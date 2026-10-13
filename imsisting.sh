@@ -1,0 +1,536 @@
+#!/usr/bin/env bash
+# IMSIsting main launcher — cellular security research toolkit
+#
+# Standalone CLI:   sudo bash imsisting.sh
+# Sourced by GUI:   IMSISTING_GUI=1 source imsisting.sh
+
+# ── sourced-vs-executed detection ───────────────────────────
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    IMSISTING_SOURCED=1
+else
+    IMSISTING_SOURCED=0
+fi
+export IMSISTING_SOURCED
+
+# ── resolve script location, following symlinks ─────────────
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+export IMSISTING_ROOT="$SCRIPT_DIR"
+export MODULES_DIR="$SCRIPT_DIR/modules"
+export TMP_DIR="$SCRIPT_DIR/tmp"
+export LOOT_DIR="$SCRIPT_DIR/loot"
+export LOG_DIR="$SCRIPT_DIR/logs"
+export CAPTURES_DIR="$SCRIPT_DIR/captures"
+export STATE_DIR="$SCRIPT_DIR/state"
+export SESSION_LOG="${SESSION_LOG:-$LOG_DIR/session_$(date +%Y%m%d_%H%M%S)_$$.log}"
+
+for d in "$TMP_DIR" "$LOOT_DIR" "$LOG_DIR" "$CAPTURES_DIR" "$STATE_DIR"; do
+    if ! mkdir -p "$d"; then
+        printf 'imsisting: cannot create %s\n' "$d" >&2
+        (( IMSISTING_SOURCED )) && return 1 || exit 1
+    fi
+done
+
+# ── CLI flags (standalone only) ─────────────────────────────
+IMSISTING_LIST=0
+if (( ! IMSISTING_SOURCED )); then
+    case "${1:-}" in
+        -h|--help)
+            cat << 'USAGE'
+imsisting — cellular security research toolkit
+            2G/GSM · 3G/UMTS · 4G/LTE · 5G/NR
+
+Usage:
+  sudo bash imsisting.sh           Interactive module menu (requires root)
+  bash imsisting.sh --list         List all modules and availability
+  bash imsisting.sh --index        Print the module index (TSV)
+  bash imsisting.sh --gui          Launch the GTK GUI
+  bash imsisting.sh --version      Print version
+  bash imsisting.sh --help         This message
+USAGE
+            exit 0 ;;
+        -V|--version)
+            # Count the modules rather than hardcode: a stale number here is
+            # the first thing a user sees and the easiest thing to forget.
+            _n=$(ls -1 "$SCRIPT_DIR"/modules/*.sh 2>/dev/null | wc -l)
+            echo "imsisting v0.4 — ${_n} modules, 2G/3G/4G/5G"
+            unset _n
+            exit 0 ;;
+        --index)
+            cat "$SCRIPT_DIR/module_index.tsv" 2>/dev/null || {
+                printf 'imsisting: no module_index.tsv — run tools/gen-module-index.sh\n' >&2
+                exit 1
+            }
+            exit 0 ;;
+        --list)
+            IMSISTING_LIST=1 ;;
+        --gui)
+            IMSISTING_GUI=1
+            IMSISTING_LIST=0 ;;
+        "")
+            ;;
+        *)
+            printf 'imsisting: unknown flag: %s\n' "$1" >&2
+            exit 2 ;;
+    esac
+fi
+
+# ── palette ─────────────────────────────────────────────────
+C_RED=$'\e[38;5;196m'; C_GRN=$'\e[38;5;46m';   C_YEL=$'\e[38;5;226m'
+C_CYN=$'\e[38;5;51m';  C_MAG=$'\e[38;5;201m';  C_BLU=$'\e[38;5;39m'
+C_ORG=$'\e[38;5;208m'; C_PUR=$'\e[38;5;135m';  C_DIM=$'\e[38;5;240m'
+C_WHT=$'\e[38;5;255m'; C_BOLD=$'\e[1m';        C_RESET=$'\e[0m'
+export C_RED C_GRN C_YEL C_CYN C_MAG C_BLU C_ORG C_PUR C_DIM C_WHT C_BOLD C_RESET
+
+# ── logging ─────────────────────────────────────────────────
+info() { echo -e "${C_CYN}[${C_BOLD}*${C_RESET}${C_CYN}]${C_RESET} $*" | tee -a "$SESSION_LOG"; }
+ok()   { echo -e "${C_GRN}[${C_BOLD}+${C_RESET}${C_GRN}]${C_RESET} $*" | tee -a "$SESSION_LOG"; }
+warn() { echo -e "${C_YEL}[${C_BOLD}!${C_RESET}${C_YEL}]${C_RESET} $*" | tee -a "$SESSION_LOG"; }
+err()  { echo -e "${C_RED}[${C_BOLD}-${C_RESET}${C_RED}]${C_RESET} $*" | tee -a "$SESSION_LOG"; }
+
+# ── cursor + width ──────────────────────────────────────────
+show_cursor() { printf '\e[?25h'; }
+hide_cursor() { printf '\e[?25l'; }
+term_width() {
+    local w
+    w=$(tput cols 2>/dev/null) || w=80
+    [[ -z "$w" || "$w" -lt 40 ]] && w=80
+    echo "$w"
+}
+
+if (( ! IMSISTING_SOURCED )); then
+    trap 'show_cursor; tput cnorm 2>/dev/null; echo' EXIT INT TERM
+fi
+
+# ── module table ────────────────────────────────────────────
+# CATEGORY|KEY|LABEL|MENU_FUNCTION|MODULE_ID
+#
+# KEY is the menu selection key (a sequential position, as in wifisting);
+# MODULE_ID is the module file the row drives. They are NOT the same number
+# and are not meant to be — the fifth field exists so the mapping is stated
+# rather than inferred. tools/check-paths.sh verifies every module file
+# appears here exactly once.
+IMSISTING_MODULE_TABLE=(
+    "SYSTEM|01|Dependency Manager|deps_menu|00_deps"
+    "SYSTEM|02|SDR / Radio Manager|radio_menu|01_radio"
+    "SYSTEM|03|Field Kit|fkit_menu|05_field_kit"
+    "SYSTEM|04|Cellular Killchain|kchn_menu|30_killchain"
+
+    "RECON|05|Cell Recon|crec_menu|02_cell_recon"
+    "RECON|06|GSMTAP Passive|gtap_menu|03_gsmtap"
+    "RECON|07|Tower Survey / War-drive|tmap_menu|04_tower_map"
+    "RECON|08|5G NTN / Satellite|ntn_menu|54_ntn"
+    "RECON|09|TETRA / DMR / GSM-R|n3g_menu|58_non3gpp"
+
+    "AIR INTERFACE|10|GSM Air Interface|gair_menu|10_gsm_air"
+    "AIR INTERFACE|11|UMTS Air Interface|uair_menu|12_umts_air"
+    "AIR INTERFACE|12|LTE Air Interface|lair_menu|14_lte_air"
+    "AIR INTERFACE|13|5G NR Air Interface|nair_menu|16_nr_air"
+    "AIR INTERFACE|14|NB-IoT / Cat-M1|iot_menu|50_iot"
+    "AIR INTERFACE|15|GPRS / EDGE|gprs_menu|55_gprs"
+    "AIR INTERFACE|16|NR Sidelink / V2X|slnk_menu|56_sidelink"
+
+    "CORE NETWORK|17|LTE Attach / NAS|latt_menu|13_lte_attach"
+    "CORE NETWORK|18|LTE Core (EPC)|lcore_menu|15_lte_core"
+    "CORE NETWORK|19|5G Core (SBA)|ncore_menu|17_nr_core"
+    "CORE NETWORK|20|SS7 / MAP / GRX|ss7_menu|31_ss7_map"
+    "CORE NETWORK|21|DNS over Cellular|cdns_menu|32_cellular_dns"
+    "CORE NETWORK|22|Network Slicing|slic_menu|39_slicing"
+    "CORE NETWORK|23|VoWiFi / ePDG|vowi_menu|41_vowifi"
+    "CORE NETWORK|24|Femtocell / HeNB|femt_menu|42_femtocell"
+    "CORE NETWORK|25|USSD|ussd_menu|43_ussd"
+    "CORE NETWORK|26|5G SBA Pivot|sbap_menu|45_sba_pivot"
+    "CORE NETWORK|27|RAN Sharing|rans_menu|48_ran_share"
+    "CORE NETWORK|28|Wi-Fi Offload / LWA|wifioff_menu|52_wifioff"
+
+    "SIM / IDENTITY|29|SUCI / SUPI|suci_menu|18_suci"
+    "SIM / IDENTITY|30|SIM / eSIM / OTA|sim_menu|20_sim"
+    "SIM / IDENTITY|31|SIM Swap Defence|simd_menu|36_sim_defense"
+    "SIM / IDENTITY|32|OTA Binary SMS|otasm_menu|46_ota_sms"
+    "SIM / IDENTITY|33|SIM Toolkit (STK)|stk_menu|57_stk"
+
+    "ATTACKS|34|GSM Attack|gatk_menu|11_gsm_attack"
+    "ATTACKS|35|Downgrade Attacks|dwn_menu|19_downgrade"
+    "ATTACKS|36|GSM/UMTS CVE Kit|gcve_menu|24_gsm_cve"
+    "ATTACKS|37|LTE CVE Kit|lcve_menu|25_lte_cve"
+    "ATTACKS|38|5G CVE Kit|ncve_menu|26_nr_cve"
+    "ATTACKS|39|VoLTE / IMS|vims_menu|35_volte_ims"
+    "ATTACKS|40|Baseband Research|bbnd_menu|40_baseband"
+    "ATTACKS|41|O-RAN / Open RAN|oran_menu|53_oran"
+    "ATTACKS|42|Baseband Exploits|bexp_menu|59_baseband_exploit"
+    "ATTACKS|43|5G NR Injection|nrj_menu|60_nr_inject"
+
+    "ANALYSIS|44|Capture Analysis|pcap_menu|21_pcap_analysis"
+    "ANALYSIS|45|IMSI Exposure Audit|imsi_menu|22_imsi_exposure"
+    "ANALYSIS|46|Cipher Audit|caud_menu|23_cipher_audit"
+    "ANALYSIS|47|Traffic Analysis|tana_menu|27_traffic_analysis"
+    "ANALYSIS|48|MAC Layer|macl_menu|34_mac_layer"
+    "ANALYSIS|49|NAS Signalling|nasf_menu|37_nas_signaling"
+    "ANALYSIS|50|LI Discovery|lipr_menu|47_li_probe"
+    "ANALYSIS|51|Carrier API Audit|capi_menu|49_carrier_api"
+
+    "RF / TRACKING|52|RF Fingerprint / CSI|rff_menu|28_rf_fingerprint"
+    "RF / TRACKING|53|Paging / Torpedo|pgt_menu|33_paging_track"
+    "RF / TRACKING|54|Jamming Detection|jamd_menu|38_jamming_detect"
+    "RF / TRACKING|55|TA Geolocation|tgeo_menu|44_ta_geoloc"
+    "RF / TRACKING|56|LPP Positioning|lpp_menu|51_lpp"
+)
+
+# ── banner ──────────────────────────────────────────────────
+# Wordmark on the left, illustration on the right, after a modern terminal
+# splash. The illustration is a baked terminal-art asset (assets/banner.ans,
+# produced by tools/gen-banner.sh from any image) when present; otherwise a
+# built-in line-art fallback. A terminal too narrow for both stacks them.
+banner() {
+    clear
+    local w; w=$(term_width)
+
+    local -a _LOGO=(
+        '████ █   █ █████ ████       █   █'
+        '  █  ██ ██ █       █        █            ███'
+        '  █  █ █ █ █████   █  ████ ███  █  █ ██ █  █'
+        '  █  █   █     █   █  █     █   █  ██ █ ████'
+        '  █  █   █ █████   █   ███  █   █  █  █    █'
+        '████ █   █ █████ ████ ████  ██  █  █  █ ███'
+    )
+    # wordmark gradient: blue -> violet -> magenta, one shade per line.
+    local -a _GC=( "$C_BLU" $'\e[38;5;63m' $'\e[38;5;69m' $'\e[38;5;105m' "$C_PUR" "$C_MAG" )
+    local _i _l _lw=0
+    for _l in "${_LOGO[@]}"; do (( ${#_l} > _lw )) && _lw=${#_l}; done
+
+    # The illustration: baked asset if present, else the built-in fallback.
+    local _asset="${IMSISTING_BANNER_ART:-$IMSISTING_ROOT/assets/banner.ans}"
+    local -a _ART=()
+    if [[ -r "$_asset" ]]; then
+        while IFS= read -r _l || [[ -n "$_l" ]]; do _ART+=("$_l"); done < "$_asset"
+    else
+        _ART=(
+            '          \|      |/'
+            '           \      /'
+            '            \    /'
+            '         ____\__/____'
+            '        /            \'
+            '       /   ________   \'
+            '      /   /        \   \'
+            '     /   /  > scan  \   \'
+            '    /   /____________\   \'
+            '   /______________________\'
+            '  |  []  []  []  []  []  []|'
+            '  |________________________|'
+            '  |  |                  |  |'
+            '  |__|__________________|__|'
+        )
+    fi
+    # visible width of the art (strip SGR sequences so colour is not counted)
+    local _aw=0 _bare
+    for _l in "${_ART[@]}"; do
+        _bare=$(printf '%s' "$_l" | sed 's/\x1b\[[0-9;]*m//g')
+        (( ${#_bare} > _aw )) && _aw=${#_bare}
+    done
+
+    if (( w >= _lw + _aw + 4 )); then
+        local _rows=${#_LOGO[@]} _pad
+        (( ${#_ART[@]} > _rows )) && _rows=${#_ART[@]}
+        for (( _i = 0; _i < _rows; _i++ )); do
+            _l="${_LOGO[_i]:-}"
+            printf -v _pad '%*s' "$(( _lw - ${#_l} ))" ""
+            printf '  %s%s%s%s  %s\n' \
+                "${_GC[_i % ${#_GC[@]}]}" "$_l" "$_pad" "$C_RESET" "${_ART[_i]:-}"
+        done
+    else
+        for (( _i = 0; _i < ${#_LOGO[@]}; _i++ )); do
+            printf '  %s%s%s\n' "${_GC[_i % ${#_GC[@]}]}" "${_LOGO[_i]}" "$C_RESET"
+        done
+        printf '\n'
+        for (( _i = 0; _i < ${#_ART[@]}; _i++ )); do
+            printf '  %s\n' "${_ART[_i]}"
+        done
+    fi
+
+    printf '\n'
+    printf '%s' "$C_PUR"
+    printf '═%.0s' $(seq 1 "$w")
+    printf '%s\n' "$C_RESET"
+
+    printf '  %s%s» %scellular offensive toolkit %s// 2g · 3g · 4g · 5g %s// v0.4 %s// ysl%s\n' \
+        "$C_CYN" "$C_BOLD" "$C_WHT" "$C_DIM" "$C_MAG" "$C_RESET"
+
+    printf '%s' "$C_PUR"
+    printf '─%.0s' $(seq 1 "$w")
+    printf '%s\n' "$C_RESET"
+}
+
+# ── framed input prompt ─────────────────────────────────────
+# A rounded input field drawn closed, like a modern CLI splash. The box is
+# printed, the cursor is parked on the field, read() takes the line, and the
+# field is then redrawn with the value and its closing border. It only ever
+# moves the cursor within the three rows the box owns.
+menu_prompt() {
+    local _var="$1" _hint="${2:-}"
+    local w; w=$(term_width)
+    local inner=$(( w - 8 ))
+    (( inner < ${#_hint} + 4 )) && inner=$(( ${#_hint} + 4 ))
+    (( inner < 30 )) && inner=30
+    local bar; bar=$(printf '─%.0s' $(seq 1 "$inner"))
+
+    printf '  %s╭%s╮%s\n' "$C_PUR" "$bar" "$C_RESET"
+    printf '  %s│%s > %s%-*s%s%s│%s\n' \
+        "$C_PUR" "$C_RESET" "$C_DIM" "$(( inner - 3 ))" "$_hint" "$C_RESET" "$C_PUR" "$C_RESET"
+    printf '  %s╰%s╯%s\n' "$C_PUR" "$bar" "$C_RESET"
+
+    # park the cursor on the field and clear the placeholder
+    printf '\e[2A\e[1G\e[2K'
+    printf '  %s│%s > ' "$C_PUR" "$C_RESET"
+    IFS= read -r "$_var"
+
+    # redraw the field with the entered value and the closing border
+    printf '\e[1A\e[1G\e[2K'
+    local _val; printf -v _val '%s' "${!_var}"
+    local _len=${#_val}
+    local _rem=$(( inner - 3 - _len )); (( _rem < 0 )) && _rem=0
+    printf '  %s│%s > %s%s%s%*s%s│%s' \
+        "$C_PUR" "$C_RESET" "$C_BOLD$C_WHT" "$_val" "$C_RESET" \
+        "$_rem" "" "$C_PUR" "$C_RESET"
+    printf '\n\e[1B'
+}
+
+# ── menu primitives ─────────────────────────────────────────
+menu_row() {
+    local key="$1" label="$2" state="$3"
+    local kcol="$C_ORG" lcol="$C_WHT" tag=""
+    case "$state" in
+        missing)
+            kcol="$C_DIM"; lcol="$C_DIM"; tag=" ${C_YEL}[offline]${C_RESET}" ;;
+    esac
+    printf '   %s│%s %s[%s]%s  %s%s%s%s\n' \
+        "$C_DIM" "$C_RESET" \
+        "$kcol$C_BOLD" "$key" "$C_RESET" \
+        "$lcol" "$label" "$C_RESET" "$tag"
+}
+
+section_header() {
+    local title="$1"
+    printf '\n   %s── %s%s%s %s───────────────────────────────%s\n' \
+        "$C_PUR$C_BOLD" "$C_MAG" "$title" "$C_PUR$C_BOLD" "$C_DIM" "$C_RESET"
+}
+
+row_state() {
+    declare -F "$1" >/dev/null 2>&1 && echo present || echo missing
+}
+
+fn_for_key() {
+    local key="$1" row
+    for row in "${IMSISTING_MODULE_TABLE[@]}"; do
+        # Trailing _ absorbs the MODULE_ID field: `read` gives the LAST
+        # variable the whole remainder, so without it f becomes
+        # "fn_menu|00_mod" and declare -F never matches.
+        IFS='|' read -r _ k _ f _ <<< "$row"
+        [[ "$k" == "$key" ]] && { echo "$f"; return; }
+    done
+}
+
+# ── root + module dir checks ────────────────────────────────
+if [[ $EUID -ne 0 && "${IMSISTING_LIST:-0}" != "1" && "${IMSISTING_GUI:-0}" != "1" ]]; then
+    err "must run as root — try: sudo bash $0"
+    exit 1
+fi
+if [[ $EUID -ne 0 && "${IMSISTING_GUI:-0}" == "1" ]]; then
+    warn "GUI backend is not root; privileged module operations may fail"
+fi
+
+if [[ ! -d "$MODULES_DIR" ]]; then
+    err "modules dir not found: $MODULES_DIR"
+    (( IMSISTING_SOURCED )) && return 1 || exit 1
+fi
+
+info "loading modules from $MODULES_DIR"
+shopt -s nullglob
+MODULE_FILES=("$MODULES_DIR"/*.sh)
+shopt -u nullglob
+
+if [[ ${#MODULE_FILES[@]} -eq 0 ]]; then
+    err "no .sh files in $MODULES_DIR"
+    (( IMSISTING_SOURCED )) && return 1 || exit 1
+fi
+
+for mod in "${MODULE_FILES[@]}"; do
+    if ! bash -n "$mod" 2>/dev/null; then
+        err "syntax error in $(basename "$mod") — skipping"
+        continue
+    fi
+
+    # Some modules call `exit` at top level. Sourcing such a file would
+    # kill this shell mid-loop. Shadow the exit builtin for the duration
+    # of the source, then unshadow.
+    _prev_exit_fn=$(declare -f exit 2>/dev/null || true)
+    exit() { return "${1:-0}"; }
+
+    if source "$mod" 2>>"$SESSION_LOG"; then
+        ok "loaded: $(basename "$mod")"
+    else
+        err "runtime error in $(basename "$mod")"
+    fi
+
+    unset -f exit
+    if [[ -n "$_prev_exit_fn" ]]; then
+        eval "$_prev_exit_fn"
+        unset _prev_exit_fn
+    fi
+done
+
+# ── --list ──────────────────────────────────────────────────
+if (( IMSISTING_LIST )) && (( ! IMSISTING_SOURCED )); then
+    printf '\nimsisting — installed modules\n\n'
+    local_cat=""
+    for row in "${IMSISTING_MODULE_TABLE[@]}"; do
+        IFS='|' read -r cat key label fn _ <<< "$row"
+        if [[ "$cat" != "$local_cat" ]]; then
+            printf '  %s%s%s\n' "$C_MAG" "$cat" "$C_RESET"
+            local_cat="$cat"
+        fi
+        if declare -F "$fn" >/dev/null 2>&1; then
+            printf '    [%s] %-28s %s✓%s\n' "$key" "$label" "$C_GRN" "$C_RESET"
+        else
+            printf '    [%s] %-28s %s✗%s\n' "$key" "$label" "$C_DIM" "$C_RESET"
+        fi
+    done
+    echo
+    exit 0
+fi
+
+# ── cleanup (standalone only) ──────────────────────────────
+cleanup() {
+    show_cursor
+    info "cleaning up radio state..."
+    for daemon in grgsm_livemon srsenb srsepc gnb nr-uesoftmodem; do
+        pkill -f "$daemon" 2>/dev/null
+    done
+    ok "system restored. goodbye."
+}
+if (( ! IMSISTING_SOURCED )) && [[ "${IMSISTING_GUI:-0}" != "1" ]]; then
+    trap cleanup EXIT TERM
+fi
+
+# ── main menu ───────────────────────────────────────────────
+launch_gui() {
+    if ! pgrep -x imsisting-gui >/dev/null 2>&1; then
+        local bin="$IMSISTING_ROOT/native/builddir/imsisting-gui"
+        [[ -x "$bin" ]] || bin="$IMSISTING_ROOT/native/build/imsisting-gui"
+        if [[ ! -x "$bin" ]]; then
+            err "GUI not built — run: meson setup native/builddir native && ninja -C native/builddir"
+            sleep 2
+            return 1
+        fi
+        info "launching imsisting-gui..."
+        nohup "$bin" >/dev/null 2>&1 &
+        sleep 1
+    else
+        info "imsisting-gui is already running"
+        sleep 1
+    fi
+}
+
+main_menu() {
+    while true; do
+        banner
+        echo
+
+        local_cat=""
+        for row in "${IMSISTING_MODULE_TABLE[@]}"; do
+            IFS='|' read -r cat key label fn _ <<< "$row"
+            if [[ "$cat" != "$local_cat" ]]; then
+                section_header "$cat"
+                local_cat="$cat"
+            fi
+            menu_row "$key" "$label" "$(row_state "$fn")"
+        done
+
+        echo
+        printf '   %s│%s\n' "$C_DIM" "$C_RESET"
+        printf '   %s│%s  %s[h]%s help   %s[c]%s clear   %s[g]%s gui   %s[q]%s quit\n' \
+            "$C_DIM" "$C_RESET" \
+            "$C_ORG$C_BOLD" "$C_RESET" \
+            "$C_ORG$C_BOLD" "$C_RESET" \
+            "$C_ORG$C_BOLD" "$C_RESET" \
+            "$C_RED$C_BOLD" "$C_RESET"
+
+        echo
+        printf '   %s└─%s▶%s %s · %ssession:%s %s\n' \
+            "$C_PUR" "$C_MAG" "$C_RESET" \
+            "$(date +%H:%M:%S)" "$C_DIM" "$C_RESET" \
+            "$(basename "$SESSION_LOG")"
+        echo
+
+        show_cursor
+        local choice
+        menu_prompt choice 'enter a module key · [h]elp · [c]lear · [g]ui · [q]uit'
+        hide_cursor
+
+        local norm="${choice#0}"
+        [[ -z "$norm" ]] && norm="$choice"
+
+        case "$choice" in
+            q|Q) show_cursor; info "bye"; exit 0 ;;
+            h|H)
+                clear
+                cat << HELP
+imsisting CLI — help
+────────────────────
+
+  Modules are grouped by generation. Type the two-digit key to launch.
+  Modules marked [offline] failed to load — check logs/session_*.log.
+
+  Keys:
+    [01]-[23]   launch module
+    [h]         this help
+    [c]         clear screen
+    [g]         launch the GUI (native/builddir/imsisting-gui)
+    [q]         quit
+
+  Every module has its own menu. Type '0' inside to return here.
+
+  Session log:  logs/session_<date>_<pid>.log
+  Project root: ${IMSISTING_ROOT:-\$HOME/IMSIsting}
+  Press enter to return.
+HELP
+                read -r _
+                ;;
+            c|C) : ;;
+            g|G) launch_gui ;;
+            *)
+                local fn
+                fn=$(fn_for_key "$choice")
+                [[ -z "$fn" ]] && fn=$(fn_for_key "$norm")
+
+                if [[ -n "$fn" ]] && declare -F "$fn" >/dev/null 2>&1; then
+                    "$fn"
+                elif [[ -n "$fn" ]]; then
+                    warn "module $choice failed to load — check $SESSION_LOG"
+                    sleep 1
+                else
+                    warn "invalid selection: $choice"
+                    sleep 0.5
+                fi
+                ;;
+        esac
+    done
+}
+
+# ── entry ───────────────────────────────────────────────────
+# Don't leave a false conditional as the final sourced command — the
+# GUI sources this file then invokes a module function; a status of 1
+# here would prevent the caller's `&&` from firing.
+if (( ! IMSISTING_SOURCED )) && [[ "${IMSISTING_GUI:-0}" != "1" ]]; then
+    main_menu
+fi
+if (( ! IMSISTING_SOURCED )) && [[ "${IMSISTING_GUI:-0}" == "1" ]]; then
+    launch_gui
+fi
+
+true

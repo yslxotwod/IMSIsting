@@ -1,0 +1,23 @@
+# ── runtime: never commit captured material, results or scratch ─────────
+# loot/ holds unredacted identities and captures; captures/ holds raw pcap and
+# IQ; logs/ holds session logs; state/ and tmp/ are scratch.
+/loot/
+/captures/
+/logs/
+/state/
+/tmp/
+
+# ── build output ────────────────────────────────────────────────────────
+/native/builddir/
+*.o
+*.obj
+
+# ── editor / OS ─────────────────────────────────────────────────────────
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── local session logs and diagnostics ──────────────────────────────────
+session_*.log
+gui.stderr

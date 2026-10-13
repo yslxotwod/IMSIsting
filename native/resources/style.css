@@ -1,0 +1,1288 @@
+/* IMSIsting — GTK4 stylesheet
+ *
+ * A dark bench palette: the night-desk look the toolkit is built around.
+ * Cellular work means long passive captures, so the UI stays low-contrast
+ * and readable rather than bright.
+ */
+
+/* ── base ─────────────────────────────────────────────────────────
+ *
+ * The theme's own window background (#2c2c2c under Adwaita) was showing
+ * through every container that did not paint one, which is what made the
+ * module pages look like grey rectangles. So: set the toplevel, then make
+ * every container transparent, then paint panels deliberately.
+ *
+ * The panel colour is a slightly transparent blue, lighter than the base,
+ * so content areas read as raised without a hard edge.
+ */
+
+@define-color bg_base    #0b1017;
+@define-color bg_panel   #10192a;
+@define-color bg_panel2  #0d1522;
+@define-color bg_sunken  #070a0f;
+@define-color line       #22304a;
+@define-color card_bg    #151d2b;
+@define-color card_hi    #1c2639;
+@define-color text       #d7dde8;
+@define-color text_dim   #8b97a8;
+@define-color accent     #4fb3d9;
+
+window,
+.background {
+    background-color: @bg_base;
+    color: @text;
+    font-size: 14px;
+}
+
+/* Containers paint nothing by default; only explicit panels do. */
+notebook,
+notebook > stack,
+stack,
+scrolledwindow,
+viewport,
+paned,
+paned > separator,
+box,
+grid,
+list,
+listview,
+columnview {
+    background-color: transparent;
+    background-image: none;
+}
+
+/* A content area: the translucent blue panel. */
+.page {
+    background-color: @bg_panel;
+}
+
+.page-alt {
+    background-color: @bg_panel2;
+}
+
+/* ── header ─────────────────────────────────────────────────────── */
+
+headerbar {
+    background-color: #131822;
+    border-bottom: 1px solid @line;
+    box-shadow: none;
+    min-height: 46px;
+}
+
+headerbar .title {
+    font-weight: 700;
+    font-size: 15px;
+    color: #eef2f8;
+}
+
+.app-subtitle {
+    color: @text_dim;
+    font-size: 11px;
+}
+
+/* ── sidebar ────────────────────────────────────────────────────── */
+
+.sidebar {
+    background-color: #10141c;
+    border-right: 1px solid #1e2635;
+}
+
+.sidebar-category {
+    color: #4fb3d9;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    padding: 12px 12px 4px 12px;
+}
+
+.sidebar row {
+    padding: 7px 10px;
+    border-radius: 6px;
+    margin: 1px 6px;
+    font-size: 14px;
+}
+
+.sidebar row:hover {
+    background-color: #1a2130;
+}
+
+.sidebar row:selected {
+    background-color: #1d3a4d;
+    color: #eaf6ff;
+}
+
+.sidebar .module-id {
+    color: #5c6878;
+    font-size: 10px;
+    font-family: monospace;
+}
+
+.sidebar .module-offline {
+    color: #6b5a3a;
+}
+
+/* ── module page ────────────────────────────────────────────────── */
+
+.module-header {
+    background-color: #131822;
+    border-bottom: 1px solid #1e2635;
+    padding: 8px 12px;
+}
+
+.module-header-title {
+    font-weight: 600;
+    font-size: 16px;
+    color: #e8ecf3;
+}
+
+.module-header-category {
+    color: #5c6878;
+    font-size: 10px;
+    letter-spacing: 1px;
+}
+
+.module-header-desc {
+    color: #8b97a8;
+    font-size: 13px;
+}
+
+.status-pill {
+    border-radius: 10px;
+    padding: 2px 10px;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.status-idle {
+    background-color: #1c2430;
+    color: #7d8a9c;
+}
+
+.status-running {
+    background-color: #1d3a4d;
+    color: #6fc9ef;
+}
+
+.status-ok {
+    background-color: #1b3a26;
+    color: #74d99f;
+}
+
+.status-error {
+    background-color: #3d1f22;
+    color: #ef8b8b;
+}
+
+/* ── submenu ────────────────────────────────────────────────────── */
+
+.module-submenu {
+    background-color: #0f131a;
+    border-right: 1px solid #1e2635;
+}
+
+.module-submenu row {
+    padding: 7px 12px;
+    border-radius: 6px;
+    margin: 1px 6px;
+}
+
+.module-submenu row:hover {
+    background-color: #1a2130;
+}
+
+.module-submenu row:selected {
+    background-color: #1d3a4d;
+}
+
+/* ── action buttons ─────────────────────────────────────────────── */
+
+button {
+    background-color: #1a2130;
+    color: #cfd6e0;
+    border: 1px solid #26303f;
+    border-radius: 6px;
+    padding: 5px 12px;
+    box-shadow: none;
+}
+
+button:hover {
+    background-color: #212b3c;
+    border-color: #33415a;
+}
+
+button:active,
+button:checked {
+    background-color: #1d3a4d;
+    border-color: #2f6b8f;
+}
+
+button.destructive {
+    color: #ef8b8b;
+    border-color: #4a2629;
+}
+
+button.destructive:hover {
+    background-color: #3d1f22;
+}
+
+/* ── terminal / output ──────────────────────────────────────────── */
+
+.terminal-pane {
+    background-color: #080a0e;
+    padding: 6px;
+}
+
+.terminal-pane text {
+    background-color: #080a0e;
+    color: #b9c4d2;
+    font-family: monospace;
+    font-size: 11px;
+}
+
+/* ── event drawer ───────────────────────────────────────────────── */
+
+.event-drawer {
+    background-color: #0b0e14;
+    border-top: 1px solid #1e2635;
+}
+
+.event-drawer text {
+    background-color: #0b0e14;
+    color: #8b97a8;
+    font-family: monospace;
+    font-size: 10px;
+}
+
+.event-time {
+    color: #4a5666;
+}
+
+/* ── toasts ─────────────────────────────────────────────────────── */
+
+.toast {
+    background-color: #1a2130;
+    border: 1px solid #2b3648;
+    border-radius: 8px;
+    padding: 8px 14px;
+    margin: 6px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+}
+
+.toast-error {
+    border-color: #5a2b2f;
+}
+
+.toast-error label {
+    color: #ef8b8b;
+}
+
+.toast-ok {
+    border-color: #2b5a3d;
+}
+
+.toast-ok label {
+    color: #74d99f;
+}
+
+/* ── misc ───────────────────────────────────────────────────────── */
+
+.dim {
+    color: @text_dim;
+}
+
+.mono {
+    font-family: monospace;
+}
+
+.warning-label {
+    color: #d9b26f;
+}
+
+separator {
+    background-color: #1e2635;
+}
+
+scrollbar slider {
+    background-color: #2a3442;
+    border-radius: 6px;
+    min-width: 6px;
+    min-height: 6px;
+}
+
+scrollbar slider:hover {
+    background-color: #3a4759;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Live status strip — the cellular values in the window header
+   ══════════════════════════════════════════════════════════════════ */
+
+.status-strip {
+    background-color: #0b0f16;
+    border-bottom: 1px solid #1e2635;
+    padding: 6px 16px;
+}
+
+.status-cell {
+    min-width: 74px;
+}
+
+.status-key {
+    color: #4a5666;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.1px;
+}
+
+.status-value {
+    font-family: monospace;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+/* Value-label variants: colour only, no pill background. */
+.status-value.status-ok   { background: none; color: #74d99f; }
+.status-value.status-warn { background: none; color: #d9b26f; }
+.status-value.status-dim  { background: none; color: #55606f; }
+
+.status-warn { color: #d9b26f; }
+.status-dim  { color: #55606f; }
+
+/* ══════════════════════════════════════════════════════════════════
+   Dashboard
+   ══════════════════════════════════════════════════════════════════ */
+
+.page-title {
+    font-size: 21px;
+    font-weight: 700;
+    color: #e8ecf3;
+}
+
+.page-subtitle {
+    color: #6f7b8d;
+    font-size: 13px;
+}
+
+.dash-category {
+    color: #4fb3d9;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    margin-top: 4px;
+}
+
+button.module-card {
+    background: none;
+    border: none;
+    padding: 0;
+    box-shadow: none;
+}
+
+.module-card-inner {
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-radius: 12px;
+    padding: 12px 12px 14px 12px;
+}
+
+button.module-card:hover .module-card-inner {
+    background-color: @card_hi;
+    border-color: #3a5075;
+}
+
+button.module-card:active .module-card-inner {
+    background-color: #1d3a4d;
+    border-color: @accent;
+}
+
+.module-card-toprow {
+    min-height: 14px;
+}
+
+.module-card-category {
+    color: @text_dim;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+}
+
+/* The icon sits on a tinted tile so a card is not a lone floating glyph. */
+.module-card-iconwrap {
+    border-radius: 14px;
+    padding: 12px;
+    background-color: rgba(79, 179, 217, 0.12);
+}
+
+.module-card-icon {
+    color: @accent;
+}
+
+.module-card-offline {
+    color: #4a4030;
+}
+
+.module-card-title {
+    color: @text;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Loot / Stats / Help / Settings / Live Traffic bodies
+   ══════════════════════════════════════════════════════════════════ */
+
+/* Help / Settings read like a document panel, not a terminal: the same
+   proportional font and panel background as the rest of the app. */
+.doc-page {
+    background-color: @bg_panel;
+}
+
+.page-text {
+    background-color: transparent;
+    padding: 10px 16px 18px 16px;
+}
+
+.page-text text {
+    background-color: transparent;
+    color: #c9d1dc;
+    font-size: 15px;
+}
+
+.live-view text {
+    background-color: #07090d;
+    color: #9fd8b4;
+}
+
+.loot-list {
+    background-color: #0d1117;
+}
+
+.loot-list row {
+    padding: 7px 14px;
+    border-bottom: 1px solid #161d28;
+}
+
+.loot-module {
+    color: #d6dae2;
+    font-family: monospace;
+    font-size: 14px;
+}
+
+.loot-count {
+    color: #6f7b8d;
+    font-size: 13px;
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+   Tabs — larger labels, proper contrast
+   ══════════════════════════════════════════════════════════════════ */
+
+notebook > header {
+    background-color: #0e141d;
+    border-bottom: 1px solid #1e2635;
+}
+
+notebook > header > tabs > tab {
+    padding: 10px 22px;
+    border: none;
+    background-color: transparent;
+    min-height: 36px;
+    min-width: 132px;
+}
+
+notebook > header > tabs > tab label {
+    font-size: 16px;
+    font-weight: 600;
+    color: #8b97a8;
+}
+
+/* A module tab carries a close button; keep it compact so a closable tab is
+   the same height as a permanent one. */
+notebook > header > tabs > tab button {
+    min-width: 18px;
+    min-height: 18px;
+    padding: 0;
+    margin: 0 0 0 6px;
+    border: none;
+    background: none;
+}
+
+notebook > header > tabs > tab:hover label {
+    color: #cfd6e0;
+}
+
+notebook > header > tabs > tab:checked {
+    background-color: @bg_panel;
+    box-shadow: inset 0 -2px 0 #4fb3d9;
+}
+
+notebook > header > tabs > tab:checked label {
+    color: #eaf6ff;
+    font-weight: 700;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Module pages — left menu, centred content
+   ══════════════════════════════════════════════════════════════════ */
+
+.module-page {
+    background-color: @bg_panel;
+}
+
+.module-menu {
+    background-color: rgba(10, 16, 24, 0.55);
+    border-right: 1px solid #1e2635;
+}
+
+.module-menu row {
+    padding: 9px 14px;
+    margin: 2px 6px;
+    border-radius: 6px;
+    font-size: 14px;
+}
+
+.module-menu row:hover {
+    background-color: rgba(79, 179, 217, 0.10);
+}
+
+.module-menu row:selected {
+    background-color: rgba(79, 179, 217, 0.20);
+}
+
+.module-menu row:selected label {
+    color: #eaf6ff;
+}
+
+.module-body {
+    background-color: @bg_panel;
+    padding: 4px;
+}
+
+.module-header-bar {
+    background-color: @card_bg;
+    border-bottom: 1px solid @line;
+    border-left: 3px solid @accent;
+    padding: 10px 16px;
+}
+
+.module-header-bar .module-header-title {
+    font-size: 16px;
+}
+
+/* Verb buttons get real weight — they are the primary action. */
+.verb-button {
+    min-height: 34px;
+    padding: 6px 16px;
+    font-size: 13px;
+}
+
+.verb-button:hover {
+    background-color: rgba(79, 179, 217, 0.20);
+    border-color: #4fb3d9;
+}
+
+.verb-run-row {
+    margin-top: 6px;
+    padding: 8px 10px;
+    background-color: rgba(10, 16, 24, 0.45);
+    border: 1px solid #1e2635;
+    border-radius: 6px;
+}
+
+.flowboxchild {
+    background: none;
+    padding: 0;
+}
+
+.menu-heading {
+    color: #4a5666;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Module content cards
+   ══════════════════════════════════════════════════════════════════ */
+
+.card {
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-radius: 10px;
+}
+
+.card-heading {
+    color: #4fb3d9;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    padding: 12px 14px 0 14px;
+}
+
+.card-note {
+    color: #6f7b8d;
+    font-size: 13px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Live Traffic table
+   ══════════════════════════════════════════════════════════════════ */
+
+.live-table {
+    background-color: rgba(7, 11, 17, 0.6);
+}
+
+.live-table > header > button {
+    background-color: rgba(12, 20, 30, 0.9);
+    border: none;
+    border-bottom: 1px solid #1e2635;
+    border-radius: 0;
+    padding: 6px 10px;
+    min-height: 24px;
+}
+
+.live-table > header > button label {
+    color: #4fb3d9;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.1px;
+}
+
+.live-table columnview > listview > row {
+    padding: 1px 0;
+}
+
+.live-table columnview > listview > row:hover {
+    background-color: rgba(79, 179, 217, 0.08);
+}
+
+.live-cell {
+    font-family: monospace;
+    font-size: 12px;
+    color: #b9c4d2;
+    padding: 2px 10px;
+}
+
+.dir-ul {
+    color: #74d99f;
+    font-weight: 700;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Stats
+   ══════════════════════════════════════════════════════════════════ */
+
+.stat-tile {
+    background-color: rgba(12, 20, 30, 0.6);
+    border: 1px solid #1e2635;
+    border-radius: 8px;
+    padding: 12px 18px;
+    min-width: 108px;
+}
+
+.stat-value {
+    font-size: 24px;
+    font-weight: 700;
+    color: #4fb3d9;
+}
+
+.stat-label {
+    color: #6f7b8d;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+}
+
+.stat-row-label {
+    color: #b9c4d2;
+    font-size: 14px;
+}
+
+.stat-row-count {
+    color: #4fb3d9;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+progressbar.stat-bar {
+    min-height: 6px;
+}
+
+progressbar.stat-bar trough {
+    background-color: rgba(79, 179, 217, 0.10);
+    border-radius: 3px;
+    min-height: 6px;
+    border: none;
+}
+
+progressbar.stat-bar progress {
+    background-color: rgba(79, 179, 217, 0.65);
+    border-radius: 3px;
+    min-height: 6px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Category accents — one hue per taxonomy group
+   ══════════════════════════════════════════════════════════════════ */
+.cat-system   { color: #93a2b8; }
+.cat-recon    { color: #4fb3d9; }
+.cat-air      { color: #6a8dff; }
+.cat-core     { color: #a98bff; }
+.cat-sim      { color: #4fd08a; }
+.cat-attacks  { color: #ef6b6b; }
+.cat-analysis { color: #e0b357; }
+.cat-rf       { color: #e07bd0; }
+
+.module-card-iconwrap.cat-system   { background-color: rgba(147,162,184,0.14); }
+.module-card-iconwrap.cat-recon    { background-color: rgba(79,179,217,0.14); }
+.module-card-iconwrap.cat-air      { background-color: rgba(106,141,255,0.14); }
+.module-card-iconwrap.cat-core     { background-color: rgba(169,139,255,0.14); }
+.module-card-iconwrap.cat-sim      { background-color: rgba(79,208,138,0.14); }
+.module-card-iconwrap.cat-attacks  { background-color: rgba(239,107,107,0.14); }
+.module-card-iconwrap.cat-analysis { background-color: rgba(224,179,87,0.14); }
+.module-card-iconwrap.cat-rf       { background-color: rgba(224,123,208,0.14); }
+
+.module-header-bar.cat-system   { border-left-color: #93a2b8; }
+.module-header-bar.cat-recon    { border-left-color: #4fb3d9; }
+.module-header-bar.cat-air      { border-left-color: #6a8dff; }
+.module-header-bar.cat-core     { border-left-color: #a98bff; }
+.module-header-bar.cat-sim      { border-left-color: #4fd08a; }
+.module-header-bar.cat-attacks  { border-left-color: #ef6b6b; }
+.module-header-bar.cat-analysis { border-left-color: #e0b357; }
+.module-header-bar.cat-rf       { border-left-color: #e07bd0; }
+
+.sidebar-category.cat-system   { color: #93a2b8; }
+.sidebar-category.cat-recon    { color: #4fb3d9; }
+.sidebar-category.cat-air      { color: #6a8dff; }
+.sidebar-category.cat-core     { color: #a98bff; }
+.sidebar-category.cat-sim      { color: #4fd08a; }
+.sidebar-category.cat-attacks  { color: #ef6b6b; }
+.sidebar-category.cat-analysis { color: #e0b357; }
+.sidebar-category.cat-rf       { color: #e07bd0; }
+
+/* ══════════════════════════════════════════════════════════════════
+   Buttons — primary vs secondary, and a visible focus ring
+   ══════════════════════════════════════════════════════════════════ */
+button.primary {
+    background-color: #1d6f92;
+    border-color: #2f9ec7;
+    color: #eaf7ff;
+    font-weight: 600;
+}
+button.primary:hover {
+    background-color: #2487ad;
+    border-color: #46b6df;
+}
+button:focus-visible {
+    outline: 2px solid @accent;
+    outline-offset: 2px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Sidebar — search, collapsible groups, count chip, active accent
+   ══════════════════════════════════════════════════════════════════ */
+.sidebar {
+    background-color: #0f141d;
+    border-right: 1px solid @line;
+}
+
+.sidebar-search {
+    margin: 8px 8px 4px 8px;
+}
+
+.sidebar expander > title {
+    padding: 10px 10px 4px 10px;
+    color: @text_dim;
+}
+.sidebar expander > title:hover {
+    color: @text;
+}
+
+.sidebar .sidebar-cat-count {
+    color: #55606f;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.sidebar .module-id {
+    color: #6b7789;
+    font-family: monospace;
+    font-size: 10px;
+    background-color: rgba(255, 255, 255, 0.04);
+    border-radius: 5px;
+    padding: 1px 6px;
+}
+
+.sidebar row {
+    padding: 6px 10px;
+    border-radius: 6px;
+    margin: 1px 6px;
+    font-size: 14px;
+    border-left: 3px solid transparent;
+}
+
+.sidebar row:selected {
+    background-color: #1a2636;
+    color: #eaf6ff;
+}
+.sidebar row.cat-recon:selected    { border-left-color: #4fb3d9; }
+.sidebar row.cat-air:selected      { border-left-color: #6a8dff; }
+.sidebar row.cat-core:selected     { border-left-color: #a98bff; }
+.sidebar row.cat-sim:selected      { border-left-color: #4fd08a; }
+.sidebar row.cat-attacks:selected  { border-left-color: #ef6b6b; }
+.sidebar row.cat-analysis:selected { border-left-color: #e0b357; }
+.sidebar row.cat-rf:selected       { border-left-color: #e07bd0; }
+.sidebar row.cat-system:selected   { border-left-color: #93a2b8; }
+
+/* ══════════════════════════════════════════════════════════════════
+   Live Traffic — summary chip, zebra, arrival flash
+   ══════════════════════════════════════════════════════════════════ */
+.live-summary {
+    color: @text_dim;
+    font-size: 12px;
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-radius: 8px;
+    padding: 4px 12px;
+}
+.live-table columnview > listview > row.live-even {
+    background-color: rgba(255, 255, 255, 0.018);
+}
+.live-table columnview > listview > row.flash {
+    background-color: rgba(79, 179, 217, 0.22);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Empty and loading states
+   ══════════════════════════════════════════════════════════════════ */
+.empty-state {
+    color: @text_dim;
+}
+.empty-state .empty-icon {
+    color: #3a4860;
+}
+.empty-state .empty-title {
+    color: @text;
+    font-size: 15px;
+    font-weight: 600;
+}
+.empty-state .empty-hint {
+    color: @text_dim;
+    font-size: 12px;
+    font-family: monospace;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Event drawer — toolbar, badge
+   ══════════════════════════════════════════════════════════════════ */
+.event-toolbar {
+    background-color: #0d1219;
+    border-bottom: 1px solid @line;
+    padding: 6px 8px;
+}
+.event-badge {
+    background-color: #3d1f22;
+    color: #ef8b8b;
+    border-radius: 9px;
+    padding: 0 7px;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Module page — breadcrumb, description, last-run, run box
+   ══════════════════════════════════════════════════════════════════ */
+.breadcrumb {
+    color: @text_dim;
+    font-size: 11px;
+    letter-spacing: 0.4px;
+}
+.module-header-desc {
+    color: @text_dim;
+    font-size: 13px;
+}
+.last-run {
+    color: @text_dim;
+    font-size: 11px;
+}
+.run-row {
+    margin-top: 6px;
+    padding: 8px 10px;
+    background-color: rgba(10, 16, 24, 0.45);
+    border: 1px solid @line;
+    border-radius: 8px;
+}
+
+/* Bounded reading width: keep long text off the window edges. */
+.doc-page {
+    padding: 0;
+}
+.doc-body {
+    padding: 0 28px 24px 28px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Visual refresh — GTK-native overrides
+   Keeps the interface dense and operational while improving depth,
+   hierarchy, focus, and separation between navigation and workspace.
+   ══════════════════════════════════════════════════════════════════ */
+
+window,
+.background {
+    background-color: #070b12;
+    color: #dce5f2;
+}
+
+headerbar {
+    background-image: linear-gradient(to bottom, #151d2a, #101722);
+    border-bottom: 1px solid #2b3c55;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.38);
+    min-height: 52px;
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
+headerbar .title {
+    color: #f4f8ff;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.app-subtitle {
+    color: #8292a8;
+    font-size: 11px;
+}
+
+.status-strip {
+    background-image: linear-gradient(to right, #0a1019, #0d1521);
+    border-bottom: 1px solid #22334a;
+    padding: 8px 18px;
+}
+
+.status-cell {
+    min-width: 86px;
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
+.status-key {
+    color: #65758b;
+    font-size: 9px;
+    letter-spacing: 1.4px;
+}
+
+.status-value {
+    color: #dce8f7;
+    font-size: 13px;
+}
+
+.sidebar {
+    background-image: linear-gradient(to bottom, #0d131d, #090e16);
+    border-right: 1px solid #293a52;
+    box-shadow: 3px 0 14px rgba(0, 0, 0, 0.24);
+}
+
+.sidebar-search {
+    background-color: #111b29;
+    color: #dce5f2;
+    border: 1px solid #293c56;
+    border-radius: 9px;
+    margin: 10px 10px 8px 10px;
+    min-height: 36px;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.sidebar-search:focus {
+    border-color: #4fb3d9;
+    box-shadow: 0 0 0 2px rgba(79, 179, 217, 0.18);
+}
+
+.sidebar expander > title {
+    padding: 11px 11px 5px 11px;
+}
+
+.sidebar-category {
+    font-size: 9px;
+    letter-spacing: 1.5px;
+}
+
+.sidebar row {
+    min-height: 34px;
+    margin: 2px 7px;
+    padding: 7px 10px;
+    border-radius: 7px;
+    border-left: 3px solid transparent;
+}
+
+.sidebar row:hover {
+    background-color: #172233;
+}
+
+.sidebar row:selected {
+    background-image: linear-gradient(to right, #1b3044, #17283a);
+    color: #f2f8ff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+
+.sidebar .module-id {
+    background-color: #17202d;
+    color: #8190a4;
+    border: 1px solid #253247;
+    border-radius: 5px;
+    padding: 1px 6px;
+}
+
+notebook > header {
+    background-color: #0c121b;
+    border-bottom: 1px solid #263750;
+}
+
+notebook > header > tabs > tab {
+    min-height: 38px;
+    min-width: 126px;
+    padding: 9px 20px;
+    border-bottom: 3px solid transparent;
+}
+
+notebook > header > tabs > tab:hover {
+    background-color: #131d2a;
+}
+
+notebook > header > tabs > tab:checked {
+    background-image: linear-gradient(to bottom, #172334, #111c2a);
+    border-bottom-color: #55bde4;
+    box-shadow: none;
+}
+
+notebook > header > tabs > tab:checked label {
+    color: #f3f9ff;
+}
+
+.page,
+.module-page,
+.module-body,
+.doc-page {
+    background-color: #0d1624;
+}
+
+.page-title {
+    color: #f2f6fc;
+    font-size: 23px;
+    font-weight: 700;
+}
+
+.page-subtitle {
+    color: #8d9bb0;
+    font-size: 13px;
+}
+
+.module-card-inner {
+    background-image: linear-gradient(to bottom right, #172233, #111a28);
+    border: 1px solid #293a52;
+    border-radius: 12px;
+    padding: 15px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+button.module-card:hover .module-card-inner {
+    background-image: linear-gradient(to bottom right, #1d2c40, #162236);
+    border-color: #466689;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.34);
+}
+
+button.module-card:active .module-card-inner {
+    background-image: linear-gradient(to bottom right, #1d3b50, #173044);
+    border-color: #55bde4;
+}
+
+.module-card-iconwrap {
+    border-radius: 12px;
+    padding: 13px;
+    border: 1px solid rgba(255, 255, 255, 0.045);
+}
+
+.module-card-title {
+    color: #e8eef8;
+    font-size: 14px;
+    font-weight: 650;
+}
+
+.card {
+    background-image: linear-gradient(to bottom right, #162131, #111a27);
+    border: 1px solid #293a52;
+    border-radius: 11px;
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.22);
+}
+
+.card-heading {
+    color: #62c3e8;
+    padding: 14px 16px 2px 16px;
+}
+
+.module-header-bar {
+    background-image: linear-gradient(to right, #172232, #121c2a);
+    border-bottom: 1px solid #2a3a51;
+    border-left-width: 4px;
+    padding: 13px 18px;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+}
+
+.module-header-title {
+    color: #f1f6fd;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.module-header-desc,
+.breadcrumb,
+.last-run,
+.card-note {
+    color: #8998ad;
+}
+
+.module-menu {
+    background-color: #0a111c;
+    border-right: 1px solid #26374e;
+}
+
+.module-menu row {
+    min-height: 35px;
+    margin: 2px 7px;
+    padding: 8px 13px;
+    border-radius: 7px;
+}
+
+.module-menu row:hover {
+    background-color: #172537;
+}
+
+.module-menu row:selected {
+    background-image: linear-gradient(to right, #1c3a50, #182d40);
+    box-shadow: inset 3px 0 #55bde4;
+}
+
+button {
+    background-image: linear-gradient(to bottom, #202c3e, #182334);
+    color: #dce5f2;
+    border: 1px solid #34465f;
+    border-radius: 7px;
+    padding: 7px 14px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.22);
+}
+
+button:hover {
+    background-image: linear-gradient(to bottom, #29394f, #202f44);
+    border-color: #4d6687;
+}
+
+button:active,
+button:checked {
+    background-image: linear-gradient(to bottom, #18384d, #142f42);
+    border-color: #55bde4;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.32);
+}
+
+button.primary {
+    background-image: linear-gradient(to bottom, #2584aa, #1b6688);
+    color: #f5fbff;
+    border-color: #49b3dc;
+    box-shadow: 0 3px 10px rgba(25, 118, 156, 0.32);
+}
+
+button.primary:hover {
+    background-image: linear-gradient(to bottom, #32a0c9, #217b9f);
+    border-color: #72d2f3;
+}
+
+.verb-button {
+    min-height: 38px;
+    padding: 7px 17px;
+    font-weight: 600;
+}
+
+.status-pill {
+    border-radius: 999px;
+    padding: 3px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.status-running {
+    background-color: #153b52;
+    color: #73d4f6;
+    border-color: #2b6f91;
+}
+
+.status-ok {
+    background-color: #143824;
+    color: #80e2a9;
+    border-color: #28663e;
+}
+
+.status-error {
+    background-color: #411f27;
+    color: #ff9ba3;
+    border-color: #75323d;
+}
+
+.stat-tile {
+    background-image: linear-gradient(to bottom right, #172435, #111b29);
+    border-color: #2b3d55;
+    border-radius: 10px;
+    padding: 14px 20px;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
+}
+
+.stat-value {
+    color: #62c3e8;
+    font-size: 26px;
+}
+
+.live-table {
+    background-color: #090f18;
+    border: 1px solid #25364c;
+}
+
+.live-table > header > button {
+    background-image: linear-gradient(to bottom, #152131, #101925);
+    border-bottom: 1px solid #2a3c55;
+    min-height: 30px;
+}
+
+.live-table columnview > listview > row:hover {
+    background-color: rgba(79, 179, 217, 0.11);
+}
+
+.terminal-pane,
+.terminal-pane text {
+    background-color: #05080d;
+}
+
+.event-drawer {
+    background-color: #080d14;
+    border-top: 1px solid #2b3d55;
+    box-shadow: 0 -4px 14px rgba(0, 0, 0, 0.3);
+}
+
+.event-toolbar {
+    background-image: linear-gradient(to bottom, #131d2a, #0e1621);
+    padding: 7px 10px;
+}
+
+.toast {
+    background-image: linear-gradient(to bottom right, #202d40, #172235);
+    border-color: #3b526f;
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.48);
+}
+
+scrollbar slider {
+    background-color: #33445a;
+    border-radius: 999px;
+    min-width: 7px;
+    min-height: 7px;
+}
+
+scrollbar slider:hover {
+    background-color: #506680;
+}
