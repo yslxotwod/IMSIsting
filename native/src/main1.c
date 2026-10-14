@@ -149,11 +149,33 @@ struct _AppState {
     GtkWidget *dash_case, *dash_targets, *dash_evidence, *dash_alerts;
     /* Dashboard grid handle + the pin/recent sets behind the card cues. */
     GtkWidget *dash_flow, *dash_search;
+    GtkWidget *dash_empty;   /* shown when a search matches nothing */
+    GtkWidget *dash_mission; /* the "Start here" panel, hidden while searching */
     GHashTable *pins, *recent;
+    /* Persisted personalisation. `recent_counts` is module id -> number of
+       runs, which is what "Most used" orders by; `density` is the tile
+       density class kept on the window from launch to launch. */
+    GHashTable *recent_counts;
+    char       *density;
     GtkWidget *loot_list;
-    GtkWidget *stats_view;
-    GtkWidget *settings_ids_switch;
+    /* The Stats tiles' value labels. The counts they show describe a
+       filesystem that modules keep writing to while the app runs, so they are
+       recomputed when the tab is opened rather than frozen at startup. */
+    GtkWidget *stat_selftests, *stat_loot_dirs, *stat_loot_files, *stat_offline;
     guint      status_source;
+
+    /* Sidebar active state. Each category is its own GtkListBox, so selection
+       is per-list and "which module is open" cannot be read off the widgets.
+       One id is the source of truth; sidebar_set_active() paints it. */
+    GHashTable *sidebar_rows;          /* module id -> GtkListBoxRow */
+    /* The box that actually holds the category expanders. NOT
+       gtk_scrolled_window_get_child(sidebar): GtkScrolledWindow inserts a
+       GtkViewport of its own, so that returns the viewport and every walk of
+       "the children" finds one GtkBox instead of the expanders. */
+    GtkWidget  *sidebar_content;
+    char       *active_module_id;      /* NULL while a permanent tab is shown */
+    guint       sidebar_scroll_idle;   /* pending scroll-into-view */
+    guint       sidebar_scroll_tries;  /* passes spent waiting for layout */
 
     /* Live GSMTAP feed. */
     GtkWidget     *live_view;          /* the GtkColumnView */
@@ -174,6 +196,14 @@ struct _AppState {
     guint          live_count;
     guint          live_hint;
     gboolean       live_paused;
+    /* Operational state for the feed: how fast it is arriving, and when
+       anything last did. A cumulative count alone cannot distinguish a live
+       emitter from one that died an hour ago. */
+    guint          live_rate;          /* datagrams in the last whole second */
+    guint          live_rate_prev;     /* live_count at the previous tick */
+    gint64         live_last_us;       /* monotonic time of the last datagram */
+    guint          live_rate_timer;
+    guint          live_follow_idle;   /* pending coalesced follow-scroll */
 
     /* Event drawer chrome. */
     GtkWidget     *event_filter_entry;
@@ -455,6 +485,14 @@ module_name_for(const char *module_id)
 /* ==================================================================== */
 
 static void append_event(AppState *state, const char *message);
+static void recents_bump(AppState *state, const char *module_id);
+static guint recent_count_of(int idx);
+static void live_inspector_reset(AppState *state);
+static guint live_shown_count(AppState *state);
+static gboolean live_follow_idle(gpointer user_data);
+static void sidebar_set_active(AppState *state, const char *module_id);
+static GtkWidget *empty_state(const char *icon, const char *title,
+                              const char *hint);
 static void show_toast_full(AppState *state, const char *title,
                             const char *message, const char *severity);
 static void imsisting_action_run(AppState *state, const char *module_id,
@@ -890,9 +928,11 @@ imsisting_action_run(AppState *state, const char *module_id,
 
     if (state == NULL || argv == NULL || argv[0] == NULL) return;
 
-    /* Mark the module recent so its dashboard cue reflects use. */
+    /* Mark the module recent so its dashboard cue reflects use, and count the
+       run so the dashboard can be ordered by what this operator really uses. */
     if (state->recent != NULL && module_id != NULL)
         g_hash_table_add(state->recent, g_strdup(module_id));
+    recents_bump(state, module_id);
 
     append_event(state, label);
     status_label_set(status_label, "Running", "status-running");
@@ -2124,6 +2164,12 @@ create_module_page(AppState *state, const ModuleDefinition *module,
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
                                        GTK_POLICY_NEVER,
                                        GTK_POLICY_AUTOMATIC);
+        /* The scroller, rather than the page, owns the remaining height.
+           Without an explicit expansion request a tall custom view can be
+           allocated at its natural height and its lower controls are clipped
+           below the notebook instead of becoming reachable by scrolling. */
+        gtk_widget_set_vexpand(scrolled, TRUE);
+        gtk_widget_set_hexpand(scrolled, TRUE);
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), view);
         gtk_stack_add_named(GTK_STACK(stack), scrolled, mp->views[i].name);
     }
@@ -2212,6 +2258,7 @@ open_module(AppState *state, const ModuleDefinition *module)
     if (existing != NULL) {
         int index = gtk_notebook_page_num(GTK_NOTEBOOK(state->notebook), existing);
         gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), index);
+        sidebar_set_active(state, module->id);
         return;
     }
 
@@ -2226,9 +2273,17 @@ open_module(AppState *state, const ModuleDefinition *module)
         page = create_placeholder_page(state, module);
     }
 
+    /* Which module this page belongs to, so the notebook switch handler can
+       keep the sidebar in step without a lookup table of its own.
+       create_module_page() already tags its page; this covers the placeholder
+       path, and re-tagging with the same value is harmless. */
+    g_object_set_data_full(G_OBJECT(page), "module-id",
+                           g_strdup(module->id), g_free);
+
     GtkWidget *tab = create_closable_tab_label(module->name, page, state);
     int index = gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook), page, tab);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), index);
+    sidebar_set_active(state, module->id);
 
     g_autofree char *msg = g_strdup_printf("Opened module: %s [%s]",
                                            module->name, module->id);
@@ -2253,6 +2308,10 @@ sidebar_apply_filter(GtkWidget *content, const char *q)
 {
     g_autofree char *needle = (q && *q) ? g_ascii_strdown(q, -1) : NULL;
     gboolean searching = needle != NULL && *needle != '\0';
+    gboolean was_searching =
+        GPOINTER_TO_INT(g_object_get_data(G_OBJECT(content), "searching"));
+
+    gboolean searching_any = FALSE;
 
     for (GtkWidget *child = gtk_widget_get_first_child(content);
          child != NULL; child = gtk_widget_get_next_sibling(child)) {
@@ -2260,23 +2319,49 @@ sidebar_apply_filter(GtkWidget *content, const char *q)
         GtkWidget *list = gtk_expander_get_child(GTK_EXPANDER(child));
         if (list == NULL) continue;
         gboolean any = FALSE;
+
+        /* Remember how the operator had the group folded, so clearing the box
+           puts it back rather than leaving every category expanded. */
+        if (searching && !was_searching)
+            g_object_set_data(G_OBJECT(child), "expanded-before",
+                              GINT_TO_POINTER(gtk_expander_get_expanded(
+                                  GTK_EXPANDER(child))));
+
         for (GtkWidget *row = gtk_widget_get_first_child(list);
              row != NULL; row = gtk_widget_get_next_sibling(row)) {
             const ModuleDefinition *m = g_object_get_data(G_OBJECT(row), "module");
             if (m == NULL) continue;
             gboolean show = TRUE;
             if (searching) {
-                g_autofree char *joined = g_strdup_printf(
-                    "%s %s %s", m->name, m->id, m->desc ? m->desc : "");
+                /* The same fields the dashboard searches. Category was the one
+                   missing here, so typing "ATTACKS" filtered the dashboard and
+                   emptied the sidebar. */
+                g_autofree char *joined = g_strdup_printf("%s %s %s %s",
+                    m->name, m->id, m->category, m->desc ? m->desc : "");
                 g_autofree char *hay = g_ascii_strdown(joined, -1);
                 show = g_strrstr(hay, needle) != NULL;
             }
             gtk_widget_set_visible(row, show);
             if (show) any = TRUE;
         }
+
         gtk_widget_set_visible(child, searching ? any : TRUE);
-        gtk_expander_set_expanded(GTK_EXPANDER(child), searching ? any : TRUE);
+        if (any) searching_any = TRUE;
+        if (searching)
+            gtk_expander_set_expanded(GTK_EXPANDER(child), any);
+        else if (was_searching)
+            gtk_expander_set_expanded(GTK_EXPANDER(child),
+                GPOINTER_TO_INT(g_object_get_data(G_OBJECT(child),
+                                                   "expanded-before")));
     }
+
+    /* With every category hidden the list went completely blank, which reads
+       as a broken sidebar rather than "nothing matched". */
+    GtkWidget *empty = g_object_get_data(G_OBJECT(content), "empty");
+    if (empty != NULL)
+        gtk_widget_set_visible(empty, searching && !searching_any);
+
+    g_object_set_data(G_OBJECT(content), "searching", GINT_TO_POINTER(searching));
 }
 
 static void
@@ -2290,6 +2375,7 @@ build_sidebar(AppState *state)
 {
     GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_widget_add_css_class(content, "sidebar");
+    state->sidebar_content = content;
 
     GtkWidget *search = gtk_search_entry_new();
     gtk_widget_add_css_class(search, "sidebar-search");
@@ -2370,15 +2456,129 @@ build_sidebar(AppState *state)
         gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
         g_object_set_data(G_OBJECT(row), "module", (gpointer) &modules[i]);
         gtk_list_box_append(GTK_LIST_BOX(list), row);
+        /* Reachable by module id, so the sidebar can show which module is
+           open no matter where it was opened from. */
+        if (state->sidebar_rows == NULL)
+            state->sidebar_rows =
+                g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+        g_hash_table_insert(state->sidebar_rows, g_strdup(modules[i].id), row);
     }
 
     GtkWidget *scrolled = gtk_scrolled_window_new();
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
                                    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+
+    /* Shown only when a search hides every category; see sidebar_apply_filter. */
+    GtkWidget *no_match = empty_state("system-search-symbolic", "No match",
+        "Try a name, an id such as 02_cell_recon, or a category.");
+    gtk_widget_set_visible(no_match, FALSE);
+    gtk_widget_set_margin_top(no_match, 24);
+    gtk_box_append(GTK_BOX(content), no_match);
+    g_object_set_data(G_OBJECT(content), "empty", no_match);
+
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), content);
     gtk_widget_set_size_request(scrolled, 272, -1);
 
     return scrolled;
+}
+
+/* Bring the active sidebar row into view, once there is a layout to measure.
+
+   This cannot run while the module is being opened: at startup the sidebar has
+   never been allocated, so the row reports no bounds and the scroll silently
+   does nothing. It re-arms until the geometry exists rather than guessing a
+   delay, and gives up after a few passes so a hidden sidebar cannot spin. */
+static gboolean
+sidebar_scroll_idle(gpointer user_data)
+{
+    AppState *state = user_data;
+    GtkWidget *content, *row;
+    GtkAdjustment *adj;
+    graphene_rect_t b;
+    double top, bottom, page, val;
+
+    if (state->active_module_id == NULL || state->sidebar_rows == NULL ||
+        state->sidebar == NULL || !GTK_IS_SCROLLED_WINDOW(state->sidebar)) {
+        state->sidebar_scroll_idle = 0;
+        return G_SOURCE_REMOVE;
+    }
+
+    content = state->sidebar_content;
+    row = g_hash_table_lookup(state->sidebar_rows, state->active_module_id);
+    adj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(state->sidebar));
+
+    if (content != NULL && row != NULL && adj != NULL &&
+        gtk_widget_compute_bounds(row, content, &b) &&
+        b.size.height > 0 && gtk_adjustment_get_page_size(adj) > 0) {
+        top    = b.origin.y;
+        bottom = top + b.size.height;
+        page   = gtk_adjustment_get_page_size(adj);
+        val    = gtk_adjustment_get_value(adj);
+        if (top < val)                gtk_adjustment_set_value(adj, top);
+        else if (bottom > val + page) gtk_adjustment_set_value(adj, bottom - page);
+        state->sidebar_scroll_idle = 0;
+        state->sidebar_scroll_tries = 0;
+        return G_SOURCE_REMOVE;
+    }
+
+    if (++state->sidebar_scroll_tries < 20) return G_SOURCE_CONTINUE;
+    state->sidebar_scroll_idle = 0;
+    state->sidebar_scroll_tries = 0;
+    return G_SOURCE_REMOVE;
+}
+
+/* Show which module is open.
+
+   The sidebar is one GtkListBox per category, so selection is per-list: a row
+   picked in RECON stays marked when a SYSTEM module is opened afterwards, and
+   two rows read as active at once. Nothing tied the sidebar to the notebook
+   at all, so opening a module from a dashboard card, from a CLI --module, or
+   switching to a permanent tab left the highlight pointing at whatever was
+   last clicked.
+
+   Every list is cleared first, then the open module's row is selected, its
+   category expanded and the row scrolled into view. Exactly one row is ever
+   marked, and it is the one you are looking at. */
+static void
+sidebar_set_active(AppState *state, const char *module_id)
+{
+    GtkWidget *content, *row, *list, *exp;
+
+    if (state == NULL || state->sidebar == NULL) return;
+    if (!GTK_IS_SCROLLED_WINDOW(state->sidebar)) return;
+    content = state->sidebar_content;
+    if (content == NULL) return;
+
+    g_free(state->active_module_id);
+    state->active_module_id = g_strdup(module_id);
+
+    for (exp = gtk_widget_get_first_child(content); exp != NULL;
+         exp = gtk_widget_get_next_sibling(exp)) {
+        if (!GTK_IS_EXPANDER(exp)) continue;
+        list = gtk_expander_get_child(GTK_EXPANDER(exp));
+        if (list == NULL || !GTK_IS_LIST_BOX(list)) continue;
+        gtk_list_box_unselect_all(GTK_LIST_BOX(list));
+    }
+
+    if (module_id == NULL || state->sidebar_rows == NULL) return;
+    row = g_hash_table_lookup(state->sidebar_rows, module_id);
+    if (row == NULL || !GTK_IS_LIST_BOX_ROW(row)) return;
+
+    list = gtk_widget_get_parent(row);
+    if (list == NULL || !GTK_IS_LIST_BOX(list)) return;
+    gtk_list_box_select_row(GTK_LIST_BOX(list), GTK_LIST_BOX_ROW(row));
+
+    exp = gtk_widget_get_parent(list);
+    if (exp != NULL && GTK_IS_EXPANDER(exp))
+        gtk_expander_set_expanded(GTK_EXPANDER(exp), TRUE);
+
+    /* A highlight inside a collapsed group, or scrolled out of sight, is not
+       an indication of anything. The scroll is deferred because it needs a
+       layout that may not exist yet. */
+    if (state->sidebar_scroll_idle == 0) {
+        state->sidebar_scroll_tries = 0;
+        state->sidebar_scroll_idle = g_idle_add(sidebar_scroll_idle, state);
+    }
 }
 
 /* ==================================================================== */
@@ -2974,10 +3174,11 @@ make_module_card(AppState *state, const ModuleDefinition *mod)
 #define DASH_COLS 7
 
 /* Sort modes for the single dashboard grid. */
-enum { DASH_SORT_WORKFLOW = 0, DASH_SORT_NAME, DASH_SORT_CATEGORY };
+enum { DASH_SORT_WORKFLOW = 0, DASH_SORT_MOST_USED, DASH_SORT_NAME,
+       DASH_SORT_CATEGORY };
 static int g_dash_sort = DASH_SORT_WORKFLOW;
 static const char *dash_sort_names[] = {
-    "Workflow", "Name (A–Z)", "Category", NULL
+    "Workflow", "Most used", "Name (A–Z)", "Category", NULL
 };
 
 static int
@@ -2990,6 +3191,11 @@ dash_cmp(const void *pa, const void *pb)
                      g_hash_table_contains(g_dash_state->pins, modules[b].id);
     if (pin_a != pin_b) return pin_a ? -1 : 1;   /* pinned cards lead */
     switch (g_dash_sort) {
+        case DASH_SORT_MOST_USED: {
+            guint ca = recent_count_of(a), cb = recent_count_of(b);
+            if (ca != cb) return ca > cb ? -1 : 1;   /* most used leads */
+            return a - b;
+        }
         case DASH_SORT_NAME:
             return g_ascii_strcasecmp(modules[a].name, modules[b].name);
         case DASH_SORT_CATEGORY: {
@@ -3028,9 +3234,19 @@ dash_apply_filter(GtkWidget *flow, const char *q)
 {
     g_autofree char *needle = (q && *q) ? g_ascii_strdown(q, -1) : NULL;
     gboolean searching = needle != NULL && *needle != '\0';
+    guint shown = 0;
 
-    for (GtkWidget *c = gtk_widget_get_first_child(flow);
-         c != NULL; c = gtk_widget_get_next_sibling(c)) {
+    for (GtkWidget *w = gtk_widget_get_first_child(flow);
+         w != NULL; w = gtk_widget_get_next_sibling(w)) {
+        /* GtkFlowBox wraps every appended child in its own GtkFlowBoxChild,
+           so the direct children of the flow box are wrappers, not the cards
+           that carry the "module" data. Looking it up on the wrapper found
+           NULL for all 56 and skipped every one, which is why this filter
+           never hid a card. Unwrap first, and hide the wrapper so the grid
+           reflows instead of leaving a gap. */
+        GtkWidget *c = GTK_IS_FLOW_BOX_CHILD(w)
+                     ? gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(w)) : w;
+        if (c == NULL) continue;
         const ModuleDefinition *m = g_object_get_data(G_OBJECT(c), "module");
         if (m == NULL) continue;
         gboolean show = TRUE;
@@ -3040,8 +3256,18 @@ dash_apply_filter(GtkWidget *flow, const char *q)
             g_autofree char *hay = g_ascii_strdown(joined, -1);
             show = g_strrstr(hay, needle) != NULL;
         }
-        gtk_widget_set_visible(c, show);
+        gtk_widget_set_visible(w, show);
+        if (show) shown++;
     }
+
+    AppState *state = g_object_get_data(G_OBJECT(flow), "state");
+    if (state != NULL && state->dash_empty != NULL)
+        gtk_widget_set_visible(state->dash_empty, searching && shown == 0);
+    /* Searching is about the grid, so the landing panel steps aside: without
+       this the results (and the no-match note) sit below the fold of a
+       window that is already showing the hero and the quick cards. */
+    if (state != NULL && state->dash_mission != NULL)
+        gtk_widget_set_visible(state->dash_mission, !searching);
 }
 
 /* ---- Favourites ------------------------------------------------------ */
@@ -3083,6 +3309,160 @@ pins_save(AppState *state)
     g_string_free(out, TRUE);
 }
 
+/* ---- Personalisation -------------------------------------------------
+   Favourites live in state/pins.tsv, above. Everything else the operator
+   tunes - tile density, dashboard order, and how often each module is
+   actually run - lives in state/ui.tsv and state/recent.tsv, so a session
+   opens the way the last one was left. Plain TSV: no parser to get wrong,
+   and a file that survives being read by hand. */
+
+static char *
+ui_state_path(void)
+{
+    return g_build_filename(IMSISTING_ROOT, "state", "ui.tsv", NULL);
+}
+
+static char *
+recents_path(void)
+{
+    return g_build_filename(IMSISTING_ROOT, "state", "recent.tsv", NULL);
+}
+
+/* How many times a module has been run. Missing means never. */
+static guint
+recent_count_of(int idx)
+{
+    if (g_dash_state == NULL || g_dash_state->recent_counts == NULL) return 0;
+    return GPOINTER_TO_UINT(g_hash_table_lookup(g_dash_state->recent_counts,
+                                                modules[idx].id));
+}
+
+static void
+ui_state_save(AppState *state)
+{
+    g_autofree char *path = ui_state_path();
+    GString *out = g_string_new(NULL);
+
+    g_string_append_printf(out, "sort\t%d\n", g_dash_sort);
+    g_string_append_printf(out, "density\t%s\n",
+                           state->density ? state->density : "density-comfortable");
+    g_file_set_contents(path, out->str, -1, NULL);
+    g_string_free(out, TRUE);
+}
+
+static void
+recents_save(AppState *state)
+{
+    g_autofree char *path = recents_path();
+    GString *out = g_string_new(NULL);
+    GHashTableIter it;
+    gpointer k, v;
+
+    if (state->recent_counts == NULL) return;
+    g_hash_table_iter_init(&it, state->recent_counts);
+    while (g_hash_table_iter_next(&it, &k, &v))
+        g_string_append_printf(out, "%s\t%u\n", (const char *) k,
+                               GPOINTER_TO_UINT(v));
+    g_file_set_contents(path, out->str, -1, NULL);
+    g_string_free(out, TRUE);
+}
+
+static void
+recents_bump(AppState *state, const char *module_id)
+{
+    guint n;
+
+    if (state == NULL || module_id == NULL) return;
+    if (state->recent_counts == NULL)
+        state->recent_counts =
+            g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    n = GPOINTER_TO_UINT(g_hash_table_lookup(state->recent_counts, module_id));
+    if (n < G_MAXUINT) n++;
+    g_hash_table_insert(state->recent_counts, g_strdup(module_id),
+                        GUINT_TO_POINTER(n));
+    recents_save(state);
+}
+
+/* Density is one class on the window; the stylesheet carries the sizes, so
+   nothing has to be re-measured or re-requested when it changes. */
+static void
+density_apply(AppState *state)
+{
+    static const char *classes[] = {
+        "density-compact", "density-comfortable", "density-spacious", NULL
+    };
+
+    if (state == NULL || state->window == NULL) return;
+    for (int i = 0; classes[i] != NULL; i++)
+        gtk_widget_remove_css_class(state->window, classes[i]);
+    gtk_widget_add_css_class(state->window, state->density
+                             ? state->density : "density-comfortable");
+}
+
+static int
+density_index(AppState *state)
+{
+    const char *d = state->density ? state->density : "density-comfortable";
+
+    if (g_strcmp0(d, "density-compact") == 0) return 0;
+    if (g_strcmp0(d, "density-spacious") == 0) return 2;
+    return 1;
+}
+
+static void
+density_changed(GObject *dd, GParamSpec *pspec, gpointer user_data)
+{
+    static const char *names[] = {
+        "density-compact", "density-comfortable", "density-spacious"
+    };
+    AppState *state = g_object_get_data(dd, "state");
+    guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+
+    if (state == NULL || sel > 2) return;
+    g_free(state->density);
+    state->density = g_strdup(names[sel]);
+    density_apply(state);
+    ui_state_save(state);
+    (void) pspec; (void) user_data;
+}
+
+static void
+ui_state_load(AppState *state)
+{
+    g_autofree char *path = ui_state_path();
+    g_autofree char *data = NULL;
+
+    if (state->recent_counts == NULL)
+        state->recent_counts =
+            g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+
+    if (g_file_get_contents(path, &data, NULL, NULL)) {
+        g_auto(GStrv) lines = g_strsplit(data, "\n", -1);
+        for (int i = 0; lines[i] != NULL; i++) {
+            g_auto(GStrv) f = g_strsplit(lines[i], "\t", 2);
+            if (f[0] == NULL || *f[0] == '\0' || f[1] == NULL) continue;
+            if (g_strcmp0(f[0], "sort") == 0)
+                g_dash_sort = CLAMP(atoi(f[1]), 0, DASH_SORT_CATEGORY);
+            else if (g_strcmp0(f[0], "density") == 0) {
+                g_free(state->density);
+                state->density = g_strdup(f[1]);
+            }
+        }
+    }
+
+    g_autofree char *rpath = recents_path();
+    g_autofree char *rdata = NULL;
+    if (g_file_get_contents(rpath, &rdata, NULL, NULL)) {
+        g_auto(GStrv) rlines = g_strsplit(rdata, "\n", -1);
+        for (int i = 0; rlines[i] != NULL; i++) {
+            g_auto(GStrv) f = g_strsplit(rlines[i], "\t", 2);
+            if (f[0] == NULL || *f[0] == '\0' || f[1] == NULL) continue;
+            g_hash_table_insert(state->recent_counts, g_strdup(f[0]),
+                                GUINT_TO_POINTER((guint) atoi(f[1])));
+        }
+    }
+}
+
 static void
 dash_refresh(AppState *state)
 {
@@ -3116,6 +3496,7 @@ dash_sort_changed(GObject *dd, GParamSpec *pspec, gpointer user_data)
     AppState  *state  = g_object_get_data(dd, "state");
     guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
     dash_fill(state, flow, (int) sel);
+    ui_state_save(state);   /* the operator's order outlives the session */
     dash_apply_filter(flow,
         search ? gtk_editable_get_text(GTK_EDITABLE(search)) : "");
     (void) pspec; (void) user_data;
@@ -3187,12 +3568,28 @@ create_dashboard_page(AppState *state)
     gtk_box_append(GTK_BOX(mission), mission_grid);
     GtkWidget *sortlab  = gtk_label_new("Sort");
     GtkWidget *dd       = gtk_drop_down_new_from_strings(dash_sort_names);
+    /* The flow is already built in the persisted order, so the control has to
+       agree with it or it reads "Workflow" over a most-used list. Set before
+       the notify handler is attached, so this does not re-fill the grid. */
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(dd),
+                               CLAMP(g_dash_sort, 0, DASH_SORT_CATEGORY));
+    /* Density sits next to Sort because both are "how I want to see the
+       desk" rather than "what the desk is doing". */
+    static const char *density_names[] = {
+        "Compact", "Comfortable", "Spacious", NULL
+    };
+    GtkWidget *denslab  = gtk_label_new("Density");
+    GtkWidget *dens     = gtk_drop_down_new_from_strings(density_names);
     GtkWidget *search   = gtk_search_entry_new();
     GtkWidget *flow     = gtk_flow_box_new();
 
     gtk_widget_add_css_class(title, "page-title");
     gtk_widget_add_css_class(sub,   "page-subtitle");
     gtk_widget_add_css_class(sortlab, "dim");
+    gtk_widget_add_css_class(denslab, "dim");
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(dens), density_index(state));
+    g_object_set_data(G_OBJECT(dens), "state", state);
+    g_signal_connect(dens, "notify::selected", G_CALLBACK(density_changed), NULL);
     gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
     gtk_label_set_xalign(GTK_LABEL(sub),   0.0f);
     gtk_box_append(GTK_BOX(head), title);
@@ -3212,11 +3609,15 @@ create_dashboard_page(AppState *state)
     gtk_widget_set_hexpand(search, TRUE);
     gtk_box_append(GTK_BOX(bar), sortlab);
     gtk_box_append(GTK_BOX(bar), dd);
+    gtk_box_append(GTK_BOX(bar), denslab);
+    gtk_box_append(GTK_BOX(bar), dens);
     gtk_box_append(GTK_BOX(bar), search);
     gtk_widget_set_margin_start(bar, 16);
     gtk_widget_set_margin_end(bar, 16);
     gtk_widget_set_margin_top(bar, 4);
     gtk_box_append(GTK_BOX(body), bar);
+
+    state->dash_mission = mission;   /* hidden while a search is active */
 
     /* A responsive flow instead of a fixed grid: columns follow the width.
        Not homogeneous: with it on, every row stretched its children to
@@ -3234,9 +3635,23 @@ create_dashboard_page(AppState *state)
     gtk_widget_set_margin_top(flow, 6);
     gtk_box_append(GTK_BOX(body), flow);
 
+    /* A search that matches nothing used to blank the grid with no word of
+       explanation. This states it, in the space the cards would have used;
+       it stays hidden unless a search is active and hides every card. It
+       lives inside the scrolling body rather than on an overlay, because an
+       overlay centres over the whole body and would land on the quick cards. */
+    state->dash_empty = empty_state("system-search-symbolic",
+        "No module matches", "Clear the search, or try a category such as "
+        "ATTACKS, RECON or ANALYSIS.");
+    gtk_widget_set_visible(state->dash_empty, FALSE);
+    gtk_widget_set_margin_top(state->dash_empty, 28);
+    gtk_widget_set_margin_bottom(state->dash_empty, 28);
+    gtk_box_append(GTK_BOX(body), state->dash_empty);
+
     g_object_set_data(G_OBJECT(dd), "grid",   flow);
     g_object_set_data(G_OBJECT(dd), "search", search);
     g_object_set_data(G_OBJECT(dd), "state",  state);
+    g_object_set_data(G_OBJECT(flow), "state", state);
     g_signal_connect(dd, "notify::selected", G_CALLBACK(dash_sort_changed), NULL);
     g_signal_connect(search, "search-changed",
                      G_CALLBACK(dash_search_changed), flow);
@@ -3250,7 +3665,7 @@ create_dashboard_page(AppState *state)
     state->dash_flow = flow;
     state->dash_search = search;
 
-    dash_fill(state, flow, DASH_SORT_WORKFLOW);
+    dash_fill(state, flow, g_dash_sort);   /* honour the persisted order */
 
     gtk_widget_set_margin_bottom(body, 18);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
@@ -3280,6 +3695,12 @@ empty_state(const char *icon, const char *title, const char *hint)
     gtk_widget_add_css_class(t,   "empty-title");
     gtk_widget_add_css_class(h,   "empty-hint");
     gtk_image_set_pixel_size(GTK_IMAGE(ic), 56);
+    /* The sidebar is narrow, so the hint has to fold instead of running off
+       the edge; the dashboard is wide enough that it simply stays one line. */
+    gtk_label_set_wrap(GTK_LABEL(h), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(h), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_justify(GTK_LABEL(h), GTK_JUSTIFY_CENTER);
+    gtk_label_set_max_width_chars(GTK_LABEL(h), 34);
     gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
     gtk_box_append(GTK_BOX(box), ic);
@@ -4408,6 +4829,45 @@ stat_bar_row(const char *label, guint n, guint max)
     return row;
 }
 
+/* The counts behind the Stats tiles. Recomputed on every visit, because loot
+   is written by modules while the app runs and a frozen number is worse than
+   no number at all. */
+static void
+stats_counts(guint *selftests, guint *loot_dirs, guint *loot_files, guint *offline)
+{
+    guint s = 0, dirs = 0, files = 0, off = 0;
+
+    for (int i = 0; i < N_MODULES; i++)
+        if (!module_script_exists(modules[i].id)) off++;
+    for (int i = 0; i < MODULE_INDEX_N; i++)
+        if (module_index[i].has_selftest) s++;
+
+    g_autofree char *loot = g_build_filename(IMSISTING_ROOT, "loot", NULL);
+    g_autoptr(GDir) d = g_dir_open(loot, 0, NULL);
+    const char *name;
+
+    if (d != NULL) {
+        while ((name = g_dir_read_name(d)) != NULL) {
+            g_autofree char *p = g_build_filename(loot, name, NULL);
+            if (g_file_test(p, G_FILE_TEST_IS_DIR)) {
+                dirs++;
+                files += count_files(p);
+            }
+        }
+    }
+    *selftests  = s;
+    *loot_dirs  = dirs;
+    *loot_files = files;
+    *offline    = off;
+}
+
+static void
+stat_set(GtkWidget *label, guint n)
+{
+    g_autofree char *v = g_strdup_printf("%u", n);
+    if (label != NULL) gtk_label_set_text(GTK_LABEL(label), v);
+}
+
 static GtkWidget *
 create_stats_page(AppState *state)
 {
@@ -4421,8 +4881,6 @@ create_stats_page(AppState *state)
     GHashTable *by_cat = g_hash_table_new(g_str_hash, g_str_equal);
     guint selftests = 0, loot_files = 0, loot_dirs = 0, offline = 0, maxcat = 0;
 
-    (void) state;
-
     gtk_widget_add_css_class(title, "page-title");
     gtk_widget_add_css_class(sub,   "page-subtitle");
     gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
@@ -4435,24 +4893,8 @@ create_stats_page(AppState *state)
         gpointer v = g_hash_table_lookup(by_cat, modules[i].category);
         g_hash_table_insert(by_cat, (gpointer) modules[i].category,
                             GINT_TO_POINTER(GPOINTER_TO_INT(v) + 1));
-        if (!module_script_exists(modules[i].id)) offline++;
     }
-    for (int i = 0; i < MODULE_INDEX_N; i++)
-        if (module_index[i].has_selftest) selftests++;
-
-    {
-        g_autofree char *loot = g_build_filename(IMSISTING_ROOT, "loot", NULL);
-        g_autoptr(GDir) d = g_dir_open(loot, 0, NULL);
-        const char *name;
-        if (d != NULL) {
-            while ((name = g_dir_read_name(d)) != NULL) {
-                g_autofree char *p = g_build_filename(loot, name, NULL);
-                if (g_file_test(p, G_FILE_TEST_IS_DIR)) {
-                    loot_dirs++; loot_files += count_files(p);
-                }
-            }
-        }
-    }
+    stats_counts(&selftests, &loot_dirs, &loot_files, &offline);
 
     {
         g_autofree char *v = g_strdup_printf("%d", N_MODULES);
@@ -4460,19 +4902,27 @@ create_stats_page(AppState *state)
     }
     {
         g_autofree char *v = g_strdup_printf("%u", selftests);
-        gtk_box_append(GTK_BOX(tiles), stat_tile(v, "WITH SELFTEST"));
+        GtkWidget *t = stat_tile(v, "WITH SELFTEST");
+        state->stat_selftests = gtk_widget_get_first_child(t);
+        gtk_box_append(GTK_BOX(tiles), t);
     }
     {
         g_autofree char *v = g_strdup_printf("%u", loot_dirs);
-        gtk_box_append(GTK_BOX(tiles), stat_tile(v, "LOOT DIRS"));
+        GtkWidget *t = stat_tile(v, "LOOT DIRS");
+        state->stat_loot_dirs = gtk_widget_get_first_child(t);
+        gtk_box_append(GTK_BOX(tiles), t);
     }
     {
         g_autofree char *v = g_strdup_printf("%u", loot_files);
-        gtk_box_append(GTK_BOX(tiles), stat_tile(v, "LOOT FILES"));
+        GtkWidget *t = stat_tile(v, "LOOT FILES");
+        state->stat_loot_files = gtk_widget_get_first_child(t);
+        gtk_box_append(GTK_BOX(tiles), t);
     }
     {
         g_autofree char *v = g_strdup_printf("%u", offline);
-        gtk_box_append(GTK_BOX(tiles), stat_tile(v, "OFFLINE"));
+        GtkWidget *t = stat_tile(v, "OFFLINE");
+        state->stat_offline = gtk_widget_get_first_child(t);
+        gtk_box_append(GTK_BOX(tiles), t);
     }
     gtk_box_append(GTK_BOX(inner), tiles);
 
@@ -4535,7 +4985,23 @@ create_stats_page(AppState *state)
     gtk_box_append(GTK_BOX(outer), scroll);
 
     g_hash_table_unref(by_cat);
+    g_object_set_data(G_OBJECT(outer), "stats-page", GINT_TO_POINTER(1));
     return outer;
+}
+
+/* Recount the tiles when the page is opened. Counting is cheap (56 stat calls
+   plus a walk of loot/) and the alternative — numbers from launch time — is
+   actively misleading once a module has run. */
+static void
+stats_refresh(AppState *state)
+{
+    guint selftests = 0, loot_dirs = 0, loot_files = 0, offline = 0;
+
+    stats_counts(&selftests, &loot_dirs, &loot_files, &offline);
+    stat_set(state->stat_selftests, selftests);
+    stat_set(state->stat_loot_dirs, loot_dirs);
+    stat_set(state->stat_loot_files, loot_files);
+    stat_set(state->stat_offline, offline);
 }
 static const char *HELP_TEXT =
 "IMSIsting — cellular security research toolkit\n"
@@ -4558,6 +5024,16 @@ static const char *HELP_TEXT =
 "\n"
 "  Open a module card (or a sidebar row) and it appears as its own tab.\n"
 "  Module tabs close; Dashboard/Casebook/Stats/Help/Settings do not.\n"
+"\n"
+"MAKING IT YOURS\n"
+"  These survive a restart; they are kept in state/ui.tsv,\n"
+"  state/recent.tsv and state/pins.tsv beside the toolkit.\n"
+"\n"
+"  Pin      the star on a card or sidebar row; pinned modules lead the\n"
+"           dashboard whatever the sort is set to\n"
+"  Sort     Workflow (category order), Most used (by run count), Name,\n"
+"           Category\n"
+"  Density  Compact, Comfortable or Spacious card sizing\n"
 "\n"
 "RUNNING A VERB\n"
 "  Each module page lists common verbs as buttons. The generated verb\n"
@@ -4703,6 +5179,9 @@ create_settings_page(AppState *state)
 
 #define LIVE_PORT 4729
 #define LIVE_MAX_LINES 600
+/* Silence longer than this, while listening, is reported as "quiet Ns"
+   rather than left to look like a healthy feed with a frozen counter. */
+#define LIVE_QUIET_SECONDS 5
 
 static const char *
 gsmtap_type_name(guint8 t)
@@ -4766,6 +5245,16 @@ notebook_page_switched(GtkNotebook *nb, GtkWidget *child, guint page,
         g_clear_object(&state->active_output);
         state->active_output = buf != NULL ? g_object_ref(buf) : NULL;
     }
+
+    /* Keep the sidebar highlight on the module actually on screen. A
+       permanent tab carries no module id, which clears the highlight rather
+       than leaving the last module marked while you look at the dashboard. */
+    sidebar_set_active(state, child != NULL
+                       ? g_object_get_data(G_OBJECT(child), "module-id") : NULL);
+
+    /* Stats counts filesystem state that modules change while the app runs. */
+    if (child != NULL && g_object_get_data(G_OBJECT(child), "stats-page") != NULL)
+        stats_refresh(state);
 
     if (state->live_view == NULL) return;
 
@@ -4883,6 +5372,10 @@ live_refilter(AppState *state)
         if (live_matches(state, m))
             g_list_store_append(G_LIST_STORE(state->live_store), m);
     }
+    /* The selected row can be filtered away, or evicted by the history cap.
+       Leaving its detail up would describe a row that is no longer there. */
+    if (live_shown_count(state) == 0)
+        live_inspector_reset(state);
 }
 
 static void
@@ -4899,17 +5392,78 @@ live_set_status(AppState *state, const char *msg, const char *css)
         gtk_widget_add_css_class(state->live_status, css);
 }
 
-/* Keep the count chip and the empty state in step with the feed. */
+/* The inspector's resting state. One definition, so Clear, a filter that
+   matches nothing and the first paint all agree on what "nothing selected"
+   looks like instead of leaving the last packet on screen. */
+static void
+live_inspector_reset(AppState *state)
+{
+    if (state->live_inspector_buf == NULL) return;
+    gtk_text_buffer_set_text(state->live_inspector_buf,
+        "Select a row to inspect its decoded GSMTAP fields.", -1);
+}
+
+/* How many rows the view is actually showing, as opposed to how many have
+   arrived - the difference is the whole point of the filter. */
+static guint
+live_shown_count(AppState *state)
+{
+    if (state->live_store == NULL) return 0;
+    return g_list_model_get_n_items(G_LIST_MODEL(state->live_store));
+}
+
+/* Keep the count chip and the empty state in step with the feed.
+
+   The chip is the operational read-out: how much has arrived, how fast it is
+   still arriving, how much of it survives the filter, and whether the feed
+   has gone quiet. The state word stays on the pill next to it, so the two
+   never overwrite each other - the poll callback used to rewrite the pill
+   with the counter eight times a second, which is what buried "listening". */
 static void
 live_update_summary(AppState *state)
 {
     if (state->live_summary != NULL) {
-        g_autofree char *s = g_strdup_printf("%u msg%s%s", state->live_count,
-            state->live_count == 1 ? "" : "s", state->live_paused ? " · paused" : "");
-        gtk_label_set_text(GTK_LABEL(state->live_summary), s);
+        GString *s = g_string_new(NULL);
+        gboolean filtered = state->live_filter != NULL &&
+                            *state->live_filter != '\0';
+        guint shown = live_shown_count(state);
+
+        if (filtered)
+            g_string_append_printf(s, "%u of %u shown", shown, state->live_count);
+        else
+            g_string_append_printf(s, "%u msg%s", state->live_count,
+                                   state->live_count == 1 ? "" : "s");
+
+        if (state->live_socket != NULL && !state->live_paused)
+            g_string_append_printf(s, " · %u/s", state->live_rate);
+
+        /* Silence while listening is a condition, not an absence of one. */
+        if (state->live_socket != NULL && !state->live_paused &&
+            state->live_count > 0 && state->live_last_us > 0) {
+            gint64 quiet_s = (g_get_monotonic_time() - state->live_last_us) / 1000000;
+            if (quiet_s >= LIVE_QUIET_SECONDS)
+                g_string_append_printf(s, " · quiet %" G_GINT64_FORMAT "s", quiet_s);
+        }
+
+        if (state->live_paused) g_string_append(s, " · paused");
+
+        gtk_label_set_text(GTK_LABEL(state->live_summary), s->str);
+        g_string_free(s, TRUE);
     }
     if (state->live_empty != NULL)
         gtk_widget_set_visible(state->live_empty, state->live_count == 0);
+}
+
+/* One tick a second is enough to read as live without redrawing the chip
+   eight times a second for no new information. */
+static gboolean
+live_rate_tick(gpointer user_data)
+{
+    AppState *state = user_data;
+    state->live_rate = state->live_count - state->live_rate_prev;
+    state->live_rate_prev = state->live_count;
+    live_update_summary(state);
+    return G_SOURCE_CONTINUE;
 }
 
 static void
@@ -4931,7 +5485,17 @@ live_add_msg(AppState *state, LiveMsg *m)
     }
 
     state->live_count++;
-    live_update_summary(state);
+    /* The first datagram since start or Clear retires the "no emitter yet"
+       hint. The pill is set by start/stop/pause now, so nothing else would
+       ever take that message down once traffic started arriving. */
+    if (state->live_count == 1 && state->live_socket != NULL && !state->live_paused)
+        live_set_status(state, "listening on udp/4729", "status-running");
+
+    /* Deliberately no summary update here. This runs inside the model-append
+       path, and redrawing the chip from there re-enters the column view while
+       it is still handling items-changed - which is what tripped GTK's
+       gtk_list_item_manager_ensure_items assertion during a busy feed. The
+       chip is a once-a-second read-out anyway; live_rate_tick owns it. */
 }
 
 static gboolean
@@ -4947,6 +5511,8 @@ live_poll_cb(gpointer user_data)
     while ((n = g_socket_receive(state->live_socket, (gchar *) buf,
                                  sizeof buf, NULL, NULL)) > 0) {
         if (n < 16) continue;
+
+        state->live_last_us = g_get_monotonic_time();
 
         guint hdr_bytes = (guint) buf[1] * 4;
         if (hdr_bytes < 16 || hdr_bytes > (guint) n) hdr_bytes = 16;
@@ -4990,11 +5556,9 @@ live_poll_cb(gpointer user_data)
         live_add_msg(state, m);   /* live_add_msg takes the reference */
     }
 
-    if (state->live_count > 0) {
-        g_autofree char *m = g_strdup_printf("%u message%s",
-            state->live_count, state->live_count == 1 ? "" : "s");
-        live_set_status(state, m, "status-ok");
-    }
+    /* Deliberately no label write here. This runs every 120 ms; the state
+       word on the pill is set by start/stop/pause, and the numbers live in
+       the summary chip, which updates on its own one-second tick. */
     return G_SOURCE_CONTINUE;
 }
 
@@ -5089,6 +5653,10 @@ live_clear_clicked(GtkButton *b, gpointer user_data)
     if (state->live_store != NULL)
         g_list_store_remove_all(G_LIST_STORE(state->live_store));
     state->live_count = 0;
+    state->live_rate = 0;
+    state->live_rate_prev = 0;
+    state->live_last_us = 0;
+    live_inspector_reset(state);
     live_update_summary(state);
     live_set_status(state, state->live_socket ? "listening on udp/4729"
                                               : "stopped",
@@ -5100,22 +5668,50 @@ live_follow_toggled(GtkToggleButton *b, gpointer user_data)
 {
     AppState *state = user_data;
     state->live_follow = gtk_toggle_button_get_active(b);
+    /* Turning Follow back on should catch up immediately, not wait for the
+       next datagram to arrive. */
+    if (state->live_follow && state->live_follow_idle == 0)
+        state->live_follow_idle = g_idle_add(live_follow_idle, state);
 }
 
-/* Keep the newest row in view while Follow is on. */
-static void
-live_items_changed(GListModel *model, guint pos, guint removed, guint added,
-                   gpointer user_data)
+/* Scroll to the newest row, after the model change has been fully processed.
+
+   This used to run straight from the items-changed handler. Setting the
+   adjustment there scrolls the column view from inside its own model
+   notification, which re-enters the list item manager while it is still
+   placing the row that was just appended. Under a busy feed that ends in
+   GTK's "gtk_list_item_manager_ensure_items: code should not be reached"
+   assertion and an abort. An idle hop costs nothing visible and cannot
+   re-enter. */
+static gboolean
+live_follow_idle(gpointer user_data)
 {
     AppState *state = user_data;
     GtkAdjustment *adj;
-    if (!state->live_follow || state->live_scroll == NULL) return;
+
+    state->live_follow_idle = 0;
+    if (!state->live_follow || state->live_scroll == NULL) return G_SOURCE_REMOVE;
+
     adj = gtk_scrolled_window_get_vadjustment(
         GTK_SCROLLED_WINDOW(state->live_scroll));
     if (adj != NULL)
         gtk_adjustment_set_value(adj,
             gtk_adjustment_get_upper(adj) - gtk_adjustment_get_page_size(adj));
+    return G_SOURCE_REMOVE;
+}
+
+/* Keep the newest row in view while Follow is on. One pending scroll is
+   enough however many rows arrive in a burst. */
+static void
+live_items_changed(GListModel *model, guint pos, guint removed, guint added,
+                   gpointer user_data)
+{
+    AppState *state = user_data;
     (void) model; (void) pos; (void) removed; (void) added;
+
+    if (!state->live_follow || state->live_scroll == NULL) return;
+    if (state->live_follow_idle != 0) return;
+    state->live_follow_idle = g_idle_add(live_follow_idle, state);
 }
 
 static void
@@ -5158,6 +5754,9 @@ live_filter_changed(GtkEditable *e, gpointer user_data)
     g_free(state->live_filter);
     state->live_filter = g_strdup(gtk_editable_get_text(e));
     live_refilter(state);
+    /* The chip reports "shown of total", so it has to follow the filter
+       rather than wait for the next rate tick. */
+    live_update_summary(state);
 }
 
 static void
@@ -5167,6 +5766,33 @@ live_filter_cleared(GtkButton *b, gpointer user_data)
     (void) b;
     if (state->live_filter_entry != NULL)
         gtk_editable_set_text(GTK_EDITABLE(state->live_filter_entry), "");
+}
+
+/* Place the live divider once the paned has actually been measured.
+
+   A position set at construction is applied before the children have a
+   minimum size, so 850 against a ~908px notebook left the inspector a ~58px
+   sliver. Measuring first and then subtracting a fixed inspector width keeps
+   the panel usable, and shrink-end-child=FALSE keeps it that way when the
+   window narrows. */
+#define LIVE_INSPECTOR_WIDTH 320
+
+static gboolean
+live_paned_place_idle(gpointer user_data)
+{
+    GtkWidget *paned = user_data;
+    int w = gtk_widget_get_width(paned);
+
+    if (w > LIVE_INSPECTOR_WIDTH + 260)
+        gtk_paned_set_position(GTK_PANED(paned), w - LIVE_INSPECTOR_WIDTH);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+live_paned_mapped(GtkWidget *paned, gpointer user_data)
+{
+    (void) user_data;
+    g_idle_add(live_paned_place_idle, paned);
 }
 
 static GtkWidget *
@@ -5210,6 +5836,12 @@ create_live_traffic_page(AppState *state)
     gtk_widget_add_css_class(pause,  "verb-button");
     gtk_widget_add_css_class(follow, "verb-button");
     gtk_widget_add_css_class(inspector_box, "live-inspector");
+    /* The divider is requested at 850, but the pane is only as wide as the
+       notebook (~908 at the default window, less with the sidebar open), so
+       the inspector was being squeezed into a ~58px sliver and its values
+       were clipped. A minimum width makes GtkPaned clamp the divider itself,
+       at any window size, instead of trusting one hardcoded number. */
+    gtk_widget_set_size_request(inspector_box, 300, -1);
     gtk_widget_add_css_class(inspector_title, "live-inspector-title");
     gtk_widget_add_css_class(view,   "live-table");
     gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
@@ -5288,11 +5920,28 @@ create_live_traffic_page(AppState *state)
     gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(inspector), GTK_WRAP_WORD_CHAR);
     gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(inspector)),
         "Select a row to inspect its decoded GSMTAP fields.", -1);
+    /* A GtkTextView appended bare into a box reports its full wrapped content
+       height as its minimum. This one propagated all the way up and pinned the
+       toplevel's minimum height at 1322px, so the window could not fit a
+       1000px-tall screen and a long payload could not scroll. Scrolling it
+       keeps the minimum at the small default instead. */
+    GtkWidget *inspector_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(inspector_scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(inspector_scroll),
+                                  inspector);
+    gtk_widget_set_vexpand(inspector_scroll, TRUE);
     gtk_box_append(GTK_BOX(inspector_box), inspector_title);
-    gtk_box_append(GTK_BOX(inspector_box), inspector);
+    gtk_box_append(GTK_BOX(inspector_box), inspector_scroll);
     gtk_paned_set_start_child(GTK_PANED(paned), overlay);
     gtk_paned_set_end_child(GTK_PANED(paned), inspector_box);
     gtk_paned_set_position(GTK_PANED(paned), 850);
+    /* The inspector keeps its width; the table absorbs the resizing. */
+    gtk_paned_set_resize_start_child(GTK_PANED(paned), TRUE);
+    gtk_paned_set_resize_end_child(GTK_PANED(paned), FALSE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(paned), TRUE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(paned), FALSE);
+    g_signal_connect(paned, "map", G_CALLBACK(live_paned_mapped), NULL);
     gtk_box_append(GTK_BOX(outer), paned);
 
     state->live_view         = view;
@@ -5310,6 +5959,11 @@ create_live_traffic_page(AppState *state)
     state->live_hint         = 0;
     state->live_msgs         = NULL;
     state->live_filter       = NULL;
+    state->live_rate         = 0;
+    state->live_rate_prev    = 0;
+    state->live_last_us      = 0;
+    /* One tick a second drives the arrival rate and the quiet indicator. */
+    state->live_rate_timer   = g_timeout_add_seconds(1, live_rate_tick, state);
 
     g_signal_connect(start,  "clicked", G_CALLBACK(live_toggle_clicked), state);
     g_signal_connect(clear,  "clicked", G_CALLBACK(live_clear_clicked), state);
@@ -5646,6 +6300,17 @@ on_activate(GtkApplication *app, gpointer user_data)
         return;
     }
 
+    /* The module icons are compiled into this binary (see
+       tools/gen-icons-xml.sh) and published under a resource path shaped like
+       an icon theme: icons/scalable/actions/<name>.svg. Registering that path
+       makes gtk_image_new_from_icon_name() find them inside the binary, so the
+       dashboard does not depend on the launcher having copied the SVGs into
+       ~/.local/share/icons/hicolor, nor on whichever theme the distro exposes.
+       They stay symbolic, so each category's accent colour still applies. */
+    gtk_icon_theme_add_resource_path(
+        gtk_icon_theme_get_for_display(gdk_display_get_default()),
+        "/com/imsisting/native/icons");
+
     state->window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(state->window), "IMSIsting");
     gtk_window_set_default_size(GTK_WINDOW(state->window), 1180, 760);
@@ -5656,6 +6321,11 @@ on_activate(GtkApplication *app, gpointer user_data)
        a 170px minimum of its own plus its toolbar; this is the cheap guard
        that keeps it reachable. */
     gtk_widget_set_size_request(state->window, -1, 500);
+
+    /* Open the way the last session was left: tile density, dashboard order
+       and the run counts behind "Most used". */
+    ui_state_load(state);
+    density_apply(state);
 
     g_autoptr(GtkCssProvider) css = gtk_css_provider_new();
     gtk_css_provider_load_from_resource(css, "/com/imsisting/native/style.css");
@@ -5945,19 +6615,397 @@ static ModuleSubmenuEntry deps_entries[] = {
       "preferences-system-symbolic",
       "--distro-info:Distro Info" },
 };
+/* Radio Bench: an operational workspace for selecting, tuning and recording. */
+typedef struct {
+    AppState *state;
+    const char *module_id;
+    GtkWidget *devices;
+    GtkWidget *selection;
+    GtkWidget *telemetry;
+} RadioBench;
+
+static void
+radio_bench_clear(GtkWidget *list)
+{
+    GtkWidget *child = gtk_widget_get_first_child(list);
+    while (child != NULL) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        gtk_list_box_remove(GTK_LIST_BOX(list), child);
+        child = next;
+    }
+}
+
+static void
+radio_bench_run_button(GtkWidget *button, AppState *state,
+                       const char *module_id, GtkWidget *status,
+                       const char *verb, const char *args)
+{
+    g_object_set_data(G_OBJECT(button), "state", state);
+    g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
+    g_object_set_data(G_OBJECT(button), "status", status);
+    g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
+    if (args != NULL)
+        g_object_set_data_full(G_OBJECT(button), "args", g_strdup(args), g_free);
+    g_signal_connect(button, "clicked", G_CALLBACK(group_verb_clicked), NULL);
+}
+
+static void
+radio_bench_add_device(RadioBench *bench, char **f, int index,
+                       GtkWidget *status)
+{
+    g_autofree char *summary = g_strdup_printf(
+        "%s-%s MHz  |  %s-%s Msps  |  %s dB  |  %s",
+        f[2] ? f[2] : "?", f[3] ? f[3] : "?", f[4] ? f[4] : "?",
+        f[5] ? f[5] : "?", f[6] ? f[6] : "?", f[8] ? f[8] : "RX");
+    g_autofree char *serial = g_strdup_printf("serial: %s", f[1] ? f[1] : "unknown");
+    g_autofree char *select_arg = g_strdup_printf("%d", index);
+    GtkWidget *row = gtk_list_box_row_new();
+    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    GtkWidget *text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *name = gtk_label_new(f[0] ? f[0] : "SDR");
+    GtkWidget *ident = gtk_label_new(serial);
+    GtkWidget *meta = gtk_label_new(summary);
+    GtkWidget *icon = gtk_image_new_from_icon_name("network-wireless-symbolic");
+    GtkWidget *select = gtk_button_new_with_label("Select");
+    GtkWidget *caps = gtk_button_new_with_label("Capabilities");
+
+    gtk_image_set_pixel_size(GTK_IMAGE(icon), 28);
+    gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(ident), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(meta), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(meta), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(row, "radio-device-row");
+    gtk_widget_add_css_class(name, "cell-name");
+    gtk_widget_add_css_class(ident, "cell-ident");
+    gtk_widget_add_css_class(meta, "cell-meta");
+    gtk_widget_add_css_class(icon, "cell-icon");
+    gtk_widget_add_css_class(select, "verb-button");
+    gtk_widget_add_css_class(caps, "flat");
+    gtk_widget_set_hexpand(text, TRUE);
+    gtk_box_append(GTK_BOX(top), name);
+    gtk_box_append(GTK_BOX(top), ident);
+    gtk_box_append(GTK_BOX(text), top);
+    gtk_box_append(GTK_BOX(text), meta);
+    gtk_box_append(GTK_BOX(content), icon);
+    gtk_box_append(GTK_BOX(content), text);
+    gtk_box_append(GTK_BOX(content), caps);
+    gtk_box_append(GTK_BOX(content), select);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), content);
+    radio_bench_run_button(select, bench->state, bench->module_id, status,
+                           "--select", select_arg);
+    radio_bench_run_button(caps, bench->state, bench->module_id, status,
+                           "--caps-tsv", f[0]);
+    gtk_list_box_append(GTK_LIST_BOX(bench->devices), row);
+}
+
+static void
+radio_bench_fill(RadioBench *bench, GtkWidget *status)
+{
+    g_autofree char *script = module_script_path(bench->module_id);
+    const char *status_argv[] = { script, "--status-tsv", NULL };
+    const char *list_argv[] = { script, "--list-tsv", NULL };
+    g_autofree char *current = run_capture(status_argv);
+    g_autofree char *roster = run_capture(list_argv);
+    g_autofree char *selected = current ? tsv_field(current, "selected_driver") : NULL;
+    g_autofree char *freq = current ? tsv_field(current, "freq_hz") : NULL;
+    g_autofree char *gain = current ? tsv_field(current, "gain_db") : NULL;
+    g_autofree char *rate = current ? tsv_field(current, "rate_sps") : NULL;
+    g_autofree char *lock = current ? tsv_field(current, "lock_state") : NULL;
+    g_autofree char *selection = g_strdup_printf("SELECTED  %s",
+        (selected && *selected) ? selected : "none");
+    g_autofree char *telemetry = g_strdup_printf(
+        "TUNE  %s Hz  |  %s dB  |  %s sps  /  LOCK  %s",
+        (freq && *freq) ? freq : "not set", (gain && *gain) ? gain : "not set",
+        (rate && *rate) ? rate : "not set", (lock && *lock) ? lock : "free");
+    int count = 0;
+
+    gtk_label_set_text(GTK_LABEL(bench->selection), selection);
+    gtk_label_set_text(GTK_LABEL(bench->telemetry), telemetry);
+    radio_bench_clear(bench->devices);
+    if (roster != NULL && *roster != '\0') {
+        g_auto(GStrv) lines = g_strsplit(roster, "\n", -1);
+        for (guint i = 0; lines[i] != NULL; i++) {
+            g_auto(GStrv) f = g_strsplit(lines[i], "\t", 10);
+            if (g_strv_length(f) < 9 || g_strcmp0(f[0], "driver") == 0)
+                continue;
+            radio_bench_add_device(bench, f, count++, status);
+        }
+    }
+    if (count == 0) {
+        GtkWidget *row = gtk_list_box_row_new();
+        GtkWidget *empty = gtk_label_new(
+            "No SDRs detected - connect a supported radio, then Refresh.");
+        gtk_widget_add_css_class(empty, "cell-empty");
+        gtk_widget_set_margin_top(empty, 14);
+        gtk_widget_set_margin_bottom(empty, 14);
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), empty);
+        gtk_list_box_append(GTK_LIST_BOX(bench->devices), row);
+    }
+}
+
+static void
+radio_bench_refresh_clicked(GtkButton *button, gpointer user_data)
+{
+    RadioBench *bench = user_data;
+    radio_bench_fill(bench, g_object_get_data(G_OBJECT(button), "status"));
+}
+
+static GtkWidget *
+radio_bench_arg_action(AppState *state, const char *module_id,
+                       GtkWidget *status, const char *label,
+                       const char *placeholder, const char *verb,
+                       const char *button_label)
+{
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *caption = gtk_label_new(label);
+    GtkWidget *entry = gtk_entry_new();
+    GtkWidget *button = gtk_button_new_with_label(button_label);
+
+    gtk_label_set_xalign(GTK_LABEL(caption), 0.0f);
+    gtk_widget_set_size_request(caption, 112, -1);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), placeholder);
+    gtk_widget_set_hexpand(entry, TRUE);
+    gtk_widget_add_css_class(entry, "verb-arg-entry");
+    gtk_widget_add_css_class(button, "verb-button");
+    g_object_set_data(G_OBJECT(button), "state", state);
+    g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
+    g_object_set_data(G_OBJECT(button), "status", status);
+    g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
+    g_object_set_data(G_OBJECT(button), "arg-entry", entry);
+    g_signal_connect(button, "clicked", G_CALLBACK(group_arg_clicked), NULL);
+    gtk_box_append(GTK_BOX(row), caption);
+    gtk_box_append(GTK_BOX(row), entry);
+    gtk_box_append(GTK_BOX(row), button);
+    return row;
+}
+
+static GtkWidget *
+radio_build_bench(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *inner = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *hero = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *selection = gtk_label_new("SELECTED  checking...");
+    GtkWidget *telemetry = gtk_label_new("TUNE  checking...");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh hardware");
+    GtkWidget *device_body;
+    GtkWidget *device_card = verb_card("DEVICE INVENTORY", &device_body);
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    GtkWidget *devices = gtk_list_box_new();
+    GtkWidget *tune_body;
+    GtkWidget *tune_card = verb_card("QUICK TUNE", &tune_body);
+    GtkWidget *capture_body;
+    GtkWidget *capture_card = verb_card("CAPTURE", &capture_body);
+    RadioBench *bench = g_new0(RadioBench, 1);
+
+    bench->state = state;
+    bench->module_id = module_id;
+    bench->devices = devices;
+    bench->selection = selection;
+    bench->telemetry = telemetry;
+    gtk_widget_set_margin_top(inner, 16);
+    gtk_widget_set_margin_bottom(inner, 16);
+    gtk_widget_set_margin_start(inner, 16);
+    gtk_widget_set_margin_end(inner, 16);
+    gtk_widget_set_hexpand(inner, TRUE);
+    gtk_widget_add_css_class(hero, "radio-bench-status");
+    gtk_widget_add_css_class(selection, "radio-bench-selection");
+    gtk_widget_add_css_class(telemetry, "radio-bench-telemetry");
+    gtk_widget_add_css_class(refresh, "flat");
+    gtk_label_set_xalign(GTK_LABEL(selection), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(telemetry), 0.0f);
+    gtk_widget_set_hexpand(selection, TRUE);
+    gtk_widget_set_hexpand(telemetry, TRUE);
+    gtk_box_append(GTK_BOX(hero), selection);
+    gtk_box_append(GTK_BOX(hero), telemetry);
+    gtk_box_append(GTK_BOX(hero), refresh);
+    gtk_box_append(GTK_BOX(inner), hero);
+
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(devices), GTK_SELECTION_NONE);
+    gtk_widget_add_css_class(devices, "cell-list");
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), devices);
+    gtk_widget_set_size_request(scroll, -1, 230);
+    gtk_box_append(GTK_BOX(device_body), scroll);
+    gtk_box_append(GTK_BOX(inner), device_card);
+
+    gtk_box_append(GTK_BOX(tune_body), radio_bench_arg_action(
+        state, module_id, status, "Frequency", "MHz  e.g. 942", "--set-freq", "Apply"));
+    gtk_box_append(GTK_BOX(tune_body), radio_bench_arg_action(
+        state, module_id, status, "Gain", "dB  e.g. 40", "--set-gain", "Apply"));
+    gtk_box_append(GTK_BOX(tune_body), radio_bench_arg_action(
+        state, module_id, status, "Sample rate", "samples/s  e.g. 2000000", "--set-rate", "Apply"));
+    gtk_box_append(GTK_BOX(inner), tune_card);
+
+    gtk_box_append(GTK_BOX(capture_body), radio_bench_arg_action(
+        state, module_id, status, "IQ capture", "seconds", "--record", "Record"));
+    gtk_box_append(GTK_BOX(inner), capture_card);
+    if (out != NULL)
+        gtk_box_append(GTK_BOX(inner), build_output_card(out));
+
+    g_object_set_data(G_OBJECT(refresh), "status", status);
+    g_signal_connect(refresh, "clicked", G_CALLBACK(radio_bench_refresh_clicked), bench);
+    g_object_set_data_full(G_OBJECT(inner), "radio-bench", bench, g_free);
+    radio_bench_fill(bench, status);
+    gtk_box_append(GTK_BOX(outer), inner);
+    return outer;
+}
+
+static GtkWidget *
+radio_view_shell(const char *title, const char *subtitle, GtkWidget **body_out)
+{
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *inner = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *heading = gtk_label_new(title);
+    GtkWidget *detail = gtk_label_new(subtitle);
+    GtkWidget *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+
+    gtk_widget_set_margin_top(inner, 16);
+    gtk_widget_set_margin_bottom(inner, 16);
+    gtk_widget_set_margin_start(inner, 16);
+    gtk_widget_set_margin_end(inner, 16);
+    gtk_widget_add_css_class(heading, "radio-view-title");
+    gtk_widget_add_css_class(detail, "radio-view-subtitle");
+    gtk_label_set_xalign(GTK_LABEL(heading), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(detail), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(detail), TRUE);
+    gtk_box_append(GTK_BOX(inner), heading);
+    gtk_box_append(GTK_BOX(inner), detail);
+    gtk_box_append(GTK_BOX(inner), body);
+    gtk_box_append(GTK_BOX(outer), inner);
+    if (body_out != NULL) *body_out = body;
+    return outer;
+}
+
+static char *
+radio_status_summary(const char *module_id)
+{
+    g_autofree char *script = module_script_path(module_id);
+    const char *argv[] = { script, "--status-tsv", NULL };
+    g_autofree char *status = run_capture(argv);
+    g_autofree char *driver = status ? tsv_field(status, "selected_driver") : NULL;
+    g_autofree char *freq = status ? tsv_field(status, "freq_hz") : NULL;
+    g_autofree char *gain = status ? tsv_field(status, "gain_db") : NULL;
+    g_autofree char *rate = status ? tsv_field(status, "rate_sps") : NULL;
+    return g_strdup_printf("ACTIVE PROFILE  %s  |  %s Hz  |  %s dB  |  %s sps",
+        (driver && *driver) ? driver : "no device",
+        (freq && *freq) ? freq : "not set", (gain && *gain) ? gain : "not set",
+        (rate && *rate) ? rate : "not set");
+}
+
+static GtkWidget *
+radio_build_tuning(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("TUNING CONSOLE",
+        "Set the receiver profile deliberately. Select an SDR in Overview first; results are recorded below.",
+        &body);
+    g_autofree char *summary = radio_status_summary(module_id);
+    GtkWidget *profile = gtk_label_new(summary);
+    GtkWidget *tune_body;
+    GtkWidget *tune = verb_card("RECEIVER SETTINGS", &tune_body);
+
+    gtk_widget_add_css_class(profile, "radio-bench-status");
+    gtk_widget_add_css_class(profile, "radio-bench-telemetry");
+    gtk_label_set_xalign(GTK_LABEL(profile), 0.0f);
+    gtk_box_append(GTK_BOX(body), profile);
+    gtk_box_append(GTK_BOX(tune_body), radio_bench_arg_action(
+        state, module_id, status, "Center frequency", "MHz  e.g. 942", "--set-freq", "Apply"));
+    gtk_box_append(GTK_BOX(tune_body), radio_bench_arg_action(
+        state, module_id, status, "Gain", "dB  e.g. 40", "--set-gain", "Apply"));
+    gtk_box_append(GTK_BOX(tune_body), radio_bench_arg_action(
+        state, module_id, status, "Sample rate", "samples/s  e.g. 2000000", "--set-rate", "Apply"));
+    gtk_box_append(GTK_BOX(body), tune);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
+static GtkWidget *
+radio_build_ownership(AppState *state, const char *module_id,
+                      GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DEVICE OWNERSHIP",
+        "An SDR is exclusive hardware. Claim it before a long operation, then release it when the work is complete.",
+        &body);
+    g_autofree char *script = module_script_path(module_id);
+    const char *argv[] = { script, "--lock-status-tsv", NULL };
+    g_autofree char *raw = run_capture(argv);
+    g_autofree char *lock = raw ? tsv_field(raw, "state") : NULL;
+    g_autofree char *owner = raw ? tsv_field(raw, "owner") : NULL;
+    g_autofree char *owner_text = g_strdup_printf("LOCK  %s   |   OWNER  %s",
+        (lock && *lock) ? lock : "unknown", (owner && *owner) ? owner : "none");
+    GtkWidget *banner = gtk_label_new(owner_text);
+    GtkWidget *control_body;
+    GtkWidget *control = verb_card("LOCK CONTROL", &control_body);
+    GtkWidget *recover = gtk_button_new_with_label("Recover stale lock");
+
+    gtk_widget_add_css_class(banner, "radio-bench-status");
+    gtk_widget_add_css_class(banner, "radio-bench-telemetry");
+    gtk_label_set_xalign(GTK_LABEL(banner), 0.0f);
+    gtk_box_append(GTK_BOX(body), banner);
+    gtk_box_append(GTK_BOX(control_body), radio_bench_arg_action(
+        state, module_id, status, "Owner name", "e.g. recon-session", "--lock-claim", "Claim"));
+    gtk_box_append(GTK_BOX(control_body), radio_bench_arg_action(
+        state, module_id, status, "Release owner", "exact owner name", "--lock-release", "Release"));
+    gtk_widget_add_css_class(recover, "flat");
+    radio_bench_run_button(recover, state, module_id, status, "--lock-recover", NULL);
+    gtk_box_append(GTK_BOX(control_body), recover);
+    gtk_box_append(GTK_BOX(body), control);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
+static GtkWidget *
+radio_build_diagnostics(AppState *state, const char *module_id,
+                        GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("RADIO DIAGNOSTICS",
+        "Check practical coverage and inspect processes that may have the SDR open before troubleshooting a failed run.",
+        &body);
+    GtkWidget *coverage_body;
+    GtkWidget *coverage = verb_card("BAND COVERAGE", &coverage_body);
+    GtkWidget *health_body;
+    GtkWidget *health = verb_card("HARDWARE HEALTH", &health_body);
+    GtkWidget *processes = gtk_button_new_with_label("Inspect SDR processes");
+    GtkWidget *plan = gtk_button_new_with_label("Show control plan");
+
+    gtk_box_append(GTK_BOX(coverage_body), radio_bench_arg_action(
+        state, module_id, status, "Frequency", "MHz  e.g. 942", "--band-check", "Check coverage"));
+    radio_bench_run_button(processes, state, module_id, status, "--processes-tsv", NULL);
+    radio_bench_run_button(plan, state, module_id, status, "--plan", NULL);
+    gtk_widget_add_css_class(processes, "verb-button");
+    gtk_widget_add_css_class(plan, "flat");
+    gtk_box_append(GTK_BOX(health_body), processes);
+    gtk_box_append(GTK_BOX(health_body), plan);
+    gtk_box_append(GTK_BOX(body), coverage);
+    gtk_box_append(GTK_BOX(body), health);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
 static ModuleSubmenuEntry radio_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
-      "#DEVICE|--list-tsv:List SDRs|--caps-tsv:Capabilities|#CAPTURE|--record:Record IQ" },
+      NULL,
+      radio_build_bench },
     { "Tuning",
       "preferences-system-symbolic",
-      "#DEVICE|--select=0|#TUNING|--set-freq=942|--set-gain=40|--set-rate=2000000" },
+      NULL,
+      radio_build_tuning },
     { "Ownership",
       "channel-secure-symbolic",
-      "#STATUS|--lock-status-tsv:Lock Status|#CONTROL|--lock-claim:Claim|--lock-release:Release|--lock-recover:Recover Stale" },
+      NULL,
+      radio_build_ownership },
     { "Diagnostics",
       "utilities-terminal-symbolic",
-      "#PROCESSES|--processes-tsv:SDR Processes|#PLAN|--band-check=942|--plan:Plan" },
+      NULL,
+      radio_build_diagnostics },
 };
 /* ── Cell Recon · Targets ───────────────────────────────────────────
    Laid out like wifisting's Wi-Fi Recon target list: a toolbar naming what
@@ -6205,6 +7253,107 @@ crec_build_targets(AppState *state, const char *module_id,
     return outer;
 }
 
+static char *
+crec_status_summary(const char *module_id)
+{
+    g_autofree char *script = module_script_path(module_id);
+    const char *argv[] = { script, "--status-tsv", NULL };
+    g_autofree char *raw = run_capture(argv);
+    g_autofree char *cells = raw ? tsv_field(raw, "cells") : NULL;
+    g_autofree char *sdr = raw ? tsv_field(raw, "sdr") : NULL;
+    g_autofree char *gsm = raw ? tsv_field(raw, "gsm_scanner") : NULL;
+    return g_strdup_printf("SURVEY STORE  %s cells   |   SDR  %s   |   GSM SCANNER  %s",
+        (cells && *cells) ? cells : "0", (sdr && *sdr) ? sdr : "none",
+        (gsm && *gsm) ? gsm : "unavailable");
+}
+
+static GtkWidget *
+crec_build_overview(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CELL SURVEY",
+        "Start a focused survey, then inspect and promote discovered cells from Targets.", &body);
+    g_autofree char *summary = crec_status_summary(module_id);
+    GtkWidget *banner = gtk_label_new(summary);
+    GtkWidget *scan_body;
+    GtkWidget *scan = verb_card("SURVEY SOURCE", &scan_body);
+    GtkWidget *gsm = gtk_button_new_with_label("Start GSM survey");
+    GtkWidget *lte = gtk_button_new_with_label("Start LTE survey");
+
+    gtk_widget_add_css_class(banner, "crec-survey-status");
+    gtk_label_set_xalign(GTK_LABEL(banner), 0.0f);
+    radio_bench_run_button(gsm, state, module_id, status, "--scan", "gsm");
+    radio_bench_run_button(lte, state, module_id, status, "--scan", "lte");
+    gtk_widget_add_css_class(gsm, "verb-button");
+    gtk_widget_add_css_class(lte, "flat");
+    gtk_box_append(GTK_BOX(scan_body), gsm);
+    gtk_box_append(GTK_BOX(scan_body), lte);
+    gtk_box_append(GTK_BOX(scan_body), radio_bench_arg_action(
+        state, module_id, status, "Offline PCAP", "pcap / path/to/capture.pcap", "--scan", "Inspect"));
+    gtk_box_append(GTK_BOX(body), banner);
+    gtk_box_append(GTK_BOX(body), scan);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
+static GtkWidget *
+crec_build_channel(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CHANNEL INTELLIGENCE",
+        "Translate GSM, LTE, or NR channel numbers into downlink frequencies before selecting a survey range.", &body);
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card("ARFCN LOOKUP", &card_body);
+
+    gtk_box_append(GTK_BOX(card_body), radio_bench_arg_action(
+        state, module_id, status, "RAT + channel", "gsm 1  |  lte 6300  |  nr 620000", "--arfcn", "Resolve"));
+    gtk_box_append(GTK_BOX(body), card);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
+static GtkWidget *
+crec_build_network(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("NETWORK IDENTITY",
+        "Resolve the MCC-MNC before correlating a surveyed cell with its operator and country.", &body);
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card("PLMN RESOLUTION", &card_body);
+
+    gtk_box_append(GTK_BOX(card_body), radio_bench_arg_action(
+        state, module_id, status, "MCC-MNC", "e.g. 208-01", "--plmn", "Resolve"));
+    gtk_box_append(GTK_BOX(body), card);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
+static GtkWidget *
+crec_build_export(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SURVEY HANDOFF",
+        "Export the current survey into the case workspace, or clear the working store when a new collection begins.", &body);
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card("DATA MANAGEMENT", &card_body);
+    GtkWidget *export_btn = gtk_button_new_with_label("Export survey CSV");
+    GtkWidget *clear = gtk_button_new_with_label("Clear survey store");
+
+    radio_bench_run_button(export_btn, state, module_id, status, "--export", NULL);
+    radio_bench_run_button(clear, state, module_id, status, "--clear", NULL);
+    gtk_widget_add_css_class(export_btn, "verb-button");
+    gtk_widget_add_css_class(clear, "flat");
+    gtk_box_append(GTK_BOX(card_body), export_btn);
+    gtk_box_append(GTK_BOX(card_body), clear);
+    gtk_box_append(GTK_BOX(body), card);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
 static ModuleSubmenuEntry crec_entries[] = {
     /* Laid out like wifisting's Wi-Fi Recon page - the same job on a
        different radio. An Overview carrying the scan, then a view per
@@ -6214,7 +7363,8 @@ static ModuleSubmenuEntry crec_entries[] = {
        "start it" versus "read the result". */
     { "Overview",
       "dialog-information-symbolic",
-      "#CONTROLS|--scan:Start scan" },
+      NULL,
+      crec_build_overview },
     /* The surveyed cells get their own list view, the way wifisting's Targets
        view does, instead of two buttons that print TSV into the output card. */
     { "Targets",
@@ -6223,13 +7373,16 @@ static ModuleSubmenuEntry crec_entries[] = {
       crec_build_targets },
     { "Channel",
       "network-wireless-symbolic",
-      "#CHANNEL|--arfcn=gsm 1" },
+      NULL,
+      crec_build_channel },
     { "Network",
       "network-workgroup-symbolic",
-      "#NETWORK|--plmn=001-01" },
+      NULL,
+      crec_build_network },
     { "Export",
       "document-save-symbolic",
-      "#EXPORT|--export:Export|--clear:Clear Survey" },
+      NULL,
+      crec_build_export },
 };
 static ModuleSubmenuEntry gtap_entries[] = {
     { "Overview",
@@ -6276,7 +7429,7 @@ static ModuleSubmenuEntry gair_entries[] = {
       "--cipher-audit:Cipher Audit|--a5-1-keystream:A5/1 Keystream" },
     { "Paging & Identity",
       "system-search-symbolic",
-      "--paging-group=001010000000001|--imsi-exposure-tsv:IMSI Exposure" },
+      "--paging-group=001010000000001|--imsi-exposure-tsv:IMSI Exposure|~--identity-exposure:Identity Exposure" },
 };
 static ModuleSubmenuEntry gatk_entries[] = {
     { "Overview",
@@ -6309,7 +7462,7 @@ static ModuleSubmenuEntry latt_entries[] = {
       "--decode-nas:Decode NAS|--encode-attach:Encode Attach|--ue-stack:UE Stack" },
     { "Identity",
       "auth-smartcard-symbolic",
-      "--imsi-decode:Decode IMSI|--imsi-encode:Encode IMSI|--identity-exposure:Identity Exposure" },
+      "--imsi-decode:Decode IMSI|--imsi-encode:Encode IMSI|~--identity-exposure:Identity Exposure" },
 };
 static ModuleSubmenuEntry lair_entries[] = {
     { "Overview",
