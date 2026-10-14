@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<g fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="butt" stroke-linejoin="miter">
+<path d="M56 160 A40 40 0 0 1 96 200"/><path d="M56 128 A72 72 0 0 1 128 200"/><path d="M56 96 A104 104 0 0 1 160 200"/>
+</g>
+</svg>
