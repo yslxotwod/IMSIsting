@@ -371,27 +371,41 @@ scrollbar slider:hover {
     margin-top: 4px;
 }
 
+/* ── module tile ────────────────────────────────────────────────────
+   One size for every tile. The flow box packs them, so a tile is the
+   same width whether its row holds four or two. This is the only place
+   the tile size is set - the C no longer requests one, so the stylesheet
+   and the layout cannot disagree.
+   The hover lifts the inner surface with a ring and a shadow, and the
+   transition is declared on the base rule so the release animates too. */
 button.module-card {
     background: none;
     border: none;
     padding: 0;
     box-shadow: none;
+    min-width: 164px;
+    min-height: 150px;
 }
 
 .module-card-inner {
-    background-color: @card_bg;
-    border: 1px solid @line;
-    border-radius: 12px;
-    padding: 12px 12px 14px 12px;
+    background-image: linear-gradient(to bottom right, #172233, #111a28);
+    border: 1px solid #293a52;
+    border-left: 3px solid transparent;
+    border-radius: 10px;
+    padding: 11px 12px 12px 12px;
+    transition: background-image 140ms ease-out,
+                border-color     140ms ease-out,
+                box-shadow       140ms ease-out;
 }
 
 button.module-card:hover .module-card-inner {
-    background-color: @card_hi;
-    border-color: #3a5075;
+    background-image: linear-gradient(to bottom right, #1d2c40, #162236);
+    border-color: #466689;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.38);
 }
 
 button.module-card:active .module-card-inner {
-    background-color: #1d3a4d;
+    background-image: linear-gradient(to bottom right, #1d3b50, #173044);
     border-color: @accent;
 }
 
@@ -401,15 +415,15 @@ button.module-card:active .module-card-inner {
 
 .module-card-category {
     color: @text_dim;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 700;
-    letter-spacing: 0.6px;
+    letter-spacing: 0.8px;
 }
 
 /* The icon sits on a tinted tile so a card is not a lone floating glyph. */
 .module-card-iconwrap {
-    border-radius: 14px;
-    padding: 12px;
+    border-radius: 10px;
+    padding: 10px;
     background-color: rgba(79, 179, 217, 0.12);
 }
 
@@ -423,7 +437,7 @@ button.module-card:active .module-card-inner {
 
 .module-card-title {
     color: @text;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
 }
 
@@ -471,6 +485,38 @@ button.module-card:active .module-card-inner {
 .loot-count {
     color: #6f7b8d;
     font-size: 13px;
+}
+
+/* Casebook keeps evidence browsing and operational context together without
+   pretending that case management is a cellular module. */
+.casebook {
+    background-color: #0d1624;
+}
+
+.casebook-tabs > header {
+    background-color: #09111c;
+    border-top: 1px solid #26374e;
+    border-bottom: 1px solid #26374e;
+}
+
+.casebook-tabs > header > tabs > tab {
+    min-width: 88px;
+    min-height: 31px;
+    padding: 7px 11px;
+}
+
+.casebook-toolbar {
+    padding: 3px 0 8px 0;
+}
+
+.casebook-text,
+.casebook-text text,
+.loot-preview,
+.loot-preview text {
+    background-color: #080e17;
+    color: #cbd6e5;
+    font-family: monospace;
+    font-size: 12px;
 }
 
 
@@ -1077,37 +1123,6 @@ notebook > header > tabs > tab:checked label {
     font-size: 13px;
 }
 
-.module-card-inner {
-    background-image: linear-gradient(to bottom right, #172233, #111a28);
-    border: 1px solid #293a52;
-    border-radius: 12px;
-    padding: 15px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
-}
-
-button.module-card:hover .module-card-inner {
-    background-image: linear-gradient(to bottom right, #1d2c40, #162236);
-    border-color: #466689;
-    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.34);
-}
-
-button.module-card:active .module-card-inner {
-    background-image: linear-gradient(to bottom right, #1d3b50, #173044);
-    border-color: #55bde4;
-}
-
-.module-card-iconwrap {
-    border-radius: 12px;
-    padding: 13px;
-    border: 1px solid rgba(255, 255, 255, 0.045);
-}
-
-.module-card-title {
-    color: #e8eef8;
-    font-size: 14px;
-    font-weight: 650;
-}
-
 .card {
     background-image: linear-gradient(to bottom right, #162131, #111a27);
     border: 1px solid #293a52;
@@ -1141,26 +1156,57 @@ button.module-card:active .module-card-inner {
     color: #8998ad;
 }
 
+/* Module menu: tall rows with big icons and bold labels. The selected row is
+   filled with the module's category colour and inverts its text, like a
+   terminal cursor. */
 .module-menu {
     background-color: #0a111c;
     border-right: 1px solid #26374e;
 }
 
 .module-menu row {
-    min-height: 35px;
-    margin: 2px 7px;
-    padding: 8px 13px;
-    border-radius: 7px;
+    min-height: 46px;
+    margin: 3px 8px;
+    padding: 9px 14px;
+    border-radius: 5px;
+    border-left: 3px solid transparent;
+}
+
+.module-menu row label {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    color: #b9c7da;
+}
+
+.module-menu row image {
+    color: #7f97b0;
 }
 
 .module-menu row:hover {
-    background-color: #172537;
+    background-color: rgba(79, 179, 217, 0.10);
+    border-left-color: rgba(127, 211, 240, 0.55);
 }
 
 .module-menu row:selected {
-    background-image: linear-gradient(to right, #1c3a50, #182d40);
-    box-shadow: inset 3px 0 #55bde4;
+    background-color: #2f6f8c;
+    border-left-color: #7fd3f0;
 }
+
+.module-menu row:selected label,
+.module-menu row:selected image {
+    color: #041018;
+}
+
+/* The highlight takes the module's category colour. */
+.module-menu.cat-system   row:selected { background-color: #93a2b8; }
+.module-menu.cat-recon    row:selected { background-color: #4fb3d9; }
+.module-menu.cat-air      row:selected { background-color: #6a8dff; }
+.module-menu.cat-core     row:selected { background-color: #a98bff; }
+.module-menu.cat-sim      row:selected { background-color: #4fd08a; }
+.module-menu.cat-attacks  row:selected { background-color: #ef6b6b; }
+.module-menu.cat-analysis row:selected { background-color: #e0b357; }
+.module-menu.cat-rf       row:selected { background-color: #e07bd0; }
 
 button {
     background-image: linear-gradient(to bottom, #202c3e, #182334);
@@ -1286,3 +1332,234 @@ scrollbar slider {
 scrollbar slider:hover {
     background-color: #506680;
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   Mission-control pass: signal rack, category rails, station band
+   ══════════════════════════════════════════════════════════════════ */
+
+/* Signal rack. The dot is an LED that follows the cell's state class, so a
+   meaningful change (radio gone, TX unavailable, stale GPS) reads instantly. */
+.status-dot { color: #39424f; font-size: 11px; }
+.status-cell.status-ok   .status-dot { color: #57d38c; }
+.status-cell.status-warn .status-dot { color: #e0b357; }
+.status-cell.status-dim  .status-dot { color: #39424f; }
+.status-cell.status-dim  .status-key { color: #3b4553; }
+
+/* Category as a thin rail on each card rather than a wash of colour; the icon
+   carries the rest of the accent. Bright cyan stays reserved for focus/live.
+   The rail's transparent base and padding are set once, in the module tile
+   block at the top of this file. */
+.module-card-inner.cat-system   { border-left-color: #93a2b8; }
+.module-card-inner.cat-recon    { border-left-color: #4fb3d9; }
+.module-card-inner.cat-air      { border-left-color: #6a8dff; }
+.module-card-inner.cat-core     { border-left-color: #a98bff; }
+.module-card-inner.cat-sim      { border-left-color: #4fd08a; }
+.module-card-inner.cat-attacks  { border-left-color: #ef6b6b; }
+.module-card-inner.cat-analysis { border-left-color: #e0b357; }
+.module-card-inner.cat-rf       { border-left-color: #e07bd0; }
+
+.module-card-state { font-size: 9px; font-weight: 700; letter-spacing: 0.7px; }
+.module-card-ready { color: #57d38c; }
+.module-card-offline { color: #e0b357; }
+.module-card-desc { color: #8b97a8; font-size: 11px; }
+.module-card-id { color: #55606f; font-size: 10px; font-family: monospace; }
+
+/* More air between major panels. */
+.mission-panel { margin-bottom: 6px; }
+.dash-grid { margin-top: 4px; }
+
+/* Station band: case, radio and transmit state at the top of the dashboard. */
+.station-band { padding: 2px 0 10px 0; }
+.station-band .status-value { font-size: 14px; }
+.station-band .status-key { color: #4a5666; }
+
+/* Pin control and pin/recent cues. */
+.card-pin { color: #55606f; font-size: 15px; padding: 0 2px; min-width: 0; min-height: 0; }
+.card-pin:hover { color: #e8c15a; }
+.module-card-state.module-card-pinned { color: #e8c15a; }
+.module-card-state.module-card-recent { color: #6a8dff; }
+
+/* Casebook home: the investigation's facts, above the tabs. */
+.case-home {
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-left: 3px solid @accent;
+    border-radius: 10px;
+    padding: 12px 16px;
+}
+.case-home-alert { color: #8b97a8; font-size: 12px; }
+
+/* ── module output card ─────────────────────────────────────────────
+   Where a module's buttons put their result. It lives inside the view's
+   scrolled content rather than as a strip on the page, because a module
+   page's content does not shrink and a page-level strip got squeezed to
+   nothing. Fixed slice, scrolled inside, so long output cannot push the
+   rest of the page around. */
+.output-card {
+    /* Was @bg_sunken - a near-black well in the middle of a blue interface,
+       which read as a terminal bolted into the page. The output card is a
+       card like any other, so it gets the same surface as its neighbours. */
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-radius: 10px;
+}
+.output-card-head {
+    padding: 8px 10px 2px 10px;
+    min-height: 18px;
+}
+.output-card-title {
+    color: @text_dim;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+}
+.output-card-view {
+    background-color: transparent;
+    color: #b9c4d2;
+    font-size: 11px;
+    padding: 4px 10px 8px 10px;
+}
+.output-card-view text { background-color: transparent; }
+
+/* ── Cell Recon · Targets list ──────────────────────────────────────
+   One row per surveyed cell: identity and identifiers on the left, the
+   numbers worth scanning down in the middle, Set target on the right. */
+.cell-selected { color: #8d9bb0; font-size: 12px; }
+.cell-list { background-color: transparent; }
+.cell-row {
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-radius: 9px;
+    margin: 3px 0;
+    padding: 8px 10px;
+}
+.cell-row:hover { background-color: @card_hi; border-color: #3a5075; }
+.cell-name   { color: @text; font-size: 13px; font-weight: 600; }
+.cell-ident  { color: #55606f; font-size: 11px; font-family: monospace; }
+.cell-meta   { color: @text_dim; font-size: 11px; }
+.cell-icon   { color: @accent; }
+.cell-empty  { color: @text_dim; font-size: 12px; }
+
+/* ── global radio target strip ──────────────────────────────────────
+   The header's Target toggle slides this open from under the status
+   strip, so the target is reachable from any page rather than only from
+   inside Casebook. */
+.target-panel {
+    background-color: @card_bg;
+    border-bottom: 1px solid @line;
+    padding: 8px 14px;
+}
+.target-title {
+    color: @accent;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+}
+.target-value { color: @text_dim; font-size: 12px; font-family: monospace; }
+.target-value.target-set { color: @accent; }
+
+/* Where the Casebook's target row used to be, now that the target lives in
+   the header panel: says where it went rather than leaving a gap. */
+.casebook-hint { color: @text_dim; font-size: 11px; margin-top: 2px; }
+
+/* An entry beside its Run button, for a verb that needs an argument. */
+.verb-arg-entry {
+    background-color: @bg_base;
+    border: 1px solid @line;
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: @text;
+    font-size: 12px;
+}
+.verb-arg-entry:focus { border-color: @accent; }
+
+/* ── status cells: one shape, three tints ───────────────────────────
+   status_set() puts the state class on the CELL as well as the value
+   label, and .status-ok carries a background while .status-warn/.status-dim
+   are colour-only. So healthy cells painted opaque hard-edged rectangles
+   with no radius while degraded ones painted nothing - two visual languages
+   in one row. Give every cell the same shape and let only the tint differ. */
+.status-cell {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 2px 10px;
+    min-width: 96px;
+}
+.status-cell.status-ok {
+    background-color: rgba(87, 211, 140, 0.10);
+    border-color: rgba(87, 211, 140, 0.35);
+}
+.status-cell.status-warn {
+    background-color: rgba(224, 179, 87, 0.10);
+    border-color: rgba(224, 179, 87, 0.35);
+}
+.status-cell.status-dim { background: none; border-color: transparent; }
+/* Ticking values (FREQ MHz, CELLS count) change width without this. */
+.status-value { font-variant-numeric: tabular-nums; }
+.status-cell-head { margin-bottom: 1px; }
+/* A hard separator per cell rather than 22px of air. */
+.status-cell + .status-cell { border-left: 1px solid @line; }
+
+/* ── "Start here" band ──────────────────────────────────────────────
+   These classes were applied in C but had no rule anywhere in the
+   stylesheet, so the band rendered as four default buttons with three
+   same-size labels stacked: no surface, no hierarchy, indistinguishable
+   from the status strip above it. */
+button.mission-shortcut { background: none; border: none; padding: 0; }
+.mission-shortcut-inner {
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-radius: 10px;
+    padding: 12px 14px;
+    min-height: 92px;
+}
+button.mission-shortcut:hover .mission-shortcut-inner { border-color: @accent; }
+.mission-shortcut-eyebrow {
+    color: @accent;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+}
+.mission-shortcut-title { color: @text; font-size: 14px; font-weight: 600; }
+.mission-shortcut-note  { color: @text_dim; font-size: 11px; }
+.mission-title    { color: @text; font-size: 13px; font-weight: 700; letter-spacing: 1.1px; }
+.mission-subtitle { color: @text_dim; font-size: 11px; }
+
+/* The case summary band: a surface of its own, so a case summary does not
+   read as a second copy of the header strip. */
+.station-band {
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-left: 3px solid @accent;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+}
+.station-band .status-cell { min-width: 0; border-left: none; }
+.station-band .status-value { font-size: 15px; }
+
+/* Every open module page pins the notebook's minimum height, because a
+   notebook sizes to its largest page: the header bar and the tab strip are
+   the two floors that do it. Trimming both buys ~20px back per open page. */
+.module-header-bar { padding: 8px 18px; }
+notebook > header > tabs > tab { min-height: 30px; }
+
+/* ── module output: activity, not a console ─────────────────────────
+   The card used to be a monospace text view on a black box, which made
+   every module look like it was dumping to a terminal. Lines are rows now,
+   in the interface font, with severity carried by the marker's colour. */
+.output-log { background-color: transparent; }
+.log-row { padding: 2px 0; }
+.log-glyph { font-size: 9px; color: @text_dim; }
+.log-msg { font-size: 12px; color: @text_dim; }
+/* A command line is the one thing that should still look like one. */
+.log-cmd .log-glyph { color: @accent; }
+/* No monospace anywhere in the log: a command line is still a line of the
+   interface, not a terminal transcript. The accent colour is enough to set
+   it apart from its result. */
+.log-cmd .log-msg { color: @accent; }
+.log-error .log-glyph, .log-error .log-msg { color: #ff6b6b; }
+.log-warn  .log-glyph, .log-warn  .log-msg { color: #e0b357; }
+.log-ok    .log-glyph, .log-ok    .log-msg { color: #57d38c; }
+.log-info  .log-glyph { color: @accent; }
