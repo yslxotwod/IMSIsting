@@ -31,29 +31,6 @@ hardware-gated ones name the radio they are missing instead of returning an
 empty result, and a module that cannot do its job exits non-zero rather than
 reporting success.
 
-### The testing discipline
-
-There is exactly one rule that matters in this tree, and it was learned the hard
-way three separate times:
-
-> **A selftest that asserts the value your code already produces proves only
-> that your code is deterministic. It cannot catch a wrong constant.**
-
-Three real cases, all of which passed their own tests while being wrong:
-
-- **A5/1** passed self-consistent tests with the wrong feedback taps. It was
-  caught only by asserting the published Briceno/Goldberg/Wagner vector.
-- **The NR-ARFCN raster** was implemented as a flat 5 kHz. The selftest passed
-  because the single ARFCN it checked was a band edge, where the offset term is
-  zero and a wrong raster still gives the right answer.
-- **The S6a command-code table** was shifted by one from 317 upward and passed
-  270 assertions that encoded the same wrong values. It was caught against
-  Wireshark's own 3GPP Diameter dictionary.
-
-So: where a published vector, spec table or independent implementation exists,
-the selftest asserts against that and cites it in a comment. See
-`docs/MODULE_CONVENTIONS.md` §16.
-
 ---
 
 ## Modules
