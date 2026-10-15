@@ -1115,8 +1115,13 @@ deps_selftest() {
                               "$(fld "$out" MISSING_COUNT)"
     chk missing-only-fields  "$(printf '%s\n' "$out" | awk -F'\t' '$1!="MISSING_COUNT" && NF!=4{c++} END{print c+0}')" 0
     chk missing-only-count   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="MISSING_COUNT"' | grep -c .)" 1
-    chk missing-only-tally   "$(fld "$out" MISSING_COUNT)" "$(printf '%s\n' "$out" | grep -c $'\tmissing\t')"
+    # MISSING_COUNT counts everything not installed — missing AND broken. The
+    # literal-state-word sum that used to be asserted here only agreed on a
+    # host where nothing was present-but-broken. Count both states, and assert
+    # that no third state can appear in the output at all.
+    chk missing-only-tally   "$(fld "$out" MISSING_COUNT)" "$(printf '%s\n' "$out" | grep -cE $'\t(missing|broken)\t')"
     chk missing-only-tally2  "$(fld "$out" MISSING_COUNT)" "$(printf '%s\n' "$out" | awk -F'\t' '$2=="missing"||$2=="broken"' | grep -c .)"
+    chk missing-only-states  "$(printf '%s\n' "$out" | awk -F'\t' '$1!="MISSING_COUNT" && $2!="missing" && $2!="broken"{c++} END{print c+0}')" 0
     # present tools must NOT appear
     chk missing-only-omits-present "$(printf '%s\n' "$out" | awk -F'\t' '$1=="bash"' | grep -c .)" 0
 

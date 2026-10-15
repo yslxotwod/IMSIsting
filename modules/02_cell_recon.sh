@@ -729,6 +729,51 @@ M
     done
 }
 
+# ── shared radio target ─────────────────────────────────────────────────
+# The cellular modules agree on a target kept in $TMP_DIR (target_arfcn,
+# target_plmn). Nothing ever wrote those files, so picking a cell in the GUI
+# could not affect what the next module acted on, and the GUI had no target
+# to show. These two verbs give that shared state a writer and a reader.
+
+crec_target_store() {
+    local rat="${1:-}" arfcn="${2:-}" plmn="${3:-}"
+    mkdir -p "$TMP_DIR" 2>/dev/null || true
+    printf '%s\n' "$rat"   > "$TMP_DIR/target_rat"   2>/dev/null || true
+    printf '%s\n' "$arfcn" > "$TMP_DIR/target_arfcn" 2>/dev/null || true
+    printf '%s\n' "$plmn"  > "$TMP_DIR/target_plmn"  2>/dev/null || true
+    printf 'rat\t%s\narfcn\t%s\nplmn\t%s\n' "$rat" "$arfcn" "$plmn"
+}
+
+crec_cmd_set_target() {
+    local rat="${1:-}" arfcn="${2:-}" plmn="${3:-}"
+    # All three empty means "forget the target", which is what the GUI's Clear
+    # sends. Removing the files matters: leaving them behind would show no
+    # target in the panel while every module still read the old one.
+    if [[ -z "$rat" && -z "$arfcn" && -z "$plmn" ]]; then
+        rm -f "$TMP_DIR/target_rat" "$TMP_DIR/target_arfcn" \
+              "$TMP_DIR/target_plmn" 2>/dev/null || true
+        printf 'selected\tno\n'
+        return 0
+    fi
+    [[ -n "$rat" && -n "$arfcn" ]] || {
+        printf 'ERROR\tusage: --set-target <rat> <arfcn> <plmn>\n' >&2
+        return 2
+    }
+    crec_target_store "$rat" "$arfcn" "$plmn"
+}
+
+crec_cmd_target_tsv() {
+    local rat="" arfcn="" plmn=""
+    [[ -f "$TMP_DIR/target_rat"   ]] && rat=$(tr -d '[:space:]'   < "$TMP_DIR/target_rat")
+    [[ -f "$TMP_DIR/target_arfcn" ]] && arfcn=$(tr -d '[:space:]' < "$TMP_DIR/target_arfcn")
+    [[ -f "$TMP_DIR/target_plmn"  ]] && plmn=$(tr -d '[:space:]'  < "$TMP_DIR/target_plmn")
+    if [[ -z "${rat}${arfcn}${plmn}" ]]; then
+        printf 'selected\tno\n'
+        return 1
+    fi
+    printf 'selected\tyes\nrat\t%s\narfcn\t%s\nplmn\t%s\n' "$rat" "$arfcn" "$plmn"
+}
+
 # ── CLI dispatch ────────────────────────────────────────────────────────
 crec_cli_main() {
     local cmd="${1:-}"
@@ -739,6 +784,8 @@ crec_cli_main() {
         --scan)         crec_cmd_scan "${1:-gsm}" "${2:-}" ;;
         --arfcn)        crec_cmd_arfcn "${1:-}" "${2:-}" ;;
         --plmn)         crec_cmd_plmn "${1:-}" ;;
+        --set-target)   crec_cmd_set_target "${1:-}" "${2:-}" "${3:-}" ;;
+        --target-tsv)   crec_cmd_target_tsv ;;
         --export)       crec_export_cells ;;
         --clear)        crec_clear_cells ;;
         --list)         crec_list_cells ;;
@@ -755,6 +802,8 @@ Usage: $0 COMMAND
   --list                    surveyed cells, sorted for reading
   --arfcn <gsm|lte|nr> <N>  ARFCN/EARFCN to downlink MHz
   --plmn <MCC-MNC>          PLMN to operator and country
+  --set-target <rat> <arfcn> <plmn>   record the shared radio target
+  --target-tsv              current shared radio target as TSV
   --export                  copy the survey into loot/
   --clear                   empty the survey store
   --selftest                verify parsers and tables without a radio

@@ -47,9 +47,13 @@ MOD_TMP="$TMP_DIR/killchain"
 KCHN_DIR="$LOOT_DIR/killchain"
 KCHN_RUNS_DIR="$KCHN_DIR/runs"
 KCHN_CHAINS_DIR="$KCHN_DIR/chains"
-mkdir -p "$MOD_TMP" "$KCHN_DIR" "$KCHN_RUNS_DIR" "$KCHN_CHAINS_DIR" 2>/dev/null
+KCHN_STATE_DIR="${KCHN_STATE_DIR:-$STATE_DIR/killchain}"
+KCHN_ACTIVE_STATE="$KCHN_STATE_DIR/active.tsv"
+KCHN_PAUSE_FILE="$KCHN_STATE_DIR/pause.request"
+KCHN_PROGRESS_FILE="$KCHN_STATE_DIR/progress.tsv"
+mkdir -p "$MOD_TMP" "$KCHN_DIR" "$KCHN_RUNS_DIR" "$KCHN_CHAINS_DIR" "$KCHN_STATE_DIR" 2>/dev/null
 
-KCHN_VERSION="1.0"
+KCHN_VERSION="1.1"
 
 # The logging helpers live in the launcher, but this module must run
 # standalone (and be sourceable by a test harness) without them. The
@@ -264,11 +268,84 @@ kchn_row() {
         "$(kchn_sanitize "${7:-}")"
 }
 
-# ── execution ───────────────────────────────────────────────────────────
+# ── execution checkpoints ──────────────────────────────────────────────
+# Checkpoints are written atomically after each step. Pause is cooperative:
+# the current module is allowed to finish before the chain enters PAUSED.
+kchn_checkpoint_write() {
+    local chain="$1" next="$2" keep="$3" target="${4:-}" report="${5:-}"
+    local tmp="$KCHN_ACTIVE_STATE.$$"
+    mkdir -p "$KCHN_STATE_DIR" || return 1
+    printf 'chain\t%s\nnext_step\t%s\nkeep_going\t%s\ntarget\t%s\nreport\t%s\nupdated\t%s\n' \
+        "$(kchn_sanitize "$chain")" "$(kchn_sanitize "$next")" "$keep" \
+        "$(kchn_sanitize "$target")" "$(kchn_sanitize "$report")" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" && mv "$tmp" "$KCHN_ACTIVE_STATE"
+}
+
+kchn_progress_init() {
+    kchn_report_header > "$KCHN_PROGRESS_FILE"
+}
+
+kchn_progress_load() {
+    KCHN_ROWS=()
+    [[ -f "$KCHN_PROGRESS_FILE" ]] || return 0
+    mapfile -t KCHN_ROWS < <(tail -n +2 "$KCHN_PROGRESS_FILE")
+}
+
+kchn_progress_append() {
+    local row="$1"
+    printf '%s\n' "$row" >> "$KCHN_PROGRESS_FILE"
+}
+
+kchn_checkpoint_field() {
+    [[ -f "$KCHN_ACTIVE_STATE" ]] || return 1
+    awk -F'\t' -v k="$1" '$1==k{print $2; exit}' "$KCHN_ACTIVE_STATE"
+}
+
+kchn_pause() {
+    mkdir -p "$KCHN_STATE_DIR" || return 1
+    : > "$KCHN_PAUSE_FILE"
+    printf 'pause\trequested\n'
+}
+
+kchn_run_status_tsv() {
+    if [[ ! -f "$KCHN_ACTIVE_STATE" ]]; then
+        printf 'state\tidle\nchain\t-\nnext_step\t-\ntarget\t-\nupdated\t-\n'
+        return 0
+    fi
+    printf 'state\t%s\n' "$([[ -f "$KCHN_PAUSE_FILE" ]] && echo paused || echo resumable)"
+    cat "$KCHN_ACTIVE_STATE"
+}
+
+kchn_resume() {
+    [[ -f "$KCHN_ACTIVE_STATE" ]] || { printf 'ERROR\tno interrupted or paused run\n' >&2; return 1; }
+    local chain next keep target
+    chain=$(kchn_checkpoint_field chain); next=$(kchn_checkpoint_field next_step)
+    keep=$(kchn_checkpoint_field keep_going); target=$(kchn_checkpoint_field target)
+    rm -f "$KCHN_PAUSE_FILE"
+    IMSISTING_TARGET_ID="$target" kchn_run_chain "$chain" 0 "$keep" "$next" "$target"
+}
+
+kchn_run_multi() {
+    local chain="${1:-}" file="${2:-}"
+    [[ -n "$chain" && -f "$file" ]] || {
+        printf 'ERROR\tusage: --run-multi CHAIN TARGETS.tsv\n' >&2; return 2; }
+    local target rest n=0 bad=0
+    while IFS=$'\t' read -r target rest; do
+        [[ -z "$target" || "$target" == target || "$target" == id || "$target" == \#* ]] && continue
+        [[ "$target" =~ ^[A-Za-z0-9._:-]+$ ]] || {
+            printf 'ERROR\tinvalid target id: %s\n' "$(kchn_sanitize "$target")" >&2; bad=1; continue; }
+        n=$((n + 1))
+        printf 'TARGET\t%s\n' "$target"
+        IMSISTING_TARGET_ID="$target" kchn_run_chain "$chain" 0 0 1 "$target" || bad=1
+    done < "$file"
+    [[ "$n" -gt 0 ]] || { printf 'ERROR\tno targets in %s\n' "$file" >&2; return 1; }
+    return "$bad"
+}
+
 # Statuses: PASS (verb exited 0), FAIL (verb exited non-zero),
 #           SKIP (module missing or hardware absent), ERROR (bad step line).
 kchn_run_chain() {
-    local name="${1:-}" dry="${2:-0}" keep="${3:-0}"
+    local name="${1:-}" dry="${2:-0}" keep="${3:-0}" start="${4:-1}" target="${5:-${IMSISTING_TARGET_ID:-}}"
     if [[ -z "$name" ]]; then
         printf 'ERROR\tusage: --run <chain>\n' >&2
         return 2
@@ -300,10 +377,24 @@ kchn_run_chain() {
     fi
 
     KCHN_ROWS=()
-    local line n=0 overall=0
+    local line n=0 overall=0 report=""
+    if [[ "$dry" != "1" ]]; then
+        rm -f "$KCHN_PAUSE_FILE"
+        if (( start <= 1 )); then kchn_progress_init; else kchn_progress_load; fi
+        kchn_checkpoint_write "$name" "$start" "$keep" "$target" "" || return 1
+    fi
     while IFS=$'\t' read -r step module verb args hard desc; do
         [[ -z "$step" || "$step" == "step" ]] && continue
+        [[ "$step" =~ ^[0-9]+$ ]] || {
+            KCHN_ROWS+=("$(kchn_row "$step" "$module" "$verb" ERROR 2 0 "non-numeric step")")
+            overall=1; continue; }
+        (( step < start )) && continue
         n=$((n + 1))
+        if [[ "$dry" != "1" && -f "$KCHN_PAUSE_FILE" ]]; then
+            kchn_checkpoint_write "$name" "$step" "$keep" "$target" "$report"
+            printf 'PAUSED\t%s\tnext step %s\n' "$(kchn_sanitize "$name")" "$step"
+            return 3
+        fi
 
         # Dry run comes first and short-circuits both gates below. A dry run
         # resolves the chain as written — it does not evaluate whether this
@@ -322,18 +413,31 @@ kchn_run_chain() {
         # Resolve the module.
         local mpath=""
         if ! mpath="$(kchn_module_path "$module")"; then
-            KCHN_ROWS+=("$(kchn_row "$step" "$module" "$verb" SKIP "-" "0" "module not found: $module")")
+            local skip_row
+            skip_row=$(kchn_row "$step" "$module" "$verb" SKIP "-" "0" "module not found: $module")
+            KCHN_ROWS+=("$skip_row")
+            kchn_progress_append "$skip_row"
+            kchn_checkpoint_write "$name" "$((step + 1))" "$keep" "$target" "$report"
             printf 'SKIP\t%s\t%s\tmodule not found\n' "$(kchn_sanitize "$module")" "$(kchn_sanitize "$verb")"
             continue
         fi
 
         # Hardware gate: absent hardware is a SKIP with a reason.
         if [[ "$hard" == "yes" && "$hw_ok" -eq 0 ]]; then
-            KCHN_ROWS+=("$(kchn_row "$step" "$module" "$verb" SKIP "-" "0" "hardware absent: $hw_reason")")
+            local skip_row
+            skip_row=$(kchn_row "$step" "$module" "$verb" SKIP "-" "0" "hardware absent: $hw_reason")
+            KCHN_ROWS+=("$skip_row")
+            kchn_progress_append "$skip_row"
+            kchn_checkpoint_write "$name" "$((step + 1))" "$keep" "$target" "$report"
             printf 'SKIP\t%s\t%s\thardware absent\n' "$(kchn_sanitize "$module")" "$(kchn_sanitize "$verb")"
             continue
         fi
 
+        if [[ -n "$target" ]]; then
+            args=${args//\{\{target\}\}/$target}
+            desc=${desc//\{\{target\}\}/$target}
+            export IMSISTING_TARGET_ID="$target"
+        fi
         kchn_split_args "$args"
         local t0 t1 secs rc
         t0=$(date +%s)
@@ -344,12 +448,20 @@ kchn_run_chain() {
         secs=$((t1 - t0))
 
         if [[ "$rc" -eq 0 ]]; then
-            KCHN_ROWS+=("$(kchn_row "$step" "$module" "$verb" PASS "$rc" "$secs" "$desc")")
+            local completed_row
+            completed_row=$(kchn_row "$step" "$module" "$verb" PASS "$rc" "$secs" "$desc")
+            KCHN_ROWS+=("$completed_row")
+            kchn_progress_append "$completed_row"
             printf 'PASS\t%s\t%s\t%s\n' "$(kchn_sanitize "$module")" "$(kchn_sanitize "$verb")" "$rc"
+            kchn_checkpoint_write "$name" "$((step + 1))" "$keep" "$target" "$report"
         else
-            KCHN_ROWS+=("$(kchn_row "$step" "$module" "$verb" FAIL "$rc" "$secs" "$desc")")
+            local failed_row
+            failed_row=$(kchn_row "$step" "$module" "$verb" FAIL "$rc" "$secs" "$desc")
+            KCHN_ROWS+=("$failed_row")
+            kchn_progress_append "$failed_row"
             printf 'FAIL\t%s\t%s\t%s\n' "$(kchn_sanitize "$module")" "$(kchn_sanitize "$verb")" "$rc"
             overall=1
+            kchn_checkpoint_write "$name" "$step" "$keep" "$target" "$report"
             if [[ "$keep" != "1" ]]; then
                 warn "step $step failed (rc=$rc) — stopping; use --keep-going to continue"
                 break
@@ -369,10 +481,13 @@ kchn_run_chain() {
 
     local ts report
     ts=$(date +%Y%m%d_%H%M%S)
-    report="$KCHN_RUNS_DIR/${name}_${ts}.tsv"
+    report="$KCHN_RUNS_DIR/${name}${target:+_${target}}_${ts}.tsv"
     mkdir -p "$KCHN_RUNS_DIR" 2>/dev/null
     kchn_write_report "$report" || return 1
     ok "run report: $report"
+    if [[ "$overall" -eq 0 ]]; then
+        rm -f "$KCHN_ACTIVE_STATE" "$KCHN_PAUSE_FILE" "$KCHN_PROGRESS_FILE"
+    fi
     if [[ "$overall" -ne 0 ]]; then
         printf 'RESULT\tFAIL\n' >&2
         return 1
@@ -493,7 +608,11 @@ kchn_selftest() {
     export LOOT_DIR="$d/loot" MODULES_DIR="$d/modules"
     export KCHN_DIR="$d/loot/killchain" KCHN_RUNS_DIR="$d/loot/killchain/runs"
     export KCHN_CHAINS_DIR="$d/loot/killchain/chains"
-    mkdir -p "$KCHN_RUNS_DIR" "$KCHN_CHAINS_DIR"
+    export KCHN_STATE_DIR="$d/state/killchain"
+    export KCHN_ACTIVE_STATE="$KCHN_STATE_DIR/active.tsv"
+    export KCHN_PAUSE_FILE="$KCHN_STATE_DIR/pause.request"
+    export KCHN_PROGRESS_FILE="$KCHN_STATE_DIR/progress.tsv"
+    mkdir -p "$KCHN_RUNS_DIR" "$KCHN_CHAINS_DIR" "$KCHN_STATE_DIR"
 
     # A stub module that always succeeds, and one that always fails.
     cat > "$d/modules/02_cell_recon.sh" <<'STUB'
@@ -745,6 +864,24 @@ CHAIN
     chk report-inject-rows   "$(tail -n +2 "$rf" | grep -c .)" "1"
     chk report-unwritable-rc "$(kchn_write_report /proc/imsisting-nope/r.tsv >/dev/null 2>&1; echo $?)" "1"
 
+    # Checkpoint/status and multi-target substitution are offline-testable.
+    rm -f "$KCHN_ACTIVE_STATE" "$KCHN_PAUSE_FILE"
+    chk run-status-idle "$(kchn_run_status_tsv | awk -F'\t' '$1=="state"{print $2}')" idle
+    kchn_checkpoint_write smoke 2 1 ue-a report.tsv
+    chk run-status-chain "$(kchn_run_status_tsv | awk -F'\t' '$1=="chain"{print $2}')" smoke
+    chk run-status-next "$(kchn_run_status_tsv | awk -F'\t' '$1=="next_step"{print $2}')" 2
+    chk pause-rc "$(kchn_pause >/dev/null 2>&1; echo $?)" 0
+    chk pause-state "$(kchn_run_status_tsv | awk -F'\t' '$1=="state"{print $2}')" paused
+    rm -f "$KCHN_ACTIVE_STATE" "$KCHN_PAUSE_FILE"
+    cat > "$KCHN_CHAINS_DIR/multi.tsv" <<'CHAIN'
+step	module	verb	args	hardware	description
+1	02_cell_recon	--ok	{{target}}	no	target {{target}}
+CHAIN
+    printf 'target\tlabel\nue-a\tfirst\nue-b\tsecond\n' > "$d/targets.tsv"
+    chk multi-rc "$(kchn_run_multi multi "$d/targets.tsv" >/dev/null 2>&1; echo $?)" 0
+    chk multi-reports "$(find "$KCHN_RUNS_DIR" -name 'multi_ue-*.tsv' | wc -l | tr -d ' ')" 2
+    chk multi-invalid "$(printf 'bad target\tx\n' > "$d/badtargets.tsv"; kchn_run_multi multi "$d/badtargets.tsv" >/dev/null 2>&1; echo $?)" 1
+
     # A chain file with a malformed hardware flag is a bad step line, and a
     # bad step must not silently become a pass.
     cat > "$KCHN_CHAINS_DIR/badflag.tsv" <<'CHAIN'
@@ -812,6 +949,10 @@ kchn_cli_main() {
         --dry-run)     kchn_run_chain "${1:-}" 1 0 ;;
         --add-chain)   kchn_add_chain "${1:-}" ;;
         --runs-tsv)    kchn_runs_tsv ;;
+        --pause)       kchn_pause ;;
+        --resume)      kchn_resume ;;
+        --run-multi)   kchn_run_multi "${1:-}" "${2:-}" ;;
+        --run-status-tsv) kchn_run_status_tsv ;;
         --selftest)    kchn_selftest ;;
         --menu)        kchn_menu ;;
         *)
@@ -828,6 +969,10 @@ Usage: $0 COMMAND
                             a failed step (the overall exit is still non-zero)
   --add-chain <name>        create an empty chain file to edit
   --runs-tsv                recorded runs as TSV
+  --pause                   request a cooperative pause between steps
+  --resume                  resume the active run from its checkpoint
+  --run-multi CHAIN FILE    run once per first-column target; {{target}} expands
+  --run-status-tsv          active checkpoint and pause state
   --selftest                verify chaining and reporting without a radio
   --menu                    interactive menu
 

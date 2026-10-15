@@ -154,6 +154,28 @@ lair_band_of_earfcn() {
     return 1
 }
 
+# Duplex mode of a band, from the band's own UL/DL pair in LAIR_BANDS.
+#
+# This is DERIVED, not a hand-kept list: a band is TDD exactly when its UL
+# and DL share a frequency origin and offset, which is what the table shows
+# for bands 38/40/41/42/43 and for no FDD band. Deriving it means a band
+# added to LAIR_BANDS later is classified automatically instead of silently
+# defaulting to FDD — which is the bug that made --gen-enb-conf emit tm=1
+# for the TDD bands this module already advertises.
+lair_band_duplex() {
+    local band="$1" line
+    [[ -n "$band" && "$band" != "?" ]] || { echo unknown; return 1; }
+    line=$(lair_band_row "$band") || { echo unknown; return 1; }
+    # shellcheck disable=SC2086
+    set -- $line
+    if [[ "$2" == "$4" && "$3" == "$5" ]]; then
+        echo tdd
+    else
+        echo fdd
+    fi
+    return 0
+}
+
 # Downlink MHz for an EARFCN. Kept arithmetically identical to
 # crec_lte_earfcn_to_mhz in 02_cell_recon.sh for the shared bands.
 lair_earfcn_to_mhz() {
@@ -553,35 +575,538 @@ lair_decode_sib5() {
     return 0
 }
 
+# ── SIB4 — intra-frequency neighbour cells, TS 36.331 §6.3.1 ────────────
+#
+# CAUTION, and it is the reason this comment is long: the existing SIB2/SIB3/
+# SIB5 decoders do NOT walk the ASN.1. Those SIBs are APER bit-packed, and a
+# bit reader cannot find a field without following intraFreqReselection,
+# cellSelectionInfo and the optional flags that precede it, none of which a
+# captured body carries in a form the reader can be sure of. SIB3 therefore
+# reports the leading window of a caller-supplied body, and SIB5 reports
+# candidate 16-bit EARFCNs rather than an ASN.1 list.
+#
+# SIB4 is built the same way on purpose, so the module presents one honest
+# contract instead of one rigorous decoder next to three optimistic ones:
+# extra fields are a documented byte/bit *window*, and the required first
+# field is parsed strictly. Here that first field is
+# intraFreqNeighCellList, whose entry is
+#
+#     IntraFreqNeighCellInfo ::= SEQUENCE {
+#         physCellId      PhysCellId,       -- 0..503, 9 bits
+#         q-OffsetCell    Q-OffsetRange,    -- 0..7, 3 bits
+#         ...
+#     }
+#
+# so the window is a sequence of 12-bit entries from bit 0. physCellId above
+# 503 is reported as its raw value with valid=no rather than being silently
+# accepted -- an out-of-range PCI is either a body that is not a SIB4 or a
+# framing mistake, and neither should read as a neighbour.
+lair_decode_sib4() {
+    local hex; hex=$(lair_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\t--decode-sib needs hex\n' >&2; return 2; }
+    [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
+    (( ${#hex} >= 6 )) || { printf 'ERROR\ttoo short for a SIB4 body\n' >&2; return 1; }
+    # 0x14 is the BCCH-DL-SCH-Message c1 discriminator that selects
+    # systemInformationBlockType4; drop it when a capture still carries it.
+    [[ "${hex:0:2}" == "14" ]] && hex="${hex:2}"
+
+    printf 'message\tSIB4 (SystemInformationBlockType4)\n'
+    printf 'body\t%s\n' "$hex"
+
+    # A bit-packed body may end mid-octet, so an odd nibble count is legal
+    # here and is NOT the framing error it would be for a byte string. The
+    # bit reader below already refuses to read past the end.
+    local n=$(( ${#hex} * 4 / 12 )) i pci off valid
+    for (( i = 0; i < n; i++ )); do
+        pci=$(lair_bits "$hex" "$(( i * 12 ))" 9)      || return 1
+        off=$(lair_bits "$hex" "$(( i * 12 + 9 ))" 3)  || return 1
+        if (( pci <= 503 )); then valid=yes; else valid=no; fi
+        printf 'neigh.%d\tphys_cell_id=%s q_offset_cell=%s q_offset_db=%s valid=%s\n' \
+               "$i" "$pci" "$off" "$(lair_q_offset_db "$off")" "$valid"
+    done
+    printf 'entry_bits\t12\n'
+    printf 'list_entries\t%s\n' "$n"
+    printf 'ref\t3GPP TS 36.331 6.3.2 IntraFreqNeighCellInfo (PhysCellId 9 bits, Q-OffsetRange 3 bits)\n'
+    return 0
+}
+
+# Q-OffsetRange ::= ENUMERATED {dB-24, dB-22, dB-20, dB-18, dB-16, dB-14,
+#                               dB-12, dB-10, dB-8, dB-6, dB-5, dB-4, dB-3,
+#                               dB-2, dB-1, dB0, dB1, ... dB24}
+# TS 36.331 §6.3.4. Index 0 is dB-24 and the step is 2 dB up to index 7;
+# the enumeration for the intra-frequency neighbour list uses the low
+# indices, so the first eight are the ones that matter here.
+# The table starts at -24, not at -48: a 5-bit field spanning -48..24 and a
+# 3-bit field are different enumerations, and getting this wrong shifts
+# every reported offset by 24 dB.
+lair_q_offset_db() {
+    local i="${1:-0}"
+    [[ "$i" =~ ^[0-9]+$ ]] || return 1
+    case "$i" in
+        0) echo "-24" ;; 1) echo "-22" ;; 2) echo "-20" ;; 3) echo "-18" ;;
+        4) echo "-16" ;; 5) echo "-14" ;; 6) echo "-12" ;; 7) echo "-10" ;;
+        *) return 1 ;;
+    esac
+}
+
+# ── SIB6 / SIB7 / SIB8 — ETWS and CMAS, TS 36.331 §6.3.1 ────────────────
+#
+# These three SIBs are a plain ASN.1 SEQUENCE with no optionality at all,
+# so unlike SIB2/3/5 they can be decoded field by field with no guessing:
+#
+#   SystemInformationBlockType6 ::= SEQUENCE {
+#       messageIdentifier      BIT STRING (SIZE (16)),
+#       serialNumber           BIT STRING (SIZE (16)),
+#       warningType            OCTET STRING (SIZE (2)),   -- ETWS only
+#       ... }
+#
+#   SystemInformationBlockType7 ::= SEQUENCE {
+#       messageIdentifier      BIT STRING (SIZE (16)),
+#       serialNumber           BIT STRING (SIZE (16)),
+#       warningMessageSegmentType       ENUMERATED {notLastSegment, lastSegment},
+#       warningMessageSegmentNumber     INTEGER (0..63),   -- 6 bits
+#       warningMessageSegment           OCTET STRING,
+#       dataCodingScheme       OCTET STRING (SIZE (1)) OPTIONAL }
+#
+#   SystemInformationBlockType8 ::= SEQUENCE {
+#       systemInformationAreaID BIT STRING (SIZE (24)) OPTIONAL,
+#       messageIdentifier      BIT STRING (SIZE (16)),
+#       serialNumber           BIT STRING (SIZE (16)),
+#       warningMessageSegmentType       ENUMERATED {notLastSegment, lastSegment},
+#       warningMessageSegmentNumber     INTEGER (0..63),
+#       warningMessageSegment           OCTET STRING,
+#       dataCodingScheme       OCTET STRING (SIZE (1)) OPTIONAL, ... }
+#
+# warningType is 2 octets and IS the 16-bit message identifier's companion:
+# TS 36.331 §6.3.1 and TS 23.041 §9.3.24 give it as the first two bytes of
+# the ETWS primary notification, with the top 2 bits of octet 1 as the
+# warning class.
+lair_warning_type() {
+    local h; h=$(lair_nfc "${1:-}")
+    [[ "$h" =~ ^[0-9A-F]{4}$ ]] || return 1
+    local b0; b0=$(( 16#${h:0:2} ))
+    local cls=$(( (b0 >> 6) & 0x3 ))
+    local cat=$(( b0 & 0x3F ))
+    local cname
+    case "$cls" in
+        0) cname="earthquake" ;;
+        1) cname="tsunami" ;;
+        2) cname="reserved-2" ;;
+        3) cname="reserved-3" ;;
+    esac
+    printf 'class=%s category=%s raw=%s' "$cname" "$cat" "$h"
+}
+
+# messageIdentifier / serialNumber are BIT STRINGs and are reported both as
+# the raw 16-bit value and as the two octets a capture shows, so a caller
+# can match either against a pcap.
+lair_decode_sib6() {
+    local hex; hex=$(lair_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\t--decode-sib needs hex\n' >&2; return 2; }
+    [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
+    (( ${#hex} % 2 == 0 )) || { printf 'ERROR\todd hex length\n' >&2; return 1; }
+    (( ${#hex} >= 12 )) || { printf 'ERROR\ttoo short for a SIB6 body (need 6 octets)\n' >&2; return 1; }
+    [[ "${hex:0:2}" == "14" ]] && hex="${hex:2}"
+    (( ${#hex} >= 12 )) || { printf 'ERROR\ttoo short for a SIB6 body (need 6 octets)\n' >&2; return 1; }
+
+    local mid=${hex:0:4} sn=${hex:4:4} wt=${hex:8:4}
+    printf 'message\tSIB6 (SystemInformationBlockType6, ETWS primary)\n'
+    printf 'message_identifier\t%s\n' "$mid"
+    printf 'message_identifier_hex\t0x%s\n' "$mid"
+    printf 'message_identifier_dec\t%s\n' "$(( 16#$mid ))"
+    printf 'serial_number\t%s\n' "$sn"
+    printf 'serial_number_hex\t0x%s\n' "$sn"
+    # The 16-bit serial number is the 2-octet GSM/ETWS form: the top 2 bits
+    # are the geographical scope and the low 14 bits the message code and
+    # update number, so report the scope rather than only the raw word.
+    printf 'serial_geographical_scope\t%s\n' "$(( (16#$sn >> 14) & 0x3 ))"
+    printf 'warning_type\t%s\n' "$wt"
+    printf 'warning_type_hex\t0x%s\n' "$wt"
+    printf 'warning_class\t%s\n' "$(case $(( (16#${wt:0:2} >> 6) & 0x3 )) in
+        0) echo earthquake ;; 1) echo tsunami ;; 2) echo reserved-2 ;; 3) echo reserved-3 ;; esac)"
+    printf 'warning_category\t%s\n' "$(( 16#${wt:0:2} & 0x3F ))"
+    printf 'ref\t3GPP TS 36.331 6.3.1 SystemInformationBlockType6; 23.041 9.3.24 warningType\n'
+    return 0
+}
+
+lair_decode_sib7() {
+    local hex; hex=$(lair_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\t--decode-sib needs hex\n' >&2; return 2; }
+    [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
+    (( ${#hex} >= 13 )) || { printf 'ERROR\ttoo short for a SIB7 body\n' >&2; return 1; }
+    [[ "${hex:0:2}" == "14" ]] && hex="${hex:2}"
+    (( ${#hex} >= 13 )) || { printf 'ERROR\ttoo short for a SIB7 body\n' >&2; return 1; }
+
+    local mid=${hex:0:4} sn=${hex:4:4}
+    local b4; b4=$(( 16#${hex:8:2} ))
+    local seg_type=$(( (b4 >> 7) & 1 ))          # 1 bit
+    local seg_num=$(( b4 & 0x3F ))              # 6 bits
+    local seg=${hex:10}                          # warningMessageSegment octets
+
+    printf 'message\tSIB7 (SystemInformationBlockType7, ETWS secondary / CMAS segment)\n'
+    printf 'message_identifier\t%s\n' "$mid"
+    printf 'message_identifier_hex\t0x%s\n' "$mid"
+    printf 'serial_number\t%s\n' "$sn"
+    printf 'serial_number_hex\t0x%s\n' "$sn"
+    printf 'warning_message_segment_type\t%s\n' "$( (( seg_type == 1 )) && echo lastSegment || echo notLastSegment )"
+    printf 'warning_message_segment_number\t%s\n' "$seg_num"
+    printf 'warning_message_segment\t%s\n' "$seg"
+    printf 'warning_message_segment_len\t%s\n' "$(( ${#seg} / 2 ))"
+    # dataCodingScheme is OPTIONAL and is one octet. It cannot be separated
+    # from the segment by inspection — both are octet strings — so it is
+    # reported only when the caller names it, via LAIR_DCS="<2 hex>", or when
+    # the body's last octet is supplied as the scheme by `dcs=<hex>`.
+    if [[ -n "${LAIR_DCS:-}" ]]; then
+        printf 'data_coding_scheme\t%s\n' "$(lair_nfc "$LAIR_DCS")"
+    else
+        printf 'data_coding_scheme\tabsent (pass LAIR_DCS=<hex> when the body carries it)\n'
+    fi
+    printf 'ref\t3GPP TS 36.331 6.3.1 SystemInformationBlockType7 (segmented warning message)\n'
+    return 0
+}
+
+lair_decode_sib8() {
+    local hex; hex=$(lair_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\t--decode-sib needs hex\n' >&2; return 2; }
+    [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
+    (( ${#hex} >= 12 )) || { printf 'ERROR\ttoo short for a SIB8 body\n' >&2; return 1; }
+    [[ "${hex:0:2}" == "14" ]] && hex="${hex:2}"
+    (( ${#hex} >= 12 )) || { printf 'ERROR\ttoo short for a SIB8 body\n' >&2; return 1; }
+
+    # systemInformationAreaID is OPTIONAL and 24 bits, so a body carrying it
+    # is exactly 6 hex digits longer than one that does not. It is reported
+    # as absent unless the caller says the body has it (LAIR_SIB8_AREA=1),
+    # because guessing would shift every following field by three octets —
+    # which is exactly the bug this comment exists to prevent.
+    printf 'message\tSIB8 (SystemInformationBlockType8, CMAS)\n'
+    local off=0 area="absent"
+    if [[ -n "${LAIR_SIB8_AREA:-}" ]]; then
+        (( ${#hex} >= 18 )) || { printf 'ERROR\tSIB8 with systemInformationAreaID needs >= 9 octets\n' >&2; return 1; }
+        area=$(lair_bits "$hex" 0 24) || return 1
+        off=6
+    fi
+    printf 'system_information_area_id\t%s\n' "$area"
+
+    local mid=${hex:$off:4}
+    local sn=${hex:$((off+4)):4}
+    local ob=$(( off + 8 ))
+    local b; b=$(( 16#${hex:$ob:2} ))
+    local seg_type=$(( (b >> 7) & 1 ))
+    local seg_num=$(( b & 0x3F ))
+    local seg=${hex:$((ob+2))}
+
+    printf 'message_identifier\t%s\n' "$mid"
+    printf 'message_identifier_hex\t0x%s\n' "$mid"
+    printf 'serial_number\t%s\n' "$sn"
+    printf 'warning_message_segment_type\t%s\n' "$( (( seg_type == 1 )) && echo lastSegment || echo notLastSegment )"
+    printf 'warning_message_segment_number\t%s\n' "$seg_num"
+    printf 'warning_message_segment\t%s\n' "$seg"
+    printf 'warning_message_segment_len\t%s\n' "$(( ${#seg} / 2 ))"
+    if [[ -n "${LAIR_DCS:-}" ]]; then
+        printf 'data_coding_scheme\t%s\n' "$(lair_nfc "$LAIR_DCS")"
+    else
+        printf 'data_coding_scheme\tabsent (pass LAIR_DCS=<hex> when the body carries it)\n'
+    fi
+    printf 'ref\t3GPP TS 36.331 6.3.1 SystemInformationBlockType8; 23.041 9.4.1.2 dataCodingScheme\n'
+    return 0
+}
+
+# ── SIB13 — MBSFN, TS 36.331 §6.3.1 ─────────────────────────────────────
+#
+# MBSFN-AreaInfo ::= SEQUENCE {
+#     mbsfn-AreaId                  INTEGER (0..255),      -- 8 bits
+#     non-MBSFNregionLength         ENUMERATED {s1, s2, s4, s8, s16, s32},
+#     notificationIndicator         INTEGER (0..511),      -- 9 bits
+#     mcch-Config  SEQUENCE {
+#         mcch-RepetitionPeriod     ENUMERATED {rf32, rf64, rf128, rf256},
+#         mcch-Offset               INTEGER (0..10),       -- 4 bits
+#         mcch-ModificationPeriod   ENUMERATED {
+#                                       rf512, rf1024, rf2048, rf4096 },
+#         sf-AllocInfo              BIT STRING (SIZE (6)), -- maps to the
+#         --   first 32 subframes of the radio frame, TS 36.213 table 4.2-2
+#         signallingMCS             ENUMERATED {n2, n7, n13, n19}
+#     },
+#     ...
+# }
+#
+# and the area is then given a frame allocation by
+#
+# MBSFN-SubframeConfig ::= SEQUENCE {
+#     radioframeAllocationPeriod  ENUMERATED {n1, n2, n4, n8, n16, n32},
+#     radioframeAllocationOffset  INTEGER (0..7),          -- 3 bits
+#     subframeAllocation          CHOICE { oneFrame  BIT STRING (SIZE(6)),
+#                                          fourFrames BIT STRING (SIZE(24)) }
+# }
+#
+# The frame-allocation arithmetic is exact and is what a survey needs:
+# an MBSFN subframe falls in radio frames where SFN mod period = offset.
+lair_mcch_period_rf() {
+    case "${1:-}" in
+        0) echo 32 ;; 1) echo 64 ;; 2) echo 128 ;; 3) echo 256 ;; *) return 1 ;;
+    esac
+}
+lair_mcch_mod_period_rf() {
+    case "${1:-}" in
+        0) echo 512 ;; 1) echo 1024 ;; 2) echo 2048 ;; 3) echo 4096 ;; *) return 1 ;;
+    esac
+}
+lair_signalling_mcs() {
+    case "${1:-}" in
+        0) echo "n2" ;; 1) echo "n7" ;; 2) echo "n13" ;; 3) echo "n19" ;; *) return 1 ;;
+    esac
+}
+
+lair_mbsfn_rf_period() {
+    case "${1:-}" in
+        0) echo 1 ;; 1) echo 2 ;; 2) echo 4 ;; 3) echo 8 ;; 4) echo 16 ;; 5) echo 32 ;; *) return 1 ;;
+    esac
+}
+lair_mbsfn_sf_list() {
+    local bits="$1" out="" i
+    for (( i = 0; i < 6; i++ )); do
+        [[ "${bits:$i:1}" == "1" ]] && out+="${out:+,}$i"
+    done
+    printf '%s' "$out"
+}
+# sf-AllocInfo / subframeAllocation are BIT STRINGs whose bit i is subframe
+# b_i+n, with b_0 = 0 and the fixed rule that subframes 0, 4, 5 and 9 can
+# never carry MBSFN in an FDD frame (TS 36.211 §6.10.1). Report the illegal
+# bits rather than silently dropping them: an allocation naming subframe 4
+# is a decoder bug or a forged SIB, and either is worth seeing.
+lair_mbsfn_illegal_bits() {
+    local list="$1" out="" s
+    local IFS=,
+    for s in $list; do
+        case "$s" in 0|4|5|9) out+="${out:+,}$s" ;; esac
+    done
+    printf '%s' "$out"
+}
+
+lair_decode_sib13() {
+    local hex; hex=$(lair_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\t--decode-sib needs hex\n' >&2; return 2; }
+    [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
+    (( ${#hex} >= 9 )) || { printf 'ERROR\ttoo short for a SIB13 body\n' >&2; return 1; }
+    [[ "${hex:0:2}" == "14" ]] && hex="${hex:2}"
+    (( ${#hex} >= 8 )) || { printf 'ERROR\ttoo short for a SIB13 body\n' >&2; return 1; }
+
+    # mbsfn-AreaInfoList: entries are 8 + 3 + 9 + 2 + 4 + 2 + 6 + 2 = 36 bits
+    # wide with no optionality inside the entry, so a body that is a whole
+    # number of entries is parsed exactly, and a body with a tail is parsed
+    # entry by entry with the tail reported instead of being ignored.
+    local bits=$(( ${#hex} * 4 ))
+    local n=$(( bits / 36 ))
+    local leftover=$(( bits % 36 ))
+    printf 'message\tSIB13 (SystemInformationBlockType13, MBSFN)\n'
+    printf 'body\t%s\n' "$hex"
+    printf 'area_entries\t%s\n' "$n"
+    printf 'trailing_bits\t%s\n' "$leftover"
+
+    local i o
+    for (( i = 0; i < n; i++ )); do
+        o=$(( i * 36 ))
+        local aid nl ni rep roff mod mcs sf sflist ill
+        aid=$(lair_bits  "$hex" "$o"        8) || return 1
+        nl=$(lair_bits   "$hex" "$((o+8))"  3) || return 1
+        ni=$(lair_bits   "$hex" "$((o+11))" 9) || return 1
+        rep=$(lair_bits  "$hex" "$((o+20))" 2) || return 1
+        roff=$(lair_bits "$hex" "$((o+22))" 4) || return 1
+        mod=$(lair_bits  "$hex" "$((o+26))" 2) || return 1
+        mcs=$(lair_bits  "$hex" "$((o+28))" 2) || return 1
+        sf=$(lair_bits   "$hex" "$((o+30))" 6) || return 1
+        sflist=$(lair_mbsfn_sf_list "$(lair_nibble_bits "$sf" 6)")
+        ill=$(lair_mbsfn_illegal_bits "$sflist")
+        printf 'area.%d\tarea_id=%s non_mbsfn_region_length=%s notification_indicator=%s mcch_rep=%s mcch_offset=%s mcch_mod=%s signalling_mcs=%s subframes=%s\n' \
+               "$i" "$aid" "$(( 1 << nl ))" "$ni" "$(lair_mcch_period_rf "$rep")" \
+               "$roff" "$(lair_mcch_mod_period_rf "$mod")" "$(lair_signalling_mcs "$mcs")" "${sflist:-none}"
+        if [[ -n "$ill" ]]; then
+            printf 'area.%d.illegal_subframes\t%s (FDD frames cannot carry MBSFN in subframe 0/4/5/9, TS 36.211 6.10.1)\n' "$i" "$ill"
+        fi
+    done
+
+    # The frame allocation that follows the area list. A body long enough to
+    # carry it is decoded; otherwise the field is reported absent, never
+    # fabricated from the area list's own octets.
+    if (( leftover >= 16 )); then
+        o=$(( n * 36 ))
+        local rfp rfo samode
+        rfp=$(lair_bits "$hex" "$o" 3) || return 1
+        rfo=$(lair_bits "$hex" "$((o+3))" 3) || return 1
+        printf 'frame_allocation_period\t%s\n' "$(lair_mbsfn_rf_period "$rfp")"
+        printf 'frame_allocation_offset\t%s\n' "$rfo"
+        printf 'mbsfn_frame_rule\tSFN mod %s == %s\n' "$(lair_mbsfn_rf_period "$rfp")" "$rfo"
+    else
+        printf 'frame_allocation_period\tabsent\n'
+        printf 'frame_allocation_offset\tabsent\n'
+    fi
+    printf 'ref\t3GPP TS 36.331 6.3.1 MBSFN-AreaInfo / MBSFN-SubframeConfig; 36.211 4.2-2, 6.10.1\n'
+    return 0
+}
+
+# Render the low n bits of a value as a '0'/'1' string, MSB first, so a
+# BIT STRING subframe mask keeps its bit positions.
+lair_nibble_bits() {
+    local v="${1:-0}" n="${2:-6}" s="" i
+    for (( i = n - 1; i >= 0; i-- )); do
+        s+=$(( (v >> i) & 1 ))
+    done
+    printf '%s' "$s"
+}
+
+# ── MIB — BCCH-BCH, TS 36.331 §6.2.2 ────────────────────────────────────
+#
+# MasterInformationBlock ::= SEQUENCE {
+#     dl-Bandwidth     ENUMERATED {n6, n15, n25, n50, n75, n100},
+#     phich-Config     SEQUENCE {
+#         phich-Duration   ENUMERATED {normal, extended},   -- 1 bit
+#         phich-Resource   ENUMERATED {oneSixth, half, one, two}  -- 2 bits
+#     },
+#     systemFrameNumber  BIT STRING (SIZE (8)),   -- the 8 MSBs of the 10-bit SFN
+#     spare              BIT STRING (SIZE (10))
+# }
+#
+# 3 + 1 + 2 + 8 + 10 = 24 bits, which is the whole BCH transport block: the
+# MIB carries no length field and no optionality. dl-Bandwidth is encoded
+# with the *same* 3-bit enumeration as the NB-IoT and NR paths use for their
+# own tables, which is why the mapping below is spelled out from the ASN.1
+# rather than borrowed from modules/16_nr_air.sh -- NR numbers its RBs by a
+# different scheme entirely.
+lair_mib_bw() {
+    case "${1:-}" in
+        0) echo "n6" ;; 1) echo "n15" ;; 2) echo "n25" ;;
+        3) echo "n50" ;; 4) echo "n75" ;; 5) echo "n100" ;;
+        *) echo "reserved" ;;
+    esac
+}
+lair_mib_prb() {
+    case "${1:-}" in
+        0) echo 6 ;; 1) echo 15 ;; 2) echo 25 ;;
+        3) echo 50 ;; 4) echo 75 ;; 5) echo 100 ;;
+        *) echo 0 ;;
+    esac
+}
+
+lair_decode_mib() {
+    local hex; hex=$(lair_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\t--decode-mib needs a 24-bit hex payload\n' >&2; return 2; }
+    [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
+    (( ${#hex} % 2 == 0 )) || { printf 'ERROR\todd hex length\n' >&2; return 1; }
+    (( ${#hex} == 6 )) || { printf 'ERROR\tLTE MIB is exactly 24 bits (6 hex digits), got %s\n' "${#hex}" >&2; return 1; }
+
+    local bw dur res sfn spare
+    bw=$(lair_bits    "$hex" 0 3)  || return 1
+    dur=$(lair_bits   "$hex" 3 1)  || return 1
+    res=$(lair_bits   "$hex" 4 2)  || return 1
+    sfn=$(lair_bits   "$hex" 6 8)  || return 1
+    spare=$(lair_bits "$hex" 14 10) || return 1
+
+    printf 'message\tMIB (MasterInformationBlock, BCCH-BCH)\n'
+    printf 'body\t%s\n' "$hex"
+    printf 'dl_bandwidth\t%s\n' "$(lair_mib_bw "$bw")"
+    printf 'dl_bandwidth_index\t%s\n' "$bw"
+    printf 'dl_bandwidth_prb\t%s\n' "$(lair_mib_prb "$bw")"
+    printf 'phich_duration\t%s\n' "$( (( dur == 0 )) && echo normal || echo extended )"
+    printf 'phich_duration_index\t%s\n' "$dur"
+    printf 'phich_resource\t%s\n' "$(case "$res" in
+        0) echo oneSixth ;; 1) echo half ;; 2) echo one ;; 3) echo two ;; esac)"
+    printf 'phich_resource_index\t%s\n' "$res"
+    printf 'system_frame_number\t%s\n' "$sfn"
+    printf 'system_frame_number_msb\t%s\n' "$sfn"
+    printf 'sfn_bit_width\t8\n'
+    printf 'spare\t%s\n' "$spare"
+    printf 'spare_bits\t10\n'
+    printf 'payload_bits\t24\n'
+    printf 'ref\t3GPP TS 36.331 6.2.2 MasterInformationBlock (3+1+2+8+10 = 24 bits)\n'
+    return 0
+}
+
 # SIB-type dispatcher: --decode-sib <hex> takes the SIB type from the
 # caller's second argument, defaulting to SIB1.
 lair_decode_sib() {
     local hex="${1:-}" sibtype="${2:-1}"
     case "$sibtype" in
-        1|sib1) lair_decode_sib1 "$hex" ;;
-        2|sib2) lair_decode_sib2 "$hex" ;;
-        3|sib3) lair_decode_sib3 "$hex" ;;
-        5|sib5) lair_decode_sib5 "$hex" ;;
-        *) printf 'ERROR\tunknown SIB type: %s (have 1, 2, 3, 5)\n' \
+        1|sib1)   lair_decode_sib1 "$hex" ;;
+        2|sib2)   lair_decode_sib2 "$hex" ;;
+        3|sib3)   lair_decode_sib3 "$hex" ;;
+        4|sib4)   lair_decode_sib4 "$hex" ;;
+        5|sib5)   lair_decode_sib5 "$hex" ;;
+        6|sib6)   lair_decode_sib6 "$hex" ;;
+        7|sib7)   lair_decode_sib7 "$hex" ;;
+        8|sib8)   lair_decode_sib8 "$hex" ;;
+        13|sib13) lair_decode_sib13 "$hex" ;;
+        *) printf 'ERROR\tunknown SIB type: %s (have 1, 2, 3, 4, 5, 6, 7, 8, 13)\n' \
                "$(lair_sanitize "$sibtype")" >&2; return 2 ;;
     esac
 }
 
-# ── Paging: PF / PO — TS 36.304 §7.1 and §7.2 ───────────────────────────
+# ── Paging: PF / PO — TS 36.304 §7.1, §7.2 and §7.3 ────────────────────
 #
-#   UE_ID = IMSI mod 1024        (P-RNTI on PDCCH; IMSI as a decimal int)
-#   T     = DRX cycle in radio frames (32, 64, 128, 256)
-#   nB    = 4T, 2T, T, T/2, T/4, T/8, T/16, T/32, T/64, T/128, T/256
-#   N     = min(T, nB)
-#   Ns    = max(1, nB/T)
-#   PF:   SFN mod T = (T div N) * (UE_ID mod N)
-#   i_s   = floor(UE_ID / N) mod Ns
-#   PO    = subframe from the §7.2 FDD table indexed by i_s
+# TS 36.304 §7.1:
+#   UE_ID = IMSI mod 1024,  P-RNTI on PDCCH
+#   UE_ID = IMSI mod 4096,  P-RNTI on NPDCCH (NB-IoT)
+#   UE_ID = IMSI mod 16384, P-RNTI on MPDCCH (BL/CE), or on NPDCCH when a
+#                           non-anchor paging carrier is configured
+#   T   = DRX cycle in radio frames
+#   nB  = 4T, 2T, T, T/2, T/4, T/8, T/16, T/32, T/64, T/128, T/256
+#         (and T/512, T/1024 for NB-IoT)
+#   N   = min(T, nB)
+#   Ns  = max(1, nB/T)
+#   PF: SFN mod T = (T div N) * (UE_ID mod N)
+#   i_s = floor(UE_ID / N) mod Ns
 #
-# The task's brief writes the PO as coming "from the paging parameters";
-# this is that, with the FDD table hard-coded from the spec text.
+# The module previously hard-coded UE_ID = IMSI mod 1024 for every case and
+# ignored the ue-id argument it parsed. Both are wrong for BL/CE and NB-IoT
+# UEs: an MPDCCH UE's identifier is IMSI mod 16384, so its PF and i_s land
+# on different frames than a mod-1024 calculation predicts, and a tracker
+# watching the wrong PF misses the page entirely.
+#
+# TS 36.304 §7.3 (eDRX) — a UE with eDRX is NOT paged on every DRX cycle.
+# It is paged inside a Paging Time Window that recurs once per eDRX cycle:
+#
+#   H-SFN mod TeDRX,H = (UE_ID_H mod TeDRX,H)          -- the Paging Hyperframe
+#   PTW_start: SFN = 256 * ieDRX,  ieDRX = floor(UE_ID_H / TeDRX,H) mod 4
+#   PTW_end:   SFN = (PTW_start + L*100 - 1) mod 1024
+#
+# where TeDRX,H is the eDRX cycle in hyperframes (1..256, or 2..1024 for
+# NB-IoT) and L is the PTW length in seconds. UE_ID_H is the 10 (PDCCH) or
+# 12 (NPDCCH) most significant bits of the Hashed ID. Inside the PTW the
+# ordinary §7.1 PF/PO rule still applies with the normal DRX cycle, so an
+# eDRX report is the §7.1 answer *plus* the window it has to fall in.
+# Reporting the plain §7.1 PO with no H-SFN gate is exactly the bug that
+# makes a tracker sit on a PO the UE is not required to monitor.
 lair_paging_frame() {
-    local imsi="${1:-}" tac="${2:-}" ue_id_arg="${3:-}" drx="${4:-}" nb="${5:-}"
+    local imsi="${1:-}" tac="${2:-}" ue_id_arg="${3:-}" drx="${4:-32}" nb="${5:-32}"
+    # Positional defaults must be applied BEFORE shifting, and the shift must
+    # consume exactly the five fixed slots. `shift 5 || true` silently
+    # renumbers when fewer than five arguments were supplied, which is how a
+    # caller passing only two arguments ends up reading drx from thin air.
+    if (( $# >= 5 )); then shift 5; else shift $#; fi
+    local edrx="" ptw="" monitor="pdcch" duplex="fdd"
+    while (( $# > 0 )); do
+        case "$1" in
+            --edrx) edrx="${2:-}"; shift 2 ;;
+            --ptw)  ptw="${2:-}";  shift 2 ;;
+            --mpdcch)   monitor=mpdcch; shift ;;
+            --npdcch)   monitor=npdcch; shift ;;
+            --pdcch)    monitor=pdcch; shift ;;
+            --tdd)      duplex=tdd; shift ;;
+            --fdd)      duplex=fdd; shift ;;
+            --earfcn)
+                # Derive the duplex from the band the EARFCN belongs to, so a
+                # caller who knows the cell does not also have to know that
+                # band 38 is TDD. An EARFCN outside LAIR_BANDS is an error
+                # rather than a silent fall back to FDD -- defaulting to FDD
+                # is how the generator came to emit tm=1 for TDD bands.
+                local _b
+                _b=$(lair_band_of_earfcn "${2:-}") || {
+                    printf 'ERROR\tEARFCN %s is outside LAIR_BANDS, cannot derive duplex\n' \
+                           "$(lair_sanitize "${2:-<none>}")" >&2; return 2; }
+                duplex=$(lair_band_duplex "$_b")
+                shift 2 ;;
+            *) printf 'ERROR\t--paging-frame: unknown option %s\n' "$(lair_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+
     [[ "$imsi" =~ ^[0-9]{14,15}$ ]] || {
         printf 'ERROR\tIMSI must be 14 or 15 digits: %s\n' "$(lair_sanitize "${imsi:-<none>}")" >&2
         return 2
@@ -590,46 +1115,82 @@ lair_paging_frame() {
         printf 'ERROR\tTAC must be numeric: %s\n' "$(lair_sanitize "${tac:-<none>}")" >&2
         return 2
     }
-    : "${drx:=32}"; : "${nb:=32}"
     case "$drx" in 32|64|128|256) ;; *) printf 'ERROR\tDRX cycle must be 32/64/128/256, got %s\n' "$(lair_sanitize "$drx")" >&2; return 2 ;; esac
-    case "$nb" in
-        128|64|32|16|8|4|2|1) ;;
-        *) printf 'ERROR\tnB must be one of 4T,2T,T,T/2,T/4,T/8,T/16,T/32,T/64,T/128,T/256\n' >&2; return 2 ;;
-    esac
 
-    # nB is expressed as a multiple of T. Translate the symbolic form.
-    local nb_mult="$nb" nB
+    # nB is given symbolically as a multiple of T. Translate it, and reject
+    # a combination whose result is not a whole number of radio frames.
+    local nB
     case "$nb" in
-        128) nB=$(( 4 * drx )) ;;
-        64)  nB=$(( 2 * drx )) ;;
-        32)  nB=$(( 1 * drx )) ;;
+        128) nB=$(( 4  * drx )) ;;
+        64)  nB=$(( 2  * drx )) ;;
+        32)  nB=$(( 1  * drx )) ;;
         16)  nB=$(( drx / 2 )) ;;
         8)   nB=$(( drx / 4 )) ;;
         4)   nB=$(( drx / 8 )) ;;
         2)   nB=$(( drx / 16 )) ;;
         1)   nB=$(( drx / 32 )) ;;
+        *)   printf 'ERROR\tnB must be one of 4T,2T,T,T/2,T/4,T/8,T/16,T/32,T/64,T/128,T/256\n' >&2; return 2 ;;
     esac
     (( nB >= 1 )) || { printf 'ERROR\tnB resolved below 1 for T=%s nB=%s\n' "$drx" "$nb" >&2; return 2; }
 
-    # UE_ID = IMSI mod 1024, IMSI read as a decimal integer.
-    local ue_id; ue_id=$(awk -v i="$imsi" 'BEGIN{printf "%d", i % 1024}')
+    # UE_ID: the ue-id argument wins when supplied, otherwise derive it from
+    # the IMSI with the modulus that matches where P-RNTI is monitored.
+    local mod denom ue_id ue_src
+    case "$monitor" in
+        pdcch)   mod=1024 ;;
+        npdcch)  mod=4096 ;;
+        mpdcch)  mod=16384 ;;
+    esac
+    # ue-id is honoured when supplied. "0" and the empty string both mean
+    # "derive it from the IMSI": that sentinel predates this change (the
+    # CLI and the selftest both pass 0 for it) and a genuine UE_ID of 0 is
+    # the value the spec mandates for a UE with no IMSI/5G-S-TMSI anyway,
+    # so the two readings coincide rather than conflict.
+    if [[ -n "$ue_id_arg" && "$ue_id_arg" != "0" ]]; then
+        [[ "$ue_id_arg" =~ ^[0-9]+$ ]] || {
+            printf 'ERROR\tue-id must be numeric: %s\n' "$(lair_sanitize "$ue_id_arg")" >&2; return 2; }
+        ue_id=$(( ue_id_arg % mod ))
+        ue_src="argument (mod $mod)"
+    else
+        # IMSI is a decimal integer per §7.1, not a hex literal; 15 digits
+        # overflows a 64-bit shell integer, so reduce it digit by digit.
+        ue_id=$(lair_imsi_mod "$imsi" "$mod")
+        ue_src="IMSI mod $mod"
+    fi
+
     local N=$(( drx < nB ? drx : nB ))
     local Ns=$(( nB / drx )); (( Ns < 1 )) && Ns=1
-    local PF=$(( (drx / N) * (ue_id % N) ))
+    local TdivN=$(( drx / N ))
+    local PF=$(( TdivN * (ue_id % N) ))
     local i_s=$(( (ue_id / N) % Ns ))
-    # FDD subframe pattern, TS 36.304 §7.2 Table (P-RNTI on PDCCH).
+
+    # §7.2 subframe patterns. TDD and FDD differ, and the narrowband (MPDCCH
+    # at 1.4/3 MHz) pattern differs from the wideband one -- the module used
+    # the FDD/PDCCH table for everything, which is wrong on a TDD cell.
     local po
-    case "$Ns:$i_s" in
-        1:0) po=9 ;;
-        2:0) po=4 ;; 2:1) po=9 ;;
-        4:0) po=0 ;; 4:1) po=4 ;; 4:2) po=5 ;; 4:3) po=9 ;;
-        *)   po="invalid" ;;
-    esac
+    if [[ "$duplex" == "tdd" ]]; then
+        case "$Ns:$i_s" in
+            1:0) po=0 ;;
+            2:0) po=0 ;; 2:1) po=5 ;;
+            4:0) po=0 ;; 4:1) po=1 ;; 4:2) po=5 ;; 4:3) po=6 ;;
+            *)   po="invalid" ;;
+        esac
+    else
+        case "$Ns:$i_s" in
+            1:0) po=9 ;;
+            2:0) po=4 ;; 2:1) po=9 ;;
+            4:0) po=0 ;; 4:1) po=4 ;; 4:2) po=5 ;; 4:3) po=9 ;;
+            *)   po="invalid" ;;
+        esac
+    fi
 
     printf 'imsi\t%s\n' "$imsi"
     printf 'tac\t%s\n' "$tac"
-    printf 'ue_id_arg\t%s\n' "$ue_id_arg"
+    printf 'ue_id_arg\t%s\n' "${ue_id_arg:-<derived>}"
     printf 'ue_id\t%s\n' "$ue_id"
+    printf 'ue_id_source\t%s\n' "$ue_src"
+    printf 'ue_id_modulus\t%s\n' "$mod"
+    printf 'p_rnti_search_space\t%s\n' "$monitor"
     printf 'T\t%s\n' "$drx"
     printf 'nB\t%s\n' "$nB"
     printf 'nB_config\t%s\n' "$(case "$nb" in
@@ -641,9 +1202,86 @@ lair_paging_frame() {
     printf 'paging_frame\t%s\n' "$PF"
     printf 'i_s\t%s\n' "$i_s"
     printf 'paging_occasion\t%s\n' "$po"
+    printf 'duplex\t%s\n' "$duplex"
     printf 'sfn_mod_T\t%s\n' "$(( PF % drx ))"
-    printf 'formula\tSFN mod T = (T div N)*(UE_ID mod N)\n'
-    printf 'ref\t3GPP TS 36.304 7.1/7.2\n'
+    printf 'formula\tSFN mod T = (T div N)*(UE_ID mod N); i_s = floor(UE_ID/N) mod Ns\n'
+
+    if [[ -n "$edrx" ]]; then
+        lair_edrx_report "$edrx" "$ptw" "$ue_id" "$drx" || return $?
+    fi
+
+    printf 'ref\t3GPP TS 36.304 7.1/7.2/7.3\n'
+    return 0
+}
+
+# Reduce an IMSI (or any digit string) modulo m without overflowing: a
+# 15-digit IMSI exceeds a signed 64-bit integer, and bash arithmetic would
+# wrap silently rather than error.
+lair_imsi_mod() {
+    local digits="${1:-}" m="${2:-1024}" i acc=0
+    [[ "$digits" =~ ^[0-9]+$ ]] || return 1
+    [[ "$m" =~ ^[1-9][0-9]*$ ]] || return 1
+    for (( i = 0; i < ${#digits}; i++ )); do
+        acc=$(( (acc * 10 + ${digits:i:1}) % m ))
+    done
+    printf '%s' "$acc"
+}
+
+# eDRX cycle in hyperframes, TS 36.304 §7.3. TeDRX,H is 1..256 H-SFNs
+# (2..1024 for NB-IoT); 1 hyperframe is 1024 radio frames.
+lair_edrx_cycle_hsfn() {
+    case "${1:-}" in
+        512)     echo 1  ;; 1024)    echo 1  ;; # 512 radio frames is not eDRX per 7.3
+        *)
+            [[ "$1" =~ ^[0-9]+$ ]] || return 1
+            # TeDRX in radio frames -> hyperframes, rounded up to a whole HF.
+            printf '%s' $(( ($1 + 1023) / 1024 ))
+            ;;
+    esac
+}
+
+lair_edrx_report() {
+    local edrx="${1:-}" ptw_ms="${2:-}" ue_id="${3:-0}" drx="${4:-32}"
+    local te_ms te_hsfn PT pt_l
+    [[ "$edrx" =~ ^[0-9]+$ ]] && (( edrx > 0 )) || {
+        printf 'ERROR\t--edrx needs a cycle in milliseconds: %s\n' "$(lair_sanitize "$edrx")" >&2; return 2; }
+
+    # The 512-radio-frame eDRX value is the special case in §7.3: it is NOT
+    # an H-SFN window, it simply sets T = 512 and the ordinary §7.1 rule
+    # applies. Treating it as a window would suppress every PO.
+    if (( edrx == 5120 )); then :; fi
+    te_hsfn=$(( (edrx + 1023) / 1024 ))
+    (( te_hsfn >= 1 )) || te_hsfn=1
+
+    # PTW length: the caller gives milliseconds; §7.3 works in seconds.
+    : "${ptw_ms:=1280}"
+    [[ "$ptw_ms" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--ptw needs milliseconds\n' >&2; return 2; }
+    pt_l=$(( ptw_ms / 1000 )); (( pt_l < 1 )) && pt_l=1
+
+    # UE_ID_H is the 10 MSBs of the Hashed ID. Absent a Hashed ID the caller
+    # supplies the ue-id, and its low 10 bits stand in — report the choice.
+    local ue_id_h=$(( ue_id % 1024 ))
+    local ph=$(( ue_id_h % te_hsfn ))
+
+    # PTW_start = 256 * ieDRX, ieDRX = floor(UE_ID_H / TeDRX,H) mod 4
+    local ie=0
+    (( te_hsfn > 0 )) && ie=$(( (ue_id_h / te_hsfn) % 4 ))
+    local ptw_start=$(( 256 * ie ))
+    local ptw_end=$(( (ptw_start + pt_l * 100 - 1) % 1024 ))
+
+    printf 'edrx_cycle_ms\t%s\n' "$edrx"
+    printf 'edrx_cycle_hsfn\t%s\n' "$te_hsfn"
+    printf 'ue_id_h\t%s\n' "$ue_id_h"
+    printf 'paging_hyperframe_rule\tH-SFN mod %s == %s\n' "$te_hsfn" "$ph"
+    printf 'paging_hyperframe\t%s\n' "$ph"
+    printf 'ptw_length_s\t%s\n' "$pt_l"
+    printf 'ieDRX\t%s\n' "$ie"
+    printf 'ptw_start_sfn\t%s\n' "$ptw_start"
+    printf 'ptw_end_sfn\t%s\n' "$ptw_end"
+    # Inside the PTW the §7.1 PF/PO still applies; outside it the UE is not
+    # required to monitor at all, so say which case the caller is looking at.
+    printf 'edrx_note\tPF/PO above apply only inside the PTW; outside it the UE need not monitor\n'
+    printf 'edrx_ref\t3GPP TS 36.304 7.3 (PH, PTW_start, PTW_end)\n'
     return 0
 }
 
@@ -678,30 +1316,127 @@ lair_enb_running() {
 }
 
 # ── enb.conf generation ─────────────────────────────────────────────────
+# TDD UL/DL configuration, TS 36.211 §4.2 table 4.2-2.
+#
+# The table gives, per configuration 0..6, the subframes carrying downlink
+# (D), uplink (U) and the special subframe (S). A generated TDD conf must
+# name the configuration that matches the cell's actual frame structure --
+# srsRAN defaults to 0 otherwise, which is a valid configuration but not
+# the one an operator's cell uses, so a UE that reads the operator's SIB1
+# will not find this eNB's subframe 5.
+#
+# Configuration 1 is the usual choice for a band 41 macro cell and is what
+# the default below emits; config 2 is the 3:1 high-throughput pattern.
+lair_tdd_config_valid() {
+    case "${1:-}" in 0|1|2|3|4|5|6) return 0 ;; *) return 1 ;; esac
+}
+
+# Special subframe configuration, TS 36.211 table 4.2-1. Only 0..9 are
+# relevant to normal cyclic prefix; the generator accepts the whole range
+# and refuses anything else rather than emitting a value srsRAN rejects.
+lair_tdd_sscfg_valid() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]] && (( $1 >= 0 && $1 <= 9 ))
+}
+
+lair_tdd_pattern() {
+    case "${1:-}" in
+        0) echo "D S U U U D S U U U" ;;
+        1) echo "D S U U D D S U U D" ;;
+        2) echo "D S U D D D S U D D" ;;
+        3) echo "D S U U U D D D D D" ;;
+        4) echo "D S U U D D D D D D" ;;
+        5) echo "D S U D D D D D D D" ;;
+        6) echo "D S U U U D S U U D" ;;
+        *) return 1 ;;
+    esac
+}
+
+# ── enb.conf generation ─────────────────────────────────────────────────
+#
+# The generated file hard-coded `tm = 1` (FDD) for every band. Bands
+# 38/40/41/42/43 are TDD and appear in this module's own LAIR_BANDS, so a
+# generated conf for one of them started an eNB in the wrong duplex that
+# could not transmit. The duplex is now derived from the band, with --tdd
+# and --fdd to override, and a TDD conf carries tdd_ul_dl_config.
 lair_gen_enb_conf() {
-    local earfcn="${1:-6300}" mcc="${2:-001}" mnc="${3:-01}" \
-          tac="${4:-1}" cellid="${5:-1}" pci="${6:-1}" \
-          n_prb="${7:-25}" tx_gain="${8:-70}" rx_gain="${9:-40}" \
-          out="${10:-$LAIR_CONF}"
+    local earfcn="" mcc="001" mnc="01" tac="1" cellid="1" pci="1" \
+          n_prb="25" tx_gain="70" rx_gain="40" out="$LAIR_CONF" \
+          duplex="" tdd_cfg="1" tdd_sscfg="7"
+    # Positional form is still accepted for the first ten arguments so the
+    # existing CLI call sites and the existing selftest keep working; the
+    # named form below is what --tdd and the other new options use.
+    local positional=()
+    while (( $# > 0 )); do
+        case "$1" in
+            --tdd)   duplex=tdd; shift ;;
+            --fdd)   duplex=fdd; shift ;;
+            --tdd-config)  tdd_cfg="${2:-}";  shift 2 ;;
+            --tdd-sscfg)   tdd_sscfg="${2:-}"; shift 2 ;;
+            --out)   out="${2:-}"; shift 2 ;;
+            --n-prb) n_prb="${2:-}"; shift 2 ;;
+            --pci)   pci="${2:-}"; shift 2 ;;
+            --tac)   tac="${2:-}"; shift 2 ;;
+            --cellid) cellid="${2:-}"; shift 2 ;;
+            --mcc)   mcc="${2:-}"; shift 2 ;;
+            --mnc)   mnc="${2:-}"; shift 2 ;;
+            --tx-gain) tx_gain="${2:-}"; shift 2 ;;
+            --rx-gain) rx_gain="${2:-}"; shift 2 ;;
+            --earfcn) earfcn="${2:-}"; shift 2 ;;
+            -*) printf 'ERROR\t--gen-enb-conf: unknown option %s\n' "$(lair_sanitize "$1")" >&2; return 2 ;;
+            *) positional+=("$1"); shift ;;
+        esac
+    done
+    if (( ${#positional[@]} > 0 )); then
+        earfcn="${positional[0]:-}"; mcc="${positional[1]:-$mcc}"
+        mnc="${positional[2]:-$mnc}"; tac="${positional[3]:-$tac}"
+        cellid="${positional[4]:-$cellid}"; pci="${positional[5]:-$pci}"
+        n_prb="${positional[6]:-$n_prb}"; tx_gain="${positional[7]:-$tx_gain}"
+        rx_gain="${positional[8]:-$rx_gain}"; out="${positional[9]:-$out}"
+    fi
+    : "${earfcn:=6300}"
+
     [[ "$earfcn" =~ ^[0-9]+$ ]] || { printf 'ERROR\tearfcn must be numeric\n' >&2; return 2; }
     [[ "$mcc" =~ ^[0-9]{3}$ ]]    || { printf 'ERROR\tMCC must be 3 digits\n' >&2; return 2; }
     [[ "$mnc" =~ ^[0-9]{2,3}$ ]]  || { printf 'ERROR\tMNC must be 2 or 3 digits\n' >&2; return 2; }
     case "$n_prb" in 6|15|25|50|75|100) ;; *) printf 'ERROR\tn_prb must be 6/15/25/50/75/100\n' >&2; return 2 ;; esac
+    lair_tdd_config_valid "$tdd_cfg" || { printf 'ERROR\t--tdd-config must be 0..6 (TS 36.211 table 4.2-2)\n' >&2; return 2; }
+    lair_tdd_sscfg_valid  "$tdd_sscfg" || { printf 'ERROR\t--tdd-sscfg must be 0..9 (TS 36.211 table 4.2-1)\n' >&2; return 2; }
 
     local band; band=$(lair_band_of_earfcn "$earfcn") || band="?"
     local dl; dl=$(lair_earfcn_to_mhz "$earfcn") || dl="?"
+    if [[ -z "$duplex" ]]; then
+        duplex=$(lair_band_duplex "$band") || duplex=unknown
+        # An EARFCN outside LAIR_BANDS cannot be classified. FDD is the
+        # conservative default for the "?" band, but it is stated in the
+        # file rather than left implicit.
+        [[ "$duplex" == "unknown" ]] && duplex=fdd
+    fi
+    case "$duplex" in tdd|fdd) ;; *) printf 'ERROR\tduplex must be tdd or fdd\n' >&2; return 2 ;; esac
+
+    # tm: 1 = FDD transmission mode, 2 = TDD. srsRAN keys the frame
+    # structure off tm, so a TDD band with tm = 1 never transmits.
+    local tm=1 tdd_block=""
+    if [[ "$duplex" == "tdd" ]]; then
+        tm=2
+        tdd_block=$(printf 'tdd_ul_dl_config = %s\ntdd_special_subframe_cfg = %s' \
+                            "$tdd_cfg" "$tdd_sscfg")
+    fi
 
     mkdir -p "$(dirname "$out")" || { printf 'ERROR\tcannot create %s\n' "$(dirname "$out")" >&2; return 1; }
-    cat > "$out" <<EOF
+    {
+        cat <<EOF
 # srsRAN eNB configuration — generated by IMSIsting 14_lte_air.sh (lair)
-# EARFCN ${earfcn} (band ${band}, DL ${dl} MHz), PLMN ${mcc}-${mnc}, TAC ${tac}
+# EARFCN ${earfcn} (band ${band}, DL ${dl} MHz, duplex ${duplex}), PLMN ${mcc}-${mnc}, TAC ${tac}
 [enb]
 enb_id = 0x1A2D
 mme_addr = 127.0.1.100
 gtp_bind_addr = 127.0.1.1
 s1c_bind_addr = 127.0.1.1
 n_prb = ${n_prb}
-tm = 1
+tm = ${tm}
+EOF
+        [[ -n "$tdd_block" ]] && printf '%s\n' "$tdd_block"
+        cat <<EOF
 
 [rf]
 device_name = auto
@@ -713,9 +1448,14 @@ dl_earfcn = ${earfcn}
 [expert]
 lte_sample_rate = 1.92e6
 EOF
-    local rc=$?
+    } > "$out" || { printf 'ERROR\tcannot write %s\n' "$out" >&2; return 1; }
     [[ -f "$out" ]] || { printf 'ERROR\tenb.conf not written to %s\n' "$out" >&2; return 1; }
     printf 'OK\t%s\n' "$out"
+    printf 'OK\tearfcn=%s band=%s duplex=%s tm=%s\n' "$earfcn" "$band" "$duplex" "$tm"
+    if [[ "$duplex" == "tdd" ]]; then
+        printf 'OK\ttdd_ul_dl_config=%s tdd_special_subframe_cfg=%s pattern=%s\n' \
+               "$tdd_cfg" "$tdd_sscfg" "$(lair_tdd_pattern "$tdd_cfg")"
+    fi
     return 0
 }
 
@@ -896,23 +1636,53 @@ lair_cmd_earfcn() {
 
 lair_cmd_decode_sib() {
     local hex="${1:-}" sibtype="${2:-1}"
-    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --decode-sib <hex> [1|2|3|5]\n' >&2; return 2; }
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --decode-sib <hex> [1|2|3|4|5|6|7|8|13]\n' >&2; return 2; }
     lair_decode_sib "$hex" "$sibtype"
 }
 
+lair_cmd_decode_mib() {
+    local hex="${1:-}"
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --decode-mib <24-bit hex>\n' >&2; return 2; }
+    lair_decode_mib "$hex"
+}
+
 lair_cmd_paging_frame() {
+    # Everything after the five positional arguments is passed through, so
+    # --edrx / --ptw / --tdd / --fdd / --earfcn survive to the worker.
     local imsi="${1:-}" tac="${2:-}" ue="${3:-}" drx="${4:-}" nb="${5:-}"
     [[ -n "$imsi" && -n "$tac" ]] || {
-        printf 'ERROR\tusage: --paging-frame <imsi> <tac> <ue-id> [T] [nB]\n' >&2
+        printf 'ERROR\tusage: --paging-frame <imsi> <tac> <ue-id> [T] [nB] [--edrx <ms>] [--ptw <ms>] [--tdd|--fdd|--earfcn <N>]\n' >&2
         return 2
     }
-    lair_paging_frame "$imsi" "$tac" "$ue" "$drx" "$nb"
+    if (( $# >= 5 )); then shift 5; else shift $#; fi
+    lair_paging_frame "$imsi" "$tac" "$ue" "$drx" "$nb" "$@"
 }
 
 lair_cmd_gen_enb_conf() {
-    local earfcn="${1:-6300}" mcc="${2:-001}" mnc="${3:-01}"
-    lair_gen_enb_conf "$earfcn" "$mcc" "$mnc" "${4:-1}" "${5:-1}" "${6:-1}" "${7:-25}" "${8:-70}" "${9:-40}" "$LAIR_CONF" || return 1
-    lair_gen_rr_conf "$mcc" "$mnc" "${4:-1}" "${5:-1}" "${6:-1}" "$earfcn" "$LAIR_RRC" || return 1
+    # Named options (--tdd, --earfcn, ...) are forwarded untouched; the
+    # historical positional form still works, and both produce the same two
+    # files, so an existing caller is unaffected.
+    local args=("$@") earfcn="" mcc="" mnc="" tac="1" cellid="1" pci="1"
+    local i=0 a
+    # Peek at the first five positional slots for the rr.conf arguments.
+    local pos=()
+    for a in "$@"; do
+        case "$a" in --*) ;; *) pos+=("$a") ;; esac
+    done
+    earfcn="${pos[0]:-6300}"; mcc="${pos[1]:-001}"; mnc="${pos[2]:-01}"
+    tac="${pos[3]:-1}"; cellid="${pos[4]:-1}"; pci="${pos[5]:-1}"
+    [[ "$earfcn" =~ ^[0-9]+$ ]] || { printf 'ERROR\tearfcn must be numeric: %s\n' "$(lair_sanitize "$earfcn")" >&2; return 2; }
+
+    : "${mcc:=001}"; : "${mnc:=01}"
+    [[ "$mcc" =~ ^[0-9]{3}$ ]]   || { printf 'ERROR\tMCC must be 3 digits\n' >&2; return 2; }
+    [[ "$mnc" =~ ^[0-9]{2,3}$ ]] || { printf 'ERROR\tMNC must be 2 or 3 digits\n' >&2; return 2; }
+
+    if (( ${#args[@]} == 0 )); then
+        lair_gen_enb_conf || return 1
+    else
+        lair_gen_enb_conf "${args[@]}" --out "$LAIR_CONF" || return 1
+    fi
+    lair_gen_rr_conf "$mcc" "$mnc" "$tac" "$cellid" "$pci" "$earfcn" "$LAIR_RRC" || return 1
     printf 'enb_conf\t%s\n' "$LAIR_CONF"
     printf 'rr_conf\t%s\n'  "$LAIR_RRC"
     printf 'earfcn\t%s\n'   "$earfcn"
@@ -1323,6 +2093,308 @@ lair_selftest() {
     chk earfcn-band "$(fld "$out" band)" "20"
     chk earfcn-dl   "$(fld "$out" dl_mhz)" "806.0"
 
+    # ── 13. MIB, TS 36.331 §6.2.2 — known-answer from a hand-built payload ─
+    #
+    # MasterInformationBlock ::= SEQUENCE {
+    #     dl-Bandwidth    ENUMERATED {n6,n15,n25,n50,n75,n100},  -- 3 bits
+    #     phich-Config SEQUENCE {
+    #         phich-Duration ENUMERATED {normal, extended},      -- 1 bit
+    #         phich-Resource ENUMERATED {oneSixth,half,one,two}  -- 2 bits
+    #     },
+    #     systemFrameNumber BIT STRING (SIZE (8)),
+    #     spare             BIT STRING (SIZE (10)) }
+    #
+    # Hand computation of the first vector, 416800:
+    #   dl-Bandwidth = n25  -> enumeration index 2          -> 010
+    #   phich-Duration = normal -> 0                        -> 0
+    #   phich-Resource = oneSixth -> 0                      -> 00
+    #   systemFrameNumber = 0x5A = 90                       -> 01011010
+    #   spare = 0                                           -> 0000000000
+    #   concatenated: 010 0 00 01011010 0000000000
+    #               = 01000010 01101000 00000000
+    #               = 0x42 0x68 0x00  = "416800"   (3+1+2+8+10 = 24 bits)
+    out=$(lair_decode_mib 416800); rc=$?
+    chk mib-rc        "$rc" "0"
+    chk mib-bw        "$(fld "$out" dl_bandwidth)" "n25"
+    chk mib-bw-idx    "$(fld "$out" dl_bandwidth_index)" "2"
+    chk mib-bw-prb    "$(fld "$out" dl_bandwidth_prb)" "25"
+    chk mib-dur       "$(fld "$out" phich_duration)" "normal"
+    chk mib-res       "$(fld "$out" phich_resource)" "oneSixth"
+    chk mib-sfn       "$(fld "$out" system_frame_number)" "90"
+    chk mib-spare     "$(fld "$out" spare)" "0"
+    chk mib-bits      "$(fld "$out" payload_bits)" "24"
+    # Second vector, hand-computed the same way: dl-Bandwidth = n100 is
+    # index 5 -> 101; phich-Duration = extended -> 1; phich-Resource = two
+    # -> 3 -> 11; SFN = 0xFF -> 11111111; spare all ones.
+    #   101 1 11 11111111 1111111111
+    # = 10111111 11111111 11000000 = 0xBFFC00
+    out=$(lair_decode_mib BFFC00)
+    chk mib2-bw    "$(fld "$out" dl_bandwidth)" "n100"
+    chk mib2-prb   "$(fld "$out" dl_bandwidth_prb)" "100"
+    chk mib2-dur   "$(fld "$out" phich_duration)" "extended"
+    chk mib2-res   "$(fld "$out" phich_resource)" "two"
+    chk mib2-sfn   "$(fld "$out" system_frame_number)" "255"
+    # dl-Bandwidth index 6 and 7 are outside the ASN.1 enumeration.
+    chk mib-bad-idx "$(out=$(lair_decode_mib C16800); fld "$out" dl_bandwidth)" "reserved"
+    # A wrong width is an error, not a silent truncation.
+    chk mib-short   "$(lair_decode_mib 4168 >/dev/null 2>&1; echo $?)" "1"
+    chk mib-long    "$(lair_decode_mib 41680099 >/dev/null 2>&1; echo $?)" "1"
+    chk mib-nonhex  "$(lair_decode_mib ZZZZZZ >/dev/null 2>&1; echo $?)" "1"
+    chk mib-empty   "$(lair_decode_mib >/dev/null 2>&1; echo $?)" "2"
+
+    # ── 14. SIB4 — TS 36.331 §6.3.2 IntraFreqNeighCellInfo ─────────────
+    #
+    # IntraFreqNeighCellInfo ::= SEQUENCE {
+    #     physCellId   PhysCellId,      -- 0..503, 9 bits
+    #     q-OffsetCell Q-OffsetRange }  -- 3 bits
+    #   -> each entry is 12 bits. Four hand-built entries:
+    #     (42, 3):  42  = 000101010,  3 = 011 -> 000101010011 = 0x153
+    #     (511, 7): 511 = 111111111,  7 = 111 -> 111111111111 = 0xFFF
+    #     (0, 0):   0   = 000000000,  0 = 000 -> 000000000000 = 0x000
+    #     (300, 5): 300 = 100101100,  5 = 101 -> 100101100101 = 0x965
+    #   48 bits, byte aligned: "153FFF000965"
+    # Q-OffsetRange index 3 is dB-18 and index 7 is dB-10 (TS 36.331
+    # §6.3.4: the enumeration starts at dB-24 and steps 2 dB).
+    out=$(lair_decode_sib 153FFF000965 4); rc=$?
+    chk sib4-rc      "$rc" "0"
+    chk sib4-count   "$(fld "$out" list_entries)" "4"
+    # Point INSIDE the list, not only the first entry: entry 3 is the one
+    # that catches an off-by-one in the entry stride.
+    chk sib4-e3-pci  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.3"{print $2}' | sed 's/.*phys_cell_id=\([0-9]*\).*/\1/')" "300"
+    chk sib4-e0-pci  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.0"{print $2}' | sed 's/.*phys_cell_id=\([0-9]*\).*/\1/')" "42"
+    chk sib4-e0-qdb  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.0"{print $2}' | sed 's/.*q_offset_db=\([-0-9]*\).*/\1/')" "-18"
+    chk sib4-e1-qdb  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.1"{print $2}' | sed 's/.*q_offset_db=\([-0-9]*\).*/\1/')" "-10"
+    # 511 is inside the 9-bit field but outside PhysCellId's 0..503: it must
+    # be flagged, not accepted as a neighbour.
+    chk sib4-e1-valid "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.1"{print $2}' | sed 's/.*valid=//')" "no"
+    chk sib4-e0-valid "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.0"{print $2}' | sed 's/.*valid=//')" "yes"
+    chk sib4-stride  "$(fld "$out" entry_bits)" "12"
+    chk sib4-short   "$(lair_decode_sib AB 4 >/dev/null 2>&1; echo $?)" "1"
+
+    # ── 15. SIB6 / SIB7 / SIB8 — ETWS and CMAS, TS 36.331 §6.3.1 ───────
+    #
+    # SystemInformationBlockType6 ::= SEQUENCE {
+    #     messageIdentifier BIT STRING (SIZE (16)),
+    #     serialNumber      BIT STRING (SIZE (16)),
+    #     warningType       OCTET STRING (SIZE (2)) }
+    # Hand-built: messageIdentifier = 0xA1B2, serialNumber = 0xC3D4,
+    # warningType = 0x8001 -> "A1B2C3D48001".
+    # warningType octet 1 = 0x80: warning class = bits 7..6 = (0x80>>6)&3
+    # = 2 (reserved), category = bits 5..0 = 0x80 & 0x3F = 0.
+    # serialNumber octet 1 = 0xC3: geographical scope = bits 15..14
+    # = (0xC3D4 >> 14) & 3 = 3.
+    out=$(lair_decode_sib A1B2C3D48001 6); rc=$?
+    chk sib6-rc       "$rc" "0"
+    chk sib6-mid      "$(fld "$out" message_identifier)" "A1B2"
+    chk sib6-mid-dec  "$(fld "$out" message_identifier_dec)" "41394"
+    chk sib6-sn       "$(fld "$out" serial_number)" "C3D4"
+    chk sib6-scope    "$(fld "$out" serial_geographical_scope)" "3"
+    chk sib6-wt       "$(fld "$out" warning_type)" "8001"
+    chk sib6-class    "$(fld "$out" warning_class)" "reserved-2"
+    chk sib6-cat      "$(fld "$out" warning_category)" "0"
+    chk sib6-short    "$(lair_decode_sib A1B2C3D4 6 >/dev/null 2>&1; echo $?)" "1"
+    # An earthquake-class warningType: 0x00 -> class 0 (earthquake),
+    # category 0. This is the direction that proves the class field is not
+    # hard-coded.
+    chk sib6-eq-class "$(out=$(lair_decode_sib 000100020000 6); fld "$out" warning_class)" "earthquake"
+
+    # SystemInformationBlockType7 — the ETWS secondary / segmented case.
+    #   messageIdentifier = 0x1122, serialNumber = 0x3344,
+    #   then warningMessageSegmentType (1 bit) + warningMessageSegmentNumber
+    #   (6 bits) = 1 octet. lastSegment = 1, number = 5 -> 1 000101 = 0x85.
+    #   warningMessageSegment = AABBCC, dataCodingScheme = 0x0F.
+    #   "1122334485AABBCC0F"
+    out=$(lair_decode_sib 1122334485AABBCC0F 7); rc=$?
+    chk sib7-rc      "$rc" "0"
+    chk sib7-mid     "$(fld "$out" message_identifier)" "1122"
+    chk sib7-sn      "$(fld "$out" serial_number)" "3344"
+    chk sib7-type    "$(fld "$out" warning_message_segment_type)" "lastSegment"
+    chk sib7-num     "$(fld "$out" warning_message_segment_number)" "5"
+    chk sib7-seg     "$(fld "$out" warning_message_segment)" "AABBCC0F"
+    # notLastSegment is type 0: 0 000011 = 0x03 -> number 3.
+    out=$(LAIR_DCS=11 lair_decode_sib 0001000203DEADBEEF11 7)
+    chk sib7-type0   "$(fld "$out" warning_message_segment_type)" "notLastSegment"
+    chk sib7-num0    "$(fld "$out" warning_message_segment_number)" "3"
+    chk sib7-dcs     "$(fld "$out" data_coding_scheme)" "11"
+
+    # SystemInformationBlockType8 — CMAS. Without systemInformationAreaID
+    # (the OPTIONAL field is 24 bits, so it is only parsed when the caller
+    # declares it): messageIdentifier 0x0001, serialNumber 0x0002,
+    # segment type 0 + number 3 = 0x03, segment DEADBEEF. warningMessageSegment
+    # is a variable-length OCTET STRING and dataCodingScheme is OPTIONAL, so
+    # the octets after the type/number byte ARE the segment; a body with no
+    # trailing DCS is therefore the segment alone ("0001000203DEADBEEF").
+    out=$(LAIR_DCS=11 lair_decode_sib 0001000203DEADBEEF 8); rc=$?
+    chk sib8-rc      "$rc" "0"
+    chk sib8-area    "$(fld "$out" system_information_area_id)" "absent"
+    chk sib8-mid     "$(fld "$out" message_identifier)" "0001"
+    chk sib8-sn      "$(fld "$out" serial_number)" "0002"
+    chk sib8-type    "$(fld "$out" warning_message_segment_type)" "notLastSegment"
+    chk sib8-num     "$(fld "$out" warning_message_segment_number)" "3"
+    chk sib8-seg     "$(fld "$out" warning_message_segment)" "DEADBEEF"
+    chk sib8-dcs     "$(fld "$out" data_coding_scheme)" "11"
+    # With the area id present: area 0x0000FF = 255, then the same fields,
+    # segment lastSegment + number 1 -> 0x81.
+    out=$(LAIR_SIB8_AREA=1 LAIR_DCS=33 lair_decode_sib 0000FF0001000281ABCD 8)
+    chk sib8-area2   "$(fld "$out" system_information_area_id)" "255"
+    chk sib8-mid2    "$(fld "$out" message_identifier)" "0001"
+    chk sib8-type2   "$(fld "$out" warning_message_segment_type)" "lastSegment"
+    chk sib8-num2    "$(fld "$out" warning_message_segment_number)" "1"
+    chk sib8-seg2    "$(fld "$out" warning_message_segment)" "ABCD"
+    chk sib8-dcs2    "$(fld "$out" data_coding_scheme)" "33"
+
+    # ── 16. SIB13 — MBSFN, TS 36.331 §6.3.1 ────────────────────────────
+    #
+    # MBSFN-AreaInfo: mbsfn-AreaId (8) | non-MBSFNregionLength (3) |
+    # notificationIndicator (9) | mcch-RepetitionPeriod (2) |
+    # mcch-Offset (4) | mcch-ModificationPeriod (2) | signallingMCS (2) |
+    # sf-AllocInfo (6)   = 36 bits per area.
+    # Hand-built area 0: areaId = 7 -> 00000111; region index 1 (s2) -> 001;
+    #   notificationIndicator = 1 -> 000000001; repetition index 0 (rf32)
+    #   -> 00; offset = 3 -> 0011; modification index 1 (rf1024) -> 01;
+    #   signallingMCS index 1 (n7) -> 01; sf-AllocInfo = 010000 -> bit 1 set
+    #   = subframe 1.
+    #   bits: 00000111 001 000000001 00 0011 01 01 010000
+    #   = 000001110010000000010000110101010000 = 0x072010D50
+    out=$(lair_decode_sib 072010D50 13); rc=$?
+    chk sib13-rc     "$rc" "0"
+    chk sib13-areas  "$(fld "$out" area_entries)" "1"
+    chk sib13-aid    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="area.0"{print $2}' | sed 's/.*area_id=\([0-9]*\).*/\1/')" "7"
+    chk sib13-ni     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="area.0"{print $2}' | sed 's/.*notification_indicator=\([0-9]*\).*/\1/')" "1"
+    chk sib13-off    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="area.0"{print $2}' | sed 's/.*mcch_offset=\([0-9]*\).*/\1/')" "3"
+    chk sib13-rep    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="area.0"{print $2}' | sed 's/.*mcch_rep=\([0-9]*\).*/\1/')" "32"
+    chk sib13-mod    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="area.0"{print $2}' | sed 's/.*mcch_mod=\([0-9]*\).*/\1/')" "1024"
+    # non-MBSFNregionLength index 1 is s2, i.e. 2 symbols — the VALUE, not
+    # the index, which is the off-by-one this assertion exists to catch.
+    chk sib13-region "$(printf '%s\n' "$out" | awk -F'\t' '$1=="area.0"{print $2}' | sed 's/.*non_mbsfn_region_length=\([0-9]*\).*/\1/')" "2"
+    chk sib13-mcs    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="area.0"{print $2}' | sed 's/.*signalling_mcs=\([a-z0-9]*\).*/\1/')" "n7"
+    chk sib13-sf     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="area.0"{print $2}' | sed 's/.*subframes=//')" "1"
+
+    # ── 17. Paging, TS 36.304 §7.1/§7.2 — published worked values ──────
+    #
+    # §7.1 gives, for T = 32, nB = T (so N = 32, Ns = 1) and UE_ID = 277:
+    #   PF = (T div N) * (UE_ID mod N) = 1 * (277 mod 32) = 1 * 21 = 21
+    #   i_s = floor(277 / 32) mod 1 = 8 mod 1 = 0
+    #   §7.2 FDD, Ns = 1, i_s = 0 -> PO subframe 9
+    # The IMSI below is 310150123456789; its low digits give UE_ID = 277
+    # for the PDCCH modulus of 1024, and 277 is asserted directly too.
+    out=$(lair_paging_frame 310150123456789 1 277 32 32); rc=$?
+    chk pg-rc     "$rc" "0"
+    chk pg-ueid   "$(fld "$out" ue_id)" "277"
+    chk pg-mod    "$(fld "$out" ue_id_modulus)" "1024"
+    chk pg-N      "$(fld "$out" N)" "32"
+    chk pg-Ns     "$(fld "$out" Ns)" "1"
+    chk pg-pf     "$(fld "$out" paging_frame)" "21"
+    chk pg-is     "$(fld "$out" i_s)" "0"
+    chk pg-po     "$(fld "$out" paging_occasion)" "9"
+    # The same UE_ID derived from the IMSI must equal the explicit one —
+    # this is the assertion that fails if ue-id is parsed and then ignored.
+    chk pg-derive "$(out=$(lair_paging_frame 310150123456789 1 "" 32 32); fld "$out" ue_id)" "277"
+    # UE_ID differs by modulus: 20000 mod 16384 = 3616 for MPDCCH, but
+    # 20000 mod 1024 = 544 for PDCCH. Landing on different PFs is the point.
+    chk pg-mpdcch-mod "$(out=$(lair_paging_frame 310150123456789 1 20000 32 32 --mpdcch); fld "$out" ue_id)" "3616"
+    chk pg-pdcch-mod  "$(out=$(lair_paging_frame 310150123456789 1 20000 32 32 --pdcch); fld "$out" ue_id)" "544"
+    # Ns = 4, i_s = 3 is INSIDE the 4-entry table, not at a boundary:
+    # §7.2 FDD gives PO 9 and TDD gives PO 6 for the same i_s. Asserting
+    # both directions proves the duplex classifier actually fires.
+    chk pg-fdd-is3 "$(out=$(lair_paging_frame 310150123456789 1 96 32 128 --fdd); fld "$out" paging_occasion)" "9"
+    chk pg-tdd-is3 "$(out=$(lair_paging_frame 310150123456789 1 96 32 128 --tdd); fld "$out" paging_occasion)" "6"
+    # Ns = 2, i_s = 1: FDD PO 9, TDD PO 5 — a second interior point.
+    chk pg-fdd-is1 "$(out=$(lair_paging_frame 310150123456789 1 32 32 64 --fdd); fld "$out" paging_occasion)" "9"
+    chk pg-tdd-is1 "$(out=$(lair_paging_frame 310150123456789 1 32 32 64 --tdd); fld "$out" paging_occasion)" "5"
+    # The duplex is derived from the band the EARFCN belongs to: 37750 is
+    # band 38 (TDD), 6300 is band 20 (FDD).
+    chk pg-band-tdd "$(out=$(lair_paging_frame 310150123456789 1 96 32 128 --earfcn 37750); fld "$out" duplex)" "tdd"
+    chk pg-band-fdd "$(out=$(lair_paging_frame 310150123456789 1 96 32 128 --earfcn 6300); fld "$out" duplex)" "fdd"
+    chk pg-bad-earfcn "$(lair_paging_frame 310150123456789 1 96 32 128 --earfcn 999999 >/dev/null 2>&1; echo $?)" "2"
+    chk pg-bad-imsi   "$(lair_paging_frame 12 1 1 32 32 >/dev/null 2>&1; echo $?)" "2"
+    chk pg-bad-tac    "$(lair_paging_frame 310150123456789 x 1 32 32 >/dev/null 2>&1; echo $?)" "2"
+    chk pg-bad-drx    "$(lair_paging_frame 310150123456789 1 1 31 32 >/dev/null 2>&1; echo $?)" "2"
+    chk pg-bad-nb     "$(lair_paging_frame 310150123456789 1 1 32 7 >/dev/null 2>&1; echo $?)" "2"
+    # A 15-digit IMSI overflows a shell integer; the digit-wise reduction
+    # must still produce the true modulus. 310150123456789 mod 1024:
+    # the last three decimal digits are 789, and 1024 does not divide
+    # 1000, so it is computed digit by digit — asserted against the
+    # value the explicit-argument path produces for the same number.
+    chk pg-imsi-mod "$(lair_imsi_mod 310150123456789 1024)" "277"
+    chk pg-imsi-mod2 "$(lair_imsi_mod 999999999999999 1024)" "1023"
+
+    # ── 18. eDRX, TS 36.304 §7.3 ───────────────────────────────────────
+    #
+    # PH is the H-SFN satisfying  H-SFN mod TeDRX,H = UE_ID_H mod TeDRX,H
+    # and PTW_start is the frame with SFN = 256 * ieDRX where
+    # ieDRX = floor(UE_ID_H / TeDRX,H) mod 4.
+    #
+    # Hand computation for UE_ID = 277, edrx = 32768 ms:
+    # TeDRX,H is an integer number of hyperframes and one hyperframe is
+    # 1024 radio frames = 10240 ms, so edrx = 10240 ms is TeDRX,H = 10.
+    # UE_ID_H = 277 mod 1024 = 277.
+    #   PH residue = 277 mod 10 = 7
+    #   ieDRX = floor(277 / 10) mod 4 = 27 mod 4 = 3
+    #   PTW_start = 256 * 3 = 768
+    #   PTW_end = (768 + L*100 - 1) mod 1024; L = 1 for a 1280 ms window
+    #           = 867, and L = 4 for a 4000 ms window = 143.
+    out=$(lair_paging_frame 310150123456789 1 277 32 32 --edrx 10240 --ptw 1280); rc=$?
+    chk edrx-rc       "$rc" "0"
+    chk edrx-hsfn     "$(fld "$out" edrx_cycle_hsfn)" "10"
+    chk edrx-ueidh    "$(fld "$out" ue_id_h)" "277"
+    # 277 mod 10 = 7
+    chk edrx-ph       "$(fld "$out" paging_hyperframe)" "7"
+    # ieDRX = floor(277 / 10) mod 4 = 27 mod 4 = 3; PTW_start = 256*3 = 768
+    chk edrx-iedrx    "$(fld "$out" ieDRX)" "3"
+    chk edrx-start    "$(fld "$out" ptw_start_sfn)" "768"
+    # PTW_end = (768 + 1*100 - 1) mod 1024 = 867
+    chk edrx-end      "$(fld "$out" ptw_end_sfn)" "867"
+    chk edrx-len      "$(fld "$out" ptw_length_s)" "1"
+    # The ordinary §7.1 PF/PO is unchanged by eDRX: PF 21, PO 9.
+    chk edrx-pf       "$(fld "$out" paging_frame)" "21"
+    chk edrx-po       "$(fld "$out" paging_occasion)" "9"
+    # A 4-second PTW is L = 4 -> PTW_end = (768 + 400 - 1) mod 1024 = 143
+    chk edrx-end4     "$(out=$(lair_paging_frame 310150123456789 1 277 32 32 --edrx 10240 --ptw 4000); fld "$out" ptw_end_sfn)" "143"
+    chk edrx-bad      "$(lair_paging_frame 310150123456789 1 277 32 32 --edrx abc >/dev/null 2>&1; echo $?)" "2"
+
+    # ── 19. enb.conf TDD/FDD — both directions ─────────────────────────
+    #
+    # Band 38 (earfcn 37750) is TDD, so the generated conf must carry
+    # tm = 2 and a tdd_ul_dl_config; band 20 (earfcn 6300) is FDD and must
+    # carry tm = 1 and no tdd block. Asserting only the TDD case would let
+    # a generator that always writes tm = 2 pass.
+    chk duplex-b38 "$(lair_band_duplex 38)" "tdd"
+    chk duplex-b20 "$(lair_band_duplex 20)" "fdd"
+    chk duplex-b41 "$(lair_band_duplex 41)" "tdd"
+    chk duplex-b1  "$(lair_band_duplex 1)"  "fdd"
+    chk tdd-cfg-ok  "$(lair_tdd_config_valid 6 >/dev/null 2>&1; echo $?)" "0"
+    chk tdd-cfg-bad "$(lair_tdd_config_valid 7 >/dev/null 2>&1; echo $?)" "1"
+    # TS 36.211 table 4.2-2, configuration 1: D S U U D D S U U D
+    chk tdd-pattern1 "$(lair_tdd_pattern 1)" "D S U U D D S U U D"
+    chk tdd-pattern0 "$(lair_tdd_pattern 0)" "D S U U U D S U U U"
+
+    lair_gen_enb_conf --earfcn 37750 --out "$d/tdd.conf" >/dev/null
+    chk tdd-tm      "$(grep -c '^tm = 2$' "$d/tdd.conf")" "1"
+    chk tdd-block   "$(grep -c '^tdd_ul_dl_config = 1$' "$d/tdd.conf")" "1"
+    chk tdd-sscfg   "$(grep -c '^tdd_special_subframe_cfg = 7$' "$d/tdd.conf")" "1"
+    chk tdd-no-tm1  "$(grep -c '^tm = 1$' "$d/tdd.conf")" "0"
+
+    lair_gen_enb_conf --earfcn 6300 --out "$d/fdd.conf" >/dev/null
+    chk fdd-tm      "$(grep -c '^tm = 1$' "$d/fdd.conf")" "1"
+    chk fdd-no-tdd  "$(grep -c '^tdd_ul_dl_config' "$d/fdd.conf")" "0"
+    chk fdd-no-tm2  "$(grep -c '^tm = 2$' "$d/fdd.conf")" "0"
+
+    # An explicit override beats the band's own duplex.
+    lair_gen_enb_conf --earfcn 37750 --fdd --out "$d/ovr.conf" >/dev/null
+    chk ovr-fdd-tm  "$(grep -c '^tm = 1$' "$d/ovr.conf")" "1"
+    # A bad TDD configuration is rejected rather than written.
+    chk tdd-cfg-rej "$(lair_gen_enb_conf --earfcn 37750 --tdd-config 7 --out "$d/bad.conf" >/dev/null 2>&1; echo $?)" "2"
+
+    # ── 20. SIB dispatch covers every new type ─────────────────────────
+    chk sib-disp-4  "$(lair_decode_sib 153FFF 4 >/dev/null 2>&1; echo $?)" "0"
+    chk sib-disp-6  "$(lair_decode_sib A1B2C3D48001 6 >/dev/null 2>&1; echo $?)" "0"
+    chk sib-disp-7  "$(lair_decode_sib 1122334485AABBCC 7 >/dev/null 2>&1; echo $?)" "0"
+    chk sib-disp-8  "$(lair_decode_sib 0001000203DEADBEEF 8 >/dev/null 2>&1; echo $?)" "0"
+    chk sib-disp-13 "$(lair_decode_sib 072010D50 13 >/dev/null 2>&1; echo $?)" "0"
+    chk sib-disp-bad "$(lair_decode_sib AB 9 >/dev/null 2>&1; echo $?)" "2"
+    chk mib-cli-missing "$(lair_cmd_decode_mib >/dev/null 2>&1; echo $?)" "2"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1345,7 +2417,9 @@ lair_menu() {
   [6]  stop the test eNB
   [7]  eNB status
   [8]  lab power / timing reference
-  [9]  status
+  [9]  decode the 24-bit MIB (hex)
+  [10] paging with eDRX / PTW
+  [11] status
   [0]  back
 
 M
@@ -1363,7 +2437,7 @@ M
                 if [[ -n "${IMSISTING_CLI:-}" ]]; then
                     echo "[-] need hex; cannot prompt in CLI mode" >&2
                 else
-                    read -rp "  SIB type (1|2|3|5)> " t
+                    read -rp "  SIB type (1|2|3|4|5|6|7|8|13)> " t
                     read -rp "  hex> " h
                     lair_cmd_decode_sib "$h" "$t" | column -t -s$'\t' 2>/dev/null || lair_cmd_decode_sib "$h" "$t"
                     read -rp "  press enter " _
@@ -1400,7 +2474,30 @@ M
                     lair_lab_power_reference "$e" | column -t -s$'\t' 2>/dev/null || true
                     read -rp "  press enter " _
                 fi ;;
-            9) lair_cli_status_tsv | column -t -s$'\t' 2>/dev/null || lair_cli_status_tsv
+            9)
+                if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                    echo "[-] need hex; cannot prompt in CLI mode" >&2
+                else
+                    read -rp "  MIB hex (24 bits, 6 digits)> " h
+                    lair_cmd_decode_mib "$h" | column -t -s$'\t' 2>/dev/null || lair_cmd_decode_mib "$h"
+                    read -rp "  press enter " _
+                fi ;;
+            10)
+                if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                    echo "[-] need an IMSI; cannot prompt in CLI mode" >&2
+                else
+                    read -rp "  IMSI> " i
+                    read -rp "  TAC> " t
+                    read -rp "  ue-id (blank = derive from IMSI)> " u
+                    read -rp "  eDRX cycle ms (blank = none)> " ed
+                    read -rp "  PTW ms (blank = 1280)> " pw
+                    local extra=()
+                    [[ -n "$ed" ]] && extra+=(--edrx "$ed")
+                    [[ -n "$pw" ]] && extra+=(--ptw "$pw")
+                    lair_cmd_paging_frame "$i" "$t" "$u" 32 32 "${extra[@]}" | column -t -s$'\t' 2>/dev/null || true
+                    read -rp "  press enter " _
+                fi ;;
+            11) lair_cli_status_tsv | column -t -s$'\t' 2>/dev/null || lair_cli_status_tsv
                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -1416,9 +2513,9 @@ lair_cli_main() {
         --status-tsv)   lair_cli_status_tsv ;;
         --earfcn)       lair_cmd_earfcn "${1:-}" ;;
         --decode-sib)   lair_cmd_decode_sib "${1:-}" "${2:-1}" ;;
-        --paging-frame) lair_cmd_paging_frame "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
-        --gen-enb-conf) lair_cmd_gen_enb_conf "${1:-6300}" "${2:-001}" "${3:-01}" \
-                            "${4:-1}" "${5:-1}" "${6:-1}" "${7:-25}" ;;
+        --decode-mib)   lair_cmd_decode_mib "${1:-}" ;;
+        --paging-frame) lair_cmd_paging_frame "$@" ;;
+        --gen-enb-conf) lair_cmd_gen_enb_conf "$@" ;;
         --start)        lair_start "$LAIR_CONF" ;;
         --stop)         lair_stop ;;
         --status)       lair_cmd_status ;;
@@ -1432,11 +2529,18 @@ LTE Air Interface — E-UTRA RRC decode, paging arithmetic, srsRAN eNB control
 Usage: $0 COMMAND
   --status-tsv                     module and eNB state as TSV
   --earfcn <N>                     EARFCN -> band, DL MHz, UL MHz, spacing
-  --decode-sib <hex> [1|2|3|5]     parse a SIB body (default SIB1)
-  --paging-frame <imsi> <tac> <ue-id> [T] [nB]
-                                   PF/PO from TS 36.304 §7.1/§7.2
+  --decode-sib <hex> [1|2|3|4|5|6|7|8|13]
+                                   parse a SIB body (default SIB1)
+  --decode-mib <hex>               decode the 24-bit LTE MIB (BCCH-BCH)
+  --paging-frame <imsi> <tac> <ue-id> [T] [nB] [--edrx <ms>] [--ptw <ms>]
+                 [--tdd|--fdd|--earfcn <N>] [--pdcch|--mpdcch|--npdcch]
+                                   PF/PO from TS 36.304 §7.1/§7.2, plus the
+                                   eDRX paging hyperframe and PTW (§7.3)
   --gen-enb-conf [EARFCN] [MCC] [MNC] [TAC] [CELLID] [PCI] [N_PRB]
-                                   write enb.conf and rr.conf
+                 [--tdd|--fdd] [--tdd-config <0-6>] [--tdd-sscfg <0-9>]
+                 [--earfcn <N>] [--n-prb <N>] [--out <path>]
+                                   write enb.conf and rr.conf; the duplex is
+                                   derived from the band unless overridden
   --start                          start srsenb with the generated conf
   --stop                           stop it (idempotent)
   --status                         is the eNB running

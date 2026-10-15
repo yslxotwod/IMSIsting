@@ -12,7 +12,7 @@ typedef struct {
 
 static const ModuleIndexEntry module_index[] = {
     { "00_deps", "Dependency Manager", "SYSTEM", "--check-versions --distro-info --install-all --install-missing --install-package --install-pip --menu --missing-only --report --selftest --status-tsv --yes ", "(no --info in this module)", TRUE },
-    { "01_radio", "SDR / Radio Manager", "SYSTEM", "--band-check --caps-tsv --list-tsv --menu --plan --record --select --selftest --set-freq --set-gain --set-rate --status-tsv ", "(no --info in this module)", TRUE },
+    { "01_radio", "SDR / Radio Manager", "SYSTEM", "--band-check --caps-tsv --list-tsv --lock-claim --lock-recover --lock-release --lock-status-tsv --menu --plan --processes-tsv --record --select --selftest --set-freq --set-gain --set-rate --status-tsv ", "(no --info in this module)", TRUE },
     { "02_cell_recon", "Cell Recon", "RECON", "--arfcn --clear --export --list --list-tsv --menu --plmn --scan --selftest --status-tsv ", "(no --info in this module)", TRUE },
     { "03_gsmtap", "GSMTAP Passive", "RECON", "--build-header --decode-tsv --export-pcap --identities-tsv --listen --menu --parse-header --read --selftest --status-tsv ", "(no --info in this module)", TRUE },
     { "04_tower_map", "Tower Survey", "RECON", "--clear --export-csv --export-geojson --export-kml --gps-quality-tsv --history --list-tsv --menu --selftest --start-gpsd --status-tsv --survey ", "(no --info in this module)", TRUE },
@@ -36,7 +36,7 @@ static const ModuleIndexEntry module_index[] = {
     { "26_nr_cve", "5G CVE Kit", "ATTACKS", "--list-cves --list-findings --menu --plan --probe --run-cve --runs-tsv --selftest --snssai --status-tsv ", "(no --info in this module)", TRUE },
     { "27_traffic_analysis", "Traffic Analysis", "ANALYSIS", "--classify --clear-refs --features --fingerprint-add --flows --menu --refs-tsv --selftest --status-tsv ", "(no --info in this module)", TRUE },
     { "28_rf_fingerprint", "RF Fingerprint / CSI", "RF / TRACKING", "--classify --clear-sigs --csi-motion --csi-parse --features --menu --selftest --sig-add --sigs-tsv --status-tsv --transient ", "(no --info in this module)", TRUE },
-    { "30_killchain", "Cellular Killchain", "SYSTEM", "--add-chain --dry-run --keep-going --list-chains --menu --run --runs-tsv --selftest --show-chain --status-tsv ", "(no --info in this module)", TRUE },
+    { "30_killchain", "Cellular Killchain", "SYSTEM", "--add-chain --dry-run --keep-going --list-chains --menu --pause --resume --run --run-multi --run-status-tsv --runs-tsv --selftest --show-chain --status-tsv ", "(no --info in this module)", TRUE },
     { "31_ss7_map", "SS7 / MAP / GRX", "CORE NETWORK", "--build-ati --build-sri --build-sri-sm --decode-map --decode-msu --decode-tcap --detect --fallback-detect --flow --grx-recon --menu --opcode --pc-format --plan --require-stp --selftest --ssn --status-tsv --surface --visited-plmn ", "(no --info in this module)", TRUE },
     { "32_cellular_dns", "DNS over Cellular", "CORE NETWORK", "--alter --build-query --build-response --decode-dns --detect --menu --pco --plan --resolver-discovery --selftest --status-tsv ", "(no --info in this module)", TRUE },
     { "33_paging_track", "Paging / Torpedo", "RF / TRACKING", "--detect --menu --paging-parse --piercer-correlate --plan --po --selftest --status-tsv --torpedo-model ", "(no --info in this module)", TRUE },

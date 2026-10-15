@@ -63,6 +63,7 @@ the selftest asserts against that and cites it in a comment. See
 |---|---|
 | `00_deps` | Inspect the cellular toolchain and install what is missing |
 | `01_radio` | Enumerate SDRs, report per-band capability, record IQ |
+| `05_field_kit` | RF pre-flight, honesty verification of every radio verb, synthetic GSMTAP source |
 
 ### Recon (passive)
 | Module | Description |
@@ -164,6 +165,40 @@ Two of these are scoped deliberately, and the reason is in the module header:
 `47_li_probe` detects and fingerprints lawful-intercept interfaces; it does not
 receive or decode intercepted content.
 
+### v0.4 — the gap closed
+
+Eleven more ids, extending coverage into places none of the above reached —
+narrowband IoT, positioning, Wi-Fi offload, satellite access, land mobile
+radio, the SIM's own application layer, and the RAN edges.
+
+| Module | Description |
+|---|---|
+| `50_iot` | NB-IoT and Cat-M1: NPRACH, NPSS/NSSS, SIB1-NB and NPRFCN |
+| `51_lpp` | LTE Positioning Protocol: procedure codes, header codec, position-forgery detection |
+| `52_wifioff` | Wi-Fi offload and LWA: ePDG FQDN, certificate validation, LWA configuration |
+| `53_oran` | O-RAN interfaces, deployment assessment and xApp-authority modelling |
+| `54_ntn` | Non-terrestrial access: Doppler, round-trip delay, TA, k_offset and the SIB19 fields |
+| `55_gprs` | GPRS/EDGE packet-switched: GEA ciphering, APN coding, PDP context, downgrade detection |
+| `56_sidelink` | NR sidelink on PC5: resource pools, SCI-1A, ITS certificates and relay checks |
+| `57_stk` | TS 31.111 proactive commands: build, parse and audit for silent off-device actions |
+| `58_non3gpp` | TETRA, DMR and GSM-R structure, ciphers and band classification |
+| `59_baseband_exploit` | L1/L2 malformed-PDU construction, 5G control-plane forgery, baseband CVE catalogue |
+| `60_nr_inject` | NR RNTI tracking, MAC-NR framing, descrambling and the injection exploit set |
+
+Two of these carry the same kind of scope note as `40_baseband` and
+`49_carrier_api` above:
+
+- **`53_oran` assesses a deployment; it does not load a rogue xApp.** The
+  xApp-authority model names the authority a RIC grants an xApp and flags an
+  unsigned app holding RAN control. Loading into a carrier RIC requires that
+  carrier's authorisation.
+- **`58_non3gpp` is receive-only.** Receiving public-safety traffic may itself be
+  restricted where you are, and the module says so. It demods nothing that needs
+  keys you are not entitled to.
+
+The per-module detail, including which tag each module exposes and what it owns,
+is in [`docs/MODULE_ROSTER.md`](docs/MODULE_ROSTER.md).
+
 The full attack-to-module mapping is in
 [`docs/ATTACK_COVERAGE.md`](docs/ATTACK_COVERAGE.md).
 
@@ -242,7 +277,7 @@ Click a card and the module opens as its own tab. Six tabs are permanent:
 |---|---|
 | **Dashboard** | Every module as a card, grouped by category. The main menu. |
 | **Live Traffic** | A live GSMTAP view (below). Starts listening when you open it. |
-| **Loot** | What every module has collected, per module, with file counts. |
+| **Casebook** | Cases, selected cells, evidence/captures, timeline, IDS alerts, passive sensor nodes and HTML/JSON/TSV reports. The Evidence page retains the per-module loot browser and preview. |
 | **Stats** | Module and collection counts, and a health line. |
 | **Help** | How the tree fits together and how to drive it. |
 | **Settings** | Environment facts, plus dependency and SDR probe actions. |
@@ -251,16 +286,25 @@ Module tabs appear alongside these and can be closed; the six permanent tabs
 cannot.
 
 **A module page** is a left menu of views with the content beside it, grouped
-into cards — STATUS, ACTIONS and RUN ANY VERB. The action buttons cover the
-verbs you reach for most; the run box takes anything else the module
-implements, with arguments, so nothing is unreachable.
+into cards — STATUS, ACTIONS and ALL MODULE VERBS. The action buttons cover
+the verbs you reach for most; the generated selector is built from the module
+index and exposes everything else, with a separate arguments field and command
+copy button, so nothing is unreachable.
 
 **Live Traffic** is a real table (sequence, time, type, channel, ARFCN,
 timeslot, signal, direction, length, payload) with a filter box above it that
 matches on type, channel or payload. Uplink rows are marked.
 
+**The dashboard is configurable, and it remembers.** Every card carries a star:
+pinned modules lead the grid whatever the sort is set to. `Sort`
+offers Workflow (category order), Most used (by run count), Name and Category,
+and `Density` switches Compact, Comfortable or Spacious card sizing. All of it
+survives a restart, because it lives in `state/` rather than in the binary —
+and both searches say *no match* instead of going quietly blank.
+
 **Stats** shows headline counts as tiles, a per-category breakdown as bars, and
-where everything lives on disk.
+where everything lives on disk. It recounts when you open it, so a module that
+has just written loot is not still showing the numbers from launch.
 
 The **module list on the left collapses** — the *Modules* button in the header
 bar. Collapse it when a module page needs the full width.
@@ -274,7 +318,7 @@ themselves so it cannot disagree with them:
     CELLS  cells in the survey store (02_cell_recon)
     GPS    the survey position source (04_tower_map)
 
-`--tab N` opens straight to a tab (0 Dashboard, 1 Live Traffic, 2 Loot,
+`--tab N` opens straight to a tab (0 Dashboard, 1 Live Traffic, 2 Casebook,
 3 Stats, 4 Help, 5 Settings):
 
 ```bash
@@ -371,7 +415,14 @@ often identifies the problem with no hardware attached.
 ./tools/check-paths.sh            # every path and table entry resolves
 ./tools/check-verbs.sh            # verbs reachable from the GUI
 ./tools/gen-module-index.sh       # regenerate the index
+./tools/gen-icons-xml.sh --check  # the bundled icon set matches the tree
 ```
+
+The 56 module icons are compiled into the binary as a GResource, published under
+the directory layout GTK's icon theme expects, so the GUI does not depend on the
+launcher having installed them into your theme — or on which theme your distro
+happens to ship. They stay symbolic, so each category's accent colour still
+applies. The launcher still installs them as a fallback.
 
 `check-verbs.sh` grades reachability rather than treating it as binary: a verb
 with a clickable control is one a user will find; a verb reachable only by
@@ -390,13 +441,25 @@ are the ones that have already earned their place.
 
 ## Directories
 
-On first run the toolkit creates `tmp/`, `loot/`, `logs/`, `captures/` and
-`state/` automatically. Nothing needs to pre-exist.
+On first run the toolkit creates `tmp/`, `loot/`, `logs/`, `captures/`,
+`state/` and `cases/` automatically. Nothing needs to pre-exist.
+
+**`cases/` is the Casebook store.** It records scope and authorization, the
+selected cellular target, SHA-256 evidence provenance, correlated events,
+alerts, passive sensor health and exported reports. Files are indexed explicitly
+from Casebook so large IQ recordings are not rehashed after every command.
+Module completion is appended to the active case timeline automatically.
 
 **`loot/` is where results land** — one subdirectory per module. Everything in
 it came off the air or off a target device and **is not redacted**. It contains
 real identities: IMSIs, IMEIs, captured messages, and in some cases decrypted
 traffic.
+
+**`state/` is what the GUI remembers.** `pins.tsv` holds the starred modules,
+`ui.tsv` the dashboard sort and density, and `recent.tsv` the run counts behind
+*Most used*. Delete one and that preference resets to its default; the toolkit
+writes it again on the next change. Modules also keep their own working data
+here, which is why `state/` grows subdirectories as you use them.
 
 Treat a copy of `loot/` the way you would treat the equipment it came from. Do
 not commit it, sync it, or email it.
@@ -427,20 +490,26 @@ Check GTK4 is at least 4.14.
    send errors to stderr, and exit non-zero on failure.
 2. Add a `--selftest` that runs with no hardware, and whose assertions come from
    a published source where one exists.
-3. Register it in `native/src/main1.c` — a `modules[]` table row and a
-   `module_registry_register()` call.
-4. Add it to `IMSISTING_MODULE_TABLE` in `imsisting.sh`, with the module id as
+3. Draw `native/resources/icons/symbolic/imsisting-NN_name-symbolic.svg` —
+   256×256, stroke-only, `stroke="currentColor"` and no fill of its own, so the
+   category colour applies — then re-run `./tools/gen-icons-xml.sh` to bundle it.
+4. Register it in `native/src/main1.c` — a `modules[]` table row and a
+   `module_registry_register()` call. Its category drives the sidebar,
+   dashboard and Stats, and the launcher's table uses the same names, so keep
+   the two in step.
+5. Add it to `IMSISTING_MODULE_TABLE` in `imsisting.sh`, with the module id as
    the fifth field.
-5. Run:
+6. Run:
 
 ```bash
 ./tools/gen-module-index.sh
+./tools/gen-icons-xml.sh
 ./tools/run-selftests.sh
 ./tools/check-paths.sh
 ./tools/check-verbs.sh
 ```
 
-All four must pass.
+All of them must pass.
 
 ---
 

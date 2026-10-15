@@ -166,6 +166,7 @@ PY
 # a file path ending in .pcap.
 fk_emit() {
     local scenario="${1:-mixed}" count="${2:-1}" delay="${3:-0.15}" target="${4:-udp}"
+    [[ "$count" =~ ^[0-9]+$ ]] || count=1
     local frames; frames=$(fk_scenario_frames "$scenario") || return $?
     local n; n=$(printf '%s\n' "$frames" | grep -c .)
     (( n > 0 )) || { printf 'ERROR\tscenario produced no frames\n' >&2; return 1; }
@@ -179,12 +180,12 @@ fk_emit() {
     done <<< "$frames"
 
     if [[ "$target" == "udp" ]]; then
-        python3 - "${delay}" "${hexes[@]}" <<'PY'
+        python3 - "${delay}" "${count}" "${hexes[@]}" <<'PY'
 import socket, sys, time
-delay = float(sys.argv[1]); frames = sys.argv[2:]
+delay = float(sys.argv[1]); count = int(sys.argv[2]); frames = sys.argv[3:]
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sent = 0
-for rep in range(1):
+for rep in range(count):
     for hx in frames:
         s.sendto(bytes.fromhex(hx), ('127.0.0.1', 4729))
         sent += 1
@@ -197,23 +198,25 @@ PY
         printf '%s\n' "${hexes[@]}" > "$MOD_TMP/frames.txt"
         # A GSMTAP capture is Ethernet/IP/UDP on 4729, which is what Wireshark
         # and 03_gsmtap both expect.
-        python3 - "$out" "$MOD_TMP/frames.txt" <<'PY'
+        python3 - "$out" "$MOD_TMP/frames.txt" "$count" <<'PY'
 import struct, sys
 out, ff = sys.argv[1], sys.argv[2]
+count = int(sys.argv[3])
 frames = [l.strip() for l in open(ff) if l.strip()]
 with open(out, 'wb') as f:
     f.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
     ts = 0
-    for hx in frames:
-        g = bytes.fromhex(hx)
-        udp = struct.pack('!HHHH', 4729, 4729, 8 + len(g), 0) + g
-        ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0,
-                         bytes([10,0,0,1]), bytes([10,0,0,2])) + udp
-        eth = bytes.fromhex('001122334455') + bytes.fromhex('66778899aabb') + \
-              struct.pack('!H', 0x0800) + ip
-        f.write(struct.pack('<IIII', ts, 0, len(eth), len(eth)))
-        f.write(eth)
-        ts += 1
+    for rep in range(count):
+        for hx in frames:
+            g = bytes.fromhex(hx)
+            udp = struct.pack('!HHHH', 4729, 4729, 8 + len(g), 0) + g
+            ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0,
+                             bytes([10,0,0,1]), bytes([10,0,0,2])) + udp
+            eth = bytes.fromhex('001122334455') + bytes.fromhex('66778899aabb') + \
+                  struct.pack('!H', 0x0800) + ip
+            f.write(struct.pack('<IIII', ts, 0, len(eth), len(eth)))
+            f.write(eth)
+            ts += 1
 print("wrote\t%s" % out)
 PY
     fi
@@ -233,7 +236,7 @@ PY
 fk_guard_matrix() {
     cat <<'MATRIX'
 01_radio|--record|
-02_cell_recon|--scan|gsm
+02_cell_recon|--scan|gsm||45
 10_gsm_air|--decode-pcap|/nonexistent.pcap
 14_lte_air|--start|
 16_nr_air|--start|
@@ -252,6 +255,8 @@ fk_guard_matrix() {
 46_ota_sms|--parse-packet|00
 47_li_probe|--score|/nonexistent.pcap
 48_ran_share|--leak-check|/nonexistent.pcap
+59_baseband_exploit|--inject|7E0044001F|BEXP_TX_ARMED=1 BEXP_TX_CMD=
+60_nr_inject|--inject|7E0044001F|NRJ_TX_ARMED=1 NRJ_TX_CMD=
 MATRIX
 }
 
@@ -280,10 +285,10 @@ fk_guard_check() {
     [[ "${1:-}" == "--quiet" ]] && quiet=1
 
     printf 'module\tverb\tstatus\tdetail\n' > "$FK_GUARDS"
-    local honest=0 silent=0 fabricated=0 missing=0
-    local mod verb args line
+    local honest=0 silent=0 fabricated=0 missing=0 timedout=0
+    local mod verb args envset tmo line
 
-    while IFS='|' read -r mod verb args; do
+    while IFS='|' read -r mod verb args envset tmo; do
         [[ -z "$mod" ]] && continue
 
         if [[ ! -x "$IMSISTING_ROOT/modules/$mod.sh" ]]; then
@@ -293,15 +298,33 @@ fk_guard_check() {
             continue
         fi
 
+        # Fields: mod|verb|args|env|timeout.  The optional 4th field pins the
+        # environment for this probe. A TX module is checked with its TX command
+        # explicitly empty and its guard armed: that exercises the real "no
+        # hardware" branch and makes it impossible for --guard-check to radiate
+        # by accident.  The 5th field must exceed the module's OWN internal
+        # timeout, otherwise we kill it before it can report honestly and
+        # mislabel a slow-but-honest module as silent.  Default 25s.
+        tmo="${tmo:-25}"
+
         local out rc
-        out=$(timeout 25 "$IMSISTING_ROOT/modules/$mod.sh" "$verb" $args 2>&1); rc=$?
-        local status; status=$(fk_classify_run "$rc" "$out")
-        local detail; detail=$(printf '%s' "$out" | grep -oE 'ERROR\t[^\n]*|no [A-Za-z0-9 /_-]*(SDR|radio|capture)[^\n]*' | head -1)
+        out=$(timeout "$tmo" env $envset "$IMSISTING_ROOT/modules/$mod.sh" "$verb" $args 2>&1); rc=$?
+
+        # A killed probe is not a verdict about the module. Surface it as its
+        # own status rather than folding it into honest/silent.
+        local status
+        if (( rc == 124 )); then
+            status='timeout'
+        else
+            status=$(fk_classify_run "$rc" "$out")
+        fi
+        local detail; detail=$(printf '%s' "$out" | grep -oE 'ERROR[[:space:]][^\n]*|no [A-Za-z0-9 /_-]*(SDR|radio|capture)[^\n]*' | head -1)
 
         case "$status" in
             honest-fail) honest=$((honest + 1)) ;;
             silent-fail) silent=$((silent + 1)) ;;
             FABRICATED)  fabricated=$((fabricated + 1)) ;;
+            timeout)     timedout=$((timedout + 1)) ;;
         esac
 
         printf '%s\t%s\t%s\t%s\n' "$mod" "$verb" "$status" "$(fk_sanitize "$detail")" >> "$FK_GUARDS"
@@ -309,13 +332,14 @@ fk_guard_check() {
         if (( ! quiet )) || [[ "$status" != "honest-fail" ]]; then
             case "$status" in
                 honest-fail) printf '%-20s %-16s \033[38;5;46m%s\033[0m\n' "$mod" "$verb" "$status" ;;
+                timeout)     printf '%-20s %-16s \033[38;5;226m%s\033[0m  exceeded %ss\n' "$mod" "$verb" "$status" "$tmo" ;;
                 *)           printf '%-20s %-16s \033[38;5;196m%s\033[0m  %s\n' "$mod" "$verb" "$status" "$(fk_sanitize "$detail")" ;;
             esac
         fi
     done < <(fk_guard_matrix)
 
-    printf '\nhonest %d   silent %d   fabricated %d   missing %d\n' \
-        "$honest" "$silent" "$fabricated" "$missing"
+    printf '\nhonest %d   silent %d   fabricated %d   timeout %d   missing %d\n' \
+        "$honest" "$silent" "$fabricated" "$timedout" "$missing"
     printf 'report\t%s\n' "$FK_GUARDS"
 
     # A fabricated result is the cardinal sin: it returned success with no

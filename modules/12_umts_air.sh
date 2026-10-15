@@ -332,7 +332,11 @@ uair_sib6_carriers() {
 
 # ── RRC integrity protection (UIA1/UIA2 MAC-I) ──────────────────────────
 # The integrity algorithm f9 (TS 33.102 Annex B) protects RRC signalling.
-# UIA2 is KASUMI-based and is the one that shipped; UIA1 is SNOW 3G based.
+# UIA1 is KASUMI-based (TS 35.201); UIA2 is SNOW 3G based (TS 35.215). Both
+# feed f9 the same COUNT-I || FRESH || DIRECTION || MESSAGE string assembled
+# below, so this module's --mac-input is identical for either algorithm; only
+# the underlying permutation differs. Compute the MAC-I with
+# `11_gsm_attack --f9-mac`.
 #
 # The input to the algorithm is
 #     COUNT-I || FRESH || DIRECTION || MESSAGE
@@ -402,8 +406,8 @@ uair_mac_input() {
     printf 'message\t%s\n' "$msg"
     printf 'mac_input\t%s\n' "${c}${f}${d}${msg}"
     printf 'mac_input_bits\t%s\n' "$(( 32 + 32 + 32 + ${#msg} * 4 ))"
-    printf 'algorithm\tUIA2 (KASUMI-based f9)\n'
-    printf 'algorithm_alt\tUIA1 (SNOW 3G based)\n'
+    printf 'algorithm\tUIA1 (KASUMI-based f9)\n'
+    printf 'algorithm_alt\tUIA2 (SNOW 3G based)\n'
     printf 'mac_i_bits\t32\n'
     return 0
 }

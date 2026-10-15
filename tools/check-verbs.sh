@@ -2,12 +2,17 @@
 # check-verbs.sh — find verbs a module exposes that no GUI control can reach.
 #
 # A feature nobody can click is a feature nobody has. Every verb a module
-# documents must be passed as a literal argument by some GUI control, or this
-# check fails and names it.
+# documents must either sit in one of its submenu groups (so it is clickable),
+# or be a plumbing verb that belongs to the launcher and the test runner rather
+# than to a person. A verb in neither category is a failure, and this check
+# names it.
+#
+# Placement is read from the group specs in native/src/main1.c, where each
+# module lists its submenus as "verb[!][@][:Label]" entries.
 #
 # Usage: tools/check-verbs.sh [--json] [--list]
 #   --list  show every verb and where it is reached from
-# Exit: 0 if every verb is reachable, 1 otherwise.
+# Exit: 0 if every verb is placed or exempt, 1 otherwise.
 
 set -uo pipefail
 
@@ -25,21 +30,23 @@ done
 [[ -f "$MAIN" ]] || { echo "no $MAIN" >&2; exit 2; }
 
 fail=0
-n_button=0
-n_box=0
+n_placed=0
+n_exempt=0
+n_cli=0
 declare -a unreachable=()
 
-# Every module page carries a free-text run box, which reaches any verb the
-# module implements. That makes a verb reachable but not *discoverable*, so the
-# two are counted separately rather than treated as equal: a verb with a button
-# is one a user will find; a verb reachable only by typing is one they must
-# already know about.
-has_runbox=0
-grep -q 'verb_any_run_clicked' "$MAIN" && has_runbox=1
+# Plumbing and modifier verbs. These are not user actions: the launcher, the
+# test runner and the module internals call them. They are allowed to have no
+# button.
+exempt_re='^--(menu|selftest|status-tsv|info|__index_probe__|yes|quiet|help|version)$'
 
-# Verbs that are plumbing rather than user actions. These are legitimately
-# not clickable: the launcher and the test runner call them.
-ignore_re='^--(selftest|menu|status-tsv|info|__index_probe__)$'
+# main1.c with every submenu table stripped out. A verb found in here is wired
+# from C code -- a custom view building its own controls -- rather than named in
+# a spec string. Keeping the two apart is what stops one module borrowing
+# another's spec line.
+codeonly=$(awk '/^static ModuleSubmenuEntry [a-z0-9_]+_entries\[\] = \{/ { f=1 }
+                f && /^\};/ { f=0; next }
+                !f' "$MAIN")
 
 for f in "$ROOT"/modules/*.sh; do
     [[ -e "$f" ]] || continue
@@ -51,30 +58,54 @@ for f in "$ROOT"/modules/*.sh; do
 
     [[ -z "$verbs" ]] && continue
 
+    # Scope every lookup to THIS module's own submenu table. Matching the bare
+    # verb name anywhere in main1.c lets a verb borrow another module's entry:
+    # 13_lte_attach's --identity-exposure was reported PLACED on the strength of
+    # 10_gsm_air's spec, which hid that it had no working control at all.
+    tab=$(grep -oE "module_registry_register\(\"$mod\", *[a-z0-9_]+_entries" "$MAIN" |
+          head -1 | grep -oE '[a-z0-9_]+_entries')
+    spec=""
+    if [[ -n "$tab" ]]; then
+        spec=$(awk "/static ModuleSubmenuEntry ${tab}\\[\\] = \\{/{f=1} f{print} f&&/^};/{exit}" "$MAIN")
+    fi
+    [[ -n "$spec" ]] || spec="$MAIN"
+
     while read -r v; do
         [[ -z "$v" ]] && continue
-        [[ "$v" =~ $ignore_re ]] && continue
 
-        # Three grades, and the difference matters:
-        #   button  the verb is named literally, so a click reaches it
-        #   box     reachable only by typing it into a page run box
-        #   none    not reachable at all -- a failure
-        if grep -qF "\"$v\"" "$MAIN"; then
-            n_button=$((n_button + 1))
-            (( listall )) && printf 'BUTTON  %-22s %s\n' "$mod" "$v"
-        elif [[ $has_runbox -eq 1 ]]; then
-            n_box=$((n_box + 1))
-            (( listall )) && printf 'TYPED   %-22s %s (run box only)\n' "$mod" "$v"
+        if [[ "$v" =~ $exempt_re ]]; then
+            n_exempt=$((n_exempt + 1))
+            (( listall )) && printf 'EXEMPT   %-22s %s\n' "$mod" "$v"
+            continue
+        fi
+
+        # A '~' prefix in a group spec marks a verb that needs an argument only
+        # the operator knows: it is deliberately kept on the command line.
+        if grep -qE -- "~${v}([^a-z0-9-]|\$)" <<< "$spec"; then
+            n_cli=$((n_cli + 1))
+            (( listall )) && printf 'CLI-ONLY %-22s %s\n' "$mod" "$v"
+            continue
+        fi
+
+        # Placed means the verb is named in this module's group spec in
+        # main1.c. Match it as a whole token so --list does not satisfy
+        # --list-tsv. A verb the module's own C code calls is reachable too --
+        # custom views build their controls directly -- so fall back to the
+        # code-only view of main1.c.
+        if grep -qE -- "(^|[^a-z0-9-])${v}([^a-z0-9-]|\$)" <<< "$spec" ||
+           grep -qE -- "(^|[^a-z0-9-])${v}([^a-z0-9-]|\$)" <<< "$codeonly"; then
+            n_placed=$((n_placed + 1))
+            (( listall )) && printf 'PLACED   %-22s %s\n' "$mod" "$v"
         else
             unreachable+=("$mod $v")
             fail=$((fail + 1))
-            (( jsonout )) || printf 'UNREACHABLE  %-22s %s\n' "$mod" "$v"
+            (( jsonout )) || printf 'UNPLACED  %-22s %s\n' "$mod" "$v"
         fi
     done <<< "$verbs"
 done
 
 if (( jsonout )); then
-    printf '{"unreachable":%d,"verbs":[' "$fail"
+    printf '{"unplaced":%d,"verbs":[' "$fail"
     for i in "${!unreachable[@]}"; do
         (( i > 0 )) && printf ','
         printf '"%s"' "${unreachable[$i]}"
@@ -83,12 +114,11 @@ if (( jsonout )); then
 else
     printf '\n'
     if (( fail == 0 )); then
-        printf 'every documented verb is reachable from the GUI\n'
-        printf '  %d with a clickable control, %d reachable only via the run box\n' \
-            "$n_button" "$n_box"
-        (( n_box > 0 )) && printf '  (run-box-only verbs are reachable but not discoverable)\n'
+        printf 'every documented verb is placed in a submenu or exempt\n'
+        printf '  %d placed as one-click buttons, %d CLI-only (need an argument), %d exempt plumbing verbs\n' \
+            "$n_placed" "$n_cli" "$n_exempt"
     else
-        printf '%d verb(s) have no GUI path at all\n' "$fail"
+        printf '%d verb(s) are neither placed in a submenu nor exempt\n' "$fail"
     fi
 fi
 

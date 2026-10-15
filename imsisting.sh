@@ -28,14 +28,59 @@ export LOOT_DIR="$SCRIPT_DIR/loot"
 export LOG_DIR="$SCRIPT_DIR/logs"
 export CAPTURES_DIR="$SCRIPT_DIR/captures"
 export STATE_DIR="$SCRIPT_DIR/state"
+export CASES_DIR="$SCRIPT_DIR/cases"
 export SESSION_LOG="${SESSION_LOG:-$LOG_DIR/session_$(date +%Y%m%d_%H%M%S)_$$.log}"
 
-for d in "$TMP_DIR" "$LOOT_DIR" "$LOG_DIR" "$CAPTURES_DIR" "$STATE_DIR"; do
+for d in "$TMP_DIR" "$LOOT_DIR" "$LOG_DIR" "$CAPTURES_DIR" "$STATE_DIR" "$CASES_DIR"; do
     if ! mkdir -p "$d"; then
         printf 'imsisting: cannot create %s\n' "$d" >&2
         (( IMSISTING_SOURCED )) && return 1 || exit 1
     fi
 done
+
+# ---------------------------------------------------------------------
+#  Module icons. GTK resolves them by name from the hicolor theme, so the
+#  symbolic SVGs are copied there and the cache refreshed. Without this a
+#  tarball unzipped elsewhere shows grey placeholder boxes with no
+#  indication why.
+#  The theme is kept in step with the tree, not merely seeded: files that are
+#  missing or whose content differs are (re)copied, and imsisting-* files this
+#  toolkit no longer ships are pruned. Copy-if-missing alone meant an edited
+#  or renamed icon never reached the theme — the old drawing stayed installed
+#  with nothing to show it was stale. The cache rebuild is skipped when
+#  nothing changed.
+# ---------------------------------------------------------------------
+ICON_SRC="$SCRIPT_DIR/native/resources/icons/symbolic"
+ICON_DST="$HOME/.local/share/icons/hicolor/scalable/actions"
+
+if [ -d "$ICON_SRC" ]; then
+    installed=0
+    pruned=0
+    mkdir -p "$ICON_DST" 2>/dev/null
+    for src in "$ICON_SRC"/imsisting-*.svg; do
+        [ -e "$src" ] || continue
+        name=$(basename "$src")
+        if [ ! -e "$ICON_DST/$name" ] || ! cmp -s "$src" "$ICON_DST/$name"; then
+            cp -f "$src" "$ICON_DST/$name" 2>/dev/null && installed=$((installed + 1))
+        fi
+    done
+    # Only imsisting-* names are considered here, so nothing else in the
+    # user's icon theme is ever touched.
+    for dst in "$ICON_DST"/imsisting-*.svg; do
+        [ -e "$dst" ] || continue
+        name=$(basename "$dst")
+        if [ ! -e "$ICON_SRC/$name" ]; then
+            rm -f "$dst" 2>/dev/null && pruned=$((pruned + 1))
+        fi
+    done
+    if [ "$installed" -gt 0 ] || [ "$pruned" -gt 0 ]; then
+        printf '  module icons: %d updated, %d pruned in the hicolor theme\n' \
+               "$installed" "$pruned"
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -q -t -f "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+        fi
+    fi
+fi
 
 # ── CLI flags (standalone only) ─────────────────────────────
 IMSISTING_LIST=0

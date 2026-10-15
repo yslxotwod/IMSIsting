@@ -803,6 +803,19 @@ lcve_run_cve() {
 }
 
 # ── CLI verbs ───────────────────────────────────────────────────────────
+# The shared state file is written by 01_radio as <driver>\t<serial>\t<index>.
+# Never paste it raw into a status row: that puts three values into a two-field
+# contract. Split it into three 2-field rows instead.
+lcve_sdr_rows() {
+    local drv="none" sn="none" idx="none"
+    if [[ -s "$LCVE_SDR" ]]; then
+        IFS=$'\t' read -r drv sn idx < <(tr -d '\r' < "$LCVE_SDR" | head -n1)
+    fi
+    printf 'sdr\t%s\n'        "${drv:-none}"
+    printf 'sdr_serial\t%s\n' "${sn:-none}"
+    printf 'sdr_index\t%s\n'  "${idx:-none}"
+}
+
 lcve_cli_status_tsv() {
     local plans
     plans=$(find "$LCVE_PLANS" -type f -name 'plan_*.txt' 2>/dev/null | wc -l | tr -d ' ')
@@ -812,7 +825,7 @@ lcve_cli_status_tsv() {
     printf 'handoffs\t%s\n' "$(lcve_ids_of_kind handoff | grep -c . || true)"
     printf 'runs\t%s\n'     "$(lcve_run_count)"
     printf 'plans\t%s\n'    "$plans"
-    printf 'sdr\t%s\n'      "$([[ -f "$LCVE_SDR" ]] && cat "$LCVE_SDR" 2>/dev/null || echo none)"
+    lcve_sdr_rows
     printf 'target\t%s\n'   "$(lcve_resolve_target 2>/dev/null || echo none)"
     printf 'dir\t%s\n'      "$LCVE_DIR"
     printf 'runs_file\t%s\n' "$LCVE_RUNS"
@@ -921,6 +934,9 @@ lcve_selftest() {
     export LOOT_DIR="$d/loot" CAPTURES_DIR="$d/captures"
     export LCVE_DIR="$d/loot/lte_cve" LCVE_RUNS="$d/loot/lte_cve/runs.tsv"
     export LCVE_PLANS="$d/loot/lte_cve/plans"
+    # Read the shared SDR state from the scratch dir, not the host's: the status
+    # row must be tested against a state file this selftest controls.
+    export LCVE_SDR="$d/state/sdr_device"
     unset LCVE_TARGET LCVE_ASN1_ARTEFACT LCVE_RRC_ARTEFACT LCVE_NAS_ARTEFACT \
           LCVE_DIAMETER_ARTEFACT LCVE_GTP_ARTEFACT LCVE_SIP_ARTEFACT \
           LCVE_PAGING_ARTEFACT LCVE_SIB_ARTEFACT LCVE_BT_ARTEFACT
@@ -1206,6 +1222,10 @@ SIP
     chk list-cves-fields "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=5' | grep -c . || true)" "0"
     chk runs-empty-rc    "$(: > "$LCVE_RUNS"; lcve_cmd_runs_tsv >/dev/null 2>&1; echo $?)" "1"
 
+    # 01_radio writes "<driver>\t<serial>\t<index>". A populated state file was
+    # once pasted raw into the 2-field status row; assert the split instead.
+    mkdir -p "${LCVE_SDR%/*}"
+    printf 'bladerf\tdeadbeef0001\t1\n' > "$LCVE_SDR"
     out=$(lcve_cli_status_tsv)
     chk status-module   "$(fld "$out" module)"    "lte_cve"
     chk status-ids      "$(fld "$out" ids)"       "$nids"
@@ -1214,6 +1234,14 @@ SIP
     chk status-dir      "$(fld "$out" dir)"       "$LCVE_DIR"
     chk status-runsf    "$(fld "$out" runs_file)" "$LCVE_RUNS"
     chk status-fields   "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"
+    chk status-sdr      "$(fld "$out" sdr)"        "bladerf"
+    chk status-sdr-sn   "$(fld "$out" sdr_serial)" "deadbeef0001"
+    chk status-sdr-idx  "$(fld "$out" sdr_index)"  "1"
+    # An absent state file still yields the three rows, all "none".
+    rm -f "$LCVE_SDR"
+    out=$(lcve_cli_status_tsv)
+    chk status-sdr-nofile  "$(fld "$out" sdr)" "none"
+    chk status-fields-none "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"
 
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"

@@ -51,6 +51,104 @@ RADIO_GAIN_STATE="$TMP_DIR/sdr_gain"
 RADIO_FREQ_STATE="$TMP_DIR/sdr_freq"
 RADIO_RATE_STATE="$TMP_DIR/sdr_rate"
 RADIO_CACHE="$RADIO_TMP/roster.tsv"         # last successful enumeration
+RADIO_LOCK_DIR="${RADIO_LOCK_DIR:-$TMP_DIR/radio.lock}"
+
+# ── radio ownership ─────────────────────────────────────────────────────
+# A vendor utility generally opens an SDR exclusively. Claiming ownership
+# here prevents two modules from producing confusing "device busy" failures.
+radio_lock_read() {
+    [[ -f "$RADIO_LOCK_DIR/owner.tsv" ]] || return 1
+    cat "$RADIO_LOCK_DIR/owner.tsv"
+}
+
+radio_lock_field() {
+    radio_lock_read 2>/dev/null | awk -F'\t' -v k="$1" '$1==k{print $2; exit}'
+}
+
+radio_lock_pid_alive() {
+    local pid="${1:-}"
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+radio_lock_claim() {
+    local owner="${1:-}" pid="${2:-$$}" started device existing_owner existing_pid
+    [[ -n "$owner" ]] || { printf 'ERROR\tusage: --lock-claim OWNER [PID]\n' >&2; return 2; }
+    [[ "$pid" =~ ^[0-9]+$ ]] || { printf 'ERROR\tPID must be numeric\n' >&2; return 2; }
+    owner=$(radio_sanitize "$owner")
+
+    if mkdir "$RADIO_LOCK_DIR" 2>/dev/null; then
+        started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        device=$(radio_selected 2>/dev/null || echo none)
+        printf 'owner\t%s\npid\t%s\nstarted\t%s\ndevice\t%s\n' \
+            "$owner" "$pid" "$started" "$(radio_sanitize "$device")" > "$RADIO_LOCK_DIR/owner.tsv" || {
+            rm -rf "$RADIO_LOCK_DIR"; printf 'ERROR\tcannot write radio lock\n' >&2; return 1; }
+        printf 'lock\tclaimed\nowner\t%s\npid\t%s\n' "$owner" "$pid"
+        return 0
+    fi
+
+    existing_owner=$(radio_lock_field owner)
+    existing_pid=$(radio_lock_field pid)
+    if ! radio_lock_pid_alive "$existing_pid"; then
+        rm -rf "$RADIO_LOCK_DIR" 2>/dev/null || {
+            printf 'ERROR\tstale radio lock cannot be removed\n' >&2; return 1; }
+        radio_lock_claim "$owner" "$pid"
+        return $?
+    fi
+    if [[ "$existing_owner" == "$owner" && "$existing_pid" == "$pid" ]]; then
+        printf 'lock\talready-owned\nowner\t%s\npid\t%s\n' "$owner" "$pid"
+        return 0
+    fi
+    printf 'ERROR\tradio owned by %s (pid %s)\n' \
+        "$(radio_sanitize "$existing_owner")" "$(radio_sanitize "$existing_pid")" >&2
+    return 1
+}
+
+radio_lock_release() {
+    local owner="${1:-}" existing
+    [[ -n "$owner" ]] || { printf 'ERROR\tusage: --lock-release OWNER\n' >&2; return 2; }
+    [[ -d "$RADIO_LOCK_DIR" ]] || { printf 'lock\tnone\n'; return 0; }
+    existing=$(radio_lock_field owner)
+    if [[ "$existing" != "$(radio_sanitize "$owner")" ]]; then
+        printf 'ERROR\tlock belongs to %s, not %s\n' \
+            "$(radio_sanitize "$existing")" "$(radio_sanitize "$owner")" >&2
+        return 1
+    fi
+    rm -rf "$RADIO_LOCK_DIR" || return 1
+    printf 'lock\treleased\nowner\t%s\n' "$(radio_sanitize "$owner")"
+}
+
+radio_lock_recover() {
+    local pid
+    [[ -d "$RADIO_LOCK_DIR" ]] || { printf 'lock\tnone\n'; return 0; }
+    pid=$(radio_lock_field pid)
+    if radio_lock_pid_alive "$pid"; then
+        printf 'ERROR\tlock is live (pid %s)\n' "$pid" >&2; return 1
+    fi
+    rm -rf "$RADIO_LOCK_DIR" || return 1
+    printf 'lock\trecovered\n'
+}
+
+radio_lock_status_tsv() {
+    local owner pid started device state
+    if [[ ! -d "$RADIO_LOCK_DIR" ]]; then
+        printf 'state\tfree\nowner\tnone\npid\t-\nstarted\t-\ndevice\t-\n'
+        return 0
+    fi
+    owner=$(radio_lock_field owner); pid=$(radio_lock_field pid)
+    started=$(radio_lock_field started); device=$(radio_lock_field device)
+    if radio_lock_pid_alive "$pid"; then state=locked; else state=stale; fi
+    printf 'state\t%s\nowner\t%s\npid\t%s\nstarted\t%s\ndevice\t%s\n' \
+        "$state" "$(radio_sanitize "$owner")" "$(radio_sanitize "$pid")" \
+        "$(radio_sanitize "$started")" "$(radio_sanitize "$device")"
+}
+
+radio_processes_tsv() {
+    printf 'pid\tcommand\n'
+    ps -eo pid=,args= 2>/dev/null | awk '
+        /hackrf_transfer|rtl_sdr|bladeRF-cli|LimeUtil|uhd_rx|SoapySDRUtil|rx_samples_to_file/ && $0 !~ /awk/ {
+            pid=$1; sub(/^[[:space:]]*[0-9]+[[:space:]]+/, ""); gsub(/[\t\r\n]/, " "); print pid "\t" $0
+        }'
+}
 
 # ── sanitisation ────────────────────────────────────────────────────────
 # Device serial numbers come from the hardware itself. A malformed EEPROM or
@@ -561,7 +659,7 @@ radio_gnuradio_plan() {
 EOF
 }
 
-radio_record() {
+radio_record_unlocked() {
     local secs="${1:-}" drv hz rate gain
     # `[[ ok ]] && (( n>0 )) || {...}` is NOT an if. It happened to work on a
     # valid argument, but a *missing* one fell through into the no-SDR path and
@@ -624,6 +722,14 @@ radio_record() {
     return 1
 }
 
+radio_record() {
+    local owner="radio-record-$$" rc
+    radio_lock_claim "$owner" "$$" >/dev/null || return $?
+    radio_record_unlocked "$@"; rc=$?
+    radio_lock_release "$owner" >/dev/null 2>&1 || true
+    return "$rc"
+}
+
 # ═══════════════════════════════════════════════════════════════════
 #  CLI verbs
 # ═══════════════════════════════════════════════════════════════════
@@ -647,6 +753,8 @@ radio_cli_status_tsv() {
     printf 'probe_tools_missing\t%s\n' "$(radio_sanitize "${probe_missing# }")"
     printf 'state_file\t%s\n' "$RADIO_SDR_STATE"
     printf 'captures_dir\t%s\n' "$CAPTURES_DIR"
+    printf 'lock_state\t%s\n' "$(radio_lock_status_tsv | awk -F'\t' '$1=="state"{print $2}')"
+    printf 'lock_owner\t%s\n' "$(radio_lock_status_tsv | awk -F'\t' '$1=="owner"{print $2}')"
 }
 
 radio_cmd_list_tsv() {
@@ -865,6 +973,7 @@ radio_selftest() {
     export RADIO_FREQ_STATE="$TMP_DIR/sdr_freq"
     export RADIO_RATE_STATE="$TMP_DIR/sdr_rate"
     export RADIO_CACHE="$RADIO_TMP/roster.tsv"
+    export RADIO_LOCK_DIR="$TMP_DIR/radio.lock"
 
     local out rc row
 
@@ -1016,10 +1125,21 @@ Found device 1
     chk bandcheck-fr2-needs "$(awk -F'\t' '$1=="needs"{print ($2 ~ /mmWave/) ? 1 : 0}' <<<"$out")" 1
     chk bandcheck-fr2-needs-named "$(fld "$out" needs)" "mmWave hardware (NR FR2 24-40 GHz)"
     chk bandcheck-fr2-nosup  "$(fld "$out" supported)" no
-    out=$(radio_cmd_band_check 942 2>&1); rc=$?
+    #    "No radio attached" is an environment fact, not a code path. A host
+    #    with a HackRF on the bus legitimately answers `supported yes`, so
+    #    force an empty roster to test the branch this assertion names, and
+    #    keep the live answer as a second assertion only when it applies.
+    local empty_roster="$d/empty-roster.tsv"
+    : > "$empty_roster"
+    out=$(RADIO_CACHE="$empty_roster" radio_cmd_band_check 942 2>&1); rc=$?
     chk bandcheck-noradio-rc "$rc" 1
     chk bandcheck-noradio-sup "$(fld "$out" supported)" no
     chk bandcheck-noradio-why "$(printf '%s\n' "$out" | grep -c 'no attached SDR')" 1
+    if (( $(radio_count) == 0 )); then
+        out=$(radio_cmd_band_check 942 2>&1); rc=$?
+        chk bandcheck-live-noradio-rc  "$rc" 1
+        chk bandcheck-live-noradio-sup "$(fld "$out" supported)" no
+    fi
     out=$(radio_cmd_band_check 100 2>&1); rc=$?
     chk bandcheck-unsupported-rc "$rc" 1
     chk bandcheck-unsupported    "$(fld "$out" supported)" no
@@ -1125,17 +1245,33 @@ Found device 1
     chk covers-rtl-gsm  "$(radio_covers "$row" 942 && echo yes || echo no)"       yes
     chk covers-rtl-fr2  "$(radio_covers "$row" 28000 && echo yes || echo no)"     no
     chk covers-empty    "$(radio_covers "$(printf 'soapy:x\tsn\t\t\t\t\t\t\tRX/TX')" 942 && echo yes || echo no)" no
-    chk any-covers-none "$(radio_any_covers 942 && echo yes || echo no)"          no
+    #    Another live-host assertion: an empty roster covers nothing. Forced
+    #    empty rather than assumed empty, then the live case when it applies.
+    chk any-covers-none "$(RADIO_CACHE="$empty_roster" radio_any_covers 942 && echo yes || echo no)" no
+    if (( $(radio_count) == 0 )); then
+        chk any-covers-none-live "$(radio_any_covers 942 && echo yes || echo no)" no
+    fi
 
     # 11. TSV contracts.
     out=$(radio_cmd_list_tsv)
     chk list-header-fields "$(printf '%s\n' "$out" | head -1 | awk -F'\t' '{print NF}')" 9
     chk list-header-first  "$(printf '%s\n' "$out" | head -1 | cut -f1)" driver
-    chk list-rows-no-radio "$(printf '%s\n' "$out" | grep -c .)" 1
+    #    One row means header-only: the live roster is empty. The header is
+    #    asserted above regardless; this asserts the row count only when the
+    #    bus really is empty.
+    if (( $(radio_count) == 0 )); then
+        chk list-rows-no-radio "$(printf '%s\n' "$out" | grep -c .)" 1
+    else
+        chk list-rows-with-radio \
+            "$(printf '%s\n' "$out" | tail -n +2 | awk -F'\t' 'NF==9' | grep -c .)" \
+            "$(radio_count)"
+    fi
     chk header-fields      "$(radio_header | awk -F'\t' '{print NF}')" 9
 
     out=$(radio_cli_status_tsv)
-    chk status-devices   "$(fld "$out" devices)" 0
+    #    The contract: `devices` equals the live roster count and the two never
+    #    disagree. Pinning it to 0 only held on a host with nothing attached.
+    chk status-devices   "$(fld "$out" devices)" "$(radio_count)"
     chk status-selected-driver "$(fld "$out" selected_driver)" hackrf
     chk status-selected-fields "$(awk -F'\t' '$1=="selected"{print NF}' <<<"$out")" 2
     chk status-cantx     "$(fld "$out" can_tx)" yes
@@ -1145,7 +1281,7 @@ Found device 1
     chk status-statefile "$(fld "$out" state_file)" "$RADIO_SDR_STATE"
     chk status-fields    "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2{c++} END{print c+0}')" 0
     chk status-keys      "$(printf '%s\n' "$out" | cut -f1 | tr '\n' ' ')" \
-        "devices selected selected_driver can_tx freq_hz gain_db rate_sps probe_tools_missing state_file captures_dir "
+        "devices selected selected_driver can_tx freq_hz gain_db rate_sps probe_tools_missing state_file captures_dir lock_state lock_owner "
     chk status-probe-missing-names " $(printf '%s\n' "$out" | awk -F'\t' '$1=="probe_tools_missing"{print $2}') " \
         "$( for t in hackrf_info bladeRF-cli LimeUtil uhd_find_devices rtl_test SoapySDRUtil; do
                 command -v "$t" >/dev/null 2>&1 || printf '%s ' "$t"
@@ -1162,7 +1298,23 @@ Found device 1
     chk main-menu-rc    "$(radio_cli_main --menu </dev/null >/dev/null 2>&1; echo $?)" 0
     chk menu-fn-defined "$(declare -F radio_menu >/dev/null && echo yes || echo no)" yes
 
-    # 13. Sanitisation.
+    # 13. Exclusive ownership: live conflicts fail, owners cannot release
+    # each other's claim, and a dead PID is recoverable.
+    rm -rf "$RADIO_LOCK_DIR"
+    chk lock-free "$(radio_lock_status_tsv | awk -F'\t' '$1=="state"{print $2}')" free
+    chk lock-claim-rc "$(radio_lock_claim alpha $$ >/dev/null 2>&1; echo $?)" 0
+    chk lock-owner "$(radio_lock_status_tsv | awk -F'\t' '$1=="owner"{print $2}')" alpha
+    chk lock-conflict-rc "$(radio_lock_claim beta $$ >/dev/null 2>&1; echo $?)" 1
+    chk lock-wrong-release "$(radio_lock_release beta >/dev/null 2>&1; echo $?)" 1
+    chk lock-release-rc "$(radio_lock_release alpha >/dev/null 2>&1; echo $?)" 0
+    mkdir -p "$RADIO_LOCK_DIR"
+    printf 'owner\tdead\npid\t99999999\nstarted\t-\ndevice\t-\n' > "$RADIO_LOCK_DIR/owner.tsv"
+    chk lock-stale "$(radio_lock_status_tsv | awk -F'\t' '$1=="state"{print $2}')" stale
+    chk lock-recover-rc "$(radio_lock_recover >/dev/null 2>&1; echo $?)" 0
+    chk lock-after-recover "$(radio_lock_status_tsv | awk -F'\t' '$1=="state"{print $2}')" free
+    chk processes-header "$(radio_processes_tsv | head -1)" $'pid\tcommand'
+
+    # 14. Sanitisation.
     chk sanitize-tab "$(radio_sanitize $'a\tb')" "a b"
     chk sanitize-nl  "$(radio_sanitize $'a\nb')" "a b"
     chk sanitize-cr  "$(radio_sanitize $'a\rb')" "a b"
@@ -1246,6 +1398,11 @@ radio_cli_main() {
         --set-rate)     radio_cmd_set_rate "${1:-}" ;;
         --plan)         radio_cmd_plan "${1:-}" ;;
         --record)       radio_record "${1:-}" ;;
+        --lock-claim)   radio_lock_claim "${1:-}" "${2:-$$}" ;;
+        --lock-release) radio_lock_release "${1:-}" ;;
+        --lock-status-tsv) radio_lock_status_tsv ;;
+        --lock-recover) radio_lock_recover ;;
+        --processes-tsv) radio_processes_tsv ;;
         --selftest)     radio_selftest ;;
         --menu)         radio_menu ;;
         *)
@@ -1262,7 +1419,12 @@ Usage: $0 COMMAND
   --set-gain <db>            set gain for the selection
   --set-rate <sps>           set sample rate for the selection
   --plan [driver]            print the vendor control commands
-  --record <seconds>         record raw IQ into captures/
+  --record <seconds>         record raw IQ into captures/ with exclusive ownership
+  --lock-claim <owner> [pid] claim the selected SDR for one operation
+  --lock-release <owner>     release only that owner's claim
+  --lock-status-tsv          owner, PID, device and stale/live state
+  --lock-recover             remove a stale claim; refuses a live owner
+  --processes-tsv            vendor processes that may hold an SDR open
   --selftest                 verify parsers and band tables, no radio needed
   --menu                     interactive menu
 

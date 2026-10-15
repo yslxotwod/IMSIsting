@@ -1,0 +1,42 @@
+// 49-imsisting.rules
+// Auto-allow pkexec for IMSIsting module scripts, the same way wifisting's
+// 49-wifisting.rules does, so an install button does not stop to ask for a
+// password on every press.
+//
+// Install once with:
+//   sudo install -m 0644 tools/49-imsisting.rules /etc/polkit-1/rules.d/
+//
+// polkitd watches rules.d with inotify and picks a new file up by itself, so
+// there is normally nothing to reload. If a change is not taking effect use
+// `sudo systemctl restart polkit` (polkit has no reload verb), or
+// `sudo pkill -HUP polkitd`.
+//
+// Verify it with no prompt:
+//   pkexec /home/ysl/IMSIsting/modules/00_deps.sh --check-versions
+//
+// For this to fire, the C side must call `pkexec /path/to/script.sh --verb`
+// directly and never `pkexec env ...`: pkexec's "program" key is the first
+// argument after pkexec, so env would appear there instead and the path match
+// below would never see the script. imsisting_action_run() already does this.
+// The scripts self-locate IMSISTING_ROOT, because pkexec hands them a reset
+// environment.
+
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.policykit.exec") return null;
+
+    var prog = action.lookup("program");
+    if (!prog) return null;
+
+    // Any .sh under an IMSIsting modules directory. indexOf/charAt rather
+    // than EndsWith: polkit's JS engine does not reliably provide the ES6
+    // string methods. Both spellings of the directory are accepted so a
+    // checkout at ~/imsisting works as well as ~/IMSIsting.
+    var under = prog.indexOf("/IMSIsting/modules/") !== -1 ||
+                prog.indexOf("/imsisting/modules/") !== -1;
+    if (under) {
+        var tail = prog.substring(prog.length - 3);
+        if (tail === ".sh") return polkit.Result.YES;
+    }
+
+    return null;
+});

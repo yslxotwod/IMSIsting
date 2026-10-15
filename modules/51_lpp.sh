@@ -2,8 +2,14 @@
 # LPP Positioning — LTE Positioning Protocol (TS 36.413)
 #
 # LPP (LTE Positioning Protocol) carries positioning information between eNB
-# and MME over the S1 interface. This module decodes LPP messages, builds
-# position requests/responses, and tests for position forgery attacks.
+# and MME over the S1 interface. This module decodes the TS 36.413 transport
+# header, builds position requests/responses and parses position responses.
+#
+# Attack owned: O14/P8 adjacency (location via signalling, positioning
+# integrity) — header and position-record half. LPP payloads themselves are
+# ASN.1 PER (TS 37.355); dissecting them needs a real dissector, so
+# `--detect-forgery` is a handoff and says so rather than inventing a result
+# (MODULE_CONVENTIONS §9).
 #
 # Resolve IMSISTING_ROOT from this script's own path.
 if [[ -z "${IMSISTING_ROOT:-}" ]]; then
@@ -149,22 +155,41 @@ EOF
 }
 
 # ── Position forgery detection ─────────────────────────────────────────
+# Handoff, not a detection engine. LPP positioning payloads are ASN.1 PER
+# (TS 37.355) carried inside LPPa/NRPPa; the latitude/longitude live in
+# ProvideLocationInformation, which the TS 36.413 transport header above does
+# not reach. Printing a verdict without decoding that layer would be a
+# fabricated result, so this verb prints the plan and the exact tool needed
+# instead (MODULE_CONVENTIONS §9).
 lpp_detect_forgery() {
     local pcap="$1"
     [[ -z "$pcap" ]] && { warn "usage: --detect-forgery <pcap>"; return 1; }
-    
-    info "scanning $pcap for LPP position anomalies..."
+    [[ -f "$pcap" ]] || { err "no such capture: $pcap"; return 1; }
     
     cat << EOF
 Forged Position Detection: $pcap
 ================================
-Expected position range: -90 to +90 latitude
-Anomalies detected:
-  - Position outside valid bounds: 0
+status: handoff
 
-Status: Handoff
-Hardware: tshark with LPP dissector
-Plan: Analyze LPP position messages for anomalies
+This module performs no detection on this capture. Two layers are missing:
+
+  1. Transport — LPP rides LPPa (S1AP, TS 36.413) or NRPPa (NGAP, TS 38.413),
+     so the capture must first be dissected to the LPP PDU.
+  2. Payload — the LPP body is ASN.1 PER (TS 37.355). The coordinates sit in
+     ProvideLocationInformation and cannot be read with a byte-offset parser.
+
+Hardware / software needed:
+  tshark (>= 3.x, LPP dissector) or Wireshark
+      tshark -r $(printf '%q' "$pcap") -Y lpp -V
+
+What to compare once decoded:
+  - latitude outside -90..+90 or longitude outside -180..+180
+  - a reported accuracy better than the measured reference signal supports
+  - a reported position inconsistent with the serving cell's timing advance
+    and RSRP (a spoofed fix usually cannot stay consistent with both)
+
+For a reference signal to compare against, run 02_cell_recon or 44_ta_geoloc
+against the same serving cell.
 EOF
 }
 
@@ -210,6 +235,14 @@ lpp_selftest() {
     chk header-short "$(lpp_decode_header "01" >/dev/null 2>&1; echo $?)" "1"
     chk pos-empty "$(lpp_parse_position_response "" >/dev/null 2>&1; echo $?)" "1"
     chk pos-missing "$(lpp_parse_position_response >/dev/null 2>&1; echo $?)" "1"
+
+    # 7. --detect-forgery is a handoff: it must refuse rather than invent a
+    #    verdict, and it must never claim an analysis it did not run.
+    chk forgery-noargs "$(lpp_detect_forgery >/dev/null 2>&1; echo $?)" "1"
+    chk forgery-nofile "$(lpp_detect_forgery /nonexistent-lpp.pcap >/dev/null 2>&1; echo $?)" "1"
+    local forgery_out=$(lpp_detect_forgery "$BASH_SOURCE" 2>&1)
+    chk forgery-says-handoff "$(echo "$forgery_out" | grep -c 'status: handoff')" "1"
+    chk forgery-no-verdict "$(echo "$forgery_out" | grep -ciE 'anomalies detected|position outside valid bounds')" "0"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"

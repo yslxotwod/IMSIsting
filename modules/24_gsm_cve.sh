@@ -455,14 +455,28 @@ gcve_probe_map_blocks() {
     fi
 }
 
-# A3/A8 Kc derivation: COMP128-1 is in the specification and known-answer
-# testable in software, which is how a default OTA key set gets spotted.
-gcve_comp128_kc() {
-    local ki="$1" rand="$2"
+# Kc — real A3/A8 (COMP128).
+#
+# COMP128-1 is the classic A3/A8 that most 2G SIMs implement; COMP128-2 and -3
+# are the patched variants later card generations use. All three live in
+# tools/gsm_crypto.py, which carries published known-answer vectors and proves
+# itself with its own --selftest. This is the derivation that separates a
+# default OTA key set from a provisioned one: a known KI yields a known
+# SRES/Kc pair, which a digest of KI||RAND never could.
+gcve_kc_tsv() {
+    local ki="$1" rand="$2" algo="${3:-v1}"
     [[ "$ki" =~ ^[0-9A-Fa-f]{32}$ && "$rand" =~ ^[0-9A-Fa-f]{32}$ ]] || return 2
-    local h
-    h=$(printf '%s%s' "${ki^^}" "${rand^^}" | sha256sum | cut -c1-16)
-    printf '%s\n' "${h:0:8}"
+    case "$algo" in v1|v2|v3) ;; *) return 2 ;; esac
+    local tool="$IMSISTING_ROOT/tools/gsm_crypto.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\ttools/gsm_crypto.py is missing\n' >&2; return 3; }
+    python3 "$tool" --comp128 "$algo" --ki "$ki" --rand "$rand" || return 1
+}
+
+# Just the Kc value, for callers that want the key itself.
+gcve_kc_hex() {
+    local out
+    out=$(gcve_kc_tsv "$@") || return $?
+    printf '%s\n' "$out" | awk -F'\t' '$1=="kc"{print $2}'
 }
 
 gcve_probe_default_key() {
@@ -476,13 +490,20 @@ gcve_probe_default_key() {
         printf 'ERROR\tno KI in %s — the Kc derivation cannot run\n' "$(gcve_sanitize "$f")" >&2
         return 1
     fi
-    kc=$(gcve_comp128_kc "$ki" "00000000000000000000000000000000")
-    printf 'kc_zero_rand\t%s\n' "$kc"
-    if [[ "${ki^^}" == $(printf '0%.0s' $(seq 1 32)) ]]; then
-        printf 'STATUS\tKI is all zero — the card ships a default authentication key\n'
-        return 0
-    fi
-    printf 'STATUS\tKI is not the all-zero default; verify it against the operator key set before trusting Kc\n'
+    local sres kc zero="00000000000000000000000000000000"
+    sres=$(gcve_kc_tsv "$ki" "$zero" | awk -F'\t' '$1=="sres"{print $2}')
+    kc=$(gcve_kc_hex "$ki" "$zero") || {
+        printf 'ERROR\tKc derivation failed\n' >&2; return 1; }
+    printf 'sres_zero_rand\t%s\nkc_zero_rand\t%s\n' "$sres" "$kc"
+    case "${ki^^}" in
+        $(printf '0%.0s' $(seq 1 32)))
+            printf 'STATUS\tKI is all zero — the card ships a default authentication key\n'
+            return 0 ;;
+        $(printf 'F%.0s' $(seq 1 32)))
+            printf 'STATUS\tKI is all ones — a test key, not a provisioned one\n'
+            return 0 ;;
+    esac
+    printf 'STATUS\tKI is not a known default; compare sres_zero_rand/kc_zero_rand against the EF_KC set from the card\n'
 }
 
 # GSMA FS.11 / SGP.02 profile parse. Reports the profile fields that decide
@@ -649,6 +670,19 @@ FINDINGS
 }
 
 # ── CLI verbs ───────────────────────────────────────────────────────────
+# The shared state file is written by 01_radio as <driver>\t<serial>\t<index>.
+# Never paste it raw into a status row: that puts three values into a two-field
+# contract. Split it into three 2-field rows instead.
+gcve_sdr_rows() {
+    local drv="none" sn="none" idx="none"
+    if [[ -s "$GCVE_SDR" ]]; then
+        IFS=$'\t' read -r drv sn idx < <(tr -d '\r' < "$GCVE_SDR" | head -n1)
+    fi
+    printf 'sdr\t%s\n'        "${drv:-none}"
+    printf 'sdr_serial\t%s\n' "${sn:-none}"
+    printf 'sdr_index\t%s\n'  "${idx:-none}"
+}
+
 gcve_cli_status_tsv() {
     local runs plans rows
     runs=$(gcve_run_count)
@@ -660,7 +694,7 @@ gcve_cli_status_tsv() {
     printf 'handoffs\t%s\n'       "$(gcve_ids_of_kind handoff | grep -c . || true)"
     printf 'runs\t%s\n'           "$runs"
     printf 'plans\t%s\n'          "$plans"
-    printf 'sdr\t%s\n'            "$([[ -f "$GCVE_SDR" ]] && cat "$GCVE_SDR" 2>/dev/null || echo none)"
+    gcve_sdr_rows
     printf 'target\t%s\n'         "$(gcve_resolve_target 2>/dev/null || echo none)"
     printf 'dir\t%s\n'            "$GCVE_DIR"
     printf 'runs_file\t%s\n'      "$GCVE_RUNS"
@@ -724,11 +758,13 @@ gcve_cmd_bcd() {
 }
 
 gcve_cmd_kc() {
-    local ki="${1:-}" rand="${2:-}" kc
-    [[ -n "$ki" && -n "$rand" ]] || { printf 'ERROR\tusage: --kc <KI-hex32> <RAND-hex32>\n' >&2; return 2; }
-    kc=$(gcve_comp128_kc "$ki" "$rand") || {
-        printf 'ERROR\tKI and RAND must each be 32 hex digits\n' >&2; return 1; }
-    printf 'ki\t%s\nrand\t%s\nkc\t%s\n' "${ki^^}" "${rand^^}" "$kc"
+    local ki="${1:-}" rand="${2:-}" algo="${3:-v1}" out
+    [[ -n "$ki" && -n "$rand" ]] || {
+        printf 'ERROR\tusage: --kc <KI-hex32> <RAND-hex32> [v1|v2|v3]\n' >&2; return 2; }
+    out=$(gcve_kc_tsv "$ki" "$rand" "$algo") || {
+        printf 'ERROR\tKI and RAND must each be 32 hex digits, algo must be v1, v2 or v3\n' >&2; return 1; }
+    printf '%s\n' "$out"
+    printf 'note\tA3/A8 via COMP128 — validated against published vectors in tools/gsm_crypto.py --selftest\n'
 }
 
 gcve_cmd_plan() {
@@ -769,6 +805,9 @@ gcve_selftest() {
     export LOOT_DIR="$d/loot" CAPTURES_DIR="$d/captures"
     export GCVE_DIR="$d/loot/gsm_cve" GCVE_RUNS="$d/loot/gsm_cve/runs.tsv"
     export GCVE_PLANS="$d/loot/gsm_cve/plans"
+    # Read the shared SDR state from the scratch dir, not the host's: the status
+    # row must be tested against a state file this selftest controls.
+    export GCVE_SDR="$d/state/sdr_device"
     unset GCVE_TARGET GCVE_SIM_ARTEFACT GCVE_OTA_ARTEFACT GCVE_IUH_ARTEFACT GCVE_MAP_ARTEFACT
     mkdir -p "$GCVE_DIR" "$GCVE_PLANS"
 
@@ -888,14 +927,18 @@ gcve_selftest() {
     chk bcd-dec-odd    "$(gcve_bcd_decode abc >/dev/null 2>&1; echo $?)" "1"
     chk bcd-dec-nonhex "$(gcve_bcd_decode zz >/dev/null 2>&1; echo $?)" "1"
 
-    # ── 7. Kc derivation is deterministic and validates its input ──────
-    local ki="00112233445566778899AABBCCDDEEFF"
-    chk kc-deterministic "$(gcve_comp128_kc "$ki" 00000000000000000000000000000000)" \
-                         "$(gcve_comp128_kc "$ki" 00000000000000000000000000000000)"
-    chk kc-len   "$(gcve_comp128_kc "$ki" 00000000000000000000000000000000 | wc -c | tr -d ' ')" "9"
-    chk kc-bad-rc "$(gcve_comp128_kc 12 34 >/dev/null 2>&1; echo $?)" "2"
-    chk kc-differs "$([[ "$(gcve_comp128_kc "$ki" 00000000000000000000000000000000)" != \
-                           "$(gcve_comp128_kc "$ki" FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)" ]] && echo yes || echo no)" "yes"
+    # ── 7. Kc is REAL A3/A8 (COMP128), not a digest of KI||RAND ────────
+    local ki="00112233445566778899AABBCCDDEEFF" zero="00000000000000000000000000000000"
+    # Published COMP128-1 known-answer vector; the same vector is asserted in
+    # tools/gsm_crypto.py --selftest, so this pins the cross-module contract.
+    chk kc-vector-kat   "$(gcve_kc_hex "$ki" "$ki")" "F87EB8222CEA3400"
+    chk sres-vector-kat "$(gcve_kc_tsv "$ki" "$ki" | awk -F'\t' '$1=="sres"{print $2}')" "04A66BA8"
+    chk kc-deterministic "$(gcve_kc_hex "$ki" "$zero")" "$(gcve_kc_hex "$ki" "$zero")"
+    chk kc-len   "$(gcve_kc_hex "$ki" "$zero" | wc -c | tr -d ' ')" "17"
+    chk kc-bad-rc "$(gcve_kc_hex 12 34 >/dev/null 2>&1; echo $?)" "2"
+    chk kc-bad-algo "$(gcve_kc_tsv "$ki" "$zero" v9 >/dev/null 2>&1; echo $?)" "2"
+    chk kc-differs "$([[ "$(gcve_kc_hex "$ki" "$zero")" != \
+                           "$(gcve_kc_hex "$ki" FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)" ]] && echo yes || echo no)" "yes"
 
     # ── 8. artefact probes: real parse on a real listing ───────────────
     cat > "$d/captures/sim.txt" <<'SIM'
@@ -924,7 +967,7 @@ SIM
     out=$(gcve_run_cve DEFAULT-KEY-SUPPORT); rc=$?
     chk kc-run-rc    "$rc" "0"
     chk kc-run-ki    "$(fld "$out" ki_present)" "yes"
-    chk kc-run-status "$(printf '%s\n' "$out" | grep -c 'STATUS	KI is not the all-zero default')" "1"
+    chk kc-run-status "$(printf '%s\n' "$out" | grep -c 'STATUS	KI is not a known default')" "1"
 
     # The all-zero KI is the default-key finding, and must say so.
     printf 'KI: %s\n' "00000000000000000000000000000000" > "$d/captures/simzero.txt"
@@ -1045,6 +1088,10 @@ MAP
     chk runs-empty-rc    "$(: > "$GCVE_RUNS"; gcve_cmd_runs_tsv >/dev/null 2>&1; echo $?)" "1"
 
     # ── 11. status TSV contract ────────────────────────────────────────
+    # 01_radio writes "<driver>\t<serial>\t<index>". A populated state file was
+    # once pasted raw into the 2-field status row; assert the split instead.
+    mkdir -p "${GCVE_SDR%/*}"
+    printf 'bladerf\tdeadbeef0001\t1\n' > "$GCVE_SDR"
     out=$(gcve_cli_status_tsv)
     chk status-module  "$(fld "$out" module)"   "gsm_cve"
     chk status-ids     "$(fld "$out" ids)"      "$nids"
@@ -1054,6 +1101,14 @@ MAP
     chk status-runsf   "$(fld "$out" runs_file)" "$GCVE_RUNS"
     chk status-plansdir "$(fld "$out" plans_dir)" "$GCVE_PLANS"
     chk status-fields  "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"
+    chk status-sdr     "$(fld "$out" sdr)"        "bladerf"
+    chk status-sdr-sn  "$(fld "$out" sdr_serial)" "deadbeef0001"
+    chk status-sdr-idx "$(fld "$out" sdr_index)"  "1"
+    # An absent state file still yields the three rows, all "none".
+    rm -f "$GCVE_SDR"
+    out=$(gcve_cli_status_tsv)
+    chk status-sdr-nofile  "$(fld "$out" sdr)" "none"
+    chk status-fields-none "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"
 
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -1127,7 +1182,7 @@ gcve_cli_main() {
         --probe)       gcve_cmd_probe "${1:-}" ;;
         --plan)        gcve_cmd_plan "${1:-}" ;;
         --bcd)         gcve_cmd_bcd "${1:-}" "${2:-}" ;;
-        --kc)          gcve_cmd_kc "${1:-}" "${2:-}" ;;
+        --kc)          gcve_cmd_kc "${1:-}" "${2:-}" "${3:-v1}" ;;
         --runs-tsv)    gcve_cmd_runs_tsv ;;
         --selftest)    gcve_selftest ;;
         --menu)        gcve_menu ;;
@@ -1144,7 +1199,8 @@ Usage: $0 COMMAND
                             SIM-SAT|OTA|FS11|KC|IUH|IDENTITY
   --plan <ID>               write the handoff plan for a handoff id
   --bcd <enc|dec> VALUE   identity BCD encode or decode
-  --kc <KI-hex32> <RAND-hex32>   derive Kc
+  --kc <KI-hex32> <RAND-hex32> [v1|v2|v3]
+                                 Kc via real A3/A8 (COMP128)
   --runs-tsv                recorded probe runs as TSV
   --selftest                verify routing, parsers and probes without a radio
   --menu                    interactive menu

@@ -6,6 +6,11 @@
 # layer structures. This module covers NPRACH, NPSS/NSSS, NPDCCH/NPDSCH, and
 # the unique SIB types (SIB1-NB, SIB2-NB, SIB3-NB, SIB4-NB, SIB5-NB, SIB14-NB).
 #
+# Attack owned: LPWA adjacency (extends P1/P8 — NB-IoT devices as an identity
+# and availability target) — decode and framing half. NPRACH resource maps,
+# NPSS/NSSS and the SIB1-NB/SIB14-NB fields are decoded for real here; standing
+# up a cell, or flooding NPRACH, is a named-hardware plan (--plan).
+#
 # Resolve IMSISTING_ROOT from this script's own path.
 if [[ -z "${IMSISTING_ROOT:-}" ]]; then
     _sl_src="${BASH_SOURCE[0]}"
@@ -37,7 +42,8 @@ mkdir -p "$TMP_DIR" "$LOOT_DIR" "$CAPTURES_DIR" "$LOGS_DIR" "$STATE_DIR" 2>/dev/
 
 MOD_TMP="$TMP_DIR/iot"
 IOT_DIR="$LOOT_DIR/iot"
-mkdir -p "$MOD_TMP" "$IOT_DIR" 2>/dev/null
+IOT_PLAN_DIR="$IOT_DIR/plans"
+mkdir -p "$MOD_TMP" "$IOT_DIR" "$IOT_PLAN_DIR" 2>/dev/null
 
 # Palette
 C_RED=$'\e[38;5;196m'; C_GRN=$'\e[38;5;46m';   C_YEL=$'\e[38;5;226m'
@@ -148,6 +154,121 @@ iot_nprfcn_to_mhz() {
     }' || { warn "NPRFCN out of range"; return 1; }
 }
 
+# ── Plan files (MODULE_CONVENTIONS §9) ─────────────────────────────────
+# The decode half of this module runs anywhere. Standing up a cell that an
+# NB-IoT device will actually attach to, and flooding its NPRACH, both need
+# hardware this tree does not assume — so they ship as labelled plan files
+# whose first lines are `status: handoff` and the exact hardware.
+iot_plan() {
+    local kind="${1:-}"
+    case "$kind" in
+        fake-cell|nprach-flood) ;;
+        *) printf 'ERROR\tunknown plan: %s (want fake-cell|nprach-flood)\n' "${kind:-<none>}" >&2; return 2 ;;
+    esac
+    local hw ts f
+    hw="an SDR you are authorised to transmit with (USRP B210/X310 or LimeSDR), srsRAN (srsRAN_4G or srsRAN Project) or OpenAirInterface built for NB-IoT/Cat-M1, a programmable SIM or an NB-IoT test USIM, a faraday-isolated enclosure or a licensed test cell, and a sacrificial IoT device or module (Quectel BC66/BG96, u-blox SARA-N) you own"
+    ts=$(date +%Y%m%d_%H%M%S)
+    mkdir -p "$IOT_PLAN_DIR"
+    f="$IOT_PLAN_DIR/plan_${kind}_${ts}.txt"
+    {
+        echo "plan: $kind"
+        echo "status: handoff"
+        echo "hardware: $hw"
+        echo "ts: $(date -Is)"
+        echo
+        if [[ "$kind" == "fake-cell" ]]; then
+            cat <<'EOF'
+objective
+  Show that an NB-IoT / Cat-M1 device will select and attach to a cell this
+  module controls, and record what identity material it offers before any
+  application-layer authentication happens.
+
+why it is worth doing
+  LPWA devices are deployed as meters, trackers and sensors, frequently with
+  no user-visible indication of which cell they are on. LTE identity
+  protection (a GUTI) does not survive a cell the device has never seen, and
+  the attach that follows is where the device is most willing to talk.
+
+preconditions
+  1. The target's band is known: run `01_radio --survey` or read the device's
+     band list. NB-IoT is most often n8 / n20 / n28; Cat-M1 also n1/n3/n18.
+  2. An NPRFCN in that band with no live operator, so the real cell does not
+     out-compete the test cell. `--to-mhz <nprfcn>` converts.
+  3. The device is powered in the enclosure, not on the production network.
+
+sequence
+  1. Stand up the cell with srsRAN's NB-IoT mode at the chosen NPRFCN, with
+     MIB-NB and SIB1-NB set to advertise access, and SIB14-NB (access barring)
+     left permissive. This module's `--decode-sib1 <hex>` verifies the SIB1-NB
+     you broadcast decodes to what you intended.
+  2. Watch the attach: RRC connection setup, then the NAS ATTACH REQUEST. The
+     IMSI appears only if the device has no valid GUTI for this PLMN — which
+     is the normal case for a cell it has never seen. If it offers a GUTI,
+     issue an identity request; a device with no stored mapping answers.
+  3. Record the IMEISV as well. Many LPWA modules answer even when the SIM is
+     absent, and the module model plus firmware narrows the CVE set in 25_lte_cve.
+  4. If the device accepts a network-initiated detach, note that it will
+     re-attach and offer identity again — this is the repeatable part.
+
+what is proven and what is not
+  Proven: the device selects and attaches to a cell you control, and the
+  identity/equipment material it volunteers.
+  Not proven: anything about the core network. This is an air-interface
+  capture, and no traffic leaves the enclosure.
+
+stop conditions
+  Abort on the first unexpected transmission in the surrounding spectrum, and
+  keep the run inside the enclosure or the licensed cell. An NB-IoT cell at
+  n28 shares spectrum with live downlink; transmitting outside a shielded
+  environment is interference, not research.
+EOF
+        else
+            cat <<'EOF'
+objective
+  Measure how little NPRACH traffic it takes to make an NB-IoT cell unable to
+  serve legitimate devices, and whether the preamble a device picks is
+  predictable enough to target.
+
+why it is worth doing
+  NPRACH is 12 subcarriers in a 180 kHz channel with a small number of
+  preamble formats and a frequency-hopping pattern that is fully specified.
+  Capacity is tiny compared with LTE PRACH, so the ratio of attacker packets
+  to legitimate service loss is unusually favourable.
+
+preconditions
+  1. A cell you own — either the fake-cell plan above, or a lab eNB running
+     NB-IoT on an isolated band.
+  2. One or more sacrificial devices with no production SIM.
+  3. A power level chosen so the preamble reaches the eNB and nothing else.
+
+sequence
+  1. Baseline: log the device's preamble selection. Run `--nprach <freq> <cfg>
+     <spacing>` for the configured preamble format and subcarrier set, then
+     confirm against the capture that the real preamble fell where predicted.
+  2. Drive preambles at increasing rate. The interesting measurement is not
+     the maximum rate but the *lowest* rate at which the legitimate device's
+     contention resolution stops completing.
+  3. Repeat with the preambles offset from the device's; if both complete, the
+     collision is resource-blocking rather than preamble-blocking, and the
+     distinction changes the mitigation.
+  4. Record the rate, the configured NPRACH periodicity, and the number of
+     repetitions used (NB-IoT repeats preambles up to 128 times, which is what
+     makes the amplification real).
+
+what is proven and what is not
+  Proven: the offered load at which this cell stops completing contention
+  resolution, on this band and configuration.
+  Not proven: that the same rate works against an operator cell. NPRACH
+  periodicity and repetition counts are operator configuration, and
+  `01_radio --survey` cannot read them — they come from SIB2-NB on the target.
+EOF
+        fi
+    } > "$f"
+    printf 'PLAN\t%s\n' "$f"
+    printf 'STATUS\thandoff\n'
+    printf 'HARDWARE\t%s\n' "$hw"
+}
+
 # ── Selftest ───────────────────────────────────────────────────────────
 iot_selftest() {
     local bad=0 nchk=0
@@ -187,6 +308,18 @@ iot_selftest() {
     chk nprfcn-neg "$(iot_nprfcn_to_mhz -1 >/dev/null 2>&1; echo $?)" "1"
     chk nprfcn-str "$(iot_nprfcn_to_mhz abc >/dev/null 2>&1; echo $?)" "1"
     chk sib1-short "$(iot_decode_sib1_nb "000000" >/dev/null 2>&1; echo $?)" "1"
+
+    # 6. --plan is a handoff and must say so, and must reject an unknown kind.
+    chk plan-bad-kind "$(iot_plan not-a-plan >/dev/null 2>&1; echo $?)" "2"
+    chk plan-no-args  "$(iot_plan >/dev/null 2>&1; echo $?)" "2"
+    local plan_out plan_file
+    plan_out=$(iot_plan fake-cell 2>&1) || true
+    plan_file=$(printf '%s\n' "$plan_out" | awk -F'\t' '$1=="PLAN"{print $2}')
+    chk plan-emits-status "$(printf '%s\n' "$plan_out" | awk -F'\t' '$1=="STATUS"{print $2}')" "handoff"
+    chk plan-file-written "$([[ -n "$plan_file" && -f "$plan_file" ]] && echo y || echo n)" "y"
+    chk plan-file-says-handoff "$(grep -c '^status: handoff$' "$plan_file" 2>/dev/null)" "1"
+    chk plan-file-names-hw "$(grep -c '^hardware: ' "$plan_file" 2>/dev/null)" "1"
+    [[ -n "$plan_file" && -f "$plan_file" ]] && rm -f "$plan_file"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -239,6 +372,7 @@ iot_cli_main() {
         --npss-nss)     iot_npss_to_nss "${1:-0}" ;;
         --decode-sib1)  iot_decode_sib1_nb "${1:-}" ;;
         --to-mhz)       iot_nprfcn_to_mhz "${1:-}" ;;
+        --plan)         iot_plan "${1:-}" ;;
         --selftest)     iot_selftest ;;
         --menu)         iot_menu ;;
         *) cat >&2 <<EOF
@@ -250,6 +384,9 @@ Usage: $0 COMMAND
   --npss-nss [pci]
   --decode-sib1 <hex>
   --to-mhz <nprfcn>
+  --plan <fake-cell|nprach-flood>
+                     write a handoff plan (status: handoff) for a vector that
+                     needs transmit hardware; no transmission is performed
   --selftest         verify tables and parsers
   --menu             interactive menu
 EOF

@@ -270,13 +270,13 @@ gair_decode_lai() {
     o2=$(( 2#$(gair_bits "$hex" 48 8) )) || return 1
     o3=$(( 2#$(gair_bits "$hex" 56 8) )) || return 1
 
-    # Digit stream is MCC1 MCC2 MCC3 MNC1 MNC2 [MNC3], two digits per octet
+    # TS 23.003 2.2 / TS 24.008 10.5.1.3: the digits are packed two per octet
     # with the earlier digit in the LOW nibble:
-    #   o1 = MCC2 MCC1     o2 = MNC1 MCC3     o3 = MNC3 MNC2
+    #   o1 = MCC2 MCC1     o2 = MNC3 MCC3     o3 = MNC2 MNC1
     local mcc1 mcc2 mcc3 mnc1 mnc2 mnc3
     mcc1=$(( o1 & 0x0f ));  mcc2=$(( (o1 >> 4) & 0x0f ))
-    mcc3=$(( o2 & 0x0f ));  mnc1=$(( (o2 >> 4) & 0x0f ))
-    mnc2=$(( o3 & 0x0f ));  mnc3=$(( (o3 >> 4) & 0x0f ))
+    mcc3=$(( o2 & 0x0f ));  mnc3=$(( (o2 >> 4) & 0x0f ))
+    mnc1=$(( o3 & 0x0f ));  mnc2=$(( (o3 >> 4) & 0x0f ))
 
     # A digit of 15 is the filler; only the MNC may carry one (2-digit MNC).
     local mcc_fill=0
@@ -418,43 +418,73 @@ gair_decode_si1() {
 }
 
 # ── paging analysis ─────────────────────────────────────────────────────
-# Paging group per 3GPP TS 45.002 §6.5.2. The MS derives its paging group
-# from the last three digits of the IMSI (the "IMSI mod 1024" rule); the
-# network pages it in the paging block belonging to that group.
+# Paging group per 3GPP TS 45.002 §6.5.2 and §6.5.3, quoted from the section:
 #
-#   paging_group = IMSI mod 1024
+#   CCCH_GROUP   (0 .. BS_CC_CHANS-1) = ((IMSI mod 1000) mod (BS_CC_CHANS x N)) div N
+#   PAGING_GROUP (0 .. N-1)           = ((IMSI mod 1000) mod (BS_CC_CHANS x N)) mod N
 #
-# Within a 51-frame multiframe there are (BS_PA_MFRMS div 2) paging blocks
-# when BS_CC_CHANS = 1; the MS listens to the block
+# where N = (paging blocks per 51-multiframe) x BS_PA_MFRMS.
 #
-#   block = paging_group mod (BS_PA_MFRMS div 2)
+# THE BASE MODULUS IS 1000, NOT 1024. An IMSI is a decimal BCD string, so the
+# reduction is by the last three DECIMAL digits; a power-of-two modulus has no
+# basis in the section. This function used 1024 until it was corrected against
+# the spec text, and its selftest asserted values computed from the same wrong
+# modulus, so the suite passed while every paging group it reported was wrong.
 #
-# and returns to that block every BS_PA_MFRMS multiframes. BS_AG_BLKS_RES
-# reserves the first blocks of each multiframe for AGCH, so the usable paging
-# blocks start after that reservation.
+# The paging blocks available per 51-multiframe come from TS 45.002 table 5:
+# nine on a non-combined cell, three when the CCCH shares TS0 with SDCCH/4
+# (BS_CCCH_SDCCH_COMB), less the BS_AG_BLKS_RES blocks reserved for access
+# grants, which are counted from and including block number 0:
+#
+#   pblocks = (BS_CCCH_SDCCH_COMB ? 3 : 9) - BS_AG_BLKS_RES
+#
+# The MS monitors one block per 51-multiframe:
+#
+#   paging block index = PAGING_GROUP mod (N div BS_PA_MFRMS)
+#                      = PAGING_GROUP mod pblocks
+#
+# and the 51-multiframe it must watch satisfies
+#
+#   PAGING_GROUP div pblocks = (FN div 51) mod BS_PA_MFRMS
+#
+# The index is relative to the AVAILABLE blocks, so the CCCH block number in
+# the multiframe (block B0..B8 order, table 4) is BS_AG_BLKS_RES + index.
 gair_paging_group() {
     local imsi="${1:-}"
     [[ "$imsi" =~ ^[0-9]{6,15}$ ]] || return 1
     # bash arithmetic is 64-bit: a 15-digit IMSI fits with room to spare.
-    printf '%d' "$(( 10#$imsi % 1024 ))"
+    printf '%d' "$(( 10#$imsi % 1000 ))"
 }
 
 gair_paging_params() {
-    local imsi="$1" pamfrms="${2:-2}" agblk="${3:-1}" ccch="${4:-1}"
+    local imsi="$1" pamfrms="${2:-2}" agblk="${3:-1}" ccch="${4:-1}" comb="${5:-false}"
     local grp; grp=$(gair_paging_group "$imsi") || return 1
     (( pamfrms >= 2 && pamfrms <= 9 )) || return 1
-    (( ccch >= 1 )) || ccch=1
-    local n=$(( pamfrms / 2 ))
-    (( n >= 1 )) || n=1
-    local block=$(( grp % n ))
+    (( ccch >= 1 && ccch <= 4 )) || return 1
+    (( agblk >= 0 && agblk <= 7 )) || return 1
+    # TS 45.002 table 5: blocks available per 51-multiframe on this CCCH.
+    local maxb=9
+    [[ "$comb" == "true" ]] && maxb=3
+    local n=$(( maxb - agblk ))
+    (( n >= 1 )) || return 1
+    local n_total=$(( n * pamfrms ))
+    local x=$(( grp % (ccch * n_total) ))
+    local ccch_group=$(( x / n_total ))
+    local pg=$(( x % n_total ))
+    local block=$(( pg % n ))
     local slot=$(( agblk + block ))
     printf 'imsi\t%s\n' "$imsi"
-    printf 'paging_group\t%d\n' "$grp"
+    printf 'imsi_mod_1000\t%d\n' "$(( 10#$imsi % 1000 ))"
+    printf 'paging_group\t%d\n' "$pg"
+    printf 'ccch_group\t%d\n' "$ccch_group"
     printf 'bs_pa_mfrms\t%d\n' "$pamfrms"
     printf 'bs_cc_chans\t%d\n' "$ccch"
+    printf 'bs_ag_blks_res\t%d\n' "$agblk"
+    printf 'bs_ccch_sdcch_comb\t%s\n' "$comb"
     printf 'paging_block_index\t%d\n' "$block"
     printf 'ccch_slot\t%d\n' "$slot"
     printf 'blocks_per_multiframe\t%d\n' "$n"
+    printf 'paging_blocks_total\t%d\n' "$n_total"
     printf 'repeat_every_multiframes\t%d\n' "$pamfrms"
 }
 
@@ -524,6 +554,57 @@ gair_decode_identity_ie() {
             printf 'value\t%s\n' "$hex" ;;
     esac
     return 0
+}
+
+# Per-payload identity exposure, for a caller that holds a capture rather than
+# a store: 03_gsmtap hands us every GSM Um payload via --identity-exposure.
+# TSV with the kind in field 1 and the value in field 2, which is the shape
+# 03_gsmtap's --identities-tsv consumes.
+#
+# A GSMTAP GSM Um payload is a WHOLE message, so the Mobile Identity IE has to
+# be located before it can be decoded. Only message types that carry one at a
+# fixed offset are handled; anything else is refused rather than guessed at,
+# so a payload that is not an identity message claims nothing.
+gair_identity_exposure() {
+    local hex; hex=$(gair_norm_hex "${1:-}")
+    gair_is_hex "$hex" || return 2
+    (( ${#hex} >= 4 )) || return 2
+
+    # Abis framing prefixes an L2 pseudo-length octet whose value plus one
+    # equals the number of bytes that follow it. Um framing has no such octet.
+    local body="$hex"
+    local l2=$(( 16#${hex:0:2} ))
+    (( l2 + 1 == ${#hex} / 2 )) && body="${hex:2}"
+    (( ${#body} >= 4 )) || return 1
+
+    local pd=$(( 16#${body:0:2} & 0x0f ))
+    local mt=$(( 16#${body:2:2} ))
+
+    # Octet index at which the Mobile Identity IE begins.
+    local ie
+    case "$pd:$mt" in
+        6:9)  ie=2 ;;   # RR  IDENTITY RESPONSE      TS 44.018 9.1.15
+        5:1)  ie=3 ;;   # MM  IMSI DETACH INDICATOR  TS 24.008 9.2.10
+        5:8)  ie=3 ;;   # MM  LOCATION UPDATING REQ  TS 24.008 9.2.15
+        5:36) ie=3 ;;   # MM  CM SERVICE REQUEST     TS 24.008 9.2.9
+        5:39) ie=3 ;;   # MM  PAGING RESPONSE        TS 24.008 9.2.18
+        *)    return 1 ;;
+    esac
+    (( ${#body} / 2 > ie )) || return 1
+
+    local out
+    out=$(gair_decode_identity_ie "${body:$(( ie * 2 ))}" 2>/dev/null) || return 1
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "$out"
+    return 0
+}
+
+gair_cmd_identity_exposure() {
+    local arg="${1:-}"
+    [[ -n "$arg" ]] || {
+        printf 'ERROR\tusage: --identity-exposure <hex message>\n' >&2; return 2; }
+    gair_identity_exposure "$arg" || {
+        printf 'ERROR\tno mobile identity in this message\n' >&2; return 1; }
 }
 
 # ── cipher mode audit ───────────────────────────────────────────────────
@@ -933,21 +1014,22 @@ gair_selftest() {
 
     #    MCC/MNC extraction from a real PLMN encoding. Per TS 23.003 §2.2 the
     #    IMSI/LAI digits are packed two per octet with digit1 in the LOW nibble,
-    #    so MCC=262 MNC=01 packs as 62 02 f1 (the trailing F is the 2-digit MNC
-    #    filler). MCC=208 MNC=01 packs as 02 08 f1.
-    #    Frame: header 15061b + CI 0001 + 62 02 f1 + LAC 3039 (=12345).
-    local si3b="15061b00016202f130390000000000000000"
+    #    and the octets run  MCC2 MCC1 | MNC3 MCC3 | MNC2 MNC1, so MCC=262 MNC=01
+    #    packs as 62 f2 10 (the F is the 2-digit MNC filler). MCC=208 MNC=01
+    #    packs as 02 f8 10.
+    #    Frame: header 15061b + CI 0001 + 62 f2 10 + LAC 3039 (=12345).
+    local si3b="15061b000162f21030390000000000000000"
     local lai; lai=$(gair_decode_lai "$si3b")
     chk si3-mcc "$(fld "$lai" mcc)" "262"
     chk si3-mnc "$(fld "$lai" mnc)" "01"
     chk si3-lac "$(fld "$lai" lac)" "12345"
 
-    #    A 3-digit MNC fills the filler nibble: MCC=262 MNC=010 -> 62 02 01.
-    local si3c="15061b000162020130390000000000000000"
+    #    A 3-digit MNC fills the MNC3 nibble: MCC=262 MNC=010 -> 62 02 10.
+    local si3c="15061b000162021030390000000000000000"
     chk si3-mnc-3digit "$(fld "$(gair_decode_lai "$si3c")" mnc)" "010"
 
-    #    A known-good foreign PLMN: MCC=208 MNC=01 packs as 02 08 f1.
-    local si3d="15061b00010208f130390000000000000000"
+    #    A known-good foreign PLMN: MCC=208 MNC=01 packs as 02 f8 10.
+    local si3d="15061b000102f81030390000000000000000"
     chk si3-mcc-fr "$(fld "$(gair_decode_lai "$si3d")" mcc)" "208"
     chk si3-mnc-fr "$(fld "$(gair_decode_lai "$si3d")" mnc)" "01"
 
@@ -956,21 +1038,39 @@ gair_selftest() {
     chk si-nonhex       "$(gair_decode_si 'zzzz' >/dev/null 2>&1; echo $?)" "2"
     chk si-nonhex-empty "$(gair_cmd_decode_si >/dev/null 2>&1; echo $?)" "2"
 
-    # 5. Paging group: hand-computed against the IMSI mod 1024 rule.
-    chk page-group-1  "$(gair_paging_group 310150123456789)" "277"
-    chk page-group-2  "$(gair_paging_group 208011234567890)" "722"
-    chk page-group-3  "$(gair_paging_group 123456789012345)" "889"
+    # 5. Paging group: hand-computed from TS 45.002 §6.5.2, whose base modulus
+    #    is 1000 — the last three DECIMAL digits of the IMSI — not 1024.
+    chk page-group-1  "$(gair_paging_group 310150123456789)" "789"
+    chk page-group-2  "$(gair_paging_group 208011234567890)" "890"
+    chk page-group-3  "$(gair_paging_group 123456789012345)" "345"
     chk page-group-4  "$(gair_paging_group 001010000000001)" "1"
     chk page-group-bad "$(gair_paging_group 'not-an-imsi' >/dev/null 2>&1; echo $?)" "1"
     chk page-group-short "$(gair_paging_group '12345' >/dev/null 2>&1; echo $?)" "1"
+    #    Regression guard for the old power-of-two modulus: 310150123456789 mod
+    #    1024 = 277, and 277 must not be what this reports.
+    chk page-group-not1024 "$([[ "$(gair_paging_group 310150123456789)" == "277" ]] && echo yes || echo no)" "no"
 
-    #    Paging block index within the multiframe: group mod (BS_PA_MFRMS/2).
+    #    Block index = PAGING_GROUP mod pblocks, pblocks = 9 - BS_AG_BLKS_RES on
+    #    a non-combined cell (TS 45.002 table 5). 789 mod 8 = 5, and the CCCH
+    #    block number is 1 + 5 = 6.
     out=$(gair_paging_params 310150123456789 2 1)
-    chk page-block-mf2 "$(fld "$out" paging_block_index)" "0"
+    chk page-block-mf2  "$(fld "$out" paging_block_index)"    "5"
+    chk page-slot-mf2   "$(fld "$out" ccch_slot)"             "6"
+    chk page-pblocks-2  "$(fld "$out" blocks_per_multiframe)" "8"
+    #    789 mod 7 = 5 when two blocks are reserved for access grants.
     out=$(gair_paging_params 310150123456789 6 2)
-    chk page-block-mf6 "$(fld "$out" paging_block_index)" "$(( 277 % 3 ))"
-    chk page-slot      "$(fld "$out" ccch_slot)"        "$(( 2 + 277 % 3 ))"
+    chk page-block-mf6 "$(fld "$out" paging_block_index)" "5"
+    chk page-slot      "$(fld "$out" ccch_slot)"          "7"
+    chk page-total-n   "$(fld "$out" paging_blocks_total)" "42"
+    #    Combined CCCH + SDCCH/4 leaves three blocks (table 5). 789 mod 3 = 0.
+    out=$(gair_paging_params 310150123456789 2 0 1 true)
+    chk page-block-comb "$(fld "$out" paging_block_index)"    "0"
+    chk page-pblocks-c  "$(fld "$out" blocks_per_multiframe)" "3"
+    chk page-comb-flag  "$(fld "$out" bs_ccch_sdcch_comb)"    "true"
     chk page-bad-mfrms "$(gair_paging_params 310150123456789 99 >/dev/null 2>&1; echo $?)" "1"
+    chk page-bad-ccch  "$(gair_paging_params 310150123456789 2 1 9 >/dev/null 2>&1; echo $?)" "1"
+    #    Reserving more blocks than the combined layout has must fail, not clamp.
+    chk page-over-res  "$(gair_paging_params 310150123456789 2 4 1 true >/dev/null 2>&1; echo $?)" "1"
 
     # 6. A5/1 known-answer vector — the official Briceno/Goldberg/Wagner
     #    test vector: Kc octets 12 23 45 67 89 AB CD EF, frame 0x134,
@@ -1027,6 +1127,21 @@ gair_selftest() {
     chk id-tmsi-val  "$(fld "$(gair_decode_identity_ie "$tid")" tmsi)" "12345678"
     chk id-tmsi-code "$(fld "$(gair_decode_identity_ie "$tid")" identity_type_code)" "4"
     chk id-bad-nonhex "$(gair_decode_identity_ie 'zz' >/dev/null 2>&1; echo $?)" "1"
+
+    #    --identity-exposure locates the identity IE inside a WHOLE message,
+    #    which is what 03_gsmtap hands us. A bare IE is not a message, a
+    #    message carrying no identity must claim nothing, and an Abis-framed
+    #    payload (L2 pseudo-length: value = octets that follow it) must still
+    #    be read. These are the cases the caller actually produces.
+    chk ir-rr-response "$(fld "$(gair_identity_exposure "0609$idie")" imsi)" "310150123456789"
+    chk ir-rr-type     "$(fld "$(gair_identity_exposure "0609$idie")" identity_type)" "IMSI"
+    chk ir-mm-lu-req   "$(fld "$(gair_identity_exposure "050800$idie")" imsi)" "310150123456789"
+    chk ir-mm-cm-svc   "$(fld "$(gair_identity_exposure "052400$idie")" imsi)" "310150123456789"
+    chk ir-abis-frame  "$(fld "$(gair_identity_exposure "0a0609$idie")" imsi)" "310150123456789"
+    chk ir-bare-ie     "$(gair_identity_exposure "$idie" >/dev/null 2>&1; echo $?)" "1"
+    chk ir-no-identity "$(gair_identity_exposure '06061b000162f2103039' >/dev/null 2>&1; echo $?)" "1"
+    chk ir-nonhex      "$(gair_identity_exposure 'zzzz' >/dev/null 2>&1; echo $?)" "2"
+    chk ir-empty       "$(gair_identity_exposure '' >/dev/null 2>&1; echo $?)" "2"
 
     # 9. SCH burst: BSIC and frame number from a real 25-bit payload.
     #    bsic = 6 bits, ncc = bsic div 8 (3 bits), bcc = bsic mod 8 (3 bits).
@@ -1162,6 +1277,7 @@ gair_cli_main() {
         --cipher-audit)        gair_cmd_cipher_audit "${1:-01}" ;;
         --a5-1-keystream)      gair_cmd_a5_keystream "${1:-}" "${2:-114}" "${3:-0}" ;;
         --imsi-exposure-tsv)   gair_imsi_exposure_tsv ;;
+        --identity-exposure)   gair_cmd_identity_exposure "${1:-}" ;;
         --decode-sch)          gair_decode_sch "${1:-}" ;;
         --decode-pcap)         gair_decode_pcap "${1:-}" ;;
         --selftest)            gair_selftest ;;
@@ -1177,6 +1293,7 @@ Usage: $0 COMMAND
   --cipher-audit [hex]            classify a Cipher Mode Command
   --a5-1-keystream <kc> [n] [fn]  A5/1 keystream, Kc in hex, fn default 0
   --imsi-exposure-tsv             where an IMSI crosses the air in the clear
+  --identity-exposure <hex>       mobile identity in one Um message (TSV)
   --decode-sch <hex>              BSIC and frame number from an SCH burst
   --decode-pcap <pcap>            list RR messages in a GSMTAP capture
   --selftest                      verify decoders and A5/1 without a radio
