@@ -5,12 +5,15 @@
 /captures/
 /logs/
 /state/
+/cases/
 /tmp/
 
 # ── build output ────────────────────────────────────────────────────────
 /native/builddir/
 *.o
 *.obj
+__pycache__/
+*.py[cod]
 
 # ── editor / OS ─────────────────────────────────────────────────────────
 *.swp
