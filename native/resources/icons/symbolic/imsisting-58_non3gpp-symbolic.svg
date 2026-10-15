@@ -1,7 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-<g fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="butt" stroke-linejoin="miter">
-<rect x="88" y="88" width="56" height="112"/>
-<path d="M116 88 V52 M100 116 H132"/>
-<path d="M168 108 l24 20 -24 20 24 20"/>
-</g>
+<defs><mask id="cut"><rect width="256" height="256" fill="white"/><circle cx="188" cy="150" r="56" fill="black"/></mask></defs>
+<g fill="none" stroke="#63798f" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#cut)"><path d="M72 208 A40 40 0 1 1 72 128" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/><path d="M140 208 A40 40 0 1 1 140 128" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/><rect x="96.0" y="148.0" width="22.0" height="40.0" rx="2.0"/></g>
+<g fill="#c8d4e2" stroke="none" transform="translate(188 150)"><rect x="-30.0" y="-18.0" width="46.0" height="36.0" rx="6.0"/><path d="M16 -18 L32 -38" fill="none" stroke="#c8d4e2" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><circle cx="34.0" cy="-42.0" r="7.0"/></g>
 </svg>

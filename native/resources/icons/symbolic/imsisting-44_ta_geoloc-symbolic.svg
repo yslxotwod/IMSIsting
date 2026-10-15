@@ -1,7 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-<g fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="butt" stroke-linejoin="miter">
-<circle cx="128" cy="128" r="24"/>
-<circle cx="128" cy="128" r="56"/>
-<circle cx="128" cy="128" r="88"/>
-</g>
+<defs><mask id="cut"><rect width="256" height="256" fill="white"/><circle cx="188" cy="150" r="56" fill="black"/></mask></defs>
+<g fill="none" stroke="#63798f" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#cut)"><path d="M104 128 m-66 0 a66 66 0 1 0 132 0 a66 66 0 1 0 -132 0" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/><path d="M104 44 v18" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/><path d="M104 194 v18" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 128 h18" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/><path d="M170 128 h18" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/><path d="M104 128 L142 166" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g fill="#c8d4e2" stroke="none" transform="translate(188 150)"><path d="M0 0 m-38 0 a38 38 0 1 0 76 0 a38 38 0 1 0 -76 0" fill="none" stroke="#c8d4e2" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><path d="M0 0 m-22 0 a22 22 0 1 0 44 0 a22 22 0 1 0 -44 0" fill="none" stroke="#c8d4e2" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><circle cx="0.0" cy="0.0" r="9.0"/></g>
 </svg>

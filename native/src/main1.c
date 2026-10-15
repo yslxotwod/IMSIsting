@@ -66,6 +66,32 @@ typedef struct {
 
 /* One CSS accent class per taxonomy group, so the category colour is set in a
    single place and followed by the sidebar, the cards and the module header. */
+/* Load a bundled icon, falling back to the system theme.
+ *
+ * These used to be referenced by icon name, which resolves through the system
+ * icon theme - so every tile depended on IMSIsting having installed 56 SVGs
+ * into ~/.local/share/icons/hicolor AND on that theme being visible to the
+ * app. That is not portable across distros, and where a stale copy WAS
+ * installed the stale copy won, so a rebuilt icon set changed nothing on
+ * screen. Bundling them in the binary removes the dependency: they ship with
+ * the executable and cannot be missing or out of date. The theme lookup stays
+ * as a fallback for names that are not ours, like GTK's own
+ * window-close-symbolic. */
+static GtkWidget *
+imsisting_icon_image(const char *name)
+{
+    if (name != NULL && *name != '\0') {
+        g_autofree char *res = g_strdup_printf(
+            "/com/imsisting/native/icons/scalable/actions/%s.svg", name);
+
+        if (g_resources_get_info(res, G_RESOURCE_LOOKUP_FLAGS_NONE,
+                                 NULL, NULL, NULL))
+            return gtk_image_new_from_resource(res);
+    }
+    return gtk_image_new_from_icon_name(
+        (name != NULL && *name != '\0') ? name : "dialog-information-symbolic");
+}
+
 static const char *
 category_class(const char *cat)
 {
@@ -111,6 +137,22 @@ typedef struct {
     GtkWidget *page;
 } ModuleView;
 
+/* One file in the evidence index. The whole index is rebuilt from disk on
+   every refresh, so an entry never outlives the scan that produced it. */
+typedef struct {
+    char   *path;      /* absolute */
+    char   *name;      /* basename - the thing the user searches for */
+    char   *module;    /* the loot/ subdirectory it came from */
+    guint64 size;
+    gint64  mtime;
+} LootEntry;
+
+/* Defined with the Overview cards further down, but called from
+   casebook_refresh() above them. */
+static GtkWidget *casebook_card(const char *title, GtkWidget **body_out);
+static void casebook_kv_fill(GtkWidget *body, const char *tsv, const char *empty_msg);
+static void casebook_counts_fill(GtkWidget *body, const char *tsv);
+
 typedef struct {
     AppState *state;
     const ModuleDefinition *module;
@@ -141,8 +183,23 @@ struct _AppState {
     GPtrArray *running;
 
     /* Permanent-tab and status-strip widgets. */
-    GtkWidget *sidebar_paned;
-    GtkWidget *sidebar_toggle;
+    GtkWidget *sidebar_revealer;
+
+    /* The page panel. Everything that is not the dashboard is shown here,
+       floating over it, rather than replacing it. */
+    GtkWidget *sheet;
+    GtkWidget *sheet_scrim;
+
+    /* The header's search field and the result list it opens under itself. */
+    GtkWidget *header_search;
+    GtkWidget *palette;
+    GtkWidget *palette_list;
+    GtkWidget *sidebar_search;
+    /* The six permanent pages as a list at the top of the drawer. Held so
+       the highlight can follow the notebook instead of being rebuilt. */
+    GtkWidget *drawer_nav;
+    GtkWidget *drawer_nav_rows[6];
+    gboolean   drawer_nav_syncing;
     GtkWidget *status_sdr, *status_tx, *status_cells, *status_gps, *status_freq;
     /* Live station band on the dashboard: case-scoped facts the status strip
        does not carry (case, targets, evidence, alerts). */
@@ -156,8 +213,19 @@ struct _AppState {
        runs, which is what "Most used" orders by; `density` is the tile
        density class kept on the window from launch to launch. */
     GHashTable *recent_counts;
+    /* Drawer "recent places": module ids most-recent-first, and the list box
+       they are rendered into. Session-scoped — the persisted counts above
+       answer "what do I use", this answers "what was I just in". */
+    GPtrArray *recent_mru;
+    GtkWidget *drawer_recent_box;
     char       *density;
     GtkWidget *loot_list;
+    GtkWidget *loot_search;
+    GtkWidget *loot_sort;
+    GtkWidget *loot_count_lbl;
+    GPtrArray *loot_entries;   /* of LootEntry, the sorted index */
+    int        loot_sort_mode; /* 0 name, 1 size, 2 newest, 3 module */
+
     /* The Stats tiles' value labels. The counts they show describe a
        filesystem that modules keep writing to while the app runs, so they are
        recomputed when the tab is opened rather than frozen at startup. */
@@ -213,10 +281,19 @@ struct _AppState {
     gboolean       event_errors_only;
     guint          event_errors;
 
-    /* Casebook workspace. Evidence retains the original loot preview. */
-    GtkWidget     *loot_preview;
-    GtkTextBuffer *loot_preview_buf;
-    char          *loot_preview_path;
+    /* Casebook workspace. */
+    GtkWidget     *casebook_tabs;        /* the inner notebook */
+    guint          casebook_filled;      /* bit per tab: filled at least once */
+    /* The radio's status, probed while the splash is still up. The first
+       --status-tsv walks six drivers and costs about two seconds; started
+       before the interface is built, it overlaps that work instead of
+       following it. */
+    char          *radio_prefetch;
+    GPid           radio_prefetch_pid;
+    int            radio_prefetch_fd;
+    GtkWidget     *casebook_case_body;   /* Overview cards */
+    GtkWidget     *casebook_target_body;
+    GtkWidget     *casebook_counts_body;
     GtkTextBuffer *casebook_overview;   /* Overview still a dump; converted next */
     /* Records, not text: these were monospace TSV dumps, which is what made
        the Casebook tabs look like a terminal sitting in the window. */
@@ -242,6 +319,28 @@ struct _AppState {
        the result shows next to the button that was pressed. Held with a
        ref: a run in flight can outlive the page it started from. */
     GtkTextBuffer *active_output;
+
+    /* The splash owns the application's only window for the second or so
+       between process start and the main window, which is what makes it
+       possible to report the boot instead of hiding it. Everything here is
+       NULL or zero once the main window is up. */
+    GtkApplication *splash_app;
+    GtkWidget      *splash_window;
+    GtkWidget      *splash_area;
+    cairo_surface_t *splash_art;      /* the two PNGs, decoded once */
+    cairo_surface_t *splash_logo;
+    cairo_surface_t *splash_bg;       /* art + shade + gradient, composed once */
+    int              splash_bg_w, splash_bg_h;
+    guint           splash_source;    /* the tick that drives the stages */
+    guint           splash_step;      /* stages completed so far */
+    const char     *splash_label;     /* the stage being run, or NULL */
+    gint64          splash_stage_us;  /* when the last one was started */
+    double          splash_shown;     /* the bar's position, 0.0 .. 1.0 */
+    gboolean        splash_video;     /* this launch plays the film, not the art */
+    GtkMediaStream *splash_media;     /* the film, polled for "has it ended" */
+    GtkWidget      *splash_poster;    /* still art, until the film can draw */
+    gint64          splash_film_us;   /* when the film started playing */
+    gint64          splash_start_us;  /* when the splash first appeared */
 };
 
 typedef struct {
@@ -486,11 +585,14 @@ module_name_for(const char *module_id)
 
 static void append_event(AppState *state, const char *message);
 static void recents_bump(AppState *state, const char *module_id);
+static void drawer_recent_push(AppState *state, const char *module_id);
+static void drawer_recent_refresh(AppState *state);
 static guint recent_count_of(int idx);
 static void live_inspector_reset(AppState *state);
 static guint live_shown_count(AppState *state);
 static gboolean live_follow_idle(gpointer user_data);
 static void sidebar_set_active(AppState *state, const char *module_id);
+static void drawer_set_open(AppState *state, gboolean open);
 static GtkWidget *empty_state(const char *icon, const char *title,
                               const char *hint);
 static void show_toast_full(AppState *state, const char *title,
@@ -721,48 +823,172 @@ append_event(AppState *state, const char *message)
     event_scroll_to_end(state);
 }
 
+/* ── toasts ─────────────────────────────────────────────────────────
+   Modelled on wifisting's show_toast_full. Each toast is its own revealer
+   over a box of [icon | title over content | close glyph]: it slides in
+   from the right, slides back out, and is destroyed when the slide
+   finishes. The stack is capped, because the previous version appended
+   forever and a long session walked the newest toast off the top of the
+   screen.
+
+   What this replaced: one label with <b> markup and an x icon button,
+   appended and removed with no transition. It appeared and disappeared in
+   a single frame, which reads as a repaint glitch rather than as
+   something the program is telling you. */
+typedef struct {
+    GtkWidget *revealer;
+    guint      timeout_id;
+} ToastEntry;
+
+static void
+toast_entry_free(gpointer data)
+{
+    ToastEntry *t = data;
+
+    if (t->timeout_id != 0) g_source_remove(t->timeout_id);
+    g_free(t);
+}
+
+static gboolean
+toast_dismiss_cb(gpointer user_data)
+{
+    ToastEntry *t = user_data;
+
+    t->timeout_id = 0;
+    if (t->revealer != NULL)
+        gtk_revealer_set_reveal_child(GTK_REVEALER(t->revealer), FALSE);
+    return G_SOURCE_REMOVE;
+}
+
+/* The toast is removed when its slide-out finishes, not when the timer
+   fires, so the exit animation is never cut off half way. */
+static void
+toast_reveal_done(GObject *obj, GParamSpec *pspec, gpointer user_data)
+{
+    ToastEntry *t = user_data;
+    GtkWidget *parent;
+
+    (void) obj; (void) pspec;
+    if (t->revealer == NULL) return;
+    if (gtk_revealer_get_child_revealed(GTK_REVEALER(t->revealer))) return;
+    parent = gtk_widget_get_parent(t->revealer);
+    if (parent != NULL && GTK_IS_BOX(parent))
+        gtk_box_remove(GTK_BOX(parent), t->revealer);
+}
+
 static void
 toast_close_clicked(GtkButton *button, gpointer user_data)
 {
-    GtkWidget *toast = user_data;
-    GtkWidget *parent = gtk_widget_get_parent(toast);
-    if (parent != NULL)
-        gtk_box_remove(GTK_BOX(parent), toast);
+    ToastEntry *t = user_data;
+
     (void) button;
+    if (t->timeout_id != 0) {
+        g_source_remove(t->timeout_id);
+        t->timeout_id = 0;
+    }
+    if (t->revealer != NULL)
+        gtk_revealer_set_reveal_child(GTK_REVEALER(t->revealer), FALSE);
 }
+
+#define TOAST_STACK_MAX 5
 
 static void
 show_toast_full(AppState *state, const char *title,
                 const char *message, const char *severity)
 {
-    if (state == NULL || state->toast_box == NULL) return;
+    ToastEntry *t;
+    GtkWidget *rev, *box, *icon, *col, *title_lbl, *content_lbl, *close, *glyph;
+    const char *icon_name;
+    gboolean is_err = (g_strcmp0(severity, "error") == 0);
+    guint n = 0;
 
-    GtkWidget *toast = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    gtk_widget_add_css_class(toast, "toast");
-    if (g_strcmp0(severity, "error") == 0)
-        gtk_widget_add_css_class(toast, "toast-error");
-    else if (g_strcmp0(severity, "ok") == 0)
-        gtk_widget_add_css_class(toast, "toast-ok");
+    /* GTK_IS_WIDGET, not == NULL: at shutdown the state can hold a pointer
+       that is non-NULL and no longer a widget, and touching it aborts. */
+    if (state == NULL || !GTK_IS_WIDGET(state->toast_box)) return;
 
-    g_autofree char *text = NULL;
-    if (title != NULL && *title != '\0')
-        text = g_strdup_printf("<b>%s</b>\n%s", title, message ? message : "");
-    else
-        text = g_strdup(message ? message : "");
+    {
+        GtkWidget *c = gtk_widget_get_first_child(state->toast_box);
+        while (c != NULL) { n++; c = gtk_widget_get_next_sibling(c); }
+        if (n >= TOAST_STACK_MAX) {
+            GtkWidget *first = gtk_widget_get_first_child(state->toast_box);
+            if (first != NULL)
+                gtk_box_remove(GTK_BOX(state->toast_box), first);
+        }
+    }
 
-    GtkWidget *label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(label), text);
-    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
-    gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
-    gtk_widget_set_hexpand(label, TRUE);
+    if (is_err)                                     icon_name = "dialog-error-symbolic";
+    else if (g_strcmp0(severity, "warn") == 0)      icon_name = "dialog-warning-symbolic";
+    else if (g_strcmp0(severity, "ok") == 0)        icon_name = "emblem-ok-symbolic";
+    else                                            icon_name = "dialog-information-symbolic";
 
-    GtkWidget *close = gtk_button_new_from_icon_name("window-close-symbolic");
-    gtk_widget_add_css_class(close, "flat");
-    g_signal_connect(close, "clicked", G_CALLBACK(toast_close_clicked), toast);
+    rev = gtk_revealer_new();
+    box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    icon = imsisting_icon_image(icon_name);
+    col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    title_lbl = gtk_label_new((title != NULL && *title != '\0') ? title : "IMSIsting");
+    content_lbl = gtk_label_new(message != NULL ? message : "");
+    close = gtk_button_new();
+    glyph = gtk_label_new("×");
 
-    gtk_box_append(GTK_BOX(toast), label);
-    gtk_box_append(GTK_BOX(toast), close);
-    gtk_box_append(GTK_BOX(state->toast_box), toast);
+    gtk_widget_add_css_class(box, "toast");
+    gtk_widget_add_css_class(icon, "toast-icon");
+    gtk_widget_add_css_class(title_lbl, "toast-title");
+    gtk_widget_add_css_class(content_lbl, "toast-content");
+    gtk_widget_add_css_class(close, "toast-close");
+    gtk_widget_add_css_class(glyph, "toast-close-glyph");
+    if (severity != NULL && *severity != '\0') {
+        g_autofree char *cls = g_strdup_printf("toast-%s", severity);
+        gtk_widget_add_css_class(box, cls);
+    }
+
+    gtk_image_set_pixel_size(GTK_IMAGE(icon), 18);
+    gtk_widget_set_valign(icon, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(icon, 2);
+
+    gtk_label_set_xalign(GTK_LABEL(title_lbl), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(content_lbl), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(title_lbl), PANGO_ELLIPSIZE_END);
+    gtk_label_set_wrap(GTK_LABEL(content_lbl), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(content_lbl), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_max_width_chars(GTK_LABEL(content_lbl), 58);
+    /* Selectable: a toast often carries the one line worth pasting into a
+       report, and it used to be impossible to copy. */
+    gtk_label_set_selectable(GTK_LABEL(content_lbl), TRUE);
+
+    gtk_widget_set_hexpand(col, TRUE);
+    gtk_widget_set_halign(title_lbl, GTK_ALIGN_START);
+    gtk_widget_set_halign(content_lbl, GTK_ALIGN_START);
+
+    gtk_button_set_child(GTK_BUTTON(close), glyph);
+    gtk_widget_set_valign(close, GTK_ALIGN_START);
+    gtk_widget_set_tooltip_text(close, "Dismiss");
+
+    gtk_box_append(GTK_BOX(col), title_lbl);
+    gtk_box_append(GTK_BOX(col), content_lbl);
+    gtk_box_append(GTK_BOX(box), icon);
+    gtk_box_append(GTK_BOX(box), col);
+    gtk_box_append(GTK_BOX(box), close);
+
+    gtk_revealer_set_child(GTK_REVEALER(rev), box);
+    gtk_revealer_set_transition_type(GTK_REVEALER(rev),
+                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_LEFT);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(rev), 220);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(rev), FALSE);
+
+    t = g_new0(ToastEntry, 1);
+    t->revealer = rev;
+
+    g_object_set_data_full(G_OBJECT(rev), "toast-entry", t, toast_entry_free);
+    g_signal_connect(close, "clicked", G_CALLBACK(toast_close_clicked), t);
+    g_signal_connect(rev, "notify::child-revealed",
+                     G_CALLBACK(toast_reveal_done), t);
+
+    gtk_box_append(GTK_BOX(state->toast_box), rev);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(rev), TRUE);
+
+    /* Errors are the ones worth reading twice. */
+    t->timeout_id = g_timeout_add(is_err ? 9000u : 4200u,
+                                  toast_dismiss_cb, t);
 }
 
 /* ==================================================================== */
@@ -888,6 +1114,10 @@ action_waited(GObject *source, GAsyncResult *result, gpointer user_data)
     } else {
         g_autofree char *m = g_strdup_printf("%s: done", run->label);
         append_event(state, m);
+        /* A success used to be silent here while a failure raised a toast,
+           so the only notification the operator ever saw was bad news. A
+           button that worked and a button that did nothing looked the same. */
+        show_toast_full(state, run->label, "completed", "ok");
         status_label_set(run->status_label, "Done", "status-ok");
     }
 
@@ -1873,7 +2103,7 @@ module_page_build_submenu(ModulePage *mp)
     for (int i = 0; i < mp->n_views; i++) {
         GtkWidget *row = gtk_list_box_row_new();
         GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-        GtkWidget *icon = gtk_image_new_from_icon_name(mp->views[i].icon);
+        GtkWidget *icon = imsisting_icon_image(mp->views[i].icon);
         GtkWidget *label = gtk_label_new(mp->views[i].name);
         gtk_widget_add_css_class(row, "module-menu-row");
         gtk_image_set_pixel_size(GTK_IMAGE(icon), 20);
@@ -2037,6 +2267,26 @@ build_overview_view(AppState *state, const ModuleDefinition *module,
     return outer;
 }
 
+/* Closing a module page from its own header. The tab strip that used to
+   carry the close control is gone, so without this a module could only ever
+   be replaced, never put away. */
+static void
+module_close_clicked(GtkButton *button, gpointer user_data)
+{
+    AppState *state = g_object_get_data(G_OBJECT(button), "state");
+    GtkWidget *page = user_data;
+    int index = gtk_notebook_page_num(GTK_NOTEBOOK(state->notebook), page);
+    if (index >= 0)
+        gtk_notebook_remove_page(GTK_NOTEBOOK(state->notebook), index);
+
+    /* Removing the page you are standing on makes GTK pick the next one for
+       you, and its pick is the last page left in the notebook - Settings. So
+       closing a module used to open Settings. Page 0 is the dashboard's slot,
+       and landing there is what closing means: notebook_page_switched() reads
+       it and lifts the sheet off the dashboard. */
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), 0);
+}
+
 static GtkWidget *
 create_module_page(AppState *state, const ModuleDefinition *module,
                    ModuleSubmenuEntry *entries, int n_entries,
@@ -2055,7 +2305,7 @@ create_module_page(AppState *state, const ModuleDefinition *module,
        description beneath them. */
     GtkWidget *header = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     GtkWidget *hrow   = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *hicon = gtk_image_new_from_icon_name(module_icon_for(module->id));
+    GtkWidget *hicon = imsisting_icon_image(module_icon_for(module->id));
     gtk_image_set_pixel_size(GTK_IMAGE(hicon), 34);
     GtkWidget *htitle = gtk_label_new(module_name_for(module->id));
     GtkWidget *hcat = gtk_label_new(module->category);
@@ -2081,6 +2331,15 @@ create_module_page(AppState *state, const ModuleDefinition *module,
     gtk_box_append(GTK_BOX(hrow), htitle);
     gtk_box_append(GTK_BOX(hrow), hcat);
     gtk_box_append(GTK_BOX(hrow), pill);
+
+    GtkWidget *hclose = gtk_button_new_from_icon_name("window-close-symbolic");
+    gtk_widget_add_css_class(hclose, "flat");
+    gtk_widget_add_css_class(hclose, "module-close");
+    gtk_widget_set_tooltip_text(hclose, "close this module");
+    g_object_set_data(G_OBJECT(hclose), "state", state);
+    g_signal_connect(hclose, "clicked", G_CALLBACK(module_close_clicked), outer);
+    gtk_box_append(GTK_BOX(hrow), hclose);
+
     gtk_box_append(GTK_BOX(header), hrow);
     if (module->desc != NULL && *module->desc != '\0')
         gtk_box_append(GTK_BOX(header), hdesc);
@@ -2254,6 +2513,8 @@ create_closable_tab_label(const char *title, GtkWidget *page, AppState *state)
 static void
 open_module(AppState *state, const ModuleDefinition *module)
 {
+    if (state == NULL || module == NULL) return;
+    drawer_recent_push(state, module->id);
     GtkWidget *existing = find_module_page(state, module->id);
     if (existing != NULL) {
         int index = gtk_notebook_page_num(GTK_NOTEBOOK(state->notebook), existing);
@@ -2296,8 +2557,12 @@ module_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer user_data)
     AppState *state = user_data;
     const ModuleDefinition *module =
         g_object_get_data(G_OBJECT(row), "module");
-    if (module != NULL)
+    if (module != NULL) {
         open_module(state, module);
+        /* A drawer has done its job the moment it is used: leaving it over
+           the page it just opened would hide the thing that was asked for. */
+        drawer_set_open(state, FALSE);
+    }
     (void) list;
 }
 
@@ -2370,116 +2635,211 @@ sidebar_search_changed(GtkEditable *e, gpointer user_data)
     sidebar_apply_filter(GTK_WIDGET(user_data), gtk_editable_get_text(e));
 }
 
+static void
+drawer_nav_row_selected(GtkListBox *list, GtkListBoxRow *row, gpointer user_data)
+{
+    AppState *state = user_data;
+    int index;
+    (void) list;
+
+    /* A row selected programmatically -- because the notebook moved and the
+       list is catching up -- must not be read as a click, or every page
+       change would also close the drawer. */
+    if (state->drawer_nav_syncing || row == NULL) return;
+
+    index = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "page-index"));
+    if (index >= 0 &&
+        index < gtk_notebook_get_n_pages(GTK_NOTEBOOK(state->notebook)))
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), index);
+    drawer_set_open(state, FALSE);
+}
+
+/* The drawer's own navigation: the six permanent pages in tab order, which
+   is the order they are appended in. Above the catalogue, because the
+   drawer is read top to bottom -- where you can go, then everything that
+   can be opened once you are there. */
+static GtkWidget *
+build_drawer_nav(AppState *state)
+{
+    static const char *names[6] = {
+        "Dashboard", "Live Traffic", "Casebook", "Stats", "Help", "Settings"
+    };
+    static const char *icons[6] = {
+        "view-grid-symbolic", "network-wireless-symbolic", "folder-symbolic",
+        "office-chart-bar-symbolic", "help-browser-symbolic",
+        "emblem-system-symbolic"
+    };
+
+    GtkWidget *nav = gtk_list_box_new();
+    gtk_widget_add_css_class(nav, "drawer-nav");
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(nav), GTK_SELECTION_SINGLE);
+
+    for (int i = 0; i < 6; i++) {
+        GtkWidget *rowbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 9);
+        GtkWidget *icon = imsisting_icon_image(icons[i]);
+        GtkWidget *label = gtk_label_new(names[i]);
+        gtk_image_set_pixel_size(GTK_IMAGE(icon), 16);
+        gtk_widget_set_hexpand(label, TRUE);
+        gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+        gtk_widget_add_css_class(label, "drawer-nav-label");
+        gtk_box_append(GTK_BOX(rowbox), icon);
+        gtk_box_append(GTK_BOX(rowbox), label);
+
+        GtkWidget *row = gtk_list_box_row_new();
+        gtk_widget_add_css_class(row, "drawer-nav-row");
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), rowbox);
+        g_object_set_data(G_OBJECT(row), "page-index", GINT_TO_POINTER(i));
+        gtk_list_box_append(GTK_LIST_BOX(nav), row);
+        state->drawer_nav_rows[i] = row;
+    }
+
+    g_signal_connect(nav, "row-selected",
+                     G_CALLBACK(drawer_nav_row_selected), state);
+    state->drawer_nav = nav;
+    return nav;
+}
+
+/* ---- recent places ----
+   The catalogue is ordered by category, which is the right order to browse
+   in and the wrong order to return in: the module you were just inside is
+   the one you are most likely to want next, and finding it again means
+   remembering which category it was filed under. */
+#define DRAWER_RECENT_MAX 6
+
+static void
+drawer_recent_refresh(AppState *state)
+{
+    GtkWidget *list = state->drawer_recent_box;
+    GtkWidget *row;
+
+    if (list == NULL) return;
+
+    while ((row = gtk_widget_get_first_child(list)) != NULL)
+        gtk_list_box_remove(GTK_LIST_BOX(list), row);
+
+    if (state->recent_mru == NULL || state->recent_mru->len == 0) {
+        GtkWidget *empty = gtk_label_new("Nothing opened yet");
+        gtk_widget_add_css_class(empty, "drawer-recent-empty");
+        gtk_label_set_xalign(GTK_LABEL(empty), 0.0f);
+        row = gtk_list_box_row_new();
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), empty);
+        gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
+        gtk_list_box_row_set_selectable(GTK_LIST_BOX_ROW(row), FALSE);
+        gtk_list_box_append(GTK_LIST_BOX(list), row);
+        return;
+    }
+
+    for (guint i = 0; i < state->recent_mru->len; i++) {
+        const char *id = g_ptr_array_index(state->recent_mru, i);
+        const ModuleDefinition *mod = NULL;
+        GtkWidget *hb, *icon, *label;
+
+        for (int m = 0; m < N_MODULES; m++)
+            if (g_strcmp0(modules[m].id, id) == 0) { mod = &modules[m]; break; }
+        if (mod == NULL) continue;
+
+        hb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        icon = imsisting_icon_image(mod->icon != NULL ? mod->icon
+                                            : "application-x-executable-symbolic");
+        label = gtk_label_new(mod->name);
+        gtk_image_set_pixel_size(GTK_IMAGE(icon), 14);
+        gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+        gtk_widget_set_hexpand(label, TRUE);
+        gtk_box_append(GTK_BOX(hb), icon);
+        gtk_box_append(GTK_BOX(hb), label);
+
+        row = gtk_list_box_row_new();
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), hb);
+        /* Same "module" payload the catalogue rows carry, so the existing
+           module_row_activated handler opens these too. */
+        g_object_set_data(G_OBJECT(row), "module", (gpointer) mod);
+        gtk_list_box_append(GTK_LIST_BOX(list), row);
+    }
+}
+
+static void
+drawer_recent_push(AppState *state, const char *module_id)
+{
+    if (state == NULL || module_id == NULL) return;
+
+    if (state->recent_mru == NULL)
+        state->recent_mru = g_ptr_array_new_with_free_func(g_free);
+
+    /* Move to front rather than append: re-opening a module should not put a
+       second copy of it in the list. */
+    for (guint i = 0; i < state->recent_mru->len; i++) {
+        if (g_strcmp0(g_ptr_array_index(state->recent_mru, i), module_id) == 0) {
+            g_ptr_array_remove_index(state->recent_mru, i);
+            break;
+        }
+    }
+    g_ptr_array_insert(state->recent_mru, 0, g_strdup(module_id));
+    while (state->recent_mru->len > DRAWER_RECENT_MAX)
+        g_ptr_array_remove_index(state->recent_mru,
+                                 state->recent_mru->len - 1);
+
+    drawer_recent_refresh(state);
+}
+
 static GtkWidget *
 build_sidebar(AppState *state)
 {
+    /* The drawer is one surface: the page list, a rule, then the catalogue.
+       The background lives on the outer box rather than on the list so the
+       two halves cannot drift apart. */
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(outer, "sidebar");
+
+    gtk_box_append(GTK_BOX(outer), build_drawer_nav(state));
+
+    GtkWidget *rule = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_add_css_class(rule, "drawer-rule");
+    gtk_box_append(GTK_BOX(outer), rule);
+
     GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_widget_add_css_class(content, "sidebar");
     state->sidebar_content = content;
 
-    GtkWidget *search = gtk_search_entry_new();
-    gtk_widget_add_css_class(search, "sidebar-search");
-    gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(search),
-        "Search modules…");
-    gtk_box_append(GTK_BOX(content), search);
-    g_signal_connect(search, "search-changed",
-                     G_CALLBACK(sidebar_search_changed), content);
+    /* The module catalogue used to live here: a search field over category
+       expanders listing all 56 modules. It went because every one of those
+       modules is already reachable the two ways an operator actually uses —
+       the dashboard grid for browsing and the header palette (Ctrl+K) for
+       naming a module outright — and a third list of the same 56 items was
+       three navigation systems answering one question.
 
-    const char *last_category = NULL;
-    GtkWidget *list = NULL;
+       `content` is still built and still recorded on the state because the
+       open-module highlight helpers read it back; it simply never enters the
+       hierarchy now, so those helpers operate on a detached box instead of
+       needing to be unwound first. */
 
-    for (int i = 0; i < N_MODULES; i++) {
-        if (g_strcmp0(last_category, modules[i].category) != 0) {
-            int count = 0;
-            for (int j = 0; j < N_MODULES; j++)
-                if (g_strcmp0(modules[j].category, modules[i].category) == 0) count++;
 
-            GtkWidget *hdr = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-            GtkWidget *cat = gtk_label_new(modules[i].category);
-            GtkWidget *cnt = gtk_label_new(NULL);
-            g_autofree char *cs = g_strdup_printf("%d", count);
+    /* ---- recent places ----
+       Pinned under the catalogue instead of scrolling inside it: the whole
+       point of the list is that it is reachable without hunting, and a
+       section that scrolls away is one you have to go and find. */
+    {
+        GtkWidget *wrap = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        GtkWidget *head = gtk_label_new("RECENT");
+        GtkWidget *list = gtk_list_box_new();
 
-            gtk_widget_add_css_class(cat, "sidebar-category");
-            gtk_widget_add_css_class(cat, category_class(modules[i].category));
-            gtk_widget_add_css_class(cnt, "sidebar-cat-count");
-            gtk_label_set_xalign(GTK_LABEL(cat), 0.0f);
-            gtk_widget_set_hexpand(cat, TRUE);
-            gtk_label_set_text(GTK_LABEL(cnt), cs);
-            gtk_box_append(GTK_BOX(hdr), cat);
-            gtk_box_append(GTK_BOX(hdr), cnt);
+        gtk_widget_add_css_class(wrap, "drawer-recent");
+        gtk_widget_add_css_class(head, "drawer-recent-head");
+        gtk_label_set_xalign(GTK_LABEL(head), 0.0f);
+        gtk_widget_add_css_class(list, "drawer-nav");
+        gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
+        gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(list), TRUE);
+        g_signal_connect(list, "row-activated",
+                         G_CALLBACK(module_row_activated), state);
 
-            list = gtk_list_box_new();
-            gtk_widget_add_css_class(list, "sidebar-list");
-            gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_SINGLE);
-            gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(list), TRUE);
-            g_signal_connect(list, "row-activated",
-                             G_CALLBACK(module_row_activated), state);
-
-            GtkWidget *exp = gtk_expander_new(NULL);
-            gtk_expander_set_label_widget(GTK_EXPANDER(exp), hdr);
-            gtk_expander_set_expanded(GTK_EXPANDER(exp), TRUE);
-            gtk_expander_set_child(GTK_EXPANDER(exp), list);
-            gtk_box_append(GTK_BOX(content), exp);
-
-            last_category = modules[i].category;
-        }
-
-        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-        GtkWidget *icon = gtk_image_new_from_icon_name(modules[i].icon);
-        gtk_image_set_pixel_size(GTK_IMAGE(icon), 32);
-        GtkWidget *label = gtk_label_new(modules[i].name);
-        GtkWidget *id = gtk_label_new(modules[i].id);
-
-        gtk_image_set_pixel_size(GTK_IMAGE(icon), 16);
-        gtk_widget_add_css_class(icon, category_class(modules[i].category));
-        gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
-        gtk_widget_set_hexpand(label, TRUE);
-        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
-        gtk_widget_add_css_class(id, "module-id");
-
-        /* A module whose script is missing is dimmed, not hidden: an absent
-           module is information, not something to conceal. */
-        if (!module_script_exists(modules[i].id)) {
-            gtk_widget_add_css_class(label, "module-offline");
-            gtk_widget_set_tooltip_text(label, "module script not found");
-        } else {
-            gtk_widget_set_tooltip_text(label,
-                modules[i].desc ? modules[i].desc : modules[i].id);
-        }
-
-        gtk_box_append(GTK_BOX(box), icon);
-        gtk_box_append(GTK_BOX(box), label);
-        gtk_box_append(GTK_BOX(box), id);
-
-        GtkWidget *row = gtk_list_box_row_new();
-        gtk_widget_add_css_class(row, category_class(modules[i].category));
-        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
-        g_object_set_data(G_OBJECT(row), "module", (gpointer) &modules[i]);
-        gtk_list_box_append(GTK_LIST_BOX(list), row);
-        /* Reachable by module id, so the sidebar can show which module is
-           open no matter where it was opened from. */
-        if (state->sidebar_rows == NULL)
-            state->sidebar_rows =
-                g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-        g_hash_table_insert(state->sidebar_rows, g_strdup(modules[i].id), row);
+        state->drawer_recent_box = list;
+        gtk_box_append(GTK_BOX(wrap), head);
+        gtk_box_append(GTK_BOX(wrap), list);
+        gtk_box_append(GTK_BOX(outer), wrap);
+        drawer_recent_refresh(state);
     }
 
-    GtkWidget *scrolled = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
-                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-
-    /* Shown only when a search hides every category; see sidebar_apply_filter. */
-    GtkWidget *no_match = empty_state("system-search-symbolic", "No match",
-        "Try a name, an id such as 02_cell_recon, or a category.");
-    gtk_widget_set_visible(no_match, FALSE);
-    gtk_widget_set_margin_top(no_match, 24);
-    gtk_box_append(GTK_BOX(content), no_match);
-    g_object_set_data(G_OBJECT(content), "empty", no_match);
-
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), content);
-    gtk_widget_set_size_request(scrolled, 272, -1);
-
-    return scrolled;
+    return outer;
 }
 
 /* Bring the active sidebar row into view, once there is a layout to measure.
@@ -2545,7 +2905,6 @@ sidebar_set_active(AppState *state, const char *module_id)
     GtkWidget *content, *row, *list, *exp;
 
     if (state == NULL || state->sidebar == NULL) return;
-    if (!GTK_IS_SCROLLED_WINDOW(state->sidebar)) return;
     content = state->sidebar_content;
     if (content == NULL) return;
 
@@ -2768,7 +3127,11 @@ tsv_row_field(const char *text, const char *key)
         if (g_strcmp0(cols[i], key) == 0) { col = i; break; }
     if (col < 0) return NULL;
     row = g_strsplit(head[1], "\t", -1);
-    return (row[col] != NULL) ? g_strdup(row[col]) : NULL;
+    /* A header with no data line under it splits to a single empty field, so
+       the column index can point past the end of row. That used to be read
+       anyway - a heap overrun that crashed the app the first time a case
+       existed and the target table was empty. Index only what exists. */
+    return (col >= 0 && col < (int) g_strv_length(row)) ? g_strdup(row[col]) : NULL;
 }
 
 /* Same, but the last data row (the newest alert). */
@@ -2789,7 +3152,7 @@ tsv_last_field(const char *text, const char *key)
         if (g_strcmp0(cols[i], key) == 0) { col = i; break; }
     if (col < 0) return NULL;
     g_auto(GStrv) row = g_strsplit(lines[last - 1], "\t", -1);
-    return (row[col] != NULL) ? g_strdup(row[col]) : NULL;
+    return (col >= 0 && col < (int) g_strv_length(row)) ? g_strdup(row[col]) : NULL;
 }
 
 static char *
@@ -2835,8 +3198,12 @@ status_poll(gpointer user_data)
     AppState *state = user_data;
     if (state->window == NULL) return G_SOURCE_CONTINUE;
 
-    /* Radio: device, transmit capability, tuned frequency. */
-    g_autofree char *radio = module_status("01_radio");
+    /* Radio: device, transmit capability, tuned frequency. The splash starts
+       this probe early and hands the answer over, because it is the single
+       slowest thing the tick does. */
+    g_autofree char *radio = state->radio_prefetch != NULL
+                           ? g_steal_pointer(&state->radio_prefetch)
+                           : module_status("01_radio");
     if (radio != NULL) {
         g_autofree char *drv = tsv_field(radio, "selected_driver");
         g_autofree char *sel = tsv_field(radio, "selected");
@@ -2947,7 +3314,7 @@ status_cell(const char *key, GtkWidget **value_out)
 static GtkWidget *
 build_status_strip(AppState *state)
 {
-    GtkWidget *strip = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 22);
+    GtkWidget *strip = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_add_css_class(strip, "status-strip");
 
     gtk_box_append(GTK_BOX(strip),
@@ -3020,28 +3387,36 @@ dashboard_shortcut(AppState *state, const char *eyebrow, const char *title,
                    const ModuleDefinition *module, int tab)
 {
     GtkWidget *button = gtk_button_new();
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *label = gtk_label_new(eyebrow);
-    GtkWidget *image = gtk_image_new_from_icon_name(icon);
-    GtkWidget *name = gtk_label_new(title);
-    GtkWidget *note = gtk_label_new(detail);
-    gtk_image_set_pixel_size(GTK_IMAGE(image), 28);
-    gtk_widget_add_css_class(button, "mission-shortcut");
-    gtk_widget_add_css_class(box, "mission-shortcut-inner");
-    gtk_widget_add_css_class(label, "mission-shortcut-eyebrow");
-    gtk_widget_add_css_class(name, "mission-shortcut-title");
-    gtk_widget_add_css_class(note, "mission-shortcut-note");
+    GtkWidget *box    = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *image  = imsisting_icon_image(icon);
+    GtkWidget *label  = gtk_label_new(eyebrow);
+    GtkWidget *name   = gtk_label_new(title);
+    GtkWidget *chev   = imsisting_icon_image("go-next-symbolic");
+
+    /* One line per step instead of a three-line card: the strip is an order of
+       operations, and it must not outweigh the module grid it introduces. The
+       sentence that used to print on the card is now the tooltip. */
+    gtk_image_set_pixel_size(GTK_IMAGE(image), 16);
+    gtk_image_set_pixel_size(GTK_IMAGE(chev), 12);
+    gtk_widget_add_css_class(button, "mission-step");
+    gtk_widget_add_css_class(box,    "mission-step-inner");
+    gtk_widget_add_css_class(image,  "mission-step-icon");
+    gtk_widget_add_css_class(label,  "mission-step-eyebrow");
+    gtk_widget_add_css_class(name,   "mission-step-title");
+    gtk_widget_add_css_class(chev,   "mission-step-chevron");
     gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
     gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
-    gtk_label_set_xalign(GTK_LABEL(note), 0.0f);
-    gtk_label_set_wrap(GTK_LABEL(note), TRUE);
-    gtk_widget_set_hexpand(label, TRUE);
-    gtk_box_append(GTK_BOX(top), label);
-    gtk_box_append(GTK_BOX(top), image);
-    gtk_box_append(GTK_BOX(box), top);
+    /* Only the title may ellipsize. The step index is two digits and is the
+       one thing on the chip that must survive a narrow window. */
+    gtk_label_set_ellipsize(GTK_LABEL(name),  PANGO_ELLIPSIZE_END);
+    gtk_widget_set_hexpand(name, TRUE);
+    gtk_widget_set_valign(image, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(chev,  GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(button, detail);
+    gtk_box_append(GTK_BOX(box), image);
+    gtk_box_append(GTK_BOX(box), label);
     gtk_box_append(GTK_BOX(box), name);
-    gtk_box_append(GTK_BOX(box), note);
+    gtk_box_append(GTK_BOX(box), chev);
     gtk_button_set_child(GTK_BUTTON(button), box);
     if (module != NULL) {
         g_object_set_data(G_OBJECT(button), "module", (gpointer) module);
@@ -3061,70 +3436,81 @@ static GtkWidget *
 make_module_card(AppState *state, const ModuleDefinition *mod)
 {
     GtkWidget *button = gtk_button_new();
-    GtkWidget *card   = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget *card   = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
     GtkWidget *top    = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     GtkWidget *cat    = gtk_label_new(mod->category);
-    GtkWidget *icon   = gtk_image_new_from_icon_name(mod->icon);
+    GtkWidget *icon   = imsisting_icon_image(mod->icon);
     gboolean offline  = !module_script_exists(mod->id);
     gboolean pinned   = state->pins != NULL &&
                         g_hash_table_contains(state->pins, mod->id);
     gboolean recent   = state->recent != NULL &&
                         g_hash_table_contains(state->recent, mod->id);
-    GtkWidget *chip   = gtk_label_new(
-        offline ? "OFFLINE" : pinned ? "PINNED" : recent ? "RECENT" : "READY");
-    gtk_image_set_pixel_size(GTK_IMAGE(icon), 64);
+    /* Only a state that DIFFERS from the norm gets a badge. A tile that is
+       present and unpinned says nothing, because READY on 56 tiles is not
+       information, it is wallpaper - and it teaches the reader to ignore the
+       one corner where OFFLINE has to be noticed. */
+    const char *chip_text = offline ? "OFFLINE"
+                          : pinned  ? "PINNED"
+                          : recent  ? "RECENT" : NULL;
+    GtkWidget *chip   = chip_text ? gtk_label_new(chip_text) : NULL;
+    gtk_image_set_pixel_size(GTK_IMAGE(icon), 57);
     gtk_widget_add_css_class(icon, category_class(mod->category));
     GtkWidget *name   = gtk_label_new(mod->name);
-    GtkWidget *desc   = gtk_label_new(mod->desc ? mod->desc : "");
     GtkWidget *id     = gtk_label_new(mod->id);
 
     gtk_widget_add_css_class(button, "module-card");
     gtk_widget_add_css_class(card,   "module-card-inner");
+    /* A GtkButton hands its child its natural width and centres it, so the
+       inner surface stayed card-width while the tile around it was set to
+       the width the grid computed - the tile looked small and the space
+       inside it looked like a margin. Filling makes size_request on the
+       button mean what it says. */
+    gtk_widget_set_hexpand(card, TRUE);
+    gtk_widget_set_halign(card, GTK_ALIGN_FILL);
     gtk_widget_add_css_class(card,   category_class(mod->category));
     gtk_widget_add_css_class(top,    "module-card-toprow");
     gtk_widget_add_css_class(cat,    "module-card-category");
-    gtk_widget_add_css_class(chip,  "module-card-state");
-    gtk_widget_add_css_class(chip, offline ? "module-card-offline" : "module-card-ready");
-    if (!offline && pinned)
-        gtk_widget_add_css_class(chip, "module-card-pinned");
-    else if (!offline && recent)
-        gtk_widget_add_css_class(chip, "module-card-recent");
+    if (chip != NULL) {
+        gtk_widget_add_css_class(chip, "module-card-state");
+        gtk_widget_add_css_class(chip, offline ? "module-card-offline"
+                                               : "module-card-ready");
+        if (!offline && pinned)
+            gtk_widget_add_css_class(chip, "module-card-pinned");
+        else if (!offline && recent)
+            gtk_widget_add_css_class(chip, "module-card-recent");
+    }
     gtk_widget_add_css_class(cat,    category_class(mod->category));
     gtk_widget_add_css_class(icon,   "module-card-icon");
     gtk_widget_add_css_class(name,   "module-card-title");
-    gtk_widget_add_css_class(desc,   "module-card-desc");
     gtk_widget_add_css_class(id,     "module-card-id");
+    /* The id was the third line of every tile. 56 monospace filenames read as
+       a wall, and the name above already identifies the module; the id is in
+       the tooltip and in the palette. Hiding rather than deleting keeps the
+       label available for the search that still matches on it. */
+    gtk_widget_set_visible(id, FALSE);
     if (offline)
         gtk_widget_add_css_class(icon, "module-card-offline");
 
+    /* Left-aligned on the same rail as the category, the name and the id. It
+       used to be centred and vexpanded, which let it swallow every spare pixel
+       in the tile and push the text away from it - the emptiness the tile was
+       criticised for. */
     gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(icon, GTK_ALIGN_CENTER);
-    gtk_widget_set_vexpand(icon, TRUE);
 
     gtk_label_set_xalign(GTK_LABEL(cat), 0.0f);
     gtk_label_set_ellipsize(GTK_LABEL(cat), PANGO_ELLIPSIZE_END);
     gtk_widget_set_hexpand(cat, TRUE);
-    gtk_widget_set_margin_end(chip, 20);   /* clear the pin overlay */
+    if (chip != NULL)
+        gtk_widget_set_margin_end(chip, 4);
 
     gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
     gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
-    gtk_label_set_xalign(GTK_LABEL(desc), 0.0f);
-    gtk_label_set_wrap(GTK_LABEL(desc), TRUE);
-    gtk_label_set_lines(GTK_LABEL(desc), 2);
-    gtk_label_set_ellipsize(GTK_LABEL(desc), PANGO_ELLIPSIZE_END);
     gtk_label_set_xalign(GTK_LABEL(id), 0.0f);
 
-    /* Bound each label's NATURAL width - it is what decides how many tiles
-       a row holds. For the wrapping description the effective property is
-       max_width_chars, not width_chars: a wrapping label reports the width
-       of its whole unwrapped text as its natural width, and width_chars
-       does not cap that. Left uncapped, one description asked for ~500px,
-       the flow box could only fit one tile per row, and each row drew a
-       single enormous card. The label still wraps, two lines, ellipsized;
-       it just reports the width it will actually be drawn at. */
+    /* Bound the labels' NATURAL width - it is what decides how many tiles a
+       row holds. */
     gtk_label_set_width_chars(GTK_LABEL(name), 18);
-    gtk_label_set_width_chars(GTK_LABEL(desc), 22);
-    gtk_label_set_max_width_chars(GTK_LABEL(desc), 22);
 
     /* Tile size lives in style.css (button.module-card) so there is one
        place to change it; the old 218x188 request fought the stylesheet
@@ -3133,34 +3519,49 @@ make_module_card(AppState *state, const ModuleDefinition *mod)
     gtk_widget_set_halign(button, GTK_ALIGN_START);
     gtk_widget_set_valign(button, GTK_ALIGN_START);
 
-    gtk_widget_set_tooltip_text(button,
-        offline ? "module script not found" : mod->id);
+    /* The description moved to the tooltip. It was the only thing forcing a
+       fixed card height, and a sentence printed on every tile is what turned
+       a grid into a wall of text; the words stay one hover away. */
+    if (offline) {
+        gtk_widget_set_tooltip_text(button, "module script not found");
+    } else {
+        char *tip = (mod->desc && *mod->desc)
+            ? g_strdup_printf("%s\n\n%s", mod->desc, mod->id)
+            : g_strdup(mod->id);
+        gtk_widget_set_tooltip_text(button, tip);
+        g_free(tip);
+    }
 
     gtk_box_append(GTK_BOX(top), cat);
     gtk_box_append(GTK_BOX(card), top);
-    gtk_box_append(GTK_BOX(top), chip);
+    if (chip != NULL)
+        gtk_box_append(GTK_BOX(top), chip);
     gtk_box_append(GTK_BOX(card), icon);
     gtk_box_append(GTK_BOX(card), name);
     gtk_button_set_child(GTK_BUTTON(button), card);
-    gtk_box_append(GTK_BOX(card), desc);
     gtk_box_append(GTK_BOX(card), id);
 
     g_object_set_data(G_OBJECT(button), "module", (gpointer) mod);
     g_signal_connect(button, "clicked", G_CALLBACK(module_card_clicked), state);
 
     /* The pin rides an overlay layer above the card, so tapping it does not
-       also open the module the way a nested button would. */
+       also open the module the way a nested button would. It is revealed on
+       hover and stays put once pinned: a permanent outline star on every tile
+       is 56 pieces of furniture for an action used on two or three. */
     {
         GtkWidget *overlay = gtk_overlay_new();
         GtkWidget *star = gtk_button_new_with_label(pinned ? "★" : "☆");
+        gtk_widget_add_css_class(overlay, "module-card-host");
         gtk_widget_add_css_class(star, "flat");
         gtk_widget_add_css_class(star, "card-pin");
+        if (pinned)
+            gtk_widget_add_css_class(star, "card-pin-on");
         gtk_widget_set_tooltip_text(star,
             pinned ? "unpin this module" : "pin this module");
         gtk_widget_set_halign(star, GTK_ALIGN_END);
         gtk_widget_set_valign(star, GTK_ALIGN_START);
-        gtk_widget_set_margin_top(star, 6);
-        gtk_widget_set_margin_end(star, 6);
+        gtk_widget_set_margin_top(star, 4);
+        gtk_widget_set_margin_end(star, 4);
         g_object_set_data(G_OBJECT(star), "state", state);
         g_object_set_data(G_OBJECT(star), "module-id", (gpointer) mod->id);
         g_signal_connect(star, "clicked", G_CALLBACK(pin_toggled), NULL);
@@ -3207,6 +3608,161 @@ dash_cmp(const void *pa, const void *pb)
     }
 }
 
+/* ── Filling the line ────────────────────────────────────────────────
+   GtkFlowBox sizes every child to its own minimum and then pours the
+   space left over in a line into the GAPS. At 1180x760 that was 42
+   pixels of dead desk between four 178-pixel tiles: the tiles were not
+   too big, the line was simply not full, and no property of the flow box
+   stretches a child to close it.
+
+   So the width is handed to the tiles directly. Count how many columns
+   the line can hold at the density's preferred width, then give every
+   tile the exact width that fills the line at that count. The gaps go
+   back to being the 8 pixels they are declared as. Wrapping is still the
+   flow box's to decide, so this only has to run when the width changes,
+   when the density changes, and when a search changes the visible count.
+   ─────────────────────────────────────────────────────────────────── */
+
+static int
+dash_tile_preferred(AppState *state)
+{
+    /* This is the number that decides how many tiles fit on a line, so it is
+       the number that decides how big they are: the cap in dash_fit_tiles()
+       only ever shaves the last few pixels off, it cannot make a row of five
+       become a row of four. Raised from 158/178/200 so the grid lays out
+       fewer, larger tiles and the icon has room to be the thing you scan. */
+    const char *d = state->density ? state->density : "density-comfortable";
+    if (g_strcmp0(d, "density-compact") == 0) return 158;
+    if (g_strcmp0(d, "density-spacious") == 0) return 200;
+    return 178;
+}
+
+/* The card inside a flow box child, or the widget itself when it is not
+   one. Both callers here need it, and the filter above learned the hard
+   way that the flow box's direct children are wrappers. */
+static GtkWidget *
+dash_card_of(GtkWidget *w)
+{
+    if (GTK_IS_FLOW_BOX_CHILD(w))
+        return gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(w));
+    return w;
+}
+
+static gboolean
+dash_fit_tiles(gpointer user_data)
+{
+    GtkWidget *flow  = GTK_WIDGET(user_data);
+    AppState  *state = g_object_get_data(G_OBJECT(flow), "state");
+
+    int avail = gtk_widget_get_width(flow);
+    if (state == NULL || avail <= 0)
+        return G_SOURCE_REMOVE;
+
+    const int gap = 4;    /* matches column-spacing */
+    const int cap = 300;  /* a lone search result should not span the desk */
+
+    int cols = (avail + gap) / (dash_tile_preferred(state) + gap);
+    if (cols < 1) cols = 1;
+    if (cols > 7) cols = 7;   /* past seven a "tile" is a table row */
+
+    /* A short result set should fill its line too, but two tiles stretched
+       across the whole width read as a layout accident, so the tile stops
+       at the cap and the rest of the line stays empty. */
+    int visible = 0;
+    for (GtkWidget *w = gtk_widget_get_first_child(flow); w != NULL;
+         w = gtk_widget_get_next_sibling(w))
+        if (gtk_widget_get_visible(w)) visible++;
+    if (visible > 0 && cols > visible) cols = visible;
+
+    int target = (avail - (cols - 1) * gap) / cols;
+    /* The cap is for a grid with almost nothing in it: one search result
+       should not stretch to the width of the desk. On a full line it is
+       actively wrong, because the clamp hands the leftover width to the flow
+       box to spread into the gaps - the exact spacing it was meant to fix. */
+    if (cols <= 2 && target > cap) target = cap;
+    if (target < 96)  target = 96;
+
+    if (g_getenv("IMSISTING_FIT_DEBUG") != NULL)
+        g_printerr("fit: avail=%d cols=%d visible=%d target=%d\n",
+                   avail, cols, visible, target);
+
+    if (GPOINTER_TO_INT(g_object_get_data(G_OBJECT(flow), "tile-w")) == target)
+        return G_SOURCE_REMOVE;
+    g_object_set_data(G_OBJECT(flow), "tile-w", GINT_TO_POINTER(target));
+
+    /* Pin the column count. Left to itself the flow box reflows on the
+       children's *natural* width, which is the width we are setting here --
+       a feedback loop whose fixed point is not the line we computed. Naming
+       the count makes the box lay out the grid we asked for; homogeneous
+       gives every column the same share of the line instead of letting the
+       widest card set the width and the rest hang.
+       Only the maximum is pinned. A minimum would become the grid's own
+       minimum width, the window would be unable to shrink below one full
+       line, and the content would hang off the right edge of a window that
+       refused to grow. With a maximum the box simply uses fewer columns
+       when there is less room, which is the reflow we wanted. */
+    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(flow), TRUE);
+    gtk_flow_box_set_min_children_per_line(GTK_FLOW_BOX(flow), 1);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(flow), cols);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(flow), gap);
+
+    for (GtkWidget *w = gtk_widget_get_first_child(flow); w != NULL;
+         w = gtk_widget_get_next_sibling(w)) {
+        GtkWidget *c = dash_card_of(w);
+        if (c != NULL) gtk_widget_set_size_request(c, target, -1);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+/* Deferred: the fit must read the width the flow box was actually given,
+   and measure() must not be re-entered from inside an allocation. */
+static void
+dash_fit_soon(GtkWidget *flow)
+{
+    if (g_getenv("IMSISTING_FIT_DEBUG") != NULL)
+        g_printerr("soon: flow=%p w=%d\n", (void*)flow,
+                   flow ? gtk_widget_get_width(flow) : -1);
+    if (flow == NULL) return;
+    g_idle_add_full(G_PRIORITY_HIGH_IDLE, dash_fit_tiles,
+                    g_object_ref(flow), g_object_unref);
+}
+
+/* There is no reliable event for "the line got wider". GtkWidget has no
+   width property, GTK4 removed ::size-allocate, and a frame-clock tick is
+   only delivered while the clock is running - under a bare X server it
+   never ran once, so the first fit was the only fit and the grid kept the
+   width of a window that did not exist yet. A 200 ms poll costs two
+   integer compares when the window is still, and changing the width is a
+   user action, so the latency is not perceptible. */
+static gboolean
+dash_width_poll(gpointer user_data)
+{
+    GtkWidget *flow = GTK_WIDGET(user_data);
+    int w = gtk_widget_get_width(flow);
+
+    if (g_getenv("IMSISTING_FIT_DEBUG") != NULL)
+        g_printerr("poll: w=%d\n", w);
+
+    if (w != GPOINTER_TO_INT(g_object_get_data(G_OBJECT(flow), "last-w"))) {
+        g_object_set_data(G_OBJECT(flow), "last-w", GINT_TO_POINTER(w));
+        dash_fit_soon(flow);
+        if (g_getenv("IMSISTING_FIT_DEBUG") != NULL) {
+            int n = 0;
+            for (GtkWidget *c = gtk_widget_get_first_child(flow); c != NULL;
+                 c = gtk_widget_get_next_sibling(c)) {
+                int cw = gtk_widget_get_width(c);
+                if (n < 4)
+                    g_printerr("child[%d] w=%d req=%d\n", n, cw,
+                               gtk_widget_get_width(
+                                   dash_card_of(c)));
+                n++;
+            }
+            g_printerr("poll: children=%d\n", n);
+        }
+    }
+    return G_SOURCE_CONTINUE;
+}
+
 /* Rebuild the flow for a given sort mode. */
 static void
 dash_fill(AppState *state, GtkWidget *flow, int mode)
@@ -3225,6 +3781,8 @@ dash_fill(AppState *state, GtkWidget *flow, int mode)
     for (int k = 0; k < N_MODULES; k++)
         gtk_flow_box_append(GTK_FLOW_BOX(flow),
                             make_module_card(state, &modules[idx[k]]));
+
+    dash_fit_soon(flow);
 }
 
 /* Show only the cards matching a query, over name, id, category and the
@@ -3268,6 +3826,10 @@ dash_apply_filter(GtkWidget *flow, const char *q)
        window that is already showing the hero and the quick cards. */
     if (state != NULL && state->dash_mission != NULL)
         gtk_widget_set_visible(state->dash_mission, !searching);
+
+    /* The visible count just changed, so the same line can hold a
+       different number of tiles at the same width. */
+    dash_fit_soon(flow);
 }
 
 /* ---- Favourites ------------------------------------------------------ */
@@ -3397,6 +3959,10 @@ density_apply(AppState *state)
         gtk_widget_remove_css_class(state->window, classes[i]);
     gtk_widget_add_css_class(state->window, state->density
                              ? state->density : "density-comfortable");
+    if (state->dash_flow != NULL) {
+        g_object_set_data(G_OBJECT(state->dash_flow), "tile-w", NULL);
+        dash_fit_soon(state->dash_flow);
+    }
 }
 
 static int
@@ -3514,57 +4080,59 @@ create_dashboard_page(AppState *state)
     GtkWidget *outer    = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkWidget *scroll   = gtk_scrolled_window_new();
     GtkWidget *body     = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    GtkWidget *head     = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    GtkWidget *title    = gtk_label_new("Command Dashboard");
-    GtkWidget *sub      = gtk_label_new(
-        "Every module on one flow. Search or sort, then click a card to open it.");
     GtkWidget *bar      = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *mission = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     GtkWidget *mission_head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *mission_title = gtk_label_new("Start here");
     GtkWidget *mission_sub = gtk_label_new(
-        "Set the case, verify the bench, then move into collection.");
+        "In order — set the case, verify the bench, then move into collection.");
     GtkWidget *mission_grid = gtk_flow_box_new();
+    GtkWidget *grid_head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *grid_title = gtk_label_new("All modules");
+    GtkWidget *grid_sub = gtk_label_new(
+        "The full catalogue — search or sort, then click a card to open it.");
     gtk_widget_add_css_class(mission, "mission-panel");
-    gtk_widget_add_css_class(mission_title, "mission-title");
-    gtk_widget_add_css_class(mission_sub, "mission-subtitle");
+    gtk_widget_add_css_class(mission_title, "section-eyebrow");
+    gtk_widget_add_css_class(mission_sub, "section-note");
+    gtk_widget_add_css_class(grid_title, "section-eyebrow");
+    gtk_widget_add_css_class(grid_sub, "section-note");
     gtk_label_set_xalign(GTK_LABEL(mission_title), 0.0f);
     gtk_label_set_xalign(GTK_LABEL(mission_sub), 1.0f);
+    gtk_label_set_xalign(GTK_LABEL(grid_title), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(grid_sub), 1.0f);
     gtk_widget_set_hexpand(mission_title, TRUE);
+    gtk_widget_set_hexpand(grid_title, TRUE);
     gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(mission_grid), GTK_SELECTION_NONE);
     gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(mission_grid), TRUE);
-    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(mission_grid), 4);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(mission_grid), 2);
     gtk_flow_box_set_min_children_per_line(GTK_FLOW_BOX(mission_grid), 2);
     gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(mission_grid), 8);
     gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(mission_grid), 8);
     gtk_flow_box_append(GTK_FLOW_BOX(mission_grid),
-        dashboard_shortcut(state, "01 · CASEBOOK", "Define the operation",
-            "Scope, target and evidence ledger", "book-open-symbolic", NULL, 2));
+        dashboard_shortcut(state, "01", "Define the operation",
+            "CASEBOOK — set the case, the target and the evidence ledger",
+            "book-open-symbolic", NULL, 2));
     gtk_flow_box_append(GTK_FLOW_BOX(mission_grid),
-        dashboard_shortcut(state, "02 · BENCH", "Check the field kit",
-            "Confirm hardware and capture readiness", "imsisting-05_field_kit-symbolic",
+        dashboard_shortcut(state, "02", "Check the field kit",
+            "BENCH — confirm hardware and capture readiness",
+            "imsisting-05_field_kit-symbolic",
             dashboard_module("05_field_kit"), -1));
     gtk_flow_box_append(GTK_FLOW_BOX(mission_grid),
-        dashboard_shortcut(state, "03 · RECON", "Survey the cell layer",
-            "Identify the carrier before deeper work", "imsisting-02_cell_recon-symbolic",
+        dashboard_shortcut(state, "03", "Survey the cell layer",
+            "RECON — identify the carrier before deeper work",
+            "imsisting-02_cell_recon-symbolic",
             dashboard_module("02_cell_recon"), -1));
     gtk_flow_box_append(GTK_FLOW_BOX(mission_grid),
-        dashboard_shortcut(state, "04 · LIVE", "Watch traffic",
-            "Inspect the GSMTAP feed as it arrives", "network-receive-symbolic", NULL, 1));
+        dashboard_shortcut(state, "04", "Watch traffic",
+            "LIVE — inspect the GSMTAP feed as it arrives",
+            "network-receive-symbolic", NULL, 1));
     gtk_box_append(GTK_BOX(mission_head), mission_title);
     gtk_box_append(GTK_BOX(mission_head), mission_sub);
     gtk_box_append(GTK_BOX(mission), mission_head);
-    {
-        /* The station: case, radio and transmit state, read at a glance
-           before the operator picks an action. Kept live by status_poll(). */
-        GtkWidget *station = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 26);
-        gtk_widget_add_css_class(station, "station-band");
-        gtk_box_append(GTK_BOX(station), status_cell("CASE", &state->dash_case));
-        gtk_box_append(GTK_BOX(station), status_cell("TARGETS", &state->dash_targets));
-        gtk_box_append(GTK_BOX(station), status_cell("EVIDENCE", &state->dash_evidence));
-        gtk_box_append(GTK_BOX(station), status_cell("ALERTS", &state->dash_alerts));
-        gtk_box_append(GTK_BOX(mission), station);
-    }
+    /* The case counters used to sit here as a band. They moved to the target
+       column, which is the one panel that can be open over every page: on
+       the dashboard they were only readable while the dashboard was the
+       page in front. */
     gtk_box_append(GTK_BOX(mission), mission_grid);
     GtkWidget *sortlab  = gtk_label_new("Sort");
     GtkWidget *dd       = gtk_drop_down_new_from_strings(dash_sort_names);
@@ -3583,26 +4151,30 @@ create_dashboard_page(AppState *state)
     GtkWidget *search   = gtk_search_entry_new();
     GtkWidget *flow     = gtk_flow_box_new();
 
-    gtk_widget_add_css_class(title, "page-title");
-    gtk_widget_add_css_class(sub,   "page-subtitle");
     gtk_widget_add_css_class(sortlab, "dim");
     gtk_widget_add_css_class(denslab, "dim");
     gtk_drop_down_set_selected(GTK_DROP_DOWN(dens), density_index(state));
     g_object_set_data(G_OBJECT(dens), "state", state);
     g_signal_connect(dens, "notify::selected", G_CALLBACK(density_changed), NULL);
-    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-    gtk_label_set_xalign(GTK_LABEL(sub),   0.0f);
-    gtk_box_append(GTK_BOX(head), title);
+
+    /* One label per layer and no H1. The tab above already reads "Dashboard",
+       so an in-page "Command Dashboard" repeated it, and "Start here" sat
+       three lines below that: three titles for one screen, with the quick
+       cards drawn heavier than the 56 modules they were meant to introduce.
+       What was missing was never another heading, it was a stated hierarchy -
+       the strip is an order of operations, the grid is the catalogue, and
+       each now says so exactly once. */
     gtk_widget_set_margin_start(mission, 16);
     gtk_widget_set_margin_end(mission, 16);
-    gtk_widget_set_margin_top(mission, 12);
+    gtk_widget_set_margin_top(mission, 10);
     gtk_box_append(GTK_BOX(body), mission);
 
-    gtk_box_append(GTK_BOX(head), sub);
-    gtk_widget_set_margin_top(head, 14);
-    gtk_widget_set_margin_start(head, 16);
-    gtk_widget_set_margin_end(head, 16);
-    gtk_box_append(GTK_BOX(body), head);
+    gtk_box_append(GTK_BOX(grid_head), grid_title);
+    gtk_box_append(GTK_BOX(grid_head), grid_sub);
+    gtk_widget_set_margin_top(grid_head, 10);
+    gtk_widget_set_margin_start(grid_head, 16);
+    gtk_widget_set_margin_end(grid_head, 16);
+    gtk_box_append(GTK_BOX(body), grid_head);
 
     gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(search),
         "Search name, id or purpose…");
@@ -3624,11 +4196,11 @@ create_dashboard_page(AppState *state)
        fill the line, so a row of four and a row of two drew different
        sized cards. Tiles now keep one size and simply pack. */
     gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(flow), GTK_SELECTION_NONE);
-    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(flow), FALSE);
+    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(flow), TRUE);
     gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(flow), 8);
     gtk_flow_box_set_min_children_per_line(GTK_FLOW_BOX(flow), 1);
-    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(flow), 10);
-    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(flow), 10);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(flow), 8);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(flow), 8);
     gtk_widget_set_halign(flow, GTK_ALIGN_FILL);
     gtk_widget_set_margin_start(flow, 16);
     gtk_widget_set_margin_end(flow, 16);
@@ -3652,6 +4224,8 @@ create_dashboard_page(AppState *state)
     g_object_set_data(G_OBJECT(dd), "search", search);
     g_object_set_data(G_OBJECT(dd), "state",  state);
     g_object_set_data(G_OBJECT(flow), "state", state);
+    g_timeout_add_full(G_PRIORITY_DEFAULT_IDLE, 200, dash_width_poll,
+                       g_object_ref(flow), g_object_unref);
     g_signal_connect(dd, "notify::selected", G_CALLBACK(dash_sort_changed), NULL);
     g_signal_connect(search, "search-changed",
                      G_CALLBACK(dash_search_changed), flow);
@@ -3668,8 +4242,15 @@ create_dashboard_page(AppState *state)
     dash_fill(state, flow, g_dash_sort);   /* honour the persisted order */
 
     gtk_widget_set_margin_bottom(body, 18);
+    /* Never scroll the module grid sideways. With an automatic horizontal
+       policy the flow box is handed its *natural* width once that exceeds
+       the viewport, so the width the fit reads back is the width it just
+       asked for: the column count feeds itself and the grid settles on six
+       columns that hang off the right edge. A reflowing grid must be told
+       the viewport width, which only happens when sideways scrolling is
+       impossible. */
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
-                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), body);
     gtk_widget_set_vexpand(scroll, TRUE);
     gtk_box_append(GTK_BOX(outer), scroll);
@@ -3686,7 +4267,7 @@ static GtkWidget *
 empty_state(const char *icon, const char *title, const char *hint)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    GtkWidget *ic  = gtk_image_new_from_icon_name(icon);
+    GtkWidget *ic  = imsisting_icon_image(icon);
     GtkWidget *t   = gtk_label_new(title);
     GtkWidget *h   = gtk_label_new(hint);
 
@@ -3726,136 +4307,419 @@ count_files(const char *dir)
 static char *
 loot_fmt_size(guint64 n)
 {
-    if (n < 1024)           return g_strdup_printf("%llu B", (unsigned long long) n);
-    if (n < 1024 * 1024)    return g_strdup_printf("%.1f KB", n / 1024.0);
-    return g_strdup_printf("%.1f MB", n / (1024.0 * 1024.0));
+    if (n < 1024)                   return g_strdup_printf("%llu B", (unsigned long long) n);
+    if (n < 1024 * 1024)            return g_strdup_printf("%.1f KB", n / 1024.0);
+    if (n < 1024ULL * 1024 * 1024)  return g_strdup_printf("%.1f MB", n / (1024.0 * 1024.0));
+    return g_strdup_printf("%.2f GB", n / (1024.0 * 1024.0 * 1024.0));
 }
 
-/* Selecting a module shows its directory and a preview of the newest file. */
 static void
-loot_row_selected(GtkListBox *lb, GtkListBoxRow *row, gpointer user_data)
+loot_entry_free(gpointer p)
 {
-    AppState *state = user_data;
-    const char *dir = row ? g_object_get_data(G_OBJECT(row), "loot-dir") : NULL;
-    if (state->loot_preview_buf == NULL) return;
-    if (dir == NULL) { gtk_text_buffer_set_text(state->loot_preview_buf, "", -1); return; }
+    LootEntry *e = p;
+    if (e == NULL) return;
+    g_free(e->path);
+    g_free(e->name);
+    g_free(e->module);
+    g_free(e);
+}
 
-    g_autoptr(GString) out = g_string_new(NULL);
-    g_string_append_printf(out, "%s\n\n", dir);
+static const char *
+loot_ext(const char *name)
+{
+    const char *dot = strrchr(name != NULL ? name : "", '.');
+    return dot != NULL ? dot + 1 : "";
+}
 
-    g_autofree char *newest = NULL;
-    guint64 newest_t = 0;
-    g_autoptr(GDir) d = g_dir_open(dir, 0, NULL);
-    if (d != NULL) {
+static gboolean
+loot_is_image(const char *name)
+{
+    static const char *ext[] = { "png", "jpg", "jpeg", "gif", "webp", "bmp",
+                                 "svg", "tif", "tiff", NULL };
+    for (int i = 0; ext[i] != NULL; i++)
+        if (g_ascii_strcasecmp(loot_ext(name), ext[i]) == 0) return TRUE;
+    return FALSE;
+}
+
+static gboolean
+loot_is_text(const char *name)
+{
+    static const char *ext[] = { "txt", "log", "csv", "tsv", "json", "md", "xml",
+                                 "yaml", "yml", "py", "sh", "c", "h", "conf", "ini",
+                                 "hex", "kml", "geojson", "sql", "html", "htm",
+                                 "pcap", "pcapng", "cap", "gsmtap", NULL };
+    for (int i = 0; ext[i] != NULL; i++)
+        if (g_ascii_strcasecmp(loot_ext(name), ext[i]) == 0) return TRUE;
+    return FALSE;
+}
+
+/* No known extension: decide by looking, because a great deal of what these
+   modules write is plain text under a name nobody anticipated. A NUL in the
+   first kilobyte is the one signal that survives every format. */
+static gboolean
+loot_bytes_look_text(const char *buf, gsize len)
+{
+    if (buf == NULL) return FALSE;
+    gsize n = MIN(len, (gsize) 1024);
+    for (gsize i = 0; i < n; i++)
+        if (buf[i] == '\0') return FALSE;
+    return TRUE;
+}
+
+static const char *
+loot_icon_for(const char *name)
+{
+    if (loot_is_image(name)) return "image-x-generic-symbolic";
+    if (loot_is_text(name))  return "text-x-generic-symbolic";
+    return "application-x-generic-symbolic";
+}
+
+/* Every regular file one level under loot/<module>/ - the same shape the
+   modules write, and the level at which a file still has a module to blame. */
+static GPtrArray *
+loot_scan(void)
+{
+    GPtrArray *out = g_ptr_array_new_with_free_func(loot_entry_free);
+    g_autofree char *root = g_build_filename(IMSISTING_ROOT, "loot", NULL);
+    g_autoptr(GDir) d = g_dir_open(root, 0, NULL);
+    if (d == NULL) return out;
+
+    const char *mod;
+    while ((mod = g_dir_read_name(d)) != NULL) {
+        g_autofree char *sub = g_build_filename(root, mod, NULL);
+        if (!g_file_test(sub, G_FILE_TEST_IS_DIR)) continue;
+        g_autoptr(GDir) sd = g_dir_open(sub, 0, NULL);
+        if (sd == NULL) continue;
         const char *fn;
-        while ((fn = g_dir_read_name(d)) != NULL) {
-            g_autofree char *fp = g_build_filename(dir, fn, NULL);
+        while ((fn = g_dir_read_name(sd)) != NULL) {
+            g_autofree char *fp = g_build_filename(sub, fn, NULL);
             GStatBuf st;
             if (g_stat(fp, &st) != 0 || !S_ISREG(st.st_mode)) continue;
-            g_string_append_printf(out, "  %s\n", fn);
-            if ((guint64) st.st_mtime >= newest_t) {
-                newest_t = (guint64) st.st_mtime;
-                g_free(newest); newest = g_strdup(fp);
+            LootEntry *e = g_new0(LootEntry, 1);
+            e->path   = g_strdup(fp);
+            e->name   = g_strdup(fn);
+            e->module = g_strdup(mod);
+            e->size   = (guint64) st.st_size;
+            e->mtime  = (gint64)  st.st_mtime;
+            g_ptr_array_add(out, e);
+        }
+    }
+    return out;
+}
+
+static gint
+loot_cmp(gconstpointer a, gconstpointer b, gpointer user_data)
+{
+    const LootEntry *x = *(LootEntry *const *) a;
+    const LootEntry *y = *(LootEntry *const *) b;
+    AppState *state = user_data;
+
+    switch (state != NULL ? state->loot_sort_mode : 0) {
+    case 1:   /* biggest first: the thing you are looking for is usually large */
+        return x->size < y->size ? 1 : x->size > y->size ? -1 : 0;
+    case 2:   /* newest first */
+        return x->mtime < y->mtime ? 1 : x->mtime > y->mtime ? -1 : 0;
+    case 3: { /* grouped by the module that produced it */
+        int c = g_ascii_strcasecmp(x->module, y->module);
+        return c != 0 ? c : g_ascii_strcasecmp(x->name, y->name);
+    }
+    default:
+        return g_ascii_strcasecmp(x->name, y->name);
+    }
+}
+
+static gboolean
+loot_match(const LootEntry *e, const char *needle)
+{
+    if (needle == NULL || *needle == '\0') return TRUE;
+    g_autofree char *n   = g_ascii_strdown(needle, -1);
+    g_autofree char *nm  = g_ascii_strdown(e->name, -1);
+    g_autofree char *mod = g_ascii_strdown(e->module, -1);
+    return strstr(nm, n) != NULL || strstr(mod, n) != NULL;
+}
+
+/* The seven fixed tabs of the casebook notebook, in the order
+   create_casebook_page appends them. Evidence files open after these. */
+#define CASEBOOK_TAB_COUNT     7
+#define CASEBOOK_TAB_OVERVIEW  0
+#define CASEBOOK_TAB_EVIDENCE  1
+#define CASEBOOK_TAB_CAPTURES  2
+#define CASEBOOK_TAB_TIMELINE  3
+#define CASEBOOK_TAB_ALERTS    4
+#define CASEBOOK_TAB_NODES     5
+#define CASEBOOK_TAB_REPORTS   6
+
+static void
+casebook_file_close_clicked(GtkButton *button, gpointer user_data)
+{
+    AppState *state = g_object_get_data(G_OBJECT(button), "state");
+    GtkWidget *page = user_data;
+    int index;
+
+    if (state == NULL || state->casebook_tabs == NULL) return;
+    index = gtk_notebook_page_num(GTK_NOTEBOOK(state->casebook_tabs), page);
+    if (index < 0) return;
+
+    /* Same trap as closing a module: removing the page you are standing on
+       makes GTK pick the next one, and its pick is the last page left - so
+       closing the file you are reading used to jump to Reports. Land back on
+       Evidence, which is where files are opened from. Closing a tab you were
+       not reading changes nothing. */
+    gboolean was_current =
+        gtk_notebook_get_current_page(GTK_NOTEBOOK(state->casebook_tabs)) == index;
+    gtk_notebook_remove_page(GTK_NOTEBOOK(state->casebook_tabs), index);
+    if (was_current && index >= CASEBOOK_TAB_COUNT)
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(state->casebook_tabs),
+                                      CASEBOOK_TAB_EVIDENCE);
+}
+
+static void
+casebook_system_open_clicked(GtkButton *button, gpointer user_data)
+{
+    const char *path = g_object_get_data(G_OBJECT(button), "file-path");
+    g_autofree char *uri = NULL;
+
+    (void) user_data;
+    if (path == NULL) return;
+    uri = g_filename_to_uri(path, NULL, NULL);
+    if (uri != NULL)
+        g_app_info_launch_default_for_uri(uri, NULL, NULL);
+}
+
+/* A file opened from Evidence becomes a page in the Casebook's own notebook,
+   so it sits beside the case it belongs to instead of in a modal the user has
+   to dismiss before getting back to the work. */
+static GtkWidget *
+casebook_file_view(const char *path)
+{
+    GtkWidget *outer  = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *bar    = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *where  = gtk_label_new(path);
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    GtkWidget *open   = gtk_button_new_with_label("Open with system");
+    g_autofree char *base = g_path_get_basename(path);
+    GStatBuf st;
+
+    gtk_widget_add_css_class(outer, "cb-file");
+    gtk_widget_add_css_class(where, "cb-file-path");
+    gtk_label_set_xalign(GTK_LABEL(where), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(where), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_widget_set_hexpand(where, TRUE);
+    gtk_widget_add_css_class(open, "verb-button");
+    g_object_set_data_full(G_OBJECT(open), "file-path", g_strdup(path), g_free);
+    g_signal_connect(open, "clicked", G_CALLBACK(casebook_system_open_clicked), NULL);
+    gtk_box_append(GTK_BOX(bar), where);
+    gtk_box_append(GTK_BOX(bar), open);
+    gtk_widget_set_margin_top(bar, 12);
+    gtk_widget_set_margin_bottom(bar, 8);
+    gtk_widget_set_margin_start(bar, 16);
+    gtk_widget_set_margin_end(bar, 16);
+    gtk_box_append(GTK_BOX(outer), bar);
+
+    if (loot_is_image(base)) {
+        GtkWidget *pic = gtk_picture_new_for_filename(path);
+        gtk_picture_set_can_shrink(GTK_PICTURE(pic), TRUE);
+        gtk_widget_set_halign(pic, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(pic, GTK_ALIGN_CENTER);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), pic);
+    } else {
+        GtkWidget *view = gtk_text_view_new();
+        GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));
+        guint64 size = (g_stat(path, &st) == 0) ? (guint64) st.st_size : 0;
+
+        if (size > 8ULL * 1024 * 1024) {
+            g_autofree char *sz = loot_fmt_size(size);
+            g_autofree char *msg = g_strdup_printf(
+                "This file is %s — too large to render here.\n\n"
+                "Use Open with system to inspect it, or index it from Captures "
+                "where the toolchain reads it properly.", sz);
+            gtk_text_buffer_set_text(buf, msg, -1);
+        } else {
+            g_autofree char *body = NULL;
+            gsize len = 0;
+            if (g_file_get_contents(path, &body, &len, NULL) &&
+                loot_bytes_look_text(body, len)) {
+                gtk_text_buffer_set_text(buf, body, -1);
+            } else {
+                g_autofree char *sz = loot_fmt_size(size);
+                g_autofree char *msg = g_strdup_printf(
+                    "This is a binary file (%s), so there is nothing readable "
+                    "to show.\n\nOpen with system hands it to whichever tool "
+                    "you have registered for it.", sz);
+                gtk_text_buffer_set_text(buf, msg, -1);
             }
+        }
+        gtk_text_view_set_editable(GTK_TEXT_VIEW(view), FALSE);
+        gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(view), FALSE);
+        gtk_text_view_set_monospace(GTK_TEXT_VIEW(view), TRUE);
+        gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view), GTK_WRAP_WORD_CHAR);
+        gtk_text_view_set_left_margin(GTK_TEXT_VIEW(view), 16);
+        gtk_text_view_set_right_margin(GTK_TEXT_VIEW(view), 16);
+        gtk_widget_add_css_class(view, "cb-file-text");
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), view);
+    }
+
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_box_append(GTK_BOX(outer), scroll);
+    return outer;
+}
+
+static void
+casebook_open_file(AppState *state, const char *path)
+{
+    int n, idx;
+    GtkWidget *page, *tab, *label, *close;
+
+    if (state == NULL || state->casebook_tabs == NULL || path == NULL) return;
+
+    n = gtk_notebook_get_n_pages(GTK_NOTEBOOK(state->casebook_tabs));
+    for (int i = 0; i < n; i++) {
+        GtkWidget *p = gtk_notebook_get_nth_page(GTK_NOTEBOOK(state->casebook_tabs), i);
+        if (g_strcmp0(g_object_get_data(G_OBJECT(p), "file-path"), path) == 0) {
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(state->casebook_tabs), i);
+            return;
         }
     }
 
-    if (newest != NULL) {
-        g_autofree char *body = NULL;
-        gsize len = 0;
-        if (g_file_get_contents(newest, &body, &len, NULL)) {
-            if (len > 4000) { body[4000] = '\0'; }
-            g_string_append_printf(out, "\n── %s ──\n%s\n",
-                                   g_path_get_basename(newest), body);
-        }
-    } else {
-        g_string_append(out, "\n(no files yet)\n");
+    page = casebook_file_view(path);
+    g_object_set_data_full(G_OBJECT(page), "file-path", g_strdup(path), g_free);
+
+    tab   = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    label = gtk_label_new(g_path_get_basename(path));
+    close = gtk_button_new_from_icon_name("window-close-symbolic");
+    gtk_widget_add_css_class(close, "flat");
+    gtk_widget_set_tooltip_text(close, "close this file");
+    g_object_set_data(G_OBJECT(close), "state", state);
+    g_signal_connect(close, "clicked", G_CALLBACK(casebook_file_close_clicked), page);
+    gtk_box_append(GTK_BOX(tab), label);
+    gtk_box_append(GTK_BOX(tab), close);
+
+    idx = gtk_notebook_append_page(GTK_NOTEBOOK(state->casebook_tabs), page, tab);
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(state->casebook_tabs), idx);
+}
+
+static void
+loot_open_clicked(GtkButton *button, gpointer user_data)
+{
+    casebook_open_file(user_data, g_object_get_data(G_OBJECT(button), "loot-file"));
+}
+
+static void
+loot_add_row(AppState *state, const LootEntry *e)
+{
+    GtkWidget *row   = gtk_list_box_row_new();
+    GtkWidget *box   = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *icon  = imsisting_icon_image(loot_icon_for(e->name));
+    GtkWidget *text  = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
+    GtkWidget *name  = gtk_label_new(e->name);
+    GtkWidget *meta  = gtk_label_new(NULL);
+    GtkWidget *open  = gtk_button_new_with_label("Open");
+    g_autofree char *sz = loot_fmt_size(e->size);
+    g_autofree char *when = NULL;
+    g_autofree char *sub = NULL;
+
+    if (e->mtime > 0) {
+        GDateTime *dt = g_date_time_new_from_unix_local(e->mtime);
+        when = g_date_time_format(dt, "%Y-%m-%d %H:%M");
+        g_date_time_unref(dt);
     }
-    gtk_text_buffer_set_text(state->loot_preview_buf, out->str, -1);
-    (void) lb;
+    sub = g_strdup_printf("%s · %s · %s", e->module, sz, when != NULL ? when : "—");
+
+    gtk_image_set_pixel_size(GTK_IMAGE(icon), 20);
+    gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(meta), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_widget_add_css_class(name, "loot-name");
+    gtk_widget_add_css_class(meta, "loot-meta");
+    gtk_widget_add_css_class(open, "verb-button");
+    gtk_widget_set_valign(open, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(text, TRUE);
+    gtk_label_set_text(GTK_LABEL(meta), sub);
+
+    gtk_box_append(GTK_BOX(text), name);
+    gtk_box_append(GTK_BOX(text), meta);
+    gtk_box_append(GTK_BOX(box), icon);
+    gtk_box_append(GTK_BOX(box), text);
+    gtk_box_append(GTK_BOX(box), open);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+
+    g_object_set_data_full(G_OBJECT(row), "loot-file", g_strdup(e->path), g_free);
+    g_object_set_data_full(G_OBJECT(open), "loot-file", g_strdup(e->path), g_free);
+    g_signal_connect(open, "clicked", G_CALLBACK(loot_open_clicked), state);
+    gtk_list_box_append(GTK_LIST_BOX(state->loot_list), row);
 }
 
 static void
 loot_refresh(AppState *state)
 {
     GtkWidget *child;
+    const char *needle;
+    guint shown = 0;
+    guint64 bytes = 0;
 
     if (state->loot_list == NULL) return;
     while ((child = gtk_widget_get_first_child(state->loot_list)) != NULL)
         gtk_list_box_remove(GTK_LIST_BOX(state->loot_list), child);
 
-    g_autofree char *root = g_build_filename(IMSISTING_ROOT, "loot", NULL);
-    g_autoptr(GDir) d = g_dir_open(root, 0, NULL);
-    guint rows = 0;
+    g_clear_pointer(&state->loot_entries, g_ptr_array_unref);
+    state->loot_entries = loot_scan();
+    g_ptr_array_sort_with_data(state->loot_entries, loot_cmp, state);
 
-    if (d != NULL) {
-        const char *name;
-        while ((name = g_dir_read_name(d)) != NULL) {
-            g_autofree char *sub = g_build_filename(root, name, NULL);
-            if (!g_file_test(sub, G_FILE_TEST_IS_DIR)) continue;
+    needle = state->loot_search != NULL
+           ? gtk_editable_get_text(GTK_EDITABLE(state->loot_search)) : NULL;
 
-            guint n = 0;
-            guint64 bytes = 0, newest = 0;
-            g_autoptr(GDir) sd = g_dir_open(sub, 0, NULL);
-            if (sd != NULL) {
-                const char *fn;
-                while ((fn = g_dir_read_name(sd)) != NULL) {
-                    g_autofree char *fp = g_build_filename(sub, fn, NULL);
-                    GStatBuf st;
-                    if (g_stat(fp, &st) != 0 || !S_ISREG(st.st_mode)) continue;
-                    n++;
-                    bytes += (guint64) st.st_size;
-                    if ((guint64) st.st_mtime > newest) newest = (guint64) st.st_mtime;
-                }
-            }
-
-            GtkWidget *row  = gtk_list_box_row_new();
-            GtkWidget *box  = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-            GtkWidget *mod  = gtk_label_new(name);
-            GtkWidget *meta = gtk_label_new(NULL);
-            GtkWidget *cnt  = gtk_label_new(NULL);
-            g_autofree char *sz = loot_fmt_size(bytes);
-            g_autofree char *when = NULL;
-            if (newest > 0) {
-                GDateTime *dt = g_date_time_new_from_unix_local((gint64) newest);
-                when = g_date_time_format(dt, "%m-%d %H:%M");
-                g_date_time_unref(dt);
-            } else {
-                when = g_strdup("—");
-            }
-            g_autofree char *txt = g_strdup_printf(
-                n == 0 ? "empty" : "%u file%s · %s", n, n == 1 ? "" : "s", sz);
-
-            gtk_widget_add_css_class(mod, "loot-module");
-            gtk_widget_add_css_class(meta, "loot-count");
-            gtk_widget_add_css_class(cnt, "loot-count");
-            gtk_label_set_xalign(GTK_LABEL(mod), 0.0f);
-            gtk_widget_set_hexpand(mod, TRUE);
-            gtk_label_set_text(GTK_LABEL(meta), when);
-            gtk_label_set_text(GTK_LABEL(cnt), txt);
-            gtk_label_set_xalign(GTK_LABEL(cnt), 1.0f);
-
-            gtk_box_append(GTK_BOX(box), mod);
-            gtk_box_append(GTK_BOX(box), meta);
-            gtk_box_append(GTK_BOX(box), cnt);
-            gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
-            g_object_set_data_full(G_OBJECT(row), "loot-dir", g_strdup(sub), g_free);
-            gtk_list_box_append(GTK_LIST_BOX(state->loot_list), row);
-            rows++;
-        }
+    for (guint i = 0; i < state->loot_entries->len; i++) {
+        LootEntry *e = g_ptr_array_index(state->loot_entries, i);
+        if (!loot_match(e, needle)) continue;
+        loot_add_row(state, e);
+        shown++;
+        bytes += e->size;
     }
 
-    if (rows == 0) {
+    if (shown == 0) {
+        gboolean empty = state->loot_entries->len == 0;
         GtkWidget *row = gtk_list_box_row_new();
-        GtkWidget *empty = empty_state("folder-symbolic", "Loot is empty",
-            "run a module that collects something, then Refresh");
-        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), empty);
+        GtkWidget *es  = empty_state("folder-symbolic",
+            empty ? "No evidence yet" : "Nothing matches",
+            empty ? "run a module that collects something, then Refresh"
+                  : "clear the search to see every file again");
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), es);
         gtk_list_box_row_set_selectable(GTK_LIST_BOX_ROW(row), FALSE);
         gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
         gtk_list_box_append(GTK_LIST_BOX(state->loot_list), row);
     }
-    if (state->loot_preview_buf != NULL)
-        gtk_text_buffer_set_text(state->loot_preview_buf, "", -1);
+
+    if (state->loot_count_lbl != NULL) {
+        g_autofree char *sz = loot_fmt_size(bytes);
+        g_autofree char *txt = (needle != NULL && *needle != '\0')
+            ? g_strdup_printf("%u of %u files · %s", shown, state->loot_entries->len, sz)
+            : g_strdup_printf("%u file%s · %s", shown, shown == 1 ? "" : "s", sz);
+        gtk_label_set_text(GTK_LABEL(state->loot_count_lbl), txt);
+    }
+}
+
+
+static void
+loot_row_activated(GtkListBox *lb, GtkListBoxRow *row, gpointer user_data)
+{
+    casebook_open_file(user_data, row ? g_object_get_data(G_OBJECT(row), "loot-file") : NULL);
+    (void) lb;
+}
+
+static void
+loot_search_changed(GtkEditable *editable, gpointer user_data)
+{
+    (void) editable;
+    loot_refresh(user_data);
+}
+
+static void
+loot_sort_changed(GObject *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+    AppState *state = user_data;
+    state->loot_sort_mode = (int) gtk_drop_down_get_selected(GTK_DROP_DOWN(dropdown));
+    loot_refresh(state);
+    (void) pspec;
 }
 
 static void
@@ -3875,10 +4739,7 @@ create_evidence_page(AppState *state)
     GtkWidget *sub    = gtk_label_new(NULL);
     GtkWidget *list   = gtk_list_box_new();
     GtkWidget *refresh = gtk_button_new_with_label("Refresh");
-    GtkWidget *paned  = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     GtkWidget *lscroll = gtk_scrolled_window_new();
-    GtkWidget *preview_scroll = gtk_scrolled_window_new();
-    GtkWidget *preview = gtk_text_view_new();
     g_autofree char *dir = g_build_filename(IMSISTING_ROOT, "loot", NULL);
 
     gtk_widget_add_css_class(title, "page-title");
@@ -3898,28 +4759,60 @@ create_evidence_page(AppState *state)
     gtk_widget_set_margin_end(head, 16);
     gtk_box_append(GTK_BOX(outer), head);
 
+    /* Finding a file is the whole job of this tab once a case has been
+       running for a while, so search and order sit above the list rather
+       than behind a menu. */
+    {
+        GtkWidget *bar    = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        GtkWidget *search = gtk_search_entry_new();
+        GtkWidget *sort   = gtk_drop_down_new_from_strings(
+            (const char *[]) { "Name", "Size", "Newest", "Module", NULL });
+        GtkWidget *count  = gtk_label_new("No evidence yet");
+        GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+
+        gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(search),
+                                              "Search files and modules");
+        gtk_widget_set_size_request(search, 320, -1);
+        gtk_widget_set_hexpand(spacer, TRUE);
+        gtk_widget_add_css_class(count, "loot-count-lbl");
+        gtk_widget_add_css_class(sort, "loot-sort");
+        gtk_widget_set_valign(search, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(sort,   GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(count,  GTK_ALIGN_CENTER);
+
+        gtk_box_append(GTK_BOX(bar), search);
+        gtk_box_append(GTK_BOX(bar), sort);
+        gtk_box_append(GTK_BOX(bar), spacer);
+        gtk_box_append(GTK_BOX(bar), count);
+        gtk_widget_set_margin_bottom(bar, 8);
+        gtk_widget_set_margin_start(bar, 16);
+        gtk_widget_set_margin_end(bar, 16);
+        gtk_box_append(GTK_BOX(outer), bar);
+
+        state->loot_search = search;
+        state->loot_sort = sort;
+        state->loot_count_lbl = count;
+        g_signal_connect(search, "changed",
+                         G_CALLBACK(loot_search_changed), state);
+        g_signal_connect(sort, "notify::selected",
+                         G_CALLBACK(loot_sort_changed), state);
+    }
+
     gtk_widget_add_css_class(list, "loot-list");
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_SINGLE);
     state->loot_list = list;
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(lscroll), list);
 
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(preview), FALSE);
-    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(preview), FALSE);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(preview), TRUE);
-    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(preview), GTK_WRAP_WORD_CHAR);
-    gtk_widget_add_css_class(preview, "loot-preview");
-    state->loot_preview = preview;
-    state->loot_preview_buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(preview));
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(preview_scroll), preview);
-
-    gtk_paned_set_start_child(GTK_PANED(paned), lscroll);
-    gtk_paned_set_end_child(GTK_PANED(paned), preview_scroll);
-    gtk_paned_set_position(GTK_PANED(paned), 380);
-    gtk_widget_set_vexpand(paned, TRUE);
-    gtk_box_append(GTK_BOX(outer), paned);
+    /* The list owns the tab. It used to share it with a preview pane that held
+       a third of the width and was empty until a file was selected, which made
+       every row stop short of the right edge with nothing beside it. A file
+       opens as its own tab now, so the glance value is covered and the rows
+       can run the full width with Open on the right. */
+    gtk_widget_set_vexpand(lscroll, TRUE);
+    gtk_box_append(GTK_BOX(outer), lscroll);
 
     g_signal_connect(refresh, "clicked", G_CALLBACK(loot_refresh_clicked), state);
-    g_signal_connect(list, "row-selected", G_CALLBACK(loot_row_selected), state);
+    g_signal_connect(list, "row-activated", G_CALLBACK(loot_row_activated), state);
     loot_refresh(state);
     return outer;
 }
@@ -4016,7 +4909,7 @@ casebook_row_new(const char *icon_name, const char *title, const char *ident,
     GtkWidget *content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     GtkWidget *text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *icon = gtk_image_new_from_icon_name(icon_name);
+    GtkWidget *icon = imsisting_icon_image(icon_name);
     GtkWidget *t = gtk_label_new(title != NULL ? title : "");
     GtkWidget *i = gtk_label_new(ident != NULL ? ident : "");
     GtkWidget *m = gtk_label_new(meta != NULL ? meta : "");
@@ -4219,6 +5112,57 @@ cb_row_report(GtkWidget *list, gchar **h, gchar **f)
 
 /* Run a TSV verb and render one row per record. An empty table arrives as a
    header line with nothing under it, so "one line" means empty. */
+/* The fetched text, the row builder and the empty-state copy are kept on the
+   list itself, so the search field can re-render without asking the CLI
+   again - and so a filter never turns into a second source of truth. */
+static void
+casebook_list_render(GtkWidget *list, const char *text, CasebookRowFn row_fn,
+                     const char *empty_title, const char *empty_hint,
+                     const char *needle)
+{
+    g_auto(GStrv) lines = NULL;
+    g_auto(GStrv) header = NULL;
+    g_autoptr(GPtrArray) rows = g_ptr_array_new_with_free_func(g_free);
+    g_autofree char *low = NULL;
+    guint matched = 0;
+
+    casebook_list_clear(list);
+
+    if (text == NULL || *text == '\0') {
+        casebook_list_note(list, empty_title, empty_hint);
+        return;
+    }
+
+    lines  = g_strsplit(text, "\n", -1);
+    header = g_strsplit(lines[0], "\t", -1);
+
+    if (needle != NULL && *needle != '\0')
+        low = g_ascii_strdown(needle, -1);
+
+    for (guint i = 1; lines[i] != NULL; i++) {
+        if (*lines[i] == '\0') continue;
+        if (low != NULL) {
+            g_autofree char *hay = g_ascii_strdown(lines[i], -1);
+            if (strstr(hay, low) == NULL) continue;
+        }
+        g_ptr_array_add(rows, g_strdup(lines[i]));
+    }
+
+    for (guint i = 0; i < rows->len; i++) {
+        g_auto(GStrv) f = g_strsplit(g_ptr_array_index(rows, i), "\t", -1);
+        row_fn(list, header, f);
+        matched++;
+    }
+
+    /* Distinguish "this case has no captures" from "your search matched
+       nothing" - they call for different next actions. */
+    if (matched == 0)
+        casebook_list_note(list,
+            (needle != NULL && *needle != '\0') ? "Nothing matches" : empty_title,
+            (needle != NULL && *needle != '\0') ? "clear the search to see everything again"
+                                                : empty_hint);
+}
+
 static void
 casebook_list_fill(GtkWidget *list, const char *command, CasebookRowFn row_fn,
                    const char *empty_title, const char *empty_hint)
@@ -4226,12 +5170,8 @@ casebook_list_fill(GtkWidget *list, const char *command, CasebookRowFn row_fn,
     const char *args[] = { command, NULL };
     gboolean ok = FALSE;
     g_autofree char *text = NULL;
-    g_auto(GStrv) lines = NULL;
-    g_auto(GStrv) header = NULL;
-    int rows = 0;
 
     if (list == NULL) return;
-    casebook_list_clear(list);
 
     text = casebook_call(args, &ok);
     if (!ok) {
@@ -4247,28 +5187,44 @@ casebook_list_fill(GtkWidget *list, const char *command, CasebookRowFn row_fn,
             first = g_str_has_prefix(raw, "ERROR")
                 ? g_strdup(g_strstrip(raw + 5))
                 : g_strdup(raw);
+            /* The tool's refusal names its own flags. Under a heading that
+               already says "No active case", "--case-create or --case-select"
+               is a man page, not a next step. */
+            if (first != NULL && g_ascii_strncasecmp(first, "no active case", 14) == 0) {
+                g_free(first);
+                first = g_strdup("Create or select a case in Overview.");
+            }
         }
+        g_object_set_data_full(G_OBJECT(list), "cb-text", g_strdup(""), g_free);
         casebook_list_note(list, "No active case",
             (first != NULL && *first != '\0')
                 ? first : "Create or select a case in Overview.");
         return;
     }
-    if (text == NULL || *text == '\0') {
-        casebook_list_note(list, empty_title, empty_hint);
-        return;
-    }
 
-    lines = g_strsplit(text, "\n", -1);
-    header = g_strsplit(lines[0], "\t", -1);
-    for (guint i = 1; lines[i] != NULL; i++) {
-        g_auto(GStrv) f = NULL;
-        if (*lines[i] == '\0') continue;
-        f = g_strsplit(lines[i], "\t", -1);
-        row_fn(list, header, f);
-        rows++;
-    }
-    if (rows == 0)
-        casebook_list_note(list, empty_title, empty_hint);
+    g_object_set_data_full(G_OBJECT(list), "cb-text", g_strdup(text), g_free);
+    g_object_set_data(G_OBJECT(list), "cb-rowfn", (gpointer) row_fn);
+    g_object_set_data_full(G_OBJECT(list), "cb-empty", g_strdup(empty_title), g_free);
+    g_object_set_data_full(G_OBJECT(list), "cb-hint", g_strdup(empty_hint), g_free);
+
+    casebook_list_render(list, text, row_fn, empty_title, empty_hint,
+                         g_object_get_data(G_OBJECT(list), "cb-needle"));
+}
+
+static void
+casebook_list_filter_changed(GtkEditable *editable, gpointer user_data)
+{
+    GtkWidget *list = user_data;
+    const char *text = g_object_get_data(G_OBJECT(list), "cb-text");
+
+    g_object_set_data_full(G_OBJECT(list), "cb-needle",
+                           g_strdup(gtk_editable_get_text(editable)), g_free);
+    if (text == NULL) return;
+    casebook_list_render(list, text,
+                         (CasebookRowFn) g_object_get_data(G_OBJECT(list), "cb-rowfn"),
+                         g_object_get_data(G_OBJECT(list), "cb-empty"),
+                         g_object_get_data(G_OBJECT(list), "cb-hint"),
+                         gtk_editable_get_text(editable));
 }
 
 /* The Casebook home: the facts an investigator wants before touching a tab —
@@ -4301,15 +5257,13 @@ build_casebook_home(AppState *state)
     return card;
 }
 
+/* The page-head band. Pure rendering: the four TSVs it describes are
+   fetched once by the Overview and handed in. They used to be fetched twice -
+   once for the band and once for the cards - and every fetch is a process. */
 static void
-casebook_home_refresh(AppState *state)
+casebook_fill_head(AppState *state, const char *show, const char *tgt,
+                   const char *status, const char *al)
 {
-    gboolean ok = FALSE;
-    const char *status_args[] = { "--status-tsv", NULL };
-    const char *show_args[]   = { "--case-show-tsv", NULL };
-    const char *tgt_args[]    = { "--target-current-tsv", NULL };
-    const char *alert_args[]  = { "--alerts-tsv", NULL };
-    g_autofree char *status = NULL, *show = NULL, *tgt = NULL, *al = NULL;
     g_autofree char *name = NULL, *cstat = NULL, *scope = NULL, *auth = NULL;
     g_autofree char *evc = NULL, *alc = NULL, *rat = NULL, *plmn = NULL;
     g_autofree char *cell = NULL, *asev = NULL, *amsg = NULL, *tstr = NULL;
@@ -4317,12 +5271,6 @@ casebook_home_refresh(AppState *state)
 
     if (state->casebook_brief_case == NULL) return;
 
-    status = casebook_call(status_args, &ok);
-    if (ok) {
-        show = casebook_call(show_args, NULL);
-        tgt  = casebook_call(tgt_args, NULL);
-        al   = casebook_call(alert_args, NULL);
-    }
     name  = show ? tsv_field(show, "name") : NULL;
     cstat = show ? tsv_field(show, "status") : NULL;
     scope = show ? tsv_field(show, "scope") : NULL;
@@ -4340,15 +5288,15 @@ casebook_home_refresh(AppState *state)
     if (none)
         status_set(state->casebook_brief_case, "not set", "status-warn");
     else {
-        g_autofree char *cs = g_strdup_printf("%s · %s", name,
+        g_autofree char *cs = g_strdup_printf("%s \u00b7 %s", name,
             (cstat && *cstat) ? cstat : "OPEN");
         status_set(state->casebook_brief_case, cs, "status-ok");
     }
     status_set(state->casebook_brief_scope,
-        (scope && *scope) ? scope : "—",
+        (scope && *scope) ? scope : "\u2014",
         (scope && *scope) ? "" : "status-dim");
     status_set(state->casebook_brief_auth,
-        (auth && *auth) ? auth : "—",
+        (auth && *auth) ? auth : "\u2014",
         (auth && *auth) ? "" : "status-dim");
 
     tstr = (rat || plmn || cell)
@@ -4374,47 +5322,111 @@ casebook_home_refresh(AppState *state)
 
     if (asev && amsg && *amsg)
         gtk_label_set_text(GTK_LABEL(state->casebook_brief_alert),
-                           g_strdup_printf("Latest alert · %s — %s", asev, amsg));
+                           g_strdup_printf("Latest alert \u00b7 %s \u2014 %s", asev, amsg));
     else
         gtk_label_set_text(GTK_LABEL(state->casebook_brief_alert),
             none ? "No active case. Create or select one to begin."
                  : "No alerts recorded for this case.");
 }
 
+/* Overview: three cards - the case, the target, the counts - and the band
+   above them, all from four TSVs fetched once. The monospace dump that used
+   to live here mixed all three together and gave a missing value nowhere to
+   be seen. */
+static void
+casebook_fill_overview(AppState *state)
+{
+    gboolean ok = FALSE;
+    const char *status_args[] = { "--status-tsv", NULL };
+    const char *case_args[] = { "--case-show-tsv", NULL };
+    const char *target_args[] = { "--target-current-tsv", NULL };
+    const char *alert_args[] = { "--alerts-tsv", NULL };
+    g_autofree char *status = casebook_call(status_args, &ok);
+    g_autofree char *details = ok ? casebook_call(case_args, NULL) : NULL;
+    g_autofree char *target = ok ? casebook_call(target_args, NULL) : NULL;
+    g_autofree char *alerts = ok ? casebook_call(alert_args, NULL) : NULL;
+
+    if (state->casebook_case_body != NULL) {
+        casebook_kv_fill(state->casebook_case_body,
+            (details != NULL && !g_str_has_prefix(details, "ERROR")) ? details : NULL,
+            "No active case. Create one above, or select an existing case.");
+        casebook_kv_fill(state->casebook_target_body,
+            (target != NULL && !g_str_has_prefix(target, "ERROR")) ? target : NULL,
+            "No target selected for this case.");
+        casebook_counts_fill(state->casebook_counts_body, status);
+    }
+    casebook_fill_head(state, details, target, status, alerts);
+}
+
+/* One fill per tab. Each forks two to four processes, and building the page
+   used to pay for all seven at once - 3.2 s of the window's startup, spent
+   before the window had ever been drawn, for data the user might not look
+   at. A tab now loads the first time it is opened, and remembers that it
+   did. */
+static void
+casebook_refresh_tab(AppState *state, guint tab)
+{
+    switch (tab) {
+    case CASEBOOK_TAB_OVERVIEW:
+        casebook_fill_overview(state);
+        break;
+    case CASEBOOK_TAB_EVIDENCE:
+        loot_refresh(state);
+        break;
+    case CASEBOOK_TAB_CAPTURES:
+        casebook_list_fill(state->casebook_captures_list, "--captures-tsv",
+            cb_row_capture, "No captures indexed.",
+            "Index Files, then Refresh.");
+        break;
+    case CASEBOOK_TAB_TIMELINE:
+        casebook_list_fill(state->casebook_timeline_list, "--timeline-tsv",
+            cb_row_timeline, "No timeline events.",
+            "Index captures, then Correlate Evidence.");
+        break;
+    case CASEBOOK_TAB_ALERTS:
+        casebook_list_fill(state->casebook_alerts_list, "--alerts-tsv",
+            cb_row_alert, "No alerts recorded.",
+            "Build Baseline writes the reference snapshot to compare against.");
+        break;
+    case CASEBOOK_TAB_NODES:
+        casebook_list_fill(state->casebook_nodes_list, "--node-list-tsv",
+            cb_row_node, "No remote sensor nodes configured.",
+            "Add a sensor above.");
+        break;
+    case CASEBOOK_TAB_REPORTS:
+        casebook_list_fill(state->casebook_reports_list, "--reports-tsv",
+            cb_row_report, "No reports exported.",
+            "Export HTML or JSON from the toolbar.");
+        break;
+    default:
+        return;
+    }
+    state->casebook_filled |= (1u << tab);
+}
+
+/* Refresh All, and the Refresh button on any tab, still mean every tab. */
 static void
 casebook_refresh(AppState *state)
 {
-    /* Overview combines the summary, active case and current target. */
-    if (state->casebook_overview != NULL) {
-        gboolean ok = FALSE;
-        const char *status_args[] = { "--status-tsv", NULL };
-        const char *case_args[] = { "--case-show-tsv", NULL };
-        const char *target_args[] = { "--target-current-tsv", NULL };
-        g_autofree char *status = casebook_call(status_args, &ok);
-        g_autofree char *details = ok ? casebook_call(case_args, NULL) : NULL;
-        g_autofree char *target = ok ? casebook_call(target_args, NULL) : NULL;
-        g_autofree char *all = g_strdup_printf(
-            "CASEBOOK STATUS\n%s\nACTIVE CASE\n%s\nCURRENT TARGET\n%s",
-            status != NULL ? status : "", details != NULL ? details : "No active case.\n",
-            target != NULL ? target : "No target selected.\n");
-        gtk_text_buffer_set_text(state->casebook_overview, all, -1);
-    }
-    casebook_list_fill(state->casebook_captures_list, "--captures-tsv",
-        cb_row_capture, "No captures indexed.",
-        "Index Files, then Refresh.");
-    casebook_list_fill(state->casebook_timeline_list, "--timeline-tsv",
-        cb_row_timeline, "No timeline events.",
-        "Index captures, then Correlate Evidence.");
-    casebook_list_fill(state->casebook_alerts_list, "--alerts-tsv",
-        cb_row_alert, "No alerts recorded.",
-        "Build Baseline writes the reference snapshot to compare against.");
-    casebook_list_fill(state->casebook_nodes_list, "--node-list-tsv",
-        cb_row_node, "No remote sensor nodes configured.",
-        "Add a sensor above.");
-    casebook_list_fill(state->casebook_reports_list, "--reports-tsv",
-        cb_row_report, "No reports exported.",
-        "Export HTML or JSON from the toolbar.");
-    casebook_home_refresh(state);
+    for (guint i = 0; i < CASEBOOK_TAB_COUNT; i++)
+        casebook_refresh_tab(state, i);
+}
+
+/* A tab loads the first time it is shown. switch-page is emitted while the
+   switch is still in progress, so the fill lands before the page is drawn
+   and the unfilled state is never on screen. */
+static void
+casebook_tab_switched(GtkNotebook *notebook, GtkWidget *page, guint tab,
+                      gpointer user_data)
+{
+    AppState *state = user_data;
+    (void) notebook;
+    (void) page;
+
+    /* Evidence files are appended past the seven fixed tabs. */
+    if (tab >= CASEBOOK_TAB_COUNT) return;
+    if (state->casebook_filled & (1u << tab)) return;
+    casebook_refresh_tab(state, tab);
 }
 
 static gboolean
@@ -4558,6 +5570,132 @@ casebook_shell(GtkWidget *toolbar, GtkWidget *content)
     return box;
 }
 
+/* The Overview used to be a monospace dump of whatever the Casebook CLI
+   printed. It was legible to whoever wrote the CLI and to nobody else: no
+   hierarchy, no empty state, and a wall of text where three facts mattered.
+   These three cards replace it - and a field that has no value says "not set"
+   rather than going blank, because a blank is indistinguishable from a bug. */
+static GtkWidget *
+casebook_card(const char *title, GtkWidget **body_out)
+{
+    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    GtkWidget *head = gtk_label_new(title);
+    GtkWidget *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+
+    gtk_widget_add_css_class(card, "cb-card");
+    gtk_widget_add_css_class(head, "cb-card-title");
+    gtk_label_set_xalign(GTK_LABEL(head), 0.0f);
+    gtk_box_append(GTK_BOX(card), head);
+    gtk_box_append(GTK_BOX(card), body);
+    if (body_out != NULL) *body_out = body;
+    return card;
+}
+
+static void
+casebook_card_empty(GtkWidget *body, const char *msg)
+{
+    GtkWidget *lbl = gtk_label_new(msg);
+    gtk_widget_add_css_class(lbl, "cb-empty");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(lbl), TRUE);
+    gtk_box_append(GTK_BOX(body), lbl);
+}
+
+/* Renders a key<TAB>value block. Anything the CLI could not answer arrives as
+   an ERROR row, which is shown as the card's own empty state instead of as a
+   field called ERROR. */
+static void
+casebook_kv_fill(GtkWidget *body, const char *tsv, const char *empty_msg)
+{
+    GtkWidget *child;
+    gboolean errored = tsv != NULL && g_str_has_prefix(tsv, "ERROR");
+
+    if (body == NULL) return;
+    while ((child = gtk_widget_get_first_child(body)) != NULL)
+        gtk_box_remove(GTK_BOX(body), child);
+
+    if (tsv == NULL || *tsv == '\0' || errored) {
+        casebook_card_empty(body, (errored && tsv != NULL)
+            ? g_strstrip((char *) tsv + 6) : empty_msg);
+        return;
+    }
+
+    g_auto(GStrv) lines = g_strsplit(tsv, "\n", -1);
+    for (guint i = 0; lines[i] != NULL; i++) {
+        g_auto(GStrv) f = NULL;
+        const char *key, *val;
+        GtkWidget *row, *k, *v;
+
+        if (*lines[i] == '\0') continue;
+        f = g_strsplit(lines[i], "\t", 2);
+        key = f[0] != NULL ? f[0] : "";
+        val = (f[1] != NULL && *f[1] != '\0') ? f[1] : NULL;
+
+        row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+        k = gtk_label_new(key);
+        v = gtk_label_new(val != NULL ? val : "not set");
+        gtk_widget_add_css_class(k, "cb-k");
+        gtk_widget_add_css_class(v, val != NULL ? "cb-v" : "cb-v-none");
+        gtk_label_set_xalign(GTK_LABEL(k), 0.0f);
+        gtk_label_set_xalign(GTK_LABEL(v), 0.0f);
+        gtk_widget_set_size_request(k, 168, -1);
+        gtk_label_set_selectable(GTK_LABEL(v), TRUE);
+        gtk_label_set_wrap(GTK_LABEL(v), TRUE);
+        gtk_widget_set_hexpand(v, TRUE);
+        gtk_box_append(GTK_BOX(row), k);
+        gtk_box_append(GTK_BOX(row), v);
+        gtk_box_append(GTK_BOX(body), row);
+    }
+}
+
+/* Counts read as a row of tiles: a number is scanned, a sentence is read. */
+static void
+casebook_counts_fill(GtkWidget *body, const char *tsv)
+{
+    GtkWidget *child;
+    GtkWidget *row = NULL;
+
+    if (body == NULL) return;
+    while ((child = gtk_widget_get_first_child(body)) != NULL)
+        gtk_box_remove(GTK_BOX(body), child);
+
+    if (tsv == NULL || *tsv == '\0' || g_str_has_prefix(tsv, "ERROR")) {
+        casebook_card_empty(body, "No case is open, so there is nothing to count.");
+        return;
+    }
+
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    g_auto(GStrv) lines = g_strsplit(tsv, "\n", -1);
+    for (guint i = 0; lines[i] != NULL; i++) {
+        g_auto(GStrv) f = NULL;
+        const char *key, *val;
+        GtkWidget *tile, *num, *lbl;
+        g_autofree char *up = NULL;
+
+        if (*lines[i] == '\0') continue;
+        f = g_strsplit(lines[i], "\t", 2);
+        key = f[0] != NULL ? f[0] : "";
+        val = (f[1] != NULL && *f[1] != '\0') ? f[1] : "0";
+        up = g_ascii_strup(key, -1);
+        g_strdelimit(up, "_", ' ');
+
+        tile = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        num  = gtk_label_new(val);
+        lbl  = gtk_label_new(up);
+        gtk_widget_add_css_class(tile, "cb-count");
+        gtk_widget_add_css_class(num, "cb-count-num");
+        gtk_widget_add_css_class(lbl, "cb-count-key");
+        gtk_label_set_xalign(GTK_LABEL(num), 0.0f);
+        gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+        gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+        gtk_widget_set_hexpand(tile, TRUE);
+        gtk_box_append(GTK_BOX(tile), num);
+        gtk_box_append(GTK_BOX(tile), lbl);
+        gtk_box_append(GTK_BOX(row), tile);
+    }
+    gtk_box_append(GTK_BOX(body), row);
+}
+
 static GtkWidget *
 create_casebook_overview(AppState *state)
 {
@@ -4595,14 +5733,37 @@ create_casebook_overview(AppState *state)
     gtk_box_append(GTK_BOX(body), create_row);
     gtk_box_append(GTK_BOX(body), select_row);
     gtk_box_append(GTK_BOX(body), hint);
-    gtk_box_append(GTK_BOX(body), casebook_text_view(&state->casebook_overview,
-        "No active case. Create or select one above."));
-    return casebook_shell(NULL, body);
+    {
+        GtkWidget *cards = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+        gtk_widget_set_margin_top(cards, 12);
+        gtk_box_append(GTK_BOX(cards),
+            casebook_card("ACTIVE CASE", &state->casebook_case_body));
+        gtk_box_append(GTK_BOX(cards),
+            casebook_card("CURRENT TARGET", &state->casebook_target_body));
+        gtk_box_append(GTK_BOX(cards),
+            casebook_card("CASEBOOK AT A GLANCE", &state->casebook_counts_body));
+        gtk_box_append(GTK_BOX(body), cards);
+    }
+    /* Every other tab puts its content in a scroller, and this one did not -
+       which made the cards set the notebook's minimum height. A notebook
+       cannot shrink below that minimum, so the whole Casebook page grew past
+       the window and the bottom of every tab was off-screen and unreachable:
+       the counts card here, the last files in Evidence. A scroller gives the
+       page a minimum it can shrink to. */
+    {
+        GtkWidget *scroll = gtk_scrolled_window_new();
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), body);
+        gtk_widget_set_vexpand(scroll, TRUE);
+        return casebook_shell(NULL, scroll);
+    }
 }
 
 static GtkWidget *
 create_casebook_listing(AppState *state, GtkWidget **list_out,
-                        const char *placeholder, const char *label1,
+                        const char *placeholder, const char *search_hint,
+                        const char *label1,
                         const char *command1, const char *label2,
                         const char *command2, const char *label3,
                         const char *command3)
@@ -4611,8 +5772,12 @@ create_casebook_listing(AppState *state, GtkWidget **list_out,
     GtkWidget *refresh = gtk_button_new_with_label("Refresh");
     GtkWidget *scroll = gtk_scrolled_window_new();
     GtkWidget *list = gtk_list_box_new();
+    GtkWidget *search = gtk_search_entry_new();
 
-    (void) placeholder;
+    gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(search),
+        search_hint != NULL ? search_hint : "Search this list");
+    gtk_widget_set_hexpand(search, TRUE);
+    gtk_widget_set_valign(search, GTK_ALIGN_CENTER);
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
     gtk_widget_add_css_class(list, "cell-list");
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
@@ -4622,6 +5787,9 @@ create_casebook_listing(AppState *state, GtkWidget **list_out,
     *list_out = list;
 
     g_signal_connect(refresh, "clicked", G_CALLBACK(casebook_refresh_clicked), state);
+    g_signal_connect(search, "changed",
+                     G_CALLBACK(casebook_list_filter_changed), list);
+    gtk_box_append(GTK_BOX(toolbar), search);
     gtk_box_append(GTK_BOX(toolbar), refresh);
     if (label1 != NULL) gtk_box_append(GTK_BOX(toolbar), casebook_action(state, label1, command1));
     if (label2 != NULL) gtk_box_append(GTK_BOX(toolbar), casebook_action(state, label2, command2));
@@ -4657,6 +5825,10 @@ create_casebook_nodes(AppState *state)
     {
         GtkWidget *scroll = gtk_scrolled_window_new();
         GtkWidget *list = gtk_list_box_new();
+        GtkWidget *nodesearch = gtk_search_entry_new();
+        gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(nodesearch),
+                                              "Search sensors");
+        gtk_widget_set_margin_bottom(nodesearch, 6);
         gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
         gtk_widget_add_css_class(list, "cell-list");
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
@@ -4664,6 +5836,9 @@ create_casebook_nodes(AppState *state)
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), list);
         gtk_widget_set_vexpand(scroll, TRUE);
         state->casebook_nodes_list = list;
+        g_signal_connect(nodesearch, "changed",
+                         G_CALLBACK(casebook_list_filter_changed), list);
+        gtk_box_append(GTK_BOX(body), nodesearch);
         gtk_box_append(GTK_BOX(body), scroll);
     }
     return casebook_shell(NULL, body);
@@ -4706,6 +5881,8 @@ create_casebook_page(AppState *state)
     }
     gtk_widget_set_vexpand(tabs, TRUE);
     gtk_box_append(GTK_BOX(outer), tabs);
+    state->casebook_tabs = tabs;
+    gtk_notebook_set_scrollable(GTK_NOTEBOOK(tabs), TRUE);
     g_signal_connect(refresh, "clicked", G_CALLBACK(casebook_refresh_clicked), state);
 
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), create_casebook_overview(state),
@@ -4714,24 +5891,25 @@ create_casebook_page(AppState *state)
                              gtk_label_new("Evidence"));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs),
         create_casebook_listing(state, &state->casebook_captures_list,
-            "No captures indexed.", "Index Files", "--index",
+            "No captures indexed.", "Search captures", "Index Files", "--index",
             NULL, NULL, NULL, NULL), gtk_label_new("Captures"));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs),
         create_casebook_listing(state, &state->casebook_timeline_list,
-            "No timeline events.", "Correlate Evidence", "--correlate",
+            "No timeline events.", "Search events", "Correlate Evidence", "--correlate",
             NULL, NULL, NULL, NULL), gtk_label_new("Timeline"));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs),
         create_casebook_listing(state, &state->casebook_alerts_list,
-            "No alerts.", "Build Baseline", "--baseline-build",
+            "No alerts.", "Search alerts", "Build Baseline", "--baseline-build",
             "Clear Alerts", "--alerts-clear", NULL, NULL), gtk_label_new("Alerts"));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), create_casebook_nodes(state),
                              gtk_label_new("Nodes"));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs),
         create_casebook_listing(state, &state->casebook_reports_list,
-            "No reports exported.", "Export HTML", "--report-html",
+            "No reports exported.", "Search reports", "Export HTML", "--report-html",
             "Export JSON", "--report-json", "Export TSV", "--report-tsv"),
             gtk_label_new("Reports"));
-    casebook_refresh(state);
+    g_signal_connect(tabs, "switch-page",
+                     G_CALLBACK(casebook_tab_switched), state);
     return outer;
 }
 
@@ -5016,20 +6194,37 @@ static const char *HELP_TEXT =
 "  ./modules/15_lte_core.sh --decode-diameter <hex>\n"
 "\n"
 "GETTING AROUND\n"
-"  Dashboard   every module as a card on one grid; sort with the control\n"
-"  Modules     the sidebar list; toggle it from the header bar\n"
-"  Casebook    cases, targets, evidence, alerts, sensors and reports\n"
+"  Dashboard   every module as a card on one grid\n"
+"  Casebook    cases, targets, evidence, captures, alerts, sensors\n"
 "  Stats       module and collection counts\n"
 "  Settings    environment facts and maintenance actions\n"
 "\n"
-"  Open a module card (or a sidebar row) and it appears as its own tab.\n"
-"  Module tabs close; Dashboard/Casebook/Stats/Help/Settings do not.\n"
+"  The page list is a drawer: move the pointer to the left edge of the\n"
+"  window and it slides out over the page. Choosing a row switches page\n"
+"  and closes it; moving the pointer away closes it too.\n"
+"\n"
+"  Target    the right-hand panel, toggled from the header. It holds the\n"
+"            current target and the case counters, and it floats over the\n"
+"            page instead of narrowing it.\n"
+"  Search    the header field (Ctrl+K) matches every page and module;\n"
+"            Enter opens the first match.\n"
+"  Escape    closes the search results, then the open module.\n"
+"\n"
+"  Opening a module raises it as a panel over the dashboard, with its own\n"
+"  submenu down the left. The dashboard is never replaced - it stays\n"
+"  underneath, and Escape or the panel's close button returns to it.\n"
+"\n"
+"EVIDENCE\n"
+"  The Casebook's Evidence tab indexes every file under loot/. Search\n"
+"  matches the file name and the module that produced it; Sort orders by\n"
+"  Name, Size, Newest or Module. Open, or a double click, opens the file\n"
+"  as a closable tab inside the Casebook.\n"
 "\n"
 "MAKING IT YOURS\n"
 "  These survive a restart; they are kept in state/ui.tsv,\n"
 "  state/recent.tsv and state/pins.tsv beside the toolkit.\n"
 "\n"
-"  Pin      the star on a card or sidebar row; pinned modules lead the\n"
+"  Pin      the star on a dashboard card; pinned modules lead the\n"
 "           dashboard whatever the sort is set to\n"
 "  Sort     Workflow (category order), Most used (by run count), Name,\n"
 "           Category\n"
@@ -5228,6 +6423,164 @@ static void live_stop(AppState *state);
 
 #define LIVE_TAB_INDEX 1
 
+/* ── the palette ──────────────────────────────────────────────────────────
+   The header's search field opens a result list under itself. It answers
+   the same question the drawer's catalogue does, one keystroke in instead
+   of a pointer journey to the window edge, which is the difference between
+   the search being the fastest way somewhere and being the last resort. */
+static void
+palette_add_row(AppState *state, const char *icon, const char *name,
+                const char *sub, const char *haystack, int page_index,
+                const ModuleDefinition *module)
+{
+    GtkWidget *row = gtk_list_box_row_new();
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *img = imsisting_icon_image(icon);
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *lname = gtk_label_new(name);
+    GtkWidget *lsub = gtk_label_new(sub);
+
+    gtk_image_set_pixel_size(GTK_IMAGE(img), 18);
+    gtk_widget_set_valign(img, GTK_ALIGN_CENTER);
+    gtk_label_set_xalign(GTK_LABEL(lname), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(lsub), 0.0f);
+    gtk_widget_set_hexpand(lname, TRUE);
+    gtk_widget_add_css_class(lname, "palette-name");
+    gtk_widget_add_css_class(lsub, "palette-sub");
+    gtk_label_set_ellipsize(GTK_LABEL(lsub), PANGO_ELLIPSIZE_END);
+    gtk_box_append(GTK_BOX(col), lname);
+    gtk_box_append(GTK_BOX(col), lsub);
+    gtk_widget_set_hexpand(col, TRUE);
+    gtk_box_append(GTK_BOX(box), img);
+    gtk_box_append(GTK_BOX(box), col);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+
+    /* Owned by the row: g_ascii_strdown returns a fresh string, and a
+       g_autofree would hand the row a pointer it had already freed. */
+    g_object_set_data_full(G_OBJECT(row), "haystack",
+                           g_ascii_strdown(haystack, -1), g_free);
+    g_object_set_data(G_OBJECT(row), "page-index", GINT_TO_POINTER(page_index));
+    g_object_set_data(G_OBJECT(row), "module", (gpointer) module);
+    gtk_list_box_append(GTK_LIST_BOX(state->palette_list), row);
+}
+
+static void
+palette_refilter(AppState *state)
+{
+    const char *q = state->header_search != NULL
+        ? gtk_editable_get_text(GTK_EDITABLE(state->header_search)) : NULL;
+    g_autofree char *needle = (q != NULL && *q != '\0') ? g_ascii_strdown(q, -1) : NULL;
+    int shown = 0;
+
+    if (state->palette == NULL) return;
+    for (GtkWidget *row = gtk_widget_get_first_child(state->palette_list);
+         row != NULL; row = gtk_widget_get_next_sibling(row)) {
+        const char *hay = g_object_get_data(G_OBJECT(row), "haystack");
+        gboolean hit = needle != NULL && hay != NULL && strstr(hay, needle) != NULL;
+        gtk_widget_set_visible(row, hit);
+        if (hit) shown++;
+    }
+    gtk_widget_set_visible(state->palette, needle != NULL && shown > 0);
+}
+
+static void
+palette_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer user_data)
+{
+    AppState *state = user_data;
+    const ModuleDefinition *module = g_object_get_data(G_OBJECT(row), "module");
+    int page = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "page-index"));
+
+    gtk_editable_set_text(GTK_EDITABLE(state->header_search), "");
+    gtk_widget_set_visible(state->palette, FALSE);
+    if (module != NULL)
+        open_module(state, module);
+    else if (page >= 0)
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), page);
+    (void) list;
+}
+
+static void
+palette_search_changed(GtkSearchEntry *entry, gpointer user_data)
+{
+    (void) entry;
+    palette_refilter(user_data);
+}
+
+static void
+palette_activate(GtkSearchEntry *entry, gpointer user_data)
+{
+    AppState *state = user_data;
+    for (GtkWidget *row = gtk_widget_get_first_child(state->palette_list);
+         row != NULL; row = gtk_widget_get_next_sibling(row)) {
+        if (gtk_widget_get_visible(row)) {
+            palette_row_activated(NULL, GTK_LIST_BOX_ROW(row), state);
+            return;
+        }
+    }
+    (void) entry;
+}
+
+static void
+palette_stopped(GtkSearchEntry *entry, gpointer user_data)
+{
+    AppState *state = user_data;
+    gtk_editable_set_text(GTK_EDITABLE(entry), "");
+    gtk_widget_set_visible(state->palette, FALSE);
+}
+
+/* The dashboard is the only view that is never covered, so it is the
+   overlay's main child and the notebook's page 0 is an empty slot standing
+   in for it. Every other page is this panel: floating over the dashboard
+   with a scrim behind it, opened by the drawer and closed by Escape, by a
+   click on the scrim, or by the page's own close button. */
+static void
+sheet_set_open(AppState *state, gboolean open)
+{
+    if (state->sheet == NULL) return;
+    gtk_widget_set_visible(state->sheet, open);
+    gtk_widget_set_visible(state->sheet_scrim, open);
+}
+
+static void
+sheet_dismiss(AppState *state)
+{
+    if (state->notebook == NULL) return;
+    if (gtk_widget_get_visible(state->sheet))
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), 0);
+}
+
+static void
+sheet_scrim_clicked(GtkGestureClick *gesture, int n_press, double x, double y,
+                    gpointer user_data)
+{
+    (void) gesture; (void) n_press; (void) x; (void) y;
+    sheet_dismiss(user_data);
+}
+
+static gboolean
+sheet_key_pressed(GtkEventControllerKey *controller, guint keyval,
+                  guint keycode, GdkModifierType modifiers, gpointer user_data)
+{
+    AppState *state = user_data;
+    (void) controller; (void) keycode;
+
+    if ((modifiers & GDK_CONTROL_MASK) != 0 &&
+        (keyval == GDK_KEY_k || keyval == GDK_KEY_K)) {
+        if (state->header_search != NULL)
+            gtk_widget_grab_focus(state->header_search);
+        return TRUE;
+    }
+    if (keyval != GDK_KEY_Escape) return FALSE;
+    if (state->palette != NULL && gtk_widget_get_visible(state->palette)) {
+        gtk_editable_set_text(GTK_EDITABLE(state->header_search), "");
+        gtk_widget_set_visible(state->palette, FALSE);
+        return TRUE;
+    }
+    if (!gtk_widget_get_visible(state->sheet)) return FALSE;
+    sheet_dismiss(state);
+    return TRUE;
+}
+
 static void
 notebook_page_switched(GtkNotebook *nb, GtkWidget *child, guint page,
                        gpointer user_data)
@@ -5235,6 +6588,10 @@ notebook_page_switched(GtkNotebook *nb, GtkWidget *child, guint page,
     AppState *state = user_data;
     GtkTextBuffer *buf;
     (void) nb;
+
+    /* Page 0 is the dashboard's slot, and the dashboard is behind the sheet
+       rather than in it, so landing on page 0 is what closing looks like. */
+    sheet_set_open(state, page != 0);
 
     /* Aim output at the console of whichever page is on screen. Non-module
        tabs carry no "output-buffer", which clears the target so a run can
@@ -5251,6 +6608,19 @@ notebook_page_switched(GtkNotebook *nb, GtkWidget *child, guint page,
        than leaving the last module marked while you look at the dashboard. */
     sidebar_set_active(state, child != NULL
                        ? g_object_get_data(G_OBJECT(child), "module-id") : NULL);
+
+    /* The drawer's page list replaced the tab strip, so it has to follow the
+       notebook the way the module rows already do -- including onto a module
+       page, which is on no list entry and so clears the highlight. */
+    if (state->drawer_nav != NULL) {
+        state->drawer_nav_syncing = TRUE;
+        if (page < 6 && state->drawer_nav_rows[page] != NULL)
+            gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
+                GTK_LIST_BOX_ROW(state->drawer_nav_rows[page]));
+        else
+            gtk_list_box_unselect_all(GTK_LIST_BOX(state->drawer_nav));
+        state->drawer_nav_syncing = FALSE;
+    }
 
     /* Stats counts filesystem state that modules change while the app runs. */
     if (child != NULL && g_object_get_data(G_OBJECT(child), "stats-page") != NULL)
@@ -5768,31 +7138,32 @@ live_filter_cleared(GtkButton *b, gpointer user_data)
         gtk_editable_set_text(GTK_EDITABLE(state->live_filter_entry), "");
 }
 
-/* Place the live divider once the paned has actually been measured.
-
-   A position set at construction is applied before the children have a
-   minimum size, so 850 against a ~908px notebook left the inspector a ~58px
-   sliver. Measuring first and then subtracting a fixed inspector width keeps
-   the panel usable, and shrink-end-child=FALSE keeps it that way when the
-   window narrows. */
-#define LIVE_INSPECTOR_WIDTH 320
-
-static gboolean
-live_paned_place_idle(gpointer user_data)
+/* The packet inspector used to be a permanent right-hand pane, so the live
+   feed - the only thing this page exists for - was 320px narrower than the
+   window at all times, and every payload column paid for a panel that sits
+   empty until a row is selected. It is now a popover over the table, opened
+   from "Inspect" in the toolbar and closed on Escape or a click outside. */
+static void
+live_inspector_toggled(GtkToggleButton *btn, gpointer user_data)
 {
-    GtkWidget *paned = user_data;
-    int w = gtk_widget_get_width(paned);
+    GtkWidget *popover = user_data;
 
-    if (w > LIVE_INSPECTOR_WIDTH + 260)
-        gtk_paned_set_position(GTK_PANED(paned), w - LIVE_INSPECTOR_WIDTH);
-    return G_SOURCE_REMOVE;
+    if (gtk_toggle_button_get_active(btn))
+        gtk_popover_popup(GTK_POPOVER(popover));
+    else
+        gtk_popover_popdown(GTK_POPOVER(popover));
 }
 
+/* Closing the popover has to release the button, or the next press toggles it
+   OFF and pops nothing up - the control would look dead every second click.
+   Setting the state re-enters the handler above, which calls popdown() on an
+   already-closed popover; that is a no-op, and cheaper than a guard flag. */
 static void
-live_paned_mapped(GtkWidget *paned, gpointer user_data)
+live_inspector_closed(GtkPopover *popover, gpointer user_data)
 {
-    (void) user_data;
-    g_idle_add(live_paned_place_idle, paned);
+    GtkToggleButton *btn = user_data;
+    (void) popover;
+    gtk_toggle_button_set_active(btn, FALSE);
 }
 
 static GtkWidget *
@@ -5809,7 +7180,8 @@ create_live_traffic_page(AppState *state)
     GtkWidget *clear  = gtk_button_new_with_label("Clear");
     GtkWidget *pause  = gtk_button_new_with_label("Pause");
     GtkWidget *follow = gtk_toggle_button_new_with_label("Follow");
-    GtkWidget *paned  = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    GtkWidget *inspector_btn  = gtk_toggle_button_new_with_label("Inspect");
+    GtkWidget *inspector_pop  = gtk_popover_new();
     GtkWidget *inspector_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     GtkWidget *inspector_title = gtk_label_new("PACKET INSPECTOR");
     GtkWidget *inspector = gtk_text_view_new();
@@ -5836,12 +7208,13 @@ create_live_traffic_page(AppState *state)
     gtk_widget_add_css_class(pause,  "verb-button");
     gtk_widget_add_css_class(follow, "verb-button");
     gtk_widget_add_css_class(inspector_box, "live-inspector");
-    /* The divider is requested at 850, but the pane is only as wide as the
-       notebook (~908 at the default window, less with the sidebar open), so
-       the inspector was being squeezed into a ~58px sliver and its values
-       were clipped. A minimum width makes GtkPaned clamp the divider itself,
-       at any window size, instead of trusting one hardcoded number. */
-    gtk_widget_set_size_request(inspector_box, 300, -1);
+    gtk_widget_add_css_class(inspector_btn, "verb-button");
+    gtk_widget_set_tooltip_text(inspector_btn,
+        "show the decoded fields of the selected packet");
+    /* Fixed, because a popover sizes to its content and the text view's
+       natural width is the longest decoded line - without this the panel
+       grows a horizontal scrollbar and covers the feed it is describing. */
+    gtk_widget_set_size_request(inspector_box, 340, 280);
     gtk_widget_add_css_class(inspector_title, "live-inspector-title");
     gtk_widget_add_css_class(view,   "live-table");
     gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
@@ -5868,6 +7241,7 @@ create_live_traffic_page(AppState *state)
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(follow), TRUE);
     gtk_widget_set_tooltip_text(follow, "keep the newest packet in view");
     gtk_box_append(GTK_BOX(head), follow);
+    gtk_box_append(GTK_BOX(head), inspector_btn);
     g_signal_connect(follow, "toggled", G_CALLBACK(live_follow_toggled), state);
 
     /* ---- toolbar ---- */
@@ -5933,16 +7307,19 @@ create_live_traffic_page(AppState *state)
     gtk_widget_set_vexpand(inspector_scroll, TRUE);
     gtk_box_append(GTK_BOX(inspector_box), inspector_title);
     gtk_box_append(GTK_BOX(inspector_box), inspector_scroll);
-    gtk_paned_set_start_child(GTK_PANED(paned), overlay);
-    gtk_paned_set_end_child(GTK_PANED(paned), inspector_box);
-    gtk_paned_set_position(GTK_PANED(paned), 850);
-    /* The inspector keeps its width; the table absorbs the resizing. */
-    gtk_paned_set_resize_start_child(GTK_PANED(paned), TRUE);
-    gtk_paned_set_resize_end_child(GTK_PANED(paned), FALSE);
-    gtk_paned_set_shrink_start_child(GTK_PANED(paned), TRUE);
-    gtk_paned_set_shrink_end_child(GTK_PANED(paned), FALSE);
-    g_signal_connect(paned, "map", G_CALLBACK(live_paned_mapped), NULL);
-    gtk_box_append(GTK_BOX(outer), paned);
+
+    /* The inspector is a popover over the feed, not a sibling of it, so the
+       table gets the full width of the page. It is parented to the button so
+       GTK can anchor and destroy it with the toolbar. */
+    gtk_popover_set_position(GTK_POPOVER(inspector_pop), GTK_POS_BOTTOM);
+    gtk_popover_set_has_arrow(GTK_POPOVER(inspector_pop), TRUE);
+    gtk_widget_set_parent(inspector_pop, inspector_btn);
+    gtk_popover_set_child(GTK_POPOVER(inspector_pop), inspector_box);
+    g_signal_connect(inspector_pop, "closed",
+                     G_CALLBACK(live_inspector_closed), inspector_btn);
+    g_signal_connect(inspector_btn, "toggled",
+                     G_CALLBACK(live_inspector_toggled), inspector_pop);
+    gtk_box_append(GTK_BOX(outer), overlay);
 
     state->live_view         = view;
     state->live_status       = status;
@@ -5974,21 +7351,73 @@ create_live_traffic_page(AppState *state)
 }
 
 /* ==================================================================== */
-/*  SIDEBAR COLLAPSE                                                    */
+/*  THE MODULE DRAWER                                                   */
 /* ==================================================================== */
 
+/* The list slides out over the page instead of sitting beside it. Pushing
+   the page aside was not just a layout choice, it was a cost: every toggle
+   re-ran the dashboard's tile fit and re-wrapped every module page, and it
+   made the list compete with the content for width instead of being called
+   up when it is wanted. */
 static void
-sidebar_toggle_toggled(GtkToggleButton *button, gpointer user_data)
+drawer_set_open(AppState *state, gboolean open)
+{
+    if (state->sidebar_revealer == NULL) return;
+
+    gtk_revealer_set_reveal_child(GTK_REVEALER(state->sidebar_revealer), open);
+
+    /* Opening it is a request to find something, and where you already are
+       is part of that. The caret is deliberately NOT moved: the drawer now
+       opens on hover, and a hover that quietly took the keyboard would
+       swallow the next keystroke into a search box the pointer only passed
+       over. Clicking the entry is how you type in it. */
+    if (open && state->drawer_nav != NULL) {
+        int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(state->notebook));
+        state->drawer_nav_syncing = TRUE;
+        if (cur >= 0 && cur < 6 && state->drawer_nav_rows[cur] != NULL)
+            gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
+                GTK_LIST_BOX_ROW(state->drawer_nav_rows[cur]));
+        else
+            gtk_list_box_unselect_all(GTK_LIST_BOX(state->drawer_nav));
+        state->drawer_nav_syncing = FALSE;
+    }
+}
+
+static gboolean
+drawer_is_open(AppState *state)
+{
+    return state->sidebar_revealer != NULL &&
+           gtk_revealer_get_reveal_child(GTK_REVEALER(state->sidebar_revealer));
+}
+
+/* The left edge of the page is the handle. There is no button in the
+   titlebar any more: a hover target costs no header space, and the header
+   is the scarcest strip in the window.
+
+   There is no timer on the way in either. A delay would have to be a GLib
+   timeout, and this process has been observed not to dispatch them, so the
+   drawer opens on the motion event itself. Nothing needs debouncing:
+   travelling from the edge to a row keeps the pointer inside the drawer
+   the whole way, so the close fires only once the pointer is well clear. */
+/* Measured from the window, not from the overlay: the card leaves a 22px
+   gutter around the content, so an edge defined inside the overlay would sit
+   a finger's width away from the edge of the screen and the pointer would
+   have to be dragged through the margin before anything happened. */
+#define DRAWER_EDGE   34.0
+#define DRAWER_CLEAR (DRAWER_EDGE + 272.0 + 24.0)
+static void
+drawer_edge_motion(GtkEventControllerMotion *controller, double x, double y,
+                   gpointer user_data)
 {
     AppState *state = user_data;
-    gboolean show = gtk_toggle_button_get_active(button);
+    (void) controller;
+    (void) y;
 
-    if (state->sidebar == NULL) return;
-    gtk_widget_set_visible(state->sidebar, show);
-    gtk_widget_set_visible(gtk_paned_get_start_child(
-        GTK_PANED(state->sidebar_paned)), show);
-    if (show)
-        gtk_paned_set_position(GTK_PANED(state->sidebar_paned), 272);
+    if (x <= DRAWER_EDGE) {
+        if (!drawer_is_open(state)) drawer_set_open(state, TRUE);
+    } else if (x > DRAWER_CLEAR) {
+        if (drawer_is_open(state)) drawer_set_open(state, FALSE);
+    }
 }
 
 /* ── global radio target ────────────────────────────────────────────────
@@ -6232,7 +7661,7 @@ static GtkWidget *
 build_target_panel(AppState *state)
 {
     GtkWidget *revealer = gtk_revealer_new();
-    GtkWidget *panel = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     GtkWidget *title = gtk_label_new("TARGET");
     GtkWidget *apply = gtk_button_new_with_label("Apply");
     GtkWidget *clear = gtk_button_new_with_label("Clear");
@@ -6251,10 +7680,6 @@ build_target_panel(AppState *state)
     gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_arfcn), 12);
     gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_plmn), 10);
     gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_cell), 24);
-    gtk_widget_set_size_request(state->rtarget_rat, 110, -1);
-    gtk_widget_set_size_request(state->rtarget_arfcn, 90, -1);
-    gtk_widget_set_size_request(state->rtarget_plmn, 100, -1);
-    gtk_widget_set_size_request(state->rtarget_cell, 110, -1);
 
     gtk_widget_add_css_class(panel, "target-panel");
     gtk_widget_add_css_class(title, "target-title");
@@ -6278,38 +7703,320 @@ build_target_panel(AppState *state)
     gtk_box_append(GTK_BOX(panel), clear);
     gtk_box_append(GTK_BOX(panel), state->rtarget_state_lbl);
 
+    /* The case counters. Same status_cell helper and the same four state
+       fields as before, so status_poll() still keeps them live. */
+    {
+        GtkWidget *head = gtk_label_new("CASE");
+        GtkWidget *grid = gtk_grid_new();
+        GtkWidget *cells[4];
+
+        gtk_widget_add_css_class(head, "target-case-head");
+        gtk_label_set_xalign(GTK_LABEL(head), 0.0f);
+        gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
+        gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
+
+        cells[0] = status_cell("CASE", &state->dash_case);
+        cells[1] = status_cell("TARGETS", &state->dash_targets);
+        cells[2] = status_cell("EVIDENCE", &state->dash_evidence);
+        cells[3] = status_cell("ALERTS", &state->dash_alerts);
+        for (int i = 0; i < 4; i++) {
+            gtk_widget_set_hexpand(cells[i], TRUE);
+            gtk_grid_attach(GTK_GRID(grid), cells[i], i % 2, i / 2, 1, 1);
+        }
+
+        gtk_box_append(GTK_BOX(panel), head);
+        gtk_box_append(GTK_BOX(panel), grid);
+    }
+
     g_signal_connect(apply, "clicked", G_CALLBACK(rtarget_apply_clicked), state);
     g_signal_connect(clear, "clicked", G_CALLBACK(rtarget_clear_clicked), state);
 
+    /* A column hugs the right edge and folds sideways; sliding down was
+       what the panel did when it was a strip across the top. */
+    for (GtkWidget **e = (GtkWidget *[]){ state->rtarget_rat, state->rtarget_arfcn,
+                                          state->rtarget_plmn, state->rtarget_cell };
+         e < (GtkWidget *[]){ state->rtarget_rat, state->rtarget_arfcn,
+                              state->rtarget_plmn, state->rtarget_cell } + 4; e++)
+        gtk_widget_set_hexpand(*e, TRUE);
+
     gtk_revealer_set_transition_type(GTK_REVEALER(revealer),
-                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_LEFT);
     gtk_revealer_set_transition_duration(GTK_REVEALER(revealer), 180);
     gtk_revealer_set_child(GTK_REVEALER(revealer), panel);
+    gtk_widget_set_size_request(revealer, 288, -1);
     state->rtarget_revealer = revealer;
 
     return revealer;
 }
 
-static void
-on_activate(GtkApplication *app, gpointer user_data)
-{
-    AppState *state = user_data;
+/* ──────────────────────────────── Splash ────────────────────────────────
+   The first screen: the illustration, the logo over it, and a bar that
+   reports what the boot is doing.
 
-    if (state->window != NULL) {
-        gtk_window_present(GTK_WINDOW(state->window));
+   Three things about how it is drawn are deliberate.
+
+   The logo asset is glow-on-black with no alpha channel, and that is not a
+   defect to work around. Compositing it with CAIRO_OPERATOR_ADD makes the
+   black contribute nothing and the glow add to whatever is underneath, which
+   is how the art was drawn in the first place. Cutting an alpha channel by
+   hand would be the wrong fix: it would have to be redrawn for every edge,
+   and it would throw away the halo the additive pass produces for free.
+
+   The art is drawn to cover, not to fit. The splash window is the art's own
+   aspect ratio, so cover and fit agree at the natural size; cover is what
+   keeps them agreeing if the window manager hands us a different one, at the
+   cost of cropping rather than letterboxing.
+
+   The bar is not decoration. Each stage below does the work its label names,
+   and the percentage is that stage's place in the sequence. The pacing is
+   deliberate - a stage stays up long enough to read even when its work
+   returns in a millisecond - because a bar that jumps straight to 100% has
+   told the user nothing and looks like the app skipped something.
+   ─────────────────────────────────────────────────────────────────────── */
+
+#define SPLASH_BAR_R 0.184
+#define SPLASH_BAR_G 0.427
+#define SPLASH_BAR_B 1.000   /* #2f6dff - the blue the logo is drawn in */
+#define SPLASH_TXT_R 0.435
+#define SPLASH_TXT_G 0.659
+#define SPLASH_TXT_B 1.000   /* #6fa8ff */
+#define SPLASH_DIM_R 0.545
+#define SPLASH_DIM_G 0.592
+#define SPLASH_DIM_B 0.659   /* #8b97a8, the app's text_dim */
+
+static void
+splash_rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r)
+{
+    if (r > h / 2.0) r = h / 2.0;
+    if (r > w / 2.0) r = w / 2.0;
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, x + w - r, y + r,     r, -G_PI_2, 0.0);
+    cairo_arc(cr, x + w - r, y + h - r, r, 0.0, G_PI_2);
+    cairo_arc(cr, x + r,     y + h - r, r, G_PI_2, G_PI);
+    cairo_arc(cr, x + r,     y + r,     r, G_PI, G_PI + G_PI_2);
+    cairo_close_path(cr);
+}
+
+/* A GdkTexture as a Cairo surface, downloaded once at startup.
+   gdk_cairo_set_source_paint() would do this in one call, but it arrived in
+   GTK 4.20 and this has to build against what the distro ships (4.14 here).
+   Converting per frame would copy several megabytes sixty times a second. */
+static cairo_surface_t *
+splash_surface(GdkTexture *tex)
+{
+    int w = gdk_texture_get_width(tex);
+    int h = gdk_texture_get_height(tex);
+    gsize stride = (gsize) w * 4;
+
+    g_autofree guchar *src = g_malloc(stride * h);
+    gdk_texture_download(tex, src, stride);
+
+    cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    guchar *dst = cairo_image_surface_get_data(s);
+    gsize dstride = (gsize) cairo_image_surface_get_stride(s);
+    for (int y = 0; y < h; y++)
+        memcpy(dst + (gsize) y * dstride, src + (gsize) y * stride,
+               MIN(stride, dstride));
+    cairo_surface_mark_dirty(s);
+    return s;
+}
+
+/* Draw a surface so it covers the given rectangle: scaled by whichever axis
+   needs more, centred, and cropped by the clip. */
+static void
+splash_cover(cairo_t *cr, cairo_surface_t *s, double x, double y,
+             double w, double h)
+{
+    double tw = cairo_image_surface_get_width(s);
+    double th = cairo_image_surface_get_height(s);
+    if (tw <= 0.0 || th <= 0.0 || w <= 0.0 || h <= 0.0) return;
+
+    double k = MAX(w / tw, h / th);
+
+    cairo_save(cr);
+    cairo_rectangle(cr, x, y, w, h);
+    cairo_clip(cr);
+    cairo_translate(cr, x + (w - tw * k) / 2.0, y + (h - th * k) / 2.0);
+    cairo_scale(cr, k, k);
+    cairo_set_source_surface(cr, s, 0.0, 0.0);
+    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+    cairo_paint(cr);
+    cairo_restore(cr);
+}
+
+/* One centred line of monospace, which is the face the rest of the app uses. */
+static void
+splash_text(cairo_t *cr, const char *text, double cx, double y, double px,
+            gboolean bold, double r, double g, double b, double a)
+{
+    PangoLayout *layout = pango_cairo_create_layout(cr);
+    PangoFontDescription *fd = pango_font_description_new();
+    pango_font_description_set_family(fd, "monospace");
+    pango_font_description_set_absolute_size(fd, px * PANGO_SCALE);
+    pango_font_description_set_weight(fd, bold ? PANGO_WEIGHT_BOLD
+                                               : PANGO_WEIGHT_NORMAL);
+    pango_layout_set_font_description(layout, fd);
+    pango_layout_set_text(layout, text, -1);
+
+    int tw = 0, th = 0;
+    pango_layout_get_pixel_size(layout, &tw, &th);
+
+    cairo_set_source_rgba(cr, r, g, b, a);
+    cairo_move_to(cr, cx - tw / 2.0, y);
+    pango_cairo_show_layout(cr, layout);
+
+    g_object_unref(layout);
+    pango_font_description_free(fd);
+}
+
+/* Everything above the bar is the same in every frame - the art, the shade
+   under the logo, the footer gradient. Composing it once into a backdrop at
+   the widget's device size and blitting that afterwards is the difference
+   between a bar that moves and one that jumps: scaling two images of this
+   size per frame, in software, measured at roughly 130 ms a frame, so the
+   animation was asking for 60 fps and being given seven. */
+static void
+splash_backdrop(AppState *state, int width, int height, int scale)
+{
+    if (state->splash_bg != NULL &&
+        state->splash_bg_w == width * scale &&
+        state->splash_bg_h == height * scale)
         return;
+    if (state->splash_bg != NULL)
+        cairo_surface_destroy(state->splash_bg);
+
+    state->splash_bg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+                                                  width * scale, height * scale);
+    state->splash_bg_w = width * scale;
+    state->splash_bg_h = height * scale;
+
+    cairo_t *cr = cairo_create(state->splash_bg);
+    cairo_scale(cr, scale, scale);
+
+    /* Base colour first, so a resource that somehow did not carry the art
+       still gives a dark panel rather than a hole in the screen. */
+    cairo_set_source_rgb(cr, 0.043, 0.063, 0.090);
+    cairo_paint(cr);
+
+    if (state->splash_art != NULL)
+        splash_cover(cr, state->splash_art, 0, 0, width, height);
+
+    /* The logo goes in the middle. The art underneath is an illustration
+       with its own focal point, so the logo gets a soft radial shade to sit
+       on - without it the glow and the artwork fight and neither reads. */
+    if (state->splash_logo != NULL) {
+        double size = MIN(width * 0.40, height * 0.62);
+        double lx = (width - size) / 2.0;
+        double ly = height * 0.45 - size / 2.0;
+
+        if (size > 8.0) {
+            cairo_pattern_t *shade = cairo_pattern_create_radial(
+                width / 2.0, ly + size / 2.0, size * 0.10,
+                width / 2.0, ly + size / 2.0, size * 0.78);
+            cairo_pattern_add_color_stop_rgba(shade, 0.0, 0.02, 0.03, 0.06, 0.62);
+            cairo_pattern_add_color_stop_rgba(shade, 1.0, 0.02, 0.03, 0.06, 0.0);
+            cairo_set_source(cr, shade);
+            cairo_paint(cr);
+            cairo_pattern_destroy(shade);
+
+            cairo_save(cr);
+            cairo_set_operator(cr, CAIRO_OPERATOR_ADD);
+            splash_cover(cr, state->splash_logo, lx, ly, size, size);
+            cairo_restore(cr);
+        }
     }
 
+    /* Darken the bottom so the bar and its text read over any crop of the
+       art. Transparent at the top edge of the strip, so there is no seam. */
+    cairo_pattern_t *foot = cairo_pattern_create_linear(0, height - 170.0,
+                                                        0, (double) height);
+    cairo_pattern_add_color_stop_rgba(foot, 0.0, 0.02, 0.03, 0.06, 0.0);
+    cairo_pattern_add_color_stop_rgba(foot, 1.0, 0.02, 0.03, 0.06, 0.78);
+    cairo_set_source(cr, foot);
+    cairo_rectangle(cr, 0, height - 170.0, width, 170.0);
+    cairo_fill(cr);
+    cairo_pattern_destroy(foot);
+
+    cairo_destroy(cr);
+}
+
+static void
+splash_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
+            gpointer data)
+{
+    AppState *state = data;
+
+    splash_backdrop(state, width, height,
+                    gtk_widget_get_scale_factor(GTK_WIDGET(area)));
+    if (state->splash_bg != NULL) {
+        cairo_set_source_surface(cr, state->splash_bg, 0, 0);
+        cairo_paint(cr);
+    }
+
+    double bar_w = CLAMP(width * 0.42, 220.0, 560.0);
+    double bar_h = 7.0;
+    double bar_x = (width - bar_w) / 2.0;
+    double bar_y = height - 84.0;
+    double shown = CLAMP(state->splash_shown, 0.0, 1.0);
+
+    /* Track. */
+    splash_rounded_rect(cr, bar_x, bar_y, bar_w, bar_h, bar_h / 2.0);
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.13);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.35);
+    cairo_set_line_width(cr, 1.0);
+    cairo_stroke(cr);
+
+    /* Fill, with a halo. Cairo has no blur, so the glow is the same path
+       stroked a few times at decreasing width and increasing alpha. */
+    double fw = bar_w * shown;
+    if (fw > 0.75) {
+        for (int i = 2; i >= 0; i--) {
+            double grow = 3.0 + i * 5.0;
+            splash_rounded_rect(cr, bar_x, bar_y, fw, bar_h, bar_h / 2.0);
+            cairo_set_source_rgba(cr, SPLASH_BAR_R, SPLASH_BAR_G, SPLASH_BAR_B,
+                                  0.05 + (2 - i) * 0.05);
+            cairo_set_line_width(cr, bar_h + grow);
+            cairo_stroke(cr);
+        }
+        splash_rounded_rect(cr, bar_x, bar_y, fw, bar_h, bar_h / 2.0);
+        cairo_set_source_rgb(cr, SPLASH_BAR_R, SPLASH_BAR_G, SPLASH_BAR_B);
+        cairo_fill(cr);
+    }
+
+    /* What the boot is on, in the app's dim grey - it is a caption for the
+       bar, not a second headline competing with the logo. */
+    if (state->splash_label != NULL)
+        splash_text(cr, state->splash_label, width / 2.0, bar_y - 28.0,
+                    12.0, FALSE, SPLASH_DIM_R, SPLASH_DIM_G, SPLASH_DIM_B, 1.0);
+
+    g_autofree char *pct = g_strdup_printf("%d %%", (int) (shown * 100.0 + 0.5));
+    splash_text(cr, pct, width / 2.0, bar_y + bar_h + 14.0, 15.0, TRUE,
+                SPLASH_TXT_R, SPLASH_TXT_G, SPLASH_TXT_B, 1.0);
+}
+
+/* ─────────────────────────────── Boot ───────────────────────────────────
+   on_activate used to do all of the following in one block, which meant the
+   process had no window on screen for the whole of it: the launch looked
+   like nothing had happened until everything had. These are that same block
+   cut at the points where it already paused naturally, so the splash can
+   report each one and the window can appear as soon as there is one.
+
+   The order is not cosmetic. density_apply() writes a CSS class onto
+   state->window, so the window has to exist before it runs - which is why
+   creating it is part of the first stage rather than a stage of its own.
+   ─────────────────────────────────────────────────────────────────────── */
+
+static void
+boot_restore_session(AppState *state, GtkApplication *app)
+{
     /* The module icons are compiled into this binary (see
-       tools/gen-icons-xml.sh) and published under a resource path shaped like
-       an icon theme: icons/scalable/actions/<name>.svg. Registering that path
-       makes gtk_image_new_from_icon_name() find them inside the binary, so the
-       dashboard does not depend on the launcher having copied the SVGs into
-       ~/.local/share/icons/hicolor, nor on whichever theme the distro exposes.
-       They stay symbolic, so each category's accent colour still applies. */
-    gtk_icon_theme_add_resource_path(
-        gtk_icon_theme_get_for_display(gdk_display_get_default()),
-        "/com/imsisting/native/icons");
+       tools/gen-icons-xml.sh) and published as icons/scalable/actions/
+       <name>.svg. imsisting_icon_image() reads them straight out of the
+       resource, so the dashboard depends on neither the launcher having
+       copied the SVGs into ~/.local/share/icons/hicolor nor whichever theme
+       the distro exposes. They stay symbolic, so each category's accent
+       colour still applies. */
 
     state->window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(state->window), "IMSIsting");
@@ -6326,12 +8033,25 @@ on_activate(GtkApplication *app, gpointer user_data)
        and the run counts behind "Most used". */
     ui_state_load(state);
     density_apply(state);
+}
+
+static void
+boot_load_css(AppState *state, GtkApplication *app)
+{
+    (void) state;
+    (void) app;
 
     g_autoptr(GtkCssProvider) css = gtk_css_provider_new();
     gtk_css_provider_load_from_resource(css, "/com/imsisting/native/style.css");
     gtk_style_context_add_provider_for_display(
         gdk_display_get_default(), GTK_STYLE_PROVIDER(css),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+}
+
+static void
+boot_build_ui(AppState *state, GtkApplication *app)
+{
+    (void) app;
 
     GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
@@ -6342,21 +8062,49 @@ on_activate(GtkApplication *app, gpointer user_data)
     GtkWidget *subtitle = gtk_label_new("2G · 3G · 4G · 5G cellular research toolkit");
     gtk_widget_add_css_class(title, "title");
     gtk_widget_add_css_class(subtitle, "app-subtitle");
+    /* Both lines centre inside the title block. Left-aligned, the longer
+       subtitle set the block's width and the shorter word "IMSIsting" hung
+       off its left edge, which is what read as the title being off-centre -
+       the block was centred, the word inside it was not. */
     gtk_widget_set_halign(title, GTK_ALIGN_START);
     gtk_widget_set_halign(subtitle, GTK_ALIGN_START);
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(subtitle), 0.0f);
+    gtk_widget_set_halign(titlebox, GTK_ALIGN_START);
     gtk_box_append(GTK_BOX(titlebox), title);
     gtk_box_append(GTK_BOX(titlebox), subtitle);
-    gtk_header_bar_set_title_widget(GTK_HEADER_BAR(header), titlebox);
 
-    /* Modules toggle — the sidebar collapses so a module page gets the
-       full width when it needs it. */
-    GtkWidget *modules_btn = gtk_toggle_button_new_with_label("Modules");
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(modules_btn), TRUE);
-    gtk_widget_set_tooltip_text(modules_btn, "show or hide the module list");
-    g_signal_connect(modules_btn, "toggled",
-                     G_CALLBACK(sidebar_toggle_toggled), state);
-    gtk_header_bar_pack_start(GTK_HEADER_BAR(header), modules_btn);
-    state->sidebar_toggle = modules_btn;
+    /* The wordmark moves to the start and the search takes the centre. The
+       centre of the header is the most expensive real estate in the window
+       and it was spending it on a name that never changes, while the one
+       control that goes anywhere was inside a drawer you have to reach for
+       by moving the pointer to the edge of the screen. */
+    gtk_header_bar_pack_start(GTK_HEADER_BAR(header), titlebox);
+
+    GtkWidget *searchbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_add_css_class(searchbox, "header-search");
+    GtkWidget *search = gtk_search_entry_new();
+    GtkWidget *hint = gtk_label_new("Ctrl K");
+    gtk_widget_add_css_class(hint, "header-search-hint");
+    gtk_widget_set_valign(hint, GTK_ALIGN_CENTER);
+    gtk_widget_set_size_request(search, 380, -1);
+    gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(search),
+                                          "Search modules and pages");
+    gtk_box_append(GTK_BOX(searchbox), search);
+    gtk_box_append(GTK_BOX(searchbox), hint);
+    gtk_header_bar_set_title_widget(GTK_HEADER_BAR(header), searchbox);
+    state->header_search = search;
+    /* "search-changed" is emitted through a 150ms GLib timeout, and timers
+       do not dispatch in this process, so the palette would never open.
+       "changed" is the editable's own signal and fires on the keystroke. */
+    g_signal_connect(search, "changed",
+                     G_CALLBACK(palette_search_changed), state);
+    g_signal_connect(search, "activate", G_CALLBACK(palette_activate), state);
+    g_signal_connect(search, "stop-search", G_CALLBACK(palette_stopped), state);
+
+    /* No drawer button: the drawer opens from the left edge of the page,
+       which costs the header nothing. This strip is the scarcest in the
+       window -- title, target and events all compete for it. */
 
     GtkWidget *events_btn = gtk_toggle_button_new_with_label("Events");
     gtk_widget_set_tooltip_text(events_btn,
@@ -6381,36 +8129,34 @@ on_activate(GtkApplication *app, gpointer user_data)
 
     /* Live cellular state, read from the modules themselves. */
     gtk_box_append(GTK_BOX(root), build_status_strip(state));
-    gtk_box_append(GTK_BOX(root), build_target_panel(state));
+    /* Not appended here: the target is the right-hand column of the body,
+       so it is built now and packed beside the overlay below. */
+    GtkWidget *target_col = build_target_panel(state);
 
     /* Body: sidebar | notebook. */
-    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_paned_set_position(GTK_PANED(paned), 272);
-    state->sidebar_paned = paned;
-
-    state->sidebar = build_sidebar(state);
-    gtk_paned_set_start_child(GTK_PANED(paned), state->sidebar);
-    /* Keep the sidebar at its width when the window grows. */
-    gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
-
     state->notebook = gtk_notebook_new();
     gtk_notebook_set_scrollable(GTK_NOTEBOOK(state->notebook), TRUE);
     gtk_notebook_set_show_border(GTK_NOTEBOOK(state->notebook), FALSE);
-    gtk_paned_set_end_child(GTK_PANED(paned), state->notebook);
+    /* No tab strip. The six permanent pages are the first six rows of the
+       drawer and module pages are reached from the catalogue below them, so
+       a strip naming the same six pages again would be exactly the second
+       navigation layer the old dashboard was criticised for. */
+    gtk_notebook_set_show_tabs(GTK_NOTEBOOK(state->notebook), FALSE);
+    gtk_widget_set_vexpand(state->notebook, TRUE);
+    gtk_widget_set_hexpand(state->notebook, TRUE);
 
-    gtk_widget_set_vexpand(paned, TRUE);
-    /* Kept as a box child: an overlay child was tried and never rendered
-       (the revealer reported its revealed height but GtkOverlay allocated it
-       nothing), so the drawer vanished while its header toggle showed as
-       active. The window's own minimum height below is what keeps it on
-       screen instead. */
-    gtk_box_append(GTK_BOX(root), paned);
-
-    /* ---- permanent tabs, in order, before any module page ----
-       These carry a bare label rather than a closable tab, so they cannot be
-       closed. Module pages are appended after them and do close. */
+    /* ---- the permanent pages, appended first ----
+       First because the drawer lists them in this order and resolves them
+       by index, and because "Dashboard" has to be page zero. The label is
+       never shown with the strip hidden, but the notebook still wants one,
+       and keeping it means the pages are described correctly if a strip
+       ever comes back. */
+    /* Page 0 is the dashboard's index, not the dashboard itself -- that
+       widget is the overlay's main child. Keeping the index means every
+       page number in the rest of this file still means what it did when the
+       dashboard was page 0 of the notebook. */
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
-        create_dashboard_page(state), gtk_label_new("Dashboard"));
+        gtk_box_new(GTK_ORIENTATION_VERTICAL, 0), gtk_label_new("Dashboard"));
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
         create_live_traffic_page(state), gtk_label_new("Live Traffic"));
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
@@ -6425,6 +8171,135 @@ on_activate(GtkApplication *app, gpointer user_data)
 
     g_signal_connect(state->notebook, "switch-page",
                      G_CALLBACK(notebook_page_switched), state);
+
+
+    /* ---- the drawer ----
+       The notebook is the overlay's main child, so it keeps the full width
+       of the window at all times and the drawer is drawn on top of it
+       rather than beside it. The revealer supplies the slide.
+
+       measure_overlay FALSE is the load-bearing line: with it TRUE the
+       overlay reports notebook + 272 as its own preferred width, so the
+       drawer does not float over the page, it sets a floor under the whole
+       window and the page is never narrow enough to need the drawer. */
+    GtkWidget *overlay = gtk_overlay_new();
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), create_dashboard_page(state));
+
+    /* ---- the target column ----
+       It floats over the page the way the drawer does rather than sitting
+       beside it. Sizing it here rather than in the box means opening it
+       never costs the grid a column: the page keeps every pixel it had and
+       the panel covers the right-hand tiles instead of reflowing them. */
+    gtk_widget_set_halign(target_col, GTK_ALIGN_END);
+    gtk_widget_set_valign(target_col, GTK_ALIGN_FILL);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), target_col);
+    gtk_overlay_set_measure_overlay(GTK_OVERLAY(overlay), target_col, FALSE);
+
+    /* ---- the sheet and its scrim ----
+       Added before the drawer so the drawer still floats above both. The
+       scrim swallows the click that would otherwise land on a dashboard
+       tile behind the panel and turn a dismissal into a navigation. */
+    state->sheet_scrim = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(state->sheet_scrim, "sheet-scrim");
+    GtkGesture *scrim_click = gtk_gesture_click_new();
+    g_signal_connect(scrim_click, "released", G_CALLBACK(sheet_scrim_clicked), state);
+    gtk_widget_add_controller(state->sheet_scrim,
+                              GTK_EVENT_CONTROLLER(scrim_click));
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->sheet_scrim);
+    gtk_overlay_set_measure_overlay(GTK_OVERLAY(overlay), state->sheet_scrim, FALSE);
+
+    state->sheet = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(state->sheet, "sheet");
+    gtk_box_append(GTK_BOX(state->sheet), state->notebook);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->sheet);
+    gtk_overlay_set_measure_overlay(GTK_OVERLAY(overlay), state->sheet, FALSE);
+    sheet_set_open(state, FALSE);
+
+    GtkEventController *sheet_keys = gtk_event_controller_key_new();
+    g_signal_connect(sheet_keys, "key-pressed", G_CALLBACK(sheet_key_pressed), state);
+    gtk_widget_add_controller(GTK_WIDGET(state->window), sheet_keys);
+
+    /* ---- the palette ----
+       Anchored to the top of the content area rather than to the field, so
+       it cannot be clipped by the header's own height and does not move
+       when the field's neighbours change width. */
+    state->palette = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(state->palette, "palette");
+    gtk_widget_set_halign(state->palette, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(state->palette, GTK_ALIGN_START);
+    gtk_widget_set_size_request(state->palette, 520, -1);
+    state->palette_list = gtk_list_box_new();
+    gtk_widget_add_css_class(state->palette_list, "palette-list");
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(state->palette_list),
+                                    GTK_SELECTION_SINGLE);
+    gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(state->palette_list), TRUE);
+    g_signal_connect(state->palette_list, "row-activated",
+                     G_CALLBACK(palette_row_activated), state);
+    gtk_list_box_set_placeholder(GTK_LIST_BOX(state->palette_list),
+                                 gtk_label_new("Nothing matches"));
+    gtk_box_append(GTK_BOX(state->palette), state->palette_list);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->palette);
+    gtk_overlay_set_measure_overlay(GTK_OVERLAY(overlay), state->palette, FALSE);
+    gtk_widget_set_visible(state->palette, FALSE);
+
+    /* Every destination in one list: the six permanent pages, then every
+       module, in the order the drawer shows them. Built once and filtered
+       by visibility, because the set never changes at runtime. */
+    palette_add_row(state, "view-grid-symbolic", "Dashboard",
+                    "Case, bench, recon and live traffic",
+                    "dashboard start here command overview home", 0, NULL);
+    palette_add_row(state, "network-wireless-symbolic", "Live Traffic",
+                    "The GSMTP feed as it arrives",
+                    "live traffic gsmtp packets feed capture", LIVE_TAB_INDEX, NULL);
+    palette_add_row(state, "folder-symbolic", "Casebook",
+                    "Cases, evidence and nodes",
+                    "casebook case evidence nodes exhibits", 2, NULL);
+    palette_add_row(state, "org.gnome.SystemMonitor-symbolic", "Stats",
+                    "Modules, collections and health",
+                    "stats counts modules health inventory", 3, NULL);
+    palette_add_row(state, "help-about-symbolic", "Help",
+                    "How this is put together",
+                    "help about documentation", 4, NULL);
+    palette_add_row(state, "emblem-system-symbolic", "Settings",
+                    "Preferences and paths",
+                    "settings preferences paths configuration", 5, NULL);
+    for (int i = 0; i < N_MODULES; i++) {
+        g_autofree char *sub = g_strdup_printf("%s  ·  %s",
+                                               modules[i].category, modules[i].id);
+        g_autofree char *hay = g_strdup_printf("%s %s %s %s",
+                                               modules[i].name, modules[i].id,
+                                               modules[i].category, modules[i].desc);
+        palette_add_row(state, modules[i].icon, modules[i].name, sub, hay, -1,
+                        &modules[i]);
+    }
+
+    state->sidebar = build_sidebar(state);
+    gtk_widget_set_size_request(state->sidebar, 272, -1);
+
+    GtkWidget *revealer = gtk_revealer_new();
+    state->sidebar_revealer = revealer;
+    gtk_revealer_set_transition_type(GTK_REVEALER(revealer),
+                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_RIGHT);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(revealer), 170);
+    gtk_revealer_set_child(GTK_REVEALER(revealer), state->sidebar);
+    gtk_widget_set_halign(revealer, GTK_ALIGN_START);
+    gtk_widget_set_valign(revealer, GTK_ALIGN_FILL);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), revealer);
+    gtk_overlay_set_measure_overlay(GTK_OVERLAY(overlay), revealer, FALSE);
+
+    /* The left edge of the window is the handle. One controller on the
+       window and not one on the drawer: a motion controller reports the
+       pointer in the controller's own coordinates, so a single listener can
+       decide "at the edge" and "clear of the drawer" without having to
+       reason about enter/leave as the pointer crosses from the drawer onto
+       its own rows -- and the window is the only widget whose origin is the
+       edge of the screen. */
+    GtkEventController *motion = gtk_event_controller_motion_new();
+    g_signal_connect(motion, "motion", G_CALLBACK(drawer_edge_motion), state);
+    gtk_widget_add_controller(GTK_WIDGET(state->window), motion);
+
+    gtk_widget_set_vexpand(overlay, TRUE);
+    gtk_box_append(GTK_BOX(root), overlay);
 
     if (g_start_module != NULL) {
         for (int i = 0; i < N_MODULES; i++) {
@@ -6449,18 +8324,530 @@ on_activate(GtkApplication *app, gpointer user_data)
     gtk_box_append(GTK_BOX(root), drawer);
     gtk_box_append(GTK_BOX(root), state->toast_box);
 
-    gtk_window_set_child(GTK_WINDOW(state->window), root);
+    /* A visual self-check for the notification layer, off unless asked for.
+       IMSISTING_TOAST_DEMO=1 raises one toast of each severity at startup,
+       so the component can be looked at without having to navigate to a
+       button and run a real command to produce one. */
+    if (g_getenv("IMSISTING_TOAST_DEMO") != NULL) {
+        show_toast_full(state, "Dependency Manager",
+                        "completed — 28 present, 3 missing, 2 broken", "ok");
+        show_toast_full(state, "grgsm_decode",
+                        "gnuradio present but no gr-gsm OOT blocks (import grgsm fails)",
+                        "warn");
+        show_toast_full(state, "Install Missing", "failed (exit 1)", "error");
+    }
 
+    /* The card, drawn in two halves: the stylesheet gives the header the top
+       corners and this box the bottom ones. See "the frame" in style.css. */
+    gtk_widget_add_css_class(root, "app-root");
+    gtk_window_set_child(GTK_WINDOW(state->window), root);
+}
+
+static void
+boot_check_index(AppState *state, GtkApplication *app)
+{
+    (void) app;
     report_index_drift(state);
     append_event(state, "IMSIsting started — modules are standalone scripts "
                         "in modules/; the GUI is a view over them.");
+}
 
-    /* Poll the live status strip. Cheap: every value is a --status-tsv verb
-       that returns in well under 100 ms. */
+static void
+boot_poll_status(AppState *state, GtkApplication *app)
+{
+    (void) app;
+
+    /* Collect the probe splash_begin started. It has had the whole interface
+       build to finish, so this read is short - and if it somehow is not, the
+       child is what this stage is waiting for anyway. */
+    if (state->radio_prefetch_fd >= 0) {
+        GString *out = g_string_new(NULL);
+        char buf[4096];
+        ssize_t got;
+        while ((got = read(state->radio_prefetch_fd, buf, sizeof buf)) > 0)
+            g_string_append_len(out, buf, got);
+        close(state->radio_prefetch_fd);
+        state->radio_prefetch_fd = -1;
+        if (state->radio_prefetch_pid > 0) {
+            g_spawn_close_pid(state->radio_prefetch_pid);
+            state->radio_prefetch_pid = 0;
+        }
+        if (out->len > 0) {
+            g_free(state->radio_prefetch);
+            state->radio_prefetch = g_string_free(out, FALSE);
+        } else {
+            g_string_free(out, TRUE);
+        }
+    }
+    /* Cheap: every value is a --status-tsv verb that returns in well under
+       100 ms. */
     status_poll(state);
     state->status_source = g_timeout_add_seconds(3, status_poll, state);
+}
 
-    gtk_window_present(GTK_WINDOW(state->window));
+/* The Overview is the tab the Casebook opens on, so switch-page never fires
+   for it. Filling it from a short timeout rather than here puts the window on
+   screen first: the fill forks four processes, and doing it inline would hold
+   the first paint behind them - which is the cost this whole exercise is
+   about removing. Idle would not do; a frame is painted from the frame clock,
+   and a timeout is the only ordering that is not a guess. */
+static gboolean
+boot_fill_overview(gpointer data)
+{
+    AppState *state = data;
+    if (state->window != NULL && state->casebook_tabs != NULL &&
+        !(state->casebook_filled & (1u << CASEBOOK_TAB_OVERVIEW)))
+        casebook_refresh_tab(state, CASEBOOK_TAB_OVERVIEW);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+boot_present(AppState *state, GtkApplication *app)
+{
+    /* With a splash on screen the window is not shown from here: it would be
+       up, and painting, while the splash still had seconds to run, and the two
+       would be visible at once - the window is the larger of the two, so its
+       edges show around the splash. splash_close is what puts it up. */
+    if (state->splash_window == NULL)
+        gtk_window_present(GTK_WINDOW(state->window));
+    (void) app;
+}
+
+/* The bar's stages, in order. Each label is what the step does; the
+   percentage is the step's place in this list, so adding a stage lengthens
+   the sequence rather than making the last one lie. */
+static const struct {
+    const char *label;
+    void (*run)(AppState *state, GtkApplication *app);
+} boot_steps[] = {
+    { "restoring the last session", boot_restore_session },
+    { "loading the stylesheet",     boot_load_css        },
+    { "building the interface",     boot_build_ui        },
+    { "checking the module index",  boot_check_index     },
+    { "polling the radio",          boot_poll_status     },
+    { "ready",                      boot_present         },
+};
+
+#define SPLASH_MIN_STEP_MS 165  /* a stage stays up at least this long */
+#define SPLASH_TAIL_MS     260  /* pause on the full bar before it goes */
+#define SPLASH_FRAME_MS     16
+/* A splash that blinks out in half a second reads as a flash, not as a title.
+   The boot is usually over inside three seconds, so the splash is held to
+   this regardless - the work being finished is not the splash's cue to go. */
+#define SPLASH_MIN_TOTAL_MS 6000
+/* If the film never reports an end (no decoder, a truncated file) the splash
+   still has to let go. */
+#define SPLASH_VIDEO_CAP_MS 13000
+
+/* One of these is printed at the bottom left of the film, drawn fresh each
+   launch, so that two starts of the same program do not say the same thing.
+   The claims and their citations are the cards'; do not soften them. */
+static const struct {
+    const char *title;
+    const char *body;
+} splash_facts[] = {
+    { "the mechanism",
+      "GSM authenticates the subscriber to the network. It never authenticates "
+      "the network to the subscriber. A phone attaches to whichever cell proves "
+      "strongest, and no part of the 2G air interface proves that cell belongs "
+      "to its operator. 3GPP TS 43.020" },
+    { "what a catcher is, stated honestly",
+      "An IMSI catcher is not a device that reads a SIM. It is a base station "
+      "that wins a selection contest \u2014 same broadcast channel, closer, louder. "
+      "Everything it learns, it learns because the phone was asked and "
+      "answered." },
+    { "where the identity comes from",
+      "The TMSI exists so the IMSI does not have to travel. It is a 32-bit "
+      "alias the network assigns, valid inside one location area and nowhere "
+      "else. On 2G the IMSI still crosses the air in the clear whenever the "
+      "network asks for it." },
+    { "mutual authentication, and what it forced",
+      "UMTS added the missing half: the phone verifies the network with AUTN. "
+      "That is why the practical attacks moved from impersonate the tower to "
+      "make the phone believe the tower is old \u2014 a downgrade to 2G restores "
+      "the one-way world." },
+    { "5G fixed the identity, not the problem",
+      "5G stops broadcasting the permanent identity: the SUCI is the SUPI "
+      "encrypted to the home network's public key (ECIES, profile A or B), so "
+      "a passive receiver cannot resolve it back to a subscriber. It does not "
+      "follow that a false gNB is harmless. TS 33.501 \u00a76.12" },
+    { "the distance clue nobody uses",
+      "GSM timing advance is measured in bit periods. One step is 3.69 \u00b5s of "
+      "round trip \u2014 about 554 metres of range, 63 steps to the 35 km cell "
+      "limit. It is the only distance information the 2G air interface hands "
+      "out for free." },
+    { "where encryption stops",
+      "A5 protects the link between the phone and the base station and nothing "
+      "else. The ciphertext ends at the tower. From there your traffic is the "
+      "operator's plaintext, and the cipher choice was the network's, not "
+      "yours." },
+};
+
+static char *
+splash_fact_markup(void)
+{
+    guint i = (guint) g_random_int_range(0,
+                    (gint32) G_N_ELEMENTS(splash_facts));
+    g_autofree char *title = g_markup_escape_text(splash_facts[i].title, -1);
+    g_autofree char *body  = g_markup_escape_text(splash_facts[i].body, -1);
+    return g_strdup_printf(
+        "<span size=\"large\" foreground=\"#6fa8ff\">%s</span>\n%s",
+        title, body);
+}
+
+static void
+splash_close(AppState *state)
+{
+    if (state->splash_source != 0) {
+        g_source_remove(state->splash_source);
+        state->splash_source = 0;
+    }
+    if (state->splash_window != NULL) {
+        gtk_window_destroy(GTK_WINDOW(state->splash_window));
+        state->splash_window = NULL;
+    }
+    state->splash_area = NULL;
+    state->splash_label = NULL;
+    /* Owned by the video widget, which the destroyed window took with it. */
+    state->splash_media = NULL;
+    state->splash_poster = NULL;
+    state->splash_video = FALSE;
+    /* The handover. The main window is built by now; it has only been kept
+       off the screen so that the splash could have its time to itself. */
+    if (state->window != NULL)
+        gtk_window_present(GTK_WINDOW(state->window));
+    /* The Overview's fill forks four processes. It is started here rather than
+       when the window was built, so that it never runs while the splash is
+       still on screen - a film that stutters because four shells were forked
+       under it is worse than an Overview that fills a moment later. */
+    g_timeout_add(300, boot_fill_overview, state);
+    if (state->splash_art != NULL) {
+        cairo_surface_destroy(state->splash_art);
+        state->splash_art = NULL;
+    }
+    if (state->splash_logo != NULL) {
+        cairo_surface_destroy(state->splash_logo);
+        state->splash_logo = NULL;
+    }
+    if (state->splash_bg != NULL) {
+        cairo_surface_destroy(state->splash_bg);
+        state->splash_bg = NULL;
+        state->splash_bg_w = state->splash_bg_h = 0;
+    }
+}
+
+static gboolean
+splash_tick(gpointer data)
+{
+    AppState *state = data;
+    guint n = G_N_ELEMENTS(boot_steps);
+    gint64 now = g_get_monotonic_time();
+
+    /* Drop the stand-in the moment the film has something to show, and note
+       when that was: the film's own length is measured from here. */
+    if (state->splash_media != NULL &&
+        gtk_media_stream_is_prepared(state->splash_media)) {
+        if (state->splash_poster != NULL) {
+            gtk_widget_set_visible(state->splash_poster, FALSE);
+            state->splash_poster = NULL;
+        }
+        if (state->splash_film_us == 0)
+            state->splash_film_us = now;
+    }
+
+    /* The film draws itself and needs no easing; the still splash's bar is
+       the only thing this tick animates. */
+    if (!state->splash_video) {
+        /* The bar reports the stage that is *running*, not the one before it,
+           so it is already full while the last stage presents the window. The
+           main window's first paint is the one thing here that has to block,
+           and at that moment a bar still climbing would look like the freeze
+           it is. */
+        double target = n > 0
+                      ? (double) (state->splash_step + 1) / (double) n : 1.0;
+        if (target > 1.0)
+            target = 1.0;
+        double gap = target - state->splash_shown;
+        if (gap > 0.0) {
+            /* Eased, but with a floor under the step. Pure exponential easing
+               never quite arrives, and at a low frame rate the tail of it is
+               seconds long - the bar would reach 99% and sit there while the
+               boot waited on it. */
+            state->splash_shown += MAX(gap * 0.22, 0.05);
+            if (state->splash_shown > target)
+                state->splash_shown = target;
+        }
+    }
+
+    if (state->splash_step < n &&
+        (now - state->splash_stage_us) / 1000 >= SPLASH_MIN_STEP_MS) {
+        boot_steps[state->splash_step].run(state, state->splash_app);
+        state->splash_step++;
+        state->splash_stage_us = now;
+        state->splash_label = state->splash_step < n
+                            ? boot_steps[state->splash_step].label : NULL;
+        /* The last stage presents the main window, and that first paint is the
+           one thing here that has to block the loop. The bar is filled before
+           it starts, so the pause that follows reads as "done" and not as a
+           bar that stopped climbing. */
+        if (!state->splash_video && state->splash_step + 1 >= n)
+            state->splash_shown = 1.0;
+    }
+
+    if (state->splash_step >= n &&
+        (now - state->splash_start_us) / 1000 >= SPLASH_MIN_TOTAL_MS) {
+        gboolean finished;
+        if (state->splash_video) {
+            /* The GStreamer backend does not always report the end of a
+               stream, so the film's own duration is what decides; the cap is
+               only there so that a decoder that never finishes cannot keep
+               the splash on screen. */
+            GtkMediaStream *film = state->splash_media;
+            gint64 length = film != NULL ? gtk_media_stream_get_duration(film) : -1;
+            gboolean ran_out = film != NULL && state->splash_film_us > 0 &&
+                               length > 0 &&
+                               now - state->splash_film_us >= length;
+            finished = film == NULL
+                    || gtk_media_stream_get_ended(film)
+                    || ran_out
+                    || gtk_media_stream_get_error(film) != NULL
+                    || (now - state->splash_start_us) / 1000 >= SPLASH_VIDEO_CAP_MS;
+        } else {
+            finished = state->splash_shown >= 0.999 &&
+                       (now - state->splash_stage_us) / 1000 >= SPLASH_TAIL_MS;
+        }
+        if (finished) {
+            splash_close(state);
+            return G_SOURCE_REMOVE;
+        }
+    }
+
+    if (state->splash_area != NULL)
+        gtk_widget_queue_draw(state->splash_area);
+
+    /* Re-armed rather than returned G_SOURCE_CONTINUE: a stage can present
+       the main window, and anything that closes the splash from inside that
+       has to be able to cancel this source by id. */
+    state->splash_source = g_timeout_add(SPLASH_FRAME_MS, splash_tick, state);
+    return G_SOURCE_REMOVE;
+}
+
+/* The still splash: the artwork, the logo over it, and the boot's own
+   progress at the foot of the frame. */
+static void
+splash_window_art(AppState *state, GtkApplication *app)
+{
+    /* Loaded from the binary's own resources, like the module icons and for
+       the same reason: the splash is the first thing on screen, before any
+       theme, working directory or installed copy can be trusted. */
+    GdkTexture *art = gdk_texture_new_from_resource(
+        "/com/imsisting/native/imsisting_splash.png");
+    if (art != NULL) {
+        state->splash_art = splash_surface(art);
+        g_object_unref(art);
+    }
+    GdkTexture *logo = gdk_texture_new_from_resource(
+        "/com/imsisting/native/imsisting_logo.png");
+    if (logo != NULL) {
+        state->splash_logo = splash_surface(logo);
+        g_object_unref(logo);
+    }
+
+    GtkWidget *area = gtk_drawing_area_new();
+    gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(area), 960);
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), 540);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), splash_draw,
+                                   state, NULL);
+
+    GtkWidget *win = gtk_application_window_new(app);
+    gtk_window_set_title(GTK_WINDOW(win), "IMSIsting");
+    gtk_window_set_decorated(GTK_WINDOW(win), FALSE);
+    gtk_window_set_resizable(GTK_WINDOW(win), FALSE);
+    gtk_window_set_default_size(GTK_WINDOW(win), 960, 540);
+    gtk_window_set_child(GTK_WINDOW(win), area);
+
+    state->splash_window = win;
+    state->splash_area = area;
+}
+
+/* The film splash. GtkVideo plays it through the media backend (GStreamer) -
+   the one dependency in this file that can be absent, which is why the caller
+   falls back to the still if no window comes back. Nothing is drawn over the
+   film: its own caption says LOADING, and the only thing added is the fact. */
+/* GtkVideo is the obvious widget for a film and the wrong one here: it carries
+   a control bar that fades in over the picture on hover - a play/pause button,
+   an orange transport with a running clock and a mute toggle, floating on top
+   of a splash screen. A GtkMediaStream is itself a GdkPaintable, so a
+   GtkPicture shows exactly the same frames with nothing drawn over them. The
+   price is the piece GtkVideo would otherwise do for us: the stream has to be
+   realized against a surface by hand before it will play. */
+static void
+splash_film_mapped(GtkWidget *widget, gpointer user_data)
+{
+    GtkMediaStream *film = user_data;
+    GdkSurface *surface = gtk_native_get_surface(gtk_widget_get_native(widget));
+    if (surface == NULL)
+        return;
+    gtk_media_stream_realize(film, surface);
+    gtk_media_stream_play(film);
+}
+
+static void
+splash_film_unmapped(GtkWidget *widget, gpointer user_data)
+{
+    GtkMediaStream *film = user_data;
+    GdkSurface *surface = gtk_native_get_surface(gtk_widget_get_native(widget));
+    gtk_media_stream_pause(film);
+    if (surface != NULL)
+        gtk_media_stream_unrealize(film, surface);
+}
+
+static void
+splash_window_video(AppState *state, GtkApplication *app)
+{
+    static const char *path = "/com/imsisting/native/imsisting_splash2.mp4";
+    if (!g_resources_get_info(path, G_RESOURCE_LOOKUP_FLAGS_NONE,
+                              NULL, NULL, NULL))
+        return;                     /* not built in: fall back to the still */
+
+    GtkMediaStream *film = gtk_media_file_new_for_resource(path);
+    if (film == NULL)
+        return;
+    /* A launch that makes a noise is a launch that gets muted, and the film
+       carries an audio track with nothing to say. */
+    gtk_media_stream_set_muted(film, TRUE);
+    gtk_media_stream_set_loop(film, FALSE);
+
+    GtkWidget *video = gtk_picture_new_for_paintable(GDK_PAINTABLE(film));
+    gtk_picture_set_content_fit(GTK_PICTURE(video), GTK_CONTENT_FIT_COVER);
+    gtk_picture_set_can_shrink(GTK_PICTURE(video), TRUE);
+    gtk_widget_set_size_request(video, 960, 540);
+    gtk_widget_set_hexpand(video, TRUE);
+    gtk_widget_set_vexpand(video, TRUE);
+    g_signal_connect(video, "map", G_CALLBACK(splash_film_mapped), film);
+    g_signal_connect(video, "unmap", G_CALLBACK(splash_film_unmapped), film);
+
+    g_autofree char *markup = splash_fact_markup();
+    GtkWidget *fact = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(fact), markup);
+    gtk_label_set_wrap(GTK_LABEL(fact), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(fact), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_xalign(GTK_LABEL(fact), 0.0);
+    gtk_label_set_yalign(GTK_LABEL(fact), 1.0);
+    gtk_label_set_justify(GTK_LABEL(fact), GTK_JUSTIFY_LEFT);
+    gtk_widget_set_size_request(fact, 440, -1);
+    gtk_widget_set_halign(fact, GTK_ALIGN_START);
+    gtk_widget_set_valign(fact, GTK_ALIGN_END);
+    gtk_widget_set_margin_start(fact, 44);
+    gtk_widget_set_margin_bottom(fact, 40);
+    gtk_widget_set_margin_end(fact, 24);
+    gtk_widget_add_css_class(fact, "splash-fact");
+
+    /* The film takes seconds to produce its first frame - the media backend
+       has to be started and the decoder primed, and on a cold machine that is
+       long enough to look like a hang. The still splash's artwork stands in
+       until the stream reports itself prepared. */
+    GtkWidget *poster = gtk_picture_new_for_resource(
+        "/com/imsisting/native/imsisting_splash.png");
+    gtk_picture_set_content_fit(GTK_PICTURE(poster), GTK_CONTENT_FIT_COVER);
+    gtk_picture_set_can_shrink(GTK_PICTURE(poster), TRUE);
+    gtk_widget_set_size_request(poster, 960, 540);
+
+    GtkWidget *overlay = gtk_overlay_new();
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), video);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), poster);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), fact);
+
+    GtkWidget *win = gtk_application_window_new(app);
+    gtk_window_set_title(GTK_WINDOW(win), "IMSIsting");
+    gtk_window_set_decorated(GTK_WINDOW(win), FALSE);
+    gtk_window_set_resizable(GTK_WINDOW(win), FALSE);
+    gtk_window_set_default_size(GTK_WINDOW(win), 960, 540);
+    gtk_window_set_child(GTK_WINDOW(win), overlay);
+
+    state->splash_window = win;
+    state->splash_area = NULL;
+    state->splash_media = film;      /* the video widget holds the reference */
+    state->splash_poster = poster;
+    state->splash_video = TRUE;
+}
+
+static void
+splash_begin(AppState *state, GtkApplication *app)
+{
+    state->splash_app = app;
+    state->radio_prefetch_fd = -1;
+    state->splash_video = FALSE;
+    state->splash_media = NULL;
+    state->splash_poster = NULL;
+    state->splash_film_us = 0;
+    state->splash_start_us = g_get_monotonic_time();
+
+    /* Start the radio probe first: it is the one cold call in the boot (six
+       drivers, about two seconds) and everything else here can run while it
+       does. boot_poll_status collects it. */
+    {
+        g_autofree char *script = module_script_path("01_radio");
+        if (script != NULL && g_file_test(script, G_FILE_TEST_IS_EXECUTABLE)) {
+            const char *argv[3] = { script, "--status-tsv", NULL };
+            g_autoptr(GError) error = NULL;
+            if (!g_spawn_async_with_pipes(NULL, (char **) argv, NULL,
+                    G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD |
+                    G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL,
+                    &state->radio_prefetch_pid, NULL,
+                    &state->radio_prefetch_fd, NULL, &error))
+                state->radio_prefetch_fd = -1;
+        }
+    }
+
+    /* The film by default; IMSISTING_SPLASH=art buys the still instead. If no
+       window comes back - the media backend absent, the film not built in -
+       the still is built instead, so a launch always has a splash. */
+    const char *which = g_getenv("IMSISTING_SPLASH");
+    if (!(which != NULL && (g_ascii_strcasecmp(which, "art") == 0 ||
+                            g_strcmp0(which, "1") == 0)))
+        splash_window_video(state, app);
+    if (state->splash_window == NULL)
+        splash_window_art(state, app);
+
+    gtk_window_present(GTK_WINDOW(state->splash_window));
+
+    state->splash_shown = 0.0;
+    state->splash_step = 0;
+    state->splash_label = boot_steps[0].label;
+    /* Starts one stage-interval out, so the art is on screen and read before
+       the first label replaces it. */
+    state->splash_stage_us = g_get_monotonic_time();
+    state->splash_source = g_timeout_add(SPLASH_FRAME_MS, splash_tick, state);
+}
+
+static void
+on_activate(GtkApplication *app, gpointer user_data)
+{
+    AppState *state = user_data;
+
+    if (state->window != NULL) {
+        gtk_window_present(GTK_WINDOW(state->window));
+        return;
+    }
+    if (state->splash_window != NULL) {
+        gtk_window_present(GTK_WINDOW(state->splash_window));
+        return;
+    }
+
+    /* The escape hatch matters more than usual here: with the splash on, the
+       window cannot be reached until the boot finishes, so a splash that
+       misbehaves would have to be waited out on every launch. */
+    if (g_getenv("IMSISTING_NO_SPLASH") != NULL) {
+        for (guint i = 0; i < G_N_ELEMENTS(boot_steps); i++)
+            boot_steps[i].run(state, app);
+        /* Normally splash_close starts this; with no splash there is nobody
+           else to do it. */
+        g_timeout_add(600, boot_fill_overview, state);
+        return;
+    }
+
+    splash_begin(state, app);
 }
 
 static void
@@ -6666,7 +9053,7 @@ radio_bench_add_device(RadioBench *bench, char **f, int index,
     GtkWidget *name = gtk_label_new(f[0] ? f[0] : "SDR");
     GtkWidget *ident = gtk_label_new(serial);
     GtkWidget *meta = gtk_label_new(summary);
-    GtkWidget *icon = gtk_image_new_from_icon_name("network-wireless-symbolic");
+    GtkWidget *icon = imsisting_icon_image("network-wireless-symbolic");
     GtkWidget *select = gtk_button_new_with_label("Select");
     GtkWidget *caps = gtk_button_new_with_label("Capabilities");
 
@@ -7100,7 +9487,7 @@ crec_targets_add_row(CrecTargets *t, char **f)
     GtkWidget *name    = gtk_label_new(identity);
     GtkWidget *ident   = gtk_label_new(sub);
     GtkWidget *metalbl = gtk_label_new(meta);
-    GtkWidget *icon    = gtk_image_new_from_icon_name("network-wireless-symbolic");
+    GtkWidget *icon    = imsisting_icon_image("network-wireless-symbolic");
     GtkWidget *pick    = gtk_button_new_with_label("Set target");
 
     gtk_image_set_pixel_size(GTK_IMAGE(icon), 28);
@@ -7387,7 +9774,13 @@ static ModuleSubmenuEntry crec_entries[] = {
 static ModuleSubmenuEntry gtap_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
-      "#LIVE|--listen:Listen Live|#OFFLINE|--read={capture}" },
+      "#LIVE|--listen:Listen Live|#OFFLINE|--read={capture}|~--port|~--iface|~--pipe|~--forward" },
+    { "Filter",
+      "system-search-symbolic",
+      "~--arfcn|~--channel|~--uplink|~--any-port|~--since|~--until" },
+    { "Watchlist",
+      "emblem-important-symbolic",
+      "~--watchlist" },
     { "Decode",
       "document-open-symbolic",
       "--decode-tsv:Decoded TSV|--identities-tsv:Identities" },
@@ -7435,9 +9828,40 @@ static ModuleSubmenuEntry gatk_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
       "--imsi-catcher-sequence:IMSI Catcher Sequence|--paging-race:Paging Race|--kc-recovery:Kc Recovery" },
+    { "Vectors",
+      "security-high-symbolic",
+      "#TRANSMIT VECTORS|--vector-imsi-catcher:IMSI Catcher (O1)|--vector-a5-downgrade:A5/1 Downgrade|"
+      "--vector-tmsi-deanon:TMSI De-anonymisation|--vector-kc-recovery:Kc Recovery|"
+      "#TRANSMIT GATE|--tx-ack:Transmit Acknowledgement" },
+    { "Air interface",
+      "network-wireless-symbolic",
+      "#BURSTS AND CHANNELS|--burst-layout:Burst Layout|--dummy-burst:C0 Idle Burst|"
+      "--ccch-conf:CCCH_CONF|--sch-payload:SCH Payload|--fcch-facts:FCCH Facts|"
+      "--multiframe-map:51-Frame Map|--ccch-blocks:CCCH Blocks|--rach-blocks:RACH Blocks|"
+      "--sdcch-map:SDCCH Map|"
+      "#TIMING|--frame-facts:Frame Facts|~--fn-split:Frame Split|~--fn-join:Frame Join|~--ta:Timing Advance|"
+      "#PAGING|~--paging-schedule:Paging Schedule" },
     { "Identity",
       "auth-smartcard-symbolic",
-      "--build-identity-request:Build Identity Request|--classmark|--classmark-downgrade:Classmark Downgrade" },
+      "#BUILD|--build-identity-request:Build Identity Request|--build-cipher-mode:Build Cipher Mode|"
+      "--build-lu-accept:Build LU Accept|--build-tmsi-realloc:Build TMSI Realloc|"
+      "--build-paging-request:Build Paging Request|"
+      "--build-immediate-assignment:Build Immediate Assignment|~--mobile-identity:Mobile Identity|"
+      "#CLASSMARK|--classmark|--classmark-downgrade:Classmark Downgrade|--classmark1|"
+      "--classmark1-encode:Classmark 1 Encode|~--classmark3:Classmark 3 Decode|"
+      "#LAPDM|--lapdm-ui:LAPDm UI Frame|--lapdm-fill:Fill Frame|--lapdm-bursts:LAPDm Bursts|"
+      "--n201:N201 Limit" },
+    { "Ciphers",
+      "channel-secure-symbolic",
+      "#A5 FAMILY|--a5-1-keystream:A5/1 Keystream|~--a5-count:A5/1 COUNT|--a5-2-keystream:A5/2 Keystream|"
+      "--a5-3-keystream:A5/3 Keystream|--a5-4-keystream:A5/4 Keystream|"
+      "#KGCORE|~--kasumi:KASUMI|~--f8-keystream:f8 Keystream|~--f9-mac:f9 MAC|--alg-name:Algorithm Name|"
+      "#RECOVERY|~--kc-verify:Kc Verify|~--kc-search:Kc Search|~--kc-known-plaintext:Known Plaintext|"
+      "~--decrypt:Decrypt" },
+    { "TMSI store",
+      "edit-find-symbolic",
+      "--deanon-list:Recorded Pairings|~--deanon-lookup:TMSI Lookup|~--deanon-record:TMSI Record|"
+      "~--deanon-confirm:TMSI Confirm" },
     { "C1",
       "preferences-system-symbolic",
       "--c1=-100 -90 33 5|--plan:Plan|--plan-tsv:Plan TSV" },
@@ -7463,6 +9887,12 @@ static ModuleSubmenuEntry latt_entries[] = {
     { "Identity",
       "auth-smartcard-symbolic",
       "--imsi-decode:Decode IMSI|--imsi-encode:Encode IMSI|~--identity-exposure:Identity Exposure" },
+    { "GUTI",
+      "network-wired-symbolic",
+      "#CODEC|--decode-guti:Decode GUTI|--encode-guti:Encode GUTI|#ATTACH|--encode-attach-guti:Encode Attach (GUTI)" },
+    { "Integrity",
+      "channel-secure-symbolic",
+      "#NAS-MAC|--nas-mac:NAS MAC|#DOWNLINK|--build-attach-accept:Build Attach Accept|--build-tau-accept:Build TAU Accept" },
 };
 static ModuleSubmenuEntry lair_entries[] = {
     { "Overview",
@@ -7470,7 +9900,7 @@ static ModuleSubmenuEntry lair_entries[] = {
       "#CONTROL|--start:Start|--stop:Stop|#STATUS|--status:Status" },
     { "Decode",
       "document-open-symbolic",
-      "--decode-sib:Decode SIB|--paging-frame:Paging Frame" },
+      "--decode-sib:Decode SIB|--decode-mib:Decode MIB|--paging-frame:Paging Frame" },
     { "Tools",
       "preferences-system-symbolic",
       "--earfcn=6300|--power-ref:Power Reference|--gen-enb-conf:Generate eNB Config" },
@@ -7492,10 +9922,13 @@ static ModuleSubmenuEntry lcore_entries[] = {
 static ModuleSubmenuEntry nair_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
-      "#CONTROL|--start:Start|--stop:Stop|#STATUS|--status:Status" },
+      "#CONTROL|--start:Start|--stop:Stop|#STATUS|--status:Status|~--tx" },
     { "Decode",
       "document-open-symbolic",
-      "--decode-mib:Decode MIB|--decode-sib1:Decode SIB1" },
+      "--decode-mib:Decode MIB|--decode-sib1:Decode SIB1|--decode-rrc:Decode RRC" },
+    { "Build",
+      "security-high-symbolic",
+      "#RRC|--build-rrc-reconfig:Build RRC Reconfig|--build-meas-report:Build Meas Report|#BEAM|--beam-sweep:Beam Sweep" },
     { "Signals",
       "network-wireless-symbolic",
       "--ssb:SSB|--prach:PRACH|--pci=0 0" },
@@ -7534,7 +9967,7 @@ static ModuleSubmenuEntry dwn_entries[] = {
       "--detect:Detect|--path=steer-down|--causes:Causes" },
     { "Build",
       "security-high-symbolic",
-      "#BUILD|--build-security-mode:Build Security Mode|--null-cipher-table:Null Cipher Table|#PLAN|--reject-cause=22 EMM|--plan:Plan" },
+      "#BUILD|--build-security-mode:Build Security Mode|--build-reject:Build Reject|--null-cipher-table:Null Cipher Table|#PLAN|--reject-cause=22 EMM|--plan:Plan" },
 };
 static ModuleSubmenuEntry sim_entries[] = {
     { "Overview",
@@ -7715,6 +10148,12 @@ static ModuleSubmenuEntry pgt_entries[] = {
     { "Model",
       "system-search-symbolic",
       "--torpedo-model:Torpedo Model|--po=001010000000001 2 gsm|--plan:Plan" },
+    { "Occasion",
+      "preferences-system-symbolic",
+      "~--edrx-occ|~--pei-occ|~--page-mode|~--paging-cause" },
+    { "Attack",
+      "security-high-symbolic",
+      "#BUILD|~--build-paging-req|#TX|~--paging-tx|#HISTORY|~--paging-history" },
 };
 static ModuleSubmenuEntry vims_entries[] = {
     { "Overview",
@@ -7966,6 +10405,15 @@ static ModuleSubmenuEntry nrj_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
       "--exploits:Exploits|--exploit=rrc-setup-crash|--descramble:Descramble" },
+    { "PHY",
+      "network-wireless-symbolic",
+      "#SEQUENCE|--gold=12345,84|#TRANSPORT|--tbs=9,52,12,0" },
+    { "DCI",
+      "utilities-terminal-symbolic",
+      "--dci-parse=0A0F3C9001,1_0|~--dci-encode" },
+    { "RAR",
+      "document-new-symbolic",
+      "--rar=33,128,4601,4026|--rar-backoff=20" },
     { "MAC",
       "network-receive-symbolic",
       "#DECODE|--mac-pdu:MAC PDU|--mac-sub:MAC Subheader|#LCID|--lcid=0|--lcid-table:LCID Table" },

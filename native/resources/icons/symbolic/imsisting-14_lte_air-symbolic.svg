@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-<g fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="butt" stroke-linejoin="miter">
-<path d="M56 160 A40 40 0 0 1 96 200"/><path d="M56 128 A72 72 0 0 1 128 200"/><path d="M56 96 A104 104 0 0 1 160 200"/><path d="M56 64 A136 136 0 0 1 192 200"/>
-</g>
+<defs><mask id="cut"><rect width="256" height="256" fill="white"/><circle cx="188" cy="150" r="56" fill="black"/></mask></defs>
+<g fill="none" stroke="#63798f" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#cut)"><path d="M52 40 h50 a12 12 0 0 1 12 12 v152 a12 12 0 0 1 -12 12 h-50 a12 12 0 0 1 -12 -12 v-152 a12 12 0 0 1 12 -12 z" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/><path d="M66 62 h24" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g fill="#c8d4e2" stroke="none" transform="translate(188 150)"><circle cx="-34.0" cy="34.0" r="9.0"/><path d="M -34.0 12.0 A 22.0 22.0 0 0 1 -12.0 34.0" fill="none" stroke="#c8d4e2" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><path d="M -34.0 -6.0 A 40.0 40.0 0 0 1 6.0 34.0" fill="none" stroke="#c8d4e2" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><path d="M -34.0 -24.0 A 58.0 58.0 0 0 1 24.0 34.0" fill="none" stroke="#c8d4e2" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/></g>
 </svg>

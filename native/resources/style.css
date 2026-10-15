@@ -383,48 +383,83 @@ button.module-card {
     border: none;
     padding: 0;
     box-shadow: none;
-    min-width: 164px;
-    min-height: 150px;
+
+    /* No minimum height. The tile's height is its content: category, icon,
+       name, id. A minimum tall enough to look deliberate on a tile that
+       still carried a description is now just empty desk on a tile that
+       does not, and the flow box already sizes every tile in a row to the
+       tallest one, so the grid stays even without being told a number.
+
+       The growth is animated on the BUTTON, not on the inner surface: the
+       button is what the flow box allocates, so growing it here (padding
+       out, margin back) inflates the tile over its neighbours and leaves
+       the grid footprint untouched. Padding is the lever, not
+       min-width/min-height — those are content-box and the content is
+       already larger than any minimum small enough to leave the grid
+       alone. Declared on the base rule so the shrink animates too; a
+       transition on :hover alone animates in and snaps back out. */
+    transition: padding 140ms ease-out,
+                margin  140ms ease-out;
 }
 
 .module-card-inner {
     background-image: linear-gradient(to bottom right, #172233, #111a28);
-    border: 1px solid #293a52;
-    border-left: 3px solid transparent;
+    border: 1px solid @line;
     border-radius: 10px;
-    padding: 11px 12px 12px 12px;
+    padding: 9px 10px 10px 10px;
     transition: background-image 140ms ease-out,
                 border-color     140ms ease-out,
                 box-shadow       140ms ease-out;
 }
 
+/* Hover: the tile floats toward the pointer inside an accent glow. GTK CSS
+   has no `transform`, so it is grown with padding and pulled back with an
+   equal negative margin (+6px a side = +12px on the border box; the margin
+   must stay at half the growth or the grid drifts under the pointer). */
+button.module-card:hover {
+    padding: 6px;
+    margin: -6px;
+}
+
 button.module-card:hover .module-card-inner {
-    background-image: linear-gradient(to bottom right, #1d2c40, #162236);
-    border-color: #466689;
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.38);
+    background-image: linear-gradient(to bottom right, #1b2a3d, #142033);
+    border-color: @accent;
+    box-shadow: 0 0 0 1px rgba(79, 179, 217, 0.45),
+                0 14px 28px rgba(0, 0, 0, 0.55);
+}
+
+/* Pressed settles back below the hover growth so a click acknowledges. */
+button.module-card:active {
+    padding: 3px;
+    margin: -3px;
 }
 
 button.module-card:active .module-card-inner {
-    background-image: linear-gradient(to bottom right, #1d3b50, #173044);
+    background-image: linear-gradient(to bottom right, #1c3a4d, #16303f);
     border-color: @accent;
+    box-shadow: 0 0 0 1px rgba(79, 179, 217, 0.65),
+                0 3px 8px rgba(79, 179, 217, 0.30);
 }
 
 .module-card-toprow {
     min-height: 14px;
 }
 
+/* One of the four places the accent is allowed: the category label. */
 .module-card-category {
-    color: @text_dim;
+    color: @accent;
     font-size: 9px;
     font-weight: 700;
     letter-spacing: 0.8px;
 }
 
-/* The icon sits on a tinted tile so a card is not a lone floating glyph. */
+/* The icon sits on a faint tile so a card is not a lone floating glyph.
+   The tint is neutral, not per-category: colour on the tile would compete
+   with the icon, and the category is already carried by the label. */
 .module-card-iconwrap {
-    border-radius: 10px;
-    padding: 10px;
-    background-color: rgba(79, 179, 217, 0.12);
+    border-radius: 9px;
+    padding: 6px;
+    background-color: rgba(147, 162, 184, 0.08);
 }
 
 .module-card-icon {
@@ -439,6 +474,7 @@ button.module-card:active .module-card-inner {
     color: @text;
     font-size: 12px;
     font-weight: 600;
+    margin-top: 2px;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -780,14 +816,12 @@ progressbar.stat-bar progress {
 .cat-analysis { color: #e0b357; }
 .cat-rf       { color: #e07bd0; }
 
-.module-card-iconwrap.cat-system   { background-color: rgba(147,162,184,0.14); }
-.module-card-iconwrap.cat-recon    { background-color: rgba(79,179,217,0.14); }
-.module-card-iconwrap.cat-air      { background-color: rgba(106,141,255,0.14); }
-.module-card-iconwrap.cat-core     { background-color: rgba(169,139,255,0.14); }
-.module-card-iconwrap.cat-sim      { background-color: rgba(79,208,138,0.14); }
-.module-card-iconwrap.cat-attacks  { background-color: rgba(239,107,107,0.14); }
-.module-card-iconwrap.cat-analysis { background-color: rgba(224,179,87,0.14); }
-.module-card-iconwrap.cat-rf       { background-color: rgba(224,123,208,0.14); }
+/* Per-category tints for the TILE surfaces are deliberately gone. Eight
+   hues across a dashboard is colour doing the structural work: it reads as
+   organised only because it is colourful, so it collapses the moment the
+   theme changes. The tile is neutral; the category is carried by the
+   accent label and the icon. `.cat-*` still colours the module page's own
+   header rail, where it labels a single page rather than a whole grid. */
 
 .module-header-bar.cat-system   { border-left-color: #93a2b8; }
 .module-header-bar.cat-recon    { border-left-color: #4fb3d9; }
@@ -1345,22 +1379,20 @@ scrollbar slider:hover {
 .status-cell.status-dim  .status-dot { color: #39424f; }
 .status-cell.status-dim  .status-key { color: #3b4553; }
 
-/* Category as a thin rail on each card rather than a wash of colour; the icon
-   carries the rest of the accent. Bright cyan stays reserved for focus/live.
-   The rail's transparent base and padding are set once, in the module tile
-   block at the top of this file. */
-.module-card-inner.cat-system   { border-left-color: #93a2b8; }
-.module-card-inner.cat-recon    { border-left-color: #4fb3d9; }
-.module-card-inner.cat-air      { border-left-color: #6a8dff; }
-.module-card-inner.cat-core     { border-left-color: #a98bff; }
-.module-card-inner.cat-sim      { border-left-color: #4fd08a; }
-.module-card-inner.cat-attacks  { border-left-color: #ef6b6b; }
-.module-card-inner.cat-analysis { border-left-color: #e0b357; }
-.module-card-inner.cat-rf       { border-left-color: #e07bd0; }
+/* The per-category rail is gone too. A coloured left edge on every tile is
+   eight hues of decoration that the grid does not need: at a glance the
+   rail read as a status stripe, and it said nothing a reader could act on.
+   The accent is now carried by the icon and the category label only. */
 
 .module-card-state { font-size: 9px; font-weight: 700; letter-spacing: 0.7px; }
-.module-card-ready { color: #57d38c; }
+/* .module-card-ready is gone with the READY badge: a badge that is identical
+   on every tile is decoration, and it teaches the reader to ignore that
+   corner, which is exactly where OFFLINE would have to be noticed. Only the
+   states that differ from the norm are rendered. */
 .module-card-offline { color: #e0b357; }
+/* .module-card-desc is unused now: the description lives in the tooltip. The
+   rule is kept only so an older build of a module view that still emits the
+   class does not render unstyled text. */
 .module-card-desc { color: #8b97a8; font-size: 11px; }
 .module-card-id { color: #55606f; font-size: 10px; font-family: monospace; }
 
@@ -1373,8 +1405,23 @@ scrollbar slider:hover {
 .station-band .status-value { font-size: 14px; }
 .station-band .status-key { color: #4a5666; }
 
-/* Pin control and pin/recent cues. */
-.card-pin { color: #55606f; font-size: 15px; padding: 0 2px; min-width: 0; min-height: 0; }
+/* Pin control and pin/recent cues. The star is invisible until the tile is
+   hovered, so it reads as an affordance rather than decoration; a pinned tile
+   keeps its star permanently, which is the only case where it carries state.
+   `opacity` and not `visibility`, because GTK keeps hit-testing an invisible
+   button either way and a focus ring on nothing looks broken. */
+.card-pin {
+    color: #55606f;
+    font-size: 15px;
+    padding: 0 2px;
+    min-width: 0;
+    min-height: 0;
+    opacity: 0;
+    transition: opacity 130ms ease-out, color 130ms ease-out;
+}
+.module-card-host:hover .card-pin,
+.card-pin:focus,
+.card-pin-on { opacity: 1; }
 .card-pin:hover { color: #e8c15a; }
 .module-card-state.module-card-pinned { color: #e8c15a; }
 .module-card-state.module-card-recent { color: #6a8dff; }
@@ -1506,25 +1553,53 @@ scrollbar slider:hover {
    stylesheet, so the band rendered as four default buttons with three
    same-size labels stacked: no surface, no hierarchy, indistinguishable
    from the status strip above it. */
-button.mission-shortcut { background: none; border: none; padding: 0; }
-.mission-shortcut-inner {
+/* The four quick-start entries are STEPS, not cards. They used to be full
+   tiles - icon, title, sentence, 92px tall - which made the on-ramp heavier
+   on screen than the 56 modules it was supposed to lead to; that is exactly
+   how a page ends up with two navigation layers and no answer to "which one
+   do I click". One line each, and the strip reads as an order of operations
+   sitting above the catalogue rather than as a second catalogue. */
+button.mission-step { background: none; border: none; padding: 0; }
+.mission-step-inner {
     background-color: @card_bg;
     border: 1px solid @line;
-    border-radius: 10px;
-    padding: 12px 14px;
-    min-height: 92px;
+    border-radius: 8px;
+    padding: 7px 10px;
+    transition: border-color 130ms ease-out, background-color 130ms ease-out;
 }
-button.mission-shortcut:hover .mission-shortcut-inner { border-color: @accent; }
-.mission-shortcut-eyebrow {
+button.mission-step:hover .mission-step-inner {
+    border-color: @accent;
+    background-color: #16202e;
+}
+.mission-step-icon    { color: @accent; }
+/* The step index is a small tinted pill rather than coloured type: one
+   accent surface per step, four steps, and the order reads at a glance
+   without the strip turning into a row of bright buttons. */
+.mission-step-eyebrow {
     color: @accent;
+    background-color: alpha(@accent, 0.13);
+    border: 1px solid alpha(@accent, 0.28);
     font-size: 9px;
     font-weight: 700;
-    letter-spacing: 1.2px;
+    letter-spacing: 0.5px;
+    padding: 1px 5px;
+    border-radius: 6px;
 }
-.mission-shortcut-title { color: @text; font-size: 14px; font-weight: 600; }
-.mission-shortcut-note  { color: @text_dim; font-size: 11px; }
-.mission-title    { color: @text; font-size: 13px; font-weight: 700; letter-spacing: 1.1px; }
-.mission-subtitle { color: @text_dim; font-size: 11px; }
+.mission-step-title   { color: @text; font-size: 12px; }
+.mission-step-chevron { color: #38455a; }
+button.mission-step:hover .mission-step-chevron { color: @accent; }
+
+/* Section labels, not page titles. The page's own name is already on the tab
+   above it, so these only say which layer is which: the on-ramp, then the
+   catalogue. They stay neutral on purpose - a third accented heading is the
+   thing the accent budget exists to prevent. */
+.section-eyebrow {
+    color: #7d8ea6;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+}
+.section-note { color: #5b6b80; font-size: 11px; }
 
 /* The case summary band: a surface of its own, so a case summary does not
    read as a second copy of the header strip. */
@@ -1563,3 +1638,467 @@ notebook > header > tabs > tab { min-height: 30px; }
 .log-warn  .log-glyph, .log-warn  .log-msg { color: #e0b357; }
 .log-ok    .log-glyph, .log-ok    .log-msg { color: #57d38c; }
 .log-info  .log-glyph { color: @accent; }
+
+/* Radio Bench: compact, always-legible live telemetry above the operator controls. */
+.radio-bench-status {
+    background-color: #111d2e;
+    border: 1px solid #29476e;
+    border-radius: 10px;
+    padding: 10px 12px;
+}
+.radio-bench-selection {
+    color: @accent;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.1px;
+}
+.radio-bench-telemetry {
+    color: #9cadc2;
+    font-family: monospace;
+    font-size: 11px;
+}
+.radio-device-row {
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-radius: 9px;
+    margin: 3px 0;
+    padding: 8px 10px;
+}
+.radio-device-row:hover { background-color: @card_hi; border-color: #3a5075; }
+
+/* Radio workflow views share the bench's disciplined instrument-panel hierarchy. */
+.radio-view-title {
+    color: #dcecff;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+}
+.radio-view-subtitle {
+    color: @text_dim;
+    font-size: 12px;
+    margin-bottom: 2px;
+}
+
+/* Cell Recon keeps field-survey state legible without turning it into a terminal dump. */
+.crec-survey-status {
+    background-color: #102132;
+    border: 1px solid #315575;
+    border-radius: 10px;
+    color: #a7c8e8;
+    font-family: monospace;
+    font-size: 11px;
+    padding: 10px 12px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Tile density — how much desk the operator wants to see at once.
+   Chosen on the dashboard and remembered in state/ui.tsv.
+
+   These rules move size only: the tile's minimum WIDTH and its padding.
+   No colour is set here, so switching density cannot change the look of
+   the palette, only the breathing room.
+
+   The per-density minimum HEIGHT is gone. It was set for tiles that
+   carried a two-line description, and once the description moved to the
+   tooltip every preset was asking for 16 to 80 pixels of height that no
+   tile had any content for - which is where the empty space came from.
+   Rows already size to their tallest tile, so height follows content on
+   its own; a preset should not be able to invent it.
+   ══════════════════════════════════════════════════════════════════ */
+
+.density-compact .module-card-inner   { padding: 7px 8px 8px 8px; border-radius: 8px; }
+
+.density-comfortable .module-card-inner { padding: 9px 10px 10px 10px; }
+
+.density-spacious .module-card-inner  { padding: 11px 12px 12px 12px; border-radius: 12px; }
+
+/* ══════════════════════════════════════════════════════════════════
+   Motion — four movements, all in service of state, none of them a
+   colour of their own:
+
+     · a tile fades in as the dashboard is built, so a re-sort reads as
+       the flow changing rather than as a repaint;
+     · a hovered tile lifts and deepens its shadow, so the pointer has
+       somewhere to land;
+     · a running module's pill breathes, so a module that is still
+       working is legible from across the desk;
+     · rows, tabs, buttons and pills transition their state instead of
+       snapping between it.
+
+   Everything here fails safe. A declaration the engine does not know
+   is dropped and the widget renders in its final state, with no
+   animation and no layout surprise. That is why motion is the safest
+   thing to add to a stylesheet that cannot be seen before it ships.
+   ══════════════════════════════════════════════════════════════════ */
+
+@keyframes imsisting-card-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+/* Opacity only: a pulse that cannot be mistaken for a colour change, and
+   that cannot leave the pill invisible if a frame is dropped. */
+@keyframes imsisting-run-pulse {
+    0%   { opacity: 1.0; }
+    50%  { opacity: 0.58; }
+    100% { opacity: 1.0; }
+}
+
+button.module-card {
+    animation: imsisting-card-in 200ms ease-out;
+}
+
+/* The entrance animation stays; the lift below it is the padding/margin growth
+   declared on the tile rule at the top of this file. A second hover rule here
+   used to re-declare box-shadow and a `transform: translateY(-2px)` — GTK CSS
+   has no transform, and because it came later in the sheet it also replaced
+   the accent ring with a plain drop shadow. Removed rather than reordered. */
+
+.status-running {
+    animation: imsisting-run-pulse 1.7s ease-in-out infinite;
+}
+
+.sidebar row,
+.module-submenu row,
+.status-pill,
+button,
+notebook > header > tabs > tab {
+    transition: background-color 130ms ease-out,
+                color            130ms ease-out,
+                border-color     130ms ease-out,
+                box-shadow       160ms ease-out,
+                opacity          160ms ease-out;
+}
+
+/* ── Background atmosphere ────────────────────────────────────────────────
+   Two low-alpha pools of palette colour over the window background — the
+   accent in the top-left, the indigo in the top-right — so the top of the
+   window reads as depth instead of a flat fill. This redefines no token and
+   changes no solid colour: the base is still #070b12, so deleting this block
+   restores the previous look exactly. Only `window` is targeted; the
+   `.background` class sits on many widgets and would pool per widget.
+   Anchored to the top edge (not 100% 100%) because the window is taller than
+   most viewports, which would push a bottom-anchored pool off-screen.
+   Note: panels here are translucent (rgba 0.45-0.6), so this glow also lifts
+   their fill slightly wherever it passes underneath. */
+window {
+    background-image:
+        radial-gradient(720px 430px at 2% 0%,
+                        alpha(@accent, 0.28), alpha(@accent, 0.0) 70%),
+        radial-gradient(780px 470px at 100% 0%,
+                        alpha(#6a8dff, 0.20), alpha(#6a8dff, 0.0) 70%);
+    background-repeat: no-repeat;
+}
+
+/* ── the frame ─────────────────────────────────────────────────────────────
+   The app is one rounded card floating on a darker backdrop. The card is the
+   base tone; everything inside it is lifted by one step of that same tone
+   plus a 1px border, so depth comes from the radius and the border rather
+   than from a second hue. Deleting this block restores the flat window.
+
+   The titlebar and the root box are two separate widgets in GTK's
+   client-side decoration, so the card is drawn in two halves that have to
+   agree: the header carries the top corners and the root carries the bottom
+   ones, and the shared border sits only on the outer edges. The window
+   behind them is the darker ground the card floats on -- two low-alpha pools
+   of palette colour give it depth without a second accent. */
+window {
+    background-color: #04060a;
+    background-image:
+        radial-gradient(760px 460px at 12% -6%,
+                        alpha(@accent, 0.16), alpha(@accent, 0.0) 72%),
+        radial-gradient(680px 420px at 96% -10%,
+                        alpha(#3d6fd8, 0.14), alpha(#3d6fd8, 0.0) 72%);
+    background-repeat: no-repeat;
+}
+
+headerbar {
+    background-color: @bg_base;
+    background-image: none;
+    border: 1px solid @line;
+    border-bottom: none;
+    border-radius: 15px 15px 0 0;
+    margin: 11px 12px 0 12px;
+    padding-left: 10px;
+    padding-right: 10px;
+    box-shadow: none;
+    min-height: 50px;
+}
+
+.app-root {
+    background-color: @bg_base;
+    border: 1px solid @line;
+    border-top: none;
+    border-radius: 0 0 15px 15px;
+    margin: 0 12px 12px 12px;
+    padding: 10px;
+    box-shadow: 0 22px 48px rgba(0, 0, 0, 0.55);
+}
+
+/* ── the drawer's page list ────────────────────────────────────────────────
+   The six permanent pages, which used to be the notebook's tab strip. They
+   are one step quieter than the module rows under them: the catalogue is
+   what the drawer is opened for, and the pages are where you already know
+   how to get. The selected row is the one piece of state here, so it is the
+   only row that carries a fill. */
+.drawer-nav {
+    background: none;
+    padding: 7px 7px 1px 7px;
+}
+.drawer-nav > row {
+    background: none;
+    border-radius: 9px;
+    padding: 7px 9px;
+    transition: background-color 120ms ease-out;
+}
+.drawer-nav > row:hover    { background-color: rgba(255, 255, 255, 0.045); }
+.drawer-nav > row:selected { background-color: @card_hi; }
+.drawer-nav > row:selected image { color: @accent; }
+.drawer-nav-label { font-size: 12.5px; }
+
+.drawer-rule {
+    background-color: @line;
+    min-height: 1px;
+    margin: 6px 12px;
+}
+
+.module-close {
+    padding: 2px;
+    min-width: 0;
+    min-height: 0;
+    color: @text_dim;
+}
+.module-close:hover { color: @text; }
+
+/* ── the sheet ─────────────────────────────────────────────────────────────
+   Every page that is not the dashboard. It floats over the dashboard with a
+   scrim behind it instead of replacing it, so the drawer's entries all open
+   the same way and closing one puts you back where you started. */
+.sheet-scrim {
+    background-color: rgba(4, 6, 10, 0.62);
+}
+
+.sheet {
+    background-color: @bg_base;
+    border: 1px solid @line;
+    border-radius: 15px;
+    margin: 16px;
+    box-shadow: 0 26px 64px rgba(0, 0, 0, 0.70);
+}
+
+/* ── the header search and its palette ────────────────────────────────────
+   The field sits where the wordmark used to be, and the wordmark moved to
+   the start. What the header spends its best position on should be the
+   thing you reach for most, not the thing that never changes. */
+.header-search {
+    padding: 0 2px;
+}
+.header-search-hint {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: @text_dim;
+    background-color: rgba(255, 255, 255, 0.05);
+    border: 1px solid @line;
+    border-radius: 6px;
+    padding: 1px 7px;
+}
+
+.palette {
+    background-color: @bg_panel;
+    border: 1px solid @line;
+    border-radius: 14px;
+    margin-top: 6px;
+    padding: 6px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.70);
+}
+.palette-list {
+    background: none;
+}
+.palette-list > row {
+    background: none;
+    border-radius: 9px;
+    padding: 7px 9px;
+}
+.palette-list > row:hover    { background-color: rgba(255, 255, 255, 0.05); }
+.palette-list > row:selected { background-color: @card_hi; }
+.palette-name { font-size: 13px; }
+.palette-sub  { font-size: 11px; color: @text_dim; }
+
+/* The target is the right-hand column now, not a strip across the top: it
+   shares the dashboard's zone language rather than competing with the
+   status strip for the same horizontal line. */
+.target-panel {
+    background-color: @bg_base;
+    border-left: 1px solid @line;
+    padding: 14px 14px 16px 14px;
+}
+.target-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: @accent;
+}
+
+/* The target column is an overlay, so it needs an edge of its own: without
+   the shadow it reads as a column that appeared rather than a panel that
+   arrived, and the tiles under it look clipped instead of covered. */
+.target-panel {
+    box-shadow: -20px 0 44px rgba(0, 0, 0, 0.55);
+}
+
+/* The case counters in the target column: a divider and an eyebrow, so they
+   read as a second block of the panel rather than four more fields of the
+   target form. */
+.target-case-head {
+    color: @text_dim;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    margin-top: 6px;
+    padding-top: 10px;
+    border-top: 1px solid @line;
+}
+
+/* Recent places: a footer of the drawer, divided from the catalogue so it
+   reads as a different kind of list — one you did not choose the order of. */
+.drawer-recent { border-top: 1px solid @line; margin-top: 6px; padding-top: 8px; }
+.drawer-recent-head {
+    color: @text_dim;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    margin: 0 0 4px 14px;
+}
+.drawer-recent-empty { color: @text_dim; font-size: 12px; padding: 2px 14px 8px 14px; }
+
+/* The status pills: they were reading as five cards rather than one line of
+   instrument state, which is a lot of the window's top band spent on values
+   that are mostly "none" and "0". Smaller, tighter, left-packed. */
+.status-cell {
+    min-width: 58px;
+    padding: 3px 8px 4px 8px;
+    border-radius: 7px;
+}
+.status-key   { font-size: 9.5px; }
+.status-value { font-size: 12px; }
+.status-dot   { font-size: 9px; }
+
+/* The tile has room now that the id line is gone: the icon is the thing you
+   actually scan for, so it takes the space the filename was using. */
+.module-card-icon { margin: 2px 0 2px 0; }
+
+/* ══════════════════════════════════════════════════════════════════
+   Toasts — wifisting's anatomy, IMSIsting's palette
+   Each toast is [icon | title over content | ×] inside its own revealer.
+   The icon carries the severity, so the state is legible before the text
+   is read; the border and a low-alpha glow repeat it for anyone scanning
+   the corner rather than reading it.
+   ══════════════════════════════════════════════════════════════════ */
+
+.toast {
+    background-image: linear-gradient(to bottom right, #1b2536, #141c2a);
+    border: 1px solid #33455f;
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin: 7px;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.52);
+}
+
+.toast-icon { color: @text_dim; margin-right: 2px; }
+
+.toast-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: @text;
+    letter-spacing: 0.2px;
+}
+
+.toast-content {
+    font-size: 11.5px;
+    color: @text_dim;
+}
+
+.toast-close {
+    background: none;
+    background-image: none;
+    border: none;
+    box-shadow: none;
+    min-width: 22px;
+    min-height: 22px;
+    padding: 0;
+    border-radius: 7px;
+    color: @text_dim;
+}
+.toast-close:hover { background-color: rgba(255, 255, 255, 0.07); }
+.toast-close-glyph { font-size: 14px; color: @text_dim; }
+
+.toast-ok {
+    border-color: rgba(95, 211, 154, 0.55);
+    box-shadow: 0 8px 24px rgba(95, 211, 154, 0.16), 0 10px 26px rgba(0, 0, 0, 0.5);
+}
+.toast-ok .toast-icon,
+.toast-ok .toast-title { color: #5fd39a; }
+.toast-ok .toast-close-glyph { color: @text_dim; }
+
+.toast-error {
+    border-color: rgba(239, 139, 139, 0.55);
+    box-shadow: 0 8px 24px rgba(239, 139, 139, 0.16), 0 10px 26px rgba(0, 0, 0, 0.5);
+}
+.toast-error .toast-icon,
+.toast-error .toast-title { color: #ef8b8b; }
+.toast-error .toast-close-glyph { color: @text_dim; }
+
+.toast-warn {
+    border-color: rgba(224, 179, 87, 0.55);
+    box-shadow: 0 8px 24px rgba(224, 179, 87, 0.16), 0 10px 26px rgba(0, 0, 0, 0.5);
+}
+.toast-warn .toast-icon,
+.toast-warn .toast-title { color: #e0b357; }
+
+/* ---- the Casebook gets the same card language as the rest of the shell
+   (Overview cards, the evidence file list, and opened evidence files) ---- */
+.cb-card {
+  background-color: @card_bg;
+  border: 1px solid @line;
+  border-radius: 12px;
+  padding: 12px 14px 14px 14px;
+}
+.cb-card-title {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 1.2px;
+  color: @text_dim;
+}
+.cb-k { font-size: 12px; color: @text_dim; }
+.cb-v { font-size: 12.5px; color: @text; }
+.cb-v-none { font-size: 12.5px; color: @text_dim; font-style: italic; }
+.cb-empty { font-size: 12px; color: @text_dim; font-style: italic; }
+.cb-count {
+  background-color: @bg_sunken;
+  border: 1px solid @line;
+  border-radius: 9px;
+  padding: 7px 10px 8px 10px;
+}
+.cb-count-num { font-size: 18px; font-weight: 700; color: @accent; }
+.cb-count-key {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.8px;
+  color: @text_dim;
+}
+.loot-name { font-size: 12.5px; color: @text; }
+.loot-meta { font-size: 10.5px; color: @text_dim; }
+.loot-count-lbl { font-size: 11px; color: @text_dim; }
+.cb-file-path { font-size: 11px; color: @text_dim; }
+.cb-file-text { font-size: 12px; }
+
+/* The film splash's fact card. Neuropol is the face the film's own caption is
+   drawn in; the family is asked for by name and falls back to the interface
+   font on a machine that does not have it installed. The panel behind it is
+   there because the film moves under the text - legibility cannot depend on
+   where the animation happens to be. */
+.splash-fact {
+    font-family: "Neuropol";
+    font-size: 13px;
+    line-height: 1.55;
+    color: #dfe8f5;
+    background-color: rgba(3, 7, 14, 0.55);
+    border-radius: 4px;
+    padding: 14px 18px;
+}

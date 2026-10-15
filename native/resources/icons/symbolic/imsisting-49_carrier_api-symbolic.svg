@@ -1,8 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-<g fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="butt" stroke-linejoin="miter">
-<path d="M96 56 c-24 0 -24 22 -24 32 v20 c0 10 -8 18 -18 18 c10 0 18 8 18 18 v20 c0 10 0 32 24 32"/>
-<path d="M160 56 c24 0 24 22 24 32 v20 c0 10 8 18 18 18 c-10 0 -18 8 -18 18 v20 c0 10 0 32 -24 32"/>
-<circle cx="128" cy="120" r="14"/>
-<path d="M128 134 V168 M128 152 H142"/>
-</g>
+<defs><mask id="cut"><rect width="256" height="256" fill="white"/><circle cx="188" cy="150" r="56" fill="black"/></mask></defs>
+<g fill="none" stroke="#63798f" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#cut)"><path d="M100 116 m-62 0 a62 62 0 1 0 124 0 a62 62 0 1 0 -124 0" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/><path d="M56 168 L18 216" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g fill="#c8d4e2" stroke="none" transform="translate(188 150)"><path d="M-10 -34 h-14 v68 h14" fill="none" stroke="#c8d4e2" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 -34 h14 v68 h-14" fill="none" stroke="#c8d4e2" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/></g>
 </svg>

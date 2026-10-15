@@ -3,6 +3,9 @@
 <gresources>
   <gresource prefix="/com/imsisting/native">
     <file>style.css</file>
+    <file>imsisting_splash.png</file>
+    <file>imsisting_logo.png</file>
+    <file>imsisting_splash2.mp4</file>
     <file alias="icons/scalable/actions/imsisting-00_deps-symbolic.svg">icons/symbolic/imsisting-00_deps-symbolic.svg</file>
     <file alias="icons/scalable/actions/imsisting-01_radio-symbolic.svg">icons/symbolic/imsisting-01_radio-symbolic.svg</file>
     <file alias="icons/scalable/actions/imsisting-02_cell_recon-symbolic.svg">icons/symbolic/imsisting-02_cell_recon-symbolic.svg</file>

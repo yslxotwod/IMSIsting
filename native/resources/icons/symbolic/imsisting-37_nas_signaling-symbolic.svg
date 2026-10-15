@@ -1,8 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-<g fill="none" stroke="currentColor" stroke-width="14" stroke-linecap="butt" stroke-linejoin="miter">
-<path d="M80 48 V208 M176 48 V208"/>
-<path d="M80 80 H176 M160 72 L176 80 L160 88"/>
-<path d="M176 120 H80 M96 112 L80 120 L96 128"/>
-<path d="M80 160 H176 M160 152 L176 160 L160 168"/>
-</g>
+<defs><mask id="cut"><rect width="256" height="256" fill="white"/><circle cx="188" cy="150" r="56" fill="black"/></mask></defs>
+<g fill="none" stroke="#63798f" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#cut)"><path d="M100 116 m-62 0 a62 62 0 1 0 124 0 a62 62 0 1 0 -124 0" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/><path d="M56 168 L18 216" fill="none" stroke="#c8d4e2" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g fill="#c8d4e2" stroke="none" transform="translate(188 150)"><rect x="-32.0" y="-26.0" width="64.0" height="40.0" rx="10.0"/><path d="M-6 14 L-14 32 L8 14 z"/></g>
 </svg>

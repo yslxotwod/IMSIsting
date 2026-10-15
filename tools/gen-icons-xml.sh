@@ -15,6 +15,10 @@
 # theme that the distro happens to expose - and they stay symbolic, so each
 # category's accent colour still applies.
 #
+# The splash art is listed here too, and for the same reason: it is drawn from
+# the binary before any theme, path or working directory is trustworthy. Two
+# fixed files rather than a scanned directory, but the same resource.
+#
 # Usage: tools/gen-icons-xml.sh [--check]
 set -euo pipefail
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,6 +30,9 @@ generate() {
     printf '<gresources>\n'
     printf '  <gresource prefix="/com/imsisting/native">\n'
     printf '    <file>style.css</file>\n'
+    printf '    <file>imsisting_splash.png</file>\n'
+    printf '    <file>imsisting_logo.png</file>\n'
+    printf '    <file>imsisting_splash2.mp4</file>\n'
     ( cd "$ROOT/native/resources" && find icons/symbolic -name '*.svg' | LC_ALL=C sort ) \
         | while read -r icon; do
               printf '    <file alias="icons/scalable/actions/%s">%s</file>\n' \
