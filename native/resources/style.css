@@ -2779,3 +2779,118 @@ window.motion-reduced * {
     font-size: 12px;
     color: #aab6c6;
 }
+
+/* ---- the target panel's read-out ----
+   Three zones under one eyebrow each, so the panel answers "what is it",
+   "what is it doing" and "how long have I had it" instead of presenting a
+   dozen loose fields. No rule here sets a decorative family: the panel
+   inherits the body font, which is what keeps it out of the fonts-system
+   override list. */
+/* Each zone is its own rectangle, so the panel reads as three cards rather
+   than as one long column of fields. */
+.target-zone {
+    padding: 10px 12px;
+    border-radius: 10px;
+}
+.target-scroll { background: transparent; }
+.target-zone-head {
+    color: @text_dim;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+}
+.target-kv { margin: 0; }
+.target-kv-key {
+    color: @text_dim;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+.target-kv-val {
+    color: @text;
+    font-size: 12px;
+    font-family: monospace;
+}
+
+/* The mark. The frame is always the same size so the panel does not jump
+   when the target changes generation, and only the glyph and its colour
+   move. */
+.target-mark-row { margin-bottom: 4px; }
+.target-mark-icon {
+    min-width: 44px;
+    min-height: 44px;
+    border: 1px solid @line;
+    border-radius: 8px;
+    background-color: @bg_sunken;
+    padding: 2px;
+}
+.target-mark-rat {
+    font-size: 15px;
+    font-weight: 700;
+    color: @text;
+    letter-spacing: 1px;
+}
+.target-mark-gen {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.6px;
+    color: @text_dim;
+}
+.target-mark-owner {
+    color: @text_dim;
+    font-size: 11px;
+    font-family: monospace;
+}
+/* One colour per generation, so the panel says which network it is before
+   the word is read. */
+.target-gen-2g   { color: #7fd8a0; }
+.target-gen-3g   { color: #e8c877; }
+.target-gen-4g   { color: #6fc3e8; }
+.target-gen-5g   { color: #c78fe8; }
+.target-gen-none { color: @text_dim; }
+
+.target-lock { color: @text_dim; }
+.target-lock.target-lock-on { color: #7fd8a0; }
+.target-lock-lbl {
+    color: @text_dim;
+    font-size: 11px;
+    font-family: monospace;
+}
+/* An open cipher is the reading that matters, so it is the one that shouts. */
+.target-lock.target-open { color: #e8a06a; }
+
+/* The spark and the bars that go with it. */
+.target-spark {
+    background-color: @bg_sunken;
+    border: 1px solid @line;
+    border-radius: 6px;
+}
+.target-bars { margin-right: 6px; }
+.target-bar {
+    background-color: @line;
+    border-radius: 1px;
+}
+.target-bar.on { background-color: #4fc3d9; }
+.target-sig-now {
+    color: @text;
+    font-size: 13px;
+    font-family: monospace;
+}
+.target-sig-range {
+    color: @text_dim;
+    font-size: 10px;
+    font-family: monospace;
+}
+.target-sig-state {
+    color: @text_dim;
+    font-size: 11px;
+    margin-top: 2px;
+}
+
+/* The four fields that set a target, folded away: typed once, read past
+   many times. */
+.target-editor {
+    margin-top: 4px;
+    padding-top: 10px;
+    border-top: 1px solid @line;
+}

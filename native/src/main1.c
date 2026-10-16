@@ -297,6 +297,11 @@ typedef struct {
     int n_views;
 } ModulePage;
 
+/* How many signal samples the target panel's spark keeps. At the live feed's
+   frame rate this is a few minutes of history, which is the window in which
+   moving an antenna or a hand changes what you see. */
+#define RTARGET_SPARK 96
+
 struct _AppState {
     GtkApplication *application;
     GtkWidget *window;
@@ -496,6 +501,22 @@ struct _AppState {
        case, this one is what the cellular modules tune to. */
     GtkWidget *rtarget_revealer, *rtarget_button, *rtarget_state_lbl;
     GtkWidget *rtarget_rat, *rtarget_arfcn, *rtarget_plmn, *rtarget_cell;
+    /* What the panel shows back: the mark says what generation the target is
+       and whether its traffic is ciphered, the four identity rows say which
+       cell it is, the spark plots the signal of the live feed, and the times
+       say how long it has been held. All of them are filled by
+       rtarget_panel_refresh() so there is one place that decides what the
+       panel means. */
+    GtkWidget *rtarget_mark, *rtarget_mark_rat, *rtarget_mark_gen;
+    GtkWidget *rtarget_mark_rat_owner;
+    GtkWidget *rtarget_mark_lock, *rtarget_mark_lock_lbl;
+    GtkWidget *rtarget_id_plmn, *rtarget_id_cell, *rtarget_id_chan, *rtarget_id_band;
+    GtkWidget *rtarget_sig_now, *rtarget_sig_range, *rtarget_sig_state;
+    GtkWidget *rtarget_spark_area;
+    GtkWidget *rtarget_bars;
+    GtkWidget *rtarget_held, *rtarget_seen, *rtarget_editor;
+    double rtarget_spark[RTARGET_SPARK];
+    int    rtarget_spark_n;
     GtkWidget *node_name_entry, *node_host_entry, *node_transport_entry;
 
     /* Output buffer of the module page on screen, or NULL on a non-module
@@ -830,6 +851,9 @@ static GtkWidget *create_module_page(AppState *state,
                                      gpointer module_data);
 static void module_page_free(gpointer data);
 static char *casebook_call(const char *const *args, gboolean *ok_out);
+/* status_poll refreshes the target panel's read-out, and the poll is emitted
+   long before the panel itself is defined. */
+static void rtarget_panel_refresh(AppState *state);
 static void casebook_home_refresh(AppState *state);
 static void casebook_refresh(AppState *state);
 
@@ -4082,6 +4106,11 @@ status_poll(gpointer user_data)
         status_set(state->dash_evidence, se, ne > 0 ? "status-ok" : "status-dim");
         status_set(state->dash_alerts, sa, na > 0 ? "status-warn" : "status-dim");
     }
+
+    /* The target panel reads the same casebook the counters above do, plus
+       the live feed's own file, so it rides the same tick rather than
+       polling on a timer of its own. */
+    rtarget_panel_refresh(state);
 
     /* Stamped last, on purpose: the marker means "this strip was filled in",
        not "a poll was started". It is set once everything above has landed. */
@@ -10336,77 +10365,597 @@ rtarget_toggled(GtkToggleButton *button, gpointer user_data)
     gtk_revealer_set_reveal_child(GTK_REVEALER(state->rtarget_revealer), on);
 }
 
-/* Open the panel from anywhere and put a target in it - what the Targets
-   list's Set target does. */
-void
-imsisting_target_offer(AppState *state, const char *rat, const char *arfcn,
-                       const char *plmn, const char *cell)
+/* ── What the target panel shows back ────────────────────────────────
+   The panel is a read-out first and a form second, in three zones:
+
+     Identity   a mark for the generation, the operator if it is known, a
+                padlock for whether the cell's traffic is ciphered, and the
+                fields that name the cell.
+     Live       the signal the live feed is seeing, as a spark with bars.
+     Context    how long the target has been held, when it was last seen,
+                and the case counters.
+
+   The four fields that SET a target are behind an expander: they are typed
+   once and read past many times, and the three zones need the room.
+
+   Every reading is taken from something that already exists - casebook's
+   target row for identity, loot/cell_recon/cells.tsv for the operator, band
+   and cipher, loot/gsmtap/decoded.tsv for the signal. A reading that is not
+   there says so; none of them is invented and none is shown as a zero. */
+
+static const char *
+rtarget_rat_icon(const char *rat)
 {
-    if (state == NULL) return;
+    if (rat == NULL || *rat == '\0') return "imsisting-02_cell_recon-symbolic";
+    if (g_ascii_strcasecmp(rat, "GSM") == 0)  return "imsisting-06_gsm_air-symbolic";
+    if (g_ascii_strcasecmp(rat, "UMTS") == 0) return "imsisting-08_umts_air-symbolic";
+    if (g_ascii_strcasecmp(rat, "LTE") == 0)  return "imsisting-10_lte_air-symbolic";
+    if (g_ascii_strcasecmp(rat, "NR") == 0 ||
+        g_ascii_strcasecmp(rat, "5G") == 0)   return "imsisting-12_nr_air-symbolic";
+    return "imsisting-02_cell_recon-symbolic";
+}
 
-    if (state->rtarget_rat != NULL)
-        gtk_editable_set_text(GTK_EDITABLE(state->rtarget_rat), rat ? rat : "");
-    if (state->rtarget_arfcn != NULL)
-        gtk_editable_set_text(GTK_EDITABLE(state->rtarget_arfcn), arfcn ? arfcn : "");
-    if (state->rtarget_plmn != NULL)
-        gtk_editable_set_text(GTK_EDITABLE(state->rtarget_plmn), plmn ? plmn : "");
-    if (state->rtarget_cell != NULL)
-        gtk_editable_set_text(GTK_EDITABLE(state->rtarget_cell), cell ? cell : "");
+/* The generation rather than the RAT: "2G" is what is read at a glance, and
+   the RAT itself is spelled out next to it. */
+static const char *
+rtarget_rat_generation(const char *rat)
+{
+    if (rat == NULL || *rat == '\0') return "--";
+    if (g_ascii_strcasecmp(rat, "GSM") == 0)  return "2G";
+    if (g_ascii_strcasecmp(rat, "UMTS") == 0) return "3G";
+    if (g_ascii_strcasecmp(rat, "LTE") == 0)  return "4G";
+    if (g_ascii_strcasecmp(rat, "NR") == 0 ||
+        g_ascii_strcasecmp(rat, "5G") == 0)   return "5G";
+    return rat;
+}
 
-    rtarget_apply(state);
+/* The generation's own colour, so the mark is readable before the word is. */
+static const char *
+rtarget_rat_class(const char *rat)
+{
+    if (rat == NULL || *rat == '\0') return "target-gen-none";
+    if (g_ascii_strcasecmp(rat, "GSM") == 0)  return "target-gen-2g";
+    if (g_ascii_strcasecmp(rat, "UMTS") == 0) return "target-gen-3g";
+    if (g_ascii_strcasecmp(rat, "LTE") == 0)  return "target-gen-4g";
+    if (g_ascii_strcasecmp(rat, "NR") == 0 ||
+        g_ascii_strcasecmp(rat, "5G") == 0)   return "target-gen-5g";
+    return "target-gen-none";
+}
 
-    if (state->rtarget_button != NULL)
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->rtarget_button), TRUE);
+/* A zone: an eyebrow and a body. The eyebrow is what makes the panel read as
+   three answers rather than a dozen loose fields. */
+static GtkWidget *
+rtarget_zone(const char *title, GtkWidget **body_out)
+{
+    GtkWidget *box  = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget *head = gtk_label_new(title);
+    GtkWidget *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+
+    gtk_widget_add_css_class(box, "target-zone");
+    gtk_widget_add_css_class(box, "card");
+    gtk_widget_add_css_class(head, "target-zone-head");
+    gtk_label_set_xalign(GTK_LABEL(head), 0.0f);
+    gtk_box_append(GTK_BOX(box), head);
+    gtk_box_append(GTK_BOX(box), body);
+    if (body_out != NULL) *body_out = body;
+    return box;
+}
+
+/* One key and one value. Returns the value label, which is the only thing
+   refresh() has to touch. The key is a fixed width so a column of values
+   lines up down the panel. */
+static GtkWidget *
+rtarget_kv(GtkWidget *body, const char *key)
+{
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *k   = gtk_label_new(key);
+    GtkWidget *v   = gtk_label_new("--");
+
+    gtk_widget_add_css_class(row, "target-kv");
+    gtk_widget_add_css_class(k, "target-kv-key");
+    gtk_widget_add_css_class(v, "target-kv-val");
+    gtk_widget_set_size_request(k, 66, -1);
+    gtk_label_set_xalign(GTK_LABEL(k), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(v), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(v), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_hexpand(v, TRUE);
+    gtk_box_append(GTK_BOX(row), k);
+    gtk_box_append(GTK_BOX(row), v);
+    gtk_box_append(GTK_BOX(body), row);
+    return v;
+}
+
+/* A value the panel could not read says so, rather than showing -- at the
+   operator as though the cell had no PLMN. */
+static void
+rtarget_put(GtkWidget *label, const char *value)
+{
+    /* "-" is Casebook's own word for a field it does not have, so it reads as
+       absent here too rather than as a value that happens to be a dash. */
+    gboolean there = value != NULL && *value != '\0' &&
+                     g_strcmp0(value, "-") != 0;
+
+    gtk_label_set_text(GTK_LABEL(label), there ? value : "--");
+}
+
+/* The spark. Split out of the panel so the drawing is one function that only
+   ever looks at the samples refresh() left behind. */
+static void
+rtarget_spark_draw(GtkDrawingArea *area, cairo_t *cr,
+                   int width, int height, gpointer user_data)
+{
+    AppState *state = user_data;
+    int n = state->rtarget_spark_n;
+    double lo, hi, span;
+
+    (void) area;
+    if (n < 1 || width < 2 || height < 2) return;
+
+    lo = hi = state->rtarget_spark[0];
+    for (int i = 1; i < n; i++) {
+        if (state->rtarget_spark[i] < lo) lo = state->rtarget_spark[i];
+        if (state->rtarget_spark[i] > hi) hi = state->rtarget_spark[i];
+    }
+    /* A flat trace is a real reading, not an empty one: give it a band so it
+       draws down the middle instead of dividing by zero. 6 dB is about the
+       smallest change a receiver reports meaningfully. */
+    if (hi - lo < 6.0) {
+        double mid = (hi + lo) / 2.0;
+
+        lo = mid - 3.0;
+        hi = mid + 3.0;
+    }
+    span = hi - lo;
+
+    /* Two faint rules, so the trace has a scale to be read against. */
+    cairo_set_line_width(cr, 1.0);
+    cairo_set_source_rgba(cr, 0.25, 0.33, 0.46, 0.55);
+    for (int i = 1; i < 3; i++) {
+        double y = height * i / 3.0;
+
+        cairo_move_to(cr, 0.0, y);
+        cairo_line_to(cr, width, y);
+    }
+    cairo_stroke(cr);
+
+    cairo_set_source_rgba(cr, 0.31, 0.80, 0.88, 1.0);
+    if (n == 1) {
+        /* A single reading is a level, and drawing it as a level is more
+           honest than leaving the box empty. */
+        double y = height - (state->rtarget_spark[0] - lo) / span * height;
+
+        if (y < 0.0) y = 0.0;
+        if (y > height) y = height;
+        cairo_set_line_width(cr, 1.6);
+        cairo_move_to(cr, 0.0, y);
+        cairo_line_to(cr, width, y);
+        cairo_stroke(cr);
+        return;
+    }
+    cairo_set_line_width(cr, 1.6);
+    cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+    for (int i = 0; i < n; i++) {
+        double x = width * (double) i / (double) (n - 1);
+        double y = height - (state->rtarget_spark[i] - lo) / span * height;
+
+        if (y < 0.0) y = 0.0;
+        if (y > height) y = height;
+        if (i == 0) cairo_move_to(cr, x, y);
+        else        cairo_line_to(cr, x, y);
+    }
+    cairo_stroke(cr);
+}
+
+/* Ring -> straight, oldest first. */
+static void
+rtarget_spark_unwrap(AppState *state, const double *ring, int have)
+{
+    int n = have < RTARGET_SPARK ? have : RTARGET_SPARK;
+    int start = have <= RTARGET_SPARK ? 0 : have % RTARGET_SPARK;
+
+    for (int i = 0; i < n; i++)
+        state->rtarget_spark[i] = ring[(start + i) % RTARGET_SPARK];
+    state->rtarget_spark_n = n;
+}
+
+/* The readings the live feed took, newest last. The feed writes
+   loot/gsmtap/decoded.tsv one row per frame with signal_dbm and the arfcn it
+   arrived on. Rows for the target's own channel are preferred; when the
+   target names no channel, or the feed has nothing on that one, every frame
+   counts. Returns FALSE when there is no reading at all - which is said in
+   words rather than drawn as a flat line at zero. */
+static gboolean
+rtarget_read_signal(AppState *state, const char *arfcn)
+{
+    g_autofree char *path = g_build_filename(IMSISTING_ROOT, "loot", "gsmtap",
+                                             "decoded.tsv", NULL);
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    double on_chan[RTARGET_SPARK], anywhere[RTARGET_SPARK];
+    int n_chan = 0, n_any = 0;
+    int sig_col = -1, arf_col = -1;
+    gboolean want_chan;
+
+    state->rtarget_spark_n = 0;
+    if (!g_file_get_contents(path, &text, NULL, NULL)) return FALSE;
+    lines = g_strsplit(text, "\n", -1);
+    if (lines[0] == NULL) return FALSE;
+
+    {
+        g_auto(GStrv) cols = g_strsplit(lines[0], "\t", -1);
+
+        for (int i = 0; cols[i] != NULL; i++) {
+            if (g_strcmp0(cols[i], "signal_dbm") == 0) sig_col = i;
+            else if (g_strcmp0(cols[i], "arfcn") == 0) arf_col = i;
+        }
+    }
+    if (sig_col < 0) return FALSE;
+    want_chan = arfcn != NULL && *arfcn != '\0' && arf_col >= 0;
+
+    for (int i = 1; lines[i] != NULL; i++) {
+        g_auto(GStrv) f = g_strsplit(lines[i], "\t", -1);
+        char *end = NULL;
+        double dbm;
+
+        if (f[0] == NULL || *f[0] == '\0') continue;
+        if ((int) g_strv_length(f) <= sig_col) continue;
+        dbm = g_ascii_strtod(f[sig_col], &end);
+        if (end == f[sig_col]) continue;      /* "-", or blank */
+
+        anywhere[n_any % RTARGET_SPARK] = dbm;
+        n_any++;
+        if (want_chan && (int) g_strv_length(f) > arf_col &&
+            g_strcmp0(f[arf_col], arfcn) == 0) {
+            on_chan[n_chan % RTARGET_SPARK] = dbm;
+            n_chan++;
+        }
+    }
+
+    if (n_chan > 0) rtarget_spark_unwrap(state, on_chan, n_chan);
+    else if (n_any > 0) rtarget_spark_unwrap(state, anywhere, n_any);
+    return state->rtarget_spark_n > 0;
+}
+
+/* Read the casebook's selected target, and refresh the whole read-out from
+   it. Called from status_poll, so the panel is never older than the radio
+   strip beside it. */
+static void
+rtarget_panel_refresh(AppState *state)
+{
+    const char *cur_args[] = { "--target-current-tsv", NULL };
+    gboolean ok = FALSE;
+    g_autofree char *cur = casebook_call(cur_args, &ok);
+    g_autofree char *rat = ok && cur != NULL
+                         ? tsv_row_field(cur, "rat") : NULL;
+    g_autofree char *plmn = ok && cur != NULL
+                          ? tsv_row_field(cur, "plmn") : NULL;
+    g_autofree char *chan = ok && cur != NULL
+                          ? tsv_row_field(cur, "channel") : NULL;
+    g_autofree char *cell = ok && cur != NULL
+                          ? tsv_row_field(cur, "cell_id") : NULL;
+    g_autofree char *band = ok && cur != NULL
+                          ? tsv_row_field(cur, "band") : NULL;
+    g_autofree char *pci = ok && cur != NULL
+                         ? tsv_row_field(cur, "pci") : NULL;
+    g_autofree char *first = ok && cur != NULL
+                           ? tsv_row_field(cur, "first_seen") : NULL;
+    g_autofree char *last = ok && cur != NULL
+                          ? tsv_row_field(cur, "last_seen") : NULL;
+    gboolean have = rat != NULL && *rat != '\0';
+    gboolean live;
+
+    if (state->rtarget_mark == NULL) return;
+
+    /* ---- Identity ---- */
+    gtk_image_set_from_icon_name(GTK_IMAGE(state->rtarget_mark),
+                                 rtarget_rat_icon(rat));
+    /* The generation's colour goes on the words as well as the glyph: the
+       panel should say which network it is at a glance, and the two words
+       are what there is to read. */
+    {
+        GtkWidget *marks[3] = { state->rtarget_mark,
+                                state->rtarget_mark_rat,
+                                state->rtarget_mark_gen };
+
+        for (int i = 0; i < 3; i++) {
+            gtk_widget_remove_css_class(marks[i], "target-gen-2g");
+            gtk_widget_remove_css_class(marks[i], "target-gen-3g");
+            gtk_widget_remove_css_class(marks[i], "target-gen-4g");
+            gtk_widget_remove_css_class(marks[i], "target-gen-5g");
+            gtk_widget_remove_css_class(marks[i], "target-gen-none");
+            gtk_widget_add_css_class(marks[i], rtarget_rat_class(rat));
+        }
+    }
+    gtk_label_set_text(GTK_LABEL(state->rtarget_mark_rat),
+                       have ? rat : "No target");
+    gtk_label_set_text(GTK_LABEL(state->rtarget_mark_gen),
+                       have ? rtarget_rat_generation(rat) : "--");
+
+    /* Rows may be absent; the panel says so rather than leaving a zero. */
+    rtarget_put(state->rtarget_id_plmn, plmn);
+    rtarget_put(state->rtarget_id_cell, cell);
+    rtarget_put(state->rtarget_id_chan, chan);
+    {
+        g_autofree char *bp = NULL;
+
+        if (band != NULL && *band != '\0' && pci != NULL && *pci != '\0')
+            bp = g_strdup_printf("%s  ·  PCI %s", band, pci);
+        else if (band != NULL && *band != '\0') bp = g_strdup(band);
+        else if (pci != NULL && *pci != '\0')   bp = g_strdup_printf("PCI %s", pci);
+        rtarget_put(state->rtarget_id_band, bp);
+    }
+
+    /* The cipher and the operator come from the last cell survey, because a
+       casebook target does not carry either. */
+    {
+        g_autofree char *cells = g_build_filename(IMSISTING_ROOT, "loot",
+                                                  "cell_recon", "cells.tsv", NULL);
+        g_autofree char *text = NULL;
+
+        if (g_file_get_contents(cells, &text, NULL, NULL)) {
+            g_auto(GStrv) lines = g_strsplit(text, "\n", -1);
+            int arf_col = -1, cell_col = -1, op_col = -1, ciph_col = -1;
+
+            if (lines[0] != NULL) {
+                g_auto(GStrv) cols = g_strsplit(lines[0], "\t", -1);
+
+                for (int i = 0; cols[i] != NULL; i++) {
+                    if (g_strcmp0(cols[i], "arfcn") == 0)   arf_col = i;
+                    else if (g_strcmp0(cols[i], "cell_id") == 0) cell_col = i;
+                    else if (g_strcmp0(cols[i], "operator") == 0) op_col = i;
+                    else if (g_strcmp0(cols[i], "cipher") == 0)  ciph_col = i;
+                }
+            }
+            for (int i = 1; lines[i] != NULL && arf_col >= 0; i++) {
+                g_auto(GStrv) f = g_strsplit(lines[i], "\t", -1);
+                gboolean hit = FALSE;
+
+                if ((int) g_strv_length(f) <= arf_col) continue;
+                if (cell != NULL && *cell != '\0' && cell_col >= 0 &&
+                    (int) g_strv_length(f) > cell_col)
+                    hit = g_strcmp0(f[cell_col], cell) == 0;
+                else if (chan != NULL && *chan != '\0')
+                    hit = g_strcmp0(f[arf_col], chan) == 0;
+                if (!hit) continue;
+
+                if (op_col >= 0 && (int) g_strv_length(f) > op_col)
+                    rtarget_put(state->rtarget_mark_rat_owner, f[op_col]);
+                if (ciph_col >= 0 && (int) g_strv_length(f) > ciph_col) {
+                    const char *c = f[ciph_col];
+                    gboolean sealed = c != NULL && *c != '\0' &&
+                                      g_ascii_strcasecmp(c, "none") != 0 &&
+                                      g_ascii_strcasecmp(c, "null") != 0 &&
+                                      g_ascii_strcasecmp(c, "-") != 0;
+
+                    gtk_label_set_text(GTK_LABEL(state->rtarget_mark_lock_lbl),
+                                       (c != NULL && *c != '\0') ? c : "--");
+                    gtk_image_set_from_icon_name(
+                        GTK_IMAGE(state->rtarget_mark_lock),
+                        sealed ? "channel-secure-symbolic" : "dialog-warning-symbolic");
+                    /* Green says the cipher is on, orange says the cell is
+                       there and the cipher is not. The two are different
+                       findings, so they are different colours. */
+                    gtk_widget_remove_css_class(state->rtarget_mark_lock, "target-open");
+                    gtk_widget_remove_css_class(state->rtarget_mark_lock, "target-lock-on");
+                    gtk_widget_add_css_class(state->rtarget_mark_lock,
+                                             sealed ? "target-lock-on" : "target-open");
+                }
+                break;
+            }
+        }
+    }
+    if (!have) {
+        rtarget_put(state->rtarget_mark_rat_owner, NULL);
+        gtk_label_set_text(GTK_LABEL(state->rtarget_mark_lock_lbl), "--");
+        gtk_image_set_from_icon_name(GTK_IMAGE(state->rtarget_mark_lock),
+                                     "channel-secure-symbolic");
+        /* No target is not an open cipher, or a closed one: it is nothing
+           known, and it is drawn as nothing known. */
+        gtk_widget_remove_css_class(state->rtarget_mark_lock, "target-open");
+        gtk_widget_remove_css_class(state->rtarget_mark_lock, "target-lock-on");
+    }
+
+    /* ---- Live ---- */
+    live = rtarget_read_signal(state, chan);
+    if (live) {
+        g_autofree char *now = g_strdup_printf("%.0f dBm",
+                                               state->rtarget_spark[state->rtarget_spark_n - 1]);
+        g_autofree char *rng = NULL;
+        double lo = state->rtarget_spark[0], hi = state->rtarget_spark[0];
+
+        for (int i = 1; i < state->rtarget_spark_n; i++) {
+            if (state->rtarget_spark[i] < lo) lo = state->rtarget_spark[i];
+            if (state->rtarget_spark[i] > hi) hi = state->rtarget_spark[i];
+        }
+        rng = g_strdup_printf("%d sample%s  ·  %.0f to %.0f dBm",
+                              state->rtarget_spark_n,
+                              state->rtarget_spark_n == 1 ? "" : "s", lo, hi);
+        gtk_label_set_text(GTK_LABEL(state->rtarget_sig_now), now);
+        gtk_label_set_text(GTK_LABEL(state->rtarget_sig_range), "");
+        /* The count and the range get their own line: beside the reading they
+           ran off the edge of a 300px panel. */
+        gtk_label_set_text(GTK_LABEL(state->rtarget_sig_state), rng);
+        gtk_widget_set_visible(state->rtarget_sig_state, TRUE);
+        /* Five bars, filled from the current reading. -113 dBm is the weakest
+           a GSM receiver is specified to hear and -51 the strongest, so the
+           scale is the standard's own rather than an invented one. */
+        {
+            double dbm = state->rtarget_spark[state->rtarget_spark_n - 1];
+            int lit = (int) (((dbm + 113.0) / 62.0) * 5.0 + 0.5);
+
+            if (lit < 0) lit = 0;
+            if (lit > 5) lit = 5;
+            for (int i = 0; i < 5; i++) {
+                GtkWidget *bar = g_object_get_data(G_OBJECT(state->rtarget_bars),
+                                                   i == 0 ? "bar0" : i == 1 ? "bar1"
+                                                   : i == 2 ? "bar2" : i == 3 ? "bar3"
+                                                   : "bar4");
+
+                if (bar == NULL) continue;
+                if (i < lit) gtk_widget_add_css_class(bar, "on");
+                else         gtk_widget_remove_css_class(bar, "on");
+            }
+        }
+    } else {
+        gtk_label_set_text(GTK_LABEL(state->rtarget_sig_now), "--");
+        gtk_label_set_text(GTK_LABEL(state->rtarget_sig_range), "");
+        gtk_label_set_text(GTK_LABEL(state->rtarget_sig_state),
+                           "No live feed — nothing has been decoded yet.");
+        gtk_widget_set_visible(state->rtarget_sig_state, TRUE);
+        for (int i = 0; i < 5; i++) {
+            GtkWidget *bar = g_object_get_data(G_OBJECT(state->rtarget_bars),
+                                               i == 0 ? "bar0" : i == 1 ? "bar1"
+                                               : i == 2 ? "bar2" : i == 3 ? "bar3"
+                                               : "bar4");
+
+            if (bar != NULL) gtk_widget_remove_css_class(bar, "on");
+        }
+    }
+    gtk_widget_queue_draw(state->rtarget_spark_area);
+
+    /* ---- Context ---- */
+    rtarget_put(state->rtarget_held, first);
+    rtarget_put(state->rtarget_seen, last);
 }
 
 static GtkWidget *
 build_target_panel(AppState *state)
 {
     GtkWidget *revealer = gtk_revealer_new();
-    GtkWidget *panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-    GtkWidget *title = gtk_label_new("TARGET");
-    GtkWidget *apply = gtk_button_new_with_label("Apply");
-    GtkWidget *clear = gtk_button_new_with_label("Clear");
-
-    state->rtarget_rat = gtk_entry_new();
-    state->rtarget_arfcn = gtk_entry_new();
-    state->rtarget_plmn = gtk_entry_new();
-    state->rtarget_cell = gtk_entry_new();
-    state->rtarget_state_lbl = gtk_label_new("No target set");
-
-    gtk_entry_set_placeholder_text(GTK_ENTRY(state->rtarget_rat), "RAT");
-    gtk_entry_set_placeholder_text(GTK_ENTRY(state->rtarget_arfcn), "ARFCN");
-    gtk_entry_set_placeholder_text(GTK_ENTRY(state->rtarget_plmn), "PLMN");
-    gtk_entry_set_placeholder_text(GTK_ENTRY(state->rtarget_cell), "Cell ID");
-    gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_rat), 6);
-    gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_arfcn), 12);
-    gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_plmn), 10);
-    gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_cell), 24);
+    GtkWidget *panel    = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
+    GtkWidget *title    = gtk_label_new("TARGET");
+    GtkWidget *id_body  = NULL, *live_body = NULL, *ctx_body = NULL;
+    GtkWidget *mark_row, *mark_text, *mark_icon;
+    GtkWidget *apply    = gtk_button_new_with_label("Apply");
+    GtkWidget *clear    = gtk_button_new_with_label("Clear");
 
     gtk_widget_add_css_class(panel, "target-panel");
     gtk_widget_add_css_class(title, "target-title");
-    gtk_widget_add_css_class(state->rtarget_state_lbl, "target-value");
-    gtk_widget_add_css_class(apply, "verb-button");
-    gtk_widget_add_css_class(apply, "primary");
-    gtk_widget_add_css_class(clear, "verb-button");
-
-    gtk_label_set_xalign(GTK_LABEL(state->rtarget_state_lbl), 0.0f);
-    gtk_label_set_ellipsize(GTK_LABEL(state->rtarget_state_lbl),
-                            PANGO_ELLIPSIZE_END);
-    gtk_widget_set_hexpand(state->rtarget_state_lbl, TRUE);
-    gtk_widget_set_valign(state->rtarget_state_lbl, GTK_ALIGN_CENTER);
-
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
     gtk_box_append(GTK_BOX(panel), title);
-    gtk_box_append(GTK_BOX(panel), state->rtarget_rat);
-    gtk_box_append(GTK_BOX(panel), state->rtarget_arfcn);
-    gtk_box_append(GTK_BOX(panel), state->rtarget_plmn);
-    gtk_box_append(GTK_BOX(panel), state->rtarget_cell);
-    gtk_box_append(GTK_BOX(panel), apply);
-    gtk_box_append(GTK_BOX(panel), clear);
-    gtk_box_append(GTK_BOX(panel), state->rtarget_state_lbl);
 
-    /* The case counters. Same status_cell helper and the same four state
-       fields as before, so status_poll() still keeps them live. */
+    /* ---- Identity ---- */
+    {
+        GtkWidget *zone = rtarget_zone("IDENTITY", &id_body);
+
+        mark_row  = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+        mark_icon = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        mark_text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        gtk_widget_add_css_class(mark_row, "target-mark-row");
+        gtk_widget_add_css_class(mark_icon, "target-mark-icon");
+
+        state->rtarget_mark = imsisting_icon_image(rtarget_rat_icon(NULL));
+        gtk_image_set_pixel_size(GTK_IMAGE(state->rtarget_mark), 40);
+        gtk_widget_add_css_class(state->rtarget_mark, "target-gen-none");
+        gtk_box_append(GTK_BOX(mark_icon), state->rtarget_mark);
+
+        state->rtarget_mark_rat  = gtk_label_new("No target");
+        state->rtarget_mark_gen  = gtk_label_new("--");
+        state->rtarget_mark_rat_owner = gtk_label_new(NULL);
+        gtk_widget_add_css_class(state->rtarget_mark_rat, "target-mark-rat");
+        gtk_widget_add_css_class(state->rtarget_mark_gen, "target-mark-gen");
+        gtk_widget_add_css_class(state->rtarget_mark_rat_owner, "target-mark-owner");
+        gtk_label_set_xalign(GTK_LABEL(state->rtarget_mark_rat), 0.0f);
+        gtk_label_set_xalign(GTK_LABEL(state->rtarget_mark_gen), 0.0f);
+        gtk_label_set_xalign(GTK_LABEL(state->rtarget_mark_rat_owner), 0.0f);
+        gtk_label_set_ellipsize(GTK_LABEL(state->rtarget_mark_rat_owner),
+                                PANGO_ELLIPSIZE_END);
+        gtk_box_append(GTK_BOX(mark_text), state->rtarget_mark_rat);
+        gtk_box_append(GTK_BOX(mark_text), state->rtarget_mark_gen);
+        gtk_box_append(GTK_BOX(mark_text), state->rtarget_mark_rat_owner);
+
+        /* The padlock: which cipher protects the cell's traffic, if any. */
+        {
+            GtkWidget *lock = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+
+            state->rtarget_mark_lock = imsisting_icon_image("channel-secure-symbolic");
+            gtk_image_set_pixel_size(GTK_IMAGE(state->rtarget_mark_lock), 14);
+            gtk_widget_add_css_class(state->rtarget_mark_lock, "target-lock");
+            state->rtarget_mark_lock_lbl = gtk_label_new("--");
+            gtk_widget_add_css_class(state->rtarget_mark_lock_lbl, "target-lock-lbl");
+            gtk_label_set_xalign(GTK_LABEL(state->rtarget_mark_lock_lbl), 0.0f);
+            gtk_box_append(GTK_BOX(lock), state->rtarget_mark_lock);
+            gtk_box_append(GTK_BOX(lock), state->rtarget_mark_lock_lbl);
+            gtk_box_append(GTK_BOX(mark_text), lock);
+        }
+
+        gtk_widget_set_valign(mark_icon, GTK_ALIGN_START);
+        gtk_widget_set_hexpand(mark_text, TRUE);
+        gtk_box_append(GTK_BOX(mark_row), mark_icon);
+        gtk_box_append(GTK_BOX(mark_row), mark_text);
+        gtk_box_append(GTK_BOX(id_body), mark_row);
+
+        state->rtarget_id_plmn = rtarget_kv(id_body, "PLMN");
+        state->rtarget_id_cell = rtarget_kv(id_body, "Cell");
+        state->rtarget_id_chan = rtarget_kv(id_body, "Channel");
+        state->rtarget_id_band = rtarget_kv(id_body, "Band");
+        gtk_box_append(GTK_BOX(panel), zone);
+    }
+
+    /* ---- Live ---- */
+    {
+        GtkWidget *zone = rtarget_zone("SIGNAL", &live_body);
+        GtkWidget *bars = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 3);
+
+        state->rtarget_bars = bars;
+        gtk_widget_add_css_class(bars, "target-bars");
+        gtk_widget_set_valign(bars, GTK_ALIGN_END);
+        for (int i = 0; i < 5; i++) {
+            GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+            g_autofree char *key = g_strdup_printf("bar%d", i);
+
+            gtk_widget_add_css_class(bar, "target-bar");
+            gtk_widget_set_size_request(bar, 4, 6 + i * 3);
+            gtk_widget_set_valign(bar, GTK_ALIGN_END);
+            gtk_box_append(GTK_BOX(bars), bar);
+            g_object_set_data(G_OBJECT(state->rtarget_bars), key, bar);
+        }
+
+        state->rtarget_spark_area = gtk_drawing_area_new();
+        gtk_widget_add_css_class(state->rtarget_spark_area, "target-spark");
+        gtk_widget_set_size_request(state->rtarget_spark_area, -1, 54);
+        gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(state->rtarget_spark_area), -1);
+        gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(state->rtarget_spark_area),
+                                       rtarget_spark_draw, state, NULL);
+
+        {
+            GtkWidget *under = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+
+            state->rtarget_sig_now   = gtk_label_new("--");
+            state->rtarget_sig_range = gtk_label_new("");
+            gtk_widget_add_css_class(state->rtarget_sig_now, "target-sig-now");
+            gtk_widget_add_css_class(state->rtarget_sig_range, "target-sig-range");
+            gtk_label_set_xalign(GTK_LABEL(state->rtarget_sig_now), 0.0f);
+            gtk_label_set_xalign(GTK_LABEL(state->rtarget_sig_range), 0.0f);
+            gtk_label_set_ellipsize(GTK_LABEL(state->rtarget_sig_range),
+                                    PANGO_ELLIPSIZE_END);
+            gtk_widget_set_hexpand(state->rtarget_sig_range, TRUE);
+            gtk_widget_set_valign(bars, GTK_ALIGN_CENTER);
+            gtk_box_append(GTK_BOX(under), bars);
+            gtk_box_append(GTK_BOX(under), state->rtarget_sig_now);
+            gtk_box_append(GTK_BOX(under), state->rtarget_sig_range);
+            gtk_box_append(GTK_BOX(live_body), state->rtarget_spark_area);
+            gtk_box_append(GTK_BOX(live_body), under);
+        }
+
+        state->rtarget_sig_state = gtk_label_new("No live feed.");
+        gtk_widget_add_css_class(state->rtarget_sig_state, "target-sig-state");
+        gtk_label_set_xalign(GTK_LABEL(state->rtarget_sig_state), 0.0f);
+        gtk_label_set_wrap(GTK_LABEL(state->rtarget_sig_state), TRUE);
+        gtk_box_append(GTK_BOX(live_body), state->rtarget_sig_state);
+        gtk_box_append(GTK_BOX(panel), zone);
+    }
+
+    /* ---- Context ---- */
+    {
+        GtkWidget *zone = rtarget_zone("HELD", &ctx_body);
+
+        state->rtarget_held = rtarget_kv(ctx_body, "Since");
+        state->rtarget_seen = rtarget_kv(ctx_body, "Last");
+        gtk_box_append(GTK_BOX(panel), zone);
+    }
+
+    /* ---- Case counters ---- */
     {
         GtkWidget *head = gtk_label_new("CASE");
         GtkWidget *grid = gtk_grid_new();
@@ -10430,26 +10979,113 @@ build_target_panel(AppState *state)
         gtk_box_append(GTK_BOX(panel), grid);
     }
 
-    g_signal_connect(apply, "clicked", G_CALLBACK(rtarget_apply_clicked), state);
-    g_signal_connect(clear, "clicked", G_CALLBACK(rtarget_clear_clicked), state);
+    /* ---- The form, folded away ----
+       Setting a target happens once; reading it happens every time. The
+       expander is closed by default so the three zones above get the panel,
+       and it opens onto the same four fields and the same Apply and Clear. */
+    {
+        GtkWidget *expander = gtk_expander_new("Set target");
+        GtkWidget *form     = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+
+        gtk_widget_add_css_class(expander, "target-editor");
+        gtk_expander_set_expanded(GTK_EXPANDER(expander), FALSE);
+        state->rtarget_editor = expander;
+
+        state->rtarget_rat   = gtk_entry_new();
+        state->rtarget_arfcn = gtk_entry_new();
+        state->rtarget_plmn  = gtk_entry_new();
+        state->rtarget_cell  = gtk_entry_new();
+        state->rtarget_state_lbl = gtk_label_new("No target set");
+
+        gtk_entry_set_placeholder_text(GTK_ENTRY(state->rtarget_rat), "RAT — GSM, UMTS, LTE, NR");
+        gtk_entry_set_placeholder_text(GTK_ENTRY(state->rtarget_arfcn), "ARFCN or channel");
+        gtk_entry_set_placeholder_text(GTK_ENTRY(state->rtarget_plmn), "PLMN — 6 digits");
+        gtk_entry_set_placeholder_text(GTK_ENTRY(state->rtarget_cell), "Cell ID");
+        gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_rat), 6);
+        gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_arfcn), 12);
+        gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_plmn), 10);
+        gtk_entry_set_max_length(GTK_ENTRY(state->rtarget_cell), 24);
+
+        gtk_widget_add_css_class(state->rtarget_state_lbl, "target-value");
+        gtk_widget_add_css_class(apply, "verb-button");
+        gtk_widget_add_css_class(apply, "primary");
+        gtk_widget_add_css_class(clear, "verb-button");
+        gtk_label_set_xalign(GTK_LABEL(state->rtarget_state_lbl), 0.0f);
+        gtk_label_set_ellipsize(GTK_LABEL(state->rtarget_state_lbl),
+                                PANGO_ELLIPSIZE_END);
+        gtk_widget_set_hexpand(state->rtarget_state_lbl, TRUE);
+
+        g_signal_connect(apply, "clicked", G_CALLBACK(rtarget_apply_clicked), state);
+        g_signal_connect(clear, "clicked", G_CALLBACK(rtarget_clear_clicked), state);
+
+        {
+            GtkWidget *fields[4] = { state->rtarget_rat, state->rtarget_arfcn,
+                                     state->rtarget_plmn, state->rtarget_cell };
+
+            for (int i = 0; i < 4; i++) {
+                gtk_widget_set_hexpand(fields[i], TRUE);
+                gtk_box_append(GTK_BOX(form), fields[i]);
+            }
+        }
+
+        {
+            GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+
+            gtk_box_append(GTK_BOX(row), apply);
+            gtk_box_append(GTK_BOX(row), clear);
+            gtk_box_append(GTK_BOX(form), row);
+        }
+        gtk_box_append(GTK_BOX(form), state->rtarget_state_lbl);
+        gtk_expander_set_child(GTK_EXPANDER(expander), form);
+        gtk_box_append(GTK_BOX(panel), expander);
+    }
 
     /* A column hugs the right edge and folds sideways; sliding down was
        what the panel did when it was a strip across the top. */
-    for (GtkWidget **e = (GtkWidget *[]){ state->rtarget_rat, state->rtarget_arfcn,
-                                          state->rtarget_plmn, state->rtarget_cell };
-         e < (GtkWidget *[]){ state->rtarget_rat, state->rtarget_arfcn,
-                              state->rtarget_plmn, state->rtarget_cell } + 4; e++)
-        gtk_widget_set_hexpand(*e, TRUE);
-
     gtk_revealer_set_transition_type(GTK_REVEALER(revealer),
                                      GTK_REVEALER_TRANSITION_TYPE_SLIDE_LEFT);
     gtk_revealer_set_transition_duration(GTK_REVEALER(revealer), 180);
-    gtk_revealer_set_child(GTK_REVEALER(revealer), panel);
-    gtk_widget_set_size_request(revealer, 288, -1);
+    /* The read-out plus the folded form is taller than a 760px window, and a
+       clipped control is a control the operator cannot reach. */
+    {
+        GtkWidget *scroll = gtk_scrolled_window_new();
+
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), panel);
+        gtk_widget_add_css_class(scroll, "target-scroll");
+        gtk_revealer_set_child(GTK_REVEALER(revealer), scroll);
+    }
+    gtk_widget_set_size_request(revealer, 300, -1);
+    gtk_widget_set_vexpand(revealer, TRUE);
     state->rtarget_revealer = revealer;
 
     return revealer;
 }
+
+/* Open the panel from anywhere and put a target in it - what the Targets
+   list's Set target does. */
+void
+imsisting_target_offer(AppState *state, const char *rat, const char *arfcn,
+                       const char *plmn, const char *cell)
+{
+    if (state == NULL) return;
+
+    if (state->rtarget_rat != NULL)
+        gtk_editable_set_text(GTK_EDITABLE(state->rtarget_rat), rat ? rat : "");
+    if (state->rtarget_arfcn != NULL)
+        gtk_editable_set_text(GTK_EDITABLE(state->rtarget_arfcn), arfcn ? arfcn : "");
+    if (state->rtarget_plmn != NULL)
+        gtk_editable_set_text(GTK_EDITABLE(state->rtarget_plmn), plmn ? plmn : "");
+    if (state->rtarget_cell != NULL)
+        gtk_editable_set_text(GTK_EDITABLE(state->rtarget_cell), cell ? cell : "");
+
+    rtarget_apply(state);
+
+    if (state->rtarget_button != NULL)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->rtarget_button), TRUE);
+}
+
 
 /* ──────────────────────────────── Splash ────────────────────────────────
    The first screen: the illustration, the logo over it, and a bar that
@@ -11056,11 +11692,15 @@ boot_build_ui(AppState *state, GtkApplication *app)
        It floats over the page the way the drawer does rather than sitting
        beside it. Sizing it here rather than in the box means opening it
        never costs the grid a column: the page keeps every pixel it had and
-       the panel covers the right-hand tiles instead of reflowing them. */
+       the panel covers the right-hand tiles instead of reflowing them.
+
+       Added AFTER the sheet, not before it. An overlay paints its children in
+       the order they were added, and the sheet is what every page - the seven
+       permanent ones and every module page - lives inside. Built here, the
+       panel sat under the sheet and was invisible the moment any page was
+       open, which is whenever the operator wants to read a target. */
     gtk_widget_set_halign(target_col, GTK_ALIGN_END);
     gtk_widget_set_valign(target_col, GTK_ALIGN_FILL);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), target_col);
-    gtk_overlay_set_measure_overlay(GTK_OVERLAY(overlay), target_col, FALSE);
 
     /* ---- the sheet and its scrim ----
        Added before the drawer so the drawer still floats above both. The
@@ -11081,6 +11721,10 @@ boot_build_ui(AppState *state, GtkApplication *app)
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->sheet);
     gtk_overlay_set_measure_overlay(GTK_OVERLAY(overlay), state->sheet, FALSE);
     sheet_set_open(state, FALSE);
+
+    /* Above the sheet, so a target stays readable while a page is open. */
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), target_col);
+    gtk_overlay_set_measure_overlay(GTK_OVERLAY(overlay), target_col, FALSE);
 
     GtkEventController *sheet_keys = gtk_event_controller_key_new();
     g_signal_connect(sheet_keys, "key-pressed", G_CALLBACK(sheet_key_pressed), state);
