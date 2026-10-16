@@ -20,6 +20,8 @@ __pycache__/
 *.swo
 *~
 .DS_Store
+# cscope/ctags-style function-name scratch, e.g. native/src/main1.c.fns
+*.fns
 
 # ── local session logs and diagnostics ──────────────────────────────────
 session_*.log

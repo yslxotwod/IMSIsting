@@ -50,9 +50,11 @@
    it is included rather than linked so the GUI always agrees with the tree. */
 #include "module_index.c"
 
-#ifndef IMSISTING_VERSION
-#define IMSISTING_VERSION "0.1"
-#endif
+/* The version is NOT compiled in. It is read at runtime from the top-level
+   VERSION file, the same file imsisting.sh reads, so the header label and
+   `imsisting.sh --version` cannot disagree -- they did: the CLI printed v0.4
+   while config.h still carried 0.1.0 from meson.build. See
+   imsisting_version_label(). */
 
 /* ==================================================================== */
 /*  TYPES                                                               */
@@ -10777,6 +10779,27 @@ terminal_opened(GtkButton *button, gpointer user_data)
 #endif
 }
 
+/* "v0.6.0", read from the top-level VERSION file.
+ *
+ * Read at runtime rather than compiled in: the CLI reads the same file, so
+ * they cannot disagree, and bumping the version needs no rebuild. Returns
+ * NULL when VERSION is missing or empty, and the caller hides the label
+ * rather than print a version number nobody can trust.
+ */
+static char *
+imsisting_version_label(void)
+{
+    g_autofree char *path = g_build_filename(IMSISTING_ROOT, "VERSION", NULL);
+    g_autofree char *contents = NULL;
+
+    if (g_file_get_contents(path, &contents, NULL, NULL)) {
+        g_strstrip(contents);
+        if (*contents != '\0')
+            return g_strdup_printf("v%s", contents);
+    }
+    return NULL;
+}
+
 static void
 boot_build_ui(AppState *state, GtkApplication *app)
 {
@@ -10791,15 +10814,17 @@ boot_build_ui(AppState *state, GtkApplication *app)
     GtkWidget *titlebox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkWidget *titleline = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
     GtkWidget *title = gtk_label_new("IMSIsting");
-    GtkWidget *version = gtk_label_new(IMSISTING_VERSION);
+    g_autofree char *version_text = imsisting_version_label();
+    GtkWidget *version = gtk_label_new(version_text ? version_text : "");
+    gtk_widget_set_visible(version, version_text != NULL);
     GtkWidget *subtitle = gtk_label_new("2G · 3G · 4G · 5G cellular research toolkit");
     gtk_widget_add_css_class(title, "title");
     gtk_widget_add_css_class(version, "app-version");
     gtk_widget_add_css_class(subtitle, "app-subtitle");
     /* The version sits on the name's baseline rather than its centre: centred
        on a 20px word it floats, and read as part of the word it looks like the
-       tool is called "IMSIsting 0.1". Dim and small, it is a footnote to the
-       name, which is what a version is. */
+       tool is called "IMSIsting v0.6.0". Dim and small, it is a footnote to
+       the name, which is what a version is. */
     gtk_widget_set_valign(version, GTK_ALIGN_END);
     gtk_widget_set_margin_bottom(version, 3);
     /* Both lines centre inside the title block. Left-aligned, the longer

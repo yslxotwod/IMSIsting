@@ -24,6 +24,18 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 export IMSISTING_ROOT="$SCRIPT_DIR"
 export MODULES_DIR="$SCRIPT_DIR/modules"
 
+# ── version ─────────────────────────────────────────────────
+# VERSION has no second copy: native/meson.build reads this same file at
+# configure time, so the GUI label and `--version` cannot drift apart the way
+# they had (the CLI said v0.4 while meson.build still said 0.1.0). If the file
+# is unreadable, say so rather than print a plausible stale number.
+if [[ -r "$SCRIPT_DIR/VERSION" ]]; then
+    IMSISTING_VERSION="$(cat "$SCRIPT_DIR/VERSION")"
+else
+    IMSISTING_VERSION="unknown"
+fi
+export IMSISTING_VERSION
+
 # ── declared settings ───────────────────────────────────────
 # state/settings.tsv holds what the operator declared: key<TAB>value, one per
 # line, '#' starts a comment, and a missing key means "the default". Plain
@@ -190,8 +202,10 @@ USAGE
         -V|--version)
             # Count the modules rather than hardcode: a stale number here is
             # the first thing a user sees and the easiest thing to forget.
+            # The version itself is never written here -- it is read from
+            # VERSION above, so this line cannot drift from the GUI.
             _n=$(ls -1 "$SCRIPT_DIR"/modules/*.sh 2>/dev/null | wc -l)
-            echo "imsisting v0.4 — ${_n} modules, 2G/3G/4G/5G"
+            echo "imsisting v${IMSISTING_VERSION} — ${_n} modules, 2G/3G/4G/5G"
             unset _n
             exit 0 ;;
         --index)
@@ -410,8 +424,8 @@ banner() {
     printf '═%.0s' $(seq 1 "$w")
     printf '%s\n' "$C_RESET"
 
-    printf '  %s%s» %scellular offensive toolkit %s// 2g · 3g · 4g · 5g %s// v0.4 %s// ysl%s\n' \
-        "$C_CYN" "$C_BOLD" "$C_WHT" "$C_DIM" "$C_MAG" "$C_RESET"
+    printf '  %s%s» %scellular offensive toolkit %s// 2g · 3g · 4g · 5g %s// v%s %s// ysl%s\n' \
+        "$C_CYN" "$C_BOLD" "$C_WHT" "$C_DIM" "$C_MAG" "$IMSISTING_VERSION" "$C_RESET"
 
     printf '%s' "$C_PUR"
     printf '─%.0s' $(seq 1 "$w")

@@ -1,7 +1,13 @@
+# The version has exactly one home: ../VERSION, next to imsisting.sh. The CLI
+# reads the same file, so the GUI label and `--version` can no longer drift --
+# they did: the CLI said v0.4 while this file said 0.1.0.
 project(
   'imsisting-native',
   'c',
-  version: '0.1.0',
+  version: run_command(
+    'cat', meson.current_source_dir() / '..' / 'VERSION',
+    check: true,
+  ).stdout().strip(),
   default_options: [
     'c_std=c17',
     'warning_level=3',
