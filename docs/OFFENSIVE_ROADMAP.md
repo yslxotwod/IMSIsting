@@ -274,13 +274,30 @@ over the air.
    - **PDSCH agrees with srsRAN**, end to end and bit for bit. It did not when
      this paragraph was first written -- 146 mismatches over 25 cases, the first
      in rate matching -- and the check was left red and visible rather than
-     accommodated by moving the tolerance. Three defects were behind it, and
+     accommodated by moving the tolerance. Six defects were behind it, and
      finding them required an outside reference, not a self-test.
    - `10_lte_air --pdcch` no longer prints zeros. It did, because it passed QPSK
      symbols to a hex formatter that expects bits.
-   - **The four-point bar has not been applied.** Every assertion so far is
-     against a software implementation. Nothing has verified that a transmission
-     produced by this tree is receivable by a real device.
+   - **Criterion 3 is met, and it took a third pass to meet it.** The bar says
+     a module with no radio attached must fail honestly: non-zero exit, the
+     missing device named, no success line. The first version tested
+     `command -v hackrf_transfer` -- the *driver binary*, not a device -- so on
+     a box with the hackrf and LimeSDR packages installed and nothing plugged
+     in it printed `tx_armed 1` and `TX queued to hackrf` and exited 0. The
+     selftest could not see it, because every no-radio arm reaches the refusal
+     path through `LAIR_SDR_DEVICE=""` -- the correct way to test a refusal on
+     a box that *has* a radio, and also why none of them ever asked the
+     machine. The detector now probes each driver for a device (`hackrf_info`,
+     `bladeRF-cli -p`, `LimeUtil --find` -- whose exit code is worthless, since
+     it returns 0 either way -- and `uhd_find_devices`), and four new selftest
+     arms drive it through a fake driver on PATH with a transfer binary present
+     and no board answering.
+   - **The four-point bar is otherwise not fully applied.** Criteria 1 and 2
+     are met: every construction is asserted against srsRAN or a published
+     vector, and the transmit path is written rather than described. What
+     remains is the honest headline -- **nothing has verified that a
+     transmission produced by this tree is receivable by a real device.** Every
+     assertion so far is against a software implementation.
 
 Also real in LTE, and unchanged by the above:
 - `10_lte_air --gen-enb-conf` writes usable srsRAN `enb.conf` and `rr.conf`.
