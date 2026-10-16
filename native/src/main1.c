@@ -15634,7 +15634,7 @@ static ModuleSubmenuEntry pgt_entries[] = {
       "~--edrx-occ|~--pei-occ|~--page-mode|~--paging-cause" },
     { "Attack",
       "security-high-symbolic",
-      "#BUILD|~--build-paging-req|#TX|~--paging-tx|#HISTORY|~--paging-history" },
+      "#BUILD|~--build-paging-req|#TX|~--paging-tx|#HISTORY|~--paging-history|~--flapping-tsv" },
 };
 static ModuleSubmenuEntry vims_entries[] = {
     { "Overview",
@@ -15885,7 +15885,10 @@ static ModuleSubmenuEntry bexp_entries[] = {
       "--forge-identity:Forge Identity|--forge-reg-accept:Forge Reg Accept|--forge-reg-reject:Forge Reg Reject" },
     { "Analysis",
       "system-search-symbolic",
-      "#CVE|--cve=CVE-2023-33042|#CHECK|--cp-check:CP Check|#L2|--l2-case:L2 Case|--l2-corpus:L2 Corpus" },
+      "#CVE|--cve=CVE-2023-33042|#CHECK|--cp-check:CP Check|#L2|--l2-case:L2 Case|--l2-corpus:L2 Corpus|~--l2-build" },
+    { "Transmit",
+      "network-transmit-receive-symbolic",
+      "#FRAME|~--inject|#CASE|~--send" },
     { "Planning",
       "preferences-system-symbolic",
       "--plan:Plan" },
@@ -15902,13 +15905,16 @@ static ModuleSubmenuEntry nrj_entries[] = {
       "--dci-parse=0A0F3C9001,1_0|~--dci-encode" },
     { "RAR",
       "document-new-symbolic",
-      "--rar=33,128,4601,4026|--rar-backoff=20" },
+      "--rar=33,128,4601,4026|--rar-backoff=20|~--rar-backoff-idx" },
     { "MAC",
       "network-receive-symbolic",
-      "#DECODE|--mac-pdu:MAC PDU|--mac-sub:MAC Subheader|#LCID|--lcid=0|--lcid-table:LCID Table" },
+      "#DECODE|--mac-pdu:MAC PDU|--mac-sub:MAC Subheader|#LCID|--lcid=0|--lcid-table:LCID Table|#FRAME|~--frame" },
     { "RNTI",
       "preferences-system-symbolic",
       "#RNTI|--ra-rnti-nr:RA-RNTI NR|--ra-rnti-lte:RA-RNTI LTE|#DCI|--dci|#PLAN|--plan:Plan" },
+    { "Transmit",
+      "network-transmit-receive-symbolic",
+      "#AUTH|~--auth-capture|--auth-replay:Auth Replay|#FRAME|~--inject" },
 };
 
 static ModuleSubmenuEntry bbdg_entries[] = {
