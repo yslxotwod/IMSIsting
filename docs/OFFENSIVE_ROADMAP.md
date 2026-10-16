@@ -246,29 +246,63 @@ decodes it" is not "a handset camps on it".
 **Phase 2 — LTE.** `10_lte_air` (eNB run, RRC reconfiguration, SIB forging),
 `09_lte_attach` (forged attach), `27_cellular_dns` (aLTEr on-path rewrite).
 
-**Phase 2 status — audited, and the audit corrected this document.** The
-"4G / LTE" entry above credits `10_lte_air` with "SIB1–5 construction" and
-"RRC message construction, handover sequences". That is `status handoff` with
-*no code behind it*: the module contains **nine SIB decoders and zero SIB or
-RRC encoders**. The nine are `lair_decode_sib1()` (`modules/10_lte_air.sh:339`)
-through `lair_decode_sib13()` (`modules/10_lte_air.sh:885`), dispatched at
-`modules/10_lte_air.sh:1028-1036`.
+**Phase 2 status — current.** The three items below are closed except for the
+last, which is the one that matters: nothing here has yet been confirmed to work
+over the air.
 
-Worse, they are **not TS 36.331 PER decoders**. They read a private bit layout
-of this tree's own invention, and the module's selftest then validates that
-layout against itself — the exact anti-pattern the bar below forbids. The
-evidence: a genuine SIB1 encoded by pycrate 0.8.1 and passed to
-`10_lte_air --decode-sib 1` yields values that cannot exist in the
-specification, and pycrate decoding the SIB2 fixture this tree then carried —
-a ten-hex-digit body — reports mandatory fields missing.
+1. A real TS 36.331 unaligned-PER codec — **done**. `tools/asn1gen.py` walks
+   pycrate's structure and emits `tools/lte_rrc_layout.py`, a declarative layout
+   table of 1045 types over 15 root types; `tools/lte_per.py` is a stdlib-only
+   generic unaligned-PER engine that consumes it. `tools/lte-per-oracle/verify_per.py`
+   generates values from pycrate's *own object graph* — deliberately not from the
+   table under test — and reports **42,700 of 42,700 cases agreeing**, plus a
+   5809-node structural audit of the layout itself. pycrate is the oracle, never
+   the shipped code: the runtime carries no import beyond the standard library.
+2. Replacement of the nine private-layout decoders — **done**. All thirteen SIBs
+   decode through a real codec. `lair_decode_sib()` dispatches 1 through 13 and
+   `lair_note_private_layout()` is deleted outright, because no SIB is on a
+   private layout any more. There is no SIB14 in TS 36.331, and a body that is
+   none of the thirteen is refused rather than guessed at.
+3. RRC reconfiguration and handover construction, the actual TX path, then the
+   same four-point bar Phase 1 was held to — **the construction and most of the
+   TX path are done; the bar is not**.
+   - RRC construction is done: `tools/lte_rrc.py` builds
+     `RRCConnectionReconfiguration` and `HandoverCommand`, stdlib-only, refused
+     outside a hand-written view per type.
+   - The downlink coding and channel-mapping chains are done and asserted
+     against implementations outside this tree.
+   - **PDSCH does not currently agree with srsRAN**: 146 mismatches over 25
+     cases, the first in rate matching. This is a known-red check, deliberately
+     left red and visible rather than accommodated by moving the tolerance.
+   - `10_lte_air --pdcch` prints zeros: it passes QPSK symbols to a hex
+     formatter that expects bits. Not yet fixed.
+   - **The four-point bar has not been applied.** Every assertion so far is
+     against a software implementation. Nothing has verified that a transmission
+     produced by this tree is receivable by a real device.
 
-What is real in LTE today:
+Also real in LTE, and unchanged by the above:
 - `10_lte_air --gen-enb-conf` writes usable srsRAN `enb.conf` and `rr.conf`.
 - `09_lte_attach --encode-attach` emits a correct EMM ATTACH REQUEST, and its
   `--imsi-encode` / `--imsi-decode` round-trip.
 - `27_cellular_dns` builds DNS queries and responses.
+- `modules/10_lte_air.sh --rrc-tx` builds and transmits a reconfiguration over
+  a real radio when one is present, and with no radio present fails with rc=1
+  and says so rather than reporting success.
 
-What Phase 2 now has to add, in order:
+**A note for anyone reading the history below.** The audit that first corrected
+this document found `10_lte_air` credited with "SIB1–5 construction" and "RRC
+message construction, handover sequences" with *no code behind it*: nine SIB
+decoders and zero encoders, reading a private bit layout of this tree's own
+invention and validating that layout against itself. A genuine SIB1 encoded by
+pycrate and passed to `--decode-sib 1` yielded values that cannot exist in the
+specification. That is the state items 1 and 2 were written to fix, and it is
+kept because the failure was invisible from inside the tree: the module's own
+selftest was green the whole time. The narrative that follows is the record of
+how each piece was closed, in the order it was closed; where it says an item is
+"started" or "done so far", read it as the state at that point in the work, not
+as the current state — the list above is the current state.
+
+**How each piece was closed — historical record, not current status.**
 1. A real TS 36.331 unaligned-PER codec — **started**: `tools/lte_asn1.py`
    encodes `SystemInformationBlockType1` and is asserted bit-for-bit against
    five vectors captured from pycrate 0.8.1 (an independent ASN.1 PER

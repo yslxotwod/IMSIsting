@@ -19,7 +19,15 @@ set -uo pipefail
 
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODDIR="$ROOT/modules"
-TIMEOUT="${SELFTEST_TIMEOUT:-120}"
+# The cap exists to catch a module that HANGS -- an unbounded wait on a device
+# that never answers -- not to police how long correct work takes. It was 120s,
+# and 00_deps blew through it intermittently: its selftest probes the whole
+# ~65-tool roster twice, and a sweep is only cheap while the memo cache is warm,
+# so on a loaded machine the module is killed for being slow and the runner
+# reports a bare rc=124. That is a timeout measuring the machine, not the code.
+# 300s keeps the hang detection that matters and stops failing a module that is
+# simply doing the probing it was written to do.
+TIMEOUT="${SELFTEST_TIMEOUT:-300}"
 
 show_all=0 quiet=0 jsonout=0
 filters=()
@@ -71,9 +79,15 @@ for m in "${modules[@]}"; do
     else
         fail=$((fail + 1)); failed+=("$name")
         if (( ! jsonout )); then
-            printf 'FAIL     %-26s rc=%s\n' "$name" "$rc"
+            if (( rc == 124 )); then
+                # Say TIMEOUT on the FAIL line itself, not only on the next
+                # one: anyone reading `grep '^FAIL'` output would otherwise see
+                # an unexplained rc=124 and have to know what it means.
+                printf 'TIMEOUT  %-26s killed after %ss\n' "$name" "$TIMEOUT"
+            else
+                printf 'FAIL     %-26s rc=%s\n' "$name" "$rc"
+            fi
             grep -E 'FAIL' <<<"$out" | head -6 | sed 's/^/           /'
-            (( rc == 124 )) && printf '           timed out after %ss\n' "$TIMEOUT"
         fi
     fi
 done
