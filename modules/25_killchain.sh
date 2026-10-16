@@ -105,35 +105,35 @@ kchn_builtin_chain() {
             ;;
         passive-audit)
             kchn_chain_header
-            printf '1\t21_pcap_analysis\t--hierarchy\t-\tno\tprotocol hierarchy of the capture\n'
-            printf '2\t21_pcap_analysis\t--identities\t-\tno\tharvest identities from the capture\n'
-            printf '3\t22_imsi_exposure\t--audit\t-\tno\tcorrelate identities across the capture\n'
-            printf '4\t23_cipher_audit\t--score\t-\tno\tscore the negotiated ciphers\n'
-            printf '5\t22_imsi_exposure\t--report\t-\tno\twrite the exposure report\n'
+            printf '1\t17_pcap_analysis\t--hierarchy\t-\tno\tprotocol hierarchy of the capture\n'
+            printf '2\t17_pcap_analysis\t--identities\t-\tno\tharvest identities from the capture\n'
+            printf '3\t18_imsi_exposure\t--audit\t-\tno\tcorrelate identities across the capture\n'
+            printf '4\t19_cipher_audit\t--score\t-\tno\tscore the negotiated ciphers\n'
+            printf '5\t18_imsi_exposure\t--report\t-\tno\twrite the exposure report\n'
             ;;
         gsm-assessment)
             kchn_chain_header
             printf '1\t02_cell_recon\t--scan\tgsm GSM900\tyes\tfind the GSM cells in range\n'
-            printf '2\t10_gsm_air\t--decode-pcap\t-\tno\tdecode the GSM air interface capture\n'
-            printf '3\t10_gsm_air\t--cipher-audit\t-\tno\taudit the A5 cipher per session\n'
-            printf '4\t23_cipher_audit\t--table\t-\tno\tshow the cipher table\n'
-            printf '5\t11_gsm_attack\t--plan\t-\tno\twrite the GSM attack plans\n'
-            printf '6\t24_gsm_cve\t--list-cves\t-\tno\tlist the 2G/3G CVE probes and handoffs\n'
+            printf '2\t06_gsm_air\t--decode-pcap\t-\tno\tdecode the GSM air interface capture\n'
+            printf '3\t06_gsm_air\t--cipher-audit\t-\tno\taudit the A5 cipher per session\n'
+            printf '4\t19_cipher_audit\t--table\t-\tno\tshow the cipher table\n'
+            printf '5\t07_gsm_attack\t--plan\t-\tno\twrite the GSM attack plans\n'
+            printf '6\t20_gsm_cve\t--list-cves\t-\tno\tlist the 2G/3G CVE probes and handoffs\n'
             ;;
         lte-core-audit)
             kchn_chain_header
-            printf '1\t21_pcap_analysis\t--hierarchy\t-\tno\tprotocol hierarchy of the EPC capture\n'
-            printf '2\t15_lte_core\t--decode-diameter\t-\tno\tparse the Diameter S6a exchange\n'
-            printf '3\t15_lte_core\t--decode-gtp-c\t-\tno\tparse the GTP-C exchange\n'
-            printf '4\t15_lte_core\t--surface\t-\tno\treport the EPC surface\n'
-            printf '5\t25_lte_cve\t--list-cves\t-\tno\tlist the LTE core plans\n'
+            printf '1\t17_pcap_analysis\t--hierarchy\t-\tno\tprotocol hierarchy of the EPC capture\n'
+            printf '2\t11_lte_core\t--decode-diameter\t-\tno\tparse the Diameter S6a exchange\n'
+            printf '3\t11_lte_core\t--decode-gtp-c\t-\tno\tparse the GTP-C exchange\n'
+            printf '4\t11_lte_core\t--surface\t-\tno\treport the EPC surface\n'
+            printf '5\t21_lte_cve\t--list-cves\t-\tno\tlist the LTE core plans\n'
             ;;
         5g-privacy)
             kchn_chain_header
-            printf '1\t18_suci\t--parse-suci\t-\tno\tparse the captured SUCI\n'
-            printf '2\t18_suci\t--audit\t-\tno\taudit the SUCI concealment\n'
-            printf '3\t23_cipher_audit\t--downgrade-check\t-\tno\tcheck the null-cipher downgrade path\n'
-            printf '4\t26_nr_cve\t--list-cves\t-\tno\tlist the 5G CVE probes and handoffs\n'
+            printf '1\t14_suci\t--parse-suci\t-\tno\tparse the captured SUCI\n'
+            printf '2\t14_suci\t--audit\t-\tno\taudit the SUCI concealment\n'
+            printf '3\t19_cipher_audit\t--downgrade-check\t-\tno\tcheck the null-cipher downgrade path\n'
+            printf '4\t22_nr_cve\t--list-cves\t-\tno\tlist the 5G CVE probes and handoffs\n'
             ;;
         *)
             return 1 ;;

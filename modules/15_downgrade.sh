@@ -475,7 +475,7 @@ dwn_build_sib1() {
     printf 'body\t%s\n' "$body"
     printf 'body_with_flags\t%s%s\n' "$body" "$flags"
     printf 'nibbles\t%s\n' "$(( ${#body} + ${#flags} ))"
-    printf 'decode_with\t14_lte_air.sh --decode-sib 1 <body>\n'
+    printf 'decode_with\t10_lte_air.sh --decode-sib 1 <body>\n'
 }
 
 # One line describing what a given cipher/integrity pair leaves exposed.

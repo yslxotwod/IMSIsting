@@ -456,8 +456,8 @@ static const HelpSection FILES_SECTIONS[] = {
 
 static const HelpSection CLI_SECTIONS[] = {
     { "RUNNING A MODULE",
-      "| ./modules/11_gsm_attack.sh --vector-imsi-catcher 262 01\n"
-      "| ./modules/14_lte_air.sh --decode-sib <hex>\n"
+      "| ./modules/07_gsm_attack.sh --vector-imsi-catcher 262 01\n"
+      "| ./modules/10_lte_air.sh --decode-sib <hex>\n"
       "| ./modules/05_field_kit.sh --guard-check\n"
       "\n"
       "Each module answers --help with its verbs, --selftest with its own\n"

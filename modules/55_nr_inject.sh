@@ -832,7 +832,7 @@ nrj_probe_frame() {
         out=$(bash "$mod" --l2-case "$layer" "$case_name" 2>/dev/null) || continue
         hex=$(printf '%s\n' "$out" | awk -F'\t' '{print $3}')
         [[ -n "$hex" ]] || continue
-        printf 'constructor\t59_baseband_exploit --l2-case %s %s\n' "$layer" "$case_name"
+        printf 'constructor\t54_baseband_exploit --l2-case %s %s\n' "$layer" "$case_name"
         printf 'frame_hex\t%s\n' "$hex"
         printf 'build_with\t$IMSISTING_ROOT/modules/54_baseband_exploit.sh --l2-case %s %s\n' "$layer" "$case_name"
         found=$(( found + 1 ))

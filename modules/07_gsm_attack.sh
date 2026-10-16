@@ -2236,7 +2236,7 @@ gatk_cmd_transmit() {   # <arfcn> [--bsic N] [--mcc M] [--mnc N] [--lac H] [--ci
     local mod; mod=$(gatk_gsm_mod)
     [[ -r "$mod" ]] || {
         printf 'ERROR\tthe modulator is missing: %s\n' "$mod" >&2
-        printf 'WHY\t11_gsm_attack does not modulate anything itself; %s carries the\n' "$mod" >&2
+        printf 'WHY\t07_gsm_attack does not modulate anything itself; %s carries the\n' "$mod" >&2
         printf '\txCCH, SCH and RACH channel coding, the multiframe and the GMSK\n' >&2
         printf '\tshaping pulse. Without it this module can schedule a burst but\n' >&2
         printf '\tcannot produce a sample to transmit.\n' >&2
@@ -2257,7 +2257,7 @@ gatk_cmd_transmit() {   # <arfcn> [--bsic N] [--mcc M] [--mnc N] [--lac H] [--ci
         blocks+=(--block "$framed")
     done
 
-    printf 'transmit\t11_gsm_attack\n'
+    printf 'transmit\t07_gsm_attack\n'
     printf 'objective\tput a forged BCCH carrier on the air that a handset can camp on\n'
     printf 'arfcn\t%s\n' "$arfcn"
     printf 'downlink_mhz\t%s\n' "$downlink"
@@ -2423,7 +2423,7 @@ This is not a prompt. It is the record that the decision was made.
 EOF
     printf '\n'
     printf 'ack\trequired\n'
-    printf 'module\t11_gsm_attack\n'
+    printf 'module\t07_gsm_attack\n'
     printf 'vectors\timsi-catcher a5-downgrade tmsi-deanon kc-recovery\n'
     printf 'to_schedule\t--vector-imsi-catcher | --vector-a5-downgrade | --vector-tmsi-deanon | --vector-kc-recovery\n'
     printf 'note\tscheduling a vector does not require this; keying a radio does\n'

@@ -968,7 +968,7 @@ bbdg_dev_read() {
 # ------------------------------------------------------------------- plan
 bbdg_plan() {
     printf 'status\thandoff\n'
-    printf 'module\t61_baseband_diag\n'
+    printf 'module\t56_baseband_diag\n'
     printf 'target\t%s\n' "${1:-<no device attached>}"
     cat <<'PLAN'
 requirement	USB cable to a Qualcomm-based handset in DIAG mode, or a modem exposing a DIAG tty
@@ -985,7 +985,7 @@ PLAN
 
 # ------------------------------------------------------------------- status
 bbdg_status_tsv() {
-    printf 'MODULE\t61_baseband_diag\n'
+    printf 'MODULE\t56_baseband_diag\n'
     printf 'TAG\tbbdg\n'
     printf 'KIND\tno-SDR (protocol level)\n'
     printf 'TARGET\tQualcomm DM/DIAG over USB or UART\n'

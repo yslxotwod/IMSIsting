@@ -531,7 +531,7 @@ def fcch_burst():
     run of them rotates the GMSK phase by pi/2 per symbol, and the resulting
     constant-envelope tone sits at a quarter of the symbol rate above the
     carrier: 270833.3333 / 4 = 67708.333 Hz, which is the figure the tree's
-    `11_gsm_attack --fcch-facts` reports. The burst is 148 bits rather than 142
+    `07_gsm_attack --fcch-facts` reports. The burst is 148 bits rather than 142
     because it keeps the normal burst's 3-bit tails, which are zero anyway.
     """
     return [0] * NORMAL_BURST_BITS
@@ -550,7 +550,7 @@ def sch_payload(bsic, fn):
     while the figure the fields are drawn in is octet bit 8 first, so the 25
     bits are packed into octets most-significant-bit first and then unpacked
     least-significant-bit first — exactly what osmo_pbit2ubit_ext(..., 1) does
-    inside libosmocoding. Verified against `11_gsm_attack --sch-payload 7 1 0`,
+    inside libosmocoding. Verified against `07_gsm_attack --sch-payload 7 1 0`,
     which prints the same 25 bits as `sch_bits_tx`.
     """
     if not 0 <= bsic <= 63:

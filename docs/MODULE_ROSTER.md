@@ -23,8 +23,9 @@ Two consequences are worth stating, because neither is visible from the code:
 
 - **Any id written down outside this tree is now stale.** That includes
   published notes, saved plans under `loot/`, and this project's own git history
-  before the rename. Nothing inside the tree depends on the numbering, but prose
-  that says `38_jamming_detect` needs to be read as `33_jamming_detect`.
+  before the rename. Nothing inside the tree depends on the numbering, but an
+  old id in prose has to be read through the mapping above — a note that says
+  `38_jamming_detect` is talking about the file now called `33_jamming_detect`.
 - **`docs/MODULE_ROSTER.md`, `imsisting.sh` and `native/src/module_index.c` must
   move together.** These are the three consumers of the id; a partial rename
   breaks the menu without breaking any single file's self-test.
