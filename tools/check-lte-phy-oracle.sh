@@ -109,7 +109,33 @@ sed -e 's/@SRSRAN_VERSION_MAJOR@/23/' \
 # definition. The stubs are what upstream's debug facility is replaced with.
 SYNC_SRC="sync/pss.c sync/gen_sss.c"
 
+# refsignal_dl.c is the cell-specific and MBSFN reference-signal generator of
+# TS 36.211 6.10.1/6.10.2. It needs the Gold sequence generator and the
+# vector helpers, and phy_common.c for srsran_cell_isvalid().
+CRS_SRC="ch_estimation/refsignal_dl.c common/sequence.c common/phy_common.c
+         utils/vector.c utils/vector_simd.c"
+
 MIMO_SRC="mimo/layermap.c mimo/precoding.c utils/vector.c utils/vector_simd.c"
+
+# The DL-SCH transmit chain of TS 36.212 5.3.2: code block segmentation,
+# CRC, turbo coding with its rate matcher, scrambling, modulation, layer
+# mapping, precoding, and srsRAN's own grant arithmetic in ra_dl.c (which is
+# what makes the RE count and the symbol lengths independent of the model
+# under test). tc_interl_lte.c is the QPP interleaver table; rm_turbo.c is
+# the TS 36.212 5.1.4.1 rate matcher. turbodecoder.c is in the list only
+# because srsran_sch_init()/sch_free() reference srsran_tdec_init/free; its
+# own sections are dropped by --gc-sections where nothing calls them.
+PDSCH_SRC="phch/pdsch.c phch/sch.c phch/ra_dl.c phch/prb_dl.c phch/sequences.c
+           fec/cbsegm.c fec/crc.c fec/softbuffer.c
+           fec/turbo/turbocoder.c fec/turbo/turbodecoder.c
+           fec/turbo/turbodecoder_gen.c fec/turbo/rm_turbo.c
+           fec/turbo/tc_interl_lte.c fec/turbo/tc_interl_umts.c
+           fec/convolutional/viterbi.c fec/convolutional/viterbi37_port.c
+           phch/ra.c phch/uci.c
+           scrambling/scrambling.c common/sequence.c common/phy_common.c
+           modem/mod.c modem/modem_table.c modem/lte_tables.c
+           utils/bit.c utils/vector.c utils/vector_simd.c
+           mimo/layermap.c mimo/precoding.c"
 
 PBCH_SRC="phch/pbch.c phch/prb_dl.c phch/sequences.c fec/crc.c
           fec/convolutional/convcoder.c fec/turbo/rm_conv.c
@@ -154,14 +180,19 @@ echo "== building oracles"
 build "$WORK/oracle"      sync_dump.c $SYNC_SRC
 build "$WORK/oracle/mimo" mimo_dump.c $MIMO_SRC
 build "$WORK/oracle/pbch" pbch_dump.c $PBCH_SRC
+build "$WORK/oracle/crs"  crs_dump.c  $CRS_SRC
+build "$WORK/oracle/pdsch" pdsch_dump.c $PDSCH_SRC
 
 # --- run ------------------------------------------------------------------
 echo "== running oracles"
 "$WORK/oracle/sync_dump"                 > "$WORK/oracle/srsran_sync.txt"
 "$WORK/oracle/mimo/mimo_dump"            > "$WORK/oracle/mimo/dump.txt"
 "$WORK/oracle/pbch/pbch_dump"            > "$WORK/oracle/pbch/dump.txt"
+"$WORK/oracle/crs/crs_dump"              > "$WORK/oracle/crs/dump.txt"
+"$WORK/oracle/pdsch/pdsch_dump"          > "$WORK/oracle/pdsch/dump.txt"
 for f in "$WORK/oracle/srsran_sync.txt" "$WORK/oracle/mimo/dump.txt" \
-         "$WORK/oracle/pbch/dump.txt"; do
+         "$WORK/oracle/pbch/dump.txt" "$WORK/oracle/crs/dump.txt" \
+         "$WORK/oracle/pdsch/dump.txt"; do
     [ -s "$f" ] || { echo "oracle produced nothing: $f" >&2; exit 2; }
 done
 
@@ -169,7 +200,7 @@ done
 # The comparators take the oracle directory, so they can be pointed at a
 # different build without editing them.
 rc=0
-for cmp in cmp_sync cmp_mimo cmp_pbch; do
+for cmp in cmp_sync cmp_mimo cmp_pbch cmp_crs cmp_pdsch; do
     echo "== $cmp"
     if ! IMSISTING_ORACLE="$WORK/oracle" python3 "$SRC/$cmp.py"; then
         rc=1

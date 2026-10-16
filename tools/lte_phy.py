@@ -510,19 +510,36 @@ def cinit_phich(n_s, cell_id):
 
 
 def cinit_pbch(cell_id, n_f=0, tdd=False, mbms=False):
-    """TS 36.211 6.6.1.
+    """TS 36.211 6.6.1: the seed is the cell identity, in FDD and in TDD.
 
-    PBCH is the odd one out. Its sequence is 1920 bits, seeded ONCE per
-    40 ms, and the four frames in that period take 480-bit slices of it --
-    they do not each restart the generator. FDD seeds on the cell id alone
-    (so every 40 ms period produces the same sequence); TDD folds in
-    n_f mod 4. An MBMS-dedicated cell uses 2^9 + cell id, which is why a
-    receiver that does not know the cell type must try both seeds.
+        c_init = N_ID^cell, in each radio frame fulfilling n_f mod 4 = 0
+
+    The frame number does not enter the seed; it enters the sequence as an
+    OFFSET. One 1920-bit generator run spans the whole 40 ms period and the
+    four frames take successive 480-bit slices of it (pbch_frame_bits), so
+    the seed is re-initialised once per period and not once per frame. Both
+    independent implementations this tree checks against do exactly that:
+    srsRAN's srsran_pbch_encode() calls
+    srsran_scrambling_b_offset(&q->seq, ..., frame_idx*nof_bits, nof_bits)
+    on a sequence seeded with the cell id, and OpenAirInterface's
+    pbch_scrambling() seeds x2 = Nid_cell and maps
+    pbch_e[frame_mod4*(pbch_E>>2)].
+
+    An earlier revision of this file folded n_f mod 4 into the seed for TDD
+    (c_init = 2**9 * (n_f mod 4) + N_ID^cell). That formula is TS 36.211
+    5.3.4's PUSCH hopping seed, not 6.6.1's, and it contradicts the sliding
+    window for every n_f mod 4 != 0: gold(2**9*k + N_ID) is not gold(N_ID)
+    advanced by 480*k. `n_f` and `tdd` are kept in the signature so callers
+    need not know that, and are deliberately unused.
+
+    MBMS-dedicated cells replace N_ID^cell by 2**9 + N_ID^cell -- OAI's
+    pbch_scrambling_fembms() cites 6.6.1 for that constant as well -- which
+    is why a receiver that does not know the cell type must try both seeds.
+    That one does belong in the seed: unlike the frame number it cannot be
+    recovered from a position in the sequence.
     """
     if mbms:
         return (1 << 9) + cell_id
-    if tdd:
-        return ((1 << 9) * (n_f % 4)) + cell_id
     return cell_id
 
 
@@ -778,13 +795,22 @@ def selftest():
     chk("cinit-pcfich-published", cinit_pcfich(0, 1), 1537)
     chk("cinit-phich-published", cinit_phich(0, 1), 1537)
     chk("cinit-pbch-fdd", cinit_pbch(1), 1)
-    # TDD folds in (n_f mod 4), so frames 0 and 4 of a 40 ms period share a
-    # seed and the three frames between them do not.
+    # The frame number is not a seed term in either duplex mode: the 40 ms
+    # period is one sequence sliced four ways (TS 36.211 6.6.1 seeds only at
+    # n_f mod 4 = 0). An earlier revision of this file folded n_f mod 4 in
+    # for TDD; that is 5.3.4's PUSCH hopping seed, and it makes frames 1..3
+    # of the period disagree with the sliding window srsRAN and OAI use.
     chk("cinit-pbch-tdd-nf0", cinit_pbch(1, n_f=0, tdd=True), 1)
     chk("cinit-pbch-tdd-nf4", cinit_pbch(1, n_f=4, tdd=True), 1)
-    chk("cinit-pbch-tdd-nf5", cinit_pbch(1, n_f=5, tdd=True), 513)
-    chk("cinit-pbch-tdd-nf7", cinit_pbch(1, n_f=7, tdd=True), 1537)
+    chk("cinit-pbch-tdd-nf5", cinit_pbch(1, n_f=5, tdd=True), 1)
+    chk("cinit-pbch-tdd-nf7", cinit_pbch(1, n_f=7, tdd=True), 1)
     chk("cinit-pbch-mbms", cinit_pbch(1, mbms=True), 513)
+    # The folded seed and the offset slice disagree -- the measurement that
+    # says the two readings are not the same rule stated twice.
+    _cid, _k = 42, 1
+    _win = gold_sequence(_cid, PBCH_SEQ_BITS)[480 * _k:480 * _k + 480]
+    chk("pbch-folded-seed-ne-offset",
+        gold_sequence((1 << 9) * _k + _cid, 480) == _win, False)
     chk("cinit-pucch", cinit_pucch(0, 1, 0x12345), (1 * 3 << 16) + 0x2345)
     # floor(n_s/2) is the term that is most often transcribed as n_s. Two
     # slots in the same subframe must therefore seed identically, and the
@@ -1312,6 +1338,19 @@ def selftest():
         chk('pbch-scramble-slice-%s' % (_k,),
             lte_scramble_offset(pbch_encode(_mib, _ports, _cid)[:480],
                                 cinit_pbch(_cid), 480), _blk[480:960])
+        # The same statement for all four frames and for both duplex modes:
+        # a frame's bits are the 480-bit window of the ONE period sequence,
+        # scrambled by the same generator advanced by the same offset. If the
+        # frame number were a seed term instead, frame 0 would be the only
+        # one that agreed.
+        _raw = pbch_encode(_mib, _ports, _cid)
+        for _tdd in (False, True):
+            _win = [lte_scramble_offset(_raw[_f * 480:(_f + 1) * 480],
+                                        cinit_pbch(_cid, n_f=_f, tdd=_tdd),
+                                        _f * 480) for _f in range(4)]
+            chk('pbch-period-slices-%s-tdd%d' % (_k, _tdd),
+                _win == [_blk[_f * 480:(_f + 1) * 480] for _f in range(4)],
+                True)
     for _k in sorted(_pbch_re_want):
         _n_rb, _cid = _k[0], _k[1]
         chk('pbch-re-count-%s' % (_k,),
@@ -1731,17 +1770,41 @@ def selftest():
                                1 if _c[5] else 0, 1 if _c[6] else 0, len(_re),
                                _sha(';'.join('%d,%d' % _x for _x in _re))))
     chk('pdsch-re-digest', _sha(';'.join(sorted(_pdsch_lines))),
-        '7b0fdeaaf8e6149ca759f6417c20eb9ddcd3bb1d2eb070ef60bd63f9ef327c38')
+        # Derived from srsRAN 4G release 23.11, NOT from this module:
+        # tools/lte-phy-oracle/pdsch_dump.c walks these same 504
+        # configurations and prints the subcarriers srsran_pdsch_cp() writes
+        # (its `REMAP` lines), and tools/lte-phy-oracle/cmp_pdsch.py rebuilds
+        # this digest from those lines and prints it as `sweep digest`.  The
+        # oracle is the only place this number may come from: copied out of
+        # this module's own output it would assert nothing at all.
+        'f53cc479f30ad42aeef80d870b613d63ab9086053d62d97dbdd5aa840127693b')
+    # All nine configurations are 6 PRB, CFI 1, FDD, normal CP, so every one
+    # of them is also a row of the oracle's RE sweep above.  The numbers are
+    # srsRAN's: the RE count its grant arithmetic reports
+    # (srsran_ra_dl_compute_nof_re(), the `GRANT ... nof_re` line that
+    # pdsch_dump.c prints -- case 0 is (6, 0, 1, 0, 1, 0, 0)), and equally
+    # the number of REs srsran_pdsch_cp() writes for it (the `REPORTS` line of
+    # the sweep entry).  Both routes agree with each other and with all three
+    # of 408/384/384 for subframe 0, so the count is not this module's
+    # opinion of itself.
+    #
+    # These replace 480/900/756, 456/864/720 and 432/816/672, which were
+    # wrong by one symbol of slot 0: they took the CFI as the number of
+    # control symbols, but for a 6 PRB cell the control region is CFI + 1
+    # symbols (TS 36.211 Table 6.7-1, and SRSRAN_NOF_CTRL_SYMBOLS() in
+    # srsRAN phy_common.h:162).  The extra symbol was worth 72 REs for 1 and
+    # 2 ports and 48 for 4 ports, the difference being the four CRS
+    # subcarriers of every PRB that a 4-port cell reserves there.
     _pdsch_counts = {
-        (6, 0, 1, 0, 1, 0, 0, 480): 480,
-        (6, 0, 1, 1, 1, 0, 0, 900): 900,
-        (6, 0, 1, 5, 1, 0, 0, 756): 756,
-        (6, 0, 2, 0, 1, 0, 0, 456): 456,
-        (6, 0, 2, 1, 1, 0, 0, 864): 864,
-        (6, 0, 2, 5, 1, 0, 0, 720): 720,
-        (6, 0, 4, 0, 1, 0, 0, 432): 432,
-        (6, 0, 4, 1, 1, 0, 0, 816): 816,
-        (6, 0, 4, 5, 1, 0, 0, 672): 672,
+        (6, 0, 1, 0, 1, 0, 0): 408,
+        (6, 0, 1, 1, 1, 0, 0): 828,
+        (6, 0, 1, 5, 1, 0, 0): 684,
+        (6, 0, 2, 0, 1, 0, 0): 384,
+        (6, 0, 2, 1, 1, 0, 0): 792,
+        (6, 0, 2, 5, 1, 0, 0): 648,
+        (6, 0, 4, 0, 1, 0, 0): 384,
+        (6, 0, 4, 1, 1, 0, 0): 768,
+        (6, 0, 4, 5, 1, 0, 0): 624,
     }
     for _k in sorted(_pdsch_counts):
         _prbs = range(0, _k[0], 3) if _k[6] else None
@@ -2090,6 +2153,19 @@ def slot_samples(n_fft, extended=False):
 # Cell-specific reference signals, TS 36.211 6.10.1
 # ---------------------------------------------------------------------------
 
+# N_RB^max,DL, TS 36.211 6.10.1.1: the reference-signal sequence is defined
+# over the MAXIMUM bandwidth -- m = 0..2*N_RB^max,DL - 1, i.e. 220 QPSK
+# values -- and a narrower cell transmits the CENTRE of it. 6.10.1.2 states
+# that window explicitly: a_{k,l} = r(m') with m' = m + N_RB^max,DL - N_RB^DL.
+# So a 6-PRB cell starts its references at m' = 104, not at 0. Reading the
+# sequence off from m = 0 is the natural transcription error and it is wrong
+# for every bandwidth a real cell uses (only N_RB = 110 would hide it): it
+# shifts the whole reference sequence, which no length check, no unit-power
+# check and no self-round-trip can see, and which leaves a receiver
+# estimating the channel against the wrong symbols.
+CRS_MAX_N_RB = 110
+
+
 def crs_cinit(n_s, l, cell_id, extended_cp=False):
     """The Gold seed for the CRS of slot n_s, symbol l, TS 36.211 6.10.1.1.
 
@@ -2099,6 +2175,10 @@ def crs_cinit(n_s, l, cell_id, extended_cp=False):
     is not cosmetic: it puts the two prefix lengths on different scrambling
     sequences, so a receiver that guesses the wrong prefix length does not
     merely mis-time its window, it correlates against the wrong reference.
+
+    The factor stays 7 for both prefix lengths -- the standard does not
+    switch it to N_symb -- so only N_CP and the symbol index l (0 or
+    N_symb^DL - 3, i.e. 4 or 3) separate the two cases.
     """
     n_cp = 0 if extended_cp else 1
     return (1024 * (7 * (n_s + 1) + l + 1) * (2 * cell_id + 1)
@@ -2111,15 +2191,18 @@ def crs_sequence(n_rb, n_s, l, cell_id, extended_cp=False):
     TS 36.211 6.10.1.1 defines r as a QPSK constellation taken two bits at a
     time from the Gold generator seeded above -- same 1/sqrt(2) scaling as
     the data modulation, so the reference and the data sit in the same
-    constellation.
+    constellation -- and 6.10.1.2 indexes it at m' = m + 110 - N_RB. Value
+    number m of a narrow cell is therefore r(m'), not r(m).
     """
-    c = gold_sequence(crs_cinit(n_s, l, cell_id, extended_cp), 2 * 2 * n_rb)
+    shift = CRS_MAX_N_RB - n_rb
+    c = gold_sequence(crs_cinit(n_s, l, cell_id, extended_cp),
+                      2 * (shift + 2 * n_rb))[2 * shift:]
     return [complex((1 - 2 * c[2 * m]) / math.sqrt(2.0),
                     (1 - 2 * c[2 * m + 1]) / math.sqrt(2.0))
             for m in range(2 * n_rb)]
 
 
-def crs_re_positions(n_rb, cell_id, port=0, l=0):
+def crs_re_positions(n_rb, cell_id, port=0, l=0, n_s=0):
     """The subcarriers a CRS symbol lands on, TS 36.211 6.10.1.2.
 
     Within a resource block the reference sits on subcarriers spaced six
@@ -2134,45 +2217,154 @@ def crs_re_positions(n_rb, cell_id, port=0, l=0):
     neighbouring cells transmit their references in different subcarriers
     and can be told apart -- six shifts is exactly the reuse factor the
     grid allows.
+
+    `l` is the OFDM symbol within the slot: 0 or N_symb^DL - 3 for ports 0
+    and 1, and 1 for ports 2 and 3, which exist in no other symbol. The
+    standard's v for ports 2 and 3 alternates with the SLOT -- 3*(n_s mod 2)
+    and 3 + 3*(n_s mod 2) -- so `n_s` is not optional information for them:
+    it is what decides between the two staggerings. Hard-coding either one
+    is right in half the slots, which is a bug that survives any test that
+    only looks at slot 0 with the cell identity and little else.
     """
     if port not in (0, 1, 2, 3):
         raise ValueError("LTE has CRS antenna ports 0..3, not %r" % (port,))
-    # v per TS 36.211 6.10.1.2: the stagger between the slot's two CRS
-    # symbols, and the fact that ports 2 and 3 only ever use symbol 1.
+    if port in (2, 3) and l != 1:
+        raise ValueError("CRS for port %d is transmitted in symbol 1 only, "
+                         "not symbol %d (TS 36.211 6.10.1.2)" % (port, l))
+    # v per TS 36.211 6.10.1.2, the table after the mapping: the stagger
+    # between the slot's two CRS symbols for ports 0/1, and the slot-parity
+    # stagger for ports 2/3.
     if port == 0:
         v = 0 if l == 0 else 3
     elif port == 1:
         v = 3 if l == 0 else 0
     elif port == 2:
-        v = 3
+        v = 3 * (n_s % 2)
     else:
-        v = 0
+        v = 3 + 3 * (n_s % 2)
+    # v_shift = N_ID^cell mod 6 applies to every port: the standard states
+    # it once, after the table of v, not per port.
     v_shift = cell_id % 6
-    return [(6 * m + (v + v_shift) % 6) % (n_rb * 12) for m in range(2 * n_rb)]
+    return [6 * m + (v + v_shift) % 6 for m in range(2 * n_rb)]
+
+
+def crs_symbol_map(n_rb, cell_id, n_s, extended_cp=False, ports=(0,)):
+    """(l, k, value) for every CRS RE of one slot, l being slot-local.
+
+    One place builds the mapping, the sequence and the ports together, so
+    the slot grid, the full subframe and the oracle dump cannot drift apart.
+    """
+    nsymb = SYMBOLS_PER_SLOT_EXTENDED if extended_cp else SYMBOLS_PER_SLOT_NORMAL
+    out = []
+    for p in ports:
+        # TS 36.211 6.10.1.2: l = 0 and N_symb^DL - 3 for p in {0,1},
+        # l = 1 for p in {2,3}.
+        symbols = (0, nsymb - 3) if p in (0, 1) else (1,)
+        for l in symbols:
+            seq = crs_sequence(n_rb, n_s, l, cell_id, extended_cp)
+            for idx, k in enumerate(crs_re_positions(n_rb, cell_id, p, l, n_s)):
+                out.append((l, k, seq[idx]))
+    return out
 
 
 def crs_grid(n_rb, cell_id, n_s, extended_cp=False, ports=(0,)):
     """Insert CRS for one slot into a fresh grid, returning (grid, count).
 
     The grid is a list of symbols, each a list of n_rb*12 complex values or
-    None where nothing is mapped. CRS goes on symbol 0 and 4 of every slot
-    for ports 0 and 1; ports 2 and 3 exist only on symbol 1 when four ports
-    are configured, which is why the port loop is not uniform.
+    None where nothing is mapped. Ports 0 and 1 sit on symbols 0 and
+    N_symb^DL - 3 of every slot (4 with a normal prefix, 3 with an extended
+    one); ports 2 and 3 exist only on symbol 1 when four ports are
+    configured, which is why the port loop is not uniform.
     """
-    n_sc = n_rb * 12
-    grid = [[None] * n_sc for _ in range(SYMBOLS_PER_SLOT_NORMAL)]
+    nsymb = SYMBOLS_PER_SLOT_EXTENDED if extended_cp else SYMBOLS_PER_SLOT_NORMAL
+    grid = [[None] * (n_rb * 12) for _ in range(nsymb)]
     inserted = 0
-    for p in ports:
-        if p in (0, 1):
-            symbols = (0, 4)
-        else:
-            symbols = (1,)
-        for l in symbols:
-            seq = crs_sequence(n_rb, n_s, l, cell_id, extended_cp)
-            for idx, k in enumerate(crs_re_positions(n_rb, cell_id, p, l)):
-                grid[l][k] = seq[idx]
-                inserted += 1
+    for l, k, v in crs_symbol_map(n_rb, cell_id, n_s, extended_cp, ports):
+        if grid[l][k] is not None:
+            raise ValueError("CRS RE (%d, %d) is used by two antenna ports"
+                             % (l, k))
+        grid[l][k] = v
+        inserted += 1
     return grid, inserted
+
+
+def crs_subframe(n_rb, cell_id, subframe=0, extended_cp=False, ports=(0,),
+                 mbsfn=False):
+    """Every CRS RE of one subframe: (l, k, value), l now subframe-local.
+
+    n_s is the slot number within the RADIO FRAME (0..19), so slot s of the
+    subframe is n_s = 2*subframe + s: the slot parity that ports 2 and 3
+    depend on must come from the subframe, not from the slot-in-subframe,
+    or half the subframes are staggered the wrong way.
+
+    In an MBSFN subframe 6.10.1.2 confines the cell-specific references to
+    the non-MBSFN region, i.e. the first two OFDM symbols.
+    """
+    nsymb = SYMBOLS_PER_SLOT_EXTENDED if extended_cp else SYMBOLS_PER_SLOT_NORMAL
+    out = []
+    for s in (0, 1):
+        n_s = 2 * subframe + s
+        for l, k, v in crs_symbol_map(n_rb, cell_id, n_s, extended_cp, ports):
+            if mbsfn and l > 1:
+                continue
+            out.append((s * nsymb + l, k, v))
+    return out
+
+
+def mbsfn_rs_cinit(n_s, l, mbsfn_area_id):
+    """TS 36.211 6.10.2.1:
+
+        c_init = 2**9 * (7*(n_s+1) + l + 1) * (2*N_ID^MBSFN + 1) + N_ID^MBSFN
+
+    The seed is built from the MBSFN AREA identity, not the cell identity,
+    and carries no N_CP term -- but it starts at 2**9 rather than 2**10,
+    which is what stops the two reference signals from ever sharing a
+    sequence however the identities are chosen.
+    """
+    return (512 * (7 * (n_s + 1) + l + 1) * (2 * mbsfn_area_id + 1)
+            + mbsfn_area_id)
+
+
+def mbsfn_rs_sequence(n_rb, n_s, l, mbsfn_area_id):
+    """6*N_RB values; TS 36.211 6.10.2.1 with the window of 6.10.2.2.
+
+    m' = m + 3*(N_RB^max,DL - N_RB^DL): the MBSFN sequence spans 6*N_RB^max
+    values and the three-fold spread (three subcarriers apart across the
+    whole band) is why the window offset is 3x the CRS one. The sequences
+    are the same length only at N_RB = 110, so a dump that agrees with the
+    CRS implementation here would agree at one bandwidth by accident.
+    """
+    shift = 3 * (CRS_MAX_N_RB - n_rb)
+    c = gold_sequence(mbsfn_rs_cinit(n_s, l, mbsfn_area_id),
+                      2 * (shift + 6 * n_rb))[2 * shift:]
+    return [complex((1 - 2 * c[2 * m]) / math.sqrt(2.0),
+                    (1 - 2 * c[2 * m + 1]) / math.sqrt(2.0))
+            for m in range(6 * n_rb)]
+
+
+def mbsfn_rs_re_positions(n_rb, l):
+    """TS 36.211 6.10.2.2 at delta f = 15 kHz: k = 2m, or 2m+1 in symbol 0.
+
+    One RE every two subcarriers, six per resource block, and symbol 0 of a
+    slot carries the odd ones -- the same stagger idea as the CRS, on a
+    two-subcarrier comb instead of a six-subcarrier one.
+    """
+    return [2 * m + (1 if l == 0 else 0) for m in range(6 * n_rb)]
+
+
+def mbsfn_rs_symbol_map(n_rb, n_s, mbsfn_area_id):
+    """(l, k, value) for the MBSFN reference signals of one slot.
+
+    TS 36.211 6.10.2.2: l = 2 when n_s is even, l = 0 and 4 when n_s is
+    odd. The reference is transmitted on port 4 and only with an extended
+    cyclic prefix (6.10.2), which is why nothing here takes a CP argument.
+    """
+    out = []
+    for l in ((2,) if n_s % 2 == 0 else (0, 4)):
+        seq = mbsfn_rs_sequence(n_rb, n_s, l, mbsfn_area_id)
+        for idx, k in enumerate(mbsfn_rs_re_positions(n_rb, l)):
+            out.append((l, k, seq[idx]))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2207,7 +2399,7 @@ def subcarrier_bins(n_fft, n_sc):
             + [i + 1 for i in range(half)])
 
 
-def ofdm_modulate(grid, n_fft, extended_cp=False):
+def ofdm_modulate(grid, n_fft, extended_cp=False, slots=1):
     """Turn resource-grid symbols into a baseband sample stream.
 
     Runs the whole TS 36.211 6.12 chain: subcarrier mapping, inverse
@@ -2216,14 +2408,20 @@ def ofdm_modulate(grid, n_fft, extended_cp=False):
     each symbol including its prefix, so a caller can see the timing
     structure rather than just a flat buffer.
 
+    `grid` holds `slots` slots' worth of symbols, and the prefix pattern
+    repeats per slot -- which matters because the FIRST symbol of every slot
+    carries the long prefix (160 samples at 2048), not just the first symbol
+    of the subframe. Getting that wrong shifts the second slot by 16 samples
+    and costs the receiver its timing.
+
     The samples are complex baseband I/Q. The DC bin stays at zero because
     no subcarrier maps to it.
     """
     bins = subcarrier_bins(n_fft, len(grid[0]))
-    cps = cp_lengths(n_fft, extended_cp)
+    cps = cp_lengths(n_fft, extended_cp) * slots
     if len(cps) < len(grid):
-        raise ValueError("%d symbols do not fit in a %d-symbol slot"
-                         % (len(grid), len(cps)))
+        raise ValueError("%d symbols do not fit in %d slot(s) of %d symbols"
+                         % (len(grid), slots, len(cps) // slots))
     out = []
     lengths = []
     for l, row in enumerate(grid):
@@ -2900,11 +3098,12 @@ def pbch_encode(mib_bits, nof_ports, cell_id, n_f=0, extended_cp=False,
 def pbch_scramble(bits, cell_id, n_f=0, tdd=False, mbms=False, offset=0):
     """TS 36.211 6.6.1: b(n) = (b'(n) + c(n)) mod 2, one sequence per 40 ms.
 
-    For FDD the seed is the cell id and nothing else, so the sequence is
-    identical in every period and the 40 ms period is a frame-timing
-    hypothesis at the receiver, not a decoding parameter. For TDD the seed
-    folds in n_f mod 4, which is what makes the four frames of a period
-    distinguishable at all.
+    The seed is the cell id -- for both duplex modes; the frame index is a
+    slice offset into the sequence, not a seed term (see cinit_pbch). The
+    sequence is therefore identical in every period for a given cell, and
+    the 40 ms period is a frame-timing hypothesis at the receiver rather
+    than a decoding parameter. What distinguishes the four frames is which
+    480-bit window of the one sequence they carry.
     """
     return lte_scramble_offset(bits, cinit_pbch(cell_id, n_f, tdd, mbms), offset)
 
@@ -3446,12 +3645,13 @@ def pdcch_crc_rnti(dci_bits, rnti):
     return [int(b) & 1 for b in dci_bits] + [a ^ b for a, b in zip(crc, mask)]
 
 
-def pdcch_encode(dci_bits, rnti, cell_id, subframe, ncce, fmt, rv_offset=0):
-    """TS 36.211 6.8: one DCI, from bits to QPSK symbols.
+def pdcch_coded_bits(dci_bits, rnti, cell_id, subframe, ncce, fmt):
+    """TS 36.211 6.8 / 36.212 5.3.3: one DCI, from bits to SCRAMBLED BITS.
 
     CRC and RNTI mask, tail-biting convolutional coding (rate 1/3, K=7),
-    rate matching to E = 72*2^L bits, scrambling with the sequence generated
-    for the whole control region, then QPSK.
+    rate matching to E = 72*2^L bits, then scrambling with the sequence
+    generated for the whole control region.  The modulation is one stage
+    further on, in pdcch_encode().
 
     The trap is the sequence offset: the Gold sequence is seeded once per
     subframe with c_init = floor(n_s/2)*2^9 + N_ID and the message starts at
@@ -3462,9 +3662,14 @@ def pdcch_encode(dci_bits, rnti, cell_id, subframe, ncce, fmt, rv_offset=0):
     e_len = pdcch_format_bits(fmt)
     coded = conv_encode(pdcch_crc_rnti(dci_bits, rnti), tail_biting=True)
     matched = conv_rate_match(coded, e_len)
-    scrambled = lte_scramble_offset(matched, cinit_pdcch(2 * subframe, cell_id),
-                                    offset=72 * ncce)
-    return qpsk_modulate(scrambled)
+    return lte_scramble_offset(matched, cinit_pdcch(2 * subframe, cell_id),
+                               offset=72 * ncce)
+
+
+def pdcch_encode(dci_bits, rnti, cell_id, subframe, ncce, fmt, rv_offset=0):
+    """TS 36.211 6.8: one DCI, from bits to QPSK symbols."""
+    return qpsk_modulate(pdcch_coded_bits(dci_bits, rnti, cell_id, subframe,
+                                          ncce, fmt))
 
 
 # ---------------------------------------------------------------------------
@@ -3729,6 +3934,37 @@ def pdsch_crs_positions(l, n_rb, cell_id, nof_ports, extended_cp=False):
 
 PDSCH_CENTRE_RE = 72       # the six centre PRBs: PSS/SSS and PBCH, 6.11 + 6.6
 
+# TDD uplink-downlink configuration 1 (the configuration this module's TDD
+# PSS/SSS placement already assumes, see pdsch_reserved_re) with special
+# subframe configuration 0: subframes 1 and 6 are special subframes and their
+# DwPTS lasts PDSCH_TDD_DWPT_SYMBOLS = 3 OFDM symbols of slot 0.  Slot 1 of a
+# special subframe is the guard period plus the UpPTS and carries no downlink
+# data at all.
+PDSCH_TDD_DWPT_SYMBOLS = 3
+
+
+def nof_ctrl_symbols(n_rb, cfi):
+    """TS 36.211 Table 6.7-1: how many OFDM symbols the control region uses.
+
+    The table has two columns. For N_RB > 10 the number of symbols is the CFI
+    itself; for N_RB <= 10 it is the CFI VALUE PLUS ONE (CFI 1, 2, 3 -> 2, 3,
+    4 symbols). 6 PRB is the only standard bandwidth below 10, so this is the
+    1.4 MHz case -- and it is a silent, fatal one: taking the CFI as a symbol
+    count starts the PDSCH one symbol early and maps data over the last
+    control symbol, which makes the subframe undecodable while every length,
+    power and digest check still passes.
+
+    srsRAN writes the same rule as
+    `SRSRAN_NOF_CTRL_SYMBOLS(cell, cfi) = cfi + (nof_prb < 10 ? 1 : 0)`
+    (phy_common.h:162). Its grant arithmetic is what exposed this: for 6 PRB,
+    CFI 1, subframe 0, one port, srsran_ra_dl_grant_nof_re() reports 408
+    usable REs, not 480.
+
+    `n_rb <= 10` is the spec's condition; no standard bandwidth lies between
+    7 and 14 PRB, so it and srsRAN's `< 10` agree everywhere it matters.
+    """
+    return cfi + (1 if n_rb <= 10 else 0)
+
 
 def pdsch_reserved_re(n_rb, cell_id, subframe, slot, nof_ports=1,
                       extended_cp=False, tdd=False):
@@ -3790,21 +4026,37 @@ def pdsch_reserved_re(n_rb, cell_id, subframe, slot, nof_ports=1,
 
 
 def pdsch_available_re(n_rb, cell_id, subframe, slot, nof_ports=1,
-                       extended_cp=False, tdd=False, prbs=None, l_start=0):
+                       extended_cp=False, tdd=False, prbs=None, cfi=0):
     """The REs of one slot that a PDSCH allocation may use, in mapping order.
 
     `prbs` restricts the allocation to a set of PRBs (all of them by
-    default), and `l_start` drops the leading control-region symbols of the
-    first slot. The result is ordered by symbol and then by subcarrier,
-    which is the order the mapper of TS 36.211 6.4 walks it in.
+    default), and `cfi` is the control format indicator: the first slot
+    loses its leading control-region symbols, whose count is
+    nof_ctrl_symbols() -- NOT the CFI itself for a 1.4 MHz cell, see there.
+    The result is ordered by symbol and then by subcarrier, which is the
+    order the mapper of TS 36.211 6.4 walks it in.
+
+    The parameter is the CFI and not a symbol index on purpose: a symbol
+    index lets a caller pass the CFI for a 6 PRB cell, which is the bug this
+    function used to have.
+
+    TDD subframes 1 and 6 are special subframes (uplink-downlink
+    configuration 1, special subframe configuration 0): slot 0 holds the three
+    symbols of the DwPTS and slot 1 holds no PDSCH at all.  Without that,
+    mapping runs straight through the guard period -- see
+    PDSCH_TDD_DWPT_SYMBOLS.
     """
     nsymb = 6 if extended_cp else 7
+    if tdd and subframe in (1, 6):
+        if slot == 1:
+            return []
+        nsymb = min(nsymb, PDSCH_TDD_DWPT_SYMBOLS)
     reserved = pdsch_reserved_re(n_rb, cell_id, subframe, slot, nof_ports,
                                  extended_cp, tdd)
     if prbs is None:
         prbs = range(n_rb)
     out = []
-    start = l_start if slot == 0 else 0
+    start = nof_ctrl_symbols(n_rb, cfi) if slot == 0 else 0
     for l in range(start, nsymb):
         for n in prbs:
             for k in range(n * 12, (n + 1) * 12):
@@ -3814,7 +4066,7 @@ def pdsch_available_re(n_rb, cell_id, subframe, slot, nof_ports=1,
 
 
 def pdsch_map(grid, symbols, n_rb, cell_id, subframe, slot, nof_ports=1,
-              extended_cp=False, tdd=False, prbs=None, l_start=0):
+              extended_cp=False, tdd=False, prbs=None, cfi=0):
     """TS 36.211 6.4: write `symbols` onto the available REs of one slot.
 
     Returns the number of REs written; it is an error to supply more symbols
@@ -3822,7 +4074,7 @@ def pdsch_map(grid, symbols, n_rb, cell_id, subframe, slot, nof_ports=1,
     smaller allocation rather than a mistake.
     """
     re = pdsch_available_re(n_rb, cell_id, subframe, slot, nof_ports,
-                            extended_cp, tdd, prbs, l_start)
+                            extended_cp, tdd, prbs, cfi)
     if len(symbols) > len(re):
         raise ValueError("%d symbols do not fit in %d available REs"
                          % (len(symbols), len(re)))
@@ -3835,11 +4087,389 @@ def pdsch_map(grid, symbols, n_rb, cell_id, subframe, slot, nof_ports=1,
 
 
 def pdsch_demap(grid, n_rb, cell_id, subframe, slot, nof_ports=1,
-                extended_cp=False, tdd=False, prbs=None, l_start=0):
+                extended_cp=False, tdd=False, prbs=None, cfi=0):
     """The inverse of pdsch_map: the mapped symbols, in the same order."""
     return [grid[l][k] for (l, k) in
             pdsch_available_re(n_rb, cell_id, subframe, slot, nof_ports,
-                               extended_cp, tdd, prbs, l_start)]
+                               extended_cp, tdd, prbs, cfi)]
+
+
+# ===========================================================================
+# The downlink transmit path: TS 36.212 5.1/5.3 composed into TS 36.211
+# 6.3/6.4/6.12.
+#
+# Every stage above is verified on its own, but a transmit path is the
+# composition, and a composition has failure modes no single stage test sees:
+# the wrong code block order, an E_r that does not follow the segmentation, a
+# scrambler seeded from the wrong slot, or PDSCH symbols written over the
+# control region or the references. All of those give a signal that is
+# well-formed and undecodable. So this section is asserted end to end too,
+# against srsRAN's srsran_dlsch_encode2() and srsran_pdsch_encode() driven
+# over the same transport block (tools/lte-phy-oracle/pdsch_dump.c).
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Modulation, TS 36.211 7.1.2 QPSK, 7.1.3 16QAM, 7.1.4 64QAM, 7.1.5 256QAM
+# ---------------------------------------------------------------------------
+
+MOD_ORDER = {"qpsk": 2, "16qam": 4, "64qam": 6, "256qam": 8}
+
+# TS 36.211 7.1.2/7.1.3/7.1.4/7.1.5: the tables print I and Q, and the whole
+# constellation is divided by these constants so that the mean symbol energy
+# is one -- sqrt(2), sqrt(10), sqrt(42), sqrt(170), i.e. twice the sum of the
+# squared odd levels on one axis. Leaving the division out keeps every symbol
+# on the right constellation POINT and multiplies the transmit power by
+# 2/10/42/170, which is a link-budget error, not a decoding one.
+MOD_NORM = {2: math.sqrt(2.0), 4: math.sqrt(10.0), 6: math.sqrt(42.0),
+            8: math.sqrt(170.0)}
+
+
+def _qam_level(bits, m):
+    """One axis' magnitude for a square QAM, TS 36.211 7.1.3/7.1.4/7.1.5.
+
+    The three tables are one Gray-coded nesting, read with m = Qm/2 bits
+    landing on each axis -- b0, b2, b4, ... on I and b1, b3, b5, ... on Q:
+
+        level = 2**(m-1) - (1 - 2*b[2]) * (2**(m-2) - (1 - 2*b[4]) * ... )
+
+    ending at the innermost term 1 = 2**0. Reading the tables as four
+    unrelated constellations is the natural error: a "magnitude from the
+    bits" reading (1 + 2b2 + 4b4 + 8b6) puts 256QAM's all-zeros point at
+    (1,1) where the standard's Table 7.1.5-1 says (5,5), and it still
+    produces the right number of points at the right average power, so only
+    a full table comparison can see it. Asserted against the transcribed
+    tables in selftest() (MOD_VECTORS) and against srsRAN's tables.
+    """
+    if m == 1:
+        return 1.0
+    return (float(1 << (m - 1))
+            - (1 - 2 * bits[2]) * _qam_level(bits[2:], m - 1))
+
+
+def modulate(bits, mod="qpsk"):
+    """TS 36.211 7.1.2-7.1.5: Qm bits at a time, MSB first, into x = I + jQ.
+
+    The bits are consumed in codeword order, which is how
+    srsran_mod_modulate_bytes() reads them out of a packed byte array (its
+    LUTs are indexed with the first bit of the group in the MSB).
+    """
+    qm = MOD_ORDER.get(mod, mod)
+    if qm not in MOD_NORM:
+        raise ValueError("unknown modulation %r" % (mod,))
+    if len(bits) % qm:
+        raise ValueError("%s takes a multiple of %d bits, got %d"
+                         % (mod, qm, len(bits)))
+    m = qm // 2
+    s = MOD_NORM[qm]
+    out = []
+    for i in range(0, len(bits), qm):
+        g = bits[i:i + qm]
+        out.append(complex((1 - 2 * g[0]) * _qam_level(g, m) / s,
+                           (1 - 2 * g[1]) * _qam_level(g[1:], m) / s))
+    return out
+
+
+def mod_table(mod="qpsk"):
+    """The whole constellation in index order: entry i is the symbol for the
+    Qm bits of i, first bit first. That is the order the standard prints its
+    tables in and the order srsRAN's symbol_table[] is in, so both can be
+    compared against it without a bit-order convention in the comparator."""
+    qm = MOD_ORDER.get(mod, mod)
+    return [modulate([(i >> (qm - 1 - j)) & 1 for j in range(qm)], qm)[0]
+            for i in range(1 << qm)]
+
+
+def demodulate(symbols, mod="qpsk"):
+    """Nearest-constellation-point inversion, for round-trip assertions.
+
+    Exact only for noiseless input by construction: the point is to catch a
+    mapper that is not invertible at all, not to be a receiver.
+    """
+    qm = MOD_ORDER.get(mod, mod)
+    table = mod_table(qm)
+    bits = []
+    for d in symbols:
+        best = min(range(len(table)), key=lambda i: abs(table[i] - d))
+        bits.extend((best >> (qm - 1 - j)) & 1 for j in range(qm))
+    return bits
+
+
+# TS 36.211 Table 7.1.3-1 (16QAM) complete, Table 7.1.4-1 (64QAM) and Table
+# 7.1.5-1 (256QAM) in part, transcribed from the standard as (bits, I, Q)
+# with the levels as PRINTED -- that is, before the 1/sqrt(10), 1/sqrt(42)
+# and 1/sqrt(170) of MOD_NORM. The 64QAM and 256QAM selections cover every
+# sign combination and every nesting level, including the innermost bit.
+# Eight 256QAM rows (b4 b5 b6 b7 = 111x) fell on a page break in the ETSI
+# text rendering and are covered by the srsRAN table comparison instead,
+# which prints all 256 points.
+MOD_VECTORS = {
+    # NB: every fragment ends with a space -- adjacent string literals in
+    # Python are concatenated, and without the separator "0000 1 1" "0001"
+    # becomes "0000 1 10001", which still parses as three tokens.
+    "16qam": (
+        "0000 1 1 " "0001 1 3 " "0010 3 1 " "0011 3 3 " "0100 1 -1 " "0101 1 -3 "
+        "0110 3 -1 " "0111 3 -3 " "1000 -1 1 " "1001 -1 3 " "1010 -3 1 "
+        "1011 -3 3 " "1100 -1 -1 " "1101 -1 -3 " "1110 -3 -1 " "1111 -3 -3 "
+    ),
+    "64qam": (
+        "000000 3 3 " "000001 3 1 " "000010 1 3 " "000011 1 1 " "000100 3 5 "
+        "000111 1 7 " "001000 5 3 " "001010 7 3 " "001100 5 5 " "001111 7 7 "
+        "010000 3 -3 " "011111 7 -7 " "100000 -3 3 " "100001 -3 1 "
+        "100010 -1 3 " "100011 -1 1 " "100100 -3 5 " "101111 -7 7 "
+        "110000 -3 -3 " "110111 -1 -7 " "111000 -5 -3 " "111100 -5 -5 "
+        "111110 -7 -5 " "111111 -7 -7 "
+    ),
+    "256qam": (
+        "00000000 5 5 " "00000001 5 7 " "00000010 7 5 " "00000011 7 7 "
+        "00000100 5 3 " "00000101 5 1 " "00001000 3 5 " "00001010 1 5 "
+        "00001100 3 3 " "00001111 1 1 " "00010000 5 11 " "00100000 11 5 "
+        "00110000 11 11 " "01000000 5 -5 " "01000001 5 -7 " "01000010 7 -5 "
+        "01000100 5 -3 " "01010000 5 -11 " "01100000 11 -5 " "10000000 -5 5 "
+        "10000001 -5 7 " "10000010 -7 5 " "10000100 -5 3 " "10010000 -5 11 "
+        "10100000 -11 5 " "11000000 -5 -5 " "11000001 -5 -7 " "11000010 -7 -5 "
+        "11000100 -5 -3 " "11010000 -5 -11 " "11100000 -11 -5 "
+        "11110000 -11 -11 " "11110001 -11 -9 " "11110010 -9 -11 "
+        "11110011 -9 -9 " "11110100 -11 -13 " "11110101 -11 -15 "
+        "11111010 -15 -11 " "11111101 -13 -15 "
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# CRC attachment and code block segmentation, TS 36.212 5.1.1 / 5.1.2
+# ---------------------------------------------------------------------------
+
+CBSEGM_MAX_K = 6144          # TS 36.212 5.1.2: Z = 6144
+CBSEGM_L_TB = 24             # TS 36.212 5.1.1: CRC24A on the transport block
+CBSEGM_L_CB = 24             # TS 36.212 5.1.2: CRC24B on each code block
+
+
+def lte_crc_attach(bits, kind="24a"):
+    """TS 36.212 5.1.1: the block followed by its CRC, MSB first."""
+    return list(bits) + crc_bits(bits, kind)
+
+
+def _cb_size_index_ge(k):
+    """Index of the smallest Table 5.1.3-3 size >= k, as srsRAN's
+    srsran_cbsegm_cbindex() computes it.
+
+    Not cb_size_index(), which demands an exact hit: the argument here is
+    ceil(Bp/C), which lands between two table entries for most transport
+    block sizes, and 5.1.2 rounds it UP to the next valid block size.
+    """
+    for i, size in enumerate(TC_CB_SIZES):
+        if size >= k:
+            return i
+    raise ValueError("%d exceeds the largest code block size" % k)
+
+
+def cb_segmentation(tbs, l_tb=CBSEGM_L_TB):
+    """TS 36.212 5.1.2 code block segmentation, srsran_cbsegm() transcribed.
+
+    `tbs` is the transport block size A, i.e. without the CRC: B = A + 24 is
+    the size of the block that is actually segmented, which is the first
+    place a caller can go wrong. For C > 1 the segmented size is
+    Bp = B + 24*C, because every code block carries a 24-bit CRC.
+
+    Returns a dict; the code blocks themselves come from
+    dlsch_code_blocks(), which needs the bits as well as the sizes.
+
+    F is the number of filler bits. srsRAN refuses F != 0 ("Error filler
+    bits are not supported. Use standard TBS") and so does this tree: for the
+    TBS values of TS 36.213 Table 7.1.7.1-1, F is always zero, and a filler
+    path that no independent implementation can be driven through would be
+    unverified code pretending to be a feature.
+    """
+    b = tbs + l_tb
+    if b <= CBSEGM_MAX_K:
+        c, bp = 1, b
+    else:
+        c = -(-b // (CBSEGM_MAX_K - 24))
+        bp = b + 24 * c
+    k1_idx = _cb_size_index_ge((bp - 1) // c + 1)
+    k1 = TC_CB_SIZES[k1_idx]
+    k2 = TC_CB_SIZES[k1_idx - 1] if k1_idx > 0 else 0
+    if c == 1:
+        k2, k2_idx, c2, c1 = 0, 0, 0, 1
+    else:
+        k2_idx = k1_idx - 1
+        c2 = (c * k1 - bp) // (k1 - k2)
+        c1 = c - c2
+    return {"tbs": tbs, "B": b, "Bp": bp, "C": c, "C1": c1, "C2": c2,
+            "K1": k1, "K1_idx": k1_idx, "K2": k2, "K2_idx": k2_idx,
+            "F": c1 * k1 + c2 * k2 - bp, "L_tb": l_tb, "L_cb": 24}
+
+
+def cb_sizes(seg):
+    """The per-code-block sizes of `seg`, in order.
+
+    TS 36.212 5.1.2 and srsran_cbsegm(): the C2 SHORT blocks (K2) come first,
+    then the C1 long ones (K1). Order matters downstream -- the rate matcher
+    gives the first blocks the smaller E_r -- so a segmentation that lists
+    the long blocks first produces a bit stream of exactly the right length
+    with the two halves swapped, which decodes to garbage.
+    """
+    return [seg["K2"]] * seg["C2"] + [seg["K1"]] * seg["C1"]
+
+
+def dlsch_code_blocks(tb_bits, seg=None):
+    """TS 36.212 5.1.1+5.1.2: the C code blocks of one transport block.
+
+    C == 1 is the special case, and it is not "the general rule with a
+    shorter payload". With a single code block there is nothing to segment,
+    so 5.1.2 attaches no CRC24B at all: the block IS the transport block
+    with its own CRC24A appended, B = K = A + 24. Only for C > 1 does each
+    block get a CRC24B, over the payload with the code block's own CRC
+    position excluded; the last such payload ends with the transport block's
+    CRC24A, which is what "the transport block CRC is used for the last code
+    block" means in 5.1.2.
+
+    Appending a CRC24B unconditionally gets C == 1 wrong in exactly the last
+    24 bits of the block. srsRAN's srsran_tcod_encode_lut() takes the
+    transport block's own checksum for the last block and only computes a
+    code block checksum from crc_cb -- which srsran_dlsch_encode2() passes as
+    NULL when C == 1. Treating the checksum type as a detail of the last
+    block's tail silently corrupts the whole parity stream, because the
+    rate matcher's circular buffer is built from those bits.
+    """
+    if seg is None:
+        seg = cb_segmentation(len(tb_bits))
+    if seg["F"]:
+        raise ValueError("TBS %d needs %d filler bits; srsRAN 23.11 refuses "
+                         "them too, so this path cannot be verified against it"
+                         % (seg["tbs"], seg["F"]))
+    stream = lte_crc_attach(tb_bits, "24a")
+    if len(stream) != seg["B"]:
+        raise ValueError("segmentation is for a %d bit block, got %d"
+                         % (seg["B"], len(stream)))
+    if seg["C"] == 1:
+        # K = B here; the block is the transport block with its CRC24A.
+        k = cb_sizes(seg)[0]
+        if k != len(stream):
+            raise ValueError("C == 1 but B = %d and K = %d disagree"
+                             % (len(stream), k))
+        return [list(stream)]
+    out = []
+    pos = 0
+    for k in cb_sizes(seg):
+        payload = stream[pos:pos + k - 24]
+        if len(payload) != k - 24:
+            raise ValueError("transport block is too short for %d code blocks"
+                             % (seg["C"],))
+        pos += k - 24
+        out.append(payload + crc_bits(payload, "24b"))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# DL-SCH coding chain, TS 36.212 5.3.2
+# ---------------------------------------------------------------------------
+
+
+def dlsch_encode(tb_bits, mod, e_len, rv=0, nl=1, n_cb=None):
+    """The DL-SCH chain: segmentation, turbo coding, rate matching.
+
+    Returns (e_bits, info). `e_len` is G of TS 36.212 5.3.2.2 -- the number
+    of rate-matched bits for the codeword -- and `nl` is the number of layers
+    multiplier the eNB applies: srsRAN passes Qm*Nl to encode_tb_off(), which
+    changes how G is divided between the code blocks, not how many bits come
+    out. The split follows srsRAN exactly:
+
+        Gp = G / (Qm*Nl); gamma = Gp mod C
+        E_r = Qm*Nl * floor(Gp/C)  for r <= C - gamma - 1
+        E_r = Qm*Nl * ceil(Gp/C)   otherwise
+
+    so the FIRST gamma-padded blocks are the short ones. That is the
+    opposite of the natural "remainder to the last block" reading and it is
+    invisible in the total: sum(E_r) = G either way, and both produce a
+    codeword of exactly G bits. It is wrong for every C > 1.
+    """
+    qm = MOD_ORDER.get(mod, mod)
+    seg = cb_segmentation(len(tb_bits))
+    cbs = dlsch_code_blocks(tb_bits, seg)
+    c = seg["C"]
+    gp = e_len // (qm * nl)
+    gamma = gp % c if c else 0
+    out = []
+    sizes = []
+    for i, cb in enumerate(cbs):
+        n_e = qm * nl * ((gp // c) if i <= c - gamma - 1
+                         else -(-gp // c))
+        d0, d1, d2 = turbo_encode_split(cb)
+        out.extend(lte_rate_match(d0, d1, d2, n_e, rv, n_cb))
+        sizes.append(n_e)
+    if len(out) != e_len:
+        raise ValueError("G = %d is not a multiple of Qm*Nl = %d for C = %d; "
+                         "got %d rate-matched bits"
+                         % (e_len, qm * nl, c, len(out)))
+    return out, {"segmentation": seg, "cbs": cbs, "e_per_cb": sizes,
+                 "K": cb_sizes(seg)}
+
+
+def pdsch_rho_a(p_a_db=0.0, nof_ports=1):
+    """TS 36.213 5.2: the PDSCH/CRS power ratio srsRAN applies to PDSCH.
+
+    srsran_pdsch_encode() takes `rho_a` straight out of
+    apply_power_allocation() -- rho_a = 10**(P_A/20) times sqrt(2) as soon as
+    the cell has more than one antenna port -- and multiplies the precoder
+    output by it. For one port at P_A = 0 dB that is exactly 1, so a
+    single-port comparison sees no scaling at all; for two and four ports it
+    is sqrt(2), and a comparison that does not model it reports a failure
+    that is entirely the oracle's power allocation.
+    """
+    rho = 10.0 ** (p_a_db / 20.0)
+    return rho if nof_ports == 1 else rho * math.sqrt(2.0)
+
+
+def pdsch_encode(tb_bits, mod, rnti, cell_id, subframe, nof_re,
+                 nof_ports=1, nof_layers=1, rv=0, p_a_db=0.0, n_cb=None,
+                 q=0):
+    """TS 36.212 5.3.2 + TS 36.211 6.3: one transport block to complex symbols.
+
+    Takes a transport block (the payload bits, A of TS 36.212 5.1.1 -- NOT
+    with a CRC attached) and runs the whole chain: CRC24A -> segmentation ->
+    turbo + rate matching -> scrambling -> modulation -> layer mapping ->
+    precoding. Returns a dict with every intermediate value, so an oracle can
+    compare each stage rather than only the end.
+
+    `nof_re` is the number of resource elements the grant covers, i.e. what
+    is left of the allocation after the control region and the references
+    have been taken out; G = nof_re * Qm. The caller gets it from
+    pdsch_available_re(), srsRAN from srsran_ra_dl_grant_nof_re().
+
+    Supported port/layer pairs are the ones that need no codebook selection:
+    one port on one layer, and transmit diversity with nof_layers ==
+    nof_ports in {2, 4} (TS 36.211 6.3.4.3). Everything else is a PMI
+    codebook choice that this tree does not implement, and it raises rather
+    than guessing.
+    """
+    qm = MOD_ORDER.get(mod, mod)
+    e_len = nof_re * qm
+    # srsran_dlsch_encode2() works with Nl = 2 whenever the layer count
+    # differs from the codeword count, i.e. for transmit diversity.
+    nl = 1 if nof_layers == 1 else 2
+    e_bits, info = dlsch_encode(tb_bits, qm, e_len, rv=rv, nl=nl, n_cb=n_cb)
+    # TS 36.211 6.3.1 with q = the codeword index, re-seeded once per
+    # subframe: n_s = 2*subframe is the slot number of the first slot.
+    c_init = cinit_pdsch(rnti, q, 2 * subframe, cell_id)
+    scrambled = lte_scramble(e_bits, c_init)
+    symbols = modulate(scrambled, qm)
+    if len(symbols) != nof_re:
+        raise ValueError("%d REs need %d symbols, got %d"
+                         % (nof_re, nof_re, len(symbols)))
+    rho = pdsch_rho_a(p_a_db, nof_ports)
+    if nof_ports == 1 and nof_layers == 1:
+        ports = precode_layers(symbols, 1, 1, scaling=rho)
+    elif nof_layers == nof_ports and nof_ports in (2, 4):
+        ports = precode_layers(symbols, nof_ports, nof_layers, scaling=rho)
+    else:
+        raise ValueError("%d ports with %d layers needs a PMI codebook, "
+                         "which this tree does not implement"
+                         % (nof_ports, nof_layers))
+    return {"e": e_bits, "scrambled": scrambled, "symbols": symbols,
+            "ports": ports, "c_init": c_init, "rho_a": rho, "Qm": qm,
+            "Nl": nl, "info": info}
 
 
 # === LTE PHY ADDITIONS CONTINUE HERE ===
@@ -3933,11 +4563,22 @@ def cmd_dci_size(args):
 
 
 def cmd_pdcch(args):
-    """DCI -> CRC+RNTI -> conv -> rate match -> scramble -> QPSK."""
+    """DCI -> CRC+RNTI -> conv -> rate match -> scramble -> QPSK.
+
+    What is printed is the SCRAMBLED CODED BITS, one hex digit per bit, and
+    not the QPSK symbols.  A bit rendered as "0" or "1" is a hex digit, so
+    the digit count is the coded length -- which is exactly what the caller
+    reads it for (modules/10_lte_air.sh counts the digits as pdcch_bits).
+
+    Printing the symbols here, as this command did, produced 18 zeros for
+    every input: bits_to_hex() renders an element as "1" only if it equals 1
+    or "1", and a QPSK symbol is a complex number, so every symbol became
+    "0" and the channel looked empty rather than mis-rendered.
+    """
     dci = hex_to_bits(args.hex, args.bits)
-    coded = pdcch_encode(dci, args.rnti, args.cell, args.subframe,
-                         args.ncce, args.format)
-    print(bits_to_hex(coded, len(coded)))
+    bits = pdcch_coded_bits(dci, args.rnti, args.cell, args.subframe,
+                            args.ncce, args.format)
+    print("".join("1" if b else "0" for b in bits))
     return 0
 
 
@@ -3976,7 +4617,7 @@ def cmd_pdsch_re(args):
     prbs = None if args.prbs is None else [int(x) for x in args.prbs.split(",")]
     re = pdsch_available_re(args.n_rb, args.cell, args.subframe, args.slot,
                             args.ports, args.extended_cp, args.tdd, prbs,
-                            args.l_start)
+                            args.cfi)
     for l, k in re:
         print("%d\t%d" % (l, k))
     return 0
@@ -4160,7 +4801,10 @@ def main(argv):
     dr.add_argument("--tdd", action="store_true")
     dr.add_argument("--prbs", default=None,
                     help="comma-separated allocated PRBs, empty for all")
-    dr.add_argument("--l-start", type=int, default=0)
+    # The CFI, not a symbol count: for a 6 PRB cell the control region is
+    # CFI+1 symbols (TS 36.211 Table 6.7-1). --l-start is kept as an alias
+    # because it named the same quantity for every other bandwidth.
+    dr.add_argument("--cfi", "--l-start", dest="cfi", type=int, default=0)
     dr.set_defaults(func=cmd_pdsch_re)
 
 
