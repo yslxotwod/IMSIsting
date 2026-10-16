@@ -387,10 +387,45 @@ turbofec's forward rate matcher hardcodes `N_cb = K_w`, so the sweep covers only
 the untruncated circular buffer. The soft-buffer truncation case rests on the
 `k_0` table asserted in the selftest, not on an independent implementation.
 
-What is still missing above this layer is everything between the coded bits and
-the antenna: modulation, layer mapping and OFDM. Until those exist `10_lte_air`
-still has no transmit path, and criteria 2 and 3 of the four-point bar remain
-unmet for Phase 2.
+Above that layer, the downlink physical layer is now partly built, in
+`tools/lte_phy.py`:
+
+- **Modulation.** QPSK (TS 36.211 7.1.2), including the bit-to-symbol order
+  (first bit to the real part) and the `1/sqrt(2)` scaling, with a demodulator
+  and round-trip assertions.
+- **The OFDM transform.** A pure-Python mixed-radix FFT — radix-2 alone cannot
+  do 1536, which is 15 MHz — asserted against `numpy.fft` at fourteen lengths
+  up to 2048 and round-tripped to 1e-15.
+- **OFDM numerology** for all six bandwidths: `n_fft`, sample rate, cyclic
+  prefix lengths and slot length, each checked so that a slot is 0.5 ms and the
+  subcarrier spacing is 15 kHz at every bandwidth.
+- **Cell-specific reference signals** (TS 36.211 6.10.1): the pseudo-random
+  sequence, its `c_init`, and the resource-element positions including the
+  per-port, per-symbol frequency shift.
+- **OFDM modulation** from a resource grid to baseband samples, with the cyclic
+  prefix.
+
+Two traps in that layer are worth stating because neither is catchable from
+inside the code, and I got both wrong first:
+
+- **The DC subcarrier is null.** TS 36.211 6.12 excludes `k = 0` from the
+  baseband sum, and srsRAN's `ofdm.c` leaves FFT bin 0 unwritten by default.
+  Mapping `N_sc` subcarriers onto bins `-N/2 .. N/2-1` instead round-trips
+  perfectly through this module's own IFFT/FFT pair — no self-test can tell the
+  two apart. It took an external reference (a standalone build of srsRAN's
+  `ofdm.c`) to show the disagreement.
+- **The time-domain output is complex, not real.** Taking the real part after
+  the IFFT folds the spectrum and mirrors every subcarrier onto its conjugate
+  bin; a tone placed at one subcarrier came back at another. This one a
+  self-test does catch, which is why the modulator keeps I and Q.
+
+What is still missing above this layer is **layer mapping and precoding**,
+**PSS/SSS**, the **PBCH chain** (the 24-bit MIB with its CRC and antenna mask,
+tail-biting convolutional coding, rate matching to 1920 bits per frame,
+scrambling, and the reserved-element exclusion in its RE mapping), and the
+**PDCCH/PCFICH/PHICH and PDSCH** resource mapping that carries anything a UE
+would act on. Until those exist `10_lte_air` still has no transmit path, and
+criteria 2 and 3 of the four-point bar remain unmet for Phase 2.
 
 The one rule that governs every LTE bit, and the one easiest to get wrong:
 X.691 puts a SEQUENCE's OPTIONAL/DEFAULT component bitmap at the *front* of the
