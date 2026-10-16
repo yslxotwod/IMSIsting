@@ -407,9 +407,16 @@ button.module-card {
     border: 1px solid @line;
     border-radius: 10px;
     padding: 9px 10px 10px 10px;
+
+    /* The tile rests a step back and comes fully forward under the pointer.
+       This is the move wifisting makes with its own tiles (0.82 to 1.0), and
+       it is what makes a hovered card read as picked out of the grid rather
+       than merely tinted: everything else fades back while one card steps up. */
+    opacity: 0.88;
     transition: background-image 140ms ease-out,
                 border-color     140ms ease-out,
-                box-shadow       140ms ease-out;
+                box-shadow       140ms ease-out,
+                opacity          140ms ease-out;
 }
 
 /* Hover: the tile floats toward the pointer inside an accent glow. GTK CSS
@@ -422,10 +429,13 @@ button.module-card:hover {
 }
 
 button.module-card:hover .module-card-inner {
-    background-image: linear-gradient(to bottom right, #1b2a3d, #142033);
+    /* Tinted toward the accent, not just lighter: at rest the card is neutral
+       slate, under the pointer it is the accent's own colour held dark. */
+    background-image: linear-gradient(to bottom right, #1a4054, #123044);
     border-color: @accent;
     box-shadow: 0 0 0 1px rgba(79, 179, 217, 0.45),
                 0 14px 28px rgba(0, 0, 0, 0.55);
+    opacity: 1;
 }
 
 /* Pressed settles back below the hover growth so a click acknowledges. */
@@ -2406,3 +2416,42 @@ dropdown > button {
 /* An icon-only pill in the header strip. Without the width it hugs the glyph
    and reads as a smudge next to the wordy Target and Events pills. */
 .header-pill.icon-only { min-width: 34px; padding-left: 8px; padding-right: 8px; }
+
+/* ---------------------------------------------------------------------------
+   The tiles are rectangles. Two general button rules reach them and both have
+   to be answered here, after the rules they answer:
+
+   - `button:hover` fills the whole button with its own gradient. The tile is a
+     button whose surface is an inner box, so that gradient painted a slab
+     behind the card - and with the pill radius on the general rule it painted
+     a stadium that arched out above and below the tile.
+   - the pill radius also shaped the focus ring, which is drawn around the
+     button: the button is the card plus its hover growth, so the ring floated
+     clear of the surface it was supposed to outline.
+
+   So the tile buttons paint nothing in any state, keep the card's own radius,
+   and the focus ring moves onto the inner surface where it belongs. */
+button.module-card,
+button.mission-step,
+button.module-card:hover,
+button.mission-step:hover,
+button.module-card:active,
+button.mission-step:active,
+button.module-card:checked,
+button.mission-step:checked {
+    background-image: none;
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    border-radius: 10px;
+}
+
+button.module-card:focus-visible,
+button.mission-step:focus-visible {
+    outline: none;
+}
+
+button.module-card:focus-visible .module-card-inner,
+button.mission-step:focus-visible .mission-step-inner {
+    box-shadow: 0 0 0 2px @accent;
+}
