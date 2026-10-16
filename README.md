@@ -404,37 +404,6 @@ and yet the APDU codec underneath it is real.
 | LI interception | `42_li_probe` | `partial` | Fingerprints lawful-intercept interfaces and reports activity indicators. It does not receive or decode intercepted content. `--activate`, `--intercept` and `--provision-target` are Phase 12. |
 | Carrier API abuse | `44_carrier_api` | `partial` | The thinnest offensive module in the tree: it enumerates an API surface and tests rate limits. No bulk subscriber enumeration and no account-takeover path. Phase 12. |
 
-### Deliberately held
-
-Two attacks are in the docket and are **not** being built, each for a reason that is
-about the attack rather than about difficulty:
-
-- **RAN jamming** → `33_jamming_detect`. A transmitter whose only function is to raise
-  the noise floor is illegal to operate in most jurisdictions regardless of intent, and
-  it takes down emergency calls along with the target. The module builds the legal and
-  useful side instead: noise-floor shift, decode-failure rate, RSRP/RSRQ collapse with no
-  handover, and the profile that distinguishes jamming from congestion. `33_jamming_detect
-  --transmit` is Phase 9 and is still pending an explicit decision.
-- **SIM swapping** → `31_sim_defense`. It is a carrier-rep social-engineering play, not a
-  protocol attack, and a toolkit shipping a pretexting script for it is shipping an
-  identity-theft guide aimed at a real person's phone number. The module detects a port
-  already in progress and documents carrier-side controls. If it cannot detect or defend
-  an action, it does not document how to perform it.
-
-A third deliberate boundary cuts across everything above. **Transmission is gated, and the
-gate is a device check, not a comment.** `07_gsm_attack --transmit` with no radio exits 3
-and names what it looked for (`hackrf_info` is installed here and reports "No HackRF boards
-found."); `05_field_kit --guard-check` classifies each transmit verb as `honest-fail`,
-`handoff` or `ready`. There are two transmit architectures and the difference is real:
-`07_gsm_attack` carries **its own modulator** — `tools/gsm_mod.py` does the channel coding
-and GMSK shaping, verified by decoding its own waveform back with gr-gsm's receiver, and
-then calls `hackrf_transfer` directly. `54_baseband_exploit` and `55_nr_inject` do the
-opposite: they compute the frame and hand the hex to a command **you** supply
-(`BEXP_TX_CMD`, `NRJ_TX_CMD`) on stdin, behind an armed guard, and with no command set they
-exit 3 rather than pretending to radiate. An earlier revision of this README said those two
-were the only real transmit verbs; that was wrong, and the distinction is worth keeping
-visible rather than flattening into one column.
-
 ### Roll-up
 
 | | built | built · TX | partial | planned | held | missing | total |
