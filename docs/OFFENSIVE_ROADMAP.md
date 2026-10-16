@@ -631,33 +631,60 @@ and it took an outside reference to get there. What the oracle proves:
   reported 146 mismatches across all 25 cases, diverging *first* at rate matching
   (`case 0 rate-matched bits differ at 95 of 816`) with the scrambled-bit count
   identical, so the scrambler was faithfully carrying an upstream disagreement.
-  Three real bugs came out of it, in this order of difficulty:
+  Six defects came out of it — four in the model, two in the oracle:
 
+  - **PDSCH was mapped across the guard period.** `pdsch_available_re()` looped
+    `for l in range(start, nsymb)` with `nsymb = 7` for *every* subframe, so in
+    subframes 1 and 6 it filled all of slot 0 **and all of slot 1** — straight
+    through the guard period and the UpPTS. The module already reserved the
+    centre PSS subcarriers on symbol 2 for those subframes, so the DwPTS being
+    three symbols had been noticed and never enforced. For 25 PRB, TDD
+    configuration 1, subframe 1, our model claimed 3678 REs (one port) where
+    srsRAN writes 528. Fixed with `PDSCH_TDD_DWPT_SYMBOLS = 3` and an early
+    `return []` for slot 1; the 504-configuration sweep disagreed in **21**
+    configurations before and **0** after, all 21 being the TDD special-subframe
+    rows.
   - `dlsch_code_blocks` appended a CRC24B to every code block. srsRAN passes
     `crc_cb = NULL` when `C == 1` (`phch/sch.c`), and `turbocoder.c` then appends
     the transport block's own CRC24A instead. The second CRC put the rate matcher
-    64 bits out of step for every single-block transport block. This was most of
-    the 146.
+    64 bits out of step for every single-block transport block.
   - `pdsch_available_re` treated CFI as the number of control symbols. For a cell
     of 10 PRB or fewer the control region is **CFI + 1** symbols (TS 36.211
-    Table 6.7-1, `SRSRAN_NOF_CTRL_SYMBOLS()` in `phy_common.h`), so every count
-    was short by one symbol of slot 0 -- and the *pinned* counts in this module's
-    own selftest encoded the same error, which is why the selftest had been
-    agreeing with a wrong tree.
+    Table 6.7-1, `SRSRAN_NOF_CTRL_SYMBOLS()` in `phy_common.h`).
   - `crs_sequence` (see below) and the PUCCH shift.
 
-  One defect was in the **oracle**, not the model, and it is the reason a red
-  result was not accepted at face value: `pdsch_dump.c` printed `nsym` symbols
-  from `q->x[l]`, but `srsran_layermap_diversity()` writes only
+  And two that made the *check* lie rather than the model:
+
+  - **The pinned expectations asserted nothing.** `_pdsch_counts` mapped each key
+    to itself (`(6,0,1,0,1,0,0,480): 480`), and `pdsch-re-digest` was a hash of
+    this module's own output. Both are now srsRAN's, taken from the oracle's
+    `REMAP` masks over the same 504 configurations, with the provenance written
+    next to the constant. This is the failure mode the whole oracle exists for,
+    and it had reproduced itself *inside* the selftest that was supposed to
+    catch it: the nine counts encoded the CFI bug, which is why the selftest had
+    been passing on a wrong tree.
+  - **`cmp_pdsch.py` compared four ports as if they were one.** RE values were
+    keyed by `(l, k)`, so port 1 overwrote port 0 and the comparison ran that
+    against port 0's symbols; all six multi-port cases were affected. Now keyed
+    by `(port, l, k)`.
+  - **srsRAN was being asked for something it forbids.** `srsran_rm_turbo_tx()`
+    fills its circular buffer only when `rv_idx == 0` (`fec/turbo/rm_turbo.c`),
+    so driving `rv > 0` without a preceding `rv = 0` encode returns zeros that
+    look like a rate-matching disagreement. Our rate matcher was never wrong
+    here — the k0 formulas are identical — the driver was misusing the oracle.
+    It now primes with an `rv = 0` encode first, as srsRAN's own test does.
+
+  One further defect was in the oracle's *output*: `pdsch_dump.c` printed `nsym`
+  symbols from `q->x[l]`, but `srsran_layermap_diversity()` writes only
   `nof_re/nof_layers` per layer (876 of 1752), so the tail of every `X` line was
-  uninitialised heap -- plausible-looking output that was half noise. A length
+  uninitialised heap — plausible-looking output that was half noise. A length
   guard added to the comparator is what caught it.
 
   What made this hard is worth stating plainly: **the rate-matched bit stream
   agreed everywhere except 4 bits across 4 cases, all `rv > 0`, while the value
-  errors were `1.414e+00` and `2.000e+00`** -- far too large to be rounding, yet
+  errors were `1.414e+00` and `2.000e+00`** — far too large to be rounding, yet
   attached to the cases whose bits agreed exactly. Those two facts look
-  contradictory until you separate the RE-count error from the rate-matcher
+  contradictory until the RE-count error is separated from the rate-matcher
   error, which is only possible once the RE counts are right. A tolerance would
   have hidden both.
 - **srsRAN's grant arithmetic disagrees with srsRAN's own RE mapper** in 7 of the

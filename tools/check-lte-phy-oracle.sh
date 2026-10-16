@@ -14,12 +14,25 @@
 # evidence rather than a restatement.
 #
 # What it covers: PSS and SSS (TS 36.211 6.11), layer mapping and precoding
-# (TS 36.211 6.3.3), and the PBCH chain (TS 36.212 5.3.1 + TS 36.211 6.6).
+# (TS 36.211 6.3.3), the PBCH chain (TS 36.212 5.3.1 + TS 36.211 6.6), the
+# cell-specific reference signals (TS 36.211 6.10.1), and the whole downlink
+# shared channel end to end -- CRC, code block segmentation, turbo coding, rate
+# matching, scrambling, modulation, layer mapping, precoding, and the PDSCH
+# resource-element map (TS 36.212 5.3.2 + TS 36.211 6.4).
 #
 # What it does NOT cover, stated rather than papered over: PDCCH/PCFICH/PHICH
-# and the PDSCH resource mapping are not cross-checked here, because the
-# drivers for them would have to drive srsRAN's DCI and REG machinery, which
-# is a much larger surface. Those stages rest on their own selftest vectors.
+# are not cross-checked here, because the drivers for them would have to drive
+# srsRAN's DCI and REG machinery, which is a much larger surface. Those stages
+# rest on their own selftest vectors. The TDD special-subframe model is also
+# checked at one configuration only (uplink-downlink configuration 1, special
+# subframe configuration 0), so how the control-region rule interacts with the
+# DwPTS clamp at 1.4 MHz is unverified.
+#
+# Run this ONE AT A TIME in a given checkout. The work directory defaults to
+# /tmp/imsisting-lte-phy-oracle, and a second concurrent run rewrites the same
+# dump.txt files; a comparator reading one mid-write reports a torn read that
+# looks exactly like a real mismatch (observed as `cases: 0 ... MISMATCHES: 1`).
+# Pass a private directory as $1 to run alongside somebody else.
 #
 # == The tolerance rule, which this script exists partly to record ==
 #
