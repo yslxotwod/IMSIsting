@@ -1,0 +1,25 @@
+# Real captured LTE RRC PDU -- SystemInformationBlockType1 (BCCH-DL-SCH-Message)
+# 18 bytes / 144 bits, carried on SI-RNTI (RNTI 0xffff in the srsRAN MAC context).
+#
+# SOURCE   : https://github.com/SysSec-KAIST/LTESniffer  (licence: AGPL-3.0)
+# FILE     : pcap_file_example/ltesniffer_dl_mode.pcap
+# COMMIT   : a694803082017ac2b349e6b113940e8b9ba2fe5b
+# URL      : https://raw.githubusercontent.com/SysSec-KAIST/LTESniffer/a694803082017ac2b349e6b113940e8b9ba2fe5b/pcap_file_example/ltesniffer_dl_mode.pcap
+# PCAPSHA  : be4972206afe95e8cc2a76f1312a648a7011795d5112782b4986317986fc0340
+# FRAME    : 1 (identical PDU in 1432 of the 2433 frames; 1790 frames are SI-RNTI)
+# CARRIER  : pcap link type 147 (DLT_USER0) holding srsRAN "mac-lte-framed"
+#            context (radioType, direction, rntiType, tag/value pairs; tag 0x01
+#            introduces the payload -- srsRAN lib/src/common/pcap.c, which is
+#            the layout Wireshark's packet-mac-lte.c expects for DLT_USER0).
+# CAPTURED : over the air by LTESniffer (SDR sniffer) from an srsRAN srseNB
+#            testbed, 2023-04-25 13:17 CEST. The LTESniffer README states:
+#            "Some examples of pcap files that contain decoded traffic between
+#            srseNB and a test smartphone". Real radio, real hardware, but a
+#            LAB eNB, not a commercial network -- MCC 901 is the ITU test MCC.
+# CELL     : trackingAreaCode 0007 (7), cellIdentity 0019b01 (105217),
+#            freqBandIndicator 7, systemInfoValueTag 0, scheduling rf16
+#            sibType3 (Wireshark dissection of the same pcap).
+# LICENCE  : upstream pcap NOT vendored (AGPL-3.0, and this repository declares
+#            no licence of its own); factual 18-byte extract only, re-derivable
+#            with ./tools/check-lte-corpus.sh <workdir> --upstream
+406404ab00070019b0181460108280000000

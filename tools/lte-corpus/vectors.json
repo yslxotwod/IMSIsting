@@ -1,0 +1,211 @@
+{
+  "schema": "imsisting-lte-corpus/1",
+  "what": "Real captured LTE RRC bytes (BCCH-DL-SCH-Message: SIB1 and the SystemInformation container) used to assert tools/lte_asn1.py against an implementation that is independent of pycrate.",
+  "why_not_pycrate": "tools/lte_asn1.py is proven against pycrate 0.8.1, which implements TS 36.331 from the same document, so a shared misreading of a clause would be invisible. The PDUs in pdus/ were produced by real hardware on a real network, not by any encoder, and the expected values below were taken from Wireshark's independent lte-rrc C dissector of the same capture (see the per-vector 'independent_evidence' field), not from our codec and not from pycrate.",
+  "licence_note": "The upstream pcaps are copyleft (QCSuper = GPL-3.0, LTESniffer = AGPL-3.0) and this repository declares no licence of its own, so the pcap files are NOT vendored. Only the small factual PDU extracts in pdus/ are stored, each with its provenance and licence notice. The upstream file can be re-fetched, sha256-checked and re-extracted, and the extracted bytes are then required to be byte-identical to the vendored ones: ./tools/check-lte-corpus.sh <workdir> --upstream",
+  "upstream": [
+    {
+      "id": "qcsuper",
+      "repo": "https://github.com/P1sec/QCSuper",
+      "licence": "GPL-3.0",
+      "file": "docs/sample_pcaps/sample_2g_3g_4g_xperia_with_sib_and_nas.pcap",
+      "commit": "4510c22f523658a551ed619698b16fa89ade015e",
+      "url": "https://raw.githubusercontent.com/P1sec/QCSuper/4510c22f523658a551ed619698b16fa89ade015e/docs/sample_pcaps/sample_2g_3g_4g_xperia_with_sib_and_nas.pcap",
+      "sha256": "c25244bd115efc6addf3ce25eb8b6b05658e63daf19aaa9edf24609b47c8b45e",
+      "bytes": 164748,
+      "container": "pcap, link type 228 (LINKTYPE_IPV4); the phone's Qualcomm diag log re-encapsulated as GSMTAP/UDP port 4729",
+      "hardware": "Sony Xperia phone (Qualcomm diag), captured with QCSuper",
+      "network": "real commercial LTE network, MCC 208 / MNC 10 (SFR, France)",
+      "when": "2018-03-24 08:38:02..08:43:28 (pcap timestamps)",
+      "extractor": "qcsuper"
+    },
+    {
+      "id": "ltesniffer",
+      "repo": "https://github.com/SysSec-KAIST/LTESniffer",
+      "licence": "AGPL-3.0",
+      "file": "pcap_file_example/ltesniffer_dl_mode.pcap",
+      "commit": "a694803082017ac2b349e6b113940e8b9ba2fe5b",
+      "url": "https://raw.githubusercontent.com/SysSec-KAIST/LTESniffer/a694803082017ac2b349e6b113940e8b9ba2fe5b/pcap_file_example/ltesniffer_dl_mode.pcap",
+      "sha256": "be4972206afe95e8cc2a76f1312a648a7011795d5112782b4986317986fc0340",
+      "bytes": 423936,
+      "container": "pcap, link type 147 (DLT_USER0) holding the srsRAN 'mac-lte-framed' context that Wireshark's packet-mac-lte.c dissector expects",
+      "hardware": "LTESniffer (SDR sniffer) receiving an srsRAN srseNB",
+      "network": "srsRAN testbed (lab, not commercial); MCC 901 / MNC 55 is the ITU test PLMN",
+      "when": "2023-04-25 13:17 CEST",
+      "extractor": "srsran"
+    }
+  ],
+  "vectors": [
+    {
+      "id": "qcsuper-sfr-band3-cell320515",
+      "pdu_file": "pdus/qcsuper-sfr-band3-cell320515.pdu.hex",
+      "pdu_hex": "60c820219040436b5a009c80702ea11080840421411108ddc000",
+      "pdu_bits": 208,
+      "pdu_sha256": "f6fbec750da9daef889aba631b1f757c2261966eeec6f449d864b84eded36c20",
+      "upstream": "qcsuper",
+      "frames": [1836, 1860, 1871, 1977, 1992, 1999],
+      "channel": "GSMTAP type 13 (LTE RRC), sub-type 5 (BCCH-DL-SCH-Message), SI-RNTI",
+      "what": "SystemInformationBlockType1 of a real SFR (France) cell, band 3",
+      "command": "decode",
+      "independent_evidence": "tshark lte-rrc dissector of the same pcap, frame 1836: plmn-IdentityList 2 items both mcc 208 mnc 10, trackingAreaCode b5ad = 46509, cellIdentity 004e4030 = 320515, cellBarred notBarred, intraFreqReselection allowed, q-RxLevMin -65, p-Max 23, freqBandIndicator 3, si-WindowLength ms10, systemInfoValueTag 23, schedulingInfoList 5 items with si-Periodicity rf16 rf16 rf16 rf32 rf16",
+      "expect": {
+        "message": "BCCH-DL-SCH-Message",
+        "sib": "SystemInformationBlockType1",
+        "mcc": "208",
+        "mnc": "10",
+        "plmn_count": "2",
+        "tac": "b5ad",
+        "cellid": "004e403",
+        "barred": "notBarred",
+        "intra_freq_reselection": "allowed",
+        "csg_indication": "0",
+        "q_rx_lev_min": "-65",
+        "p_max": "23",
+        "band": "3",
+        "si_window_length": "ms10",
+        "system_info_value_tag": "23",
+        "bits_consumed": "194"
+      },
+      "expect_scheduling": ["rf16", "rf16 sibType3", "rf16 sibType4", "rf32 sibType5", "rf16 sibType6"],
+      "expect_absent": ["q_rx_lev_min_offset"]
+    },
+    {
+      "id": "qcsuper-sfr-band7-cell320512",
+      "pdu_file": "pdus/qcsuper-sfr-band7-cell320512.pdu.hex",
+      "pdu_hex": "60c820219040436b5a009c80102ea31080840421411108dd8000",
+      "pdu_bits": 208,
+      "pdu_sha256": "ac1279c5e3e3f8e92530f6d63c66df9163b37dd9c63413d0c1f852bf2d8150a3",
+      "upstream": "qcsuper",
+      "frames": [2019, 2023],
+      "channel": "GSMTAP type 13 (LTE RRC), sub-type 5 (BCCH-DL-SCH-Message), SI-RNTI",
+      "what": "SystemInformationBlockType1 of a second real SFR cell in the same capture, band 7",
+      "command": "decode",
+      "independent_evidence": "tshark lte-rrc dissector of the same pcap, frames 2019 and 2023: plmn-IdentityList 2 items both mcc 208 mnc 10, trackingAreaCode b5ad = 46509, cellIdentity 004e4000 = 320512, cellBarred notBarred, intraFreqReselection allowed, q-RxLevMin -65, p-Max 23, freqBandIndicator 7, si-WindowLength ms10, systemInfoValueTag 22",
+      "expect": {
+        "message": "BCCH-DL-SCH-Message",
+        "sib": "SystemInformationBlockType1",
+        "mcc": "208",
+        "mnc": "10",
+        "plmn_count": "2",
+        "tac": "b5ad",
+        "cellid": "004e400",
+        "barred": "notBarred",
+        "intra_freq_reselection": "allowed",
+        "csg_indication": "0",
+        "q_rx_lev_min": "-65",
+        "p_max": "23",
+        "band": "7",
+        "si_window_length": "ms10",
+        "system_info_value_tag": "22",
+        "bits_consumed": "194"
+      },
+      "expect_scheduling": ["rf16", "rf16 sibType3", "rf16 sibType4", "rf32 sibType5", "rf16 sibType6"],
+      "expect_absent": ["q_rx_lev_min_offset"]
+    },
+    {
+      "id": "ltesniffer-srsenb-band7-cell105217",
+      "pdu_file": "pdus/ltesniffer-srsenb-band7-cell105217.pdu.hex",
+      "pdu_hex": "406404ab00070019b0181460108280000000",
+      "pdu_bits": 144,
+      "pdu_sha256": "72039de89105d880be2ec1a01e6d9f768150697ef188378fd2021c88731b60d2",
+      "upstream": "ltesniffer",
+      "frames": [1],
+      "channel": "DLT_USER0 / srsRAN mac-lte-framed, SI-RNTI 0xffff, BCCH-DL-SCH",
+      "what": "SystemInformationBlockType1 of an srsRAN srseNB testbed cell (lab)",
+      "command": "decode",
+      "independent_evidence": "tshark lte-rrc dissector of the same pcap (with -o 'uat:user_dlts:\"User 0 (DLT=147)\",\"mac-lte-framed\",\"0\",\"\",\"0\",\"\"'), frame 1: plmn-IdentityList 1 item mcc 901 mnc 55, trackingAreaCode 0007 = 7, cellIdentity 0019b010 = 105217, cellBarred notBarred, intraFreqReselection allowed, q-RxLevMin -65, freqBandIndicator 7, si-WindowLength ms20, systemInfoValueTag 0, schedulingInfoList 1 item si-Periodicity rf16 sibType3",
+      "expect": {
+        "message": "BCCH-DL-SCH-Message",
+        "sib": "SystemInformationBlockType1",
+        "mcc": "901",
+        "mnc": "55",
+        "plmn_count": "1",
+        "tac": "0007",
+        "cellid": "0019b01",
+        "barred": "notBarred",
+        "intra_freq_reselection": "allowed",
+        "csg_indication": "0",
+        "q_rx_lev_min": "-65",
+        "band": "7",
+        "si_window_length": "ms20",
+        "system_info_value_tag": "0",
+        "bits_consumed": "118"
+      },
+      "expect_scheduling": ["rf16 sibType3"],
+      "expect_absent": ["q_rx_lev_min_offset", "p_max"]
+    },
+    {
+      "id": "ltesniffer-srsenb-si-sib2-sib3",
+      "pdu_file": "pdus/ltesniffer-srsenb-si-sib2-sib3.pdu.hex",
+      "pdu_hex": "00800ce1bf788800ca11e20140000801829945ab9c30c6a73141c21462d84ea5a40000000000000000",
+      "pdu_bits": 328,
+      "pdu_sha256": "7c288c6a09d02ed61d01ff12ac60f81b25712b67c67df6820f3f190f532d6849",
+      "upstream": "ltesniffer",
+      "frames": [3],
+      "channel": "DLT_USER0 / srsRAN mac-lte-framed, SI-RNTI 0xffff, BCCH-DL-SCH",
+      "what": "SystemInformation container carrying sib-TypeAndInfo = sib2, sib3 (a real captured SIB2 and SIB3)",
+      "command": "si",
+      "independent_evidence": "tshark lte-rrc dissector of the same pcap, frame 3: BCCH-DL-SCH-Message c1 = systemInformation, systemInformation-r8 sib-TypeAndInfo with exactly 2 items -- item 0 = sib2 (rootSequenceIndex 128, prach-ConfigIndex 3, zeroCorrelationZoneConfig 5, n1PUCCH-AN 12, modificationPeriodCoeff n16, defaultPagingCycle rf32, p0-NominalPUSCH -85, t300 ms2000) and item 1 = sib3 (q-Hyst dB2, s-NonIntraSearch 6dB, threshServingLow 4dB, cellReselectionPriority 6, q-RxLevMin -122dBm, p-Max 23dBm, s-IntraSearch 10dB, presenceAntennaPort1 True, neighCellConfig 1, t-ReselectionEUTRA 1s)",
+      "expect": {
+        "message": "BCCH-DL-SCH-Message",
+        "c1": "systemInformation",
+        "sib_type": "sibType2",
+        "sib_choice_index": "0",
+        "sib_count": "2",
+        "header_bits": "14",
+        "body_bits": "314",
+        "total_bits": "328"
+      },
+      "expect_regression": {
+        "body_hex": "03386FDE2200328478805000020060A6516AE70C31A9CC50708518B613A969000000000000000000",
+        "_note": "self-consistency lock on our own output, not independent evidence: the SI envelope (2 items, first = sib2, 14-bit header, 328 total bits = 41 bytes) is what Wireshark independently reports; body_hex is only pinned so a refactor cannot silently change the split"
+      },
+      "expect_ties": "total_bits == 8 * len(pdu)"
+    }
+  ],
+  "negative_controls": [
+    {
+      "id": "si-is-not-sib1",
+      "vector": "ltesniffer-srsenb-si-sib2-sib3",
+      "command": "decode",
+      "args": ["${pdu}"],
+      "expect_exit_nonzero": true,
+      "expect_stderr_contains": "c1 alternative is systemInformation, not SIB1",
+      "why": "a SystemInformation container must not be accepted by the SIB1 entry point"
+    },
+    {
+      "id": "real-sib2-uses-release-soundingrs",
+      "vector": "ltesniffer-srsenb-si-sib2-sib3",
+      "command": "sib2-decode",
+      "args": ["${body}"],
+      "expect_exit_nonzero": true,
+      "expect_stderr_contains": "soundingRS-UL-ConfigCommon is release",
+      "why": "the captured SIB2 body (the 40 body bytes Wireshark dissects out of the SystemInformation container, recorded as expect_regression.body_hex) really does carry soundingRS-UL-ConfigCommon in its release form, and our SIB2 codec models only the setup form. Asserted as a negative control so the gap cannot change silently: it must keep failing until the codec models the field."
+    }
+  ],
+  "mutations": [
+    {"id": "mut-mcc", "vector": "qcsuper-sfr-band3-cell320515", "byte": 1, "xor": 1, "observed": "mcc 208 -> 248"},
+    {"id": "mut-mnc", "vector": "qcsuper-sfr-band3-cell320515", "byte": 2, "xor": 1, "observed": "mnc 10 -> 90"},
+    {"id": "mut-tac", "vector": "qcsuper-sfr-band3-cell320515", "byte": 6, "xor": 1, "observed": "tac b5ad -> 35ad"},
+    {"id": "mut-cellid", "vector": "qcsuper-sfr-band3-cell320515", "byte": 8, "xor": 1, "observed": "cellid 004e403 -> 804e403"},
+    {"id": "mut-band", "vector": "qcsuper-sfr-band3-cell320515", "byte": 14, "xor": 1, "observed": "band 3 -> 1"},
+    {"id": "mut-valuetag", "vector": "qcsuper-sfr-band3-cell320515", "byte": 23, "xor": 1, "observed": "system_info_value_tag 23 -> 19"},
+    {"id": "mut-reject", "vector": "qcsuper-sfr-band3-cell320515", "byte": 0, "xor": 1, "observed": "decode exits 1: SIB-Type extension index 96 is not defined"}
+  ],
+  "consistency_groups": [
+    {
+      "id": "qcsuper-two-sfr-cells",
+      "vectors": ["qcsuper-sfr-band3-cell320515", "qcsuper-sfr-band7-cell320512"],
+      "same_fields": ["mcc", "mnc", "tac", "plmn_count", "q_rx_lev_min", "p_max", "barred", "intra_freq_reselection"],
+      "same_scheduling": true,
+      "why": "Both SIB1s were broadcast by the same SFR network inside one 4-minute capture: the same PLMN, the same tracking area b5ad and the same scheduling list. If the codec mis-split a field the two cells would disagree, so cross-vector agreement is itself evidence."
+    }
+  ],
+  "coverage_gaps": [
+    "Only SIB1 (3 vectors) and the SystemInformation envelope (1 vector) are exercised. SIB2 and SIB3 are present in the capture but our codec cannot decode those bodies: sib2-decode fails on the real soundingRS-UL-ConfigCommon release form, and sib3-decode only models the absent forms of s-NonIntraSearch / s-IntraSearch / p-Max while the real SIB3 carries them. SIB4..SIB13 are therefore NOT asserted against any real capture.",
+    "Both captures are FDD, release-8/9 style, no NB-IoT, no TDD, no Rel-13+ content, no carrier aggregation.",
+    "The expected values come from Wireshark's lte-rrc dissector, which implements the same TS 36.331 unaligned PER rules as pycrate and our codec. A misreading shared by all three implementations would still be invisible. What this corpus does eliminate is the possibility that both our codec and pycrate agree on bytes that no real network ever sends.",
+    "Only one vector comes from a commercial network (SFR France); the other three are from an srsRAN lab testbed (MCC 901 test PLMN). No second commercial operator was available under a licence that permits reuse.",
+    "plmn_count > 1 cannot be cross-checked field by field: the decode CLI prints only the first PLMN, so for the two SFR vectors the second PLMN of the list is asserted only through Wireshark's independent dissection of the same bytes."
+  ]
+}

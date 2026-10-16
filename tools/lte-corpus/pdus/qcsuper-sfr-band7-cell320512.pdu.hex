@@ -1,0 +1,20 @@
+# Real captured LTE RRC PDU -- SystemInformationBlockType1 (BCCH-DL-SCH-Message)
+# 26 bytes / 208 bits, carried on SI-RNTI.
+#
+# SOURCE   : https://github.com/P1sec/QCSuper  (licence: GPL-3.0)
+# FILE     : docs/sample_pcaps/sample_2g_3g_4g_xperia_with_sib_and_nas.pcap
+# COMMIT   : 4510c22f523658a551ed619698b16fa89ade015e
+# URL      : https://raw.githubusercontent.com/P1sec/QCSuper/4510c22f523658a551ed619698b16fa89ade015e/docs/sample_pcaps/sample_2g_3g_4g_xperia_with_sib_and_nas.pcap
+# PCAPSHA  : c25244bd115efc6addf3ce25eb8b6b05658e63daf19aaa9edf24609b47c8b45e
+# FRAME    : 2019 (identical PDU in frame 2023)
+# CARRIER  : GSMTAP type 13 = GSMTAP_TYPE_LTE_RRC, sub-type 5 =
+#            GSMTAP_LTE_RRC_SUB_BCCH_DL_SCH_Message
+# CAPTURED : same capture as qcsuper-sfr-band3-cell320515: real commercial LTE
+#            network, MCC 208 / MNC 10 (SFR, France), 2018-03-24, Sony Xperia
+#            Qualcomm diag log re-encapsulated by QCSuper.
+# CELL     : a DIFFERENT cell of the same network -- trackingAreaCode b5ad
+#            (46509), cellIdentity 004e400 (320512), freqBandIndicator 7,
+#            systemInfoValueTag 22 (Wireshark dissection). Two distinct real
+#            cells with distinct bands/value tags in one capture.
+# LICENCE  : upstream pcap NOT vendored (GPL-3.0); factual 26-byte extract only.
+60c820219040436b5a009c80102ea31080840421411108dd8000

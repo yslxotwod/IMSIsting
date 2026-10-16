@@ -1,0 +1,24 @@
+# Real captured LTE RRC PDU -- SystemInformation container (BCCH-DL-SCH-Message
+# c1 = systemInformation) carrying sib-TypeAndInfo = 2 items: sib2, sib3.
+# 41 bytes / 328 bits, carried on SI-RNTI (RNTI 0xffff).
+#
+# SOURCE   : https://github.com/SysSec-KAIST/LTESniffer  (licence: AGPL-3.0)
+# FILE     : pcap_file_example/ltesniffer_dl_mode.pcap
+# COMMIT   : a694803082017ac2b349e6b113940e8b9ba2fe5b
+# URL      : https://raw.githubusercontent.com/SysSec-KAIST/LTESniffer/a694803082017ac2b349e6b113940e8b9ba2fe5b/pcap_file_example/ltesniffer_dl_mode.pcap
+# PCAPSHA  : be4972206afe95e8cc2a76f1312a648a7011795d5112782b4986317986fc0340
+# FRAME    : 3 (identical PDU in 358 of the 2433 frames)
+# CARRIER  : link type 147 (DLT_USER0), srsRAN mac-lte-framed context, SI-RNTI
+# CAPTURED : over the air by LTESniffer from an srsRAN srseNB testbed,
+#            2023-04-25; MCC 901 / MNC 55 (ITU test PLMN), band 7.
+# CONTENTS : Wireshark's lte-rrc dissector shows sib-TypeAndInfo with exactly
+#            2 items, item 0 = sib2 (rach-ConfigCommon rootSequenceIndex 128,
+#            prach-ConfigIndex 3, zeroCorrelationZoneConfig 5, n1PUCCH-AN 12,
+#            bcch-Config modificationPeriodCoeff n16, pcch-Config
+#            defaultPagingCycle rf32, p0-NominalPUSCH -85, t300 ms2000) and
+#            item 1 = sib3 (q-Hyst dB2, s-NonIntraSearch 6dB, threshServingLow
+#            4dB, cellReselectionPriority 6, q-RxLevMin -122dBm, p-Max 23dBm,
+#            s-IntraSearch 10dB, presenceAntennaPort1 True, neighCellConfig 1,
+#            t-ReselectionEUTRA 1s).
+# LICENCE  : upstream pcap NOT vendored (AGPL-3.0); factual 41-byte extract only.
+00800ce1bf788800ca11e20140000801829945ab9c30c6a73141c21462d84ea5a40000000000000000

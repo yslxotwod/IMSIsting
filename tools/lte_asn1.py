@@ -30,7 +30,10 @@ Usage:
     python3 tools/lte_asn1.py selftest
 """
 import argparse
+import importlib.util
 import inspect
+import json
+import os
 import sys
 
 # ---------------------------------------------------------------------------
@@ -2699,6 +2702,91 @@ def selftest():
     except ValueError:
         pass
 
+    # SIB9 to SIB13 go through the generic engine rather than a transcribed
+    # codec, so what is checked here is the WIRING -- that each name maps to
+    # the right root type, the right SIB-TypeAndInfo alternative, and the right
+    # body length. The encoding itself is checked against pycrate by
+    # tools/check-lte-sib-codec.sh, which is authoritative and is deliberately
+    # not run from here because pycrate is optional and it takes minutes.
+    #
+    # The two SIBs that travel as extension additions matter most: SIB12 and
+    # SIB13 are NOT root alternatives of the CHOICE. Getting that wrong yields
+    # a header three bits short and every field after it shifts under, with no
+    # error -- so the vectors below are containers, where the choice index is
+    # part of the message and a wrong one is refused instead of misread.
+    engine_vectors = [
+        ("sib9",  "4601020304050607",        64, "001D1804080C1014181C",
+         {"hnb-Name": {"$octets": "01020304050607"}}),
+        ("sib10", "2FBBC48D011880",          50, "0020BEEF12340462",
+         {"messageIdentifier": {"$bits": [48879, 16]},
+          "serialNumber": {"$bits": [4660, 16]},
+          "warningType": {"$octets": "0462"}}),
+        ("sib11", "2FBBC48D21826F56DF7780",  81, "0024BEEF12348609BD5B7DDE",
+         {"messageIdentifier": {"$bits": [48879, 16]},
+          "serialNumber": {"$bits": [4660, 16]},
+          "warningMessageSegmentType": "lastSegment",
+          "warningMessageSegmentNumber": 3,
+          "warningMessageSegment": {"$octets": "DEADBEEF"}}),
+        ("sib12", "17DDE24690C137AB6FBBC0",  82,
+         "0040058BEEF12348609BD5B7DDE000",
+         {"messageIdentifier-r9": {"$bits": [48879, 16]},
+          "serialNumber-r9": {"$bits": [4660, 16]},
+          "warningMessageSegmentType-r9": "lastSegment",
+          "warningMessageSegmentNumber-r9": 3,
+          "warningMessageSegment-r9": {"$octets": "DEADBEEF"}}),
+        ("sib13", "001E53A0D500",            41, "004083000F29D06A8000",
+         {"mbsfn-AreaInfoList-r9": [
+              {"mbsfn-AreaId-r9": 7, "non-MBSFNregionLength": "s2",
+               "notificationIndicator-r9": 1,
+               "mcch-Config-r9": {
+                   "mcch-RepetitionPeriod-r9": "rf64", "mcch-Offset-r9": 3,
+                   "mcch-ModificationPeriod-r9": "rf1024",
+                   "sf-AllocInfo-r9": {"$bits": [16, 6]},
+                   "signallingMCS-r9": "n7"}}],
+          "notificationConfig-r9": {"notificationRepetitionCoeff-r9": "n4",
+                                    "notificationOffset-r9": 5,
+                                    "notificationSF-Index-r9": 3}}),
+    ]
+    try:
+        codec, per = engine()
+        missing = [n for n, _, _, _, _ in engine_vectors
+                   if ENGINE_ROOTS[n][0] not in codec.types]
+    except Exception as exc:                        # noqa: BLE001
+        missing, codec, per = [str(exc)], None, None
+    if missing:
+        # Not a failure: the committed table is generated with a narrow root
+        # set and an operator may not have pycrate installed. Say so loudly,
+        # because a silent skip is how a check stops checking anything.
+        print("SKIP\tthe layout table has no SIB9-SIB13 roots: %s"
+              % ", ".join(missing))
+    else:
+        for label, want, wbits, want_container, val in engine_vectors:
+            root, choice = ENGINE_ROOTS[label]
+            v = _unjson(val)
+            try:
+                bits = codec.encode_bits(root, v)
+                if not isinstance(bits, str):
+                    bits = "".join(str(b) for b in bits)
+                chk("%s-vector" % label, _bits_to_hex(bits), want)
+                chk("%s-bitlen" % label, codec.encode_bitlen(root, v), wbits)
+                # The SIB-TypeAndInfo alternative has to be the one the CHOICE
+                # actually declares. SIB12 and SIB13 are extension additions
+                # (indices >= SI_CHOICE_ROOT) and travel as open types; framing
+                # them as root alternatives gives a header three bits short and
+                # shifts every field after it.
+                chk("%s-choice" % label, SIB_CHOICE[choice],
+                    "sibType%s%s" % (label[3:],
+                                     "-v920" if choice >= SI_CHOICE_ROOT else ""))
+                chk("%s-container" % label,
+                    _bits_to_hex(encode_si(choice, bits, 1)), want_container)
+                # Round-trip through the engine: a decoder that reads the right
+                # fields in the wrong places still passes an encode-only check.
+                chk("%s-roundtrip" % label,
+                    codec.decode_bits(root, bits, exact=True), v)
+            except Exception as exc:                # noqa: BLE001
+                failures.append("%s FAIL %s: %s"
+                                % (label, type(exc).__name__, exc))
+
     if failures:
         for f in failures:
             sys.stderr.write(f + "\n")
@@ -3533,6 +3621,286 @@ def _bits_to_hex(bits):
     return "".join("%02X" % int(s[i:i + 8], 2) for i in range(0, len(s), 8))
 
 
+# ---------------------------------------------------------------------------
+# SIB9 to SIB13 -- read and written by the generated engine, not by hand
+# ---------------------------------------------------------------------------
+#
+# SIB1 to SIB8 above are transcribed field by field and each proved against
+# captured pycrate vectors. That method cost most of a session per SIB and it
+# does not scale to the messages left in Phase 2, so the roadmap changed it:
+# tools/asn1gen.py walks the oracle's structure and emits a declarative layout
+# table, and tools/lte_per.py is a stdlib-only engine that consumes the table.
+# The runtime stays dependency-free, which is the whole point -- pycrate stays
+# the independent thing we assert against instead of becoming the thing we
+# ship.
+#
+# SIB9 to SIB13 are the first SIBs to go through that engine, and they are
+# here rather than in a new tool only because this is the entry point
+# modules/10_lte_air.sh already calls. Two paths in one file is a transitional
+# state and is marked as one: SIB1 to SIB8 are due to move to the engine too,
+# and when they do the hand-written codecs above should be deleted rather than
+# left beside it.
+#
+# Two facts about the oracle's naming, because each looks like "that type does
+# not exist":
+#
+#   * TS 36.331 never defines SIB12 or SIB13 unsuffixed. They enter at Rel-9,
+#     and the table carries them as SystemInformationBlockType12_r9 and
+#     SystemInformationBlockType13_r9. The hyphen becomes an underscore
+#     because the name has to be a Python identifier.
+#   * Inside a value the keys keep the specification's own hyphenated spelling,
+#     because that spelling is what the ASN.1 actually says. The table is
+#     generated from the specification, not from Python.
+
+# sibtype -> (table root, SIB-TypeAndInfo CHOICE index). The index matters:
+# SIB12 and SIB13 enter TS 36.331 at Rel-9 and sit at indices 10 and 11, past
+# SI_CHOICE_ROOT, so inside a SystemInformation container they travel as OPEN
+# TYPES -- extension bit, normally-small index, a length, and the body octet
+# padded -- while SIB9 to SIB11 travel as plain root alternatives. Framing the
+# two the same way produces a header three bits short and every field after it
+# shifts under, silently.
+ENGINE_ROOTS = {
+    "sib9": ("SystemInformationBlockType9", 7),
+    "sib10": ("SystemInformationBlockType10", 8),
+    "sib11": ("SystemInformationBlockType11", 9),
+    "sib12": ("SystemInformationBlockType12_r9", 10),
+    "sib13": ("SystemInformationBlockType13_r9", 11),
+}
+
+_ENGINE = None
+
+
+def engine():
+    """Load the generic PER engine and the generated table, once per process.
+
+    The table is 1.7 MB of plain data, so it is loaded lazily: the hand-written
+    codecs above never touch it and should not pay for it.
+    """
+    global _ENGINE
+    if _ENGINE is not None:
+        return _ENGINE
+    here = os.path.dirname(os.path.abspath(__file__))
+    # The table path is overridable so a freshly generated table can be tried
+    # before it replaces the committed one. Comparing two tables is the only
+    # way to tell a generator change from an engine change.
+    table = os.environ.get("LTE_RRC_LAYOUT",
+                           os.path.join(here, "lte_rrc_layout.py"))
+    mods = {}
+    for name, path in (("lte_per", os.path.join(here, "lte_per.py")),
+                       ("lte_rrc_layout", table)):
+        if not os.path.isfile(path):
+            raise RuntimeError(
+                "missing %s -- SIB9 to SIB13 are decoded by the generated\n"
+                "engine, so both tools/lte_per.py and the generated\n"
+                "tools/lte_rrc_layout.py have to be present.\n"
+                "Regenerate the table with: python3 tools/asn1gen.py --out "
+                "tools/lte_rrc_layout.py" % path)
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mods[name] = mod
+    _ENGINE = (mods["lte_per"].codec_from_module(mods["lte_rrc_layout"]),
+               mods["lte_per"])
+    return _ENGINE
+
+
+def _decode_counting(codec, per, typename, bits):
+    """Decode and report how many bits were actually consumed.
+
+    decode_bits() only offers "every bit consumed or not", which is the wrong
+    question here: the module hands over a buffer padded to whole nibbles, so
+    the true body length is shorter than the buffer and the module's SIB1 to
+    SIB8 path reports the true length. Reporting the buffer length under the
+    same key would make SIB9 to SIB13 look longer than they are and break the
+    one thing the key is for.
+
+    This reaches into the engine's decoder for r.pos, which is deliberate and
+    is the only coupling to its internals. If the engine renames _dec or
+    BitReader this raises rather than returning a plausible wrong number, and
+    the caller turns that into an ERROR line.
+    """
+    r = per.BitReader(bits)
+    value = codec._dec(r, codec.node(typename), typename)
+    return value, r.pos
+
+
+def _render(v):
+    """One decoded value as a single field-friendly string."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (bytes, bytearray)):
+        return v.hex().upper()
+    if isinstance(v, tuple) and len(v) == 2 and isinstance(v[1], int):
+        # A BIT STRING, or a constrained whole number, decodes as (value,
+        # width). The width is not decoration: for a bit string it is the only
+        # thing that distinguishes 0x01 from 0x0100, and PER does not carry it
+        # in the octets.
+        val, width = v
+        if width % 8 == 0:
+            text = "0x%0*X" % (width // 4, val)
+        else:
+            text = "0b" + format(val, "0%db" % width)
+        return "%s (%d bits)" % (text, width)
+    return str(v)
+
+
+def _flatten(prefix, v, out=None, depth=0):
+    """Flatten a decoded value into (key, rendered) pairs.
+
+    Nested SEQUENCEs become dotted keys and SEQUENCE OF entries gain an index,
+    so a caller reading the output can tell which MBSFN area a field belongs
+    to. A dict printed with str() would hide exactly that.
+    """
+    if out is None:
+        out = []
+    if depth > 12:
+        out.append((prefix, _render(v)))
+        return out
+    if isinstance(v, dict):
+        for k in sorted(v):
+            _flatten("%s.%s" % (prefix, k) if prefix else k, v[k], out,
+                     depth + 1)
+    elif isinstance(v, list):
+        out.append((prefix + ".count", str(len(v))))
+        for i, item in enumerate(v):
+            _flatten("%s[%d]" % (prefix, i), item, out, depth + 1)
+    else:
+        out.append((prefix, _render(v)))
+    return out
+
+
+def _unjson(v):
+    """Turn a JSON value into the shapes the engine's encoder takes.
+
+    JSON has no bytes and no bit strings, so the two are spelled out:
+    {"$octets": "DEADBEEF"} and {"$bits": [value, width]}. Everything else is
+    already the right shape -- ints, strings for ENUMERATED, objects for
+    SEQUENCEs, arrays for SEQUENCE OF.
+    """
+    if isinstance(v, dict):
+        if set(v) == {"$octets"}:
+            return bytes.fromhex(v["$octets"])
+        if set(v) == {"$bits"}:
+            val, width = v["$bits"]
+            return (val, width)
+        return {k: _unjson(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_unjson(x) for x in v]
+    return v
+
+
+def cmd_engine_decode(args):
+    """Decode a SIB9 to SIB13 body with the generated codec."""
+    root, choice = ENGINE_ROOTS[args.sibtype]
+    want_sib = int(args.sibtype[3:])
+    data = bytes.fromhex(args.hex)
+    if args.bits is not None and args.bits > len(data) * 8:
+        print("ERROR\t--bits %d exceeds the %d bits of hex given"
+              % (args.bits, len(data) * 8), file=sys.stderr)
+        return 2
+
+    # --bits says how many bits of the buffer are the message. It does NOT by
+    # itself mean "every bit must be consumed": the module passes the padded
+    # nibble length, exactly as it does for SIB1 to SIB8, and a body that ends
+    # mid-octet then has trailing pad. --exact is the separate promise that the
+    # length given is the true one, which is what catches a body one bit short
+    # for the message it claims to read.
+    exact = args.exact
+
+    # A container reading goes first when asked for, exactly as lair_sib_codec
+    # does for SIB1 to SIB8 and for the same reason: reading a whole container
+    # as a bare body does not fail, it reports a confident body assembled out
+    # of the container header's own bits. The container reading is the only one
+    # that can be checked, because it carries a sibType that has to match.
+    if args.container:
+        try:
+            si = decode_si(data)
+        except ValueError as exc:
+            print("ERROR\t%s" % exc, file=sys.stderr)
+            return 1
+        if si["sib_index"] != choice:
+            print("ERROR\tthe container carries %s, not SIB%d"
+                  % (si["sib"], want_sib), file=sys.stderr)
+            return 3
+        bits = si["body_bits"]
+        # An extension addition is an OPEN TYPE, so its content was octet
+        # padded on the way in and the true body length is not recoverable
+        # here. Requiring every bit to be consumed would reject every SIB12 and
+        # SIB13 that arrived in a container.
+        exact = False
+    else:
+        nbits = args.bits if args.bits is not None else len(data) * 8
+        bits = "".join(format(b, "08b") for b in data)[:nbits]
+
+    try:
+        codec, per = engine()
+        if exact:
+            value = codec.decode_bits(root, bits, exact=True)
+            consumed = len(bits)
+        else:
+            value, consumed = _decode_counting(codec, per, root, bits)
+    except Exception as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+    for k, v in _flatten("", value):
+        print("%s\t%s" % (k, v))
+    print("bits_consumed\t%d" % consumed)
+    if consumed != len(bits):
+        # The difference is nibble padding (or open-type octet padding), not
+        # data. Saying so keeps a reader from treating the last field as
+        # three bits longer than the specification gives it.
+        print("pad_bits\t%d" % (len(bits) - consumed))
+    if args.container:
+        print("container_bits\t%d" % si["total_bits"])
+        if si["sib_index"] >= SI_CHOICE_ROOT:
+            # SIB12 and SIB13 travel as OPEN TYPES, so the body in the
+            # container was octet padded on the way in and its true length is
+            # not recoverable from the container. Saying so is the difference
+            # between a reader knowing a trailing field might be pad bits and
+            # a reader assuming the last three bits were data.
+            print("length_note\tSIB%d is an extension addition and travels as "
+                  "an open type, octet padded; its body was read at %d bits "
+                  "and up to 7 trailing bits of it are pad, not data"
+                  % (want_sib, len(bits)))
+    return 0
+
+
+def cmd_engine_encode(args):
+    """Encode a SIB9 to SIB13 body with the generated codec."""
+    root, choice = ENGINE_ROOTS[args.sibtype]
+    try:
+        value = _unjson(json.loads(args.json))
+    except ValueError as exc:
+        print("ERROR\t--json is not valid JSON: %s" % exc, file=sys.stderr)
+        return 2
+    try:
+        body = engine()[0].encode_bits(root, value)
+    except Exception as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+
+    # Same keys as the SIB1 to SIB8 encoders, so a caller does not have to know
+    # which codec produced a given SIB. body_bits carries the TRUE length,
+    # because body_hex is zero-padded to whole octets and the padding is not
+    # distinguishable from data.
+    print("sib\t%s" % root)
+    print("layout\tTS 36.331 unaligned PER (generated codec, tools/lte_per.py)")
+    if args.body_only:
+        print("body_bits\t%d" % len(body))
+        print("body_hex\t%s" % _bits_to_hex(body))
+        return 0
+    full = encode_si(choice, body, 1)
+    print("body_bits\t%d" % len(body))
+    print("body_hex\t%s" % _bits_to_hex(body))
+    print("container_bits\t%d" % len(full))
+    print("container_hex\t%s" % _bits_to_hex(full))
+    return 0
+
+
 def main(argv):
     p = argparse.ArgumentParser(prog="lte_asn1",
                                 description="LTE RRC ASN.1 unaligned PER (TS 36.331)")
@@ -3719,6 +4087,40 @@ def main(argv):
     s8d.add_argument("--container", action="store_true",
                      help="the hex is a whole SystemInformation container")
     s8d.set_defaults(func=cmd_sib8_decode)
+
+    # SIB9 to SIB13 go through the generated engine rather than a transcribed
+    # codec, so they share one pair of subcommands instead of gaining ten. The
+    # value is passed as JSON; see _unjson() for how octet strings and bit
+    # strings are spelled, since JSON has neither.
+    for sibtype, rootname, _idx in (
+            ("sib9", "SystemInformationBlockType9", 7),
+            ("sib10", "SystemInformationBlockType10", 8),
+            ("sib11", "SystemInformationBlockType11", 9),
+            ("sib12", "SystemInformationBlockType12_r9", 10),
+            ("sib13", "SystemInformationBlockType13_r9", 11)):
+        e = sub.add_parser(sibtype, help="encode a %s (generated codec)"
+                                        % rootname)
+        e.add_argument("--json", required=True, metavar="OBJ",
+                       help='the value as JSON, e.g. {"hnb-Name": {"$octets": '
+                            '"0A0B"}}; {"$octets": HEX} is an OCTET STRING and '
+                            '{"$bits": [VALUE, WIDTH]} a BIT STRING')
+        e.add_argument("--body-only", action="store_true",
+                       help="omit the SystemInformation container wrapper")
+        e.set_defaults(func=cmd_engine_encode, sibtype=sibtype)
+
+        d = sub.add_parser(sibtype + "-decode",
+                           help="decode a %s body (generated codec)" % rootname)
+        d.add_argument("hex", help="the body, as hex")
+        d.add_argument("--bits", type=int, default=None,
+                       help="how many bits of the buffer are the message, "
+                            "before hex padding; trailing bits past the fields "
+                            "are tolerated, as for SIB1 to SIB8")
+        d.add_argument("--exact", action="store_true",
+                       help="require every bit given to be consumed -- only "
+                            "correct when --bits is the TRUE length")
+        d.add_argument("--container", action="store_true",
+                       help="the hex is a whole SystemInformation container")
+        d.set_defaults(func=cmd_engine_decode, sibtype=sibtype)
 
     args = p.parse_args(argv)
     if args.cmd == "selftest":

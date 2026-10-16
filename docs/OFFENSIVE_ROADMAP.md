@@ -299,8 +299,12 @@ What Phase 2 now has to add, in order:
    soundingRS-UL-ConfigCommon CHOICE selecting `setup`; and a fifty-field
    differential sweep against pycrate — the widest legal value in every leaf,
    one leaf at a time — agrees bit for bit. SIB4–SIB7 are **done** as well,
-   each asserted bit for bit against pycrate 0.8.1. SIB13 does not yet pass
-   pycrate's own validation.
+   each asserted bit for bit against pycrate 0.8.1. SIB8 through SIB13 are
+   **done** too, and SIB9 to SIB13 are the first codecs produced by the
+   generated-table method rather than transcribed. SIB13 was the one that did
+   not pass pycrate's own validation when this paragraph was written; it does
+   now, and the reason it did not is recorded below — the type is named
+   `SystemInformationBlockType13-r9`, not `SystemInformationBlockType13`.
 
    **A note on method, because hand-transcription is the slowest of the
    available paths and it is where most of the time went.** Transcribing one
@@ -335,8 +339,9 @@ What Phase 2 now has to add, in order:
    SIB they claim rather than reporting fields decoded from the wrong bit
    offsets. The private-layout warning that used to print for SIB2 and SIB3 is
    gone with the parsers that needed it. **SIB1–SIB7 are all real codecs now**
-   — `lair_decode_sib()` dispatches 1 through 8 to `tools/lte_asn1.py`, and only
-   13 still calls `lair_note_private_layout`.
+   — `lair_decode_sib()` dispatches 1 through 8 to `tools/lte_asn1.py`, and
+   `lair_note_private_layout()` has since been deleted outright, because no SIB
+   is on a private layout any more.
 
    **SIB8 is real now, and what it was before was worse than private.** `lair_decode_sib8()`
    was reading `systemInformationAreaID`, `messageIdentifier`, `serialNumber`,
@@ -349,11 +354,23 @@ What Phase 2 now has to add, in order:
    `searchWindowSize`, and `t-ReselectionUTRA-SF` as a two-alternative CHOICE.
    A bare body is five bits; with the search window set it is nine (`2480`).
 
-   **What is still missing is more than one decoder.** `lair_decode_sib()`
-   dispatches 1 through 8, so **SIB9, SIB10, SIB11 and SIB12 have no decoder at
-   all** and are rejected as unknown — the module's own error message silently
-   defines the ceiling of what it can read. SIB13 is the last decoder on a
-   private octet-aligned layout.
+   **All thirteen SIBs are now decoded by a real codec, and the last private
+   layout is gone.** `lair_decode_sib()` dispatches 1 through 13; SIB9 to SIB13
+   go through the generated PER engine rather than a transcribed codec, because
+   hand-transcription cost most of a session for one SIB and does not scale.
+   SIB13's private octet-aligned parser was deleted; a later definition in the
+   same bash file silently overrides an earlier one, so leaving it would have
+   shadowed the new decoder rather than coexisting with it. TS 36.331 defines no
+   SIB14, and a body that is none of the thirteen is still rejected rather than
+   guessed at.
+
+   Four of those five had no decoder at all, so this closed a gap where the
+   module's own error message silently defined the ceiling of what it could
+   read. The MBSFN helpers the old SIB13 parser used were kept and re-used: the
+   codec returns `sf-AllocInfo` as the raw six-bit BIT STRING the ASN.1
+   declares, but **which of those bits are legal is not in the ASN.1** — in FDD
+   an MBSFN subframe cannot be 0, 4, 5 or 9 (TS 36.211 6.10.1). Reporting only
+   the mask hands back the easy half.
 
    Two of those five were absent from the generated table for a reason worth
    writing down, because it looks exactly like "the oracle does not have this
@@ -398,21 +415,53 @@ What Phase 2 now has to add, in order:
    from pycrate's *own object graph* — deliberately not from the table under
    test, which would assume the thing being checked — encodes each value with
    both codecs, compares bit for bit, and then round-trips it through the
-   decoder. **125 cases over SIB4, SIB6, SIB7, SIB8 and
-   RRCConnectionReconfiguration agree exactly**, including the first of the two
-   large messages that made hand-transcription impractical.
+   decoder. It also walks the table's node graph and compares it against
+   pycrate's, which is a check on the *layout* rather than on a sample of
+   values. The run in full:
 
-   Two honest limits on that number. It is **not coverage of all ten root
-   types**: SIB1, SIB2, SIB3 and SIB5 currently yield *zero* cases, because the
-   harness cannot construct a value pycrate will accept, and a type producing
-   zero cases must be read as unverified rather than as passing — a green run
-   that silently skips its own subject is worse than no run. The causes are
-   known and are in the harness, not the codec: `verify_per.py`'s value
-   generator reads integer bounds from `get_const()['val']['root'][0].lb/.ub`
-   and assumes every constraint is expressed that way, while pycrate represents
-   several as size or offset constraints. And the table holds **1031 types**
-   while only the roots are exercised, so a leaf that is wrong and unreachable
-   from the sampled roots is still invisible.
+   ```
+   types checked : 1045 of 1045 table type(s), 15 root type(s)
+   coverage      : 1045 exercised, 0 excused, 0 unresolved, 0 with zero cases
+   struct audit  : 5809 node(s) compared, 0 mismatch(es), 0 unsupported node(s)
+   fresh-object  : 54 type(s) re-run, 0 mismatch(es)
+   cases         : 42700
+   agree         : 42700
+   disagree      : 0
+   ```
+
+   **Every root type now carries 100 cases**, including SIB1, SIB2, SIB3 and
+   SIB5. Those four used to produce *zero* cases, and the reason is worth
+   keeping because the failure mode is invisible: `verify_per.py`'s value
+   generator read integer bounds from `get_const()['val']['root'][0].lb/.ub` and
+   assumed every constraint is expressed that way, while pycrate wraps them in
+   an `ASN1Set` that is **not subscriptable**. The lookup raised, returned
+   `None`, and silently fell back to `randint(0, 7)` — a range pycrate then
+   rejected — so four root types produced nothing at all while the run stayed
+   green. **A type producing zero cases must be read as unverified, never as
+   passing**, because a green run that silently skips its own subject is worse
+   than no run. The coverage accounting now makes that state impossible to
+   reach quietly: a type that is never attempted and has no `EXCUSED` entry
+   fails the run, as does a stale `EXCUSED` name, and `--only` deliberately
+   disables coverage accounting so a restricted run cannot masquerade as a full
+   one.
+
+   `tools/check-lte-sib-codec.sh` is the second, independent harness: it drives
+   the fourteen root types in the table plus ten hand-built SIB9-SIB13 vectors,
+   and it exists because neither harness alone would have caught the
+   `[A-Za-z_]+` bug described below. It is deliberately **not** in
+   `tools/run-selftests.sh` — pycrate is an optional dependency and the run
+   takes minutes.
+
+   The one-sided check that let all of this hide is worth recording. The
+   detector that was supposed to catch a zero-case root type was
+   `grep -qE '^  [A-Za-z_]+ +0 case'`. The character class excludes digits, so
+   it could not match `SystemInformationBlockType1` — it could never match any
+   of the names it existed to look for. **A detector that cannot match the names
+   it looks for is worse than no detector, because it manufactures confidence in
+   exactly the state it was written to catch.** It is now `[A-Za-z0-9_]+`, and
+   the five root types that the hand-built harness genuinely covers are
+   subtracted explicitly rather than quietly ignored, on the principle that
+   overstating the *gap* trains the reader to ignore the check.
 
 The downlink **coding** layer is now in place, because a transmit path that
 cannot code a transport block is not a transmit path. `tools/lte_phy.py` holds
@@ -529,13 +578,40 @@ inside the code, and I got both wrong first:
   bin; a tone placed at one subcarrier came back at another. This one a
   self-test does catch, which is why the modulator keeps I and Q.
 
-What is still missing above this layer is **layer mapping and precoding**,
-**PSS/SSS**, the **PBCH chain** (the 24-bit MIB with its CRC and antenna mask,
-tail-biting convolutional coding, rate matching to 1920 bits per frame,
-scrambling, and the reserved-element exclusion in its RE mapping), and the
-**PDCCH/PCFICH/PHICH and PDSCH** resource mapping that carries anything a UE
-would act on. Until those exist `10_lte_air` still has no transmit path, and
-criteria 2 and 3 of the four-point bar remain unmet for Phase 2.
+**Every layer that paragraph used to list as missing now exists** — layer
+mapping and precoding, PSS/SSS, the PBCH chain, PDCCH/PCFICH/PHICH, and the
+PDSCH resource-element map — but **existing is not the same as being verified**,
+and one of them is not. What the srsRAN oracle proves at the time of writing:
+
+- **clean**: `cmp_sync` 0 mismatches (PSS exact against the closed form, SSS
+  `0.000e+00` across 504 cell identities x 2 subframes), `cmp_mimo` 0, `cmp_pbch`
+  0 failures over 75 payload / 120-bit encoded / 1920-bit raw / scrambled and 175
+  RE-sets, and `cmp_crs` **0 mismatches over 2128 cases and 768,096 reference
+  elements**.
+- **red**: `cmp_pdsch`, the end-to-end DL-SCH chain, reports **146 mismatches
+  across all 25 cases**, and the divergence is reported *first* at rate matching
+  (`case 0 rate-matched bits differ at 95 of 816`), with the scrambled-bit count
+  identical — so the scrambler is faithfully carrying through an upstream
+  disagreement, and the root cause is at or before the TS 36.212 5.1.4.1 rate
+  matcher. The complex-value errors are `1.414e+00` and `2.000e+00`, far too
+  large to be single-precision rounding, so this is a genuine disagreement about
+  which bits are correct. **It is not yet known which side is wrong** — our chain
+  or the new srsRAN-side driver — and the check is left failing rather than
+  weakened, because an exact bit comparison replaced with a tolerance would hide
+  precisely the class of error it was written to find. Until that is resolved,
+  criterion 2 of the four-point bar is **written but unproven**, and
+  `10_lte_air` still has no transmit path.
+
+The reference-signal work found a genuine bug in this tree, and it is the kind
+that no self-test can see. The CRS pseudo-random sequence of TS 36.211 6.10.1.1
+is defined over the **maximum** downlink bandwidth (`N_max_DL_RB = 110`) and
+6.10.1.2 places a smaller cell's resource elements in a window offset by
+`N_max_DL_RB - n_rb`. `crs_sequence` was generating only `2 * 2 * n_rb` values,
+which gives the **wrong sequence at every bandwidth below maximum** while
+remaining perfectly self-consistent. The same mistake was present in the PUCCH
+sequence, where the shift is `3 * (N_max_DL_RB - n_rb)`. Both are now derived
+from `CRS_MAX_N_RB = 110`. Two code paths agreeing with each other cannot
+detect this; only an outside reference can.
 
 The one rule that governs every LTE bit, and the one easiest to get wrong:
 X.691 puts a SEQUENCE's OPTIONAL/DEFAULT component bitmap at the *front* of the

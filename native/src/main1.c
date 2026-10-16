@@ -14627,6 +14627,9 @@ static ModuleSubmenuEntry lair_entries[] = {
     { "Tools",
       "preferences-system-symbolic",
       "--earfcn=6300|--power-ref:Power Reference|--gen-enb-conf:Generate eNB Config" },
+    { "Transmit",
+      "media-playback-start-symbolic",
+      "--rrc-tx:Build and Transmit RRC" },
 };
 static ModuleSubmenuEntry lcore_entries[] = {
     { "Overview",

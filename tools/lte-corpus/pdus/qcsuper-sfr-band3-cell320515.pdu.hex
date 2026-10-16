@@ -1,0 +1,24 @@
+# Real captured LTE RRC PDU -- SystemInformationBlockType1 (BCCH-DL-SCH-Message)
+# 26 bytes / 208 bits, carried on SI-RNTI.
+#
+# SOURCE   : https://github.com/P1sec/QCSuper  (licence: GPL-3.0)
+# FILE     : docs/sample_pcaps/sample_2g_3g_4g_xperia_with_sib_and_nas.pcap
+# COMMIT   : 4510c22f523658a551ed619698b16fa89ade015e
+# URL      : https://raw.githubusercontent.com/P1sec/QCSuper/4510c22f523658a551ed619698b16fa89ade015e/docs/sample_pcaps/sample_2g_3g_4g_xperia_with_sib_and_nas.pcap
+# PCAPSHA  : c25244bd115efc6addf3ce25eb8b6b05658e63daf19aaa9edf24609b47c8b45e
+# FRAME    : 1836 (identical PDU in frames 1860, 1871, 1977, 1992, 1999)
+# CARRIER  : GSMTAP type 13 = GSMTAP_TYPE_LTE_RRC, sub-type 5 =
+#            GSMTAP_LTE_RRC_SUB_BCCH_DL_SCH_Message (packet-gsmtap.c enum, value 5)
+# CAPTURED : real commercial LTE network, MCC 208 / MNC 10 (SFR, France), on
+#            2018-03-24 (pcap timestamps 08:38:02..08:43:28). The capture is a
+#            Qualcomm diag log from a Sony Xperia phone, re-encapsulated as
+#            GSMTAP/UDP into a pcap by QCSuper. Real radio, real network, real
+#            hardware -- NOT encoder output.
+# CELL     : trackingAreaCode b5ad (46509), cellIdentity 004e403 (320515),
+#            freqBandIndicator 3, systemInfoValueTag 23 (Wireshark dissection)
+# LICENCE  : the upstream pcap is NOT vendored here (GPL-3.0 source, and this
+#            repository declares no licence of its own). Only this 26-byte
+#            factual extract is stored, with the provenance above; the upstream
+#            file can be re-fetched and re-extracted to prove it:
+#            ./tools/check-lte-corpus.sh <workdir> --upstream
+60c820219040436b5a009c80702ea11080840421411108ddc000
