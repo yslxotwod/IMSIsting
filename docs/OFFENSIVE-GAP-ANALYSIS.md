@@ -86,13 +86,25 @@ which is the tree's stated contract, not a defect.
   `constructor_unresolved` when nothing resolves, so a probe row can no longer
   claim a frame that does not exist. Asserted by `expl-probe-*` in 60's selftest.
 
-**Follow-up (in progress).** The corpus is still a fixed heredoc: `bexp_l2_case`
-`modules/59_baseband_exploit.sh:254` selects a row and nothing encodes one, so
-the hex for all 16 L2 cases is an opaque literal. The open item is to replace
-each literal with a field-level constructor derived from the spec (TS 38.321
-§6.2.1 MAC, TS 38.323 §6.2.2/§6.3 PDCP, TS 38.322 RLC, TS 38.212 §7.3.1 DCI,
-TS 24.501 NAS) and assert the constructor reproduces the recorded bytes.
-Separately, the module now has a real transmit path (`bexp_inject`
+**Done — field-level constructors.** The corpus is no longer opaque literals. Each of
+the 16 L2 cases now declares how its bytes arise, and `--l2-build <name>` prints that
+derivation (`bexp_l2_build` `modules/59_baseband_exploit.sh:326`, `bexp_l2_construct`
+`:360`, `bexp_l2_cases` `:370`): TS 38.321 §6.1.2/§6.2.1 MAC subheaders and the UL/DL
+LCID tables (`bexp_mac_sh` `:256`), TS 38.323 §6.2.2/§6.3 PDCP data and control headers
+(`bexp_pdcp_data_hdr` `:280`, `bexp_pdcp_ctrl_hdr` `:294`), TS 24.501
+§9.1.1/§9.2/§9.3/§9.5 NAS header (`bexp_nas_hdr` `:304`), TS 38.214 §5.1.2.2.2 RIV
+(`bexp_riv` `:313`). 7 cases are true **field** constructions that reproduce their
+recorded bytes exactly and are asserted to (`mac-ccch-len`, `mac-lcid-padding`,
+`mac-bsr-oversize`, `pdcp-1byte-cp`, `pdcp-5byte-cp`, `pdcp-sn-narrow`,
+`nas-unknown-pdu`). The remaining 9 are honest **byte-class** constructs: the RRC/PHY/RLC
+strings cannot be decomposed into named fields, because their named fields sit at least
+9 bits into an ASN.1 APER structure, or describe LTE framing that NR removed. For those
+the `why` column states the byte-level fact the string does encode and what would have to
+be true for the named field to exist — `bexp_l2_construct` labels every case `fields` or
+`bytes` so a caller can never mistake one class for the other. `docs/CONFIRMED-BUGS.md`
+items 36-37 record the two defects the new assertions caught.
+
+Separately, the module has a real transmit path (`bexp_inject`
 `modules/59_baseband_exploit.sh:373`), so 59 is no longer build-only: the send
 is performed here via `BEXP_TX_CMD` and only radio sync/waveform/timing is the
 handoff.
@@ -128,15 +140,28 @@ Ordered by value ÷ cost, where cost is what it takes to validate.
 
 ### 2.1 — Build these first (no SDR required)
 
-**1. Milenage and TUAK — the 3GPP AKA algorithm is not implemented anywhere.**
-Only *mentioned*, in a passing note at `modules/35_volte_ims.sh:644`. Without it
-the toolkit cannot compute RES/XRES/CK/IK/AUTN/MAC-A from K, and therefore cannot
-validate or forge an authentication exchange in 3G/4G/5G. `tools/gsm_crypto.py`
-already carries COMP128-1/2/3 (A3/A8) with published vectors — **its 3G successor
-never followed**, which is the single largest hole in the crypto layer and a
-bigger one than the missing ciphers `FEATURE-GAPS.md` catalogues, because every
+Items struck through and marked **DONE** are closed; they are kept in place so the
+original ordering and its evidence stay visible. As of Phase 1 that is items 1 and
+5 — the AKA algorithms and the A5/1 tradeoff table are implemented, and what
+remains for both is *wiring them into modules*, which no longer belongs to this
+section.
+
+**1. Milenage and TUAK — ~~the 3GPP AKA algorithm is not implemented anywhere~~
+DONE (Phase 1).** ~~Only *mentioned*, in a passing note at
+`modules/35_volte_ims.sh:644`. Without it the toolkit cannot compute
+RES/XRES/CK/IK/AUTN/MAC-A from K, and therefore cannot validate or forge an
+authentication exchange in 3G/4G/5G. `tools/gsm_crypto.py` already carries
+COMP128-1/2/3 (A3/A8) with published vectors — **its 3G successor never
+followed**, which is the single largest hole in the crypto layer and a bigger
+one than the missing ciphers `FEATURE-GAPS.md` catalogues, because every
 AKA-relay and fake-authentication vector is blocked behind it. Testable today
-against TS 35.208 test sets. *Cost: pure computation.*
+against TS 35.208 test sets. *Cost: pure computation.*~~
+Milenage f1–f5\* and TUAK f1–f5\* now live in `tools/gsm_crypto.py`, asserted
+against all twenty TS 35.208 test sets and the TS 35.231/35.232 TUAK sets, with
+the raw Keccak-f[1600] pairs pinning the permutation independently of the
+framing. RES/XRES/CK/IK/AUTN/MAC-A are computable from K. What is left is
+**wiring**, not capability: no module calls the new verbs yet, so `35_volte_ims`
+still only *mentions* AKA.
 
 **2. Baseband diagnostic interfaces — QCDM / DIAG / AT / NV-EFS.** Zero hits for
 `qcdm`, `diag`, `qcsuper`, `at+`, `nvitem`. This is a complete attack surface
@@ -161,11 +186,18 @@ but there is no side-channel path: no differential-power-analysis model to recov
 Ki from a card, no trace-capture interface. `modules/20_sim.sh` already has the
 APDU layer the attack would sit next to. *Cost: computation + a capture rig.*
 
-**5. A5/1 time-memory-tradeoff.** `24_gsm_cve` cites Golic 1997, Biham-Dunkelman-Keller
-2000 and Nohl 2009 in its own output (`modules/24_gsm_cve.sh:662`) but implements
-none of it — the "recovery" verb is a threshold comparison. `11_gsm_attack`'s
-`--kc-search` is the A5/2-style 2^16 shortcut, not the A5/1 TMTO.
-*Cost: computation.*
+**5. A5/1 time-memory-tradeoff — ~~implements none of it~~ the lookup half is DONE
+(Phase 1).** `24_gsm_cve` cites Golic 1997, Biham-Dunkelman-Keller 2000 and Nohl
+2009 in its own output (`modules/24_gsm_cve.sh:662`) but implements none of it —
+the "recovery" verb is a threshold comparison. `11_gsm_attack`'s `--kc-search` is
+the A5/2-style 2^16 shortcut, not the A5/1 TMTO. `tools/gsm_crypto.py` now has
+`A51Table` / `a51_tmto_demo`: a rainbow table with a real build-and-lookup
+interface, and **the honest limit is width**. The method is exact and is checked
+at every column alignment, but the table is built at a reduced index width so it
+can be exhaustively verified in seconds; the 2^54 TMTO of the literature is a
+precomputed-table or cluster job and is out of scope here. Both published A5/1
+vectors (BGW and libosmocore, downlink and uplink) are asserted on the state
+transition. *Cost: computation.*
 
 ### 2.2 — Published attacks with an existing emitter to ride on
 
@@ -257,17 +289,37 @@ own §9 standard.
 
 ### Phase 1 — Crypto core completion (pure computation, published KATs)
 
-**Milenage + TUAK** into `tools/gsm_crypto.py`, alongside the COMP128-1/2/3 that
-already lives there. Assert against **TS 35.208** test sets and **TS 35.231/35.232**
-for TUAK — the tree's own §16 standard, so this phase has the strongest proof
-available anywhere in the list.
+**DONE.** **Milenage + TUAK** are in `tools/gsm_crypto.py`, alongside the
+COMP128-1/2/3 that were already there. Asserted against **TS 35.208** clause
+4.3 — all twenty Milenage test sets, OPC derivation included — and
+**TS 35.231/35.232** for TUAK: all six clause-6 f1/f1* sets and all six
+clause-7 f2-f5/f5* sets. TUAK is pinned twice over, because the end-to-end
+sets alone cannot separate a broken permutation from broken framing: the six
+raw clause-5 Keccak-f[1600] 200-byte input/output pairs cover the permutation
+on its own, and the instance in-blocks printed in clauses 6 and 7 cover the
+key-length-dependent encoding byte-for-byte.
 
-Then **A5/1 time-memory-tradeoff**: implement the table-lookup interface and
-validate the state transition against the two published A5/1 vectors already
-asserted in `gatk_kat_suite` (BGW and libosmocore). Note honestly that the 2^54
-search itself is not runnable here, so this ships as the *lookup* half.
+Then **A5/1 time-memory-tradeoff**:
+  * The **state transition** is validated against the two independent published
+    A5/1 vectors already asserted in `gatk_kat_suite` — Briceno/Goldberg/Wagner
+    and libosmocore, the downlink *and* uplink row of each, plus the
+    `osmo_a5_fn_count` frame-to-COUNT conversion.
+  * The **lookup half** ships as `A51Table` / `a51_tmto_demo`: a rainbow table
+    with a real build-and-lookup interface, run at an operator-named width so
+    the method is exhaustively checkable, and every hit confirmed by
+    regenerating the observed keystream (which is what converts a reduction
+    collision into lost time rather than a wrong answer).
+  * It is explicitly *not* the 2^54 search. At full width that is a
+    precomputed-table or cluster job; `--a51-tmto-demo` prints
+    `scope reduced-width demonstration, NOT the 2^54 attack` on every run, and
+    the module docstring says the same.
 
-**Unblocks:** 5G-AKA / EAP-AKA' (`17_nr_core`, `41_vowifi`), IMP4GT (`35_volte_ims`),
+`--selftest` reports PASS for **1** AES FIPS-197 vector, **6** Keccak pairs,
+**20** Milenage sets (7 checks each), **2** TUAK groups (12 and 30 checks),
+**2** A5/1 vectors (downlink + uplink each), **1** COUNT conversion and **4**
+tradeoff-table lookup alignments.
+
+**Unblocked:** 5G-AKA / EAP-AKA' (`17_nr_core`, `41_vowifi`), IMP4GT (`35_volte_ims`),
 fake authentication in every rogue-BTS module (`11`, `13`, `14`, `16`),
 `23_cipher_audit`'s algorithm tables.
 
@@ -277,14 +329,91 @@ fake authentication in every rogue-BTS module (`11`, `13`, `14`, `16`),
 
 This is the only high-value work that can be *proved* without a radio.
 
+**TP layer — DONE.** The **TS 23.040 SMS TP layer** is in `modules/46_ota_sms.sh`
+as `otasm_tp_*` / `otasm_tpdu_*`, alongside the TS 23.048 work already there.
+Encoded and parsed: **TP-MTI** (all four values, with the reserved value
+reported rather than coerced, per §9.2.3.1), **TP-PID** (both coding blocks,
+the full telematic-device table, Short Message Type 0, Replace 1–7, Device
+Triggering), **TP-DCS** (all nine TS 23.038 §4 coding groups, alphabet, message
+class, compression, and the reserved groups §4 warns about), **TP-SCTS** and
+**TP-DT** (semi-octet swap plus the signed quarter-hour zone), the **address
+field** (§9.1.2.5, odd digit counts with the `F` fill, and the alphanumeric
+originator read path), **TP-FCS** and **TP-ST** (both full tables, reserved
+ranges interpreted the way the spec says an MS must), **TP-UDL** cross-checked
+against the actual TP-UD length *under the alphabet TP-DCS selected* rather
+than assumed, **TP-UDHI**, **TP-PI** and **TP-VPF**-dependent TP-VP lengths.
+
+**Delivery-report handling** is the SMS-STATUS-REPORT branch of `--tpdu-parse`
+(TP-MR, TP-RA, TP-SCTS, TP-DT, TP-ST, TP-PI, and the optional trailing TP-UD),
+with TP-ST's temporary/permanent and retry-vs-gave-up ranges distinguished.
+
+**Type 0 silent SMS** ships as `--type0-build` and `--type0`: the builder emits
+the canonical TP-PID 0x40 SMS-DELIVER with an empty TP-UD, and the audit states
+what that obliges the ME to do — acknowledge, discard, do not indicate, do not
+store (§9.2.3.9) — plus the TP-FCS 0x81 an SC returns when it will not carry
+Type 0 at all (§9.2.3.22).
+
+The **GSM 7-bit packer** is anchored to TS 23.038 §6.1.2.1.1's normative
+bit-layout tables: `hi`→`e834`, `Hi`→`c834`, `hello`→`e8329bfd06`,
+`Hello`→`c8329bfd06`, each with a round-trip check. `hi`→`e834` is the same
+vector `43_ussd` already asserts, so a regression in either packer is caught by
+the other module. `--selftest` reports **93 assertions, RESULT PASS**, four of
+which assert an invariant rather than a value: every line emitted on the
+`finding` severity channel is counted in `findings`, and an informational line
+arrives as `note`. That invariant is what caught a MEDIUM that was printed but
+never counted.
+
+Nothing in this half transmits. `--plan-tp` is the handoff: build the TPDU,
+wrap it with `--smsc-wrap`, and hand it to a loopback SMSC you run.
+
+**Size:** S. **Validate by:** a loopback SMSC; the published packing vectors.
+
+**DPA side-channel model — DONE.** COMP128-1's round 0, level 0 reads
+`x[a] = T0[(ki[j] + 2*rand[j]) & 511]`, so the power proxy for key byte `j`
+is the Hamming weight of one table lookup at an address the attacker chooses
+by picking RAND. That model lives in `tools/gsm_crypto.py` next to the
+COMP128-1 tables it needs — copying the S-boxes and `T0` into shell is the
+drift this tree has already been bitten by. `20_sim` owns the SIM-domain
+verbs and delegates:
+
+- `--dpa-model <ki> <rand>` prints the leakage point for all 16 key bytes:
+  address, `T0` output and Hamming weight.
+- `--dpa-sim <ki> [traces] [sigma]` synthesises traces from the model,
+  correlates all 256 candidates per position, then **proves** the result by
+  running COMP128-1 on challenges the trace set never contained. A correlation
+  peak is not accepted as evidence; `holdout_mismatches` must be 0.
+- `--dpa-sweep <ki>` sweeps noise (σ 0…5), trace count (16…512) and a
+  deliberately wrong leakage model.
+
+At σ=0 and 512 traces the peak correlation is 0.80 against a runner-up of
+0.01. Recovery survives σ=5.0, and 16 traces already separate the key byte
+from all 256 candidates. The sweep's discrimination control is the load-bearing
+part: when the model targets the wrong quantity (the address rather than the
+table output), **16 of 16 bytes come back wrong** — so a passing run is testing
+the leakage model, not merely finding structure in the trace matrix.
+
+The traces are synthetic. There is no oscilloscope, no probe and no card in
+this path, and none of those numbers is a measurement. `--plan dpa-lab` is the
+handoff and names the exact rig (owned UICC, PC/SC reader, current or EM probe,
+triggerable scope), plus what real captures add: alignment jitter, and whether
+the leakage is `T0`'s Hamming weight at all — a masked card makes that
+assumption false, and masking is exactly what COMP128-2/-3 do.
+
+`20_sim --selftest` gained 10 assertions covering the delegation and its
+argument validation; the arithmetic is proved in `gsm_crypto.py --selftest`,
+which includes the held-out verification and the wrong-model control.
+
+**Size:** S (model) rather than M — the APDU layer already existed, and the
+arithmetic sits beside tables that were already there.
+**Validate by:** the model's own degradation behaviour; a capture rig for the
+real thing.
+
 | Item | Where | Notes |
 |---|---|---|
 | **QCDM / DIAG / AT / NV-EFS** | new module (nb. `61_baseband_diag`) | DIAG framing, NV/EFS read-write, IMEI surface, AT command handling, baseband log decode. New dep: `pyserial`. Needs a cable, not an SDR. |
-| **TS 23.040 TP layer + Type-0 silent SMS** | extend `46_ota_sms` | TP-MTI / TP-PID / TP-DCS encode+parse, delivery-report handling. Natural sibling of the TS 23.048 work already there. |
-| **DPA side-channel model** | alongside `20_sim` | Trace→Ki correlation for COMP128; the APDU layer it needs already exists. |
 
-**Size:** L for DIAG, S for the TP layer, M for DPA.
-**Validate by:** a USB-attached modem; a loopback SMSC; a capture rig.
+**Size:** L for DIAG.
+**Validate by:** a USB-attached modem.
 
 ### Phase 3 — The emitter layer (one decision, eight modules)
 

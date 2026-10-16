@@ -56,14 +56,14 @@ Module ids are the contract between the C app, the index generator and
 
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
-| `20_sim.sh` | `sim` | SIM / eSIM / OTA | SIM | APDU ISO-7816, USIM file read, OTA SMS TAR/SPI, eSIM profile ops |
+| `20_sim.sh` | `sim` | SIM / eSIM / OTA | SIM | APDU ISO-7816, USIM file read, OTA SMS TAR/SPI, eSIM profile ops, COMP128-1 DPA model |
 
 ## Analysis
 
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
 | `21_pcap_analysis.sh` | `pcap` | Capture Analysis | ANALYSIS | Decode pcap/pcapng: SCTP, Diameter, GTP, NAS, RRC, NGAP, PFCP |
-| `22_imsi_exposure.sh` | `imsi` | IMSI Exposure Audit | ANALYSIS | Correlate identities across captures, TMSI/IMSI map, exposure report |
+| `22_imsi_exposure.sh` | `imsi` | IMSI Harvest | ANALYSIS | Harvest and correlate identities across captures, TMSI/IMSI map, exposure report |
 | `23_cipher_audit.sh` | `caud` | Cipher Audit | ANALYSIS | Score negotiated ciphers per session, find null/downgraded bearers |
 
 ## Scanners
@@ -212,3 +212,33 @@ restricted where you are, and the module says so. It demods nothing that needs
 keys you are not entitled to.
 
 **`47_li_probe` remains detection-only** and is listed under v0.3 above.
+
+## 59–61 — new
+
+| File | Tag | Menu name | Category | Owns |
+|---|---|---|---|---|
+| `59_baseband_exploit.sh` | `bexp` | Baseband Exploits | ATTACKS | L1/L2 malformed PDUs, 5G control-plane forgery, CVE catalogue, the TX path |
+| `60_nr_inject.sh` | `nrj` | 5G NR Injection | ATTACKS | RNTI arithmetic, MAC-NR, DCI/TBS/RAR, Gold descrambling, injection exploits |
+| `61_baseband_diag.sh` | `bbdg` | Baseband NV/EFS | ATTACKS | Qualcomm DM/DIAG framing, NV and EFS2 read/write, state-info identity decode, AT/device I/O |
+
+## Scoping decisions in 59–61
+
+**`61_baseband_diag` has no `--set-imsi`, and that is a decision, not a gap.**
+DIAG reaches baseband NV/EFS, and the module can write any NV item or any EFS
+path (`--nv-write`, `--efs-write`). What it will not do is pretend to know
+*which* item holds the IMSI: no published item-number-to-semantics table exists,
+and the item numbers that circulate trace to forum posts rather than to a
+specification or an implementation. Hardcoding them would put a confident,
+wrong write on the wire — the same failure mode as the S702 work, where 270
+assertions encoded the same unverified values. So the module ships discovery
+(`--nv-scan`, `--efs-walk`, `--efs-stat`, `--state-info`) and read-back
+verification (`--state-info-parse`) instead of a setter that might be pointed at
+the wrong item. On LTE/5G the network-visible IMSI comes from the USIM during
+attach anyway, so the baseband NV identity is largely a CDMA/legacy path; the
+SIM-side reader is `20_sim.sh`, and the core-side forger is
+`15_lte_core.sh --gtp-csr-forge`.
+
+**`61_baseband_diag` is ungated by design.** `--nv-write` and `--efs-write` are
+raw protocol primitives, so gating them would only obscure what they do. The
+module says so in its own `--status` (`GATING none`) and in `--help`.
+

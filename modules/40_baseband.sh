@@ -155,7 +155,11 @@ bbnd_mutate() {
             printf '%s%02x' "$hex" "$(( r & 0xFF ))" ;;
         duplicate)
             (( nbytes < 2 )) && { printf '%s%s' "$hex" "$hex"; return 0; }
-            local start=$(( r % nbytes )) len=$(( 1 + (r % (nbytes - start)) ))
+            # Split: `local a=.. b=$(( ..a.. ))` expands every argument before
+            # local runs, so b would read an unset a and the bound on the
+            # duplicated tail would be wrong.
+            local start len
+            start=$(( r % nbytes )); len=$(( 1 + (r % (nbytes - start)) ))
             printf '%s%s' "$hex" "${hex:$(( start * 2 )):$(( len * 2 ))}" ;;
         len-corrupt)
             # ASN.1-aware: overwrite the first length octet with a value that

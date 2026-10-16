@@ -1061,7 +1061,7 @@ vims_cli_main() {
         --menu)                   vims_menu ;;
         *)
             cat >&2 <<EOF
-VoLTE / IMS — ReVoLTE keystream reuse, IMP4GT, SIP and IMS registration
+VoLTE / IMS Attacks — ReVoLTE keystream reuse, IMP4GT, SIP and IMS registration
 
 Usage: $0 COMMAND
   --status-tsv                              module state as TSV

@@ -1149,7 +1149,7 @@ imsi_cli_main() {
         --menu)            imsi_menu ;;
         *)
             cat >&2 <<EOF
-IMSI Exposure Audit — identity harvesting, correlation and scoring
+IMSI Harvest — identity harvesting, correlation and scoring
 
 Harvests through module 21 (21_pcap_analysis.sh), so there is one pcap
 parser in the tree. A pre-harvested TSV of the same shape is also accepted,

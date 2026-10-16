@@ -26,7 +26,7 @@ things to build, because one implementation closes findings in many modules:
 
 | Theme | Findings mentioning it | What is missing |
 |---|---|---|
-| **No cipher implementations** | 21 | A5/2, A5/3 (KASUMI), UEA1/2 (f8), UIA (f9), EEA/EIA (AES-CMAC), NEA/NIA and Milenage: named in plans and status tables, but nothing computes them — **except A3/A8: COMP128-1/2/3 landed in `tools/gsm_crypto.py`** and is wired into `24_gsm_cve --kc` / `--probe KC` (validated against published vectors). `--kc` previously returned a truncated `sha256`. |
+| **No cipher implementations** | 21 | A5/2, A5/3 (KASUMI), UEA1/2 (f8), UIA (f9), EEA/EIA (AES-CMAC), NEA/NIA: still named in plans and status tables with nothing computing them. **What does compute, all in `tools/gsm_crypto.py` and all validated against published vectors: A3/A8 (COMP128-1/2/3) wired into `24_gsm_cve --kc`/`--probe KC`; the AKA pair Milenage f1–f5\* (20 TS 35.208 sets) and TUAK f1–f5\* (TS 35.231/35.232 sets) with the raw Keccak-f[1600] permutation; and the A5/1 keystream plus a reduced-width time-memory-tradeoff table (`A51Table`/`a51_tmto_demo`, checked at every column alignment).** The A5/1 state transition also exists in `10_gsm_air` — the TMTO lookup half is new. Minting RES/XRES/CK/IK is no longer the blocker; *calling* it is, because no module wires the AKA verbs yet. |
 | **No decryption anywhere** | 16 | 10 modules reference decryption or a keystream; none XORs a recovered keystream over captured ciphertext, so "can this be read" is never actually answered. |
 | **File-only, no live capture** | 47 | 36 findings involve pcaps. Several modules read a file, then advertise tshark they never invoke; no module captures live, so nothing can notice a problem while it is happening. |
 | **One direction only** | — | Many modules build a request or parse a message but not the counterpart: decode without encode, or parse without answer. The tests pass because only one direction is exercised. |
@@ -338,7 +338,16 @@ things to build, because one implementation closes findings in many modules:
   - *Evidence:* verified: 19_downgrade.sh:356-357 prints 'no tshark — install wireshark-cli'; sibling 21_pcap_analysis.sh:920 always runs its own python parser and 22_imsi_exposure.sh:114-123 / 23_cipher_audit.sh:773-784 drive module 21 as a subprocess
 
 ### `modules/20_sim.sh`
-
+- **the DPA model has no real trace acquisition: the traces are synthesised, so nothing here proves a card leaks**
+  - *Why it matters:* `--dpa-sim` recovers a KI from traces it generated from the leakage model itself, which bounds what the
+    attack needs (a correct model and aligned traces) but is not a measurement. A real COMP128-1 card may be masked, and then
+    the Hamming-weight assumption the model rests on is simply false — COMP128-2/-3 exist precisely to break it.
+  - *Suggested:* a capture path driving a PC/SC reader and a scope (`--plan dpa-lab` names the rig), recording RAND per trace,
+    with alignment and a leakage-model check on the real data.
+  - *Evidence:* verified: `--dpa-sim` calls tools/gsm_crypto.py `dpa_run`, which builds its traces from `dpa_hw` of the model's
+    own table lookup plus seeded Gaussian noise; every verb prints `scope synthetic traces ... not a measured card`;
+    `grep -rniE 'pyvisa' modules/*.sh tools/*.py` = 0 hits, so no instrument-control call exists anywhere in the tree. The
+    only occurrences of 'oscilloscope' are the dpa-lab plan text and the honesty notes (20_sim.sh:1297, :1565, :1782).
 - **only three EF contents can be decoded (ICCID, IMSI, EF_AD); the module names 40+ files but returns raw hex for the rest**
   - *Why it matters:* after --read-binary on EF_LOCI, EF_FPLMN, EF_HPLMNwAct, EF_UST, EF_SPN, EF_KEYS or EF_EPSLOCI the operator gets a hex blob the module cannot interpret, so the classic "where was this card last used / which PLMNs are barred / which services are enabled" questions stay unanswered
   - *Suggested:* `--decode-ef <fid> <hex> covering LOCI/PSLOCI/EPSLOCI (TMSI+LAC), FPLMN/HPLMNwAct/OPLMNwAct (PLMN lists), UST/EST (service bitmaps), EF_KEYS/EF_KEYSPS (CK/IK)`
@@ -346,7 +355,7 @@ things to build, because one implementation closes findings in many modules:
 - **no Milenage / USIM-5G AKA computation (f1–f5) and no OPc derivation**
   - *Why it matters:* the operator cannot compute RES/CK/IK/AUTN from Ki+OPc+RAND, so a USIM cannot be validated and a replayed or forged authentication cannot be distinguished from a real one; the only key derivation in the tree is a fake
   - *Suggested:* `--aka <ki32> <opc32> <rand32> [sqn] [amf] printing mac-a/mac-s/res/ck/ik/autn, plus --opc <ki> <op>`
-  - *Evidence:* verified: grep -rniE 'milenage' modules/*.sh = 1 hit and it is prose (35_volte_ims.sh:644); grep -rniE 'comp128' shows no implementation, and 24_gsm_cve.sh:460-466 gcve_comp128_kc is sha256(KI||RAND)[0:8], not A3/A8
+  - *Evidence:* verified: grep -rniE 'milenage' modules/*.sh = 1 hit and it is prose (35_volte_ims.sh:644); grep -n '\-\-aka' modules/20_sim.sh = 0 hits. NOTE (updated): the arithmetic now DOES exist — tools/gsm_crypto.py implements Milenage f1-f5* and OPC derivation, asserted against TS 35.208 Test Sets 1-20, and 24_gsm_cve.sh:470-472 shells out to it with --comp128 — so what remains is the module-level --aka verb, not the cipher. The earlier claim that 24_gsm_cve.sh:460-466 was sha256(KI||RAND)[0:8] is stale; gcve_comp128_kc no longer exists.
 - **no ATR decoder**
   - *Why it matters:* the first thing an operator does with an unknown card in a PC/SC reader is read the ATR, and the module finds the reader and lists it but cannot tell a T=0 GSM card from a T=1 USIM, an eUICC or a Java card, nor flag a malformed checksum
   - *Suggested:* `--atr <hex> decoding TS, T0, TA/TB/TC/TD, the historical bytes and the TCK checksum`
@@ -533,18 +542,22 @@ things to build, because one implementation closes findings in many modules:
   - *Why it matters:* the most-used SS7/MAP attack primitive, SAI against a chosen IMSI, cannot be exercised at all, and the dead builders mean the operator has no way to hand a real MSU to a lab STP
   - *Suggested:* `--build-sai <imsi> [n], --build-psi, --build-ulr, --build-isd, --build-register-ss <ss-code> [forwarded-number]`
   - *Evidence:* verified: modules/31_ss7_map.sh:1026-1037 define the builders, dispatch :2024-2026 exposes only --build-sri/--build-sri-sm/--build-ati, grep for ss7_build_sai/ss7_build_ulr/ss7_build_isd finds definitions with no call sites
+  - *Status:* **CLOSED** — `--build-sai/--build-psi/--build-ulr/--build-isd/--build-register-ss/--build-activate-ss` are all dispatched (modules/31_ss7_map.sh:2598-2603) through `ss7_cmd_build_extra` (modules/31_ss7_map.sh:1876), each reporting its opcode and a `roundtrip_opcode` proving builder and parser still agree, and each is reachable from the menu. The router/number arguments also reach the wire: `ss7_build_ulr` takes optional MSC and VLR numbers and `ss7_build_register_ss` takes the forwarded number, both length-prefixed.
 - **--flow is hardcoded to a test identity and test point codes**
   - *Why it matters:* the four published flows (intercept, locate, sms-intercept, forward-hijack) can only be built for MSISDN 33612345678, IMSI 310150123456789 and OPC/DPC 00000001/00000002, so nothing can be produced for the operator's own target
   - *Suggested:* `--flow <name> [msisdn] [imsi] [opc] [dpc]`
   - *Evidence:* verified: modules/31_ss7_map.sh:1054-1055 (fixed identity constants), :1061-1068 (hardcoded point codes), :1517 (ss7_cmd_flow takes one arg)
+  - *Status:* **CLOSED** — `ss7_cmd_flow` now takes msisdn, imsi, opc and dpc (modules/31_ss7_map.sh:1921) and `ss7_flow` threads them into every built step (modules/31_ss7_map.sh:1086); the selftest parses the built label back out of step 1 to prove the point codes are in the message rather than only in the header output.
 - **no SIGTRAN/M3UA layer: the codec is MTP3-only, so an M3UA-over-SCTP capture cannot be decoded and no send-ready M3UA payload can be built even though the module's own plan says to send the MSU as the M3UA payload**
   - *Why it matters:* real interconnect traffic is SCTP/M3UA, which the module itself calls the modern exposure path; the operator must strip SCTP and M3UA headers by hand before --decode-msu sees anything
   - *Suggested:* `--decode-sigtran <hex> (strip SCTP common header and M3UA DATA) and --build-m3ua <msu-hex> [opc] [dpc] [si]`
   - *Evidence:* verified: grep -in m3ua/sctp modules/31_ss7_map.sh returns only :624 comment, :1128/:1133 prose and :1296-1396 plan text, no code path
+  - *Status:* **CLOSED** — `--decode-sigtran` (modules/31_ss7_map.sh:1803) walks SCTP common header and DATA chunk, then M3UA, then hands the Protocol Data payload to the existing MTP3/SCCP decoder; `--build-m3ua` (modules/31_ss7_map.sh:1783) emits a send-ready DATA message with the 16-octet Protocol Data parameter and its RFC 4666 4-octet padding, and `ss7_m3ua_parse` (modules/31_ss7_map.sh:1707) round-trips the payload back to the input MSU. The optional arguments are routing-context and network-appearance, not opc/dpc/si — the MSU already carries those, and restating them would be the bug.
 - **--detect reports no point code and no global title: the tshark extraction pulls only frame, calling/called SSN and opcode, and the rules key on SSN and opcode alone**
   - *Why it matters:* a finding names the opcode but not the OPC/DPC or called GT that sent it, so the operator cannot act on the offending interconnect peer or confirm which of their own nodes was queried
   - *Suggested:* `add mtp3.opc/dpc and sccp.calling/called.gt to the extraction and finding detail, plus a first-seen or unexpected point-code rule`
   - *Evidence:* verified: modules/31_ss7_map.sh:1249 (-e frame.number -e sccp.calling.ssn -e sccp.called.ssn -e gsm_old.opCode), rules :1200-1240 use SSNs only
+  - *Status:* **CLOSED** — the tshark extraction now also pulls `mtp3.opc`, `mtp3.dpc`, `sccp.calling.digits` and `sccp.called.digits` (note: tshark defines no `sccp.calling.gt`, so the global title is the `digits` field), and every finding carries the routing context via `ss7_detect_route` (modules/31_ss7_map.sh:1222). `ss7_detect_stream` (modules/31_ss7_map.sh:1233) buffers the rows and adds a first-message-is-a-query rule: a point code whose very first message in the capture is ATI/SRI/SRI-SM/ULR/forwarding never announced itself with routine traffic. Four-column rows still work unchanged, and no point code is invented when the MTP3 columns are absent.
 
 ### `modules/32_cellular_dns.sh`
 
@@ -814,10 +827,10 @@ things to build, because one implementation closes findings in many modules:
 
 ### `modules/46_ota_sms.sh`
 
-- **no SMS transport framing: the module emits the bare 03.48 command packet and cannot build the SMS-DELIVER TPDU that carries it (TP-UDHI=1 with UDH IEI 0x70, OTA DCS) nor segment a packet across 140-octet SMS into concatenated UDHs**
+- **OTA-specific SMS transport framing is still missing: the module now builds a general SMS-DELIVER/SMS-SUBMIT TPDU (Phase 2 of docs/OFFENSIVE-GAP-ANALYSIS.md, `--tpdu-deliver` / `--tpdu-submit`) but not the OTA one — TP-UDHI=1 with UDH IEI 0x70 and the OTA DCS — and it still cannot segment a packet across 140-octet SMS into concatenated UDHs**
   - *Why it matters:* the 200-octet packet its own selftest builds can never be delivered to a SIM, and no built packet can be handed to a modem as-is
-  - *Suggested:* `--sms-deliver <packet-hex> [oa] emitting the TPDU with 8-bit concatenation UDHs`
-  - *Evidence:* verified: modules/46_ota_sms.sh:151-167, :275-277 (200-octet selftest packet); modules/20_sim.sh:641-790 parses OTA TPDUs (sim_parse_ota) and nothing builds one
+  - *Suggested:* `--sms-deliver <packet-hex> [oa] emitting the TPDU with the 0x70 UDH and 8-bit concatenation UDHs`
+  - *Evidence:* verified: `otasm_tpdu_build_deliver` / `otasm_tpdu_build_submit` emit plain TPDUs and `--tpdu-parse` reports `mt_udhi`, but no UDH composer or segmentation loop exists; modules/20_sim.sh:641-790 parses OTA TPDUs (sim_parse_ota) and nothing builds one
 - **no PoR/response packet parse: the SPI's PoR request bits are decoded but the SIM's receipt packet, with its own RC/CC and application status, is never read**
   - *Why it matters:* a lab operator can only say a receipt was requested, never whether the card accepted the command or why it refused
   - *Suggested:* `--parse-por <hex> printing the PoR header, application status, receipt CC/RC verdict`
@@ -840,6 +853,7 @@ things to build, because one implementation closes findings in many modules:
 - **No silent-SMS detection from the message itself — the scorer only counts rows the operator already labelled 'silent_sms', and the declared 'silent' column is never read**
   - *Why it matters:* Silent SMS (TP-PID 64 / class-0) is the canonical LI target-presence test; a module that claims to score it but cannot recognise it in traffic has no independent detection value
   - *Suggested:* `--detect-silent-sms <file> parsing SMS-DELIVER TP-PID and TP-DCS class-0 (TS 23.040 §9.2.3.9) and flagging short/empty TP-UD pings per IMSI`
+  - *Note:* the TPDU-level primitive this needs now exists — `modules/46_ota_sms.sh --tpdu-parse` classifies TP-PID 0x40 on a raw TPDU and `--type0` reports the silent-message properties — so this gap is now only the pcap/TSV plumbing in this module, not the TP-layer decode
   - *Evidence:* verified: awk block 47_li_probe.sh:106-113 uses only $2,$3,$4 — the 5-field header documented at 47_li_probe.sh:101 ('silent') is read nowhere in the file; grep -n "silent" 47_li_probe.sh shows the string only inside literal event names at :121 and :125
 - **No TS 33.128 5G LI handover mapping — X1/X2/X3 (TS 33.108) are modelled but the 5G equivalents and their POIs (AMF/SMF/UPF) are only mentioned in a comment**
   - *Why it matters:* Any intercept or audit question on a 5G SA network is answered against TS 33.128 interfaces and PDU-session-level CC, not the 3GPP-rel-8 names the module prints

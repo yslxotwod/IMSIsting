@@ -629,3 +629,69 @@ variables were overridable all along and the selftests simply never set them, so
 assertion that had been present from the start could not fire — the defect could only appear
 in an environment where a driver had actually been detected.
 
+## 36. `59_baseband_exploit` put the NAS security header type in the wrong nibble (2025)
+
+Two independent defects, one hiding the other.
+
+**(a) The nibble was wrong.** `bexp_forge_reg_accept` built octet 2 as
+`printf -v out '7e%02x42%s' "$(( sec << 4 ))" "$body"` — security header type in the **high**
+nibble — and `bexp_cp_check` read it back the same way, `sec=$(( (b1 >> 4) & 0x0F ))`. Both are
+the opposite of the specification. TS 24.501 §9.3 puts the security header type in *bits 1 to 4*
+of the second octet, §9.5 puts the spare half octet in *bits 5 to 8*, and §9.1.2 numbers **bit 1
+as the least significant bit** of the octet. The security header type is therefore the **low**
+nibble and the spare half octet the high one. Every forged Registration Accept was emitted as
+`7e4042` instead of `7e0442` — a message whose header byte says "spare = 4, plain message",
+which is not the bypass the function claims to build.
+
+**(b) The decoder never worked at all.** `bexp_cp_check` read the byte with
+
+```bash
+local b1=$(( 16#${h:2:2} )) sec=$(( b1 & 0x0F )) mt=$(( 16#${h:4:2} ))
+```
+
+`local` is a command: **all** of its arguments are expanded *before* it runs, so `sec` read the
+**outer**, still-unset `b1` and was always `0`. This is why (a) was invisible: `security_header`
+was reported as 0 for every input, and the one assertion that touched the field
+(`cp-newctx`, expecting the new-context bypass class `findings=1`) passes for a plain message
+too, because a plaintext network-originated message is *also* a bypass class. The assertion could
+not distinguish the two paths it was supposed to separate.
+
+| Field | Old behaviour | Correct |
+|-------|---------------|---------|
+| `--forge-reg-accept 4` frame | `7e4042` | `7e0442` |
+| `--cp-check 7e0442` `security_header` | `0` | `4` |
+| `--cp-check 7e0442` `security_meaning` | plain 5GS NAS | integrity protected and ciphered, new 5G NAS security context |
+
+Fixed at `modules/59_baseband_exploit.sh:158` (`sec & 0x0F`), `:201` (split assignment) and
+`:197`-region, plus the comment block that documented the wrong nibble. The selftest gained
+`forge-ra-frame`/`forge-ra-body` at the corrected values, `forge-ra-spare-zero` (octet 2 must be
+`04`, proving the spare half octet is the high one), `cp-newctx-sec`, and four spec-constant
+assertions on `bexp_nas_hdr`. 108 assertions PASS.
+
+## 37. The `local a=… b=$(( …a… ))` bug class (2025)
+
+Defect 36(b) is one instance of a shape that is invisible on inspection: a single `local`
+declaring several variables where a later initialiser reads an earlier one.
+
+```bash
+local start=$(( r % nbytes )) len=$(( 1 + (r % (nbytes - start)) ))   # start is unset here
+```
+
+`local` expands every argument before it assigns any of them, so `start` resolves to whatever the
+enclosing scope holds — normally nothing, i.e. `0`. The value is silently wrong rather than an
+error, and the line reads correctly.
+
+The tree was scanned for the shape (a `local` command with two or more assignments where a
+later right-hand side names an earlier variable in the same command) and it occurs **once** more:
+`modules/40_baseband.sh:158`, the `duplicate` mutation strategy, where `len` was computed from an
+unset `start`. Its effect was bounded — bash clamps an over-long substring — but the duplicated
+tail was longer than the strategy intends. Fixed by splitting the declaration; `40_baseband`
+selftest 48 assertions PASS.
+
+**Rule.** When one `local` line initialises a variable from another, split the declaration from
+the assignments. The two-argument form is safe only while the right-hand sides are independent —
+and nothing enforces that as the line grows. Two other grep hits for the same *text* pattern
+(`modules/52_wifioff.sh:84-85`) are not instances: the `subject=`/`issuer=` there are inside sed
+patterns, not variable references.
+
+

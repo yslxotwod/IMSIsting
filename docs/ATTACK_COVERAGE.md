@@ -27,7 +27,7 @@ in the v0.1 roster.
 |---|---|---|---|
 | O1 | IMSI catcher (Stingray) | `11_gsm_attack` · `14_lte_air` · `16_nr_air` | Full sequence construction and the reselection/race logic; transmit path is a named-hardware plan file |
 | O2 | GTP exploitation | `15_lte_core` | GTP-C/GTP-U encode, decode, IE walk, TEID handling; injection is a lab-testbed plan |
-| O3 | SS7 exploitation | `31_ss7_map` **NEW** | MAP/TCAP encode-decode: SRI, SRI-SM, PSI, ATI, ULR; interception and tracking flows; lab STP plan |
+| O3 | SS7 exploitation | `31_ss7_map` **NEW** | MAP/TCAP encode-decode: SRI, SRI-SM, PSI, ATI, ULR, SAI (auth-vector retrieval), ISD, registerSS/activateSS; the flows; SIGTRAN (SCTP+M3UA) build and decode; lab STP plan |
 | O4 | Diameter attacks | `15_lte_core` | S6a/S6d AIR/ULR/CLR/IDR/DSR/PUR encode-decode; forged-ULR registration move; lab HSS plan |
 | O5 | SIM swapping | `36_sim_defense` **NEW** | See the scoping note below |
 | O6 | Baseband exploitation | `24_gsm_cve` · `25_lte_cve` · `26_nr_cve` | CVE catalogue with probe-or-handoff per id; ASN.1 length-oracle and vector analysis |

@@ -97,7 +97,7 @@ and a testbed. Every computational half is already built and verified offline.
 
 | Capability | Module | Built today | Missing to fire |
 |---|---|---|---|
-| **SIM / APDU** | `20_sim` | ISO-7816 build/parse with real status words, USIM file ids, ICCID/IMSI BCD, EF_AD in both layouts, PIN/PUK state, eSIM RSP | DEVICE: a reader and a SIM you own |
+| **SIM / APDU** | `20_sim` | ISO-7816 build/parse with real status words, USIM file ids, ICCID/IMSI BCD, EF_AD in both layouts, PIN/PUK state, eSIM RSP, COMP128-1 DPA leakage model with synthetic-trace key recovery | DEVICE for capture: a reader, a SIM you own, a probe and a scope (`--plan dpa-lab`) |
 | **OTA binary SMS** | `46_ota_sms` | TS 23.048 Command-Packet construction (SPI, TAR, counter, padding counter), replay decisions per SPI mode | DEVICE: the SIM's KIc/KID — **only your own SIM** |
 | **SIM Toolkit / STK** | `57_stk` | TS 31.111 proactive command build/parse (D0 envelope, comprehension-TLVs), silent-command audit | DEVICE |
 | **USSD / STK injection** | `43_ussd` | GSM 7-bit packing (E8 34 worked example), MMI/SS parsing, USSD facility build with DCS, injection detector | DEVICE / NET |
@@ -116,7 +116,7 @@ edge of what can be validated by anyone.
 
 | Capability | Module | What is buildable now | The hop nobody closes |
 |---|---|---|---|
-| **O3 — SS7 exploitation** | `31_ss7_map` | MTP3 routing label (3-8-3, 4-4-4-2), SCCP, TCAP, MAP opcodes TS 29.002, SRI / SRI-SM / ATI / PSI / call-forwarding-hijack construction, SSN table | An STP or interconnect. In practice: a roaming agreement |
+| **O3 — SS7 exploitation** | `31_ss7_map` | MTP3 routing label (3-8-3, 4-4-4-2), SCCP, TCAP, MAP opcodes TS 29.002, SRI / SRI-SM / ATI / PSI / SAI / ULR / ISD / call-forwarding-hijack construction, SCTP+M3UA framing in both directions, SSN table | An STP or interconnect. In practice: a roaming agreement |
 | **O9 — GRX exploitation** | `31_ss7_map` | GRX/IPX reachability, GSN address harvesting, the interconnect trust model | A GRX/IPX presence |
 | **O20 — roaming abuse** | `31_ss7_map` | SEPP / delegated-discovery exposure, inter-operator trust model | Two operators |
 | **O4 — Diameter attacks** | `15_lte_core` | S6a/S6d AIR/ULR/CLR/IDR/DSR/PUR encode-decode (code table corrected against Wireshark: 316 ULR, 317 CLR, 318 AIR, 319 IDR, 320 DSR, 321 PUR), forged-ULR registration move | An HSS |
@@ -248,7 +248,7 @@ A module is finished when all four are true:
 4. `05_field_kit --guard-check` classifies it `honest`, never `silent`, never
    `fabricated`.
 
-That is the bar the other 54 modules are held to, and it is the bar that makes
+That is the bar the other 56 modules are held to, and it is the bar that makes
 the "ship it and let people with hardware test it" model work — because when
 someone does attach a PlutoSDR, the module either fires or tells them precisely
 what is missing.

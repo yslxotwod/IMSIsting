@@ -215,6 +215,8 @@ M["59_baseband_exploit"] = (R(-30, -30, 60, 60, 6) +
                             SL("M0 -34 L-8 -8 L4 2 L-6 34"))
 M["60_nr_inject"] = (dot(-40, 34, 8) + arc(20, -40.0, 34.0) + arc(34, -40.0, 34.0) +
                      arc(48, -40.0, 34.0) + P("M20 -6 L46 2 L20 10 z"))
+M["61_baseband_diag"] = (R(-30, -30, 60, 60, 6) +
+                         SL("M-14 -14 L2 0 L-14 14") + SL("M8 14 h18"))
 
 # --- ANALYSIS: magnifier base, mark inside the lens ----------------------
 M["21_pcap_analysis"] = SL("M-38 8 l12 -22 l12 32 l12 -36 l12 26 l12 -12 l10 8")
@@ -290,8 +292,8 @@ def main():
             if m and m.group(2) in CATS:
                 mods.append((m.group(1), m.group(2)))
 
-    if len(mods) != 56:
-        raise SystemExit("expected 56 modules, parsed %d" % len(mods))
+    if len(mods) != 57:
+        raise SystemExit("expected 57 modules, parsed %d" % len(mods))
 
     os.makedirs(OUT, exist_ok=True)
     for mid, cat in mods:

@@ -1294,6 +1294,7 @@ sim_plan_hardware() {
         sat-wib)    echo "a programmable USIM (sysmoUSIM-SJS1 or Sysmocom SJA2/SJS1) with OTA keys you hold, plus a phone or an Osmocom testbed to receive the proactive commands" ;;
         esim-download) echo "an eUICC with test-profile capability (a 5.2+ eUICC in a PC/SC reader, or a removable eSIM such as a 5ber/eSTK test card) plus a GSMA SM-DP+ test account (test profile server)" ;;
         apdu-live)  echo "a PC/SC reader (any CCID reader; ACR38U or SCM SCR3310 both work) plus pcscd, and a UICC you are authorised to read" ;;
+        dpa-lab)    echo "a UICC you own, a PC/SC reader (ACR38U or SCM SCR3310) to drive it, and a current probe or an EM probe plus an oscilloscope with a trigger the reader's clock can drive (a PicoScope 5244D or equivalent) — the card must be yours, since a DPA capture is a physical teardown of the key" ;;
         *)          echo "unknown plan" ;;
     esac
 }
@@ -1301,8 +1302,8 @@ sim_plan_hardware() {
 sim_plan() {
     local kind="${1:-}"
     case "$kind" in
-        ota-replay|sat-wib|esim-download|apdu-live) ;;
-        *) printf 'ERROR\tunknown plan: %s (want ota-replay|sat-wib|esim-download|apdu-live)\n' "${kind:-<none>}" >&2; return 2 ;;
+        ota-replay|sat-wib|esim-download|apdu-live|dpa-lab) ;;
+        *) printf 'ERROR\tunknown plan: %s (want ota-replay|sat-wib|esim-download|apdu-live|dpa-lab)\n' "${kind:-<none>}" >&2; return 2 ;;
     esac
     local hw; hw=$(sim_plan_hardware "$kind")
     local ts; ts=$(date +%Y%m%d_%H%M%S)
@@ -1542,6 +1543,58 @@ notes on authorisation
   being re-provisioned by a third party.
 EOF
         ;;
+    dpa-lab)
+        cat <<'EOF'
+DPA capture against COMP128-1 — what this module models and what it does not.
+
+what is already computed here
+  modules/20_sim.sh --dpa-model <ki> <rand>
+      the level-0 leakage point x[a] = T0[(ki[j] + 2*rand[j]) & 511] for each
+      of the 16 key bytes, with the address, the table output and its Hamming
+      weight. RAND is attacker-chosen, so each key byte is attacked at its own
+      position independently.
+  modules/20_sim.sh --dpa-sim <ki> [traces] [sigma]
+      synthesises traces from that model, correlates each of the 256 key-byte
+      candidates per position, and then PROVES the recovered key by running
+      COMP128-1 on challenges the trace set never contained.
+  tools/gsm_crypto.py --dpa-sweep --ki <ki>
+      recovery against noise (sigma 0..5), against trace count (16..512) and
+      against a deliberately wrong leakage model, which is expected to fail.
+
+what this is not
+  The traces are synthetic. There is no oscilloscope, no probe and no card in
+  this path, and none of the numbers above are a measurement. They bound what
+  the attack needs — the model has to be right, the traces have to be clean —
+  and nothing more.
+
+the capture, step by step
+  1. Owned UICC in a PC/SC reader. The ATR confirms the card class; a card that
+     answers A3/A8 locally with COMP128-1 is the target of this attack.
+  2. Trigger. The reader's clock (CLK) is the natural trigger; the COMP128-1
+     computation follows the RUN GSM ALGORITHM APDU (A0 88 00 00 10 || RAND ||
+     Le=0x10) by a fixed latency, so trigger on the last CLA/INS byte and delay
+     into the window rather than triggering on the current spike itself.
+  3. Probe. A current probe on the card's Vcc/GND path, or an EM probe over the
+     die for a contactless or de-capped card. Sample at 5-10x the card clock.
+  4. Alignment. Every trace must be aligned to the same clock edge. Jitter
+     eats the correlation faster than noise does — if the attack fails, check
+     alignment before adding traces.
+  5. Inputs. Record the RAND sent with each trace. The attack needs the RAND,
+     not just the power trace, and a trace whose RAND was not logged is
+     useless.
+  6. Analysis. Feed the traces and RANDs to --dpa-sim's model; the correlation
+     is per key-byte position, and the recovered key is then verified by
+     running COMP128-1 forward.
+
+what the model tells you to expect
+  With this leakage model, 16 traces already separate the right key byte from
+  all 256 candidates, and recovery survives noise well past the point where a
+  real capture would be considered clean. Real captures are dominated by
+  alignment and by whether the leakage is the Hamming weight of T0's output at
+  all — a masked card makes that assumption false, and a masked card is
+  precisely what COMP128-2/-3 and later generations are.
+EOF
+        ;;
     esac
     return 0
 }
@@ -1712,8 +1765,54 @@ sim_cmd_get_response() {
 
 sim_cmd_plan() {
     local kind="${1:-}"
-    [[ -n "$kind" ]] || { printf 'ERROR\tusage: --plan <ota-replay|sat-wib|esim-download|apdu-live>\n' >&2; return 2; }
+    [[ -n "$kind" ]] || { printf 'ERROR\tusage: --plan <ota-replay|sat-wib|esim-download|apdu-live|dpa-lab>\n' >&2; return 2; }
     sim_plan "$kind"
+}
+
+# ── DPA side-channel model (COMP128-1) ──────────────────────────────────
+# The model itself lives in tools/gsm_crypto.py, next to the COMP128-1 tables
+# it depends on. Copying the S-boxes and the T0 table into shell is exactly the
+# drift this tree has been bitten by before, so 20_sim owns the SIM-domain
+# verbs and delegates the arithmetic.
+#
+# WHAT IS REAL: the leakage point, the correlation, the key recovery, the
+# noise/trace-count behaviour, and the fact that a wrong leakage model fails.
+# All of it is computed.
+#
+# WHAT IS NOT: no oscilloscope, no probe, no card. Traces are synthesised from
+# the leakage model with a seeded RNG, and every verb says so on stdout.
+sim_dpa_tool() {
+    local tool="$IMSISTING_ROOT/tools/gsm_crypto.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\ttools/gsm_crypto.py is missing\n' >&2; return 3; }
+    printf '%s\n' "$tool"
+}
+
+# --dpa-model <ki> <rand> : the level-0 leakage point for each key byte.
+sim_dpa_model() {
+    local ki="${1:-}" rand="${2:-}" tool
+    [[ "$ki" =~ ^[0-9A-Fa-f]{32}$ && "$rand" =~ ^[0-9A-Fa-f]{32}$ ]] || return 2
+    tool=$(sim_dpa_tool) || return $?
+    printf 'scope\tmodel of the leakage point; trace acquisition is a handoff (--plan dpa-lab)\n'
+    python3 "$tool" --dpa-leak --ki "$ki" --rand "$rand" || return 1
+}
+
+# --dpa-sim <ki> [traces] [sigma] : synthesise traces, recover the key, verify
+# the recovered key against COMP128-1 on held-out challenges.
+sim_dpa_sim() {
+    local ki="${1:-}" traces="${2:-256}" sigma="${3:-1.0}" tool
+    [[ "$ki" =~ ^[0-9A-Fa-f]{32}$ ]] || return 2
+    [[ "$traces" =~ ^[0-9]+$ ]] || return 2
+    [[ "$sigma" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 2
+    tool=$(sim_dpa_tool) || return $?
+    python3 "$tool" --dpa-sim --ki "$ki" --traces "$traces" --sigma "$sigma" || return 1
+}
+
+# --dpa-sweep <ki> : noise / trace-count / leakage-model sweeps.
+sim_dpa_sweep() {
+    local ki="${1:-}" tool
+    [[ "$ki" =~ ^[0-9A-Fa-f]{32}$ ]] || return 2
+    tool=$(sim_dpa_tool) || return $?
+    python3 "$tool" --dpa-sweep --ki "$ki" || return 1
 }
 
 # ── selftest — no reader, no root, no network ───────────────────────────
@@ -2230,6 +2329,23 @@ sim_selftest() {
     chk status-log   "$(fld "$out" apdu_log)"   "$SIM_APDU_LOG"
     chk status-plans "$(fld "$out" plan_count)" "3"
 
+    # ── 16. DPA model (COMP128-1) ───────────────────────────────────────
+    # The arithmetic lives in tools/gsm_crypto.py, whose --selftest proves it
+    # against held-out challenges. These check this module's delegation and the
+    # delegation's argument validation.
+    chk dpa-plan-hardware "$(sim_plan_hardware dpa-lab | grep -c oscilloscope)" "1"
+    chk dpa-model-bad-ki  "$(sim_dpa_model zz 00112233445566778899aabbccddeeff >/dev/null 2>&1; echo $?)" "2"
+    chk dpa-model-no-rand "$(sim_dpa_model 465b5ce8b199b49faa5f0a2ee238a6bc >/dev/null 2>&1; echo $?)" "2"
+    chk dpa-sim-bad-sigma "$(sim_dpa_sim 465b5ce8b199b49faa5f0a2ee238a6bc 16 x >/dev/null 2>&1; echo $?)" "2"
+    out=$(sim_dpa_model 465b5ce8b199b49faa5f0a2ee238a6bc 23553cbe9637a89d218ae64dae47bf35)
+    chk dpa-level0-addr "$(fld "$out" pos_00)" "ki=46 rand=23 addr=140 t0=0F hw=4"
+    chk dpa-positions   "$(fld "$out" positions)" "16"
+    out=$(sim_dpa_sim 465b5ce8b199b49faa5f0a2ee238a6bc 128 1.0)
+    chk dpa-sim-recovers "$(fld "$out" recovered_ki)" "465B5CE8B199B49FAA5F0A2EE238A6BC"
+    chk dpa-sim-no-wrong "$(fld "$out" bytes_wrong)" "0"
+    chk dpa-sim-holdout  "$(fld "$out" holdout_mismatches)" "0"
+    chk dpa-sim-honest   "$(fld "$out" scope)" "synthetic traces from a leakage model, not a measured card"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -2260,6 +2376,10 @@ sim_menu() {
   [d]  plan: live APDU over PC/SC (handoff)
   [e]  list the known USIM file ids
   [f]  show the APDU log
+  [g]  DPA model: COMP128-1 leakage point for a KI + RAND
+  [h]  DPA model: synthetic-trace key recovery (verified)
+  [i]  plan: DPA capture rig   (handoff)
+  [j]  DPA model: noise / trace-count / model-mismatch sweeps
   [0]  back
 
 M
@@ -2308,6 +2428,17 @@ M
                read -rp "  press enter " _ ;;
             f) [[ -f "$SIM_APDU_LOG" ]] && column -t -s$'\t' < "$SIM_APDU_LOG" || warn "no APDU log yet"
                read -rp "  press enter " _ ;;
+            g) read -rp "  KI (32 hex)> " p; read -rp "  RAND (32 hex)> " q
+               sim_dpa_model "$p" "$q" | column -t -s$'\t'
+               read -rp "  press enter " _ ;;
+            h) read -rp "  KI (32 hex)> " p
+               read -rp "  traces [256]> " q; read -rp "  sigma [1.0]> " s
+               sim_dpa_sim "$p" "${q:-256}" "${s:-1.0}" | column -t -s$'\t'
+               read -rp "  press enter " _ ;;
+            i) sim_plan dpa-lab;         read -rp "  press enter " _ ;;
+            j) read -rp "  KI (32 hex)> " p
+               sim_dpa_sweep "$p" | column -t -s$'\t'
+               read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -2333,6 +2464,9 @@ sim_cli_main() {
         --get-response)   sim_cmd_get_response "${1:-0}" ;;
         --file-id)        sim_file_name "${1:-}" ;;
         --plan)           sim_cmd_plan "${1:-}" ;;
+        --dpa-model)      sim_dpa_model "${1:-}" "${2:-}" ;;
+        --dpa-sim)        sim_dpa_sim "${1:-}" "${2:-}" "${3:-}" ;;
+        --dpa-sweep)      sim_dpa_sweep "${1:-}" ;;
         --rsp)            sim_rsp_roles ;;
         --selftest)       sim_selftest ;;
         --menu)           sim_menu ;;
@@ -2355,7 +2489,10 @@ Usage: $0 COMMAND
   --parse-ota <hex>                 OTA SMS TPDU -> TAR, SPI, KIc/KID, CNTR
   --spi <decimal>                   SPI bit-field decode
   --rsp                             eSIM RSP roles and profile states
-  --plan <ota-replay|sat-wib|esim-download|apdu-live>
+  --dpa-model <ki> <rand>           COMP128-1 level-0 DPA leakage point per key byte
+  --dpa-sim <ki> [traces] [sigma]   synthetic-trace DPA; key proven on held-out challenges
+  --dpa-sweep <ki>                  DPA noise / trace-count / leakage-model sweeps
+  --plan <ota-replay|sat-wib|esim-download|apdu-live|dpa-lab>
                                     write a handoff plan naming the hardware
   --selftest                        verify encoders/decoders without a reader
   --menu                            interactive menu
