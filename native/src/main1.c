@@ -14682,7 +14682,7 @@ static ModuleSubmenuEntry suci_entries[] = {
       "--parse-suci:Parse SUCI|--build-suci:Build SUCI|--audit:Audit" },
     { "Conceal",
       "channel-secure-symbolic",
-      "#CONCEAL|--conceal:Conceal|~--deconceal|#CRYPTO|--genkey:Generate Key|--hkdf:HKDF" },
+      "#CONCEAL|--conceal:Conceal|~--deconceal|#CRYPTO|--genkey:Generate Key|--hkdf:HKDF|--verify-hnkey:Verify HN Key" },
     { "MSIN",
       "auth-smartcard-symbolic",
       "--msin-decode:Decode MSIN|--msin-encode:Encode MSIN" },
@@ -14693,7 +14693,7 @@ static ModuleSubmenuEntry dwn_entries[] = {
       "--detect:Detect|--path=steer-down|--causes:Causes" },
     { "Build",
       "security-high-symbolic",
-      "#BUILD|--build-security-mode:Build Security Mode|--build-reject:Build Reject|--null-cipher-table:Null Cipher Table|#PLAN|--reject-cause=22 EMM|--plan:Plan" },
+      "#BUILD|--build-security-mode:Build Security Mode|--build-reject:Build Reject|--tx-reject:Transmit Reject|--build-sib1:Build SIB1|--null-cipher-table:Null Cipher Table|#PLAN|--reject-cause=22 EMM|--plan:Plan" },
 };
 static ModuleSubmenuEntry sim_entries[] = {
     { "Overview",
