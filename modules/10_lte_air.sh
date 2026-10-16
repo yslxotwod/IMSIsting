@@ -2855,7 +2855,16 @@ lair_selftest() {
     # The four bit lengths below are the ones tools/lte_rrc.py pins in its
     # own selftest ("selftest: 5 checks passed"), so a change that silently
     # re-encodes the message fails here rather than at a receiver.
-    out=$(lair_rrc_tx reconfiguration minimal); rc=$?
+    #
+    # LAIR_SDR_DEVICE=hackrf is pinned on every arm that reads the CHAIN, and
+    # it is not decoration. Without it these arms ask the machine whether a
+    # radio is attached, so their exit code would say which box the suite ran
+    # on rather than whether the chain is right -- and they passed on a
+    # machine with no radio for as long as the detector wrongly answered
+    # "hackrf" there. The detector itself is tested separately, further down,
+    # against a fake driver on PATH; here the device is an input, so the bit
+    # lengths are the only thing under test.
+    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration minimal); rc=$?
     chk txc-recfg-min-rc   "$rc" "0"
     chk txc-recfg-min-hex  "$(fld "$out" rrc_hex)" "41000AA001E00005800000"
     chk txc-recfg-min-bits "$(fld "$out" rrc_bits)" "88"
@@ -2865,7 +2874,7 @@ lair_selftest() {
     chk txc-recfg-min-pad  "$(fld "$out" rrc_hex_padded_bits)" "88"
     chk txc-recfg-min-chan "$(fld "$out" channel)" "DL-DCCH on PDSCH"
 
-    out=$(lair_rrc_tx reconfiguration full); rc=$?
+    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration full); rc=$?
     chk txc-recfg-full-rc  "$rc" "0"
     chk txc-recfg-full-bits "$(fld "$out" rrc_bits)" "660"
     # 660 = 82.5 octets, so 83 octets and 664 padded bits. Asserting the
@@ -2874,24 +2883,24 @@ lair_selftest() {
     chk txc-recfg-full-oct  "$(fld "$out" rrc_octets)" "83"
     chk txc-recfg-full-pad  "$(fld "$out" rrc_hex_padded_bits)" "664"
 
-    out=$(lair_rrc_tx handover-command minimal); rc=$?
+    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx handover-command minimal); rc=$?
     chk txc-ho-min-rc   "$rc" "0"
     chk txc-ho-min-hex  "$(fld "$out" rrc_hex)" "0061104002A80078000160000000"
     chk txc-ho-min-bits "$(fld "$out" rrc_bits)" "109"
 
-    out=$(lair_rrc_tx handover-command full); rc=$?
+    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx handover-command full); rc=$?
     chk txc-ho-full-rc   "$rc" "0"
     chk txc-ho-full-bits "$(fld "$out" rrc_bits)" "685"
 
     # The two messages are different encodings, not the same bytes twice.
-    chk txc-min-distinct "$(out=$(lair_rrc_tx reconfiguration minimal); fld "$out" rrc_hex)" \
+    chk txc-min-distinct "$(out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration minimal); fld "$out" rrc_hex)" \
         "41000AA001E00005800000"
 
     # The chain itself, on the minimal reconfiguration. These are the values
     # that move if the TB/MAC/flit chain is wrong, independent of the PDU:
     # 24-bit CRC-A is added to the 88-bit PDU, so the TB is 112 bits, and
     # unlike the CRC the filler below is 0 on this boundary.
-    out=$(lair_rrc_tx reconfiguration minimal)
+    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration minimal)
     local txc_tb txc_e txc_turbo txc_sym txc_nof txc_s0 txc_s1
     txc_tb=$(fld "$out" tb_with_crc_bits)
     txc_e=$(fld "$out" e_bits)
@@ -2922,7 +2931,7 @@ lair_selftest() {
     # The DCI is sized for the cell, not for the message: format 1 at 25 PRB
     # is 27 bits whatever the PDU is. Pinning it catches a sizing change that
     # would make the PDCCH the wrong length for the grant it describes.
-    out=$(lair_rrc_tx reconfiguration full)
+    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration full)
     chk txc-dci-fmt  "$(fld "$out" dci_format)" "1"
     chk txc-dci-bits "$(fld "$out" dci_bits)" "27"
 
@@ -2941,6 +2950,54 @@ lair_selftest() {
     # The reason line is on stderr too, and it names the device path it
     # probed. Without a name this failure is indistinguishable from a crash.
     chk txc-nosdr-why   "$(printf '%s\n' "$txc_err" | grep -c '^WHY')" "1"
+
+    # ── the DETECTOR, which the arms above never reach ──────────────────
+    # Every check around this one forces the refusal path through
+    # LAIR_SDR_DEVICE, because a module that refuses on a box with a radio is
+    # as wrong as one that transmits on a box without.  The cost of scoping
+    # them that way is that NONE of them ever asks the machine, so all of
+    # them stayed green while the real detector answered "hackrf" on a box
+    # with the hackrf package installed and no radio in it -- reporting
+    # `tx_armed 1` and `TX queued to hackrf` and exiting 0.
+    #
+    # These two arms drive the detector itself through a fake driver on PATH.
+    # A transfer binary is present and executable in both, exactly as on a
+    # box with the package installed, so the OLD test (`command -v
+    # hackrf_transfer`) would pass the first arm -- which is the bug.
+    local fakedrv="$d/fake-drv" saved_path="$PATH"
+    mkdir -p "$fakedrv"
+    printf '#!/bin/sh\nexit 0\n' > "$fakedrv/hackrf_transfer"
+    chmod +x "$fakedrv/hackrf_transfer"
+
+    # Arm 1: the package is installed, nothing is plugged in.  Ask and refuse.
+    printf '#!/bin/sh\necho "No HackRF boards found."\nexit 1\n' \
+        > "$fakedrv/hackrf_info"
+    chmod +x "$fakedrv/hackrf_info"
+    PATH="$fakedrv:$PATH"
+    lair_sdr_probe hackrf; chk txc-probe-noradio "$?" "1"
+
+    # Arm 2: a board answers.  The detector must not have been made to refuse
+    # everything -- a check that can only fail is not a check.
+    printf '#!/bin/sh\necho "Found HackRF board."\necho "Board ID Number: 2"\nexit 0\n' \
+        > "$fakedrv/hackrf_info"
+    chmod +x "$fakedrv/hackrf_info"
+    PATH="$fakedrv:$PATH"
+    lair_sdr_probe hackrf; chk txc-probe-radio "$?" "0"
+    PATH="$saved_path"
+
+    # LimeUtil is the one driver whose exit code says nothing: it returns 0
+    # with no device attached, so a probe that only looked at `$?` would
+    # report a LimeSDR on every box with the package installed.
+    printf '#!/bin/sh\nexit 0\n' > "$fakedrv/LimeUtil"
+    chmod +x "$fakedrv/LimeUtil"
+    PATH="$fakedrv:$PATH"
+    lair_sdr_probe limesdr; chk txc-probe-lime-empty "$?" "1"
+    printf '#!/bin/sh\necho "  * [USB 3.0] LimeSDR-USB, media=USB 3.0"\nexit 0\n' \
+        > "$fakedrv/LimeUtil"
+    chmod +x "$fakedrv/LimeUtil"
+    PATH="$fakedrv:$PATH"
+    lair_sdr_probe limesdr; chk txc-probe-lime-found "$?" "0"
+    PATH="$saved_path"
 
     # The dry-run arm is a success and is labelled as NOT sent: it must never
     # print the TX line, because that line claims a radio took the samples.
@@ -3219,6 +3276,48 @@ lair_hex_bits() {
 # that 01_radio.sh --select writes, then a driver actually present. The
 # device is NAMED, never assumed: a verb that returns success with no radio
 # is worse than one that fails.
+# Ask a driver whether a DEVICE is attached -- not whether its binary exists.
+# The distinction is the whole point of this function and getting it wrong is
+# how a verb reports success with nothing plugged in.  hackrf_transfer, LimeUtil
+# and bladeRF-cli are installed on any box with their packages; `command -v`
+# therefore answers a different question than the caller is asking, and answers
+# it "yes" on a machine with no radio at all.
+#
+# Each driver needs a different signal, so each is handled on its own terms:
+#   * hackrf_info exits 1 and prints "No HackRF boards found." with no board;
+#   * bladeRF-cli -p exits 1 and prints "No devices are available.";
+#   * LimeUtil --find exits 0 WHETHER OR NOT a device is attached -- its exit
+#     code carries no information whatsoever, so its OUTPUT is the only signal
+#     (one line per device, nothing at all when there is none);
+#   * uhd_find_devices prints a "Device Address" block per device.
+# SoapySDRUtil is not used: with no radio attached here it still reports
+# "Found device 0", which is exactly the false positive this function exists
+# to prevent.
+lair_sdr_probe() {
+    local drv="$1" out
+    case "$drv" in
+        hackrf)
+            command -v hackrf_info >/dev/null 2>&1 || return 1
+            out=$(timeout 10 hackrf_info 2>&1) || return 1
+            grep -qi 'no hackrf boards found' <<< "$out" && return 1
+            return 0 ;;
+        bladerf)
+            command -v bladeRF-cli >/dev/null 2>&1 || return 1
+            out=$(timeout 10 bladeRF-cli -p 2>&1) || return 1
+            grep -qi 'no devices are available' <<< "$out" && return 1
+            return 0 ;;
+        limesdr)
+            command -v LimeUtil >/dev/null 2>&1 || return 1
+            out=$(timeout 15 LimeUtil --find 2>&1)
+            [[ -n "${out//[[:space:]]/}" ]] ;;
+        usrp|b200|b210)
+            command -v uhd_find_devices >/dev/null 2>&1 || return 1
+            out=$(timeout 15 uhd_find_devices 2>&1)
+            grep -qi 'device address' <<< "$out" ;;
+        *) return 1 ;;
+    esac
+}
+
 lair_sdr_device() {
     local f drv
     # Defined but empty is an instruction, not an unset variable: the
@@ -3233,13 +3332,7 @@ lair_sdr_device() {
         [[ -n "$drv" ]] && { printf '%s\n' "$drv"; return 0; }
     done
     for drv in hackrf bladerf limesdr usrp b200 b210; do
-        case "$drv" in
-            hackrf)  command -v hackrf_transfer >/dev/null 2>&1 && { printf 'hackrf\n'; return 0; } ;;
-            bladerf) command -v bladeRF-cli    >/dev/null 2>&1 && { printf 'bladerf\n'; return 0; } ;;
-            limesdr) command -v LimeUtil       >/dev/null 2>&1 && { printf 'limesdr\n'; return 0; } ;;
-            usrp|b200|b210)
-                     command -v uhd_find_devices >/dev/null 2>&1 && { printf 'uhd\n'; return 0; } ;;
-        esac
+        lair_sdr_probe "$drv" && { printf '%s\n' "$drv"; return 0; }
     done
     return 1
 }
@@ -3381,9 +3474,9 @@ lair_rrc_tx() {
         return 0
     fi
     printf 'tx_mode\tnone\n' >&2
-    printf 'ERROR\tno SDR device: %s does not exist and no transmit-capable driver (hackrf_transfer, bladeRF-cli, LimeUtil, uhd_find_devices) is installed\n' \
+    printf 'ERROR\tno SDR device: %s does not exist and no radio answered a probe (tried hackrf_info, bladeRF-cli -p, LimeUtil --find, uhd_find_devices)\n' \
            "$LAIR_SDR" >&2
-    printf 'WHY\tthe baseband chain above is real, but keying it needs a radio; set LTE_TX_DRYRUN=1 to build without transmitting\n' >&2
+    printf 'WHY\tthe baseband chain above is real, but keying it needs a radio; a driver package being installed is not a radio, so the probe asks the driver rather than the PATH; set LTE_TX_DRYRUN=1 to build without transmitting\n' >&2
     return 1
 }
 
