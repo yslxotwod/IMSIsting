@@ -926,7 +926,17 @@ report_index_drift(AppState *state)
 
 /* GTK and GLib write to stderr; so does any subprocess spawned without its
    own stderr. Redirecting stderr to a file and polling it keeps that noise
-   in the events drawer instead of on a terminal nobody is watching. */
+   in the events drawer instead of on a terminal nobody is watching.
+
+   The file is BOUNDED at STDERR_LOG_MAX. It was not, and that is not a
+   theoretical problem: a dangling-widget assertion firing in a redraw loop
+   made one run write 12.97 GB in under an hour and took the root filesystem
+   to 100% with 112 MB free. Nothing trimmed the log, because stderr_poll()
+   only advanced a read offset -- the file grew for the whole life of the
+   process and was reset only by the next launch. */
+#ifndef STDERR_LOG_MAX
+#define STDERR_LOG_MAX (8 * 1024 * 1024)
+#endif
 
 static void
 stderr_redirect(AppState *state)
@@ -995,6 +1005,18 @@ stderr_poll(gpointer user_data)
     }
     state->stderr_pos = ftello(f);
     fclose(f);
+
+    /* Bound the log. Truncating through state->stderr_fd is safe because
+       dup2 made fd 2 and this descriptor share ONE open file description,
+       so they also share the file offset -- the lseek below rewinds the
+       writer as well. Without it the next write would land at the old,
+       now-past-EOF offset and leave a sparse hole the size of the log. */
+    if (st.st_size > STDERR_LOG_MAX) {
+        if (ftruncate(state->stderr_fd, 0) == 0) {
+            lseek(state->stderr_fd, 0, SEEK_SET);
+            state->stderr_pos = 0;
+        }
+    }
     return G_SOURCE_CONTINUE;
 }
 

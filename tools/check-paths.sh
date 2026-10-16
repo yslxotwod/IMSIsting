@@ -26,8 +26,16 @@ problem() {
 (( jsonout )) || printf 'checking %s\n\n' "$ROOT"
 
 # 1. The expected top-level tree.
+#
+# `wordlists` used to be required here. It is gone on purpose: nothing in the
+# tree creates it (imsisting.sh:77 makes captures, logs, loot, state, tmp and
+# cases, and not this), no module reads it, and git never tracked it. The only
+# reason it was ever present was that somebody made the directory by hand, so
+# this check failed on a clean checkout and passed on the author's box -- a
+# gate whose colour came from an untracked directory. A module that needs a
+# wordlist should create it the way every other runtime directory is created.
 for d in modules tools native native/src native/resources \
-         captures logs loot state tmp wordlists docs; do
+         captures logs loot state tmp docs; do
     if [[ -d "$ROOT/$d" ]]; then
         (( jsonout )) || printf 'OK    dir  %s\n' "$d"
     else
