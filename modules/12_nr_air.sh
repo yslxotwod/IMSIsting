@@ -378,16 +378,26 @@ nair_pss_sequence() {
 
 # SSS: d_SSS(n) = [1 - 2*x0((n+m0) mod 127)] * [1 - 2*x1((n+m1) mod 127)]
 # with m0 = 15*floor(N_ID(1)/112) + 5*N_ID(2) and m1 = N_ID(1) mod 112.
-# x0 uses the PSS initialisation, x1 uses the all-ones one.
+# TS 38.211 §7.4.2.3.1 gives BOTH m-sequences the same initialisation
+# [x(6)..x(0)] = [0 0 0 0 0 0 1] — i.e. x(0)=1 and x(1..6)=0 — and they
+# differ only in their recursion: x0 uses taps (i+4, i), x1 uses (i+1, i).
+# This is not the LTE pair of TS 36.211 §6.11.2.1: there x0 takes the PSS
+# initialisation and x1 the all-ones one. Using the LTE initialisations here
+# yields a sequence that is wrong for every one of the 1008 cell identities
+# while still being a valid-looking ±1 sequence of 127 chips, so it passes
+# any "right length, right alphabet" check — see the pinned chips in the
+# selftest, which come from an independent TS 38.211 implementation.
 nair_sss_sequence() {
     local n1="${1:-}" n2="${2:-}"
     [[ "$n1" =~ ^[0-9]+$ && "$n2" =~ ^[0-9]+$ ]] || return 1
     (( n1 <= 335 && n2 <= 2 )) || return 1
     awk -v n1="$n1" -v n2="$n2" 'BEGIN{
-        x0[0]=0; x0[1]=1; x0[2]=1; x0[3]=0; x0[4]=1; x0[5]=1; x0[6]=1
+        x0[0]=1
+        for (i = 1; i < 7; i++) x0[i] = 0
         for (i = 0; i <= 119; i++) x0[i+7] = (x0[i+4] + x0[i]) % 2
-        for (i = 0; i < 7; i++) x1[i] = 1
-        for (i = 0; i <= 119; i++) x1[i+7] = (x1[i+4] + x1[i]) % 2
+        x1[0]=1
+        for (i = 1; i < 7; i++) x1[i] = 0
+        for (i = 0; i <= 119; i++) x1[i+7] = (x1[i+1] + x1[i]) % 2
         m0 = 15 * int(n1 / 112) + 5 * n2
         m1 = n1 % 112
         out = ""
@@ -676,6 +686,12 @@ nair_prach_preamble() {
 # ── hardware guards ─────────────────────────────────────────────────────
 # Each guard names the missing radio or program. An empty result is not an
 # answer, so these return non-zero and the caller prints MISSING.
+#
+# nair_find_sdr answers "which SDR *driver* is installed". That is all it
+# ever claimed and all a status row should claim. It is deliberately NOT the
+# gate on a transmit path: a host with libhackrf installed and no HackRF
+# plugged in satisfies it, and a transmit verb that gated on it would report
+# a send that never left the machine. nair_probe_radio below is the gate.
 nair_find_sdr() {
     command -v hackrf_info       >/dev/null 2>&1 && { echo "hackrf";  return 0; }
     command -v bladeRF-cli       >/dev/null 2>&1 && { echo "bladerf"; return 0; }
@@ -683,6 +699,1038 @@ nair_find_sdr() {
     command -v uhd_find_devices  >/dev/null 2>&1 && { echo "usrp";    return 0; }
     command -v rtl_test          >/dev/null 2>&1 && { echo "rtlsdr";  return 0; }
     return 1
+}
+
+# Ask the driver whether a radio is actually attached. Exit 0 only when the
+# probe really found one, and echo "type<TAB>detail" when it did.
+#
+# Every probe below was run on a host with all three drivers installed and no
+# radio attached, and that is why the acceptance test is a positive pattern
+# rather than an exit status:
+#   hackrf_info      rc=1  "No HackRF boards found."
+#   bladeRF-cli -p   rc=1  "probe: No devices are available."
+#   LimeUtil --find  rc=0  a single empty line   <-- exit status alone lies
+# LimeUtil exiting 0 with no device is exactly the fabrication this guard
+# exists to stop, so the probe output must carry the device.
+# Handles for nair_find_sdr's type names. Also the accept pattern: a driver's
+# "no device" output must not match it. hackrf_info prints "hackrf_info
+# version: 2023.01.1" before "No HackRF boards found.", so anchoring on
+# "Board ID" rather than on the program name is what keeps the version banner
+# from reading as a device.
+nair_sdr_probe_cmd() {
+    case "${1:-}" in
+        hackrf)  printf 'hackrf_info' ;;
+        bladerf) printf 'bladeRF-cli -p' ;;
+        limesdr) printf 'LimeUtil --find' ;;
+        usrp)    printf 'uhd_find_devices' ;;
+        *)       return 1 ;;
+    esac
+}
+
+nair_sdr_probe_pattern() {
+    case "${1:-}" in
+        hackrf)  printf 'Serial number|Board ID' ;;
+        bladerf) printf 'Serial:|Backend:|Device instance' ;;
+        limesdr) printf 'Device name|LimeSDR|FX3|Media' ;;
+        usrp)    printf 'Device Address|type:' ;;
+        *)       return 1 ;;
+    esac
+}
+
+nair_sdr_probe_one() {
+    local t="${1:-}" cmd pat out rc
+    pat=$(nair_sdr_probe_pattern "$t") || return 1
+    cmd=$(nair_sdr_probe_cmd "$t")     || return 1
+    out=$(timeout 6 bash -c "$cmd" 2>&1 | head -c 2000) || rc=$?
+    rc="${rc:-0}"
+    (( rc != 0 )) && return 1
+    printf '%s' "$out" | grep -qiE "$pat" || return 1
+    printf '%s' "$out" | grep -iE "$pat" | head -1
+    return 0
+}
+
+# Which radio is attached, or non-zero with nothing on stdout.
+#
+#   NAIR_SDR_DEVICE=<type>   consider only that driver
+#   NAIR_SDR_PROBE='<cmd>'   answer with this command instead of a driver
+#                            probe; it must exit 0 and print the device line.
+#                            This is how a test pins "a radio is attached"
+#                            without owning one, and how an out-of-tree radio
+#                            is wired in.
+nair_probe_radio() {
+    if [[ -n "${NAIR_SDR_PROBE:-}" ]]; then
+        local out
+        out=$(timeout 6 bash -c "$NAIR_SDR_PROBE" 2>&1) || return 1
+        out=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | head -1)
+        [[ -n "$out" ]] || return 1
+        printf 'override\t%s\n' "$out"
+        return 0
+    fi
+    local t out
+    for t in ${NAIR_SDR_DEVICE:-hackrf bladerf limesdr usrp}; do
+        nair_sdr_probe_cmd "$t" >/dev/null 2>&1 || {
+            printf 'ERROR\tNAIR_SDR_DEVICE must name a radio: hackrf|bladerf|limesdr|usrp\n' >&2
+            return 2
+        }
+        command -v "$(nair_sdr_probe_cmd "$t" | awk '{print $1}')" >/dev/null 2>&1 || continue
+        out=$(nair_sdr_probe_one "$t") || continue
+        [[ -n "$out" ]] || continue
+        printf '%s\t%s\n' "$t" "$(nair_sanitize "$out")"
+        return 0
+    done
+    return 1
+}
+
+# ── NR numerology, FFT size and sample rate ─────────────────────────────
+# The baseband sample rate of an NR carrier is fixed by its numerology and
+# channel bandwidth, not chosen by the operator:
+#
+#   f_s = N_FFT * dF
+#
+# with N_FFT the smallest power of two whose 85 % still contains the
+# transmission bandwidth configuration N_RB (12 subcarriers per RB):
+#
+#   2^i * 0.85 >= N_RB * 12
+#
+# That rule is what puts NR's rates on the 7.68 / 15.36 / 30.72 / 61.44 /
+# 122.88 / 245.76 / 491.52 Msps ladder, and it is a DERIVATION rather than a
+# transcribed FFT table on purpose: a table of (bandwidth, SCS) -> N_FFT is
+# exactly the kind of number that keeps looking right after a bandwidth is
+# added, and the sample rate it feeds goes straight into an SDR call.
+#
+# Cross-checked against py3gpp 0.1.6's nrOFDMInfo (an independent Python
+# implementation of TS 38.211/38.104): 41 (bandwidth, SCS) pairs agree, and
+# every f_s lands on the published rate ladder — 15 kHz/5 MHz -> 512 * 15 kHz
+# = 7.68 Msps, 30 kHz/20 MHz -> 1024 * 30 kHz = 30.72 Msps, 60 kHz/100 MHz ->
+# 2048 * 60 kHz = 122.88 Msps, 120 kHz/400 MHz -> 4096 * 120 kHz = 491.52
+# Msps. N_RB comes from TS 38.104 Table 5.3.2-1 (FR1) and 5.3.2-2 (FR2-1).
+#
+# The selftest pins a spread of those pairs, so a future edit to either table
+# has to disagree with the published value, visibly.
+nair_fft_size_for() {
+    local scs="${1:-}" bw="${2:-}" nrb i
+    [[ "$scs" =~ ^[0-9]+$ && "$bw" =~ ^[0-9]+$ ]] || return 1
+    nrb=$(nair_n_rb_for "$scs" "$bw") || return 1
+    [[ "$nrb" =~ ^[0-9]+$ ]] || return 1
+    (( nrb > 0 )) || return 1
+    # 2^i * 0.85 >= nrb * 12, scaled by 100 to stay in integers.
+    for (( i = 0; i < 20; i++ )); do
+        if (( (1 << i) * 85 >= nrb * 1200 )); then
+            echo $(( 1 << i ))
+            return 0
+        fi
+    done
+    return 1
+}
+
+# f_s in Hz as an integer.
+nair_sample_rate_hz() {
+    local scs="${1:-}" bw="${2:-}" nfft
+    nfft=$(nair_fft_size_for "$scs" "$bw") || return 1
+    echo $(( scs * 1000 * nfft ))
+}
+
+# TS 38.104 Table 5.3.2-1: transmission bandwidth configuration N_RB, one row
+# per subcarrier spacing, keyed by channel bandwidth in MHz. Returns non-zero
+# when the combination is N/A in the table — the honest answer, since a
+# carrier the spec does not define has no sample rate to hand a radio.
+#
+# The 60 kHz row is Table 5.3.2-1 (FR1). Table 5.3.2-2 gives different values
+# for 60 kHz at 50/100/200 MHz (66/132/264) because those are FR2-1 carriers;
+# this module's bands are FR1, so FR1 wins here and the FR2-1 numbers are
+# deliberately unreachable. 120 kHz exists only in FR2-1 in this table.
+nair_n_rb_for() {
+    local scs="${1:-}" bw="${2:-}"
+    [[ "$scs" =~ ^[0-9]+$ && "$bw" =~ ^[0-9]+$ ]] || return 1
+    awk -v s="$scs" -v b="$bw" 'BEGIN{
+        if      (s == 15)  split("3:15 5:25 7:35 10:52 15:79 20:106 25:133 30:160 35:188 40:216 45:242 50:270", R, " ")
+        else if (s == 30)  split("5:11 10:24 15:38 20:51 25:65 30:78 35:92 40:106 45:119 50:133 60:162 70:189 80:217 90:245 100:273", R, " ")
+        else if (s == 60)  split("10:11 15:18 20:24 25:31 30:38 35:44 40:51 45:58 50:65 60:79 70:93 80:107 90:121 100:135", R, " ")
+        else if (s == 120) split("50:32 100:66 200:132 400:264", R, " ")
+        else exit 1
+        for (i = 1; i <= length(R); i++) {
+            split(R[i], kv, ":")
+            if (kv[1] == b) { print kv[2]; exit 0 }
+        }
+        exit 1
+    }'
+}
+
+# ── exact carrier frequency in Hz ──────────────────────────────────────
+# nair_arfcn_to_mhz prints three decimals, which for a 240 kHz raster
+# (FR2, 60 kHz steps) is exactly enough — but a centre frequency handed to an
+# SDR must be exact, and "24250.080 MHz" is 24250080000 Hz only if you trust
+# the rounded text. These two return the exact integer the raster defines:
+#
+#   0 - 3000 MHz       F = 5 * N                      (5 kHz steps)
+#   3000 - 24250 MHz   F = 3000000 + 15 * (N-600000)  kHz
+#   24250 - 100000 MHz F = 24250080 + 60 * (N-2016667) kHz
+nair_arfcn_to_khz() {
+    local n="${1:-}"
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    (( n >= 0 && n <= 3279165 )) || return 1
+    if   (( n <= 599999  )); then echo $(( 5 * n ))
+    elif (( n <= 2016666 )); then echo $(( 3000000 + 15 * (n - 600000) ))
+    else                          echo $(( 24250080 + 60 * (n - 2016667) ))
+    fi
+}
+
+nair_arfcn_to_hz() {
+    local khz; khz=$(nair_arfcn_to_khz "${1:-}") || return 1
+    echo $(( khz * 1000 ))
+}
+
+# ── SSB baseband ────────────────────────────────────────────────────────
+# One NR SSB is four OFDM symbols in the middle 20 RBs of the carrier
+# (TS 38.211 §7.4.3.1):
+#
+#   symbol 0   PBCH  PSS  PBCH       k =   0..47 / 56..182 / 183..239
+#   symbol 1   PBCH  PBCH PBCH  DMRS k =   0..239, DMRS at v, v+4, ...
+#   symbol 2   PBCH  SSS  PBCH
+#   symbol 3   PBCH  PBCH PBCH  DMRS
+#
+# The CP is the spec's (TS 38.211 §5.3.1): 144*2^-mu samples normally, and
+# 144*2^-mu + 16 in the 30.72 MHz reference grid for l = 0 and l = 7*2^mu,
+# where l counts symbols **within the subframe** — not within the slot. The
+# +16 is what makes a subframe come out at exactly 1 ms; taking the slot as
+# the unit instead (or using 512*kappa*2^-mu, which is the extended CP) puts
+# a long CP in every slot and makes a 60 kHz slot 8 samples too long. The
+# generator takes the slot index for that reason and the decoder infers it
+# back, so a wrong CP does not survive the round trip either.
+#
+# The IQ file is the smallest honest unit: one slot of 14 symbols — 15360
+# samples = 0.5 ms at mu = 1, 61440 bytes of int16 I/Q at 30.72 Msps. The SSB
+# burst set period is 20 ms, so the caller repeats that slot — `--tx-ssb`
+# prints the repetition count. Nothing here resamples: a driver that cannot
+# run at the carrier's own f_s gets a real error, not a silently stretched
+# waveform.
+NAIR_BB_PY="$MOD_TMP/nr_ssb_bb.py"
+NAIR_BB_DEC_PY="$MOD_TMP/nr_ssb_decode.py"
+
+# Write the baseband generator once. It is a heredoc rather than a tools/
+# script because it exists only to serve this module's transmit path, and the
+# module must stay runnable from the tree with nothing installed but bash,
+# python3 and numpy.
+nair_write_bb_gen() {
+    mkdir -p "$MOD_TMP" 2>/dev/null
+    cat > "$NAIR_BB_PY" <<'NAIR_PYEOF'
+#!/usr/bin/env python3
+"""NR SSB baseband generator - TS 38.211 7.4.2 (PSS/SSS), 7.4.3 (PBCH),
+5.3.1 (CP lengths), 5.2.1 (Gold sequences).
+
+Emits one slot of int16 I/Q at the carrier's own sample rate f_s = dF * N_FFT
+(30.72 MHz for mu <= 2), with one SSB in the slot. Every constant is a spec
+constant or derived from one.
+
+Deliberately NOT implemented, and the TSV says so rather than implying
+otherwise: the PBCH polar code (TS 38.212 7.1) and PBCH bit scrambling. The
+PBCH REs therefore carry the MIB payload and its CRC24C directly, not a
+polar-encoded BCH transport block, and the receiver will not decode a BCH
+from them. PSS, SSS, the DMRS sequences, the DMRS placement, the OFDM
+numerology and the CP lengths ARE the spec's; PSS and SSS are additionally
+pinned chip-by-chip against an independent TS 38.211 implementation, because
+the module's own PSS/SSS table would agree with itself either way.
+"""
+import sys
+
+import numpy as np
+
+PSS_FORM = "TS 38.211 7.4.2.2.1"
+SSS_FORM = "TS 38.211 7.4.2.3.1"
+NFFT_STD = {15: 4096, 30: 4096, 60: 4096, 120: 8192, 240: 8192}
+
+# Pinned chips: the first 32 of d_PSS(N_ID(2)) for all three roots and of
+# d_SSS(N_ID(1), N_ID(2)) for three cell ids, taken from py3gpp 0.1.6 — an
+# independent Python implementation of TS 38.211 — and not from this file's
+# own recursions. build_grid() refuses to emit a waveform whose sequences do
+# not reproduce them. The same vectors are pinned in the shell selftest, so a
+# future edit that "fixes" a sequence to match its own output fails twice.
+PSS_PINNED = {
+    0: [1, -1, -1, 1, -1, -1, -1, -1, 1, 1, -1, -1, -1, 1, 1, -1, 1, -1, 1,
+        -1, -1, 1, 1, -1, -1, 1, 1, 1, 1, 1, -1, -1],
+    1: [1, 1, 1, -1, -1, 1, 1, -1, 1, 1, 1, -1, 1, 1, 1, 1, 1, 1, -1, 1, 1,
+        -1, 1, 1, -1, -1, 1, -1, 1, 1, -1, -1],
+    2: [-1, -1, -1, -1, -1, -1, 1, 1, 1, -1, -1, -1, 1, -1, -1, 1, 1, 1, -1,
+        1, -1, 1, 1, -1, 1, -1, -1, -1, -1, -1, 1, -1],
+}
+SSS_PINNED = {
+    0: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, 1, 1, 1, 1, 1, -1, 1, 1, 1, -1, 1,
+        -1, 1, -1, 1, 1, -1, -1, 1, 1, 1],
+    13: [1, 1, -1, -1, 1, -1, 1, 1, -1, 1, -1, -1, 1, 1, -1, 1, -1, 1, 1, -1,
+         -1, 1, -1, -1, -1, 1, -1, 1, -1, -1, -1, 1],
+    1007: [-1, 1, -1, -1, -1, -1, 1, 1, -1, 1, 1, -1, 1, -1, -1, 1, -1, -1,
+           -1, -1, -1, -1, 1, 1, 1, -1, 1, -1, 1, -1, -1, 1],
+}
+# Pinned sign pattern of the first 12 PBCH DMRS chips (24 bits, I then Q), from
+# the same independent TS 38.211 implementation. Without a pin a wrong c_init
+# would still put QPSK symbols on the right subcarriers and nothing would
+# notice: the DMRS carries no CRC and no other check sees its values.
+DMRS_PINNED = {
+    0: "000011101110011011101101",
+    13: "010110101010011100100100",
+    42: "001001000101111100011000",
+    1007: "000001111000010111101010",
+}
+# What the pinned comparisons actually compared, filled in by build_grid(). A
+# printed "agree" line then reports a comparison that ran, never a literal.
+CHECKS = {}
+
+
+def pss_recursive(nid2):
+    """d_PSS(n) = 1 - 2*x((n + 43*N_ID(2)) mod 127)."""
+    x = [0, 1, 1, 0, 1, 1, 1]
+    for i in range(0, 120):
+        x.append((x[i + 4] + x[i]) % 2)
+    return [1 - 2 * x[(n + 43 * nid2) % 127] for n in range(127)]
+
+
+def pss_pinned(nid2):
+    """The published chips of d_PSS for this N_ID(2), from an independent
+    TS 38.211 implementation. This is a second derivation only in the sense
+    that matters: it did not come from the recursion above, so comparing the
+    two catches a transcription error in either."""
+    return list(PSS_PINNED[nid2])
+
+
+def mseq(init, taps, n_terms):
+    """x(i+7) = (x(i+taps[0]) + x(i+taps[1])) mod 2, init = x(0..6)."""
+    x = list(init)
+    for i in range(0, n_terms + 7):
+        x.append((x[i + taps[0]] + x[i + taps[1]]) % 2)
+    return x
+
+
+def sss(nid1, nid2):
+    """d_SSS(n) = (1-2*x0((n+m0)mod127))*(1-2*x1((n+m1)mod127)),
+    m0 = 15*floor(N_ID(1)/112) + 5*N_ID(2), m1 = N_ID(1) mod 112.
+    TS 38.211 7.4.2.3.1: BOTH sequences start from x(0..6) = [1,0,0,0,0,0,0]
+    (i.e. [x(6)..x(0)] = [0 0 0 0 0 0 1]) and differ in their recursion —
+    x0 taps (4,0), x1 taps (1,0). LTE's pair (PSS init for x0, all-ones for
+    x1, both with taps (4,0)) is a different sequence and is wrong here."""
+    m0 = 15 * (nid1 // 112) + 5 * nid2
+    m1 = nid1 % 112
+    x0 = mseq([1, 0, 0, 0, 0, 0, 0], (4, 0), 127 + m0)
+    x1 = mseq([1, 0, 0, 0, 0, 0, 0], (1, 0), 127 + m1)
+    return [(1 - 2 * x0[(n + m0) % 127]) * (1 - 2 * x1[(n + m1) % 127])
+            for n in range(127)]
+
+
+def gold(c_init, length):
+    """TS 38.211 5.2.1, Nc = 1600."""
+    nc = 1600
+    x1 = [0] * (nc + length + 31)
+    x2 = [0] * (nc + length + 31)
+    x1[0] = 1
+    for i in range(31):
+        x2[i] = (c_init >> i) & 1
+    for n in range(nc + length):
+        x1[n + 31] = (x1[n + 3] + x1[n]) % 2
+        x2[n + 31] = (x2[n + 3] + x2[n + 2] + x2[n + 1] + x2[n]) % 2
+    return np.array([(x1[n + nc] + x2[n + nc]) % 2 for n in range(length)],
+                    dtype=np.int64)
+
+
+def crc24c(bits):
+    """TS 38.212 5.1: gCRC24C(D) = D^24+D^23+D^21+D^20+D^17+D^15+D^13+D^12
+    +D^8+D^4+D^2+D+1, attached MSB-first with the register preset to all
+    ones. This is the CRC BCH uses (38.212 7.1.1)."""
+    poly = 0
+    for e in (24, 23, 21, 20, 17, 15, 13, 12, 8, 4, 2, 1, 0):
+        poly |= 1 << e
+    reg = 0xFFFFFF
+    for b in list(bits) + [0] * 24:
+        msb = (reg >> 23) & 1
+        reg = ((reg << 1) & 0xFFFFFF)
+        if msb ^ (b & 1):
+            reg ^= poly
+    return [(reg >> (23 - i)) & 1 for i in range(24)]
+
+
+def mib_payload(pci, sf):
+    """TS 38.212 7.1.1 BCH transport block -> 24 bits, from TS 38.331 6.2.2:
+    the 1-bit BCCH-BCH-MessageType CHOICE index (0 = mib) followed by the 23
+    ASN.1 MIB bits in field order — systemFrameNumber (6),
+    subCarrierSpacingCommon (1), ssb-SubcarrierOffset (4), dmrs-TypeA-Position
+    (1), pdcch-ConfigSIB1 (8), cellBarred (1), intraFreqReselection (1),
+    spare (1). The polar code and the 8-bit PBCH payload extension of 38.212
+    7.1.1 are still not implemented, and the TSV says so rather than implying
+    otherwise."""
+    b = [0]                                           # ...MessageType = mib
+    b += [(sf >> i) & 1 for i in range(5, -1, -1)]   # systemFrameNumber 6
+    b += [0]                                          # subCarrierSpacingCommon
+    b += [0, 0, 0, 0]                                 # ssb-SubcarrierOffset 4
+    b += [0]                                          # dmrs-TypeA-Position
+    b += [0] * 8                                      # pdcch-ConfigSIB1
+    b += [0]                                          # cellBarred
+    b += [0]                                          # intraFreqReselection
+    b += [0]                                          # spare
+    assert len(b) == 24, len(b)
+    return b
+
+
+def qpsk(bits):
+    """TS 38.211 5.1.3: b(2i),b(2i+1) -> (1-2b)/sqrt(2) + j(1-2b)/sqrt(2)."""
+    out = []
+    for i in range(0, len(bits) - 1, 2):
+        out.append(complex(1 - 2 * bits[i], 1 - 2 * bits[i + 1]) / np.sqrt(2))
+    return np.array(out)
+
+
+def cp_lengths(mu, nslot, nfft):
+    """TS 38.211 5.3.1: N_CP = 144*2^-mu samples normally, and
+    144*2^-mu + 16 in the 30.72 MHz reference grid for l = 0 and l = 7*2^mu,
+    where l is the symbol index **within the subframe**. nslot is the slot
+    index within the subframe, so for mu >= 2 only some slots open with the
+    long CP — that is what makes every subframe come out at exactly 1 ms.
+    512*2^-mu is the extended CP and is not used here.
+
+    At f_s = N_FFT * dF the sample counts are 144*N_FFT/2048 and, for the 16
+    extra reference samples, 16*N_FFT*2^mu/2048: both are exact for the
+    standard grids (N_FFT = 2048*2^-mu), and a grid where they are not is a
+    bug rather than something to round."""
+    num_s = 144 * nfft
+    num_x = 16 * nfft * (2 ** mu)
+    if num_s % 2048 or num_x % 2048:
+        raise SystemExit("ERROR\tN_FFT %d is not a multiple of the "
+                         "numerology grid 2048*2^-%d" % (nfft, mu))
+    short, extra = num_s // 2048, num_x // 2048
+    l0 = nslot * 14
+    return [short + extra if (l0 + l) in (0, 7 * (2 ** mu)) else short
+            for l in range(14)]
+
+
+def ssb_symbols_in_slot(scs):
+    """TS 38.213 4.1: Case A {2,8}+14n, Case B/C/D {4,8,16,20}+28n,
+    Case E {8,12,16,20,32,36,40,44}+56n. In symbols of the carrier the first
+    SSB of a half-frame starts at index 2 (15/30 kHz) or 4 (120/240 kHz)."""
+    if scs in (15,):
+        return [2]
+    if scs == 30:
+        return [4]
+    return [4]
+
+
+def build_grid(pci, scs, nfft, mib_bits, i_ssb):
+    """The four SSB symbols as four 240-long frequency-domain blocks."""
+    nid1, nid2 = pci // 3, pci % 3
+    pss = pss_recursive(nid2)
+    pin = pss_pinned(nid2)
+    CHECKS["pss"] = (len(pin), pss[:len(pin)] == pin)
+    if not CHECKS["pss"][1]:
+        raise SystemExit("ERROR\tPSS for N_ID(2)=%d does not reproduce the "
+                         "pinned TS 38.211 chips" % nid2)
+    sss_v = sss(nid1, nid2)
+    if pci in SSS_PINNED:
+        pin = SSS_PINNED[pci]
+        CHECKS["sss"] = (len(pin), sss_v[:len(pin)] == pin)
+        if not CHECKS["sss"][1]:
+            raise SystemExit("ERROR\tSSS for PCI %d does not reproduce the "
+                             "pinned TS 38.211 chips" % pci)
+    pss = np.array(pss, dtype=complex)
+    sss_v = np.array(sss_v, dtype=complex)
+
+    # RE layout, TS 38.211 7.4.3.1 / 7.4.1.4.1. The SSB is 20 RBs = 240 REs
+    # over 4 consecutive symbols: PSS (symbol 0) and SSS (symbol 2) take
+    # k = 56..182, the PBCH data takes the rest of symbols 1 and 3 plus
+    # k = 0..47 and 192..239 of symbol 2 — 432 REs, the 864 polar-coded bits
+    # at QPSK — and the DMRS takes every 4th subcarrier of symbols 1 and 3
+    # and the same comb inside symbol 2's two PBCH blocks, offset
+    # v = N_ID^cell mod 4. The PSS symbol carries no PBCH and no DMRS.
+    v = pci % 4
+    dmrs_k = {1: list(range(v, 240, 4)),
+              2: list(range(v, 48, 4)) + list(range(192 + v, 240, 4)),
+              3: list(range(v, 240, 4))}
+    pbch_k = [k for k in range(240) if k % 4 != v]
+
+    # DMRS: TS 38.211 7.4.1.4.1, c_init = 2^11*(i_SSB+1)*(N_ID^cell//4+1)
+    # + 2^6*(i_SSB+1) + N_ID^cell mod 4. Only i_SSB = 0 is emitted here.
+    c_init = (2 ** 11) * (i_ssb + 1) * (pci // 4 + 1) + 64 * (i_ssb + 1) + v
+    dmrs = qpsk(gold(c_init, 2 * 144))
+    if pci in DMRS_PINNED:
+        pin = DMRS_PINNED[pci]
+        got = "".join(("0" if c.real > 0 else "1") + ("0" if c.imag > 0 else "1")
+                      for c in dmrs[:len(pin) // 2])
+        CHECKS["dmrs"] = (len(pin) // 2, got == pin)
+        if not CHECKS["dmrs"][1]:
+            raise SystemExit("ERROR\tPBCH DMRS for PCI %d does not reproduce "
+                             "the pinned TS 38.211 chips (c_init = %d)"
+                             % (pci, c_init))
+
+    # PBCH data: the raw MIB + CRC24C as QPSK in the spec's RE order. The
+    # 864-bit polar code and the bit scrambling are NOT built, so only the
+    # first 24 of the 432 PBCH REs are driven and the rest stay empty rather
+    # than carrying bits that would only look like a coded block. The TSV
+    # line pbch_encoding says exactly that.
+    pbch = qpsk(list(mib_bits) + crc24c(mib_bits))
+
+    grids = []
+    for l in range(4):
+        g = np.zeros(240, dtype=complex)
+        if l == 0:
+            g[56:183] = pss
+        elif l == 2:
+            g[56:183] = sss_v
+        grids.append(g)
+    j = 0
+    for l in (1, 2, 3):
+        for k in dmrs_k[l]:
+            grids[l][k] = dmrs[j]
+            j += 1
+    if j != 144:
+        raise SystemExit("ERROR\tDMRS occupies %d REs, TS 38.211 says 144" % j)
+    n_pbch_re = sum(len([k for k in (range(240) if s in (1, 3)
+                                      else list(range(48)) + list(range(192, 240)))
+                         if k % 4 != v]) for s in (1, 2, 3))
+    CHECKS["dmrs_re"] = (144, j == 144)
+    CHECKS["pbch_re"] = (432, n_pbch_re == 432)
+    CHECKS["pbch_driven"] = (len(pbch), len(pbch) <= n_pbch_re)
+    for j, k in enumerate(pbch_k[:len(pbch)]):
+        grids[1][k] = pbch[j]
+    return grids
+
+
+def main():
+    if len(sys.argv) < 6:
+        sys.stderr.write("ERROR\tusage: nr_ssb_bb.py <out.c16> <pci> <scs_khz> "
+                         "<nfft> <sf> [--slot N] [--detail FILE]\n")
+        return 2
+    out, pci, scs, nfft, sf = (sys.argv[1], int(sys.argv[2]), int(sys.argv[3]),
+                               int(sys.argv[4]), int(sys.argv[5]))
+    detail = None
+    if "--detail" in sys.argv:
+        detail = sys.argv[sys.argv.index("--detail") + 1]
+    nslot = int(sys.argv[sys.argv.index("--slot") + 1]) if "--slot" in sys.argv else 0
+    if scs not in NFFT_STD:
+        sys.stderr.write("ERROR\tSCS %d kHz has no numerology in TS 38.104 "
+                         "5.3.1\n" % scs)
+        return 2
+    mu = {15: 0, 30: 1, 60: 2, 120: 3, 240: 4}[scs]
+    if not 0 <= nslot < 2 ** mu:
+        sys.stderr.write("ERROR\tslot %d is outside subframe mu=%d (0..%d)\n"
+                         % (nslot, mu, 2 ** mu - 1))
+        return 2
+    fs = scs * 1000 * nfft
+    grids = build_grid(pci, scs, nfft, mib_payload(pci, sf), 0)
+    # TS 38.213 4.1: the four SSB symbols are consecutive from the candidate
+    # start symbol (Case A: 2, Case B/C/D: 4) — not one every four symbols.
+    syms_in_slot = [ssb_symbols_in_slot(scs)[0] + k for k in range(4)]
+    cps = cp_lengths(mu, nslot, nfft)
+
+    iq = np.zeros(0, dtype=complex)
+    for l in range(14):
+        if l in syms_in_slot:
+            g = grids[syms_in_slot.index(l)]
+            f = np.zeros(nfft, dtype=complex)
+            f[(nfft - 120):nfft] = g[0:120]     # k = -120 .. -1
+            f[0:120] = g[120:240]               # k =   0 .. 119
+            body = np.fft.ifft(f) * np.sqrt(nfft)
+        else:
+            body = np.zeros(nfft, dtype=complex)
+        iq = np.concatenate([iq, body[-cps[l]:], body])
+
+    peak = np.max(np.abs(iq)) or 1.0
+    scale = 32000.0 / peak
+    i16 = np.round(iq.real * scale).astype("<i2")
+    q16 = np.round(iq.imag * scale).astype("<i2")
+    inter = np.empty(i16.size * 2, dtype="<i2")
+    inter[0::2] = i16
+    inter[1::2] = q16
+    inter.tofile(out)
+
+    if detail:
+        with open(detail, "w") as fh:
+            for l in range(4):
+                fh.write("%d\t%s\n" % (l, " ".join(
+                    "%d:%.6f:%.6f" % (i, v.real, v.imag)
+                    for i, v in enumerate(grids[l]) if v != 0)))
+
+    print("pss_pinned_checked\t%d" % CHECKS.get("pss", (0, False))[0])
+    print("pss_pinned_agree\t%s" % ("1" if CHECKS.get("pss", (0, False))[1] else "0"))
+    print("sss_pinned_checked\t%d" % CHECKS.get("sss", (0, False))[0])
+    print("sss_pinned_agree\t%s" % ("1" if CHECKS.get("sss", (0, False))[1] else
+                                    ("n/a" if "sss" not in CHECKS else "0")))
+    print("dmrs_pinned_checked\t%d" % CHECKS.get("dmrs", (0, False))[0])
+    print("dmrs_pinned_agree\t%s" % ("1" if CHECKS.get("dmrs", (0, False))[1] else
+                                     ("n/a" if "dmrs" not in CHECKS else "0")))
+    print("dmrs_c_init\t%d" % ((2 ** 11) * (0 + 1) * (pci // 4 + 1) + 64 + pci % 4))
+    print("dmrs_re\t%d" % CHECKS.get("dmrs_re", (0, False))[0])
+    print("pbch_re\t%d" % CHECKS.get("pbch_re", (0, False))[0])
+    print("pbch_re_driven\t%d" % CHECKS.get("pbch_driven", (0, False))[0])
+    print("pss_derivation\t%s" % PSS_FORM)
+    print("sss_derivation\t%s" % SSS_FORM)
+    print("fs_hz\t%d" % fs)
+    print("nfft\t%d" % nfft)
+    print("mu\t%d" % mu)
+    print("slot\t%d" % nslot)
+    print("slot_samples\t%d" % iq.size)
+    print("slot_us\t%.3f" % (1e6 * iq.size / fs))
+    print("subframe_samples\t%d" % (iq.size * 2 ** mu))
+    print("cp_long\t%d" % max(cps))
+    print("cp_short\t%d" % min(cps))
+    print("cp_per_slot\t%d" % sum(cps))
+    print("ssb_symbols\t%s" % ",".join(str(s) for s in syms_in_slot))
+    print("iq_bytes\t%d" % (i16.size * 4))
+    print("pbch_encoding\tmib+crc24c mapped directly (polar code TS 38.212 7.1 NOT implemented)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+NAIR_PYEOF
+}
+
+# Write the independent decoder. This is the assertion half of the transmit
+# path: it reads the IQ file back, finds the OFDM symbol boundaries from the
+# signal's own cyclicity, and recovers the SSB grid by FFT. It shares no code
+# with the generator, carries its own copy of the spec sequences, and reports
+# what it measured — so a waveform that is not what the generator claims is
+# visible in its output rather than hidden by it.
+nair_write_bb_dec() {
+    mkdir -p "$MOD_TMP" 2>/dev/null
+    cat > "$NAIR_BB_DEC_PY" <<'NAIR_PYEOF'
+#!/usr/bin/env python3
+"""Independent NR SSB decoder: IQ in, measurements out.
+
+Nothing here reads the generator's code. The slot timing comes from the
+TS 38.211 5.3.1 CP formula and the sample count alone, the SSB subcarrier map
+from TS 38.211 7.4.3.1 and 7.4.1.4.1, the sequences are compared against
+pinned chips taken from an independent TS 38.211 implementation as well as
+against this file's own recursions, and the PBCH block is demodulated and its
+CRC24C recomputed. Everything a caller might assert on is printed as TSV.
+"""
+import sys
+
+import numpy as np
+
+# Pinned chips (first 32) of the published sequences, transcribed from an
+# independent TS 38.211 implementation. A drift in the recursions below then
+# shows up as pss_pinned_agree / sss_pinned_agree = 0 instead of as silent
+# agreement with a wrong sequence.
+PSS_PINNED = {
+    0: [1, -1, -1, 1, -1, -1, -1, -1, 1, 1, -1, -1, -1, 1, 1, -1, 1, -1, 1,
+        -1, -1, 1, 1, -1, -1, 1, 1, 1, 1, 1, -1, -1],
+    1: [1, 1, 1, -1, -1, 1, 1, -1, 1, 1, 1, -1, 1, 1, 1, 1, 1, 1, -1, 1, 1,
+        -1, 1, 1, -1, -1, 1, -1, 1, 1, -1, -1],
+    2: [-1, -1, -1, -1, -1, -1, 1, 1, 1, -1, -1, -1, 1, -1, -1, 1, 1, 1, -1,
+        1, -1, 1, 1, -1, 1, -1, -1, -1, -1, -1, 1, -1],
+}
+SSS_PINNED = {
+    0: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, 1, 1, 1, 1, 1, -1, 1, 1, 1, -1, 1,
+        -1, 1, -1, 1, 1, -1, -1, 1, 1, 1],
+    13: [1, 1, -1, -1, 1, -1, 1, 1, -1, 1, -1, -1, 1, 1, -1, 1, -1, 1, 1, -1,
+         -1, 1, -1, -1, -1, 1, -1, 1, -1, -1, -1, 1],
+    1007: [-1, 1, -1, -1, -1, -1, 1, 1, -1, 1, 1, -1, 1, -1, -1, 1, -1, -1,
+           -1, -1, -1, -1, 1, 1, 1, -1, 1, -1, 1, -1, -1, 1],
+}
+
+
+# Pinned sign pattern of the first 12 PBCH DMRS chips (24 bits, I then Q) for
+# the same cell identities, from the same independent implementation: a wrong
+# c_init still produces QPSK symbols on the right subcarriers, so without a
+# pin the DMRS values would go unchecked.
+DMRS_PINNED = {
+    0: "000011101110011011101101",
+    13: "010110101010011100100100",
+    42: "001001000101111100011000",
+    1007: "000001111000010111101010",
+}
+
+
+def pss_any(nid2):
+    """d_PSS(n) = 1 - 2*x((n + 43*N_ID(2)) mod 127), x(i+7) = (x(i+4)+x(i))
+    mod 2, x(0..6) = 0,1,1,0,1,1,1. TS 38.211 7.4.2.2.1."""
+    x = [0, 1, 1, 0, 1, 1, 1]
+    for i in range(0, 120):
+        x.append((x[i + 4] + x[i]) % 2)
+    return np.array([1 - 2 * x[(n + 43 * nid2) % 127] for n in range(127)])
+
+
+def mseq(init, taps, n_terms):
+    """x(i+7) = (x(i+taps[0]) + x(i+taps[1])) mod 2, init = x(0..6)."""
+    x = list(init)
+    for i in range(0, n_terms + 7):
+        x.append((x[i + taps[0]] + x[i + taps[1]]) % 2)
+    return x
+
+
+def sss_any(nid1, nid2):
+    """TS 38.211 7.4.2.3.1: both sequences start at x(0..6) = 1,0,0,0,0,0,0;
+    x0 uses taps (4,0) and x1 uses taps (1,0). Kept as a separate copy from
+    the generator on purpose - a PCI search that locks on after a fix is then
+    evidence about the waveform rather than about a shared helper."""
+    m0 = 15 * (nid1 // 112) + 5 * nid2
+    m1 = nid1 % 112
+    x0 = mseq([1, 0, 0, 0, 0, 0, 0], (4, 0), 127 + m0)
+    x1 = mseq([1, 0, 0, 0, 0, 0, 0], (1, 0), 127 + m1)
+    return np.array([(1 - 2 * x0[(n + m0) % 127]) * (1 - 2 * x1[(n + m1) % 127])
+                     for n in range(127)])
+
+
+def load_c16(path):
+    raw = np.fromfile(path, dtype="<i2").astype(float)
+    if raw.size % 2:
+        raise SystemExit("ERROR\tIQ file is not an even number of int16 samples")
+    return raw[0::2] + 1j * raw[1::2]
+
+
+def first_energy(iq, thresh=1.0):
+    """First sample of the first symbol that carries energy. A slot can open
+    with empty symbols (an SSB-only burst does), and a purely zero window has
+    no correlation to measure, so every timing measurement starts here."""
+    nz = np.nonzero(np.abs(iq) > thresh)[0]
+    return int(nz[0]) if nz.size else 0
+
+
+def detect_period(iq, s, max_lag, width=16, min_lag=16):
+    """An OFDM symbol repeats its own body: within the cyclic prefix,
+    iq[n + N_body] = iq[n]. Measuring that lag over a window inside the first
+    energetic symbol gives N_FFT without using the CP formula at all. Lags
+    below min_lag are skipped: the SSB occupies only 240 of the 240..4096
+    subcarriers, so the signal is oversampled and neighbouring samples
+    correlate strongly - a short-lag peak would say nothing about the body."""
+    best, best_lag = -2.0, 0
+    for lag in range(min_lag, max_lag + 1):
+        a = iq[s:s + width]
+        b = iq[s + lag:s + lag + width]
+        n = min(a.size, b.size)
+        if n < width:
+            break
+        den = np.sqrt(np.sum(np.abs(a) ** 2) * np.sum(np.abs(b) ** 2))
+        if den == 0:
+            continue
+        rho = abs(np.vdot(a, b)) / den
+        if rho > best:
+            best, best_lag = rho, lag
+    return best_lag, best
+
+
+def spec_cp_pattern(nfft, mu, nslot):
+    """TS 38.211 5.3.1 for the 14 symbols of one slot: N_CP = (144*2^-mu + 16)
+    reference samples when the symbol is l = 0 or l = 7*2^mu of the subframe
+    and 144*2^-mu otherwise; at f_s = N_FFT*dF that is 144*N_FFT/2048 and
+    16*N_FFT*2^mu/2048 samples. None when N_FFT is off the numerology grid."""
+    num_s = 144 * nfft
+    num_x = 16 * nfft * (2 ** mu)
+    if num_s % 2048 or num_x % 2048:
+        return None
+    short, extra = num_s // 2048, num_x // 2048
+    l0 = nslot * 14
+    return [short + extra if (l0 + l) in (0, 7 * (2 ** mu)) else short
+            for l in range(14)]
+
+
+def detect_slot_geometry(nsamples, mu, lo, hi):
+    """The sample count over-determines the timing: for the numerology the 14
+    symbol lengths are fixed by the CP formula, so (N_FFT, slot) are exactly
+    the pairs whose pattern sums to nsamples. No generator knowledge."""
+    hits = []
+    for nfft in range(lo, hi + 1):
+        for nslot in range(2 ** mu):
+            pat = spec_cp_pattern(nfft, mu, nslot)
+            if pat is None:
+                continue
+            if sum(pat) + 14 * nfft == nsamples:
+                hits.append((nfft, nslot, pat))
+    return hits
+
+
+def split_slot(iq, pat, nfft):
+    pos, syms, starts = 0, [], []
+    for l in range(14):
+        starts.append(pos)
+        syms.append(iq[pos + pat[l]:pos + pat[l] + nfft])
+        pos += pat[l] + nfft
+    return syms, starts, pos
+
+
+def spec_dmrs_re(v, s):
+    """TS 38.211 7.4.1.4.1 / 7.4.3.1 DMRS subcarriers of SSB symbol s (0 is
+    the PSS symbol): the comb k = v mod 4 over the whole 240 REs of symbols 1
+    and 3, and the same comb inside symbol 2's two 48-RE PBCH blocks."""
+    if s in (1, 3):
+        return [k for k in range(240) if k % 4 == v]
+    if s == 2:
+        return [k for k in list(range(48)) + list(range(192, 240)) if k % 4 == v]
+    return []
+
+
+def spec_pbch_re(v, s):
+    """The PBCH data REs of SSB symbol s in the spec's own order: ascending k
+    outside the DMRS comb in symbols 1 and 3, and the two blocks of symbol 2.
+    432 REs in all - the 864 polar-coded bits at QPSK."""
+    if s in (1, 3):
+        return [k for k in range(240) if k % 4 != v]
+    if s == 2:
+        return [k for k in list(range(48)) + list(range(192, 240)) if k % 4 != v]
+    return []
+
+
+def crc24c_bits(bits):
+    """TS 38.212 5.1 gCRC24C = D^24+D^23+D^21+D^20+D^17+D^15+D^13+D^12+D^8
+    +D^4+D^2+D+1 over a decoded block, register preset to all ones, check bits
+    appended MSB-first. The polynomial is written as its exponent set and then
+    checked against the constant, because the neighbouring gCRC24A
+    (0x864CFB) differs and a wrong one still produces plausible-looking bits."""
+    poly = 0
+    for e in (24, 23, 21, 20, 17, 15, 13, 12, 8, 4, 2, 1, 0):
+        poly |= 1 << e
+    if poly != 0x1B2B117:
+        raise SystemExit("ERROR\tgCRC24C exponent set does not build 0x1B2B117")
+    reg = 0xFFFFFF
+    for b in list(bits) + [0] * 24:
+        msb = (reg >> 23) & 1
+        reg = (reg << 1) & 0xFFFFFF
+        if msb ^ (b & 1):
+            reg ^= poly
+    return [(reg >> (23 - i)) & 1 for i in range(24)]
+
+
+def main():
+    if len(sys.argv) < 4:
+        sys.stderr.write("ERROR\tusage: nr_ssb_decode.py <in.c16> <scs_khz> "
+                         "<nfft_nominal> [--grid FILE]\n")
+        return 2
+    path, scs, nfft_nom = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    grid_out = None
+    if "--grid" in sys.argv:
+        grid_out = sys.argv[sys.argv.index("--grid") + 1]
+    mu = {15: 0, 30: 1, 60: 2, 120: 3, 240: 4}[scs]
+    iq = load_c16(path)
+
+    # 1. Timing. The CP formula plus the sample count fixes the candidate
+    # (N_FFT, slot) pairs; the SSB itself then picks between them, because a
+    # wrong symbol length scrambles the grid and no PSS root correlates.
+    hits = detect_slot_geometry(iq.size, mu, max(128, nfft_nom // 2),
+                                nfft_nom * 2)
+    print("geometry_candidates\t%d" % len(hits))
+    if not hits:
+        print("ERROR\tno (N_FFT, slot) pair makes %d samples into 14 CP+body "
+              "symbols of the %d kHz numerology (TS 38.211 5.3.1)"
+              % (iq.size, scs))
+        return 2
+
+    per_sym_start = first_energy(iq)
+    period, period_rho = detect_period(iq, per_sym_start, nfft_nom * 2)
+
+    chosen = None
+    ranked = []
+    for nfft, nslot, pat in hits:
+        syms, starts, consumed = split_slot(iq, pat, nfft)
+        block = [np.concatenate([np.fft.fft(s)[nfft - 120:nfft],
+                                 np.fft.fft(s)[0:120]]) / np.sqrt(nfft)
+                 for s in syms]
+        r = -1.0
+        for b in block:
+            for nid2 in range(3):
+                p = pss_any(nid2)
+                den = np.linalg.norm(p) * np.linalg.norm(b[56:183])
+                if den:
+                    r = max(r, abs(np.vdot(p, b[56:183])) / den)
+        ranked.append((r, nfft, nslot, pat, syms, starts, block))
+    ranked.sort(key=lambda t: -t[0])
+    r, nfft, nslot, pat, syms, starts, block = ranked[0]
+    chosen = (nfft, nslot)
+    print("geometry_selected\t%d/%d" % (nfft, nslot))
+    print("geometry_pss_correlation\t%.4f" % r)
+    if len(ranked) > 1:
+        print("geometry_runner_up\t%d/%d\t%.4f" % (ranked[1][1], ranked[1][2],
+                                                   ranked[1][0]))
+    else:
+        print("geometry_runner_up\tnone\t0.0000")
+    if r < 0.5:
+        print("ERROR\tno SSB found under any timing the %d kHz CP formula "
+              "allows: best PSS correlation %.4f" % (scs, r))
+        return 2
+
+    # 2. Cyclic prefixes: every symbol that carries energy must repeat its own
+    # body by exactly the length the spec gives it. Empty symbols cannot be
+    # checked at all, so they are counted, not silently passed.
+    cp_ok, cp_bad, cp_empty = 0, 0, 0
+    energies = []
+    for l, s in enumerate(syms):
+        energies.append(float(np.mean(np.abs(s) ** 2)))
+        if np.all(s == 0):
+            cp_empty += 1
+            continue
+        pre = iq[starts[l]:starts[l] + pat[l]]
+        tail = s[nfft - pat[l]:]
+        den = np.sqrt(np.sum(np.abs(pre) ** 2) * np.sum(np.abs(tail) ** 2))
+        ratio = abs(np.vdot(pre, tail)) / den if den else 0.0
+        if ratio > 0.99:
+            cp_ok += 1
+        else:
+            cp_bad += 1
+
+    symbol_energy_max = max(energies) if energies else 0.0
+    print("cp_pattern\t%s" % ",".join(str(x) for x in pat))
+    print("cp_long_expected\t%d" % max(pat))
+    print("cp_short_expected\t%d" % min(pat))
+    print("cp_in_spec_set\t%d" % (1 if set(pat) == set(
+        spec_cp_pattern(nfft, mu, nslot) or []) else 0))
+    print("period_detected\t%d" % period)
+    print("period_correlation\t%.4f" % period_rho)
+    print("nfft_detected\t%d" % nfft)
+    print("nfft_nominal\t%d" % nfft_nom)
+    print("symbols\t%d" % len(syms))
+    print("symbols_empty\t%d" % cp_empty)
+    print("symbols_energetic\t%d" % (len(syms) - cp_empty))
+    print("cp_symbols_ok\t%d" % cp_ok)
+    print("cp_symbols_bad\t%d" % cp_bad)
+    print("symbol_energy_max\t%.4g" % symbol_energy_max)
+    print("slot_samples\t%d" % iq.size)
+    print("subframe_samples\t%d" % (iq.size * (2 ** mu)))
+    print("slot_us\t%.1f" % (1000.0 * iq.size / (nfft * scs * 1000)))
+
+    # 3. Sequences. Blind search over every symbol, against this file's own
+    # recursions, with the pinned chips as the guard rail.
+    best_sym, best_nid2, best_r = None, None, -1.0
+    for l, b in enumerate(block):
+        for nid2 in range(3):
+            p = pss_any(nid2)
+            den = np.linalg.norm(p) * np.linalg.norm(b[56:183])
+            rr = abs(np.vdot(p, b[56:183])) / den if den else 0.0
+            if rr > best_r:
+                best_sym, best_nid2, best_r = l, nid2, rr
+
+    sss_sym, nid1, sss_r = None, None, -1.0
+    if best_nid2 is not None:
+        for l, b in enumerate(block):
+            if l == best_sym:
+                continue
+            for n1 in range(336):
+                s = sss_any(n1, best_nid2)
+                den = np.linalg.norm(s) * np.linalg.norm(b[56:183])
+                rr = abs(np.vdot(s, b[56:183])) / den if den else 0.0
+                if rr > sss_r:
+                    sss_sym, nid1, sss_r = l, n1, rr
+
+    p_ok = all(list(pss_any(i))[:32] == PSS_PINNED[i] for i in range(3))
+    s_ok = all(list(sss_any(k // 3, k % 3))[:32] == v
+               for k, v in SSS_PINNED.items())
+    print("pss_pinned_agree\t%d" % (1 if p_ok else 0))
+    print("sss_pinned_agree\t%d" % (1 if s_ok else 0))
+    print("pss_pinned_table\t%d" % len(PSS_PINNED))
+    print("sss_pinned_table\t%d" % len(SSS_PINNED))
+    print("pss_symbol\t%s" % (best_sym if best_sym is not None else "none"))
+    print("pss_correlation\t%.4f" % best_r)
+    print("n_id_2\t%s" % (best_nid2 if best_nid2 is not None else "none"))
+    print("sss_symbol\t%s" % (sss_sym if sss_sym is not None else "none"))
+    print("sss_offset_from_pss\t%s" % (sss_sym - best_sym
+                                       if None not in (sss_sym, best_sym)
+                                       else "none"))
+    print("n_id_1\t%s" % (nid1 if nid1 is not None else "none"))
+    print("sss_correlation\t%.4f" % sss_r)
+    pci = 3 * nid1 + best_nid2 if None not in (nid1, best_nid2) else None
+    print("pci_recovered\t%s" % (pci if pci is not None else "none"))
+
+    # 4. The SSB's own subcarrier map, re-derived from the spec for the
+    # recovered PCI: energy must sit on the PSS/SSS/PBCH/DMRS REs and nowhere
+    # else in the block.
+    out_max = 0.0
+    blk_rms = float(np.sqrt(np.mean([np.mean(np.abs(b) ** 2) for b in block]))) or 1.0
+    for s in syms:
+        out = np.fft.fft(s)[120:nfft - 120] / np.sqrt(nfft)
+        if out.size:
+            out_max = max(out_max, float(np.max(np.abs(out))) / blk_rms)
+    print("out_of_block_max\t%.4f" % out_max)
+
+    if pci is not None and best_sym is not None:
+        v = pci % 4
+        # The generator writes int16, so the recovered grid carries an
+        # unknown constant gain. Every presence test is therefore relative to
+        # the strongest RE in the SSB: the quantisation floor sits four orders
+        # of magnitude below any driven subcarrier.
+        blk_ref = max(float(np.max(np.abs(b))) for b in block) or 1.0
+        present = 1e-4 * blk_ref
+        s0 = best_sym
+        if s0 + 3 >= len(block):
+            print("ERROR\tPSS at symbol %d leaves no room for the 4 SSB "
+                  "symbols" % s0)
+            return 2
+        ssb = block[s0:s0 + 4]
+        # The legal REs of each SSB symbol: PSS or SSS in k = 56..182, the
+        # DMRS comb, and the PBCH data REs. Energy anywhere else in the block
+        # is a placement error, which is what re_outside_spec counts.
+        allowed = {
+            0: set(range(56, 183)),
+            1: set(spec_dmrs_re(v, 1)) | set(spec_pbch_re(v, 1)),
+            2: (set(range(56, 183)) | set(spec_dmrs_re(v, 2))
+                | set(spec_pbch_re(v, 2))),
+            3: set(spec_dmrs_re(v, 3)) | set(spec_pbch_re(v, 3)),
+        }
+        outside = 0
+        dmrs_hits = 0
+        dmrs_total = 0
+        for s in (1, 2, 3):
+            for k in spec_dmrs_re(v, s):
+                dmrs_total += 1
+                if abs(ssb[s][k]) > present:
+                    dmrs_hits += 1
+        for s in range(4):
+            for k in range(240):
+                if k in allowed[s]:
+                    continue
+                if abs(ssb[s][k]) > present:
+                    outside += 1
+        dmrs_qpsk = all(
+            abs(abs(ssb[s][k].real) - abs(ssb[s][k].imag))
+            <= 0.05 * (abs(ssb[s][k].real) + abs(ssb[s][k].imag))
+            for s in (1, 2, 3) for k in spec_dmrs_re(v, s))
+        print("ssb_first_symbol\t%d" % s0)
+        print("re_outside_spec\t%d" % outside)
+        print("dmrs_re_checked\t%d" % dmrs_total)
+        print("dmrs_re_present\t%d" % dmrs_hits)
+        print("dmrs_constellation_ok\t%d" % (1 if dmrs_qpsk else 0))
+        print("pss_re_present\t%d" % sum(1 for k in range(56, 183)
+                                          if abs(ssb[0][k]) > present))
+        print("sss_re_present\t%d" % sum(1 for k in range(56, 183)
+                                          if abs(ssb[2][k]) > present))
+        print("sss_neighbours_empty\t%d" % (1 if all(
+            abs(ssb[2][k]) <= present
+            for k in list(range(48, 56)) + list(range(183, 192))) else 0))
+        pin = DMRS_PINNED.get(pci)
+        if pin:
+            got = "".join(("0" if ssb[1][k].real > 0 else "1") +
+                          ("0" if ssb[1][k].imag > 0 else "1")
+                          for k in spec_dmrs_re(v, 1)[:len(pin) // 2])
+            print("dmrs_pinned_checked\t%d" % (len(pin) // 2))
+            print("dmrs_pinned_agree\t%d" % (1 if got == pin else 0))
+        else:
+            print("dmrs_pinned_checked\t0")
+            print("dmrs_pinned_agree\tn/a")
+
+        # 5. The PBCH block: the raw payload in the spec's RE order, so the
+        # decoder can demodulate it and recompute its CRC24C.
+        pb = spec_pbch_re(v, 1)
+        n_used = min(24, len(pb))
+        bits = []
+        for k in pb[:n_used]:
+            c = ssb[1][k]
+            bits += [0 if c.real > 0 else 1, 0 if c.imag > 0 else 1]
+        if len(bits) >= 48:
+            mib, crc = bits[:24], bits[24:48]
+            print("pbch_bits_used\t%d" % len(bits))
+            print("mib_hex\t%s" % "".join("%x" % int("".join(
+                str(x) for x in mib[i:i + 4]), 2) for i in range(0, 24, 4)))
+            print("mib_sfn\t%d" % int("".join(str(x) for x in mib[1:7]), 2))
+            print("mib_message_type\t%d" % mib[0])
+            print("pbch_crc24c_ok\t%d" % (1 if crc24c_bits(mib) == crc else 0))
+        else:
+            print("pbch_bits_used\t%d" % len(bits))
+            print("pbch_crc24c_ok\t0")
+
+    if grid_out:
+        with open(grid_out, "w") as fh:
+            for l, b in enumerate(block):
+                fh.write("%d\t%s\n" % (l, " ".join(
+                    "%.6f:%.6f" % (x.real, x.imag) for x in b)))
+    print("scs_khz\t%d" % scs)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+NAIR_PYEOF
 }
 
 nair_find_srsran_gnb() {
@@ -1959,6 +3007,8 @@ nair_selftest() {
         else printf '%s\tFAIL want=%s got=%s\n' "$n" "$want" "$got"; bad=$(( bad + 1 )); fi
     }
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
+    # chips FROM TO of a space-separated chip dump (1-based, inclusive).
+    chips() { awk -v a="$1" -v b="$2" '{s=""; for (i=a;i<=b;i++) s = s (i>a?" ":"") $i; print s}'; }
 
     local d out rc
     d=$(mktemp -d "$MOD_TMP/selftest.XXXXXX") || {
@@ -2062,6 +3112,29 @@ nair_selftest() {
     out=$(nair_sss_sequence 0 0)
     chk sss-chips  "$(awk '{print NF}' <<<"$out")" "127"
     chk sss-values "$(awk '{for(i=1;i<=NF;i++) if ($i!=1 && $i!=-1) b=1; print (b?"bad":"ok")}' <<<"$out")" "ok"
+    # Pinned SSS chips taken from an INDEPENDENT TS 38.211 implementation
+    # (py3gpp nrSSS, all 1008 PCIs cross-checked against the §7.4.2.3.1
+    # recursion), not from this module's own output. Length and alphabet
+    # alone cannot see the failure this guards: the LTE initialisations
+    # (PSS init for x0, all-ones for x1, both with taps (4,0)) also yield
+    # 127 values of +/-1, but the wrong ones for all 1008 cell identities.
+    # The four PCIs below cover n2 = 0,1,2 and both floor(n1/112) branches
+    # (n1 = 0, 14, 335), and the tail vectors pin the m-sequence phase, so
+    # an m0/m1 offset error cannot hide behind a correct prefix.
+    out=$(nair_sss_sequence 0 0)
+    chk sss-pci0-head  "$(chips 1 14 <<<"$out")"  "1 1 1 1 1 1 1 1 1 1 -1 1 1 1"
+    chk sss-pci0-tail  "$(chips 114 127 <<<"$out")" "-1 1 1 1 -1 1 1 -1 -1 -1 1 -1 -1 -1"
+    out=$(nair_sss_sequence 0 1)
+    chk sss-pci1-head  "$(chips 1 14 <<<"$out")"  "-1 1 -1 1 1 -1 1 -1 -1 -1 1 -1 1 -1"
+    out=$(nair_sss_sequence 14 0)
+    chk sss-pci42-head "$(chips 1 14 <<<"$out")"  "1 1 1 1 1 -1 1 1 1 1 -1 -1 -1 1"
+    out=$(nair_sss_sequence 335 2)
+    chk sss-pci1007-head "$(chips 1 14 <<<"$out")" "-1 1 -1 -1 -1 -1 1 1 -1 1 1 -1 1 -1"
+    chk sss-pci1007-tail "$(chips 114 127 <<<"$out")" "1 1 1 -1 1 1 1 1 -1 1 1 1 1 1"
+    # PSS is NOT touched by the SSS fix: its recursive form must still agree
+    # with the closed-form construction the decoder carries independently.
+    out=$(nair_pss_sequence 0)
+    chk pss-pci0-head "$(chips 1 14 <<<"$out")" "1 -1 -1 1 -1 -1 -1 -1 1 1 -1 -1 -1 1"
     chk pss-bad    "$(nair_pss_sequence 3 >/dev/null 2>&1; echo $?)" "1"
 
     # 4. SSB burst set pattern and half-frame timing.
