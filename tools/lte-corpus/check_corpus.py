@@ -450,15 +450,54 @@ def main(argv):
             rep.note("%s (%s)" % (vec["what"], vec["channel"]))
             rep.note("expectations from: %s" % vec["independent_evidence"])
             hexs = vec["pdu_hex"]
-            rc, out, err = run_codec(args.root, [vec["command"], hexs])
+            # A vector may point at a slice of the captured PDU rather than the
+            # whole thing -- a SIB body pulled out of the SI container, for
+            # instance. The offset is not a free choice: the "items" vector
+            # asserts that same offset against Wireshark's item boundaries, so
+            # a codec that shifts where a body begins fails there first.
+            sub = {"hex": hexs, "bits": str(vec["pdu_bits"])}
+            if "slice" in vec:
+                off = vec["slice"]["offset"]
+                nb = vec["slice"]["bits"]
+                bin_all = "".join(format(b, "08b") for b in bytes.fromhex(hexs))
+                body = bin_all[off:off + nb]
+                if len(body) != nb:
+                    raise SetupError("%s: slice %d+%d runs past the %d captured "
+                                     "bits" % (vec["id"], off, nb, len(bin_all)))
+                # Pad to a whole nibble before slicing into hex digits, or the
+                # final partial group is read as a SHORTER integer and the last
+                # hex digit comes out wrong -- which then shifts nothing but
+                # still changes the last field's value.
+                padded = body + "0" * (-nb % 4)
+                sub = {"hex": "".join(
+                    "%X" % int(padded[i:i + 4], 2)
+                    for i in range(0, len(padded), 4)),
+                    "bits": str(nb)}
+            # Most vectors are "<command> <hex>", but a vector whose subcommand
+            # takes its arguments in another order (type-decode wants the type
+            # name first) spells the whole argument list out instead.
+            if "argv" in vec:
+                argv = [a.format(**sub) for a in vec["argv"]]
+            else:
+                argv = [vec["command"], sub["hex"]] + vec.get("command_args", [])
+            rc, out, err = run_codec(args.root, argv)
             if not rep.check(rc == 0,
                              "codec %s exits 0" % vec["command"],
                              "codec %s %s exits %d: %s"
-                             % (vec["command"], hexs, rc, err.strip()[:200])):
+                             % (vec["command"], sub["hex"], rc, err.strip()[:200])):
                 continue
             fields, sched = parse_fields(out)
             check_expected(rep, vec, fields, sched)
-            check_plausible(rep, vec, fields, sched, len(bytes.fromhex(hexs)))
+            # The plausibility sweep below is about a SIB1-shaped decode: MCC,
+            # MNC, TAC, cell identity, band, value tag. A vector that decodes
+            # something else has none of those keys, so running it there reports
+            # a dozen failures about fields the message never had. The vector
+            # says which it is rather than the checker guessing from the
+            # command, because "which fields must be present" is a property of
+            # the capture, not of the subcommand.
+            if vec.get("plausible", True):
+                check_plausible(rep, vec, fields, sched,
+                                len(bytes.fromhex(sub["hex"])))
             print("   decoded: %s" % ", ".join(
                 "%s=%s" % (k, fields[k]) for k in sorted(fields) if k != "body_hex"
                 and k not in ("layout",)))

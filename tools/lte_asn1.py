@@ -2250,16 +2250,145 @@ def decode_si(data):
         r.pos += n_octets * 8
         # The content is octet padded, so the true body length is not
         # recoverable here. Trailing zero pad bits are reported as they are.
-    name = SIB_CHOICE[index] if index < len(SIB_CHOICE) else "unknown"
-
     return {
         "count": count,
         "sib_index": index,
-        "sib": name,
+        "sib": _sib_name(index),
         "body_bits": body,
         "bits_consumed": r.pos,
         "total_bits": len(r.bits),
     }
+
+
+def _sib_name(index):
+    """The SIB-TypeAndInfo alternative name for a CHOICE index."""
+    return SIB_CHOICE[index] if index < len(SIB_CHOICE) else "unknown"
+
+
+# The root alternatives of SIB-TypeAndInfo in CHOICE-index order: index 0 is
+# sibType2, so the type name for index i is SI_ROOT_TYPES[i]. Index 10 and 11
+# are the two extension additions and travel as open types, under the
+# release-suffixed names TS 36.331 actually gives them (there is no
+# SystemInformationBlockType12 without the -r9).
+SI_ROOT_TYPES = (
+    "SystemInformationBlockType2", "SystemInformationBlockType3",
+    "SystemInformationBlockType4", "SystemInformationBlockType5",
+    "SystemInformationBlockType6", "SystemInformationBlockType7",
+    "SystemInformationBlockType8", "SystemInformationBlockType9",
+    "SystemInformationBlockType10", "SystemInformationBlockType11",
+)
+SI_EXT_TYPES = ("SystemInformationBlockType12_r9",
+                "SystemInformationBlockType13_r9")
+
+
+def _si_root_length(index, rest):
+    """Bit length of one root sib-TypeAndInfo alternative, or None.
+
+    A root alternative carries no length of its own -- only an extension
+    addition is an open type with an octet count in front -- so the only way
+    to learn where its body ends is to decode it. That needs the generated
+    layout table, which is optional. When the table is missing, or does not
+    carry the type, this returns None and the caller stops the walk instead of
+    guessing a boundary it cannot know.
+    """
+    if index >= len(SI_ROOT_TYPES):
+        return None
+    try:
+        codec, per = engine()
+    except Exception:                                   # noqa: BLE001
+        return None
+    try:
+        _value, pos = _decode_counting(codec, per, SI_ROOT_TYPES[index], rest)
+    except Exception:                                   # noqa: BLE001
+        return None
+    return pos
+
+
+def decode_si_items(data):
+    """Every sib-TypeAndInfo item of a SystemInformation container.
+
+    decode_si() stops at the first item. That is enough for the single-SIB
+    messages it was written against, but it half-reads a real multi-SIB
+    message, because the items are NOT concatenated bodies: each root
+    alternative is preceded by its own 5-bit CHOICE index. A caller that
+    assumes otherwise reads the second body five bits early and gets a
+    confident wrong answer -- the container gives no other clue, since a root
+    alternative has no length field.
+
+    Returns "count", "items", "bits_consumed" and "total_bits". Each item has
+    "sib_index", "sib", "choice_offset" (where the item starts), "offset"
+    (where its body starts), "body_bits", "bits" (the true body length, or
+    None when the walk could not establish one) and "open_type". A walk that
+    has to stop early records "stopped_after" rather than returning a short
+    list as though it were the whole message.
+    """
+    r = BitReader(data)
+
+    if r.uint(1) != 0:
+        raise ValueError("not a c1 message (messageClassExtension set)")
+    if r.uint(1) != 0:
+        raise ValueError("c1 alternative is systemInformationBlockType1")
+    if r.uint(1) != 0:
+        raise ValueError("criticalExtensions is not systemInformation-r8")
+    if r.uint(1) != 0:
+        raise ValueError("nonCriticalExtension present; not modelled")
+
+    count = r.uint(SI_COUNT_BITS) + 1
+    items = []
+    stopped_after = None
+
+    for _ in range(count):
+        choice_offset = r.pos
+        if r.uint(1) == 0:
+            index = r.uint(SI_CHOICE_BITS - 1)          # 4-bit root index
+            body_offset = r.pos
+            nbits = _si_root_length(index, r.bits[body_offset:])
+            if nbits is None:
+                items.append({
+                    "sib_index": index, "sib": _sib_name(index),
+                    "choice_offset": choice_offset, "offset": body_offset,
+                    "body_bits": r.bits[body_offset:], "bits": None,
+                    "open_type": False,
+                })
+                stopped_after = _sib_name(index)
+                r.pos = len(r.bits)
+                break
+            body = r.bits[body_offset:body_offset + nbits]
+            if len(body) < nbits:
+                raise ValueError("SIB %d needs %d bits but only %d remain"
+                                 % (index, nbits, len(body)))
+            r.pos = body_offset + nbits
+            open_type = False
+        else:
+            ext_index = r.uint(7)
+            if r.uint(1) != 0:
+                raise ValueError("open-type length uses the long form; not modelled")
+            n_octets = r.uint(7)
+            index = SI_CHOICE_ROOT + ext_index
+            body_offset = r.pos
+            body = r.bits[body_offset:body_offset + n_octets * 8]
+            if len(body) < n_octets * 8:
+                raise ValueError("open type claims %d octets but only %d bits remain"
+                                 % (n_octets, len(r.bits) - body_offset))
+            r.pos = body_offset + n_octets * 8
+            nbits = n_octets * 8
+            open_type = True
+
+        items.append({
+            "sib_index": index, "sib": _sib_name(index),
+            "choice_offset": choice_offset, "offset": body_offset,
+            "body_bits": body, "bits": nbits, "open_type": open_type,
+        })
+
+    out = {
+        "count": count,
+        "items": items,
+        "bits_consumed": r.pos,
+        "total_bits": len(r.bits),
+    }
+    if stopped_after is not None:
+        out["stopped_after"] = stopped_after
+    return out
 
 
 def selftest():
@@ -2385,6 +2514,56 @@ def selftest():
                 bits[5:10] == format(want_index, "05b"), False)
             chk("si-" + name + "-index-at-9",
                 bits[9:14], format(want_index, "05b"))
+
+    # ---- a multi-item container ----------------------------------------
+    #
+    # A real SI message carries several SIBs, and their bodies are NOT
+    # adjacent: each root alternative is preceded by its own 5-bit CHOICE
+    # index. Reading the second body where the first one ended is five bits
+    # early, which does not fail -- it yields a confident wrong decode. That
+    # is the mistake this block exists to catch, and it is why decode_si()
+    # alone is not enough for a message with more than one item.
+    bodies = {}
+    for name, hexs, nbits in SI_VECTORS:
+        if name in ("sib2", "sib3"):
+            bodies[name] = decode_si(bits_of(hexs, nbits))["body_bits"]
+
+    if len(bodies) == 2:
+        two = (encode_si(SIB_CHOICE.index("sibType2"), bodies["sib2"], count=2)
+               + format(SIB_CHOICE.index("sibType3"), "05b") + bodies["sib3"])
+        try:
+            walk = decode_si_items(two)
+        except ValueError as exc:
+            failures.append("si2-walk FAIL raised %s" % exc)
+            walk = None
+        if walk is not None and "stopped_after" in walk:
+            # Not a failure: the layout table is generated with a narrow root
+            # set and may be absent. Say so, because a silent skip is how a
+            # check stops checking anything.
+            print("SKIP\tthe layout table cannot size a root SIB body, so the "
+                  "multi-item walk is unchecked")
+        elif walk is not None:
+            chk("si2-count", walk["count"], 2)
+            chk("si2-items", len(walk["items"]), 2)
+            chk("si2-item0-name", walk["items"][0]["sib"], "sibType2")
+            chk("si2-item1-name", walk["items"][1]["sib"], "sibType3")
+            chk("si2-item0-offset", walk["items"][0]["offset"], SI_HEADER_BITS)
+            chk("si2-item0-bits", walk["items"][0]["bits"], len(bodies["sib2"]))
+            chk("si2-item0-body", walk["items"][0]["body_bits"], bodies["sib2"])
+            # The gap between the two bodies is the second CHOICE index and
+            # nothing else. This is the assertion that fails the moment
+            # somebody treats the items as a plain concatenation.
+            chk("si2-gap",
+                walk["items"][1]["offset"] - walk["items"][0]["offset"],
+                len(bodies["sib2"]) + SI_CHOICE_BITS)
+            chk("si2-item1-bits", walk["items"][1]["bits"], len(bodies["sib3"]))
+            chk("si2-item1-body", walk["items"][1]["body_bits"], bodies["sib3"])
+            _i1 = walk["items"][1]["choice_offset"]
+            chk("si2-index-bits", two[_i1:_i1 + SI_CHOICE_BITS],
+                format(SIB_CHOICE.index("sibType3"), "05b"))
+            # And the walk must land the body exactly, no trailing slack.
+            chk("si2-walk-end", walk["bits_consumed"],
+                walk["items"][1]["offset"] + len(bodies["sib3"]))
 
     # An extension alternative is carried as an OPEN TYPE, not as a flat
     # 5-bit index. Root alternatives coincide with pycrate because a root
@@ -2876,6 +3055,24 @@ def cmd_si(args):
     print("body_bits\t%d" % len(d["body_bits"]))
     print("total_bits\t%d" % d["total_bits"])
     print("body_hex\t%s" % _bits_to_hex(d["body_bits"]))
+    if getattr(args, "all", False):
+        # One row per item, because a real SI message usually carries several
+        # SIBs and the first body's tail is NOT the second body: each root
+        # alternative is preceded by its own 5-bit CHOICE index.
+        try:
+            walk = decode_si_items(bits)
+        except ValueError as exc:
+            sys.stderr.write("ERROR\tcould not walk the item list: %s\n" % exc)
+            return 1
+        print("items\t%d of %d" % (len(walk["items"]), walk["count"]))
+        for i, it in enumerate(walk["items"]):
+            print("item%d\t%s\tindex=%d\toffset=%d\tbits=%s\t%s"
+                  % (i, it["sib"], it["sib_index"], it["offset"],
+                     "?" if it["bits"] is None else it["bits"],
+                     "open type" if it["open_type"] else "root"))
+            print("item%d_hex\t%s" % (i, _bits_to_hex(it["body_bits"])))
+        if "stopped_after" in walk:
+            print("walk_stopped_after\t%s" % walk["stopped_after"])
     return 0
 
 
@@ -3734,17 +3931,33 @@ def _render(v):
         return v
     if isinstance(v, (bytes, bytearray)):
         return v.hex().upper()
-    if isinstance(v, tuple) and len(v) == 2 and isinstance(v[1], int):
-        # A BIT STRING, or a constrained whole number, decodes as (value,
-        # width). The width is not decoration: for a bit string it is the only
-        # thing that distinguishes 0x01 from 0x0100, and PER does not carry it
-        # in the octets.
-        val, width = v
-        if width % 8 == 0:
-            text = "0x%0*X" % (width // 4, val)
-        else:
-            text = "0b" + format(val, "0%db" % width)
-        return "%s (%d bits)" % (text, width)
+    if isinstance(v, tuple) and len(v) == 2:
+        # TWO different kinds of value decode to a 2-tuple: a CHOICE is
+        # (alternative_name, value) and a BIT STRING is (value, width). Both
+        # can carry an int in slot 1 -- a CHOICE that selects a NULL or a
+        # constrained INTEGER does -- so testing slot 1 alone reads the
+        # alternative's NAME as if it were the bit value and dies with
+        # "TypeError: %X format: an integer is required, not str". The
+        # discriminator has to be both slots at once.
+        if isinstance(v[0], int) and isinstance(v[1], int):
+            # A BIT STRING, or a constrained whole number. The width is not
+            # decoration: for a bit string it is the only thing that
+            # distinguishes 0x01 from 0x0100, and PER does not carry it in the
+            # octets.
+            val, width = v
+            if width % 8 == 0:
+                text = "0x%0*X" % (width // 4, val)
+            else:
+                text = "0b" + format(val, "0%db" % width)
+            return "%s (%d bits)" % (text, width)
+        if isinstance(v[0], str):
+            name, inner = v
+            # A CHOICE selecting a NULL is carried as 0, which _render would
+            # otherwise print as a bare "0"; the alternative's name IS the
+            # content, so print just the name.
+            if inner is None or (isinstance(inner, int) and inner == 0):
+                return name
+            return "%s(%s)" % (name, _render(inner))
     return str(v)
 
 
@@ -3791,6 +4004,22 @@ def _unjson(v):
     if isinstance(v, list):
         return [_unjson(x) for x in v]
     return v
+
+
+def _jsonify(v):
+    """The inverse of _unjson, for json.dumps(default=...).
+
+    json has no bytes and no bit strings, so both are spelled out rather than
+    being stringified into something that cannot be read back: {"$octets":
+    "DEADBEEF"} and {"$bits": [value, width]}. A BIT STRING keeps its width
+    because PER does not carry it in the octets -- "010000" and "0100" are the
+    same two bytes at different lengths, and dropping the width loses that.
+    """
+    if isinstance(v, bytes):
+        return {"$octets": v.hex().upper()}
+    if isinstance(v, tuple) and len(v) == 2 and all(isinstance(x, int) for x in v):
+        return {"$bits": [v[0], v[1]]}
+    raise TypeError("cannot express %r in JSON" % (v,))
 
 
 def cmd_engine_decode(args):
@@ -3869,6 +4098,69 @@ def cmd_engine_decode(args):
     return 0
 
 
+def cmd_type_decode(args):
+    """Decode any type in the generated table, by its ASN.1 name.
+
+    The per-SIB subcommands exist because a SIB usually arrives inside a
+    container that has to be unwrapped first. This one is the escape hatch for
+    everything else -- a bare body pulled out of a container, or a type with no
+    hand-written codec at all. It is deliberately dumb: it decodes the bits it
+    is given and reports how many it used, so a caller who hands it a body that
+    starts one bit late gets a short consumption count rather than an error.
+    """
+    # A bit string does not have to be a whole number of octets, and neither
+    # does its hex spelling: a 196-bit body is 49 hex digits. bytes.fromhex
+    # rejects an odd count, so a trailing half-octet is completed with a zero
+    # NIBBLE on the right -- which is where pad belongs -- and then --bits cuts
+    # it off again. Padding on the left would shift every field by four bits.
+    h = args.hex.strip()
+    if len(h) % 2:
+        h += "0"
+    try:
+        data = bytes.fromhex(h)
+    except ValueError:
+        print("ERROR\tnot hex: %s" % args.hex.strip()[:64], file=sys.stderr)
+        return 2
+    if args.bits is not None:
+        if args.bits > len(data) * 8:
+            print("ERROR\t--bits %d exceeds the %d bits of hex given"
+                  % (args.bits, len(data) * 8), file=sys.stderr)
+            return 2
+        nbits = args.bits
+    else:
+        nbits = len(data) * 8
+    bits = "".join(format(b, "08b") for b in data)[:nbits]
+
+    try:
+        codec, per = engine()
+    except Exception as exc:                            # noqa: BLE001
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+    try:
+        if args.exact:
+            value = codec.decode_bits(args.type_name, bits, exact=True)
+            consumed = len(bits)
+        else:
+            value, consumed = _decode_counting(codec, per, args.type_name, bits)
+    except Exception as exc:                            # noqa: BLE001
+        # A truncated read is a different outcome from a malformed request, so
+        # the two get different exit codes: 3 means "the bits ran out", 1 means
+        # anything else. The class is matched by name because the engine is
+        # loaded dynamically and importing its exception here would undo the
+        # laziness that keeps this module usable without a layout table.
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 3 if type(exc).__name__ == "PerError" else 1
+    if args.json:
+        print(json.dumps(value, default=_jsonify, indent=2, sort_keys=True))
+    else:
+        for k, v in _flatten("", value):
+            print("%s\t%s" % (k, v))
+    print("bits_consumed\t%d" % consumed)
+    if consumed != len(bits):
+        print("pad_bits\t%d" % (len(bits) - consumed))
+    return 0
+
+
 def cmd_engine_encode(args):
     """Encode a SIB9 to SIB13 body with the generated codec."""
     root, choice = ENGINE_ROOTS[args.sibtype]
@@ -3935,6 +4227,8 @@ def main(argv):
     si.add_argument("hex", help="the message, as hex octets or a bit string")
     si.add_argument("--bits", type=int, default=None,
                     help="the message's true bit length, before hex padding")
+    si.add_argument("--all", action="store_true",
+                    help="walk every sib-TypeAndInfo item, not just the first")
     si.set_defaults(func=cmd_si)
 
     s3 = sub.add_parser("sib3", help="encode a SystemInformationBlockType3")
@@ -4121,6 +4415,26 @@ def main(argv):
         d.add_argument("--container", action="store_true",
                        help="the hex is a whole SystemInformation container")
         d.set_defaults(func=cmd_engine_decode, sibtype=sibtype)
+
+    # The escape hatch: any type in the generated table, by ASN.1 name. The
+    # per-SIB subcommands above only cover the thirteen SIBs; a body pulled out
+    # of a container, or any other RRC type, has no hand-written decoder and
+    # needs this one. The name must be spelled as pycrate spells it, including
+    # the release suffix (SystemInformationBlockType12_r9, with an underscore).
+    td = sub.add_parser("type-decode",
+                        help="decode any type in the generated layout table")
+    td.add_argument("type_name", help="the ASN.1 type name, e.g. "
+                                      "SystemInformationBlockType3")
+    td.add_argument("hex", help="the body, as hex")
+    td.add_argument("--bits", type=int, default=None,
+                    help="how many bits of the buffer are the message, before "
+                         "hex padding")
+    td.add_argument("--exact", action="store_true",
+                    help="require every bit given to be consumed")
+    td.add_argument("--json", action="store_true",
+                    help="print the decoded value as JSON instead of dotted "
+                         "field lines")
+    td.set_defaults(func=cmd_type_decode)
 
     args = p.parse_args(argv)
     if args.cmd == "selftest":

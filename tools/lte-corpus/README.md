@@ -125,14 +125,26 @@ is never a skip.
 
 ## What this does NOT cover (stated, not papered over)
 
-* **SIB2 and SIB3 are captured but not asserted.** The LTESniffer SI container
-  really does carry SIB2 and SIB3 (Wireshark confirms both, with all their
-  fields), but our codec cannot decode those bodies: `sib2-decode` fails on the
-  real `soundingRS-UL-ConfigCommon` **release** form (we model only setup), and
-  `sib3-decode` models only the *absent* forms of `s-NonIntraSearch` /
-  `s-IntraSearch` / `p-Max` while the real SIB3 carries them. `SIB4..SIB13` are
-  therefore **not** asserted against any real capture at all. Fixing the codec to
-  decode these would be the highest-value follow-up.
+* **The real SIB2 and SIB3 are asserted now, but through the generated engine,
+  not the hand-written codecs.** The LTESniffer SI container carries SIB2 and
+  SIB3, and both are decoded field by field against Wireshark's independent
+  dissection -- `ltesniffer-srsenb-sib2-body` and `-sib3-body` slice the bodies
+  out of the captured container and run them through `type-decode`, which uses
+  the generated layout table. What that proves is the engine. The hand-written
+  `decode_sib2` / `decode_sib3` in `tools/lte_asn1.py` still cannot read these
+  bodies: `sib2-decode` fails on the real `soundingRS-UL-ConfigCommon`
+  **release** form (it models only setup) and `sib3-decode` models only the
+  *absent* forms of `s-NonIntraSearch` / `s-IntraSearch` / `p-Max`. Those two
+  decoders predate the engine and are superseded by it; the honest follow-up is
+  to delete them, not to teach them.
+* **`SIB4..SIB13` are still not asserted against any real capture.** This
+  payload is the only vector carrying a second SIB, and that SIB is SIB3. Every
+  other capture here is a SIB1 or an SI envelope.
+* **The one vector that made the SIB2/SIB3 assertions possible also found a real
+  trap**: the items of `sib-TypeAndInfo` are not adjacent bodies. Each root
+  alternative is preceded by its own 5-bit CHOICE index, so SIB3 starts at bit
+  215, not at bit 210 where SIB2 ends. `si --all` walks them; `ltesniffer-srsenb-si-items`
+  pins the boundaries.
 * **Only one commercial network.** One source (SFR France) is a commercial
   network; the other three vectors are a laboratory testbed. No second operator
   was found under a licence that permits reuse, so "real network" here means
