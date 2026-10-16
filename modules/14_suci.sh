@@ -1321,12 +1321,16 @@ suci_selftest() {
         chk deconceal-a-odd "$(fld "$out" msin)" "123456789"
         chk deconceal-a-odd-n "$(fld "$out" msin_digits)" "9"
         # Deconcealment has no integrity tag to check: ECIES here is AES-CTR
-        # over BCD with no MAC, so a wrong home-network key is only caught
-        # when the decrypted nibbles are not decimal digits. That happens for
-        # roughly 4 of every 5 wrong keys, not for all of them -- asserting
-        # the exit status would make this arm fail on the minority of keys
-        # whose garbage happens to be decodable BCD. Assert the security
-        # property instead: a wrong key must never yield the real MSIN.
+        # over BCD with no MAC, so a wrong home-network key is caught only
+        # when the decrypted nibbles are not decimal digits. Measured against
+        # a fixed real profile-A SUCI with random 32-octet wrong keys: 99.25%
+        # caught (N=2000, 15 accepted) and 99.0% caught (N=20000, 201
+        # accepted), against a 1.00% closed-form acceptance probability
+        # (0.625^5 * 0.625^4 * 0.6875). So this is NOT "a wrong key always
+        # fails": about 1 in 100 wrong keys decrypts to decodable BCD and is
+        # reported as a bogus MSIN. Asserting the exit status would make this
+        # arm fail on those. Assert the security property instead: a wrong key
+        # must never yield the real MSIN.
         local kp2 kp2_priv wrong notreal
         kp2=$(suci_gen_keypair 1); kp2_priv=$(fld "$kp2" private_key)
         wrong=$(suci_deconceal "$suci_hex" "$kp2_priv" 2>/dev/null || true)
