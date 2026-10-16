@@ -67,7 +67,12 @@ else
     for f in "$ROOT"/modules/*.sh; do
         [[ -e "$f" ]] || continue
         id=$(basename "$f" .sh)
-        if ! printf '%s\n' "$gui_ids" | grep -qx "$id"; then
+        # A here-string, not a pipe: `printf ... | grep -q` dies of SIGPIPE
+        # when grep exits at its first match, and `set -o pipefail` then
+        # reports the whole pipeline as failed -- a false "missing" that
+        # appears only under load. Verified: 6/6 spurious failures at a
+        # payload over the pipe buffer.
+        if ! grep -qx "$id" <<< "$gui_ids"; then
             problem "modules/$id.sh exists but has no entry in the GUI table"
         fi
     done
@@ -107,7 +112,7 @@ else
     for f in "$ROOT"/modules/*.sh; do
         [[ -e "$f" ]] || continue
         id=$(basename "$f" .sh)
-        if ! printf '%s\n' "$launcher_ids" | grep -qx "$id"; then
+        if ! grep -qx "$id" <<< "$launcher_ids"; then
             problem "modules/$id.sh is missing from IMSISTING_MODULE_TABLE in imsisting.sh"
         fi
     done
