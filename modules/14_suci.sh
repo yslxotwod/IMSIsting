@@ -386,7 +386,286 @@ print("scheme_output\t" + (eph_pub + ct).hex())
 PYEOF
 }
 
-# The reverse direction: given the home network private key and a captured
+# ── the home-network key interface ──────────────────────────────────────
+# This is the last hop of SUCI deconcealment: everything above is real and
+# testable offline, but recovering a subscriber's MSIN needs the home
+# network's private key for the profile that concealed it. There is no way
+# to compute past that key, and this module will not pretend otherwise.
+#
+# The key arrives at exactly one place:
+#
+#   --deconceal <suci-hex> <key>   second argument, tried in this order:
+#       1. 64 hex digits (optionally 0x-prefixed, whitespace tolerated)
+#          = a raw 32-octet private scalar, as --genkey prints it
+#       2. a path to a readable file, in any of:
+#            - the key file --genkey writes (comment header + TSV, the
+#              private_key field is used)
+#            - a file whose only content is the hex scalar
+#            - a standard PEM/DER key: PKCS#8, SEC1, OpenSSH, X25519 or P-256
+#
+#   IMSISTING_SUCI_HN_KEY=<path>   used when the second argument is omitted;
+#                                  must name an existing readable file
+#
+# The key is validated against the profile the SUCI actually used: the curve
+# must be right, the encoding right, the length right, and the scalar a valid
+# key on that curve. Every failure is a distinct non-zero exit with an
+# actionable message; there is no fallback path and no weaker scheme is
+# substituted. Exit codes (they do not collide with the pass/fail contract the
+# launcher reads):
+#
+#   0  key resolved and validated
+#   2  missing      no key supplied, or the file/variable names nothing
+#   1  malformed    hex that will not parse, a corrupt PEM/DER, or a key file
+#                   with no private key field
+#   3  unreadable   the path exists but this user cannot read it, or is not a
+#                   regular file
+#   4  wrong-curve  a valid key that is not the curve the profile requires
+#
+# suci_key_error prints the actionable message for one of those codes.
+suci_key_error() {
+    case "${1:-}" in
+        2) printf 'ERROR\tno home-network private key: pass <suci-hex> <key-hex|keyfile> or set IMSISTING_SUCI_HN_KEY to a key file (see --status-tsv)\n' >&2 ;;
+        1) printf 'ERROR\thome-network private key is malformed: supply a 64-hex-digit private scalar, a --genkey key file, or a PEM/DER key file\n' >&2 ;;
+        3) printf 'ERROR\thome-network private key is unreadable: the path exists but cannot be opened as a regular file by this user\n' >&2 ;;
+        4) printf 'ERROR\thome-network private key is the wrong curve for this SUCI: profile A (scheme 1) needs X25519, profile B (schemes 2/3) needs secp256r1 (P-256)\n' >&2 ;;
+        *) printf 'ERROR\thome-network private key could not be resolved\n' >&2 ;;
+    esac
+}
+
+# Resolve one key source (an existing file, or 64 hex digits) to
+#   private_key <hex>  public_key <hex>  curve <name>  encoding <label>
+# The profile argument is required, so the curve is checked against the
+# profile that actually concealed the SUCI rather than guessed from the key.
+suci_key_resolve_source() {
+    local src="${1:-}" profile="${2:-}"
+    [[ -n "$src" ]] || return 2
+    [[ "$profile" == "1" || "$profile" == "2" ]] || return 4
+    local dep; dep=$(suci_missing_dep)
+    if [[ -n "$dep" ]]; then
+        printf 'ERROR\t%s is required to validate a home-network private key\n' "$dep" >&2
+        return 1
+    fi
+    local mode="hex" path=""
+    # A hex string is unambiguous, so it wins over a same-named file.
+    if [[ "$src" =~ ^(0x)?[0-9a-fA-F]{64}$ ]]; then
+        mode="hex"; path="$src"
+    elif [[ -e "$src" ]]; then
+        mode="file"; path="$src"
+        if [[ ! -f "$path" ]]; then
+            printf 'ERROR\thome-network private key path is not a regular file: %s\n' "$(suci_sanitize "$path")" >&2
+            return 3
+        fi
+        if [[ ! -r "$path" ]]; then
+            printf 'ERROR\thome-network private key file is not readable by this user: %s\n' "$(suci_sanitize "$path")" >&2
+            return 3
+        fi
+        [[ -s "$path" ]] || {
+            printf 'ERROR\thome-network private key file is empty: %s\n' "$(suci_sanitize "$path")" >&2
+            return 1; }
+    else
+        printf 'ERROR\thome-network private key is neither 64 hex digits nor an existing file: %s\n' "$(suci_sanitize "$src")" >&2
+        return 1
+    fi
+    python3 - "$mode" "$path" "$profile" << 'PYEOF'
+import sys, re, base64, binascii
+from cryptography.hazmat.primitives.asymmetric import x25519, ec
+from cryptography.hazmat.primitives import serialization as ser
+
+mode, path, profile = sys.argv[1], sys.argv[2], int(sys.argv[3])
+
+def fail(msg):
+    sys.stderr.write("ERROR\t" + msg + "\n")
+    sys.exit(90)
+
+def der_priv(data):
+    """Load a private key from PKCS#8 or SEC1 DER."""
+    try:
+        return ser.load_der_private_key(data, password=None)
+    except Exception:
+        pass
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec as _ec
+        return _ec.derive_private_key(int.from_bytes(data, "big"), _ec.SECP256R1())
+    except Exception:
+        return None
+
+raw = None          # a 32-octet scalar whose curve the container did not say
+obj = None          # a key object whose curve the container *did* say (PEM/DER)
+enc = "raw-hex"
+
+def key_from_raw(scalar, prof):
+    """Build the private key a curve-agnostic 32-octet scalar denotes.
+
+    A bare scalar carries no curve, so the profile that concealed the SUCI
+    decides how to read it -- otherwise a valid P-256 scalar would be
+    misreported as a wrong-curve X25519 key. An out-of-range P-256 scalar is
+    malformed, not wrong-curve: the bytes are not a key at all.
+    """
+    if prof == 1:
+        return x25519.X25519PrivateKey.from_private_bytes(scalar), "X25519"
+    # 2^256 is a safe upper bound that needs no big-int curve-parameter copy;
+    # the curve order check is the one that actually rejects a bad scalar.
+    d = int.from_bytes(scalar, "big")
+    if d == 0:
+        fail("private key is not a valid secp256r1 scalar (zero or out of range)")
+    try:
+        return ec.derive_private_key(d, ec.SECP256R1()), "secp256r1"
+    except ValueError as e:
+        fail("private key is not a valid secp256r1 scalar: %s" % e)
+
+def octets_of(key):
+    """The private scalar of a parsed key, so both containers normalise."""
+    if isinstance(key, x25519.X25519PrivateKey):
+        return key.private_bytes_raw()
+    return key.private_numbers().private_value.to_bytes(32, "big")
+
+if mode == "hex":
+    raw = binascii.unhexlify(path)
+else:
+    try:
+        blob = open(path, "rb").read()
+    except OSError as e:
+        sys.stderr.write("ERROR\tcannot read the home-network private key file: %s\n" % e)
+        sys.exit(91)
+    if not blob.strip():
+        fail("key file has no content")
+    text = None
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError:
+        text = None
+
+    if text is not None:
+        # 1. the key file --genkey writes: comments, then TSV fields.
+        val = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "\t" in line:
+                k, _, v = line.partition("\t")
+                if k.strip() == "private_key":
+                    val = v.strip(); break
+            elif re.fullmatch(r"(0x)?[0-9a-fA-F]{64}", line):
+                val = line; break
+        if val is not None:
+            val = val[2:] if val.lower().startswith("0x") else val
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", val):
+                fail("the private_key field is not 64 hex digits")
+            raw = binascii.unhexlify(val)
+            enc = "tsv-hex" if "\t" in text else "hex-file"
+        elif "BEGIN" in text and "PRIVATE KEY" in text:
+            try:
+                obj = ser.load_pem_private_key(text.encode(), password=None)
+            except Exception as e:
+                fail("PEM private key could not be parsed: %s" % e)
+            enc = "pem"
+        else:
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            if len(lines) == 1 and re.fullmatch(r"(0x)?[0-9a-fA-F]{64}", lines[0]):
+                v = lines[0]
+                v = v[2:] if v.lower().startswith("0x") else v
+                raw = binascii.unhexlify(v)
+                enc = "hex-file"
+            else:
+                compact = re.sub(r"\s+", "", text)
+                try:
+                    obj = der_priv(base64.b64decode(compact, validate=True))
+                    if obj is not None:
+                        enc = "der-base64"
+                except Exception:
+                    obj = None
+                if obj is None:
+                    obj = der_priv(blob)
+                    if obj is not None:
+                        enc = "der"
+    else:
+        # Binary: a PEM that was not text, or a bare DER key.
+        if b"BEGIN" in blob and b"PRIVATE KEY" in blob:
+            try:
+                obj = ser.load_pem_private_key(blob, password=None)
+                enc = "pem"
+            except Exception as e:
+                fail("PEM private key could not be parsed: %s" % e)
+        if obj is None:
+            obj = der_priv(blob)
+            if obj is not None:
+                enc = "der"
+
+if obj is None and raw is None:
+    fail("key file has no private key this interface recognises (hex scalar, --genkey TSV, PEM or DER)")
+
+if obj is not None:
+    # The container named the curve, so a mismatch is a real wrong-curve answer.
+    if isinstance(obj, x25519.X25519PrivateKey):
+        curve = "X25519"
+    elif isinstance(obj, ec.EllipticCurvePrivateKey):
+        if not isinstance(obj.curve, ec.SECP256R1):
+            fail("private key is on curve %s, not secp256r1" % obj.curve.name)
+        curve = "secp256r1"
+    else:
+        fail("unsupported private key type: %s" % type(obj).__name__)
+    kp = obj
+    raw = octets_of(obj)
+    want = "X25519" if profile == 1 else "secp256r1"
+    if curve != want:
+        sys.stderr.write(
+            "ERROR\tprivate key is %s but profile %d needs %s\n" % (curve, profile, want))
+        sys.exit(4)
+else:
+    if len(raw) != 32:
+        fail("private key is %d octets, expected 32" % len(raw))
+    kp, curve = key_from_raw(bytes(raw), profile)
+
+hn_pub = (kp.public_key().public_bytes_raw() if curve == "X25519"
+          else kp.public_key().public_bytes(ser.Encoding.X962, ser.PublicFormat.CompressedPoint))
+
+priv = (kp.private_bytes_raw() if curve == "X25519"
+        else kp.private_numbers().private_value.to_bytes(32, "big"))
+print("private_key\t" + priv.hex())
+print("public_key\t" + hn_pub.hex())
+print("hn_public_key\t" + hn_pub.hex())
+print("curve\t" + curve)
+print("encoding\t" + enc)
+print("profile\t%d" % profile)
+PYEOF
+}
+
+# The documented entry point. An explicit argument wins; otherwise
+# IMSISTING_SUCI_HN_KEY supplies a key file. Nothing is guessed and no
+# default key file is picked up behind the operator's back.
+suci_key_resolve() {
+    local arg="${1:-}" profile="${2:-}"
+    local src="$arg" origin="argument"
+    if [[ -z "$src" ]]; then
+        if [[ -n "${IMSISTING_SUCI_HN_KEY:-}" ]]; then
+            src="$IMSISTING_SUCI_HN_KEY"; origin="env:IMSISTING_SUCI_HN_KEY"
+        else
+            printf 'ERROR\tno home-network private key supplied (second argument or IMSISTING_SUCI_HN_KEY)\n' >&2
+            return 2
+        fi
+    fi
+    local out rc=0 err=""
+    err=$(mktemp "$MOD_TMP/keyerr.XXXXXX" 2>/dev/null) || err="$MOD_TMP/keyerr.$$"
+    out=$(suci_key_resolve_source "$src" "$profile" 2>"$err") || rc=$?
+    if (( rc == 0 )); then
+        rm -f "$err"
+        printf '%s\n' "$out"
+        printf 'key_source\t%s\n' "$origin"
+        printf 'key_ref\t%s\n' "$(suci_sanitize "$src")"
+        return 0
+    fi
+    # Report the resolver's specific complaint, not a generic one.
+    if [[ -s "$err" ]]; then sed -n '1p' "$err" >&2; else suci_key_error "$rc"; fi
+    rm -f "$err"
+    # Collapse the parser's internal exits onto the documented code set.
+    case "$rc" in
+        2|3|4) return "$rc" ;;
+        *)     return 1 ;;
+    esac
+}
+
+# ── the reverse direction: given the home network private key and a captured
 # SUCI, recover the MSIN. This is the operator's own key — an audit tool that
 # cannot run it cannot tell whether a deployment is actually protecting the
 # subscriber.
@@ -400,9 +679,7 @@ suci_deconceal() {
         return 1
     fi
     suci_hex="${suci_hex//[[:space:]]/}"; suci_hex="${suci_hex//0x/}"
-    priv_hex="${priv_hex//[[:space:]]/}"; priv_hex="${priv_hex//0x/}"
     [[ "$suci_hex" =~ ^[0-9a-fA-F]+$ ]] || { printf 'ERROR\tSUCI must be hex\n' >&2; return 1; }
-    [[ "$priv_hex" =~ ^[0-9a-fA-F]+$ ]] || { printf 'ERROR\tprivate key must be hex\n' >&2; return 1; }
 
     local scheme; scheme=$(suci_parse "$suci_hex" 2>/dev/null | awk -F'\t' '$1=="protection_scheme"{print $2}')
     [[ -n "$scheme" ]] || { printf 'ERROR\tcould not parse the SUCI\n' >&2; return 1; }
@@ -412,7 +689,24 @@ suci_deconceal() {
     fi
     local scheme_out
     scheme_out=$(suci_parse "$suci_hex" | awk -F'\t' '$1=="scheme_output"{print $2}')
-    python3 - "$scheme" "$scheme_out" "$priv_hex" << 'PYEOF'
+
+    # The key arrives through the one documented interface, validated against
+    # the profile this SUCI used (1 or 2). A refused key stops here: no
+    # fallback, no weaker path, no attempt with a key that does not fit.
+    local kprof="$scheme"; [[ "$scheme" == "3" ]] && kprof=2
+    local kout krc=0
+    kout=$(suci_key_resolve "$priv_hex" "$kprof") || krc=$?
+    if (( krc != 0 )); then
+        (( krc == 2 || krc == 3 || krc == 4 )) || krc=1
+        return "$krc"
+    fi
+    local priv_hex2 hn_pub
+    priv_hex2=$(printf '%s\n' "$kout" | awk -F'\t' '$1=="private_key"{print $2; exit}')
+    hn_pub=$(printf '%s\n' "$kout" | awk -F'\t' '$1=="public_key"{print $2; exit}')
+    [[ -n "$priv_hex2" && -n "$hn_pub" ]] || {
+        printf 'ERROR\thome-network key interface returned no key material\n' >&2; return 1; }
+
+    python3 - "$scheme" "$scheme_out" "$priv_hex2" "$hn_pub" << 'PYEOF'
 import sys, binascii, hashlib, hmac
 from cryptography.hazmat.primitives.asymmetric import x25519, ec
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -420,6 +714,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 scheme  = int(sys.argv[1])
 out     = binascii.unhexlify(sys.argv[2])
 priv    = binascii.unhexlify(sys.argv[3])
+hn_pub  = binascii.unhexlify(sys.argv[4])
 
 def hkdf(ikm, salt, info, length=16):
     prk = hmac.new(salt, ikm, hashlib.sha256).digest()
@@ -429,12 +724,14 @@ def hkdf(ikm, salt, info, length=16):
         okm += t; i += 1
     return okm[:length]
 
+# The public key was derived by the key interface from the private key, so it
+# is a function of the key and not an independent input; asserting it here
+# would only re-check the interface's own arithmetic.
 if scheme == 1:
     if len(out) < 32:
         sys.exit("ERROR\tscheme output too short for a 32-byte ephemeral key")
     eph_pub, ct = out[:32], out[32:]
     kp = x25519.X25519PrivateKey.from_private_bytes(priv)
-    hn_pub = kp.public_key().public_bytes_raw()
     shared = kp.exchange(x25519.X25519PublicKey.from_public_bytes(eph_pub))
 else:
     if len(out) < 33:
@@ -442,8 +739,6 @@ else:
     eph_pub, ct = out[:33], out[33:]
     curve = ec.SECP256R1()
     kp = ec.derive_private_key(int.from_bytes(priv, "big"), curve)
-    from cryptography.hazmat.primitives import serialization as ser
-    hn_pub = kp.public_key().public_bytes(ser.Encoding.X962, ser.PublicFormat.CompressedPoint)
     eph = ec.EllipticCurvePublicKey.from_encoded_point(curve, eph_pub)
     shared = kp.exchange(ec.ECDH(), eph)
 
@@ -669,7 +964,11 @@ suci_ri_nibble() {
 }
 
 # ── CLI verbs ───────────────────────────────────────────────────────────
+# The status verb is the honest inventory of this module: what works with no
+# key at all, what needs the last hop, and what that last hop is. The optional
+# argument probes one key source through the same validation --deconceal uses.
 suci_status() {
+    local keysrc="${1:-}"
     local py cry
     py=$(suci_have_python && echo "python3 ($(python3 -V 2>&1 | awk '{print $2}'))" || echo missing)
     cry=$(suci_have_cryptography && echo "present ($(python3 -c 'import cryptography; print(cryptography.__version__)' 2>/dev/null))" || echo missing)
@@ -681,9 +980,114 @@ suci_status() {
     printf 'bcd_codec\tavailable\n'
     printf 'dir\t%s\n'          "$SUCI_DIR"
     printf 'keydir\t%s\n'       "$SUCI_KEYDIR"
+
+    # ── the key interface, as labelled fields ───────────────────────────
+    # key_absent is the accurate state when no source defines a key — it is
+    # not an error here, because most of this module runs without one.
+    #
+    # A bare hex scalar does not name its curve, so the same source can be
+    # valid for one profile and not the other; probing only profile A would
+    # report a perfectly good P-256 key as unusable. Probe both, and say
+    # which profiles the key actually unlocks. An explicit argument wins over
+    # IMSISTING_SUCI_HN_KEY, exactly as it does in --deconceal.
+    local src="$keysrc" src_origin="argument"
+    if [[ -z "$src" && -n "${IMSISTING_SUCI_HN_KEY:-}" ]]; then
+        src="$IMSISTING_SUCI_HN_KEY"; src_origin="env:IMSISTING_SUCI_HN_KEY"
+    fi
+    if [[ -z "$src" ]]; then
+        printf 'key_interface\targument <key-hex|keyfile> | env IMSISTING_SUCI_HN_KEY=<keyfile>\n'
+        printf 'key_source\tnone\n'
+        printf 'key_state\tkey_absent\n'
+        printf 'key_note\tno key supplied: profile A/B deconcealment is unavailable in this state\n'
+        printf 'can_without_key\tparse-suci,audit,msin-encode,msin-decode,hkdf,build-suci-conceal\n'
+        printf 'cannot_without_key\tdeconceal-profile-a,deconceal-profile-b,msin-recovery\n'
+    elif ! suci_have_cryptography >/dev/null 2>&1; then
+        printf 'key_interface\targument <key-hex|keyfile> | env IMSISTING_SUCI_HN_KEY=<keyfile>\n'
+        printf 'key_source\t%s\n' "$src_origin"
+        printf 'key_ref\t%s\n'    "$(suci_sanitize "$src")"
+        printf 'key_state\tcrypto_unavailable\n'
+        printf 'key_note\tpython3 with the cryptography package is required to validate or use the key\n'
+        printf 'can_without_key\tparse-suci,audit\n'
+        printf 'cannot_without_key\tdeconceal-profile-a,deconceal-profile-b,msin-recovery\n'
+    else
+        local prof rc_a=0 rc_b=0 out_a out_b
+        out_a=$(suci_key_resolve "$src" 1 2>/dev/null) || rc_a=$?
+        out_b=$(suci_key_resolve "$src" 2 2>/dev/null) || rc_b=$?
+        local curve enc pub
+        curve=$(printf '%s\n' "$out_a$out_b" | awk -F'\t' '$1=="curve"{print $2; exit}')
+        enc=$(printf '%s\n'   "$out_a$out_b" | awk -F'\t' '$1=="encoding"{print $2; exit}')
+        pub=$(printf '%s\n'   "$out_a$out_b" | awk -F'\t' '$1=="public_key"{print $2; exit}')
+        printf 'key_interface\targument <key-hex|keyfile> | env IMSISTING_SUCI_HN_KEY=<keyfile>\n'
+        printf 'key_source\t%s\n' "$src_origin"
+        printf 'key_ref\t%s\n'    "$(suci_sanitize "$src")"
+        # The most specific complaint wins; a key that works for at least one
+        # profile is validated for that profile.
+        if (( rc_a == 0 || rc_b == 0 )); then
+            local unlocked="none"
+            if (( rc_a == 0 && rc_b == 0 )); then unlocked="profile-a,profile-b"
+            elif (( rc_a == 0 )); then unlocked="profile-a"
+            else unlocked="profile-b"; fi
+            printf 'key_state\tkey_validated\n'
+            printf 'key_curve\t%s\n'      "$curve"
+            printf 'key_encoding\t%s\n'   "$enc"
+            printf 'hn_public_key\t%s\n'  "$pub"
+            printf 'unlocks\t%s\n'        "$unlocked"
+            printf 'key_note\tkey validated; deconcealment is available for %s\n' "$unlocked"
+            printf 'can_without_key\tparse-suci,audit,msin-encode,msin-decode,hkdf,build-suci-conceal\n'
+            printf 'cannot_without_key\tmsin-recovery-without-this-key\n'
+        else
+            local rc="$rc_a"
+            (( rc_a == 4 && rc_b != 4 )) && rc=4
+            case "$rc" in
+                2) printf 'key_state\tkey_missing\n'
+                   printf 'key_note\tno key supplied: set IMSISTING_SUCI_HN_KEY or pass a key path\n' ;;
+                3) printf 'key_state\tkey_unreadable\n'
+                   printf 'key_note\tthe path exists but cannot be opened as a regular file by this user\n' ;;
+                4) printf 'key_state\tkey_wrong_curve\n'
+                   printf 'key_note\tthe key is valid but on the wrong curve for both profiles (profile A: X25519, profile B: secp256r1)\n' ;;
+                *) printf 'key_state\tkey_malformed\n'
+                   printf 'key_note\tthe key material could not be parsed as a private key\n' ;;
+            esac
+            printf 'can_without_key\tparse-suci,audit\n'
+            printf 'cannot_without_key\tdeconceal-profile-a,deconceal-profile-b,msin-recovery\n'
+        fi
+    fi
+    printf 'last_hop\thome-network-private-key\n'
+    printf 'last_hop_detail\t%s\n' \
+        "the private key matching the home network public key that concealed the SUPI (profile A: X25519, profile B: secp256r1) -- held by the operator or extracted from it"
+    return 0
 }
 
-suci_cli_status_tsv() { suci_status; }
+suci_cli_status_tsv() { suci_status "${1:-}"; }
+
+# Report what one key source resolves to, through the same interface
+# --deconceal uses. Non-zero on refusal, so a script can gate on it.
+suci_cmd_verify_hnkey() {
+    local src="${1:-}" profile="${2:-1}"
+    [[ "$profile" =~ ^[12]$ ]] || {
+        printf 'ERROR\tprofile must be 1 (X25519) or 2 (secp256r1)\n' >&2; return 2; }
+    [[ -n "$src" || -n "${IMSISTING_SUCI_HN_KEY:-}" ]] || {
+        printf 'ERROR\tusage: --verify-hnkey <key-hex|keyfile> [profile] (or set IMSISTING_SUCI_HN_KEY)\n' >&2
+        printf 'key_state\tkey_missing\n'
+        printf 'key_note\tno key supplied: pass a key or set IMSISTING_SUCI_HN_KEY\n'
+        return 2; }
+    # An omitted source still resolves through IMSISTING_SUCI_HN_KEY: the
+    # interface has exactly one fallback and it is that variable, so this
+    # verb must be able to report on it too.
+    local out rc=0
+    out=$(suci_key_resolve "$src" "$profile") || rc=$?
+    if (( rc != 0 )); then
+        printf 'key_state\t%s\n' "$(case "$rc" in 2) echo key_missing;; 3) echo key_unreadable;; 4) echo key_wrong_curve;; 1) echo key_malformed;; *) echo refused;; esac)"
+        printf 'key_note\t%s\n' "$(case "$rc" in
+            2) echo 'no key supplied: pass a key or set IMSISTING_SUCI_HN_KEY';;
+            3) echo 'the path exists but is not a readable regular file';;
+            4) echo 'the key is valid but on the wrong curve for this profile';;
+            *) echo 'the key material could not be parsed as a private key';; esac)"
+        return "$rc"
+    fi
+    printf '%s\n' "$out"
+    printf 'key_state\tkey_validated\n'
+}
 
 suci_cmd_build() {
     local scheme="${1:-1}" msin="${2:-}" hn_pub="${3:-}" mcc="${4:-001}" mnc="${5:-01}"
@@ -702,8 +1106,12 @@ suci_cmd_parse() {
 
 suci_cmd_deconceal() {
     local hex="${1:-}" key="${2:-}"
-    [[ -n "$hex" && -n "$key" ]] || {
-        printf 'ERROR\tusage: --deconceal <suci-hex> <hn-private-key-hex>\n' >&2; return 2; }
+    [[ -n "$hex" ]] || {
+        printf 'ERROR\tusage: --deconceal <suci-hex> <key-hex|keyfile>  (or set IMSISTING_SUCI_HN_KEY=<keyfile>)\n' >&2; return 2; }
+    if [[ -z "$key" && -z "${IMSISTING_SUCI_HN_KEY:-}" ]]; then
+        printf 'ERROR\tusage: --deconceal <suci-hex> <key-hex|keyfile>  (or set IMSISTING_SUCI_HN_KEY=<keyfile>)\n' >&2
+        return 2
+    fi
     suci_deconceal "$hex" "$key"
 }
 
@@ -912,10 +1320,90 @@ suci_selftest() {
         out=$(suci_deconceal "$suci_hex" "$kp_priv")
         chk deconceal-a-odd "$(fld "$out" msin)" "123456789"
         chk deconceal-a-odd-n "$(fld "$out" msin_digits)" "9"
-        # A wrong key must not silently produce digits.
-        local kp2 kp2_priv
+        # Deconcealment has no integrity tag to check: ECIES here is AES-CTR
+        # over BCD with no MAC, so a wrong home-network key is only caught
+        # when the decrypted nibbles are not decimal digits. That happens for
+        # roughly 4 of every 5 wrong keys, not for all of them -- asserting
+        # the exit status would make this arm fail on the minority of keys
+        # whose garbage happens to be decodable BCD. Assert the security
+        # property instead: a wrong key must never yield the real MSIN.
+        local kp2 kp2_priv wrong notreal
         kp2=$(suci_gen_keypair 1); kp2_priv=$(fld "$kp2" private_key)
-        chk deconceal-a-wrongkey "$(suci_deconceal "$suci_hex" "$kp2_priv" >/dev/null 2>&1; echo $?)" "1"
+        wrong=$(suci_deconceal "$suci_hex" "$kp2_priv" 2>/dev/null || true)
+        notreal=$(fld "$wrong" msin)
+        [[ "$notreal" == "1234567890" ]] && notreal="LEAKED"
+        chk deconceal-a-wrongkey "$notreal" ""
+
+        # ── the key interface refuses, and never guesses ────────────────
+        # A key that is missing, unreadable, malformed or on the wrong curve
+        # must each come back as its own distinct state, and the module must
+        # not fall back to a weaker path. kstate() runs the same resolver
+        # --deconceal uses and reduces it to one label.
+        local kd p1 p2
+        kd=$(mktemp -d "$MOD_TMP/keyiface.XXXXXX")
+        p1=$(fld "$kp" private_key)
+        p2=$(fld "$(suci_gen_keypair 2)" private_key)
+        # A --genkey key file for profile A, and a P-256 key in a real PEM
+        # container, which is the only form that names its own curve.
+        suci_gen_keypair 1 > "$kd/a.tsv"
+        python3 - "$kd/p256.pem" <<'PYV'
+import sys
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization as ser
+open(sys.argv[1], "wb").write(ec.generate_private_key(ec.SECP256R1()).private_bytes(
+    ser.Encoding.PEM, ser.PrivateFormat.PKCS8, ser.NoEncryption()))
+PYV
+        kstate() { # <profile> <key>  -> key_state label
+            local o r=0
+            o=$(suci_cmd_verify_hnkey "$2" "$1" 2>/dev/null) || r=$?
+            if (( r == 0 )); then fld "$o" key_state; else fld "$o" key_state; fi
+        }
+        chk ki-missing      "$(suci_cmd_verify_hnkey "" 1 >/dev/null 2>&1; echo $?)" "2"
+        chk ki-state-missing "$(kstate 1 "")" "key_missing"
+        # A directory is not a key file: that is the unreadable case.
+        chk ki-state-unreadable "$(kstate 1 "$kd")" "key_unreadable"
+        # 63 hex digits is not a scalar, and ASCII is not a key.
+        chk ki-state-malformed-hex "$(kstate 1 "$(printf 'a%.0s' $(seq 1 63))")" "key_malformed"
+        chk ki-state-malformed-ascii "$(kstate 1 "not-a-key")" "key_malformed"
+        # The container names the curve, so this is a real wrong-curve refusal.
+        chk ki-state-wrongcurve "$(kstate 1 "$kd/p256.pem")" "key_wrong_curve"
+        chk ki-state-rightcurve "$(kstate 2 "$kd/p256.pem")" "key_validated"
+        chk ki-keyfile-tsv  "$(kstate 1 "$kd/a.tsv")" "key_validated"
+        chk ki-hex-nocurve  "$(kstate 1 "$p2")" "key_validated"
+        # A key is never accepted on the strength of the other profile's curve.
+        # It has to be the container that names the curve: a bare 32-octet
+        # scalar is legitimately readable as either curve, so the same bytes
+        # unlocking both profiles is correct, not a fallback.
+        chk ki-nofallback    "$(suci_cmd_verify_hnkey "$kd/p256.pem" 1 >/dev/null 2>&1; echo $?)" "4"
+
+        # ── the key-dependent path, against an independent vector ────────
+        # This scheme output was produced by a separate Python implementation
+        # of TS 33.501 Annex C (X25519 + HKDF-SHA256 + AES-128-CTR) with fixed
+        # scalars, not by this module: the module's own encoder is never in the
+        # loop, so a shared bug cannot hide here. The scalars were invented for
+        # this test -- no real subscriber and no real operator key.
+        local vec_priv vec_hnpub vec_so vec_suci vec_out
+        vec_priv="6b2f0c8d5e4a3b1908273645f1e2d3c4b5a6978877665544332211ffeeddccbb"
+        vec_hnpub="ad098a6bca5d63202f93d944dd188e4f025b9ab5ff64251efa81ddfc47da1004"
+        vec_so="d5e9065052939549d055acf03f348200578e3ed2b65eb6a96564471761ba4f54066dcd7c93"
+        # The SUCI around it comes from this module's builder, so only the
+        # scheme output -- the part the standard defines -- is external.
+        vec_suci=$(fld "$(suci_build 1 1234567890 "$vec_hnpub" 208 01 1 0001)" suci)
+        vec_suci="$(python3 -c "
+import sys
+sx = bytes.fromhex('$vec_suci'); so = bytes.fromhex('$vec_so')
+sys.stdout.write((sx[:-len(so)] + so).hex())")"
+        vec_out=$(suci_deconceal "$vec_suci" "$vec_priv")
+        chk vector-a-msin      "$(fld "$vec_out" msin)" "1234567890"
+        chk vector-a-bcd       "$(fld "$vec_out" bcd_msin)" "2143658709"
+        chk vector-a-k         "$(fld "$vec_out" k_hex)" "d67f6c05b952f6e3030e47d080bad6bd"
+        # The k above is fixed by the KDF; if the interface handed the module
+        # the wrong scalar or the wrong curve, this cannot come out right.
+        chk vector-a-hnpub     "$(fld "$vec_out" hn_public_key)" "$vec_hnpub"
+        # The same vector under a key that did not conceal it must not give
+        # the MSIN back.
+        vec_out=$(suci_deconceal "$vec_suci" "$(fld "$(suci_gen_keypair 1)" private_key)" 2>/dev/null || true)
+        chk vector-a-wrongkey "$(fld "$vec_out" msin)" ""
 
         # Profile B, P-256 with a compressed point.
         kp=$(suci_gen_keypair 2)
@@ -1063,6 +1551,7 @@ suci_menu() {
   [7]  MSIN BCD decode
   [8]  audit a file of SUCIs (exposure / linkability)
   [9]  status
+  [10] verify a home-network private key (the last hop)
   [0]  back
 
 M
@@ -1106,6 +1595,10 @@ M
                suci_cmd_audit "$f" | column -t -s$'\t' 2>/dev/null
                read -rp "  press enter " _ ;;
             9) suci_status | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
+            10) read -rp "  key hex or key file> " k
+                read -rp "  profile (1|X25519, 2|secp256r1)> " p
+                suci_cmd_verify_hnkey "$k" "${p:-1}" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1117,10 +1610,11 @@ suci_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
     case "$cmd" in
-        --status-tsv)    suci_cli_status_tsv ;;
+        --status-tsv)    suci_cli_status_tsv "${1:-}" ;;
         --build-suci)    suci_cmd_build "${1:-1}" "${2:-}" "${3:-}" "${4:-001}" "${5:-01}" ;;
         --parse-suci)    suci_cmd_parse "${1:-}" ;;
         --deconceal)     suci_cmd_deconceal "${1:-}" "${2:-}" ;;
+        --verify-hnkey)  suci_cmd_verify_hnkey "${1:-}" "${2:-1}" ;;
         --hkdf)          suci_cmd_hkdf "${1:-}" "${2:-}" "${3:-}" "${4:-32}" ;;
         --msin-encode)   suci_cmd_msin_encode "${1:-}" ;;
         --msin-decode)   suci_cmd_msin_decode "${1:-}" ;;
@@ -1134,11 +1628,17 @@ suci_cli_main() {
 SUCI Deconcealment — concealment, deconcealment, exposure audit
 
 Usage: $0 COMMAND
-  --status-tsv                       crypto availability and paths as TSV
+  --status-tsv [key-hex|keyfile]     availability, the key interface and the last hop
+                                     as TSV; with an argument, validates that key source
   --build-suci <0|1|2> <msin> [hn-pubkey-hex] [mcc] [mnc]
                                      build a SUCI (0 null, 1 profile A, 2 profile B)
   --parse-suci <hex>                 parse the SUCI fields; flags a null scheme
-  --deconceal <hex> <privkey-hex>    recover the MSIN with the home network key
+  --deconceal <hex> <key-hex|keyfile>
+                                     recover the MSIN with the home network private
+                                     key; env IMSISTING_SUCI_HN_KEY=<keyfile> also works
+  --verify-hnkey <key-hex|keyfile> [1|2]
+                                     validate a home network private key against the
+                                     profile's curve and report what it is
   --hkdf <ikm-hex> <salt-hex|-> <info> [len]
                                      HKDF-SHA256, extract then expand (RFC 5869)
   --msin-encode <msin>               decimal MSIN to nibble-swapped BCD
@@ -1152,6 +1652,16 @@ Usage: $0 COMMAND
 
 Profile A/B need python3 with the 'cryptography' package; HKDF and the BCD
 codec are pure hashlib/hmac and always run.
+
+The last hop: recovering a subscriber's MSIN needs the home network's private
+key for the profile that concealed it (X25519 for profile A, secp256r1 for
+profile B). It is held by the operator, or obtained from it. Everything else
+here -- parsing, the null-scheme audit, the reused-ephemeral audit, HKDF, the
+MSIN codec and concealment -- runs without it. A key that is missing,
+unreadable, malformed or on the wrong curve is refused with its own exit code
+(2, 3, 1, 4); nothing falls back to a weaker path. The key arrives as the
+second argument (hex scalar or key file: --genkey TSV, bare hex, PEM or DER)
+or through IMSISTING_SUCI_HN_KEY=<keyfile>.
 EOF
             return 2 ;;
     esac
