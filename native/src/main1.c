@@ -33,11 +33,17 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
+/* config.h comes first: it carries the build-time answers (HAVE_VTE, the
+   project root and version) that the includes below branch on. */
+#include "config.h"
+
 #ifdef HAVE_VTE
 #include <vte/vte.h>
 #endif
 
-#include "config.h"
+/* Orbitron and Neuropol ride in the binary with the icons; fontconfig is how
+   this process gets to see them without installing anything system-wide. */
+#include <fontconfig/fontconfig.h>
 
 /* The generated module index. tools/gen-module-index.sh rewrites this file;
    it is included rather than linked so the GUI always agrees with the tree. */
@@ -90,6 +96,125 @@ imsisting_icon_image(const char *name)
     }
     return gtk_image_new_from_icon_name(
         (name != NULL && *name != '\0') ? name : "dialog-information-symbolic");
+}
+
+/* The drawing the tool is named after, sized for the header.
+ *
+ * The asset is authored with transparency, so normally this is just the
+ * resource at a size. The fallback matters because the first version of this
+ * file was glow-on-black with NO alpha channel - drawn for the splash, where
+ * it is composited additively, so black cost nothing there. Dropped into the
+ * header unchanged that version would be a black tile with a blue smudge in
+ * it. For a format with no alpha channel the key is therefore taken from the
+ * pixels: alpha becomes the brightest channel, which makes the black
+ * transparent and leaves the glow its colour. Every channel is then <= alpha,
+ * so the result is valid premultiplied data. */
+static gboolean
+memory_format_alpha_at(GdkMemoryFormat fmt, int *off_r, int *off_g, int *off_b,
+                       int *bpp)
+{
+    int r = 0, g = 0, b = 0, n = 0;
+    gboolean has;
+
+    switch (fmt) {
+    case GDK_MEMORY_B8G8R8A8:
+    case GDK_MEMORY_B8G8R8A8_PREMULTIPLIED:
+        r = 2; g = 1; b = 0; n = 4; has = TRUE; break;
+    case GDK_MEMORY_R8G8B8A8:
+    case GDK_MEMORY_R8G8B8A8_PREMULTIPLIED:
+        r = 0; g = 1; b = 2; n = 4; has = TRUE; break;
+    case GDK_MEMORY_A8R8G8B8:
+    case GDK_MEMORY_A8R8G8B8_PREMULTIPLIED:
+        r = 1; g = 2; b = 3; n = 4; has = TRUE; break;
+    case GDK_MEMORY_A8B8G8R8:
+    case GDK_MEMORY_A8B8G8R8_PREMULTIPLIED:
+        r = 0; g = 1; b = 2; n = 4; has = TRUE; break;
+    default:
+        has = FALSE; break;
+    }
+
+    /* Callers that only want the verdict pass NULLs, so every write is
+       conditional: this is a predicate as often as it is an accessor. */
+    if (off_r != NULL) *off_r = r;
+    if (off_g != NULL) *off_g = g;
+    if (off_b != NULL) *off_b = b;
+    if (bpp   != NULL) *bpp   = n;
+    return has;
+}
+
+static gboolean
+memory_format_rgb(GdkMemoryFormat fmt, int *off_r, int *off_g, int *off_b)
+{
+    switch (fmt) {
+    case GDK_MEMORY_B8G8R8:
+        *off_r = 2; *off_g = 1; *off_b = 0; return TRUE;
+    case GDK_MEMORY_R8G8B8:
+        *off_r = 0; *off_g = 1; *off_b = 2; return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+static GtkWidget *
+imsisting_logo_image(int size)
+{
+    const char *res = "/com/imsisting/native/imsisting_logo.png";
+    g_autoptr(GdkTexture) tex = NULL;
+    g_autofree guchar *px = NULL;
+    GdkMemoryFormat fmt, out_fmt;
+    GdkTexture *keyed;
+    GtkWidget *image;
+    int w, h, off_r, off_g, off_b, bpp;
+    gsize stride, len;
+
+    if (!g_resources_get_info(res, G_RESOURCE_LOOKUP_FLAGS_NONE,
+                              NULL, NULL, NULL))
+        return gtk_image_new();
+
+    tex = gdk_texture_new_from_resource(res);
+    if (tex == NULL)
+        return gtk_image_new();
+
+    fmt = gdk_texture_get_format(tex);
+    if (memory_format_alpha_at(fmt, NULL, NULL, NULL, NULL)) {
+        /* Nothing to key: hand the resource straight to the image. */
+        image = gtk_image_new_from_resource(res);
+        gtk_image_set_pixel_size(GTK_IMAGE(image), size);
+        return image;
+    }
+
+    if (!memory_format_rgb(fmt, &off_r, &off_g, &off_b))
+        return gtk_image_new();
+
+    w = gdk_texture_get_width(tex);
+    h = gdk_texture_get_height(tex);
+    stride = (gsize) w * 3;
+    len = stride * (gsize) h;
+    px = g_malloc(len);
+    gdk_texture_download(tex, px, stride);
+
+    {
+        gsize out_len = (gsize) w * 4 * (gsize) h;
+        guchar *out = g_malloc(out_len);
+
+        for (gsize i = 0, o = 0; i + 2 < len; i += 3, o += 4) {
+            guchar r = px[i + off_r], g = px[i + off_g], b = px[i + off_b];
+            out[o]     = r;
+            out[o + 1] = g;
+            out[o + 2] = b;
+            out[o + 3] = MAX(r, MAX(g, b));
+        }
+        out_fmt = (off_r == 0) ? GDK_MEMORY_R8G8B8A8_PREMULTIPLIED
+                               : GDK_MEMORY_B8G8R8A8_PREMULTIPLIED;
+        keyed = gdk_memory_texture_new(w, h, out_fmt,
+                                       g_bytes_new_take(out, out_len),
+                                       (gsize) w * 4);
+    }
+
+    image = gtk_image_new_from_paintable(GDK_PAINTABLE(keyed));
+    g_object_unref(keyed);
+    gtk_image_set_pixel_size(GTK_IMAGE(image), size);
+    return image;
 }
 
 static const char *
@@ -176,6 +301,14 @@ struct _AppState {
     GtkTextBuffer *event_buffer;
     GtkWidget *toast_box;
 
+    /* The last notifications, newest first. A toast is an announcement, not a
+       record: it slides away in a few seconds, and only five share the corner
+       at once. Everything that toasts is also written here, and the
+       Notifications page is what reads it. */
+    GQueue    *notifs;
+    GtkWidget *notif_list;
+    GtkWidget *notif_summary;
+
     /* Diagnostics: stderr is redirected here and polled into the drawer. */
     int stderr_fd;
     off_t stderr_pos;
@@ -198,9 +331,14 @@ struct _AppState {
     /* The six permanent pages as a list at the top of the drawer. Held so
        the highlight can follow the notebook instead of being rebuilt. */
     GtkWidget *drawer_nav;
-    GtkWidget *drawer_nav_rows[6];
+    GtkWidget *drawer_nav_rows[7];
     gboolean   drawer_nav_syncing;
     GtkWidget *status_sdr, *status_tx, *status_cells, *status_gps, *status_freq;
+    /* The strip's own heartbeat. Without it the chips look equally certain
+       whether the radio answered a second ago or the poll died an hour ago -
+       which is the one lie a status strip must not tell. */
+    GtkWidget *status_fresh;
+    gint64     status_seen_us;
     /* Live station band on the dashboard: case-scoped facts the status strip
        does not carry (case, targets, evidence, alerts). */
     GtkWidget *dash_case, *dash_targets, *dash_evidence, *dash_alerts;
@@ -264,6 +402,7 @@ struct _AppState {
     guint          live_count;
     guint          live_hint;
     gboolean       live_paused;
+    gboolean       live_announced;  /* the user started the feed, not the page */
     /* Operational state for the feed: how fast it is arriving, and when
        anything last did. A cumulative count alone cannot distinguish a live
        emitter from one that died an hour ago. */
@@ -338,7 +477,6 @@ struct _AppState {
     double          splash_shown;     /* the bar's position, 0.0 .. 1.0 */
     gboolean        splash_video;     /* this launch plays the film, not the art */
     GtkMediaStream *splash_media;     /* the film, polled for "has it ended" */
-    GtkWidget      *splash_poster;    /* still art, until the film can draw */
     gint64          splash_film_us;   /* when the film started playing */
     gint64          splash_start_us;  /* when the splash first appeared */
 };
@@ -355,6 +493,8 @@ typedef struct {
     gboolean saw_error;
     int refs;               /* two pipe readers + one waiter */
     GtkTextBuffer *output;  /* page output card to echo into, or NULL */
+    char *last_announced;   /* the previous line that earned a toast */
+    guint announced;        /* how many this run has spent */
 } ActionRun;
 
 /* Which pipe a read callback belongs to. */
@@ -438,9 +578,9 @@ static const ModuleDefinition modules[] = {
     { "17_nr_core",          "5G Core (SBA)",        "CORE NETWORK",
       "imsisting-17_nr_core-symbolic",
       "5G SBA: NGAP, 5GS NAS, 5G-GUTI, PFCP rules and 5G-AKA." },
-    { "31_ss7_map",          "SS7 / MAP / GRX",      "CORE NETWORK",
+    { "31_ss7_map",          "SS7 / MAP Attacks",    "CORE NETWORK",
       "imsisting-31_ss7_map-symbolic",
-      "MTP3/SCCP/TCAP/MAP decode, SRI/ATI/PSI flows and GRX reachability." },
+      "MTP3/SCCP/TCAP/MAP decode and forge, M3UA framing both ways and GRX reachability." },
     { "32_cellular_dns",     "DNS over Cellular",    "CORE NETWORK",
       "imsisting-32_cellular_dns-symbolic",
       "DNS encode-decode, the aLTEr redirection sequence and response-tampering detection." },
@@ -499,7 +639,7 @@ static const ModuleDefinition modules[] = {
     { "26_nr_cve",           "5G CVE Kit",           "ATTACKS",
       "imsisting-26_nr_cve-symbolic",
       "5G NR, SBA and SUCI CVEs." },
-    { "35_volte_ims",        "VoLTE / IMS",          "ATTACKS",
+    { "35_volte_ims",        "VoLTE / IMS Attacks",  "ATTACKS",
       "imsisting-35_volte_ims-symbolic",
       "VoLTE keystream reuse (ReVoLTE), IMP4GT identity mapping and SIP/IMS analysis." },
     { "40_baseband",         "Baseband Research",    "ATTACKS",
@@ -514,14 +654,17 @@ static const ModuleDefinition modules[] = {
     { "60_nr_inject",        "5G NR Injection",      "ATTACKS",
       "imsisting-60_nr_inject-symbolic",
       "NR RNTI tracking, MAC-NR framing, descrambling and the injection exploit set." },
+    { "61_baseband_diag",    "Baseband NV/EFS",      "ATTACKS",
+      "imsisting-61_baseband_diag-symbolic",
+      "Qualcomm DM/DIAG framing, NV and EFS2 codecs, state-info identity decode and the AT/device surface." },
 
     /* ANALYSIS — captures, identities and signalling */
     { "21_pcap_analysis",    "Capture Analysis",     "ANALYSIS",
       "imsisting-21_pcap_analysis-symbolic",
       "From-scratch pcap reader that dissects GSMTAP, Diameter, NGAP, S1AP, GTP, PFCP and RTP." },
-    { "22_imsi_exposure",    "IMSI Exposure Audit",  "ANALYSIS",
+    { "22_imsi_exposure",    "IMSI Harvest",         "ANALYSIS",
       "imsisting-22_imsi_exposure-symbolic",
-      "TMSI/GUTI to IMSI correlation, cross-capture audit and per-subscriber exposure scoring." },
+      "Identity harvesting, TMSI/GUTI to IMSI correlation and per-subscriber exposure scoring." },
     { "23_cipher_audit",     "Cipher Audit",         "ANALYSIS",
       "imsisting-23_cipher_audit-symbolic",
       "Scores negotiated ciphers per session across 2G-5G and finds null or downgraded bearers." },
@@ -777,6 +920,55 @@ event_line_is_error(const char *s)
            strstr(s, "denied") != NULL || strstr(s, "fabricat") != NULL;
 }
 
+/* ── which lines earn a toast ─────────────────────────────────────────
+   Copied from wifisting, where the corner is driven by the event stream and
+   not only by the ends of runs. The case that matters is a long module: a
+   scan that has been running for forty seconds has said nothing since it
+   started, and "it started", "it stopped early", "it saved something" are
+   exactly what you want to be told without sitting on the Events drawer.
+   Every error is announced, and a success only when it says one of the
+   things worth interrupting for - the same keyword list wifisting uses - so
+   a module that prints a line per record does not paper over the window.
+
+   Two brakes on top of the policy: the same line twice in a row is one
+   event, and a run gets at most four announcements, because the deps audit
+   legitimately prints a dozen lines that each look like news. */
+static void
+action_line_announce(ActionRun *run, const char *line)
+{
+    static const char *success_words[] = {
+        "captured", "Captured", "launched", "Launched", "installed",
+        "Installed", "found", "Found", "hash", "Hash", "extracted",
+        "Extracted", "started", "Started", "stopped", "Stopped", "saved",
+        "Saved", NULL
+    };
+    const char *severity = NULL;
+
+    if (event_line_is_error(line)) {
+        severity = "error";
+    } else {
+        for (int i = 0; success_words[i] != NULL; i++) {
+            if (strstr(line, success_words[i]) != NULL) {
+                severity = "ok";
+                break;
+            }
+        }
+    }
+    if (severity == NULL) return;
+    if (g_strcmp0(line, run->last_announced) == 0) return;
+    if (run->announced >= 4) return;
+
+    run->announced++;
+    g_free(run->last_announced);
+    run->last_announced = g_strdup(line);
+
+    {
+        g_autofree char *clean = g_strdup(line);
+        g_strstrip(clean);
+        show_toast_full(run->state, run->label, clean, severity);
+    }
+}
+
 static void
 event_badge_update(AppState *state)
 {
@@ -891,6 +1083,119 @@ toast_close_clicked(GtkButton *button, gpointer user_data)
 }
 
 #define TOAST_STACK_MAX 5
+#define NOTIF_MAX 100
+
+/* One line of the notification log: what was said, in what tone, and when.
+   Kept apart from the toast widget because the widget is gone in five seconds
+   and this is what the Notifications page reads back. */
+typedef struct {
+    gint64 when;          /* g_get_real_time(), for the clock in the list */
+    char  *title;
+    char  *body;
+    char  *severity;      /* error | warn | ok | info */
+} NotifEntry;
+
+static void
+notif_entry_free(gpointer data)
+{
+    NotifEntry *n = data;
+
+    if (n == NULL) return;
+    g_free(n->title);
+    g_free(n->body);
+    g_free(n->severity);
+    g_free(n);
+}
+
+static void notif_page_refill(AppState *state);
+
+/* The tone of a notification, as a class name. Every kind gets a dot and a
+   colour in the list, so the shape of a session reads at a glance: a column of
+   green with one red in it is a different story from the reverse. */
+static const char *
+notif_kind_class(const char *severity)
+{
+    if (g_strcmp0(severity, "error") == 0) return "notif-error";
+    if (g_strcmp0(severity, "warn") == 0)  return "notif-warn";
+    if (g_strcmp0(severity, "ok") == 0)    return "notif-ok";
+    return "notif-info";
+}
+
+static GtkWidget *
+notif_row_new(const NotifEntry *n)
+{
+    GtkWidget *row = gtk_list_box_row_new();
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *dot = gtk_label_new("●");
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *title = gtk_label_new(n->title);
+    GtkWidget *body = gtk_label_new(n->body);
+    GDateTime *dt = g_date_time_new_from_unix_local(n->when / G_USEC_PER_SEC);
+    g_autofree char *clock = dt != NULL
+        ? g_date_time_format(dt, "%H:%M:%S") : g_strdup("--:--:--");
+    GtkWidget *time = gtk_label_new(clock);
+
+    if (dt != NULL) g_date_time_unref(dt);
+
+    gtk_widget_add_css_class(box, "notif-row");
+    gtk_widget_add_css_class(dot, "status-dot");
+    gtk_widget_add_css_class(dot, notif_kind_class(n->severity));
+    gtk_widget_add_css_class(time, "notif-time");
+    gtk_widget_add_css_class(title, "notif-title");
+    gtk_widget_add_css_class(body, "notif-body");
+
+    gtk_widget_set_valign(dot, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(dot, 3);
+    gtk_widget_set_valign(time, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(time, 1);
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(body), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_hexpand(title, TRUE);
+    gtk_label_set_wrap(GTK_LABEL(body), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(body), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_selectable(GTK_LABEL(body), TRUE);
+
+    gtk_box_append(GTK_BOX(head), title);
+    gtk_box_append(GTK_BOX(col), head);
+    gtk_box_append(GTK_BOX(col), body);
+    gtk_widget_set_hexpand(col, TRUE);
+    gtk_box_append(GTK_BOX(box), dot);
+    gtk_box_append(GTK_BOX(box), time);
+    gtk_box_append(GTK_BOX(box), col);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+    return row;
+}
+
+/* Called from show_toast_full, so the log holds exactly what was announced:
+   nothing here is a second, hand-maintained list of events that can drift out
+   of step with the toasts. */
+static void
+notif_push(AppState *state, const char *title, const char *body,
+           const char *severity)
+{
+    NotifEntry *n;
+
+    if (state == NULL) return;
+
+    if (state->notifs == NULL)
+        state->notifs = g_queue_new();
+
+    n = g_new0(NotifEntry, 1);
+    n->when = g_get_real_time();
+    n->title = g_strdup((title != NULL && *title != '\0') ? title : "IMSIsting");
+    n->body = g_strdup(body != NULL ? body : "");
+    n->severity = g_strdup((severity != NULL && *severity != '\0')
+                           ? severity : "info");
+
+    g_queue_push_head(state->notifs, n);
+    while (g_queue_get_length(state->notifs) > NOTIF_MAX)
+        notif_entry_free(g_queue_pop_tail(state->notifs));
+
+    if (state->notif_list != NULL)
+        notif_page_refill(state);
+}
 
 static void
 show_toast_full(AppState *state, const char *title,
@@ -901,6 +1206,12 @@ show_toast_full(AppState *state, const char *title,
     const char *icon_name;
     gboolean is_err = (g_strcmp0(severity, "error") == 0);
     guint n = 0;
+
+    /* The log first: a toast that is never seen - because five are already
+       stacked, or because the operator was reading another page - still has to
+       be in the record. */
+    notif_push(state, title, message, severity);
+
 
     /* GTK_IS_WIDGET, not == NULL: at shutdown the state can hold a pointer
        that is non-NULL and no longer a widget, and touching it aborts. */
@@ -1031,6 +1342,7 @@ action_run_unref(ActionRun *run)
     if (run->captured != NULL) g_string_free(run->captured, TRUE);
     g_free(run->module_id);
     g_free(run->label);
+    g_free(run->last_announced);
     g_free(run);
 }
 
@@ -1058,6 +1370,7 @@ action_line_cb(GObject *source, GAsyncResult *result, gpointer user_data)
     if (*line != '\0') {
         g_autofree char *l = g_strdup_printf("  %s", line);
         append_event(run->state, l);
+        action_line_announce(run, line);
         console_append(run->output, line);
         if (run->captured != NULL) {
             g_string_append(run->captured, line);
@@ -1167,20 +1480,11 @@ imsisting_action_run(AppState *state, const char *module_id,
     append_event(state, label);
     status_label_set(status_label, "Running", "status-running");
 
-    /* Surface the output. A module's stdout/stderr goes to the Events
-       drawer, and a drawer the operator has to open themselves makes a
-       button look like it did nothing - which is exactly the complaint
-       this fixes. Opening it here means the result of the press is on
-       screen from the first line. */
-    if (state->event_revealer != NULL &&
-        !gtk_revealer_get_reveal_child(GTK_REVEALER(state->event_revealer))) {
-        if (state->event_button != NULL)
-            gtk_toggle_button_set_active(
-                GTK_TOGGLE_BUTTON(state->event_button), TRUE);
-        else
-            gtk_revealer_set_reveal_child(
-                GTK_REVEALER(state->event_revealer), TRUE);
-    }
+    /* The Events drawer is not opened here on purpose. A press is answered by
+       the status label going to "Running", by the output card filling in place
+       and by a toast when the run ends - so the drawer can stay shut until the
+       operator asks for it. Opening it on every press made a button look like
+       it did nothing but open the drawer, which is the complaint this fixes. */
 
     if (privileged) {
         /* pkexec must see the real script path as its program so a polkit
@@ -2661,20 +2965,21 @@ drawer_nav_row_selected(GtkListBox *list, GtkListBoxRow *row, gpointer user_data
 static GtkWidget *
 build_drawer_nav(AppState *state)
 {
-    static const char *names[6] = {
-        "Dashboard", "Live Traffic", "Casebook", "Stats", "Help", "Settings"
+    static const char *names[7] = {
+        "Dashboard", "Live Traffic", "Casebook", "Stats", "Notifications",
+        "Help", "Settings"
     };
-    static const char *icons[6] = {
+    static const char *icons[7] = {
         "view-grid-symbolic", "network-wireless-symbolic", "folder-symbolic",
-        "office-chart-bar-symbolic", "help-browser-symbolic",
-        "emblem-system-symbolic"
+        "office-chart-bar-symbolic", "notification-symbolic",
+        "help-browser-symbolic", "emblem-system-symbolic"
     };
 
     GtkWidget *nav = gtk_list_box_new();
     gtk_widget_add_css_class(nav, "drawer-nav");
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(nav), GTK_SELECTION_SINGLE);
 
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 7; i++) {
         GtkWidget *rowbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 9);
         GtkWidget *icon = imsisting_icon_image(icons[i]);
         GtkWidget *label = gtk_label_new(names[i]);
@@ -2802,10 +3107,10 @@ build_sidebar(AppState *state)
     state->sidebar_content = content;
 
     /* The module catalogue used to live here: a search field over category
-       expanders listing all 56 modules. It went because every one of those
+       expanders listing all 57 modules. It went because every one of those
        modules is already reachable the two ways an operator actually uses —
        the dashboard grid for browsing and the header palette (Ctrl+K) for
-       naming a module outright — and a third list of the same 56 items was
+       naming a module outright — and a third list of the same 57 items was
        three navigation systems answering one question.
 
        `content` is still built and still recorded on the state because the
@@ -3281,6 +3586,10 @@ status_poll(gpointer user_data)
         status_set(state->dash_alerts, sa, na > 0 ? "status-warn" : "status-dim");
     }
 
+    /* Stamped last, on purpose: the marker means "this strip was filled in",
+       not "a poll was started". It is set once everything above has landed. */
+    state->status_seen_us = g_get_monotonic_time();
+
     return G_SOURCE_CONTINUE;
 }
 
@@ -3328,7 +3637,67 @@ build_status_strip(AppState *state)
     gtk_box_append(GTK_BOX(strip),
         status_cell("GPS",     &state->status_gps));
 
+    /* Right end: when the strip was last told anything. The gap in the middle
+       is deliberate - it keeps the hardware chips from reading as one long
+       line, and splits the row into what the bench IS (left) and how current
+       that reading is (right). */
+    {
+        GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_set_hexpand(spacer, TRUE);
+        gtk_box_append(GTK_BOX(strip), spacer);
+    }
+    state->status_fresh = gtk_label_new(NULL);
+    gtk_widget_add_css_class(state->status_fresh, "status-fresh");
+    gtk_label_set_xalign(GTK_LABEL(state->status_fresh), 1.0f);
+    gtk_widget_set_valign(state->status_fresh, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(strip), state->status_fresh);
+
     return strip;
+}
+
+/* Runs once a second, off the poll's own clock, so the age keeps climbing even
+   if the 3 s poll stops coming back. A strip that freezes at "polled 2 s ago"
+   is a lied-about strip; this timer refuses to lie. */
+static gboolean
+status_freshness_tick(gpointer user_data)
+{
+    AppState *state = user_data;
+    gint64 age_s;
+    gboolean stale;
+    g_autofree char *text = NULL;
+
+    if (state->status_fresh == NULL)
+        return G_SOURCE_CONTINUE;
+
+    if (state->status_seen_us == 0) {
+        gtk_label_set_text(GTK_LABEL(state->status_fresh),
+                           "waiting for the first poll");
+        return G_SOURCE_CONTINUE;
+    }
+
+    age_s = (g_get_monotonic_time() - state->status_seen_us) / G_USEC_PER_SEC;
+    if (age_s < 0) age_s = 0;
+
+    /* Said in the unit that reads, not in the unit that computes. Past a
+       minute, seconds stop meaning anything and only make the number long. */
+    stale = age_s > 10;
+    if (age_s <= 1)
+        text = g_strdup("polled just now");
+    else if (age_s < 90)
+        text = g_strdup_printf("polled %" G_GINT64_FORMAT " s ago", age_s);
+    else if (age_s < 5400)
+        text = g_strdup_printf("polled %" G_GINT64_FORMAT " min ago", age_s / 60);
+    else
+        text = g_strdup_printf("polled %" G_GINT64_FORMAT " h ago", age_s / 3600);
+
+    gtk_label_set_text(GTK_LABEL(state->status_fresh), text);
+
+    if (stale)
+        gtk_widget_add_css_class(state->status_fresh, "stale");
+    else
+        gtk_widget_remove_css_class(state->status_fresh, "stale");
+
+    return G_SOURCE_CONTINUE;
 }
 
 /* Unique categories in first-appearance order. The modules[] table is not
@@ -4160,7 +4529,7 @@ create_dashboard_page(AppState *state)
     /* One label per layer and no H1. The tab above already reads "Dashboard",
        so an in-page "Command Dashboard" repeated it, and "Start here" sat
        three lines below that: three titles for one screen, with the quick
-       cards drawn heavier than the 56 modules they were meant to introduce.
+       cards drawn heavier than the 57 modules they were meant to introduce.
        What was missing was never another heading, it was a stated hierarchy -
        the strip is an order of operations, the grid is the catalogue, and
        each now says so exactly once. */
@@ -6167,13 +6536,120 @@ create_stats_page(AppState *state)
     return outer;
 }
 
+/* ── Notifications ─────────────────────────────────────────────────────
+   The record of what the toolkit said, newest first. A toast is easy to miss
+   and impossible to look back at: it slides away after five seconds, only five
+   share the corner, and the thing it usually reports - a scan that started, a
+   scan that stopped, a run that failed - is exactly the thing worth checking
+   afterwards. The log is written by show_toast_full, so it holds what was
+   actually announced rather than a second list that can drift out of step. */
+static void
+notif_page_refill(AppState *state)
+{
+    GtkWidget *child;
+    guint shown = 0;
+
+    if (state == NULL || state->notif_list == NULL) return;
+
+    while ((child = gtk_widget_get_first_child(state->notif_list)) != NULL)
+        gtk_list_box_remove(GTK_LIST_BOX(state->notif_list), child);
+
+    if (state->notifs != NULL) {
+        for (GList *l = state->notifs->head; l != NULL; l = l->next) {
+            gtk_list_box_append(GTK_LIST_BOX(state->notif_list),
+                                notif_row_new(l->data));
+            shown++;
+        }
+    }
+
+    if (state->notif_summary == NULL) return;
+    if (shown == 0) {
+        gtk_label_set_text(GTK_LABEL(state->notif_summary),
+            "Nothing yet — toasts land here as they happen.");
+    } else if (shown == 1) {
+        gtk_label_set_text(GTK_LABEL(state->notif_summary),
+            "1 notification · newest first");
+    } else {
+        g_autofree char *t = g_strdup_printf(
+            "%u notifications · newest first", shown);
+        gtk_label_set_text(GTK_LABEL(state->notif_summary), t);
+    }
+}
+
+static void
+notif_clear_clicked(GtkButton *button, gpointer user_data)
+{
+    AppState *state = user_data;
+
+    (void) button;
+    if (state->notifs != NULL) {
+        g_queue_free_full(state->notifs, notif_entry_free);
+        state->notifs = NULL;
+    }
+    notif_page_refill(state);
+}
+
+static GtkWidget *
+create_notifications_page(AppState *state)
+{
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    GtkWidget *inner = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *titles = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget *title = gtk_label_new("Notifications");
+    GtkWidget *sub = gtk_label_new(
+        "Everything the toolkit has announced, newest first.");
+    GtkWidget *clear = gtk_button_new_with_label("Clear");
+    GtkWidget *list = gtk_list_box_new();
+
+    gtk_widget_add_css_class(title, "page-title");
+    gtk_widget_add_css_class(sub, "page-subtitle");
+    gtk_widget_add_css_class(clear, "verb-button");
+    gtk_widget_add_css_class(list, "notif-list");
+    gtk_widget_add_css_class(inner, "page");
+    gtk_widget_add_css_class(inner, "notif-page");
+
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(sub), 0.0f);
+    gtk_widget_set_hexpand(titles, TRUE);
+    gtk_widget_set_halign(titles, GTK_ALIGN_START);
+    gtk_widget_set_valign(clear, GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(clear, "forget every notification kept here");
+
+    gtk_label_set_wrap(GTK_LABEL(sub), TRUE);
+    gtk_box_append(GTK_BOX(titles), title);
+    gtk_box_append(GTK_BOX(titles), sub);
+    gtk_box_append(GTK_BOX(head), titles);
+    gtk_box_append(GTK_BOX(head), clear);
+
+    /* One column, no selection: these are lines to read, not rows to act on. */
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
+    gtk_list_box_set_show_separators(GTK_LIST_BOX(list), TRUE);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), list);
+    gtk_widget_set_vexpand(scroll, TRUE);
+
+    state->notif_list = list;
+    state->notif_summary = sub;
+
+    gtk_box_append(GTK_BOX(inner), head);
+    gtk_box_append(GTK_BOX(inner), scroll);
+    gtk_box_append(GTK_BOX(outer), inner);
+    g_signal_connect(clear, "clicked",
+                     G_CALLBACK(notif_clear_clicked), state);
+
+    notif_page_refill(state);
+    return outer;
+}
+
 /* Recount the tiles when the page is opened. Counting is cheap (56 stat calls
    plus a walk of loot/) and the alternative — numbers from launch time — is
    actively misleading once a module has run. */
 static void
 stats_refresh(AppState *state)
-{
-    guint selftests = 0, loot_dirs = 0, loot_files = 0, offline = 0;
+{    guint selftests = 0, loot_dirs = 0, loot_files = 0, offline = 0;
 
     stats_counts(&selftests, &loot_dirs, &loot_files, &offline);
     stat_set(state->stat_selftests, selftests);
@@ -6418,8 +6894,8 @@ static gboolean gsmtap_is_gsm(guint8 t)
 
 /* Live Traffic is permanent page 1. Start the listener when it is opened and
    stop it when it is left, so the socket is only bound while the view is up. */
-static void live_start(AppState *state);
-static void live_stop(AppState *state);
+static void live_start(AppState *state, gboolean announce);
+static void live_stop(AppState *state, gboolean announce);
 
 #define LIVE_TAB_INDEX 1
 
@@ -6629,9 +7105,9 @@ notebook_page_switched(GtkNotebook *nb, GtkWidget *child, guint page,
     if (state->live_view == NULL) return;
 
     if ((int) page == LIVE_TAB_INDEX) {
-        if (state->live_socket == NULL) live_start(state);
+        if (state->live_socket == NULL) live_start(state, FALSE);
     } else if (state->live_socket != NULL) {
-        live_stop(state);
+        live_stop(state, FALSE);
     }
 }
 
@@ -6937,16 +7413,31 @@ live_hint_cb(gpointer user_data)
 {
     AppState *state = user_data;
     state->live_hint = 0;
-    if (state->live_count == 0 && state->live_socket != NULL)
+    if (state->live_count == 0 && state->live_socket != NULL) {
         live_set_status(state,
             "listening — no emitter yet. Start grgsm_livemon, or an eNB/gNB "
             "with GSMTAP enabled.", "status-error");
+        /* The pill alone cannot be trusted to be read: this is the "it did
+           not work" case, three seconds after the operator asked for a feed,
+           and it is worth interrupting for once. */
+        if (state->live_announced) {
+            show_toast_full(state, "Live Traffic",
+                "listening on udp/4729, but nothing has arrived — start "
+                "grgsm_livemon or enable GSMTAP on the eNB/gNB", "warn");
+            state->live_announced = FALSE;
+        }
+    }
     return G_SOURCE_REMOVE;
 }
 
 static void
-live_stop(AppState *state)
+live_stop(AppState *state, gboolean announce)
 {
+    /* Only the button announces. The listener also starts and stops by itself
+       when the page is opened or left, and a toast for every visit to Live
+       Traffic is the noise that makes people stop reading the corner. */
+    gboolean was_listening = (state->live_socket != NULL);
+
     if (state->live_poll != 0) {
         g_source_remove(state->live_poll);
         state->live_poll = 0;
@@ -6968,13 +7459,23 @@ live_stop(AppState *state)
             state->live_count, state->live_count == 1 ? "" : "s");
         live_set_status(state, m, "status-ok");
     }
+
+    if (announce && was_listening) {
+        g_autofree char *m = (state->live_count > 0)
+            ? g_strdup_printf("listener stopped — %u message%s captured",
+                              state->live_count, state->live_count == 1 ? "" : "s")
+            : g_strdup("listener stopped");
+        show_toast_full(state, "Live Traffic", m, "warn");
+    }
 }
 
 static void
-live_start(AppState *state)
+live_start(AppState *state, gboolean announce)
 {
     g_autoptr(GError) error = NULL;
     GSocketAddress *addr;
+
+    state->live_announced = announce;
 
     state->live_socket = g_socket_new(G_SOCKET_FAMILY_IPV4,
                                       G_SOCKET_TYPE_DATAGRAM,
@@ -6982,6 +7483,9 @@ live_start(AppState *state)
     if (state->live_socket == NULL) {
         live_set_status(state, error ? error->message : "socket failed",
                         "status-error");
+        if (announce)
+            show_toast_full(state, "Live Traffic",
+                            error ? error->message : "socket failed", "error");
         return;
     }
 
@@ -6990,6 +7494,7 @@ live_start(AppState *state)
         g_autofree char *m = g_strdup_printf("cannot bind udp/%d — %s",
             LIVE_PORT, error ? error->message : "in use");
         live_set_status(state, m, "status-error");
+        if (announce) show_toast_full(state, "Live Traffic", m, "error");
         g_object_unref(addr);
         g_clear_object(&state->live_socket);
         return;
@@ -7002,6 +7507,9 @@ live_start(AppState *state)
     if (state->live_button != NULL)
         gtk_button_set_label(GTK_BUTTON(state->live_button), "Stop");
     live_set_status(state, "listening on udp/4729", "status-running");
+    if (announce)
+        show_toast_full(state, "Live Traffic", "listening on udp/4729 — "
+                        "the feed gr-gsm and srsRAN emit into", "ok");
     state->live_hint = g_timeout_add(3000, live_hint_cb, state);
 }
 
@@ -7010,8 +7518,8 @@ live_toggle_clicked(GtkButton *b, gpointer user_data)
 {
     AppState *state = user_data;
     (void) b;
-    if (state->live_socket != NULL) live_stop(state);
-    else                            live_start(state);
+    if (state->live_socket != NULL) live_stop(state, TRUE);
+    else                            live_start(state, TRUE);
 }
 
 static void
@@ -8048,6 +8556,119 @@ boot_load_css(AppState *state, GtkApplication *app)
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 }
 
+/* ── The terminal ──────────────────────────────────────────────────────
+   A shell standing in the project directory. Every button in this window runs
+   something that could have been typed, and the modules are shell scripts that
+   read and write files under IMSISTING_ROOT - so the fastest way to see what a
+   module actually did is to be standing where it lives. VTE is what makes this
+   a terminal rather than a log pane: job control, colour, interactive prompts,
+   a real shell you can leave running while you work in the window. It is
+   optional at build time, so if the dependency is missing this falls back to
+   whatever terminal the desktop already has rather than doing nothing. */
+#ifdef HAVE_VTE
+static void
+terminal_child_exited(VteTerminal *terminal, gint status, gpointer user_data)
+{
+    GtkWindow *window = user_data;
+
+    (void) terminal;
+    (void) status;
+    /* The shell is the window: when it ends there is nothing left to show. */
+    gtk_window_destroy(window);
+}
+
+static void
+terminal_spawned(VteTerminal *terminal, GPid pid, GError *error,
+                 gpointer user_data)
+{
+    AppState *state = user_data;
+
+    (void) terminal;
+    (void) pid;
+    if (error != NULL) {
+        show_toast_full(state, "Terminal", error->message, "error");
+        g_error_free(error);
+    }
+}
+#endif
+
+static void
+terminal_opened(GtkButton *button, gpointer user_data)
+{
+    AppState *state = user_data;
+
+    (void) button;
+
+#ifdef HAVE_VTE
+    {
+        const char *shell = g_getenv("SHELL");
+        GtkWidget *window = gtk_window_new();
+        GtkWidget *terminal = vte_terminal_new();
+        char *argv[2];
+
+        if (shell == NULL || *shell == '\0') shell = "/bin/bash";
+        argv[0] = (char *) shell;
+        argv[1] = NULL;
+
+        gtk_window_set_title(GTK_WINDOW(window), "IMSIsting — shell");
+        gtk_window_set_default_size(GTK_WINDOW(window), 900, 460);
+        gtk_window_set_transient_for(GTK_WINDOW(window),
+                                     GTK_WINDOW(state->window));
+        gtk_window_set_icon_name(GTK_WINDOW(window), "utilities-terminal");
+        gtk_widget_add_css_class(window, "terminal-window");
+        vte_terminal_set_scrollback_lines(VTE_TERMINAL(terminal), 10000);
+        vte_terminal_set_cursor_blink_mode(VTE_TERMINAL(terminal),
+                                           VTE_CURSOR_BLINK_ON);
+        gtk_widget_set_vexpand(terminal, TRUE);
+        gtk_window_set_child(GTK_WINDOW(window), terminal);
+        g_signal_connect(terminal, "child-exited",
+                         G_CALLBACK(terminal_child_exited), window);
+        /* The working directory is the point: modules/ and loot/ are one `ls`
+           away, and a relative path from a module's own help text works. */
+        vte_terminal_spawn_async(VTE_TERMINAL(terminal), VTE_PTY_DEFAULT,
+                                 IMSISTING_ROOT, argv, NULL,
+                                 G_SPAWN_SEARCH_PATH, NULL, NULL, NULL,
+                                 -1, NULL, terminal_spawned, state);
+        gtk_window_present(GTK_WINDOW(window));
+    }
+#else
+    {
+        static const char *candidates[] = {
+            "konsole", "gnome-terminal", "xfce4-terminal",
+            "x-terminal-emulator", "xterm", NULL
+        };
+        char *program = NULL;
+
+        for (int i = 0; candidates[i] != NULL && program == NULL; i++)
+            program = g_find_program_in_path(candidates[i]);
+
+        if (program == NULL) {
+            show_toast_full(state, "Terminal",
+                            "no terminal emulator found on this system",
+                            "error");
+            return;
+        }
+
+        {
+            /* konsole is the one that needs telling where to start; the rest
+               inherit the working directory from the spawn itself. */
+            gboolean konsole = (strstr(program, "konsole") != NULL);
+            char *argv[4];
+
+            argv[0] = program;
+            argv[1] = konsole ? "--workdir" : NULL;
+            argv[2] = konsole ? (char *) IMSISTING_ROOT : NULL;
+            argv[3] = NULL;
+            if (!g_spawn_async(IMSISTING_ROOT, argv, NULL, G_SPAWN_SEARCH_PATH,
+                               NULL, NULL, NULL, NULL))
+                show_toast_full(state, "Terminal",
+                                "could not start a terminal", "error");
+        }
+        g_free(program);
+    }
+#endif
+}
+
 static void
 boot_build_ui(AppState *state, GtkApplication *app)
 {
@@ -8057,11 +8678,22 @@ boot_build_ui(AppState *state, GtkApplication *app)
 
     /* Header bar. */
     GtkWidget *header = gtk_header_bar_new();
+    GtkWidget *wordmark = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *mark = imsisting_logo_image(30);
     GtkWidget *titlebox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *titleline = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
     GtkWidget *title = gtk_label_new("IMSIsting");
+    GtkWidget *version = gtk_label_new(IMSISTING_VERSION);
     GtkWidget *subtitle = gtk_label_new("2G · 3G · 4G · 5G cellular research toolkit");
     gtk_widget_add_css_class(title, "title");
+    gtk_widget_add_css_class(version, "app-version");
     gtk_widget_add_css_class(subtitle, "app-subtitle");
+    /* The version sits on the name's baseline rather than its centre: centred
+       on a 20px word it floats, and read as part of the word it looks like the
+       tool is called "IMSIsting 0.1". Dim and small, it is a footnote to the
+       name, which is what a version is. */
+    gtk_widget_set_valign(version, GTK_ALIGN_END);
+    gtk_widget_set_margin_bottom(version, 3);
     /* Both lines centre inside the title block. Left-aligned, the longer
        subtitle set the block's width and the shorter word "IMSIsting" hung
        off its left edge, which is what read as the title being off-centre -
@@ -8071,27 +8703,28 @@ boot_build_ui(AppState *state, GtkApplication *app)
     gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
     gtk_label_set_xalign(GTK_LABEL(subtitle), 0.0f);
     gtk_widget_set_halign(titlebox, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(titlebox), title);
+    gtk_box_append(GTK_BOX(titleline), title);
+    gtk_box_append(GTK_BOX(titleline), version);
+    gtk_box_append(GTK_BOX(titlebox), titleline);
     gtk_box_append(GTK_BOX(titlebox), subtitle);
+    gtk_widget_set_valign(mark, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(wordmark), mark);
+    gtk_box_append(GTK_BOX(wordmark), titlebox);
 
     /* The wordmark moves to the start and the search takes the centre. The
        centre of the header is the most expensive real estate in the window
        and it was spending it on a name that never changes, while the one
        control that goes anywhere was inside a drawer you have to reach for
        by moving the pointer to the edge of the screen. */
-    gtk_header_bar_pack_start(GTK_HEADER_BAR(header), titlebox);
+    gtk_header_bar_pack_start(GTK_HEADER_BAR(header), wordmark);
 
     GtkWidget *searchbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_widget_add_css_class(searchbox, "header-search");
     GtkWidget *search = gtk_search_entry_new();
-    GtkWidget *hint = gtk_label_new("Ctrl K");
-    gtk_widget_add_css_class(hint, "header-search-hint");
-    gtk_widget_set_valign(hint, GTK_ALIGN_CENTER);
     gtk_widget_set_size_request(search, 380, -1);
     gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(search),
                                           "Search modules and pages");
     gtk_box_append(GTK_BOX(searchbox), search);
-    gtk_box_append(GTK_BOX(searchbox), hint);
     gtk_header_bar_set_title_widget(GTK_HEADER_BAR(header), searchbox);
     state->header_search = search;
     /* "search-changed" is emitted through a 150ms GLib timeout, and timers
@@ -8107,6 +8740,7 @@ boot_build_ui(AppState *state, GtkApplication *app)
        window -- title, target and events all compete for it. */
 
     GtkWidget *events_btn = gtk_toggle_button_new_with_label("Events");
+    gtk_widget_add_css_class(events_btn, "header-pill");
     gtk_widget_set_tooltip_text(events_btn,
         "show the event drawer — module output and diagnostics");
     g_signal_connect(events_btn, "toggled",
@@ -8118,12 +8752,26 @@ boot_build_ui(AppState *state, GtkApplication *app)
        order wifisting uses. Reachable from every page, which is the whole
        point of putting the target here. */
     GtkWidget *rtarget_btn = gtk_toggle_button_new_with_label("Target");
+    gtk_widget_add_css_class(rtarget_btn, "header-pill");
     gtk_widget_set_tooltip_text(rtarget_btn,
         "the radio target the cellular modules tune to — accessible from any page");
     g_signal_connect(rtarget_btn, "toggled",
                      G_CALLBACK(rtarget_toggled), state);
     gtk_header_bar_pack_end(GTK_HEADER_BAR(header), rtarget_btn);
     state->rtarget_button = rtarget_btn;
+
+    /* Packed last of the three, so it lands furthest left: search, terminal,
+       Target, Events, then the window controls. The terminal sits next to the
+       search because both are how you go and find something out. */
+    GtkWidget *terminal_btn =
+        gtk_button_new_from_icon_name("utilities-terminal-symbolic");
+    gtk_widget_add_css_class(terminal_btn, "header-pill");
+    gtk_widget_add_css_class(terminal_btn, "icon-only");
+    gtk_widget_set_tooltip_text(terminal_btn,
+        "open a shell in the project directory — every button here is a command you can run yourself");
+    g_signal_connect(terminal_btn, "clicked",
+                     G_CALLBACK(terminal_opened), state);
+    gtk_header_bar_pack_end(GTK_HEADER_BAR(header), terminal_btn);
 
     gtk_window_set_titlebar(GTK_WINDOW(state->window), header);
 
@@ -8163,6 +8811,8 @@ boot_build_ui(AppState *state, GtkApplication *app)
         create_casebook_page(state), gtk_label_new("Casebook"));
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
         create_stats_page(state), gtk_label_new("Stats"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
+        create_notifications_page(state), gtk_label_new("Notifications"));
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
         text_page("Help", "How this is put together", HELP_TEXT, NULL),
         gtk_label_new("Help"));
@@ -8383,6 +9033,9 @@ boot_poll_status(AppState *state, GtkApplication *app)
        100 ms. */
     status_poll(state);
     state->status_source = g_timeout_add_seconds(3, status_poll, state);
+    /* Its own once-a-second clock, so the age on the strip keeps climbing
+       even when a poll is stuck inside a module that will not answer. */
+    g_timeout_add_seconds(1, status_freshness_tick, state);
 }
 
 /* The Overview is the tab the Casebook opens on, so switch-page never fires
@@ -8442,10 +9095,12 @@ static const struct {
 /* One of these is printed at the bottom left of the film, drawn fresh each
    launch, so that two starts of the same program do not say the same thing.
    The claims and their citations are the cards'; do not soften them. */
-static const struct {
+typedef struct {
     const char *title;
     const char *body;
-} splash_facts[] = {
+} SplashFact;
+
+static const SplashFact splash_facts[] = {
     { "the mechanism",
       "GSM authenticates the subscriber to the network. It never authenticates "
       "the network to the subscriber. A phone attaches to whichever cell proves "
@@ -8483,16 +9138,161 @@ static const struct {
       "yours." },
 };
 
+/* The baseband chip - the second computer in every handset. */
+static const SplashFact splash_chip_facts[] = {
+    { "a second computer, and it has the microphone",
+      "The modem is not a peripheral of the application processor. It has its "
+      "own CPU, its own RTOS, its own firmware and its own memory, and the "
+      "audio path runs through it \u2014 which is why a compromised baseband is a "
+      "compromised microphone, not one you reach through the OS." },
+    { "it has to answer strangers",
+      "A cell the phone has never met tells it how to behave, and the modem "
+      "parses that before it has authenticated anything: SIBs and paging in "
+      "every generation, NAS before the security mode command. A rogue base "
+      "station that sends a malformed one attacks a parser written by a chip "
+      "vendor." },
+    { "a fix is a firmware blob",
+      "A modem defect is repaired in a signed image the vendor builds and the "
+      "carrier stages, months after the disclosure. The phone's OS version "
+      "says nothing about it: the two are on different release schedules, and "
+      "the modem's build is usually far older than the system's." },
+    { "the air is the cheap path",
+      "Reaching a modem over the air costs a radio and a specification; "
+      "reaching it through a cable costs physical possession. The 2023 Exynos "
+      "modem disclosures were reachable from a malicious base station \u2014 "
+      "remote, no user action, and the phone cannot tell a well-formed hostile "
+      "message from a friendly one." },
+    { "the link to the application processor",
+      "The operating system does not see inside the modem. It talks to it over "
+      "a proprietary interface (DIAG, QMI) across shared memory or a "
+      "high-speed link, and that interface has its own parser and its own "
+      "bugs; the 2021 Qualcomm flaws lived there, not in the radio." },
+};
+
+/* IMSIsting itself - how the toolkit is put together, and what it refuses. */
+static const SplashFact splash_kit_facts[] = {
+    { "it says when something failed",
+      "Every module answers in TSV, and a failure comes back as a failure: no "
+      "radio, no dependency, a refused verb \u2014 an ERROR line the interface "
+      "renders as an error rather than as an empty result. A toolkit that "
+      "reports 0 cells when it means it could not run is worse than one that "
+      "reports nothing." },
+    { "every button is a command",
+      "Nothing is locked behind the interface. Each card invokes one "
+      "standalone, ./modules/02_cell_recon.sh --plmn 208-01, and "
+      "tools/check-verbs.sh verifies that the verbs the window binds to exist "
+      "and are documented in the module's own header. If you can click it, you "
+      "can script it." },
+    { "the modules do not need the interface",
+      "All 57 modules are shell scripts with no GUI dependency; the window is "
+      "a view over them, not the program. That is a constraint, not an "
+      "accident \u2014 a research tool has to survive being run over ssh, inside a "
+      "pipeline, or in a container with no display at all." },
+    { "hardware is stated, not assumed",
+      "01_radio enumerates what is genuinely attached \u2014 HackRF, BladeRF, "
+      "LimeSDR, USRP, RTL-SDR, SoapySDR \u2014 and the status strip shows SDR, TX, "
+      "FREQ, CELLS and GPS before any work starts. Modules that need a radio "
+      "say so and stop; the ones that only read files run anywhere." },
+    { "the casebook keeps the chain, not just the files",
+      "Cases, targets, evidence, captures, timeline, alerts, nodes and "
+      "reports, with an authorisation reference recorded when the case is "
+      "created, so the record says what was done, against what, and under "
+      "whose authority. Evidence stays in loot/ as plain files; the casebook "
+      "indexes them." },
+};
+
+/* An SDR - what the hardware decides before any software runs. */
+static const SplashFact splash_sdr_facts[] = {
+    { "the ADC sets your ceiling",
+      "Sample rate is instantaneous bandwidth and bit depth is dynamic range, "
+      "and neither can be argued with afterwards. An 8-bit converter tops out "
+      "near 50 dB of signal-to-noise, a 12-bit one near 74. Where a strong "
+      "cell and the weak one you want differ by 60 dB, that gap is the whole "
+      "experiment." },
+    { "the antenna beats the radio",
+      "At 900 MHz a kilometre of free space costs about 91 dB, so a handset's "
+      "0.2 W arrives 68 dB down \u2014 and every dBi you fail to collect is signal "
+      "you never sampled. A wideband antenna hears everything badly; a tuned "
+      "quarter-wave for one band usually beats it where it matters." },
+    { "half duplex cannot sit in the middle",
+      "Being a base station means answering inside the same exchange you are "
+      "listening to. A radio that transmits or receives \u2014 HackRF, RTL-SDR \u2014 "
+      "cannot do both at once, so it can imitate a network in bursts but not "
+      "hold a conversation. Full duplex, or two radios, is the price." },
+    { "time is the hard part",
+      "GSM's bit period is 48/13 \u00b5s, about 3.7 \u00b5s, and a handset expects a "
+      "burst inside its own slot. A sample clock that drifts by a fraction of "
+      "that produces a base station the phone refuses to hear, which is why "
+      "timing is disciplined against a reference and not trusted to a "
+      "crystal." },
+    { "a radio is not a decoder",
+      "An SDR delivers samples; the protocol is a stack above them, and srsRAN "
+      "or OpenAirInterface does the decoding, not the hardware. Most SDRs stop "
+      "at 6 GHz, which puts NR FR2 out of reach entirely \u2014 the honest module "
+      "says which of the two it can see." },
+};
+
+/* The films. One is chosen per launch, and the card that goes with it comes
+   from its own set, so a launch does not repeat the film or the sentence. */
+typedef struct {
+    const char *film;
+    const SplashFact *facts;
+    guint n_facts;
+} SplashFilm;
+
+static const SplashFilm splash_films[] = {
+    { "/com/imsisting/native/imsisting_splash2.mp4",
+      splash_facts,      G_N_ELEMENTS(splash_facts)      },  /* the network */
+    { "/com/imsisting/native/imsisting_splash3.mp4",
+      splash_chip_facts, G_N_ELEMENTS(splash_chip_facts) },  /* the chip     */
+    { "/com/imsisting/native/imsisting_splash4.mp4",
+      splash_kit_facts,  G_N_ELEMENTS(splash_kit_facts)  },  /* the toolkit  */
+    { "/com/imsisting/native/imsisting_splash5.mp4",
+      splash_sdr_facts,  G_N_ELEMENTS(splash_sdr_facts)  },  /* the SDR      */
+};
+
+/* The still is a splash in its own right, not a pre-roll and not a fallback
+   that happens first: it takes its turn in the same draw as the four films,
+   and it draws its card from a randomly picked set because it has no film of
+   its own to belong to. It is also what plays when the media backend cannot
+   give us a window, which is why it always has to work. */
+static const SplashFilm splash_still = {
+    NULL, splash_facts, G_N_ELEMENTS(splash_facts)
+};
+
 static char *
-splash_fact_markup(void)
+splash_fact_markup(const SplashFact *facts, guint n_facts)
 {
-    guint i = (guint) g_random_int_range(0,
-                    (gint32) G_N_ELEMENTS(splash_facts));
-    g_autofree char *title = g_markup_escape_text(splash_facts[i].title, -1);
-    g_autofree char *body  = g_markup_escape_text(splash_facts[i].body, -1);
+    guint i = (guint) g_random_int_range(0, (gint32) n_facts);
+    g_autofree char *title = g_markup_escape_text(facts[i].title, -1);
+    g_autofree char *body  = g_markup_escape_text(facts[i].body, -1);
     return g_strdup_printf(
         "<span size=\"large\" foreground=\"#6fa8ff\">%s</span>\n%s",
         title, body);
+}
+
+/* The card at the foot of every splash. `bottom` is what keeps it clear of
+   the loading bar on the still, where both share the lower third. */
+static GtkWidget *
+splash_fact_label(const SplashFact *facts, guint n_facts, int bottom)
+{
+    g_autofree char *markup = splash_fact_markup(facts, n_facts);
+    GtkWidget *fact = gtk_label_new(NULL);
+
+    gtk_label_set_markup(GTK_LABEL(fact), markup);
+    gtk_label_set_wrap(GTK_LABEL(fact), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(fact), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_xalign(GTK_LABEL(fact), 0.0);
+    gtk_label_set_yalign(GTK_LABEL(fact), 1.0);
+    gtk_label_set_justify(GTK_LABEL(fact), GTK_JUSTIFY_LEFT);
+    gtk_widget_set_size_request(fact, 440, -1);
+    gtk_widget_set_halign(fact, GTK_ALIGN_START);
+    gtk_widget_set_valign(fact, GTK_ALIGN_END);
+    gtk_widget_set_margin_start(fact, 44);
+    gtk_widget_set_margin_bottom(fact, bottom);
+    gtk_widget_set_margin_end(fact, 24);
+    gtk_widget_add_css_class(fact, "splash-fact");
+    return fact;
 }
 
 static void
@@ -8510,7 +9310,6 @@ splash_close(AppState *state)
     state->splash_label = NULL;
     /* Owned by the video widget, which the destroyed window took with it. */
     state->splash_media = NULL;
-    state->splash_poster = NULL;
     state->splash_video = FALSE;
     /* The handover. The main window is built by now; it has only been kept
        off the screen so that the splash could have its time to itself. */
@@ -8543,17 +9342,13 @@ splash_tick(gpointer data)
     guint n = G_N_ELEMENTS(boot_steps);
     gint64 now = g_get_monotonic_time();
 
-    /* Drop the stand-in the moment the film has something to show, and note
-       when that was: the film's own length is measured from here. */
+    /* The film's own length is measured from the moment it had something to
+       show rather than from the moment the window opened, because the media
+       backend takes a variable second or two to get there. */
     if (state->splash_media != NULL &&
-        gtk_media_stream_is_prepared(state->splash_media)) {
-        if (state->splash_poster != NULL) {
-            gtk_widget_set_visible(state->splash_poster, FALSE);
-            state->splash_poster = NULL;
-        }
-        if (state->splash_film_us == 0)
-            state->splash_film_us = now;
-    }
+        gtk_media_stream_is_prepared(state->splash_media) &&
+        state->splash_film_us == 0)
+        state->splash_film_us = now;
 
     /* The film draws itself and needs no easing; the still splash's bar is
        the only thing this tick animates. */
@@ -8632,10 +9427,11 @@ splash_tick(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
-/* The still splash: the artwork, the logo over it, and the boot's own
+/* The still splash: the artwork, the logo over it, a card, and the boot's own
    progress at the foot of the frame. */
 static void
-splash_window_art(AppState *state, GtkApplication *app)
+splash_window_art(AppState *state, GtkApplication *app,
+                  const SplashFact *facts, guint n_facts)
 {
     /* Loaded from the binary's own resources, like the module icons and for
        the same reason: the splash is the first thing on screen, before any
@@ -8659,12 +9455,23 @@ splash_window_art(AppState *state, GtkApplication *app)
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), splash_draw,
                                    state, NULL);
 
+    /* The card rides over the drawing, the same way it does over a film, and
+       sits high enough to leave the loading bar the bottom of the frame. */
+    GtkWidget *overlay = gtk_overlay_new();
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), area);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay),
+                            splash_fact_label(facts, n_facts, 152));
+
     GtkWidget *win = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(win), "IMSIsting");
     gtk_window_set_decorated(GTK_WINDOW(win), FALSE);
     gtk_window_set_resizable(GTK_WINDOW(win), FALSE);
     gtk_window_set_default_size(GTK_WINDOW(win), 960, 540);
-    gtk_window_set_child(GTK_WINDOW(win), area);
+    gtk_window_set_child(GTK_WINDOW(win), overlay);
+    /* A film has no first frame for a moment; without this the window shows
+       the theme's background in that gap instead of the near-black the films
+       are drawn on. */
+    gtk_widget_add_css_class(win, "splash-window");
 
     state->splash_window = win;
     state->splash_area = area;
@@ -8703,9 +9510,10 @@ splash_film_unmapped(GtkWidget *widget, gpointer user_data)
 }
 
 static void
-splash_window_video(AppState *state, GtkApplication *app)
+splash_window_video(AppState *state, GtkApplication *app,
+                    const SplashFilm *choice)
 {
-    static const char *path = "/com/imsisting/native/imsisting_splash2.mp4";
+    const char *path = choice->film;
     if (!g_resources_get_info(path, G_RESOURCE_LOOKUP_FLAGS_NONE,
                               NULL, NULL, NULL))
         return;                     /* not built in: fall back to the still */
@@ -8727,35 +9535,15 @@ splash_window_video(AppState *state, GtkApplication *app)
     g_signal_connect(video, "map", G_CALLBACK(splash_film_mapped), film);
     g_signal_connect(video, "unmap", G_CALLBACK(splash_film_unmapped), film);
 
-    g_autofree char *markup = splash_fact_markup();
-    GtkWidget *fact = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(fact), markup);
-    gtk_label_set_wrap(GTK_LABEL(fact), TRUE);
-    gtk_label_set_wrap_mode(GTK_LABEL(fact), PANGO_WRAP_WORD_CHAR);
-    gtk_label_set_xalign(GTK_LABEL(fact), 0.0);
-    gtk_label_set_yalign(GTK_LABEL(fact), 1.0);
-    gtk_label_set_justify(GTK_LABEL(fact), GTK_JUSTIFY_LEFT);
-    gtk_widget_set_size_request(fact, 440, -1);
-    gtk_widget_set_halign(fact, GTK_ALIGN_START);
-    gtk_widget_set_valign(fact, GTK_ALIGN_END);
-    gtk_widget_set_margin_start(fact, 44);
-    gtk_widget_set_margin_bottom(fact, 40);
-    gtk_widget_set_margin_end(fact, 24);
-    gtk_widget_add_css_class(fact, "splash-fact");
+    GtkWidget *fact = splash_fact_label(choice->facts, choice->n_facts, 40);
 
-    /* The film takes seconds to produce its first frame - the media backend
-       has to be started and the decoder primed, and on a cold machine that is
-       long enough to look like a hang. The still splash's artwork stands in
-       until the stream reports itself prepared. */
-    GtkWidget *poster = gtk_picture_new_for_resource(
-        "/com/imsisting/native/imsisting_splash.png");
-    gtk_picture_set_content_fit(GTK_PICTURE(poster), GTK_CONTENT_FIT_COVER);
-    gtk_picture_set_can_shrink(GTK_PICTURE(poster), TRUE);
-    gtk_widget_set_size_request(poster, 960, 540);
-
+    /* No stand-in artwork here. The still used to be laid over the film until
+       the decoder produced its first frame, so every launch opened on the same
+       picture before showing the one it had chosen. The window is dark and the
+       card is up from the first frame instead; the film fades into its own
+       place once the backend is ready. */
     GtkWidget *overlay = gtk_overlay_new();
     gtk_overlay_set_child(GTK_OVERLAY(overlay), video);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), poster);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), fact);
 
     GtkWidget *win = gtk_application_window_new(app);
@@ -8764,11 +9552,14 @@ splash_window_video(AppState *state, GtkApplication *app)
     gtk_window_set_resizable(GTK_WINDOW(win), FALSE);
     gtk_window_set_default_size(GTK_WINDOW(win), 960, 540);
     gtk_window_set_child(GTK_WINDOW(win), overlay);
+    /* A film has no first frame for a moment; without this the window shows
+       the theme's background in that gap instead of the near-black the films
+       are drawn on. */
+    gtk_widget_add_css_class(win, "splash-window");
 
     state->splash_window = win;
     state->splash_area = NULL;
     state->splash_media = film;      /* the video widget holds the reference */
-    state->splash_poster = poster;
     state->splash_video = TRUE;
 }
 
@@ -8779,7 +9570,6 @@ splash_begin(AppState *state, GtkApplication *app)
     state->radio_prefetch_fd = -1;
     state->splash_video = FALSE;
     state->splash_media = NULL;
-    state->splash_poster = NULL;
     state->splash_film_us = 0;
     state->splash_start_us = g_get_monotonic_time();
 
@@ -8800,15 +9590,41 @@ splash_begin(AppState *state, GtkApplication *app)
         }
     }
 
-    /* The film by default; IMSISTING_SPLASH=art buys the still instead. If no
-       window comes back - the media backend absent, the film not built in -
-       the still is built instead, so a launch always has a splash. */
+    /* A splash every launch, chosen from five: the four films and the still,
+       each with the card that belongs to it. IMSISTING_SPLASH=art (or 1) pins
+       the still and =2..=5 pins a film, which is how one is looked at without
+       relaunching until it comes round. If no window comes back - the media
+       backend absent, the film not built in - the still is built instead. */
     const char *which = g_getenv("IMSISTING_SPLASH");
-    if (!(which != NULL && (g_ascii_strcasecmp(which, "art") == 0 ||
-                            g_strcmp0(which, "1") == 0)))
-        splash_window_video(state, app);
-    if (state->splash_window == NULL)
-        splash_window_art(state, app);
+    if (which != NULL && (g_ascii_strcasecmp(which, "art") == 0 ||
+                          g_strcmp0(which, "1") == 0)) {
+        const SplashFilm *r = &splash_films[g_random_int_range(
+            0, (gint32) G_N_ELEMENTS(splash_films))];
+        splash_window_art(state, app, r->facts, r->n_facts);
+    } else {
+        gint32 n_films = (gint32) G_N_ELEMENTS(splash_films);
+        const SplashFilm *choice = NULL;
+
+        if (which != NULL && which[0] >= '2' && which[0] <= '5' &&
+            which[1] == '\0')
+            choice = &splash_films[which[0] - '2'];
+        else if (g_random_int_range(0, n_films + 1) == n_films)
+            choice = &splash_still;
+        else
+            choice = &splash_films[g_random_int_range(0, n_films)];
+
+        if (choice == &splash_still) {
+            const SplashFilm *r = &splash_films[g_random_int_range(0, n_films)];
+            splash_window_art(state, app, r->facts, r->n_facts);
+        } else {
+            splash_window_video(state, app, choice);
+        }
+    }
+    if (state->splash_window == NULL) {
+        const SplashFilm *r = &splash_films[g_random_int_range(
+            0, (gint32) G_N_ELEMENTS(splash_films))];
+        splash_window_art(state, app, r->facts, r->n_facts);
+    }
 
     gtk_window_present(GTK_WINDOW(state->splash_window));
 
@@ -8866,7 +9682,50 @@ on_shutdown(GtkApplication *app, gpointer user_data)
         state->status_source = 0;
     }
     if (state->live_socket != NULL)
-        live_stop(state);
+        live_stop(state, FALSE);
+}
+
+/* The two faces the interface uses are compiled in, but fontconfig only reads
+   files. Each is written once into the per-user cache directory and registered
+   for this process only, so a machine with neither font installed still shows
+   the interface as designed -- and nothing is installed system-wide. */
+static void
+imsisting_load_fonts(void)
+{
+    static const char *const files[] = {
+        "fonts/Orbitron-Regular.ttf",
+        "fonts/Orbitron-Bold.ttf",
+        "fonts/Neuropol-Regular.otf",
+    };
+    g_autofree char *dir = g_build_filename(g_get_user_cache_dir(),
+                                            "imsisting", "fonts", NULL);
+
+    g_mkdir_with_parents(dir, 0700);
+
+    for (gsize i = 0; i < G_N_ELEMENTS(files); i++) {
+        g_autofree char *res = g_strdup_printf("/com/imsisting/native/%s",
+                                               files[i]);
+        const char *slash = strrchr(files[i], '/');
+        g_autofree char *path = g_build_filename(
+            dir, slash != NULL ? slash + 1 : files[i], NULL);
+        g_autoptr(GBytes) bytes = g_resources_lookup_data(
+            res, G_RESOURCE_LOOKUP_FLAGS_NONE, NULL);
+        const char *data;
+        GStatBuf st;
+        gsize len = 0;
+
+        if (bytes == NULL)
+            continue;
+
+        data = g_bytes_get_data(bytes, &len);
+
+        /* Rewritten only when it is missing or a different size, so an
+           ordinary start costs one stat() per face and no writes. */
+        if (g_stat(path, &st) != 0 || st.st_size != (goffset) len)
+            g_file_set_contents(path, data, (gssize) len, NULL);
+
+        FcConfigAppFontAddFile(NULL, (const FcChar8 *) path);
+    }
 }
 
 int
@@ -8941,6 +9800,7 @@ main(int argc, char **argv)
 
     stderr_redirect(&state);
     register_all_modules();
+    imsisting_load_fonts();
 
     GtkApplication *app = gtk_application_new("com.imsisting.native",
                                               G_APPLICATION_DEFAULT_FLAGS);
@@ -8973,6 +9833,533 @@ main(int argc, char **argv)
 /*  REGISTRATION TABLE                                                  */
 /* ==================================================================== */
 
+/* ==================================================================== */
+/*  DEPENDENCY MANAGER — the Packages view                              */
+/*                                                                      */
+/*  Built like wifisting's Dependencies page because it answers the same */
+/*  question the same way: what is registered, what is installed, and a  */
+/*  button on the line that fixes it. What differs is the data - this    */
+/*  module's --status-tsv carries a level and a version as well as the   */
+/*  package, so a row says more than installed or missing.               */
+/*                                                                      */
+/*  The read is asynchronous on purpose. On a cold machine (65 tools,    */
+/*  each probed by the shell) that call has been measured at 35 seconds, */
+/*  and a synchronous read would freeze the window for the whole of it.  */
+/* ==================================================================== */
+
+typedef struct {
+    AppState   *state;
+    const char *module_id;
+    GtkWidget  *list;
+    GtkWidget  *summary;
+    GtkWidget  *search;
+    GtkWidget  *critical;
+    GtkWidget  *optional;
+    GtkWidget  *status;         /* the page's own pill */
+    GtkWidget  *refresh;
+    GtkWidget  *busy;           /* spinner + message, hidden unless reading */
+    GtkWidget  *busy_label;
+    GtkWidget  *entry;          /* install by name */
+    GSubprocess *process;
+    guint       refresh_source;
+} DepsPage;
+
+typedef struct {
+    DepsPage  *page;
+    char      *tool;
+    char      *package;
+    char      *group;           /* "critical" or "optional" */
+    char      *meta;            /* "level · version" */
+    gboolean   installed;
+} DepsRow;
+
+static void deps_page_free(gpointer data);
+static void deps_refresh(DepsPage *page);
+static void deps_apply_filter(DepsPage *page);
+
+static const char *
+deps_field(char **f, guint i)
+{
+    return (f != NULL && i < g_strv_length(f)) ? f[i] : "";
+}
+
+static void
+deps_clear_rows(DepsPage *page)
+{
+    GtkWidget *child = gtk_widget_get_first_child(page->list);
+
+    while (child != NULL) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        gtk_list_box_remove(GTK_LIST_BOX(page->list), child);
+        child = next;
+    }
+}
+
+static void
+deps_row_free(gpointer data)
+{
+    DepsRow *row = data;
+
+    g_free(row->tool);
+    g_free(row->package);
+    g_free(row->group);
+    g_free(row->meta);
+    g_free(row);
+}
+
+static gboolean
+deps_row_matches(DepsRow *row)
+{
+    DepsPage *page = row->page;
+    const char *query = gtk_editable_get_text(GTK_EDITABLE(page->search));
+    gboolean show_critical = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(page->critical));
+    gboolean show_optional = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(page->optional));
+    gboolean group_ok =
+        (g_strcmp0(row->group, "critical") == 0 && show_critical) ||
+        (g_strcmp0(row->group, "optional") == 0 && show_optional);
+
+    if (!group_ok)
+        return FALSE;
+    if (query == NULL || *query == '\0')
+        return TRUE;
+
+    {
+        g_autofree char *needle = g_utf8_strdown(query, -1);
+        g_autofree char *tool   = g_utf8_strdown(row->tool, -1);
+        g_autofree char *pkg    = g_utf8_strdown(row->package, -1);
+
+        return strstr(tool, needle) != NULL || strstr(pkg, needle) != NULL;
+    }
+}
+
+static void
+deps_apply_filter(DepsPage *page)
+{
+    GtkWidget *child = gtk_widget_get_first_child(page->list);
+    while (child != NULL) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        DepsRow *row = g_object_get_data(G_OBJECT(child), "deps-row");
+
+        if (row != NULL)
+            gtk_widget_set_visible(child, deps_row_matches(row));
+        child = next;
+    }
+}
+
+static void
+deps_filter_changed(GtkWidget *widget, gpointer data)
+{
+    (void) widget;
+    deps_apply_filter(data);
+}
+
+static void
+deps_set_busy(DepsPage *page, gboolean busy, const char *message)
+{
+    if (page->busy != NULL)
+        gtk_widget_set_visible(page->busy, busy);
+    if (busy && message != NULL && page->busy_label != NULL)
+        gtk_label_set_text(GTK_LABEL(page->busy_label), message);
+    if (page->refresh != NULL)
+        gtk_widget_set_sensitive(page->refresh, !busy);
+}
+
+/* The install leaves through the same door as every other privileged verb
+   (group_verb_clicked -> pkexec, per the polkit rule), so this only has to
+   arrange for the list to be re-read once the install has had time to
+   land. */
+static gboolean
+deps_refresh_later(gpointer data)
+{
+    DepsPage *page = data;
+
+    page->refresh_source = 0;
+    deps_refresh(page);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+deps_install_one_clicked(GtkButton *button, gpointer data)
+{
+    DepsRow *row = data;
+
+    (void) button;
+    if (row->package == NULL || *row->package == '\0')
+        return;
+    if (row->page->refresh_source != 0)
+        g_source_remove(row->page->refresh_source);
+    row->page->refresh_source = g_timeout_add_seconds(4, deps_refresh_later,
+                                                      row->page);
+}
+
+static void
+deps_install_named_clicked(GtkButton *button, gpointer data)
+{
+    DepsPage *page = data;
+    const char *name = gtk_editable_get_text(GTK_EDITABLE(page->entry));
+    g_autofree char *script = NULL;
+    g_autofree char *label = NULL;
+    const char *argv[4];
+
+    (void) button;
+    if (name == NULL || *name == '\0')
+        return;
+
+    script = module_script_path(page->module_id);
+    if (script == NULL || !g_file_test(script, G_FILE_TEST_EXISTS))
+        return;
+
+    argv[0] = script;
+    argv[1] = "--install-package";
+    argv[2] = name;
+    argv[3] = NULL;
+    label = g_strdup_printf("%s --install-package %s", page->module_id, name);
+
+    /* Privileged, because installing is: imsisting_action_run routes it
+       through pkexec, which the polkit rule in tools/49-imsisting.rules
+       matches on the module path. */
+    imsisting_action_run(page->state, page->module_id, label, page->status,
+                         argv, TRUE);
+    gtk_editable_set_text(GTK_EDITABLE(page->entry), "");
+
+    if (page->refresh_source != 0)
+        g_source_remove(page->refresh_source);
+    page->refresh_source = g_timeout_add_seconds(4, deps_refresh_later, page);
+}
+
+static GtkWidget *
+deps_create_row(DepsPage *page, const char *group, const char *tool,
+                const char *package, const char *meta, gboolean installed)
+{
+    GtkWidget *row      = gtk_list_box_row_new();
+    GtkWidget *content  = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    GtkWidget *identity = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget *name     = gtk_label_new(tool);
+    GtkWidget *group_lbl = gtk_label_new(group);
+    GtkWidget *status   = gtk_label_new(installed ? "INSTALLED" : "MISSING");
+    GtkWidget *install  = gtk_button_new_with_label("Install");
+    DepsRow   *entry    = g_new0(DepsRow, 1);
+    g_autofree char *meta_text = g_strdup_printf("package: %s%s%s",
+        package, (meta != NULL && *meta != '\0') ? "  ·  " : "",
+        (meta != NULL) ? meta : "");
+    GtkWidget *package_lbl = gtk_label_new(meta_text);
+
+    gtk_widget_add_css_class(row, "deps-row");
+    gtk_widget_add_css_class(name, "deps-name");
+    gtk_widget_add_css_class(package_lbl, "deps-package");
+    gtk_widget_add_css_class(group_lbl, "deps-group");
+    gtk_widget_add_css_class(group_lbl,
+        g_strcmp0(group, "critical") == 0 ? "deps-critical"
+                                          : "deps-optional");
+    gtk_widget_add_css_class(status, "deps-status");
+    gtk_widget_add_css_class(status, installed ? "installed" : "missing");
+    gtk_widget_add_css_class(install, "deps-install");
+
+    gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(package_lbl), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(group_lbl), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(package_lbl), PANGO_ELLIPSIZE_END);
+
+    gtk_widget_set_hexpand(identity, TRUE);
+    gtk_widget_set_halign(group_lbl, GTK_ALIGN_START);
+    gtk_widget_set_valign(group_lbl, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(status, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(install, GTK_ALIGN_CENTER);
+    gtk_widget_set_sensitive(install, !installed);
+
+    gtk_box_append(GTK_BOX(identity), name);
+    gtk_box_append(GTK_BOX(identity), package_lbl);
+
+    gtk_box_append(GTK_BOX(content), group_lbl);
+    gtk_box_append(GTK_BOX(content), identity);
+    gtk_box_append(GTK_BOX(content), status);
+    gtk_box_append(GTK_BOX(content), install);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), content);
+
+    entry->page      = page;
+    entry->tool      = g_strdup(tool);
+    entry->package   = g_strdup(package);
+    entry->group     = g_strdup(group);
+    entry->meta      = g_strdup(meta);
+    entry->installed = installed;
+
+    if (!installed) {
+        g_object_set_data(G_OBJECT(install), "state", page->state);
+        g_object_set_data(G_OBJECT(install), "module-id",
+                          (gpointer) page->module_id);
+        g_object_set_data(G_OBJECT(install), "status", page->status);
+        g_object_set_data_full(G_OBJECT(install), "verb",
+                               g_strdup("--install-package"), g_free);
+        g_object_set_data_full(G_OBJECT(install), "args",
+                               g_strdup(package), g_free);
+        g_object_set_data(G_OBJECT(install), "privileged",
+                          GINT_TO_POINTER(1));
+        g_signal_connect(install, "clicked",
+                         G_CALLBACK(group_verb_clicked), NULL);
+        g_signal_connect(install, "clicked",
+                         G_CALLBACK(deps_install_one_clicked), entry);
+    }
+
+    /* The row owns the record, not the install button: every row has to be
+       filterable, and an installed row has no install button at all. Attaching
+       it only in the !installed branch left installed rows with no record, so
+       the search and the group toggles could not hide them. */
+    g_object_set_data_full(G_OBJECT(row), "deps-row", entry, deps_row_free);
+    return row;
+}
+
+static void
+deps_refresh_finished(GObject *source, GAsyncResult *result, gpointer data)
+{
+    DepsPage *page = data;
+    g_autoptr(GError) error = NULL;
+    g_autofree char *out = NULL;
+    gboolean ok;
+    int total = 0, installed = 0, critical_missing = 0, optional_missing = 0;
+
+    ok = g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), result,
+                                              &out, NULL, &error);
+    g_clear_object(&page->process);
+
+    if (!ok || !g_subprocess_get_successful(G_SUBPROCESS(source))) {
+        const char *why = error != NULL ? error->message
+                       : (g_subprocess_get_if_exited(G_SUBPROCESS(source)) &&
+                          g_subprocess_get_exit_status(G_SUBPROCESS(source)) != 0
+                             ? "the dependency module refused the request"
+                             : "the dependency module could not be run");
+        g_autofree char *msg = g_strdup_printf("Dependency list failed: %s", why);
+        if (page->summary != NULL)
+            gtk_label_set_text(GTK_LABEL(page->summary), msg);
+        append_event(page->state, msg);
+        deps_set_busy(page, FALSE, NULL);
+        return;
+    }
+
+    deps_clear_rows(page);
+
+    if (out != NULL) {
+        g_auto(GStrv) lines = g_strsplit(out, "\n", -1);
+
+        for (guint i = 0; lines[i] != NULL; i++) {
+            g_auto(GStrv) f = NULL;
+            const char *tool, *level, *required, *state, *version, *package;
+            gboolean is_installed;
+            g_autofree char *meta = NULL;
+            g_autofree char *group = NULL;
+
+            if (*lines[i] == '\0' || strchr(lines[i], '\t') == NULL)
+                continue;
+
+            f = g_strsplit(lines[i], "\t", -1);
+            if (g_strv_length(f) < 6)
+                continue;
+
+            tool     = deps_field(f, 0);
+            level    = deps_field(f, 1);
+            required = deps_field(f, 2);
+            state    = deps_field(f, 3);
+            version  = deps_field(f, 4);
+            package  = deps_field(f, 5);
+
+            is_installed = g_strcmp0(state, "installed") == 0;
+            group = g_strdup(g_strcmp0(required, "yes") == 0 ? "critical"
+                                                             : "optional");
+            meta = (*version != '\0')
+                     ? g_strdup_printf("%s  ·  %s", level, version)
+                     : g_strdup(level);
+
+            gtk_list_box_append(GTK_LIST_BOX(page->list),
+                                deps_create_row(page, group, tool, package,
+                                                meta, is_installed));
+
+            total++;
+            if (is_installed)
+                installed++;
+            else if (g_strcmp0(group, "critical") == 0)
+                critical_missing++;
+            else
+                optional_missing++;
+        }
+    }
+
+    if (page->summary != NULL) {
+        g_autofree char *line = g_strdup_printf(
+            "%d/%d installed  ·  %d critical missing  ·  %d optional missing",
+            installed, total, critical_missing, optional_missing);
+        gtk_label_set_text(GTK_LABEL(page->summary), line);
+    }
+
+    deps_set_busy(page, FALSE, NULL);
+    deps_apply_filter(page);
+}
+
+static void
+deps_refresh(DepsPage *page)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *script = module_script_path(page->module_id);
+    const char *argv[3];
+
+    if (page->process != NULL)
+        return;                         /* one read at a time */
+    if (script == NULL || !g_file_test(script, G_FILE_TEST_EXISTS)) {
+        gtk_label_set_text(GTK_LABEL(page->summary),
+                           "The dependency module is not present in this tree.");
+        return;
+    }
+
+    argv[0] = script;
+    argv[1] = "--status-tsv";
+    argv[2] = NULL;
+
+    page->process = g_subprocess_newv(argv,
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+        &error);
+    if (page->process == NULL) {
+        g_autofree char *msg = g_strdup_printf(
+            "Dependency list failed: %s",
+            error != NULL ? error->message : "could not start the module");
+        gtk_label_set_text(GTK_LABEL(page->summary), msg);
+        append_event(page->state, msg);
+        return;
+    }
+
+    deps_set_busy(page, TRUE, "Inspecting installed tools…");
+    g_subprocess_communicate_utf8_async(page->process, NULL, NULL,
+                                        deps_refresh_finished, page);
+}
+
+static gboolean
+deps_refresh_idle(gpointer data)
+{
+    deps_refresh(data);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+deps_page_free(gpointer data)
+{
+    DepsPage *page = data;
+
+    if (page->refresh_source != 0)
+        g_source_remove(page->refresh_source);
+    g_clear_object(&page->process);
+    g_free(page);
+}
+
+static GtkWidget *
+deps_build_packages(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *page    = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    GtkWidget *scroll  = gtk_scrolled_window_new();
+    GtkWidget *search  = gtk_search_entry_new();
+    GtkWidget *critical = gtk_toggle_button_new_with_label("Critical");
+    GtkWidget *optional = gtk_toggle_button_new_with_label("Optional");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh");
+    GtkWidget *summary = gtk_label_new("Dependency state not read yet.");
+    GtkWidget *list    = gtk_list_box_new();
+    GtkWidget *busy    = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *spinner = gtk_spinner_new();
+    GtkWidget *busy_lbl = gtk_label_new("");
+    GtkWidget *entry   = gtk_entry_new();
+    GtkWidget *install = gtk_button_new_with_label("Install");
+    DepsPage  *manager = g_new0(DepsPage, 1);
+
+    (void) out;
+
+    manager->state     = state;
+    manager->module_id = module_id;
+    manager->list      = list;
+    manager->summary   = summary;
+    manager->search    = search;
+    manager->critical  = critical;
+    manager->optional  = optional;
+    manager->status    = status;
+    manager->refresh   = refresh;
+    manager->busy      = busy;
+    manager->busy_label = busy_lbl;
+    manager->entry     = entry;
+
+    gtk_widget_add_css_class(page, "deps-page");
+    gtk_widget_add_css_class(summary, "deps-summary");
+    gtk_widget_add_css_class(busy_lbl, "deps-busy");
+    gtk_widget_add_css_class(entry, "deps-entry");
+    gtk_widget_add_css_class(install, "verb-button");
+    gtk_widget_add_css_class(critical, "deps-filter");
+    gtk_widget_add_css_class(optional, "deps-filter");
+
+    gtk_label_set_xalign(GTK_LABEL(summary), 0.0f);
+    gtk_widget_set_hexpand(search, TRUE);
+    gtk_widget_set_hexpand(entry, TRUE);
+    gtk_widget_set_vexpand(scroll, TRUE);
+
+    gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(search),
+                                          "Filter tool or package…");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry),
+                                   "Install a package by name…");
+    gtk_label_set_text(GTK_LABEL(busy_lbl), "Inspecting installed tools…");
+
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(critical), TRUE);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(optional), TRUE);
+    gtk_widget_set_tooltip_text(critical, "Show the tools this toolkit needs");
+    gtk_widget_set_tooltip_text(optional, "Show the tools it can use");
+
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
+    gtk_list_box_set_show_separators(GTK_LIST_BOX(list), TRUE);
+    gtk_list_box_set_filter_func(GTK_LIST_BOX(list), NULL, NULL, NULL);
+
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), list);
+
+    gtk_box_append(GTK_BOX(busy), spinner);
+    gtk_box_append(GTK_BOX(busy), busy_lbl);
+    gtk_widget_set_visible(busy, FALSE);
+
+    gtk_box_append(GTK_BOX(page), search);
+    {
+        GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_append(GTK_BOX(controls), critical);
+        gtk_box_append(GTK_BOX(controls), optional);
+        gtk_box_append(GTK_BOX(controls), refresh);
+        gtk_box_append(GTK_BOX(page), controls);
+    }
+    gtk_box_append(GTK_BOX(page), summary);
+    gtk_box_append(GTK_BOX(page), busy);
+    gtk_box_append(GTK_BOX(page), scroll);
+    {
+        GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_append(GTK_BOX(row), entry);
+        gtk_box_append(GTK_BOX(row), install);
+        gtk_box_append(GTK_BOX(page), row);
+    }
+
+    g_object_set_data_full(G_OBJECT(list), "deps-page", manager,
+                           deps_page_free);
+
+    g_signal_connect(search, "search-changed",
+                     G_CALLBACK(deps_filter_changed), manager);
+    g_signal_connect(critical, "toggled",
+                     G_CALLBACK(deps_filter_changed), manager);
+    g_signal_connect(optional, "toggled",
+                     G_CALLBACK(deps_filter_changed), manager);
+    g_signal_connect(refresh, "clicked",
+                     G_CALLBACK(deps_filter_changed), manager);
+    g_signal_connect_swapped(refresh, "clicked",
+                             G_CALLBACK(deps_refresh), manager);
+    g_signal_connect(install, "clicked",
+                     G_CALLBACK(deps_install_named_clicked), manager);
+    g_signal_connect(entry, "activate",
+                     G_CALLBACK(deps_install_named_clicked), manager);
+
+    gtk_spinner_start(GTK_SPINNER(spinner));
+    g_idle_add(deps_refresh_idle, manager);
+    return page;
+}
+
 /* Each module lists its submenus in order. Entry 0 is always the Overview,
    whose spec becomes the QUICK ACTIONS row; the rest are themed groups of
    verbs drawn from the module's own vocabulary. Verbs that are plumbing
@@ -8994,10 +10381,11 @@ static ModuleSubmenuEntry deps_entries[] = {
          failing on every write. With the marker here they go through
          `pkexec <script> <verb>`, which is what the polkit rule in
          tools/49-imsisting.rules matches on. */
-      "#CHECK|--check-versions:Refresh|#INSTALL|--install-missing!:Install Missing!|--install-all!:Install Full Toolchain!|--install-pip!:Install Pipx Tools!" },
+      "#CHECK|--check-versions:Refresh|#INSTALL|--install-missing!:Install Missing!|--install-all!:Install Full Toolchain!|--install-pip!:Install Pipx Tools!|#AUDIT|--missing-only:Missing Only|--report:Report" },
     { "Packages",
       "system-software-install-symbolic",
-      "#INSTALL|~--install-package!:Install Package|#AUDIT|--missing-only:Missing Only|--report:Report" },
+      NULL,
+      deps_build_packages },
     { "System",
       "preferences-system-symbolic",
       "--distro-info:Distro Info" },
@@ -9982,6 +11370,9 @@ static ModuleSubmenuEntry sim_entries[] = {
     { "OTA",
       "document-send-symbolic",
       "#PARSE|--parse-ota:Parse OTA|#CONFIG|--spi=1|--rsp:RSP|#PLAN|--plan:Plan" },
+    { "Side channel",
+      "auth-smartcard-symbolic",
+      "#DPA (COMP128-1)|~--dpa-model:Leak Point (ki rand)|~--dpa-sim:Key Recovery (ki)|~--dpa-sweep:Sweeps (ki)|#PLAN|--plan=dpa-lab:DPA Rig" },
 };
 static ModuleSubmenuEntry pcap_entries[] = {
     { "Overview",
@@ -10119,10 +11510,10 @@ static ModuleSubmenuEntry ss7_entries[] = {
       "--surface:Surface|--grx-recon:GRX Recon|--detect:Detect" },
     { "Build",
       "document-new-symbolic",
-      "--build-ati:Build ATI|--build-sri:Build SRI|--build-sri-sm:Build SRI-SM" },
+      "--build-ati:Build ATI|--build-sri:Build SRI|--build-sri-sm:Build SRI-SM|--build-sai:Build SAI (auth vectors)|--build-psi:Build PSI|--build-ulr:Build ULR|--build-isd:Build ISD|--build-register-ss:Build RegisterSS|--build-activate-ss:Build ActivateSS|--build-m3ua:Wrap MSU in M3UA" },
     { "Decode",
       "document-open-symbolic",
-      "--decode-map:Decode MAP|--decode-msu:Decode MSU|--decode-tcap:Decode TCAP" },
+      "--decode-map:Decode MAP|--decode-msu:Decode MSU|--decode-tcap:Decode TCAP|--decode-sigtran:Decode SIGTRAN" },
     { "Detection",
       "dialog-warning-symbolic",
       "--fallback-detect:Fallback Detect|--flow:Flow" },
@@ -10269,6 +11660,14 @@ static ModuleSubmenuEntry otasm_entries[] = {
     { "SPI",
       "auth-smartcard-symbolic",
       "--spi-build:Build SPI|~--spi|--plan:Plan" },
+    { "TP layer",
+      "mail-message-new-symbolic",
+      "~--tpdu-parse:Parse TPDU|--tpdu-deliver:Build DELIVER|--tpdu-submit:Build SUBMIT|--smsc-wrap:Wrap SMSC"
+      "|--tp-pid:TP-PID|--tp-dcs:TP-DCS|--tp-dcs-build:Build DCS|--tp-scts:TP-SCTS|--tp-scts-build:Build SCTS"
+      "|--tp-addr:Address|--tp-addr-build:Build Address|--tp-fcs:TP-FCS|--tp-st:TP-ST|--plan-tp:Handoff" },
+    { "Type 0",
+      "dialog-warning-symbolic",
+      "~--type0:Audit Type 0|--type0-build:Build Type 0|--tp-kat:Packing KAT|--tp-ud-build:Pack Text|--tp-ud-read:Unpack Text" },
 };
 static ModuleSubmenuEntry lipr_entries[] = {
     { "Overview",
@@ -10422,6 +11821,30 @@ static ModuleSubmenuEntry nrj_entries[] = {
       "#RNTI|--ra-rnti-nr:RA-RNTI NR|--ra-rnti-lte:RA-RNTI LTE|#DCI|--dci|#PLAN|--plan:Plan" },
 };
 
+static ModuleSubmenuEntry bbdg_entries[] = {
+    { "Overview",
+      "dialog-information-symbolic",
+      "--status:Status|--kat:Framing KATs|--cmd-name=38:Name Code|--plan:Handoff Plan" },
+    { "Framing",
+      "utilities-terminal-symbolic",
+      "#CHECKSUM|--crc=313233343536373839:CRC 906E|#FRAME|--frame=0032:Frame|--unframe=7e000a6b6d000007000000000000007e:Unframe|~--demux|#CODEC|~--escape|~--unescape|--log-classify=10:Classify" },
+    { "NV",
+      "drive-harddisk-symbolic",
+      "#BUILD|--nv-build=read 178:Build Read|--nv-read=178:Read NV178|--nv-write=178 00:Write NV178|#DECODE|~--nv-parse|--nv-scan:NV Scan" },
+    { "Identity",
+      "avatar-default-symbolic",
+      "#REQUEST|--state-build=gsm:Build GSM|--state-info=gsm:State GSM|--state-info=wcdma:State WCDMA|--state-info=cm:State CM|~--state|#VERSION|--verno:Version Req|~--verno-parse|#BCD|--bcd=3035230506641263:Decode IMEI|--luhn=353325060462136:Luhn" },
+    { "EFS",
+      "folder-symbolic",
+      "#OPEN|--efs-open=/nv/item_files/modem/mmode/ue_usage_setting read:Open RO|#READ|--efs-read=/nv/item_files/modem/mmode/ue_usage_setting:Read|#WRITE|--efs-write=/nv/item_files/modem/mmode/ue_usage_setting 00:Write|#STAT|--efs-stat=/nv:Stat|--efs-hello:Hello|#DECODE|~--efs-parse|--efs-walk=/nv:EFS Walk" },
+    { "AT / Device",
+      "network-wireless-symbolic",
+      "#AT|--at=ATI:ATI|--at=AT+CGSN:CGSN|~--at-parse|#DEVICE|--ports:Ports|~--config|~--read|~--write-hex|--audit=7e000a6b6d000007000000000000007e:Audit" },
+    { "Planning",
+      "preferences-system-symbolic",
+      "--guard-check:Guard Check|--plan:Plan" },
+};
+
 static void
 register_all_modules(void)
 {
@@ -10537,4 +11960,6 @@ register_all_modules(void)
                              G_N_ELEMENTS(bexp_entries), NULL);
     module_registry_register("60_nr_inject", nrj_entries,
                              G_N_ELEMENTS(nrj_entries), NULL);
+    module_registry_register("61_baseband_diag", bbdg_entries,
+                             G_N_ELEMENTS(bbdg_entries), NULL);
 }

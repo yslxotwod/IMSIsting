@@ -4,8 +4,14 @@
   <gresource prefix="/com/imsisting/native">
     <file>style.css</file>
     <file>imsisting_splash.png</file>
+    <file>fonts/Orbitron-Bold.ttf</file>
+    <file>fonts/Orbitron-Regular.ttf</file>
+    <file>fonts/Neuropol-Regular.otf</file>
     <file>imsisting_logo.png</file>
     <file>imsisting_splash2.mp4</file>
+    <file>imsisting_splash3.mp4</file>
+    <file>imsisting_splash4.mp4</file>
+    <file>imsisting_splash5.mp4</file>
     <file alias="icons/scalable/actions/imsisting-00_deps-symbolic.svg">icons/symbolic/imsisting-00_deps-symbolic.svg</file>
     <file alias="icons/scalable/actions/imsisting-01_radio-symbolic.svg">icons/symbolic/imsisting-01_radio-symbolic.svg</file>
     <file alias="icons/scalable/actions/imsisting-02_cell_recon-symbolic.svg">icons/symbolic/imsisting-02_cell_recon-symbolic.svg</file>
@@ -62,5 +68,6 @@
     <file alias="icons/scalable/actions/imsisting-58_non3gpp-symbolic.svg">icons/symbolic/imsisting-58_non3gpp-symbolic.svg</file>
     <file alias="icons/scalable/actions/imsisting-59_baseband_exploit-symbolic.svg">icons/symbolic/imsisting-59_baseband_exploit-symbolic.svg</file>
     <file alias="icons/scalable/actions/imsisting-60_nr_inject-symbolic.svg">icons/symbolic/imsisting-60_nr_inject-symbolic.svg</file>
+    <file alias="icons/scalable/actions/imsisting-61_baseband_diag-symbolic.svg">icons/symbolic/imsisting-61_baseband_diag-symbolic.svg</file>
   </gresource>
 </gresources>

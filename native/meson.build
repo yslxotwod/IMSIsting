@@ -22,12 +22,8 @@ _imsisting_root = run_command(
 
 conf = configuration_data()
 conf.set('IMSISTING_ROOT', _imsisting_root)
+conf.set('IMSISTING_VERSION', meson.project_version())
 
-configure_file(
-  input: 'src/config.h.in',
-  output: 'config.h',
-  configuration: conf,
-)
 
 gnome = import('gnome')
 
@@ -37,6 +33,23 @@ gtk_dep = dependency('gtk4', version: '>=4.10')
 # without it the output pane falls back to a text view, so the build
 # still succeeds on a system that has GTK4 but no vte4.
 vte_dep = dependency('vte-2.91-gtk4', required: false)
+
+# config.h has to agree with what the dependency probes decided: without this
+# the VTE include is skipped and the terminal button falls back to whatever
+# terminal the desktop has instead of using the library that is installed.
+if vte_dep.found()
+  conf.set('HAVE_VTE', 1)
+endif
+
+configure_file(
+  input: 'src/config.h.in',
+  output: 'config.h',
+  configuration: conf,
+)
+
+# Orbitron and Neuropol are compiled into the binary. fontconfig is what lets
+# this process see them without a system-wide install; GTK already uses it.
+fontconfig_dep = dependency('fontconfig')
 
 imsisting_resources = gnome.compile_resources(
   'imsisting-resources',
@@ -54,6 +67,7 @@ executable(
   dependencies: [
     gtk_dep,
     vte_dep,
+    fontconfig_dep,
   ],
   install: true,
 )

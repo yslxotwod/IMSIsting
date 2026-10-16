@@ -2102,3 +2102,307 @@ headerbar {
     border-radius: 4px;
     padding: 14px 18px;
 }
+
+/* ── Dependency manager — the package list ────────────────────────────────
+   The shape is wifisting's Dependencies page (search, two group filters, a
+   counted summary, one row per package with a status chip and an install) in
+   this toolkit's palette: the sunken panel and @line border the rest of the
+   app uses, green and red only on the chip that carries the meaning, and the
+   accent kept for focus and hover. Nothing here is red-accented: critical is
+   attention (#e0b357), not an error. */
+.deps-page {
+    padding: 14px 16px 16px;
+}
+
+.deps-page searchentry {
+    min-height: 34px;
+    color: @text;
+    background-color: @bg_sunken;
+    border: 1px solid @line;
+    border-radius: 5px;
+}
+
+.deps-page searchentry:focus-within {
+    border-color: @accent;
+    box-shadow: 0 0 0 1px rgba(79, 179, 217, 0.22);
+}
+
+.deps-page entry.deps-entry {
+    min-height: 34px;
+    color: @text;
+    background-color: @bg_sunken;
+    border: 1px solid @line;
+    border-radius: 5px;
+}
+
+button.deps-filter {
+    min-height: 34px;
+    padding: 6px 14px;
+    font-size: 12px;
+    color: @text_dim;
+    background-color: transparent;
+    border: 1px solid @line;
+    border-radius: 5px;
+}
+
+button.deps-filter:checked {
+    color: @accent;
+    border-color: @accent;
+    background-color: rgba(79, 179, 217, 0.14);
+}
+
+.deps-summary {
+    color: @text_dim;
+    font-size: 11px;
+    padding: 2px 2px 4px;
+}
+
+.deps-busy {
+    color: @text_dim;
+    font-size: 11px;
+    font-style: italic;
+}
+
+.deps-page list {
+    color: @text;
+    background-color: @bg_sunken;
+    border: 1px solid @line;
+    border-radius: 6px;
+}
+
+.deps-page list > row {
+    min-height: 47px;
+    padding: 7px 10px;
+    background-color: rgba(16, 25, 42, 0.55);
+    border-bottom: 1px solid @line;
+}
+
+.deps-page list > row:hover {
+    background-color: rgba(28, 38, 57, 0.75);
+}
+
+.deps-name {
+    color: @text;
+    font-size: 13px;
+    font-weight: bold;
+}
+
+.deps-package {
+    color: @text_dim;
+    font-family: monospace;
+    font-size: 11px;
+}
+
+.deps-group {
+    min-width: 62px;
+    font-size: 10px;
+    font-weight: bold;
+}
+
+.deps-group.deps-critical { color: #e0b357; }
+.deps-group.deps-optional { color: #6f7b8d; }
+
+.deps-status {
+    min-width: 74px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: bold;
+}
+
+.deps-status.installed {
+    color: #74d99f;
+    background-color: rgba(20, 62, 44, 0.55);
+    border: 1px solid #2c6e4c;
+}
+
+.deps-status.missing {
+    color: #ef8b8b;
+    background-color: rgba(74, 26, 34, 0.55);
+    border: 1px solid #7d2f3c;
+}
+
+button.deps-install {
+    min-width: 74px;
+    min-height: 32px;
+    font-size: 12px;
+    color: @accent;
+    border: 1px solid @line;
+    border-radius: 5px;
+}
+
+button.deps-install:hover {
+    border-color: @accent;
+    background-color: rgba(79, 179, 217, 0.18);
+}
+
+button.deps-install:disabled {
+    color: #5f636c;
+    background-color: rgba(12, 13, 16, 0.55);
+    border-color: #25272d;
+}
+
+/* ── Header: the mark, the name, the version ─────────────────────────────
+   The drawing is keyed off its black background at load time (see
+   imsisting_logo_image), so it drops onto the header without a plate. */
+.app-version {
+    color: @text_dim;
+    font-family: monospace;
+    font-size: 10px;
+    letter-spacing: 0.4px;
+}
+
+/* ── Status strip: how current the reading is ────────────────────────────
+   Dim while the poll is landing on schedule; amber once it has missed, which
+   is the only claim this end of the strip makes. */
+.status-fresh {
+    color: @text_dim;
+    font-family: monospace;
+    font-size: 10px;
+    padding: 0 2px 2px;
+}
+
+.status-fresh.stale {
+    color: #e0b357;
+}
+
+/* ---------------------------------------------------------------------------
+   Typography. Three voices, each with one job:
+
+     Neuropol   the tool's own voice, said once and large: the name in the
+                header, the heading of a page, the title of an open module.
+                Never smaller than a heading - its letterforms are wide and
+                several of them rhyme, which is fine on a sign and bad in a
+                sentence.
+     Orbitron   the instrument labels: eyebrows, keys, tags, chips, buttons,
+                tabs, the drawer, card names, counters. Small, fixed, and
+                never data - these are the words that are the same on every
+                launch.
+     monospace  everything that is data or has to line up: values, paths,
+                filenames, package and version strings, TSV, hex, logs, the
+                evidence pane. Also the freshness readout, which changes every
+                second and would shimmer in a proportional face.
+
+   Both display faces are compiled into the binary (resources/fonts/NOTICE.md)
+   and registered with fontconfig at startup, so a machine with neither
+   installed still sees this. Prose - descriptions, notes, empty states - stays
+   in the interface font, because it is meant to be read rather than scanned.
+   --------------------------------------------------------------------------- */
+
+/* Neuropol: the voice. */
+headerbar .title,
+.page-title,
+.module-header-title {
+    font-family: "Neuropol";
+    letter-spacing: 0.2px;
+}
+
+/* Orbitron: the instrument. */
+.app-subtitle,
+.status-key,
+.section-eyebrow,
+.card-heading,
+.cb-card-title,
+.cb-k,
+.cb-count-key,
+.output-card-title,
+.dash-category,
+.sidebar-category,
+.menu-heading,
+.drawer-recent-head,
+.drawer-nav-label,
+.mission-step-eyebrow,
+.mission-step-title,
+.module-card-category,
+.module-card-title,
+.module-header-category,
+.cat-air, .cat-analysis, .cat-attacks, .cat-core,
+.cat-recon, .cat-rf, .cat-sim, .cat-system,
+.status-pill,
+.deps-status,
+.deps-group,
+.deps-summary,
+.module-card-state,
+.event-badge,
+.breadcrumb,
+.stat-label,
+.stat-value,
+.stat-row-label,
+.stat-row-count,
+.deps-name,
+.loot-count,
+.loot-count-lbl,
+.crec-survey-status,
+.log-tool,
+.verb-button,
+button.primary,
+button.destructive,
+button.module-card,
+button.mission-step,
+button.deps-install,
+button.deps-filter,
+notebook > header > tabs > tab label,
+.casebook-tabs > header > tabs > tab label {
+    font-family: "Orbitron";
+}
+
+/* ---------------------------------------------------------------------------
+   Rounded controls. The window buttons and the two header toggles are the same
+   shape as everything else in the header (a 4px rounded rectangle), which at
+   this size reads as three small squares in a row. A pill says "button" at a
+   glance and matches the capsule loading bar on the splash.
+   --------------------------------------------------------------------------- */
+windowcontrols button {
+    border-radius: 999px;
+    min-width: 26px;
+    min-height: 26px;
+}
+
+.header-pill {
+    border-radius: 999px;
+    padding-left: 14px;
+    padding-right: 14px;
+}
+
+/* The splash window has no artwork behind it for the first moment of a film,
+   and the default window background is not the near-black the films fade in
+   from. */
+.splash-window {
+    background-color: #03070e;
+}
+
+/* ---------------------------------------------------------------------------
+   Every button is a pill, the way Target, Events and the three window buttons
+   are. The tile-shaped buttons are untouched by this on purpose: a module card
+   and a mission step draw no background of their own - the card surface is an
+   inner box with an 8px radius - so a radius here cannot reach them. That is
+   the shape they should keep, because a 130px-tall tile rounded into a stadium
+   would clip the icon and the title at the corners.
+   --------------------------------------------------------------------------- */
+button,
+dropdown > button {
+    border-radius: 999px;
+}
+
+/* ── Notifications ──────────────────────────────────────────────────────
+   The record of what was announced, one line each: when, what tone, and what
+   was said. The dot carries the severity with the same three colours the
+   status strip uses, so a red in a column of green reads before any text. */
+.notif-list { background: none; }
+.notif-list > row { background: none; padding: 9px 10px; }
+.notif-list > row:hover { background: rgba(79, 179, 217, 0.05); }
+.notif-row { }
+.notif-time { font-family: monospace; font-size: 10px; color: @text_dim;
+              min-width: 58px; }
+.notif-title { font-family: "Orbitron"; font-size: 11px; font-weight: 700;
+               letter-spacing: 0.5px; color: @text; }
+.notif-body { font-size: 12px; color: @text_dim; }
+.notif-row .status-dot { font-size: 10px; }
+.notif-row .status-dot.notif-error { color: #ef8b8b; }
+.notif-row .status-dot.notif-warn  { color: #e0b357; }
+.notif-row .status-dot.notif-ok    { color: #74d99f; }
+.notif-row .status-dot.notif-info  { color: @accent; }
+
+/* An icon-only pill in the header strip. Without the width it hugs the glyph
+   and reads as a smudge next to the wordy Target and Events pills. */
+.header-pill.icon-only { min-width: 34px; padding-left: 8px; padding-right: 8px; }

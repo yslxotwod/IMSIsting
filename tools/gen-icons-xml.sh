@@ -31,8 +31,15 @@ generate() {
     printf '  <gresource prefix="/com/imsisting/native">\n'
     printf '    <file>style.css</file>\n'
     printf '    <file>imsisting_splash.png</file>\n'
+for f in "${ROOT}/native/resources/fonts"/*.ttf "${ROOT}/native/resources/fonts"/*.otf; do
+    [[ -e "$f" ]] || continue
+    printf '    <file>fonts/%s</file>\n' "$(basename "$f")"
+done
     printf '    <file>imsisting_logo.png</file>\n'
     printf '    <file>imsisting_splash2.mp4</file>\n'
+    printf '    <file>imsisting_splash3.mp4</file>\n'
+    printf '    <file>imsisting_splash4.mp4</file>\n'
+    printf '    <file>imsisting_splash5.mp4</file>\n'
     ( cd "$ROOT/native/resources" && find icons/symbolic -name '*.svg' | LC_ALL=C sort ) \
         | while read -r icon; do
               printf '    <file alias="icons/scalable/actions/%s">%s</file>\n' \
