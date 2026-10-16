@@ -30,6 +30,7 @@ Usage:
     python3 tools/lte_asn1.py selftest
 """
 import argparse
+import inspect
 import sys
 
 # ---------------------------------------------------------------------------
@@ -430,7 +431,7 @@ SI_VECTORS = [
     ("sib3", "000400000000", 45),
     ("sib4", "000800", 18),
     ("sib5", "000C00000000000000", 66),
-    ("sib6", "001000", 18),
+    ("sib6", "001000", 21),   # 14 header + 7 body; see SIB6_BASELINE_BITS
     ("sib7", "001400", 20),
     ("sib8", "001800", 19),
 ]
@@ -445,9 +446,18 @@ SIB5_ELEMENT_BITS = 48
 SIB5_MAX_CARRIERS = 8
 SIB5_NEIGH_MAX = 16
 # Baseline body lengths with every OPTIONAL absent, from the ASN.1 root: one
-# extension bit plus the OPTIONAL presence bits, plus SIB7's mandatory
-# t-ReselectionGERAN.
-SIB6_BASELINE_BITS = 1 + 3
+# extension bit, the OPTIONAL presence bits, and whatever the root declares
+# MANDATORY.
+#   SIB6  ext 1 + 3 presence + 3 for the mandatory t-ReselectionUTRA (0..7)
+#   SIB7  ext 1 + 2 presence + 3 for the mandatory t-ReselectionGERAN (0..7)
+#   SIB8  ext 1 + 4 presence, nothing mandatory at all
+# SIB6 was written here as 1 + 3 and stayed wrong for a long time: the
+# mandatory t-ReselectionUTRA was simply not counted, so the constant claimed
+# a four-bit body for a seven-bit message, and the SI_VECTORS entry below was
+# truncated to match. pycrate's _to_per() gives 7. A selftest that derives a
+# length from the same wrong constant cannot catch this -- only an independent
+# implementation can.
+SIB6_BASELINE_BITS = 1 + 3 + 3
 SIB7_BASELINE_BITS = 1 + 2 + 3
 SIB8_BASELINE_BITS = 1 + 4
 
@@ -2074,6 +2084,92 @@ SIB7_VECTORS = [
 ]
 
 
+# ── SIB8: CDMA2000 carrier reselection ────────────────────────────────────
+#
+#   SystemInformationBlockType8 ::= SEQUENCE {
+#       systemTimeInfo          SEQUENCE {...} OPTIONAL,
+#       searchWindowSize        INTEGER (0..15) OPTIONAL,
+#       parametersHRPD          SEQUENCE {...} OPTIONAL,
+#       parameters1XRTT         SEQUENCE {...} OPTIONAL,
+#       ... }
+#
+# All four root fields are OPTIONAL, so the minimum body is the extension bit
+# plus a four-bit presence preamble: five bits, with no field at all. Only
+# searchWindowSize is a plain small integer and is modelled. The other three
+# are SEQUENCEs of CDMA2000 parameters, and the eight extension additions are
+# all OPTIONAL structures; rather than guess at them this raises, the same way
+# SIB3 refuses the optional constructs it does not model.
+#
+# Note what is NOT in this message: messageIdentifier, serialNumber and
+# warningType. Those are SIB10 (ETWS primary), SIB11 (ETWS secondary) and
+# SIB12 (CMAS). A reader that reports CMAS fields out of a SIB8 is reading
+# the wrong octets, which is what this module used to do.
+
+SIB8_ROOT_FIELDS = ("systemTimeInfo", "searchWindowSize", "parametersHRPD",
+                    "parameters1XRTT")
+SIB8_MAX_SEARCH_WINDOW = 15
+
+SIB8_REFUSED = {
+    "system_time_info": "systemTimeInfo",
+    "parameters_hrpd": "parametersHRPD",
+    "parameters_1xrtt": "parameters1XRTT",
+}
+
+
+def _sib8_reject_unknown(fields):
+    for name in fields:
+        if name in SIB8_REFUSED:
+            raise ValueError(
+                "SIB8 %s is a CDMA2000 SEQUENCE and is not modelled; "
+                "only search_window_size is" % SIB8_REFUSED[name])
+        raise ValueError("unknown SIB8 field(s): %s" % ", ".join(sorted(fields)))
+
+
+def encode_sib8(search_window_size=None, **fields):
+    """Encode a SIB8 body. Only searchWindowSize is modelled.
+
+    Returns a bit string. Bare (every optional absent) is five bits.
+    """
+    _sib8_reject_unknown(fields)
+    if search_window_size is not None:
+        if not 0 <= search_window_size <= SIB8_MAX_SEARCH_WINDOW:
+            raise ValueError("searchWindowSize is 0..%d, not %r"
+                             % (SIB8_MAX_SEARCH_WINDOW, search_window_size))
+    w = BitWriter()
+    w.bit(0)                                    # no extension additions
+    w.bit(0)                                    # systemTimeInfo absent
+    w.bit(1 if search_window_size is not None else 0)
+    w.bit(0)                                    # parametersHRPD absent
+    w.bit(0)                                    # parameters1XRTT absent
+    if search_window_size is not None:
+        w.uint(search_window_size, 4)
+    return w.string()
+
+
+def decode_sib8(data):
+    """Decode a SIB8 body. Raises on anything not modelled."""
+    r = BitReader(data)
+    out = {}
+    if r.bit():
+        raise ValueError("SIB8 carries extension additions; not modelled")
+    present = [r.bit() for _ in range(4)]
+    for i, p in enumerate(present):
+        if p and SIB8_ROOT_FIELDS[i] != "searchWindowSize":
+            raise ValueError("SIB8 sets %s, whose content is not modelled"
+                             % SIB8_ROOT_FIELDS[i])
+    out["search_window_size"] = r.uint(4) if present[1] else None
+    out["bits_consumed"] = r.pos
+    return out
+
+
+SIB8_VECTORS = [
+    # Captured from pycrate 0.8.1, not from this encoder.
+    ("bare", "00000", {}),
+    ("window9", "001001001", {'search_window_size': 9}),
+    ("window15", "001001111", {'search_window_size': 15}),
+]
+
+
 def encode_si(sib_index, body_bits, count=1):
     """Wrap one SIB body in a SystemInformation-r8-IEs container.
 
@@ -2566,6 +2662,40 @@ def selftest():
     try:
         encode_sib5(carriers=[{"dl_carrier_frequency": 1}])
         failures.append("sib5-reject-unknown-key FAIL accepted a typo'd key")
+    except ValueError:
+        pass
+
+    # SIB6 / SIB7 / SIB8. Every vector here was captured from pycrate 0.8.1,
+    # not from this file: a vector this tree wrote itself would only restate
+    # whatever this tree believes, which is how the old hand-written SIB6
+    # vector came to claim a 4-bit body for a 7-bit message.
+    for label, vectors, enc, dec in (("sib6", SIB6_VECTORS, encode_sib6, decode_sib6),
+                                     ("sib7", SIB7_VECTORS, encode_sib7, decode_sib7),
+                                     ("sib8", SIB8_VECTORS, encode_sib8, decode_sib8)):
+        takes = set(inspect.signature(enc).parameters)
+        for name, want, kw in vectors:
+            chk("%s-vector-%s" % (label, name), enc(**kw), want)
+            # Decode then re-encode: the decoder is what 10_lte_air drives,
+            # and a decoder that reads the right fields in the wrong places
+            # still passes a length check.
+            back = {k: v for k, v in dec(want).items() if k in takes}
+            chk("%s-roundtrip-%s" % (label, name), enc(**back), want)
+
+    # A SIB8 whose extension bit is set, or which sets a CDMA2000 root field
+    # this tree does not model, must be refused rather than half-read.
+    for label, bad in (("ext", "1" + "0" * 8),
+                       ("systemTimeInfo", "0" + "1" + "0" * 7),
+                       ("parametersHRPD", "0" + "001" + "0" * 8),
+                       ("parameters1XRTT", "0" + "0001" + "0" * 8)):
+        try:
+            decode_sib8(bad)
+            failures.append("sib8-reject-%s FAIL accepted an unmodelled body"
+                            % label)
+        except ValueError:
+            pass
+    try:
+        encode_sib8(16)
+        failures.append("sib8-reject-window FAIL accepted searchWindowSize 16")
     except ValueError:
         pass
 
@@ -3235,6 +3365,61 @@ def cmd_sib7_decode(args):
     return 0
 
 
+def cmd_sib8(args):
+    try:
+        body = encode_sib8(search_window_size=args.window)
+    except ValueError as exc:
+        sys.stderr.write("ERROR\t%s\n" % exc)
+        return 2
+
+    print("sib\tSystemInformationBlockType8")
+    print("layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)")
+    print("search_window_size\t%s"
+          % (args.window if args.window is not None else "absent"))
+    print("modelled\tsearchWindowSize only; systemTimeInfo, parametersHRPD, "
+          "parameters1XRTT and every extension addition are refused")
+    print("body_bits\t%d" % len(body))
+    print("body_bits_str\t%s" % body)
+    print("body_hex\t%s" % _bits_to_hex(body))
+    if not args.body_only:
+        full = encode_si(SIB_CHOICE.index("sibType8"), body, 1)
+        print("container_bits\t%d" % len(full))
+        print("container_hex\t%s" % _bits_to_hex(full))
+    return 0
+
+
+def cmd_sib8_decode(args):
+    bits = bits_of(args.hex, args.bits)
+    if args.container:
+        try:
+            d = decode_si(bits)
+        except ValueError as exc:
+            sys.stderr.write("ERROR\tnot a SystemInformation container: %s\n"
+                             % exc)
+            return 1
+        if d["sib"] != "sibType8":
+            # Exit 3, not 1 -- see cmd_sib6_decode for why.
+            sys.stderr.write("ERROR\tcontainer carries %s, not sibType8\n"
+                             % d["sib"])
+            return 3
+        bits = d["body_bits"]
+    try:
+        d = decode_sib8(bits)
+    except ValueError as exc:
+        sys.stderr.write("ERROR\tnot a SIB8 body: %s\n" % exc)
+        return 1
+
+    print("message\tSystemInformationBlockType8")
+    print("layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)")
+    print("search_window_size\t%s"
+          % (d["search_window_size"] if d["search_window_size"] is not None
+             else "absent"))
+    print("ref\t3GPP TS 36.331 6.3.1 SystemInformationBlockType8 (CDMA2000 "
+          "reselection; not CMAS -- CMAS is SIB12)")
+    print("bits_consumed\t%d" % d["bits_consumed"])
+    return 0
+
+
 def _sib2_step(name):
     for step in SIB2_LAYOUT:
         if step["n"] == name:
@@ -3516,6 +3701,24 @@ def main(argv):
     s7d.add_argument("--container", action="store_true",
                      help="the hex is a whole SystemInformation container")
     s7d.set_defaults(func=cmd_sib7_decode)
+
+    s8 = sub.add_parser("sib8", help="encode a SystemInformationBlockType8 "
+                                     "(CDMA2000 reselection)")
+    s8.add_argument("--window", type=int, default=None, metavar="N",
+                    help="searchWindowSize, INTEGER (0..15); the only field "
+                         "modelled, so omitting it gives a bare five-bit body")
+    s8.add_argument("--body-only", action="store_true",
+                    help="omit the SystemInformation container wrapper")
+    s8.set_defaults(func=cmd_sib8)
+
+    s8d = sub.add_parser("sib8-decode",
+                         help="decode a SystemInformationBlockType8 body")
+    s8d.add_argument("hex", help="the body, as hex")
+    s8d.add_argument("--bits", type=int, default=None,
+                     help="the true bit length, before hex padding")
+    s8d.add_argument("--container", action="store_true",
+                     help="the hex is a whole SystemInformation container")
+    s8d.set_defaults(func=cmd_sib8_decode)
 
     args = p.parse_args(argv)
     if args.cmd == "selftest":

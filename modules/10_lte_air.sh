@@ -793,38 +793,45 @@ lair_decode_sib4() {
     return 0
 }
 
-# ── SIB6 / SIB7 / SIB8 — ETWS and CMAS, TS 36.331 §6.3.1 ────────────────
+# ── SIB8 — CDMA2000 reselection; and the warning-message helpers ────────
 #
-# These three SIBs are a plain ASN.1 SEQUENCE with no optionality at all,
-# so unlike SIB2/3/5 they can be decoded field by field with no guessing:
+# The three ASN.1 SEQUENCEs that stood here as "SIB6 / SIB7 / SIB8 — ETWS
+# and CMAS" were none of those things. Measured against TS 36.331 through
+# pycrate, the real definitions are:
 #
 #   SystemInformationBlockType6 ::= SEQUENCE {
-#       messageIdentifier      BIT STRING (SIZE (16)),
-#       serialNumber           BIT STRING (SIZE (16)),
-#       warningType            OCTET STRING (SIZE (2)),   -- ETWS only
-#       ... }
+#       t-ReselectionUTRA       INTEGER (0..7),              -- MANDATORY
+#       carrierFreqListUTRA-FDD SEQUENCE (SIZE (1..16)) OF CarrierFreqUTRA-FDD
+#                                                           OPTIONAL,
+#       carrierFreqListUTRA-TDD ... OPTIONAL,
+#       t-ReselectionUTRA-SF    SEQUENCE {...} OPTIONAL, ... }
 #
 #   SystemInformationBlockType7 ::= SEQUENCE {
-#       messageIdentifier      BIT STRING (SIZE (16)),
-#       serialNumber           BIT STRING (SIZE (16)),
-#       warningMessageSegmentType       ENUMERATED {notLastSegment, lastSegment},
-#       warningMessageSegmentNumber     INTEGER (0..63),   -- 6 bits
-#       warningMessageSegment           OCTET STRING,
-#       dataCodingScheme       OCTET STRING (SIZE (1)) OPTIONAL }
+#       t-ReselectionGERAN      INTEGER (0..7),              -- MANDATORY
+#       t-ReselectionGERAN-SF   SEQUENCE {...} OPTIONAL,
+#       carrierFreqsInfoList    SEQUENCE (SIZE (1..16)) OF CarrierFreqsInfoGERAN
+#                                                           OPTIONAL, ... }
+#
+# so both are carrier-frequency lists for reselection, and both are now
+# decoded by the real unaligned-PER codec in tools/lte_asn1.py.
 #
 #   SystemInformationBlockType8 ::= SEQUENCE {
-#       systemInformationAreaID BIT STRING (SIZE (24)) OPTIONAL,
-#       messageIdentifier      BIT STRING (SIZE (16)),
-#       serialNumber           BIT STRING (SIZE (16)),
-#       warningMessageSegmentType       ENUMERATED {notLastSegment, lastSegment},
-#       warningMessageSegmentNumber     INTEGER (0..63),
-#       warningMessageSegment           OCTET STRING,
-#       dataCodingScheme       OCTET STRING (SIZE (1)) OPTIONAL, ... }
+#       systemTimeInfo          SEQUENCE {...} OPTIONAL,
+#       searchWindowSize        INTEGER (0..15) OPTIONAL,
+#       parametersHRPD          SEQUENCE {...} OPTIONAL,
+#       parameters1XRTT         SEQUENCE {...} OPTIONAL, ... }
 #
-# warningType is 2 octets and IS the 16-bit message identifier's companion:
-# TS 36.331 §6.3.1 and TS 23.041 §9.3.24 give it as the first two bytes of
-# the ETWS primary notification, with the top 2 bits of octet 1 as the
-# warning class.
+# is CDMA2000 reselection. Note what is NOT in it: messageIdentifier,
+# serialNumber and warningType, which is why nothing here may be called CMAS.
+#
+# The warning messages are SIB10 (ETWS primary: messageIdentifier,
+# serialNumber, warningType, and a 'dummy' OPTIONAL), SIB11 (ETWS secondary)
+# and SIB12 (CMAS: the same shape as SIB11 with -r9 suffixes). The helpers
+# below decode warningType for those; SIB8 does not carry one.
+#
+# warningType is 2 octets: TS 36.331 §6.3.1 and TS 23.041 §9.3.24 give it as
+# the first two bytes of the ETWS primary notification, with the top 2 bits
+# of octet 1 as the warning class.
 lair_warning_type() {
     local h; h=$(lair_nfc "${1:-}")
     [[ "$h" =~ ^[0-9A-F]{4}$ ]] || return 1
@@ -841,32 +848,21 @@ lair_warning_type() {
     printf 'class=%s category=%s raw=%s' "$cname" "$cat" "$h"
 }
 
-# messageIdentifier / serialNumber are BIT STRINGs and are reported both as
-# the raw 16-bit value and as the two octets a capture shows, so a caller
-# can match either against a pcap.
 # SIB6 and SIB7 go through the real TS 36.331 unaligned-PER codec in
-# tools/lte_asn1.py. What stood here before was an octet-aligned private
-# layout that called itself ETWS/CMAS -- and SIB6/SIB7 are neither. They are
-# the UTRA and GERAN carrier-frequency lists for reselection
-# (TS 36.331 6.3.1 SystemInformationBlockType6 / SystemInformationBlockType7).
-# ETWS primary/secondary is SIB10/SIB11 and CMAS is SIB12, all three still on
-# the private layout below. The old SIB6/SIB7 readers printed
-# messageIdentifier and serialNumber, which SIB6 and SIB7 do not carry at all,
-# so every field they produced came from the wrong octets.
-#
-# The two share one runner because the shapes differ only in the subcommand
-# and the SIB type name the container header has to carry.
+# tools/lte_asn1.py; see the structure comments above. They share one runner
+# because they differ only in the subcommand and in the SIB type name the
+# container header has to carry.
 #
 # $1 = subcommand stem (sib6 / sib7)
 # $2 = the SIB type the container header must name (sibType6 / sibType7)
 # $3 = hex
 # Prints the codec's own `key<TAB>value` lines, or an ERROR and returns 1.
-lair_sib67_codec() {
+lair_sib_codec() {
     local stem="$1" stype="$2" hex="$3"
     local tool="$IMSISTING_ROOT/tools/lte_asn1.py"
     [[ -r "$tool" ]] || {
         printf 'ERROR\tmissing %s\n' "$tool" >&2
-        printf 'WHY\tthe SIB6/SIB7 decoder is a real ASN.1 PER codec and lives in tools/\n' >&2
+        printf 'WHY\tthe SIB decoder is a real ASN.1 PER codec and lives in tools/\n' >&2
         return 1
     }
 
@@ -913,7 +909,7 @@ lair_decode_sib6() {
     [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
 
     local out
-    out=$(lair_sib67_codec sib6 sibType6 "$hex") || {
+    out=$(lair_sib_codec sib6 sibType6 "$hex") || {
         printf '%s\n' "$out" | sed '/^$/d;s/^/ERROR\t/'
         printf 'NOTDECODED\tthe input is not a SIB6 body; no fields were reported\n' >&2
         return 1
@@ -938,7 +934,7 @@ lair_decode_sib7() {
     [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
 
     local out
-    out=$(lair_sib67_codec sib7 sibType7 "$hex") || {
+    out=$(lair_sib_codec sib7 sibType7 "$hex") || {
         printf '%s\n' "$out" | sed '/^$/d;s/^/ERROR\t/'
         printf 'NOTDECODED\tthe input is not a SIB7 body; no fields were reported\n' >&2
         return 1
@@ -960,45 +956,32 @@ lair_decode_sib8() {
     local hex; hex=$(lair_nfc "${1:-}")
     [[ -n "$hex" ]] || { printf 'ERROR\t--decode-sib needs hex\n' >&2; return 2; }
     [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
-    (( ${#hex} >= 12 )) || { printf 'ERROR\ttoo short for a SIB8 body\n' >&2; return 1; }
-    [[ "${hex:0:2}" == "14" ]] && hex="${hex:2}"
-    (( ${#hex} >= 12 )) || { printf 'ERROR\ttoo short for a SIB8 body\n' >&2; return 1; }
 
-    # systemInformationAreaID is OPTIONAL and 24 bits, so a body carrying it
-    # is exactly 6 hex digits longer than one that does not. It is reported
-    # as absent unless the caller says the body has it (LAIR_SIB8_AREA=1),
-    # because guessing would shift every following field by three octets —
-    # which is exactly the bug this comment exists to prevent.
-    printf 'message\tSIB8 (SystemInformationBlockType8, CMAS)\n'
-    local off=0 area="absent"
-    if [[ -n "${LAIR_SIB8_AREA:-}" ]]; then
-        (( ${#hex} >= 18 )) || { printf 'ERROR\tSIB8 with systemInformationAreaID needs >= 9 octets\n' >&2; return 1; }
-        area=$(lair_bits "$hex" 0 24) || return 1
-        off=6
-    fi
-    printf 'system_information_area_id\t%s\n' "$area"
-
-    local mid=${hex:$off:4}
-    local sn=${hex:$((off+4)):4}
-    local ob=$(( off + 8 ))
-    local b; b=$(( 16#${hex:$ob:2} ))
-    local seg_type=$(( (b >> 7) & 1 ))
-    local seg_num=$(( b & 0x3F ))
-    local seg=${hex:$((ob+2))}
-
-    printf 'message_identifier\t%s\n' "$mid"
-    printf 'message_identifier_hex\t0x%s\n' "$mid"
-    printf 'serial_number\t%s\n' "$sn"
-    printf 'warning_message_segment_type\t%s\n' "$( (( seg_type == 1 )) && echo lastSegment || echo notLastSegment )"
-    printf 'warning_message_segment_number\t%s\n' "$seg_num"
-    printf 'warning_message_segment\t%s\n' "$seg"
-    printf 'warning_message_segment_len\t%s\n' "$(( ${#seg} / 2 ))"
-    if [[ -n "${LAIR_DCS:-}" ]]; then
-        printf 'data_coding_scheme\t%s\n' "$(lair_nfc "$LAIR_DCS")"
-    else
-        printf 'data_coding_scheme\tabsent (pass LAIR_DCS=<hex> when the body carries it)\n'
-    fi
-    printf 'ref\t3GPP TS 36.331 6.3.1 SystemInformationBlockType8; 23.041 9.4.1.2 dataCodingScheme\n'
+    # What stood here read systemInformationAreaID, messageIdentifier,
+    # serialNumber, warningMessageSegmentType/Number/Segment and
+    # dataCodingScheme out of a SIB8. None of those fields is in
+    # SystemInformationBlockType8: every one of them belongs to SIB10
+    # (ETWS primary), SIB11 (ETWS secondary) or SIB12 (CMAS). The reader was
+    # decoding a different message's shape and reporting it as SIB8, so the
+    # only honest thing to do with a body it cannot place is refuse it --
+    # which is what the codec does for every field it does not model.
+    local out
+    out=$(lair_sib_codec sib8 sibType8 "$hex") || {
+        printf '%s\n' "$out" | sed '/^$/d;s/^/ERROR\t/'
+        printf 'NOTDECODED\tthe input is not a SIB8 body; no fields were reported\n' >&2
+        return 1
+    }
+    local k v
+    while IFS=$'\t' read -r k v; do
+        case "$k" in
+            layout|message)  : ;;
+            bits_consumed)   printf 'bits\t%s\n' "$v" ;;
+            *)               printf '%s\t%s\n' "$k" "$v" ;;
+        esac
+    done <<< "$out"
+    printf 'ref\t3GPP TS 36.331 6.3.1 SystemInformationBlockType8 (CDMA2000 reselection, unaligned PER)\n'
+    printf 'note\tSIB8 is not CMAS; CMAS is SIB12, and ETWS is SIB10/SIB11\n'
+    printf 'body\t%s\n' "$hex"
     return 0
 }
 
@@ -1214,11 +1197,11 @@ lair_decode_mib() {
 # SIB-type dispatcher: --decode-sib <hex> takes the SIB type from the
 # caller's second argument, defaulting to SIB1.
 #
-# SIB1 to SIB5 are decoded by the real TS 36.331 unaligned-PER codec in
-# tools/lte_asn1.py. SIB6..SIB13 are NOT: those still read a private,
-# octet-aligned field layout of this tree's own invention. The caller is told
-# so in the output rather than left to assume the numbers are spec offsets --
-# reporting a wrong cell field is worse than reporting none.
+# SIB1 to SIB8 are decoded by the real TS 36.331 unaligned-PER codec in
+# tools/lte_asn1.py. SIB13 is NOT: it still reads a private, octet-aligned
+# field layout of this tree's own invention. The caller is told so in the
+# output rather than left to assume the numbers are spec offsets -- reporting
+# a wrong cell field is worse than reporting none.
 lair_decode_sib() {
     local hex="${1:-}" sibtype="${2:-1}"
     case "$sibtype" in
@@ -1229,19 +1212,20 @@ lair_decode_sib() {
         5|sib5)   lair_decode_sib5 "$hex" ;;
         6|sib6)   lair_decode_sib6 "$hex" ;;
         7|sib7)   lair_decode_sib7 "$hex" ;;
-        8|sib8)   lair_note_private_layout 8;   lair_decode_sib8 "$hex" ;;
+        8|sib8)   lair_decode_sib8 "$hex" ;;
         13|sib13) lair_note_private_layout 13;  lair_decode_sib13 "$hex" ;;
         *) printf 'ERROR\tunknown SIB type: %s (have 1, 2, 3, 4, 5, 6, 7, 8, 13)\n' \
                "$(lair_sanitize "$sibtype")" >&2; return 2 ;;
     esac
 }
 
-# The caveat line SIB6..SIB13 carry. It names what the numbers below are not.
+# The caveat line the SIBs still on a private layout carry. Only SIB13 is
+# left on one; SIB8 was moved to the real codec.
 lair_note_private_layout() {
     printf 'layout\tPRIVATE octet-aligned layout -- NOT TS 36.331 unaligned PER\n'
     printf 'limit\tSIB%s is not a PER decoder: these offsets are this tree'"'"'s own\n' "$1"
     printf 'limit\tscheme, not the specification'"'"'s. Do not read a real capture with it.\n'
-    printf 'ref\tSIB1 to SIB7 are decoded properly; run --decode-sib <hex> 1, 2, 3, 4, 5, 6 or 7\n'
+    printf 'ref\tSIB1 to SIB8 are decoded properly; run --decode-sib <hex> 1, 2, 3, 4, 5, 6, 7 or 8\n'
 }
 
 # ── Paging: PF / PO — TS 36.304 §7.1, §7.2 and §7.3 ────────────────────
@@ -2596,31 +2580,44 @@ lair_selftest() {
     chk sib6-ext-reject "$(lair_decode_sib 80 6 >/dev/null 2>&1; echo $?)" "1"
     chk sib7-short      "$(lair_decode_sib 20 7 >/dev/null 2>&1; echo $?)" "1"
     chk sib6-nonhex     "$(lair_decode_sib ZZZZ 6 >/dev/null 2>&1; echo $?)" "1"
-    # SystemInformationBlockType8 — CMAS. Without systemInformationAreaID
-    # (the OPTIONAL field is 24 bits, so it is only parsed when the caller
-    # declares it): messageIdentifier 0x0001, serialNumber 0x0002,
-    # segment type 0 + number 3 = 0x03, segment DEADBEEF. warningMessageSegment
-    # is a variable-length OCTET STRING and dataCodingScheme is OPTIONAL, so
-    # the octets after the type/number byte ARE the segment; a body with no
-    # trailing DCS is therefore the segment alone ("0001000203DEADBEEF").
-    out=$(LAIR_DCS=11 lair_decode_sib 0001000203DEADBEEF 8); rc=$?
-    chk sib8-rc      "$rc" "0"
-    chk sib8-area    "$(fld "$out" system_information_area_id)" "absent"
-    chk sib8-mid     "$(fld "$out" message_identifier)" "0001"
-    chk sib8-sn      "$(fld "$out" serial_number)" "0002"
-    chk sib8-type    "$(fld "$out" warning_message_segment_type)" "notLastSegment"
-    chk sib8-num     "$(fld "$out" warning_message_segment_number)" "3"
-    chk sib8-seg     "$(fld "$out" warning_message_segment)" "DEADBEEF"
-    chk sib8-dcs     "$(fld "$out" data_coding_scheme)" "11"
-    # With the area id present: area 0x0000FF = 255, then the same fields,
-    # segment lastSegment + number 1 -> 0x81.
-    out=$(LAIR_SIB8_AREA=1 LAIR_DCS=33 lair_decode_sib 0000FF0001000281ABCD 8)
-    chk sib8-area2   "$(fld "$out" system_information_area_id)" "255"
-    chk sib8-mid2    "$(fld "$out" message_identifier)" "0001"
-    chk sib8-type2   "$(fld "$out" warning_message_segment_type)" "lastSegment"
-    chk sib8-num2    "$(fld "$out" warning_message_segment_number)" "1"
-    chk sib8-seg2    "$(fld "$out" warning_message_segment)" "ABCD"
-    chk sib8-dcs2    "$(fld "$out" data_coding_scheme)" "33"
+    # SystemInformationBlockType8 is CDMA2000 carrier reselection. It is NOT
+    # CMAS, and it does NOT carry messageIdentifier, serialNumber or
+    # warningType -- those are SIB10 (ETWS primary), SIB11 (ETWS secondary)
+    # and SIB12 (CMAS). What stood here asserted exactly those fields out of a
+    # SIB8, so the whole block was checking a reader against its own invention.
+    #
+    # Vectors from pycrate 0.8.1. A bare SIB8 is five bits: the extension bit
+    # plus a four-bit presence preamble, with every root field absent. With
+    # searchWindowSize = 9 it is nine bits.
+    out=$(lair_decode_sib 00 8); rc=$?
+    chk sib8-rc       "$rc" "0"
+    chk sib8-bare     "$(fld "$out" search_window_size)" "absent"
+    chk sib8-bare-bits "$(fld "$out" bits)" "5"
+    out=$(lair_decode_sib 2480 8); rc=$?
+    chk sib8-win-rc   "$rc" "0"
+    chk sib8-win      "$(fld "$out" search_window_size)" "9"
+    chk sib8-win-bits "$(fld "$out" bits)" "9"
+    # The ext bit set, and each of the three CDMA2000 SEQUENCEs this codec
+    # does not model, must be refused rather than half-read.
+    # The presence preamble is <ext><systemTimeInfo><searchWindowSize>
+    # <parametersHRPD><parameters1XRTT>, so each body below is one bit set:
+    # 10000 for the ext bit, 01000 for systemTimeInfo, 00010 for
+    # parametersHRPD and 00001 for parameters1XRTT, each padded to two octets.
+    chk sib8-ext-reject    "$(lair_decode_sib 8000 8 >/dev/null 2>&1; echo $?)" "1"
+    chk sib8-timin-reject  "$(lair_decode_sib 4000 8 >/dev/null 2>&1; echo $?)" "1"
+    chk sib8-hrpd-reject   "$(lair_decode_sib 1000 8 >/dev/null 2>&1; echo $?)" "1"
+    chk sib8-1xrtt-reject  "$(lair_decode_sib 0800 8 >/dev/null 2>&1; echo $?)" "1"
+    chk sib8-nonhex        "$(lair_decode_sib ZZZZ 8 >/dev/null 2>&1; echo $?)" "1"
+    # lair_warning_type decodes a SIB10/SIB11 warningType octet pair: the top
+    # 2 bits of octet 1 are the class, its low 6 the category. No SIB10 reader
+    # exists yet, so nothing calls it in anger and it is checked here directly
+    # rather than left as an untested function waiting for one.
+    chk wt-earthquake "$(lair_warning_type 0C11)" "class=earthquake category=12 raw=0C11"
+    chk wt-tsunami    "$(lair_warning_type 4011)" "class=tsunami category=0 raw=4011"
+    chk wt-reserved2  "$(lair_warning_type 8011)" "class=reserved-2 category=0 raw=8011"
+    chk wt-reserved3  "$(lair_warning_type C011)" "class=reserved-3 category=0 raw=C011"
+    chk wt-badlen     "$(lair_warning_type 0C >/dev/null 2>&1; echo $?)" "1"
+    chk wt-garbage    "$(lair_warning_type ZZZZ >/dev/null 2>&1; echo $?)" "1"
 
     # ── 16. SIB13 — MBSFN, TS 36.331 §6.3.1 ────────────────────────────
     #
@@ -2769,7 +2766,7 @@ lair_selftest() {
     chk sib-disp-4  "$(lair_decode_sib 153FFF 4 >/dev/null 2>&1; echo $?)" "0"
     chk sib-disp-6  "$(lair_decode_sib 00 6 >/dev/null 2>&1; echo $?)" "0"
     chk sib-disp-7  "$(lair_decode_sib 00 7 >/dev/null 2>&1; echo $?)" "0"
-    chk sib-disp-8  "$(lair_decode_sib 0001000203DEADBEEF 8 >/dev/null 2>&1; echo $?)" "0"
+    chk sib-disp-8  "$(lair_decode_sib 2480 8 >/dev/null 2>&1; echo $?)" "0"
     chk sib-disp-13 "$(lair_decode_sib 072010D50 13 >/dev/null 2>&1; echo $?)" "0"
     chk sib-disp-bad "$(lair_decode_sib AB 9 >/dev/null 2>&1; echo $?)" "2"
     chk mib-cli-missing "$(lair_cmd_decode_mib >/dev/null 2>&1; echo $?)" "2"
