@@ -79,17 +79,60 @@ SI_PERIODICITY = ["rf8", "rf16", "rf32", "rf64", "rf128", "rf256", "rf512"]
 SI_WINDOW_LENGTH = ["ms1", "ms2", "ms5", "ms10", "ms15", "ms20", "ms40"]
 
 # SIB-Type ::= ENUMERATED { sibType3(0), sibType4(1), ... } -- 36.331 release 13.
+# SIB-Type ::= ENUMERATED { sibType3(0), ..., sibType18-v1250(15), ...,
+#                            sibType19-v1250, ..., sibType29-v1610 }
+#
+# Root values 0..15 encode as 1 extension bit + a 4-bit index; the extension
+# additions encode as 1 extension bit + a 7-bit "normally small non-negative
+# whole number" index. Those two widths are NOT interchangeable: treating the
+# extension additions as indices 16, 17, ... of one flat 5-bit list produces a
+# body three bits short for sibType19 onwards and silently shifts every field
+# after the SIB-MappingInfo. The names follow Release 18, which is what
+# pycrate models; the earlier table invented "spare1"/"spare2" entries that do
+# not exist in the enumeration.
 SIB_TYPE = [
     "sibType3", "sibType4", "sibType5", "sibType6", "sibType7", "sibType8",
     "sibType9", "sibType10", "sibType11", "sibType12-v920", "sibType13-v920",
-    "sibType14-v11xy", "sibType15-v11xy", "sibType16-v11xy", "sibType17-v11xy",
-    "sibType18-v11xy", "sibType19-v12xy", "sibType20-v13xy", "spare2", "spare1",
+    "sibType14-v1130", "sibType15-v1130", "sibType16-v1130",
+    "sibType17-v1250", "sibType18-v1250",
 ]
+SIB_TYPE_EXT = [
+    "sibType19-v1250", "sibType20-v1310", "sibType21-v1430",
+    "sibType24-v1530", "sibType25-v1530", "sibType26-v1530",
+    "sibType26a-v1610", "sibType27-v1610", "sibType28-v1610",
+    "sibType29-v1610",
+]
+SIB_TYPE_ALL = SIB_TYPE + SIB_TYPE_EXT
 
 
 # ---------------------------------------------------------------------------
 # SystemInformationBlockType1 over BCCH-DL-SCH-Message.
 # ---------------------------------------------------------------------------
+
+def _sib_type_write(w, name):
+    """Write one SIB-Type. Root and extension additions have different widths."""
+    if name in SIB_TYPE:
+        w.bit(0)
+        w.uint(SIB_TYPE.index(name), 4)
+    elif name in SIB_TYPE_EXT:
+        w.bit(1)
+        w.uint(SIB_TYPE_EXT.index(name), 7)     # normally small, 7 bits
+    else:
+        raise ValueError("unknown SIB-Type %r; have %s"
+                         % (name, ", ".join(SIB_TYPE_ALL)))
+
+
+def _sib_type_read(r):
+    if r.bit() == 0:
+        i = r.uint(4)
+        if i >= len(SIB_TYPE):
+            raise ValueError("SIB-Type root index %d is not defined" % i)
+        return SIB_TYPE[i]
+    i = r.uint(7)
+    if i >= len(SIB_TYPE_EXT):
+        raise ValueError("SIB-Type extension index %d is not defined" % i)
+    return SIB_TYPE_EXT[i]
+
 
 def encode_sib1(mcc, mnc, tac, cellid, barred="notBarred",
                 reselect="notAllowed", qrxlevmin=-70, band=20, siw="ms20",
@@ -159,7 +202,7 @@ def encode_sib1(mcc, mnc, tac, cellid, barred="notBarred",
     # SIB-MappingInfo ::= SEQUENCE (SIZE (0..31)) OF SIB-Type
     w.uint(len(sibs), 5)
     for s in sibs:
-        w.uint(SIB_TYPE.index(s), 5)
+        _sib_type_write(w, s)
 
     # si-WindowLength ::= ENUMERATED { ms1, ms2, ms5, ms10, ms15, ms20, ms40 }
     w.uint(SI_WINDOW_LENGTH.index(siw), 3)
@@ -258,7 +301,7 @@ def decode_sib1(data):
     for _ in range(n_sched):
         period = SI_PERIODICITY[r.uint(3)]
         n_map = r.uint(5)
-        sibs = [SIB_TYPE[r.uint(5)] for _ in range(n_map)]
+        sibs = [_sib_type_read(r) for _ in range(n_map)]
         sched.append((period, sibs))
 
     if tdd_config_present:
@@ -350,6 +393,15 @@ SI_COUNT_BITS = 5
 SI_CHOICE_BITS = 5
 SI_HEADER_BITS = SI_PREFIX_BITS + SI_COUNT_BITS + SI_CHOICE_BITS   # 14
 
+# The sib-TypeAndInfo CHOICE has ten root alternatives and everything after
+# them is an extension addition. The two are framed differently and the
+# difference is not cosmetic: a root alternative is an extension bit plus a
+# 4-bit index, while an extension addition is an OPEN TYPE -- extension bit,
+# normally-small index, a length, and the alternative's own content octet
+# padded. Writing a flat 5-bit index for an extension addition produces a
+# header three bits short that every field after it silently shifts under.
+SI_CHOICE_ROOT = 10
+
 # The SIB-TypeAndInfo CHOICE, in index order. Only the alternatives this tree
 # can name are listed; an index outside this table is reported, not guessed.
 SIB_CHOICE = [
@@ -375,7 +427,7 @@ SIB_CHOICE = [
 # derivation in the selftest.
 SI_VECTORS = [
     ("sib2", "00000000000000000000000000000000100000000000000000", 200),
-    ("sib3", "000400000000", 48),
+    ("sib3", "000400000000", 45),
     ("sib4", "000800", 18),
     ("sib5", "000C00000000000000", 66),
     ("sib6", "001000", 18),
@@ -414,7 +466,7 @@ def bits_of(hex_str, nbits=None):
 # against its neighbours, and t-ReselectionEUTRA sets how long a UE must stay
 # before it may leave. A forged version of it is a steering tool.
 #
-# The 34-bit body layout, mapped by probing pycrate field by field and then
+# The 31-bit body layout, mapped by probing pycrate field by field and then
 # checked against a vector with every field maxed:
 #
 #     0      SIB3 extension bit ("..." in the ASN.1 -- it is extensible)
@@ -430,15 +482,17 @@ def bits_of(hex_str, nbits=None):
 #     25     presenceAntennaPort1   BOOLEAN
 #     26..27 neighCellConfig        BIT STRING (SIZE (2))
 #     28..30 t-ReselectionEUTRA     INTEGER (0..7)
-#     31..33 three bits this model does not name
 #
-# The trailing three bits are real: pycrate emits them, they are zero in every
-# value probed (including one with every above field maxed), and omitting them
-# makes the block three bits short. They are carried explicitly rather than
-# silently dropped. Everything else is spec-derived and vector-asserted.
+# This block previously carried three more bits (31..33), on the belief that
+# pycrate emitted them. It does not: the whole BCCH-DL-SCH-Message is 45 bits
+# and pycrate's to_uper() reported 6 octets, and 48 - 14 was mistaken for the
+# body length. The three bits were that octet padding, they are zero in every
+# vector, and because the vectors were captured the same padded way no
+# assertion here could see the difference -- the vector and the encoder were
+# wrong together. The length now comes from _to_per(), which is the true one.
 # ---------------------------------------------------------------------------
 
-SIB3_BODY_BITS = 34
+SIB3_BODY_BITS = 31
 SIB3_Q_HYST = ["dB0", "dB1", "dB2", "dB3", "dB4", "dB5", "dB6", "dB8",
                "dB10", "dB12", "dB14", "dB16", "dB18", "dB20", "dB22", "dB24"]
 SIB3_T_RESELECTION = list(range(8))
@@ -446,7 +500,7 @@ SIB3_T_RESELECTION = list(range(8))
 
 def encode_sib3(q_hyst="dB0", thresh_serving_low=0, cell_reselection_priority=0,
                 q_rx_lev_min=-70, presence_antenna_port1=False,
-                neigh_cell_config="00", t_reselection_eutra=0, tail=0):
+                neigh_cell_config="00", t_reselection_eutra=0):
     """Encode a SystemInformationBlockType3 body (TS 36.331 6.3.1)."""
     if q_hyst not in SIB3_Q_HYST:
         raise ValueError("q-Hyst must be one of %s" % SIB3_Q_HYST)
@@ -461,9 +515,6 @@ def encode_sib3(q_hyst="dB0", thresh_serving_low=0, cell_reselection_priority=0,
     ncc = "".join(c for c in neigh_cell_config if c in "01")
     if len(ncc) != 2:
         raise ValueError("neighCellConfig is BIT STRING (SIZE (2))")
-    if not 0 <= tail <= 7:
-        raise ValueError("tail is 3 bits")
-
     w = BitWriter()
     w.bit(0)                                        # no extensions
     w.bit(0)                                        # speedStateReselectionPars
@@ -477,7 +528,6 @@ def encode_sib3(q_hyst="dB0", thresh_serving_low=0, cell_reselection_priority=0,
     for c in ncc:
         w.bit(1 if c == "1" else 0)
     w.uint(t_reselection_eutra, 3)
-    w.uint(tail, 3)
     return w.string()
 
 
@@ -509,7 +559,7 @@ def decode_sib3(data):
     presence_antenna_port1 = r.bit()
     neigh_cell_config = "%d%d" % (r.uint(1), r.uint(1))
     t_reselection_eutra = r.uint(3)
-    tail = r.uint(3)
+
 
     return {
         "q_hyst": q_hyst,
@@ -519,7 +569,6 @@ def decode_sib3(data):
         "presence_antenna_port1": presence_antenna_port1,
         "neigh_cell_config": neigh_cell_config,
         "t_reselection_eutra": t_reselection_eutra,
-        "tail": tail,
         "bits_consumed": r.pos,
     }
 
@@ -528,13 +577,13 @@ def decode_sib3(data):
 # round-trip for a wrong layout too, so the set spans the full range of every
 # field -- the "maxed" vector pins all 24 field bits at once.
 SIB3_VECTORS = [
-    ("minimal", "000400000000", 48,
+    ("minimal", "000400000000", 45,
      dict()),
-    ("maxed", "0004F7F861F8", 48,
+    ("maxed", "0004F7F861F8", 45,
      dict(q_hyst="dB24", thresh_serving_low=31, cell_reselection_priority=7,
           q_rx_lev_min=-22, presence_antenna_port1=True,
           neigh_cell_config="11", t_reselection_eutra=7)),
-    ("mid", "000461583250", 48,
+    ("mid", "000461583250", 45,
      dict(q_hyst="dB6", thresh_serving_low=5, cell_reselection_priority=3,
           q_rx_lev_min=-45, neigh_cell_config="01",
           t_reselection_eutra=2)),
@@ -623,12 +672,12 @@ SIB2_TIME_ALIGNMENT_TIMER = [
 # range, encoded offset by its lower bound the way PER encodes a constrained
 # whole number; `t` is an ENUMERATED table, encoded by index.
 SIB2_LAYOUT = [
-    {"k": "bit", "n": "ext", "d": 0},                      # SIB2 extensible
-    {"k": "bit", "n": "ac_barring_info_present", "d": 0},
-    {"k": "bit", "n": "mbsfn_subframe_config_list_present", "d": 0},
-    {"k": "bit", "n": "rrc_common_ext", "d": 0},           # radioResourceConfigCommon
-    {"k": "bit", "n": "rach_ext", "d": 0},                 # rach-ConfigCommon
-    {"k": "bit", "n": "preambles_group_a_config_present", "d": 0},
+    {"k": "fixed", "n": "ext", "d": 0},                      # SIB2 extensible
+    {"k": "fixed", "n": "ac_barring_info_present", "d": 0},
+    {"k": "fixed", "n": "mbsfn_subframe_config_list_present", "d": 0},
+    {"k": "fixed", "n": "rrc_common_ext", "d": 0},           # radioResourceConfigCommon
+    {"k": "fixed", "n": "rach_ext", "d": 0},                 # rach-ConfigCommon
+    {"k": "fixed", "n": "preambles_group_a_config_present", "d": 0},
     {"k": "enum", "n": "number_of_ra_preambles",
      "t": SIB2_NUMBER_OF_RA_PREAMBLES, "d": "n4"},
     {"k": "enum", "n": "power_ramping_step",
@@ -694,7 +743,7 @@ SIB2_LAYOUT = [
     {"k": "int", "n": "delta_preamble_msg3", "r": (-1, 6), "d": -1},
     {"k": "enum", "n": "ul_cyclic_prefix_length",
      "t": SIB2_UL_CYCLIC_PREFIX_LENGTH, "d": "len1"},
-    {"k": "bit", "n": "ue_timers_ext", "d": 0},            # ue-TimersAndConstants
+    {"k": "fixed", "n": "ue_timers_ext", "d": 0},            # ue-TimersAndConstants
     {"k": "enum", "n": "t300", "t": SIB2_T300, "d": "ms100"},
     {"k": "enum", "n": "t301", "t": SIB2_T301, "d": "ms100"},
     {"k": "enum", "n": "t310", "t": SIB2_T310, "d": "ms0"},
@@ -738,7 +787,15 @@ def encode_sib2(**fields):
     camelCase flattened to '_'. Returns a bit string, not a BitWriter: a SIB2
     body is a fragment of a larger message and is not octet aligned.
     """
-    known = {s["n"] for s in SIB2_LAYOUT}
+    # A structural presence bit is not a field: `ext`, the three "is this
+    # OPTIONAL construct present" bits, the two nested extension markers and
+    # ue-TimersAndConstants' marker are fixed at 0 because this tree models no
+    # content for any of them. Leaving them settable let
+    # encode_sib2(ac_barring_info_present=1) emit a body that CLAIMS the
+    # construct is present and then supplies nothing -- 186 bits that pycrate
+    # refuses with "length determinant too long". Unknown-field rejection is
+    # the honest answer, so they are excluded here.
+    known = {s["n"] for s in SIB2_LAYOUT if s["k"] != "fixed"}
     unknown = set(fields) - known
     if unknown:
         raise ValueError("unknown SIB2 field(s): %s" % ", ".join(sorted(unknown)))
@@ -747,7 +804,7 @@ def encode_sib2(**fields):
         if "when" in step and not _enabled(step, fields):
             continue
         name = step["n"]
-        if _is_optional(step):
+        if _is_optional(step) or step["k"] == "fixed":
             continue
         val = fields.get(name, step.get("d"))
         if step["k"] == "enum":
@@ -767,7 +824,9 @@ def encode_sib2(**fields):
         if not _enabled(step, fields):
             continue
         k, name = step["k"], step["n"]
-        if k == "bit":
+        if k == "fixed":
+            w.bit(step["d"])
+        elif k == "bit":
             w.bit(fields.get(name, step["d"]))
         elif k == "enum":
             w.uint(step["t"].index(fields.get(name, step["d"])),
@@ -810,6 +869,15 @@ def decode_sib2(data):
         if "when" in step and not _enabled(step, out):
             continue
         k, name = step["k"], step["n"]
+        if k == "fixed":
+            # A structural presence bit this tree models no content for. It is
+            # still one bit on the wire and still has to be consumed, or every
+            # field after it shifts. It is deliberately not recorded in `out`:
+            # it is not a field a caller may set.
+            if r.bit() != step["d"]:
+                raise ValueError("SIB2 sets %s, whose content is not modelled"
+                                 % name)
+            continue
         if k == "optbit":
             # An OPTIONAL or DEFAULT field costs one presence bit even when it
             # is absent, and that bit sits in the SEQUENCE's bitmap ahead of the
@@ -841,23 +909,11 @@ def decode_sib2(data):
             continue
         raise ValueError("bad layout kind %r" % k)
 
-    if out["ext"]:
-        raise ValueError("SIB2 has extension additions; not modelled")
-    if out["ac_barring_info_present"]:
-        raise ValueError("ac-BarringInfo present; not modelled")
-    if out["mbsfn_subframe_config_list_present"]:
-        raise ValueError("mbsfn-SubframeConfigList present; not modelled")
-    if out["rrc_common_ext"]:
-        raise ValueError("radioResourceConfigCommon has extension additions; "
-                         "not modelled")
-    if out["rach_ext"]:
-        raise ValueError("rach-ConfigCommon has extension additions; "
-                         "not modelled")
-    if out["preambles_group_a_config_present"]:
-        raise ValueError("preamblesGroupAConfig present; not modelled")
-    if out["ue_timers_ext"]:
-        raise ValueError("ue-TimersAndConstants has extension additions; "
-                         "not modelled")
+    # The presence bits for ac-BarringInfo, mbsfn-SubframeConfigList,
+    # radioResourceConfigCommon's and rach-ConfigCommon's extension markers,
+    # preamblesGroupAConfig and ue-TimersAndConstants' marker are consumed and
+    # refused inside the loop above, where they are read: they are `fixed`
+    # steps now and no longer land in `out`.
     if not out["sounding_rs_setup"]:
         raise ValueError("soundingRS-UL-ConfigCommon is release; no setup "
                          "fields are present")
@@ -1419,6 +1475,605 @@ SIB5_VECTORS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# SIB6 and SIB7: the UTRA and GERAN reselection blocks (TS 36.331 6.3.1).
+#
+# Both are extensible SEQUENCEs whose only optional root fields are lists, so
+# unlike SIB2 there is no CHOICE to get wrong -- but there is a length
+# encoding that catches people. Every carrier list here is SIZE(1..n), and
+# X.691 encodes a constrained SEQUENCE OF as "length minus lower bound", not
+# as the length. A one-element list therefore spends its four bits on zeroes,
+# which look exactly like padding and are not. An encoder that writes the raw
+# count is self-consistent and wrong, and a decoder written from the same
+# misreading agrees with it -- which is why neither can be its own oracle.
+#
+# This tree models the root of each block and refuses a body that reaches into
+# the extension additions. Those additions carry Release 12 multi-band data
+# (carrierFreqListUTRA-FDD-Ext-r12 and friends); encoding their bitmap without
+# their contents would produce a body that decodes to something else.
+#
+# THE TRAP, and it is the one that cost the most time here: "is extensible" and
+# "has extension additions" are different questions, and only the second one is
+# visible from the type's declaration fields. CarrierFreqUTRA-TDD, for example,
+# declares an extension marker and no additions at all -- it still spends an
+# extension bit on the wire. CarrierFreqsGERAN declares no marker and spends
+# none. A type is extensible exactly when its ASN.1 has the "..." marker, and
+# that is worth 1 bit per instance either way. Reader beware: in pycrate this
+# shows up as _ext == [] for "extensible, no additions" and _ext is None for
+# "not extensible", and [] is falsy -- so a truthiness test on _ext silently
+# drops the bit for every one of these types.
+# ---------------------------------------------------------------------------
+
+# SF-Medium and SF-High, the shared time-to-trigger scale factors. Both are
+# declared with four values, including sf-High: the specification's own
+# comment says a High needs no oDot25, but the ASN.1 keeps the full set, and
+# the ASN.1 is what goes on the wire.
+SIB_SF_MEDIUM = ["oDot25", "oDot5", "oDot75", "lDot0"]
+SIB_SF_HIGH = ["oDot25", "oDot5", "oDot75", "lDot0"]
+
+SIB6_CARRIER_KEYS = ("carrier_freq", "cell_reselection_priority",
+                     "thresh_x_high", "thresh_x_low", "q_rx_lev_min",
+                     "p_max_utra", "q_qual_min")
+SIB6_CARRIER_REQUIRED = ("carrier_freq", "thresh_x_high", "thresh_x_low",
+                         "q_rx_lev_min", "p_max_utra", "q_qual_min")
+# The TDD carrier is a different type that happens to share a name stem, and
+# the difference is worth 5 bits per carrier: it has no q-QualMin. It IS still
+# extensible, so it still spends an extension bit even though it declares no
+# extension additions -- "no additions" and "not extensible" are different
+# things and only the second one saves the bit. Reading a TDD carrier as an
+# FDD one shifts every carrier after the first, and nothing in this tree can
+# notice: the same trap as SIB4's and SIB5's InterFreqNeighCellInfo, which
+# also look alike and are not.
+SIB6_CARRIER_KEYS_TDD = ("carrier_freq", "cell_reselection_priority",
+                         "thresh_x_high", "thresh_x_low", "q_rx_lev_min",
+                         "p_max_utra")
+SIB6_CARRIER_REQUIRED_TDD = ("carrier_freq", "thresh_x_high", "thresh_x_low",
+                             "q_rx_lev_min", "p_max_utra")
+SIB6_MAX_CARRIER = 16
+
+
+def _sib6_check_carrier(c, what, tdd=False):
+    """Validate one UTRA carrier against its declared constraints."""
+    if c["carrier_freq"] is None:
+        raise ValueError("%s.carrierFreq is required" % what)
+    limits = [("carrier_freq", 0, 16383),
+              ("thresh_x_high", 0, 31), ("thresh_x_low", 0, 31),
+              ("q_rx_lev_min", -60, -13), ("p_max_utra", -50, 33),
+              ("cell_reselection_priority", 0, 7)]
+    if not tdd:
+        limits.insert(5, ("q_qual_min", -24, 0))
+    for name, lo, hi in limits:
+        v = c[name]
+        if v is None:
+            if name in ("cell_reselection_priority",):
+                continue
+            raise ValueError("%s.%s is required" % (what, name))
+        if not isinstance(v, int) or not lo <= v <= hi:
+            raise ValueError("%s.%s is INTEGER (%d..%d), got %r"
+                             % (what, name, lo, hi, v))
+
+
+def _sib6_carrier(fields, what, tdd=False):
+    keys = SIB6_CARRIER_KEYS_TDD if tdd else SIB6_CARRIER_KEYS
+    required = SIB6_CARRIER_REQUIRED_TDD if tdd else SIB6_CARRIER_REQUIRED
+    unknown = set(fields) - set(keys)
+    if unknown:
+        raise ValueError("unknown %s field(s): %s"
+                         % (what, ", ".join(sorted(unknown))))
+    for needed in required:
+        if fields.get(needed) is None:
+            raise ValueError("%s.%s is required" % (what, needed))
+    c = dict.fromkeys(keys)
+    c.update(fields)
+    _sib6_check_carrier(c, what, tdd)
+    return c
+
+
+def _sib6_write_carrier(w, c, tdd=False):
+    # Both carriers are extensible. The FDD extension holds threshX-Q-r9 and
+    # the TDD one holds nothing, but a SEQUENCE with an extension marker pays
+    # the extension bit either way -- so this is 0 for both, and omitting it
+    # for TDD would shorten every TDD carrier by one bit.
+    w.bit(0)
+    w.bit(1 if c["cell_reselection_priority"] is not None else 0)
+    w.uint(c["carrier_freq"], 14)
+    if c["cell_reselection_priority"] is not None:
+        w.uint(c["cell_reselection_priority"], 3)
+    w.uint(c["thresh_x_high"], 5)
+    w.uint(c["thresh_x_low"], 5)
+    w.uint(c["q_rx_lev_min"] + 60, 6)
+    w.uint(c["p_max_utra"] + 50, 7)
+    if not tdd:
+        w.uint(c["q_qual_min"] + 24, 5)
+
+
+def _sib6_write_carrier_list(w, carriers, what, tdd=False):
+    if not 1 <= len(carriers) <= SIB6_MAX_CARRIER:
+        raise ValueError("%s holds 1..%d carriers, got %d"
+                         % (what, SIB6_MAX_CARRIER, len(carriers)))
+    w.uint(len(carriers) - 1, 4)          # SIZE(1..16), so length minus one
+    for c in carriers:
+        _sib6_write_carrier(w, c, tdd)
+
+
+def encode_sib6(t_reselection_utra=0, utra_fdd=None, utra_tdd=None,
+                t_reselection_utra_sf=None):
+    """Encode a SystemInformationBlockType6 body (TS 36.331 6.3.1).
+
+    `utra_fdd` and `utra_tdd` are lists of CarrierFreqUTRA-FDD dicts with the
+    ASN.1 names lowercased: carrier_freq, cell_reselection_priority (optional),
+    thresh_x_high, thresh_x_low, q_rx_lev_min, p_max_utra, q_qual_min.
+    """
+    if not isinstance(t_reselection_utra, int) or not 0 <= t_reselection_utra <= 7:
+        raise ValueError("t-ReselectionUTRA is INTEGER (0..7), got %r"
+                         % (t_reselection_utra,))
+    fdd = tdd = None
+    if utra_fdd is not None:
+        fdd = [_sib6_carrier(c, "carrierFreqListUTRA-FDD") for c in utra_fdd]
+    if utra_tdd is not None:
+        tdd = [_sib6_carrier(c, "carrierFreqListUTRA-TDD", tdd=True)
+               for c in utra_tdd]
+    sf = t_reselection_utra_sf
+    if sf is not None:
+        if set(sf) != {"sf_medium", "sf_high"}:
+            raise ValueError("t-ReselectionUTRA-SF needs sf_medium and "
+                             "sf_high, got %r" % (sf,))
+        for k in ("sf_medium", "sf_high"):
+            if sf[k] not in SIB_SF_MEDIUM:
+                raise ValueError("t-ReselectionUTRA-SF.%s must be one of %s"
+                                 % (k, SIB_SF_MEDIUM))
+
+    w = BitWriter()
+    w.bit(0)                                   # no extension addition
+    w.bit(1 if fdd else 0)
+    w.bit(1 if tdd else 0)
+    w.bit(1 if sf is not None else 0)
+    if fdd:
+        _sib6_write_carrier_list(w, fdd, "carrierFreqListUTRA-FDD")
+    if tdd:
+        _sib6_write_carrier_list(w, tdd, "carrierFreqListUTRA-TDD", tdd=True)
+    w.uint(t_reselection_utra, 3)
+    if sf is not None:
+        w.uint(SIB_SF_MEDIUM.index(sf["sf_medium"]), 2)
+        w.uint(SIB_SF_HIGH.index(sf["sf_high"]), 2)
+    return w.string()
+
+
+def _sib6_read_carrier(r, tdd=False):
+    if r.bit():
+        raise ValueError("this UTRA carrier sets its extension bit; "
+                         "threshX-Q-r9 is not modelled")
+    crp = r.bit()
+    c = {"carrier_freq": r.uint(14),
+         "cell_reselection_priority": r.uint(3) if crp else None,
+         "thresh_x_high": r.uint(5), "thresh_x_low": r.uint(5),
+         "q_rx_lev_min": r.uint(6) - 60, "p_max_utra": r.uint(7) - 50}
+    if not tdd:
+        c["q_qual_min"] = r.uint(5) - 24
+    return c
+
+
+def decode_sib6(data):
+    """Decode a SystemInformationBlockType6 body into a dict."""
+    r = BitReader(data)
+    if r.bit():
+        raise ValueError("this SIB6 sets the extension bit; the Release 12 "
+                         "carrier list extensions are not modelled")
+    have_fdd, have_tdd, have_sf = r.bit(), r.bit(), r.bit()
+    out = {}
+    for present, name, tdd in ((have_fdd, "utra_fdd", False),
+                               (have_tdd, "utra_tdd", True)):
+        if not present:
+            continue
+        n = r.uint(4) + 1
+        out[name] = [_sib6_read_carrier(r, tdd) for _ in range(n)]
+    out["t_reselection_utra"] = r.uint(3)
+    if have_sf:
+        m = SIB_SF_MEDIUM[r.uint(2)]
+        h = SIB_SF_HIGH[r.uint(2)]
+        out["t_reselection_utra_sf"] = {"sf_medium": m, "sf_high": h}
+    out["bits_consumed"] = r.pos
+    return out
+
+
+SIB6_VECTORS = [
+    # Captured from pycrate, not from this encoder: a vector this
+    # tree wrote itself would only restate its own bugs.
+    ("bare",
+     "0000000",
+     {'t_reselection_utra': 0}),
+    ("t7",
+     "0000111",
+     {'t_reselection_utra': 7}),
+    ("sf",
+     "00010110011",
+     {'t_reselection_utra': 3,
+      't_reselection_utra_sf': {'sf_medium': 'oDot25',
+                                'sf_high': 'lDot0'}}),
+    ("onefdd",
+     "0100000000000000000000000000000000000000000000000000001",
+     {'t_reselection_utra': 1,
+      'utra_fdd': [{'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24}]}),
+    ("fdd+tdd",
+     "01100000011111111111111111111111111111011111010011110000000000000000000000000000000000000000000000010",
+     {'t_reselection_utra': 2,
+      'utra_fdd': [{'carrier_freq': 16383,
+                    'cell_reselection_priority': 7,
+                    'thresh_x_high': 31,
+                    'thresh_x_low': 31,
+                    'q_rx_lev_min': -13,
+                    'p_max_utra': 33,
+                    'q_qual_min': 0}],
+      'utra_tdd': [{'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50}]}),
+    ("fdd16",
+     "0100111100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101",
+     {'t_reselection_utra': 5,
+      'utra_fdd': [{'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24},
+                   {'carrier_freq': 0,
+                    'thresh_x_high': 0,
+                    'thresh_x_low': 0,
+                    'q_rx_lev_min': -60,
+                    'p_max_utra': -50,
+                    'q_qual_min': -24}]}),
+]
+
+
+# --- SIB7: GERAN reselection -------------------------------------------------
+
+SIB7_INFO_KEYS = ("carrier_freqs", "common_info")
+SIB7_GERAN_BAND = ["dcs1800", "pcs1900"]
+SIB7_MAX_CARRIER = 16
+SIB7_MAX_ARFCN = 31
+SIB7_MAX_BITMAP = 16
+
+
+def _sib7_check_arfcn(v, what):
+    if not isinstance(v, int) or not 0 <= v <= 1023:
+        raise ValueError("%s is INTEGER (0..1023), got %r" % (what, v))
+
+
+def _sib7_write_carrier_freqs(w, cf):
+    unknown = set(cf) - {"starting_arfcn", "band_indicator", "following"}
+    if unknown:
+        raise ValueError("unknown CarrierFreqsGERAN field(s): %s"
+                         % ", ".join(sorted(unknown)))
+    _sib7_check_arfcn(cf.get("starting_arfcn"), "startingARFCN")
+    if cf.get("band_indicator") not in SIB7_GERAN_BAND:
+        raise ValueError("bandIndicator must be one of %s" % SIB7_GERAN_BAND)
+    w.uint(cf["starting_arfcn"], 10)
+    w.uint(SIB7_GERAN_BAND.index(cf["band_indicator"]), 1)
+
+    following = cf.get("following")
+    if not isinstance(following, dict) or len(following) != 1:
+        raise ValueError("followingARFCNs needs exactly one CHOICE branch, "
+                         "got %r" % (following,))
+    branch, arg = next(iter(following.items()))
+    if branch == "explicit_list":
+        w.uint(0, 2)
+        if not isinstance(arg, list) or not 0 <= len(arg) <= SIB7_MAX_ARFCN:
+            raise ValueError("explicitListOfARFCNs holds 0..%d entries"
+                             % SIB7_MAX_ARFCN)
+        w.uint(len(arg), 5)
+        for a in arg:
+            _sib7_check_arfcn(a, "explicitListOfARFCNs")
+            w.uint(a, 10)
+    elif branch == "equally_spaced":
+        w.uint(1, 2)
+        sp, n = arg.get("arfcn_spacing"), arg.get("number_of_following")
+        if not isinstance(sp, int) or not 1 <= sp <= 8:
+            raise ValueError("arfcn-Spacing is INTEGER (1..8), got %r" % (sp,))
+        if not isinstance(n, int) or not 0 <= n <= 31:
+            raise ValueError("numberOfFollowingARFCNs is INTEGER (0..31), "
+                             "got %r" % (n,))
+        w.uint(sp - 1, 3)
+        w.uint(n, 5)
+    elif branch == "bitmap":
+        w.uint(2, 2)
+        if not isinstance(arg, str) or not 1 <= len(arg) <= SIB7_MAX_BITMAP:
+            raise ValueError("variableBitMapOfARFCNs is 1..%d octets"
+                             % SIB7_MAX_BITMAP)
+        blob = bytes.fromhex(arg)
+        if len(blob) != len(arg) // 2:
+            raise ValueError("variableBitMapOfARFCNs must be whole octets")
+        w.uint(len(blob) - 1, 4)
+        for b in blob:
+            w.uint(b, 8)
+    else:
+        raise ValueError("unknown followingARFCNs branch: %r" % branch)
+
+
+def _sib7_write_common_info(w, ci):
+    unknown = set(ci) - {"cell_reselection_priority", "ncc_permitted",
+                         "q_rx_lev_min", "p_max_geran", "thresh_x_high",
+                         "thresh_x_low"}
+    if unknown:
+        raise ValueError("unknown commonInfo field(s): %s"
+                         % ", ".join(sorted(unknown)))
+    crp, pmax = ci.get("cell_reselection_priority"), ci.get("p_max_geran")
+    w.bit(1 if crp is not None else 0)
+    w.bit(1 if pmax is not None else 0)
+    for name, lo, hi in (("q_rx_lev_min", 0, 45), ("thresh_x_high", 0, 31),
+                         ("thresh_x_low", 0, 31)):
+        v = ci.get(name)
+        if not isinstance(v, int) or not lo <= v <= hi:
+            raise ValueError("commonInfo.%s is INTEGER (%d..%d), got %r"
+                             % (name, lo, hi, v))
+    # Everything past the preamble goes in DECLARATION order, and the two
+    # optional fields are not both at the end: cellReselectionPriority comes
+    # first and p-MaxGERAN sits between q-RxLevMin and threshX-High. Grouping
+    # the optionals together after the mandatory fields is the natural thing
+    # to write, and it produces a body of exactly the right length that
+    # decodes to different numbers -- no length check catches it, and only an
+    # independent encoder disagrees.
+    if crp is not None:
+        if not 0 <= crp <= 7:
+            raise ValueError("cellReselectionPriority is INTEGER (0..7)")
+        w.uint(crp, 3)
+    _bitstr(w, ci.get("ncc_permitted"), 8, "ncc-Permitted")
+    w.uint(ci["q_rx_lev_min"], 6)
+    if pmax is not None:
+        if not 0 <= pmax <= 39:
+            raise ValueError("p-MaxGERAN is INTEGER (0..39)")
+        w.uint(pmax, 6)
+    w.uint(ci["thresh_x_high"], 5)
+    w.uint(ci["thresh_x_low"], 5)
+
+
+def encode_sib7(t_reselection_geran=0, t_reselection_geran_sf=None,
+                carrier_freqs_info=None):
+    """Encode a SystemInformationBlockType7 body (TS 36.331 6.3.1).
+
+    `carrier_freqs_info` is a list of CarrierFreqsInfoGERAN dicts, each with
+    `carrier_freqs` (a CarrierFreqsGERAN dict) and `common_info`.
+    """
+    if not isinstance(t_reselection_geran, int) or not 0 <= t_reselection_geran <= 7:
+        raise ValueError("t-ReselectionGERAN is INTEGER (0..7), got %r"
+                         % (t_reselection_geran,))
+    sf = t_reselection_geran_sf
+    if sf is not None:
+        if set(sf) != {"sf_medium", "sf_high"}:
+            raise ValueError("t-ReselectionGERAN-SF needs sf_medium and "
+                             "sf_high, got %r" % (sf,))
+        for k in ("sf_medium", "sf_high"):
+            if sf[k] not in SIB_SF_MEDIUM:
+                raise ValueError("t-ReselectionGERAN-SF.%s must be one of %s"
+                                 % (k, SIB_SF_MEDIUM))
+    if carrier_freqs_info is not None:
+        if not 1 <= len(carrier_freqs_info) <= SIB7_MAX_CARRIER:
+            raise ValueError("carrierFreqsInfoList holds 1..%d entries, got %d"
+                             % (SIB7_MAX_CARRIER, len(carrier_freqs_info)))
+        for entry in carrier_freqs_info:
+            unknown = set(entry) - set(SIB7_INFO_KEYS)
+            if unknown:
+                raise ValueError("unknown CarrierFreqsInfoGERAN field(s): %s"
+                                 % ", ".join(sorted(unknown)))
+            if entry.get("carrier_freqs") is None or entry.get("common_info") is None:
+                raise ValueError("CarrierFreqsInfoGERAN needs carrier_freqs "
+                                 "and common_info")
+
+    w = BitWriter()
+    w.bit(0)                                   # no extension addition
+    w.bit(1 if sf is not None else 0)
+    w.bit(1 if carrier_freqs_info else 0)
+    w.uint(t_reselection_geran, 3)
+    if sf is not None:
+        w.uint(SIB_SF_MEDIUM.index(sf["sf_medium"]), 2)
+        w.uint(SIB_SF_HIGH.index(sf["sf_high"]), 2)
+    if carrier_freqs_info:
+        w.uint(len(carrier_freqs_info) - 1, 4)   # SIZE(1..16)
+        for entry in carrier_freqs_info:
+            # CarrierFreqsInfoGERAN is extensible with no extension additions,
+            # so it still pays an extension bit -- see the note above.
+            w.bit(0)
+            _sib7_write_carrier_freqs(w, entry["carrier_freqs"])
+            _sib7_write_common_info(w, entry["common_info"])
+    return w.string()
+
+
+def decode_sib7(data):
+    """Decode a SystemInformationBlockType7 body into a dict."""
+    r = BitReader(data)
+    if r.bit():
+        raise ValueError("this SIB7 sets the extension bit; lateNonCritical"
+                         "Extension is not modelled")
+    have_sf, have_list = r.bit(), r.bit()
+    out = {"t_reselection_geran": r.uint(3)}
+    if have_sf:
+        out["t_reselection_geran_sf"] = {
+            "sf_medium": SIB_SF_MEDIUM[r.uint(2)],
+            "sf_high": SIB_SF_HIGH[r.uint(2)]}
+    if have_list:
+        n = r.uint(4) + 1
+        entries = []
+        for _ in range(n):
+            if r.bit():
+                raise ValueError("this CarrierFreqsInfoGERAN sets the "
+                                 "extension bit; the r9 additions are not "
+                                 "modelled")
+            start = r.uint(10)
+            band = SIB7_GERAN_BAND[r.uint(1)]
+            branch = r.uint(2)
+            if branch == 0:
+                k = r.uint(5)
+                following = {"explicit_list": [r.uint(10) for _ in range(k)]}
+            elif branch == 1:
+                following = {"equally_spaced": {
+                    "arfcn_spacing": r.uint(3) + 1,
+                    "number_of_following": r.uint(5)}}
+            elif branch == 2:
+                k = r.uint(4) + 1
+                following = {"bitmap": "".join("%02X" % r.uint(8)
+                                               for _ in range(k))}
+            else:
+                raise ValueError("followingARFCNs reserved branch 3")
+            crp, pmax = r.bit(), r.bit()
+            ci = {}
+            ci["cell_reselection_priority"] = r.uint(3) if crp else None
+            ci["ncc_permitted"] = "".join("1" if r.bit() else "0"
+                                          for _ in range(8))
+            ci["q_rx_lev_min"] = r.uint(6)
+            ci["p_max_geran"] = r.uint(6) if pmax else None
+            ci["thresh_x_high"] = r.uint(5)
+            ci["thresh_x_low"] = r.uint(5)
+            entries.append({"carrier_freqs": {
+                "starting_arfcn": start, "band_indicator": band,
+                "following": following}, "common_info": ci})
+        out["carrier_freqs_info"] = entries
+    out["bits_consumed"] = r.pos
+    return out
+
+
+SIB7_VECTORS = [
+    # Captured from pycrate, not from this encoder: a vector this
+    # tree wrote itself would only restate its own bugs.
+    ("bare",
+     "000000",
+     {'t_reselection_geran': 0}),
+    ("t5",
+     "000101",
+     {'t_reselection_geran': 5}),
+    ("sf",
+     "0100100110",
+     {'t_reselection_geran': 2,
+      't_reselection_geran_sf': {'sf_medium': 'oDot5',
+                                 'sf_high': 'oDot75'}}),
+    ("explicit",
+     "001001000001111111111000000100000000010111110100011111101010101011011001111111111111",
+     {'t_reselection_geran': 1,
+      'carrier_freqs_info': [{'carrier_freqs': {'starting_arfcn': 1023,
+                                                'band_indicator': 'dcs1800',
+                                                'following': {'explicit_list': [2,
+                                                                                1000]}},
+                              'common_info': {'cell_reselection_priority': 7,
+                                              'ncc_permitted': '10101010',
+                                              'q_rx_lev_min': 45,
+                                              'p_max_geran': 39,
+                                              'thresh_x_high': 31,
+                                              'thresh_x_low': 31}}]}),
+    ("spaced",
+     "0010100000011111111111011111111111111101010101011011001111111111111",
+     {'t_reselection_geran': 2,
+      'carrier_freqs_info': [{'carrier_freqs': {'starting_arfcn': 1023,
+                                                'band_indicator': 'pcs1900',
+                                                'following': {'equally_spaced': {'arfcn_spacing': 8,
+                                                                                 'number_of_following': 31}}},
+                              'common_info': {'cell_reselection_priority': 7,
+                                              'ncc_permitted': '10101010',
+                                              'q_rx_lev_min': 45,
+                                              'p_max_geran': 39,
+                                              'thresh_x_high': 31,
+                                              'thresh_x_low': 31}}]}),
+    ("bitmap",
+     "0011100000000000000000100001101001010011111100000000000000000000000000",
+     {'t_reselection_geran': 6,
+      'carrier_freqs_info': [{'carrier_freqs': {'starting_arfcn': 0,
+                                                'band_indicator': 'dcs1800',
+                                                'following': {'bitmap': 'a53f'}},
+                              'common_info': {'ncc_permitted': '00000000',
+                                              'q_rx_lev_min': 0,
+                                              'thresh_x_high': 0,
+                                              'thresh_x_low': 0}}]}),
+]
+
+
 def encode_si(sib_index, body_bits, count=1):
     """Wrap one SIB body in a SystemInformation-r8-IEs container.
 
@@ -1436,8 +2091,27 @@ def encode_si(sib_index, body_bits, count=1):
     w.bit(0)                               # criticalExtensions -> r8
     w.bit(0)                               # nonCriticalExtension absent
     w.uint(count - 1, SI_COUNT_BITS)       # count is encoded minus one
-    w.uint(sib_index, SI_CHOICE_BITS)
-    return w.string() + "".join(c for c in body_bits if c in "01")
+    body = "".join(c for c in body_bits if c in "01")
+    if sib_index < SI_CHOICE_ROOT:
+        # Root alternative: an extension bit of 0 plus the 4-bit index, which
+        # for 0..9 is the same five bits as the index alone.
+        w.uint(sib_index, SI_CHOICE_BITS)
+        return w.string() + body
+
+    # Extension addition, carried as an open type. The content is the
+    # alternative's own encoding zero-padded to whole octets, and the length
+    # of record is in octets -- so a 41-bit SIB13 body travels as 6 octets and
+    # three pad bits. Measured against pycrate 0.8.1: for sib13-v920 this is
+    # "1" + "0000001" + "0" + "0000110" + 6 octets.
+    content = body + "0" * (-len(body) % 8)
+    n_octets = len(content) // 8
+    if n_octets > 127:
+        raise ValueError("open-type content too long: %d octets" % n_octets)
+    w.bit(1)                               # extension addition
+    w.uint(sib_index - SI_CHOICE_ROOT, 7)  # normally small non-negative
+    w.bit(0)                               # length determinant: short form
+    w.uint(n_octets, 7)
+    return w.string() + content
 
 
 def decode_si(data):
@@ -1458,14 +2132,32 @@ def decode_si(data):
         raise ValueError("nonCriticalExtension present; not modelled")
 
     count = r.uint(SI_COUNT_BITS) + 1
-    index = r.uint(SI_CHOICE_BITS)
+    if r.uint(1) == 0:
+        index = r.uint(SI_CHOICE_BITS - 1)          # 4-bit root index
+        body = r.bits[r.pos:]
+    else:
+        # An extension addition arrives as an open type, so the length has to
+        # be read before the content can be found: anything left in the buffer
+        # past the first alternative belongs to the next one.
+        ext_index = r.uint(7)
+        if r.uint(1) != 0:
+            raise ValueError("open-type length uses the long form; not modelled")
+        n_octets = r.uint(7)
+        index = SI_CHOICE_ROOT + ext_index
+        body = r.bits[r.pos:r.pos + n_octets * 8]
+        if len(body) < n_octets * 8:
+            raise ValueError("open type claims %d octets but only %d bits remain"
+                             % (n_octets, len(r.bits) - r.pos))
+        r.pos += n_octets * 8
+        # The content is octet padded, so the true body length is not
+        # recoverable here. Trailing zero pad bits are reported as they are.
     name = SIB_CHOICE[index] if index < len(SIB_CHOICE) else "unknown"
 
     return {
         "count": count,
         "sib_index": index,
         "sib": name,
-        "body_bits": r.bits[r.pos:],
+        "body_bits": body,
         "bits_consumed": r.pos,
         "total_bits": len(r.bits),
     }
@@ -1595,6 +2287,40 @@ def selftest():
             chk("si-" + name + "-index-at-9",
                 bits[9:14], format(want_index, "05b"))
 
+    # An extension alternative is carried as an OPEN TYPE, not as a flat
+    # 5-bit index. Root alternatives coincide with pycrate because a root
+    # CHOICE value is an extension bit of 0 plus a 4-bit index -- the same five
+    # bits as the index alone -- but an extension alternative adds a
+    # normally-small index, a length, and the alternative's own content octet
+    # padded. Writing a flat index there is three bits short and shifts every
+    # field after it.
+    #
+    # Vectors measured against pycrate 0.8.1 for sib13-v920 (SIB_CHOICE index
+    # 11, extension index 1) with a 41-bit body: 9 bits of prefix and count,
+    # then "1" (extension), "0000001" (index), "0" (short length form),
+    # "0000110" (six octets), then the body zero-padded to 48 bits.
+    _sib13_body = "0" * 41
+    chk("si-ext-open-type", encode_si(11, _sib13_body, 1),
+        "000000000" "1" "0000001" "0" "0000110" + "0" * 48)
+    _ext = decode_si(encode_si(11, _sib13_body, 1))
+    chk("si-ext-index", _ext["sib_index"], 11)
+    chk("si-ext-name", _ext["sib"], "sibType13-v920")
+    chk("si-ext-body-padded", len(_ext["body_bits"]), 48)
+    chk("si-ext-consumed", _ext["bits_consumed"], 73)
+    # A root alternative is unchanged by the open-type path.
+    chk("si-root-still-flat", encode_si(0, "0" * 186, 1)[9:14], "00000")
+    chk("si-root-total-bits", len(encode_si(0, "0" * 186, 1)), 200)
+    # An open type whose content would need the long length form is refused
+    # rather than written short.
+    try:
+        encode_si(11, "0" * (128 * 8), 1)
+        failures.append("si-ext-long-form FAIL wrote a >127-octet open type")
+    except ValueError:
+        pass
+    # An extension index that has no SIB_CHOICE entry must not be invented.
+    _far = decode_si("000000000" + "1" + format(90, "07b") + "0" + "0000001" + "0" * 8)
+    chk("si-ext-unknown-name", _far["sib"], "unknown")
+
     # A SIB1 message must not be read as a container, and vice versa.
     try:
         decode_si(VECTORS[0][2])
@@ -1609,9 +2335,9 @@ def selftest():
 
     # ---- SystemInformationBlockType3 -----------------------------------
     #
-    # The body is 34 bits with three of them (31..33) unnamed, so this set
-    # matters: a single all-zero vector would round-trip through a wrong
-    # layout too. "maxed" pins all 24 named field bits at once, and "mid" is
+    # Every bit of the body is a named field, so the vector set matters for
+    # a different reason: a single all-zero vector would round-trip through a
+    # wrong layout too. "maxed" pins all 24 named field bits at once, and "mid" is
     # a value no field boundary can fake. Each is checked as a whole
     # container -- header plus body -- not as a bare bit string.
     for name, hexs, nbits, kw in SIB3_VECTORS:
@@ -1637,7 +2363,6 @@ def selftest():
             kw.get("neigh_cell_config", "00"))
         chk("sib3-" + name + "-tresel", d["t_reselection_eutra"],
             kw.get("t_reselection_eutra", 0))
-        chk("sib3-" + name + "-tail", d["tail"], 0)
         chk("sib3-" + name + "-consumed", d["bits_consumed"], SIB3_BODY_BITS)
 
     # q-RxLevMin is the field that steers a handset, so its endpoints must be
@@ -1972,6 +2697,9 @@ def cmd_sib3_decode(args):
     bits = bits_of(args.hex, args.bits)
     # Same guard as sib2-decode: a container must be long enough to leave a
     # whole body after its 14-bit header, or a bare body gets mistaken for one.
+    # >=, not ==: a caller may hand in the whole container (45 bits, or 48
+    # from octet-padded hex) or a bare body (31). Anything longer than a body
+    # and starting like a container is treated as one.
     if (len(bits) - SI_HEADER_BITS >= SIB3_BODY_BITS
             and bits[:SI_PREFIX_BITS] == "0000"):
         try:
@@ -2256,6 +2984,257 @@ def cmd_sib5_decode(args):
     return 0
 
 
+def _coerce(v):
+    return int(v) if v.lstrip("-").isdigit() else v
+
+
+def _kv(spec, what):
+    out = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError("%s wants key=value pairs, got %r" % (what, part))
+        k, v = part.split("=", 1)
+        out[k.strip()] = _coerce(v.strip())
+    return out
+
+
+def _sib6_carrier_spec(spec, tdd):
+    d = _kv(spec, "a SIB6 carrier")
+    prio = d.pop("prio", d.pop("cell_reselection_priority", None))
+    if prio is not None:
+        d["cell_reselection_priority"] = prio
+    if tdd:
+        d.pop("q_qual_min", None)
+    missing = [k for k in ("carrier_freq", "thresh_x_high", "thresh_x_low",
+                           "q_rx_lev_min", "p_max_utra") if k not in d]
+    if missing:
+        raise ValueError("a SIB6 carrier needs %s; missing %s"
+                         % ("carrier_freq, thresh_x_high, thresh_x_low, "
+                            "q_rx_lev_min, p_max_utra", ", ".join(missing)))
+    if not tdd and "q_qual_min" not in d:
+        raise ValueError("a FDD carrier needs q_qual_min (TDD carriers have none)")
+    return d
+
+
+def _sib6_sf(spec):
+    for sep in (":", "/"):
+        if sep in spec:
+            m, h = spec.split(sep, 1)
+            return {"sf_medium": m, "sf_high": h}
+    raise ValueError("--sf wants MEDIUM:HIGH, got %r" % spec)
+
+
+def cmd_sib6(args):
+    try:
+        fdd = [_sib6_carrier_spec(s, False) for s in (args.fdd or [])] or None
+        tdd = [_sib6_carrier_spec(s, True) for s in (args.tdd or [])] or None
+        sf = _sib6_sf(args.sf) if args.sf else None
+        body = encode_sib6(t_reselection_utra=args.t_resel, utra_fdd=fdd,
+                           utra_tdd=tdd, t_reselection_utra_sf=sf)
+    except (ValueError, IndexError) as exc:
+        sys.stderr.write("ERROR\t%s\n" % exc)
+        return 2
+
+    print("sib\tSystemInformationBlockType6")
+    print("layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)")
+    print("t_reselection_utra\t%d" % args.t_resel)
+    if sf:
+        print("t_reselection_utra_sf\t%s:%s" % (sf["sf_medium"], sf["sf_high"]))
+    for tag, lst in (("fdd", fdd), ("tdd", tdd)):
+        for i, c in enumerate(lst or []):
+            print("carrier\t%s\t%d\tcarrier_freq=%d\tprio=%s\tthresh_x_high=%d"
+                  "\tthresh_x_low=%d\tq_rx_lev_min=%d\tp_max_utra=%d"
+                  "\tq_qual_min=%s"
+                  % (tag, i, c["carrier_freq"],
+                     c.get("cell_reselection_priority")
+                     if c.get("cell_reselection_priority") is not None else "-",
+                     c["thresh_x_high"], c["thresh_x_low"], c["q_rx_lev_min"],
+                     c["p_max_utra"],
+                     c.get("q_qual_min") if c.get("q_qual_min") is not None
+                     else "-"))
+    print("body_bits\t%d" % len(body))
+    print("body_bits_str\t%s" % body)
+    print("body_hex\t%s" % _bits_to_hex(body))
+    if not args.body_only:
+        full = encode_si(SIB_CHOICE.index("sibType6"), body, 1)
+        print("container_bits\t%d" % len(full))
+        print("container_hex\t%s" % _bits_to_hex(full))
+    return 0
+
+
+def cmd_sib6_decode(args):
+    bits = bits_of(args.hex, args.bits)
+    if args.container:
+        try:
+            d = decode_si(bits)
+        except ValueError as exc:
+            sys.stderr.write("ERROR\tnot a SystemInformation container: %s\n"
+                             % exc)
+            return 1
+        if d["sib"] != "sibType6":
+            # Exit 3, not 1: the input parsed as a container and carried a
+            # different SIB. A caller that falls back to a bare-body reading on
+            # any non-zero exit would re-read this container's own header bits
+            # as a body and print a confident wrong answer, so the two failures
+            # have to be distinguishable.
+            sys.stderr.write("ERROR\tcontainer carries %s, not sibType6\n"
+                             % d["sib"])
+            return 3
+        bits = d["body_bits"]
+    try:
+        d = decode_sib6(bits)
+    except ValueError as exc:
+        sys.stderr.write("ERROR\tnot a SIB6 body: %s\n" % exc)
+        return 1
+
+    print("message\tSystemInformationBlockType6")
+    print("layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)")
+    print("t_reselection_utra\t%d" % d["t_reselection_utra"])
+    if d.get("t_reselection_utra_sf"):
+        print("t_reselection_utra_sf\t%s:%s"
+              % (d["t_reselection_utra_sf"]["sf_medium"],
+                 d["t_reselection_utra_sf"]["sf_high"]))
+    for tag in ("utra_fdd", "utra_tdd"):
+        for i, c in enumerate(d.get(tag) or []):
+            print("carrier\t%s\t%d\tcarrier_freq=%d\tprio=%s\tthresh_x_high=%d"
+                  "\tthresh_x_low=%d\tq_rx_lev_min=%d\tp_max_utra=%d"
+                  "\tq_qual_min=%s"
+                  % (tag, i, c["carrier_freq"],
+                     c["cell_reselection_priority"]
+                     if c["cell_reselection_priority"] is not None else "-",
+                     c["thresh_x_high"], c["thresh_x_low"], c["q_rx_lev_min"],
+                     c["p_max_utra"],
+                     c.get("q_qual_min") if c.get("q_qual_min") is not None
+                     else "-"))
+    print("bits_consumed\t%d" % d["bits_consumed"])
+    return 0
+
+
+def _sib7_info_spec(spec):
+    d = _kv(spec, "a SIB7 carrierFreqsInfoList entry")
+    cf = {"starting_arfcn": d.pop("starting_arfcn", None),
+          "band_indicator": d.pop("band", d.pop("band_indicator", None))}
+    if "explicit" in d:
+        branch = {"explicit_list": [int(x) for x in str(d.pop("explicit")).split("|")]}
+    elif "spaced" in d:
+        sp, n = str(d.pop("spaced")).split(":", 1)
+        branch = {"equally_spaced": {"arfcn_spacing": int(sp),
+                                     "number_of_following": int(n)}}
+    elif "bitmap" in d:
+        branch = {"bitmap": str(d.pop("bitmap"))}
+    else:
+        raise ValueError("a SIB7 entry needs explicit=A|B, spaced=N:N or bitmap=HEX")
+    cf["following"] = branch
+    ci = {"ncc_permitted": str(d.pop("ncc", "00000000")),
+          "q_rx_lev_min": d.pop("q_rx", 0),
+          "thresh_x_high": d.pop("txh", 0),
+          "thresh_x_low": d.pop("txl", 0)}
+    if "prio" in d:
+        ci["cell_reselection_priority"] = d.pop("prio")
+    if "pmax" in d:
+        ci["p_max_geran"] = d.pop("pmax")
+    if d:
+        raise ValueError("unknown SIB7 key(s): %s" % ", ".join(sorted(d)))
+    return {"carrier_freqs": cf, "common_info": ci}
+
+
+def cmd_sib7(args):
+    try:
+        info = [_sib7_info_spec(s) for s in (args.info or [])] or None
+        sf = _sib6_sf(args.sf) if args.sf else None
+        body = encode_sib7(t_reselection_geran=args.t_resel,
+                           t_reselection_geran_sf=sf, carrier_freqs_info=info)
+    except (ValueError, IndexError) as exc:
+        sys.stderr.write("ERROR\t%s\n" % exc)
+        return 2
+
+    print("sib\tSystemInformationBlockType7")
+    print("layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)")
+    print("t_reselection_geran\t%d" % args.t_resel)
+    if sf:
+        print("t_reselection_geran_sf\t%s:%s" % (sf["sf_medium"], sf["sf_high"]))
+    for i, e in enumerate(info or []):
+        cf, ci = e["carrier_freqs"], e["common_info"]
+        print("info\t%d\tstart=%d\tband=%s\tfollowing=%s\tprio=%s\tncc=%s"
+              "\tq_rx_lev_min=%d\tp_max_geran=%s\tthresh_x_high=%d"
+              "\tthresh_x_low=%d"
+              % (i, cf["starting_arfcn"], cf["band_indicator"],
+                 _sib7_following_str(cf["following"]),
+                 ci.get("cell_reselection_priority")
+                 if ci.get("cell_reselection_priority") is not None else "-",
+                 ci["ncc_permitted"], ci["q_rx_lev_min"],
+                 ci.get("p_max_geran") if ci.get("p_max_geran") is not None
+                 else "-", ci["thresh_x_high"], ci["thresh_x_low"]))
+    print("body_bits\t%d" % len(body))
+    print("body_bits_str\t%s" % body)
+    print("body_hex\t%s" % _bits_to_hex(body))
+    if not args.body_only:
+        full = encode_si(SIB_CHOICE.index("sibType7"), body, 1)
+        print("container_bits\t%d" % len(full))
+        print("container_hex\t%s" % _bits_to_hex(full))
+    return 0
+
+
+def _sib7_following_str(f):
+    branch, arg = next(iter(f.items()))
+    if branch == "explicit_list":
+        return "explicit=" + "|".join(str(a) for a in arg)
+    if branch == "equally_spaced":
+        return "spaced=%d:%d" % (arg["arfcn_spacing"], arg["number_of_following"])
+    return "bitmap=" + arg
+
+
+def cmd_sib7_decode(args):
+    bits = bits_of(args.hex, args.bits)
+    if args.container:
+        try:
+            d = decode_si(bits)
+        except ValueError as exc:
+            sys.stderr.write("ERROR\tnot a SystemInformation container: %s\n"
+                             % exc)
+            return 1
+        if d["sib"] != "sibType7":
+            # Exit 3, not 1: the input parsed as a container and carried a
+            # different SIB. A caller that falls back to a bare-body reading on
+            # any non-zero exit would re-read this container's own header bits
+            # as a body and print a confident wrong answer, so the two failures
+            # have to be distinguishable.
+            sys.stderr.write("ERROR\tcontainer carries %s, not sibType7\n"
+                             % d["sib"])
+            return 3
+        bits = d["body_bits"]
+    try:
+        d = decode_sib7(bits)
+    except ValueError as exc:
+        sys.stderr.write("ERROR\tnot a SIB7 body: %s\n" % exc)
+        return 1
+
+    print("message\tSystemInformationBlockType7")
+    print("layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)")
+    print("t_reselection_geran\t%d" % d["t_reselection_geran"])
+    if d.get("t_reselection_geran_sf"):
+        print("t_reselection_geran_sf\t%s:%s"
+              % (d["t_reselection_geran_sf"]["sf_medium"],
+                 d["t_reselection_geran_sf"]["sf_high"]))
+    for i, e in enumerate(d.get("carrier_freqs_info") or []):
+        cf, ci = e["carrier_freqs"], e["common_info"]
+        print("info\t%d\tstart=%d\tband=%s\tfollowing=%s\tprio=%s\tncc=%s"
+              "\tq_rx_lev_min=%d\tp_max_geran=%s\tthresh_x_high=%d"
+              "\tthresh_x_low=%d"
+              % (i, cf["starting_arfcn"], cf["band_indicator"],
+                 _sib7_following_str(cf["following"]),
+                 ci.get("cell_reselection_priority")
+                 if ci.get("cell_reselection_priority") is not None else "-",
+                 ci["ncc_permitted"], ci["q_rx_lev_min"],
+                 ci.get("p_max_geran") if ci.get("p_max_geran") is not None
+                 else "-", ci["thresh_x_high"], ci["thresh_x_low"]))
+    print("bits_consumed\t%d" % d["bits_consumed"])
+    return 0
+
+
 def _sib2_step(name):
     for step in SIB2_LAYOUT:
         if step["n"] == name:
@@ -2388,7 +3367,7 @@ def main(argv):
     s.add_argument("--siw", default="ms20", choices=SI_WINDOW_LENGTH)
     s.add_argument("--valuetag", type=int, default=0)
     s.add_argument("--period", default="rf32", choices=SI_PERIODICITY)
-    s.add_argument("--sib", action="append", choices=SIB_TYPE)
+    s.add_argument("--sib", action="append", choices=SIB_TYPE_ALL)
     s.set_defaults(func=cmd_sib1)
 
     d = sub.add_parser("decode",
@@ -2487,6 +3466,56 @@ def main(argv):
                           "required because a SIB5 body also starts with four "
                           "zero bits, so this cannot be auto-detected")
     s5d.set_defaults(func=cmd_sib5_decode)
+
+    s6 = sub.add_parser("sib6", help="encode a SystemInformationBlockType6 "
+                                     "(UTRA reselection)")
+    s6.add_argument("--t-resel", type=int, default=0,
+                    help="t-ReselectionUTRA, INTEGER (0..7)")
+    s6.add_argument("--fdd", action="append", default=[], metavar="K=V,...",
+                    help="one CarrierFreqUTRA-FDD; needs carrier_freq, "
+                         "thresh_x_high, thresh_x_low, q_rx_lev_min, "
+                         "p_max_utra, q_qual_min, optional prio")
+    s6.add_argument("--tdd", action="append", default=[], metavar="K=V,...",
+                    help="one CarrierFreqUTRA-TDD; as --fdd but with no "
+                         "q_qual_min (TDD carriers do not have one)")
+    s6.add_argument("--sf", default=None, metavar="MEDIUM:HIGH",
+                    help="t-ReselectionUTRA-SF, e.g. oDot5:oDot75")
+    s6.add_argument("--body-only", action="store_true",
+                    help="omit the SystemInformation container wrapper")
+    s6.set_defaults(func=cmd_sib6)
+
+    s6d = sub.add_parser("sib6-decode",
+                         help="decode a SystemInformationBlockType6 body")
+    s6d.add_argument("hex", help="the body, as hex")
+    s6d.add_argument("--bits", type=int, default=None,
+                     help="the true bit length, before hex padding")
+    s6d.add_argument("--container", action="store_true",
+                     help="the hex is a whole SystemInformation container")
+    s6d.set_defaults(func=cmd_sib6_decode)
+
+    s7 = sub.add_parser("sib7", help="encode a SystemInformationBlockType7 "
+                                     "(GERAN reselection)")
+    s7.add_argument("--t-resel", type=int, default=0,
+                    help="t-ReselectionGERAN, INTEGER (0..7)")
+    s7.add_argument("--sf", default=None, metavar="MEDIUM:HIGH",
+                    help="t-ReselectionGERAN-SF")
+    s7.add_argument("--info", action="append", default=[], metavar="K=V,...",
+                    help="one carrierFreqsInfoList entry: starting_arfcn, "
+                         "band, one of explicit=A|B / spaced=SPACING:N / "
+                         "bitmap=HEX, and ncc, q_rx, txh, txl, optional "
+                         "prio and pmax")
+    s7.add_argument("--body-only", action="store_true",
+                    help="omit the SystemInformation container wrapper")
+    s7.set_defaults(func=cmd_sib7)
+
+    s7d = sub.add_parser("sib7-decode",
+                         help="decode a SystemInformationBlockType7 body")
+    s7d.add_argument("hex", help="the body, as hex")
+    s7d.add_argument("--bits", type=int, default=None,
+                     help="the true bit length, before hex padding")
+    s7d.add_argument("--container", action="store_true",
+                     help="the hex is a whole SystemInformation container")
+    s7d.set_defaults(func=cmd_sib7_decode)
 
     args = p.parse_args(argv)
     if args.cmd == "selftest":
