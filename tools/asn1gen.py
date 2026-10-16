@@ -57,6 +57,18 @@ DEFAULT_TYPES = [
     "SystemInformationBlockType6",
     "SystemInformationBlockType7",
     "SystemInformationBlockType8",
+    # SIB9 to SIB13 are decoded by the generic engine rather than a transcribed
+    # codec, so their roots have to be in the table. TS 36.331 never defines
+    # SIB12 or SIB13 in an unsuffixed form -- they enter at Rel-9 -- and
+    # pycrate names them accordingly. hasattr(module,
+    # "SystemInformationBlockType13") is False and tells you nothing; the -r9
+    # spelling is the only one that exists, and grepping RRCLTE.py finds it
+    # where the unsuffixed name cannot.
+    "SystemInformationBlockType9",
+    "SystemInformationBlockType10",
+    "SystemInformationBlockType11",
+    "SystemInformationBlockType12_r9",
+    "SystemInformationBlockType13_r9",
     "RRCConnectionReconfiguration",
     "INTER.HandoverCommand",
 ]
@@ -159,7 +171,7 @@ class Generator(object):
     """Turns pycrate objects into layout-table nodes."""
 
     def __init__(self, registry, key_of):
-        self.registry = registry        # id(obj) -> (key, module, obj)
+        self.registry = registry        # id(obj) -> (module, asn1_name)
         self.key_of = key_of            # id(obj) -> table key
         self.emitted = {}               # table key -> node
         self.unsupported = {}           # table key -> [ "path: reason", ... ]
@@ -418,6 +430,15 @@ class Generator(object):
         if not _is_const(cset):
             return None
         lb, ub = _single_range(cset, "size")
+        if ub >= 65536:
+            # X.691 10.9/11.9: an upper bound of 65536 or more drops the length
+            # back to an unconstrained determinant, which [lb, ub] cannot say.
+            # The engine would write the offset bits instead, so refuse rather
+            # than emit a size the engine reads differently from pycrate.
+            raise Unsupported(
+                "SIZE upper bound %d selects an unconstrained length determinant"
+                % ub
+            )
         return [lb, ub]
 
     # -- driver -----------------------------------------------------------
@@ -606,6 +627,15 @@ def emit_table(types, roots, unsupported, collisions, generated_at):
 
 
 def _pycrate_version():
+    # pycrate_asn1rt.utils has no VERSION attribute (it never had one), so the
+    # table used to record its oracle as "pycrate unknown" -- which is exactly
+    # the provenance a differential check has to be able to pin down.
+    try:
+        from importlib.metadata import version
+
+        return version("pycrate")
+    except Exception:
+        pass
     try:
         from pycrate_asn1rt.utils import VERSION
 
@@ -626,8 +656,15 @@ def generate(specs=None, verbose=False):
     roots = []
     for spec in specs:
         name, obj = resolve_type(spec, modules_by_name)
-        key_of[id(obj)] = name
-        roots.append((name, obj))
+        # A root whose bare name is shared with another namespace keeps the
+        # module-qualified key make_key_of gave it: forcing the bare name here
+        # would put two different definitions under one table key and let the
+        # second silently overwrite the first.
+        key = name
+        if len(by_name.get(name, ())) > 1 and key_of.get(id(obj)):
+            key = key_of[id(obj)]
+        key_of[id(obj)] = key
+        roots.append((key, obj))
 
     gen = Generator(reg, key_of)
     types = gen.run(roots)

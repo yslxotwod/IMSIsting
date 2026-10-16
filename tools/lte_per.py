@@ -691,7 +691,10 @@ class Codec(object):
     def _dec_open(self, r, node, path):
         count = self._dec_count(r, path)
         bits = r.get(8 * count)
-        sub = BitReader(format(bits, "0%db" % (8 * count)))
+        # format(0, "00b") is "0", not "": a zero-length open type would hand
+        # the decoder a phantom bit and let a truncated one decode as a value.
+        text = format(bits, "0%db" % (8 * count)) if count else ""
+        sub = BitReader(text)
         value = self._dec(sub, node, path)
         # The open type is octet-padded; trailing zero bits are not significant.
         if sub.remaining() and sub.bits[sub.pos:].strip("0"):

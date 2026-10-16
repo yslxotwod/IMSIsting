@@ -2,8 +2,8 @@
 
 Produced by tools/asn1gen.py -- DO NOT EDIT BY HAND.
 
-Oracle:    pycrate unknown
-Generated: 2026-10-16 20:08:47
+Oracle:    pycrate 0.8.1
+Generated: 2026-10-16 21:07:30
 
 This file is plain data: it imports nothing and is consumed by
 tools/lte_per.py, which implements the PER engine.
@@ -35,6 +35,11 @@ ROOTS = [
     'SystemInformationBlockType6',
     'SystemInformationBlockType7',
     'SystemInformationBlockType8',
+    'SystemInformationBlockType9',
+    'SystemInformationBlockType10',
+    'SystemInformationBlockType11',
+    'SystemInformationBlockType12_r9',
+    'SystemInformationBlockType13_r9',
     'RRCConnectionReconfiguration',
     'HandoverCommand',
 ]
@@ -14656,6 +14661,440 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'MBMS_NotificationConfig_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'notificationRepetitionCoeff-r9',
+                {
+                    'k': 'enum',
+                    'names': ['n2', 'n4'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'notificationOffset-r9',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 10,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'notificationSF-Index-r9',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 6,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBMS_NotificationConfig_v1430': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'notificationSF-Index-v1430',
+                {
+                    'k': 'int',
+                    'lb': 7,
+                    'ub': 10,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBSFN_AreaId_r12': {
+        'k': 'int',
+        'lb': 0,
+        'ub': 255,
+        'ext': False,
+    },
+    'MBSFN_AreaInfoList_r16': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MBSFN_AreaInfo_r16',
+        },
+    },
+    'MBSFN_AreaInfoList_r17': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MBSFN_AreaInfo_r17',
+        },
+    },
+    'MBSFN_AreaInfoList_r9': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MBSFN_AreaInfo_r9',
+        },
+    },
+    'MBSFN_AreaInfo_r16': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'mbsfn-AreaId-r16',
+                {
+                    'k': 'ref',
+                    't': 'MBSFN_AreaId_r12',
+                },
+                False,
+                None,
+            ],
+            [
+                'notificationIndicator-r16',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 7,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'mcch-Config-r16',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'mcch-RepetitionPeriod-r16',
+                            {
+                                'k': 'enum',
+                                'names': [
+                                    'rf1',
+                                    'rf2',
+                                    'rf4',
+                                    'rf8',
+                                    'rf16',
+                                    'rf32',
+                                    'rf64',
+                                    'rf128',
+                                    'rf256',
+                                    'spare7',
+                                    'spare6',
+                                    'spare5',
+                                    'spare4',
+                                    'spare3',
+                                    'spare2',
+                                    'spare1',
+                                ],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'mcch-ModificationPeriod-r16',
+                            {
+                                'k': 'enum',
+                                'names': [
+                                    'rf1',
+                                    'rf2',
+                                    'rf4',
+                                    'rf8',
+                                    'rf16',
+                                    'rf32',
+                                    'rf64',
+                                    'rf128',
+                                    'rf256',
+                                    'rf512',
+                                    'rf1024',
+                                    'spare5',
+                                    'spare4',
+                                    'spare3',
+                                    'spare2',
+                                    'spare1',
+                                ],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'mcch-Offset-r16',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 10,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'sf-AllocInfo-r16',
+                            {
+                                'k': 'bits',
+                                'size': [10, 10],
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'signallingMCS-r16',
+                            {
+                                'k': 'enum',
+                                'names': ['n2', 'n7', 'n13', 'n19'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'subcarrierSpacingMBMS-r16',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'kHz7dot5',
+                        'kHz2dot5',
+                        'kHz1dot25',
+                        'kHz0dot37',
+                        'kHz15-v1710',
+                        'spare3',
+                        'spare2',
+                        'spare1',
+                    ],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'timeSeparation-r16',
+                {
+                    'k': 'enum',
+                    'names': ['sl2', 'sl4'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBSFN_AreaInfo_r17': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'mbsfn-AreaInfo-r17',
+                {
+                    'k': 'ref',
+                    't': 'MBSFN_AreaInfo_r16',
+                },
+                False,
+                None,
+            ],
+            [
+                'pmch-Bandwidth-r17',
+                {
+                    'k': 'enum',
+                    'names': ['n40', 'n35', 'n30', 'spare1'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBSFN_AreaInfo_r9': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'mbsfn-AreaId-r9',
+                {
+                    'k': 'ref',
+                    't': 'MBSFN_AreaId_r12',
+                },
+                False,
+                None,
+            ],
+            [
+                'non-MBSFNregionLength',
+                {
+                    'k': 'enum',
+                    'names': ['s1', 's2'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'notificationIndicator-r9',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 7,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'mcch-Config-r9',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'mcch-RepetitionPeriod-r9',
+                            {
+                                'k': 'enum',
+                                'names': ['rf32', 'rf64', 'rf128', 'rf256'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'mcch-Offset-r9',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 10,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'mcch-ModificationPeriod-r9',
+                            {
+                                'k': 'enum',
+                                'names': ['rf512', 'rf1024'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'sf-AllocInfo-r9',
+                            {
+                                'k': 'bits',
+                                'size': [6, 6],
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'signallingMCS-r9',
+                            {
+                                'k': 'enum',
+                                'names': ['n2', 'n7', 'n13', 'n19'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['mcch-Config-r14', 'subcarrierSpacingMBMS-r14'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'mcch-Config-r14',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'mcch-RepetitionPeriod-v1430',
+                                        {
+                                            'k': 'enum',
+                                            'names': ['rf1', 'rf2', 'rf4', 'rf8', 'rf16'],
+                                            'ext': None,
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                    [
+                                        'mcch-ModificationPeriod-v1430',
+                                        {
+                                            'k': 'enum',
+                                            'names': [
+                                                'rf1',
+                                                'rf2',
+                                                'rf4',
+                                                'rf8',
+                                                'rf16',
+                                                'rf32',
+                                                'rf64',
+                                                'rf128',
+                                                'rf256',
+                                                'spare7',
+                                            ],
+                                            'ext': None,
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'subcarrierSpacingMBMS-r14',
+                            {
+                                'k': 'enum',
+                                'names': ['kHz7dot5', 'kHz1dot25'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
     },
     'MBSFN_SubframeConfig': {
         'k': 'seq',
@@ -46360,6 +46799,348 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'SystemInformationBlockType10': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'messageIdentifier',
+                {
+                    'k': 'bits',
+                    'size': [16, 16],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'serialNumber',
+                {
+                    'k': 'bits',
+                    'size': [16, 16],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'warningType',
+                {
+                    'k': 'octets',
+                    'size': [2, 2],
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'dummy',
+                {
+                    'k': 'octets',
+                    'size': [50, 50],
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extone',
+                'name': 'lateNonCriticalExtension',
+                'node': {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+            },
+        ],
+    },
+    'SystemInformationBlockType11': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'messageIdentifier',
+                {
+                    'k': 'bits',
+                    'size': [16, 16],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'serialNumber',
+                {
+                    'k': 'bits',
+                    'size': [16, 16],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'warningMessageSegmentType',
+                {
+                    'k': 'enum',
+                    'names': ['notLastSegment', 'lastSegment'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'warningMessageSegmentNumber',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 63,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'warningMessageSegment',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'dataCodingScheme',
+                {
+                    'k': 'octets',
+                    'size': [1, 1],
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extone',
+                'name': 'lateNonCriticalExtension',
+                'node': {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+            },
+        ],
+    },
+    'SystemInformationBlockType12_r9': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'messageIdentifier-r9',
+                {
+                    'k': 'bits',
+                    'size': [16, 16],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'serialNumber-r9',
+                {
+                    'k': 'bits',
+                    'size': [16, 16],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'warningMessageSegmentType-r9',
+                {
+                    'k': 'enum',
+                    'names': ['notLastSegment', 'lastSegment'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'warningMessageSegmentNumber-r9',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 63,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'warningMessageSegment-r9',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'dataCodingScheme-r9',
+                {
+                    'k': 'octets',
+                    'size': [1, 1],
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['warningAreaCoordinatesSegment-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'warningAreaCoordinatesSegment-r15',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'SystemInformationBlockType13_r9': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'mbsfn-AreaInfoList-r9',
+                {
+                    'k': 'ref',
+                    't': 'MBSFN_AreaInfoList_r9',
+                },
+                False,
+                None,
+            ],
+            [
+                'notificationConfig-r9',
+                {
+                    'k': 'ref',
+                    't': 'MBMS_NotificationConfig_r9',
+                },
+                False,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['notificationConfig-v1430'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'notificationConfig-v1430',
+                            {
+                                'k': 'ref',
+                                't': 'MBMS_NotificationConfig_v1430',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['mbsfn-AreaInfoList-r16'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'mbsfn-AreaInfoList-r16',
+                            {
+                                'k': 'ref',
+                                't': 'MBSFN_AreaInfoList_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['mbsfn-AreaInfoList-r17'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'mbsfn-AreaInfoList-r17',
+                            {
+                                'k': 'ref',
+                                't': 'MBSFN_AreaInfoList_r17',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
     'SystemInformationBlockType1_v1130_IEs': {
         'k': 'seq',
         'ext': False,
@@ -49271,6 +50052,35 @@ TYPES = {
                         ],
                     ],
                     'extadd': [],
+                },
+            },
+        ],
+    },
+    'SystemInformationBlockType9': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'hnb-Name',
+                {
+                    'k': 'octets',
+                    'size': [1, 48],
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extone',
+                'name': 'lateNonCriticalExtension',
+                'node': {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
                 },
             },
         ],
