@@ -335,11 +335,84 @@ What Phase 2 now has to add, in order:
    SIB they claim rather than reporting fields decoded from the wrong bit
    offsets. The private-layout warning that used to print for SIB2 and SIB3 is
    gone with the parsers that needed it. **SIB1–SIB7 are all real codecs now**
-   — `modules/10_lte_air.sh:1222`'s `lair_decode_sib()` dispatches 1 through 7
-   to `tools/lte_asn1.py` and only 8 and 13 still call
-   `lair_note_private_layout`.
+   — `lair_decode_sib()` dispatches 1 through 8 to `tools/lte_asn1.py`, and only
+   13 still calls `lair_note_private_layout`.
+
+   **SIB8 is real now, and what it was before was worse than private.** `lair_decode_sib8()`
+   was reading `systemInformationAreaID`, `messageIdentifier`, `serialNumber`,
+   `warningMessageSegment*` and `dataCodingScheme` out of a SIB8 body. Not one
+   of those fields exists in `SystemInformationBlockType8` — they are CMAS
+   fields belonging to SIB12. The decoder was reporting *a different message's*
+   contents under SIB8's name, which is a more dangerous failure than reading
+   wrong offsets inside the right message. SIB8 is now generated like the rest:
+   a four-bit optional bitmap in declaration order, a four-bit
+   `searchWindowSize`, and `t-ReselectionUTRA-SF` as a two-alternative CHOICE.
+   A bare body is five bits; with the search window set it is nine (`2480`).
+
+   **What is still missing is more than one decoder.** `lair_decode_sib()`
+   dispatches 1 through 8, so **SIB9, SIB10, SIB11 and SIB12 have no decoder at
+   all** and are rejected as unknown — the module's own error message silently
+   defines the ceiling of what it can read. SIB13 is the last decoder on a
+   private octet-aligned layout.
+
+   Two of those five were absent from the generated table for a reason worth
+   writing down, because it looks exactly like "the oracle does not have this
+   type". TS 36.331 never defines SIB12 or SIB13 in an unsuffixed form — they
+   enter the specification at Rel-9 — and pycrate names them accordingly:
+   **`SystemInformationBlockType12-r9`** and **`SystemInformationBlockType13-r9`**.
+   `hasattr(module, "SystemInformationBlockType13")` returns `False` and tells
+   you nothing. Searching every pycrate ASN.1 namespace for the unsuffixed name
+   finds no definition site at all, while grepping `RRCLTE.py` finds one
+   immediately under the `-r9` name. SIB9 through SIB11 are present unsuffixed
+   and were merely absent from the generator's root list. The general lesson:
+   when a type appears to be missing from an ASN.1 oracle, grep the source for
+   the name as a **substring** before concluding the oracle lacks it, because
+   `-r<N>` and `-v<N><M><K>` revision suffixes are systematic in this
+   specification.
 3. RRC reconfiguration and handover construction, the actual TX path, then the
    same four-point bar Phase 1 was held to.
+
+   The **channel-mapping** half of the TX path is in place too, because the
+   coding chain could turn a transport block into coded bits and nothing turned
+   coded bits into resource elements. `tools/lte_phy.py` now carries PSS and SSS
+   generation, layer mapping and precoding, convolutional coding, PBCH, DCI
+   size, PDCCH, PCFICH, PHICH, the REG interleaver and the PDSCH
+   resource-element map, each asserted against srsRAN release 23.11 built from
+   its own sources outside this repository — 0 mismatches across the sync, MIMO
+   and PBCH comparisons.
+
+   Two *oracle* mistakes were found and corrected rather than accommodated, and
+   both are worth remembering. The sync comparison hard-coded a `1e-6` tolerance
+   and reported a failure that was entirely srsRAN's own float32 error: the
+   codec agrees with the closed-form definition to `0.000e+00` while srsRAN
+   itself sits `2.269e-04` away. **A tolerance must be derived from the oracle's
+   measured error, never chosen as a round number**, or the oracle silently
+   becomes the thing under test. And the comparator's first version read the PSS
+   second half as a continuation of the first (`exp(-j*pi*u*(n+1)*(n+2)/63)`
+   for `n = 31..61`, not `n = 0..30` continued) and the SSS halves as
+   concatenated rather than interleaved (`d(2i)`/`d(2i+1)`); both were bugs in
+   the comparator, not in the codec.
+
+   **The generator has been checked against pycrate**, which is the go/no-go on
+   the whole method. `tools/lte-per-oracle/verify_per.py` generates random values
+   from pycrate's *own object graph* — deliberately not from the table under
+   test, which would assume the thing being checked — encodes each value with
+   both codecs, compares bit for bit, and then round-trips it through the
+   decoder. **125 cases over SIB4, SIB6, SIB7, SIB8 and
+   RRCConnectionReconfiguration agree exactly**, including the first of the two
+   large messages that made hand-transcription impractical.
+
+   Two honest limits on that number. It is **not coverage of all ten root
+   types**: SIB1, SIB2, SIB3 and SIB5 currently yield *zero* cases, because the
+   harness cannot construct a value pycrate will accept, and a type producing
+   zero cases must be read as unverified rather than as passing — a green run
+   that silently skips its own subject is worse than no run. The causes are
+   known and are in the harness, not the codec: `verify_per.py`'s value
+   generator reads integer bounds from `get_const()['val']['root'][0].lb/.ub`
+   and assumes every constraint is expressed that way, while pycrate represents
+   several as size or offset constraints. And the table holds **1031 types**
+   while only the roots are exercised, so a leaf that is wrong and unreachable
+   from the sampled roots is still invisible.
 
 The downlink **coding** layer is now in place, because a transmit path that
 cannot code a transport block is not a transmit path. `tools/lte_phy.py` holds
