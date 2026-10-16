@@ -36,14 +36,16 @@
 # cap this project puts on a check, so the stages are separately selectable
 # and each one fits:
 #
-#   --stage=sync   sequences only          (the long one)
+#   --stage=sync   sequences only          (the long one, 40-60 s)
 #   --stage=mib    MIB offsets only        (a few seconds)
-#   --stage=all    both                    (default)
+#   --stage=num    carrier numerology only (~40 s: 153 cells x 3 helpers,
+#                                           each helper shelling out to awk)
+#   --stage=all    all three               (default)
 #
-# For a full verification inside the cap, run ./tools/check-verbs.sh-style
-# one stage per invocation:
+# For a full verification inside the cap, run one stage per invocation:
 #
 #   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=mib
+#   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=num
 #   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=sync
 #
 # Each stage runs its own negative control FIRST and refuses to report on the
@@ -52,16 +54,19 @@
 # that had passed a bug for the whole life of the file.
 #
 # What it covers: PSS and SSS sequence generation (TS 38.211 7.4.2.2 and
-# 7.4.2.3) over all 3 PSS values and all 1008 cell identities, and the MIB
-# field offsets and enumerations of the BCCH-BCH-Message (TS 38.331 6.2.1
-# and 6.2.2).
+# 7.4.2.3) over all 3 PSS values and all 1008 cell identities; the MIB field
+# offsets and enumerations of the BCCH-BCH-Message (TS 38.331 6.2.1 and
+# 6.2.2); and the carrier numerology -- N_RB against TS 38.104 Tables
+# 5.3.2-1 and 5.3.2-2, and N_FFT and the sample rate as the derivation
+# TS 38.104 5.3 defines them.
 #
 # What it does NOT cover, stated rather than papered over: the PSS/SSS
 # resource-element positions (TS 38.211 7.4.2.1 / 7.4.3), the PBCH payload
 # beyond the MIB fields, the PBCH polar code, its scrambling and its DMRS,
-# PRACH, and every higher-layer stage in the module. Those still rest on the
-# module's own selftest vectors, which is the exposure this file
-# demonstrates is real.
+# the SSB baseband generator and decoder (nair_write_bb_gen at
+# modules/12_nr_air.sh:1063 and its decoder at :1455), PRACH, and every
+# higher-layer stage in the module. Those still rest on the module's own
+# selftest vectors, which is the exposure this file demonstrates is real.
 #
 # == Tolerance ==
 #
@@ -104,8 +109,8 @@ done
 set -- ${_args[@]+"${_args[@]}"}
 
 case "$STAGE" in
-    sync|mib|all) ;;
-    *) printf 'error: unknown stage "%s" (want sync, mib or all)\n' "$STAGE" >&2; exit 2 ;;
+    sync|mib|num|all) ;;
+    *) printf 'error: unknown stage "%s" (want sync, mib, num or all)\n' "$STAGE" >&2; exit 2 ;;
 esac
 
 WORK="${1:-${TMPDIR:-/tmp}/imsisting-nr-phy-oracle}"
@@ -127,34 +132,54 @@ fi
 
 rc=0
 
+# The two pure-Python stages have the same shape: run the two-sided negative
+# control first and refuse to report on the real module if it fails, because
+# a comparator that has not been shown to fail cannot be shown to pass.
+#
+#   run_py_stage <label> <comparator> <negative-control>
+run_py_stage() {
+    local label="$1" cmp="$2" neg="$3" tag="$4" prc=0
+    if [[ ! -f "$cmp" ]]; then
+        printf '\n!! %s comparator missing; %s is unchecked\n' "$label" "$tag" >&2
+        rc=2
+        return
+    fi
+    printf '\n'
+    if [[ -f "$neg" ]]; then
+        python3 "$neg" || prc=$?
+    else
+        printf '!! %s negative control missing: %s\n' "$label" "$neg" >&2
+        prc=2
+    fi
+    if [[ $prc -ne 0 ]]; then
+        printf '\nerror: the %s negative control did not pass (exit %d).\n' "$label" "$prc" >&2
+        printf 'The comparison below would prove nothing, so it is skipped.\n' >&2
+        rc=$prc
+        return
+    fi
+    printf '\n'
+    python3 "$cmp" --module "$ROOT/modules/12_nr_air.sh" || prc=$?
+    [[ $rc -eq 0 && $prc -ne 0 ]] && rc=$prc
+}
+
 # ════════════════════════════════════════════════════════════════════════
 # stage: mib (no py3gpp needed, no network)
 # ════════════════════════════════════════════════════════════════════════
 if [[ "$STAGE" == all || "$STAGE" == mib ]]; then
-    MIBCMP="$ROOT/tools/nr-phy-oracle/cmp_nr_mib.py"
-    MIBNEG="$ROOT/tools/nr-phy-oracle/negative-control-mib.py"
-    if [[ ! -f "$MIBCMP" ]]; then
-        printf '\n!! MIB comparator missing; the MIB offsets are unchecked\n' >&2
-        rc=2
-    else
-        mibrc=0
-        printf '\n'
-        if [[ -f "$MIBNEG" ]]; then
-            python3 "$MIBNEG" || mibrc=$?
-        else
-            printf '!! MIB negative control missing: %s\n' "$MIBNEG" >&2
-            mibrc=2
-        fi
-        if [[ $mibrc -ne 0 ]]; then
-            printf '\nerror: the MIB negative control did not pass (exit %d).\n' "$mibrc" >&2
-            printf 'The comparison below would prove nothing, so it is skipped.\n' >&2
-            rc=$mibrc
-        else
-            printf '\n'
-            python3 "$MIBCMP" --module "$ROOT/modules/12_nr_air.sh" || mibrc=$?
-            [[ $rc -eq 0 && $mibrc -ne 0 ]] && rc=$mibrc
-        fi
-    fi
+    run_py_stage "MIB" \
+        "$ROOT/tools/nr-phy-oracle/cmp_nr_mib.py" \
+        "$ROOT/tools/nr-phy-oracle/negative-control-mib.py" \
+        "the MIB field offsets"
+fi
+
+# ════════════════════════════════════════════════════════════════════════
+# stage: num (no py3gpp needed, no network)
+# ════════════════════════════════════════════════════════════════════════
+if [[ "$STAGE" == all || "$STAGE" == num ]]; then
+    run_py_stage "numerology" \
+        "$ROOT/tools/nr-phy-oracle/cmp_nr_numerology.py" \
+        "$ROOT/tools/nr-phy-oracle/negative-control-numerology.py" \
+        "the carrier numerology"
 fi
 
 # ════════════════════════════════════════════════════════════════════════
