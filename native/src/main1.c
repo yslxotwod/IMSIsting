@@ -13552,11 +13552,12 @@ fkit_preset_button(const char *label, const char *args, GtkWidget *entry)
 
 /* The command line a card's presets fill, and the button that runs it. Same
    shape as radio_bench_arg_action, except that the entry is handed back so the
-   presets above can write into it. */
+   presets above can write into it, and the verb is named by the caller so a
+   page other than the Field Kit can put its own verb behind the line. */
 static GtkWidget *
-fkit_composer(AppState *state, const char *module_id, GtkWidget *status,
-              GtkWidget **entry_out, const char *label, const char *placeholder,
-              const char *button_label)
+fkit_composer_verb(AppState *state, const char *module_id, GtkWidget *status,
+              GtkWidget **entry_out, const char *verb, const char *label,
+              const char *placeholder, const char *button_label)
 {
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *caption = gtk_label_new(label);
@@ -13573,7 +13574,7 @@ fkit_composer(AppState *state, const char *module_id, GtkWidget *status,
     g_object_set_data(G_OBJECT(button), "state", state);
     g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
     g_object_set_data(G_OBJECT(button), "status", status);
-    g_object_set_data_full(G_OBJECT(button), "verb", g_strdup("--emit"), g_free);
+    g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
     g_object_set_data(G_OBJECT(button), "arg-entry", entry);
     g_signal_connect(button, "clicked", G_CALLBACK(group_arg_clicked), NULL);
     gtk_box_append(GTK_BOX(row), caption);
@@ -13581,6 +13582,16 @@ fkit_composer(AppState *state, const char *module_id, GtkWidget *status,
     gtk_box_append(GTK_BOX(row), button);
     *entry_out = entry;
     return row;
+}
+
+/* The Field Kit's own composer, whose every line runs --emit. */
+static GtkWidget *
+fkit_composer(AppState *state, const char *module_id, GtkWidget *status,
+              GtkWidget **entry_out, const char *label, const char *placeholder,
+              const char *button_label)
+{
+    return fkit_composer_verb(state, module_id, status, entry_out, "--emit",
+                              label, placeholder, button_label);
 }
 
 static GtkWidget *
@@ -14009,38 +14020,486 @@ static ModuleSubmenuEntry caud_entries[] = {
       "document-open-symbolic",
       "#LOAD|--sessions-load:Load Sessions|~--session|#MANAGE|--clear:Clear" },
 };
+/* ── The CVE catalogue ───────────────────────────────────────────────────────
+
+   All three catalogue modules publish the same five columns, so all three
+   pages are built from one reader:
+
+       id <TAB> kind <TAB> class <TAB> needs <TAB> what the vector is
+
+   id is the CVE number the module keys its runs on; kind is "probe" (the module
+   measures the target itself) or "handoff" (the far end has to be something
+   this module does not drive); class is the view the vector is filed under; and
+   needs is what has to be in the room. Every one of them is on the card,
+   because a vector that cannot run here has to say what is missing before it is
+   pressed rather than after.
+
+   The LTE catalogue is fifty-six vectors, so the page is one view per class
+   rather than one long scroll, and inside a view every vector is its own card,
+   so the button that runs a vector belongs to that vector and not to a row in a
+   table above it.
+   -------------------------------------------------------------------------- */
+
+typedef struct {
+    char *id;
+    char *kind;
+    char *klass;
+    char *needs;
+    char *what;
+} CveRow;
+
+typedef struct {
+    char *module_id;
+    GPtrArray *rows;
+} CveCatalogue;
+
+/* --list-cves prints a heredoc, so it cannot change while the process runs; and
+   GTK builds every view of a page the moment that page is opened, so without
+   this the module would be spawned once per class view to print the same table
+   over and over. One capture per module per process. */
+static GPtrArray *cve_catalogues = NULL;
+
+static void
+cve_row_free(gpointer p)
+{
+    CveRow *r = p;
+
+    g_free(r->id);
+    g_free(r->kind);
+    g_free(r->klass);
+    g_free(r->needs);
+    g_free(r->what);
+    g_free(r);
+}
+
+static void
+cve_catalogue_free(gpointer p)
+{
+    CveCatalogue *c = p;
+
+    g_ptr_array_unref(c->rows);
+    g_free(c->module_id);
+    g_free(c);
+}
+
+static GPtrArray *
+cve_rows(const char *module_id)
+{
+    g_autofree char *script = NULL;
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    CveCatalogue *entry;
+    GPtrArray *rows;
+
+    if (cve_catalogues == NULL)
+        cve_catalogues = g_ptr_array_new_with_free_func(cve_catalogue_free);
+    for (guint i = 0; i < cve_catalogues->len; i++) {
+        CveCatalogue *c = g_ptr_array_index(cve_catalogues, i);
+
+        if (g_strcmp0(c->module_id, module_id) == 0)
+            return c->rows;
+    }
+
+    /* Owned by the cache from here on: every path below - a module that did not
+       answer included - has to leave an array behind, or the next view of the
+       page spawns the module again to learn the same thing. */
+    rows = g_ptr_array_new_with_free_func(cve_row_free);
+    script = module_script_path(module_id);
+    {
+        const char *argv[] = { script, "--list-cves", NULL };
+        text = run_capture(argv);
+    }
+    if (text != NULL) {
+        lines = g_strsplit(text, "\n", -1);
+        for (int i = 0; lines[i] != NULL; i++) {
+            g_auto(GStrv) f = g_strsplit(lines[i], "\t", 5);
+            CveRow *r;
+
+            /* The first line names the columns; a line with fewer than five
+               fields is a short read or a blank, and neither is a vector. */
+            if (f[0] == NULL || f[1] == NULL || f[2] == NULL ||
+                f[3] == NULL || f[4] == NULL)
+                continue;
+            if (g_strcmp0(f[0], "id") == 0)
+                continue;
+            r = g_new0(CveRow, 1);
+            r->id = g_strdup(f[0]);
+            r->kind = g_strdup(f[1]);
+            r->klass = g_strdup(f[2]);
+            r->needs = g_strdup(f[3]);
+            r->what = g_strdup(f[4]);
+            g_ptr_array_add(rows, r);
+        }
+    }
+
+    entry = g_new0(CveCatalogue, 1);
+    entry->module_id = g_strdup(module_id);
+    entry->rows = rows;                 /* transfer: the cache owns it now */
+    g_ptr_array_add(cve_catalogues, entry);
+    return rows;
+}
+
+/* One KEY / value line, the way the Field Kit prints the machine it is on. */
+static void
+cve_fill_meta(GtkWidget *card_body, const char *key, const char *value)
+{
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *k = gtk_label_new(key);
+    GtkWidget *v = gtk_label_new(value);
+
+    gtk_widget_add_css_class(row, "cve-kv-row");
+    gtk_widget_add_css_class(k, "cve-kv-key");
+    gtk_widget_add_css_class(v, "cve-kv-val");
+    gtk_widget_set_size_request(k, 110, -1);
+    gtk_label_set_xalign(GTK_LABEL(k), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(v), 0.0f);
+    gtk_label_set_selectable(GTK_LABEL(v), TRUE);
+    gtk_widget_set_hexpand(v, TRUE);
+    gtk_label_set_wrap(GTK_LABEL(v), TRUE);
+    gtk_box_append(GTK_BOX(row), k);
+    gtk_box_append(GTK_BOX(row), v);
+    gtk_box_append(GTK_BOX(card_body), row);
+}
+
+/* One vector, in its own window. The CVE id is the heading because the id is
+   what gets typed anywhere else - here, in a plan, on a command line - and the
+   run the button starts is recorded against it. */
+static void
+cve_add_card(AppState *state, const char *module_id, const CveRow *r,
+             GtkWidget *status, GtkWidget *body)
+{
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card(r->id, &card_body);
+    GtkWidget *flow = fkit_flow();
+    GtkWidget *run = gtk_button_new_with_label("Run This Vector");
+    GtkWidget *plan = gtk_button_new_with_label("Add To Plan");
+    const char *kind = g_strcmp0(r->kind, "handoff") == 0
+        ? "handoff - the far end has to be something this module does not drive"
+        : "probe - measured against the target from here";
+
+    cve_fill_meta(card_body, "kind", kind);
+    cve_fill_meta(card_body, "needs", (r->needs != NULL && *r->needs != '\0')
+                                      ? r->needs : "nothing beyond this machine");
+    gtk_box_append(GTK_BOX(card_body), fkit_note(r->what));
+
+    radio_bench_run_button(run, state, module_id, status, "--run-cve", r->id);
+    fkit_flow_add(flow, run, "primary");
+    radio_bench_run_button(plan, state, module_id, status, "--plan", r->id);
+    fkit_flow_add(flow, plan, "flat");
+    gtk_box_append(GTK_BOX(card_body), flow);
+    gtk_box_append(GTK_BOX(body), card);
+}
+
+/* One class: every vector the module files under it, in the order the module
+   lists them, which is the order it wants them read in. */
+static GtkWidget *
+cve_build_class(AppState *state, const char *module_id, const char *klass,
+                const char *title, const char *subtitle,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell(title, subtitle, &body);
+    GPtrArray *rows = cve_rows(module_id);
+    g_autofree char *count = NULL;
+    GtkWidget *label;
+    guint shown = 0;
+
+    for (guint i = 0; i < rows->len; i++) {
+        CveRow *r = g_ptr_array_index(rows, i);
+
+        if (g_strcmp0(r->klass, klass) != 0)
+            continue;
+        cve_add_card(state, module_id, r, status, body);
+        shown++;
+    }
+
+    count = g_strdup_printf("%u VECTOR%s IN THIS CLASS", shown, shown == 1 ? "" : "S");
+    label = gtk_label_new(count);
+    gtk_widget_add_css_class(label, "cve-count");
+    gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+    if (shown == 0)
+        gtk_box_append(GTK_BOX(body),
+            fkit_note("This module files no vector under this class. It is the "
+                      "page's own reading of --list-cves, so an empty view means "
+                      "the catalogue has nothing there - not that the reader "
+                      "failed."));
+    gtk_box_prepend(GTK_BOX(body), label);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
+/* A class view is the same builder with the class and its wording curried in;
+   the page's entry table can only name a function, so each one gets a name. */
+#define CVE_CLASS_VIEW(fn, klass, title, subtitle)                            \
+    static GtkWidget *fn(AppState *state, const char *module_id,              \
+                         GtkWidget *status, GtkTextBuffer *out)               \
+    {                                                                         \
+        return cve_build_class(state, module_id, klass, title, subtitle,      \
+                               status, out);                                  \
+    }
+
+/* The catalogue itself: how much of it there is, the verbs that print it, the
+   two that run one, and the module's own helpers. The helpers used to have a
+   view of their own, which meant leaving the page to reach a verb that belongs
+   to it just as much as the run buttons do. */
+static GtkWidget *
+cve_build_overview(AppState *state, const char *module_id,
+                   const char *title, const char *subtitle,
+                   const char *probe_verb, const char *probe_label,
+                   const char *sample_cve, gboolean findings,
+                   const char *const *helpers,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell(title, subtitle, &body);
+    GtkWidget *catalogue_body, *run_body, *helpers_body;
+    GtkWidget *catalogue = verb_card("CATALOGUE", &catalogue_body);
+    GtkWidget *one = verb_card("RUN ONE", &run_body);
+    GtkWidget *helper_card = verb_card("HELPERS", &helpers_body);
+    GtkWidget *flow = fkit_flow();
+    GtkWidget *banner;
+    GPtrArray *rows = cve_rows(module_id);
+    g_autofree char *script = module_script_path(module_id);
+    g_autofree char *raw = NULL;
+    g_autofree char *runs = NULL;
+    g_autofree char *dir = NULL;
+    g_autofree char *text = NULL;
+    guint probe_n = 0, handoff_n = 0;
+
+    for (guint i = 0; i < rows->len; i++) {
+        CveRow *r = g_ptr_array_index(rows, i);
+
+        if (g_strcmp0(r->kind, "handoff") == 0) handoff_n++;
+        else probe_n++;
+    }
+
+    {
+        const char *argv[] = { script, "--status-tsv", NULL };
+        raw = run_capture(argv);
+    }
+    runs = raw ? tsv_field(raw, "runs") : NULL;
+    dir = raw ? tsv_field(raw, "dir") : NULL;
+    /* The loot directory is long and the only part that identifies it is the
+       end, so it is shown relative to the project it lives in. */
+    if (dir != NULL && g_str_has_prefix(dir, IMSISTING_ROOT "/"))
+        memmove(dir, dir + strlen(IMSISTING_ROOT) + 1, strlen(dir + strlen(IMSISTING_ROOT) + 1) + 1);
+
+    text = g_strdup_printf("%u VECTORS   |   %u PROBE / %u HANDOFF   |   %s RUNS RECORDED   |   %s",
+        rows->len, probe_n, handoff_n,
+        (runs != NULL && *runs != '\0') ? runs : "0",
+        (dir != NULL && *dir != '\0') ? dir : "no loot directory");
+    banner = gtk_label_new(text);
+    gtk_widget_add_css_class(banner, "crec-survey-status");
+    gtk_label_set_xalign(GTK_LABEL(banner), 0.0f);
+    gtk_label_set_selectable(GTK_LABEL(banner), TRUE);
+    gtk_box_append(GTK_BOX(body), banner);
+
+    {
+        static const struct { const char *label; const char *verb; } whole[] = {
+            { "List Every Vector", "--list-cves" },
+            { "Runs TSV",          "--runs-tsv" },
+            { "Selftest",          "--selftest" },
+        };
+
+        for (guint i = 0; i < G_N_ELEMENTS(whole); i++) {
+            GtkWidget *button = gtk_button_new_with_label(whole[i].label);
+
+            radio_bench_run_button(button, state, module_id, status, whole[i].verb, NULL);
+            fkit_flow_add(flow, button, i == 0 ? "primary" : "flat");
+        }
+        if (findings) {
+            GtkWidget *button = gtk_button_new_with_label("List Findings");
+
+            radio_bench_run_button(button, state, module_id, status, "--list-findings", NULL);
+            fkit_flow_add(flow, button, "flat");
+        }
+    }
+    {
+        /* One representative of each half, so the shape of both is on screen
+           next to the count that says how many there are. */
+        GtkWidget *probe = gtk_button_new_with_label(probe_label);
+        GtkWidget *sample = gtk_button_new_with_label(sample_cve);
+
+        radio_bench_run_button(probe, state, module_id, status, "--probe", probe_verb);
+        fkit_flow_add(flow, probe, "flat");
+        radio_bench_run_button(sample, state, module_id, status, "--run-cve", sample_cve);
+        fkit_flow_add(flow, sample, "flat");
+    }
+    gtk_box_append(GTK_BOX(catalogue_body), flow);
+    gtk_box_append(GTK_BOX(catalogue_body),
+        fkit_note("Every vector is a real run: it records to the runs table "
+                  "against the id it used, and a vector whose needs cannot be "
+                  "met fails honestly - non-zero, and it says what is missing."));
+
+    {
+        GtkWidget *entry = NULL;
+
+        gtk_box_append(GTK_BOX(run_body),
+            fkit_composer_verb(state, module_id, status, &entry, "--run-cve",
+                "CVE id", sample_cve, "Run Vector"));
+        gtk_box_append(GTK_BOX(run_body),
+            fkit_composer_verb(state, module_id, status, &entry, "--probe",
+                "Probe", probe_verb, "Probe"));
+    }
+    gtk_box_append(GTK_BOX(run_body),
+        fkit_note("The field takes one argument and the module splits it on "
+                  "spaces, so a verb that wants two values takes them both here."));
+
+    for (guint i = 0; helpers != NULL && helpers[i] != NULL; i++) {
+        g_autofree char *spec = g_strdup(helpers[i]);
+        g_autofree char *verb = NULL;
+        const char *label = NULL;
+        GtkWidget *entry = NULL;
+        char *colon = strchr(spec, ':');
+
+        if (colon != NULL) { *colon = '\0'; label = colon + 1; }
+        verb = g_strdup(spec);
+        g_strstrip(verb);
+        if (*verb == '\0')
+            continue;
+        /* The helpers are single-value verbs, so the caption carries the name
+           and the verb itself is the placeholder - the same reading the
+           generic arg row gives them, in the composer's shape. */
+        gtk_box_append(GTK_BOX(helpers_body),
+            fkit_composer_verb(state, module_id, status, &entry, verb,
+                (label != NULL && *label != '\0') ? label : verb, verb, "Run"));
+    }
+
+    gtk_box_append(GTK_BOX(body), catalogue);
+    gtk_box_append(GTK_BOX(body), one);
+    gtk_box_append(GTK_BOX(body), helper_card);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
+#define CVE_OVERVIEW_VIEW(fn, title, subtitle, probe_verb, probe_label, sample, findings, helpers) \
+    static GtkWidget *fn(AppState *state, const char *module_id,              \
+                         GtkWidget *status, GtkTextBuffer *out)               \
+    {                                                                         \
+        return cve_build_overview(state, module_id, title, subtitle,          \
+                                  probe_verb, probe_label, sample, findings,  \
+                                  helpers, status, out);                      \
+    }
+
+static const char *const gcve_helpers[] = {
+    "--bcd:BCD", "--kc:Kc", "--plan:Plan", NULL
+};
+static const char *const lcve_helpers[] = {
+    "--teid:TEID", "--plmn:PLMN", "--plan:Plan", NULL
+};
+static const char *const ncve_helpers[] = {
+    "--snssai:S-NSSAI", "--plan:Plan", NULL
+};
+
+CVE_OVERVIEW_VIEW(gcve_view_overview, "GSM CVE CATALOGUE",
+    "Every catalogued GSM vulnerability, one card per vector, filed by the part "
+    "of the network it lives in.",
+    "IDENTITY", "Probe Identity", "CVE-2019-15962", TRUE, gcve_helpers)
+
+CVE_CLASS_VIEW(gcve_view_baseband,  "baseband",     "GSM BASEBAND",
+    "Vectors that reach the modem's own code rather than the network around it.")
+CVE_CLASS_VIEW(gcve_view_femtocell, "femtocell",    "FEMTOCELL",
+    "Vectors against the small cell that carries the operator's own traffic.")
+CVE_CLASS_VIEW(gcve_view_gprs,      "gprs",         "GPRS",
+    "Vectors in packet data, where a session exists before it is authenticated.")
+CVE_CLASS_VIEW(gcve_view_cipher,    "gsm-cipher",   "GSM CIPHER",
+    "Vectors against the A5 ciphering this module can already reason about.")
+CVE_CLASS_VIEW(gcve_view_identity,  "identity",     "IDENTITY",
+    "Vectors that make the network give up a subscriber's identity.")
+CVE_CLASS_VIEW(gcve_view_sim_ota,   "sim-ota",      "SIM OTA",
+    "Vectors delivered over the air to the card, not to the phone.")
+CVE_CLASS_VIEW(gcve_view_sim_toolkit, "sim-toolkit", "SIM TOOLKIT",
+    "Vectors in the card's own application toolkit.")
+CVE_CLASS_VIEW(gcve_view_ss7_map,   "ss7-map",      "SS7 / MAP",
+    "Vectors on the signalling network behind the radio.")
+
 static ModuleSubmenuEntry gcve_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--list-cves:List CVEs|--probe=IDENTITY|--run-cve=CVE-2019-15962" },
-    { "Results",
-      "x-office-document-symbolic",
-      "--list-findings:List Findings|--runs-tsv:Runs TSV" },
-    { "Helpers",
-      "preferences-system-symbolic",
-      "--bcd:BCD|--kc:Kc|--plan:Plan" },
+    { "Overview", "dialog-information-symbolic", NULL, gcve_view_overview },
+    { "Baseband", "imsisting-35_baseband-symbolic", NULL, gcve_view_baseband },
+    { "Femtocell", "imsisting-37_femtocell-symbolic", NULL, gcve_view_femtocell },
+    { "GPRS", "imsisting-50_gprs-symbolic", NULL, gcve_view_gprs },
+    { "GSM Cipher", "imsisting-19_cipher_audit-symbolic", NULL, gcve_view_cipher },
+    { "Identity", "imsisting-18_imsi_exposure-symbolic", NULL, gcve_view_identity },
+    { "SIM OTA", "imsisting-41_ota_sms-symbolic", NULL, gcve_view_sim_ota },
+    { "SIM Toolkit", "imsisting-52_stk-symbolic", NULL, gcve_view_sim_toolkit },
+    { "SS7 / MAP", "imsisting-26_ss7_map-symbolic", NULL, gcve_view_ss7_map },
 };
+CVE_OVERVIEW_VIEW(lcve_view_overview, "LTE CVE CATALOGUE",
+    "Every catalogued LTE vulnerability, one card per vector, filed by the part "
+    "of the network it lives in.",
+    "RRC", "Probe RRC", "CVE-2017-6975", FALSE, lcve_helpers)
+
+CVE_CLASS_VIEW(lcve_view_asn1, "asn1", "ASN.1",
+    "Vectors in the decoders every other LTE interface is built on, so a fault "
+    "here is reachable from more than one of them.")
+CVE_CLASS_VIEW(lcve_view_baseband, "baseband", "LTE BASEBAND",
+    "Vectors that reach the modem's own code rather than the network around it.")
+CVE_CLASS_VIEW(lcve_view_diameter, "diameter", "DIAMETER",
+    "Vectors on the signalling between the core and the subscriber database.")
+CVE_CLASS_VIEW(lcve_view_epc, "epc", "EPC",
+    "Vectors against the evolved packet core itself rather than the air around it.")
+CVE_CLASS_VIEW(lcve_view_gtp, "gtp", "GTP",
+    "Vectors in the tunnelling that carries user traffic once a session exists.")
+CVE_CLASS_VIEW(lcve_view_lte_baseband, "lte-baseband", "LTE MODEM",
+    "Vectors in the LTE stack a handset runs, reached from the network side.")
+CVE_CLASS_VIEW(lcve_view_paging, "paging", "PAGING",
+    "Vectors in the paging that reaches an idle handset.")
+CVE_CLASS_VIEW(lcve_view_sib, "sib", "SIB",
+    "Vectors in the system information a cell broadcasts to everyone.")
+CVE_CLASS_VIEW(lcve_view_volte, "volte", "VOLTE",
+    "Vectors in the IMS stack that carries voice over LTE.")
+
 static ModuleSubmenuEntry lcve_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--list-cves:List CVEs|--probe=RRC|--run-cve=CVE-2017-6975" },
-    { "Results",
-      "x-office-document-symbolic",
-      "--runs-tsv:Runs TSV" },
-    { "Helpers",
-      "preferences-system-symbolic",
-      "--teid=1|--plmn=001-01|--plan:Plan" },
+    { "Overview", "dialog-information-symbolic", NULL, lcve_view_overview },
+    { "ASN.1", "imsisting-32_nas_signaling-symbolic", NULL, lcve_view_asn1 },
+    { "LTE Baseband", "imsisting-35_baseband-symbolic", NULL, lcve_view_baseband },
+    { "Diameter", "imsisting-11_lte_core-symbolic", NULL, lcve_view_diameter },
+    { "EPC", "network-server-symbolic", NULL, lcve_view_epc },
+    { "GTP", "imsisting-23_traffic_analysis-symbolic", NULL, lcve_view_gtp },
+    { "LTE Modem", "imsisting-54_baseband_exploit-symbolic", NULL, lcve_view_lte_baseband },
+    { "Paging", "imsisting-28_paging_track-symbolic", NULL, lcve_view_paging },
+    { "SIB", "imsisting-10_lte_air-symbolic", NULL, lcve_view_sib },
+    { "VoLTE", "imsisting-30_volte_ims-symbolic", NULL, lcve_view_volte },
 };
+CVE_OVERVIEW_VIEW(ncve_view_overview, "5G CVE CATALOGUE",
+    "Every catalogued 5G vulnerability, one card per vector, filed by the part "
+    "of the network it lives in.",
+    "NRF", "Probe NRF", "CVE-2020-11197", TRUE, ncve_helpers)
+
+CVE_CLASS_VIEW(ncve_view_asn1, "asn1", "ASN.1",
+    "Vectors in the decoders every other 5G interface is built on, so a fault "
+    "here is reachable from more than one of them.")
+CVE_CLASS_VIEW(ncve_view_n2_n4, "n2-n4", "N2 / N4",
+    "Vectors on the control and user plane between the radio and the core.")
+CVE_CLASS_VIEW(ncve_view_nr_baseband, "nr-baseband", "NR BASEBAND",
+    "Vectors that reach the modem's own code rather than the network around it.")
+CVE_CLASS_VIEW(ncve_view_nr_rrc, "nr-rrc", "NR RRC",
+    "Vectors in the radio resource control that runs before a session exists.")
+CVE_CLASS_VIEW(ncve_view_nrf, "nrf", "NRF",
+    "Vectors against the function registry every other core function trusts.")
+CVE_CLASS_VIEW(ncve_view_sba_http2, "sba-http2", "SBA / HTTP2",
+    "Vectors in the service-based interface itself rather than in a service.")
+CVE_CLASS_VIEW(ncve_view_sepp, "sepp", "SEPP",
+    "Vectors on the interconnect between one operator and the next.")
+CVE_CLASS_VIEW(ncve_view_slicing, "slicing", "SLICING",
+    "Vectors in the isolation that is supposed to keep one slice out of another.")
+CVE_CLASS_VIEW(ncve_view_suci_privacy, "suci-privacy", "SUCI PRIVACY",
+    "Vectors against the concealment of the subscriber's own identity.")
+CVE_CLASS_VIEW(ncve_view_upf_pfcp, "upf-pfcp", "UPF / PFCP",
+    "Vectors in the session management that programs the user plane function.")
+
 static ModuleSubmenuEntry ncve_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--list-cves:List CVEs|--probe=NRF|--run-cve=CVE-2020-11197" },
-    { "Results",
-      "x-office-document-symbolic",
-      "--list-findings:List Findings|--runs-tsv:Runs TSV" },
-    { "Helpers",
-      "preferences-system-symbolic",
-      "--snssai=010203|--plan:Plan" },
+    { "Overview", "dialog-information-symbolic", NULL, ncve_view_overview },
+    { "ASN.1", "imsisting-32_nas_signaling-symbolic", NULL, ncve_view_asn1 },
+    { "N2 / N4", "imsisting-13_nr_core-symbolic", NULL, ncve_view_n2_n4 },
+    { "NR Baseband", "imsisting-55_nr_inject-symbolic", NULL, ncve_view_nr_baseband },
+    { "NR RRC", "imsisting-12_nr_air-symbolic", NULL, ncve_view_nr_rrc },
+    { "NRF", "imsisting-40_sba_pivot-symbolic", NULL, ncve_view_nrf },
+    { "SBA / HTTP2", "network-workgroup-symbolic", NULL, ncve_view_sba_http2 },
+    { "SEPP", "network-wired-symbolic", NULL, ncve_view_sepp },
+    { "Slicing", "imsisting-34_slicing-symbolic", NULL, ncve_view_slicing },
+    { "SUCI Privacy", "imsisting-14_suci-symbolic", NULL, ncve_view_suci_privacy },
+    { "UPF / PFCP", "imsisting-23_traffic_analysis-symbolic", NULL, ncve_view_upf_pfcp },
 };
 static ModuleSubmenuEntry kchn_entries[] = {
     { "Overview",
