@@ -506,25 +506,49 @@ lair_decode_sib2() {
     [[ -n "$hex" ]] || { printf 'ERROR\t--decode-sib needs hex\n' >&2; return 2; }
     [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
     (( ${#hex} % 2 == 0 )) || { printf 'ERROR\todd hex length\n' >&2; return 1; }
-    (( ${#hex} >= 6 )) || { printf 'ERROR\ttoo short for a SIB2 body\n' >&2; return 1; }
 
-    local hdr_note="none"
-    if [[ "${hex:0:2}" == "14" ]]; then
-        hex="${hex:2}"
-        hdr_note="skipped BCCH-DL-SCH c1 discriminator 0x14"
+    # SIB2 is read by the real TS 36.331 unaligned-PER codec in
+    # tools/lte_asn1.py. What stood here before read a 6-bit "prach-ConfigIndex"
+    # from bit 0 of the body and dressed it up as the RACH configuration. Bit 0
+    # is the extension bit of the SIB2 SEQUENCE; prach-ConfigIndex is six bits
+    # at 46..51, behind a ten-bit rootSequenceIndex and six bits of OPTIONAL
+    # bitmap. The number it printed was not any field of the message, and the
+    # selftest that checked it only proved the function returned what it had
+    # been given. It has been removed rather than kept beside the correct one.
+    local tool="$IMSISTING_ROOT/tools/lte_asn1.py"
+    [[ -r "$tool" ]] || {
+        printf 'ERROR\tmissing %s\n' "$tool" >&2
+        printf 'WHY\tthe SIB2 decoder is a real ASN.1 PER codec and lives in tools/\n' >&2
+        return 1
+    }
+
+    # A bare SIB2 body is 186 bits, or longer when the freqInfo uplink
+    # OPTIONALs are present; the whole SystemInformation container puts a
+    # 14-bit header in front of that. The true length is not recoverable from
+    # the hex, which is zero-padded to a whole octet, so the padded length is
+    # passed and the codec decides -- it only reads the input as a container
+    # when a 14-bit header still leaves a whole body behind. 186 is the retry
+    # for a caller who hands in a body whose octet padding the codec would
+    # otherwise have to guess at.
+    local pbits=$(( ${#hex} * 4 ))
+    local out rc
+    out=$(python3 "$tool" sib2-decode "$hex" --bits "$pbits" 2>&1); rc=$?
+    if (( rc != 0 )); then
+        out=$(python3 "$tool" sib2-decode "$hex" --bits 186 2>&1); rc=$?
+    fi
+    if (( rc != 0 )); then
+        printf '%s\n' "$out" | sed 's/^/ERROR\t/'
+        printf 'NOTDECODED\tthe input is not a SIB2 body; no fields were reported\n' >&2
+        return 1
     fi
 
-    # prach-ConfigIndex is a 6-bit field; read it from the body at bit 0 of
-    # the RACH-ConfigCommon region, which follows the leading zero-padding
-    # of radioResourceConfigCommon. Report the bit offset used so a caller
-    # can verify the framing rather than trust it.
-    local prach; prach=$(lair_bits "$hex" 0 6) || return 1
-    local rach; rach=$(lair_rach_summary "$prach" 2>/dev/null) || rach="unknown"
-
-    printf 'message\tSIB2 (SystemInformationBlockType2)\n'
-    printf 'header\t%s\n' "$hdr_note"
-    printf 'prach_config_index\t%s\n' "$prach"
-    printf 'prach_config\t%s\n' "$rach"
+    local k v
+    while IFS=$'\t' read -r k v; do
+        case "$k" in
+            bits_consumed) printf 'bits\t%s\n' "$v" ;;
+            *)             printf '%s\t%s\n' "$k" "$v" ;;
+        esac
+    done <<< "$out"
     printf 'body\t%s\n' "$hex"
     return 0
 }
@@ -1081,7 +1105,7 @@ lair_decode_sib() {
     local hex="${1:-}" sibtype="${2:-1}"
     case "$sibtype" in
         1|sib1)   lair_decode_sib1 "$hex" ;;
-        2|sib2)   lair_note_private_layout 2;   lair_decode_sib2 "$hex" ;;
+        2|sib2)   lair_decode_sib2 "$hex" ;;
         3|sib3)   lair_decode_sib3 "$hex" ;;
         4|sib4)   lair_note_private_layout 4;   lair_decode_sib4 "$hex" ;;
         5|sib5)   lair_note_private_layout 5;   lair_decode_sib5 "$hex" ;;
@@ -1094,12 +1118,12 @@ lair_decode_sib() {
     esac
 }
 
-# The caveat line SIB2..SIB13 carry. It names what the numbers below are not.
+# The caveat line SIB4..SIB13 carry. It names what the numbers below are not.
 lair_note_private_layout() {
     printf 'layout\tPRIVATE octet-aligned layout -- NOT TS 36.331 unaligned PER\n'
     printf 'limit\tSIB%s is not a PER decoder: these offsets are this tree'"'"'s own\n' "$1"
     printf 'limit\tscheme, not the specification'"'"'s. Do not read a real capture with it.\n'
-    printf 'ref\tSIB1 and SIB3 are decoded properly; run --decode-sib <hex> 1 or <hex> 3\n'
+    printf 'ref\tSIB1, SIB2 and SIB3 are decoded properly; run --decode-sib <hex> 1, 2 or 3\n'
 }
 
 # ── Paging: PF / PO — TS 36.304 §7.1, §7.2 and §7.3 ────────────────────
@@ -2029,10 +2053,48 @@ lair_selftest() {
     chk prach-bad "$(lair_prach_config 99 >/dev/null 2>&1; echo $?)" "1"
     chk rach-summary "$(lair_rach_summary 0)" "preamble_format=0 sf=even subframes=1"
 
-    # SIB2 body with prach-ConfigIndex = 0 in the leading 6 bits.
-    out=$(lair_decode_sib2 "0000000000")
-    chk sib2-prach-idx "$(fld "$out" prach_config_index)" "0"
-    chk sib2-prach     "$(printf '%s\n' "$out" | grep -c 'preamble_format=0')" "1"
+    # ── SIB2 ────────────────────────────────────────────────────────────
+    # SIB2 now goes through the same real codec as SIB1 and SIB3. These are
+    # captured pycrate 0.8.1 containers, not values read back out of this
+    # tree's own encoder. The body is 186 bits and is zero-padded to whole
+    # octets, so no field is octet aligned -- which is exactly what the
+    # parser that used to stand here got wrong.
+    out=$(lair_decode_sib2 "00000000000000000000000000000000100000000000000000")
+    chk sib2-default-bits "$(fld "$out" bits)" "186"
+    chk sib2-default-ra   "$(fld "$out" number_of_ra_preambles)" "n4"
+    chk sib2-default-root "$(fld "$out" root_sequence_index)" "0"
+    chk sib2-default-qam  "$(fld "$out" enable64qam)" "0"
+    chk sib2-default-srs  "$(fld "$out" sounding_rs_setup)" "1"
+    chk sib2-default-cf   "$(fld "$out" ul_carrier_freq)" "absent"
+
+    # rootSequenceIndex 22, prach-ConfigIndex 3, highSpeedFlag,
+    # zeroCorrelationZoneConfig 12, prach-FreqOffset 4.
+    out=$(lair_decode_sib2 "0000000000000160F810000000000000100000000000000000")
+    chk sib2-prach-root "$(fld "$out" root_sequence_index)" "22"
+    chk sib2-prach-idx  "$(fld "$out" prach_config_index)" "3"
+    chk sib2-prach-hs   "$(fld "$out" high_speed_flag)" "1"
+    chk sib2-prach-zone "$(fld "$out" zero_correlation_zone_config)" "12"
+    chk sib2-prach-off  "$(fld "$out" prach_freq_offset)" "4"
+
+    # referenceSignalPower 15, p-b 1, p0-NominalPUSCH -90, alpha al1,
+    # p0-NominalPUCCH -112, deltaPreambleMsg3 0.
+    out=$(lair_decode_sib2 "000000A80000000000025A0000000000100127780040000000")
+    chk sib2-power-rs      "$(fld "$out" reference_signal_power)" "15"
+    chk sib2-power-pb      "$(fld "$out" p_b)" "1"
+    chk sib2-power-p0pusch "$(fld "$out" p0_nominal_pusch)" "-90"
+    chk sib2-power-alpha   "$(fld "$out" alpha)" "al1"
+
+    # This is the only vector carrying the freqInfo OPTIONALs, so it is the
+    # only one whose body is not 186 bits -- and the only one that proves the
+    # OPTIONAL bitmap is read rather than skipped.
+    out=$(lair_decode_sib2 "00000000000000000000000000000000100000000000000309154000")
+    chk sib2-ulcarrier-bits "$(fld "$out" bits)" "205"
+    chk sib2-ulcarrier-freq "$(fld "$out" ul_carrier_freq)" "2325"
+    chk sib2-ulcarrier-bw   "$(fld "$out" ul_bandwidth)" "n25"
+
+    # A body this codec does not model must refuse rather than report fields
+    # read from the wrong offsets.
+    chk sib2-short "$(lair_decode_sib2 14000000 >/dev/null 2>&1; echo $?)" "1"
 
     # ── 5. SIB3 / SIB5 ──────────────────────────────────────────────────
     # SIB3 now goes through the real TS 36.331 unaligned-PER codec in

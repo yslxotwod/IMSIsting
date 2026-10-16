@@ -259,8 +259,8 @@ of this tree's own invention, and the module's selftest then validates that
 layout against itself — the exact anti-pattern the bar below forbids. The
 evidence: a genuine SIB1 encoded by pycrate 0.8.1 and passed to
 `10_lte_air --decode-sib 1` yields values that cannot exist in the
-specification, and pycrate decoding this tree's own SIB2 fixture reports
-mandatory fields missing.
+specification, and pycrate decoding the SIB2 fixture this tree then carried —
+a ten-hex-digit body — reports mandatory fields missing.
 
 What is real in LTE today:
 - `10_lte_air --gen-enb-conf` writes usable srsRAN `enb.conf` and `rr.conf`.
@@ -289,17 +289,27 @@ What Phase 2 now has to add, in order:
    t-ReselectionEUTRA, and `31..33` three bits pycrate emits that are **not
    yet named** — they are zero in every value probed and are carried
    explicitly rather than dropped. A body with `p-Max` present is refused
-   rather than silently truncated. SIB2 and SIB4–SIB8 body vectors are
+   rather than silently truncated. SIB2 is **done** as well: the 186-bit
+   `SystemInformationBlockType2` body now encodes and decodes from a
+   declarative layout table whose every width is the constrained whole-number
+   encoding of the ASN.1 range, asserted against four captured containers. Two
+   independent checks confirm the *layout* rather than the table that encodes
+   it: the all-default value produces exactly 186 bits with a single set bit at
+   body position 117, which is where the table puts the
+   soundingRS-UL-ConfigCommon CHOICE selecting `setup`; and a fifty-field
+   differential sweep against pycrate — the widest legal value in every leaf,
+   one leaf at a time — agrees bit for bit. SIB4–SIB8 body vectors are
    captured but still to be encoded, and SIB13 does not yet pass pycrate's own
    validation.
 2. Replacement of the nine fake decoders with that codec, or an explicit
    statement in their output that they read a private layout. **`--decode-sib
-   1` and `--decode-sib 3` are done**: `lair_decode_sib1()` and
-   `lair_decode_sib3()` now delegate to `tools/lte_asn1.py`, both verified
-   against captured pycrate vectors, and both refuse anything that is not the
+   1`, `--decode-sib 2` and `--decode-sib 3` are done**: `lair_decode_sib1()`,
+   `lair_decode_sib2()` and `lair_decode_sib3()` now delegate to
+   `tools/lte_asn1.py`, all verified
+   against captured pycrate vectors, and all refuse anything that is not the
    SIB they claim rather than reporting fields decoded from the wrong bit
-   offsets. The private-layout warning that used to print for SIB3 is gone
-   with the parser that needed it. SIB2 and SIB4–SIB13 still read the old
+   offsets. The private-layout warning that used to print for SIB2 and SIB3 is
+   gone with the parsers that needed it. SIB4–SIB13 still read the old
    private layout, and now say so in their own output.
 3. RRC reconfiguration and handover construction, the actual TX path, then the
    same four-point bar Phase 1 was held to.
