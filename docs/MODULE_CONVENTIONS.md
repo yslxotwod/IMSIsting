@@ -12,15 +12,20 @@ can read the other without re-learning anything.
 
     modules/NN_name.sh
 
-`NN` is two digits, `name` is lowercase with underscores. Ranges are grouped
-by domain so the menu reads in order:
+`NN` is two digits, `name` is lowercase with underscores. Ids are **contiguous**
+and ordered by domain so the menu reads in order: setup and recon first, then the
+per-generation air interfaces, then SIM/eSIM/OTA and analysis, then automation
+and the device work.
 
-| Range | Domain |
-|---|---|
-| 00-09 | setup, radio interfaces, recon |
-| 10-19 | per-generation air interface and core attacks |
-| 20-29 | SIM/eSIM/OTA, analysis, scanners |
-| 30+ | automation, killchain, reporting |
+There are no reserved ranges and no band headroom. The next free id is one past
+the highest in use — `docs/MODULE_ROSTER.md` records both, and it is the file to
+update when a module is added or removed. A gap in the sequence is a defect, not
+a boundary.
+
+Adding, removing or renaming a module touches three files that must move
+together: `imsisting.sh`, the roster, and the generated
+`native/src/module_index.c` plus `module_index.tsv`. `tools/check-paths.sh`
+verifies every module file appears exactly once in the table.
 
 ## 2. Header block (mandatory, verbatim shape)
 

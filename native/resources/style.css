@@ -2653,3 +2653,66 @@ window.motion-reduced * {
     color: @accent;
     border-color: @accent;
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   Help
+   ══════════════════════════════════════════════════════════════════
+
+   The Help page is a stack of sections, each one a centred title above a
+   .card — the same rectangle a module page groups its content in. The
+   separation is the point: prose and a list want different rhythm, and a
+   single scrolling text view gives both the same one. */
+
+/* The title sits ABOVE the card, not inside it, so the card reads as the
+   section's field rather than as a titled box. Centred, because it labels
+   the whole card and not its first line. */
+.help-sec-title {
+    font-family: "Orbitron";
+    color: @accent;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.8px;
+}
+
+.help-card-body {
+    padding: 16px 18px;
+}
+
+/* Prose is joined into paragraphs and wrapped by the label, so the source
+   can stay hard-wrapped without the reader paying for it. */
+.help-prose {
+    color: @text;
+    font-size: 13px;
+}
+
+/* The lead line of a view, before the first section title. */
+.help-lead {
+    color: @text;
+    font-size: 14px;
+}
+
+/* A term and its definition. The term is a fixed column so the definitions
+   line up and the eye can run down them; the definition wraps. */
+.help-row-key {
+    font-family: "Orbitron";
+    font-size: 11px;
+    color: @accent;
+}
+.help-row-val {
+    font-family: monospace;
+    font-size: 12px;
+    color: @text;
+}
+
+/* Bulleted and numbered lines. */
+.help-item {
+    color: @text;
+    font-size: 13px;
+}
+
+/* Verbatim lines: commands, paths, output. */
+.help-mono {
+    font-family: monospace;
+    font-size: 12px;
+    color: #aab6c6;
+}

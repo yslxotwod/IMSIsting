@@ -60,8 +60,8 @@ for f in "$ROOT"/modules/*.sh; do
 
     # Scope every lookup to THIS module's own submenu table. Matching the bare
     # verb name anywhere in main1.c lets a verb borrow another module's entry:
-    # 13_lte_attach's --identity-exposure was reported PLACED on the strength of
-    # 10_gsm_air's spec, which hid that it had no working control at all.
+    # 09_lte_attach's --identity-exposure was reported PLACED on the strength of
+    # 06_gsm_air's spec, which hid that it had no working control at all.
     tab=$(grep -oE "module_registry_register\(\"$mod\", *[a-z0-9_]+_entries" "$MAIN" |
           head -1 | grep -oE '[a-z0-9_]+_entries')
     spec=""

@@ -697,8 +697,8 @@ gtap_identities() {
 
     # Hand the payloads to the per-generation decoder that owns the message
     # format, rather than re-implementing NAS/RR parsing here.
-    local lte="$IMSISTING_ROOT/modules/13_lte_attach.sh"
-    local gsm="$IMSISTING_ROOT/modules/10_gsm_air.sh"
+    local lte="$IMSISTING_ROOT/modules/09_lte_attach.sh"
+    local gsm="$IMSISTING_ROOT/modules/06_gsm_air.sh"
     local found=0
 
     printf 'frame\tkind\tvalue\tsource\n'
@@ -885,12 +885,12 @@ gtap_selftest() {
     chk payload-len  "$(( ${#h} / 2 ))" "16"
 
     # 9. The identity harvest is a CROSS-MODULE contract: this module asks
-    #    10_gsm_air to classify each GSM Um payload with --identity-exposure.
+    #    06_gsm_air to classify each GSM Um payload with --identity-exposure.
     #    If that verb ever goes missing the loop's `|| continue` swallows every
     #    payload and the harvest silently reports nothing -- which is exactly
     #    how it was broken before. Assert both halves: the callee implements
     #    the verb, and a real IDENTITY RESPONSE yields its IMSI here.
-    local gsm="$IMSISTING_ROOT/modules/10_gsm_air.sh"
+    local gsm="$IMSISTING_ROOT/modules/06_gsm_air.sh"
     chk exp-verb-exists \
         "$(grep -cE '^[[:space:]]*--identity-exposure\)' "$gsm" 2>/dev/null)" "1"
     chk exp-verb-answers \
@@ -1456,7 +1456,7 @@ gtap_cli_main() {
         --menu)            gtap_menu ;;
         *)
             cat >&2 <<EOF
-GSMTAP Passive — listen for, decode and export Osmocom GSMTAP
+GSMTAP Live Feed — listen for, decode and export Osmocom GSMTAP
 
 Usage: $0 COMMAND [FLAGS]
 

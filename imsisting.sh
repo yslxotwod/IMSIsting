@@ -253,70 +253,85 @@ fi
 # rather than inferred. tools/check-paths.sh verifies every module file
 # appears here exactly once.
 IMSISTING_MODULE_TABLE=(
+    # SYSTEM
     "SYSTEM|01|Dependency Manager|deps_menu|00_deps"
     "SYSTEM|02|SDR / Radio Manager|radio_menu|01_radio"
     "SYSTEM|03|Field Kit|fkit_menu|05_field_kit"
-    "SYSTEM|04|Cellular Killchain|kchn_menu|30_killchain"
+    "SYSTEM|04|Cellular Killchain|kchn_menu|25_killchain"
 
+    # RECON
     "RECON|05|Cell Recon|crec_menu|02_cell_recon"
-    "RECON|06|GSMTAP Passive|gtap_menu|03_gsmtap"
-    "RECON|07|Tower Survey / War-drive|tmap_menu|04_tower_map"
-    "RECON|08|5G NTN / Satellite|ntn_menu|54_ntn"
-    "RECON|09|TETRA / DMR / GSM-R|n3g_menu|58_non3gpp"
+    "RECON|06|GSMTAP Live Feed|gtap_menu|03_gsmtap"
+    "RECON|07|Tower Survey|tmap_menu|04_tower_map"
 
-    "AIR INTERFACE|10|GSM Air Interface|gair_menu|10_gsm_air"
-    "AIR INTERFACE|11|UMTS Air Interface|uair_menu|12_umts_air"
-    "AIR INTERFACE|12|LTE Air Interface|lair_menu|14_lte_air"
-    "AIR INTERFACE|13|5G NR Air Interface|nair_menu|16_nr_air"
-    "AIR INTERFACE|14|NB-IoT / Cat-M1|iot_menu|50_iot"
-    "AIR INTERFACE|15|GPRS / EDGE|gprs_menu|55_gprs"
-    "AIR INTERFACE|16|NR Sidelink / V2X|slnk_menu|56_sidelink"
+    # RADIO
+    "RADIO|08|GSM Air Interface|gair_menu|06_gsm_air"
+    "RADIO|09|GSM Attack|gatk_menu|07_gsm_attack"
+    "RADIO|10|UMTS Air Interface|uair_menu|08_umts_air"
+    "RADIO|11|LTE Air Interface|lair_menu|10_lte_air"
+    "RADIO|12|5G NR Air Interface|nair_menu|12_nr_air"
+    "RADIO|13|Downgrade Attacks|dwn_menu|15_downgrade"
+    "RADIO|14|NB-IoT / Cat-M1|iot_menu|45_iot"
+    "RADIO|15|GPRS / EDGE|gprs_menu|50_gprs"
+    "RADIO|16|NR Sidelink / V2X|slnk_menu|51_sidelink"
+    "RADIO|17|5G NTN / Satellite|ntn_menu|49_ntn"
+    "RADIO|18|TETRA / DMR / GSM-R|n3g_menu|53_non3gpp"
+    "RADIO|19|Jamming Detection|jamd_menu|33_jamming_detect"
 
-    "CORE NETWORK|17|LTE Attach / NAS|latt_menu|13_lte_attach"
-    "CORE NETWORK|18|LTE Core (EPC)|lcore_menu|15_lte_core"
-    "CORE NETWORK|19|5G Core (SBA)|ncore_menu|17_nr_core"
-    "CORE NETWORK|20|SS7 / MAP Attacks|ss7_menu|31_ss7_map"
-    "CORE NETWORK|21|DNS over Cellular|cdns_menu|32_cellular_dns"
-    "CORE NETWORK|22|Network Slicing|slic_menu|39_slicing"
-    "CORE NETWORK|23|VoWiFi / ePDG|vowi_menu|41_vowifi"
-    "CORE NETWORK|24|Femtocell / HeNB|femt_menu|42_femtocell"
-    "CORE NETWORK|25|USSD|ussd_menu|43_ussd"
-    "CORE NETWORK|26|5G SBA Pivot|sbap_menu|45_sba_pivot"
-    "CORE NETWORK|27|RAN Sharing|rans_menu|48_ran_share"
-    "CORE NETWORK|28|Wi-Fi Offload / LWA|wifioff_menu|52_wifioff"
+    # ACCESS
+    "ACCESS|20|LTE Attach Forge|latt_menu|09_lte_attach"
+    "ACCESS|21|Slicing Escape|slic_menu|34_slicing"
+    "ACCESS|22|VoWiFi / ePDG Attacks|vowi_menu|36_vowifi"
+    "ACCESS|23|Femtocell / HeNB Attacks|femt_menu|37_femtocell"
+    "ACCESS|24|USSD Forge|ussd_menu|38_ussd"
+    "ACCESS|25|RAN Sharing|rans_menu|43_ran_share"
+    "ACCESS|26|Wi-Fi Offload / LWA|wifioff_menu|47_wifioff"
 
-    "SIM / IDENTITY|29|SUCI / SUPI|suci_menu|18_suci"
-    "SIM / IDENTITY|30|SIM / eSIM / OTA|sim_menu|20_sim"
-    "SIM / IDENTITY|31|SIM Swap Defence|simd_menu|36_sim_defense"
-    "SIM / IDENTITY|32|OTA Binary SMS|otasm_menu|46_ota_sms"
-    "SIM / IDENTITY|33|SIM Toolkit (STK)|stk_menu|57_stk"
+    # CORE NETWORK
+    "CORE NETWORK|27|LTE Core (EPC)|lcore_menu|11_lte_core"
+    "CORE NETWORK|28|5G Core (SBA)|ncore_menu|13_nr_core"
+    "CORE NETWORK|29|SS7 / MAP Attacks|ss7_menu|26_ss7_map"
+    "CORE NETWORK|30|Cellular DNS Spoof|cdns_menu|27_cellular_dns"
+    "CORE NETWORK|31|VoLTE / IMS Attacks|vims_menu|30_volte_ims"
+    "CORE NETWORK|32|NAS Signalling|nasf_menu|32_nas_signaling"
+    "CORE NETWORK|33|5G SBA Pivot|sbap_menu|40_sba_pivot"
+    "CORE NETWORK|34|O-RAN / xApp Attacks|oran_menu|48_oran"
 
-    "ATTACKS|34|GSM Attack|gatk_menu|11_gsm_attack"
-    "ATTACKS|35|Downgrade Attacks|dwn_menu|19_downgrade"
-    "ATTACKS|36|GSM/UMTS CVE Kit|gcve_menu|24_gsm_cve"
-    "ATTACKS|37|LTE CVE Kit|lcve_menu|25_lte_cve"
-    "ATTACKS|38|5G CVE Kit|ncve_menu|26_nr_cve"
-    "ATTACKS|39|VoLTE / IMS Attacks|vims_menu|35_volte_ims"
-    "ATTACKS|40|Baseband Research|bbnd_menu|40_baseband"
-    "ATTACKS|41|O-RAN / Open RAN|oran_menu|53_oran"
-    "ATTACKS|42|Baseband Exploits|bexp_menu|59_baseband_exploit"
-    "ATTACKS|43|5G NR Injection|nrj_menu|60_nr_inject"
-    "ATTACKS|44|Baseband NV/EFS|bbdg_menu|61_baseband_diag"
+    # SIM / IDENTITY
+    "SIM / IDENTITY|35|SUCI Deconcealment|suci_menu|14_suci"
+    "SIM / IDENTITY|36|SIM / eSIM / OTA Attacks|sim_menu|16_sim"
+    "SIM / IDENTITY|37|IMSI Harvest|imsi_menu|18_imsi_exposure"
+    "SIM / IDENTITY|38|SIM Swap Attack/Defence|simd_menu|31_sim_defense"
+    "SIM / IDENTITY|39|OTA Binary SMS Attacks|otasm_menu|41_ota_sms"
+    "SIM / IDENTITY|40|STK Attacks|stk_menu|52_stk"
 
-    "ANALYSIS|45|Capture Analysis|pcap_menu|21_pcap_analysis"
-    "ANALYSIS|46|IMSI Harvest|imsi_menu|22_imsi_exposure"
-    "ANALYSIS|47|Cipher Audit|caud_menu|23_cipher_audit"
-    "ANALYSIS|48|Traffic Analysis|tana_menu|27_traffic_analysis"
-    "ANALYSIS|49|MAC Layer|macl_menu|34_mac_layer"
-    "ANALYSIS|50|NAS Signalling|nasf_menu|37_nas_signaling"
-    "ANALYSIS|51|LI Discovery|lipr_menu|47_li_probe"
-    "ANALYSIS|52|Carrier API Audit|capi_menu|49_carrier_api"
+    # BASEBAND / DEVICE
+    "BASEBAND / DEVICE|41|Baseband Fuzzing|bbnd_menu|35_baseband"
+    "BASEBAND / DEVICE|42|Baseband Exploits|bexp_menu|54_baseband_exploit"
+    "BASEBAND / DEVICE|43|5G NR Injection|nrj_menu|55_nr_inject"
+    "BASEBAND / DEVICE|44|Baseband NV/EFS|bbdg_menu|56_baseband_diag"
 
-    "RF / TRACKING|53|RF Fingerprint / CSI|rff_menu|28_rf_fingerprint"
-    "RF / TRACKING|54|Paging / Torpedo|pgt_menu|33_paging_track"
-    "RF / TRACKING|55|Jamming Detection|jamd_menu|38_jamming_detect"
-    "RF / TRACKING|56|TA Geolocation|tgeo_menu|44_ta_geoloc"
-    "RF / TRACKING|57|LPP Positioning|lpp_menu|51_lpp"
+    # TRACKING
+    "TRACKING|45|RF Fingerprint / CSI|rff_menu|24_rf_fingerprint"
+    "TRACKING|46|Paging / Torpedo|pgt_menu|28_paging_track"
+    "TRACKING|47|TA Geolocation|tgeo_menu|39_ta_geoloc"
+    "TRACKING|48|LPP Position Forgery|lpp_menu|46_lpp"
+
+    # ANALYSIS
+    "ANALYSIS|49|Capture Analysis|pcap_menu|17_pcap_analysis"
+    "ANALYSIS|50|Cipher Audit|caud_menu|19_cipher_audit"
+    "ANALYSIS|51|Traffic Analysis|tana_menu|23_traffic_analysis"
+    "ANALYSIS|52|MAC / RLC Analysis|macl_menu|29_mac_layer"
+
+    # EXPLOIT KITS
+    "EXPLOIT KITS|53|GSM/UMTS CVE Kit|gcve_menu|20_gsm_cve"
+    "EXPLOIT KITS|54|LTE CVE Kit|lcve_menu|21_lte_cve"
+    "EXPLOIT KITS|55|5G CVE Kit|ncve_menu|22_nr_cve"
+
+    # INTERCEPT / CARRIER
+    "INTERCEPT / CARRIER|56|LI Interception|lipr_menu|42_li_probe"
+    "INTERCEPT / CARRIER|57|Carrier API Abuse|capi_menu|44_carrier_api"
+
 )
 
 # ── banner ──────────────────────────────────────────────────

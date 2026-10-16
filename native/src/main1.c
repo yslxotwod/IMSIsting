@@ -359,6 +359,10 @@ struct _AppState {
        they are rendered into. Session-scoped — the persisted counts above
        answer "what do I use", this answers "what was I just in". */
     GPtrArray *recent_mru;
+    /* A view to select once the page that owns it has been built. The recent
+       list can name a submenu, and the module page does not exist yet when
+       the row is pressed, so the wish waits here for one build. */
+    char      *pending_view;
     GtkWidget *drawer_recent_box;
     char       *density;
     GtkWidget *loot_list;
@@ -563,8 +567,8 @@ static const ModuleDefinition modules[] = {
     { "05_field_kit",        "Field Kit",            "SYSTEM",
       "imsisting-05_field_kit-symbolic",
       "RF pre-flight, honesty verification of every radio verb, and a synthetic GSMTAP source." },
-    { "30_killchain",        "Cellular Killchain",   "SYSTEM",
-      "imsisting-30_killchain-symbolic",
+    { "25_killchain",        "Cellular Killchain",   "SYSTEM",
+      "imsisting-25_killchain-symbolic",
       "Chains module verbs into repeatable runs from a TSV chain file." },
 
     /* RECON — passive survey of the RF environment: no target, no identity */
@@ -579,171 +583,171 @@ static const ModuleDefinition modules[] = {
       "GPS-tagged cell survey with CSV, KML and GeoJSON export." },
 
     /* RADIO — the air interface per RAT, plus radio-layer attacks and RF effects */
-    { "10_gsm_air",          "GSM Air Interface",    "RADIO",
-      "imsisting-10_gsm_air-symbolic",
+    { "06_gsm_air",          "GSM Air Interface",    "RADIO",
+      "imsisting-06_gsm_air-symbolic",
       "GSM system information, paging, cipher audit and A5/1 keystream, proved against the BGW vector." },
-    { "11_gsm_attack",       "GSM Attack",           "RADIO",
-      "imsisting-11_gsm_attack-symbolic",
+    { "07_gsm_attack",       "GSM Attack",           "RADIO",
+      "imsisting-07_gsm_attack-symbolic",
       "IMSI-catcher sequence, A5/1 downgrade, TMSI de-anonymisation and Kc recovery." },
-    { "12_umts_air",         "UMTS Air Interface",   "RADIO",
-      "imsisting-12_umts_air-symbolic",
+    { "08_umts_air",         "UMTS Air Interface",   "RADIO",
+      "imsisting-08_umts_air-symbolic",
       "UMTS UARFCN, SIB decode, RRC integrity (UIA1/UIA2) and the AKA relay flow." },
-    { "14_lte_air",          "LTE Air Interface",    "RADIO",
-      "imsisting-14_lte_air-symbolic",
+    { "10_lte_air",          "LTE Air Interface",    "RADIO",
+      "imsisting-10_lte_air-symbolic",
       "LTE EARFCN, RRC/SIB decode, paging maths and srsRAN eNB orchestration." },
-    { "16_nr_air",           "5G NR Air Interface",  "RADIO",
-      "imsisting-16_nr_air-symbolic",
+    { "12_nr_air",           "5G NR Air Interface",  "RADIO",
+      "imsisting-12_nr_air-symbolic",
       "NR-ARFCN, MIB/SIB1 decode, PCI, PRACH occasions and gNB config generation." },
-    { "19_downgrade",        "Downgrade Attacks",    "RADIO",
-      "imsisting-19_downgrade-symbolic",
+    { "15_downgrade",        "Downgrade Attacks",    "RADIO",
+      "imsisting-15_downgrade-symbolic",
       "Reject causes, null-cipher tables, Security Mode Command and downgrade detection." },
-    { "50_iot",              "NB-IoT / Cat-M1",      "RADIO",
-      "imsisting-50_iot-symbolic",
+    { "45_iot",              "NB-IoT / Cat-M1",      "RADIO",
+      "imsisting-45_iot-symbolic",
       "NB-IoT and Cat-M1: NPRACH, NPSS/NSSS, SIB1-NB and NPRFCN." },
-    { "55_gprs",             "GPRS / EDGE",          "RADIO",
-      "imsisting-55_gprs-symbolic",
+    { "50_gprs",             "GPRS / EDGE",          "RADIO",
+      "imsisting-50_gprs-symbolic",
       "GPRS/EDGE packet-switched: GEA ciphering, APN coding, PDP context and downgrade detection." },
-    { "56_sidelink",         "NR Sidelink / V2X",    "RADIO",
-      "imsisting-56_sidelink-symbolic",
+    { "51_sidelink",         "NR Sidelink / V2X",    "RADIO",
+      "imsisting-51_sidelink-symbolic",
       "NR sidelink on PC5: resource pools, SCI-1A, ITS certificates and relay checks." },
-    { "54_ntn",              "5G NTN / Satellite",   "RADIO",
-      "imsisting-54_ntn-symbolic",
+    { "49_ntn",              "5G NTN / Satellite",   "RADIO",
+      "imsisting-49_ntn-symbolic",
       "Non-terrestrial access: Doppler, round-trip delay, TA, k_offset and the SIB19 fields." },
-    { "58_non3gpp",          "TETRA / DMR / GSM-R",  "RADIO",
-      "imsisting-58_non3gpp-symbolic",
+    { "53_non3gpp",          "TETRA / DMR / GSM-R",  "RADIO",
+      "imsisting-53_non3gpp-symbolic",
       "Non-3GPP land mobile radio: TETRA, DMR and GSM-R structure, ciphers and band classification." },
-    { "38_jamming_detect",   "Jamming Detection",    "RADIO",
-      "imsisting-38_jamming_detect-symbolic",
+    { "33_jamming_detect",   "Jamming Detection",    "RADIO",
+      "imsisting-33_jamming_detect-symbolic",
       "Measures interference and discriminates jamming from congestion or a coverage hole." },
 
     /* ACCESS — attach, registration and the access-network edge */
-    { "13_lte_attach",       "LTE Attach Forge",     "ACCESS",
-      "imsisting-13_lte_attach-symbolic",
+    { "09_lte_attach",       "LTE Attach Forge",     "ACCESS",
+      "imsisting-09_lte_attach-symbolic",
       "NAS EMM/ESM encode-decode, BCD IMSI/IMEI, attach forge and identity-exposure detection." },
-    { "39_slicing",          "Slicing Escape",      "ACCESS",
-      "imsisting-39_slicing-symbolic",
+    { "34_slicing",          "Slicing Escape",      "ACCESS",
+      "imsisting-34_slicing-symbolic",
       "S-NSSAI encode-decode, slice selection and cross-slice isolation testing." },
-    { "41_vowifi",           "VoWiFi / ePDG Attacks",        "ACCESS",
-      "imsisting-41_vowifi-symbolic",
+    { "36_vowifi",           "VoWiFi / ePDG Attacks",        "ACCESS",
+      "imsisting-36_vowifi-symbolic",
       "IKEv2 over SWu, EAP-AKA, the SWu NAI and an encryption/integrity transform audit." },
-    { "42_femtocell",        "Femtocell / HeNB Attacks",     "ACCESS",
-      "imsisting-42_femtocell-symbolic",
+    { "37_femtocell",        "Femtocell / HeNB Attacks",     "ACCESS",
+      "imsisting-37_femtocell-symbolic",
       "HeNB assessment: CSG/PCI conflicts, the Iuh stack and a TR-069 management audit." },
-    { "43_ussd",             "USSD Forge",                 "ACCESS",
-      "imsisting-43_ussd-symbolic",
+    { "38_ussd",             "USSD Forge",                 "ACCESS",
+      "imsisting-38_ussd-symbolic",
       "USSD/MMI parsing, 7-bit packing and USSD/STK injection detection." },
-    { "48_ran_share",        "RAN Sharing",          "ACCESS",
-      "imsisting-48_ran_share-symbolic",
+    { "43_ran_share",        "RAN Sharing",          "ACCESS",
+      "imsisting-43_ran_share-symbolic",
       "PLMN coding, MOCN/MORAN/GWCN classification and cross-operator leakage detection." },
-    { "52_wifioff",          "Wi-Fi Offload / LWA",  "ACCESS",
-      "imsisting-52_wifioff-symbolic",
+    { "47_wifioff",          "Wi-Fi Offload / LWA",  "ACCESS",
+      "imsisting-47_wifioff-symbolic",
       "Wi-Fi offload and LWA: ePDG FQDN, certificate validation and LWA configuration." },
 
     /* CORE NETWORK — the network behind the RAN, and the interconnect */
-    { "15_lte_core",         "LTE Core (EPC)",       "CORE NETWORK",
-      "imsisting-15_lte_core-symbolic",
+    { "11_lte_core",         "LTE Core (EPC)",       "CORE NETWORK",
+      "imsisting-11_lte_core-symbolic",
       "Diameter S6a/S6d, GTP-C/GTP-U and S1AP; decodes the EPC core and forges registration moves." },
-    { "17_nr_core",          "5G Core (SBA)",        "CORE NETWORK",
-      "imsisting-17_nr_core-symbolic",
+    { "13_nr_core",          "5G Core (SBA)",        "CORE NETWORK",
+      "imsisting-13_nr_core-symbolic",
       "5G SBA: NGAP, 5GS NAS, 5G-GUTI, PFCP rules and 5G-AKA." },
-    { "31_ss7_map",          "SS7 / MAP Attacks",    "CORE NETWORK",
-      "imsisting-31_ss7_map-symbolic",
+    { "26_ss7_map",          "SS7 / MAP Attacks",    "CORE NETWORK",
+      "imsisting-26_ss7_map-symbolic",
       "MTP3/SCCP/TCAP/MAP decode and forge, M3UA framing both ways and GRX reachability." },
-    { "32_cellular_dns",     "Cellular DNS Spoof",    "CORE NETWORK",
-      "imsisting-32_cellular_dns-symbolic",
+    { "27_cellular_dns",     "Cellular DNS Spoof",    "CORE NETWORK",
+      "imsisting-27_cellular_dns-symbolic",
       "DNS encode-decode, the aLTEr redirection sequence and response-tampering detection." },
-    { "35_volte_ims",        "VoLTE / IMS Attacks",  "CORE NETWORK",
-      "imsisting-35_volte_ims-symbolic",
+    { "30_volte_ims",        "VoLTE / IMS Attacks",  "CORE NETWORK",
+      "imsisting-30_volte_ims-symbolic",
       "VoLTE keystream reuse (ReVoLTE), IMP4GT identity mapping and SIP/IMS analysis." },
-    { "37_nas_signaling",    "NAS Signalling",       "CORE NETWORK",
-      "imsisting-37_nas_signaling-symbolic",
+    { "32_nas_signaling",    "NAS Signalling",       "CORE NETWORK",
+      "imsisting-32_nas_signaling-symbolic",
       "NAS message-rate measurement, procedure mix and signalling-storm detection." },
-    { "45_sba_pivot",        "5G SBA Pivot",         "CORE NETWORK",
-      "imsisting-45_sba_pivot-symbolic",
+    { "40_sba_pivot",        "5G SBA Pivot",         "CORE NETWORK",
+      "imsisting-40_sba_pivot-symbolic",
       "HTTP/2 SBI framing, NRF discovery and OAuth2 token audit." },
-    { "53_oran",             "O-RAN / xApp Attacks",     "CORE NETWORK",
-      "imsisting-53_oran-symbolic",
+    { "48_oran",             "O-RAN / xApp Attacks",     "CORE NETWORK",
+      "imsisting-48_oran-symbolic",
       "O-RAN interfaces, deployment assessment and xApp-authority modelling." },
 
     /* SIM / IDENTITY — the subscription, the card and the subscriber identity */
-    { "18_suci",             "SUCI Deconcealment",          "SIM / IDENTITY",
-      "imsisting-18_suci-symbolic",
+    { "14_suci",             "SUCI Deconcealment",          "SIM / IDENTITY",
+      "imsisting-14_suci-symbolic",
       "SUCI conceal/deconceal (ECIES profile A/B), HKDF and the null-scheme audit." },
-    { "20_sim",              "SIM / eSIM / OTA Attacks",     "SIM / IDENTITY",
-      "imsisting-20_sim-symbolic",
+    { "16_sim",              "SIM / eSIM / OTA Attacks",     "SIM / IDENTITY",
+      "imsisting-16_sim-symbolic",
       "ISO-7816 APDU, USIM files, EF_AD in both layouts, OTA parsing and eSIM profiles." },
-    { "22_imsi_exposure",    "IMSI Harvest",         "SIM / IDENTITY",
-      "imsisting-22_imsi_exposure-symbolic",
+    { "18_imsi_exposure",    "IMSI Harvest",         "SIM / IDENTITY",
+      "imsisting-18_imsi_exposure-symbolic",
       "Identity harvesting, TMSI/GUTI to IMSI correlation and per-subscriber exposure scoring." },
-    { "36_sim_defense",      "SIM Swap Attack/Defence",     "SIM / IDENTITY",
-      "imsisting-36_sim_defense-symbolic",
+    { "31_sim_defense",      "SIM Swap Attack/Defence",     "SIM / IDENTITY",
+      "imsisting-31_sim_defense-symbolic",
       "Detection and defence for a SIM port in flight, plus eSIM profile integrity." },
-    { "46_ota_sms",          "OTA Binary SMS Attacks",       "SIM / IDENTITY",
-      "imsisting-46_ota_sms-symbolic",
+    { "41_ota_sms",          "OTA Binary SMS Attacks",       "SIM / IDENTITY",
+      "imsisting-41_ota_sms-symbolic",
       "TS 23.048 OTA command-packet construction with an SPI/counter/key audit. Own-SIM and lab." },
-    { "57_stk",              "STK Attacks",    "SIM / IDENTITY",
-      "imsisting-57_stk-symbolic",
+    { "52_stk",              "STK Attacks",    "SIM / IDENTITY",
+      "imsisting-52_stk-symbolic",
       "TS 31.111 proactive commands: build, parse and audit for silent off-device actions." },
 
     /* BASEBAND / DEVICE — below the stack and at the handset */
-    { "40_baseband",         "Baseband Fuzzing",    "BASEBAND / DEVICE",
-      "imsisting-40_baseband-symbolic",
+    { "35_baseband",         "Baseband Fuzzing",    "BASEBAND / DEVICE",
+      "imsisting-35_baseband-symbolic",
       "Baseband research scaffolding: ASN.1 mutation, corpus generation and crash triage." },
-    { "59_baseband_exploit", "Baseband Exploits",    "BASEBAND / DEVICE",
-      "imsisting-59_baseband_exploit-symbolic",
+    { "54_baseband_exploit", "Baseband Exploits",    "BASEBAND / DEVICE",
+      "imsisting-54_baseband_exploit-symbolic",
       "L1/L2 malformed-PDU construction, 5G control-plane forgery, and the baseband CVE catalogue." },
-    { "60_nr_inject",        "5G NR Injection",      "BASEBAND / DEVICE",
-      "imsisting-60_nr_inject-symbolic",
+    { "55_nr_inject",        "5G NR Injection",      "BASEBAND / DEVICE",
+      "imsisting-55_nr_inject-symbolic",
       "NR RNTI tracking, MAC-NR framing, descrambling and the injection exploit set." },
-    { "61_baseband_diag",    "Baseband NV/EFS",      "BASEBAND / DEVICE",
-      "imsisting-61_baseband_diag-symbolic",
+    { "56_baseband_diag",    "Baseband NV/EFS",      "BASEBAND / DEVICE",
+      "imsisting-56_baseband_diag-symbolic",
       "Qualcomm DM/DIAG framing, NV and EFS2 codecs, state-info identity decode and the AT/device surface." },
 
     /* TRACKING — locating and following a subscriber or a transmitter */
-    { "28_rf_fingerprint",   "RF Fingerprint / CSI", "TRACKING",
-      "imsisting-28_rf_fingerprint-symbolic",
+    { "24_rf_fingerprint",   "RF Fingerprint / CSI", "TRACKING",
+      "imsisting-24_rf_fingerprint-symbolic",
       "IQ fingerprinting (CFO, IRR, transients) and CSI side-channel extraction." },
-    { "33_paging_track",     "Paging / Torpedo",     "TRACKING",
-      "imsisting-33_paging_track-symbolic",
+    { "28_paging_track",     "Paging / Torpedo",     "TRACKING",
+      "imsisting-28_paging_track-symbolic",
       "Paging occasion maths, paging capture, and the Torpedo/Piercer models." },
-    { "44_ta_geoloc",        "TA Geolocation",       "TRACKING",
-      "imsisting-44_ta_geoloc-symbolic",
+    { "39_ta_geoloc",        "TA Geolocation",       "TRACKING",
+      "imsisting-39_ta_geoloc-symbolic",
       "Timing-advance ranging and multi-cell trilateration from TA measurements." },
-    { "51_lpp",              "LPP Position Forgery",      "TRACKING",
-      "imsisting-51_lpp-symbolic",
+    { "46_lpp",              "LPP Position Forgery",      "TRACKING",
+      "imsisting-46_lpp-symbolic",
       "LTE Positioning Protocol: procedure codes, header codec and position-forgery detection." },
 
     /* ANALYSIS — offline work on captures and logs */
-    { "21_pcap_analysis",    "Capture Analysis",     "ANALYSIS",
-      "imsisting-21_pcap_analysis-symbolic",
+    { "17_pcap_analysis",    "Capture Analysis",     "ANALYSIS",
+      "imsisting-17_pcap_analysis-symbolic",
       "From-scratch pcap reader that dissects GSMTAP, Diameter, NGAP, S1AP, GTP, PFCP and RTP." },
-    { "23_cipher_audit",     "Cipher Audit",         "ANALYSIS",
-      "imsisting-23_cipher_audit-symbolic",
+    { "19_cipher_audit",     "Cipher Audit",         "ANALYSIS",
+      "imsisting-19_cipher_audit-symbolic",
       "Scores negotiated ciphers per session across 2G-5G and finds null or downgraded bearers." },
-    { "27_traffic_analysis", "Traffic Analysis",     "ANALYSIS",
-      "imsisting-27_traffic_analysis-symbolic",
+    { "23_traffic_analysis", "Traffic Analysis",     "ANALYSIS",
+      "imsisting-23_traffic_analysis-symbolic",
       "Flow and burst analysis, website fingerprinting and padding/shaping detection." },
-    { "34_mac_layer",        "MAC / RLC Analysis",            "ANALYSIS",
-      "imsisting-34_mac_layer-symbolic",
+    { "29_mac_layer",        "MAC / RLC Analysis",            "ANALYSIS",
+      "imsisting-29_mac_layer-symbolic",
       "LTE MAC PDU decode, RNTI tracking, scheduling-pattern inference and DCI/MCS mapping." },
 
     /* EXPLOIT KITS — probe-or-handoff CVE kits */
-    { "24_gsm_cve",          "GSM/UMTS CVE Kit",     "EXPLOIT KITS",
-      "imsisting-24_gsm_cve-symbolic",
+    { "20_gsm_cve",          "GSM/UMTS CVE Kit",     "EXPLOIT KITS",
+      "imsisting-20_gsm_cve-symbolic",
       "Per-CVE probes and handoffs for 2G/3G stack bugs." },
-    { "25_lte_cve",          "LTE CVE Kit",          "EXPLOIT KITS",
-      "imsisting-25_lte_cve-symbolic",
+    { "21_lte_cve",          "LTE CVE Kit",          "EXPLOIT KITS",
+      "imsisting-21_lte_cve-symbolic",
       "LTE stack CVEs: baseband, NAS, ASN.1 and Diameter." },
-    { "26_nr_cve",           "5G CVE Kit",           "EXPLOIT KITS",
-      "imsisting-26_nr_cve-symbolic",
+    { "22_nr_cve",           "5G CVE Kit",           "EXPLOIT KITS",
+      "imsisting-22_nr_cve-symbolic",
       "5G NR, SBA and SUCI CVEs." },
 
     /* INTERCEPT / CARRIER — lawful intercept and carrier-side interfaces */
-    { "47_li_probe",         "LI Interception",         "INTERCEPT / CARRIER",
-      "imsisting-47_li_probe-symbolic",
+    { "42_li_probe",         "LI Interception",         "INTERCEPT / CARRIER",
+      "imsisting-42_li_probe-symbolic",
       "Lawful-interception interfaces and interception-posture signals. Detection only." },
-    { "49_carrier_api",      "Carrier API Abuse",    "INTERCEPT / CARRIER",
-      "imsisting-49_carrier_api-symbolic",
+    { "44_carrier_api",      "Carrier API Abuse",    "INTERCEPT / CARRIER",
+      "imsisting-44_carrier_api-symbolic",
       "Carrier API surface, authorisation-boundary testing and token/rate-limit audit." }
 
 };
@@ -774,7 +778,15 @@ module_name_for(const char *module_id)
 
 static void append_event(AppState *state, const char *message);
 static void recents_bump(AppState *state, const char *module_id);
-static void drawer_recent_push(AppState *state, const char *module_id);
+static void drawer_recent_push(AppState *state, const char *key);
+/* A place is "<owner>|<view>" - a module or permanent page and the view that
+   was on screen inside it. Defined with the recent list, called from the
+   module page as soon as a view is opened. */
+static void place_push_view(AppState *state, const char *owner,
+                            const char *view);
+/* Defined with the Settings page, which owns the only permanent page with
+   sub-views; the recent list can send the operator straight to one. */
+static void settings_show_view(AppState *state, const char *name);
 static void drawer_recent_refresh(AppState *state);
 static guint recent_count_of(int idx);
 static void live_inspector_reset(AppState *state);
@@ -1138,8 +1150,154 @@ toast_close_clicked(GtkButton *button, gpointer user_data)
         gtk_revealer_set_reveal_child(GTK_REVEALER(t->revealer), FALSE);
 }
 
+/* Read by the toast gate below, which is defined before the store itself. */
+static const char *settings_get(const char *key, const char *fallback);
+
+/* A comma-separated list, matched case-insensitively against the toast's
+   title. The log is the record and the corner is the interruption: a muted
+   title is still logged, it just stops interrupting. */
+static gboolean
+settings_list_has(const char *key, const char *needle)
+{
+    const char *list = settings_get(key, NULL);
+    gboolean found = FALSE;
+
+    if (list == NULL || *list == '\0' || needle == NULL) return FALSE;
+    g_autofree char *hay = g_ascii_strdown(needle, -1);
+    g_auto(GStrv) parts = g_strsplit(list, ",", -1);
+
+    /* Lowercased, then a plain substring test: GLib has no strcasestr, and
+       lowercasing four short titles costs less than the alternative. */
+    for (guint i = 0; parts[i] != NULL && !found; i++) {
+        g_autofree char *one = g_strstrip(g_strdup(parts[i]));
+        g_autofree char *low = g_ascii_strdown(one, -1);
+        if (*one != '\0' && strstr(hay, low) != NULL)
+            found = TRUE;
+    }
+    return found;
+}
+
 #define TOAST_STACK_MAX 5
 #define NOTIF_MAX 100
+
+/* ---- Declared settings -------------------------------------------------
+   state/settings.tsv: key<TAB>value, one per line, '#' starts a comment, and
+   a missing key means the default. It is the same file imsisting.sh reads at
+   startup and the same shape as state/ui.tsv, on purpose: the window is one
+   client of the file, not its owner. A setting changed here changes what a
+   command typed by hand does, and `./imsisting.sh --settings set k v` changes
+   what the window does - the button and the command stay the same thing.
+
+   Precedence is environment > file > default, which the launcher applies to
+   the module-facing keys; these are the window's own. */
+
+static GHashTable *g_settings;   /* key -> value, both owned */
+
+static char *
+settings_path(void)
+{
+    return g_build_filename(IMSISTING_ROOT, "state", "settings.tsv", NULL);
+}
+
+static void
+settings_load(void)
+{
+    g_autofree char *path = settings_path();
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+
+    if (g_settings == NULL)
+        g_settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    else
+        g_hash_table_remove_all(g_settings);
+
+    if (!g_file_get_contents(path, &text, NULL, NULL)) return;
+    lines = g_strsplit(text, "\n", -1);
+    for (int i = 0; lines[i] != NULL; i++) {
+        char *tab;
+        if (lines[i][0] == '\0' || lines[i][0] == '#') continue;
+        tab = strchr(lines[i], '\t');
+        if (tab == NULL) continue;          /* no tab: not a pair, ignore it */
+        *tab = '\0';
+        g_hash_table_insert(g_settings, g_strdup(lines[i]), g_strdup(tab + 1));
+    }
+}
+
+static void
+settings_save(void)
+{
+    g_autofree char *path = settings_path();
+    g_autoptr(GString) out = g_string_new(
+        "# IMSIsting settings — key<TAB>value, one per line, # starts a comment.\n"
+        "# A missing key means the default; `./imsisting.sh --settings list` "
+        "shows what is declared.\n");
+    GList *keys = g_hash_table_get_keys(g_settings);
+    GList *it;
+
+    keys = g_list_sort(keys, (GCompareFunc) g_strcmp0);
+    for (it = keys; it != NULL; it = it->next)
+        g_string_append_printf(out, "%s\t%s\n", (const char *) it->data,
+            (const char *) g_hash_table_lookup(g_settings, it->data));
+    g_list_free(keys);
+    g_file_set_contents(path, out->str, -1, NULL);
+}
+
+static const char *
+settings_get(const char *key, const char *fallback)
+{
+    const char *v;
+
+    if (g_settings == NULL || key == NULL) return fallback;
+    v = g_hash_table_lookup(g_settings, key);
+    return (v != NULL && *v != '\0') ? v : fallback;
+}
+
+static gboolean
+settings_declared(const char *key)
+{
+    if (g_settings == NULL || key == NULL) return FALSE;
+    return g_hash_table_contains(g_settings, key);
+}
+
+/* A value of NULL takes the key back out, which is what "default" means. */
+static void
+settings_put(const char *key, const char *value)
+{
+    if (key == NULL) return;
+    if (g_settings == NULL) settings_load();
+    if (value == NULL)
+        g_hash_table_remove(g_settings, key);
+    else
+        g_hash_table_insert(g_settings, g_strdup(key), g_strdup(value));
+    settings_save();
+}
+
+static gboolean
+settings_flag(const char *key, gboolean fallback)
+{
+    const char *v = settings_get(key, NULL);
+
+    if (v == NULL) return fallback;
+    return g_ascii_strcasecmp(v, "on") == 0 ||
+           g_ascii_strcasecmp(v, "yes") == 0 ||
+           g_ascii_strcasecmp(v, "true") == 0 ||
+           g_strcmp0(v, "1") == 0;
+}
+
+/* Clamped integer, defaulted, never fatal: a hand-edited file with a typo in
+   it must not take the window down. */
+static int
+settings_int(const char *key, int fallback, int lo, int hi)
+{
+    const char *v = settings_get(key, NULL);
+    char *end = NULL;
+    long n;
+
+    if (v == NULL) return fallback;
+    n = strtol(v, &end, 10);
+    if (end == v) return fallback;
+    return (int) CLAMP(n, lo, hi);
+}
 
 /* One line of the notification log: what was said, in what tone, and when.
    Kept apart from the toast widget because the widget is gone in five seconds
@@ -1246,7 +1404,8 @@ notif_push(AppState *state, const char *title, const char *body,
                            ? severity : "info");
 
     g_queue_push_head(state->notifs, n);
-    while (g_queue_get_length(state->notifs) > NOTIF_MAX)
+    while (g_queue_get_length(state->notifs) >
+           (guint) settings_int("notify.keep", NOTIF_MAX, 10, 1000))
         notif_entry_free(g_queue_pop_tail(state->notifs));
 
     if (state->notif_list != NULL)
@@ -1268,6 +1427,24 @@ show_toast_full(AppState *state, const char *title,
        be in the record. */
     notif_push(state, title, message, severity);
 
+    /* A muted title is logged and not shown, which is what "mute" has to mean
+       if the log is to stay the record. */
+    if (settings_list_has("notify.mute", title)) return;
+
+    /* notify.severities is a comma-separated list of the tones that are worth
+       interrupting for. Silence here does not mean silence in the log: the
+       record keeps everything, the corner keeps what was asked for. */
+    {
+        const char *want = settings_get("notify.severities", NULL);
+        if (want != NULL) {
+            g_autofree char *needle = g_strdup_printf("%s",
+                severity != NULL ? severity : "info");
+            g_autofree char *hay = g_ascii_strdown(want, -1);
+            g_autofree char *low = g_ascii_strdown(needle, -1);
+            if (strstr(hay, low) == NULL) return;
+        }
+    }
+
 
     /* GTK_IS_WIDGET, not == NULL: at shutdown the state can hold a pointer
        that is non-NULL and no longer a widget, and touching it aborts. */
@@ -1276,7 +1453,7 @@ show_toast_full(AppState *state, const char *title,
     {
         GtkWidget *c = gtk_widget_get_first_child(state->toast_box);
         while (c != NULL) { n++; c = gtk_widget_get_next_sibling(c); }
-        if (n >= TOAST_STACK_MAX) {
+        if (n >= (guint) settings_int("notify.stack", TOAST_STACK_MAX, 1, 20)) {
             GtkWidget *first = gtk_widget_get_first_child(state->toast_box);
             if (first != NULL)
                 gtk_box_remove(GTK_BOX(state->toast_box), first);
@@ -1353,9 +1530,12 @@ show_toast_full(AppState *state, const char *title,
     gtk_box_append(GTK_BOX(state->toast_box), rev);
     gtk_revealer_set_reveal_child(GTK_REVEALER(rev), TRUE);
 
-    /* Errors are the ones worth reading twice. */
-    t->timeout_id = g_timeout_add(is_err ? 9000u : 4200u,
-                                  toast_dismiss_cb, t);
+    /* Errors are the ones worth reading twice. notify.toast_ms sets how long
+       a toast of any kind lingers; 0 means "until it is closed by hand". */
+    {
+        int ms = settings_int("notify.toast_ms", is_err ? 9000 : 4200, 0, 120000);
+        t->timeout_id = ms > 0 ? g_timeout_add((guint) ms, toast_dismiss_cb, t) : 0;
+    }
 }
 
 /* ==================================================================== */
@@ -2443,6 +2623,11 @@ module_page_submenu_row_activated(GtkListBox *list, GtkListBoxRow *row,
                                          mp->views[index].name);
         gtk_list_box_select_row(list, row);
 
+        /* The recent list is a list of places, and the place is the view.
+           "Field Kit" says less than "Field Kit - Guards". */
+        if (mp->state != NULL && mp->module != NULL)
+            place_push_view(mp->state, mp->module->id, mp->views[index].name);
+
         /* Output goes to the submenu on screen. The page's record is kept in
            step so switching tabs away and back retargets correctly. */
         if (mp->state != NULL) {
@@ -2455,6 +2640,26 @@ module_page_submenu_row_activated(GtkListBox *list, GtkListBoxRow *row,
             }
         }
     }
+}
+
+/* Put a named view back on screen, for a recent place. Returns FALSE when
+   the module no longer has a view by that name, which is what an older entry
+   in the recent list looks like after a module is reorganised. */
+static gboolean
+module_page_show_view(ModulePage *mp, const char *name)
+{
+    if (mp == NULL || name == NULL || mp->submenu_list == NULL) return FALSE;
+    for (int i = 0; i < mp->n_views; i++) {
+        if (g_strcmp0(mp->views[i].name, name) != 0) continue;
+        GtkListBoxRow *r = gtk_list_box_get_row_at_index(
+            GTK_LIST_BOX(mp->submenu_list), i);
+        if (r != NULL) {
+            module_page_submenu_row_activated(GTK_LIST_BOX(mp->submenu_list),
+                                              r, mp);
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 static GtkWidget *
@@ -2489,9 +2694,22 @@ module_page_build_submenu(ModulePage *mp)
     g_signal_connect(list, "row-activated",
                      G_CALLBACK(module_page_submenu_row_activated), mp);
 
-    if (mp->n_views > 0)
+    if (mp->n_views > 0) {
         gtk_list_box_select_row(GTK_LIST_BOX(list),
             gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0));
+
+        /* Opening a module is arriving at its first view, so that is the
+           place worth remembering - unless a recent row asked for another
+           one, in which case that view wins. */
+        if (mp->state != NULL && mp->module != NULL) {
+            place_push_view(mp->state, mp->module->id, mp->views[0].name);
+            if (mp->state->pending_view != NULL) {
+                g_autofree char *want = g_strdup(mp->state->pending_view);
+                g_clear_pointer(&mp->state->pending_view, g_free);
+                module_page_show_view(mp, want);
+            }
+        }
+    }
 
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
                                    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
@@ -2885,12 +3103,23 @@ static void
 open_module(AppState *state, const ModuleDefinition *module)
 {
     if (state == NULL || module == NULL) return;
-    drawer_recent_push(state, module->id);
     GtkWidget *existing = find_module_page(state, module->id);
     if (existing != NULL) {
+        ModulePage *mp = g_object_get_data(G_OBJECT(existing), "module-page");
         int index = gtk_notebook_page_num(GTK_NOTEBOOK(state->notebook), existing);
         gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), index);
         sidebar_set_active(state, module->id);
+
+        /* The page is already built, so nothing will consume a pending view
+           for us and its current view is the place to remember. */
+        if (state->pending_view != NULL) {
+            g_autofree char *want = g_strdup(state->pending_view);
+            g_clear_pointer(&state->pending_view, g_free);
+            if (module_page_show_view(mp, want)) return;
+        }
+        if (mp != NULL)
+            place_push_view(state, module->id,
+                            gtk_stack_get_visible_child_name(GTK_STACK(mp->stack)));
         return;
     }
 
@@ -2917,6 +3146,11 @@ open_module(AppState *state, const ModuleDefinition *module)
     gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), index);
     sidebar_set_active(state, module->id);
 
+    /* A view the page turned out not to have (a module with no views at all,
+       or one that was reorganised since the entry was written) must not wait
+       here for the next page and surprise it. */
+    g_clear_pointer(&state->pending_view, g_free);
+
     g_autofree char *msg = g_strdup_printf("Opened module: %s [%s]",
                                            module->name, module->id);
     append_event(state, msg);
@@ -2928,11 +3162,29 @@ module_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer user_data)
     AppState *state = user_data;
     const ModuleDefinition *module =
         g_object_get_data(G_OBJECT(row), "module");
+    const char *view = g_object_get_data(G_OBJECT(row), "place-view");
+
+    /* A recent place can name the view it was in. The page that owns that
+       view may not exist yet, so the wish waits on the state until it does. */
+    if (view != NULL && state != NULL) {
+        g_free(state->pending_view);
+        state->pending_view = g_strdup(view);
+    }
+
     if (module != NULL) {
         open_module(state, module);
         /* A drawer has done its job the moment it is used: leaving it over
            the page it just opened would hide the thing that was asked for. */
         drawer_set_open(state, FALSE);
+    } else {
+        int index = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "page-index"));
+        if (state != NULL && index >= 0 &&
+            index < gtk_notebook_get_n_pages(GTK_NOTEBOOK(state->notebook))) {
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), index);
+            settings_show_view(state, view);
+            drawer_set_open(state, FALSE);
+        }
+        g_clear_pointer(&state->pending_view, g_free);
     }
     (void) list;
 }
@@ -3079,6 +3331,41 @@ build_drawer_nav(AppState *state)
    remembering which category it was filed under. */
 #define DRAWER_RECENT_MAX 6
 
+/* A place is "<owner>|<view>": the module or permanent page that was open,
+   and the view that was on screen inside it. A bar cannot appear in a module
+   id or a view name, so the two halves split apart again unambiguously. */
+static char *
+place_key(const char *owner, const char *view)
+{
+    if (owner == NULL) return NULL;
+    if (view == NULL || *view == '\0') return g_strdup(owner);
+    return g_strdup_printf("%s|%s", owner, view);
+}
+
+static const char *
+place_bar(const char *key)
+{
+    return key != NULL ? strchr(key, '|') : NULL;
+}
+
+/* The permanent pages, in notebook order, so a place that is a page rather
+   than a module can be named and opened again from the recent list. */
+static const struct {
+    const char *id;
+    const char *name;
+    const char *icon;
+} g_place_pages[] = {
+    { "dashboard",     "Dashboard",     "view-grid-symbolic" },
+    { "live",          "Live Traffic",  "network-wireless-symbolic" },
+    { "casebook",      "Casebook",      "folder-symbolic" },
+    { "stats",         "Stats",         "office-chart-bar-symbolic" },
+    { "notifications", "Notifications", "notification-symbolic" },
+    { "help",          "Help",          "help-browser-symbolic" },
+    { "settings",      "Settings",      "emblem-system-symbolic" },
+};
+
+#define SETTINGS_PLACE_PAGE 6
+
 static void
 drawer_recent_refresh(AppState *state)
 {
@@ -3103,18 +3390,40 @@ drawer_recent_refresh(AppState *state)
     }
 
     for (guint i = 0; i < state->recent_mru->len; i++) {
-        const char *id = g_ptr_array_index(state->recent_mru, i);
+        const char *key = g_ptr_array_index(state->recent_mru, i);
+        g_auto(GStrv) parts = g_strsplit(key, "|", 2);
+        const char *owner = parts[0];
+        const char *view  = parts[1];
         const ModuleDefinition *mod = NULL;
+        const char *pname = NULL, *picon = NULL;
+        int pindex = -1;
+        const char *title, *belongs;
         GtkWidget *hb, *icon, *label;
 
         for (int m = 0; m < N_MODULES; m++)
-            if (g_strcmp0(modules[m].id, id) == 0) { mod = &modules[m]; break; }
-        if (mod == NULL) continue;
+            if (g_strcmp0(modules[m].id, owner) == 0) { mod = &modules[m]; break; }
+        if (mod == NULL) {
+            for (int p = 0; p < (int) G_N_ELEMENTS(g_place_pages); p++)
+                if (g_strcmp0(g_place_pages[p].id, owner) == 0) {
+                    pname  = g_place_pages[p].name;
+                    picon  = g_place_pages[p].icon;
+                    pindex = p;
+                    break;
+                }
+        }
+        if (mod == NULL && pname == NULL) continue;
+
+        belongs = mod != NULL ? mod->name : pname;
+        /* The view is the name of the place; the module is the context that
+           makes it unambiguous, because half the toolkit has an Overview. */
+        title = (view != NULL && *view != '\0') ? view : belongs;
 
         hb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-        icon = imsisting_icon_image(mod->icon != NULL ? mod->icon
-                                            : "application-x-executable-symbolic");
-        label = gtk_label_new(mod->name);
+        icon = imsisting_icon_image(mod != NULL
+                 ? (mod->icon != NULL ? mod->icon
+                                      : "application-x-executable-symbolic")
+                 : picon);
+        label = gtk_label_new(title);
         gtk_image_set_pixel_size(GTK_IMAGE(icon), 14);
         gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
         gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
@@ -3122,37 +3431,72 @@ drawer_recent_refresh(AppState *state)
         gtk_box_append(GTK_BOX(hb), icon);
         gtk_box_append(GTK_BOX(hb), label);
 
+        if (view != NULL && *view != '\0' && belongs != NULL) {
+            GtkWidget *where = gtk_label_new(belongs);
+            gtk_widget_add_css_class(where, "dim");
+            gtk_label_set_xalign(GTK_LABEL(where), 1.0f);
+            gtk_label_set_ellipsize(GTK_LABEL(where), PANGO_ELLIPSIZE_END);
+            gtk_box_append(GTK_BOX(hb), where);
+        }
+
         row = gtk_list_box_row_new();
         gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), hb);
-        /* Same "module" payload the catalogue rows carry, so the existing
-           module_row_activated handler opens these too. */
-        g_object_set_data(G_OBJECT(row), "module", (gpointer) mod);
+        /* The same payloads the catalogue and the page list carry, so the
+           existing handler opens these too. */
+        if (mod != NULL) {
+            g_object_set_data(G_OBJECT(row), "module", (gpointer) mod);
+        } else {
+            g_object_set_data(G_OBJECT(row), "page-index",
+                              GINT_TO_POINTER(pindex));
+        }
+        if (view != NULL)
+            g_object_set_data_full(G_OBJECT(row), "place-view",
+                                   g_strdup(view), g_free);
         gtk_list_box_append(GTK_LIST_BOX(list), row);
     }
 }
 
+/* One row per module or page, not one per view: the section is six rows
+   tall, and six rows all reading "Overview" would be worse than useless. So
+   arriving at a new view replaces that owner's row instead of adding one. */
 static void
-drawer_recent_push(AppState *state, const char *module_id)
+drawer_recent_push(AppState *state, const char *key)
 {
-    if (state == NULL || module_id == NULL) return;
+    g_autofree char *owner = NULL;
 
+    if (state == NULL || key == NULL) return;
     if (state->recent_mru == NULL)
         state->recent_mru = g_ptr_array_new_with_free_func(g_free);
 
-    /* Move to front rather than append: re-opening a module should not put a
-       second copy of it in the list. */
-    for (guint i = 0; i < state->recent_mru->len; i++) {
-        if (g_strcmp0(g_ptr_array_index(state->recent_mru, i), module_id) == 0) {
-            g_ptr_array_remove_index(state->recent_mru, i);
-            break;
-        }
+    {
+        const char *bar = place_bar(key);
+        owner = bar != NULL ? g_strndup(key, (gsize) (bar - key)) : g_strdup(key);
     }
-    g_ptr_array_insert(state->recent_mru, 0, g_strdup(module_id));
+
+    for (guint i = 0; i < state->recent_mru->len; ) {
+        const char *have = g_ptr_array_index(state->recent_mru, i);
+        const char *bar = place_bar(have);
+        gsize n = bar != NULL ? (gsize) (bar - have) : strlen(have);
+        if (strlen(owner) == n && strncmp(have, owner, n) == 0)
+            g_ptr_array_remove_index(state->recent_mru, i);
+        else
+            i++;
+    }
+    g_ptr_array_insert(state->recent_mru, 0, g_strdup(key));
     while (state->recent_mru->len > DRAWER_RECENT_MAX)
         g_ptr_array_remove_index(state->recent_mru,
                                  state->recent_mru->len - 1);
 
     drawer_recent_refresh(state);
+}
+
+/* Remember that the operator was here: the owner is a module id or a page
+   id, the view is what the page calls the submenu they were looking at. */
+static void
+place_push_view(AppState *state, const char *owner, const char *view)
+{
+    g_autofree char *key = place_key(owner, view);
+    if (key != NULL) drawer_recent_push(state, key);
 }
 
 static GtkWidget *
@@ -6350,49 +6694,16 @@ create_casebook_page(AppState *state)
 }
 
 /* ==================================================================== */
-/*  STATS / HELP / SETTINGS                                             */
+/*  STATS / SETTINGS                                                    */
 /* ==================================================================== */
 
-static GtkWidget *
-text_page(const char *title, const char *subtitle, const char *body_text,
-          GtkWidget **view_out)
-{
-    GtkWidget *outer  = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-    GtkWidget *head   = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    GtkWidget *t      = gtk_label_new(title);
-    GtkWidget *sub    = gtk_label_new(subtitle);
-    GtkWidget *scroll = gtk_scrolled_window_new();
-    GtkWidget *view   = gtk_text_view_new();
-
-    gtk_widget_add_css_class(t,   "page-title");
-    gtk_widget_add_css_class(sub, "page-subtitle");
-    gtk_label_set_xalign(GTK_LABEL(t),   0.0f);
-    gtk_label_set_xalign(GTK_LABEL(sub), 0.0f);
-    gtk_box_append(GTK_BOX(head), t);
-    gtk_box_append(GTK_BOX(head), sub);
-    gtk_widget_set_margin_top(head, 14);
-    gtk_widget_set_margin_start(head, 16);
-    gtk_widget_set_margin_end(head, 16);
-    gtk_widget_add_css_class(outer, "doc-page");
-    gtk_box_append(GTK_BOX(outer), head);
-
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(view), FALSE);
-    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(view), FALSE);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(view), FALSE);
-    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view), GTK_WRAP_WORD_CHAR);
-    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(view), 28);
-    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(view), 28);
-    gtk_widget_add_css_class(view, "page-text");
-    gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(view)),
-                             body_text ? body_text : "", -1);
-
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), view);
-    gtk_widget_set_vexpand(scroll, TRUE);
-    gtk_box_append(GTK_BOX(outer), scroll);
-
-    if (view_out != NULL) *view_out = view;
-    return outer;
-}
+/* text_page() used to live here. It rendered a title, a subtitle and one
+   scrolled body of text, and its only caller was the Help page. The Help
+   page is now a subject list with a view each -- native/src/help_page.c --
+   so the helper had no callers left and was deleted rather than kept
+   against a future that had not asked for it. Its layout survives as
+   help_body_view() in that file, where the class and margin choices are
+   recorded next to the reason for them. */
 
 /* A single headline number. */
 static GtkWidget *
@@ -6724,146 +7035,692 @@ stats_refresh(AppState *state)
     stat_set(state->stat_loot_files, loot_files);
     stat_set(state->stat_offline, offline);
 }
-static const char *HELP_TEXT =
-"IMSIsting — cellular security research toolkit\n"
-"2G/GSM · 3G/UMTS · 4G/LTE · 5G/NR\n"
-"\n"
-"WHAT THIS IS\n"
-"  A GTK4 view over standalone shell modules. Nothing is locked behind the\n"
-"  interface: every action a button takes is also a command you can run.\n"
-"\n"
-"  ./modules/02_cell_recon.sh --plmn 208-01\n"
-"  ./modules/21_pcap_analysis.sh --summary capture.pcap\n"
-"  ./modules/15_lte_core.sh --decode-diameter <hex>\n"
-"\n"
-"GETTING AROUND\n"
-"  Dashboard   every module as a card on one grid\n"
-"  Casebook    cases, targets, evidence, captures, alerts, sensors\n"
-"  Stats       module and collection counts\n"
-"  Settings    environment facts and maintenance actions\n"
-"\n"
-"  The page list is a drawer: move the pointer to the left edge of the\n"
-"  window and it slides out over the page. Choosing a row switches page\n"
-"  and closes it; moving the pointer away closes it too.\n"
-"\n"
-"  Target    the right-hand panel, toggled from the header. It holds the\n"
-"            current target and the case counters, and it floats over the\n"
-"            page instead of narrowing it.\n"
-"  Search    the header field (Ctrl+K) matches every page and module;\n"
-"            Enter opens the first match.\n"
-"  Escape    closes the search results, then the open module.\n"
-"\n"
-"  Opening a module raises it as a panel over the dashboard, with its own\n"
-"  submenu down the left. The dashboard is never replaced - it stays\n"
-"  underneath, and Escape or the panel's close button returns to it.\n"
-"\n"
-"EVIDENCE\n"
-"  The Casebook's Evidence tab indexes every file under loot/. Search\n"
-"  matches the file name and the module that produced it; Sort orders by\n"
-"  Name, Size, Newest or Module. Open, or a double click, opens the file\n"
-"  as a closable tab inside the Casebook.\n"
-"\n"
-"MAKING IT YOURS\n"
-"  These survive a restart; they are kept in state/ui.tsv,\n"
-"  state/recent.tsv and state/pins.tsv beside the toolkit.\n"
-"\n"
-"  Pin      the star on a dashboard card; pinned modules lead the\n"
-"           dashboard whatever the sort is set to\n"
-"  Sort     Workflow (category order), Most used (by run count), Name,\n"
-"           Category\n"
-"  Density  Compact, Comfortable or Spacious card sizing\n"
-"\n"
-"RUNNING A VERB\n"
-"  Each module page lists common verbs as buttons. The generated verb\n"
-"  selector exposes every documented verb; enter only its arguments.\n"
-"  Copy shows the matching terminal command before it is run.\n"
-"\n"
-"  Every verb a module documents is reachable this way. Verbs that need\n"
-"  hardware say so and name the radio; they do not report a clean result\n"
-"  without one.\n"
-"\n"
-"WHEN SOMETHING LOOKS WRONG\n"
-"  Run the module's --selftest first. It works with no radio attached and\n"
-"  usually names the problem.\n"
-"\n"
-"  ./tools/run-selftests.sh        every module\n"
-"  ./tools/check-paths.sh          paths and table entries resolve\n"
-"  ./tools/check-verbs.sh          verbs reachable from this GUI\n"
-"\n"
-"TARGET AND CASE STATE\n"
-"  Casebook owns persistent cases, selected cells, evidence hashes, alerts,\n"
-"  sensors and reports. Modules still share live SDR state under tmp/; each\n"
-"  completed run is added to the active case timeline automatically.\n"
-"\n"
-"HARDWARE\n"
-"  Nothing in this tree has been tested against a real radio. Every\n"
-"  over-the-air path is written and reviewed, not verified. The README\n"
-"  splits tested from untested in detail — read it before filing a bug.\n"
-"\n"
-"LEGAL\n"
-"  Use this on networks you own or have written permission to test.\n"
-"  Transmitting on licensed spectrum is regulated everywhere.\n";
+/* The Help page lives in its own translation unit, native/src/help_page.c.
+   It used to be a single string here, rendered through text_page(): one
+   79-line scroll, so the answer to "where does loot/ go" and the answer to
+   "what does exit code 3 mean" were the same scroll position. It is now a
+   subject list with one view each, built from the same classes a module
+   submenu uses.
+
+   It is called out here because main1.c cannot see the definition: the
+   page needs nothing from this file, and keeping the prototype rather than
+   the text keeps a body of reference prose that changes for unrelated
+   reasons out of the middle of the interface source. */
+GtkWidget *create_help_page(void);
+
+/* The note line is shared with the Field Kit page, which is defined much
+   further down; the settings views are the page's first caller. */
+static GtkWidget *fkit_note(const char *text);
+
+/* ---- A row ----------------------------------------------------------
+   Caption, control, where the value came from, and what the setting does.
+   The origin chip is also the way back: pressing it takes the key out of
+   settings.tsv, which is what "default" means. */
+
+typedef struct {
+    AppState   *state;
+    const char *key;          /* static string, NULL for the ui.tsv rows */
+    GtkWidget  *chip;         /* the origin chip, so it can say "default" */
+    GtkWidget  *control;      /* the entry / switch / dropdown to put back */
+    GCallback   handler;      /* its change handler, to block while we do */
+    gpointer    ctx;          /* ...and the context that handler was given */
+    const char *fallback;     /* entries and switches: the default */
+    guint       fallback_index;  /* choices: the default's index */
+    guint       kind;         /* 0 entry, 1 switch, 2 choice */
+    gboolean    fallback_on;
+} SettingsReset;
+
+/* Taking the key out of the file is the easy half. The control has to go back
+   to the default with it, and it has to do so with its own handler blocked -
+   otherwise "back to the default" would immediately write the default into
+   the file as though it had been chosen. */
+static void
+settings_reset_clicked(GtkButton *button, gpointer user_data)
+{
+    SettingsReset *r = g_object_get_data(G_OBJECT(button), "settings-reset");
+    (void) user_data;
+    if (r == NULL || r->key == NULL) return;
+
+    if (r->control != NULL &&
+        g_signal_handlers_block_by_func(r->control, r->handler, r->ctx)) {
+        switch (r->kind) {
+        case 1:
+            gtk_switch_set_active(GTK_SWITCH(r->control), r->fallback_on);
+            break;
+        case 2:
+            gtk_drop_down_set_selected(GTK_DROP_DOWN(r->control),
+                                       r->fallback_index);
+            break;
+        default:
+            gtk_editable_set_text(GTK_EDITABLE(r->control),
+                                  r->fallback != NULL ? r->fallback : "");
+            break;
+        }
+        g_signal_handlers_unblock_by_func(r->control, r->handler, r->ctx);
+    }
+
+    settings_put(r->key, NULL);
+    if (r->chip != NULL) gtk_label_set_text(GTK_LABEL(r->chip), "default");
+    if (r->state != NULL)
+        show_toast_full(r->state, "Settings",
+                        "back to the default", "info");
+}
 
 static GtkWidget *
-create_settings_page(AppState *state)
+settings_row(const char *label, SettingsReset *spec, const char *origin,
+             const char *note, GtkWidget *control, AppState *state)
 {
-    GtkWidget *outer  = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-    GtkWidget *head   = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    GtkWidget *t      = gtk_label_new("Settings");
-    GtkWidget *sub    = gtk_label_new("Environment and maintenance");
-    GtkWidget *scroll = gtk_scrolled_window_new();
-    GtkWidget *view   = gtk_text_view_new();
-    GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    g_autoptr(GtkCssProvider) css = NULL;
-    g_autofree char *body = NULL;
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    GtkWidget *cap = gtk_label_new(label);
+    g_autofree char *where = NULL;
 
-    (void) css;
+    if (origin == NULL)
+        where = g_strdup((spec != NULL && settings_declared(spec->key))
+                         ? "settings.tsv" : "default");
+    else
+        where = g_strdup(origin);
 
-    gtk_widget_add_css_class(t,   "page-title");
-    gtk_widget_add_css_class(sub, "page-subtitle");
-    gtk_label_set_xalign(GTK_LABEL(t),   0.0f);
-    gtk_label_set_xalign(GTK_LABEL(sub), 0.0f);
-    gtk_box_append(GTK_BOX(head), t);
-    gtk_box_append(GTK_BOX(head), sub);
-    gtk_widget_set_margin_top(head, 14);
-    gtk_widget_set_margin_start(head, 16);
-    gtk_widget_add_css_class(outer, "doc-page");
-    gtk_box_append(GTK_BOX(outer), head);
+    gtk_widget_add_css_class(row, "settings-row");
+    gtk_widget_add_css_class(cap, "settings-key");
+    gtk_label_set_xalign(GTK_LABEL(cap), 0.0f);
+    gtk_widget_set_hexpand(cap, TRUE);
+    gtk_box_append(GTK_BOX(top), cap);
+    if (control != NULL) gtk_box_append(GTK_BOX(top), control);
 
-    body = g_strdup_printf(
+    {
+        GtkWidget *chip = gtk_label_new(where);
+        gtk_widget_add_css_class(chip, "settings-origin");
+        if (spec != NULL) {
+            spec->state = state;
+            spec->chip = chip;
+            gtk_widget_set_tooltip_text(chip, "press to go back to the default");
+            g_object_set_data_full(G_OBJECT(chip), "settings-reset", spec, g_free);
+            GtkGesture *g = gtk_gesture_click_new();
+            g_signal_connect_swapped(g, "pressed",
+                                     G_CALLBACK(settings_reset_clicked), chip);
+            gtk_widget_add_controller(chip, GTK_EVENT_CONTROLLER(g));
+        }
+        gtk_box_append(GTK_BOX(top), chip);
+    }
+
+    gtk_box_append(GTK_BOX(row), top);
+    if (note != NULL && *note != '\0') {
+        GtkWidget *n = gtk_label_new(note);
+        gtk_widget_add_css_class(n, "settings-note");
+        gtk_label_set_xalign(GTK_LABEL(n), 0.0f);
+        gtk_label_set_wrap(GTK_LABEL(n), TRUE);
+        gtk_box_append(GTK_BOX(row), n);
+    }
+    return row;
+}
+
+/* ---- Entries -------------------------------------------------------- */
+
+typedef struct { AppState *state; const char *key; } SettingsText;
+
+static void
+settings_entry_changed(GtkEditable *editable, gpointer user_data)
+{
+    SettingsText *t = user_data;
+    const char *txt = gtk_editable_get_text(editable);
+
+    if (t == NULL || t->key == NULL) return;
+    settings_put(t->key, (*txt != '\0') ? txt : NULL);
+}
+
+static GtkWidget *
+settings_entry(const char *label, const char *key, const char *origin,
+               const char *note, const char *placeholder, int width,
+               AppState *state)
+{
+    GtkWidget *entry = gtk_entry_new();
+    SettingsText *t = g_new0(SettingsText, 1);
+    SettingsReset *spec = g_new0(SettingsReset, 1);
+    const char *declared = settings_get(key, NULL);
+
+    t->state = state;
+    t->key = key;
+    if (placeholder != NULL) gtk_entry_set_placeholder_text(GTK_ENTRY(entry),
+                                                            placeholder);
+    if (declared != NULL) gtk_editable_set_text(GTK_EDITABLE(entry), declared);
+    if (width > 0) gtk_widget_set_size_request(entry, width, -1);
+    g_signal_connect(entry, "changed", G_CALLBACK(settings_entry_changed), t);
+    g_object_set_data_full(G_OBJECT(entry), "settings-text", t, g_free);
+
+    if (key == NULL) {
+        /* Not a settings.tsv key at all (the density and sort rows are
+           kept in state/ui.tsv), so there is no default to go back to. */
+        g_free(spec);
+        spec = NULL;
+    } else {
+        spec->key = key;
+        spec->control = entry;
+        spec->handler = G_CALLBACK(settings_entry_changed);
+        spec->ctx = t;
+        spec->fallback = "";
+        spec->kind = 0;
+    }
+
+    return settings_row(label, spec, origin, note, entry, state);
+}
+
+/* ---- Switches ------------------------------------------------------- */
+
+typedef struct {
+    AppState *state;
+    const char *key;
+    void (*apply)(AppState *state, gboolean on);
+} SettingsToggle;
+
+static void
+settings_switch_changed(GObject *sw, GParamSpec *pspec, gpointer user_data)
+{
+    SettingsToggle *t = user_data;
+    gboolean on;
+
+    (void) pspec;
+    if (t == NULL || t->key == NULL) return;
+    on = gtk_switch_get_active(GTK_SWITCH(sw));
+    settings_put(t->key, on ? "on" : "off");
+    if (t->apply != NULL) t->apply(t->state, on);
+}
+
+static GtkWidget *
+settings_switch(const char *label, const char *key, const char *note,
+                gboolean fallback, void (*apply)(AppState *, gboolean),
+                AppState *state)
+{
+    GtkWidget *sw = gtk_switch_new();
+    SettingsToggle *t = g_new0(SettingsToggle, 1);
+    SettingsReset *spec = g_new0(SettingsReset, 1);
+
+    t->state = state;
+    t->key = key;
+    t->apply = apply;
+    gtk_switch_set_active(GTK_SWITCH(sw), settings_flag(key, fallback));
+    gtk_widget_set_valign(sw, GTK_ALIGN_CENTER);
+    g_signal_connect(sw, "notify::active", G_CALLBACK(settings_switch_changed), t);
+    g_object_set_data_full(G_OBJECT(sw), "settings-toggle", t, g_free);
+
+    if (key == NULL) {
+        /* Not a settings.tsv key at all (the density and sort rows are
+           kept in state/ui.tsv), so there is no default to go back to. */
+        g_free(spec);
+        spec = NULL;
+    } else {
+        spec->key = key;
+        spec->control = sw;
+        spec->handler = G_CALLBACK(settings_switch_changed);
+        spec->ctx = t;
+        spec->kind = 1;
+        spec->fallback_on = fallback;
+    }
+
+    return settings_row(label, spec, NULL, note, sw, state);
+}
+
+/* ---- Choices -------------------------------------------------------- */
+
+typedef struct {
+    AppState *state;
+    const char *key;
+    const char *const *values;
+    void (*apply)(AppState *state, guint index);
+} SettingsChoice;
+
+static void
+settings_choice_changed(GObject *dd, GParamSpec *pspec, gpointer user_data)
+{
+    SettingsChoice *c = user_data;
+    guint sel;
+
+    (void) pspec;
+    if (c == NULL || c->key == NULL) return;
+    sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+    if (sel == GTK_INVALID_LIST_POSITION || c->values[sel] == NULL) return;
+    settings_put(c->key, c->values[sel]);
+    if (c->apply != NULL) c->apply(c->state, sel);
+}
+
+static GtkWidget *
+settings_choice(const char *label, const char *key, const char *const *values,
+                const char *const *labels, guint n, guint fallback,
+                const char *note, void (*apply)(AppState *, guint),
+                AppState *state)
+{
+    GtkWidget *dd = gtk_drop_down_new_from_strings(labels);
+    SettingsChoice *c = g_new0(SettingsChoice, 1);
+    SettingsReset *spec = g_new0(SettingsReset, 1);
+    const char *cur = settings_get(key, NULL);
+    guint sel = fallback;
+
+    for (guint i = 0; i < n; i++)
+        if (cur != NULL && g_strcmp0(cur, values[i]) == 0) sel = i;
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(dd), sel);
+
+    c->state = state;
+    c->key = key;
+    c->values = values;
+    c->apply = apply;
+    g_signal_connect(dd, "notify::selected", G_CALLBACK(settings_choice_changed), c);
+    g_object_set_data_full(G_OBJECT(dd), "settings-choice", c, g_free);
+
+    if (key == NULL) {
+        /* Not a settings.tsv key at all (the density and sort rows are
+           kept in state/ui.tsv), so there is no default to go back to. */
+        g_free(spec);
+        spec = NULL;
+    } else {
+        spec->key = key;
+        spec->control = dd;
+        spec->handler = G_CALLBACK(settings_choice_changed);
+        spec->ctx = c;
+        spec->kind = 2;
+        spec->fallback_index = fallback;
+    }
+
+    return settings_row(label, spec, NULL, note, dd, state);
+}
+
+/* ---- The effects ---------------------------------------------------- */
+
+static void
+settings_density_apply(AppState *state, guint index)
+{
+    static const char *names[] = {
+        "density-compact", "density-comfortable", "density-spacious"
+    };
+
+    if (state == NULL) return;
+    g_free(state->density);
+    state->density = g_strdup(names[index]);
+    density_apply(state);
+    ui_state_save(state);
+}
+
+static void
+settings_sort_apply(AppState *state, guint index)
+{
+    if (state == NULL) return;
+    g_dash_sort = (int) index;
+    dash_refresh(state);
+    ui_state_save(state);
+}
+
+static void
+settings_fonts_apply(AppState *state, guint index)
+{
+    if (state == NULL || state->window == NULL) return;
+    if (index == 1)
+        gtk_widget_add_css_class(state->window, "fonts-system");
+    else
+        gtk_widget_remove_css_class(state->window, "fonts-system");
+}
+
+static void
+settings_motion_apply(AppState *state, guint index)
+{
+    if (state == NULL || state->window == NULL) return;
+    if (index == 1)
+        gtk_widget_add_css_class(state->window, "motion-reduced");
+    else
+        gtk_widget_remove_css_class(state->window, "motion-reduced");
+}
+
+static GtkWidget *
+settings_card(const char *heading, GtkWidget **body_out)
+{
+    return verb_card(heading, body_out);
+}
+
+/* ---- Views ---------------------------------------------------------- */
+
+static GtkWidget *
+settings_view_interface(AppState *state)
+{
+    static const char *density_v[] = { "compact", "comfortable", "spacious" };
+    static const char *density_l[] = { "Compact", "Comfortable", "Spacious" };
+    static const char *sort_v[] = { "workflow", "alpha", "category" };
+    static const char *sort_l[] = { "Workflow", "Alphabetical", "Category" };
+    static const char *fonts_v[] = { "bundled", "system" };
+    static const char *fonts_l[] = { "Neuropol + Orbitron", "System interface font" };
+    static const char *motion_v[] = { "full", "reduced" };
+    static const char *motion_l[] = { "Full", "Reduced" };
+    static const char *splash_v[] = { "on", "off" };
+    static const char *splash_l[] = { "Show a splash", "Go straight to the window" };
+    static const char *art_v[] = { "all", "films", "still" };
+    static const char *art_l[] = { "Films and the still", "Films only", "The still only" };
+    static const char *drawer_v[] = { "hover", "click" };
+    static const char *drawer_l[] = { "Pointer at the edge", "Click the edge" };
+
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *card, *body;
+    guint d = 1, s = 0, f = 0, m = 0;
+
+    if (state != NULL && state->density != NULL) {
+        if (strstr(state->density, "compact") != NULL) d = 0;
+        else if (strstr(state->density, "spacious") != NULL) d = 2;
+    }
+    s = (guint) CLAMP(g_dash_sort, 0, 2);
+
+    card = settings_card("INTERFACE", &body);
+    gtk_box_append(GTK_BOX(body), settings_choice("Tile density",
+        NULL, density_v, density_l, 3, d,
+        "How much room each module tile is given on the dashboard. Kept in "
+        "state/ui.tsv with the rest of what the last session was using; the "
+        "dashboard dropdown changes the same value.",
+        settings_density_apply, state));
+    gtk_box_append(GTK_BOX(body), settings_choice("Dashboard order",
+        NULL, sort_v, sort_l, 3, s,
+        "The order the full catalogue is laid out in.",
+        settings_sort_apply, state));
+    gtk_box_append(GTK_BOX(col), card);
+
+    card = settings_card("TYPE AND MOTION", &body);
+    gtk_box_append(GTK_BOX(body), settings_choice("Display fonts",
+        "ui.fonts", fonts_v, fonts_l, 2, f,
+        "The two faces this toolkit ships — Neuropol for headings, Orbitron "
+        "for labels. Off falls back to the system interface font everywhere, "
+        "which is also the honest answer if the bundled licences ever become "
+        "a problem.",
+        settings_fonts_apply, state));
+    gtk_box_append(GTK_BOX(body), settings_choice("Motion",
+        "ui.motion", motion_v, motion_l, 2, m,
+        "Reduced drops the tile growth and the fade-ins. Nothing is lost from "
+        "the interface: it is the same layout, arriving still.",
+        settings_motion_apply, state));
+    gtk_box_append(GTK_BOX(col), card);
+
+    card = settings_card("LAUNCH", &body);
+    gtk_box_append(GTK_BOX(body), settings_choice("Splash screen",
+        "ui.splash", splash_v, splash_l, 2, 0,
+        "Read before the first window is built, so it takes effect on the "
+        "next launch. The escape hatch stays: IMSISTING_NO_SPLASH=1 always "
+        "wins over this.",
+        NULL, state));
+    gtk_box_append(GTK_BOX(body), settings_choice("Splash artwork",
+        "ui.splash_art", art_v, art_l, 3, 0,
+        "Four films and one still; the still is drawn over the artwork with "
+        "its own card. Next launch, like the row above.",
+        NULL, state));
+    gtk_box_append(GTK_BOX(body), settings_choice("Page drawer",
+        "ui.drawer", drawer_v, drawer_l, 2, 0,
+        "The drawer that slides out over the page. Pointer at the edge is the "
+        "default; click the edge is steadier on a touchpad.",
+        NULL, state));
+    gtk_box_append(GTK_BOX(col), card);
+
+    card = settings_card("SHORTCUTS", &body);
+    {
+        static const char *keys[][2] = {
+            { "Ctrl+K", "focus the header search — modules, pages and settings" },
+            { "Enter",  "open the first result" },
+            { "Escape", "close the results, then the open module" },
+        };
+        for (guint i = 0; i < G_N_ELEMENTS(keys); i++)
+            gtk_box_append(GTK_BOX(body), overview_row(keys[i][0], keys[i][1]));
+    }
+    gtk_box_append(GTK_BOX(col), card);
+    return col;
+}
+
+static void
+settings_open_dir_clicked(GtkButton *button, gpointer user_data)
+{
+    const char *path = g_object_get_data(G_OBJECT(button), "path");
+    g_autofree char *uri = NULL;
+    g_autoptr(GError) error = NULL;
+
+    (void) user_data;
+    if (path == NULL || *path == '\0') return;
+    uri = g_filename_to_uri(path, NULL, NULL);
+    if (uri == NULL) return;
+    if (!g_app_info_launch_default_for_uri(uri, NULL, &error) && error != NULL)
+        g_printerr("imsisting: cannot open %s: %s\n", path, error->message);
+}
+
+static GtkWidget *
+settings_dir_button(const char *label, const char *path)
+{
+    GtkWidget *b = gtk_button_new_with_label(label);
+
+    gtk_widget_add_css_class(b, "verb-button");
+    g_object_set_data(G_OBJECT(b), "path", (gpointer) path);
+    g_signal_connect(b, "clicked", G_CALLBACK(settings_open_dir_clicked), NULL);
+    return b;
+}
+
+static GtkWidget *
+settings_view_paths(AppState *state)
+{
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *card, *body;
+    struct { const char *label; const char *key; const char *env;
+             const char *leaf; } dirs[] = {
+        { "Loot",     "paths.loot",     "LOOT_DIR",     "loot" },
+        { "Captures", "paths.captures", "CAPTURES_DIR", "captures" },
+        { "Scratch",  "paths.tmp",      "TMP_DIR",      "tmp" },
+        { "Logs",     "paths.logs",     "LOG_DIR",      "logs" },
+        { "State",    "paths.state",    "STATE_DIR",    "state" },
+        { "Cases",    "paths.cases",    "CASES_DIR",    "cases" },
+    };
+    const char *eff[G_N_ELEMENTS(dirs)];
+    g_autofree char *def[G_N_ELEMENTS(dirs)];
+
+    card = settings_card("WHERE THINGS GO", &body);
+    gtk_box_append(GTK_BOX(body), fkit_note(
+        "The launcher reads these before any module starts, so a change here "
+        "lands on the next launch — and the same file is what "
+        "`./imsisting.sh --settings set` writes, so the command line and this "
+        "window cannot drift apart. A variable already exported in the shell "
+        "wins over the file, which is why the row says where its value came "
+        "from."));
+    for (guint i = 0; i < G_N_ELEMENTS(dirs); i++) {
+        const char *env = g_getenv(dirs[i].env);
+        g_autofree char *note = NULL;
+        def[i] = g_build_filename(IMSISTING_ROOT, dirs[i].leaf, NULL);
+        eff[i] = (env != NULL && *env != '\0') ? env : def[i];
+        note = g_strdup_printf("In use now: %s — from the %s", eff[i],
+                               (env != NULL && *env != '\0') ? "environment"
+                                                             : "built-in default");
+        gtk_box_append(GTK_BOX(body), settings_entry(dirs[i].label, dirs[i].key,
+            NULL, note, eff[i], 320, state));
+    }
+    gtk_box_append(GTK_BOX(col), card);
+
+    card = settings_card("OPEN", &body);
+    {
+        GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_append(GTK_BOX(row), settings_dir_button("Loot", eff[0]));
+        gtk_box_append(GTK_BOX(row), settings_dir_button("Captures", eff[1]));
+        gtk_box_append(GTK_BOX(row), settings_dir_button("Scratch", eff[2]));
+        gtk_box_append(GTK_BOX(body), row);
+    }
+    gtk_box_append(GTK_BOX(col), card);
+    return col;
+}
+
+static GtkWidget *
+settings_view_radio(AppState *state)
+{
+    static const char *hint_v[] = { "none", "dcs", "pcs" };
+    static const char *hint_l[] = { "No hint", "DCS 1800", "PCS 1900" };
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *card, *body;
+
+    card = settings_card("ARFCN", &body);
+    gtk_box_append(GTK_BOX(body), settings_choice("GSM band hint",
+        "radio.arfcn_hint", hint_v, hint_l, 3, 0,
+        "GSM ARFCN 512..810 is PCS 1900 uplink and DCS 1800 downlink at the "
+        "same time; nothing in the number itself says which. The hint decides, "
+        "and it is passed to every conversion the window makes.",
+        NULL, state));
+    gtk_box_append(GTK_BOX(body), fkit_note(
+        "02_cell_recon.sh --arfcn takes the same hint as a fourth argument, so "
+        "a conversion done here and one done by hand agree."));
+    gtk_box_append(GTK_BOX(col), card);
+
+    card = settings_card("THE BENCH", &body);
+    gtk_box_append(GTK_BOX(body), fkit_note(
+        "What the SDR is tuned to is part of the bench, not a preference: it "
+        "lives on the SDR / Radio Manager page and in the status strip, and "
+        "the header Target panel is where a cell is set."));
+    gtk_box_append(GTK_BOX(body), overview_row("Choosing a radio", "SDR / Radio Manager → Device inventory"));
+    gtk_box_append(GTK_BOX(body), overview_row("Current tuning", "SDR / Radio Manager → Tuning"));
+    gtk_box_append(GTK_BOX(col), card);
+    return col;
+}
+
+static GtkWidget *
+settings_view_live(AppState *state)
+{
+    static const char *bind_v[] = { "127.0.0.1", "0.0.0.0" };
+    static const char *bind_l[] = { "This machine only (127.0.0.1)",
+                                    "Any interface (0.0.0.0)" };
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *card, *body;
+    g_autofree char *port = g_strdup_printf("%d", settings_int("live.port", 4729, 1, 65535));
+    g_autofree char *rot = g_strdup_printf("%d", settings_int("live.rotate_s", 0, 0, 86400));
+    g_autofree char *keep = g_strdup_printf("%d", settings_int("live.keep", 20, 1, 5000));
+    g_autofree char *dbm = g_strdup_printf("%d", settings_int("live.min_dbm", 0, -120, 0));
+
+    card = settings_card("LISTENER", &body);
+    gtk_box_append(GTK_BOX(body), settings_entry("GSMTAP port",
+        "live.port", NULL,
+        "What the live view binds, and what the Listen udp field on Live "
+        "Traffic starts with. gr-gsm, srsRAN and Open5GS all emit to 4729 by "
+        "default.", port, 120, state));
+    gtk_box_append(GTK_BOX(body), settings_choice("Bind address",
+        "live.bind", bind_v, bind_l, 2, 0,
+        "0.0.0.0 accepts GSMTAP from anywhere that can reach this machine, "
+        "which is convenient on a bench and wrong on a shared network: anyone "
+        "who can reach the port can put frames into what you are treating as "
+        "evidence. 127.0.0.1 is the careful default.",
+        NULL, state));
+    gtk_box_append(GTK_BOX(col), card);
+
+    card = settings_card("CAPTURES", &body);
+    gtk_box_append(GTK_BOX(body), settings_switch("Save as soon as it starts",
+        "live.autosave", "The Save pcap box on Live Traffic starts checked, and "
+        "a file opens when the listener does. Everything received is written, "
+        "filtered or not: the capture is evidence, not what was on screen.",
+        FALSE, NULL, state));
+    gtk_box_append(GTK_BOX(body), settings_entry("Rotate every",
+        "live.rotate_s", NULL, "Seconds per capture file; 0 means one file for "
+        "the whole session.", rot, 120, state));
+    gtk_box_append(GTK_BOX(body), settings_entry("Keep at most",
+        "live.keep", NULL, "How many live_*.pcap files the prune keeps in the "
+        "capture directory, newest first.", keep, 120, state));
+    gtk_box_append(GTK_BOX(col), card);
+
+    card = settings_card("WHAT THE VIEW STARTS WITH", &body);
+    gtk_box_append(GTK_BOX(body), settings_entry("Minimum signal",
+        "live.min_dbm", NULL, "dBm. 0 means off. A frame whose signal the "
+        "emitter never reported is never hidden by this.", dbm, 120, state));
+    gtk_box_append(GTK_BOX(col), card);
+    return col;
+}
+
+static GtkWidget *
+settings_view_notify(AppState *state)
+{
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *card, *body;
+    g_autofree char *ms = g_strdup_printf("%d", settings_int("notify.toast_ms", 4200, 0, 120000));
+    g_autofree char *keep = g_strdup_printf("%d", settings_int("notify.keep", 100, 10, 1000));
+    g_autofree char *stack = g_strdup_printf("%d", settings_int("notify.stack", 5, 1, 20));
+
+    card = settings_card("TOASTS", &body);
+    gtk_box_append(GTK_BOX(body), settings_entry("Linger",
+        "notify.toast_ms", NULL, "Milliseconds a toast stays before it fades. "
+        "0 keeps it until it is closed by hand. Errors are given twice this "
+        "when the default is in force — they are the ones worth reading twice.",
+        ms, 120, state));
+    gtk_box_append(GTK_BOX(body), settings_entry("At most on screen",
+        "notify.stack", NULL, "A new toast past this closes the oldest one.",
+        stack, 120, state));
+    gtk_box_append(GTK_BOX(body), settings_entry("Tones worth interrupting for",
+        "notify.severities", NULL, "Any of: error, warn, ok, info — separated "
+        "by commas, or with spaces, which are ignored. The notification log "
+        "keeps everything either way; this is only about the corner.",
+        "error, warn, ok, info", 320, state));
+    gtk_box_append(GTK_BOX(col), card);
+
+    card = settings_card("THE LOG", &body);
+    gtk_box_append(GTK_BOX(body), settings_entry("Keep",
+        "notify.keep", NULL, "How many notifications the Notifications page "
+        "remembers, newest first.", keep, 120, state));
+    gtk_box_append(GTK_BOX(body), settings_entry("Muted titles",
+        "notify.mute", NULL, "Comma-separated toast titles — usually a module "
+        "name — that are logged but never shown. Empty means nothing is muted.",
+        "e.g. Live Traffic", 320, state));
+    {
+        GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        GtkWidget *clear = gtk_button_new_with_label("Clear the log");
+        gtk_widget_add_css_class(clear, "verb-button");
+        g_signal_connect(clear, "clicked", G_CALLBACK(notif_clear_clicked), state);
+        gtk_box_append(GTK_BOX(row), clear);
+        gtk_box_append(GTK_BOX(body), row);
+    }
+    gtk_box_append(GTK_BOX(col), card);
+    return col;
+}
+
+static GtkWidget *
+settings_view_diagnostics(AppState *state)
+{
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *card, *body;
+    GtkWidget *scroll, *view;
+    g_autofree char *body_text = NULL;
+    const char *tmp = g_getenv("TMP_DIR");
+    const char *loot = g_getenv("LOOT_DIR");
+    const char *caps = g_getenv("CAPTURES_DIR");
+
+    if (tmp == NULL)  tmp  = IMSISTING_ROOT "/tmp";
+    if (loot == NULL) loot = IMSISTING_ROOT "/loot";
+    if (caps == NULL) caps = IMSISTING_ROOT "/captures";
+
+    card = settings_card("ENVIRONMENT", &body);
+    body_text = g_strdup_printf(
         "Project root      %s\n"
-        "Module directory  %s/modules\n"
-        "Loot directory    %s/loot\n"
-        "Captures          %s/captures\n"
-        "Scratch           /tmp/imsisting\n"
+        "Loot directory    %s\n"
+        "Captures          %s\n"
+        "Scratch           %s\n"
         "\n"
         "GTK               %u.%u.%u\n"
         "GLib              %u.%u.%u\n"
         "Modules           %d\n"
         "Index entries     %d\n"
         "\n"
-        "Privileged actions run through pkexec, per action rather than once\n"
-        "at startup. A module invoked without root reports the failure\n"
-        "instead of silently doing nothing.\n",
-        IMSISTING_ROOT, IMSISTING_ROOT, IMSISTING_ROOT, IMSISTING_ROOT,
+        "Privileged actions run through pkexec, per action rather than once at\n"
+        "startup. A module invoked without root reports the failure instead of\n"
+        "silently doing nothing.\n"
+        "\n"
+        "Bundled fonts     Neuropol (headings), Orbitron (labels, OFL 1.1)\n"
+        "                  native/resources/fonts/NOTICE.md\n",
+        IMSISTING_ROOT, loot, caps, tmp,
         gtk_get_major_version(), gtk_get_minor_version(), gtk_get_micro_version(),
         glib_major_version, glib_minor_version, glib_micro_version,
         N_MODULES, MODULE_INDEX_N);
 
+    view = gtk_text_view_new();
+    scroll = gtk_scrolled_window_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(view), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(view), FALSE);
     gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view), GTK_WRAP_WORD_CHAR);
-    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(view), 28);
-    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(view), 28);
     gtk_widget_add_css_class(view, "page-text");
     gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(view)),
-                             body, -1);
+                             body_text, -1);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), view);
-    gtk_widget_set_vexpand(scroll, TRUE);
-    gtk_box_append(GTK_BOX(outer), scroll);
+    gtk_widget_set_size_request(scroll, -1, 260);
+    gtk_box_append(GTK_BOX(body), scroll);
+    gtk_box_append(GTK_BOX(col), card);
 
+    card = settings_card("MAINTENANCE", &body);
     {
-        /* Real actions, wired to the modules rather than to nothing. */
+        GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
         GtkWidget *deps  = gtk_button_new_with_label("Check dependencies");
         GtkWidget *radio = gtk_button_new_with_label("Probe SDRs");
         GtkWidget *st    = gtk_label_new("Idle");
@@ -6885,14 +7742,176 @@ create_settings_page(AppState *state)
                                g_strdup("--list-tsv"), g_free);
         g_signal_connect(radio, "clicked", G_CALLBACK(group_verb_clicked), NULL);
 
-        gtk_box_append(GTK_BOX(actions), deps);
-        gtk_box_append(GTK_BOX(actions), radio);
-        gtk_box_append(GTK_BOX(actions), st);
+        gtk_box_append(GTK_BOX(row), deps);
+        gtk_box_append(GTK_BOX(row), radio);
+        gtk_box_append(GTK_BOX(row), st);
+        gtk_box_append(GTK_BOX(body), row);
     }
-    gtk_widget_set_margin_start(actions, 16);
-    gtk_widget_set_margin_end(actions, 16);
-    gtk_widget_set_margin_bottom(actions, 14);
-    gtk_box_append(GTK_BOX(outer), actions);
+    gtk_box_append(GTK_BOX(col), card);
+    return col;
+}
+
+/* ---- The page ------------------------------------------------------- */
+
+typedef struct {
+    AppState  *state;
+    GtkWidget *stack;
+    GtkWidget *list;
+    const char *names[6];
+    GtkWidget *pages[6];
+    guint n;
+} SettingsViews;
+
+static void
+settings_view_activated(GtkListBox *list, GtkListBoxRow *row, gpointer user_data)
+{
+    SettingsViews *sv = user_data;
+    int index = gtk_list_box_row_get_index(row);
+
+    if (sv == NULL || index < 0 || (guint) index >= sv->n) return;
+    gtk_stack_set_visible_child_name(GTK_STACK(sv->stack), sv->names[index]);
+    gtk_list_box_select_row(list, row);
+
+    /* "Settings" is a place worth returning to, and the view is the part of it
+       worth naming: Paths and Diagnostics are two different intentions. */
+    if (sv->state != NULL)
+        place_push_view(sv->state, "settings", sv->names[index]);
+}
+
+/* Open the Settings page on a named view, for a recent place. A name that no
+   longer exists leaves the page as it is rather than failing loudly: the
+   recent list is a convenience, not a contract. */
+static void
+settings_show_view(AppState *state, const char *name)
+{
+    GtkWidget *page;
+    SettingsViews *sv;
+
+    if (state == NULL || name == NULL || state->notebook == NULL) return;
+    page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(state->notebook),
+                                     SETTINGS_PLACE_PAGE);
+    if (page == NULL) return;
+    sv = g_object_get_data(G_OBJECT(page), "settings-views");
+    if (sv == NULL || sv->list == NULL) return;
+
+    for (guint i = 0; i < sv->n; i++) {
+        if (g_strcmp0(sv->names[i], name) != 0) continue;
+        {
+            GtkListBoxRow *r = gtk_list_box_get_row_at_index(
+                GTK_LIST_BOX(sv->list), (int) i);
+            if (r != NULL)
+                settings_view_activated(GTK_LIST_BOX(sv->list), r, sv);
+        }
+        return;
+    }
+}
+
+static GtkWidget *
+create_settings_page(AppState *state)
+{
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    GtkWidget *head  = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget *title = gtk_label_new("Settings");
+    GtkWidget *sub   = gtk_label_new("What this toolkit does by default");
+    GtkWidget *cols  = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    GtkWidget *menu_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *hdr   = gtk_label_new("VIEWS");
+    GtkWidget *list  = gtk_list_box_new();
+    GtkWidget *menu_scroll = gtk_scrolled_window_new();
+    GtkWidget *stack = gtk_stack_new();
+    SettingsViews *sv = g_new0(SettingsViews, 1);
+    static const struct { const char *name; const char *icon; } views[] = {
+        { "Interface",     "preferences-desktop-symbolic" },
+        { "Paths",         "folder-symbolic" },
+        { "Radio",         "network-wireless-symbolic" },
+        { "Live traffic",  "media-record-symbolic" },
+        { "Notifications", "notification-symbolic" },
+        { "Diagnostics",   "dialog-information-symbolic" },
+    };
+
+    gtk_widget_add_css_class(title, "page-title");
+    gtk_widget_add_css_class(sub, "page-subtitle");
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(sub), 0.0f);
+    gtk_box_append(GTK_BOX(head), title);
+    gtk_box_append(GTK_BOX(head), sub);
+    gtk_widget_set_margin_top(head, 14);
+    gtk_widget_set_margin_start(head, 16);
+    gtk_widget_add_css_class(outer, "doc-page");
+    gtk_box_append(GTK_BOX(outer), head);
+
+    sv->stack = stack;
+    sv->list = list;
+    sv->n = G_N_ELEMENTS(views);
+    sv->pages[0] = settings_view_interface(state);
+    sv->pages[1] = settings_view_paths(state);
+    sv->pages[2] = settings_view_radio(state);
+    sv->pages[3] = settings_view_live(state);
+    sv->pages[4] = settings_view_notify(state);
+    sv->pages[5] = settings_view_diagnostics(state);
+
+    gtk_widget_add_css_class(list, "module-menu");
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_SINGLE);
+    gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(list), TRUE);
+    gtk_stack_set_transition_type(GTK_STACK(stack), GTK_STACK_TRANSITION_TYPE_NONE);
+
+    for (guint i = 0; i < sv->n; i++) {
+        GtkWidget *row = gtk_list_box_row_new();
+        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+        GtkWidget *icon = imsisting_icon_image(views[i].icon);
+        GtkWidget *label = gtk_label_new(views[i].name);
+        GtkWidget *scroll = gtk_scrolled_window_new();
+        GtkWidget *pad = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+
+        sv->names[i] = views[i].name;
+        gtk_widget_add_css_class(row, "module-menu-row");
+        gtk_image_set_pixel_size(GTK_IMAGE(icon), 20);
+        gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+        gtk_widget_set_hexpand(label, TRUE);
+        gtk_box_append(GTK_BOX(box), icon);
+        gtk_box_append(GTK_BOX(box), label);
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+        gtk_list_box_append(GTK_LIST_BOX(list), row);
+
+        gtk_widget_set_margin_start(sv->pages[i], 18);
+        gtk_widget_set_margin_end(sv->pages[i], 18);
+        gtk_widget_set_margin_top(sv->pages[i], 10);
+        gtk_widget_set_margin_bottom(sv->pages[i], 18);
+        gtk_box_append(GTK_BOX(pad), sv->pages[i]);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), pad);
+        gtk_widget_set_vexpand(scroll, TRUE);
+        gtk_stack_add_named(GTK_STACK(stack), scroll, views[i].name);
+    }
+    g_signal_connect(list, "row-activated",
+                     G_CALLBACK(settings_view_activated), sv);
+
+    gtk_widget_add_css_class(hdr, "menu-heading");
+    gtk_label_set_xalign(GTK_LABEL(hdr), 0.0f);
+    gtk_widget_set_margin_top(hdr, 12);
+    gtk_widget_set_margin_bottom(hdr, 6);
+    gtk_widget_set_margin_start(hdr, 16);
+    gtk_box_append(GTK_BOX(menu_col), hdr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(menu_scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(menu_scroll), list);
+    gtk_widget_set_size_request(menu_scroll, 250, -1);
+    gtk_widget_set_vexpand(menu_scroll, TRUE);
+    gtk_box_append(GTK_BOX(menu_col), menu_scroll);
+    gtk_widget_set_vexpand(menu_col, TRUE);
+    gtk_box_append(GTK_BOX(menu_col), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
+    gtk_box_append(GTK_BOX(cols), menu_col);
+    gtk_widget_set_hexpand(stack, TRUE);
+    gtk_box_append(GTK_BOX(cols), stack);
+    gtk_widget_set_vexpand(cols, TRUE);
+    gtk_box_append(GTK_BOX(outer), cols);
+
+    gtk_list_box_select_row(GTK_LIST_BOX(list),
+                            gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0));
+
+    sv->state = state;
+    g_object_set_data_full(G_OBJECT(outer), "settings-views", sv, g_free);
     return outer;
 }
 
@@ -7670,9 +8689,11 @@ live_pcap_prune(const char *dir)
     g_dir_close(d);
 
     /* The names carry the time they were opened, so sorting by name sorts by
-       age. Oldest first, then everything past the newest twenty goes. */
+       age. Oldest first, then everything past the newest N goes - and the
+       prune only ever touches the files this window wrote itself. */
+    guint keep = (guint) settings_int("live.keep", 20, 1, 5000);
     g_ptr_array_sort(live, live_path_cmp);
-    drop = live->len > 20 ? live->len - 20 : 0;
+    drop = live->len > keep ? live->len - keep : 0;
     for (i = 0; i < drop; i++)
         g_remove((const char *) g_ptr_array_index(live, i));
     g_ptr_array_free(live, TRUE);
@@ -7917,7 +8938,8 @@ live_start(AppState *state, gboolean announce)
         return;
     }
 
-    addr = g_inet_socket_address_new_from_string("0.0.0.0", state->live_port);
+    addr = g_inet_socket_address_new_from_string(
+        settings_get("live.bind", "127.0.0.1"), state->live_port);
     if (!g_socket_bind(state->live_socket, addr, TRUE, &error)) {
         g_autofree char *m = g_strdup_printf("cannot bind udp/%u — %s",
             state->live_port, error ? error->message : "in use");
@@ -8333,8 +9355,15 @@ live_row_freq(AppState *state, LiveMsg *m)
     argv[i++] = rat;
     argv[i++] = n;
     if (g_strcmp0(rat, "gsm") == 0) {
+        const char *hint = settings_get("radio.arfcn_hint", "none");
         argv[i++] = m->up ? "ul" : "dl";
-        if (m->pcs) argv[i++] = "pcs";
+        /* The frame's own PCS flag is the better evidence when it is set; the
+           setting is what to assume when it is not, and "none" leaves the
+           ambiguity in place rather than guessing a band. */
+        if (m->pcs)
+            argv[i++] = "pcs";
+        else if (g_strcmp0(hint, "none") != 0)
+            argv[i++] = hint;
     }
     argv[i] = NULL;
 
@@ -8618,9 +9647,13 @@ create_live_traffic_page(AppState *state)
     GtkWidget *plabel = gtk_label_new("Listen udp");
     GtkWidget *portentry = gtk_entry_new();
     GtkWidget *savecheck = gtk_check_button_new_with_label("Save pcap");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(savecheck),
+                                settings_flag("live.autosave", FALSE));
     GtkWidget *cappath = gtk_entry_new();
     GtkWidget *rotlabel = gtk_label_new("rotate every");
     GtkWidget *rotspin = gtk_spin_button_new_with_range(0, 3600, 30);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(rotspin),
+        settings_int("live.rotate_s", 0, 0, 86400));
     GtkWidget *rotunit = gtk_label_new("s");
     GtkWidget *caplabel = gtk_label_new("not saving");
     GtkWidget *scroll = gtk_scrolled_window_new();
@@ -8843,9 +9876,17 @@ create_live_traffic_page(AppState *state)
     /* One tick a second drives the arrival rate and the quiet indicator. */
     state->live_rate_timer   = g_timeout_add_seconds(1, live_rate_tick, state);
 
-    /* The listener's port, the capture, and the decoded-field filters. */
-    state->live_port          = LIVE_PORT;
+    /* The listener's port, the capture, and the decoded-field filters. The
+       stored values are what this page opens with; the controls below are how
+       they are changed for this run, and a change made here is not written
+       back - the settings window is the one place that owns the file. */
+    state->live_port          = (guint) settings_int("live.port", LIVE_PORT,
+                                                     1, 65535);
     state->live_port_entry    = portentry;
+    {
+        g_autofree char *pt = g_strdup_printf("%u", state->live_port);
+        gtk_editable_set_text(GTK_EDITABLE(portentry), pt);
+    }
     state->live_port_label    = sub;
     state->live_save_check    = savecheck;
     state->live_path_entry    = cappath;
@@ -8856,9 +9897,9 @@ create_live_traffic_page(AppState *state)
     state->live_dbm_spin      = dspin;
     state->live_arfcn_entry   = aentry;
     state->live_channel_drop  = chdrop;
-    state->live_show_ul       = TRUE;
-    state->live_show_dl       = TRUE;
-    state->live_min_dbm       = 0;
+    state->live_show_ul       = settings_flag("live.ul", TRUE);
+    state->live_show_dl       = settings_flag("live.dl", TRUE);
+    state->live_min_dbm       = (gint) settings_int("live.min_dbm", 0, -120, 0);
     state->live_filter_arfcn  = -1;
     state->live_filter_channel = -1;
     state->live_pcap          = NULL;
@@ -8961,10 +10002,37 @@ drawer_edge_motion(GtkEventControllerMotion *controller, double x, double y,
     (void) controller;
     (void) y;
 
+    /* Hover-to-open is the default; "click" waits for the press instead, which
+       is steadier on a touchpad. The movement is still what is measured, so
+       the two differ only in whether the drawer opens on arrival. */
+    if (g_strcmp0(settings_get("ui.drawer", "hover"), "click") == 0)
+        return;
+
     if (x <= DRAWER_EDGE) {
         if (!drawer_is_open(state)) drawer_set_open(state, TRUE);
     } else if (x > DRAWER_CLEAR) {
         if (drawer_is_open(state)) drawer_set_open(state, FALSE);
+    }
+}
+
+/* The other half of the drawer's two behaviours: in "click" mode the
+   movement does nothing and the press does the work. It is the same test of
+   x, on the same controller's coordinates, so the two modes open the drawer
+   at the same place. */
+static void
+drawer_edge_pressed(GtkGestureClick *gesture, int n_press, double x, double y,
+                    gpointer user_data)
+{
+    AppState *state = user_data;
+    (void) gesture;
+    (void) n_press;
+    (void) y;
+
+    if (g_strcmp0(settings_get("ui.drawer", "hover"), "click") != 0) return;
+    if (x <= DRAWER_EDGE) {
+        drawer_set_open(state, TRUE);
+    } else if (x > DRAWER_CLEAR) {
+        drawer_set_open(state, FALSE);
     }
 }
 
@@ -9854,7 +10922,7 @@ boot_build_ui(AppState *state, GtkApplication *app)
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
         create_notifications_page(state), gtk_label_new("Notifications"));
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
-        text_page("Help", "How this is put together", HELP_TEXT, NULL),
+        create_help_page(),
         gtk_label_new("Help"));
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
         create_settings_page(state), gtk_label_new("Settings"));
@@ -9987,6 +11055,13 @@ boot_build_ui(AppState *state, GtkApplication *app)
     GtkEventController *motion = gtk_event_controller_motion_new();
     g_signal_connect(motion, "motion", G_CALLBACK(drawer_edge_motion), state);
     gtk_widget_add_controller(GTK_WIDGET(state->window), motion);
+
+    /* Same edge, pressed instead of crossed, for the steadier mode. */
+    GtkGesture *edge = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(edge), 1);
+    g_signal_connect(edge, "pressed", G_CALLBACK(drawer_edge_pressed), state);
+    gtk_widget_add_controller(GTK_WIDGET(state->window),
+                              GTK_EVENT_CONTROLLER(edge));
 
     gtk_widget_set_vexpand(overlay, TRUE);
     gtk_box_append(GTK_BOX(root), overlay);
@@ -10635,19 +11710,34 @@ splash_begin(AppState *state, GtkApplication *app)
        the still and =2..=5 pins a film, which is how one is looked at without
        relaunching until it comes round. If no window comes back - the media
        backend absent, the film not built in - the still is built instead. */
+    /* Where the splash comes from: the settings file decides, the environment
+       overrides it - an explicit IMSISTING_SPLASH for one launch outranks a
+       stored preference, including a stored "off", because saying it on the
+       command line is a deliberate act about this run. */
     const char *which = g_getenv("IMSISTING_SPLASH");
-    if (which != NULL && (g_ascii_strcasecmp(which, "art") == 0 ||
-                          g_strcmp0(which, "1") == 0)) {
+    const char *art = (which == NULL) ? settings_get("ui.splash_art", "all") : NULL;
+    gboolean splash_off =
+        g_getenv("IMSISTING_NO_SPLASH") != NULL ||
+        (which == NULL && !settings_flag("ui.splash", TRUE));
+    gboolean pin_still = !splash_off &&
+        ((which != NULL && (g_ascii_strcasecmp(which, "art") == 0 ||
+                            g_strcmp0(which, "1") == 0)) ||
+         (art != NULL && g_strcmp0(art, "still") == 0));
+    gboolean films_only = (art != NULL && g_strcmp0(art, "films") == 0);
+
+    if (pin_still) {
         const SplashFilm *r = &splash_films[g_random_int_range(
             0, (gint32) G_N_ELEMENTS(splash_films))];
         splash_window_art(state, app, r->facts, r->n_facts);
-    } else {
+    } else if (!splash_off) {
         gint32 n_films = (gint32) G_N_ELEMENTS(splash_films);
         const SplashFilm *choice = NULL;
 
         if (which != NULL && which[0] >= '2' && which[0] <= '5' &&
             which[1] == '\0')
             choice = &splash_films[which[0] - '2'];
+        else if (films_only)
+            choice = &splash_films[g_random_int_range(0, n_films)];
         else if (g_random_int_range(0, n_films + 1) == n_films)
             choice = &splash_still;
         else
@@ -10660,11 +11750,13 @@ splash_begin(AppState *state, GtkApplication *app)
             splash_window_video(state, app, choice);
         }
     }
-    if (state->splash_window == NULL) {
+    if (!splash_off && state->splash_window == NULL) {
         const SplashFilm *r = &splash_films[g_random_int_range(
             0, (gint32) G_N_ELEMENTS(splash_films))];
         splash_window_art(state, app, r->facts, r->n_facts);
     }
+
+    if (splash_off || state->splash_window == NULL) return;
 
     gtk_window_present(GTK_WINDOW(state->splash_window));
 
@@ -10693,8 +11785,15 @@ on_activate(GtkApplication *app, gpointer user_data)
 
     /* The escape hatch matters more than usual here: with the splash on, the
        window cannot be reached until the boot finishes, so a splash that
-       misbehaves would have to be waited out on every launch. */
-    if (g_getenv("IMSISTING_NO_SPLASH") != NULL) {
+       misbehaves would have to be waited out on every launch. It is the
+       environment variable and the setting together: either one turns it off,
+       and neither can be set by accident from the other's direction. The same
+       condition as the one splash_begin() uses to pick the art, restated here
+       because this is a different function and the decision is about whether
+       to call it at all. */
+    if (g_getenv("IMSISTING_NO_SPLASH") != NULL ||
+        (g_getenv("IMSISTING_SPLASH") == NULL &&
+         !settings_flag("ui.splash", TRUE))) {
         for (guint i = 0; i < G_N_ELEMENTS(boot_steps); i++)
             boot_steps[i].run(state, app);
         /* Normally splash_close starts this; with no splash there is nobody
@@ -10771,6 +11870,9 @@ imsisting_load_fonts(void)
 int
 main(int argc, char **argv)
 {
+    /* Before the interface, because density, the splash and the toast rules
+       are all read from here. */
+    settings_load();
     AppState state = { 0 };
     state.stderr_fd = -1;
     g_app_state = &state;
@@ -13329,106 +14431,106 @@ register_all_modules(void)
                              G_N_ELEMENTS(tmap_entries), NULL);
     module_registry_register("05_field_kit", fkit_entries,
                              G_N_ELEMENTS(fkit_entries), NULL);
-    module_registry_register("10_gsm_air", gair_entries,
+    module_registry_register("06_gsm_air", gair_entries,
                              G_N_ELEMENTS(gair_entries), NULL);
-    module_registry_register("11_gsm_attack", gatk_entries,
+    module_registry_register("07_gsm_attack", gatk_entries,
                              G_N_ELEMENTS(gatk_entries), NULL);
-    module_registry_register("12_umts_air", uair_entries,
+    module_registry_register("08_umts_air", uair_entries,
                              G_N_ELEMENTS(uair_entries), NULL);
-    module_registry_register("13_lte_attach", latt_entries,
+    module_registry_register("09_lte_attach", latt_entries,
                              G_N_ELEMENTS(latt_entries), NULL);
-    module_registry_register("14_lte_air", lair_entries,
+    module_registry_register("10_lte_air", lair_entries,
                              G_N_ELEMENTS(lair_entries), NULL);
-    module_registry_register("15_lte_core", lcore_entries,
+    module_registry_register("11_lte_core", lcore_entries,
                              G_N_ELEMENTS(lcore_entries), NULL);
-    module_registry_register("16_nr_air", nair_entries,
+    module_registry_register("12_nr_air", nair_entries,
                              G_N_ELEMENTS(nair_entries), NULL);
-    module_registry_register("17_nr_core", ncore_entries,
+    module_registry_register("13_nr_core", ncore_entries,
                              G_N_ELEMENTS(ncore_entries), NULL);
-    module_registry_register("18_suci", suci_entries,
+    module_registry_register("14_suci", suci_entries,
                              G_N_ELEMENTS(suci_entries), NULL);
-    module_registry_register("19_downgrade", dwn_entries,
+    module_registry_register("15_downgrade", dwn_entries,
                              G_N_ELEMENTS(dwn_entries), NULL);
-    module_registry_register("20_sim", sim_entries,
+    module_registry_register("16_sim", sim_entries,
                              G_N_ELEMENTS(sim_entries), NULL);
-    module_registry_register("21_pcap_analysis", pcap_entries,
+    module_registry_register("17_pcap_analysis", pcap_entries,
                              G_N_ELEMENTS(pcap_entries), NULL);
-    module_registry_register("22_imsi_exposure", imsi_entries,
+    module_registry_register("18_imsi_exposure", imsi_entries,
                              G_N_ELEMENTS(imsi_entries), NULL);
-    module_registry_register("23_cipher_audit", caud_entries,
+    module_registry_register("19_cipher_audit", caud_entries,
                              G_N_ELEMENTS(caud_entries), NULL);
-    module_registry_register("24_gsm_cve", gcve_entries,
+    module_registry_register("20_gsm_cve", gcve_entries,
                              G_N_ELEMENTS(gcve_entries), NULL);
-    module_registry_register("25_lte_cve", lcve_entries,
+    module_registry_register("21_lte_cve", lcve_entries,
                              G_N_ELEMENTS(lcve_entries), NULL);
-    module_registry_register("26_nr_cve", ncve_entries,
+    module_registry_register("22_nr_cve", ncve_entries,
                              G_N_ELEMENTS(ncve_entries), NULL);
-    module_registry_register("30_killchain", kchn_entries,
+    module_registry_register("25_killchain", kchn_entries,
                              G_N_ELEMENTS(kchn_entries), NULL);
-    module_registry_register("27_traffic_analysis", tana_entries,
+    module_registry_register("23_traffic_analysis", tana_entries,
                              G_N_ELEMENTS(tana_entries), NULL);
-    module_registry_register("28_rf_fingerprint", rff_entries,
+    module_registry_register("24_rf_fingerprint", rff_entries,
                              G_N_ELEMENTS(rff_entries), NULL);
-    module_registry_register("34_mac_layer", macl_entries,
+    module_registry_register("29_mac_layer", macl_entries,
                              G_N_ELEMENTS(macl_entries), NULL);
-    module_registry_register("37_nas_signaling", nasf_entries,
+    module_registry_register("32_nas_signaling", nasf_entries,
                              G_N_ELEMENTS(nasf_entries), NULL);
-    module_registry_register("31_ss7_map", ss7_entries,
+    module_registry_register("26_ss7_map", ss7_entries,
                              G_N_ELEMENTS(ss7_entries), NULL);
-    module_registry_register("32_cellular_dns", cdns_entries,
+    module_registry_register("27_cellular_dns", cdns_entries,
                              G_N_ELEMENTS(cdns_entries), NULL);
-    module_registry_register("33_paging_track", pgt_entries,
+    module_registry_register("28_paging_track", pgt_entries,
                              G_N_ELEMENTS(pgt_entries), NULL);
-    module_registry_register("35_volte_ims", vims_entries,
+    module_registry_register("30_volte_ims", vims_entries,
                              G_N_ELEMENTS(vims_entries), NULL);
-    module_registry_register("36_sim_defense", simd_entries,
+    module_registry_register("31_sim_defense", simd_entries,
                              G_N_ELEMENTS(simd_entries), NULL);
-    module_registry_register("38_jamming_detect", jamd_entries,
+    module_registry_register("33_jamming_detect", jamd_entries,
                              G_N_ELEMENTS(jamd_entries), NULL);
-    module_registry_register("39_slicing", slic_entries,
+    module_registry_register("34_slicing", slic_entries,
                              G_N_ELEMENTS(slic_entries), NULL);
-    module_registry_register("50_iot", iot_entries,
+    module_registry_register("45_iot", iot_entries,
                              G_N_ELEMENTS(iot_entries), NULL);
-    module_registry_register("51_lpp", lpp_entries,
+    module_registry_register("46_lpp", lpp_entries,
                              G_N_ELEMENTS(lpp_entries), NULL);
-    module_registry_register("52_wifioff", wifioff_entries,
+    module_registry_register("47_wifioff", wifioff_entries,
                              G_N_ELEMENTS(wifioff_entries), NULL);
-    module_registry_register("40_baseband", bbnd_entries,
+    module_registry_register("35_baseband", bbnd_entries,
                              G_N_ELEMENTS(bbnd_entries), NULL);
-    module_registry_register("41_vowifi", vowi_entries,
+    module_registry_register("36_vowifi", vowi_entries,
                              G_N_ELEMENTS(vowi_entries), NULL);
-    module_registry_register("42_femtocell", femt_entries,
+    module_registry_register("37_femtocell", femt_entries,
                              G_N_ELEMENTS(femt_entries), NULL);
-    module_registry_register("43_ussd", ussd_entries,
+    module_registry_register("38_ussd", ussd_entries,
                              G_N_ELEMENTS(ussd_entries), NULL);
-    module_registry_register("44_ta_geoloc", tgeo_entries,
+    module_registry_register("39_ta_geoloc", tgeo_entries,
                              G_N_ELEMENTS(tgeo_entries), NULL);
-    module_registry_register("45_sba_pivot", sbap_entries,
+    module_registry_register("40_sba_pivot", sbap_entries,
                              G_N_ELEMENTS(sbap_entries), NULL);
-    module_registry_register("46_ota_sms", otasm_entries,
+    module_registry_register("41_ota_sms", otasm_entries,
                              G_N_ELEMENTS(otasm_entries), NULL);
-    module_registry_register("47_li_probe", lipr_entries,
+    module_registry_register("42_li_probe", lipr_entries,
                              G_N_ELEMENTS(lipr_entries), NULL);
-    module_registry_register("48_ran_share", rans_entries,
+    module_registry_register("43_ran_share", rans_entries,
                              G_N_ELEMENTS(rans_entries), NULL);
-    module_registry_register("49_carrier_api", capi_entries,
+    module_registry_register("44_carrier_api", capi_entries,
                              G_N_ELEMENTS(capi_entries), NULL);
-    module_registry_register("53_oran", oran_entries,
+    module_registry_register("48_oran", oran_entries,
                              G_N_ELEMENTS(oran_entries), NULL);
-    module_registry_register("54_ntn", ntn_entries,
+    module_registry_register("49_ntn", ntn_entries,
                              G_N_ELEMENTS(ntn_entries), NULL);
-    module_registry_register("55_gprs", gprs_entries,
+    module_registry_register("50_gprs", gprs_entries,
                              G_N_ELEMENTS(gprs_entries), NULL);
-    module_registry_register("56_sidelink", slnk_entries,
+    module_registry_register("51_sidelink", slnk_entries,
                              G_N_ELEMENTS(slnk_entries), NULL);
-    module_registry_register("57_stk", stk_entries,
+    module_registry_register("52_stk", stk_entries,
                              G_N_ELEMENTS(stk_entries), NULL);
-    module_registry_register("58_non3gpp", n3g_entries,
+    module_registry_register("53_non3gpp", n3g_entries,
                              G_N_ELEMENTS(n3g_entries), NULL);
-    module_registry_register("59_baseband_exploit", bexp_entries,
+    module_registry_register("54_baseband_exploit", bexp_entries,
                              G_N_ELEMENTS(bexp_entries), NULL);
-    module_registry_register("60_nr_inject", nrj_entries,
+    module_registry_register("55_nr_inject", nrj_entries,
                              G_N_ELEMENTS(nrj_entries), NULL);
-    module_registry_register("61_baseband_diag", bbdg_entries,
+    module_registry_register("56_baseband_diag", bbdg_entries,
                              G_N_ELEMENTS(bbdg_entries), NULL);
 }

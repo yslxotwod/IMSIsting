@@ -49,8 +49,8 @@ reverse-engineering. The known-answer vectors are libosmocore's own test suite
 PyPI package.
 
 A5/1 is written from the published algorithm description and is pinned by the
-two independent vectors already used by `modules/10_gsm_air.sh` and
-`modules/24_gsm_cve.sh` -- Briceno/Goldberg/Wagner and libosmocore -- asserting
+two independent vectors already used by `modules/06_gsm_air.sh` and
+`modules/20_gsm_cve.sh` -- Briceno/Goldberg/Wagner and libosmocore -- asserting
 the downlink and uplink row of each, so a transposed state or a wrong clocking
 order cannot pass.
 

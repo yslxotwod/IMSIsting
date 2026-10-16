@@ -218,9 +218,11 @@ with open(out, 'wb') as f:
                              bytes([10,0,0,1]), bytes([10,0,0,2])) + udp
             eth = bytes.fromhex('001122334455') + bytes.fromhex('66778899aabb') + \
                   struct.pack('!H', 0x0800) + ip
-            f.write(struct.pack('<IIII', ts, 0, len(eth), len(eth)))
+            sec = int(ts)
+            f.write(struct.pack('<IIII', sec, int(round((ts - sec) * 1000000)),
+                                len(eth), len(eth)))
             f.write(eth)
-            ts += 1
+            ts += delay
 print("wrote\t%s" % out)
 PY
     fi
@@ -241,26 +243,27 @@ fk_guard_matrix() {
     cat <<'MATRIX'
 01_radio|--record|
 02_cell_recon|--scan|gsm||45
-10_gsm_air|--decode-pcap|/nonexistent.pcap
-14_lte_air|--start|
-16_nr_air|--start|
-17_nr_core|--decode-ngap|00
-19_downgrade|--detect|/nonexistent.pcap
-24_gsm_cve|--run-cve|CVE-2017-1000250
-25_lte_cve|--probe|CVE-2017-6975
-26_nr_cve|--run-cve|CVE-2019-1234
-31_ss7_map|--decode-msu|00
-32_cellular_dns|--detect|/nonexistent.pcap
-33_paging_track|--detect|/nonexistent.pcap
-34_mac_layer|--rnti-track|/nonexistent.pcap
-37_nas_signaling|--rate|/nonexistent.pcap
-38_jamming_detect|--analyse|/nonexistent.iq
-44_ta_geoloc|--trilaterate|/nonexistent.tsv
-46_ota_sms|--parse-packet|00
-47_li_probe|--score|/nonexistent.pcap
-48_ran_share|--leak-check|/nonexistent.pcap
-59_baseband_exploit|--inject|7E0044001F|BEXP_TX_ARMED=1 BEXP_TX_CMD=
-60_nr_inject|--inject|7E0044001F|NRJ_TX_ARMED=1 NRJ_TX_CMD=
+06_gsm_air|--decode-pcap|/nonexistent.pcap
+07_gsm_attack|--transmit|62||60
+10_lte_air|--start|
+12_nr_air|--start|
+13_nr_core|--decode-ngap|00
+15_downgrade|--detect|/nonexistent.pcap
+20_gsm_cve|--run-cve|CVE-2017-1000250
+21_lte_cve|--probe|CVE-2017-6975
+22_nr_cve|--run-cve|CVE-2019-1234
+26_ss7_map|--decode-msu|00
+27_cellular_dns|--detect|/nonexistent.pcap
+28_paging_track|--detect|/nonexistent.pcap
+29_mac_layer|--rnti-track|/nonexistent.pcap
+32_nas_signaling|--rate|/nonexistent.pcap
+33_jamming_detect|--analyse|/nonexistent.iq
+39_ta_geoloc|--trilaterate|/nonexistent.tsv
+41_ota_sms|--parse-packet|00
+42_li_probe|--score|/nonexistent.pcap
+43_ran_share|--leak-check|/nonexistent.pcap
+54_baseband_exploit|--inject|7E0044001F|BEXP_TX_ARMED=1 BEXP_TX_CMD=
+55_nr_inject|--inject|7E0044001F|NRJ_TX_ARMED=1 NRJ_TX_CMD=
 MATRIX
 }
 
@@ -364,7 +367,7 @@ fk_capability() {
     printf 'pkexec\t%s\n'      "$pkexec"
     printf 'gsmtap_port\t%s\n' "$FK_PORT"
     printf 'gsmtap_consumers\t%s\n' \
-        "$(for m in 03_gsmtap 21_pcap_analysis 22_imsi_exposure 33_paging_track; do
+        "$(for m in 03_gsmtap 17_pcap_analysis 18_imsi_exposure 28_paging_track; do
              [[ -x "$IMSISTING_ROOT/modules/$m.sh" ]] && printf '%s ' "$m"; done)"
     printf 'software_emitters\t%s\n' \
         "$(for e in grgsm_livemon srsenb gnb srsepc open5gs; do

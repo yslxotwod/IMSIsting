@@ -2,7 +2,7 @@
 
 ## STATUS: six fixed and one relabelled, all verified; one retracted as a false positive (2024)
 
-## STATUS (11_gsm_attack): nine more found and fixed while building the transmit layer (2025)
+## STATUS (07_gsm_attack): nine more found and fixed while building the transmit layer (2025)
 
 | # | Defect | Fix | Verification |
 |---|--------|-----|--------------|
@@ -14,7 +14,7 @@
 | 14 | Normal burst modelled as 116 encrypted bits | 114 data + 2 stealing flags at BN60/BN87 | `data_bits 114`, `stealing_bits 2`; TS 45.003 §3.1.4 |
 | 15 | Paging group claimed `IMSI mod 1024` in the plan text | corrected to `IMSI mod 1000`, TS 45.002 §6.5.2 | `262011234567890` → `imsi_mod_1000 890` |
 | 16 | `--ta` hardcoded TAmax 63, ignoring GSM 400 | `--ta <units> [gsm400]` | `--ta 64` rc 2; `--ta 219 gsm400` rc 0, `max_ta 219` |
-| 17 | **Sixteen** frame-model functions unreachable — built but never dispatched | wired to verbs and to the GUI submenu | `tools/check-verbs.sh` → 0 UNPLACED for `11_gsm_attack`; all 16 return rc 0 |
+| 17 | **Sixteen** frame-model functions unreachable — built but never dispatched | wired to verbs and to the GUI submenu | `tools/check-verbs.sh` → 0 UNPLACED for `07_gsm_attack`; all 16 return rc 0 |
 | 18 | `--build-cipher-mode <alg> 1` put the Cipher Response bit in bit 4 | moved to bit 5 | `06350304` (cr=0) / `06350314` (cr=1); 0x14 is the only octet Wireshark decodes as `CR: IMEISV shall be included` |
 
 ### Detail: items 9 and 10 (the classmark codec)
@@ -77,16 +77,16 @@ exposed as `--a5-count` and asserted at `fn 123456` → `191624` (`0x2EC88`).
 |---|--------|-----|--------------|
 | 1 | SI3/LAI MNC transposed | `gair_decode_lai` nibble order | 262-01→`mnc 01`, 208-01→`mnc 01`, 262-010→`mnc 010`; vectors corrected |
 | 2 | IDENTITY REQUEST wrong discriminator | `0605` not `0505` | octets `060501`/`060503`; selftest 107/107 |
-| 3 | GSMTAP identity harvest dead | added `--identity-exposure` to 10_gsm_air | end-to-end: IMSI row emitted, non-identity payload claims nothing |
+| 3 | GSMTAP identity harvest dead | added `--identity-exposure` to 06_gsm_air | end-to-end: IMSI row emitted, non-identity payload claims nothing |
 | 4 | Field Kit ignores `count` | numeric guard on `$count` | count=1 → 6 frames, count=3 → 18 |
 | 5 | ~~LTE ASN.1 flags partial length~~ | **false positive — no fix needed** | see below |
 | 6 | NIA0 absent from the security-mode table | added `NIA0` | `--build-security-mode NIA0` → `null_algorithm yes` |
-| 7 | `19_downgrade --detect` could never fire on a pcap | classifier writes the event name, not the literal `event` | crafted reject pcap: `steering_rejects 1 / verdict SUSPECT` (was `0 / CLEAN`) |
-| 8 | `--kc` presented a truncated `sha256(KI‖RAND)` as an A3/A8 Kc | **real A3/A8 implemented** — COMP128-1/2/3 in `tools/gsm_crypto.py`, wired into `--kc` and `--probe KC` | `--kc 00112233445566778899AABBCCDDEEFF 00112233445566778899AABBCCDDEEFF` → `sres 04A66BA8` / `kc F87EB8222CEA3400` (published vector); `24_gsm_cve --selftest` PASS |
+| 7 | `15_downgrade --detect` could never fire on a pcap | classifier writes the event name, not the literal `event` | crafted reject pcap: `steering_rejects 1 / verdict SUSPECT` (was `0 / CLEAN`) |
+| 8 | `--kc` presented a truncated `sha256(KI‖RAND)` as an A3/A8 Kc | **real A3/A8 implemented** — COMP128-1/2/3 in `tools/gsm_crypto.py`, wired into `--kc` and `--probe KC` | `--kc 00112233445566778899AABBCCDDEEFF 00112233445566778899AABBCCDDEEFF` → `sres 04A66BA8` / `kc F87EB8222CEA3400` (published vector); `20_gsm_cve --selftest` PASS |
 
-### Retraction: item 5 (15_lte_core "flags 192 only")
+### Retraction: item 5 (11_lte_core "flags 192 only")
 
-The audit reported `modules/15_lte_core.sh:611,635,654` as setting a length field
+The audit reported `modules/11_lte_core.sh:611,635,654` as setting a length field
 to `192` regardless of payload. On inspection this is wrong: those three sites
 pass `192` as the Diameter **command flags** octet, and 0xC0 = R (0x80) |
 P (0x40) is exactly right for a request per RFC 6733 §3. There is no ASN.1
@@ -100,13 +100,13 @@ call site without checking the callee's contract. **One of six "confirmed"
 findings was a misread**, so any finding from this pass needs its callee checked
 before it is treated as real.
 
-Regression state after the fixes: `10_gsm_air --selftest` 100 checks / 0 fail,
-`11_gsm_attack --selftest` 107 / 0, `05_field_kit --selftest` 32 / 0,
-`19_downgrade --selftest` 150 / 0 (was 148; the two new checks are defect 7's guard).
+Regression state after the fixes: `06_gsm_air --selftest` 100 checks / 0 fail,
+`07_gsm_attack --selftest` 107 / 0, `05_field_kit --selftest` 32 / 0,
+`15_downgrade --selftest` 150 / 0 (was 148; the two new checks are defect 7's guard).
 
 **Note on method:** defects 1 and 2 were both invisible to the selftest because
 the *test vector carried the same wrong assumption as the decoder* — 91 passing
-assertions did not catch either. `modules/10_gsm_air.sh:490-493` already records
+assertions did not catch either. `modules/06_gsm_air.sh:490-493` already records
 this exact failure mode from an earlier round. When a decoder and its vector are
 written from one reading of the spec, the suite proves self-consistency, not
 correctness; only a real-world vector (a known cell, a captured frame) does that.
@@ -121,7 +121,7 @@ by running the module, not inferred from reading it.
 
 ## 1. SI3/LAI decoder transposes the MNC digits — every real cell decodes wrong
 
-`modules/10_gsm_air.sh:277-279`
+`modules/06_gsm_air.sh:277-279`
 
 ```sh
 mcc3=$(( o2 & 0x0f ));  mnc1=$(( (o2 >> 4) & 0x0f ))
@@ -145,7 +145,7 @@ Reproduced — same PLMN (MCC 262, MNC 01), two encodings:
 | `--decode-si 15061b000162f210303900…` (**spec-correct**) | `mcc 262` / `mnc 1501` ❌ |
 
 **The selftest passes because its vector was built with the same transposition.**
-`modules/10_gsm_air.sh:938-941` comments "MCC=262 MNC=01 packs as 62 02 f1" and
+`modules/06_gsm_air.sh:938-941` comments "MCC=262 MNC=01 packs as 62 02 f1" and
 `:950` repeats it for 208-01 — both are wrong; the correct packings are
 `62 f2 10` and `02 f8 10`.
 
@@ -154,7 +154,7 @@ fake-cell identity built from this output carries the wrong MNC.
 
 ## 2. IDENTITY REQUEST uses the wrong protocol discriminator
 
-`modules/11_gsm_attack.sh:457,474`
+`modules/07_gsm_attack.sh:457,474`
 
 ```sh
 # -> 0x05 for Radio Resources        <- wrong comment
@@ -169,8 +169,8 @@ The trailing octet follows the same convention: the RR message type sits in the
 LOW nibble of octet 2, so IDENTITY REQUEST is `06 05`, not `05 05`.
 
 Reproduced: `--build-identity-request 1` → `octets 050501`. The module's own
-sibling states the correct value twice (`modules/10_gsm_air.sh:188` and `:212`),
-and the selftest bakes the error in (`modules/11_gsm_attack.sh:628` asserts
+sibling states the correct value twice (`modules/06_gsm_air.sh:188` and `:212`),
+and the selftest bakes the error in (`modules/07_gsm_attack.sh:628` asserts
 `050501`).
 
 *Impact:* the one message this module can actually construct is not an RR
@@ -180,9 +180,9 @@ IDENTITY REQUEST on the wire; the target stack and Wireshark both misparse it.
 
 `modules/03_gsmtap.sh:381,387` calls
 `"$dec" --identity-exposure "$pl" 2>/dev/null) || continue`, where `$dec` is
-`10_gsm_air.sh` for GSM Um CS/PS payloads.
+`06_gsm_air.sh` for GSM Um CS/PS payloads.
 
-`10_gsm_air.sh` implements no such verb — its dispatch (`:1164`) has only
+`06_gsm_air.sh` implements no such verb — its dispatch (`:1164`) has only
 `--imsi-exposure-tsv`, a store-level verb, not a per-payload one.
 
 Reproduced: `grep -c -- '--identity-exposure)'` → `0`. The `|| continue` swallows
@@ -209,7 +209,7 @@ decoder or fill a capture, which is the documented purpose of the argument.
 
 ## 5. LTE core can only build requests — answers are structurally impossible
 
-`modules/15_lte_core.sh:611,635,654` — every builder passes Diameter flags `192`
+`modules/11_lte_core.sh:611,635,654` — every builder passes Diameter flags `192`
 (`0xC0` = Request + Proxiable). The Diameter R bit must be **clear** in an answer.
 
 `grep -oE 'diameter_build_msg [0-9]+ [0-9]+ [0-9]+'` → the only flag value used
@@ -222,7 +222,7 @@ to use it.
 
 ## 6. NIA0 is not recognised as a null algorithm
 
-`modules/19_downgrade.sh:232`
+`modules/15_downgrade.sh:232`
 
 ```sh
 NEA0|EIA0|EEA0|UIA0|UEA0|A5/0|A50|NULL|NONE) return 0 ;;
@@ -239,7 +239,7 @@ for the newest generation it covers.
 ## Also worth knowing
 
 - `--build-security-mode` cannot express cipher ≠ integrity: both are derived
-  from one algorithm name (`modules/19_downgrade.sh:248-262`), so the realistic
+  from one algorithm name (`modules/15_downgrade.sh:248-262`), so the realistic
   downgrade — strong ciphering with null integrity — cannot be encoded.
 - `03_gsmtap` timestamps are synthetic: `gtap_write_pcap` writes `ts = 0` then
   `ts += 1` per frame (`:212-223`), so no timing question can be answered from a
@@ -253,7 +253,7 @@ for the newest generation it covers.
 
 ---
 
-## 7. `19_downgrade --detect` answers CLEAN for every capture
+## 7. `15_downgrade --detect` answers CLEAN for every capture
 
 *Reproduced:* built a pcap whose protocol info reads `GET /reject?cause=15 HTTP/1.1`
 and ran `--detect` on it.
@@ -304,7 +304,7 @@ is worse than a missing one, because its CLEAN verdict is read as evidence.
 
 ## 18. The Cipher Response bit was in the wrong bit — the parameter silently did nothing
 
-`modules/11_gsm_attack.sh`, `gatk_build_cipher_mode` (the `--build-cipher-mode <alg> [cr]`
+`modules/07_gsm_attack.sh`, `gatk_build_cipher_mode` (the `--build-cipher-mode <alg> [cr]`
 verb). The Cipher Response octet was `((cr << 3) | 4)`, i.e. **CR in bit 4** of the octet.
 
 TS 44.018 section 10.5.2.10 table 10.5.2.10.1 prints the CR field's bit as `1`, which is
@@ -340,7 +340,7 @@ module that a test vector carried the same wrong assumption as the code it was t
 
 ## 19. The IMMEDIATE ASSIGNMENT protocol discriminator was in the wrong nibble
 
-`modules/11_gsm_attack.sh`, `gatk_build_immediate_assignment` (the
+`modules/07_gsm_attack.sh`, `gatk_build_immediate_assignment` (the
 `--build-immediate-assignment` verb). The octet after the L2 pseudo length was written as
 `0x60`.
 
@@ -393,8 +393,8 @@ Two smaller things found in the same pass:
 Found by the same audit as item 17, run again after the work above:
 
 ```
-for f in $(grep -oE '^gatk_[a-z0-9_]+\(\)' modules/11_gsm_attack.sh | sed 's/()//'); do
-    n=$(grep -c "\b$f\b" modules/11_gsm_attack.sh); [ "$n" -le 1 ] && echo "DEAD $f"
+for f in $(grep -oE '^gatk_[a-z0-9_]+\(\)' modules/07_gsm_attack.sh | sed 's/()//'); do
+    n=$(grep -c "\b$f\b" modules/07_gsm_attack.sh); [ "$n" -le 1 ] && echo "DEAD $f"
 done
 ```
 
@@ -407,11 +407,11 @@ edit rather than once.
 
 `gatk_fcch_facts` is now `--fcch-facts`, `gatk_alg_name` is `--alg-name <wire-code>`, and
 `gatk_build_immediate_assignment` is `--build-immediate-assignment`. All three are asserted
-in `gatk_selftest` and placed in the `11_gsm_attack` GUI submenu, so
+in `gatk_selftest` and placed in the `07_gsm_attack` GUI submenu, so
 `tools/check-verbs.sh` would now fail if they were dropped again.
 
 Regression state after this pass: `--selftest` 256 assertions, `RESULT PASS`;
-`tools/check-verbs.sh` 0 UNPLACED for `11_gsm_attack`; `tools/check-paths.sh` all passed.
+`tools/check-verbs.sh` 0 UNPLACED for `07_gsm_attack`; `tools/check-paths.sh` all passed.
 
 ---
 
@@ -444,7 +444,7 @@ still machine-readable TSV, just on stderr, and the selftest already read it fro
 
 ## STATUS (GSM paging arithmetic): one formula wrong in three modules (2025)
 
-Found during the Phase 0 sweep, after the `11_gsm_attack` plan text was corrected. The same
+Found during the Phase 0 sweep, after the `07_gsm_attack` plan text was corrected. The same
 wrong paging formula had been copied into every module that computes a GSM paging occasion,
 each with a selftest that asserted values derived from the same wrong formula — so the suite
 passed in all three.
@@ -478,9 +478,9 @@ the combined-cell reduction entirely.
 
 | # | Defect | Fix | Verification |
 |---|--------|-----|--------------|
-| 22 | `10_gsm_air` — `gair_paging_group` used `IMSI mod 1024`; `gair_paging_params` used `blocks = BS_PA_MFRMS div 2` and ignored `BS_AG_BLKS_RES`/CCCH_CONF | rewrote to §6.5.2/§6.5.3 with `pblocks = (comb ? 3 : 9) - BS_AG_BLKS_RES`, plus `ccch_group` and `paging_blocks_total` | `310150123456789` → `789` (was `277`); `--paging-group 310150123456789 2 1` → `paging_block_index 5`, `ccch_slot 6`; `19` new assertions, `RESULT PASS` |
-| 23 | `33_paging_track` — `pgt_paging_group` / `pgt_paging_block` / `pgt_gsm_params`, the same two defects; and `pgt_edrx_occ` called `pgt_paging_group` for an **LTE** `UE_ID` | rewrote all three to §6.5.2/§6.5.3; `pgt_edrx_occ` now reduces `mod 1024` itself (TS 36.304 §7.2 is genuinely a power of two) | GSM group `310150123456789` → `789` (was `277`); `--po … 6 gsm 1` → `paging_block_index 5`, `ccch_block_index 6`; combined `--po … 2 gsm 0 true` → `blocks_per_multiframe 3`, index `0`; `RESULT PASS` |
-| 24 | `docs/OFFENSIVE_ROADMAP.md:39` and `docs/TOOLKIT_REFERENCE.md` repeated `IMSI mod 1024` as the GSM rule | corrected to `1000` | grep for a GSM claim of `mod 1024` now returns only `14_lte_air`'s LTE `UE_ID`, which is correct |
+| 22 | `06_gsm_air` — `gair_paging_group` used `IMSI mod 1024`; `gair_paging_params` used `blocks = BS_PA_MFRMS div 2` and ignored `BS_AG_BLKS_RES`/CCCH_CONF | rewrote to §6.5.2/§6.5.3 with `pblocks = (comb ? 3 : 9) - BS_AG_BLKS_RES`, plus `ccch_group` and `paging_blocks_total` | `310150123456789` → `789` (was `277`); `--paging-group 310150123456789 2 1` → `paging_block_index 5`, `ccch_slot 6`; `19` new assertions, `RESULT PASS` |
+| 23 | `28_paging_track` — `pgt_paging_group` / `pgt_paging_block` / `pgt_gsm_params`, the same two defects; and `pgt_edrx_occ` called `pgt_paging_group` for an **LTE** `UE_ID` | rewrote all three to §6.5.2/§6.5.3; `pgt_edrx_occ` now reduces `mod 1024` itself (TS 36.304 §7.2 is genuinely a power of two) | GSM group `310150123456789` → `789` (was `277`); `--po … 6 gsm 1` → `paging_block_index 5`, `ccch_block_index 6`; combined `--po … 2 gsm 0 true` → `blocks_per_multiframe 3`, index `0`; `RESULT PASS` |
+| 24 | `docs/OFFENSIVE_ROADMAP.md:39` and `docs/TOOLKIT_REFERENCE.md` repeated `IMSI mod 1024` as the GSM rule | corrected to `1000` | grep for a GSM claim of `mod 1024` now returns only `10_lte_air`'s LTE `UE_ID`, which is correct |
 
 ### Detail: item 23 — why the eDRX assertion was the tell
 
@@ -499,13 +499,13 @@ wrong reading of §6.5.2, which is why 56 modules passed. Each fixed site now al
 explicit regression guard — `chk …-not1024` requires the answer *not* to be `277` — so the
 old value cannot come back silently.
 
-`docs/FEATURE-GAPS.md:243` also mentions `IMSI mod 1024`, for `14_lte_air`'s LTE paging.
+`docs/FEATURE-GAPS.md:243` also mentions `IMSI mod 1024`, for `10_lte_air`'s LTE paging.
 That one is **correct** and was left alone; the note is recorded here so a later reader does
 not "fix" it.
 
 ## STATUS (L1/L2 vector table and one algorithm label): four spec-wrong descriptions and two swapped names (2025)
 
-The malformed-PDU corpus in `59_baseband_exploit.sh` (`bexp_l2_cases`) named, for every vector,
+The malformed-PDU corpus in `54_baseband_exploit.sh` (`bexp_l2_cases`) named, for every vector,
 the field it was supposed to drive out of range. Nine of those descriptions were prose written
 from memory of the attack papers, not from the specification. They were re-derived field by
 field against the primary spec PDFs — `pdftotext -layout` for clause prose, and page
@@ -539,16 +539,16 @@ convention, which is why several of these were read backwards.
 
 | # | Defect | Fix | Verification |
 |---|--------|-----|--------------|
-| 25 | `59_baseband_exploit` `rlc-many-chunks` / `rlc-li-max` claimed an NR `E=1` length-indicator chain and "LI at the field maximum" | relabelled both as LTE 36.322 framing and stated that NR 38.322 cannot explain the strings | grep of TS 38.322 v17.3.0 for "length indicator": 0 hits |
-| 26 | `phy-dci1c-edge` named a format that does not exist in NR | renamed `phy-dci-fdra-edge`; format recorded as unpinned; refs updated in `59` selftest and `60_nr_inject` `nrj_probe_ctor` | grep of TS 38.212 v18.5.0 for "format 1C": 0 hits |
+| 25 | `54_baseband_exploit` `rlc-many-chunks` / `rlc-li-max` claimed an NR `E=1` length-indicator chain and "LI at the field maximum" | relabelled both as LTE 36.322 framing and stated that NR 38.322 cannot explain the strings | grep of TS 38.322 v17.3.0 for "length indicator": 0 hits |
+| 26 | `phy-dci1c-edge` named a format that does not exist in NR | renamed `phy-dci-fdra-edge`; format recorded as unpinned; refs updated in `59` selftest and `55_nr_inject` `nrj_probe_ctor` | grep of TS 38.212 v18.5.0 for "format 1C": 0 hits |
 | 27 | `phy-dci1-dl` claimed a "resource-block count past the bandwidth" | corrected: RIV=36 → `RB_start=12, L=2` for N=24 is **legal** and does not exceed `N-RB_start`; claim marked unproven, needs format/RNTI/BWP size | RIV arithmetic, TS 38.214 §5.1.2.2.2; RIV_max(24)=299 so RIV=36 is in range |
 | 28 | `mac-lcid-unknown` called LCID 63 a "reserved UL LCID" | renamed `mac-lcid-padding` — 63 is **Padding**, an *assigned* UL codepoint whose subheader is `R/LCID` with no L field. Reserved UL LCIDs are 37-42 and 47 (e.g. `0x25`) | TS 38.321 table 6.2.1-2 |
 | 29 | `mac-bsr-oversize` called LCID 62 a "short Buffer Status Report subheader" | corrected to Long BSR (variable size, so `L=0` is impossible); noted Short BSR is LCID 61, fixed size, no L octet at all | TS 38.321 §6.1.3.1 |
 | 30 | `pdcp-5byte-cp` called `0000000000` a five-octet PDCP **Data** PDU | corrected: `D/C=0` makes it a **Control** PDU; as a status report the 5-octet length is *correct*. The real defect is the carrier — §6.2.3.1 scopes status reports to UM/AM DRBs and AM MRBs, never an SRB | TS 38.323 §6.2.3.1, §6.3.7 |
 | 31 | `pdcp-sn-narrow` called `00` a 12-bit-SN Data PDU | corrected: `D/C=0` is a Control PDU, so the label was a category error; a Data PDU needs 2 octets at 12-bit SN | TS 38.323 §6.3.2, §6.3.7 |
 | 32 | `mac-ccch-len` named only the illegal L octet | noted the second violation: `R=1`, and R must be 0 for a UL CCCH SDU subheader (`(LX)/R/LCID` only) | TS 38.321 §6.2.1 |
-| 33 | `12_umts_air` `uair_mac_input` reported `algorithm UIA2 (KASUMI-based f9)` and `algorithm_alt UIA1 (SNOW 3G based)` — **inverted** | corrected to UIA1=KASUMI, UIA2=SNOW 3G at the comment and both output lines | GSMA FS.35 lists "UEA1 / UIA1 (Kasumi)"; the [UEA2/UIA2 specification](https://www.gsma.com/about-us/wp-content/uploads/2014/12/uea2uia2d1v21.pdf) is the SNOW 3G set — **every other module in this tree already had it right** (`23_cipher_audit.sh:101-104`, `19_downgrade.sh:208-209`, `11_gsm_attack.sh:2691` cites TS 35.201, the KASUMI spec) |
-| 34 | `59_baseband_exploit` header said "the one step this module does not take is the over-the-air send, which is a named handoff" and "the transmit step is a plan" | **under-claim, the mirror of a fabricated capability**: the module does transmit for real. Header rewritten to state the real boundary (radio sync/waveform/timing is the handoff, not the send). The selftest assertion `scope-no-transmit` renamed `unknown-verb-usage`, since the old name asserted the same false claim; its body only checks that an unknown verb is a usage error | code: `--inject`→`bexp_inject` `modules/59_baseband_exploit.sh:351` and `--send`→`bexp_inject_named` `:382`, dispatched at `:618-619`; frame on stdin of `BEXP_TX_CMD`, guarded by `--yes`/`BEXP_TX_ARMED=1`; 20 tx assertions `:539-558`; live `--send forge reg-reject 31` → `injected\t7E00441F` |
+| 33 | `08_umts_air` `uair_mac_input` reported `algorithm UIA2 (KASUMI-based f9)` and `algorithm_alt UIA1 (SNOW 3G based)` — **inverted** | corrected to UIA1=KASUMI, UIA2=SNOW 3G at the comment and both output lines | GSMA FS.35 lists "UEA1 / UIA1 (Kasumi)"; the [UEA2/UIA2 specification](https://www.gsma.com/about-us/wp-content/uploads/2014/12/uea2uia2d1v21.pdf) is the SNOW 3G set — **every other module in this tree already had it right** (`19_cipher_audit.sh:101-104`, `15_downgrade.sh:208-209`, `07_gsm_attack.sh:2691` cites TS 35.201, the KASUMI spec) |
+| 34 | `54_baseband_exploit` header said "the one step this module does not take is the over-the-air send, which is a named handoff" and "the transmit step is a plan" | **under-claim, the mirror of a fabricated capability**: the module does transmit for real. Header rewritten to state the real boundary (radio sync/waveform/timing is the handoff, not the send). The selftest assertion `scope-no-transmit` renamed `unknown-verb-usage`, since the old name asserted the same false claim; its body only checks that an unknown verb is a usage error | code: `--inject`→`bexp_inject` `modules/54_baseband_exploit.sh:351` and `--send`→`bexp_inject_named` `:382`, dispatched at `:618-619`; frame on stdin of `BEXP_TX_CMD`, guarded by `--yes`/`BEXP_TX_ARMED=1`; 20 tx assertions `:539-558`; live `--send forge reg-reject 31` → `injected\t7E00441F` |
 
 ### What re-verification could NOT confirm
 
@@ -582,9 +582,9 @@ Four consumers read that file and pasted the raw line into a **two**-field statu
 | Module | Old line | Emitted |
 |--------|----------|---------|
 | `modules/03_gsmtap.sh` | `local sdr; sdr=$(cat "$GTAP_SDR" 2>/dev/null \|\| echo none)` then `printf 'sdr\t%s\n' "$sdr"` | `sdr⇥bladerf⇥unknown⇥1` |
-| `modules/24_gsm_cve.sh` | `printf 'sdr\t%s\n' "$([[ -f "$GCVE_SDR" ]] && cat "$GCVE_SDR" 2>/dev/null \|\| echo none)"` | same |
-| `modules/25_lte_cve.sh` | same shape, `LCVE_SDR` | same |
-| `modules/26_nr_cve.sh` | same shape, `NCVE_SDR` | same |
+| `modules/20_gsm_cve.sh` | `printf 'sdr\t%s\n' "$([[ -f "$GCVE_SDR" ]] && cat "$GCVE_SDR" 2>/dev/null \|\| echo none)"` | same |
+| `modules/21_lte_cve.sh` | same shape, `LCVE_SDR` | same |
+| `modules/22_nr_cve.sh` | same shape, `NCVE_SDR` | same |
 
 On the host that produced this entry the file existed with the contents `bladerf⇥unknown⇥1`
 (`bladeRF-cli` is installed at `/usr/bin/bladeRF-cli`, and `radio_parse_bladerf` at
@@ -597,7 +597,7 @@ attached), so all three CVE kits emitted a 4-field row:
 
 **Why the tests did not catch it.** 24/25/26 *do* assert the contract —
 `chk status-fields "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"`
-(`modules/24_gsm_cve.sh`, `modules/25_lte_cve.sh`, `modules/26_nr_cve.sh`) — but none of their
+(`modules/20_gsm_cve.sh`, `modules/21_lte_cve.sh`, `modules/22_nr_cve.sh`) — but none of their
 selftests overrode the `*_SDR` variable, so the row was rendered from whatever the *host* had.
 The assertion was testing the machine, not the code, and it went red only once the host file
 was populated; that is why the three kits failed as a group while the other 53 modules passed.
@@ -629,7 +629,7 @@ variables were overridable all along and the selftests simply never set them, so
 assertion that had been present from the start could not fire — the defect could only appear
 in an environment where a driver had actually been detected.
 
-## 36. `59_baseband_exploit` put the NAS security header type in the wrong nibble (2025)
+## 36. `54_baseband_exploit` put the NAS security header type in the wrong nibble (2025)
 
 Two independent defects, one hiding the other.
 
@@ -662,7 +662,7 @@ not distinguish the two paths it was supposed to separate.
 | `--cp-check 7e0442` `security_header` | `0` | `4` |
 | `--cp-check 7e0442` `security_meaning` | plain 5GS NAS | integrity protected and ciphered, new 5G NAS security context |
 
-Fixed at `modules/59_baseband_exploit.sh:158` (`sec & 0x0F`), `:201` (split assignment) and
+Fixed at `modules/54_baseband_exploit.sh:158` (`sec & 0x0F`), `:201` (split assignment) and
 `:197`-region, plus the comment block that documented the wrong nibble. The selftest gained
 `forge-ra-frame`/`forge-ra-body` at the corrected values, `forge-ra-spare-zero` (octet 2 must be
 `04`, proving the spare half octet is the high one), `cp-newctx-sec`, and four spec-constant
@@ -683,15 +683,15 @@ error, and the line reads correctly.
 
 The tree was scanned for the shape (a `local` command with two or more assignments where a
 later right-hand side names an earlier variable in the same command) and it occurs **once** more:
-`modules/40_baseband.sh:158`, the `duplicate` mutation strategy, where `len` was computed from an
+`modules/35_baseband.sh:158`, the `duplicate` mutation strategy, where `len` was computed from an
 unset `start`. Its effect was bounded — bash clamps an over-long substring — but the duplicated
-tail was longer than the strategy intends. Fixed by splitting the declaration; `40_baseband`
+tail was longer than the strategy intends. Fixed by splitting the declaration; `35_baseband`
 selftest 48 assertions PASS.
 
 **Rule.** When one `local` line initialises a variable from another, split the declaration from
 the assignments. The two-argument form is safe only while the right-hand sides are independent —
 and nothing enforces that as the line grows. Two other grep hits for the same *text* pattern
-(`modules/52_wifioff.sh:84-85`) are not instances: the `subject=`/`issuer=` there are inside sed
+(`modules/47_wifioff.sh:84-85`) are not instances: the `subject=`/`issuer=` there are inside sed
 patterns, not variable references.
 
 

@@ -7,6 +7,33 @@ and one `module_registry_register()` call per module.
 Module ids are the contract between the C app, the index generator and
 `imsisting.sh`. Do not rename one without the others.
 
+**The numbering is contiguous: `00`–`56`, with no gaps, and the next module is
+`57`.** Ids are ordered by domain so the menu reads in order, but they are not
+banded any more — the ordering is a sequence, not a set of reserved ranges.
+
+This was not always so. The ids were previously banded by decade — `00`–`05`,
+`10`–`19`, `20`–`28`, `30`–`61` — which left `06`–`09` and `29` unused. Those
+gaps were closed in one pass: everything from `10` to `28` shifted down by 4 and
+everything from `30` up shifted down by 5, so that the empty `29` did not simply
+relocate to `25`. The old-to-new mapping is mechanical (`10`→`06`, `11`→`07`,
+`14`→`10`, `28`→`24`, `30`→`25`, `61`→`56`) and applies to module files, the
+symbolic icons, and every reference in the tree.
+
+Two consequences are worth stating, because neither is visible from the code:
+
+- **Any id written down outside this tree is now stale.** That includes
+  published notes, saved plans under `loot/`, and this project's own git history
+  before the rename. Nothing inside the tree depends on the numbering, but prose
+  that says `38_jamming_detect` needs to be read as `33_jamming_detect`.
+- **`docs/MODULE_ROSTER.md`, `imsisting.sh` and `native/src/module_index.c` must
+  move together.** These are the three consumers of the id; a partial rename
+  breaks the menu without breaking any single file's self-test.
+
+No consumer indexes by number. `native/src/main1.c` matches on the id **string**
+(`g_strcmp0(modules[i].id, module_id)`), and `imsisting.sh` keeps a separate
+sequential menu `KEY` — its own comment states that `KEY` and `MODULE_ID` "are
+NOT the same number and are not meant to be".
+
 ## Setup / radio
 
 | File | Tag | Menu name | Category | Purpose |
@@ -19,66 +46,66 @@ Module ids are the contract between the C app, the index generator and
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
 | `02_cell_recon.sh` | `crec` | Cell Recon | RECON | Scan GSM/UMTS/LTE/NR cells: ARFCN, PLMN, TAC/LAC, cell id, band, RSRP |
-| `03_gsmtap.sh` | `gtap` | GSMTAP Passive | RECON | Live GSMTAP over UDP from gr-gsm/srsue; decode to pcap; identity harvest |
+| `03_gsmtap.sh` | `gtap` | GSMTAP Live Feed | RECON | Live GSMTAP over UDP from gr-gsm/srsue; decode to pcap; identity harvest |
 | `04_tower_map.sh` | `tmap` | Tower Survey / War-drive | RECON | GPS-tagged cell survey, CSV/KML/GeoJSON export, coverage map |
 
 ## 2G / GSM
 
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
-| `10_gsm_air.sh` | `gair` | GSM Air Interface | GSM | BCCH/SI decode, paging analysis, A5/1-A5/3 cipher audit, IMSI exposure |
-| `11_gsm_attack.sh` | `gatk` | GSM Attack | GSM | IMSI catcher logic, A5/1 downgrade, TMSI de-anonymisation, Kc recovery |
+| `06_gsm_air.sh` | `gair` | GSM Air Interface | RADIO | BCCH/SI decode, paging analysis, A5/1-A5/3 cipher audit, IMSI exposure |
+| `07_gsm_attack.sh` | `gatk` | GSM Attack | RADIO | IMSI catcher logic, A5/1 downgrade, TMSI de-anonymisation, Kc recovery |
 
 ## 3G / UMTS
 
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
-| `12_umts_air.sh` | `uair` | UMTS Air Interface | UMTS | UARFCN, SIB decode, RRC integrity, AKA relay analysis |
+| `08_umts_air.sh` | `uair` | UMTS Air Interface | RADIO | UARFCN, SIB decode, RRC integrity, AKA relay analysis |
 
 ## 4G / LTE
 
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
-| `13_lte_attach.sh` | `latt` | LTE Attach / NAS | LTE | NAS EMM/ESM encode-decode, attach forge, TAU, identity request/response |
-| `14_lte_air.sh` | `lair` | LTE Air Interface | LTE | RRC/NAS over SDR, srsRAN eNB orchestration, SIB forging, paging |
-| `15_lte_core.sh` | `lcore` | LTE Core (EPC) | LTE | Diameter S6a/S6d, GTP-C/GTP-U, S1-MME, MME/HLR vectors |
+| `09_lte_attach.sh` | `latt` | LTE Attach Forge | ACCESS | NAS EMM/ESM encode-decode, attach forge, TAU, identity request/response |
+| `10_lte_air.sh` | `lair` | LTE Air Interface | RADIO | RRC/NAS over SDR, srsRAN eNB orchestration, SIB forging, paging |
+| `11_lte_core.sh` | `lcore` | LTE Core (EPC) | CORE NETWORK | Diameter S6a/S6d, GTP-C/GTP-U, S1-MME, MME/HLR vectors |
 
 ## 5G / NR
 
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
-| `16_nr_air.sh` | `nair` | 5G NR Air Interface | 5G | gNB orchestration, NR RRC, SSB/CSI, RACH, SIB1 decode |
-| `17_nr_core.sh` | `ncore` | 5G Core (SBA) | 5G | N2/N3/N4, SBA HTTP/2 NF discovery, SEPP, AUSF/UDM flows |
-| `18_suci.sh` | `suci` | SUCI / SUPI | 5G | SUCI conceal/deconceal, ECIES profile A/B, home-network key derivation |
-| `19_downgrade.sh` | `dwn` | Downgrade Attacks | 5G | 5G→4G→3G→2G steering, NEA/NIA null-cipher, reject-cause forging |
+| `12_nr_air.sh` | `nair` | 5G NR Air Interface | RADIO | gNB orchestration, NR RRC, SSB/CSI, RACH, SIB1 decode |
+| `13_nr_core.sh` | `ncore` | 5G Core (SBA) | CORE NETWORK | N2/N3/N4, SBA HTTP/2 NF discovery, SEPP, AUSF/UDM flows |
+| `14_suci.sh` | `suci` | SUCI Deconcealment | SIM / IDENTITY | SUCI conceal/deconceal, ECIES profile A/B, home-network key derivation |
+| `15_downgrade.sh` | `dwn` | Downgrade Attacks | RADIO | 5G→4G→3G→2G steering, NEA/NIA null-cipher, reject-cause forging |
 
 ## SIM / eSIM / OTA
 
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
-| `20_sim.sh` | `sim` | SIM / eSIM / OTA | SIM | APDU ISO-7816, USIM file read, OTA SMS TAR/SPI, eSIM profile ops, COMP128-1 DPA model |
+| `16_sim.sh` | `sim` | SIM / eSIM / OTA Attacks | SIM / IDENTITY | APDU ISO-7816, USIM file read, OTA SMS TAR/SPI, eSIM profile ops, COMP128-1 DPA model |
 
 ## Analysis
 
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
-| `21_pcap_analysis.sh` | `pcap` | Capture Analysis | ANALYSIS | Decode pcap/pcapng: SCTP, Diameter, GTP, NAS, RRC, NGAP, PFCP |
-| `22_imsi_exposure.sh` | `imsi` | IMSI Harvest | ANALYSIS | Harvest and correlate identities across captures, TMSI/IMSI map, exposure report |
-| `23_cipher_audit.sh` | `caud` | Cipher Audit | ANALYSIS | Score negotiated ciphers per session, find null/downgraded bearers |
+| `17_pcap_analysis.sh` | `pcap` | Capture Analysis | ANALYSIS | Decode pcap/pcapng: SCTP, Diameter, GTP, NAS, RRC, NGAP, PFCP |
+| `18_imsi_exposure.sh` | `imsi` | IMSI Harvest | SIM / IDENTITY | Harvest and correlate identities across captures, TMSI/IMSI map, exposure report |
+| `19_cipher_audit.sh` | `caud` | Cipher Audit | ANALYSIS | Score negotiated ciphers per session, find null/downgraded bearers |
 
 ## Scanners
 
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
-| `24_gsm_cve.sh` | `gcve` | GSM/UMTS CVE Kit | SCANNERS | Per-CVE probes and handoffs for 2G/3G stack bugs |
-| `25_lte_cve.sh` | `lcve` | LTE CVE Kit | SCANNERS | LTE stack CVEs: baseband, NAS, ASN.1, Diameter |
-| `26_nr_cve.sh` | `ncve` | 5G CVE Kit | SCANNERS | 5G NR / SBA / SUCI CVEs |
+| `20_gsm_cve.sh` | `gcve` | GSM/UMTS CVE Kit | EXPLOIT KITS | Per-CVE probes and handoffs for 2G/3G stack bugs |
+| `21_lte_cve.sh` | `lcve` | LTE CVE Kit | EXPLOIT KITS | LTE stack CVEs: baseband, NAS, ASN.1, Diameter |
+| `22_nr_cve.sh` | `ncve` | 5G CVE Kit | EXPLOIT KITS | 5G NR / SBA / SUCI CVEs |
 
 ## Automation
 
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
-| `30_killchain.sh` | `kchn` | Cellular Killchain | AUTOMATION | Chain recon → target select → vector → capture → report |
+| `25_killchain.sh` | `kchn` | Cellular Killchain | SYSTEM | Chain recon → target select → vector → capture → report |
 
 ## Verb contract (all modules)
 
@@ -95,34 +122,34 @@ action print `status: handoff` and name the hardware required.
 
 # v0.3 — the expansion
 
-Ten new modules and five enhancements. Ids 40–49 continue the existing scheme.
+Ten new modules and five enhancements. Ids 35–44 continue the existing scheme.
 
 | File | Tag | Menu name | Category | Owns |
 |---|---|---|---|---|
-| `40_baseband.sh` | `bbnd` | Baseband Research | SCANNERS | RRC/NAS fuzzing, corpus generation, crash triage |
-| `41_vowifi.sh` | `vowi` | VoWiFi / ePDG | 4G / LTE | IKEv2/IPsec SWu, EAP-AKA, tunnel analysis |
-| `42_femtocell.sh` | `femt` | Femtocell / HeNB | 4G / LTE | HeNB gateway, Iuh, local device assessment |
-| `43_ussd.sh` | `ussd` | USSD | 2G / GSM | USSD strings, flash USSD, carrier command handling |
-| `44_ta_geoloc.sh` | `tgeo` | TA Geolocation | RECON | Timing-advance ranging and trilateration |
-| `45_sba_pivot.sh` | `sbap` | 5G SBA Pivot | 5G / NR | HTTP/2 mesh, NRF abuse, token handling |
-| `46_ota_sms.sh` | `otasm` | OTA Binary SMS | SIM | TS 23.048 OTA construction, SPI/key audit |
-| `47_li_probe.sh` | `lipr` | LI Discovery | ANALYSIS | X1/X2/X3 fingerprinting, LI-active detection |
-| `48_ran_share.sh` | `rans` | RAN Sharing | 4G / LTE | MOCN/MORAN boundary, cross-operator leakage |
-| `49_carrier_api.sh` | `capi` | Carrier API Audit | ANALYSIS | API surface discovery, authz and rate-limit testing |
+| `35_baseband.sh` | `bbnd` | Baseband Fuzzing | BASEBAND / DEVICE | RRC/NAS fuzzing, corpus generation, crash triage |
+| `36_vowifi.sh` | `vowi` | VoWiFi / ePDG Attacks | ACCESS | IKEv2/IPsec SWu, EAP-AKA, tunnel analysis |
+| `37_femtocell.sh` | `femt` | Femtocell / HeNB Attacks | ACCESS | HeNB gateway, Iuh, local device assessment |
+| `38_ussd.sh` | `ussd` | USSD Forge | ACCESS | USSD strings, flash USSD, carrier command handling |
+| `39_ta_geoloc.sh` | `tgeo` | TA Geolocation | TRACKING | Timing-advance ranging and trilateration |
+| `40_sba_pivot.sh` | `sbap` | 5G SBA Pivot | CORE NETWORK | HTTP/2 mesh, NRF abuse, token handling |
+| `41_ota_sms.sh` | `otasm` | OTA Binary SMS Attacks | SIM / IDENTITY | TS 23.048 OTA construction, SPI/key audit |
+| `42_li_probe.sh` | `lipr` | LI Interception | INTERCEPT / CARRIER | X1/X2/X3 fingerprinting, LI-active detection |
+| `43_ran_share.sh` | `rans` | RAN Sharing | ACCESS | MOCN/MORAN boundary, cross-operator leakage |
+| `44_carrier_api.sh` | `capi` | Carrier API Abuse | INTERCEPT / CARRIER | API surface discovery, authz and rate-limit testing |
 
 ## Enhancements to existing modules
 
 | Module | Added |
 |---|---|
-| `31_ss7_map` | IPX/GRX pivot — interconnect lateral movement, not just MAP flows |
-| `35_volte_ims` | IMS registration hijack, SIP REGISTER spoofing |
-| `39_slicing` | SUPI correlation across slices — proving isolation failure by linking identities |
-| `17_nr_core` | NRF token forgery, OAuth2 abuse within the SBA |
-| `20_sim` | Offensive OTA split out to `46_ota_sms`; 20 keeps the reader/defensive side |
+| `26_ss7_map` | IPX/GRX pivot — interconnect lateral movement, not just MAP flows |
+| `30_volte_ims` | IMS registration hijack, SIP REGISTER spoofing |
+| `34_slicing` | SUPI correlation across slices — proving isolation failure by linking identities |
+| `13_nr_core` | NRF token forgery, OAuth2 abuse within the SBA |
+| `16_sim` | Offensive OTA split out to `41_ota_sms`; 20 keeps the reader/defensive side |
 
 ## Two scoping decisions
 
-**`40_baseband` is a research instrument, not a weapon.** A working zero-click RCE
+**`35_baseband` is a research instrument, not a weapon.** A working zero-click RCE
 against named production modem firmware is an offensive payload with no
 defensive framing; it is not something this tree ships. The module builds the
 tooling that baseband *research* actually runs on — ASN.1-grammar-aware
@@ -132,7 +159,7 @@ modem. Where a CVE is documented, the module routes to a probe or a named
 handoff exactly as `24`/`25`/`26` do. It does not emit a fire-and-forget
 payload against live firmware.
 
-**`49_carrier_api` audits an API, it does not enumerate subscribers.** Testing a
+**`44_carrier_api` audits an API, it does not enumerate subscribers.** Testing a
 carrier's REST surface that you are authorised to test — your own account, a
 bug-bounty scope, a contract — is ordinary assessment work. A tool that
 mass-enumerates MSISDNs against a live portal is an account-takeover aid aimed
@@ -143,7 +170,7 @@ enumeration of third-party accounts is not a verb it exposes.
 
 ## One worth stating plainly
 
-**`46_ota_sms` is real protocol work with a real precondition.** TS 23.048 OTA
+**`41_ota_sms` is real protocol work with a real precondition.** TS 23.048 OTA
 packets are how a carrier updates a SIM. Constructing and analysing them, and
 testing them against a SIM you hold, is legitimate research — the S@T and WIB
 classes are published. Affecting a SIM you do not hold requires that SIM's
@@ -156,7 +183,7 @@ authorisation; the module says so in its own output.
 
 # v0.4 — the gap closed
 
-`40`–`49` are now on disk and all pass `tools/run-selftests.sh`. `52_wifioff`'s
+`40`–`49` are now on disk and all pass `tools/run-selftests.sh`. `47_wifioff`'s
 selftest was repaired. Six new ids extend coverage into areas no module held.
 
 ## Taxonomy — grouped by function, not generation
@@ -169,19 +196,22 @@ source; the launcher table and the generated index follow it.
 | Category | Modules |
 |---|---|
 | SYSTEM | deps, radio, field kit, killchain |
-| RECON | cell recon, GSMTAP, tower survey, NTN, non-3GPP |
-| AIR INTERFACE | GSM, UMTS, LTE, NR, NB-IoT, GPRS/EDGE, sidelink |
-| CORE NETWORK | attach/NAS, EPC, 5GC, SS7/MAP, DNS, slicing, VoWiFi, femto, USSD, SBA, RAN sharing, Wi-Fi offload |
-| SIM / IDENTITY | SUCI, SIM/eSIM/OTA, SIM-swap defence, OTA SMS, STK |
-| ATTACKS | GSM attack, downgrade, the three CVE kits, VoLTE/IMS, baseband, O-RAN |
-| ANALYSIS | pcap, IMSI exposure, cipher audit, traffic, MAC, NAS signalling, LI, carrier API |
-| RF / TRACKING | RF fingerprint, paging/Torpedo, jamming, TA geolocation, LPP |
+| RECON | cell recon, GSMTAP, tower survey |
+| RADIO | GSM/UMTS/LTE/NR air, NB-IoT, GPRS/EDGE, sidelink, NTN, non-3GPP, GSM attack, downgrade, jamming |
+| ACCESS | attach/NAS, slicing, VoWiFi, femto, USSD, RAN sharing, Wi-Fi offload |
+| CORE NETWORK | EPC, 5GC, SS7/MAP, DNS, IMS/VoLTE, NAS signalling, SBA, O-RAN |
+| SIM / IDENTITY | SUCI, SIM/eSIM/OTA, IMSI exposure, SIM-swap, OTA SMS, STK |
+| BASEBAND / DEVICE | baseband fuzzing, baseband exploits, NR injection, DIAG/NV/EFS |
+| TRACKING | RF fingerprint, paging/Torpedo, TA geolocation, LPP |
+| ANALYSIS | pcap, cipher audit, traffic, MAC/RLC |
+| EXPLOIT KITS | the three CVE kits |
+| INTERCEPT / CARRIER | LI, carrier API |
 
 Categories are contiguous in every table so a grouping header is emitted once.
 Each module also carries a one-line description (`ModuleDefinition.desc`) shown
 beneath its title on the module page.
 
-## 40–49 — status
+## 35–44 — status
 
 All ten are implemented to the full contract (self-locate header, `declare -F`
 shims, TSV output, `status: handoff` where hardware is required, a `--selftest`
@@ -189,41 +219,41 @@ with known-answer assertions, and a loot redirect in the selftest). See
 `docs/TOOLKIT_REFERENCE.md` §5 for the per-module summary. The `40`–`49` ids in
 the table above are no longer plans — they are the modules.
 
-## 53–58 — new
+## 48–53 — new
 
 | File | Tag | Menu name | Category | Owns |
 |---|---|---|---|---|
-| `53_oran.sh` | `oran` | O-RAN / Open RAN | SCANNERS | E2/A1/O1/O2 interfaces, deployment + xApp assessment |
-| `54_ntn.sh` | `ntn` | 5G NTN / Satellite | RECON | NTN Doppler, delay, TA, k_offset, SIB19 |
-| `55_gprs.sh` | `gprs` | GPRS / EDGE | 2G / GSM | GEA ciphers, APN coding, PDP context, downgrade |
-| `56_sidelink.sh` | `slnk` | NR Sidelink / V2X | 5G / NR | PC5 pools, SCI-1A, ITS certs, relay checks |
-| `57_stk.sh` | `stk` | SIM Toolkit (STK) | SIM | TS 31.111 proactive commands and audit |
-| `58_non3gpp.sh` | `n3g` | TETRA / DMR / GSM-R | RECON | Non-3GPP LMR structure, ciphers, classification |
+| `48_oran.sh` | `oran` | O-RAN / xApp Attacks | CORE NETWORK | E2/A1/O1/O2 interfaces, deployment + xApp assessment |
+| `49_ntn.sh` | `ntn` | 5G NTN / Satellite | RADIO | NTN Doppler, delay, TA, k_offset, SIB19 |
+| `50_gprs.sh` | `gprs` | GPRS / EDGE | RADIO | GEA ciphers, APN coding, PDP context, downgrade |
+| `51_sidelink.sh` | `slnk` | NR Sidelink / V2X | RADIO | PC5 pools, SCI-1A, ITS certs, relay checks |
+| `52_stk.sh` | `stk` | STK Attacks | SIM / IDENTITY | TS 31.111 proactive commands and audit |
+| `53_non3gpp.sh` | `n3g` | TETRA / DMR / GSM-R | RADIO | Non-3GPP LMR structure, ciphers, classification |
 
-## Scoping decisions in 53–58
+## Scoping decisions in 48–53
 
-**`53_oran` assesses a deployment; it does not load a rogue xApp.** The
+**`48_oran` assesses a deployment; it does not load a rogue xApp.** The
 xApp-authority model names the authority a RIC grants an xApp and flags an
 unsigned app holding RAN control. Loading into a carrier RIC requires that
 carrier's authorisation.
 
-**`58_non3gpp` is receive-only.** Receiving public-safety traffic may itself be
+**`53_non3gpp` is receive-only.** Receiving public-safety traffic may itself be
 restricted where you are, and the module says so. It demods nothing that needs
 keys you are not entitled to.
 
-**`47_li_probe` remains detection-only** and is listed under v0.3 above.
+**`42_li_probe` remains detection-only** and is listed under v0.3 above.
 
-## 59–61 — new
+## 54–56 — new
 
 | File | Tag | Menu name | Category | Owns |
 |---|---|---|---|---|
-| `59_baseband_exploit.sh` | `bexp` | Baseband Exploits | ATTACKS | L1/L2 malformed PDUs, 5G control-plane forgery, CVE catalogue, the TX path |
-| `60_nr_inject.sh` | `nrj` | 5G NR Injection | ATTACKS | RNTI arithmetic, MAC-NR, DCI/TBS/RAR, Gold descrambling, injection exploits |
-| `61_baseband_diag.sh` | `bbdg` | Baseband NV/EFS | ATTACKS | Qualcomm DM/DIAG framing, NV and EFS2 read/write, state-info identity decode, AT/device I/O |
+| `54_baseband_exploit.sh` | `bexp` | Baseband Exploits | BASEBAND / DEVICE | L1/L2 malformed PDUs, 5G control-plane forgery, CVE catalogue, the TX path |
+| `55_nr_inject.sh` | `nrj` | 5G NR Injection | BASEBAND / DEVICE | RNTI arithmetic, MAC-NR, DCI/TBS/RAR, Gold descrambling, injection exploits |
+| `56_baseband_diag.sh` | `bbdg` | Baseband NV/EFS | BASEBAND / DEVICE | Qualcomm DM/DIAG framing, NV and EFS2 read/write, state-info identity decode, AT/device I/O |
 
-## Scoping decisions in 59–61
+## Scoping decisions in 54–56
 
-**`61_baseband_diag` has no `--set-imsi`, and that is a decision, not a gap.**
+**`56_baseband_diag` has no `--set-imsi`, and that is a decision, not a gap.**
 DIAG reaches baseband NV/EFS, and the module can write any NV item or any EFS
 path (`--nv-write`, `--efs-write`). What it will not do is pretend to know
 *which* item holds the IMSI: no published item-number-to-semantics table exists,
@@ -235,10 +265,10 @@ assertions encoded the same unverified values. So the module ships discovery
 verification (`--state-info-parse`) instead of a setter that might be pointed at
 the wrong item. On LTE/5G the network-visible IMSI comes from the USIM during
 attach anyway, so the baseband NV identity is largely a CDMA/legacy path; the
-SIM-side reader is `20_sim.sh`, and the core-side forger is
-`15_lte_core.sh --gtp-csr-forge`.
+SIM-side reader is `16_sim.sh`, and the core-side forger is
+`11_lte_core.sh --gtp-csr-forge`.
 
-**`61_baseband_diag` is ungated by design.** `--nv-write` and `--efs-write` are
+**`56_baseband_diag` is ungated by design.** `--nv-write` and `--efs-write` are
 raw protocol primitives, so gating them would only obscure what they do. The
 module says so in its own `--status` (`GATING none`) and in `--help`.
 

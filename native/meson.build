@@ -66,6 +66,11 @@ executable(
   'imsisting-gui',
   [
     'src/main1.c',
+    # The Help page. Its own translation unit because it is a body of
+    # reference text that changes for reasons unrelated to the rest of the
+    # interface, and because it needs nothing from it: no AppState, no
+    # module registry, no output console.
+    'src/help_page.c',
     imsisting_resources,
   ],
   dependencies: [

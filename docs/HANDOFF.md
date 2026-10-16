@@ -121,7 +121,7 @@ module's own output, transmit verb gated behind an explicit acknowledgement flag
 `docs/OFFENSIVE_ROADMAP.md` has the full list, the gating analysis, and eleven
 phases.
 
-**Phase 1 is `modules/11_gsm_attack.sh`.** It has the most complete computational
+**Phase 1 is `modules/07_gsm_attack.sh`.** It has the most complete computational
 base in the tree — the RACH→AGCH→SDDCCH→Identity Request sequence, the downgrade
 decision logic, the Kc arithmetic, and an A5/1 implementation validated against
 the published Briceno/Goldberg/Wagner vector. What it needs is the transmit half:

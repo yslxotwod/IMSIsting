@@ -1,5 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-<defs><mask id="cut"><rect width="256" height="256" fill="white"/><circle cx="188" cy="150" r="56" fill="black"/></mask></defs>
-<g fill="none" stroke="#63798f" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#cut)"><path d="M132 26 L58 142 h50 l-26 88 L170 106 h-50 z"/></g>
-<g fill="#c8d4e2" stroke="none" transform="translate(188 150)"><path d="M-38 30 h22 v-18 h22 v-18 h22" fill="none" stroke="#c8d4e2" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/></g>
-</svg>

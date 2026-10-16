@@ -88,7 +88,7 @@ BASES = {
         SL("M140 208 A40 40 0 1 1 140 128", BASE_SW) +
         R(96, 148, 22, 40, 2)
     ),
-    "AIR INTERFACE": (    # handset, body on the left, arcs deliberately NOT
+    "RADIO": (    # handset, body on the left, arcs deliberately NOT
                           # top-right (that is the mark's zone)
         SL("M52 40 h50 a12 12 0 0 1 12 12 v152 a12 12 0 0 1 -12 12 h-50 "
            "a12 12 0 0 1 -12 -12 v-152 a12 12 0 0 1 12 -12 z", BASE_SW) +
@@ -107,7 +107,7 @@ BASES = {
            "v-164 a8 8 0 0 1 8 -8 z", BASE_SW) +
         SL("M62 126 h50 v50 h-50 z", BASE_SW)
     ),
-    "ATTACKS": (          # lightning bolt, shifted left so its head clears
+    "EXPLOIT KITS": (          # lightning bolt, shifted left so its head clears
         P("M132 26 L58 142 h50 l-26 88 L170 106 h-50 z")
     ),
     "ANALYSIS": (         # magnifier: lens left, and the handle points DOWN-
@@ -115,7 +115,7 @@ BASES = {
         SL("M100 116 m-62 0 a62 62 0 1 0 124 0 a62 62 0 1 0 -124 0", BASE_SW) +
         SL("M56 168 L18 216", BASE_SW)
     ),
-    "RF / TRACKING": (    # crosshair: four ticks, arrow shortened and pointed
+    "TRACKING": (    # crosshair: four ticks, arrow shortened and pointed
                           # down-right so it stays out of the mask
         SL("M104 128 m-66 0 a66 66 0 1 0 132 0 a66 66 0 1 0 -132 0", BASE_SW) +
         SL("M104 44 v18", BASE_SW) + SL("M104 194 v18", BASE_SW) +
@@ -137,116 +137,116 @@ M["01_radio"] = (R(-38, -8, 76, 34, 6) + C(-6, -34, 8) +
                  SL("M-6 -8 L-6 -26") + arc(30, -30.0, 30.0))
 M["05_field_kit"] = (R(-40, -18, 80, 44, 6) +
                      SL("M-16 -18 a16 16 0 0 1 32 0") + C(0, 4, 6))
-M["30_killchain"] = (C(-30, 0, 13) + C(0, 0, 13) + C(30, 0, 13) +
+M["25_killchain"] = (C(-30, 0, 13) + C(0, 0, 13) + C(30, 0, 13) +
                      SL("M-18 0 h6") + SL("M12 0 h6"))
 
 # --- RECON: binoculars base ----------------------------------------------
 M["02_cell_recon"] = P("M0 -34 L30 -17 v34 L0 34 L-30 17 v-34 z")
 M["03_gsmtap"] = dot(-26, 0, 11) + dot(0, 0, 11) + dot(26, 0, 11)
 M["04_tower_map"] = P("M0 38 L-20 2 A22 22 0 1 1 20 2 z")
-M["54_ntn"] = (R(-16, -14, 32, 28, 4) + R(-46, -10, 22, 20, 3) +
+M["49_ntn"] = (R(-16, -14, 32, 28, 4) + R(-46, -10, 22, 20, 3) +
                R(24, -10, 22, 20, 3))
-M["58_non3gpp"] = (R(-30, -18, 46, 36, 6) + SL("M16 -18 L32 -38") +
+M["53_non3gpp"] = (R(-30, -18, 46, 36, 6) + SL("M16 -18 L32 -38") +
                    C(34, -42, 7))
 
-# --- AIR INTERFACE: handset base, the arc count IS the generation ---------
-M["10_gsm_air"] = dot(-34, 34, 9) + arc(30)
-M["12_umts_air"] = dot(-34, 34, 9) + arc(26) + arc(48)
-M["14_lte_air"] = dot(-34, 34, 9) + arc(22) + arc(40) + arc(58)
-M["16_nr_air"] = dot(-34, 34, 9) + arc(20) + arc(36) + arc(52) + arc(68)
-M["50_iot"] = (dot(-34, 34, 9) +
+# --- RADIO: handset base, the arc count IS the generation ------------------
+M["06_gsm_air"] = dot(-34, 34, 9) + arc(30)
+M["08_umts_air"] = dot(-34, 34, 9) + arc(26) + arc(48)
+M["10_lte_air"] = dot(-34, 34, 9) + arc(22) + arc(40) + arc(58)
+M["12_nr_air"] = dot(-34, 34, 9) + arc(20) + arc(36) + arc(52) + arc(68)
+M["45_iot"] = (dot(-34, 34, 9) +
                '<path d="M -34 4 A 30 30 0 0 1 -4 34" fill="none" '
                'stroke="%s" stroke-width="12" '
                'stroke-dasharray="10 9"/>' % MARK_COLOR)
-M["55_gprs"] = dot(-34, 34, 9) + arc(28) + R(-8, -22, 22, 22, 4)
-M["56_sidelink"] = (R(-42, -18, 20, 36, 4) + R(22, -18, 20, 36, 4) +
+M["50_gprs"] = dot(-34, 34, 9) + arc(28) + R(-8, -22, 22, 22, 4)
+M["51_sidelink"] = (R(-42, -18, 20, 36, 4) + R(22, -18, 20, 36, 4) +
                     arc(24, -12.0, 0.0) + arc(40, -12.0, 0.0))
 
 # --- CORE NETWORK: tower base, solid nodes inside the frame ---------------
-M["13_lte_attach"] = (dot(4, 4, 16) + SL("M-44 -26 L-6 -26") +
+M["09_lte_attach"] = (dot(4, 4, 16) + SL("M-44 -26 L-6 -26") +
                       P("M-6 -38 L16 -26 L-6 -14 z"))
-M["15_lte_core"] = dot(0, 0, 20)
-M["17_nr_core"] = dot(-22, 20, 13) + dot(22, 20, 13) + dot(0, -20, 13)
-M["31_ss7_map"] = (dot(-30, 0, 11) + dot(0, 0, 11) + dot(30, 0, 11) +
+M["11_lte_core"] = dot(0, 0, 20)
+M["13_nr_core"] = dot(-22, 20, 13) + dot(22, 20, 13) + dot(0, -20, 13)
+M["26_ss7_map"] = (dot(-30, 0, 11) + dot(0, 0, 11) + dot(30, 0, 11) +
                    SL("M-19 0 h8") + SL("M11 0 h8"))
-M["32_cellular_dns"] = (dot(0, -20, 13) + dot(-28, 26, 9) + dot(0, 28, 9) +
+M["27_cellular_dns"] = (dot(0, -20, 13) + dot(-28, 26, 9) + dot(0, 28, 9) +
                         dot(28, 26, 9) + SL("M-4 -8 L-22 18") +
                         SL("M0 -8 L0 20") + SL("M4 -8 L22 18"))
-M["39_slicing"] = (R(-34, -32, 68, 20, 4) + R(-34, -6, 68, 20, 4) +
+M["34_slicing"] = (R(-34, -32, 68, 20, 4) + R(-34, -6, 68, 20, 4) +
                    R(-34, 20, 68, 20, 4))
-M["41_vowifi"] = (dot(-34, 34, 9) + arc(26) + arc(44) + arc(62))
-M["42_femtocell"] = (R(-26, -4, 52, 32, 5) + SL("M0 -4 L0 -26") +
+M["36_vowifi"] = (dot(-34, 34, 9) + arc(26) + arc(44) + arc(62))
+M["37_femtocell"] = (R(-26, -4, 52, 32, 5) + SL("M0 -4 L0 -26") +
                      C(0, -32, 7))
-M["43_ussd"] = (dot(-16, -16, 11) + dot(16, -16, 11) +
+M["38_ussd"] = (dot(-16, -16, 11) + dot(16, -16, 11) +
                 dot(-16, 16, 11) + dot(16, 16, 11))
-M["45_sba_pivot"] = (dot(-26, -14, 11) + dot(0, 0, 11) + dot(-26, 16, 11) +
+M["40_sba_pivot"] = (dot(-26, -14, 11) + dot(0, 0, 11) + dot(-26, 16, 11) +
                      P("M16 -8 L42 0 L16 8 z"))
-M["48_ran_share"] = (SL("M-18 0 m-22 0 a22 22 0 1 0 44 0 a22 22 0 1 0 -44 0") +
+M["43_ran_share"] = (SL("M-18 0 m-22 0 a22 22 0 1 0 44 0 a22 22 0 1 0 -44 0") +
                      SL("M18 0 m-22 0 a22 22 0 1 0 44 0 a22 22 0 1 0 -44 0"))
-M["52_wifioff"] = (arc(24) + arc(42) + P("M14 -22 L40 -30 L14 -38 z"))
+M["47_wifioff"] = (arc(24) + arc(42) + P("M14 -22 L40 -30 L14 -38 z"))
 
 # --- SIM / IDENTITY: card base, the mark sits on the pads ----------------
-M["18_suci"] = C(0, -12, 16) + P("M0 4 L-11 34 L11 34 z")
-M["20_sim"] = (R(-26, -16, 52, 34, 4) + SL("M0 -40 L0 -20") +
+M["14_suci"] = C(0, -12, 16) + P("M0 4 L-11 34 L11 34 z")
+M["16_sim"] = (R(-26, -16, 52, 34, 4) + SL("M0 -40 L0 -20") +
                P("M-12 -30 L0 -16 L12 -30 z"))
-M["36_sim_defense"] = P("M0 -38 L30 -24 v22 A30 30 0 0 1 0 38 "
+M["31_sim_defense"] = P("M0 -38 L30 -24 v22 A30 30 0 0 1 0 38 "
                         "A30 30 0 0 1 -30 0 v-22 z")
-M["46_ota_sms"] = (R(-34, -22, 68, 44, 5) + SL("M-34 -22 L0 8 L34 -22"))
-M["57_stk"] = (SL("M-30 -18 h20") + SL("M-30 0 h20") + SL("M-30 18 h20") +
+M["41_ota_sms"] = (R(-34, -22, 68, 44, 5) + SL("M-34 -22 L0 8 L34 -22"))
+M["52_stk"] = (SL("M-30 -18 h20") + SL("M-30 0 h20") + SL("M-30 18 h20") +
                C(20, -18, 8) + C(20, 0, 8) + C(20, 18, 8))
 
-# --- ATTACKS: lightning base, mark beside it -----------------------------
-M["11_gsm_attack"] = dot(-34, 34, 9) + arc(34) + SL("M-40 30 L26 -34")
-M["19_downgrade"] = SL("M-38 30 h22 v-18 h22 v-18 h22")
-M["24_gsm_cve"] = (dot(-40, 34, 8) + arc(24, -40.0, 34.0) + arc(42, -40.0, 34.0) +
+# --- EXPLOIT KITS: lightning base, mark beside it -------------------------
+M["07_gsm_attack"] = dot(-34, 34, 9) + arc(34) + SL("M-40 30 L26 -34")
+M["15_downgrade"] = SL("M-38 30 h22 v-18 h22 v-18 h22")
+M["20_gsm_cve"] = (dot(-40, 34, 8) + arc(24, -40.0, 34.0) + arc(42, -40.0, 34.0) +
                    SL("M10 -34 L-4 -6 L10 4 L-4 34"))
-M["25_lte_cve"] = (dot(-40, 34, 8) + arc(20, -40.0, 34.0) + arc(34, -40.0, 34.0) +
+M["21_lte_cve"] = (dot(-40, 34, 8) + arc(20, -40.0, 34.0) + arc(34, -40.0, 34.0) +
                    arc(48, -40.0, 34.0) + SL("M16 -34 L2 -6 L16 4 L2 34"))
-M["26_nr_cve"] = (dot(-40, 34, 8) + arc(18, -40.0, 34.0) + arc(30, -40.0, 34.0) +
+M["22_nr_cve"] = (dot(-40, 34, 8) + arc(18, -40.0, 34.0) + arc(30, -40.0, 34.0) +
                   arc(42, -40.0, 34.0) + arc(54, -40.0, 34.0) +
                   SL("M18 -34 L4 -6 L18 4 L4 34"))
-M["35_volte_ims"] = (R(-32, -28, 64, 46, 10) + P("M-6 18 L-14 34 L8 18 z"))
-M["40_baseband"] = (R(-30, -30, 60, 60, 6) + C(0, 0, 8) +
+M["30_volte_ims"] = (R(-32, -28, 64, 46, 10) + P("M-6 18 L-14 34 L8 18 z"))
+M["35_baseband"] = (R(-30, -30, 60, 60, 6) + C(0, 0, 8) +
                     SL("M-30 -18 h-10") + SL("M-30 0 h-10") +
                     SL("M-30 18 h-10") + SL("M30 -18 h10") + SL("M30 0 h10") +
                     SL("M30 18 h10"))
-M["53_oran"] = SL("M22 -20 A30 30 0 1 0 22 20")
-M["59_baseband_exploit"] = (R(-30, -30, 60, 60, 6) +
+M["48_oran"] = SL("M22 -20 A30 30 0 1 0 22 20")
+M["54_baseband_exploit"] = (R(-30, -30, 60, 60, 6) +
                             SL("M0 -34 L-8 -8 L4 2 L-6 34"))
-M["60_nr_inject"] = (dot(-40, 34, 8) + arc(20, -40.0, 34.0) + arc(34, -40.0, 34.0) +
+M["55_nr_inject"] = (dot(-40, 34, 8) + arc(20, -40.0, 34.0) + arc(34, -40.0, 34.0) +
                      arc(48, -40.0, 34.0) + P("M20 -6 L46 2 L20 10 z"))
-M["61_baseband_diag"] = (R(-30, -30, 60, 60, 6) +
+M["56_baseband_diag"] = (R(-30, -30, 60, 60, 6) +
                          SL("M-14 -14 L2 0 L-14 14") + SL("M8 14 h18"))
 
 # --- ANALYSIS: magnifier base, mark inside the lens ----------------------
-M["21_pcap_analysis"] = SL("M-38 8 l12 -22 l12 32 l12 -36 l12 26 l12 -12 l10 8")
-M["22_imsi_exposure"] = (SL("M-14 -32 h-16 v64 h16") +
+M["17_pcap_analysis"] = SL("M-38 8 l12 -22 l12 32 l12 -36 l12 26 l12 -12 l10 8")
+M["18_imsi_exposure"] = (SL("M-14 -32 h-16 v64 h16") +
                          SL("M14 -32 h16 v64 h-16") + C(0, 0, 11))
-M["23_cipher_audit"] = C(0, -12, 16) + P("M0 4 L-11 34 L11 34 z")
-M["27_traffic_analysis"] = SL("M-34 -12 h68") + SL("M-34 12 h68")
-M["34_mac_layer"] = R(-34, -28, 68, 22, 4) + R(-34, 6, 68, 22, 4)
-M["37_nas_signaling"] = (R(-32, -26, 64, 40, 10) +
+M["19_cipher_audit"] = C(0, -12, 16) + P("M0 4 L-11 34 L11 34 z")
+M["23_traffic_analysis"] = SL("M-34 -12 h68") + SL("M-34 12 h68")
+M["29_mac_layer"] = R(-34, -28, 68, 22, 4) + R(-34, 6, 68, 22, 4)
+M["32_nas_signaling"] = (R(-32, -26, 64, 40, 10) +
                          P("M-6 14 L-14 32 L8 14 z"))
-M["47_li_probe"] = (SL("M-40 0 h80") + C(0, 0, 11) + SL("M0 0 L0 -30"))
-M["49_carrier_api"] = (SL("M-10 -34 h-14 v68 h14") +
+M["42_li_probe"] = (SL("M-40 0 h80") + C(0, 0, 11) + SL("M0 0 L0 -30"))
+M["44_carrier_api"] = (SL("M-10 -34 h-14 v68 h14") +
                        SL("M10 -34 h14 v68 h-14"))
 
-# --- RF / TRACKING: crosshair base ---------------------------------------
-M["28_rf_fingerprint"] = (arc(24, -30.0, 26.0) + arc(40, -30.0, 26.0) +
+# --- TRACKING: crosshair base ---------------------------------------------
+M["24_rf_fingerprint"] = (arc(24, -30.0, 26.0) + arc(40, -30.0, 26.0) +
                           arc(56, -30.0, 26.0))
-M["33_paging_track"] = (dot(0, 0, 10) + dot(-30, -26, 8) + dot(30, -26, 8) +
+M["28_paging_track"] = (dot(0, 0, 10) + dot(-30, -26, 8) + dot(30, -26, 8) +
                         dot(-38, 14, 8) + dot(38, 14, 8) + dot(0, 34, 8))
-M["38_jamming_detect"] = ('<path d="M0 -40 A40 40 0 0 1 40 0" fill="none" '
+M["33_jamming_detect"] = ('<path d="M0 -40 A40 40 0 0 1 40 0" fill="none" '
                           'stroke="%s" stroke-width="12" '
                           'stroke-linecap="round"/>' % MARK_COLOR +
                           '<path d="M0 -26 A26 26 0 0 1 26 0" fill="none" '
                           'stroke="%s" stroke-width="12" '
                           'stroke-dasharray="8 8"/>' % MARK_COLOR +
                           SL("M0 -12 h12"))
-M["44_ta_geoloc"] = (SL("M0 0 m-38 0 a38 38 0 1 0 76 0 a38 38 0 1 0 -76 0") +
+M["39_ta_geoloc"] = (SL("M0 0 m-38 0 a38 38 0 1 0 76 0 a38 38 0 1 0 -76 0") +
                      SL("M0 0 m-22 0 a22 22 0 1 0 44 0 a22 22 0 1 0 -44 0") +
                      dot(0, 0, 9))
-M["51_lpp"] = (R(-16, -30, 32, 22, 4) + R(-40, -26, 18, 14, 3) +
+M["46_lpp"] = (R(-16, -30, 32, 22, 4) + R(-40, -26, 18, 14, 3) +
                R(22, -26, 18, 14, 3) + SL("M0 -8 L0 12") + dot(0, 22, 10))
 
 
@@ -282,8 +282,9 @@ def build(module_id, category):
 def main():
     # the registry, read straight out of the C table so the two cannot drift
     import re
-    CATS = ("SYSTEM", "RECON", "AIR INTERFACE", "CORE NETWORK",
-            "SIM / IDENTITY", "ATTACKS", "ANALYSIS", "RF / TRACKING")
+    CATS = ("SYSTEM", "RECON", "RADIO", "ACCESS", "CORE NETWORK",
+            "SIM / IDENTITY", "BASEBAND / DEVICE", "TRACKING", "ANALYSIS",
+            "EXPLOIT KITS", "INTERCEPT / CARRIER")
     row = re.compile(r'^\s*\{ "([0-9][a-z0-9_]*)",\s*"[^"]*",\s*"([^"]+)"')
     mods = []
     with open("native/src/main1.c") as f:
