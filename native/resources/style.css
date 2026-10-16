@@ -2589,6 +2589,27 @@ button.mission-step:focus-visible .mission-step-inner {
   color: @text_dim;
 }
 
+/* Where a card's answer lands. The output card this toolkit grew up with is
+   being retired, and a listing or a run belongs in the rectangle that started
+   it - so each card carries its own, separated from the vector's own rows by a
+   rule rather than by a border (it is already inside one). */
+.cve-result {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid @line;
+}
+
+.cve-result-title {
+  font-family: "Orbitron";
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: @text_dim;
+}
+
+.cve-result-body {
+  padding-top: 2px;
+}
+
 /* ── Settings: the two switches that change how everything else is read ───
    The display faces are applied by the rules above, each naming its family
    directly, so turning them off means overriding the same selectors. This
@@ -2653,7 +2674,8 @@ window.fonts-system .notif-title,
 window.fonts-system .live-menu-item,
 window.fonts-system .fkit-kv-key,
 window.fonts-system .cve-kv-key,
-window.fonts-system .cve-count {
+window.fonts-system .cve-count,
+window.fonts-system .cve-result-title {
     font-family: inherit;
 }
 

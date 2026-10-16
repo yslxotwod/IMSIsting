@@ -526,6 +526,12 @@ struct _AppState {
     gint64          splash_start_us;  /* when the splash first appeared */
 };
 
+/* A run that has ended, handed to whoever asked to be told. `text` is the
+   module's own output and nothing the interface added around it: a card that
+   shows a result shows what the module said, not the shell line that asked. */
+typedef void (*ActionDoneFn)(const char *text, gboolean ok, int status,
+                             gpointer user_data);
+
 typedef struct {
     AppState *state;
     char *module_id;
@@ -540,6 +546,11 @@ typedef struct {
     GtkTextBuffer *output;  /* page output card to echo into, or NULL */
     char *last_announced;   /* the previous line that earned a toast */
     guint announced;        /* how many this run has spent */
+    ActionDoneFn done;      /* told when the run ends, or NULL */
+    GObject *done_owner;    /* held open until then, so the callback is safe */
+    gboolean wait_ok;       /* how the process itself ended */
+    int wait_status;
+    gboolean reported;      /* the callback has run */
 } ActionRun;
 
 /* Which pipe a read callback belongs to. */
@@ -834,6 +845,10 @@ static const char *g_start_module = NULL;
 /* ==================================================================== */
 /*  SMALL HELPERS                                                       */
 /* ==================================================================== */
+
+/* Defined with the rest of the label helpers, but needed by the button that
+   runs a verb, which is emitted long before that. */
+static char *verb_label(const char *verb);
 
 static char *
 imsisting_root(void)
@@ -1569,11 +1584,23 @@ action_run_unref(ActionRun *run)
     if (run == NULL) return;
     if (--run->refs > 0) return;
 
+    /* Last release: the process has been reaped, and both pipes have reached
+       EOF, so this is the first moment the module's whole answer is known. A
+       card that asked to be told gets the module's output and nothing the
+       interface added around it - no command line, no "-- done" trailer. */
+    if (run->done != NULL && !run->reported) {
+        run->reported = TRUE;
+        run->done(run->captured != NULL ? run->captured->str : "",
+                  run->wait_ok && run->wait_status == 0 && !run->saw_error,
+                  run->wait_status, run->done_owner);
+    }
+
     if (run->state->running != NULL &&
         g_ptr_array_find(run->state->running, run, NULL))
         g_ptr_array_remove(run->state->running, run);
 
     g_clear_object(&run->output);
+    g_clear_object(&run->done_owner);
     g_clear_object(&run->proc);
     g_clear_object(&run->out);
     g_clear_object(&run->err);
@@ -1681,6 +1708,14 @@ action_waited(GObject *source, GAsyncResult *result, gpointer user_data)
         console_append(run->output, sum);
     }
 
+    /* The card that started the run is told directly, so it can build its own
+       result from what the module said. That happens on the run's LAST
+       release, not here: the process can exit while its pipes still hold
+       output, and a card fed at that moment shows only the first line or two.
+       So the verdict is recorded now and reported once every reader is done. */
+    run->wait_ok = ok;
+    run->wait_status = status;
+
     /* If a Casebook is active, preserve the result as a correlated event.
        No evidence is hashed automatically: indexing large IQ files remains an
        explicit operator action in Casebook > Captures. */
@@ -1699,10 +1734,17 @@ action_waited(GObject *source, GAsyncResult *result, gpointer user_data)
     action_run_unref(run);
 }
 
+/* `console` is where the run echoes line by line; NULL means the caller has
+   somewhere better to put the result and wants nothing written to a page-wide
+   card. `done` is called once with the module's whole output, and `done_owner`
+   - the widget the caller will read the result out of - is held open until
+   then, so a page closed mid-run cannot pull the callback's ground away. */
 static void
-imsisting_action_run(AppState *state, const char *module_id,
-                     const char *label, GtkWidget *status_label,
-                     const char *const *argv, gboolean privileged)
+imsisting_action_run_full(AppState *state, const char *module_id,
+                          const char *label, GtkWidget *status_label,
+                          const char *const *argv, gboolean privileged,
+                          GtkTextBuffer *console, ActionDoneFn done,
+                          GObject *done_owner)
 {
     g_autoptr(GError) error = NULL;
     GSubprocess *proc;
@@ -1719,10 +1761,11 @@ imsisting_action_run(AppState *state, const char *module_id,
     status_label_set(status_label, "Running", "status-running");
 
     /* The Events drawer is not opened here on purpose. A press is answered by
-       the status label going to "Running", by the output card filling in place
-       and by a toast when the run ends - so the drawer can stay shut until the
-       operator asks for it. Opening it on every press made a button look like
-       it did nothing but open the drawer, which is the complaint this fixes. */
+       the status label going to "Running", by the card that started it filling
+       in place and by a toast when the run ends - so the drawer can stay shut
+       until the operator asks for it. Opening it on every press made a button
+       look like it did nothing but open the drawer, which is the complaint
+       this fixes. */
 
     if (privileged) {
         /* pkexec must see the real script path as its program so a polkit
@@ -1762,11 +1805,12 @@ imsisting_action_run(AppState *state, const char *module_id,
     a->proc         = g_object_ref(proc);
     a->captured     = g_string_new(NULL);
     a->refs         = 3;   /* stdout reader + stderr reader + waiter */
+    a->done         = done;
+    a->done_owner   = done_owner != NULL ? g_object_ref(done_owner) : NULL;
 
     /* Echo the run into the output card of the page that is on screen. The
        run keeps its own reference, so closing the page mid-run is safe. */
-    a->output = state->active_output != NULL
-        ? g_object_ref(state->active_output) : NULL;
+    a->output = console != NULL ? g_object_ref(console) : NULL;
     if (a->output != NULL) {
         g_autofree char *hdr = g_strdup_printf("$ %s", label);
         console_append(a->output, hdr);
@@ -1786,6 +1830,18 @@ imsisting_action_run(AppState *state, const char *module_id,
     g_subprocess_wait_check_async(proc, NULL, action_waited, a);
 
     g_object_unref(proc);
+}
+
+/* The common case: echo into the page that is on screen, tell nobody. */
+static void
+imsisting_action_run(AppState *state, const char *module_id,
+                     const char *label, GtkWidget *status_label,
+                     const char *const *argv, gboolean privileged)
+{
+    imsisting_action_run_full(state, module_id, label, status_label, argv,
+                              privileged,
+                              state != NULL ? state->active_output : NULL,
+                              NULL, NULL);
 }
 
 /* Run a module verb with no arguments beyond the verb itself. */
@@ -1929,8 +1985,10 @@ group_verb_clicked(GtkButton *button, gpointer user_data)
     if (!g_file_test(script, G_FILE_TEST_EXISTS)) {
         g_autofree char *m = g_strdup_printf(
             "module %s is not present at %s", module_id, script);
+        g_autofree char *title = verb_label(verb);
+
         append_event(state, m);
-        show_toast_full(state, verb, m, "error");
+        show_toast_full(state, title, m, "error");
         return;
     }
 
@@ -1967,13 +2025,35 @@ group_verb_clicked(GtkButton *button, gpointer user_data)
     }
     argv[n] = NULL;
 
-    /* Show the arguments too. The output card echoes this label, so without
-       them a run that used the wrong value - or none - looks identical to one
-       that used the right one. */
-    label = (argspec != NULL && *argspec != '\0')
-        ? g_strdup_printf("%s %s %s", module_id, verb, argspec)
-        : g_strdup_printf("%s %s", module_id, verb);
-    imsisting_action_run(state, module_id, label, status, argv, privileged);
+    /* What the operator reads afterwards - the toast, the Events drawer, the
+       card the run started from. A label set on the button wins; otherwise the
+       verb is spelled the way a reader spells it. The command line the run
+       stands for is never what the interface shows: `--run-cve` is a thing to
+       type in a shell, not a thing to read in a window. */
+    {
+        const char *wanted = g_object_get_data(G_OBJECT(button), "label");
+
+        if (wanted != NULL && *wanted != '\0') {
+            label = g_strdup(wanted);
+        } else {
+            g_autofree char *nice = verb_label(verb);
+
+            label = (argspec != NULL && *argspec != '\0')
+                ? g_strdup_printf("%s %s", nice, argspec)
+                : g_strdup(nice);
+            }
+    }
+    {
+        /* A button may ask to be told when the run ends, so the card it lives
+           in can show the result itself. Without that the run only toasts. */
+        ActionDoneFn done =
+            (ActionDoneFn) g_object_get_data(G_OBJECT(button), "done");
+        GObject *owner = g_object_get_data(G_OBJECT(button), "done-owner");
+
+        imsisting_action_run_full(state, module_id, label, status, argv,
+                                  privileged, state->active_output,
+                                  done, owner);
+    }
     (void) user_data;
 }
 
@@ -2062,8 +2142,12 @@ group_arg_clicked(GtkButton *button, gpointer user_data)
 
     if (text == NULL || *text == '\0') {
         const char *verb = g_object_get_data(G_OBJECT(button), "verb");
-        show_toast_full(state, verb != NULL ? verb : "argument",
-                        "type a value first", "error");
+        const char *set = g_object_get_data(G_OBJECT(button), "label");
+        g_autofree char *title = (set != NULL && *set != '\0')
+            ? g_strdup(set)
+            : (verb != NULL ? verb_label(verb) : g_strdup("Nothing to run"));
+
+        show_toast_full(state, title, "type a value first", "error");
         return;
     }
 
@@ -14161,6 +14245,274 @@ cve_fill_meta(GtkWidget *card_body, const char *key, const char *value)
     gtk_box_append(GTK_BOX(card_body), row);
 }
 
+/* ── the result a card shows ──────────────────────────────────────────
+   Every module answers in KEY<TAB>value lines, so a result is read as rows
+   and not as a transcript - the same shape as the vector's own kind and needs
+   rows, so a result and the vector it came from are read the same way.
+
+   The card owns it. The raw output card this toolkit grew up with is being
+   retired module by module, and a listing or a run belongs in the rectangle
+   that started it rather than in a text view bolted to the bottom of the page.
+   Wiring a button with cve_result_wire() gives it that card and keeps the
+   command line out of everything the operator reads. */
+typedef struct {
+    GtkWidget *root;    /* what the run holds open until it reports */
+    GtkWidget *body;    /* the rows */
+    GtkWidget *idle;    /* shown until something runs */
+} CveResult;
+
+#define CVE_RESULT_ROWS 24
+
+/* Clear the rows, keeping the idle note. It is a child of the body too, and
+   removing it would leave res->idle pointing at a disposed widget - which is
+   exactly how pressing a card's button a second time used to crash. */
+static void
+cve_result_rows_clear(CveResult *res)
+{
+    GtkWidget *child;
+
+    if (res == NULL || res->body == NULL) return;
+    child = gtk_widget_get_first_child(res->body);
+    while (child != NULL) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+
+        if (child != res->idle) gtk_box_remove(GTK_BOX(res->body), child);
+        child = next;
+    }
+}
+
+/* A listing row is a record, not a sentence, but the three listings a CVE
+   module answers with do not agree on their columns - --list-cves gives
+   id/kind/class/needs/label, --runs-tsv id/status/target/evidence/ts, and
+   --list-findings id/class/summary/reference. So the row is read as its anchor
+   and then everything the module said after it: the id is a column, so records
+   line up, and the rest is one wrapping line rather than four cells whose
+   widths would have to be guessed per verb. */
+static void
+cve_result_wide(GtkWidget *body, const char *line)
+{
+    const char *tab = strchr(line, '\t');
+    g_autofree char *id = g_strndup(line, (gsize)(tab - line));
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *k = gtk_label_new(id);
+    GtkWidget *v = gtk_label_new(tab + 1);
+
+    gtk_widget_add_css_class(row, "cve-kv-row");
+    gtk_widget_add_css_class(k, "cve-kv-key");
+    gtk_widget_add_css_class(v, "cve-kv-val");
+    gtk_widget_set_size_request(k, 150, -1);
+    gtk_label_set_xalign(GTK_LABEL(k), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(v), 0.0f);
+    gtk_label_set_selectable(GTK_LABEL(v), TRUE);
+    gtk_label_set_wrap(GTK_LABEL(v), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(v), PANGO_WRAP_WORD_CHAR);
+    gtk_widget_set_hexpand(v, TRUE);
+    gtk_box_append(GTK_BOX(row), k);
+    gtk_box_append(GTK_BOX(row), v);
+    gtk_box_append(GTK_BOX(body), row);
+}
+
+static void
+cve_result_fill(CveResult *res, const char *text, gboolean ok)
+{
+    g_auto(GStrv) lines = NULL;
+    guint shown = 0, total = 0;
+
+    if (res == NULL || res->body == NULL) return;
+
+    cve_result_rows_clear(res);
+    gtk_widget_set_visible(res->idle, FALSE);
+
+    lines = g_strsplit(text != NULL ? text : "", "\n", -1);
+    for (int i = 0; lines[i] != NULL; i++) {
+        const char *line = lines[i];
+        const char *tab;
+
+        while (*line == ' ' || *line == '\t') line++;
+        if (*line == '\0') continue;
+        total++;
+        if (shown >= CVE_RESULT_ROWS) continue;
+
+        tab = strchr(line, '\t');
+        /* A leading "id\tkind\t..." is the column header of a listing, not a
+           row of one. */
+        if (tab != NULL && g_str_has_prefix(line, "id\t")) continue;
+        if (tab != NULL) {
+            /* Three fields or more is a listing row; two is a key and a value,
+               which is what --run-cve and --plan answer with. */
+            if (strchr(tab + 1, '\t') != NULL)
+                cve_result_wide(res->body, line);
+            else {
+                g_autofree char *key = g_strndup(line, (gsize)(tab - line));
+
+                cve_fill_meta(res->body, key, tab + 1);
+            }
+        } else {
+            gtk_box_append(GTK_BOX(res->body), fkit_note(line));
+        }
+        shown++;
+    }
+
+    if (shown == 0)
+        gtk_box_append(GTK_BOX(res->body),
+                       fkit_note(ok ? "The module reported nothing."
+                                    : "The module failed without a message."));
+    else if (total > shown) {
+        g_autofree char *more = g_strdup_printf(
+            "and %u more - the classes on the left list every one.",
+            total - shown);
+
+        gtk_box_append(GTK_BOX(res->body), fkit_note(more));
+    }
+}
+
+static void
+cve_result_done(const char *text, gboolean ok, int status, gpointer user_data)
+{
+    CveResult *res;
+
+    (void) status;
+    if (user_data == NULL) return;
+    res = g_object_get_data(G_OBJECT(user_data), "cve-result");
+    cve_result_fill(res, text, ok);
+}
+
+/* A press is answered at once: the card says it is working before the module
+   has had time to. A composer with an empty field is not a press, though - it
+   runs nothing, and says so itself. */
+static void
+cve_result_pressed(GtkButton *button, gpointer user_data)
+{
+    CveResult *res = user_data;
+
+    if (res == NULL || res->body == NULL) return;
+    if (button != NULL) {
+        GtkWidget *entry = g_object_get_data(G_OBJECT(button), "arg-entry");
+
+        if (entry != NULL) {
+            const char *typed = gtk_editable_get_text(GTK_EDITABLE(entry));
+
+            if (typed == NULL || *typed == '\0') return;
+        }
+    }
+    cve_result_rows_clear(res);
+    gtk_widget_set_visible(res->idle, FALSE);
+    gtk_box_append(GTK_BOX(res->body), fkit_note("Running..."));
+}
+
+static GtkWidget *
+cve_result_strip(CveResult **out)
+{
+    CveResult *res = g_new0(CveResult, 1);
+    GtkWidget *root  = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget *head  = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *title = gtk_label_new("RESULT");
+    GtkWidget *body  = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+
+    res->root = root;
+    res->body = body;
+    res->idle = fkit_note("Not run yet.");
+
+    gtk_widget_add_css_class(root,  "cve-result");
+    gtk_widget_add_css_class(head,  "cve-result-head");
+    gtk_widget_add_css_class(title, "cve-result-title");
+    gtk_widget_add_css_class(body,  "cve-result-body");
+    gtk_widget_set_halign(title, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(title, TRUE);
+    gtk_box_append(GTK_BOX(head), title);
+    gtk_box_append(GTK_BOX(body), res->idle);
+    gtk_box_append(GTK_BOX(root), head);
+    gtk_box_append(GTK_BOX(root), body);
+
+    /* The run keeps a reference to root, so this survives until the run has
+       reported - a page closed mid-run does not pull the ground away. */
+    g_object_set_data_full(G_OBJECT(root), "cve-result", res, g_free);
+    if (out != NULL) *out = res;
+    return root;
+}
+
+/* Hand a button the card it should fill, and the words the operator will read
+   afterwards. The label is spelled out here rather than derived from the verb,
+   because the verb is a shell word and this is a sentence. */
+static void
+cve_result_wire(GtkWidget *button, CveResult *res, const char *label)
+{
+    if (res == NULL) return;
+    g_object_set_data_full(G_OBJECT(button), "label", g_strdup(label), g_free);
+    g_object_set_data(G_OBJECT(button), "done", (gpointer) cve_result_done);
+    g_object_set_data(G_OBJECT(button), "done-owner", res->root);
+    g_signal_connect(button, "clicked", G_CALLBACK(cve_result_pressed), res);
+}
+
+/* A button that lists rather than runs: the answer is already on this machine,
+   so it is read at the press and shown in the card that asked for it. */
+typedef struct {
+    CveResult *res;
+    char *module_id;
+    char *verb;
+} CveListing;
+
+static void
+cve_listing_free(gpointer p)
+{
+    CveListing *l = p;
+
+    g_free(l->module_id);
+    g_free(l->verb);
+    g_free(l);
+}
+
+static void
+cve_listing_clicked(GtkButton *button, gpointer user_data)
+{
+    CveListing *l = user_data;
+    g_autofree char *script = module_script_path(l->module_id);
+    const char *argv[] = { script, l->verb, NULL };
+    g_autofree char *text = NULL;
+
+    (void) button;
+    cve_result_pressed(NULL, l->res);
+    text = run_capture(argv);
+    if (text == NULL) {
+        if (l->res->body != NULL) {
+            cve_result_rows_clear(l->res);
+            gtk_widget_set_visible(l->res->idle, FALSE);
+            gtk_box_append(GTK_BOX(l->res->body),
+                           fkit_note("That listing could not be read."));
+        }
+        return;
+    }
+    cve_result_fill(l->res, text, TRUE);
+}
+
+static GtkWidget *
+cve_listing_button(CveResult *res, const char *module_id, const char *label,
+                  const char *verb, const char *extra_class)
+{
+    GtkWidget *button = gtk_button_new_with_label(label);
+    CveListing *l = g_new0(CveListing, 1);
+
+    l->res = res;
+    l->module_id = g_strdup(module_id);
+    l->verb = g_strdup(verb);
+    g_signal_connect(button, "clicked", G_CALLBACK(cve_listing_clicked), l);
+    g_object_set_data_full(G_OBJECT(button), "cve-listing", l, cve_listing_free);
+    gtk_widget_add_css_class(button, "verb-button");
+    if (extra_class != NULL)
+        gtk_widget_add_css_class(button, extra_class);
+    return button;
+}
+
+/* The composer is caption, entry, button, in that order, and the button is
+   the only one of the three that can be told where its result goes. */
+static GtkWidget *
+cve_composer_button(GtkWidget *row)
+{
+    GtkWidget *last = row != NULL ? gtk_widget_get_last_child(row) : NULL;
+
+    return (last != NULL && GTK_IS_BUTTON(last)) ? last : NULL;
+}
+
 /* One vector, in its own window. The CVE id is the heading because the id is
    what gets typed anywhere else - here, in a plan, on a command line - and the
    run the button starts is recorded against it. */
@@ -14173,6 +14525,7 @@ cve_add_card(AppState *state, const char *module_id, const CveRow *r,
     GtkWidget *flow = fkit_flow();
     GtkWidget *run = gtk_button_new_with_label("Run This Vector");
     GtkWidget *plan = gtk_button_new_with_label("Add To Plan");
+    CveResult *res = NULL;
     const char *kind = g_strcmp0(r->kind, "handoff") == 0
         ? "handoff - the far end has to be something this module does not drive"
         : "probe - measured against the target from here";
@@ -14187,6 +14540,16 @@ cve_add_card(AppState *state, const char *module_id, const CveRow *r,
     radio_bench_run_button(plan, state, module_id, status, "--plan", r->id);
     fkit_flow_add(flow, plan, "flat");
     gtk_box_append(GTK_BOX(card_body), flow);
+
+    /* The result lands here, in this vector's own window. */
+    gtk_box_append(GTK_BOX(card_body), cve_result_strip(&res));
+    {
+        g_autofree char *rl = g_strdup_printf("Run vector %s", r->id);
+        g_autofree char *pl = g_strdup_printf("Add %s to a plan", r->id);
+
+        cve_result_wire(run, res, rl);
+        cve_result_wire(plan, res, pl);
+    }
     gtk_box_append(GTK_BOX(body), card);
 }
 
@@ -14224,7 +14587,6 @@ cve_build_class(AppState *state, const char *module_id, const char *klass,
                       "the catalogue has nothing there - not that the reader "
                       "failed."));
     gtk_box_prepend(GTK_BOX(body), label);
-    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
     return outer;
 }
 
@@ -14245,9 +14607,8 @@ cve_build_class(AppState *state, const char *module_id, const char *klass,
 static GtkWidget *
 cve_build_overview(AppState *state, const char *module_id,
                    const char *title, const char *subtitle,
-                   const char *probe_verb, const char *probe_label,
-                   const char *sample_cve, gboolean findings,
-                   const char *const *helpers,
+                   const char *probe_verb, const char *sample_cve,
+                   gboolean findings, const char *const *helpers,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
@@ -14256,7 +14617,8 @@ cve_build_overview(AppState *state, const char *module_id,
     GtkWidget *catalogue = verb_card("CATALOGUE", &catalogue_body);
     GtkWidget *one = verb_card("RUN ONE", &run_body);
     GtkWidget *helper_card = verb_card("HELPERS", &helpers_body);
-    GtkWidget *flow = fkit_flow();
+    CveResult *cat_res = NULL, *one_res = NULL, *help_res = NULL;
+    GtkWidget *cat_result, *one_result, *help_result;
     GtkWidget *banner;
     GPtrArray *rows = cve_rows(module_id);
     g_autofree char *script = module_script_path(module_id);
@@ -14294,107 +14656,111 @@ cve_build_overview(AppState *state, const char *module_id,
     gtk_label_set_selectable(GTK_LABEL(banner), TRUE);
     gtk_box_append(GTK_BOX(body), banner);
 
+    /* The three cards each own a result, and each strip is built before the
+       buttons that fill it: it is created first and placed last. */
+    cat_result  = cve_result_strip(&cat_res);
+    one_result  = cve_result_strip(&one_res);
+    help_result = cve_result_strip(&help_res);
+
     {
-        static const struct { const char *label; const char *verb; } whole[] = {
-            { "List Every Vector", "--list-cves" },
-            { "Runs TSV",          "--runs-tsv" },
-            { "Selftest",          "--selftest" },
+        /* Listings, and nothing else. Neither the selftest nor a named vector
+           belongs here: the first is not an operator verb, and the second was
+           a button because the module could be asked, not because an operator
+           wanted to run CVE-2017-6975 in particular. */
+        static const struct { const char *label; const char *verb; const char *cls; } whole[] = {
+            { "List Every Vector", "--list-cves",     "primary" },
+            { "Runs",              "--runs-tsv",      "flat" },
+            { "Findings",          "--list-findings", "flat" },
         };
+        GtkWidget *flow = fkit_flow();
 
         for (guint i = 0; i < G_N_ELEMENTS(whole); i++) {
-            GtkWidget *button = gtk_button_new_with_label(whole[i].label);
-
-            radio_bench_run_button(button, state, module_id, status, whole[i].verb, NULL);
-            fkit_flow_add(flow, button, i == 0 ? "primary" : "flat");
+            if (!findings && g_strcmp0(whole[i].verb, "--list-findings") == 0)
+                continue;
+            fkit_flow_add(flow, cve_listing_button(cat_res, module_id,
+                            whole[i].label, whole[i].verb, whole[i].cls), NULL);
         }
-        if (findings) {
-            GtkWidget *button = gtk_button_new_with_label("List Findings");
-
-            radio_bench_run_button(button, state, module_id, status, "--list-findings", NULL);
-            fkit_flow_add(flow, button, "flat");
-        }
+        gtk_box_append(GTK_BOX(catalogue_body), flow);
     }
-    {
-        /* One representative of each half, so the shape of both is on screen
-           next to the count that says how many there are. */
-        GtkWidget *probe = gtk_button_new_with_label(probe_label);
-        GtkWidget *sample = gtk_button_new_with_label(sample_cve);
-
-        radio_bench_run_button(probe, state, module_id, status, "--probe", probe_verb);
-        fkit_flow_add(flow, probe, "flat");
-        radio_bench_run_button(sample, state, module_id, status, "--run-cve", sample_cve);
-        fkit_flow_add(flow, sample, "flat");
-    }
-    gtk_box_append(GTK_BOX(catalogue_body), flow);
+    gtk_box_append(GTK_BOX(catalogue_body), cat_result);
     gtk_box_append(GTK_BOX(catalogue_body),
         fkit_note("Every vector is a real run: it records to the runs table "
                   "against the id it used, and a vector whose needs cannot be "
                   "met fails honestly - non-zero, and it says what is missing."));
 
     {
-        GtkWidget *entry = NULL;
+        GtkWidget *row, *entry = NULL;
 
-        gtk_box_append(GTK_BOX(run_body),
-            fkit_composer_verb(state, module_id, status, &entry, "--run-cve",
-                "CVE id", sample_cve, "Run Vector"));
-        gtk_box_append(GTK_BOX(run_body),
-            fkit_composer_verb(state, module_id, status, &entry, "--probe",
-                "Probe", probe_verb, "Probe"));
+        row = fkit_composer_verb(state, module_id, status, &entry, "--run-cve",
+                "CVE id", sample_cve, "Run Vector");
+        gtk_box_append(GTK_BOX(run_body), row);
+        cve_result_wire(cve_composer_button(row), one_res, "Run a vector");
+
+        row = fkit_composer_verb(state, module_id, status, &entry, "--probe",
+                "Probe", probe_verb, "Probe");
+        gtk_box_append(GTK_BOX(run_body), row);
+        cve_result_wire(cve_composer_button(row), one_res, "Run a probe");
     }
+    gtk_box_append(GTK_BOX(run_body), one_result);
     gtk_box_append(GTK_BOX(run_body),
         fkit_note("The field takes one argument and the module splits it on "
                   "spaces, so a verb that wants two values takes them both here."));
 
     for (guint i = 0; helpers != NULL && helpers[i] != NULL; i++) {
-        g_autofree char *spec = g_strdup(helpers[i]);
-        g_autofree char *verb = NULL;
-        const char *label = NULL;
-        GtkWidget *entry = NULL;
-        char *colon = strchr(spec, ':');
+        g_auto(GStrv) bits = g_strsplit(helpers[i], ":", 3);
+        const char *verb = bits[0];
+        const char *label = (bits[1] != NULL && *bits[1] != '\0') ? bits[1] : bits[0];
+        /* The placeholder is what to type, never the verb that will be run:
+           `--plmn` is a shell word, not something to read in a window. */
+        const char *hint = (bits[2] != NULL && *bits[2] != '\0') ? bits[2] : label;
+        GtkWidget *row, *entry = NULL;
 
-        if (colon != NULL) { *colon = '\0'; label = colon + 1; }
-        verb = g_strdup(spec);
-        g_strstrip(verb);
-        if (*verb == '\0')
+        if (verb == NULL || *verb == '\0')
             continue;
-        /* The helpers are single-value verbs, so the caption carries the name
-           and the verb itself is the placeholder - the same reading the
-           generic arg row gives them, in the composer's shape. */
-        gtk_box_append(GTK_BOX(helpers_body),
-            fkit_composer_verb(state, module_id, status, &entry, verb,
-                (label != NULL && *label != '\0') ? label : verb, verb, "Run"));
+        row = fkit_composer_verb(state, module_id, status, &entry, verb,
+                label, hint, "Run");
+        gtk_box_append(GTK_BOX(helpers_body), row);
+        cve_result_wire(cve_composer_button(row), help_res, label);
     }
+    gtk_box_append(GTK_BOX(helpers_body), help_result);
 
     gtk_box_append(GTK_BOX(body), catalogue);
     gtk_box_append(GTK_BOX(body), one);
     gtk_box_append(GTK_BOX(body), helper_card);
-    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
     return outer;
 }
 
-#define CVE_OVERVIEW_VIEW(fn, title, subtitle, probe_verb, probe_label, sample, findings, helpers) \
+#define CVE_OVERVIEW_VIEW(fn, title, subtitle, probe_verb, sample, findings, helpers) \
     static GtkWidget *fn(AppState *state, const char *module_id,              \
                          GtkWidget *status, GtkTextBuffer *out)               \
     {                                                                         \
         return cve_build_overview(state, module_id, title, subtitle,          \
-                                  probe_verb, probe_label, sample, findings,  \
+                                  probe_verb, sample, findings,              \
                                   helpers, status, out);                      \
     }
 
 static const char *const gcve_helpers[] = {
-    "--bcd:BCD", "--kc:Kc", "--plan:Plan", NULL
+    "--bcd:BCD:enc or dec, then a value",
+    "--kc:Kc:two 32-digit hex keys, then v1, v2 or v3",
+    "--plan:Plan:a CVE id",
+    NULL
 };
 static const char *const lcve_helpers[] = {
-    "--teid:TEID", "--plmn:PLMN", "--plan:Plan", NULL
+    "--teid:TEID:a decimal TEID",
+    "--plmn:PLMN:six hex digits, e.g. 02F801",
+    "--plan:Plan:a CVE id",
+    NULL
 };
 static const char *const ncve_helpers[] = {
-    "--snssai:S-NSSAI", "--plan:Plan", NULL
+    "--snssai:S-NSSAI:SST, or SST and SD, e.g. 010203",
+    "--plan:Plan:a CVE id",
+    NULL
 };
 
 CVE_OVERVIEW_VIEW(gcve_view_overview, "GSM CVE CATALOGUE",
     "Every catalogued GSM vulnerability, one card per vector, filed by the part "
     "of the network it lives in.",
-    "IDENTITY", "Probe Identity", "CVE-2019-15962", TRUE, gcve_helpers)
+    "IDENTITY", "CVE-2019-15962", TRUE, gcve_helpers)
 
 CVE_CLASS_VIEW(gcve_view_baseband,  "baseband",     "GSM BASEBAND",
     "Vectors that reach the modem's own code rather than the network around it.")
@@ -14427,7 +14793,7 @@ static ModuleSubmenuEntry gcve_entries[] = {
 CVE_OVERVIEW_VIEW(lcve_view_overview, "LTE CVE CATALOGUE",
     "Every catalogued LTE vulnerability, one card per vector, filed by the part "
     "of the network it lives in.",
-    "RRC", "Probe RRC", "CVE-2017-6975", FALSE, lcve_helpers)
+    "RRC", "CVE-2017-6975", FALSE, lcve_helpers)
 
 CVE_CLASS_VIEW(lcve_view_asn1, "asn1", "ASN.1",
     "Vectors in the decoders every other LTE interface is built on, so a fault "
@@ -14464,7 +14830,7 @@ static ModuleSubmenuEntry lcve_entries[] = {
 CVE_OVERVIEW_VIEW(ncve_view_overview, "5G CVE CATALOGUE",
     "Every catalogued 5G vulnerability, one card per vector, filed by the part "
     "of the network it lives in.",
-    "NRF", "Probe NRF", "CVE-2020-11197", TRUE, ncve_helpers)
+    "NRF", "CVE-2020-11197", TRUE, ncve_helpers)
 
 CVE_CLASS_VIEW(ncve_view_asn1, "asn1", "ASN.1",
     "Vectors in the decoders every other 5G interface is built on, so a fault "
