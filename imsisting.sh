@@ -23,12 +23,45 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
 export IMSISTING_ROOT="$SCRIPT_DIR"
 export MODULES_DIR="$SCRIPT_DIR/modules"
-export TMP_DIR="$SCRIPT_DIR/tmp"
-export LOOT_DIR="$SCRIPT_DIR/loot"
-export LOG_DIR="$SCRIPT_DIR/logs"
-export CAPTURES_DIR="$SCRIPT_DIR/captures"
-export STATE_DIR="$SCRIPT_DIR/state"
-export CASES_DIR="$SCRIPT_DIR/cases"
+
+# ── declared settings ───────────────────────────────────────
+# state/settings.tsv holds what the operator declared: key<TAB>value, one per
+# line, '#' starts a comment, and a missing key means "the default". Plain
+# TSV for the same reason state/ui.tsv is: no parser to get wrong, and a file
+# that survives being read by hand.
+#
+# Precedence is environment > file > default, so a one-off
+# `LOOT_DIR=/mnt/usb bash imsisting.sh` still means what it says.
+SETTINGS_FILE="$SCRIPT_DIR/state/settings.tsv"
+declare -A IMSISTING_SETTINGS=()
+imsisting_settings_load() {
+    local k v line
+    IMSISTING_SETTINGS=()
+    [[ -r "$SETTINGS_FILE" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        k="${line%%$'\t'*}"
+        v="${line#*$'\t'}"
+        [[ -z "$k" || "$k" == "$line" ]] && continue   # no tab: not a pair
+        IMSISTING_SETTINGS["$k"]="$v"
+    done < "$SETTINGS_FILE"
+    return 0
+}
+# Value of a setting, or the default when it was never declared.
+imsisting_setting() {
+    local k="$1" d="${2:-}"
+    [[ -n "${IMSISTING_SETTINGS[$k]+set}" ]] && printf '%s' "${IMSISTING_SETTINGS[$k]}" || printf '%s' "$d"
+}
+# True when the key is in the file (so the UI can say "default" honestly).
+imsisting_setting_set() { [[ -n "${IMSISTING_SETTINGS[$1]+set}" ]]; }
+imsisting_settings_load
+
+export TMP_DIR="${TMP_DIR:-$(imsisting_setting paths.tmp "$SCRIPT_DIR/tmp")}"
+export LOOT_DIR="${LOOT_DIR:-$(imsisting_setting paths.loot "$SCRIPT_DIR/loot")}"
+export LOG_DIR="${LOG_DIR:-$(imsisting_setting paths.logs "$SCRIPT_DIR/logs")}"
+export CAPTURES_DIR="${CAPTURES_DIR:-$(imsisting_setting paths.captures "$SCRIPT_DIR/captures")}"
+export STATE_DIR="${STATE_DIR:-$(imsisting_setting paths.state "$SCRIPT_DIR/state")}"
+export CASES_DIR="${CASES_DIR:-$(imsisting_setting paths.cases "$SCRIPT_DIR/cases")}"
 export SESSION_LOG="${SESSION_LOG:-$LOG_DIR/session_$(date +%Y%m%d_%H%M%S)_$$.log}"
 
 for d in "$TMP_DIR" "$LOOT_DIR" "$LOG_DIR" "$CAPTURES_DIR" "$STATE_DIR" "$CASES_DIR"; do
@@ -84,6 +117,56 @@ fi
 
 # ── CLI flags (standalone only) ─────────────────────────────
 IMSISTING_LIST=0
+
+# One key, one line, rewritten in place. `drop` is a full key, never a prefix,
+# so paths.tmp can never take paths.tmp2 with it.
+imsisting_settings_rewrite() {
+    local drop="$1" append="${2:-}" line tmp
+    mkdir -p "$(dirname "$SETTINGS_FILE")" 2>/dev/null
+    tmp="$(mktemp "$SETTINGS_FILE.XXXXXX")" || return 1
+    if [[ -f "$SETTINGS_FILE" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" == "$drop"$'\t'* ]] && continue
+            printf '%s\n' "$line"
+        done < "$SETTINGS_FILE" > "$tmp"
+    fi
+    [[ -n "$append" ]] && printf '%s\n' "$append" >> "$tmp"
+    mv -f "$tmp" "$SETTINGS_FILE"
+}
+
+imsisting_settings_cli() {
+    local cmd="${1:-list}" k v
+    case "$cmd" in
+        path) printf '%s\n' "$SETTINGS_FILE" ;;
+        list)
+            imsisting_settings_load
+            for k in $(printf '%s\n' "${!IMSISTING_SETTINGS[@]}" | sort); do
+                printf '%s\t%s\n' "$k" "${IMSISTING_SETTINGS[$k]}"
+            done ;;
+        get)
+            k="${2:-}"
+            [[ -n "$k" ]] || { printf 'usage: imsisting --settings get KEY\n' >&2; return 2; }
+            imsisting_settings_load
+            imsisting_setting "$k" ""
+            printf '\n' ;;
+        set)
+            k="${2:-}"; v="${3:-}"
+            [[ -n "$k" && $# -ge 3 ]] || { printf 'usage: imsisting --settings set KEY VALUE\n' >&2; return 2; }
+            imsisting_settings_rewrite "$k" "$k"$'\t'"$v" || return 1
+            printf '%s\t%s\n' "$k" "$v" ;;
+        unset)
+            k="${2:-}"
+            [[ -n "$k" ]] || { printf 'usage: imsisting --settings unset KEY\n' >&2; return 2; }
+            imsisting_settings_rewrite "$k" || return 1 ;;
+        reset)
+            : > "$SETTINGS_FILE"
+            printf 'imsisting: %s cleared — every setting is back to its default\n' "$SETTINGS_FILE" ;;
+        *)
+            printf 'usage: imsisting --settings [list|get KEY|set KEY VALUE|unset KEY|reset|path]\n' >&2
+            return 2 ;;
+    esac
+}
+
 if (( ! IMSISTING_SOURCED )); then
     case "${1:-}" in
         -h|--help)
@@ -96,6 +179,10 @@ Usage:
   bash imsisting.sh --list         List all modules and availability
   bash imsisting.sh --index        Print the module index (TSV)
   bash imsisting.sh --gui          Launch the GTK GUI
+  bash imsisting.sh --settings list        Declared settings (TSV)
+  bash imsisting.sh --settings set K V     Declare a setting
+  bash imsisting.sh --settings unset K     Back to the default
+  bash imsisting.sh --settings reset       Back to every default
   bash imsisting.sh --version      Print version
   bash imsisting.sh --help         This message
 USAGE
@@ -113,6 +200,10 @@ USAGE
                 exit 1
             }
             exit 0 ;;
+        --settings)
+            shift
+            imsisting_settings_cli "$@"
+            exit $? ;;
         --list)
             IMSISTING_LIST=1 ;;
         --gui)

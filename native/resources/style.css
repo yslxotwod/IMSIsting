@@ -2549,3 +2549,107 @@ button.mission-step:focus-visible .mission-step-inner {
 .status-dot.fk-guard-ok   { color: #74d99f; }
 .status-dot.fk-guard-bad  { color: #ef8b8b; }
 .status-dot.fk-guard-warn { color: #e0b357; }
+
+/* ── Settings: the two switches that change how everything else is read ───
+   The display faces are applied by the rules above, each naming its family
+   directly, so turning them off means overriding the same selectors. This
+   list is generated from them: the override is only as complete as the set
+   of rules that name a family, which is exactly what it has to match. */
+window.fonts-system .splash-fact,
+window.fonts-system headerbar .title,
+window.fonts-system .page-title,
+window.fonts-system .module-header-title,
+window.fonts-system .app-subtitle,
+window.fonts-system .status-key,
+window.fonts-system .section-eyebrow,
+window.fonts-system .card-heading,
+window.fonts-system .cb-card-title,
+window.fonts-system .cb-k,
+window.fonts-system .cb-count-key,
+window.fonts-system .output-card-title,
+window.fonts-system .dash-category,
+window.fonts-system .sidebar-category,
+window.fonts-system .menu-heading,
+window.fonts-system .drawer-recent-head,
+window.fonts-system .drawer-nav-label,
+window.fonts-system .mission-step-eyebrow,
+window.fonts-system .mission-step-title,
+window.fonts-system .module-card-category,
+window.fonts-system .module-card-title,
+window.fonts-system .module-header-category,
+window.fonts-system .cat-air,
+window.fonts-system .cat-analysis,
+window.fonts-system .cat-attacks,
+window.fonts-system .cat-core,
+window.fonts-system .cat-recon,
+window.fonts-system .cat-rf,
+window.fonts-system .cat-sim,
+window.fonts-system .cat-system,
+window.fonts-system .status-pill,
+window.fonts-system .deps-status,
+window.fonts-system .deps-group,
+window.fonts-system .deps-summary,
+window.fonts-system .module-card-state,
+window.fonts-system .event-badge,
+window.fonts-system .breadcrumb,
+window.fonts-system .stat-label,
+window.fonts-system .stat-value,
+window.fonts-system .stat-row-label,
+window.fonts-system .stat-row-count,
+window.fonts-system .deps-name,
+window.fonts-system .loot-count,
+window.fonts-system .loot-count-lbl,
+window.fonts-system .crec-survey-status,
+window.fonts-system .log-tool,
+window.fonts-system .verb-button,
+window.fonts-system button.primary,
+window.fonts-system button.destructive,
+window.fonts-system button.module-card,
+window.fonts-system button.mission-step,
+window.fonts-system button.deps-install,
+window.fonts-system button.deps-filter,
+window.fonts-system notebook > header > tabs > tab label,
+window.fonts-system .casebook-tabs > header > tabs > tab label,
+window.fonts-system .notif-title,
+window.fonts-system .live-menu-item,
+window.fonts-system .fkit-kv-key {
+    font-family: inherit;
+}
+
+/* Reduced motion keeps the layout and drops the travel. */
+window.motion-reduced * {
+    transition-duration: 0s;
+}
+
+/* ── Settings rows ─────────────────────────────────────────────────────── */
+.settings-row {
+    padding: 7px 0;
+}
+
+.settings-key {
+    font-family: "Orbitron";
+    font-size: 11px;
+    color: @text;
+}
+
+.settings-note {
+    font-size: 11px;
+    color: @text_dim;
+    margin-top: 2px;
+}
+
+/* The origin chip doubles as "back to the default", so it has to look
+   pressable without competing with the control it sits beside. */
+.settings-origin {
+    font-family: monospace;
+    font-size: 10px;
+    color: @text_dim;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid alpha(@text_dim, 0.3);
+}
+
+.settings-origin:hover {
+    color: @accent;
+    border-color: @accent;
+}
