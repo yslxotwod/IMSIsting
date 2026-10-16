@@ -365,15 +365,39 @@ SIB_CHOICE = [
 # length is not derivable from the hex and slicing to it is required. Each
 # carries exactly one SIB, with pycrate's own minimal valid body, so the body
 # is independent output even though the header is what these vectors pin.
+# Captured from pycrate 0.8.1, one per SIB type. The third value is the TRUE
+# bit length of the container, header included. It is NOT the nibble count
+# times four: pycrate's to_uper() pads to whole octets, so the hex only bounds
+# the length from above, and the difference is up to seven bits. These were
+# first written as the padded figures, which an assertion that the truncated
+# vector is as long as the truncation length cannot detect -- each length here
+# is derived from the SIB body layout instead and checked against that
+# derivation in the selftest.
 SI_VECTORS = [
     ("sib2", "00000000000000000000000000000000100000000000000000", 200),
     ("sib3", "000400000000", 48),
-    ("sib4", "000800", 24),
-    ("sib5", "000C00000000000000", 72),
-    ("sib6", "001000", 24),
-    ("sib7", "001400", 24),
-    ("sib8", "001800", 24),
+    ("sib4", "000800", 18),
+    ("sib5", "000C00000000000000", 66),
+    ("sib6", "001000", 18),
+    ("sib7", "001400", 20),
+    ("sib8", "001800", 19),
 ]
+
+# The SIB5 element is 48 bits with every OPTIONAL absent: one extension bit,
+# six OPTIONAL presence bits, then dl-CarrierFreq (16), q-RxLevMin (6),
+# t-ReselectionEUTRA (3), threshX-High (5), threshX-Low (5),
+# allowedMeasBandwidth (3), presenceAntennaPort1 (1) and neighCellConfig (2).
+# The stride was confirmed by putting a different dl-CarrierFreq in the second
+# element of a two-element list and watching which bit moved.
+SIB5_ELEMENT_BITS = 48
+SIB5_MAX_CARRIERS = 8
+SIB5_NEIGH_MAX = 16
+# Baseline body lengths with every OPTIONAL absent, from the ASN.1 root: one
+# extension bit plus the OPTIONAL presence bits, plus SIB7's mandatory
+# t-ReselectionGERAN.
+SIB6_BASELINE_BITS = 1 + 3
+SIB7_BASELINE_BITS = 1 + 2 + 3
+SIB8_BASELINE_BITS = 1 + 4
 
 
 def bits_of(hex_str, nbits=None):
@@ -867,6 +891,534 @@ SIB2_VECTORS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# SystemInformationBlockType4 (TS 36.331 6.3.1), unaligned PER.
+#
+# SIB4 is the neighbour-cell list: which cells a UE may reselect to, which it
+# must avoid, and the CSG range it may treat as closed. Unlike SIB2 it is
+# structured -- SEQUENCE OF lists of SEQUENCEs, one of which has its own
+# OPTIONAL -- so it is written out rather than driven from a flat table.
+#
+# THE EXTENSIBILITY RULE, which this section had to establish because no ASN.1
+# dump shows it: pycrate reports `_ext = None` for a SEQUENCE with no extension
+# marker, `[]` for one that is extensible but declares no extension additions,
+# and a non-empty list for one that does. So an EMPTY LIST is not the same as
+# None, and a SEQUENCE whose `_ext` is `[]` still emits its extension bit.
+# `IntraFreqNeighCellInfo` is exactly that case -- `_ext = []` while
+# `PhysCellIdRange` and `CSG-PhysCellIdRange` are None. A `len(_ext)` test
+# reports both as zero; believing it puts physCellId one bit early and every
+# element after that fifteen bits out.
+#
+# Layout, from differential probing against pycrate and then checked by hand
+# against a baseline with every OPTIONAL populated:
+#
+#   0        extension bit
+#   1        intraFreqNeighCellList present
+#   2        intraFreqExcludedCellList present
+#   3        csg-PhysCellIdRange present
+#   4..7     intraFreqNeighCellList length - 1        (SIZE (1..16))
+#   each element, IntraFreqNeighCellInfo, 15 bits:
+#       +0       extension bit
+#       +1..9    physCellId     INTEGER (0..503)
+#       +10..14  q-OffsetCell   ENUMERATED, 31 values
+#   then intraFreqExcludedCellList the same way, elements are PhysCellIdRange
+#   at 1 + 9 [+ 4] bits: a range-present bit, start INTEGER (0..503), and the
+#   16-value ENUMERATED when present. csg-PhysCellIdRange has that same shape.
+# ---------------------------------------------------------------------------
+
+SIB4_Q_OFFSET_CELL = [
+    "dB-24", "dB-22", "dB-20", "dB-18", "dB-16", "dB-14", "dB-12", "dB-10",
+    "dB-8", "dB-6", "dB-5", "dB-4", "dB-3", "dB-2", "dB-1", "dB0", "dB1",
+    "dB2", "dB3", "dB4", "dB5", "dB6", "dB8", "dB10", "dB12", "dB14", "dB16",
+    "dB18", "dB20", "dB22", "dB24",
+]
+SIB4_PHYS_CELL_ID_RANGE = [
+    "n4", "n8", "n12", "n16", "n24", "n32", "n48", "n64", "n84", "n96",
+    "n128", "n168", "n252", "n504", "spare2", "spare1",
+]
+SIB4_MAX_CELLS = 16
+SIB4_PHYS_CELL_ID_MAX = 503
+# The vector tables name the encoder's arguments; the decoder returns the
+# ASN.1 names. One map, so a test cannot pass by comparing a value to itself
+# under two spellings of the same key.
+SIB4_VECTOR_KEY = {
+    "neigh_cells": "intra_freq_neigh_cell_list",
+    "excluded_cells": "intra_freq_excluded_cell_list",
+    "csg_phys_cell_id_range": "csg_phys_cell_id_range",
+}
+
+
+def _sib4_check_cell_id(v, what):
+    if not isinstance(v, int) or not 0 <= v <= SIB4_PHYS_CELL_ID_MAX:
+        raise ValueError("%s is PhysCellId (0..%d), got %r"
+                         % (what, SIB4_PHYS_CELL_ID_MAX, v))
+
+
+def _sib4_write_range(w, start, rng, what):
+    _sib4_check_cell_id(start, what + ".start")
+    w.bit(1 if rng is not None else 0)
+    w.uint(start, 9)
+    if rng is not None:
+        if rng not in SIB4_PHYS_CELL_ID_RANGE:
+            raise ValueError("%s.range must be one of %s"
+                             % (what, SIB4_PHYS_CELL_ID_RANGE))
+        w.uint(SIB4_PHYS_CELL_ID_RANGE.index(rng), 4)
+
+
+def encode_sib4(neigh_cells=None, excluded_cells=None,
+                csg_phys_cell_id_range=None):
+    """Encode a SystemInformationBlockType4 body.
+
+    `neigh_cells` is a list of {"phys_cell_id": int, "q_offset_cell": str};
+    `excluded_cells` a list of {"start": int, "range": str or None};
+    `csg_phys_cell_id_range` one such dict or None. An empty or absent list
+    means the OPTIONAL is absent, because TS 36.331 gives both lists a lower
+    bound of 1 -- a present list always carries at least one cell.
+
+    Returns a bit string, not a BitWriter: a SIB body is a fragment of a larger
+    message and is not octet aligned.
+    """
+    neigh_cells = list(neigh_cells or [])
+    excluded_cells = list(excluded_cells or [])
+
+    for name, cells in (("intraFreqNeighCellList", neigh_cells),
+                        ("intraFreqExcludedCellList", excluded_cells)):
+        if len(cells) > SIB4_MAX_CELLS:
+            raise ValueError("%s holds at most %d cells, got %d"
+                             % (name, SIB4_MAX_CELLS, len(cells)))
+    for c in neigh_cells:
+        _sib4_check_cell_id(c.get("phys_cell_id"), "neighCell.physCellId")
+        if c.get("q_offset_cell") not in SIB4_Q_OFFSET_CELL:
+            raise ValueError("neighCell.qOffsetCell must be one of %s"
+                             % SIB4_Q_OFFSET_CELL)
+
+    w = BitWriter()
+    w.bit(0)                                    # no extension addition
+    w.bit(1 if neigh_cells else 0)
+    w.bit(1 if excluded_cells else 0)
+    w.bit(1 if csg_phys_cell_id_range is not None else 0)
+
+    if neigh_cells:
+        w.uint(len(neigh_cells) - 1, 4)
+        for c in neigh_cells:
+            w.bit(0)                            # IntraFreqNeighCellInfo ext
+            w.uint(c["phys_cell_id"], 9)
+            w.uint(SIB4_Q_OFFSET_CELL.index(c["q_offset_cell"]), 5)
+
+    if excluded_cells:
+        w.uint(len(excluded_cells) - 1, 4)
+        for c in excluded_cells:
+            _sib4_write_range(w, c.get("start"), c.get("range"),
+                              "physCellIdRange")
+
+    if csg_phys_cell_id_range is not None:
+        _sib4_write_range(w, csg_phys_cell_id_range.get("start"),
+                          csg_phys_cell_id_range.get("range"),
+                          "csg-PhysCellIdRange")
+    return w.string()
+
+
+def decode_sib4(data):
+    """Decode a SystemInformationBlockType4 body.
+
+    Refuses rather than mis-reads: an extension addition in the block or in a
+    neighbour cell. Returns the two lists, the CSG range, and bits_consumed.
+    """
+    r = BitReader(data)
+    if len(r.bits) < 4:
+        raise ValueError("SIB4 body is at least 4 bits, got %d" % len(r.bits))
+    if r.bit():
+        raise ValueError("SIB4 carries an extension addition; "
+                         "this codec models the root only")
+
+    out = {}
+    neigh_present = r.bit()
+    excluded_present = r.bit()
+    csg_present = r.bit()
+
+    if neigh_present:
+        cells = []
+        for _ in range(r.uint(4) + 1):
+            if r.bit():
+                raise ValueError("IntraFreqNeighCellInfo carries an "
+                                 "extension addition")
+            cells.append({"phys_cell_id": r.uint(9),
+                          "q_offset_cell": SIB4_Q_OFFSET_CELL[r.uint(5)]})
+        out["intra_freq_neigh_cell_list"] = cells
+    else:
+        out["intra_freq_neigh_cell_list"] = None
+
+    def one_range():
+        present = r.bit()
+        start = r.uint(9)
+        rng = SIB4_PHYS_CELL_ID_RANGE[r.uint(4)] if present else None
+        return {"start": start, "range": rng}
+
+    if excluded_present:
+        out["intra_freq_excluded_cell_list"] = [one_range()
+                                                for _ in range(r.uint(4) + 1)]
+    else:
+        out["intra_freq_excluded_cell_list"] = None
+
+    out["csg_phys_cell_id_range"] = one_range() if csg_present else None
+    out["bits_consumed"] = r.pos
+    return out
+
+
+# Captured from pycrate 0.8.1. The third value is the TRUE bit length of the
+# container, including the 14-bit SystemInformation header; the hex is padded
+# to whole octets, so the two differ and neither is derivable from the other.
+SIB4_VECTORS = [
+    ("empty", "000800", 18, {}),
+    ("neigh1", "0009002AA8", 37,
+     {"neigh_cells": [{"phys_cell_id": 42, "q_offset_cell": "dB6"}]}),
+    ("neigh2", "000904007800F0", 52,
+     {"neigh_cells": [{"phys_cell_id": 0, "q_offset_cell": "dB0"},
+                      {"phys_cell_id": 0, "q_offset_cell": "dB0"}]}),
+    ("neigh16",
+     "00093C007802F009E01BC04780AF019E03BC087812F029E05BC0C781AF039E07BC", 262,
+     {"neigh_cells": [{"phys_cell_id": i, "q_offset_cell": "dB0"}
+                      for i in range(16)]}),
+    ("allpresent", "0009C42AA80E0199072CDB2000", 98,
+     {"neigh_cells": [{"phys_cell_id": 42, "q_offset_cell": "dB6"},
+                      {"phys_cell_id": 7, "q_offset_cell": "dB-24"}],
+      "excluded_cells": [{"start": 100, "range": "n8"},
+                         {"start": 300, "range": "n504"}],
+      "csg_phys_cell_id_range": {"start": 200, "range": "n4"}}),
+]
+
+
+# ---------------------------------------------------------------------------
+# SystemInformationBlockType5 (TS 36.331 6.3.1), unaligned PER.
+#
+# SIB5 is the inter-frequency neighbour list: one InterFreqCarrierFreqInfo per
+# EARFCN the UE may reselect to. It is the largest SIB here and the first with
+# a MANDATORY list, which changes the preamble: SIB4's lists are OPTIONAL, so
+# each carries a presence bit, while interFreqCarrierFreqList has SIZE (1..8)
+# and no presence bit at all -- only its 3-bit length.
+#
+#   0        extension bit                                   (SIB5 root)
+#   1..3     interFreqCarrierFreqList length - 1              SIZE (1..8)
+#   then one InterFreqCarrierFreqInfo per carrier, 48 bits with every
+#   OPTIONAL absent:
+#        +0       extension bit
+#        +1..+6   OPTIONAL presence bits, declaration order: p-Max,
+#                 t-ReselectionEUTRA-SF, cellReselectionPriority,
+#                 q-OffsetFreq, interFreqNeighCellList,
+#                 interFreqExcludedCellList
+#        +7..22   dl-CarrierFreq            INTEGER (0..65535)
+#        +23..28  q-RxLevMin                INTEGER (-70..-22)
+#        [+29..34 p-Max                     INTEGER (-30..33)]
+#        +35..37  t-ReselectionEUTRA        INTEGER (0..7)
+#        [+t-ReselectionEUTRA-SF            sf-Medium (2), sf-High (2)]
+#        threshX-High                       INTEGER (0..31)
+#        threshX-Low                        INTEGER (0..31)
+#        allowedMeasBandwidth               ENUMERATED, 6 values
+#        presenceAntennaPort1               BOOLEAN
+#        [cellReselectionPriority           INTEGER (0..7)]
+#        neighCellConfig                    BIT STRING (SIZE (2))
+#        [q-OffsetFreq                      ENUMERATED, 31 values]
+#        [interFreqNeighCellList            length (4) + 14 per cell]
+#        [interFreqExcludedCellList         length (4) + (1 + 9 [+ 4]) per cell]
+#
+# The 48-bit stride was measured, not assumed: giving the second element of a
+# two-element list a different dl-CarrierFreq moved exactly one bit, at
+# position 88, which is that field's last bit when the element starts at body
+# bit 52 -- i.e. 1 + 3 bits of preamble plus one 48-bit element.
+#
+# A neighbour cell here is 14 bits, NOT the 15 bits SIB4 uses. The two types
+# read alike and are not:
+#
+#     IntraFreqNeighCellInfo  (SIB4)  ...  -- extension marker, no additions
+#     InterFreqNeighCellInfo  (SIB5)       -- no extension marker at all
+#
+# so SIB4 writes an extension bit per cell and SIB5 does not. A cell read one
+# bit long puts every following cell 1 bit out; the first one still decodes,
+# which is what makes this worth a comment.
+#
+# Both cell lists here share SIB4's Q-OffsetRange enumeration and its
+# PhysCellIdRange shape, so the value tables below are reused deliberately.
+# ---------------------------------------------------------------------------
+
+SIB5_ALLOWED_MEAS_BANDWIDTH = ["mbw6", "mbw15", "mbw25", "mbw50", "mbw75",
+                               "mbw100"]
+SIB5_T_RESELECTION_SF = ["oDot25", "oDot5", "oDot75", "lDot0"]
+SIB5_CARRIER_KEYS = (
+    "dl_carrier_freq", "q_rx_lev_min", "p_max", "t_reselection_eutra",
+    "t_reselection_eutra_sf", "thresh_x_high", "thresh_x_low",
+    "allowed_meas_bandwidth", "presence_antenna_port1",
+    "cell_reselection_priority", "neigh_cell_config", "q_offset_freq",
+    "inter_freq_neigh_cell_list", "inter_freq_excluded_cell_list",
+)
+SIB5_REQUIRED_KEYS = (
+    "dl_carrier_freq", "q_rx_lev_min", "t_reselection_eutra",
+    "thresh_x_high", "thresh_x_low", "allowed_meas_bandwidth",
+)
+# The default carrier: every OPTIONAL absent, all integers at their lower
+# bound. It encodes to 48 zero bits, which is the baseline pycrate produces.
+SIB5_DEFAULT_CARRIER = {
+    "dl_carrier_freq": 0,
+    "q_rx_lev_min": -70,
+    "p_max": None,
+    "t_reselection_eutra": 0,
+    "t_reselection_eutra_sf": None,
+    "thresh_x_high": 0,
+    "thresh_x_low": 0,
+    "allowed_meas_bandwidth": "mbw6",
+    "presence_antenna_port1": False,
+    "cell_reselection_priority": None,
+    "neigh_cell_config": "00",
+    "q_offset_freq": None,
+    "inter_freq_neigh_cell_list": None,
+    "inter_freq_excluded_cell_list": None,
+}
+
+
+def _bitstr(w, s, width, what):
+    """Write a BIT STRING of a fixed size, given as '0'/'1' characters."""
+    if not isinstance(s, str) or len(s) != width or set(s) - {"0", "1"}:
+        raise ValueError("%s is a %d-bit string of 0 and 1, got %r"
+                         % (what, width, s))
+    for c in s:
+        w.bit(c == "1")
+
+
+def _sib5_carrier(fields):
+    """Merge a caller's carrier dict over the default and validate it."""
+    unknown = set(fields) - set(SIB5_CARRIER_KEYS)
+    if unknown:
+        raise ValueError("unknown SIB5 carrier field(s): %s"
+                         % ", ".join(sorted(unknown)))
+    c = dict(SIB5_DEFAULT_CARRIER)
+    c.update(fields)
+
+    _bitstr(BitWriter(), c["neigh_cell_config"], 2, "neighCellConfig")
+    if not isinstance(c["dl_carrier_freq"], int) or not 0 <= c["dl_carrier_freq"] <= 65535:
+        raise ValueError("dl-CarrierFreq is INTEGER (0..65535), got %r"
+                         % (c["dl_carrier_freq"],))
+    for name, lo, hi in (("q_rx_lev_min", -70, -22), ("p_max", -30, 33),
+                         ("thresh_x_high", 0, 31), ("thresh_x_low", 0, 31)):
+        v = c[name]
+        if v is None:
+            if name == "p_max":
+                continue
+            raise ValueError("%s is required" % name)
+        if not isinstance(v, int) or not lo <= v <= hi:
+            raise ValueError("%s is INTEGER (%d..%d), got %r"
+                             % (name, lo, hi, v))
+    for name, lo, hi in (("t_reselection_eutra", 0, 7),
+                         ("cell_reselection_priority", 0, 7)):
+        v = c[name]
+        if v is None:
+            continue
+        if not isinstance(v, int) or not lo <= v <= hi:
+            raise ValueError("%s is INTEGER (%d..%d), got %r"
+                             % (name, lo, hi, v))
+    if c["allowed_meas_bandwidth"] not in SIB5_ALLOWED_MEAS_BANDWIDTH:
+        raise ValueError("allowedMeasBandwidth must be one of %s"
+                         % SIB5_ALLOWED_MEAS_BANDWIDTH)
+    if c["q_offset_freq"] is not None and c["q_offset_freq"] not in SIB4_Q_OFFSET_CELL:
+        raise ValueError("q-OffsetFreq must be one of %s" % SIB4_Q_OFFSET_CELL)
+    sf = c["t_reselection_eutra_sf"]
+    if sf is not None:
+        if set(sf) != {"sf_medium", "sf_high"}:
+            raise ValueError("t-ReselectionEUTRA-SF needs sf_medium and "
+                             "sf_high, got %r" % (sf,))
+        for k, v in sf.items():
+            if v not in SIB5_T_RESELECTION_SF:
+                raise ValueError("t-ReselectionEUTRA-SF.%s must be one of %s"
+                                 % (k, SIB5_T_RESELECTION_SF))
+    for name in ("inter_freq_neigh_cell_list", "inter_freq_excluded_cell_list"):
+        cells = c[name]
+        if cells is not None and len(cells) > SIB5_NEIGH_MAX:
+            raise ValueError("%s holds at most %d cells, got %d"
+                             % (name, SIB5_NEIGH_MAX, len(cells)))
+    for cell in c["inter_freq_neigh_cell_list"] or []:
+        _sib4_check_cell_id(cell.get("phys_cell_id"),
+                            "interFreqNeighCell.physCellId")
+        if cell.get("q_offset_cell") not in SIB4_Q_OFFSET_CELL:
+            raise ValueError("interFreqNeighCell.qOffsetCell must be one of %s"
+                             % SIB4_Q_OFFSET_CELL)
+    return c
+
+
+def _sib5_write_carrier(w, c):
+    w.bit(0)                                        # no extension addition
+    w.bit(1 if c["p_max"] is not None else 0)
+    w.bit(1 if c["t_reselection_eutra_sf"] is not None else 0)
+    w.bit(1 if c["cell_reselection_priority"] is not None else 0)
+    w.bit(1 if c["q_offset_freq"] is not None else 0)
+    w.bit(1 if c["inter_freq_neigh_cell_list"] else 0)
+    w.bit(1 if c["inter_freq_excluded_cell_list"] else 0)
+
+    w.uint(c["dl_carrier_freq"], 16)
+    w.uint(c["q_rx_lev_min"] + 70, 6)
+    if c["p_max"] is not None:
+        w.uint(c["p_max"] + 30, 6)
+    w.uint(c["t_reselection_eutra"], 3)
+    if c["t_reselection_eutra_sf"] is not None:
+        w.uint(SIB5_T_RESELECTION_SF.index(c["t_reselection_eutra_sf"]["sf_medium"]), 2)
+        w.uint(SIB5_T_RESELECTION_SF.index(c["t_reselection_eutra_sf"]["sf_high"]), 2)
+    w.uint(c["thresh_x_high"], 5)
+    w.uint(c["thresh_x_low"], 5)
+    w.uint(SIB5_ALLOWED_MEAS_BANDWIDTH.index(c["allowed_meas_bandwidth"]), 3)
+    w.bit(1 if c["presence_antenna_port1"] else 0)
+    if c["cell_reselection_priority"] is not None:
+        w.uint(c["cell_reselection_priority"], 3)
+    _bitstr(w, c["neigh_cell_config"], 2, "neighCellConfig")
+    if c["q_offset_freq"] is not None:
+        w.uint(SIB4_Q_OFFSET_CELL.index(c["q_offset_freq"]), 5)
+    if c["inter_freq_neigh_cell_list"]:
+        cells = c["inter_freq_neigh_cell_list"]
+        w.uint(len(cells) - 1, 4)
+        for cell in cells:
+            # No extension bit here, and that is not an oversight: SIB5's
+            # InterFreqNeighCellInfo has no extension marker at all, while
+            # SIB4's IntraFreqNeighCellInfo is extensible with no additions.
+            # The two look like the same type and are not -- one bit per cell
+            # separates them, and reading the wrong one shifts every cell
+            # after the first.
+            w.uint(cell["phys_cell_id"], 9)
+            w.uint(SIB4_Q_OFFSET_CELL.index(cell["q_offset_cell"]), 5)
+    if c["inter_freq_excluded_cell_list"]:
+        cells = c["inter_freq_excluded_cell_list"]
+        w.uint(len(cells) - 1, 4)
+        for cell in cells:
+            _sib4_write_range(w, cell.get("start"), cell.get("range"),
+                              "interFreqExcludedCell.physCellIdRange")
+
+
+def encode_sib5(carriers=None):
+    """Encode a SystemInformationBlockType5 body.
+
+    `carriers` is a list of dicts with the SIB5_CARRIER_KEYS; anything omitted
+    takes SIB5_DEFAULT_CARRIER's value, and a key set to None means the
+    OPTIONAL is absent. The list has SIZE (1..8) and is mandatory, so an empty
+    or absent list encodes the one-element default -- a SIB5 with no carriers
+    is not a message TS 36.331 can express.
+
+    Returns a bit string, not a BitWriter.
+    """
+    if carriers is None:
+        carriers = [{}]
+    if not carriers:
+        carriers = [{}]
+    if len(carriers) > SIB5_MAX_CARRIERS:
+        raise ValueError("interFreqCarrierFreqList holds at most %d carriers, "
+                         "got %d" % (SIB5_MAX_CARRIERS, len(carriers)))
+
+    merged = [_sib5_carrier(c) for c in carriers]
+    w = BitWriter()
+    w.bit(0)                                        # no extension addition
+    w.uint(len(merged) - 1, 3)
+    for c in merged:
+        _sib5_write_carrier(w, c)
+    return w.string()
+
+
+def decode_sib5(data):
+    """Decode a SystemInformationBlockType5 body.
+
+    Refuses rather than mis-reads: an extension addition in the block or in a
+    carrier. The carrier dicts it returns use the encoder's key names, so the
+    round trip is a comparison of like with like.
+    """
+    r = BitReader(data)
+    if len(r.bits) < 1 + 3:
+        raise ValueError("SIB5 body is at least 4 bits, got %d" % len(r.bits))
+    if r.bit():
+        raise ValueError("SIB5 carries an extension addition; "
+                         "this codec models the root only")
+
+    out = {"carriers": []}
+    for _ in range(r.uint(3) + 1):
+        if r.bit():
+            raise ValueError("InterFreqCarrierFreqInfo carries an extension "
+                             "addition")
+        has_pmax = r.bit()
+        has_sf = r.bit()
+        has_prio = r.bit()
+        has_qoff = r.bit()
+        has_neigh = r.bit()
+        has_excl = r.bit()
+
+        c = dict(SIB5_DEFAULT_CARRIER)
+        c["dl_carrier_freq"] = r.uint(16)
+        c["q_rx_lev_min"] = r.uint(6) - 70
+        c["p_max"] = (r.uint(6) - 30) if has_pmax else None
+        c["t_reselection_eutra"] = r.uint(3)
+        if has_sf:
+            c["t_reselection_eutra_sf"] = {
+                "sf_medium": SIB5_T_RESELECTION_SF[r.uint(2)],
+                "sf_high": SIB5_T_RESELECTION_SF[r.uint(2)],
+            }
+        c["thresh_x_high"] = r.uint(5)
+        c["thresh_x_low"] = r.uint(5)
+        c["allowed_meas_bandwidth"] = SIB5_ALLOWED_MEAS_BANDWIDTH[r.uint(3)]
+        c["presence_antenna_port1"] = bool(r.bit())
+        c["cell_reselection_priority"] = r.uint(3) if has_prio else None
+        c["neigh_cell_config"] = "".join("1" if r.bit() else "0"
+                                         for _ in range(2))
+        c["q_offset_freq"] = (SIB4_Q_OFFSET_CELL[r.uint(5)] if has_qoff
+                              else None)
+
+        if has_neigh:
+            cells = []
+            for _ in range(r.uint(4) + 1):
+                cells.append({"phys_cell_id": r.uint(9),
+                              "q_offset_cell": SIB4_Q_OFFSET_CELL[r.uint(5)]})
+            c["inter_freq_neigh_cell_list"] = cells
+        if has_excl:
+            cells = []
+            for _ in range(r.uint(4) + 1):
+                present = r.bit()
+                start = r.uint(9)
+                cells.append({"start": start,
+                              "range": (SIB4_PHYS_CELL_ID_RANGE[r.uint(4)]
+                                        if present else None)})
+            c["inter_freq_excluded_cell_list"] = cells
+        out["carriers"].append(c)
+
+    out["bits_consumed"] = r.pos
+    return out
+
+
+# Captured from pycrate 0.8.1. As with SIB4_VECTORS the third value is the TRUE
+# bit length of the container, of which the body is that minus the 14-bit
+# SystemInformation header; the hex is padded to whole octets.
+#
+# Each vector's carriers are PARTIAL dicts merged over SIB5_DEFAULT_CARRIER, so
+# a row lists only what it changes. The "empty" row is the whole codec at its
+# floor: one carrier, every OPTIONAL absent, 52 body bits.
+SIB5_VECTORS = [
+    ("empty", "000C00000000000000", 66, [{}]),
+    ("dlfreq", "000C00026900000000", 66, [{"dl_carrier_freq": 1234}]),
+    ("alloptions", "000C1F826961FF7FFEED311557EE0199052C", 144, [{
+        "dl_carrier_freq": 1234, "q_rx_lev_min": -22, "p_max": 33,
+        "t_reselection_eutra": 7,
+        "t_reselection_eutra_sf": {"sf_medium": "oDot5", "sf_high": "lDot0"},
+        "thresh_x_high": 31, "thresh_x_low": 31,
+        "allowed_meas_bandwidth": "mbw100", "presence_antenna_port1": True,
+        "cell_reselection_priority": 5, "neigh_cell_config": "10",
+        "q_offset_freq": "dB4",
+        "inter_freq_neigh_cell_list": [
+            {"phys_cell_id": 42, "q_offset_cell": "dB6"},
+            {"phys_cell_id": 503, "q_offset_cell": "dB-24"}],
+        "inter_freq_excluded_cell_list": [{"start": 100, "range": "n8"},
+                                          {"start": 300, "range": None}],
+    }]),
+    ("neigh16",
+     "000C0100000000003C00F00BC04F01BC08F02BC0CF03BC10F04BC14F05BC18F06BC1CF07BC", 294,
+     [{"inter_freq_neigh_cell_list": [{"phys_cell_id": i,
+                                       "q_offset_cell": "dB0"}
+                                      for i in range(16)]}]),
+    ("eightcarriers",
+     "000DC0009600000000009680000000009700000000009780000000009800000000009880000000009900000000009980000000",
+     402,
+     [{"dl_carrier_freq": 300 + i} for i in range(8)]),
+]
+
+
 def encode_si(sib_index, body_bits, count=1):
     """Wrap one SIB body in a SystemInformation-r8-IEs container.
 
@@ -993,9 +1545,31 @@ def selftest():
     # These pin the 14-bit header, which is where a transmitter goes wrong:
     # the OPTIONAL bitmap comes first, and the CHOICE index sits at bits
     # 9..13, not immediately after the count.
+    # Each container's true length, derived from the SIB body layout rather
+    # than read off the hex. Without this the loop below can only assert that
+    # a vector is as long as the length it was truncated to, which is true of
+    # any number at all.
+    si_true = {
+        "sib2": SI_HEADER_BITS + SIB2_BODY_BITS,
+        "sib3": SI_HEADER_BITS + SIB3_BODY_BITS,
+        "sib4": SI_HEADER_BITS + 4,                      # every OPTIONAL absent
+        "sib5": SI_HEADER_BITS + 1 + 3 + SIB5_ELEMENT_BITS,
+        "sib6": SI_HEADER_BITS + SIB6_BASELINE_BITS,
+        "sib7": SI_HEADER_BITS + SIB7_BASELINE_BITS,
+        "sib8": SI_HEADER_BITS + SIB8_BASELINE_BITS,
+    }
     for name, hexs, nbits in SI_VECTORS:
         bits = bits_of(hexs, nbits)
         chk("si-" + name + "-bitlen", len(bits), nbits)
+        chk("si-" + name + "-bitlen-derived", nbits, si_true[name])
+        # The hex is the true bits followed by the zero padding that brings it
+        # to a whole octet, so the padding is present, empty of information,
+        # and shorter than eight bits. A padded length stored as a true one
+        # makes the first of these zero and the third still pass.
+        padded = bits_of(hexs)
+        chk("si-" + name + "-padding-under-8", 0 <= len(padded) - nbits < 8, True)
+        chk("si-" + name + "-padding-zeros",
+            set(padded[nbits:]) - {"0"}, set())
         # The container opens with four zero bits: c1, systemInformation,
         # systemInformation-r8, and an absent nonCriticalExtension.
         chk("si-" + name + "-prefix", bits[:SI_PREFIX_BITS], "0000")
@@ -1154,6 +1728,122 @@ def selftest():
     except ValueError:
         pass
 
+    # ── SIB4 ────────────────────────────────────────────────────────────
+    # SIB4 is the first SIB here with nested structure, so these check the
+    # shape as well as the values. The per-cell extension bit is the one an
+    # extensibility test written as `len(_ext)` hides, and losing it moves
+    # every neighbour cell after the first.
+    for name, hexs, nbits, f in SIB4_VECTORS:
+        bits = bits_of(hexs, nbits)
+        body = encode_sib4(neigh_cells=f.get("neigh_cells"),
+                           excluded_cells=f.get("excluded_cells"),
+                           csg_phys_cell_id_range=f.get("csg_phys_cell_id_range"))
+        chk("sib4-" + name + "-container",
+            encode_si(SIB_CHOICE.index("sibType4"), body, 1), bits)
+        d = decode_sib4(bits[SI_HEADER_BITS:])
+        chk("sib4-" + name + "-consumed", d["bits_consumed"],
+            nbits - SI_HEADER_BITS)
+        for k, want in f.items():
+            chk("sib4-%s-%s" % (name, k), d[SIB4_VECTOR_KEY[k]], want)
+        chk("sib4-" + name + "-roundtrip",
+            encode_sib4(neigh_cells=d["intra_freq_neigh_cell_list"],
+                        excluded_cells=d["intra_freq_excluded_cell_list"],
+                        csg_phys_cell_id_range=d["csg_phys_cell_id_range"]), body)
+
+    # The stride is what catches the missing extension bit: 15 bits per
+    # neighbour cell, not 14, so sixteen cells is 240 bits and not 224.
+    zero = {"phys_cell_id": 0, "q_offset_cell": "dB0"}
+    chk("sib4-empty-body-bits", len(encode_sib4()), 4)
+    one = encode_sib4(neigh_cells=[zero])
+    two = encode_sib4(neigh_cells=[zero, zero])
+    chk("sib4-one-body-bits", len(one), 4 + 4 + 15)
+    chk("sib4-cell-stride", len(two) - len(one), 15)
+    chk("sib4-16-cells-body-bits", len(encode_sib4(neigh_cells=[zero] * 16)), 248)
+    # An excluded entry is the other element shape: no extension bit, but a
+    # range-present bit, and no length field of its own beyond the list's.
+    chk("sib4-excluded-body-bits",
+        len(encode_sib4(excluded_cells=[{"start": 0, "range": None}])),
+        4 + 4 + 1 + 9)
+    chk("sib4-excluded-range-costs-4",
+        len(encode_sib4(excluded_cells=[{"start": 0, "range": "n4"}]))
+        - len(encode_sib4(excluded_cells=[{"start": 0, "range": None}])), 4)
+
+    # Refusals. Each of these would move every field after it.
+    for label, bad in [("ext", "1" + "0" * 40),
+                       ("cell-ext", "0100" + "0000" + "1" + "0" * 40),
+                       ("short", "01")]:
+        try:
+            decode_sib4(bad)
+            failures.append("sib4-reject-%s FAIL accepted an unmodelled body"
+                            % label)
+        except ValueError:
+            pass
+
+    # SIB5. A neighbour cell here is 14 bits, not SIB4's 15 -- the SIB5 type has
+    # no extension marker at all. A test reusing SIB4's stride would still pass
+    # on a one-cell list and go wrong from the second cell on, which is exactly
+    # the shape of the bug this table was written to catch.
+    for name, hexs, nbits, partials in SIB5_VECTORS:
+        bits = bits_of(hexs, nbits)
+        carriers = [dict(SIB5_DEFAULT_CARRIER, **p) for p in partials]
+        body = encode_sib5(carriers=carriers)
+        chk("sib5-" + name + "-container",
+            encode_si(SIB_CHOICE.index("sibType5"), body, 1), bits)
+        d = decode_sib5(bits[SI_HEADER_BITS:])
+        chk("sib5-" + name + "-consumed", d["bits_consumed"],
+            nbits - SI_HEADER_BITS)
+        chk("sib5-" + name + "-fields", d["carriers"], carriers)
+        chk("sib5-" + name + "-roundtrip", encode_sib5(carriers=d["carriers"]),
+            body)
+
+    chk("sib5-empty-body-bits", len(encode_sib5()), 52)
+    zero5 = {"phys_cell_id": 0, "q_offset_cell": "dB0"}
+    one5 = encode_sib5(carriers=[dict(SIB5_DEFAULT_CARRIER,
+                                      inter_freq_neigh_cell_list=[zero5])])
+    two5 = encode_sib5(carriers=[dict(SIB5_DEFAULT_CARRIER,
+                                      inter_freq_neigh_cell_list=[zero5, zero5])])
+    chk("sib5-neigh-one-body-bits", len(one5), 4 + 48 + 4 + 14)
+    chk("sib5-cell-stride", len(two5) - len(one5), 14)
+    chk("sib5-cell-past-first-stride",
+        len(encode_sib5(carriers=[dict(SIB5_DEFAULT_CARRIER,
+            inter_freq_neigh_cell_list=[zero5] * 16)]))
+        - len(encode_sib5(carriers=[dict(SIB5_DEFAULT_CARRIER,
+            inter_freq_neigh_cell_list=[zero5] * 15)])), 14)
+    # The carrier stride is the element's baseline size, and the preamble does
+    # not grow with the list, so eight carriers add 7 x 48 to the one-carrier
+    # floor.
+    chk("sib5-carrier-stride",
+        len(encode_sib5(carriers=[{}, {}])) - len(encode_sib5()), 48)
+    chk("sib5-8-carriers-body-bits", len(encode_sib5(carriers=[{}] * 8)),
+        4 + 8 * 48)
+
+    # Refusals.
+    for label, bad in [("ext", "1" + "0" * 60),
+                       ("carrier-ext", "0" + "000" + "1" + "0" * 60),
+                       ("short", "01")]:
+        try:
+            decode_sib5(bad)
+            failures.append("sib5-reject-%s FAIL accepted an unmodelled body"
+                            % label)
+        except ValueError:
+            pass
+    # 503 is physCellId's ceiling; 504 must be refused, not truncated to 0.
+    try:
+        encode_sib5(carriers=[dict(SIB5_DEFAULT_CARRIER,
+                                   inter_freq_neigh_cell_list=[
+                                       {"phys_cell_id": 504,
+                                        "q_offset_cell": "dB0"}])])
+        failures.append("sib5-reject-cell-id FAIL accepted physCellId 504")
+    except ValueError:
+        pass
+    # An unknown carrier key must be refused: a typo would otherwise take the
+    # default silently and encode a carrier the caller never asked for.
+    try:
+        encode_sib5(carriers=[{"dl_carrier_frequency": 1}])
+        failures.append("sib5-reject-unknown-key FAIL accepted a typo'd key")
+    except ValueError:
+        pass
+
     if failures:
         for f in failures:
             sys.stderr.write(f + "\n")
@@ -1306,6 +1996,262 @@ def cmd_sib3_decode(args):
     print("presence_antenna_port1\t%d" % d["presence_antenna_port1"])
     print("neigh_cell_config\t%s" % d["neigh_cell_config"])
     print("t_reselection_eutra\t%d" % d["t_reselection_eutra"])
+    print("bits_consumed\t%d" % d["bits_consumed"])
+    return 0
+
+
+def _sib4_parse_range(text, what):
+    """Parse START or START:RANGE into a PhysCellIdRange."""
+    head, _, tail = text.partition(":")
+    if not head:
+        raise ValueError("%s wants START[:RANGE], got %r" % (what, text))
+    try:
+        start = int(head, 0)
+    except ValueError:
+        raise ValueError("%s start must be an integer, got %r" % (what, head))
+    if not tail:
+        return {"start": start, "range": None}
+    if tail not in SIB4_PHYS_CELL_ID_RANGE:
+        raise ValueError("%s range must be one of %s, got %r"
+                         % (what, SIB4_PHYS_CELL_ID_RANGE, tail))
+    return {"start": start, "range": tail}
+
+
+def cmd_sib4(args):
+    try:
+        neigh = []
+        for spec in args.neigh or []:
+            pid, sep, off = spec.partition(":")
+            if not sep:
+                raise ValueError("--neigh wants PHYS:OFFSET, got %r" % spec)
+            neigh.append({"phys_cell_id": int(pid, 0), "q_offset_cell": off})
+        excluded = [_sib4_parse_range(s, "--excluded")
+                    for s in (args.excluded or [])]
+        csg = _sib4_parse_range(args.csg, "--csg") if args.csg else None
+        body = encode_sib4(neigh_cells=neigh, excluded_cells=excluded,
+                           csg_phys_cell_id_range=csg)
+    except (ValueError, IndexError) as exc:
+        sys.stderr.write("ERROR\t%s\n" % exc)
+        return 2
+
+    print("sib\tSystemInformationBlockType4")
+    print("layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)")
+    print("neigh_count\t%d" % len(neigh))
+    for c in neigh:
+        print("neigh\t%d\t%s" % (c["phys_cell_id"], c["q_offset_cell"]))
+    print("excluded_count\t%d" % len(excluded))
+    for c in excluded:
+        print("excluded\t%d\t%s" % (c["start"], c["range"] or "-"))
+    print("csg_phys_cell_id_range\t%s"
+          % ("%d:%s" % (csg["start"], csg["range"] or "-") if csg else "-"))
+    print("body_bits\t%d" % len(body))
+    print("body_bits_str\t%s" % body)
+    print("body_hex\t%s" % _bits_to_hex(body))
+    if not args.body_only:
+        full = encode_si(SIB_CHOICE.index("sibType4"), body, 1)
+        print("container_bits\t%d" % len(full))
+        print("container_hex\t%s" % _bits_to_hex(full))
+    return 0
+
+
+def cmd_sib4_decode(args):
+    bits = bits_of(args.hex, args.bits)
+    # Same guard as sib2-decode and sib3-decode. A bare SIB4 body is at least
+    # four bits and starts with the extension bit, so the only four-zero prefix
+    # it can have is the four-bit empty body, which is too short to be confused
+    # for a container once the header is subtracted.
+    if len(bits) - SI_HEADER_BITS >= 4 and bits[:SI_PREFIX_BITS] == "0000":
+        try:
+            d = decode_si(bits)
+            if d["sib"] == "sibType4":
+                bits = d["body_bits"]
+        except ValueError:
+            pass
+
+    try:
+        d = decode_sib4(bits)
+    except ValueError as exc:
+        sys.stderr.write("ERROR\tnot a SIB4 body: %s\n" % exc)
+        return 1
+
+    print("message\tSystemInformationBlockType4")
+    print("layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)")
+    neigh = d["intra_freq_neigh_cell_list"]
+    print("neigh_count\t%d" % (len(neigh) if neigh else 0))
+    for c in neigh or []:
+        print("neigh\t%d\t%s" % (c["phys_cell_id"], c["q_offset_cell"]))
+    excluded = d["intra_freq_excluded_cell_list"]
+    print("excluded_count\t%d" % (len(excluded) if excluded else 0))
+    for c in excluded or []:
+        print("excluded\t%d\t%s" % (c["start"], c["range"] or "-"))
+    csg = d["csg_phys_cell_id_range"]
+    print("csg_phys_cell_id_range\t%s"
+          % ("%d:%s" % (csg["start"], csg["range"] or "-") if csg else "-"))
+    print("bits_consumed\t%d" % d["bits_consumed"])
+    return 0
+
+
+def _sib5_parse_carrier(spec):
+    """Parse one --carrier value into a SIB5 carrier dict.
+
+    The form is comma-separated key=value pairs, with two keys that hold more
+    than one item spelled as a pipe-separated list:
+
+        --carrier dl_carrier_freq=1234,q_rx_lev_min=-100,p_max=23
+        --carrier dl_carrier_freq=0,neigh=42:dB6|7:dB-24
+        --carrier dl_carrier_freq=0,excluded=100:n8|300:
+        --carrier dl_carrier_freq=0,tresel_sf=oDot5:lDot0,prio=5
+
+    A bare `key=` yields None, which is how an OPTIONAL is left absent when the
+    carrier is merged over SIB5_DEFAULT_CARRIER.
+    """
+    out = {}
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        key, sep, val = item.partition("=")
+        if not sep:
+            raise ValueError("--carrier wants key=value, got %r" % item)
+        key = key.strip()
+        if key in ("neigh", "neigh_cell_list", "inter_freq_neigh_cell_list"):
+            cells = []
+            for one in val.split("|"):
+                if not one:
+                    continue
+                pid, colon, off = one.partition(":")
+                if not colon:
+                    raise ValueError("neigh wants PHYS:OFFSET, got %r" % one)
+                cells.append({"phys_cell_id": int(pid, 0), "q_offset_cell": off})
+            out["inter_freq_neigh_cell_list"] = cells or None
+        elif key in ("excluded", "excluded_cell_list",
+                     "inter_freq_excluded_cell_list"):
+            cells = []
+            for one in val.split("|"):
+                if not one:
+                    continue
+                cells.append(_sib4_parse_range(one, "excluded"))
+            out["inter_freq_excluded_cell_list"] = cells or None
+        elif key in ("tresel_sf", "t_reselection_eutra_sf"):
+            if not val:
+                out["t_reselection_eutra_sf"] = None
+            else:
+                med, colon, high = val.partition(":")
+                if not colon:
+                    raise ValueError("tresel_sf wants SF-MEDIUM:SF-HIGH, got %r"
+                                     % val)
+                out["t_reselection_eutra_sf"] = {"sf_medium": med,
+                                                 "sf_high": high}
+        elif key in ("neigh_cfg", "neigh_cell_config"):
+            out["neigh_cell_config"] = val
+        elif key in ("antport1", "presence_antenna_port1"):
+            out["presence_antenna_port1"] = val.lower() in ("1", "true", "yes")
+        elif key == "prio":
+            out["cell_reselection_priority"] = None if not val else int(val, 0)
+        elif key == "ambw":
+            out["allowed_meas_bandwidth"] = val
+        elif key in ("qoff", "q_offset_freq"):
+            out["q_offset_freq"] = val or None
+        else:
+            if key not in SIB5_CARRIER_KEYS:
+                raise ValueError("unknown --carrier key %r; the keys are %s"
+                                 % (key, ", ".join(SIB5_CARRIER_KEYS)))
+            out[key] = None if not val else int(val, 0)
+    return out
+
+
+def cmd_sib5(args):
+    try:
+        carriers = [_sib5_parse_carrier(s) for s in (args.carrier or [])] or None
+        body = encode_sib5(carriers=carriers)
+        merged = [dict(SIB5_DEFAULT_CARRIER, **_sib5_parse_carrier(s))
+                  for s in (args.carrier or [])] or [dict(SIB5_DEFAULT_CARRIER)]
+    except (ValueError, IndexError) as exc:
+        sys.stderr.write("ERROR\t%s\n" % exc)
+        return 2
+
+    print("sib\tSystemInformationBlockType5")
+    print("layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)")
+    print("carrier_count\t%d" % len(merged))
+    for i, c in enumerate(merged):
+        neigh = c["inter_freq_neigh_cell_list"] or []
+        excl = c["inter_freq_excluded_cell_list"] or []
+        print("carrier\t%d\tdl_carrier_freq=%d\tq_rx_lev_min=%d\tp_max=%s"
+              "\tthresh_x_high=%d\tthresh_x_low=%d\tambw=%s\tantport1=%s"
+              "\tneigh_cell_config=%s\tt_reselection_eutra=%d\tprio=%s"
+              "\tq_offset_freq=%s\tneigh=%s\texcluded=%s"
+              % (i, c["dl_carrier_freq"], c["q_rx_lev_min"],
+                 c["p_max"] if c["p_max"] is not None else "-",
+                 c["thresh_x_high"], c["thresh_x_low"],
+                 c["allowed_meas_bandwidth"],
+                 "1" if c["presence_antenna_port1"] else "0",
+                 c["neigh_cell_config"], c["t_reselection_eutra"],
+                 c["cell_reselection_priority"]
+                 if c["cell_reselection_priority"] is not None else "-",
+                 c["q_offset_freq"] or "-",
+                 "|".join("%d:%s" % (x["phys_cell_id"], x["q_offset_cell"])
+                          for x in neigh) or "-",
+                 "|".join("%d:%s" % (x["start"], x["range"] or "-")
+                          for x in excl) or "-"))
+    print("body_bits\t%d" % len(body))
+    print("body_bits_str\t%s" % body)
+    print("body_hex\t%s" % _bits_to_hex(body))
+    if not args.body_only:
+        full = encode_si(SIB_CHOICE.index("sibType5"), body, 1)
+        print("container_bits\t%d" % len(full))
+        print("container_hex\t%s" % _bits_to_hex(full))
+    return 0
+
+
+def cmd_sib5_decode(args):
+    bits = bits_of(args.hex, args.bits)
+    # No auto-detection here, unlike sib2/3/4-decode. A SIB5 body opens with
+    # the extension bit followed by a 3-bit length, so its first four bits are
+    # "0000" for the ordinary one-carrier case -- exactly what a
+    # SystemInformation header looks like. Guessing would sometimes decode a
+    # body as a container, so the caller says which with --container.
+    if args.container:
+        try:
+            d = decode_si(bits)
+        except ValueError as exc:
+            sys.stderr.write("ERROR\tnot a SystemInformation container: %s\n"
+                             % exc)
+            return 1
+        if d["sib"] != "sibType5":
+            sys.stderr.write("ERROR\tcontainer carries %s, not sibType5\n"
+                             % d["sib"])
+            return 1
+        bits = d["body_bits"]
+
+    try:
+        d = decode_sib5(bits)
+    except ValueError as exc:
+        sys.stderr.write("ERROR\tnot a SIB5 body: %s\n" % exc)
+        return 1
+
+    print("message\tSystemInformationBlockType5")
+    print("layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)")
+    print("carrier_count\t%d" % len(d["carriers"]))
+    for i, c in enumerate(d["carriers"]):
+        print("carrier\t%d\tdl_carrier_freq=%d\tq_rx_lev_min=%d\tp_max=%s"
+              "\tthresh_x_high=%d\tthresh_x_low=%d\tambw=%s\tantport1=%s"
+              "\tneigh_cell_config=%s\tt_reselection_eutra=%d\tprio=%s"
+              "\tq_offset_freq=%s"
+              % (i, c["dl_carrier_freq"], c["q_rx_lev_min"],
+                 c["p_max"] if c["p_max"] is not None else "-",
+                 c["thresh_x_high"], c["thresh_x_low"],
+                 c["allowed_meas_bandwidth"],
+                 "1" if c["presence_antenna_port1"] else "0",
+                 c["neigh_cell_config"], c["t_reselection_eutra"],
+                 c["cell_reselection_priority"]
+                 if c["cell_reselection_priority"] is not None else "-",
+                 c["q_offset_freq"] or "-"))
+        for cell in c["inter_freq_neigh_cell_list"] or []:
+            print("neigh\t%d\t%d\t%s" % (i, cell["phys_cell_id"],
+                                         cell["q_offset_cell"]))
+        for cell in c["inter_freq_excluded_cell_list"] or []:
+            print("excluded\t%d\t%d\t%s" % (i, cell["start"],
+                                            cell["range"] or "-"))
     print("bits_consumed\t%d" % d["bits_consumed"])
     return 0
 
@@ -1499,6 +2445,48 @@ def main(argv):
     s2d.add_argument("--bits", type=int, default=None,
                      help="the true bit length, before hex padding")
     s2d.set_defaults(func=cmd_sib2_decode)
+
+    s4 = sub.add_parser("sib4", help="encode a SystemInformationBlockType4")
+    s4.add_argument("--neigh", action="append", default=[], metavar="PHYS:OFFSET",
+                    help="add a neighbour cell, e.g. 42:dB6; repeatable")
+    s4.add_argument("--excluded", action="append", default=[],
+                    metavar="START[:RANGE]",
+                    help="add an excluded PhysCellIdRange; repeatable")
+    s4.add_argument("--csg", metavar="START[:RANGE]", default=None,
+                    help="the csg-PhysCellIdRange")
+    s4.add_argument("--body-only", action="store_true",
+                    help="omit the SystemInformation container wrapper")
+    s4.set_defaults(func=cmd_sib4)
+
+    s4d = sub.add_parser("sib4-decode",
+                         help="decode a SystemInformationBlockType4 body")
+    s4d.add_argument("hex", help="the body (or whole container), as hex")
+    s4d.add_argument("--bits", type=int, default=None,
+                     help="the true bit length, before hex padding")
+    s4d.set_defaults(func=cmd_sib4_decode)
+
+    s5 = sub.add_parser("sib5", help="encode a SystemInformationBlockType5")
+    s5.add_argument("--carrier", action="append", default=[], metavar="K=V,...",
+                    help="one InterFreqCarrierFreqInfo as comma-separated "
+                         "key=value pairs; repeatable, one per carrier. "
+                         "neigh=PHYS:OFFSET|... and excluded=START[:RANGE]|... "
+                         "hold lists, tresel_sf=SF-MEDIUM:SF-HIGH, "
+                         "prio=N, ambw=mbw6..mbw100, antport1=0|1, "
+                         "neigh_cfg=00..11; a bare key= leaves an OPTIONAL out")
+    s5.add_argument("--body-only", action="store_true",
+                    help="omit the SystemInformation container wrapper")
+    s5.set_defaults(func=cmd_sib5)
+
+    s5d = sub.add_parser("sib5-decode",
+                         help="decode a SystemInformationBlockType5 body")
+    s5d.add_argument("hex", help="the body, as hex")
+    s5d.add_argument("--bits", type=int, default=None,
+                     help="the true bit length, before hex padding")
+    s5d.add_argument("--container", action="store_true",
+                     help="the hex is a whole SystemInformation container; "
+                          "required because a SIB5 body also starts with four "
+                          "zero bits, so this cannot be auto-detected")
+    s5d.set_defaults(func=cmd_sib5_decode)
 
     args = p.parse_args(argv)
     if args.cmd == "selftest":

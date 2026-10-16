@@ -553,14 +553,13 @@ lair_decode_sib2() {
     return 0
 }
 
-# ── SIB3 / SIB5 decode — TS 36.331 §6.3.1 ───────────────────────────────
+# ── SIB3 decode — TS 36.331 §6.3.1 ──────────────────────────────────────
 # SIB3 = intra-frequency reselection. The fields that matter for a survey
 # and for a downgrade experiment:
 #   q-Hyst                 (3 bits) ENUMERATED dB
 #   s-NonIntraSearch       (5 bits) -> dB, 0 means "not present"
 #   threshServingLow       (5 bits) -> dB
 #   cellReselectionPriority(3 bits) 0..7
-# SIB5 = inter-frequency neighbours, one carrierFreqInfo per EARFCN.
 lair_decode_sib3() {
     local hex; hex=$(lair_nfc "${1:-}")
     [[ -n "$hex" ]] || { printf 'ERROR\t--decode-sib needs hex\n' >&2; return 2; }
@@ -623,103 +622,175 @@ lair_decode_sib3() {
     return 0
 }
 
+# ── SIB5 — inter-frequency carriers, TS 36.331 §6.3.1 ───────────────────
+#
+# SIB5 is decoded by the real TS 36.331 unaligned-PER codec in
+# tools/lte_asn1.py, like SIB1 to SIB4. Its body is the longest of the
+# frequency SIBs: an extension bit, a 3-bit carrier count, then one
+# interFreqCarrierFreqInfo per carrier, 48 bits each when nothing optional is
+# present, plus an interFreqNeighCellList and an interFreqExcludedCellList.
+#
+# Every carrier leads with six OPTIONAL presence bits in declaration order.
+# That is why the flat 16-bit-word reader this function used to be was not a
+# partial answer but a wrong one: dl-CarrierFreq does not start at bit 0 of the
+# carrier, it starts at bit 7, after those presence bits, and the words before
+# it are framing. It printed valid-looking EARFCNs derived from framing bits.
 lair_decode_sib5() {
     local hex; hex=$(lair_nfc "${1:-}")
     [[ -n "$hex" ]] || { printf 'ERROR\t--decode-sib needs hex\n' >&2; return 2; }
     [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
-    (( ${#hex} % 2 == 0 )) || { printf 'ERROR\todd hex length\n' >&2; return 1; }
-    (( ${#hex} >= 6 )) || { printf 'ERROR\ttoo short for a SIB5 body\n' >&2; return 1; }
-    [[ "${hex:0:2}" == "14" ]] && hex="${hex:2}"
 
-    # A SIB5 body carries a list of interFreqCarrierFreqInfo entries, each
-    # beginning with a dl-CarrierFreq EARFCN (16 bits in the ASN.1). Report
-    # each 16-bit word as a candidate neighbour so a caller sees the real
-    # octets rather than a synthesised list.
-    printf 'message\tSIB5 (SystemInformationBlockType5)\n'
+    # SIB5 is read by the real TS 36.331 unaligned-PER codec in
+    # tools/lte_asn1.py. What stood here before sliced the body into flat
+    # 16-bit words and offered each as a "candidate neighbour EARFCN". Those
+    # words are not EARFCNs and not neighbour cells: the body opens with an
+    # extension bit and a 3-bit carrier count, each carrier leads with six
+    # OPTIONAL presence bits, and dl-CarrierFreq sits at bit 7 of the carrier,
+    # after those. Every number it printed was framing read as data. It has
+    # been removed rather than kept beside the correct one.
+    #
+    # A neighbour cell in SIB5 is 14 bits -- physCellId (9) and q-OffsetCell
+    # (5) with no extension bit -- while SIB4's is 15. The types read alike,
+    # so the codec, not this function, is where that difference is pinned.
+    local tool="$IMSISTING_ROOT/tools/lte_asn1.py"
+    [[ -r "$tool" ]] || {
+        printf 'ERROR\tmissing %s\n' "$tool" >&2
+        printf 'WHY\tthe SIB5 decoder is a real ASN.1 PER codec and lives in tools/\n' >&2
+        return 1
+    }
+
+    # A SIB5 body is variable-length (52 bits for one bare carrier, plus 48 per
+    # extra carrier, plus any lists) and the hex is zero-padded to a whole
+    # octet, so the padded length is what gets passed; the codec consumes
+    # exactly the fields it finds and reports how many.
+    #
+    # There is deliberately no fixed-length retry like SIB3's: with a
+    # variable-length body a retry at a constant length re-reads a prefix of a
+    # message that was correctly refused.
+    local pbits=$(( ${#hex} * 4 ))
+    local out rc alt=""
+    # The container reading goes first, and that order matters. It is the only
+    # one of the two that can be checked: a SystemInformation header carries
+    # sibType5 as six specific bits (000011) and the body behind it must then
+    # decode. The body reading checks nothing, so a whole container read as a
+    # bare body does not fail -- it reports a confident carrier assembled from
+    # framing bits (dl-CarrierFreq 24828, q-RxLevMin -66 on the fixture below).
+    # A wrong field that looks plausible is the worst outcome here, so the
+    # reading that can be wrong silently is the one that goes second.
+    out=$(python3 "$tool" sib5-decode "$hex" --bits "$pbits" --container 2>&1)
+    rc=$?
+    if (( rc == 0 )); then
+        # Both readings are syntactically possible for some inputs -- a body
+        # whose dl-CarrierFreq starts 0011 has the same bits 8..13 as a
+        # container header. When that happens the caller is told rather than
+        # left with whichever the code happened to try first.
+        alt=$(python3 "$tool" sib5-decode "$hex" --bits "$pbits" 2>&1) || alt=""
+    else
+        out=$(python3 "$tool" sib5-decode "$hex" --bits "$pbits" 2>&1)
+        rc=$?
+    fi
+    if (( rc != 0 )); then
+        printf '%s\n' "$out" | sed 's/^/ERROR\t/'
+        printf 'NOTDECODED\tthe input is not a SIB5 body; no fields were reported\n' >&2
+        return 1
+    fi
+
+    local k v
+    while IFS=$'\t' read -r k v; do
+        case "$k" in
+            bits_consumed) printf 'bits\t%s\n' "$v" ;;
+            message)       printf 'message\tSIB5 (SystemInformationBlockType5)\n' ;;
+            carrier)       printf 'carrier\t%s\n' "$v" ;;
+            neigh)         printf 'neighbour_cell\t%s\n' "$v" ;;
+            excluded)      printf 'excluded_cell\t%s\n' "$v" ;;
+            carrier_count) printf 'carrier_count\t%s\n' "$v" ;;
+            layout)        : ;;
+            *)             printf '%s\t%s\n' "$k" "$v" ;;
+        esac
+    done <<< "$out"
+    if [[ -n "$alt" ]]; then
+        printf 'ambiguous\tthis input also parses as a bare SIB5 body; the list above\n'
+        printf 'ambiguous\tis the SystemInformation container reading, which is the one\n'
+        printf 'ambiguous\tthat carries a checkable sibType5 header\n'
+    fi
+    printf 'ref\t3GPP TS 36.331 6.3.1 SystemInformationBlockType5 (unaligned PER)\n'
     printf 'body\t%s\n' "$hex"
-    local i=0 n=$(( ${#hex} / 4 ))
-    while (( i < n )); do
-        local e=$(( 16#${hex:$((i*4)):4} ))
-        local f
-        f=$(lair_earfcn_to_mhz "$e" 2>/dev/null) || f="out-of-table"
-        printf 'neighbour.%d\tearfcn=%s dl_mhz=%s\n' "$i" "$e" "$f"
-        i=$(( i + 1 ))
-    done
     return 0
 }
 
 # ── SIB4 — intra-frequency neighbour cells, TS 36.331 §6.3.1 ────────────
 #
-# CAUTION, and it is the reason this comment is long: the existing SIB2/SIB3/
-# SIB5 decoders do NOT walk the ASN.1. Those SIBs are APER bit-packed, and a
-# bit reader cannot find a field without following intraFreqReselection,
-# cellSelectionInfo and the optional flags that precede it, none of which a
-# captured body carries in a form the reader can be sure of. SIB3 therefore
-# reports the leading window of a caller-supplied body, and SIB5 reports
-# candidate 16-bit EARFCNs rather than an ASN.1 list.
+# SIB4 is decoded by the real TS 36.331 unaligned-PER codec in
+# tools/lte_asn1.py, like SIB1 to SIB3. The function below only frames the
+# caller's hex and labels the codec's fields; it does not walk the ASN.1
+# itself, and it must not start to. The layout is
 #
-# SIB4 is built the same way on purpose, so the module presents one honest
-# contract instead of one rigorous decoder next to three optimistic ones:
-# extra fields are a documented byte/bit *window*, and the required first
-# field is parsed strictly. Here that first field is
-# intraFreqNeighCellList, whose entry is
-#
-#     IntraFreqNeighCellInfo ::= SEQUENCE {
-#         physCellId      PhysCellId,       -- 0..503, 9 bits
-#         q-OffsetCell    Q-OffsetRange,    -- 0..7, 3 bits
+#     SystemInformationBlockType4 ::= SEQUENCE {
+#         intraFreqNeighCellList     IntraFreqNeighCellList   OPTIONAL,
+#         intraFreqExcludedCellList  IntraFreqExcludedCellList OPTIONAL,
+#         csg-PhysCellIdRange        PhysCellIdRange           OPTIONAL,
 #         ...
 #     }
+#     IntraFreqNeighCellInfo ::= SEQUENCE {
+#         physCellId      PhysCellId,       -- 0..503, 9 bits
+#         q-OffsetCell    Q-OffsetRange,    -- 31 values, 5 bits
+#         ...                                                  -- extensible
+#     }
 #
-# so the window is a sequence of 12-bit entries from bit 0. physCellId above
-# 503 is reported as its raw value with valid=no rather than being silently
-# accepted -- an out-of-range PCI is either a body that is not a SIB4 or a
-# framing mistake, and neither should read as a neighbour.
+# The neighbour entry is 15 bits, and the extension bit is not decoration: a
+# SEQUENCE that declares an extension marker emits that bit even when it
+# declares no extension additions. Getting it wrong puts physCellId one bit
+# early and every entry after the first 15 bits out.
 lair_decode_sib4() {
     local hex; hex=$(lair_nfc "${1:-}")
     [[ -n "$hex" ]] || { printf 'ERROR\t--decode-sib needs hex\n' >&2; return 2; }
     [[ "$hex" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
-    (( ${#hex} >= 6 )) || { printf 'ERROR\ttoo short for a SIB4 body\n' >&2; return 1; }
-    # 0x14 is the BCCH-DL-SCH-Message c1 discriminator that selects
-    # systemInformationBlockType4; drop it when a capture still carries it.
-    [[ "${hex:0:2}" == "14" ]] && hex="${hex:2}"
 
-    printf 'message\tSIB4 (SystemInformationBlockType4)\n'
+    # SIB4 is read by the real TS 36.331 unaligned-PER codec in
+    # tools/lte_asn1.py. What stood here before walked the body as a flat list
+    # of 12-bit records -- 9 bits of physCellId and a 3-bit Q-OffsetRange --
+    # starting at bit 0. No part of that is the message. Bit 0 is the
+    # extension bit of the SIB4 SEQUENCE, the three OPTIONAL presence bits
+    # follow it, each list carries a 4-bit length before its elements, and
+    # Q-OffsetCell is a 5-bit ENUMERATED, not 3. Sixteen one-bit fields of
+    # structural framing were being read as fifteen neighbour cells, and the
+    # offsets were wrong even where the boundaries happened to line up. It has
+    # been removed rather than kept beside the correct one.
+    local tool="$IMSISTING_ROOT/tools/lte_asn1.py"
+    [[ -r "$tool" ]] || {
+        printf 'ERROR\tmissing %s\n' "$tool" >&2
+        printf 'WHY\tthe SIB4 decoder is a real ASN.1 PER codec and lives in tools/\n' >&2
+        return 1
+    }
+
+    # A bare SIB4 body is at least 4 bits and grows by 15 bits per neighbour
+    # cell, so its length is not fixed and the hex is zero-padded to a whole
+    # octet. The padded length is passed and the codec consumes exactly the
+    # fields it finds, reading the input as a container only when a 14-bit
+    # header still leaves a whole body behind. There is deliberately no retry
+    # at a fixed short length: with a variable-length body a retry re-reads a
+    # prefix of a message that was correctly refused, and an extension bit
+    # this codec does not model would be reported as an empty cell list.
+    local pbits=$(( ${#hex} * 4 ))
+    local out rc
+    out=$(python3 "$tool" sib4-decode "$hex" --bits "$pbits" 2>&1); rc=$?
+    if (( rc != 0 )); then
+        printf '%s\n' "$out" | sed 's/^/ERROR\t/'
+        printf 'NOTDECODED\tthe input is not a SIB4 body; no fields were reported\n' >&2
+        return 1
+    fi
+
+    local k v
+    while IFS=$'\t' read -r k v; do
+        case "$k" in
+            bits_consumed) printf 'bits\t%s\n' "$v" ;;
+            message)       printf 'message\tSIB4 (SystemInformationBlockType4)\n' ;;
+            *)             printf '%s\t%s\n' "$k" "$v" ;;
+        esac
+    done <<< "$out"
+    printf 'ref\t3GPP TS 36.331 6.3.1 SystemInformationBlockType4 (unaligned PER)\n'
     printf 'body\t%s\n' "$hex"
-
-    # A bit-packed body may end mid-octet, so an odd nibble count is legal
-    # here and is NOT the framing error it would be for a byte string. The
-    # bit reader below already refuses to read past the end.
-    local n=$(( ${#hex} * 4 / 12 )) i pci off valid
-    for (( i = 0; i < n; i++ )); do
-        pci=$(lair_bits "$hex" "$(( i * 12 ))" 9)      || return 1
-        off=$(lair_bits "$hex" "$(( i * 12 + 9 ))" 3)  || return 1
-        if (( pci <= 503 )); then valid=yes; else valid=no; fi
-        printf 'neigh.%d\tphys_cell_id=%s q_offset_cell=%s q_offset_db=%s valid=%s\n' \
-               "$i" "$pci" "$off" "$(lair_q_offset_db "$off")" "$valid"
-    done
-    printf 'entry_bits\t12\n'
-    printf 'list_entries\t%s\n' "$n"
-    printf 'ref\t3GPP TS 36.331 6.3.2 IntraFreqNeighCellInfo (PhysCellId 9 bits, Q-OffsetRange 3 bits)\n'
     return 0
-}
-
-# Q-OffsetRange ::= ENUMERATED {dB-24, dB-22, dB-20, dB-18, dB-16, dB-14,
-#                               dB-12, dB-10, dB-8, dB-6, dB-5, dB-4, dB-3,
-#                               dB-2, dB-1, dB0, dB1, ... dB24}
-# TS 36.331 §6.3.4. Index 0 is dB-24 and the step is 2 dB up to index 7;
-# the enumeration for the intra-frequency neighbour list uses the low
-# indices, so the first eight are the ones that matter here.
-# The table starts at -24, not at -48: a 5-bit field spanning -48..24 and a
-# 3-bit field are different enumerations, and getting this wrong shifts
-# every reported offset by 24 dB.
-lair_q_offset_db() {
-    local i="${1:-0}"
-    [[ "$i" =~ ^[0-9]+$ ]] || return 1
-    case "$i" in
-        0) echo "-24" ;; 1) echo "-22" ;; 2) echo "-20" ;; 3) echo "-18" ;;
-        4) echo "-16" ;; 5) echo "-14" ;; 6) echo "-12" ;; 7) echo "-10" ;;
-        *) return 1 ;;
-    esac
 }
 
 # ── SIB6 / SIB7 / SIB8 — ETWS and CMAS, TS 36.331 §6.3.1 ────────────────
@@ -1096,8 +1167,8 @@ lair_decode_mib() {
 # SIB-type dispatcher: --decode-sib <hex> takes the SIB type from the
 # caller's second argument, defaulting to SIB1.
 #
-# SIB1 is decoded by the real TS 36.331 unaligned-PER codec in
-# tools/lte_asn1.py. SIB2..SIB13 are NOT: those eight still read a private,
+# SIB1 to SIB5 are decoded by the real TS 36.331 unaligned-PER codec in
+# tools/lte_asn1.py. SIB6..SIB13 are NOT: those still read a private,
 # octet-aligned field layout of this tree's own invention. The caller is told
 # so in the output rather than left to assume the numbers are spec offsets --
 # reporting a wrong cell field is worse than reporting none.
@@ -1107,8 +1178,8 @@ lair_decode_sib() {
         1|sib1)   lair_decode_sib1 "$hex" ;;
         2|sib2)   lair_decode_sib2 "$hex" ;;
         3|sib3)   lair_decode_sib3 "$hex" ;;
-        4|sib4)   lair_note_private_layout 4;   lair_decode_sib4 "$hex" ;;
-        5|sib5)   lair_note_private_layout 5;   lair_decode_sib5 "$hex" ;;
+        4|sib4)   lair_decode_sib4 "$hex" ;;
+        5|sib5)   lair_decode_sib5 "$hex" ;;
         6|sib6)   lair_note_private_layout 6;   lair_decode_sib6 "$hex" ;;
         7|sib7)   lair_note_private_layout 7;   lair_decode_sib7 "$hex" ;;
         8|sib8)   lair_note_private_layout 8;   lair_decode_sib8 "$hex" ;;
@@ -1118,12 +1189,12 @@ lair_decode_sib() {
     esac
 }
 
-# The caveat line SIB4..SIB13 carry. It names what the numbers below are not.
+# The caveat line SIB6..SIB13 carry. It names what the numbers below are not.
 lair_note_private_layout() {
     printf 'layout\tPRIVATE octet-aligned layout -- NOT TS 36.331 unaligned PER\n'
     printf 'limit\tSIB%s is not a PER decoder: these offsets are this tree'"'"'s own\n' "$1"
     printf 'limit\tscheme, not the specification'"'"'s. Do not read a real capture with it.\n'
-    printf 'ref\tSIB1, SIB2 and SIB3 are decoded properly; run --decode-sib <hex> 1, 2 or 3\n'
+    printf 'ref\tSIB1 to SIB5 are decoded properly; run --decode-sib <hex> 1, 2, 3, 4 or 5\n'
 }
 
 # ── Paging: PF / PO — TS 36.304 §7.1, §7.2 and §7.3 ────────────────────
@@ -2131,11 +2202,65 @@ lair_selftest() {
     # The old parser's fixture is 16 bits: it must be refused, not guessed at.
     chk sib3-short "$(lair_decode_sib3 14000000 >/dev/null 2>&1; echo $?)" "1"
 
-    # SIB5: two 16-bit candidate neighbour EARFCNs.
-    out=$(lair_decode_sib5 "000018F8")
-    chk sib5-count "$(printf '%s\n' "$out" | grep -c '^neighbour\.')" "2"
-    chk sib5-n0-earfcn "$(printf '%s\n' "$out" | grep '^neighbour\.0' | cut -f2)" "earfcn=0 dl_mhz=2110.0"
-    chk sib5-n1-earfcn "$(printf '%s\n' "$out" | grep '^neighbour\.1' | cut -f2)" "earfcn=6392 dl_mhz=815.2"
+    # SIB5. 52 bits: one carrier, every optional absent, q-RxLevMin at its
+    # floor. This is what a real SIB5 with nothing configured looks like, and
+    # the old reader -- which reported 16-bit words as neighbour EARFCNs --
+    # would have called the three words here neighbours 0, 0 and 0.
+    out=$(lair_decode_sib5 "00000000000000")
+    chk sib5-empty-rc     "$?" "0"
+    chk sib5-empty-count  "$(fld "$out" carrier_count)" "1"
+    chk sib5-empty-bits   "$(fld "$out" bits)" "52"
+    chk sib5-empty-dl     "$(printf '%s\n' "$out" | grep '^carrier' | grep -o 'dl_carrier_freq=[0-9-]*')" "dl_carrier_freq=0"
+    chk sib5-empty-qrx    "$(printf '%s\n' "$out" | grep '^carrier' | grep -o 'q_rx_lev_min=[0-9-]*')" "q_rx_lev_min=-70"
+    chk sib5-empty-neigh  "$(printf '%s\n' "$out" | grep -c '^neighbour_cell')" "0"
+
+    # Every optional field present at once, with both lists populated. 130
+    # bits. The two neighbour entries are 14 bits each -- physCellId 42 and
+    # 503, q-OffsetCell dB6 and dB-24. SIB4's equivalent entry is 15 bits;
+    # this fixture is what pins the difference.
+    out=$(lair_decode_sib5 "07E09A587FDFFFBB4C4555FB8066414B00")
+    chk sib5-full-rc      "$?" "0"
+    chk sib5-full-bits    "$(fld "$out" bits)" "130"
+    chk sib5-full-dl      "$(printf '%s\n' "$out" | grep '^carrier' | grep -o 'dl_carrier_freq=[0-9]*')" "dl_carrier_freq=1234"
+    chk sib5-full-pmax    "$(printf '%s\n' "$out" | grep '^carrier' | grep -o 'p_max=[0-9-]*')" "p_max=33"
+    chk sib5-full-ambw    "$(printf '%s\n' "$out" | grep '^carrier' | grep -o 'ambw=[a-z0-9]*')" "ambw=mbw100"
+    chk sib5-full-prio    "$(printf '%s\n' "$out" | grep '^carrier' | grep -o 'prio=[0-9]*')" "prio=5"
+    chk sib5-full-qoff    "$(printf '%s\n' "$out" | grep '^carrier' | grep -o 'q_offset_freq=[a-zA-Z0-9-]*')" "q_offset_freq=dB4"
+    chk sib5-full-neigh   "$(printf '%s\n' "$out" | grep -c '^neighbour_cell')" "2"
+    chk sib5-full-n0      "$(printf '%s\n' "$out" | grep '^neighbour_cell' | sed -n 1p | cut -f2-)" "0	42	dB6"
+    chk sib5-full-n1      "$(printf '%s\n' "$out" | grep '^neighbour_cell' | sed -n 2p | cut -f2-)" "0	503	dB-24"
+    chk sib5-full-excl    "$(printf '%s\n' "$out" | grep -c '^excluded_cell')" "2"
+    chk sib5-full-e0      "$(printf '%s\n' "$out" | grep '^excluded_cell' | sed -n 1p | cut -f2-)" "0	100	n8"
+    # The second excluded cell carries no range field. It must read as "-",
+    # not as n4 -- the ENUM's zero value is a real range, not an absence.
+    chk sib5-full-e1      "$(printf '%s\n' "$out" | grep '^excluded_cell' | sed -n 2p | cut -f2-)" "0	300	-"
+
+    # Two carriers: 52 + 48 = 100 bits of content, 106 real. The second
+    # carrier's p-Max is set and the first's is not, so the 48-bit stride is
+    # what puts it on the right carrier.
+    out=$(lair_decode_sib5 "10000C8500000400190A6A000000")
+    chk sib5-two-count    "$(fld "$out" carrier_count)" "2"
+    chk sib5-two-bits     "$(fld "$out" bits)" "106"
+    chk sib5-two-c0       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="carrier"' | sed -n 1p | cut -f3-)" "dl_carrier_freq=100	q_rx_lev_min=-60	p_max=-	thresh_x_high=0	thresh_x_low=0	ambw=mbw6	antport1=0	neigh_cell_config=00	t_reselection_eutra=0	prio=-	q_offset_freq=-"
+    chk sib5-two-c1       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="carrier"' | sed -n 2p | cut -f3-)" "dl_carrier_freq=200	q_rx_lev_min=-50	p_max=23	thresh_x_high=0	thresh_x_low=0	ambw=mbw6	antport1=0	neigh_cell_config=00	t_reselection_eutra=0	prio=-	q_offset_freq=-"
+
+    # The same carrier set inside a whole SystemInformation container. The
+    # container reading is tried first and wins, and because the bare-body
+    # reading also happens to parse the module says so rather than choosing
+    # silently.
+    out=$(lair_decode_sib5 "000C1F826961FF7FFEED311557EE0199052C")
+    chk sib5-cont-rc      "$?" "0"
+    chk sib5-cont-dl      "$(printf '%s\n' "$out" | grep '^carrier' | grep -o 'dl_carrier_freq=[0-9]*')" "dl_carrier_freq=1234"
+    chk sib5-cont-neigh   "$(printf '%s\n' "$out" | grep -c '^neighbour_cell')" "2"
+    chk sib5-cont-ambig   "$(printf '%s\n' "$out" | grep -c '^ambiguous')" "3"
+
+    # A bare body must NOT be reported as ambiguous on its own account: the
+    # reading that succeeded was the body, so there is nothing to warn about.
+    chk sib5-empty-noamb  "$(printf '%s\n' "$(lair_decode_sib5 00000000000000)" | grep -c '^ambiguous')" "0"
+
+    chk sib5-short        "$(lair_decode_sib5 AB >/dev/null 2>&1; echo $?)" "1"
+    chk sib5-nonhex       "$(lair_decode_sib5 ZZZZ >/dev/null 2>&1; echo $?)" "1"
+    chk sib5-empty-arg    "$(lair_decode_sib5 "" >/dev/null 2>&1; echo $?)" "2"
 
     # ── 6. bit reader ───────────────────────────────────────────────────
     chk bits-8-0   "$(lair_bits FF 0 8)"  "255"
@@ -2301,34 +2426,38 @@ lair_selftest() {
     chk mib-nonhex  "$(lair_decode_mib ZZZZZZ >/dev/null 2>&1; echo $?)" "1"
     chk mib-empty   "$(lair_decode_mib >/dev/null 2>&1; echo $?)" "2"
 
-    # ── 14. SIB4 — TS 36.331 §6.3.2 IntraFreqNeighCellInfo ─────────────
+    # ── 14. SIB4 — TS 36.331 §6.3.1 SystemInformationBlockType4 ────────
     #
-    # IntraFreqNeighCellInfo ::= SEQUENCE {
-    #     physCellId   PhysCellId,      -- 0..503, 9 bits
-    #     q-OffsetCell Q-OffsetRange }  -- 3 bits
-    #   -> each entry is 12 bits. Four hand-built entries:
-    #     (42, 3):  42  = 000101010,  3 = 011 -> 000101010011 = 0x153
-    #     (511, 7): 511 = 111111111,  7 = 111 -> 111111111111 = 0xFFF
-    #     (0, 0):   0   = 000000000,  0 = 000 -> 000000000000 = 0x000
-    #     (300, 5): 300 = 100101100,  5 = 101 -> 100101100101 = 0x965
-    #   48 bits, byte aligned: "153FFF000965"
-    # Q-OffsetRange index 3 is dB-18 and index 7 is dB-10 (TS 36.331
-    # §6.3.4: the enumeration starts at dB-24 and steps 2 dB).
-    out=$(lair_decode_sib 153FFF000965 4); rc=$?
-    chk sib4-rc      "$rc" "0"
-    chk sib4-count   "$(fld "$out" list_entries)" "4"
-    # Point INSIDE the list, not only the first entry: entry 3 is the one
-    # that catches an off-by-one in the entry stride.
-    chk sib4-e3-pci  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.3"{print $2}' | sed 's/.*phys_cell_id=\([0-9]*\).*/\1/')" "300"
-    chk sib4-e0-pci  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.0"{print $2}' | sed 's/.*phys_cell_id=\([0-9]*\).*/\1/')" "42"
-    chk sib4-e0-qdb  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.0"{print $2}' | sed 's/.*q_offset_db=\([-0-9]*\).*/\1/')" "-18"
-    chk sib4-e1-qdb  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.1"{print $2}' | sed 's/.*q_offset_db=\([-0-9]*\).*/\1/')" "-10"
-    # 511 is inside the 9-bit field but outside PhysCellId's 0..503: it must
-    # be flagged, not accepted as a neighbour.
-    chk sib4-e1-valid "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.1"{print $2}' | sed 's/.*valid=//')" "no"
-    chk sib4-e0-valid "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh.0"{print $2}' | sed 's/.*valid=//')" "yes"
-    chk sib4-stride  "$(fld "$out" entry_bits)" "12"
-    chk sib4-short   "$(lair_decode_sib AB 4 >/dev/null 2>&1; echo $?)" "1"
+    # SIB4 is decoded by the real unaligned-PER codec. These fixtures are
+    # pycrate 0.8.1 captures, so they pin the field order, the optionals and
+    # the per-cell extension bit against something outside this tree.
+    # `0009C42AA80E0199072CDB2000` carries every OPTIONAL at once:
+    # two neighbour cells, two excluded ranges and a CSG range.
+    out=$(lair_decode_sib 0009C42AA80E0199072CDB2000 4); rc=$?
+    chk sib4-rc        "$rc" "0"
+    chk sib4-neigh     "$(fld "$out" neigh_count)" "2"
+    chk sib4-excluded  "$(fld "$out" excluded_count)" "2"
+    chk sib4-csg       "$(fld "$out" csg_phys_cell_id_range)" "200:n4"
+    # Point INSIDE each list, not only at the first entry: the second one is
+    # what catches a wrong element stride (15 bits, not 14).
+    chk sib4-neigh0    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh"{print $2":"$3}' | sed -n 1p)" "42:dB6"
+    chk sib4-neigh1    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="neigh"{print $2":"$3}' | sed -n 2p)" "7:dB-24"
+    chk sib4-excl0     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="excluded"{print $2":"$3}' | sed -n 1p)" "100:n8"
+    chk sib4-excl1     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="excluded"{print $2":"$3}' | sed -n 2p)" "300:n504"
+    chk sib4-bits      "$(fld "$out" bits)" "84"
+    # The empty body is four bits: extension bit plus three absent OPTIONALs.
+    out=$(lair_decode_sib 000800 4); rc=$?
+    chk sib4-empty-rc  "$rc" "0"
+    chk sib4-empty-n   "$(fld "$out" neigh_count)" "0"
+    chk sib4-empty-bits "$(fld "$out" bits)" "4"
+    # An extension bit this codec does not model must be refused, not read as
+    # fields: every neighbour cell after the first would move. The one changed
+    # nibble is the SIB4 body's bit 0 -- the header's choice index ends in the
+    # same nibble, so this also pins where the header stops.
+    chk sib4-reject    "$(lair_decode_sib 000bC42AA80E0199072CDB2000 4 >/dev/null 2>&1; echo $?)" "1"
+    chk sib4-reject-body "$(lair_decode_sib 80000000 4 >/dev/null 2>&1; echo $?)" "1"
+    chk sib4-short     "$(lair_decode_sib AB 4 >/dev/null 2>&1; echo $?)" "1"
+    chk sib4-nonhex    "$(lair_decode_sib ZZZZZZ 4 >/dev/null 2>&1; echo $?)" "1"
 
     # ── 15. SIB6 / SIB7 / SIB8 — ETWS and CMAS, TS 36.331 §6.3.1 ───────
     #
