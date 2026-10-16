@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 
@@ -221,13 +222,16 @@ static const char *
 category_class(const char *cat)
 {
     if (cat == NULL) return "cat-system";
-    if (g_strcmp0(cat, "RECON") == 0)        return "cat-recon";
-    if (g_strcmp0(cat, "AIR INTERFACE") == 0) return "cat-air";
-    if (g_strcmp0(cat, "CORE NETWORK") == 0) return "cat-core";
-    if (g_strcmp0(cat, "SIM / IDENTITY") == 0) return "cat-sim";
-    if (g_strcmp0(cat, "ATTACKS") == 0)      return "cat-attacks";
-    if (g_strcmp0(cat, "ANALYSIS") == 0)     return "cat-analysis";
-    if (g_strcmp0(cat, "RF / TRACKING") == 0) return "cat-rf";
+    if (g_strcmp0(cat, "RECON") == 0)               return "cat-recon";
+    if (g_strcmp0(cat, "RADIO") == 0)               return "cat-radio";
+    if (g_strcmp0(cat, "ACCESS") == 0)              return "cat-access";
+    if (g_strcmp0(cat, "CORE NETWORK") == 0)        return "cat-core";
+    if (g_strcmp0(cat, "SIM / IDENTITY") == 0)      return "cat-sim";
+    if (g_strcmp0(cat, "BASEBAND / DEVICE") == 0)   return "cat-baseband";
+    if (g_strcmp0(cat, "TRACKING") == 0)            return "cat-tracking";
+    if (g_strcmp0(cat, "ANALYSIS") == 0)            return "cat-analysis";
+    if (g_strcmp0(cat, "EXPLOIT KITS") == 0)        return "cat-kits";
+    if (g_strcmp0(cat, "INTERCEPT / CARRIER") == 0) return "cat-intercept";
     return "cat-system";
 }
 
@@ -412,6 +416,41 @@ struct _AppState {
     guint          live_rate_timer;
     guint          live_follow_idle;   /* pending coalesced follow-scroll */
 
+    /* Writing the feed to disk. The listener already receives every datagram,
+       so the capture is written from the same bytes the table was built from
+       rather than from a second process competing for the port. */
+    FILE          *live_pcap;
+    char          *live_pcap_path;
+    guint64        live_pcap_packets;
+    guint64        live_pcap_bytes;
+    guint          live_pcap_rotate_s;   /* 0 = one file for the whole run */
+    guint          live_pcap_rotate_id;
+    gint64         live_pcap_opened_us;
+    gint64         live_pcap_flushed_us;
+    gboolean       live_pcap_failed;     /* reported once, not once per packet */
+    GtkWidget     *live_save_check;
+    GtkWidget     *live_path_entry;
+    GtkWidget     *live_rotate_spin;
+    GtkWidget     *live_capture_label;   /* file name and size read-out */
+
+    /* The listener's port is a field, not a constant: a second instance, a
+       different emitter, or a forward from another host all need it. */
+    guint          live_port;
+    GtkWidget     *live_port_entry;
+    GtkWidget     *live_port_label;
+
+    /* Filters that read the decoded header rather than the payload text. */
+    gboolean       live_show_ul;
+    gboolean       live_show_dl;
+    gint           live_min_dbm;         /* 0 = off, else hide anything weaker */
+    gint           live_filter_arfcn;    /* -1 = any */
+    gint           live_filter_channel;  /* -1 = any, else the GSMTAP channel code */
+    GtkWidget     *live_ul_toggle;
+    GtkWidget     *live_dl_toggle;
+    GtkWidget     *live_dbm_spin;
+    GtkWidget     *live_arfcn_entry;
+    GtkWidget     *live_channel_drop;
+
     /* Event drawer chrome. */
     GtkWidget     *event_filter_entry;
     GtkWidget     *event_badge;
@@ -528,50 +567,79 @@ static const ModuleDefinition modules[] = {
       "imsisting-30_killchain-symbolic",
       "Chains module verbs into repeatable runs from a TSV chain file." },
 
-    /* RECON — survey and passive observation */
+    /* RECON — passive survey of the RF environment: no target, no identity */
     { "02_cell_recon",       "Cell Recon",           "RECON",
       "imsisting-02_cell_recon-symbolic",
       "ARFCN/EARFCN/NR-ARFCN to frequency, PLMN to operator, and a cell survey from an SDR or capture." },
-    { "03_gsmtap",           "GSMTAP Passive",       "RECON",
+    { "03_gsmtap",           "GSMTAP Live Feed",       "RECON",
       "imsisting-03_gsmtap-symbolic",
       "GSMTAP header codec and pcap I/O; listens for gr-gsm and srsRAN traffic." },
     { "04_tower_map",        "Tower Survey",         "RECON",
       "imsisting-04_tower_map-symbolic",
       "GPS-tagged cell survey with CSV, KML and GeoJSON export." },
-    { "54_ntn",              "5G NTN / Satellite",   "RECON",
-      "imsisting-54_ntn-symbolic",
-      "Non-terrestrial access: Doppler, round-trip delay, TA, k_offset and the SIB19 fields." },
-    { "58_non3gpp",          "TETRA / DMR / GSM-R",  "RECON",
-      "imsisting-58_non3gpp-symbolic",
-      "Non-3GPP land mobile radio: TETRA, DMR and GSM-R structure, ciphers and band classification." },
 
-    /* AIR INTERFACE — per-RAT decoding and encoding */
-    { "10_gsm_air",          "GSM Air Interface",    "AIR INTERFACE",
+    /* RADIO — the air interface per RAT, plus radio-layer attacks and RF effects */
+    { "10_gsm_air",          "GSM Air Interface",    "RADIO",
       "imsisting-10_gsm_air-symbolic",
       "GSM system information, paging, cipher audit and A5/1 keystream, proved against the BGW vector." },
-    { "12_umts_air",         "UMTS Air Interface",   "AIR INTERFACE",
+    { "11_gsm_attack",       "GSM Attack",           "RADIO",
+      "imsisting-11_gsm_attack-symbolic",
+      "IMSI-catcher sequence, A5/1 downgrade, TMSI de-anonymisation and Kc recovery." },
+    { "12_umts_air",         "UMTS Air Interface",   "RADIO",
       "imsisting-12_umts_air-symbolic",
       "UMTS UARFCN, SIB decode, RRC integrity (UIA1/UIA2) and the AKA relay flow." },
-    { "14_lte_air",          "LTE Air Interface",    "AIR INTERFACE",
+    { "14_lte_air",          "LTE Air Interface",    "RADIO",
       "imsisting-14_lte_air-symbolic",
       "LTE EARFCN, RRC/SIB decode, paging maths and srsRAN eNB orchestration." },
-    { "16_nr_air",           "5G NR Air Interface",  "AIR INTERFACE",
+    { "16_nr_air",           "5G NR Air Interface",  "RADIO",
       "imsisting-16_nr_air-symbolic",
       "NR-ARFCN, MIB/SIB1 decode, PCI, PRACH occasions and gNB config generation." },
-    { "50_iot",              "NB-IoT / Cat-M1",      "AIR INTERFACE",
+    { "19_downgrade",        "Downgrade Attacks",    "RADIO",
+      "imsisting-19_downgrade-symbolic",
+      "Reject causes, null-cipher tables, Security Mode Command and downgrade detection." },
+    { "50_iot",              "NB-IoT / Cat-M1",      "RADIO",
       "imsisting-50_iot-symbolic",
       "NB-IoT and Cat-M1: NPRACH, NPSS/NSSS, SIB1-NB and NPRFCN." },
-    { "55_gprs",             "GPRS / EDGE",          "AIR INTERFACE",
+    { "55_gprs",             "GPRS / EDGE",          "RADIO",
       "imsisting-55_gprs-symbolic",
       "GPRS/EDGE packet-switched: GEA ciphering, APN coding, PDP context and downgrade detection." },
-    { "56_sidelink",         "NR Sidelink / V2X",    "AIR INTERFACE",
+    { "56_sidelink",         "NR Sidelink / V2X",    "RADIO",
       "imsisting-56_sidelink-symbolic",
       "NR sidelink on PC5: resource pools, SCI-1A, ITS certificates and relay checks." },
+    { "54_ntn",              "5G NTN / Satellite",   "RADIO",
+      "imsisting-54_ntn-symbolic",
+      "Non-terrestrial access: Doppler, round-trip delay, TA, k_offset and the SIB19 fields." },
+    { "58_non3gpp",          "TETRA / DMR / GSM-R",  "RADIO",
+      "imsisting-58_non3gpp-symbolic",
+      "Non-3GPP land mobile radio: TETRA, DMR and GSM-R structure, ciphers and band classification." },
+    { "38_jamming_detect",   "Jamming Detection",    "RADIO",
+      "imsisting-38_jamming_detect-symbolic",
+      "Measures interference and discriminates jamming from congestion or a coverage hole." },
 
-    /* CORE NETWORK — attach, core, interconnect and roaming */
-    { "13_lte_attach",       "LTE Attach / NAS",     "CORE NETWORK",
+    /* ACCESS — attach, registration and the access-network edge */
+    { "13_lte_attach",       "LTE Attach Forge",     "ACCESS",
       "imsisting-13_lte_attach-symbolic",
       "NAS EMM/ESM encode-decode, BCD IMSI/IMEI, attach forge and identity-exposure detection." },
+    { "39_slicing",          "Slicing Escape",      "ACCESS",
+      "imsisting-39_slicing-symbolic",
+      "S-NSSAI encode-decode, slice selection and cross-slice isolation testing." },
+    { "41_vowifi",           "VoWiFi / ePDG Attacks",        "ACCESS",
+      "imsisting-41_vowifi-symbolic",
+      "IKEv2 over SWu, EAP-AKA, the SWu NAI and an encryption/integrity transform audit." },
+    { "42_femtocell",        "Femtocell / HeNB Attacks",     "ACCESS",
+      "imsisting-42_femtocell-symbolic",
+      "HeNB assessment: CSG/PCI conflicts, the Iuh stack and a TR-069 management audit." },
+    { "43_ussd",             "USSD Forge",                 "ACCESS",
+      "imsisting-43_ussd-symbolic",
+      "USSD/MMI parsing, 7-bit packing and USSD/STK injection detection." },
+    { "48_ran_share",        "RAN Sharing",          "ACCESS",
+      "imsisting-48_ran_share-symbolic",
+      "PLMN coding, MOCN/MORAN/GWCN classification and cross-operator leakage detection." },
+    { "52_wifioff",          "Wi-Fi Offload / LWA",  "ACCESS",
+      "imsisting-52_wifioff-symbolic",
+      "Wi-Fi offload and LWA: ePDG FQDN, certificate validation and LWA configuration." },
+
+    /* CORE NETWORK — the network behind the RAN, and the interconnect */
     { "15_lte_core",         "LTE Core (EPC)",       "CORE NETWORK",
       "imsisting-15_lte_core-symbolic",
       "Diameter S6a/S6d, GTP-C/GTP-U and S1AP; decodes the EPC core and forges registration moves." },
@@ -581,125 +649,103 @@ static const ModuleDefinition modules[] = {
     { "31_ss7_map",          "SS7 / MAP Attacks",    "CORE NETWORK",
       "imsisting-31_ss7_map-symbolic",
       "MTP3/SCCP/TCAP/MAP decode and forge, M3UA framing both ways and GRX reachability." },
-    { "32_cellular_dns",     "DNS over Cellular",    "CORE NETWORK",
+    { "32_cellular_dns",     "Cellular DNS Spoof",    "CORE NETWORK",
       "imsisting-32_cellular_dns-symbolic",
       "DNS encode-decode, the aLTEr redirection sequence and response-tampering detection." },
-    { "39_slicing",          "Network Slicing",      "CORE NETWORK",
-      "imsisting-39_slicing-symbolic",
-      "S-NSSAI encode-decode, slice selection and cross-slice isolation testing." },
-    { "41_vowifi",           "VoWiFi / ePDG",        "CORE NETWORK",
-      "imsisting-41_vowifi-symbolic",
-      "IKEv2 over SWu, EAP-AKA, the SWu NAI and an encryption/integrity transform audit." },
-    { "42_femtocell",        "Femtocell / HeNB",     "CORE NETWORK",
-      "imsisting-42_femtocell-symbolic",
-      "HeNB assessment: CSG/PCI conflicts, the Iuh stack and a TR-069 management audit." },
-    { "43_ussd",             "USSD",                 "CORE NETWORK",
-      "imsisting-43_ussd-symbolic",
-      "USSD/MMI parsing, 7-bit packing and USSD/STK injection detection." },
+    { "35_volte_ims",        "VoLTE / IMS Attacks",  "CORE NETWORK",
+      "imsisting-35_volte_ims-symbolic",
+      "VoLTE keystream reuse (ReVoLTE), IMP4GT identity mapping and SIP/IMS analysis." },
+    { "37_nas_signaling",    "NAS Signalling",       "CORE NETWORK",
+      "imsisting-37_nas_signaling-symbolic",
+      "NAS message-rate measurement, procedure mix and signalling-storm detection." },
     { "45_sba_pivot",        "5G SBA Pivot",         "CORE NETWORK",
       "imsisting-45_sba_pivot-symbolic",
       "HTTP/2 SBI framing, NRF discovery and OAuth2 token audit." },
-    { "48_ran_share",        "RAN Sharing",          "CORE NETWORK",
-      "imsisting-48_ran_share-symbolic",
-      "PLMN coding, MOCN/MORAN/GWCN classification and cross-operator leakage detection." },
-    { "52_wifioff",          "Wi-Fi Offload / LWA",  "CORE NETWORK",
-      "imsisting-52_wifioff-symbolic",
-      "Wi-Fi offload and LWA: ePDG FQDN, certificate validation and LWA configuration." },
+    { "53_oran",             "O-RAN / xApp Attacks",     "CORE NETWORK",
+      "imsisting-53_oran-symbolic",
+      "O-RAN interfaces, deployment assessment and xApp-authority modelling." },
 
-    /* SIM / IDENTITY — the subscription and its keys */
-    { "18_suci",             "SUCI / SUPI",          "SIM / IDENTITY",
+    /* SIM / IDENTITY — the subscription, the card and the subscriber identity */
+    { "18_suci",             "SUCI Deconcealment",          "SIM / IDENTITY",
       "imsisting-18_suci-symbolic",
       "SUCI conceal/deconceal (ECIES profile A/B), HKDF and the null-scheme audit." },
-    { "20_sim",              "SIM / eSIM / OTA",     "SIM / IDENTITY",
+    { "20_sim",              "SIM / eSIM / OTA Attacks",     "SIM / IDENTITY",
       "imsisting-20_sim-symbolic",
       "ISO-7816 APDU, USIM files, EF_AD in both layouts, OTA parsing and eSIM profiles." },
-    { "36_sim_defense",      "SIM Swap Defence",     "SIM / IDENTITY",
+    { "22_imsi_exposure",    "IMSI Harvest",         "SIM / IDENTITY",
+      "imsisting-22_imsi_exposure-symbolic",
+      "Identity harvesting, TMSI/GUTI to IMSI correlation and per-subscriber exposure scoring." },
+    { "36_sim_defense",      "SIM Swap Attack/Defence",     "SIM / IDENTITY",
       "imsisting-36_sim_defense-symbolic",
       "Detection and defence for a SIM port in flight, plus eSIM profile integrity." },
-    { "46_ota_sms",          "OTA Binary SMS",       "SIM / IDENTITY",
+    { "46_ota_sms",          "OTA Binary SMS Attacks",       "SIM / IDENTITY",
       "imsisting-46_ota_sms-symbolic",
       "TS 23.048 OTA command-packet construction with an SPI/counter/key audit. Own-SIM and lab." },
-    { "57_stk",              "SIM Toolkit (STK)",    "SIM / IDENTITY",
+    { "57_stk",              "STK Attacks",    "SIM / IDENTITY",
       "imsisting-57_stk-symbolic",
       "TS 31.111 proactive commands: build, parse and audit for silent off-device actions." },
 
-    /* ATTACKS — offensive vectors and CVE kits */
-    { "11_gsm_attack",       "GSM Attack",           "ATTACKS",
-      "imsisting-11_gsm_attack-symbolic",
-      "IMSI-catcher sequence, A5/1 downgrade, TMSI de-anonymisation and Kc recovery." },
-    { "19_downgrade",        "Downgrade Attacks",    "ATTACKS",
-      "imsisting-19_downgrade-symbolic",
-      "Reject causes, null-cipher tables, Security Mode Command and downgrade detection." },
-    { "24_gsm_cve",          "GSM/UMTS CVE Kit",     "ATTACKS",
-      "imsisting-24_gsm_cve-symbolic",
-      "Per-CVE probes and handoffs for 2G/3G stack bugs." },
-    { "25_lte_cve",          "LTE CVE Kit",          "ATTACKS",
-      "imsisting-25_lte_cve-symbolic",
-      "LTE stack CVEs: baseband, NAS, ASN.1 and Diameter." },
-    { "26_nr_cve",           "5G CVE Kit",           "ATTACKS",
-      "imsisting-26_nr_cve-symbolic",
-      "5G NR, SBA and SUCI CVEs." },
-    { "35_volte_ims",        "VoLTE / IMS Attacks",  "ATTACKS",
-      "imsisting-35_volte_ims-symbolic",
-      "VoLTE keystream reuse (ReVoLTE), IMP4GT identity mapping and SIP/IMS analysis." },
-    { "40_baseband",         "Baseband Research",    "ATTACKS",
+    /* BASEBAND / DEVICE — below the stack and at the handset */
+    { "40_baseband",         "Baseband Fuzzing",    "BASEBAND / DEVICE",
       "imsisting-40_baseband-symbolic",
       "Baseband research scaffolding: ASN.1 mutation, corpus generation and crash triage." },
-    { "53_oran",             "O-RAN / Open RAN",     "ATTACKS",
-      "imsisting-53_oran-symbolic",
-      "O-RAN interfaces, deployment assessment and xApp-authority modelling." },
-    { "59_baseband_exploit", "Baseband Exploits",    "ATTACKS",
+    { "59_baseband_exploit", "Baseband Exploits",    "BASEBAND / DEVICE",
       "imsisting-59_baseband_exploit-symbolic",
       "L1/L2 malformed-PDU construction, 5G control-plane forgery, and the baseband CVE catalogue." },
-    { "60_nr_inject",        "5G NR Injection",      "ATTACKS",
+    { "60_nr_inject",        "5G NR Injection",      "BASEBAND / DEVICE",
       "imsisting-60_nr_inject-symbolic",
       "NR RNTI tracking, MAC-NR framing, descrambling and the injection exploit set." },
-    { "61_baseband_diag",    "Baseband NV/EFS",      "ATTACKS",
+    { "61_baseband_diag",    "Baseband NV/EFS",      "BASEBAND / DEVICE",
       "imsisting-61_baseband_diag-symbolic",
       "Qualcomm DM/DIAG framing, NV and EFS2 codecs, state-info identity decode and the AT/device surface." },
 
-    /* ANALYSIS — captures, identities and signalling */
+    /* TRACKING — locating and following a subscriber or a transmitter */
+    { "28_rf_fingerprint",   "RF Fingerprint / CSI", "TRACKING",
+      "imsisting-28_rf_fingerprint-symbolic",
+      "IQ fingerprinting (CFO, IRR, transients) and CSI side-channel extraction." },
+    { "33_paging_track",     "Paging / Torpedo",     "TRACKING",
+      "imsisting-33_paging_track-symbolic",
+      "Paging occasion maths, paging capture, and the Torpedo/Piercer models." },
+    { "44_ta_geoloc",        "TA Geolocation",       "TRACKING",
+      "imsisting-44_ta_geoloc-symbolic",
+      "Timing-advance ranging and multi-cell trilateration from TA measurements." },
+    { "51_lpp",              "LPP Position Forgery",      "TRACKING",
+      "imsisting-51_lpp-symbolic",
+      "LTE Positioning Protocol: procedure codes, header codec and position-forgery detection." },
+
+    /* ANALYSIS — offline work on captures and logs */
     { "21_pcap_analysis",    "Capture Analysis",     "ANALYSIS",
       "imsisting-21_pcap_analysis-symbolic",
       "From-scratch pcap reader that dissects GSMTAP, Diameter, NGAP, S1AP, GTP, PFCP and RTP." },
-    { "22_imsi_exposure",    "IMSI Harvest",         "ANALYSIS",
-      "imsisting-22_imsi_exposure-symbolic",
-      "Identity harvesting, TMSI/GUTI to IMSI correlation and per-subscriber exposure scoring." },
     { "23_cipher_audit",     "Cipher Audit",         "ANALYSIS",
       "imsisting-23_cipher_audit-symbolic",
       "Scores negotiated ciphers per session across 2G-5G and finds null or downgraded bearers." },
     { "27_traffic_analysis", "Traffic Analysis",     "ANALYSIS",
       "imsisting-27_traffic_analysis-symbolic",
       "Flow and burst analysis, website fingerprinting and padding/shaping detection." },
-    { "34_mac_layer",        "MAC Layer",            "ANALYSIS",
+    { "34_mac_layer",        "MAC / RLC Analysis",            "ANALYSIS",
       "imsisting-34_mac_layer-symbolic",
       "LTE MAC PDU decode, RNTI tracking, scheduling-pattern inference and DCI/MCS mapping." },
-    { "37_nas_signaling",    "NAS Signalling",       "ANALYSIS",
-      "imsisting-37_nas_signaling-symbolic",
-      "NAS message-rate measurement, procedure mix and signalling-storm detection." },
-    { "47_li_probe",         "LI Discovery",         "ANALYSIS",
+
+    /* EXPLOIT KITS — probe-or-handoff CVE kits */
+    { "24_gsm_cve",          "GSM/UMTS CVE Kit",     "EXPLOIT KITS",
+      "imsisting-24_gsm_cve-symbolic",
+      "Per-CVE probes and handoffs for 2G/3G stack bugs." },
+    { "25_lte_cve",          "LTE CVE Kit",          "EXPLOIT KITS",
+      "imsisting-25_lte_cve-symbolic",
+      "LTE stack CVEs: baseband, NAS, ASN.1 and Diameter." },
+    { "26_nr_cve",           "5G CVE Kit",           "EXPLOIT KITS",
+      "imsisting-26_nr_cve-symbolic",
+      "5G NR, SBA and SUCI CVEs." },
+
+    /* INTERCEPT / CARRIER — lawful intercept and carrier-side interfaces */
+    { "47_li_probe",         "LI Interception",         "INTERCEPT / CARRIER",
       "imsisting-47_li_probe-symbolic",
       "Lawful-interception interfaces and interception-posture signals. Detection only." },
-    { "49_carrier_api",      "Carrier API Audit",    "ANALYSIS",
+    { "49_carrier_api",      "Carrier API Abuse",    "INTERCEPT / CARRIER",
       "imsisting-49_carrier_api-symbolic",
-      "Carrier API surface, authorisation-boundary testing and token/rate-limit audit." },
+      "Carrier API surface, authorisation-boundary testing and token/rate-limit audit." }
 
-    /* RF / TRACKING — interference and position */
-    { "28_rf_fingerprint",   "RF Fingerprint / CSI", "RF / TRACKING",
-      "imsisting-28_rf_fingerprint-symbolic",
-      "IQ fingerprinting (CFO, IRR, transients) and CSI side-channel extraction." },
-    { "33_paging_track",     "Paging / Torpedo",     "RF / TRACKING",
-      "imsisting-33_paging_track-symbolic",
-      "Paging occasion maths, paging capture, and the Torpedo/Piercer models." },
-    { "38_jamming_detect",   "Jamming Detection",    "RF / TRACKING",
-      "imsisting-38_jamming_detect-symbolic",
-      "Measures interference and discriminates jamming from congestion or a coverage hole." },
-    { "44_ta_geoloc",        "TA Geolocation",       "RF / TRACKING",
-      "imsisting-44_ta_geoloc-symbolic",
-      "Timing-advance ranging and multi-cell trilateration from TA measurements." },
-    { "51_lpp",              "LPP Positioning",      "RF / TRACKING",
-      "imsisting-51_lpp-symbolic",
-      "LTE Positioning Protocol: procedure codes, header codec and position-forgery detection." },
 };
 
 static const char *
@@ -734,6 +780,16 @@ static guint recent_count_of(int idx);
 static void live_inspector_reset(AppState *state);
 static guint live_shown_count(AppState *state);
 static gboolean live_follow_idle(gpointer user_data);
+/* The live page's capture and the target panel write back into each other:
+   a row can set the target, and turning the checkbox on mid-run opens the
+   file - both are defined after their callers. */
+static void live_capture_begin(AppState *state, gboolean announce);
+static gboolean live_pcap_open(AppState *state, const char *path, gboolean announce);
+static void live_pcap_close(AppState *state);
+static void live_capture_label_update(AppState *state);
+static char *live_pcap_default_path(void);
+static gboolean live_pcap_rotate_cb(gpointer user_data);
+static void rtarget_apply(AppState *state);
 static void sidebar_set_active(AppState *state, const char *module_id);
 static void drawer_set_open(AppState *state, gboolean open);
 static GtkWidget *empty_state(const char *icon, const char *title,
@@ -1316,7 +1372,7 @@ status_label_set(GtkWidget *label, const char *text, const char *css)
                               "status-ok", "status-error", NULL };
     for (int i = 0; classes[i] != NULL; i++)
         gtk_widget_remove_css_class(label, classes[i]);
-    if (css != NULL)
+    if (css != NULL && *css != '\0')
         gtk_widget_add_css_class(label, css);
 }
 
@@ -1680,6 +1736,7 @@ group_verb_clicked(GtkButton *button, gpointer user_data)
        unnoticed until something allocated in between (the label build) and
        reused the block. The verb then ran with a clobbered argument. */
     g_auto(GStrv) parts = NULL;
+    g_autofree char *args_root = NULL;
     const char *argv[12];
     int n = 0;
 
@@ -1697,6 +1754,16 @@ group_verb_clicked(GtkButton *button, gpointer user_data)
 
     argv[n++] = script;
     argv[n++] = verb;
+
+    /* {root} is the project directory, resolved at press time. The pages are
+       static tables, but the root is not, and a preset that writes a capture
+       has to name the same directory the app reads - wherever the app was
+       launched from, and whichever user launched it. */
+    if (argspec != NULL && strstr(argspec, "{root}") != NULL) {
+        g_auto(GStrv) chunks = g_strsplit(argspec, "{root}", -1);
+        args_root = g_strjoinv(IMSISTING_ROOT, chunks);
+        argspec = args_root;
+    }
 
     if (argspec != NULL && *argspec != '\0') {
         parts = g_strsplit_set(argspec, " \t", -1);
@@ -2903,7 +2970,7 @@ sidebar_apply_filter(GtkWidget *content, const char *q)
             gboolean show = TRUE;
             if (searching) {
                 /* The same fields the dashboard searches. Category was the one
-                   missing here, so typing "ATTACKS" filtered the dashboard and
+                   missing here, so typing "RADIO" filtered the dashboard and
                    emptied the sidebar. */
                 g_autofree char *joined = g_strdup_printf("%s %s %s %s",
                     m->name, m->id, m->category, m->desc ? m->desc : "");
@@ -3490,7 +3557,7 @@ status_set(GtkWidget *label, const char *value, const char *css)
         if (cell != NULL)
             gtk_widget_remove_css_class(cell, classes[i]);
     }
-    if (css != NULL) {
+    if (css != NULL && *css != '\0') {
         gtk_widget_add_css_class(label, css);
         if (cell != NULL)
             gtk_widget_add_css_class(cell, css);
@@ -4583,7 +4650,7 @@ create_dashboard_page(AppState *state)
        overlay centres over the whole body and would land on the quick cards. */
     state->dash_empty = empty_state("system-search-symbolic",
         "No module matches", "Clear the search, or try a category such as "
-        "ATTACKS, RECON or ANALYSIS.");
+        "RADIO, ACCESS or ANALYSIS.");
     gtk_widget_set_visible(state->dash_empty, FALSE);
     gtk_widget_set_margin_top(state->dash_empty, 28);
     gtk_widget_set_margin_bottom(state->dash_empty, 28);
@@ -5663,10 +5730,10 @@ casebook_fill_head(AppState *state, const char *show, const char *tgt,
     }
     status_set(state->casebook_brief_scope,
         (scope && *scope) ? scope : "\u2014",
-        (scope && *scope) ? "" : "status-dim");
+        (scope && *scope) ? NULL : "status-dim");
     status_set(state->casebook_brief_auth,
         (auth && *auth) ? auth : "\u2014",
-        (auth && *auth) ? "" : "status-dim");
+        (auth && *auth) ? NULL : "status-dim");
 
     tstr = (rat || plmn || cell)
         ? g_strdup_printf("%s%s%s%s%s",
@@ -6850,6 +6917,10 @@ create_settings_page(AppState *state)
 
 #define LIVE_PORT 4729
 #define LIVE_MAX_LINES 600
+/* A GSMTAP message is a signalling frame - tens of bytes. The cap exists so a
+   malformed emitter cannot grow the retained history without bound, and the
+   inspector says so when it bites. */
+#define LIVE_PAYLOAD_MAX 2048
 /* Silence longer than this, while listening, is reported as "quiet Ns"
    rather than left to look like a healthy feed with a frozen counter. */
 #define LIVE_QUIET_SECONDS 5
@@ -7119,6 +7190,12 @@ struct _LiveMsg {
     GObject parent;
     guint   seq, arfcn, ts, len;
     gint    sig;
+    guint8  raw_type;      /* the GSMTAP type byte, for the RAT a row implies */
+    guint8  ch_code;       /* the channel code, for filtering by channel */
+    gboolean pcs;          /* 0x8000 on the ARFCN: PCS1900, not DCS1800 */
+    gboolean up;           /* 0x4000: the phone's direction, not the cell's */
+    /* The whole message, not the first fourteen bytes of it. The column
+       abbreviates; the inspector and the row actions need all of it. */
     char   *time, *type, *ch, *dir, *payload;
 };
 
@@ -7182,9 +7259,24 @@ live_col_bind(GtkSignalListItemFactory *f, GtkListItem *item, gpointer d)
     case 6: s = g_strdup_printf("%d", m->sig);      break;
     case 7: s = g_strdup(m->dir);                   break;
     case 8: s = g_strdup_printf("%u", m->len);      break;
-    default: s = g_strdup(m->payload);              break;
+    default:
+        /* A glance, not the record: the whole message is in the inspector
+           and in the capture. Sixteen bytes is enough to see what it is. */
+        if (m->payload != NULL && strlen(m->payload) > 32)
+            s = g_strdup_printf("%.32s..", m->payload);
+        else
+            s = g_strdup(m->payload != NULL ? m->payload : "");
+        break;
     }
     gtk_label_set_text(GTK_LABEL(l), s ? s : "");
+    /* The label cannot be picked (labels do not take pointer events), and the
+       widget that can be is the one wrapping it. It carries the message so a
+       right-click anywhere in the cell finds it by walking up. */
+    {
+        GtkWidget *cellw = gtk_widget_get_parent(l);
+        if (cellw != NULL)
+            g_object_set_data(G_OBJECT(cellw), "live-msg", m);
+    }
     gboolean right = (which == 4 || which == 5 || which == 6 || which == 8);
     gtk_label_set_xalign(GTK_LABEL(l), right ? 1.0f : 0.0f);
     if (which == 7) {
@@ -7198,13 +7290,59 @@ live_col_bind(GtkSignalListItemFactory *f, GtkListItem *item, gpointer d)
     (void) f;
 }
 
+/* GLib's case-insensitive search is for whole strings or sorted keys, so the
+   feed carries its own. The strings are a type, a channel and a payload of a
+   few hundred bytes, so the plain scan is the right shape. */
+static gboolean
+live_ci_contains(const char *hay, const char *needle)
+{
+    gsize nlen;
+
+    if (needle == NULL || *needle == '\0') return TRUE;
+    if (hay == NULL) return FALSE;
+    nlen = strlen(needle);
+    for (; *hay != '\0'; hay++) {
+        if (g_ascii_strncasecmp(hay, needle, nlen) == 0) return TRUE;
+    }
+    return FALSE;
+}
+
 static gboolean
 live_matches(AppState *state, LiveMsg *m)
 {
+    /* The decoded filters come first: they answer "show me the uplink" and
+       "only this cell" without the operator having to spell out a substring.
+       A signal of 0 is the emitter saying it does not know, so a strength
+       filter does not throw those rows away - it would be a filter that hides
+       frames for a reason the operator never asked for. */
+    if (!state->live_show_ul && m->up)  return FALSE;
+    if (!state->live_show_dl && !m->up) return FALSE;
+    if (state->live_min_dbm != 0 && m->sig != 0 && m->sig < state->live_min_dbm)
+        return FALSE;
+    if (state->live_filter_arfcn >= 0 &&
+        (gint) m->arfcn != state->live_filter_arfcn)
+        return FALSE;
+    if (state->live_filter_channel >= 0 &&
+        (gint) m->ch_code != state->live_filter_channel)
+        return FALSE;
+
     if (state->live_filter == NULL || *state->live_filter == '\0') return TRUE;
-    return (m->type && strstr(m->type, state->live_filter) != NULL) ||
-           (m->ch   && strstr(m->ch,   state->live_filter) != NULL) ||
-           (m->payload && strstr(m->payload, state->live_filter) != NULL);
+    /* Case-insensitive, because the one field anybody types by hand is hex.
+       GLib has no ascii strcasestr, and lowercasing every payload on every
+       message would cost more than this. */
+    return live_ci_contains(m->type, state->live_filter) ||
+           live_ci_contains(m->ch, state->live_filter) ||
+           live_ci_contains(m->payload, state->live_filter);
+}
+
+/* Any filter the user can set, so the chip knows whether to say "of N". */
+static gboolean
+live_filtered(AppState *state)
+{
+    return (state->live_filter != NULL && *state->live_filter != '\0') ||
+           !state->live_show_ul || !state->live_show_dl ||
+           state->live_min_dbm != 0 || state->live_filter_arfcn >= 0 ||
+           state->live_filter_channel >= 0;
 }
 
 /* Rebuild the visible model from the retained messages. */
@@ -7234,7 +7372,7 @@ live_set_status(AppState *state, const char *msg, const char *css)
                               "status-ok", "status-error", NULL };
     for (int i = 0; classes[i] != NULL; i++)
         gtk_widget_remove_css_class(state->live_status, classes[i]);
-    if (css != NULL)
+    if (css != NULL && *css != '\0')
         gtk_widget_add_css_class(state->live_status, css);
 }
 
@@ -7270,8 +7408,7 @@ live_update_summary(AppState *state)
 {
     if (state->live_summary != NULL) {
         GString *s = g_string_new(NULL);
-        gboolean filtered = state->live_filter != NULL &&
-                            *state->live_filter != '\0';
+        gboolean filtered = live_filtered(state);
         guint shown = live_shown_count(state);
 
         if (filtered)
@@ -7344,6 +7481,271 @@ live_add_msg(AppState *state, LiveMsg *m)
        chip is a once-a-second read-out anyway; live_rate_tick owns it. */
 }
 
+/* ── writing the feed to disk ─────────────────────────────────────────────
+   A GSMTAP capture is an ordinary Ethernet/IPv4/UDP pcap, which is what
+   Wireshark dissects and what `modules/03_gsmtap.sh --decode` reads back.
+   The layout below matches gtap_write_pcap in that module — link type 1,
+   port to port, GSMTAP in the payload — so a file written here opens in
+   both. Two differences, both deliberate: the timestamps are the real
+   arrival times rather than a counter, and the IPv4 header checksum is
+   computed. Neither is verified by a dissector, but a capture whose clock is
+   a counter is worthless next to a log, and a checksum costs two lines.
+
+   The bytes written are the datagram exactly as it arrived, so what lands on
+   disk is what the table showed — including anything a filter hid. */
+static void
+live_pcap_put32(FILE *fp, guint32 v)
+{
+    guint8 b[4] = { (guint8) (v & 0xff), (guint8) ((v >> 8) & 0xff),
+                    (guint8) ((v >> 16) & 0xff), (guint8) ((v >> 24) & 0xff) };
+    if (fwrite(b, 1, 4, fp) != 4) { /* the failure is reported by the caller */ }
+}
+
+static void
+live_pcap_write_header(FILE *fp)
+{
+    live_pcap_put32(fp, 0xa1b2c3d4);   /* magic: microseconds, little-endian */
+    live_pcap_put32(fp, 0x00040002);   /* version 2.4 */
+    live_pcap_put32(fp, 0);            /* thiszone */
+    live_pcap_put32(fp, 0);            /* sigfigs */
+    live_pcap_put32(fp, 65535);        /* snaplen */
+    live_pcap_put32(fp, 1);            /* LINKTYPE_ETHERNET */
+}
+
+/* One datagram, wrapped so it looks like the UDP/GSMTAP packet it is. */
+static gsize
+live_pcap_frame(AppState *state, const guint8 *g, gsize glen,
+                guint8 *out, gsize outsz)
+{
+    static const guint8 dst_mac[6] = { 0x00,0x11,0x22,0x33,0x44,0x55 };
+    static const guint8 src_mac[6] = { 0x66,0x77,0x88,0x99,0xaa,0xbb };
+    gsize o = 0, ip, i;
+    guint32 csum = 0;
+    guint16 udp_len;
+
+    if (glen > 1500) glen = 1500;      /* keep one record inside one MTU */
+    udp_len = (guint16) (8 + glen);
+    if (14 + 20 + 8 + glen > outsz) return 0;
+
+    memcpy(out + o, dst_mac, 6); o += 6;
+    memcpy(out + o, src_mac, 6); o += 6;
+    out[o++] = 0x08; out[o++] = 0x00;
+
+    ip = o;
+    out[o++] = 0x45; out[o++] = 0x00;                      /* v4, 20-byte header */
+    out[o++] = (guint8) ((20 + udp_len) >> 8);
+    out[o++] = (guint8) ((20 + udp_len) & 0xff);
+    out[o++] = 0x00; out[o++] = 0x00;                      /* id */
+    out[o++] = 0x40; out[o++] = 0x00;                      /* don't fragment */
+    out[o++] = 64;   out[o++] = 17;                        /* ttl, UDP */
+    out[o++] = 0x00; out[o++] = 0x00;                      /* checksum, below */
+    out[o++] = 10; out[o++] = 0; out[o++] = 0; out[o++] = 1;
+    out[o++] = 10; out[o++] = 0; out[o++] = 0; out[o++] = 2;
+
+    for (i = ip; i < ip + 20; i += 2)
+        csum += (guint32) ((out[i] << 8) | out[i + 1]);
+    while (csum >> 16) csum = (csum & 0xffff) + (csum >> 16);
+    csum = (~csum) & 0xffff;
+    out[ip + 10] = (guint8) (csum >> 8);
+    out[ip + 11] = (guint8) (csum & 0xff);
+
+    /* The port the listener is on, both ends: this is a capture of what
+       arrived, not of a conversation with a peer. */
+    out[o++] = (guint8) ((state->live_port >> 8) & 0xff);
+    out[o++] = (guint8) (state->live_port & 0xff);
+    out[o++] = (guint8) ((state->live_port >> 8) & 0xff);
+    out[o++] = (guint8) (state->live_port & 0xff);
+    out[o++] = (guint8) (udp_len >> 8);
+    out[o++] = (guint8) (udp_len & 0xff);
+    out[o++] = 0x00; out[o++] = 0x00;   /* checksum 0 = not computed, RFC 768 */
+
+    memcpy(out + o, g, glen); o += glen;
+    return o;
+}
+
+static void
+live_capture_label_update(AppState *state)
+{
+    if (state->live_capture_label == NULL) return;
+    if (state->live_pcap == NULL) {
+        gtk_label_set_text(GTK_LABEL(state->live_capture_label), "not saving");
+        gtk_widget_remove_css_class(state->live_capture_label, "capture-live");
+        return;
+    }
+    g_autofree char *base = g_path_get_basename(state->live_pcap_path);
+    g_autofree char *m = g_strdup_printf("%s · %" G_GUINT64_FORMAT " frames · %.1f MB",
+        base, state->live_pcap_packets,
+        (double) state->live_pcap_bytes / (1024.0 * 1024.0));
+    gtk_label_set_text(GTK_LABEL(state->live_capture_label), m);
+    gtk_widget_add_css_class(state->live_capture_label, "capture-live");
+}
+
+/* The default name carries the start time, so two runs never overwrite each
+   other the way a fixed captures/live.pcap would. */
+static char *
+live_pcap_default_path(void)
+{
+    g_autoptr(GDateTime) now = g_date_time_new_now_local();
+    g_autofree char *stamp = now ? g_date_time_format(now, "%Y%m%d_%H%M%S") : NULL;
+    g_autofree char *name = g_strdup_printf("live_%s.pcap",
+                                            stamp ? stamp : "capture");
+    return g_build_filename(IMSISTING_ROOT, "captures", name, NULL);
+}
+
+static void
+live_pcap_close(AppState *state)
+{
+    if (state->live_pcap != NULL) {
+        fclose(state->live_pcap);
+        state->live_pcap = NULL;
+    }
+    if (state->live_pcap_rotate_id != 0) {
+        g_source_remove(state->live_pcap_rotate_id);
+        state->live_pcap_rotate_id = 0;
+    }
+}
+
+/* Opens the file the path entry names, creating the directory if it is one we
+   own. Returns FALSE and toasts on failure: a feed that is quietly not being
+   recorded is the one failure mode a capture must never have. */
+static gboolean
+live_pcap_open(AppState *state, const char *path, gboolean announce)
+{
+    g_autofree char *dir = NULL;
+
+    live_pcap_close(state);
+    g_free(state->live_pcap_path);
+    state->live_pcap_path = g_strdup(path);
+
+    dir = g_path_get_dirname(state->live_pcap_path);
+    if (g_mkdir_with_parents(dir, 0755) != 0 && errno != EEXIST) {
+        g_autofree char *m = g_strdup_printf("cannot create %s: %s", dir,
+                                             g_strerror(errno));
+        if (announce) show_toast_full(state, "Live Traffic", m, "error");
+        live_set_status(state, m, "status-error");
+        return FALSE;
+    }
+
+    state->live_pcap = fopen(state->live_pcap_path, "wb");
+    if (state->live_pcap == NULL) {
+        g_autofree char *m = g_strdup_printf("cannot write %s: %s",
+            state->live_pcap_path, g_strerror(errno));
+        if (announce) show_toast_full(state, "Live Traffic", m, "error");
+        live_set_status(state, m, "status-error");
+        return FALSE;
+    }
+    setvbuf(state->live_pcap, NULL, _IOFBF, 1 << 16);
+    live_pcap_write_header(state->live_pcap);
+    state->live_pcap_packets = 0;
+    state->live_pcap_bytes = 24;   /* the global header counts too */
+    state->live_pcap_opened_us = g_get_monotonic_time();
+    state->live_pcap_flushed_us = state->live_pcap_opened_us;
+    state->live_pcap_failed = FALSE;
+    live_capture_label_update(state);
+    return TRUE;
+}
+
+/* Rotation keeps the window's worth of files, not the whole disk: a capture
+   left running overnight must not fill the partition it is evidence on. */
+static gint
+live_path_cmp(gconstpointer a, gconstpointer b)
+{
+    return g_strcmp0(*(const char *const *) a, *(const char *const *) b);
+}
+
+static void
+live_pcap_prune(const char *dir)
+{
+    GDir *d = g_dir_open(dir, 0, NULL);
+    const char *name;
+    GPtrArray *live = g_ptr_array_new_with_free_func(g_free);
+    guint i, drop;
+
+    if (d == NULL) return;
+    while ((name = g_dir_read_name(d)) != NULL) {
+        if (!g_str_has_prefix(name, "live_") || !g_str_has_suffix(name, ".pcap"))
+            continue;
+        g_ptr_array_add(live, g_build_filename(dir, name, NULL));
+    }
+    g_dir_close(d);
+
+    /* The names carry the time they were opened, so sorting by name sorts by
+       age. Oldest first, then everything past the newest twenty goes. */
+    g_ptr_array_sort(live, live_path_cmp);
+    drop = live->len > 20 ? live->len - 20 : 0;
+    for (i = 0; i < drop; i++)
+        g_remove((const char *) g_ptr_array_index(live, i));
+    g_ptr_array_free(live, TRUE);
+}
+
+static gboolean
+live_pcap_rotate_cb(gpointer user_data)
+{
+    AppState *state = user_data;
+    g_autofree char *dir = NULL;
+    g_autofree char *next = NULL;
+    g_autoptr(GDateTime) now = NULL;
+    g_autofree char *stamp = NULL;
+    g_autofree char *base = NULL;
+
+    if (state->live_pcap == NULL) { state->live_pcap_rotate_id = 0; return G_SOURCE_REMOVE; }
+
+    dir = g_path_get_dirname(state->live_pcap_path);
+    now = g_date_time_new_now_local();
+    stamp = now ? g_date_time_format(now, "%Y%m%d_%H%M%S") : NULL;
+    base = g_strdup_printf("live_%s.pcap", stamp ? stamp : "capture");
+    next = g_build_filename(dir, base, NULL);
+    if (!live_pcap_open(state, next, FALSE)) {
+        state->live_pcap_rotate_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    live_pcap_prune(dir);
+    live_set_status(state, "saving to a new file", "status-running");
+    return G_SOURCE_CONTINUE;
+}
+
+static void
+live_pcap_write(AppState *state, const guint8 *g, gsize glen)
+{
+    guint8 pkt[14 + 20 + 8 + 1500];
+    gsize n;
+    gint64 us;
+
+    if (state->live_pcap == NULL) return;
+
+    n = live_pcap_frame(state, g, glen, pkt, sizeof pkt);
+    if (n == 0) return;
+
+    us = g_get_real_time();
+    live_pcap_put32(state->live_pcap, (guint32) (us / G_USEC_PER_SEC));
+    live_pcap_put32(state->live_pcap, (guint32) (us % G_USEC_PER_SEC));
+    live_pcap_put32(state->live_pcap, (guint32) n);
+    live_pcap_put32(state->live_pcap, (guint32) n);
+    if (fwrite(pkt, 1, n, state->live_pcap) != n) {
+        if (!state->live_pcap_failed) {
+            state->live_pcap_failed = TRUE;
+            show_toast_full(state, "Live Traffic",
+                            "the capture file stopped accepting writes — "
+                            "the disk may be full", "error");
+        }
+        live_pcap_close(state);
+        live_capture_label_update(state);
+        return;
+    }
+    state->live_pcap_packets++;
+    state->live_pcap_bytes += 16 + n;
+
+    /* The file is buffered because a live feed is a stream of small writes,
+       but a capture that only lands on disk when the window closes is not
+       evidence - it is a promise. A flush a few times a second costs little
+       and bounds what a crash can take with it. */
+    if (g_get_monotonic_time() - state->live_pcap_flushed_us > 200000) {
+        fflush(state->live_pcap);
+        state->live_pcap_flushed_us = g_get_monotonic_time();
+        live_capture_label_update(state);
+    }
+}
+
 static gboolean
 live_poll_cb(gpointer user_data)
 {
@@ -7360,6 +7762,10 @@ live_poll_cb(gpointer user_data)
 
         state->live_last_us = g_get_monotonic_time();
 
+        /* Disk first, filter later. A capture is evidence, and evidence is
+           not "what the operator happened to be looking at". */
+        live_pcap_write(state, buf, (gsize) n);
+
         guint hdr_bytes = (guint) buf[1] * 4;
         if (hdr_bytes < 16 || hdr_bytes > (guint) n) hdr_bytes = 16;
 
@@ -7372,9 +7778,11 @@ live_poll_cb(gpointer user_data)
         gboolean up = (arf & 0x4000) != 0;
 
         const char *ch = "-";
+        guint8 ch_code = 0;
         if (gsmtap_is_gsm(type)) {
             guint8 c = sub;
             if (c == 0) c = (guint8) ((arf >> 8) & 0xff);
+            ch_code = c;
             ch = gsmtap_channel_name(c);
         }
 
@@ -7383,9 +7791,9 @@ live_poll_cb(gpointer user_data)
         if (now) g_date_time_unref(now);
 
         GString *pay = g_string_new(NULL);
-        for (guint i = 0; i < paylen && i < 14; i++)
+        guint keep = paylen > LIVE_PAYLOAD_MAX ? LIVE_PAYLOAD_MAX : paylen;
+        for (guint i = 0; i < keep; i++)
             g_string_append_printf(pay, "%02x", buf[hdr_bytes + i]);
-        if (paylen > 14) g_string_append(pay, "..");
 
         LiveMsg *m = g_object_new(LIVE_TYPE_MSG, NULL);
         m->seq     = state->live_count + 1;
@@ -7397,6 +7805,10 @@ live_poll_cb(gpointer user_data)
         m->sig     = sig;
         m->dir     = g_strdup(up ? "UL" : "DL");
         m->len     = paylen;
+        m->raw_type = type;
+        m->ch_code  = ch_code;
+        m->pcs     = (arf & 0x8000) != 0;
+        m->up      = up;
         m->payload = g_string_free(pay, FALSE);
 
         live_add_msg(state, m);   /* live_add_msg takes the reference */
@@ -7460,6 +7872,22 @@ live_stop(AppState *state, gboolean announce)
         live_set_status(state, m, "status-ok");
     }
 
+    /* The capture belongs to the listener: no listener, no file. Leaving it
+       open would keep "recording" a feed nobody is receiving. */
+    if (state->live_pcap != NULL) {
+        g_autofree char *base = g_path_get_basename(state->live_pcap_path);
+        guint64 frames = state->live_pcap_packets;
+        g_autofree char *saved = g_strdup(base);
+        live_pcap_close(state);
+        live_capture_label_update(state);
+        if (announce && frames > 0) {
+            g_autofree char *m = g_strdup_printf(
+                "capture closed — %s, %" G_GUINT64_FORMAT " frames",
+                saved, frames);
+            show_toast_full(state, "Live Traffic", m, "ok");
+        }
+    }
+
     if (announce && was_listening) {
         g_autofree char *m = (state->live_count > 0)
             ? g_strdup_printf("listener stopped — %u message%s captured",
@@ -7489,10 +7917,10 @@ live_start(AppState *state, gboolean announce)
         return;
     }
 
-    addr = g_inet_socket_address_new_from_string("0.0.0.0", LIVE_PORT);
+    addr = g_inet_socket_address_new_from_string("0.0.0.0", state->live_port);
     if (!g_socket_bind(state->live_socket, addr, TRUE, &error)) {
-        g_autofree char *m = g_strdup_printf("cannot bind udp/%d — %s",
-            LIVE_PORT, error ? error->message : "in use");
+        g_autofree char *m = g_strdup_printf("cannot bind udp/%u — %s",
+            state->live_port, error ? error->message : "in use");
         live_set_status(state, m, "status-error");
         if (announce) show_toast_full(state, "Live Traffic", m, "error");
         g_object_unref(addr);
@@ -7506,10 +7934,22 @@ live_start(AppState *state, gboolean announce)
 
     if (state->live_button != NULL)
         gtk_button_set_label(GTK_BUTTON(state->live_button), "Stop");
-    live_set_status(state, "listening on udp/4729", "status-running");
-    if (announce)
-        show_toast_full(state, "Live Traffic", "listening on udp/4729 — "
-                        "the feed gr-gsm and srsRAN emit into", "ok");
+    {
+        g_autofree char *m = g_strdup_printf("listening on udp/%u",
+                                             state->live_port);
+        live_set_status(state, m, "status-running");
+        if (announce) {
+            g_autofree char *t = g_strdup_printf(
+                "listening on udp/%u — the feed gr-gsm and srsRAN emit into",
+                state->live_port);
+            show_toast_full(state, "Live Traffic", t, "ok");
+        }
+    }
+    /* The checkbox is the operator's intent, so the file opens when the
+       listener does rather than on a separate button. */
+    if (state->live_save_check != NULL &&
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(state->live_save_check)))
+        live_capture_begin(state, FALSE);
     state->live_hint = g_timeout_add(3000, live_hint_cb, state);
 }
 
@@ -7611,16 +8051,32 @@ live_selection_changed(GObject *selection, GParamSpec *pspec, gpointer user_data
     if (state->live_inspector_buf == NULL) return;
     if (pos == GTK_INVALID_LIST_POSITION) {
         gtk_text_buffer_set_text(state->live_inspector_buf,
-            "Select a row to inspect its decoded GSMTAP fields.", -1);
+            "Select a row to inspect its fields and its payload.", -1);
         return;
     }
     LiveMsg *m = g_list_model_get_item(G_LIST_MODEL(selection), pos);
     if (m == NULL) return;
-    g_autofree char *detail = g_strdup_printf(
-        "PACKET %u\n\nTime      %s\nType      %s\nChannel   %s\nARFCN     %u\nTimeslot  %u\nSignal    %d dBm\nDirection %s\nLength    %u bytes\n\nPAYLOAD\n%s",
-        m->seq, m->time, m->type, m->ch, m->arfcn, m->ts, m->sig, m->dir,
-        m->len, m->payload);
-    gtk_text_buffer_set_text(state->live_inspector_buf, detail, -1);
+    {
+        /* The column abbreviates; this does not. The one thing it must say
+           out loud is when the message was longer than what is held here -
+           a silently shortened payload is a lie about the capture. */
+        const char *hex = m->payload != NULL ? m->payload : "";
+        gsize have = strlen(hex) / 2;
+        g_autofree char *payload = NULL;
+
+        if (have * 2 < (gsize) m->len) {
+            payload = g_strdup_printf(
+                "%s\n\n[%u of %u bytes held - the rest is in the capture]",
+                hex, (guint) have, m->len);
+        } else {
+            payload = g_strdup(hex);
+        }
+        g_autofree char *detail = g_strdup_printf(
+            "PACKET %u\n\nTime      %s\nType      %s\nChannel   %s\nARFCN     %u\nTimeslot  %u\nSignal    %d dBm\nDirection %s\nLength    %u bytes\nPayload   %u bytes\n\nPAYLOAD\n%s",
+            m->seq, m->time, m->type, m->ch, m->arfcn, m->ts, m->sig, m->dir,
+            m->len, (guint) have, payload);
+        gtk_text_buffer_set_text(state->live_inspector_buf, detail, -1);
+    }
     g_object_unref(m);
     (void) pspec;
 }
@@ -7644,6 +8100,458 @@ live_filter_cleared(GtkButton *b, gpointer user_data)
     (void) b;
     if (state->live_filter_entry != NULL)
         gtk_editable_set_text(GTK_EDITABLE(state->live_filter_entry), "");
+}
+
+/* ── the decoded-field filters, the port and the capture ─────────────────
+   wifisting reads its traffic out of tshark, so its filter row is MAC, SSID
+   and a signal floor. A GSMTAP feed has none of those fields, but it has the
+   ones that matter more: which direction the frame went, which cell it came
+   from, which logical channel carried it, and how strong it was. The
+   free-text filter above stays as the escape hatch for everything else. */
+static const guint8 live_channel_codes[] = {
+    0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x00
+};
+static const char *const live_channel_labels[] = {
+    "any channel", "BCCH", "CCCH", "RACH", "AGCH", "PCH", "SDCCH", "SDCCH4",
+    "SDCCH8", "TCH/F", "TCH/H", "PACCH", "unknown", NULL
+};
+
+static void
+live_filters_changed(AppState *state)
+{
+    live_refilter(state);
+    /* The chip says "shown of total", so it has to follow the filters rather
+       than wait for the next rate tick. */
+    live_update_summary(state);
+}
+
+static void
+live_dir_toggled(GtkToggleButton *btn, gpointer user_data)
+{
+    AppState *state = user_data;
+    (void) btn;
+    if (state->live_ul_toggle == NULL || state->live_dl_toggle == NULL) return;
+    state->live_show_ul = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(state->live_ul_toggle));
+    state->live_show_dl = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(state->live_dl_toggle));
+    live_filters_changed(state);
+}
+
+static void
+live_dbm_changed(GtkSpinButton *spin, gpointer user_data)
+{
+    AppState *state = user_data;
+    state->live_min_dbm = (gint) gtk_spin_button_get_value(spin);
+    live_filters_changed(state);
+}
+
+static void
+live_arfcn_changed(GtkEditable *e, gpointer user_data)
+{
+    AppState *state = user_data;
+    const char *t = gtk_editable_get_text(e);
+
+    /* Typing is not a parse: an empty box means "any", digits mean that cell,
+       and anything else is ignored until it becomes a number rather than
+       emptying the feed on every keystroke. */
+    g_strstrip((char *) t);
+    state->live_filter_arfcn = (*t != '\0' && g_ascii_isdigit(*t))
+        ? (gint) g_ascii_strtoull(t, NULL, 10) : -1;
+    live_filters_changed(state);
+}
+
+static void
+live_channel_changed(GObject *drop, GParamSpec *pspec, gpointer user_data)
+{
+    AppState *state = user_data;
+    guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(drop));
+    guint8 code = (sel < G_N_ELEMENTS(live_channel_codes))
+        ? live_channel_codes[sel] : 0xff;
+
+    state->live_filter_channel = (code == 0xff) ? -1 : (gint) code;
+    live_filters_changed(state);
+    (void) pspec;
+}
+
+static void
+live_port_label_update(AppState *state)
+{
+    if (state->live_port_label == NULL) return;
+    g_autofree char *t = g_strdup_printf(
+        "GSMTAP on udp/%u — the feed gr-gsm, srsRAN and Open5GS all emit.",
+        state->live_port);
+    gtk_label_set_text(GTK_LABEL(state->live_port_label), t);
+}
+
+static void
+live_port_changed(GtkEditable *e, gpointer user_data)
+{
+    AppState *state = user_data;
+    const char *t = gtk_editable_get_text(e);
+    gulong v;
+
+    if (t == NULL || !g_ascii_isdigit(*t)) return;
+    v = g_ascii_strtoull(t, NULL, 10);
+    if (v < 1 || v > 65535) return;
+    /* The label follows what is typed; the socket only moves on a restart,
+       which is what the tooltip promises. */
+    state->live_port = (guint) v;
+    live_port_label_update(state);
+}
+
+/* The checkbox and the path entry together decide one thing: whether the next
+   datagram is written. Opening happens on the first packet's behalf, so the
+   file appears when there is something in it. */
+static void
+live_save_toggled(GtkToggleButton *btn, gpointer user_data)
+{
+    AppState *state = user_data;
+    /* GtkCheckButton is not a GtkToggleButton in GTK4 - they are siblings -
+       so the checked state has to be asked of the check button itself. */
+    if (!gtk_check_button_get_active(GTK_CHECK_BUTTON(btn))) {
+        if (state->live_pcap != NULL) {
+            g_autofree char *name = g_path_get_basename(state->live_pcap_path);
+            guint64 frames = state->live_pcap_packets;
+            live_pcap_close(state);
+            live_capture_label_update(state);
+            if (frames > 0) {
+                g_autofree char *m = g_strdup_printf(
+                    "%s closed — %" G_GUINT64_FORMAT " frames", name, frames);
+                show_toast_full(state, "Live Traffic", m, "ok");
+            }
+        } else {
+            live_capture_label_update(state);
+        }
+        return;
+    }
+
+    /* Turning it on mid-run captures from here; turning it on before the run
+       is the normal case and the listener opens the file when it starts. */
+    if (state->live_socket != NULL)
+        live_capture_begin(state, TRUE);
+    else
+        gtk_label_set_text(GTK_LABEL(state->live_capture_label),
+                           "starts with the listener");
+}
+
+static void
+live_rotate_changed(GtkSpinButton *spin, gpointer user_data)
+{
+    AppState *state = user_data;
+    state->live_pcap_rotate_s = (guint) gtk_spin_button_get_value(spin);
+    if (state->live_pcap_rotate_id != 0) {
+        g_source_remove(state->live_pcap_rotate_id);
+        state->live_pcap_rotate_id = 0;
+    }
+    if (state->live_pcap != NULL && state->live_pcap_rotate_s > 0)
+        state->live_pcap_rotate_id = g_timeout_add_seconds(
+            state->live_pcap_rotate_s, live_pcap_rotate_cb, state);
+}
+
+/* Opening the capture is one decision made from two widgets, so it lives in
+   one place rather than in whichever callback fired first. */
+static void
+live_capture_begin(AppState *state, gboolean announce)
+{
+    const char *typed = state->live_path_entry != NULL
+        ? gtk_editable_get_text(GTK_EDITABLE(state->live_path_entry)) : "";
+    g_autofree char *path = NULL;
+
+    if (typed != NULL && *typed != '\0') {
+        path = g_path_is_absolute(typed)
+            ? g_strdup(typed)
+            : g_build_filename(IMSISTING_ROOT, typed, NULL);
+    } else {
+        path = live_pcap_default_path();
+        if (state->live_path_entry != NULL) {
+            gtk_editable_set_text(GTK_EDITABLE(state->live_path_entry), path);
+            /* The name at the end is the part that identifies the file, so
+               the box shows the end of the path rather than its prefix. */
+            gtk_editable_set_position(GTK_EDITABLE(state->live_path_entry), -1);
+        }
+    }
+
+    if (!live_pcap_open(state, path, announce)) return;
+
+    if (state->live_pcap_rotate_s > 0 && state->live_pcap_rotate_id == 0)
+        state->live_pcap_rotate_id = g_timeout_add_seconds(
+            state->live_pcap_rotate_s, live_pcap_rotate_cb, state);
+    if (announce) {
+        g_autofree char *base = g_path_get_basename(path);
+        g_autofree char *m = g_strdup_printf("capturing to %s", base);
+        show_toast_full(state, "Live Traffic", m, "ok");
+    }
+}
+
+/* ── what a row can do ───────────────────────────────────────────────────
+   The feed is a list of cells you might want to act on, so the actions are
+   the ones that turn a row into something else: into the target, into a
+   filter, into a tuned radio, into the clipboard. */
+static const char *
+live_rat_from_type(guint8 t)
+{
+    switch (t) {
+    case 0x01: case 0x02: case 0x08: return "GSM";
+    case 0x03: return "UMTS";
+    case 0x04: case 0x05: case 0x0a: case 0x0c: return "LTE";
+    case 0x06: case 0x07: case 0x0b: return "NR";
+    default: return NULL;
+    }
+}
+
+static const char *
+live_conv_rat(guint8 t)
+{
+    const char *rat = live_rat_from_type(t);
+    if (rat == NULL) return NULL;
+    if (g_strcmp0(rat, "GSM") == 0)  return "gsm";
+    if (g_strcmp0(rat, "LTE") == 0)  return "lte";
+    if (g_strcmp0(rat, "NR") == 0)   return "nr";
+    return NULL;   /* UMTS ARFCNs are not in the conversion table */
+}
+
+/* The frequency a receiver would have to sit on for this row, asked of the
+   module that owns the table rather than kept as a second copy here. NULL
+   when the ARFCN is outside the table: better no menu item than a tune to a
+   frequency nobody computed. */
+static char *
+live_row_freq(AppState *state, LiveMsg *m)
+{
+    g_autofree char *script = module_script_path("02_cell_recon");
+    g_autofree char *out = NULL;
+    g_autofree char *n = NULL;
+    const char *rat = live_conv_rat(m->raw_type);
+    const char *argv[8];
+    int i = 0;
+
+    if (rat == NULL || script == NULL) return NULL;
+
+    n = g_strdup_printf("%u", m->arfcn);
+    argv[i++] = script;
+    argv[i++] = "--arfcn";
+    argv[i++] = rat;
+    argv[i++] = n;
+    if (g_strcmp0(rat, "gsm") == 0) {
+        argv[i++] = m->up ? "ul" : "dl";
+        if (m->pcs) argv[i++] = "pcs";
+    }
+    argv[i] = NULL;
+
+    out = run_capture(argv);
+    if (out == NULL || g_strstr_len(out, -1, "ERROR") != NULL) return NULL;
+
+    g_auto(GStrv) lines = g_strsplit(out, "\n", -1);
+    for (guint k = 0; lines[k] != NULL; k++) {
+        g_auto(GStrv) kv = g_strsplit(lines[k], "\t", 2);
+        if (g_strv_length(kv) == 2 && g_strcmp0(kv[0], "freq_mhz") == 0)
+            return g_strdup(kv[1]);
+    }
+    (void) state;
+    return NULL;
+}
+
+static void
+live_tune_to(AppState *state, const char *mhz)
+{
+    /* One process, built the way every other verb button builds one, so the
+       run lands in the output card and the event log like any other. */
+    GtkWidget *b = gtk_button_new();
+
+    g_object_set_data(G_OBJECT(b), "state", state);
+    g_object_set_data(G_OBJECT(b), "module-id", (gpointer) "01_radio");
+    g_object_set_data(G_OBJECT(b), "verb", (gpointer) "--set-freq");
+    g_object_set_data_full(G_OBJECT(b), "args", g_strdup(mhz), g_free);
+    g_object_set_data(G_OBJECT(b), "status", state->live_status);
+    group_verb_clicked(GTK_BUTTON(b), NULL);
+    g_object_unref(b);
+}
+
+static void
+live_copy_text(AppState *state, GtkWidget *anchor, const char *text,
+               const char *what)
+{
+    gdk_clipboard_set_text(gtk_widget_get_clipboard(anchor), text);
+    g_autofree char *m = g_strdup_printf("%s copied", what);
+    show_toast_full(state, "Live Traffic", m, "ok");
+}
+
+static void
+live_menu_copy_payload(GtkButton *b, gpointer user_data)
+{
+    (void) user_data;
+    AppState *state = g_object_get_data(G_OBJECT(b), "state");
+    LiveMsg *m = g_object_get_data(G_OBJECT(b), "msg");
+    live_copy_text(state, GTK_WIDGET(b), m->payload != NULL ? m->payload : "",
+                   "payload");
+}
+
+static void
+live_menu_copy_arfcn(GtkButton *b, gpointer user_data)
+{
+    (void) user_data;
+    AppState *state = g_object_get_data(G_OBJECT(b), "state");
+    LiveMsg *m = g_object_get_data(G_OBJECT(b), "msg");
+    g_autofree char *t = g_strdup_printf("%u", m->arfcn);
+    live_copy_text(state, GTK_WIDGET(b), t, "ARFCN");
+}
+
+static void
+live_menu_copy_row(GtkButton *b, gpointer user_data)
+{
+    (void) user_data;
+    AppState *state = g_object_get_data(G_OBJECT(b), "state");
+    LiveMsg *m = g_object_get_data(G_OBJECT(b), "msg");
+    g_autofree char *t = g_strdup_printf(
+        "%u\t%s\t%s\t%s\t%u\t%u\t%d\t%s\t%u\t%s",
+        m->seq, m->time, m->type, m->ch, m->arfcn, m->ts, m->sig, m->dir,
+        m->len, m->payload != NULL ? m->payload : "");
+    live_copy_text(state, GTK_WIDGET(b), t, "row");
+}
+
+static void
+live_menu_filter_arfcn(GtkButton *b, gpointer user_data)
+{
+    (void) user_data;
+    AppState *state = g_object_get_data(G_OBJECT(b), "state");
+    LiveMsg *m = g_object_get_data(G_OBJECT(b), "msg");
+    g_autofree char *t = g_strdup_printf("%u", m->arfcn);
+
+    if (state->live_arfcn_entry != NULL)
+        gtk_editable_set_text(GTK_EDITABLE(state->live_arfcn_entry), t);
+}
+
+static void
+live_menu_set_target(GtkButton *b, gpointer user_data)
+{
+    (void) user_data;
+    AppState *state = g_object_get_data(G_OBJECT(b), "state");
+    LiveMsg *m = g_object_get_data(G_OBJECT(b), "msg");
+    const char *rat = live_rat_from_type(m->raw_type);
+    g_autofree char *t = g_strdup_printf("%u", m->arfcn);
+
+    if (rat == NULL) {
+        show_toast_full(state, "Live Traffic",
+                        "this message type does not name a RAT", "error");
+        return;
+    }
+    if (state->rtarget_rat != NULL)
+        gtk_editable_set_text(GTK_EDITABLE(state->rtarget_rat), rat);
+    if (state->rtarget_arfcn != NULL)
+        gtk_editable_set_text(GTK_EDITABLE(state->rtarget_arfcn), t);
+    /* Through the panel's own Apply, so the validation and the state files
+       are the same ones a typed target gets. */
+    rtarget_apply(state);
+}
+
+static void
+live_menu_tune(GtkButton *b, gpointer user_data)
+{
+    (void) user_data;
+    AppState *state = g_object_get_data(G_OBJECT(b), "state");
+    const char *mhz = g_object_get_data(G_OBJECT(b), "mhz");
+    live_tune_to(state, mhz);
+}
+
+/* A pick returns the row, not the cell under the pointer: the cells are
+   children of the row and none of them is targetable. Every cell of a row
+   carries the same message, so descending to whichever one holds it answers
+   the same question the pointer asked. */
+static gpointer
+live_find_msg(GtkWidget *w)
+{
+    gpointer it;
+
+    if (w == NULL) return NULL;
+    it = g_object_get_data(G_OBJECT(w), "live-msg");
+    if (it != NULL) return it;
+    for (GtkWidget *c = gtk_widget_get_first_child(w); c != NULL;
+         c = gtk_widget_get_next_sibling(c)) {
+        gpointer r = live_find_msg(c);
+        if (r != NULL) return r;
+    }
+    return NULL;
+}
+
+static void
+live_row_menu_pressed(GtkGestureClick *gesture, int n_press,
+                      double x, double y, gpointer user_data)
+{
+    AppState *state = user_data;
+    LiveMsg *m = NULL;
+    GtkWidget *pop, *box;
+    GtkWidget *item;
+    g_autofree char *mhz = NULL;
+
+    (void) n_press;
+    /* The pick cannot land on a cell's label - labels do not take pointer
+       events - so it lands on the row widget, and the row knows its own item.
+       That item is the message the row is showing. */
+    {
+        GtkWidget *w = gtk_widget_pick(state->live_view, x, y, GTK_PICK_DEFAULT);
+        for (; w != NULL; w = gtk_widget_get_parent(w)) {
+            gpointer it = live_find_msg(w);
+            if (it != NULL) { m = g_object_ref(it); break; }
+        }
+    }
+    /* A right-click that lands on the header or on empty space below the rows
+       has no message behind it, and the menu is about a message. */
+    if (m == NULL) return;
+    pop = gtk_popover_new();
+    box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_add_css_class(box, "live-menu");
+
+#define LIVE_MENU_ITEM(label, cb)                                            \
+    do {                                                                     \
+        item = gtk_button_new_with_label(label);                             \
+        gtk_widget_add_css_class(item, "flat");                              \
+        gtk_widget_add_css_class(item, "live-menu-item");                    \
+        g_object_set_data(G_OBJECT(item), "state", state);                   \
+        g_object_set_data(G_OBJECT(item), "msg", m);                         \
+        g_signal_connect(item, "clicked", G_CALLBACK(cb), NULL);             \
+        gtk_box_append(GTK_BOX(box), item);                                  \
+    } while (0)
+
+    g_autofree char *tune_label = NULL;
+    mhz = live_row_freq(state, m);
+    if (mhz != NULL) {
+        g_autofree char *rat = g_strdup(live_rat_from_type(m->raw_type));
+        tune_label = g_strdup_printf("Tune the SDR to %s MHz (%s %s)", mhz,
+                                     rat != NULL ? rat : "",
+                                     m->up ? "uplink" : "downlink");
+    }
+
+    LIVE_MENU_ITEM("Copy payload", live_menu_copy_payload);
+    LIVE_MENU_ITEM("Copy ARFCN", live_menu_copy_arfcn);
+    LIVE_MENU_ITEM("Copy row", live_menu_copy_row);
+    LIVE_MENU_ITEM("Filter to this ARFCN", live_menu_filter_arfcn);
+    LIVE_MENU_ITEM(g_strdup_printf("Set %u as the target", m->arfcn),
+                   live_menu_set_target);
+    if (tune_label != NULL) {
+        item = gtk_button_new_with_label(tune_label);
+        gtk_widget_add_css_class(item, "flat");
+        gtk_widget_add_css_class(item, "live-menu-item");
+        g_object_set_data(G_OBJECT(item), "state", state);
+        g_object_set_data(G_OBJECT(item), "mhz", g_strdup(mhz));
+        g_signal_connect_data(item, "clicked", G_CALLBACK(live_menu_tune),
+                              NULL, NULL, 0);
+        gtk_box_append(GTK_BOX(box), item);
+    }
+#undef LIVE_MENU_ITEM
+
+    g_signal_connect_swapped(pop, "closed", G_CALLBACK(g_object_unref), m);
+    gtk_popover_set_child(GTK_POPOVER(pop), box);
+    gtk_popover_set_has_arrow(GTK_POPOVER(pop), FALSE);
+    gtk_widget_set_parent(pop, state->live_view);
+    /* The popover is rebuilt per click, so it is unparented with the click
+       rather than kept in the page. */
+    g_signal_connect_swapped(pop, "closed", G_CALLBACK(gtk_widget_unparent), pop);
+    {
+        GdkRectangle r = { (int) x, (int) y, 1, 1 };
+        gtk_popover_set_pointing_to(GTK_POPOVER(pop), &r);
+    }
+    gtk_popover_popup(GTK_POPOVER(pop));
+    (void) gesture;
 }
 
 /* The packet inspector used to be a permanent right-hand pane, so the live
@@ -7697,6 +8605,24 @@ create_live_traffic_page(AppState *state)
     GtkWidget *flabel = gtk_label_new("Filter");
     GtkWidget *fentry = gtk_entry_new();
     GtkWidget *fclear = gtk_button_new_with_label("Reset");
+    GtkWidget *bar2   = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *ulbtn  = gtk_toggle_button_new_with_label("UL");
+    GtkWidget *dlbtn  = gtk_toggle_button_new_with_label("DL");
+    GtkWidget *dlabel = gtk_label_new("min dBm");
+    GtkWidget *dspin  = gtk_spin_button_new_with_range(-120, 0, 1);
+    GtkWidget *alabel = gtk_label_new("ARFCN");
+    GtkWidget *aentry = gtk_entry_new();
+    GtkWidget *chlabel = gtk_label_new("Channel");
+    GtkWidget *chdrop = gtk_drop_down_new_from_strings(live_channel_labels);
+    GtkWidget *bar3   = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *plabel = gtk_label_new("Listen udp");
+    GtkWidget *portentry = gtk_entry_new();
+    GtkWidget *savecheck = gtk_check_button_new_with_label("Save pcap");
+    GtkWidget *cappath = gtk_entry_new();
+    GtkWidget *rotlabel = gtk_label_new("rotate every");
+    GtkWidget *rotspin = gtk_spin_button_new_with_range(0, 3600, 30);
+    GtkWidget *rotunit = gtk_label_new("s");
+    GtkWidget *caplabel = gtk_label_new("not saving");
     GtkWidget *scroll = gtk_scrolled_window_new();
     GtkWidget *view   = gtk_column_view_new(NULL);
     GtkWidget *summary = gtk_label_new("0 msg");
@@ -7718,7 +8644,7 @@ create_live_traffic_page(AppState *state)
     gtk_widget_add_css_class(inspector_box, "live-inspector");
     gtk_widget_add_css_class(inspector_btn, "verb-button");
     gtk_widget_set_tooltip_text(inspector_btn,
-        "show the decoded fields of the selected packet");
+        "every field of the selected packet, and its whole payload");
     /* Fixed, because a popover sizes to its content and the text view's
        natural width is the longest decoded line - without this the panel
        grows a horizontal scrollbar and covers the feed it is describing. */
@@ -7761,8 +8687,75 @@ create_live_traffic_page(AppState *state)
     gtk_box_append(GTK_BOX(bar), fclear);
     gtk_widget_set_margin_start(bar, 16);
     gtk_widget_set_margin_end(bar, 16);
-    gtk_widget_set_margin_bottom(bar, 8);
+    gtk_widget_set_margin_bottom(bar, 6);
     gtk_box_append(GTK_BOX(outer), bar);
+
+    /* The decoded-field row. A GSMTAP feed is read by direction and by cell,
+       and neither of those is a substring of anything on screen. */
+    gtk_widget_add_css_class(ulbtn, "verb-button");
+    gtk_widget_add_css_class(dlbtn, "verb-button");
+    gtk_widget_add_css_class(dlabel, "dim");
+    gtk_widget_add_css_class(alabel, "dim");
+    gtk_widget_add_css_class(chlabel, "dim");
+    gtk_widget_set_tooltip_text(ulbtn, "show what the phone sends (uplink)");
+    gtk_widget_set_tooltip_text(dlbtn, "show what the network sends (downlink)");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ulbtn), TRUE);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(dlbtn), TRUE);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(dspin), 0);
+    gtk_widget_set_tooltip_text(dspin,
+        "hide frames weaker than this — 0 means off, and a frame whose signal "
+        "the emitter did not report is never hidden");
+    gtk_widget_set_size_request(dspin, 78, -1);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(aentry), "any");
+    gtk_widget_set_size_request(aentry, 80, -1);
+    gtk_widget_set_tooltip_text(aentry, "show one ARFCN only");
+    gtk_widget_set_tooltip_text(chdrop,
+        "show one logical channel only — BCCH, CCCH, SDCCH, TCH and so on");
+    gtk_box_append(GTK_BOX(bar2), ulbtn);
+    gtk_box_append(GTK_BOX(bar2), dlbtn);
+    gtk_box_append(GTK_BOX(bar2), dlabel);
+    gtk_box_append(GTK_BOX(bar2), dspin);
+    gtk_box_append(GTK_BOX(bar2), alabel);
+    gtk_box_append(GTK_BOX(bar2), aentry);
+    gtk_box_append(GTK_BOX(bar2), chlabel);
+    gtk_box_append(GTK_BOX(bar2), chdrop);
+    gtk_widget_set_margin_start(bar2, 16);
+    gtk_widget_set_margin_end(bar2, 16);
+    gtk_widget_set_margin_bottom(bar2, 6);
+    gtk_box_append(GTK_BOX(outer), bar2);
+
+    /* The listener's port and the capture. Both are settings for the run, not
+       for the view, so they sit together and away from the filters. */
+    gtk_widget_add_css_class(plabel, "dim");
+    gtk_widget_add_css_class(rotlabel, "dim");
+    gtk_widget_add_css_class(rotunit, "dim");
+    gtk_widget_add_css_class(caplabel, "live-capture");
+    gtk_widget_set_tooltip_text(portentry,
+        "the UDP port the listener binds — applied when it starts");
+    gtk_widget_set_size_request(portentry, 74, -1);
+    gtk_widget_set_tooltip_text(savecheck,
+        "write every datagram to a pcap as it arrives, filtered or not");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(cappath),
+        "captures/live_<time>.pcap");
+    gtk_widget_set_hexpand(cappath, TRUE);
+    gtk_widget_set_tooltip_text(rotspin,
+        "start a new file this often — 0 keeps one file for the whole run, "
+        "and the newest twenty are kept");
+    gtk_widget_set_size_request(rotspin, 80, -1);
+    gtk_label_set_ellipsize(GTK_LABEL(caplabel), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_label_set_xalign(GTK_LABEL(caplabel), 0.0f);
+    gtk_box_append(GTK_BOX(bar3), plabel);
+    gtk_box_append(GTK_BOX(bar3), portentry);
+    gtk_box_append(GTK_BOX(bar3), savecheck);
+    gtk_box_append(GTK_BOX(bar3), cappath);
+    gtk_box_append(GTK_BOX(bar3), rotlabel);
+    gtk_box_append(GTK_BOX(bar3), rotspin);
+    gtk_box_append(GTK_BOX(bar3), rotunit);
+    gtk_box_append(GTK_BOX(bar3), caplabel);
+    gtk_widget_set_margin_start(bar3, 16);
+    gtk_widget_set_margin_end(bar3, 16);
+    gtk_widget_set_margin_bottom(bar3, 8);
+    gtk_box_append(GTK_BOX(outer), bar3);
 
     /* ---- table ---- */
     state->live_store = g_list_store_new(LIVE_TYPE_MSG);
@@ -7850,11 +8843,58 @@ create_live_traffic_page(AppState *state)
     /* One tick a second drives the arrival rate and the quiet indicator. */
     state->live_rate_timer   = g_timeout_add_seconds(1, live_rate_tick, state);
 
+    /* The listener's port, the capture, and the decoded-field filters. */
+    state->live_port          = LIVE_PORT;
+    state->live_port_entry    = portentry;
+    state->live_port_label    = sub;
+    state->live_save_check    = savecheck;
+    state->live_path_entry    = cappath;
+    state->live_rotate_spin   = rotspin;
+    state->live_capture_label = caplabel;
+    state->live_ul_toggle     = ulbtn;
+    state->live_dl_toggle     = dlbtn;
+    state->live_dbm_spin      = dspin;
+    state->live_arfcn_entry   = aentry;
+    state->live_channel_drop  = chdrop;
+    state->live_show_ul       = TRUE;
+    state->live_show_dl       = TRUE;
+    state->live_min_dbm       = 0;
+    state->live_filter_arfcn  = -1;
+    state->live_filter_channel = -1;
+    state->live_pcap          = NULL;
+    state->live_pcap_path     = NULL;
+    state->live_pcap_rotate_s = 0;
+    state->live_pcap_rotate_id = 0;
+    state->live_pcap_failed   = FALSE;
+    {
+        g_autofree char *port = g_strdup_printf("%u", state->live_port);
+        gtk_editable_set_text(GTK_EDITABLE(portentry), port);
+    }
+    live_port_label_update(state);
+
     g_signal_connect(start,  "clicked", G_CALLBACK(live_toggle_clicked), state);
     g_signal_connect(clear,  "clicked", G_CALLBACK(live_clear_clicked), state);
     g_signal_connect(fentry, "changed", G_CALLBACK(live_filter_changed), state);
     g_signal_connect(pause,  "clicked", G_CALLBACK(live_pause_clicked), state);
     g_signal_connect(fclear, "clicked", G_CALLBACK(live_filter_cleared), state);
+    g_signal_connect(ulbtn,  "toggled", G_CALLBACK(live_dir_toggled), state);
+    g_signal_connect(dlbtn,  "toggled", G_CALLBACK(live_dir_toggled), state);
+    g_signal_connect(dspin,  "value-changed", G_CALLBACK(live_dbm_changed), state);
+    g_signal_connect(aentry, "changed", G_CALLBACK(live_arfcn_changed), state);
+    g_signal_connect(chdrop, "notify::selected", G_CALLBACK(live_channel_changed), state);
+    g_signal_connect(savecheck, "toggled", G_CALLBACK(live_save_toggled), state);
+    g_signal_connect(rotspin, "value-changed", G_CALLBACK(live_rotate_changed), state);
+    g_signal_connect(portentry, "changed", G_CALLBACK(live_port_changed), state);
+    /* Right-click on a row: the actions that need the row's own values. */
+    {
+        GtkGesture *rc = gtk_gesture_click_new();
+        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(rc), GDK_BUTTON_SECONDARY);
+        /* On release, not on press: the popover would be dismissed by the
+           very button release that opened it if it appeared while the button
+           was still down. */
+        g_signal_connect(rc, "released", G_CALLBACK(live_row_menu_pressed), state);
+        gtk_widget_add_controller(view, GTK_EVENT_CONTROLLER(rc));
+    }
     return outer;
 }
 
@@ -7882,7 +8922,7 @@ drawer_set_open(AppState *state, gboolean open)
     if (open && state->drawer_nav != NULL) {
         int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(state->notebook));
         state->drawer_nav_syncing = TRUE;
-        if (cur >= 0 && cur < 6 && state->drawer_nav_rows[cur] != NULL)
+        if (cur >= 0 && cur < 7 && state->drawer_nav_rows[cur] != NULL)
             gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
                 GTK_LIST_BOX_ROW(state->drawer_nav_rows[cur]));
         else
@@ -11193,13 +12233,369 @@ static ModuleSubmenuEntry tmap_entries[] = {
       "preferences-system-symbolic",
       "--clear:Clear" },
 };
+/* --------------------------------------------------------------------------
+   The field kit is a pre-flight instrument and an honesty check, so the page
+   is laid out the way wifisting lays a module page out: the state of the
+   machine first, then one view per job. The Emitter is a synthetic GSMTAP
+   source, which is what makes Live Traffic testable with no radio attached at
+   all; the guard matrix is the module's verdict on every radio-gated verb - a
+   verb that returns success with nothing attached is the one failure the whole
+   module exists to catch, so it belongs on screen rather than in a report file
+   nobody opens.
+   -------------------------------------------------------------------------- */
+
+static const struct { const char *id; const char *label; } fkit_scenarios[] = {
+    { "gsm-idle",     "GSM Idle" },
+    { "gsm-attach",   "GSM Attach" },
+    { "lte-attach",   "LTE Attach" },
+    { "imsi-catcher", "IMSI Catcher" },
+    { "mixed",        "Mixed" },
+};
+
+static char *
+fkit_status_summary(const char *module_id)
+{
+    g_autofree char *script = module_script_path(module_id);
+    const char *argv[] = { script, "--status-tsv", NULL };
+    g_autofree char *raw = run_capture(argv);
+    g_autofree char *sdr = raw ? tsv_field(raw, "sdr") : NULL;
+    g_autofree char *serial = raw ? tsv_field(raw, "serial") : NULL;
+    g_autofree char *guards = raw ? tsv_field(raw, "guards") : NULL;
+    g_autofree char *port = raw ? tsv_field(raw, "port") : NULL;
+
+    return g_strdup_printf("SDR  %s   |   serial  %s   |   GSMTAP  udp/%s",
+        (sdr && *sdr) ? sdr : "none",
+        (serial && *serial) ? serial : "none",
+        (port && *port) ? port : "4729");
+}
+
+/* Rows of buttons, not columns of them: five scenarios are five buttons on one
+   line, and they rewrap with the window instead of stretching a grid. */
+static GtkWidget *
+fkit_flow(void)
+{
+    GtkWidget *flow = gtk_flow_box_new();
+
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(flow), GTK_SELECTION_NONE);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(flow), 8);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(flow), 8);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(flow), 6);
+    return flow;
+}
+
+static void
+fkit_flow_add(GtkWidget *flow, GtkWidget *button, const char *extra_class)
+{
+    GtkWidget *child = gtk_flow_box_child_new();
+
+    gtk_widget_add_css_class(button, "verb-button");
+    if (extra_class != NULL) gtk_widget_add_css_class(button, extra_class);
+    gtk_flow_box_child_set_child(GTK_FLOW_BOX_CHILD(child), button);
+    gtk_flow_box_append(GTK_FLOW_BOX(flow), child);
+}
+
+static GtkWidget *
+fkit_note(const char *text)
+{
+    GtkWidget *label = gtk_label_new(text);
+
+    gtk_widget_add_css_class(label, "fkit-note");
+    gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+    return label;
+}
+
+/* The capability report, as the module prints it: key, tab, value. */
+static void
+fkit_fill_machine(GtkWidget *card_body)
+{
+    g_autofree char *script = module_script_path("05_field_kit");
+    const char *argv[] = { script, "--capability", NULL };
+    g_autofree char *text = run_capture(argv);
+    g_auto(GStrv) lines = NULL;
+
+    if (text == NULL || *text == '\0') {
+        gtk_box_append(GTK_BOX(card_body), fkit_note("The module did not answer."));
+        return;
+    }
+    lines = g_strsplit(text, "\n", -1);
+    for (int i = 0; lines[i] != NULL; i++) {
+        char *tab = strchr(lines[i], '\t');
+        GtkWidget *row, *key, *value;
+
+        if (tab == NULL) continue;
+        *tab = '\0';
+        row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+        key = gtk_label_new(lines[i]);
+        value = gtk_label_new(tab + 1);
+        gtk_widget_add_css_class(row, "fkit-kv-row");
+        gtk_widget_add_css_class(key, "fkit-kv-key");
+        gtk_widget_add_css_class(value, "fkit-kv-val");
+        gtk_widget_set_size_request(key, 190, -1);
+        gtk_label_set_xalign(GTK_LABEL(key), 0.0f);
+        gtk_label_set_xalign(GTK_LABEL(value), 0.0f);
+        gtk_label_set_selectable(GTK_LABEL(value), TRUE);
+        gtk_widget_set_hexpand(value, TRUE);
+        gtk_label_set_ellipsize(GTK_LABEL(value), PANGO_ELLIPSIZE_END);
+        gtk_box_append(GTK_BOX(row), key);
+        gtk_box_append(GTK_BOX(row), value);
+        gtk_box_append(GTK_BOX(card_body), row);
+    }
+}
+
+static GtkWidget *
+fkit_build_overview(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("FIELD KIT",
+        "RF pre-flight, the honesty check, and the synthetic source Live Traffic listens to.",
+        &body);
+    GtkWidget *machine_body;
+    GtkWidget *checks_body;
+    GtkWidget *machine = verb_card("THIS MACHINE", &machine_body);
+    GtkWidget *checks = verb_card("CHECKS", &checks_body);
+    GtkWidget *flow = fkit_flow();
+    g_autofree char *summary = fkit_status_summary(module_id);
+    GtkWidget *banner = gtk_label_new(summary);
+    static const struct { const char *label; const char *verb; } probe[] = {
+        { "Capability Report", "--capability" },
+        { "Guard Check",       "--guard-check" },
+        { "Selftest",          "--selftest" },
+        { "Scenarios",         "--scenarios" },
+    };
+
+    fkit_fill_machine(machine_body);
+    for (guint i = 0; i < G_N_ELEMENTS(probe); i++) {
+        GtkWidget *button = gtk_button_new_with_label(probe[i].label);
+
+        radio_bench_run_button(button, state, module_id, status, probe[i].verb, NULL);
+        fkit_flow_add(flow, button, i == 0 ? "primary" : "flat");
+    }
+    gtk_box_append(GTK_BOX(checks_body), flow);
+    gtk_box_append(GTK_BOX(checks_body),
+        fkit_note("The guard check runs every radio-gated verb with nothing attached. "
+                  "It fails honestly when a verb says what is missing, and it calls a verb "
+                  "fabricated when it returns a success it cannot have earned."));
+    gtk_widget_add_css_class(banner, "crec-survey-status");
+    gtk_label_set_xalign(GTK_LABEL(banner), 0.0f);
+    gtk_label_set_selectable(GTK_LABEL(banner), TRUE);
+    gtk_box_append(GTK_BOX(body), banner);
+    gtk_box_append(GTK_BOX(body), machine);
+    gtk_box_append(GTK_BOX(body), checks);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
+static GtkWidget *
+fkit_build_emitter(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SYNTHETIC SOURCE",
+        "Spec-shaped GSMTAP frames, so the decoder and the live view can be exercised with "
+        "no radio, no antenna and no transmission licence.", &body);
+    GtkWidget *live_body;
+    GtkWidget *write_body;
+    GtkWidget *live = verb_card("STREAM TO LIVE TRAFFIC", &live_body);
+    GtkWidget *write = verb_card("WRITE A CAPTURE", &write_body);
+    GtkWidget *live_flow = fkit_flow();
+    GtkWidget *write_flow = fkit_flow();
+
+    for (guint i = 0; i < G_N_ELEMENTS(fkit_scenarios); i++) {
+        g_autofree char *stream = g_strdup_printf("%s 40 0.25 udp", fkit_scenarios[i].id);
+        g_autofree char *file = g_strdup_printf("%s 40 0.1 {root}/captures/fieldkit_%s.pcap",
+                                                fkit_scenarios[i].id, fkit_scenarios[i].id);
+        GtkWidget *to_live = gtk_button_new_with_label(fkit_scenarios[i].label);
+        GtkWidget *to_file = gtk_button_new_with_label(fkit_scenarios[i].label);
+
+        radio_bench_run_button(to_live, state, module_id, status, "--emit", stream);
+        radio_bench_run_button(to_file, state, module_id, status, "--emit", file);
+        fkit_flow_add(live_flow, to_live,
+                      g_strcmp0(fkit_scenarios[i].id, "mixed") == 0 ? "primary" : "flat");
+        fkit_flow_add(write_flow, to_file, "flat");
+    }
+    gtk_box_append(GTK_BOX(live_body), live_flow);
+    gtk_box_append(GTK_BOX(live_body),
+        fkit_note("Forty frames, one every 250 ms - about ten seconds for Live Traffic to "
+                  "show. Open that page first; the emitter waits for nothing."));
+    gtk_box_append(GTK_BOX(live_body), radio_bench_arg_action(state, module_id, status,
+        "Custom", "gsm-attach 40 0.25 udp", "--emit", "Emit"));
+    gtk_box_append(GTK_BOX(write_body), write_flow);
+    gtk_box_append(GTK_BOX(write_body),
+        fkit_note("Written as a real pcap - Ethernet, IPv4, UDP on 4729 - so tshark and "
+                  "03_gsmtap.sh --decode read it. An existing file of that name is overwritten."));
+    gtk_box_append(GTK_BOX(write_body), radio_bench_arg_action(state, module_id, status,
+        "To a path", "mixed 40 0.2 {root}/captures/mine.pcap", "--emit", "Write"));
+    gtk_box_append(GTK_BOX(body), live);
+    gtk_box_append(GTK_BOX(body), write);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    return outer;
+}
+
+/* The guard matrix, read back from the report the check writes. */
+typedef struct {
+    GtkWidget *list;
+    GtkWidget *summary;
+} FkitGuards;
+
+static const char *
+fkit_guard_class(const char *status)
+{
+    /* Green is the honest failure - non-zero, and it said why. */
+    if (g_strcmp0(status, "honest-fail") == 0) return "fk-guard-ok";
+    if (g_strcmp0(status, "silent-fail") == 0) return "fk-guard-bad";
+    if (g_strcmp0(status, "FABRICATED") == 0) return "fk-guard-bad";
+    return "fk-guard-warn";
+}
+
+static void
+fkit_guards_fill(FkitGuards *guards)
+{
+    g_autofree char *path = g_build_filename(IMSISTING_ROOT, "loot", "field_kit",
+                                             "guard-check.tsv", NULL);
+    g_autofree char *text = NULL;
+    g_autofree char *summary = NULL;
+    GtkWidget *child;
+    guint total = 0, honest = 0, silent = 0, fabricated = 0, other = 0;
+
+    while ((child = gtk_widget_get_first_child(guards->list)) != NULL)
+        gtk_list_box_remove(GTK_LIST_BOX(guards->list), child);
+
+    if (g_file_get_contents(path, &text, NULL, NULL)) {
+        g_auto(GStrv) lines = g_strsplit(text, "\n", -1);
+
+        for (int i = 0; lines[i] != NULL; i++) {
+            g_auto(GStrv) field = NULL;
+            const char *status;
+            GtkWidget *row, *box, *dot, *module, *verb, *detail;
+
+            if (*lines[i] == '\0') continue;
+            field = g_strsplit(lines[i], "\t", 4);
+            status = field[2];
+            if (g_strcmp0(field[0], "module") == 0) continue;   /* the header row */
+            if (field[0] == NULL || field[1] == NULL || status == NULL) continue;
+            total++;
+            if (g_strcmp0(status, "honest-fail") == 0) honest++;
+            else if (g_strcmp0(status, "silent-fail") == 0) silent++;
+            else if (g_strcmp0(status, "FABRICATED") == 0) fabricated++;
+            else other++;
+
+            row = gtk_list_box_row_new();
+            box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+            dot = gtk_label_new("\u25cf");
+            module = gtk_label_new(field[0]);
+            verb = gtk_label_new(field[1]);
+            detail = gtk_label_new((field[3] != NULL && *field[3] != '\0') ? field[3] : status);
+            gtk_widget_add_css_class(box, "fk-guard-row");
+            gtk_widget_add_css_class(dot, "status-dot");
+            gtk_widget_add_css_class(dot, fkit_guard_class(status));
+            gtk_widget_add_css_class(module, "fk-guard-module");
+            gtk_widget_add_css_class(verb, "fk-guard-verb");
+            gtk_widget_add_css_class(detail, "fk-guard-detail");
+            gtk_widget_set_size_request(module, 150, -1);
+            gtk_widget_set_size_request(verb, 170, -1);
+            gtk_label_set_xalign(GTK_LABEL(module), 0.0f);
+            gtk_label_set_xalign(GTK_LABEL(verb), 0.0f);
+            gtk_label_set_xalign(GTK_LABEL(detail), 0.0f);
+            gtk_label_set_ellipsize(GTK_LABEL(detail), PANGO_ELLIPSIZE_END);
+            gtk_label_set_selectable(GTK_LABEL(detail), TRUE);
+            gtk_widget_set_hexpand(detail, TRUE);
+            gtk_box_append(GTK_BOX(box), dot);
+            gtk_box_append(GTK_BOX(box), module);
+            gtk_box_append(GTK_BOX(box), verb);
+            gtk_box_append(GTK_BOX(box), detail);
+            gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+            gtk_list_box_append(GTK_LIST_BOX(guards->list), row);
+        }
+    }
+
+    if (total == 0) {
+        summary = g_strdup("No report read yet - run the guard check.");
+    } else {
+        summary = g_strdup_printf("%u verbs:  %u failed honestly  |  %u failed silently  |  "
+                                  "%u fabricated  |  %u other", total, honest, silent,
+                                  fabricated, other);
+    }
+    gtk_label_set_text(GTK_LABEL(guards->summary), summary);
+}
+
+static void
+fkit_guards_refresh(GtkWidget *widget, gpointer user_data)
+{
+    (void) widget;
+    fkit_guards_fill(user_data);
+}
+
+static void
+fkit_guards_status_changed(GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+    (void) object;
+    (void) pspec;
+    fkit_guards_fill(user_data);
+}
+
+static GtkWidget *
+fkit_build_guards(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("HONESTY CHECK",
+        "Every radio-gated verb, run with nothing attached. Non-zero and naming what is "
+        "missing is the honest answer; success is the failure this view exists to catch.",
+        &body);
+    GtkWidget *matrix_body;
+    GtkWidget *matrix = verb_card("GUARD MATRIX", &matrix_body);
+    GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *summary = gtk_label_new(NULL);
+    GtkWidget *run = gtk_button_new_with_label("Run guard check");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh");
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    GtkWidget *list = gtk_list_box_new();
+    FkitGuards *guards = g_new0(FkitGuards, 1);
+
+    guards->list = list;
+    guards->summary = summary;
+    g_object_set_data_full(G_OBJECT(list), "fkit-guards", guards, g_free);
+
+    gtk_widget_set_hexpand(summary, TRUE);
+    gtk_label_set_xalign(GTK_LABEL(summary), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(summary), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(summary, "fkit-note");
+    gtk_widget_add_css_class(run, "verb-button");
+    gtk_widget_add_css_class(run, "primary");
+    gtk_widget_add_css_class(refresh, "flat");
+    radio_bench_run_button(run, state, module_id, status, "--guard-check", NULL);
+    g_signal_connect(refresh, "clicked", G_CALLBACK(fkit_guards_refresh), guards);
+    /* The report is written by the run, so the list follows the status pill:
+       while that reads Running the file is still being appended to, and when it
+       settles the rows are there to be read. */
+    g_signal_connect(status, "notify::label", G_CALLBACK(fkit_guards_status_changed), guards);
+
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
+    gtk_list_box_set_show_separators(GTK_LIST_BOX(list), TRUE);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), list);
+    gtk_widget_set_size_request(scroll, -1, 240);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_widget_add_css_class(scroll, "fkit-guard-scroll");
+
+    gtk_box_append(GTK_BOX(bar), summary);
+    gtk_box_append(GTK_BOX(bar), run);
+    gtk_box_append(GTK_BOX(bar), refresh);
+    gtk_box_append(GTK_BOX(matrix_body), bar);
+    gtk_box_append(GTK_BOX(matrix_body), scroll);
+    gtk_box_append(GTK_BOX(body), matrix);
+    if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
+    fkit_guards_fill(guards);
+    return outer;
+}
+
 static ModuleSubmenuEntry fkit_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--capability:Capability|--guard-check:Guard Check|--scenarios:Scenarios" },
-    { "Emitter",
-      "media-record-symbolic",
-      "--emit:Emit Sample" },
+    { "Overview", "dialog-information-symbolic", NULL, fkit_build_overview },
+    { "Emitter",  "media-record-symbolic",       NULL, fkit_build_emitter },
+    { "Guards",   "security-high-symbolic",      NULL, fkit_build_guards },
 };
 static ModuleSubmenuEntry gair_entries[] = {
     { "Overview",

@@ -56,6 +56,10 @@ imsisting_resources = gnome.compile_resources(
   'resources/imsisting.gresource.xml',
   source_dir: 'resources',
   c_name: 'imsisting',
+  # The manifest names the files, so meson has no other way to learn that the
+  # sheet changed: without this a CSS-only edit is silently not embedded, and
+  # the running app keeps the old styles with nothing to say so.
+  dependencies: files('resources/style.css'),
 )
 
 executable(

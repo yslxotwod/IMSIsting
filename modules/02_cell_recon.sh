@@ -72,24 +72,65 @@ crec_split() {
 }
 
 # ── band / ARFCN tables ─────────────────────────────────────────────────
-# GSM ARFCN -> uplink MHz.  GSM900: F = 890 + 0.2*N (N=1..124)
-#                          GSM1800: F = 1710 + 0.2*(N-511) (N=512..885)
-#                          GSM850: F = 824 + 0.2*N (N=128..251)
-#                          GSM1900: F = 1850 + 0.2*(N-512) (N=512..810)
-crec_gsm_arfcn_to_mhz() {
-    local arfcn="$1"
+# The ARFCN raster alone does not name the band: 512..810 is valid for both
+# DCS1800 and PCS1900, and only the operator (or the 0x8000 PCS flag in a
+# GSMTAP header) knows which. So the band is resolved first, and the numeric
+# ranges are stated once, here.
+#
+#   GSM900   1..124    uplink F = 890  + 0.2*N        duplex +45
+#   GSM850   128..251  uplink F = 824  + 0.2*N        duplex +45
+#   DCS1800  512..885  uplink F = 1710 + 0.2*(N-511)  duplex +95
+#   PCS1900  512..810  uplink F = 1850 + 0.2*(N-512)  duplex +80
+#
+# ARFCN 0 and the 975..1023 range are the GSM900 extension band; they are left
+# out on purpose rather than mapped by a guess.
+crec_gsm_arfcn_band() {
+    local arfcn="$1" hint="${2:-}"
     [[ "$arfcn" =~ ^[0-9]+$ ]] || return 1
-    if (( arfcn >= 1 && arfcn <= 124 )); then
-        awk -v n="$arfcn" 'BEGIN{printf "%.1f", 890 + 0.2*n}'
-    elif (( arfcn >= 128 && arfcn <= 251 )); then
-        awk -v n="$arfcn" 'BEGIN{printf "%.1f", 824 + 0.2*n}'
-    elif (( arfcn >= 512 && arfcn <= 885 )); then
-        awk -v n="$arfcn" 'BEGIN{printf "%.1f", 1710 + 0.2*(n-511)}'
-    elif (( arfcn >= 512 && arfcn <= 810 )); then
-        awk -v n="$arfcn" 'BEGIN{printf "%.1f", 1850 + 0.2*(n-512)}'
-    else
-        return 1
+    case "$hint" in
+        pcs|1900|pcs1900) (( arfcn >= 512 && arfcn <= 810 )) && { echo pcs1900; return 0; }; return 1 ;;
+        dcs|1800|dcs1800) (( arfcn >= 512 && arfcn <= 885 )) && { echo dcs1800; return 0; }; return 1 ;;
+    esac
+    if   (( arfcn >= 1   && arfcn <= 124 )); then echo gsm900
+    elif (( arfcn >= 128 && arfcn <= 251 )); then echo gsm850
+    elif (( arfcn >= 512 && arfcn <= 885 )); then echo dcs1800
+    elif (( arfcn >= 512 && arfcn <= 810 )); then echo pcs1900
+    else return 1
     fi
+}
+
+# MHz the downlink sits above the uplink for a band.
+crec_gsm_duplex_mhz() {
+    case "$1" in
+        gsm900|gsm850) echo 45 ;;
+        dcs1800)       echo 95 ;;
+        pcs1900)       echo 80 ;;
+        *)             return 1 ;;
+    esac
+}
+
+# GSM ARFCN -> uplink MHz. Same call shape and same numbers as always; the
+# optional second argument only breaks the 1800/1900 tie.
+crec_gsm_arfcn_to_mhz() {
+    local arfcn="$1" hint="${2:-}" band
+    band=$(crec_gsm_arfcn_band "$arfcn" "$hint") || return 1
+    case "$band" in
+        gsm900)  awk -v n="$arfcn" 'BEGIN{printf "%.1f", 890 + 0.2*n}' ;;
+        gsm850)  awk -v n="$arfcn" 'BEGIN{printf "%.1f", 824 + 0.2*n}' ;;
+        dcs1800) awk -v n="$arfcn" 'BEGIN{printf "%.1f", 1710 + 0.2*(n-511)}' ;;
+        pcs1900) awk -v n="$arfcn" 'BEGIN{printf "%.1f", 1850 + 0.2*(n-512)}' ;;
+        *)       return 1 ;;
+    esac
+}
+
+# The frequency a receiver has to sit on to hear this ARFCN in that direction.
+crec_gsm_arfcn_to_mhz_dir() {
+    local arfcn="$1" dir="${2:-ul}" hint="${3:-}" band ul dup
+    band=$(crec_gsm_arfcn_band "$arfcn" "$hint") || return 1
+    ul=$(crec_gsm_arfcn_to_mhz "$arfcn" "$band") || return 1
+    [[ "$dir" == "dl" || "$dir" == "downlink" ]] || { printf '%s' "$ul"; return 0; }
+    dup=$(crec_gsm_duplex_mhz "$band") || return 1
+    awk -v f="$ul" -v d="$dup" 'BEGIN{printf "%.1f", f + d}'
 }
 
 # LTE EARFCN -> downlink MHz.  F = F_low + 0.1*(N - N_offs)
@@ -515,13 +556,26 @@ crec_cmd_scan() {
 }
 
 crec_cmd_arfcn() {
-    local rat="${1:-}" n="${2:-}"
-    [[ -n "$rat" && -n "$n" ]] || { printf 'ERROR\tusage: --arfcn <gsm|lte|nr> <N>\n' >&2; return 2; }
-    local f rc=0
+    local rat="${1:-}" n="${2:-}" dir="${3:-}" hint="${4:-}"
+    [[ -n "$rat" && -n "$n" ]] || { printf 'ERROR\tusage: --arfcn <gsm|lte|nr> <N> [ul|dl] [pcs|dcs]\n' >&2; return 2; }
+    local f rc=0 band=""
     case "$rat" in
-        gsm) f=$(crec_gsm_arfcn_to_mhz "$n") || rc=1 ;;
-        lte) f=$(crec_lte_earfcn_to_mhz "$n") || rc=1 ;;
-        nr)  f=$(crec_nr_arfcn_to_mhz "$n") || rc=1 ;;
+        gsm)
+            # The optional direction is the difference between hearing the
+            # cell and hearing the phone: on the uplink the duplex split sits
+            # between them, so a receiver parked on the wrong one sees nothing.
+            [[ -z "$dir" ]] && dir=ul
+            case "$dir" in
+                ul|uplink)   dir=ul ;;
+                dl|downlink) dir=dl ;;
+                pcs|dcs|pcs1900|dcs1800) band="$dir"; dir=ul ;;
+                *) printf 'ERROR\tunknown direction: %s (ul or dl)\n' "$dir" >&2; return 2 ;;
+            esac
+            [[ -n "$hint" ]] && band="$hint"
+            f=$(crec_gsm_arfcn_to_mhz_dir "$n" "$dir" "$band") || rc=1
+            ;;
+        lte) f=$(crec_lte_earfcn_to_mhz "$n") || rc=1; dir=dl ;;
+        nr)  f=$(crec_nr_arfcn_to_mhz "$n") || rc=1; dir=dl ;;
         *)   printf 'ERROR\tunknown rat: %s\n' "$rat" >&2; return 2 ;;
     esac
     if [[ "$rc" -ne 0 || -z "$f" ]]; then
@@ -529,6 +583,9 @@ crec_cmd_arfcn() {
         return 1
     fi
     printf 'rat\t%s\narfcn\t%s\nfreq_mhz\t%s\n' "$rat" "$n" "$f"
+    [[ "$rat" == "gsm" ]] && printf 'band\t%s\ndirection\t%s\n' \
+        "$(crec_gsm_arfcn_band "$n" "$band")" "$dir"
+    return 0
 }
 
 crec_cmd_plmn() {
@@ -782,7 +839,7 @@ crec_cli_main() {
         --status-tsv)   crec_cli_status_tsv ;;
         --list-tsv)     crec_cmd_list_tsv ;;
         --scan)         crec_cmd_scan "${1:-gsm}" "${2:-}" ;;
-        --arfcn)        crec_cmd_arfcn "${1:-}" "${2:-}" ;;
+        --arfcn)        crec_cmd_arfcn "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --plmn)         crec_cmd_plmn "${1:-}" ;;
         --set-target)   crec_cmd_set_target "${1:-}" "${2:-}" "${3:-}" ;;
         --target-tsv)   crec_cmd_target_tsv ;;

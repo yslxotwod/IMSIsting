@@ -817,39 +817,48 @@ progressbar.stat-bar progress {
 /* ══════════════════════════════════════════════════════════════════
    Category accents — one hue per taxonomy group
    ══════════════════════════════════════════════════════════════════ */
-.cat-system   { color: #93a2b8; }
-.cat-recon    { color: #4fb3d9; }
-.cat-air      { color: #6a8dff; }
-.cat-core     { color: #a98bff; }
-.cat-sim      { color: #4fd08a; }
-.cat-attacks  { color: #ef6b6b; }
-.cat-analysis { color: #e0b357; }
-.cat-rf       { color: #e07bd0; }
+.cat-system     { color: #93a2b8; }
+.cat-recon      { color: #4fb3d9; }
+.cat-radio      { color: #6a8dff; }
+.cat-access     { color: #4fd0c0; }
+.cat-core       { color: #a98bff; }
+.cat-sim        { color: #4fd08a; }
+.cat-baseband   { color: #f0913f; }
+.cat-tracking   { color: #e07bd0; }
+.cat-analysis   { color: #e0b357; }
+.cat-kits       { color: #ef6b6b; }
+.cat-intercept  { color: #d98a9c; }
 
-/* Per-category tints for the TILE surfaces are deliberately gone. Eight
+/* Per-category tints for the TILE surfaces are deliberately gone. Eleven
    hues across a dashboard is colour doing the structural work: it reads as
    organised only because it is colourful, so it collapses the moment the
    theme changes. The tile is neutral; the category is carried by the
    accent label and the icon. `.cat-*` still colours the module page's own
    header rail, where it labels a single page rather than a whole grid. */
 
-.module-header-bar.cat-system   { border-left-color: #93a2b8; }
-.module-header-bar.cat-recon    { border-left-color: #4fb3d9; }
-.module-header-bar.cat-air      { border-left-color: #6a8dff; }
-.module-header-bar.cat-core     { border-left-color: #a98bff; }
-.module-header-bar.cat-sim      { border-left-color: #4fd08a; }
-.module-header-bar.cat-attacks  { border-left-color: #ef6b6b; }
-.module-header-bar.cat-analysis { border-left-color: #e0b357; }
-.module-header-bar.cat-rf       { border-left-color: #e07bd0; }
+.module-header-bar.cat-system     { border-left-color: #93a2b8; }
+.module-header-bar.cat-recon      { border-left-color: #4fb3d9; }
+.module-header-bar.cat-radio      { border-left-color: #6a8dff; }
+.module-header-bar.cat-access     { border-left-color: #4fd0c0; }
+.module-header-bar.cat-core       { border-left-color: #a98bff; }
+.module-header-bar.cat-sim        { border-left-color: #4fd08a; }
+.module-header-bar.cat-baseband   { border-left-color: #f0913f; }
+.module-header-bar.cat-tracking   { border-left-color: #e07bd0; }
+.module-header-bar.cat-analysis   { border-left-color: #e0b357; }
+.module-header-bar.cat-kits       { border-left-color: #ef6b6b; }
+.module-header-bar.cat-intercept  { border-left-color: #d98a9c; }
 
-.sidebar-category.cat-system   { color: #93a2b8; }
-.sidebar-category.cat-recon    { color: #4fb3d9; }
-.sidebar-category.cat-air      { color: #6a8dff; }
-.sidebar-category.cat-core     { color: #a98bff; }
-.sidebar-category.cat-sim      { color: #4fd08a; }
-.sidebar-category.cat-attacks  { color: #ef6b6b; }
-.sidebar-category.cat-analysis { color: #e0b357; }
-.sidebar-category.cat-rf       { color: #e07bd0; }
+.sidebar-category.cat-system     { color: #93a2b8; }
+.sidebar-category.cat-recon      { color: #4fb3d9; }
+.sidebar-category.cat-radio      { color: #6a8dff; }
+.sidebar-category.cat-access     { color: #4fd0c0; }
+.sidebar-category.cat-core       { color: #a98bff; }
+.sidebar-category.cat-sim        { color: #4fd08a; }
+.sidebar-category.cat-baseband   { color: #f0913f; }
+.sidebar-category.cat-tracking   { color: #e07bd0; }
+.sidebar-category.cat-analysis   { color: #e0b357; }
+.sidebar-category.cat-kits       { color: #ef6b6b; }
+.sidebar-category.cat-intercept  { color: #d98a9c; }
 
 /* ══════════════════════════════════════════════════════════════════
    Buttons — primary vs secondary, and a visible focus ring
@@ -2455,3 +2464,88 @@ button.module-card:focus-visible .module-card-inner,
 button.mission-step:focus-visible .mission-step-inner {
     box-shadow: 0 0 0 2px @accent;
 }
+
+/* ── Live Traffic: the row menu and the capture read-out ──────────────────
+   The menu is built per click from the row it was opened on, so it is styled
+   by class rather than by position. It is a list of things to do to a packet,
+   so the items are flat, full width, and read left to right. */
+.live-menu {
+    padding: 6px;
+    min-width: 240px;
+}
+
+.live-menu-item {
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-family: "Orbitron";
+    font-size: 11px;
+}
+
+.live-menu-item:hover {
+    background-image: linear-gradient(to bottom right, #1a4054, #123044);
+}
+
+/* The capture read-out is a value, so it keeps the monospace face and stays
+   dim until there is something to say. */
+.capture-live {
+    font-family: monospace;
+    font-size: 10px;
+    color: @text_dim;
+}
+
+/* ---- Field Kit -----------------------------------------------------------
+   The kit is a pre-flight instrument, so its page reads like one: the machine's
+   own answers in monospace, the labels beside them in Orbitron, and the guard
+   matrix coloured by verdict rather than by row. */
+
+.fkit-note {
+  font-size: 11px;
+  color: @text_dim;
+}
+
+.fkit-kv-row {
+  padding: 2px 0;
+}
+
+.fkit-kv-key {
+  font-family: "Orbitron";
+  font-size: 11px;
+  color: @text_dim;
+}
+
+.fkit-kv-val {
+  font-family: monospace;
+  font-size: 12px;
+  color: @text;
+}
+
+.fk-guard-row {
+  padding: 4px 2px;
+}
+
+.fk-guard-module {
+  font-family: monospace;
+  font-size: 12px;
+  color: @text;
+}
+
+.fk-guard-verb {
+  font-family: monospace;
+  font-size: 11px;
+  color: @text_dim;
+}
+
+.fk-guard-detail {
+  font-size: 12px;
+  color: @text_dim;
+}
+
+.fkit-guard-scroll {
+  border-radius: 8px;
+  background: @bg_sunken;
+}
+
+/* Green is the honest failure: non-zero, and it said what was missing. */
+.status-dot.fk-guard-ok   { color: #74d99f; }
+.status-dot.fk-guard-bad  { color: #ef8b8b; }
+.status-dot.fk-guard-warn { color: #e0b357; }
