@@ -298,9 +298,34 @@ What Phase 2 now has to add, in order:
    body position 117, which is where the table puts the
    soundingRS-UL-ConfigCommon CHOICE selecting `setup`; and a fifty-field
    differential sweep against pycrate — the widest legal value in every leaf,
-   one leaf at a time — agrees bit for bit. SIB4–SIB8 body vectors are
-   captured but still to be encoded, and SIB13 does not yet pass pycrate's own
-   validation.
+   one leaf at a time — agrees bit for bit. SIB4–SIB7 are **done** as well,
+   each asserted bit for bit against pycrate 0.8.1. SIB13 does not yet pass
+   pycrate's own validation.
+
+   **A note on method, because hand-transcription is the slowest of the
+   available paths and it is where most of the time went.** Transcribing one
+   SIB from the specification and then proving the transcription with
+   differential probes cost most of a session per SIB, with several SIBs and
+   two large RRC messages still to go. The reason for doing it by hand was
+   licensing — and that reason was wrong on the facts:
+
+   - **pycrate is LGPL v2.1+, not GPLv3.** It may be used as a library.
+     (turbofec genuinely is GPLv3, and the rule in the rate-matching section
+     above still stands for it.)
+   - **This tree already declares it.** `modules/00_deps.sh:197` carries
+     `"pycrate|proto|no"`, `:204` maps it, and `:984` asserts it is
+     registered. It was a sanctioned optional dependency the whole time.
+
+   So the approach changes: a **generator** walks pycrate's structure and
+   emits a declarative layout table, and a **generic unaligned-PER engine**
+   consumes that table. The runtime stays dependency-free — the table is plain
+   data and the engine is stdlib-only — so the first criterion of the
+   four-point bar is preserved rather than weakened: pycrate stays the
+   *independent* thing we assert against instead of becoming the thing we
+   ship. What goes away is the manual transcription, which was never the
+   valuable part. This is also the only realistic route to
+   RRCConnectionReconfiguration and HandoverCommand, which are far too large
+   to transcribe leaf by leaf.
 2. Replacement of the nine fake decoders with that codec, or an explicit
    statement in their output that they read a private layout. **`--decode-sib
    1`, `--decode-sib 2` and `--decode-sib 3` are done**: `lair_decode_sib1()`,
@@ -309,8 +334,10 @@ What Phase 2 now has to add, in order:
    against captured pycrate vectors, and all refuse anything that is not the
    SIB they claim rather than reporting fields decoded from the wrong bit
    offsets. The private-layout warning that used to print for SIB2 and SIB3 is
-   gone with the parsers that needed it. SIB4–SIB13 still read the old
-   private layout, and now say so in their own output.
+   gone with the parsers that needed it. **SIB1–SIB7 are all real codecs now**
+   — `modules/10_lte_air.sh:1222`'s `lair_decode_sib()` dispatches 1 through 7
+   to `tools/lte_asn1.py` and only 8 and 13 still call
+   `lair_note_private_layout`.
 3. RRC reconfiguration and handover construction, the actual TX path, then the
    same four-point bar Phase 1 was held to.
 
