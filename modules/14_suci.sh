@@ -987,9 +987,11 @@ suci_status() {
     #
     # A bare hex scalar does not name its curve, so the same source can be
     # valid for one profile and not the other; probing only profile A would
-    # report a perfectly good P-256 key as unusable. Probe both, and say
-    # which profiles the key actually unlocks. An explicit argument wins over
-    # IMSISTING_SUCI_HN_KEY, exactly as it does in --deconceal.
+    # report a perfectly good P-256 key as unusable. Probe both, report the
+    # profile the source is actually validated as in `unlocks`, and put the
+    # other curve's reading in `unlocks_note` when the source is
+    # curve-agnostic. An explicit argument wins over IMSISTING_SUCI_HN_KEY,
+    # exactly as it does in --deconceal.
     local src="$keysrc" src_origin="argument"
     if [[ -z "$src" && -n "${IMSISTING_SUCI_HN_KEY:-}" ]]; then
         src="$IMSISTING_SUCI_HN_KEY"; src_origin="env:IMSISTING_SUCI_HN_KEY"
@@ -1023,16 +1025,39 @@ suci_status() {
         # The most specific complaint wins; a key that works for at least one
         # profile is validated for that profile.
         if (( rc_a == 0 || rc_b == 0 )); then
-            local unlocked="none"
-            if (( rc_a == 0 && rc_b == 0 )); then unlocked="profile-a,profile-b"
-            elif (( rc_a == 0 )); then unlocked="profile-a"
-            else unlocked="profile-b"; fi
+            # `unlocks` names the profile this source is actually VALIDATED as,
+            # not every profile its bytes could be read on. A curve-agnostic
+            # source -- bare hex, a bare hex file, or a --genkey TSV, none of
+            # which bind the octets to a curve -- is read as X25519 when the
+            # profile is A, so that is the one profile it is validated as.
+            # Saying "unlocks profile-a,profile-b" read as a capability claim
+            # the octets do not carry: the secp256r1 reading is a DIFFERENT key
+            # with a different public key, and it deconceals only traffic
+            # concealed under that other public key. The second reading is
+            # spelled out in its own unlocks_note row instead of being folded
+            # into the capability row. A container that names its curve has no
+            # second reading, so it gets no note.
+            local unlocked note_suffix="" curve_agnostic=0
+            case "$enc" in raw-hex|hex-file|tsv-hex) curve_agnostic=1 ;; esac
+            if (( rc_a == 0 )); then unlocked="profile-a"; else unlocked="profile-b"; fi
             printf 'key_state\tkey_validated\n'
             printf 'key_curve\t%s\n'      "$curve"
             printf 'key_encoding\t%s\n'   "$enc"
             printf 'hn_public_key\t%s\n'  "$pub"
             printf 'unlocks\t%s\n'        "$unlocked"
-            printf 'key_note\tkey validated; deconcealment is available for %s\n' "$unlocked"
+            if (( curve_agnostic == 1 )); then
+                local pub_a pub_b note
+                pub_a=$(printf '%s\n' "$out_a" | awk -F'\t' '$1=="public_key"{print $2; exit}')
+                pub_b=$(printf '%s\n' "$out_b" | awk -F'\t' '$1=="public_key"{print $2; exit}')
+                if [[ -n "$pub_a" && -n "$pub_b" ]]; then
+                    note="curve-agnostic 32-octet scalar, not bound to a curve: profile A reads these octets as X25519 (public key $pub_a) and profile B reads the same octets as secp256r1 (public key $pub_b); those are two different keys, so the octets deconceal profile-a traffic only if they are the intended X25519 key, and profile-b traffic only if they are the intended secp256r1 key"
+                else
+                    note="curve-agnostic 32-octet scalar, not bound to a curve: the octets are not readable as a secp256r1 private scalar, so only the validated reading -- $unlocked -- applies"
+                fi
+                printf 'unlocks_note\t%s\n' "$(suci_sanitize "$note")"
+                note_suffix=" (see unlocks_note: the other profile reads the same octets as a different key)"
+            fi
+            printf 'key_note\tkey validated; deconcealment is available for %s%s\n' "$unlocked" "$note_suffix"
             printf 'can_without_key\tparse-suci,audit,msin-encode,msin-decode,hkdf,build-suci-conceal\n'
             printf 'cannot_without_key\tmsin-recovery-without-this-key\n'
         else
@@ -1375,10 +1400,35 @@ PYV
         chk ki-keyfile-tsv  "$(kstate 1 "$kd/a.tsv")" "key_validated"
         chk ki-hex-nocurve  "$(kstate 1 "$p2")" "key_validated"
         # A key is never accepted on the strength of the other profile's curve.
-        # It has to be the container that names the curve: a bare 32-octet
-        # scalar is legitimately readable as either curve, so the same bytes
-        # unlocking both profiles is correct, not a fallback.
+        # It has to be the container that names the curve. A bare 32-octet
+        # scalar is legitimately readable as either curve, but that is a second
+        # READING of the same octets, not the same key: on secp256r1 the octets
+        # are a different private key with a different public key. So the row
+        # must name only the profile the source is validated as, and the other
+        # reading belongs in unlocks_note, which must exist for a
+        # curve-agnostic source and must not exist for a container that names
+        # its curve.
         chk ki-nofallback    "$(suci_cmd_verify_hnkey "$kd/p256.pem" 1 >/dev/null 2>&1; echo $?)" "4"
+        local st_hex st_pem2 pub_b_scalar
+        st_hex=$(suci_status "$p2")
+        st_pem2=$(suci_status "$kd/p256.pem")
+        pub_b_scalar=$(fld "$(suci_cmd_verify_hnkey "$p2" 2 2>/dev/null)" hn_public_key)
+        chk unlocks-hex-scoped   "$(fld "$st_hex" unlocks)" "profile-a"
+        chk unlocks-pem-scoped   "$(fld "$st_pem2" unlocks)" "profile-b"
+        # Exactly one unlocks_note row on a curve-agnostic source...
+        chk unlocks-note-hex     "$(printf '%s\n' "$st_hex" | grep -c $'^unlocks_note\t')" "1"
+        # ...and none at all when the container named the curve, because there
+        # is no second reading to disclaim.
+        chk unlocks-note-pem     "$(printf '%s\n' "$st_pem2" | grep -c $'^unlocks_note\t')" "0"
+        # The note must name the other curve AND the different public key that
+        # reading produces, so a reader can see the two are not the same key.
+        chk unlocks-note-other   "$(fld "$st_hex" unlocks_note | grep -c 'secp256r1')" "1"
+        chk unlocks-note-pubkey  "$(fld "$st_hex" unlocks_note | grep -c "$pub_b_scalar")" "1"
+        # And it must keep the condition, not become a capability claim.
+        chk unlocks-note-guard   "$(fld "$st_hex" unlocks_note | grep -c 'only if they are the intended')" "1"
+        # The old claim, verbatim, is gone from every row of a curve-agnostic
+        # status -- including the key_note prose.
+        chk unlocks-no-both      "$(printf '%s\n' "$st_hex" | grep -c 'profile-a,profile-b')" "0"
 
         # ── the key-dependent path, against an independent vector ────────
         # This scheme output was produced by a separate Python implementation
