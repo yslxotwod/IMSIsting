@@ -198,14 +198,18 @@ PY
         printf '%s\n' "${hexes[@]}" > "$MOD_TMP/frames.txt"
         # A GSMTAP capture is Ethernet/IP/UDP on 4729, which is what Wireshark
         # and 03_gsmtap both expect.
-        python3 - "$out" "$MOD_TMP/frames.txt" "$count" <<'PY'
+        python3 - "$out" "$MOD_TMP/frames.txt" "$count" "$delay" <<'PY'
 import struct, sys
 out, ff = sys.argv[1], sys.argv[2]
 count = int(sys.argv[3])
+# The delay is the gap between frames, exactly as on the udp path: a capture
+# that stamped one second per frame whatever was asked for would be a
+# different emission from the one the live view just watched.
+delay = float(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else 1.0
 frames = [l.strip() for l in open(ff) if l.strip()]
 with open(out, 'wb') as f:
     f.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
-    ts = 0
+    ts = 0.0
     for rep in range(count):
         for hx in frames:
             g = bytes.fromhex(hx)

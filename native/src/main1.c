@@ -12387,6 +12387,75 @@ fkit_build_overview(AppState *state, const char *module_id,
     return outer;
 }
 
+/* A preset does not run anything: it writes the command into the field, so
+   what is about to be sent is on screen and can be edited before it is. The
+   module's own defaults are the interesting part, and they are worth reading
+   before they fire. */
+static void
+fkit_preset_clicked(GtkButton *button, gpointer user_data)
+{
+    GtkWidget *entry = g_object_get_data(G_OBJECT(button), "preset-entry");
+    const char *args = g_object_get_data(G_OBJECT(button), "preset-args");
+    g_autofree char *expanded = NULL;
+
+    (void) user_data;
+    if (entry == NULL || args == NULL) return;
+    /* {root} is expanded here rather than at run time, because the point of
+       putting it in the field is to show the path that will be used. */
+    if (strstr(args, "{root}") != NULL) {
+        g_auto(GStrv) chunks = g_strsplit(args, "{root}", -1);
+        expanded = g_strjoinv(IMSISTING_ROOT, chunks);
+        args = expanded;
+    }
+    gtk_editable_set_text(GTK_EDITABLE(entry), args);
+    gtk_editable_set_position(GTK_EDITABLE(entry), -1);
+    gtk_widget_grab_focus(entry);
+}
+
+static GtkWidget *
+fkit_preset_button(const char *label, const char *args, GtkWidget *entry)
+{
+    GtkWidget *button = gtk_button_new_with_label(label);
+
+    g_object_set_data_full(G_OBJECT(button), "preset-args", g_strdup(args), g_free);
+    g_object_set_data(G_OBJECT(button), "preset-entry", entry);
+    g_signal_connect(button, "clicked", G_CALLBACK(fkit_preset_clicked), NULL);
+    return button;
+}
+
+/* The command line a card's presets fill, and the button that runs it. Same
+   shape as radio_bench_arg_action, except that the entry is handed back so the
+   presets above can write into it. */
+static GtkWidget *
+fkit_composer(AppState *state, const char *module_id, GtkWidget *status,
+              GtkWidget **entry_out, const char *label, const char *placeholder,
+              const char *button_label)
+{
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *caption = gtk_label_new(label);
+    GtkWidget *entry = gtk_entry_new();
+    GtkWidget *button = gtk_button_new_with_label(button_label);
+
+    gtk_label_set_xalign(GTK_LABEL(caption), 0.0f);
+    gtk_widget_set_size_request(caption, 112, -1);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), placeholder);
+    gtk_widget_set_hexpand(entry, TRUE);
+    gtk_widget_add_css_class(entry, "verb-arg-entry");
+    gtk_widget_add_css_class(button, "verb-button");
+    gtk_widget_add_css_class(button, "primary");
+    g_object_set_data(G_OBJECT(button), "state", state);
+    g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
+    g_object_set_data(G_OBJECT(button), "status", status);
+    g_object_set_data_full(G_OBJECT(button), "verb", g_strdup("--emit"), g_free);
+    g_object_set_data(G_OBJECT(button), "arg-entry", entry);
+    g_signal_connect(button, "clicked", G_CALLBACK(group_arg_clicked), NULL);
+    gtk_box_append(GTK_BOX(row), caption);
+    gtk_box_append(GTK_BOX(row), entry);
+    gtk_box_append(GTK_BOX(row), button);
+    *entry_out = entry;
+    return row;
+}
+
 static GtkWidget *
 fkit_build_emitter(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
@@ -12399,34 +12468,37 @@ fkit_build_emitter(AppState *state, const char *module_id,
     GtkWidget *write_body;
     GtkWidget *live = verb_card("STREAM TO LIVE TRAFFIC", &live_body);
     GtkWidget *write = verb_card("WRITE A CAPTURE", &write_body);
+    GtkWidget *live_entry = NULL;
+    GtkWidget *write_entry = NULL;
     GtkWidget *live_flow = fkit_flow();
     GtkWidget *write_flow = fkit_flow();
+    GtkWidget *live_line = fkit_composer(state, module_id, status, &live_entry,
+        "Command", "mixed 12 0.25 udp", "Emit");
+    GtkWidget *write_line = fkit_composer(state, module_id, status, &write_entry,
+        "Command", "mixed 12 0.25 /path/to/capture.pcap", "Write");
 
     for (guint i = 0; i < G_N_ELEMENTS(fkit_scenarios); i++) {
-        g_autofree char *stream = g_strdup_printf("%s 40 0.25 udp", fkit_scenarios[i].id);
-        g_autofree char *file = g_strdup_printf("%s 40 0.1 {root}/captures/fieldkit_%s.pcap",
+        g_autofree char *stream = g_strdup_printf("%s 12 0.25 udp", fkit_scenarios[i].id);
+        g_autofree char *file = g_strdup_printf("%s 12 0.25 {root}/captures/fieldkit_%s.pcap",
                                                 fkit_scenarios[i].id, fkit_scenarios[i].id);
-        GtkWidget *to_live = gtk_button_new_with_label(fkit_scenarios[i].label);
-        GtkWidget *to_file = gtk_button_new_with_label(fkit_scenarios[i].label);
-
-        radio_bench_run_button(to_live, state, module_id, status, "--emit", stream);
-        radio_bench_run_button(to_file, state, module_id, status, "--emit", file);
-        fkit_flow_add(live_flow, to_live,
-                      g_strcmp0(fkit_scenarios[i].id, "mixed") == 0 ? "primary" : "flat");
-        fkit_flow_add(write_flow, to_file, "flat");
+        fkit_flow_add(live_flow,
+                      fkit_preset_button(fkit_scenarios[i].label, stream, live_entry), "flat");
+        fkit_flow_add(write_flow,
+                      fkit_preset_button(fkit_scenarios[i].label, file, write_entry), "flat");
     }
     gtk_box_append(GTK_BOX(live_body), live_flow);
     gtk_box_append(GTK_BOX(live_body),
-        fkit_note("Forty frames, one every 250 ms - about ten seconds for Live Traffic to "
-                  "show. Open that page first; the emitter waits for nothing."));
-    gtk_box_append(GTK_BOX(live_body), radio_bench_arg_action(state, module_id, status,
-        "Custom", "gsm-attach 40 0.25 udp", "--emit", "Emit"));
+        fkit_note("The count is how many times the scenario repeats, and the decimal is the gap "
+                  "between frames - twelve of them is roughly ten seconds for Live Traffic to "
+                  "watch. A preset fills the command line; Emit sends it. Open that page first, "
+                  "because the emitter waits for nothing."));
+    gtk_box_append(GTK_BOX(live_body), live_line);
     gtk_box_append(GTK_BOX(write_body), write_flow);
     gtk_box_append(GTK_BOX(write_body),
         fkit_note("Written as a real pcap - Ethernet, IPv4, UDP on 4729 - so tshark and "
-                  "03_gsmtap.sh --decode read it. An existing file of that name is overwritten."));
-    gtk_box_append(GTK_BOX(write_body), radio_bench_arg_action(state, module_id, status,
-        "To a path", "mixed 40 0.2 {root}/captures/mine.pcap", "--emit", "Write"));
+                  "03_gsmtap.sh --decode read it, with the same frame spacing as the stream. "
+                  "A file of that name is overwritten."));
+    gtk_box_append(GTK_BOX(write_body), write_line);
     gtk_box_append(GTK_BOX(body), live);
     gtk_box_append(GTK_BOX(body), write);
     if (out != NULL) gtk_box_append(GTK_BOX(body), build_output_card(out));
@@ -12616,6 +12688,7 @@ static ModuleSubmenuEntry gatk_entries[] = {
       "security-high-symbolic",
       "#TRANSMIT VECTORS|--vector-imsi-catcher:IMSI Catcher (O1)|--vector-a5-downgrade:A5/1 Downgrade|"
       "--vector-tmsi-deanon:TMSI De-anonymisation|--vector-kc-recovery:Kc Recovery|"
+      "#TRANSMIT|~--transmit:Transmit BCCH Carrier|"
       "#TRANSMIT GATE|--tx-ack:Transmit Acknowledgement" },
     { "Air interface",
       "network-wireless-symbolic",
