@@ -16028,6 +16028,17 @@ scell_build_backhaul(AppState *state, const char *module_id,
         "hex, or a file of it",
         "The same decoder in reverse: procedure, criticality and one row per "
         "information element."));
+    gtk_box_append(GTK_BOX(s1_body), scell_arg_row(state, module_id, status,
+        "Carry a NAS Message", "--s1ap-nas",
+        "1 7 074100 ul",
+        "MME UE id, eNB UE id, NAS hex, then ul or dl. This is the message that "
+        "carries a handset's Attach through this box, which is what makes the "
+        "IMSI ours rather than the carrier's."));
+    gtk_box_append(GTK_BOX(s1_body), scell_arg_row(state, module_id, status,
+        "Page a Handset", "--s1ap-paging",
+        "0x01 0x0A0B0C0D",
+        "MME code and M-TMSI. Release the context, page, and the handset "
+        "re-attaches where the page came from."));
     gtk_box_append(GTK_BOX(s1_body), fkit_note(
         "This builds the message, not the association. An S1 Setup only becomes "
         "a registration when an MME answers on an SCTP association, and there is "

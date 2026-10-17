@@ -563,6 +563,71 @@ femt_s1ap_decode() {
     femt_s1_asn1 decode "$hex"
 }
 
+# The two NAS-carrying S1AP messages are one verb because they are one shape:
+# the same three IEs with the ids swapped round, and only the procedure code
+# and the direction differ.  Building them lets a box carry a handset's
+# Attach through itself, which is the step that makes the IMSI ours rather
+# than the carrier's.
+femt_s1ap_nas() {
+    local mme="${1:-}" enb="${2:-}" nas="${3:-}" dir="${4:-ul}"
+    if [[ -z "$mme" || -z "$enb" || -z "$nas" ]]; then
+        printf 'ERROR\tneed <mme-ue-id> <enb-ue-id> <nas-hex> [ul|dl]\n' >&2
+        return 2
+    fi
+    local verb message
+    case "$dir" in
+        ul|up|attach) verb=initial-ue;   message=InitialUEMessage ;;
+        dl|down|paging-nas) verb=downlink-nas; message=DownlinkNASTransport ;;
+        *) printf 'ERROR\tdirection is ul or dl, not %s\n' "$dir" >&2; return 2 ;;
+    esac
+    local out hex
+    out=$(femt_s1_asn1 "$verb" --mme-ue-id "$mme" --enb-ue-id "$enb" \
+                        --nas "$nas") || return 1
+    hex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tthe codec returned no octets\n' >&2
+        return 1
+    fi
+    printf 's1ap_verb\t%s\n' "$message"
+    printf 's1ap_hex\t%s\n' "$hex"
+    printf 's1ap_octets\t%d\n' "$(( ${#hex} / 2 ))"
+    printf 's1ap_mme_ue_id\t%s\n' "$mme"
+    printf 's1ap_enb_ue_id\t%s\n' "$enb"
+    printf 's1ap_nas_hex\t%s\n' "$nas"
+    printf 'sctp_ppid\t18\n'
+    printf 'sctp_ports\t36412\n'
+    printf 'status\tbuilt\n'
+    printf 'next\tthe association itself is a handoff; and the TAI the clause also wants is not built here\n'
+    return 0
+}
+
+# Paging is the steering verb: release the context, page the handset back, and
+# it re-attaches where the page came from.
+femt_s1ap_paging() {
+    local mme_code="${1:-}" mtmsi="${2:-}"
+    if [[ -z "$mme_code" || -z "$mtmsi" ]]; then
+        printf 'ERROR\tneed <mme-code> <m-tmsi>\n' >&2
+        return 2
+    fi
+    local out hex
+    out=$(femt_s1_asn1 paging --mme-code "$mme_code" --mtmsi "$mtmsi") || return 1
+    hex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tthe codec returned no octets\n' >&2
+        return 1
+    fi
+    printf 's1ap_verb\tPaging\n'
+    printf 's1ap_hex\t%s\n' "$hex"
+    printf 's1ap_octets\t%d\n' "$(( ${#hex} / 2 ))"
+    printf 's1ap_mme_code\t%s\n' "$mme_code"
+    printf 's1ap_m_tmsi\t%s\n' "$mtmsi"
+    printf 'sctp_ppid\t18\n'
+    printf 'sctp_ports\t36412\n'
+    printf 'status\tbuilt\n'
+    printf 'next\tthe association is the handoff; the identity has to be the one the MME holds\n'
+    return 0
+}
+
 # HNBAP is the 3G half of the same idea: a Home NodeB names itself and the
 # subscriber that appears behind it, to an HNB-GW.  The reference table above
 # was all this module had for years, so --iuh-register and --ue-register exist
@@ -877,6 +942,32 @@ CFG
     chk s1ap-plmn      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie" && $2 ~ /^Global-ENB-ID /{split($2,a," "); print a[3]}')" "001/01"
     chk s1ap-empty     "$(printf '\n' | femt_s1ap_decode - >/dev/null 2>&1; echo $?)" "2"
 
+    # 4c-bis. The two NAS-carrying messages and the Paging. Each octet string
+    #     is pinned to the vector Wireshark dissected with zero Malformed
+    #     verdicts, and the identity fields are read back rather than assumed:
+    #     a lost alignment still parses, as a different subscriber.
+    out=$(femt_s1ap_nas 1 7 074100 ul)
+    chk s1ap-nas-ul-hex   "$(fld "$out" s1ap_hex)" \
+        "000c0017000003000800020007000000020001001a000403074100"
+    chk s1ap-nas-ul-verb  "$(fld "$out" s1ap_verb)" "InitialUEMessage"
+    chk s1ap-nas-ul-octets "$(fld "$out" s1ap_octets)" "27"
+    out=$(femt_s1ap_nas 1 7 074100 dl)
+    chk s1ap-nas-dl-hex   "$(fld "$out" s1ap_hex)" \
+        "000b0017000003000000020001000800020007001a000403074100"
+    chk s1ap-nas-dl-verb  "$(fld "$out" s1ap_verb)" "DownlinkNASTransport"
+    chk s1ap-nas-dir-bad  "$(femt_s1ap_nas 1 7 074100 sideways >/dev/null 2>&1; echo $?)" "2"
+    chk s1ap-nas-noargs   "$(femt_s1ap_nas >/dev/null 2>&1; echo $?)" "2"
+    out=$(femt_s1ap_paging 0x01 0x0A0B0C0D)
+    chk s1ap-paging-hex    "$(fld "$out" s1ap_hex)" \
+        "000a400d000001002b000600100a0b0c0d"
+    chk s1ap-paging-verb   "$(fld "$out" s1ap_verb)"   "Paging"
+    chk s1ap-paging-octets "$(fld "$out" s1ap_octets)" "17"
+    chk s1ap-paging-noargs "$(femt_s1ap_paging >/dev/null 2>&1; echo $?)" "2"
+    out=$(femt_s1ap_decode "$(fld "$(femt_s1ap_paging 0x01 0x0A0B0C0D)" s1ap_hex)")
+    chk s1ap-paging-proc  "$(fld "$out" procedure)" "Paging"
+    chk s1ap-paging-tmsi \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie" && $2 ~ /^UEPagingID /{print $2}' | grep -c 'mTMSI=0x0a0b0c0d')" "1"
+
     # 4d. HNBAP registration. Both octet strings are the vectors pycrate
     #     encoded and Wireshark dissected on PPID 20 (id-HNBRegister with
     #     HNB-Identity deadbeef and CellIdentity 0xA1C0100; id-UERegister with
@@ -1033,6 +1124,8 @@ femt_menu() {
   [r]  Build an HNBAP HNBRegisterRequest
   [u]  Build an HNBAP UERegisterRequest
   [k]  Decode an HNBAP PDU
+  [n]  Build a NAS-carrying S1AP message (InitialUE / DownlinkNAS)
+  [g]  Build the S1AP Paging that calls a handset back
   [l]  Live subscribers from the GSMTAP feed
   [0]  back
 M
@@ -1058,6 +1151,13 @@ M
                femt_ue_register "${ua[0]:-}" "${ua[1]:-normal}"; read -rp "  enter " _ ;;
             k|K) read -rp "  HNBAP hex or file ('-' for stdin)> " p
                femt_hnbap_decode "$p"; read -rp "  enter " _ ;;
+            n|N) read -rp "  mme-ue-id enb-ue-id nas-hex [ul|dl]> " p
+               local na=(); read -ra na <<< "$p"
+               femt_s1ap_nas "${na[0]:-}" "${na[1]:-}" "${na[2]:-}" "${na[3]:-ul}"
+               read -rp "  enter " _ ;;
+            g|G) read -rp "  mme-code m-tmsi> " p
+               local ga=(); read -ra ga <<< "$p"
+               femt_s1ap_paging "${ga[0]:-}" "${ga[1]:-}"; read -rp "  enter " _ ;;
             l|L) read -rp "  seconds, or a capture [iface]> " p
                local la=(); read -ra la <<< "$p"
                if [[ -n "${la[1]:-}" ]]; then
@@ -1088,6 +1188,8 @@ femt_cli_main() {
         --detect)      femt_detect "${1:--}" ;;
         --s1setup)     femt_s1setup "$@" ;;
         --s1ap)        femt_s1ap_decode "${1:--}" ;;
+        --s1ap-nas)    femt_s1ap_nas "${1:-}" "${2:-}" "${3:-}" "${4:-ul}" ;;
+        --s1ap-paging) femt_s1ap_paging "${1:-}" "${2:-}" ;;
         --iuh-register) femt_iuh_register "$@" ;;
         --ue-register) femt_ue_register "$@" ;;
         --hnbap)       femt_hnbap_decode "${1:--}" ;;
@@ -1118,6 +1220,11 @@ Usage: $0 COMMAND
   --s1setup <mcc> <mnc> <enb-id> <name> <tac>
                         the S1 Setup Request this eNB would present to an MME
   --s1ap <hex|file>     decode an S1AP PDU back to its fields
+  --s1ap-nas <mme-ue-id> <enb-ue-id> <nas-hex> [ul|dl]
+                        the InitialUEMessage (ul) or DownlinkNASTransport
+                        (dl) that carries a handset's NAS through this box
+  --s1ap-paging <mme-code> <m-tmsi>
+                        the Paging that calls one handset back
   --iuh-register <hnb-identity-hex> <cell-id>
                         the HNBAP HNBRegisterRequest a Home NodeB sends first
   --ue-register <imsi-bcd-hex> [cause]
