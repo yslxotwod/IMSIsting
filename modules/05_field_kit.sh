@@ -312,6 +312,8 @@ fk_guard_matrix() {
 07_gsm_attack|--transmit|62||60
 10_lte_air|--start|
 12_nr_air|--start|
+12_nr_air|--gen-gnb-conf|00101 n78 640000 0 --tx||60
+12_nr_air|--build-meas-report|measId=1 --tx||60
 13_nr_core|--decode-ngap|00
 15_downgrade|--detect|/nonexistent.pcap
 20_gsm_cve|--run-cve|CVE-2017-1000250
