@@ -1,0 +1,636 @@
+#!/usr/bin/env python3
+"""
+NGAP over APER -- TS 38.413 message bodies, encoded to real octets.
+
+Why this is a separate file from tools/s1ap_asn1.py even though both are
+aligned PER: they are different protocols with different IE registries, and
+the one thing they share is the PER machinery, which is imported rather than
+copied.  A subscriber's attach on the 5G core is an NGAP message the same way
+it is an S1AP message on the 4G core; before this file the tree could decode
+NGAP (modules/13_nr_core.sh --ngap-decode) and could not write a single one,
+so every "the core would accept this" claim about the 5G side was made from a
+S1AP message translated by hand.
+
+What is verified and how.  Every vector in VECTORS was produced by pycrate
+0.8.1 (pycrate_asn1dir.NGAP), an independent transcription of the same ASN.1,
+and by this file, and the two agree to the octet -- tools/ngap-oracle/
+re-runs that comparison.  Every vector was then replayed through tshark 4.2.2
+as an SCTP DATA chunk with PPID 60 and dissected from scratch, which is the
+second referee.  The structures tshark printed are in the comments.
+
+IE status, and it is split deliberately:
+
+  RAN-UE-NGAP-ID      VERIFIED    id 85, INTEGER (0..4294967295).  The width
+  AMF-UE-NGAP-ID                  rule is APER's, and it is not one rule: the
+                                  length of the value sits in as many bits as
+                                  the range needs, so a 32-bit range spends
+                                  two bits and a 40-bit range spends three.
+                                  AMF-UE-NGAP-ID 256 is 20 01 00 -- three
+                                  bits of length (001) then 0100 -- while the
+                                  same value in S1AP's four-octet range is
+                                  40 01 00.  Copying the S1AP rule here
+                                  gives an IE that a dissector reads as zero.
+  NAS-PDU             VERIFIED    id 38, an unconstrained OCTET STRING: one
+                                  length octet, then the bytes.
+  UEPagingIdentity    VERIFIED    id 115, CHOICE carrying 5G-S-TMSI.  The
+                                  extension bit, the CHOICE index and the
+                                  SEQUENCE's iE-Extensions bit are three bits
+                                  in one run; AMFSetID (10 bits) and
+                                  AMFPointer (6 bits) follow as bit-fields
+                                  with NO octet alignment between them, and
+                                  only the 4-octet 5G-TMSI inside them starts
+                                  on an octet boundary.
+  TAIListForPaging    VERIFIED    id 103, SEQUENCE (SIZE(1..16)) OF TAI.  The
+                                  count is four bits; each TAI is one
+                                  iE-Extensions bit, an alignment, then
+                                  pLMNIdentity and a THREE-octet TAC.  A
+                                  two-octet TAC -- the 4G width -- decodes
+                                  here as a truncated tracking area.
+
+What these messages are not, stated because a fragment that decodes is easy
+to mistake for a complete message:
+
+  InitialUEMessage    also requires UserLocationInformation (id 121) and
+                      RRCEstablishmentCause (id 90).  Neither is built, so
+                      this is a fragment that a dissector reads without a
+                      Malformed verdict and a real AMF would reject.
+  Paging              also requires TAIListForPaging, which IS built; it is
+                      the one whole message here.
+
+The envelope rules this file rides on -- the PDU CHOICE discriminator, the
+16-bit container count, the open-type framing, the criticality octet -- are
+the same in both protocols and are asserted here rather than assumed,
+because the one place they differ (the INTEGER width above) is exactly the
+kind of difference a shared helper hides.
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from s1ap_asn1 import AperReader, AperWriter  # noqa: E402  one PER, not two
+
+# ---------------------------------------------------------------------------
+# TS 38.413 clause 9.3 -- IE ids this file emits.
+# ---------------------------------------------------------------------------
+
+IE_RAN_UE_NGAP_ID = 85
+IE_AMF_UE_NGAP_ID = 10
+IE_NAS_PDU = 38
+IE_UEPAGING_IDENTITY = 115
+IE_TAI_LIST_FOR_PAGING = 103
+
+PROC_DOWNLINK_NAS = 4
+PROC_INITIAL_UE = 15
+PROC_PAGING = 24
+
+# ENUMERATED { reject, ignore, notify, ... }: extension flag in the top bit,
+# index in the two below it.  Same octets as S1AP, same trap.
+CRITICALITY = {"reject": 0x00, "ignore": 0x40, "notify": 0x80}
+CRITICALITY_NAME = {v: k for k, v in CRITICALITY.items()}
+
+
+def _criticality_octet(name):
+    if name not in CRITICALITY:
+        raise ValueError("criticality must be one of %s" % ", ".join(CRITICALITY))
+    return CRITICALITY[name]
+
+
+# ---------------------------------------------------------------------------
+# Container helpers -- the message body.
+# ---------------------------------------------------------------------------
+
+def _open_type(writer, payload):
+    writer.length_determinant(len(payload))
+    writer.octets(payload)
+
+
+def _ie_field(ie_id, criticality, payload):
+    """One ProtocolIE-Field: id, criticality, then the IE as an open type."""
+    writer = AperWriter()
+    writer.bits(ie_id, 16)
+    writer.octet(_criticality_octet(criticality))
+    _open_type(writer, payload)
+    return writer.taked()
+
+
+def _container(ie_fields):
+    """ProtocolIE-Container: SEQUENCE (SIZE(0..65535)) OF ProtocolIE-Field.
+
+    The SEQUENCE carries an extension marker, so its preamble is one bit and
+    it is padded before the count.  The count itself is constrained at
+    0..65535 and is therefore sixteen bits -- not a length determinant.  A
+    one-octet count parses, reports zero IEs and silently ignores the body,
+    which reads like success.
+    """
+    writer = AperWriter()
+    writer.bit(0)                       # no extension additions present
+    writer.align()
+    writer.constrained_count(len(ie_fields), 16)
+    for field in ie_fields:
+        writer.octets(field)
+    return writer.taked()
+
+
+# ---------------------------------------------------------------------------
+# The INTEGER rule, which is the one place NGAP and S1AP disagree.
+# ---------------------------------------------------------------------------
+
+def _constrained_uint(value, upper, label):
+    """A constrained INTEGER, aligned PER.
+
+    The value goes in the fewest octets that hold it; above them sits a
+    length field whose WIDTH depends on the range, not on the protocol.  A
+    range of 2**32 values needs four octets at most, so the length is two
+    bits; a 2**40 range needs five, so the length is three bits.  Getting the
+    width from the value instead of the range is how AMF-UE-NGAP-ID 256 turns
+    into 00 01 00 and decodes as zero.
+    """
+    if not 0 <= value <= upper:
+        raise ValueError("%s is a 0..%d integer" % (label, upper))
+    widest = max(1, upper.bit_length() // 8 + (1 if upper.bit_length() % 8 else 0))
+    length_bits = (widest - 1).bit_length()
+    count = 1 if value == 0 else (value.bit_length() + 7) // 8
+    writer = AperWriter()
+    writer.bits(count - 1, length_bits)
+    writer.align()
+    writer.octets(value.to_bytes(count, "big"))
+    return writer.taked()
+
+
+# ---------------------------------------------------------------------------
+# Individual IEs -- TS 38.413 clause 9.3.x.
+# ---------------------------------------------------------------------------
+
+def ie_ran_ue_ngap_id(value):
+    """RAN-UE-NGAP-ID: INTEGER (0..4294967295), two-bit length."""
+    return _ie_field(IE_RAN_UE_NGAP_ID, "reject",
+                     _constrained_uint(value, 0xFFFFFFFF, "RAN-UE-NGAP-ID"))
+
+
+def ie_amf_ue_ngap_id(value):
+    """AMF-UE-NGAP-ID: INTEGER (0..1099511627775), THREE-bit length."""
+    return _ie_field(IE_AMF_UE_NGAP_ID, "reject",
+                     _constrained_uint(value, 0xFFFFFFFFFF, "AMF-UE-NGAP-ID"))
+
+
+def ie_nas_pdu(nas):
+    """NAS-PDU: OCTET STRING, a length determinant then the bytes."""
+    writer = AperWriter()
+    writer.length_determinant(len(nas))
+    writer.octets(nas)
+    return _ie_field(IE_NAS_PDU, "reject", writer.taked())
+
+
+def ie_ue_paging_identity(amf_set_id, amf_pointer, tmsi):
+    """UEPagingIdentity: CHOICE { fiveG-S-TMSI }, the only root alternative.
+
+    Three bits open it: the CHOICE's extension marker, the choice of
+    fiveG-S-TMSI within the root, and FiveG-S-TMSI's own iE-Extensions bit.
+    AMFSetID (SIZE(10)) and AMFPointer (SIZE(6)) then run together as
+    bit-fields -- sixteen bits, no alignment between them, which is why they
+    are written as one run here -- and the 4-octet 5G-TMSI starts on the
+    octet boundary after them.
+    """
+    if not 0 <= amf_set_id < (1 << 10):
+        raise ValueError("an AMF Set ID is ten bits")
+    if not 0 <= amf_pointer < (1 << 6):
+        raise ValueError("an AMF Pointer is six bits")
+    if len(tmsi) != 4:
+        raise ValueError("a 5G-TMSI is four octets")
+    writer = AperWriter()
+    writer.bit(0)                       # no extension additions
+    writer.bit(0)                       # CHOICE: fiveG-S-TMSI
+    writer.bit(0)                       # FiveG-S-TMSI has no iE-Extensions
+    writer.bits(amf_set_id, 10)
+    writer.bits(amf_pointer, 6)
+    writer.align()                      # the TMSI starts on its own octet
+    writer.octets(tmsi)
+    return _ie_field(IE_UEPAGING_IDENTITY, "ignore", writer.taked())
+
+
+def ie_tai_list_for_paging(tais):
+    """TAIListForPaging: SEQUENCE (SIZE(1..16)) OF TAI.
+
+    The count is four bits because the size constraint is 1..16 and the count
+    is the value minus the lower bound.  Each TAI is { pLMNidentity, tAC
+    OCTET STRING(SIZE(3)), iE-Extensions OPTIONAL }: one preamble bit for the
+    absent extensions, an alignment, three octets of PLMN, three of TAC.
+    The first item's preamble bit shares the count's octet -- writing the
+    count, aligning, then the bit spends a whole octet on zeroes, which a
+    dissector reads as an empty tracking area.  The
+    TAC is three octets in 5G and two in 4G; taking the 4G width here leaves
+    the last octet of the tracking area to be read as the next item.
+    """
+    if not 1 <= len(tais) <= 16:
+        raise ValueError("TAIListForPaging holds 1..16 tracking areas")
+    writer = AperWriter()
+    writer.bits(len(tais) - 1, 4)
+    writer.bit(0)                       # the first TAI's iE-Extensions bit
+    writer.align()                      # count and that bit share one octet
+    for index, (plmn, tac) in enumerate(tais):
+        raw_tac = bytes.fromhex(str(tac))
+        if len(raw_tac) != 3:
+            raise ValueError("a 5G TAC is three octets, got %r" % (tac,))
+        if index:
+            writer.bit(0)               # a later TAI opens its own octet
+            writer.align()
+        writer.octets(_plmn_bytes(plmn))
+        writer.octets(raw_tac)
+    return _ie_field(IE_TAI_LIST_FOR_PAGING, "ignore", writer.taked())
+
+
+def _plmn_bytes(plmn):
+    """PLMNidentity: MCC2|MCC1, MNC3|MCC3, MNC2|MNC1, a nibble of F for a
+    two-digit MNC.  Same rule as S1AP and TS 24.008 10.5.1.3."""
+    if isinstance(plmn, str) and "/" in plmn:
+        mcc, mnc = plmn.split("/", 1)
+    elif isinstance(plmn, (tuple, list)) and len(plmn) == 2:
+        mcc, mnc = plmn
+    else:
+        raise ValueError("a PLMN is MCC/MNC or (mcc, mnc)")
+    mcc, mnc = str(mcc).zfill(3), str(mnc)
+    if len(mcc) != 3:
+        raise ValueError("MCC must be three digits")
+    if len(mnc) not in (2, 3):
+        raise ValueError("MNC must be two or three digits")
+    mnc3 = mnc[2] if len(mnc) == 3 else "f"
+    return bytes.fromhex("%s%s%s%s%s%s" % (mcc[1], mcc[0], mnc3, mcc[2], mnc[1], mnc[0]))
+
+
+# ---------------------------------------------------------------------------
+# PDUs -- the NGAP-PDU envelope, TS 38.413 clause 9.1.
+# ---------------------------------------------------------------------------
+
+def _pdu(procedure_code, criticality, body):
+    """NGAP-PDU: CHOICE { initiatingMessage, successfulOutcome,
+    unsuccessfulOutcome, ... }.
+
+    Three root alternatives and an extension marker: two bits of index and one
+    of extension, all zero, padded to the single octet 0x00.  The
+    InitiatingMessage that follows is a plain SEQUENCE with no marker and no
+    optionals, so it has no preamble: procedureCode, criticality, then the
+    body as an open type.
+    """
+    writer = AperWriter()
+    writer.octet(0)
+    writer.octet(procedure_code)
+    writer.octet(_criticality_octet(criticality))
+    _open_type(writer, body)
+    return writer.taked()
+
+
+def initial_ue_message(ran_ue_id, nas):
+    """InitialUEMessage: the gNB's first word about a handset.
+
+    Two IEs, not four.  UserLocationInformation (id 121) and
+    RRCEstablishmentCause (id 90) are mandatory in the clause and are not
+    built here: a guessed CGI or tracking area inside a location report is a
+    claim about where a subscriber is, and `decode` names the gap instead of
+    inventing it.
+    """
+    fields = [
+        ie_ran_ue_ngap_id(ran_ue_id),
+        ie_nas_pdu(nas),
+    ]
+    return _pdu(PROC_INITIAL_UE, "reject", _container(fields))
+
+
+def downlink_nas_transport(amf_ue_id, ran_ue_id, nas):
+    """DownlinkNASTransport: the core's word back, three mandatory IEs."""
+    fields = [
+        ie_amf_ue_ngap_id(amf_ue_id),
+        ie_ran_ue_ngap_id(ran_ue_id),
+        ie_nas_pdu(nas),
+    ]
+    return _pdu(PROC_DOWNLINK_NAS, "reject", _container(fields))
+
+
+def paging(amf_set_id, amf_pointer, tmsi, tais):
+    """Paging: the identity being called and the areas it is called in.
+
+    Criticality is ignore on both IEs -- a paging block a node does not
+    understand is not a reason to drop the procedure.
+    """
+    fields = [
+        ie_ue_paging_identity(amf_set_id, amf_pointer, tmsi),
+        ie_tai_list_for_paging(tais),
+    ]
+    return _pdu(PROC_PAGING, "ignore", _container(fields))
+
+
+# ---------------------------------------------------------------------------
+# Decoder -- enough of the envelope and the IEs above to read back what this
+# file writes, and to name an IE it does not know instead of guessing.
+# ---------------------------------------------------------------------------
+
+IE_NAMES = {
+    IE_RAN_UE_NGAP_ID: "RAN-UE-NGAP-ID",
+    IE_AMF_UE_NGAP_ID: "AMF-UE-NGAP-ID",
+    IE_NAS_PDU: "NAS-PDU",
+    IE_UEPAGING_IDENTITY: "UEPagingIdentity",
+    IE_TAI_LIST_FOR_PAGING: "TAIListForPaging",
+}
+
+PROCEDURE_NAMES = {
+    PROC_DOWNLINK_NAS: "DownlinkNASTransport",
+    PROC_INITIAL_UE: "InitialUEMessage",
+    PROC_PAGING: "Paging",
+}
+
+
+def _plmn_text(raw):
+    if len(raw) != 3:
+        return raw.hex()
+    a, b, c = raw
+    mcc = "%d%d%d" % (a & 0x0F, a >> 4, b & 0x0F)
+    third = b >> 4
+    mnc = "%d%d" % (c & 0x0F, c >> 4) if third == 0x0F else "%d%d%d" % (c & 0x0F, third, c >> 4)
+    return "%s/%s" % (mcc, mnc)
+
+
+def _decode_ie(reader, ie_id):
+    if ie_id in (IE_RAN_UE_NGAP_ID, IE_AMF_UE_NGAP_ID):
+        upper = 0xFFFFFFFF if ie_id == IE_RAN_UE_NGAP_ID else 0xFFFFFFFFFF
+        widest = max(1, upper.bit_length() // 8 + (1 if upper.bit_length() % 8 else 0))
+        length_bits = (widest - 1).bit_length()
+        width = (reader.bits(length_bits) + 1) * 8
+        reader.align()
+        return str(reader.bits(width)), reader
+    if ie_id == IE_NAS_PDU:
+        count = reader.octet()
+        return reader.octets(count).hex(), reader
+    if ie_id == IE_UEPAGING_IDENTITY:
+        if reader.bit() != 0:
+            return "extended form (not decoded here)", reader
+        if reader.bit() != 0:
+            return "unknown paging identity choice", reader
+        reader.bit()                    # FiveG-S-TMSI iE-Extensions
+        amf_set_id = reader.bits(10)
+        amf_pointer = reader.bits(6)
+        reader.align()
+        tmsi = reader.octets(4).hex()
+        return "5g-s-tmsi set=%d pointer=%d tmsi=%s" % (amf_set_id, amf_pointer, tmsi), reader
+    if ie_id == IE_TAI_LIST_FOR_PAGING:
+        count = reader.bits(4) + 1
+        reader.bit()                    # the first TAI's iE-Extensions bit
+        reader.align()
+        parts = []
+        for index in range(count):
+            if index:
+                reader.bit()
+                reader.align()
+            plmn = _plmn_text(reader.octets(3))
+            tac = reader.octets(3).hex()
+            parts.append("%s %s" % (plmn, tac))
+        return " ".join(parts), reader
+    raise ValueError("no decoder for IE id %d" % ie_id)
+
+
+def decode(raw):
+    """Return a list of (key, value) rows for one NGAP-PDU."""
+    if len(raw) < 4:
+        raise ValueError("too short to be an NGAP-PDU")
+    reader = AperReader(raw)
+    discriminator = reader.octet()
+    if discriminator != 0:
+        raise ValueError("only initiating messages are decoded (%#x)" % discriminator)
+    procedure = reader.octet()
+    criticality = CRITICALITY_NAME.get(reader.octet(), "?")
+    body_len = reader.octet()
+    body = reader.octets(body_len)
+    rows = [
+        ("pdu", "initiatingMessage"),
+        ("procedure", PROCEDURE_NAMES.get(procedure, "procedure %d" % procedure)),
+        ("criticality", criticality),
+        ("body_octets", "%d" % len(body)),
+    ]
+    if not body:
+        return rows
+
+    inner = AperReader(body)
+    inner.bit()                         # the container's extension marker
+    inner.align()
+    count = inner.bits(16)
+    inner.align()
+    rows.append(("ies", "%d" % count))
+    for _ in range(count):
+        ie_id = inner.bits(16)
+        inner.align()
+        ie_criticality = CRITICALITY_NAME.get(inner.octet(), "?")
+        ie_len = inner.octet()
+        value_bytes = inner.octets(ie_len)
+        name = IE_NAMES.get(ie_id, "IE-%d" % ie_id)
+        try:
+            text, _ = _decode_ie(AperReader(value_bytes), ie_id)
+        except Exception as exc:
+            text = "undecodable (%s)" % exc
+        rows.append(("ie", "%s %s %s" % (name, ie_criticality, text)))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _emit(hexbody):
+    print("pdu\tNGAP")
+    print("octets\t%d" % (len(hexbody) // 2))
+    print("hex\t%s" % hexbody)
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(add_help=True)
+    sub = parser.add_subparsers(dest="verb", required=True)
+
+    p = sub.add_parser("initial-ue", help="InitialUEMessage")
+    p.add_argument("--ran-ue-id", type=lambda v: int(v, 0), default=1)
+    p.add_argument("--nas", required=True)
+
+    p = sub.add_parser("downlink-nas", help="DownlinkNASTransport")
+    p.add_argument("--amf-ue-id", type=lambda v: int(v, 0), default=1)
+    p.add_argument("--ran-ue-id", type=lambda v: int(v, 0), default=1)
+    p.add_argument("--nas", required=True)
+
+    p = sub.add_parser("paging", help="Paging")
+    p.add_argument("--amf-set-id", type=lambda v: int(v, 0), default=1)
+    p.add_argument("--amf-pointer", type=lambda v: int(v, 0), default=0)
+    p.add_argument("--tmsi", required=True, help="four octets of hex")
+    p.add_argument("--tai", action="append", required=True,
+                   help="MCC/MNC/TAC in hex, e.g. 001/01/000001")
+
+    p = sub.add_parser("decode", help="decode one NGAP-PDU from hex")
+    p.add_argument("hex")
+
+    sub.add_parser("selftest", help="run the vectors")
+
+    args = parser.parse_args(argv)
+    try:
+        if args.verb == "initial-ue":
+            _emit(initial_ue_message(args.ran_ue_id, bytes.fromhex(args.nas)).hex())
+        elif args.verb == "downlink-nas":
+            _emit(downlink_nas_transport(args.amf_ue_id, args.ran_ue_id,
+                                         bytes.fromhex(args.nas)).hex())
+        elif args.verb == "paging":
+            tais = []
+            for spec in args.tai:
+                plmn, tac = spec.rsplit("/", 1)
+                tais.append((plmn, tac))
+            _emit(paging(args.amf_set_id, args.amf_pointer,
+                         bytes.fromhex(args.tmsi), tais).hex())
+        elif args.verb == "decode":
+            for key, value in decode(bytes.fromhex(args.hex)):
+                print("%s\t%s" % (key, value))
+        elif args.verb == "selftest":
+            return selftest()
+    except ValueError as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Vectors.  Each hex below was produced by pycrate 0.8.1 and by this file
+# before it was written down; tools/ngap-oracle/ re-checks the first claim and
+# tshark 4.2.2 re-checks the second.  The structure tshark printed is in the
+# comment.
+# ---------------------------------------------------------------------------
+
+VECTORS = [
+    # RAN-UE-NGAP-ID 1: two bits of length, then one octet of value.
+    ("ran-ue-id-1", "005500020001", "RAN-UE-NGAP-ID 1"),
+    # The finding: a 40-bit range spends three bits of length, so 256 is
+    # 20 01 00 here and 40 01 00 in S1AP's 32-bit range.
+    ("amf-ue-id-256", "000a0003200100", "AMF-UE-NGAP-ID 256, three bits of length"),
+    # NAS-PDU 7e005b01 -- a 5G Identity Request, one length octet then bytes.
+    ("nas-pdu", "00260005047e005b01", "NAS-PDU 7e005b01"),
+    # tshark: id-InitialUEMessage (15), id-RAN-UE-NGAP-ID 1, id-NAS-PDU and
+    # inside it a NAS-5GS Registration request (0x41), no Malformed verdict.
+    ("initial-ue-full",
+     "000f001500000200550002000100260008077e0041012e0100",
+     "InitialUEMessage RAN-UE 1 NAS 7e0041012e0100"),
+    # tshark: id-DownlinkNASTransport (4), AMF-UE-NGAP-ID 256, RAN-UE 1, and
+    # a NAS-5GS Identity request (0x5b).  The downlink vector carries an
+    # Identity Request because a Registration Request is an uplink message
+    # and the NAS-5GS dissector says so -- the check does not paper over
+    # direction to make two verdicts agree.
+    ("downlink-nas-full",
+     "00040019000003000a000320010000550002000100260005047e005b01",
+     "DownlinkNASTransport AMF-UE 256 RAN-UE 1 NAS 7e005b01"),
+    # tshark: id-Paging (24), id-UEPagingIdentity, id-TAIListForPaging with
+    # pLMNIdentity 00f110 and tAC 1.
+    ("paging-full",
+     "00184019000002007340070008000a0b0c0d006740070000f110000001",
+     "Paging 5g-s-tmsi set 1 ptr 0 tmsi 0a0b0c0d TAI 001/01 000001"),
+]
+
+NAS_UPLINK = b"\x7e\x00\x41\x01\x2e\x01\x00"
+NAS_DOWNLINK = b"\x7e\x00\x5b\x01"
+
+
+def selftest():
+    """Encode what we can, then read it back with our own decoder, then check
+    the bytes against the vectors that two referees agreed on.
+
+    The decoder is not an independent check of the encoder -- they are two
+    halves of one file, and a bit error mirrored in both passes.  The
+    independent half is tools/ngap-oracle/check_ngap_codec.py, which asks
+    pycrate to encode the same messages from the clause tables and compares.
+    """
+    passed = 0
+    failed = 0
+
+    def check(name, condition, detail=""):
+        nonlocal passed, failed
+        if condition:
+            passed += 1
+            print("%s\tPASS" % name)
+        else:
+            failed += 1
+            print("%s\tFAIL\t%s" % (name, detail))
+
+    by_name = {row[0]: row[1] for row in VECTORS}
+
+    check("plmn-001-01", _plmn_bytes("001/01").hex() == "00f110",
+          _plmn_bytes("001/01").hex())
+    check("plmn-310-260", _plmn_bytes("310/260").hex() == "130062",
+          _plmn_bytes("310/260").hex())
+    check("plmn-two-digit", _plmn_bytes("001/01").hex() == "00f110")
+    check("criticality-reject", _criticality_octet("reject") == 0x00)
+    check("criticality-ignore", _criticality_octet("ignore") == 0x40)
+    check("criticality-notify", _criticality_octet("notify") == 0x80)
+
+    check("encode-ran-ue-id-1", ie_ran_ue_ngap_id(1).hex() == by_name["ran-ue-id-1"],
+          ie_ran_ue_ngap_id(1).hex())
+    check("encode-amf-ue-id-256", ie_amf_ue_ngap_id(256).hex() == by_name["amf-ue-id-256"],
+          ie_amf_ue_ngap_id(256).hex())
+    check("amf-length-is-three-bits",
+          ie_amf_ue_ngap_id(256).hex()[8:10] == "20",
+          "AMF-UE-NGAP-ID 256 must open 20, not 40")
+    check("ran-length-is-two-bits",
+          ie_ran_ue_ngap_id(256).hex()[8:10] == "40",
+          "RAN-UE-NGAP-ID 256 opens 40: a 32-bit range spends two bits")
+    check("encode-nas-pdu", ie_nas_pdu(NAS_DOWNLINK).hex() == by_name["nas-pdu"],
+          ie_nas_pdu(NAS_DOWNLINK).hex())
+    check("encode-initial-ue",
+          initial_ue_message(1, NAS_UPLINK).hex() == by_name["initial-ue-full"],
+          initial_ue_message(1, NAS_UPLINK).hex())
+    check("encode-downlink-nas",
+          downlink_nas_transport(256, 1, NAS_DOWNLINK).hex()
+          == by_name["downlink-nas-full"],
+          downlink_nas_transport(256, 1, NAS_DOWNLINK).hex())
+    check("encode-paging",
+          paging(1, 0, bytes.fromhex("0a0b0c0d"), [("001/01", "000001")]).hex()
+          == by_name["paging-full"],
+          paging(1, 0, bytes.fromhex("0a0b0c0d"), [("001/01", "000001")]).hex())
+
+    # The container count is the silent failure: one octet still parses, and
+    # reports an empty IE list while the body is ignored.
+    body = _container([ie_nas_pdu(NAS_DOWNLINK)])
+    check("container-count-is-16-bit", body[1:3] == b"\x00\x01", body[:4].hex())
+    check("container-has-extension-bit", body[0] == 0x00)
+
+    # A three-octet TAC: a two-octet one shifts the next item's PLMN.
+    tais = ie_tai_list_for_paging([("001/01", "000001")])
+    check("tai-list-three-octet-tac", tais.hex().endswith("00f110000001"),
+          tais.hex())
+    for bad in ("0001", "00000001"):
+        try:
+            ie_tai_list_for_paging([("001/01", bad)])
+            ok = False
+        except ValueError:
+            ok = True
+        check("tai-rejects-%d-octet-tac" % (len(bad) // 2), ok)
+
+    three = {
+        "initial-ue-full": ("InitialUEMessage", "RAN-UE-NGAP-ID reject 1"),
+        "downlink-nas-full": ("DownlinkNASTransport", "AMF-UE-NGAP-ID reject 256"),
+        "paging-full": ("Paging", "0a0b0c0d"),
+    }
+    for name, (procedure, needle) in three.items():
+        rows = decode(bytes.fromhex(by_name[name]))
+        head = dict(rows)
+        check("decode-%s-procedure" % name, head.get("procedure") == procedure,
+              str(head.get("procedure")))
+        blob = " ".join(v for k, v in rows if k == "ie")
+        check("decode-%s-ie" % name, needle in blob, blob)
+    paging_rows = decode(bytes.fromhex(by_name["paging-full"]))
+    joined = " ".join(v for k, v in paging_rows if k == "ie")
+    check("decode-paging-tai", "001/01 000001" in joined, joined)
+    check("decode-paging-no-undecodable", "undecodable" not in joined, joined)
+
+    # An IE this file does not know is named, not guessed at and not fatal.
+    unknown = _ie_field(999, "ignore", b"\x00")
+    rows = decode(_pdu(PROC_PAGING, "ignore", _container([unknown])))
+    blob = " ".join(v for k, v in rows if k == "ie")
+    check("decode-unknown-ie-named", "IE-999" in blob, blob)
+
+    print("ASSERTIONS\t%d" % (passed + failed))
+    print("RESULT\t%s" % ("PASS" if failed == 0 else "FAIL"))
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

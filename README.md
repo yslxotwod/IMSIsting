@@ -109,12 +109,15 @@ is performed and no answer is matched to a request.
 | Module | Description | Attack |
 |---|---|---|
 | `12_nr_air` | NR-ARFCN, SSB/MIB/SIB1, RACH, gNB orchestration | `built` |
-| `13_nr_core` | N2/N3/N4, SBA service bus, NGAP, PFCP, 5G-AKA | `plan` |
+| `13_nr_core` | N2/N3/N4, SBA service bus, NGAP encode/decode, PFCP, 5G-AKA | `partial` |
 | `14_suci` | SUCI conceal/deconceal, ECIES profile A/B, HKDF, MSIN BCD | `built` |
 | `15_downgrade` | Cross-generation steering, null cipher, reject-cause analysis | `built` |
 
-`13_nr_core` decodes NGAP/PFCP/GTP-U for real but every one of its four vectors is
-a plan file; there is no network client.
+`13_nr_core` decodes NGAP/PFCP/GTP-U and now writes NGAP as well: `--ngap-initial-ue`,
+`--ngap-downlink-nas` and `--ngap-paging` emit real octets from `tools/ngap_asn1.py`
+(agreed by pycrate, dissected by tshark) and `--ngap-send` puts one on SCTP 38412/PPID 60
+behind `NR_ARMED=1`. An InitialUEMessage is still a fragment — UserLocationInformation
+and RRCEstablishmentCause are not built — and NG Setup has no builder.
 
 ### SIM
 | Module | Description | Attack |
@@ -370,7 +373,7 @@ and yet the APDU codec underneath it is real.
 |---|---|---|---|
 | GTP-C / GTP-U exploitation | `11_lte_core` | `partial` | Four finished encoders emitting real octets, an IE walk and TEID handling — and **no transport at all**. No SCTP, GTP or TCP client exists in the module; nothing is sent even pointed at a live core. Phase 7. |
 | Diameter S6a/S6d | `11_lte_core` | `partial` | AIR/ULR/CLR/IDR/DSR/PUR encode-decode and a forged-ULR registration move. The HSS is a Phase 7 lab testbed. |
-| PFCP / UPF | `13_nr_core` | `phase 7` | NGAP, PFCP and GTP-U decode for real, but all four vectors are plan files. |
+| PFCP / UPF | `13_nr_core` | `partial` | PFCP and GTP-U decode, PFCP builds and `--pfcp-send` puts a Session Establishment Request on UDP 8805; NGAP now builds three messages and `--ngap-send` carries one on SCTP 38412/PPID 60. NG Setup and the location IEs are absent. Phase 7. |
 | SBA / HTTP-2 pivot | `40_sba_pivot` | `partial` | Builds HTTP/2 frames byte-exactly, including a real Rapid Reset pair, and audits JWT audience and scope. `--sbi-send` carries frames to an NF over TLS but does not make them, so nothing end-to-end reaches an NF yet. Phase 7. |
 | SS7 / MAP | `26_ss7_map` | `partial` | Nine byte-exact MAP/TCAP builders (ATI, SRI, SRI-SM, SAI, PSI, ULR, ISD, registerSS, activateSS) and SIGTRAN in both directions. `--m3ua-send` puts an MSU on SCTP 2905 (PPID 3); there is no ASPUP/ASPAC handshake, so an STP demanding an ACTIVE ASP drops it. Phase 8. |
 | GRX / roaming interconnect | `26_ss7_map` | `phase 8` | Reachability and GSN harvesting are modelled; the interconnect trust model and SEPP exposure are Phase 8. |

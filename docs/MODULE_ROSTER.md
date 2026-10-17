@@ -76,7 +76,7 @@ NOT the same number and are not meant to be".
 | File | Tag | Menu name | Category | Purpose |
 |---|---|---|---|---|
 | `12_nr_air.sh` | `nair` | 5G NR Air Interface | RADIO | gNB orchestration, NR RRC, SSB/CSI, RACH, SIB1 decode |
-| `13_nr_core.sh` | `ncore` | 5G Core (SBA) | CORE NETWORK | N2/N3/N4, SBA HTTP/2 NF discovery, SEPP, AUSF/UDM flows |
+| `13_nr_core.sh` | `ncore` | 5G Core (SBA) | CORE NETWORK | N2/N3/N4, NGAP encode and decode, SBA HTTP/2 NF discovery, SEPP, AUSF/UDM flows |
 | `14_suci.sh` | `suci` | SUCI Deconcealment | SIM / IDENTITY | SUCI conceal/deconceal, ECIES profile A/B, home-network key derivation |
 | `15_downgrade.sh` | `dwn` | Downgrade Attacks | RADIO | 5G→4G→3G→2G steering, NEA/NIA null-cipher, reject-cause forging |
 

@@ -221,11 +221,20 @@ ncore_decode_ngap() {
     hex="${hex//[[:space:]]/}"
     hex="${hex//0x/}"
     [[ "$hex" =~ ^[0-9a-fA-F]+$ ]] || return 1
-    (( ${#hex} >= 4 )) || return 1
+    (( ${#hex} >= 8 )) || return 1
     (( ${#hex} % 2 == 0 )) || return 1
 
-    local b0; b0=$(( 16#${hex:0:2} ))
-    local pdu_type=$(( (b0 >> 6) & 0x3 ))
+    # The envelope, per TS 38.413 §9.1, and the reason this function was
+    # rewritten: NGAP-PDU is a CHOICE whose preamble is ONE octet -- an
+    # extension bit and a two-bit index -- and the procedureCode follows in
+    # its OWN octet as an INTEGER (0..255), then the criticality octet, then
+    # the message body as an open type.  Reading the procedure code out of the
+    # discriminator octet is the mistake that still looks like a decode: a
+    # real InitialUEMessage opens 00 0F, and that reading calls the 0x0F
+    # "procedure 15 in the top bits" while a capture's 0x00 becomes
+    # "procedure 0".  The old selftest pinned exactly that, so it passed.
+    local disc=$(( 16#${hex:0:2} ))
+    local pdu_type=$(( (disc >> 5) & 0x3 ))
     local type_name
     case "$pdu_type" in
         0) type_name="initiatingMessage" ;;
@@ -233,38 +242,50 @@ ncore_decode_ngap() {
         2) type_name="unsuccessfulOutcome" ;;
         *) type_name="reserved" ;;
     esac
+    local ext_bit=$(( disc & 0x80 ))
 
-    local proc=$(( b0 & 0x3F ))
-    local proc_hi=""
-    local b1m1=0
-    if (( proc == 63 )) && (( ${#hex} >= 4 )); then
-        # 6-bit all-ones means the procedure code continues in the next octet.
-        proc=$(( 16#${hex:2:2} ))
-        b1m1=1
-    fi
+    local proc=$(( 16#${hex:2:2} ))
+    local crit_octet=$(( 16#${hex:4:2} ))
     local criticality="unknown"
-    case $(( (b0 >> 4) & 0x3 )) in
+    case $(( (crit_octet >> 6) & 0x3 )) in
         0) criticality="reject" ;;
         1) criticality="ignore" ;;
         2) criticality="notify" ;;
         *) criticality="reserved" ;;
     esac
+    local body_octets=$(( 16#${hex:6:2} ))
+    local declared=$(( ${#hex} / 2 - 4 ))
 
     local name; name=$(ncore_ngap_procedure_name "$proc")
     [[ -n "$name" ]] || name="unknown-procedure"
 
+    printf 'discriminator\t%s\n'  "$(printf '%02X' "$disc")"
     printf 'pdu_type\t%s\n'        "$pdu_type"
     printf 'pdu_type_name\t%s\n'   "$type_name"
+    printf 'extension_bit\t%s\n'   "$(( ext_bit != 0 ? 1 : 0 ))"
     printf 'procedure_code\t%s\n'  "$proc"
     printf 'procedure_name\t%s\n'  "$name"
     printf 'criticality\t%s\n'     "$criticality"
-    printf 'extended_proc\t%s\n'   "$b1m1"
+    printf 'body_octets\t%s\n'     "$body_octets"
     printf 'length_octets\t%s\n'   "$(( ${#hex} / 2 ))"
+    printf 'body_matches_length\t%s\n' \
+        "$(( body_octets == declared ? 1 : 0 ))"
 
-    # InitialUEMessage carries the NAS PDU and the two UE NGAP IDs. The
-    # procedure-specific body is not decoded from a raw hex blob without a
-    # full ASN.1 PER decoder, and inventing one would be dishonest; the
-    # fields that matter for pairing are reported as presence flags.
+    # ProtocolIE-Container: one extension bit, an alignment, then a SIXTEEN-bit
+    # count (SEQUENCE (SIZE(0..65535))).  The count is read here; the IEs
+    # themselves are read by tools/ngap_asn1.py, which is the same codec that
+    # writes them, so the module does not keep a second table to drift.
+    if (( body_octets >= 3 )) && (( ${#hex} >= 14 )); then
+        local body="${hex:8:$(( body_octets * 2 ))}"
+        printf 'ie_count\t%s\n' "$(( 16#${body:2:4} ))"
+        local tool="$IMSISTING_ROOT/tools/ngap_asn1.py"
+        if [[ -f "$tool" ]] && command -v python3 >/dev/null 2>&1; then
+            python3 "$tool" decode "$hex" 2>/dev/null \
+                | awk -F'\t' '$1=="ie"{printf "ie\t%s\n", $2}' || true
+        fi
+    fi
+
+    # The fields that matter for pairing, as presence flags.
     if (( proc == 15 )); then
         printf 'carries_nas_pdu\tyes\n'
         printf 'expected_ies\tRAN-UE-NGAP-ID, NAS-PDU, UserLocationInformation, RRCEstablishmentCause, 5G-S-TMSI\n'
@@ -885,6 +906,107 @@ ncore_cmd_pfcp_send() {  # <upf-host> [port] [hex]
     timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${NR_WAIT:-0}"
 }
 
+# ── NGAP encoders ───────────────────────────────────────────────────────
+# Until now the module could read NGAP and could not write one, so every
+# claim about the 5G side was an S1AP message translated by hand.  These
+# verbs build the three messages a gNB actually sends, print the octets, and
+# stop; sending is --ngap-send, armed on its own.
+#
+# The octets come from tools/ngap_asn1.py, which was checked twice: pycrate
+# encodes the same values and must agree to the octet (tools/check-ngap-codec.sh),
+# and tshark dissects the result from an SCTP DATA chunk with PPID 60.
+
+ncore_fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
+
+ncore_ngap_build() {  # <verb> [args...]
+    local tool="$IMSISTING_ROOT/tools/ngap_asn1.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot encode NGAP\n' "$tool" >&2; return 1; }
+    local out
+    out=$(python3 "$tool" "$@" 2>&1) || { printf '%s\n' "$out" >&2; return 1; }
+    ncore_fld "$out" hex
+}
+
+ncore_cmd_ngap_initial_ue() {  # [ran-ue-id] [nas-hex]
+    local ran="${1:-1}" nas="${2:-7e0041012e0100}"
+    local hex; hex=$(ncore_ngap_build initial-ue --ran-ue-id "$ran" --nas "$nas") \
+        || { printf 'ERROR\tthe NGAP encoder failed\n' >&2; return 1; }
+    [[ -n "$hex" ]] || { printf 'ERROR\tthe NGAP encoder returned no octets\n' >&2; return 1; }
+    local dec; dec=$(ncore_decode_ngap "$hex")
+    printf 'message\tInitialUEMessage\n'
+    printf 'procedure_code\t15\n'
+    printf 'ran_ue_ngap_id\t%s\n' "$ran"
+    printf 'nas_pdu\t%s\n' "$nas"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'hex\t%s\n' "$hex"
+    printf 'ie_count\t%s\n' "$(ncore_fld "$dec" ie_count)"
+    printf 'missing_ies\tUserLocationInformation (id 121) and RRCEstablishmentCause (id 90) are mandatory here and not built, so this is a fragment an AMF rejects\n'
+}
+
+ncore_cmd_ngap_downlink_nas() {  # [amf-ue-id] [ran-ue-id] [nas-hex]
+    local amf="${1:-1}" ran="${2:-1}" nas="${3:-7e005b01}"
+    local hex; hex=$(ncore_ngap_build downlink-nas --amf-ue-id "$amf" --ran-ue-id "$ran" --nas "$nas") \
+        || { printf 'ERROR\tthe NGAP encoder failed\n' >&2; return 1; }
+    [[ -n "$hex" ]] || { printf 'ERROR\tthe NGAP encoder returned no octets\n' >&2; return 1; }
+    local dec; dec=$(ncore_decode_ngap "$hex")
+    printf 'message\tDownlinkNASTransport\n'
+    printf 'procedure_code\t4\n'
+    printf 'amf_ue_ngap_id\t%s\n' "$amf"
+    printf 'ran_ue_ngap_id\t%s\n' "$ran"
+    printf 'nas_pdu\t%s\n' "$nas"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'hex\t%s\n' "$hex"
+    printf 'ie_count\t%s\n' "$(ncore_fld "$dec" ie_count)"
+    printf 'note\tthe AMF UE NGAP ID is a 40-bit integer, so its length field is three bits: 256 is 20 01 00 here and 40 01 00 in S1AP\n'
+}
+
+ncore_cmd_ngap_paging() {  # [amf-set-id] [amf-pointer] [tmsi-hex] [plmn/tac]
+    local set_id="${1:-1}" pointer="${2:-0}" tmsi="${3:-0a0b0c0d}" tai="${4:-001/01/000001}"
+    local hex; hex=$(ncore_ngap_build paging --amf-set-id "$set_id" --amf-pointer "$pointer" \
+        --tmsi "$tmsi" --tai "$tai") \
+        || { printf 'ERROR\tthe NGAP encoder failed\n' >&2; return 1; }
+    [[ -n "$hex" ]] || { printf 'ERROR\tthe NGAP encoder returned no octets\n' >&2; return 1; }
+    local dec; dec=$(ncore_decode_ngap "$hex")
+    printf 'message\tPaging\n'
+    printf 'procedure_code\t24\n'
+    printf 'amf_set_id\t%s\n' "$set_id"
+    printf 'amf_pointer\t%s\n' "$pointer"
+    printf 'fiveg_tmsi\t%s\n' "$tmsi"
+    printf 'tai\t%s\n' "$tai"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'hex\t%s\n' "$hex"
+    printf 'ie_count\t%s\n' "$(ncore_fld "$dec" ie_count)"
+    printf 'note\tPaging is the one whole message here: both of its mandatory IEs are built, and neither has to know where the handset is\n'
+}
+
+# --ngap-send puts one of those messages on SCTP port 38412 with PPID 60.
+# Armed separately from the builders, for the same reason every other sender
+# in this tree is: a builder is not a target.
+ncore_cmd_ngap_send() {  # <amf-host> [port] [hex]
+    local host="${1:-}" port="${2:-38412}" hex="${3:-}"
+    local tool="$IMSISTING_ROOT/tools/sctp_assoc.py"
+    if [[ "${NR_ARMED:-0}" != "1" ]]; then
+        printf 'status\tdisarmed\n'
+        printf 'reason\tan NGAP message is sent only when NR_ARMED=1; the octets build either way\n'
+        printf 'would_send\t%s to %s:%s as NGAP over SCTP, PPID 60\n' \
+            "${hex:-<a forged InitialUEMessage>}" "${host:-<no host given>}" "$port"
+        return 3
+    fi
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\tneed <amf-host> [port] [hex]\n' >&2
+        return 2
+    fi
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot send\n' "$tool" >&2; return 1; }
+    if [[ -z "$hex" ]]; then
+        hex=$(ncore_ngap_build initial-ue --ran-ue-id 1 --nas 7e0041012e0100) || {
+            printf 'ERROR\tthe NGAP encoder returned no octets\n' >&2; return 1; }
+    fi
+    printf 'leg\tNGAP (N2)\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'encapsulation\tsctp\n'
+    printf 'ppid\t60\n'
+    timeout 30 python3 "$tool" send "$host" "$port" "$hex" --ppid 60 --wait "${NR_WAIT:-0}"
+}
+
 # The rule structure a Session Establishment Request builds:
 #   PDR  (Packet Detection Rule)  matches traffic  -> PDI, precedence, FAR ID, QER ID, URR ID
 #   FAR  (Forwarding Action Rule) applies action   -> Apply Action, Forwarding Parameters
@@ -1440,32 +1562,73 @@ ncore_selftest() {
     export TMP_DIR="$d/tmp" NCORE_DIR="$d/loot/nr_core" NCORE_PLAN_DIR="$d/loot/nr_core/plans"
     mkdir -p "$NCORE_DIR" "$NCORE_PLAN_DIR"
 
-    # 1. NGAP PDU type and procedure code.
-    #    InitialUEMessage is procedureCode 15, an initiatingMessage, so the
-    #    first octet is 0b00_001111 = 0x0F.
-    out=$(ncore_decode_ngap "0F002000")
+    # 1. NGAP envelope: the CHOICE preamble, then the procedureCode in its
+    #    own octet, then criticality, then the body length.  InitialUEMessage
+    #    is procedureCode 15 and an initiatingMessage, so it opens 00 0F 00 00.
+    out=$(ncore_decode_ngap "000F0000")
+    chk ngap-disc       "$(fld "$out" discriminator)"   "00"
     chk ngap-pdu-type   "$(fld "$out" pdu_type)"        "0"
     chk ngap-type-name  "$(fld "$out" pdu_type_name)"   "initiatingMessage"
+    chk ngap-ext-bit    "$(fld "$out" extension_bit)"   "0"
     chk ngap-proc       "$(fld "$out" procedure_code)"  "15"
     chk ngap-proc-name  "$(fld "$out" procedure_name)"  "InitialUEMessage"
     chk ngap-carries    "$(fld "$out" carries_nas_pdu)" "yes"
-    # DownlinkNASTransport is procedureCode 4 -> 0x04.
-    out=$(ncore_decode_ngap "0400")
+    chk ngap-body-len   "$(fld "$out" body_octets)"     "0"
+    # The mistake this decoder used to make, pinned so it cannot come back:
+    # 0x0F is a discriminator, not "procedure 15 in the top two bits", so the
+    # old shape must NOT read as InitialUEMessage.
+    out=$(ncore_decode_ngap "0F002000")
+    chk ngap-old-shape-not-iu "$(fld "$out" procedure_code)" "0"
+    # DownlinkNASTransport is procedureCode 4.
+    out=$(ncore_decode_ngap "00040000")
     chk ngap-dl-proc    "$(fld "$out" procedure_code)" "4"
     chk ngap-dl-name    "$(fld "$out" procedure_name)" "DownlinkNASTransport"
-    # UplinkNASTransport is procedureCode 48 -> 0x30.
-    out=$(ncore_decode_ngap "3000")
+    # UplinkNASTransport is procedureCode 48.
+    out=$(ncore_decode_ngap "00300000")
     chk ngap-ul-name    "$(fld "$out" procedure_name)" "UplinkNASTransport"
-    # successfulOutcome is PDU type 1: 0b01_000000 = 0x40 for code 0.
-    out=$(ncore_decode_ngap "4000")
+    # successfulOutcome is CHOICE index 1: extension bit 0, index 001 -> 0x20.
+    out=$(ncore_decode_ngap "20000000")
     chk ngap-success    "$(fld "$out" pdu_type_name)"  "successfulOutcome"
     chk ngap-success-p  "$(fld "$out" procedure_code)" "0"
-    # unsuccessfulOutcome is PDU type 2: 0b10_000000 = 0x80.
-    out=$(ncore_decode_ngap "8000")
+    # unsuccessfulOutcome is CHOICE index 2 -> 0x40.
+    out=$(ncore_decode_ngap "40000000")
     chk ngap-unsucc     "$(fld "$out" pdu_type_name)"  "unsuccessfulOutcome"
-    chk ngap-bad-odd    "$(ncore_decode_ngap ABC >/dev/null 2>&1; echo $?)"  "1"
-    chk ngap-bad-nonhex "$(ncore_decode_ngap ZZ >/dev/null 2>&1; echo $?)"   "1"
-    chk ngap-bad-short  "$(ncore_decode_ngap 0F >/dev/null 2>&1; echo $?)"   "1"
+    chk ngap-bad-odd    "$(ncore_decode_ngap ABC >/dev/null 2>&1; echo $?)"   "1"
+    chk ngap-bad-nonhex "$(ncore_decode_ngap ZZ >/dev/null 2>&1; echo $?)"    "1"
+    chk ngap-bad-short  "$(ncore_decode_ngap 0F >/dev/null 2>&1; echo $?)"    "1"
+    chk ngap-bad-3-octet "$(ncore_decode_ngap 000F00 >/dev/null 2>&1; echo $?)" "1"
+
+    # 1b. The encoders.  Each hex below was agreed by pycrate (see
+    #     tools/check-ngap-codec.sh) and dissected by tshark from an SCTP DATA
+    #     chunk with PPID 60; the decoder must also read them back.
+    out=$(ncore_cmd_ngap_initial_ue 1 7e0041012e0100)
+    chk ngap-enc-iu-hex    "$(fld "$out" hex)" \
+        "000f001500000200550002000100260008077e0041012e0100"
+    chk ngap-enc-iu-octets "$(fld "$out" octets)"    "25"
+    chk ngap-enc-iu-ies    "$(fld "$out" ie_count)"  "2"
+    chk ngap-enc-iu-gap    "$(fld "$out" missing_ies | grep -c '121')" "1"
+    out=$(ncore_cmd_ngap_downlink_nas 256 1 7e005b01)
+    chk ngap-enc-dl-hex    "$(fld "$out" hex)" \
+        "00040019000003000a000320010000550002000100260005047e005b01"
+    chk ngap-enc-dl-octets "$(fld "$out" octets)"    "29"
+    chk ngap-enc-dl-ies    "$(fld "$out" ie_count)"  "3"
+    out=$(ncore_cmd_ngap_paging 1 0 0a0b0c0d 001/01/000001)
+    chk ngap-enc-pg-hex    "$(fld "$out" hex)" \
+        "00184019000002007340070008000a0b0c0d006740070000f110000001"
+    chk ngap-enc-pg-octets "$(fld "$out" octets)"    "29"
+    chk ngap-enc-pg-ies    "$(fld "$out" ie_count)"  "2"
+    # The read-back has to agree with the send: same octets, same procedure.
+    chk ngap-enc-pg-proc "$(ncore_decode_ngap 00184019000002007340070008000a0b0c0d006740070000f110000001 | awk -F'\t' '$1=="procedure_name"{print $2; exit}')" "Paging"
+
+    # 1c. The sender is armed on its own.
+    chk ngap-send-disarmed \
+        "$(ncore_cmd_ngap_send 127.0.0.1 38412 >/dev/null 2>&1; echo $?)" "3"
+    chk ngap-send-would-send \
+        "$(ncore_cmd_ngap_send 127.0.0.1 38412 2>/dev/null | awk -F'\t' '$1=="would_send"{print $2; exit}' | grep -c 'PPID 60')" "1"
+    chk ngap-send-armed-nohost \
+        "$(NR_ARMED=1 ncore_cmd_ngap_send '' 38412 >/dev/null 2>&1; echo $?)" "2"
+    chk ngap-send-tool-present \
+        "$([[ -f "$IMSISTING_ROOT/tools/sctp_assoc.py" ]] && echo yes || echo no)" "yes"
 
     # 2. NGAP procedure table: real assigned codes.
     chk ngap-tbl-15  "$(ncore_ngap_procedure_name 15)" "InitialUEMessage"
@@ -1883,6 +2046,10 @@ ncore_cli_main() {
         --pfcp-build)      ncore_cmd_pfcp_build "${1:-1}" "${2:-10.45.0.2}" "${3:-1}" \
                                                 "${4:-0}" "${5:-10.45.0.1}" ;;
         --pfcp-send)       ncore_cmd_pfcp_send "${1:-}" "${2:-8805}" "${3:-}" ;;
+        --ngap-initial-ue)  ncore_cmd_ngap_initial_ue "${1:-}" "${2:-}" ;;
+        --ngap-downlink-nas) ncore_cmd_ngap_downlink_nas "${1:-}" "${2:-}" "${3:-}" ;;
+        --ngap-paging)      ncore_cmd_ngap_paging "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+        --ngap-send)        ncore_cmd_ngap_send "${1:-}" "${2:-}" "${3:-}" ;;
         --gtpu-header)     ncore_gtpu_header "${1:-1}" "${2:-1}" ;;
         --plan)            ncore_cmd_plan "${1:-}" ;;
         --selftest)        ncore_selftest ;;
@@ -1910,6 +2077,14 @@ Usage: $0 COMMAND
                                 build a Session Establishment Request (type 50)
   --pfcp-send <upf-host> [port] [hex]
                                 send it on UDP 8805, needs NR_ARMED=1
+  --ngap-initial-ue [ran-ue-id] [nas-hex]
+                                build an InitialUEMessage with its NAS-PDU
+  --ngap-downlink-nas [amf-ue-id] [ran-ue-id] [nas-hex]
+                                build a DownlinkNASTransport
+  --ngap-paging [set-id] [pointer] [tmsi-hex] [plmn/tac]
+                                build a Paging: 5G-S-TMSI and the TAI list
+  --ngap-send <amf-host> [port] [hex]
+                                send one on SCTP 38412, PPID 60, needs NR_ARMED=1
   --gtpu-header [teid] [qfi]    build an N3 GTP-U header with the QFI
   --plan <name>                 write a handoff plan
                                 (n2-expose|nrf-discovery|sepp-bypass|ipx-attack)
