@@ -15634,7 +15634,7 @@ static ModuleSubmenuEntry pgt_entries[] = {
       "~--edrx-occ|~--pei-occ|~--page-mode|~--paging-cause" },
     { "Attack",
       "security-high-symbolic",
-      "#BUILD|~--build-paging-req|#TX|~--paging-tx|#HISTORY|~--paging-history|~--flapping-tsv" },
+      "#BUILD|~--build-paging-req|#TX|~--paging-tx|~--paging-storm|#HISTORY|~--paging-history|~--flapping-tsv" },
 };
 static ModuleSubmenuEntry vims_entries[] = {
     { "Overview",

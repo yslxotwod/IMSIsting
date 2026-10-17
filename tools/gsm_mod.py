@@ -592,7 +592,8 @@ for _fn in range(51):
 assert len(_MULTIFRAME) == 51
 
 
-def bcch_carrier(l2_blocks, bsic=0, tsc=None, sps=4, multiframes=1, tn=0):
+def bcch_carrier(l2_blocks, bsic=0, tsc=None, sps=4, multiframes=1, tn=0,
+                 pch_blocks=None):
     """Build a complete BCCH carrier, the waveform a phone actually camps on.
 
     `l2_blocks` are 23-octet L2 blocks for the BCCH; block N of the multiframe
@@ -600,6 +601,13 @@ def bcch_carrier(l2_blocks, bsic=0, tsc=None, sps=4, multiframes=1, tn=0):
     TS 45.002 section 5.2.3.1 requires for BCCH ("the TSC must be equal to the
     BCC ... selected from the TSC Set 1"), and the BCC is the low three bits of
     the BSIC.
+
+    `pch_blocks` are 23-octet L2 blocks for the CCCH (PCH/AGCH). When given
+    they replace blocks 2, 3 and 4 of the multiframe -- the CCCH blocks in the
+    non-combined mapping, blocks 0 and 1 staying on the BCCH -- and cycle
+    across multiframes. That is the channel a paging request rides on, so
+    without this the carrier carries System Information and idle bursts and
+    no paging at all.
 
     Returns (samples, frame_count). One 51-frame multiframe is 51 * 1250 symbol
     periods = 0.2354 seconds.
@@ -615,9 +623,13 @@ def bcch_carrier(l2_blocks, bsic=0, tsc=None, sps=4, multiframes=1, tn=0):
     for blk in l2_blocks:
         if len(blk) != 23:
             raise ValueError("BCCH L2 blocks are 23 octets, got %d" % len(blk))
+    for blk in (pch_blocks or []):
+        if len(blk) != 23:
+            raise ValueError("CCCH L2 blocks are 23 octets, got %d" % len(blk))
 
-    # Each distinct BCCH block is four xCCH bursts, one per frame.
+    # Each distinct block is four xCCH bursts, one per frame.
     coded = [xcch_encode(blk) for blk in l2_blocks]
+    pch_coded = [xcch_encode(blk) for blk in (pch_blocks or [])]
 
     frames = []
     for fn in range(51 * multiframes):
@@ -628,7 +640,10 @@ def bcch_carrier(l2_blocks, bsic=0, tsc=None, sps=4, multiframes=1, tn=0):
             burst = sch_burst(sch_encode(sch_payload(bsic, fn)))
         elif what.isdigit():
             index = int(what) + 5 * (fn // 51)
-            burst = normal_burst(coded[index % len(coded)][(fn % 6) - 2], tsc)
+            # Blocks 2..4 are the CCCH in the non-combined mapping
+            # (TS 45.002 6.3.1.3), so that is where a paging block goes.
+            blocks = pch_coded if (pch_coded and int(what) >= 2) else coded
+            burst = normal_burst(blocks[index % len(blocks)][(fn % 6) - 2], tsc)
         else:
             burst = dummy_burst()
         frames.append(tdma_frame({tn: burst}, sps))
@@ -870,8 +885,16 @@ def cmd_carrier(args):
                 "ERROR\toversampling factor %d is not a multiple of %d, so the 4 sps "
                 "shaping pulse cannot be resampled exactly" % (oversample, base_sps))
 
+    pch = []
+    for h in args.paging_block:
+        b = parse_hex(h, "CCCH L2 block")
+        if len(b) != 23:
+            raise SystemExit("ERROR\tCCCH L2 blocks are 23 octets, got %d" % len(b))
+        pch.append(b)
+
     samples, frames = bcch_carrier(l2, bsic=args.bsic, sps=base_sps,
-                                   multiframes=args.multiframes, tn=args.tn)
+                                   multiframes=args.multiframes, tn=args.tn,
+                                   pch_blocks=pch)
     if args.format == "cs8":
         samples = resample(samples, oversample // base_sps)
         data = to_int8(samples)
@@ -885,6 +908,12 @@ def cmd_carrier(args):
     print("tsc\t%d" % (args.bsic & 0x07))
     print("timeslot\t%d" % args.tn)
     print("bcch_blocks\t%d" % len(l2))
+    print("paging_blocks\t%d" % len(pch))
+    if pch:
+        print("paging_block_hex\t%s" % "".join(b.hex() for b in pch))
+        print("paging_frame_numbers\t%s" % ",".join(
+            str(fn) for fn in range(51 * args.multiframes)
+            if _MULTIFRAME[fn % 51].isdigit() and int(_MULTIFRAME[fn % 51]) >= 2))
     print("multiframes\t%d" % args.multiframes)
     print("tdma_frames\t%d" % frames)
     print("multiframe_seconds\t%.6f" % (1250.0 * 51 / 270833.3333333333))
@@ -1136,6 +1165,21 @@ def selftest():
     chk("tx-duration-ms",
         round(len(tx_samples) / (270833.3333333333 * 8) * 1e3, 3), 18.462)
 
+    # A paging block must land in the CCCH blocks of the multiframe (2, 3, 4,
+    # frames 14..29), not in a BCCH block. Two carriers differing only in the
+    # paging block have to agree over the BCCH frames and differ over the CCCH
+    # frames; a placement bug moves samples across that boundary.
+    P = bytes.fromhex("0303490806211031123456782b2b2b2b2b2b2b2b2b2b2b")
+    Q = bytes.fromhex("0303490806211031123456782b2b2b2b2b2b2b2b2b2b2c")
+    X = b"\x00" * 23
+    ca, _ = bcch_carrier([X], bsic=7, sps=4, pch_blocks=[P])
+    cb, _ = bcch_carrier([X], bsic=7, sps=4, pch_blocks=[Q])
+    fl = int(round(SYMBOLS_PER_FRAME * 4))
+    chk("carrier-51-frames", len(ca), 51 * fl)
+    chk("paging-bcch-frames-untouched", ca[2 * fl:12 * fl] == cb[2 * fl:12 * fl], True)
+    chk("paging-ccch-frames-differ", ca[14 * fl:18 * fl] != cb[14 * fl:18 * fl], True)
+    chk("paging-idle-frames-untouched", ca[30 * fl:] == cb[30 * fl:], True)
+
     if failures:
         for f in failures:
             print(f)
@@ -1182,6 +1226,9 @@ def main(argv):
     p.add_argument("--multiframes", type=int, default=1)
     p.add_argument("--rate", type=float, default=2166666.666666667)
     p.add_argument("--format", choices=("cs8", "cfile"), default="cs8")
+    p.add_argument("--paging-block", action="append", default=[],
+                   help="a 23-octet CCCH (PCH/AGCH) L2 block as hex; repeat to "
+                        "cycle. Placed in multiframe blocks 2..4, the CCCH")
     p.set_defaults(fn=cmd_carrier)
     sub.add_parser("vectors").set_defaults(fn=cmd_vectors)
     sub.add_parser("selftest").set_defaults(fn=lambda a: selftest())

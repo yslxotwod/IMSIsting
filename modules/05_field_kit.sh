@@ -326,6 +326,7 @@ fk_guard_matrix() {
 27_cellular_dns|--detect|/nonexistent.pcap
 28_paging_track|--detect|/nonexistent.pcap
 28_paging_track|--paging-tx||PGT_SDR_DEVICE=|60
+28_paging_track|--paging-storm||PGT_SDR_DEVICE= PGT_STORM_CYCLES=1|120
 29_mac_layer|--rnti-track|/nonexistent.pcap
 32_nas_signaling|--rate|/nonexistent.pcap
 33_jamming_detect|--analyse|/nonexistent.iq
