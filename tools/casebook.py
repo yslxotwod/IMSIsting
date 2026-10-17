@@ -422,6 +422,20 @@ def cmd_observations_geojson(args: argparse.Namespace) -> None:
     emit_pairs(map=out, points=len(features))
 
 
+def ue_agent(serial: str, *arguments: str) -> subprocess.CompletedProcess:
+    """Run tools/ue_agent.sh against one handset.
+
+    The adb command shapes live in that file, not here: two copies of "how do
+    you ask Android for the IMEI" is two places to be wrong.  UE_SERIAL is how
+    a serial reaches it, which is the same variable a human would set.
+    """
+    script = ROOT / "tools" / "ue_agent.sh"
+    environment = dict(os.environ)
+    environment["UE_SERIAL"] = serial
+    return subprocess.run(["bash", str(script), *arguments], capture_output=True,
+                          text=True, timeout=40, check=False, env=environment)
+
+
 def cmd_node_add(args: argparse.Namespace) -> None:
     try:
         ident = slug(args.name)
@@ -460,6 +474,10 @@ def cmd_node_collect(args: argparse.Namespace) -> None:
             subprocess.run(["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                             "--", f"{node['host']}:{source}", str(target)],
                            timeout=30, check=True)
+        elif node["transport"] == "adb":
+            result = ue_agent(node["host"], "--collect", source, str(destination))
+            if result.returncode != 0:
+                err(f"adb pull failed: {(result.stderr or result.stdout).strip()}")
         else:
             err(f"unsupported transport: {node['transport']}")
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -484,6 +502,20 @@ def cmd_node_probe(args: argparse.Namespace) -> None:
             result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", node["host"], "printf 'host=%s uptime=%s' \"$(hostname)\" \"$(cut -d' ' -f1 /proc/uptime)\""], capture_output=True, text=True, timeout=8, check=False)
             detail = (result.stdout or result.stderr).strip()
             online = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            detail, online = str(exc), False
+    elif node["transport"] == "adb":
+        # role=ue: the host column is the adb serial (or "usb" for the only one
+        # attached). ue_agent reports the verdict; a phone that is absent, or
+        # present but unauthorised, is OFFLINE with the reason in the detail.
+        try:
+            result = ue_agent(node["host"], "--probe")
+            pairs = dict(line.split("\t", 1) for line in result.stdout.splitlines() if "\t" in line)
+            state = pairs.get("state", "unknown")
+            online = state == "device"
+            detail = " ".join(f"{key}={value}" for key, value in pairs.items() if key in {"serial", "state", "version"})
+            if not detail:
+                detail = (result.stderr or "ue_agent returned nothing").strip()
         except (OSError, subprocess.TimeoutExpired) as exc:
             detail, online = str(exc), False
     else:
@@ -607,7 +639,7 @@ def build_parser() -> argparse.ArgumentParser:
     add("timeline-add", cmd_timeline_add, (("severity",), {}), (("type",), {}), (("source",), {}), (("message",), {}), (("reference",), {"nargs":"?", "default":"-"})); add("timeline", cmd_timeline); add("correlate", cmd_correlate)
     add("alert-add", cmd_alert_add, (("severity",), {}), (("kind",), {}), (("source",), {}), (("message",), {}), (("evidence",), {"nargs":"?", "default":"-"})); add("alerts", cmd_alerts); add("alerts-clear", cmd_alerts_clear); add("baseline-build", cmd_baseline, (("file",), {"nargs":"?"})); add("ids-scan", cmd_ids_scan, (("file",), {}))
     add("observation-add", cmd_observation_add, (("node",), {}), (("target",), {}), (("rat",), {}), (("plmn",), {}), (("channel",), {}), (("cell_id",), {}), (("pci",), {}), (("signal",), {}), (("lat",), {"nargs":"?", "default":""}), (("lon",), {"nargs":"?", "default":""}), (("source",), {"nargs":"?", "default":"manual"})); add("observations", cmd_observations); add("observations-geojson", cmd_observations_geojson, (("file",), {"nargs":"?"}))
-    add("node-add", cmd_node_add, (("name",), {}), (("host",), {}), (("transport",), {"nargs":"?", "choices":["ssh","local"], "default":"ssh"}), (("role",), {"nargs":"?", "default":"sensor"})); add("node-remove", cmd_node_remove, (("name",), {})); add("nodes", cmd_nodes); add("node-probe", cmd_node_probe, (("name",), {})); add("node-collect", cmd_node_collect, (("name",), {}), (("remote_path",), {}))
+    add("node-add", cmd_node_add, (("name",), {}), (("host",), {}), (("transport",), {"nargs":"?", "choices":["ssh","local","adb"], "default":"ssh"}), (("role",), {"nargs":"?", "default":"sensor"})); add("node-remove", cmd_node_remove, (("name",), {})); add("nodes", cmd_nodes); add("node-probe", cmd_node_probe, (("name",), {})); add("node-collect", cmd_node_collect, (("name",), {}), (("remote_path",), {}))
     for name, function in (("report-html", cmd_report_html), ("report-json", cmd_report_json), ("report-tsv", cmd_report_tsv)):
         item = add(name, function, (("file",), {"nargs":"?"}))
         item.add_argument("--full", action="store_true", help="include unredacted subscriber identifiers")
@@ -629,6 +661,33 @@ def run_selftest() -> int:
         (CAPTURES/"mod").mkdir(parents=True);(CAPTURES/"mod"/"a.pcap").write_bytes(b"pcap");cmd_index(argparse.Namespace());check("index",len(read_table(case_dir()/"evidence.tsv",EVIDENCE_FIELDS)),1)
         alert_add("HIGH","cell-change","test","changed","ref");check("alert",read_table(case_dir()/"alerts.tsv",ALERT_FIELDS)[0]["severity"],"HIGH")
         cmd_node_add(argparse.Namespace(name="localnode",host="localhost",transport="local",role="sensor"));cmd_node_probe(argparse.Namespace(name="localnode"));check("node",read_table(NODES,NODE_FIELDS)[0]["status"],"ONLINE")
+        # A handset is a node with a transport and a role of its own. With no
+        # adb on PATH the node is OFFLINE and says why -- it does not claim a
+        # device it cannot see -- and it comes back ONLINE for a stub that
+        # answers like a phone.
+        cmd_node_add(argparse.Namespace(name="phone1",host="R58M12345",transport="adb",role="ue"))
+        phone = next(row for row in read_table(NODES,NODE_FIELDS) if row["name"] == "phone1")
+        check("node-adb-transport", phone["transport"], "adb")
+        check("node-adb-role", phone["role"], "ue")
+        check("node-adb-unseen", phone["status"], "UNKNOWN")
+        saved_adb = os.environ.get("UE_ADB")
+        try:
+            os.environ["UE_ADB"] = "definitely-not-adb"
+            try:
+                cmd_node_probe(argparse.Namespace(name="phone1"))
+                raised = False
+            except SystemExit as exc:
+                raised = exc.code == 1
+            check("node-adb-offline-raises", raised, True)
+            check("node-adb-offline-status",
+                  next(row for row in read_table(NODES,NODE_FIELDS) if row["name"] == "phone1")["status"], "OFFLINE")
+            check("node-adb-offline-detail",
+                  next(row for row in read_table(NODES,NODE_FIELDS) if row["name"] == "phone1")["detail"], "state=absent")
+        finally:
+            if saved_adb is None:
+                os.environ.pop("UE_ADB", None)
+            else:
+                os.environ["UE_ADB"] = saved_adb
         cmd_report_json(argparse.Namespace(file=None,full=False));cmd_report_html(argparse.Namespace(file=None,full=False));check("reports",len(list((case_dir()/"reports").iterdir())),2)
         check("sanitize",clean("a\tb\nc"),"a b c")
         print(f"RESULT\t{'PASS' if not failures else f'FAIL({failures})'}")

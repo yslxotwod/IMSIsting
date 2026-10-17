@@ -965,10 +965,36 @@ module does and the offensive half is committed work rather than a question:
 Until the verb lands the `--status` output is the authority on what is actually
 implemented, not the name.
 
-**Phase 13 — the attached phone.** Deferred by request; recorded here so it is
-not lost. A handset plugged into the same machine is a **cooperative UE**: a
-real modem running a real stack, which is a different instrument from an SDR
-and answers questions no SDR in this tree can answer for itself.
+**Phase 13 — the attached phone.** A handset plugged into the same machine is a
+**cooperative UE**: a real modem running a real stack, which is a different
+instrument from an SDR and answers questions no SDR in this tree can answer for
+itself.
+
+*Built: `tools/ue_agent.sh` and the `adb` node transport.* The first verb set is
+`--probe` (adb present, device present, serial, state), `--identity` (model,
+build, IMEI, IMSI, SIM, each paired with the path that produced it),
+`--radio` (operator, network type, RSRP/RSRQ), `--cells` (the serving cell out
+of `dumpsys telephony.registry`) and `--collect` (one named `adb pull`). The
+IMEI and IMSI are reported as `unavailable` with a note when the OS redacts
+them, which is the normal case from Android 10 on; the point of the verb is to
+stop guessing rather than to defeat the redaction. A 32-assertion selftest puts
+a **stub `adb` on PATH**, so every parser is checked on a host with no phone
+attached — including the `service call iphonesubinfo` Parcel decoder, which
+reads UTF-16LE out of the printed 32-bit words (two characters per word, first
+in the low half) and a Luhn check on the IMEI's check digit.
+
+`tools/casebook.py` gained `--transport adb` and the `ue` role: the node table
+was built for sensors and shells, and a handset is the first node class the
+bench does not own. Probing and collecting delegate to `ue_agent.sh` rather than
+re-implementing adb's command shapes, so there is one place that knows what a
+phone answers. Both directions are asserted: with no adb the node is `OFFLINE`
+with `detail=state=absent`, and with a stub that answers `devices -l` it comes
+back `ONLINE` carrying the serial and version.
+
+What is still open from this phase: `adb logcat -b radio` as the independent
+capture for the ASN.1 decoders (item 2 below), the AT-over-USB path (item 6),
+and using a real handset as the TX confirmation for `07_gsm_attack` (item 1) —
+none of which can be built or verified without the hardware in the room.
 
 What it is for, in the order the value actually falls:
 
