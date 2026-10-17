@@ -830,7 +830,11 @@ sim_parse_ota() {
     local tar="${pk:$(( (spi_off + 4) * 2 )):6}"
     local cntr="${pk:$(( (spi_off + 7) * 2 )):10}"
     local pcntr="${pk:$(( (spi_off + 12) * 2 )):2}"
-    local rccds_len=$(( chl - 14 ))
+    # CHL counts from the SPI to the end of the RC/CC/DS field (TS 102 225 5.1
+    # Table 1), and the eight octets before that field are SPI(2) KIc(1) KID(1)
+    # TAR(3) CNTR(5) PCNTR(1) -- thirteen, not fourteen. Reading fourteen
+    # starts the CC one octet early, which shifts the whole secured payload.
+    local rccds_len=$(( chl - 13 ))
     (( rccds_len < 0 )) && rccds_len=0
     local rccds="${pk:$(( (spi_off + 13) * 2 )):$(( rccds_len * 2 ))}"
     local secured_off=$(( spi_off + 13 + rccds_len ))
@@ -861,6 +865,14 @@ sim_parse_ota() {
     printf 'cntr_hex\t%s\ncntr\t%s\npcntr\t%s\n' "$cntr" "$(sim_hex_dec "$cntr")" "$pcntr"
     printf 'rccds_len\t%s\nrccds\t%s\nsecured_data_len\t%s\nsecured_data\t%s\n' \
         "$rccds_len" "$rccds" "$(sim_hex_bytes "$secured")" "$secured"
+    # A CC is eight octets and a response checksum four (TS 102 225 5.1.1), so
+    # any other length means this packet is not one the clause describes.
+    case "$rccds_len" in
+        0) : ;;
+        8|4) : ;;
+        *) printf 'rccds_note\tCHL is %s, so the RC/CC/DS field is %s octets; a CC is 8 and a response checksum 4, so this packet does not follow TS 102 225 5.1.1\n' \
+               "$chl" "$rccds_len" ;;
+    esac
 
     # Replay exposure, stated against the SPI rather than assumed.
     local cbits=$(( (spi >> 11) & 0x03 ))
@@ -889,11 +901,14 @@ sim_kic_kid_meaning() {
     local v="${1^^}" kind="${2:-cipher}"
     [[ "$v" =~ ^[0-9A-F]{2}$ ]] || { printf 'ERROR\tkey identifier must be one hex byte\n' >&2; return 2; }
     local val=$(( 16#$v ))
-    local alg=$(( (val >> 6) & 0x03 ))
-    local mode=$(( (val >> 4) & 0x03 ))
-    local keyset=$(( val & 0x0F ))
+    # TS 102 225 §5.1.2: b8..b5 key set, b4b3 mode, b2b1 algorithm family.
+    # Reading the nibbles the other way round (family from b8b7, "key set"
+    # from the low nibble) inverts every strength conclusion below.
+    local family=$(( val & 0x03 ))
+    local mode=$(( (val >> 2) & 0x03 ))
+    local keyset=$(( (val >> 4) & 0x0F ))
     local alg_txt
-    case "$alg" in
+    case "$family" in
         0) alg_txt="algorithm known implicitly by both entities" ;;
         1) alg_txt="DES (ISO 8731-1 DEA)" ;;
         2) alg_txt="reserved" ;;
@@ -916,7 +931,7 @@ sim_kic_kid_meaning() {
         esac
     fi
     local strength="strong"
-    case "$alg" in
+    case "$family" in
         0) strength="weak — implicit algorithm, no negotiated strength" ;;
         1) case "$mode" in
                0) strength="weak — single DES, 56-bit key" ;;
@@ -927,34 +942,61 @@ sim_kic_kid_meaning() {
         2) strength="unknown — reserved algorithm identifier" ;;
         3) strength="unknown — proprietary, cannot be assessed" ;;
     esac
-    printf '%s_hex\t0x%s\n%s_algorithm\t%s\n%s_mode\t%s\n%s_key_set\t%s\n%s_strength\t%s\n' \
-        "$kind" "$v" "$kind" "$alg_txt" "$kind" "$mode_txt" "$kind" "$keyset" "$kind" "$strength"
+    printf '%s_hex\t0x%s\n%s_algorithm\t%s\n%s_family\t%s\n' \
+        "$kind" "$v" "$kind" "$alg_txt" "$kind" "$family"
+    printf '%s_mode_meaning\t%s\n' "$kind" "$mode_txt"
+    printf '%s_mode\t%s\n%s_mode_bits\t%s\n%s_key_set\t%s\n%s_strength\t%s\n' \
+        "$kind" "$mode" "$kind" "$mode" "$kind" "$keyset" "$kind" "$strength"
+    return 0
+}
+
+# The KIc/KID pair from a Command Header, decoded together. The decoded field
+# that matters for a key-recovery attack is the key set, which is the high
+# nibble -- not the low one, which is the algorithm and its mode.
+sim_cmd_ota_key() {
+    local kic="${1:-}" kid="${2:-}" ks kds
+    [[ -n "$kic" ]] || { printf 'ERROR\tusage: --ota-key <KIc> [<KID>]\n' >&2; return 2; }
+    sim_kic_kid_meaning "$kic" cipher || return $?
+    ks=$(sim_kic_kid_meaning "$kic" cipher | awk -F'\t' '$1=="cipher_key_set"{print $2}')
+    if [[ -n "$kid" ]]; then
+        sim_kic_kid_meaning "$kid" integrity || return $?
+        kds=$(sim_kic_kid_meaning "$kid" integrity | awk -F'\t' '$1=="integrity_key_set"{print $2}')
+        if [[ -n "$ks" && "$ks" == "$kds" ]]; then
+            printf 'finding\tMEDIUM\tKIc and KID name the same key set %s — one recovered key breaks confidentiality and integrity together\n' "$ks"
+        fi
+    fi
+    if [[ "$ks" == "1" ]]; then
+        printf 'finding\tMEDIUM\tkey set 1 is the first-provisioned set, the one most often deployed with a fixed diversification input\n'
+    fi
     return 0
 }
 
 
-# The 03.48 SPI bit fields (TS 23.048 §5.1.1). The SPI is two octets and
-# the fields are NOT single bits in the first octet — several are two-bit
-# sub-fields. Reading them as one bit each is the classic way to conclude
-# "ciphering is on" when the payload is in the clear, so each field is
-# decoded with its real width here.
+# The SPI bit fields (ETSI TS 102 225 §5.1.1, with the SMS-only bit from
+# TS 31.115 §4.2). The field order in that clause is not the bit order, and
+# reading the printed table top to bottom is what produces an SPI that says
+# "ciphering on" about a payload in the clear. Two statements of the same
+# clause fix the bits: it names the command's integrity field "SPI1.b2b1",
+# and it says "SPI2.b4b3 shall be set to the same value as SPI1.b2b1" when
+# the PoR carries the same protection.
 #
 #   First octet:
-#     b8 b7   RC/CC/DS:  00 none | 01 Redundancy Check | 10 Cryptographic
-#                        Checksum | 11 Digital Signature
-#     b6      Ciphering: 0 no ciphering | 1 ciphering
+#     b8..b6  Reserved, set to zero and ignored by the RE
 #     b5 b4   Counter:   00 no counter available | 01 counter, no replay
 #                        checking | 10 process iff counter > RE value |
 #                        11 process iff counter is exactly RE+1
-#     b3..b1  Reserved, set to zero
+#     b3      Ciphering: 0 no ciphering | 1 ciphering
+#     b2 b1   RC/CC/DS:  00 none | 01 Redundancy Check | 10 Cryptographic
+#                        Checksum | 11 Digital Signature
 #   Second octet:
-#     b8 b7   PoR reply mode: 00 none | 01 required | 10 on error only |
-#                             11 reserved
-#     b6 b5   RC/CC/DS applied to the PoR response: 00 none | 01 simple RC
-#                             | 10 CC | 11 DS
-#     b4      PoR response ciphering: 0 not ciphered | 1 ciphered
-#     b3      SMS only: 0 PoR via SMS-DELIVER-REPORT | 1 via SMS-SUBMIT
-#     b2 b1   Reserved
+#     b8 b7   Reserved, set to zero
+#     b6      SMS only (TS 31.115 §4.2): 0 PoR via SMS-DELIVER-REPORT,
+#                        1 PoR via SMS-SUBMIT
+#     b5      PoR response ciphering: 0 not ciphered | 1 ciphered
+#     b4 b3   RC/CC/DS applied to the PoR response: 00 none | 01 simple RC
+#                         | 10 CC | 11 DS
+#     b2 b1   PoR reply mode: 00 none | 01 required | 10 on error only |
+#                         11 reserved
 sim_spi_decode() {
     local spi="${1:-}"
     [[ "$spi" =~ ^[0-9]+$ ]] || { printf 'ERROR\tSPI must be decimal\n' >&2; return 2; }
@@ -964,10 +1006,10 @@ sim_spi_decode() {
     printf 'spi\t%s\nspi_hex\t%04X\nspi_octet1\t%02X\nspi_octet2\t%02X\n' "$spi" "$spi" "$o1" "$o2"
 
     # ── first octet ──
-    local rccds=$(( (o1 >> 6) & 0x03 ))
-    local ciphering=$(( (o1 >> 5) & 0x01 ))
+    local rccds=$(( o1 & 0x03 ))
+    local ciphering=$(( (o1 >> 2) & 0x01 ))
     local counter=$(( (o1 >> 3) & 0x03 ))
-    local reserved1=$(( o1 & 0x07 ))
+    local reserved1=$(( (o1 >> 5) & 0x07 ))
     local rccds_txt
     case "$rccds" in
         0) rccds_txt="no RC, CC or DS" ;;
@@ -982,18 +1024,18 @@ sim_spi_decode() {
         2) counter_txt="process iff counter value is higher than the value in the RE" ;;
         3) counter_txt="process iff counter value is exactly RE+1 (strict)" ;;
     esac
-    printf 'spi_b8b7_rccds\t%s\nspi_rccds\t%s\n' "$rccds" "$rccds_txt"
-    printf 'spi_b6_ciphering\t%s\n' "$ciphering"
+    printf 'spi_b2b1_rccds\t%s\nspi_rccds\t%s\n' "$rccds" "$rccds_txt"
+    printf 'spi_b3_ciphering\t%s\n' "$ciphering"
     printf 'spi_ciphering\t%s\n' "$([[ $ciphering -eq 1 ]] && echo "applied" || echo "NOT applied (payload in the clear)")"
     printf 'spi_b5b4_counter\t%s\nspi_counter\t%s\n' "$counter" "$counter_txt"
-    printf 'spi_b3b1_reserved\t%s\n' "$reserved1"
+    printf 'spi_b8b7b6_reserved\t%s\n' "$reserved1"
 
     # ── second octet ──
-    local por=$(( (o2 >> 6) & 0x03 ))
-    local por_rccds=$(( (o2 >> 4) & 0x03 ))
-    local por_cipher=$(( (o2 >> 3) & 0x01 ))
-    local por_sms=$(( (o2 >> 2) & 0x01 ))
-    local reserved2=$(( o2 & 0x03 ))
+    local por=$(( o2 & 0x03 ))
+    local por_rccds=$(( (o2 >> 2) & 0x03 ))
+    local por_cipher=$(( (o2 >> 4) & 0x01 ))
+    local por_sms=$(( (o2 >> 5) & 0x01 ))
+    local reserved2=$(( (o2 >> 6) & 0x03 ))
     local por_txt
     case "$por" in
         0) por_txt="no PoR reply to the Sending Entity" ;;
@@ -1008,24 +1050,25 @@ sim_spi_decode() {
         2) por_rccds_txt="PoR response with CC" ;;
         3) por_rccds_txt="PoR response with DS" ;;
     esac
-    printf 'spi_b8b7_por\t%s\nspi_por\t%s\n' "$por" "$por_txt"
-    printf 'spi_b6b5_por_rccds\t%s\nspi_por_rccds\t%s\n' "$por_rccds" "$por_rccds_txt"
-    printf 'spi_b4_por_ciphering\t%s\n' "$por_cipher"
-    printf 'spi_b3_por_transport\t%s\n' "$([[ $por_sms -eq 1 ]] && echo "SMS-SUBMIT" || echo "SMS-DELIVER-REPORT")"
-    printf 'spi_b2b1_reserved\t%s\n' "$reserved2"
+    printf 'spi_b2b1_por\t%s\nspi_por\t%s\n' "$por" "$por_txt"
+    printf 'spi_b4b3_por_rccds\t%s\nspi_por_rccds\t%s\n' "$por_rccds" "$por_rccds_txt"
+    printf 'spi_b5_por_ciphering\t%s\n' "$por_cipher"
+    printf 'spi_b6_por_submit\t%s\n' "$por_sms"
+    printf 'spi_por_transport\t%s\n' "$([[ $por_sms -eq 1 ]] && echo "SMS-SUBMIT" || echo "SMS-DELIVER-REPORT")"
+    printf 'spi_b8b7_por_reserved\t%s\n' "$reserved2"
 
     # ── findings ──
     # Every branch states the mechanism that is missing, because the whole
     # point of decoding an SPI is to know what actually protects the packet.
     local findings=""
-    (( ciphering == 0 )) && findings+="${findings:+; }SPI b6=0 — the command payload is NOT ciphered"
+    (( ciphering == 0 )) && findings+="${findings:+; }SPI b3=0 — the command payload is NOT ciphered"
     case "$counter" in
         0) findings+="${findings:+; }SPI b5b4=00 — no anti-replay counter is applied" ;;
         1) findings+="${findings:+; }SPI b5b4=01 — the counter is informational only, so a captured packet can be replayed" ;;
     esac
-    (( rccds == 0 )) && findings+="${findings:+; }SPI b8b7=00 — no RC/CC/DS, so the packet has no integrity protection at all"
+    (( rccds == 0 )) && findings+="${findings:+; }SPI b2b1=00 — no RC/CC/DS, so the packet has no integrity protection at all"
     if [[ -z "$findings" ]]; then
-        printf 'spi_weakness\tnone — ciphering on (b6=1), counter enforced (b5b4=%s), integrity %s\n' \
+        printf 'spi_weakness\tnone — ciphering on (b3=1), counter enforced (b5b4=%s), integrity %s\n' \
             "$(printf '%02d' "$counter")" "$rccds_txt"
     else
         printf 'spi_weakness\t%s\n' "$findings"
@@ -1069,14 +1112,17 @@ sim_ota_key_weakness() {
     local kic_val kid_val
     kic_val=$(( 16#$kic )); kid_val=$(( 16#$kid ))
     local out=""
-    # Algorithm/mode bits carry the real cryptographic strength. The key set
-    # number in the low nibble is what the operator provisions, and a low
-    # number is the "first key set", which the literature has repeatedly
-    # found to be the one deployed with a fixed or weakly diversified input.
-    local kic_mode=$(( (kic_val >> 4) & 0x03 ))
-    local kic_alg=$(( (kic_val >> 6) & 0x03 ))
-    local kid_mode=$(( (kid_val >> 4) & 0x03 ))
-    local kid_alg=$(( (kid_val >> 6) & 0x03 ))
+    # The bits come from sim_kic_kid_meaning, not from a second reading of
+    # them: the key set number is the high nibble (b8..b5), the mode is b4b3
+    # and the algorithm family is b2b1, per TS 102 225 §5.1.2.
+    local kic_dec kid_dec
+    kic_dec=$(sim_kic_kid_meaning "$kic" cipher) || return $?
+    kid_dec=$(sim_kic_kid_meaning "$kid" integrity) || return $?
+    local kic_mode kic_alg kid_mode kid_alg
+    kic_mode=$(printf '%s\n' "$kic_dec" | awk -F'\t' '$1=="cipher_mode"{print $2}')
+    kic_alg=$(printf '%s\n' "$kic_dec" | awk -F'\t' '$1=="cipher_family"{print $2}')
+    kid_mode=$(printf '%s\n' "$kid_dec" | awk -F'\t' '$1=="integrity_mode"{print $2}')
+    kid_alg=$(printf '%s\n' "$kid_dec" | awk -F'\t' '$1=="integrity_family"{print $2}')
 
     if (( kic_val == 0 || kid_val == 0 )); then
         out="O1: mechanism not applied (KIc=0x${kic} KID=0x${kid}) — the packet is not both ciphered and integrity protected"
@@ -1105,7 +1151,9 @@ sim_ota_key_weakness() {
     # The deployment weakness this module exists to flag: one key set used
     # for both directions means one recovery breaks confidentiality and
     # integrity together.
-    local kic_set=$(( kic_val & 0x0F )) kid_set=$(( kid_val & 0x0F ))
+    local kic_set kid_set
+    kic_set=$(printf '%s\n' "$kic_dec" | awk -F'\t' '$1=="cipher_key_set"{print $2}')
+    kid_set=$(printf '%s\n' "$kid_dec" | awk -F'\t' '$1=="integrity_key_set"{print $2}')
     if (( kic_val != 0 && kic_val == kid_val )); then
         out="${out:+$out; }O8: KIc == KID (key set ${kic_set}) — a single recovered key breaks both confidentiality and integrity"
     elif (( kic_val != 0 && kic_set == kid_set )); then
@@ -2138,8 +2186,14 @@ sim_selftest() {
     chk ota-chi      "$(fld "$out" chi)"        "01"
     chk ota-chl      "$(fld "$out" chl)"        "14"
     chk ota-spi      "$(fld "$out" spi)"        "5954"
-    chk ota-rccds-len "$(fld "$out" rccds_len)" "0"
-    chk ota-secured  "$(fld "$out" secured_data)" "AABB"
+    # CHL 14 with the 13-octet prefix leaves exactly one octet of RC/CC/DS,
+    # which is why the arm says 1 and the parse prints its rccds_note.
+    chk ota-rccds-len "$(fld "$out" rccds_len)" "1"
+    chk ota-rccds-note "$(fld "$out" rccds_note | grep -c 'does not follow')" "1"
+    # With CHL 14 the RC/CC/DS field is a single octet, so only the trailing
+    # BB remains as secured data. The old reading (CHL-14) took AABB, i.e. it
+    # swallowed the CC's only octet into the payload.
+    chk ota-secured  "$(fld "$out" secured_data)" "BB"
     chk ota-cpl-check "$(fld "$out" cpl_check)" "consistent"
     chk ota-kic-hex  "$(fld "$out" cipher_hex)"   "0x01"
     chk ota-kid-hex  "$(fld "$out" integrity_hex)" "0x01"
@@ -2149,23 +2203,24 @@ sim_selftest() {
     chk ota-pcntr    "$(fld "$out" pcntr)"      "00"
     chk ota-replay   "$(fld "$out" replay_note)" "SPI b5b4=10 — the RE accepts if CNTR > its stored value (tolerant, allows gaps)"
 
-    # SPI 0x1742 = 0001 0111 0100 0010:
-    #   octet 1 0x17 = 0001 0111 -> b8b7=00 (no RC/CC/DS), b6=0 (NO
-    #   ciphering), b5b4=10 (process iff CNTR > RE value), b3b1=111 reserved
-    #   octet 2 0x42 = 0100 0010 -> b8b7=01 PoR required, b6b5=00 no RC on the
-    #   PoR, b4=0 PoR not ciphered, b3=0 SMS-DELIVER-REPORT, b2b1=10 reserved
+    # SPI 0x1742 = octet 1 0x17 (0001 0111) and octet 2 0x42 (0100 0010):
+    #   octet 1: b8..b6=000 reserved, b5b4=10 (process iff CNTR > RE value),
+    #            b3=1 ciphering applied, b2b1=11 digital signature
+    #   octet 2: b8b7=01 reserved bits set, b6=0 PoR via SMS-DELIVER-REPORT,
+    #            b5=0 PoR not ciphered, b4b3=00 no RC on the PoR,
+    #            b2b1=10 PoR only when an error has occurred
     out=$(sim_spi_decode 5954)
     chk spi-octet1   "$(fld "$out" spi_octet1)" "17"
     chk spi-octet2   "$(fld "$out" spi_octet2)" "42"
-    chk spi-rccds    "$(fld "$out" spi_rccds)"  "no RC, CC or DS"
-    chk spi-b8b7     "$(fld "$out" spi_b8b7_rccds)" "0"
-    chk spi-b6       "$(fld "$out" spi_b6_ciphering)" "0"
+    chk spi-rccds    "$(fld "$out" spi_rccds)"  "Digital Signature (DS)"
+    chk spi-b2b1     "$(fld "$out" spi_b2b1_rccds)" "3"
+    chk spi-b3       "$(fld "$out" spi_b3_ciphering)" "1"
     chk spi-b5b4     "$(fld "$out" spi_b5b4_counter)" "2"
-    chk spi-ciphering "$(fld "$out" spi_ciphering)" "NOT applied (payload in the clear)"
+    chk spi-ciphering "$(fld "$out" spi_ciphering)" "applied"
     chk spi-counter  "$(fld "$out" spi_counter)" "process iff counter value is higher than the value in the RE"
-    chk spi-por      "$(fld "$out" spi_por)"     "PoR required to be sent to the SE"
-    chk spi-por-trans "$(fld "$out" spi_b3_por_transport)" "SMS-DELIVER-REPORT"
-    chk spi-weak-has-integrity "$(fld "$out" spi_weakness | grep -c 'no RC/CC/DS')" "1"
+    chk spi-por      "$(fld "$out" spi_por)"     "PoR required only when an error has occurred"
+    chk spi-por-trans "$(fld "$out" spi_por_transport)" "SMS-DELIVER-REPORT"
+    chk spi-clean    "$(fld "$out" spi_weakness | cut -c1-4)" "none"
 
     # SPI 0x0000: nothing applied at all — the critical case.
     out=$(sim_spi_decode 0)
@@ -2182,10 +2237,10 @@ sim_selftest() {
     chk spi-b5b4-3 "$(fld "$(sim_spi_decode $(( 0x1800 )))" spi_counter)" "process iff counter value is exactly RE+1 (strict)"
     chk spi-b5b4-0 "$(fld "$(sim_spi_decode $(( 0x0000 )))" spi_counter)" "no counter available (field present but ignored by the RE)"
     chk spi-b5b4-1 "$(fld "$(sim_spi_decode $(( 0x0800 )))" spi_counter)" "counter available, NO replay or sequence checking"
-    # A packet with ciphering (b6=1), an enforced counter (b5b4=10 or 11) and
-    # an integrity field (b8b7=01 RC) reports "none" rather than a warning.
-    # octet1 0x7A = 0111 1010 -> b8b7=01 RC, b6=1 ciphering, b5b4=11 strict.
-    out=$(sim_spi_decode $(( 0x7A00 )))
+    # A packet with ciphering (b3=1), an enforced counter (b5b4=11) and an
+    # integrity field (b2b1=01 RC) reports "none" rather than a warning.
+    # octet1 0x1D = 0001 1101 -> b5b4=11 strict, b3=1 ciphering, b2b1=01 RC.
+    out=$(sim_spi_decode $(( 0x1D00 )))
     chk spi-all-good "$(fld "$out" spi_weakness | cut -c1-4)" "none"
     chk spi-all-good-rccds "$(fld "$out" spi_rccds)" "Redundancy Check (RC)"
     chk spi-all-good-cipher "$(fld "$out" spi_ciphering)" "applied"
@@ -2193,28 +2248,33 @@ sim_selftest() {
     chk spi-bad-range  "$(sim_spi_decode 70000 >/dev/null 2>&1; echo $?)" "2"
     chk spi-bad-nonnum "$(sim_spi_decode abc >/dev/null 2>&1; echo $?)" "2"
 
-    # KIc/KID strength: DES-CBC (01) vs 3-key 3DES (20) vs ECB (31).
-    # Octet layout: b8b7 algorithm (00 implicit, 01 DES, 10 reserved,
-    # 11 proprietary), b6b5 mode, b4..b1 key set reference.
+    # KIc/KID strength. TS 102 225 §5.1.2 puts the KEY SET in b8..b5, the
+    # mode in b4b3 and the algorithm family in b2b1, so 0x41 is key set 4
+    # DES-CBC while 0x15 is key set 1 2-key 3DES -- the low nibble 5 is what
+    # names 3DES, it is not a key set number.
     chk kic-des-cbc  "$(fld "$(sim_kic_kid_meaning 41 cipher)" cipher_strength | cut -c1-4)" "weak"
-    chk kic-des-mode "$(fld "$(sim_kic_kid_meaning 41 cipher)" cipher_mode)" "DES in CBC mode (56-bit key, zero IV)"
-    chk kic-3des2    "$(fld "$(sim_kic_kid_meaning 51 cipher)" cipher_mode)" "Triple DES outer-CBC with two keys (112-bit effective)"
-    chk kic-3des3    "$(fld "$(sim_kic_kid_meaning 61 cipher)" cipher_strength | cut -c1-10)" "acceptable"
-    chk kic-ecb      "$(fld "$(sim_kic_kid_meaning 71 cipher)" cipher_strength | cut -c1-8)" "critical"
-    chk kic-implicit "$(fld "$(sim_kic_kid_meaning 02 cipher)" cipher_algorithm)" "algorithm known implicitly by both entities"
-    chk kic-propriet "$(fld "$(sim_kic_kid_meaning C1 cipher)" cipher_strength | cut -c1-7)" "unknown"
+    chk kic-des-mode "$(fld "$(sim_kic_kid_meaning 41 cipher)" cipher_mode)" "0"
+    chk kic-des-meaning "$(fld "$(sim_kic_kid_meaning 41 cipher)" cipher_mode_meaning)" "DES in CBC mode (56-bit key, zero IV)"
+    chk kic-3des2    "$(fld "$(sim_kic_kid_meaning 15 cipher)" cipher_mode)" "1"
+    chk kic-3des3    "$(fld "$(sim_kic_kid_meaning 19 cipher)" cipher_strength | cut -c1-10)" "acceptable"
+    chk kic-ecb      "$(fld "$(sim_kic_kid_meaning 4D cipher)" cipher_strength | cut -c1-8)" "critical"
+    chk kic-keyset   "$(fld "$(sim_kic_kid_meaning 4D cipher)" cipher_key_set)" "4"
+    chk kic-implicit "$(fld "$(sim_kic_kid_meaning 40 cipher)" cipher_algorithm)" "algorithm known implicitly by both entities"
+    chk kic-propriet "$(fld "$(sim_kic_kid_meaning C3 cipher)" cipher_strength | cut -c1-7)" "unknown"
     chk kic-bad      "$(sim_kic_kid_meaning ZZ >/dev/null 2>&1; echo $?)" "2"
+    chk ota-key-pair "$(sim_cmd_ota_key 15 25 | awk -F'\t' '$1=="finding"{print $2}' | head -1)" "MEDIUM"
+    chk ota-key-same "$(sim_cmd_ota_key 15 15 | grep -c 'same key set 1')" "1"
 
     # OTA key weakness findings.
     chk key-weak-zero    "$(sim_ota_key_weakness 00 00 | grep -c 'O1: mechanism not applied')" "1"
     chk key-weak-same    "$(sim_ota_key_weakness 41 41 | grep -c 'O8: KIc == KID')" "1"
-    # 0x42 and 0x02 share the key-set nibble 2 but differ in the algorithm
-    # bits, so KIc != KID while the same provisioned key set is reused.
-    chk key-weak-sameset "$(sim_ota_key_weakness 42 02 | grep -c 'O9: KIc and KID reference key set 2')" "1"
-    chk key-weak-des     "$(sim_ota_key_weakness 41 42 | grep -c 'single DES-CBC')" "1"
-    chk key-weak-ecb     "$(sim_ota_key_weakness 71 42 | grep -c 'DES-ECB')" "1"
-    chk key-weak-2des3   "$(sim_ota_key_weakness 51 52 | grep -c '2-key 3DES')" "1"
-    chk key-weak-first   "$(sim_ota_key_weakness 41 42 | grep -c 'O10: key set 1')" "1"
+    # 0x41 and 0x45 share the KEY SET (the high nibble, 4) and differ in the
+    # mode bits, so KIc != KID while the same provisioned key is reused.
+    chk key-weak-sameset "$(sim_ota_key_weakness 41 45 | grep -c 'O9: KIc and KID reference key set 4')" "1"
+    chk key-weak-des     "$(sim_ota_key_weakness 41 45 | grep -c 'single DES-CBC')" "1"
+    chk key-weak-ecb     "$(sim_ota_key_weakness 4D 45 | grep -c 'DES-ECB')" "1"
+    chk key-weak-2des3   "$(sim_ota_key_weakness 55 51 | grep -c '2-key 3DES')" "1"
+    chk key-weak-first   "$(sim_ota_key_weakness 15 25 | grep -c 'O10: key set 1')" "1"
     chk key-weak-none    "$(sim_ota_key_weakness 62 62 | grep -c 'O8: KIc == KID')" "1"
 
     # Non-OTA TPDUs must fail loudly, not be misread as OTA.
@@ -2458,6 +2518,7 @@ sim_cli_main() {
         --decode-ad)      sim_cmd_decode_ad "${1:-}" ;;
         --parse-ota)      sim_cmd_parse_ota "${1:-}" ;;
         --spi)            sim_spi_decode "${1:-}" ;;
+        --ota-key)        sim_cmd_ota_key "${1:-}" "${2:-}" ;;
         --select-fid)     sim_cmd_select "${1:-}" ;;
         --read-binary)    sim_cmd_read_binary "${1:-0}" "${2:-0}" ;;
         --read-record)    sim_cmd_read_record "${1:-1}" "${2:-04}" "${3:-0}" ;;
@@ -2487,6 +2548,7 @@ Usage: $0 COMMAND
   --decode-imsi <hex>               EF_IMSI record -> IMSI, length byte handled
   --decode-ad <hex>                 EF_AD -> PIN/PUK/ADM flags
   --parse-ota <hex>                 OTA SMS TPDU -> TAR, SPI, KIc/KID, CNTR
+  --ota-key <KIc> [<KID>]           one or both key identifiers -> key set, mode, strength
   --spi <decimal>                   SPI bit-field decode
   --rsp                             eSIM RSP roles and profile states
   --dpa-model <ki> <rand>           COMP128-1 level-0 DPA leakage point per key byte

@@ -14729,7 +14729,7 @@ static ModuleSubmenuEntry sim_entries[] = {
       "--decode-iccid:Decode ICCID|--decode-imsi:Decode IMSI|--decode-ad:Decode AD" },
     { "OTA",
       "document-send-symbolic",
-      "#PARSE|--parse-ota:Parse OTA|#CONFIG|--spi=1|--rsp:RSP|#PLAN|--plan:Plan" },
+      "#PARSE|--parse-ota:Parse OTA|#CONFIG|--spi=1|~--ota-key:OTA Key|--rsp:RSP|#PLAN|--plan:Plan" },
     { "Side channel",
       "auth-smartcard-symbolic",
       "#DPA (COMP128-1)|~--dpa-model:Leak Point (ki rand)|~--dpa-sim:Key Recovery (ki)|~--dpa-sweep:Sweeps (ki)|#PLAN|--plan=dpa-lab:DPA Rig" },
@@ -15752,7 +15752,8 @@ static ModuleSubmenuEntry sbap_entries[] = {
 static ModuleSubmenuEntry otasm_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
-      "~--parse-packet|--packet:Packet|--counter-check:Counter Check" },
+      "~--parse-packet|--packet:Packet|--counter-check:Counter Check|"
+      "~--packet-sms|~--parse-packet-sms" },
     { "SPI",
       "auth-smartcard-symbolic",
       "--spi-build:Build SPI|~--spi|--plan:Plan" },

@@ -9,6 +9,14 @@
 # the audit that finds a weak SPI, a replayed counter or an un-keyed payload.
 # 16_sim keeps the reader/defensive side; this module builds and audits.
 #
+# The security the SPI selects is applied, not described: --packet-sms builds
+# the TS 31.115 4.2 SMS Command Packet and enciphers it with 3DES outer-CBC and
+# computes its CC per TS 102 225 5.1, and --parse-packet-sms undoes both and
+# checks the CC. Keys come from the environment (OTASM_KIC_KEY, OTASM_KID_KEY)
+# because an argument is visible to every user on the box. The two clauses are
+# cross-checked byte for byte against pySim in tools/ota-oracle/, which is what
+# makes a packet that claims a CC and carries none impossible to ship again.
+#
 # Attack owned: O5 adjacency (SIM/eSIM OTA) — construction plus vulnerability
 # detection, per docs/MODULE_ROSTER.md. Own-SIM and lab only.
 #
@@ -111,18 +119,30 @@ otasm_berlen_read() {
 # Octet 1: b8-b7 RC/CC/DS, b6 ciphering, b5-b4 counter, b3-b1 reserved.
 # Octet 2: b8-b7 PoR, b6-b5 PoR RC/CC/DS, b4 PoR ciphering, b3 PoR transport,
 #          b2-b1 reserved. (Same bit layout as 16_sim's sim_spi_decode.)
+# TS 102 225 §5.1.1. The two octets are NOT laid out in the order the
+# fields are listed in, and the prose of the same clause is what fixes them:
+# it names the command's own integrity field as "SPI1.b2b1", and it says
+# "SPI2.b4b3 shall be set to the same value as SPI1.b2b1" when both the
+# command and its response carry RC/CC/DS.
+#   first octet   b8..b6 reserved | b5b4 counter | b3 ciphering | b2b1 RC/CC/DS
+#   second octet  b8b7 reserved | b6 SMS-SUBMIT bit (TS 31.115 §4.2) |
+#                 b5 PoR ciphered | b4b3 PoR RC/CC/DS | b2b1 PoR mode
 otasm_spi_build() {
     local rccds="${1:-0}" cipher="${2:-0}" counter="${3:-0}"
-    local por="${4:-0}" por_rccds="${5:-0}" por_cipher="${6:-0}" por_transport="${7:-0}"
+    local por="${4:-0}" por_rccds="${5:-0}" por_cipher="${6:-0}" por_submit="${7:-0}"
     local i
-    for i in "$rccds" "$cipher" "$counter" "$por" "$por_rccds" "$por_cipher" "$por_transport"; do
+    for i in "$rccds" "$cipher" "$counter" "$por" "$por_rccds" "$por_cipher" "$por_submit"; do
         [[ "$i" =~ ^[0-9]+$ ]] || { printf 'ERROR\tSPI fields must be numeric\n' >&2; return 2; }
     done
-    (( rccds <= 3 && cipher <= 1 && counter <= 3 && por <= 3 && por_rccds <= 3 && por_cipher <= 1 && por_transport <= 1 )) || {
+    (( rccds <= 3 && cipher <= 1 && counter <= 3 && por <= 3 && por_rccds <= 3 && por_cipher <= 1 && por_submit <= 1 )) || {
         printf 'ERROR\tSPI sub-field out of range\n' >&2; return 2; }
-    local o1=$(( (rccds<<6) | (cipher<<5) | (counter<<3) ))
-    local o2=$(( (por<<6) | (por_rccds<<4) | (por_cipher<<3) | (por_transport<<2) ))
-    printf '%02X%02X\n' "$o1" "$o2"
+    local o1=$(( (counter << 3) | (cipher << 2) | rccds ))
+    local o2=$(( por | (por_rccds << 2) | (por_cipher << 4) | (por_submit << 5) ))
+    printf 'spi\t%02X%02X\noctet1\t%02X\noctet2\t%02X\n' "$o1" "$o2" "$o1" "$o2"
+    printf 'rccds\t%s\nciphering\t%s\ncounter_mode\t%s\n' "$rccds" "$cipher" "$counter"
+    printf 'por\t%s\npor_rccds\t%s\npor_cipher\t%s\npor_submit\t%s\n' \
+        "$por" "$por_rccds" "$por_cipher" "$por_submit"
+    return 0
 }
 otasm_spi_parse() {
     local in="${1:-}" h
@@ -135,25 +155,103 @@ otasm_spi_parse() {
     fi
     [[ "$h" =~ ^[0-9a-f]{4}$ ]] || { printf 'ERROR\tSPI must be 2 octets of hex or a 16-bit decimal\n' >&2; return 2; }
     local o1=$(( 16#${h:0:2} )) o2=$(( 16#${h:2:2} ))
-    local rccds=$(( (o1>>6)&3 )) cipher=$(( (o1>>5)&1 )) counter=$(( (o1>>3)&3 ))
-    local por=$(( (o2>>6)&3 )) por_rccds=$(( (o2>>4)&3 )) por_cipher=$(( (o2>>3)&1 )) por_transport=$(( (o2>>2)&1 ))
-    local rccds_t counter_t
+    local counter=$(( (o1>>3)&3 )) cipher=$(( (o1>>2)&1 )) rccds=$(( o1&3 ))
+    local reserved1=$(( (o1>>5)&7 ))
+    local por=$(( o2&3 )) por_rccds=$(( (o2>>2)&3 )) por_cipher=$(( (o2>>4)&1 ))
+    local por_submit=$(( (o2>>5)&1 )) reserved2=$(( (o2>>6)&3 ))
+    local rccds_t counter_t por_t
     case "$rccds" in 0) rccds_t="no RC, CC or DS";; 1) rccds_t="RC";; 2) rccds_t="CC";; 3) rccds_t="DS";; esac
     case "$counter" in
-        0) counter_t="no counter (replay indiscriminate)";;
+        0) counter_t="no counter (the field is present but ignored)";;
         1) counter_t="informational only (replay possible)";;
         2) counter_t="process iff counter > RE";;
         3) counter_t="process iff counter == RE+1 (strict)";; esac
-    printf 'spi\t%s\nrccds\t%s\nrccds_meaning\t%s\nciphering\t%s\n' "$h" "$rccds" "$rccds_t" "$cipher"
+    case "$por" in
+        0) por_t="no PoR requested";;
+        1) por_t="PoR required";;
+        2) por_t="PoR only on error";;
+        3) por_t="reserved";; esac
+    printf 'spi\t%s\noctet1\t%02x\noctet2\t%02x\n' "$h" "$o1" "$o2"
+    printf 'rccds\t%s\nrccds_meaning\t%s\nciphering\t%s\n' "$rccds" "$rccds_t" "$cipher"
     printf 'ciphering_meaning\t%s\ncounter_mode\t%s\ncounter_meaning\t%s\n' \
         "$([[ $cipher -eq 1 ]] && echo "applied" || echo "NOT applied (payload in the clear)")" "$counter" "$counter_t"
-    printf 'por\t%s\npor_transport\t%s\n' "$por" "$([[ $por_transport -eq 1 ]] && echo "SMS-SUBMIT" || echo "SMS-DELIVER-REPORT")"
+    printf 'por\t%s\npor_meaning\t%s\npor_rccds\t%s\npor_cipher\t%s\npor_submit\t%s\n' \
+        "$por" "$por_t" "$por_rccds" "$por_cipher" "$por_submit"
+    printf 'reserved\t%s,%s\n' "$reserved1" "$reserved2"
     local n=0
-    (( cipher == 0 )) && { printf 'finding\tHIGH\tSPI b6=0 — the command payload is sent in the clear\n'; n=$((n+1)); }
-    (( rccds == 0 )) && { printf 'finding\tHIGH\tSPI b8b7=00 — no RC/CC/DS; the packet has no integrity protection\n'; n=$((n+1)); }
-    (( counter == 0 || counter == 1 )) && { printf 'finding\tMEDIUM\tSPI b5b4=%d — the counter does not stop a replay\n' "$counter"; n=$((n+1)); }
+    (( cipher == 0 )) && { printf 'finding\tHIGH\tSPI octet1 b3=0 — the command payload is sent in the clear\n'; n=$((n+1)); }
+    (( rccds == 0 )) && { printf 'finding\tHIGH\tSPI octet1 b2b1=00 — no RC/CC/DS; the packet has no integrity protection\n'; n=$((n+1)); }
+    (( counter == 0 || counter == 1 )) && { printf 'finding\tMEDIUM\tSPI octet1 b5b4=%d — the counter does not stop a replay\n' "$counter"; n=$((n+1)); }
     (( n == 0 )) && printf 'note\tINFO\tciphering on, integrity present, counter enforced\n'
     printf 'findings\t%d\n' "$n"
+    return 0
+}
+
+# TS 102 225 §5.1.2 (KIc) and §5.1.3.1 (KID for CC), one octet each:
+#   b8..b5 key set number | b4b3 mode | b2b1 algorithm family
+# b4b3 only has meaning when the family is DES (b2b1 = 01); the whole low
+# nibble is what an implementation calls its "algorithm" enum (5 = 3DES
+# outer-CBC with two keys, 9 = three keys, 2 = AES-CBC).
+otasm_key_meaning() {
+    local kind="$1" v="${2^^}"
+    [[ "$v" =~ ^[0-9A-F]{2}$ ]] || { printf 'ERROR\t%s must be one hex octet\n' "$kind" >&2; return 2; }
+    local val=$(( 16#$v ))
+    local key_set=$(( (val >> 4) & 0x0F ))
+    local mode=$(( (val >> 2) & 0x03 ))
+    local family=$(( val & 0x03 ))
+    local family_t mode_t strength
+    case "$family" in
+        0) family_t="algorithm known implicitly by both entities" ;;
+        1) family_t="DES (ISO 8731-1 DEA)" ;;
+        2) family_t="reserved" ;;
+        3) family_t="proprietary implementation" ;;
+    esac
+    local is_cipher=1
+    [[ "$kind" == "kid" ]] && is_cipher=0
+    if [[ "$family" == "1" ]]; then
+        case "$mode" in
+            0) mode_t="$([[ $is_cipher == 1 ]] && echo "DES in CBC mode" || echo "DES in CBC mode over the CC") (56-bit key, zero IV)" ;;
+            1) mode_t="Triple DES outer-CBC with two keys (112-bit effective)" ;;
+            2) mode_t="Triple DES outer-CBC with three keys (168-bit)" ;;
+            3) mode_t="$([[ $is_cipher == 1 ]] && echo "DES in ECB mode (no chaining)" || echo "reserved for KID_RC")" ;;
+        esac
+    else
+        mode_t="b4b3 carries no meaning for family $family"
+    fi
+    case "$family" in
+        0) strength="weak — implicit algorithm, no negotiated strength" ;;
+        1) case "$mode" in
+               0) strength="weak — single DES, 56-bit key" ;;
+               1) strength="weak — 2-key 3DES, 112-bit effective" ;;
+               2) strength="acceptable — 3-key 3DES" ;;
+               3) strength="critical — DES-ECB, 56-bit key and no chaining" ;;
+           esac ;;
+        2) strength="unknown — reserved algorithm family" ;;
+        3) strength="unknown — proprietary, cannot be assessed" ;;
+    esac
+    printf '%s_hex\t0x%s\n%s_key_set\t%s\n%s_family\t%s\n%s_family_meaning\t%s\n' \
+        "$kind" "$v" "$kind" "$key_set" "$kind" "$family" "$kind" "$family_t"
+    printf '%s_mode\t%s\n%s_mode_meaning\t%s\n%s_strength\t%s\n' \
+        "$kind" "$mode" "$kind" "$mode_t" "$kind" "$strength"
+    return 0
+}
+
+# The KIc/KID pair as they appear in a Command Header. The primary fields are
+# unprefixed so a caller can read them without knowing the kind.
+otasm_cmd_key() {
+    local kic="${1:-}" kid="${2:-}" out
+    [[ -n "$kic" ]] || { printf 'ERROR\tusage: --key <KIc> [<KID>]\n' >&2; return 2; }
+    out=$(otasm_key_meaning kic "$kic") || return $?
+    printf '%s\n' "$out" | sed -e 's/^kic_//'
+    if [[ -n "$kid" ]]; then
+        otasm_key_meaning kid "$kid" || return $?
+        local ks kds
+        ks=$(printf '%s\n' "$out" | awk -F'\t' '$1=="kic_key_set"{print $2}')
+        kds=$(otasm_key_meaning kid "$kid" | awk -F'\t' '$1=="kid_key_set"{print $2}')
+        if [[ "$ks" == "$kds" ]]; then
+            printf 'finding\tMEDIUM\tKIc and KID name the same key set %s — one recovered key breaks confidentiality and integrity together\n' "$ks"
+        fi
+    fi
     return 0
 }
 
@@ -170,11 +268,16 @@ otasm_packet_build() {
     local cntr; printf -v cntr '%010X' "$(( counter & 0xFFFFFFFFFF ))"
     local chl=$(( ${#cmd} / 2 ))
     local rest; rest="${chi}$(otasm_byte "$chl")${cmd}${spi}${kic}${kid}${tar}${cntr}00${data}"
-    local base=$(( 1 + ${#rest}/2 ))
+    # CPL counts from the Command Header Identifier to the end of the Secured
+    # Data (TS 102 225 5.1 Table 1), so it is the length of everything after the
+    # CPI and after the CPL field itself -- not, as this used to compute, the
+    # length of the whole packet. Here CPL is BER-coded (Table 1 says so unless
+    # a clause states otherwise; TS 31.115 4.2 is the clause that does).
+    local span=$(( ${#rest}/2 ))
     local cpl
-    if (( base + 1 <= 127 )); then cpl=$(printf '%02X' "$(( base + 1 ))")
-    elif (( base + 2 <= 255 )); then cpl=$(printf '81%02X' "$(( base + 2 ))")
-    else cpl=$(printf '82%04X' "$(( base + 3 ))"); fi
+    if (( span <= 127 )); then cpl=$(printf '%02X' "$span")
+    elif (( span <= 255 )); then cpl=$(printf '81%02X' "$span")
+    else cpl=$(printf '82%04X' "$span"); fi
     printf '%s%s%s\n' "$cpi" "$cpl" "$rest"
 }
 otasm_packet_parse() {
@@ -187,6 +290,14 @@ otasm_packet_parse() {
     local cpl; cpl=$(printf '%s' "$cpl_read" | cut -f1)
     local cpl_oct=$(printf '%s' "$cpl_read" | cut -f2)
     local off=$(( 1 + cpl_oct ))
+    # CPL has to describe the packet it arrived in, or the header that follows
+    # is not the header this byte count owns.
+    local total=$(( ${#h} / 2 ))
+    if (( cpl != total - 1 - cpl_oct )); then
+        printf 'ERROR\tCPL says %d octets after the CPI, the packet carries %d\n' \
+            "$cpl" "$(( total - 1 - cpl_oct ))" >&2
+        return 1
+    fi
     local chi="${h:$((off*2)):2}"; off=$(( off + 1 ))
     local chl=$(( 16#${h:$((off*2)):2} )); off=$(( off + 1 ))
     local cmd="${h:$((off*2)):$((chl*2))}"; off=$(( off + chl ))
@@ -203,6 +314,245 @@ otasm_packet_parse() {
     printf 'kic\t%s\nkid\t%s\ntar\t%s\ncounter\t%s\ncounter_dec\t%d\npcntr\t%s\ndata\t%s\n' \
         "$kic" "$kid" "$tar" "$cntr" "$cn" "$pcntr" "$data"
     printf 'packet_bytes\t%d\n' "$(( ${#h}/2 ))"
+}
+
+# ── the security layer actually applied (TS 102 225 5.1, TS 31.115 4.2) ─
+# The SPI says whether the payload is ciphered and whether the packet carries a
+# CC. Until this section existed the module could say that and not do it: there
+# was no ciphering code and no CC anywhere in the file, so a packet claiming
+# both arrived with neither -- the same defect as printing a transmission that
+# was never keyed. What is below is 3DES outer-CBC, the CC being the last eight
+# octets of it over the zero-padded message, and the counters and lengths the
+# two clauses ask for.
+#
+# openssl is the cipher because it is on every host this toolkit has run on and
+# is already how 13_nr_core.sh computes HMAC-SHA-256; 2-key 3DES is the one
+# thing openssl will not accept directly, so the key is expanded here.
+
+# K1||K2 (16 octets) means 3DES with two keys, which is K1||K2||K1 on the wire.
+otasm_key24() {
+    local k; k=$(otasm_norm_hex "${1:-}")
+    if ! otasm_is_hex "$k"; then
+        printf 'ERROR\tkey must be hex\n' >&2; return 2
+    fi
+    case ${#k} in
+        32) printf '%s%s\n' "$k" "${k:0:16}" ;;
+        48) printf '%s\n' "$k" ;;
+        *)  printf 'ERROR\tkey must be 16 octets (2-key 3DES) or 24 octets (3-key 3DES), got %d\n' \
+                "$(( ${#k} / 2 ))" >&2; return 2 ;;
+    esac
+}
+
+# 3DES outer-CBC with a zero IV, no padding: the caller decides the length.
+# The direction is explicit because both are used, and a parser that silently
+# encrypts when it meant to decrypt looks exactly like a wrong key.
+otasm_des3_cbc() {
+    local key24="${1^^}" data dir="${3:-enc}" flag=""
+    data=$(otasm_norm_hex "${2:-}")
+    [[ "$dir" == "dec" ]] && flag="-d"
+    if (( ${#data} % 16 != 0 )); then
+        printf 'ERROR\t3DES-CBC input must be whole 8-octet blocks, %d octets given\n' \
+            "$(( ${#data} / 2 ))" >&2
+        return 2
+    fi
+    printf '%s' "$data" | xxd -r -p \
+        | openssl enc -des-ede3-cbc $flag -K "$key24" -iv 0000000000000000 -nopad 2>/dev/null \
+        | xxd -p | tr -d '\n'
+}
+
+# The CC is the last 8 octets of 3DES-CBC over the zero-padded message
+# (TS 102 225 5.2.2). Padding rather than refusing is what the clause asks for.
+otasm_des3_cc() {
+    local key24="${1^^}" data ct
+    data=$(otasm_norm_hex "${2:-}")
+    if ! otasm_is_hex "$data"; then
+        printf 'ERROR\tCC input must be hex\n' >&2; return 2
+    fi
+    if (( ${#data} % 2 != 0 )); then
+        printf 'ERROR\tCC input must be whole octets\n' >&2; return 2
+    fi
+    local pad=$(( (8 - (${#data} / 2) % 8) % 8 ))
+    if (( pad > 0 )); then data+=$(printf '%0*d' $(( pad * 2 )) 0); fi
+    ct=$(otasm_des3_cbc "$key24" "$data" enc) || return 1
+    printf '%s\n' "${ct: -16}"
+}
+
+# One field out of otasm_spi_parse, so this module reads the SPI bits in exactly
+# one place -- the reason the old reading survived was that there were three.
+otasm_spi_field() {
+    local spi="${1:-}" field="${2:-}"
+    otasm_spi_parse "$spi" | awk -F'\t' -v f="$field" '$1==f{v=$2} END{print v}'
+}
+
+# --packet-sms <tar> <counter> <spi> <kic> <kid> <apdu-hex>
+# Keys come from the environment, not the command line: an argument is visible
+# in ps to every user on the box.
+#   OTASM_KIC_KEY  ciphering key (16 or 24 octets of hex)
+#   OTASM_KID_KEY  integrity key
+otasm_packet_sms_build() {
+    local tar="${1:-000000}" counter="${2:-0}" spi="${3:-1600}"
+    local kic="${4:-15}" kid="${5:-25}" apdu; apdu=$(otasm_norm_hex "${6:-}")
+    [[ "$counter" =~ ^[0-9]+$ ]] || { printf 'ERROR\tcounter must be numeric\n' >&2; return 2; }
+    otasm_is_hex "$tar" && (( ${#tar} == 6 )) || {
+        printf 'ERROR\tTAR must be 3 octets of hex\n' >&2; return 2; }
+    otasm_is_hex "$spi" && (( ${#spi} == 4 )) || {
+        printf 'ERROR\tSPI must be 2 octets of hex\n' >&2; return 2; }
+    otasm_is_hex "$kic" && (( ${#kic} == 2 )) || {
+        printf 'ERROR\tKIc must be one octet of hex\n' >&2; return 2; }
+    otasm_is_hex "$kid" && (( ${#kid} == 2 )) || {
+        printf 'ERROR\tKID must be one octet of hex\n' >&2; return 2; }
+    if [[ -n "$apdu" ]] && { ! otasm_is_hex "$apdu" || (( ${#apdu} % 2 != 0 )); }; then
+        printf 'ERROR\tcommand data must be whole octets of hex\n' >&2; return 2
+    fi
+
+    local rccds cipher
+    rccds=$(otasm_spi_field "$spi" rccds)
+    cipher=$(otasm_spi_field "$spi" ciphering)
+    [[ -n "$rccds" && -n "$cipher" ]] || { printf 'ERROR\tSPI could not be read\n' >&2; return 2; }
+
+    local len_sig=0
+    (( rccds == 2 )) && len_sig=8
+    if (( rccds == 1 || rccds == 3 )); then
+        printf 'ERROR\tSPI asks for RC/DS (b2b1=%s); this verb implements CC only\n' \
+            "$rccds" >&2
+        return 2
+    fi
+
+    local kic_key24="" kid_key24=""
+    if (( cipher == 1 )); then
+        [[ -n "${OTASM_KIC_KEY:-}" ]] || {
+            printf 'ERROR\tSPI says the payload is ciphered, but OTASM_KIC_KEY is not set\n' >&2
+            return 2; }
+        kic_key24=$(otasm_key24 "$OTASM_KIC_KEY") || return 2
+    fi
+    if (( rccds == 2 )); then
+        [[ -n "${OTASM_KID_KEY:-}" ]] || {
+            printf 'ERROR\tSPI asks for a CC, but OTASM_KID_KEY is not set\n' >&2
+            return 2; }
+        kid_key24=$(otasm_key24 "$OTASM_KID_KEY") || return 2
+    fi
+
+    local cntr; printf -v cntr '%010X' "$(( counter & 0xFFFFFFFFFF ))"
+    local data="$apdu" pad_octets=0
+    if (( cipher == 1 )); then
+        # TS 102 225 5.1.1: the ciphered region is CNTR(5)||PCNTR(1)||CC(8)||
+        # Secured Data, so the Secured Data is padded until that is a block
+        # multiple. The padding count rides in PCNTR.
+        pad_octets=$(( (8 - (14 + ${#data} / 2) % 8) % 8 ))
+        if (( pad_octets > 0 )); then
+            data+=$(printf '%0*d' $(( pad_octets * 2 )) 0)
+        fi
+    fi
+    local pcntr; printf -v pcntr '%02X' "$pad_octets"
+    local chl=$(( 13 + len_sig ))
+    local head; head=$(printf '%02X%s%s%s%s' "$chl" "${spi^^}" "${kic^^}" "${kid^^}" "${tar^^}")
+    local cpl=$(( 1 + chl + ${#data} / 2 ))
+    local cc="" body
+    if (( rccds == 2 )); then
+        # The CPL and CHL fields are part of the CC input and are not ciphered.
+        cc=$(otasm_des3_cc "$kid_key24" "$(printf '%04X%s%s%s' "$cpl" "$head" "$cntr$pcntr" "$data")") || return 1
+        body="${cntr}${pcntr}${cc}${data}"
+    else
+        body="${cntr}${pcntr}${data}"
+    fi
+    local packet
+    if (( cipher == 1 )); then
+        local ciph; ciph=$(otasm_des3_cbc "$kic_key24" "$body") || return 1
+        packet=$(printf '%04X%s%s' "$cpl" "$head" "$ciph")
+    else
+        packet=$(printf '%04X%s%s' "$cpl" "$head" "$body")
+    fi
+    printf 'cpl\t%d\nchl\t%d\nspi\t%s\nrccds\t%s\nciphering\t%s\n' \
+        "$cpl" "$chl" "${spi^^}" "$rccds" "$cipher"
+    printf 'kic\t%s\nkid\t%s\ntar\t%s\ncounter\t%s\npcntr\t%s\n' \
+        "${kic^^}" "${kid^^}" "${tar^^}" "$cntr" "$pcntr"
+    printf 'padding_octets\t%s\nsecured_data_len\t%s\n' "$pad_octets" "$(( ${#data} / 2 ))"
+    if [[ -n "$cc" ]]; then printf 'cc\tsigner\t%s\n' "$cc"; else printf 'cc\tnone\n'; fi
+    printf 'packet\t%s\npacket_bytes\t%s\n' "$packet" "$(( ${#packet} / 2 ))"
+    return 0
+}
+
+# --parse-packet-sms <hex>: the inverse, including the CC check. A packet whose
+# CC does not verify is reported as such: that is the only useful answer.
+otasm_packet_sms_parse() {
+    local h; h=$(otasm_norm_hex "${1:-}")
+    if ! otasm_is_hex "$h"; then printf 'ERROR\tnot valid hex\n' >&2; return 2; fi
+    if (( ${#h} < 2 * (2 + 1 + 8) )); then
+        printf 'ERROR\tpacket shorter than CPL+CHL+SPI+KIc+KID+TAR\n' >&2; return 1
+    fi
+    local cpl=$(( 16#${h:0:4} )) chl=$(( 16#${h:4:2} ))
+    local spi="${h:6:4}" kic="${h:10:2}" kid="${h:12:2}" tar="${h:14:6}"
+    local rccds cipher
+    rccds=$(otasm_spi_field "$spi" rccds)
+    cipher=$(otasm_spi_field "$spi" ciphering)
+    local len_sig=0; (( rccds == 2 )) && len_sig=8
+    if (( chl != 13 + len_sig )); then
+        printf 'ERROR\tCHL is %d, the SPI asks for %d octets from the SPI to the end of the CC\n' \
+            "$chl" "$(( 13 + len_sig ))" >&2
+        return 1
+    fi
+    local after_cpl=$(( ${#h} / 2 - 2 ))
+    if (( cpl != after_cpl )); then
+        printf 'ERROR\tCPL says %d octets after the CPL field, the packet carries %d\n' \
+            "$cpl" "$after_cpl" >&2
+        return 1
+    fi
+    local rest body
+    rest="${h:8}"   # SPI || KIc || KID || TAR || [enciphered CNTR..data]
+    body="${h:20}"  # everything after the 10-octet head
+    if (( cipher == 1 )); then
+        [[ -n "${OTASM_KIC_KEY:-}" ]] || {
+            printf 'ERROR\tthe payload is ciphered and OTASM_KIC_KEY is not set\n' >&2
+            return 2; }
+        local kic_key24; kic_key24=$(otasm_key24 "$OTASM_KIC_KEY") || return 2
+        body=$(otasm_des3_cbc "$kic_key24" "$body" dec) || return 1
+    fi
+    local cntr="${body:0:10}" pcntr="${body:10:2}"
+    local cc="" data pad_octets
+    if (( rccds == 2 )); then
+        cc="${body:12:16}"; data="${body:28}"
+    else
+        data="${body:12}"
+    fi
+    pad_octets=$(( 16#${pcntr} ))
+    local cc_verdict="not-present"
+    if (( rccds == 2 )); then
+        if [[ -n "${OTASM_KID_KEY:-}" ]]; then
+            local kid_key24 head recomputed
+            kid_key24=$(otasm_key24 "$OTASM_KID_KEY") || return 2
+            head="${h:4:16}"   # CHL || SPI || KIc || KID || TAR
+            recomputed=$(otasm_des3_cc "$kid_key24" \
+                "$(printf '%04X%s%s%s' "$cpl" "$head" "$cntr$pcntr" "$data")") || return 1
+            if [[ "${recomputed^^}" == "${cc^^}" ]]; then cc_verdict="verified"
+            else cc_verdict="mismatch"; fi
+        else
+            cc_verdict="unknown-no-OTASM_KID_KEY"
+        fi
+    fi
+    # The CC verdict is decided first and reported even when the padding
+    # count turns out to be nonsense: a tampered packet fails the CC, and
+    # "the CC does not verify" is the answer, not "the padding looks odd".
+    local apdu="$data" pad_ok=1
+    if (( pad_octets > 0 )); then
+        if (( ${#apdu} / 2 < pad_octets )); then
+            pad_ok=0
+        else
+            apdu="${apdu:0:$(( ${#apdu} - pad_octets * 2 ))}"
+        fi
+    fi
+    printf 'cpl\t%d\nchl\t%d\nspi\t%s\nrccds\t%s\nciphering\t%s\n' \
+        "$cpl" "$chl" "${spi^^}" "$rccds" "$cipher"
+    printf 'kic\t%s\nkid\t%s\ntar\t%s\ncounter\t%s\npcntr\t%s\n' \
+        "${kic^^}" "${kid^^}" "${tar^^}" "$cntr" "$pcntr"
+    printf 'cc\t%s\ncc_verdict\t%s\npadding_octets\t%s\n' "${cc:-none}" "$cc_verdict" "$pad_octets"
+    printf 'secured_data\t%s\napdu\t%s\npacket_bytes\t%s\n' "$data" "$apdu" "$(( ${#h} / 2 ))"
+    if (( pad_ok == 0 )); then
+        printf 'ERROR\tPCNTR says %d padding octets, only %d follow the CC\n' \
+            "$pad_octets" "$(( ${#data} / 2 ))" >&2
+        return 1
+    fi
+    [[ "$cc_verdict" == "mismatch" ]] && return 1
+    return 0
 }
 
 # ── counter / replay decision (TS 23.048 §8.2) ──────────────────────────
@@ -1171,16 +1521,28 @@ otasm_selftest() {
     export OTASM_DIR="$d/loot/ota_sms"
     mkdir -p "$OTASM_DIR"
 
-    # 1. SPI bit layout (TS 23.048 §8.1). RC/CC/DS=2, cipher=1, counter=3 ->
-    #    octet1 = 10 1 11 000 = 0xB8; octet2 all zero.
-    chk spi-build "$(otasm_spi_build 2 1 3 0 0 0 0)" "B800"
-    chk spi-build2 "$(otasm_spi_build 1 0 0 0 0 0 0)" "4000"
-    local out; out=$(otasm_spi_parse B800)
+    # 1. SPI bit layout (TS 102 225 §5.1.1). The first octet is
+    #    b8..b6 reserved, b5b4 counter, b3 ciphering, b2b1 RC/CC/DS, so
+    #    counter=3, cipher=1, CC=2 packs as 0x1E -- not 0xB8, which is what
+    #    reading the clause's fields in the order they are printed produces.
+    chk spi-build "$(fld "$(otasm_spi_build 2 1 3 0 0 0 0)" spi)" "1E00"
+    chk spi-build2 "$(fld "$(otasm_spi_build 1 0 0 0 0 0 0)" spi)" "0100"
+    local out; out=$(otasm_spi_parse 1E00)
     chk spi-rccds   "$(fld "$out" rccds)" "2"
     chk spi-cipher  "$(fld "$out" ciphering)" "1"
     chk spi-counter "$(fld "$out" counter_mode)" "3"
     chk spi-clean   "$(fld "$out" findings)" "0"
-    chk spi-dec     "$(fld "$(otasm_spi_parse 16384)" rccds)" "1"
+    # b2b1 = 11 is the digital signature, and it is the low bits of the octet
+    chk spi-ds      "$(fld "$(otasm_spi_parse 0300)" rccds)" "3"
+    # counter 01 with ciphering off and CC on: 0b0000 1010
+    chk spi-mid     "$(fld "$(otasm_spi_parse 0A00)" counter_mode)" "1"
+    chk spi-mid-cc  "$(fld "$(otasm_spi_parse 0A00)" rccds)" "2"
+    # second octet: b2b1 PoR mode, b4b3 PoR RC/CC/DS, b5 PoR ciphered,
+    # b6 SMS-SUBMIT (TS 31.115 §4.2)
+    chk spi-por-req  "$(fld "$(otasm_spi_parse 0002)" por)" "2"
+    chk spi-por-rcc  "$(fld "$(otasm_spi_parse 000C)" por_rccds)" "3"
+    chk spi-por-ciph "$(fld "$(otasm_spi_parse 0010)" por_cipher)" "1"
+    chk spi-por-subm "$(fld "$(otasm_spi_parse 0020)" por_submit)" "1"
     chk spi-bad     "$(otasm_spi_build 9 0 0 0 0 0 0 >/dev/null 2>&1; echo $?)" "2"
 
     # 2. Weak SPI is flagged, and unknown/insecure is never reported safe.
@@ -1188,8 +1550,22 @@ otasm_selftest() {
     chk spi-weak-cipher  "$(fld "$out" ciphering_meaning)" "NOT applied (payload in the clear)"
     chk spi-weak-integr  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="HIGH"' | wc -l | tr -d ' ')" "2"
     chk spi-weak-findings "$(fld "$out" findings)" "3"
-    out=$(otasm_spi_parse 2000)   # cipher on, no integrity, counter 0
+    out=$(otasm_spi_parse 0400)   # cipher on (b3), no integrity, counter 0
     chk spi-partial "$(fld "$out" findings)" "2"
+
+    # 2b. KIc/KID coding (TS 102 225 §5.1.2, §5.1.3.1): high nibble key set,
+    #     b4b3 mode, b2b1 family. 0x15 is key set 1, mode 01 (2-key 3DES),
+    #     family 01 (DES).
+    out=$(otasm_cmd_key 15)
+    chk key-set   "$(fld "$out" key_set)" "1"
+    chk key-mode  "$(fld "$out" mode)" "1"
+    chk key-fam   "$(fld "$out" family)" "1"
+    chk key-des   "$(fld "$(otasm_cmd_key 11)" mode)" "0"
+    chk key-ecb   "$(fld "$(otasm_cmd_key 0D)" mode)" "3"
+    chk key-prop  "$(fld "$(otasm_cmd_key 03)" family)" "3"
+    chk key-impl  "$(fld "$(otasm_cmd_key 00)" family)" "0"
+    chk key-same  "$(otasm_cmd_key 15 15 | awk -F'\t' '$1=="finding"' | wc -l | tr -d ' ')" "1"
+    chk key-bad   "$(otasm_cmd_key ZZ >/dev/null 2>&1; echo $?)" "2"
 
     # 3. Command packet build/parse round-trip.
     local pkt; pkt=$(otasm_packet_build 01 010203 5 B800 01 02 aabbcc 01 01)
@@ -1201,9 +1577,56 @@ otasm_selftest() {
     chk pkt-tar   "$(fld "$out" tar)" "010203"
     chk pkt-counter "$(fld "$out" counter_dec)" "5"
     chk pkt-data  "$(fld "$out" data)" "aabbcc"
-    chk pkt-cpl-matches "$(fld "$out" cpl)" "$(fld "$out" packet_bytes)"
+    # CPL counts from the CHI to the end of the Secured Data, so it is the
+    # packet's length without the CPI octet and without the CPL field itself.
+    chk pkt-cpl-matches "$(fld "$out" cpl)" "$(( $(fld "$out" packet_bytes) - 2 ))"
+    chk pkt-cpl-parse "$(otasm_packet_parse "$pkt" >/dev/null 2>&1; echo $?)" "0"
+    chk pkt-cpl-lying "$(otasm_packet_parse "01FF${pkt:6}" >/dev/null 2>&1; echo $?)" "1"
     chk pkt-badhex "$(otasm_packet_parse zz >/dev/null 2>&1; echo $?)" "2"
     chk pkt-short  "$(otasm_packet_parse 01 >/dev/null 2>&1; echo $?)" "1"
+    # ── TS 31.115 SMS Command Packet with the SPI's security applied ──────
+    local sp sms tampered
+    sp=$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
+         OTASM_KID_KEY=00112233445566778899aabbccddeeff \
+         otasm_packet_sms_build b00001 4328719365 1600 15 15 801000000c00000000)
+    chk sms-packet-bytes "$(fld "$sp" packet_bytes)" "34"
+    chk sms-packet-cpl    "$(fld "$sp" cpl)" "32"
+    chk sms-packet-chl    "$(fld "$sp" chl)" "21"
+    chk sms-packet-pcntr  "$(fld "$sp" pcntr)" "01"
+    chk sms-packet-cc     "$(fld "$sp" cc | cut -f1)" "signer"
+    # The packet pySim builds for these inputs, byte for byte. A packet that
+    # says "ciphered, with a CC" and contains neither cannot match this.
+    chk sms-packet-kat "$(fld "$sp" packet | tr 'A-F' 'a-f')" \
+        "00201516001515b000018405f7d95d3f0f438ae0669d9f5c2bd3ee323f8f0f19105a"
+    local sp2; sp2=$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
+         OTASM_KID_KEY=00112233445566778899aabbccddeeff \
+         otasm_packet_sms_build ffffff 255 1600 15 15 801000000c00000000010203040506070809)
+    chk sms-packet-kat2 "$(fld "$sp2" packet | tr 'A-F' 'a-f')" \
+        "00281516001515ffffff8f56486d31d486039534c25d23d75669e997327cbc0786805b3877c7e3b5f6c3"
+    local rd; rd=$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
+         OTASM_KID_KEY=00112233445566778899aabbccddeeff \
+         otasm_packet_sms_parse "$(fld "$sp" packet)")
+    chk sms-roundtrip-apdu "$(fld "$rd" apdu)" "801000000c00000000"
+    chk sms-roundtrip-cc   "$(fld "$rd" cc_verdict)" "verified"
+    chk sms-roundtrip-pad  "$(fld "$rd" padding_octets)" "1"
+    chk sms-roundtrip-rc   "$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
+         OTASM_KID_KEY=00112233445566778899aabbccddeeff \
+         otasm_packet_sms_parse "$(fld "$sp" packet)" >/dev/null 2>&1; echo $?)" "0"
+    # A single bit changed in the secured data must not verify.
+    sms=$(fld "$sp" packet | tr 'A-F' 'a-f')
+    local n=${#sms}
+    tampered="${sms:0:n-30}$(printf '%02x' $(( 0x${sms:n-30:2} ^ 1 )))${sms:n-28}"
+    chk sms-tamper-rc "$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
+         OTASM_KID_KEY=00112233445566778899aabbccddeeff \
+         otasm_packet_sms_parse "$tampered" >/dev/null 2>&1; echo $?)" "1"
+    chk sms-tamper-verdict "$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
+         OTASM_KID_KEY=00112233445566778899aabbccddeeff \
+         otasm_packet_sms_parse "$tampered" 2>/dev/null | awk -F'\t' '$1=="cc_verdict"{print $2}')" "mismatch"
+    # Without the key material the builder refuses rather than emitting a
+    # packet that claims protection it does not have.
+    chk sms-nokey-rc "$(OTASM_KIC_KEY= OTASM_KID_KEY= otasm_packet_sms_build b00001 1 1600 15 15 8010 >/dev/null 2>&1; echo $?)" "2"
+    chk sms-nokey-says "$(OTASM_KIC_KEY= OTASM_KID_KEY= otasm_packet_sms_build b00001 1 1600 15 15 8010 2>&1 >/dev/null | grep -c OTASM_KIC_KEY)" "1"
+    chk sms-rc-only "$(OTASM_KIC_KEY=00 OTASM_KID_KEY=00 otasm_packet_sms_build b00001 1 1200 15 15 80 >/dev/null 2>&1; echo $?)" "2"
     # a large payload forces the two-octet CPL form and still round-trips.
     local big; big=$(printf 'aa%.0s' {1..200})
     pkt=$(otasm_packet_build 01 010203 9 B800 01 02 "$big" 01 01)
@@ -1342,6 +1765,9 @@ otasm_menu() {
   [13] Parse a TPDU
   [14] Build / audit a Type 0 silent SMS
   [15] Decode TP-FCS / TP-ST
+  --- TS 31.115 secured command packet ---
+  [16] Build a ciphered command packet with its CC
+  [17] Parse it back and check the CC
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -1356,6 +1782,18 @@ M
             5) read -rp "  counter> " n; read -rp "  RE> " r; read -rp "  mode 0-3> " m
                otasm_counter_check "$n" "$r" "${m:-0}"; read -rp "  enter " _ ;;
             6) otasm_plan; read -rp "  enter " _ ;;
+            16) read -rp "  TAR(6hex)> " t; read -rp "  counter> " n; read -rp "  SPI(4hex)> " s
+                read -rp "  KIc(2hex)> " k1; read -rp "  KID(2hex)> " k2; read -rp "  APDU hex> " dd
+                read -rsp "  KIc key hex (hidden, empty for none)> " kk; echo
+                read -rsp "  KID key hex (hidden, empty for none)> " kd; echo
+                OTASM_KIC_KEY="$kk" OTASM_KID_KEY="$kd" \
+                    otasm_packet_sms_build "$t" "$n" "$s" "$k1" "$k2" "$dd"
+                echo; read -rp "  enter " _ ;;
+            17) read -rp "  packet hex> " p
+                read -rsp "  KIc key hex (hidden, empty for none)> " kk; echo
+                read -rsp "  KID key hex (hidden, empty for none)> " kd; echo
+                OTASM_KIC_KEY="$kk" OTASM_KID_KEY="$kd" otasm_packet_sms_parse "$p"
+                read -rp "  enter " _ ;;
             7) read -rp "  TP-PID hex> " p; otasm_tp_pid_parse "$p"; read -rp "  enter " _ ;;
             8) read -rp "  [p]arse or [b]uild> " m
                if [[ "$m" == b ]]; then
@@ -1424,8 +1862,11 @@ otasm_cli_main() {
         --status-tsv)     otasm_status_tsv ;;
         --spi-build)      otasm_spi_build "${1:-0}" "${2:-0}" "${3:-0}" "${4:-0}" "${5:-0}" "${6:-0}" "${7:-0}" ;;
         --spi)            otasm_spi_parse "${1:-}" ;;
+        --key)            otasm_cmd_key "${1:-}" "${2:-}" ;;
         --packet)         otasm_packet_build "${1:-01}" "${2:-000000}" "${3:-0}" "${4:-B800}" "${5:-01}" "${6:-01}" "${7:-}" "${8:-01}" "${9:-01}" ;;
         --parse-packet)   otasm_packet_parse "${1:-}" ;;
+        --packet-sms)     otasm_packet_sms_build "${1:-000000}" "${2:-0}" "${3:-1600}" "${4:-15}" "${5:-25}" "${6:-}" ;;
+        --parse-packet-sms) otasm_packet_sms_parse "${1:-}" ;;
         --counter-check)  otasm_counter_check "${1:-}" "${2:-}" "${3:-0}" ;;
         --tp-pid)         otasm_tp_pid_parse "${1:-}" ;;
         --tp-dcs)         otasm_tp_dcs_parse "${1:-}" ;;
@@ -1459,6 +1900,11 @@ Usage: $0 COMMAND
   --spi <hex|dec>                    parse and audit an SPI
   --packet <cpi> <tar> <counter> <spi> <kic> <kid> <data> [chi] [cmd]
   --parse-packet <hex>               decode a command packet
+  --packet-sms <tar> <counter> <spi> <kic> <kid> <apdu-hex>
+                                     TS 31.115 SMS packet with the SPI's
+                                     security actually applied; keys come from
+                                     OTASM_KIC_KEY / OTASM_KID_KEY
+  --parse-packet-sms <hex>           decrypt it and check its CC
   --counter-check <counter> <RE> [mode]   replay decision per SPI mode
   --tp-kat                           GSM 7-bit packing KAT (TS 23.038 §6.1.2.1.1)
   --tp-pid <hex>                     decode TP-PID, including Type 0 / triggering

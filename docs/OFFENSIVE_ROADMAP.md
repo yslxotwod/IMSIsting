@@ -104,8 +104,8 @@ and a testbed. Every computational half is already built and verified offline.
 
 | Capability | Module | Built today | Missing to fire |
 |---|---|---|---|
-| **SIM / APDU** | `16_sim` | ISO-7816 build/parse with real status words, USIM file ids, ICCID/IMSI BCD, EF_AD in both layouts, PIN/PUK state, eSIM RSP, COMP128-1 DPA leakage model with synthetic-trace key recovery | DEVICE for capture: a reader, a SIM you own, a probe and a scope (`--plan dpa-lab`) |
-| **OTA binary SMS** | `41_ota_sms` | TS 23.048 Command-Packet construction (SPI, TAR, counter, padding counter), replay decisions per SPI mode | DEVICE: the SIM's KIc/KID — **only your own SIM** |
+| **SIM / APDU** | `16_sim` | ISO-7816 build/parse with real status words, USIM file ids, ICCID/IMSI BCD, EF_AD in both layouts, PIN/PUK state, eSIM RSP, COMP128-1 DPA leakage model with synthetic-trace key recovery; OTA packet dissection with the CHL field counted from the SPI to the end of the CC (13 octets of prefix, not 14 — the old reading started the CC one octet early and swallowed it into the payload) | DEVICE for capture: a reader, a SIM you own, a probe and a scope (`--plan dpa-lab`) |
+| **OTA binary SMS** | `41_ota_sms` | TS 23.048 Command-Packet construction (SPI, TAR, counter, padding counter), replay decisions per SPI mode; the TS 31.115 §4.2 SMS Command Packet with the SPI's security *applied* — 3DES outer-CBC ciphering and the CC, both computed and verified back (`--packet-sms`, `--parse-packet-sms`, keys from `OTASM_KIC_KEY`/`OTASM_KID_KEY`), matched byte for byte against pySim in `tools/ota-oracle/`; the SPI/KIc/KID bit layout corrected against TS 102 225 §5.1.1–5.1.3 in this module **and** `16_sim` (both read RC/CC/DS from b8b7 and ciphering from b6) | DEVICE for the keys: the SIM's KIc/KID — **only your own SIM**. DELIVERY: something has to carry the packet to the card (an OTA gateway, an SMSC, or a reader with `--parse-ota`) |
 | **SIM Toolkit / STK** | `52_stk` | TS 31.111 proactive command build/parse (D0 envelope, comprehension-TLVs), silent-command audit | DEVICE |
 | **USSD / STK injection** | `38_ussd` | GSM 7-bit packing (E8 34 worked example), MMI/SS parsing, USSD facility build with DCS, injection detector | DEVICE / NET |
 
@@ -759,6 +759,15 @@ differential that settled it compares our block against
 registration hijack).
 
 **Phase 6 — SIM and device.** `52_stk`, `41_ota_sms`, `16_sim`, `38_ussd`.
+
+The construction half is in: every one of the four builds the bytes it claims
+to build, and the one place where two modules read the same bits — the OTA SPI,
+KIc and KID — is now checked against a single statement of the clause and
+against pySim, because they had drifted to the same wrong layout independently.
+`41_ota_sms --packet-sms` produces a packet that is ciphered and carries a CC
+that verifies, rather than a header claiming both. What remains is not code:
+the key material is the card's, so it is own-SIM only, and delivery needs an OTA
+gateway, an SMSC or a reader.
 
 **Phase 7 — core network.** `11_lte_core` (GTP, Diameter lab testbed),
 `13_nr_core` (PFCP), `40_sba_pivot`.

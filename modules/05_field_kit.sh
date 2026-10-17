@@ -336,6 +336,8 @@ fk_guard_matrix() {
 33_jamming_detect|--analyse|/nonexistent.iq
 39_ta_geoloc|--trilaterate|/nonexistent.tsv
 41_ota_sms|--parse-packet|00
+41_ota_sms|--packet-sms||OTASM_KIC_KEY= OTASM_KID_KEY=|60
+16_sim|--parse-ota|||60
 46_lpp|--forge-position|91,0||30
 42_li_probe|--score|/nonexistent.pcap
 43_ran_share|--leak-check|/nonexistent.pcap
