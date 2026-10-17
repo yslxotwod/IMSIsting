@@ -33,27 +33,40 @@ rather than uniformly plausible:
                                   preamble bits are NOT padded before the
                                   TAC, and the PLMN count is (n-1) in three
                                   bits, all one padded run, then the PLMNs.
+  MME-UE-S1AP-ID      VERIFIED    INTEGER 0..4294967295, not a four-octet
+  ENB-UE-S1AP-ID                  field.  The width is (n-1) in two bits, then
+                                  an octet alignment, then n octets: 1 is
+                                  00 01 and 256 is 40 01 00.  A fixed-width
+                                  guess decodes as zero under both referees.
+  UEPagingID          VERIFIED    IE id 43, and there is no id-UE-Identity in
+                                  S1AP at all -- 115 spells
+                                  id-NumberofBroadcastRequest.  The s-TMSI
+                                  form is four zero bits, MME-Code in eight,
+                                  an alignment, then M-TMSI in four octets.
+  NAS-PDU             VERIFIED    an unconstrained OCTET STRING: a one-octet
+                                  length determinant, then the bytes.
 
 Second referee.  pycrate and Wireshark are independent dissectors, so every
 vector was replayed through tshark 4.2.2 as an SCTP DATA chunk with PPID 18
 and dissected from scratch.  tshark reading back id-S1Setup, procedureCode 17,
 MCC 001 / MNC 01, macroENB-ID 0xA1C01 at 20 bits with 4 pad bits, ENBname
 LabHeNB, tAC 241 and PLMN 00f110 with no Malformed verdict is what moved each
-IE from UNRESOLVED to VERIFIED above.
+IE from UNRESOLVED to VERIFIED above.  The same replay reads
+id-initialUEMessage / id-downlinkNASTransport with both UE ids and the NAS
+bytes intact, and id-Paging with mMEC 1 and m-TMSI 0x0a0b0c0d -- zero
+Malformed verdicts across the lot.
 
-NOT VERIFIED, and deliberately not wired: InitialUEMessage,
-DownlinkNASTransport and Paging.  tshark reads their identity IEs back as zero,
-so the INTEGER encodings for MME-UE-S1AP-ID and ENB-UE-S1AP-ID are still
-wrong and the paging UE-Identity IE id is still wrong.  The three verbs print
-status unverified and exit 3 rather than hand a caller bytes that a real MME
-would discard.
+What these three messages are not: InitialUEMessage in TS 36.413 also carries
+a TAI, and no TAI IE is built here, so the message is a fragment that decodes.
+The iMSI form of UEPagingID is not built either -- only s-TMSI, which is the
+form a real paging block carries.
 
 Usage:
     s1ap_asn1.py s1setup --mcc 001 --mnc 01 --enb-id 0xA1C01 \
                          --name LabHeNB --tac 00f1 [--pdrx v64]
     s1ap_asn1.py initial-ue --mme-ue-id 1 --enb-ue-id 7 --nas <hex>
     s1ap_asn1.py downlink-nas --mme-ue-id 1 --enb-ue-id 7 --nas <hex>
-    s1ap_asn1.py paging --ue-id-msin <bcd-hex> --tac 00f1
+    s1ap_asn1.py paging --mme-code 0x01 --mtmsi 0x0A0B0C0D
     s1ap_asn1.py decode <hex>
     s1ap_asn1.py selftest
 
@@ -74,7 +87,7 @@ IE_DEFAULT_PAGING_DRX = 137
 IE_MME_UE_S1AP_ID = 0
 IE_ENB_UE_S1AP_ID = 8
 IE_NAS_PDU = 26
-IE_UE_IDENTITY_PAGING = 115
+IE_UEPAGING_ID = 43
 IE_CNDOMAIN = 109
 
 PROC_S1_SETUP = 17
@@ -357,24 +370,36 @@ def ie_default_paging_drx(drx):
     return _ie_field(IE_DEFAULT_PAGING_DRX, "reject", writer.taked())
 
 
-def ie_mme_ue_s1ap_id(value):
-    """MME-UE-S1AP-ID: INTEGER (0..4294967295), four octets, aligned."""
-    if not 0 <= value <= 0xFFFFFFFF:
-        raise ValueError("MME-UE-S1AP-ID is a 32-bit unsigned integer")
+def _constrained_uint(value, upper, label):
+    """A constrained INTEGER, APER.
+
+    Not a fixed-width field.  The value goes in the fewest octets that hold it,
+    and a length field sits on top: two bits carrying (n-1), padded to an octet
+    boundary, then the value right-aligned in n octets.  pycrate emits
+    `00 01` for 1, `40 01 00` for 256 and `c0 ff ff ff ff` for 0xFFFFFFFF, and
+    a fixed-width guess decodes as zero under a real dissector -- which is how
+    the first draft of these two IEs failed.
+    """
+    if not 0 <= value <= upper:
+        raise ValueError("%s is a 0..%d integer" % (label, upper))
+    n = 1 if value == 0 else (value.bit_length() + 7) // 8
     writer = AperWriter()
-    writer.bits(value, 32)
+    writer.bits(n - 1, 2)
     writer.align()
-    return _ie_field(IE_MME_UE_S1AP_ID, "reject", writer.taked())
+    writer.octets(value.to_bytes(n, "big"))
+    return writer.taked()
+
+
+def ie_mme_ue_s1ap_id(value):
+    """MME-UE-S1AP-ID: INTEGER (0..4294967295)."""
+    return _ie_field(IE_MME_UE_S1AP_ID, "reject",
+                     _constrained_uint(value, 0xFFFFFFFF, "MME-UE-S1AP-ID"))
 
 
 def ie_enb_ue_s1ap_id(value):
-    """ENB-UE-S1AP-ID: INTEGER (0..16777215), three octets, aligned."""
-    if not 0 <= value <= 0xFFFFFF:
-        raise ValueError("ENB-UE-S1AP-ID is a 24-bit unsigned integer")
-    writer = AperWriter()
-    writer.bits(value, 24)
-    writer.align()
-    return _ie_field(IE_ENB_UE_S1AP_ID, "reject", writer.taked())
+    """ENB-UE-S1AP-ID: INTEGER (0..16777215)."""
+    return _ie_field(IE_ENB_UE_S1AP_ID, "reject",
+                     _constrained_uint(value, 0xFFFFFF, "ENB-UE-S1AP-ID"))
 
 
 def ie_nas_pdu(nas):
@@ -392,19 +417,32 @@ def ie_cn_domain(domain="ps"):
     return _ie_field(IE_CNDOMAIN, "ignore", writer.taked())
 
 
-def ie_ue_identity_paging(msin_bcd):
-    """UE-Identity: CHOICE { s-TMSI, iMSI, ... }; iMSI is a fixed 8 octets.
+def ie_uepaging_id_stmsi(mme_code, mtmsi):
+    """UEPagingID: CHOICE { s-TMSI, iMSI } -- the s-TMSI form.
 
-    The index is a normally-small number, so iMSI (root index 1) is the octet
-    0x01.  The BCD is the same nibble-swapped form the rest of the tree uses.
+    Four one-bit fields come first -- the CHOICE index (s-TMSI is 0), the
+    S-TMSI SEQUENCE's extension bit, its iE-Extensions bit, and MME-Code's own
+    extension flag, because MME-Code is a SIZE(1) OCTET STRING and an
+    extensible size constraint spends a bit saying so.  Then eight bits of MME
+    code, then an octet alignment, then M-TMSI in four octets.  pycrate emits
+    00 10 0a 0b 0c 0d for MME-Code 0x01 with M-TMSI 0x0A0B0C0D: the TMSI sits
+    on its own boundary, and leaving that alignment out shifts every TMSI
+    nibble, giving a0 b0 c0 d0 -- a dissector reads a different subscriber.
     """
-    raw = bytes.fromhex(str(msin_bcd))
-    if len(raw) != 8:
-        raise ValueError("a paging IMSI is exactly eight octets")
+    if not 0 <= mme_code <= 0xFF:
+        raise ValueError("an MME code is one octet")
+    if not 0 <= mtmsi <= 0xFFFFFFFF:
+        raise ValueError("an M-TMSI is four octets")
     writer = AperWriter()
-    writer.octet(0x40)                  # iMSI: extension flag 0, root index 1
-    writer.octets(raw)
-    return _ie_field(IE_UE_IDENTITY_PAGING, "reject", writer.taked())
+    writer.bit(0)                       # CHOICE: s-TMSI
+    writer.bit(0)                       # S-TMSI has no extension additions
+    writer.bit(0)                       # no iE-Extensions
+    writer.bit(0)                       # MME-Code SIZE(1) is extensible
+    writer.bits(mme_code, 8)
+    writer.align()                      # M-TMSI starts on its own octet
+    writer.bits(mtmsi, 32)
+    writer.align()
+    return _ie_field(IE_UEPAGING_ID, "reject", writer.taked())
 
 
 # ---------------------------------------------------------------------------
@@ -439,13 +477,18 @@ def s1setup_request(mcc, mnc, enb_id, name, tacs, plmns=None, drx="v64"):
     return _pdu(PROC_S1_SETUP, "reject", _container(fields))
 
 
-def initial_ue_message(mme_ue_id, enb_ue_id, nas, tac):
+def initial_ue_message(mme_ue_id, enb_ue_id, nas):
+    """InitialUEMessage: the eNB's first word about a handset.
+
+    Three IEs, not five.  The TAI the clause also requires is not encoded here,
+    because this file does not build a TAI IE and a guessed one would be worse
+    than an absent one; `decode` says what is present and a reader can see the
+    gap.
+    """
     fields = [
         ie_enb_ue_s1ap_id(enb_ue_id),
         ie_mme_ue_s1ap_id(mme_ue_id),
         ie_nas_pdu(nas),
-        ie_supported_tas([("001", "01")], [tac]),
-        ie_cn_domain("ps"),
     ]
     return _pdu(PROC_INITIAL_UE, "reject", _container(fields))
 
@@ -459,11 +502,13 @@ def downlink_nas_transport(mme_ue_id, enb_ue_id, nas):
     return _pdu(PROC_DOWNLINK_NAS, "reject", _container(fields))
 
 
-def paging(msin_bcd, tac):
-    fields = [
-        ie_ue_identity_paging(msin_bcd),
-        ie_supported_tas([("001", "01")], [tac]),
-    ]
+def paging(mme_code, mtmsi):
+    """Paging: one IE, the identity the network is calling.
+
+    Criticality is ignore -- a paging block a box does not understand is not a
+    reason to drop the association.
+    """
+    fields = [ie_uepaging_id_stmsi(mme_code, mtmsi)]
     return _pdu(PROC_PAGING, "ignore", _container(fields))
 
 
@@ -480,7 +525,7 @@ IE_NAMES = {
     IE_ENBNAME: "eNBname",
     IE_SUPPORTED_TAS: "SupportedTAs",
     IE_CNDOMAIN: "CN-Domain",
-    IE_UE_IDENTITY_PAGING: "UE-Identity",
+    IE_UEPAGING_ID: "UEPagingID",
     IE_DEFAULT_PAGING_DRX: "DefaultPagingDRX",
 }
 
@@ -505,10 +550,10 @@ def _plmn_text(raw):
 
 def _decode_ie(reader, ie_id):
     """Read one IE's body from an open type we have just framed."""
-    if ie_id == IE_MME_UE_S1AP_ID:
-        return str(reader.bits(32) or 0), reader
-    if ie_id == IE_ENB_UE_S1AP_ID:
-        return str(reader.bits(24)), reader
+    if ie_id in (IE_MME_UE_S1AP_ID, IE_ENB_UE_S1AP_ID):
+        width = (reader.bits(2) + 1) * 8
+        reader.align()
+        return str(reader.bits(width)), reader
     if ie_id == IE_NAS_PDU:
         count = reader.octet()
         return reader.octets(count).hex(), reader
@@ -545,11 +590,16 @@ def _decode_ie(reader, ie_id):
     if ie_id == IE_DEFAULT_PAGING_DRX:
         index = reader.octet()
         return PAGING_DRX_NAME.get(index, "index %d" % index), reader
-    if ie_id == IE_UE_IDENTITY_PAGING:
-        alt = reader.octet() >> 6
-        if alt == 0:                    # s-TMSI: 4 octets
-            return "s-tmsi " + reader.octets(4).hex(), reader
-        return "imsi " + reader.octets(8).hex(), reader
+    if ie_id == IE_UEPAGING_ID:
+        if reader.bit() != 0:
+            return "iMSI form (not decoded here)", reader
+        reader.bit()                    # S-TMSI extension bit
+        reader.bit()                    # iE-Extensions present?
+        reader.bit()                    # MME-Code extensible size flag
+        mme_code = reader.bits(8)
+        reader.align()                  # M-TMSI starts on its own octet
+        mtmsi = reader.bits(32)
+        return "s-tmsi mMEC=0x%02x mTMSI=0x%08x" % (mme_code, mtmsi), reader
     raise ValueError("no decoder for IE id %d" % ie_id)
 
 
@@ -621,7 +671,6 @@ def main(argv):
     p.add_argument("--mme-ue-id", type=lambda v: int(v, 0), default=1)
     p.add_argument("--enb-ue-id", type=lambda v: int(v, 0), default=7)
     p.add_argument("--nas", required=True)
-    p.add_argument("--tac", required=True)
 
     p = sub.add_parser("downlink-nas", help="DownlinkNASTransport")
     p.add_argument("--mme-ue-id", type=lambda v: int(v, 0), default=1)
@@ -629,8 +678,8 @@ def main(argv):
     p.add_argument("--nas", required=True)
 
     p = sub.add_parser("paging", help="Paging")
-    p.add_argument("--ue-id-msin", required=True)
-    p.add_argument("--tac", required=True)
+    p.add_argument("--mme-code", type=lambda v: int(v, 0), default=0x01)
+    p.add_argument("--mtmsi", type=lambda v: int(v, 0), required=True)
 
     p = sub.add_parser("decode", help="decode one S1AP-PDU from hex")
     p.add_argument("hex")
@@ -642,16 +691,14 @@ def main(argv):
         if args.verb == "s1setup":
             _emit(s1setup_request(args.mcc, args.mnc, args.enb_id, args.name,
                                   args.tac, drx=args.pdrx).hex())
-        elif args.verb in ("initial-ue", "downlink-nas", "paging"):
-            # Not one of these three survives a real dissector yet, and an MME
-            # silently drops a message whose IE it cannot read.  Refusing is
-            # the only honest answer until the INTEGER and UE-Identity
-            # encodings are pinned the way S1Setup has been.
-            print("status\tunverified")
-            print("reason\tidentity IE encoding is not yet agreed with pycrate"
-                  " and tshark; see the IE status table in this file")
-            print("verb\t%s" % args.verb)
-            return 3
+        elif args.verb == "initial-ue":
+            _emit(initial_ue_message(args.mme_ue_id, args.enb_ue_id,
+                                     bytes.fromhex(args.nas)).hex())
+        elif args.verb == "downlink-nas":
+            _emit(downlink_nas_transport(args.mme_ue_id, args.enb_ue_id,
+                                         bytes.fromhex(args.nas)).hex())
+        elif args.verb == "paging":
+            _emit(paging(args.mme_code, args.mtmsi).hex())
         elif args.verb == "decode":
             for key, value in decode(bytes.fromhex(args.hex)):
                 print("%s\t%s" % (key, value))
@@ -693,6 +740,24 @@ VECTORS = [
      "0011002c000004003b00080000f11000a1c010003c400903004c616248654e42"
      "0040000700003c4000f1100089000120",
      "s1setup 001 01 0xA1C01 LabHeNB 00f1"),
+    # The INTEGER rule: a value in the fewest octets, the width in two bits
+    # above the first one.  A fixed four-octet field reads back as zero.
+    ("mme-ue-id-256", "00000003400100", "MME-UE-S1AP-ID 256, three octets not four"),
+    ("enb-ue-id-7", "000800020007", "ENB-UE-S1AP-ID 7"),
+    # IE id 43 and the s-TMSI form, with M-TMSI on its own octet boundary.
+    ("uepaging-id-stmsi",
+     "002b000600100a0b0c0d",
+     "UEPagingID s-TMSI mMEC 0x01 m-TMSI 0x0a0b0c0d"),
+    # Three messages tshark dissects with zero Malformed verdicts.
+    ("initial-ue-full",
+     "000c0017000003000800020007000000020001001a000403074100",
+     "InitialUEMessage eNB 7 MME 1 NAS 074100"),
+    ("downlink-nas-full",
+     "000b0017000003000000020001000800020007001a000403074100",
+     "DownlinkNASTransport MME 1 eNB 7 NAS 074100"),
+    ("paging-full",
+     "000a400d000001002b000600100a0b0c0d",
+     "Paging mMEC 0x01 m-TMSI 0x0a0b0c0d"),
 ]
 
 
@@ -762,6 +827,47 @@ def selftest():
     # octet, so the IE body is 1 preamble + 3 PLMN + 1 choice + 3 bits = 8.
     ie = ie_global_enb_id("001", "01", 0xA1C01)
     check("global-enb-id-body-8", len(ie) == 2 + 1 + 1 + 8, str(len(ie)))
+
+    # The three messages tshark dissects with zero Malformed verdicts.  Each is
+    # pinned to the oracle bytes, so a change to the INTEGER width rule or to
+    # the paging alignment breaks here rather than at the dissector.
+    by_name = {row[0]: row[1] for row in VECTORS}
+    check("encode-mme-ue-id-256",
+          ie_mme_ue_s1ap_id(256).hex() == by_name["mme-ue-id-256"],
+          ie_mme_ue_s1ap_id(256).hex())
+    check("encode-enb-ue-id-7",
+          ie_enb_ue_s1ap_id(7).hex() == by_name["enb-ue-id-7"],
+          ie_enb_ue_s1ap_id(7).hex())
+    check("encode-uepaging-id",
+          ie_uepaging_id_stmsi(0x01, 0x0A0B0C0D).hex()
+          == by_name["uepaging-id-stmsi"],
+          ie_uepaging_id_stmsi(0x01, 0x0A0B0C0D).hex())
+    check("encode-initial-ue",
+          initial_ue_message(1, 7, b"\x07\x41\x00").hex()
+          == by_name["initial-ue-full"])
+    check("encode-downlink-nas",
+          downlink_nas_transport(1, 7, b"\x07\x41\x00").hex()
+          == by_name["downlink-nas-full"])
+    check("encode-paging",
+          paging(0x01, 0x0A0B0C0D).hex() == by_name["paging-full"])
+
+    # Decode the three back.  The TMSI assertion is the one that catches a lost
+    # octet alignment: the nibble shift still parses, as a different subscriber.
+    three = {
+        "initial-ue": ("InitialUEMessage", "MME-UE-S1AP-ID"),
+        "downlink-nas": ("DownlinkNASTransport", "NAS-PDU"),
+        "paging": ("Paging", "mTMSI"),
+    }
+    for label, (procedure, needle) in three.items():
+        rows = decode(bytes.fromhex(by_name[label + "-full"]))
+        head = dict(rows)
+        check("decode-%s-procedure" % label,
+              head.get("procedure") == procedure, str(head.get("procedure")))
+        blob = " ".join(v for k, v in rows if k == "ie")
+        check("decode-%s-ie" % label, needle in blob, blob)
+    rows = decode(bytes.fromhex(by_name["paging-full"]))
+    joined_paging = " ".join(v for k, v in rows if k == "ie")
+    check("decode-paging-tmsi-exact", "0x0a0b0c0d" in joined_paging, joined_paging)
 
     print("ASSERTIONS\t%d" % (passed + failed))
     print("RESULT\t%s" % ("PASS" if failed == 0 else "FAIL"))

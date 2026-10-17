@@ -1018,29 +1018,85 @@ contract is that **it never reports anonymity it has not measured.** IMEI
 rotation is the trivial case: for an SDR UE it is a configuration value that
 `09_lte_attach`'s UE-stack path already owns — a harness, not an attack.
 
-*Rejected.* No new module numbers for any of the above. `58_simjacker` collides
-with `53_non3gpp`, and it would be the only module in the roster named after an
-attack rather than a layer. `00_opsec` collides with `00_deps` — `00` is the
-dependency installer by convention.
+*Rejected.* No new module numbers for any of the above. `58_simjacker` would be
+the only module in the roster named after an attack rather than a layer, and it
+would split the SIMjacker surface away from `52_stk`, which already builds the
+`0xD0` envelope it would need. `00_opsec` collides with `00_deps` — `00` is the
+dependency installer by convention, and the root id is never reissued.
 
-The numbering is worth stating exactly, because the obvious guess is wrong on
-both ends. Ids are **banded by decade** and the unused ones are band headroom
-rather than holes: in use are `00`–`05`, `10`–`28` and `30`–`61`, and the unused
-numbers are `06`–`09` (tail of the 0x infrastructure band) and `29` (tail of the
-2x band). There is no mid-band hole anywhere. `00`–`05` is the Setup / radio
-band — `00_deps`, `01_radio`, `02_cell_recon`, `03_gsmtap`, `04_tower_map`,
-`05_field_kit` — so `06` is the next slot for anything infrastructural, which a
-posture or verification module is; and `29` sits between `24_rf_fingerprint` and
-`25_killchain`, which is the right slot for something that belongs beside the RF
-work. `docs/MODULE_ROSTER.md` carries the table.
+The numbering is worth stating exactly, because an earlier version of this
+paragraph had it wrong. Ids are **contiguous and not banded**: 57 modules, `00`
+through `56` with no gap, and `57` is the next free number. `docs/MODULE_ROSTER.md`
+carries the contract (`:10-12`) and the table, and it is the authority here.
+What the banding would have been useful for is the reason it is not needed: a
+module's number says nothing about what it examines, so a new module goes at the
+end regardless of subject.
 
 A new module must be registered in three places — `imsisting.sh`,
-`tools/gen-module-icons.py` and `docs/MODULE_ROSTER.md` — which is itself part
+`tools/gen-module-icons.py` and `docs/MODULE_ROSTER.md` — plus the GUI's
+`ModuleDefinition` table and a page in `native/src/main1.c`, which is itself part
 of the argument for not minting one casually.
 
 Every phase carries the same contract: full `--selftest` with published-vector
 assertions, `status: handoff` naming the exact device where TX is required, and
 `05_field_kit --guard-check` reporting zero FABRICATED at the end of the phase.
+
+**Phase 15 — the second gap sweep.** Phase 14 audited a proposal against the
+tree. This phase audits the tree against itself: a sweep for published attack
+classes that appear in neither this file nor `docs/OFFENSIVE-GAP-ANALYSIS.md`
+§2. Each was absence-verified the same way — `grep -rniE '<pattern>' modules/
+tools/` returning nothing, or returning only a reference table and no
+computation. Nine are open. Eight are placement; one is structural and blocks
+six modules' second half.
+
+*The structural one, first.*
+
+**T1 — the transport layer.** Not one module in this tree opens a network
+association. `26_ss7_map` carries SCTP and M3UA framing in both directions
+(*Tier 2*, O3) and reads chunks out of a hex string — it never opens an
+SCTP association. `37_femtocell` builds a byte-exact S1 Setup Request and an
+HNBAP Register Request and stops at `sctp_ppid 18`. `11_lte_core` builds GTP-C
+and Diameter PDUs with no client, `13_nr_core` the same for PFCP, `40_sba_pivot`
+for HTTP/2. The registry row at *Tier 2* calls this "the last hop" and it has
+been the last hop for six modules at once.
+
+This is the highest-leverage item in the file, because it is the only one that
+makes work already paid for reachable: **one socket layer turns S1AP, HNBAP,
+M3UA, GTP-C, Diameter, PFCP and the SBI pivot from encoders into senders.** It
+needs no new cryptography, no spec research and no radio — an SCTP one-to-one
+socket, a UDP socket for GTP-U, a TCP/TLS client for Diameter and SBI, each
+gated behind the same armed-handoff guard `54_baseband_exploit` and
+`55_nr_inject` already use for their transmitter. Placement: the next free
+infrastructural slot beside `00_deps`/`01_radio`, or a `tools/` companion the
+modules call — the second is cheaper and does not mint a module number.
+
+*The eight that are placement.*
+
+| Absent attack | Verified absence | Home | Cost |
+|---|---|---|---|
+| **PWS / ETWS / CMAS forging** | `10_lte_air` only decodes the three IEs (`:1049-1058`, `:1270-1272`); the encoders exist in `tools/lte_asn1.py` as `sib10`/`sib11`/`sib12` and are called by nothing | `10_lte_air` | **Lowest in the table.** The codec is done; the gap is one verb each |
+| **3G/UMTS rogue NodeB** | `08_umts_air` has no offensive verb at all — `--decode-sib --sib-fields --mac-input --aka-flow --integrity-tsv` is the whole surface. KASUMI f9 is already verified in `07_gsm_attack --f9-mac` against all three TS 35.203 vectors, and `--mac-input` already emits the fields f9 consumes | `08_umts_air` | Low — the wires are already cut to length |
+| **SRTP / DTLS-SRTP / MIKEY** | `\bsrtp\b` 0, `\bmikey\b` 0. `30_volte_ims` stops at signalling plus the ReVoLTE keystream reuse and never parses a media packet | `30_volte_ims` | High — media key derivation and a DTLS handshake parser |
+| **SUPL / LCS** | `\bsupl\b` 0. `26_ss7_map` carries MAP LCS *opcode names* (`:860-864`) and nothing else | `39_ta_geoloc` | Medium — ASN.1 over HTTP; the LPP codec is the neighbour |
+| **IRSF / SIM box / grey route** | `\birsf\b` 0, `sim box` 0, `grey route` 0 | `11_lte_core` | Low — protocol-analysable, and `--cdr-fraud-check` is the neighbour |
+| **RCS / MSRP** | `\brcs\b` 0, `\bmsrp\b` 0 | `30_volte_ims` | High — capability discovery, SIP auth, MSRP |
+| **ANDSF / Passpoint (Hotspot 2.0)** | `\bpasspoint\b` 0, `andsf` 0. `47_wifioff` prints LWA constants | `47_wifioff` | Medium |
+| **URR-based charging abuse** | `13_nr_core` builds PDR/FAR/QER/URR encode-decode against pycrate; no abuse model sits on it | `13_nr_core` | Low — the codec is the hard half and it is checked |
+
+*One correction to Phase 14.* Its "already built" row credits `16_sim` with
+DPA. It is not built: `modules/16_sim.sh:1692` carries a `dpa-lab` **plan**
+naming a card you own, a PC/SC reader, a current or EM probe and a scope with a
+trigger the reader's clock can drive. There is no differential-power model and
+no trace-capture path in the tree. The row moves from "already built" to
+"planned with the rig named", which is what this file asks of every hardware
+item — it was the only row in Phase 14 that over-claimed.
+
+Sequencing within this phase: the PWS verbs and the UMTS f9 wiring first (both
+are hours, not days, and both close a named attack class), then the transport
+layer T1 because it unlocks six modules at once, then SRTP and the fraud lanes.
+`docs/OFFENSIVE-GAP-ANALYSIS.md` §2 is stale on items 2 and 3 — the QCDM/DIAG
+surface landed as `56_baseband_diag` and the TS 23.040 TP layer with the Type-0
+audit landed in `41_ota_sms` — and should be read against the tree, not alone.
 
 ---
 
