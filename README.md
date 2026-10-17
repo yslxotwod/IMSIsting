@@ -95,9 +95,12 @@ has not been done yet.
 
 `10_lte_air` writes both srsRAN configs and execs `srsenb` — a real rogue eNB, as
 far as software goes. `11_lte_core` is the opposite case: four finished
-Diameter/GTP encoders that emit real octets, and **no transport at all** — no
-SCTP, GTP or TCP client anywhere in the module. Nothing is sent even if you point
-it at a live core.
+Diameter/GTP encoders that emit real octets, and until now **no transport**.
+`--gtpc-send` closes the GTP-C half through `tools/udp_assoc.py` — armed
+(`LTE_ARMED=1`), and honest about what a datagram proves: the report says
+`sent` and separately whether anything answered, because UDP has no
+acknowledgement and silence is not a delivery. Diameter still has no client;
+its SCTP leg is `tools/sctp_assoc.py`, which the small cell drives.
 
 ### 5G / NR
 | Module | Description | Attack |

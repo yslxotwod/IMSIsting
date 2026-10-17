@@ -1179,11 +1179,19 @@ they report `status disarmed`, exit 3, and name what they would have sent. A
 build must not be one typo away from a live socket, and the selftest asserts the
 refusal rather than the send.
 
-*What the other five modules need from it.* `11_lte_core` and `13_nr_core` want
-the UDP and TCP/TLS halves for GTP-C and Diameter/PFCP; `26_ss7_map` wants M3UA
-on PPID 132; `40_sba_pivot` wants an HTTP/2 client over TLS. None of them needs
-a different mechanism, which is the argument for the companion file rather than
-a new module number.
+*Wired: `11_lte_core --gtpc-send`.* `tools/udp_assoc.py` is the UDP half, and
+the Create Session Request now leaves the process on UDP 2123 behind `LTE_ARMED`
+— verified against a local receiver receiving all 52 octets. Its report splits
+the two questions a datagram cannot answer together: `sent` means the kernel
+took it, `delivery` says `unconfirmed` unless something replied, and a closed
+port on loopback shows as silence rather than as a failure, which is the truth
+about UDP.
+
+*What the other four modules still need.* `13_nr_core` wants the UDP send for
+PFCP *and* a session-establishment builder (it has none — the encoder gap comes
+first). `11_lte_core`'s Diameter half wants TCP, and `40_sba_pivot` wants HTTP/2
+over TLS; both are one client, so they should be one file. `26_ss7_map` wants
+M3UA on PPID 132, which is already `sctp_assoc.py --ppid 132`.
 
 *The eight that are placement.*
 

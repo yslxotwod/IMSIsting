@@ -14659,7 +14659,7 @@ static ModuleSubmenuEntry lcore_entries[] = {
       "--decode-gtp-c:Decode GTP-C|--decode-gtp-u:Decode GTP-U|--decode-diameter:Decode Diameter" },
     { "Attacks",
       "security-high-symbolic",
-      "#FORGE|--gtp-modify-bearer:Modify Bearer|--gtp-csr-forge:Forge CSR|#AUDIT|--gtpdoor-detect:Detect GTPdoor|--cdr-fraud-check:CDR Fraud Check|--fs20-audit:FS.20 Audit" },
+      "#FORGE|--gtp-modify-bearer:Modify Bearer|--gtp-csr-forge:Forge CSR|--gtpc-send:Send to Core|#AUDIT|--gtpdoor-detect:Detect GTPdoor|--cdr-fraud-check:CDR Fraud Check|--fs20-audit:FS.20 Audit" },
     { "Build",
       "document-new-symbolic",
       "--build-air:Build AIR|--build-ulr:Build ULR|--build-clr:Build CLR|--s1ap" },
