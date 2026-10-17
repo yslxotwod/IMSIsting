@@ -160,12 +160,21 @@ stk_tlv() {
 }
 
 # ── proactive command build / parse (tag 0xD0) ──────────────────────────
+# TS 31.111 6.4.4 (Command Details, TS 102 223 8.6): the value is three octets
+# -- command number, type of command, command qualifier. This used to write the
+# type, the qualifier and a zero, which put the type where the command number
+# belongs: a card reading it saw the command number as the type and the type as
+# the qualifier, so a SET UP CALL arrived as whatever 0x10 means to the card and
+# an 0x00 qualifier. The command number is the last argument so existing calls
+# still build the command they name.
 stk_proactive_build() {
-    local type="${1:-21}" qualifier="${2:-00}" src="${3:-81}" dst="${4:-82}"
+    local type="${1:-21}" qualifier="${2:-00}" src="${3:-81}" dst="${4:-82}" number="${5:-01}"
     [[ "$type" =~ ^[0-9A-Fa-f]{2}$ && "$qualifier" =~ ^[0-9A-Fa-f]{2}$ ]] || {
         printf 'ERROR\tcommand type and qualifier must be one octet each\n' >&2; return 2; }
+    [[ "$number" =~ ^[0-9A-Fa-f]{2}$ && "$number" != "00" ]] || {
+        printf 'ERROR\tcommand number must be one non-zero octet of hex\n' >&2; return 2; }
     local cd di
-    cd=$(stk_tlv 01 "${type}${qualifier}00")
+    cd=$(stk_tlv 01 "${number}${type}${qualifier}")
     di=$(stk_tlv 02 "${src}${dst}")
     local body="${cd}${di}"
     printf 'D0%s%s\n' "$(stk_tlv_len "$(( ${#body}/2 ))")" "$body"
@@ -180,7 +189,7 @@ stk_proactive_parse() {
         len=$(( 16#${h:4:$((n*2))} )); off=$(( 2 + n ))
     fi
     printf 'envelope\tD0\nbody_len\t%d\n' "$len"
-    local cmd_type="" qualifier="" src="" dst=""
+    local number="" cmd_type="" qualifier="" src="" dst=""
     printf 'tag\tlength\tvalue\n'
     local guard=0
     while (( off*2 < ${#h} )); do
@@ -192,13 +201,17 @@ stk_proactive_parse() {
         fi
         local val="${h:$((off*2)):$((l*2))}"; off=$(( off + l ))
         printf '%s\t%d\t%s\n' "$tag" "$l" "$val"
-        if [[ "$tag" == "01" ]]; then
-            cmd_type="${val:0:2}"; qualifier="${val:2:2}"
-        elif [[ "$tag" == "02" ]]; then
+        # 0x81/0x82 are the same information elements with the comprehension-
+        # required bit set (TS 102 223 8.1), which is the form cards normally
+        # send, so both are read.
+        if [[ "$tag" == "01" || "$tag" == "81" ]]; then
+            number="${val:0:2}"; cmd_type="${val:2:2}"; qualifier="${val:4:2}"
+        elif [[ "$tag" == "02" || "$tag" == "82" ]]; then
             src="${val:0:2}"; dst="${val:2:2}"
         fi
     done
-    printf 'cmd_type\t%s\ncmd_name\t%s\nqualifier\t%s\n' "$cmd_type" "$(stk_cmd_name "$cmd_type")" "$qualifier"
+    printf 'command_number\t%s\ncmd_type\t%s\ncmd_name\t%s\nqualifier\t%s\n' \
+        "$number" "$cmd_type" "$(stk_cmd_name "$cmd_type")" "$qualifier"
     printf 'source\t%s\nsource_name\t%s\ndestination\t%s\ndestination_name\t%s\n' \
         "$src" "$(stk_device_name "$src")" "$dst" "$(stk_device_name "$dst")"
 }
@@ -357,6 +370,15 @@ stk_selftest() {
     chk parse-src  "$(fld "$out" source)" "81"
     chk parse-dst  "$(fld "$out" destination)" "82"
     chk parse-alt  "$(fld "$(stk_proactive_parse "$(stk_proactive_build 13 00 81 82)")" cmd_name)" "SEND SHORT MESSAGE"
+    # The Command Details value is command number, type, qualifier -- the order
+    # pySim's CommandDetails struct declares (TS 102 223 8.6) -- so the built
+    # octets after the tag and length are 01 21 00, not 21 00 00.
+    chk build-cd-value "$(stk_proactive_build 21 00 81 82 | cut -c9-14)" "012100"
+    chk build-cd-number "$(stk_proactive_build 10 00 81 82 07 | cut -c9-14)" "071000"
+    chk parse-number "$(fld "$out" command_number)" "01"
+    chk parse-cr-tag "$(fld "$(stk_proactive_parse D009810301100002028182)" cmd_name)" "SET UP CALL"
+    chk parse-cr-number "$(fld "$(stk_proactive_parse D009810301100002028182)" command_number)" "01"
+    chk build-bad-number "$(stk_proactive_build 21 00 81 82 00 >/dev/null 2>&1; echo $?)" "2"
     chk parse-badtag "$(stk_proactive_parse 9900 >/dev/null 2>&1; echo $?)" "1"
     chk parse-badhex "$(stk_proactive_parse zz >/dev/null 2>&1; echo $?)" "2"
     # TLV length helper: 127 -> one octet, 128 -> 81 80.
@@ -434,7 +456,7 @@ stk_cli_main() {
         --cmd)         stk_cmd_name "${1:-}" ;;
         --device)      stk_device_name "${1:-}" ;;
         --result)      stk_result_name "${1:-}" ;;
-        --build)       stk_proactive_build "${1:-21}" "${2:-00}" "${3:-81}" "${4:-82}" ;;
+        --build)       stk_proactive_build "${1:-21}" "${2:-00}" "${3:-81}" "${4:-82}" "${5:-01}" ;;
         --parse)       stk_proactive_parse "${1:-}" ;;
         --audit)       stk_audit "${1:-}" ;;
         --sat-cmds)    stk_sat_cmds ;;
@@ -452,7 +474,10 @@ Usage: $0 COMMAND
   --cmd <hex>               proactive command type name
   --device <hex>            device identity name
   --result <hex>            result code name
-  --build <type> <qualifier> [src] [dst]   build a D0 proactive command
+  --build <type> <qualifier> [src] [dst] [number]
+                                     build a D0 proactive command; the number
+                                     defaults to 01 and is the first octet of
+                                     the Command Details value (TS 31.111 6.4.4)
   --parse <hex>             decode a proactive command
   --audit <log>             flag silent off-device commands
   --sat-cmds                the S@T command surface
