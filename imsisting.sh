@@ -127,6 +127,132 @@ if [ -d "$ICON_SRC" ]; then
     fi
 fi
 
+# ---------------------------------------------------------------------
+#  Application icon and desktop entry.
+#
+#  The icon has to be findable by name. A menu, a dock, a window list and a
+#  file manager all resolve the entry's Icon= key through GtkIconTheme, and a
+#  theme only knows the names inside its own directories: an absolute path
+#  into the tree is the desktop spec's fallback and GIO-based readers accept
+#  it, but a theme-based reader treats the value as a name, finds nothing and
+#  draws a blank page. So the logo is copied into the user's own hicolor theme
+#  under the application id. That is a per-user file, needs no root and no
+#  distro theme, and it follows this tree around because it is rewritten
+#  whenever the source is newer.
+#
+#  Sizes are generated when ImageMagick is around, because a 500 px PNG
+#  scaled down looks better than one blit at 48 px; without it the full-size
+#  file goes into the 512 slot and a theme scales it itself.
+#
+#  The entry is written beside it, named after the application id the GTK
+#  side registers, and rewritten only when its content differs — which is
+#  also how a checkout that moved stops pointing at where it used to be.
+#
+#  $XDG_DATA_HOME is the standard location with its own default as the
+#  fallback, so a system that never set the variable still gets the files.
+# ---------------------------------------------------------------------
+DESKTOP_ID="com.imsisting.native"
+DESKTOP_SRC="$SCRIPT_DIR/native/resources/imsisting.desktop.in"
+DESKTOP_LOGO="$SCRIPT_DIR/native/resources/imsisting_logo.png"
+
+if [ -r "$DESKTOP_LOGO" ]; then
+    DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
+    ICON_THEME="$DATA_DIR/icons/hicolor"
+
+    if command -v convert >/dev/null 2>&1; then
+        icon_sizes="48 64 128 256 512"
+    else
+        icon_sizes="512"
+    fi
+
+    desktop_icons=0
+    for size in $icon_sizes; do
+        icon_dir="$ICON_THEME/${size}x${size}/apps"
+        icon_dst="$icon_dir/$DESKTOP_ID.png"
+        if [ -e "$icon_dst" ] && [ ! "$DESKTOP_LOGO" -nt "$icon_dst" ]; then
+            continue
+        fi
+        if ! mkdir -p "$icon_dir" 2>/dev/null; then
+            continue
+        fi
+        if [ "$size" = "512" ]; then
+            cp -f "$DESKTOP_LOGO" "$icon_dst" 2>/dev/null &&
+                desktop_icons=$((desktop_icons + 1))
+        else
+            convert "$DESKTOP_LOGO" -resize "${size}x${size}" -strip "$icon_dst" 2>/dev/null &&
+                desktop_icons=$((desktop_icons + 1))
+        fi
+    done
+
+    if [ "$desktop_icons" -gt 0 ]; then
+        printf '  installed %s application icon(s) into the hicolor theme\n' "$desktop_icons"
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -q -t -f "$ICON_THEME" 2>/dev/null || true
+        fi
+    fi
+fi
+
+if [ -r "$DESKTOP_SRC" ]; then
+    DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    DESKTOP_DST="$DESKTOP_DIR/$DESKTOP_ID.desktop"
+    if mkdir -p "$DESKTOP_DIR" 2>/dev/null; then
+        desktop_exec="\"$SCRIPT_DIR/imsisting.sh\" --gui"
+        desktop_tmp="$(mktemp "$DESKTOP_DIR/.imsisting.XXXXXX" 2>/dev/null)" || desktop_tmp=""
+        if [ -n "$desktop_tmp" ]; then
+            # Literal substitution: a path is never a pattern, so & and | in
+            # it stay what they are.
+            while IFS= read -r line || [ -n "$line" ]; do
+                line="${line//@EXEC@/$desktop_exec}"
+                printf '%s\n' "$line"
+            done < "$DESKTOP_SRC" > "$desktop_tmp"
+            if [ ! -e "$DESKTOP_DST" ] || ! cmp -s "$desktop_tmp" "$DESKTOP_DST"; then
+                chmod 644 "$desktop_tmp"
+                if mv -f "$desktop_tmp" "$DESKTOP_DST"; then
+                    printf '  desktop entry: %s\n' "$DESKTOP_DST"
+                else
+                    rm -f "$desktop_tmp"
+                fi
+            else
+                rm -f "$desktop_tmp"
+            fi
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------
+#  The GUI binary's own icon, for a file manager.
+#
+#  A file manager reads a file's icon from its content type, and an ELF
+#  executable is sniffed as application/x-executable whatever it is named, so
+#  browsing to the binary shows a generic executable. The package installed
+#  here declares a content type of our own, keyed on the file name, and
+#  points it at the same icon the desktop entry uses.
+#
+#  It adds a type rather than restating application/x-executable, because that
+#  one is global and another toolkit on the same machine may already have its
+#  own mapping for it - rewriting it would put this logo on every executable.
+#
+#  update-mime-database compiles the package into the mime cache, and is
+#  skipped when the file did not change, since that rebuild is the expensive
+#  half of this.
+# ---------------------------------------------------------------------
+MIME_SRC="$SCRIPT_DIR/native/resources/imsisting-gui-mime.xml"
+
+if [ -r "$MIME_SRC" ]; then
+    MIME_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/mime"
+    MIME_DST="$MIME_DIR/packages/imsisting-gui.xml"
+    mime_changed=0
+    if [ ! -e "$MIME_DST" ] || ! cmp -s "$MIME_SRC" "$MIME_DST"; then
+        if mkdir -p "$MIME_DIR/packages" 2>/dev/null && cp -f "$MIME_SRC" "$MIME_DST" 2>/dev/null; then
+            mime_changed=1
+            printf '  file-type icon: %s\n' "$MIME_DST"
+        fi
+    fi
+    if [ "$mime_changed" = 1 ] && command -v update-mime-database >/dev/null 2>&1; then
+        update-mime-database "$MIME_DIR" 2>/dev/null || true
+    fi
+fi
+
 # ── CLI flags (standalone only) ─────────────────────────────
 IMSISTING_LIST=0
 

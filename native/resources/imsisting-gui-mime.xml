@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The GUI binary's own icon in a file manager.
+
+  A file manager reads a file's icon from its content type, and a bare ELF
+  executable has no way to carry a picture: it is sniffed by its magic bytes
+  as application/x-executable and takes whatever icon that type has. This
+  declares a content type of our own, keyed on the executable's file name,
+  and points it at the same icon the desktop entry uses - so imsisting-gui is
+  recognisable in a file manager.
+
+  It deliberately defines a new type instead of restating
+  application/x-executable: that type is global, another toolkit on the same
+  machine may have its own opinion about it, and overwriting it would make
+  every executable in the tree wear this logo.
+
+  imsisting.sh installs this into $XDG_DATA_HOME/mime/packages and compiles it
+  with update-mime-database. The icon name resolves through the hicolor theme,
+  which is where the launcher installs com.imsisting.native for the desktop
+  entry and the module icons already.
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+    <mime-type type="application/x-imsisting-gui">
+        <comment>IMSIsting GUI</comment>
+        <icon name="com.imsisting.native"/>
+        <glob pattern="imsisting-gui" weight="60"/>
+    </mime-type>
+</mime-info>

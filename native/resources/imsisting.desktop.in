@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=IMSIsting
+GenericName=Cellular security research toolkit
+Comment=RF pre-flight, capture analysis and a synthetic GSM source, over 57 standalone shell modules
+Exec=@EXEC@
+Icon=com.imsisting.native
+Terminal=false
+Categories=System;Security;
+Keywords=GSM;UMTS;LTE;5G;cellular;GSMTAP;SDR;IMSI;baseband;
+StartupNotify=true
+StartupWMClass=imsisting-gui
