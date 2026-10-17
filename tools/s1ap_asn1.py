@@ -23,17 +23,30 @@ rather than uniformly plausible:
   Criticality         VERIFIED    extensible ENUMERATED: the octet is
                                   0bEII00000, so ignore is 0x40 and not 0x01.
   PagingDRX           VERIFIED    same shape, index in bits 6-7.
-  ENBname             UNRESOLVED  pycrate's own encoder prefixes a Printable-
-                                  String with a 7-bit pad then an 8-bit
-                                  (len-1) field, where X.691 30.5.6 as read
-                                  here says an 8-bit (len-1) field with no
-                                  pad.  The two disagree and only one is
-                                  right; until the clause settles it, an
-                                  S1SetupRequest built by this file will not
-                                  decode in pycrate, and no verb is wired to
-                                  it in modules/37_femtocell.sh.
-  SupportedTAs        UNRESOLVED  same position: our body does not survive
-                                  pycrate's decoder yet.
+  ENBname             VERIFIED    two pieces, both of which this file had
+                                  wrong: the size constraint is extensible so
+                                  one extension bit comes first, and the
+                                  length is (n-1) and not n.  Nine bits,
+                                  padded, so a 7-character name opens 03 00.
+  SupportedTAs        VERIFIED    count is (n-1) in eight bits because the
+                                  size constraint is 1..256; the item's two
+                                  preamble bits are NOT padded before the
+                                  TAC, and the PLMN count is (n-1) in three
+                                  bits, all one padded run, then the PLMNs.
+
+Second referee.  pycrate and Wireshark are independent dissectors, so every
+vector was replayed through tshark 4.2.2 as an SCTP DATA chunk with PPID 18
+and dissected from scratch.  tshark reading back id-S1Setup, procedureCode 17,
+MCC 001 / MNC 01, macroENB-ID 0xA1C01 at 20 bits with 4 pad bits, ENBname
+LabHeNB, tAC 241 and PLMN 00f110 with no Malformed verdict is what moved each
+IE from UNRESOLVED to VERIFIED above.
+
+NOT VERIFIED, and deliberately not wired: InitialUEMessage,
+DownlinkNASTransport and Paging.  tshark reads their identity IEs back as zero,
+so the INTEGER encodings for MME-UE-S1AP-ID and ENB-UE-S1AP-ID are still
+wrong and the paging UE-Identity IE id is still wrong.  The three verbs print
+status unverified and exit 3 rather than hand a caller bytes that a real MME
+would discard.
 
 Usage:
     s1ap_asn1.py s1setup --mcc 001 --mnc 01 --enb-id 0xA1C01 \
@@ -280,12 +293,21 @@ def ie_global_enb_id(mcc, mnc, enb_id, width=20):
 
 
 def ie_enbname(name):
-    """ENBname: PrintableString(SIZE(1..150)), aligned, length then octets."""
+    """ENBname: PrintableString (SIZE(1..150, ...)).
+
+    Two things both reference decoders insisted on and this file had wrong.
+    The size constraint is extensible, so one extension bit comes first.  The
+    length itself is the value minus the lower bound -- (n-1), not n -- in the
+    eight bits the range 1..150 needs.  Together that is a nine-bit run padded
+    to an octet, so a seven-character name opens with 03 00 and not 07.
+    """
     data = name.encode("ascii")
     if not 1 <= len(data) <= 150:
         raise ValueError("eNB name must be 1..150 printable characters")
     writer = AperWriter()
-    writer.length_determinant(len(data))
+    writer.bit(0)                       # no extension additions
+    writer.bits(len(data) - 1, 8)       # length minus the lower bound
+    writer.align()
     writer.octets(data)
     return _ie_field(IE_ENBNAME, "ignore", writer.taked())
 
@@ -302,13 +324,24 @@ def ie_supported_tas(plmns, tacs):
     if not 1 <= len(plmns) <= 6:
         raise ValueError("each TAC broadcasts 1..6 PLMNs")
     writer = AperWriter()
-    writer.constrained_count(len(tacs), 8)
+    # SIZE(1..256) is not extensible, so no flag: just the count minus the
+    # lower bound, eight bits, padded to an octet.
+    writer.bits(len(tacs) - 1, 8)
+    writer.align()
     for tac in tacs:
         raw = bytes.fromhex(str(tac))
         if len(raw) != 2:
             raise ValueError("a TAC is two octets, got %r" % (tac,))
-        writer.octets(raw)
-        writer.constrained_count(len(plmns), 4)
+        # SupportedTAs-Item is extensible with one OPTIONAL iE-Extensions, so
+        # its preamble is two bits, and those two bits are NOT padded before
+        # the TAC: preamble, TAC and the PLMN count run together and are
+        # padded as one run.  Padding after the preamble would be the obvious
+        # reading and both reference decoders reject it.
+        writer.bit(0)                   # no extension additions
+        writer.bit(0)                   # no iE-Extensions
+        writer.bits(int.from_bytes(raw, "big"), 16)
+        writer.bits(len(plmns) - 1, 3)  # SIZE(1..6), minus the lower bound
+        writer.align()
         for mcc, mnc in plmns:
             writer.octets(_plmn(mcc, mnc))
     return _ie_field(IE_SUPPORTED_TAS, "reject", writer.taked())
@@ -490,20 +523,22 @@ def _decode_ie(reader, ie_id):
         reader.align()
         return "%s enb=%#x" % (plmn, enb), reader
     if ie_id == IE_ENBNAME:
-        count = reader.octet()
+        reader.bit()                        # extension flag
+        count = reader.bits(8) + 1          # length minus the lower bound
+        reader.align()
         return reader.octets(count).decode("ascii", "replace"), reader
     if ie_id == IE_SUPPORTED_TAS:
-        reader.align()
-        count = reader.bits(8)
+        count = reader.bits(8) + 1
         reader.align()
         parts = []
         for _ in range(count):
-            tac = reader.octets(2).hex()
-            reader.align()
-            nplmn = reader.bits(4)
+            reader.bit()                    # the item's extension flag
+            reader.bit()                    # iE-Extensions present?
+            tac = reader.bits(16)
+            nplmn = reader.bits(3) + 1      # size 1..6, minus the lower bound
             reader.align()
             plmns = [_plmn_text(reader.octets(3)) for _ in range(nplmn)]
-            parts.append("%s[%s]" % (tac, ",".join(plmns)))
+            parts.append("%04x[%s]" % (tac, ",".join(plmns)))
         return " ".join(parts), reader
     if ie_id == IE_CNDOMAIN:
         return ("ps" if reader.octet() == 0x00 else "cs"), reader
@@ -607,14 +642,16 @@ def main(argv):
         if args.verb == "s1setup":
             _emit(s1setup_request(args.mcc, args.mnc, args.enb_id, args.name,
                                   args.tac, drx=args.pdrx).hex())
-        elif args.verb == "initial-ue":
-            _emit(initial_ue_message(args.mme_ue_id, args.enb_ue_id,
-                                     bytes.fromhex(args.nas), args.tac).hex())
-        elif args.verb == "downlink-nas":
-            _emit(downlink_nas_transport(args.mme_ue_id, args.enb_ue_id,
-                                         bytes.fromhex(args.nas)).hex())
-        elif args.verb == "paging":
-            _emit(paging(args.ue_id_msin, args.tac).hex())
+        elif args.verb in ("initial-ue", "downlink-nas", "paging"):
+            # Not one of these three survives a real dissector yet, and an MME
+            # silently drops a message whose IE it cannot read.  Refusing is
+            # the only honest answer until the INTEGER and UE-Identity
+            # encodings are pinned the way S1Setup has been.
+            print("status\tunverified")
+            print("reason\tidentity IE encoding is not yet agreed with pycrate"
+                  " and tshark; see the IE status table in this file")
+            print("verb\t%s" % args.verb)
+            return 3
         elif args.verb == "decode":
             for key, value in decode(bytes.fromhex(args.hex)):
                 print("%s\t%s" % (key, value))
@@ -633,15 +670,29 @@ def main(argv):
 # ---------------------------------------------------------------------------
 
 VECTORS = [
-    # pycrate: initiatingMessage { procedureCode 17, criticality reject,
-    #   value S1SetupRequest { protocolIEs { { id 59, criticality reject,
-    #   value Global-ENB-ID { pLMNidentity '00F110'H,
-    #   eNB-ID macroENB-ID 'A1C01'H } } } } }
-    # Verified: encoded here, decoded by pycrate into the structure in the
-    # comment above.  This is the one full PDU this file may claim.
-    ("s1setup-one-ie",
-     "0011000f000001003b00080000f11000a1c010",
-     "s1setup 001 01 0xA1C01"),
+    # id 59 alone: pycrate and tshark both read pLMNidentity 00F110 and
+    # macroENB-ID A1C01 from these octets.
+    ("global-enb-id",
+     "003b00080000f11000a1c010",
+     "Global-ENB-ID, macro, PLMN 001/01, eNB 0xA1C01"),
+    # A seven-character name; the 03 00 opener is the finding.
+    ("enbname-labhenb",
+     "003c400903004c616248654e42",
+     "ENBname LabHeNB"),
+    # One TAC, one PLMN; 00 3C 40 is preamble + TAC + PLMN count as one run.
+    ("supported-tas-one",
+     "0040000700003c4000f110",
+     "SupportedTAs 00f1 [001/01]"),
+    # Two PLMNs on the same TAC: same run, one more octet of count.
+    ("supported-tas-two-plmn",
+     "0040000a00003c4800f11000f120",
+     "SupportedTAs 00f1 [001/01 001/02]"),
+    ("paging-drx-v64", "0089000120", "DefaultPagingDRX v64"),
+    # The whole message, dissected by tshark as four items with values.
+    ("s1setup-full",
+     "0011002c000004003b00080000f11000a1c010003c400903004c616248654e42"
+     "0040000700003c4000f1100089000120",
+     "s1setup 001 01 0xA1C01 LabHeNB 00f1"),
 ]
 
 
@@ -676,11 +727,31 @@ def selftest():
     check("criticality-notify-80", _criticality_octet("notify") == 0x80)
     check("pagingdrx-v64-20", PAGING_DRX["v64"] == 0x20)
 
-    for name, hexbody, _argv in VECTORS:
-        raw = bytes.fromhex(hexbody)
-        rows = dict(decode(raw))
-        check("%s-decodes" % name, rows.get("procedure") == "S1Setup", str(rows))
-        check("%s-one-ie" % name, rows.get("ies") == "1", rows.get("ies", ""))
+    # Each encoder must reproduce the bytes both referees accepted, exactly.
+    check("encode-global-enb-id",
+          ie_global_enb_id("001", "01", 0xA1C01).hex() == VECTORS[0][1])
+    check("encode-enbname", ie_enbname("LabHeNB").hex() == VECTORS[1][1])
+    check("encode-supported-tas",
+          ie_supported_tas([("001", "01")], ["00f1"]).hex() == VECTORS[2][1])
+    check("encode-supported-tas-two",
+          ie_supported_tas([("001", "01"), ("001", "02")], ["00f1"]).hex()
+          == VECTORS[3][1])
+    check("encode-paging-drx",
+          ie_default_paging_drx("v64").hex() == VECTORS[4][1])
+    check("encode-s1setup-full",
+          s1setup_request("001", "01", 0xA1C01, "LabHeNB", ["00f1"]).hex()
+          == VECTORS[5][1])
+
+    # decode() returns one row per IE and the key repeats, so this walks the
+    # list and not a dict -- collapsing it was hiding three of four IEs.
+    allrows = decode(bytes.fromhex(VECTORS[5][1]))
+    first = dict(allrows)
+    check("decode-full-procedure", first.get("procedure") == "S1Setup", str(first))
+    check("decode-full-four-ies", first.get("ies") == "4", first.get("ies", ""))
+    joined = " ".join(v for k, v in allrows if k == "ie")
+    check("decode-full-names", "LabHeNB" in joined, joined)
+    check("decode-full-plmn", "001/01" in joined, joined)
+    check("decode-full-no-undecodable", "undecodable" not in joined, joined)
 
     # The two-octet count is the detail that fails silently: a one-octet
     # count still parses, and reports an empty IE list.
