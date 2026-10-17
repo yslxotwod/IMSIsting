@@ -76,7 +76,7 @@ sim_sw_label() {
     case "$sw" in
         9000) echo "success" ;;
         61*)  echo "success:${sw:2:2} bytes available (GET RESPONSE)" ;;
-        6C*)  echo "wrong Le: retry with Le=${sw:2:2}" ;;
+        6C*)  echo "error: wrong Le, retry with Le=${sw:2:2}" ;;
         6200) echo "warning: no information given" ;;
         6281) echo "warning: part of returned data may be corrupted" ;;
         6282) echo "warning: end of file reached before reading Le bytes" ;;
@@ -312,7 +312,11 @@ sim_build_apdu() {
     if (( extended )); then
         if (( have_data )); then
             case="3E"; body+=$(sim_byte 00)$(sim_word "$lc")$data
-            if [[ -n "$le" ]]; then case="4E"; body+=$(sim_word "$(( 16#$le ))"); le_out="$(( 16#$le ))"; fi
+            if [[ -n "$le" ]]; then
+                case="4E"
+                local v4=$(( 16#$le )); (( v4 == 0 )) && v4=65536
+                body+=$(sim_word "$v4"); le_out="$v4"
+            fi
         else
             if [[ -n "$le" ]]; then
                 case="2E"
@@ -2163,7 +2167,7 @@ sim_selftest() {
     chk sw-6a86      "$(sim_sw_label 6A86)" "error: incorrect P1-P2 parameters"
     chk sw-6d00      "$(sim_sw_label 6D00)" "error: instruction code not supported or invalid"
     chk sw-6700      "$(sim_sw_label 6700)" "error: wrong length (Lc inconsistent with P1/P2)"
-    chk sw-6c1c      "$(sim_sw_label 6C1C)" "wrong Le: retry with Le=1C"
+    chk sw-6c1c      "$(sim_sw_label 6C1C)" "error: wrong Le, retry with Le=1C"
     chk sw-6c1c-len  "$(sim_sw_len 6C1C)"   "28"
     chk sw-6110      "$(sim_sw_label 6110)" "success:10 bytes available (GET RESPONSE)"
     chk sw-6110-len  "$(sim_sw_len 6110)"   "16"
