@@ -53,7 +53,7 @@ and a testbed. Every computational half is already built and verified offline.
 | **O7 — RRC reconfiguration** | `10_lte_air` | RRC message construction, handover sequences, SIB forging | TX: inject RRCConnectionReconfiguration |
 | **O10 — aLTEr** | `27_cellular_dns` | The full DNS rewriting sequence, LTE user plane has no integrity — the mechanism is demonstrated | TX: on-path rewrite inside the bearer |
 | **NAS attach forge** | `09_lte_attach` | EMM/ESM encode-decode with real IE offsets, BCD IMSI/IMEI both directions | TX: the forged attach against a lab MME |
-| **Paging / Torpedo / Piercer** | `28_paging_track` | PF/PO per TS 36.304, the Hussain et al. NDSS 2019 models | TX: paging-occasion collision, the paging storm |
+| **Paging / Torpedo / Piercer** | `28_paging_track` | PF/PO per TS 36.304, the Hussain et al. NDSS 2019 models, and the transmit: `--paging-tx` wraps the paging request in the LAPDm CCCH block and keys the radio through `tools/gsm_mod.py`, `--paging-storm` puts a block in every paging occasion of 2, 4, 8 or 16 multiframes | — |
 
 ### 5G / NR
 
@@ -76,11 +76,11 @@ and a testbed. Every computational half is already built and verified offline.
 
 | Capability | Module | Built today | Missing to fire |
 |---|---|---|---|
-| **P6 — RF fingerprinting** | `24_rf_fingerprint` | RMS/PAPR/flatness/DC/IRR, CFO by stated estimator (asserted against injected value), transient shape | RX: IQ from a calibrated radio for absolute dBm and true EVM |
+| **P6 — RF fingerprinting** | `24_rf_fingerprint` | RMS/PAPR/flatness/DC/IRR, CFO by stated estimator (asserted against injected value), transient shape | RX: IQ from a calibrated radio. Not a coding gap: absolute dBm and true EVM need a source whose level and error vector are known, and no radio in this tree is calibrated, so every metric it reports is relative. A synthetic reference can test the estimators but cannot make them absolute |
 | **P7 — CSI sniffing** | `24_rf_fingerprint` | 802.11 complex matrices, LTE CQI/PMI/RI, phase unwrapping for motion | RX: CSI-capable capture |
 | **P8 — paging monitoring** | `28_paging_track` | PO computation per TS 38.304, GSM paging group, paging record parse | RX: IQ |
-| **TA geolocation** | `39_ta_geoloc` | TA→range (TS 36.211/38.211), quantisation bound, least-squares trilateration verified against synthetic ground truth | RX: TA measurements from a real cell |
-| **LPP position forgery** | `46_lpp` | Procedure codes, header codec, position-forgery detection | TX: the forged position report |
+| **TA geolocation** | `39_ta_geoloc` | TA→range (TS 36.211/38.211), quantisation bound, least-squares trilateration verified against synthetic ground truth | RX: TA measurements from a real cell. Not a coding gap: a TA is not derivable from anything the toolkit can generate, it has to be read off a receiver, so the trilateration is verified against synthetic ground truth and the input half stays open until there is a radio on a real cell |
+| **LPP position forgery** | `46_lpp` | `--forge-position` builds a real LPP-Message carrying ProvideLocationInformation (TS 37.355) through the generated PER codec, `--parse-position` reads one back, both checked bit for bit against pycrate | TX: delivery. An LPP message reaches an E-SMLC inside a UE's NAS security context or an eNB-side LPPa peer (TS 36.455); neither is built, and `--forge-position` says so instead of claiming a send |
 
 ### Baseband
 
@@ -735,6 +735,25 @@ alone produces a message that looks plausible and decodes to garbage.
 
 **Phase 4 — tracking.** `28_paging_track` (Torpedo, Piercer), `39_ta_geoloc`,
 `46_lpp`, `24_rf_fingerprint`.
+
+The transmit half is in: `28_paging_track --paging-tx` puts a paging request on
+the CCCH and keys a radio, `--paging-storm` fills every paging occasion of a
+chosen number of multiframes, and `46_lpp --forge-position` builds a real LPP
+position report. Two of the four gaps that remain are not gaps in this tree's
+reach at all: a timing advance and a calibrated absolute power level have to be
+read off a receiver, so `39_ta_geoloc` and `24_rf_fingerprint` can be tested
+against ground truth and cannot be completed by writing more code here.
+
+One protocol detail is worth recording because it is easy to get backwards and
+this file's neighbouring module already had the other form. On the BCCH the
+LAPDm frame is address, control and information with **no length octet**
+(`modules/07_gsm_attack.sh:2105`); on the SDCCH/SACCH it carries a length octet
+(`modules/07_gsm_attack.sh:1268`). A paging request is on the CCCH, and the CCCH form
+takes no length octet either -- but the L2 pseudo length octet sits *inside*
+the information field, so the LAPDm LENGTH counts it: nine octets of paging
+request become `(9 << 3) | 1 = 0x49`, and the block is padded with `0x2b`. The
+differential that settled it compares our block against
+`modules/07_gsm_attack.sh --lapdm-ui`, which builds the same frame from the other side.
 
 **Phase 5 — VoLTE/IMS.** `30_volte_ims` (ReVoLTE capture path, IMP4GT,
 registration hijack).
