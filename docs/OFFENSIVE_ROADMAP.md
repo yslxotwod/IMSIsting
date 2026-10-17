@@ -1205,9 +1205,23 @@ says **3**, and `26_ss7_map --decode-sigtran` has been printing
 knew before the document did. Verified against a local SCTP listener: 64 octets
 arrive, PPID **3**, M3UA class 1 type 1, protocol data tag `0x0210`.
 
-*What the last module still needs.* `13_nr_core` wants the UDP send for PFCP
-*and* a session-establishment builder. It has none, so the encoder gap comes
-first: T1 cannot paper over a module that has nothing to send.
+*Wired: `13_nr_core --pfcp-build` and `--pfcp-send`.* The last module was the
+one with nothing to send: it could read a PFCP message and had no encoder, so
+the send had no payload behind it. `--pfcp-build` now emits a Session
+Establishment Request (type 50, TS 29.244 §7.5.2) — Create PDR with PDR ID,
+Precedence, a PDI holding Source Interface, F-TEID and UE IP Address, plus a
+Create FAR (Apply Action FORW, Destination Interface core) and a Create QER
+(Gate Status open) — and `--pfcp-send` puts it on UDP 8805 behind `NR_ARMED`.
+Two flag octets are the trap and are documented in place: on F-TEID, V4 is bit
+1 (`0x01`), while on UE IP Address the table orders V6 first, so an IPv4-only
+address is `0x02`; encoding the second by analogy with the first produces a
+message that dissects as "V6 present, V4 absent" and then malformed. Refereed
+by tshark 4.2.2 over a synthetic UDP frame: `PFCP Session Establishment
+Request`, zero malformed, every field read back (PDR ID 1, Precedence 100,
+Source Interface Access, TEID `0x00000001` / `10.45.0.1`, UE IP `10.45.0.2`,
+FORW true, Destination Interface Core, QER ID dynamic-by-CP 1), and by a local
+UDP receiver on 8805 taking all 124 octets with message type 50 and S=1 — the
+armed path, not a dry run. T1 is now complete in all seven modules.
 
 *The eight that are placement.*
 

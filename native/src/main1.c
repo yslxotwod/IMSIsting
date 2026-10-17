@@ -3942,6 +3942,26 @@ run_capture(const char *const *argv)
     return g_steal_pointer(&out);
 }
 
+/* The same, for the half a module writes to stderr. The transmit path puts
+   its warning there on purpose, so that stdout stays parseable TSV; a page
+   that shows that warning has to ask for the other stream explicitly rather
+   than being handed one merged blob it would have to guess apart. */
+static char *
+run_capture_stderr(const char *const *argv)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *err = NULL;
+    int status = 0;
+
+    if (!g_spawn_sync(NULL, (char **) argv, NULL,
+                      G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_SEARCH_PATH,
+                      NULL, NULL, NULL, &err, &status, &error))
+        return NULL;
+    if (!g_spawn_check_wait_status(status, NULL))
+        return NULL;
+    return g_steal_pointer(&err);
+}
+
 /* Pull KEY's value out of a KEY\tVALUE TSV body. */
 static char *
 tsv_field(const char *text, const char *key)
@@ -14696,7 +14716,7 @@ static ModuleSubmenuEntry ncore_entries[] = {
       "--aka-flow:AKA Flow|--kseaf:KSEAF" },
     { "Rules",
       "preferences-system-symbolic",
-      "--pfcp-rules:PFCP Rules|--plan:Plan" },
+      "#BUILD|--pfcp-build:Build Session Request|#SEND|--pfcp-send:Send to UPF|--pfcp-rules:PFCP Rules|--plan:Plan" },
 };
 static ModuleSubmenuEntry suci_entries[] = {
     { "Overview",
@@ -15658,14 +15678,525 @@ static ModuleSubmenuEntry simd_entries[] = {
       "auth-smartcard-symbolic",
       "--ef-ad:EF AD|--esim-profile-parse:Parse eSIM Profile|--pin-state:PIN State" },
 };
+static void
+mod_arg_clicked(GtkButton *button, gpointer user_data)
+{
+    AppState *state = g_object_get_data(G_OBJECT(button), "state");
+    const char *module_id = g_object_get_data(G_OBJECT(button), "module-id");
+    GtkWidget *status = g_object_get_data(G_OBJECT(button), "status");
+    const char *verb = g_object_get_data(G_OBJECT(button), "verb");
+    const char *label = g_object_get_data(G_OBJECT(button), "action-label");
+    GtkWidget *entry = g_object_get_data(G_OBJECT(button), "arg-entry");
+    g_autofree char *typed = g_strdup(
+        entry != NULL ? gtk_editable_get_text(GTK_EDITABLE(entry)) : "");
+    g_auto(GStrv) parts = g_strsplit(typed, " ", -1);
+    g_autofree char *script = module_script_path(module_id);
+    g_autoptr(GPtrArray) argv = g_ptr_array_new();
+
+    (void) user_data;
+    g_ptr_array_add(argv, script);
+    g_ptr_array_add(argv, (gpointer) verb);
+    for (int i = 0; parts[i] != NULL; i++)
+        if (parts[i][0] != '\0') g_ptr_array_add(argv, parts[i]);
+    g_ptr_array_add(argv, NULL);
+    imsisting_action_run(state, module_id, label, status,
+                         (const char *const *) argv->pdata, FALSE);
+}
+
+static void
+mod_entry_activate(GtkEntry *entry, gpointer user_data)
+{
+    (void) entry;
+    gtk_widget_activate(GTK_WIDGET(user_data));
+}
+/* One job: type the arguments, press the button, never see the verb.
+   Shared by every page that answers with a module run rather than a fixed
+   listing -- the small-cell page and the jamming page both grew one, and a
+   second copy is where the two would drift apart. */
+static GtkWidget *
+mod_arg_row(AppState *state, const char *module_id, GtkWidget *status,
+              const char *button_label, const char *verb,
+              const char *placeholder, const char *hint)
+{
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *entry = gtk_entry_new();
+    GtkWidget *button = gtk_button_new_with_label(button_label);
+    GtkWidget *column;
+
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), placeholder);
+    gtk_widget_set_hexpand(entry, TRUE);
+    gtk_widget_add_css_class(button, "verb-button");
+    gtk_widget_add_css_class(button, "primary");
+
+    g_object_set_data(G_OBJECT(button), "state", state);
+    g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
+    g_object_set_data(G_OBJECT(button), "status", status);
+    g_object_set_data(G_OBJECT(button), "verb", (gpointer) verb);
+    g_object_set_data(G_OBJECT(button), "action-label", (gpointer) button_label);
+    g_object_set_data(G_OBJECT(button), "arg-entry", entry);
+    g_signal_connect(button, "clicked", G_CALLBACK(mod_arg_clicked), NULL);
+    g_signal_connect(entry, "activate", G_CALLBACK(mod_entry_activate), button);
+
+    gtk_box_append(GTK_BOX(row), entry);
+    gtk_box_append(GTK_BOX(row), button);
+    if (hint == NULL) return row;
+
+    column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_box_append(GTK_BOX(column), row);
+    gtk_box_append(GTK_BOX(column), fkit_note(hint));
+    return column;
+}
+
+/* --------------------------------------------------------------------------
+   The jamming page, laid out the way the LTE CVE Kit page is: a named view
+   with a subtitle, cards that each hold one job, and a result that lands in the
+   card that asked for it. Three rules shape it.
+
+   No control is named after a verb. A button says what it does -- "Construct
+   the Waveform", "Read the Capture", "Whose Trouble Is It" -- and the verb
+   stays in the C next to the argv, where check-gui-text.sh can see that it is
+   not on screen. The one place a verb may appear is where the operator types
+   the module's own command line, and even there it is pre-filled and left to
+   the module to explain.
+
+   Views are the categories of work, not one per verb: what the receiver sees,
+   what it concludes, how it is written up, and -- last, and by itself -- the
+   half that reaches for a radio. That last one gets its own view because the
+   two halves are not the same kind of act and a page that filed them together
+   would be lying about that.
+
+   The transmit view prints the module's own warning at the top, read from the
+   module rather than retyped here. A page with a copy of the caveat is a page
+   whose copy can go stale; a page that asks the module is a page that cannot.
+   -------------------------------------------------------------------------- */
+
+/* What the overview banner says: the two halves, and whether the gate is
+   shut. Read from the module so the page and the command line cannot drift. */
+static char *
+jamd_status_summary(const char *module_id)
+{
+    g_autofree char *script = module_script_path(module_id);
+    const char *argv[] = { script, "--status-tsv", NULL };
+    g_autofree char *raw = run_capture(argv);
+    g_autofree char *tx = raw ? tsv_field(raw, "transmit_path") : NULL;
+    g_autofree char *gate = raw ? tsv_field(raw, "tx_gate") : NULL;
+    g_autofree char *branches = raw ? tsv_field(raw, "branches") : NULL;
+    g_autofree char *dir = raw ? tsv_field(raw, "dir") : NULL;
+
+    /* The loot path is long and the only part that identifies it is the end. */
+    if (dir != NULL && g_str_has_prefix(dir, IMSISTING_ROOT "/"))
+        memmove(dir, dir + strlen(IMSISTING_ROOT) + 1,
+                strlen(dir + strlen(IMSISTING_ROOT) + 1) + 1);
+
+    return g_strdup_printf(
+        "DETECTION  %s   |   TRANSMIT  %s, GATE %s   |   %s   |   %s",
+        (branches && *branches) ? branches : "no branches reported",
+        (tx && *tx) ? tx : "unknown",
+        (gate && *gate) ? gate : "unknown",
+        (dir && *dir) ? dir : "no loot directory",
+        "nothing is keyed unless the gate is armed");
+}
+
+/* The module's own warning, as the module prints it. jamd_tx_disclaimer writes
+   to stderr on every transmit verb, so the same text the command line shows is
+   the text this page shows -- one source, not two. */
+static void
+jamd_append_disclaimer(GtkWidget *card_body, const char *module_id)
+{
+    g_autofree char *script = module_script_path(module_id);
+    const char *argv[] = { script, "--tx-status", NULL };
+    g_autofree char *raw = run_capture_stderr(argv);
+    g_auto(GStrv) lines = NULL;
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gboolean shown = FALSE;
+
+    gtk_widget_add_css_class(box, "jamd-warning");
+    lines = g_strsplit(raw != NULL ? raw : "", "\n", -1);
+    for (int i = 0; lines[i] != NULL; i++) {
+        const char *line = lines[i];
+        const char *tab;
+
+        if (!g_str_has_prefix(line, "WARNING")) continue;
+        tab = strchr(line, '\t');
+        if (tab == NULL) continue;
+        gtk_box_append(GTK_BOX(box), fkit_note(tab + 1));
+        shown = TRUE;
+    }
+    if (!shown)
+        gtk_box_append(GTK_BOX(box),
+            fkit_note("The module did not print its warning. Until it does, "
+                      "there is no reason to believe anything else it says."));
+    gtk_box_append(GTK_BOX(card_body), box);
+}
+
+/* 1. Overview: the two halves, the state of the gate, and the honest frame
+      for reading every number on the rest of the page. */
+static GtkWidget *
+jamd_build_overview(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("JAMMING DETECT",
+        "Tell deliberate interference apart from congestion and from a hole in "
+        "the coverage -- and, behind a gate, build what a shielded room needs "
+        "to prove either half works.", &body);
+    GtkWidget *halves_body, *first_body;
+    GtkWidget *halves = verb_card("THE TWO HALVES", &halves_body);
+    GtkWidget *first = verb_card("READ THIS BEFORE TRUSTING A NUMBER", &first_body);
+    GtkWidget *flow = fkit_flow();
+    g_autofree char *summary = jamd_status_summary(module_id);
+    GtkWidget *banner = gtk_label_new(summary);
+    GtkWidget *selftest = gtk_button_new_with_label("Verify the Maths");
+
+    gtk_widget_add_css_class(banner, "crec-survey-status");
+    gtk_label_set_xalign(GTK_LABEL(banner), 0.0f);
+    gtk_label_set_selectable(GTK_LABEL(banner), TRUE);
+    gtk_box_append(GTK_BOX(body), banner);
+
+    gtk_box_append(GTK_BOX(halves_body), fkit_note(
+        "Detection and measurement are the authority. Every verdict on this "
+        "page comes from a capture: a Welch periodogram split in two halves, a "
+        "noise floor read from the tenth percentile of each, affected band and "
+        "peak excess, then a time-domain envelope over 512-sample windows for "
+        "activity and transitions. The shape of that measurement is what "
+        "separates a jammer from a busy cell."));
+    gtk_box_append(GTK_BOX(halves_body), fkit_note(
+        "The transmit half is gated, and it is gated by an explicit flag rather "
+        "than by a prompt, because a prompt is something a script answers. It "
+        "constructs a waveform on this machine with no radio attached, which is "
+        "what makes it testable; only the last step reaches for a device."));
+    radio_bench_run_button(selftest, state, module_id, status, "--selftest", NULL);
+    fkit_flow_add(flow, selftest, "primary");
+    gtk_box_append(GTK_BOX(halves_body), flow);
+    gtk_box_append(GTK_BOX(halves_body), fkit_note(
+        "The selftest is the honest one: it synthesises captures whose answer "
+        "is known by construction, runs the real analyser over them, and "
+        "asserts that the gate refuses an unarmed build and that no detection "
+        "verb ever reaches a driver."));
+    gtk_box_append(GTK_BOX(body), halves);
+
+    gtk_box_append(GTK_BOX(first_body), fkit_note(
+        "A capture is a claim about a place and a moment. Two captures taken "
+        "an hour apart are two different experiments, and the floor shift "
+        "between them is only meaningful if the receiver, the gain and the "
+        "antenna did not move in between."));
+    gtk_box_append(GTK_BOX(first_body), fkit_note(
+        "An audible change in decode-failure rate is not evidence of jamming on "
+        "its own: a congested cell fails to decode too, and so does one whose "
+        "neighbour is stronger than its own serving cell. That is what the "
+        "discrimination view is for, and it is why this module refuses to sign "
+        "a jamming report for a profile that could be something else."));
+    gtk_box_append(GTK_BOX(body), first);
+
+    (void) out;
+    return outer;
+}
+
+/* 2. The capture: look at it, before drawing anything from it. Two ways in --
+      measure the band, or measure the noise floor over time. */
+static GtkWidget *
+jamd_build_capture(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("THE CAPTURE",
+        "What the receiver heard: spectral occupancy, the noise floor, and "
+        "whether anything moved.", &body);
+    GtkWidget *measure_body, *floor_body;
+    GtkWidget *measure = verb_card("MEASURE THE BAND", &measure_body);
+    GtkWidget *floor_card = verb_card("WATCH THE FLOOR OVER TIME", &floor_body);
+
+    gtk_box_append(GTK_BOX(measure_body),
+        mod_arg_row(state, module_id, status, "Analyse the Capture",
+            "--analyse",
+            "capture.iq cf32 20000000",
+            "Path, then the sample format cf32 / ci16 / cu8, then the sample "
+            "rate in samples per second. The result is saved as this module's "
+            "measurement record, which the next views read."));
+    gtk_box_append(GTK_BOX(measure_body), fkit_note(
+        "What it measures: the floor of each half of the capture and the shift "
+        "between them, the fraction of the band more than 6 dB above the "
+        "median, the peak excess over that median, and the fraction of 512-"
+        "sample windows that are active together with how many times activity "
+        "started or stopped."));
+    gtk_box_append(GTK_BOX(body), measure);
+
+    gtk_box_append(GTK_BOX(floor_body),
+        mod_arg_row(state, module_id, status, "Read the Floor",
+            "--noise-floor",
+            "capture.iq cf32 20000000",
+            "The same three arguments. Useful before and after a suspected "
+            "event: a floor that rose by 6 dB and stayed there is barrage; one "
+            "that moved only under a narrow slice is not."));
+    gtk_box_append(GTK_BOX(floor_body), fkit_note(
+        "A floor is only comparable to another floor taken with the same gain "
+        "and the same antenna. Change either and the shift you are reading is "
+        "your own change, not the air's."));
+    gtk_box_append(GTK_BOX(body), floor_card);
+
+    (void) out;
+    return outer;
+}
+
+/* 3. The profile: name what was heard. Narrowband or barrage, how wide, and
+      whether it was on the whole time. */
+static GtkWidget *
+jamd_build_profile(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("THE PROFILE",
+        "Narrowband or barrage, how much of the band it takes, and whether it "
+        "was present the whole time or only part of it.", &body);
+    GtkWidget *name_body, *call_body;
+    GtkWidget *name = verb_card("NAME THE SHAPE", &name_body);
+    GtkWidget *call = verb_card("PUT IT IN WORDS", &call_body);
+
+    gtk_box_append(GTK_BOX(name_body),
+        mod_arg_row(state, module_id, status, "Classify the Profile",
+            "--characterise",
+            "capture.iq cf32 20000000",
+            "Path, format, sample rate, and optionally the centre frequency in "
+            "MHz -- the last one turns the offset into a real frequency and "
+            "names the EARFCN the interferer sits on."));
+    gtk_box_append(GTK_BOX(name_body), fkit_note(
+        "The three labels are earned, not asserted: clean needs both a floor "
+        "shift under 6 dB and a peak excess under 12 dB; narrowband needs a "
+        "peak excess of 12 dB or more occupying under a quarter of the band; "
+        "barrage needs a floor shift of 6 dB or more. A capture that satisfies "
+        "none of them is called indeterminate, and that is a real answer."));
+    gtk_box_append(GTK_BOX(body), name);
+
+    gtk_box_append(GTK_BOX(call_body),
+        mod_arg_row(state, module_id, status, "Write the Description",
+            "--characterise",
+            "capture.iq cf32 20000000 2650",
+            "The same arguments plus a centre frequency, which is what lets the "
+            "description name a frequency instead of an offset."));
+    gtk_box_append(GTK_BOX(call_body), fkit_note(
+        "The duty pattern is read from activity transitions, so a signal "
+        "observed for only part of the capture is reported as a step rather "
+        "than being called pulsed -- the capture was too short to see the "
+        "period, and the module says so instead of guessing one."));
+    gtk_box_append(GTK_BOX(body), call);
+
+    (void) out;
+    return outer;
+}
+
+/* 4. Whose trouble is it: the whole point of the module. Congestion and a
+      coverage hole both look like interference from the receiver's side. */
+static GtkWidget *
+jamd_build_discriminate(AppState *state, const char *module_id,
+                        GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("WHOSE TROUBLE IS IT",
+        "Interference, load, or no coverage: three explanations for one set of "
+        "bad numbers, separated by what the receiver was doing at the time.",
+        &body);
+    GtkWidget *verdict_body, *evidence_body;
+    GtkWidget *verdict = verb_card("THE VERDICT", &verdict_body);
+    GtkWidget *evidence = verb_card("WHERE THE EVIDENCE COMES FROM", &evidence_body);
+
+    gtk_box_append(GTK_BOX(verdict_body),
+        mod_arg_row(state, module_id, status, "Say Which One",
+            "--discriminate",
+            "leave empty for this module's saved record, or name another",
+            "Reads the measurement record. Empty uses the one --analyse saved."));
+    gtk_box_append(GTK_BOX(verdict_body), fkit_note(
+        "The three branches are not a vote. Interference needs an unexplained "
+        "floor or peak; congestion needs the load indicators to have moved "
+        "with the failures; a coverage hole needs the reference signal to have "
+        "collapsed without a handover to explain it. A record that supports "
+        "none of them is reported as indeterminate rather than forced into the "
+        "nearest one."));
+    gtk_box_append(GTK_BOX(body), verdict);
+
+    gtk_box_append(GTK_BOX(evidence_body), fkit_note(
+        "The receiver counters are the half a spectrum capture cannot supply. "
+        "A spectrum analyser sees that something is loud; it cannot see whether "
+        "the scheduler was busy, whether the handover succeeded, or whether the "
+        "uplink was failing. Those arrive as a file of key and value and are "
+        "merged into the measurement record without overwriting what the "
+        "capture already said."));
+    gtk_box_append(GTK_BOX(evidence_body),
+        mod_arg_row(state, module_id, status, "Add Receiver Counters",
+            "--counters",
+            "/path/to/counters.tsv",
+            "A file of key and value, one per line: load indicator, PDCCH and "
+            "PBCH decode-failure rates, RSRP and RSRQ deltas, handover success, "
+            "uplink block error rate, RACH failure rate, and timestamps."));
+    gtk_box_append(GTK_BOX(body), evidence);
+
+    (void) out;
+    return outer;
+}
+
+/* 5. The write-up: the artefact a security team or a regulator actually reads. */
+static GtkWidget *
+jamd_build_report(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("THE WRITE-UP",
+        "A regulator-readable report, produced only when the profile actually "
+        "supports one.", &body);
+    GtkWidget *write_body;
+    GtkWidget *write = verb_card("PRODUCE THE REPORT", &write_body);
+
+    gtk_box_append(GTK_BOX(write_body),
+        mod_arg_row(state, module_id, status, "Write the Report",
+            "--report",
+            "leave empty for this module's saved record, or name another",
+            "The measurement log, the affected band and the verdict, as text."));
+    gtk_box_append(GTK_BOX(write_body), fkit_note(
+        "This refuses a clean profile and a coverage-hole profile. A module "
+        "that will sign a jamming report for whatever it is handed is a module "
+        "whose reports are worth nothing, and the refusal is asserted by the "
+        "selftest rather than left to discipline."));
+    gtk_box_append(GTK_BOX(write_body), fkit_note(
+        "What the report is not: evidence of who did it. It records what was "
+        "measured, where and when, and what the profile supports. Attribution "
+        "is a different question that no spectrum capture answers."));
+    gtk_box_append(GTK_BOX(body), write);
+
+    (void) out;
+    return outer;
+}
+
+/* 6. The constructor: build the samples, touch no radio. This is the view an
+      operator reaches for when they need a test vector, and it is deliberately
+      separate from the keying view below it. */
+static GtkWidget *
+jamd_build_waveform(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("BUILD A WAVEFORM",
+        "Sample arithmetic on this machine. No radio is opened, no antenna is "
+        "wired, and the file is the whole output.", &body);
+    GtkWidget *make_body, *raster_body;
+    GtkWidget *make = verb_card("CONSTRUCT THE SAMPLES", &make_body);
+    GtkWidget *raster = verb_card("WHERE ON THE RASTER IT LANDS", &raster_body);
+
+    jamd_append_disclaimer(make_body, module_id);
+    gtk_box_append(GTK_BOX(make_body),
+        mod_arg_row(state, module_id, status, "Construct the Waveform",
+            "--tx-build",
+            "--centre 2650MHz",
+            "At minimum a centre frequency, as Hz or MHz or an EARFCN. The "
+            "shape, mode, format, rate, duration and pulse timing have "
+            "defaults that the module prints back when the build finishes."));
+    gtk_box_append(GTK_BOX(make_body), fkit_note(
+        "Two modes. Barrage fills the whole sample rate; narrowband fills one "
+        "slice and is refused if that slice is narrower than the analyser can "
+        "resolve, because a waveform the receiver cannot distinguish from noise "
+        "is not a test of anything. Three shapes are built: wideband noise, a "
+        "single tone, and a linear sweep."));
+    gtk_box_append(GTK_BOX(make_body), fkit_note(
+        "A pulse train is structural, not statistical: the gate is a block "
+        "pattern multiplied into the samples, so the duty cycle is exactly what "
+        "was asked for and the file says how many samples were gated. The "
+        "waveform is normalised to the peak fraction asked for and then "
+        "measured again, and the build fails if the measurement disagrees."));
+    gtk_box_append(GTK_BOX(body), make);
+
+    gtk_box_append(GTK_BOX(raster_body), fkit_note(
+        "A centre frequency given in hertz moves to the sample file as given. "
+        "A frequency on the LTE carrier raster is labelled with its EARFCN, "
+        "because that is the number a receiver test is usually written in. The "
+        "raster is a query here rather than a constraint: a receiver test is "
+        "not always on a cellular carrier, so a frequency off the raster is "
+        "labelled as off the raster and built anyway."));
+    gtk_box_append(GTK_BOX(raster_body), fkit_note(
+        "The band edges are read from one table, the same one the analyser "
+        "reads, so a frequency cannot be legal in one view and not the other."));
+    gtk_box_append(GTK_BOX(body), raster);
+
+    (void) out;
+    return outer;
+}
+
+/* 7. The gate: what the module will and will not do, and what it needs before
+      it does the second thing. The warning is the module's, not this page's. */
+static GtkWidget *
+jamd_build_gate(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("THE GATE",
+        "What this module refuses, what it accepts, and what has to be true "
+        "about the room before the radio is opened.", &body);
+    GtkWidget *state_body, *call_body;
+    GtkWidget *state_card = verb_card("WHAT THE MODULE SAYS ABOUT ITSELF", &state_body);
+    GtkWidget *call = verb_card("WHAT HAPPENS WHEN THE GATE IS ARMED", &call_body);
+    GtkWidget *flow = fkit_flow();
+    GtkWidget *status_btn = gtk_button_new_with_label("Read the Gate State");
+    g_autofree char *script = module_script_path(module_id);
+    const char *argv[] = { script, "--tx-status", NULL };
+    g_autofree char *raw = run_capture(argv);
+    g_auto(GStrv) lines = NULL;
+
+    jamd_append_disclaimer(state_body, module_id);
+
+    if (raw != NULL && *raw != '\0') {
+        lines = g_strsplit(raw, "\n", -1);
+        for (int i = 0; lines[i] != NULL; i++) {
+            char *tab;
+
+            if (!*lines[i]) continue;
+            tab = strchr(lines[i], '\t');
+            if (tab == NULL) {
+                gtk_box_append(GTK_BOX(state_body), fkit_note(lines[i]));
+                continue;
+            }
+            *tab = '\0';
+            cve_fill_meta(state_body, lines[i], tab + 1);
+        }
+    }
+    /* The state is read fresh: an operator may have armed the gate in a shell
+       since this page was drawn, and a stale "closed" would be a lie. */
+    radio_bench_run_button(status_btn, state, module_id, status, "--tx-status", NULL);
+    fkit_flow_add(flow, status_btn, "flat");
+    gtk_box_append(GTK_BOX(state_body), flow);
+    gtk_box_append(GTK_BOX(body), state_card);
+
+    gtk_box_append(GTK_BOX(call_body), fkit_note(
+        "Keying is not on this page. The constructor above builds a file and "
+        "stops; the step that opens a radio is reachable from the module's own "
+        "command line, where an operator who has read the warning already is, "
+        "and it is the only step that needs the authorisation flag. A button "
+        "here would put that step one click from someone who arrived at this "
+        "page by accident, and the flag would then have to be typed by someone "
+        "who was not told what it means."));
+    gtk_box_append(GTK_BOX(call_body), fkit_note(
+        "With the flag set, the module still refuses to report success without "
+        "a radio: it asks the driver, not the PATH, and a driver package "
+        "installed is not a radio. Each driver is probed by its own tool, and a "
+        "box with none of them fails with a non-zero exit and says which four "
+        "were asked. Nothing is transmitted by a module that cannot see the "
+        "device it claims to be transmitting with."));
+    gtk_box_append(GTK_BOX(call_body), fkit_note(
+        "There is one further refusal worth knowing: only one driver has a "
+        "built-in transmit call. The others report what they would need rather "
+        "than improvising a command line from a driver name."));
+    gtk_box_append(GTK_BOX(body), call);
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry jamd_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "~--analyse|--counters:Counters|--report:Report" },
-    { "Analysis",
-      "system-search-symbolic",
-      "--characterise:Characterise|--discriminate:Discriminate|~--noise-floor" },
+    { "Overview", "dialog-information-symbolic", NULL, jamd_build_overview },
+    { "Capture", "imsisting-01_radio-symbolic", NULL, jamd_build_capture },
+    { "Profile", "imsisting-24_rf_fingerprint-symbolic", NULL, jamd_build_profile },
+    { "Discriminate", "imsisting-23_traffic_analysis-symbolic", NULL, jamd_build_discriminate },
+    { "Report", "document-save-symbolic", NULL, jamd_build_report },
+    { "Waveform", "document-new-symbolic", NULL, jamd_build_waveform },
+    { "The Gate", "security-high-symbolic", NULL, jamd_build_gate },
 };
+
 static ModuleSubmenuEntry slic_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
@@ -15731,72 +16262,7 @@ scell_status_summary(const char *module_id)
         (tx && *tx) ? tx : "transmit state unknown");
 }
 
-static void
-scell_arg_clicked(GtkButton *button, gpointer user_data)
-{
-    AppState *state = g_object_get_data(G_OBJECT(button), "state");
-    const char *module_id = g_object_get_data(G_OBJECT(button), "module-id");
-    GtkWidget *status = g_object_get_data(G_OBJECT(button), "status");
-    const char *verb = g_object_get_data(G_OBJECT(button), "verb");
-    const char *label = g_object_get_data(G_OBJECT(button), "action-label");
-    GtkWidget *entry = g_object_get_data(G_OBJECT(button), "arg-entry");
-    g_autofree char *typed = g_strdup(
-        entry != NULL ? gtk_editable_get_text(GTK_EDITABLE(entry)) : "");
-    g_auto(GStrv) parts = g_strsplit(typed, " ", -1);
-    g_autofree char *script = module_script_path(module_id);
-    g_autoptr(GPtrArray) argv = g_ptr_array_new();
 
-    (void) user_data;
-    g_ptr_array_add(argv, script);
-    g_ptr_array_add(argv, (gpointer) verb);
-    for (int i = 0; parts[i] != NULL; i++)
-        if (parts[i][0] != '\0') g_ptr_array_add(argv, parts[i]);
-    g_ptr_array_add(argv, NULL);
-    imsisting_action_run(state, module_id, label, status,
-                         (const char *const *) argv->pdata, FALSE);
-}
-
-static void
-scell_entry_activate(GtkEntry *entry, gpointer user_data)
-{
-    (void) entry;
-    gtk_widget_activate(GTK_WIDGET(user_data));
-}
-
-/* One job: type the arguments, press the button, never see the verb. */
-static GtkWidget *
-scell_arg_row(AppState *state, const char *module_id, GtkWidget *status,
-              const char *button_label, const char *verb,
-              const char *placeholder, const char *hint)
-{
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *entry = gtk_entry_new();
-    GtkWidget *button = gtk_button_new_with_label(button_label);
-    GtkWidget *column;
-
-    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), placeholder);
-    gtk_widget_set_hexpand(entry, TRUE);
-    gtk_widget_add_css_class(button, "verb-button");
-    gtk_widget_add_css_class(button, "primary");
-
-    g_object_set_data(G_OBJECT(button), "state", state);
-    g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
-    g_object_set_data(G_OBJECT(button), "status", status);
-    g_object_set_data(G_OBJECT(button), "verb", (gpointer) verb);
-    g_object_set_data(G_OBJECT(button), "action-label", (gpointer) button_label);
-    g_object_set_data(G_OBJECT(button), "arg-entry", entry);
-    g_signal_connect(button, "clicked", G_CALLBACK(scell_arg_clicked), NULL);
-    g_signal_connect(entry, "activate", G_CALLBACK(scell_entry_activate), button);
-
-    gtk_box_append(GTK_BOX(row), entry);
-    gtk_box_append(GTK_BOX(row), button);
-    if (hint == NULL) return row;
-
-    column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-    gtk_box_append(GTK_BOX(column), row);
-    gtk_box_append(GTK_BOX(column), fkit_note(hint));
-    return column;
-}
 
 static GtkWidget *
 scell_button(AppState *state, const char *module_id, GtkWidget *status,
@@ -15868,7 +16334,7 @@ scell_build_detect(AppState *state, const char *module_id,
     GtkWidget *read = verb_card("READ ONE", &read_body);
 
     gtk_box_append(GTK_BOX(read_body),
-        scell_arg_row(state, module_id, status, "Read the Broadcast",
+        mod_arg_row(state, module_id, status, "Read the Broadcast",
             "--detect",
             "SIB1 hex, or a file with one per line, or - for stdin",
             "One BCCH-DL-SCH-Message per line. Comments after # are ignored."));
@@ -15901,16 +16367,16 @@ scell_build_commission(AppState *state, const char *module_id,
     GtkWidget *doc = verb_card("THE WHOLE PROFILE", &doc_body);
     GtkWidget *sib = verb_card("ONE BROADCAST AT A TIME", &sib_body);
 
-    gtk_box_append(GTK_BOX(doc_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(doc_body), mod_arg_row(state, module_id, status,
         "Write the Document", "--cell-profile",
         "mcc mnc band earfcn pci [csg-id] [name] [mme]",
         "The commissioning document: PLMN, band, EARFCN, PCI, CSG, plus both SIBs."));
     gtk_box_append(GTK_BOX(body), doc);
 
-    gtk_box_append(GTK_BOX(sib_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(sib_body), mod_arg_row(state, module_id, status,
         "Build SIB1", "--sib1", "mcc mnc tac-hex cellid-hex [csg-id]",
         "SIB1 carries cellAccessRelatedInfo, which is where a closed cell says so."));
-    gtk_box_append(GTK_BOX(sib_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(sib_body), mod_arg_row(state, module_id, status,
         "Build SIB9", "--sib9", "home eNodeB name",
         "SIB9's HNB-Name is an OCTET STRING, so the octets must be the text."));
     gtk_box_append(GTK_BOX(body), sib);
@@ -15933,10 +16399,10 @@ scell_build_management(AppState *state, const char *module_id,
     GtkWidget *box = verb_card("THE BOX", &box_body);
     GtkWidget *audit = verb_card("A CONFIG FILE", &audit_body);
 
-    gtk_box_append(GTK_BOX(box_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(box_body), mod_arg_row(state, module_id, status,
         "Ask the Box", "--discover", "host [port]",
         "Reads the settings the box serves. Reports what answered, not what we hoped."));
-    gtk_box_append(GTK_BOX(box_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(box_body), mod_arg_row(state, module_id, status,
         "Write the Profile", "--apply", "host [port]",
         "Builds a CWMP 1.2 SetParameterValues envelope and refuses when nothing answers."));
     gtk_box_append(GTK_BOX(box_body), fkit_note(
@@ -15944,7 +16410,7 @@ scell_build_management(AppState *state, const char *module_id,
         "non-zero, rather than reporting a write it did not make."));
     gtk_box_append(GTK_BOX(body), box);
 
-    gtk_box_append(GTK_BOX(audit_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(audit_body), mod_arg_row(state, module_id, status,
         "Audit It", "--tr069-audit", "/path/to/box.conf",
         "Key/value config. Flags default credentials, plaintext CWMP, exposed WAN "
         "management, optional TLS, a non-standard port."));
@@ -15968,15 +16434,15 @@ scell_build_identity(AppState *state, const char *module_id,
     GtkWidget *csg = verb_card("CLOSED SUBSCRIBER GROUP", &csg_body);
     GtkWidget *pci = verb_card("PCI REUSE", &pci_body);
 
-    gtk_box_append(GTK_BOX(csg_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(csg_body), mod_arg_row(state, module_id, status,
         "Encode", "--csg-encode", "decimal id",
         "A CSG-Id is 27 bits (TS 36.413). Anything wider is refused, not truncated."));
-    gtk_box_append(GTK_BOX(csg_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(csg_body), mod_arg_row(state, module_id, status,
         "Decode", "--csg-decode", "hex",
         "Eight hex octets in, the decimal id out."));
     gtk_box_append(GTK_BOX(body), csg);
 
-    gtk_box_append(GTK_BOX(pci_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(pci_body), mod_arg_row(state, module_id, status,
         "Check a Cell List", "--pci-conflict", "/path/to/cells.tsv",
         "TSV with pci, earfcn and cell_id. Two cells on one PCI and one frequency "
         "is confusion; two on different frequencies is not, and it abstains."));
@@ -16017,29 +16483,29 @@ scell_build_backhaul(AppState *state, const char *module_id,
 
     GtkWidget *s1_body;
     GtkWidget *s1 = verb_card("S1 SETUP", &s1_body);
-    gtk_box_append(GTK_BOX(s1_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(s1_body), mod_arg_row(state, module_id, status,
         "Build S1 Setup", "--s1setup",
         "001 01 0xA1C01 LabHeNB 00f1",
         "MCC, MNC, macro eNB id, eNB name, TAC. S1AP is aligned PER where RRC "
         "is unaligned, so these octets come from their own codec, checked "
         "against pycrate and dissected by Wireshark."));
-    gtk_box_append(GTK_BOX(s1_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(s1_body), mod_arg_row(state, module_id, status,
         "Read an S1AP PDU", "--s1ap",
         "hex, or a file of it",
         "The same decoder in reverse: procedure, criticality and one row per "
         "information element."));
-    gtk_box_append(GTK_BOX(s1_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(s1_body), mod_arg_row(state, module_id, status,
         "Carry a NAS Message", "--s1ap-nas",
         "1 7 074100 ul",
         "MME UE id, eNB UE id, NAS hex, then ul or dl. This is the message that "
         "carries a handset's Attach through this box, which is what makes the "
         "IMSI ours rather than the carrier's."));
-    gtk_box_append(GTK_BOX(s1_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(s1_body), mod_arg_row(state, module_id, status,
         "Page a Handset", "--s1ap-paging",
         "0x01 0x0A0B0C0D",
         "MME code and M-TMSI. Release the context, page, and the handset "
         "re-attaches where the page came from."));
-    gtk_box_append(GTK_BOX(s1_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(s1_body), mod_arg_row(state, module_id, status,
         "Open the Association", "--s1-attach",
         "203.0.113.9 36412",
         "MME host, then an optional port and payload. The host path is the only "
@@ -16056,24 +16522,24 @@ scell_build_backhaul(AppState *state, const char *module_id,
 
     GtkWidget *iuh_body;
     GtkWidget *iuh = verb_card("HNBAP REGISTRATION", &iuh_body);
-    gtk_box_append(GTK_BOX(iuh_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
         "Build HNB Register", "--iuh-register",
         "deadbeef 0xA1C0100",
         "HNB identity and the 28-bit cell identity. The octets come from their "
         "own codec, checked against pycrate and dissected by Wireshark on SCTP "
         "PPID 20, which is the payload id the Iuh uses for HNBAP."));
-    gtk_box_append(GTK_BOX(iuh_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
         "Build UE Register", "--ue-register",
         "3102601234567809 normal",
         "IMSI as BCD and a registration cause of emergency-call, normal or "
         "ue-relocation. This is the message a home node sends when a handset "
         "appears behind it."));
-    gtk_box_append(GTK_BOX(iuh_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
         "Read an HNBAP PDU", "--hnbap",
         "hex, or a file of it",
         "Procedure, criticality, one row per information element, and the "
         "identity fields the message carries."));
-    gtk_box_append(GTK_BOX(iuh_body), scell_arg_row(state, module_id, status,
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
         "Open the Association", "--iuh-attach",
         "203.0.113.9 29169",
         "HNB-GW host, then an optional port and payload. Armed like the S1 one: "
