@@ -1174,6 +1174,83 @@ built twice.
 surface landed as `56_baseband_diag` and the TS 23.040 TP layer with the Type-0
 audit landed in `41_ota_sms` — and should be read against the tree, not alone.
 
+**Phase 16 — the unauthenticated NAS surface.** `32_nas_signaling`.
+
+`32_nas_signaling` decodes NAS and runs a bounded rate harness, and there the
+module stops: `--transmit` writes a plan file and reports `status handoff` with
+`sent 0`, because there is no sender. What is missing is the other half of the
+same idea — the messages themselves. Attach reject, TAU reject, Service reject,
+Identity Request, Authentication Request and Failure, Security Mode Command and
+Security Mode Reject are all `type(1) length(1) body` over an EMM header, and
+every field they need (PLMN BCD, IMSI BCD, cause codes, the EPS update type
+bits) is already coded in `15_downgrade`, `14_suci` and this module. Building
+them is what lets a box answer a handset *before* any key exists — the state
+where an MME has to talk to a subscriber it cannot yet authenticate.
+
+The gate is the one Phase 4 and Phase 2 both use: `built` for the octets,
+`sctp`/`NET` for the sender, and a `--transmit` that keeps refusing until a
+transport exists. Two honest limits to carry: an EMM cause the handset does not
+expect ends the procedure rather than advancing it, and the identity exchange on
+NR is a different header (`5GMM`) with the same shape.
+
+Why this was not already filed: the Phase 14 audit names `32_nas_signaling` as
+the right home for a TAU/RAU reject builder (`:1002`) and files it nowhere as
+work, and the attack inventory has carried the NAS row as `partial` with no
+phase owning the balance.
+
+**Phase 17 — the AKA oracle.** `14_suci`, `19_cipher_audit`,
+`32_nas_signaling`.
+
+Authentication failures are distinguishable. An MME that answers MAC failure,
+SYNCH failure and "unknown subscriber" with different causes, different timings
+or different retry counts tells an observer which of them it hit — and
+`19_cipher_audit` has never been tested against that, because it has no
+authentication vectors at all: it parses a Security Mode Command, scores a
+session and reports a downgrade. The same class of defect is the one
+`docs/CONFIRMED-BUGS.md` records for `15_downgrade --detect` answering CLEAN on
+every input, so the bar here is a two-sided test: four injected causes must each
+be identified, and a legitimate exchange must not be.
+
+Deliverable: a cause-code oracle table (TS 24.301 §9.9.3.9 and TS 33.501 §6.1)
+with what each cause reveals about the subscriber's state; an `--auth-oracle`
+verb over a capture or a session log; and the SQN/resynchronisation behaviour,
+which is where the SUCI and the 5G-AKA halves meet `14_suci`'s profile A/B work.
+All of it is software over bytes already parsed — no radio, no core.
+
+**Phase 18 — SIM applet abuse.** `52_stk`, `41_ota_sms`.
+
+This is WIBattack's actual vector, and the tree has every piece except the one
+that matters. `52_stk` builds proactive commands, parses them, prints the S@T
+risk table (`--sat-cmds`, six commands and what each yields) and detects the S@T
+and WIB applet markers; `41_ota_sms` builds the TS 31.115 secured packet and the
+TS 23.048 SPI/KIc/KID path, both checked against pySim. What neither does is put
+the two together: **a binary SMS that invokes the applet's command set with no
+user interaction** — the S@T payload inside the D0 envelope inside the secured
+SMS, with the command and its arguments in the applet's own encoding.
+
+Deliverable: `--sat-push <command> [args]` composing both modules; the encoding
+for each of the six commands (`provideLocalInformation`, `sendShortMessage`,
+`setupCall`, `sendDTMF`, `sendUSSD`, `launchBrowser`); and an executor model that
+states what the handset does when the applet runs it. Gate: `built` for the
+bytes, delivery `handoff` — it needs an SMSC or OTA gateway, and the keys are the
+card's, so it is own-SIM only, exactly as Phase 6 records.
+
+**Phase 19 — call correlation.** `23_traffic_analysis`, `30_volte_ims`.
+
+`23_traffic_analysis` does flow fingerprinting and computes silence intervals
+(`:506`), and it has no VoLTE concept whatsoever: `volte`, `sip` and `srtp`
+return zero hits across the module. `30_volte_ims` computes ReVoLTE's keystream
+reuse but never sees a media packet, so the correlation half of a VoLTE attack —
+which of these ciphertext streams is one call, and who was in it — is absent.
+
+Deliverable: group SRTP streams into calls by burst structure and interval
+pattern; match a call against the SIP dialogue captured elsewhere; report call
+count, duration distribution and the silence structure that separates speech
+from hold; and emit `--calls-tsv` so a casebook can carry it. This is the passive
+counterpart to Phase 5's active work and needs only a capture. It also gives
+`docs/OFFENSIVE-GAP-ANALYSIS.md` §2's "traffic analysis" row something to point
+at beyond generic fingerprinting.
+
 ---
 
 ## What "complete" means for a TX module
