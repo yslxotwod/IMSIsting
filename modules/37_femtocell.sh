@@ -491,6 +491,70 @@ femt_detect() {
     return 0
 }
 
+femt_s1_asn1() {
+    local py="${FEMT_S1AP:-$IMSISTING_ROOT/tools/s1ap_asn1.py}"
+    if [[ ! -f "$py" ]]; then
+        printf 'ERROR\t%s is missing; cannot build or read an S1AP body\n' "$py" >&2
+        return 1
+    fi
+    timeout 60 python3 "$py" "$@"
+}
+
+# S1 Setup is the message that makes a small cell a node on the network rather
+# than a box on a desk: the eNB names itself to an MME and, if the MME answers,
+# gets an association it never had to subscribe for.  S1AP is aligned PER while
+# the RRC codec here is unaligned PER, so this cannot ride lte_asn1.py, and the
+# octets come from tools/s1ap_asn1.py, which is checked against pycrate and
+# Wireshark rather than against its own bit layout.
+femt_s1setup() {
+    local mcc="${1:-}" mnc="${2:-}" enb="${3:-}" name="${4:-}"
+    local tac="${5:-}"
+    if [[ -z "$mcc" || -z "$mnc" || -z "$enb" || -z "$tac" ]]; then
+        printf 'ERROR\tneed <mcc> <mnc> <enb-id-hex> <name> <tac-hex> [more tacs]\n' >&2
+        return 2
+    fi
+    local args=(s1setup --mcc "$mcc" --mnc "$mnc" --enb-id "$enb" --tac "$tac")
+    [[ -n "$name" ]] && args+=(--name "$name")
+    local out
+    out=$(femt_s1_asn1 "${args[@]}") || return 1
+    local hex
+    hex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tthe codec returned no octets\n' >&2
+        return 1
+    fi
+    printf 's1ap_verb\tS1SetupRequest\n'
+    printf 's1ap_hex\t%s\n' "$hex"
+    printf 's1ap_octets\t%d\n' "$(( ${#hex} / 2 ))"
+    printf 's1ap_mcc\t%s\n' "$mcc"
+    printf 's1ap_mnc\t%s\n' "$mnc"
+    printf 's1ap_enb_id\t%s\n' "$enb"
+    printf 's1ap_name\t%s\n' "${name:-none}"
+    printf 's1ap_tac\t%s\n' "$tac"
+    printf 'sctp_ppid\t18\n'
+    printf 'sctp_ports\t36412\n'
+    printf 'status\tbuilt\n'
+    printf 'next\tthe association itself is a handoff: an MME to attach to, and an SCTP stack to carry it\n'
+    return 0
+}
+
+femt_s1ap_decode() {
+    local src="${1:--}"
+    local hex
+    if [[ "$src" == "-" ]]; then
+        hex=$(femt_norm_hex "$(cat)")
+    elif [[ -f "$src" ]]; then
+        hex=$(femt_norm_hex "$(cat "$src")")
+    else
+        hex=$(femt_norm_hex "$src")
+    fi
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tnothing to decode\n' >&2
+        return 2
+    fi
+    femt_s1_asn1 decode "$hex"
+}
+
 femt_plan() {
     cat <<'EOF'
 status	handoff
@@ -602,6 +666,26 @@ CFG
     chk detect-bad     "$(fld "$(cat "$d/bad.out")" undecodable)" "1"
     chk detect-nofile  "$(femt_detect "$d/missing.txt" >/dev/null 2>&1; echo $?)" "2"
 
+    # 4c. S1 Setup. The octets are pinned to the vector pycrate encoded and
+    #     Wireshark dissected (procedureCode 17, MCC 001, MNC 01, macro eNB
+    #     0xA1C01, ENBname LabHeNB, tAC 241, PLMN 00f110, PagingDRX v64), so a
+    #     change to the codec's output fails here rather than on a real MME.
+    local s1_expect
+    s1_expect="0011002c000004003b00080000f11000a1c010003c400903004c616248654e42"
+    s1_expect="${s1_expect}0040000700003c4000f1100089000120"
+    out=$(femt_s1setup 001 01 0xA1C01 LabHeNB 00f1)
+    chk s1setup-hex    "$(fld "$out" s1ap_hex)"    "$s1_expect"
+    chk s1setup-octets "$(fld "$out" s1ap_octets)" "48"
+    chk s1setup-ppid   "$(fld "$out" sctp_ppid)"   "18"
+    chk s1setup-status "$(fld "$out" status)"      "built"
+    chk s1setup-noargs "$(femt_s1setup >/dev/null 2>&1; echo $?)" "2"
+    out=$(femt_s1ap_decode "$s1_expect")
+    chk s1ap-procedure "$(fld "$out" procedure)" "S1Setup"
+    chk s1ap-ies       "$(fld "$out" ies)"       "4"
+    chk s1ap-name      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie" && $2 ~ /^eNBname /{split($2,a," "); print a[3]}')" "LabHeNB"
+    chk s1ap-plmn      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie" && $2 ~ /^Global-ENB-ID /{split($2,a," "); print a[3]}')" "001/01"
+    chk s1ap-empty     "$(printf '\n' | femt_s1ap_decode - >/dev/null 2>&1; echo $?)" "2"
+
     # 5. SIB9's HNB-Name is an OCTET STRING, so the hex must be the text.
     out=$(femt_sib9_build LabHeNB)
     chk sib9-hex  "$(fld "$out" sib9_hex)"      "464C616248654E42"
@@ -705,6 +789,8 @@ femt_cli_main() {
         --apply)       femt_apply "$@" ;;
         --pci-conflict) femt_pci_conflict "${1:-}" ;;
         --detect)      femt_detect "${1:--}" ;;
+        --s1setup)     femt_s1setup "$@" ;;
+        --s1ap)        femt_s1ap_decode "${1:--}" ;;
         --iuh)         femt_iuh_stack ;;
         --tr069-audit) femt_tr069_audit "${1:-}" ;;
         --plan)        femt_plan ;;
@@ -728,6 +814,9 @@ Usage: $0 COMMAND
   --apply <host> [port] write the profile to that management plane
   --pci-conflict <tsv>  PCI confusion over a cell list
   --detect <hex|file>   does a captured SIB1 declare a closed cell
+  --s1setup <mcc> <mnc> <enb-id> <name> <tac>
+                        the S1 Setup Request this eNB would present to an MME
+  --s1ap <hex|file>     decode an S1AP PDU back to its fields
   --iuh                 Iuh (HNBAP/RUA/RANAP) reference
   --tr069-audit <conf>  TR-069/CWMP local management findings
   --plan                lab HeNB handoff plan

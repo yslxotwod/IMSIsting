@@ -16014,6 +16014,25 @@ scell_build_backhaul(AppState *state, const char *module_id,
         "software that would have to be on the bench first."));
     gtk_box_append(GTK_BOX(body), ref);
 
+    GtkWidget *s1_body;
+    GtkWidget *s1 = verb_card("S1 SETUP", &s1_body);
+    gtk_box_append(GTK_BOX(s1_body), scell_arg_row(state, module_id, status,
+        "Build S1 Setup", "--s1setup",
+        "001 01 0xA1C01 LabHeNB 00f1",
+        "MCC, MNC, macro eNB id, eNB name, TAC. S1AP is aligned PER where RRC "
+        "is unaligned, so these octets come from their own codec, checked "
+        "against pycrate and dissected by Wireshark."));
+    gtk_box_append(GTK_BOX(s1_body), scell_arg_row(state, module_id, status,
+        "Read an S1AP PDU", "--s1ap",
+        "hex, or a file of it",
+        "The same decoder in reverse: procedure, criticality and one row per "
+        "information element."));
+    gtk_box_append(GTK_BOX(s1_body), fkit_note(
+        "This builds the message, not the association. An S1 Setup only becomes "
+        "a registration when an MME answers on an SCTP association, and there is "
+        "still no SCTP client in this tree, so the handoff is unchanged."));
+    gtk_box_append(GTK_BOX(body), s1);
+
     gtk_box_append(GTK_BOX(body), fkit_note(
         "Why this leg matters: a home node's traffic is cleartext between the "
         "box and the security gateway. Attack the air and you get a phone; own "
