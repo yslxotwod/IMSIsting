@@ -970,18 +970,43 @@ implemented, not the name.
 instrument from an SDR and answers questions no SDR in this tree can answer for
 itself.
 
-*Built: `tools/ue_agent.sh` and the `adb` node transport.* The first verb set is
+*Built: `tools/ue_agent.sh` and the `adb` node transport.* The verb set is
 `--probe` (adb present, device present, serial, state), `--identity` (model,
 build, IMEI, IMSI, SIM, each paired with the path that produced it),
 `--radio` (operator, network type, RSRP/RSRQ), `--cells` (the serving cell out
-of `dumpsys telephony.registry`) and `--collect` (one named `adb pull`). The
+of `dumpsys telephony.registry`), `--radio-log` (the modem's own buffer, sorted
+into PDUs and text by `tools/radio_logcat.py`) and `--collect` (one named
+`adb pull`). The
 IMEI and IMSI are reported as `unavailable` with a note when the OS redacts
 them, which is the normal case from Android 10 on; the point of the verb is to
-stop guessing rather than to defeat the redaction. A 32-assertion selftest puts
+stop guessing rather than to defeat the redaction. A 41-assertion selftest puts
 a **stub `adb` on PATH**, so every parser is checked on a host with no phone
 attached — including the `service call iphonesubinfo` Parcel decoder, which
 reads UTF-16LE out of the printed 32-bit words (two characters per word, first
 in the low half) and a Luhn check on the IMEI's check digit.
+
+*Built: `tools/radio_logcat.py`, the independent capture item 2 asked for.* The
+point of a radio-log reader is refusing things, so it separates four questions
+the textual tools merge: what shape the line is (an AT command, an AT response,
+a `+CRSM`/`+CSIM` reply with a quoted APDU, a labelled or bare hex blob, or
+prose), whether the octet string is *provable* (NAS is, because its first octet
+is a protocol discriminator fixed by TS 24.007 — `0x07` EPS in the low nibble,
+`0x7e` 5GS on its own octet; a SIM APDU is, because the modem printed the status
+word beside it; **RRC is not**, because nothing in a DCCH message names its
+layer, so an RRC-sized blob is reported `unproven` with the candidate verb
+named), whether the bench can read it (a NAS message whose security header is
+not "plain" is reported `protected` — an answer, not a failure), and which verb
+would decode it (`32_nas_signaling --decode-nas`, `12_nr_air --decode-rrc`,
+`10_lte_air --decode-sib`, `16_sim --parse-apdu`). The traps are in the
+fixtures: a timestamp that reads as octets, an odd digit count, a truncated
+`+CSIM` whose shape matched but whose octets did not, and prose that a scraper
+would have mined. 26 assertions, and prose is counted apart from refusals so a
+quiet log does not look like a broken one. One finding fell out of the
+cross-check: `09_lte_attach --decode-nas` reads `07410bf110` as security header
+7 and discriminator `0x41`, while `32_nas_signaling --decode-nas eps` reads the
+same octets as security header 0, EPD 7, Attach request, which is what TS 24.301
+§9.3.1 says — so the log reader names only the decoder that agrees with the
+clause, rather than laundering the disagreement.
 
 `tools/casebook.py` gained `--transport adb` and the `ue` role: the node table
 was built for sensors and shells, and a handset is the first node class the
@@ -991,10 +1016,10 @@ phone answers. Both directions are asserted: with no adb the node is `OFFLINE`
 with `detail=state=absent`, and with a stub that answers `devices -l` it comes
 back `ONLINE` carrying the serial and version.
 
-What is still open from this phase: `adb logcat -b radio` as the independent
-capture for the ASN.1 decoders (item 2 below), the AT-over-USB path (item 6),
-and using a real handset as the TX confirmation for `07_gsm_attack` (item 1) —
-none of which can be built or verified without the hardware in the room.
+What is still open from this phase: the AT-over-USB path (item 6) and using a
+real handset as the TX confirmation for `07_gsm_attack` (item 1) — both need the
+hardware in the room. The radio-log reader is built and checked against fixtures
+instead, which is why it exists as a file of its own.
 
 What it is for, in the order the value actually falls:
 
@@ -1003,12 +1028,13 @@ What it is for, in the order the value actually falls:
    handset camping on it. `07_gsm_attack --transmit` builds a real BCCH
    carrier and nothing has ever confirmed a handset accepts it. A phone in the
    room is the only thing that can.
-2. **A real capture to decode.** `adb logcat -b radio` prints RRC and NAS
-   signalling as text on the device — an independent capture to feed
-   `tools/lte_asn1.py` and `09_lte_attach --decode-nas`, rather than only
-   vectors this tree generated. It would settle two things currently carried
-   as explicit unknowns: the BCCH LAPDm framing question (2-octet versus
-   3-octet header), and the three unnamed SIB3 bits at body positions 31..33.
+2. **A real capture to decode.** *Built — `ue_agent.sh --radio-log`, which is
+   `adb logcat -b radio` sorted into PDUs by `tools/radio_logcat.py`.* What it
+   settles is not settled yet: the reader proves a NAS TPDU and a `+CRSM` APDU,
+   and reports RRC as `unproven` on purpose, so the two unknowns carried here
+   (the BCCH LAPDm framing question — 2-octet versus 3-octet header — and the
+   three unnamed SIB3 bits at body positions 31..33) still need a real log with
+   a vendor trace that prints the RRC octets, not just the message name.
 3. **Cell survey without an SDR.** `dumpsys telephony.registry` reports serving
    cell, neighbours, RSRP/RSRQ, ARFCN/EARFCN, TAC, cell identity and MCC/MNC
    natively — the same facts `02_cell_recon` and `04_tower_map` currently

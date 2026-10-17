@@ -247,6 +247,55 @@ ue_cmd_cells() {
     done
 }
 
+# The modem's own account of what it did: `adb logcat -b radio`, sorted into
+# PDUs and text.  The parsing lives in tools/radio_logcat.py because reading a
+# log is not a shell job, and because the fixtures have to run on a host with no
+# handset.  This verb is the fetch and the row shape; nothing here guesses at
+# the octets.
+ue_cmd_radio_log() {
+    local file="" lines=400 commands=0
+    while (( $# )); do
+        case "$1" in
+            --file)     file="${2:-}"; shift 2 ;;
+            --lines)    lines="${2:-400}"; shift 2 ;;
+            --commands) commands=1; shift ;;
+            *)          shift ;;
+        esac
+    done
+    local parser="$ROOT/tools/radio_logcat.py"
+    [[ -f "$parser" ]] || { printf 'ERROR\tno %s\n' "$parser" >&2; return 1; }
+    local args=() log="" source="file"
+    (( commands )) && args+=(--commands)
+    if [[ -n "$file" ]]; then
+        [[ -f "$file" ]] || { ue_emit status no-such-file; ue_emit path "$file"; return 2; }
+        log="$file"
+    else
+        ue_cmd_probe >/dev/null 2>&1
+        local rc=$?; (( rc == 3 )) && {
+            ue_emit status unavailable
+            ue_emit reason "no handset is attached and no --file was given; the parser runs on a saved log"
+            return 3
+        }
+        source="adb"
+        log="$(mktemp)"
+        # -d prints what is buffered and exits, -t bounds it so a chatty modem
+        # cannot fill the disk, and threadtime is the layout the parser reads.
+        ue_adbcmd logcat -b radio -d -v threadtime -t "$lines" > "$log" 2>/dev/null
+        ue_emit fetched_lines "$(wc -l < "$log" | tr -d ' ')"
+        ue_emit buffer_lines "$lines"
+    fi
+    local rows
+    rows=$(python3 "$parser" parse "$log" --rows "${args[@]}" 2>&1)
+    local rc2=$?
+    [[ "$source" == "adb" ]] && rm -f "$log"
+    if (( rc2 != 0 )); then
+        ue_emit status parse-failed
+        printf '%s\n' "$rows" >&2
+        return 1
+    fi
+    printf '%s\n' "$rows" | sed "s/^source\t.*/source\t$source/"
+}
+
 # A file the operator asks for by name; adb pull, then casebook indexes it.
 ue_cmd_collect() {
     local remote="${1:-}" local_dir="${2:-}"
@@ -318,6 +367,8 @@ case "$*" in
     "shell service call iphonesubinfo 1") printf 'Result: Parcel(\n  0x00000000 0x00330033 0x00390036 0x00380033 0x00300033 0x00350033 0x00340036 0x00330033 0x00390038 0x00000000 '"'"'.'"'"')\n' ;;
     "shell service call iphonesubinfo 7") printf 'Result: Parcel(0x0000000f 0x00310033 0x00310030 0x00300035 0x00320031 0x00340033 0x00360035 0x00380037 0x00000039 '"'"'.'"'"')\n' ;;
     "shell dumpsys telephony.registry") printf '  mServiceState=ServiceState{ mVoiceRegState=0 mDataRegState=0 }\n  mSignalStrength=SignalStrength: 20 -1 -1 -1 -1 mGsmSignalStrength = 20 mRsrp = -95 mRsrq = -11\n  mCellIdentity=CellIdentityLte:{ mCi=12345678 mPci=301 mTac=26011 mEarfcn=6300 mMcc=310 mMnc=260 mBandwidth=20000}\n' ;;
+    # The radio buffer: prose, an AT trace, a proven APDU and a proven NAS PDU.
+    "logcat -b radio -d -v threadtime -t 400") printf '01-02 03:04:05.678  1234  5678 D RILJ    : [UNSL]< UNSOL_RESPONSE_NETWORK_STATE\n01-02 03:04:05.679  1234  5678 D AT      : AT> AT+CSQ\n01-02 03:04:05.681  1234  5678 D RIL     : AT< +CRSM: 144,0,\"002F0A0B0C\"\n01-02 03:04:05.682  1234  5678 D RILC    : NAS: 07 41 0b f1 10\n' ;;
     *) printf 'stub: unhandled command: %s\n' "$*" >&2; exit 127 ;;
 esac
 EOF
@@ -377,6 +428,25 @@ EOF
     ue_check cell-mcc      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Mcc"{print $2}')"      "310"
     ue_check cell-status   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')"        "cell-seen"
 
+    # 4b. The radio log: a saved log parses without a handset, a live one comes
+    #     through adb, and the parser is never asked to invent octets.
+    local log_file="$stub_dir/radio.log"
+    printf '%s\n' \
+        '01-02 03:04:05.678  1234  5678 D RILJ    : [UNSL]< UNSOL_RESPONSE_NETWORK_STATE' \
+        '01-02 03:04:05.681  1234  5678 D RIL     : AT< +CRSM: 144,0,"002F0A0B0C"' \
+        '01-02 03:04:05.682  1234  5678 D RILC    : NAS: 07 41 0b f1 10' > "$log_file"
+    out=$(bash "${BASH_SOURCE[0]}" --radio-log --file "$log_file" 2>/dev/null)
+    ue_check radio-log-file-status "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')" "parsed"
+    ue_check radio-log-file-pdus   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="pdus"{print $2}')"   "2"
+    ue_check radio-log-file-proven "$(printf '%s\n' "$out" | awk -F'\t' '$1=="proven"{print $2}')" "2"
+    ue_check radio-log-prose       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="prose"{print $2}')"  "1"
+    ue_check radio-log-layer       "$(printf '%s\n' "$out" | awk -F'\t' '$1~/^layer\.nas-eps$/{print $2}')" "1"
+    out=$(bash "${BASH_SOURCE[0]}" --radio-log 2>/dev/null)
+    ue_check radio-log-adb-source "$(printf '%s\n' "$out" | awk -F'\t' '$1=="source"{print $2}')" "adb"
+    ue_check radio-log-adb-pdus   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="pdus"{print $2}')"   "2"
+    ue_check radio-log-missing-rc "$(bash "${BASH_SOURCE[0]}" --radio-log --file "$stub_dir/nope.log" >/dev/null 2>&1; echo $?)" "2"
+    ue_check radio-log-nohandset-rc "$(UE_ADB=definitely-not-adb bash "${BASH_SOURCE[0]}" --radio-log >/dev/null 2>&1; echo $?)" "3"
+
     # 5. Argument handling and the disarmed-by-default surface: no verb here
     #    writes to the handset, and collect without a path is a usage error.
     ue_check collect-nopath "$(bash "${BASH_SOURCE[0]}" --collect >/dev/null 2>&1; echo $?)" "2"
@@ -404,6 +474,7 @@ ue_main() {
         --identity)  ue_cmd_identity ;;
         --radio)     ue_cmd_radio ;;
         --cells)     ue_cmd_cells ;;
+        --radio-log) ue_cmd_radio_log "$@" ;;
         --collect)   ue_cmd_collect "${1:-}" "${2:-}" ;;
         --plan)      ue_cmd_plan ;;
         --selftest)  ue_selftest ;;
@@ -416,6 +487,9 @@ Usage: $0 COMMAND
   --identity    model, build, IMEI, IMSI, SIM -- each with its source
   --radio       SIM state, operator, network type, signal
   --cells       the serving cell as the handset sees it
+  --radio-log [--file PATH] [--lines N] [--commands]
+                the modems own radio buffer, sorted into PDUs and text
+                (no handset? give it a saved log with --file)
   --collect <device-path> [local-dir]
                 adb pull one named file; nothing is dispatched blind
   --plan        the human steps this tool cannot do for you
