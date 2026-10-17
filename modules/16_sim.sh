@@ -476,78 +476,160 @@ sim_apdu_get_response() {
 }
 
 # ── BCD codecs (TS 31.102 §4.2.1 / §4.2.2) ──────────────────────────────
-# ICCID: EF_ICCID is a transparent EF of 10 bytes. Bytes 1..2 are the
-# "character" identification (0x98 = this is an ICC), bytes 3..10 carry 16
-# BCD digits with the nibbles swapped in every byte. Only 19 digits exist
-# (the 20th nibble is the check-digit filler F).
+# Both records are plain BCD with the nibbles swapped inside every byte, and
+# both were read with an invented extra field: EF_ICCID was given a "0x98
+# marker" octet to skip, EF_IMSI no parity nibble to strip. Every record
+# therefore lost (ICCID) or gained (IMSI) a leading character, and the fields
+# that follow a shifted digit -- the country, the MCC -- came out plausible
+# and wrong. The two codecs below read what the clause says is there.
+sim_luhn_ok() {
+    local s="${1:-}" i d sum=0 dbl=0
+    case "$s" in ''|*[!0-9]*) return 1 ;; esac
+    for (( i = ${#s} - 1; i >= 0; i-- )); do
+        d="${s:i:1}"
+        if (( dbl )); then
+            d=$(( d * 2 ))
+            (( d > 9 )) && d=$(( d - 9 ))
+        fi
+        sum=$(( sum + d ))
+        dbl=$(( 1 - dbl ))
+    done
+    (( sum % 10 == 0 ))
+}
+
+# The number plan is ITU-T E.118's, not the PLMN's: the leading two digits are
+# the Issuer Identification Number ("89" for telecommunications), then a
+# country calling code of one to three digits, then the issuer's own numbering.
+# The split is not self-describing, so the code is matched against this table
+# and reported unknown otherwise. The digit after "89" is a country calling
+# code -- 8986... is China (+86), not MCC 860.
+sim_icc_calling_code() {
+    local d="${1:-}" p3="${1:0:3}" p2="${1:0:2}" p1="${1:0:1}"
+    case "$p3" in
+        212) echo "212|Morocco" ;;       351) echo "351|Portugal" ;;
+        380) echo "380|Ukraine" ;;       420) echo "420|Czechia" ;;
+        966) echo "966|Saudi Arabia" ;;  971) echo "971|United Arab Emirates" ;;
+        972) echo "972|Israel" ;;
+        *)
+            case "$p2" in
+                20) echo "20|Egypt" ;;    27) echo "27|South Africa" ;;
+                33) echo "33|France" ;;   34) echo "34|Spain" ;;
+                39) echo "39|Italy" ;;    44) echo "44|United Kingdom" ;;
+                49) echo "49|Germany" ;;  52) echo "52|Mexico" ;;
+                55) echo "55|Brazil" ;;   61) echo "61|Australia" ;;
+                62) echo "62|Indonesia" ;; 65) echo "65|Singapore" ;;
+                66) echo "66|Thailand" ;; 81) echo "81|Japan" ;;
+                82) echo "82|South Korea" ;; 84) echo "84|Vietnam" ;;
+                86) echo "86|China" ;;    90) echo "90|Turkey" ;;
+                91) echo "91|India" ;;    92) echo "92|Pakistan" ;;
+                98) echo "98|Iran" ;;
+                *)
+                    case "$p1" in
+                        1) echo "1|United States / Canada" ;;
+                        7) echo "7|Russia / Kazakhstan" ;;
+                        *) echo "unknown|unknown" ;;
+                    esac ;;
+            esac ;;
+    esac
+}
+
 sim_decode_iccid() {
     local h; h=$(sim_norm_hex "${1:-}")
     [[ -n "$h" && "${h//[^0-9A-F]/}" == "$h" ]] || { printf 'ERROR\tnot hex\n' >&2; return 2; }
     local n; n=$(sim_hex_bytes "$h")
     (( n >= 2 )) || { printf 'ERROR\tICCID record too short (%d bytes)\n' "$n" >&2; return 1; }
-    local digits="" i marker="no"
+
+    # Every octet is two digits, low nibble first. Nothing is skipped: the
+    # 0x98 that opens most records is the digits 8 and 9.
+    local digits="" i
     for (( i = 0; i < n; i++ )); do
-        # The leading 0x98 is the ICC identification byte, not digits. It is
-        # a marker only in the first position: 0x98 appearing later in the
-        # record is genuine BCD data (digits 8 and 9).
-        if (( i == 0 )) && [[ "${h:0:2}" == "98" ]]; then marker="yes"; continue; fi
         local b="${h:$(( i * 2 )):2}"
         digits+="${b:1:1}${b:0:1}"
     done
-    digits="${digits//F/}"; digits="${digits//f/}"
-    # The nibble that reads 'F' is the filler for an odd digit count.
-    local d="${digits//[^0-9]/}"
-    (( ${#d} >= 4 )) || { printf 'ERROR\tdecoded ICCID too short (%d digits)\n' "${#d}" >&2; return 1; }
-    local mcc="${d:0:3}" mnc="${d:3:2}"
-    printf 'iccid\t%s\nlength\t%d\nmarker_98\t%s\nmcc\t%s\nmnc_candidate\t%s\ncountry_prefix\t%s\n' \
-        "$d" "${#d}" "$marker" "$mcc" "$mnc" "$(sim_mcc_country "$mcc")"
+    [[ "$digits" =~ ^[0-9]*[Ff]?$ ]] || { printf 'ERROR\tICCID nibbles are not all decimal: %s\n' "$digits" >&2; return 1; }
+    # The filler is the high nibble of the last octet and nothing else, so it
+    # is a trailing character after the swap. An F anywhere else stays put and
+    # the record is refused above.
+    local filler="no"
+    if [[ "$digits" == *[Ff] ]]; then filler="yes"; digits="${digits%[Ff]}"; fi
+    (( ${#digits} >= 4 )) || { printf 'ERROR\tdecoded ICCID too short (%d digits)\n' "${#digits}" >&2; return 1; }
+
+    local issuer="${digits:0:2}" check="-" luhn="n/a" cc="-" country="-"
+    case "${#digits}" in
+        19|20)  check="${digits: -1}"
+                if sim_luhn_ok "$digits"; then luhn="valid"; else luhn="INVALID"; fi ;;
+        *)      luhn="absent (${#digits} digits, the check digit brings it to 19 or 20)" ;;
+    esac
+    if [[ "$issuer" == "89" ]]; then
+        cc=$(sim_icc_calling_code "${digits:2}")
+        country="${cc#*|}"; cc="${cc%%|*}"
+    fi
+    printf 'iccid\t%s\nlength\t%d\nissuer\t%s\ncalling_code\t%s\ncountry\t%s\nfiller\t%s\ncheck_digit\t%s\nluhn\t%s\n' \
+        "$digits" "${#digits}" "$issuer" "$cc" "$country" "$filler" "$check" "$luhn"
 }
 
-# IMSI: EF_IMSI is a transparent EF. Byte 1 is the length in bytes of the
-# remaining BCD digits (8 for a 15-digit IMSI). The digits are nibble-swapped
-# and the last nibble is the odd-digit filler F when the IMSI has an odd
-# digit count (15 digits -> byte 8 is F1, i.e. '1' followed by the filler).
 sim_decode_imsi() {
     local h; h=$(sim_norm_hex "${1:-}")
     [[ -n "$h" && "${h//[^0-9A-F]/}" == "$h" ]] || { printf 'ERROR\tnot hex\n' >&2; return 2; }
     local n; n=$(sim_hex_bytes "$h")
     (( n >= 2 )) || { printf 'ERROR\tIMSI record too short (%d bytes)\n' "$n" >&2; return 1; }
 
-    local len_byte="" digits="" body="$h" start=0
-    # A leading byte of 08 or 07 is the TS 31.102 length byte; a raw 8-byte
-    # IMSI body of "08...." is not distinguishable from it by content, which
-    # is why the caller can force the reading with a leading '+' marker.
+    local len_byte="" body="$h"
     if [[ "$h" == +* ]]; then
-        body="${h#+}"; start=0
+        body="${h#+}"
     else
+        # A first byte of 1..9 with octets behind it is the length byte; L
+        # reaches 9 for an even digit count (the parity nibble plus sixteen
+        # digits), not the 1..8 a sixteen-digit ceiling suggests. A record
+        # whose octet count disagrees with its own length byte is still read,
+        # and said to disagree: encoders in the wild pad past their own count.
         local first; first=$(sim_hex_dec "${h:0:2}")
-        if (( n >= 9 && first >= 1 && first <= 8 )); then
-            len_byte="$first"; body="${h:2}"; start=1
+        if (( first >= 1 && first <= 9 && first + 1 <= n )); then
+            len_byte="$first"; body="${h:2}"
         fi
     fi
     local bn; bn=$(sim_hex_bytes "$body")
-    local i
+    local swapped="" i
     for (( i = 0; i < bn; i++ )); do
         local b="${body:$(( i * 2 )):2}"
-        digits+="${b:1:1}${b:0:1}"
+        swapped+="${b:1:1}${b:0:1}"
     done
-    local raw="$digits"
-    # An odd digit count ends with the F filler in the high nibble of the
-    # last byte, so after the swap the filler is the LAST character.
-    local odd="no" filler="none"
-    if [[ "$digits" == *F || "$digits" == *f ]]; then
-        odd="yes"; filler="F"; digits="${digits%[Ff]}"
-    elif [[ "$raw" == [Ff]* ]]; then
-        odd="yes"; filler="F"; digits="${raw:1}"
-    fi
-    [[ "$digits" =~ ^[0-9]+$ ]] || { printf 'ERROR\tIMSI nibbles are not all decimal: %s\n' "$raw" >&2; return 1; }
-    (( ${#digits} >= 5 )) || { printf 'ERROR\tdecoded IMSI too short (%d digits)\n' "${#digits}" >&2; return 1; }
 
+    # The octet after the length byte carries the parity of the digit count in
+    # its low nibble (1 even, 9 odd) and the first IMSI digit in its high one,
+    # so after the swap the parity is the leading character. Reading it as a
+    # digit turned the IMSI 310260123456789 into 9310260123456789 -- MCC 931
+    # and "unknown" where the card says Vodafone US.
+    local indicator="${swapped:0:1}" rest="${swapped:1}" parity
+    case "$indicator" in
+        1) parity="even" ;;
+        9) parity="odd" ;;
+        *) printf 'ERROR\tparity indicator "%s" is neither 1 (even digit count) nor 9 (odd); this is not an EF_IMSI body\n' "$indicator" >&2; return 1 ;;
+    esac
+    local filler="none"
+    while [[ "$rest" == *[Ff] ]]; do filler="F"; rest="${rest%[Ff]}"; done
+    [[ "$rest" =~ ^[0-9]+$ ]] || { printf 'ERROR\tIMSI digits are not all decimal: %s\n' "$rest" >&2; return 1; }
+    local digits="$rest"
+    (( ${#digits} >= 5 )) || { printf 'ERROR\tdecoded IMSI too short (%d digits)\n' "${#digits}" >&2; return 1; }
+    (( ${#digits} <= 15 )) || { printf 'ERROR\tIMSI has %d digits, more than the 15 an IMSI can have\n' "${#digits}" >&2; return 1; }
+
+    local length_agrees="n/a"
+    if [[ -n "$len_byte" ]]; then
+        if (( bn == len_byte )); then length_agrees="yes"; else length_agrees="no"; fi
+    fi
+
+    local parity_agrees="yes"
+    if [[ "$parity" == "odd" ]]; then
+        (( ${#digits} % 2 == 1 )) || parity_agrees="no"
+    else
+        (( ${#digits} % 2 == 0 )) || parity_agrees="no"
+    fi
     local mcc="${digits:0:3}" mnc2="${digits:3:2}" mnc3="${digits:3:3}"
     local hplmn2="${mcc}-${mnc2}" hplmn3="${mcc}-${mnc3}"
-    printf 'imsi\t%s\nlength\t%d\nlength_byte\t%s\nodd_digits\t%s\nfiller\t%s\nmcc\t%s\nmnc_2digit\t%s\nmnc_3digit\t%s\nhplmn_2digit\t%s\nhplmn_3digit\t%s\ncountry\t%s\nmsin\t%s\n' \
+    printf 'imsi\t%s\nlength\t%d\nlength_byte\t%s\nbody_bytes\t%d\nlength_agrees\t%s\nparity\t%s\nparity_agrees\t%s\nfiller\t%s\nmcc\t%s\nmnc_2digit\t%s\nmnc_3digit\t%s\nhplmn_2digit\t%s\nhplmn_3digit\t%s\ncountry\t%s\nmsin\t%s\n' \
         "$digits" "${#digits}" "$([[ -n "$len_byte" ]] && echo "$len_byte" || echo none)" \
-        "$odd" "$filler" "$mcc" "$mnc2" "$mnc3" "$hplmn2" "$hplmn3" \
+        "$bn" "$length_agrees" "$parity" "$parity_agrees" "$filler" \
+        "$mcc" "$mnc2" "$mnc3" "$hplmn2" "$hplmn3" \
         "$(sim_mcc_country "$mcc")" "${digits:5}"
 }
 
@@ -2114,63 +2196,79 @@ sim_selftest() {
     chk file-path-g "$(sim_file_path 2FE2)" "3F00/7F20/2FE2"
     chk file-unknown "$(sim_file_name 1234 | cut -d'|' -f1)" "unknown EF/DF"
 
-    # ── 5. ICCID decode with the nibble swap ────────────────────────────
-    # 20-byte record shape: 98 (ICC identification marker) + 10 BCD bytes.
-    # The 10 bytes 89 90 10 32 54 76 98 10 32 F0 swap to
-    #   98 09 01 23 45 67 89 01 23 0F  -> 19 digits 9809012345678901230
-    out=$(sim_decode_iccid "98899010325476981032F0")
-    chk iccid-digits  "$(fld "$out" iccid)"  "9809012345678901230"
-    chk iccid-length  "$(fld "$out" length)" "19"
-    chk iccid-marker  "$(fld "$out" marker_98)" "yes"
-    chk iccid-mcc     "$(fld "$out" mcc)"    "980"
-    # The trailing 0F is the odd-digit filler and must be dropped, so the
-    # 19th digit is 0 and there is no 20th.
-    chk iccid-last    "$(printf '%s' "$(fld "$out" iccid)" | tail -c2)" "30"
-    # A record whose leading byte is not 0x98 still decodes its digits.
-    out=$(sim_decode_iccid "89201104298376132004")
-    chk iccid-2-digits "$(fld "$out" iccid)"     "98021140923867310240"
-    chk iccid-2-marker "$(fld "$out" marker_98)" "no"
-    chk iccid-2-mcc    "$(fld "$out" mcc)"       "980"
-    # An 11-octet record: the leading 98 marker plus 10 digit octets
-    # 32 11 22 33 44 55 66 77 88 99 swap to 23 11 22 33 44 55 66 77 88 99.
-    out=$(sim_decode_iccid "9832112233445566778899")
-    chk iccid-embedded-98  "$(fld "$out" iccid)"  "23112233445566778899"
-    chk iccid-embedded-len "$(fld "$out" length)" "20"
+    # ── 5. ICCID decode: ten octets of plain BCD, nothing to skip ───────
+    # pySim's encoder turns the ICCID 8986000000000000002 into
+    # 98 68 00 00 00 00 00 00 00 f2, so the leading 0x98 is the digits 8 and
+    # 9. Read as a "marker octet" it shortened the ICCID by two digits and
+    # made every field after it wrong -- country, issuer, check digit.
+    out=$(sim_decode_iccid "986800000000000000f2")
+    chk iccid-digits   "$(fld "$out" iccid)"        "8986000000000000002"
+    chk iccid-length   "$(fld "$out" length)"       "19"
+    chk iccid-issuer   "$(fld "$out" issuer)"       "89"
+    chk iccid-cc       "$(fld "$out" calling_code)" "86"
+    chk iccid-country  "$(fld "$out" country)"      "China"
+    chk iccid-filler   "$(fld "$out" filler)"       "yes"
+    chk iccid-check    "$(fld "$out" check_digit)"  "2"
+    chk iccid-luhn     "$(fld "$out" luhn)"         "valid"
+    # Twenty digits and no filler: a UK issuer, country calling code 44.
+    out=$(sim_decode_iccid "984405214365870921f4")
+    chk iccid-2-digits "$(fld "$out" iccid)"        "8944501234567890124"
+    chk iccid-2-cc     "$(fld "$out" calling_code)" "44"
+    chk iccid-2-country "$(fld "$out" country)"     "United Kingdom"
+    chk iccid-2-luhn   "$(fld "$out" luhn)"         "valid"
+    # A check digit that does not add up is reported, not rounded away.
+    out=$(sim_decode_iccid "98680000000000000012")
+    chk iccid-badluhn  "$(fld "$out" luhn)"         "INVALID"
+    chk iccid-badcheck "$(fld "$out" check_digit)"  "1"
     chk iccid-bad-hex   "$(sim_decode_iccid ZZZZ >/dev/null 2>&1; echo $?)" "2"
     chk iccid-too-short "$(sim_decode_iccid "98" >/dev/null 2>&1; echo $?)" "1"
 
-    # ── 6. IMSI decode, including the odd digit count ───────────────────
-    # 15-digit IMSI 310260123456789 with the TS 31.102 length byte:
-    # byte 1 = 08 (8 BCD bytes follow), body 13 20 06 21 43 65 87 F9.
-    # The final byte F9 swaps to 9F — digit 9 then the odd-digit filler F.
-    out=$(sim_decode_imsi "081320062143658 7F9")
-    chk imsi-digits    "$(fld "$out" imsi)"         "310260123456789"
-    chk imsi-length    "$(fld "$out" length)"       "15"
-    chk imsi-lenbyte   "$(fld "$out" length_byte)"  "8"
-    chk imsi-odd       "$(fld "$out" odd_digits)"   "yes"
-    chk imsi-filler    "$(fld "$out" filler)"       "F"
-    chk imsi-mcc       "$(fld "$out" mcc)"          "310"
-    chk imsi-mnc2      "$(fld "$out" mnc_2digit)"   "26"
-    chk imsi-mnc3      "$(fld "$out" mnc_3digit)"   "260"
-    chk imsi-hplmn2    "$(fld "$out" hplmn_2digit)" "310-26"
-    chk imsi-hplmn3    "$(fld "$out" hplmn_3digit)" "310-260"
-    chk imsi-country   "$(fld "$out" country)"      "United States"
-    chk imsi-msin      "$(fld "$out" msin)"         "0123456789"
+    # ── 6. IMSI decode: the length byte, then the parity nibble ─────────
+    # EF_IMSI for 310260123456789 is 08 39 01 62 10 32 54 76 98. The 39 is
+    # the parity 9 (odd digit count) in the low nibble and the first digit 3
+    # in the high one, so the nibble swap leaves the parity as the leading
+    # character "9" -- read as a digit it made the IMSI 9310260123456789 and
+    # put the card in MCC 931 (unknown) instead of 310 (United States).
+    out=$(sim_decode_imsi "083901621032547698")
+    chk imsi-digits    "$(fld "$out" imsi)"          "310260123456789"
+    chk imsi-length    "$(fld "$out" length)"        "15"
+    chk imsi-lenbyte   "$(fld "$out" length_byte)"   "8"
+    chk imsi-bodybytes "$(fld "$out" body_bytes)"    "8"
+    chk imsi-lagree    "$(fld "$out" length_agrees)" "yes"
+    chk imsi-parity    "$(fld "$out" parity)"        "odd"
+    chk imsi-pagree    "$(fld "$out" parity_agrees)" "yes"
+    chk imsi-mcc       "$(fld "$out" mcc)"           "310"
+    chk imsi-mnc2      "$(fld "$out" mnc_2digit)"    "26"
+    chk imsi-mnc3      "$(fld "$out" mnc_3digit)"    "260"
+    chk imsi-hplmn2    "$(fld "$out" hplmn_2digit)"  "310-26"
+    chk imsi-hplmn3    "$(fld "$out" hplmn_3digit)"  "310-260"
+    chk imsi-country   "$(fld "$out" country)"       "United States"
+    chk imsi-msin      "$(fld "$out" msin)"          "0123456789"
 
-    # 16-digit IMSI 0010101234567890: length byte 08, body
-    # 00 01 01 21 43 65 87 09 — even digit count, no filler.
-    out=$(sim_decode_imsi "080001012143658709")
-    chk imsi-even-digits "$(fld "$out" imsi)"        "0010101234567890"
-    chk imsi-even-len    "$(fld "$out" length)"      "16"
-    chk imsi-even-odd    "$(fld "$out" odd_digits)"  "no"
-    chk imsi-even-filler "$(fld "$out" filler)"      "none"
-    chk imsi-even-mcc    "$(fld "$out" mcc)"         "001"
+    # Fourteen digits, an even count: parity 1, and the odd number of nibbles
+    # leaves the filler F at the end -- 08 31 01 62 10 32 54 76 f8.
+    out=$(sim_decode_imsi "0831016210325476f8")
+    chk imsi-even-digits "$(fld "$out" imsi)"   "31026012345678"
+    chk imsi-even-length "$(fld "$out" length)" "14"
+    chk imsi-even-parity "$(fld "$out" parity)" "even"
+    chk imsi-even-filler "$(fld "$out" filler)" "F"
 
-    # A bare 8-byte body with no length byte is accepted as-is.
-    out=$(sim_decode_imsi "13200621436587F9")
+    # An encoder that pads past its own length byte: the discrepancy is
+    # reported and the digits still read. 07 29 26 10 21 43 65 87 ff is how
+    # pySim writes the thirteen-digit 2620112345678.
+    out=$(sim_decode_imsi "0729261021436587ff")
+    chk imsi-padded-digits   "$(fld "$out" imsi)"          "2620112345678"
+    chk imsi-padded-disagree "$(fld "$out" length_agrees)" "no"
+    chk imsi-padded-filler   "$(fld "$out" filler)"        "F"
+
+    # A bare body with no length byte in front of it still decodes.
+    out=$(sim_decode_imsi "3901621032547698")
     chk imsi-nolen-digits "$(fld "$out" imsi)"        "310260123456789"
     chk imsi-nolen-lenb   "$(fld "$out" length_byte)" "none"
 
+    # A body whose leading nibble is neither 1 nor 9 is not an EF_IMSI, and
+    # saying so beats decoding a parity nibble as a digit.
+    chk imsi-no-parity "$(sim_decode_imsi "13200621436587F9" >/dev/null 2>&1; echo $?)" "1"
     chk imsi-bad-hex   "$(sim_decode_imsi "ZZ" >/dev/null 2>&1; echo $?)" "2"
     chk imsi-too-short "$(sim_decode_imsi "0813" >/dev/null 2>&1; echo $?)" "1"
 
@@ -2632,8 +2730,8 @@ Usage: $0 COMMAND
   --read-record <rec> [mode] [le]   READ RECORD APDU (mode 04 = absolute)
   --get-response <le>               GET RESPONSE APDU
   --file-id <fid>                   name of a USIM file id
-  --decode-iccid <hex>              EF_ICCID record -> ICCID with nibble swap
-  --decode-imsi <hex>               EF_IMSI record -> IMSI, length byte handled
+  --decode-iccid <hex>              EF_ICCID (10 BCD octets) -> ICCID, Luhn checked
+  --decode-imsi <hex>               EF_IMSI -> IMSI, length byte and parity nibble
   --decode-ad <hex>                 EF_AD -> PIN/PUK/ADM flags
   --parse-ota <hex>                 OTA SMS TPDU -> TAR, SPI, KIc/KID, CNTR
   --ota-key <KIc> [<KID>]           one or both key identifiers -> key set, mode, strength
