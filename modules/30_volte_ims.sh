@@ -85,7 +85,7 @@ vims_py() {
     command -v python3 >/dev/null 2>&1 || {
         printf 'ERROR\tpython3 missing — cannot run the crypto or SIP engine\n' >&2; return 1; }
     python3 - "$@" <<'PY'
-import sys, os, struct, hashlib, socket, base64
+import sys, os, re, struct, hashlib, socket, base64
 
 try:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -546,13 +546,28 @@ def _common_request(d, method, requires_contact):
                     _bad_field('branch', d['branch'])))
     lines.append('Max-Forwards: 70')
     lines.append('From: %s;tag=%s' % (_addr(d['impi']), _bad_field('from_tag', d['from_tag'])))
-    to = _addr(d['impi'], d['to_tag'] or None)
+    to = _addr(d.get('to_user') or d['impi'], d['to_tag'] or None)
     lines.append('To: %s' % to)
     lines.append('Call-ID: %s' % _bad_field('callid', d['callid']))
     lines.append('CSeq: %d %s' % (int(d['cseq']), method))
     if requires_contact:
         lines.append('Contact: <sip:%s>' % _bad_field('contact', d['contact']))
     return lines
+
+
+def _authz_line(d, method, uri):
+    """The Authorization header for a request answering a 401/407."""
+    return ('Authorization: Digest username="%s", realm="%s", nonce="%s", '
+            'uri="%s", response="%s", algorithm=%s, qop=%s, nc=%s, cnonce="%s"'
+            % (_bad_field('user', d.get('user') or d['impi'].split('@')[0]),
+               _bad_field('realm', d['realm']),
+               _bad_field('nonce', d['nonce']),
+               _bad_field('uri', d['uri']),
+               _bad_field('response', d['response']),
+               _bad_field('algorithm', d['algorithm']),
+               _bad_field('qop', d['qop']),
+               _bad_field('nc', d['nc']),
+               _bad_field('cnonce', d['cnonce'])))
 
 
 def render_sip(kind, d):
@@ -605,8 +620,10 @@ def render_sip(kind, d):
                         _bad_field('algorithm', d['algorithm']),
                         _bad_field('qop', d['qop'])))
         body = ''
-    elif kind == 'invite':
+    elif kind in ('invite', 'invite-auth'):
         lines = _common_request(d, 'INVITE', True)
+        if kind == 'invite-auth':
+            lines.append(_authz_line(d, 'INVITE', d['ruri']))
         lines.append('Content-Type: application/sdp')
         rtp = d.get('rtp_port', '49152')
         ip = d.get('media_ip', d['host'])
@@ -619,9 +636,19 @@ def render_sip(kind, d):
                 'a=rtpmap:96 AMR/8000\r\n'
                 'a=fmtp:96 mode-set=0,1,2,3,4,5,6,7\r\n'
                 % (_bad_field('host', ip), _bad_field('host', ip), _bad_field('rtp_port', rtp)))
+    elif kind == 'ack':
+        # A 2xx ACK: its own transaction, the CSeq number of the INVITE it
+        # acknowledges, no Contact and no response.
+        lines = _common_request(d, 'ACK', False)
+        body = ''
+    elif kind in ('bye', 'bye-auth'):
+        lines = _common_request(d, 'BYE', False)
+        if kind == 'bye-auth':
+            lines.append(_authz_line(d, 'BYE', d['ruri']))
+        body = ''
     else:
         raise SipError('unknown message kind %r (want register, register-auth, '
-                       'challenge or invite)' % kind)
+                       'challenge, invite, ack or bye)' % kind)
 
     body_bytes = body.encode('utf-8')
     lines.append('Content-Length: %d' % len(body_bytes))
@@ -715,6 +742,236 @@ def cmd_sipsend(argv):
     return 0
 
 
+def _sip_head(data):
+    """Split a SIP message into status line, header map and body."""
+    text = data.decode('utf-8', 'replace')
+    head, _, body = text.partition('\r\n\r\n')
+    lines = head.split('\r\n')
+    hdrs = {}
+    for ln in lines[1:]:
+        k, sep, v = ln.partition(':')
+        if sep:
+            hdrs.setdefault(k.strip().lower(), []).append(v.strip())
+    return lines[0], hdrs, body
+
+
+def _digest_challenge(value):
+    scheme, _, rest = value.partition(' ')
+    params = {}
+    for part in rest.split(','):
+        k, sep, v = part.strip().partition('=')
+        if sep:
+            params[k.strip().lower()] = v.strip().strip('"')
+    return scheme.strip().lower(), params
+
+
+def _qop_chosen(params):
+    offered = [q.strip() for q in params.get('qop', '').split(',') if q.strip()]
+    if not offered:
+        return ''
+    for want in ('auth', 'auth-int'):
+        if want in offered:
+            return want
+    return offered[0]
+
+
+def digest_response(user, realm, password, method, uri, nonce, nc, cnonce, qop):
+    """RFC 2617 3.2.2.1 response, with password as bytes."""
+    ha1 = hashlib.md5(user.encode() + b':' + realm.encode()
+                      + b':' + password).hexdigest()
+    ha2 = hashlib.md5(('%s:%s' % (method, uri)).encode()).hexdigest()
+    if qop:
+        return hashlib.md5(('%s:%s:%s:%s:%s:%s'
+                            % (ha1, nonce, nc, cnonce, qop, ha2)).encode()).hexdigest()
+    return hashlib.md5(('%s:%s:%s' % (ha1, nonce, ha2)).encode()).hexdigest()
+
+
+def cmd_callflow(argv):
+    """Place a call, and keep the dialog consistent while doing it.
+
+    A REGISTER is one transaction; a call is a dialog. The same Call-ID and
+    From tag go out on every request, each transaction gets a new branch and
+    the next CSeq, the To tag is the one the answer assigned, the ACK is
+    addressed to the Contact the answer named, and the BYE reuses the dialog
+    the INVITE opened. Building those bytes one message at a time is how a
+    dialog gets its CSeq or its To tag wrong, so the state lives here.
+    """
+    if len(argv) < 2:
+        raise SystemExit('ERROR\tusage: callflow <host> <port> [key=value ...]')
+    host, port = argv[0], argv[1]
+    opt = {}
+    for a in argv[2:]:
+        if '=' not in a:
+            raise SystemExit('ERROR\targument %r is not key=value' % a)
+        k, v = a.split('=', 1)
+        opt[k] = v
+    try:
+        portn = int(port)
+    except ValueError:
+        print('ERROR\tport must be a number', file=sys.stderr)
+        return 2
+    if not 0 < portn < 65536:
+        print('ERROR\tport %d is outside 1..65535' % portn, file=sys.stderr)
+        return 2
+    timeout = float(os.environ.get('VIMS_SIP_TIMEOUT', opt.get('timeout', '2')) or '2')
+    try:
+        fam, typ, proto, _, addr = socket.getaddrinfo(
+            host, portn, 0, socket.SOCK_DGRAM)[0]
+    except socket.gaierror as exc:
+        print('ERROR\tcannot resolve %s: %s' % (host, exc), file=sys.stderr)
+        return 1
+    sock = socket.socket(fam, typ, proto)
+    sock.settimeout(timeout)
+
+    impi = opt.get('impi') or '310150123456789@ims.mnc001.mcc310.3gppnetwork.org'
+    domain = opt.get('domain') or 'ims.mnc001.mcc310.3gppnetwork.org'
+    to_user = opt.get('to') or opt.get('to_user') or '310150987654321@' + domain
+    auth_mode = opt.get('auth', 'none')
+    user = opt.get('user') or impi.split('@')[0]
+    secret = opt.get('password', '')
+    res_hex = opt.get('res', '')
+    enc = opt.get('encoding', 'hex')
+    base = {'host': host, 'port': str(portn), 'impi': impi, 'to_user': to_user,
+            'user': user, 'ruri': opt.get('ruri') or domain,
+            'domain': domain, 'realm': opt.get('realm') or domain,
+            'callid': opt.get('callid') or (_rand(8) + '@' + _rand(2)),
+            'from_tag': opt.get('from_tag') or _rand(4),
+            'contact': opt.get('contact') or ('%s@%s:%d'
+                                              % (impi.split('@')[0], host, portn)),
+            'to_tag': ''}
+    state = {'cseq': int(opt.get('cseq', '1'))}
+
+    def build(kind, **over):
+        # Every message needs a branch, a CSeq and the digest fields even when
+        # the dialog does not use them, so start from the same defaults the
+        # single-message builder uses and let the dialog override what it owns.
+        d = _sip_defaults('invite', dict(base))
+        d.update(over)
+        return render_sip(kind, d)
+
+    def wire(msg, label):
+        try:
+            sock.sendto(msg, addr)
+        except OSError as exc:
+            print('ERROR\tsend to %s:%d failed: %s' % (host, portn, exc),
+                  file=sys.stderr)
+            raise
+        print('sent\t%s\t%d' % (label, len(msg)))
+
+    def await_final():
+        # Provisional responses are real: 100 and 180 arrive before the answer
+        # and must not be mistaken for it.
+        while True:
+            try:
+                data, _peer = sock.recvfrom(65535)
+            except socket.timeout:
+                return None
+            except OSError:
+                return None
+            line, hdrs, body = _sip_head(data)
+            print('recv\t%s' % line)
+            parts = line.split(' ')
+            try:
+                code = int(parts[1])
+            except (IndexError, ValueError):
+                continue
+            if code >= 200:
+                return line, code, hdrs, body
+
+    def authenticate(line, code, hdrs, method, ruri):
+        """Answer a 401/407 and return the request that carries the answer."""
+        if auth_mode == 'none':
+            print('challenged\t%s' % line)
+            return None
+        hdr = (hdrs.get('www-authenticate') or hdrs.get('proxy-authenticate')
+               or [''])[0]
+        scheme, params = _digest_challenge(hdr)
+        nonce = params.get('nonce', '')
+        realm = params.get('realm', base['realm'])
+        qop = _qop_chosen(params)
+        if qop == 'auth-int':
+            print('ERROR\tauth-int needs a body hash this verb does not compute',
+                  file=sys.stderr)
+            return None
+        if auth_mode == 'aka':
+            if not res_hex:
+                print('ERROR\tauth=aka needs res=<hex>', file=sys.stderr)
+                return None
+            pw = (bytes.fromhex(res_hex) if enc == 'raw'
+                  else res_hex.lower().encode())
+        else:
+            pw = secret.encode()
+        nc = '00000001'
+        cnonce = _rand(4)
+        uri = 'sip:%s' % ruri
+        response = digest_response(base['user'], realm, pw, method, uri,
+                                   nonce, nc, cnonce, qop)
+        print('auth\t%s\trealm=%s\tqop=%s' % (scheme or 'digest', realm, qop or 'none'))
+        state['cseq'] += 1
+        over = dict(branch='z9hG4bK' + _rand(6), cseq=str(state['cseq']),
+                    realm=realm, nonce=nonce, uri=uri, response=response,
+                    qop=qop, nc=nc, cnonce=cnonce, user=base['user'],
+                    algorithm=params.get('algorithm', 'AKAv1-MD5'))
+        return build(method.lower() + '-auth', **over)
+
+    try:
+        wire(build('invite', cseq=str(state['cseq']),
+                   branch='z9hG4bK' + _rand(6)), 'INVITE')
+        resp = await_final()
+        if resp is None:
+            print('status\tno-answer')
+            return 3
+        line, code, hdrs, body = resp
+        if code in (401, 407):
+            msg = authenticate(line, code, hdrs, 'INVITE', base['ruri'])
+            if msg is None:
+                print('status\tchallenged-no-credentials')
+                return 3
+            wire(msg, 'INVITE(auth)')
+            resp = await_final()
+            if resp is None:
+                print('status\tno-answer-after-auth')
+                return 3
+            line, code, hdrs, body = resp
+        if code != 200:
+            # ACK for a non-2xx is the same transaction and a different form;
+            # this verb does not send it and says so rather than faking it.
+            print('status\tfailed-%d' % code)
+            print('note\tno ACK was sent: a non-2xx ACK belongs to the failed '
+                  'transaction and is a different message')
+            return 4
+        to_tag = ''
+        m = re.search(r';tag=([^;>\s]+)', (hdrs.get('to') or [''])[0])
+        if m:
+            to_tag = m.group(1)
+        ruri = base['ruri']
+        contact = (hdrs.get('contact') or [''])[0]
+        m = re.search(r'sip:([^>]+)', contact)
+        if m:
+            ruri = m.group(1)
+        print('dialog\tcallid=%s\tfrom_tag=%s\tto_tag=%s\truri=%s'
+              % (base['callid'], base['from_tag'], to_tag or '(none)', ruri))
+        wire(build('ack', ruri=ruri, to_tag=to_tag, cseq=str(state['cseq']),
+                   branch='z9hG4bK' + _rand(6)), 'ACK')
+        if opt.get('bye', '1') == '0':
+            print('status\tcall-up')
+            return 0
+        state['cseq'] += 1
+        wire(build('bye', ruri=ruri, to_tag=to_tag, cseq=str(state['cseq']),
+                   branch='z9hG4bK' + _rand(6)), 'BYE')
+        resp = await_final()
+        if resp is None:
+            print('status\tbye-no-answer')
+            return 3
+        if resp[1] == 200:
+            print('status\tcall-torn-down')
+            return 0
+        print('status\tbye-failed-%d' % resp[1])
+        return 4
+    finally:
+        sock.close()
+
+
 def cmd_akadigest(argv):
     """AKAv1-MD5 (RFC 3310 3.3): RES is the password of RFC 2617 digest.
 
@@ -802,6 +1059,8 @@ def main():
         return cmd_sipsend(rest)
     if mode == 'akadigest':
         return cmd_akadigest(rest)
+    if mode == 'callflow':
+        return cmd_callflow(rest)
     raise SystemExit('unknown mode ' + mode)
 
 
@@ -996,6 +1255,68 @@ vims_register_aka() {
     [[ -n "$contact" ]] && sargs+=("contact=$contact")
     [[ -n "$host" ]]    && sargs+=("host=$host")
     vims_py sipbuild register-auth "${sargs[@]}"
+}
+
+# ── placing a call ──────────────────────────────────────────────────────
+# A REGISTER is one transaction; a call is a dialog that has to keep its own
+# state. The bytes are built by vims_py callflow, which owns that state; this
+# wrapper only refuses when the authority flag is missing, splits the target,
+# and turns K/OP/RAND into the RES the AKAv1 answer needs -- because the
+# response depends on RES and not on the nonce, so it can be computed before
+# the challenge arrives.
+vims_call_flow() {
+    local target="${1:-}"
+    if [[ -z "$target" ]]; then
+        printf 'ERROR\tusage: --call <host>[:port] [key=value ...]\n' >&2
+        return 2
+    fi
+    shift
+    if [[ "${VIMS_LAB_OK:-0}" != "1" ]]; then
+        printf 'ERROR\trefusing to place a call without --i-have-a-lab-and-authorisation\n' >&2
+        printf 'WHY\tan INVITE is a real datagram to a real peer and a call is a real call; the flag records that the peer is a lab you control\n' >&2
+        return 2
+    fi
+    local host="$target" port="5060"
+    if [[ "$target" == *:* ]]; then
+        host="${target%%:*}"
+        port="${target##*:}"
+    fi
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+        printf 'ERROR\tport %q is outside 1..65535\n' "$port" >&2
+        return 2
+    fi
+    local k="" op="" opc="" rand="" had_res=""
+    local -a args=()
+    local a
+    for a in "$@"; do
+        case "$a" in
+            k=*)    k="${a#k=}" ;;
+            opc=*)  opc="${a#opc=}" ;;
+            op=*)   op="${a#op=}" ;;
+            rand=*) rand="${a#rand=}" ;;
+            res=*)  had_res="${a#res=}"; args+=("$a") ;;
+            *)      args+=("$a") ;;
+        esac
+    done
+    if [[ -n "$k" && -n "$rand" && -n "${op}${opc}" && -z "$had_res" ]]; then
+        local gsm="$IMSISTING_ROOT/tools/gsm_crypto.py" gout res
+        if [[ ! -f "$gsm" ]]; then
+            printf 'ERROR\tmissing %s: it is the Milenage implementation\n' "$gsm" >&2
+            return 1
+        fi
+        local -a margs=(--milenage --ki "$k" --rand "$rand")
+        [[ -n "$op" ]]  && margs+=(--op "$op")
+        [[ -n "$opc" ]] && margs+=(--opc "$opc")
+        gout=$(python3 "$gsm" "${margs[@]}" 2>&1) || {
+            printf 'ERROR\tMilenage failed: %s\n' "$(printf '%s' "$gout" | head -1)" >&2
+            return 1
+        }
+        res=$(printf '%s\n' "$gout" | awk -F'\t' '$1=="f2"{print tolower($2); exit}')
+        [[ -n "$res" ]] || { printf 'ERROR\tMilenage produced no RES\n' >&2; return 1; }
+        printf 'res\t%s\n' "$res" >&2
+        args+=("res=$res")
+    fi
+    vims_py callflow "$host" "$port" "${args[@]}"
 }
 
 # ── IMP4GT model ────────────────────────────────────────────────────────
@@ -1501,6 +1822,133 @@ PYL
     chk aka-bad-encoding "$(vims_register_aka $aka_fix nonce="$aka_nonce" encoding=b64 >/dev/null 2>&1; echo $?)" "2"
     chk aka-nonce-mismatch "$(vims_register_aka k=465b5ce8b199b49faa5f0a2ee238a6bc op=cdc202d5123e20f62b6d676ac72cb318 rand=000102030405060708090a0b0c0d0e0f nonce="$aka_nonce" 2>&1 >/dev/null | grep -c 'does not decode to that RAND')" "1"
 
+    # 13. Placing a call: a dialog has to stay one dialog -- the same Call-ID
+    #     and From tag on every request, the To tag the answer assigned, a new
+    #     branch and the next CSeq per transaction, and the ACK addressed to
+    #     the Contact the answer named. A scripted peer is the proof: it logs
+    #     what actually arrived and the arms below read that log back.
+    local cport clog cpid cout carc
+    cport=$(( 30000 + RANDOM % 20000 ))
+    clog="$d/call.log"
+    cat > "$d/peer.py" <<'PYP'
+import socket, sys
+port, log, mode = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("127.0.0.1", port))
+s.settimeout(10.0)
+out = open(log, "w")
+
+
+def recv():
+    data, peer = s.recvfrom(65535)
+    text = data.decode("utf-8", "replace")
+    lines = text.split("\r\n\r\n")[0].split("\r\n")
+    h = {}
+    for ln in lines[1:]:
+        k, sep, v = ln.partition(":")
+        h[k.strip().lower()] = v.strip()
+    return peer, lines[0], h
+
+
+def reply(peer, text):
+    s.sendto(text.encode(), peer)
+
+
+def common(h, tag):
+    return ("Via: %s\r\nFrom: %s\r\nTo: %s;tag=%s\r\nCall-ID: %s\r\nCSeq: %s\r\n"
+            % (h.get("via", ""), h.get("from", ""), h.get("to", ""), tag,
+               h.get("call-id", ""), h.get("cseq", "")))
+
+
+def logreq(line, h):
+    out.write("REQ\t%s\tcseq=%s\tcallid=%s\tto=%s\tauthz=%s\n"
+              % (line, h.get("cseq", ""), h.get("call-id", ""),
+                 h.get("to", ""), h.get("authorization", "")))
+    out.flush()
+
+
+peer, line, h = recv()
+logreq(line, h)
+if mode == "auth":
+    reply(peer, "SIP/2.0 401 Unauthorized\r\n" + common(h, "beef")
+          + 'WWW-Authenticate: Digest realm="ims.test", nonce="99887766", '
+            'algorithm=AKAv1-MD5, qop="auth"\r\n'
+          + "Content-Length: 0\r\n\r\n")
+    peer, line, h = recv()
+    logreq(line, h)
+reply(peer, "SIP/2.0 100 Trying\r\n" + common(h, "cafe") + "Content-Length: 0\r\n\r\n")
+reply(peer, "SIP/2.0 200 OK\r\n" + common(h, "cafe")
+      + "Contact: <sip:callee@127.0.0.1:%d>\r\nContent-Length: 0\r\n\r\n" % port)
+peer, line, h = recv()
+logreq(line, h)
+peer, line, h = recv()
+logreq(line, h)
+reply(peer, "SIP/2.0 200 OK\r\n" + common(h, "cafe") + "Content-Length: 0\r\n\r\n")
+out.close()
+PYP
+    python3 "$d/peer.py" "$cport" "$clog" plain &
+    cpid=$!
+    sleep 0.3
+    cout=$(VIMS_LAB_OK=1 VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
+               to=310150987654321@ims.test domain=ims.test 2>/dev/null)
+    carc=$?
+    wait "$cpid" 2>/dev/null || true
+    chk call-rc "$carc" "0"
+    chk call-status "$(fld "$cout" status)" "call-torn-down"
+    chk call-invite-cseq "$(awk -F'\t' '$2 ~ /^INVITE/ {print $3}' "$clog" | head -1)" "cseq=1 INVITE"
+    chk call-ack-ruri "$(awk -F'\t' '$2 ~ /^ACK/ {print $2}' "$clog")" \
+        "ACK sip:callee@127.0.0.1:$cport SIP/2.0"
+    chk call-ack-tag "$(awk -F'\t' '$2 ~ /^ACK/ {print $5}' "$clog" | grep -c 'tag=cafe')" "1"
+    chk call-ack-cseq "$(awk -F'\t' '$2 ~ /^ACK/ {print $3}' "$clog")" "cseq=1 ACK"
+    chk call-bye-cseq "$(awk -F'\t' '$2 ~ /^BYE/ {print $3}' "$clog")" "cseq=2 BYE"
+    chk call-one-callid "$(awk -F'\t' 'NF>3 {print $4}' "$clog" | sort -u | wc -l)" "1"
+    chk call-dialog-line "$(printf '%s\n' "$cout" | grep -c '^dialog	callid=')" "1"
+
+    # 14. The challenge path: without credentials the verb says it was
+    #     challenged and stops; with a password or with RES it answers, and the
+    #     Authorization that reaches the peer carries the challenge's realm.
+    cport=$(( 30000 + RANDOM % 20000 ))
+    clog="$d/call-auth.log"
+    python3 "$d/peer.py" "$cport" "$clog" auth &
+    cpid=$!
+    sleep 0.3
+    cout=$(VIMS_LAB_OK=1 VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
+               domain=ims.test 2>/dev/null)
+    carc=$?
+    wait "$cpid" 2>/dev/null || true
+    chk call-auth-bare-rc "$carc" "3"
+    chk call-auth-bare-status "$(fld "$cout" status)" "challenged-no-credentials"
+
+    cport=$(( 30000 + RANDOM % 20000 ))
+    clog="$d/call-auth2.log"
+    python3 "$d/peer.py" "$cport" "$clog" auth &
+    cpid=$!
+    sleep 0.3
+    cout=$(VIMS_LAB_OK=1 VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
+               domain=ims.test auth=digest password=secret 2>/dev/null)
+    carc=$?
+    wait "$cpid" 2>/dev/null || true
+    chk call-auth-digest-rc "$carc" "0"
+    chk call-auth-digest-realm "$(awk -F'\t' '$6 ~ /realm="ims.test"/ {n++} END{print n+0}' "$clog")" "1"
+    chk call-auth-digest-user "$(awk -F'\t' '$6 ~ /username="310150123456789"/ {n++} END{print n+0}' "$clog")" "1"
+    chk call-auth-digest-cseq "$(awk -F'\t' '$2 ~ /^INVITE/ {print $3}' "$clog" | tail -1)" "cseq=2 INVITE"
+
+    cport=$(( 30000 + RANDOM % 20000 ))
+    clog="$d/call-auth3.log"
+    python3 "$d/peer.py" "$cport" "$clog" auth &
+    cpid=$!
+    sleep 0.3
+    cout=$(VIMS_LAB_OK=1 VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
+               domain=ims.test auth=aka res=a54211d5e3ba50bf 2>/dev/null)
+    carc=$?
+    wait "$cpid" 2>/dev/null || true
+    chk call-auth-aka-rc "$carc" "0"
+    chk call-auth-aka-alg "$(awk -F'\t' '$6 ~ /algorithm=AKAv1-MD5/ {n++} END{print n+0}' "$clog")" "1"
+
+    chk call-no-authority "$(vims_call_flow 127.0.0.1:9 >/dev/null 2>&1; echo $?)" "2"
+    chk call-no-target "$(VIMS_LAB_OK=1 vims_call_flow >/dev/null 2>&1; echo $?)" "2"
+    chk call-bad-port "$(VIMS_LAB_OK=1 vims_call_flow 127.0.0.1:99999 >/dev/null 2>&1; echo $?)" "2"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
     trap - EXIT
@@ -1523,6 +1971,7 @@ vims_menu() {
   [6]  IMP4GT model (sequence + preconditions)
   [7]  write a handoff plan (revolte-capture / imp4gt-lab)
   [8]  register a UE with a real AKAv1-MD5 response
+  [9]  place a call against a lab peer (INVITE, auth, ACK, BYE)
   [0]  back
 
 M
@@ -1543,6 +1992,18 @@ M
             5) read -rp "  hex> " h; vims_cmd_ims_registration "$h" | column -t -s$'\t' 2>/dev/null || true
                read -rp "  press enter " _ ;;
             6) vims_imp4gt_model | column -t -s$'\t' 2>/dev/null || vims_imp4gt_model
+               read -rp "  press enter " _ ;;
+            9) read -rp "  host[:port]> " h; read -rp "  callee> " t
+               read -rp "  auth none|digest|aka> " m
+               if [[ "$m" == "aka" ]]; then
+                   read -rp "  K hex> " k; read -rp "  op hex> " o; read -rp "  RAND hex> " r
+                   VIMS_LAB_OK=1 vims_call_flow "$h" "to=$t" "auth=aka" "k=$k" "op=$o" "rand=$r"
+               elif [[ "$m" == "digest" ]]; then
+                   read -rsp "  password> " pw; echo
+                   VIMS_LAB_OK=1 vims_call_flow "$h" "to=$t" "auth=digest" "password=$pw"
+               else
+                   VIMS_LAB_OK=1 vims_call_flow "$h" "to=$t"
+               fi
                read -rp "  press enter " _ ;;
             8) read -rp "  K hex> " k; read -rp "  op or opc> " t
                read -rp "  $t hex> " o; read -rp "  RAND hex> " r
@@ -1591,6 +2052,7 @@ vims_cli_main() {
         --imei-leak)              vims_imei_leak "${1:-}" ;;
         --register-spoof)         vims_register_spoof "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --register-aka)           vims_register_aka "$@" ;;
+        --call)                   vims_call_flow "$@" ;;
         --plan)                   vims_plan "${1:-}" ;;
         --selftest)               vims_selftest ;;
         --menu)                   vims_menu ;;
@@ -1617,6 +2079,10 @@ Usage: $0 COMMAND
                                             hashed into the RFC 2617 digest
                                             (encoding=hex|raw chooses how RES is
                                             hashed, since RFC 3310 does not say)
+  --call <host>[:port] [key=value ...]      place a call: INVITE, answer the
+                                            challenge, ACK, BYE (needs the flag)
+                                            auth=none|digest|aka, password=,
+                                            res=, to=, domain=, bye=0
   --ims-registration <hex> [aka-res-hex]    IMS REGISTER/401/AKA flow
   --detect-keystream-reuse <pcap> [port]    reuse detector
   --plan <revolte-capture|imp4gt-lab>       write a handoff plan

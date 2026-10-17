@@ -331,6 +331,7 @@ fk_guard_matrix() {
 30_volte_ims|--sip-build|||60
 30_volte_ims|--sip-send|||60
 30_volte_ims|--register-aka|k=465b5ce8b199b49faa5f0a2ee238a6bc op=cdc202d5123e20f62b6d676ac72cb318 rand=23553cbe9637a89d218ae64dae47bf35||30
+30_volte_ims|--call|127.0.0.1:9||20
 32_nas_signaling|--rate|/nonexistent.pcap
 33_jamming_detect|--analyse|/nonexistent.iq
 39_ta_geoloc|--trilaterate|/nonexistent.tsv

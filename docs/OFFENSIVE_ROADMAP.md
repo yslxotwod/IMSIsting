@@ -69,8 +69,8 @@ and a testbed. Every computational half is already built and verified offline.
 | Capability | Module | Built today | Missing to fire |
 |---|---|---|---|
 | **O11 — ReVoLTE** | `30_volte_ims` | The keystream-reuse algebra is real and demonstrated (two plaintexts XOR to the XOR of plaintexts; known-plaintext prefix recovers the rest), AES-CTR against NIST SP 800-38A | RX: sniff two calls on the same keystream |
-| **O12 — IMP4GT** | `30_volte_ims` | Identity-mapping impersonation, the mutual-auth bypass sequence and its preconditions | TX: the impersonation against a lab IMS |
-| **IMS registration hijack** | `30_volte_ims` | SIP parse, registration flows | TX: SIP REGISTER spoofing |
+| **O12 — IMP4GT** | `30_volte_ims` | Identity-mapping impersonation, the mutual-auth bypass sequence and its preconditions; the dialog it rides on is built and tested (`--call`: INVITE, answer the challenge, ACK, BYE, with the To tag and CSeq a dialog requires) | TX: the impersonation against a lab IMS |
+| **IMS registration hijack** | `30_volte_ims` | Built: a strict SIP builder, `--sip-send` behind the authority flag, and `--register-aka`, which runs Milenage for RES and hashes it into the AKAv1-MD5 digest the 401 asked for (both RES encodings computed, since RFC 3310 does not fix one) | Needs an IMS core to answer: the challenge nonce and a subscriber on that core are the two inputs the message cannot invent |
 
 ### Tracking and RF
 
