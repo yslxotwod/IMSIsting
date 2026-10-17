@@ -1187,11 +1187,21 @@ took it, `delivery` says `unconfirmed` unless something replied, and a closed
 port on loopback shows as silence rather than as a failure, which is the truth
 about UDP.
 
-*What the other four modules still need.* `13_nr_core` wants the UDP send for
+*Wired: `11_lte_core --diameter-send` and `40_sba_pivot --sbi-send`.* One file,
+`tools/stream_assoc.py`, because Diameter on 3868 and an SBI NF on 443 differ in
+what the octets mean and not in how they travel — 16 assertions, and the pair
+that matters is the negative one: a self-signed peer **fails** against the
+default trust store (`tls-failed`, nothing sent) and succeeds only when the
+caller passed `--insecure`, in which case the report says `verification none`
+and that the far end "authenticated nobody". A TLS connection that verified
+nothing is not the same object as one that did, and the log has to show it.
+`--sbi-send` reports `framing none` on purpose: it carries HTTP/2 frames, it
+does not make them.
+
+*What the two remaining modules still need.* `13_nr_core` wants the UDP send for
 PFCP *and* a session-establishment builder (it has none — the encoder gap comes
-first). `11_lte_core`'s Diameter half wants TCP, and `40_sba_pivot` wants HTTP/2
-over TLS; both are one client, so they should be one file. `26_ss7_map` wants
-M3UA on PPID 132, which is already `sctp_assoc.py --ppid 132`.
+first). `26_ss7_map` wants M3UA on PPID 132, which is already
+`sctp_assoc.py --ppid 132`; that is one verb, not one file.
 
 *The eight that are placement.*
 

@@ -2868,6 +2868,11 @@ lcore_selftest() {
     chk gtpc-send-disarmed     "$(fld "$out" status)" "disarmed"
     chk gtpc-send-disarmed-rc  "$(LTE_ARMED=0 lcore_cmd_gtpc_send 203.0.113.9 >/dev/null 2>&1; echo $?)" "3"
     chk gtpc-send-would-send   "$(fld "$out" would_send | grep -c 'GTPv2-C, UDP')" "1"
+    out=$(LTE_ARMED=0 lcore_cmd_diameter_send hss.example 2>/dev/null)
+    chk diam-send-disarmed     "$(fld "$out" status)" "disarmed"
+    chk diam-send-disarmed-rc  "$(LTE_ARMED=0 lcore_cmd_diameter_send hss.example >/dev/null 2>&1; echo $?)" "3"
+    chk diam-send-would-send   "$(fld "$out" would_send | grep -c 'hss.example:3868')" "1"
+    chk diam-send-armed-nohost "$(LTE_ARMED=1 lcore_cmd_diameter_send >/dev/null 2>&1; echo $?)" "2"
     chk gtpc-send-armed-nohost "$(LTE_ARMED=1 lcore_cmd_gtpc_send >/dev/null 2>&1; echo $?)" "2"
     chk gtpc-send-tool-present "$([[ -f "$IMSISTING_ROOT/tools/udp_assoc.py" ]] && echo yes || echo no)" "yes"
 
@@ -3017,6 +3022,42 @@ lcore_cmd_gtpc_send() {
     timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${LTE_WAIT:-0}"
 }
 
+# Diameter's other leg.  The SCTP path belongs to tools/sctp_assoc.py (it is
+# what the small cell's backhaul uses); a Diameter interconnect is just as often
+# TCP 3868 behind TLS, and that is this.  Armed for the same reason as the other
+# two: the octets build without a network, the socket is a separate decision.
+lcore_cmd_diameter_send() {
+    local host="${1:-}" port="${2:-3868}" hex="${3:-}"
+    local tool="$IMSISTING_ROOT/tools/stream_assoc.py"
+    if [[ "${LTE_ARMED:-0}" != "1" ]]; then
+        printf 'status\tdisarmed\n'
+        printf 'reason\ta Diameter message is sent only when LTE_ARMED=1; the octets build either way\n'
+        printf 'would_send\t%s to %s:%s\n' \
+            "${hex:-<an S6a Update-Location-Request>}" "${host:-<no host given>}" "$port"
+        return 3
+    fi
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\tneed <hss-or-dra-host> [port] [hex]\n' >&2
+        return 2
+    fi
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot send\n' "$tool" >&2; return 1; }
+    if [[ -z "$hex" ]]; then
+        hex=$(lcore_cmd_build_ulr 310150123456789 | awk -F'\t' '$1=="hex"{print $2; exit}')
+        [[ -n "$hex" ]] || { printf 'ERROR\tthe Diameter builder returned no octets\n' >&2; return 1; }
+    fi
+    printf 'leg\tDiameter S6a/S6d\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    if [[ "${LTE_DIAMETER_TLS:-0}" == "1" ]]; then
+        printf 'encapsulation\ttls\n'
+        timeout 30 python3 "$tool" send "$host" "$port" "$hex" --tls \
+            ${LTE_DIAMETER_INSECURE:+--insecure} --wait "${LTE_WAIT:-0}"
+    else
+        printf 'encapsulation\ttcp\n'
+        printf 'note\tno CER/CEA handshake and no answer matching; this sends and reads\n'
+        timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${LTE_WAIT:-0}"
+    fi
+}
+
 lcore_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -3031,6 +3072,7 @@ lcore_cli_main() {
         --gtp-csr-forge) lcore_cmd_gtp_csr_forge "${1:-310150123456789}" "${2:-internet}" "${3:-310}" "${4:-260}" ;;
         --gtp-modify-bearer) lcore_cmd_gtp_modify_bearer "${1:-}" "${2:-5}" ;;
         --gtpc-send)     lcore_cmd_gtpc_send "${1:-}" "${2:-2123}" "${3:-}" ;;
+        --diameter-send) lcore_cmd_diameter_send "${1:-}" "${2:-3868}" "${3:-}" ;;
         --gtpdoor-detect) lcore_cmd_gtpdoor "${1:-}" ;;
         --cdr-fraud-check) lcore_cmd_cdr_fraud "${1:-}" ;;
         --fs20-audit)    lcore_cmd_fs20 "${1:-}" ;;
@@ -3059,6 +3101,9 @@ Usage: $0 COMMAND
   --gtpc-send <host> [port] [hex]
                               send the Create Session Request over UDP 2123
                               (needs LTE_ARMED=1; reports disarmed otherwise)
+  --diameter-send <host> [port] [hex]
+                              send a Diameter message over TCP 3868, or TLS
+                              with LTE_DIAMETER_TLS=1 (needs LTE_ARMED=1)
   --gtpdoor-detect <hex>      GTPdoor-class Echo abuse detection
   --cdr-fraud-check <tsv>     CDR overbilling/bypass anomaly
   --fs20-audit <config>       GSMA FS.20 GTP interconnect controls

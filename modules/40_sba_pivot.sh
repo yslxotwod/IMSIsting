@@ -1119,6 +1119,15 @@ sbap_selftest() {
     hp=$(sbap_h2_parse 00001901250000000100000001ff828684410f7777772e6578616d706c652e636f6d)
     chk h2-priority-weight-256 "$(fld "$hp" weight)" "256"
 
+    # The SBI's socket is armed, and a send without framing is refused rather
+    # than guessed at: this file sends frames, it does not make them.
+    out=$(SBA_ARMED=0 sbap_cmd_sbi_send nrf.example 443 2>/dev/null)
+    chk sbi-send-disarmed     "$(fld "$out" status)" "disarmed"
+    chk sbi-send-disarmed-rc  "$(SBA_ARMED=0 sbap_cmd_sbi_send nrf.example >/dev/null 2>&1; echo $?)" "3"
+    chk sbi-send-armed-noframes "$(SBA_ARMED=1 sbap_cmd_sbi_send nrf.example >/dev/null 2>&1; echo $?)" "2"
+    chk sbi-send-says-why "$(SBA_ARMED=1 sbap_cmd_sbi_send nrf.example 2>&1 >/dev/null | grep -c 'does not make them')" "1"
+    chk sbi-send-tool-present "$([[ -f "$IMSISTING_ROOT/tools/stream_assoc.py" ]] && echo yes || echo no)" "yes"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1160,6 +1169,40 @@ M
     done
 }
 
+# ── the last hop ────────────────────────────────────────────────────────
+# The SBI is HTTP/2 over TLS on 443, and both halves matter: this file builds
+# and parses the frames, tools/stream_assoc.py owns the socket.  It takes the
+# octets whole on purpose -- a caller who hands it JSON and no framing gets a
+# valid TLS record and an invalid HTTP/2 message, so the report says "framing
+# none" rather than pretending to be a client.  Armed: SBA_ARMED=1.
+sbap_cmd_sbi_send() {
+    local host="${1:-}" port="${2:-443}" hex="${3:-}"
+    local tool="$IMSISTING_ROOT/tools/stream_assoc.py"
+    if [[ "${SBA_ARMED:-0}" != "1" ]]; then
+        printf 'status\tdisarmed\n'
+        printf 'reason\tan SBI request is sent only when SBA_ARMED=1; the frames build either way\n'
+        printf 'would_send\t%s to %s:%s\n' "${hex:-<a framed HTTP/2 request>}" \
+            "${host:-<no host given>}" "$port"
+        return 3
+    fi
+    if [[ -z "$host" || -z "$hex" ]]; then
+        printf 'ERROR\tneed <nf-host> [port] <framed-http2-hex>: this sends frames, it does not make them\n' >&2
+        return 2
+    fi
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot send\n' "$tool" >&2; return 1; }
+    printf 'leg\tSBI, HTTP/2 over TLS\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'framing\tnone: the octets are sent as given, so they must already be HTTP/2 frames\n'
+    if [[ "${SBI_PLAIN:-0}" == "1" ]]; then
+        printf 'encapsulation\ttcp (SBI_PLAIN=1; never a real core)\n'
+        timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${SBI_WAIT:-0}"
+    else
+        printf 'encapsulation\ttls\n'
+        timeout 30 python3 "$tool" send "$host" "$port" "$hex" --tls \
+            ${SBI_INSECURE:+--insecure} --wait "${SBI_WAIT:-0}"
+    fi
+}
+
 sbap_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -1168,6 +1211,7 @@ sbap_cli_main() {
         --h2-types)    sbap_h2_types ;;
         --h2-build)    sbap_h2_build "${1:-0}" "${2:-0}" "${3:-0}" "${4:-}" ;;
         --h2-parse)    sbap_h2_parse "${1:-}" ;;
+        --sbi-send)    sbap_cmd_sbi_send "${1:-}" "${2:-443}" "${3:-}" ;;
         --settings)    sbap_settings_parse "${1:-}" ;;
         --hpack)       sbap_cmd_hpack "$@" ;;
         --nrf)         sbap_nrf_discovery "${1:-UDM}" "${2:-AMF}" ;;

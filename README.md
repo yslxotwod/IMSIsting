@@ -99,8 +99,11 @@ Diameter/GTP encoders that emit real octets, and until now **no transport**.
 `--gtpc-send` closes the GTP-C half through `tools/udp_assoc.py` — armed
 (`LTE_ARMED=1`), and honest about what a datagram proves: the report says
 `sent` and separately whether anything answered, because UDP has no
-acknowledgement and silence is not a delivery. Diameter still has no client;
-its SCTP leg is `tools/sctp_assoc.py`, which the small cell drives.
+acknowledgement and silence is not a delivery. `--diameter-send` closes the
+Diameter half through `tools/stream_assoc.py`: TCP 3868, TLS when
+`LTE_DIAMETER_TLS=1`, and verification on by default — an unverified peer is
+reported in as many words and is never the quiet default. No CER/CEA handshake
+is performed and no answer is matched to a request.
 
 ### 5G / NR
 | Module | Description | Attack |
@@ -228,8 +231,10 @@ The `partial` rows, so the status is not a mystery:
   UE, and it is real arithmetic with GDOP. It has no measurement front end: the
   timing-advance values it solves from come from a capture or a plan.
 - **`40_sba_pivot`** builds HTTP/2 frames byte-exactly, including a real Rapid
-  Reset pair (`--rapid-reset`), and audits a JWT's audience and scope. It has no
-  HTTP/2 client, so nothing reaches an NF.
+  Reset pair (`--rapid-reset`), and audits a JWT's audience and scope.
+  `--sbi-send` carries a framed request to an NF over TLS (`SBA_ARMED=1`), and
+  says `framing none` in the report: it is a socket under the frames, not the
+  client that makes them.
 
 Two more honest notes, since they are the kind of thing a status column can hide:
 
