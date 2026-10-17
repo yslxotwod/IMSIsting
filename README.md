@@ -213,7 +213,11 @@ The `partial` rows, so the status is not a mystery:
 - **`37_femtocell`** encodes CSG identities, builds a byte-exact S1 Setup Request
   and decodes it back (both asserted against `tshark` in `tools/s1ap_asn1.py`),
   builds both HNBAP registration messages (`tools/hnbap_asn1.py`, dissected by
-  `tshark` on SCTP PPID 20),
+  `tshark` on SCTP PPID 20), carries a handset's NAS (`--s1ap-nas`) and the
+  Paging that calls it back, and opens the association itself (`--s1-attach`,
+  `--iuh-attach`) through `tools/sctp_assoc.py` — armed, so it reports
+  `disarmed` and exits 3 unless `FEMT_S1_ARMED=1`, and it always names the PPID
+  it actually put on the wire because a wrong one is a silent drop,
   flags a closed cell out of a real SIB1 codec, and parses TR-069 config for
   real. It has no SCTP client, so nothing reaches an MME — the association is
   the handoff, and the module says so.

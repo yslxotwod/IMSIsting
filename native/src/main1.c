@@ -15691,16 +15691,16 @@ static ModuleSubmenuEntry bbnd_entries[] = {
 static ModuleSubmenuEntry vowi_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
-      "--walk:Walk|--epdg=001 01|--types:Types" },
+      "--walk:Walk|--epdg=001 01|--types:Types|~--payload|~--transform|~--id-type|~--notify|~--null-check" },
     { "IKE",
       "channel-secure-symbolic",
       "--ike-parse:Parse IKE|--ike-build:Build IKE" },
     { "EAP",
       "auth-smartcard-symbolic",
-      "--eap-parse:Parse EAP|--eap-build:Build EAP|--nai=001010000000001 310 260" },
+      "--eap-parse:Parse EAP|--eap-build:Build EAP|--nai=001010000000001 310 260|~--eap-attr" },
     { "Crypto",
       "security-high-symbolic",
-      "--integrity:Integrity|--encr:Encryption|--plan:Plan" },
+      "--integrity:Integrity|--encr:Encryption|--plan:Plan|~--dh|~--esn" },
 };
 /* --------------------------------------------------------------------------
    The small-cell page, laid out the way the LTE CVE Kit page is: a named view
@@ -16039,10 +16039,19 @@ scell_build_backhaul(AppState *state, const char *module_id,
         "0x01 0x0A0B0C0D",
         "MME code and M-TMSI. Release the context, page, and the handset "
         "re-attaches where the page came from."));
+    gtk_box_append(GTK_BOX(s1_body), scell_arg_row(state, module_id, status,
+        "Open the Association", "--s1-attach",
+        "203.0.113.9 36412",
+        "MME host, then an optional port and payload. The host path is the only "
+        "one here that opens a socket, so it is armed: the module reports "
+        "disarmed, exits 3 and names what it would have sent unless it is "
+        "invoked with FEMT_S1_ARMED=1."));
     gtk_box_append(GTK_BOX(s1_body), fkit_note(
-        "This builds the message, not the association. An S1 Setup only becomes "
-        "a registration when an MME answers on an SCTP association, and there is "
-        "still no SCTP client in this tree, so the handoff is unchanged."));
+        "The three messages above need no network. The association does, and it "
+        "is the only thing in this module that leaves the process: SCTP with PPID "
+        "18, which is what an MME demultiplexes S1AP on. A wrong PPID establishes "
+        "the association and then gets the payload silently dropped, so the "
+        "report always carries the PPID it actually sent."));
     gtk_box_append(GTK_BOX(body), s1);
 
     GtkWidget *iuh_body;
@@ -16064,11 +16073,17 @@ scell_build_backhaul(AppState *state, const char *module_id,
         "hex, or a file of it",
         "Procedure, criticality, one row per information element, and the "
         "identity fields the message carries."));
+    gtk_box_append(GTK_BOX(iuh_body), scell_arg_row(state, module_id, status,
+        "Open the Association", "--iuh-attach",
+        "203.0.113.9 29169",
+        "HNB-GW host, then an optional port and payload. Armed like the S1 one: "
+        "PPID 20 is what the Iuh uses for HNBAP, and the report always names the "
+        "PPID it sent."));
     gtk_box_append(GTK_BOX(iuh_body), fkit_note(
-        "Both messages are byte-exact and neither opens an association: an HNB "
-        "only becomes a node when an HNB-GW answers on SCTP, and the tree has no "
-        "SCTP client. The selftest pins both octet strings so a codec change "
-        "fails here rather than on a real gateway."));
+        "Both messages are byte-exact, and the selftest pins both octet strings "
+        "so a codec change fails here rather than on a real gateway. The "
+        "association is armed for the same reason the S1 one is: a build should "
+        "not be one typo away from a live socket."));
     gtk_box_append(GTK_BOX(body), iuh);
 
     gtk_box_append(GTK_BOX(body), fkit_note(

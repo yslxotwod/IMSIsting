@@ -563,6 +563,72 @@ femt_s1ap_decode() {
     femt_s1_asn1 decode "$hex"
 }
 
+# ── the last hop ────────────────────────────────────────────────────────
+# Everything above builds octets; this is the only thing in the module that
+# puts them on an association.  It is armed, not automatic: a build must never
+# be one typo away from opening a socket to whatever address got pasted in.
+# tools/sctp_assoc.py does the SCTP, and it carries the PPID the far stack
+# demultiplexes on -- 18 for an MME, 20 for an HNB-GW.  A wrong PPID is a
+# silent drop: the association establishes and the payload is discarded.
+femt_sctp_send() {
+    local ppid="${1:-}" port="${2:-}" hex="${3:-}" host="${4:-}"
+    local py="$IMSISTING_ROOT/tools/sctp_assoc.py"
+    if [[ ! -f "$py" ]]; then
+        printf 'ERROR\t%s is missing; cannot open an association\n' "$py" >&2
+        return 1
+    fi
+    timeout 60 python3 "$py" send "$host" "$port" "$hex" --ppid "$ppid" \
+        --timeout "${FEMT_S1_TIMEOUT:-5}" --wait "${FEMT_S1_WAIT:-0}"
+}
+
+femt_s1_attach() {
+    local host="${1:-}" port="${2:-36412}" hex="${3:-}"
+    if [[ "${FEMT_S1_ARMED:-0}" != "1" ]]; then
+        printf 'status\tdisarmed\n'
+        printf 'reason\tan association is opened only when FEMT_S1_ARMED=1; the octets above are built either way\n'
+        printf 'would_send\t%s ppid 18 to %s:%s\n' "${hex:-<an S1 Setup built from the default profile>}" "${host:-<no host given>}" "$port"
+        return 3
+    fi
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\tneed <mme-host> [port] [hex]\n' >&2
+        return 2
+    fi
+    if [[ -z "$hex" ]]; then
+        hex=$(femt_s1setup 001 01 0xA1C01 LabHeNB 00f1 \
+              | awk -F'\t' '$1=="s1ap_hex"{print $2; exit}')
+        [[ -n "$hex" ]] || { printf 'ERROR\tthe codec returned no octets\n' >&2; return 1; }
+    fi
+    printf 'leg\tS1AP\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'ppid\t18\n'
+    femt_sctp_send 18 "$port" "$hex" "$host"
+    return $?
+}
+
+femt_iuh_attach() {
+    local host="${1:-}" port="${2:-29169}" hex="${3:-}"
+    if [[ "${FEMT_S1_ARMED:-0}" != "1" ]]; then
+        printf 'status\tdisarmed\n'
+        printf 'reason\tan association is opened only when FEMT_S1_ARMED=1; the octets above are built either way\n'
+        printf 'would_send\t%s ppid 20 to %s:%s\n' "${hex:-<an HNB Register built from the default profile>}" "${host:-<no host given>}" "$port"
+        return 3
+    fi
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\tneed <hnb-gw-host> [port] [hex]\n' >&2
+        return 2
+    fi
+    if [[ -z "$hex" ]]; then
+        hex=$(femt_hnbap_asn1 hnb-register --hnb-id deadbeef --cell-id 0xA1C0100 \
+              | awk -F'\t' '$1=="hex"||$1=="hnbap_hex"{print $2; exit}')
+        [[ -n "$hex" ]] || { printf 'ERROR\tthe codec returned no octets\n' >&2; return 1; }
+    fi
+    printf 'leg\tIuh\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'ppid\t20\n'
+    femt_sctp_send 20 "$port" "$hex" "$host"
+    return $?
+}
+
 # The two NAS-carrying S1AP messages are one verb because they are one shape:
 # the same three IEs with the ids swapped round, and only the procedure code
 # and the direction differ.  Building them lets a box carry a handset's
@@ -968,6 +1034,24 @@ CFG
     chk s1ap-paging-tmsi \
         "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie" && $2 ~ /^UEPagingID /{print $2}' | grep -c 'mTMSI=0x0a0b0c0d')" "1"
 
+    # 4c-ter. The last hop is armed.  A build must not be one typo away from an
+    #        association, so both attach verbs refuse with rc 3 and name what
+    #        they would have sent, and the refusal never opens a socket.  The
+    #        association itself is exercised by tools/sctp_assoc.py --selftest,
+    #        which has no business running inside a module selftest.
+    out=$(FEMT_S1_ARMED=0 femt_s1_attach 203.0.113.9 2>/dev/null)
+    chk attach-s1-disarmed       "$(fld "$out" status)" "disarmed"
+    chk attach-s1-disarmed-rc    "$(FEMT_S1_ARMED=0 femt_s1_attach 203.0.113.9 >/dev/null 2>&1; echo $?)" "3"
+    chk attach-s1-would-send     "$(fld "$out" would_send | grep -c 'ppid 18')" "1"
+    out=$(FEMT_S1_ARMED=0 femt_iuh_attach 203.0.113.9 2>/dev/null)
+    chk attach-iuh-disarmed      "$(fld "$out" status)" "disarmed"
+    chk attach-iuh-disarmed-rc   "$(FEMT_S1_ARMED=0 femt_iuh_attach 203.0.113.9 >/dev/null 2>&1; echo $?)" "3"
+    chk attach-iuh-would-send    "$(fld "$out" would_send | grep -c 'ppid 20')" "1"
+    # Armed but no target: rc 2, and still no socket, because the guard is
+    # checked before the host is.
+    chk attach-s1-armed-nohost   "$(FEMT_S1_ARMED=1 femt_s1_attach >/dev/null 2>&1; echo $?)" "2"
+    chk attach-tool-present      "$([[ -f "$IMSISTING_ROOT/tools/sctp_assoc.py" ]] && echo yes || echo no)" "yes"
+
     # 4d. HNBAP registration. Both octet strings are the vectors pycrate
     #     encoded and Wireshark dissected on PPID 20 (id-HNBRegister with
     #     HNB-Identity deadbeef and CellIdentity 0xA1C0100; id-UERegister with
@@ -1190,6 +1274,8 @@ femt_cli_main() {
         --s1ap)        femt_s1ap_decode "${1:--}" ;;
         --s1ap-nas)    femt_s1ap_nas "${1:-}" "${2:-}" "${3:-}" "${4:-ul}" ;;
         --s1ap-paging) femt_s1ap_paging "${1:-}" "${2:-}" ;;
+        --s1-attach)   femt_s1_attach "$@" ;;
+        --iuh-attach)  femt_iuh_attach "$@" ;;
         --iuh-register) femt_iuh_register "$@" ;;
         --ue-register) femt_ue_register "$@" ;;
         --hnbap)       femt_hnbap_decode "${1:--}" ;;
@@ -1225,6 +1311,11 @@ Usage: $0 COMMAND
                         (dl) that carries a handset's NAS through this box
   --s1ap-paging <mme-code> <m-tmsi>
                         the Paging that calls one handset back
+  --s1-attach <mme-host> [port] [hex]
+                        open an SCTP association to an MME and send the S1 Setup
+                        (ppid 18); needs FEMT_S1_ARMED=1 or it reports disarmed
+  --iuh-attach <hnb-gw-host> [port] [hex]
+                        the same for HNBAP to an HNB-GW (ppid 20)
   --iuh-register <hnb-identity-hex> <cell-id>
                         the HNBAP HNBRegisterRequest a Home NodeB sends first
   --ue-register <imsi-bcd-hex> [cause]

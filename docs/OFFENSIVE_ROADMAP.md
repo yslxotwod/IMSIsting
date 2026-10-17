@@ -1118,9 +1118,34 @@ M3UA, GTP-C, Diameter, PFCP and the SBI pivot from encoders into senders.** It
 needs no new cryptography, no spec research and no radio — an SCTP one-to-one
 socket, a UDP socket for GTP-U, a TCP/TLS client for Diameter and SBI, each
 gated behind the same armed-handoff guard `54_baseband_exploit` and
-`55_nr_inject` already use for their transmitter. Placement: the next free
-infrastructural slot beside `00_deps`/`01_radio`, or a `tools/` companion the
-modules call — the second is cheaper and does not mint a module number.
+`55_nr_inject` already use for their transmitter.
+
+**Placement: `37_femtocell`, not a new module.** The small cell is the one
+module whose entire identity is the backhaul leg — every other module in the
+tree attacks the air, and this one exists because the leg between the box and
+the core is where the traffic is already cleartext. Giving the transport a
+separate home would split that identity and leave the module that needs it
+most importing a stranger.
+
+*Built: `tools/sctp_assoc.py`.* One-to-one style SCTP through the kernel's own
+stack, PPID carried as an `SCTP_SNDINFO` control message on each `sendmsg` and
+read back from the `SCTP_RCVRCVINFO` ancillary data, so the report always names
+the PPID it actually put on the wire. Two findings from building it are worth
+keeping: `SCTP_DEFAULT_SEND_PARAM` (socket option 10) is accepted by this kernel
+and silently ignored, so every message carried PPID 0; and `SCTP_STATUS` returns
+`EINVAL` on a one-to-one socket, so the association state is "the handshake
+completed", which is what `connect()` returning zero already proves.
+
+*Wired: `--s1-attach` and `--iuh-attach`.* Both are armed — `FEMT_S1_ARMED=1` or
+they report `status disarmed`, exit 3, and name what they would have sent. A
+build must not be one typo away from a live socket, and the selftest asserts the
+refusal rather than the send.
+
+*What the other five modules need from it.* `11_lte_core` and `13_nr_core` want
+the UDP and TCP/TLS halves for GTP-C and Diameter/PFCP; `26_ss7_map` wants M3UA
+on PPID 132; `40_sba_pivot` wants an HTTP/2 client over TLS. None of them needs
+a different mechanism, which is the argument for the companion file rather than
+a new module number.
 
 *The eight that are placement.*
 
