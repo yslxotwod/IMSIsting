@@ -94,7 +94,7 @@ and a testbed. Every computational half is already built and verified offline.
 | Capability | Module | Built today | Missing to fire |
 |---|---|---|---|
 | **Small Cell / eNB** | `37_femtocell` | 27-bit CSG-Id codec, PCI-confusion detection, Iuh (HNBAP registration byte-exact, RUA/RANAP reference), TR-069/CWMP audit, a byte-exact S1 Setup Request built and decoded against `tshark`, closed-cell detection over the real SIB1 codec, and a live subscriber window fed by GSMTAP | DEVICE: an HeNB you own; NET for the gateway side and the SCTP association |
-| **VoWiFi / ePDG** | `36_vowifi` | IKEv2/SWu 28-octet header, exchange/payload tables, EAP-AKA codec, SWu NAI and ePDG FQDN, transform classifiers | NET: an ePDG |
+| **VoWiFi / ePDG** | `36_vowifi` | IKEv2/SWu 28-octet header with length/version/flag refusals, full IANA payload/exchange/transform/notify/id tables, SA-proposal parser with null-encryption detection, EAP-AKA codec with an attribute walk and per-attribute size checks, AT_KDF_INPUT/AT_KDF/AT_BIDDING (RFC 9048), SWu NAI and ePDG FQDN, transform classifiers | NET: an ePDG |
 | **Wi-Fi offload / LWA** | `47_wifioff` | ePDG FQDN, certificate validation, LWA config | LAB |
 | **GPRS / EDGE downgrade** | `50_gprs` | GEA0–GEA4 family, APN coding, PDP-context IEs, GEA-downgrade detector | TX: force GEA0 |
 | **NB-IoT / Cat-M1** | `45_iot` | NPRACH, NPSS/NSSS, SIB1-NB, NPRFCN | TX for the attack half |
@@ -908,6 +908,44 @@ leave the detection half as the authority. Phase 14 adds modes, not the decision
 **Phase 10 — small cells and access.** `37_femtocell`, `36_vowifi`,
 `43_ran_share`, `45_iot`, `47_wifioff`, `50_gprs`, `51_sidelink`, `49_ntn`,
 `53_non3gpp`.
+
+`36_vowifi` was the first of them, and it named HTTP-layer things it could not
+read. Its payload table started one row early: 41 was an invented `Nr`, 42 was
+`N`, and everything from there to SK named its neighbour, so a capture's chain
+was read one type off. The exchange table stopped at 37, the EAP-AKA subtype
+table had 2 as an "Authentication-Response" (RFC 4187 11 says
+Authentication-Reject, and it is the subtype that tells a subscriber the
+network refused the challenge) and sync-failure at 3 instead of 4. The
+AT_KDF_INPUT (23) and AT_KDF (24) attributes of RFC 9048 8.2 were absent
+entirely, and AT_KDF_INPUT is the value the EAP-AKA' keys are derived over, so
+the one field that ties a challenge to a subscription was invisible.
+
+The codec was then malformed where it was not wrong. `--eap-build` emitted five
+octets while writing the length field as eight: RFC 4187 8.1 puts the subtype
+in the low nibble of a two-octet field and reserves two octets after it, and
+the builder dropped both, so the length it declared never matched the packet it
+built and a dissector that trusts the length read into the next attribute. Nothing walked attributes at
+all. And `--plan` told the operator to run `--null-check`, a verb that did not
+exist, so the advice about ENCR_NULL could not be followed.
+
+The decoder now states the clauses it reads: header (length, version, flags,
+spare bits, `S`), the payload chain (critical bit, length against the message,
+stop at SK because the rest is encrypted), SA proposals and transforms with
+null-encryption scored as a finding, EAP-AKA packets with every attribute
+walked and each one's size checked (AT_RAND/AT_MAC 20 octets, AT_KDF 4), and
+the SWu NAI it sends.
+
+`tools/check-vowifi-codec.sh` encodes the same clauses in Python, drives the
+module through its command line, and compares against two second
+implementations: the IANA registry rows, and Wireshark's IKEv2 dissector over
+frames built from the same clause text. Fifteen hundred registry values, the
+round trip of every header field and every refusal is 515 cases. The places
+where the dissector's table predates the registry are recorded as such rather
+than compared -- 16429 is SENDER_REQUEST_ID there and GROUP_SENDER here, 46
+duplicates 44, PRF 4/8 carry CBC/CMAC6 spellings, and ID type 12/13 are still
+KEY_LIST and "Future use" -- and seven defects put back into a scratch copy are
+each caught.
+
 
 **Phase 11 — orchestration.** `48_oran`, `34_slicing`, and `25_killchain`
 chaining all of the above into repeatable runs.
