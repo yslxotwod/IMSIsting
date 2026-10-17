@@ -311,6 +311,8 @@ fk_guard_matrix() {
 06_gsm_air|--decode-pcap|/nonexistent.pcap
 07_gsm_attack|--transmit|62||60
 10_lte_air|--start|
+10_lte_air|--rrc-tx|reconfiguration|LAIR_SDR_DEVICE= LAIR_TX_IQ=|60
+10_lte_air|--rrc-tx|reconfiguration|LAIR_SDR_DEVICE=hackrf LAIR_TX_IQ=|60
 12_nr_air|--start|
 12_nr_air|--gen-gnb-conf|00101 n78 640000 0 --tx||60
 12_nr_air|--build-meas-report|measId=1 --tx||60

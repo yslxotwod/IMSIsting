@@ -2864,8 +2864,14 @@ lair_selftest() {
     # "hackrf" there. The detector itself is tested separately, further down,
     # against a fake driver on PATH; here the device is an input, so the bit
     # lengths are the only thing under test.
-    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration minimal); rc=$?
-    chk txc-recfg-min-rc   "$rc" "0"
+    #
+    # The expected exit code is 3, not 0, and LAIR_TX_IQ is cleared so that
+    # it stays 3: a radio is present and there is no waveform, which is the
+    # honest answer and the same on every machine. Before the transmit half
+    # was made honest this was 0, because the radio branch printed a success
+    # line without calling the driver.
+    out=$(LAIR_TX_IQ= LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration minimal); rc=$?
+    chk txc-recfg-min-rc   "$rc" "3"
     chk txc-recfg-min-hex  "$(fld "$out" rrc_hex)" "41000AA001E00005800000"
     chk txc-recfg-min-bits "$(fld "$out" rrc_bits)" "88"
     # 88 bits is not a whole number of octets, so the hex is padded right and
@@ -2874,8 +2880,8 @@ lair_selftest() {
     chk txc-recfg-min-pad  "$(fld "$out" rrc_hex_padded_bits)" "88"
     chk txc-recfg-min-chan "$(fld "$out" channel)" "DL-DCCH on PDSCH"
 
-    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration full); rc=$?
-    chk txc-recfg-full-rc  "$rc" "0"
+    out=$(LAIR_TX_IQ= LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration full); rc=$?
+    chk txc-recfg-full-rc  "$rc" "3"
     chk txc-recfg-full-bits "$(fld "$out" rrc_bits)" "660"
     # 660 = 82.5 octets, so 83 octets and 664 padded bits. Asserting the
     # padded length as well is what catches a codec that rounds the PDU up
@@ -2883,13 +2889,13 @@ lair_selftest() {
     chk txc-recfg-full-oct  "$(fld "$out" rrc_octets)" "83"
     chk txc-recfg-full-pad  "$(fld "$out" rrc_hex_padded_bits)" "664"
 
-    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx handover-command minimal); rc=$?
-    chk txc-ho-min-rc   "$rc" "0"
+    out=$(LAIR_TX_IQ= LAIR_SDR_DEVICE=hackrf lair_rrc_tx handover-command minimal); rc=$?
+    chk txc-ho-min-rc   "$rc" "3"
     chk txc-ho-min-hex  "$(fld "$out" rrc_hex)" "0061104002A80078000160000000"
     chk txc-ho-min-bits "$(fld "$out" rrc_bits)" "109"
 
-    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx handover-command full); rc=$?
-    chk txc-ho-full-rc   "$rc" "0"
+    out=$(LAIR_TX_IQ= LAIR_SDR_DEVICE=hackrf lair_rrc_tx handover-command full); rc=$?
+    chk txc-ho-full-rc   "$rc" "3"
     chk txc-ho-full-bits "$(fld "$out" rrc_bits)" "685"
 
     # The two messages are different encodings, not the same bytes twice.
@@ -3009,6 +3015,85 @@ lair_selftest() {
     chk txc-dry-mode   "$(fld "$out" tx_mode)" "dry-run"
     chk txc-dry-notx   "$(printf '%s\n' "$out" | grep -cE '^TX\b')" "0"
     chk txc-dry-flag   "$(fld "$out" TX_NOT_SENT)" "no SDR device; chain built but nothing was keyed"
+
+    # ── a radio WITHOUT a waveform is not a transmission ────────────────
+    # The defect this replaced printed `tx_armed 1` and "TX queued to
+    # hackrf" here: the device probe succeeded, and the success line was
+    # printed without any transmit call existing at all. Scoping the probe
+    # to a radio is what reaches the branch.
+    out=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration minimal 2>/dev/null); rc=$?
+    chk txc-nowave-rc     "$rc" "3"
+    chk txc-nowave-armed  "$(fld "$out" tx_armed)" "0"
+    chk txc-nowave-dev    "$(fld "$out" tx_device)" "hackrf"
+    chk txc-nowave-txline "$(printf '%s\n' "$out" | grep -cE '^TX\b')" "0"
+    chk txc-nowave-notx   "$(fld "$out" TX_NOT_SENT)" "no waveform: the chain stops at coded bits"
+    local txc_err2
+    txc_err2=$(LAIR_SDR_DEVICE=hackrf lair_rrc_tx reconfiguration minimal 2>&1 >/dev/null)
+    chk txc-nowave-named  "$(printf '%s\n' "$txc_err2" | grep -c '^ERROR.*no waveform to key')" "1"
+    chk txc-nowave-why    "$(printf '%s\n' "$txc_err2" | grep -c '^WHY')" "1"
+
+    # ── with a waveform, the driver really is called ────────────────────
+    # The fake driver records its argv, so a module that prints the success
+    # line without executing the call fails here rather than passing on the
+    # strength of its own output.
+    local txrec="$d/tx-argv.txt" txwave="$d/wave.cs8" drv2="$d/fake-drv2"
+    printf 'not a real waveform, only a file that exists\n' > "$txwave"
+    mkdir -p "$drv2"
+    cat > "$drv2/hackrf_transfer" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$*" >> "$TX_ARGV_LOG"
+exit 0
+FAKE
+    chmod +x "$drv2/hackrf_transfer"
+    printf '#!/bin/sh\necho "Found HackRF board."\nexit 0\n' > "$drv2/hackrf_info"
+    chmod +x "$drv2/hackrf_info"
+    : > "$txrec"
+    out=$(PATH="$drv2:$PATH" TX_ARGV_LOG="$txrec" LAIR_SDR_DEVICE=hackrf \
+          LAIR_TX_IQ="$txwave" lair_rrc_tx reconfiguration minimal 2>/dev/null); rc=$?
+    chk txc-tx-rc      "$rc" "0"
+    chk txc-tx-armed   "$(fld "$out" tx_armed)" "1"
+    chk txc-tx-line    "$(printf '%s\n' "$out" | grep -c '^TX' )" "1"
+    chk txc-tx-called  "$(wc -l < "$txrec" | tr -d ' ')" "1"
+    # The argv the driver actually received: centre frequency from the
+    # EARFCN, 30.72 Msps, and the waveform we named.
+    chk txc-tx-freq    "$(printf '%s\n' "$out" | sed -n 's/^tx_centre_hz\t//p')" "806000000"
+    chk txc-tx-argv-s  "$(grep -c -- '-s 30720000' "$txrec")" "1"
+    chk txc-tx-argv-f  "$(grep -c -- "-f 806000000" "$txrec")" "1"
+    chk txc-tx-argv-t  "$(grep -c -- "-t $txwave" "$txrec")" "1"
+
+    # A driver that runs and fails must not be reported as a transmission.
+    printf '#!/bin/sh\nexit 1\n' > "$drv2/hackrf_transfer"
+    chmod +x "$drv2/hackrf_transfer"
+    out=$(PATH="$drv2:$PATH" LAIR_SDR_DEVICE=hackrf LAIR_TX_IQ="$txwave" \
+          lair_rrc_tx reconfiguration minimal 2>/dev/null); rc=$?
+    chk txc-txfail-rc    "$rc" "1"
+    chk txc-txfail-armed "$(fld "$out" tx_armed)" "0"
+    chk txc-txfail-tx    "$(printf '%s\n' "$out" | grep -cE '^TX\b')" "0"
+
+    # A c16 file handed to an 8-bit driver is refused, not transmitted as
+    # noise: the cs8 sibling has to be there. The refusal must happen BEFORE
+    # the driver is reached, so the recording driver is restored and the
+    # assertion is that it was never called -- checking only the exit code
+    # would also pass on a box with no hackrf_transfer at all, which is
+    # every machine this suite has run on.
+    cat > "$drv2/hackrf_transfer" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$*" >> "$TX_ARGV_LOG"
+exit 0
+FAKE
+    chmod +x "$drv2/hackrf_transfer"
+    : > "$txrec"
+    local c16only="$d/only.c16"
+    printf 'not a waveform either\n' > "$c16only"
+    out=$(PATH="$drv2:$PATH" TX_ARGV_LOG="$txrec" LAIR_SDR_DEVICE=hackrf \
+          LAIR_TX_IQ="$c16only" lair_rrc_tx reconfiguration minimal 2>/dev/null); rc=$?
+    chk txc-c16-rc        "$rc" "1"
+    chk txc-c16-armed     "$(fld "$out" tx_armed)" "0"
+    chk txc-c16-nodriver  "$(wc -l < "$txrec" | tr -d ' ')" "0"
+    local c16err
+    c16err=$(PATH="$drv2:$PATH" TX_ARGV_LOG="$txrec" LAIR_SDR_DEVICE=hackrf \
+             LAIR_TX_IQ="$c16only" lair_rrc_tx reconfiguration minimal 2>&1 >/dev/null)
+    chk txc-c16-named     "$(printf '%s\n' "$c16err" | grep -c '^ERROR.*no cs8 waveform')" "1"
 
     # Bad input is refused with 2 rather than building something plausible.
     chk txc-bad-msg   "$(lair_rrc_tx bogus minimal >/dev/null 2>&1; echo $?)" "2"
@@ -3337,6 +3422,118 @@ lair_sdr_device() {
     return 1
 }
 
+# ── keying the radio ────────────────────────────────────────────────────
+# A radio is necessary and not sufficient. What a driver transmits is a
+# stream of I/Q samples; what the chain above produces is coded bits, one
+# PDCCH/PDSCH at a time. Turning bits into samples is the OFDM modulator,
+# and this module does not have one -- so the honest end of this verb is
+# "the radio is here, the waveform is not", not a line claiming the samples
+# were queued. A transmit line printed without a transmit call was the
+# defect this section exists to make impossible: the selftest runs a fake
+# driver that records its argv, so claiming without calling now fails.
+#
+# The operator can supply the waveform: LAIR_TX_IQ points at a c16 or cs8
+# file, and then the radio really is keyed and the driver's exit status is
+# this function's exit status.
+
+# The transmit gain in dB. Validated here so a typo cannot reach the driver
+# as an argument it will read as something else.
+lair_tx_gain() {
+    local g="${LTE_TX_GAIN:-0}"
+    [[ "$g" =~ ^-?[0-9]+$ ]] || {
+        printf 'ERROR\tLTE_TX_GAIN must be an integer dB value\n' >&2; return 1; }
+    printf '%s' "$g"
+}
+
+# Which sample format a driver's own CLI reads. A wrong guess here radiates
+# noise instead of failing, so it is stated per driver and printed.
+lair_tx_iq_format() {
+    case "${1:-}" in
+        hackrf) printf 'cs8' ;;
+        *)      printf 'c16' ;;
+    esac
+}
+
+# The file the driver can actually read. hackrf_transfer -t takes signed
+# 8-bit I/Q; handing it a c16 file transmits twice as many samples of noise
+# and reports success. So for an 8-bit driver the .cs8 sibling is required
+# BY NAME rather than fallen back to.
+lair_tx_iq_for() {
+    local type="${1:-}" iq="${2:-}" cs8
+    [[ -n "$iq" ]] || return 1
+    case "$type" in
+        hackrf)
+            if [[ "$iq" == *.cs8 ]]; then
+                [[ -f "$iq" ]] || return 1
+                printf '%s' "$iq"; return 0
+            fi
+            cs8="${iq%.c16}.cs8"
+            [[ -f "$cs8" ]] || return 1
+            printf '%s' "$cs8" ;;
+        *)
+            [[ -f "$iq" ]] || return 1
+            printf '%s' "$iq" ;;
+    esac
+}
+
+# The driver's own command line, or non-zero when this module has no verified
+# call for that driver (then LAIR_TX_CMD is required). Only the hackrf call is
+# built in: its transmit syntax is the one this tree already runs elsewhere
+# (07_gsm_attack.sh, 12_nr_air.sh), so it is the one that can be exercised on
+# this host. No syntax is invented for a driver nobody here can run.
+lair_tx_call() {
+    local type="${1:-}" iq="${2:-}" freq="${3:-}" gain="${4:-}"
+    [[ -n "$type" && -n "$iq" && -n "$freq" ]] || return 1
+    case "$type" in
+        hackrf)
+            # -t I/Q file, -f centre Hz, -s sample rate, -a 1 RF amp, -x TX VGA
+            printf 'hackrf_transfer -t %s -f %s -s 30720000 -a 1 -x %s' \
+                   "$iq" "$freq" "$gain" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Key the radio. <driver> <centre-hz>. Returns 0 only when the driver command
+# itself succeeded; 1 when the call ran and failed; 3 when there is nothing to
+# send or no call to send it with.
+lair_tx_run() {
+    local type="${1:-}" freq="${2:-}"
+    local gain iq cmd rc=0
+    gain=$(lair_tx_gain) || return 2
+    if [[ -z "${LAIR_TX_IQ:-}" ]]; then
+        printf 'ERROR\tno waveform to key: this verb builds coded bits (PDCCH/PDSCH), not I/Q samples, and this module has no OFDM modulator -- set LAIR_TX_IQ to a c16/cs8 waveform to transmit it\n' >&2
+        printf 'WHY\ta radio plus coded bits is not a transmission; the samples between them do not exist here, so nothing was sent\n' >&2
+        return 3
+    fi
+    iq=$(lair_tx_iq_for "$type" "$LAIR_TX_IQ") || {
+        printf 'ERROR\tno %s waveform at %s -- %s reads %s, not %s\n' \
+               "$(lair_tx_iq_format "$type")" "$LAIR_TX_IQ" "$type" \
+               "$(lair_tx_iq_format "$type")" "${LAIR_TX_IQ##*.}" >&2
+        return 1; }
+    export LAIR_TX_IQ_PATH="$iq" LAIR_TX_RATE=30720000 \
+           LAIR_TX_FREQ_HZ="$freq" LAIR_TX_GAIN_DB="$gain"
+    if [[ -n "${LAIR_TX_CMD:-}" ]]; then
+        cmd="$LAIR_TX_CMD"
+        printf 'tx_call\tshell: %s\n' "$(lair_sanitize "$cmd")"
+    else
+        cmd=$(lair_tx_call "$type" "$iq" "$freq" "$gain") || {
+            printf 'ERROR\tno built-in transmit call for %s -- set LAIR_TX_CMD\n' \
+                   "$type" >&2
+            return 3; }
+        printf 'tx_call\t%s\n' "$(lair_sanitize "$cmd")"
+    fi
+    printf 'tx_iq\t%s\n'        "$iq"
+    printf 'tx_iq_format\t%s\n' "$(lair_tx_iq_format "$type")"
+    printf 'tx_gain_db\t%s\n'   "$gain"
+    timeout 120 bash -c "$cmd" >/dev/null 2>&1 || rc=$?
+    if (( rc != 0 )); then
+        printf 'ERROR\tSDR transmit failed (rc %s): %s\n' "$rc" \
+               "$(lair_sanitize "$cmd")" >&2
+        return 1
+    fi
+    return 0
+}
+
 # The whole transmit path for one constructed RRC message.
 lair_rrc_tx() {
     local msg="${1:-reconfiguration}" case_="${2:-minimal}"
@@ -3453,19 +3650,40 @@ lair_rrc_tx() {
         printf 'pdcch_bits\t0\n'
     fi
 
-    # The real chain produced a baseband symbol map. Whether it leaves the
-    # box is a question about hardware, and it is answered by name.
+    # The chain above produced coded bits. Whether they leave the box is a
+    # question about hardware AND about the waveform: a radio with nothing
+    # to send is not a transmission, so the two are answered separately and
+    # neither is allowed to print a success line on its own.
     local dev
     if dev=$(lair_sdr_device); then
         local sps; sps=$(( rb * 12 * 14 * 2 ))
+        local dl_mhz="${LTE_TX_FREQ_MHZ:-}" freq_hz="${LTE_TX_FREQ_HZ:-}"
+        if [[ -z "$freq_hz" ]]; then
+            [[ -n "$dl_mhz" ]] || dl_mhz=$(lair_earfcn_to_mhz "${LTE_TX_EARFCN:-6300}" 2>/dev/null) || dl_mhz=""
+            [[ -n "$dl_mhz" ]] && freq_hz=$(awk -v m="$dl_mhz" \
+                'BEGIN{ printf "%.0f", m * 1000000 }') || freq_hz=""
+        fi
         printf 'tx_device\t%s\n' "$dev"
         printf 'tx_mode\tradio\n'
         printf 'sample_rate_msps\t30.72\n'
         printf 'iq_samples_per_subframe\t%d\n' "$sps"
-        printf 'tx_armed\t1\n'
-        printf 'TX\tqueued to %s (30.72 Msps, %s PRB, %s)\n' \
-               "$dev" "$rb" "$msg"
-        return 0
+        [[ -n "$dl_mhz"  ]] && printf 'dl_mhz\t%s\n' "$dl_mhz"
+        [[ -n "$freq_hz" ]] && printf 'tx_centre_hz\t%s\n' "$freq_hz"
+        printf 'tx_waveform\t%s\n' "$([[ -n "${LAIR_TX_IQ:-}" ]] && printf 'operator-supplied' || printf 'none')"
+        if lair_tx_run "$dev" "$freq_hz"; then
+            printf 'tx_armed\t1\n'
+            printf 'TX\ttransmitted to %s (30.72 Msps, %s PRB, %s)\n' \
+                   "$dev" "$rb" "$msg"
+            return 0
+        else
+            local txrc=$?
+            printf 'tx_armed\t0\n'
+            case "$txrc" in
+                3) printf 'TX_NOT_SENT\tno waveform: the chain stops at coded bits\n' ;;
+                *) printf 'TX_NOT_SENT\tthe driver was called and failed: nothing was transmitted\n' ;;
+            esac
+            return "$txrc"
+        fi
     fi
     printf 'tx_device\tnone\n'
     if [[ "${LTE_TX_DRYRUN:-0}" == "1" ]]; then
@@ -3634,9 +3852,13 @@ Usage: $0 COMMAND
   --rrc-tx reconfiguration|handover-command [minimal|full]
                                    build the RRC PDU (TS 36.331 unaligned
                                    PER) and carry it down the real DL-SCH and
-                                   PDSCH chain; keying it needs an SDR, so
-                                   with no radio the verb fails by name and
-                                   prints no success line
+                                   PDSCH chain; the chain stops at coded bits,
+                                   so a transmission also needs a waveform:
+                                   set LAIR_TX_IQ to a c16/cs8 file and the
+                                   radio is keyed and its exit status is the
+                                   verb's. No radio fails by name (rc 1); a
+                                   radio with no waveform fails by name too
+                                   (rc 3). Never radiates on its own.
   --start                          start srsenb with the generated conf
   --stop                           stop it (idempotent)
   --status                         is the eNB running
