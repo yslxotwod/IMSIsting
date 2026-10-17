@@ -773,9 +773,12 @@ the APDU coder (`tools/check-apdu-codec.sh`), the OTA coding and the secured
 packets (`tools/check-ota-codec.sh`, `tools/check-ota-packet.sh`, and the
 response in `tools/check-ota-response.sh`), the STK command details
 (`tools/check-stk-codec.sh`), and the 7-bit alphabet both USSD and OTA share
-together with the MMI grammar (`tools/check-ussd-codec.sh`). What remains is
-not code: the key material is the card's, so it is own-SIM only, and delivery
-needs an OTA gateway, an SMSC or a reader.
+together with the MMI grammar (`tools/check-ussd-codec.sh`). **The phase's code
+half is done as of `v0.14.0`** — every codec the four modules share with a
+clause is checked against that clause and a second implementation, and each
+check is two-sided: a scratch copy with the defect put back has to fail it.
+What remains is not code: the key material is the card's, so it is own-SIM
+only, and delivery needs an OTA gateway, an SMSC or a reader.
 
 **Phase 7 — core network.** `11_lte_core` (GTP, Diameter lab testbed),
 `13_nr_core` (PFCP), `40_sba_pivot`.

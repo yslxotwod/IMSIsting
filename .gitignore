@@ -26,3 +26,6 @@ __pycache__/
 # ── local session logs and diagnostics ──────────────────────────────────
 session_*.log
 gui.stderr
+
+# Kate leaves its swap beside the file, named *.kate-swp
+*.kate-swp
