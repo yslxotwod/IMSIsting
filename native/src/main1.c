@@ -15709,6 +15709,12 @@ static ModuleSubmenuEntry femt_entries[] = {
     { "CSG",
       "network-server-symbolic",
       "--csg-decode:Decode CSG|--csg-encode:Encode CSG|--plan:Plan" },
+    { "Cell",
+      "network-wireless-symbolic",
+      "--cell-profile=00101 20 6300 42 0x8400002 LabHeNB:Commissioning Profile|--sib1=001 01 00f1 00a1:SIB1|--sib9=LabHeNB:SIB9" },
+    { "Management",
+      "preferences-system-symbolic",
+      "--discover=127.0.0.1:Read Settings|--apply=127.0.0.1:Write Profile" },
 };
 static ModuleSubmenuEntry ussd_entries[] = {
     { "Overview",

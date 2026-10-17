@@ -141,11 +141,19 @@ def _sib_type_read(r):
 def encode_sib1(mcc, mnc, tac, cellid, barred="notBarred",
                 reselect="notAllowed", qrxlevmin=-70, band=20, siw="ms20",
                 valuetag=0, period="rf32", sibs=("sibType3",),
-                csg_indication=False, plmns=None):
+                csg_indication=False, csg_identity=None, plmns=None):
     """Return the unaligned-PER encoding of a BCCH-DL-SCH-Message carrying SIB1.
 
     `plmns` is an optional list of (mcc, mnc, not_reserved) tuples; the first
     entry is the primary PLMN. Defaults match a minimal live cell.
+
+    `csg_identity` is the 27-bit CSG-Identity, or None for absent. It is a
+    separate argument from `csg_indication` because the ASN.1 makes them
+    independent: `csg-Indication BOOLEAN` is mandatory and `csg-Identity
+    CSG-Identity OPTIONAL` is not, so a cell can advertise "this is a closed
+    group" without naming the group. Conflating the two was the previous
+    behaviour -- the presence bit was written as `csg_indication and False`,
+    which is a constant, so a CSG identity could never be emitted at all.
     """
     w = BitWriter()
 
@@ -167,7 +175,11 @@ def encode_sib1(mcc, mnc, tac, cellid, barred="notBarred",
     # cellAccessRelatedInfo ::= SEQUENCE { plmn-IdentityList, trackingAreaCode,
     #   cellIdentity, cellBarred, intraFreqReselection, csg-Indication,
     #   csg-Identity OPTIONAL }
-    w.bit(csg_indication and False)           # csg-Identity presence bitmap bit
+    if csg_identity is not None:
+        if not (0 <= csg_identity < (1 << 27)):
+            raise ValueError("csg-Identity is a 27-bit BIT STRING; %r does "
+                             "not fit" % (csg_identity,))
+    w.bit(csg_identity is not None)            # csg-Identity presence bitmap bit
 
     # PLMN-IdentityList ::= SEQUENCE (SIZE (1..6)) OF PLMN-IdentityInfo
     w.uint(len(plmns) - 1, 3)
@@ -190,6 +202,10 @@ def encode_sib1(mcc, mnc, tac, cellid, barred="notBarred",
     # intraFreqReselection ::= ENUMERATED { allowed(0), notAllowed(1) }
     w.bit(reselect == "notAllowed")
     w.bit(bool(csg_indication))
+    # CSG-Identity ::= BIT STRING (SIZE (27)) -- written only when present, and
+    # it follows csg-Indication in the SEQUENCE, not in the presence bitmap.
+    if csg_identity is not None:
+        w.uint(csg_identity, 27)
 
     # cellSelectionInfo ::= SEQUENCE { q-RxLevMin, q-RxLevMinOffset OPTIONAL }
     # Its own optional bitmap comes first: one bit, always absent here.
@@ -290,8 +306,11 @@ def decode_sib1(data):
     barred = "notBarred" if r.bit() else "barred"
     reselect = "notAllowed" if r.bit() else "allowed"
     csg_indication = r.bit()
-    if csg_identity_present:
-        r.uint(27)                            # CSG-Identity, not needed here
+    # CSG-Identity ::= BIT STRING (SIZE (27)). Kept, not skipped: a closed cell
+    # that names its group is the case a femtocell analysis has to tell apart
+    # from one that only sets the flag, and dropping the value made the two
+    # indistinguishable in every dump this decoder produced.
+    csg_identity = r.uint(27) if csg_identity_present else None
 
     has_q_offset = r.bit()
     qrxlevmin = r.uint(6) - 70
@@ -324,6 +343,7 @@ def decode_sib1(data):
         "reselect": reselect,
         "csg_indication": csg_indication,
         "csg_identity_present": csg_identity_present,
+        "csg_identity": csg_identity,
         "qrxlevmin": qrxlevmin,
         "q_rx_lev_min_offset": q_offset,
         "p_max": p_max,
@@ -2977,13 +2997,16 @@ def selftest():
 
 def cmd_sib1(args):
     sibs = tuple(args.sib) if args.sib else ("sibType3",)
+    csg_id = int(args.csg_identity, 16) if args.csg_identity else None
     w = encode_sib1(mcc=[int(c) for c in args.mcc],
                     mnc=[int(c) for c in args.mnc],
                     tac=int(args.tac, 16), cellid=int(args.cellid, 16),
                     barred=args.barred, reselect=args.reselect,
                     qrxlevmin=args.qrxlevmin, band=args.band,
                     siw=args.siw, valuetag=args.valuetag,
-                    period=args.period, sibs=sibs)
+                    period=args.period, sibs=sibs,
+                    csg_indication=args.csg_indication,
+                    csg_identity=csg_id)
     print("message\tBCCH-DL-SCH-Message")
     print("sib\tSystemInformationBlockType1")
     print("mcc\t%s" % args.mcc)
@@ -2992,6 +3015,8 @@ def cmd_sib1(args):
     print("cellid\t%s" % args.cellid)
     print("barred\t%s" % args.barred)
     print("intra_freq_reselection\t%s" % args.reselect)
+    print("csg_indication\t%d" % (1 if args.csg_indication else 0))
+    print("csg_identity\t%s" % (("%07x" % csg_id) if csg_id is not None else "-"))
     print("q_rx_lev_min\t%d" % args.qrxlevmin)
     print("band\t%d" % args.band)
     print("si_window_length\t%s" % args.siw)
@@ -3022,6 +3047,9 @@ def cmd_decode(args):
     print("barred\t%s" % d["barred"])
     print("intra_freq_reselection\t%s" % d["reselect"])
     print("csg_indication\t%d" % d["csg_indication"])
+    print("csg_identity\t%s"
+          % (("%07x" % d["csg_identity"]) if d["csg_identity"] is not None
+             else "-"))
     print("q_rx_lev_min\t%d" % d["qrxlevmin"])
     if d["q_rx_lev_min_offset"] is not None:
         print("q_rx_lev_min_offset\t%d" % d["q_rx_lev_min_offset"])
@@ -4164,8 +4192,23 @@ def cmd_type_decode(args):
 def cmd_engine_encode(args):
     """Encode a SIB9 to SIB13 body with the generated codec."""
     root, choice = ENGINE_ROOTS[args.sibtype]
+    raw = args.json
+    hnb = getattr(args, "hnb_name", None)
+    if hnb is not None:
+        if raw is not None:
+            print("ERROR\tgive --hnb-name or --json, not both",
+                  file=sys.stderr)
+            return 2
+        # SIB9 ::= SEQUENCE { hnb-Name HNB-Name OPTIONAL, ... }, and
+        # HNB-Name ::= OCTET STRING. The text is UTF-8; nothing in TS 36.331
+        # constrains it further, and nothing here validates that a receiver
+        # would render it -- this is the value the field carries.
+        raw = json.dumps({"hnb-Name": {"$octets": hnb.encode("utf-8").hex()}})
+    if raw is None:
+        print("ERROR\tgive --json, or --hnb-name for SIB9", file=sys.stderr)
+        return 2
     try:
-        value = _unjson(json.loads(args.json))
+        value = _unjson(json.loads(raw))
     except ValueError as exc:
         print("ERROR\t--json is not valid JSON: %s" % exc, file=sys.stderr)
         return 2
@@ -4207,6 +4250,14 @@ def main(argv):
                    choices=["barred", "notBarred"])
     s.add_argument("--reselect", default="notAllowed",
                    choices=["allowed", "notAllowed"])
+    # cellAccessRelatedInfo's two CSG fields, independently settable because
+    # the ASN.1 makes them independent (csg-Indication mandatory, csg-Identity
+    # OPTIONAL). A closed cell that names its group and one that only sets the
+    # flag are different broadcasts.
+    s.add_argument("--csg-indication", action="store_true",
+                   help="set csg-Indication (the cell is a closed group)")
+    s.add_argument("--csg-identity", metavar="HEX27", default=None,
+                   help="emit csg-Identity, up to 27 bits as hex")
     s.add_argument("--qrxlevmin", type=int, default=-70)
     s.add_argument("--band", type=int, default=20)
     s.add_argument("--siw", default="ms20", choices=SI_WINDOW_LENGTH)
@@ -4394,10 +4445,18 @@ def main(argv):
             ("sib13", "SystemInformationBlockType13_r9", 11)):
         e = sub.add_parser(sibtype, help="encode a %s (generated codec)"
                                         % rootname)
-        e.add_argument("--json", required=True, metavar="OBJ",
+        e.add_argument("--json", required=False, metavar="OBJ",
                        help='the value as JSON, e.g. {"hnb-Name": {"$octets": '
                             '"0A0B"}}; {"$octets": HEX} is an OCTET STRING and '
                             '{"$bits": [VALUE, WIDTH]} a BIT STRING')
+        if sibtype == "sib9":
+            # SIB9 carries exactly one field of interest to a small-cell
+            # researcher -- the home eNodeB name -- so spelling it as JSON
+            # octets is friction with no purpose. This is a shorthand for the
+            # same value, not a second codec: it fills in --json.
+            e.add_argument("--hnb-name", metavar="TEXT", default=None,
+                           help="the HNB-Name as UTF-8 text (SIB9 only); "
+                                "shorthand for --json")
         e.add_argument("--body-only", action="store_true",
                        help="omit the SystemInformation container wrapper")
         e.set_defaults(func=cmd_engine_encode, sibtype=sibtype)

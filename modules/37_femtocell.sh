@@ -1,13 +1,29 @@
 #!/usr/bin/env bash
-# femtocell — HeNB and Iuh: local device assessment and PCI/CSG conflict work.
+# femtocell — HeNB and Iuh: the cell's own settings, and the local plane.
 #
 # A femtocell (HeNB) exposes three surfaces a researcher owns or is authorised
 # to test: the local management console (TR-069/CWMP, often left at defaults),
 # the Iuh backhaul to the HeNB-GW (HNBAP/RUA/RANAP over SCTP), and the air
-# interface's CSG and PCI allocation. This module works all three from a config
-# or a captured cell list. It does not attack a core network it does not own.
+# interface's identity and CSG/PCI allocation. This module works all three.
 #
-# Attack owned: O1 adjacency (residential/small-cell access) — assessment half.
+# What it builds, and where the line is:
+#   --cell-profile   the commissioning document: PLMN, band, EARFCN, PCI, CSG,
+#                    the SIB1 that broadcasts them and the SIB9 home eNodeB
+#                    name. The SIB bodies come from tools/lte_asn1.py, whose
+#                    SIB1 CSG fields are asserted against pycrate by
+#                    tools/lte-sib-oracle/check_sib1_csg.py.
+#   --discover       reads a box's settings off its management plane.
+#   --apply          writes the profile to that management plane, over CWMP
+#                    1.2 SetParameterValues.
+#   --tr069-audit    finds the usual local-plane defects in a config.
+#
+# What it does NOT do: it does not run a radio. The HeNB air interface itself
+# (waveform, PRACH, S1 toward a core) is modules/10_lte_air.sh, which is the
+# macro-cell transmitter; standing one up AS a femtocell -- SIB1/SIB9 included --
+# is that module's job, not this one's. And --apply writes to a device that
+# answers; with nothing at the address it refuses rather than reporting success.
+#
+# Attack owned: O1 adjacency (residential/small-cell access).
 #
 # Resolve IMSISTING_ROOT from this script's own path (MODULE_CONVENTIONS §2).
 if [[ -z "${IMSISTING_ROOT:-}" ]]; then
@@ -158,6 +174,240 @@ femt_tr069_audit() {
     return 0
 }
 
+femt_lte_asn1() {
+    local py="${FEMT_ASN1:-$IMSISTING_ROOT/tools/lte_asn1.py}"
+    if [[ ! -f "$py" ]]; then
+        printf 'ERROR\t%s is missing; cannot build a SIB\n' "$py" >&2
+        return 1
+    fi
+    timeout 60 python3 "$py" "$@"
+}
+
+femt_sib1_build() {
+    # The over-the-air half of a small cell: SIB1 carries cellAccessRelatedInfo,
+    # and that is where a closed cell says so. csg-Indication is mandatory and
+    # csg-Identity is OPTIONAL in TS 36.331, so a CSG identity implies the flag;
+    # a flag with no identity is a legal broadcast and is kept legal here.
+    local mcc="${1:-}" mnc="${2:-}" tac="${3:-}" cellid="${4:-}"
+    local csg="${5:-}" barred="${6:-notBarred}"
+    if [[ -z "$mcc" || -z "$mnc" || -z "$tac" || -z "$cellid" ]]; then
+        printf 'ERROR\tneed <mcc> <mnc> <tac-hex> <cellid-hex> [csg-id]\n' >&2
+        return 2
+    fi
+    local args=(sib1 --mcc "$mcc" --mnc "$mnc" --tac "$tac" --cellid "$cellid"
+                --barred "$barred")
+    [[ -n "$csg" ]] && args+=(--csg-indication --csg-identity "$csg")
+    local out
+    out=$(femt_lte_asn1 "${args[@]}") || return 1
+    local bits hex
+    bits=$(printf '%s\n' "$out" | awk -F'\t' '$1=="bits"{print $2}')
+    hex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="per_hex"{print $2}')
+    printf 'sib1_bits\t%s\n' "$bits"
+    printf 'sib1_hex\t%s\n' "$hex"
+    printf 'sib1_mcc\t%s\n' "$mcc"
+    printf 'sib1_mnc\t%s\n' "$mnc"
+    printf 'sib1_tac\t%s\n' "$tac"
+    printf 'sib1_cell_id\t%s\n' "$cellid"
+    printf 'sib1_csg_indication\t%s\n' "$([[ -n "$csg" ]] && echo 1 || echo 0)"
+    printf 'sib1_csg_identity\t%s\n' "${csg:-none}"
+    printf 'sib1_cell_barred\t%s\n' "$barred"
+    return 0
+}
+
+femt_sib9_build() {
+    # SIB9 carries the home eNodeB name (HNB-Name, an OCTET STRING): the field an
+    # operator's NMS uses to label a small cell, and therefore the one that ends
+    # up in a capture carrying the operator's own naming convention.
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        printf 'ERROR\tneed a home eNodeB name\n' >&2
+        return 2
+    fi
+    local out
+    out=$(femt_lte_asn1 sib9 --hnb-name "$name" --body-only) || return 1
+    printf 'sib9_name\t%s\n' "$name"
+    printf 'sib9_name_hex\t%s\n' \
+        "$(printf '%s' "$name" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')"
+    printf 'sib9_bits\t%s\n' \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="body_bits"{print $2}')"
+    printf 'sib9_hex\t%s\n' \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="body_hex"{print $2}')"
+    return 0
+}
+
+femt_cell_profile() {
+    # One document for commissioning a small cell: the RF and identity settings a
+    # HeNB needs, then the two SIBs that broadcast them. Everything printed is
+    # something the device would transmit or be told, not a description of it.
+    local plmn="${1:-}" band="${2:-}" earfcn="${3:-}" pci="${4:-}"
+    local csg="${5:-}" name="${6:-}" mme="${7:-}"
+    if [[ -z "$plmn" || -z "$band" || -z "$earfcn" || -z "$pci" ]]; then
+        printf 'ERROR\tneed <plmn> <band> <earfcn> <pci> [csg-id] [hnb-name] [mme]\n' >&2
+        return 2
+    fi
+    if [[ ! "$plmn" =~ ^[0-9]{5,6}$ ]]; then
+        printf 'ERROR\tplmn must be 5 or 6 digits (MCC+MNC), got %s\n' "$plmn" >&2
+        return 2
+    fi
+    if [[ ! "$pci" =~ ^[0-9]+$ ]] || (( pci > 503 )); then
+        printf 'ERROR\tpci must be 0..503, got %s\n' "$pci" >&2
+        return 2
+    fi
+    if [[ -n "$csg" ]] && (( csg > 134217727 )); then
+        printf 'ERROR\tcsg-id must be 0..134217727 (27 bits), got %s\n' "$csg" >&2
+        return 2
+    fi
+
+    local mcc mnc
+    mcc="${plmn:0:3}"
+    if (( ${#plmn} == 5 )); then mnc="${plmn:3:2}"; else mnc="${plmn:3:3}"; fi
+    # TAC and cell identity are not derivable from the PLMN -- they are the
+    # operator's own allocation -- so they are emitted as labelled placeholders
+    # rather than presented as discovered.
+    local tac="00f1"
+    local cellid
+    cellid=$(printf '%07x' $(( 161 + pci )))
+
+    printf 'profile\t%s\n' "henb-commissioning"
+    printf 'plmn\t%s\n' "$plmn"
+    printf 'mcc\t%s\n' "$mcc"
+    printf 'mnc\t%s\n' "$mnc"
+    printf 'band\t%s\n' "$band"
+    printf 'earfcn\t%s\n' "$earfcn"
+    printf 'pci\t%s\n' "$pci"
+    printf 'csg_id\t%s\n' "${csg:-none}"
+    printf 'csg_mode\t%s\n' "$([[ -n "$csg" ]] && echo closed || echo open)"
+    printf 'hnb_name\t%s\n' "${name:-none}"
+    printf 'mme\t%s\n' "${mme:-none}"
+    printf 'tac\t%s\n' "$tac"
+    printf 'cell_id\t%s\n' "$cellid"
+    printf 'identity_note\t%s\n' \
+        "TAC and cell identity are placeholders; set the operator's allocation"
+
+    local rc=0
+    local s1 csg_hex=""
+    # The CSG id is a number on the command line and a 27-bit BIT STRING on the
+    # air, so it is converted once here rather than left in whichever base the
+    # caller happened to type.
+    [[ -n "$csg" ]] && csg_hex=$(printf '%x' "$csg")
+    if ! s1=$(femt_sib1_build "$mcc" "$mnc" "$tac" "$cellid" "$csg_hex"); then
+        rc=1
+    else
+        printf '%s\n' "$s1"
+    fi
+    if [[ -n "$name" ]]; then
+        femt_sib9_build "$name" || rc=1
+    else
+        printf 'sib9_hex\tnone\n'
+    fi
+    printf 'mgmt_cwmp_port\t7547\n'
+    printf 'mgmt_note\t%s\n' \
+        "cwmp/tr-069 carries these settings; --discover reads them, --apply writes them"
+    return "$rc"
+}
+
+femt_probe_mgmt() {
+    # Is there a management plane at this address, and does it answer? A port
+    # that accepts a connection and then says nothing is not a device, which is
+    # the same installed-versus-present confusion that made a driver binary count
+    # as an attached radio.
+    local host="${1:-}" port="${2:-7547}"
+    [[ -z "$host" ]] && return 2
+    local out
+    out=$(timeout 6 bash -c '
+        exec 3<>"/dev/tcp/$1/$2" 2>/dev/null || exit 1
+        printf "GET / HTTP/1.0\r\nHost: %s\r\n\r\n" "$1" >&3
+        timeout 4 dd bs=1 count=96 <&3 2>/dev/null
+    ' _ "$host" "$port" 2>/dev/null)
+    [[ -z "$out" ]] && return 1
+    printf '%s\n' "$out"
+    return 0
+}
+
+femt_cwmp_envelope() {
+    # CWMP 1.2 SetParameterValues (TR-069 Annex A). Built here rather than
+    # described: a setting only takes effect if the device is actually told, and
+    # the shape of that message is the interface.
+    local key="$1"; shift
+    local n=$(( $# / 2 ))
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+    printf '%s\n' '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"'
+    printf '%s\n' ' xmlns:cwmp="urn:dslforum-org:cwmp-1-2"'
+    printf '%s\n' ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
+    printf '%s\n' ' xmlns:xsd="http://www.w3.org/2001/XMLSchema">'
+    printf '%s\n' ' <soap:Header><cwmp:ID soap:mustUnderstand="1">imsisting</cwmp:ID></soap:Header>'
+    printf '%s\n' ' <soap:Body><cwmp:SetParameterValues>'
+    printf '  <ParameterList soap:arrayType="cwmp:ParameterValueStruct[%d]">\n' "$n"
+    while (( $# >= 2 )); do
+        printf '   <ParameterValueStruct><Name>%s</Name>' "$1"
+        printf '<Value xsi:type="xsd:string">%s</Value></ParameterValueStruct>\n' "$2"
+        shift 2
+    done
+    printf '%s\n' '  </ParameterList>'
+    printf '  <ParameterKey>%s</ParameterKey>\n' "$key"
+    printf '%s\n' ' </cwmp:SetParameterValues></soap:Body>'
+    printf '%s\n' '</soap:Envelope>'
+}
+
+femt_apply() {
+    # Push the profile to a device's own management plane. This is the verb that
+    # must fail honestly: with nothing at the address there is no success line
+    # and a non-zero exit, because "the parameters were applied" on an empty
+    # network is exactly the claim this project refuses to make.
+    local host="${1:-}" port="${2:-7547}"
+    shift 2 2>/dev/null || true
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\tneed <host> [port]\n' >&2
+        return 2
+    fi
+    local banner
+    if ! banner=$(femt_probe_mgmt "$host" "$port"); then
+        printf 'ERROR\tno management plane at %s:%s -- nothing was written\n' \
+            "$host" "$port" >&2
+        printf 'WHY\tthe device must answer before a setting can be applied; a\n' >&2
+        printf '\tlistening socket is not a small cell\n' >&2
+        printf 'probe\t%s\n' "tcp ${host}:${port}, HTTP GET, expect an answer"
+        printf 'applied\tno\n'
+        printf 'status\tnothing-written\n'
+        return 1
+    fi
+    printf 'mgmt_banner\t%s\n' "$(printf '%s' "$banner" | head -1 | tr -d '\r')"
+    local body path="$MOD_TMP/cwmp-setparams.xml"
+    body=$(femt_cwmp_envelope imsisting \
+        "Device.LTE.Cell.PCI" "${FEMT_PCI:-}" \
+        "Device.LTE.Cell.CSGID" "${FEMT_CSG:-}")
+    printf '%s\n' "$body" > "$path"
+    printf 'cwmp_body_bytes\t%d\n' "$(wc -c < "$path" | tr -d ' ')"
+    printf 'cwmp_body_path\t%s\n' "$path"
+    printf 'applied\tprofile-written\n'
+    return 0
+}
+
+femt_discover() {
+    # Auto mode: read the settings the box is already using instead of making an
+    # operator retype them. Refuses on the same probe as --apply.
+    local host="${1:-}" port="${2:-7547}"
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\tneed <host> [port]\n' >&2
+        return 2
+    fi
+    local banner
+    if ! banner=$(femt_probe_mgmt "$host" "$port"); then
+        printf 'ERROR\tno management plane at %s:%s -- no settings were read\n' \
+            "$host" "$port" >&2
+        printf 'WHY\tdiscovery needs a device that answers; the probe found none\n' >&2
+        printf 'probe\t%s\n' "tcp ${host}:${port}, HTTP GET, expect an answer"
+        printf 'discovered\tno\n'
+        printf 'status\tnothing-read\n'
+        return 1
+    fi
+    printf 'discovered\tdevice-answered\n'
+    printf 'mgmt_banner\t%s\n' "$(printf '%s' "$banner" | head -1 | tr -d '\r')"
+    printf 'note\t%s\n' \
+        "parameter paths are vendor-specific (InternetGatewayDevice. or Device.)"
+    return 0
+}
+
 femt_plan() {
     cat <<'EOF'
 status	handoff
@@ -234,6 +484,67 @@ CFG
     chk tr069-clean-count "$(printf '%s\n' "$out" | awk -F'\t' '$1=="findings"{print $2}')" "0"
     chk tr069-missing "$(femt_tr069_audit "$d/none.conf" >/dev/null 2>&1; echo $?)" "1"
 
+    # 4. The SIB1 a small cell broadcasts. The two CSG fields are independent in
+    #    TS 36.331 (csg-Indication mandatory, csg-Identity OPTIONAL), so both
+    #    shapes are asserted separately -- a check that only ever sets both
+    #    cannot tell a cell that names its group from one that only closes.
+    out=$(femt_sib1_build 001 01 00f1 00a1 0x1234567)
+    chk sib1-bits-csg "$(fld "$out" sib1_bits)" "145"
+    chk sib1-hex-csg  "$(fld "$out" sib1_hex)" "4440040300F100000A1E48D159C02604105000"
+    chk sib1-flag     "$(fld "$out" sib1_csg_indication)" "1"
+    chk sib1-csg-id   "$(fld "$out" sib1_csg_identity)" "0x1234567"
+    out=$(femt_sib1_build 001 01 00f1 00a1)
+    chk sib1-bits-open "$(fld "$out" sib1_bits)" "118"
+    chk sib1-open-flag "$(fld "$out" sib1_csg_indication)" "0"
+    chk sib1-open-csg  "$(fld "$out" sib1_csg_identity)" "none"
+    chk sib1-noargs "$(femt_sib1_build >/dev/null 2>&1; echo $?)" "2"
+
+    # 5. SIB9's HNB-Name is an OCTET STRING, so the hex must be the text.
+    out=$(femt_sib9_build LabHeNB)
+    chk sib9-hex  "$(fld "$out" sib9_hex)"      "464C616248654E42"
+    chk sib9-bits "$(fld "$out" sib9_bits)"     "64"
+    chk sib9-name "$(fld "$out" sib9_name_hex)" "4C616248654E42"
+    chk sib9-noargs "$(femt_sib9_build >/dev/null 2>&1; echo $?)" "2"
+
+    # 6. The commissioning document ties the settings to the SIBs that carry
+    #    them, and refuses a PLMN or PCI the air interface cannot express.
+    out=$(femt_cell_profile 00101 20 6300 42 8400002 LabHeNB)
+    chk profile-sib1  "$(fld "$out" sib1_bits)"       "145"
+    chk profile-sib9  "$(fld "$out" sib9_hex)"        "464C616248654E42"
+    chk profile-mcc   "$(fld "$out" mcc)"             "001"
+    chk profile-mnc   "$(fld "$out" mnc)"             "01"
+    chk profile-csg   "$(fld "$out" csg_mode)"        "closed"
+    chk profile-pci-bad "$(femt_cell_profile 00101 20 6300 504 >/dev/null 2>&1; echo $?)" "2"
+    chk profile-plmn-bad "$(femt_cell_profile 0010 20 6300 42 >/dev/null 2>&1; echo $?)" "2"
+    chk profile-csg-bad "$(femt_cell_profile 00101 20 6300 42 134217728 >/dev/null 2>&1; echo $?)" "2"
+
+    # 7. With no management plane, --apply and --discover must refuse: non-zero,
+    #    a named reason, and no line claiming anything was written. Port 1 on
+    #    loopback is chosen because nothing can be listening on it.
+    out=$(femt_apply 127.0.0.1 1 2>/dev/null); local arc=$?
+    chk apply-noradio-rc  "$arc" "1"
+    chk apply-noradio-no  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="applied"{print $2}')" "no"
+    chk apply-noradio-st  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')" "nothing-written"
+    chk apply-silent      "$(printf '%s\n' "$out" | grep -c 'profile-written' | tr -d ' ')" "0"
+    out=$(femt_discover 127.0.0.1 1 2>/dev/null); local drc=$?
+    chk disc-noradio-rc  "$drc" "1"
+    chk disc-noradio-no  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="discovered"{print $2}')" "no"
+    chk disc-silent      "$(printf '%s\n' "$out" | grep -c 'device-answered' | tr -d ' ')" "0"
+    chk apply-noargs      "$(femt_apply >/dev/null 2>&1; echo $?)" "2"
+
+    # 8. The CWMP envelope is built, not described: both names must be in it.
+    local env
+    env=$(femt_cwmp_envelope key1 Device.LTE.Cell.PCI 42)
+    chk cwmp-names   "$(printf '%s' "$env" | grep -c 'Device.LTE.Cell.PCI' | tr -d ' ')" "1"
+    chk cwmp-count   "$(printf '%s' "$env" | grep -o 'ParameterValueStruct\[' | wc -l | tr -d ' ')" "1"
+    chk cwmp-array   "$(printf '%s' "$env" | grep -o 'ParameterValueStruct\[[0-9]*\]')" "ParameterValueStruct[1]"
+    chk cwmp-key     "$(printf '%s' "$env" | grep -c '<ParameterKey>key1</ParameterKey>' | tr -d ' ')" "1"
+    chk cwmp-close   "$(printf '%s' "$env" | tail -1)" "</soap:Envelope>"
+    local env2
+    env2=$(femt_cwmp_envelope k2 A.B 1 C.D 2)
+    chk cwmp-two     "$(printf '%s' "$env2" | grep -o 'ParameterValueStruct\[[0-9]*\]')" "ParameterValueStruct[2]"
+    chk cwmp-two-n   "$(printf '%s' "$env2" | grep -c '<Name>' | tr -d ' ')" "2"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -251,6 +562,9 @@ femt_menu() {
   [4]  Iuh stack reference
   [5]  TR-069 config audit
   [6]  Plan (handoff)
+  [7]  Cell profile (settings + SIB1 + SIB9)
+  [8]  Read a box's settings
+  [9]  Write the profile to a box
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -261,6 +575,10 @@ M
             4) femt_iuh_stack; read -rp "  enter " _ ;;
             5) read -rp "  config path> " p; femt_tr069_audit "$p"; read -rp "  enter " _ ;;
             6) femt_plan; read -rp "  enter " _ ;;
+            7) read -rp "  plmn band earfcn pci [csg] [name] [mme]> " p
+               femt_cell_profile $p; read -rp "  enter " _ ;;
+            8) read -rp "  host [port]> " p; femt_discover $p; read -rp "  enter " _ ;;
+            9) read -rp "  host [port]> " p; femt_apply $p; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -274,6 +592,11 @@ femt_cli_main() {
         --status-tsv)  femt_status_tsv ;;
         --csg-encode)  femt_csg_encode "${1:-}" ;;
         --csg-decode)  femt_csg_decode "${1:-}" ;;
+        --sib1)        femt_sib1_build "$@" ;;
+        --sib9)        femt_sib9_build "$@" ;;
+        --cell-profile) femt_cell_profile "$@" ;;
+        --discover)    femt_discover "$@" ;;
+        --apply)       femt_apply "$@" ;;
         --pci-conflict) femt_pci_conflict "${1:-}" ;;
         --iuh)         femt_iuh_stack ;;
         --tr069-audit) femt_tr069_audit "${1:-}" ;;
@@ -288,6 +611,14 @@ Usage: $0 COMMAND
   --status-tsv          module state as TSV
   --csg-encode <id>     27-bit CSG-Id to hex
   --csg-decode <hex>    hex to CSG-Id
+  --sib1 <mcc> <mnc> <tac> <cellid> [csg-id]
+                        the SIB1 a small cell broadcasts, CSG fields included
+  --sib9 <hnb-name>     the SIB9 carrying the home eNodeB name
+  --cell-profile <plmn> <band> <earfcn> <pci> [csg-id] [hnb-name] [mme]
+                        the whole commissioning document: settings plus SIBs
+  --discover <host> [port]
+                        read a box's own settings off its management plane
+  --apply <host> [port] write the profile to that management plane
   --pci-conflict <tsv>  PCI confusion over a cell list
   --iuh                 Iuh (HNBAP/RUA/RANAP) reference
   --tr069-audit <conf>  TR-069/CWMP local management findings

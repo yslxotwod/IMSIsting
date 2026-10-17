@@ -30,7 +30,13 @@
 #      for any type that produced nothing, and that is reported as a failure of
 #      the check rather than passed over.
 #
-# == What it does NOT cover, stated rather than papered over ==
+#   3. SIB1's CSG-Identity, which the random differential cannot reach on its
+#      own: the field is optional, so a random SIB1 emits the presence bit as
+#      0 and the 27 bits behind it are never exercised. check_sib1_csg.py
+#      drives the six cases that separate the presence bit from the identity
+#      (flag only, identity with the flag clear, identity with the flag set,
+#      zero, maximum) and mutates a scratch copy of the encoder to prove it
+#      would notice each defect it claims to catch.
 #
 #   * The 1031 emitted types are exercised only where the root types reach. A
 #     leaf that is wrong and unreachable from the sampled roots is invisible
@@ -141,6 +147,13 @@ if grep -q 'skipped [1-9]' "$WORK/hand.txt"; then
     printf '      checked; fix the value rather than counting it as a pass\n' >&2
     rc=1
 fi
+
+printf '== hand-built cases for SIB1 CSG-Identity\n'
+set +e
+"$PY" "$REPO/tools/lte-sib-oracle/check_sib1_csg.py" 2>&1 | tee "$WORK/sib1csg.txt"
+crc=${PIPESTATUS[0]}
+set -e
+[ "$crc" -eq 0 ] || rc=1
 
 printf '\n'
 if [ "$rc" -eq 0 ]; then
