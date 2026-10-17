@@ -1146,6 +1146,30 @@ item — it was the only row in Phase 14 that over-claimed.
 Sequencing within this phase: the PWS verbs and the UMTS f9 wiring first (both
 are hours, not days, and both close a named attack class), then the transport
 layer T1 because it unlocks six modules at once, then SRTP and the fraud lanes.
+
+**Phase 15b — what a published taxonomy still finds absent.** The eight rows
+above came from reading the tree. This set came from auditing the tree against
+an external threat list, line by line, and keeping only the lines that are
+neither built nor filed. Same absence test.
+
+| Absent attack | Verified absence | Home | Cost |
+|---|---|---|---|
+| **X2AP and XnAP codecs** | `grep -riE 'x2ap'` in `modules/`+`tools/` returns one line, `modules/03_gsmtap.sh:200`, which labels a GSMTAP packet type. `xnap` returns nothing. `10_lte_air` builds `HandoverCommand` as an *RRC* message, so the eNB-to-eNB and gNB-to-gNB legs of a handover have no bytes at all | `10_lte_air` / `13_nr_core` | Medium — the same APER wrapper `tools/s1ap_asn1.py` now provides |
+| **RUA and RANAP** | `37_femtocell --iuh` is a four-row reference table; HNBAP is now byte-exact, RUA (TS 25.468) and RANAP (TS 25.413) are still names. A UE registration that reaches an HNB-GW needs all three | `37_femtocell` | Medium — continues the HNBAP pattern, same oracle |
+| **NGAP encode** | `13_nr_core:146` `ncore_ngap_procedures()` and `:219` `ncore_decode_ngap()` — decode and a procedure table, no writer. The NG setup request an gNB presents has no builder, unlike S1 Setup | `13_nr_core` | Low — S1 Setup is the template, built and oracle-confirmed |
+| **MMS / MM1 and media parsers** | `mms` in `modules/` matches only the `TP-MMS` flag bit in SMS-DELIVER (`modules/41_ota_sms.sh:1325-1416`). No MM1 transaction, no WAP push, no media parser | `41_ota_sms` | High — WAP-209/230, its own stack |
+| **Java Card / applet isolation** | Three `java` hits across the tree, all prose. No CAP file handling, no applet firewall analysis, no shareable-interface check | `16_sim` | High — needs a card and a toolchain, not just a codec |
+| **Silent-SMS presence inference** | `41_ota_sms` builds and audits the Type 0 message (`:745`, "the Type 0 silent SMS audit") — the *message* exists, the *inference* does not: nothing correlates a Type 0 delivery with a device becoming reachable | `28_paging_track` | Low — the message builder is done; this is a correlation over the identity store |
+| **Caller-identity trust abuse** | `30_volte_ims` forges a REGISTER `Contact` (`:1584`), which hijacks inbound calls, but no verb exercises `From`/`P-Asserted-Identity`/STIR-VERstat trust. `caller-id` in `modules/` returns nothing | `30_volte_ims` | Low-Medium — SIP header work on a codec that already builds messages |
+| **Charging and bearer-policy abuse** | `11_lte_core` injects a Create Session Request, which allocates a bearer and a charging record (`:1870`, `:1950`) — that is one incident, not an abuse model. No CDR/OCS/OFCS inconsistency analysis, no policy-rule mismatch | `11_lte_core` | Medium — GTP-C and the IE table are already there |
+| **SEPP at the byte level** | `13_nr_core:1042` `sepp-bypass` prints a five-step plan; `26_ss7_map:29` cites GSMA IR.88. No N32 handshake, no PRINS consent test, no byte-level boundary check | `13_nr_core` | High — N32/f98 and PRINS are their own specs |
+
+Two lines are **methodology, not capability**, and neither needs a module:
+LTEInspector's systematic discovery (a state-machine model checking a protocol
+against its own procedure tables) belongs as a verb on `35_baseband`, which
+already holds the corpus generator and the procedure list; and "pre-security
+registration" is `32_nas_signaling`'s existing harness, documented rather than
+built twice.
 `docs/OFFENSIVE-GAP-ANALYSIS.md` §2 is stale on items 2 and 3 — the QCDM/DIAG
 surface landed as `56_baseband_diag` and the TS 23.040 TP layer with the Type-0
 audit landed in `41_ota_sms` — and should be read against the tree, not alone.
