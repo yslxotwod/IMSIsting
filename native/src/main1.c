@@ -15702,19 +15702,380 @@ static ModuleSubmenuEntry vowi_entries[] = {
       "security-high-symbolic",
       "--integrity:Integrity|--encr:Encryption|--plan:Plan" },
 };
+/* --------------------------------------------------------------------------
+   The small-cell page, laid out the way the LTE CVE Kit page is: a named view
+   with a subtitle, then cards that each hold one job, and a control per job.
+   Two rules shape it.
+
+   No control is named after a verb. A button says what it does -- "Decode
+   CSG", "Ask the box", "Read the capture" -- and the verb stays in the C next
+   to the argv, where check-gui-text.sh can see that it is not on screen.
+
+   Views are the attack surface, not one per verb: closed cell, commissioning,
+   management plane, identity of the cell (CSG/PCI), backhaul, and the stream
+   of subscribers a relayed backhaul would produce. That is the same split the
+   CVE kit uses (one card per part of the network, not one per CVE).
+   -------------------------------------------------------------------------- */
+
+static char *
+scell_status_summary(const char *module_id)
+{
+    g_autofree char *script = module_script_path(module_id);
+    const char *argv[] = { script, "--status-tsv", NULL };
+    g_autofree char *raw = run_capture(argv);
+    g_autofree char *target = raw ? tsv_field(raw, "TARGET") : NULL;
+    g_autofree char *tx = raw ? tsv_field(raw, "TRANSMIT") : NULL;
+
+    return g_strdup_printf("%s\n%s",
+        (target && *target) ? target : "the module did not answer",
+        (tx && *tx) ? tx : "transmit state unknown");
+}
+
+static void
+scell_arg_clicked(GtkButton *button, gpointer user_data)
+{
+    AppState *state = g_object_get_data(G_OBJECT(button), "state");
+    const char *module_id = g_object_get_data(G_OBJECT(button), "module-id");
+    GtkWidget *status = g_object_get_data(G_OBJECT(button), "status");
+    const char *verb = g_object_get_data(G_OBJECT(button), "verb");
+    const char *label = g_object_get_data(G_OBJECT(button), "action-label");
+    GtkWidget *entry = g_object_get_data(G_OBJECT(button), "arg-entry");
+    g_autofree char *typed = g_strdup(
+        entry != NULL ? gtk_editable_get_text(GTK_EDITABLE(entry)) : "");
+    g_auto(GStrv) parts = g_strsplit(typed, " ", -1);
+    g_autofree char *script = module_script_path(module_id);
+    g_autoptr(GPtrArray) argv = g_ptr_array_new();
+
+    (void) user_data;
+    g_ptr_array_add(argv, script);
+    g_ptr_array_add(argv, (gpointer) verb);
+    for (int i = 0; parts[i] != NULL; i++)
+        if (parts[i][0] != '\0') g_ptr_array_add(argv, parts[i]);
+    g_ptr_array_add(argv, NULL);
+    imsisting_action_run(state, module_id, label, status,
+                         (const char *const *) argv->pdata, FALSE);
+}
+
+static void
+scell_entry_activate(GtkEntry *entry, gpointer user_data)
+{
+    (void) entry;
+    gtk_widget_activate(GTK_WIDGET(user_data));
+}
+
+/* One job: type the arguments, press the button, never see the verb. */
+static GtkWidget *
+scell_arg_row(AppState *state, const char *module_id, GtkWidget *status,
+              const char *button_label, const char *verb,
+              const char *placeholder, const char *hint)
+{
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *entry = gtk_entry_new();
+    GtkWidget *button = gtk_button_new_with_label(button_label);
+    GtkWidget *column;
+
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), placeholder);
+    gtk_widget_set_hexpand(entry, TRUE);
+    gtk_widget_add_css_class(button, "verb-button");
+    gtk_widget_add_css_class(button, "primary");
+
+    g_object_set_data(G_OBJECT(button), "state", state);
+    g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
+    g_object_set_data(G_OBJECT(button), "status", status);
+    g_object_set_data(G_OBJECT(button), "verb", (gpointer) verb);
+    g_object_set_data(G_OBJECT(button), "action-label", (gpointer) button_label);
+    g_object_set_data(G_OBJECT(button), "arg-entry", entry);
+    g_signal_connect(button, "clicked", G_CALLBACK(scell_arg_clicked), NULL);
+    g_signal_connect(entry, "activate", G_CALLBACK(scell_entry_activate), button);
+
+    gtk_box_append(GTK_BOX(row), entry);
+    gtk_box_append(GTK_BOX(row), button);
+    if (hint == NULL) return row;
+
+    column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_box_append(GTK_BOX(column), row);
+    gtk_box_append(GTK_BOX(column), fkit_note(hint));
+    return column;
+}
+
+static GtkWidget *
+scell_button(AppState *state, const char *module_id, GtkWidget *status,
+             const char *button_label, const char *verb, const char *extra)
+{
+    GtkWidget *button = gtk_button_new_with_label(button_label);
+
+    (void) extra;
+    radio_bench_run_button(button, state, module_id, status, verb, NULL);
+    return button;
+}
+
+/* 1. Overview: what this machine can prove right now, and the three ways in. */
+static GtkWidget *
+scell_build_overview(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SMALL CELL / eNB",
+        "A closed cell, the box that runs it, and the backhaul it hands traffic to.",
+        &body);
+    GtkWidget *state_body;
+    GtkWidget *jobs_body;
+    GtkWidget *jobs = verb_card("WHAT TO DO FIRST", &jobs_body);
+    GtkWidget *flow = fkit_flow();
+    g_autofree char *summary = scell_status_summary(module_id);
+    GtkWidget *banner = gtk_label_new(summary);
+
+    gtk_widget_add_css_class(banner, "crec-survey-status");
+    gtk_label_set_xalign(GTK_LABEL(banner), 0.0f);
+    gtk_label_set_selectable(GTK_LABEL(banner), TRUE);
+    gtk_box_append(GTK_BOX(body), banner);
+
+    gtk_box_append(GTK_BOX(body), verb_card("THE MODULE", &state_body));
+    gtk_box_append(GTK_BOX(state_body), fkit_note(
+        "27-bit CSG codec, SIB1/SIB9 over a real PER codec, PCI-confusion "
+        "detection, and a TR-069/CWMP audit of a local management plane. "
+        "Nothing here keys a transmitter."));
+    gtk_box_append(GTK_BOX(state_body), fkit_note(
+        "The Iuh backhaul reference and the lab handoff plan are in Backhaul. "
+        "The S1 leg is not wired yet, and the plan says so."));
+
+    fkit_flow_add(flow, scell_button(state, module_id, status,
+        "Verify the Codec", "--selftest", "primary"), "primary");
+    fkit_flow_add(flow, scell_button(state, module_id, status,
+        "Read a Capture", "--detect", "flat"), "primary");
+    fkit_flow_add(flow, scell_button(state, module_id, status,
+        "Lab Plan", "--plan", "flat"), "primary");
+    gtk_box_append(GTK_BOX(jobs_body), flow);
+    gtk_box_append(GTK_BOX(jobs_body), fkit_note(
+        "The selftest is the honest one: it writes a CSG SIB1, reads it back "
+        "through the detector, and fails if the round trip disagrees."));
+    gtk_box_append(GTK_BOX(body), jobs);
+
+    (void) out;
+    return outer;
+}
+
+/* 2. Closed cell: the one question a captured SIB1 answers on its own. */
+static GtkWidget *
+scell_build_detect(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CLOSED CELL",
+        "A cell that announces a closed subscriber group is a small cell by definition.",
+        &body);
+    GtkWidget *read_body;
+    GtkWidget *read = verb_card("READ ONE", &read_body);
+
+    gtk_box_append(GTK_BOX(read_body),
+        scell_arg_row(state, module_id, status, "Read the Broadcast",
+            "--detect",
+            "SIB1 hex, or a file with one per line, or - for stdin",
+            "One BCCH-DL-SCH-Message per line. Comments after # are ignored."));
+    gtk_box_append(GTK_BOX(read_body), fkit_note(
+        "The decode is tools/lte_asn1.py, whose SIB1 CSG fields are asserted "
+        "against pycrate. Nothing here reads a bit layout of this tree's own."));
+    gtk_box_append(GTK_BOX(body), read);
+
+    gtk_box_append(GTK_BOX(body), fkit_note(
+        "What the verdict means: a CSG bit is set, so the cell declares itself "
+        "closed. What it does not mean: that an open cell is not small. A "
+        "femtocell that broadcasts no CSG reads exactly like a macro here, and "
+        "no amount of staring at SIB1 will separate them."));
+
+    (void) out;
+    return outer;
+}
+
+/* 3. Commissioning: the document a box needs, and the SIBs that carry it. */
+static GtkWidget *
+scell_build_commission(AppState *state, const char *module_id,
+                       GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("COMMISSIONING",
+        "The settings a small cell is told to run, and the broadcasts that state them.",
+        &body);
+    GtkWidget *doc_body;
+    GtkWidget *sib_body;
+    GtkWidget *doc = verb_card("THE WHOLE PROFILE", &doc_body);
+    GtkWidget *sib = verb_card("ONE BROADCAST AT A TIME", &sib_body);
+
+    gtk_box_append(GTK_BOX(doc_body), scell_arg_row(state, module_id, status,
+        "Write the Document", "--cell-profile",
+        "mcc mnc band earfcn pci [csg-id] [name] [mme]",
+        "The commissioning document: PLMN, band, EARFCN, PCI, CSG, plus both SIBs."));
+    gtk_box_append(GTK_BOX(body), doc);
+
+    gtk_box_append(GTK_BOX(sib_body), scell_arg_row(state, module_id, status,
+        "Build SIB1", "--sib1", "mcc mnc tac-hex cellid-hex [csg-id]",
+        "SIB1 carries cellAccessRelatedInfo, which is where a closed cell says so."));
+    gtk_box_append(GTK_BOX(sib_body), scell_arg_row(state, module_id, status,
+        "Build SIB9", "--sib9", "home eNodeB name",
+        "SIB9's HNB-Name is an OCTET STRING, so the octets must be the text."));
+    gtk_box_append(GTK_BOX(body), sib);
+
+    (void) out;
+    return outer;
+}
+
+/* 4. Management plane: read it, audit it, write to it. */
+static GtkWidget *
+scell_build_management(AppState *state, const char *module_id,
+                       GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MANAGEMENT PLANE",
+        "A residential box usually serves its own settings to whoever asks.",
+        &body);
+    GtkWidget *box_body;
+    GtkWidget *audit_body;
+    GtkWidget *box = verb_card("THE BOX", &box_body);
+    GtkWidget *audit = verb_card("A CONFIG FILE", &audit_body);
+
+    gtk_box_append(GTK_BOX(box_body), scell_arg_row(state, module_id, status,
+        "Ask the Box", "--discover", "host [port]",
+        "Reads the settings the box serves. Reports what answered, not what we hoped."));
+    gtk_box_append(GTK_BOX(box_body), scell_arg_row(state, module_id, status,
+        "Write the Profile", "--apply", "host [port]",
+        "Builds a CWMP 1.2 SetParameterValues envelope and refuses when nothing answers."));
+    gtk_box_append(GTK_BOX(box_body), fkit_note(
+        "With nothing at the address this says nothing was written and exits "
+        "non-zero, rather than reporting a write it did not make."));
+    gtk_box_append(GTK_BOX(body), box);
+
+    gtk_box_append(GTK_BOX(audit_body), scell_arg_row(state, module_id, status,
+        "Audit It", "--tr069-audit", "/path/to/box.conf",
+        "Key/value config. Flags default credentials, plaintext CWMP, exposed WAN "
+        "management, optional TLS, a non-standard port."));
+    gtk_box_append(GTK_BOX(body), audit);
+
+    (void) out;
+    return outer;
+}
+
+/* 5. Who the cell says it is: CSG id and PCI reuse. */
+static GtkWidget *
+scell_build_identity(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CSG AND PCI",
+        "The two numbers that decide who may attach, and who confuses whom.",
+        &body);
+    GtkWidget *csg_body;
+    GtkWidget *pci_body;
+    GtkWidget *csg = verb_card("CLOSED SUBSCRIBER GROUP", &csg_body);
+    GtkWidget *pci = verb_card("PCI REUSE", &pci_body);
+
+    gtk_box_append(GTK_BOX(csg_body), scell_arg_row(state, module_id, status,
+        "Encode", "--csg-encode", "decimal id",
+        "A CSG-Id is 27 bits (TS 36.413). Anything wider is refused, not truncated."));
+    gtk_box_append(GTK_BOX(csg_body), scell_arg_row(state, module_id, status,
+        "Decode", "--csg-decode", "hex",
+        "Eight hex octets in, the decimal id out."));
+    gtk_box_append(GTK_BOX(body), csg);
+
+    gtk_box_append(GTK_BOX(pci_body), scell_arg_row(state, module_id, status,
+        "Check a Cell List", "--pci-conflict", "/path/to/cells.tsv",
+        "TSV with pci, earfcn and cell_id. Two cells on one PCI and one frequency "
+        "is confusion; two on different frequencies is not, and it abstains."));
+    gtk_box_append(GTK_BOX(body), pci);
+
+    (void) out;
+    return outer;
+}
+
+/* 6. Backhaul: where the traffic is already cleartext. */
+static GtkWidget *
+scell_build_backhaul(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("BACKHAUL",
+        "Every other module in this tree attacks the air. This view is the other leg.",
+        &body);
+    GtkWidget *ref_body;
+    GtkWidget *ref = verb_card("THE STACK", &ref_body);
+    GtkWidget *flow = fkit_flow();
+
+    fkit_flow_add(flow, scell_button(state, module_id, status,
+        "Stack Reference", "--iuh", "primary"), "primary");
+    fkit_flow_add(flow, scell_button(state, module_id, status,
+        "Lab Plan", "--plan", "flat"), "primary");
+    gtk_box_append(GTK_BOX(ref_body), flow);
+    gtk_box_append(GTK_BOX(ref_body), fkit_note(
+        "HNBAP / RUA / RANAP over SCTP on the Iuh is the 3G home-node stack. An "
+        "LTE HeNB speaks S1AP over SCTP to the MME, GTP-U to the serving gateway, "
+        "and IKEv2 to the security gateway."));
+    gtk_box_append(GTK_BOX(ref_body), fkit_note(
+        "There is no SCTP client in this tree, so nothing here registers with a "
+        "core or relays a subscriber. The plan names the hardware and the "
+        "software that would have to be on the bench first."));
+    gtk_box_append(GTK_BOX(body), ref);
+
+    gtk_box_append(GTK_BOX(body), fkit_note(
+        "Why this leg matters: a home node's traffic is cleartext between the "
+        "box and the security gateway. Attack the air and you get a phone; own "
+        "the box and you get what the phone is carrying."));
+
+    (void) out;
+    return outer;
+}
+
+/* 7. Live subscribers: what a relayed backhaul would put on this page. */
+static GtkWidget *
+scell_build_live(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("LIVE SUBSCRIBERS",
+        "What a relayed backhaul would show: who attached, through which box, when.",
+        &body);
+    GtkWidget *table_body;
+    GtkWidget *table = verb_card("ATTACHMENTS", &table_body);
+    g_autofree char *root = imsisting_root();
+    g_autofree char *path = g_strdup_printf(
+        "%s/loot/femtocell/subscribers.tsv", root);
+    g_autofree char *text = NULL;
+    GtkWidget *flow = fkit_flow();
+
+    if (g_file_get_contents(path, &text, NULL, NULL) && text != NULL && *text != '\0') {
+        g_auto(GStrv) lines = g_strsplit(text, "\n", -1);
+        for (int i = 0; lines[i] != NULL && *lines[i] != '\0'; i++) {
+            GtkWidget *row = gtk_label_new(lines[i]);
+            gtk_widget_add_css_class(row, "fkit-kv-val");
+            gtk_label_set_xalign(GTK_LABEL(row), 0.0f);
+            gtk_label_set_selectable(GTK_LABEL(row), TRUE);
+            gtk_box_append(GTK_BOX(table_body), row);
+        }
+        gtk_box_append(GTK_BOX(table_body), fkit_note(path));
+    } else {
+        gtk_box_append(GTK_BOX(table_body), fkit_note(
+            "Empty. Nothing on this machine writes this table yet."));
+        gtk_box_append(GTK_BOX(table_body), fkit_note(
+            "A relayed backhaul writes it one row per attach: the IMSI the "
+            "InitialUEMessage carried, the box that carried it, the time. That "
+            "needs an SCTP association to the MME, which is the piece not built."));
+        gtk_box_append(GTK_BOX(table_body), fkit_note(path));
+    }
+    fkit_flow_add(flow, scell_button(state, module_id, status,
+        "Where the Data Comes From", "--iuh", "flat"), "primary");
+    gtk_box_append(GTK_BOX(table_body), flow);
+    gtk_box_append(GTK_BOX(body), table);
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry femt_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "~--pci-conflict|~--detect:Closed Cell?|--iuh:IuH|--tr069-audit:TR-069 Audit" },
-    { "CSG",
-      "network-server-symbolic",
-      "--csg-decode:Decode CSG|--csg-encode:Encode CSG|--plan:Plan" },
-    { "Cell",
-      "network-wireless-symbolic",
-      "--cell-profile=00101 20 6300 42 0x8400002 LabHeNB:Commissioning Profile|--sib1=001 01 00f1 00a1:SIB1|--sib9=LabHeNB:SIB9" },
-    { "Management",
-      "preferences-system-symbolic",
-      "--discover=127.0.0.1:Read Settings|--apply=127.0.0.1:Write Profile" },
+    { "Overview", "dialog-information-symbolic", NULL, scell_build_overview },
+    { "Closed Cell", "system-search-symbolic", NULL, scell_build_detect },
+    { "Commissioning", "document-new-symbolic", NULL, scell_build_commission },
+    { "Management Plane", "preferences-system-symbolic", NULL, scell_build_management },
+    { "CSG and PCI", "network-server-symbolic", NULL, scell_build_identity },
+    { "Backhaul", "network-wired-symbolic", NULL, scell_build_backhaul },
+    { "Live Subscribers", "view-list-symbolic", NULL, scell_build_live },
 };
 static ModuleSubmenuEntry ussd_entries[] = {
     { "Overview",

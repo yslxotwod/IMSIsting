@@ -80,7 +80,7 @@ femt_norm_hex() { printf '%s' "${1:-}" | tr -d ' \t\r\n:.-' | sed 's/^0x//I' | t
 
 femt_status_tsv() {
     printf 'MODULE\tfemtocell\n'
-    printf 'TARGET\tHeNB local management, Iuh backhaul, CSG/PCI allocation\n'
+    printf 'TARGET\tSmall-cell local management, S1 and Iuh backhaul, CSG/PCI allocation\n'
     printf 'TRANSMIT\tnone — assessment and conflict detection only\n'
     printf 'SELFTEST\tyes\n'
 }
