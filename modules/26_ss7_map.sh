@@ -2761,6 +2761,22 @@ ss7_selftest() {
     chk detect-4col-no-pc   "$(printf '%s\n' "$out" | grep -c 'OPC')" "0"
     chk detect-4col-no-first "$(printf '%s\n' "$out" | grep -c 'first-message')" "0"
 
+    # ── the last hop is armed, and it names PPID 3 ──────────────────────
+    out=$(MAP_ARMED=0 ss7_cmd_m3ua_send stp.lab 2>/dev/null)
+    chk m3ua-send-disarmed     "$(fld "$out" status)" "disarmed"
+    chk m3ua-send-disarmed-rc  "$(MAP_ARMED=0 ss7_cmd_m3ua_send stp.lab >/dev/null 2>&1; echo $?)" "3"
+    chk m3ua-send-ppid         "$(fld "$out" would_send | grep -c 'PPID 3')" "1"
+    chk m3ua-send-armed-nohost "$(MAP_ARMED=1 ss7_cmd_m3ua_send >/dev/null 2>&1; echo $?)" "2"
+    chk m3ua-send-tool-present "$([[ -f "$IMSISTING_ROOT/tools/sctp_assoc.py" ]] && echo yes || echo no)" "yes"
+    # The default payload is a real exchange, not a stub: the MSU that goes in
+    # is the SRI, and the M3UA layer is 8 octets of header over it plus padding.
+    msu=$(ss7_build_msu 22 "$(ss7_arg_sri 17045550001)")
+    m3ua=$(ss7_build_m3ua "$msu")
+    chk m3ua-send-msu-octets  "$(( ${#msu} / 2 ))" "50"
+    chk m3ua-send-m3ua-octets "$(( ${#m3ua} / 2 ))" "64"
+    chk m3ua-send-class       "$(ss7_m3ua_parse "$m3ua" | awk -F'\t' '$1=="m3ua_class"{print $2; exit}')" "1"
+    chk m3ua-send-type-name   "$(ss7_m3ua_parse "$m3ua" | awk -F'\t' '$1=="m3ua_type_name"{print $2; exit}')" "DATA"
+
     rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
@@ -2885,6 +2901,51 @@ M
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── the last hop: SCTP/M3UA to an STP ───────────────────────────────────
+# Everything above this line stops at octets: the MSU builds, the M3UA layer
+# wraps it, and the plan hands it to a human.  This sends it, with the PPID
+# RFC 4666 §7.1 specifies -- 3, not the 132 the roadmap claimed for a while
+# (that number belongs to no M3UA adaptation at all; the module's own
+# --decode-sigtran has been warning about it since it was written).
+# Armed: MAP_ARMED=1, and the default payload is an SRI for a test MSISDN so
+# --m3ua-send alone is a complete, decodable exchange rather than a stub.
+ss7_cmd_m3ua_send() {
+    local host="${1:-}" port="${2:-2905}" msu="${3:-}" rc="${4:-}"
+    local tool="$IMSISTING_ROOT/tools/sctp_assoc.py"
+    if [[ "${MAP_ARMED:-0}" != "1" ]]; then
+        printf 'status\tdisarmed\n'
+        printf 'reason\tM3UA is sent only when MAP_ARMED=1; the MSU and the M3UA layer build either way\n'
+        printf 'would_send\t%s to %s:%s as M3UA over SCTP, PPID 3\n' \
+            "${msu:-<an SRI MSU>}" "${host:-<no host given>}" "$port"
+        return 3
+    fi
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\tneed <stp-host> [port] [msu-hex] [routing-context]\n' >&2
+        return 2
+    fi
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot send\n' "$tool" >&2; return 1; }
+    local msu_source
+    if [[ -z "$msu" ]]; then
+        msu=$(ss7_build_msu 22 "$(ss7_arg_sri 17045550001)") || {
+            printf 'ERROR\tthe default SRI MSU did not build\n' >&2; return 1; }
+        msu_source="default SRI for 17045550001"
+    else
+        msu=$(ss7_nfc "$msu")
+        ss7_is_hex "$msu" || { printf 'ERROR\tmsu must be hex\n' >&2; return 2; }
+        msu_source="caller-supplied MSU"
+    fi
+    local m3ua
+    m3ua=$(ss7_build_m3ua "$msu" "$rc") || return 1
+    printf 'leg\tM3UA over SCTP\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'ppid\t3\n'
+    printf 'msu_source\t%s\n' "$msu_source"
+    printf 'msu_octets\t%s\n' "$(( ${#msu} / 2 ))"
+    printf 'm3ua_octets\t%s\n' "$(( ${#m3ua} / 2 ))"
+    printf 'note\tno ASPUP/ASPAC handshake: an STP that requires an ACTIVE ASP will drop this\n'
+    timeout 30 python3 "$tool" send "$host" "$port" "$m3ua" --ppid 3 --wait "${MAP_WAIT:-0}"
+}
+
 ss7_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -2894,6 +2955,7 @@ ss7_cli_main() {
         --decode-tcap)   ss7_cmd_decode_tcap "${1:-}" ;;
         --decode-sigtran) ss7_cmd_decode_sigtran "${1:-}" ;;
         --build-m3ua)    ss7_cmd_build_m3ua "${1:-}" "${2:-}" "${3:-}" ;;
+        --m3ua-send)     ss7_cmd_m3ua_send "${1:-}" "${2:-2905}" "${3:-}" "${4:-}" ;;
         --decode-map)    ss7_cmd_decode_map "${1:-}" ;;
         --build-sri)     ss7_cmd_build_sri "${1:-}" ;;
         --build-sri-sm)  ss7_cmd_build_sri_sm "${1:-}" ;;

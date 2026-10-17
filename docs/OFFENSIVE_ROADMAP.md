@@ -1198,10 +1198,16 @@ nothing is not the same object as one that did, and the log has to show it.
 `--sbi-send` reports `framing none` on purpose: it carries HTTP/2 frames, it
 does not make them.
 
-*What the two remaining modules still need.* `13_nr_core` wants the UDP send for
-PFCP *and* a session-establishment builder (it has none — the encoder gap comes
-first). `26_ss7_map` wants M3UA on PPID 132, which is already
-`sctp_assoc.py --ppid 132`; that is one verb, not one file.
+*Wired: `26_ss7_map --m3ua-send`.* One verb over code that already worked — and it
+carried a correction. This roadmap said M3UA rides **PPID 132**; RFC 4666 §7.1
+says **3**, and `26_ss7_map --decode-sigtran` has been printing
+`warn DATA chunk PPID is %s, not 3 (M3UA)` since it was written, so the module
+knew before the document did. Verified against a local SCTP listener: 64 octets
+arrive, PPID **3**, M3UA class 1 type 1, protocol data tag `0x0210`.
+
+*What the last module still needs.* `13_nr_core` wants the UDP send for PFCP
+*and* a session-establishment builder. It has none, so the encoder gap comes
+first: T1 cannot paper over a module that has nothing to send.
 
 *The eight that are placement.*
 

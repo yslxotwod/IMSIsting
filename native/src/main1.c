@@ -15600,7 +15600,7 @@ static ModuleSubmenuEntry ss7_entries[] = {
       "--surface:Surface|--grx-recon:GRX Recon|--detect:Detect" },
     { "Build",
       "document-new-symbolic",
-      "--build-ati:Build ATI|--build-sri:Build SRI|--build-sri-sm:Build SRI-SM|--build-sai:Build SAI (auth vectors)|--build-psi:Build PSI|--build-ulr:Build ULR|--build-isd:Build ISD|--build-register-ss:Build RegisterSS|--build-activate-ss:Build ActivateSS|--build-m3ua:Wrap MSU in M3UA" },
+      "--build-ati:Build ATI|--build-sri:Build SRI|--build-sri-sm:Build SRI-SM|--build-sai:Build SAI (auth vectors)|--build-psi:Build PSI|--build-ulr:Build ULR|--build-isd:Build ISD|--build-register-ss:Build RegisterSS|--build-activate-ss:Build ActivateSS|--build-m3ua:Wrap MSU in M3UA|--m3ua-send:Send to STP" },
     { "Decode",
       "document-open-symbolic",
       "--decode-map:Decode MAP|--decode-msu:Decode MSU|--decode-tcap:Decode TCAP|--decode-sigtran:Decode SIGTRAN" },

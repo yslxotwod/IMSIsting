@@ -180,9 +180,10 @@ Where the `partial` verdicts land, exactly:
   `--build-activate-ss`. It also speaks the modern encapsulation in both
   directions — `--build-m3ua` wraps any of those MSUs in a send-ready M3UA DATA
   message, and `--decode-sigtran` walks the SCTP common header, the DATA chunk,
-  M3UA and then MTP3/SCCP. What it still has no transport for is the SS7/STP hop
-  itself: it produces and parses the bytes, it does not put them on a link, and
-  that is the plan.
+  M3UA and then MTP3/SCCP. `--m3ua-send` puts the result on the SS7/STP hop
+  itself — SCTP to 2905 with **PPID 3** (RFC 4666 §7.1), armed by `MAP_ARMED=1`.
+  It performs no ASPUP/ASPAC handshake, so an STP that requires an ACTIVE ASP
+  will drop it, and the report says so rather than leaving it to be discovered.
 - **`27_cellular_dns`** builds a real DNS query and response, and its aLTEr
   sequence is modelled. It has no packet rewriter and no send path; `--alter`
   rewrites the module's own record, not traffic on the bearer.
@@ -370,8 +371,8 @@ and yet the APDU codec underneath it is real.
 | GTP-C / GTP-U exploitation | `11_lte_core` | `partial` | Four finished encoders emitting real octets, an IE walk and TEID handling — and **no transport at all**. No SCTP, GTP or TCP client exists in the module; nothing is sent even pointed at a live core. Phase 7. |
 | Diameter S6a/S6d | `11_lte_core` | `partial` | AIR/ULR/CLR/IDR/DSR/PUR encode-decode and a forged-ULR registration move. The HSS is a Phase 7 lab testbed. |
 | PFCP / UPF | `13_nr_core` | `phase 7` | NGAP, PFCP and GTP-U decode for real, but all four vectors are plan files. |
-| SBA / HTTP-2 pivot | `40_sba_pivot` | `partial` | Builds HTTP/2 frames byte-exactly, including a real Rapid Reset pair, and audits JWT audience and scope. It has no HTTP/2 client, so nothing reaches an NF. Phase 7. |
-| SS7 / MAP | `26_ss7_map` | `partial` | Nine byte-exact MAP/TCAP builders (ATI, SRI, SRI-SM, SAI, PSI, ULR, ISD, registerSS, activateSS) and SIGTRAN in both directions. It produces and parses the bytes; it does not put them on a link. Phase 8. |
+| SBA / HTTP-2 pivot | `40_sba_pivot` | `partial` | Builds HTTP/2 frames byte-exactly, including a real Rapid Reset pair, and audits JWT audience and scope. `--sbi-send` carries frames to an NF over TLS but does not make them, so nothing end-to-end reaches an NF yet. Phase 7. |
+| SS7 / MAP | `26_ss7_map` | `partial` | Nine byte-exact MAP/TCAP builders (ATI, SRI, SRI-SM, SAI, PSI, ULR, ISD, registerSS, activateSS) and SIGTRAN in both directions. `--m3ua-send` puts an MSU on SCTP 2905 (PPID 3); there is no ASPUP/ASPAC handshake, so an STP demanding an ACTIVE ASP drops it. Phase 8. |
 | GRX / roaming interconnect | `26_ss7_map` | `phase 8` | Reachability and GSN harvesting are modelled; the interconnect trust model and SEPP exposure are Phase 8. |
 | DNS spoofing over the bearer | `27_cellular_dns` | `partial` | Builds a real DNS query and response. There is **no packet rewriter and no send path** — `--alter` rewrites the module's own record, not traffic on the bearer. |
 | aLTEr | `27_cellular_dns` | `partial` | The layer-2 redirection sequence is modelled, not performed. |
