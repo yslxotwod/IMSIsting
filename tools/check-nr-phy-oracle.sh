@@ -40,11 +40,16 @@
 #   --stage=mib    MIB offsets only        (a few seconds)
 #   --stage=num    carrier numerology only (~40 s: 153 cells x 3 helpers,
 #                                           each helper shelling out to awk)
-#   --stage=all    all three               (default)
+#   --stage=bch    the BCH chain only      (~2 s: 6 cases x 24 fields, no
+#                                           py3gpp and no network -- this
+#                                           stage carries the reliability
+#                                           sequence as data)
+#   --stage=all    all four                (default)
 #
 # For a full verification inside the cap, run one stage per invocation:
 #
 #   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=mib
+#   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=bch
 #   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=num
 #   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=sync
 #
@@ -99,7 +104,7 @@ _args=()
 for _a in "$@"; do
     case "$_a" in
         --stage=*)  STAGE="${_a#--stage=}" ;;
-        --stage)    printf 'error: use --stage=<sync|mib|all>\n' >&2; exit 2 ;;
+        --stage)    printf 'error: use --stage=<sync|mib|num|bch|all>\n' >&2; exit 2 ;;
         -h|--help)
             sed -n 's/^# \{0,1\}//p' "$0" | sed -n '/^Usage:/,/^$/p'
             exit 0 ;;
@@ -109,8 +114,8 @@ done
 set -- ${_args[@]+"${_args[@]}"}
 
 case "$STAGE" in
-    sync|mib|num|all) ;;
-    *) printf 'error: unknown stage "%s" (want sync, mib, num or all)\n' "$STAGE" >&2; exit 2 ;;
+    sync|mib|num|bch|all) ;;
+    *) printf 'error: unknown stage "%s" (want sync, mib, num, bch or all)\n' "$STAGE" >&2; exit 2 ;;
 esac
 
 WORK="${1:-${TMPDIR:-/tmp}/imsisting-nr-phy-oracle}"
@@ -170,6 +175,27 @@ if [[ "$STAGE" == all || "$STAGE" == mib ]]; then
         "$ROOT/tools/nr-phy-oracle/cmp_nr_mib.py" \
         "$ROOT/tools/nr-phy-oracle/negative-control-mib.py" \
         "the MIB field offsets"
+fi
+
+# ════════════════════════════════════════════════════════════════════════
+# stage: bch (no py3gpp needed, no network)
+#
+# The BCH chain is the one part of the SSB a handset must read before it can
+# camp: payload generation, CRC24C, the polar transform, rate matching and the
+# two scramblers. The module asserts a pinned codeword for it, and a pinned
+# constant computed from the same reading of the clause proves nothing about
+# that reading -- which is how the module shipped a wrong CRC24C that its own
+# selftest was happy with. This stage derives the codeword independently.
+#
+# This stage asks the module to regenerate its baseband generator, which the
+# module writes to a fixed path under /tmp. Run this ONE AT A TIME in a given
+# checkout; a second concurrent run can read, or be read by, the other's copy.
+# ════════════════════════════════════════════════════════════════════════
+if [[ "$STAGE" == all || "$STAGE" == bch ]]; then
+    run_py_stage "BCH" \
+        "$ROOT/tools/nr-phy-oracle/cmp_nr_bch.py" \
+        "$ROOT/tools/nr-phy-oracle/negative-control-bch.py" \
+        "the BCH chain"
 fi
 
 # ════════════════════════════════════════════════════════════════════════
