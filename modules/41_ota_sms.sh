@@ -467,8 +467,10 @@ otasm_packet_sms_build() {
     printf 'kic\t%s\nkid\t%s\ntar\t%s\ncounter\t%s\npcntr\t%s\n' \
         "${kic^^}" "${kid^^}" "${tar^^}" "$cntr" "$pcntr"
     printf 'padding_octets\t%s\nsecured_data_len\t%s\n' "$pad_octets" "$(( ${#data} / 2 ))"
-    if [[ -n "$cc" ]]; then printf 'cc\tsigner\t%s\n' "$cc"; else printf 'cc\tnone\n'; fi
-    printf 'packet\t%s\npacket_bytes\t%s\n' "$packet" "$(( ${#packet} / 2 ))"
+    if [[ -n "$cc" ]]; then printf 'cc\tsigner\t%s\n' "${cc^^}"; else printf 'cc\tnone\n'; fi
+    # One case for every hex field: the keys and the header are upper case, so
+    # the cipher text and the CC are too, whatever xxd produced.
+    printf 'packet\t%s\npacket_bytes\t%s\n' "${packet^^}" "$(( ${#packet} / 2 ))"
     return 0
 }
 
@@ -477,6 +479,7 @@ otasm_packet_sms_build() {
 otasm_packet_sms_parse() {
     local h; h=$(otasm_norm_hex "${1:-}")
     if ! otasm_is_hex "$h"; then printf 'ERROR\tnot valid hex\n' >&2; return 2; fi
+    h="${h^^}"
     if (( ${#h} < 2 * (2 + 1 + 8) )); then
         printf 'ERROR\tpacket shorter than CPL+CHL+SPI+KIc+KID+TAR\n' >&2; return 1
     fi
@@ -545,7 +548,7 @@ otasm_packet_sms_parse() {
     printf 'kic\t%s\nkid\t%s\ntar\t%s\ncounter\t%s\npcntr\t%s\n' \
         "${kic^^}" "${kid^^}" "${tar^^}" "$cntr" "$pcntr"
     printf 'cc\t%s\ncc_verdict\t%s\npadding_octets\t%s\n' "${cc:-none}" "$cc_verdict" "$pad_octets"
-    printf 'secured_data\t%s\napdu\t%s\npacket_bytes\t%s\n' "$data" "$apdu" "$(( ${#h} / 2 ))"
+    printf 'secured_data\t%s\napdu\t%s\npacket_bytes\t%s\n' "${data^^}" "${apdu^^}" "$(( ${#h} / 2 ))"
     if (( pad_ok == 0 )); then
         printf 'ERROR\tPCNTR says %d padding octets, only %d follow the CC\n' \
             "$pad_octets" "$(( ${#data} / 2 ))" >&2
@@ -1596,6 +1599,10 @@ otasm_selftest() {
     chk sms-packet-cc     "$(fld "$sp" cc | cut -f1)" "signer"
     # The packet pySim builds for these inputs, byte for byte. A packet that
     # says "ciphered, with a CC" and contains neither cannot match this.
+    # One case for the whole packet: the header and the keys are upper, so the
+    # cipher text and the CC are too.
+    local phex; phex=$(fld "$sp" packet)
+    chk sms-packet-upper "$([[ "$phex" == "${phex^^}" ]] && echo yes || echo no)" "yes"
     chk sms-packet-kat "$(fld "$sp" packet | tr 'A-F' 'a-f')" \
         "00201516001515b000018405f7d95d3f0f438ae0669d9f5c2bd3ee323f8f0f19105a"
     local sp2; sp2=$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
@@ -1606,7 +1613,7 @@ otasm_selftest() {
     local rd; rd=$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
          OTASM_KID_KEY=00112233445566778899aabbccddeeff \
          otasm_packet_sms_parse "$(fld "$sp" packet)")
-    chk sms-roundtrip-apdu "$(fld "$rd" apdu)" "801000000c00000000"
+    chk sms-roundtrip-apdu "$(fld "$rd" apdu)" "801000000C00000000"
     chk sms-roundtrip-cc   "$(fld "$rd" cc_verdict)" "verified"
     chk sms-roundtrip-pad  "$(fld "$rd" padding_octets)" "1"
     chk sms-roundtrip-rc   "$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
