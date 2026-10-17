@@ -44,12 +44,17 @@
 #                                           py3gpp and no network -- this
 #                                           stage carries the reliability
 #                                           sequence as data)
-#   --stage=all    all four                (default)
+#   --stage=ssb    SSB resource-element map only (~5 s: 5 PCIs x 4 symbols;
+#                                           occupancy against TS 38.211
+#                                           Table 7.4.3.1-1, PSS/SSS chips,
+#                                           and the DMRS sequence)
+#   --stage=all    all five                (default)
 #
 # For a full verification inside the cap, run one stage per invocation:
 #
 #   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=mib
 #   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=bch
+#   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=ssb
 #   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=num
 #   timeout 120 ./tools/check-nr-phy-oracle.sh --stage=sync
 #
@@ -61,17 +66,22 @@
 # What it covers: PSS and SSS sequence generation (TS 38.211 7.4.2.2 and
 # 7.4.2.3) over all 3 PSS values and all 1008 cell identities; the MIB field
 # offsets and enumerations of the BCCH-BCH-Message (TS 38.331 6.2.1 and
-# 6.2.2); and the carrier numerology -- N_RB against TS 38.104 Tables
-# 5.3.2-1 and 5.3.2-2, and N_FFT and the sample rate as the derivation
-# TS 38.104 5.3 defines them.
+# 6.2.2); the carrier numerology -- N_RB against TS 38.104 Tables 5.3.2-1 and
+# 5.3.2-2, and N_FFT and the sample rate as the derivation TS 38.104 5.3
+# defines them; the whole BCH chain (TS 38.212 7.1.1, 7.1.3, 5.3.1, 5.4.1 and
+# TS 38.211 7.3.3.1); and the SSB resource-element map with the PSS, SSS and
+# PBCH-DMRS values that sit on it (TS 38.211 Table 7.4.3.1-1, 7.4.1.4.1 and
+# 7.4.3.1).
 #
-# What it does NOT cover, stated rather than papered over: the PSS/SSS
-# resource-element positions (TS 38.211 7.4.2.1 / 7.4.3), the PBCH payload
-# beyond the MIB fields, the PBCH polar code, its scrambling and its DMRS,
-# the SSB baseband generator and decoder (nair_write_bb_gen at
-# modules/12_nr_air.sh:1063 and its decoder at :1455), PRACH, and every
-# higher-layer stage in the module. Those still rest on the module's own
-# selftest vectors, which is the exposure this file demonstrates is real.
+# What it does NOT cover, stated rather than papered over: the PBCH DATA
+# resource elements' values (the codeword itself is covered by the BCH stage,
+# but its mapping onto the grid is only partly checked -- occupancy and unit
+# magnitude, not the symbol order), the cyclic prefix lengths (TS 38.211
+# 5.3.1), the OFDM modulator and the time-domain mapping, the SSB DECODER
+# (nair_write_bb_gen at modules/12_nr_air.sh:1063 is the generator; its decoder
+# is a separate path), PRACH, and every higher-layer stage in the module. Those
+# still rest on the module's own selftest vectors, which is the exposure this
+# file demonstrates is real.
 #
 # == Tolerance ==
 #
@@ -114,8 +124,8 @@ done
 set -- ${_args[@]+"${_args[@]}"}
 
 case "$STAGE" in
-    sync|mib|num|bch|all) ;;
-    *) printf 'error: unknown stage "%s" (want sync, mib, num, bch or all)\n' "$STAGE" >&2; exit 2 ;;
+    sync|mib|num|bch|ssb|all) ;;
+    *) printf 'error: unknown stage "%s" (want sync, mib, num, bch, ssb or all)\n' "$STAGE" >&2; exit 2 ;;
 esac
 
 WORK="${1:-${TMPDIR:-/tmp}/imsisting-nr-phy-oracle}"
@@ -196,6 +206,23 @@ if [[ "$STAGE" == all || "$STAGE" == bch ]]; then
         "$ROOT/tools/nr-phy-oracle/cmp_nr_bch.py" \
         "$ROOT/tools/nr-phy-oracle/negative-control-bch.py" \
         "the BCH chain"
+fi
+
+# ════════════════════════════════════════════════════════════════════════
+# stage: ssb (no py3gpp needed, no network)
+#
+# WHERE the SSB's chips go, which is a different question from whether the
+# chips are right. A bit-exact PSS in the wrong 127 subcarriers synchronises
+# nothing, and the module ships with its own RE-map guard -- so the point of
+# this stage is the part the guard does not cover. Its negative control carries
+# a defect that passes every guard the module has (a PBCH block slid one
+# subcarrier into the "Set to 0" band) and is caught only here.
+# ════════════════════════════════════════════════════════════════════════
+if [[ "$STAGE" == all || "$STAGE" == ssb ]]; then
+    run_py_stage "SSB map" \
+        "$ROOT/tools/nr-phy-oracle/cmp_nr_ssb_map.py" \
+        "$ROOT/tools/nr-phy-oracle/negative-control-ssb-map.py" \
+        "the SSB resource-element map"
 fi
 
 # ════════════════════════════════════════════════════════════════════════
