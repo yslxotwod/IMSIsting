@@ -128,7 +128,7 @@ edge of what can be validated by anyone.
 | **O20 — roaming abuse** | `26_ss7_map` | SEPP / delegated-discovery exposure, inter-operator trust model | Two operators |
 | **O4 — Diameter attacks** | `11_lte_core` | S6a/S6d AIR/ULR/CLR encode-decode (316 ULR, 317 CLR, 318 AIR, 319 IDR, 320 DSR, 321 PUR) and forged-request builders. Header (RFC 6733 §3) and AVP layout (§4) checked, the AVP registry regenerated from TS 29.272 Table 7.3.1/1 (the old table was shifted from 1405: Origin-Realm is 296, not 285; Visited-PLMN-Id is 1407; ULR-Flags 1405; RAT-Type 1032 vendor 10415; RAND/XRES/AUTN/KASME are 1447-1450), the command and application tables from TS 29.230 (258 is Re-Auth, not Device-Watchdog; 268 is DER/DEA, not CCR; 272 is CCR/CCA; 282 is DPR; 16777219 is Wx, not Gx), and the result codes split between RFC 6733 §7.1 and the 3GPP codes of TS 29.272 §7.4 (AVP 298). Every registry is swept and the builders are decoded back, with Wireshark as the second implementation, by `tools/check-diameter-codec.sh` | An HSS |
 | **O2 — GTP exploitation** | `11_lte_core` | GTP-C v2 / GTP-U with extension headers, IE walk, TEID handling. Headers, message-type and IE-type registries corrected against TS 29.274 tables 6.1-1 and 8.1-1, IMSI/MSISDN read as TBCD with no count octet (§8.3, §8.11), ULI/F-TEID/RAT tables from §8.21, §8.22, §8.17, GTP-U extension headers and comprehension bits from TS 29.281 §5.2, each checked by `tools/check-gtp-codec.sh` against the clauses and pycrate | An EPC: SGW/PGW |
-| **O19 — PFCP exploitation** | `13_nr_core` | PFCP session establishment, PDR/FAR/QER/URR encode-decode | A UPF |
+| **O19 — PFCP exploitation** | `13_nr_core` | PFCP session establishment, PDR/FAR/QER/URR encode-decode. The header of TS 29.244 §7.2.2 checked (S and MP flags, the Message Length counted from the fifth octet, the message priority nibble), the message type registry regenerated from Table 7.3-1, the IE registry regenerated from Table 8.1.2-1 (the old table was shifted from 41: 56 is PDR ID, 41 Forwarding Policy, 49 PFCPSMReq-Flags, 58/59 the PFD pair, 81 URR ID), the V flag and Enterprise ID read from §8.1.2, and the grouped rule IEs of §7.5 entered. Every registry is swept and the frames are read back against pycrate by `tools/check-pfcp-codec.sh` | A UPF |
 | **5G SBA / NRF abuse** | `40_sba_pivot`, `13_nr_core` | HTTP/2 frame codec (RFC 7540), NRF discovery (TS 29.510), JWT/JOSE decode, `alg=none` and audience-confusion audit, OAuth2 abuse, NRF token forgery | A live 5GC |
 | **O18 — slicing escape** | `34_slicing` | S-NSSAI codec (TS 23.003 §28.4.2), SST table (TS 23.501), selection, isolation testing (reports "not determinable" rather than a false "isolated") | A real slice |
 | **O5 — SIM swapping** | `31_sim_defense` | Detection half built: port-out and posture signals, eSIM profile integrity, EF_AD decoding | **Build the offensive half**: forged port-out request construction, the carrier-portal/API abuse flow, eSIM profile-transfer and activation-code abuse, the SIM-jacking timing model |
@@ -815,7 +815,17 @@ table called 16777219 Gx (it is Wx), 16777221 Rx (Zh), 16777236 S6a (Rx) and
 registry (5001 read as DIAMETER_AVP_UNSUPPORTED instead of User-Unknown);
 Cancel-Location carried Cancellation-Type as DSR-Flags (1421); and a malformed
 AVP stream printed an error while the verb still exited 0. What remains in
-Phase 7 is PFCP and the SBA half.
+Phase 7 is the SBA half.
+
+The PFCP half of `13_nr_core` is checked as of the PFCP pass:
+`tools/check-pfcp-codec.sh` builds every message from TS 29.244 §7.2.2 and
+§8.1.2, sweeps the 256 message types and the whole Table 8.1.2-1 registry,
+enters the grouped rule IEs, and compares with pycrate's PFCP decoder. The
+module had no IE walk at all before this pass (a PFCP message reported its
+header and dropped every IE on the floor), its IE table was shifted from 41
+onward, and its three decoder verbs (`--decode-pfcp`, `--decode-ngap`,
+`--decode-nas-5gs`) answered any refusal with "must be an even number of hex
+digits", hiding both the real error and the fields they had already read.
 
 **Phase 8 — interconnect.** `26_ss7_map` (SS7 flows, GRX, roaming).
 

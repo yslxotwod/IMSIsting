@@ -427,6 +427,7 @@ ncore_pfcp_type_name() {
 # Apply Action is 44, UE IP Address is 93, UR-SEQN is 104 and PDR ID is 56.
 # An earlier draft of this table had 23/54/50/30 for those, all of them wrong.
 ncore_pfcp_ies() {
+    # TS 29.244 Table 8.1.2-1 (v15.8.0), every row of the IE type registry.
     cat << 'IEEOF'
 1	Create PDR
 2	PDI
@@ -439,6 +440,7 @@ ncore_pfcp_ies() {
 9	Update PDR
 10	Update FAR
 11	Update Forwarding Parameters
+12	Update BAR (PFCP Session Report Response)
 13	Update URR
 14	Update QER
 15	Remove PDR
@@ -466,21 +468,27 @@ ncore_pfcp_ies() {
 37	Reporting Triggers
 38	Redirect Information
 39	Report Type
-41	Offending IE
+40	Offending IE
+41	Forwarding Policy
 42	Destination Interface
 43	UP Function Features
 44	Apply Action
 45	Downlink Data Service Information
 46	Downlink Data Notification Delay
 47	DL Buffering Duration
-49	DL Buffering Suggested Packet Count
+48	DL Buffering Suggested Packet Count
+49	PFCPSMReq-Flags
 50	PFCPSRRsp-Flags
-52	Load Control Information
+51	Load Control Information
+52	Sequence Number
 53	Metric
-55	Overload Control Information
-56	Packet Detection Rule ID
+54	Overload Control Information
+55	Timer
+56	PDR ID
 57	F-SEID
-60	Application ID PFDs
+58	Application ID's PFDs
+59	PFD context
+60	Node ID
 61	PFD contents
 62	Measurement Method
 63	Usage Report Trigger
@@ -488,7 +496,8 @@ ncore_pfcp_ies() {
 65	FQ-CSID
 66	Volume Measurement
 67	Duration Measurement
-69	Application Detection Information
+68	Application Detection Information
+69	Time of First Packet
 70	Time of Last Packet
 71	Quota Holding Time
 72	Dropped DL Traffic Threshold
@@ -496,10 +505,16 @@ ncore_pfcp_ies() {
 74	Time Quota
 75	Start Time
 76	End Time
-81	Usage Report
+77	Query URR
+78	Usage Report (Session Modification Response)
+79	Usage Report (Session Deletion Response)
+80	Usage Report (Session Report Request)
+81	URR ID
 82	Linked URR ID
-84	Downlink Data Report
-86	Create BAR
+83	Downlink Data Report
+84	Outer Header Creation
+85	Create BAR
+86	Update BAR (Session Modification Request)
 87	Remove BAR
 88	BAR ID
 89	CP Function Features
@@ -512,18 +527,68 @@ ncore_pfcp_ies() {
 96	Recovery Time Stamp
 97	DL Flow Level Marking
 98	Header Enrichment
-100	Error Indication Report
+99	Error Indication Report
+100	Measurement Information
 101	Node Report Type
 102	User Plane Path Failure Report
 103	Remote GTP-U Peer
 104	UR-SEQN
-106	Update Duplicating Parameters
+105	Update Duplicating Parameters
+106	Activate Predefined Rules
 107	Deactivate Predefined Rules
 108	FAR ID
 109	QER ID
 110	OCI Flags
 111	PFCP Association Release Request
 112	Graceful Release Period
+113	PDN Type
+114	Failed Rule ID
+115	Time Quota Mechanism
+116	User Plane IP Resource Information
+117	User Plane Inactivity Timer
+118	Aggregated URRs
+119	Multiplier
+120	Aggregated URR ID
+121	Subsequent Volume Quota
+122	Subsequent Time Quota
+123	RQI
+124	QFI
+125	Query URR Reference
+126	Additional Usage Reports Information
+127	Create Traffic Endpoint
+128	Created Traffic Endpoint
+129	Update Traffic Endpoint
+130	Remove Traffic Endpoint
+131	Traffic Endpoint ID
+132	Ethernet Packet Filter
+133	MAC address
+134	C-TAG
+135	S-TAG
+136	Ethertype
+137	Proxying
+138	Ethernet Filter ID
+139	Ethernet Filter Properties
+140	Suggested Buffering Packets Count
+141	User ID
+142	Ethernet PDU Session Information
+143	Ethernet Traffic Information
+144	MAC Addresses Detected
+145	MAC Addresses Removed
+146	Ethernet Inactivity Timer
+147	Additional Monitoring Time
+148	Event Quota
+149	Event Threshold
+150	Subsequent Event Quota
+151	Subsequent Event Threshold
+152	Trace Information
+153	Framed-Route
+154	Framed-Routing
+155	Framed-IPv6-Route
+156	Event Time Stamp
+157	Averaging Window
+158	Paging Policy Indicator
+159	APN/DNN
+160	3GPP Interface Type
 IEEOF
 }
 
@@ -534,6 +599,73 @@ ncore_pfcp_ie_name() {
     ncore_pfcp_ies | awk -F'\t' -v x="$t" '$1==x{print $2; exit}'
 }
 
+# TS 29.244 §7.2.2.4.1: apart from the node related messages the S flag shall
+# be 1, and MP is only meaningful on a session related message (§7.2.2.3).
+ncore_pfcp_session_type() {
+    case "${1:-}" in 50|51|52|53|54|55|56|57) return 0 ;; esac
+    return 1
+}
+
+# TS 29.244 §8.1.2: an IE is a Type (2 octets), a Length (2 octets) and the
+# Value. Bit 8 of the first type octet is the V flag; the remaining 15 bits
+# are the IE type, and a vendor specific IE carries the 2-octet Enterprise ID
+# as the first two octets of its value.
+# The grouped IEs are the ones whose value is itself a sequence of IEs: the
+# groups defined in §7.5 (Create/Update/Remove PDR, FAR, QER, URR and the
+# traffic endpoint groups) plus Application ID's PFDs (Table 7.4.3.1-2).
+ncore_pfcp_ie_grouped() {
+    case "${1:-}" in
+        1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|58|84|85|86|87|128|129|130)
+            return 0 ;;
+    esac
+    return 1
+}
+
+ncore_pfcp_ie_walk() {
+    local hex="${1:-}" depth="${2:-0}" label="${3:-ie}" total
+    total=$(( ${#hex} / 2 ))
+    [[ "$hex" =~ ^[0-9a-fA-F]*$ ]] || return 1
+    local off=0 n=0
+    while (( off + 4 <= total )); do
+        local base=$(( off * 2 ))
+        local t=$(( (16#${hex:$base:2} << 8) | 16#${hex:$((base+2)):2} ))
+        local len=$(( (16#${hex:$((base+4)):2} << 8) | 16#${hex:$((base+6)):2} ))
+        local vflag=0
+        if (( t & 0x8000 )); then vflag=1; t=$(( t & 0x7FFF )); fi
+        (( off + 4 + len <= total )) || {
+            printf 'ERROR\t%s.%d type %s claims %s value octets but only %s remain\n' \
+                "$label" "$n" "$t" "$len" "$(( total - off - 4 ))" >&2
+            return 1
+        }
+        local val="${hex:$(((off + 4) * 2)):$((len * 2))}"
+        printf '%s.%d.type\t%s\n'   "$label" "$n" "$t"
+        local iname; iname=$(ncore_pfcp_ie_name "$t")
+        [[ -n "$iname" ]] || iname="unknown ($t)"
+        printf '%s.%d.name\t%s\n'   "$label" "$n" "$iname"
+        printf '%s.%d.length\t%s\n' "$label" "$n" "$len"
+        printf '%s.%d.vendor\t%s\n'   "$label" "$n" "$vflag"
+        if (( vflag == 1 )); then
+            (( len >= 2 )) || { printf 'ERROR\t%s.%d is vendor specific but shorter than its Enterprise ID\n' "$label" "$n" >&2; return 1; }
+            printf '%s.%d.enterprise_id\t%s\n' "$label" "$n" "$(( 16#${val:0:4} ))"
+            printf '%s.%d.value\t%s\n' "$label" "$n" "${val:4}"
+        else
+            printf '%s.%d.value\t%s\n' "$label" "$n" "$val"
+        fi
+        if (( vflag == 0 )) && ncore_pfcp_ie_grouped "$t"; then
+            ncore_pfcp_ie_walk "$val" "$(( depth + 1 ))" "${label}.${n}" || return 1
+        fi
+        off=$(( off + 4 + len ))
+        n=$(( n + 1 ))
+    done
+    if (( off < total )); then
+        printf 'ERROR\t%s octet(s) left over after the last IE, too few for a header\n' \
+            "$(( total - off ))" >&2
+        return 1
+    fi
+    printf '%s_count\t%s\n' "$label" "$n"
+    return 0
+}
+
 ncore_decode_pfcp() {
     local hex="${1:-}"
     hex="${hex//[[:space:]]/}"
@@ -541,37 +673,73 @@ ncore_decode_pfcp() {
     [[ "$hex" =~ ^[0-9a-fA-F]+$ ]] || return 1
     (( ${#hex} >= 8 )) || return 1
     (( ${#hex} % 2 == 0 )) || return 1
+    local total=$(( ${#hex} / 2 ))
     local b0; b0=$(( 16#${hex:0:2} ))
-    # TS 29.244 §7.2.2.4.1, first octet, bit numbering from bit 1:
-    #   bit 1 (0x01) = S  flag: the SEID field is present in octets 5..12
-    #   bit 2 (0x02) = MP flag: message priority present
-    #   bits 3,4,5   = spare
-    #   bits 6..8    = PFCP version (decimal 1, i.e. 001)
+    # TS 29.244 §7.2.2.1: bits 6..8 version, bit 2 MP, bit 1 S, bits 3..5 spare.
     local ver=$(( (b0 >> 5) & 0x7 ))
     local s=$(( b0 & 0x1 ))
     local mp=$(( (b0 >> 1) & 0x1 ))
+    local spare=$(( (b0 >> 2) & 0x7 ))
     local mtype=$(( 16#${hex:2:2} ))
     local mlen=$(( (16#${hex:4:2} << 8) | 16#${hex:6:2} ))
     local mname; mname=$(ncore_pfcp_type_name "$mtype")
     [[ -n "$mname" ]] || mname="unknown ($mtype)"
+    local hdr=8
+    (( s == 1 )) && hdr=16
 
     printf 'version\t%s\n'          "$ver"
     printf 'message_type\t%s\n'     "$mtype"
     printf 'message_type_name\t%s\n' "$mname"
     printf 'length\t%s\n'           "$mlen"
+    printf 'header_octets\t%s\n'    "$hdr"
+    printf 'actual_octets\t%s\n'    "$total"
+    if (( mlen != total - 4 )); then
+        printf 'length_agrees\tno (declared %s, the frame carries %s after the first four)\n' \
+            "$mlen" "$(( total - 4 ))"
+    else
+        printf 'length_agrees\tyes\n'
+    fi
     printf 'seid_present\t%s\n'     "$([[ $s -eq 1 ]] && echo yes || echo no)"
     printf 'priority_present\t%s\n' "$([[ $mp -eq 1 ]] && echo yes || echo no)"
-    printf 'session_related\t%s\n'  "$([[ $s -eq 1 ]] && echo yes || echo no)"
-    if (( s == 1 )) && (( ${#hex} >= 24 )); then
+    printf 'session_related\t%s\n'  "$(ncore_pfcp_session_type "$mtype" && echo yes || echo no)"
+    printf 'spare_bits\t%s\n'       "$spare"
+    if (( total < hdr )); then
+        printf 'ERROR\tPFCP header needs %s octets, the frame carries %s\n' "$hdr" "$total" >&2
+        return 1
+    fi
+    if (( s == 1 )); then
         local seid=$(( 16#${hex:8:16} ))
         printf 'seid\t%s\n'     "$seid"
         printf 'seid_hex\t%016X\n' "$seid"
         printf 'sequence\t%s\n' "$(( (16#${hex:24:2} << 16) | (16#${hex:26:2} << 8) | 16#${hex:28:2} ))"
-    elif (( s == 0 )) && (( ${#hex} >= 16 )); then
+    else
         printf 'sequence\t%s\n' "$(( (16#${hex:8:2} << 16) | (16#${hex:10:2} << 8) | 16#${hex:12:2} ))"
     fi
-    (( ver == 1 )) || { printf 'ERROR\tPFCP version %s is not 1\n' "$ver" >&2; return 1; }
+    # Octet n+3: the high nibble is Message Priority when MP=1 (§7.2.2.3),
+    # the low nibble is spare and shall be zero.
+    local tail=$(( (hdr - 1) * 2 ))
+    local tailv=$(( 16#${hex:$tail:2} ))
+    if (( mp == 1 )); then
+        printf 'message_priority\t%s\n' "$(( (tailv >> 4) & 0xF ))"
+    else
+        printf 'message_priority\tnone (MP=0)\n'
+    fi
+    (( (tailv & 0x0F) == 0 )) || printf 'note\tthe trailing spare nibble is %s, the clause sets it to zero\n' "$(( tailv & 0xF ))"
+    if (( ver != 1 )); then
+        printf 'ERROR\tPFCP version %s is not 1 (TS 29.244 §7.2.2.1)\n' "$ver" >&2
+        return 1
+    fi
+    (( spare == 0 )) || { printf 'ERROR\tspare bits of octet 1 are %s, the clause sets them to zero\n' "$spare" >&2; return 1; }
+    if ncore_pfcp_session_type "$mtype" && (( s == 0 )); then
+        printf 'ERROR\t%s is session related, so the S flag shall be 1 (§7.2.2.4.1)\n' "$mname" >&2
+        return 1
+    fi
+    if ! ncore_pfcp_session_type "$mtype" && (( mp == 1 )); then
+        printf 'note\tMP is set on a node related message; §7.2.2.2 shows it as MP=0\n'
+    fi
+    ncore_pfcp_ie_walk "${hex:$((hdr * 2))}" 0 ie
 }
+
 
 # The rule structure a Session Establishment Request builds:
 #   PDR  (Packet Detection Rule)  matches traffic  -> PDI, precedence, FAR ID, QER ID, URR ID
@@ -980,40 +1148,76 @@ ncore_cmd_nf_list() {
 ncore_cmd_decode_ngap() {
     local hex="${1:-}"
     [[ -n "$hex" ]] || { printf 'ERROR\tusage: --decode-ngap <hex>\n' >&2; return 2; }
-    local out rc=0
-    out=$(ncore_decode_ngap "$hex") || rc=1
-    if (( rc != 0 )); then
-        printf 'ERROR\tNGAP PDU must be an even number of hex digits (>= 2 octets): %s\n' \
+    # The shape of the argument is checked here, so that a decoder that
+    # refuses a WELL FORMED NGAP PDU is not reported as a malformed hex string:
+    # its own error says what is wrong, and the fields it did read are still
+    # printed.
+    local clean="${hex//[[:space:]]/}"
+    clean="${clean//0x/}"
+    if ! [[ "$clean" =~ ^[0-9a-fA-F]+$ ]] || (( ${#clean} % 2 != 0 )) || (( ${#clean} < 4 )); then
+        printf 'ERROR\t--decode-ngap takes an even number of hex digits (at least 2 octets): %s\n' \
             "$(ncore_sanitize "$hex")" >&2
         return 1
     fi
+    local out rc=0
+    out=$(ncore_decode_ngap "$hex") || rc=1
     printf '%s\n' "$out"
+    if (( rc != 0 )); then
+        printf 'ERROR\t%s is not a well formed NGAP PDU; the fields above are what could be read\n' \
+            "$(ncore_sanitize "$clean")" >&2
+        return 1
+    fi
+    return 0
 }
 
 ncore_cmd_decode_nas() {
     local hex="${1:-}"
     [[ -n "$hex" ]] || { printf 'ERROR\tusage: --decode-nas-5gs <hex>\n' >&2; return 2; }
-    local out rc=0
-    out=$(ncore_decode_nas_5gs "$hex") || rc=1
-    if (( rc != 0 )); then
-        printf 'ERROR\tNAS 5GS message must be an even number of hex digits (>= 2 octets): %s\n' \
+    # The shape of the argument is checked here, so that a decoder that
+    # refuses a WELL FORMED NAS 5GS message is not reported as a malformed hex string:
+    # its own error says what is wrong, and the fields it did read are still
+    # printed.
+    local clean="${hex//[[:space:]]/}"
+    clean="${clean//0x/}"
+    if ! [[ "$clean" =~ ^[0-9a-fA-F]+$ ]] || (( ${#clean} % 2 != 0 )) || (( ${#clean} < 4 )); then
+        printf 'ERROR\t--decode-nas-5gs takes an even number of hex digits (at least 2 octets): %s\n' \
             "$(ncore_sanitize "$hex")" >&2
         return 1
     fi
+    local out rc=0
+    out=$(ncore_decode_nas_5gs "$hex") || rc=1
     printf '%s\n' "$out"
+    if (( rc != 0 )); then
+        printf 'ERROR\t%s is not a well formed NAS 5GS message; the fields above are what could be read\n' \
+            "$(ncore_sanitize "$clean")" >&2
+        return 1
+    fi
+    return 0
 }
 
 ncore_cmd_decode_pfcp() {
     local hex="${1:-}"
     [[ -n "$hex" ]] || { printf 'ERROR\tusage: --decode-pfcp <hex>\n' >&2; return 2; }
-    local out rc=0
-    out=$(ncore_decode_pfcp "$hex") || rc=1
-    if (( rc != 0 )); then
-        printf 'ERROR\tPFCP message must be an even number of hex digits (>= 4 octets): %s\n' \
+    # The shape of the argument is checked here, so that a decoder that
+    # refuses a WELL FORMED PFCP message is not reported as a malformed hex string:
+    # its own error says what is wrong, and the fields it did read are still
+    # printed.
+    local clean="${hex//[[:space:]]/}"
+    clean="${clean//0x/}"
+    if ! [[ "$clean" =~ ^[0-9a-fA-F]+$ ]] || (( ${#clean} % 2 != 0 )) || (( ${#clean} < 8 )); then
+        printf 'ERROR\t--decode-pfcp takes an even number of hex digits (at least 4 octets): %s\n' \
             "$(ncore_sanitize "$hex")" >&2
         return 1
     fi
+    local out rc=0
+    out=$(ncore_decode_pfcp "$hex") || rc=1
     printf '%s\n' "$out"
+    if (( rc != 0 )); then
+        printf 'ERROR\t%s is not a well formed PFCP message; the fields above are what could be read\n' \
+            "$(ncore_sanitize "$clean")" >&2
+        return 1
+    fi
+    return 0
 }
 
 ncore_cmd_decode_gtpu() {
@@ -1226,6 +1430,29 @@ ncore_selftest() {
     chk pfcp-bad-ver  "$(ncore_decode_pfcp '40 01 0004 000001 00' >/dev/null 2>&1; echo $?)" "1"
     chk pfcp-bad-short "$(ncore_decode_pfcp '20 01' >/dev/null 2>&1; echo $?)" "1"
 
+    # The IE walk (§8.1.2): type, name, length, value; a vendor specific IE
+    # keeps its Enterprise ID out of the value and a grouped IE is entered.
+    out=$(ncore_decode_pfcp '21 32 000A 0000000000000001 000001 00 0013 0001 01')
+    chk pfcp-ie-len   "$(fld "$out" ie.0.length)"   "1"
+    chk pfcp-ie-name  "$(fld "$out" ie.0.name)"     "Cause"
+    chk pfcp-ie-value "$(fld "$out" ie.0.value)"    "01"
+    chk pfcp-ie-count "$(fld "$out" ie_count)"      "1"
+    out=$(ncore_decode_pfcp '21 32 000E 0000000000000001 000001 00 8064 0004 28AF A1B2')
+    chk pfcp-ie-vendor    "$(fld "$out" ie.0.vendor)"        "1"
+    chk pfcp-ie-enterprise "$(fld "$out" ie.0.enterprise_id)" "10415"
+    chk pfcp-ie-vvalue    "$(fld "$out" ie.0.value)"         "A1B2"
+    # Create PDR (1) holding PDR ID (56) and PDI (2) holding Source Interface
+    # (20), three levels deep.
+    out=$(ncore_decode_pfcp '21 32 001F 0000000000000001 000001 00 0001 000F 0038 0002 0007 0002 0005 0014 0001 00')
+    chk pfcp-group-name  "$(fld "$out" 'ie.0.name')"          "Create PDR"
+    chk pfcp-group-child "$(fld "$out" 'ie.0.0.name')"        "PDR ID"
+    chk pfcp-group-nest  "$(fld "$out" 'ie.0.1.name')"        "PDI"
+    chk pfcp-group-leaf  "$(fld "$out" 'ie.0.1.0.name')"      "Source Interface"
+    # A Length that runs past the frame and a trailing fragment are refused.
+    chk pfcp-ie-truncated "$(ncore_decode_pfcp '21 32 000E 0000000000000001 000001 00 0013 0002 01' >/dev/null 2>&1; echo $?)" "1"
+    chk pfcp-ie-leftover  "$(ncore_decode_pfcp '21 32 000F 0000000000000001 000001 00 0013 0001 01 0013' >/dev/null 2>&1; echo $?)" "1"
+    chk pfcp-len-mismatch "$(fld "$(ncore_decode_pfcp '21 32 000B 0000000000000001 000001 00 0013 0001 01')" length_agrees)" "no (declared 11, the frame carries 17 after the first four)"
+
     # 8. PFCP IE table: the real IE type numbers.
     chk ie-1   "$(ncore_pfcp_ie_name 1)"   "Create PDR"
     chk ie-2   "$(ncore_pfcp_ie_name 2)"   "PDI"
@@ -1235,7 +1462,15 @@ ncore_selftest() {
     chk ie-19  "$(ncore_pfcp_ie_name 19)"  "Cause"
     chk ie-21  "$(ncore_pfcp_ie_name 21)"  "F-TEID"
     chk ie-42  "$(ncore_pfcp_ie_name 42)"  "Destination Interface"
-    chk ie-56  "$(ncore_pfcp_ie_name 56)"  "Packet Detection Rule ID"
+    chk ie-56  "$(ncore_pfcp_ie_name 56)"  "PDR ID"
+    # The rows above 40 were shifted: 41 is Forwarding Policy, 49 is
+    # PFCPSMReq-Flags, 58 Application ID's PFDs, 59 PFD context, 81 URR ID.
+    chk ie-41  "$(ncore_pfcp_ie_name 41)"  "Forwarding Policy"
+    chk ie-49  "$(ncore_pfcp_ie_name 49)"  "PFCPSMReq-Flags"
+    chk ie-58  "$(ncore_pfcp_ie_name 58)"  "Application ID's PFDs"
+    chk ie-59  "$(ncore_pfcp_ie_name 59)"  "PFD context"
+    chk ie-81  "$(ncore_pfcp_ie_name 81)"  "URR ID"
+    chk ie-160 "$(ncore_pfcp_ie_name 160)" "3GPP Interface Type"
     chk ie-108 "$(ncore_pfcp_ie_name 108)" "FAR ID"
     chk ie-109 "$(ncore_pfcp_ie_name 109)" "QER ID"
     chk ie-93  "$(ncore_pfcp_ie_name 93)"  "UE IP Address"
