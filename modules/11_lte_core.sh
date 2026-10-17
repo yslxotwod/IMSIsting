@@ -111,7 +111,17 @@ lcore_diameter_parse_header() {
     local hbh=$(( 16#${hex:24:2} * 16777216 + 16#${hex:26:2} * 65536 + 16#${hex:28:2} * 256 + 16#${hex:30:2} ))
     local e2e=$(( 16#${hex:32:2} * 16777216 + 16#${hex:34:2} * 65536 + 16#${hex:36:2} * 256 + 16#${hex:38:2} ))
 
-    printf 'version\t%s\n' "$((16#$ver))"
+    local v=$(( 16#$ver ))
+    printf 'version\t%s\n' "$v"
+    if (( v != 1 )); then
+        printf 'ERROR\tversion %s is not the Diameter version 1 (RFC 6733 §3)\n' "$v" >&2
+        return 1
+    fi
+    if (( fv & 0x0F )); then
+        printf 'ERROR\treserved flag bits set (%s): RFC 6733 §3 reserves them\n' \
+            "$(printf '%02X' "$(( fv & 0x0F ))")" >&2
+        return 1
+    fi
     printf 'length\t%s\n' "$len"
     printf 'flags\t%s\n' "$flags"
     printf 'flag_R\t%s\n' "$(( (fv >> 7) & 1 ))"
@@ -127,6 +137,10 @@ lcore_diameter_parse_header() {
     printf 'header_octets\t20\n'
     # The declared length must agree with the bytes actually present.
     local actual=$(( ${#hex} / 2 ))
+    if (( len < 20 )); then
+        printf 'ERROR\tdeclared length %s is shorter than the 20-octet header\n' "$len" >&2
+        return 1
+    fi
     printf 'actual_octets\t%s\n' "$actual"
     if (( len != actual )); then
         printf 'length_mismatch\tyes (declared %s, actual %s)\n' "$len" "$actual"
@@ -139,37 +153,54 @@ lcore_diameter_parse_header() {
 
 # Command Code classification — RFC 6733 §3.1 and TS 29.272 §7.
 lcore_diameter_command_name() {
-    local cmd="$1" app="${2:-}"
-    case "$cmd" in
-        257) echo "Capabilities-Exchange-Request/Answer (CER/CEA)" ;;
-        258) echo "Device-Watchdog-Request/Answer (DWR/DWA)" ;;
-        259) echo "Disconnect-Peer-Request/Answer (DPR/DPA)" ;;
-        260) echo "AA-Request/Answer (AAR/AAA)" ;;
-        268) echo "Credit-Control-Request/Answer (CCR/CCA)" ;;
-        271) echo "Accounting-Request/Answer (ACR/ACA)" ;;
-        272) echo "Credit-Control-Answer (CCA)" ;;
-        274) echo "Abort-Session-Request/Answer (ASR/ASA)" ;;
-        275) echo "Session-Termination-Request/Answer (STR/STA)" ;;
-        280) echo "Diameter-EAP-Request/Answer (DER/DEA)" ;;
-        282) echo "Subscribe-Notifications-Request/Answer (SNR/SNA)" ;;
-        300) echo "User-Authorization-Request/Answer (UAR/UAA)" ;;
-        301) echo "Server-Assignment-Request/Answer (SAR/SAA)" ;;
-        302) echo "Location-Info-Request/Answer (LIR/LIA)" ;;
-        303) echo "Multimedia-Auth-Request/Answer (MAR/MAA)" ;;
-        306) echo "Registration-Termination-Request/Answer (RTR/RTA)" ;;
-        307) echo "Push-Profile-Request/Answer (PPR/PPA)" ;;
-        308) echo "User-Data-Request/Answer (UDR/UDA)" ;;
-        312) echo "Profile-Update-Request/Answer (PUR/PUA)" ;;
-        313) echo "Subscribe-Notifications-Answer (SNA)" ;;
-        316) echo "Update-Location (ULR/ULA)  [S6a/S6d]" ;;
-        317) echo "Cancel-Location (CLR/CLA)  [S6a/S6d]" ;;
-        318) echo "Authentication-Information (AIR/AIA)  [S6a/S6d]" ;;
-        319) echo "Insert-Subscriber-Data (IDR/IDA)  [S6a/S6d]" ;;
-        320) echo "Delete-Subscriber-Data (DSR/DSA)  [S6a/S6d]" ;;
-        321) echo "Purge-UE (PUR/PUA)  [S6a/S6d]" ;;
-        322) echo "Reset (RSR/RSA)  [S6a/S6d]" ;;
-        323) echo "Notify (NOR/NOA)  [S6a/S6d]" ;;
-        *)   echo "unassigned/unknown" ;;
+    # RFC 6733 §3.1 (base commands), RFC 4006 (CCR/CCA), RFC 4072 (DER/DEA),
+    # and tables 5.1/1 to 5.1/4 of TS 29.230 for the 3GPP allocations.
+    # A Request and its Answer share the code; direction is the R bit.
+    case "${1:-}" in
+        257)       echo "Capabilities-Exchange (CER/CEA)" ;;
+        258)       echo "Re-Auth (RAR/RAA)" ;;
+        268)       echo "Diameter-EAP (DER/DEA)" ;;
+        271)       echo "Accounting (ACR/ACA)" ;;
+        272)       echo "Credit-Control (CCR/CCA)" ;;
+        274)       echo "Abort-Session (ASR/ASA)" ;;
+        275)       echo "Session-Termination (STR/STA)" ;;
+        280)       echo "Device-Watchdog (DWR/DWA)" ;;
+        282)       echo "Disconnect-Peer (DPR/DPA)" ;;
+        300)       echo "User-Authorization (UAR/UAA)  [Cx]" ;;
+        301)       echo "Server-Assignment (SAR/SAA)  [Cx]" ;;
+        302)       echo "Location-Info (LIR/LIA)  [Cx]" ;;
+        303)       echo "Multimedia-Auth (MAR/MAA)  [Cx]" ;;
+        304)       echo "Registration-Termination (RTR/RTA)  [Cx]" ;;
+        305)       echo "Push-Profile (PPR/PPA)  [Cx]" ;;
+        306)       echo "User-Data (UDR/UDA)  [Sh]" ;;
+        307)       echo "Profile-Update (PUR/PUA)  [Sh]" ;;
+        308)       echo "Subscribe-Notifications (SNR/SNA)  [Sh]" ;;
+        309)       echo "Push-Notification (PNR/PNA)  [Sh]" ;;
+        310)       echo "Bootstrapping-Info (BIR/BIA)  [Zn]" ;;
+        311)       echo "Message-Process (MPR/MPA)  [MM10]" ;;
+        312)       echo "GBAPush-Info (GPR/GPI)  [Zn]" ;;
+        316)       echo "Update-Location (ULR/ULA)  [S6a/S6d]" ;;
+        317)       echo "Cancel-Location (CLR/CLA)  [S6a/S6d]" ;;
+        318)       echo "Authentication-Information (AIR/AIA)  [S6a/S6d]" ;;
+        319)       echo "Insert-Subscriber-Data (IDR/IDA)  [S6a/S6d]" ;;
+        320)       echo "Delete-Subscriber-Data (DSR/DSA)  [S6a/S6d]" ;;
+        321)       echo "Purge-UE (PUR/PUA)  [S6a/S6d]" ;;
+        322)       echo "Reset (RSR/RSA)  [S6a/S6d]" ;;
+        323)       echo "Notify (NOR/NOA)  [S6a/S6d]" ;;
+        324)       echo "ME-Identity-Check (ECR/ECA)  [S13/S13']" ;;
+        8388620)   echo "Provide-Location (PLR/PLA)  [SLh]" ;;
+        8388621)   echo "Location-Report (LRR/LRA)  [SLh]" ;;
+        8388622)   echo "LCS-Routing-Info (RIR/RIA)  [SLg]" ;;
+        8388635)   echo "Spending-Limit (SLR/SLA)  [Sy]" ;;
+        8388636)   echo "Spending-Status-Notification (SNR/SNA)  [Sy]" ;;
+        8388637)   echo "TDF-Session (TSR/TSA)  [Sd]" ;;
+        8388638)   echo "Update-VCSG-Location (UVR/UVA)  [S7a/S7d]" ;;
+        8388639)   echo "Device-Action (DAR/DAA)  [Tsp]" ;;
+        8388640)   echo "Device-Notification (DNR/DNA)  [Tsp]" ;;
+        8388642)   echo "Cancel-VCSG-Location (CVR/CVA)  [S7a/S7d]" ;;
+        8388731)   echo "TSSF-Notification (TNR/TNA)  [T4]" ;;
+        313)       echo "allocated to 3GPP, not used yet" ;;
+        *)         echo "unassigned/unknown" ;;
     esac
 }
 
@@ -187,31 +218,65 @@ lcore_diameter_flags_is_request() {
 }
 
 lcore_diameter_app_name() {
-    # IANA "Authentication, Authorization, and Accounting (AAA) Parameters"
-    # Application-ID registry, plus the 3GPP-specific ids.
+    # Table 4.1 of TS 29.230 — the 3GPP application identifiers — plus the
+    # base applications registered by IANA.
     case "${1:-}" in
-        0)          echo "Diameter Common Messages" ;;
-        1)          echo "NASREQ" ;;
-        2)          echo "Mobile IPv4" ;;
-        3)          echo "Diameter Base Accounting" ;;
-        4)          echo "Credit-Control" ;;
-        5)          echo "EAP" ;;
-        16777216)   echo "3GPP Cx" ;;
-        16777217)   echo "3GPP Sh" ;;
-        16777219)   echo "3GPP Gx" ;;
-        16777220)   echo "3GPP Gxc" ;;
-        16777221)   echo "3GPP Rx" ;;
-        16777222)   echo "3GPP Gz" ;;
-        16777236)   echo "3GPP S6a/S6d" ;;
-        16777238)   echo "3GPP S9" ;;
-        16777251)   echo "3GPP S6a/S6d" ;;
-        16777252)   echo "3GPP SLg" ;;
-        16777255)   echo "3GPP SWm" ;;
-        16777264)   echo "3GPP SWx" ;;
-        16777265)   echo "3GPP S6a/S6d (alt)" ;;
-        16777266)   echo "3GPP STa" ;;
-        16777267)   echo "3GPP S6b" ;;
-        16777272)   echo "3GPP S6b (S6b per TS 29.273)" ;;
+        0)         echo "Diameter Common Messages" ;;
+        1)         echo "NASREQ" ;;
+        2)         echo "Mobile IPv4" ;;
+        3)         echo "Diameter Base Accounting" ;;
+        4)         echo "Credit-Control" ;;
+        5)         echo "EAP" ;;
+        16777216)  echo "3GPP Cx/Px" ;;
+        16777217)  echo "3GPP Sh/Ph" ;;
+        16777218)  echo "3GPP Re" ;;
+        16777219)  echo "3GPP Wx" ;;
+        16777220)  echo "3GPP Zn" ;;
+        16777221)  echo "3GPP Zh" ;;
+        16777222)  echo "3GPP Gq" ;;
+        16777223)  echo "3GPP Gmb" ;;
+        16777224)  echo "3GPP Gx" ;;
+        16777225)  echo "3GPP Gx over Gy" ;;
+        16777226)  echo "3GPP MM10" ;;
+        16777229)  echo "3GPP Rx" ;;
+        16777230)  echo "3GPP Pr" ;;
+        16777236)  echo "3GPP Rx (29.214)" ;;
+        16777238)  echo "3GPP Gx (29.212)" ;;
+        16777250)  echo "3GPP STa" ;;
+        16777251)  echo "3GPP S6a/S6d" ;;
+        16777252)  echo "3GPP S13/S13'" ;;
+        16777255)  echo "3GPP SLg" ;;
+        16777264)  echo "3GPP SWm" ;;
+        16777265)  echo "3GPP SWx" ;;
+        16777266)  echo "3GPP Gxx" ;;
+        16777267)  echo "3GPP S9" ;;
+        16777268)  echo "3GPP Zpn" ;;
+        16777272)  echo "3GPP S6b" ;;
+        16777291)  echo "3GPP SLh" ;;
+        16777292)  echo "3GPP SGmb" ;;
+        16777302)  echo "3GPP Sy" ;;
+        16777303)  echo "3GPP Sd" ;;
+        16777308)  echo "3GPP S7a" ;;
+        16777309)  echo "3GPP Tsp" ;;
+        16777310)  echo "3GPP S6m" ;;
+        16777311)  echo "3GPP T4" ;;
+        16777312)  echo "3GPP S6c" ;;
+        16777313)  echo "3GPP SGd" ;;
+        16777318)  echo "3GPP S15" ;;
+        16777319)  echo "3GPP S9a" ;;
+        16777320)  echo "3GPP S9a*" ;;
+        16777335)  echo "3GPP MB2-C" ;;
+        16777336)  echo "3GPP PC4a" ;;
+        16777337)  echo "3GPP PC2" ;;
+        16777340)  echo "3GPP PC6/PC7" ;;
+        16777342)  echo "3GPP Np" ;;
+        16777345)  echo "3GPP S6t" ;;
+        16777346)  echo "3GPP T6a/T6b" ;;
+        16777347)  echo "3GPP Ns" ;;
+        16777348)  echo "3GPP Nt" ;;
+        16777349)  echo "3GPP St" ;;
+        16777350)  echo "3GPP PC2" ;;
+        16777351)  echo "3GPP Diameter Data" ;;
         *)          echo "unknown" ;;
     esac
 }
@@ -274,7 +339,11 @@ lcore_diameter_parse_avps() {
         printf 'avp.%d.data_octets\t%s\n' "$n" "$dlen"
         printf 'avp.%d.data\t%s\n' "$n" "$data"
 
-        # Typed rendering for the AVPs whose wire type is fixed.
+                # Typed rendering for the AVPs whose wire type is fixed in
+        # Table 7.3.1/1 of TS 29.272 or §4.1 of RFC 6733. The numbers are
+        # the table's: an AVP whose code is one off is a different AVP, and
+        # decoding it under the wrong name is how the old table read an
+        # Authentication-Info as a Re-Synchronization-Info.
         case "$code" in
             263) printf 'avp.%d.decoded\tSession-Id=%s\n' "$n" \
                      "$(lcore_diameter_utf8 "$data")" ;;
@@ -282,39 +351,89 @@ lcore_diameter_parse_avps() {
                      "$(lcore_diameter_avp_name "$code")" "$(lcore_diameter_utf8 "$data")" ;;
             277) printf 'avp.%d.decoded\tAuth-Session-State=%s\n' "$n" \
                      "$([[ "$data" == "00000000" ]] && echo 'NO_STATE_MAINTAINED (0)' || echo "value $data")" ;;
-            268|291) printf 'avp.%d.decoded\tResult-Code=%s\n' "$n" \
+            268) printf 'avp.%d.decoded\tResult-Code=%s\n' "$n" \
                      "$(lcore_diameter_result_code "$(( 16#${data:0:8} ))")" ;;
+            298) printf 'avp.%d.decoded\tExperimental-Result-Code=%s\n' "$n" \
+                     "$(lcore_diameter_exp_result_code "$(( 16#${data:0:8} ))")" ;;
+            297) printf 'avp.%d.decoded\tExperimental-Result (grouped)\n' "$n" ;;
+            291) printf 'avp.%d.decoded\tAuthorization-Lifetime=%s\n' "$n" \
+                     "$(( 16#${data:0:8} ))" ;;
+            1405|1406) printf 'avp.%d.decoded\t%s=%s\n' "$n" \
+                     "$(lcore_diameter_avp_name "$code")" "$(( 16#${data:0:8} ))" ;;
             1407) printf 'avp.%d.decoded\tVisited-PLMN-Id=%s\n' "$n" \
                      "$(lcore_plmn_from_octets "$data")" ;;
             1410) printf 'avp.%d.decoded\tNumber-Of-Requested-Vectors=%s\n' "$n" \
                      "$(( 16#${data:0:8} ))" ;;
-            1413) printf 'avp.%d.decoded\tImmediate-Response-Preferred=%s\n' "$n" \
+            1032) printf 'avp.%d.decoded\tRAT-Type=%s\n' "$n" \
                      "$(( 16#${data:0:8} ))" ;;
-            # TS 29.272 numbers the authentication vector fields 1447..1451
-            # as RAND, XRES, AUTN, KASME. (1447 also appears in the wider
-            # registry as GPRS-Subscription-Data, which the AVP-name table
-            # reports; inside an Authentication-Info it is RAND.)
+            1412) printf 'avp.%d.decoded\tImmediate-Response-Preferred=%s\n' "$n" \
+                     "$(( 16#${data:0:8} ))" ;;
+            1417) printf 'avp.%d.decoded\tNetwork-Access-Mode=%s\n' "$n" \
+                     "$(( 16#${data:0:8} ))" ;;
+            1420) printf 'avp.%d.decoded\tCancellation-Type=%s\n' "$n" \
+                     "$(( 16#${data:0:8} ))" ;;
+            1424) printf 'avp.%d.decoded\tSubscriber-Status=%s\n' "$n" \
+                     "$(( 16#${data:0:8} ))" ;;
+            1425) printf 'avp.%d.decoded\tOperator-Determined-Barring=%s\n' "$n" \
+                     "$(( 16#${data:0:8} ))" ;;
+            1426) printf 'avp.%d.decoded\tAccess-Restriction-Data=%s\n' "$n" \
+                     "$(( 16#${data:0:8} ))" ;;
+            1427) printf 'avp.%d.decoded\tAPN-OI-Replacement=%s\n' "$n" \
+                     "$(lcore_diameter_utf8 "$data")" ;;
+            1411) printf 'avp.%d.decoded\tRe-Synchronization-Info=%s\n' "$n" "$data" ;;
+            1400) printf 'avp.%d.decoded\tSubscription-Data (grouped)\n' "$n" ;;
+            1401) printf 'avp.%d.decoded\tTerminal-Information (grouped)\n' "$n" ;;
+            1408) printf 'avp.%d.decoded\tRequested-EUTRAN-Authentication-Info (grouped)\n' "$n" ;;
+            1409) printf 'avp.%d.decoded\tRequested-UTRAN-GERAN-Authentication-Info (grouped)\n' "$n" ;;
+            1413) printf 'avp.%d.decoded\tAuthentication-Info (grouped)\n' "$n" ;;
+            1414) printf 'avp.%d.decoded\tE-UTRAN-Vector (grouped)\n' "$n" ;;
+            1415) printf 'avp.%d.decoded\tUTRAN-Vector (grouped)\n' "$n" ;;
+            1416) printf 'avp.%d.decoded\tGERAN-Vector (grouped)\n' "$n" ;;
+            1429) printf 'avp.%d.decoded\tAPN-Configuration-Profile (grouped)\n' "$n" ;;
+            1430) printf 'avp.%d.decoded\tAPN-Configuration (grouped)\n' "$n" ;;
+            1431) printf 'avp.%d.decoded\tEPS-Subscribed-QoS-Profile (grouped)\n' "$n" ;;
+            1435) printf 'avp.%d.decoded\tAMBR (grouped)\n' "$n" ;;
+            1436) printf 'avp.%d.decoded\tCSG-Subscription-Data (grouped)\n' "$n" ;;
+            1458) printf 'avp.%d.decoded\tTrace-Data (grouped)\n' "$n" ;;
+            1467) printf 'avp.%d.decoded\tGPRS-Subscription-Data (grouped)\n' "$n" ;;
+            1469) printf 'avp.%d.decoded\tPDP-Context (grouped)\n' "$n" ;;
+            1472) printf 'avp.%d.decoded\tSpecific-APN-Info (grouped)\n' "$n" ;;
+            1473) printf 'avp.%d.decoded\tLCS-Info (grouped)\n' "$n" ;;
+            1475) printf 'avp.%d.decoded\tLCS-PrivacyException (grouped)\n' "$n" ;;
+            1479) printf 'avp.%d.decoded\tExternal-Client (grouped)\n' "$n" ;;
+            1483) printf 'avp.%d.decoded\tService-Type (grouped)\n' "$n" ;;
+            1485) printf 'avp.%d.decoded\tMO-LR (grouped)\n' "$n" ;;
+            1486) printf 'avp.%d.decoded\tTeleservice-List (grouped)\n' "$n" ;;
+            1488) printf 'avp.%d.decoded\tCall-Barring-Info (grouped)\n' "$n" ;;
+            1495) printf 'avp.%d.decoded\tEPS-User-State (grouped)\n' "$n" ;;
+            1496) printf 'avp.%d.decoded\tEPS-Location-Information (grouped)\n' "$n" ;;
+            1497) printf 'avp.%d.decoded\tMME-User-State (grouped)\n' "$n" ;;
+            1498) printf 'avp.%d.decoded\tSGSN-User-State (grouped)\n' "$n" ;;
+            1600) printf 'avp.%d.decoded\tMME-LocationInformation (grouped)\n' "$n" ;;
+            1601) printf 'avp.%d.decoded\tSGSN-Location-Information (grouped)\n' "$n" ;;
+            1612) printf 'avp.%d.decoded\tActive-APN (grouped)\n' "$n" ;;
+            1622) printf 'avp.%d.decoded\tMDT-Configuration (grouped)\n' "$n" ;;
+            1624) printf 'avp.%d.decoded\tArea-Scope (grouped)\n' "$n" ;;
+            1637) printf 'avp.%d.decoded\tEquivalent-PLMN-List (grouped)\n' "$n" ;;
+            1641) printf 'avp.%d.decoded\tVPLMN-CSG-Subscription-Data (grouped)\n' "$n" ;;
+            1649) printf 'avp.%d.decoded\tLocal-Time-Zone (grouped)\n' "$n" ;;
+            1667) printf 'avp.%d.decoded\tWLAN-offloadability (grouped)\n' "$n" ;;
+            1672) printf 'avp.%d.decoded\tAdjacent-PLMNs (grouped)\n' "$n" ;;
+            1673) printf 'avp.%d.decoded\tAdjacent-Access-Restriction-Data (grouped)\n' "$n" ;;
+            1675) printf 'avp.%d.decoded\tIMSI-Group-Id (grouped)\n' "$n" ;;
+            1685) printf 'avp.%d.decoded\tSubscription-Data-Deletion (grouped)\n' "$n" ;;
+            1686) printf 'avp.%d.decoded\tPreferred-Data-Mode (grouped)\n' "$n" ;;
+            1687) printf 'avp.%d.decoded\tEmergency-Info (grouped)\n' "$n" ;;
+            1688) printf 'avp.%d.decoded\tV2X-Subscription-Data (grouped)\n' "$n" ;;
+            1691) printf 'avp.%d.decoded\teDRX-Cycle-Length (grouped)\n' "$n" ;;
+            1694) printf 'avp.%d.decoded\tMBSFN-Area (grouped)\n' "$n" ;;
+            1701) printf 'avp.%d.decoded\tPaging-Time-Window (grouped)\n' "$n" ;;
+            1705) printf 'avp.%d.decoded\teDRX-Related-RAT (grouped)\n' "$n" ;;
+            # The authentication vector fields, §7.3.53-§7.3.56.
             1447) printf 'avp.%d.decoded\tRAND=%s\n' "$n" "$data" ;;
             1448) printf 'avp.%d.decoded\tXRES=%s\n' "$n" "$data" ;;
             1449) printf 'avp.%d.decoded\tAUTN=%s\n' "$n" "$data" ;;
             1450) printf 'avp.%d.decoded\tKASME=%s\n' "$n" "$data" ;;
-            1418) printf 'avp.%d.decoded\tNetwork-Access-Mode=%s\n' "$n" \
-                     "$(( 16#${data:0:8} ))" ;;
-            1421) printf 'avp.%d.decoded\tCancellation-Type=%s\n' "$n" \
-                     "$(( 16#${data:0:8} ))" ;;
-            1425) printf 'avp.%d.decoded\tSubscriber-Status=%s\n' "$n" \
-                     "$(( 16#${data:0:8} ))" ;;
-            1426) printf 'avp.%d.decoded\tOperator-Determined-Barring=%s\n' "$n" \
-                     "$(( 16#${data:0:8} ))" ;;
-            1427) printf 'avp.%d.decoded\tAccess-Restriction-Data=%s\n' "$n" \
-                     "$(( 16#${data:0:8} ))" ;;
-            1428) printf 'avp.%d.decoded\tAPN-OI-Replacement=%s\n' "$n" \
-                     "$(lcore_diameter_utf8 "$data")" ;;
-            1439) printf 'avp.%d.decoded\tService-Selection=%s\n' "$n" \
-                     "$(lcore_diameter_utf8 "$data")" ;;
-            1408) printf 'avp.%d.decoded\tRequested-EUTRAN-Authentication-Info (grouped)\n' "$n" ;;
-            1411) printf 'avp.%d.decoded\tRequested-UTRAN-GERAN-Authentication-Info (grouped)\n' "$n" ;;
-            1424) printf 'avp.%d.decoded\tE-UTRAN-Vector (grouped)\n' "$n" ;;
         esac
 
         off=$(( off + alen ))
@@ -322,144 +441,328 @@ lcore_diameter_parse_avps() {
         while (( off % 4 != 0 )); do off=$(( off + 1 )); done
         n=$(( n + 1 ))
     done
+    # Anything left is shorter than an AVP header and cannot be padding: the
+    # loop above already stepped over the 4-octet alignment after each AVP.
+    if (( off < total )); then
+        printf 'ERROR\t%s octet(s) left over after the last AVP, too few for a header\n' \
+            "$(( total - off ))" >&2
+        return 1
+    fi
     printf 'avp_count\t%s\n' "$n"
     return 0
 }
 
 # AVP Code registry — TS 29.272 §7.3 plus the Diameter base codes.
 lcore_diameter_avp_name() {
+    # RFC 6733 §4.1 base AVPs and Table 7.3.1/1 of TS 29.272
+    # (S6a/S6d, S7a/S7d, S13/S13'), generated from the clause tables.
     case "${1:-}" in
-        1)     echo "User-Name" ;;
-        25)    echo "Class" ;;
-        55)    echo "Event-Timestamp" ;;
-        258)   echo "Auth-Application-Id" ;;
-        259)   echo "Acct-Application-Id" ;;
-        260)   echo "Vendor-Specific-Application-Id" ;;
-        263)   echo "Session-Id" ;;
-        264)   echo "Origin-Host" ;;
-        265)   echo "Supported-Vendor-Id" ;;
-        266)   echo "Vendor-Id" ;;
-        267)   echo "Firmware-Revision" ;;
-        268)   echo "Result-Code" ;;
-        269)   echo "Product-Name" ;;
-        270)   echo "Session-Binding" ;;
-        272)   echo "Disconnect-Cause" ;;
-        277)   echo "Auth-Session-State" ;;
-        278)   echo "Origin-State-Id" ;;
-        279)   echo "Failed-AVP" ;;
-        280)   echo "Proxy-Host" ;;
-        281)   echo "Error-Message" ;;
-        282)   echo "Route-Record" ;;
-        283)   echo "Destination-Realm" ;;
-        284)   echo "Proxy-State" ;;
-        285)   echo "Origin-Realm" ;;
-        287)   echo "Experimental-Result" ;;
-        288)   echo "Experimental-Result-Code" ;;
-        293)   echo "Destination-Host" ;;
-        294)   echo "Error-Reporting-Host" ;;
-        295)   echo "Termination-Cause" ;;
-        296)   echo "Origin-AAA-Protocol" ;;
-        297)   echo "Origin-Realm (alt)" ;;
-        300)   echo "MIP-FA-to-HA-SPI" ;;
-        1400)  echo "Subscription-Data" ;;
-        1401)  echo "Terminal-Information" ;;
-        1402)  echo "IMEI" ;;
-        1403)  echo "Software-Version" ;;
-        1405)  echo "UE-Usage-Type" ;;
-        1406)  echo "Number-Of-Requested-Vectors (deprecated)" ;;
-        1407)  echo "Visited-PLMN-Id" ;;
-        1408)  echo "Requested-EUTRAN-Authentication-Info" ;;
-        1409)  echo "Requested-UTRAN-GERAN-Authentication-Info (deprecated)" ;;
-        1410)  echo "Number-Of-Requested-Vectors" ;;
-        1411)  echo "Requested-UTRAN-GERAN-Authentication-Info" ;;
-        1412)  echo "Re-Synchronization-Info" ;;
-        1413)  echo "Immediate-Response-Preferred" ;;
-        1414)  echo "Authentication-Info" ;;
-        1415)  echo "E-UTRAN-Vector (deprecated)" ;;
-        1416)  echo "UTRAN-Vector" ;;
-        1417)  echo "GERAN-Vector" ;;
-        1418)  echo "Network-Access-Mode" ;;
-        1419)  echo "HPLMN-ODB" ;;
-        1420)  echo "Item-Number" ;;
-        1421)  echo "Cancellation-Type" ;;
-        1422)  echo "DSR-Flags" ;;
-        1423)  echo "DSA-Flags" ;;
-        1424)  echo "Context-Identifier" ;;
-        1425)  echo "Subscriber-Status" ;;
-        1426)  echo "Operator-Determined-Barring" ;;
-        1427)  echo "Access-Restriction-Data" ;;
-        1428)  echo "APN-OI-Replacement" ;;
-        1429)  echo "All-APN-Configurations-Included-Indicator" ;;
-        1430)  echo "APN-Configuration-Profile" ;;
-        1431)  echo "APN-Configuration" ;;
-        1432)  echo "EPS-Subscribed-QoS-Profile" ;;
-        1433)  echo "VPLMN-Dynamic-Address-Allowed" ;;
-        1434)  echo "STN-SR" ;;
-        1435)  echo "PDN-GW-Allocation-Type" ;;
-        1436)  echo "AMBR" ;;
-        1437)  echo "CSG-Subscription-Data" ;;
-        1438)  echo "PDN-Type" ;;
-        1439)  echo "Service-Selection" ;;
-        1440)  echo "Trace-Data" ;;
-        1441)  echo "Trace-Reference" ;;
-        1442)  echo "Trace-Depth" ;;
-        1443)  echo "Trace-NE-Type-List" ;;
-        1444)  echo "Trace-Interface-List" ;;
-        1445)  echo "Trace-Event-List" ;;
-        1446)  echo "OMC-Id" ;;
-        1447)  echo "GPRS-Subscription-Data" ;;
-        1448)  echo "RAND" ;;
-        1449)  echo "AUTN" ;;
-        1450)  echo "XRES" ;;
-        1451)  echo "KASME" ;;
-        1452)  echo "Subscription-Data-Flags" ;;
-        1453)  echo "Reachability-Information" ;;
+        1)       echo "User-Name" ;;
+        25)      echo "Class" ;;
+        27)      echo "Session-Timeout" ;;
+        33)      echo "Proxy-State" ;;
+        44)      echo "Acct-Session-Id" ;;
+        50)      echo "Acct-Multi-Session-Id" ;;
+        55)      echo "Event-Timestamp" ;;
+        85)      echo "Acct-Interim-Interval" ;;
+        257)     echo "Host-IP-Address" ;;
+        258)     echo "Auth-Application-Id" ;;
+        259)     echo "Acct-Application-Id" ;;
+        260)     echo "Vendor-Specific-Application-Id" ;;
+        261)     echo "Redirect-Host-Usage" ;;
+        262)     echo "Redirect-Max-Cache-Time" ;;
+        263)     echo "Session-Id" ;;
+        264)     echo "Origin-Host" ;;
+        265)     echo "Supported-Vendor-Id" ;;
+        266)     echo "Vendor-Id" ;;
+        267)     echo "Firmware-Revision" ;;
+        268)     echo "Result-Code" ;;
+        269)     echo "Product-Name" ;;
+        270)     echo "Session-Binding" ;;
+        271)     echo "Session-Server-Failover" ;;
+        272)     echo "Multi-Round-Time-Out" ;;
+        273)     echo "Disconnect-Cause" ;;
+        274)     echo "Auth-Request-Type" ;;
+        276)     echo "Auth-Grace-Period" ;;
+        277)     echo "Auth-Session-State" ;;
+        278)     echo "Origin-State-Id" ;;
+        279)     echo "Failed-AVP" ;;
+        280)     echo "Proxy-Host" ;;
+        281)     echo "Error-Message" ;;
+        282)     echo "Route-Record" ;;
+        283)     echo "Destination-Realm" ;;
+        284)     echo "Proxy-Info" ;;
+        285)     echo "Re-Auth-Request-Type" ;;
+        287)     echo "Accounting-Sub-Session-Id" ;;
+        291)     echo "Authorization-Lifetime" ;;
+        292)     echo "Redirect-Host" ;;
+        293)     echo "Destination-Host" ;;
+        294)     echo "Error-Reporting-Host" ;;
+        295)     echo "Termination-Cause" ;;
+        296)     echo "Origin-Realm" ;;
+        297)     echo "Experimental-Result" ;;
+        298)     echo "Experimental-Result-Code" ;;
+        299)     echo "Inband-Security-Id" ;;
+        480)     echo "Accounting-Record-Type" ;;
+        483)     echo "Accounting-Realtime-Required" ;;
+        485)     echo "Accounting-Record-Number" ;;
+        1400)    echo "Subscription-Data" ;;
+        1401)    echo "Terminal-Information" ;;
+        1402)    echo "IMEI" ;;
+        1403)    echo "Software-Version" ;;
+        1404)    echo "QoS-Subscribed" ;;
+        1405)    echo "ULR-Flags" ;;
+        1406)    echo "ULA-Flags" ;;
+        1407)    echo "Visited-PLMN-Id" ;;
+        1408)    echo "Requested-EUTRAN-Authentication-Info" ;;
+        1409)    echo "Requested-UTRAN-GERAN-Authentication-Info" ;;
+        1410)    echo "Number-Of-Requested-Vectors" ;;
+        1411)    echo "Re-Synchronization-Info" ;;
+        1412)    echo "Immediate-Response-Preferred" ;;
+        1413)    echo "Authentication-Info" ;;
+        1414)    echo "E-UTRAN-Vector" ;;
+        1415)    echo "UTRAN-Vector" ;;
+        1416)    echo "GERAN-Vector" ;;
+        1417)    echo "Network-Access-Mode" ;;
+        1418)    echo "HPLMN-ODB" ;;
+        1419)    echo "Item-Number" ;;
+        1420)    echo "Cancellation-Type" ;;
+        1421)    echo "DSR-Flags" ;;
+        1422)    echo "DSA-Flags" ;;
+        1423)    echo "Context-Identifier" ;;
+        1424)    echo "Subscriber-Status" ;;
+        1425)    echo "Operator-Determined-Barring" ;;
+        1426)    echo "Access-Restriction-Data" ;;
+        1427)    echo "APN-OI-Replacement" ;;
+        1428)    echo "All-APN-Configurations-Included-Indicator" ;;
+        1429)    echo "APN-Configuration-Profile" ;;
+        1430)    echo "APN-Configuration" ;;
+        1431)    echo "EPS-Subscribed-QoS-Profile" ;;
+        1432)    echo "VPLMN-Dynamic-Address-Allowed" ;;
+        1433)    echo "STN-SR" ;;
+        1434)    echo "Alert-Reason" ;;
+        1435)    echo "AMBR" ;;
+        1436)    echo "CSG-Subscription-Data" ;;
+        1437)    echo "CSG-Id" ;;
+        1438)    echo "PDN-GW-Allocation-Type" ;;
+        1439)    echo "Expiration-Date" ;;
+        1440)    echo "RAT-Frequency-Selection-Priority-ID" ;;
+        1441)    echo "IDA-Flags" ;;
+        1442)    echo "PUA-Flags" ;;
+        1443)    echo "NOR-Flags" ;;
+        1444)    echo "User-Id" ;;
+        1445)    echo "Equipment-Status" ;;
+        1446)    echo "Regional-Subscription-Zone-Code" ;;
+        1447)    echo "RAND" ;;
+        1448)    echo "XRES" ;;
+        1449)    echo "AUTN" ;;
+        1450)    echo "KASME" ;;
+        1452)    echo "Trace-Collection-Entity" ;;
+        1453)    echo "Kc" ;;
+        1454)    echo "SRES" ;;
+        1456)    echo "PDN-Type" ;;
+        1457)    echo "Roaming-Restricted-Due-To-Unsupported-Feature" ;;
+        1458)    echo "Trace-Data" ;;
+        1459)    echo "Trace-Reference" ;;
+        1462)    echo "Trace-Depth" ;;
+        1463)    echo "Trace-NE-Type-List" ;;
+        1464)    echo "Trace-Interface-List" ;;
+        1465)    echo "Trace-Event-List" ;;
+        1466)    echo "OMC-Id" ;;
+        1467)    echo "GPRS-Subscription-Data" ;;
+        1468)    echo "Complete-Data-List-Included-Indicator" ;;
+        1469)    echo "PDP-Context" ;;
+        1470)    echo "PDP-Type" ;;
+        1471)    echo "3GPP2-MEID" ;;
+        1472)    echo "Specific-APN-Info" ;;
+        1473)    echo "LCS-Info" ;;
+        1474)    echo "GMLC-Number" ;;
+        1475)    echo "LCS-PrivacyException" ;;
+        1476)    echo "SS-Code" ;;
+        1477)    echo "SS-Status" ;;
+        1478)    echo "Notification-To-UE-User" ;;
+        1479)    echo "External-Client" ;;
+        1480)    echo "Client-Identity" ;;
+        1481)    echo "GMLC-Restriction" ;;
+        1482)    echo "PLMN-Client" ;;
+        1483)    echo "Service-Type" ;;
+        1484)    echo "ServiceTypeIdentity" ;;
+        1485)    echo "MO-LR" ;;
+        1486)    echo "Teleservice-List" ;;
+        1487)    echo "TS-Code" ;;
+        1488)    echo "Call-Barring-Info" ;;
+        1489)    echo "SGSN-Number" ;;
+        1490)    echo "IDR-Flags" ;;
+        1491)    echo "ICS-Indicator" ;;
+        1492)    echo "IMS-Voice-Over-PS-Sessions-Supported" ;;
+        1493)    echo "Homogeneous-Support-of-IMS-Voice-Over-PS-Sessions" ;;
+        1494)    echo "Last-UE-Activity-Time" ;;
+        1495)    echo "EPS-User-State" ;;
+        1496)    echo "EPS-Location-Information" ;;
+        1497)    echo "MME-User-State" ;;
+        1498)    echo "SGSN-User-State" ;;
+        1499)    echo "User-State" ;;
+        1600)    echo "MME-LocationInformation" ;;
+        1601)    echo "SGSN-Location-Information" ;;
+        1602)    echo "E-UTRAN-Cell-Global-Identity" ;;
+        1603)    echo "Tracking-Area-Identity" ;;
+        1604)    echo "Cell-Global-Identity" ;;
+        1605)    echo "Routing-Area-Identity" ;;
+        1606)    echo "Location-Area-Identity" ;;
+        1607)    echo "Service-Area-Identity" ;;
+        1608)    echo "Geographical-Information" ;;
+        1609)    echo "Geodetic-Information" ;;
+        1610)    echo "Current-Location-Retrieved" ;;
+        1611)    echo "Age-Of-Location-Information" ;;
+        1612)    echo "Active-APN" ;;
+        1613)    echo "SIPTO-Permission" ;;
+        1614)    echo "Error-Diagnostic" ;;
+        1615)    echo "UE-SRVCC-Capability" ;;
+        1616)    echo "MPS-Priority" ;;
+        1617)    echo "VPLMN-LIPA-Allowed" ;;
+        1618)    echo "LIPA-Permission" ;;
+        1619)    echo "Subscribed-Periodic-RAU-TAU-Timer" ;;
+        1621)    echo "Ext-PDP-Address" ;;
+        1622)    echo "MDT-Configuration" ;;
+        1623)    echo "Job-Type" ;;
+        1624)    echo "Area-Scope" ;;
+        1625)    echo "List-Of-Measurements" ;;
+        1626)    echo "Reporting-Trigger" ;;
+        1627)    echo "Report-Interval" ;;
+        1628)    echo "Report-Amount" ;;
+        1629)    echo "Event-Threshold-RSRP" ;;
+        1630)    echo "Event-Threshold-RSRQ" ;;
+        1631)    echo "Logging-Interval" ;;
+        1632)    echo "Logging-Duration" ;;
+        1633)    echo "Relay-Node-Indicator" ;;
+        1634)    echo "MDT-User-Consent" ;;
+        1635)    echo "PUR-Flags" ;;
+        1636)    echo "Subscribed-VSRVCC" ;;
+        1637)    echo "Equivalent-PLMN-List" ;;
+        1638)    echo "CLR-Flags" ;;
+        1639)    echo "UVR-Flags" ;;
+        1640)    echo "UVA-Flags" ;;
+        1641)    echo "VPLMN-CSG-Subscription-Data" ;;
+        1642)    echo "Time-Zone" ;;
+        1643)    echo "A-MSISDN" ;;
+        1645)    echo "MME-Number-for-MT-SMS" ;;
+        1648)    echo "SMS-Register-Request" ;;
+        1649)    echo "Local-Time-Zone" ;;
+        1650)    echo "Daylight-Saving-Time" ;;
+        1654)    echo "Subscription-Data-Flags" ;;
+        1655)    echo "Measurement-Period-LTE" ;;
+        1656)    echo "Measurement-Period-UMTS" ;;
+        1657)    echo "Collection-Period-RRM-LTE" ;;
+        1658)    echo "Collection-Period-RRM-UMTS" ;;
+        1659)    echo "Positioning-Method" ;;
+        1660)    echo "Measurement-Quantity" ;;
+        1661)    echo "Event-Threshold-Event-1F" ;;
+        1662)    echo "Event-Threshold-Event-1I" ;;
+        1663)    echo "Restoration-Priority" ;;
+        1664)    echo "SGs-MME-Identity" ;;
+        1665)    echo "SIPTO-Local-Network-Permission" ;;
+        1666)    echo "Coupled-Node-Diameter-ID" ;;
+        1667)    echo "WLAN-offloadability" ;;
+        1668)    echo "WLAN-offloadability-EUTRAN" ;;
+        1669)    echo "WLAN-offloadability-UTRAN" ;;
+        1670)    echo "Reset-ID" ;;
+        1671)    echo "MDT-Allowed-PLMN-Id" ;;
+        1672)    echo "Adjacent-PLMNs" ;;
+        1673)    echo "Adjacent-Access-Restriction-Data" ;;
+        1674)    echo "DL-Buffering-Suggested-Packet-Count" ;;
+        1675)    echo "IMSI-Group-Id" ;;
+        1676)    echo "Group-Service-Id" ;;
+        1677)    echo "Group-PLMN-Id" ;;
+        1678)    echo "Local-Group-Id" ;;
+        1679)    echo "AIR-Flags" ;;
+        1680)    echo "UE-Usage-Type" ;;
+        1681)    echo "Non-IP-PDN-Type-Indicator" ;;
+        1682)    echo "Non-IP-Data-Delivery-Mechanism" ;;
+        1683)    echo "Additional-Context-ID" ;;
+        1684)    echo "SCEF-Realm" ;;
+        1685)    echo "Subscription-Data-Deletion" ;;
+        1686)    echo "Preferred-Data-Mode" ;;
+        1687)    echo "Emergency-Info" ;;
+        1688)    echo "V2X-Subscription-Data" ;;
+        1689)    echo "V2X-Permission" ;;
+        1690)    echo "PDN-Connection-Continuity" ;;
+        1691)    echo "eDRX-Cycle-Length" ;;
+        1692)    echo "eDRX-Cycle-Length-Value" ;;
+        1693)    echo "UE-PC5-AMBR" ;;
+        1694)    echo "MBSFN-Area" ;;
+        1695)    echo "MBSFN-Area-ID" ;;
+        1696)    echo "Carrier-Frequency" ;;
+        1697)    echo "RDS-Indicator" ;;
+        1698)    echo "Service-Gap-Time" ;;
+        1699)    echo "Aerial-UE-Subscription-Information" ;;
+        1700)    echo "Broadcast-Location-Assistance-Data-Types" ;;
+        1701)    echo "Paging-Time-Window" ;;
+        1702)    echo "Operation-Mode" ;;
+        1703)    echo "Paging-Time-Window-Length" ;;
+        1704)    echo "Core-Network-Restrictions" ;;
+        1705)    echo "eDRX-Related-RAT" ;;
+        1706)    echo "Interworking-5GS-Indicator" ;;
+        1032)    echo "RAT-Type" ;;
         *)     echo "unknown AVP code $1" ;;
     esac
 }
 
 # Result-Code — RFC 6733 §7.1 plus TS 29.272 §7.4.
 lcore_diameter_result_code() {
+    # RFC 6733 §7.1.1 (informational) and §7.1.2 (success, protocol errors,
+    # transient and permanent failures). These are the values of the
+    # Result-Code AVP (268) and of Experimental-Result-Code (298) when a
+    # 3GPP code is not in play.
     case "${1:-}" in
-        1001) echo "DIAMETER_MULTI_ROUND_AUTH (1001)" ;;
-        2001) echo "DIAMETER_SUCCESS (2001)" ;;
-        2002) echo "DIAMETER_LIMITED_SUCCESS (2002)" ;;
-        2003) echo "DIAMETER_FIRST_REGISTRATION (2003)" ;;
-        2004) echo "DIAMETER_SUBSEQUENT_REGISTRATION (2004)" ;;
-        2005) echo "DIAMETER_UNREGISTERED_SERVICE (2005)" ;;
-        3001) echo "DIAMETER_COMMAND_UNSUPPORTED (3001)" ;;
-        3002) echo "DIAMETER_UNABLE_TO_DELIVER (3002)" ;;
-        3003) echo "DIAMETER_REALM_NOT_SERVED (3003)" ;;
-        3004) echo "DIAMETER_TOO_BUSY (3004)" ;;
-        3005) echo "DIAMETER_LOOP_DETECTED (3005)" ;;
-        3007) echo "DIAMETER_UNABLE_TO_COMPLY (3007)" ;;
-        3008) echo "DIAMETER_INVALID_BIT_IN_HEADER (3008)" ;;
-        3009) echo "DIAMETER_INVALID_AVP_BIT_COMBO (3009)" ;;
-        3010) echo "DIAMETER_NO_COMMON_SECURITY (3010)" ;;
-        5001) echo "DIAMETER_USER_UNKNOWN / 3GPP: User-Unknown (5001)" ;;
-        5002) echo "DIAMETER_UNKNOWN_SESSION_ID (5002)" ;;
-        5003) echo "DIAMETER_AUTHORIZATION_REJECTED (5003)" ;;
-        5004) echo "DIAMETER_INVALID_AVP_VALUE (5004)" ;;
-        5005) echo "DIAMETER_MISSING_AVP (5005)" ;;
-        5006) echo "DIAMETER_RESOURCES_EXCEEDED (5006)" ;;
-        5007) echo "DIAMETER_CONTRADICTING_AVPS (5007)" ;;
-        5008) echo "DIAMETER_AVP_NOT_ALLOWED (5008)" ;;
-        5009) echo "DIAMETER_AVP_OCCURS_TOO_MANY_TIMES (5009)" ;;
-        5010) echo "DIAMETER_NO_COMMON_APPLICATION (5010)" ;;
-        5011) echo "DIAMETER_UNSUPPORTED_VERSION (5011)" ;;
-        5012) echo "DIAMETER_UNABLE_TO_COMPLY / 3GPP: Unable-To-Comply (5012)" ;;
-        5013) echo "DIAMETER_INVALID_BIT_IN_HEADER / 3GPP: (5013)" ;;
-        5014) echo "DIAMETER_RAT_TYPE_NOT_ALLOWED (5014)" ;;
-        5015) echo "DIAMETER_ERROR_SERVING_NODE_UNKNOWN (5015)" ;;
-        5016) echo "DIAMETER_ERROR_USER_NO_NON_3GPP_SUBSCRIPTION (5016)" ;;
-        5019) echo "DIAMETER_ERROR_NO_AVAILABLE_USER (5019)" ;;
-        5420) echo "DIAMETER_ERROR_UNKNOWN_EPS_SUBSCRIPTION (5420)" ;;
-        5421) echo "DIAMETER_ERROR_RAT_NOT_ALLOWED (5421)" ;;
-        5422) echo "DIAMETER_ERROR_EQUIPMENT_UNKNOWN (5422)" ;;
-        5423) echo "DIAMETER_ERROR_UNKOWN_SERVING_NODE (5423)" ;;
-        5450) echo "DIAMETER_ERROR_USER_DATA_NOT_RECOGNIZED (5450)" ;;
-        5451) echo "DIAMETER_ERROR_OPERATION_NOT_ALLOWED (5451)" ;;
-        *)    echo "unassigned ($1)" ;;
+        1001)    echo "DIAMETER_MULTI_ROUND_AUTH (1001)" ;;
+        2001)    echo "DIAMETER_SUCCESS (2001)" ;;
+        2002)    echo "DIAMETER_LIMITED_SUCCESS (2002)" ;;
+        3001)    echo "DIAMETER_COMMAND_UNSUPPORTED (3001)" ;;
+        3002)    echo "DIAMETER_UNABLE_TO_DELIVER (3002)" ;;
+        3003)    echo "DIAMETER_REALM_NOT_SERVED (3003)" ;;
+        3004)    echo "DIAMETER_TOO_BUSY (3004)" ;;
+        3005)    echo "DIAMETER_LOOP_DETECTED (3005)" ;;
+        3006)    echo "DIAMETER_REDIRECT_INDICATION (3006)" ;;
+        3007)    echo "DIAMETER_APPLICATION_UNSUPPORTED (3007)" ;;
+        3008)    echo "DIAMETER_INVALID_HDR_BITS (3008)" ;;
+        3009)    echo "DIAMETER_INVALID_AVP_BITS (3009)" ;;
+        3010)    echo "DIAMETER_UNKNOWN_PEER (3010)" ;;
+        4001)    echo "DIAMETER_AUTHENTICATION_REJECTED (4001)" ;;
+        4002)    echo "DIAMETER_OUT_OF_SPACE (4002)" ;;
+        5001)    echo "DIAMETER_AVP_UNSUPPORTED (5001)" ;;
+        5002)    echo "DIAMETER_UNKNOWN_SESSION_ID (5002)" ;;
+        5003)    echo "DIAMETER_AUTHORIZATION_REJECTED (5003)" ;;
+        5004)    echo "DIAMETER_INVALID_AVP_VALUE (5004)" ;;
+        5005)    echo "DIAMETER_MISSING_AVP (5005)" ;;
+        5006)    echo "DIAMETER_RESOURCES_EXCEEDED (5006)" ;;
+        5007)    echo "DIAMETER_CONTRADICTING_AVPS (5007)" ;;
+        5008)    echo "DIAMETER_AVP_NOT_ALLOWED (5008)" ;;
+        5009)    echo "DIAMETER_AVP_OCCURS_TOO_MANY_TIMES (5009)" ;;
+        5010)    echo "DIAMETER_NO_COMMON_APPLICATION (5010)" ;;
+        5011)    echo "DIAMETER_UNSUPPORTED_VERSION (5011)" ;;
+        5012)    echo "DIAMETER_UNABLE_TO_COMPLY (5012)" ;;
+        5013)    echo "DIAMETER_INVALID_BIT_IN_HEADER (5013)" ;;
+        5014)    echo "DIAMETER_INVALID_AVP_LENGTH (5014)" ;;
+        5015)    echo "DIAMETER_INVALID_MESSAGE_LENGTH (5015)" ;;
+        5016)    echo "DIAMETER_INVALID_AVP_BIT_COMBO (5016)" ;;
+        5017)    echo "DIAMETER_NO_COMMON_SECURITY (5017)" ;;
+        *)    echo "unassigned Diameter result code ($1)" ;;
+    esac
+}
+
+# Experimental-Result-Code (AVP 298) values of TS 29.272 §7.4. A 3GPP result
+# code is carried there and the Result-Code AVP is then absent (§7.4.3).
+lcore_diameter_exp_result_code() {
+    case "${1:-}" in
+        4181)    echo "DIAMETER_AUTHENTICATION_DATA_UNAVAILABLE (4181)" ;;
+        4182)    echo "DIAMETER_ERROR_CAMEL_SUBSCRIPTION_PRESENT (4182)" ;;
+        5001)    echo "DIAMETER_ERROR_USER_UNKNOWN (5001)" ;;
+        5004)    echo "DIAMETER_ERROR_ROAMING_NOT_ALLOWED (5004)" ;;
+        5420)    echo "DIAMETER_ERROR_UNKNOWN_EPS_SUBSCRIPTION (5420)" ;;
+        5421)    echo "DIAMETER_ERROR_RAT_NOT_ALLOWED (5421)" ;;
+        5422)    echo "DIAMETER_ERROR_EQUIPMENT_UNKNOWN (5422)" ;;
+        5423)    echo "DIAMETER_ERROR_UNKOWN_SERVING_NODE (5423)" ;;
+        *)    echo "unassigned 3GPP experimental result code ($1)" ;;
     esac
 }
 
@@ -568,11 +871,15 @@ lcore_diameter_build_u32_avp() {
 # Application-Id for S6a/S6d is 16777251 (0x0100001B) per TS 29.272 §7.1.
 # A request has the R and P flags set: 0xC0.
 lcore_diameter_origin_avps() {
-    local origin_host="$1" origin_realm="$2"
+    # RFC 6733 §4.1 / TS 29.272 §7.2: Origin-Host 264, Origin-Realm 296,
+    # Destination-Realm 283, Auth-Session-State 277. 285 is
+    # Re-Auth-Request-Type, so it was both mislabelled here and left the
+    # mandatory Destination-Realm out of every built message.
+    local origin_host="$1" origin_realm="$2" dest_realm="${3:-$2}"
     printf '%s%s%s%s' \
         "$(lcore_diameter_build_utf8_avp 264 "$origin_host" M)" \
-        "$(lcore_diameter_build_utf8_avp 296 "$origin_host" M)" \
-        "$(lcore_diameter_build_utf8_avp 285 "$origin_realm" M)" \
+        "$(lcore_diameter_build_utf8_avp 296 "$origin_realm" M)" \
+        "$(lcore_diameter_build_utf8_avp 283 "$dest_realm" M)" \
         "$(lcore_diameter_build_u32_avp 277 0 M)"
 }
 
@@ -602,7 +909,7 @@ lcore_build_air() {
     # §7.3.55) holding Number-Of-Requested-Vectors and
     # Immediate-Response-Preferred.
     local nuri; nuri=$(lcore_diameter_build_u32_avp 1410 "$nvectors" M)
-    local irp;  irp=$(lcore_diameter_build_u32_avp 1413 0 M)
+    local irp;  irp=$(lcore_diameter_build_u32_avp 1412 0 M)
     local reai; reai=$(lcore_diameter_build_avp 1408 "${nuri}${irp}" M)
 
     local avps
@@ -624,11 +931,11 @@ lcore_build_ulr() {
     local session_avp; session_avp=$(lcore_diameter_build_utf8_avp 263 "$sid" M)
     local uname_avp;   uname_avp=$(lcore_diameter_build_utf8_avp 1 "$imsi" M)
     local vplmn_avp;   vplmn_avp=$(lcore_diameter_build_avp 1407 "$(lcore_nfc "$visited_plmn")" M)
-    # ULR-Flags (AVP 1405 is UE-Usage-Type; ULR-Flags is 1405 in the older
-    # numbering — TS 29.272 §7.3.7 assigns ULR-Flags = 1405 in Rel-8 and
-    # later moved it; we emit the Rel-8 code the MMEs in the field use).
+    # ULR-Flags is AVP 1405 (§7.3.7) and RAT-Type is AVP 1032, defined in
+    # TS 29.212 and reused here (§7.3.13), which means a vendor-specific
+    # AVP carrying Vendor-Id 10415 (3GPP).
     local flags_avp;   flags_avp=$(lcore_diameter_build_u32_avp 1405 "$ulr_flags" M)
-    local rat_avp;     rat_avp=$(lcore_diameter_build_u32_avp 1418 "$rat_type" M)
+    local rat_avp;     rat_avp=$(lcore_diameter_build_u32_avp 1032 "$rat_type" MV 10415)
 
     local avps
     avps="$(lcore_diameter_origin_avps "$origin_host" "$origin_realm")${session_avp}${uname_avp}${vplmn_avp}${flags_avp}${rat_avp}"
@@ -648,7 +955,7 @@ lcore_build_clr() {
     # 1 = INITIAL_ATTACH_PROCEDURE, 2 = SUBSCRIPTION_WITHDRAWAL,
     # 3 = UPDATE_PROCEDURE_IWF, 4 = INITIAL_ATTACH_PROCEDURE_IWF.
     local uname_avp; uname_avp=$(lcore_diameter_build_utf8_avp 1 "$imsi" M)
-    local ct_avp;    ct_avp=$(lcore_diameter_build_u32_avp 1421 "$canc_type" M)
+    local ct_avp;    ct_avp=$(lcore_diameter_build_u32_avp 1420 "$canc_type" M)
     local avps
     avps="$(lcore_diameter_origin_avps "$origin_host" "$origin_realm")${session_avp}${uname_avp}${ct_avp}"
     lcore_diameter_build_msg 317 16777251 192 3 3 "$avps"
@@ -892,6 +1199,11 @@ lcore_gtpc_parse_ies() {
         while (( off % 4 != 0 )); do off=$(( off + 1 )); done
         n=$(( n + 1 ))
     done
+    if (( off < total )); then
+        printf 'ERROR\t%s octet(s) left over after the last IE, too few for a header\n' \
+            "$(( total - off ))" >&2
+        return 1
+    fi
     printf 'ie_count\t%s\n' "$n"
     return 0
 }
@@ -1780,8 +2092,12 @@ lcore_cmd_decode_diameter() {
     local hdr; hdr=$(lcore_diameter_parse_header "$hex") || return 1
     printf '%s\n' "$hdr"
     local body; body=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="body"{print $2}')
-    [[ -n "$body" ]] && lcore_diameter_parse_avps "$body"
-    return 0
+    # An AVP walk that refuses the stream must make the verb fail: a caller
+    # (or a GUI button) that only sees exit 0 would treat a malformed packet
+    # as a good one.
+    local walk=0
+    if [[ -n "$body" ]]; then lcore_diameter_parse_avps "$body" || walk=1; fi
+    return "$walk"
 }
 
 lcore_cmd_decode_gtp_c() {
@@ -1790,8 +2106,9 @@ lcore_cmd_decode_gtp_c() {
     local hdr; hdr=$(lcore_gtpc_parse_header "$hex") || return 1
     printf '%s\n' "$hdr"
     local payload; payload=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="payload"{print $2}')
-    [[ -n "$payload" ]] && lcore_gtpc_parse_ies "$payload"
-    return 0
+    local walk=0
+    if [[ -n "$payload" ]]; then lcore_gtpc_parse_ies "$payload" || walk=1; fi
+    return "$walk"
 }
 
 lcore_cmd_decode_gtp_u() {
@@ -1817,6 +2134,21 @@ lcore_cmd_build_air() {
     printf 'roundtrip_length_ok\t%s\n' "$([[ "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="length_mismatch"{print $2}')" == "no" ]] && echo yes || echo no)"
 }
 
+lcore_cmd_build_clr() {
+    local imsi="${1:-310150123456789}"
+    local msg; msg=$(lcore_build_clr "$imsi" "${2:-hss.localdomain}" "${3:-localdomain}" "${4:-0}") || return 1
+    printf 'message\tCancel-Location-Request (CLR)\n'
+    printf 'command_code\t317\n'
+    printf 'application_id\t16777251\n'
+    printf 'imsi\t%s\n' "$imsi"
+    printf 'octets\t%s\n' "$(( ${#msg} / 2 ))"
+    printf 'hex\t%s\n' "$msg"
+    local hdr; hdr=$(lcore_diameter_parse_header "$msg") || return 1
+    printf 'roundtrip_command\t%s\n' "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="command_code"{print $2}')"
+    printf 'roundtrip_app\t%s\n'     "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="application_id"{print $2}')"
+    printf 'roundtrip_length_ok\t%s\n' "$([[ "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="length_mismatch"{print $2}')" == "no" ]] && echo yes || echo no)"
+}
+
 lcore_cmd_build_ulr() {
     local imsi="${1:-310150123456789}"
     local msg; msg=$(lcore_build_ulr "$imsi" "${2:-mme.localdomain}" "${3:-localdomain}" "${4:-02F810}" "${5:-6}" "${6:-0}") || return 1
@@ -1828,6 +2160,7 @@ lcore_cmd_build_ulr() {
     printf 'hex\t%s\n' "$msg"
     local hdr; hdr=$(lcore_diameter_parse_header "$msg") || return 1
     printf 'roundtrip_command\t%s\n' "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="command_code"{print $2}')"
+    printf 'roundtrip_app\t%s\n'     "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="application_id"{print $2}')"
     printf 'roundtrip_length_ok\t%s\n' "$([[ "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="length_mismatch"{print $2}')" == "no" ]] && echo yes || echo no)"
 }
 
@@ -2080,7 +2413,7 @@ lcore_selftest() {
 
     # A GROUPED AVP: Requested-EUTRAN-Authentication-Info (1408) holding
     # Number-Of-Requested-Vectors (1410) and Immediate-Response-Preferred (1413).
-    local g_in; g_in="$(lcore_diameter_build_u32_avp 1410 2 M)$(lcore_diameter_build_u32_avp 1413 0 M)"
+    local g_in; g_in="$(lcore_diameter_build_u32_avp 1410 2 M)$(lcore_diameter_build_u32_avp 1412 0 M)"
     local grouped; grouped=$(lcore_diameter_build_avp 1408 "$g_in" M)
     out=$(lcore_diameter_parse_avps "$grouped")
     chk avp-group-code "$(fld "$out" avp.0.code)" "1408"
@@ -2093,11 +2426,17 @@ lcore_selftest() {
     chk avp-inner-count "$(fld "$out" avp_count)" "2"
     chk avp-inner-0code "$(fld "$out" avp.0.code)" "1410"
     chk avp-inner-0dec  "$(fld "$out" avp.0.decoded)" "Number-Of-Requested-Vectors=2"
-    chk avp-inner-1code "$(fld "$out" avp.1.code)" "1413"
+    chk avp-inner-1code "$(fld "$out" avp.1.code)" "1412"
     chk avp-inner-1dec  "$(fld "$out" avp.1.decoded)" "Immediate-Response-Preferred=0"
 
     # A declared AVP length longer than the bytes present is rejected.
     chk avp-truncated "$(lcore_diameter_parse_avps 00000108400000FF >/dev/null 2>&1; echo $?)" "1"
+    # A fragment shorter than a header after the last AVP is not padding.
+    chk avp-leftover "$(lcore_diameter_parse_avps 000001084000000C00000001FFFF >/dev/null 2>&1; echo $?)" "1"
+    # The verb must fail when the walk does: a GUI button reads the exit code.
+    chk dcd-walk-rc "$(lcore_cmd_decode_diameter 01000028C000013C010000530000000100000001000001084000000C00000001FFFF >/dev/null 2>&1; echo $?)" "1"
+    chk gcd-walk-rc "$(lcore_cmd_decode_gtp_c 482000240000000100000001000000011F00 >/dev/null 2>&1; echo $?)" "1"
+    chk gcd-walk-ok "$(lcore_cmd_decode_gtp_c 482000140000000100000001000000015200010006000000 >/dev/null 2>&1; echo $?)" "0"
     # A zero-length AVP is below the 8-octet minimum and is rejected.
     chk avp-zero-len  "$(lcore_diameter_parse_avps 0000010840000000 >/dev/null 2>&1; echo $?)" "1"
     # A well-formed but value-less AVP parses.
@@ -2123,11 +2462,20 @@ lcore_selftest() {
     chk ccr-empty  "$(lcore_diameter_flags_is_request '' >/dev/null 2>&1; echo $?)" "1"
     chk cc-shared  "$(lcore_diameter_command_name 316 | grep -c 'ULR/ULA')" "1"
     chk app-s6a "$(lcore_diameter_app_name 16777251)" "3GPP S6a/S6d"
-    chk app-gx  "$(lcore_diameter_app_name 16777219)" "3GPP Gx"
+    chk app-wx  "$(lcore_diameter_app_name 16777219)" "3GPP Wx"
+    chk app-gx  "$(lcore_diameter_app_name 16777238)" "3GPP Gx (29.212)"
+    chk app-s13 "$(lcore_diameter_app_name 16777252)" "3GPP S13/S13'"
     chk app-unk "$(lcore_diameter_app_name 424242)"  "unknown"
     chk rc-2001 "$(lcore_diameter_result_code 2001)" "DIAMETER_SUCCESS (2001)"
-    chk rc-5001 "$(lcore_diameter_result_code 5001)" "DIAMETER_USER_UNKNOWN / 3GPP: User-Unknown (5001)"
-    chk rc-5420 "$(lcore_diameter_result_code 5420)" "DIAMETER_ERROR_UNKNOWN_EPS_SUBSCRIPTION (5420)"
+    # RFC 6733 renamed several of the RFC 3588 codes: 3007 is now
+    # APPLICATION_UNSUPPORTED and NO_COMMON_SECURITY moved from 3010 to 5017.
+    chk rc-3007 "$(lcore_diameter_result_code 3007)" "DIAMETER_APPLICATION_UNSUPPORTED (3007)"
+    chk rc-3010 "$(lcore_diameter_result_code 3010)" "DIAMETER_UNKNOWN_PEER (3010)"
+    chk rc-5001 "$(lcore_diameter_result_code 5001)" "DIAMETER_AVP_UNSUPPORTED (5001)"
+    chk rc-5420 "$(lcore_diameter_result_code 5420)" "unassigned Diameter result code (5420)"
+    # The 3GPP codes live in Experimental-Result-Code (§7.4), AVP 298.
+    chk erc-5001 "$(lcore_diameter_exp_result_code 5001)" "DIAMETER_ERROR_USER_UNKNOWN (5001)"
+    chk erc-5420 "$(lcore_diameter_exp_result_code 5420)" "DIAMETER_ERROR_UNKNOWN_EPS_SUBSCRIPTION (5420)"
 
     # ── 4. AVP code registry (the codes the brief names) ────────────────
     chk avpn-263  "$(lcore_diameter_avp_name 263)"  "Session-Id"
@@ -2137,12 +2485,20 @@ lcore_selftest() {
     chk avpn-1407 "$(lcore_diameter_avp_name 1407)" "Visited-PLMN-Id"
     chk avpn-1408 "$(lcore_diameter_avp_name 1408)" "Requested-EUTRAN-Authentication-Info"
     chk avpn-1410 "$(lcore_diameter_avp_name 1410)" "Number-Of-Requested-Vectors"
-    chk avpn-1447 "$(lcore_diameter_avp_name 1447)" "GPRS-Subscription-Data"
-    chk avpn-1448 "$(lcore_diameter_avp_name 1448)" "RAND"
+    chk avpn-1405 "$(lcore_diameter_avp_name 1405)" "ULR-Flags"
+    chk avpn-1412 "$(lcore_diameter_avp_name 1412)" "Immediate-Response-Preferred"
+    chk avpn-1417 "$(lcore_diameter_avp_name 1417)" "Network-Access-Mode"
+    chk avpn-1447 "$(lcore_diameter_avp_name 1447)" "RAND"
+    chk avpn-1448 "$(lcore_diameter_avp_name 1448)" "XRES"
     chk avpn-1449 "$(lcore_diameter_avp_name 1449)" "AUTN"
-    chk avpn-1450 "$(lcore_diameter_avp_name 1450)" "XRES"
-    chk avpn-1451 "$(lcore_diameter_avp_name 1451)" "KASME"
-    chk avpn-285  "$(lcore_diameter_avp_name 285)"  "Origin-Realm"
+    chk avpn-1450 "$(lcore_diameter_avp_name 1450)" "KASME"
+    chk avpn-1032 "$(lcore_diameter_avp_name 1032)" "RAT-Type"
+    # Origin-Realm is 296; 285 is Re-Auth-Request-Type and 297/298 are the
+    # Experimental-Result pair.
+    chk avpn-285  "$(lcore_diameter_avp_name 285)"  "Re-Auth-Request-Type"
+    chk avpn-296  "$(lcore_diameter_avp_name 296)"  "Origin-Realm"
+    chk avpn-297  "$(lcore_diameter_avp_name 297)"  "Experimental-Result"
+    chk avpn-298  "$(lcore_diameter_avp_name 298)"  "Experimental-Result-Code"
 
     # ── 5. Built AIR/ULR round-trip ─────────────────────────────────────
     out=$(lcore_cmd_build_air 310150123456789); rc=$?
@@ -2178,13 +2534,22 @@ lcore_selftest() {
     chk ulr-lenok "$(fld "$out" roundtrip_length_ok)" "yes"
     out=$(lcore_cmd_decode_diameter "$(fld "$out" hex)")
     chk ulr-name  "$(fld "$out" command_name)" "Update-Location (ULR/ULA)  [S6a/S6d]"
-    chk ulr-rat   "$(printf '%s\n' "$out" | awk -F'\t' '$1 ~ /^avp\.[0-9]+\.decoded$/ && $2=="Network-Access-Mode=6"{print "yes"; exit}')" "yes"
+    chk ulr-rat   "$(printf '%s\n' "$out" | awk -F'\t' '$1 ~ /^avp\.[0-9]+\.decoded$/ && $2=="RAT-Type=6"{print "yes"; exit}')" "yes"
 
     # Builders validate their input.
     chk air-bad-imsi "$(lcore_cmd_build_air 123 >/dev/null 2>&1; echo $?)" "1"
     chk ulr-bad-imsi "$(lcore_cmd_build_ulr abc >/dev/null 2>&1; echo $?)" "1"
     chk air-bad-nv   "$(lcore_build_air 310150123456789 mme.localdomain localdomain 9 >/dev/null 2>&1; echo $?)" "2"
-    # CLR uses 320/321, not the 319 the brief listed for Cancel-Location.
+    out=$(lcore_cmd_build_clr 310150123456789); rc=$?
+    chk clr-build-rc  "$rc" "0"
+    chk clr-build-cmd "$(fld "$out" roundtrip_command)" "317"
+    chk clr-build-app "$(fld "$out" roundtrip_app)" "16777251"
+    chk clr-build-len "$(fld "$out" roundtrip_length_ok)" "yes"
+    # Cancellation-Type is AVP 1420 (§7.3.24); 1421 is DSR-Flags.
+    out=$(lcore_cmd_decode_diameter "$(fld "$out" hex)")
+    chk clr-ct-code "$(printf '%s\n' "$out" | awk -F'\t' '$1 ~ /^avp\.[0-9]+\.code$/ && $2=="1420"{print "yes"; exit}')" "yes"
+    chk clr-ct-dec  "$(printf '%s\n' "$out" | awk -F'\t' '$1 ~ /^avp\.[0-9]+\.decoded$/ && $2=="Cancellation-Type=0"{print "yes"; exit}')" "yes"
+
     local clr; clr=$(lcore_build_clr 310150123456789 hss.localdomain localdomain 0)
     out=$(lcore_diameter_parse_header "$clr")
     chk clr-cmd  "$(fld "$out" command_code)" "317"
@@ -2616,6 +2981,7 @@ lcore_cli_main() {
         --decode-gtp-u)  lcore_cmd_decode_gtp_u "${1:-}" ;;
         --build-air)     lcore_cmd_build_air "${1:-310150123456789}" ;;
         --build-ulr)     lcore_cmd_build_ulr "${1:-310150123456789}" ;;
+        --build-clr)     lcore_cmd_build_clr "${1:-310150123456789}" ;;
         --gtp-csr-forge) lcore_cmd_gtp_csr_forge "${1:-310150123456789}" "${2:-internet}" "${3:-310}" "${4:-260}" ;;
         --gtp-modify-bearer) lcore_cmd_gtp_modify_bearer "${1:-}" "${2:-5}" ;;
         --gtpdoor-detect) lcore_cmd_gtpdoor "${1:-}" ;;
@@ -2637,6 +3003,7 @@ Usage: $0 COMMAND
   --decode-gtp-c <hex>        parse a GTP-C v2 header and walk its IEs
   --decode-gtp-u <hex>        parse a GTP-U header and its extension chain
   --build-air [IMSI]          build an S6a Authentication-Information-Request
+  --build-clr [IMSI]          build an S6a Cancel-Location-Request (317)
   --build-ulr [IMSI]          build an S6a Update-Location-Request
   --gtp-csr-forge [IMSI] [APN] [MCC] [MNC]
                               forge a GTP-C Create Session Request

@@ -14662,7 +14662,7 @@ static ModuleSubmenuEntry lcore_entries[] = {
       "#FORGE|--gtp-modify-bearer:Modify Bearer|--gtp-csr-forge:Forge CSR|#AUDIT|--gtpdoor-detect:Detect GTPdoor|--cdr-fraud-check:CDR Fraud Check|--fs20-audit:FS.20 Audit" },
     { "Build",
       "document-new-symbolic",
-      "--build-air:Build AIR|--build-ulr:Build ULR|--s1ap" },
+      "--build-air:Build AIR|--build-ulr:Build ULR|--build-clr:Build CLR|--s1ap" },
     { "Recon",
       "system-search-symbolic",
       "--surface:Surface|--require-core:Require Core|--plan:Plan" },

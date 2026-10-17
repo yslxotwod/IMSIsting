@@ -126,7 +126,7 @@ edge of what can be validated by anyone.
 | **O3 — SS7 exploitation** | `26_ss7_map` | MTP3 routing label (3-8-3, 4-4-4-2), SCCP, TCAP, MAP opcodes TS 29.002, SRI / SRI-SM / ATI / PSI / SAI / ULR / ISD / call-forwarding-hijack construction, SCTP+M3UA framing in both directions, SSN table | An STP or interconnect. In practice: a roaming agreement |
 | **O9 — GRX exploitation** | `26_ss7_map` | GRX/IPX reachability, GSN address harvesting, the interconnect trust model | A GRX/IPX presence |
 | **O20 — roaming abuse** | `26_ss7_map` | SEPP / delegated-discovery exposure, inter-operator trust model | Two operators |
-| **O4 — Diameter attacks** | `11_lte_core` | S6a/S6d AIR/ULR/CLR/IDR/DSR/PUR encode-decode (code table corrected against Wireshark: 316 ULR, 317 CLR, 318 AIR, 319 IDR, 320 DSR, 321 PUR), forged-ULR registration move | An HSS |
+| **O4 — Diameter attacks** | `11_lte_core` | S6a/S6d AIR/ULR/CLR encode-decode (316 ULR, 317 CLR, 318 AIR, 319 IDR, 320 DSR, 321 PUR) and forged-request builders. Header (RFC 6733 §3) and AVP layout (§4) checked, the AVP registry regenerated from TS 29.272 Table 7.3.1/1 (the old table was shifted from 1405: Origin-Realm is 296, not 285; Visited-PLMN-Id is 1407; ULR-Flags 1405; RAT-Type 1032 vendor 10415; RAND/XRES/AUTN/KASME are 1447-1450), the command and application tables from TS 29.230 (258 is Re-Auth, not Device-Watchdog; 268 is DER/DEA, not CCR; 272 is CCR/CCA; 282 is DPR; 16777219 is Wx, not Gx), and the result codes split between RFC 6733 §7.1 and the 3GPP codes of TS 29.272 §7.4 (AVP 298). Every registry is swept and the builders are decoded back, with Wireshark as the second implementation, by `tools/check-diameter-codec.sh` | An HSS |
 | **O2 — GTP exploitation** | `11_lte_core` | GTP-C v2 / GTP-U with extension headers, IE walk, TEID handling. Headers, message-type and IE-type registries corrected against TS 29.274 tables 6.1-1 and 8.1-1, IMSI/MSISDN read as TBCD with no count octet (§8.3, §8.11), ULI/F-TEID/RAT tables from §8.21, §8.22, §8.17, GTP-U extension headers and comprehension bits from TS 29.281 §5.2, each checked by `tools/check-gtp-codec.sh` against the clauses and pycrate | An EPC: SGW/PGW |
 | **O19 — PFCP exploitation** | `13_nr_core` | PFCP session establishment, PDR/FAR/QER/URR encode-decode | A UPF |
 | **5G SBA / NRF abuse** | `40_sba_pivot`, `13_nr_core` | HTTP/2 frame codec (RFC 7540), NRF discovery (TS 29.510), JWT/JOSE decode, `alg=none` and audience-confusion audit, OAuth2 abuse, NRF token forgery | A live 5GC |
@@ -797,8 +797,25 @@ Session Request for 310150123456789 read back as 50123456789), the F-TEID
 interface type was read as four bits rather than six and stopped at 20, the
 GTP-U extension-header names for types 1, 2, 193 and 194 were invented where
 the table says "Reserved - Control Plane Only", and neither header reported a
-Length field that disagreed with the frame. What remains in Phase 7 is
-Diameter (S6a/S6d), PFCP and the SBA half.
+Length field that disagreed with the frame.
+
+The Diameter half is checked the same way as of the S6a/S6d pass:
+`tools/check-diameter-codec.sh` builds every message from RFC 6733 §3/§4 and
+TS 29.272 §7, sweeps the AVP, command and application registries, decodes the
+three forged requests back to the AVPs their message format requires, and
+compares against Wireshark's Diameter dissector and dictionaries. The defects
+it found were the same kind: the AVP table was shifted from 1405 onward
+(Origin-Realm was 285, which is Re-Auth-Request-Type; GPRS-Subscription-Data
+was 1447, which is RAND; MSISDN/Result-Code/RAT rows were off by two to
+forty), so every built request carried a mandatory Destination-Realm as the
+optional Re-Auth-Request-Type and the origin realm twice; the command table
+named 258 Device-Watchdog, 268 CCR, 282 SNR and 324 nothing; the application
+table called 16777219 Gx (it is Wx), 16777221 Rx (Zh), 16777236 S6a (Rx) and
+16777252 SLg (S13/S13'); the 3GPP result codes were looked up in the base
+registry (5001 read as DIAMETER_AVP_UNSUPPORTED instead of User-Unknown);
+Cancel-Location carried Cancellation-Type as DSR-Flags (1421); and a malformed
+AVP stream printed an error while the verb still exited 0. What remains in
+Phase 7 is PFCP and the SBA half.
 
 **Phase 8 — interconnect.** `26_ss7_map` (SS7 flows, GRX, roaming).
 
