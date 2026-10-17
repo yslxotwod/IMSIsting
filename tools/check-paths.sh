@@ -45,7 +45,7 @@ done
 
 # 2. The launcher and the tools.
 for f in imsisting.sh tools/gen-module-index.sh tools/run-selftests.sh \
-         tools/check-paths.sh tools/check-verbs.sh; do
+         tools/check-paths.sh tools/check-verbs.sh tools/check-gui-text.sh; do
     if [[ -x "$ROOT/$f" ]]; then
         (( jsonout )) || printf 'OK    exec %s\n' "$f"
     elif [[ -f "$ROOT/$f" ]]; then

@@ -553,7 +553,7 @@ CFG
 femt_menu() {
     while true; do
         banner
-        echo "  === Femtocell / HeNB Attacks ==="
+        echo "  === Small Cell / eNB Attacks ==="
         echo
         cat <<'M'
   [1]  CSG id encode
@@ -605,7 +605,7 @@ femt_cli_main() {
         --menu)        femt_menu ;;
         *)
             cat >&2 <<EOF
-Femtocell / HeNB Attacks — local management audit and PCI/CSG conflict work
+Small Cell / eNB Attacks — local management audit and PCI/CSG conflict work
 
 Usage: $0 COMMAND
   --status-tsv          module state as TSV

@@ -422,7 +422,7 @@ IMSISTING_MODULE_TABLE=(
     "ACCESS|20|LTE Attach Forge|latt_menu|09_lte_attach"
     "ACCESS|21|Slicing Escape|slic_menu|34_slicing"
     "ACCESS|22|VoWiFi / ePDG Attacks|vowi_menu|36_vowifi"
-    "ACCESS|23|Femtocell / HeNB Attacks|femt_menu|37_femtocell"
+    "ACCESS|23|Small Cell / eNB Attacks|femt_menu|37_femtocell"
     "ACCESS|24|USSD Forge|ussd_menu|38_ussd"
     "ACCESS|25|RAN Sharing|rans_menu|43_ran_share"
     "ACCESS|26|Wi-Fi Offload / LWA|wifioff_menu|47_wifioff"

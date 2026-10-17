@@ -736,6 +736,7 @@ often identifies the problem with no hardware attached.
 ./tools/run-selftests.sh          # every module
 ./tools/check-paths.sh            # every path and table entry resolves
 ./tools/check-verbs.sh            # verbs reachable from the GUI
+./tools/check-gui-text.sh         # no verb is rendered as interface text
 ./tools/gen-module-index.sh       # regenerate the index
 ./tools/gen-icons-xml.sh --check  # the bundled icon set matches the tree
 ```
@@ -829,6 +830,7 @@ Check GTK4 is at least 4.14.
 ./tools/run-selftests.sh
 ./tools/check-paths.sh
 ./tools/check-verbs.sh
+./tools/check-gui-text.sh
 ```
 
 All of them must pass.
