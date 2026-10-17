@@ -803,8 +803,9 @@ otasm_tp_g7_code() {
         'ü') printf '126'; return 0 ;;
         'à') printf '127'; return 0 ;;
         # §6.2.1.1 extension table — ESC (27) then the extension code.
+        $'\f') printf 'E 10'; return 0 ;;
         '[')  printf 'E 60';  return 0 ;;
-        '\\') printf 'E 47';  return 0 ;;
+        '\') printf 'E 47';  return 0 ;;
         ']')  printf 'E 62';  return 0 ;;
         '^')  printf 'E 20';  return 0 ;;
         '{')  printf 'E 40';  return 0 ;;

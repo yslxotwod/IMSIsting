@@ -62,67 +62,191 @@ ussd_split() {
 ussd_norm_hex() { printf '%s' "${1:-}" | tr -d ' \t\r\n:.-' | sed 's/^0x//I' | tr 'A-F' 'a-f'; }
 
 # ── GSM 7-bit default alphabet (TS 23.038 §6.2.1) ───────────────────────
-# Only the printable subset a USSD/MMI string actually carries is mapped; the
-# remainder is the extension escape and locale characters. A character outside
-# the table is a hard error, never silently replaced.
+# The whole table, both ways. Every one of the 128 septets decodes to the
+# character the clause assigns it -- there are no unassigned positions -- and
+# every character the table names packs back to its septet. The extension
+# table (§6.2.1.1) rides behind ESC (27): those characters emit "E <code>" on
+# encode and take two septets, which is why the packer works on septets rather
+# than on characters.
+#
+# The previous table was a hand-picked subset ("only what a USSD string
+# carries"): 'è', '¥', '_', '€' and every bracketed character were refused on
+# encode, and the decoder answered '?' for 26 positions -- a silent
+# substitution in a function whose own comment promised a hard error. A USSD
+# message can carry any of these; a decoder that invents a '?' turns a card's
+# answer into a different string.
 ussd_septet_of_char() {
     local ch="${1:-}"
+    [[ -n "$ch" ]] || { printf 'ERROR\tempty character\n' >&2; return 2; }
     case "$ch" in
-        ' ') printf '32'; return 0 ;;
-        [0-9]) printf '%d' "$(( $(printf '%d' "'$ch") ))"; return 0 ;;
-        [A-Z]) printf '%d' "$(( $(printf '%d' "'$ch") ))"; return 0 ;;
-        [a-z]) printf '%d' "$(( $(printf '%d' "'$ch") ))"; return 0 ;;
-        '!') printf '33';; '"') printf '34';; '#') printf '35';; '%') printf '37';;
-        '&') printf '38';; "'") printf '39';; '(') printf '40';; ')') printf '41';;
-        '*') printf '42';; '+') printf '43';; ',') printf '44';; '-') printf '45';;
-        '.') printf '46';; '/') printf '47';; ':') printf '58';; ';') printf '59';;
-        '<') printf '60';; '=') printf '61';; '>') printf '62';; '?') printf '63';;
-        *) printf 'ERROR\tcharacter not in the 7-bit default alphabet: %s\n' "$ch" >&2; return 2 ;;
+        '@') printf '0';   return 0 ;;
+        '£') printf '1';   return 0 ;;
+        '$') printf '2';   return 0 ;;
+        '¥') printf '3';   return 0 ;;
+        'è') printf '4';   return 0 ;;
+        'é') printf '5';   return 0 ;;
+        'ù') printf '6';   return 0 ;;
+        'ì') printf '7';   return 0 ;;
+        'ò') printf '8';   return 0 ;;
+        'Ç') printf '9';   return 0 ;;
+        'Ø') printf '11';  return 0 ;;
+        'ø') printf '12';  return 0 ;;
+        'Å') printf '14';  return 0 ;;
+        'å') printf '15';  return 0 ;;
+        'Δ') printf '16';  return 0 ;;
+        '_') printf '17';  return 0 ;;
+        'Φ') printf '18';  return 0 ;;
+        'Γ') printf '19';  return 0 ;;
+        'Λ') printf '20';  return 0 ;;
+        'Ω') printf '21';  return 0 ;;
+        'Π') printf '22';  return 0 ;;
+        'Ψ') printf '23';  return 0 ;;
+        'Σ') printf '24';  return 0 ;;
+        'Θ') printf '25';  return 0 ;;
+        'Ξ') printf '26';  return 0 ;;
+        'Æ') printf '28';  return 0 ;;
+        'æ') printf '29';  return 0 ;;
+        'ß') printf '30';  return 0 ;;
+        'É') printf '31';  return 0 ;;
+        '¤') printf '36';  return 0 ;;
+        '¡') printf '64';  return 0 ;;
+        'Ä') printf '91';  return 0 ;;
+        'Ö') printf '92';  return 0 ;;
+        'Ñ') printf '93';  return 0 ;;
+        'Ü') printf '94';  return 0 ;;
+        '§') printf '95';  return 0 ;;
+        '¿') printf '96';  return 0 ;;
+        'ä') printf '123'; return 0 ;;
+        'ö') printf '124'; return 0 ;;
+        'ñ') printf '125'; return 0 ;;
+        'ü') printf '126'; return 0 ;;
+        'à') printf '127'; return 0 ;;
+        $'\n') printf '10'; return 0 ;;
+        $'\r') printf '13'; return 0 ;;
+        # §6.2.1.1 extension table: ESC (27) then the extension code.
+        '[')  printf 'E 60';  return 0 ;;
+        '\') printf 'E 47';  return 0 ;;
+        ']')  printf 'E 62';  return 0 ;;
+        '^')  printf 'E 20';  return 0 ;;
+        '{')  printf 'E 40';  return 0 ;;
+        '|')  printf 'E 64';  return 0 ;;
+        '}')  printf 'E 41';  return 0 ;;
+        '~')  printf 'E 61';  return 0 ;;
+        '€')  printf 'E 101'; return 0 ;;
+        $'\f') printf 'E 10'; return 0 ;;
     esac
-    return 0
+    # Between the named characters the table is the identity on printable
+    # ASCII. Position 0x24 is '¤' and 0x40 '¡', both already taken above.
+    local o
+    o=$(printf '%d' "'$ch" 2>/dev/null) || o=""
+    if [[ "$o" =~ ^[0-9]+$ ]] && (( o >= 32 && o <= 126 )) && [[ "$ch" != '¤' && "$ch" != '¡' ]]; then
+        printf '%d' "$o"; return 0
+    fi
+    printf 'ERROR\tcharacter not in the 7-bit default alphabet: %s\n' "$ch" >&2
+    return 2
 }
 ussd_char_of_septet() {
     local s="${1:-0}"
     case "$s" in
-        0)  printf '@' ;;
-        1)  printf '£' ;;
-        2)  printf '$' ;;
-        10) printf '\n' ;;
-        13) printf '\r' ;;
-        27) printf '\033' ;;
-        36) printf '¤' ;;
-        64) printf '¡' ;;
-        91) printf 'Ä' ;;
-        92) printf 'Ö' ;;
-        93) printf 'Ñ' ;;
-        94) printf 'Ü' ;;
-        95) printf '§' ;;
-        96) printf '¿' ;;
+        0)   printf '@' ;;
+        1)   printf '£' ;;
+        2)   printf '$' ;;
+        3)   printf '¥' ;;
+        4)   printf 'è' ;;
+        5)   printf 'é' ;;
+        6)   printf 'ù' ;;
+        7)   printf 'ì' ;;
+        8)   printf 'ò' ;;
+        9)   printf 'Ç' ;;
+        10)  printf '\n' ;;
+        11)  printf 'Ø' ;;
+        12)  printf 'ø' ;;
+        13)  printf '\r' ;;
+        14)  printf 'Å' ;;
+        15)  printf 'å' ;;
+        16)  printf 'Δ' ;;
+        17)  printf '_' ;;
+        18)  printf 'Φ' ;;
+        19)  printf 'Γ' ;;
+        20)  printf 'Λ' ;;
+        21)  printf 'Ω' ;;
+        22)  printf 'Π' ;;
+        23)  printf 'Ψ' ;;
+        24)  printf 'Σ' ;;
+        25)  printf 'Θ' ;;
+        26)  printf 'Ξ' ;;
+        27)  printf '\033' ;;
+        28)  printf 'Æ' ;;
+        29)  printf 'æ' ;;
+        30)  printf 'ß' ;;
+        31)  printf 'É' ;;
+        36)  printf '¤' ;;
+        64)  printf '¡' ;;
+        91)  printf 'Ä' ;;
+        92)  printf 'Ö' ;;
+        93)  printf 'Ñ' ;;
+        94)  printf 'Ü' ;;
+        95)  printf '§' ;;
+        96)  printf '¿' ;;
         123) printf 'ä' ;;
         124) printf 'ö' ;;
         125) printf 'ñ' ;;
         126) printf 'ü' ;;
-        *)  if (( s >= 32 && s <= 126 )); then printf "\\$(printf '%03o' "$s")"; else printf '?' ; fi ;;
+        127) printf 'à' ;;
+        *)   printf "\\$(printf '%03o' "$s")" ;;
     esac
+}
+ussd_ext_char() {
+    case "${1:-}" in
+        10)  printf '\f' ;;
+        20)  printf '^' ;;
+        40)  printf '{' ;;
+        41)  printf '}' ;;
+        47)  printf '\\' ;;
+        60)  printf '[' ;;
+        61)  printf '~' ;;
+        62)  printf ']' ;;
+        64)  printf '|' ;;
+        101) printf '€' ;;
+        *)   printf 'ERROR\tno GSM 7-bit extension character for code %s\n' "${1:-}" >&2; return 2 ;;
+    esac
+}
+# Text -> space-separated septet codes; an extension character emits "27 <code>".
+ussd_septets_of_text() {
+    local text="${1:-}" out=() i ch enc
+    [[ -n "$text" ]] || { printf 'ERROR\tempty string\n' >&2; return 2; }
+    for (( i = 0; i < ${#text}; i++ )); do
+        ch="${text:i:1}"
+        enc=$(ussd_septet_of_char "$ch") || return 2
+        if [[ "$enc" == E\ * ]]; then out+=( 27 "${enc#E }"); else out+=( "$enc" ); fi
+    done
+    printf '%s' "${out[*]}"
 }
 
 # ── 7-bit packing (TS 23.038 §6.1.2.1) ──────────────────────────────────
-ussd_pack() {
-    local text="${1:-}"
-    local n=${#text}
-    (( n > 0 )) || { printf 'ERROR\tempty string\n' >&2; return 2; }
-    local nbytes=$(( (n * 7 + 7) / 8 ))
-    local out=() i
-    for (( i = 0; i < nbytes; i++ )); do out[i]=0; done
-    for (( i = 0; i < n; i++ )); do
-        local s; s=$(ussd_septet_of_char "${text:i:1}") || return 2
-        local bitpos=$(( i * 7 )) byte=$(( i * 7 / 8 )) shift=$(( i * 7 % 8 ))
-        out[byte]=$(( out[byte] | ((s << shift) & 0xFF) ))
-        if (( shift > 1 )); then
-            out[byte+1]=$(( out[byte+1] | (s >> (8 - shift)) ))
+# "The bit number zero is always transmitted first": septet i starts at bit
+# 7*i of the octet string, low bit first.
+ussd_pack_septets() {
+    local codes="${1:-}" s
+    local out=() i=0 byte shift
+    set -- $codes
+    (( $# > 0 )) || { printf 'ERROR\tno septets to pack\n' >&2; return 2; }
+    local nbytes=$(( ($# * 7 + 7) / 8 ))
+    for (( byte = 0; byte < nbytes; byte++ )); do out[byte]=0; done
+    for s in "$@"; do
+        (( s >= 0 && s <= 127 )) || { printf 'ERROR\tseptet out of range: %s\n' "$s" >&2; return 2; }
+        local bp=$(( i * 7 )) b=$(( i * 7 / 8 )) sh=$(( i * 7 % 8 ))
+        out[b]=$(( out[b] | ((s << sh) & 0xFF) ))
+        if (( sh > 1 )); then
+            out[b+1]=$(( out[b+1] | (s >> (8 - sh)) ))
         fi
+        i=$(( i + 1 ))
     done
     printf '%02x' "${out[@]}"
+}
+ussd_pack() {
+    local codes; codes=$(ussd_septets_of_text "${1:-}") || return 2
+    ussd_pack_septets "$codes"
 }
 ussd_unpack() {
     local hex; hex=$(ussd_norm_hex "${1:-}")
@@ -134,14 +258,24 @@ ussd_unpack() {
     for (( i = 0; i < nbytes; i++ )); do b[i]=$(( 16#${hex:$((i*2)):2} )); done
     local nseptets=$(( nbytes * 8 / 7 ))
     (( count > 0 && count < nseptets )) && nseptets=$count
+    local esc=0 val
     for (( i = 0; i < nseptets; i++ )); do
         local bitpos=$(( i * 7 )) byte=$(( i * 7 / 8 )) shift=$(( i * 7 % 8 ))
-        local val=$(( b[byte] >> shift ))
+        val=$(( b[byte] >> shift ))
         if (( shift > 1 )); then
             val=$(( val | (b[byte+1] << (8 - shift)) ))
         fi
-        ussd_char_of_septet "$(( val & 0x7F ))"
+        val=$(( val & 0x7F ))
+        if (( esc == 1 )); then
+            ussd_ext_char "$val" || return 2
+            esc=0
+        elif (( val == 27 )); then
+            esc=1
+        else
+            ussd_char_of_septet "$val"
+        fi
     done
+    (( esc == 0 )) || { printf 'ERROR\tdangling ESC (27) at the end of the septets\n' >&2; return 2; }
 }
 
 # ── USSD facility message (TS 24.090): [DCS][7-bit text] ────────────────
@@ -179,21 +313,60 @@ ussd_ss_name() {
         *) echo "unknown supplementary-service code" ;;
     esac
 }
+# TS 22.030 §5.3 / §5.4 start-string grammar:
+#   *SC#        activate            (#SC#        deactivate)
+#   *SC*SI#     activate with SI    (#SC*SI#     deactivate with SI)
+#   **SC*SI#    register            (##SC#       erase)
+#   *#SC#       interrogate         (*#SC*SI#    interrogate with SI)
+# and each form may carry one more "*SIA" (the "service information" that
+# selects e.g. a forwarding timer) after the SI:
+#   **SC*SI*SIA#   *SC*SI*SIA#   *#SC*SI*SIA#
+# The activate form without an SI -- *43#, the way call waiting is turned on --
+# used to be rejected as malformed because the pattern demanded "*" after the
+# code, while the deactivate and erase forms already accepted their SI-less
+# shape.
 ussd_mmi_parse() {
     local s="${1:-}"
     [[ -n "$s" ]] || { printf 'ERROR\tempty MMI string\n' >&2; return 2; }
-    local action="" code="" param=""
-    if [[ "$s" =~ ^\*#([0-9]+)\*([0-9*#]+)#$ ]]; then action=interrogate; code="${BASH_REMATCH[1]}"; param="${BASH_REMATCH[2]}"
-    elif [[ "$s" =~ ^\*#([0-9]+)#$ ]];            then action=interrogate; code="${BASH_REMATCH[1]}"
-    elif [[ "$s" =~ ^\*\*([0-9]+)\*([^#]*)#$ ]];  then action=register;    code="${BASH_REMATCH[1]}"; param="${BASH_REMATCH[2]}"
-    elif [[ "$s" =~ ^\*([0-9]+)\*([^#]*)#$ ]];    then action=activate;    code="${BASH_REMATCH[1]}"; param="${BASH_REMATCH[2]}"
-    elif [[ "$s" =~ ^##([0-9]+)#$ ]];             then action=erase;       code="${BASH_REMATCH[1]}"
-    elif [[ "$s" =~ ^#([0-9]+)#$ ]];              then action=deactivate;  code="${BASH_REMATCH[1]}"
-    else
+    local action="" body="" code="" param="" sia="" note=""
+    case "$s" in
+        '**'*) action=register;    body="${s:2}" ;;
+        '##'*) action=erase;       body="${s:2}" ;;
+        '*#'*) action=interrogate; body="${s:2}" ;;
+        '*'*)  action=activate;    body="${s:1}" ;;
+        '#'*)  action=deactivate;  body="${s:1}" ;;
+        *)     printf 'ERROR\tnot a well-formed MMI/SS string: %s\n' "$s" >&2; return 1 ;;
+    esac
+    if [[ "$body" != *# || "${body%#}" == *'#'* ]]; then
         printf 'ERROR\tnot a well-formed MMI/SS string: %s\n' "$s" >&2; return 1
+    fi
+    body="${body%#}"
+    if [[ -z "$body" ]]; then
+        printf 'ERROR\tnot a well-formed MMI/SS string: %s (no service code)\n' "$s" >&2; return 1
+    fi
+    local -a f=()
+    local IFS='*'
+    read -r -a f <<< "$body"
+    unset IFS
+    code="${f[0]}"
+    param="${f[1]:-}"
+    sia="${f[2]:-}"
+    if ! [[ "$code" =~ ^[0-9]{1,4}$ ]]; then
+        printf 'ERROR\tnot a well-formed MMI/SS string: %s (service code "%s" is not 1-4 digits)\n' "$s" "$code" >&2
+        return 1
+    fi
+    if (( ${#f[@]} > 3 )); then
+        printf 'ERROR\tnot a well-formed MMI/SS string: %s (at most SC, SI and SIA are expected)\n' "$s" >&2
+        return 1
+    fi
+    if [[ "$action" == activate && -z "$param" ]]; then
+        note="no SI: a bare *SC# is equally a plain MMI/USSD string, so the network decides whether it is an SS activation"
     fi
     printf 'action\t%s\ncode\t%s\nservice\t%s\nparameter\t%s\n' \
         "$action" "$code" "$(ussd_ss_name "$code")" "$param"
+    [[ -n "$sia" ]]   && printf 'sia\t%s\n' "$sia"
+    [[ -n "$note" ]]  && printf 'note\t%s\n' "$note"
+    return 0
 }
 
 # ── injection detection (the defensive half) ────────────────────────────
@@ -264,6 +437,22 @@ ussd_selftest() {
     chk pack-empty "$(ussd_pack '' >/dev/null 2>&1; echo $?)" "2"
     chk pack-badchar "$(ussd_pack 'tab	' >/dev/null 2>&1; echo $?)" "2"
     chk unpack-badhex "$(ussd_unpack zz >/dev/null 2>&1; echo $?)" "2"
+    # The whole table, both ways. The default alphabet assigns all 128 septets,
+    # so a decode never has to invent a character; the extension table rides
+    # behind ESC (27) and takes two septets.
+    chk pack-accent   "$(ussd_pack 'è')" "04"
+    chk char-04       "$(ussd_char_of_septet 4)" "è"
+    chk char-24       "$(ussd_char_of_septet 36)" "¤"
+    chk char-40       "$(ussd_char_of_septet 64)" "¡"
+    chk char-7f       "$(ussd_char_of_septet 127)" "à"
+    chk pack-euro     "$(ussd_pack '€')" "9b32"
+    chk unpack-euro   "$(ussd_unpack 9b32)" "€"
+    chk pack-backslash "$(ussd_pack '\')" "9b17"
+    chk unpack-backslash "$(ussd_unpack 9b17)" '\'
+    chk unpack-caret  "$(ussd_unpack 1b0a)" "^"
+    chk unpack-dangling "$(ussd_unpack 1b >/dev/null 2>&1; echo $?)" "2"
+    chk pack-ext-mixed "$(ussd_pack 'a[b')" "e10d4f0c"
+    chk roundtrip-ext "$(ussd_unpack "$(ussd_pack 'a[b')")" "a[b"
 
     # 2. DCS default (TS 23.038): 0x0F for USSD.
     chk dcs-0f "$(ussd_dcs_name 0x0F)" "GSM 7-bit default alphabet"
@@ -292,6 +481,19 @@ ussd_selftest() {
     chk mmi-deactivate "$(fld "$out" action)" "deactivate"
     out=$(ussd_mmi_parse '*#06#')
     chk mmi-imei "$(fld "$out" service)" "IMEI request (*#06#)"
+    # *43# -- the way call waiting is switched on -- has no SI, and TS 22.030
+    # §5.3 admits the SI-less activate form just as it admits #SC# and ##SC#.
+    out=$(ussd_mmi_parse '*43#')
+    chk mmi-activate-noparam "$(fld "$out" action)" "activate"
+    chk mmi-noparam-empty    "$(fld "$out" parameter)" ""
+    chk mmi-noparam-note     "$([[ -n "$(fld "$out" note)" ]] && echo yes)" "yes"
+    out=$(ussd_mmi_parse '**21*+4917112345678*20#')
+    chk mmi-sia      "$(fld "$out" sia)" "20"
+    chk mmi-sia-param "$(fld "$out" parameter)" "+4917112345678"
+    out=$(ussd_mmi_parse '*#21*1#')
+    chk mmi-interrogate-si "$(fld "$out" parameter)" "1"
+    chk mmi-code-not-numeric "$(ussd_mmi_parse '*#abc#' >/dev/null 2>&1; echo $?)" "1"
+    chk mmi-no-service-code "$(ussd_mmi_parse '*##' >/dev/null 2>&1; echo $?)" "1"
     chk mmi-malformed "$(ussd_mmi_parse 'hello' >/dev/null 2>&1; echo $?)" "1"
     chk mmi-empty "$(ussd_mmi_parse '' >/dev/null 2>&1; echo $?)" "2"
     chk mmi-unknown-code "$(ussd_ss_name 99)" "unknown supplementary-service code"
@@ -362,10 +564,10 @@ USSD Forge — MMI/SS parsing, 7-bit packing and injection detection
 
 Usage: $0 COMMAND
   --status-tsv      module state as TSV
-  --pack <text>     GSM 7-bit default-alphabet packing
-  --unpack <hex>    decode 7-bit packed text
+  --pack <text>     GSM 7-bit default-alphabet packing, extension chars too
+  --unpack <hex> [<septets>]   decode 7-bit packed text (ESC handled)
   --build <dcs> <text>   USSD facility message (DCS + packed text)
-  --mmi <string>    parse *#...# / **...# MMI strings (TS 22.030)
+  --mmi <string>    parse *#...# / **...# MMI strings (TS 22.030): SC, SI, SIA
   --ss-codes        supplementary-service code reference
   --detect <payload>   USSD/STK injection findings
   --plan            lab USSD handoff plan
