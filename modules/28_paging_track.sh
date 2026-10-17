@@ -2187,7 +2187,12 @@ pgt_selftest() {
     chk tx-status   "$(fld "$out" status)" "blocked"
     chk tx-ready    "$(fld "$out" protocol_content_ready)" "yes"
     chk tx-no-sdr   "$(printf '%s' "$(fld "$out" requires_sdr)" | grep -ci 'usrp\|bladerf')" "1"
-    chk tx-missing  "$(pgt_tx_paging >/dev/null 2>&1; echo $?)" "0"
+    # No argument and no terminal used to return 0 and print NOTHING, which a
+    # caller cannot tell from a transmission. It is a usage error, and it has
+    # to say so out loud.
+    chk tx-missing  "$(pgt_tx_paging </dev/null >/dev/null 2>&1; echo $?)" "2"
+    chk tx-missing-says \
+        "$(pgt_tx_paging </dev/null 2>&1 >/dev/null | grep -c '^ERROR.*needs a capture path')" "1"
     chk tx-no-file  "$(pgt_tx_paging "$capdir/absent.pcap" >/dev/null 2>&1; echo $?)" "2"
     # "protocol_content_ready yes" must be EARNED: the verb has to print the
     # exact octets it would transmit. An empty built_message here is the
@@ -2335,9 +2340,20 @@ pgt_tx_paging() {
     # an explicit handoff.
     local pcap="${1:-}"
     if [[ -z "$pcap" ]]; then
-        read -rp "  pcap to replay as paging> " pcap || return 0
+        # A prompt that cannot be answered is not a success. With no terminal
+        # and no argument this used to return 0 and print nothing at all --
+        # indistinguishable from having transmitted, which is the worst of
+        # the ways to fail here because no caller can tell it happened.
+        if [[ ! -t 0 ]]; then
+            printf 'ERROR\t--paging-tx needs a capture path when stdin is not a terminal\n' >&2
+            printf 'WHY\twith no argument and no terminal there is nothing to prompt, so nothing was read and nothing was sent\n' >&2
+            return 2
+        fi
+        read -rp "  pcap to replay as paging> " pcap || {
+            printf 'ERROR\tno capture given; nothing was sent\n' >&2; return 2; }
     fi
-    [[ -n "$pcap" ]] || return 2
+    [[ -n "$pcap" ]] || {
+        printf 'ERROR\tno capture given; nothing was sent\n' >&2; return 2; }
     [[ -f "$pcap" ]] || { printf 'ERROR\tno such capture: %s\n' "$pcap" >&2; return 2; }
 
     # Default to the worked TYPE 1 example the selftest pins: a TMSI page with

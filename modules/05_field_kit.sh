@@ -325,6 +325,7 @@ fk_guard_matrix() {
 26_ss7_map|--decode-msu|00
 27_cellular_dns|--detect|/nonexistent.pcap
 28_paging_track|--detect|/nonexistent.pcap
+28_paging_track|--paging-tx|||60
 29_mac_layer|--rnti-track|/nonexistent.pcap
 32_nas_signaling|--rate|/nonexistent.pcap
 33_jamming_detect|--analyse|/nonexistent.iq
@@ -384,8 +385,13 @@ fk_guard_check() {
         # mislabel a slow-but-honest module as silent.  Default 25s.
         tmo="${tmo:-25}"
 
+        # </dev/null is not tidiness. The loop's own stdin is the matrix
+        # process substitution, so a probe that calls `read` -- every module
+        # with an interactive prompt does -- steals the NEXT ROWS of the
+        # matrix. Those rows then never run and the probe is judged on a
+        # prompt it received instead of on what it does with no input.
         local out rc
-        out=$(timeout "$tmo" env $envset "$IMSISTING_ROOT/modules/$mod.sh" "$verb" $args 2>&1); rc=$?
+        out=$(timeout "$tmo" env $envset "$IMSISTING_ROOT/modules/$mod.sh" "$verb" $args 2>&1 </dev/null); rc=$?
 
         # A killed probe is not a verdict about the module. Surface it as its
         # own status rather than folding it into honest/silent.
