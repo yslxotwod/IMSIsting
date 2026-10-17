@@ -93,7 +93,7 @@ and a testbed. Every computational half is already built and verified offline.
 
 | Capability | Module | Built today | Missing to fire |
 |---|---|---|---|
-| **Femtocell / HeNB** | `37_femtocell` | 27-bit CSG-Id codec, PCI-confusion detection, Iuh (HNBAP/RUA/RANAP), TR-069/CWMP audit | DEVICE: an HeNB you own; NET for the gateway side |
+| **Femtocell / HeNB** | `37_femtocell` | 27-bit CSG-Id codec, PCI-confusion detection, Iuh (HNBAP/RUA/RANAP), TR-069/CWMP audit, a byte-exact S1 Setup Request built and decoded against `tshark`, closed-cell detection over the real SIB1 codec, and a live subscriber window fed by GSMTAP | DEVICE: an HeNB you own; NET for the gateway side and the SCTP association |
 | **VoWiFi / ePDG** | `36_vowifi` | IKEv2/SWu 28-octet header, exchange/payload tables, EAP-AKA codec, SWu NAI and ePDG FQDN, transform classifiers | NET: an ePDG |
 | **Wi-Fi offload / LWA** | `47_wifioff` | ePDG FQDN, certificate validation, LWA config | LAB |
 | **GPRS / EDGE downgrade** | `50_gprs` | GEA0–GEA4 family, APN coding, PDP-context IEs, GEA-downgrade detector | TX: force GEA0 |
@@ -129,7 +129,7 @@ edge of what can be validated by anyone.
 | **O4 — Diameter attacks** | `11_lte_core` | S6a/S6d AIR/ULR/CLR encode-decode (316 ULR, 317 CLR, 318 AIR, 319 IDR, 320 DSR, 321 PUR) and forged-request builders. Header (RFC 6733 §3) and AVP layout (§4) checked, the AVP registry regenerated from TS 29.272 Table 7.3.1/1 (the old table was shifted from 1405: Origin-Realm is 296, not 285; Visited-PLMN-Id is 1407; ULR-Flags 1405; RAT-Type 1032 vendor 10415; RAND/XRES/AUTN/KASME are 1447-1450), the command and application tables from TS 29.230 (258 is Re-Auth, not Device-Watchdog; 268 is DER/DEA, not CCR; 272 is CCR/CCA; 282 is DPR; 16777219 is Wx, not Gx), and the result codes split between RFC 6733 §7.1 and the 3GPP codes of TS 29.272 §7.4 (AVP 298). Every registry is swept and the builders are decoded back, with Wireshark as the second implementation, by `tools/check-diameter-codec.sh` | An HSS |
 | **O2 — GTP exploitation** | `11_lte_core` | GTP-C v2 / GTP-U with extension headers, IE walk, TEID handling. Headers, message-type and IE-type registries corrected against TS 29.274 tables 6.1-1 and 8.1-1, IMSI/MSISDN read as TBCD with no count octet (§8.3, §8.11), ULI/F-TEID/RAT tables from §8.21, §8.22, §8.17, GTP-U extension headers and comprehension bits from TS 29.281 §5.2, each checked by `tools/check-gtp-codec.sh` against the clauses and pycrate | An EPC: SGW/PGW |
 | **O19 — PFCP exploitation** | `13_nr_core` | PFCP session establishment, PDR/FAR/QER/URR encode-decode. The header of TS 29.244 §7.2.2 checked (S and MP flags, the Message Length counted from the fifth octet, the message priority nibble), the message type registry regenerated from Table 7.3-1, the IE registry regenerated from Table 8.1.2-1 (the old table was shifted from 41: 56 is PDR ID, 41 Forwarding Policy, 49 PFCPSMReq-Flags, 58/59 the PFD pair, 81 URR ID), the V flag and Enterprise ID read from §8.1.2, and the grouped rule IEs of §7.5 entered. Every registry is swept and the frames are read back against pycrate by `tools/check-pfcp-codec.sh` | A UPF |
-| **5G SBA / NRF abuse** | `40_sba_pivot`, `13_nr_core` | HTTP/2 frame codec (RFC 7540), NRF discovery (TS 29.510), JWT/JOSE decode, `alg=none` and audience-confusion audit, OAuth2 abuse, NRF token forgery | A live 5GC |
+| **5G SBA / NRF abuse** | `40_sba_pivot`, `13_nr_core` | HTTP/2 frame codec (RFC 7540) with PADDED and PRIORITY read and the weight as the octet plus one (§6.3, 1-256), HPACK (RFC 7541) with the 61-row static table of Appendix A, the 257 Huffman codes of Appendix B decoded from a bit trie, the §5.1 integer and §5.2 string encodings, all four §6 representations, the dynamic table with §4.4 eviction, and the block fed across HEADERS/CONTINUATION; NRF discovery (TS 29.510), JWT/JOSE decode, `alg=none` and audience-confusion audit, OAuth2 abuse, NRF token forgery. The codec is swept by `tools/check-sba-codec.sh` against the `hpack` library and the Appendix C examples | A live 5GC |
 | **O18 — slicing escape** | `34_slicing` | S-NSSAI codec (TS 23.003 §28.4.2), SST table (TS 23.501), selection, isolation testing (reports "not determinable" rather than a false "isolated") | A real slice |
 | **O5 — SIM swapping** | `31_sim_defense` | Detection half built: port-out and posture signals, eSIM profile integrity, EF_AD decoding | **Build the offensive half**: forged port-out request construction, the carrier-portal/API abuse flow, eSIM profile-transfer and activation-code abuse, the SIM-jacking timing model |
 | **LI discovery / interception** | `42_li_probe` | X1/HI1, X2/HI2, X3/HI3 (TS 33.108), ADMF/DF2/DF3/LEMF model, interception-posture scoring, regulator reporting | **Build `--activate`, `--intercept`, `--provision-target`**: X1 warrant/provisioning construction, X2 target activation and IRI mapping, X3 delivery to the LEMF. Last hop: a real LI interface |
@@ -814,8 +814,8 @@ table called 16777219 Gx (it is Wx), 16777221 Rx (Zh), 16777236 S6a (Rx) and
 16777252 SLg (S13/S13'); the 3GPP result codes were looked up in the base
 registry (5001 read as DIAMETER_AVP_UNSUPPORTED instead of User-Unknown);
 Cancel-Location carried Cancellation-Type as DSR-Flags (1421); and a malformed
-AVP stream printed an error while the verb still exited 0. What remains in
-Phase 7 is the SBA half.
+AVP stream printed an error while the verb still exited 0. The SBA half is
+checked as of the SBA pass.
 
 The PFCP half of `13_nr_core` is checked as of the PFCP pass:
 `tools/check-pfcp-codec.sh` builds every message from TS 29.244 §7.2.2 and
@@ -826,6 +826,26 @@ header and dropped every IE on the floor), its IE table was shifted from 41
 onward, and its three decoder verbs (`--decode-pfcp`, `--decode-ngap`,
 `--decode-nas-5gs`) answered any refusal with "must be an even number of hex
 digits", hiding both the real error and the fields they had already read.
+
+The SBA half of `40_sba_pivot` is checked as of the SBA pass. The module spoke
+HTTP/2 frames and nothing inside them: a HEADERS frame printed its type and
+dropped the block, so a capture gave the frame count and never the `:path`
+that names the service or the authorization that says whose token it carries.
+HPACK is now the codec: the 61-row static table of RFC 7541 Appendix A, the 257
+Huffman codes of Appendix B decoded through a bit trie (the codes are written
+aligned to the LSB, which cost one bug), the §5.1 integer and §5.2 string
+encodings with the H bit, all four §6 representations, and the dynamic table
+with the §4.4 eviction a block needs to stay in sync with the peer. Frame side,
+PADDED and PRIORITY are read (RFC 7540 §6.2, §6.10) and the weight is the octet
+plus one, 1-256 (§6.3). `tools/check-sba-codec.sh` drives the module from clause
+encoders, compares with the `hpack` library on the same block and with the
+Appendix C examples, and catches six defects put back into a scratch copy: the
+Huffman bits read from the MSB, index 61 unreachable, the dynamic entry
+inserted at the tail, a Huffman string read as identity, the frame padding left
+inside the block, and a never-indexed entry entered into the table anyway.
+The two real defects it found were the missing §4.4 eviction (90 entries of 99
+octets left 90 in the table where the library keeps 41) and the weight mask
+that turned a weight of 256 into 0.
 
 **Phase 8 — interconnect.** `26_ss7_map` (SS7 flows, GRX, roaming).
 

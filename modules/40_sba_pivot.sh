@@ -114,7 +114,680 @@ sbap_h2_parse() {
     local sid=$(( 16#${h:10:8} & 0x7FFFFFFF ))
     printf 'length\t%d\ntype\t%d\ntype_name\t%s\nflags\t0x%02X\nstream_id\t%d\n' \
         "$len" "$type" "$(sbap_h2_name "$type")" "$flags" "$sid"
-    (( ${#h} - 18 >= len * 2 )) || printf 'truncated\ttrue (payload shorter than the declared length)\n'
+    local body="${h:18:$(( len * 2 ))}"
+    if (( ${#h} - 18 < len * 2 )); then
+        printf 'truncated\ttrue (payload shorter than the declared length)\n'
+        body="${h:18}"
+    fi
+    printf 'payload\t%s\n' "$body"
+    # RFC 7540 §6.2/§6.10: a HEADERS or CONTINUATION frame carries an HPACK
+    # header block, after the pad length and the priority fields when those
+    # flags are set.
+    if (( type == 1 || type == 9 )); then
+        local pad=0
+        if (( flags & 0x08 )); then
+            (( ${#body} >= 2 )) || { printf 'ERROR\tPADDED frame has no pad length octet\n' >&2; return 1; }
+            pad=$(( 16#${body:0:2} ))
+            printf 'pad_length\t%d\n' "$pad"
+            body="${body:2}"
+        fi
+        if (( flags & 0x20 )); then
+            (( ${#body} >= 10 )) || { printf 'ERROR\tPRIORITY fields are 5 octets\n' >&2; return 1; }
+            printf 'exclusive\t%d\ndependency\t%d\nweight\t%d\n' \
+                "$(( (16#${body:0:2} >> 7) & 1 ))" \
+                "$(( 16#${body:0:8} & 0x7FFFFFFF ))" \
+                "$(( 16#${body:8:2} + 1 ))"
+            body="${body:10}"
+        fi
+        if (( pad > 0 )); then
+            (( ${#body} >= pad * 2 )) || { printf 'ERROR\tpad length %d is longer than the frame\n' "$pad" >&2; return 1; }
+            body="${body:0:${#body}-pad*2}"
+        fi
+        sbap_hpack_decode "$body" "header" || return 1
+    fi
+    return 0
+}
+
+# ── HPACK (RFC 7541): the header block a HEADERS frame carries ──────────
+# The SBI is HTTP/2, and an HTTP/2 header list is HPACK-compressed (RFC 7541
+# §2.3, §5, §6). Without it a HEADERS frame off the wire shows neither
+# :method, :path nor authorization, so the request a service is making cannot
+# be read at all — which leaves the module able to name a frame and nothing
+# inside it.
+#
+# The static table of Appendix A, index, name, value.
+sbap_hpack_static() {
+    cat <<'EOF'
+1	:authority	
+2	:method	GET
+3	:method	POST
+4	:path	/
+5	:path	/index.html
+6	:scheme	http
+7	:scheme	https
+8	:status	200
+9	:status	204
+10	:status	206
+11	:status	304
+12	:status	400
+13	:status	404
+14	:status	500
+15	accept-charset	
+16	accept-encoding	gzip, deflate
+17	accept-language	
+18	accept-ranges	
+19	accept	
+20	access-control-allow-origin	
+21	age	
+22	allow	
+23	authorization	
+24	cache-control	
+25	content-disposition	
+26	content-encoding	
+27	content-language	
+28	content-length	
+29	content-location	
+30	content-range	
+31	content-type	
+32	cookie	
+33	date	
+34	etag	
+35	expect	
+36	expires	
+37	from	
+38	host	
+39	if-match	
+40	if-modified-since	
+41	if-none-match	
+42	if-range	
+43	if-unmodified-since	
+44	last-modified	
+45	link	
+46	location	
+47	max-forwards	
+48	proxy-authenticate	
+49	proxy-authorization	
+50	range	
+51	referer	
+52	refresh	
+53	retry-after	
+54	server	
+55	set-cookie	
+56	strict-transport-security	
+57	transfer-encoding	
+58	user-agent	
+59	vary	
+60	via	
+61	www-authenticate	
+EOF
+}
+
+# The static entry an index names, as "<name>\t<value>".
+sbap_hpack_static_name() {
+    local idx="${1:-}" i name value
+    while IFS=$'\t' read -r i name value; do
+        if (( idx == i )); then printf '%s\t%s\n' "$name" "$value"; return 0; fi
+    done < <(sbap_hpack_static)
+    return 1
+}
+
+# Appendix B: symbol, code as hex, code length in bits.
+sbap_hpack_huff_table() {
+    cat <<'EOF'
+0	1FF8	13
+1	7FFFD8	23
+2	FFFFFE2	28
+3	FFFFFE3	28
+4	FFFFFE4	28
+5	FFFFFE5	28
+6	FFFFFE6	28
+7	FFFFFE7	28
+8	FFFFFE8	28
+9	FFFFEA	24
+10	3FFFFFFC	30
+11	FFFFFE9	28
+12	FFFFFEA	28
+13	3FFFFFFD	30
+14	FFFFFEB	28
+15	FFFFFEC	28
+16	FFFFFED	28
+17	FFFFFEE	28
+18	FFFFFEF	28
+19	FFFFFF0	28
+20	FFFFFF1	28
+21	FFFFFF2	28
+22	3FFFFFFE	30
+23	FFFFFF3	28
+24	FFFFFF4	28
+25	FFFFFF5	28
+26	FFFFFF6	28
+27	FFFFFF7	28
+28	FFFFFF8	28
+29	FFFFFF9	28
+30	FFFFFFA	28
+31	FFFFFFB	28
+32	0014	6
+33	03F8	10
+34	03F9	10
+35	0FFA	12
+36	1FF9	13
+37	0015	6
+38	00F8	8
+39	07FA	11
+40	03FA	10
+41	03FB	10
+42	00F9	8
+43	07FB	11
+44	00FA	8
+45	0016	6
+46	0017	6
+47	0018	6
+48	0000	5
+49	0001	5
+50	0002	5
+51	0019	6
+52	001A	6
+53	001B	6
+54	001C	6
+55	001D	6
+56	001E	6
+57	001F	6
+58	005C	7
+59	00FB	8
+60	7FFC	15
+61	0020	6
+62	0FFB	12
+63	03FC	10
+64	1FFA	13
+65	0021	6
+66	005D	7
+67	005E	7
+68	005F	7
+69	0060	7
+70	0061	7
+71	0062	7
+72	0063	7
+73	0064	7
+74	0065	7
+75	0066	7
+76	0067	7
+77	0068	7
+78	0069	7
+79	006A	7
+80	006B	7
+81	006C	7
+82	006D	7
+83	006E	7
+84	006F	7
+85	0070	7
+86	0071	7
+87	0072	7
+88	00FC	8
+89	0073	7
+90	00FD	8
+91	1FFB	13
+92	7FFF0	19
+93	1FFC	13
+94	3FFC	14
+95	0022	6
+96	7FFD	15
+97	0003	5
+98	0023	6
+99	0004	5
+100	0024	6
+101	0005	5
+102	0025	6
+103	0026	6
+104	0027	6
+105	0006	5
+106	0074	7
+107	0075	7
+108	0028	6
+109	0029	6
+110	002A	6
+111	0007	5
+112	002B	6
+113	0076	7
+114	002C	6
+115	0008	5
+116	0009	5
+117	002D	6
+118	0077	7
+119	0078	7
+120	0079	7
+121	007A	7
+122	007B	7
+123	7FFE	15
+124	07FC	11
+125	3FFD	14
+126	1FFD	13
+127	FFFFFFC	28
+128	FFFE6	20
+129	3FFFD2	22
+130	FFFE7	20
+131	FFFE8	20
+132	3FFFD3	22
+133	3FFFD4	22
+134	3FFFD5	22
+135	7FFFD9	23
+136	3FFFD6	22
+137	7FFFDA	23
+138	7FFFDB	23
+139	7FFFDC	23
+140	7FFFDD	23
+141	7FFFDE	23
+142	FFFFEB	24
+143	7FFFDF	23
+144	FFFFEC	24
+145	FFFFED	24
+146	3FFFD7	22
+147	7FFFE0	23
+148	FFFFEE	24
+149	7FFFE1	23
+150	7FFFE2	23
+151	7FFFE3	23
+152	7FFFE4	23
+153	1FFFDC	21
+154	3FFFD8	22
+155	7FFFE5	23
+156	3FFFD9	22
+157	7FFFE6	23
+158	7FFFE7	23
+159	FFFFEF	24
+160	3FFFDA	22
+161	1FFFDD	21
+162	FFFE9	20
+163	3FFFDB	22
+164	3FFFDC	22
+165	7FFFE8	23
+166	7FFFE9	23
+167	1FFFDE	21
+168	7FFFEA	23
+169	3FFFDD	22
+170	3FFFDE	22
+171	FFFFF0	24
+172	1FFFDF	21
+173	3FFFDF	22
+174	7FFFEB	23
+175	7FFFEC	23
+176	1FFFE0	21
+177	1FFFE1	21
+178	3FFFE0	22
+179	1FFFE2	21
+180	7FFFED	23
+181	3FFFE1	22
+182	7FFFEE	23
+183	7FFFEF	23
+184	FFFEA	20
+185	3FFFE2	22
+186	3FFFE3	22
+187	3FFFE4	22
+188	7FFFF0	23
+189	3FFFE5	22
+190	3FFFE6	22
+191	7FFFF1	23
+192	3FFFFE0	26
+193	3FFFFE1	26
+194	FFFEB	20
+195	7FFF1	19
+196	3FFFE7	22
+197	7FFFF2	23
+198	3FFFE8	22
+199	1FFFFEC	25
+200	3FFFFE2	26
+201	3FFFFE3	26
+202	3FFFFE4	26
+203	7FFFFDE	27
+204	7FFFFDF	27
+205	3FFFFE5	26
+206	FFFFF1	24
+207	1FFFFED	25
+208	7FFF2	19
+209	1FFFE3	21
+210	3FFFFE6	26
+211	7FFFFE0	27
+212	7FFFFE1	27
+213	3FFFFE7	26
+214	7FFFFE2	27
+215	FFFFF2	24
+216	1FFFE4	21
+217	1FFFE5	21
+218	3FFFFE8	26
+219	3FFFFE9	26
+220	FFFFFFD	28
+221	7FFFFE3	27
+222	7FFFFE4	27
+223	7FFFFE5	27
+224	FFFEC	20
+225	FFFFF3	24
+226	FFFED	20
+227	1FFFE6	21
+228	3FFFE9	22
+229	1FFFE7	21
+230	1FFFE8	21
+231	7FFFF3	23
+232	3FFFEA	22
+233	3FFFEB	22
+234	1FFFFEE	25
+235	1FFFFEF	25
+236	FFFFF4	24
+237	FFFFF5	24
+238	3FFFFEA	26
+239	7FFFF4	23
+240	3FFFFEB	26
+241	7FFFFE6	27
+242	3FFFFEC	26
+243	3FFFFED	26
+244	7FFFFE7	27
+245	7FFFFE8	27
+246	7FFFFE9	27
+247	7FFFFEA	27
+248	7FFFFEB	27
+249	FFFFFFE	28
+250	7FFFFEC	27
+251	7FFFFED	27
+252	7FFFFEE	27
+253	7FFFFEF	27
+254	7FFFFF0	27
+255	3FFFFEE	26
+256	3FFFFFFF	30
+EOF
+}
+
+declare -gA SBAP_HUFF_TRIE=()
+# A Huffman code is prefix free, so a table keyed by "<length>:<bits>" is
+# enough to decode: walk bits until the key exists, which is the symbol.
+sbap_hpack_huff_init() {
+    (( ${#SBAP_HUFF_TRIE[@]} > 0 )) && return 0
+    # Appendix B prints each code as hex aligned to the LSB, so the code is
+    # the low <len> bits of that number, not its first <len> bits.
+    local sym hx len bits v k
+    while IFS=$'\t' read -r sym hx len; do
+        v=$(( 16#$hx ))
+        bits=""
+        for (( k = len - 1; k >= 0; k-- )); do
+            if (( (v >> k) & 1 )); then bits+="1"; else bits+="0"; fi
+        done
+        SBAP_HUFF_TRIE["${len}:${bits}"]=$sym
+    done < <(sbap_hpack_huff_table)
+}
+
+# The first n bits of a hex string, as a string of 0 and 1.
+sbap_hpack_hex_bits() {
+    local hz="${1:-}" n="${2:-0}" i b out=""
+    local map=(0000 0001 0010 0011 0100 0101 0110 0111 1000 1001 1010 1011 1100 1101 1110 1111)
+    for (( i = 0; i < ${#hz}; i++ )); do
+        b=$(( 16#${hz:i:1} ))
+        out+="${map[b]}"
+    done
+    printf '%s' "${out:0:n}"
+}
+
+# Hex to text. The SBI's header names and values are ASCII; a NUL cannot be
+# carried by a shell string, so it is reported rather than silently dropped.
+sbap_hpack_text() {
+    local hz="${1:-}" i out="" ch
+    for (( i = 0; i < ${#hz}; i += 2 )); do
+        if (( 16#${hz:i:2} == 0 )); then
+            printf 'ERROR\tHPACK value carries a NUL octet, which this shell cannot hold\n' >&2
+            return 1
+        fi
+        printf -v ch "\\$(printf '%03o' "$(( 16#${hz:i:2} ))")"
+        out+="$ch"
+    done
+    printf '%s' "$out"
+}
+
+# §5.2. At the end, at most seven bits of EOS prefix are allowed as padding.
+sbap_hpack_huff_decode() {
+    local hz="${1:-}" bits acc="" out="" sym i total ch
+    sbap_hpack_huff_init
+    bits=$(sbap_hpack_hex_bits "$hz" 999999)
+    total=${#bits}
+    (( total > 0 )) || { printf ''; return 0; }
+    for (( i = 0; i < total; i++ )); do
+        acc+="${bits:i:1}"
+        if [[ -n "${SBAP_HUFF_TRIE["${#acc}:${acc}"]+x}" ]]; then
+            sym=${SBAP_HUFF_TRIE["${#acc}:${acc}"]}
+            if (( sym == 256 )); then
+                printf 'ERROR\tHPACK Huffman data carries the EOS symbol (256)\n' >&2
+                return 1
+            fi
+            printf -v ch "\\$(printf '%03o' "$sym")"
+            out+="$ch"
+            acc=""
+        fi
+        if (( ${#acc} > 30 )); then
+            printf 'ERROR\tHPACK Huffman code is longer than the 30 bits of the table\n' >&2
+            return 1
+        fi
+    done
+    if (( ${#acc} > 7 )); then
+        printf 'ERROR\tHPACK Huffman data ends in %s bits, which is not the EOS prefix\n' "${#acc}" >&2
+        return 1
+    fi
+    [[ "$acc" =~ ^1*$ ]] || { printf 'ERROR\tHPACK Huffman padding is not the ones of the EOS prefix\n' >&2; return 1; }
+    printf '%s' "$out"
+}
+
+# §5.1: an integer with an N-bit prefix. Prints "<value> <octets used>".
+sbap_hpack_uint() {
+    local hz="${1:-}" off="${2:-0}" pb="${3:-0}" b v used=1 m=0
+    local max=$(( (1 << pb) - 1 ))
+    (( (off + 1) * 2 <= ${#hz} )) || { printf 'ERROR\tHPACK block ends inside an integer\n' >&2; return 1; }
+    b=$(( 16#${hz:$((off*2)):2} ))
+    v=$(( b & max ))
+    if (( v != max )); then
+        printf '%s %s\n' "$v" "$used"
+        return 0
+    fi
+    while :; do
+        (( (off + used + 1) * 2 <= ${#hz} )) || { printf 'ERROR\tHPACK integer runs past the block\n' >&2; return 1; }
+        b=$(( 16#${hz:$(((off + used)*2)):2} ))
+        v=$(( v + ((b & 0x7F) << m) ))
+        used=$(( used + 1 ))
+        m=$(( m + 7 ))
+        (( b & 0x80 )) || break
+        if (( m > 28 )); then
+            printf 'ERROR\tHPACK integer is longer than 28 bits\n' >&2
+            return 1
+        fi
+    done
+    printf '%s %s\n' "$v" "$used"
+}
+
+# §5.2: a string literal. Prints "<huffman> <octets as hex> <octets used>".
+sbap_hpack_string() {
+    local hz="${1:-}" off="${2:-0}" b huff r len used
+    (( (off + 1) * 2 <= ${#hz} )) || { printf 'ERROR\tHPACK block ends inside a string\n' >&2; return 1; }
+    b=$(( 16#${hz:$((off*2)):2} ))
+    huff=$(( (b >> 7) & 1 ))
+    r=$(sbap_hpack_uint "$hz" "$off" 7) || return 1
+    len=${r% *}
+    used=${r#* }
+    if (( off + used + len > ${#hz} / 2 )); then
+        printf 'ERROR\tHPACK string claims %s octets and the block carries %s\n' \
+            "$len" "$(( ${#hz} / 2 - off - used ))" >&2
+        return 1
+    fi
+    printf '%s %s %s\n' "$huff" "${hz:$(((off + used)*2)):$((len*2))}" "$(( used + len ))"
+}
+
+# §6: decode a header block. Prints <prefix>.N.<field> per header plus the
+# table state, so the same block can be read twice (a dynamic table entry
+# refers to an earlier block and must be decoded in order).
+declare -ga SBAP_HPACK_NAME=() SBAP_HPACK_VALUE=()
+declare -g  SBAP_HPACK_SIZE=0 SBAP_HPACK_MAX=4096 SBAP_HPACK_N=0
+
+sbap_hpack_reset() {
+    SBAP_HPACK_NAME=()
+    SBAP_HPACK_VALUE=()
+    SBAP_HPACK_SIZE=0
+    SBAP_HPACK_MAX=4096
+    SBAP_HPACK_N=0
+}
+
+# §6: decode one header block into the shared dynamic table. A block of a
+# request is not the whole story — the next request on the connection refers
+# back to entries this one inserted, which is why the table is module state
+# and not a local.
+sbap_hpack_block() {
+    local hz; hz=$(sbap_norm_hex "${1:-}")
+    sbap_is_hex "$hz" || { printf 'ERROR\tnot valid hex\n' >&2; return 2; }
+    local prefix="${2:-hpack}"
+    local off=0 total n
+    total=$(( ${#hz} / 2 ))
+    n=$SBAP_HPACK_N
+    while (( off < total )); do
+        local b repr pb r used idx name value size sr huff hexv dn
+        b=$(( 16#${hz:$((off*2)):2} ))
+        if (( (b & 0x80) != 0 )); then
+            r=$(sbap_hpack_uint "$hz" "$off" 7) || return 1
+            idx=${r% *}; used=${r#* }
+            if (( idx == 0 )); then
+                printf 'ERROR\tHPACK index 0 is not a header field (a static index is 1..61)\n' >&2
+                return 1
+            fi
+            if (( idx <= 61 )); then
+                IFS=$'\t' read -r name value < <(sbap_hpack_static_name "$idx")
+            else
+                dn=$(( idx - 61 ))
+                if (( dn > ${#SBAP_HPACK_NAME[@]} )); then
+                    printf 'ERROR\tHPACK index %s is past the static table and the %s dynamic entries; feed the earlier blocks first\n' \
+                        "$idx" "${#SBAP_HPACK_NAME[@]}" >&2
+                    return 1
+                fi
+                name="${SBAP_HPACK_NAME[dn-1]}"
+                value="${SBAP_HPACK_VALUE[dn-1]}"
+            fi
+            printf '%s.%d.repr\tindexed\n' "$prefix" "$n"
+            printf '%s.%d.index\t%s\n' "$prefix" "$n" "$idx"
+            printf '%s.%d.name\t%s\n' "$prefix" "$n" "$(sbap_sanitize "$name")"
+            printf '%s.%d.value\t%s\n' "$prefix" "$n" "$(sbap_sanitize "$value")"
+            off=$(( off + used ))
+            n=$(( n + 1 ))
+            continue
+        fi
+        if (( (b & 0x40) != 0 )); then
+            repr=with-indexing; pb=6
+        elif (( (b & 0x20) != 0 )); then
+            repr=size-update; pb=5
+        elif (( (b & 0x10) != 0 )); then
+            repr=never-indexed; pb=4
+        else
+            repr=without-indexing; pb=4
+        fi
+        if [[ "$repr" == size-update ]]; then
+            r=$(sbap_hpack_uint "$hz" "$off" 5) || return 1
+            size=${r% *}; used=${r#* }
+            SBAP_HPACK_MAX=$size
+            while (( SBAP_HPACK_SIZE > SBAP_HPACK_MAX && ${#SBAP_HPACK_NAME[@]} > 0 )); do
+                local last=$(( ${#SBAP_HPACK_NAME[@]} - 1 ))
+                SBAP_HPACK_SIZE=$(( SBAP_HPACK_SIZE - ${#SBAP_HPACK_NAME[last]} - ${#SBAP_HPACK_VALUE[last]} - 32 ))
+                unset 'SBAP_HPACK_NAME[last]' 'SBAP_HPACK_VALUE[last]'
+                SBAP_HPACK_NAME=("${SBAP_HPACK_NAME[@]}")
+                SBAP_HPACK_VALUE=("${SBAP_HPACK_VALUE[@]}")
+            done
+            printf '%s.%d.repr\tsize-update\n' "$prefix" "$n"
+            printf '%s.%d.max_size\t%s\n' "$prefix" "$n" "$SBAP_HPACK_MAX"
+            off=$(( off + used ))
+            n=$(( n + 1 ))
+            continue
+        fi
+        r=$(sbap_hpack_uint "$hz" "$off" "$pb") || return 1
+        idx=${r% *}; used=${r#* }
+        if (( idx == 0 )); then
+            sr=$(sbap_hpack_string "$hz" "$(( off + used ))") || return 1
+            huff=${sr%% *}; sr=${sr#* }
+            hexv=${sr%% *}; used=$(( used + ${sr#* } ))
+            if (( huff == 1 )); then
+                name=$(sbap_hpack_huff_decode "$hexv") || return 1
+            else
+                name=$(sbap_hpack_text "$hexv") || return 1
+            fi
+        else
+            if (( idx <= 61 )); then
+                IFS=$'\t' read -r name _ < <(sbap_hpack_static_name "$idx")
+            else
+                dn=$(( idx - 61 ))
+                if (( dn > ${#SBAP_HPACK_NAME[@]} )); then
+                    printf 'ERROR\tHPACK name index %s is past the tables; a literal name is index 0\n' "$idx" >&2
+                    return 1
+                fi
+                name="${SBAP_HPACK_NAME[dn-1]}"
+            fi
+        fi
+        sr=$(sbap_hpack_string "$hz" "$(( off + used ))") || return 1
+        huff=${sr%% *}; sr=${sr#* }
+        hexv=${sr%% *}; used=$(( used + ${sr#* } ))
+        if (( huff == 1 )); then
+            value=$(sbap_hpack_huff_decode "$hexv") || return 1
+        else
+            value=$(sbap_hpack_text "$hexv") || return 1
+        fi
+        printf '%s.%d.repr\t%s\n' "$prefix" "$n" "$repr"
+        printf '%s.%d.name\t%s\n' "$prefix" "$n" "$(sbap_sanitize "$name")"
+        printf '%s.%d.value\t%s\n' "$prefix" "$n" "$(sbap_sanitize "$value")"
+        if [[ "$repr" == with-indexing ]]; then
+            SBAP_HPACK_NAME=("$name" "${SBAP_HPACK_NAME[@]}")
+            SBAP_HPACK_VALUE=("$value" "${SBAP_HPACK_VALUE[@]}")
+            SBAP_HPACK_SIZE=$(( SBAP_HPACK_SIZE + ${#name} + ${#value} + 32 ))
+            # §4.4: an insertion that passes the limit evicts from the back
+            # (the oldest entry) until it fits; an entry larger than the table
+            # evicts every other entry and is not stored itself.
+            while (( SBAP_HPACK_SIZE > SBAP_HPACK_MAX && ${#SBAP_HPACK_NAME[@]} > 0 )); do
+                local last=$(( ${#SBAP_HPACK_NAME[@]} - 1 ))
+                SBAP_HPACK_SIZE=$(( SBAP_HPACK_SIZE - ${#SBAP_HPACK_NAME[last]} - ${#SBAP_HPACK_VALUE[last]} - 32 ))
+                unset 'SBAP_HPACK_NAME[last]' 'SBAP_HPACK_VALUE[last]'
+                SBAP_HPACK_NAME=("${SBAP_HPACK_NAME[@]}")
+                SBAP_HPACK_VALUE=("${SBAP_HPACK_VALUE[@]}")
+            done
+        fi
+        off=$(( off + used ))
+        n=$(( n + 1 ))
+    done
+    SBAP_HPACK_N=$n
+    return 0
+}
+
+sbap_hpack_state() {
+    local prefix="${1:-hpack}"
+    printf '%s.count\t%s\n' "$prefix" "$SBAP_HPACK_N"
+    printf '%s.dynamic_entries\t%s\n' "$prefix" "${#SBAP_HPACK_NAME[@]}"
+    printf '%s.table_size\t%s\n' "$prefix" "$SBAP_HPACK_SIZE"
+    printf '%s.max_size\t%s\n' "$prefix" "$SBAP_HPACK_MAX"
+}
+
+# One header block on its own.
+sbap_hpack_decode() {
+    sbap_hpack_reset
+    local rc=0
+    sbap_hpack_block "${1:-}" "${2:-hpack}" || rc=$?
+    (( rc == 0 )) || return "$rc"
+    sbap_hpack_state "${2:-hpack}"
+    return 0
+}
+
+# A run of header blocks on one connection: the dynamic table carries over.
+sbap_hpack_decode_seq() {
+    local prefix="${1:-hpack}"
+    shift || true
+    (( $# > 0 )) || { printf 'ERROR\tusage: --hpack-seq <block> [<block> ...]\n' >&2; return 2; }
+    sbap_hpack_reset
+    local blk
+    local rc=0
+    for blk in "$@"; do
+        sbap_hpack_block "$blk" "$prefix" || { rc=$?; return "$rc"; }
+    done
+    sbap_hpack_state "$prefix"
+    return 0
+}
+
+# --hpack <block hex> [<block hex> ...]: one header block, or the sequence a
+# connection sends (a later block may index entries a earlier one inserted).
+sbap_cmd_hpack() {
+    [[ -n "${1:-}" ]] || { printf 'usage: --hpack <header-block hex> [<more blocks>]\n' >&2; return 2; }
+    sbap_hpack_decode_seq hpack "$@"
 }
 
 # ── SETTINGS parameters (RFC 7540 §6.5.2) ───────────────────────────────
@@ -398,6 +1071,54 @@ sbap_selftest() {
     chk rapid-rst     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="reset"{n++} END{print n+0}')" "3"
     chk rapid-bad     "$(sbap_rapid_reset 0 >/dev/null 2>&1; echo $?)" "2"
 
+    # 8. HPACK (RFC 7541): the static table, the indexed and literal forms,
+    # the Huffman code and the dynamic table the appendix examples exercise.
+    local hp
+    hp=$(sbap_hpack_decode 828684410f7777772e6578616d706c652e636f6d h)
+    chk hpack-c31-method "$(fld "$hp" h.0.value)" "GET"
+    chk hpack-c31-auth   "$(fld "$hp" h.3.value)" "www.example.com"
+    chk hpack-c31-size   "$(fld "$hp" h.table_size)" "57"
+    chk hpack-c31-count  "$(fld "$hp" h.count)" "4"
+    # the indexed form alone: 82 is :method GET in the static table.
+    hp=$(sbap_hpack_decode 82 h)
+    chk hpack-indexed-name "$(fld "$hp" h.0.name)" ":method"
+    chk hpack-indexed-value "$(fld "$hp" h.0.value)" "GET"
+    # C.2.2 literal without indexing, C.2.3 never indexed.
+    hp=$(sbap_hpack_decode 040c2f73616d706c652f70617468 h)
+    chk hpack-c22 "$(fld "$hp" h.0.name):$(fld "$hp" h.0.value)" ":path:/sample/path"
+    chk hpack-c22-dyn "$(fld "$hp" h.dynamic_entries)" "0"
+    hp=$(sbap_hpack_decode 100870617373776f726406736563726574 h)
+    chk hpack-c23 "$(fld "$hp" h.0.name):$(fld "$hp" h.0.value)" "password:secret"
+    chk hpack-c23-dyn "$(fld "$hp" h.dynamic_entries)" "0"
+    # C.4.1 the same request with the authority Huffman-coded.
+    hp=$(sbap_hpack_decode 828684418cf1e3c2e5f23a6ba0ab90f4ff h)
+    chk hpack-c41 "$(fld "$hp" h.3.value)" "www.example.com"
+    # C.3.2 indexes the entry C.3.1 added, so the two blocks are one sequence.
+    hp=$(sbap_hpack_decode_seq h 828684410f7777772e6578616d706c652e636f6d 828684be58086e6f2d6361636865)
+    chk hpack-c32-index "$(fld "$hp" h.7.index)" "62"
+    chk hpack-c32-auth  "$(fld "$hp" h.7.value)" "www.example.com"
+    chk hpack-c32-cache "$(fld "$hp" h.8.value)" "no-cache"
+    chk hpack-c32-size  "$(fld "$hp" h.table_size)" "110"
+    # a dynamic table size update (C.3.3 style) and an index past the table.
+    hp=$(sbap_hpack_decode 3fe11f h)
+    chk hpack-size-update "$(fld "$hp" h.0.max_size)" "4096"
+    chk hpack-miss "$(sbap_hpack_decode_seq h be >/dev/null 2>&1; echo $?)" "1"
+    # a bad Huffman padding and a zero index are refused, not decoded.
+    chk hpack-pad "$(sbap_hpack_decode_seq h 418cf1e3c2e5f23a6ba0ab90f4 >/dev/null 2>&1; echo $?)" "1"
+    chk hpack-zero-index "$(sbap_hpack_decode_seq h 80 >/dev/null 2>&1; echo $?)" "1"
+    chk hpack-badhex "$(sbap_hpack_decode_seq h zz >/dev/null 2>&1; echo $?)" "2"
+    # a HEADERS frame hands its header block to HPACK, padding and priority
+    # fields stripped first.
+    hp=$(sbap_h2_parse 000014010500000001828684410f7777772e6578616d706c652e636f6d)
+    chk h2-headers-block "$(fld "$hp" header.3.value)" "www.example.com"
+    hp=$(sbap_h2_parse 000017010d0000000102828684410f7777772e6578616d706c652e636f6d0000)
+    chk h2-padded-pad "$(fld "$hp" pad_length)" "2"
+    hp=$(sbap_h2_parse 000019012500000001000000010a828684410f7777772e6578616d706c652e636f6d)
+    chk h2-priority-weight "$(fld "$hp" weight)" "11"
+    # RFC 7540 §6.3: weight is the octet plus one, so 0xff reads 256, not 0.
+    hp=$(sbap_h2_parse 00001901250000000100000001ff828684410f7777772e6578616d706c652e636f6d)
+    chk h2-priority-weight-256 "$(fld "$hp" weight)" "256"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -448,6 +1169,7 @@ sbap_cli_main() {
         --h2-build)    sbap_h2_build "${1:-0}" "${2:-0}" "${3:-0}" "${4:-}" ;;
         --h2-parse)    sbap_h2_parse "${1:-}" ;;
         --settings)    sbap_settings_parse "${1:-}" ;;
+        --hpack)       sbap_cmd_hpack "$@" ;;
         --nrf)         sbap_nrf_discovery "${1:-UDM}" "${2:-AMF}" ;;
         --nf-paths)    sbap_nf_paths ;;
         --jwt)         sbap_jwt_decode "${1:-}" ;;
@@ -468,6 +1190,7 @@ Usage: $0 COMMAND
   --h2-build <t> <flags> <sid> <payload_hex>
   --h2-parse <hex>      decode a 9-octet HTTP/2 header and length
   --settings <hex>      decode a SETTINGS payload
+  --hpack <hex>...      decode HPACK header blocks (RFC 7541)
   --nrf <target> [requester]   NRF discovery request (TS 29.510)
   --nf-paths            SBI service path reference
   --jwt <token>         decode a JWT header and payload

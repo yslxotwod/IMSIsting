@@ -16121,7 +16121,7 @@ static ModuleSubmenuEntry sbap_entries[] = {
       "--nf-paths:NF Paths|--nrf|--token-pivot:Token Pivot" },
     { "HTTP/2",
       "network-transmit-receive-symbolic",
-      "--h2-parse:Parse HTTP/2|--h2-build:Build HTTP/2|--h2-types:HTTP/2 Types" },
+      "--h2-parse:Parse HTTP/2|--h2-build:Build HTTP/2|--h2-types:HTTP/2 Types|--hpack:HPACK Decode" },
     { "JWT",
       "channel-secure-symbolic",
       "--jwt|--jwt-audit:JWT Audit" },
