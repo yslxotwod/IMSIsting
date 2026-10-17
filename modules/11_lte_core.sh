@@ -690,9 +690,15 @@ lcore_gtpc_parse_header() {
     printf 'flags\t%s\n' "$flags"
     printf 'flag_P\t%s\n' "$pt"
     printf 'flag_T\t%s\n' "$tbit"
+    printf 'flag_MP\t%s\n' "$(( (fv >> 2) & 0x01 ))"
+    printf 'spare_bits\t%s\n' "$(( fv & 0x03 ))"
     printf 'message_type\t%s\n' "$((16#$mtype))"
     printf 'message_name\t%s\n' "$(lcore_gtpc_msg_name "$((16#$mtype))")"
     printf 'length\t%s\n' "$len"
+    local frame_after=$(( ${#hex} / 2 - 4 ))
+    printf 'length_agrees\t%s\n' "$([[ $len -eq $frame_after ]] && echo yes || echo no)"
+    (( len == frame_after )) || printf 'note\tlength field says %d octets after it, the frame carries %d\n' "$len" "$frame_after"
+    (( ver == 2 )) || { printf 'ERROR\tGTP-C header says version %d; TS 29.274 §5.1 fixes the version at 2\n' "$ver" >&2; return 1; }
 
     local off=4
     if (( tbit == 1 )); then
@@ -709,7 +715,16 @@ lcore_gtpc_parse_header() {
     local b=$(( off * 2 ))
     local seq=$(( 16#${hex:$b:2} * 65536 + 16#${hex:$((b+2)):2} * 256 + 16#${hex:$((b+4)):2} ))
     printf 'sequence_number\t%s\n' "$seq"
-    printf 'spare\t%s\n' "${hex:$((b+6)):2}"
+    if (( (fv >> 2) & 0x01 )); then
+        # TS 29.274 Figure 5.1-2: with MP=1 the fourth trailer octet is the
+        # Message Priority in bits 8-5 and spare in bits 4-1.
+        local tr=$(( 16#${hex:$((b+6)):2} ))
+        printf 'spare\tnone (bits 4-1 carry spare %d)\n' "$(( tr & 0x0F ))"
+        printf 'message_priority\t%s\n' "$(( (tr >> 4) & 0x0F ))"
+    else
+        printf 'spare\t%s\n' "${hex:$((b+6)):2}"
+        printf 'message_priority\tnone\n'
+    fi
     printf 'payload\t%s\n' "${hex:$((b+8))}"
     printf 'payload_octets\t%s\n' "$(( ${#hex} / 2 - off - 4 ))"
     return 0
@@ -717,51 +732,112 @@ lcore_gtpc_parse_header() {
 
 # Message Type — TS 29.274 Table 6.1-1.
 lcore_gtpc_msg_name() {
-    case "${1:-}" in
-        1)   echo "Echo Request" ;;
-        2)   echo "Echo Response" ;;
-        3)   echo "Version Not Supported Indication" ;;
-        32)  echo "Create Session Request" ;;
-        33)  echo "Create Session Response" ;;
-        34)  echo "Modify Bearer Request" ;;
-        35)  echo "Modify Bearer Response" ;;
-        36)  echo "Delete Session Request" ;;
-        37)  echo "Delete Session Response" ;;
-        38)  echo "Change Notification Request" ;;
-        39)  echo "Change Notification Response" ;;
-        64)  echo "Modify Bearer Command" ;;
-        65)  echo "Modify Bearer Failure Indication" ;;
-        66)  echo "Delete Bearer Command" ;;
-        67)  echo "Delete Bearer Failure Indication" ;;
-        68)  echo "Bearer Resource Command" ;;
-        69)  echo "Bearer Resource Failure Indication" ;;
-        70)  echo "Downlink Data Notification Failure Indication" ;;
-        71)  echo "Trace Session Activation" ;;
-        72)  echo "Trace Session Deactivation" ;;
-        73)  echo "Stop Paging Indication" ;;
-        95)  echo "Create Bearer Request" ;;
-        96)  echo "Create Bearer Response" ;;
-        97)  echo "Update Bearer Request" ;;
-        98)  echo "Update Bearer Response" ;;
-        99)  echo "Delete Bearer Request" ;;
-        100) echo "Delete Bearer Response" ;;
-        101) echo "Delete PDN Connection Set Request" ;;
-        102) echo "Delete PDN Connection Set Response" ;;
-        128) echo "Downlink Data Notification" ;;
-        129) echo "Downlink Data Notification Ack" ;;
-        130) echo "Search Bearer Request" ;;
-        131) echo "Search Bearer Response" ;;
-        160) echo "Create Forwarding Tunnel Request" ;;
-        161) echo "Create Forwarding Tunnel Response" ;;
-        162) echo "Suspend Notification" ;;
-        163) echo "Suspend Acknowledge" ;;
-        164) echo "Resume Notification" ;;
-        165) echo "Resume Acknowledge" ;;
-        170) echo "Create Indirect Data Forwarding Tunnel Request" ;;
-        171) echo "Create Indirect Data Forwarding Tunnel Response" ;;
-        176) echo "Release Access Bearers Request" ;;
-        177) echo "Release Access Bearers Response" ;;
-        *)   echo "unknown/extension" ;;
+    # Message Type — TS 29.274 Table 6.1-1. The argument is decimal.
+    # The Identification and Context messages at 128-132 are the ones a
+    # Mobility Management entity uses on S10/S16, not bearer messages.
+    local t="${1:-0}"
+    [[ "$t" =~ ^[0-9]+$ ]] || { echo "unknown/extension message type"; return 0; }
+    if (( t >= 4 && t <= 16 )); then echo "Reserved for the S101 interface (TS 29.276)"; return 0; fi
+    if (( t >= 17 && t <= 24 )); then echo "Reserved for the S121 interface (TS 29.276)"; return 0; fi
+    if (( t >= 25 && t <= 31 )); then echo "Reserved for the Sv interface (TS 29.280)"; return 0; fi
+    if (( t >= 42 && t <= 63 )); then echo "For future use"; return 0; fi
+    if (( t >= 74 && t <= 94 )); then echo "For future use"; return 0; fi
+    if (( t >= 105 && t <= 127 )); then echo "For future use"; return 0; fi
+    if (( t >= 142 && t <= 148 )); then echo "For future use"; return 0; fi
+    if (( t >= 172 && t <= 175 )); then echo "For future use"; return 0; fi
+    if (( t == 178 )); then echo "Reserved (allocated in an earlier version of TS 29.274)"; return 0; fi
+    if (( t >= 181 && t <= 199 )); then echo "For future use"; return 0; fi
+    if (( t >= 202 && t <= 210 )); then echo "For future use"; return 0; fi
+    if (( t >= 213 && t <= 230 )); then echo "For future use"; return 0; fi
+    if (( t >= 237 && t <= 239 )); then echo "For future use"; return 0; fi
+    if (( t >= 240 && t <= 247 )); then echo "Reserved for the Sv interface (TS 29.280)"; return 0; fi
+    if (( t >= 248 && t <= 255 )); then echo "For future use"; return 0; fi
+    case "$t" in
+        1)	echo "Echo Request" ;;
+        2)	echo "Echo Response" ;;
+        3)	echo "Version Not Supported Indication" ;;
+        32)	echo "Create Session Request" ;;
+        33)	echo "Create Session Response" ;;
+        34)	echo "Modify Bearer Request" ;;
+        35)	echo "Modify Bearer Response" ;;
+        36)	echo "Delete Session Request" ;;
+        37)	echo "Delete Session Response" ;;
+        38)	echo "Change Notification Request" ;;
+        39)	echo "Change Notification Response" ;;
+        40)	echo "Remote UE Report Notification" ;;
+        41)	echo "Remote UE Report Acknowledge" ;;
+        64)	echo "Modify Bearer Command" ;;
+        65)	echo "Modify Bearer Failure Indication" ;;
+        66)	echo "Delete Bearer Command" ;;
+        67)	echo "Delete Bearer Failure Indication" ;;
+        68)	echo "Bearer Resource Command" ;;
+        69)	echo "Bearer Resource Failure Indication" ;;
+        70)	echo "Downlink Data Notification Failure Indication" ;;
+        71)	echo "Trace Session Activation" ;;
+        72)	echo "Trace Session Deactivation" ;;
+        73)	echo "Stop Paging Indication" ;;
+        95)	echo "Create Bearer Request" ;;
+        96)	echo "Create Bearer Response" ;;
+        97)	echo "Update Bearer Request" ;;
+        98)	echo "Update Bearer Response" ;;
+        99)	echo "Delete Bearer Request" ;;
+        100)	echo "Delete Bearer Response" ;;
+        101)	echo "Delete PDN Connection Set Request" ;;
+        102)	echo "Delete PDN Connection Set Response" ;;
+        103)	echo "PGW Downlink Triggering Notification" ;;
+        104)	echo "PGW Downlink Triggering Acknowledge" ;;
+        128)	echo "Identification Request" ;;
+        129)	echo "Identification Response" ;;
+        130)	echo "Context Request" ;;
+        131)	echo "Context Response" ;;
+        132)	echo "Context Acknowledge" ;;
+        133)	echo "Forward Relocation Request" ;;
+        134)	echo "Forward Relocation Response" ;;
+        135)	echo "Forward Relocation Complete Notification" ;;
+        136)	echo "Forward Relocation Complete Acknowledge" ;;
+        137)	echo "Forward Access Context Notification" ;;
+        138)	echo "Forward Access Context Acknowledge" ;;
+        139)	echo "Relocation Cancel Request" ;;
+        140)	echo "Relocation Cancel Response" ;;
+        141)	echo "Configuration Transfer Tunnel" ;;
+        149)	echo "Detach Notification" ;;
+        150)	echo "Detach Acknowledge" ;;
+        151)	echo "CS Paging Indication" ;;
+        152)	echo "RAN Information Relay" ;;
+        153)	echo "Alert MME Notification" ;;
+        154)	echo "Alert MME Acknowledge" ;;
+        155)	echo "UE Activity Notification" ;;
+        156)	echo "UE Activity Acknowledge" ;;
+        157)	echo "ISR Status Indication" ;;
+        158)	echo "UE Registration Query Request" ;;
+        159)	echo "UE Registration Query Response" ;;
+        160)	echo "Create Forwarding Tunnel Request" ;;
+        161)	echo "Create Forwarding Tunnel Response" ;;
+        162)	echo "Suspend Notification" ;;
+        163)	echo "Suspend Acknowledge" ;;
+        164)	echo "Resume Notification" ;;
+        165)	echo "Resume Acknowledge" ;;
+        166)	echo "Create Indirect Data Forwarding Tunnel Request" ;;
+        167)	echo "Create Indirect Data Forwarding Tunnel Response" ;;
+        168)	echo "Delete Indirect Data Forwarding Tunnel Request" ;;
+        169)	echo "Delete Indirect Data Forwarding Tunnel Response" ;;
+        170)	echo "Release Access Bearers Request" ;;
+        171)	echo "Release Access Bearers Response" ;;
+        176)	echo "Downlink Data Notification" ;;
+        177)	echo "Downlink Data Notification Acknowledge" ;;
+        179)	echo "PGW Restart Notification" ;;
+        180)	echo "PGW Restart Notification Acknowledge" ;;
+        200)	echo "Update PDN Connection Set Request" ;;
+        201)	echo "Update PDN Connection Set Response" ;;
+        211)	echo "Modify Access Bearers Request" ;;
+        212)	echo "Modify Access Bearers Response" ;;
+        231)	echo "MBMS Session Start Request" ;;
+        232)	echo "MBMS Session Start Response" ;;
+        233)	echo "MBMS Session Update Request" ;;
+        234)	echo "MBMS Session Update Response" ;;
+        235)	echo "MBMS Session Stop Request" ;;
+        236)	echo "MBMS Session Stop Response" ;;
+        *)   echo "unknown/extension message type" ;;
     esac
 }
 
@@ -795,14 +871,20 @@ lcore_gtpc_parse_ies() {
         printf 'ie.%d.instance\t%s\n' "$n" "$(( sval & 0x0F ))"
         printf 'ie.%d.value\t%s\n' "$n" "$val"
         # Typed rendering for the IEs a core-network analyst reads first.
+        # Numbers and labels are TS 29.274 Table 8.1-1; the value layouts are
+        # the clause named next to each one.
         case "$((16#$t))" in
-            1)  printf 'ie.%d.decoded\tIMSI=%s\n' "$n" "$(lcore_bcd_decode "$val")" ;;
-            2)  printf 'ie.%d.decoded\tCause=%s\n' "$n" "$((16#${val:0:2}))" ;;
-            3)  printf 'ie.%d.decoded\tMSISDN=%s\n' "$n" "$(lcore_bcd_decode "$val")" ;;
-            71) printf 'ie.%d.decoded\tAPN=%s\n' "$n" "$(lcore_apn_decode "$val")" ;;
-            86) printf 'ie.%d.decoded\tECGI=%s\n' "$n" "$(lcore_ecgi_decode "$val")" ;;
-            87) printf 'ie.%d.decoded\tTAI=%s\n' "$n" "$(lcore_tai_decode "$val")" ;;
-            5)  printf 'ie.%d.decoded\tCause=%s\n' "$n" "$((16#${val:0:2}))" ;;
+            1)  printf 'ie.%d.decoded\tIMSI=%s\n' "$n" "$(lcore_tbcd_decode "$val")" ;;              # §8.3
+            2)  printf 'ie.%d.decoded\tCause=%s\n' "$n" "$((16#${val:0:2}))" ;;                      # §8.4
+            3)  printf 'ie.%d.decoded\tRecovery=%s\n' "$n" "$((16#${val:0:2}))" ;;                   # §8.5, 1 octet
+            71) printf 'ie.%d.decoded\tAPN=%s\n' "$n" "$(lcore_apn_decode "$val")" ;;                # §8.6
+            73) printf 'ie.%d.decoded\tEBI=%s\n' "$n" "$((16#${val:0:2}))" ;;                        # §8.8
+            76) printf 'ie.%d.decoded\tMSISDN=%s\n' "$n" "$(lcore_tbcd_decode "$val")" ;;            # §8.11
+            82) printf 'ie.%d.decoded\tRAT=%s\n' "$n" "$(lcore_rat_name "$((16#${val:0:2}))")" ;;     # §8.17
+            86) printf 'ie.%d.decoded\tULI=%s\n' "$n" "$(lcore_uli_compact "$val")" ;;               # §8.21
+            87) printf 'ie.%d.decoded\tF-TEID=%s\n' "$n" "$(lcore_fteid_decode "$val")" ;;           # §8.22
+            83) printf 'ie.%d.decoded\tServingNetwork=%s\n' "$n" "$(lcore_plmn_from_octets "${val:0:6}")" ;;  # §8.18
+            111) printf 'ie.%d.decoded\tP-TMSI=%s\n' "$n" "$val" ;;                                  # §8.41, 4 octets
         esac
         off=$(( off + 4 + len ))
         # GTP-C IEs are padded to a 4-octet boundary; padding is not
@@ -978,6 +1060,55 @@ lcore_gtpc_ie_name() {
 # (86) and F-Cause (87); ECGI and TAI are *fields inside* the ULI IE (114),
 # which is where this decoder reads them. Both interpretations are exposed:
 # the raw type table above, and the ULI sub-field decoder below.
+lcore_lai_decode() {
+    local v; v=$(lcore_nfc "${1:-}")
+    [[ ${#v} -ge 10 ]] || return 1
+    printf '%s lac=%d' "$(lcore_plmn_from_octets "${v:0:6}")" "$(( 16#${v:6:2} * 256 + 16#${v:8:2} ))"
+}
+
+lcore_cgi_decode() {
+    # §8.21.2: PLMN, Location Area Code, then the 16-bit Cell Identity.
+    local v; v=$(lcore_nfc "${1:-}")
+    [[ ${#v} -ge 14 ]] || return 1
+    printf '%s lac=%d ci=%d' "$(lcore_plmn_from_octets "${v:0:6}")" \
+        "$(( 16#${v:6:2} * 256 + 16#${v:8:2} ))" \
+        "$(( 16#${v:10:2} * 256 + 16#${v:12:2} ))"
+}
+
+lcore_sai_decode() {
+    # §8.21.3: PLMN, LAC, then the 16-bit Service Area Code.
+    local v; v=$(lcore_nfc "${1:-}")
+    [[ ${#v} -ge 14 ]] || return 1
+    printf '%s lac=%d sac=%d' "$(lcore_plmn_from_octets "${v:0:6}")" \
+        "$(( 16#${v:6:2} * 256 + 16#${v:8:2} ))" \
+        "$(( 16#${v:10:2} * 256 + 16#${v:12:2} ))"
+}
+
+lcore_rai_decode() {
+    # §8.21.4: PLMN, LAC, then the 16-bit Routing Area Code.
+    local v; v=$(lcore_nfc "${1:-}")
+    [[ ${#v} -ge 14 ]] || return 1
+    printf '%s lac=%d rac=%d' "$(lcore_plmn_from_octets "${v:0:6}")" \
+        "$(( 16#${v:6:2} * 256 + 16#${v:8:2} ))" \
+        "$(( 16#${v:10:2} * 256 + 16#${v:12:2} ))"
+}
+
+lcore_macro_enb_decode() {
+    # §8.21.7: 20-bit Macro eNodeB ID starting at bit 4 of the fourth octet.
+    local v; v=$(lcore_nfc "${1:-}")
+    [[ ${#v} -ge 12 ]] || return 1
+    local id=$(( 16#${v:6:6} & 0x0FFFFF ))
+    printf '%s macro_enb=%d' "$(lcore_plmn_from_octets "${v:0:6}")" "$id"
+}
+
+lcore_extmacro_enb_decode() {
+    # §8.21.8: 21 bits; the top bit is the SMeNB flag (bit 8 of octet 4),
+    # so the identifier starts at bit 5 of that octet.
+    local v; v=$(lcore_nfc "${1:-}")
+    [[ ${#v} -ge 12 ]] || return 1
+    local id=$(( 16#${v:6:6} & 0x1FFFFF ))
+    printf '%s extmacro_enb=%d' "$(lcore_plmn_from_octets "${v:0:6}")" "$id"
+}
 lcore_uli_decode() {
     local val; val=$(lcore_nfc "${1:-}")
     [[ ${#val} -ge 2 ]] || return 1
@@ -986,12 +1117,17 @@ lcore_uli_decode() {
     printf 'uli.flags\t%s\n' "$flags"
     # Bit 1 (0x01) CGI, bit 2 (0x02) SAI, bit 3 (0x04) RAI,
     # bit 4 (0x08) TAI, bit 5 (0x10) ECGI, bit 6 (0x20) LAI.
-    (( flags & 0x01 )) && { desc+="CGI "; printf 'uli.cgi\t%s\n' "${val:$((off*2)):14}"; off=$((off+7)); }
-    (( flags & 0x02 )) && { desc+="SAI "; printf 'uli.sai\t%s\n' "${val:$((off*2)):14}"; off=$((off+7)); }
-    (( flags & 0x04 )) && { desc+="RAI "; printf 'uli.rai\t%s\n' "${val:$((off*2)):14}"; off=$((off+7)); }
+    (( flags & 0x01 )) && { desc+="CGI "; printf 'uli.cgi\t%s\n' "$(lcore_cgi_decode "${val:$((off*2)):14}")"; off=$((off+7)); }
+    (( flags & 0x02 )) && { desc+="SAI "; printf 'uli.sai\t%s\n' "$(lcore_sai_decode "${val:$((off*2)):14}")"; off=$((off+7)); }
+    (( flags & 0x04 )) && { desc+="RAI "; printf 'uli.rai\t%s\n' "$(lcore_rai_decode "${val:$((off*2)):14}")"; off=$((off+7)); }
     (( flags & 0x08 )) && { desc+="TAI "; printf 'uli.tai\t%s\n' "$(lcore_tai_decode "${val:$((off*2)):10}")"; off=$((off+5)); }
     (( flags & 0x10 )) && { desc+="ECGI "; printf 'uli.ecgi\t%s\n' "$(lcore_ecgi_decode "${val:$((off*2)):14}")"; off=$((off+7)); }
-    (( flags & 0x20 )) && { desc+="LAI "; printf 'uli.lai\t%s\n' "${val:$((off*2)):10}"; off=$((off+5)); }
+    (( flags & 0x20 )) && { desc+="LAI "; printf 'uli.lai\t%s\n' "$(lcore_lai_decode "${val:$((off*2)):10}")"; off=$((off+5)); }
+    # Bits 7 and 8 are the Macro eNodeB ID and the Extended Macro eNodeB ID
+    # (§8.21.7, §8.21.8). Both are 6 octets: PLMN, then 3 octets whose bit
+    # 4 of the first is the top of a 20- or 21-bit identifier.
+    (( flags & 0x40 )) && { desc+="MACRO "; printf 'uli.macro\t%s\n' "$(lcore_macro_enb_decode "${val:$((off*2)):12}")"; off=$((off+6)); }
+    (( flags & 0x80 )) && { desc+="EXTMACRO "; printf 'uli.extmacro\t%s\n' "$(lcore_extmacro_enb_decode "${val:$((off*2)):12}")"; off=$((off+6)); }
     printf 'uli.present\t%s\n' "${desc:-none}"
     return 0
 }
@@ -1046,20 +1182,129 @@ lcore_hex_to_ascii() {
 # GTP-C IMSI IE: the identity is BCD with the *same* nibble rule as the
 # air interface (TS 29.274 §8.3), including the 0xF filler for an odd
 # digit count and the leading digit-count octet.
-lcore_bcd_decode() {
+lcore_tbcd_decode() {
     local hex; hex=$(lcore_nfc "${1:-}")
     [[ -n "$hex" ]] || { printf ''; return; }
-    # The first octet of an IMSI/MSISDN IE is the number of digits.
-    local ndigits=$(( 16#${hex:0:2} ))
-    local body="${hex:2}"
-    (( ndigits > 0 )) || { printf ''; return; }
-    local out="" i
-    for (( i = 0; i < ${#body}; i += 2 )); do
-        out+="${body:$((i+1)):1}${body:$i:1}"
+    (( ${#hex} % 2 == 0 )) || { printf 'ERROR\tTBCD value has an odd number of hex digits\n' >&2; return 1; }
+    # TS 29.274 §8.3 (IMSI) and §8.11 (MSISDN): the value is plain TBCD.
+    # Two digits per octet, the low nibble is the first digit; an odd
+    # number of digits ends in the filler 1111 in the high nibble of the
+    # last octet. There is no digit-count octet in front of the value.
+    local out="" i f
+    for (( i = 0; i < ${#hex}; i += 2 )); do
+        f="${hex:$i:2}"
+        out+="${f:1:1}${f:0:1}"
     done
-    # Drop the filler nibble only if the digit count says so.
-    out="${out:0:$ndigits}"
+    [[ "$out" =~ ^[0-9F]+$ ]] || { printf 'ERROR\tnot TBCD: value carries a nibble outside 0-9 and the filler F\n' >&2; return 1; }
+    [[ "$out" == *F ]] && out="${out%F}"
     printf '%s' "$out"
+}
+lcore_rat_name() {
+    # RAT Type values — TS 29.274 Table 8.17-1.
+    case "${1:-}" in
+        0)   echo "reserved" ;;
+        1)   echo "UTRAN" ;;
+        2)   echo "GERAN" ;;
+        3)   echo "WLAN" ;;
+        4)   echo "GAN" ;;
+        5)   echo "HSPA Evolution" ;;
+        6)   echo "EUTRAN (WB-E-UTRAN)" ;;
+        7)   echo "Virtual" ;;
+        8)   echo "EUTRAN-NB-IoT" ;;
+        9)   echo "LTE-M" ;;
+        10)  echo "NR" ;;
+        *)   echo "spare" ;;
+    esac
+}
+
+lcore_fteid_interface_name() {
+    # F-TEID Interface Type — TS 29.274 §8.22, the 6-bit value in octet 5.
+    case "${1:-}" in
+        0)  echo "S1-U eNodeB GTP-U" ;;
+        1)  echo "S1-U SGW GTP-U" ;;
+        2)  echo "S12 RNC GTP-U" ;;
+        3)  echo "S12 SGW GTP-U" ;;
+        4)  echo "S5/S8 SGW GTP-U" ;;
+        5)  echo "S5/S8 PGW GTP-U" ;;
+        6)  echo "S5/S8 SGW GTP-C" ;;
+        7)  echo "S5/S8 PGW GTP-C" ;;
+        8)  echo "S5/S8 SGW PMIPv6" ;;
+        9)  echo "S5/S8 PGW PMIPv6" ;;
+        10) echo "S11 MME GTP-C" ;;
+        11) echo "S11/S4 SGW GTP-C" ;;
+        12) echo "S10/N26 MME GTP-C" ;;
+        13) echo "S3 MME GTP-C" ;;
+        14) echo "S3 SGSN GTP-C" ;;
+        15) echo "S4 SGSN GTP-U" ;;
+        16) echo "S4 SGW GTP-U" ;;
+        17) echo "S4 SGSN GTP-C" ;;
+        18) echo "S16 SGSN GTP-C" ;;
+        19) echo "eNodeB GTP-U for DL data forwarding" ;;
+        20) echo "eNodeB GTP-U for UL data forwarding" ;;
+        21) echo "RNC GTP-U for data forwarding" ;;
+        22) echo "SGSN GTP-U for data forwarding" ;;
+        23) echo "SGW/UPF GTP-U for DL data forwarding" ;;
+        24) echo "Sm MBMS GW GTP-C" ;;
+        25) echo "Sn MBMS GW GTP-C" ;;
+        26) echo "Sm MME GTP-C" ;;
+        27) echo "Sn SGSN GTP-C" ;;
+        28) echo "SGW GTP-U for UL data forwarding" ;;
+        29) echo "Sn SGSN GTP-U" ;;
+        30) echo "S2b ePDG GTP-C" ;;
+        31) echo "S2b-U ePDG GTP-U" ;;
+        32) echo "S2b PGW GTP-C" ;;
+        33) echo "S2b-U PGW GTP-U" ;;
+        34) echo "S2a TWAN GTP-U" ;;
+        35) echo "S2a TWAN GTP-C" ;;
+        36) echo "S2a PGW GTP-C" ;;
+        37) echo "S2a PGW GTP-U" ;;
+        38) echo "S11 MME GTP-U" ;;
+        39) echo "S11 SGW GTP-U" ;;
+        40) echo "N26 AMF GTP-C" ;;
+        *)  echo "spare, reserved for future use" ;;
+    esac
+}
+
+lcore_fteid_decode() {
+    # TS 29.274 §8.22: octet 5 = V4(bit 8) V6(bit 7) Interface Type(6 bits),
+    # octets 6-9 = TEID, then the IPv4 address if V4, then the IPv6 address
+    # if V6. At least one of V4 and V6 shall be set.
+    local val; val=$(lcore_nfc "${1:-}")
+    [[ ${#val} -ge 2 ]] || return 1
+    local o=$(( 16#${val:0:2} ))
+    local v4=$(( (o >> 7) & 1 ))
+    local v6=$(( (o >> 6) & 1 ))
+    local itype=$(( o & 0x3F ))
+    local out="" off=1
+    out+="interface=$(lcore_fteid_interface_name "$itype") ($itype)"
+    if (( ${#val} >= (off + 4) * 2 )); then
+        out+=" teid=$(( 16#${val:$((off*2)):8 }))"
+        off=$(( off + 4 ))
+    else
+        out+=" teid=none"
+    fi
+    if (( v4 == 1 )); then
+        if (( ${#val} >= (off + 4) * 2 )); then
+            out+=" ipv4=$(( 16#${val:$((off*2)):2 })).$(( 16#${val:$((off*2+2)):2 })).$(( 16#${val:$((off*2+4)):2 })).$(( 16#${val:$((off*2+6)):2 }))"
+            off=$(( off + 4 ))
+        else
+            out+=" ipv4=truncated"
+        fi
+    fi
+    if (( v6 == 1 )); then
+        if (( ${#val} >= (off + 16) * 2 )); then
+            out+=" ipv6=${val:$((off*2)):32}"
+        else
+            out+=" ipv6=truncated"
+        fi
+    fi
+    (( v4 == 1 || v6 == 1 )) || out+=" note=neither V4 nor V6 set, which §8.22 forbids"
+    printf '%s' "$out"
+}
+
+lcore_uli_compact() {
+    # One line for the parse_ies renderer: the identities inside a ULI.
+    lcore_uli_decode "${1:-}" | awk -F'\t' '$1 ~ /^uli\.(cgi|sai|rai|tai|ecgi|lai|macro|extmacro)$/ {k=$1; sub(/^uli\./,"",k); printf "%s %s; ", toupper(k), $2}'
 }
 
 # ── GTP-U — TS 29.281 §5.1 ──────────────────────────────────────────────
@@ -1090,6 +1335,8 @@ lcore_gtpu_parse_header() {
     local mtype="${hex:2:2}"
     local len=$(( 16#${hex:4:2} * 256 + 16#${hex:6:2} ))
     local teid=$(( 16#${hex:8:2} * 16777216 + 16#${hex:10:2} * 65536 + 16#${hex:12:2} * 256 + 16#${hex:14:2} ))
+    local total=$(( ${#hex} / 2 ))
+    (( ver == 1 )) || { printf 'ERROR\tGTP-U header says version %d; TS 29.281 §5.1 fixes the version at 1\n' "$ver" >&2; return 1; }
 
     printf 'version\t%s\n' "$ver"
     printf 'protocol\t%s\n' "$([[ $ver -eq 1 ]] && echo 'GTPv1-U' || echo "GTPv$ver")"
@@ -1098,9 +1345,21 @@ lcore_gtpu_parse_header() {
     printf 'flag_E\t%s\n' "$ebit"
     printf 'flag_S\t%s\n' "$sbit"
     printf 'flag_PN\t%s\n' "$pnbit"
+    printf 'spare_bits\t%s\n' "$(( fv & 0x08 ))"
     printf 'message_type\t0x%s\n' "$mtype"
     printf 'message_name\t%s\n' "$(lcore_gtpu_msg_name "$((16#$mtype))")"
     printf 'length\t%s\n' "$len"
+    # §5.1: Length counts the octets after the 8-octet mandatory header,
+    # sequence number, N-PDU number and extension headers included.
+    printf 'length_agrees\t%s\n' "$([[ $len -eq $(( total - 8 )) ]] && echo yes || echo no)"
+    (( len == total - 8 )) || printf 'note\tlength field says %d octets after the mandatory header, the frame carries %d\n' "$len" "$(( total - 8 ))"
+    case "$((16#$mtype))" in
+        1|2|26|31)
+            # §5.1: the S flag shall be set for these four messages.
+            (( sbit == 1 )) || printf 'note\tTS 29.281 §5.1 requires the S flag on message type %d, and this header clears it\n' "$((16#$mtype))" ;;
+        254)
+            (( sbit == 0 )) || printf 'note\tTS 29.281 §5.1 requires the S flag to be clear on an End Marker\n' ;;
+    esac
     printf 'teid\t%s\n' "$teid"
     printf 'teid_hex\t%s\n' "${hex:8:8}"
 
@@ -1149,8 +1408,10 @@ lcore_gtpu_parse_header() {
             local ehlen=$(( units * 4 ))
             printf 'ext.%d.type\t0x%02X\n' "$n" "$nextt"
             printf 'ext.%d.name\t%s\n' "$n" "$(lcore_gtpu_ext_name "$nextt")"
+            printf 'ext.%d.comprehension\t%s\n' "$n" "$(lcore_gtpu_ext_comprehension "$(( (nextt >> 6) & 0x03 ))")"
             printf 'ext.%d.units\t%s\n' "$n" "$units"
             printf 'ext.%d.octets\t%s\n' "$n" "$ehlen"
+            (( 16#${hex:$b:2} == 0 )) && printf 'ext.%d.note\tlength field is 0; TS 29.281 §5.2.1 requires a positive integer, so 0 is read as one 4-octet unit\n' "$n"
             (( (eoff + ehlen) * 2 <= ${#hex} )) || { printf 'ext.%d.note\ttruncated at the end of the packet\n' "$n"; break; }
             printf 'ext.%d.content\t%s\n' "$n" "${hex:$((b+2)):$((ehlen*2-2))}"
             # Next-type octet is the last octet of this extension header.
@@ -1169,11 +1430,16 @@ lcore_gtpu_parse_header() {
 }
 
 lcore_gtpu_msg_name() {
+    # GTP-U message types. TS 29.281 §4.4 defines the messages a user-plane
+    # entity exchanges and leaves the numbers to TS 29.060 Table 6.1-1,
+    # which the two protocols share; the End Marker is 254, not 255.
     case "${1:-}" in
         1)   echo "Echo Request" ;;
         2)   echo "Echo Response" ;;
+        3)   echo "Version Not Supported Indication" ;;
         26)  echo "Error Indication" ;;
         31)  echo "Supported Extension Headers Notification" ;;
+        254) echo "End Marker" ;;
         255) echo "G-PDU (T-PDU)" ;;
         *)   echo "unknown" ;;
     esac
@@ -1181,28 +1447,38 @@ lcore_gtpu_msg_name() {
 
 # Extension Header Type — TS 29.281 Table 5.1-1.
 lcore_gtpu_ext_name() {
-    # Extension Header Type — TS 29.281 Table 5.1-1. The wire values are
-    # 0x01..0x03, 0x20, 0x40, 0x81..0x85, 0xC0..0xC2.
-    #
-    # The argument is a DECIMAL integer, so these patterns are decimal:
-    # `case` matches patterns as literal text, and a `0x40)` pattern would
-    # never match the number 64.
+    # Extension Header Type — TS 29.281 Table 5.2.1-2 (Figure 5.2.1-3).
+    # The wire values are 0x00..0x03, 0x20, 0x40, 0x81..0x85, 0xC0..0xC2.
+    # The argument is a DECIMAL integer: `case` matches patterns as text, so
+    # a `0x40)` pattern would never match the number 64.
     case "${1:-}" in
         0)   echo "No more extension headers" ;;
-        1)   echo "MBMS Support Indication" ;;
-        2)   echo "MS Info Change Reporting Support Indication" ;;
+        1)   echo "Reserved - Control Plane only" ;;
+        2)   echo "Reserved - Control Plane only" ;;
         3)   echo "Long PDCP PDU Number" ;;
         32)  echo "Service Class Indicator" ;;
         64)  echo "UDP Port" ;;
         129) echo "RAN Container" ;;
-        130) echo "Long PDCP PDU" ;;
+        130) echo "Long PDCP PDU Number (earlier release; not sent by a source complying with this release)" ;;
         131) echo "Xw RAN Container" ;;
         132) echo "NR RAN Container" ;;
         133) echo "PDU Session Container" ;;
         192) echo "PDCP PDU Number" ;;
-        193) echo "Suspend Request" ;;
-        194) echo "Suspend Response" ;;
+        193) echo "Reserved - Control Plane only" ;;
+        194) echo "Reserved - Control Plane only" ;;
         *)   echo "unknown extension header" ;;
+    esac
+}
+
+lcore_gtpu_ext_comprehension() {
+    # TS 29.281 Figure 5.2.1-2: bits 8 and 7 of the Next Extension Header
+    # Type say how a node that does not know the type must treat it.
+    case "${1:-}" in
+        0) echo "not required: an intermediate node forwards it" ;;
+        1) echo "not required: an intermediate node discards the content" ;;
+        2) echo "required by the endpoint receiver, not by an intermediate node" ;;
+        3) echo "required by every recipient" ;;
+        *) echo "unknown" ;;
     esac
 }
 
@@ -1624,7 +1900,7 @@ lcore_cmd_gtp_csr_forge() {
     local imsi_ie apn_ie sn_ie msg
     imsi_ie=$(lcore_gtpc_ie 1 "$(lcore_bcd_encode "$imsi")") || return 2
     apn_ie=$(lcore_gtpc_ie 71 "$(lcore_apn_encode "$apn")") || return 2
-    sn_ie=$(lcore_gtpc_ie 111 "$(lcore_plmn_bcd "$mcc" "$mnc")") || return 2
+    sn_ie=$(lcore_gtpc_ie 83 "$(lcore_plmn_bcd "$mcc" "$mnc")") || return 2
     msg=$(lcore_gtpc_msg 32 "" 1 "${imsi_ie}${apn_ie}$(lcore_gtpc_ie 82 06)${sn_ie}")
     printf 'message_type\t32\nmessage_name\t%s\nimsi\t%s\napn\t%s\nimsi_ie\t%s\nmessage\t%s\n' \
         "$(lcore_gtpc_msg_name 32)" "$imsi" "$apn" "$imsi_ie" "$msg"
@@ -1710,10 +1986,10 @@ lcore_cmd_fs20() {
 
 # ── selftest — no radio, no root, no network ────────────────────────────
 lcore_selftest() {
-    local bad=0
+    local bad=0 ok=0
     chk() {
         local n="$1" got="$2" want="$3"
-        if [[ "$got" == "$want" ]]; then printf '%s\tPASS\n' "$n"
+        if [[ "$got" == "$want" ]]; then printf '%s\tPASS\n' "$n"; ok=$((ok + 1))
         else printf '%s\tFAIL want=%s got=%s\n' "$n" "$want" "$got"; bad=$((bad + 1)); fi
     }
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
@@ -1960,15 +2236,16 @@ lcore_selftest() {
     chk gtpu-missing "$(lcore_cmd_decode_gtp_u >/dev/null 2>&1; echo $?)" "2"
 
     # ── 7. GTP-C IE format and types ────────────────────────────────────
-    # IMSI IE (type 1): type 01, length 0008, instance 00, then
-    # digit-count 0F + 8 BCD octets for 15-digit 310150123456789.
-    # BCD of 310150123456789 is 13 10 05 21 43 65 87 F9.
-    local imsi_ie="010009000F13100521436587F9"
+    # IMSI IE (type 1): type 01, length 0008, instance 00, then 8 TBCD
+    # octets for the 15-digit 310150123456789. §8.3 has NO digit-count
+    # octet: the digits are 13 10 05 21 43 65 87 F9, and the odd count ends
+    # in the filler 1111 in the high nibble of the last octet.
+    local imsi_ie="0100080013100521436587F9"
     out=$(lcore_gtpc_parse_ies "$imsi_ie"); rc=$?
     chk gtpie-rc     "$rc" "0"
     chk gtpie-type   "$(fld "$out" ie.0.type)" "1"
-    chk gtpie-name   "$(fld "$out" ie.0.name)" "IMSI"
-    chk gtpie-len    "$(fld "$out" ie.0.length)" "9"
+    chk gtpie-name   "$(fld "$out" ie.0.name)" "International Mobile Subscriber Identity (IMSI)"
+    chk gtpie-len    "$(fld "$out" ie.0.length)" "8"
     chk gtpie-spare  "$(fld "$out" ie.0.spare)" "0"
     chk gtpie-inst   "$(fld "$out" ie.0.instance)" "0"
     chk gtpie-dec    "$(fld "$out" ie.0.decoded)" "IMSI=310150123456789"
@@ -1979,28 +2256,76 @@ lcore_selftest() {
     chk gtpie-cause "$(fld "$out" ie.0.decoded)" "Cause=16"
     chk gtpie-cname "$(fld "$out" ie.0.name)" "Cause"
 
+    # Recovery IE (type 3) is one octet (§8.5). It used to be read as a
+    # MSISDN, which is type 76.
+    out=$(lcore_gtpc_parse_ies "0300010010")
+    chk gtpie-recovery "$(fld "$out" ie.0.name)" "Recovery (Restart Counter)"
+    chk gtpie-recovery-val "$(fld "$out" ie.0.decoded)" "Recovery=16"
+
     # APN IE (71) "internet" = 08 69 6E 74 65 72 6E 65 74
     local apn_ie="4700090008696E7465726E6574"
     out=$(lcore_gtpc_parse_ies "$apn_ie")
     chk gtpie-apn-type "$(fld "$out" ie.0.type)" "71"
-    chk gtpie-apn-name "$(fld "$out" ie.0.name)" "APN"
+    chk gtpie-apn-name "$(fld "$out" ie.0.name)" "Access Point Name (APN)"
     chk gtpie-apn-dec  "$(fld "$out" ie.0.decoded)" "APN=internet"
 
-    # MSISDN IE (3) with a 10-digit number.
-    # digits 0123456789 -> BCD 10 32 54 76 98, count 0A
-    out=$(lcore_gtpc_parse_ies "030006000A1032547698")
-    chk gtpie-msisdn "$(fld "$out" ie.0.decoded)" "MSISDN=0123456789"
+    # MSISDN IE (76) with a 10-digit number: §8.11 is TBCD too, no count.
+    out=$(lcore_gtpc_parse_ies "4C0005001032547698")
+    chk gtpie-msisdn "$(fld "$out" ie.0.name)" "MSISDN"
+    chk gtpie-msisdn-val "$(fld "$out" ie.0.decoded)" "MSISDN=0123456789"
+
+    # RAT Type IE (82) = 06, EUTRAN (§8.17).
+    out=$(lcore_gtpc_parse_ies "5200010006")
+    chk gtpie-rat "$(fld "$out" ie.0.decoded)" "RAT=EUTRAN (WB-E-UTRAN)"
+
+    # Serving Network IE (83) for 310/260 (§8.18), the PLMN order that TAI
+    # and ECGI use. It is 83, not 111 — 111 is the P-TMSI.
+    out=$(lcore_gtpc_parse_ies "5300030013006200")
+    chk gtpie-sn "$(fld "$out" ie.0.name)" "Serving Network"
+    chk gtpie-sn-val "$(fld "$out" ie.0.decoded)" "ServingNetwork=310-260"
+
+    # P-TMSI IE (111), 4 octets (§8.41).
+    out=$(lcore_gtpc_parse_ies "6F000400DEADBEEF")
+    chk gtpie-ptmsi "$(fld "$out" ie.0.name)" "P-TMSI"
+    chk gtpie-ptmsi-val "$(fld "$out" ie.0.decoded)" "P-TMSI=DEADBEEF"
+
+    # F-TEID IE (87): V4 flag, interface type 10 (S11 MME GTP-C), TEID 42,
+    # address 10.0.0.1 (§8.22).
+    out=$(lcore_gtpc_parse_ies "570009008A0000002A0A000001")
+    chk gtpie-fteid "$(fld "$out" ie.0.decoded)" "F-TEID=interface=S11 MME GTP-C (10) teid=42 ipv4=10.0.0.1"
+
+    # ULI IE (86) carrying an ECGI (§8.21).
+    out=$(lcore_gtpc_parse_ies "560008001002F8100000ABCD")
+    chk gtpie-uli "$(fld "$out" ie.0.decoded)" "ULI=ECGI 208-01 eci=43981; "
 
     # IE type registry (the numbers the brief names).
-    chk ien-1  "$(lcore_gtpc_ie_name 1)"  "IMSI"
+    chk ien-1  "$(lcore_gtpc_ie_name 1)"  "International Mobile Subscriber Identity (IMSI)"
     chk ien-2  "$(lcore_gtpc_ie_name 2)"  "Cause"
     chk ien-3  "$(lcore_gtpc_ie_name 3)"  "Recovery (Restart Counter)"
-    chk ien-71 "$(lcore_gtpc_ie_name 71)" "APN"
-    chk ien-86 "$(lcore_gtpc_ie_name 86)" "F-Container"
-    chk ien-87 "$(lcore_gtpc_ie_name 87)" "F-Cause"
+    chk ien-4  "$(lcore_gtpc_ie_name 4)"  "Reserved for the S101 interface (TS 29.276)"
+    chk ien-71 "$(lcore_gtpc_ie_name 71)" "Access Point Name (APN)"
+    chk ien-83 "$(lcore_gtpc_ie_name 83)" "Serving Network"
+    chk ien-86 "$(lcore_gtpc_ie_name 86)" "User Location Information (ULI)"
+    chk ien-87 "$(lcore_gtpc_ie_name 87)" "Fully Qualified Tunnel Endpoint Identifier (F-TEID)"
     chk ien-93 "$(lcore_gtpc_ie_name 93)" "Bearer Context"
-    chk ien-114 "$(lcore_gtpc_ie_name 114)" "ULI (User Location Information)"
+    chk ien-111 "$(lcore_gtpc_ie_name 111)" "P-TMSI"
+    chk ien-114 "$(lcore_gtpc_ie_name 114)" "UE Time Zone"
+    chk ien-254 "$(lcore_gtpc_ie_name 254)" "Special IE type for IE Type Extension"
+    chk ien-255 "$(lcore_gtpc_ie_name 255)" "Private Extension"
+    chk ien-207 "$(lcore_gtpc_ie_name 207)" "Spare, for future use"
     chk ien-unknown "$(lcore_gtpc_ie_name 60000)" "unknown/extension IE type"
+
+    # Message types as the card's peers send them (Table 6.1-1). The
+    # Identifying/Context messages at 128-132 are the Mobility Management
+    # ones, and the access-bearer messages are 170/171, not 162/163.
+    chk mtn-32  "$(lcore_gtpc_msg_name 32)"  "Create Session Request"
+    chk mtn-128 "$(lcore_gtpc_msg_name 128)" "Identification Request"
+    chk mtn-130 "$(lcore_gtpc_msg_name 130)" "Context Request"
+    chk mtn-162 "$(lcore_gtpc_msg_name 162)" "Suspend Notification"
+    chk mtn-170 "$(lcore_gtpc_msg_name 170)" "Release Access Bearers Request"
+    chk mtn-176 "$(lcore_gtpc_msg_name 176)" "Downlink Data Notification"
+    chk mtn-178 "$(lcore_gtpc_msg_name 178)" "Reserved (allocated in an earlier version of TS 29.274)"
+    chk mtn-254 "$(lcore_gtpc_msg_name 254)" "For future use"
 
     # TAI and ECGI as they appear INSIDE the ULI IE (114), not as IE 86/87.
     # TAI = PLMN 02F810 (plain BCD) + TAC 0x1234.
@@ -2027,7 +2352,7 @@ lcore_selftest() {
     # Two IEs in sequence, with 4-octet padding between them.
     # IE1: type 02 len 0002 inst 00 value 0010 (4 octets total, aligned).
     # IE2: type 01 len 0009 inst 00 value <9 octets> -> total 13, pad 3.
-    out=$(lcore_gtpc_parse_ies "0200010010000000${imsi_ie}000000")
+    out=$(lcore_gtpc_parse_ies "0200010010000000${imsi_ie}")
     chk gtpie-two-count "$(fld "$out" ie_count)" "2"
     chk gtpie-two-0     "$(fld "$out" ie.0.type)" "2"
     chk gtpie-two-1     "$(fld "$out" ie.1.type)" "1"
@@ -2078,13 +2403,18 @@ lcore_selftest() {
 
     # Extension header type registry.
     chk ext-00  "$(lcore_gtpu_ext_name 0)"    "No more extension headers"
-    chk ext-01  "$(lcore_gtpu_ext_name 1)"    "MBMS Support Indication"
+    chk ext-01  "$(lcore_gtpu_ext_name 1)"    "Reserved - Control Plane only"
+    chk ext-03  "$(lcore_gtpu_ext_name 3)"    "Long PDCP PDU Number"
+    chk ext-82  "$(lcore_gtpu_ext_name 130)"  "Long PDCP PDU Number (earlier release; not sent by a source complying with this release)"
+    chk ext-85  "$(lcore_gtpu_ext_name 133)"  "PDU Session Container"
+    chk ext-comp0 "$(lcore_gtpu_ext_comprehension 0)" "not required: an intermediate node forwards it"
+    chk ext-comp3 "$(lcore_gtpu_ext_comprehension 3)" "required by every recipient"
     chk ext-03  "$(lcore_gtpu_ext_name 3)"    "Long PDCP PDU Number"
     chk ext-20  "$(lcore_gtpu_ext_name 32)"   "Service Class Indicator"
     chk ext-40  "$(lcore_gtpu_ext_name 64)"   "UDP Port"
     chk ext-85  "$(lcore_gtpu_ext_name 133)"  "PDU Session Container"
     chk ext-c0  "$(lcore_gtpu_ext_name 192)"  "PDCP PDU Number"
-    chk ext-c1  "$(lcore_gtpu_ext_name 193)"  "Suspend Request"
+    chk ext-c1  "$(lcore_gtpu_ext_name 193)"  "Reserved - Control Plane only"
     chk ext-unk "$(lcore_gtpu_ext_name 200)"  "unknown extension header"
     chk gtpu-mname-2 "$(lcore_gtpu_msg_name 2)"   "Echo Response"
     chk gtpu-mname-26 "$(lcore_gtpu_msg_name 26)" "Error Indication"
@@ -2150,8 +2480,20 @@ lcore_selftest() {
     chk apn-multi  "$(lcore_apn_decode 08696E7465726E65740361706E)" "internet.apn"
     chk ascii-hello "$(lcore_hex_to_ascii 68656C6C6F)" "hello"
     chk ipv4       "$(lcore_hex_to_ipv4 0A000001)" "10.0.0.1"
-    chk bcd-10     "$(lcore_bcd_decode 0A1032547698)" "0123456789"
-    chk bcd-15     "$(lcore_bcd_decode 0F13100521436587F9)" "310150123456789"
+    chk tbcd-10    "$(lcore_tbcd_decode 1032547698)" "0123456789"
+    chk tbcd-15    "$(lcore_tbcd_decode 13100521436587F9)" "310150123456789"
+    # A nibble outside 0-9 and the filler is not TBCD.
+    chk tbcd-bad   "$(lcore_tbcd_decode 1A34 >/dev/null 2>&1; echo $?)" "1"
+
+    # Round trip: the message the builder forges must decode back to the
+    # IMSI it was given, which it could not do while the reader ate a
+    # count octet that the writer never wrote.
+    local forged fpay
+    forged=$(lcore_cmd_gtp_csr_forge 310150123456789 internet | awk -F'\t' '$1=="message"{print $2}')
+    fpay=$(lcore_gtpc_parse_header "$forged" | awk -F'\t' '$1=="payload"{print $2}')
+    chk forge-imsi "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1=="ie.0.decoded"{print $2}')" "IMSI=310150123456789"
+    chk forge-sn "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1=="ie.3.type"{print $2}')" "83"
+    chk forge-len "$(lcore_gtpc_parse_header "$forged" | awk -F'\t' '$1=="length_agrees"{print $2}')" "yes"
     chk cli-unknown "$(lcore_cli_main --nope >/dev/null 2>&1; echo $?)" "2"
 
     out=$(lcore_cli_status_tsv)
@@ -2198,6 +2540,7 @@ lcore_selftest() {
     chk fs20-present "$(lcore_cmd_fs20 "$d/fs20.tsv" | awk -F'\t' '$1=="imsi_plmn_consistency"{print $2}')" "yes"
 
     rm -rf "$d"
+    printf 'ASSERTIONS\t%s\n' "$(( ok + bad ))"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }

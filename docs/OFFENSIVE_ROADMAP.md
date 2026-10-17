@@ -127,7 +127,7 @@ edge of what can be validated by anyone.
 | **O9 — GRX exploitation** | `26_ss7_map` | GRX/IPX reachability, GSN address harvesting, the interconnect trust model | A GRX/IPX presence |
 | **O20 — roaming abuse** | `26_ss7_map` | SEPP / delegated-discovery exposure, inter-operator trust model | Two operators |
 | **O4 — Diameter attacks** | `11_lte_core` | S6a/S6d AIR/ULR/CLR/IDR/DSR/PUR encode-decode (code table corrected against Wireshark: 316 ULR, 317 CLR, 318 AIR, 319 IDR, 320 DSR, 321 PUR), forged-ULR registration move | An HSS |
-| **O2 — GTP exploitation** | `11_lte_core` | GTP-C v2 / GTP-U with extension headers, IE walk, TEID handling | An EPC: SGW/PGW |
+| **O2 — GTP exploitation** | `11_lte_core` | GTP-C v2 / GTP-U with extension headers, IE walk, TEID handling. Headers, message-type and IE-type registries corrected against TS 29.274 tables 6.1-1 and 8.1-1, IMSI/MSISDN read as TBCD with no count octet (§8.3, §8.11), ULI/F-TEID/RAT tables from §8.21, §8.22, §8.17, GTP-U extension headers and comprehension bits from TS 29.281 §5.2, each checked by `tools/check-gtp-codec.sh` against the clauses and pycrate | An EPC: SGW/PGW |
 | **O19 — PFCP exploitation** | `13_nr_core` | PFCP session establishment, PDR/FAR/QER/URR encode-decode | A UPF |
 | **5G SBA / NRF abuse** | `40_sba_pivot`, `13_nr_core` | HTTP/2 frame codec (RFC 7540), NRF discovery (TS 29.510), JWT/JOSE decode, `alg=none` and audience-confusion audit, OAuth2 abuse, NRF token forgery | A live 5GC |
 | **O18 — slicing escape** | `34_slicing` | S-NSSAI codec (TS 23.003 §28.4.2), SST table (TS 23.501), selection, isolation testing (reports "not determinable" rather than a false "isolated") | A real slice |
@@ -782,6 +782,23 @@ only, and delivery needs an OTA gateway, an SMSC or a reader.
 
 **Phase 7 — core network.** `11_lte_core` (GTP, Diameter lab testbed),
 `13_nr_core` (PFCP), `40_sba_pivot`.
+
+The GTP half of `11_lte_core` is checked against the clauses as of the
+GTPv2-C/GTPv1-U pass: `tools/check-gtp-codec.sh` builds the frames from
+TS 29.274 §5.1, §8.3, §8.11, §8.17, §8.21, §8.22 and TS 29.281 §5.1/§5.2,
+sweeps both registries over all 256 values, and compares the module's output
+field by field with pycrate's GTPv2 decoder as the second implementation.
+The defects it found were not cosmetic: the IE name table was shifted from
+type 78 onward (78 is PCO, not P-TMSI; 86 is ULI, not F-Container; 87 is
+F-TEID, not F-Cause; 111 is P-TMSI, not Serving Network), five message types
+between 128 and 177 were named after their neighbours, IMSI and MSISDN were
+read with a digit-count octet the clause does not define (a forged Create
+Session Request for 310150123456789 read back as 50123456789), the F-TEID
+interface type was read as four bits rather than six and stopped at 20, the
+GTP-U extension-header names for types 1, 2, 193 and 194 were invented where
+the table says "Reserved - Control Plane Only", and neither header reported a
+Length field that disagreed with the frame. What remains in Phase 7 is
+Diameter (S6a/S6d), PFCP and the SBA half.
 
 **Phase 8 — interconnect.** `26_ss7_map` (SS7 flows, GRX, roaming).
 
