@@ -16043,6 +16043,196 @@ scell_build_backhaul(AppState *state, const char *module_id,
 }
 
 /* 7. Live subscribers: what a relayed backhaul would put on this page. */
+/* The subscriber list, built the way the Wi-Fi recon Targets view is built: a
+   summary strip over a scrollable list of composite rows, because nine columns
+   squeezed side by side read worse than an identity with its own second line.
+   Nothing here is a table model — the file is the model, and a refresh rereads
+   it. */
+
+typedef struct {
+    GtkWidget *summary;
+    GtkWidget *list;
+    char      *path;
+} ScellFeed;
+
+static void
+scell_feed_free(gpointer user_data)
+{
+    ScellFeed *feed = user_data;
+
+    if (feed == NULL)
+        return;
+    g_free(feed->path);
+    g_free(feed);
+}
+
+static void
+scell_feed_copy_clicked(GtkButton *button, gpointer user_data)
+{
+    const char *text = g_object_get_data(G_OBJECT(button), "scell-line");
+    GdkClipboard *cb;
+
+    (void) user_data;
+    if (text == NULL || *text == '\0')
+        return;
+    cb = gdk_display_get_clipboard(
+        gtk_widget_get_display(GTK_WIDGET(button)));
+    if (cb != NULL)
+        gdk_clipboard_set_text(cb, text);
+}
+
+/* time frame kind identity source type arfcn channel uplink */
+static void
+scell_feed_add_row(GtkWidget *list, const char *line)
+{
+    g_auto(GStrv) f = g_strsplit(line, "\t", 9);
+    const char *kind = f[2] != NULL ? f[2] : "";
+    const char *icon;
+    GtkWidget *row;
+    GtkWidget *hbox;
+    GtkWidget *left;
+    GtkWidget *main_row;
+    GtkWidget *badge;
+    GtkWidget *glyph;
+    GtkWidget *copy;
+    g_autofree char *meta = NULL;
+
+    if (g_strv_length(f) < 4)
+        return;
+
+    if (g_strcmp0(kind, "imsi") == 0)
+        icon = "system-users-symbolic";
+    else if (g_strcmp0(kind, "guti") == 0 || g_strcmp0(kind, "tmsi") == 0)
+        icon = "dialog-password-symbolic";
+    else
+        icon = "network-cellular-symbolic";
+
+    row = gtk_list_box_row_new();
+    gtk_widget_add_css_class(row, "scell-feed-row");
+    hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+
+    glyph = gtk_image_new_from_icon_name(icon);
+    gtk_image_set_pixel_size(GTK_IMAGE(glyph), 20);
+    gtk_widget_set_valign(glyph, GTK_ALIGN_START);
+    gtk_widget_add_css_class(glyph, "scell-feed-glyph");
+
+    left = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+
+    main_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    {
+        GtkWidget *id = gtk_label_new(f[3]);
+        gtk_label_set_xalign(GTK_LABEL(id), 0.0f);
+        gtk_label_set_selectable(GTK_LABEL(id), TRUE);
+        gtk_widget_add_css_class(id, "scell-feed-id");
+        gtk_box_append(GTK_BOX(main_row), id);
+
+        badge = gtk_label_new(kind);
+        gtk_label_set_xalign(GTK_LABEL(badge), 0.5f);
+        gtk_widget_add_css_class(badge, "scell-feed-badge");
+        if (g_strcmp0(kind, "imsi") != 0)
+            gtk_widget_add_css_class(badge, "closed");
+        gtk_widget_set_valign(badge, GTK_ALIGN_CENTER);
+        gtk_box_append(GTK_BOX(main_row), badge);
+    }
+    gtk_box_append(GTK_BOX(left), main_row);
+
+    /* time . NAS type . ARFCN . channel . direction . which module saw it */
+    meta = g_strdup_printf("%s  \u2022  %s  \u2022  ARFCN %s  \u2022  ch %s  \u2022  %s  \u2022  %s",
+        f[0] != NULL && *f[0] != '\0' ? f[0] : "-",
+        f[5] != NULL && *f[5] != '\0' ? f[5] : "unknown type",
+        f[6] != NULL && *f[6] != '\0' ? f[6] : "-",
+        f[7] != NULL && *f[7] != '\0' ? f[7] : "-",
+        f[8] != NULL && *f[8] != '\0' ? f[8] : "-",
+        f[4] != NULL && *f[4] != '\0' ? f[4] : "-");
+    {
+        GtkWidget *meta_label = gtk_label_new(meta);
+        gtk_label_set_xalign(GTK_LABEL(meta_label), 0.0f);
+        gtk_label_set_wrap(GTK_LABEL(meta_label), TRUE);
+        gtk_widget_add_css_class(meta_label, "scell-feed-meta");
+        gtk_box_append(GTK_BOX(left), meta_label);
+    }
+    gtk_widget_set_hexpand(left, TRUE);
+    gtk_box_append(GTK_BOX(hbox), glyph);
+    gtk_box_append(GTK_BOX(hbox), left);
+
+    copy = gtk_button_new_with_label("Copy");
+    gtk_widget_set_valign(copy, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(copy, "scell-feed-copy");
+    gtk_widget_add_css_class(copy, "flat");
+    g_object_set_data_full(G_OBJECT(copy), "scell-line", g_strdup(line), g_free);
+    g_signal_connect(copy, "clicked",
+        G_CALLBACK(scell_feed_copy_clicked), NULL);
+    gtk_box_append(GTK_BOX(hbox), copy);
+
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), hbox);
+    gtk_list_box_append(GTK_LIST_BOX(list), row);
+}
+
+/* Rebuild the list from the file. Returns the number of sightings drawn. */
+static guint
+scell_feed_reload(ScellFeed *feed)
+{
+    g_autofree char *text = NULL;
+    g_autofree char *summary = NULL;
+    guint rows = 0, imsi = 0, other = 0;
+
+    for (GtkWidget *child = gtk_widget_get_first_child(feed->list);
+         child != NULL; child = gtk_widget_get_first_child(feed->list))
+        gtk_list_box_remove(GTK_LIST_BOX(feed->list), child);
+
+    if (!g_file_get_contents(feed->path, &text, NULL, NULL) ||
+        text == NULL || *text == '\0') {
+        gtk_label_set_text(GTK_LABEL(feed->summary), "no table yet");
+        return 0;
+    }
+
+    {
+        g_auto(GStrv) lines = g_strsplit(text, "\n", -1);
+        guint total = 0;
+
+        for (guint i = 1; lines[i] != NULL; i++)
+            if (*lines[i] != '\0')
+                total++;
+
+        /* Newest last in the file, newest first in the window: the reason to
+           open this page is the attach that just happened. */
+        for (guint i = 0; total > 0 && i < total; i++) {
+            guint idx = total - i;
+            g_auto(GStrv) f = g_strsplit(lines[idx], "\t", 9);
+
+            if (g_strv_length(f) < 4)
+                continue;
+            if (rows >= 500)
+                break;
+            scell_feed_add_row(feed->list, lines[idx]);
+            rows++;
+            if (g_strcmp0(f[2], "imsi") == 0)
+                imsi++;
+            else
+                other++;
+        }
+    }
+
+    if (rows == 0) {
+        gtk_label_set_text(GTK_LABEL(feed->summary),
+            "table present, no identity sighting in it");
+        return 0;
+    }
+    summary = g_strdup_printf("%u sighting%s  \u2022  %u IMSI  \u2022  %u other identity  \u2022  %s",
+        rows, rows == 1 ? "" : "s", imsi, other, "newest first");
+    gtk_label_set_text(GTK_LABEL(feed->summary), summary);
+    return rows;
+}
+
+static void
+scell_feed_refresh_clicked(GtkButton *button, gpointer user_data)
+{
+    ScellFeed *feed = user_data;
+
+    (void) button;
+    scell_feed_reload(feed);
+}
+
 static GtkWidget *
 scell_build_live(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
@@ -16051,37 +16241,75 @@ scell_build_live(AppState *state, const char *module_id,
     GtkWidget *outer = radio_view_shell("LIVE SUBSCRIBERS",
         "What a relayed backhaul would show: who attached, through which box, when.",
         &body);
-    GtkWidget *table_body;
-    GtkWidget *table = verb_card("ATTACHMENTS", &table_body);
+    GtkWidget *feed_body;
+    GtkWidget *feed = verb_card("FEED", &feed_body);
+    GtkWidget *list_head;
+    GtkWidget *scroll;
+    GtkWidget *list;
+    GtkWidget *refresh;
+    GtkWidget *window;
+    GtkWidget *path_note;
+    GtkWidget *entry = NULL;
+    ScellFeed *sf;
     g_autofree char *root = imsisting_root();
-    g_autofree char *path = g_strdup_printf(
-        "%s/loot/femtocell/subscribers.tsv", root);
-    g_autofree char *text = NULL;
-    GtkWidget *flow = fkit_flow();
 
-    if (g_file_get_contents(path, &text, NULL, NULL) && text != NULL && *text != '\0') {
-        g_auto(GStrv) lines = g_strsplit(text, "\n", -1);
-        for (int i = 0; lines[i] != NULL && *lines[i] != '\0'; i++) {
-            GtkWidget *row = gtk_label_new(lines[i]);
-            gtk_widget_add_css_class(row, "fkit-kv-val");
-            gtk_label_set_xalign(GTK_LABEL(row), 0.0f);
-            gtk_label_set_selectable(GTK_LABEL(row), TRUE);
-            gtk_box_append(GTK_BOX(table_body), row);
-        }
-        gtk_box_append(GTK_BOX(table_body), fkit_note(path));
-    } else {
-        gtk_box_append(GTK_BOX(table_body), fkit_note(
-            "Empty. Nothing on this machine writes this table yet."));
-        gtk_box_append(GTK_BOX(table_body), fkit_note(
-            "A relayed backhaul writes it one row per attach: the IMSI the "
-            "InitialUEMessage carried, the box that carried it, the time. That "
-            "needs an SCTP association to the MME, which is the piece not built."));
-        gtk_box_append(GTK_BOX(table_body), fkit_note(path));
-    }
-    fkit_flow_add(flow, scell_button(state, module_id, status,
-        "Where the Data Comes From", "--iuh", "flat"), "primary");
-    gtk_box_append(GTK_BOX(table_body), flow);
-    gtk_box_append(GTK_BOX(body), table);
+    sf = g_new0(ScellFeed, 1);
+    sf->path = g_strdup_printf("%s/loot/femtocell/subscribers.tsv", root);
+
+    /* One field, because the module takes one: a number is a listen window on
+       GSMTAP, anything else is a capture to read through the same join. */
+    gtk_box_append(GTK_BOX(feed_body), fkit_composer_verb(state, module_id,
+        status, &entry, "--live", "Feed",
+        "seconds on UDP 4729, or a .pcap to read",
+        "Read Feed"));
+    gtk_box_append(GTK_BOX(feed_body), fkit_note(
+        "The window listens on GSMTAP and hands every payload to the decoder "
+        "that owns its format, so a capture read here and a capture read on "
+        "Live Traffic produce the same rows. Nothing is decoded twice."));
+
+    window = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_add_css_class(window, "scell-feed-window");
+
+    list_head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    sf->summary = gtk_label_new("no table yet");
+    gtk_label_set_xalign(GTK_LABEL(sf->summary), 0.0f);
+    gtk_widget_set_hexpand(sf->summary, TRUE);
+    gtk_widget_add_css_class(sf->summary, "scell-feed-summary");
+    refresh = gtk_button_new_with_label("Refresh");
+    gtk_widget_set_valign(refresh, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(refresh, "flat");
+    gtk_box_append(GTK_BOX(list_head), sf->summary);
+    gtk_box_append(GTK_BOX(list_head), refresh);
+    gtk_box_append(GTK_BOX(window), list_head);
+
+    list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
+    gtk_widget_add_css_class(list, "scell-feed-list");
+    scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+        GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), list);
+    gtk_widget_set_size_request(scroll, -1, 260);
+    gtk_widget_add_css_class(scroll, "scell-feed-scroll");
+    gtk_box_append(GTK_BOX(window), scroll);
+
+    sf->list = list;
+    g_signal_connect(refresh, "clicked",
+        G_CALLBACK(scell_feed_refresh_clicked), sf);
+    g_signal_connect_swapped(scroll, "destroy",
+        G_CALLBACK(scell_feed_free), sf);
+
+    path_note = fkit_note(sf->path);
+    gtk_box_append(GTK_BOX(window), path_note);
+
+    if (scell_feed_reload(sf) == 0)
+        gtk_box_append(GTK_BOX(window), fkit_note(
+            "A row is written only for an identity sighting, so an empty "
+            "window means the feed carried no identity - not that the capture "
+            "failed. Nothing invents a row."));
+
+    gtk_box_append(GTK_BOX(body), feed);
+    gtk_box_append(GTK_BOX(body), window);
 
     (void) out;
     return outer;

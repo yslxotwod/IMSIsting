@@ -129,7 +129,7 @@ Ten new modules and five enhancements. Ids 35–44 continue the existing scheme.
 |---|---|---|---|---|
 | `35_baseband.sh` | `bbnd` | Baseband Fuzzing | BASEBAND / DEVICE | RRC/NAS fuzzing, corpus generation, crash triage |
 | `36_vowifi.sh` | `vowi` | VoWiFi / ePDG Attacks | ACCESS | IKEv2/IPsec SWu, EAP-AKA, tunnel analysis |
-| `37_femtocell.sh` | `femt` | Femtocell / HeNB Attacks | ACCESS | HeNB gateway, Iuh, local device assessment |
+| `37_femtocell.sh` | `femt` | Small Cell / eNB Attacks | ACCESS | SCTP backhaul and S1AP bodies, Iuh legacy, CSG/PCI, local device assessment, live subscriber feed |
 | `38_ussd.sh` | `ussd` | USSD Forge | ACCESS | USSD strings, flash USSD, carrier command handling |
 | `39_ta_geoloc.sh` | `tgeo` | TA Geolocation | TRACKING | Timing-advance ranging and trilateration |
 | `40_sba_pivot.sh` | `sbap` | 5G SBA Pivot | CORE NETWORK | HTTP/2 mesh, NRF abuse, token handling |

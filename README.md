@@ -199,7 +199,7 @@ already hold, and neither emits a frame.
 |---|---|---|
 | `35_baseband` | RRC/NAS fuzzing, corpus generation, crash triage, baseband CVE catalogue | `built` |
 | `36_vowifi` | IKEv2/IPsec SWu, EAP-AKA, ePDG attach flow, tunnel weakness detection | `built` |
-| `37_femtocell` | HeNB/Iuh decode, CSG audit, local device assessment | `partial` |
+| `37_femtocell` | CSG/PCI audit, S1AP body build and decode, closed-cell detection, live subscriber feed, TR-069 audit | `partial` |
 | `38_ussd` | GSM 03.38 7-bit codec, service codes, USSD flow and tunnelling analysis | `built` |
 | `39_ta_geoloc` | Timing-advance ranging and multilateration with GDOP | `partial` |
 | `40_sba_pivot` | NF discovery, token audience/scope checks, HTTP/2 SBI, pivot mapping | `partial` |
@@ -210,8 +210,11 @@ already hold, and neither emits a frame.
 
 The `partial` rows, so the status is not a mystery:
 
-- **`37_femtocell`** encodes CSG identities and parses TR-069 config for real. The
-  rogue-HeNB vector is a plan — there is no HeNB stack in the module.
+- **`37_femtocell`** encodes CSG identities, builds a byte-exact S1 Setup Request
+  and decodes it back (both asserted against `tshark` in `tools/s1ap_asn1.py`),
+  flags a closed cell out of a real SIB1 codec, and parses TR-069 config for
+  real. It has no SCTP client, so nothing reaches an MME — the association is
+  the handoff, and the module says so.
 - **`39_ta_geoloc`** does the ranging and multilateration arithmetic that locates a
   UE, and it is real arithmetic with GDOP. It has no measurement front end: the
   timing-advance values it solves from come from a capture or a plan.
@@ -377,7 +380,7 @@ and yet the APDU codec underneath it is real.
 | USSD flows and tunnelling | `38_ussd` | `built` | GSM 03.38 7-bit codec, service codes, the flow. |
 | Remote SIM provisioning / eSIM | `16_sim` | `phase 6` | A real ISO-7816 C-APDU is built and OTA/IMSI/ICCID decode. All four offensive paths — OTA replay, programmable-SIM write, eSIM install, live APDU session — are `status: handoff` plan files. **There is no PC/SC or CCID call and no APDU exchange loop in the module.** |
 | VoWiFi / ePDG attach | `36_vowifi` | `built` | IKEv2/IPsec SWu, EAP-AKA, the ePDG attach flow, tunnel weakness detection. |
-| Rogue HeNB / femtocell | `37_femtocell` | `partial` | CSG identities encode and TR-069 config parses for real. There is no HeNB stack in the module. Phase 10. |
+| Rogue HeNB / small cell | `37_femtocell` | `partial` | The S1 Setup Request is built to the octet and confirmed against `tshark`, closed-cell detection runs on the real SIB1 codec, and the live window joins a GSMTAP feed to its identity rows. There is no SCTP client, so no association reaches an MME. |
 | Wi-Fi offload (LWA) | `47_wifioff` | `phase 10` | ePDG FQDN, certificate-validation checks and LWA configuration analysis. Assessment only today. |
 
 ### Tracking, positioning and RF

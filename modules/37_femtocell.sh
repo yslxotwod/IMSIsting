@@ -82,6 +82,7 @@ femt_status_tsv() {
     printf 'MODULE\tfemtocell\n'
     printf 'TARGET\tSmall-cell local management, S1 and Iuh backhaul, CSG/PCI allocation\n'
     printf 'TRANSMIT\tnone — assessment and conflict detection only\n'
+    printf 'FEED\tGSMTAP udp/4729, or a capture file; one row per identity sighting\n'
     printf 'SELFTEST\tyes\n'
 }
 
@@ -555,6 +556,132 @@ femt_s1ap_decode() {
     femt_s1_asn1 decode "$hex"
 }
 
+# ── live subscriber feed ────────────────────────────────────────────────
+# The GUI's Live Subscribers view tails this file by byte offset. Nothing
+# here re-implements the capture or the NAS classification: modules/
+# 03_gsmtap.sh owns the GSMTAP header and hands each payload to the decoder
+# that owns its format (09_lte_attach for LTE, 06_gsm_air for GSM). This
+# module joins that store to its identity rows and writes one line per
+# identity sighting, so the file only ever grows by what is new.
+FEMT_SUBS_HEADER=$'time\tframe\tidentity_kind\tidentity\tsource\ttype\tarfcn\tchannel\tuplink'
+femt_subs_path() { printf '%s/subscribers.tsv\n' "$FEMT_DIR"; }
+
+# Three paths in, new rows out. Deliberately free of any capture call so it
+# can be asserted against a fixture with no radio attached, and so the same
+# join serves a live feed and a capture that was read afterwards.
+femt_live_rows() {
+    local store="${1:-}" ids="${2:-}" have="${3:-}"
+    [[ -f "$store" ]] || { printf 'ERROR\tno decode store: %s\n' "$store" >&2; return 1; }
+    [[ -f "$ids" ]]   || { printf 'ERROR\tno identity rows: %s\n' "$ids" >&2; return 1; }
+    [[ -f "$have" ]]  || : > "$have" || return 1
+    awk -F'\t' -v OFS='\t' '
+        function key(f, k, v) { return f "|" k "|" v }
+        FILENAME == ARGV[1] {
+            if (FNR > 1) seen[key($2, $3, $4)] = 1
+            next
+        }
+        FILENAME == ARGV[2] {
+            if (FNR > 1) {
+                ts[$1] = $13; typ[$1] = $2; ch[$1] = $3; arf[$1] = $4; ul[$1] = $5
+            }
+            next
+        }
+        FILENAME == ARGV[3] {
+            if (FNR <= 1) next
+            k = key($1, $2, $3)
+            if (k in seen) next
+            seen[k] = 1
+            print (ts[$1]  == "" ? "-" : ts[$1]),  $1, $2, $3, $4, \
+                  (typ[$1] == "" ? "-" : typ[$1]), (arf[$1] == "" ? "-" : arf[$1]), \
+                  (ch[$1]  == "" ? "-" : ch[$1]),  (ul[$1]  == "" ? "-" : ul[$1])
+        }
+    ' "$have" "$store" "$ids"
+}
+
+# One verb, one field: a number is a listen window on GSMTAP, a path is a
+# capture to read through the same join. A second word is the interface to
+# bind, which is what a mirrored backhaul feed on its own NIC needs.
+femt_live() {
+    local secs=30 iface="" pcap=""
+    if (( $# )); then
+        if [[ "$1" =~ ^[0-9]+$ ]]; then
+            secs="$1"; iface="${2:-}"
+        else
+            pcap="$1"
+        fi
+    fi
+    [[ "$secs" =~ ^[0-9]+$ ]] && (( secs >= 1 && secs <= 3600 )) || {
+        printf 'ERROR\t--seconds must be 1..3600\n' >&2; return 2; }
+
+    local gtap="$IMSISTING_ROOT/modules/03_gsmtap.sh"
+    [[ -x "$gtap" ]] || {
+        printf 'ERROR\t%s is missing; cannot read a GSMTAP feed\n' "$gtap" >&2; return 1; }
+
+    local store="$LOOT_DIR/gsmtap/decoded.tsv"
+    local work; work=$(mktemp -d "$MOD_TMP/live.XXXXXX") || {
+        printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
+    local ids="$work/identities.tsv"
+
+    if [[ -n "$pcap" ]]; then
+        if [[ ! -f "$pcap" ]]; then
+            rm -rf "$work"
+            printf 'ERROR\tno such capture: %s\n' "$pcap" >&2
+            return 2
+        fi
+        if ! "$gtap" --read "$pcap" >/dev/null 2>&1; then
+            rm -rf "$work"
+            printf 'ERROR\t03_gsmtap could not read %s\n' "$pcap" >&2
+            return 1
+        fi
+        printf 'feed_source\tpcap:%s\n' "$(basename "$pcap")"
+    else
+        printf 'feed_source\tgsmtap:udp/4729 listen %ss\n' "$secs"
+        local lout lrc
+        lout=$("$gtap" --listen "$secs" "$iface" 2>&1); lrc=$?
+        # "frames 0" on a clean listen is an empty window, not a failure; only
+        # a run that never got as far as counting frames is reported as one.
+        if (( lrc != 0 )) && ! printf '%s\n' "$lout" | grep -q $'^frames\t'; then
+            rm -rf "$work"
+            printf 'ERROR\t03_gsmtap could not listen for %ss: %s\n' "$secs" \
+                "$(printf '%s\n' "$lout" | grep -m1 . || echo 'no reason given')" >&2
+            return 1
+        fi
+    fi
+
+    if [[ ! -s "$store" ]]; then
+        rm -rf "$work"
+        printf 'rows_seen\t0\nnew_rows\t0\nstatus\tno-frames\n'
+        printf 'note\tnothing arrived on the feed; no subscriber row is invented for an empty capture\n'
+        return 0
+    fi
+
+    if ! "$gtap" --identities-tsv > "$ids" 2>/dev/null; then
+        rm -rf "$work"
+        printf 'rows_seen\t0\nnew_rows\t0\nstatus\tno-identities\n'
+        printf 'note\tthe feed carried frames but none announced an identity; a row is only written for a sighting\n'
+        return 0
+    fi
+
+    local subs; subs=$(femt_subs_path)
+    [[ -f "$subs" ]] || printf '%s\n' "$FEMT_SUBS_HEADER" > "$subs"
+    local new
+    if ! new=$(femt_live_rows "$store" "$ids" "$subs"); then
+        rm -rf "$work"
+        return 1
+    fi
+    local n=0
+    if [[ -n "$new" ]]; then
+        printf '%s\n' "$new" >> "$subs"
+        n=$(printf '%s\n' "$new" | grep -c . || true)
+    fi
+    printf 'feed_store\t%s\n' "${subs#"$IMSISTING_ROOT"/}"
+    printf 'rows_seen\t%s\n' "$(tail -n +2 "$subs" | grep -c . || true)"
+    printf 'new_rows\t%s\n' "$n"
+    printf 'status\tbuilt\n'
+    rm -rf "$work"
+    return 0
+}
+
 femt_plan() {
     cat <<'EOF'
 status	handoff
@@ -562,7 +689,9 @@ what	exercising the Iuh backhaul or the local management plane
 hardware	an HeNB you own (a commercial unit or an srsRAN/srsLTE small-cell on an SDR) and a test HNB-GW
 software	osmo-hnbgw, an SCTP stack, a packet capture point on the Iuh
 flow	1. capture the Iuh SCTP association here  2. decode HNBAP/RUA/RANAP  3. audit the local config with --tr069-audit
-note	for a device you own or a lab; attaching to a carrier's HeNB-GW is out of scope
+note	the leg is a lab association you bring: this module builds the S1 body to the octet and decodes it, it does not open the SCTP association itself
+s1setup	the S1 Setup Request this box would present is byte-exact and oracle-confirmed: --s1setup <mcc> <mnc> <enb-id> <name> <tac>
+s1ap	the encoder and decoder for S1SetupRequest, ENBname, SupportedTAs and PagingDRX are asserted against tshark in tools/s1ap_asn1.py
 EOF
 }
 
@@ -732,6 +861,36 @@ CFG
     chk cwmp-two     "$(printf '%s' "$env2" | grep -o 'ParameterValueStruct\[[0-9]*\]')" "ParameterValueStruct[2]"
     chk cwmp-two-n   "$(printf '%s' "$env2" | grep -c '<Name>' | tr -d ' ')" "2"
 
+    # 9. The live window joins the capture store to the identity rows and
+    #    never writes a sighting twice. Both inputs are fixtures here:
+    #    03_gsmtap owns the GSMTAP header and its own selftest asserts it,
+    #    so what is asserted below is the join, the "-" fallback for a frame
+    #    the store does not know, and the dedupe against the file already
+    #    written -- not the decode.
+    local store="$d/decoded.tsv" ids="$d/ids.tsv" subs="$d/subs.tsv"
+    printf 'frame\ttype\tchannel\tarfcn\tuplink\ttimeslot\tsignal_dbm\tsnr_db\tframe_number\tpayload_len\tpayload_hex\tts_epoch\tts_utc\n' > "$store"
+    printf '1\tLTE NAS\t0\t6300\tdownlink\t0\t-52\t18\t7\t22\t00a1\t1770000000\t2026-10-17T08:00:00Z\n' >> "$store"
+    printf '2\tNR NAS\t0\t482000\tuplink\t0\t-60\t11\t9\t30\t00b2\t1770000001\t2026-10-17T08:00:01Z\n' >> "$store"
+    printf 'frame\tkind\tvalue\tsource\n' > "$ids"
+    printf '1\timsi\t001010000000001\t09_lte_attach.sh\n' >> "$ids"
+    printf '2\tguti\t0010100000000000001\t09_lte_attach.sh\n' >> "$ids"
+    printf '3\timsi\t999990000000001\t06_gsm_air.sh\n' >> "$ids"
+    printf '%s\n' "$FEMT_SUBS_HEADER" > "$subs"
+    local first; first=$(femt_live_rows "$store" "$ids" "$subs")
+    chk live-rows     "$(printf '%s\n' "$first" | grep -c . || true)" "3"
+    printf '%s\n' "$first" >> "$subs"
+    chk live-time     "$(printf '%s\n' "$first" | head -1 | cut -f1)" "2026-10-17T08:00:00Z"
+    chk live-frame    "$(printf '%s\n' "$first" | head -1 | cut -f2)" "1"
+    chk live-identity "$(printf '%s\n' "$first" | head -1 | cut -f4)" "001010000000001"
+    chk live-source   "$(printf '%s\n' "$first" | head -1 | cut -f5)" "09_lte_attach.sh"
+    chk live-type     "$(printf '%s\n' "$first" | head -1 | cut -f6)" "LTE NAS"
+    chk live-arfcn    "$(printf '%s\n' "$first" | sed -n 2p | cut -f7)" "482000"
+    chk live-uplink   "$(printf '%s\n' "$first" | sed -n 2p | cut -f9)" "uplink"
+    chk live-unknown  "$(printf '%s\n' "$first" | tail -1 | cut -f1)" "-"
+    chk live-header   "$(head -1 "$subs")" "$FEMT_SUBS_HEADER"
+    local second; second=$(femt_live_rows "$store" "$ids" "$subs")
+    chk live-dedupe   "$(printf '%s' "$second" | grep -c . || true)" "0"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -753,6 +912,7 @@ femt_menu() {
   [8]  Read a box's settings
   [9]  Write the profile to a box
   [d]  Detect a closed cell from a captured SIB1
+  [l]  Live subscribers from the GSMTAP feed
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -769,6 +929,14 @@ M
             9) read -rp "  host [port]> " p; femt_apply $p; read -rp "  enter " _ ;;
             d|D) read -rp "  SIB1 hex or file ('-' for stdin)> " p
                femt_detect "$p"; read -rp "  enter " _ ;;
+            l|L) read -rp "  seconds, or a capture [iface]> " p
+               local la=(); read -ra la <<< "$p"
+               if [[ -n "${la[1]:-}" ]]; then
+                   femt_live "${la[0]:-30}" "${la[1]}"
+               else
+                   femt_live "${la[0]:-30}"
+               fi
+               read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -791,6 +959,7 @@ femt_cli_main() {
         --detect)      femt_detect "${1:--}" ;;
         --s1setup)     femt_s1setup "$@" ;;
         --s1ap)        femt_s1ap_decode "${1:--}" ;;
+        --live)        femt_live "$@" ;;
         --iuh)         femt_iuh_stack ;;
         --tr069-audit) femt_tr069_audit "${1:-}" ;;
         --plan)        femt_plan ;;
@@ -817,6 +986,10 @@ Usage: $0 COMMAND
   --s1setup <mcc> <mnc> <enb-id> <name> <tac>
                         the S1 Setup Request this eNB would present to an MME
   --s1ap <hex|file>     decode an S1AP PDU back to its fields
+  --live [seconds | capture.pcap] [iface]
+                        join the GSMTAP feed to its identity rows and append
+                        new subscriber sightings to the live view's file; a
+                        capture reads through the same join with no radio
   --iuh                 Iuh (HNBAP/RUA/RANAP) reference
   --tr069-audit <conf>  TR-069/CWMP local management findings
   --plan                lab HeNB handoff plan

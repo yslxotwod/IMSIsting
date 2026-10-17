@@ -2894,3 +2894,77 @@ window.motion-reduced * {
     padding-top: 10px;
     border-top: 1px solid @line;
 }
+
+/* ---- Small cell: the subscriber list -------------------------------------
+   The same shape the Wi-Fi recon Targets view uses: a summary strip over a
+   bordered, scrolling list of composite rows. An identity is the thing being
+   read, so it gets its own line in monospace and the circumstances of the
+   sighting sit under it in dim text. No row is a table cell. */
+
+.scell-feed-window {
+  padding: 2px 0 0;
+}
+
+.scell-feed-summary {
+  font-size: 11px;
+  color: @text_dim;
+}
+
+.scell-feed-scroll {
+  background: rgba(9, 14, 22, 0.62);
+  border: 1px solid #293a52;
+  border-radius: 9px;
+}
+
+.scell-feed-list {
+  background: transparent;
+}
+
+.scell-feed-list > row {
+  min-height: 46px;
+  padding: 7px 11px;
+  background: transparent;
+  border-bottom: 1px solid #1e2a3b;
+}
+
+.scell-feed-list > row:hover {
+  background: rgba(22, 33, 49, 0.9);
+}
+
+.scell-feed-list > row:last-child {
+  border-bottom: none;
+}
+
+.scell-feed-glyph {
+  color: #62c3e8;
+}
+
+.scell-feed-id {
+  font-family: monospace;
+  font-size: 13px;
+  color: #dcecff;
+}
+
+.scell-feed-meta {
+  font-size: 10px;
+  color: @text_dim;
+}
+
+.scell-feed-badge {
+  font-family: "Orbitron";
+  font-size: 9px;
+  letter-spacing: 1.2px;
+  color: #62c3e8;
+  padding: 2px 7px;
+  border: 1px solid #2d5a72;
+  border-radius: 4px;
+}
+
+.scell-feed-badge.closed {
+  color: #ff9aae;
+  border-color: #7a2333;
+}
+
+.scell-feed-copy {
+  min-width: 58px;
+}
