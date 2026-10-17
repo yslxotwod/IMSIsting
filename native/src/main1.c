@@ -15705,7 +15705,7 @@ static ModuleSubmenuEntry vowi_entries[] = {
 static ModuleSubmenuEntry femt_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
-      "~--pci-conflict|--iuh:IuH|--tr069-audit:TR-069 Audit" },
+      "~--pci-conflict|~--detect:Closed Cell?|--iuh:IuH|--tr069-audit:TR-069 Audit" },
     { "CSG",
       "network-server-symbolic",
       "--csg-decode:Decode CSG|--csg-encode:Encode CSG|--plan:Plan" },

@@ -16,6 +16,9 @@
 #   --apply          writes the profile to that management plane, over CWMP
 #                    1.2 SetParameterValues.
 #   --tr069-audit    finds the usual local-plane defects in a config.
+#   --detect         decodes a captured SIB1 and says whether the cell declares
+#                    itself closed. The decode is tools/lte_asn1.py, not a bit
+#                    layout of this tree's own.
 #
 # What it does NOT do: it does not run a radio. The HeNB air interface itself
 # (waveform, PRACH, S1 toward a core) is modules/10_lte_air.sh, which is the
@@ -408,6 +411,86 @@ femt_discover() {
     return 0
 }
 
+femt_detect() {
+    # A closed subscriber group is announced, not inferred. SIB1 carries
+    # cellAccessRelatedInfo, and that carries csg-Indication; csg-Identity
+    # rides along only when the flag is set (TS 36.331 6.2.2). So one captured
+    # SIB1 answers "does this cell declare itself closed" with no radio
+    # attached -- and the decode is done by tools/lte_asn1.py, whose SIB1
+    # fields are asserted against pycrate, not by a bit layout of this tree's
+    # own invention.
+    #
+    # What it cannot answer: a small cell that broadcasts no CSG reads exactly
+    # like a macro at this layer, and a CSG on a macro is legal. The verdict is
+    # about the announcement, not the hardware, which is why it says "declares".
+    #
+    # Input: one BCCH-DL-SCH-Message in hex per line, or "-" for stdin.
+    local src="${1:--}"
+    local py="${FEMT_ASN1:-$IMSISTING_ROOT/tools/lte_asn1.py}"
+    if [[ ! -f "$py" ]]; then
+        printf 'ERROR\t%s is missing; cannot decode a SIB1\n' "$py" >&2
+        return 1
+    fi
+    local raw="$MOD_TMP/detect-raw.txt" in="$MOD_TMP/detect-in.txt"
+    if [[ "$src" == "-" ]]; then
+        cat > "$raw"
+    elif [[ -f "$src" ]]; then
+        cp "$src" "$raw"
+    elif [[ "$src" =~ ^[0-9a-fA-Fx[:space:]:.-]+$ ]]; then
+        # Inline hex, not a path: a mistyped filename must not be read as one
+        # undecodable cell, so only characters that could be hex get here.
+        printf '%s\n' "$src" > "$raw"
+    else
+        printf 'ERROR\tno such file: %s\n' "$src" >&2
+        return 2
+    fi
+    sed 's/#.*//' "$raw" | tr -d '\r' > "$in"
+
+    local n=0 closed=0 bad=0 line hex out row
+    printf 'cell\tmcc\tmnc\ttac\tcellid\tcsg\tverdict\n'
+    while IFS= read -r line; do
+        hex=$(femt_norm_hex "$line")
+        [[ -z "$hex" ]] && continue
+        n=$(( n + 1 ))
+        if ! out=$(timeout 60 python3 "$py" decode "$hex" 2>/dev/null); then
+            printf '%s\t-\t-\t-\t-\t-\tundecodable\n' "${hex:0:16}"
+            bad=$(( bad + 1 ))
+            continue
+        fi
+        row=$(printf '%s\n' "$out" | awk -F'\t' -v hx="$hex" '
+            $1=="mcc"            { mcc = $2 }
+            $1=="mnc"            { mnc = $2 }
+            $1=="tac"            { tac = $2 }
+            $1=="cellid"         { cid = $2 }
+            $1=="csg_indication" { ci  = $2 }
+            $1=="csg_identity"   { csg = $2 }
+            END {
+                if (ci == "1") { v = "declares-closed-cell"; if (csg == "-") csg = "set,identity-absent" }
+                else           { v = "declares-open-cell";   csg = "-" }
+                printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                       substr(hx, 1, 16), mcc, mnc, tac, cid, csg, v
+            }')
+        printf '%s\n' "$row"
+        case "$row" in *declares-closed-cell*) closed=$(( closed + 1 )) ;; esac
+    done < "$in"
+
+    printf 'cells\t%d\n' "$n"
+    printf 'closed\t%d\n' "$closed"
+    (( bad > 0 )) && printf 'undecodable\t%d\n' "$bad"
+    if (( n == 0 )); then
+        printf 'ERROR\tno SIB1 hex on input\n' >&2
+        return 2
+    fi
+    if (( closed > 0 )); then
+        printf 'verdict\tclosed-cell-declared\n'
+        printf 'note\ta cell that announces a CSG is a small cell by definition\n'
+    else
+        printf 'verdict\tno-closed-cell-declared\n'
+        printf 'note\tan open small cell reads like a macro here; SIB1 cannot prove one\n'
+    fi
+    return 0
+}
+
 femt_plan() {
     cat <<'EOF'
 status	handoff
@@ -499,6 +582,26 @@ CFG
     chk sib1-open-csg  "$(fld "$out" sib1_csg_identity)" "none"
     chk sib1-noargs "$(femt_sib1_build >/dev/null 2>&1; echo $?)" "2"
 
+    # 4b. --detect reads that SIB1 back. The round trip is the test: a CSG the
+    # module wrote must come back as a declared closed cell, and a cell with no
+    # CSG must not. Neither assertion touches a private bit layout -- the
+    # decode is the same codec's, asserted against pycrate on its own.
+    local csg_hex open_hex
+    csg_hex=$(femt_sib1_build 001 01 00f1 00a1 0x1234567 | awk -F'\t' '$1=="sib1_hex"{print $2}')
+    open_hex=$(femt_sib1_build 001 01 00f1 00a1 | awk -F'\t' '$1=="sib1_hex"{print $2}')
+    printf '%s\n%s\n' "$csg_hex" "$open_hex" > "$d/sib1s.txt"
+    out=$(femt_detect "$d/sib1s.txt")
+    chk detect-cells   "$(fld "$out" cells)"   "2"
+    chk detect-closed  "$(fld "$out" closed)"  "1"
+    chk detect-verdict "$(fld "$out" verdict)" "closed-cell-declared"
+    chk detect-csg-row "$(printf '%s\n' "$out" | awk -F'\t' '$7=="declares-closed-cell"{print $2"|"$3"|"$5}')" "001|01|00000a1"
+    chk detect-open-row "$(printf '%s\n' "$out" | awk -F'\t' '$7=="declares-open-cell"{print $6}')" "-"
+    chk detect-stdin   "$(printf '%s\n' "$csg_hex" | femt_detect - | awk -F'\t' '$1=="verdict"{print $2}')" "closed-cell-declared"
+    chk detect-none    "$(printf '\n\n' | femt_detect - >/dev/null 2>&1; echo $?)" "2"
+    printf 'zzzz\n' | femt_detect - > "$d/bad.out" 2>/dev/null
+    chk detect-bad     "$(fld "$(cat "$d/bad.out")" undecodable)" "1"
+    chk detect-nofile  "$(femt_detect "$d/missing.txt" >/dev/null 2>&1; echo $?)" "2"
+
     # 5. SIB9's HNB-Name is an OCTET STRING, so the hex must be the text.
     out=$(femt_sib9_build LabHeNB)
     chk sib9-hex  "$(fld "$out" sib9_hex)"      "464C616248654E42"
@@ -565,6 +668,7 @@ femt_menu() {
   [7]  Cell profile (settings + SIB1 + SIB9)
   [8]  Read a box's settings
   [9]  Write the profile to a box
+  [d]  Detect a closed cell from a captured SIB1
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -579,6 +683,8 @@ M
                femt_cell_profile $p; read -rp "  enter " _ ;;
             8) read -rp "  host [port]> " p; femt_discover $p; read -rp "  enter " _ ;;
             9) read -rp "  host [port]> " p; femt_apply $p; read -rp "  enter " _ ;;
+            d|D) read -rp "  SIB1 hex or file ('-' for stdin)> " p
+               femt_detect "$p"; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -598,6 +704,7 @@ femt_cli_main() {
         --discover)    femt_discover "$@" ;;
         --apply)       femt_apply "$@" ;;
         --pci-conflict) femt_pci_conflict "${1:-}" ;;
+        --detect)      femt_detect "${1:--}" ;;
         --iuh)         femt_iuh_stack ;;
         --tr069-audit) femt_tr069_audit "${1:-}" ;;
         --plan)        femt_plan ;;
@@ -620,6 +727,7 @@ Usage: $0 COMMAND
                         read a box's own settings off its management plane
   --apply <host> [port] write the profile to that management plane
   --pci-conflict <tsv>  PCI confusion over a cell list
+  --detect <hex|file>   does a captured SIB1 declare a closed cell
   --iuh                 Iuh (HNBAP/RUA/RANAP) reference
   --tr069-audit <conf>  TR-069/CWMP local management findings
   --plan                lab HeNB handoff plan
