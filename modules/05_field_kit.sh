@@ -316,6 +316,7 @@ fk_guard_matrix() {
 12_nr_air|--build-meas-report|measId=1 --tx||60
 13_nr_core|--decode-ngap|00
 15_downgrade|--detect|/nonexistent.pcap
+15_downgrade|--tx-reject|EMM 15 attach|DWN_SDR_DEVICE=|30
 20_gsm_cve|--run-cve|CVE-2017-1000250
 21_lte_cve|--probe|CVE-2017-6975
 22_nr_cve|--run-cve|CVE-2019-1234

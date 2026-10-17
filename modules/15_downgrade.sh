@@ -65,6 +65,9 @@ MOD_TMP="$TMP_DIR/downgrade"
 DWN_DIR="$LOOT_DIR/downgrade"
 DWN_PLAN_DIR="$DWN_DIR/plans"
 DWN_FINDINGS="$DWN_DIR/findings.tsv"
+# Where a private SDR inventory may be pinned, in the same shape modules/
+# 10_lte_air.sh:59 uses for LAIR_SDR.
+DWN_SDR="${TMP_DIR}/sdr_device"
 mkdir -p "$MOD_TMP" "$DWN_DIR" "$DWN_PLAN_DIR" 2>/dev/null
 
 # ── sanitisation ────────────────────────────────────────────────────────
@@ -154,8 +157,19 @@ dwn_cause_steering() {
     dwn_cause_row "$rat" "$n" | awk -F: '{print $5}'
 }
 
-# A rejected cause arrives as one octet in the reject message. For 5GMM the
-# cause IE is 0x59 (type 1, length 1); for EMM it is 0x53; for GMM 0x13.
+# A rejected cause arrives as one octet in the reject message. The cause
+# information element has an identifier in each generation's IE table --
+# EMM cause 0x53 (TS 24.301 §9.9.3.9), 5GMM cause 0x59 (TS 24.501 §9.11.3.2),
+# GMM cause 0x13 (TS 24.008 §10.5.5.14) -- but in a reject message that IE is
+# carried as a MANDATORY type-3 IE, and a mandatory type-3 IE on the wire is
+# just its value: the position (the octet after the message type) identifies it.
+# So the identifier is reported as cause_ie for reference and the octets that
+# actually go on the wire are the value alone. pycrate draws the same
+# distinction: its EMMAttachReject models the cause as
+# Type3V('EMMCause', ...) ("mandatory IE, its content is a simple buffer", no
+# tag octet) while the accept messages that DO send the tag use
+# Type3TV('EMMCause', val={'T':0x53, 'V':...}) -- and its encoder emits 07440F
+# for an attach reject with cause 15, never 0744530F.
 dwn_reject_encoding() {
     local rat="${1:-}" cause="${2:-}"
     local row; row=$(dwn_cause_row "$rat" "$cause")
@@ -181,9 +195,1055 @@ dwn_reject_encoding() {
     printf 'name\t%s\n'         "$(dwn_sanitize "$name")"
     printf 'protocol\t%s\n'     "$proto"
     printf 'cause_ie\t0x%02X\n' "$iei"
-    printf 'ie_octets\t%s %02X\n' "$(printf '0x%02X' "$iei")" "$cause"
+    printf 'cause_ie_on_wire\tno\n'
+    printf 'wire_octets\t%02X\n' "$cause"
+    printf 'cause_ie_role\tmandatory type-3 IE in a reject: the tag is not transmitted\n'
     printf 'effect\t%s\n'       "$(dwn_sanitize "$effect")"
     printf 'steering_value\t%s\n' "$steer"
+}
+
+# ── the reject MESSAGE, not just its cause octet ────────────────────────
+# A cause octet on its own is not a message: a UE only reads it inside a
+# complete NAS reject. The encodings are fixed, so the layout is written out
+# from the spec and then asserted against an outside decoder:
+#
+#   TS 24.301 §8.2.1 / Table 9.8.1 EMM message header: octet 1 is the security
+#     header type (0000 = plain NAS, bits 4-1) under the protocol discriminator
+#     (0111 = EPS mobility management, bits 8-5), so it reads 0x07; octet 2 is
+#     the message type: 0x44 = ATTACH REJECT, 0x4B = TRACKING AREA UPDATE
+#     REJECT, 0x4E = SERVICE REJECT. The EMM cause IE (§9.9.3.9) is a
+#     mandatory type-3 information element, so the octet after the message type
+#     IS the cause value and it carries no tag octet of its own.
+#   TS 24.501 §9.7 / §9.11.3.2 5GMM: a three-octet header. Octet 1 is the
+#     extended protocol discriminator alone (0111 1110 = 5GS mobility
+#     management, so 0x7E); octet 2 is the spare half octet in bits 8-5 and the
+#     security header type in bits 4-1 (0x00 = plain NAS); octet 3 is the
+#     message type, 0x44 = REGISTRATION REJECT, 0x4D = SERVICE REJECT. The 5GMM
+#     cause then follows as the octet after the message type.
+#   TS 24.008 §9.4.1 / Table 10.4 / §10.5.5.14 GMM: octet 1 is the skip
+#     indicator in the high nibble (0000) and the protocol discriminator in the
+#     low nibble (1000 = GPRS mobility management), so 0x08; octet 2 is the
+#     message type, 0x04 = GMM ATTACH REJECT, 0x0B = ROUTING AREA UPDATE
+#     REJECT, 0x0E = GMM SERVICE REJECT; the GMM cause follows it.
+#
+# Message types were NOT taken from a reading of the tables alone: pycrate
+# 0.8.1 vendors all three specs as executable Python (pycrate_mobile.NAS,
+# TS24301_EMM, TS24501_FGMM, TS24008_GMM), and encoding each reject class at its
+# declared defaults gives
+#   EMMAttachReject 074411   EMMTrackingAreaUpdateReject 074b11
+#   EMMServiceReject 074e11  GMMAttachReject 080411
+#   GMMRoutingAreaUpdateReject 080b11                        GMMServiceReject 080e11
+#   FGMMRegistrationReject 7e004416   FGMMServiceReject 7e004d16
+# which is where the octets above come from. The first draft of this table was
+# written from the tables alone and was wrong in four places (EMM TAU 0x45, GMM
+# attach 0x06, GMM RAU 0x08) and right in a fifth only by accident; the selftest
+# now pins every one of them to the pycrate-derived value.
+#
+# The GMM header byte is the one a table reading got backwards here, and a
+# second independent dissector settled it: Wireshark's GSM A-I/F DTAP dissector
+# reads byte 1 of 08 04 11 as ".... 1000 = Protocol discriminator: GPRS mobility
+# management messages (0x8)" with "0000 .... = Skip Indicator: ... (0)", i.e.
+# the discriminator is the LOW nibble, and it reads 80 04 11 as a (GCC) message
+# instead. So the wire byte is 0x08, which is also what pycrate emits.
+#
+# The whole message is produced by this tree's own arithmetic and then handed to
+# that outside decoder (dwn_nas_decode_oracle), never read back with the code
+# that built it.
+dwn_nas_msg_type() {
+    local rat="${1:-}" kind="${2:-attach}"
+    case "$rat:$kind" in
+        EMM:attach)   printf '0x44\tATTACH REJECT\n' ;;
+        EMM:tau)      printf '0x4B\tTRACKING AREA UPDATE REJECT\n' ;;
+        EMM:service)  printf '0x4E\tSERVICE REJECT\n' ;;
+        5GMM:attach)  printf '0x44\t5GMM REGISTRATION REJECT\n' ;;
+        5GMM:tau)     printf '0x44\t5GMM REGISTRATION REJECT\n' ;;
+        5GMM:service) printf '0x4D\t5GMM SERVICE REJECT\n' ;;
+        GMM:attach)   printf '0x04\tGMM ATTACH REJECT\n' ;;
+        GMM:tau)      printf '0x0B\tROUTING AREA UPDATE REJECT\n' ;;
+        GMM:service)  printf '0x0E\tGMM SERVICE REJECT\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+dwn_nas_reject_build() {
+    local rat="${1:-}" cause="${2:-}" kind="${3:-attach}"
+    case "$rat" in EMM|5GMM|GMM) ;; *) return 1 ;; esac
+    [[ "$cause" =~ ^[0-9]+$ ]] || return 1
+    local row; row=$(dwn_cause_row "$rat" "$cause")
+    [[ -n "$row" ]] || return 1
+    local mt; mt=$(dwn_nas_msg_type "$rat" "$kind" 2>/dev/null) || return 1
+    local mt_hex="${mt%%	*}" mt_name="${mt#*	}"
+
+    # The cause rides as a bare value octet after the message type: it is a
+    # mandatory type-3 IE, so its identifier is not transmitted (see the note
+    # above dwn_reject_encoding). pycrate's encoder produces 07440F for cause
+    # 15, not 0744530F, and Wireshark reads 07440F back as Attach reject with
+    # EMM cause 15.
+    local iei
+    case "$rat" in
+        EMM)  iei=0x53 ;;
+        5GMM) iei=0x59 ;;
+        GMM)  iei=0x13 ;;
+    esac
+
+    # Header octets. TS 24.301 packs the security header type and the
+    # protocol discriminator into one octet (0x07 = plain NAS + EPS mobility
+    # management). TS 24.501 gives the discriminator its own octet (0x7E = 5GS
+    # mobility management) and follows it with the spare half octet beside the
+    # security header (0x00 = plain NAS) before the message type, so its header
+    # is THREE octets. TS 24.008 puts the discriminator 1000 in the LOW nibble
+    # of octet 1 with the skip indicator 0000 in the high nibble (0x08, as
+    # Wireshark's DTAP dissector reads it and as pycrate encodes it).
+    local mt_dec=$(( mt_hex ))
+    local -a hdr=()
+    case "$rat" in
+        EMM)  hdr=(0x07 "$mt_dec") ;;
+        5GMM) hdr=(0x7E 0x00 "$mt_dec") ;;
+        GMM)  hdr=(0x08 "$mt_dec") ;;
+    esac
+    local hdr_hex="" h
+    for h in "${hdr[@]}"; do hdr_hex+="${hdr_hex:+ }$(printf '%02X' "$h")"; done
+    local msg_hex=""
+    for h in "${hdr[@]}"; do msg_hex+="$(printf '%02X' "$h")"; done
+    msg_hex+="$(printf '%02X' "$cause")"
+    local msg_octets=$(( ${#hdr[@]} + 1 ))
+
+    printf 'rat\t%s\n'             "$rat"
+    printf 'cause\t%s\n'           "$cause"
+    printf 'cause_hex\t%02X\n'     "$cause"
+    printf 'name\t%s\n'            "$(dwn_sanitize "$(dwn_cause_name "$rat" "$cause")")"
+    printf 'protocol\t%s\n'        "$(dwn_reject_encoding "$rat" "$cause" | awk -F'\t' '$1=="protocol"{print $2}')"
+    printf 'msg_kind\t%s\n'        "$kind"
+    printf 'msg_type\t%s\n'        "$mt_hex"
+    printf 'msg_type_hex\t%s\n'    "$(printf '%02X' "$mt_hex")"
+    printf 'msg_name\t%s\n'        "$mt_name"
+    printf 'hdr_octets\t%d\n'      "${#hdr[@]}"
+    printf 'hdr_hex\t%s\n'         "$hdr_hex"
+    printf 'cause_ie\t0x%02X\n'    "$iei"
+    printf 'cause_ie_on_wire\tno\n'
+    printf 'cause_wire_octet\t%02X\n' "$cause"
+    printf 'msg_octets\t%d\n'      "$msg_octets"
+    printf 'msg_hex\t%s\n'         "$msg_hex"
+    printf 'msg_bits\t%d\n'        "$(( msg_octets * 8 ))"
+    printf 'msg_layout\tTS 24.301 Table 9.8.1 + 9.9.3.9 / TS 24.501 9.7 + 9.11.3.2 / TS 24.008 Table 10.4 + 10.5.5.14\n'
+    printf 'msg_bytes\t%s\n'       "$msg_hex"
+}
+
+# The independent decoder this message is asserted against. pycrate vendors the
+# 3GPP NAS specs as executable Python (pycrate_mobile.NAS), so its
+# EMMAttachReject is a second implementation of TS 24.301 -- not this tree's
+# arithmetic read back to itself. The script is written out here rather than
+# added to tools/ because this module owns exactly one file.
+dwn_nas_oracle_script() {
+    local dst="$1"
+    cat > "$dst" <<'DWN_NAS_ORACLE'
+#!/usr/bin/env python3
+"""Decode NAS reject messages with pycrate (independent of this tree).
+
+pycrate_mobile vendors TS 24.301 / TS 24.501 / TS 24.008 as executable Python,
+so its reject classes are a second implementation of the same messages -- the
+same independent-oracle shape tools/lte-rrc-oracle and tools/lte-per-oracle use
+for RRC and PER. Two assertions are made, and both come from pycrate:
+
+  encode -- pycrate encodes the class from its OWN declared header defaults
+            with the cause the CALLER states; the bytes this tree produced
+            must equal that encoding, or be a prefix of it when pycrate's
+            grammar mandates an optional IE this tree deliberately omits (GMM
+            RAU reject carries a ForceStdby nibble, TS 24.008 9.4.15, that is
+            optional on the air). The cause is an argument and never read out
+            of the message under test, so an encoder that echoes the bytes
+            cannot make a wrong cause compare equal to itself.
+  decode -- pycrate parses the bytes this tree produced and hands back the
+            header fields and the cause. A wrong discriminator, a wrong
+            message type or a wrong cause octet changes what it prints.
+
+Usage:  nas_oracle.py <rat> <kind> <cause> <msg_hex>
+        nas_oracle.py --batch        (stdin: rat<TAB>kind<TAB>cause<TAB>hex,
+                                      rows prefixed with the 1-based line no)
+
+The message is never compared against this tree's own arithmetic.
+"""
+import sys
+
+# rat:kind -> pycrate class. Mirrors dwn_nas_msg_type() in the shell module.
+CLASSES = {
+    ("EMM", "attach"): "EMMAttachReject",
+    ("EMM", "tau"): "EMMTrackingAreaUpdateReject",
+    ("EMM", "service"): "EMMServiceReject",
+    ("5GMM", "attach"): "FGMMRegistrationReject",
+    ("5GMM", "tau"): "FGMMRegistrationReject",
+    ("5GMM", "service"): "FGMMServiceReject",
+    ("GMM", "attach"): "GMMAttachReject",
+    ("GMM", "tau"): "GMMRoutingAreaUpdateReject",
+    ("GMM", "service"): "GMMServiceReject",
+}
+
+# Which half octet each protocol keeps its discriminator in: the security
+# header type / skip indicator, then the protocol discriminator.
+HDR = {
+    "EMM": ("SecHdr", "ProtDisc"),
+    "5GMM": ("SecHdr", "EPD"),
+    "GMM": ("SkipInd", "ProtDisc"),
+}
+
+
+def unwrap(v):
+    while isinstance(v, (list, tuple)) and len(v) == 1:
+        v = v[0]
+    return v
+
+
+def cause_of(msg):
+    for e in msg._content[1:]:
+        if "Cause" in e._name:
+            return unwrap(e.get_val())
+    return None
+
+
+def decode_one(rat, kind, cause_s, hexs):
+    """(ok, rows) for one message. rows is a list of (key, value)."""
+    cls = CLASSES.get((rat, kind))
+    if cls is None:
+        return False, [("ERROR", "no pycrate class for %s %s" % (rat, kind))]
+    if not cause_s.isdigit() or not 0 <= int(cause_s) <= 255:
+        return False, [("ERROR", "cause must be 0..255, got %r" % cause_s)]
+    if not hexs or len(hexs) % 2 or any(c not in "0123456789abcdefABCDEF"
+                                         for c in hexs):
+        return False, [("ERROR", "not an even-length hex string: %r" % hexs)]
+    raw = bytes.fromhex(hexs)
+    try:
+        import pycrate_mobile.NAS as NAS
+    except Exception as exc:
+        return False, [("ERROR", "pycrate is not importable here: %s" % exc)]
+    klass = getattr(NAS, cls, None)
+    if klass is None:
+        return False, [("ERROR", "pycrate has no class %s" % cls)]
+
+    rows = [("oracle", "pycrate %s" % cls), ("nas_bytes", raw.hex().upper()),
+            ("nas_octets", len(raw)), ("want_cause", int(cause_s))]
+
+    # -- encode side: pycrate's own default header + the caller's cause ------
+    enc = klass()
+    enc_ok = False
+    enc_bytes = b""
+    try:
+        for e in enc._content[1:]:
+            if "Cause" in e._name:
+                e.set_val([int(cause_s)])
+                enc_ok = True
+                break
+        if enc_ok:
+            enc_bytes = enc.to_bytes()
+    except Exception as exc:
+        rows.append(("encode_error", str(exc).replace("\t", " ")[:120]))
+    if enc_ok:
+        want = enc_bytes.hex().upper()
+        got = raw.hex().upper()
+        if got == want:
+            match = "exact"
+        elif want.startswith(got) and len(want) > len(got):
+            match = "prefix"
+        else:
+            match = "none"
+        rows += [("pycrate_bytes", want), ("pycrate_octets", len(enc_bytes)),
+                 ("match", match),
+                 ("extra_octets", (len(enc_bytes) - len(raw))
+                  if match == "prefix" else 0),
+                 ("pycrate_header_fields",
+                  ",".join(e._name for e in enc._content[0]._content))]
+    else:
+        rows.append(("match", "no-cause-in-grammar"))
+
+    # -- decode side: does pycrate accept THESE bytes, and read them back? ---
+    dec = klass()
+    try:
+        dec.from_bytes(raw)
+    except Exception as exc:
+        rows += [("decode", "refused"),
+                 ("decode_error", str(exc).replace("\t", " ")[:120])]
+        return True, rows
+    h = dec._content[0]
+    fields = {}
+    for e in h._content:
+        if not getattr(e, "_content", None):
+            fields[e._name] = e.get_val()
+    rows.append(("decode", "ok"))
+    sname, pname = HDR[rat]
+    rows.append(("security_header_type",
+                 "" if fields.get(sname) is None else fields.get(sname)))
+    rows.append(("protocol_discriminator", fields.get(pname, "")))
+    mt = fields.get("Type", "")
+    rows.append(("message_type", mt))
+    rows.append(("message_type_hex", "%02X" % mt if isinstance(mt, int) else ""))
+    c = cause_of(dec)
+    rows.append(("cause", "" if c is None else c))
+    rows.append(("cause_present", "yes" if c is not None else "no"))
+    # The read-back cause must be the one asked for, independently of the
+    # byte comparison above.
+    rows.append(("cause_readback_ok",
+                 "yes" if c is not None and int(c) == int(cause_s) else "no"))
+    return True, rows
+
+
+def emit(rows):
+    sys.stdout.write("".join("%s\t%s\n" % (k, v) for k, v in rows))
+
+
+def main(argv):
+    if argv and argv[0] == "--batch":
+        import io
+        n = 0
+        for line in io.TextIOWrapper(sys.stdin.buffer, "utf-8"):
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            n += 1
+            parts = line.split("\t")
+            if len(parts) != 4:
+                sys.stderr.write("ERROR\tline %d: need 4 tab fields\n" % n)
+                return 1
+            ok, rows = decode_one(*parts)
+            if not ok:
+                sys.stderr.write("ERROR\tline %d: %s\t%s\n"
+                                 % (n, rows[0][0], rows[0][1]))
+                return 1
+            sys.stdout.write("".join("%d\t%s\t%s\n" % (n, k, v)
+                                     for k, v in rows))
+        return 0
+    if len(argv) != 4:
+        sys.stderr.write("ERROR\tusage: nas_oracle.py <rat> <kind> <cause>"
+                         " <msg_hex> | nas_oracle.py --batch\n")
+        return 1
+    ok, rows = decode_one(*argv)
+    if not ok:
+        sys.stderr.write("ERROR\t%s\n" % rows[0][1])
+        return 1
+    emit(rows)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+DWN_NAS_ORACLE
+}
+
+# dwn_nas_oracle_py: the interpreter that can actually import pycrate, or
+# non-zero with the reason on stderr. A box without it cannot assert the LTE
+# message against an outside implementation, and the caller must say so rather
+# than skip the assertion quietly.
+dwn_nas_oracle_py() {
+    local want="${DWN_NAS_ORACLE_PY:-}" c
+    # DWN_NAS_ORACLE_PY wins; then the venv this tree's own RRC/SIB oracles
+    # use (tools/check-lte-sib-codec.sh:49 and tools/asn1gen.py both hardcode
+    # /home/ysl/.lte-oracles/venv/bin/python, overridable with LTE_ORACLE_PY);
+    # then a venv beside the tree; then whatever `python3` is.
+    for c in "$want" "${LTE_ORACLE_PY:-}" \
+             "$HOME/.lte-oracles/venv/bin/python" \
+             "$IMSISTING_ROOT/tools/../.venv/bin/python3" \
+             "$IMSISTING_ROOT/venv/bin/python3" /tmp/pycvenv/bin/python3 \
+             python3; do
+        [[ -n "$c" ]] || continue
+        [[ -x "$c" || "$c" == "python3" ]] || continue
+        if "$c" -c 'import pycrate_mobile.NAS' >/dev/null 2>&1; then
+            printf '%s\n' "$c"; return 0
+        fi
+    done
+    printf 'ERROR\tno interpreter with pycrate_mobile found (tried %s); set DWN_NAS_ORACLE_PY to one\n' \
+        "${DWN_NAS_ORACLE_PY:-unset, LTE_ORACLE_PY, ~/.lte-oracles, .venv, venv, /tmp/pycvenv, python3}" >&2
+    return 1
+}
+
+# dwn_nas_decode_oracle <rat> <kind> <cause> <msg_hex>: hand ONE reject message
+# to pycrate, which parses the bytes this tree built and separately encodes the
+# same class from its own grammar with the cause the CALLER states. Prints the
+# parsed header and cause, the pycrate encoding, and whether the two agree
+# (exact/prefix/none). The cause is an argument so that a wrong cause octet
+# shows up as match=none instead of the encoder faithfully echoing it.
+dwn_nas_decode_oracle() {
+    local rat="${1:-}" kind="${2:-}" cause="${3:-}" hexs="${4:-}"
+    [[ "$rat" =~ ^(EMM|5GMM|GMM)$ ]] || {
+        printf 'ERROR\tdwn_nas_decode_oracle needs rat EMM|5GMM|GMM\n' >&2
+        return 2; }
+    [[ "$kind" =~ ^(attach|tau|service)$ ]] || {
+        printf 'ERROR\tdwn_nas_decode_oracle needs kind attach|tau|service\n' >&2
+        return 2; }
+    [[ "$cause" =~ ^[0-9]+$ ]] && (( cause <= 255 )) || {
+        printf 'ERROR\tdwn_nas_decode_oracle needs a cause 0..255\n' >&2
+        return 2; }
+    [[ "$hexs" =~ ^[0-9A-Fa-f]+$ && $(( ${#hexs} % 2 )) -eq 0 ]] || {
+        printf 'ERROR\tneed an even-length hex string\n' >&2; return 2; }
+    local py; py=$(dwn_nas_oracle_py) || return 1
+    # Always rewritten, never reused: a stale copy under a shared TMP_DIR from
+    # an older revision of this module silently changed the oracle's own CLI
+    # once ("usage: nas_oracle.py <rat> <kind> <msg_hex>"), and an oracle that
+    # is quietly the wrong revision is worse than no oracle at all.
+    local pyf="$MOD_TMP/nas_oracle_v3.py"
+    dwn_nas_oracle_script "$pyf" || return 1
+    "$py" "$pyf" "$rat" "$kind" "$cause" "$hexs"
+}
+
+# dwn_nas_decode_oracle_batch: assert MANY messages in ONE pycrate process.
+# Each oracle invocation pays pycrate's import (measured 6.2s here), so the
+# selftest feeds every reject class through one run instead of nine: the
+# assertions are identical, the interpreter start is paid once.
+# stdin: rat<TAB>kind<TAB>cause<TAB>msg_hex per line; stdout rows are
+# "<line number><TAB><key><TAB><value>" so a caller can pick a line's field.
+dwn_nas_decode_oracle_batch() {
+    local py; py=$(dwn_nas_oracle_py) || return 1
+    local pyf="$MOD_TMP/nas_oracle_v3.py"
+    dwn_nas_oracle_script "$pyf" || return 1
+    "$py" "$pyf" --batch
+}
+
+# ── the RRC envelope that carries it to a UE ────────────────────────────
+# The reject has to arrive inside a downlink RRC message. TS 36.331 §10.5
+# puts a NAS PDU in DLInformationTransfer, whose message type is 0x34, but
+# the DL-DCCH-Message envelope is what a UE has to read first and what a
+# packet analyser dissects: DL-DCCH-MessageType is a non-extensible CHOICE
+# whose `c1` alternative (bit 0) is a 16-alternative CHOICE in which
+# rrcConnectionReconfiguration is number 4 (00100 in unaligned PER) -- the
+# same five-bit envelope tools/lte_rrc.py builds for HandoverCommand, and the
+# same bits pycrate asserts in tools/lte-rrc-oracle/verify_rrc.py.
+dwn_dl_dcch_prefix() { printf '00100\n'; }
+
+dwn_rrc_dl_dcch() {
+    local hexs="${1:-}" bits="${2:-}"
+    [[ "$hexs" =~ ^[0-9A-Fa-f]+$ && $(( ${#hexs} % 2 )) -eq 0 ]] || {
+        printf 'ERROR\tdwn_rrc_dl_dcch needs an even-length hex PDU\n' >&2; return 2; }
+    python3 - "$hexs" "$bits" <<'PY'
+import sys
+hexs, blen = sys.argv[1].upper(), sys.argv[2]
+bits = "".join(format(int(c, 16), "04b") for c in hexs)
+# The true bit length is what tools/lte_rrc.py measured; the hex is padded out
+# to whole octets, so trim the padding bits rather than trust the hex length.
+if blen.isdigit() and 0 < int(blen) <= len(bits):
+    bits = bits[:int(blen)]
+pre = "00100"
+body = pre + bits
+pad = -len(body) % 8
+raw = bytes(int((body + "0" * pad)[i:i + 8], 2) for i in range(0, len(body) + pad, 8))
+print("dl_dcch_prefix\t%s" % pre)
+print("dl_dcch_prefix_dec\t%d" % int(pre, 2))
+print("rrc_pdu_hex\t%s" % hexs)
+print("rrc_pdu_bits\t%d" % len(bits))
+print("rrc_pdu_octets\t%d" % ((len(bits) + 7) // 8))
+print("dl_dcch_pad_bits\t%d" % pad)
+print("dl_dcch_bits\t%d" % len(body))
+print("dl_dcch_octets\t%d" % len(raw))
+print("dl_dcch_hex\t%s" % raw.hex().upper())
+print("dl_dcch_layout\tTS 36.331 10.5 DL-DCCH-Message (unaligned PER)")
+PY
+}
+
+# ── the DLInformationTransfer the reject actually rides in ──────────────
+# A reject is not carried by an RRCConnectionReconfiguration: TS 36.331 §10.5
+# gives the NAS PDU its own message, DLInformationTransfer, whose
+# DLInformationTransfer-r8-IEs carry a `dedicatedInfoType` CHOICE that selects
+# `dedicatedInfoNAS` (a DedicatedInfoNAS OCTET STRING). The bits below are
+# written out from those definitions, not copied from a captured PDU. Each
+# field is listed with the bits it contributes:
+#
+#   DL-DCCH-Message ::= SEQUENCE { message DL-DCCH-MessageType }
+#     DL-DCCH-MessageType is an extensible CHOICE: 1 extension bit (0 = no
+#     extension addition) then the c1 CHOICE index in 4 bits. Inside c1,
+#     dlInformationTransfer is alternative 1 (0001) -- the same five-bit
+#     envelope shape tools/lte_rrc.py builds for rrcConnectionReconfiguration,
+#     where alternative 4 gives 00100.
+#   DLInformationTransfer ::= SEQUENCE {
+#     rrc-TransactionIdentifier RRC-TransactionIdentifier,   INTEGER (0..3)
+#     criticalExtensions CHOICE { c1 CHOICE { dlInformationTransfer-r8,
+#       dlInformationTransfer-r15, spare2, spare1 } } }
+#     unaligned PER: 2 bits of transaction id; then the criticalExtensions
+#     CHOICE index (1 bit, 0 = c1); then the c1 CHOICE index (2 bits, 00 =
+#     dlInformationTransfer-r8).
+#   DLInformationTransfer-r8-IEs ::= SEQUENCE { ... ,
+#     dedicatedInfoType CHOICE { dedicatedInfoNAS DedicatedInfoNAS,
+#       dedicatedInfoCDMA2000-1XRTT ..., dedicatedInfoCDMA2000-HRPD ... },
+#     nonCriticalExtension DLInformationTransfer-v8a0-IEs OPTIONAL }
+#     the SEQUENCE is extensible, so an extension bit (0 = no extension
+#     additions); then the dedicatedInfoType CHOICE index (2 bits, 00 =
+#     dedicatedInfoNAS); then the OCTET STRING itself -- an unconstrained
+#     octet string carries a length determinant, which unaligned PER writes in
+#     the normally-small form: 1 bit saying the length fits the next 7 bits,
+#     then those 7 bits (3 octets is 0 0000011); then the 24 payload bits.
+#
+# Total: 5 + 2 + 1 + 2 + 1 + 2 + 8 + 24 = 45 bits (one more per extra NAS
+# octet). The NAS payload therefore lands at a FIXED bit offset of 21, and the
+# check that matters is that an outside decoder reads the NAS octets back out.
+# This layout is asserted bit for bit against pycrate's DL-DCCH-Message in the
+# selftest; it is not taken on faith here.
+dwn_lte_rrc_transfer() {
+    local nas_hex="${1:-}" tx="${2:-0}" syms="${3:-head}"
+    [[ "$nas_hex" =~ ^[0-9A-Fa-f]+$ && $(( ${#nas_hex} % 2 )) -eq 0 ]] || {
+        printf 'ERROR\tdwn_lte_rrc_transfer needs an even-length hex NAS PDU\n' >&2
+        return 2; }
+    [[ "$tx" =~ ^[0-9]$ ]] || tx=0
+    python3 - "$nas_hex" "$tx" "$syms" <<'PY'
+import sys
+nas_hex, tx, syms = sys.argv[1].upper(), int(sys.argv[2]), sys.argv[3]
+nas = bytes.fromhex(nas_hex)
+if not 1 <= len(nas) <= 127:
+    sys.stderr.write("ERROR\tNAS PDU must be 1..127 octets, got %d\n" % len(nas))
+    raise SystemExit(1)
+
+# TS 36.331 10.5: DL-DCCH-Message/message/c1 index 1 = dlInformationTransfer.
+pre = "0" + format(1, "04b")
+txb = format(tx, "02b")
+crit = "0"                       # criticalExtensions CHOICE: c1
+c1 = "00"                        # c1 CHOICE: dlInformationTransfer-r8
+r8ext = "0"                      # r8-IEs extension bit: no extension additions
+dtype = "00"                     # dedicatedInfoType CHOICE: dedicatedInfoNAS
+nslen = "0" + format(len(nas), "07b")   # normally-small length determinant
+payload = "".join(format(b, "08b") for b in nas)
+inner = txb + crit + c1 + r8ext + dtype + nslen + payload
+body = pre + inner
+pad = -len(body) % 8
+raw = bytes(int((body + "0" * pad)[i:i + 8], 2)
+            for i in range(0, len(body) + pad, 8))
+
+# Where the octet string starts, counted from the first bit of the message.
+nas_off = len(pre) + len(txb) + len(crit) + len(c1) + len(r8ext) + len(dtype) \
+    + len(nslen)
+back = body[nas_off:nas_off + len(payload)]
+print("rrc_message\tDLInformationTransfer")
+print("rrc_message_type\t0x%02X" % 0x34)
+print("channel\tDL-DCCH on PDSCH")
+print("rrc_layout\tTS 36.331 10.5/6.2.2 unaligned PER")
+print("dl_dcch_prefix\t%s" % pre)
+print("dl_dcch_prefix_dec\t1")
+print("rrc_tx_id\t%d" % tx)
+print("dedicated_info_type\tdedicatedInfoNAS")
+print("nas_len_octets\t%d" % len(nas))
+print("nas_ldet_bits\t%d" % len(nslen))
+print("nas_hex\t%s" % nas_hex)
+print("nas_bits\t%d" % len(payload))
+print("nas_bit_offset\t%d" % nas_off)
+print("inner_bits\t%d" % len(inner))
+print("dl_dcch_bits\t%d" % len(body))
+print("dl_dcch_pad_bits\t%d" % pad)
+print("dl_dcch_octets\t%d" % len(raw))
+print("dl_dcch_hex\t%s" % raw.hex().upper())
+print("dl_dcch_bits_hex\t%s" % body)
+# The transmission block is the RRC PDU itself: the PDU was built at the true
+# bit length, so no filler is needed on the way in.
+print("tb_hex\t%s" % raw.hex().upper())
+print("tb_bits\t%d" % len(body))
+# Read the NAS octets straight back out of the finished bit string. This is a
+# self-consistency check of the layout, not the independent one (that is the
+# pycrate arm in the selftest).
+print("nas_readback_hex\t%s" % "".join(
+    "%02X" % int(back[i:i + 8], 2) for i in range(0, len(back), 8)))
+PY
+}
+
+# ── the downlink transmit path ──────────────────────────────────────────
+# The reject above is a NAS message, and a NAS message does not go on the air
+# by itself. It rides in an RRC DLInformationTransfer on DL-DCCH (built by
+# dwn_lte_rrc_transfer), and that RRC PDU is a transport block: CRC24A ->
+# code-block segmentation -> turbo coding -> rate matching -> scrambling ->
+# QPSK -> layer mapping -> precoding -> resource-element mapping -> OFDM.
+#
+# Every stage of that chain is tools/lte_phy.py, which is a transcription of
+# srsRAN_4G's C asserted stage by stage in its own selftest and end to end
+# against srsran_dlsch_encode2()/srsran_pdsch_encode() driven from that C
+# (tools/lte-phy-oracle/pdsch_dump.c). The composed entry point used here is
+# pdsch_encode(), which returns every intermediate so the numbers below are
+# read out of the chain rather than recomputed beside it. Nothing in this
+# module re-implements a PHY stage, so there is only one place for the
+# arithmetic to be wrong and it is not this file.
+#
+# What this module owns is the part no single stage test sees: that the
+# transport block IS the RRC PDU at its true bit length, that the symbols land
+# in the REs the grant actually has, that the resulting samples are one
+# millisecond of baseband, and that the cyclic prefixes are where TS 36.211
+# 6.12 says they are. Those are checked here (dwn_lte_chain_script) and the
+# checks are mutation-tested in the selftest.
+dwn_lte_phy_ok() {
+    [[ -r "$IMSISTING_ROOT/tools/lte_phy.py" ]]
+}
+
+# The chain driver. Prints `<key>\t<value>` rows and exits non-zero, with the
+# reason on stderr, if any stage refuses -- including the waveform checks.
+dwn_lte_chain_script() {
+    local dst="$1"
+    cat > "$dst" <<'DWN_PHY'
+"""The downlink transmit path for one NAS reject, as number rows.
+
+argv: <tb-hex> <tb-bits> <rnti> <cell> <subframe> <n_rb> <cfi> <ports>
+      <iq-dir> <symbols-mode>
+"""
+import importlib.util
+import math
+import os
+import struct
+import sys
+
+ROOT = os.environ.get("IMSISTING_ROOT") or "."
+_spec = importlib.util.spec_from_file_location(
+    "lte_phy", os.path.join(ROOT, "tools", "lte_phy.py"))
+P = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(P)
+
+
+def h2b(h):
+    return [(int(c, 16) >> (3 - i)) & 1 for c in h for i in range(4)]
+
+
+def b2h(bits):
+    pad = (-len(bits)) % 4
+    bits = list(bits) + [0] * pad
+    return "".join("%X" % (bits[i] << 3 | bits[i + 1] << 2
+                           | bits[i + 2] << 1 | bits[i + 3])
+                   for i in range(0, len(bits), 4))
+
+
+def main(argv):
+    hexs, nbits = argv[0], int(argv[1])
+    rnti, cell, sf, n_rb, cfi, ports = (int(x) for x in argv[2:8])
+    iq_dir = argv[8]
+    syms = argv[9] if len(argv) > 9 else "head"
+
+    out = []
+
+    def row(k, v):
+        out.append("%s\t%s" % (k, v))
+
+    bits = h2b(hexs)
+    if nbits > len(bits):
+        sys.stderr.write("ERROR\t--bitlen %d exceeds %d hex bits\n"
+                         % (nbits, len(bits)))
+        return 1
+    tb = bits[:nbits]
+    row("tb_bits", len(tb))
+
+    # TS 36.211 6.12: the FFT size and the sample rate follow from N_RB, and
+    # the waveform is generated at that rate. Nothing resamples it later: a
+    # driver that cannot run at this rate gets a named error rather than a
+    # stretched signal, because a stretched waveform still "transmits".
+    p = P.ofdm_params(n_rb)
+    n_fft, fs, n_sc = p["n_fft"], p["sample_rate"], p["n_sc"]
+    row("ofdm_bandwidth_mhz", p["bandwidth_mhz"])
+    row("ofdm_n_rb", p["n_rb"])
+    row("ofdm_n_fft", n_fft)
+    row("ofdm_sample_rate_hz", fs)
+    row("ofdm_n_sc", n_sc)
+
+    # The grant: which REs the PDSCH may use, in mapping order, with the
+    # control region of slot 0 and the cell-specific references removed.
+    re_by_slot = [P.pdsch_available_re(n_rb, cell, sf, s, ports, False,
+                                       False, None, cfi)
+                  for s in (0, 1)]
+    nof_re = sum(len(r) for r in re_by_slot)
+    row("re_slot0", len(re_by_slot[0]))
+    row("re_slot1", len(re_by_slot[1]))
+    row("nof_re", nof_re)
+
+    crc_stream = P.lte_crc_attach(tb, "24a")
+    row("tb_with_crc_bits", len(crc_stream))
+    row("tb_crc24a_hex", "0x" + b2h(P.crc_bits(tb, "24a")))
+
+    # The whole chain, in one call, at G = nof_re * Qm.
+    enc = P.pdsch_encode(tb, "qpsk", rnti, cell, sf, nof_re, ports, 1)
+    info = enc["info"]
+    cbs = info["cbs"]
+    row("cb_count", info["segmentation"]["C"])
+    row("turbo_k", len(cbs[0]))
+    row("filler_bits", len(cbs[0]) - len(crc_stream))
+    row("turbo_bits", len(P.turbo_encode(cbs[0], len(cbs[0]))))
+    row("e_per_cb", ",".join(str(x) for x in info["e_per_cb"]))
+    row("e_bits", len(enc["e"]))
+    row("rm_reused_blocks", int(math.ceil(len(enc["e"])
+                                          / float(3 * (len(cbs[0]) + 4)))))
+    row("c_init", enc["c_init"])
+    row("scrambled_bits", len(enc["scrambled"]))
+    row("qpsk_symbols", len(enc["symbols"]))
+    row("port_symbols", len(enc["ports"][0]))
+    row("rho_a", "%.6f" % enc["rho_a"])
+
+    # A mapper that cannot be inverted on its own output is broken in a way
+    # every length check passes, so it is inverted once here -- against the
+    # SCRAMBLED bits the modulator was actually fed, which is not the same
+    # sequence as e and is the comparison that makes this check mean anything.
+    if P.demodulate(enc["symbols"], "qpsk") != enc["scrambled"]:
+        sys.stderr.write("ERROR\tQPSK modulator is not invertible on its "
+                         "own output\n")
+        return 1
+    row("qpsk_roundtrip", "ok")
+
+    # TS 36.211 6.4: onto the grid, in the same order pdsch_available_re()
+    # hands out, one slot at a time. pdsch_map writes at the SYMBOL INDEX OF
+    # THE SLOT, so the two slots need two grids and then a stack: mapping the
+    # second slot into the same rows overlaps the first and the mapper refuses
+    # it (which is how this was found). pdsch_map also refuses an RE that is
+    # already written, so a mapping-order mistake is an error, not an overlap.
+    # precode_layers() returns a stream PER PORT, so for one port the symbols
+    # are ports[0] and not ports. Reading the outer list is the mistake that
+    # makes a length check compare the port count against the RE count.
+    if ports != 1:
+        sys.stderr.write("ERROR\t%d ports needs a PMI codebook, which "
+                         "tools/lte_phy.py does not implement\n" % ports)
+        return 1
+    streams = enc["ports"]
+    if len(streams) != 1:
+        sys.stderr.write("ERROR\texpected 1 port stream, got %d\n"
+                         % len(streams))
+        return 1
+    symbols = streams[0]
+    if len(symbols) != nof_re:
+        sys.stderr.write("ERROR\t%d REs need %d symbols, got %d\n"
+                         % (nof_re, nof_re, len(symbols)))
+        return 1
+    n0 = len(re_by_slot[0])
+    grid = []
+    for slot in (0, 1):
+        sub = [[None] * (n_rb * 12) for _ in range(7)]
+        P.pdsch_map(sub, symbols[:n0] if slot == 0 else symbols[n0:],
+                    n_rb, cell, sf, slot, ports, False, False, None,
+                    cfi if slot == 0 else 0)
+        grid.extend(sub)
+    row("symbols_mapped", sum(1 for r in grid for v in r if v is not None))
+
+    # TS 36.211 6.12: subcarrier mapping (DC bin left empty), inverse
+    # transform, cyclic prefix. Two slots make the 1 ms subframe.
+    flat = [[0j if v is None else complex(v) for v in r] for r in grid]
+    samples, lengths = P.ofdm_modulate(flat, n_fft, False, 2)
+    cps = P.cp_lengths(n_fft, False) * 2
+    row("cp_samples", ",".join(str(c) for c in cps[:3])
+        + (",..." if len(cps) > 3 else ""))
+    row("symbol_samples_first", "%d,%d" % (lengths[0], lengths[1]))
+    row("slot_samples", P.slot_samples(n_fft))
+    row("subframe_samples", len(samples))
+
+    want = 2 * P.slot_samples(n_fft)
+    if len(samples) != want:
+        sys.stderr.write("ERROR\tthe waveform is %d samples; one millisecond "
+                         "at %d Hz is %d\n" % (len(samples), fs, want))
+        return 1
+
+    # The prefix of every symbol must be a copy of that symbol's last samples,
+    # at the offset the grid implies. This is the one property that says the
+    # buffer is an OFDM waveform and not simply the right length.
+    off = 0
+    for i, ln in enumerate(lengths):
+        c = cps[i]
+        for j in range(c):
+            if abs(samples[off + j] - samples[off + n_fft + j]) > 1e-9:
+                sys.stderr.write("ERROR\tsymbol %d prefix is not the tail of "
+                                 "its body\n" % i)
+                return 1
+        off += ln
+    row("cp_identity", "ok")
+
+    peak = max(abs(s) for s in samples)
+    if peak <= 0:
+        sys.stderr.write("ERROR\tthe waveform is all zeros\n")
+        return 1
+    mean = sum(abs(s) ** 2 for s in samples) / len(samples)
+    row("peak", "%.6f" % peak)
+    row("mean_power", "%.6f" % mean)
+    row("papr_db", "%.3f" % (10.0 * math.log10(peak * peak / mean)))
+
+    # The two sample formats a driver's own CLI reads. cs8 is what
+    # hackrf_transfer reads; sc16 is the bladeRF/Lime/USRP format. Both are
+    # written from the same complex buffer, scaled by the peak so neither
+    # clips, and the file is read back so the byte counts are measured.
+    os.makedirs(iq_dir, exist_ok=True)
+    cs8 = bytearray()
+    sc16 = bytearray()
+    for s in samples:
+        cs8 += bytes((int(round(s.real / peak * 127.0)) & 0xFF,
+                      int(round(s.imag / peak * 127.0)) & 0xFF))
+        sc16 += struct.pack("<hh",
+                            int(round(s.real / peak * 32767.0)),
+                            int(round(s.imag / peak * 32767.0)))
+    for name, blob in (("cs8", cs8), ("sc16", sc16)):
+        path = os.path.join(iq_dir, "dwn_reject_lte." + name)
+        with open(path, "wb") as fh:
+            fh.write(bytes(blob))
+        back = open(path, "rb").read()
+        if len(back) != len(blob):
+            sys.stderr.write("ERROR\t%s is %d bytes on disk, %d written\n"
+                             % (path, len(back), len(blob)))
+            return 1
+        row("iq_%s_path" % name, path)
+        row("iq_%s_bytes" % name, len(back))
+    row("iq_samples", len(samples))
+    row("iq_seconds", "%.6f" % (len(samples) / float(fs)))
+
+    if syms == "all":
+        idx = range(len(enc["symbols"]))
+    else:
+        var = len(enc["symbols"])
+        idx = list(range(min(8, var))) + \
+            list(range(max(8, var - 4), var))
+    for i in idx:
+        v = enc["symbols"][i]
+        row("sym", "%d\t%d\t%.6f%+.6fi" % (i, i // 12, v.real, v.imag))
+    row("symbols_shown", "%d of %d (DWN_TX_SYMBOLS=all for every one)"
+        % (len(list(idx)), len(enc["symbols"])))
+
+    sys.stdout.write("\n".join(out) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (ValueError, IndexError) as exc:
+        sys.stderr.write("ERROR\t%s\n" % exc)
+        sys.exit(1)
+DWN_PHY
+}
+
+# Run the chain, leaving its rows in <dest>. Non-zero, with the chain's own
+# error text on stderr, when a stage refuses.
+dwn_lte_chain_build() {
+    local hex="$1" nbits="$2" dst="$3"
+    local py="$MOD_TMP/downlink_chain.py"
+    # Written every run, not cached on size: the driver is a heredoc inside
+    # this file, so a cached copy is the previous version of this file. A
+    # stale driver is the one failure that looks exactly like success.
+    mkdir -p "$MOD_TMP" || return 1
+    dwn_lte_chain_script "$py" || return 1
+    IMSISTING_ROOT="$IMSISTING_ROOT" python3 "$py" "$hex" "$nbits" \
+        "${DWN_TX_RNTI:-0}" "${DWN_TX_CELL:-1}" "${DWN_TX_SF:-1}" \
+        "${DWN_TX_RB:-6}" "${DWN_TX_CFI:-1}" "${DWN_TX_PORTS:-1}" \
+        "${DWN_TX_IQ_DIR:-$DWN_DIR/iq}" "${DWN_TX_SYMBOLS:-head}" > "$dst"
+}
+
+# One field out of a `<key>\t<value>` row, first match wins. The here-string
+# matters: the chain output is thousands of rows and `printf | awk` exits on
+# the first match, so the write after that is a broken pipe every time.
+dwn_ltef() {
+    awk -F'\t' -v k="$2" '$1==k{print $2; exit}' <<< "$1"
+}
+
+# The transmit call for a driver's own CLI, or non-zero when this module has no
+# verified call for it. Only the hackrf call is built in: hackrf_transfer's
+# transmit syntax is the one this tree already runs in modules/07_gsm_attack.sh
+# and modules/12_nr_air.sh. No syntax is invented for drivers this host cannot
+# exercise -- an operator supplies DWN_TX_CMD for those, and the output says so
+# instead of printing a plausible-looking line nobody has ever run.
+#
+# The sample rate is checked against a driver's range before the call is
+# offered. hackrf_transfer resamples in the CPLD between 2 and 20 Msps, so the
+# 1.92..30.72 Msps an LTE carrier runs at fits, but a driver whose range does
+# not cover the waveform's rate gets a named error rather than a stretched
+# signal: the waveform is generated at N_FFT * 15 kHz and this module never
+# resamples it.
+dwn_lte_rate_ok() {
+    local drv="${1:-}" rate="${2:-}"
+    [[ "$rate" =~ ^[0-9]+$ ]] || return 1
+    case "$drv" in
+        hackrf) (( rate >= 2000000 && rate <= 20000000 )) ;;
+        *) return 0 ;;   # operator-supplied call: their driver, their range
+    esac
+}
+
+dwn_lte_tx_call() {
+    local drv="${1:-}" iq="${2:-}" rate="${3:-}" freq="${4:-}" gain="${5:-}"
+    [[ -n "$drv" && -n "$iq" && -n "$rate" && -n "$freq" ]] || return 1
+    case "$drv" in
+        hackrf)
+            # -t I/Q file, -f centre Hz, -s sample rate, -a 1 RF amp, -x TX VGA
+            printf 'hackrf_transfer -t %s -f %s -s %s -a 1 -x %s' \
+                   "$iq" "$freq" "$rate" "$gain" ;;
+        *) return 1 ;;
+    esac
+}
+
+# ── dwn_tx_reject: the whole downlink, and an honest answer about the radio ──
+# <rat> <cause> [attach|tau|service]. Prints every number as a value and only
+# claims a transmission when a driver answered a probe AND its command ran.
+# With no radio it prints ERROR plus WHY on stderr and returns non-zero, with
+# no success line on stdout.
+dwn_tx_reject() {
+    local rat="${1:-5GMM}" cause="${2:-22}" kind="${3:-attach}"
+    local nas; nas=$(dwn_nas_reject_build "$rat" "$cause" "$kind") || {
+        printf 'ERROR\tno such reject: %s cause %s (%s)\n' \
+               "$(dwn_sanitize "$rat")" "$(dwn_sanitize "$cause")" \
+               "$(dwn_sanitize "$kind")" >&2
+        return 2; }
+    local nas_hex nas_bits nas_name
+    nas_hex=$(dwn_ltef "$nas" msg_hex)
+    nas_bits=$(dwn_ltef "$nas" msg_bits)
+    nas_name=$(dwn_ltef "$nas" name)
+
+    local rrc; rrc=$(dwn_lte_rrc_transfer "$nas_hex" "${DWN_TX_RRC_TX:-0}") || {
+        printf 'ERROR\tthe DL-DCCH wrapper refused the NAS PDU\n' >&2
+        return 1; }
+    local rrc_hex rrc_bits rrc_octets tb_bits
+    rrc_hex=$(dwn_ltef "$rrc" dl_dcch_hex)
+    rrc_bits=$(dwn_ltef "$rrc" dl_dcch_bits)
+    rrc_octets=$(dwn_ltef "$rrc" dl_dcch_octets)
+    # The transport block is the octet-aligned RRC PDU, NOT its ASN.1 bit
+    # length. TS 36.212 5.1.1 takes A from the TBS table of TS 36.213
+    # Table 7.1.7.2.1-1, and every entry there is a multiple of 8, so a
+    # transport block of 53 bits is not a size that exists: the three bits the
+    # PER encoder added to reach an octet boundary are transmitted with the
+    # PDU. Passing the ASN.1 length instead is what makes a chain ask for
+    # filler bits -- the tree refuses those ("srsRAN 23.11 refuses them too"),
+    # and it is right to: at every standard TBS the filler count is zero, so a
+    # caller asking for filler has the length wrong, not the chain.
+    tb_bits=$(( rrc_octets * 8 ))
+
+    printf 'rat\t%s\n' "$rat"
+    printf 'cause\t%s\n' "$cause"
+    printf 'cause_name\t%s\n' "$nas_name"
+    printf 'nas_msg_type\t%s\n' "$(dwn_ltef "$nas" msg_type_hex)"
+    printf 'nas_msg_name\t%s\n' "$(dwn_ltef "$nas" msg_name)"
+    printf 'nas_hex\t%s\n' "$nas_hex"
+    printf 'nas_bits\t%s\n' "$nas_bits"
+    printf 'rrc_message\t%s\n' "$(dwn_ltef "$rrc" rrc_message) on DL-DCCH"
+    printf 'rrc_tx_id\t%s\n' "$(dwn_ltef "$rrc" rrc_tx_id)"
+    printf 'rrc_hex\t%s\n' "$rrc_hex"
+    printf 'rrc_bits\t%s\n' "$rrc_bits"
+    printf 'rrc_octets\t%s\n' "$rrc_octets"
+    printf 'rrc_pad_bits\t%s\n' "$(dwn_ltef "$rrc" dl_dcch_pad_bits)"
+    printf 'tb_bits\t%s\n' "$tb_bits"
+
+    if ! dwn_lte_phy_ok; then
+        printf 'ERROR\tthe PHY chain needs tools/lte_phy.py, which is not readable under %s\n' \
+               "$(dwn_sanitize "$IMSISTING_ROOT")" >&2
+        return 1
+    fi
+
+    local chain="$MOD_TMP/tx_chain.tsv"
+    mkdir -p "$MOD_TMP"
+    if ! dwn_lte_chain_build "$rrc_hex" "$tb_bits" "$chain"; then
+        printf 'ERROR\tthe downlink PHY chain refused this transport block\n' >&2
+        return 1
+    fi
+    local o; o=$(cat "$chain")
+    local k
+    for k in ofdm_bandwidth_mhz ofdm_n_rb ofdm_n_fft ofdm_sample_rate_hz \
+             ofdm_n_sc re_slot0 re_slot1 nof_re tb_bits tb_with_crc_bits \
+             tb_crc24a_hex cb_count turbo_k filler_bits turbo_bits e_bits \
+             rm_reused_blocks c_init scrambled_bits qpsk_symbols port_symbols \
+             rho_a qpsk_roundtrip symbols_mapped cp_samples slot_samples \
+             subframe_samples cp_identity peak mean_power papr_db iq_samples \
+             iq_cs8_path iq_cs8_bytes iq_sc16_path iq_sc16_bytes iq_seconds \
+             symbols_shown; do
+        printf '%s\t%s\n' "$k" "$(dwn_ltef "$o" "$k")"
+    done
+    local n=0 s
+    while IFS= read -r s; do
+        [[ -n "$s" ]] || continue
+        printf 'sym\t%s\n' "$s"
+        n=$(( n + 1 ))
+    done < <(awk -F'\t' '$1=="sym"{sub(/^sym\t/,""); print}' <<< "$o")
+
+    # The grant that carries this PDSCH. Format 1 for a C-RNTI, 1A for the
+    # fallback, and the aggregation level follows from the CCEs the control
+    # region has room for.
+    local phy="$IMSISTING_ROOT/tools/lte_phy.py" rb="${DWN_TX_RB:-6}"
+    local cell="${DWN_TX_CELL:-1}" ports="${DWN_TX_PORTS:-1}" sf="${DWN_TX_SF:-1}"
+    local cfi="${DWN_TX_CFI:-1}" rnti="${DWN_TX_RNTI:-0}"
+    local dci_fmt=1 dci_size agg cce_have regs_line
+    regs_line=$(python3 "$phy" regs --n-rb "$rb" --cell "$cell" --ports "$ports" 2>/dev/null \
+                | awk -F'\t' -v k="pdcch-cfi$cfi" '$1==k{print $2; exit}')
+    cce_have=$(printf '%s' "$regs_line" | sed -n 's/.*, *\([0-9]*\) *CCEs\?.*/\1/p')
+    dci_size=$(python3 "$phy" dci-size "$dci_fmt" --n-rb "$rb" --ports "$ports" 2>/dev/null)
+    [[ "$dci_size" =~ ^[0-9]+$ ]] || {
+        dci_fmt=1A
+        dci_size=$(python3 "$phy" dci-size 1A --n-rb "$rb" --ports "$ports" 2>/dev/null); }
+    [[ "$dci_size" =~ ^[0-9]+$ ]] || dci_size=0
+    case "$dci_fmt" in 0|1A|1) agg=2 ;; 2) agg=4 ;; 3) agg=8 ;; esac
+    printf 'dci_format\t%s\n' "$dci_fmt"
+    printf 'dci_bits\t%s\n' "$dci_size"
+    printf 'pdcch_aggregation\t%s\n' "$agg"
+    printf 'pdcch_cce_available\t%s\n' "${cce_have:-0}"
+    printf 'pdcch_cce_needed\t%s\n' "$agg"
+    if [[ "${cce_have:-0}" =~ ^[0-9]+$ ]] && (( cce_have >= agg )) \
+       && (( dci_size > 0 )); then
+        printf 'pdcch_fits\t1\n'
+    else
+        printf 'pdcch_fits\t0\n'
+    fi
+    local dci_hex pdc pdc_hex
+    dci_hex=$(printf '%0*X' $(( ((dci_size + 7) / 8) * 2 )) 0)
+    pdc=$(python3 "$phy" pdcch "$dci_hex" --rnti "$rnti" --bits "$dci_size" \
+              --format "$dci_fmt" --ncce 0 --cell "$cell" --subframe "$sf" 2>/dev/null)
+    pdc_hex="${pdc%% *}"
+    if [[ "$pdc_hex" =~ ^[0-9A-Fa-f]+$ ]]; then
+        # lte_phy.py pdcch prints one hex digit PER CODED BIT, so the digit
+        # count is the coded length: aggregation level 2 is 2 CCEs, a CCE is
+        # 36 REGs and a REG carries 8 coded bits, so 72 whatever the DCI is.
+        printf 'pdcch_hex\t%s\n' "$pdc_hex"
+        printf 'pdcch_bits\t%d\n' "${#pdc_hex}"
+    else
+        printf 'pdcch_hex\t-\n'
+        printf 'pdcch_bits\t0\n'
+    fi
+
+    # Timing and burst structure. A DLInformationTransfer is one transport
+    # block in one subframe; a steering burst is that subframe repeated, and
+    # the repetition count is stated rather than implied.
+    local freq="${DWN_TX_FREQ_HZ:-1842500000}" gain="${DWN_TX_GAIN_DB:-0}"
+    local reps="${DWN_TX_BURST_SUBFRAMES:-1}" rate sps
+    rate=$(dwn_ltef "$o" ofdm_sample_rate_hz)
+    sps=$(dwn_ltef "$o" subframe_samples)
+    [[ "$reps" =~ ^[0-9]+$ ]] && (( reps >= 1 )) || reps=1
+    [[ "$gain" =~ ^-?[0-9]+$ ]] || gain=0
+    printf 'tx_subframe_ms\t1\n'
+    printf 'tx_slots\t2\n'
+    printf 'tx_symbols\t14\n'
+    printf 'tx_burst_subframes\t%s\n' "$reps"
+    printf 'tx_burst_ms\t%s\n' "$reps"
+    printf 'tx_burst_samples\t%d\n' "$(( sps * reps ))"
+    printf 'tx_centre_freq_hz\t%s\n' "$freq"
+    printf 'tx_gain_db\t%s\n' "$gain"
+    printf 'tx_sample_rate_hz\t%s\n' "$rate"
+    printf 'tx_iq_format\tcs8\n'
+    if [[ -n "${DWN_TX_FREQ_HZ:-}" ]]; then
+        printf 'tx_centre_source\tDWN_TX_FREQ_HZ\n'
+    else
+        printf 'tx_centre_source\tdefault band 3 EARFCN 1650 = 1842.5 MHz (not probed from any network; set DWN_TX_FREQ_HZ to change it)\n'
+    fi
+
+    # The radio. A driver binary on PATH is not a radio, so the device is
+    # asked (dwn_find_tx_sdr), and DWN_SDR_DEVICE overrides the answer.
+    local dev
+    if ! dev=$(dwn_find_tx_sdr); then
+        printf 'tx_device\tnone\n' >&2
+        printf 'tx_mode\tnone\n' >&2
+        printf 'ERROR\tno SDR device: %s did not answer a probe (tried hackrf_info, bladeRF-cli -p, LimeUtil --find, uhd_find_devices)\n' \
+               "$(dwn_sanitize "$DWN_SDR")" >&2
+        printf 'WHY\tthe baseband chain above is real and its waveform is on disk, but keying it needs a radio; a driver package being installed is not a radio, so the probe asks the driver rather than the PATH; set DWN_SDR_DEVICE=<driver> to force a named device, or DWN_TX_CMD for a driver this module has no built-in call for\n' >&2
+        return 1
+    fi
+    printf 'tx_device\t%s\n' "$(dwn_sanitize "$dev")"
+    printf 'tx_mode\tradio\n'
+    local iq; iq=$(dwn_ltef "$o" iq_cs8_path)
+    if ! dwn_lte_rate_ok "$dev" "$rate"; then
+        printf 'ERROR\t%s cannot run at %s Hz, and this waveform is generated at N_FFT * 15 kHz and never resampled\n' \
+               "$(dwn_sanitize "$dev")" "$(dwn_sanitize "$rate")" >&2
+        return 1
+    fi
+    local cmd
+    if [[ -n "${DWN_TX_CMD:-}" ]]; then
+        cmd="$DWN_TX_CMD"
+        printf 'sdr_call\tshell: %s\n' "$(dwn_sanitize "$cmd")"
+    elif ! cmd=$(dwn_lte_tx_call "$dev" "$iq" "$rate" "$freq" "$gain"); then
+        printf 'ERROR\tno built-in transmit call for %s -- set DWN_TX_CMD\n' \
+               "$(dwn_sanitize "$dev")" >&2
+        return 1
+    else
+        printf 'sdr_call\t%s\n' "$(dwn_sanitize "$cmd")"
+    fi
+    printf 'sdr_iq\t%s\n' "$iq"
+    printf 'sdr_iq_format\tcs8\n'
+    printf 'sdr_centre_hz\t%s\n' "$freq"
+    printf 'sdr_gain_db\t%s\n' "$gain"
+    local rc=0
+    timeout 120 bash -c "$cmd" >/dev/null 2>&1 || rc=$?
+    if (( rc != 0 )); then
+        printf 'ERROR\tthe SDR call failed (rc %s): %s\n' "$rc" \
+               "$(dwn_sanitize "$cmd")" >&2
+        return 1
+    fi
+    printf 'TX\tqueued to %s (%s Hz, %s PRB, burst %s subframe(s))\n' \
+           "$(dwn_sanitize "$dev")" "$rate" "$rb" "$reps"
 }
 
 # ── null cipher identifiers ─────────────────────────────────────────────
@@ -742,11 +1802,60 @@ EOF
 }
 
 # ── hardware guards ─────────────────────────────────────────────────────
+# A driver binary on PATH is not a radio. `command -v hackrf_transfer` is true
+# on any box with the HackRF tools installed, with or without a HackRF plugged
+# in, so deciding a transmit radio exists that way makes this module announce a
+# radio it cannot transmit through. Each driver is asked instead, and only its
+# answer counts (the same probe shape modules/10_lte_air.sh:3296 uses):
+#   * hackrf_info exits non-zero and says "No HackRF boards found." with no
+#     board attached;
+#   * bladeRF-cli -p exits non-zero with "No devices are available.";
+#   * LimeUtil --find exits 0 with AND without a device, so its OUTPUT is the
+#     only signal -- no information at all means no radio;
+#   * uhd_find_devices prints a "Device Address" block per device.
+# SoapySDRUtil is not used: it reports "Found device 0" with nothing attached.
+dwn_sdr_probe() {
+    local drv="$1" out
+    case "$drv" in
+        hackrf)
+            command -v hackrf_info >/dev/null 2>&1 || return 1
+            out=$(timeout 10 hackrf_info 2>&1) || return 1
+            grep -qi 'no hackrf boards found' <<< "$out" && return 1
+            return 0 ;;
+        bladerf)
+            command -v bladeRF-cli >/dev/null 2>&1 || return 1
+            out=$(timeout 10 bladeRF-cli -p 2>&1) || return 1
+            grep -qi 'no devices are available' <<< "$out" && return 1
+            return 0 ;;
+        limesdr)
+            command -v LimeUtil >/dev/null 2>&1 || return 1
+            out=$(timeout 15 LimeUtil --find 2>&1)
+            [[ -n "${out//[[:space:]]/}" ]] ;;
+        usrp|b200|b210)
+            command -v uhd_find_devices >/dev/null 2>&1 || return 1
+            out=$(timeout 15 uhd_find_devices 2>&1)
+            grep -qi 'device address' <<< "$out" ;;
+        *) return 1 ;;
+    esac
+}
+
+# dwn_find_tx_sdr: the transmit radio, or non-zero when there is none.
 dwn_find_tx_sdr() {
-    command -v hackrf_transfer >/dev/null 2>&1 && { echo "hackrf";  return 0; }
-    command -v bladeRF-cli     >/dev/null 2>&1 && { echo "bladerf"; return 0; }
-    command -v LimeUtil        >/dev/null 2>&1 && { echo "limesdr"; return 0; }
-    command -v uhd_siggen      >/dev/null 2>&1 && { echo "usrp";    return 0; }
+    local f drv
+    # Defined but empty is an instruction, not an unset variable: the selftest
+    # uses it to prove the refusal path on a box that HAS a radio.
+    if [[ -n "${DWN_SDR_DEVICE+set}" ]]; then
+        [[ -n "$DWN_SDR_DEVICE" ]] || return 1
+        printf '%s\n' "$DWN_SDR_DEVICE"; return 0
+    fi
+    for f in "$DWN_SDR" "$TMP_DIR/sdr_device"; do
+        [[ -s "$f" ]] || continue
+        drv=$(cut -f1 < "$f" 2>/dev/null | head -n1 | tr -d '\r')
+        [[ -n "$drv" ]] && { printf '%s\n' "$drv"; return 0; }
+    done
+    for drv in hackrf bladerf limesdr usrp b200 b210; do
+        dwn_sdr_probe "$drv" && { printf '%s\n' "$drv"; return 0; }
+    done
     return 1
 }
 
@@ -818,6 +1927,45 @@ dwn_cmd_build_smc() {
 
 dwn_cmd_detect() { dwn_detect "${1:-}"; }
 
+# The NAS reject message itself: header, message type and the mandatory cause
+# IE, for one RAT and message class.
+dwn_cmd_build_reject() {
+    local rat="${1:-}" cause="${2:-}" kind="${3:-attach}"
+    [[ -n "$rat" && -n "$cause" ]] || {
+        printf 'ERROR\tusage: --build-reject <EMM|5GMM|GMM> <cause> [attach|tau|service]\n' >&2
+        return 2; }
+    case "${rat^^}" in
+        EMM|5GMM|GMM) ;;
+        *) printf 'ERROR\trat must be EMM, 5GMM or GMM: %s\n' "$(dwn_sanitize "$rat")" >&2
+           return 2 ;;
+    esac
+    [[ "$cause" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tcause must be numeric: %s\n' "$(dwn_sanitize "$cause")" >&2; return 2; }
+    dwn_nas_reject_build "${rat^^}" "$cause" "$kind" || {
+        printf 'ERROR\tno %s reject carries cause %s as a %s reject\n' \
+               "$(dwn_sanitize "${rat^^}")" "$(dwn_sanitize "$cause")" \
+               "$(dwn_sanitize "$kind")" >&2
+        return 1; }
+}
+
+# The same message over the real downlink chain, and an honest answer about
+# whether a radio exists to carry it.
+dwn_cmd_tx_reject() {
+    local rat="${1:-}" cause="${2:-}" kind="${3:-attach}"
+    if [[ -z "$rat" ]]; then
+        printf 'ERROR\tusage: --tx-reject <EMM|5GMM|GMM> <cause> [attach|tau|service]\n' >&2
+        return 2
+    fi
+    case "${rat^^}" in
+        EMM|5GMM|GMM) ;;
+        *) printf 'ERROR\trat must be EMM, 5GMM or GMM: %s\n' "$(dwn_sanitize "$rat")" >&2
+           return 2 ;;
+    esac
+    [[ "$cause" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tcause must be numeric: %s\n' "$(dwn_sanitize "$cause")" >&2; return 2; }
+    dwn_tx_reject "${rat^^}" "$cause" "$kind"
+}
+
 dwn_cmd_plan() {
     local name="${1:-}"
     [[ -n "$name" ]] || {
@@ -881,21 +2029,29 @@ dwn_selftest() {
     chk cause-27-emm "$(dwn_cause_row EMM 27)" ""
     chk cause-27-5gmm "$(dwn_cause_name 5GMM 27)" "N1 mode not allowed"
 
-    # 2. The reject encoding: the cause IE and its octets.
+    # 2. The reject encoding: the cause IE and the octets it puts on the wire.
+    #    The tag (EMM 0x53 / 5GMM 0x59 / GMM 0x13) identifies the IE in a
+    #    TLV, but this cause is a MANDATORY type-3 IE in a reject, so the tag
+    #    is not transmitted and the octet after the message type IS the cause.
+    #    pycrate encodes 07440F for Attach reject cause 15 and Wireshark reads
+    #    07440F back as Attach reject (EMM cause 15); 0744530F is neither.
     out=$(dwn_reject_encoding 5GMM 27)
     chk rej-rat     "$(fld "$out" rat)"        "5GMM"
     chk rej-cause   "$(fld "$out" cause)"      "27"
     chk rej-hex     "$(fld "$out" cause_hex)"  "1B"
     chk rej-ie      "$(fld "$out" cause_ie)"   "0x59"
-    chk rej-octets  "$(fld "$out" ie_octets)"  "0x59 1B"
+    chk rej-ie-wire "$(fld "$out" cause_ie_on_wire)" "no"
+    chk rej-octets  "$(fld "$out" wire_octets)" "1B"
     chk rej-name    "$(fld "$out" name)"       "N1 mode not allowed"
     out=$(dwn_reject_encoding EMM 15)
     chk rej-emm-ie  "$(fld "$out" cause_ie)"   "0x53"
     chk rej-emm-hex "$(fld "$out" cause_hex)"  "0F"
+    chk rej-emm-oct "$(fld "$out" wire_octets)" "0F"
     chk rej-emm-name "$(fld "$out" name)"      "No suitable cells in tracking area"
     out=$(dwn_reject_encoding GMM 12)
     chk rej-gmm-ie  "$(fld "$out" cause_ie)"   "0x13"
     chk rej-gmm-hex "$(fld "$out" cause_hex)"  "0C"
+    chk rej-gmm-oct "$(fld "$out" wire_octets)" "0C"
     chk rej-bad-rat "$(dwn_reject_encoding XYZ 1 >/dev/null 2>&1; echo $?)" "1"
 
     # 3. Null-cipher table completeness across all four generations.
@@ -1111,6 +2267,387 @@ EOF
         printf 'pcap-reject-raised\tSKIP (no tshark/text2pcap)\n'
     fi
 
+    # 13. The NAS reject MESSAGE, not just its cause octet: security header
+    #     type / skip indicator, protocol discriminator, message type and the
+    #     mandatory cause IE, assembled per generation. The hex asserted here
+    #     is the published wire form -- TS 24.301 Table 9.8.1 with 9.9.3.9,
+    #     TS 24.501 9.7 with 9.11.3.2, TS 24.008 Table 10.4 with 10.5.5.14 --
+    #     and group 14 has pycrate parse and re-encode every one of them.
+    out=$(dwn_nas_reject_build EMM 15 attach)
+    chk msg-emm-attach-hex  "$(fld "$out" msg_hex)"        "07440F"
+    chk msg-emm-attach-type "$(fld "$out" msg_type_hex)"   "44"
+    chk msg-emm-hdr-octets  "$(fld "$out" hdr_octets)"     "2"
+    chk msg-emm-octets      "$(fld "$out" msg_octets)"     "3"
+    chk msg-emm-bits        "$(fld "$out" msg_bits)"       "24"
+    # A mandatory type-3 IE transmits no identifier: sending 0x53 there, which
+    # the old cause_ie row used to advertise, makes the message unparseable.
+    chk msg-ie-on-wire      "$(fld "$out" cause_ie_on_wire)" "no"
+    chk msg-ie-wire-octet   "$(fld "$out" cause_wire_octet)" "0F"
+    out=$(dwn_nas_reject_build EMM 22 tau)
+    chk msg-emm-tau-hex     "$(fld "$out" msg_hex)"        "074B16"
+    chk msg-emm-tau-type    "$(fld "$out" msg_type_hex)"   "4B"
+    out=$(dwn_nas_reject_build EMM 15 service)
+    chk msg-emm-svc-hex     "$(fld "$out" msg_hex)"        "074E0F"
+    chk msg-emm-svc-type    "$(fld "$out" msg_type_hex)"   "4E"
+    # 5GS keeps the discriminator in its own octet, so the header is three
+    # octets and there is a spare half octet beside the security header type.
+    out=$(dwn_nas_reject_build 5GMM 27 attach)
+    chk msg-5gmm-reg-hex    "$(fld "$out" msg_hex)"        "7E00441B"
+    chk msg-5gmm-type       "$(fld "$out" msg_type_hex)"   "44"
+    chk msg-5gmm-hdr-octets "$(fld "$out" hdr_octets)"     "3"
+    chk msg-5gmm-octets     "$(fld "$out" msg_octets)"     "4"
+    chk msg-5gmm-bits       "$(fld "$out" msg_bits)"       "32"
+    out=$(dwn_nas_reject_build 5GMM 31 tau)
+    chk msg-5gmm-tau-hex    "$(fld "$out" msg_hex)"        "7E00441F"
+    chk msg-5gmm-tau-type   "$(fld "$out" msg_type_hex)"   "44"
+    out=$(dwn_nas_reject_build 5GMM 27 service)
+    chk msg-5gmm-svc-hex    "$(fld "$out" msg_hex)"        "7E004D1B"
+    chk msg-5gmm-svc-type   "$(fld "$out" msg_type_hex)"   "4D"
+    # GPRS puts the discriminator 1000 in the LOW nibble with the skip
+    # indicator in the high nibble: 0x08. It is NOT 0x80.
+    out=$(dwn_nas_reject_build GMM 12 attach)
+    chk msg-gmm-attach-hex  "$(fld "$out" msg_hex)"        "08040C"
+    chk msg-gmm-type        "$(fld "$out" msg_type_hex)"   "04"
+    out=$(dwn_nas_reject_build GMM 12 tau)
+    chk msg-gmm-rau-hex     "$(fld "$out" msg_hex)"        "080B0C"
+    chk msg-gmm-rau-type    "$(fld "$out" msg_type_hex)"   "0B"
+    out=$(dwn_nas_reject_build GMM 12 service)
+    chk msg-gmm-svc-hex     "$(fld "$out" msg_hex)"        "080E0C"
+    chk msg-gmm-svc-type    "$(fld "$out" msg_type_hex)"   "0E"
+    chk msg-bad-rat    "$(dwn_nas_reject_build LTE 15 attach >/dev/null 2>&1; echo $?)" "1"
+    chk msg-bad-cause  "$(dwn_nas_reject_build EMM abc attach >/dev/null 2>&1; echo $?)" "1"
+    chk msg-bad-kind   "$(dwn_nas_reject_build EMM 15 detach >/dev/null 2>&1; echo $?)" "1"
+    chk msg-unassigned "$(dwn_nas_reject_build EMM 250 attach >/dev/null 2>&1; echo $?)" "1"
+    chk msg-cli-bad-rat "$(dwn_cli_main --build-reject LTE 15 >/dev/null 2>&1; echo $?)" "2"
+
+    # 14. The INDEPENDENT assertion. pycrate_mobile vendors TS 24.301 /
+    #     24.501 / 24.008 as executable Python, so its reject classes are a
+    #     second implementation of every message above. One pycrate process
+    #     asserts all of them because an interpreter start costs ~6s of import
+    #     and this selftest has a 120s cap.
+    #       match=exact  -- pycrate's own encoder, handed the cause from THIS
+    #                       script (never read out of the bytes under test),
+    #                       produced exactly the bytes this tree built;
+    #       match=prefix -- pycrate mandates an optional IE this tree leaves
+    #                       out (GMM RAU reject appends a ForceStdby nibble,
+    #                       TS 24.008 9.4.15) so its encoding is longer;
+    #       cause_readback_ok -- pycrate PARSED these bytes and read back the
+    #                       same cause, which the byte comparison alone cannot
+    #                       show for a class it refuses to parse.
+    #     Lines 10 and 11 are negative controls: a wrong message type and a
+    #     wrong cause. Both must report match=none, and line 11's read-back
+    #     cause must differ -- if the oracle cannot fail, it proves nothing.
+    local specs="$d/nas_specs.txt" orc
+    {
+        printf 'EMM\tattach\t15\t07440F\n'
+        printf 'EMM\ttau\t22\t074B16\n'
+        printf 'EMM\tservice\t15\t074E0F\n'
+        printf '5GMM\tattach\t27\t7E00441B\n'
+        printf '5GMM\ttau\t31\t7E00441F\n'
+        printf '5GMM\tservice\t27\t7E004D1B\n'
+        printf 'GMM\tattach\t12\t08040C\n'
+        printf 'GMM\ttau\t12\t080B0C\n'
+        printf 'GMM\tservice\t12\t080E0C\n'
+        printf 'EMM\tattach\t15\t07450F\n'
+        printf 'EMM\tattach\t15\t074410\n'
+    } > "$specs"
+    if orc=$(dwn_nas_decode_oracle_batch < "$specs" 2>"$d/orc.err"); then
+        nasf() { printf '%s\n' "$1" | awk -F'\t' -v i="$2" -v k="$3" \
+                 '$1==i && $2==k{print $3; exit}'; }
+        chk oracle-1-proc    "$(nasf "$orc" 1 oracle)"   "pycrate EMMAttachReject"
+        chk oracle-1-bytes   "$(nasf "$orc" 1 pycrate_bytes)" "07440F"
+        chk oracle-1-match   "$(nasf "$orc" 1 match)"    "exact"
+        chk oracle-1-decode  "$(nasf "$orc" 1 decode)"   "ok"
+        chk oracle-1-cause   "$(nasf "$orc" 1 cause)"    "15"
+        chk oracle-1-pd      "$(nasf "$orc" 1 protocol_discriminator)" "7"
+        chk oracle-1-sechdr  "$(nasf "$orc" 1 security_header_type)"   "0"
+        chk oracle-2-match   "$(nasf "$orc" 2 match)"    "exact"
+        chk oracle-2-mt      "$(nasf "$orc" 2 message_type_hex)" "4B"
+        chk oracle-2-cause   "$(nasf "$orc" 2 cause)"    "22"
+        chk oracle-3-mt      "$(nasf "$orc" 3 message_type_hex)" "4E"
+        chk oracle-4-proc    "$(nasf "$orc" 4 oracle)"   "pycrate FGMMRegistrationReject"
+        chk oracle-4-bytes   "$(nasf "$orc" 4 pycrate_bytes)" "7E00441B"
+        chk oracle-4-match   "$(nasf "$orc" 4 match)"    "exact"
+        chk oracle-4-decode  "$(nasf "$orc" 4 decode)"   "ok"
+        chk oracle-4-cause   "$(nasf "$orc" 4 cause)"    "27"
+        chk oracle-4-pd      "$(nasf "$orc" 4 protocol_discriminator)" "126"
+        chk oracle-5-match   "$(nasf "$orc" 5 match)"    "exact"
+        chk oracle-5-cause   "$(nasf "$orc" 5 cause)"    "31"
+        chk oracle-6-mt      "$(nasf "$orc" 6 message_type_hex)" "4D"
+        chk oracle-7-proc    "$(nasf "$orc" 7 oracle)"   "pycrate GMMAttachReject"
+        chk oracle-7-match   "$(nasf "$orc" 7 match)"    "exact"
+        chk oracle-7-pd      "$(nasf "$orc" 7 protocol_discriminator)" "8"
+        chk oracle-7-cause   "$(nasf "$orc" 7 cause)"    "12"
+        # A routing-area-update reject is the one shape pycrate will not parse
+        # back without the optional ForceStdby nibble, so here the assertion is
+        # its encoder's bytes: longer by exactly that octet, this tree's 3
+        # octets a prefix of it, extra_octets 1.
+        chk oracle-8-proc    "$(nasf "$orc" 8 oracle)"  "pycrate GMMRoutingAreaUpdateReject"
+        chk oracle-8-bytes   "$(nasf "$orc" 8 pycrate_bytes)" "080B0C00"
+        chk oracle-8-match   "$(nasf "$orc" 8 match)"    "prefix"
+        chk oracle-8-extra   "$(nasf "$orc" 8 extra_octets)" "1"
+        chk oracle-8-decode  "$(nasf "$orc" 8 decode)"   "refused"
+        chk oracle-9-match   "$(nasf "$orc" 9 match)"    "exact"
+        chk oracle-9-mt      "$(nasf "$orc" 9 message_type_hex)" "0E"
+        # negative controls -- the oracle must be able to say no
+        chk oracle-neg-type   "$(nasf "$orc" 10 match)"  "none"
+        chk oracle-neg-cause  "$(nasf "$orc" 11 match)"  "none"
+        chk oracle-neg-readback "$(nasf "$orc" 11 cause_readback_ok)" "no"
+    else
+        printf 'oracle-batch\tFAIL: %s\n' "$(head -n1 "$d/orc.err" 2>/dev/null)"
+        bad=$(( bad + 1 ))
+    fi
+
+    # 15. The RRC carrier. A NAS message does not go on the air by itself: it
+    #     rides in a DLInformationTransfer on DL-DCCH, whose unaligned-PER
+    #     layout is 5 bits of envelope + 2 txId + 1 + 2 + 1 + 2 + 8 length +
+    #     8n payload, so the NAS lands at bit offset 21 whatever its length.
+    #     The finished container is asserted against the hex pycrate's
+    #     DL_DCCH_Message encodes for the same value (verified out of band:
+    #     pycrate decodes 0800183A2078 back to the NAS octets 07440F).
+    out=$(dwn_lte_rrc_transfer 07440F 0)
+    chk rrc-emm-bits     "$(fld "$out" dl_dcch_bits)"      "45"
+    chk rrc-emm-octets   "$(fld "$out" dl_dcch_octets)"    "6"
+    chk rrc-emm-hex      "$(fld "$out" dl_dcch_hex)"       "0800183A2078"
+    chk rrc-emm-prefix   "$(fld "$out" dl_dcch_prefix)"    "00001"
+    chk rrc-emm-nas-off  "$(fld "$out" nas_bit_offset)"    "21"
+    chk rrc-emm-pad      "$(fld "$out" dl_dcch_pad_bits)"  "3"
+    chk rrc-emm-readback "$(fld "$out" nas_readback_hex)"  "07440F"
+    chk rrc-emm-inner    "$(fld "$out" inner_bits)"        "40"
+    chk rrc-emm-layout   "$(fld "$out" rrc_layout)"        "TS 36.331 10.5/6.2.2 unaligned PER"
+    out=$(dwn_lte_rrc_transfer 7E00441B 0)
+    chk rrc-5gmm-bits     "$(fld "$out" dl_dcch_bits)"     "53"
+    chk rrc-5gmm-octets   "$(fld "$out" dl_dcch_octets)"   "7"
+    chk rrc-5gmm-hex      "$(fld "$out" dl_dcch_hex)"      "080023F00220D8"
+    chk rrc-5gmm-readback "$(fld "$out" nas_readback_hex)" "7E00441B"
+    # One octet of NAS is the same 21-bit offset and an 8-bit shorter message.
+    out=$(dwn_lte_rrc_transfer 07 0)
+    chk rrc-one-nas-off   "$(fld "$out" nas_bit_offset)"   "21"
+    chk rrc-one-nas-bits  "$(fld "$out" dl_dcch_bits)"     "29"
+    chk rrc-one-nas-rd    "$(fld "$out" nas_readback_hex)" "07"
+    # The transaction identifier occupies bits 6..7 of the container.
+    chk rrc-txid-3 "$(dwn_lte_rrc_transfer 07440F 3 \
+        | awk -F'\t' '$1=="dl_dcch_bits_hex"{print substr($2,6,2)}')" "11"
+    chk rrc-txid-pad "$(dwn_lte_rrc_transfer 07440F 0 \
+        | awk -F'\t' '$1=="dl_dcch_bits_hex"{print substr($2,6,2)}')" "00"
+    chk rrc-bad-input "$(dwn_lte_rrc_transfer 0744G 0 >/dev/null 2>&1; echo $?)" "2"
+    chk rrc-empty     "$(dwn_lte_rrc_transfer "" 0 >/dev/null 2>&1; echo $?)" "2"
+
+    # 16. The downlink transmit path, and the honest answer about the radio.
+    #     The whole baseband chain runs for real here (OFDM -> IQ on disk) and
+    #     the numbers below are read out of it, so a broken stage shows up as
+    #     a wrong count rather than as a missing feature.
+    local to="$d/tx.out" te="$d/tx.err"
+    rc=0
+    ( export DWN_SDR_DEVICE=; dwn_tx_reject EMM 15 attach ) >"$to" 2>"$te" || rc=$?
+    chk tx-noradio-rc        "$rc"  "1"
+    chk tx-noradio-no-tx     "$(grep -c '^TX' "$to")" "0"
+    chk tx-noradio-names-dev "$(grep -c 'no SDR device' "$te")" "1"
+    chk tx-noradio-error     "$(grep -c '^ERROR' "$te")" "1"
+    chk tx-noradio-why       "$(grep -c '^WHY' "$te")" "1"
+    # ... and it still reports the real baseband while refusing.
+    chk tx-noradio-tb      "$(fld "$(cat "$to")" tb_bits)"   "48"
+    chk tx-noradio-rrc     "$(fld "$(cat "$to")" rrc_hex)"   "0800183A2078"
+    chk tx-noradio-nas     "$(fld "$(cat "$to")" nas_hex)"   "07440F"
+    chk tx-noradio-syms    "$(fld "$(cat "$to")" qpsk_symbols)" "828"
+    chk tx-chain-nofre     "$(fld "$(cat "$to")" nof_re)"    "828"
+    chk tx-chain-e-bits    "$(fld "$(cat "$to")" e_bits)"    "1656"
+    chk tx-chain-crc       "$(fld "$(cat "$to")" tb_with_crc_bits)" "72"
+    chk tx-chain-turbo     "$(fld "$(cat "$to")" turbo_bits)" "228"
+    chk tx-chain-k         "$(fld "$(cat "$to")" turbo_k)"   "72"
+    chk tx-chain-filler    "$(fld "$(cat "$to")" filler_bits)" "0"
+    chk tx-chain-cb        "$(fld "$(cat "$to")" cb_count)"  "1"
+    chk tx-chain-scramble  "$(fld "$(cat "$to")" scrambled_bits)" "1656"
+    chk tx-chain-cinit     "$(fld "$(cat "$to")" c_init)"    "513"
+    chk tx-chain-mapped    "$(fld "$(cat "$to")" symbols_mapped)" "828"
+    chk tx-chain-slot      "$(fld "$(cat "$to")" slot_samples)"    "960"
+    chk tx-chain-subframe  "$(fld "$(cat "$to")" subframe_samples)" "1920"
+    chk tx-chain-rate      "$(fld "$(cat "$to")" ofdm_sample_rate_hz)" "1920000"
+    chk tx-chain-nfft      "$(fld "$(cat "$to")" ofdm_n_fft)"      "128"
+    chk tx-chain-roundtrip "$(fld "$(cat "$to")" qpsk_roundtrip)"  "ok"
+    chk tx-chain-cp        "$(fld "$(cat "$to")" cp_identity)"     "ok"
+    chk tx-chain-iq-samples "$(fld "$(cat "$to")" iq_samples)"     "1920"
+    chk tx-chain-iq-cs8    "$(fld "$(cat "$to")" iq_cs8_bytes)"    "3840"
+    chk tx-chain-iq-seconds "$(fld "$(cat "$to")" iq_seconds)"     "0.001000"
+    chk tx-chain-burst-ms  "$(fld "$(cat "$to")" tx_burst_ms)"     "1"
+    chk tx-chain-burst-smp "$(fld "$(cat "$to")" tx_burst_samples)" "1920"
+    chk tx-chain-freq      "$(fld "$(cat "$to")" tx_centre_freq_hz)" "1842500000"
+    chk tx-chain-gain      "$(fld "$(cat "$to")" tx_gain_db)"      "0"
+    chk tx-chain-dci       "$(fld "$(cat "$to")" dci_format)"      "1"
+    chk tx-chain-dci-bits  "$(fld "$(cat "$to")" dci_bits)"        "19"
+    chk tx-chain-pdcch-agg "$(fld "$(cat "$to")" pdcch_aggregation)" "2"
+    chk tx-chain-pdcch-fits "$(fld "$(cat "$to")" pdcch_fits)"     "1"
+    # aggregation level 2 is 2 CCEs of 72 coded bits: 144 one-digit-per-bit
+    chk tx-chain-pdcch-bits "$(fld "$(cat "$to")" pdcch_bits)"     "144"
+    # The waveform is on disk, both formats, and the byte counts follow from
+    # the sample count: cs8 is 2 bytes a sample, sc16 is 4.
+    chk tx-chain-cs8-file "$(stat -c%s "$(fld "$(cat "$to")" iq_cs8_path)" 2>/dev/null)" "3840"
+    chk tx-chain-sc16-file "$(stat -c%s "$(fld "$(cat "$to")" iq_sc16_path)" 2>/dev/null)" "7680"
+
+    # A forced device with an operator-supplied call: the same chain, now
+    # actually keyed, and the success line appears ONLY here.
+    rc=0
+    ( export DWN_SDR_DEVICE=bladerf DWN_TX_CMD=/bin/true
+      dwn_tx_reject EMM 15 attach ) >"$to" 2>"$te" || rc=$?
+    chk tx-forced-rc      "$rc" "0"
+    chk tx-forced-device  "$(fld "$(cat "$to")" tx_device)" "bladerf"
+    chk tx-forced-mode    "$(fld "$(cat "$to")" tx_mode)"   "radio"
+    chk tx-forced-tx      "$(grep -c '^TX' "$to")" "1"
+    chk tx-forced-iq      "$(fld "$(cat "$to")" sdr_iq_format)" "cs8"
+    chk tx-forced-call    "$(fld "$(cat "$to")" sdr_call)" "shell: /bin/true"
+    # A driver that fails must NOT report success.
+    rc=0
+    ( export DWN_SDR_DEVICE=bladerf DWN_TX_CMD=/bin/false
+      dwn_tx_reject EMM 15 attach ) >"$to" 2>"$te" || rc=$?
+    chk tx-sdrfail-rc     "$rc" "1"
+    chk tx-sdrfail-no-tx  "$(grep -c '^TX' "$to")" "0"
+    chk tx-sdrfail-error  "$(grep -c 'the SDR call failed' "$te")" "1"
+    # hackrf cannot be clocked at the 1.92 Msps this waveform is generated at,
+    # and the module never resamples: it refuses instead of transmitting wrong.
+    rc=0
+    ( export DWN_SDR_DEVICE=hackrf DWN_TX_CMD=/bin/true
+      dwn_tx_reject EMM 15 attach ) >"$to" 2>"$te" || rc=$?
+    chk tx-rate-rc        "$rc" "1"
+    chk tx-rate-no-tx     "$(grep -c '^TX' "$to")" "0"
+    chk tx-rate-error     "$(grep -c 'cannot run at' "$te")" "1"
+    # A centre frequency the operator states is reported as theirs.
+    rc=0
+    ( export DWN_SDR_DEVICE=bladerf DWN_TX_CMD=/bin/true DWN_TX_FREQ_HZ=950000000
+      dwn_tx_reject EMM 15 attach ) >"$to" 2>"$te" || rc=$?
+    chk tx-freq-rc        "$rc" "0"
+    chk tx-freq-hz        "$(fld "$(cat "$to")" tx_centre_freq_hz)" "950000000"
+    chk tx-freq-source    "$(fld "$(cat "$to")" tx_centre_source)"  "DWN_TX_FREQ_HZ"
+    # 5GMM rides the same chain with a four-octet NAS PDU.
+    rc=0
+    ( export DWN_SDR_DEVICE= DWN_TX_RB=25; dwn_tx_reject 5GMM 27 attach ) \
+        >"$to" 2>"$te" || rc=$?
+    chk tx-5gmm-rc        "$rc" "1"
+    chk tx-5gmm-nas       "$(fld "$(cat "$to")" nas_hex)" "7E00441B"
+    chk tx-5gmm-tb        "$(fld "$(cat "$to")" tb_bits)"  "56"
+    chk tx-5gmm-rrc       "$(fld "$(cat "$to")" rrc_hex)"  "080023F00220D8"
+    chk tx-5gmm-nofre     "$(fld "$(cat "$to")" nof_re)"   "3750"
+    chk tx-badrat-rc      "$(dwn_cli_main --tx-reject LTE 15 >/dev/null 2>&1; echo $?)" "2"
+    chk tx-badcause-rc    "$(dwn_cli_main --tx-reject EMM abc >/dev/null 2>&1; echo $?)" "2"
+    chk tx-usage-rc       "$(dwn_cli_main --tx-reject >/dev/null 2>&1; echo $?)" "2"
+    chk tx-unassigned-rc  "$(dwn_cli_main --tx-reject EMM 250 >/dev/null 2>&1; echo $?)" "2"
+
+    # 16b. A driver BINARY on PATH is not a radio. dwn_sdr_probe must ask the
+    #      driver, per the shapes measured on this box: hackrf_info exits 1 and
+    #      says "No HackRF boards found." with no board; bladeRF-cli -p exits 1
+    #      with "No devices are available."; LimeUtil --find exits 0 with AND
+    #      without a device, so its OUTPUT is the only signal; uhd_find_devices
+    #      prints a "Device Address" block per device. The fakes below shadow
+    #      every driver name so this arm means the same thing on a box that has
+    #      a real radio -- and the SoapySDRUtil fake (which claims "Found
+    #      device 0" with nothing attached) proves the probe never listens to it.
+    local fb="$d/fakebin" fny="$d/fakebin-yes"
+    mkdir -p "$fb" "$fny"
+    cat > "$fb/hackrf_info" <<'FAKE'
+#!/bin/sh
+echo "hackrf_info version: 2024.02.1"
+echo "No HackRF boards found."
+exit 1
+FAKE
+    cat > "$fb/hackrf_transfer" <<'FAKE'
+#!/bin/sh
+exit 0
+FAKE
+    cat > "$fb/bladeRF-cli" <<'FAKE'
+#!/bin/sh
+echo "No devices are available."
+exit 1
+FAKE
+    cat > "$fb/LimeUtil" <<'FAKE'
+#!/bin/sh
+exit 0
+FAKE
+    cat > "$fb/uhd_find_devices" <<'FAKE'
+#!/bin/sh
+exit 0
+FAKE
+    cat > "$fb/SoapySDRUtil" <<'FAKE'
+#!/bin/sh
+echo "Found device 0"
+echo "  driver = hackrf"
+exit 0
+FAKE
+    cat > "$fny/hackrf_info" <<'FAKE'
+#!/bin/sh
+echo "hackrf_info version: 2024.02.1"
+echo "Found HackRF"
+echo "Board ID Number: 2 (HackRF One)"
+exit 0
+FAKE
+    cat > "$fny/bladeRF-cli" <<'FAKE'
+#!/bin/sh
+echo "No devices are available."
+exit 1
+FAKE
+    cat > "$fny/LimeUtil" <<'FAKE'
+#!/bin/sh
+exit 0
+FAKE
+    cat > "$fny/uhd_find_devices" <<'FAKE'
+#!/bin/sh
+exit 0
+FAKE
+    chmod +x "$fb"/* "$fny"/*
+    # The very defect this replaces: hackrf_transfer IS on PATH here, and the
+    # driver answers "no boards", so there is no radio to transmit with.
+    chk probe-hackrf-noboard "$( ( PATH="$fb:$PATH"; unset DWN_SDR_DEVICE
+        DWN_SDR="$d/tmp/none" dwn_sdr_probe hackrf ) >/dev/null 2>&1; echo $?)" "1"
+    chk probe-bladerf-noboard "$( ( PATH="$fb:$PATH"; unset DWN_SDR_DEVICE
+        dwn_sdr_probe bladerf ) >/dev/null 2>&1; echo $?)" "1"
+    chk probe-lime-no-output  "$( ( PATH="$fb:$PATH"; unset DWN_SDR_DEVICE
+        dwn_sdr_probe limesdr ) >/dev/null 2>&1; echo $?)" "1"
+    chk probe-uhd-no-output   "$( ( PATH="$fb:$PATH"; unset DWN_SDR_DEVICE
+        dwn_sdr_probe usrp ) >/dev/null 2>&1; echo $?)" "1"
+    chk probe-hackrf-board    "$( ( PATH="$fny:$PATH"; unset DWN_SDR_DEVICE
+        dwn_sdr_probe hackrf ) >/dev/null 2>&1; echo $?)" "0"
+    chk find-noboard-rc   "$( ( PATH="$fb:$PATH"; unset DWN_SDR_DEVICE
+        DWN_SDR="$d/tmp/none" TMP_DIR="$d/tmp/none"
+        dwn_find_tx_sdr ) >/dev/null 2>&1; echo $?)" "1"
+    chk find-noboard-none "$( ( PATH="$fb:$PATH"; unset DWN_SDR_DEVICE
+        DWN_SDR="$d/tmp/none" TMP_DIR="$d/tmp/none"
+        dwn_find_tx_sdr ) 2>/dev/null | wc -l)" "0"
+    chk find-board-name   "$( ( PATH="$fny:$PATH"; unset DWN_SDR_DEVICE
+        DWN_SDR="$d/tmp/none" TMP_DIR="$d/tmp/none"
+        dwn_find_tx_sdr ) 2>/dev/null)" "hackrf"
+    chk find-board-rc     "$( ( PATH="$fny:$PATH"; unset DWN_SDR_DEVICE
+        DWN_SDR="$d/tmp/none" TMP_DIR="$d/tmp/none"
+        dwn_find_tx_sdr ) >/dev/null 2>&1; echo $?)" "0"
+    # LimeUtil IS the one driver whose exit status says nothing: give it a
+    # device line and it must be believed; give it none and it must not be.
+    cat > "$fny/LimeUtil" <<'FAKE'
+#!/bin/sh
+echo "Found 1 device(s):"
+echo "  LimeSDR Mini, media=USB, addr=1d50:6108"
+exit 0
+FAKE
+    chmod +x "$fny/LimeUtil"
+    chk probe-lime-device    "$( ( PATH="$fny:$PATH"; unset DWN_SDR_DEVICE
+        dwn_sdr_probe limesdr ) >/dev/null 2>&1; echo $?)" "0"
+    cat > "$fny/uhd_find_devices" <<'FAKE'
+#!/bin/sh
+echo "--------------------------------------------------"
+echo "-- UHD Device 0"
+echo "--------------------------------------------------"
+echo "Device Address:"
+echo "    type: b200"
+echo "    serial: 1234ABCD"
+exit 0
+FAKE
+    chmod +x "$fny/uhd_find_devices"
+    chk probe-uhd-device     "$( ( PATH="$fny:$PATH"; unset DWN_SDR_DEVICE
+        dwn_sdr_probe b200 ) >/dev/null 2>&1; echo $?)" "0"
+    # SoapySDRUtil reports "Found device 0" with nothing attached, which is why
+    # it is not consulted; the source arm keeps it that way.
+    # ... and the probe body itself never consults SoapySDRUtil (it reports
+    # "Found device 0" with nothing attached, which is why it is excluded).
+    chk probe-no-soapy "$(sed -n '/^dwn_sdr_probe()/,/^}/p' "$0" \
+        | grep -c 'SoapySDRUtil')" "0"
+    chk probe-bad-driver "$(dwn_sdr_probe rtl-sdr >/dev/null 2>&1; echo $?)" "1"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1177,6 +2714,8 @@ dwn_cli_main() {
         --reject-cause)      dwn_cmd_reject_cause "${1:-}" "${2:-}" ;;
         --null-cipher-table) dwn_cmd_null_table ;;
         --build-security-mode) dwn_cmd_build_smc "${1:-}" "${2:-NR}" ;;
+        --build-reject)      dwn_cmd_build_reject "${1:-}" "${2:-}" "${3:-attach}" ;;
+        --tx-reject)         dwn_cmd_tx_reject "${1:-}" "${2:-}" "${3:-attach}" ;;
         --build-sib1)        dwn_build_sib1 "${1:-001}" "${2:-01}" "${3:-1}" "${4:-0}" "${5:-barred}" "${6:-notAllowed}" ;;
         --detect)            dwn_cmd_detect "${1:-}" ;;
         --path)              dwn_cmd_path "${1:-}" ;;
@@ -1195,6 +2734,13 @@ Usage: $0 COMMAND
   --null-cipher-table             NEA0/EEA0/UEA0/A5-0 across all generations
   --build-security-mode <alg> [RAT]
                                   the Security Mode Command algorithm octet
+  --build-reject <EMM|5GMM|GMM> <cause> [attach|tau|service]
+                                  the whole NAS reject message: header,
+                                  message type and the mandatory cause IE
+  --tx-reject <EMM|5GMM|GMM> <cause> [attach|tau|service]
+                                  the same reject carried in a
+                                  DLInformationTransfer over the real
+                                  DL-SCH/PDSCH chain, to the SDR
   --build-sib1 <mcc> <mnc> <tac> <cellid> [barred|notBarred] [allowed|notAllowed]
                                   a SIB1 body with cellBarred and
                                   intraFreqReselection set — the forged-SIB
