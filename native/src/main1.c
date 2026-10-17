@@ -15753,7 +15753,7 @@ static ModuleSubmenuEntry otasm_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
       "~--parse-packet|--packet:Packet|--counter-check:Counter Check|"
-      "~--packet-sms|~--parse-packet-sms" },
+      "~--packet-sms|~--parse-packet-sms|~--parse-resp-sms:Response Packet" },
     { "SPI",
       "auth-smartcard-symbolic",
       "--spi-build:Build SPI|~--spi|--plan:Plan" },

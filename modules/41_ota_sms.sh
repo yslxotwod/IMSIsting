@@ -558,6 +558,169 @@ otasm_packet_sms_parse() {
     return 0
 }
 
+# --parse-resp-sms [<spi>] <hex>: the card's answer, TS 102 225 §5.2 in the
+# SMS form of TS 31.115 §4.2. A Response Packet carries no SPI of its own: what
+# protects it is octet 2 of the SPI in the command that asked for it, so the
+# SPI is the first argument when it is known. It defaults to 0E00 -- PoR
+# required, CC, unciphered -- and says so in spi_source.
+#
+# RPL, RHL, RPI and RHI are in the response, but the SMS form fills them in
+# differently from CAT-TP: RHI is a null field, RPI is the UDH information
+# element 0x71 whose value is '00', and the Response Packet sits after a
+# three-octet UDH (02 71 00). RPL counts from the RHL octet to the end of the
+# response data, RHL counts from the TAR to the end of the RC/CC/DS.
+otasm_resp_status_meaning() {
+    case "${1:-}" in
+        00) printf 'PoR OK, the command was processed' ;;
+        01) printf 'RC/CC/DS failed, the card rejected the integrity check' ;;
+        02) printf 'CNTR low, the counter is below the value the card last received' ;;
+        03) printf 'CNTR high, the counter is above the value the card last received' ;;
+        04) printf 'CNTR blocked, the card refuses further command packets' ;;
+        05) printf 'ciphering error, the card could not decipher the command' ;;
+        06) printf 'unidentified security error, the header could not be read; the response is unciphered and carries no RC/CC/DS' ;;
+        07) printf 'insufficient memory to process the incoming message' ;;
+        08) printf 'more time, a later Response Packet will follow' ;;
+        09) printf 'TAR unknown, no application behind that TAR' ;;
+        0A) printf 'insufficient security level' ;;
+        0B) printf 'reserved for 3GPP, the actual response arrives in an SMS-SUBMIT' ;;
+        0C) printf 'reserved for 3GPP, the actual response arrives by USSD' ;;
+        [CcDdEeFf]*) printf 'proprietary status code' ;;
+        *) printf 'reserved or unknown status code' ;;
+    esac
+}
+
+otasm_resp_sms_parse() {
+    local spi_arg="" h transport="bare-packet" udh="027100" udh_source="assumed"
+    if (( $# >= 2 )); then spi_arg="${1:-}"; h=$(otasm_norm_hex "${2:-}")
+    else h=$(otasm_norm_hex "${1:-}"); fi
+    if ! otasm_is_hex "$h"; then printf 'ERROR\tnot valid hex\n' >&2; return 2; fi
+    h="${h^^}"
+    if [[ "${h:0:6}" == "027000" ]]; then
+        printf 'ERROR\tUDH carries RPI 0x70, the small Command Packet identifier; a Response Packet uses 0x71\n' >&2
+        return 1
+    fi
+    if [[ "${h:0:6}" == "027100" ]]; then
+        transport="sms-udh"; udh="${h:0:6}"; udh_source="present"; h="${h:6}"
+    fi
+    if (( ${#h} < 26 )); then
+        printf 'ERROR\tresponse shorter than RPL+RHL+TAR+CNTR+PCNTR+status\n' >&2; return 1
+    fi
+    local rpl=$(( 16#${h:0:4} )) rhl=$(( 16#${h:4:2} )) tar="${h:6:6}"
+    local after=$(( ${#h} / 2 - 2 ))
+    if (( rpl != after )); then
+        printf 'ERROR\tRPL says %d octets from the RHL octet to the end, the packet carries %d\n' \
+            "$rpl" "$after" >&2
+        return 1
+    fi
+    local sig_len=$(( rhl - 10 ))
+    case "$sig_len" in
+        0|4|8) ;;
+        *) printf 'ERROR\tRHL is %d octets; TAR, CNTR, PCNTR and the status octet take 10, so the RC/CC/DS would be %d octets rather than 0, 4 or 8\n' \
+               "$rhl" "$sig_len" >&2
+           return 1 ;;
+    esac
+    local spi spi_source="argument"
+    if [[ -n "$spi_arg" ]]; then
+        spi=$(printf '%s' "$spi_arg" | tr 'a-f' 'A-F')
+        [[ "$spi" =~ ^[0-9A-F]{4}$ ]] || {
+            printf 'ERROR\tSPI must be 2 octets of hex\n' >&2; return 2; }
+    else
+        spi="0E00"; spi_source="default"
+    fi
+    local por_cipher por_rccds
+    por_cipher=$(otasm_spi_field "$spi" por_cipher)
+    por_rccds=$(otasm_spi_field "$spi" por_rccds)
+    local body="${h:12}" cntr pcntr status cc data
+    if (( por_cipher == 1 )); then
+        if [[ -z "${OTASM_KIC_KEY:-}" ]]; then
+            printf 'ERROR\tthe SPI says the response is ciphered and OTASM_KIC_KEY is not set\n' >&2
+            return 2
+        fi
+        if (( ${#body} % 16 != 0 )); then
+            printf 'ERROR\tthe ciphered part is %d octets, not whole 8-octet 3DES blocks\n' \
+                "$(( ${#body} / 2 ))" >&2
+            return 1
+        fi
+        local kic_key24; kic_key24=$(otasm_key24 "$OTASM_KIC_KEY") || return 2
+        body=$(otasm_des3_cbc "$kic_key24" "$body" dec) || return 1
+    fi
+    body="${body^^}"   # xxd prints lower case; every hex field here is upper
+    cntr="${body:0:10}"; pcntr="${body:10:2}"; status="${body:12:2}"
+    if (( sig_len > 0 )); then
+        cc="${body:14:$(( sig_len * 2 ))}"; data="${body:$(( 14 + sig_len * 2 ))}"
+    else
+        cc=""; data="${body:14}"
+    fi
+    local pad_octets=$(( 16#${pcntr} ))
+    # The CC verdict first: a tampered packet fails the CC, and "the CC does
+    # not verify" is the answer, not "the padding looks odd".
+    local cc_verdict="not-present"
+    if (( sig_len > 0 )); then
+        if (( por_rccds == 2 && sig_len == 8 )); then
+            if [[ -n "${OTASM_KID_KEY:-}" ]]; then
+                local kid_key24 head signed recomputed
+                kid_key24=$(otasm_key24 "$OTASM_KID_KEY") || return 2
+                head="${h:0:12}"   # RPL || RHL || TAR
+                signed="${udh}${head}${cntr}${pcntr}${status}${data}"
+                recomputed=$(otasm_des3_cc "$kid_key24" "$signed") || return 1
+                if [[ "${recomputed^^}" == "${cc^^}" ]]; then cc_verdict="verified"
+                else cc_verdict="mismatch"; fi
+            else
+                cc_verdict="unknown-no-OTASM_KID_KEY"
+            fi
+        else
+            cc_verdict="unverified-not-a-cc"
+        fi
+    fi
+    local resp="$data" pad_ok=1
+    if (( pad_octets > 0 )); then
+        if (( ${#resp} / 2 < pad_octets )); then pad_ok=0
+        else resp="${resp:0:$(( ${#resp} - pad_octets * 2 ))}"; fi
+    fi
+    printf 'dialect\tts31.115-sms-response\n'
+    printf 'transport\t%s\nudh\t%s\nudh_source\t%s\n' "$transport" "$udh" "$udh_source"
+    printf 'rpl\t%d\nrhl\t%d\ntar\t%s\n' "$rpl" "$rhl" "$tar"
+    printf 'cntr\t%s\npcntr\t%s\n' "$cntr" "$pcntr"
+    printf 'status\t%s\nstatus_meaning\t%s\n' "$status" "$(otasm_resp_status_meaning "$status")"
+    printf 'spi\t%s\nspi_source\t%s\npor_cipher\t%s\npor_rccds\t%s\n' \
+        "$spi" "$spi_source" "$por_cipher" "$por_rccds"
+    printf 'sig_len\t%d\ncc\t%s\ncc_verdict\t%s\npadding_octets\t%d\n' \
+        "$sig_len" "${cc:-none}" "$cc_verdict" "$pad_octets"
+    printf 'additional_response_data\t%s\n' "${resp:-none}"
+    local findings=0
+    if (( pad_ok == 0 )); then
+        printf 'ERROR\tPCNTR says %d padding octets, only %d follow the CC\n' \
+            "$pad_octets" "$(( ${#data} / 2 ))" >&2
+        findings=$(( findings + 1 ))
+    fi
+    # TS 102 226 §5.1.2: on por_ok the response data is a CompactRemoteResp --
+    # number of commands, the last status word, the last response data.
+    if [[ "$status" == "00" && -n "$resp" ]]; then
+        local ncmd="${resp:0:2}" sw="${resp:2:4}" rdata="${resp:6}"
+        printf 'response\t%s\nnumber_of_commands\t%d\nlast_status_word\t%s\nlast_response_data\t%s\n' \
+            "compact" "$(( 16#$ncmd ))" "$sw" "${rdata:--}"
+    elif [[ "$status" == "00" ]]; then
+        printf 'note\tINFO\tstatus 00 with no response data: the card did its task and said nothing else\n'
+    elif [[ -n "$resp" ]]; then
+        printf 'finding\tMEDIUM\tstatus %s is not 00 but the response carries %d octets of response data, which table 3 says shall be empty for a standardized status code\n' \
+            "$status" "$(( ${#resp} / 2 ))"
+        findings=$(( findings + 1 ))
+    fi
+    if (( por_rccds == 0 && sig_len > 0 )); then
+        printf 'finding\tMEDIUM\tthe command asked for no RC/CC/DS, so the response should carry none, yet RHL accounts for %d octets of it\n' "$sig_len"
+        findings=$(( findings + 1 ))
+    elif (( por_rccds != 0 && sig_len == 0 )); then
+        printf 'finding\tHIGH\tthe command asked for an RC/CC/DS, so the response must carry one, but RHL accounts for none\n'
+        findings=$(( findings + 1 ))
+    fi
+    if [[ "$spi_source" == "default" ]]; then
+        printf 'note\tINFO\tSPI defaulted to 0E00 (PoR required, CC, unciphered); pass the SPI of the command that asked for this response\n'
+    fi
+    printf 'findings\t%d\n' "$findings"
+    [[ "$cc_verdict" == "mismatch" ]] && return 1
+    return 0
+}
+
 # ── counter / replay decision (TS 23.048 §8.2) ──────────────────────────
 otasm_counter_check() {
     local counter="${1:-}" re="${2:-}" mode="${3:-0}"
@@ -1634,6 +1797,53 @@ otasm_selftest() {
     chk sms-nokey-rc "$(OTASM_KIC_KEY= OTASM_KID_KEY= otasm_packet_sms_build b00001 1 1600 15 15 8010 >/dev/null 2>&1; echo $?)" "2"
     chk sms-nokey-says "$(OTASM_KIC_KEY= OTASM_KID_KEY= otasm_packet_sms_build b00001 1 1600 15 15 8010 2>&1 >/dev/null | grep -c OTASM_KIC_KEY)" "1"
     chk sms-rc-only "$(OTASM_KIC_KEY=00 OTASM_KID_KEY=00 otasm_packet_sms_build b00001 1 1200 15 15 80 >/dev/null 2>&1; echo $?)" "2"
+    # ── the card's Response Packet (TS 102 225 §5.2, TS 31.115 SMS form) ──
+    # These four packets are pySim's own 3DES test vectors, so the status
+    # word, the CC and the CompactRemoteResp are read the same way by two
+    # implementations. SPI 0601 = PoR required, no RC/CC/DS, unciphered;
+    # 0609 adds a CC; 0619 adds ciphering on top of it.
+    local rp
+    rp=$(otasm_resp_sms_parse 0601 027100000e0ab000110000000000000001612f)
+    chk resp-transport  "$(fld "$rp" transport)" "sms-udh"
+    chk resp-rpl        "$(fld "$rp" rpl)" "14"
+    chk resp-rhl        "$(fld "$rp" rhl)" "10"
+    chk resp-tar        "$(fld "$rp" tar)" "B00011"
+    chk resp-status     "$(fld "$rp" status)" "00"
+    chk resp-sig-len    "$(fld "$rp" sig_len)" "0"
+    chk resp-cc-none    "$(fld "$rp" cc_verdict)" "not-present"
+    chk resp-ncmd       "$(fld "$rp" number_of_commands)" "1"
+    chk resp-sw         "$(fld "$rp" last_status_word)" "612F"
+    rp=$(OTASM_KID_KEY=12110C78E678C25408233076AA033615 \
+         otasm_resp_sms_parse 0609 027100001612b000110000000000000055f47118381175fb01612f)
+    chk resp-signed-len "$(fld "$rp" sig_len)" "8"
+    chk resp-signed-cc  "$(fld "$rp" cc_verdict)" "verified"
+    rp=$(OTASM_KIC_KEY=C21DD66ACAC13CB3BC8B331B24AFB57B \
+         OTASM_KID_KEY=12110C78E678C25408233076AA033615 \
+         otasm_resp_sms_parse 0619 027100001c12b000119660ebdb81be189b5e4389e9e7ab2bc0954f963ad869ed7c)
+    chk resp-ciphered-pcntr "$(fld "$rp" pcntr)" "06"
+    chk resp-ciphered-pad   "$(fld "$rp" padding_octets)" "6"
+    chk resp-ciphered-sw    "$(fld "$rp" last_status_word)" "612F"
+    chk resp-ciphered-cc    "$(fld "$rp" cc_verdict)" "verified"
+    # One bit in the CC and the packet must not verify.
+    chk resp-tamper-rc "$(OTASM_KID_KEY=12110C78E678C25408233076AA033615 \
+         otasm_resp_sms_parse 0609 027100001612b000110000000000000055f47118381175fb02612f \
+         >/dev/null 2>&1; echo $?)" "1"
+    chk resp-rpl-lying "$(otasm_resp_sms_parse 0609 027100001512b000110000000000000055f47118381175fb01612f \
+         >/dev/null 2>&1; echo $?)" "1"
+    chk resp-rhl-bad   "$(otasm_resp_sms_parse 0609 02710000160bb000110000000000000055f47118381175fb01612f \
+         >/dev/null 2>&1; echo $?)" "1"
+    chk resp-command-udh "$(otasm_resp_sms_parse 027000000e0ab000110000000000000001612f \
+         >/dev/null 2>&1; echo $?)" "1"
+    # Without its UDH the packet is still readable: the SMS form fixes the UDH
+    # at 02 71 00, which is also what the CC is computed over.
+    rp=$(OTASM_KID_KEY=12110C78E678C25408233076AA033615 \
+         otasm_resp_sms_parse 0609 001612b000110000000000000055f47118381175fb01612f)
+    chk resp-bare-udh   "$(fld "$rp" udh_source)" "assumed"
+    chk resp-bare-cc    "$(fld "$rp" cc_verdict)" "verified"
+    chk resp-default-spi "$(fld "$(otasm_resp_sms_parse 027100000e0ab000110000000000000001612f)" spi_source)" "default"
+    chk resp-status-nz  "$(fld "$(otasm_resp_sms_parse 027100000b0ab000110000000000000a)" status_meaning)" \
+        "insufficient security level"
+
     # a large payload forces the two-octet CPL form and still round-trips.
     local big; big=$(printf 'aa%.0s' {1..200})
     pkt=$(otasm_packet_build 01 010203 9 B800 01 02 "$big" 01 01)
@@ -1874,6 +2084,7 @@ otasm_cli_main() {
         --parse-packet)   otasm_packet_parse "${1:-}" ;;
         --packet-sms)     otasm_packet_sms_build "${1:-000000}" "${2:-0}" "${3:-1600}" "${4:-15}" "${5:-25}" "${6:-}" ;;
         --parse-packet-sms) otasm_packet_sms_parse "${1:-}" ;;
+        --parse-resp-sms) otasm_resp_sms_parse "$@" ;;
         --counter-check)  otasm_counter_check "${1:-}" "${2:-}" "${3:-0}" ;;
         --tp-pid)         otasm_tp_pid_parse "${1:-}" ;;
         --tp-dcs)         otasm_tp_dcs_parse "${1:-}" ;;
@@ -1912,6 +2123,7 @@ Usage: $0 COMMAND
                                      security actually applied; keys come from
                                      OTASM_KIC_KEY / OTASM_KID_KEY
   --parse-packet-sms <hex>           decrypt it and check its CC
+  --parse-resp-sms [<spi>] <hex>      read the card's Response Packet (RPL/RHL, status, CC)
   --counter-check <counter> <RE> [mode]   replay decision per SPI mode
   --tp-kat                           GSM 7-bit packing KAT (TS 23.038 §6.1.2.1.1)
   --tp-pid <hex>                     decode TP-PID, including Type 0 / triggering
