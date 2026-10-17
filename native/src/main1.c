@@ -16007,7 +16007,8 @@ scell_build_backhaul(AppState *state, const char *module_id,
     gtk_box_append(GTK_BOX(ref_body), fkit_note(
         "HNBAP / RUA / RANAP over SCTP on the Iuh is the 3G home-node stack. An "
         "LTE HeNB speaks S1AP over SCTP to the MME, GTP-U to the serving gateway, "
-        "and IKEv2 to the security gateway."));
+        "and IKEv2 to the security gateway. HNBAP registration is built below; "
+        "RUA and RANAP are still a reference here."));
     gtk_box_append(GTK_BOX(ref_body), fkit_note(
         "There is no SCTP client in this tree, so nothing here registers with a "
         "core or relays a subscriber. The plan names the hardware and the "
@@ -16032,6 +16033,32 @@ scell_build_backhaul(AppState *state, const char *module_id,
         "a registration when an MME answers on an SCTP association, and there is "
         "still no SCTP client in this tree, so the handoff is unchanged."));
     gtk_box_append(GTK_BOX(body), s1);
+
+    GtkWidget *iuh_body;
+    GtkWidget *iuh = verb_card("HNBAP REGISTRATION", &iuh_body);
+    gtk_box_append(GTK_BOX(iuh_body), scell_arg_row(state, module_id, status,
+        "Build HNB Register", "--iuh-register",
+        "deadbeef 0xA1C0100",
+        "HNB identity and the 28-bit cell identity. The octets come from their "
+        "own codec, checked against pycrate and dissected by Wireshark on SCTP "
+        "PPID 20, which is the payload id the Iuh uses for HNBAP."));
+    gtk_box_append(GTK_BOX(iuh_body), scell_arg_row(state, module_id, status,
+        "Build UE Register", "--ue-register",
+        "3102601234567809 normal",
+        "IMSI as BCD and a registration cause of emergency-call, normal or "
+        "ue-relocation. This is the message a home node sends when a handset "
+        "appears behind it."));
+    gtk_box_append(GTK_BOX(iuh_body), scell_arg_row(state, module_id, status,
+        "Read an HNBAP PDU", "--hnbap",
+        "hex, or a file of it",
+        "Procedure, criticality, one row per information element, and the "
+        "identity fields the message carries."));
+    gtk_box_append(GTK_BOX(iuh_body), fkit_note(
+        "Both messages are byte-exact and neither opens an association: an HNB "
+        "only becomes a node when an HNB-GW answers on SCTP, and the tree has no "
+        "SCTP client. The selftest pins both octet strings so a codec change "
+        "fails here rather than on a real gateway."));
+    gtk_box_append(GTK_BOX(body), iuh);
 
     gtk_box_append(GTK_BOX(body), fkit_note(
         "Why this leg matters: a home node's traffic is cleartext between the "

@@ -212,6 +212,8 @@ The `partial` rows, so the status is not a mystery:
 
 - **`37_femtocell`** encodes CSG identities, builds a byte-exact S1 Setup Request
   and decodes it back (both asserted against `tshark` in `tools/s1ap_asn1.py`),
+  builds both HNBAP registration messages (`tools/hnbap_asn1.py`, dissected by
+  `tshark` on SCTP PPID 20),
   flags a closed cell out of a real SIB1 codec, and parses TR-069 config for
   real. It has no SCTP client, so nothing reaches an MME — the association is
   the handoff, and the module says so.

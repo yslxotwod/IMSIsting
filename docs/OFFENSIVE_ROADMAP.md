@@ -93,7 +93,7 @@ and a testbed. Every computational half is already built and verified offline.
 
 | Capability | Module | Built today | Missing to fire |
 |---|---|---|---|
-| **Femtocell / HeNB** | `37_femtocell` | 27-bit CSG-Id codec, PCI-confusion detection, Iuh (HNBAP/RUA/RANAP), TR-069/CWMP audit, a byte-exact S1 Setup Request built and decoded against `tshark`, closed-cell detection over the real SIB1 codec, and a live subscriber window fed by GSMTAP | DEVICE: an HeNB you own; NET for the gateway side and the SCTP association |
+| **Small Cell / eNB** | `37_femtocell` | 27-bit CSG-Id codec, PCI-confusion detection, Iuh (HNBAP registration byte-exact, RUA/RANAP reference), TR-069/CWMP audit, a byte-exact S1 Setup Request built and decoded against `tshark`, closed-cell detection over the real SIB1 codec, and a live subscriber window fed by GSMTAP | DEVICE: an HeNB you own; NET for the gateway side and the SCTP association |
 | **VoWiFi / ePDG** | `36_vowifi` | IKEv2/SWu 28-octet header, exchange/payload tables, EAP-AKA codec, SWu NAI and ePDG FQDN, transform classifiers | NET: an ePDG |
 | **Wi-Fi offload / LWA** | `47_wifioff` | ePDG FQDN, certificate validation, LWA config | LAB |
 | **GPRS / EDGE downgrade** | `50_gprs` | GEA0–GEA4 family, APN coding, PDP-context IEs, GEA-downgrade detector | TX: force GEA0 |

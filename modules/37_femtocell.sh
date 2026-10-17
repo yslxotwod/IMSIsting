@@ -82,6 +82,7 @@ femt_status_tsv() {
     printf 'MODULE\tfemtocell\n'
     printf 'TARGET\tSmall-cell local management, S1 and Iuh backhaul, CSG/PCI allocation\n'
     printf 'TRANSMIT\tnone — assessment and conflict detection only\n'
+    printf 'BACKHAUL\tS1AP over SCTP ppid 18 port 36412; HNBAP over SCTP ppid 20 port 29169\n'
     printf 'FEED\tGSMTAP udp/4729, or a capture file; one row per identity sighting\n'
     printf 'SELFTEST\tyes\n'
 }
@@ -383,7 +384,13 @@ femt_apply() {
     printf '%s\n' "$body" > "$path"
     printf 'cwmp_body_bytes\t%d\n' "$(wc -c < "$path" | tr -d ' ')"
     printf 'cwmp_body_path\t%s\n' "$path"
-    printf 'applied\tprofile-written\n'
+    # Nothing here speaks CWMP. Building the SetParameterValues body is the
+    # whole of the work this module can do unattended, so the report says that
+    # and stops: a body on disk is not a profile on a device.
+    printf 'posted\tno\n'
+    printf 'applied\tno\n'
+    printf 'status\tbody-written-not-posted\n'
+    printf 'next\tnothing in this tree speaks CWMP; the body is at %s\n' "$path"
     return 0
 }
 
@@ -556,6 +563,60 @@ femt_s1ap_decode() {
     femt_s1_asn1 decode "$hex"
 }
 
+# HNBAP is the 3G half of the same idea: a Home NodeB names itself and the
+# subscriber that appears behind it, to an HNB-GW.  The reference table above
+# was all this module had for years, so --iuh-register and --ue-register exist
+# to make the claim checkable: real octets from tools/hnbap_asn1.py, checked
+# against pycrate and dissected by Wireshark on PPID 20 before they shipped.
+femt_hnbap_asn1() {
+    local py="${FEMT_HNBAP:-$IMSISTING_ROOT/tools/hnbap_asn1.py}"
+    if [[ ! -f "$py" ]]; then
+        printf 'ERROR\t%s is missing; cannot build or read an HNBAP body\n' "$py" >&2
+        return 1
+    fi
+    timeout 60 python3 "$py" "$@"
+}
+
+femt_iuh_register() {
+    local hnb="${1:-}" cell="${2:-}" cause="${3:-}"
+    if [[ -z "$hnb" || -z "$cell" ]]; then
+        printf 'ERROR\tneed <hnb-identity-hex> <cell-id-28bit> [criticality]\n' >&2
+        return 2
+    fi
+    if [[ -n "$cause" ]]; then
+        femt_hnbap_asn1 hnb-register --hnb-id "$hnb" --cell-id "$cell" \
+            --criticality "$cause"
+    else
+        femt_hnbap_asn1 hnb-register --hnb-id "$hnb" --cell-id "$cell"
+    fi
+}
+
+femt_ue_register() {
+    local imsi="${1:-}" cause="${2:-normal}"
+    if [[ -z "$imsi" ]]; then
+        printf 'ERROR\tneed <imsi-bcd-hex> [cause]\n' >&2
+        return 2
+    fi
+    femt_hnbap_asn1 ue-register --imsi "$imsi" --cause "$cause"
+}
+
+femt_hnbap_decode() {
+    local src="${1:--}"
+    local hex
+    if [[ "$src" == "-" ]]; then
+        hex=$(femt_norm_hex "$(cat)")
+    elif [[ -f "$src" ]]; then
+        hex=$(femt_norm_hex "$(cat "$src")")
+    else
+        hex=$(femt_norm_hex "$src")
+    fi
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tnothing to decode\n' >&2
+        return 2
+    fi
+    femt_hnbap_asn1 decode "$hex"
+}
+
 # ── live subscriber feed ────────────────────────────────────────────────
 # The GUI's Live Subscribers view tails this file by byte offset. Nothing
 # here re-implements the capture or the NAS classification: modules/
@@ -692,6 +753,7 @@ flow	1. capture the Iuh SCTP association here  2. decode HNBAP/RUA/RANAP  3. aud
 note	the leg is a lab association you bring: this module builds the S1 body to the octet and decodes it, it does not open the SCTP association itself
 s1setup	the S1 Setup Request this box would present is byte-exact and oracle-confirmed: --s1setup <mcc> <mnc> <enb-id> <name> <tac>
 s1ap	the encoder and decoder for S1SetupRequest, ENBname, SupportedTAs and PagingDRX are asserted against tshark in tools/s1ap_asn1.py
+hnbap	the HNBRegisterRequest and UERegisterRequest this box would present are byte-exact and oracle-confirmed in tools/hnbap_asn1.py: --iuh-register / --ue-register
 EOF
 }
 
@@ -815,6 +877,35 @@ CFG
     chk s1ap-plmn      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie" && $2 ~ /^Global-ENB-ID /{split($2,a," "); print a[3]}')" "001/01"
     chk s1ap-empty     "$(printf '\n' | femt_s1ap_decode - >/dev/null 2>&1; echo $?)" "2"
 
+    # 4d. HNBAP registration. Both octet strings are the vectors pycrate
+    #     encoded and Wireshark dissected on PPID 20 (id-HNBRegister with
+    #     HNB-Identity deadbeef and CellIdentity 0xA1C0100; id-UERegister with
+    #     iMSI 3102601234567809 and cause normal). A change to the codec's
+    #     output fails here instead of on a real HNB-GW.
+    local hnb_expect ue_expect
+    hnb_expect="000100150000020003000600c0deadbeef000b0004a1c01000"
+    ue_expect="00030015000002000500090a3102601234567809000c000140"
+    out=$(femt_iuh_register deadbeef 0xA1C0100)
+    chk iuh-register-hex    "$(fld "$out" hnbap_hex)"    "$hnb_expect"
+    chk iuh-register-octets "$(fld "$out" hnbap_octets)" "25"
+    chk iuh-register-status "$(fld "$out" status)"       "built"
+    chk iuh-register-noargs "$(femt_iuh_register >/dev/null 2>&1; echo $?)" "2"
+    out=$(femt_ue_register 3102601234567809 normal)
+    chk ue-register-hex    "$(fld "$out" hnbap_hex)"    "$ue_expect"
+    chk ue-register-octets "$(fld "$out" hnbap_octets)" "25"
+    chk ue-register-status "$(fld "$out" status)"       "built"
+    chk ue-register-cause  "$(fld "$out" registration_cause)" "normal"
+    chk ue-register-noargs "$(femt_ue_register >/dev/null 2>&1; echo $?)" "2"
+    out=$(femt_hnbap_decode "$hnb_expect")
+    chk hnbap-procedure "$(fld "$out" procedure)" "HNBRegister"
+    chk hnbap-ies       "$(fld "$out" ies)"       "2"
+    chk hnbap-hnb-id    "$(fld "$out" hnb_identity)" "deadbeef"
+    chk hnbap-cell      "$(fld "$out" cell_identity)" "0a1c0100"
+    out=$(femt_hnbap_decode "$ue_expect")
+    chk hnbap-ue-procedure "$(fld "$out" procedure)" "UERegister"
+    chk hnbap-imsi         "$(fld "$out" imsi)" "3102601234567809"
+    chk hnbap-empty     "$(printf '\n' | femt_hnbap_decode - >/dev/null 2>&1; echo $?)" "2"
+
     # 5. SIB9's HNB-Name is an OCTET STRING, so the hex must be the text.
     out=$(femt_sib9_build LabHeNB)
     chk sib9-hex  "$(fld "$out" sib9_hex)"      "464C616248654E42"
@@ -842,6 +933,33 @@ CFG
     chk apply-noradio-no  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="applied"{print $2}')" "no"
     chk apply-noradio-st  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')" "nothing-written"
     chk apply-silent      "$(printf '%s\n' "$out" | grep -c 'profile-written' | tr -d ' ')" "0"
+    # 7b. With a management plane answering, --apply writes the body and then
+    #     says exactly that. It has never spoken CWMP, so it must not report the
+    #     body as posted, or the parameters as applied.
+    local pport=$(( 20000 + RANDOM % 20000 )) srvpid
+    python3 - "$pport" >/dev/null 2>&1 <<'CWMPSTUB' &
+import sys, http.server, socketserver
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"cwmp-1.2 management server\r\n")
+    def log_message(self, *a):
+        pass
+socketserver.TCPServer.allow_reuse_address = True
+socketserver.TCPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+CWMPSTUB
+    srvpid=$!
+    sleep 1
+    out=$(femt_apply 127.0.0.1 "$pport" 2>/dev/null); local prc=$?
+    kill "$srvpid" 2>/dev/null; wait "$srvpid" 2>/dev/null
+    chk apply-live-rc     "$prc" "0"
+    chk apply-live-posted "$(printf '%s\n' "$out" | awk -F'\t' '$1=="posted"{print $2}')" "no"
+    chk apply-live-applied "$(printf '%s\n' "$out" | awk -F'\t' '$1=="applied"{print $2}')" "no"
+    chk apply-live-status "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')" "body-written-not-posted"
+    chk apply-live-body   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cwmp_body_bytes" && $2+0 > 0{print "yes"}')" "yes"
+
     out=$(femt_discover 127.0.0.1 1 2>/dev/null); local drc=$?
     chk disc-noradio-rc  "$drc" "1"
     chk disc-noradio-no  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="discovered"{print $2}')" "no"
@@ -912,6 +1030,9 @@ femt_menu() {
   [8]  Read a box's settings
   [9]  Write the profile to a box
   [d]  Detect a closed cell from a captured SIB1
+  [r]  Build an HNBAP HNBRegisterRequest
+  [u]  Build an HNBAP UERegisterRequest
+  [k]  Decode an HNBAP PDU
   [l]  Live subscribers from the GSMTAP feed
   [0]  back
 M
@@ -929,6 +1050,14 @@ M
             9) read -rp "  host [port]> " p; femt_apply $p; read -rp "  enter " _ ;;
             d|D) read -rp "  SIB1 hex or file ('-' for stdin)> " p
                femt_detect "$p"; read -rp "  enter " _ ;;
+            r|R) read -rp "  hnb identity hex, cell id> " p
+               local ra=(); read -ra ra <<< "$p"
+               femt_iuh_register "${ra[0]:-}" "${ra[1]:-}"; read -rp "  enter " _ ;;
+            u|U) read -rp "  imsi bcd hex [cause]> " p
+               local ua=(); read -ra ua <<< "$p"
+               femt_ue_register "${ua[0]:-}" "${ua[1]:-normal}"; read -rp "  enter " _ ;;
+            k|K) read -rp "  HNBAP hex or file ('-' for stdin)> " p
+               femt_hnbap_decode "$p"; read -rp "  enter " _ ;;
             l|L) read -rp "  seconds, or a capture [iface]> " p
                local la=(); read -ra la <<< "$p"
                if [[ -n "${la[1]:-}" ]]; then
@@ -959,6 +1088,9 @@ femt_cli_main() {
         --detect)      femt_detect "${1:--}" ;;
         --s1setup)     femt_s1setup "$@" ;;
         --s1ap)        femt_s1ap_decode "${1:--}" ;;
+        --iuh-register) femt_iuh_register "$@" ;;
+        --ue-register) femt_ue_register "$@" ;;
+        --hnbap)       femt_hnbap_decode "${1:--}" ;;
         --live)        femt_live "$@" ;;
         --iuh)         femt_iuh_stack ;;
         --tr069-audit) femt_tr069_audit "${1:-}" ;;
@@ -986,6 +1118,11 @@ Usage: $0 COMMAND
   --s1setup <mcc> <mnc> <enb-id> <name> <tac>
                         the S1 Setup Request this eNB would present to an MME
   --s1ap <hex|file>     decode an S1AP PDU back to its fields
+  --iuh-register <hnb-identity-hex> <cell-id>
+                        the HNBAP HNBRegisterRequest a Home NodeB sends first
+  --ue-register <imsi-bcd-hex> [cause]
+                        the HNBAP UERegisterRequest for a handset behind it
+  --hnbap <hex|file>    decode an HNBAP PDU back to its fields
   --live [seconds | capture.pcap] [iface]
                         join the GSMTAP feed to its identity rows and append
                         new subscriber sightings to the live view's file; a
