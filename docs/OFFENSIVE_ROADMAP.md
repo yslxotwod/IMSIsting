@@ -123,7 +123,7 @@ edge of what can be validated by anyone.
 
 | Capability | Module | What is buildable now | The hop nobody closes |
 |---|---|---|---|
-| **O3 — SS7 exploitation** | `26_ss7_map` | MTP3 routing label (3-8-3, 4-4-4-2), SCCP, TCAP, MAP opcodes TS 29.002, SRI / SRI-SM / ATI / PSI / SAI / ULR / ISD / call-forwarding-hijack construction, SCTP+M3UA framing in both directions, SSN table | An STP or interconnect. In practice: a roaming agreement |
+| **O3 — SS7 exploitation** | `26_ss7_map` | MTP3 routing label (3-8-3, 4-4-4-2), SCCP addresses with the Q.713 3.4.1 indicator and the 1.4 pointers, TCAP components whose returnResult is entered so a reply names its answering operation and carries its result, and the operation, error and SS-Code registries from TS 29.002 17.5 and 17.7.5 (the operation table was 104 rows but shifted and inventing 109-113; it is now 70 assigned + 11 withdrawn + 23 dissector-only with the provenance printed per code, the error space has its own 56-row table because error 34 is systemFailure where operation 34 is sendRoutingInfoForLCS, and the SS-Code table went from 35 rows to the clause's 72). SRI / SRI-SM / ATI / PSI / SAI / ULR / ISD / call-forwarding-hijack construction with the numbers validated rather than silently stripped, SCTP+M3UA framing in both directions, SSN table. `tools/check-ss7-codec.sh` sweeps every registry and reads every built frame back against clause encoders and Wireshark 4.2.2 | An STP or interconnect. In practice: a roaming agreement |
 | **O9 — GRX exploitation** | `26_ss7_map` | GRX/IPX reachability, GSN address harvesting, the interconnect trust model | A GRX/IPX presence |
 | **O20 — roaming abuse** | `26_ss7_map` | SEPP / delegated-discovery exposure, inter-operator trust model | Two operators |
 | **O4 — Diameter attacks** | `11_lte_core` | S6a/S6d AIR/ULR/CLR encode-decode (316 ULR, 317 CLR, 318 AIR, 319 IDR, 320 DSR, 321 PUR) and forged-request builders. Header (RFC 6733 §3) and AVP layout (§4) checked, the AVP registry regenerated from TS 29.272 Table 7.3.1/1 (the old table was shifted from 1405: Origin-Realm is 296, not 285; Visited-PLMN-Id is 1407; ULR-Flags 1405; RAT-Type 1032 vendor 10415; RAND/XRES/AUTN/KASME are 1447-1450), the command and application tables from TS 29.230 (258 is Re-Auth, not Device-Watchdog; 268 is DER/DEA, not CCR; 272 is CCR/CCA; 282 is DPR; 16777219 is Wx, not Gx), and the result codes split between RFC 6733 §7.1 and the 3GPP codes of TS 29.272 §7.4 (AVP 298). Every registry is swept and the builders are decoded back, with Wireshark as the second implementation, by `tools/check-diameter-codec.sh` | An HSS |
@@ -847,7 +847,59 @@ The two real defects it found were the missing §4.4 eviction (90 entries of 99
 octets left 90 in the table where the library keeps 41) and the weight mask
 that turned a weight of 256 into 0.
 
-**Phase 8 — interconnect.** `26_ss7_map` (SS7 flows, GRX, roaming).
+**Phase 8 — interconnect.** `26_ss7_map` (SS7 flows, GRX, roaming). The
+interconnect side speaks MTP3, SCCP, TCAP and MAP, and each layer names
+something an operator acts on: the point codes in the label, the routing bit of
+the Q.713 address indicator, the pointer that says where the called party
+address begins, the operation code in a TCAP invoke, the SS-Code in a
+RegisterSS argument. The slice compared the module with its clause (TS 29.002
+V15.7.0 §17.5 and §17.7.5, Q.713 03/2001, Q.773) and with Wireshark 4.2.2
+decoding the same frames, and the first comparison was not kind.
+
+The operation table had 104 rows and had drifted: opcode 38 was named
+`forwardCheckSS` where the clause says `forwardCheckSS-Indication`, and codes
+109-126 were invented (`lcs-*`, `callDeflection`, `explicitCT`) that TS 29.002
+V15.7.0 does not mention at all. The dissector does name those, which is where
+they came from, so the table is not simply deleted: `--opcode` now prints the
+provenance of a code -- **active** (70, the clause's `CODE local:N`),
+**withdrawn** (11, the names the clause comments out in §17.5: 9, 19, 28, 30,
+31, 32, 35, 48, 49, 52, 54), **dissector-only** (23, what Wireshark still
+names from an older release: 16, 78-81, 109-126), or unassigned. The SS-Code
+table was 35 rows against the clause's 72: no `uus2`/`uus3`, no barring group
+144-155, no `emlpp` 160-161, no LCS privacy 176-181, no MOLR 192-195, no
+PLMN-specific 240-255. It now carries all 72, with the clause spelling where
+the dissector disagrees (`allBarringSS`, not `allCallRestrictionSS`).
+
+Four defects were the codec's own. A `returnResultLast` printed its invoke id
+and then the whole result as one hex tail, because the parser never entered the
+inner `result SEQUENCE` of Q.773 §3.3 -- so an SRI answer, the message whose
+entire content is the roaming number, showed no operation name and no number.
+`A7` (`returnResultNotLast`) printed "unknown". A `returnError` was read with
+the *operation* table: error 34 (`systemFailure`) came out as
+`sendRoutingInfoForLCS` and error 4 -- which is not an error at all, it is the
+operation `provideRoamingNumber` -- was stamped with that name; the two number
+spaces only look alike, so the error registry (56 codes) and the
+`Q.773 §3.3.4` problem tags now have their own tables. And `--decode-msu`
+stopped at `sccp_data`, leaving the whole point of decoding an MSU -- the
+operation inside it -- to a second command; it now descends into TCAP when the
+SCCP user data is a TCAP message.
+
+The decoders also accepted frames they should have refused. An SCCP length
+octet that promised more octets than the message carried was taken at face
+value, so `8301800000090003070B040301000604030200080B4243` (user data length
+11, two octets present) decoded as a complete message with `sccp_data 4243`;
+pointers were followed without checking that they name parameters in order; and
+a number with a non-digit was *stripped* rather than refused -- `12x4` became
+124, a valid frame for a subscriber nobody named. All three are now refusals
+that say which length or pointer was wrong.
+
+`tools/check-ss7-codec.sh` states the clauses as encoders, drives the module
+through its own command line, compares with Wireshark where the dissector can
+be asked, and catches seven defects put back into a scratch copy: the SS-Code
+144 name, opcode 38 shortened, the SLS read from the wrong nibble, the builder
+and the decoder each with a called-party pointer off by one, TBCD padded with
+zero instead of F, and the abort tag renamed. It also pinned the SSN wording to
+the dissector's, because the module's table is documented as read back from it.
 
 **Phase 9 — RF effect.** `33_jamming_detect` TX — call already made at
 *Tier 3* above: build it, with the disclaimer as a condition of the build, and

@@ -184,7 +184,12 @@ ss7_ber_int() {
 # Optional second argument is the TON/NPI octet (default 0x91 = E.164
 # international).
 ss7_msisdn_hex() {
-    local d="${1//[^0-9]/}" ton="${2:-91}"
+    local d="${1:-}" ton="${2:-91}"
+    # A leading '+' is the only decoration accepted. Stripping every non-digit
+    # silently ("12x4" -> "124") would build a valid frame for a number the
+    # caller never typed, which is worse than refusing it.
+    d="${d#+}"
+    [[ "$d" =~ ^[0-9]+$ ]] || return 1
     [[ -n "$d" ]] || return 1
     (( ${#d} <= 15 )) || return 1
     (( ${#d} % 2 )) && d+="F"
@@ -198,7 +203,8 @@ ss7_msisdn_hex() {
 # TBCD-STRING (IMSI, TS 23.003 §2.2): digits, two per octet, first digit in
 # the LOW nibble, no TON/NPI octet. An odd count is padded with F.
 ss7_imsi_hex() {
-    local d="${1//[^0-9]/}"
+    local d="${1:-}"
+    [[ "$d" =~ ^[0-9]+$ ]] || return 1
     [[ "$d" =~ ^[0-9]{5,15}$ ]] || return 1
     (( ${#d} % 2 )) && d+="F"
     local out="" i
@@ -600,21 +606,33 @@ ss7_sccp_parse() {
     if (( ${#h} >= 10 )); then
         p2=$(( 16#${h:6:2} )); p3=$(( 16#${h:8:2} ))
         coff=$(( p2 + 3 )); xoff=$(( p3 + 4 ))
+        # Q.713 §1.4: the parameters follow one another in the order the
+        # pointers name, so each pointer has to point past the previous one.
+        (( p2 > p1 )) || { printf 'ERROR\tSCCP pointers are out of order (called %s, calling %s)\n' "$p1" "$p2" >&2; return 1; }
+        (( p3 > p2 )) || { printf 'ERROR\tSCCP pointers are out of order (calling %s, data %s)\n' "$p2" "$p3" >&2; return 1; }
     else
         coff=0; xoff=0
     fi
+    # A length octet that promises more octets than the message carries is a
+    # mangled frame, not a short parameter: refuse it rather than print the
+    # part that happens to be there, which reads as a complete decode.
     local clen=$(( 16#${h:$((doff*2)):2} ))
+    (( (doff + 1 + clen) * 2 <= ${#h} )) || { printf 'ERROR\tcalled party address length %s runs past the message\n' "$clen" >&2; return 1; }
     local called="${h:$(((doff+1)*2)):$((clen*2))}"
     printf 'called_party\t%s\n' "$called"
     ss7_sccp_addr_decode "$called" | sed 's/^/called_/'
-    if (( coff > 0 )) && (( ${#h} >= (coff + 1) * 2 )); then
+    if (( coff > 0 )); then
+        (( (coff + 1) * 2 <= ${#h} )) || { printf 'ERROR\tcalling party address pointer runs past the message\n' >&2; return 1; }
         local olen=$(( 16#${h:$((coff*2)):2} ))
+        (( (coff + 1 + olen) * 2 <= ${#h} )) || { printf 'ERROR\tcalling party address length %s runs past the message\n' "$olen" >&2; return 1; }
         local calling="${h:$(((coff+1)*2)):$((olen*2))}"
         printf 'calling_party\t%s\n' "$calling"
         ss7_sccp_addr_decode "$calling" | sed 's/^/calling_/'
     fi
-    if (( xoff > 0 )) && (( ${#h} >= (xoff + 1) * 2 )); then
+    if (( xoff > 0 )); then
+        (( (xoff + 1) * 2 <= ${#h} )) || { printf 'ERROR\tuser data pointer runs past the message\n' >&2; return 1; }
         local dln=$(( 16#${h:$((xoff*2)):2} ))
+        (( (xoff + 1 + dln) * 2 <= ${#h} )) || { printf 'ERROR\tuser data length %s runs past the message\n' "$dln" >&2; return 1; }
         local data="${h:$(((xoff+1)*2)):$((dln*2))}"
         printf 'sccp_data\t%s\n' "$data"
     fi
@@ -644,14 +662,16 @@ ss7_tcap_msg_name() {
     esac
 }
 
-# Component tags — Q.773 §3.3, read back from Wireshark 4.2.2
-# (Component: invoke (1) / returnResultLast (2) / returnError (3) / reject (4)).
+# Component tags — Q.773 §3.3: invoke [1], returnResultLast [2], returnError
+# [3], reject [4], returnResultNotLast [7]. Wireshark 4.2.2 names the same
+# five (its tag 2 is what it calls returnResultLast).
 ss7_tcap_component_name() {
     case "${1^^}" in
         A1) echo "invoke" ;;
-        A2) echo "returnResult" ;;
+        A2) echo "returnResultLast" ;;
         A3) echo "returnError" ;;
         A4) echo "reject" ;;
+        A7) echo "returnResultNotLast" ;;
         *)  echo "unknown" ;;
     esac
 }
@@ -730,7 +750,10 @@ ss7_tcap_parse_components() {
         # amount and a second component is parsed out of the first one's tail.
         local chl="$SS7_BHL" clen="$SS7_BLEN"
         local cname; cname=$(ss7_tcap_component_name "$ctag")
-        local iid="" op="" opname="" param=""
+        local iid="" op="" opname="" param="" pval=""
+        local is_err=0 is_rej=0
+        [[ "$ctag" == "A3" ]] && is_err=1
+        [[ "$ctag" == "A4" ]] && is_rej=1
         local ioff=0 itag
         if (( ${#cval} >= 4 )); then
             ss7_ber_at "$cval" 0 && itag="$SS7_BTAG"
@@ -741,15 +764,36 @@ ss7_tcap_parse_components() {
         fi
         if (( ioff * 2 < ${#cval} )); then
             ss7_ber_at "$cval" "$ioff" && itag="$SS7_BTAG"
+            if [[ "$itag" == "30" ]]; then
+                # Q.773 §3.3: a returnResult is SEQUENCE { invokeID,
+                # result SEQUENCE { opcode, result } }. Without entering that
+                # inner SEQUENCE the answering operation has no name and the
+                # whole response reads as one hex tail, so a reply to an SRI
+                # never showed the roaming number it carried.
+                cval="$SS7_BVAL"; ioff=0
+                ss7_ber_at "$cval" 0 && itag="$SS7_BTAG"
+            fi
             case "$itag" in
                 02) op=$(( 16#$SS7_BVAL )); ioff=$(( ioff + SS7_BHL + SS7_BLEN )) ;;
                 06) op="oid:${SS7_BVAL}"; ioff=$(( ioff + SS7_BHL + SS7_BLEN )) ;;
+                80|81|82|83) op="$itag"; pval="$SS7_BVAL"
+                            ioff=$(( ioff + SS7_BHL + SS7_BLEN )) ;;
             esac
         fi
         if (( ioff * 2 < ${#cval} )); then
             param="${cval:$((ioff*2))}"
         fi
-        if [[ "$op" =~ ^[0-9]+$ ]]; then
+        # The reject's problem detail IS its value, and it sits before the
+        # tail the generic path reads.
+        [[ -z "$param" ]] && param="$pval"
+        # A3 carries an error code and A4 a problem tag: both are named from
+        # their own tables, never from the operation-code table.
+        if (( is_rej )) && [[ -n "$op" ]]; then
+            opname=$(ss7_tcap_problem_name "$op")
+            op=$(( 16#$op ))
+        elif (( is_err )) && [[ "$op" =~ ^[0-9]+$ ]]; then
+            opname=$(ss7_map_error_name "$op")
+        elif [[ "$op" =~ ^[0-9]+$ ]]; then
             opname=$(ss7_map_opcode_name "$op")
         elif [[ -n "$op" ]]; then
             opname="global opcode (OID)"
@@ -762,11 +806,107 @@ ss7_tcap_parse_components() {
     return 0
 }
 
-# ── MAP operation codes — TS 29.002 §17.4.1 ─────────────────────────────
-# Every value below 0..113 was read back out of Wireshark 4.2.2's GSM MAP
-# dissector by building an invoke per opcode and reading `localValue`. Two
-# operations (44, 46) are spec-sourced: Wireshark declines to decode them
-# without an SMS application context, so the names come from TS 29.002.
+# ── MAP error codes — TS 29.002 §17.5 ───────────────────────────────────
+# A returnError component carries an ERROR code, not an OPERATION code, and the
+# two number spaces only look alike: error 4 is not "provideRoamingNumber", it
+# is unassigned, and error 34 is systemFailure where operation 34 is
+# sendRoutingInfoForLCS. Reading one as the other stamps a real error with the
+# name of an unrelated operation.
+#   2, 23, 24 are commented out by the clause (unknownBaseStation,
+#   invalidTargetBaseStation, noRadioResourceAvailable): reserved, not assigned.
+ss7_map_error_name() {
+    case "${1:-}" in
+        2)   echo "unknownBaseStation (withdrawn)" ;;
+        23)  echo "invalidTargetBaseStation (withdrawn)" ;;
+        24)  echo "noRadioResourceAvailable (withdrawn)" ;;
+        1)   echo "unknownSubscriber" ;;
+        3)   echo "unknownMSC" ;;
+        5)   echo "unidentifiedSubscriber" ;;
+        6)   echo "absentSubscriberSM" ;;
+        7)   echo "unknownEquipment" ;;
+        8)   echo "roamingNotAllowed" ;;
+        9)   echo "illegalSubscriber" ;;
+        10)  echo "bearerServiceNotProvisioned" ;;
+        11)  echo "teleserviceNotProvisioned" ;;
+        12)  echo "illegalEquipment" ;;
+        13)  echo "callBarred" ;;
+        14)  echo "forwardingViolation" ;;
+        15)  echo "cug-Reject" ;;
+        16)  echo "illegalSS-Operation" ;;
+        17)  echo "ss-ErrorStatus" ;;
+        18)  echo "ss-NotAvailable" ;;
+        19)  echo "ss-SubscriptionViolation" ;;
+        20)  echo "ss-Incompatibility" ;;
+        21)  echo "facilityNotSupported" ;;
+        22)  echo "ongoingGroupCall" ;;
+        25)  echo "noHandoverNumberAvailable" ;;
+        26)  echo "subsequentHandoverFailure" ;;
+        27)  echo "absentSubscriber" ;;
+        28)  echo "incompatibleTerminal" ;;
+        29)  echo "shortTermDenial" ;;
+        30)  echo "longTermDenial" ;;
+        31)  echo "subscriberBusyForMT-SMS" ;;
+        32)  echo "sm-DeliveryFailure" ;;
+        33)  echo "messageWaitingListFull" ;;
+        34)  echo "systemFailure" ;;
+        35)  echo "dataMissing" ;;
+        36)  echo "unexpectedDataValue" ;;
+        37)  echo "pw-RegistrationFailure" ;;
+        38)  echo "negativePW-Check" ;;
+        39)  echo "noRoamingNumberAvailable" ;;
+        40)  echo "tracingBufferFull" ;;
+        42)  echo "targetCellOutsideGroupCallArea" ;;
+        43)  echo "numberOfPW-AttemptsViolation" ;;
+        44)  echo "numberChanged" ;;
+        45)  echo "busySubscriber" ;;
+        46)  echo "noSubscriberReply" ;;
+        47)  echo "forwardingFailed" ;;
+        48)  echo "or-NotAllowed" ;;
+        49)  echo "ati-NotAllowed" ;;
+        50)  echo "noGroupCallNumberAvailable" ;;
+        51)  echo "resourceLimitation" ;;
+        52)  echo "unauthorizedRequestingNetwork" ;;
+        53)  echo "unauthorizedLCSClient" ;;
+        54)  echo "positionMethodFailure" ;;
+        58)  echo "unknownOrUnreachableLCSClient" ;;
+        59)  echo "mm-EventNotSupported" ;;
+        60)  echo "atsi-NotAllowed" ;;
+        61)  echo "atm-NotAllowed" ;;
+        62)  echo "informationNotAvailable" ;;
+        71)  echo "unknownAlphabet" ;;
+        72)  echo "ussd-Busy" ;;
+        *)   echo "unassigned/unknown" ;;
+    esac
+}
+
+# Q.773 §3.3.4: the reject component's problem is a CHOICE tagged
+# [0] generalProblem, [1] invokeProblem, [2] returnResultProblem,
+# [3] returnErrorProblem.
+ss7_tcap_problem_name() {
+    case "${1:-}" in
+        80) echo "generalProblem" ;;
+        81) echo "invokeProblem" ;;
+        82) echo "returnResultProblem" ;;
+        83) echo "returnErrorProblem" ;;
+        *)  echo "unknown problem" ;;
+    esac
+}
+
+# ── MAP operation codes — TS 29.002 §17.5 ───────────────────────────────
+# Three provenances, and the CLI says which one a code has:
+#   active        the clause's `OPERATION ::= ... local:N` list (70 codes);
+#   withdrawn     the clause comments the code out in §17.5 but keeps its name
+#                 in the "-- withdrawn" block (11 codes: 9, 19, 28, 30, 31,
+#                 32, 35, 48, 49, 52, 54). The code stays reserved, it is not
+#                 assigned in this release;
+#   dissector-only  Wireshark 4.2.2 names the code from an older release
+#                 (16, 78-81, 109-126) and TS 29.002 V15.7.0 does not mention
+#                 it at all, so a capture still decodes the name but the CLI
+#                 must not claim the clause assigns it.
+# Two rows (44, 46) are clause-sourced: Wireshark declines to decode them
+# without an SMS application context, and the clause names them at 44/46.
+# The clause and the dissector disagree in wording only on opcode 38: the
+# clause says forwardCheckSS-Indication, the dissector prints forwardCheckSS.
 ss7_map_opcode_name() {
     case "${1:-}" in
         2)   echo "updateLocation" ;;
@@ -776,7 +916,6 @@ ss7_map_opcode_name() {
         6)   echo "resumeCallHandling" ;;
         7)   echo "insertSubscriberData" ;;
         8)   echo "deleteSubscriberData" ;;
-        9)   echo "sendParameters" ;;
         10)  echo "registerSS" ;;
         11)  echo "eraseSS" ;;
         12)  echo "activateSS" ;;
@@ -786,7 +925,6 @@ ss7_map_opcode_name() {
         16)  echo "notifySS" ;;
         17)  echo "registerPassword" ;;
         18)  echo "getPassword" ;;
-        19)  echo "processUnstructuredSS-Data" ;;
         20)  echo "releaseResources" ;;
         21)  echo "mt-ForwardSM-VGCS" ;;
         22)  echo "sendRoutingInfo" ;;
@@ -794,18 +932,12 @@ ss7_map_opcode_name() {
         24)  echo "sendRoutingInfoForGprs" ;;
         25)  echo "failureReport" ;;
         26)  echo "noteMsPresentForGprs" ;;
-        27)  echo "unAllocated" ;;
-        28)  echo "performHandover" ;;
         29)  echo "sendEndSignal" ;;
-        30)  echo "performSubsequentHandover" ;;
-        31)  echo "provideSIWFSNumber" ;;
-        32)  echo "sIWFSSignallingModify" ;;
         33)  echo "processAccessSignalling" ;;
         34)  echo "forwardAccessSignalling" ;;
-        35)  echo "noteInternalHandover" ;;
         36)  echo "cancelVcsgLocation" ;;
         37)  echo "reset" ;;
-        38)  echo "forwardCheckSS" ;;
+        38)  echo "forwardCheckSS-Indication" ;;
         39)  echo "prepareGroupCall" ;;
         40)  echo "sendGroupCallEndSignal" ;;
         41)  echo "processGroupCallSignalling" ;;
@@ -815,13 +947,9 @@ ss7_map_opcode_name() {
         45)  echo "sendRoutingInfoForSM" ;;
         46)  echo "mo-ForwardSM" ;;
         47)  echo "reportSM-DeliveryStatus" ;;
-        48)  echo "noteSubscriberPresent" ;;
-        49)  echo "alertServiceCentreWithoutResult" ;;
         50)  echo "activateTraceMode" ;;
         51)  echo "deactivateTraceMode" ;;
-        52)  echo "traceSubscriberActivity" ;;
         53)  echo "updateVcsgLocation" ;;
-        54)  echo "beginSubscriberActivity" ;;
         55)  echo "sendIdentification" ;;
         56)  echo "sendAuthenticationInfo" ;;
         57)  echo "restoreData" ;;
@@ -849,7 +977,6 @@ ss7_map_opcode_name() {
         79)  echo "secureTransportClass2" ;;
         80)  echo "secureTransportClass3" ;;
         81)  echo "secureTransportClass4" ;;
-        82)  echo "unAllocated" ;;
         83)  echo "provideSubscriberLocation" ;;
         84)  echo "sendGroupCallInfo" ;;
         85)  echo "sendRoutingInfoForLCS" ;;
@@ -857,11 +984,41 @@ ss7_map_opcode_name() {
         87)  echo "ist-Alert" ;;
         88)  echo "ist-Command" ;;
         89)  echo "noteMM-Event" ;;
+        # Withdrawn: the clause keeps the name in its commented-out block
+        # (-- sendParameters ... local:9). Reserved, not assigned.
+        9)   echo "sendParameters" ;;
+        19)  echo "processUnstructuredSS-Data" ;;
+        28)  echo "performHandover" ;;
+        30)  echo "performSubsequentHandover" ;;
+        31)  echo "provideSIWFSNumber" ;;
+        32)  echo "siwfs-SignallingModify" ;;
+        35)  echo "noteInternalHandover" ;;
+        48)  echo "noteSubscriberPresent" ;;
+        49)  echo "alertServiceCentreWithoutResult" ;;
+        52)  echo "traceSubscriberActivity" ;;
+        54)  echo "beginSubscriberActivity" ;;
+        # Dissector-only: TS 29.002 V15.7.0 names none of these, Wireshark
+        # 4.2.2 still does (16, 78-81 are the 1999 secure transport and
+        # notifySS; 109-126 the LCS work items and CC-entry operands). Live
+        # captures carry them, so the names stay, attributed as such.
         109) echo "lcs-PeriodicLocationCancellation" ;;
         110) echo "lcs-LocationUpdate" ;;
         111) echo "lcs-PeriodicLocationRequest" ;;
         112) echo "lcs-AreaEventCancellation" ;;
         113) echo "lcs-AreaEventReport" ;;
+        114) echo "lcs-AreaEventRequest" ;;
+        115) echo "lcs-MOLR" ;;
+        116) echo "lcs-LocationNotification" ;;
+        117) echo "callDeflection" ;;
+        118) echo "userUserService" ;;
+        119) echo "accessRegisterCCEntry" ;;
+        120) echo "forwardCUG-Info" ;;
+        121) echo "splitMPTY" ;;
+        122) echo "retrieveMPTY" ;;
+        123) echo "holdMPTY" ;;
+        124) echo "buildMPTY" ;;
+        125) echo "forwardChargeAdvice" ;;
+        126) echo "explicitCT" ;;
         *)   echo "unassigned/unknown" ;;
     esac
 }
@@ -872,14 +1029,38 @@ ss7_opcode_known() {
     return 0
 }
 
-# ── MAP SS-Code — TS 29.002 §17.7.10 ────────────────────────────────────
-# Read back from Wireshark 4.2.2 with a registerSS invoke per value. The
-# call-forwarding hijack needs cfu = 33, NOT 21: 21 is mci (malicious call
-# identification). --selftest asserts both so a regression cannot silently
-# register the wrong service.
+# The 11 codes §17.5 keeps in its commented-out "-- withdrawn" block: named,
+# reserved, and NOT assigned in this release.
+ss7_map_opcode_withdrawn() {
+    case "${1:-}" in
+        9|19|28|30|31|32|35|48|49|52|54) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Codes only Wireshark 4.2.2 names (from a release before V15.7.0). Useful
+# when reading a capture, but the clause does not assign them.
+ss7_map_opcode_dissector() {
+    case "${1:-}" in
+        16|78|79|80|81|109|110|111|112|113|114|115|116|117|118|119|120|121|122|123|124|125|126) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ── MAP SS-Code — TS 29.002 §17.7.5 ─────────────────────────────────────
+# All 72 values the clause assigns, read back from Wireshark 4.2.2 with a
+# registerSS invoke per value. The names follow the clause where the two
+# differ: 144 is allBarringSS (the dissector still prints its pre-Rel-4 name
+# allCallRestrictionSS), 178/179 are callSessionRelated/callSessionUnrelated
+# (the dissector prints callrelated/callunrelated) and 250-255 use the
+# clause's upper-case plmn-specificSS-A..F.
+# The call-forwarding hijack needs cfu = 33, NOT 21: 21 is mci (malicious
+# call identification). --selftest asserts both so a regression cannot
+# silently register the wrong service.
 ss7_ss_code_name() {
     case "${1:-}" in
         0)   echo "allSS" ;;
+        # all line identification SS
         16)  echo "allLineIdentificationSS" ;;
         17)  echo "clip" ;;
         18)  echo "clir" ;;
@@ -888,31 +1069,82 @@ ss7_ss_code_name() {
         21)  echo "mci" ;;
         24)  echo "allNameIdentificationSS" ;;
         25)  echo "cnap" ;;
+        # all call forwarding SS
         32)  echo "allForwardingSS" ;;
         33)  echo "cfu" ;;
         36)  echo "cd" ;;
+        # all conditional forwarding SS
         40)  echo "allCondForwardingSS" ;;
         41)  echo "cfb" ;;
         42)  echo "cfnry" ;;
         43)  echo "cfnrc" ;;
+        # all call offering SS
         48)  echo "allCallOfferingSS" ;;
         49)  echo "ect" ;;
         50)  echo "mah" ;;
+        # all call completion SS
         64)  echo "allCallCompletionSS" ;;
         65)  echo "cw" ;;
         66)  echo "hold" ;;
         67)  echo "ccbs-A" ;;
         68)  echo "ccbs-B" ;;
         69)  echo "mc" ;;
+        # all multiparty SS
         80)  echo "allMultiPartySS" ;;
         81)  echo "multiPTY" ;;
-        96)  echo "allCommunityOfInterestSS" ;;
+        # all community of interest SS
+        96)  echo "allCommunityOfInterest-SS" ;;
         97)  echo "cug" ;;
+        # all charging SS
         112) echo "allChargingSS" ;;
         113) echo "aoci" ;;
         114) echo "aocc" ;;
+        # all additional information transfer SS
         128) echo "allAdditionalInfoTransferSS" ;;
         129) echo "uus1" ;;
+        130) echo "uus2" ;;
+        131) echo "uus3" ;;
+        # all barring SS
+        144) echo "allBarringSS" ;;
+        145) echo "barringOfOutgoingCalls" ;;
+        146) echo "baoc" ;;
+        147) echo "boic" ;;
+        148) echo "boicExHC" ;;
+        153) echo "barringOfIncomingCalls" ;;
+        154) echo "baic" ;;
+        155) echo "bicRoam" ;;
+        # all call priority SS
+        160) echo "allCallPrioritySS" ;;
+        161) echo "emlpp" ;;
+        # all LCS privacy exception SS
+        176) echo "allLCSPrivacyException" ;;
+        177) echo "universal" ;;
+        178) echo "callSessionRelated" ;;
+        179) echo "callSessionUnrelated" ;;
+        180) echo "plmnoperator" ;;
+        181) echo "serviceType" ;;
+        # all mobile originating location request SS
+        192) echo "allMOLR-SS" ;;
+        193) echo "basicSelfLocation" ;;
+        194) echo "autonomousSelfLocation" ;;
+        195) echo "transferToThirdParty" ;;
+        # all PLMN specific SS
+        240) echo "allPLMN-specificSS" ;;
+        241) echo "plmn-specificSS-1" ;;
+        242) echo "plmn-specificSS-2" ;;
+        243) echo "plmn-specificSS-3" ;;
+        244) echo "plmn-specificSS-4" ;;
+        245) echo "plmn-specificSS-5" ;;
+        246) echo "plmn-specificSS-6" ;;
+        247) echo "plmn-specificSS-7" ;;
+        248) echo "plmn-specificSS-8" ;;
+        249) echo "plmn-specificSS-9" ;;
+        250) echo "plmn-specificSS-A" ;;
+        251) echo "plmn-specificSS-B" ;;
+        252) echo "plmn-specificSS-C" ;;
+        253) echo "plmn-specificSS-D" ;;
+        254) echo "plmn-specificSS-E" ;;
+        255) echo "plmn-specificSS-F" ;;
         *)   echo "unknown" ;;
     esac
 }
@@ -1561,7 +1793,17 @@ ss7_cmd_decode_msu() {
     ss7_sio_parse "${hex:0:2}"
     ss7_label_parse "${hex:2:8}"
     printf 'layer\tsccp\n'
-    ss7_sccp_parse "${hex:10}"
+    local out data
+    out=$(ss7_sccp_parse "${hex:10}") || { printf '%s\n' "$out"; return 1; }
+    printf '%s\n' "$out"
+    # The SCCP user here is always TCAP on a MAP interface, and the whole point
+    # of decoding an MSU is to reach the operation inside it: stop at the SCCP
+    # user data and the operator still has to run the hex through --decode-tcap.
+    data=$(printf '%s\n' "$out" | awk -F'\t' '$1 == "sccp_data" { print $2; exit }')
+    if [[ -n "$data" && "${data:0:2}" =~ ^6[1-7]$ ]]; then
+        printf 'layer\ttcap\n'
+        ss7_tcap_parse "$data" || return 1
+    fi
 }
 
 # ── SIGTRAN: SCTP + M3UA ────────────────────────────────────────────────
@@ -1948,9 +2190,21 @@ ss7_cmd_pc() {
 ss7_cmd_opcode() {
     local n="${1:-}"
     [[ "$n" =~ ^[0-9]+$ ]] || { printf 'ERROR\tusage: --opcode <n>\n' >&2; return 2; }
+    local name status
+    name=$(ss7_map_opcode_name "$n")
+    if [[ "$name" == "unassigned/unknown" ]]; then
+        status=unassigned
+    elif ss7_map_opcode_withdrawn "$n"; then
+        status=withdrawn
+    elif ss7_map_opcode_dissector "$n"; then
+        status=dissector-only
+    else
+        status=active
+    fi
     printf 'opcode\t%s\n' "$n"
-    printf 'name\t%s\n' "$(ss7_map_opcode_name "$n")"
-    printf 'assigned\t%s\n' "$(ss7_opcode_known "$n" && echo yes || echo no)"
+    printf 'name\t%s\n' "$name"
+    printf 'assigned\t%s\n' "$([[ "$status" == active ]] && echo yes || echo no)"
+    printf 'status\t%s\n' "$status"
 }
 
 # ── selftest — no radio, no root, no network ────────────────────────────
@@ -2138,9 +2392,35 @@ ss7_selftest() {
     # tshark names the component tags: A1 invoke, A2 returnResultLast,
     # A3 returnError, A4 reject.
     chk comp-a1 "$(ss7_tcap_component_name A1)" "invoke"
-    chk comp-a2 "$(ss7_tcap_component_name A2)" "returnResult"
+    chk comp-a2 "$(ss7_tcap_component_name A2)" "returnResultLast"
     chk comp-a3 "$(ss7_tcap_component_name A3)" "returnError"
     chk comp-a4 "$(ss7_tcap_component_name A4)" "reject"
+    chk comp-a7 "$(ss7_tcap_component_name A7)" "returnResultNotLast"
+    # Wireshark 4.2.2 reads this exact frame as returnResultLast for opcode 22
+    # with the roaming number 33163254768: the inner result SEQUENCE has to be
+    # entered or the response decodes as an unnamed hex tail.
+    out=$(ss7_tcap_parse "621B4804000000016C13A211020101300C0201168007913386090000F0")
+    chk resp-cname  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="component"{print $3}')" "returnResultLast"
+    chk resp-op     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="component"{print $5}')" "22"
+    chk resp-opname "$(printf '%s\n' "$out" | awk -F'\t' '$1=="component"{print $6}')" "sendRoutingInfo"
+    chk resp-param  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="component"{print $7}')" "8007913386090000F0"
+    # A returnError carries an ERROR code from its own number space. Reading
+    # it as an operation code stamped error 34 with sendRoutingInfoForLCS and
+    # error 4 (unassigned as an error) with provideRoamingNumber.
+    out=$(ss7_tcap_parse "64104904000000076C08A306020101020122")
+    chk err-34 "$(printf '%s\n' "$out" | awk -F'\t' '$1=="component"{print $6}')" "systemFailure"
+    out=$(ss7_tcap_parse "64104904000000076C08A306020101020104")
+    chk err-4  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="component"{print $6}')" "unassigned/unknown"
+    # The reject problem is a CHOICE on a context tag: [1] invokeProblem.
+    out=$(ss7_tcap_parse "64104904000000076C08A406020101810101")
+    chk rej-problem "$(printf '%s\n' "$out" | awk -F'\t' '$1=="component"{print $6}')" "invokeProblem"
+    chk rej-value   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="component"{print $7}')" "01"
+    # A number with a non-digit must be refused: stripping every non-digit
+    # silently encoded "12x4" as 124, a frame for a number nobody typed.
+    chk msisdn-plus       "$(ss7_msisdn_hex +33612345678)" "913316325476F8"
+    chk msisdn-mangled    "$(ss7_msisdn_hex 12x4 >/dev/null 2>&1; echo $?)" "1"
+    chk imsi-mangled      "$(ss7_imsi_hex 31015x123456789 >/dev/null 2>&1; echo $?)" "1"
+    chk build-mangled-rc  "$(ss7_cmd_build_sri 12x4 >/dev/null 2>&1; echo $?)" "1"
     # A BEGIN transaction: tshark reports begin / otid 00000001 / 1 component.
     local tcap; tcap=$(ss7_tcap_begin "00000001" "A106020101020116")
     chk tcap-begin-hex "$tcap" "62104804000000016C08A106020101020116"
@@ -2183,6 +2463,29 @@ ss7_selftest() {
     chk sscode-42 "$(ss7_ss_code_name 42)" "cfnry"
     chk sscode-43 "$(ss7_ss_code_name 43)" "cfnrc"
     chk sscode-unknown "$(ss7_ss_code_name 99)" "unknown"
+    # The table the clause fills to 72 rows: each group's umbrella value, the
+    # barring set the module used to stop at (144-155), and the last value.
+    chk sscode-144 "$(ss7_ss_code_name 144)" "allBarringSS"
+    chk sscode-146 "$(ss7_ss_code_name 146)" "baoc"
+    chk sscode-153 "$(ss7_ss_code_name 153)" "barringOfIncomingCalls"
+    chk sscode-130 "$(ss7_ss_code_name 130)" "uus2"
+    chk sscode-131 "$(ss7_ss_code_name 131)" "uus3"
+    chk sscode-161 "$(ss7_ss_code_name 161)" "emlpp"
+    chk sscode-177 "$(ss7_ss_code_name 177)" "universal"
+    chk sscode-178 "$(ss7_ss_code_name 178)" "callSessionRelated"
+    chk sscode-193 "$(ss7_ss_code_name 193)" "basicSelfLocation"
+    chk sscode-240 "$(ss7_ss_code_name 240)" "allPLMN-specificSS"
+    chk sscode-255 "$(ss7_ss_code_name 255)" "plmn-specificSS-F"
+    # 104 rows: 70 assigned operations, 11 the clause names as withdrawn and
+    # 23 more that only the dissector still names.
+    chk map-38 "$(ss7_map_opcode_name 38)" "forwardCheckSS-Indication"
+    chk map-115 "$(ss7_map_opcode_name 115)" "lcs-MOLR"
+    chk map-117 "$(ss7_map_opcode_name 117)" "callDeflection"
+    chk map-124 "$(ss7_map_opcode_name 124)" "buildMPTY"
+    chk map-126 "$(ss7_map_opcode_name 126)" "explicitCT"
+    chk map-127 "$(ss7_map_opcode_name 127)" "unassigned/unknown"
+    chk sscode-count "$(for i in $(seq 0 255); do ss7_ss_code_name "$i"; done | grep -cv '^unknown$')" "72"
+    chk map-count "$(for i in $(seq 0 255); do ss7_map_opcode_name "$i"; done | grep -cv '^unassigned/unknown$')" "104"
 
     # ── 9. Builders round-trip through the decoder ──────────────────────
     # The tshark-verified invoke for registerSS with cfu + forwardedToNumber:
@@ -2440,7 +2743,7 @@ ss7_selftest() {
     chk sigtran-ppid    "$(fld "$out" data_ppid)"   "3"
     chk sigtran-ppidn   "$(fld "$out" data_ppid_name)" "M3UA"
     chk sigtran-pd      "$(fld "$out" protocol_data)" "$msu"
-    chk sigtran-layers  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="layer"{print $2}' | paste -sd, -)" "sctp,m3ua,mtp3,sccp"
+    chk sigtran-layers  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="layer"{print $2}' | paste -sd, -)" "sctp,m3ua,mtp3,sccp,tcap"
     chk val-sigtran-none  "$(ss7_cmd_decode_sigtran >/dev/null 2>&1; echo $?)" "2"
     chk val-sigtran-bad   "$(ss7_cmd_decode_sigtran zz >/dev/null 2>&1; echo $?)" "1"
     chk val-sigtran-short "$(ss7_cmd_decode_sigtran 0011 >/dev/null 2>&1; echo $?)" "1"
