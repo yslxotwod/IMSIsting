@@ -68,14 +68,71 @@ fk_split() {
 }
 
 # ── hardware inventory ──────────────────────────────────────────────────
-# Each probe names the vendor tool, because "no SDR" is useless without saying
-# which probe came back empty.
-fk_probe_sdr() {
+# Two questions that look like one, and answering the first while asking both
+# is what made this report claim a radio on a machine with none:
+#
+#   fk_probe_sdr_tools  which vendor TOOLS are installed. `command -v` is the
+#                       right test for that and proves nothing else.
+#   fk_probe_radio      which DRIVERS answer a presence probe. A driver on
+#                       PATH says the software is installed; `hackrf_info`
+#                       exits 1 and prints "No HackRF boards found." with
+#                       nothing plugged in, so the probe has to be run.
+#
+# SoapySDRUtil is deliberately not a presence probe: with no radio attached
+# it still reports "Found device 0", because its own audio driver matches any
+# machine with a sound card. It stays in the tool inventory, where it is true.
+fk_probe_sdr_tools() {
     local d
     for d in hackrf bladeRF LimeUtil uhd_find_devices rtl_test SoapySDRUtil; do
         if command -v "$d" >/dev/null 2>&1; then
             printf '%s\n' "$d"
         fi
+    done
+}
+
+# One driver, one probe. Returns 0 only when a device answers.
+fk_radio_probe() {
+    local drv="$1" out
+    case "$drv" in
+        hackrf)
+            command -v hackrf_info >/dev/null 2>&1 || return 1
+            out=$(timeout 10 hackrf_info 2>&1) || return 1
+            grep -qi 'no hackrf boards found' <<< "$out" && return 1
+            return 0 ;;
+        bladerf)
+            command -v bladeRF-cli >/dev/null 2>&1 || return 1
+            out=$(timeout 10 bladeRF-cli -p 2>&1) || return 1
+            grep -qi 'no devices are available' <<< "$out" && return 1
+            return 0 ;;
+        limesdr)
+            # LimeUtil --find exits 0 whether or not a board is present, so
+            # its exit code carries no information and only its output does.
+            command -v LimeUtil >/dev/null 2>&1 || return 1
+            out=$(timeout 15 LimeUtil --find 2>&1)
+            [[ -n "${out//[[:space:]]/}" ]] ;;
+        usrp)
+            command -v uhd_find_devices >/dev/null 2>&1 || return 1
+            out=$(timeout 15 uhd_find_devices 2>&1)
+            grep -qi 'device address' <<< "$out" ;;
+        rtl)
+            command -v rtl_test >/dev/null 2>&1 || return 1
+            out=$(timeout 15 rtl_test 2>&1)
+            grep -qiE 'found[[:space:]]+[0-9]+[[:space:]]+device' <<< "$out" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Every driver that actually answered.
+fk_probe_radio() {
+    local drv
+    # Defined but empty is an instruction, not an unset variable: it is how
+    # the selftest asserts the no-radio path on a box that has a radio.
+    if [[ -n "${FK_SDR_DEVICE+set}" ]]; then
+        [[ -n "$FK_SDR_DEVICE" ]] || return 1
+        printf '%s\n' "$FK_SDR_DEVICE"; return 0
+    fi
+    for drv in hackrf bladerf limesdr usrp rtl; do
+        fk_radio_probe "$drv" && printf '%s\n' "$drv"
     done
 }
 
@@ -86,14 +143,22 @@ fk_probe_tty() {
     done
 }
 
+# The installed tools, for reports about what is installed.
 fk_sdr_label() {
-    local l; l=$(fk_probe_sdr | tr '\n' ' ')
+    local l; l=$(fk_probe_sdr_tools | tr '\n' ' ')
+    printf '%s' "${l% }"
+    [[ -n "${l// /}" ]] || printf 'none'
+}
+
+# The radios that answered, for reports about what can be used.
+fk_radio_label() {
+    local l; l=$(fk_probe_radio | tr '\n' ' ')
     printf '%s' "${l% }"
     [[ -n "${l// /}" ]] || printf 'none'
 }
 
 fk_has_sdr() {
-    [[ -n "$(fk_probe_sdr)" ]]
+    [[ -n "$(fk_probe_radio)" ]]
 }
 
 # ── synthetic GSMTAP source ─────────────────────────────────────────────
@@ -357,13 +422,17 @@ fk_guard_check() {
 # ── capability ──────────────────────────────────────────────────────────
 fk_capability() {
     local sdrs; sdrs=$(fk_sdr_label)
+    local radios; radios=$(fk_radio_label)
+    local have_radio=no
+    fk_has_sdr && have_radio=yes
     local ttys; ttys=$(fk_probe_tty | tr '\n' ' ')
     local pkexec=no
     command -v pkexec >/dev/null 2>&1 && pkexec=yes
 
     printf 'sdr_tools\t%s\n'   "$sdrs"
+    printf 'sdr_devices\t%s\n' "$radios"
     printf 'serial_radios\t%s\n' "${ttys:-none}"
-    printf 'can_transmit\t%s\n' "$([[ -n "$sdrs" ]] && echo unknown || echo no)"
+    printf 'can_transmit\t%s\n' "$([[ "$have_radio" == yes ]] && echo unknown || echo no)"
     printf 'pkexec\t%s\n'      "$pkexec"
     printf 'gsmtap_port\t%s\n' "$FK_PORT"
     printf 'gsmtap_consumers\t%s\n' \
@@ -372,7 +441,7 @@ fk_capability() {
     printf 'software_emitters\t%s\n' \
         "$(for e in grgsm_livemon srsenb gnb srsepc open5gs; do
              command -v "$e" >/dev/null 2>&1 && printf '%s ' "$e"; done)"
-    printf 'honest_baseline\t%s\n' "$([[ -z "$sdrs" ]] && echo 'no radio - guards must fail honestly' || echo 'radio present')"
+    printf 'honest_baseline\t%s\n' "$([[ "$have_radio" == no ]] && echo 'no radio - guards must fail honestly' || echo 'radio present')"
 }
 
 # ── selftest ────────────────────────────────────────────────────────────
@@ -488,8 +557,32 @@ fk_selftest() {
     # 7. Capability report shape.
     local cap; cap=$(fk_capability)
     chk cap-sdr    "$(fld "$cap" sdr_tools)"    "$(fk_sdr_label)"
+    chk cap-radio  "$(fld "$cap" sdr_devices)"  "$(fk_radio_label)"
     chk cap-port   "$(fld "$cap" gsmtap_port)"  "4729"
     chk cap-base   "$(printf '%s' "$cap" | grep -c '^honest_baseline')" "1"
+
+    # 7b. The presence probe must answer "is a radio attached", not "is the
+    #     tool installed" -- that conflation is what made this report claim a
+    #     radio on a machine with none. Both directions, because a probe that
+    #     can only refuse is not a probe.
+    local fbin="$d/bin"; mkdir -p "$fbin"
+    : > "$fbin/hackrf"; chmod +x "$fbin/hackrf"
+    printf '#!/bin/sh\necho "No HackRF boards found."\nexit 1\n' > "$fbin/hackrf_info"
+    chmod +x "$fbin/hackrf_info"
+    chk probe-tools-noradio \
+        "$(PATH="$fbin:$PATH" fk_probe_sdr_tools | grep -c '^hackrf$')" "1"
+    chk probe-noradio \
+        "$(PATH="$fbin:$PATH" fk_radio_probe hackrf >/dev/null 2>&1; echo $?)" "1"
+    printf '#!/bin/sh\necho "Found HackRF"\necho "Board ID Number: 2 (HackRF One)"\nexit 0\n' \
+        > "$fbin/hackrf_info"
+    chmod +x "$fbin/hackrf_info"
+    chk probe-radio \
+        "$(PATH="$fbin:$PATH" fk_radio_probe hackrf >/dev/null 2>&1; echo $?)" "0"
+    # The override is how a test asserts the no-radio path on a box that has
+    # a radio, and defined-but-empty is an instruction rather than unset.
+    chk probe-override-on  "$(FK_SDR_DEVICE=hackrf fk_radio_label)" "hackrf"
+    chk probe-override-off "$(FK_SDR_DEVICE= fk_radio_label)"       "none"
+    chk probe-override-rc  "$(FK_SDR_DEVICE= fk_has_sdr; echo $?)"  "1"
 
     # 8. Argument validation.
     chk emit-bad-scenario "$(fk_emit nonsense 1 0 "$d/x.pcap" >/dev/null 2>&1; echo $?)" "2"
@@ -505,7 +598,8 @@ fk_menu() {
     while true; do
         banner
         echo -e "  ${C_MAG}=== field kit ===${C_RESET}"
-        echo -e "  sdr:   ${C_GRN}$(fk_probe_sdr | tr '\n' ' ' | sed 's/^$/none/')${C_RESET}\n"
+        echo -e "  sdr:   ${C_GRN}$(fk_probe_sdr_tools | tr '\n' ' ' | sed 's/^$/none/')${C_RESET}"
+        echo -e "  radio: ${C_GRN}$(fk_radio_label)${C_RESET}\n"
         cat << 'M'
   [1]  capability report
   [2]  guard check — do radio verbs fail honestly?
@@ -533,6 +627,7 @@ M
 # ── CLI dispatch ────────────────────────────────────────────────────────
 fk_cli_status_tsv() {
     printf 'sdr\t%s\n'      "$(fk_sdr_label)"
+    printf 'radio\t%s\n'    "$(fk_radio_label)"
     printf 'serial\t%s\n'   "$(fk_probe_tty | tr '\n' ' ' | sed 's/^$/none/')"
     printf 'guards\t%s\n'   "$FK_GUARDS"
     printf 'port\t%s\n'     "$FK_PORT"
