@@ -788,6 +788,15 @@ sim_parse_ota() {
         return 1
     fi
     local pk="${ud:$iei70_off}"
+    # Two packet layouts reach this point and they are not interchangeable.
+    # The CAT_TP layout starts with a CPI octet (01/02) followed by a BER CPL,
+    # a CHI and a BER CHL. The SMS layout of TS 31.115 4.2 has no CHI at all
+    # and its CPL is a plain two-octet count, so its first octet is 00 for any
+    # packet that fits in an SMS. That first octet is the discriminator.
+    if [[ "${pk:0:2}" == "00" ]]; then
+        sim_parse_ota_sms "$pk" "$udhl"
+        return $?
+    fi
     local pkbytes; pkbytes=$(sim_hex_bytes "$pk")
     (( pkbytes >= 15 )) || {
         printf 'ota_valid\tno\nreason\tCommand Packet is %d bytes; the minimum is 15 (CPI CPL CHI CHL SPI2 KIc KID TAR3 CNTR5 PCNTR)\n' "$pkbytes"
@@ -852,7 +861,7 @@ sim_parse_ota() {
         cpl_note="CPL says the packet is $expected_cpl bytes (CHI at $chi_off + CPL $cpl) but the IE carries $pkbytes — truncated or non-standard length coding"
     fi
 
-    printf 'ota_valid\tyes\nudhl\t%s\ncpi\t%s\ncpi_meaning\t%s\ncpl\t%s\ncpl_len_octets\t%s\nchi\t%s\nchi_meaning\t%s\nchl\t%s\nchl_len_octets\t%s\nspi_off\t%s\ncpl_check\t%s\n' \
+    printf 'ota_valid\tyes\ndialect\tts102.225-cat-tp\nudhl\t%s\ncpi\t%s\ncpi_meaning\t%s\ncpl\t%s\ncpl_len_octets\t%s\nchi\t%s\nchi_meaning\t%s\nchl\t%s\nchl_len_octets\t%s\nspi_off\t%s\ncpl_check\t%s\n' \
         "$udhl" "$cpi" "$cpi_txt" "$cpl" "$cpl_len" "$chi" "$chi_txt" "$chl" "$chl_len" "$spi_off" "$cpl_note"
     printf 'spi\t%s\nspi_hex\t%s\n' "$spi" "$spi_hex"
     sim_spi_decode "$spi"
@@ -862,6 +871,9 @@ sim_parse_ota() {
     sim_kic_kid_meaning "$kic" cipher
     sim_kic_kid_meaning "$kid" integrity
     printf 'tar\t%s\ntar_known\t%s\n' "$tar" "$(sim_ota_tar_name "$tar")"
+    # The raw octets, so the key audit downstream reads the packet rather than
+    # falling back to 00 for a key that is right there.
+    printf 'kic\t%s\nkid\t%s\n' "$kic" "$kid"
     printf 'cntr_hex\t%s\ncntr\t%s\npcntr\t%s\n' "$cntr" "$(sim_hex_dec "$cntr")" "$pcntr"
     printf 'rccds_len\t%s\nrccds\t%s\nsecured_data_len\t%s\nsecured_data\t%s\n' \
         "$rccds_len" "$rccds" "$(sim_hex_bytes "$secured")" "$secured"
@@ -1754,6 +1766,53 @@ sim_cmd_decode_ad() {
     sim_parse_ef_ad "$h"
 }
 
+# TS 31.115 4.2: the single-SMS Command Packet. CPL is two octets and CHL is
+# one, neither BER-coded; there is no Command Header Identifier. The security
+# header is SPI(2) KIc(1) KID(1) TAR(3), then CNTR(5) PCNTR(1) [CC(8)] and the
+# secured data -- all of which the SPI may declare ciphered.
+sim_parse_ota_sms() {
+    local pk="${1:-}" udhl="${2:-}"
+    local n; n=$(sim_hex_bytes "$pk")
+    (( n >= 10 )) || { printf 'ERROR\tSMS command packet too short (%d bytes)\n' "$n" >&2; return 1; }
+    local cpl=$(( 16#${pk:0:4} ))
+    local chl=$(( 16#${pk:4:2} ))
+    local spi_hex="${pk:6:4}"
+    local kic="${pk:10:2}" kid="${pk:12:2}" tar="${pk:14:6}"
+    (( cpl == n - 2 )) || {
+        printf 'ERROR\tCPL says %d octets after the CPL field, the packet carries %d\n' \
+            "$cpl" "$(( n - 2 ))" >&2
+        return 1
+    }
+    printf 'ota_valid\tyes\ndialect\tts31.115-sms-packet\nudhl\t%s\ncpi\t-\ncpi_meaning\tnone in this layout (TS 31.115 4.2 has no Command Header Identifier)\n' "$udhl"
+    printf 'cpl\t%d\ncpl_len_octets\t2\nchl\t%d\nchl_len_octets\t1\n' "$cpl" "$chl"
+    local spi=$(( 16#${spi_hex} )) counter cipher
+    printf 'spi_off\t2\nspi\t%s\nspi_hex\t%s\n' "$spi" "$spi_hex"
+    sim_spi_decode "$spi"
+    counter=$(sim_spi_decode "$spi" | awk -F'\t' '$1=="spi_counter"{print $2}')
+    cipher=$(sim_spi_decode "$spi" | awk -F'\t' '$1=="spi_ciphering"{print $2}')
+    local sig=0
+    (( chl == 21 )) && sig=8
+    if (( chl != 13 && chl != 21 )); then
+        printf 'chl_note\tCHL is %d; the header is 13 octets without a CC and 21 with one (TS 102 225 5.1.1)\n' "$chl"
+    fi
+    printf 'header_bytes\t%d\ncc_bytes\t%d\n' "$chl" "$sig"
+    sim_kic_kid_meaning "$kic" cipher
+    sim_kic_kid_meaning "$kid" integrity
+    printf 'tar\t%s\ntar_known\t%s\n' "$tar" "$(sim_ota_tar_name "$tar")"
+    printf 'kic\t%s\nkid\t%s\n' "$kic" "$kid"
+    if [[ "$cipher" == "applied" ]]; then
+        # The key is the card's, and guessing at plaintext would be inventing
+        # the one thing an attacker actually needs to know.
+        printf 'secured\tyes (SPI b3=1)\nsecured_note\tthe header after TAR, the counter and the payload are enciphered; this verb does not decrypt. Run modules/41_ota_sms.sh --parse-packet-sms with OTASM_KIC_KEY/OTASM_KID_KEY to read them (it also verifies the CC)\n'
+    else
+        local cntr="${pk:20:10}" pcntr="${pk:30:2}"
+        printf 'secured\tno (SPI b3=0)\ncounter\t%s\npcntr\t%s\n' "$cntr" "$pcntr"
+        (( sig == 8 )) && printf 'cc\t%s\n' "${pk:32:16}"
+        printf 'apdu\t%s\n' "${pk:$(( 32 + sig * 2 ))}"
+    fi
+    return 0
+}
+
 sim_cmd_parse_ota() {
     local h="${1:-}"
     [[ -n "$h" ]] || { printf 'ERROR\tusage: --parse-ota <tpdu-hex>\n' >&2; return 2; }
@@ -2190,6 +2249,35 @@ sim_selftest() {
     # which is why the arm says 1 and the parse prints its rccds_note.
     chk ota-rccds-len "$(fld "$out" rccds_len)" "1"
     chk ota-rccds-note "$(fld "$out" rccds_note | grep -c 'does not follow')" "1"
+    # ── the TS 31.115 SMS packet layout (no CHI, two-octet CPL) ──────────
+    # The IE is the packet pySim builds for SPI 1600 (counter 2, ciphering, CC),
+    # TAR b00001, wrapped in an SMS-DELIVER with UDHI and IEI 70 so that the
+    # end-to-end path is what is under test and not a helper called directly.
+    local smstpdu="40039121F30004240101000000002524702200201516001515b000018405f7d95d3f0f438ae0669d9f5c2bd3ee323f8f0f19105a"
+    local sout; sout=$(sim_parse_ota "$smstpdu")
+    chk sms-ota-valid   "$(fld "$sout" ota_valid)" "yes"
+    chk sms-ota-dialect "$(fld "$sout" dialect)" "ts31.115-sms-packet"
+    chk sms-ota-cpl     "$(fld "$sout" cpl)" "32"
+    chk sms-ota-chl     "$(fld "$sout" chl)" "21"
+    chk sms-ota-cpl-oct "$(fld "$sout" cpl_len_octets)" "2"
+    chk sms-ota-chl-oct "$(fld "$sout" chl_len_octets)" "1"
+    chk sms-ota-spi     "$(fld "$sout" spi_hex)" "1600"
+    chk sms-ota-rccds   "$(fld "$sout" spi_b2b1_rccds)" "2"
+    chk sms-ota-cipher  "$(fld "$sout" spi_b3_ciphering)" "1"
+    chk sms-ota-cc-len  "$(fld "$sout" cc_bytes)" "8"
+    chk sms-ota-tar     "$(fld "$sout" tar)" "B00001"
+    chk sms-ota-kic     "$(fld "$sout" kic)" "15"
+    chk sms-ota-nocpi   "$(fld "$sout" cpi)" "-"
+    chk sms-ota-secured "$(fld "$sout" secured | cut -d' ' -f1)" "yes"
+    # The payload is ciphered, so the verb says so instead of printing the
+    # ciphertext as though it were a command.
+    chk sms-ota-note    "$(fld "$sout" secured_note | grep -c 'does not decrypt')" "1"
+    chk sms-ota-noapdu  "$(fld "$sout" apdu)" ""
+    # A CPL that does not describe the packet must be refused.
+    chk sms-ota-badcpl  "$(sim_parse_ota "${smstpdu:0:44}FF${smstpdu:48}" >/dev/null 2>&1; echo $?)" "1"
+    # The CAT_TP fixture still reports its own dialect, so the discriminator
+    # cannot quietly swallow one layout into the other.
+    chk cat-ota-dialect "$(fld "$out" dialect)" "ts102.225-cat-tp"
     # With CHL 14 the RC/CC/DS field is a single octet, so only the trailing
     # BB remains as secured data. The old reading (CHL-14) took AABB, i.e. it
     # swallowed the CC's only octet into the payload.
