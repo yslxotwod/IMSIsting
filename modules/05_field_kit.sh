@@ -332,6 +332,7 @@ fk_guard_matrix() {
 33_jamming_detect|--analyse|/nonexistent.iq
 39_ta_geoloc|--trilaterate|/nonexistent.tsv
 41_ota_sms|--parse-packet|00
+46_lpp|--forge-position|91,0||30
 42_li_probe|--score|/nonexistent.pcap
 43_ran_share|--leak-check|/nonexistent.pcap
 54_baseband_exploit|--inject|7E0044001F|BEXP_TX_ARMED=1 BEXP_TX_CMD=

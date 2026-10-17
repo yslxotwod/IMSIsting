@@ -3892,41 +3892,59 @@ ENGINE_ROOTS = {
     "sib13": ("SystemInformationBlockType13_r9", 11),
 }
 
-_ENGINE = None
+_ENGINES = {}
+
+# One row per generated table: file name, the environment variable that
+# overrides its path, and the message printed when it is missing. The codec is
+# the same for every family -- only the data differs, so a second protocol is a
+# row here and a family in tools/asn1gen.py, never a second engine.
+ENGINE_TABLES = {
+    "rrc": (
+        "lte_rrc_layout.py",
+        "LTE_RRC_LAYOUT",
+        "SIB9 to SIB13 are decoded by the generated engine, so both\n"
+        "tools/lte_per.py and the generated tools/lte_rrc_layout.py have to\n"
+        "be present.\nRegenerate it with: "
+        "python3 tools/asn1gen.py --out tools/lte_rrc_layout.py",
+    ),
+    "lpp": (
+        "lpp_layout.py",
+        "LPP_LAYOUT",
+        "LPP messages are decoded by the generated engine, so both\n"
+        "tools/lte_per.py and the generated tools/lpp_layout.py have to be\n"
+        "present.\nRegenerate it with: "
+        "/home/ysl/.lte-oracles/venv/bin/python tools/asn1gen.py "
+        "--family lpp --out tools/lpp_layout.py",
+    ),
+}
 
 
-def engine():
-    """Load the generic PER engine and the generated table, once per process.
+def engine(family="rrc"):
+    """Load the generic PER engine and one generated table, once per process.
 
-    The table is 1.7 MB of plain data, so it is loaded lazily: the hand-written
-    codecs above never touch it and should not pay for it.
+    The tables are 1-2 MB of plain data, so they are loaded lazily: the
+    hand-written codecs above never touch them and should not pay for one.
     """
-    global _ENGINE
-    if _ENGINE is not None:
-        return _ENGINE
+    if family in _ENGINES:
+        return _ENGINES[family]
+    fname, envvar, missing = ENGINE_TABLES[family]
     here = os.path.dirname(os.path.abspath(__file__))
     # The table path is overridable so a freshly generated table can be tried
     # before it replaces the committed one. Comparing two tables is the only
     # way to tell a generator change from an engine change.
-    table = os.environ.get("LTE_RRC_LAYOUT",
-                           os.path.join(here, "lte_rrc_layout.py"))
+    table = os.environ.get(envvar, os.path.join(here, fname))
     mods = {}
     for name, path in (("lte_per", os.path.join(here, "lte_per.py")),
-                       ("lte_rrc_layout", table)):
+                       (fname[:-3], table)):
         if not os.path.isfile(path):
-            raise RuntimeError(
-                "missing %s -- SIB9 to SIB13 are decoded by the generated\n"
-                "engine, so both tools/lte_per.py and the generated\n"
-                "tools/lte_rrc_layout.py have to be present.\n"
-                "Regenerate the table with: python3 tools/asn1gen.py --out "
-                "tools/lte_rrc_layout.py" % path)
+            raise RuntimeError("missing %s -- %s" % (path, missing))
         spec = importlib.util.spec_from_file_location(name, path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         mods[name] = mod
-    _ENGINE = (mods["lte_per"].codec_from_module(mods["lte_rrc_layout"]),
-               mods["lte_per"])
-    return _ENGINE
+    _ENGINES[family] = (mods["lte_per"].codec_from_module(mods[fname[:-3]]),
+                        mods["lte_per"])
+    return _ENGINES[family]
 
 
 def _decode_counting(codec, per, typename, bits):
@@ -4236,6 +4254,216 @@ def cmd_engine_encode(args):
     return 0
 
 
+# --------------------------------------------------------------------------
+# LPP (TS 37.355): the positioning payload.
+#
+# TS 37.355 fixes the coordinate grid: Ellipsoid-Point carries the latitude as
+# an integer over 0..2^23-1 spanning a quadrant (0..90 degrees) and the
+# longitude as a signed integer over -2^23..2^23-1 spanning the full circle
+# (-180..180 degrees). Writing those conversions twice is how two tools end up
+# disagreeing about where a coordinate is, so there is one function here and
+# the module calls it.
+# --------------------------------------------------------------------------
+
+LPP_LAT_STEPS = 1 << 23
+LPP_LON_STEPS = 1 << 23
+LPP_ROOT = "LPP_Message"
+
+
+def lpp_encode_coord(lat, lon):
+    """Degrees to (sign, degreesLatitude, degreesLongitude), or raise."""
+    if not (-90.0 <= lat <= 90.0):
+        raise ValueError("latitude %.7f is outside -90..90" % lat)
+    if not (-180.0 <= lon <= 180.0):
+        raise ValueError("longitude %.7f is outside -180..180" % lon)
+    sign = "north" if lat >= 0 else "south"
+    dlat = int(round(abs(lat) * LPP_LAT_STEPS / 90.0))
+    dlon = int(round(lon * LPP_LON_STEPS / 180.0))
+    # A value just inside the range can round one step past the last point the
+    # grid carries (90 degrees is not representable: the top is 90 - 90/2^23).
+    # Clamping moves the report by under 1.1 cm, which is far below anything
+    # the message can express, and refusing would reject a legal coordinate.
+    dlat = min(dlat, LPP_LAT_STEPS - 1)
+    dlon = min(max(dlon, -LPP_LON_STEPS), LPP_LON_STEPS - 1)
+    return sign, dlat, dlon
+
+
+def lpp_decode_coord(sign, dlat, dlon):
+    """(sign, degreesLatitude, degreesLongitude) back to decimal degrees."""
+    lat = dlat * 90.0 / LPP_LAT_STEPS
+    if sign != "north":
+        lat = -lat
+    lon = dlon * 180.0 / LPP_LON_STEPS
+    return lat, lon
+
+
+def lpp_position_message(lat, lon, radius=None, txn=1,
+                         initiator="targetDevice"):
+    """An LPP-Message carrying one forged location estimate.
+
+    The shape is the one a target device sends back to the E-SMLC: message
+    body provideLocationInformation, IEs r9, commonIEsProvideLocationInformation
+    with a locationEstimate. `radius` selects the uncertainty-circle variant
+    (TS 37.355 Ellipsoid-PointWithUncertaintyCircle) instead of a bare point.
+    """
+    sign, dlat, dlon = lpp_encode_coord(float(lat), float(lon))
+    point = {"latitudeSign": sign, "degreesLatitude": dlat,
+             "degreesLongitude": dlon}
+    if radius is None:
+        estimate = ("ellipsoidPoint", point)
+    else:
+        # TS 37.355: Ellipsoid-PointWithUncertaintyCircle.uncertainty is an
+        # INTEGER(0..127), in metres.
+        r = int(radius)
+        if not (0 <= r <= 127):
+            raise ValueError("radius %d is outside 0..127 metres" % r)
+        estimate = ("ellipsoidPointWithUncertaintyCircle",
+                    dict(point, uncertainty=r))
+    return {
+        "transactionID": {"initiator": initiator, "transactionNumber": int(txn)},
+        "endTransaction": False,
+        "sequenceNumber": 0,
+        "lpp-MessageBody": ("c1", ("provideLocationInformation", {
+            "criticalExtensions": ("c1", ("provideLocationInformation-r9", {
+                "commonIEsProvideLocationInformation": {
+                    "locationEstimate": estimate,
+                },
+            })),
+        })),
+    }
+
+
+def lpp_read_position(value):
+    """Pull (lat, lon, shape, radius, txn) back out of an LPP-Message value.
+
+    Returns None when the message is not a ProvideLocationInformation with a
+    location estimate -- a message of another type is not an error, it is just
+    not a position report.
+    """
+    try:
+        # LPP-MessageBody is a CHOICE (c1, messageClassExtension) and c1 is
+        # itself a CHOICE, so the payload sits two tuples deep.
+        _, c1 = value["lpp-MessageBody"]
+        prov = c1[1]
+        ies = prov["criticalExtensions"][1][1]
+        common = ies["commonIEsProvideLocationInformation"]
+        shape, est = common["locationEstimate"]
+        lat, lon = lpp_decode_coord(est["latitudeSign"],
+                                    est["degreesLatitude"],
+                                    est["degreesLongitude"])
+    except (KeyError, IndexError, TypeError):
+        return None
+    return {
+        "latitude": lat,
+        "longitude": lon,
+        "shape": shape,
+        "radius": est.get("uncertainty"),
+        "txn": value.get("transactionID", {}).get("transactionNumber"),
+    }
+
+
+def cmd_lpp_encode(args):
+    """Encode an LPP-Message, from --lat/--lon or from raw --json."""
+    if args.json is not None and (args.lat is not None or args.lon is not None):
+        print("ERROR\tgive --lat/--lon or --json, not both", file=sys.stderr)
+        return 2
+    if args.json is not None:
+        try:
+            value = _unjson(json.loads(args.json))
+        except ValueError as exc:
+            print("ERROR\t--json is not valid JSON: %s" % exc, file=sys.stderr)
+            return 2
+        extra = {}
+    else:
+        if args.lat is None or args.lon is None:
+            print("ERROR\tgive --lat and --lon, or --json", file=sys.stderr)
+            return 2
+        try:
+            value = lpp_position_message(args.lat, args.lon,
+                                         radius=args.radius, txn=args.txn,
+                                         initiator=args.initiator)
+            lat, lon = float(args.lat), float(args.lon)
+            sign, dlat, dlon = lpp_encode_coord(lat, lon)
+        except ValueError as exc:
+            print("ERROR\t%s" % exc, file=sys.stderr)
+            return 2
+        extra = {"lat_deg": lat, "lon_deg": lon, "lat_sign": sign,
+                 "deg_lat": dlat, "deg_lon": dlon}
+    try:
+        codec = engine("lpp")[0]
+        bits = codec.encode_bits(LPP_ROOT, value)
+    except Exception as exc:                        # noqa: BLE001
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+    bits = "".join(str(b) for b in bits) if not isinstance(bits, str) else bits
+    print("lpp\t%s" % LPP_ROOT)
+    print("layout\tTS 37.355 unaligned PER (generated codec, tools/lte_per.py)")
+    for key in ("lat_sign", "deg_lat", "deg_lon", "lat_deg", "lon_deg"):
+        if key in extra:
+            val = extra[key]
+            print("%s\t%s" % (key, ("%.7f" % val) if isinstance(val, float)
+                              else val))
+    if args.radius is not None:
+        print("radius_m\t%d" % int(args.radius))
+    print("pdu_bits\t%d" % len(bits))
+    print("pdu_hex\t%s" % _bits_to_hex(bits))
+    return 0
+
+
+def cmd_lpp_decode(args):
+    """Decode an LPP-Message and report the location estimate it carries."""
+    if args.file is not None:
+        try:
+            with open(args.file, "rb") as fh:
+                data = fh.read()
+        except OSError as exc:
+            print("ERROR\t%s" % exc, file=sys.stderr)
+            return 2
+        bits = "".join(format(b, "08b") for b in data)
+        total = len(bits)
+    elif args.hex is not None:
+        h = args.hex.strip()
+        if len(h) % 2:
+            print("ERROR\t--hex has an odd number of digits", file=sys.stderr)
+            return 2
+        try:
+            data = bytes.fromhex(h)
+        except ValueError as exc:
+            print("ERROR\t--hex is not hex: %s" % exc, file=sys.stderr)
+            return 2
+        bits = "".join(format(b, "08b") for b in data)
+        total = len(bits)
+    else:
+        print("ERROR\tgive --hex or --file", file=sys.stderr)
+        return 2
+    try:
+        codec = engine("lpp")[0]
+        value = codec.decode_bits(LPP_ROOT, bits, exact=False)
+    except Exception as exc:                        # noqa: BLE001
+        print("ERROR\tnot an LPP-Message: %s" % exc, file=sys.stderr)
+        return 1
+    pos = lpp_read_position(value)
+    print("lpp\t%s" % LPP_ROOT)
+    print("buffer_bits\t%d" % total)
+    if pos is None:
+        body = value.get("lpp-MessageBody")
+        name = body[1][0] if body and isinstance(body[1], tuple) else "unknown"
+        print("body\t%s" % name)
+        print("estimate\tnone")
+        print("note\tthis message carries no location estimate, so there is "
+              "no position to report")
+        return 0
+    print("body\tprovideLocationInformation")
+    print("shape\t%s" % pos["shape"])
+    print("latitude\t%.7f" % pos["latitude"])
+    print("longitude\t%.7f" % pos["longitude"])
+    if pos["radius"] is not None:
+        print("radius_m\t%d" % pos["radius"])
+    if pos["txn"] is not None:
+        print("transaction_number\t%d" % pos["txn"])
+    return 0
+
+
 def main(argv):
     p = argparse.ArgumentParser(prog="lte_asn1",
                                 description="LTE RRC ASN.1 unaligned PER (TS 36.331)")
@@ -4494,6 +4722,30 @@ def main(argv):
                     help="print the decoded value as JSON instead of dotted "
                          "field lines")
     td.set_defaults(func=cmd_type_decode)
+
+    lpp = sub.add_parser("lpp-encode",
+                         help="encode an LPP-Message carrying a location")
+    lpp.add_argument("--lat", type=float, default=None,
+                     help="latitude in decimal degrees (-90..90)")
+    lpp.add_argument("--lon", type=float, default=None,
+                     help="longitude in decimal degrees (-180..180)")
+    lpp.add_argument("--radius", type=int, default=None,
+                     help="report an uncertainty circle of this many metres "
+                          "instead of a bare point")
+    lpp.add_argument("--txn", type=int, default=1,
+                     help="LPP transaction number (0..255, default 1)")
+    lpp.add_argument("--initiator", default="targetDevice",
+                     choices=("targetDevice", "locationServer"))
+    lpp.add_argument("--json", default=None,
+                     help="encode this JSON value instead of --lat/--lon")
+    lpp.set_defaults(func=cmd_lpp_encode)
+
+    lpd = sub.add_parser("lpp-decode",
+                         help="decode an LPP-Message and report its position")
+    lpd.add_argument("--hex", default=None, help="PER-encoded message as hex")
+    lpd.add_argument("--file", default=None,
+                     help="read the PER-encoded message from this file")
+    lpd.set_defaults(func=cmd_lpp_decode)
 
     args = p.parse_args(argv)
     if args.cmd == "selftest":

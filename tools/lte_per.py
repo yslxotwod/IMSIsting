@@ -392,6 +392,14 @@ class Codec(object):
         if ub is None:
             self._enc_intunconst(w, value, lb, path)
             return
+        # A constrained INTEGER outside its range is not representable, and
+        # writing it anyway truncates: 20578 in 0..127 comes back as 34. pycrate
+        # refuses, so allowing it here would make the two disagree about what a
+        # valid message is -- and the wrong position would encode cleanly.
+        if not (lb <= value <= ub):
+            raise PerError(
+                "%s: INTEGER %d is outside %d..%d" % (path, value, lb, ub)
+            )
         span = ub - lb + 1
         if span > 1:
             w.put(value - lb, _ceil_log2(span))

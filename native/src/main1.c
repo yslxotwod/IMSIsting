@@ -15806,7 +15806,7 @@ static ModuleSubmenuEntry lpp_entries[] = {
       "--list-pids:List PIDs|--parse-position:Parse Position|--detect-forgery:Detect Forgery" },
     { "Build",
       "document-new-symbolic",
-      "--build-header:Build Header|--build-position:Build Position|--decode-header:Decode Header" },
+      "--build-header:Build Header|--forge-position:Forge Position|--decode-header:Decode Header" },
 };
 static ModuleSubmenuEntry wifioff_entries[] = {
     { "Overview",

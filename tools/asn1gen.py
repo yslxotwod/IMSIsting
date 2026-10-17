@@ -73,6 +73,68 @@ DEFAULT_TYPES = [
     "INTER.HandoverCommand",
 ]
 
+# The ASN.1 namespaces this generator can be pointed at.  The table format and
+# the engine are the same for both; only the pycrate modules, the default
+# module for an unqualified --types entry, and the default root set differ.
+# Adding a family here is the whole cost of a second protocol -- a second
+# generator would be a second implementation of the same closure walk.
+FAMILIES = {}
+
+
+def _register_rrc():
+    FAMILIES["rrc"] = {
+        "modules": MODULES,
+        "aliases": MODULE_ALIASES,
+        "default_module": "EUTRA-RRC-Definitions",
+        "default_types": DEFAULT_TYPES,
+        "out": "lte_rrc_layout.py",
+        "description": "LTE RRC (TS 36.331)",
+    }
+
+
+def _register_lpp():
+    """LPP (TS 37.355), the positioning protocol.
+
+    The forged position report needs the ProvideLocationInformation half, but
+    a table is generated per family and the whole closure of LPP_Message is
+    cheaper to carry than a second table for each message type.
+    """
+    from pycrate_asn1dir import LPP
+
+    FAMILIES["lpp"] = {
+        "modules": [
+            ("LPP-PDU-Definitions", LPP.LPP_PDU_Definitions),
+            ("LPP-Broadcast-Definitions", LPP.LPP_Broadcast_Definitions),
+        ],
+        "aliases": {
+            "PDU": "LPP-PDU-Definitions",
+            "BCAST": "LPP-Broadcast-Definitions",
+        },
+        "default_module": "LPP-PDU-Definitions",
+        "default_types": ["LPP_Message"],
+        "out": "lpp_layout.py",
+        "description": "LPP (TS 37.355)",
+    }
+
+
+DEFAULT_MODULE = "EUTRA-RRC-Definitions"
+
+
+def use_family(name):
+    """Point the module-level namespace globals at one ASN.1 family.
+
+    Called once from main() so that every function below keeps reading the
+    same globals it always did; a family is a data switch, not a second code
+    path.
+    """
+    global MODULES, MODULE_ALIASES, DEFAULT_TYPES, DEFAULT_MODULE
+    fam = FAMILIES[name]
+    MODULES = fam["modules"]
+    MODULE_ALIASES = fam["aliases"]
+    DEFAULT_TYPES = fam["default_types"]
+    DEFAULT_MODULE = fam["default_module"]
+
+
 # The ASN.1 constructs this generator can express.  Everything else becomes an
 # ``unsupported`` marker so the engine refuses instead of mis-encoding.
 KNOWN_TYPES = (
@@ -507,7 +569,7 @@ def resolve_type(spec, modules_by_name):
         modpart, name = spec.rsplit(".", 1)
         modname = MODULE_ALIASES.get(modpart.upper(), modpart)
     else:
-        modname, name = "EUTRA-RRC-Definitions", spec
+        modname, name = DEFAULT_MODULE, spec
     mod = modules_by_name.get(modname)
     if mod is None:
         raise SystemExit(
@@ -683,24 +745,40 @@ def generate(specs=None, verbose=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Generate a declarative unaligned-PER layout table for "
-        "LTE RRC from the pycrate ASN.1 oracle."
+        "LTE RRC or LPP from the pycrate ASN.1 oracle."
+    )
+    parser.add_argument(
+        "--family",
+        default="rrc",
+        choices=("rrc", "lpp"),
+        help="which ASN.1 namespace to generate for (default: rrc)",
     )
     parser.add_argument(
         "--types",
         default=None,
         help="comma separated type list, e.g. "
-        "'SystemInformationBlockType1,INTER.HandoverCommand'. Defaults to "
-        "SIB1..SIB8 + RRCConnectionReconfiguration + HandoverCommand.",
+        "'SystemInformationBlockType1,INTER.HandoverCommand'. Defaults to the "
+        "family's root set: SIB1..SIB8 + RRCConnectionReconfiguration + "
+        "HandoverCommand for rrc, LPP_Message for lpp.",
     )
     parser.add_argument(
         "--out",
-        default="/tmp/asn1gen/lte_rrc_layout.py",
-        help="output path (default: /tmp/asn1gen/lte_rrc_layout.py)",
+        default=None,
+        help="output path (default: tools/<family> layout name)",
     )
     parser.add_argument(
         "--quiet", action="store_true", help="suppress the progress summary"
     )
     args = parser.parse_args(argv)
+
+    _register_rrc()
+    if args.family == "lpp":
+        _register_lpp()
+    use_family(args.family)
+    if args.out is None:
+        args.out = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), FAMILIES[args.family]["out"]
+        )
 
     specs = None
     if args.types:
