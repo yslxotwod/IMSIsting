@@ -61,6 +61,19 @@ a TAI, and no TAI IE is built here, so the message is a fragment that decodes.
 The iMSI form of UEPagingID is not built either -- only s-TMSI, which is the
 form a real paging block carries.
 
+TAIList is the one IE still UNRESOLVED, and it is worth writing down as such
+because three plausible encodings were built and all three were rejected.
+With the wrapper and IE count correct, tshark reads `id-TAIList: 1 item` and
+then dissects the item as a ProtocolIE-Field instead of a TAI, for each of:
+a preamble octet then PLMN then TAC (00 00f110 00f1), no preamble
+(00f110 00f1), and two preamble octets (00 00 00f110 00f1).  A TAIList that
+carries a TAC an MME cannot read is worse than no TAIList, so it is not here.
+What did settle in the same probe: EUTRAN-CGI dissects as preamble + PLMN +
+28-bit cell-ID, and RRC-Establishment-Cause as an extensible ENUMERATED whose
+octet is index<<6, so `mo-Data` is 0x40 -- 0x80 reads back as
+delay-TolerantAccess through the extension marker.  Neither is wired up yet;
+both are ready to be.
+
 Usage:
     s1ap_asn1.py s1setup --mcc 001 --mnc 01 --enb-id 0xA1C01 \
                          --name LabHeNB --tac 00f1 [--pdrx v64]
