@@ -1883,6 +1883,62 @@ lair_cmd_decode_mib() {
     lair_decode_mib "$hex"
 }
 
+# ── X2AP — the message two base stations exchange ───────────────────────
+# tools/x2ap_asn1.py writes the X2 message a fake cell answers a real one
+# with. It is a separate codec from S1AP on purpose: same aligned PER,
+# different procedure codes and IE ids. The layout that a writer gets wrong
+# there -- the 28-bit eUTRANcellIdentifier, which is NOT padded before the
+# TAC, so the TAC lands across octets -- is pinned against pycrate and
+# tshark by tools/check-x2ap-codec.sh rather than against itself.
+lair_x2_tool() {
+    local tool="$IMSISTING_ROOT/tools/x2ap_asn1.py"
+    [[ -r "$tool" ]] || {
+        printf 'ERROR	missing %s\n' "$tool" >&2
+        printf 'WHY\tX2AP is a real aligned-PER codec and lives in tools/\n' >&2
+        return 1
+    }
+    python3 "$tool" "$@"
+}
+
+lair_cmd_x2_setup() {
+    local mcc="${1:-}" mnc="${2:-}" enb="${3:-}" pci="${4:-}"
+    local cell="${5:-}" tac="${6:-}"
+    if [[ -z "$mcc" || -z "$mnc" || -z "$enb" || -z "$pci" || -z "$cell" || -z "$tac" ]]; then
+        printf 'ERROR\tusage: --x2-setup <mcc> <mnc> <enb-id> <pci> <cell-id> <tac>\n' >&2
+        return 2
+    fi
+    local out rc hex
+    out=$(lair_x2_tool x2setup --mcc "$mcc" --mnc "$mnc" --enb-id "$enb" \
+          --pci "$pci" --cell-id "$cell" --tac "$tac" 2>&1); rc=$?
+    if (( rc != 0 )); then
+        printf '%s\n' "$out" | sed 's/^/ERROR\t/'
+        return 1
+    fi
+    hex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    [[ -n "$hex" ]] || { printf 'ERROR\tthe codec printed no octets\n' >&2; return 1; }
+    printf 'message\tX2SetupRequest\n'
+    printf 'procedure\tid-x2Setup\n'
+    printf 'layout\tTS 36.423 aligned PER (tools/x2ap_asn1.py)\n'
+    printf 'transport\tSCTP 36422 PPID 27 -- built here, not sent from here\n'
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'hex\t%s\n' "$hex"
+    printf 'referee\tpycrate and tshark both read these octets (tools/check-x2ap-codec.sh)\n'
+}
+
+lair_cmd_x2_decode() {
+    local hex
+    hex=$(lair_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --x2-decode <hex>\n' >&2; return 2; }
+    local out rc
+    out=$(lair_x2_tool decode "$hex" 2>&1); rc=$?
+    if (( rc != 0 )); then
+        printf '%s\n' "$out" | sed 's/^/ERROR\t/'
+        printf 'NOTDECODED\tthe input is not an X2AP initiating message\n' >&2
+        return 1
+    fi
+    printf '%s\n' "$out"
+}
+
 lair_cmd_paging_frame() {
     # Everything after the five positional arguments is passed through, so
     # --edrx / --ptw / --tdd / --fdd / --earfcn survive to the worker.
@@ -3100,6 +3156,29 @@ FAKE
     chk txc-bad-case  "$(lair_rrc_tx reconfiguration nonsense >/dev/null 2>&1; echo $?)" "2"
     chk txc-bad-cmd   "$(lair_cmd_rrc_tx bogus >/dev/null 2>&1; echo $?)" "2"
 
+    # ── X2AP: the octets a fake cell answers a real one with ────────────
+    # The vector and its two referee verdicts live in tools/x2ap_asn1.py's
+    # selftest and tools/check-x2ap-codec.sh; what this checks is that the
+    # verb reaches that codec and reports its octets, and that the decoder
+    # puts the TAC back where the encoder meant it.
+    out=$(lair_cmd_x2_setup 1 01 0xA1C01 301 0x0A1C010 1 2>/dev/null); rc=$?
+    chk x2-setup-rc    "$rc" "0"
+    chk x2-setup-proc  "$(fld "$out" procedure)" "id-x2Setup"
+    chk x2-setup-oct   "$(fld "$out" octets)" "46"
+    chk x2-setup-hex   "$(fld "$out" hex)" \
+        "0006002a000002001500080000f11000a1c010001400170000012d0000f1100a1c0100001000f110005eec189c55"
+    chk x2-setup-notsent "$(fld "$out" transport | grep -c 'not sent')" "1"
+    out=$(lair_cmd_x2_decode \
+        "0006002a000002001500080000f11000a1c010001400170000012d0000f1100a1c0100001000f110005eec189c55" 2>/dev/null)
+    rc=$?
+    chk x2-decode-rc   "$rc" "0"
+    chk x2-decode-proc "$(fld "$out" procedure)" "id-x2Setup"
+    chk x2-decode-cell "$(printf '%s\n' "$out" | grep -c 'tac 1 ')" "1"
+    chk x2-decode-ies  "$(fld "$out" ies)" "2"
+    # A body that is not an X2AP PDU is refused instead of decoded as one.
+    chk x2-decode-garbage "$(lair_cmd_x2_decode 00 >/dev/null 2>&1; echo $?)" "1"
+    chk x2-setup-usage    "$(lair_cmd_x2_setup 1 01 >/dev/null 2>&1; echo $?)" "2"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -3817,6 +3896,8 @@ lair_cli_main() {
         --earfcn)       lair_cmd_earfcn "${1:-}" ;;
         --decode-sib)   lair_cmd_decode_sib "${1:-}" "${2:-1}" ;;
         --decode-mib)   lair_cmd_decode_mib "${1:-}" ;;
+        --x2-setup)     lair_cmd_x2_setup "$@" ;;
+        --x2-decode)    lair_cmd_x2_decode "${1:-}" ;;
         --paging-frame) lair_cmd_paging_frame "$@" ;;
         --gen-enb-conf) lair_cmd_gen_enb_conf "$@" ;;
         --rrc-tx)       lair_cmd_rrc_tx "${1:-reconfiguration}" "${2:-minimal}" ;;
@@ -3836,6 +3917,14 @@ Usage: $0 COMMAND
   --decode-sib <hex> [1..13]
                                    parse a SIB body (default SIB1)
   --decode-mib <hex>               decode the 24-bit LTE MIB (BCCH-BCH)
+  --x2-setup <mcc> <mnc> <enb-id> <pci> <cell-id> <tac>
+                                   write an X2SetupRequest (TS 36.423, aligned
+                                   PER) for one served cell: the octets a
+                                   fake cell answers a real one with. The
+                                   verb builds the message and does not open
+                                   a socket.
+  --x2-decode <hex>                read an X2AP initiating message: procedure,
+                                   IE ids, and the cell fields it carries
   --paging-frame <imsi> <tac> <ue-id> [T] [nB] [edrx <ms>] [ptw <ms>]
                  [tdd|fdd|earfcn <N>] [pdcch|mpdcch|npdcch]
                                    PF/PO from TS 36.304 §7.1/§7.2, plus the

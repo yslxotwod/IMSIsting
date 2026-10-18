@@ -14666,6 +14666,13 @@ static ModuleSubmenuEntry lair_entries[] = {
     { "Decode",
       "document-open-symbolic",
       "--decode-sib:Decode SIB|--decode-mib:Decode MIB|--paging-frame:Paging Frame" },
+    /* X2AP is what two base stations say to each other, and it is the
+       message a fake cell answers a real one with. It gets its own view
+       because it is a different protocol from the air interface, not a
+       filter on it. */
+    { "X2",
+      "network-transmit-receive-symbolic",
+      "--x2-setup:Build X2 Setup|--x2-decode:Decode X2" },
     { "Tools",
       "preferences-system-symbolic",
       "--earfcn=6300|--power-ref:Power Reference|--gen-enb-conf:Generate eNB Config" },

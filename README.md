@@ -90,11 +90,20 @@ has not been done yet.
 | Module | Description | Attack |
 |---|---|---|
 | `09_lte_attach` | NAS EMM/ESM encode-decode, BCD IMSI/IMEI, attach forge | `built` |
-| `10_lte_air` | RRC/SIB decode, paging frame maths, srsRAN eNB orchestration | `built` |
+| `10_lte_air` | RRC/SIB decode, X2AP setup encode, paging frame maths, srsRAN eNB orchestration | `built` |
 | `11_lte_core` | Diameter S6a/S6d, GTP-C/GTP-U, S1-MME, EPC vectors | `plan` |
 
 `10_lte_air` writes both srsRAN configs and execs `srsenb` — a real rogue eNB, as
-far as software goes. `11_lte_core` is the opposite case: four finished
+far as software goes. It also writes X2AP: `--x2-setup` builds the X2 Setup
+Request a fake cell answers a real one with, and `--x2-decode` reads one back.
+X2AP is a second aligned-PER codec rather than a switch on S1AP
+(`tools/x2ap_asn1.py`), because the two protocols share an envelope and nothing
+else — and because the ECGI's 28-bit cell identity is *not* padded before the
+TAC that follows it, an alignment there yields a message that dissects cleanly
+and reports the wrong tracking area. `tools/check-x2ap-codec.sh` pins that
+against pycrate and tshark over two cases and four negation controls. The
+handover procedures are not built: they need an E-RAB list this tree cannot
+fill in from a plan file. `11_lte_core` is the opposite case: four finished
 Diameter/GTP encoders that emit real octets, and until now **no transport**.
 `--gtpc-send` closes the GTP-C half through `tools/udp_assoc.py` — armed
 (`LTE_ARMED=1`), and honest about what a datagram proves: the report says
@@ -758,6 +767,7 @@ often identifies the problem with no hardware attached.
 ./tools/check-paths.sh            # every path and table entry resolves
 ./tools/check-verbs.sh            # verbs reachable from the GUI
 ./tools/check-gui-text.sh         # no verb is rendered as interface text
+./tools/check-x2ap-codec.sh       # X2AP octets vs pycrate and the clause
 ./tools/gen-module-index.sh       # regenerate the index
 ./tools/gen-icons-xml.sh --check  # the bundled icon set matches the tree
 ```
