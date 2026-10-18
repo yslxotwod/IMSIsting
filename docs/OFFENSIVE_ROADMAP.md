@@ -1248,28 +1248,42 @@ home; several are committed to a phase above; two are reversals of a scope line
 rather than new work; five are genuinely additive. **None require a new module
 number**, and two of the proposed numbers collide.
 
-*Already owned — placement, not construction.*
+*Already owned — where each proposal would live, and whether it does yet.*
 
-| Proposed | Home | Note |
-|---|---|---|
-| Barrage, narrowband, duty-cycle jamming | `33_jamming_detect` | already DECIDED at *Tier 3*; TX path specified there |
-| PSS/SSS, PBCH, PUCCH jamming | `38` + `10_lte_air` | new modes; the sequences come from the Phase 2 codec work |
-| NR SSB jamming | `38` + `12_nr_air` | `12_nr_air` already builds SSB |
-| GPS/GNSS jamming | `38` + `01_radio` | the sync dependency is a `01_radio` question |
-| Physical SIM swap, COMP128v1, Milenage, eSIM ES9+ | `16_sim` | APDU build/parse, EF access, DPA, RSP and OTA parse are already built; crypto in `20_gsm_cve` and `tools/gsm_crypto.py` |
-| PC/SC transport | `00_deps` | already a declared dependency; hardware paths are `handoff` by contract, not gaps |
-| SIMjacker / WIB S@T push | `52_stk` + `41_ota_sms` | `52_stk` builds the `0xD0` envelope and COMPREHENSION-TLVs |
-| UMTS IMSI catcher, AKA reflection | `08_umts_air` | the module exists and already does UARFCN, SIB maps, UIA1/UIA2 MAC-I and AKA relay analysis; UMTS *transmit* is the gap |
-| 5G AKA linkability | `14_suci` | Phase 3 already says "wire the NET half" |
-| TAU/RAU reject builder | `32_nas_signaling` | not `15_downgrade` — `37` is the NAS builder; `19` detects |
-| Measurement reports, RLF/RRC release spam, CA/DC | `10_lte_air` | RRC work already in flight |
-| PWS / CMAS / ETWS false alert | `10_lte_air` | the SIB codec exists; carries an emergency-services disclaimer like `38`'s |
-| GTP-in-GTP, TEID brute force | `11_lte_core` | Phase 7 transport |
-| IMS registration hijack | `30_volte_ims` | already named in Phase 5 |
-| O-RAN E2/A1/O1, slicing escape, URLLC/TSN | `48_oran`, `34_slicing` | Phase 11 |
-| OTDOA/UTDOA/PRS spoofing | `46_lpp` + `10_lte_air` | `46_lpp` owns LPP; PRS is a 36.211 downlink signal |
-| MBMS / MooD | `11_lte_core` | hooks present |
-| Operator-side SIM swap and portal enumeration | `31_sim_defense`, `44_carrier_api` | **scope reversal**, not placement — see below |
+This table is an **audit of placement**, not a build record. The `Status` column
+was added after the fact, because without it the `Note` column reads like a claim
+of capability: it mixes "already built" with "would go here" and there is no way
+to tell them apart. Every row below was checked against the tree at the time of
+writing, with the grep or verb that settles it. `BUILT` means a verb does it
+today; `PARTIAL` means part of it exists and the named gap is real; `ABSENT`
+means nothing in the tree does it; `DECIDED` means a phase commits to it and the
+code is not written.
+
+Two ids in the original version of this table were from before the module
+renumbering (`docs/MODULE_ROSTER.md`): `38` was the jamming module that is now
+`33_jamming_detect`, and `37` was the NAS builder that is now
+`32_nas_signaling`. Both are corrected here.
+
+| Proposed | Home | Status | Note |
+|---|---|---|---|
+| Barrage, narrowband, duty-cycle jamming | `33_jamming_detect` | **BUILT** | Phase 9: barrage and narrowband modes, AWGN/CW/chirp shapes, a structural pulse train, the TS 36.104 EARFCN raster, behind the lab gate |
+| PSS/SSS, PBCH, PUCCH jamming | `33_jamming_detect` + `10_lte_air` | **ABSENT** | `10_lte_air` has no PSS/SSS/PBCH sequence generator — its only PSS/SSS/PUCCH mentions are PUCCH *power* parameters and a clause comment — and "the Phase 2 codec work" is the RRC ASN.1 layout, not PHY sequences. Nothing in the tree generates those reference signals, so there is nothing to feed the constructor |
+| NR SSB jamming | `33_jamming_detect` + `12_nr_air` | **PARTIAL** | `12_nr_air` does build SSB (`--ssb`, 306 references); `33_jamming_detect` has no mode that consumes it. The producer exists, the consumer does not |
+| GPS/GNSS jamming | `33_jamming_detect` + `01_radio` | **ABSENT** | `01_radio` has no GPS/GNSS code at all (0 matches); the "sync dependency" this row asserted is not a thing in this tree |
+| Physical SIM swap, COMP128v1, Milenage, eSIM ES9+ | `16_sim` | **PARTIAL** | APDU build/parse, EF access, OTA (165 references) and the SGP.22 RSP profile operations exist; COMP128-1 and Milenage live in `tools/gsm_crypto.py` (94 references, used by `20_gsm_cve`), not as `16_sim` verbs. ES9+ is not built |
+| PC/SC transport | `00_deps` | **DECLARED** | `pcsc` appears three times in `00_deps` as a declared dependency; no module opens a PC/SC context, and hardware paths are `handoff` by contract |
+| SIMjacker / WIB S@T push | `52_stk` + `41_ota_sms` | **PARTIAL** | `52_stk` builds the `0xD0` envelope and COMPREHENSION-TLVs; `41_ota_sms` names S@T/WIB only in a header comment — the push itself is not built |
+| UMTS IMSI catcher, AKA reflection | `08_umts_air` | **PARTIAL** | UARFCN (65), SIB maps (126), UIA1/UIA2 MAC-I (23) and AKA relay analysis (30) are real; UMTS *transmit* is the gap, and without it there is no catcher |
+| 5G AKA linkability | `14_suci` | **BUILT** | `--build-suci`, `--parse-suci`, `--deconceal`, `--verify-hnkey`, `--hkdf`, `--msin-encode`: the NET half is wired |
+| TAU/RAU reject builder | `32_nas_signaling` | **BUILT** | Phase 16, this cut: nine EPS and eight 5GS pre-authentication messages, octets only |
+| Measurement reports, RLF/RRC release spam, CA/DC | `10_lte_air` | **ABSENT** | 0 matches for measurement report, RLF and RRC release in `10_lte_air`; "RRC work already in flight" was not true |
+| PWS / CMAS / ETWS false alert | `10_lte_air` | **ABSENT** | The SIB codec does exist (SIB1/SIB2 decoders), but there is no PWS/CMAS/ETWS handling anywhere and no emergency-services disclaimer in that module (0 matches) — the note this row carried was wrong |
+| GTP-in-GTP, TEID brute force | `11_lte_core` | **PARTIAL** | TEID handling is real (68 references); GTP-in-GTP encapsulation is absent (0 matches) |
+| IMS registration hijack | `30_volte_ims` | **BUILT** | "SIP REGISTER spoof (registration hijack)" is a verb, guarded by an operator-ownership flag |
+| O-RAN E2/A1/O1, slicing escape, URLLC/TSN | `48_oran`, `34_slicing` | **PARTIAL** | `48_oran` has `--a1-put`, `--e2-control`, `--xapp-attack`; `34_slicing` has `--isolation-check` and `--detect`. URLLC/TSN is absent |
+| OTDOA/UTDOA/PRS spoofing | `46_lpp` + `10_lte_air` | **PARTIAL** | `46_lpp` forges LPP positions (`--forge-position`, `--build-header`, `--detect-forgery`); PRS signal generation is absent |
+| MBMS / MooD | `11_lte_core` | **ABSENT** | MBMS appears only as GTP message-name strings (four lines); nothing decodes or builds an MBMS session and there is no MooD handling. "hooks present" overstated it |
+| Operator-side SIM swap and portal enumeration | `31_sim_defense`, `44_carrier_api` | **BUILT** | Phase 12 built both halves; the `scope-no-*` assertions were replaced by gate assertions |
 
 *Two scope reversals, stated as such.* `31_sim_defense`'s header says its
 selftest asserts the file contains no port-request template and no dispatchable
@@ -1279,7 +1293,10 @@ proposal to "move the swap builder into `44_carrier_api`" is therefore not a
 filing decision — it is the Phase 12 decision, and those two `scope-no-*`
 assertions are deleted when the verbs land, exactly as Phase 12 describes.
 
-*Five that are genuinely additive.*
+*Five that are genuinely additive — none of them built.*
+
+Nothing in this list has a verb today; it is what remains after the audit above,
+and each item names the work that would have to exist first.
 
 1. **PRACH jamming, paired with the IMSI catcher.** The only jamming mode here
    that composes with work already in the tree rather than duplicating it: deny
@@ -1526,6 +1543,45 @@ Why this was not already filed: the Phase 14 audit names `32_nas_signaling` as
 the right home for a TAU/RAU reject builder (`:1002`) and files it nowhere as
 work, and the attack inventory has carried the NAS row as `partial` with no
 phase owning the balance.
+
+*Built.* `--build-nas <eps|5gs> <message>` builds 17 messages — the nine EPS and
+eight 5GS messages that belong to the window before the network has authenticated
+anybody: attach / TAU / service / registration reject, identity request,
+authentication request / reject / failure, security mode command / reject. What
+it produces is octets: `sent 0`, and a `carrier` row saying no SCTP association
+and no NGAP/S1AP wrapper is built here, so this is a message and not a
+transmission. The authorisation flag is gone and is now **rejected** rather than
+swallowed, so a script still carrying it is told it is retired. `--transmit`
+keeps the lab-PLMN and rate ceiling and still writes a plan.
+
+Two limits are carried in the output rather than in a comment. The **NAS-MAC is
+not built** on a security mode command — it is a function of K_ASME and an
+integrity algorithm this tree does not implement — so the message stops before
+the MAC and a handset will treat it as unprotected; the `limit` row says exactly
+that. And **AUTN is refused**, which is the sharpest thing this phase learned:
+Wireshark 4.2.2 has no AUTN field in its nas-eps dissector at all (only RAND and
+the message authentication code) and reports the whole message `Malformed Packet`
+as soon as 16 further octets follow the RAND. An octet at an unconfirmed offset
+is a guess, so `--autn` exits 2 with that evidence and the instruction to settle
+it against TS 24.301 §8.2.8. The authentication request therefore carries RAND
+only, which is legal and useless — and says so.
+
+**The oracle is part of the deliverable.** `tools/check-nas-vectors.sh` builds
+every EPS vector through the module's own CLI, wraps it in a GSMTAP LTE NAS
+packet and hands it to tshark: the message type, the EMM cause, the identity type
+and the KSI that Wireshark reports are compared with what the module claimed.
+Ten of ten agree. That check caught two real errors before they shipped — the
+replayed UE security capabilities were encoded as `02 22` (an LV with a
+one-octet value) instead of `02 20 20`, and the capability bit map is
+`1 << (7 - n)` with the null algorithm at bit 8, which is why the oracle reads
+`20 20` as "128-EEA2: Supported". Without the oracle both would have looked
+correct in a round-trip. The eight 5GS vectors are reported **UNVERIFIED**, not
+passed: no GSMTAP payload type carries 5G NAS in Wireshark 4.2.2 and `nas-5gs`
+cannot be bound to a UDP port, so their message type numbers rest on tshark's own
+value table — a weaker claim, printed as weaker.
+
+`32_nas_signaling` selftest: 199 assertions. GUI: a Messages view with six worked
+vectors, and the page subtitle now names both halves.
 
 **Phase 17 — the AKA oracle.** `14_suci`, `19_cipher_audit`,
 `32_nas_signaling`.

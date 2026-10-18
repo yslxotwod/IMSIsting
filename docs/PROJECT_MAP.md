@@ -189,6 +189,11 @@ All six are green with the Phase 12 work in the tree. Detail:
   a verb. That last one is a trap — see `docs/SESSION_HANDOFF.md`; widening the
   regex to a name another module already uses as a verb silently stops requiring a
   control for it (`--device` did exactly that, and came straight back out).
+- **Two oracles now gate message work,** and both skip rather than pass when the
+  tool they need is absent: `tools/check-lte-nb-codec.sh` (pycrate) for the NB-IoT
+  RRC table and `tools/check-nas-vectors.sh` (tshark) for the NAS builders. A
+  check that reports PASS because its oracle is missing is the failure both exist
+  to prevent.
 - **A module change needs a GUI restart.** The page re-reads the module on build;
   a screenshot taken against a running instance shows the previous module's data.
   Captures need ~20-25 s after launch or the frame is black.

@@ -699,9 +699,14 @@ static const ModuleDefinition modules[] = {
     { "30_volte_ims",        "VoLTE / IMS Attacks",  "CORE NETWORK",
       "imsisting-30_volte_ims-symbolic",
       "VoLTE keystream reuse (ReVoLTE), IMP4GT identity mapping and SIP/IMS analysis." },
+    /* The description has to name both halves, for the reason Phase 12 wrote
+       down: a name or a subtitle that describes half the module lies about the
+       other half. Measurement is still the authority; the builders emit the
+       messages an MME sends before it has authenticated anybody, and never send
+       them. */
     { "32_nas_signaling",    "NAS Signalling",       "CORE NETWORK",
       "imsisting-32_nas_signaling-symbolic",
-      "NAS message-rate measurement, procedure mix and signalling-storm detection." },
+      "Rate, procedure mix and storm detection over captures -- plus the pre-authentication messages (reject, identity, auth, security mode) built as octets and never sent." },
     { "40_sba_pivot",        "5G SBA Pivot",         "CORE NETWORK",
       "imsisting-40_sba_pivot-symbolic",
       "HTTP/2 SBI framing, NRF discovery and OAuth2 token audit." },
@@ -15666,9 +15671,21 @@ static ModuleSubmenuEntry nasf_entries[] = {
     { "Model",
       "system-search-symbolic",
       "--cost-model:Cost Model|--procedure-mix:Procedure Mix|--rate={capture}" },
+    /* The pre-authentication message builders. Each button runs a worked
+       vector so the card shows a real message rather than a usage line; the
+       module's own output carries the `limit` row that says what was not
+       built (the NAS-MAC, the AUTN) and that nothing was sent. */
+    { "Messages",
+      "document-send-symbolic",
+      "--build-nas=eps attach-reject --cause 15:Attach Reject"
+      "|--build-nas=eps tau-reject --cause 12:TAU Reject"
+      "|--build-nas=eps identity-request --identity imsi:Identity Request"
+      "|--build-nas=eps auth-reject:Authentication Reject"
+      "|--build-nas=eps security-mode-reject --cause 23:Security Mode Reject"
+      "|--build-nas=5gs registration-reject --cause 22:Registration Reject" },
     { "Transmit",
       "media-playback-start-symbolic",
-      "--transmit:Transmit|--i-have-a-lab-and-authorisation:Lab Authorisation" },
+      "--transmit=00101 5:Write the Lab Plan" },
     { "Planning",
       "preferences-system-symbolic",
       "--plan:Plan" },

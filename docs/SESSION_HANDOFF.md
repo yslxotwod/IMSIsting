@@ -166,7 +166,23 @@ What replaces a gate, and what a reviewer should check instead:
 `33_jamming_detect` is the last module that still gates, from an explicit Phase 9
 decision; it is a one-function removal if that is revisited.
 
-### Two more, from the `45_iot` decode work### Two more, from the `45_iot` decode work
+### Two from the Phase 16 message builders
+
+1. **An oracle that decodes the artefact is worth more than a round-trip.** The
+   NAS builders disagreed with themselves in no way and were still wrong twice:
+   the replayed UE security capabilities were `02 22` (an LV whose value was one
+   octet) instead of `02 20 20`, and the capability bit for algorithm *n* is
+   `1 << (7 - n)` with the null algorithm at bit 8. Both round-tripped cleanly
+   through the module's own decoder and both were caught the moment tshark read
+   the bytes. `tools/check-nas-vectors.sh` is that reading.
+2. **When the oracle has no opinion, refuse the field instead of encoding it.**
+   Wireshark 4.2.2 has no AUTN field in its nas-eps dissector and calls the
+   message malformed as soon as 16 octets follow the RAND. So `--autn` exits 2
+   with that evidence rather than placing 16 bytes at an offset no implementation
+   here confirms; the authentication request carries RAND only and its `limit`
+   row says a handset will not authenticate against it.
+
+### Two more, from the `45_iot` decode work
 
 1. **A decode that slices hex is not a decoder, and its output is worse than an error.** The old
    `--decode-sib1` printed `hex[0:6]` as "MIB-NB", `hex[6:8]` as "SI Period × 1024" and

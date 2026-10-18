@@ -57,7 +57,7 @@ exempt_re='^--(menu|selftest|status-tsv|info|__index_probe__|yes|quiet|help|vers
 # a control for a verb, and widening it to a name another module already uses as a
 # verb does exactly that: `device` was added for 35_baseband --device and had to
 # come straight back out, because 52_stk --device is a verb with its own button.
-modifier_re='^--(earfcn|i-have-a-lab-and-authorisation|mode|shape|format|rate|secs|centre|band|peak|on|off|seed|out|gen|key|dir|framing|freq|instrument|power|action|case|base|port)$'
+modifier_re='^--(earfcn|i-have-a-lab-and-authorisation|mode|shape|format|rate|secs|centre|band|peak|on|off|seed|out|gen|key|dir|framing|freq|instrument|power|action|case|base|port|cause|identity|rand|autn|auts|algorithms|ksi|ksi-type)$'
 
 # main1.c with every submenu table stripped out. A verb found in here is wired
 # from C code -- a custom view building its own controls -- rather than named in

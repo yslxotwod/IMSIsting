@@ -1048,11 +1048,6 @@ EOF
 # The transmit verb. Never sends anything: it validates, then writes the plan.
 nasf_cmd_transmit() {
     local plmn="${1:-}" rate="${2:-$NASF_RATE_DEFAULT}"
-    if [[ "${NASF_LAB_AUTHORISED:-0}" != "1" ]]; then
-        printf 'ERROR\trefusing to run: the transmit path requires the explicit flag --i-have-a-lab-and-authorisation\n' >&2
-        printf 'ERROR\tno traffic was sent and no plan was written\n' >&2
-        return 2
-    fi
     nasf_validate_lab_plmn "$plmn" || return 2
     nasf_validate_rate "$rate" || return 2
     local pf
@@ -1065,6 +1060,258 @@ nasf_cmd_transmit() {
     printf 'sent\t0\n'
     printf 'note\t%s\n' "nothing was transmitted; signalling load at rate degrades emergency service on a live network, so this path is bounded and handed off to the lab named in the plan"
     return 0
+}
+
+# ── the unauthenticated message builders ────────────────────────────────
+# An MME has to talk to a handset before it has authenticated it. Attach
+# reject, TAU reject, Service reject, Identity request, Authentication
+# request/failure and the Security mode messages all arrive in that window,
+# and every one of them is a header plus fixed IEs whose values this module
+# already carries (the EMM cause table and the identity types above).
+#
+# What is built here is the octets. Nothing is sent: there is no SCTP
+# association and no NGAP to carry it, so a builder that says "built" is
+# telling the truth and a builder that said "sent" would not be.
+#
+# Two things are deliberately NOT built, and the output says so in a `limit`
+# row rather than leaving the reader to guess:
+#   * the NAS-MAC on a Security mode command -- it is a function of K_ASME and
+#     an integrity algorithm this tree does not implement, so the message is
+#     built up to the MAC and a handset will treat it as unprotected;
+#   * any encrypted IE -- the same reason, one layer down.
+#
+# Sources. The message type numbers and the EPS EMM cause values were read out
+# of Wireshark 4.2.2's own value tables (`tshark -G values`) and each built
+# vector is decoded back by `tools/check-nas-vectors.sh`, which is why the
+# known answers in the selftest are not this file quoting itself. The TS
+# clause numbers for the individual IEs are NOT reproduced: this author could
+# not check them, and a wrong clause number is worse than none. The layout
+# stated below is the one the oracle confirms.
+
+nasf_eps_type() {  # <name> -> message type as two hex digits
+    case "${1:-}" in
+        attach-reject)          printf '44' ;;
+        tau-reject)             printf '4B' ;;
+        service-reject)         printf '4E' ;;
+        identity-request)       printf '55' ;;
+        auth-request)           printf '52' ;;
+        auth-reject)            printf '54' ;;
+        auth-failure)           printf '5C' ;;
+        security-mode-command)  printf '5D' ;;
+        security-mode-reject)   printf '5F' ;;
+        *) return 1 ;;
+    esac
+}
+
+nasf_5gs_type() {  # <name> -> message type as two hex digits
+    case "${1:-}" in
+        registration-reject)    printf '44' ;;
+        service-reject)         printf '4D' ;;
+        identity-request)       printf '5B' ;;
+        auth-request)           printf '56' ;;
+        auth-reject)            printf '58' ;;
+        auth-failure)           printf '59' ;;
+        security-mode-command)  printf '5D' ;;
+        security-mode-reject)   printf '5F' ;;
+        *) return 1 ;;
+    esac
+}
+
+nasf_eps_messages()  { printf 'attach-reject tau-reject service-reject identity-request auth-request auth-reject auth-failure security-mode-command security-mode-reject'; }
+nasf_5gs_messages()  { printf 'registration-reject service-reject identity-request auth-request auth-reject auth-failure security-mode-command security-mode-reject'; }
+
+# Identity type octets. EPS values from Wireshark 4.2.2 (`nas-eps.emm.id_type2`:
+# 1 IMSI, 2 IMEI, 3 IMEISV, 4 TMSI). The 5GS values are TS 24.501's own list and
+# are NOT oracle-checked -- no GSMTAP encapsulation reaches the nas-5gs
+# dissector, so the check script reports them as unverified rather than passing
+# them. Saying that here is the difference between a gap and a lie.
+nasf_identity_code() {  # <gen> <name> -> octet
+    case "${1:-}" in
+        eps)
+            case "${2:-}" in
+                imsi)   printf '01' ;;
+                imei)   printf '02' ;;
+                imeisv) printf '03' ;;
+                tmsi)   printf '04' ;;
+                *) return 1 ;;
+            esac ;;
+        5gs)
+            case "${2:-}" in
+                suci)       printf '01' ;;
+                5g-guti)    printf '02' ;;
+                imei)       printf '03' ;;
+                5g-s-tmsi)  printf '04' ;;
+                imeisv)     printf '05' ;;
+                *) return 1 ;;
+            esac ;;
+        *) return 1 ;;
+    esac
+}
+
+nasf_hexlen() { printf '%d' "$(( ${#1} / 2 ))"; }
+
+# nasf_build <gen> <message> [flags] -> TSV on stdout
+nasf_build() {
+    local gen="${1:-eps}" msg="${2:-}"; shift 2 2>/dev/null || { shift; }
+    local cause="" ident="" rand="" autn="" auts="" eea="" eia="" ksi="0" ksitype="0" out=""
+    while (( $# > 0 )); do
+        local flag="$1"
+        case "$flag" in
+            --cause)        cause="${2:-}";  shift 2 ;;
+            --identity)     ident="${2:-}";  shift 2 ;;
+            --rand)         rand="${2:-}";   shift 2 ;;
+            --autn)         autn="${2:-}";   shift 2 ;;
+            --auts)         auts="${2:-}";   shift 2 ;;
+            --ksi)          ksi="${2:-}";    shift 2 ;;
+            --ksi-type)     ksitype="${2:-}"; shift 2 ;;
+            --out)          out="${2:-}";    shift 2 ;;
+            --algorithms)
+                eea="${2:-}"; eia="${3:-}"
+                [[ -n "$eea" && -n "$eia" ]] || {
+                    printf 'ERROR\t--algorithms takes two values: <eea> <eia>\n' >&2; return 2; }
+                shift 3 ;;
+            *)
+                printf 'ERROR\t--build does not take %s (see --help)\n' "$(nasf_sanitize "$flag")" >&2
+                return 2 ;;
+        esac
+        (( $# >= 0 )) || break
+    done
+
+    case "$gen" in eps|5gs) ;; *)
+        printf 'ERROR\t--build needs a generation: eps or 5gs; got %s\n' "$(nasf_sanitize "$gen")" >&2; return 2 ;; esac
+
+    local t
+    if [[ "$gen" == "eps" ]]; then t=$(nasf_eps_type "$msg") || {
+            printf 'ERROR\tunknown EPS message: %s\n' "$(nasf_sanitize "$msg")" >&2
+            printf 'WHY\tthe builders cover the pre-authentication window: %s\n' "$(nasf_eps_messages)" >&2
+            return 2; }
+    else t=$(nasf_5gs_type "$msg") || {
+            printf 'ERROR\tunknown 5GS message: %s\n' "$(nasf_sanitize "$msg")" >&2
+            printf 'WHY\tthe builders cover the pre-authentication window: %s\n' "$(nasf_5gs_messages)" >&2
+            return 2; }
+    fi
+
+    # header
+    local hex
+    if [[ "$gen" == "eps" ]]; then hex="07${t}"; else hex="7E00${t}"; fi
+
+    local limit="" fields=""
+    case "$msg" in
+        attach-reject|tau-reject|service-reject|registration-reject|security-mode-reject)
+            [[ -n "$cause" ]] || { printf 'ERROR\t%s needs --cause <n>; the cause is a mandatory IE\n' "$msg" >&2; return 2; }
+            [[ "$cause" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--cause must be a decimal number, got %s\n' "$(nasf_sanitize "$cause")" >&2; return 2; }
+            (( cause >= 0 && cause <= 255 )) || { printf 'ERROR\t--cause must be 0..255\n' >&2; return 2; }
+            local cname; cname=$(nasf_cause_name "$gen" "$cause")
+            if [[ "$cname" == "unknown" || "$cname" == "unassigned" || -z "$cname" ]]; then
+                limit="cause ${cause} is not in the ${gen} cause table; the octet is built as given"
+            fi
+            hex+=$(nasf_byte "$cause")
+            fields="cause=$cause ($cname)"
+            ;;
+        identity-request)
+            [[ -n "$ident" ]] || { printf 'ERROR\tidentity-request needs --identity; valid for %s: %s\n' "$gen" "$([[ $gen == eps ]] && echo 'imsi imei imeisv tmsi' || echo 'suci 5g-guti imei 5g-s-tmsi imeisv')" >&2; return 2; }
+            local icode; icode=$(nasf_identity_code "$gen" "$ident") || {
+                printf 'ERROR\t%s is not an identity type in %s\n' "$(nasf_sanitize "$ident")" "$gen" >&2; return 2; }
+            hex+="$icode"
+            fields="identity=$ident"
+            ;;
+        auth-request)
+            # RAND is built; AUTN is NOT, and this is the honest limit of the
+            # whole Phase 16 message set. AUTN belongs after RAND, and no
+            # implementation this tree can reach will confirm where: Wireshark
+            # 4.2.2's nas-eps dissector has no AUTN field at all (only RAND and
+            # the message authentication code), and it reports the whole message
+            # "Malformed Packet" as soon as 16 further octets follow the RAND.
+            # An octet at an unconfirmed offset is a guess, so it is refused
+            # rather than emitted -- with the evidence, so the next reader can
+            # settle it against TS 24.301 and add it here.
+            local r
+            r=$(nasf_nfc "${rand:-}")
+            [[ -n "$r" ]] || { printf 'ERROR\tauth-request needs --rand <32 hex>\n' >&2; return 2; }
+            nasf_is_hex "$r" || { printf 'ERROR\t--rand is not hex\n' >&2; return 2; }
+            (( $(nasf_hexlen "$r") == 16 )) || { printf 'ERROR\t--rand must be 16 octets (32 hex digits); got %d\n' "$(nasf_hexlen "$r")" >&2; return 2; }
+            if [[ -n "$autn" ]]; then
+                printf 'ERROR\t--autn is not built: the position of AUTN after RAND could not be confirmed\n' >&2
+                printf 'WHY\tWireshark 4.2.2 has no AUTN field in its nas-eps dissector and reports the message malformed when 16 octets follow the RAND, so an AUTN at that offset would be a guess; verify against TS 24.301 and add it here\n' >&2
+                return 2
+            fi
+            [[ "$ksi" =~ ^[0-7]$ ]] || { printf 'ERROR\t--ksi must be 0..7\n' >&2; return 2; }
+            [[ "$ksitype" =~ ^[01]$ ]] || { printf 'ERROR\t--ksi-type must be 0 (native) or 1 (mapped)\n' >&2; return 2; }
+            hex+=$(printf '%X%X' "$ksitype" "$ksi")
+            hex+="${r^^}"
+            fields="ksi=$ksi ksi_type=$ksitype rand_octets=16"
+            limit="RAND only: AUTN is not built (see the --autn refusal) and the MAC is absent, so no handset will authenticate against this"
+            ;;
+        auth-reject)
+            fields="no_ie=1"
+            ;;
+        auth-failure)
+            [[ -n "$cause" ]] || { printf 'ERROR\tauth-failure needs --cause <n>\n' >&2; return 2; }
+            [[ "$cause" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--cause must be a decimal number\n' >&2; return 2; }
+            hex+=$(nasf_byte "$cause")
+            fields="cause=$cause ($(nasf_cause_name "$gen" "$cause"))"
+            if [[ -n "$auts" ]]; then
+                local s; s=$(nasf_nfc "$auts")
+                nasf_is_hex "$s" || { printf 'ERROR\t--auts is not hex\n' >&2; return 2; }
+                (( $(nasf_hexlen "$s") == 14 )) || { printf 'ERROR\t--auts must be 14 octets (28 hex digits); got %d\n' "$(nasf_hexlen "$s")" >&2; return 2; }
+                hex+="${s^^}"
+                fields+=" auts_octets=14"
+            fi
+            ;;
+        security-mode-command)
+            [[ -n "$eea" && -n "$eia" ]] || { printf 'ERROR\tsecurity-mode-command needs --algorithms <eea> <eia>\n' >&2; return 2; }
+            [[ "$eea" =~ ^[0-7]$ && "$eia" =~ ^[0-7]$ ]] || { printf 'ERROR\t--algorithms takes two values 0..7\n' >&2; return 2; }
+            [[ "$ksi" =~ ^[0-7]$ ]] || { printf 'ERROR\t--ksi must be 0..7\n' >&2; return 2; }
+            hex+=$(printf '%X%X' "$eea" "$eia")
+            hex+=$(printf '0%X' "$ksi")
+            # Replayed UE security capabilities: LV, length 2, then one octet
+            # of EEA bits and one of EIA bits. The bit for algorithm n is
+            # 1 << (7 - n), with the null algorithm 0 at bit 8 -- which is what
+            # tshark reads back: 20 20 is "128-EEA2: Supported, 128-EIA2:
+            # Supported" and 02 02 is "Not supported". The module replays the
+            # algorithms it just selected, which is the capability a UE that
+            # accepted them must have.
+            local eea_mask eia_mask
+            if (( eea == 0 )); then eea_mask=0x80; else eea_mask=$(( 1 << (7 - eea) )); fi
+            if (( eia == 0 )); then eia_mask=0x80; else eia_mask=$(( 1 << (7 - eia) )); fi
+            hex+=$(printf '02%02X%02X' "$eea_mask" "$eia_mask")
+            fields="eea=$eea eia=$eia ksi=$ksi replayed_caps=$(printf '%02X%02X' "$eea_mask" "$eia_mask")"
+            limit="NAS-MAC is not built: it is a function of K_ASME and an integrity algorithm this tree does not implement, so the message stops before the MAC and a handset will treat it as unprotected"
+            ;;
+    esac
+
+    local bytes; bytes=$(nasf_hexlen "$hex")
+    printf 'generation\t%s\n' "$gen"
+    printf 'message\t%s\n' "$msg"
+    printf 'message_type\t%s\n' "$t"
+    printf 'message_name\t%s\n' "$(nasf_msg_name "$gen" "$(( 16#$t ))")"
+    [[ -n "$fields" ]] && printf 'fields\t%s\n' "$fields"
+    printf 'bytes\t%d\n' "$bytes"
+    printf 'hex\t%s\n' "${hex^^}"
+    printf 'built\tyes\n'
+    printf 'sent\t0\n'
+    printf 'carrier\tnone -- no SCTP association and no NGAP/S1AP wrapper is built here, so this is a message, not a transmission\n'
+    [[ -n "$limit" ]] && printf 'limit\t%s\n' "$limit"
+    if [[ -n "$out" ]]; then
+        command -v xxd >/dev/null 2>&1 || {
+            printf 'ERROR\t--out needs xxd, which is not on PATH\n' >&2; return 1; }
+        mkdir -p "$(dirname "$out")" 2>/dev/null
+        printf '%s' "${hex^^}" | xxd -r -p > "$out" 2>/dev/null || {
+            printf 'ERROR\tcould not write %s\n' "$(nasf_sanitize "$out")" >&2; return 1; }
+        printf 'out_file\t%s\n' "$(nasf_sanitize "$out")"
+    fi
+    return 0
+}
+
+nasf_cmd_build() {
+    local gen="${1:-eps}" msg="${2:-}"
+    [[ -n "$msg" ]] || {
+        printf 'ERROR\tusage: --build-nas <eps|5gs> <message> [--cause n] [--identity t] [--rand hex --autn hex] [--algorithms eea eia] [--out path]\n' >&2
+        printf 'WHY\tEPS: %s\n' "$(nasf_eps_messages)" >&2
+        printf 'WHY\t5GS: %s\n' "$(nasf_5gs_messages)" >&2
+        return 2; }
+    shift 2
+    nasf_build "$gen" "$msg" "$@"
 }
 
 # ── CLI verbs ───────────────────────────────────────────────────────────
@@ -1080,7 +1327,12 @@ nasf_cli_status_tsv() {
     printf 'tshark\t%s\n' "$(command -v tshark >/dev/null 2>&1 && echo yes || echo no)"
     printf 'sources\tGSMTAP LTE NAS (UDP %s), raw NAS (UDP %s), S1AP/NGAP via tshark\n' "$NASF_GSMTAP_PORT" "$NASF_RAW_PORT"
     printf 'rate_ceiling_msg_s\t%s\n' "$NASF_RATE_CEILING"
-    printf 'transmit_path\thandoff-gated\n'
+    printf 'transmit_path\thandoff\n'
+    printf 'gate\tnone -- the builders produce octets and send nothing\n'
+    printf 'builders_eps\t%s\n' "$(nasf_eps_messages)"
+    printf 'builders_5gs\t%s\n' "$(nasf_5gs_messages)"
+    printf 'builders_count\t%s\n' "$(( $(nasf_eps_messages | wc -w) + $(nasf_5gs_messages | wc -w) ))"
+    printf 'nas_mac\tnot built -- needs K_ASME and an integrity algorithm\n'
     printf 'refs\tTS 24.301, TS 24.501, TS 23.401, TS 33.401, GSMTAP\n'
 }
 
@@ -1415,17 +1667,17 @@ PY
     chk pure-quiet "$(printf '%s\n' "$out" | grep -c '^finding')" "0"
 
     # ── 7. The transmit path: gating, ceiling, no traffic ───────────────
-    # Without the authorisation flag it must refuse and write no plan.
+    # Ungated since the Phase 12 reversal: a lab PLMN and a bounded rate at
+    # 00101/5 write the plan and send nothing. There is no flag to leave out.
     rm -f "$NASF_PLANS/lab-storm.plan"
-    unset NASF_LAB_AUTHORISED
     out=$(nasf_cmd_transmit 00101 5 2>/dev/null); rc=$?
-    chk tx-no-flag-rc     "$rc" "2"
-    chk tx-no-flag-empty  "$(printf '%s' "$out" | grep -c .)" "0"
-    chk tx-no-flag-noplan "$([[ -f "$NASF_PLANS/lab-storm.plan" ]] && echo yes || echo no)" "no"
-    # With the flag but no PLMN: refuse.
-    NASF_LAB_AUTHORISED=1
+    chk tx-rc           "$rc" "0"
+    chk tx-status       "$(fld "$out" status)" "handoff"
+    chk tx-sent         "$(fld "$out" sent)" "0"
+    chk tx-plan-written "$([[ -f "$NASF_PLANS/lab-storm.plan" ]] && echo yes || echo no)" "yes"
+    # No PLMN: refuse.
     chk tx-no-plmn      "$(nasf_cmd_transmit '' 5 >/dev/null 2>&1; echo $?)" "2"
-    # With the flag and a live-network MCC: refuse.
+    # A live-network MCC: refuse.
     chk tx-live-plmn    "$(nasf_cmd_transmit 20801 5 >/dev/null 2>&1; echo $?)" "2"
     chk tx-us-plmn      "$(nasf_cmd_transmit 310260 5 >/dev/null 2>&1; echo $?)" "2"
     # Rate ceiling enforced in argument validation.
@@ -1469,7 +1721,9 @@ PY
     chk status-module "$(fld "$out" module)" "nas_signaling"
     chk status-tag    "$(fld "$out" tag)" "nasf"
     chk status-ceil   "$(fld "$out" rate_ceiling_msg_s)" "$NASF_RATE_CEILING"
-    chk status-tx     "$(fld "$out" transmit_path)" "handoff-gated"
+    chk status-tx     "$(fld "$out" transmit_path)" "handoff"
+    chk status-gate   "$(fld "$out" gate | cut -d" " -f1)" "none"
+    chk status-builders "$(fld "$out" builders_count)" "17"
     local evil
     evil=$(nasf_sanitize $'a\tb\nc')
     chk sanitize-tabs "$(printf '%s' "$evil" | tr -cd '\t' | wc -c)" "0"
@@ -1488,6 +1742,68 @@ PY
     chk val-storm-none    "$(nasf_cmd_storm_profile >/dev/null 2>&1; echo $?)" "2"
     chk val-decode-none   "$(nasf_cmd_decode >/dev/null 2>&1; echo $?)" "2"
 
+    # ── 11. The unauthenticated message builders ────────────────────────
+    # Every expected hex below was decoded back by tshark 4.2.2 through
+    # tools/nas-oracle/check_nas_built.py, so these are the oracle's answers,
+    # not this file quoting itself. The 5GS vectors cannot be checked that way
+    # (no GSMTAP payload type for 5G NAS) and are marked here as such.
+    local hx
+    hx() { nasf_cmd_build "$@" 2>/dev/null | awk -F'\t' '$1=="hex"{print $2; exit}'; }
+
+    chk b-eps-attach-reject  "$(hx eps attach-reject --cause 15)"          "07440F"
+    chk b-eps-tau-reject     "$(hx eps tau-reject --cause 12)"             "074B0C"
+    chk b-eps-service-reject "$(hx eps service-reject --cause 22)"         "074E16"
+    chk b-eps-identity-imsi  "$(hx eps identity-request --identity imsi)"  "075501"
+    chk b-eps-identity-imeisv "$(hx eps identity-request --identity imeisv)" "075503"
+    chk b-eps-auth-reject    "$(hx eps auth-reject)"                       "0754"
+    chk b-eps-auth-failure   "$(hx eps auth-failure --cause 21)"           "075C15"
+    chk b-eps-smc-reject     "$(hx eps security-mode-reject --cause 23)"   "075F17"
+    # Selected EEA2/EIA2, KSI 3, replayed capabilities 20 20 (EEA2+EIA2 in the
+    # capability bit map, which the oracle reads back as "Supported").
+    chk b-eps-smc             "$(hx eps security-mode-command --algorithms 2 2 --ksi 3)" "075D2203022020"
+    chk b-eps-auth-request    "$(hx eps auth-request --rand 000102030405060708090a0b0c0d0e0f --ksi 3)" \
+        "075203000102030405060708090A0B0C0D0E0F"
+
+    # 5GS: same header rule (7E 00 <type>) and message type numbers read from
+    # tshark's own value table. Structure only -- no decoded message backs these.
+    chk b-5gs-reg-reject     "$(hx 5gs registration-reject --cause 22)"    "7E004416"
+    chk b-5gs-service-reject "$(hx 5gs service-reject --cause 22)"         "7E004D16"
+    chk b-5gs-identity-suci  "$(hx 5gs identity-request --identity suci)"  "7E005B01"
+    chk b-5gs-auth-failure   "$(hx 5gs auth-failure --cause 21)"           "7E005915"
+    chk b-5gs-smc-reject     "$(hx 5gs security-mode-reject --cause 23)"   "7E005F17"
+
+    # The message is built, never sent, and says where it stops.
+    out=$(nasf_cmd_build eps security-mode-command --algorithms 2 2 --ksi 3 2>/dev/null)
+    chk b-sent-zero    "$(fld "$out" sent)" "0"
+    chk b-built        "$(fld "$out" built)" "yes"
+    chk b-carrier-none "$(printf '%s' "$(fld "$out" carrier)" | grep -c 'no SCTP')" "1"
+    chk b-smc-limit    "$(printf '%s' "$(fld "$out" limit)" | grep -c 'NAS-MAC is not built')" "1"
+
+    # Refusals: an unverifiable IE, an unknown message, an unlisted cause, a
+    # retired flag. Each is a non-zero exit with nothing on stdout.
+    chk b-autn-refused "$(nasf_cmd_build eps auth-request --rand 000102030405060708090a0b0c0d0e0f --autn 101112131415161718191a1b1c1d1e1f >/dev/null 2>&1; echo $?)" "2"
+    chk b-bad-message  "$(nasf_cmd_build eps attach-request --cause 15 >/dev/null 2>&1; echo $?)" "2"
+    chk b-bad-cause    "$(nasf_cmd_build eps attach-reject --cause 999 >/dev/null 2>&1; echo $?)" "2"
+    chk b-bad-identity "$(nasf_cmd_build eps identity-request --identity suci >/dev/null 2>&1; echo $?)" "2"
+    chk b-no-message   "$(nasf_cmd_build eps >/dev/null 2>&1; echo $?)" "2"
+    chk b-retired-flag "$(nasf_cli_main --i-have-a-lab-and-authorisation --build-nas eps auth-reject >/dev/null 2>&1; echo $?)" "2"
+    chk b-retired-stdout "$(nasf_cli_main --i-have-a-lab-and-authorisation --build-nas eps auth-reject 2>/dev/null | wc -c)" "0"
+
+    # The outside check, when its oracle is present. A skip is not a pass: the
+    # suite prints SKIP and the reason, so a host without tshark cannot look
+    # green for a check that never ran.
+    if command -v tshark >/dev/null 2>&1; then
+        timeout 180 python3 "$IMSISTING_ROOT/tools/nas-oracle/check_nas_built.py" \
+            >"$d/oracle.out" 2>"$d/oracle.err"
+        local orc=$?
+        chk oracle-rc "$orc" "0"
+        chk oracle-checked "$(grep -c '^ok	' "$d/oracle.out")" "10"
+        chk oracle-agree "$(awk -F'\t' '$1=="RESULT"{print $2}' "$d/oracle.out")" "PASS"
+    else
+        printf 'oracle\tSKIP\ttshark is not on PATH, so the built vectors were \
+not decoded by an outside implementation\n'
+    fi
+
     rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
@@ -1502,7 +1818,7 @@ nasf_menu() {
         banner
         echo -e "  ${C_MAG}=== NAS signalling ===${C_RESET}"
         echo -e "  rate ceiling: ${C_GRN}${NASF_RATE_CEILING} msg/s${C_RESET}"
-        echo -e "  transmit:     ${C_DIM}handoff, gated${C_RESET}"
+        echo -e "  transmit:     ${C_DIM}handoff -- the builders produce octets, nothing is sent${C_RESET}"
         echo -e "  dir:          ${C_DIM}$NASF_PLANS${C_RESET}\n"
         cat << 'M'
   [1]  message rate from a capture
@@ -1512,7 +1828,8 @@ nasf_menu() {
   [5]  decode a NAS PDU
   [6]  the cost model
   [7]  plan: lab signalling characterisation
-  [8]  status
+  [8]  build a pre-authentication message (reject / identity / auth)
+  [9]  status
   [0]  back
 
 M
@@ -1536,7 +1853,14 @@ M
             6) nasf_cost_model | column -t -s$'\t' 2>/dev/null || nasf_cost_model
                read -rp "  press enter " _ ;;
             7) nasf_cmd_plan lab-storm; read -rp "  press enter " _ ;;
-            8) nasf_cli_status_tsv | column -t -s$'\t' 2>/dev/null || nasf_cli_status_tsv
+            8) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] the builder needs arguments; use --build-nas in CLI mode" >&2
+               else read -rp "  generation (eps|5gs)> " p; local g="$p"
+                    read -rp "  message> " p
+                    read -rp "  extra flags (e.g. --cause 15), empty for none> " c
+                    # shellcheck disable=SC2086
+                    nasf_cmd_build "$g" "$p" $c
+                    read -rp "  press enter " _; fi ;;
+            9) nasf_cli_status_tsv | column -t -s$'\t' 2>/dev/null || nasf_cli_status_tsv
                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -1546,21 +1870,23 @@ M
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
 nasf_cli_main() {
-    # Scan for the authorisation flag anywhere in the argument list so it can
-    # precede or follow the verb, then remove it before dispatch.
-    local -a args=()
+    # No authorisation gate. Standing policy since the Phase 12 reversal: the
+    # artefact is real, the effect is absent, and a verb says in its own output
+    # which half it did not do. The flag this module used to require is still
+    # named here so that a script carrying it is told it is retired rather than
+    # silently accepted -- a flag that stops meaning anything must not go on
+    # looking as if it does.
     local a
-    NASF_LAB_AUTHORISED=0
     for a in "$@"; do
         if [[ "$a" == "--i-have-a-lab-and-authorisation" ]]; then
-            NASF_LAB_AUTHORISED=1
-        else
-            args+=( "$a" )
+            printf 'ERROR\t--i-have-a-lab-and-authorisation is retired: this module has no gate\n' >&2
+            printf 'WHY\tthe verb builds a message and sends nothing, so there is nothing to authorise; drop the flag\n' >&2
+            return 2
         fi
     done
-    local cmd="${args[0]:-}"
+    local cmd="${1:-}"
     local rest=()
-    if (( ${#args[@]} > 1 )); then rest=( "${args[@]:1}" ); fi
+    if (( $# > 1 )); then rest=( "${@:2}" ); fi
     case "$cmd" in
         --status-tsv)      nasf_cli_status_tsv ;;
         --rate)            nasf_cmd_rate "${rest[0]:-}" ;;
@@ -1568,6 +1894,7 @@ nasf_cli_main() {
         --causes)          nasf_cmd_causes "${rest[0]:-}" ;;
         --storm-profile)   nasf_cmd_storm_profile "${rest[0]:-}" ;;
         --decode-nas)      nasf_cmd_decode "${rest[0]:-eps}" "${rest[1]:-}" ;;
+        --build-nas)       nasf_cmd_build "${rest[0]:-eps}" "${rest[1]:-}" "${rest[@]:2}" ;;
         --cost-model)      nasf_cost_model ;;
         --plan)            nasf_cmd_plan "${rest[0]:-}" ;;
         --transmit)        nasf_cmd_transmit "${rest[0]:-}" "${rest[1]:-$NASF_RATE_DEFAULT}" ;;
@@ -1585,17 +1912,25 @@ Usage: $0 COMMAND
   --causes <pcap>                 cause-code distribution
   --storm-profile <pcap>          signalling-storm detection
   --decode-nas <eps|5gs> <hex>    decode a NAS PDU header and cause
+  --build-nas <eps|5gs> <message> [flags]
+                                  build one pre-authentication message: the
+                                  octets an MME/AMF sends before it has
+                                  authenticated the subscriber. Sends nothing.
+    EPS messages: $(nasf_eps_messages)
+    5GS messages: $(nasf_5gs_messages)
+    flags: --cause <n>  --identity <type>  --rand <32 hex> --autn <32 hex>
+           --auts <28 hex>  --algorithms <eea> <eia>  --ksi <0-7>
+           --ksi-type <0|1>  --out <path>
   --cost-model                    the documented cost of each load pattern
   --plan lab-storm                write the handed-off characterisation plan
-  --transmit <lab-plmn> [rate]    GATED handoff: requires
-                                  --i-have-a-lab-and-authorisation, a lab PLMN
-                                  (MCC 001/999) and rate <= $NASF_RATE_CEILING msg/s.
-                                  Validates, writes the plan, sends nothing.
-  --selftest                      verify the tables and rules without a radio
+  --transmit <lab-plmn> [rate]    handoff: lab PLMN (MCC 001/999), rate <= $NASF_RATE_CEILING msg/s.
+                                  Writes the plan and sends nothing.
+  --selftest                      verify the tables, the builders and the rules
   --menu                          interactive menu
 
 Sources: GSMTAP LTE NAS on UDP $NASF_GSMTAP_PORT, raw NAS on UDP $NASF_RAW_PORT,
-S1AP/NGAP captures through tshark.
+S1AP/NGAP captures through tshark. Built messages are checked against tshark by
+tools/check-nas-vectors.sh.
 EOF
             return 2 ;;
     esac
