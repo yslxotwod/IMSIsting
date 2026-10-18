@@ -14768,6 +14768,14 @@ static ModuleSubmenuEntry ncore_entries[] = {
     { "Forge NGAP",
       "network-transmit-receive-symbolic",
       "#BUILD|--ngap-initial-ue:Initial UE Message|--ngap-downlink-nas:Downlink NAS|--ngap-paging:Page a Handset|--ngap-ngsetup:Open the Node|#SEND|--ngap-send:Send to AMF" },
+    /* Xn is the interface between two NG-RAN nodes, so its setup message is
+     * the same handshake as NG Setup addressed to a peer instead of a core.
+     * Built here, not sent from here: Xn rides SCTP 38422 on PPID 61, and a
+     * message sent with NGAP's PPID 60 is dissected as a different protocol
+     * that reads every field differently. */
+    { "Forge Xn",
+      "network-transmit-receive-symbolic",
+      "#BUILD|--xnap-setup:Open to the Peer|#READ|--xnap-decode:Decode Xn" },
 };
 static ModuleSubmenuEntry suci_entries[] = {
     { "Overview",

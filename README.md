@@ -118,7 +118,7 @@ is performed and no answer is matched to a request.
 | Module | Description | Attack |
 |---|---|---|
 | `12_nr_air` | NR-ARFCN, SSB/MIB/SIB1, RACH, gNB orchestration | `built` |
-| `13_nr_core` | N2/N3/N4, SBA service bus, NGAP encode/decode, PFCP, 5G-AKA | `partial` |
+| `13_nr_core` | N2/N3/N4, SBA service bus, NGAP and XnAP encode, PFCP, 5G-AKA | `partial` |
 | `14_suci` | SUCI conceal/deconceal, ECIES profile A/B, HKDF, MSIN BCD | `built` |
 | `15_downgrade` | Cross-generation steering, null cipher, reject-cause analysis | `built` |
 
@@ -127,6 +127,14 @@ is performed and no answer is matched to a request.
 `tools/ngap_asn1.py` (agreed by pycrate, dissected by tshark) and `--ngap-send` puts one
 on SCTP 38412/PPID 60 behind `NR_ARMED=1`. NG Setup and a complete InitialUEMessage —
 location and establishment cause included, four IEs — are whole messages, not fragments.
+It also writes XnAP: `--xnap-setup` builds the Xn Setup Request two NG-RAN nodes exchange,
+`--xnap-decode` reads one back. XnAP is a third aligned-PER codec
+(`tools/xnap_asn1.py`) and the one where the type, not the rule, decides the octets —
+`id-xnSetup` is procedure code 17 (not the first row of the table, which is
+`id-sNStatusTransfer`), the `tAISliceSupport-List` count is sixteen bits, and its
+S-NSSAI items are eleven bits each with **no** padding between them, so an `sst` of
+`0x01` ends the message as `0x20`. `tools/check-xnap-codec.sh` pins that against pycrate
+and tshark over three cases and three negation controls.
 
 ### SIM
 | Module | Description | Attack |
@@ -382,7 +390,7 @@ and yet the APDU codec underneath it is real.
 |---|---|---|---|
 | GTP-C / GTP-U exploitation | `11_lte_core` | `partial` | Four finished encoders emitting real octets, an IE walk and TEID handling — and **no transport at all**. No SCTP, GTP or TCP client exists in the module; nothing is sent even pointed at a live core. Phase 7. |
 | Diameter S6a/S6d | `11_lte_core` | `partial` | AIR/ULR/CLR/IDR/DSR/PUR encode-decode and a forged-ULR registration move. The HSS is a Phase 7 lab testbed. |
-| PFCP / UPF | `13_nr_core` | `partial` | PFCP and GTP-U decode, PFCP builds and `--pfcp-send` puts a Session Establishment Request on UDP 8805; NGAP builds four messages — InitialUEMessage down to the location and cause IEs, Paging, DownlinkNASTransport, NG Setup — and `--ngap-send` carries one on SCTP 38412/PPID 60. Phase 7. |
+| PFCP / UPF | `13_nr_core` | `partial` | PFCP and GTP-U decode, PFCP builds and `--pfcp-send` puts a Session Establishment Request on UDP 8805; NGAP builds four messages — InitialUEMessage down to the location and cause IEs, Paging, DownlinkNASTransport, NG Setup — and `--ngap-send` carries one on SCTP 38412/PPID 60; Xn Setup builds for SCTP 38422/PPID 61 and is not sent from here. Phase 7. |
 | SBA / HTTP-2 pivot | `40_sba_pivot` | `partial` | Builds HTTP/2 frames byte-exactly, including a real Rapid Reset pair, and audits JWT audience and scope. `--sbi-send` carries frames to an NF over TLS but does not make them, so nothing end-to-end reaches an NF yet. Phase 7. |
 | SS7 / MAP | `26_ss7_map` | `partial` | Nine byte-exact MAP/TCAP builders (ATI, SRI, SRI-SM, SAI, PSI, ULR, ISD, registerSS, activateSS) and SIGTRAN in both directions. `--m3ua-send` puts an MSU on SCTP 2905 (PPID 3); there is no ASPUP/ASPAC handshake, so an STP demanding an ACTIVE ASP drops it. Phase 8. |
 | GRX / roaming interconnect | `26_ss7_map` | `phase 8` | Reachability and GSN harvesting are modelled; the interconnect trust model and SEPP exposure are Phase 8. |
@@ -768,6 +776,7 @@ often identifies the problem with no hardware attached.
 ./tools/check-verbs.sh            # verbs reachable from the GUI
 ./tools/check-gui-text.sh         # no verb is rendered as interface text
 ./tools/check-x2ap-codec.sh       # X2AP octets vs pycrate and the clause
+./tools/check-xnap-codec.sh       # XnAP octets vs pycrate and the clause
 ./tools/gen-module-index.sh       # regenerate the index
 ./tools/gen-icons-xml.sh --check  # the bundled icon set matches the tree
 ```

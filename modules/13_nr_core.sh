@@ -906,6 +906,64 @@ ncore_cmd_pfcp_send() {  # <upf-host> [port] [hex]
     timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${NR_WAIT:-0}"
 }
 
+# ── XnAP encoders ───────────────────────────────────────────────────────
+# XnSetup is the same handshake as NGSetup on the other interface: a gNB
+# tells a peer gNB who it is and which tracking areas it serves, so the peer
+# can hand a subscriber over to it.  Until this verb existed the module could
+# read X2AP and write NGAP and had nothing for the interface between them.
+#
+# The octets come from tools/xnap_asn1.py, checked twice: pycrate encodes the
+# same values and must agree to the octet (tools/check-xnap-codec.sh), and
+# tshark dissects the result from an SCTP DATA chunk with PPID 61 on 38422 --
+# which is not NGAP's 60 on 38412, and the two dissectors disagree about what
+# a message means when you get that wrong.
+
+ncore_xnap_build() {  # <verb> [args...]
+    local tool="$IMSISTING_ROOT/tools/xnap_asn1.py"
+    [[ -f "$tool" ]] || { printf 'ERROR	%s is missing; cannot encode XnAP\n' "$tool" >&2; return 1; }
+    local out
+    out=$(python3 "$tool" "$@" 2>&1) || { printf '%s\n' "$out" >&2; return 1; }
+    ncore_fld "$out" hex
+}
+
+ncore_cmd_xnap_setup() {  # [plmn] [gnb-id] [tac] [sst] [amf-region]
+    local plmn="${1:-001/01}" gnb="${2:-0xA1C01}" tac="${3:-000001}"
+    local sst="${4:-0x01}" region="${5:-0xFF}"
+    local mcc="${plmn%%/*}" mnc="${plmn##*/}"
+    tac="0x${tac#0x}"                   # accept both 000001 and 0x000001
+    local hex
+    hex=$(ncore_xnap_build xn-setup --mcc "$mcc" --mnc "$mnc" --gnb-id "$gnb" \
+        --tac "$tac" --sst "$sst" --amf-region "$region") \
+        || { printf 'ERROR\tthe XnAP encoder failed\n' >&2; return 1; }
+    [[ -n "$hex" ]] || { printf 'ERROR\tthe XnAP encoder returned no octets\n' >&2; return 1; }
+    local dec; dec=$(python3 "$IMSISTING_ROOT/tools/xnap_asn1.py" decode "$hex" 2>/dev/null)
+    printf 'message\tXnSetupRequest\n'
+    printf 'procedure_code\t17\n'
+    printf 'global_ng_ran_node_id\tgNB %s gNB-ID %s\n' "$plmn" "$gnb"
+    printf 'served_ta\t%s tac %s sst %s\n' "$plmn" "$tac" "$sst"
+    printf 'amf_region\t%s\n' "$region"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'hex\t%s\n' "$hex"
+    printf 'ie_count\t%s\n' "$(ncore_fld "$dec" ies)"
+    printf 'transport\tSCTP 38422 PPID 61 -- built here, not sent from here\n'
+    printf 'referee\tpycrate and tshark both read these octets (tools/check-xnap-codec.sh)\n'
+    printf 'note\tall three mandatory IEs are built: the node id, the AMF region it registers through, and the TAI list it serves -- which is the whole message\n'
+}
+
+ncore_cmd_xnap_decode() {  # <hex>
+    local hex="${1:-}"
+    hex=$(printf '%s' "$hex" | tr -d '[:space:]:')
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --xnap-decode <hex>\n' >&2; return 2; }
+    if (( ${#hex} % 2 )) || (( ${#hex} < 4 )); then
+        printf 'ERROR\t--xnap-decode takes an even number of hex digits (at least 2 octets): %s\n' "$hex" >&2
+        return 2
+    fi
+    local tool="$IMSISTING_ROOT/tools/xnap_asn1.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot decode XnAP\n' "$tool" >&2; return 1; }
+    python3 "$tool" decode "$hex"
+}
+
+
 # ── NGAP encoders ───────────────────────────────────────────────────────
 # Until now the module could read NGAP and could not write one, so every
 # claim about the 5G side was an S1AP message translated by hand.  These
@@ -1673,6 +1731,35 @@ ncore_selftest() {
     chk ngap-enc-setup-ies "$(fld "$out" ie_count)"  "3"
     chk ngap-enc-setup-name "$(ncore_decode_ngap "$(fld "$out" hex)" | awk -F'\t' '$1=="ie"{print $2}' | grep -c 'LabGnb')" "1"
 
+    # 1b. XnAP.  Same envelope shape as NGAP, different procedure code, and
+    #     a body whose slice list is the part a reader gets wrong: the count
+    #     is sixteen bits and the S-NSSAI items are eleven bits each with no
+    #     padding between them, so an sst of 0x01 ENDS the message as 0x20.
+    out=$(ncore_cmd_xnap_setup 001/01 0xA1C01 000001 0x01 0xFF)
+    chk xnap-setup-hex "$(fld "$out" hex)" \
+        "00110029000003000400050000f110ff000e00080000f11000287004004b000d00000000010000f11000000020"
+    chk xnap-setup-octets "$(fld "$out" octets)" "45"
+    chk xnap-setup-ies    "$(fld "$out" ie_count)" "3"
+    chk xnap-setup-proc   "$(fld "$out" procedure_code)" "17"
+    chk xnap-setup-ppid   "$(fld "$out" transport | grep -c 'PPID 61')" "1"
+    chk xnap-setup-sst    "$(fld "$out" hex | grep -c '00000020$')" "1"
+    #     The procedure code is not the first row of the table: 1 is
+    #     id-sNStatusTransfer, and a message built with it dissects as one.
+    chk xnap-setup-not-1  "$(fld "$out" hex | grep -c '^0011')" "1"
+    #     The decoder reads the tool's own octets back to the same values.
+    out=$(ncore_cmd_xnap_decode 00110029000003000400050000f110ff000e00080000f11000287004004b000d00000000010000f11000000020)
+    chk xnap-dec-proc     "$(fld "$out" procedure)" "id-xnSetup"
+    chk xnap-dec-ies      "$(fld "$out" ies)" "3"
+    chk xnap-dec-tac      "$(printf '%s\n' "$out" | grep -c 'tac 0x000001')" "1"
+    chk xnap-dec-sst      "$(printf '%s\n' "$out" | grep -c 'sst 0x01')" "1"
+    chk xnap-dec-gnb      "$(printf '%s\n' "$out" | grep -c '0xa1c01')" "1"
+    chk xnap-dec-usage    "$(ncore_cmd_xnap_decode "" >/dev/null 2>&1; echo $?)" "2"
+    chk xnap-dec-oddhex   "$(ncore_cmd_xnap_decode "001" >/dev/null 2>&1; echo $?)" "2"
+    #     A gapless XnSetupRequest is the point: all three mandatory IEs.
+    out=$(ncore_cmd_xnap_setup 310/260 0x12345 0xBEEF01 0x55 0x07)
+    chk xnap-setup-tac    "$(fld "$out" hex | grep -c '00beef01')" "1"
+    chk xnap-setup-55     "$(fld "$out" hex | grep -c '00000aa0$')" "1"
+
     # 1c. The sender is armed on its own.
     chk ngap-send-disarmed \
         "$(ncore_cmd_ngap_send 127.0.0.1 38412 >/dev/null 2>&1; echo $?)" "3"
@@ -2103,6 +2190,8 @@ ncore_cli_main() {
         --ngap-downlink-nas) ncore_cmd_ngap_downlink_nas "${1:-}" "${2:-}" "${3:-}" ;;
         --ngap-ngsetup)     ncore_cmd_ngap_ngsetup "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --ngap-paging)      ncore_cmd_ngap_paging "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+        --xnap-setup)       ncore_cmd_xnap_setup "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+        --xnap-decode)      ncore_cmd_xnap_decode "${1:-}" ;;
         --ngap-send)        ncore_cmd_ngap_send "${1:-}" "${2:-}" "${3:-}" ;;
         --gtpu-header)     ncore_gtpu_header "${1:-1}" "${2:-1}" ;;
         --plan)            ncore_cmd_plan "${1:-}" ;;
@@ -2138,6 +2227,9 @@ Usage: $0 COMMAND
   --ngap-paging [set-id] [pointer] [tmsi-hex] [plmn/tac]
   --ngap-ngsetup [plmn] [gnb-id] [node-name] [tac]
                                 build a Paging: 5G-S-TMSI and the TAI list
+  --xnap-setup [plmn] [gnb-id] [tac] [sst] [amf-region]
+                                build an XnSetupRequest (SCTP 38422, PPID 61)
+  --xnap-decode <hex>           read one back: node id, TAC, slice
   --ngap-send <amf-host> [port] [hex]
                                 send one on SCTP 38412, PPID 60, needs NR_ARMED=1
   --gtpu-header [teid] [qfi]    build an N3 GTP-U header with the QFI
