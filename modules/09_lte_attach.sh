@@ -404,34 +404,56 @@ latt_is_downgrade_cause() {
 
 # ── message parsing ─────────────────────────────────────────────────────
 #
-# Common EMM header, octets 1..3 (TS 24.301 §9.1):
-#   octet 1 : EPS bearer identity (high nibble) | security header type (low)
-#             For plain EMM messages the high nibble is 0.
-#   octet 2 : EPS mobility management protocol discriminator = 0x07 (TS 24.007 §11.2.3.1.4)
-#   octet 3 : procedure transaction identity (for ESM) OR message type.
-#             Plain EMM signalling carries the message type directly.
+# The NAS header is TWO octets for mobility management and three for session
+# management, and this module had it as three for both until a referee said
+# otherwise (TS 24.301 §9.3.1, checked against tshark's NAS-EPS dissector):
+#
+#   EMM (PD 0x07): octet 1 = security header type (bits 8-5) | protocol
+#                  discriminator (bits 4-1); octet 2 = message type.
+#   ESM (PD 0x02): octet 1 = EPS bearer identity (bits 8-5) | protocol
+#                  discriminator (bits 4-1); octet 2 = procedure transaction
+#                  identity; octet 3 = message type.
+#
+# So an Attach Request opens `07 41` -- not `00 07 41`. The extra leading
+# octet this module used to write put the discriminator where a dissector
+# expects the security header, and put the message type one octet late; the
+# only thing that agreed with it was this module's own decoder, which is what
+# a shared mistake looks like.
 latt_parse_nas_header() {
     local hex; hex=$(latt_nfc "${1:-}")
     latt_is_hex "$hex" || { printf 'ERROR\tnot valid hex: %s\n' "$(latt_sanitize "${1:-}")" >&2; return 1; }
-    (( ${#hex} >= 6 )) || { printf 'ERROR\tNAS message shorter than the 3-octet header\n' >&2; return 1; }
+    (( ${#hex} >= 4 )) || { printf 'ERROR\tNAS message shorter than a two-octet header\n' >&2; return 1; }
 
-    local oct1 dec sh
-    oct1="${hex:0:2}"; dec=$((16#${oct1}))
-    sh=$(( dec & 0x0F ))
-    local ebi; ebi=$(printf '%d' $(( dec >> 4 )))
-    local pd="${hex:2:2}"
-    local mt="${hex:4:2}"
+    local oct1 pd high mt body pti=""
+    oct1=$(( 16#${hex:0:2} ))
+    pd=$(( oct1 & 0x0F ))          # protocol discriminator: the LOW nibble
+    high=$(( (oct1 >> 4) & 0x0F )) # security header type (EMM) or bearer id (ESM)
 
-    printf 'octet1\t%s\n'  "$oct1"
-    printf 'security_header\t%s\n' "$sh"
-    printf 'security_header_name\t%s\n' "$(latt_security_header_name "$sh")"
-    printf 'plain\t%s\n' "$([[ "$sh" == "0" ]] && echo yes || echo no)"
-    printf 'eps_bearer_identity\t%s\n' "$ebi"
-    printf 'protocol_discriminator\t%s\n' "$pd"
-    printf 'protocol_discriminator_name\t%s\n' "$(latt_pd_name "$pd")"
+    if (( pd == 2 )); then
+        # EPS session management: bearer identity, PTI, then the message type.
+        (( ${#hex} >= 6 )) || { printf 'ERROR\tESM message shorter than a three-octet header\n' >&2; return 1; }
+        pti=$(printf '%02X' $(( 16#${hex:2:2} )))
+        mt=${hex:4:2}
+        body=${hex:6}
+    else
+        mt=${hex:2:2}
+        body=${hex:4}
+    fi
+
+    printf 'octet1\t%02X\n' "$oct1"
+    if (( pd == 2 )); then
+        printf 'eps_bearer_identity\t%s\n' "$high"
+        printf 'procedure_transaction_identity\t%s\n' "$pti"
+    else
+        printf 'security_header\t%s\n' "$high"
+        printf 'security_header_name\t%s\n' "$(latt_security_header_name "$high")"
+        printf 'plain\t%s\n' "$([[ "$high" == "0" ]] && echo yes || echo no)"
+    fi
+    printf 'protocol_discriminator\t%02X\n' "$pd"
+    printf 'protocol_discriminator_name\t%s\n' "$(latt_pd_name "$(printf '%02X' "$pd")")"
     printf 'message_type\t%s\n' "$mt"
     printf 'message_name\t%s\n' "$(latt_msg_type_name "0x$mt")"
-    printf 'body\t%s\n' "${hex:6}"
+    printf 'body\t%s\n' "$body"
 }
 
 # ── Attach Request builder — TS 24.301 §9.9.3.1 ─────────────────────────
@@ -463,8 +485,9 @@ latt_build_attach_request() {
 
     # Octet 4: attach type in bits 3-1, KSI in bits 7-5, spare in bits 4/0.
     local oct4; oct4=$(printf '%02X' $(( (ksi << 5) | (attach_type << 1) )))
-    # Octet 1: EBI 0 | security header 0. Octet 2: PD 0x07. Octet 3: 0x41.
-    local hdr="000741"
+    # Octet 1: security header 0 | PD 0x07.  Octet 2: message type 0x41.
+    # Two octets, not three -- see the header note above.
+    local hdr="0741"
 
     local mob; mob=$(latt_imsi_to_eps_mobile_id "$imsi") || {
         printf 'ERROR\tcould not BCD-encode IMSI\n' >&2; return 1
@@ -936,18 +959,22 @@ latt_selftest() {
     chk imsi-ie-nonnumeric "$(latt_imsi_to_eps_mobile_id 31015012345678A >/dev/null 2>&1; echo $?)" "1"
 
     # ── 3. Hand-built Attach Request, byte-exact ────────────────────────
-    # 00 07 41        header (EBI 0 | plain, PD 0x07 EMM, MT 0x41)
-    # E2              octet 4: attach type 1 (EPS attach) << 1 | KSI 7 << 5
+    # 07              octet 1: security header 0 (plain, high nibble) | PD 0x07
+    # 41              octet 2: message type 0x41 (ATTACH REQUEST)
+    # E2              octet 3: attach type 1 (EPS attach) << 1 | KSI 7 << 5
     #                 0b1110_0010 = 0xE2
     # 08 09 01 <8>    EPS mobile identity, IMSI, length 9, type 1
     local ar
     ar=$(latt_build_attach_request 310150123456789)
-    chk attach-octets   "$(( ${#ar} / 2 ))" "15"
-    chk attach-hex      "$ar" "000741E208090113100521436587F9"
-    chk attach-mt       "${ar:4:2}" "41"
-    chk attach-pd       "${ar:2:2}" "07"
-    chk attach-sh       "${ar:0:2}" "00"
-    chk attach-oct4     "${ar:6:2}" "E2"
+    chk attach-octets   "$(( ${#ar} / 2 ))" "14"
+    chk attach-hex      "$ar" "0741E208090113100521436587F9"
+    chk attach-mt       "${ar:2:2}" "41"
+    chk attach-pd       "$(( 16#${ar:0:2} & 0x0F ))" "7"
+    chk attach-sh       "$(( 16#${ar:0:2} >> 4 ))" "0"
+    chk attach-oct3     "${ar:4:2}" "E2"
+    # The three-octet header this module used to write: tshark reads `00 07`
+    # as PD 0 (reserved) and finds no message type at all.
+    chk attach-no-leading-zero "$(printf '%s' "$ar" | cut -c1-2)" "07"
 
     # With UE network capability (IEI 0x33) and an ESM container (IEI 0x2D).
     # 0xE0 0xE0 is a commonly seen 2-octet UE network capability
@@ -955,7 +982,7 @@ latt_selftest() {
     # PDN CONNECTIVITY REQUEST (PD 0x02, PTI 0x01, MT 0xD0, ...).
     # The ESM message container length is TWO octets (0x0005), not one.
     ar=$(latt_build_attach_request 310150123456789 E0E0 0201D00128)
-    chk attach-caps-hex "$ar" "000741E208090113100521436587F93302E0E02D00050201D00128"
+    chk attach-caps-hex "$ar" "0741E208090113100521436587F93302E0E02D00050201D00128"
     chk attach-caps-iei "$(printf '%s' "$ar" | grep -o '3302E0E0' | head -1)" "3302E0E0"
     chk attach-esm-iei  "$(printf '%s' "$ar" | grep -o '2D00050201D00128' | head -1)" "2D00050201D00128"
     # Regression guard for the octal-length bug: bash parses $((010/2)) as
@@ -968,35 +995,47 @@ latt_selftest() {
     chk attach-bad-ksi  "$(latt_build_attach_request 310150123456789 '' '' 1 9 >/dev/null 2>&1; echo $?)" "1"
 
     # ── 4. Header parsing: message type and security header ─────────────
-    out=$(latt_parse_nas_header "000741E208090113100521436587F9")
+    # EMM is TWO octets: security header type (high nibble) | PD (low), then
+    # the message type.  0x07 = plain NAS + EPS mobility management.
+    out=$(latt_parse_nas_header "0741E208090113100521436587F9")
     chk hdr-mt       "$(fld "$out" message_type)" "41"
     chk hdr-mt-name  "$(fld "$out" message_name)" "ATTACH REQUEST"
     chk hdr-sh       "$(fld "$out" security_header)" "0"
     chk hdr-sh-name  "$(fld "$out" security_header_name)" "PLAIN NAS"
     chk hdr-plain    "$(fld "$out" plain)" "yes"
     chk hdr-pd       "$(fld "$out" protocol_discriminator)" "07"
-    chk hdr-ebi      "$(fld "$out" eps_bearer_identity)" "0"
+    chk hdr-pd-name  "$(fld "$out" protocol_discriminator_name)" "EPS mobility management"
+    chk hdr-body     "$(fld "$out" body)" "E208090113100521436587F9"
 
-    # A protected message: octet 1 = 0x27 -> EBI 2, security header 7?
-    # No: security header type occupies the low nibble, and 0x01 is
-    # INTEGRITY PROTECTED. Use EBI 0, SH 1 -> octet 1 = 0x01.
-    out=$(latt_parse_nas_header "0107530001")
+    # The same octets under an established context: security header 1 moves
+    # into the HIGH nibble of octet 1, so the byte is 0x17 and the message
+    # type stays at octet 2.
+    out=$(latt_parse_nas_header "17530001")
     chk hdr2-sh      "$(fld "$out" security_header)" "1"
     chk hdr2-sh-name "$(fld "$out" security_header_name)" "INTEGRITY PROTECTED"
     chk hdr2-plain   "$(fld "$out" plain)" "no"
     chk hdr2-mt      "$(fld "$out" message_type)" "53"
-    # EBI is the high nibble: 0x21 -> EBI 2, SH 1.
-    out=$(latt_parse_nas_header "2107530001")
-    chk hdr3-ebi     "$(fld "$out" eps_bearer_identity)" "2"
-    chk hdr3-sh      "$(fld "$out" security_header)" "1"
+    out=$(latt_parse_nas_header "27530001")
+    chk hdr3-sh      "$(fld "$out" security_header)" "2"
+    chk hdr3-sh-name "$(fld "$out" security_header_name)" "INTEGRITY PROTECTED AND NEW EPS SECURITY CONTEXT"
 
-    chk hdr-short    "$(latt_parse_nas_header 0007 >/dev/null 2>&1; echo $?)" "1"
+    # ESM is THREE octets: EPS bearer identity (high nibble) | PD 0x02, then
+    # the procedure transaction identity, then the message type.
+    out=$(latt_parse_nas_header "22012900")
+    chk hdr-esm-ebi  "$(fld "$out" eps_bearer_identity)" "2"
+    chk hdr-esm-pti  "$(fld "$out" procedure_transaction_identity)" "01"
+    chk hdr-esm-pd   "$(fld "$out" protocol_discriminator)" "02"
+    chk hdr-esm-mt   "$(fld "$out" message_type)" "29"
+    chk hdr-esm-body "$(fld "$out" body)" "00"
+
+    chk hdr-short    "$(latt_parse_nas_header 07 >/dev/null 2>&1; echo $?)" "1"
+    chk hdr-esm-short "$(latt_parse_nas_header 2201 >/dev/null 2>&1; echo $?)" "1"
     chk hdr-nonhex   "$(latt_parse_nas_header ZZYY >/dev/null 2>&1; echo $?)" "1"
     chk hdr-oddlen   "$(latt_parse_nas_header 00074 >/dev/null 2>&1; echo $?)" "1"
 
     # ── 5. Identity exposure: the classic finding ───────────────────────
-    # 00 07 53 01 = plain NAS (SH 0) IDENTITY REQUEST asking for IMSI.
-    out=$(latt_identity_exposure "00075301"); rc=$?
+    # 07 53 01 = plain NAS (SH 0) IDENTITY REQUEST asking for IMSI.
+    out=$(latt_identity_exposure "075301"); rc=$?
     chk exposure-rc         "$rc" "0"
     chk exposure-flag       "$(fld "$out" exposure)" "yes"
     chk exposure-type       "$(fld "$out" identity_type_name)" "IMSI"
@@ -1005,81 +1044,81 @@ latt_selftest() {
 
     # Same request, but under an established security context
     # (SH 1 = integrity protected) MUST NOT be flagged.
-    out=$(latt_identity_exposure "01075301"); rc=$?
+    out=$(latt_identity_exposure "175301"); rc=$?
     chk protected-rc        "$rc" "0"
     chk protected-flag      "$(fld "$out" exposure)" "no"
     chk protected-severity  "$(fld "$out" severity)" "none"
     chk protected-sh        "$(fld "$out" security_header)" "1"
 
     # SH 2 (integrity protected + new EPS security context) likewise.
-    out=$(latt_identity_exposure "02075301")
+    out=$(latt_identity_exposure "275301")
     chk protected2-flag     "$(fld "$out" exposure)" "no"
 
     # A plain IMEI request is still an exposure, but medium severity.
-    out=$(latt_identity_exposure "00075302")
+    out=$(latt_identity_exposure "075302")
     chk exposure-imei-flag  "$(fld "$out" exposure)" "yes"
     chk exposure-imei-name  "$(fld "$out" identity_type_name)" "IMEI"
     chk exposure-imei-sev   "$(fld "$out" severity)" "medium"
 
     # A non-Identity-Request message is a hard error, not a silent "no".
-    chk exposure-wrong-mt   "$(latt_identity_exposure "00074101" >/dev/null 2>&1; echo $?)" "1"
+    chk exposure-wrong-mt   "$(latt_identity_exposure "074101" >/dev/null 2>&1; echo $?)" "1"
     chk exposure-bad-hex    "$(latt_identity_exposure "nothex" >/dev/null 2>&1; echo $?)" "1"
 
     # ── 6. Full decode of several message types ─────────────────────────
-    out=$(latt_decode_nas "000741E208090113100521436587F9")
+    out=$(latt_decode_nas "0741E208090113100521436587F9")
     chk dec-attach-mt    "$(fld "$out" message_name)" "ATTACH REQUEST"
     chk dec-attach-type  "$(fld "$out" eps_attach_type_name)" "EPS attach"
     chk dec-attach-ksi   "$(fld "$out" nas_key_set_identifier)" "7"
 
     # Attach reject, cause 15 = "No suitable cells in tracking area".
-    out=$(latt_decode_nas "0007440F")
+    out=$(latt_decode_nas "07440F")
     chk dec-reject-name  "$(fld "$out" message_name)" "ATTACH REJECT"
     chk dec-reject-cause "$(fld "$out" emm_cause)" "15"
     chk dec-reject-cname "$(fld "$out" emm_cause_name)" "No suitable cells in tracking area"
 
     # Attach reject, cause 2 = "IMSI unknown in HSS".
-    out=$(latt_decode_nas "00074402")
+    out=$(latt_decode_nas "074402")
     chk dec-reject2 "$(fld "$out" emm_cause_name)" "IMSI unknown in HSS"
 
     # Authentication request: RAND(16) || AUTN(16), fixed by TS 33.401.
     local rand="000102030405060708090A0B0C0D0E0F"
     local autn="101112131415161718191A1B1C1D1E1F"
-    out=$(latt_decode_nas "00074F${rand}${autn}")
+    out=$(latt_decode_nas "074F${rand}${autn}")
     chk dec-auth-mt   "$(fld "$out" message_name)" "AUTHENTICATION REQUEST"
     chk dec-auth-rand "$(fld "$out" rand)" "$rand"
     chk dec-auth-autn "$(fld "$out" autn)" "$autn"
     chk dec-auth-rlen "$(fld "$out" rand_len)" "16"
 
     # Authentication response carrying an 8-octet RES.
-    out=$(latt_decode_nas "000750A1A2A3A4A5A6A7A8")
+    out=$(latt_decode_nas "0750A1A2A3A4A5A6A7A8")
     chk dec-res     "$(fld "$out" res)" "A1A2A3A4A5A6A7A8"
     chk dec-res-len "$(fld "$out" res_len)" "8"
 
     # Security mode command: cipher 2 (128-EEA2), integrity 2 (128-EIA2),
     # i.e. octet 4 = 0x22.
-    out=$(latt_decode_nas "00075522000000000000")
+    out=$(latt_decode_nas "075522000000000000")
     chk dec-smc-cipher "$(fld "$out" selected_nas_cipher)" "2"
     chk dec-smc-integ  "$(fld "$out" selected_nas_integrity)" "2"
     chk dec-smc-mac    "$(fld "$out" nas_mac)" "00000000"
 
     # Security mode complete under integrity protection (SH 1).
-    out=$(latt_decode_nas "0107561122334455")
+    out=$(latt_decode_nas "17561122334455")
     chk dec-smc-done-mt  "$(fld "$out" message_name)" "SECURITY MODE COMPLETE"
     chk dec-smc-done-mac "$(fld "$out" nas_mac)" "11223344"
 
     # Detach request, type 1 = EPS detach.
-    out=$(latt_decode_nas "00074502")
+    out=$(latt_decode_nas "074502")
     chk dec-detach-mt   "$(fld "$out" message_name)" "DETACH REQUEST"
     chk dec-detach-type "$(fld "$out" detach_type_name)" "EPS detach"
 
     # Identity response carrying an IMSI as EPS mobile identity.
-    out=$(latt_decode_nas "00075408090113100521436587F9")
+    out=$(latt_decode_nas "075408090113100521436587F9")
     chk dec-idresp-mt   "$(fld "$out" message_name)" "IDENTITY RESPONSE"
     chk dec-idresp-type "$(fld "$out" mobile_identity_type)" "IMSI"
     chk dec-idresp-imsi "$(fld "$out" mobile_identity)" "310150123456789"
 
     # TAU request (0x47) uses the same leading octet layout as attach.
-    out=$(latt_decode_nas "000747E208090113100521436587F9")
+    out=$(latt_decode_nas "0747E208090113100521436587F9")
     chk dec-tau-mt   "$(fld "$out" message_name)" "TRACKING AREA UPDATE REQUEST"
     chk dec-tau-type "$(fld "$out" eps_attach_type_name)" "EPS attach"
 
@@ -1125,7 +1164,7 @@ latt_selftest() {
     chk pd-02     "$(latt_pd_name 02)" "call control"
     chk pd-01     "$(latt_pd_name 01)" "EPS session management"
     chk pd-unk    "$(latt_pd_name FF)" "reserved/unknown"
-    chk pd-lines  "$(latt_parse_nas_header 000741E2 | grep -c '^protocol_discriminator_name')" "1"
+    chk pd-lines  "$(latt_parse_nas_header 0741E2 | grep -c '^protocol_discriminator_name')" "1"
     chk sh-1      "$(latt_security_header_name 1)" "INTEGRITY PROTECTED"
     chk att-1     "$(latt_attach_type_name 1)" "EPS attach"
     chk att-2     "$(latt_attach_type_name 2)" "combined EPS/IMSI attach"
@@ -1139,9 +1178,9 @@ latt_selftest() {
     chk v-enc-missing      "$(latt_cmd_encode_attach >/dev/null 2>&1; echo $?)" "2"
     chk v-enc-bad-imsi     "$(latt_cmd_encode_attach 42 >/dev/null 2>&1; echo $?)" "1"
     chk v-dec-missing      "$(latt_cmd_decode_nas >/dev/null 2>&1; echo $?)" "2"
-    chk v-dec-bad          "$(latt_cmd_decode_nas 0007 >/dev/null 2>&1; echo $?)" "1"
+    chk v-dec-bad          "$(latt_cmd_decode_nas 07 >/dev/null 2>&1; echo $?)" "1"
     chk v-exp-missing      "$(latt_cmd_identity_exposure >/dev/null 2>&1; echo $?)" "2"
-    chk v-exp-wrong-mt     "$(latt_cmd_identity_exposure 00074101 >/dev/null 2>&1; echo $?)" "1"
+    chk v-exp-wrong-mt     "$(latt_cmd_identity_exposure 074101 >/dev/null 2>&1; echo $?)" "1"
     chk v-cli-unknown      "$(latt_cli_main --nope >/dev/null 2>&1; echo $?)" "2"
     chk v-ue-stack-absent  "$(latt_require_ue_stack >/dev/null 2>&1; echo $?)" "$([[ -n "$(latt_find_lte_ue_stack || true)" ]] && echo 0 || echo 1)"
 
@@ -1158,8 +1197,8 @@ latt_selftest() {
     chk v-dec2-mnc "$(fld "$out" mnc)" "01"
     out=$(latt_cmd_encode_attach 310150123456789)
     chk v-att-rc   "$rc" "0"
-    chk v-att-hex  "$(fld "$out" nas_hex)" "000741E208090113100521436587F9"
-    out=$(latt_cmd_decode_nas 00075301)
+    chk v-att-hex  "$(fld "$out" nas_hex)" "0741E208090113100521436587F9"
+    out=$(latt_cmd_decode_nas 075301)
     chk v-dec-nas-mt "$(fld "$out" message_name)" "IDENTITY REQUEST"
 
     # ── 11. Identity store round-trip ───────────────────────────────────

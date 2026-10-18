@@ -695,3 +695,28 @@ and nothing enforces that as the line grows. Two other grep hits for the same *t
 patterns, not variable references.
 
 
+## 38. `09_lte_attach` put one octet too many in every NAS header (2026)
+
+The module modelled the EPS NAS header as three octets — an "EPS bearer identity" byte, then the
+protocol discriminator, then the message type — so an Attach Request built as `00 07 41 E2 …`. The
+clause and the dissector both say two: **octet 1 carries the security header type in its high
+nibble and the protocol discriminator in its low nibble, and octet 2 is the message type**, so an
+Attach Request is `07 41 …`. The bearer identity belongs to *session management* messages, where it
+takes the high nibble instead of the security header and a PTI moves the message type to octet 3.
+
+The bug survived because the module's builder, its parser and its selftest all shared the same
+three-octet model: `--encode-attach` produced `000741E2080901…`, `--decode-nas` read it back
+happily, and the selftest pinned both. Nothing outside the module agreed. `32_nas_signaling
+--decode-nas eps 07410bf110` reports security header 0 / EPD 7 / Attach request; the old parser in
+this module reported security header 7 / discriminator `0x41` and a message type of `0x0B`.
+
+Fixed by rewriting `latt_parse_nas_header` to the clause (two octets for EMM, three for ESM with
+the bearer identity and PTI reported), correcting the builder to `0741`, and updating the pins —
+including one that now asserts the old form is *not* read as an Attach Request. Verified against
+tshark 4.2.2: the built message dissects as `EPS mobility management messages (0x7)` /
+`Attach request (0x41)` inside an S1AP InitialUEMessage, where the old octets produced no message
+type at all. `09_lte_attach` selftest 168 assertions PASS.
+
+**Rule.** When a codec, its writer and its selftest are written together, the selftest is not a
+referee — it is a third copy of the same assumption. A second implementation (here
+`32_nas_signaling`) or an independent dissector has to read the bytes, or the bug is invisible.

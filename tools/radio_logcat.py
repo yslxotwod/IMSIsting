@@ -195,14 +195,16 @@ def candidate_commands(layer: str, hexstr: str) -> list[str]:
         return ["modules/32_nas_signaling.sh --decode-nas 5gs %s" % hexstr,
                 "modules/13_nr_core.sh --decode-nas-5gs %s" % hexstr]
     if layer == "nas-eps":
-        # `09_lte_attach --decode-nas` is deliberately NOT offered: run on
-        # `07410bf110` it reports security_header 7 and protocol_discriminator
-        # 0x41, i.e. it reads octet 0 as a security header and octet 1 as the
-        # discriminator.  `32_nas_signaling --decode-nas eps` reads the same
-        # octets as security header 0, EPD 7, Attach request, which is what
-        # TS 24.301 §9.3.1 says.  Two decoders in this tree disagree, and a
-        # log reader that names both would launder the disagreement.
-        return ["modules/32_nas_signaling.sh --decode-nas eps %s" % hexstr]
+        # Both decoders are offered now.  They disagreed for a while:
+        # `09_lte_attach` modelled a three-octet NAS header (bearer identity,
+        # then the discriminator, then the message type) and read
+        # `0741...` as security header 7 / discriminator 0x41, while
+        # `32_nas_signaling` read it as security header 0 / EPD 7 / Attach
+        # request -- which is what TS 24.301 §9.3.1 and tshark's NAS-EPS
+        # dissector both say.  The older module was corrected, and this
+        # reader names it again rather than laundering a stale disagreement.
+        return ["modules/32_nas_signaling.sh --decode-nas eps %s" % hexstr,
+                "modules/09_lte_attach.sh --decode-nas %s" % hexstr]
     if layer == "apdu":
         return ["modules/16_sim.sh --parse-apdu %s" % hexstr]
     return []
