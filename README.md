@@ -242,15 +242,16 @@ The `partial` rows, so the status is not a mystery:
   builds both HNBAP registration messages (`tools/hnbap_asn1.py`, dissected by
   `tshark` on SCTP PPID 20), builds the RUA Connect and DirectTransfer that
   open an Iuh signalling connection after registration (`tools/rua_asn1.py`,
-  PPID 19) while framing the RANAP rather than inventing it, carries a
+  PPID 19) and the InitialUE-Message that hands the core a subscriber's first
+  NAS message (`tools/ranap_asn1.py`, `--ranap-initial-ue`), carries a
   handset's NAS (`--s1ap-nas`) and the Paging that calls it back, and opens the
-  association itself (`--s1-attach`, `--iuh-attach`, `--iuh-rua`) through
-  `tools/sctp_assoc.py` — armed, so it reports `disarmed` and exits 3 unless
+  association itself (`--s1-attach`, `--iuh-attach`, `--iuh-rua`, `--iuh-ue`)
+  through `tools/sctp_assoc.py` — armed, so it reports `disarmed` and exits 3 unless
   `FEMT_S1_ARMED=1`, and it always names the PPID it actually put on the wire
   because a wrong one is a silent drop. It also flags a closed cell out of a
-  real SIB1 codec and parses TR-069 config for real. What it still does not
-  have is RANAP: TS 25.413 is a fourth codec, so `--rua-transfer` takes the
-  RANAP as octets and the output says `framed, not built`.
+  real SIB1 codec and parses TR-069 config for real. Three codecs meet here —
+  HNBAP, RUA and RANAP — and `--iuh-ue` chains all three into one call so a NAS
+  message goes from hex to the core with each layer's octet count named.
 - **`39_ta_geoloc`** does the ranging and multilateration arithmetic that locates a
   UE, and it is real arithmetic with GDOP. It has no measurement front end: the
   timing-advance values it solves from come from a capture or a plan.
@@ -781,6 +782,7 @@ often identifies the problem with no hardware attached.
 ./tools/check-x2ap-codec.sh       # X2AP octets vs pycrate and the clause
 ./tools/check-xnap-codec.sh       # XnAP octets vs pycrate and the clause
 ./tools/check-rua-codec.sh        # RUA octets vs pycrate and the clause
+./tools/check-ranap-codec.sh      # RANAP octets vs pycrate and the clause
 ./tools/gen-module-index.sh       # regenerate the index
 ./tools/gen-icons-xml.sh --check  # the bundled icon set matches the tree
 ```

@@ -848,6 +848,101 @@ femt_iuh_rua() {
     femt_sctp_send 19 "$port" "$hex" "$host"
 }
 
+femt_ranap_asn1() {
+    local py="${FEMT_RANAP:-$IMSISTING_ROOT/tools/ranap_asn1.py}"
+    if [[ ! -f "$py" ]]; then
+        printf 'ERROR	%s is missing; cannot build or read a RANAP body\n' "$py" >&2
+        return 1
+    fi
+    timeout 60 python3 "$py" "$@"
+}
+
+# The RANAP a rogue access point sends to hand the core a subscriber's first
+# NAS message. It is the reason the Iuh story ends here and not at RUA: a
+# DirectTransfer with nothing worth carrying opens a connection that says
+# nothing.
+femt_ranap_initial_ue() {
+    local mcc="${1:-}" mnc="${2:-}" lac="${3:-}" sac="${4:-}" nas="${5:-}"
+    local domain="${6:-ps-domain}"
+    if [[ -z "$mcc" || -z "$mnc" || -z "$lac" || -z "$sac" || -z "$nas" ]]; then
+        printf 'ERROR\tneed <mcc> <mnc> <lac> <sac> <nas-hex> [cs-domain|ps-domain]\n' >&2
+        return 2
+    fi
+    local out hex
+    out=$(femt_ranap_asn1 initial-ue --mcc "$mcc" --mnc "$mnc" --lac "$lac" \
+        --sac "$sac" --nas "$nas" --domain "$domain") || return 1
+    hex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tthe codec returned no octets\n' >&2
+        return 1
+    fi
+    printf 'ranap_message\tInitialUE-Message\n'
+    printf 'ranap_procedure\t19\n'
+    printf 'ranap_domain\t%s\n' "$domain"
+    printf 'ranap_plmn\t%s/%s\n' "$mcc" "$mnc"
+    printf 'ranap_hex\t%s\n' "$hex"
+    printf 'ranap_octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'ranap_carried_by\tRUA DirectTransfer (TS 25.468)\n'
+    printf 'status\tbuilt\n'
+}
+
+femt_ranap_decode() {
+    local src="${1:--}"
+    local hex
+    if [[ "$src" == "-" ]]; then
+        hex=$(femt_norm_hex "$(cat)")
+    elif [[ -f "$src" ]]; then
+        hex=$(femt_norm_hex "$(cat "$src")")
+    else
+        hex=$(femt_norm_hex "$src")
+    fi
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tnothing to decode\n' >&2
+        return 2
+    fi
+    femt_ranap_asn1 decode "$hex"
+}
+
+# NAS to core in one call: RANAP InitialUE-Message, framed in a RUA
+# DirectTransfer, sent over the association. Three layers, each built by the
+# tool that owns its format, and armed -- a subscriber's first message is
+# still a message to a core that is not ours.
+femt_iuh_ue() {
+    local host="${1:-}" mcc="${2:-}" mnc="${3:-}" lac="${4:-}" sac="${5:-}"
+    local nas="${6:-}" ctx="${7:-1}" port="${8:-29169}"
+    if [[ "${FEMT_S1_ARMED:-0}" != "1" ]]; then
+        printf 'status\tdisarmed\n'
+        printf 'reason\tan InitialUE-Message goes out only when FEMT_S1_ARMED=1; the octets are built either way\n'
+        printf 'would_send\tppid 19 to %s:%s, context %s, RANAP over RUA\n' \
+            "${host:-<no host given>}" "$port" "$ctx"
+        return 3
+    fi
+    if [[ -z "$host" || -z "$mcc" || -z "$mnc" || -z "$lac" || -z "$sac" || -z "$nas" ]]; then
+        printf 'ERROR\tneed <hnb-gw-host> <mcc> <mnc> <lac> <sac> <nas-hex> [context-id] [port]\n' >&2
+        return 2
+    fi
+    local ranap rua
+    ranap=$(femt_ranap_initial_ue "$mcc" "$mnc" "$lac" "$sac" "$nas") || return 1
+    ranap=$(printf '%s\n' "$ranap" | awk -F'\t' '$1=="ranap_hex"{print $2; exit}')
+    if [[ -z "$ranap" ]]; then
+        printf 'ERROR\tthe RANAP codec returned no octets\n' >&2
+        return 1
+    fi
+    rua=$(femt_rua_transfer "$ctx" "$ranap") || return 1
+    rua=$(printf '%s\n' "$rua" | awk -F'\t' '$1=="rua_hex"{print $2; exit}')
+    if [[ -z "$rua" ]]; then
+        printf 'ERROR\tthe RUA codec returned no octets\n' >&2
+        return 1
+    fi
+    printf 'leg\tIuh\n'
+    printf 'layer\tRANAP InitialUE-Message inside RUA DirectTransfer\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'ppid\t19\n'
+    printf 'ranap_octets\t%s\n' "$(( ${#ranap} / 2 ))"
+    printf 'rua_octets\t%s\n' "$(( ${#rua} / 2 ))"
+    femt_sctp_send 19 "$port" "$rua" "$host"
+}
+
 # ── live subscriber feed ────────────────────────────────────────────────
 # The GUI's Live Subscribers view tails this file by byte offset. Nothing
 # here re-implements the capture or the NAS classification: modules/
@@ -1216,6 +1311,34 @@ CFG
     chk iuh-rua-disarmed-rc  "$(FEMT_S1_ARMED=0 femt_iuh_rua 203.0.113.9 1 0000000100 >/dev/null 2>&1; echo $?)" "3"
     chk iuh-rua-would-send   "$(fld "$out" would_send | grep -c 'ppid 19')" "1"
 
+    # 7c. RANAP: the message the RUA DirectTransfer was always meant to carry.
+    out=$(femt_ranap_initial_ue 001 01 1 2 0741010b0000)
+    chk ranap-initial-ue-hex  "$(fld "$out" ranap_hex)" \
+        "001300290000040003000180000f40060000f1100001003a40080000f1100001000200104007060741010b0000"
+    chk ranap-initial-ue-octets "$(fld "$out" ranap_octets)" "45"
+    chk ranap-initial-ue-proc  "$(fld "$out" ranap_procedure)" "19"
+    chk ranap-initial-ue-status "$(fld "$out" status)" "built"
+    # The domain bit is one bit of 45 octets and it decides which core answers.
+    out=$(femt_ranap_initial_ue 001 01 1 2 0741010b0000 cs-domain)
+    # One bit apart. Octet 11 carries the domain index: 80 for ps, 00 for cs.
+    ps_hex=$(femt_ranap_initial_ue 001 01 1 2 0741010b0000 | awk -F'\t' '$1=="ranap_hex"{print $2}')
+    cs_hex=$(femt_ranap_initial_ue 001 01 1 2 0741010b0000 cs-domain | awk -F'\t' '$1=="ranap_hex"{print $2}')
+    chk ranap-cs-domain-octet "${cs_hex:22:2}" "00"
+    chk ranap-ps-domain-octet "${ps_hex:22:2}" "80"
+    chk ranap-domain-body "$( [[ "${ps_hex:24}" == "${cs_hex:24}" ]] && echo same )" "same"
+    chk ranap-cs-domain-read "$(femt_ranap_decode "$(fld "$out" ranap_hex)" | awk -F'\t' '$1=="ie.0.domain"{print $2}')" "cs-domain"
+    chk ranap-usage "$(femt_ranap_initial_ue 001 01 >/dev/null 2>&1; echo $?)" "2"
+    chk ranap-decode-proc "$(femt_ranap_decode 001300290000040003000180000f40060000f1100001003a40080000f1100001000200104007060741010b0000 | awk -F'\t' '$1=="procedure-name"{print $2}')" \
+        "id-InitialUE-Message"
+    chk ranap-decode-nas "$(femt_ranap_decode 001300290000040003000180000f40060000f1100001003a40080000f1100001000200104007060741010b0000 | awk -F'\t' '$1=="ie.3.nas"{print $2}')" \
+        "0741010b0000"
+    chk ranap-decode-garbage "$(femt_ranap_decode deadbeef >/dev/null 2>&1; echo $?)" "1"
+    # Same arming rule as every other send path.
+    out=$(FEMT_S1_ARMED=0 femt_iuh_ue 203.0.113.9 001 01 1 2 0741010b0000)
+    chk iuh-ue-disarmed "$(fld "$out" status)" "disarmed"
+    chk iuh-ue-disarmed-rc "$(FEMT_S1_ARMED=0 femt_iuh_ue 203.0.113.9 001 01 1 2 0741010b0000 >/dev/null 2>&1; echo $?)" "3"
+    chk iuh-ue-would-send "$(fld "$out" would_send | grep -c 'ppid 19')" "1"
+
     # 5. SIB9's HNB-Name is an OCTET STRING, so the hex must be the text.
     out=$(femt_sib9_build LabHeNB)
     chk sib9-hex  "$(fld "$out" sib9_hex)"      "464C616248654E42"
@@ -1416,6 +1539,9 @@ femt_cli_main() {
         --rua-transfer) femt_rua_transfer "${1:-1}" "${2:-}" ;;
         --rua-decode)  femt_rua_decode "${1:--}" ;;
         --iuh-rua)     femt_iuh_rua "$@" ;;
+        --ranap-initial-ue) femt_ranap_initial_ue "$@" ;;
+        --ranap-decode) femt_ranap_decode "${1:--}" ;;
+        --iuh-ue)      femt_iuh_ue "$@" ;;
         --ue-register) femt_ue_register "$@" ;;
         --hnbap)       femt_hnbap_decode "${1:--}" ;;
         --live)        femt_live "$@" ;;
@@ -1468,6 +1594,9 @@ Usage: $0 COMMAND
   --rua-decode <hex|file>
                         walk a RUA PDU back to its IEs and their values
   --iuh-rua <hnb-gw-host> <context-id> <ranap-hex> [port]
+  --ranap-initial-ue <mcc> <mnc> <lac> <sac> <nas-hex> [cs-domain|ps-domain]
+  --ranap-decode <hex|file>
+  --iuh-ue <hnb-gw-host> <mcc> <mnc> <lac> <sac> <nas-hex> [context-id] [port]
                         send that DirectTransfer over SCTP 29169 (ppid 19);
                         needs FEMT_S1_ARMED=1 or it reports disarmed
   --live [seconds | capture.pcap] [iface]

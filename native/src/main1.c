@@ -16686,12 +16686,23 @@ scell_build_backhaul(AppState *state, const char *module_id,
         "the cause octet is what the core files the call as: 0x40 is a normal "
         "call, 0x20 reads as an emergency call."));
     gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
+        "Build InitialUE-Message", "--ranap-initial-ue",
+        "001 01 1 2 0741010b0000",
+        "MCC, MNC, LAC, SAC and the subscriber's NAS message. This is the RANAP "
+        "a rogue access point hands the core so it will serve that subscriber, "
+        "and the domain octet in it is one bit: 0x80 asks for the packet core, "
+        "0x00 asks for the circuit-switched one."));
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
+        "Read a RANAP PDU", "--ranap-decode",
+        "hex, or a file of it",
+        "Procedure, one row per information element, and the PLMN, tracking "
+        "area, service area and NAS message the message carries."));
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
         "Carry a RANAP", "--rua-transfer",
         "0x000102 0000000100",
-        "A DirectTransfer frames the RANAP you supply as hex. It is framed and "
-        "not built: TS 25.413 is a fourth codec and this page does not pretend "
-        "to have it, because a DirectTransfer with invented RANAP is malformed "
-        "at the only peer that matters."));
+        "A DirectTransfer frames RANAP hex you supply -- the octets from the "
+        "row above, or a message from another tool. The frame is checked on its "
+        "own; what it carries is only as good as what was put in it."));
     gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
         "Read a RUA PDU", "--rua-decode",
         "hex, or a file of it",
@@ -16703,12 +16714,19 @@ scell_build_backhaul(AppState *state, const char *module_id,
         "HNB-GW host, context id, RANAP hex, then an optional port. Armed like "
         "the others: PPID 19 on 29169 is what the Iuh uses for RUA, and nothing "
         "leaves the process unless it is invoked with FEMT_S1_ARMED=1."));
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
+        "Attach a Subscriber", "--iuh-ue",
+        "203.0.113.9 001 01 1 2 0741010b0000",
+        "HNB-GW host, then MCC, MNC, LAC, SAC and NAS: the whole leg in one "
+        "call. RANAP is built, framed in a RUA DirectTransfer and sent on "
+        "PPID 19, with each layer's octet count reported. Armed like the rest."));
     gtk_box_append(GTK_BOX(iuh_body), fkit_note(
-        "Both messages are byte-exact, and the selftest pins both octet strings "
-        "so a codec change fails here rather than on a real gateway. The "
-        "association is armed for the same reason the S1 one is: a build should "
-        "not be one typo away from a live socket. The RUA octets are checked "
-        "the same way, against pycrate and on PPID 19."));
+        "Every message is byte-exact, and the selftest pins the octet strings "
+        "so a codec change fails here rather than on a real gateway. Both "
+        "codecs are checked against pycrate and dissected by tshark, HNBAP on "
+        "PPID 20, RUA and RANAP on PPID 19. The association is armed for the "
+        "same reason the S1 one is: a build should not be one typo away from a "
+        "live socket."));
     gtk_box_append(GTK_BOX(body), iuh);
 
     gtk_box_append(GTK_BOX(body), fkit_note(
