@@ -748,6 +748,106 @@ femt_hnbap_decode() {
     femt_hnbap_asn1 decode "$hex"
 }
 
+# RUA is the other half of Iuh.  HNBAP answers "which access point is this";
+# RUA opens the signalling connection and carries the RANAP the core acts on.
+# tools/rua_asn1.py writes the two messages and refuses to invent the third:
+# the RANAP inside a DirectTransfer is supplied as octets, because building
+# TS 25.413 is a codec this tree does not have, and a DirectTransfer carrying
+# invented RANAP is a message that dissects as malformed at the only peer that
+# matters.
+femt_rua_asn1() {
+    local py="${FEMT_RUA:-$IMSISTING_ROOT/tools/rua_asn1.py}"
+    if [[ ! -f "$py" ]]; then
+        printf 'ERROR\t%s is missing; cannot build or read a RUA body\n' "$py" >&2
+        return 1
+    fi
+    timeout 60 python3 "$py" "$@"
+}
+
+femt_rua_connect() {
+    local ctx="${1:-1}" cause="${2:-normal-call}"
+    local out hex
+    out=$(femt_rua_asn1 connect --context-id "$ctx" --cause "$cause") || return 1
+    hex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tthe codec returned no octets\n' >&2
+        return 1
+    fi
+    printf 'rua_message\tConnect\n'
+    printf 'rua_context\t%s\n' "$ctx"
+    printf 'rua_cause\t%s\n' "$cause"
+    printf 'rua_hex\t%s\n' "$hex"
+    printf 'rua_octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'rua_transport\tSCTP 29169 PPID 19 -- built here, not sent from here\n'
+    printf 'status\tbuilt\n'
+}
+
+femt_rua_transfer() {
+    local ctx="${1:-1}" ranap="${2:-}"
+    if [[ -z "$ranap" ]]; then
+        printf 'ERROR\tneed <context-id> <ranap-hex>; the RANAP is supplied, not built\n' >&2
+        return 2
+    fi
+    local out hex
+    out=$(femt_rua_asn1 direct-transfer --context-id "$ctx" --ranap "$ranap") || return 1
+    hex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tthe codec returned no octets\n' >&2
+        return 1
+    fi
+    printf 'rua_message\tDirectTransfer\n'
+    printf 'rua_context\t%s\n' "$ctx"
+    printf 'rua_ranap\tframed, not built\n'
+    printf 'rua_hex\t%s\n' "$hex"
+    printf 'rua_octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'rua_transport\tSCTP 29169 PPID 19 -- built here, not sent from here\n'
+    printf 'status\tbuilt\n'
+}
+
+femt_rua_decode() {
+    local src="${1:--}"
+    local hex
+    if [[ "$src" == "-" ]]; then
+        hex=$(femt_norm_hex "$(cat)")
+    elif [[ -f "$src" ]]; then
+        hex=$(femt_norm_hex "$(cat "$src")")
+    else
+        hex=$(femt_norm_hex "$src")
+    fi
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tnothing to decode\n' >&2
+        return 2
+    fi
+    femt_rua_asn1 decode "$hex"
+}
+
+femt_iuh_rua() {
+    local host="${1:-}" ctx="${2:-1}" ranap="${3:-}" port="${4:-29169}"
+    if [[ "${FEMT_S1_ARMED:-0}" != "1" ]]; then
+        printf 'status\tdisarmed\n'
+        printf 'reason\ta DirectTransfer goes out only when FEMT_S1_ARMED=1; the octets are built either way\n'
+        printf 'would_send\tppid 19 to %s:%s, context %s\n' \
+            "${host:-<no host given>}" "$port" "$ctx"
+        return 3
+    fi
+    if [[ -z "$host" || -z "$ranap" ]]; then
+        printf 'ERROR\tneed <hnb-gw-host> <context-id> <ranap-hex> [port]\n' >&2
+        return 2
+    fi
+    local out hex
+    out=$(femt_rua_asn1 direct-transfer --context-id "$ctx" --ranap "$ranap") || return 1
+    hex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tthe codec returned no octets\n' >&2
+        return 1
+    fi
+    printf 'leg\tIuh\n'
+    printf 'layer\tRUA over RANAP\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'ppid\t19\n'
+    femt_sctp_send 19 "$port" "$hex" "$host"
+}
+
 # ── live subscriber feed ────────────────────────────────────────────────
 # The GUI's Live Subscribers view tails this file by byte offset. Nothing
 # here re-implements the capture or the NAS classification: modules/
@@ -1081,6 +1181,41 @@ CFG
     chk hnbap-imsi         "$(fld "$out" imsi)" "3102601234567809"
     chk hnbap-empty     "$(printf '\n' | femt_hnbap_decode - >/dev/null 2>&1; echo $?)" "2"
 
+    # 4e. RUA, the other half of Iuh. Both vectors were encoded by pycrate and
+    #     dissected by Wireshark on PPID 19 (id-Connect with Context-ID 1 and
+    #     normal-call; id-DirectTransfer with Context-ID 0x000102 and a RANAP
+    #     passed through). The Establishment-Cause octet is the one to keep an
+    #     eye on: 0x40 is a normal call and 0x20 reads as an emergency call.
+    local rua_connect_expect rua_transfer_expect
+    rua_connect_expect="0001400f000002000300030000010006400140"
+    rua_transfer_expect="000240140000020003000300010200040006050000000100"
+    out=$(femt_rua_connect 1 normal-call)
+    chk rua-connect-hex    "$(fld "$out" rua_hex)"       "$rua_connect_expect"
+    chk rua-connect-octets "$(fld "$out" rua_octets)"    "19"
+    chk rua-connect-status "$(fld "$out" status)"        "built"
+    chk rua-connect-cause  "$(fld "$out" rua_cause)"     "normal-call"
+    chk rua-connect-ppid   "$(fld "$out" rua_transport | grep -c 'PPID 19')" "1"
+    out=$(femt_rua_connect 1 emergency-call)
+    chk rua-emergency-hex  "$(fld "$out" rua_hex)"      "0001400f000002000300030000010006400100"
+    out=$(femt_rua_transfer 0x000102 0000000100)
+    chk rua-transfer-hex   "$(fld "$out" rua_hex)"      "$rua_transfer_expect"
+    chk rua-transfer-octets "$(fld "$out" rua_octets)"  "24"
+    chk rua-transfer-ranap "$(fld "$out" rua_ranap)"    "framed, not built"
+    chk rua-transfer-noargs "$(femt_rua_transfer >/dev/null 2>&1; echo $?)" "2"
+    out=$(femt_rua_decode "$rua_connect_expect")
+    chk rua-decode-procedure "$(fld "$out" procedure-name)" "id-Connect"
+    chk rua-decode-ies       "$(fld "$out" ies)"            "2"
+    chk rua-decode-context   "$(fld "$out" ie.0.context-id)" "1"
+    chk rua-decode-cause     "$(fld "$out" ie.1.establishment-cause)" "normal-call"
+    out=$(femt_rua_decode "$rua_transfer_expect")
+    chk rua-decode-ranap     "$(fld "$out" ie.1.ranap)" "0000000100"
+    chk rua-empty  "$(printf '\n' | femt_rua_decode - >/dev/null 2>&1; echo $?)" "2"
+    # The send path must refuse until armed, and say what it would have sent.
+    out=$(FEMT_S1_ARMED=0 femt_iuh_rua 203.0.113.9 1 0000000100)
+    chk iuh-rua-disarmed     "$(fld "$out" status)" "disarmed"
+    chk iuh-rua-disarmed-rc  "$(FEMT_S1_ARMED=0 femt_iuh_rua 203.0.113.9 1 0000000100 >/dev/null 2>&1; echo $?)" "3"
+    chk iuh-rua-would-send   "$(fld "$out" would_send | grep -c 'ppid 19')" "1"
+
     # 5. SIB9's HNB-Name is an OCTET STRING, so the hex must be the text.
     out=$(femt_sib9_build LabHeNB)
     chk sib9-hex  "$(fld "$out" sib9_hex)"      "464C616248654E42"
@@ -1277,6 +1412,10 @@ femt_cli_main() {
         --s1-attach)   femt_s1_attach "$@" ;;
         --iuh-attach)  femt_iuh_attach "$@" ;;
         --iuh-register) femt_iuh_register "$@" ;;
+        --rua-connect) femt_rua_connect "${1:-1}" "${2:-normal-call}" ;;
+        --rua-transfer) femt_rua_transfer "${1:-1}" "${2:-}" ;;
+        --rua-decode)  femt_rua_decode "${1:--}" ;;
+        --iuh-rua)     femt_iuh_rua "$@" ;;
         --ue-register) femt_ue_register "$@" ;;
         --hnbap)       femt_hnbap_decode "${1:--}" ;;
         --live)        femt_live "$@" ;;
@@ -1321,6 +1460,16 @@ Usage: $0 COMMAND
   --ue-register <imsi-bcd-hex> [cause]
                         the HNBAP UERegisterRequest for a handset behind it
   --hnbap <hex|file>    decode an HNBAP PDU back to its fields
+  --rua-connect [context-id] [emergency-call|normal-call]
+                        the RUA Connect that opens an Iuh signalling connection
+  --rua-transfer <context-id> <ranap-hex>
+                        the RUA DirectTransfer carrying that RANAP; the RANAP
+                        is framed here and not built here
+  --rua-decode <hex|file>
+                        walk a RUA PDU back to its IEs and their values
+  --iuh-rua <hnb-gw-host> <context-id> <ranap-hex> [port]
+                        send that DirectTransfer over SCTP 29169 (ppid 19);
+                        needs FEMT_S1_ARMED=1 or it reports disarmed
   --live [seconds | capture.pcap] [iface]
                         join the GSMTAP feed to its identity rows and append
                         new subscriber sightings to the live view's file; a

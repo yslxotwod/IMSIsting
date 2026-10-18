@@ -16637,7 +16637,7 @@ scell_build_backhaul(AppState *state, const char *module_id,
     gtk_box_append(GTK_BOX(body), s1);
 
     GtkWidget *iuh_body;
-    GtkWidget *iuh = verb_card("HNBAP REGISTRATION", &iuh_body);
+    GtkWidget *iuh = verb_card("HNBAP AND RUA", &iuh_body);
     gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
         "Build HNB Register", "--iuh-register",
         "deadbeef 0xA1C0100",
@@ -16661,11 +16661,37 @@ scell_build_backhaul(AppState *state, const char *module_id,
         "HNB-GW host, then an optional port and payload. Armed like the S1 one: "
         "PPID 20 is what the Iuh uses for HNBAP, and the report always names the "
         "PPID it sent."));
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
+        "Build RUA Connect", "--rua-connect",
+        "1 normal-call",
+        "Context id, then the establishment cause. RUA is the half of Iuh that "
+        "opens a signalling connection after HNBAP has registered the box, and "
+        "the cause octet is what the core files the call as: 0x40 is a normal "
+        "call, 0x20 reads as an emergency call."));
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
+        "Carry a RANAP", "--rua-transfer",
+        "0x000102 0000000100",
+        "A DirectTransfer frames the RANAP you supply as hex. It is framed and "
+        "not built: TS 25.413 is a fourth codec and this page does not pretend "
+        "to have it, because a DirectTransfer with invented RANAP is malformed "
+        "at the only peer that matters."));
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
+        "Read a RUA PDU", "--rua-decode",
+        "hex, or a file of it",
+        "Procedure, criticality, one row per information element with its value: "
+        "the context id, the establishment cause, or the RANAP octets it carried."));
+    gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
+        "Send the Transfer", "--iuh-rua",
+        "203.0.113.9 1 0000000100",
+        "HNB-GW host, context id, RANAP hex, then an optional port. Armed like "
+        "the others: PPID 19 on 29169 is what the Iuh uses for RUA, and nothing "
+        "leaves the process unless it is invoked with FEMT_S1_ARMED=1."));
     gtk_box_append(GTK_BOX(iuh_body), fkit_note(
         "Both messages are byte-exact, and the selftest pins both octet strings "
         "so a codec change fails here rather than on a real gateway. The "
         "association is armed for the same reason the S1 one is: a build should "
-        "not be one typo away from a live socket."));
+        "not be one typo away from a live socket. The RUA octets are checked "
+        "the same way, against pycrate and on PPID 19."));
     gtk_box_append(GTK_BOX(body), iuh);
 
     gtk_box_append(GTK_BOX(body), fkit_note(

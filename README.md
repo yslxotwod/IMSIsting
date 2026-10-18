@@ -226,7 +226,7 @@ already hold, and neither emits a frame.
 |---|---|---|
 | `35_baseband` | RRC/NAS fuzzing, corpus generation, crash triage, baseband CVE catalogue | `built` |
 | `36_vowifi` | IKEv2/IPsec SWu, EAP-AKA, ePDG attach flow, tunnel weakness detection | `built` |
-| `37_femtocell` | CSG/PCI audit, S1AP body build and decode, closed-cell detection, live subscriber feed, TR-069 audit | `partial` |
+| `37_femtocell` | CSG/PCI audit, S1AP/NGAP-adjacent Iuh build and decode (HNBAP and RUA), closed-cell detection, live subscriber feed, TR-069 audit | `partial` |
 | `38_ussd` | GSM 03.38 7-bit codec, service codes, USSD flow and tunnelling analysis | `built` |
 | `39_ta_geoloc` | Timing-advance ranging and multilateration with GDOP | `partial` |
 | `40_sba_pivot` | NF discovery, token audience/scope checks, HTTP/2 SBI, pivot mapping | `partial` |
@@ -240,14 +240,17 @@ The `partial` rows, so the status is not a mystery:
 - **`37_femtocell`** encodes CSG identities, builds a byte-exact S1 Setup Request
   and decodes it back (both asserted against `tshark` in `tools/s1ap_asn1.py`),
   builds both HNBAP registration messages (`tools/hnbap_asn1.py`, dissected by
-  `tshark` on SCTP PPID 20), carries a handset's NAS (`--s1ap-nas`) and the
-  Paging that calls it back, and opens the association itself (`--s1-attach`,
-  `--iuh-attach`) through `tools/sctp_assoc.py` — armed, so it reports
-  `disarmed` and exits 3 unless `FEMT_S1_ARMED=1`, and it always names the PPID
-  it actually put on the wire because a wrong one is a silent drop,
-  flags a closed cell out of a real SIB1 codec, and parses TR-069 config for
-  real. It has no SCTP client, so nothing reaches an MME — the association is
-  the handoff, and the module says so.
+  `tshark` on SCTP PPID 20), builds the RUA Connect and DirectTransfer that
+  open an Iuh signalling connection after registration (`tools/rua_asn1.py`,
+  PPID 19) while framing the RANAP rather than inventing it, carries a
+  handset's NAS (`--s1ap-nas`) and the Paging that calls it back, and opens the
+  association itself (`--s1-attach`, `--iuh-attach`, `--iuh-rua`) through
+  `tools/sctp_assoc.py` — armed, so it reports `disarmed` and exits 3 unless
+  `FEMT_S1_ARMED=1`, and it always names the PPID it actually put on the wire
+  because a wrong one is a silent drop. It also flags a closed cell out of a
+  real SIB1 codec and parses TR-069 config for real. What it still does not
+  have is RANAP: TS 25.413 is a fourth codec, so `--rua-transfer` takes the
+  RANAP as octets and the output says `framed, not built`.
 - **`39_ta_geoloc`** does the ranging and multilateration arithmetic that locates a
   UE, and it is real arithmetic with GDOP. It has no measurement front end: the
   timing-advance values it solves from come from a capture or a plan.
@@ -415,7 +418,7 @@ and yet the APDU codec underneath it is real.
 | USSD flows and tunnelling | `38_ussd` | `built` | GSM 03.38 7-bit codec, service codes, the flow. |
 | Remote SIM provisioning / eSIM | `16_sim` | `phase 6` | A real ISO-7816 C-APDU is built and OTA/IMSI/ICCID decode. All four offensive paths — OTA replay, programmable-SIM write, eSIM install, live APDU session — are `status: handoff` plan files. **There is no PC/SC or CCID call and no APDU exchange loop in the module.** |
 | VoWiFi / ePDG attach | `36_vowifi` | `built` | IKEv2/IPsec SWu, EAP-AKA, the ePDG attach flow, tunnel weakness detection. |
-| Rogue HeNB / small cell | `37_femtocell` | `partial` | The S1 Setup Request is built to the octet and confirmed against `tshark`, closed-cell detection runs on the real SIB1 codec, and the live window joins a GSMTAP feed to its identity rows. There is no SCTP client, so no association reaches an MME. |
+| Rogue HeNB / small cell | `37_femtocell` | `partial` | The S1 Setup Request, the two HNBAP registrations and the two RUA messages are built to the octet and confirmed against `tshark`; closed-cell detection runs on the real SIB1 codec and the live window joins a GSMTAP feed to its identity rows. RANAP itself is framed and not built. |
 | Wi-Fi offload (LWA) | `47_wifioff` | `phase 10` | ePDG FQDN, certificate-validation checks and LWA configuration analysis. Assessment only today. |
 
 ### Tracking, positioning and RF
@@ -777,6 +780,7 @@ often identifies the problem with no hardware attached.
 ./tools/check-gui-text.sh         # no verb is rendered as interface text
 ./tools/check-x2ap-codec.sh       # X2AP octets vs pycrate and the clause
 ./tools/check-xnap-codec.sh       # XnAP octets vs pycrate and the clause
+./tools/check-rua-codec.sh        # RUA octets vs pycrate and the clause
 ./tools/gen-module-index.sh       # regenerate the index
 ./tools/gen-icons-xml.sh --check  # the bundled icon set matches the tree
 ```
