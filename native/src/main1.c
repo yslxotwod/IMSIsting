@@ -15749,7 +15749,7 @@ static ModuleSubmenuEntry pgt_entries[] = {
 static ModuleSubmenuEntry vims_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
-      "--ims-registration:IMS Registration|--sip-parse:Parse SIP|~--sip-build|--detect-keystream-reuse:Keystream Reuse" },
+      "--ims-registration:IMS Registration|--sip-parse:Parse SIP|~--sip-build|--detect-keystream-reuse:Keystream Reuse|~--calls|~--tag" },
     { "Attacks",
       "security-high-symbolic",
       "#FLOOD|--sip-flood:SIP Flood|#SPOOF|--register-spoof:Register Spoof|~--register-aka|~--call|~--sip-send|#EXPOSURE|--imei-leak:IMEI Leak|#DEMO|--revolte-demo:ReVoLTE Demo|~--i-have-a-lab-and-authorisation" },

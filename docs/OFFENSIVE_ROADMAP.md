@@ -1656,7 +1656,7 @@ bytes, delivery `handoff` — it needs an SMSC or OTA gateway, and the keys are 
 card's, so it is own-SIM only, exactly as Phase 6 records.
 
 **Phase 19 — call correlation.** `23_traffic_analysis`, `30_volte_ims`.
-**Built** (the capture half).
+**Built.**
 
 `23_traffic_analysis` gained a `calls` mode and the `--calls-tsv` verb: it
 reads a capture once, finds media by RTP header inspection, groups streams
@@ -1681,10 +1681,29 @@ a call whose directions use different addresses is reported as two calls.
 The encryption statement is header-only — RTP and SRTP share the twelve-octet
 header, so a stream is `rtp-or-srtp` and no row claims the payload is clear.
 
-Still absent: feeding a call's ciphertext payloads into
-`30_volte_ims --detect-keystream-reuse` is not automatic; the two halves share
-a definition of a call, not a pipe. `30_volte_ims` still never reads a media
-packet, which is the remaining half of this phase.
+The pipe: `30_volte_ims --detect-keystream-reuse <pcap> [udp-port] [--calls <tsv>]`
+now reads a call's media packet by packet. The detector it replaces took every
+pair of datagrams on a port and XORed them, which meant it compared a stream
+with its own reverse direction and with other streams of the same call — in
+both cases two independent keys, and a finding manufactured out of the capture.
+It now groups datagrams into streams by direction and SSRC, compares frame *k*
+of one call with frame *k* of another (a keystream advances per frame, so
+position is the comparison), and refuses two pairs outright: a stream's own
+reverse direction, and — when a `--calls-tsv` table from `23_traffic_analysis`
+is supplied — another stream of the same call. Each finding names both calls
+and their Call-IDs. RTP shape is decided per direction and needs corroboration
+(two or more frames whose sequence numbers count); what fails that test is
+reported as `ambiguous_rtp` and kept as one bare stream, because ciphertext has
+no header to read and a lucky first octet is not one.
+
+The referee is split the same way this phase always was: `tools/check-keystream.sh`
+compares stream identity, per-stream packet counts and sequence order against
+`tshark`'s RTP dissector, and the reuse verdict itself — which no dissector has
+an opinion on — against captures whose ground truth the test constructs (the
+same pad on two calls, a different pad, and one call's two legs sharing a pad on
+purpose). Six fixtures in the module selftest pin the refusals: no reuse, reuse
+one frame out of step, one call's two legs, bare payloads with RTP-lookalike
+octets, two calls multiplexed on one five-tuple, and two streams of one call.
 
 ---
 

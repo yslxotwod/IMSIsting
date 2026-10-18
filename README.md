@@ -194,7 +194,7 @@ its A5/1 and A5/2 "key recovery" verbs are threshold comparisons
 | `27_cellular_dns` | DNS over the bearer, the aLTEr sequence, spoof detection | `partial` |
 | `28_paging_track` | Paging occasions, Torpedo, Piercer | `partial` |
 | `29_mac_layer` | MAC/RLC/PDCP, RNTI tracking, the user-plane integrity gap | `none` |
-| `30_volte_ims` | ReVoLTE keystream reuse, IMP4GT, SIP REGISTER spoofing | `partial` |
+| `30_volte_ims` | ReVoLTE keystream reuse across calls, IMP4GT, SIP REGISTER spoofing | `partial` |
 | `31_sim_defense` | SIM-swap detection and defence (defensive only) | `none` |
 | `32_nas_signaling` | NAS load measurement and signalling-storm detection | `plan` |
 | `33_jamming_detect` | Jamming detection and characterisation (defensive only) | `none` |
@@ -218,10 +218,13 @@ Where the `partial` verdicts land, exactly:
   rewrites the module's own record, not traffic on the bearer.
 - **`28_paging_track`** computes the paging occasion and builds a real
   `--build-paging-req`. `--paging-tx` is honest-fail without a radio.
-- **`30_volte_ims`** is the widest split in the tree: ReVoLTE keystream recovery
-  and the forged `--register-spoof` REGISTER are real, computed code; IMP4GT is a
-  `--imp4gt-model` arithmetic model, and `--sip-flood` is a rate calculation, not
-  a sender.
+- **`30_volte_ims`** is the widest split in the tree: ReVoLTE keystream recovery,
+  the forged `--register-spoof` REGISTER and the cross-call reuse detector are
+  real, computed code; IMP4GT is a `--imp4gt-model` arithmetic model, and
+  `--sip-flood` is a rate calculation, not a sender. The detector groups a
+  capture into streams by direction and SSRC and compares aligned frames only, so
+  a finding is two calls rather than two legs of one call; it takes
+  `--calls <tsv>` from `23_traffic_analysis` to name the calls it compared.
 - **`34_slicing`** encodes and decodes S-NSSAI for real and evaluates isolation
   from observed config. The slice-escape vector itself is a plan.
 
@@ -443,6 +446,7 @@ and yet the APDU codec underneath it is real.
 | CSI sniffing | `24_rf_fingerprint` | `phase 4` | Channel-state side-channel extraction and motion inference. |
 | Traffic and website fingerprinting | `23_traffic_analysis` | `built` | Flow features from a capture you already hold. Passive by construction — it emits no frame. |
 | Call correlation | `23_traffic_analysis` | `built` | Group media streams into calls by 5-tuple reversal, report the silence structure that separates speech from hold, and match a call against the SDP a captured SIP dialogue named. `--calls-tsv` is refereeable: `tools/check-calls.sh` compares the stream set, packet counts, ports, payload types and Call-IDs with tshark's own dissectors. Silence is **not** compared — the dissector has no opinion on it, so that half rests on a fixture whose gaps are written by hand. |
+| Keystream reuse between calls | `30_volte_ims` | `built` | Two calls that drew the same keystream XOR to structured codec plaintext. Streams are grouped by direction and SSRC, frames are compared at the same position, and a stream is never compared with its own reverse direction or with another stream of its own call. `tools/check-keystream.sh` referees stream identity and framing against tshark; the verdict has no external oracle and is checked against a constructed pad. |
 | NTN / satellite access | `49_ntn` | `phase 10` | Doppler, round-trip delay, TA and k_offset from the SIB19 fields. Arithmetic; the vector is a plan. |
 | NB-IoT fake cell | `45_iot` | `phase 10` | NPRACH, NPSS/NSSS and SIB1-NB decode for real, plus band and NPRFCN maths. `fake-cell` and `nprach-flood` are `--plan` files naming an SDR. |
 | NR sidelink on PC5 | `51_sidelink` | `partial` | SCI-1A and resource-pool descriptors build and relay configuration is checked. PC5 transmission is a plan. |
@@ -796,6 +800,7 @@ often identifies the problem with no hardware attached.
 ./tools/check-ranap-codec.sh      # RANAP octets vs pycrate and the clause
 ./tools/check-auth-oracle.sh      # EMM and 5GMM causes vs tshark's registries
 ./tools/check-calls.sh            # call grouping vs tshark's RTP and SIP dissectors
+./tools/check-keystream.sh        # reuse detection: stream identity vs tshark, verdict vs a constructed pad
 ./tools/gen-module-index.sh       # regenerate the index
 ./tools/gen-icons-xml.sh --check  # the bundled icon set matches the tree
 ```

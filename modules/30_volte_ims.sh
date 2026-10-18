@@ -210,7 +210,13 @@ def read_pcap(path):
     return out
 
 
-def udp_payloads(path, port=0):
+def udp_frames(path, port=0):
+    """Every UDP datagram, with the five-tuple that says which stream it is.
+
+    The older reader kept a timestamp and a payload, which threw away the two
+    fields that decide whether two ciphertexts may be compared at all: which
+    direction they travelled, and which SSRC they belong to.
+    """
     res = []
     for ts, pkt, link in read_pcap(path):
         if link != 1 or len(pkt) < 14:
@@ -221,46 +227,250 @@ def udp_payloads(path, port=0):
         if len(ip) < 20 or (ip[0] >> 4) != 4 or ip[9] != 17:
             continue
         ihl = (ip[0] & 0x0f) * 4
-        udp = ip[ihl:]
-        if len(udp) < 8:
+        if len(ip) < ihl + 8:
             continue
+        udp = ip[ihl:]
         sport, dport = struct.unpack('!HH', udp[:4])
         if port and port not in (sport, dport):
             continue
         payload = udp[8:]
         if len(payload) >= 16:
-            res.append((ts, payload))
+            res.append({"ts": ts, "src": socket.inet_ntoa(ip[12:16]),
+                        "dst": socket.inet_ntoa(ip[16:20]),
+                        "sport": sport, "dport": dport, "payload": payload})
     return res
+
+
+def parse_rtp(p):
+    """RTP fields, or None when these octets are not an RTP packet.
+
+    `body` is everything after the header. In SRTP that is ciphertext plus the
+    authentication tag, and the tag comes off only when the operator states how
+    long it is -- assuming ten octets would shorten every frame of a cipher
+    that uses sixteen.
+    """
+    if len(p) < 12 or (p[0] >> 6) != 2:
+        return None
+    n = 12 + 4 * (p[0] & 0x0f)
+    if p[0] & 0x10:
+        if len(p) < n + 4:
+            return None
+        n += 4 + 4 * struct.unpack('!H', p[n + 2:n + 4])[0]
+    if len(p) <= n:
+        return None
+    return {"ssrc": struct.unpack('!I', p[8:12])[0],
+            "seq": struct.unpack('!H', p[2:4])[0],
+            "pt": p[1] & 0x7f, "body": p[n:]}
+
+
+def seq_consistent(seqs):
+    """Fraction of consecutive sequence numbers that advance by exactly one.
+
+    A single lucky first octet can make ciphertext look like an RTP header.
+    What it cannot do is produce a dozen sequence numbers that count.
+    """
+    if len(seqs) < 2:
+        return 0.0
+    good = sum(1 for a, b in zip(seqs, seqs[1:]) if (b - a) % 65536 == 1)
+    return good / float(len(seqs) - 1)
+
+
+def _stream_of(dkey, ssrc, items, tag):
+    frames = []
+    for fr, rtp in items:
+        body = fr["payload"] if rtp is None else rtp["body"]
+        if tag:
+            body = body[:-tag] if len(body) > tag else b''
+        if len(body) < 16:
+            continue
+        frames.append((fr["ts"], rtp["seq"] if rtp is not None else 0, body))
+    frames.sort(key=lambda t: (t[0], t[1]))
+    return {"src": dkey[0], "sport": dkey[1], "dst": dkey[2], "dport": dkey[3],
+            "ssrc": ssrc, "frames": frames}
+
+
+def group_streams(frames, tag=0):
+    """One entry per stream: one direction of one SSRC, frames in send order.
+
+    Shape is decided per direction, not per packet. Ciphertext has no header to
+    read, so a payload whose first octet happens to look like RTP would split a
+    bare stream into pieces with invented SSRCs. Acceptance needs corroboration:
+    two or more frames and sequence numbers that count. What fails that test is
+    reported as `ambiguous_rtp` and kept as one bare stream.
+    """
+    dirs = {}
+    order = []
+    for f in frames:
+        dkey = (f["src"], f["sport"], f["dst"], f["dport"])
+        d = dirs.get(dkey)
+        if d is None:
+            d = []
+            dirs[dkey] = d
+            order.append(dkey)
+        d.append(f)
+    streams = []
+    ambiguous = 0
+    for dkey in order:
+        cand = {}
+        bare = []
+        for f in dirs[dkey]:
+            rtp = parse_rtp(f["payload"])
+            if rtp is None:
+                bare.append((f, None))
+            else:
+                cand.setdefault(rtp["ssrc"], []).append((f, rtp))
+        for ssrc, items in cand.items():
+            seqs = [it[1]["seq"] for it in items]
+            if len(items) >= 2 and seq_consistent(seqs) >= 0.8:
+                streams.append(_stream_of(dkey, ssrc, items, tag))
+            else:
+                ambiguous += len(items)
+                bare.extend(items)
+        if bare:
+            streams.append(_stream_of(dkey, None, bare, tag))
+    streams = [x for x in streams if x["frames"]]
+    streams.sort(key=lambda x: x["frames"][0][0])
+    return streams, ambiguous
+
+
+def compare_streams(a, b):
+    """Compare frame k of one stream with frame k of the other.
+
+    Position is the whole comparison. A keystream advances per frame, so two
+    packets sitting at different offsets in their calls carry different
+    keystream whether or not the same generator fed them. Aligning by index is
+    what makes the difference mean reuse instead of coincidence.
+    """
+    n = min(len(a["frames"]), len(b["frames"]))
+    fired = 0
+    run_best = 0
+    zf_best = 0.0
+    length = 0
+    for k in range(n):
+        x = xorb(a["frames"][k][2], b["frames"][k][2])
+        if len(x) < 16:
+            continue
+        run = longest_run(x)
+        zf = x.count(0) / float(len(x))
+        if run >= 8 or zf > 0.05:
+            fired += 1
+            if run > run_best:
+                run_best, length = run, len(x)
+            if zf > zf_best:
+                zf_best = zf
+    return {"aligned": n, "fired": fired, "run": run_best, "zf": zf_best,
+            "length": length}
+
+
+def is_reverse(a, b):
+    return ((a["src"], a["sport"], a["dst"], a["dport"]) ==
+            (b["dst"], b["dport"], b["src"], b["sport"]))
+
+
+def read_calls_tsv(path):
+    """Rows from `23_traffic_analysis --calls-tsv`."""
+    rows = []
+    head = None
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            parts = line.rstrip('\n').split('\t')
+            if head is None:
+                head = parts
+                continue
+            if len(parts) != len(head):
+                continue
+            rows.append(dict(zip(head, parts)))
+    return rows
+
+
+def call_of(stream, calls):
+    """The call row this stream belongs to: by SSRC first, endpoint second."""
+    if stream["ssrc"] is not None:
+        want = "%08x" % stream["ssrc"]
+        for r in calls:
+            if want in [x for x in r.get("ssrcs", "").split(",") if x]:
+                return r
+    ep = "%s:%d" % (stream["dst"], stream["dport"])
+    for r in calls:
+        if ep in [x for x in r.get("media_endpoints", "").split(",") if x]:
+            return r
+    return None
+
+
+MIN_ALIGNED = 3
 
 
 def cmd_reuse(argv):
     path = argv[0]
     port = int(argv[1]) if len(argv) > 1 and argv[1] else 0
-    pls = udp_payloads(path, port)
-    print('ciphertext_streams\t%d' % len(pls))
-    if len(pls) < 2:
+    calls_path = argv[2] if len(argv) > 2 else ''
+    tag = int(argv[3]) if len(argv) > 3 and argv[3] else 0
+    streams, ambiguous = group_streams(udp_frames(path, port), tag)
+    print('ciphertext_streams\t%d' % len(streams))
+    print('ambiguous_rtp\t%d' % ambiguous)
+    for i, s in enumerate(streams):
+        who = ('ssrc 0x%08x' % s["ssrc"] if s["ssrc"] is not None
+               else 'no-rtp-header')
+        print('stream.%d\t%s:%d -> %s:%d %s frames %d'
+              % (i, s["src"], s["sport"], s["dst"], s["dport"], who,
+                 len(s["frames"])))
+    if len(streams) < 2:
         print('status\tnot_determinable')
-        print('reason\tfewer than two ciphertext streams; keystream reuse cannot be tested')
+        print('reason\tfewer than two ciphertext streams; reuse needs two')
         return 1
-    pairs = 0; hits = 0
-    for i in range(len(pls)):
-        for j in range(i + 1, len(pls)):
-            a = pls[i][1]; b = pls[j][1]
-            n = min(len(a), len(b))
-            if n < 16:
+    calls = read_calls_tsv(calls_path) if calls_path else []
+    if calls_path:
+        print('calls_source\t%s' % calls_path)
+        print('calls_rows\t%d' % len(calls))
+    pairs = 0
+    hits = 0
+    rev = 0
+    same = 0
+    for i in range(len(streams)):
+        for j in range(i + 1, len(streams)):
+            a = streams[i]
+            b = streams[j]
+            if is_reverse(a, b):
+                rev += 1
+                print('excluded.%d.reverse\t%d:%d' % (rev - 1, i, j))
+                continue
+            ca = call_of(a, calls) if calls else None
+            cb = call_of(b, calls) if calls else None
+            if ca is not None and ca is cb:
+                same += 1
+                print('excluded.%d.same_call\t%d:%d call %s'
+                      % (same - 1, i, j, ca.get("call", "?")))
                 continue
             pairs += 1
-            x = xorb(a[:n], b[:n])
-            run = longest_run(x)
-            zf = x.count(0) / float(n)
-            reuse = run >= 8 or zf > 0.05
-            if reuse:
-                hits += 1
-                print('finding\t%d:%d\tlongest_run=%d\tzero_fraction=%.3f\tlength=%d' % (i, j, run, zf, n))
-    print('pairs_checked\t%d' % pairs)
+            c = compare_streams(a, b)
+            if c["aligned"] < MIN_ALIGNED or c["fired"] < MIN_ALIGNED:
+                continue
+            print('finding.%d.streams\t%d:%d' % (hits, i, j))
+            print('finding.%d.aligned_frames\t%d' % (hits, c["aligned"]))
+            print('finding.%d.fired_frames\t%d' % (hits, c["fired"]))
+            print('finding.%d.longest_run\t%d' % (hits, c["run"]))
+            print('finding.%d.zero_fraction\t%.3f' % (hits, c["zf"]))
+            if ca is not None or cb is not None:
+                print('finding.%d.call_a\t%s'
+                      % (hits, ca.get("call", "?") if ca else "unmatched"))
+                print('finding.%d.call_b\t%s'
+                      % (hits, cb.get("call", "?") if cb else "unmatched"))
+                print('finding.%d.call_id_a\t%s'
+                      % (hits, ca.get("sip_call_id", "") if ca else ""))
+                print('finding.%d.call_id_b\t%s'
+                      % (hits, cb.get("sip_call_id", "") if cb else ""))
+            hits += 1
+    print('pairs_compared\t%d' % pairs)
+    print('excluded_reverse\t%d' % rev)
+    print('excluded_same_call\t%d' % same)
     print('reuse_findings\t%d' % hits)
     print('status\t%s' % ('keystream_reuse' if hits else 'no_reuse'))
-    print('note\t%s' % 'a reused keystream makes XOR(c1,c2) equal to XOR(p1,p2); structured codec plaintext gives long byte runs and a high zero fraction, independent keystreams give neither')
+    print('note\t%s' % 'reuse means both calls drew the same keystream, so '
+          'aligned frame ciphertexts XOR to codec plaintext XOR, which carries '
+          'long byte runs and a high zero fraction; a stream is never compared '
+          'with its own reverse direction (that is a second key, not a second '
+          'call) and, when a calls table is supplied, never with another stream '
+          'of its own call')
     return 0
 
 
@@ -273,34 +483,86 @@ def w_pcap(path, frames):
             f.write(pkt)
 
 
-def eth_udp(payload, port, ts):
-    udp = struct.pack('!HHHH', port, port, 8 + len(payload), 0) + payload
+def eth_udp(payload, sport, dport, ts, sip='10.0.0.1', dip='10.0.0.2'):
+    udp = struct.pack('!HHHH', sport, dport, 8 + len(payload), 0) + payload
     iph = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0,
-                      b'\x0a\x00\x00\x01', b'\x0a\x00\x00\x02')
-    eth = b'\xff' * 6 + b'\x02\x02\x02\x02\x02\x02' + struct.pack('!H', 0x0800) + iph + udp
+                      socket.inet_aton(sip), socket.inet_aton(dip))
+    eth = b'\xff' * 6 + b'\x02' * 6 + struct.pack('!H', 0x0800) + iph + udp
     return (ts, eth)
+
+
+def rtp_frame(ssrc, seq, tstamp, pt, body):
+    return struct.pack('!BBHII', 0x80, pt & 0x7f, seq & 0xffff,
+                       tstamp & 0xffffffff, ssrc & 0xffffffff) + body
+
+
+# AMR-ish speech: mostly silence with a short voiced run. Two frames that
+# differ, so their XOR is structured rather than empty.
+SPEECH_A = bytes([0x00] * 80 + [0x04, 0x0c] * 8 + [0x00] * 64)
+SPEECH_B = bytes([0x00] * 96 + [0x04, 0x0c] * 4 + [0x00] * 64)
+FRAME_LEN = len(SPEECH_A)
+
+
+def frame_plain(k, which):
+    base = SPEECH_A if which == 0 else SPEECH_B
+    shift = 2 * (k % 3)
+    return base[:shift] + bytes([0x00] * 64) + base[shift:]
+
+
+def keystream_slices(n, iv=DEMO_IV):
+    """One counter-mode keystream, cut per frame, as a call would consume it."""
+    long_ks = ctr_keystream(DEMO_KEY, iv, FRAME_LEN * (n + 2))
+    return [long_ks[k * FRAME_LEN:(k + 1) * FRAME_LEN] for k in range(n + 2)]
+
+
+def one_stream(ssrc, sport, dport, plaintexts, keystreams, t0,
+               src='10.0.0.1', dst='10.0.0.2', rtp=True, seq0=1000):
+    out = []
+    for k, (pt, ks) in enumerate(zip(plaintexts, keystreams)):
+        ct = xorb(pt, ks)
+        body = (rtp_frame(ssrc, seq0 + k, 160000 + 160 * k, 96, ct)
+                if rtp else ct)
+        out.append(eth_udp(body, sport, dport, t0 + 0.02 * k, src, dst))
+    return out
 
 
 def cmd_mkfixture(argv):
     path, kind = argv[0], argv[1]
-    # two AMR-ish speech frames with long silence runs (0x00) and a little
-    # structure, which is what a codec produces when nobody is talking
-    p1 = bytes([0x00] * 80 + [0x04, 0x0c] * 8 + [0x00] * 64)
-    p2 = bytes([0x00] * 96 + [0x04, 0x0c] * 4 + [0x00] * 64)
-    ks1 = ctr_keystream(DEMO_KEY, DEMO_IV, len(p1))
+    n = 12
+    pa = [frame_plain(k, 0) for k in range(n)]
+    pb = [frame_plain(k, 1) for k in range(n)]
+    ks = keystream_slices(n + 1)
+    other = keystream_slices(n + 1, bytes.fromhex('f0f1f2f3f4f5f6f7f8f9fafbfcfdfe00'))
     if kind == 'reuse':
-        ks2 = ks1
+        frames = (one_stream(0x11111111, 5004, 5005, pa, ks, 0.0) +
+                  one_stream(0x22222222, 5006, 5007, pb, ks, 0.01))
     elif kind == 'noreuse':
-        ks2 = ctr_keystream(DEMO_KEY, bytes.fromhex('f0f1f2f3f4f5f6f7f8f9fafbfcfdfe00'), len(p2))
+        frames = (one_stream(0x11111111, 5004, 5005, pa, ks, 0.0) +
+                  one_stream(0x22222222, 5006, 5007, pb, other, 0.01))
+    elif kind == 'shifted':
+        # the same keystream, one frame out of step: reuse of the generator but
+        # not of the position, so an index-aligned comparison must stay clean
+        frames = (one_stream(0x11111111, 5004, 5005, pa, ks, 0.0) +
+                  one_stream(0x22222222, 5006, 5007, pb, ks[1:], 0.01))
+    elif kind == 'reverse':
+        # one call, both directions, deliberately fed the same keystream: two
+        # legs of one call are two keys, and comparing them would be a finding
+        # manufactured out of the fixture
+        frames = (one_stream(0x11111111, 5004, 5005, pa, ks, 0.0) +
+                  one_stream(0x22222222, 5005, 5004, pb, ks, 0.01,
+                             src='10.0.0.2', dst='10.0.0.1'))
+    elif kind == 'bare':
+        frames = (one_stream(0, 5004, 5005, pa, ks, 0.0, rtp=False) +
+                  one_stream(0, 5006, 5007, pb, ks, 0.01, rtp=False))
+    elif kind == 'mixed':
+        # two SSRCs on one five-tuple: a multiplexed pair, not two packets of
+        # one stream, and the grouping has to say so
+        frames = (one_stream(0x11111111, 5004, 5005, pa, ks, 0.0) +
+                  one_stream(0x22222222, 5004, 5005, pb, ks, 0.01))
     else:
         raise SystemExit('unknown fixture kind')
-    c1 = xorb(p1, ks1); c2 = xorb(p2, ks2)
-    if kind == 'reuse':
-        # put the same ciphertext twice as well, so the detector has an
-        # unambiguous pair even if a codec frame is not perfectly structured
-        w_pcap(path, [eth_udp(c1, 9999, 0.0), eth_udp(c1, 9999, 0.02)])
-    else:
-        w_pcap(path, [eth_udp(c1, 9999, 0.0), eth_udp(c2, 9999, 0.02)])
+    frames.sort(key=lambda t: t[0])
+    w_pcap(path, frames)
 
 
 # ── SIP ─────────────────────────────────────────────────────────────────
@@ -1101,12 +1363,31 @@ vims_cmd_keystream_recover() {
 }
 
 vims_cmd_detect_reuse() {
-    local pcap="${1:-}" port="${2:-0}"
-    [[ -n "$pcap" ]] || { printf 'ERROR\tusage: --detect-keystream-reuse <pcap> [udp-port]\n' >&2; return 2; }
+    local pcap="" port="0" calls="" tag="0"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --calls) calls="${2:-}"; shift 2 || shift ;;
+            --tag)   tag="${2:-0}";  shift 2 || shift ;;
+            *)
+                if [[ -z "$pcap" ]]; then pcap="$1"
+                elif [[ "$port" == "0" ]]; then port="$1"
+                else printf 'ERROR\ttoo many arguments\n' >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+    [[ -n "$pcap" ]] || {
+        printf 'ERROR\tusage: --detect-keystream-reuse <pcap> [udp-port] [--calls <tsv>] [--tag <octets>]\n' >&2
+        printf 'WHY\treuse is a claim about two calls, so the caller must say which capture and may say which calls\n' >&2
+        return 2; }
     [[ -f "$pcap" ]] || { printf 'ERROR\tno such capture: %s\n' "$pcap" >&2; return 1; }
     [[ "$port" =~ ^[0-9]+$ ]] || { printf 'ERROR\tport must be numeric\n' >&2; return 2; }
+    [[ "$tag" =~ ^[0-9]+$ ]] || { printf 'ERROR\ttag length must be numeric\n' >&2; return 2; }
+    if [[ -n "$calls" ]]; then
+        [[ -f "$calls" ]] || { printf 'ERROR\tno such calls table: %s\n' "$calls" >&2; return 1; }
+    fi
     printf 'model\t%s\n' "ReVoLTE keystream-reuse detector (Rupprecht et al., USENIX Security 2020)"
-    vims_py reuse "$pcap" "$port"
+    vims_py reuse "$pcap" "$port" "$calls" "$tag"
 }
 
 # ── SIP construction and transmission ───────────────────────────────────
@@ -1660,16 +1941,62 @@ vims_selftest() {
     chk ksr-bad-hex "$(vims_cmd_keystream_recover zz "$p1" >/dev/null 2>&1; echo $?)" "2"
     chk ksr-missing "$(vims_cmd_keystream_recover "$c1" >/dev/null 2>&1; echo $?)" "2"
 
-    # 4. Keystream-reuse detector, both directions.
-    vims_py mkfixture "$d/reuse.pcap" reuse
-    vims_py mkfixture "$d/noreuse.pcap" noreuse
-    out=$(vims_cmd_detect_reuse "$d/reuse.pcap" 9999); rc=$?
+    # 4. Keystream-reuse detector: two calls, never one call's two legs.
+    local k
+    for k in reuse noreuse shifted reverse bare mixed; do
+        vims_py mkfixture "$d/$k.pcap" "$k"
+    done
+    printf 'call\tssrcs\tmedia_endpoints\tsip_call_id\n0\t11111111,22222222\t\tcall-one\n' \
+        > "$d/one-call.tsv"
+
+    out=$(vims_cmd_detect_reuse "$d/reuse.pcap"); rc=$?
     chk reuse-rc "$rc" "0"
     chk reuse-fires "$(fld "$out" status)" "keystream_reuse"
-    out=$(vims_cmd_detect_reuse "$d/noreuse.pcap" 9999)
+    chk reuse-streams "$(fld "$out" ciphertext_streams)" "2"
+    chk reuse-ssrc-a "$(printf '%s\n' "$out" | awk -F'\t' '$1=="stream.0"{print ($2 ~ /11111111/)}')" "1"
+    chk reuse-ssrc-b "$(printf '%s\n' "$out" | awk -F'\t' '$1=="stream.1"{print ($2 ~ /22222222/)}')" "1"
+    chk reuse-aligned "$(fld "$out" finding.0.aligned_frames)" "12"
+    chk reuse-fired "$(fld "$out" finding.0.fired_frames)" "12"
+    chk reuse-run "$(fld "$out" finding.0.longest_run)" "144"
+
+    out=$(vims_cmd_detect_reuse "$d/noreuse.pcap")
     chk noreuse-clean "$(fld "$out" status)" "no_reuse"
-    chk reuse-bad-pcap "$(vims_cmd_detect_reuse /nonexistent.pcap 9999 >/dev/null 2>&1; echo $?)" "1"
+    chk noreuse-pairs "$(fld "$out" pairs_compared)" "1"
+
+    # The same keystream one frame out of step: reuse of the generator, not of
+    # the position, so an index-aligned comparison must stay clean.
+    out=$(vims_cmd_detect_reuse "$d/shifted.pcap")
+    chk shifted-clean "$(fld "$out" status)" "no_reuse"
+
+    # One call, both legs fed the same keystream on purpose. Two legs are two
+    # keys; a detector that compares them reports its own fixture.
+    out=$(vims_cmd_detect_reuse "$d/reverse.pcap")
+    chk reverse-clean "$(fld "$out" status)" "no_reuse"
+    chk reverse-excluded "$(fld "$out" excluded_reverse)" "1"
+    chk reverse-pairs "$(fld "$out" pairs_compared)" "0"
+
+    # No RTP header at all, and some ciphertext octets that happen to look like
+    # one: shape must be corroborated by counting sequence numbers.
+    out=$(vims_cmd_detect_reuse "$d/bare.pcap")
+    chk bare-fires "$(fld "$out" status)" "keystream_reuse"
+    chk bare-streams "$(fld "$out" ciphertext_streams)" "2"
+    chk bare-ambiguous "$(fld "$out" ambiguous_rtp)" "6"
+
+    # Two calls multiplexed on one five-tuple: one stream each, by SSRC.
+    out=$(vims_cmd_detect_reuse "$d/mixed.pcap")
+    chk mixed-fires "$(fld "$out" status)" "keystream_reuse"
+    chk mixed-streams "$(fld "$out" ciphertext_streams)" "2"
+
+    # With a calls table, two streams of the same call are not two calls.
+    out=$(vims_cmd_detect_reuse "$d/reuse.pcap" 0 --calls "$d/one-call.tsv")
+    chk samecall-clean "$(fld "$out" status)" "no_reuse"
+    chk samecall-excluded "$(fld "$out" excluded_same_call)" "1"
+    chk samecall-rows "$(fld "$out" calls_rows)" "1"
+
+    chk reuse-bad-pcap "$(vims_cmd_detect_reuse /nonexistent.pcap >/dev/null 2>&1; echo $?)" "1"
     chk reuse-bad-port "$(vims_cmd_detect_reuse "$d/reuse.pcap" xx >/dev/null 2>&1; echo $?)" "2"
+    chk reuse-bad-tag "$(vims_cmd_detect_reuse "$d/reuse.pcap" 0 --tag xx >/dev/null 2>&1; echo $?)" "2"
+    chk reuse-missing-calls "$(vims_cmd_detect_reuse "$d/reuse.pcap" 0 --calls /nonexistent.tsv >/dev/null 2>&1; echo $?)" "1"
 
     # 5. SIP parse on a real REGISTER.
     local reg hex
@@ -2047,7 +2374,7 @@ vims_cli_main() {
         --sip-build)              vims_sip_build "$@" ;;
         --sip-send)               vims_sip_send "$@" ;;
         --ims-registration)       vims_cmd_ims_registration "${1:-}" "${2:-}" ;;
-        --detect-keystream-reuse) vims_cmd_detect_reuse "${1:-}" "${2:-0}" ;;
+        --detect-keystream-reuse) vims_cmd_detect_reuse "$@" ;;
         --sip-flood)              vims_sip_flood "${1:-INVITE}" "${2:-100}" "${3:-400}" "${4:-1600}" ;;
         --imei-leak)              vims_imei_leak "${1:-}" ;;
         --register-spoof)         vims_register_spoof "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
@@ -2084,7 +2411,8 @@ Usage: $0 COMMAND
                                             auth=none|digest|aka, password=,
                                             res=, to=, domain=, bye=0
   --ims-registration <hex> [aka-res-hex]    IMS REGISTER/401/AKA flow
-  --detect-keystream-reuse <pcap> [port]    reuse detector
+  --detect-keystream-reuse <pcap> [port] [--calls <tsv>]
+                                            reuse detector, two calls at a time
   --plan <revolte-capture|imp4gt-lab>       write a handoff plan
   --selftest                                verify crypto and parsers, no radio
   --menu                                    interactive menu
