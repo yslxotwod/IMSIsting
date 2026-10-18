@@ -111,6 +111,72 @@ CASES = [
             ]),
         ]),
     },
+    {
+        "name": "initial-ue-located",
+        "argv": ["initial-ue", "--ran-ue-id", "1", "--nas", NAS_UL,
+                 "--nci", "0x123456789", "--tac", "000001",
+                 "--cause", "mo-Data"],
+        "pycrate": (15, "reject", "InitialUEMessage", [
+            (85, "reject", "RAN-UE-NGAP-ID", 1),
+            (38, "reject", "NAS-PDU", bytes.fromhex(NAS_UL)),
+            (121, "reject", "UserLocationInformation",
+             ("userLocationInformationNR", {
+                 # A SIZE-constrained BIT STRING takes (value, bit length).
+                 "nR-CGI": {"pLMNIdentity": b"\x00\xf1\x10",
+                            "nRCellIdentity": (0x123456789, 36)},
+                 "tAI": {"pLMNIdentity": b"\x00\xf1\x10",
+                         "tAC": b"\x00\x00\x01"},
+             })),
+            (90, "ignore", "RRCEstablishmentCause", "mo-Data"),
+        ]),
+    },
+    {
+        "name": "ng-setup",
+        "argv": ["ng-setup", "--plmn", "001/01", "--gnb-id", "0xA1C01",
+                 "--node-name", "LabGnb", "--tac", "000001"],
+        "pycrate": (21, "reject", "NGSetupRequest", [
+            (27, "reject", "GlobalRANNodeID",
+             ("globalGNB-ID", {
+                 "pLMNIdentity": b"\x00\xf1\x10",
+                 "gNB-ID": ("gNB-ID", (0x0A1C01, 22)),
+             })),
+            (82, "ignore", "RANNodeName", "LabGnb"),
+            (102, "reject", "SupportedTAList", [
+                {"tAC": b"\x00\x00\x01",
+                 "broadcastPLMNList": [
+                     {"pLMNIdentity": b"\x00\xf1\x10",
+                      "tAISliceSupportList": [
+                          {"s-NSSAI": {"sST": b"\x01"}},
+                      ]},
+                 ]},
+            ]),
+        ]),
+    },
+    {
+        # A 32-bit identity, because a 22-bit one cannot tell a four-bit
+        # length-of-length from a two-bit one: both spend the octet as 00.
+        "name": "ng-setup-wide-id",
+        "argv": ["ng-setup", "--plmn", "001/01", "--gnb-id", "0xFFFFFFFF",
+                 "--gnb-id-bits", "32", "--node-name", "LabGnb",
+                 "--tac", "000001"],
+        "pycrate": (21, "reject", "NGSetupRequest", [
+            (27, "reject", "GlobalRANNodeID",
+             ("globalGNB-ID", {
+                 "pLMNIdentity": b"\x00\xf1\x10",
+                 "gNB-ID": ("gNB-ID", (0xFFFFFFFF, 32)),
+             })),
+            (82, "ignore", "RANNodeName", "LabGnb"),
+            (102, "reject", "SupportedTAList", [
+                {"tAC": b"\x00\x00\x01",
+                 "broadcastPLMNList": [
+                     {"pLMNIdentity": b"\x00\xf1\x10",
+                      "tAISliceSupportList": [
+                          {"s-NSSAI": {"sST": b"\x01"}},
+                      ]},
+                 ]},
+            ]),
+        ]),
+    },
 ]
 
 
@@ -230,6 +296,44 @@ NEGCTL = [
      "    writer.align()\n"
      "    writer.bit(0)",
      "paging"),
+    # The four below break what this turn added: the shared preamble octet,
+    # the establishment cause's four-bit index, the name's extension bit
+    # ordering, the unaligned SST and the gNB-ID width field.
+    ("location-preamble-aligned-between-the-two-runs",
+     "the NR-CGI preamble aligned on its own octet instead of sharing one"
+     " with the ULI preamble",
+     "    _absent(writer, 2)                  # timeStamp and iE-Extensions absent\n"
+     "    _absent(writer, 1)                  # NR-CGI: iE-Extensions absent\n"
+     "    writer.align()",
+     "    _absent(writer, 2)                  # timeStamp and iE-Extensions absent\n"
+     "    writer.align()\n"
+     "    _absent(writer, 1)                  # NR-CGI: iE-Extensions absent\n"
+     "    writer.align()",
+     "initial-ue-located"),
+    ("cause-index-is-two-bits",
+     "the establishment cause's index narrowed from four bits to two",
+     "    writer.bits(CAUSES.index(cause), 4)",
+     "    writer.bits(CAUSES.index(cause), 2)",
+     "initial-ue-located"),
+    ("ran-node-name-length-before-extension",
+     "the name's length octet placed before the size constraint's extension"
+     " bit, so a reader sees 05 00 rather than 02 80",
+     "    writer.bit(0)                       # the size constraint's extension bit\n"
+     "    writer.bits(len(raw) - 1, 8)",
+     "    writer.bits(len(raw) - 1, 8)\n"
+     "    writer.bit(0)                       # the size constraint's extension bit",
+     "ng-setup"),
+    ("sst-aligned-as-its-own-octet",
+     "the S-NSSAI SST written as an aligned octet, spending the two octets of"
+     " a thirteen-bit item",
+     "    writer.bits(sst, 8)                 # no alignment: the item is 13 bits",
+     "    writer.octet(sst)",
+     "ng-setup"),
+    ("gnb-id-length-is-two-bits",
+     "the gNB-ID length-of-length narrowed from four bits to two",
+     "    writer.bits(gnb_id_bits - 22, 4)",
+     "    writer.bits(gnb_id_bits - 22, 2)",
+     "ng-setup-wide-id"),
 ]
 
 

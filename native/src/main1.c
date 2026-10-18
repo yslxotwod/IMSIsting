@@ -14719,7 +14719,7 @@ static ModuleSubmenuEntry ncore_entries[] = {
       "#BUILD|--pfcp-build:Build Session Request|#SEND|--pfcp-send:Send to UPF|--pfcp-rules:PFCP Rules|--plan:Plan" },
     { "Forge NGAP",
       "network-transmit-receive-symbolic",
-      "#BUILD|--ngap-initial-ue:Initial UE Message|--ngap-downlink-nas:Downlink NAS|--ngap-paging:Page a Handset|#SEND|--ngap-send:Send to AMF" },
+      "#BUILD|--ngap-initial-ue:Initial UE Message|--ngap-downlink-nas:Downlink NAS|--ngap-paging:Page a Handset|--ngap-ngsetup:Open the Node|#SEND|--ngap-send:Send to AMF" },
 };
 static ModuleSubmenuEntry suci_entries[] = {
     { "Overview",

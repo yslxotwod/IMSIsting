@@ -926,9 +926,17 @@ ncore_ngap_build() {  # <verb> [args...]
     ncore_fld "$out" hex
 }
 
-ncore_cmd_ngap_initial_ue() {  # [ran-ue-id] [nas-hex]
-    local ran="${1:-1}" nas="${2:-7e0041012e0100}"
-    local hex; hex=$(ncore_ngap_build initial-ue --ran-ue-id "$ran" --nas "$nas") \
+ncore_cmd_ngap_initial_ue() {  # [ran-ue-id] [nas-hex] [nci-hex] [cause]
+    local ran="${1:-1}" nas="${2:-7e0041012e0100}" nci="${3:-}" cause="${4:-}"
+    local plmn="${NRC_PLMN:-001/01}" tac="${NRC_TAC:-000001}"
+    local -a argv=(--ran-ue-id "$ran" --nas "$nas")
+    if [[ -n "$nci" ]]; then
+        argv+=(--nci "$nci" --plmn "$plmn" --tac "$tac")
+    fi
+    if [[ -n "$cause" ]]; then
+        argv+=(--cause "$cause")
+    fi
+    local hex; hex=$(ncore_ngap_build initial-ue "${argv[@]}") \
         || { printf 'ERROR\tthe NGAP encoder failed\n' >&2; return 1; }
     [[ -n "$hex" ]] || { printf 'ERROR\tthe NGAP encoder returned no octets\n' >&2; return 1; }
     local dec; dec=$(ncore_decode_ngap "$hex")
@@ -936,10 +944,19 @@ ncore_cmd_ngap_initial_ue() {  # [ran-ue-id] [nas-hex]
     printf 'procedure_code\t15\n'
     printf 'ran_ue_ngap_id\t%s\n' "$ran"
     printf 'nas_pdu\t%s\n' "$nas"
+    if [[ -n "$nci" ]]; then
+        printf 'location\tnrCellIdentity %s tac %s plmn %s\n' \
+            "${nci#0x}" "$tac" "$plmn"
+    fi
+    [[ -n "$cause" ]] && printf 'cause\t%s\n' "$cause"
     printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
     printf 'hex\t%s\n' "$hex"
     printf 'ie_count\t%s\n' "$(ncore_fld "$dec" ie_count)"
-    printf 'missing_ies\tUserLocationInformation (id 121) and RRCEstablishmentCause (id 90) are mandatory here and not built, so this is a fragment an AMF rejects\n'
+    if [[ -n "$nci" && -n "$cause" ]]; then
+        printf 'complete_ies\tyes\n'
+    else
+        printf 'missing_ies\tUserLocationInformation (id 121) and RRCEstablishmentCause (id 90) are mandatory here; give <nci-hex> and <cause> to build them, or this is a fragment an AMF rejects\n'
+    fi
 }
 
 ncore_cmd_ngap_downlink_nas() {  # [amf-ue-id] [ran-ue-id] [nas-hex]
@@ -976,6 +993,24 @@ ncore_cmd_ngap_paging() {  # [amf-set-id] [amf-pointer] [tmsi-hex] [plmn/tac]
     printf 'hex\t%s\n' "$hex"
     printf 'ie_count\t%s\n' "$(ncore_fld "$dec" ie_count)"
     printf 'note\tPaging is the one whole message here: both of its mandatory IEs are built, and neither has to know where the handset is\n'
+}
+
+ncore_cmd_ngap_ngsetup() {  # [plmn] [gnb-id] [node-name] [tac]
+    local plmn="${1:-001/01}" gnb="${2:-0xA1C01}" name="${3:-LabGNb}" tac="${4:-000001}"
+    local hex; hex=$(ncore_ngap_build ng-setup --plmn "$plmn" --gnb-id "$gnb" \
+        --node-name "$name" --tac "$tac") \
+        || { printf 'ERROR\tthe NGAP encoder failed\n' >&2; return 1; }
+    [[ -n "$hex" ]] || { printf 'ERROR\tthe NGAP encoder returned no octets\n' >&2; return 1; }
+    local dec; dec=$(ncore_decode_ngap "$hex")
+    printf 'message\tNGSetupRequest\n'
+    printf 'procedure_code\t21\n'
+    printf 'global_ran_node_id\tglobalGNB-ID %s gNB-ID %s\n' "$plmn" "$gnb"
+    printf 'ran_node_name\t%s\n' "$name"
+    printf 'supported_ta\t%s %s\n' "$plmn" "$tac"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'hex\t%s\n' "$hex"
+    printf 'ie_count\t%s\n' "$(ncore_fld "$dec" ie_count)"
+    printf 'note\tevery mandatory IE of NGSetupRequest is built: a gNB that says who it is and which tracking area it serves, which is the whole message\n'
 }
 
 # --ngap-send puts one of those messages on SCTP port 38412 with PPID 60.
@@ -1619,6 +1654,24 @@ ncore_selftest() {
     chk ngap-enc-pg-ies    "$(fld "$out" ie_count)"  "2"
     # The read-back has to agree with the send: same octets, same procedure.
     chk ngap-enc-pg-proc "$(ncore_decode_ngap 00184019000002007340070008000a0b0c0d006740070000f110000001 | awk -F'\t' '$1=="procedure_name"{print $2; exit}')" "Paging"
+    #     The whole InitialUEMessage: with a cell identity and a cause every
+    #     mandatory IE is present, so the AMF has nothing to reject on.
+    out=$(ncore_cmd_ngap_initial_ue 1 074100 0x123456789 mo-Data)
+    chk ngap-enc-iu-loc-hex "$(fld "$out" hex)" \
+        "000f002900000400550002000100260004030741000079000f4000f110123456789000f110000001005a400120"
+    chk ngap-enc-iu-loc-octets "$(fld "$out" octets)" "45"
+    chk ngap-enc-iu-loc-ies "$(fld "$out" ie_count)"  "4"
+    chk ngap-enc-iu-loc-complete "$(fld "$out" complete_ies)" "yes"
+    chk ngap-enc-iu-loc-no-gap "$(fld "$out" missing_ies | grep -c .)" "0"
+    #     The two preambles share one octet: aligning between them spends
+    #     another, and the PLMN then starts where the dissector expects a TAC.
+    chk ngap-enc-iu-loc-choice "$(fld "$out" hex | grep -c '0079000f40')" "1"
+    out=$(ncore_cmd_ngap_ngsetup 001/01 0xA1C01 LabGnb 000001)
+    chk ngap-enc-setup-hex "$(fld "$out" hex)" \
+        "0015002c000003001b00080000f110002870040052400802804c6162476e620066000d00000000010000f11000000008"
+    chk ngap-enc-setup-octets "$(fld "$out" octets)" "48"
+    chk ngap-enc-setup-ies "$(fld "$out" ie_count)"  "3"
+    chk ngap-enc-setup-name "$(ncore_decode_ngap "$(fld "$out" hex)" | awk -F'\t' '$1=="ie"{print $2}' | grep -c 'LabGnb')" "1"
 
     # 1c. The sender is armed on its own.
     chk ngap-send-disarmed \
@@ -2046,8 +2099,9 @@ ncore_cli_main() {
         --pfcp-build)      ncore_cmd_pfcp_build "${1:-1}" "${2:-10.45.0.2}" "${3:-1}" \
                                                 "${4:-0}" "${5:-10.45.0.1}" ;;
         --pfcp-send)       ncore_cmd_pfcp_send "${1:-}" "${2:-8805}" "${3:-}" ;;
-        --ngap-initial-ue)  ncore_cmd_ngap_initial_ue "${1:-}" "${2:-}" ;;
+        --ngap-initial-ue)  ncore_cmd_ngap_initial_ue "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --ngap-downlink-nas) ncore_cmd_ngap_downlink_nas "${1:-}" "${2:-}" "${3:-}" ;;
+        --ngap-ngsetup)     ncore_cmd_ngap_ngsetup "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --ngap-paging)      ncore_cmd_ngap_paging "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --ngap-send)        ncore_cmd_ngap_send "${1:-}" "${2:-}" "${3:-}" ;;
         --gtpu-header)     ncore_gtpu_header "${1:-1}" "${2:-1}" ;;
@@ -2077,11 +2131,12 @@ Usage: $0 COMMAND
                                 build a Session Establishment Request (type 50)
   --pfcp-send <upf-host> [port] [hex]
                                 send it on UDP 8805, needs NR_ARMED=1
-  --ngap-initial-ue [ran-ue-id] [nas-hex]
+  --ngap-initial-ue [ran-ue-id] [nas-hex] [nci-hex] [cause]
                                 build an InitialUEMessage with its NAS-PDU
   --ngap-downlink-nas [amf-ue-id] [ran-ue-id] [nas-hex]
                                 build a DownlinkNASTransport
   --ngap-paging [set-id] [pointer] [tmsi-hex] [plmn/tac]
+  --ngap-ngsetup [plmn] [gnb-id] [node-name] [tac]
                                 build a Paging: 5G-S-TMSI and the TAI list
   --ngap-send <amf-host> [port] [hex]
                                 send one on SCTP 38412, PPID 60, needs NR_ARMED=1
