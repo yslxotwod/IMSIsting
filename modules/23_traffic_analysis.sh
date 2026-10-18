@@ -112,6 +112,7 @@ import sys
 import os
 import struct
 import math
+import re
 import binascii
 
 PCAP_MAGIC_LE = 0xa1b2c3d4
@@ -410,8 +411,15 @@ def parse_ip(payload):
         sport, dport = struct.unpack(">HH", l4[0:4])
     elif proto == 132 and len(l4) >= 12:
         sport, dport = struct.unpack(">HH", l4[0:4])
+    # The transport payload, for the reader that inspects it (calls). The
+    # flow readers use length and the ports only; nothing else reads this.
+    payload = b""
+    if proto == 17 and len(l4) > 8:
+        payload = l4[8:]
+    elif proto == 6 and len(l4) > 20:
+        payload = l4[20:]
     return {"src": src, "dst": dst, "proto": proto, "sport": sport,
-            "dport": dport, "length": total_len}
+            "dport": dport, "length": total_len, "payload": payload}
 
 
 def flow_records(path):
@@ -522,6 +530,361 @@ def bursts_from_ts(ts_list, idle):
         count += 1
     b.append({"start": start, "end": prev, "packets": count})
     return b, gaps
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# calls: media streams grouped into calls, matched to a SIP dialogue
+#
+# The three questions are answered separately, because each has a different
+# refutation: which packets are media (header inspection), which media
+# packets are one call (5-tuple reversal), and who was in it (the SDP of a
+# SIP message in the same file). None of the three is a port number alone.
+# ─────────────────────────────────────────────────────────────────────────
+SIP_PORTS = (5060, 5061)
+SIP_REQUEST = re.compile(
+    rb"(?i)^(INVITE|ACK|BYE|CANCEL|REGISTER|OPTIONS|PRACK|SUBSCRIBE|NOTIFY|"
+    rb"UPDATE|INFO|MESSAGE|REFER|PUBLISH)[ \t]+\S+[ \t]+SIP/2[.]0")
+SIP_RESPONSE = re.compile(rb"(?i)^SIP/2[.]0[ \t]+[0-9]{3}")
+
+RTP_HEADER_MIN = 12      # octets every RTP header has, with no CSRC
+CALL_MIN_PACKETS = 3     # fewer than three packets is not a call, it is a probe
+CALL_IDLE = 0.25        # seconds; a gap this long inside a call is a hold
+
+
+def sdp_endpoints(body):
+    """Media endpoints in an SDP body: address, port and payload types.
+
+    A media section with no c= line inherits the session-level one. That is
+    the shape most offers use, and skipping it leaves the address empty and
+    the dialogue unmatchable."""
+    if b"m=" not in body:
+        return []
+    text = body.decode("latin-1", "replace")
+    sess_addr = None
+    media = []
+    cur = None
+    for raw in text.split("\n"):
+        ln = raw.strip("\r")
+        if ln.startswith("c="):
+            parts = ln.split()
+            if len(parts) >= 3:
+                addr = parts[2].split("/")[0]
+                if cur is None:
+                    sess_addr = addr
+                else:
+                    cur["addr"] = addr
+        elif ln.startswith("m="):
+            p = ln[2:].split()
+            if len(p) < 4:
+                cur = None
+                continue
+            cur = {"kind": p[0], "port": int(p[1]) if p[1].isdigit() else 0,
+                   "proto": p[2], "pts": [], "addr": None}
+            media.append(cur)
+        elif ln.startswith("a=rtpmap:") and cur is not None:
+            n = ln.split(":", 1)[1].split()
+            if n and n[0].isdigit():
+                cur["pts"].append(int(n[0]))
+    for m in media:
+        if m["addr"] is None:
+            m["addr"] = sess_addr
+    return media
+
+
+def parse_sip(payload):
+    """One SIP message, or None when the bytes are not SIP.
+
+    The request or status line is the test, not the port: SIP runs on 8080
+    and other things run on 5060, and only the first line settles which."""
+    head = payload.split(b"\r\n\r\n", 1)
+    lines = head[0].split(b"\r\n")
+    if not lines:
+        return None
+    first = lines[0]
+    m = SIP_REQUEST.match(first)
+    kind = "request"
+    method = None
+    status = None
+    if m:
+        method = m.group(1).decode("latin-1").upper()
+    elif SIP_RESPONSE.match(first):
+        kind = "response"
+        status = int(first.split()[1])
+    else:
+        return None
+    hdrs = {}
+    for ln in lines[1:]:
+        if b":" not in ln:
+            continue
+        k, v = ln.split(b":", 1)
+        hdrs.setdefault(k.strip().lower(), v.strip())
+    body = head[1] if len(head) > 1 else b""
+    return {"kind": kind, "method": method, "status": status,
+            "call_id": hdrs.get(b"call-id", b"").decode("latin-1"),
+            "from": hdrs.get(b"from", b"").decode("latin-1"),
+            "to": hdrs.get(b"to", b"").decode("latin-1"),
+            "cseq": hdrs.get(b"cseq", b"").decode("latin-1"),
+            "sdp": sdp_endpoints(body)}
+
+
+def rtp_header(payload):
+    """RTP header fields of a UDP payload, or None.
+
+    Only the header is read, so this cannot tell RTP from SRTP: SRTP encrypts
+    the payload and leaves the twelve-octet header where it was. Every stream
+    this returns is labelled rtp-or-srtp for exactly that reason."""
+    if len(payload) < RTP_HEADER_MIN:
+        return None
+    b0 = payload[0]
+    if (b0 >> 6) != 2:
+        return None
+    pt = payload[1] & 0x7F
+    seq = struct.unpack(">H", payload[2:4])[0]
+    ssrc = struct.unpack(">I", payload[8:12])[0]
+    off = RTP_HEADER_MIN + 4 * (b0 & 0x0F)
+    if b0 & 0x10:                        # header extension: 4 octets, then words
+        if len(payload) < off + 4:
+            return None
+        words = struct.unpack(">H", payload[off + 2:off + 4])[0]
+        off += 4 + 4 * words
+    if off > len(payload):
+        return None                      # the header claims more than it holds
+    end = len(payload)
+    if b0 & 0x20:                        # padding: the last octet is its length
+        pad = payload[-1]
+        if pad == 0 or pad > end - off:
+            return None
+        end -= pad
+    return {"pt": pt, "seq": seq, "ssrc": ssrc, "media_len": end - off}
+
+
+def scan_calls(path):
+    """Walk the capture once and collect SIP messages and media streams.
+
+    SIP over TCP is counted and skipped: finding message boundaries needs a
+    reassembler, and treating one frame as one message would report a
+    dialogue that was never seen whole."""
+    r = Reader(path)
+    r.sniff()
+    sips = []
+    non_sip_on_sip_port = 0
+    tcp_sip_frames = 0
+    streams = {}
+    order = []
+    for (idx, ts, linktype, frame) in r.frames():
+        et, l3 = parse_l3(linktype, frame)
+        if not l3:
+            continue
+        ip = parse_ip(l3)
+        if ip is None:
+            continue
+        on_sip_port = ip["sport"] in SIP_PORTS or ip["dport"] in SIP_PORTS
+        if ip["proto"] == 6:
+            if on_sip_port:
+                tcp_sip_frames += 1
+            continue
+        if ip["proto"] != 17:
+            continue
+        pl = ip.get("payload") or b""
+        if not pl:
+            continue
+        msg = parse_sip(pl)
+        if msg is not None:
+            msg.update({"ts": ts, "src": ip["src"], "dst": ip["dst"],
+                        "sport": ip["sport"], "dport": ip["dport"]})
+            sips.append(msg)
+            continue
+        if on_sip_port:
+            non_sip_on_sip_port += 1
+            continue
+        h = rtp_header(pl)
+        if h is None:
+            continue
+        key = (ip["src"], ip["sport"], ip["dst"], ip["dport"], h["ssrc"])
+        st = streams.get(key)
+        if st is None:
+            st = {"key": key, "src": ip["src"], "sport": ip["sport"],
+                  "dst": ip["dst"], "dport": ip["dport"], "ssrc": h["ssrc"],
+                  "pts": set(), "packets": []}
+            streams[key] = st
+            order.append(key)
+        st["pts"].add(h["pt"])
+        st["packets"].append({"ts": ts, "len": ip["length"],
+                              "media_len": h["media_len"], "seq": h["seq"]})
+    return {"sips": sips, "non_sip_on_sip_port": non_sip_on_sip_port,
+            "tcp_sip_frames": tcp_sip_frames,
+            "streams": [streams[k] for k in order]}
+
+
+def group_calls(streams, min_packets=CALL_MIN_PACKETS):
+    """Pair each media stream with the stream whose 5-tuple is its reverse.
+
+    One call is two streams, each direction with its own SSRC. A stream whose
+    reverse is absent is still reported, as a call with one direction: which
+    end was the caller is not something these bytes say."""
+    by_tuple = {}
+    for s in streams:
+        by_tuple.setdefault((s["src"], s["sport"], s["dst"], s["dport"]),
+                            []).append(s)
+    used = set()
+    calls = []
+    for s in streams:
+        if s["key"] in used:
+            continue
+        used.add(s["key"])
+        members = [s]
+        rev = (s["dst"], s["dport"], s["src"], s["sport"])
+        for c in by_tuple.get(rev, []):
+            if c["key"] not in used:
+                used.add(c["key"])
+                members.append(c)
+                break
+        if sum(len(m["packets"]) for m in members) < min_packets:
+            continue
+        members.sort(key=lambda m: m["packets"][0]["ts"])
+        calls.append(members)
+    calls.sort(key=lambda ms: min(m["packets"][0]["ts"] for m in ms))
+    return calls
+
+
+def call_stats(members, idle):
+    """Duration, bytes and the silence structure of one call.
+
+    Bursts are computed over both directions merged: a hold is silent in both
+    directions at once, so a per-stream split would report the other side's
+    comfort noise as speech."""
+    pk = []
+    for m in members:
+        pk.extend(m["packets"])
+    pk.sort(key=lambda p: p["ts"])
+    ts = [p["ts"] for p in pk]
+    bursts, gaps = bursts_from_ts(ts, idle)
+    dur = ts[-1] - ts[0]
+    speech = sum(b["end"] - b["start"] for b in bursts)
+    spurts = [b["end"] - b["start"] for b in bursts]
+    return {
+        "first_ts": ts[0], "last_ts": ts[-1], "dur": dur, "packets": len(pk),
+        "up_pkts": len(members[0]["packets"]),
+        "dn_pkts": len(members[1]["packets"]) if len(members) > 1 else 0,
+        "bytes": sum(p["len"] for p in pk),
+        "bursts": len(bursts),
+        "longest_silence": max(gaps) if gaps else 0.0,
+        "silence_total": sum(gaps),
+        "spurts": spurts,
+        "spurt_mean": (sum(spurts) / len(spurts)) if spurts else 0.0,
+        "speech": speech,
+        "speech_fraction": (speech / dur) if dur > 0 else 0.0,
+        "media_bytes": sum(p["media_len"] for p in pk),
+        "streams": len(members),
+        "ssrcs": ",".join("%08x" % m["ssrc"] for m in members),
+        "endpoints": ",".join("%s:%d" % (m["dst"], m["dport"]) for m in members),
+        "pts": ",".join(str(x) for x in
+                        sorted(set().union(*[m["pts"] for m in members]))),
+    }
+
+
+def sip_dialogues(sips):
+    """SIP messages grouped by Call-ID, with the media endpoints each names."""
+    by_id = {}
+    for s in sips:
+        cid = s["call_id"] or "(no call-id)"
+        d = by_id.get(cid)
+        if d is None:
+            d = {"call_id": cid, "from": s["from"], "to": s["to"],
+                 "endpoints": set(), "messages": [], "first_ts": s["ts"],
+                 "last_ts": s["ts"]}
+            by_id[cid] = d
+        for med in s["sdp"]:
+            if med["addr"] and med["port"]:
+                d["endpoints"].add((med["addr"], med["port"]))
+        d["messages"].append(s["method"] or str(s["status"]))
+        d["first_ts"] = min(d["first_ts"], s["ts"])
+        d["last_ts"] = max(d["last_ts"], s["ts"])
+    return by_id
+
+
+def match_dialogue(members, dialogues):
+    """The dialogue naming one of this call's endpoints, or None.
+
+    The match is on the (address, port) an SDP names, never on a Call-ID
+    merely being present: a capture with two calls and one INVITE has one
+    matched call, not two."""
+    eps = set()
+    for m in members:
+        eps.add((m["src"], m["sport"]))
+        eps.add((m["dst"], m["dport"]))
+    for cid in sorted(dialogues):
+        d = dialogues[cid]
+        if d["endpoints"] & eps:
+            return d
+    return None
+
+
+def mode_calls(path, idle):
+    sc = scan_calls(path)
+    dialogues = sip_dialogues(sc["sips"])
+    calls = group_calls(sc["streams"])
+    header = ["call", "first_ts", "last_ts", "dur_s", "packets", "up_pkts",
+              "dn_pkts", "bytes", "media_bytes", "bursts", "spurt_mean_s",
+              "burst_durs_s", "silence_total_s", "longest_silence_s",
+              "speech_s", "speech_fraction", "streams", "ssrcs",
+              "media_endpoints", "payload_types", "sip_call_id", "sip_from",
+              "sip_to", "sip_messages", "match"]
+    out(*header)
+    matched = 0
+    durs = []
+    silences = []
+    for i, members in enumerate(calls):
+        st = call_stats(members, idle)
+        d = match_dialogue(members, dialogues)
+        if d is not None:
+            matched += 1
+            verdict = "sip-dialogue"
+            cid, frm, to = d["call_id"], d["from"], d["to"]
+            msgs = ",".join(d["messages"])
+        else:
+            verdict = "no-sip-dialogue" if dialogues else "no-sip-seen"
+            cid = frm = to = msgs = ""
+        out(i, "%.6f" % st["first_ts"], "%.6f" % st["last_ts"],
+            "%.6f" % st["dur"], st["packets"], st["up_pkts"], st["dn_pkts"],
+            st["bytes"], st["media_bytes"], st["bursts"],
+            "%.3f" % st["spurt_mean"],
+            ",".join("%.3f" % x for x in st["spurts"]),
+            "%.3f" % st["silence_total"], "%.3f" % st["longest_silence"],
+            "%.3f" % st["speech"], "%.6f" % st["speech_fraction"],
+            st["streams"], st["ssrcs"], st["endpoints"], st["pts"],
+            cid, frm, to, msgs, verdict)
+        durs.append(st["dur"])
+        silences.extend(st["spurts"])
+    out("summary", "calls", len(calls))
+    out("summary", "matched_to_sip", matched)
+    out("summary", "unmatched_calls", len(calls) - matched)
+    out("summary", "media_streams", len(sc["streams"]))
+    out("summary", "sip_messages", len(sc["sips"]))
+    out("summary", "sip_dialogues", len(dialogues))
+    out("summary", "non_sip_on_sip_port", sc["non_sip_on_sip_port"])
+    out("summary", "tcp_sip_frames", sc["tcp_sip_frames"])
+    out("summary", "idle_threshold_s", "%.3f" % idle)
+    if durs:
+        sd = sorted(durs)
+        out("summary", "dur_min_s", "%.3f" % sd[0])
+        out("summary", "dur_median_s", "%.3f" % sd[len(sd) // 2])
+        out("summary", "dur_max_s", "%.3f" % sd[-1])
+        out("summary", "dur_total_s", "%.3f" % sum(sd))
+    out("summary", "spurt_count", len(silences))
+    if silences:
+        ss = sorted(silences)
+        out("summary", "spurt_median_s", "%.3f" % ss[len(ss) // 2])
+    out("summary", "call_definition",
+        "two media streams whose 5-tuples are reverses; silence is an idle "
+        "gap over BOTH directions merged")
+    out("summary", "encryption_basis",
+        "header only: RTP and SRTP share the twelve-octet header, so every "
+        "stream here is rtp-or-srtp and no row claims the payload is clear")
+    out("summary", "limit",
+        "SIP over TCP and TLS is counted, not parsed; a call whose two "
+        "directions use different addresses is reported as two calls")
+    return 0
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -1034,6 +1397,11 @@ def main(argv):
             return 2
         k = int(args[1]) if len(args) > 1 and args[1].isdigit() else 3
         return mode_classify(args[0], k, REF_FILE)
+    if mode == "calls":
+        if not need(1, "--mode calls <pcap> [idle_s]"):
+            return 2
+        idle = float(args[1]) if len(args) > 1 else CALL_IDLE
+        return mode_calls(args[0], idle)
     if mode == "refs":
         return mode_refs_tsv(REF_FILE)
     return 2
@@ -1132,7 +1500,8 @@ tana_cli_status_tsv() {
         \( -name '*.pcap' -o -name '*.pcapng' -o -name '*.cap' \) 2>/dev/null | wc -l | tr -d ' ')"
     printf 'up_down_ratio_defined\t%s\n' 'up_bytes/down_bytes'
     printf 'metric\t%s\n' 'cosine(feature) + timing RBF, combined 0.7/0.3'
-    printf 'attack_coverage\tP4,P5\n'
+    printf 'calls\t%s\n' '--calls-tsv: SRTP call grouping + SIP dialogue match'
+    printf 'attack_coverage\tP4,P5,P19\n'
     printf 'radio_required\tno\n'
 }
 
@@ -1142,6 +1511,19 @@ tana_cmd_flows() {
     [[ "$idle" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
         printf 'ERROR\tidle threshold must be a number of seconds\n' >&2; return 2; }
     tana_run flows "$f" "$idle"
+}
+
+tana_cmd_calls() {
+    local f="${1:-}" idle="${2:-}"
+    tana_check_file "$f" || return $?
+    if [[ -n "$idle" ]]; then
+        [[ "$idle" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+            printf 'ERROR\tidle threshold must be a number of seconds\n' >&2
+            return 2; }
+        tana_run calls "$f" "$idle"
+        return $?
+    fi
+    tana_run calls "$f"
 }
 
 tana_cmd_features() {
@@ -1544,7 +1926,7 @@ PYFIX
     chk status-store   "$(fld "$out" fingerprints)" "$TANA_REFS"
     chk status-count   "$(fld "$out" fingerprint_count)" "1"
     chk status-radio   "$(fld "$out" radio_required)" "no"
-    chk status-attacks "$(fld "$out" attack_coverage)" "P4,P5"
+    chk status-attacks "$(fld "$out" attack_coverage)" "P4,P5,P19"
 
     # The engine must be pure stdlib: no scapy, no numpy, no tshark. A
     # hidden dependency is a field failure, so assert its absence rather
@@ -1552,6 +1934,115 @@ PYFIX
     chk engine-no-scapy "$(grep -c 'import scapy\|from scapy' "$MOD_TMP/tana_engine.py")" "0"
     chk engine-no-tshark "$(grep -c 'tshark' "$MOD_TMP/tana_engine.py")" "0"
     chk engine-no-numpy "$(grep -c 'import numpy' "$MOD_TMP/tana_engine.py")" "0"
+
+    # ── calls: media grouped into calls, matched to a SIP dialogue ──────
+    # One file holding two calls, a two-packet RTP lookalike that must not
+    # become a call, and bytes on 5060 that are not SIP. Every count below
+    # is written by this fixture, so a reader can recompute it.
+    local pc="$d/calls.pcap"
+    python3 - "$pc" << 'PYFIX'
+import struct, sys
+ETH = bytes.fromhex("0200000000010200000000020800")
+def frame(src, dst, sport, dport, payload):
+    udp = struct.pack(">HHHH", sport, dport, 8 + len(payload), 0) + payload
+    ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 0x1234, 0, 64,
+                     17, 0, bytes(src), bytes(dst))
+    return ETH + ip + udp
+def rtp(ssrc, seq, pt=96, media=160):
+    return struct.pack(">BBHII", 0x80, pt, seq & 0xffff, 160 * seq, ssrc) + bytes([0xa5] * media)
+def sip(method, cid, frm, to, body=b"", status=None):
+    first = "SIP/2.0 %s" % status if status else "%s sip:x@10.0.0.2 SIP/2.0" % method
+    h = [first, "Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1",
+         "From: <%s>;tag=abc" % frm, "To: <%s>" % to, "Call-ID: %s" % cid,
+         "CSeq: 1 %s" % (method if not status else "INVITE"),
+         "Content-Type: application/sdp", "Content-Length: %d" % len(body), "", ""]
+    return ("\r\n".join(h)).encode() + (body if isinstance(body, bytes) else body.encode())
+def sdp(addr, port):
+    return ("v=0\r\no=- 1 1 IN IP4 %s\r\ns=-\r\nc=IN IP4 %s\r\nt=0 0\r\n"
+            "m=audio %d RTP/AVP 96\r\na=rtpmap:96 AMR/8000\r\n" % (addr, addr, port)).encode()
+A, B = [10,0,0,1], [10,0,0,2]
+C, D = [10,0,0,3], [10,0,0,4]
+T = 1700000000.0
+recs = []
+recs.append((frame(A, B, 5060, 5060, sip("INVITE", "cid-one@10.0.0.1",
+            "sip:alice@10.0.0.1", "sip:bob@10.0.0.2", sdp("10.0.0.1", 5004))), T))
+recs.append((frame(B, A, 5060, 5060, sip("INVITE", "cid-one@10.0.0.1",
+            "sip:alice@10.0.0.1", "sip:bob@10.0.0.2", sdp("10.0.0.2", 5006),
+            status="200 OK")), T + 0.2))
+# 51 frames of 20 ms from 1.00 s, a 500 ms hold, then 51 more: two bursts.
+seq = 0
+for t in [1.00 + 0.02 * i for i in range(51)] + [2.50 + 0.02 * i for i in range(51)]:
+    recs.append((frame(A, B, 5004, 5006, rtp(0x11111111, seq)), T + t))
+    recs.append((frame(B, A, 5006, 5004, rtp(0x22222222, seq)), T + t))
+    seq += 1
+recs.append((frame(A, B, 5060, 5060, sip("BYE", "cid-one@10.0.0.1",
+            "sip:alice@10.0.0.1", "sip:bob@10.0.0.2")), T + 4.0))
+# second call, different addresses and payload type 0 (a static codec)
+recs.append((frame(C, D, 5060, 5060, sip("INVITE", "cid-two@10.0.0.3",
+            "sip:carol@10.0.0.3", "sip:dave@10.0.0.4", sdp("10.0.0.3", 6004))), T + 10.0))
+for i in range(20):
+    recs.append((frame(C, D, 6004, 6006, rtp(0x33333333, i, pt=0)), T + 11.0 + 0.02 * i))
+    recs.append((frame(D, C, 6006, 6004, rtp(0x44444444, i, pt=0)), T + 11.0 + 0.02 * i))
+# a two-packet RTP lookalike on an unrelated port: below the probe bar
+recs.append((frame(A, B, 7000, 7002, rtp(0x55555555, 0)), T + 20.0))
+recs.append((frame(A, B, 7000, 7002, rtp(0x55555555, 1)), T + 20.02))
+# bytes on the SIP port that are not SIP: counted, never a dialogue
+recs.append((frame(A, B, 5060, 5060, b"not a sip message at all"), T + 21.0))
+recs.sort(key=lambda r: r[1])
+with open(sys.argv[1], "wb") as fh:
+    fh.write(struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 262144, 1))
+    for f, ts in recs:
+        sec = int(ts); usec = int(round((ts - sec) * 1e6))
+        fh.write(struct.pack("<IIII", sec, usec, len(f), len(f)))
+        fh.write(f)
+# a second file: media with no SIP at all
+with open(sys.argv[1] + ".media", "wb") as fh:
+    fh.write(struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 262144, 1))
+    recs = [(frame(A, B, 5004, 5006, rtp(0x66666666, i)), T + i * 0.02) for i in range(10)]
+    for f, ts in recs:
+        sec = int(ts); usec = int(round((ts - sec) * 1e6))
+        fh.write(struct.pack("<IIII", sec, usec, len(f), len(f)))
+        fh.write(f)
+PYFIX
+    out=$(tana_run calls "$pc" 0.25); rc=$?
+    chk calls-rc        "$rc" "0"
+    chk calls-count     "$(f3 "$out" summary calls)" "2"
+    chk calls-matched   "$(f3 "$out" summary matched_to_sip)" "2"
+    chk calls-unmatched "$(f3 "$out" summary unmatched_calls)" "0"
+    # Five streams, four of them in a call: the two-packet lookalike on 7000
+    # is a stream and is not a call, and both numbers are reported.
+    chk calls-streams   "$(f3 "$out" summary media_streams)" "5"
+    chk calls-sip-msgs  "$(f3 "$out" summary sip_messages)" "4"
+    chk calls-dialogues "$(f3 "$out" summary sip_dialogues)" "2"
+    # The RTP lookalike stopped at two packets and the port-5060 prose is
+    # counted apart from the dialogues. Both refusals have a number here.
+    chk calls-probe-bar "$(printf '%s\n' "$out" | awk -F'\t' '$1=="call" && $5==2' | wc -l | tr -d ' ')" "0"
+    chk calls-nonsip    "$(f3 "$out" summary non_sip_on_sip_port)" "1"
+    local r1 r2
+    r1=$(printf '%s\n' "$out" | awk -F'\t' '$1=="0"')
+    r2=$(printf '%s\n' "$out" | awk -F'\t' '$1=="1"')
+    chk calls-fields    "$(printf '%s' "$r1" | awk -F'\t' '{print NF}')" "25"
+    chk calls-1-packets "$(printf '%s' "$r1" | cut -f5)" "204"
+    chk calls-1-up      "$(printf '%s' "$r1" | cut -f6)" "102"
+    chk calls-1-dn      "$(printf '%s' "$r1" | cut -f7)" "102"
+    chk calls-1-ssrcs   "$(printf '%s' "$r1" | cut -f18)" "11111111,22222222"
+    chk calls-1-cid     "$(printf '%s' "$r1" | cut -f21)" "cid-one@10.0.0.1"
+    # 51+51 frames of 20 ms are two spurts of 1.000 s with a 0.500 s hold.
+    chk calls-1-bursts  "$(printf '%s' "$r1" | cut -f10)" "2"
+    chk calls-1-spurts  "$(printf '%s' "$r1" | cut -f12)" "1.000,1.000"
+    chk calls-1-silence "$(printf '%s' "$r1" | cut -f14)" "0.500"
+    chk calls-1-speech-frac "$(printf '%s' "$r1" | cut -f16)" "0.800000"
+    chk calls-1-pts     "$(printf '%s' "$r1" | cut -f20)" "96"
+    chk calls-2-cid     "$(printf '%s' "$r2" | cut -f21)" "cid-two@10.0.0.3"
+    chk calls-2-pts     "$(printf '%s' "$r2" | cut -f20)" "0"
+    chk calls-2-packets "$(printf '%s' "$r2" | cut -f5)" "40"
+    # Media with no dialogue anywhere is reported as such, not invented.
+    out=$(tana_run calls "$pc.media" 0.25)
+    chk calls-orphan-match "$(printf '%s\n' "$out" | awk -F'\t' '$1=="0"{print $25}')" "no-sip-seen"
+    chk calls-orphan-count "$(f3 "$out" summary calls)" "1"
+    # One direction only: the reverse 5-tuple never appears, and the row says
+    # how many streams it grouped rather than assuming two.
+    chk calls-orphan-oneway "$(printf '%s\n' "$out" | awk -F'\t' '$1=="0"{print $17}')" "1"
 
     # ── clear the store: empty, and honest about being empty ────────────
     # Last, because it empties the store every earlier block populated.
@@ -1619,6 +2110,7 @@ tana_cli_main() {
     case "$cmd" in
         --status-tsv)     tana_cli_status_tsv ;;
         --flows)          tana_cmd_flows "${1:-}" "${2:-}" ;;
+        --calls-tsv)      tana_cmd_calls "${1:-}" "${2:-}" ;;
         --features)       tana_cmd_features "${1:-}" "${2:-}" "${3:-}" ;;
         --fingerprint-add) tana_cmd_fingerprint_add "${1:-}" "${2:-}" ;;
         --classify)       tana_cmd_classify "${1:-}" "${2:-}" ;;
@@ -1639,6 +2131,9 @@ Usage: $0 COMMAND
   --features <pcap> <flow-index> [idle-s]
                                       packet-size / inter-arrival / direction
                                       sequences and the feature vector
+  --calls-tsv <pcap> [idle-s]         call table: media streams grouped by
+                                      5-tuple reversal, silence structure,
+                                      matched to a SIP dialogue's SDP
   --fingerprint-add <name> <pcap>     store a reference fingerprint
   --classify <pcap> [k]               top-k against the reference set
   --refs-tsv                          stored fingerprints as TSV

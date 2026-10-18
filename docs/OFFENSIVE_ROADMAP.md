@@ -1656,20 +1656,35 @@ bytes, delivery `handoff` — it needs an SMSC or OTA gateway, and the keys are 
 card's, so it is own-SIM only, exactly as Phase 6 records.
 
 **Phase 19 — call correlation.** `23_traffic_analysis`, `30_volte_ims`.
+**Built** (the capture half).
 
-`23_traffic_analysis` does flow fingerprinting and computes silence intervals
-(`:506`), and it has no VoLTE concept whatsoever: `volte`, `sip` and `srtp`
-return zero hits across the module. `30_volte_ims` computes ReVoLTE's keystream
-reuse but never sees a media packet, so the correlation half of a VoLTE attack —
-which of these ciphertext streams is one call, and who was in it — is absent.
+`23_traffic_analysis` gained a `calls` mode and the `--calls-tsv` verb: it
+reads a capture once, finds media by RTP header inspection, groups streams
+into calls by 5-tuple reversal, measures the silence structure over both
+directions merged, and matches a call against the media endpoints an SDP in
+the same file named. The row carries the Call-ID, From and To when a dialogue
+matched, and says `no-sip-seen` / `no-sip-dialogue` when it did not — a
+Call-ID merely being present in the file matches nothing.
 
-Deliverable: group SRTP streams into calls by burst structure and interval
-pattern; match a call against the SIP dialogue captured elsewhere; report call
-count, duration distribution and the silence structure that separates speech
-from hold; and emit `--calls-tsv` so a casebook can carry it. This is the passive
-counterpart to Phase 5's active work and needs only a capture. It also gives
-`docs/OFFENSIVE-GAP-ANALYSIS.md` §2's "traffic analysis" row something to point
-at beyond generic fingerprinting.
+What the referee covers, and what it does not: `tools/check-calls.sh` compares
+the stream set, per-call packet counts (summed from tshark's own per-SSRC
+counts), media ports, payload types and Call-IDs against `tshark`'s RTP and
+SIP dissectors on a fixture both readers see. The silence structure is
+**not** compared there, because the dissector has no opinion about it; it is
+asserted in the module selftest against a fixture whose gaps the test writes
+(51 + 51 frames of 20 ms with a 500 ms hold → two spurts of 1.000 s, silence
+0.500 s, speech fraction 0.800).
+
+Two limits are printed by the verb rather than implied: SIP over TCP and TLS
+is counted and skipped (finding message boundaries needs a reassembler), and
+a call whose directions use different addresses is reported as two calls.
+The encryption statement is header-only — RTP and SRTP share the twelve-octet
+header, so a stream is `rtp-or-srtp` and no row claims the payload is clear.
+
+Still absent: feeding a call's ciphertext payloads into
+`30_volte_ims --detect-keystream-reuse` is not automatic; the two halves share
+a definition of a call, not a pipe. `30_volte_ims` still never reads a media
+packet, which is the remaining half of this phase.
 
 ---
 

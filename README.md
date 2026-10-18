@@ -188,7 +188,7 @@ its A5/1 and A5/2 "key recovery" verbs are threshold comparisons
 ### v0.2 — the wider attack surface
 | Module | Description | Attack |
 |---|---|---|
-| `23_traffic_analysis` | Flow features, website fingerprinting, defence detection | `none` |
+| `23_traffic_analysis` | Flow features, website fingerprinting, call correlation, defence detection | `none` |
 | `24_rf_fingerprint` | IQ fingerprinting, CFO/IQ-imbalance, CSI motion | `none` |
 | `26_ss7_map` | MAP/TCAP decode and forge, SIGTRAN both ways, GRX/roaming interconnect | `partial` |
 | `27_cellular_dns` | DNS over the bearer, the aLTEr sequence, spoof detection | `partial` |
@@ -442,6 +442,7 @@ and yet the APDU codec underneath it is real.
 | RF fingerprinting | `24_rf_fingerprint` | `phase 4` | Device identification from IQ — transient, CFO, IQ imbalance, EVM. The maths is tested against synthetic IQ; a real device signature has never been collected. |
 | CSI sniffing | `24_rf_fingerprint` | `phase 4` | Channel-state side-channel extraction and motion inference. |
 | Traffic and website fingerprinting | `23_traffic_analysis` | `built` | Flow features from a capture you already hold. Passive by construction — it emits no frame. |
+| Call correlation | `23_traffic_analysis` | `built` | Group media streams into calls by 5-tuple reversal, report the silence structure that separates speech from hold, and match a call against the SDP a captured SIP dialogue named. `--calls-tsv` is refereeable: `tools/check-calls.sh` compares the stream set, packet counts, ports, payload types and Call-IDs with tshark's own dissectors. Silence is **not** compared — the dissector has no opinion on it, so that half rests on a fixture whose gaps are written by hand. |
 | NTN / satellite access | `49_ntn` | `phase 10` | Doppler, round-trip delay, TA and k_offset from the SIB19 fields. Arithmetic; the vector is a plan. |
 | NB-IoT fake cell | `45_iot` | `phase 10` | NPRACH, NPSS/NSSS and SIB1-NB decode for real, plus band and NPRFCN maths. `fake-cell` and `nprach-flood` are `--plan` files naming an SDR. |
 | NR sidelink on PC5 | `51_sidelink` | `partial` | SCI-1A and resource-pool descriptors build and relay configuration is checked. PC5 transmission is a plan. |
@@ -794,6 +795,7 @@ often identifies the problem with no hardware attached.
 ./tools/check-rua-codec.sh        # RUA octets vs pycrate and the clause
 ./tools/check-ranap-codec.sh      # RANAP octets vs pycrate and the clause
 ./tools/check-auth-oracle.sh      # EMM and 5GMM causes vs tshark's registries
+./tools/check-calls.sh            # call grouping vs tshark's RTP and SIP dissectors
 ./tools/gen-module-index.sh       # regenerate the index
 ./tools/gen-icons-xml.sh --check  # the bundled icon set matches the tree
 ```

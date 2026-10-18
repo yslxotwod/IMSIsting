@@ -15648,6 +15648,13 @@ static ModuleSubmenuEntry tana_entries[] = {
     { "Fingerprints",
       "system-search-symbolic",
       "#ADD|--fingerprint-add:Add Fingerprint|#REFS|--refs-tsv:References TSV|#MANAGE|--clear-refs:Clear References" },
+    /* Calls is a separate view because it answers a separate question: which
+       of these streams is one conversation, and who was in it. The table
+       names the dialogue when the capture holds one and says so when it
+       does not. */
+    { "Calls",
+      "call-start-symbolic",
+      "--calls-tsv={capture}:Call Table" },
 };
 static ModuleSubmenuEntry rff_entries[] = {
     { "Overview",
