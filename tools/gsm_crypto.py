@@ -1563,6 +1563,21 @@ def main(argv=None) -> int:
                    help="TUAK key length in bits (default 128)")
     p.add_argument("--iterations", type=int, default=1, choices=(1, 2),
                    help="Keccak iterations (TUAK default 1)")
+    # TUAK output lengths are per-vector, not fixed by the algorithm: a TS 35.232
+    # test set names MAC_sz, RES_sz, CK_sz and IK_sz for each row, and the same
+    # inputs produce different f2..f5 for different RES_sz. The defaults below are
+    # the ones this CLI has always used, so the output of an existing command is
+    # unchanged; the flags exist because without them a standard vector whose row
+    # says RES_sz=32 could never be reproduced from the command line at all, and
+    # the TSV now states the sizes it actually used.
+    p.add_argument("--mac-sz", type=int, default=64, choices=(64, 128),
+                   help="TUAK MAC_sz in bits (default 64)")
+    p.add_argument("--res-sz", type=int, default=64, choices=(32, 64, 128, 256),
+                   help="TUAK RES_sz in bits (default 64)")
+    p.add_argument("--ck-sz", type=int, default=128, choices=(128, 256),
+                   help="TUAK CK_sz in bits (default 128)")
+    p.add_argument("--ik-sz", type=int, default=128, choices=(128, 256),
+                   help="TUAK IK_sz in bits (default 128)")
     p.add_argument("--keccak", metavar="HEX",
                    help="raw Keccak-f[1600] on exactly 200 bytes of hex")
     p.add_argument("--a51", action="store_true",
@@ -1777,18 +1792,26 @@ def main(argv=None) -> int:
             print("ERROR\t%s" % exc, file=sys.stderr)
             return 1
         it, kl = a.iterations, a.klength
+        mac, res, ck, ik = a.mac_sz, a.res_sz, a.ck_sz, a.ik_sz
         topc = tuak_topc(top, k, kl, it)
         print("algorithm\ttuak")
         print("ki\t%s" % a.ki.upper())
         print("topc\t%s" % topc.hex().upper())
         print("keccak_iterations\t%d" % it)
+        # Stated because these are per-vector parameters: a reader comparing
+        # against a TS 35.232 row has to know which row's sizes produced these
+        # values, and RES_sz in particular changes f2..f5.
+        print("mac_sz\t%d" % mac)
+        print("res_sz\t%d" % res)
+        print("ck_sz\t%d" % ck)
+        print("ik_sz\t%d" % ik)
         if sqn is not None and amf is not None:
             print("f1\t%s"
-                  % tuak_f1(k, topc, rand, sqn, amf, kl, 64, it).hex().upper())
+                  % tuak_f1(k, topc, rand, sqn, amf, kl, mac, it).hex().upper())
             print("f1*\t%s"
-                  % tuak_f1(k, topc, rand, sqn, amf, kl, 64, it,
+                  % tuak_f1(k, topc, rand, sqn, amf, kl, mac, it,
                             f1star=True).hex().upper())
-        got = tuak_f2f5(k, topc, rand, kl, 64, 128, 128, it)
+        got = tuak_f2f5(k, topc, rand, kl, res, ck, ik, it)
         for name in ("f2", "f3", "f4", "f5"):
             print("%s\t%s" % (name, got[name].hex().upper()))
         print("f5*\t%s" % tuak_f5star(k, topc, rand, kl, it).hex().upper())

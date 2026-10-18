@@ -14725,6 +14725,18 @@ static ModuleSubmenuEntry lair_entries[] = {
     { "Transmit",
       "media-playback-start-symbolic",
       "--rrc-tx:Build and Transmit RRC" },
+    /* The message builders. Each button carries a worked argument line so it
+       demonstrates the encoder instead of printing a usage error, and none of
+       them sends: the octets land in the output card and a file. */
+    { "Messages",
+      "document-send-symbolic",
+      "--build-meas-report=--meas-id 1 --rsrp 60 --rsrq 20:Measure Report"
+      "|--build-rrc-release=--tid 0 --release-cause other:RRC Release"
+      "|--build-reest-reject:Re-est Reject"
+      "|#PWS|--build-sib10=--message-id 4370 --serial 1 --warning-type 2A00:SIB10 Alert"
+      "|--build-sib11=--message-id 4371 --serial 2 --segment-type lastSegment --segment-number 0 --payload 0001:SIB11 Segment"
+      "|--build-sib12=--message-id 4372 --serial 3 --segment-type notLastSegment --segment-number 0 --payload 0001:SIB12 Segment"
+      "|--enb-sib-schedule=--sib 10 --hex 0001:SIB Schedule" },
 };
 static ModuleSubmenuEntry lcore_entries[] = {
     { "Overview",
@@ -14739,6 +14751,13 @@ static ModuleSubmenuEntry lcore_entries[] = {
     { "Recon",
       "system-search-symbolic",
       "--surface:Surface|--require-core:Require Core|--plan:Plan" },
+    /* The two builders that read the transport rather than the protocol: an
+       outer GTPv1-U header carrying an inner GTP message, and an MBMS session
+       with no GTP signaller above it. */
+    { "Encapsulation",
+      "network-transmit-receive-symbolic",
+      "--gtp-in-gtp=--payload DEADBEEF --with-ip:GTP in GTP"
+      "|--mbms-session=--mood:MBMS Session" },
 };
 static ModuleSubmenuEntry nair_entries[] = {
     { "Overview",
@@ -14756,6 +14775,11 @@ static ModuleSubmenuEntry nair_entries[] = {
     { "Tools",
       "preferences-system-symbolic",
       "--arfcn=640000|--gen-gnb-conf:Generate gNB Config|--gen-core-conf:Generate Core Config" },
+    /* One SSB burst as baseband samples, which is the artefact the tree could
+       not produce before: every other NR signal path here stops at coded bits. */
+    { "Waveform",
+      "media-playback-start-symbolic",
+      "--ssb-waveform=/tmp/imsisting/nr_air/ssb.cf32:Write SSB Samples" },
 };
 static ModuleSubmenuEntry ncore_entries[] = {
     { "Overview",
@@ -14817,6 +14841,14 @@ static ModuleSubmenuEntry sim_entries[] = {
     { "Side channel",
       "auth-smartcard-symbolic",
       "#DPA (COMP128-1)|~--dpa-model:Leak Point (ki rand)|~--dpa-sim:Key Recovery (ki)|~--dpa-sweep:Sweeps (ki)|#PLAN|--plan=dpa-lab:DPA Rig" },
+    /* The card's own authentication: the algorithms a SIM runs, checked against
+       the standards' test vectors, and the ES9+ requests a profile download
+       starts with. */
+    { "Authentication",
+      "security-high-symbolic",
+      "--sim-auth-check=std:Check Standard Vectors"
+      "|--sim-auth=milenage 465B5CE8B199B49FAA5F0A2EE238A6BC 23553CBE9637A89D218AE64D0E1759CF --op CDC202D526D4F5B6B7C0B69B3F4A5C47:Milenage Vector"
+      "|--es9-plus=initiateAuthentication --smds smds.example.net:443:ES9+ Request" },
 };
 static ModuleSubmenuEntry pcap_entries[] = {
     { "Overview",
@@ -16256,6 +16288,61 @@ jamd_build_waveform(AppState *state, const char *module_id,
     return outer;
 }
 
+/* 6b. The signal shapes: every reference signal the tree can now produce,
+       reached through the module that consults the producer rather than
+       reimplementing it. The list is a verb of its own because the interesting
+       fact is which producer answers for which signal, and which are refused. */
+static GtkWidget *
+jamd_build_shapes(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SIGNAL SHAPES",
+        "One reference signal per shape, built by the tool that owns the "
+        "sequence. The module consults a producer; it does not carry a second "
+        "copy of the maths that could disagree with it.", &body);
+    GtkWidget *list_body, *pss_body, *ssb_body;
+    GtkWidget *list = verb_card("WHAT CAN BE BUILT, AND BY WHAT", &list_body);
+    GtkWidget *pss = verb_card("AN LTE SYNC SIGNAL, AS SAMPLES", &pss_body);
+    GtkWidget *ssb = verb_card("AN NR SSB BURST, AS SAMPLES", &ssb_body);
+
+    gtk_box_append(GTK_BOX(list_body),
+        mod_arg_row(state, module_id, status, "List the Shapes",
+            "--shapes", "",
+            "Every shape with the producer that answers for it, plus the shapes "
+            "that are refused and why. Keys nothing and needs no gate."));
+    gtk_box_append(GTK_BOX(list_body), fkit_note(
+        "LTE sync signals are narrowband shapes: a reference signal occupies its "
+        "own slice, so asking for it in barrage mode is refused rather than "
+        "filling the band with a copy of it."));
+    gtk_box_append(GTK_BOX(body), list);
+
+    jamd_append_disclaimer(pss_body, module_id);
+    gtk_box_append(GTK_BOX(pss_body),
+        mod_arg_row(state, module_id, status, "PSS For a Given Cell",
+            "--tx-build",
+            "--mode narrowband --shape pss --centre 2650MHz --pci 42",
+            "Physical cell identity 1..503: the PSS carries cell identity modulo "
+            "three, and the SSS that goes with it carries the rest. The samples "
+            "come from tools/lte_phy.py, the same functions the demodulator "
+            "here uses."));
+    gtk_box_append(GTK_BOX(body), pss);
+
+    jamd_append_disclaimer(ssb_body, module_id);
+    gtk_box_append(GTK_BOX(ssb_body),
+        mod_arg_row(state, module_id, status, "One SSB Burst",
+            "--tx-build",
+            "--mode narrowband --shape nr-ssb --centre 2650MHz --ssb-waveform "
+            "/tmp/imsisting/jamming_detect/ssb.cf32 --pci 42 --i-ssb 3",
+            "An NR SSB is four OFDM symbols carrying PSS, SSS, PBCH and its "
+            "DMRS. The burst is produced by 12_nr_air, which is the module that "
+            "owns the NR waveform in this tree."));
+    gtk_box_append(GTK_BOX(body), ssb);
+
+    (void) out;
+    return outer;
+}
+
 /* 7. The gate: what the module will and will not do, and what it needs before
       it does the second thing. The warning is the module's, not this page's. */
 static GtkWidget *
@@ -16332,6 +16419,7 @@ static ModuleSubmenuEntry jamd_entries[] = {
     { "Discriminate", "imsisting-23_traffic_analysis-symbolic", NULL, jamd_build_discriminate },
     { "Report", "document-save-symbolic", NULL, jamd_build_report },
     { "Waveform", "document-new-symbolic", NULL, jamd_build_waveform },
+    { "Shapes", "network-wireless-symbolic", NULL, jamd_build_shapes },
     { "The Gate", "security-high-symbolic", NULL, jamd_build_gate },
 };
 
@@ -16345,6 +16433,11 @@ static ModuleSubmenuEntry slic_entries[] = {
     { "Policy",
       "preferences-system-symbolic",
       "--isolation-check:Isolation Check|--selection:Selection|--plan:Plan" },
+    /* QoS: the standardised 5QI table, the TSN parameters that ride in it, and
+       the per-slice consistency check. */
+    { "QoS",
+      "preferences-system-symbolic",
+      "--five-qi=1:5QI 1|--five-qi-table:5QI Table|~--tsn-config:TSN-QoS Config|~--slice-qos-check:Slice QoS Check" },
 };
 static ModuleSubmenuEntry bbnd_entries[] = {
     { "Overview",
@@ -17083,6 +17176,13 @@ static ModuleSubmenuEntry otasm_entries[] = {
     { "Type 0",
       "dialog-warning-symbolic",
       "~--type0:Audit Type 0|--type0-build:Build Type 0|--tp-kat:Packing KAT|--tp-ud-build:Pack Text|--tp-ud-read:Unpack Text" },
+    /* S@T push: the SIM Toolkit browser push as it really travels, as a
+       (U)SIM Data download SMS. ~--wib-push is CLI-only on purpose: the verb
+       refuses with rc 2 until the WIB leaf commands are sourced, and a button
+       whose only possible answer is a refusal is not a control. */
+    { "SAT push",
+      "mail-message-new-symbolic",
+      "--sat-push=+15551234567 +15559876543:S@T Browser Push|~--wib-push:WIB Push (refuses)" },
 };
 static ModuleSubmenuEntry lipr_entries[] = {
     { "Overview",
@@ -17145,6 +17245,12 @@ static ModuleSubmenuEntry lpp_entries[] = {
     { "Build",
       "document-new-symbolic",
       "--build-header:Build Header|--forge-position:Forge Position|--decode-header:Decode Header" },
+    /* Positioning procedures, encoded through the generated LPP table and
+       checked against pycrate octet for octet. */
+    { "Procedures",
+      "system-search-symbolic",
+      "--otdoa-assist:OTDOA Assistance|--otdoa-request:OTDOA Request"
+      "|--utdoa-config=utdoa:UTDOA Fields|--prs-plan:PRS Schedule" },
 };
 static ModuleSubmenuEntry wifioff_entries[] = {
     { "Overview",
@@ -17164,6 +17270,11 @@ static ModuleSubmenuEntry oran_entries[] = {
     { "Planning",
       "preferences-system-symbolic",
       "--plan:Plan" },
+    /* A1 policy poisoning aimed at QoS rather than at admission: the body that
+       asks the RIC to re-shape a slice's resources. */
+    { "QoS Policy",
+      "security-high-symbolic",
+      "--qos-policy:A1 QoS Policy|~--qos-policy-check:QoS Policy Check" },
 };
 static ModuleSubmenuEntry ntn_entries[] = {
     { "Overview",

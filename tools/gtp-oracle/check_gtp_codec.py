@@ -226,13 +226,15 @@ def tbcd(digits):
 
 
 def ie(ie_type, value_hex, instance=0):
-    """Type(1) Length(2) Spare|Instance(1) Value, padded to 4 octets.  The
-    padding is not counted in Length and is not part of the value."""
+    """Type(1) Length(2) Spare|Instance(1) Value.  NOT padded.
+
+    TS 29.274 8.2 makes Length the actual length of the value and defines no
+    padding after it; the 4-octet alignment is GTPv1-C (TS 29.060). This helper
+    used to pad, which made the oracle agree with the module and both disagree
+    with every real dissector: tshark 4.2.2 calls a padded GTPv2-C IE
+    "[Malformed Packet: GTPv2]" and pycrate advances by exactly 4+Length."""
     value = bytes.fromhex(value_hex)
-    body = bytes([ie_type]) + len(value).to_bytes(2, "big") + bytes([instance]) + value
-    while len(body) % 4:
-        body += b"\x00"
-    return body
+    return bytes([ie_type]) + len(value).to_bytes(2, "big") + bytes([instance]) + value
 
 
 def gtpc(mtype, ies=b"", version=2, p=0, t=0, teid=None, seq=1, mp=0,

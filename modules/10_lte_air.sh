@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# LTE Air Interface — E-UTRA RRC decode, paging arithmetic, srsRAN eNB control
+# LTE Air Interface — E-UTRA RRC decode and message encoding, paging
+# arithmetic, srsRAN eNB control
 #
 # Everything here that can be computed from the specification is computed:
 # EARFCN arithmetic, SIB field parsing, PF/PO from the paging formula. The
@@ -9,10 +10,22 @@
 # Reference clause map:
 #   TS 36.101 §5.7.3      E-UTRA channel numbers (EARFCN)
 #   TS 36.331 §6.2.2      BCCH-BCH / BCCH-DL-SCH messages; SIB1, SIB2, SIB3, SIB5
+#   TS 36.331 §6.2.2      DCCH/CCCH messages: MeasurementReport,
+#                         RRCConnectionRelease, RRCConnectionReestablishmentReject
+#   TS 36.331 §5.5.5      measurement reporting (what a MeasurementReport asks for)
+#   TS 36.331 §5.3.8      release of the RRC connection (RRCConnectionRelease)
+#   TS 36.331 §5.3.7      RRC connection re-establishment (...ReestablishmentReject)
 #   TS 36.331 §6.3.1      SystemInformationBlockType1 field layout
+#   TS 36.331 §6.3.1      SystemInformationBlockType10/11/12 (ETWS, CMAS),
+#                         decoded and encoded; the encode half is in
+#                         modules/10_lte_air_pws.inc
+#   TS 23.041 §9.4.2.2.5  CB-Data IE: the warning message a SIB11/12 segment carries
 #   TS 36.304 §7.1/§7.2   paging frame, paging occasion, subframe pattern
 #   TS 36.211 §6.8        PRACH / PUCCH / PUSCH reference signals
-#   srsRAN enb.conf       eNB configuration for the srsRAN 4G stack
+#   srsRAN enb.conf       eNB configuration for the srsRAN 4G stack; a sib.conf
+#                         named by [enb_files] sib_config can schedule
+#                         SIB10/11/12 (srsRAN_4G master only; release_23_11
+#                         has no PWS encoder, which --enb-sib-schedule refuses)
 #
 # Resolve IMSISTING_ROOT from this script's own path so state and loot land in
 # the project tree even when launched standalone via pkexec (no launcher env).
@@ -857,6 +870,34 @@ lair_warning_type() {
 # $2 = the SIB type the container header must name (sibType6 / sibType7)
 # $3 = hex
 # Prints the codec's own `key<TAB>value` lines, or an ERROR and returns 1.
+# Is the container reading of $hex decisive?
+#
+# A SystemInformation header declares how many SIB alternatives follow it, and
+# the walk only stops early when one of them does not parse. A bare SIB body is
+# itself a legal container header: 04400000000040 (a 50-bit SIB10) reads as a
+# container carrying sibType12-v920 with nine declared alternatives, of which
+# two parse before the walk stops. Treating that as "this is a container of
+# another SIB" makes the module unable to read the bodies it builds. Only a
+# walk that consumes every declared alternative is evidence about the input.
+#
+# $1 = hex, $2 = padded bit length. Returns 0 when the walk is complete, 1
+# otherwise (including when `si` cannot walk the input at all).
+lair_container_is_complete() {
+    local hex="$1" pbits="$2"
+    local tool="$IMSISTING_ROOT/tools/lte_asn1.py"
+    [[ -r "$tool" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    local walk
+    walk=$(python3 "$tool" si "$hex" --bits "$pbits" --all 2>/dev/null) || return 1
+    local items count stopped
+    items=$(printf '%s\n' "$walk" | awk -F'\t' '$1=="items"{split($2,a," of "); print a[1]; exit}')
+    count=$(printf '%s\n' "$walk" | awk -F'\t' '$1=="items"{split($2,a," of "); print a[2]; exit}')
+    stopped=$(printf '%s\n' "$walk" | awk -F'\t' '$1=="walk_stopped_after"{print $2; exit}')
+    [[ "$items" =~ ^[0-9]+$ && "$count" =~ ^[0-9]+$ ]] || return 1
+    [[ -z "$stopped" ]] || return 1
+    (( items == count ))
+}
+
 lair_sib_codec() {
     local stem="$1" stype="$2" hex="$3"
     local tool="$IMSISTING_ROOT/tools/lte_asn1.py"
@@ -871,7 +912,7 @@ lair_sib_codec() {
     # recoverable from hex. The padded length is passed and the codec consumes
     # exactly the fields it finds and reports how many.
     local pbits=$(( ${#hex} * 4 ))
-    local out rc
+    local out rc note=""
     # The container reading goes first: it is the only one that can be
     # checked. A SystemInformation header carries a specific 5-bit sibType and
     # the codec refuses a container whose type is not the one asked for. The
@@ -881,14 +922,20 @@ lair_sib_codec() {
     out=$(python3 "$tool" "$stem-decode" "$hex" --bits "$pbits" --container 2>&1)
     rc=$?
     if (( rc == 3 )); then
-        # Exit 3 means the input DID parse as a SystemInformation container and
-        # carried a different SIB. Falling back to a bare-body reading here is
-        # what produces a confident wrong answer: the container's own header
-        # bits decode as a plausible body. Refuse instead.
-        printf '%s\n' "$out" >&2
-        return 1
-    fi
-    if (( rc != 0 )); then
+        # Exit 3 means the input parsed as a SystemInformation container that
+        # named a different SIB. That is decisive only when the container walk
+        # is complete: a bare body can always be read as a truncated container
+        # (04400000000040 is a 50-bit SIB10 and also a nine-alternative
+        # container header), so an early stop says nothing about the input.
+        # Fall back to the bare-body reading when the walk stopped early.
+        if lair_container_is_complete "$hex" "$pbits"; then
+            printf '%s\n' "$out" >&2
+            return 1
+        fi
+        note="note	the input also reads as an incomplete SystemInformation container ($(printf '%s\n' "$out" | awk -F'\t' '$1=="ERROR"{print $2; exit}')); the bare SIB body is read instead"
+        out=$(python3 "$tool" "$stem-decode" "$hex" --bits "$pbits" 2>&1)
+        rc=$?
+    elif (( rc != 0 )); then
         # No fixed-length retry: with a variable-length body a retry at a
         # constant length re-reads a prefix of a message already refused.
         out=$(python3 "$tool" "$stem-decode" "$hex" --bits "$pbits" 2>&1)
@@ -900,6 +947,7 @@ lair_sib_codec() {
     fi
     [[ -z "$stype" ]] || :
     printf '%s\n' "$out"
+    [[ -z "$note" ]] || printf '%s\n' "$note"
     return 0
 }
 
@@ -1275,6 +1323,22 @@ lair_decode_sib() {
                "$(lair_sanitize "$sibtype")" >&2; return 2 ;;
     esac
 }
+
+# ── Public warning system: the encode half of SIB10/11/12 ──────────────
+#
+# The decode half is above (SIB1..SIB13). This include is the other
+# direction: it emits the unaligned-PER octets of a warning message type
+# the caller supplies, using the same generated codec as the decoder. It is
+# SOURCED, NOT EXECUTED as a standalone script: the guard in the include
+# keeps it from running anything on load, and every function it defines is
+# called from this module's CLI.
+#
+# Read the include header before adding to it: it records why SIB10 carries
+# `dummy` and not `warningSecurityInfo`, why the segment type has no
+# `first`, and what --segment and --segment-number each mean.
+# shellcheck source=modules/10_lte_air_pws.inc
+[[ -f "$IMSISTING_ROOT/modules/10_lte_air_pws.inc" ]] && \
+    source "$IMSISTING_ROOT/modules/10_lte_air_pws.inc"
 
 # ── Paging: PF / PO — TS 36.304 §7.1, §7.2 and §7.3 ────────────────────
 #
@@ -1852,6 +1916,17 @@ lair_cli_status_tsv() {
     printf 'rr_conf\t%s\n' "$LAIR_RRC"
     printf 'pidfile\t%s\n' "$LAIR_PID"
     printf 'dir\t%s\n' "$LAIR_DIR"
+    # The three RRC message builders. `builders_ready` counts how many the
+    # table in use can actually reach: the committed table cannot reach any
+    # of them yet, and saying 0 is better than saying 3 and refusing later.
+    local ready=0 k
+    for k in meas-report rrc-release reest-reject; do
+        lair_rrc_table_has "$(lair_rrc_type_of "$k")" && ready=$((ready + 1))
+    done
+    printf 'builders\t3\n'
+    printf 'builders_ready\t%s\n' "$ready"
+    printf 'builders_sent\t0\n'
+    printf 'builder_table\t%s\n' "$(lair_rrc_table)"
 }
 
 lair_cmd_earfcn() {
@@ -2506,7 +2581,9 @@ lair_selftest() {
     chk status-dir    "$(fld "$out" dir)" "$LAIR_DIR"
     chk status-enbconf "$(fld "$out" enb_conf)" "$LAIR_CONF"
     chk status-pid    "$(fld "$out" enb_pid)" "none"
-    chk status-fields "$(printf '%s\n' "$out" | grep -c .)" "9"
+    # 13 rows = the 9 infrastructure rows plus the four builder rows
+    # (builders, builders_ready, builders_sent, builder_table).
+    chk status-fields "$(printf '%s\n' "$out" | grep -c .)" "13"
 
     # ── 12. sanitisation and CLI dispatch ───────────────────────────────
     chk san-tab "$(lair_sanitize $'a\tb')" "a b"
@@ -3179,9 +3256,825 @@ FAKE
     chk x2-decode-garbage "$(lair_cmd_x2_decode 00 >/dev/null 2>&1; echo $?)" "1"
     chk x2-setup-usage    "$(lair_cmd_x2_setup 1 01 >/dev/null 2>&1; echo $?)" "2"
 
+    # ── 22. RRC message encoders (TS 36.331 §6.2.2) ─────────────────────
+    # MeasurementReport / RRCConnectionRelease /
+    # RRCConnectionReestablishmentReject. Every expected hex below is a
+    # pycrate 0.8.1 result -- RRCLTE.EUTRA_RRC_Definitions, set_val(deepcopy(
+    # value)) then _to_per(), printed as 2*ceil(bits/8) hex digits, run under
+    # /home/ysl/.lte-oracles/venv/bin/python -- and never a result of this
+    # module's own encoder. The chapter re-derives the ten octets from pycrate
+    # (the oracle-<id>-hex rows) before asking this module for the same ones,
+    # so a typo in an expectation and a bug in the encoder cannot cancel out.
+    # The encoder is tools/lte_asn1.py's engine over tools/lte_per.py and the
+    # generated layout table; nothing here is a bit writer.
+    local st saved_table orac tbl2 berr
+    st=$(lair_cli_status_tsv)
+    chk build-count     "$(fld "$st" builders)" "3"
+    chk build-sent-row  "$(fld "$st" builders_sent)" "0"
+    chk build-ready-row "$(fld "$st" builders_ready | grep -cE '^[0-3]$')" "1"
+    chk build-table-row "$(fld "$st" builder_table | grep -c 'lte_rrc_layout.py$')" "1"
+
+    # Bad input is rc 2 with nothing on stdout: a refused parameter must not
+    # leave a half-built message behind.
+    chk build-bad-meas-id-lo "$(lair_build_meas_report --meas-id 0 --rsrp 60 --rsrq 20 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-meas-id-hi "$(lair_build_meas_report --meas-id 33 --rsrp 60 --rsrq 20 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-rsrp       "$(lair_build_meas_report --meas-id 1 --rsrp 98 --rsrq 20 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-rsrq       "$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 35 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-missing    "$(lair_build_meas_report --rsrp 60 --rsrq 20 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-neigh-pci  "$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20 --neigh 504:30 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-neigh-form "$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20 --neigh 17 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-neigh-count "$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20 \
+        --neigh 1:30 --neigh 2:30 --neigh 3:30 --neigh 4:30 --neigh 5:30 \
+        --neigh 6:30 --neigh 7:30 --neigh 8:30 --neigh 9:30 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-neigh-dup  "$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20 --neigh 17:30 --neigh 17:31 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-flag       "$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20 --nope >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-tid        "$(lair_build_rrc_release --tid 4 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-cause      "$(lair_build_rrc_release --release-cause maybe >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-earfcn     "$(lair_build_rrc_release --earfcn 65536 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-prio-orphan "$(lair_build_rrc_release --prio 4 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-prio       "$(lair_build_rrc_release --earfcn 1650 --prio 8 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-t320       "$(lair_build_rrc_release --t320 min7 >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-rej-cause  "$(lair_build_reest_reject --cause other >/dev/null 2>&1; echo $?)" "2"
+    chk build-bad-rej-both   "$(lair_build_reest_reject --critical-extensions-future --non-critical-extension >/dev/null 2>&1; echo $?)" "2"
+    out=$(lair_build_meas_report --meas-id 0 --rsrp 60 --rsrq 20 2>/dev/null)
+    chk build-bad-no-octets  "$(printf '%s' "$out" | wc -c | tr -d ' ')" "0"
+
+    # The committed table is generated from 15 roots -- the SIBs, an
+    # RRCConnectionReconfiguration and a HandoverCommand -- and none of them
+    # contains a DCCH or CCCH message body. Either the table in use reaches
+    # the wrapper type (then the verb must encode with no override at all) or
+    # it must refuse with rc 3, an empty stdout and a WHY that names the
+    # missing ASN.1 type. Saying which one is true is the honest assertion;
+    # a table that can encode and a table that cannot are not the same test.
+    saved_table="${LAIR_RRC_TABLE:-}"
+    unset LAIR_RRC_TABLE
+    if lair_rrc_table_has UL_DCCH_Message; then
+        out=$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20 2>/dev/null); rc=$?
+        chk build-shipped-meas-rc  "$rc" "0"
+        chk build-shipped-meas-hex "$(fld "$out" hex)" "02000F14"
+    else
+        chk build-refuse-meas-rc    "$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20 >/dev/null 2>&1; echo $?)" "3"
+        chk build-refuse-meas-empty "$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20 2>/dev/null | wc -c | tr -d ' ')" "0"
+        # stderr is captured first: under set -o pipefail a builder's rc 3
+        # would otherwise be the pipeline's status and swallow the match.
+        berr=$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20 2>&1 >/dev/null)
+        case "$berr" in
+            *UL-DCCH-Message*) chk build-refuse-meas-why "yes" "yes" ;;
+            *)                 chk build-refuse-meas-why "yes" "no" ;;
+        esac
+    fi
+    if lair_rrc_table_has DL_DCCH_Message; then
+        out=$(lair_build_rrc_release --tid 0 --release-cause other 2>/dev/null); rc=$?
+        chk build-shipped-rel-rc  "$rc" "0"
+        chk build-shipped-rel-hex "$(fld "$out" hex)" "1401"
+    else
+        chk build-refuse-rel-rc    "$(lair_build_rrc_release --tid 0 --release-cause other >/dev/null 2>&1; echo $?)" "3"
+        chk build-refuse-rel-empty "$(lair_build_rrc_release --tid 0 --release-cause other 2>/dev/null | wc -c | tr -d ' ')" "0"
+        berr=$(lair_build_rrc_release --tid 0 --release-cause other 2>&1 >/dev/null)
+        case "$berr" in
+            *DL-DCCH-Message*) chk build-refuse-rel-why "yes" "yes" ;;
+            *)                 chk build-refuse-rel-why "yes" "no" ;;
+        esac
+    fi
+    if lair_rrc_table_has DL_CCCH_Message; then
+        out=$(lair_build_reest_reject 2>/dev/null); rc=$?
+        chk build-shipped-rej-rc  "$rc" "0"
+        chk build-shipped-rej-hex "$(fld "$out" hex)" "04"
+    else
+        chk build-refuse-rej-rc    "$(lair_build_reest_reject >/dev/null 2>&1; echo $?)" "3"
+        chk build-refuse-rej-empty "$(lair_build_reest_reject 2>/dev/null | wc -c | tr -d ' ')" "0"
+        berr=$(lair_build_reest_reject 2>&1 >/dev/null)
+        case "$berr" in
+            *DL-CCCH-Message*) chk build-refuse-rej-why "yes" "yes" ;;
+            *)                 chk build-refuse-rej-why "yes" "no" ;;
+        esac
+    fi
+
+    # The encoder path itself, with a table that has the three roots. This is
+    # what the verbs will do once the committed table is regenerated, and it
+    # is the only way to test the encoders while the shipped table is short.
+    orac="${LTE_ORACLE_PY:-/home/ysl/.lte-oracles/venv/bin/python}"
+    tbl2="$d/dcch_layout.py"
+    if [[ -x "$orac" && -r "$IMSISTING_ROOT/tools/asn1gen.py" ]]; then
+        "$orac" "$IMSISTING_ROOT/tools/asn1gen.py" --quiet \
+            --types "UL-DCCH-Message,DL-DCCH-Message,DL-CCCH-Message" \
+            --out "$tbl2" >/dev/null 2>&1
+        chk build-table-gen "$([[ -s "$tbl2" ]] && echo yes || echo no)" "yes"
+    else
+        printf 'build-table-gen\tSKIP\t(no pycrate venv at %s, or tools/asn1gen.py is absent: the DCCH-rooted table was not generated)\n' "$orac"
+    fi
+
+    if [[ -s "$tbl2" ]]; then
+        export LAIR_RRC_TABLE="$tbl2"
+        chk build-table-roots \
+            "$(lair_rrc_table_has UL_DCCH_Message && lair_rrc_table_has DL_DCCH_Message && lair_rrc_table_has DL_CCCH_Message; echo $?)" "0"
+
+        # One KAT: run the verb, then assert the octets, length, rows and the
+        # fact that nothing claims to have been transmitted.
+        kat() {
+            local id="$1" want_hex="$2" want_bits="$3"
+            shift 3
+            local o r
+            o=$("$@" 2>/dev/null); r=$?
+            chk "kat-$id-rc"        "$r" "0"
+            chk "kat-$id-hex"       "$(fld "$o" hex)" "$want_hex"
+            chk "kat-$id-bits"      "$(fld "$o" bits_consumed)" "$want_bits"
+            chk "kat-$id-bytes"     "$(fld "$o" bytes)" "$(( (want_bits + 7) / 8 ))"
+            chk "kat-$id-built"     "$(fld "$o" built)" "yes"
+            chk "kat-$id-sent"      "$(fld "$o" sent)" "0"
+            chk "kat-$id-roundtrip" "$(fld "$o" roundtrip)" "yes"
+            chk "kat-$id-ref"       "$(fld "$o" ref | grep -c 'TS 36.331')" "1"
+            chk "kat-$id-limit"     "$(fld "$o" limit | grep -c 'no ciphering')" "1"
+        }
+        kat M1 "02000F14" 30 \
+            lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20
+        kat M2 "002044B54041147940664F" 82 \
+            lair_build_meas_report --meas-id 3 --rsrp 45 --rsrq 20 \
+            --neigh 17:30 --neigh 320:25:15
+        kat R1 "1401" 15 \
+            lair_build_rrc_release --tid 0 --release-cause other
+        kat R2 "02A3000CE482019CA0" 68 \
+            lair_build_rrc_release --tid 1 --release-cause loadBalancingTAUrequired \
+            --earfcn 1650 --prio 4 --t320 min5
+        kat R3 "1703" 15 \
+            lair_build_rrc_release --tid 3 --release-cause rrc-Suspend-v1320
+        kat R4 "1602" 15 \
+            lair_build_rrc_release --tid 2 --release-cause cs-FallbackHighPriority-v1020
+        kat R5 "0141100672" 35 \
+            lair_build_rrc_release --tid 0 --release-cause other --earfcn 1650
+        kat J1 "04" 5 \
+            lair_build_reest_reject
+        kat J2 "03" 4 \
+            lair_build_reest_reject --critical-extensions-future
+        kat J3 "14" 7 \
+            lair_build_reest_reject --non-critical-extension
+
+        # --out writes the octets as binary, not as text.
+        bin="$d/meas_report.bin"
+        out=$(lair_build_meas_report --meas-id 1 --rsrp 60 --rsrq 20 --out "$bin" 2>/dev/null)
+        chk kat-out-file  "$(fld "$out" out_file)" "$bin"
+        chk kat-out-bytes "$(wc -c < "$bin" | tr -d ' ')" "4"
+        chk kat-out-hex   "$(xxd -p "$bin" 2>/dev/null | tr -d '\n' | tr 'a-f' 'A-F')" "02000F14"
+
+        # The oracle side: pycrate re-derives the same ten octets from the
+        # same parameter sets, so each expectation has a source other than
+        # this encoder.
+        okat=$("$orac" - <<'PY' 2>/dev/null
+import copy
+from pycrate_asn1dir import RRCLTE
+
+RRC = RRCLTE.EUTRA_RRC_Definitions
+
+
+def per_hex(typename, value):
+    obj = copy.deepcopy(getattr(RRC, typename))
+    obj.set_val(copy.deepcopy(value))
+    bits = ""
+    for _t, v, bl in obj._to_per():
+        if isinstance(v, int):
+            bits += format(v, "0%db" % bl)
+        elif isinstance(v, bytes):
+            bits += "".join(format(b, "08b") for b in v)[:bl]
+        else:
+            bits += str(v)
+    return "%0*x" % (2 * ((len(bits) + 7) // 8), int(bits, 2))
+
+
+def mr(measid, rsrp, rsrq, neigh=None):
+    res = {"measId": measid,
+           "measResultPCell": {"rsrpResult": rsrp, "rsrqResult": rsrq}}
+    if neigh is not None:
+        res["measResultNeighCells"] = ("measResultListEUTRA", neigh)
+    return {"message": ("c1", ("measurementReport", {"criticalExtensions":
+            ("c1", ("measurementReport-r8", {"measResults": res}))}))}
+
+
+def rel(tid, cause, redirect=None, idle=None):
+    ies = {"releaseCause": cause}
+    if redirect is not None:
+        ies["redirectedCarrierInfo"] = ("eutra", redirect)
+    if idle is not None:
+        ies["idleModeMobilityControlInfo"] = idle
+    return {"message": ("c1", ("rrcConnectionRelease", {
+        "rrc-TransactionIdentifier": tid,
+        "criticalExtensions": ("c1", ("rrcConnectionRelease-r8", ies))}))}
+
+
+def rej(kind="min"):
+    if kind == "future":
+        ce = ("criticalExtensionsFuture", {})
+    elif kind == "ext":
+        ce = ("rrcConnectionReestablishmentReject-r8",
+              {"nonCriticalExtension": {}})
+    else:
+        ce = ("rrcConnectionReestablishmentReject-r8", {})
+    return {"message": ("c1", ("rrcConnectionReestablishmentReject",
+                               {"criticalExtensions": ce}))}
+
+
+CASES = [
+    ("M1", "UL_DCCH_Message", mr(1, 60, 20)),
+    ("M2", "UL_DCCH_Message", mr(3, 45, 20,
+                                 [{"physCellId": 17,
+                                   "measResult": {"rsrpResult": 30}},
+                                  {"physCellId": 320,
+                                   "measResult": {"rsrpResult": 25,
+                                                  "rsrqResult": 15}}])),
+    ("R1", "DL_DCCH_Message", rel(0, "other")),
+    ("R2", "DL_DCCH_Message", rel(1, "loadBalancingTAUrequired", redirect=1650,
+                                  idle={"freqPriorityListEUTRA": [
+                                            {"carrierFreq": 1650,
+                                             "cellReselectionPriority": 4}],
+                                        "t320": "min5"})),
+    ("R3", "DL_DCCH_Message", rel(3, "rrc-Suspend-v1320")),
+    ("R4", "DL_DCCH_Message", rel(2, "cs-FallbackHighPriority-v1020")),
+    ("R5", "DL_DCCH_Message", rel(0, "other", redirect=1650)),
+    ("J1", "DL_CCCH_Message", rej()),
+    ("J2", "DL_CCCH_Message", rej("future")),
+    ("J3", "DL_CCCH_Message", rej("ext")),
+]
+for cid, tname, value in CASES:
+    print("oracle-%s-hex\t%s" % (cid, per_hex(tname, value).upper()))
+PY
+)
+        chk oracle-M1-hex "$(fld "$okat" oracle-M1-hex)" "02000F14"
+        chk oracle-M2-hex "$(fld "$okat" oracle-M2-hex)" "002044B54041147940664F"
+        chk oracle-R1-hex "$(fld "$okat" oracle-R1-hex)" "1401"
+        chk oracle-R2-hex "$(fld "$okat" oracle-R2-hex)" "02A3000CE482019CA0"
+        chk oracle-R3-hex "$(fld "$okat" oracle-R3-hex)" "1703"
+        chk oracle-R4-hex "$(fld "$okat" oracle-R4-hex)" "1602"
+        chk oracle-R5-hex "$(fld "$okat" oracle-R5-hex)" "0141100672"
+        chk oracle-J1-hex "$(fld "$okat" oracle-J1-hex)" "04"
+        chk oracle-J2-hex "$(fld "$okat" oracle-J2-hex)" "03"
+        chk oracle-J3-hex "$(fld "$okat" oracle-J3-hex)" "14"
+    else
+        # No venv, no table, no encoder: say SKIP for each vector instead of
+        # letting an untested encoder look tested.
+        for id in M1 M2 R1 R2 R3 R4 R5 J1 J2 J3; do
+            printf 'kat-%s\tSKIP\t(no generated table: the pycrate venv is absent, so the encoder path was not exercised)\n' "$id"
+        done
+        printf 'oracle-refereed\tSKIP\t(no pycrate venv at %s: the ten expected octets could not be re-derived, so none of them is claimed as PASS against the oracle)\n' "$orac"
+    fi
+    if [[ -n "$saved_table" ]]; then export LAIR_RRC_TABLE="$saved_table"
+    else unset LAIR_RRC_TABLE; fi
+
+    # ── 18. Public warning: SIB10/11/12 octets, round trip, eNB schedule ──
+    #
+    # The expected octets in this section are pycrate's, not this builder's:
+    # RRCLTE.EUTRA_RRC_Definitions .to_uper() on the same field values, run
+    # under /home/ysl/.lte-oracles/venv. A builder checked against itself
+    # proves only that it is deterministic.
+    lair_pws_selftest
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
+}
+
+# ── RRC message encoders: MeasurementReport, RRCConnectionRelease, ─────
+#    RRCConnectionReestablishmentReject (TS 36.331 §6.2.2) ─────────────
+#
+# The Phase 14 audit recorded three ABSENT rows against this module --
+# measurement reports, RLF/RRC-release spam, CA/DC configuration -- because
+# every verb here decoded BCCH: nothing could write a UL-DCCH or DL-CCCH
+# message. These three verbs close the first two. A CA/DC reconfiguration is
+# an RRCConnectionReconfiguration carrying SCellToAddModList, which the
+# tree's reconfiguration view does not model, so that row is NOT closed here.
+#
+# The messages are encoded by the tree's own machinery -- tools/lte_per.py
+# interpreting the generated tools/lte_rrc_layout.py table -- which is the
+# same codec this module already uses for SIB9..SIB13. No bit writer is
+# written here and pycrate is not a runtime dependency: it only referees the
+# octets in the selftest.
+#
+# The asset that is missing is a table ROOT. asn1gen.py's RRC root set is
+# the SIBs plus RRCConnectionReconfiguration and HandoverCommand (15 roots,
+# 1045 types) and no root contains a UL-DCCH, DL-DCCH or DL-CCCH message
+# body, so the engine refuses the wrapper type by name. That refusal is
+# reported and not hidden: rc 3, an ERROR row naming the ASN.1 type and a
+# WHY row carrying the regeneration recipe. Point LAIR_RRC_TABLE at a table
+# that has the three wrapper roots and the same verbs encode for real; the
+# selftest generates such a table from pycrate, pins ten message vectors
+# against pycrate, and so exercises this path while the committed table is
+# still short.
+
+# The table the encoders read. tools/lte_asn1.engine() itself honours
+# LTE_RRC_LAYOUT for this exact purpose ("a freshly generated table can be
+# tried before it replaces the committed one"); LAIR_RRC_TABLE is the same
+# knob under a module-owned name, so a caller does not have to know which
+# variable the engine reads.
+lair_rrc_table() {
+    if [[ -n "${LAIR_RRC_TABLE:-}" ]]; then printf '%s' "$LAIR_RRC_TABLE"
+    else printf '%s' "$IMSISTING_ROOT/tools/lte_rrc_layout.py"
+    fi
+}
+
+# The wrapper type a message is encoded as, and its ASN.1 spelling. The
+# engine is asked for the DCCH/CCCH container because that is the unit
+# TS 36.331 §6.2.2 defines; the container's own CHOICE selects the message.
+lair_rrc_type_of() {
+    case "${1:-}" in
+        meas-report)  printf 'UL_DCCH_Message' ;;
+        rrc-release)  printf 'DL_DCCH_Message' ;;
+        reest-reject) printf 'DL_CCCH_Message' ;;
+        *) return 1 ;;
+    esac
+}
+
+lair_rrc_asn1_of() {
+    case "${1:-}" in
+        meas-report)  printf 'UL-DCCH-Message' ;;
+        rrc-release)  printf 'DL-DCCH-Message' ;;
+        reest-reject) printf 'DL-CCCH-Message' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Does the table reach this type? --status-tsv and the selftest ask this
+# rather than guess whether the committed table can encode at all.
+lair_rrc_table_has() {
+    local tbl; tbl=$(lair_rrc_table)
+    [[ -r "$tbl" ]] || return 1
+    grep -q "^    '$1': {" "$tbl"
+}
+
+# What the octets are not. Every builder prints this, because the message is
+# never transmitted and never ciphered: the row is the honest extent of the
+# artefact, not a disclaimer bolted on afterwards.
+lair_rrc_limit() {
+    printf 'no DCCH/CCCH framing, no PDCP/RLC/MAC, no ciphering and no integrity: these are the TS 36.331 §6.2.2 message octets and nothing above them. No verb in this module decodes this message back (the decoders here read BCCH), so the roundtrip row is tools/lte_asn1.py engine decode, not a local parser.'
+}
+
+lair_build_bad() {
+    printf 'ERROR\t%s\n' "$1" >&2
+    if [[ -n "${2:-}" ]]; then printf 'WHY\t%s\n' "$2" >&2; fi
+    return 2
+}
+
+# A decimal flag inside a TS 36.331 integer range, or rc 2 naming the range.
+lair_build_uint() {
+    local flag="$1" val="$2" lo="$3" hi="$4" what="$5"
+    if [[ ! "$val" =~ ^[0-9]{1,6}$ ]]; then
+        lair_build_bad "--$flag must be a decimal number, got $(lair_sanitize "$val")" "$what"
+        return 2
+    fi
+    if (( 10#$val < lo || 10#$val > hi )); then
+        lair_build_bad "--$flag must be $lo..$hi, got $val" "$what"
+        return 2
+    fi
+    return 0
+}
+
+# Write the octets to --out as binary, the way the rest of the tree does.
+lair_build_out() {
+    local hex="$1" path="$2"
+    if ! command -v xxd >/dev/null 2>&1; then
+        printf 'ERROR\t--out needs xxd, which is not on PATH\n' >&2
+        printf 'WHY\tthe octets are written as binary; xxd -r -p is how every other builder in this tree writes one\n' >&2
+        return 1
+    fi
+    local dir; dir=$(dirname "$path")
+    [[ -d "$dir" ]] || mkdir -p "$dir" 2>/dev/null
+    if ! printf '%s' "$hex" | xxd -r -p > "$path" 2>/dev/null; then
+        printf 'ERROR\tcould not write %s\n' "$(lair_sanitize "$path")" >&2
+        return 1
+    fi
+    printf 'out_file\t%s\n' "$path"
+    printf 'out_octets\t%s\n' "$(wc -c < "$path" | tr -d ' ')"
+}
+
+# lair_rrc_encode <kind> [params...] -> TSV rows: type, asn1, hex, bits,
+# octets, roundtrip.
+#
+# The value is handed to tools/lte_asn1.py's engine, which returns the
+# TS 36.331 §5.1 unaligned-PER octets and then decodes them back. The value
+# is a Python literal because lte_per models a CHOICE as a (name, value)
+# tuple and neither JSON nor POSIX shell can express that; lte_asn1.py's JSON
+# surface has only $octets and $bits, so --json cannot name a CHOICE
+# alternative yet. That is why the value is built here instead of parsed.
+lair_rrc_encode() {
+    local kind="${1:-}"
+    shift
+    python3 - "$IMSISTING_ROOT" "$(lair_rrc_table)" "$kind" "$@" <<'PY'
+import os
+import re
+import sys
+
+root, table, kind = sys.argv[1], sys.argv[2], sys.argv[3]
+args = sys.argv[4:]
+tools = os.path.join(root, "tools")
+sys.path.insert(0, tools)
+# engine() reads this variable; it is how a generated table is tried before
+# it replaces the committed one, so the module does not need its own loader.
+os.environ["LTE_RRC_LAYOUT"] = table
+
+
+def die(code, msg, why=""):
+    sys.stderr.write("ERROR\t%s\n" % msg)
+    if why:
+        sys.stderr.write("WHY\t%s\n" % why)
+    sys.exit(code)
+
+
+if not os.access(os.path.join(tools, "lte_per.py"), os.R_OK):
+    die(1, "tools/lte_per.py is missing from %s" % tools,
+        "the three RRC message encoders are tools/lte_per.py over the "
+        "generated layout table")
+
+try:
+    import lte_asn1
+except Exception as exc:  # any import failure is the same story
+    die(1, "cannot load the PER engine: %s" % exc,
+        "the encoders are tools/lte_per.py + tools/lte_asn1.py, both of "
+        "which ship with the tree")
+
+
+def roots_of_table():
+    # engine() executes the table but does not register it in sys.modules, so
+    # its ROOTS list is read from the file instead of imported: asn1gen.py
+    # writes ROOTS right after the docstring, and reading the head keeps the
+    # 2 MB table from being parsed twice on the refusal path.
+    try:
+        with open(table, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(40000)
+    except OSError as exc:
+        return "an unreadable table (%s)" % exc
+    m = re.match(r"(?s).*?ROOTS\s*=\s*\[(.*?)\]", head)
+    if not m:
+        return "no ROOTS entry"
+    names = [a or b for a, b in re.findall(r"'([^']+)'|\"([^\"]+)\"", m.group(1))]
+    if not names:
+        return "an empty ROOTS entry"
+    return "%d roots: %s" % (len(names), ", ".join(names))
+
+
+# ---- the three message values -----------------------------------------
+if kind == "meas-report":
+    measid, rsrp, rsrq, nneigh = (int(x) for x in args[:4])
+    res = {"measId": measid,
+           "measResultPCell": {"rsrpResult": rsrp, "rsrqResult": rsrq}}
+    neigh = []
+    for item in args[4:4 + nneigh]:
+        f = item.split(",")
+        entry = {"physCellId": int(f[0]),
+                 "measResult": {"rsrpResult": int(f[1])}}
+        if len(f) > 2:
+            entry["measResult"]["rsrqResult"] = int(f[2])
+        neigh.append(entry)
+    if neigh:
+        res["measResultNeighCells"] = ("measResultListEUTRA", neigh)
+    mtype = "UL_DCCH_Message"
+    value = {"message": ("c1", ("measurementReport", {"criticalExtensions":
+             ("c1", ("measurementReport-r8", {"measResults": res}))}))}
+elif kind == "rrc-release":
+    ies = {"releaseCause": args[1]}
+    idle = {}
+    if args[2] != "-":
+        ies["redirectedCarrierInfo"] = ("eutra", int(args[2]))
+        if args[3] != "-":
+            idle["freqPriorityListEUTRA"] = [
+                {"carrierFreq": int(args[2]),
+                 "cellReselectionPriority": int(args[3])}]
+    if args[4] != "-":
+        idle["t320"] = args[4]
+    if idle:
+        ies["idleModeMobilityControlInfo"] = idle
+    mtype = "DL_DCCH_Message"
+    value = {"message": ("c1", ("rrcConnectionRelease", {
+        "rrc-TransactionIdentifier": int(args[0]),
+        "criticalExtensions": ("c1", ("rrcConnectionRelease-r8", ies))}))}
+elif kind == "reest-reject":
+    mode = args[0] if args else "min"
+    if mode == "future":
+        ce = ("criticalExtensionsFuture", {})
+    elif mode == "ext":
+        ce = ("rrcConnectionReestablishmentReject-r8",
+              {"nonCriticalExtension": {}})
+    else:
+        ce = ("rrcConnectionReestablishmentReject-r8", {})
+    mtype = "DL_CCCH_Message"
+    value = {"message": ("c1", ("rrcConnectionReestablishmentReject",
+                                {"criticalExtensions": ce}))}
+else:
+    die(1, "unknown builder kind %r" % kind, "internal dispatch error")
+
+try:
+    codec, per = lte_asn1.engine()
+except Exception as exc:
+    die(1, "cannot load the layout table %s: %s" % (table, exc),
+        "set LAIR_RRC_TABLE to a table generated by tools/asn1gen.py")
+
+# The exception class has to be taken from the module engine() returns, not
+# from `import lte_per`: engine() executes tools/lte_per.py as a fresh module
+# object and does not register it in sys.modules, so a plain import yields a
+# second PerError class that never matches what the codec raises.
+try:
+    bits = codec.encode_bits(mtype, value)
+except per.PerError as exc:
+    msg = str(exc)
+    asn1name = mtype.replace("_", "-")
+    if "unknown type" in msg:
+        why = ("the table %s has %s -- none of them reaches %s, so the type "
+               "is absent rather than broken. Add %s to asn1gen.py's "
+               "DEFAULT_TYPES and regenerate (tools/asn1gen.py --out "
+               "tools/lte_rrc_layout.py, run under the pycrate venv), or "
+               "generate a table elsewhere and set LAIR_RRC_TABLE to it."
+               % (table, roots_of_table(), mtype, asn1name))
+        die(3, "cannot encode %s: the generated layout table has no root "
+               "that reaches it" % asn1name, why)
+    die(2, "cannot encode %s: %s" % (mtype, msg),
+        "the value is outside what TS 36.331 allows for this message")
+except Exception as exc:
+    die(1, "the PER engine failed on %s: %s" % (mtype, exc))
+
+try:
+    back = codec.decode_bits(mtype, bits, exact=True)
+except Exception as exc:
+    die(1, "the octets encoded but did not decode back: %s" % exc,
+        "an encoder whose own decoder refuses its output is not a KAT")
+
+nbytes = (len(bits) + 7) // 8
+print("type\t%s" % mtype)
+print("asn1\t%s" % mtype.replace("_", "-"))
+print("hex\t%s" % format(int(bits, 2), "0%dx" % (2 * nbytes)).upper())
+print("bits\t%d" % len(bits))
+print("octets\t%d" % nbytes)
+print("roundtrip\t%s" % ("yes" if back == value else "no"))
+PY
+}
+
+# ── --build-meas-report: the uplink report that asks for a handover ─────
+lair_build_meas_report() {
+    local measid="" rsrp="" rsrq="" out=""
+    local -a neigh=()
+    while (( $# > 0 )); do
+        case "${1:-}" in
+            --meas-id)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--meas-id needs a value" \
+                    "MeasId ::= INTEGER (1..maxMeasId), maxMeasId = 32 (TS 36.331 §6.3.2)"; return 2; }
+                measid="$2"; shift 2 ;;
+            --rsrp)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--rsrp needs a value" \
+                    "measResultPCell.rsrpResult is RSRP-Range, INTEGER (0..97)"; return 2; }
+                rsrp="$2"; shift 2 ;;
+            --rsrq)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--rsrq needs a value" \
+                    "measResultPCell.rsrqResult is RSRQ-Range, INTEGER (0..34)"; return 2; }
+                rsrq="$2"; shift 2 ;;
+            --neigh)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--neigh needs a value" \
+                    "--neigh takes pci:rsrp or pci:rsrp:rsrq"; return 2; }
+                neigh+=("$2"); shift 2 ;;
+            --out)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--out needs a path" ""; return 2; }
+                out="$2"; shift 2 ;;
+            *)
+                lair_build_bad "--build-meas-report does not take $(lair_sanitize "${1:-}")" \
+                    "flags: --meas-id <1..32> --rsrp <0..97> --rsrq <0..34> [--neigh pci:rsrp[:rsrq]]... [--out <path>]"
+                return 2 ;;
+        esac
+    done
+    [[ -n "$measid" ]] || { lair_build_bad "--build-meas-report needs --meas-id" \
+        "MeasResults.measId is mandatory: a report that names no measurement cannot be acted on (TS 36.331 §5.5.5)"; return 2; }
+    lair_build_uint meas-id "$measid" 1 32 "MeasId ::= INTEGER (1..32)" || return 2
+    [[ -n "$rsrp" ]] || { lair_build_bad "--build-meas-report needs --rsrp" \
+        "measResultPCell carries rsrpResult (RSRP-Range 0..97) and rsrqResult; both are part of that SEQUENCE in TS 36.331 §6.3.2"; return 2; }
+    lair_build_uint rsrp "$rsrp" 0 97 "RSRP-Range ::= INTEGER (0..97)" || return 2
+    [[ -n "$rsrq" ]] || { lair_build_bad "--build-meas-report needs --rsrq" \
+        "TS 36.331 §6.3.2 draws measResultPCell as SEQUENCE {rsrpResult, rsrqResult} with both fields present, unlike the neighbour MeasResult"; return 2; }
+    lair_build_uint rsrq "$rsrq" 0 34 "RSRQ-Range ::= INTEGER (0..34)" || return 2
+    (( ${#neigh[@]} <= 8 )) || { lair_build_bad "at most 8 --neigh entries, got ${#neigh[@]}" \
+        "MeasResultListEUTRA ::= SEQUENCE (SIZE (1..8)) OF MeasResultEUTRA (TS 36.331 §6.3.2)"; return 2; }
+
+    local -a clean=()
+    local item pci nrsrp nrsrq seen=" "
+    for item in ${neigh[@]+"${neigh[@]}"}; do
+        if [[ ! "$item" =~ ^([0-9]{1,3}):([0-9]{1,2})(:([0-9]{1,2}))?$ ]]; then
+            lair_build_bad "--neigh must be pci:rsrp or pci:rsrp:rsrq, got $(lair_sanitize "$item")" \
+                "MeasResultEUTRA carries physCellId (0..503) then measResult {rsrpResult 0..97, rsrqResult 0..34}"
+            return 2
+        fi
+        pci="${BASH_REMATCH[1]}"; nrsrp="${BASH_REMATCH[2]}"; nrsrq="${BASH_REMATCH[4]}"
+        lair_build_uint neigh-pci  "$pci"   0 503 "PhysCellId ::= INTEGER (0..503)" || return 2
+        lair_build_uint neigh-rsrp "$nrsrp" 0  97 "rsrpResult is RSRP-Range, INTEGER (0..97)" || return 2
+        if [[ -n "$nrsrq" ]]; then
+            lair_build_uint neigh-rsrq "$nrsrq" 0 34 "rsrqResult is RSRQ-Range, INTEGER (0..34)" || return 2
+        fi
+        case "$seen" in
+            *" $pci "*)
+                lair_build_bad "physCellId $pci is listed twice" \
+                    "one MeasResult per cell; a duplicate physCellId is not a report a UE would send (TS 36.331 §5.5.5)"
+                return 2 ;;
+        esac
+        seen+="$pci "
+        clean+=("$pci,$nrsrp${nrsrq:+,$nrsrq}")
+    done
+
+    local enc rc hex bits octets rt
+    if (( ${#clean[@]} > 0 )); then
+        enc=$(lair_rrc_encode meas-report "$measid" "$rsrp" "$rsrq" "${#clean[@]}" "${clean[@]}")
+    else
+        enc=$(lair_rrc_encode meas-report "$measid" "$rsrp" "$rsrq" 0)
+    fi
+    rc=$?
+    (( rc == 0 )) || return $rc
+    hex=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    bits=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="bits"{print $2; exit}')
+    octets=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="octets"{print $2; exit}')
+    rt=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="roundtrip"{print $2; exit}')
+    if [[ ! "$hex" =~ ^[0-9A-F]+$ || -z "$bits" || -z "$octets" ]]; then
+        printf 'ERROR\tthe PER engine returned no octets\n' >&2
+        printf '%s\n' "$enc" | sed 's/^/RAW\t/' >&2
+        return 1
+    fi
+    printf 'message\tMeasurementReport\n'
+    printf 'params\tmeasId=%s servCell=rsrp %s rsrq %s neigh=%d\n' \
+        "$measid" "$rsrp" "$rsrq" "${#clean[@]}"
+    if (( ${#clean[@]} > 0 )); then
+        printf 'neigh_cells\t%s\n' \
+            "$(printf '%s\n' "${clean[@]}" | sed 's/,/:/g' | paste -sd, -)"
+    fi
+    printf 'bytes\t%s\n' "$octets"
+    printf 'hex\t%s\n' "$hex"
+    printf 'bits_consumed\t%s\n' "$bits"
+    printf 'built\tyes\n'
+    printf 'sent\t0\n'
+    printf 'layout\t%s\n' "$(lair_rrc_table)"
+    printf 'ref\tTS 36.331 §6.2.2 MeasurementReport, §5.5.5 measurement reporting, §6.3.2 MeasResults; unaligned PER by tools/lte_per.py over the generated layout table\n'
+    printf 'limit\t%s\n' "$(lair_rrc_limit)"
+    printf 'roundtrip\t%s\n' "$rt"
+    if [[ -n "$out" ]]; then lair_build_out "$hex" "$out" || return 1; fi
+    return 0
+}
+
+# ── --build-rrc-release: the message that ends a connection ─────────────
+lair_build_rrc_release() {
+    local tid="0" cause="other" earfcn="-" prio="-" t320="-" out=""
+    while (( $# > 0 )); do
+        case "${1:-}" in
+            --tid)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--tid needs a value" \
+                    "RRC-TransactionIdentifier ::= INTEGER (0..3)"; return 2; }
+                tid="$2"; shift 2 ;;
+            --release-cause)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--release-cause needs a value" \
+                    "ReleaseCause ::= ENUMERATED {loadBalancingTAUrequired, other, cs-FallbackHighPriority-v1020, rrc-Suspend-v1320}"; return 2; }
+                cause="$2"; shift 2 ;;
+            --earfcn)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--earfcn needs a value" \
+                    "ARFCN-ValueEUTRA ::= INTEGER (0..maxEARFCN), maxEARFCN = 65535"; return 2; }
+                earfcn="$2"; shift 2 ;;
+            --prio)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--prio needs a value" \
+                    "CellReselectionPriority ::= INTEGER (0..7)"; return 2; }
+                prio="$2"; shift 2 ;;
+            --t320)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--t320 needs a value" \
+                    "T320 ::= ENUMERATED {min5, min10, min20, min30, min60, min120, min180, spare1}"; return 2; }
+                t320="$2"; shift 2 ;;
+            --out)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--out needs a path" ""; return 2; }
+                out="$2"; shift 2 ;;
+            *)
+                lair_build_bad "--build-rrc-release does not take $(lair_sanitize "${1:-}")" \
+                    "flags: [--tid <0..3>] [--release-cause <cause>] [--earfcn <0..65535>] [--prio <0..7>] [--t320 <value>] [--out <path>]"
+                return 2 ;;
+        esac
+    done
+    lair_build_uint tid "$tid" 0 3 "RRC-TransactionIdentifier ::= INTEGER (0..3) (TS 36.331 §6.3.2)" || return 2
+    case "$cause" in
+        loadBalancingTAUrequired|other|cs-FallbackHighPriority-v1020|rrc-Suspend-v1320) ;;
+        *)
+            lair_build_bad "--release-cause must be one of loadBalancingTAUrequired, other, cs-FallbackHighPriority-v1020, rrc-Suspend-v1320; got $(lair_sanitize "$cause")" \
+                "ReleaseCause ::= ENUMERATED {...} with exactly those four values (TS 36.331 §6.3.2)"
+            return 2 ;;
+    esac
+    if [[ "$earfcn" != "-" ]]; then
+        lair_build_uint earfcn "$earfcn" 0 65535 "ARFCN-ValueEUTRA ::= INTEGER (0..maxEARFCN), maxEARFCN = 65535" || return 2
+    fi
+    if [[ "$prio" != "-" ]]; then
+        if [[ "$earfcn" == "-" ]]; then
+            lair_build_bad "--prio needs --earfcn" \
+                "a reselection priority is a property of a frequency: FreqPriorityEUTRA carries carrierFreq then cellReselectionPriority (TS 36.331 §6.3.4), so there is no priority without an EARFCN"
+            return 2
+        fi
+        lair_build_uint prio "$prio" 0 7 "CellReselectionPriority ::= INTEGER (0..7)" || return 2
+    fi
+    if [[ "$t320" != "-" ]]; then
+        case "$t320" in
+            min5|min10|min20|min30|min60|min120|min180|spare1) ;;
+            *)
+                lair_build_bad "--t320 must be one of min5 min10 min20 min30 min60 min120 min180 spare1, got $(lair_sanitize "$t320")" \
+                    "T320 ::= ENUMERATED {...} inside IdleModeMobilityControlInfo (TS 36.331 §6.3.4)"
+                return 2 ;;
+        esac
+    fi
+
+    local enc rc hex bits octets rt
+    enc=$(lair_rrc_encode rrc-release "$tid" "$cause" "$earfcn" "$prio" "$t320")
+    rc=$?
+    (( rc == 0 )) || return $rc
+    hex=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    bits=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="bits"{print $2; exit}')
+    octets=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="octets"{print $2; exit}')
+    rt=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="roundtrip"{print $2; exit}')
+    if [[ ! "$hex" =~ ^[0-9A-F]+$ || -z "$bits" || -z "$octets" ]]; then
+        printf 'ERROR\tthe PER engine returned no octets\n' >&2
+        printf '%s\n' "$enc" | sed 's/^/RAW\t/' >&2
+        return 1
+    fi
+    printf 'message\tRRCConnectionRelease\n'
+    printf 'params\ttid=%s releaseCause=%s earfcn=%s priority=%s t320=%s\n' \
+        "$tid" "$cause" "${earfcn/-/none}" "${prio/-/none}" "${t320/-/none}"
+    printf 'tid\t%s\n' "$tid"
+    printf 'release_cause\t%s\n' "$cause"
+    printf 'redirected_earfcn\t%s\n' "${earfcn/-/none}"
+    printf 'cell_reselection_priority\t%s\n' "${prio/-/none}"
+    if [[ "$prio" != "-" && "$earfcn" != "-" ]]; then
+        printf 'note\tcellReselectionPriority is not a field of redirectedCarrierInfo: the frequency goes in redirectedCarrierInfo.eutra and the priority in idleModeMobilityControlInfo.freqPriorityListEUTRA for the same EARFCN (TS 36.331 §6.2.2, §6.3.4)\n'
+    fi
+    printf 'bytes\t%s\n' "$octets"
+    printf 'hex\t%s\n' "$hex"
+    printf 'bits_consumed\t%s\n' "$bits"
+    printf 'built\tyes\n'
+    printf 'sent\t0\n'
+    printf 'layout\t%s\n' "$(lair_rrc_table)"
+    printf 'ref\tTS 36.331 §6.2.2 RRCConnectionRelease, §5.3.8 release of the RRC connection, §6.3.4 IdleModeMobilityControlInfo; unaligned PER by tools/lte_per.py over the generated layout table\n'
+    printf 'limit\t%s\n' "$(lair_rrc_limit)"
+    printf 'roundtrip\t%s\n' "$rt"
+    if [[ -n "$out" ]]; then lair_build_out "$hex" "$out" || return 1; fi
+    return 0
+}
+
+# ── --build-reest-reject: the message that ends a re-establishment ──────
+# RRCConnectionReestablishmentReject has no cause field at all: what a UE
+# learns is that the attempt is over. --cause is refused rather than
+# silently dropped, because a dropped flag invents a message nobody sent.
+lair_build_reest_reject() {
+    local out="" future=0 ext=0
+    while (( $# > 0 )); do
+        case "${1:-}" in
+            --critical-extensions-future) future=1; shift ;;
+            --non-critical-extension)     ext=1;    shift ;;
+            --cause)
+                lair_build_bad "--build-reest-reject does not take --cause: the message has no cause field" \
+                    "TS 36.331 §6.2.2: RRCConnectionReestablishmentReject ::= SEQUENCE { criticalExtensions CHOICE { rrcConnectionReestablishmentReject-r8, criticalExtensionsFuture } }; the only information it carries is which branch, so no cause exists to encode"
+                return 2 ;;
+            --out)
+                [[ -n "${2:-}" ]] || { lair_build_bad "--out needs a path" ""; return 2; }
+                out="$2"; shift 2 ;;
+            *)
+                lair_build_bad "--build-reest-reject does not take $(lair_sanitize "${1:-}")" \
+                    "flags: [--critical-extensions-future] [--non-critical-extension] [--out <path>]"
+                return 2 ;;
+        esac
+    done
+    (( future + ext <= 1 )) || {
+        lair_build_bad "--critical-extensions-future and --non-critical-extension are different branches" \
+            "criticalExtensionsFuture and RRCConnectionReestablishmentReject-r8 are the two alternatives of the same CHOICE (TS 36.331 §6.2.2), so both cannot be set"
+        return 2; }
+
+    local mode=min
+    (( future == 1 )) && mode=future
+    (( ext == 1 )) && mode=ext
+
+    local enc rc hex bits octets rt
+    enc=$(lair_rrc_encode reest-reject "$mode")
+    rc=$?
+    (( rc == 0 )) || return $rc
+    hex=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="hex"{print $2; exit}')
+    bits=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="bits"{print $2; exit}')
+    octets=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="octets"{print $2; exit}')
+    rt=$(printf '%s\n' "$enc" | awk -F'\t' '$1=="roundtrip"{print $2; exit}')
+    if [[ ! "$hex" =~ ^[0-9A-F]+$ || -z "$bits" || -z "$octets" ]]; then
+        printf 'ERROR\tthe PER engine returned no octets\n' >&2
+        printf '%s\n' "$enc" | sed 's/^/RAW\t/' >&2
+        return 1
+    fi
+    printf 'message\tRRCConnectionReestablishmentReject\n'
+    case "$mode" in
+        future)
+            printf 'params\tcriticalExtensions=criticalExtensionsFuture\n'
+            printf 'critical_extensions\tcriticalExtensionsFuture\n' ;;
+        ext)
+            printf 'params\tcriticalExtensions=rrcConnectionReestablishmentReject-r8 nonCriticalExtension=present\n'
+            printf 'critical_extensions\trrcConnectionReestablishmentReject-r8\n'
+            printf 'non_critical_extension\tpresent (empty SEQUENCE)\n' ;;
+        *)
+            printf 'params\tcriticalExtensions=rrcConnectionReestablishmentReject-r8\n'
+            printf 'critical_extensions\trrcConnectionReestablishmentReject-r8\n' ;;
+    esac
+    printf 'bytes\t%s\n' "$octets"
+    printf 'hex\t%s\n' "$hex"
+    printf 'bits_consumed\t%s\n' "$bits"
+    printf 'built\tyes\n'
+    printf 'sent\t0\n'
+    printf 'layout\t%s\n' "$(lair_rrc_table)"
+    printf 'ref\tTS 36.331 §6.2.2 RRCConnectionReestablishmentReject, §5.3.7 RRC connection re-establishment; unaligned PER by tools/lte_per.py over the generated layout table\n'
+    printf 'limit\t%s The message has no cause field (TS 36.331 §6.2.2), so --cause is refused rather than dropped.\n' "$(lair_rrc_limit)"
+    printf 'roundtrip\t%s\n' "$rt"
+    if [[ -n "$out" ]]; then lair_build_out "$hex" "$out" || return 1; fi
+    return 0
 }
 
 # ── RRC construction -> DL-SCH -> PDSCH: the transmit path ─────────────
@@ -3802,6 +4695,9 @@ lair_menu() {
   [9]  decode the 24-bit MIB (hex)
   [10] paging with eDRX / PTW
   [11] status
+  [12] build an RRC MeasurementReport (§6.2.2)
+  [13] build an RRCConnectionRelease (§6.2.2)
+  [14] build an RRCConnectionReestablishmentReject (§6.2.2)
   [0]  back
 
 M
@@ -3879,6 +4775,46 @@ M
                     lair_cmd_paging_frame "$i" "$t" "$u" 32 32 "${extra[@]}" | column -t -s$'\t' 2>/dev/null || true
                     read -rp "  press enter " _
                 fi ;;
+            12)
+                if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                    echo "[-] need --meas-id --rsrp --rsrq; cannot prompt in CLI mode" >&2
+                else
+                    read -rp "  measId (1..32)> " mi
+                    read -rp "  serving RSRP (0..97)> " mrs
+                    read -rp "  serving RSRQ (0..34)> " mq
+                    read -rp "  neighbours pci:rsrp[:rsrq], comma-separated (blank = none)> " mn
+                    local -a margs=(--meas-id "$mi" --rsrp "$mrs" --rsrq "$mq")
+                    local -a mnr=()
+                    [[ -n "$mn" ]] && IFS=',' read -ra mnr <<< "$mn"
+                    local mx
+                    for mx in ${mnr[@]+"${mnr[@]}"}; do margs+=(--neigh "$mx"); done
+                    lair_build_meas_report "${margs[@]}" | column -t -s$'\t' 2>/dev/null || true
+                    read -rp "  press enter " _
+                fi ;;
+            13)
+                if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                    echo "[-] need --release-cause; cannot prompt in CLI mode" >&2
+                else
+                    read -rp "  transaction id (0..3)> " rtid
+                    read -rp "  releaseCause (loadBalancingTAUrequired|other|cs-FallbackHighPriority-v1020|rrc-Suspend-v1320)> " rcause
+                    read -rp "  redirected EARFCN (blank = none)> " rfreq
+                    read -rp "  reselection priority 0..7 (blank = none)> " rprio
+                    local -a rargs=(--tid "$rtid" --release-cause "$rcause")
+                    [[ -n "$rfreq" ]] && rargs+=(--earfcn "$rfreq")
+                    [[ -n "$rprio" ]] && rargs+=(--prio "$rprio")
+                    lair_build_rrc_release "${rargs[@]}" | column -t -s$'\t' 2>/dev/null || true
+                    read -rp "  press enter " _
+                fi ;;
+            14)
+                if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                    echo "[-] need a branch; cannot prompt in CLI mode" >&2
+                else
+                    read -rp "  use the criticalExtensionsFuture branch? (y/N)> " fb
+                    local -a jargs=()
+                    [[ "$fb" == y || "$fb" == Y ]] && jargs+=(--critical-extensions-future)
+                    lair_build_reest_reject ${jargs[@]+"${jargs[@]}"} | column -t -s$'\t' 2>/dev/null || true
+                    read -rp "  press enter " _
+                fi ;;
             11) lair_cli_status_tsv | column -t -s$'\t' 2>/dev/null || lair_cli_status_tsv
                read -rp "  press enter " _ ;;
             0) return ;;
@@ -3900,7 +4836,13 @@ lair_cli_main() {
         --x2-decode)    lair_cmd_x2_decode "${1:-}" ;;
         --paging-frame) lair_cmd_paging_frame "$@" ;;
         --gen-enb-conf) lair_cmd_gen_enb_conf "$@" ;;
+        --build-sib10|--build-sib11|--build-sib12)
+                        lair_cmd_build_sib${cmd#--build-sib} "$@" ;;
+        --enb-sib-schedule) lair_cmd_enb_sib_schedule "$@" ;;
         --rrc-tx)       lair_cmd_rrc_tx "${1:-reconfiguration}" "${2:-minimal}" ;;
+        --build-meas-report)  lair_build_meas_report "$@" ;;
+        --build-rrc-release)  lair_build_rrc_release "$@" ;;
+        --build-reest-reject) lair_build_reest_reject "$@" ;;
         --start)        lair_start "$LAIR_CONF" ;;
         --stop)         lair_stop ;;
         --status)       lair_cmd_status ;;
@@ -3948,6 +4890,59 @@ Usage: $0 COMMAND
                                    verb's. No radio fails by name (rc 1); a
                                    radio with no waveform fails by name too
                                    (rc 3). Never radiates on its own.
+  --build-meas-report --meas-id <1..32> --rsrp <0..97> --rsrq <0..34>
+                 [--neigh <pci:rsrp[:rsrq]>]... [--out <path>]
+                                   write the TS 36.331 §6.2.2
+                                   MeasurementReport a UE sends to trigger a
+                                   handover: the octets an operator's detector
+                                   would see from a forged UE. Built, not sent.
+  --build-rrc-release [--tid <0..3>] [--release-cause <cause>]
+                 [--earfcn <N>] [--prio <0..7>] [--t320 <value>] [--out <path>]
+                                   write an RRCConnectionRelease (§6.2.2).
+                                   Causes: loadBalancingTAUrequired, other,
+                                   cs-FallbackHighPriority-v1020,
+                                   rrc-Suspend-v1320. --prio adds
+                                   idleModeMobilityControlInfo for --earfcn.
+  --build-reest-reject [--critical-extensions-future]
+                 [--non-critical-extension] [--out <path>]
+                                   write an RRCConnectionReestablishmentReject
+                                   (§6.2.2). The message has no cause field.
+                 The three builder verbs encode through tools/lte_per.py.
+                 While the committed layout table has no DCCH/CCCH root they
+                 refuse with rc 3 and name the missing type; set LAIR_RRC_TABLE
+                 to a table generated with the three DCCH message roots
+                 (tools/asn1gen.py under the pycrate venv): UL-DCCH-Message,
+                 DL-DCCH-Message, DL-CCCH-Message.
+  --build-sib10 --message-id <dec> --serial <dec> --warning-type <4 hex>
+                 [--dummy <100 hex>] [--late-non-critical <hex>] [--out <path>]
+                                   write the SIB10 (ETWS primary notification)
+                                   octets, TS 36.331 6.3.1 unaligned PER.
+                                   warningType is TS 23.041: top two bits are
+                                   the class, the low six the category. Built,
+                                   not sent (sent 0).
+  --build-sib11 --message-id <dec> --serial <dec>
+                 --segment-type notLastSegment|lastSegment
+                 --segment-number <0..63> --segment <hex octets>
+                 [--count <1..64>] [--data-coding <2 hex>]
+                 [--late-non-critical <hex>] [--out <path>]
+                                   write the SIB11 (ETWS secondary) octets.
+                                   --segment is the contents and
+                                   --segment-number the number; --payload and
+                                   --payload-text are aliases for --segment.
+  --build-sib12 <same flags as --build-sib11>
+                 [--warning-area <hex>]
+                                   write the SIB12 (CMAS) octets. --warning-area
+                                   sets warningAreaCoordinatesSegment-r15, the
+                                   Rel-15 extension-group field; SIB11 has no
+                                   such field, so the flag is refused there.
+  --enb-sib-schedule --sib 10|11|12 --hex <body> [--warning-message <text>]
+                 [--out <dir>] [--srsran-version master]
+                                   write the srsRAN sib.conf fragment and the
+                                   message octets next to it, or refuse with
+                                   what srsRAN is missing. A warning on air
+                                   needs the operator's own cell and a lawful
+                                   basis; this verb writes configuration and
+                                   transmits nothing (sent 0).
   --start                          start srsenb with the generated conf
   --stop                           stop it (idempotent)
   --status                         is the eNB running

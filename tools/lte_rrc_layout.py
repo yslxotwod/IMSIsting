@@ -3,7 +3,7 @@
 Produced by tools/asn1gen.py -- DO NOT EDIT BY HAND.
 
 Oracle:    pycrate 0.8.1
-Generated: 2026-10-16 21:07:30
+Generated: 2026-10-19 00:22:16
 
 This file is plain data: it imports nothing and is consumed by
 tools/lte_per.py, which implements the PER engine.
@@ -42,6 +42,9 @@ ROOTS = [
     'SystemInformationBlockType13_r9',
     'RRCConnectionReconfiguration',
     'HandoverCommand',
+    'UL_DCCH_Message',
+    'DL_DCCH_Message',
+    'DL_CCCH_Message',
 ]
 
 # Reason strings for every construct the generator could not express.
@@ -411,6 +414,11 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'AMF_Identifier_r15': {
+        'k': 'bits',
+        'size': [24, 24],
+        'ext': False,
+    },
     'ARFCN_ValueCDMA2000': {
         'k': 'int',
         'lb': 0,
@@ -616,6 +624,37 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'AbsoluteTimeInfo_r10': {
+        'k': 'bits',
+        'size': [48, 48],
+        'ext': False,
+    },
+    'AdditionalSI_Info_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'csg-MemberStatus-r9',
+                {
+                    'k': 'enum',
+                    'names': ['member'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'csg-Identity-r9',
+                {
+                    'k': 'ref',
+                    't': 'CSG_Identity',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'AdditionalSpectrumEmission': {
         'k': 'int',
         'lb': 1,
@@ -633,6 +672,185 @@ TYPES = {
         'lb': 33,
         'ub': 288,
         'ext': False,
+    },
+    'AffectedCarrierFreqCombInfoMRDC_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'victimSystemType-r15',
+                {
+                    'k': 'ref',
+                    't': 'VictimSystemType_r11',
+                },
+                False,
+                None,
+            ],
+            [
+                'interferenceDirectionMRDC-r15',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'eutra-nr',
+                        'nr',
+                        'other',
+                        'eutra-nr-other',
+                        'nr-other',
+                        'spare3',
+                        'spare2',
+                        'spare1',
+                    ],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'affectedCarrierFreqCombMRDC-r15',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'affectedCarrierFreqCombEUTRA-r15',
+                            {
+                                'k': 'ref',
+                                't': 'AffectedCarrierFreqComb_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'affectedCarrierFreqCombNR-r15',
+                            {
+                                'k': 'ref',
+                                't': 'AffectedCarrierFreqCombNR_r15',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'AffectedCarrierFreqCombList_r11': {
+        'k': 'seqof',
+        'size': [1, 128],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'AffectedCarrierFreqComb_r11',
+        },
+    },
+    'AffectedCarrierFreqCombList_r13': {
+        'k': 'seqof',
+        'size': [1, 128],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'AffectedCarrierFreqComb_r13',
+        },
+    },
+    'AffectedCarrierFreqCombNR_r15': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'ARFCN_ValueNR_r15',
+        },
+    },
+    'AffectedCarrierFreqComb_r11': {
+        'k': 'seqof',
+        'size': [2, 5],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasObjectId',
+        },
+    },
+    'AffectedCarrierFreqComb_r13': {
+        'k': 'seqof',
+        'size': [2, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasObjectId_r13',
+        },
+    },
+    'AffectedCarrierFreqComb_r15': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasObjectId_r13',
+        },
+    },
+    'AffectedCarrierFreqList_r11': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'AffectedCarrierFreq_r11',
+        },
+    },
+    'AffectedCarrierFreqList_v1310': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'AffectedCarrierFreq_v1310',
+        },
+    },
+    'AffectedCarrierFreq_r11': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r11',
+                {
+                    'k': 'ref',
+                    't': 'MeasObjectId',
+                },
+                False,
+                None,
+            ],
+            [
+                'interferenceDirection-r11',
+                {
+                    'k': 'enum',
+                    'names': ['eutra', 'other', 'both', 'spare'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'AffectedCarrierFreq_v1310': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-v1310',
+                {
+                    'k': 'ref',
+                    't': 'MeasObjectId_v1310',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
     },
     'AllowedCellsToAddModList_r13': {
         'k': 'seqof',
@@ -1281,6 +1499,43 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'AreaConfiguration_r10': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'cellGlobalIdList-r10',
+                {
+                    'k': 'ref',
+                    't': 'CellGlobalIdList_r10',
+                },
+            ],
+            [
+                'trackingAreaCodeList-r10',
+                {
+                    'k': 'ref',
+                    't': 'TrackingAreaCodeList_r10',
+                },
+            ],
+        ],
+        'extadd': [],
+    },
+    'AreaConfiguration_v1130': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'trackingAreaCodeList-v1130',
+                {
+                    'k': 'ref',
+                    't': 'TrackingAreaCodeList_v1130',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'BCCH_Config': {
         'k': 'seq',
         'ext': False,
@@ -1308,6 +1563,60 @@ TYPES = {
                     'k': 'enum',
                     'names': ['n64'],
                     'ext': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'BLER_Range_r12': {
+        'k': 'int',
+        'lb': 0,
+        'ub': 31,
+        'ext': False,
+    },
+    'BLER_Result_r12': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'bler-r12',
+                {
+                    'k': 'ref',
+                    't': 'BLER_Range_r12',
+                },
+                False,
+                None,
+            ],
+            [
+                'blocksReceived-r12',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'n-r12',
+                            {
+                                'k': 'bits',
+                                'size': [3, 3],
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'm-r12',
+                            {
+                                'k': 'bits',
+                                'size': [8, 8],
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
                 },
                 False,
                 None,
@@ -1349,6 +1658,33 @@ TYPES = {
         'size': [1, 248],
         'ext': False,
         'containing': None,
+    },
+    'BW_Preference_r14': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'dl-Preference-r14',
+                {
+                    'k': 'enum',
+                    'names': ['mhz1dot4', 'mhz5', 'mhz20'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'ul-Preference-r14',
+                {
+                    'k': 'enum',
+                    'names': ['mhz1dot4', 'mhz5'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
     },
     'BandClassInfoCDMA2000': {
         'k': 'seq',
@@ -1405,6 +1741,126 @@ TYPES = {
             'k': 'ref',
             't': 'BandClassInfoCDMA2000',
         },
+    },
+    'BandClassPriority1XRTT': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'bandClass',
+                {
+                    'k': 'ref',
+                    't': 'BandclassCDMA2000',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellReselectionPriority',
+                {
+                    'k': 'ref',
+                    't': 'CellReselectionPriority',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'BandClassPriorityHRPD': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'bandClass',
+                {
+                    'k': 'ref',
+                    't': 'BandclassCDMA2000',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellReselectionPriority',
+                {
+                    'k': 'ref',
+                    't': 'CellReselectionPriority',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'BandClassPriorityList1XRTT': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'BandClassPriority1XRTT',
+        },
+    },
+    'BandClassPriorityListHRPD': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'BandClassPriorityHRPD',
+        },
+    },
+    'BandCombinationList_r14': {
+        'k': 'seqof',
+        'size': [1, 384],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'BandCombination_r14',
+        },
+    },
+    'BandCombination_r14': {
+        'k': 'seqof',
+        'size': [1, 64],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'BandIndication_r14',
+        },
+    },
+    'BandIndication_r14': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'bandEUTRA-r14',
+                {
+                    'k': 'ref',
+                    't': 'FreqBandIndicator_r11',
+                },
+                False,
+                None,
+            ],
+            [
+                'ca-BandwidthClassDL-r14',
+                {
+                    'k': 'ref',
+                    't': 'CA_BandwidthClass_r10',
+                },
+                False,
+                None,
+            ],
+            [
+                'ca-BandwidthClassUL-r14',
+                {
+                    'k': 'ref',
+                    't': 'CA_BandwidthClass_r10',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
     },
     'BandIndicatorGERAN': {
         'k': 'enum',
@@ -1561,6 +2017,11 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'CA_BandwidthClass_r10': {
+        'k': 'enum',
+        'names': ['a', 'b', 'c', 'd', 'e', 'f'],
+        'ext': [],
+    },
     'CDMA2000_Type': {
         'k': 'enum',
         'names': ['type1XRTT', 'typeHRPD'],
@@ -1716,6 +2177,86 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'CGI_InfoNR_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'plmn-IdentityInfoList-r15',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_IdentityInfoListNR_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'frequencyBandList-r15',
+                {
+                    'k': 'ref',
+                    't': 'MultiFrequencyBandListNR_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'noSIB1-r15',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'ssb-SubcarrierOffset-r15',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 15,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'pdcch-ConfigSIB1-r15',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 255,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['plmn-IdentityInfoList-v1710'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'plmn-IdentityInfoList-v1710',
+                            {
+                                'k': 'ref',
+                                't': 'PLMN_IdentityInfoListNR_v1710',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
     },
     'CIOT_EPS_OptimisationInfo_r13': {
         'k': 'seqof',
@@ -4126,6 +4667,193 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'CSFBParametersRequestCDMA2000': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'csfbParametersRequestCDMA2000-r8',
+                            {
+                                'k': 'ref',
+                                't': 'CSFBParametersRequestCDMA2000_r8_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CSFBParametersRequestCDMA2000_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'CSFBParametersRequestCDMA2000_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CSFBParametersRequestCDMA2000_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CSFBParametersResponseCDMA2000': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'csfbParametersResponseCDMA2000-r8',
+                            {
+                                'k': 'ref',
+                                't': 'CSFBParametersResponseCDMA2000_r8_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CSFBParametersResponseCDMA2000_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rand',
+                {
+                    'k': 'ref',
+                    't': 'RAND_CDMA2000',
+                },
+                False,
+                None,
+            ],
+            [
+                'mobilityParameters',
+                {
+                    'k': 'ref',
+                    't': 'MobilityParametersCDMA2000',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'CSFBParametersResponseCDMA2000_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CSFBParametersResponseCDMA2000_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'CSFB_RegistrationParam1XRTT': {
         'k': 'seq',
         'ext': False,
@@ -6406,6 +7134,31 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'CarrierFreqGERAN': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'arfcn',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueGERAN',
+                },
+                False,
+                None,
+            ],
+            [
+                'bandIndicator',
+                {
+                    'k': 'ref',
+                    't': 'BandIndicatorGERAN',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'CarrierFreqInfoUTRA_v1250': {
         'k': 'seq',
         'ext': False,
@@ -6422,6 +7175,15 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'CarrierFreqListMBMS_r11': {
+        'k': 'seqof',
+        'size': [1, 5],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'ARFCN_ValueEUTRA_r9',
+        },
     },
     'CarrierFreqListUTRA_FDD': {
         'k': 'seqof',
@@ -6457,6 +7219,15 @@ TYPES = {
         'of': {
             'k': 'ref',
             't': 'CarrierFreqUTRA_TDD_r12',
+        },
+    },
+    'CarrierFreqListUTRA_TDD_r10': {
+        'k': 'seqof',
+        'size': [1, 6],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'ARFCN_ValueUTRA',
         },
     },
     'CarrierFreqUTRA_FDD': {
@@ -7028,6 +7799,76 @@ TYPES = {
             't': 'CarrierFreqsInfoGERAN',
         },
     },
+    'CarrierInfoNR_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r15',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'subcarrierSpacingSSB-r15',
+                {
+                    'k': 'enum',
+                    'names': ['kHz15', 'kHz30', 'kHz120', 'kHz240'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'smtc-r15',
+                {
+                    'k': 'ref',
+                    't': 'MTC_SSB_NR_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CarrierInfoNR_r17': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r17',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'subcarrierSpacingSSB-r17',
+                {
+                    'k': 'enum',
+                    'names': ['kHz15', 'kHz30', 'kHz120', 'kHz240', 'kHz480', 'spare1'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'smtc-r17',
+                {
+                    'k': 'ref',
+                    't': 'MTC_SSB_NR_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'CellAccessRelatedInfo_5GC_r15': {
         'k': 'seq',
         'ext': False,
@@ -7105,9 +7946,303 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'CellChangeOrder': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                't304',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'ms100',
+                        'ms200',
+                        'ms500',
+                        'ms1000',
+                        'ms2000',
+                        'ms4000',
+                        'ms8000',
+                        'ms10000-v1310',
+                    ],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'targetRAT-Type',
+                {
+                    'k': 'choice',
+                    'ext': True,
+                    'alts': [
+                        [
+                            'geran',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'physCellId',
+                                        {
+                                            'k': 'ref',
+                                            't': 'PhysCellIdGERAN',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'carrierFreq',
+                                        {
+                                            'k': 'ref',
+                                            't': 'CarrierFreqGERAN',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'networkControlOrder',
+                                        {
+                                            'k': 'bits',
+                                            'size': [2, 2],
+                                            'ext': False,
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                    [
+                                        'systemInformation',
+                                        {
+                                            'k': 'ref',
+                                            't': 'SI_OrPSI_GERAN',
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CellGlobalIdCDMA2000': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'cellGlobalId1XRTT',
+                {
+                    'k': 'bits',
+                    'size': [47, 47],
+                    'ext': False,
+                },
+            ],
+            [
+                'cellGlobalIdHRPD',
+                {
+                    'k': 'bits',
+                    'size': [128, 128],
+                    'ext': False,
+                },
+            ],
+        ],
+        'extadd': [],
+    },
+    'CellGlobalIdEUTRA': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Identity',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_Identity',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellIdentity',
+                {
+                    'k': 'ref',
+                    't': 'CellIdentity',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CellGlobalIdGERAN': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Identity',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_Identity',
+                },
+                False,
+                None,
+            ],
+            [
+                'locationAreaCode',
+                {
+                    'k': 'bits',
+                    'size': [16, 16],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'cellIdentity',
+                {
+                    'k': 'bits',
+                    'size': [16, 16],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CellGlobalIdList_r10': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'CellGlobalIdEUTRA',
+        },
+    },
+    'CellGlobalIdNR_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Identity-r16',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_Identity',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellIdentity-r16',
+                {
+                    'k': 'ref',
+                    't': 'CellIdentityNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'trackingAreaCode-r16',
+                {
+                    'k': 'ref',
+                    't': 'TrackingAreaCodeNR_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CellGlobalIdUTRA': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Identity',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_Identity',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellIdentity',
+                {
+                    'k': 'bits',
+                    'size': [28, 28],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CellIdListNR_r18': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'CellIdNR_r18',
+        },
+    },
+    'CellIdNR_r18': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'cellGlobalId-r18',
+                {
+                    'k': 'ref',
+                    't': 'CellGlobalIdNR_r16',
+                },
+            ],
+            [
+                'pci-arfcn-r18',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'physCellId-r18',
+                            {
+                                'k': 'ref',
+                                't': 'PhysCellIdNR_r15',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'carrierFreq-r18',
+                            {
+                                'k': 'ref',
+                                't': 'ARFCN_ValueNR_r15',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            ],
+        ],
+        'extadd': [],
+    },
     'CellIdentity': {
         'k': 'bits',
         'size': [28, 28],
+        'ext': False,
+    },
+    'CellIdentityNR_r15': {
+        'k': 'bits',
+        'size': [36, 36],
         'ext': False,
     },
     'CellIdentity_5GC_r15': {
@@ -7147,6 +8282,166 @@ TYPES = {
             'k': 'ref',
             't': 'CellIndex',
         },
+    },
+    'CellInfoGERAN_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'physCellId-r9',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellIdGERAN',
+                },
+                False,
+                None,
+            ],
+            [
+                'carrierFreq-r9',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqGERAN',
+                },
+                False,
+                None,
+            ],
+            [
+                'systemInformation-r9',
+                {
+                    'k': 'ref',
+                    't': 'SystemInfoListGERAN',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CellInfoListGERAN_r9': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'CellInfoGERAN_r9',
+        },
+    },
+    'CellInfoListUTRA_FDD_r9': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'CellInfoUTRA_FDD_r9',
+        },
+    },
+    'CellInfoListUTRA_TDD_r10': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'CellInfoUTRA_TDD_r10',
+        },
+    },
+    'CellInfoListUTRA_TDD_r9': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'CellInfoUTRA_TDD_r9',
+        },
+    },
+    'CellInfoUTRA_FDD_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'physCellId-r9',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellIdUTRA_FDD',
+                },
+                False,
+                None,
+            ],
+            [
+                'utra-BCCH-Container-r9',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CellInfoUTRA_TDD_r10': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'physCellId-r10',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellIdUTRA_TDD',
+                },
+                False,
+                None,
+            ],
+            [
+                'carrierFreq-r10',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueUTRA',
+                },
+                False,
+                None,
+            ],
+            [
+                'utra-BCCH-Container-r10',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CellInfoUTRA_TDD_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'physCellId-r9',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellIdUTRA_TDD',
+                },
+                False,
+                None,
+            ],
+            [
+                'utra-BCCH-Container-r9',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
     },
     'CellListNR_r16': {
         'k': 'seqof',
@@ -8412,6 +9707,606 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'ConnEstFailReport_r11': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'failedCellId-r11',
+                {
+                    'k': 'ref',
+                    't': 'CellGlobalIdEUTRA',
+                },
+                False,
+                None,
+            ],
+            [
+                'locationInfo-r11',
+                {
+                    'k': 'ref',
+                    't': 'LocationInfo_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultFailedCell-r11',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'rsrpResult-r11',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrqResult-r11',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultNeighCells-r11',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListEUTRA-r11',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2EUTRA_r9',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListUTRA-r11',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2UTRA_r9',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListGERAN-r11',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultListGERAN',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultsCDMA2000-r11',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2CDMA2000_r9',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'numberOfPreamblesSent-r11',
+                {
+                    'k': 'ref',
+                    't': 'NumberOfPreamblesSent_r11',
+                },
+                False,
+                None,
+            ],
+            [
+                'contentionDetected-r11',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'maxTxPowerReached-r11',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'timeSinceFailure-r11',
+                {
+                    'k': 'ref',
+                    't': 'TimeSinceFailure_r11',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultListEUTRA-v1130',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultList2EUTRA_v9e0',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': [
+                    'measResultFailedCell-v1250',
+                    'failedCellRSRQ-Type-r12',
+                    'measResultListEUTRA-v1250',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultFailedCell-v1250',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range_v1250',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'failedCellRSRQ-Type-r12',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Type_r12',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListEUTRA-v1250',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2EUTRA_v1250',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultFailedCell-v1360'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultFailedCell-v1360',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range_v1360',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['logMeasResultListBT-r15', 'logMeasResultListWLAN-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'logMeasResultListBT-r15',
+                            {
+                                'k': 'ref',
+                                't': 'LogMeasResultListBT_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'logMeasResultListWLAN-r15',
+                            {
+                                'k': 'ref',
+                                't': 'LogMeasResultListWLAN_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultListNR-r16'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListNR-r16',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultCellListNR_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultListNR-v1640', 'measResultListExtNR-r16'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListNR-v1640',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'carrierFreqNR-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ARFCN_ValueNR_r15',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListExtNR-r16',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultFreqListNR_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'CounterCheck': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'counterCheck-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'CounterCheck_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CounterCheckResponse': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'counterCheckResponse-r8',
+                            {
+                                'k': 'ref',
+                                't': 'CounterCheckResponse_r8_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CounterCheckResponse_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'drb-CountInfoList',
+                {
+                    'k': 'ref',
+                    't': 'DRB_CountInfoList',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'CounterCheckResponse_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CounterCheckResponse_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'drb-CountInfoListExt-r15',
+                {
+                    'k': 'ref',
+                    't': 'DRB_CountInfoListExt_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CounterCheckResponse_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'CounterCheckResponse_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CounterCheck_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'drb-CountMSB-InfoList',
+                {
+                    'k': 'ref',
+                    't': 'DRB_CountMSB_InfoList',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'CounterCheck_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CounterCheck_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'drb-CountMSB-InfoListExt-r15',
+                {
+                    'k': 'ref',
+                    't': 'DRB_CountMSB_InfoListExt_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CounterCheck_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'CounterCheck_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CountingResponseInfo_r10': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'countingResponseService-r10',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 15,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'CountingResponseList_r10': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'CountingResponseInfo_r10',
+        },
+    },
     'CrossCarrierSchedulingConfigLAA_UL_r14': {
         'k': 'seq',
         'ext': False,
@@ -8655,6 +10550,336 @@ TYPES = {
         'ub': 6,
         'ext': False,
     },
+    'DLDedicatedMessageSegment_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'dlDedicatedMessageSegment-r16',
+                            {
+                                'k': 'ref',
+                                't': 'DLDedicatedMessageSegment_r16_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DLDedicatedMessageSegment_r16_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'segmentNumber-r16',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 4,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'rrc-MessageSegmentContainer-r16',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'rrc-MessageSegmentType-r16',
+                {
+                    'k': 'enum',
+                    'names': ['notLastSegment', 'lastSegment'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DLInformationTransfer': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'dlInformationTransfer-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'DLInformationTransfer_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'dlInformationTransfer-r15',
+                                        {
+                                            'k': 'ref',
+                                            't': 'DLInformationTransfer_r15_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DLInformationTransfer_r15_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'dedicatedInfoType-r15',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'dedicatedInfoNAS',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoNAS',
+                            },
+                        ],
+                        [
+                            'dedicatedInfoCDMA2000-1XRTT',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoCDMA2000',
+                            },
+                        ],
+                        [
+                            'dedicatedInfoCDMA2000-HRPD',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoCDMA2000',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'timeReferenceInfo-r15',
+                {
+                    'k': 'ref',
+                    't': 'TimeReferenceInfo_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'DLInformationTransfer_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DLInformationTransfer_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'dedicatedInfoType',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'dedicatedInfoNAS',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoNAS',
+                            },
+                        ],
+                        [
+                            'dedicatedInfoCDMA2000-1XRTT',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoCDMA2000',
+                            },
+                        ],
+                        [
+                            'dedicatedInfoCDMA2000-HRPD',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoCDMA2000',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'DLInformationTransfer_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DLInformationTransfer_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'dedicatedInfoF1c-r16',
+                {
+                    'k': 'ref',
+                    't': 'DedicatedInfoF1c_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DLInformationTransfer_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'DLInformationTransfer_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'DL_AM_RLC': {
         'k': 'seq',
         'ext': False,
@@ -8709,6 +10934,273 @@ TYPES = {
                 },
                 False,
                 None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DL_CCCH_Message': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'message',
+                {
+                    'k': 'ref',
+                    't': 'DL_CCCH_MessageType',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DL_CCCH_MessageType': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'c1',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'rrcConnectionReestablishment',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionReestablishment',
+                            },
+                        ],
+                        [
+                            'rrcConnectionReestablishmentReject',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionReestablishmentReject',
+                            },
+                        ],
+                        [
+                            'rrcConnectionReject',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionReject',
+                            },
+                        ],
+                        [
+                            'rrcConnectionSetup',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionSetup',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            ],
+            [
+                'messageClassExtension',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c2',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'rrcEarlyDataComplete-r15',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RRCEarlyDataComplete_r15',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'messageClassExtensionFuture-r15',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            ],
+        ],
+        'extadd': [],
+    },
+    'DL_DCCH_Message': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'message',
+                {
+                    'k': 'ref',
+                    't': 'DL_DCCH_MessageType',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DL_DCCH_MessageType': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'c1',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'csfbParametersResponseCDMA2000',
+                            {
+                                'k': 'ref',
+                                't': 'CSFBParametersResponseCDMA2000',
+                            },
+                        ],
+                        [
+                            'dlInformationTransfer',
+                            {
+                                'k': 'ref',
+                                't': 'DLInformationTransfer',
+                            },
+                        ],
+                        [
+                            'handoverFromEUTRAPreparationRequest',
+                            {
+                                'k': 'ref',
+                                't': 'HandoverFromEUTRAPreparationRequest',
+                            },
+                        ],
+                        [
+                            'mobilityFromEUTRACommand',
+                            {
+                                'k': 'ref',
+                                't': 'MobilityFromEUTRACommand',
+                            },
+                        ],
+                        [
+                            'rrcConnectionReconfiguration',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionReconfiguration',
+                            },
+                        ],
+                        [
+                            'rrcConnectionRelease',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionRelease',
+                            },
+                        ],
+                        [
+                            'securityModeCommand',
+                            {
+                                'k': 'ref',
+                                't': 'SecurityModeCommand',
+                            },
+                        ],
+                        [
+                            'ueCapabilityEnquiry',
+                            {
+                                'k': 'ref',
+                                't': 'UECapabilityEnquiry',
+                            },
+                        ],
+                        [
+                            'counterCheck',
+                            {
+                                'k': 'ref',
+                                't': 'CounterCheck',
+                            },
+                        ],
+                        [
+                            'ueInformationRequest-r9',
+                            {
+                                'k': 'ref',
+                                't': 'UEInformationRequest_r9',
+                            },
+                        ],
+                        [
+                            'loggedMeasurementConfiguration-r10',
+                            {
+                                'k': 'ref',
+                                't': 'LoggedMeasurementConfiguration_r10',
+                            },
+                        ],
+                        [
+                            'rnReconfiguration-r10',
+                            {
+                                'k': 'ref',
+                                't': 'RNReconfiguration_r10',
+                            },
+                        ],
+                        [
+                            'rrcConnectionResume-r13',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionResume_r13',
+                            },
+                        ],
+                        [
+                            'dlDedicatedMessageSegment-r16',
+                            {
+                                'k': 'ref',
+                                't': 'DLDedicatedMessageSegment_r16',
+                            },
+                        ],
+                        [
+                            'spare2',
+                            {
+                                'k': 'null',
+                            },
+                        ],
+                        [
+                            'spare1',
+                            {
+                                'k': 'null',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            ],
+            [
+                'messageClassExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
             ],
         ],
         'extadd': [],
@@ -8824,6 +11316,118 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'DRB_CountInfo': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'drb-Identity',
+                {
+                    'k': 'ref',
+                    't': 'DRB_Identity',
+                },
+                False,
+                None,
+            ],
+            [
+                'count-Uplink',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 4294967295,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'count-Downlink',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 4294967295,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DRB_CountInfoList': {
+        'k': 'seqof',
+        'size': [0, 11],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'DRB_CountInfo',
+        },
+    },
+    'DRB_CountInfoListExt_r15': {
+        'k': 'seqof',
+        'size': [1, 4],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'DRB_CountInfo',
+        },
+    },
+    'DRB_CountMSB_Info': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'drb-Identity',
+                {
+                    'k': 'ref',
+                    't': 'DRB_Identity',
+                },
+                False,
+                None,
+            ],
+            [
+                'countMSB-Uplink',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 33554431,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'countMSB-Downlink',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 33554431,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'DRB_CountMSB_InfoList': {
+        'k': 'seqof',
+        'size': [1, 11],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'DRB_CountMSB_Info',
+        },
+    },
+    'DRB_CountMSB_InfoListExt_r15': {
+        'k': 'seqof',
+        'size': [1, 4],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'DRB_CountMSB_Info',
+        },
     },
     'DRB_Identity': {
         'k': 'int',
@@ -9887,6 +12491,42 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'DataBLER_MCH_ResultList_r12': {
+        'k': 'seqof',
+        'size': [1, 15],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'DataBLER_MCH_Result_r12',
+        },
+    },
+    'DataBLER_MCH_Result_r12': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mch-Index-r12',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 15,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'dataBLER-Result-r12',
+                {
+                    'k': 'ref',
+                    't': 'BLER_Result_r12',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'DataInactivityTimer_r14': {
         'k': 'enum',
         'names': [
@@ -9909,11 +12549,82 @@ TYPES = {
         ],
         'ext': None,
     },
+    'DedicatedInfoCDMA2000': {
+        'k': 'octets',
+        'size': None,
+        'ext': False,
+        'containing': None,
+    },
+    'DedicatedInfoF1c_r16': {
+        'k': 'octets',
+        'size': None,
+        'ext': False,
+        'containing': None,
+    },
     'DedicatedInfoNAS': {
         'k': 'octets',
         'size': None,
         'ext': False,
         'containing': None,
+    },
+    'DelayBudgetReport_r14': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'type1',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'msMinus1280',
+                        'msMinus640',
+                        'msMinus320',
+                        'msMinus160',
+                        'msMinus80',
+                        'msMinus60',
+                        'msMinus40',
+                        'msMinus20',
+                        'ms0',
+                        'ms20',
+                        'ms40',
+                        'ms60',
+                        'ms80',
+                        'ms160',
+                        'ms320',
+                        'ms640',
+                        'ms1280',
+                    ],
+                    'ext': None,
+                },
+            ],
+            [
+                'type2',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'msMinus192',
+                        'msMinus168',
+                        'msMinus144',
+                        'msMinus120',
+                        'msMinus96',
+                        'msMinus72',
+                        'msMinus48',
+                        'msMinus24',
+                        'ms0',
+                        'ms24',
+                        'ms48',
+                        'ms72',
+                        'ms96',
+                        'ms120',
+                        'ms144',
+                        'ms168',
+                        'ms192',
+                    ],
+                    'ext': None,
+                },
+            ],
+        ],
+        'extadd': [],
     },
     'DeltaFList_PUCCH': {
         'k': 'seq',
@@ -10900,6 +13611,54 @@ TYPES = {
             't': 'MeasIdleCarrierEUTRA_r15',
         },
     },
+    'E_CSFB_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'messageContCDMA2000-1XRTT-r9',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'mobilityCDMA2000-HRPD-r9',
+                {
+                    'k': 'enum',
+                    'names': ['handover', 'redirection'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'messageContCDMA2000-HRPD-r9',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'redirectCarrierCDMA2000-HRPD-r9',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqCDMA2000',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'Enable256QAM_r14': {
         'k': 'choice',
         'ext': False,
@@ -11209,6 +13968,56 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'EventType_r17': {
+        'k': 'choice',
+        'ext': True,
+        'alts': [
+            [
+                'outOfCoverage',
+                {
+                    'k': 'null',
+                },
+            ],
+            [
+                'eventL1',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'l1-Threshold-r17',
+                            {
+                                'k': 'ref',
+                                't': 'ThresholdEUTRA',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'hysteresis-r17',
+                            {
+                                'k': 'ref',
+                                't': 'Hysteresis',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'timeToTrigger-r17',
+                            {
+                                'k': 'ref',
+                                't': 'TimeToTrigger',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            ],
+        ],
+        'extadd': [],
+    },
     'ExcludedCellsToAddMod': {
         'k': 'seq',
         'ext': False,
@@ -11254,6 +14063,457 @@ TYPES = {
             't': 'ARFCN_ValueGERAN',
         },
     },
+    'FailedLogicalChannelIdentity_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'cellGroupIndication-r16',
+                {
+                    'k': 'enum',
+                    'names': ['mn', 'sn'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'logicalChannelIdentity-r16',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 10,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'logicalChannelIdentityExt-r16',
+                {
+                    'k': 'int',
+                    'lb': 32,
+                    'ub': 38,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FailedLogicalChannelInfo_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'failedLogicalChannelIdentity-r15',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'cellGroupIndication-r15',
+                            {
+                                'k': 'enum',
+                                'names': ['mn', 'sn'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'logicalChannelIdentity-r15',
+                            {
+                                'k': 'int',
+                                'lb': 1,
+                                'ub': 10,
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'logicalChannelIdentityExt-r15',
+                            {
+                                'k': 'int',
+                                'lb': 32,
+                                'ub': 38,
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'failureType',
+                {
+                    'k': 'enum',
+                    'names': ['duplication', 'spare3', 'spare2', 'spare1'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FailureInformation_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'failedLogicalChannelInfo-r15',
+                {
+                    'k': 'ref',
+                    't': 'FailedLogicalChannelInfo_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FailureInformation_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'failureInformation-r16',
+                            {
+                                'k': 'ref',
+                                't': 'FailureInformation_r16_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FailureInformation_r16_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'failedLogicalChannelIdentity-r16',
+                {
+                    'k': 'ref',
+                    't': 'FailedLogicalChannelIdentity_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'failureType-r16',
+                {
+                    'k': 'enum',
+                    'names': ['duplication', 'dapsHO-failure', 'spare2', 'spare1'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FailureReportMCG_r16': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'failureType-r16',
+                {
+                    'k': 'enum',
+                    'names': [
+                        't310-Expiry',
+                        'randomAccessProblem',
+                        'rlc-MaxNumRetx',
+                        't312-Expiry',
+                        'spare4',
+                        'spare3',
+                        'spare2',
+                        'spare1',
+                    ],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultFreqListEUTRA-r16',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultList3EUTRA_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultFreqListNR-r16',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultFreqListFailNR_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultFreqListGERAN-r16',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultList2GERAN_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultFreqListUTRA-r16',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultList2UTRA_r9',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultSCG-r16',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FailureReportSCG_NR_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'failureType-r15',
+                {
+                    'k': 'enum',
+                    'names': [
+                        't310-Expiry',
+                        'randomAccessProblem',
+                        'rlc-MaxNumRetx',
+                        'synchReconfigFailureSCG',
+                        'scg-reconfigFailure',
+                        'srb3-IntegrityFailure',
+                        'dummy',
+                    ],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultFreqListNR-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultFreqListFailNR_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultSCG-r15',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': [
+                    'locationInfo-r16',
+                    'logMeasResultListBT-r16',
+                    'logMeasResultListWLAN-r16',
+                    'failureType-v1610',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'locationInfo-r16',
+                            {
+                                'k': 'ref',
+                                't': 'LocationInfo_r10',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'logMeasResultListBT-r16',
+                            {
+                                'k': 'ref',
+                                't': 'LogMeasResultListBT_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'logMeasResultListWLAN-r16',
+                            {
+                                'k': 'ref',
+                                't': 'LogMeasResultListWLAN_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'failureType-v1610',
+                            {
+                                'k': 'enum',
+                                'names': [
+                                    't312-Expiry',
+                                    'scg-lbtFailure',
+                                    'beamFailureRecoveryFailure',
+                                    'bh-RLF-r16',
+                                    'beamFailure-r17',
+                                    'spare3',
+                                    'spare2',
+                                    'spare1',
+                                ],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'FailureReportSCG_r12': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'failureType-r12',
+                {
+                    'k': 'enum',
+                    'names': [
+                        't313-Expiry',
+                        'randomAccessProblem',
+                        'rlc-MaxNumRetx',
+                        'scg-ChangeFailure',
+                    ],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultServFreqList-r12',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultServFreqList_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultNeighCells-r12',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultList2EUTRA_r9',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['failureType-v1290'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'failureType-v1290',
+                            {
+                                'k': 'enum',
+                                'names': ['maxUL-TimingDiff-v1290'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultServFreqListExt-r13'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultServFreqListExt-r13',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultServFreqListExt_r13',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
     'FilterCoefficient': {
         'k': 'enum',
         'names': [
@@ -11275,6 +14535,66 @@ TYPES = {
             'spare1',
         ],
         'ext': [],
+    },
+    'FlightPathInfoReportConfig_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'maxWayPointNumber-r15',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 20,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'includeTimeStamp-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FlightPathInfoReport_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'flightPath-r15',
+                {
+                    'k': 'seqof',
+                    'size': [1, 20],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'WayPointLocation_r15',
+                    },
+                },
+                True,
+                None,
+            ],
+            [
+                'dummy',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
     },
     'Format4_resource_r13': {
         'k': 'seq',
@@ -11498,6 +14818,269 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'FreqPriorityEUTRA': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellReselectionPriority',
+                {
+                    'k': 'ref',
+                    't': 'CellReselectionPriority',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FreqPriorityEUTRA_r12': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r12',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellReselectionPriority-r12',
+                {
+                    'k': 'ref',
+                    't': 'CellReselectionPriority',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FreqPriorityEUTRA_v1310': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'cellReselectionSubPriority-r13',
+                {
+                    'k': 'ref',
+                    't': 'CellReselectionSubPriority_r13',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FreqPriorityEUTRA_v9e0': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-v9e0',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_v9e0',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FreqPriorityListEUTRA': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'FreqPriorityEUTRA',
+        },
+    },
+    'FreqPriorityListEUTRA_v1310': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'FreqPriorityEUTRA_v1310',
+        },
+    },
+    'FreqPriorityListExtEUTRA_r12': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'FreqPriorityEUTRA_r12',
+        },
+    },
+    'FreqPriorityListExtEUTRA_v1310': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'FreqPriorityEUTRA_v1310',
+        },
+    },
+    'FreqPriorityListNR_r15': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'FreqPriorityNR_r15',
+        },
+    },
+    'FreqPriorityListUTRA_FDD': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'FreqPriorityUTRA_FDD',
+        },
+    },
+    'FreqPriorityListUTRA_TDD': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'FreqPriorityUTRA_TDD',
+        },
+    },
+    'FreqPriorityNR_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r15',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellReselectionPriority-r15',
+                {
+                    'k': 'ref',
+                    't': 'CellReselectionPriority',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellReselectionSubPriority-r15',
+                {
+                    'k': 'ref',
+                    't': 'CellReselectionSubPriority_r13',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FreqPriorityUTRA_FDD': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueUTRA',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellReselectionPriority',
+                {
+                    'k': 'ref',
+                    't': 'CellReselectionPriority',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FreqPriorityUTRA_TDD': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueUTRA',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellReselectionPriority',
+                {
+                    'k': 'ref',
+                    't': 'CellReselectionPriority',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FreqsPriorityGERAN': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreqs',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqsGERAN',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellReselectionPriority',
+                {
+                    'k': 'ref',
+                    't': 'CellReselectionPriority',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'FreqsPriorityListGERAN': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'FreqsPriorityGERAN',
+        },
+    },
     'GNSS_ID_r15': {
         'k': 'seq',
         'ext': True,
@@ -11514,6 +15097,33 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'GNSS_PositionFixDuration_r18': {
+        'k': 'enum',
+        'names': ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's13', 's19', 's25', 's31'],
+        'ext': None,
+    },
+    'GNSS_ValidityDuration_r17': {
+        'k': 'enum',
+        'names': [
+            's10',
+            's20',
+            's30',
+            's40',
+            's50',
+            's60',
+            'min5',
+            'min10',
+            'min15',
+            'min20',
+            'min25',
+            'min30',
+            'min50',
+            'min90',
+            'min120',
+            'infinity',
+        ],
+        'ext': None,
     },
     'GWUS_Config_r16': {
         'k': 'seq',
@@ -11773,6 +15383,63 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'Handover': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'targetRAT-Type',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'utra',
+                        'geran',
+                        'cdma2000-1XRTT',
+                        'cdma2000-HRPD',
+                        'nr',
+                        'eutra',
+                        'spare2',
+                        'spare1',
+                    ],
+                    'ext': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'targetRAT-MessageContainer',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'nas-SecurityParamFromEUTRA',
+                {
+                    'k': 'octets',
+                    'size': [1, 1],
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'systemInformation',
+                {
+                    'k': 'ref',
+                    't': 'SI_OrPSI_GERAN',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'HandoverCommand': {
         'k': 'seq',
         'ext': False,
@@ -11882,6 +15549,209 @@ TYPES = {
                     'ext': False,
                     'comp': [],
                     'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'HandoverFromEUTRAPreparationRequest': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'handoverFromEUTRAPreparationRequest-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'HandoverFromEUTRAPreparationRequest_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'HandoverFromEUTRAPreparationRequest_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'cdma2000-Type',
+                {
+                    'k': 'ref',
+                    't': 'CDMA2000_Type',
+                },
+                False,
+                None,
+            ],
+            [
+                'rand',
+                {
+                    'k': 'ref',
+                    't': 'RAND_CDMA2000',
+                },
+                True,
+                None,
+            ],
+            [
+                'mobilityParameters',
+                {
+                    'k': 'ref',
+                    't': 'MobilityParametersCDMA2000',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'HandoverFromEUTRAPreparationRequest_v890_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'HandoverFromEUTRAPreparationRequest_v1020_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'dualRxTxRedirectIndicator-r10',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'redirectCarrierCDMA2000-1XRTT-r10',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqCDMA2000',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'HandoverFromEUTRAPreparationRequest_v890_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'HandoverFromEUTRAPreparationRequest_v920_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'HandoverFromEUTRAPreparationRequest_v920_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'concurrPrepCDMA2000-HRPD-r9',
+                {
+                    'k': 'bool',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'HandoverFromEUTRAPreparationRequest_v1020_IEs',
                 },
                 True,
                 None,
@@ -12126,6 +15996,64 @@ TYPES = {
             },
         ],
     },
+    'IDC_SubframePatternList_r11': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'IDC_SubframePattern_r11',
+        },
+    },
+    'IDC_SubframePattern_r11': {
+        'k': 'choice',
+        'ext': True,
+        'alts': [
+            [
+                'subframePatternFDD-r11',
+                {
+                    'k': 'bits',
+                    'size': [4, 4],
+                    'ext': False,
+                },
+            ],
+            [
+                'subframePatternTDD-r11',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'subframeConfig0-r11',
+                            {
+                                'k': 'bits',
+                                'size': [70, 70],
+                                'ext': False,
+                            },
+                        ],
+                        [
+                            'subframeConfig1-5-r11',
+                            {
+                                'k': 'bits',
+                                'size': [10, 10],
+                                'ext': False,
+                            },
+                        ],
+                        [
+                            'subframeConfig6-r11',
+                            {
+                                'k': 'bits',
+                                'size': [60, 60],
+                                'ext': False,
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            ],
+        ],
+        'extadd': [],
+    },
     'IKE_Identity_r13': {
         'k': 'seq',
         'ext': False,
@@ -12163,6 +16091,448 @@ TYPES = {
                     'size': [128, 128],
                     'ext': False,
                 },
+            ],
+        ],
+        'extadd': [],
+    },
+    'I_RNTI_r15': {
+        'k': 'bits',
+        'size': [40, 40],
+        'ext': False,
+    },
+    'IdleModeMobilityControlInfo': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'freqPriorityListEUTRA',
+                {
+                    'k': 'ref',
+                    't': 'FreqPriorityListEUTRA',
+                },
+                True,
+                None,
+            ],
+            [
+                'freqPriorityListGERAN',
+                {
+                    'k': 'ref',
+                    't': 'FreqsPriorityListGERAN',
+                },
+                True,
+                None,
+            ],
+            [
+                'freqPriorityListUTRA-FDD',
+                {
+                    'k': 'ref',
+                    't': 'FreqPriorityListUTRA_FDD',
+                },
+                True,
+                None,
+            ],
+            [
+                'freqPriorityListUTRA-TDD',
+                {
+                    'k': 'ref',
+                    't': 'FreqPriorityListUTRA_TDD',
+                },
+                True,
+                None,
+            ],
+            [
+                'bandClassPriorityListHRPD',
+                {
+                    'k': 'ref',
+                    't': 'BandClassPriorityListHRPD',
+                },
+                True,
+                None,
+            ],
+            [
+                'bandClassPriorityList1XRTT',
+                {
+                    'k': 'ref',
+                    't': 'BandClassPriorityList1XRTT',
+                },
+                True,
+                None,
+            ],
+            [
+                't320',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'min5',
+                        'min10',
+                        'min20',
+                        'min30',
+                        'min60',
+                        'min120',
+                        'min180',
+                        'spare1',
+                    ],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['freqPriorityListExtEUTRA-r12'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'freqPriorityListExtEUTRA-r12',
+                            {
+                                'k': 'ref',
+                                't': 'FreqPriorityListExtEUTRA_r12',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['freqPriorityListEUTRA-v1310', 'freqPriorityListExtEUTRA-v1310'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'freqPriorityListEUTRA-v1310',
+                            {
+                                'k': 'ref',
+                                't': 'FreqPriorityListEUTRA_v1310',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'freqPriorityListExtEUTRA-v1310',
+                            {
+                                'k': 'ref',
+                                't': 'FreqPriorityListExtEUTRA_v1310',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['freqPriorityListNR-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'freqPriorityListNR-r15',
+                            {
+                                'k': 'ref',
+                                't': 'FreqPriorityListNR_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'IdleModeMobilityControlInfo_v9e0': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'freqPriorityListEUTRA-v9e0',
+                {
+                    'k': 'seqof',
+                    'size': [1, 8],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'FreqPriorityEUTRA_v9e0',
+                    },
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'InDeviceCoexIndication_r11': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'inDeviceCoexIndication-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'InDeviceCoexIndication_r11_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'InDeviceCoexIndication_r11_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'affectedCarrierFreqList-r11',
+                {
+                    'k': 'ref',
+                    't': 'AffectedCarrierFreqList_r11',
+                },
+                True,
+                None,
+            ],
+            [
+                'tdm-AssistanceInfo-r11',
+                {
+                    'k': 'ref',
+                    't': 'TDM_AssistanceInfo_r11',
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'InDeviceCoexIndication_v11d0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'InDeviceCoexIndication_v11d0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ul-CA-AssistanceInfo-r11',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'affectedCarrierFreqCombList-r11',
+                            {
+                                'k': 'ref',
+                                't': 'AffectedCarrierFreqCombList_r11',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'victimSystemType-r11',
+                            {
+                                'k': 'ref',
+                                't': 'VictimSystemType_r11',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'InDeviceCoexIndication_v1310_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'InDeviceCoexIndication_v1310_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'affectedCarrierFreqList-v1310',
+                {
+                    'k': 'ref',
+                    't': 'AffectedCarrierFreqList_v1310',
+                },
+                True,
+                None,
+            ],
+            [
+                'affectedCarrierFreqCombList-r13',
+                {
+                    'k': 'ref',
+                    't': 'AffectedCarrierFreqCombList_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'InDeviceCoexIndication_v1360_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'InDeviceCoexIndication_v1360_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'hardwareSharingProblem-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'InDeviceCoexIndication_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'InDeviceCoexIndication_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mrdc-AssistanceInfo-r15',
+                {
+                    'k': 'ref',
+                    't': 'MRDC_AssistanceInfo_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'InDeviceCoexIndication_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'InDeviceCoexIndication_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'victimSystemType-v1610',
+                {
+                    'k': 'ref',
+                    't': 'VictimSystemType_v1610',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
             ],
         ],
         'extadd': [],
@@ -13042,6 +17412,135 @@ TYPES = {
             't': 'PhysCellIdRange',
         },
     },
+    'InterFreqRSTDMeasurementIndication_r10': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'interFreqRSTDMeasurementIndication-r10',
+                                        {
+                                            'k': 'ref',
+                                            't': 'InterFreqRSTDMeasurementIndication_r10_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'InterFreqRSTDMeasurementIndication_r10_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rstd-InterFreqIndication-r10',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'start',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'rstd-InterFreqInfoList-r10',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RSTD_InterFreqInfoList_r10',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'stop',
+                            {
+                                'k': 'null',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'IntraFreqExcludedCellList': {
         'k': 'seqof',
         'size': [1, 16],
@@ -13415,6 +17914,1074 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'LocationInfo_r10': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'locationCoordinates-r10',
+                {
+                    'k': 'choice',
+                    'ext': True,
+                    'alts': [
+                        [
+                            'ellipsoid-Point-r10',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                        ],
+                        [
+                            'ellipsoidPointWithAltitude-r10',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                        ],
+                    ],
+                    'extadd': [
+                        [
+                            'ellipsoidPointWithUncertaintyCircle-r11',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                        ],
+                        [
+                            'ellipsoidPointWithUncertaintyEllipse-r11',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                        ],
+                        [
+                            'ellipsoidPointWithAltitudeAndUncertaintyEllipsoid-r11',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                        ],
+                        [
+                            'ellipsoidArc-r11',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                        ],
+                        [
+                            'polygon-r11',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                        ],
+                    ],
+                },
+                False,
+                None,
+            ],
+            [
+                'horizontalVelocity-r10',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'gnss-TOD-msec-r10',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['verticalVelocityInfo-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'verticalVelocityInfo-r15',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'verticalVelocity-r15',
+                                        {
+                                            'k': 'octets',
+                                            'size': None,
+                                            'ext': False,
+                                            'containing': None,
+                                        },
+                                    ],
+                                    [
+                                        'verticalVelocityAndUncertainty-r15',
+                                        {
+                                            'k': 'octets',
+                                            'size': None,
+                                            'ext': False,
+                                            'containing': None,
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'LogMeasInfoList_r10': {
+        'k': 'seqof',
+        'size': [1, 520],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'LogMeasInfo_r10',
+        },
+    },
+    'LogMeasInfo_r10': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'locationInfo-r10',
+                {
+                    'k': 'ref',
+                    't': 'LocationInfo_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'relativeTimeStamp-r10',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 7200,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'servCellIdentity-r10',
+                {
+                    'k': 'ref',
+                    't': 'CellGlobalIdEUTRA',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultServCell-r10',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'rsrpResult-r10',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrqResult-r10',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultNeighCells-r10',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListEUTRA-r10',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2EUTRA_r9',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListUTRA-r10',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2UTRA_r9',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListGERAN-r10',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2GERAN_r10',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListCDMA2000-r10',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2CDMA2000_r9',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['measResultListEUTRA-v1090'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListEUTRA-v1090',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2EUTRA_v9e0',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': [
+                    'measResultListMBSFN-r12',
+                    'measResultServCell-v1250',
+                    'servCellRSRQ-Type-r12',
+                    'measResultListEUTRA-v1250',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListMBSFN-r12',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultListMBSFN_r12',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultServCell-v1250',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range_v1250',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'servCellRSRQ-Type-r12',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Type_r12',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListEUTRA-v1250',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2EUTRA_v1250',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['inDeviceCoexDetected-r13'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'inDeviceCoexDetected-r13',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultServCell-v1360'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultServCell-v1360',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range_v1360',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['logMeasResultListBT-r15', 'logMeasResultListWLAN-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'logMeasResultListBT-r15',
+                            {
+                                'k': 'ref',
+                                't': 'LogMeasResultListBT_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'logMeasResultListWLAN-r15',
+                            {
+                                'k': 'ref',
+                                't': 'LogMeasResultListWLAN_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['anyCellSelectionDetected-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'anyCellSelectionDetected-r15',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultListNR-r16'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListNR-r16',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultCellListNR_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultListNR-v1640', 'measResultListExtNR-r16'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListNR-v1640',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'carrierFreqNR-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ARFCN_ValueNR_r15',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListExtNR-r16',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultFreqListNR_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['uncomBarPreMeasResult-r17'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'uncomBarPreMeasResult-r17',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'LogMeasReport_r10': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'absoluteTimeStamp-r10',
+                {
+                    'k': 'ref',
+                    't': 'AbsoluteTimeInfo_r10',
+                },
+                False,
+                None,
+            ],
+            [
+                'traceReference-r10',
+                {
+                    'k': 'ref',
+                    't': 'TraceReference_r10',
+                },
+                False,
+                None,
+            ],
+            [
+                'traceRecordingSessionRef-r10',
+                {
+                    'k': 'octets',
+                    'size': [2, 2],
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'tce-Id-r10',
+                {
+                    'k': 'octets',
+                    'size': [1, 1],
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'logMeasInfoList-r10',
+                {
+                    'k': 'ref',
+                    't': 'LogMeasInfoList_r10',
+                },
+                False,
+                None,
+            ],
+            [
+                'logMeasAvailable-r10',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['logMeasAvailableBT-r15', 'logMeasAvailableWLAN-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'logMeasAvailableBT-r15',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'logMeasAvailableWLAN-r15',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'LogMeasResultBT_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'bt-Addr-r15',
+                {
+                    'k': 'bits',
+                    'size': [48, 48],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'rssi-BT-r15',
+                {
+                    'k': 'int',
+                    'lb': -128,
+                    'ub': 127,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LogMeasResultListBT_r15': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'LogMeasResultBT_r15',
+        },
+    },
+    'LogMeasResultListWLAN_r15': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'LogMeasResultWLAN_r15',
+        },
+    },
+    'LogMeasResultWLAN_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'wlan-Identifiers-r15',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_Identifiers_r12',
+                },
+                False,
+                None,
+            ],
+            [
+                'rssiWLAN-r15',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_RSSI_Range_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'rtt-WLAN-r15',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_RTT_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LoggedEventTriggerConfig_r17': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'eventType-r17',
+                {
+                    'k': 'ref',
+                    't': 'EventType_r17',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LoggedMeasurementConfiguration_r10': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'loggedMeasurementConfiguration-r10',
+                                        {
+                                            'k': 'ref',
+                                            't': 'LoggedMeasurementConfiguration_r10_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LoggedMeasurementConfiguration_r10_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'traceReference-r10',
+                {
+                    'k': 'ref',
+                    't': 'TraceReference_r10',
+                },
+                False,
+                None,
+            ],
+            [
+                'traceRecordingSessionRef-r10',
+                {
+                    'k': 'octets',
+                    'size': [2, 2],
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'tce-Id-r10',
+                {
+                    'k': 'octets',
+                    'size': [1, 1],
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'absoluteTimeInfo-r10',
+                {
+                    'k': 'ref',
+                    't': 'AbsoluteTimeInfo_r10',
+                },
+                False,
+                None,
+            ],
+            [
+                'areaConfiguration-r10',
+                {
+                    'k': 'ref',
+                    't': 'AreaConfiguration_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'loggingDuration-r10',
+                {
+                    'k': 'ref',
+                    't': 'LoggingDuration_r10',
+                },
+                False,
+                None,
+            ],
+            [
+                'loggingInterval-r10',
+                {
+                    'k': 'ref',
+                    't': 'LoggingInterval_r10',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'LoggedMeasurementConfiguration_v1080_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LoggedMeasurementConfiguration_v1080_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension-r10',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'LoggedMeasurementConfiguration_v1130_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LoggedMeasurementConfiguration_v1130_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-IdentityList-r11',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_IdentityList3_r11',
+                },
+                True,
+                None,
+            ],
+            [
+                'areaConfiguration-v1130',
+                {
+                    'k': 'ref',
+                    't': 'AreaConfiguration_v1130',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'LoggedMeasurementConfiguration_v1250_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LoggedMeasurementConfiguration_v1250_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'targetMBSFN-AreaList-r12',
+                {
+                    'k': 'ref',
+                    't': 'TargetMBSFN_AreaList_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'LoggedMeasurementConfiguration_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LoggedMeasurementConfiguration_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'bt-NameList-r15',
+                {
+                    'k': 'ref',
+                    't': 'BT_NameList_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'wlan-NameList-r15',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_NameList_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'LoggedMeasurementConfiguration_v1700_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LoggedMeasurementConfiguration_v1700_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'loggedEventTriggerConfig-r17',
+                {
+                    'k': 'ref',
+                    't': 'LoggedEventTriggerConfig_r17',
+                },
+                True,
+                None,
+            ],
+            [
+                'measUncomBarPre-r17',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'LoggedMeasurementConfiguration_v1800_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LoggedMeasurementConfiguration_v1800_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'sigLoggedMeasType-r18',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'LoggingDuration_r10': {
+        'k': 'enum',
+        'names': [
+            'min10',
+            'min20',
+            'min40',
+            'min60',
+            'min90',
+            'min120',
+            'spare2',
+            'spare1',
+        ],
+        'ext': None,
+    },
+    'LoggingInterval_r10': {
+        'k': 'enum',
+        'names': [
+            'ms1280',
+            'ms2560',
+            'ms5120',
+            'ms10240',
+            'ms20480',
+            'ms30720',
+            'ms40960',
+            'ms61440',
+        ],
+        'ext': None,
     },
     'LogicalChGroupInfoList_r13': {
         'k': 'seqof',
@@ -14662,6 +20229,314 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'MBMSCountingResponse_r10': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'countingResponse-r10',
+                                        {
+                                            'k': 'ref',
+                                            't': 'MBMSCountingResponse_r10_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBMSCountingResponse_r10_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mbsfn-AreaIndex-r10',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 7,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'countingResponseList-r10',
+                {
+                    'k': 'ref',
+                    't': 'CountingResponseList_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBMSInterestIndication_r11': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'interestIndication-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'MBMSInterestIndication_r11_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBMSInterestIndication_r11_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mbms-FreqList-r11',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqListMBMS_r11',
+                },
+                True,
+                None,
+            ],
+            [
+                'mbms-Priority-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'MBMSInterestIndication_v1310_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBMSInterestIndication_v1310_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mbms-Services-r13',
+                {
+                    'k': 'ref',
+                    't': 'MBMS_ServiceList_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'MBMSInterestIndication_v1540_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBMSInterestIndication_v1540_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mbms-ROM-InfoList-r15',
+                {
+                    'k': 'seqof',
+                    'size': [1, 15],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'MBMS_ROM_Info_r15',
+                    },
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'MBMSInterestIndication_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBMSInterestIndication_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mbms-ROM-InfoList-r16',
+                {
+                    'k': 'seqof',
+                    'size': [1, 15],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'MBMS_ROM_Info_r16',
+                    },
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'MBMS_NotificationConfig_r9': {
         'k': 'seq',
         'ext': False,
@@ -14718,6 +20593,103 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'MBMS_ROM_Info_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mbms-ROM-Freq-r15',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                False,
+                None,
+            ],
+            [
+                'mbms-ROM-SubcarrierSpacing-r15',
+                {
+                    'k': 'enum',
+                    'names': ['kHz15', 'kHz7dot5', 'kHz1dot25'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'mbms-Bandwidth-r15',
+                {
+                    'k': 'enum',
+                    'names': ['n6', 'n15', 'n25', 'n50', 'n75', 'n100'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBMS_ROM_Info_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mbms-ROM-Freq-r16',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                False,
+                None,
+            ],
+            [
+                'mbms-ROM-SubcarrierSpacing-r16',
+                {
+                    'k': 'enum',
+                    'names': ['kHz2dot5', 'kHz0dot37'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'mbms-Bandwidth-r16',
+                {
+                    'k': 'enum',
+                    'names': ['n6', 'n15', 'n25', 'n50', 'n75', 'n100'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBMS_ServiceInfo_r13': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'tmgi-r13',
+                {
+                    'k': 'ref',
+                    't': 'TMGI_r9',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MBMS_ServiceList_r13': {
+        'k': 'seqof',
+        'size': [0, 15],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MBMS_ServiceInfo_r13',
+        },
     },
     'MBSFN_AreaId_r12': {
         'k': 'int',
@@ -15096,6 +21068,12 @@ TYPES = {
             },
         ],
     },
+    'MBSFN_RSRQ_Range_r12': {
+        'k': 'int',
+        'lb': 0,
+        'ub': 31,
+        'ext': False,
+    },
     'MBSFN_SubframeConfig': {
         'k': 'seq',
         'ext': False,
@@ -15220,6 +21198,79 @@ TYPES = {
         'ub': 9,
         'ext': False,
     },
+    'MCGFailureInformation_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'mcgFailureInformation',
+                            {
+                                'k': 'ref',
+                                't': 'MCGFailureInformation_r16_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MCGFailureInformation_r16_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'failureReportMCG-r16',
+                {
+                    'k': 'ref',
+                    't': 'FailureReportMCG_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'MCS_PSSCH_Range_r15': {
         'k': 'seq',
         'ext': False,
@@ -15249,6 +21300,11 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'MMEC': {
+        'k': 'bits',
+        'size': [8, 8],
+        'ext': False,
+    },
     'MNC': {
         'k': 'seqof',
         'size': [2, 3],
@@ -15257,6 +21313,53 @@ TYPES = {
             'k': 'ref',
             't': 'MCC_MNC_Digit',
         },
+    },
+    'MRDC_AssistanceInfo_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'affectedCarrierFreqCombInfoListMRDC-r15',
+                {
+                    'k': 'seqof',
+                    'size': [1, 128],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'AffectedCarrierFreqCombInfoMRDC_r15',
+                    },
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['affectedCarrierFreqCombInfoListMRDC-v1610'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'affectedCarrierFreqCombInfoListMRDC-v1610',
+                            {
+                                'k': 'seqof',
+                                'size': [1, 128],
+                                'ext': False,
+                                'of': {
+                                    'k': 'ref',
+                                    't': 'VictimSystemType_v1610',
+                                },
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
     },
     'MTC_SSB_NR_r15': {
         'k': 'seq',
@@ -16970,6 +23073,71 @@ TYPES = {
             },
         ],
     },
+    'MeasIdleConfigDedicated_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'measIdleCarrierListEUTRA-r15',
+                {
+                    'k': 'ref',
+                    't': 'EUTRA_CarrierList_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'measIdleDuration-r15',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'sec10',
+                        'sec30',
+                        'sec60',
+                        'sec120',
+                        'sec180',
+                        'sec240',
+                        'sec300',
+                        'spare',
+                    ],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['measIdleCarrierListNR-r16', 'validityAreaList-r16'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measIdleCarrierListNR-r16',
+                            {
+                                'k': 'ref',
+                                't': 'NR_CarrierList_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'validityAreaList-r16',
+                            {
+                                'k': 'ref',
+                                't': 'ValidityAreaList_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
     'MeasIdleConfigSIB_NR_r16': {
         'k': 'seq',
         'ext': True,
@@ -17531,6 +23699,12 @@ TYPES = {
         'k': 'int',
         'lb': 1,
         'ub': 32,
+        'ext': False,
+    },
+    'MeasObjectId_r13': {
+        'k': 'int',
+        'lb': 1,
+        'ub': 64,
         'ext': False,
     },
     'MeasObjectId_v1310': {
@@ -18198,6 +24372,2641 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'MeasReportAppLayer_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'measReportAppLayer-r15',
+                            {
+                                'k': 'ref',
+                                't': 'MeasReportAppLayer_r15_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasReportAppLayer_r15_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'measReportAppLayerContainer-r15',
+                {
+                    'k': 'octets',
+                    'size': [1, 8000],
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'serviceType-r15',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'qoe',
+                        'qoemtsi',
+                        'spare6',
+                        'spare5',
+                        'spare4',
+                        'spare3',
+                        'spare2',
+                        'spare1',
+                    ],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'MeasReportAppLayer_v1590_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasReportAppLayer_v1590_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResult2CDMA2000_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r9',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqCDMA2000',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultList-r9',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultsCDMA2000',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResult2EUTRA_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r9',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultList-r9',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultListEUTRA',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResult2EUTRA_v1250': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rsrq-Type-r12',
+                {
+                    'k': 'ref',
+                    't': 'RSRQ_Type_r12',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResult2EUTRA_v9e0': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-v9e0',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_v9e0',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResult2UTRA_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r9',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueUTRA',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultList-r9',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultListUTRA',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResult3EUTRA_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'carrierFreq-r15',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultServingCell-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultEUTRA',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultNeighCellList-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultListEUTRA',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultCBR_r14': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'poolIdentity-r14',
+                {
+                    'k': 'ref',
+                    't': 'SL_V2X_TxPoolReportIdentity_r14',
+                },
+                False,
+                None,
+            ],
+            [
+                'cbr-PSSCH-r14',
+                {
+                    'k': 'ref',
+                    't': 'SL_CBR_r14',
+                },
+                False,
+                None,
+            ],
+            [
+                'cbr-PSCCH-r14',
+                {
+                    'k': 'ref',
+                    't': 'SL_CBR_r14',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultCDMA2000': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'physCellId',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellIdCDMA2000',
+                },
+                False,
+                None,
+            ],
+            [
+                'cgi-Info',
+                {
+                    'k': 'ref',
+                    't': 'CellGlobalIdCDMA2000',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResult',
+                {
+                    'k': 'seq',
+                    'ext': True,
+                    'comp': [
+                        [
+                            'pilotPnPhase',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 32767,
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'pilotStrength',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 63,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultCSI_RS_List_r12': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultCSI_RS_r12',
+        },
+    },
+    'MeasResultCSI_RS_r12': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'measCSI-RS-Id-r12',
+                {
+                    'k': 'ref',
+                    't': 'MeasCSI_RS_Id_r12',
+                },
+                False,
+                None,
+            ],
+            [
+                'csi-RSRP-Result-r12',
+                {
+                    'k': 'ref',
+                    't': 'CSI_RSRP_Range_r12',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultCellListNR_r15': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultCellNR_r15',
+        },
+    },
+    'MeasResultCellListSFTD_r15': {
+        'k': 'seqof',
+        'size': [1, 3],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultCellSFTD_r15',
+        },
+    },
+    'MeasResultCellNR_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'pci-r15',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellIdNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultCell-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultRS-IndexList-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultSSB_IndexList_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['cgi-Info-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'cgi-Info-r15',
+                            {
+                                'k': 'ref',
+                                't': 'CGI_InfoNR_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'MeasResultCellSFTD_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'physCellId-r15',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellIdNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'sfn-OffsetResult-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 1023,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'frameBoundaryOffsetResult-r15',
+                {
+                    'k': 'int',
+                    'lb': -30720,
+                    'ub': 30719,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'rsrpResult-r15',
+                {
+                    'k': 'ref',
+                    't': 'RSRP_RangeNR_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultEUTRA': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'physCellId',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellId',
+                },
+                False,
+                None,
+            ],
+            [
+                'cgi-Info',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'cellGlobalId',
+                            {
+                                'k': 'ref',
+                                't': 'CellGlobalIdEUTRA',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'trackingAreaCode',
+                            {
+                                'k': 'ref',
+                                't': 'TrackingAreaCode',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'plmn-IdentityList',
+                            {
+                                'k': 'ref',
+                                't': 'PLMN_IdentityList2',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'measResult',
+                {
+                    'k': 'seq',
+                    'ext': True,
+                    'comp': [
+                        [
+                            'rsrpResult',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'rsrqResult',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [
+                        {
+                            'k': 'extgrp',
+                            'names': ['additionalSI-Info-r9'],
+                            'node': {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'additionalSI-Info-r9',
+                                        {
+                                            'k': 'ref',
+                                            't': 'AdditionalSI_Info_r9',
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        },
+                        {
+                            'k': 'extgrp',
+                            'names': ['primaryPLMN-Suitable-r12', 'measResult-v1250'],
+                            'node': {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'primaryPLMN-Suitable-r12',
+                                        {
+                                            'k': 'enum',
+                                            'names': ['true'],
+                                            'ext': None,
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                    [
+                                        'measResult-v1250',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RSRQ_Range_v1250',
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        },
+                        {
+                            'k': 'extgrp',
+                            'names': ['rs-sinr-Result-r13', 'cgi-Info-v1310'],
+                            'node': {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'rs-sinr-Result-r13',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RS_SINR_Range_r13',
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                    [
+                                        'cgi-Info-v1310',
+                                        {
+                                            'k': 'seq',
+                                            'ext': False,
+                                            'comp': [
+                                                [
+                                                    'freqBandIndicator-r13',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'FreqBandIndicator_r11',
+                                                    },
+                                                    True,
+                                                    None,
+                                                ],
+                                                [
+                                                    'multiBandInfoList-r13',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'MultiBandInfoList_r11',
+                                                    },
+                                                    True,
+                                                    None,
+                                                ],
+                                                [
+                                                    'freqBandIndicatorPriority-r13',
+                                                    {
+                                                        'k': 'enum',
+                                                        'names': ['true'],
+                                                        'ext': None,
+                                                    },
+                                                    True,
+                                                    None,
+                                                ],
+                                            ],
+                                            'extadd': [],
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        },
+                        {
+                            'k': 'extgrp',
+                            'names': ['measResult-v1360'],
+                            'node': {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'measResult-v1360',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RSRP_Range_v1360',
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        },
+                        {
+                            'k': 'extgrp',
+                            'names': ['cgi-Info-5GC-r15'],
+                            'node': {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'cgi-Info-5GC-r15',
+                                        {
+                                            'k': 'seqof',
+                                            'size': [1, 6],
+                                            'ext': False,
+                                            'of': {
+                                                'k': 'ref',
+                                                't': 'CellAccessRelatedInfo_5GC_r15',
+                                            },
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        },
+                    ],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultForECID_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ue-RxTxTimeDiffResult-r9',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 4095,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'currentSFN-r9',
+                {
+                    'k': 'bits',
+                    'size': [10, 10],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultForRSSI_NR_r16': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'rssi-ResultNR-r16',
+                {
+                    'k': 'ref',
+                    't': 'RSSI_Range_r13',
+                },
+                False,
+                None,
+            ],
+            [
+                'channelOccupancyNR-r16',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 100,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultForRSSI_r13': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'rssi-Result-r13',
+                {
+                    'k': 'ref',
+                    't': 'RSSI_Range_r13',
+                },
+                False,
+                None,
+            ],
+            [
+                'channelOccupancy-r13',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 100,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultFreqFailNR_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'carrierFreq-r15',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultCellList-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultCellListNR_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultFreqListFailNR_r15': {
+        'k': 'seqof',
+        'size': [1, 5],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultFreqFailNR_r15',
+        },
+    },
+    'MeasResultFreqListNR_r16': {
+        'k': 'seqof',
+        'size': [1, 7],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultFreqFailNR_r15',
+        },
+    },
+    'MeasResultGERAN': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqGERAN',
+                },
+                False,
+                None,
+            ],
+            [
+                'physCellId',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellIdGERAN',
+                },
+                False,
+                None,
+            ],
+            [
+                'cgi-Info',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'cellGlobalId',
+                            {
+                                'k': 'ref',
+                                't': 'CellGlobalIdGERAN',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'routingAreaCode',
+                            {
+                                'k': 'bits',
+                                'size': [8, 8],
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'measResult',
+                {
+                    'k': 'seq',
+                    'ext': True,
+                    'comp': [
+                        [
+                            'rssi',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 63,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultIdleEUTRA_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'carrierFreq-r15',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                False,
+                None,
+            ],
+            [
+                'physCellId-r15',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellId',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResult-r15',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'rsrpResult-r15',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrqResult-r15',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range_r13',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultIdleListEUTRA_r15': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultIdleEUTRA_r15',
+        },
+    },
+    'MeasResultIdleNR_r16': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'carrierFreqNR-r16',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultsPerCellListIdleNR-r16',
+                {
+                    'k': 'seqof',
+                    'size': [1, 8],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'MeasResultsPerCellIdleNR_r16',
+                    },
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultIdle_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'measResultServingCell-r15',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'rsrpResult-r15',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrqResult-r15',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range_r13',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultNeighCells-r15',
+                {
+                    'k': 'choice',
+                    'ext': True,
+                    'alts': [
+                        [
+                            'measResultIdleListEUTRA-r15',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultIdleListEUTRA_r15',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultList2CDMA2000_r9': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResult2CDMA2000_r9',
+        },
+    },
+    'MeasResultList2EUTRA_r9': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResult2EUTRA_r9',
+        },
+    },
+    'MeasResultList2EUTRA_v1250': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResult2EUTRA_v1250',
+        },
+    },
+    'MeasResultList2EUTRA_v9e0': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResult2EUTRA_v9e0',
+        },
+    },
+    'MeasResultList2GERAN_r10': {
+        'k': 'seqof',
+        'size': [1, 3],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultListGERAN',
+        },
+    },
+    'MeasResultList2UTRA_r9': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResult2UTRA_r9',
+        },
+    },
+    'MeasResultList3EUTRA_r15': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResult3EUTRA_r15',
+        },
+    },
+    'MeasResultListCBR_r14': {
+        'k': 'seqof',
+        'size': [1, 72],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultCBR_r14',
+        },
+    },
+    'MeasResultListCDMA2000': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultCDMA2000',
+        },
+    },
+    'MeasResultListEUTRA': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultEUTRA',
+        },
+    },
+    'MeasResultListExtIdle_r16': {
+        'k': 'seqof',
+        'size': [1, 5],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultIdleListEUTRA_r15',
+        },
+    },
+    'MeasResultListGERAN': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultGERAN',
+        },
+    },
+    'MeasResultListIdleNR_r16': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultIdleNR_r16',
+        },
+    },
+    'MeasResultListIdle_r15': {
+        'k': 'seqof',
+        'size': [1, 3],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultIdle_r15',
+        },
+    },
+    'MeasResultListMBSFN_r12': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultMBSFN_r12',
+        },
+    },
+    'MeasResultListUTRA': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultUTRA',
+        },
+    },
+    'MeasResultListWLAN_r13': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultWLAN_r13',
+        },
+    },
+    'MeasResultListWLAN_r14': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultWLAN_r13',
+        },
+    },
+    'MeasResultMBSFN_r12': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'mbsfn-Area-r12',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'mbsfn-AreaId-r12',
+                            {
+                                'k': 'ref',
+                                't': 'MBSFN_AreaId_r12',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'carrierFreq-r12',
+                            {
+                                'k': 'ref',
+                                't': 'ARFCN_ValueEUTRA_r9',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'rsrpResultMBSFN-r12',
+                {
+                    'k': 'ref',
+                    't': 'RSRP_Range',
+                },
+                False,
+                None,
+            ],
+            [
+                'rsrqResultMBSFN-r12',
+                {
+                    'k': 'ref',
+                    't': 'MBSFN_RSRQ_Range_r12',
+                },
+                False,
+                None,
+            ],
+            [
+                'signallingBLER-Result-r12',
+                {
+                    'k': 'ref',
+                    't': 'BLER_Result_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'dataBLER-MCH-ResultList-r12',
+                {
+                    'k': 'ref',
+                    't': 'DataBLER_MCH_ResultList_r12',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultNR_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'rsrpResult-r15',
+                {
+                    'k': 'ref',
+                    't': 'RSRP_RangeNR_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'rsrqResult-r15',
+                {
+                    'k': 'ref',
+                    't': 'RSRQ_RangeNR_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'rs-sinr-Result-r15',
+                {
+                    'k': 'ref',
+                    't': 'RS_SINR_RangeNR_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultSSB_IndexList_r15': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultSSB_Index_r15',
+        },
+    },
+    'MeasResultSSB_Index_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'ssb-Index-r15',
+                {
+                    'k': 'ref',
+                    't': 'RS_IndexNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultSSB-Index-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultNR_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultSSTD_r13': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'sfn-OffsetResult-r13',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 1023,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'frameBoundaryOffsetResult-r13',
+                {
+                    'k': 'int',
+                    'lb': -5,
+                    'ub': 4,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'subframeBoundaryOffsetResult-r13',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 127,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultSensing_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'sl-SubframeRef-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 10239,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'sensingResult-r15',
+                {
+                    'k': 'seqof',
+                    'size': [0, 400],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'SensingResult_r15',
+                    },
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultServFreqListExt_r13': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultServFreq_r13',
+        },
+    },
+    'MeasResultServFreqListNR_r15': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultServFreqNR_r15',
+        },
+    },
+    'MeasResultServFreqList_r10': {
+        'k': 'seqof',
+        'size': [1, 5],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'MeasResultServFreq_r10',
+        },
+    },
+    'MeasResultServFreqNR_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'carrierFreq-r15',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultSCell-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultCellNR_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultBestNeighCell-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultCellNR_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultServFreq_r10': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'servFreqId-r10',
+                {
+                    'k': 'ref',
+                    't': 'ServCellIndex_r10',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultSCell-r10',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'rsrpResultSCell-r10',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrqResultSCell-r10',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultBestNeighCell-r10',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'physCellId-r10',
+                            {
+                                'k': 'ref',
+                                't': 'PhysCellId',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrpResultNCell-r10',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrqResultNCell-r10',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['measResultSCell-v1250', 'measResultBestNeighCell-v1250'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultSCell-v1250',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range_v1250',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultBestNeighCell-v1250',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range_v1250',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultSCell-v1310', 'measResultBestNeighCell-v1310'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultSCell-v1310',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'rs-sinr-Result-r13',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RS_SINR_Range_r13',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultBestNeighCell-v1310',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'rs-sinr-Result-r13',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RS_SINR_Range_r13',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'MeasResultServFreq_r13': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'servFreqId-r13',
+                {
+                    'k': 'ref',
+                    't': 'ServCellIndex_r13',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultSCell-r13',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'rsrpResultSCell-r13',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrqResultSCell-r13',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range_r13',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rs-sinr-Result-r13',
+                            {
+                                'k': 'ref',
+                                't': 'RS_SINR_Range_r13',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultBestNeighCell-r13',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'physCellId-r13',
+                            {
+                                'k': 'ref',
+                                't': 'PhysCellId',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrpResultNCell-r13',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrqResultNCell-r13',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range_r13',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rs-sinr-Result-r13',
+                            {
+                                'k': 'ref',
+                                't': 'RS_SINR_Range_r13',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['measResultBestNeighCell-v1360'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultBestNeighCell-v1360',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'rsrpResultNCell-v1360',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RSRP_Range_v1360',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'MeasResultUTRA': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'physCellId',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'fdd',
+                            {
+                                'k': 'ref',
+                                't': 'PhysCellIdUTRA_FDD',
+                            },
+                        ],
+                        [
+                            'tdd',
+                            {
+                                'k': 'ref',
+                                't': 'PhysCellIdUTRA_TDD',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'cgi-Info',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'cellGlobalId',
+                            {
+                                'k': 'ref',
+                                't': 'CellGlobalIdUTRA',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'locationAreaCode',
+                            {
+                                'k': 'bits',
+                                'size': [16, 16],
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'routingAreaCode',
+                            {
+                                'k': 'bits',
+                                'size': [8, 8],
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'plmn-IdentityList',
+                            {
+                                'k': 'ref',
+                                't': 'PLMN_IdentityList2',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'measResult',
+                {
+                    'k': 'seq',
+                    'ext': True,
+                    'comp': [
+                        [
+                            'utra-RSCP',
+                            {
+                                'k': 'int',
+                                'lb': -5,
+                                'ub': 91,
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'utra-EcN0',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 49,
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [
+                        {
+                            'k': 'extgrp',
+                            'names': ['additionalSI-Info-r9'],
+                            'node': {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'additionalSI-Info-r9',
+                                        {
+                                            'k': 'ref',
+                                            't': 'AdditionalSI_Info_r9',
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        },
+                        {
+                            'k': 'extgrp',
+                            'names': ['primaryPLMN-Suitable-r12'],
+                            'node': {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'primaryPLMN-Suitable-r12',
+                                        {
+                                            'k': 'enum',
+                                            'names': ['true'],
+                                            'ext': None,
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        },
+                    ],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultWLAN_r13': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'wlan-Identifiers-r13',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_Identifiers_r12',
+                },
+                False,
+                None,
+            ],
+            [
+                'carrierInfoWLAN-r13',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_CarrierInfo_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'bandWLAN-r13',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_BandIndicator_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'rssiWLAN-r13',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_RSSI_Range_r13',
+                },
+                False,
+                None,
+            ],
+            [
+                'availableAdmissionCapacityWLAN-r13',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 31250,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'backhaulDL-BandwidthWLAN-r13',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_backhaulRate_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'backhaulUL-BandwidthWLAN-r13',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_backhaulRate_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'channelUtilizationWLAN-r13',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 255,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'stationCountWLAN-r13',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 65535,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'connectedWLAN-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResults': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'measId',
+                {
+                    'k': 'ref',
+                    't': 'MeasId',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultPCell',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'rsrpResult',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrqResult',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultNeighCells',
+                {
+                    'k': 'choice',
+                    'ext': True,
+                    'alts': [
+                        [
+                            'measResultListEUTRA',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultListEUTRA',
+                            },
+                        ],
+                        [
+                            'measResultListUTRA',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultListUTRA',
+                            },
+                        ],
+                        [
+                            'measResultListGERAN',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultListGERAN',
+                            },
+                        ],
+                        [
+                            'measResultsCDMA2000',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultsCDMA2000',
+                            },
+                        ],
+                    ],
+                    'extadd': [
+                        [
+                            'measResultNeighCellListNR-r15',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultCellListNR_r15',
+                            },
+                        ],
+                    ],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['measResultForECID-r9'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultForECID-r9',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultForECID_r9',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['locationInfo-r10', 'measResultServFreqList-r10'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'locationInfo-r10',
+                            {
+                                'k': 'ref',
+                                't': 'LocationInfo_r10',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultServFreqList-r10',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultServFreqList_r10',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measId-v1250', 'measResultPCell-v1250', 'measResultCSI-RS-List-r12'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measId-v1250',
+                            {
+                                'k': 'ref',
+                                't': 'MeasId_v1250',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultPCell-v1250',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range_v1250',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultCSI-RS-List-r12',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultCSI_RS_List_r12',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': [
+                    'measResultForRSSI-r13',
+                    'measResultServFreqListExt-r13',
+                    'measResultSSTD-r13',
+                    'measResultPCell-v1310',
+                    'ul-PDCP-DelayResultList-r13',
+                    'measResultListWLAN-r13',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultForRSSI-r13',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultForRSSI_r13',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultServFreqListExt-r13',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultServFreqListExt_r13',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultSSTD-r13',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultSSTD_r13',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultPCell-v1310',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'rs-sinr-Result-r13',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RS_SINR_Range_r13',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'ul-PDCP-DelayResultList-r13',
+                            {
+                                'k': 'ref',
+                                't': 'UL_PDCP_DelayResultList_r13',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListWLAN-r13',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultListWLAN_r13',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultPCell-v1360'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultPCell-v1360',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range_v1360',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultListCBR-r14', 'measResultListWLAN-r14'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListCBR-r14',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultListCBR_r14',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListWLAN-r14',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultListWLAN_r14',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultServFreqListNR-r15', 'measResultCellListSFTD-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultServFreqListNR-r15',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultServFreqListNR_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultCellListSFTD-r15',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultCellListSFTD_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': [
+                    'logMeasResultListBT-r15',
+                    'logMeasResultListWLAN-r15',
+                    'measResultSensing-r15',
+                    'heightUE-r15',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'logMeasResultListBT-r15',
+                            {
+                                'k': 'ref',
+                                't': 'LogMeasResultListBT_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'logMeasResultListWLAN-r15',
+                            {
+                                'k': 'ref',
+                                't': 'LogMeasResultListWLAN_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultSensing-r15',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultSensing_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'heightUE-r15',
+                            {
+                                'k': 'int',
+                                'lb': -400,
+                                'ub': 8880,
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['ul-PDCP-DelayValueResultList-r16', 'measResultForRSSI-NR-r16'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'ul-PDCP-DelayValueResultList-r16',
+                            {
+                                'k': 'ref',
+                                't': 'UL_PDCP_DelayValueResultList_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultForRSSI-NR-r16',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultForRSSI_NR_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['uncomBarPreMeasResult-r17', 'coarseLocationInfo-r17'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'uncomBarPreMeasResult-r17',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'coarseLocationInfo-r17',
+                            {
+                                'k': 'octets',
+                                'size': None,
+                                'ext': False,
+                                'containing': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'MeasResultsCDMA2000': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'preRegistrationStatusHRPD',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultListCDMA2000',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultListCDMA2000',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasResultsPerCellIdleNR_r16': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'physCellIdNR-r16',
+                {
+                    'k': 'ref',
+                    't': 'PhysCellIdNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'measIdleResultNR-r16',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'rsrpResultNR-r16',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_RangeNR_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'rsrqResultNR-r16',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_RangeNR_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'resultRS-IndexList-r16',
+                            {
+                                'k': 'ref',
+                                't': 'ResultsPerSSB_IndexList_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'MeasScaleFactor_r12': {
         'k': 'enum',
         'names': ['sf-EUTRA-cf1', 'sf-EUTRA-cf2'],
@@ -18381,6 +27190,147 @@ TYPES = {
                     ],
                     'extadd': [],
                 },
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasurementReport': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'measurementReport-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'MeasurementReport_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare7',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare6',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare5',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare4',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasurementReport_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'measResults',
+                {
+                    'k': 'ref',
+                    't': 'MeasResults',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'MeasurementReport_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MeasurementReport_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
             ],
         ],
         'extadd': [],
@@ -18779,6 +27729,329 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'MobilityFromEUTRACommand': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'mobilityFromEUTRACommand-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'MobilityFromEUTRACommand_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'mobilityFromEUTRACommand-r9',
+                                        {
+                                            'k': 'ref',
+                                            't': 'MobilityFromEUTRACommand_r9_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MobilityFromEUTRACommand_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'cs-FallbackIndicator',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'purpose',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'handover',
+                            {
+                                'k': 'ref',
+                                't': 'Handover',
+                            },
+                        ],
+                        [
+                            'cellChangeOrder',
+                            {
+                                'k': 'ref',
+                                't': 'CellChangeOrder',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'MobilityFromEUTRACommand_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MobilityFromEUTRACommand_r9_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'cs-FallbackIndicator',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'purpose',
+                {
+                    'k': 'choice',
+                    'ext': True,
+                    'alts': [
+                        [
+                            'handover',
+                            {
+                                'k': 'ref',
+                                't': 'Handover',
+                            },
+                        ],
+                        [
+                            'cellChangeOrder',
+                            {
+                                'k': 'ref',
+                                't': 'CellChangeOrder',
+                            },
+                        ],
+                        [
+                            'e-CSFB-r9',
+                            {
+                                'k': 'ref',
+                                't': 'E_CSFB_r9',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'MobilityFromEUTRACommand_v930_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MobilityFromEUTRACommand_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'smtc-r15',
+                {
+                    'k': 'ref',
+                    't': 'MTC_SSB_NR_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MobilityFromEUTRACommand_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'MobilityFromEUTRACommand_v8d0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MobilityFromEUTRACommand_v8d0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'bandIndicator',
+                {
+                    'k': 'ref',
+                    't': 'BandIndicatorGERAN',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MobilityFromEUTRACommand_v930_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'MobilityFromEUTRACommand_v960_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MobilityFromEUTRACommand_v960_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'bandIndicator',
+                {
+                    'k': 'ref',
+                    't': 'BandIndicatorGERAN',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'MobilityFromEUTRACommand_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'MobilityHistoryReport_r12': {
+        'k': 'ref',
+        't': 'VisitedCellInfoList_r12',
+    },
+    'MobilityParametersCDMA2000': {
+        'k': 'octets',
+        'size': None,
+        'ext': False,
+        'containing': None,
+    },
     'MobilityStateParameters': {
         'k': 'seq',
         'ext': False,
@@ -19011,6 +28284,11 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'NG_5G_S_TMSI_r15': {
+        'k': 'bits',
+        'size': [48, 48],
+        'ext': False,
     },
     'NR_CarrierList_r16': {
         'k': 'seqof',
@@ -19494,6 +28772,12 @@ TYPES = {
         'ub': 7,
         'ext': False,
     },
+    'NumberOfPreamblesSent_r11': {
+        'k': 'int',
+        'lb': 1,
+        'ub': 200,
+        'ext': False,
+    },
     'ObtainLocationConfig_r11': {
         'k': 'seq',
         'ext': False,
@@ -19974,6 +29258,117 @@ TYPES = {
                 },
             },
         ],
+    },
+    'OverheatingAssistance_r14': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'reducedUE-Category',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'reducedUE-CategoryDL',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 19,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'reducedUE-CategoryUL',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 21,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'reducedMaxCCs',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'reducedCCsDL',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 31,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'reducedCCsUL',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 31,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'OverheatingAssistance_v1610': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'overheatingAssistanceForSCG-r16',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'OverheatingAssistance_v1710': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'overheatingAssistanceForSCG-FR2-2-r17',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
     },
     'P0_SL_r12': {
         'k': 'int',
@@ -21852,6 +31247,85 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'PLMN_IdentityInfoListNR_r15': {
+        'k': 'seqof',
+        'size': [1, 12],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'PLMN_IdentityInfoNR_r15',
+        },
+    },
+    'PLMN_IdentityInfoListNR_v1710': {
+        'k': 'seqof',
+        'size': [1, 12],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'PLMN_IdentityInfoNR_v1710',
+        },
+    },
+    'PLMN_IdentityInfoNR_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-IdentityList-r15',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_IdentityListNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'trackingAreaCode-r15',
+                {
+                    'k': 'ref',
+                    't': 'TrackingAreaCodeNR_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'ran-AreaCode-r15',
+                {
+                    'k': 'ref',
+                    't': 'RAN_AreaCode_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'cellIdentity-r15',
+                {
+                    'k': 'ref',
+                    't': 'CellIdentityNR_r15',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'PLMN_IdentityInfoNR_v1710': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gNB-ID-Length-r17',
+                {
+                    'k': 'int',
+                    'lb': 22,
+                    'ub': 32,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'PLMN_IdentityInfo_r15': {
         'k': 'seq',
         'ext': False,
@@ -21986,6 +31460,33 @@ TYPES = {
             't': 'PLMN_IdentityInfo',
         },
     },
+    'PLMN_IdentityList2': {
+        'k': 'seqof',
+        'size': [1, 5],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'PLMN_Identity',
+        },
+    },
+    'PLMN_IdentityList3_r11': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'PLMN_Identity',
+        },
+    },
+    'PLMN_IdentityListNR_r15': {
+        'k': 'seqof',
+        'size': [1, 12],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'PLMN_Identity',
+        },
+    },
     'PLMN_IdentityList_r15': {
         'k': 'seqof',
         'size': [1, 6],
@@ -22043,6 +31544,84 @@ TYPES = {
                     'ext': None,
                 },
                 True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'PLMN_RAN_AreaCellList_r15': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'PLMN_RAN_AreaCell_r15',
+        },
+    },
+    'PLMN_RAN_AreaCell_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Identity-r15',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_Identity',
+                },
+                True,
+                None,
+            ],
+            [
+                'ran-AreaCells-r15',
+                {
+                    'k': 'seqof',
+                    'size': [1, 32],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'CellIdentity',
+                    },
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'PLMN_RAN_AreaConfigList_r15': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'PLMN_RAN_AreaConfig_r15',
+        },
+    },
+    'PLMN_RAN_AreaConfig_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Identity-r15',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_Identity',
+                },
+                True,
+                None,
+            ],
+            [
+                'ran-Area-r15',
+                {
+                    'k': 'seqof',
+                    'size': [1, 16],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'RAN_AreaConfig_r15',
+                    },
+                },
+                False,
                 None,
             ],
         ],
@@ -23870,6 +33449,871 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'PURConfigurationRequest_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'purConfigurationRequest',
+                            {
+                                'k': 'ref',
+                                't': 'PURConfigurationRequest_r16_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'PURConfigurationRequest_r16_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'pur-ConfigRequest-r16',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'pur-ReleaseRequest',
+                            {
+                                'k': 'null',
+                            },
+                        ],
+                        [
+                            'pur-SetupRequest',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'requestedNumOccasions-r16',
+                                        {
+                                            'k': 'enum',
+                                            'names': ['one', 'infinite'],
+                                            'ext': None,
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'requestedPeriodicityAndOffset-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'PUR_PeriodicityAndOffset_r16',
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                    [
+                                        'requestedTBS-r16',
+                                        {
+                                            'k': 'enum',
+                                            'names': [
+                                                'b328',
+                                                'b344',
+                                                'b376',
+                                                'b392',
+                                                'b408',
+                                                'b424',
+                                                'b440',
+                                                'b456',
+                                                'b472',
+                                                'b488',
+                                                'b504',
+                                                'b536',
+                                                'b568',
+                                                'b584',
+                                                'b616',
+                                                'b648',
+                                                'b680',
+                                                'b712',
+                                                'b744',
+                                                'b776',
+                                                'b808',
+                                                'b840',
+                                                'b872',
+                                                'b904',
+                                                'b936',
+                                                'b968',
+                                                'b1000',
+                                                'b1032',
+                                                'b1064',
+                                                'b1096',
+                                                'b1128',
+                                                'b1160',
+                                                'b1192',
+                                                'b1224',
+                                                'b1256',
+                                                'b1288',
+                                                'b1320',
+                                                'b1352',
+                                                'b1384',
+                                                'b1416',
+                                                'b1480',
+                                                'b1544',
+                                                'b1608',
+                                                'b1672',
+                                                'b1736',
+                                                'b1800',
+                                                'b1864',
+                                                'b1928',
+                                                'b1992',
+                                                'b2024',
+                                                'b2088',
+                                                'b2152',
+                                                'b2216',
+                                                'b2280',
+                                                'b2344',
+                                                'b2408',
+                                                'b2472',
+                                                'b2536',
+                                                'b2600',
+                                                'b2664',
+                                                'b2728',
+                                                'b2792',
+                                                'b2856',
+                                                'b2984',
+                                            ],
+                                            'ext': None,
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'rrc-ACK-r16',
+                                        {
+                                            'k': 'enum',
+                                            'names': ['true'],
+                                            'ext': None,
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'PUR_ConfigID_r16': {
+        'k': 'bits',
+        'size': [20, 20],
+        'ext': False,
+    },
+    'PUR_Config_r16': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'pur-ConfigID-r16',
+                {
+                    'k': 'ref',
+                    't': 'PUR_ConfigID_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-ImplicitReleaseAfter-r16',
+                {
+                    'k': 'enum',
+                    'names': ['n2', 'n4', 'n8', 'spare'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-StartTimeParameters-r16',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'periodicityAndOffset-r16',
+                            {
+                                'k': 'ref',
+                                't': 'PUR_PeriodicityAndOffset_r16',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'startSFN-r16',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 1023,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'startSubFrame-r16',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 9,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'hsfn-LSB-Info-r16',
+                            {
+                                'k': 'bits',
+                                'size': [1, 1],
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-NumOccasions-r16',
+                {
+                    'k': 'enum',
+                    'names': ['one', 'infinite'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'pur-RNTI-r16',
+                {
+                    'k': 'ref',
+                    't': 'C_RNTI',
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-TimeAlignmentTimer-r16',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 8,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-RSRP-ChangeThreshold-r16',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'release',
+                            {
+                                'k': 'null',
+                            },
+                        ],
+                        [
+                            'setup',
+                            {
+                                'k': 'ref',
+                                't': 'PUR_RSRP_ChangeThreshold_r16',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-ResponseWindowTimer-r16',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'sf240',
+                        'sf480',
+                        'sf960',
+                        'sf1920',
+                        'sf3840',
+                        'sf5760',
+                        'sf7680',
+                        'sf10240',
+                    ],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-MPDCCH-Config-r16',
+                {
+                    'k': 'ref',
+                    't': 'PUR_MPDCCH_Config_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-PDSCH-FreqHopping-r16',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'pur-PUCCH-Config-r16',
+                {
+                    'k': 'ref',
+                    't': 'PUR_PUCCH_Config_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-PUSCH-Config-r16',
+                {
+                    'k': 'ref',
+                    't': 'PUR_PUSCH_Config_r16',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['pur-PDSCH-maxTBS-r17'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'pur-PDSCH-maxTBS-r17',
+                            {
+                                'k': 'bool',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
+    'PUR_MPDCCH_Config_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mpdcch-FreqHopping-r16',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'mpdcch-Narrowband-r16',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 16,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'mpdcch-PRB-PairsConfig-r16',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'numberPRB-Pairs-r16',
+                            {
+                                'k': 'enum',
+                                'names': ['n2', 'n4', 'n6', 'spare1'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'resourceBlockAssignment-r16',
+                            {
+                                'k': 'bits',
+                                'size': [4, 4],
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'mpdcch-NumRepetition-r16',
+                {
+                    'k': 'enum',
+                    'names': ['r1', 'r2', 'r4', 'r8', 'r16', 'r32', 'r64', 'r128', 'r256'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'mpdcch-StartSF-UESS-r16',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'fdd',
+                            {
+                                'k': 'enum',
+                                'names': ['v1', 'v1dot5', 'v2', 'v2dot5', 'v4', 'v5', 'v8', 'v10'],
+                                'ext': None,
+                            },
+                        ],
+                        [
+                            'tdd',
+                            {
+                                'k': 'enum',
+                                'names': ['v1', 'v2', 'v4', 'v5', 'v8', 'v10', 'v20', 'spare1'],
+                                'ext': None,
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'mpdcch-Offset-PUR-SS-r16',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'zero',
+                        'oneEighth',
+                        'oneQuarter',
+                        'threeEighth',
+                        'oneHalf',
+                        'fiveEighth',
+                        'threeQuarter',
+                        'sevenEighth',
+                    ],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'PUR_PUCCH_Config_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'n1PUCCH-AN-r16',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 2047,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'pucch-NumRepetitionCE-Format1-r16',
+                {
+                    'k': 'enum',
+                    'names': ['n1', 'n2', 'n4', 'n8'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'PUR_PUSCH_Config_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'pur-GrantInfo-r16',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'ce-ModeA',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'numRUs-r16',
+                                        {
+                                            'k': 'bits',
+                                            'size': [2, 2],
+                                            'ext': False,
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'prb-AllocationInfo-r16',
+                                        {
+                                            'k': 'bits',
+                                            'size': [10, 10],
+                                            'ext': False,
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'mcs-r16',
+                                        {
+                                            'k': 'bits',
+                                            'size': [4, 4],
+                                            'ext': False,
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'numRepetitions-r16',
+                                        {
+                                            'k': 'bits',
+                                            'size': [3, 3],
+                                            'ext': False,
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'ce-ModeB',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'subPRB-Allocation-r16',
+                                        {
+                                            'k': 'bool',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'numRUs-r16',
+                                        {
+                                            'k': 'bool',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'prb-AllocationInfo-r16',
+                                        {
+                                            'k': 'bits',
+                                            'size': [8, 8],
+                                            'ext': False,
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'mcs-r16',
+                                        {
+                                            'k': 'bits',
+                                            'size': [4, 4],
+                                            'ext': False,
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'numRepetitions-r16',
+                                        {
+                                            'k': 'bits',
+                                            'size': [3, 3],
+                                            'ext': False,
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-PUSCH-FreqHopping-r16',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'p0-UE-PUSCH-r16',
+                {
+                    'k': 'int',
+                    'lb': -8,
+                    'ub': 7,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'alpha-r16',
+                {
+                    'k': 'ref',
+                    't': 'Alpha_r12',
+                },
+                False,
+                None,
+            ],
+            [
+                'pusch-CyclicShift-r16',
+                {
+                    'k': 'enum',
+                    'names': ['n0', 'n6'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'pusch-NB-MaxTBS-r16',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'locationCE-ModeB-r16',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 5,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'PUR_PeriodicityAndOffset_r16': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'periodicity8',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 7,
+                    'ext': False,
+                },
+            ],
+            [
+                'periodicity16',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 15,
+                    'ext': False,
+                },
+            ],
+            [
+                'periodicity32',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 31,
+                    'ext': False,
+                },
+            ],
+            [
+                'periodicity64',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 63,
+                    'ext': False,
+                },
+            ],
+            [
+                'periodicity128',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 127,
+                    'ext': False,
+                },
+            ],
+            [
+                'periodicity256',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 255,
+                    'ext': False,
+                },
+            ],
+            [
+                'periodicity512',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 511,
+                    'ext': False,
+                },
+            ],
+            [
+                'periodicity1024',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 1023,
+                    'ext': False,
+                },
+            ],
+            [
+                'periodicity2048',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 2047,
+                    'ext': False,
+                },
+            ],
+            [
+                'periodicity4096',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 4095,
+                    'ext': False,
+                },
+            ],
+            [
+                'periodicity8192',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 8191,
+                    'ext': False,
+                },
+            ],
+        ],
+        'extadd': [],
+    },
+    'PUR_RSRP_ChangeThreshold_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'increaseThresh-r16',
+                {
+                    'k': 'ref',
+                    't': 'RSRP_ChangeThresh_r16',
+                },
+                False,
+                None,
+            ],
+            [
+                'decreaseThresh-r16',
+                {
+                    'k': 'ref',
+                    't': 'RSRP_ChangeThresh_r16',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'PUSCH_ConfigCommon': {
         'k': 'seq',
         'ext': False,
@@ -25351,6 +35795,41 @@ TYPES = {
                     'extadd': [],
                 },
                 True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'PerCC_GapIndicationList_r14': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'PerCC_GapIndication_r14',
+        },
+    },
+    'PerCC_GapIndication_r14': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'servCellId-r14',
+                {
+                    'k': 'ref',
+                    't': 'ServCellIndex_r13',
+                },
+                False,
+                None,
+            ],
+            [
+                'gapIndication-r14',
+                {
+                    'k': 'enum',
+                    'names': ['gap', 'ncsg', 'nogap-noNcsg'],
+                    'ext': None,
+                },
+                False,
                 None,
             ],
         ],
@@ -29209,6 +39688,158 @@ TYPES = {
     'PresenceAntennaPort1': {
         'k': 'bool',
     },
+    'ProximityIndication_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'proximityIndication-r9',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ProximityIndication_r9_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ProximityIndication_r9_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'type-r9',
+                {
+                    'k': 'enum',
+                    'names': ['entering', 'leaving'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'carrierFreq-r9',
+                {
+                    'k': 'choice',
+                    'ext': True,
+                    'alts': [
+                        [
+                            'eutra-r9',
+                            {
+                                'k': 'ref',
+                                't': 'ARFCN_ValueEUTRA',
+                            },
+                        ],
+                        [
+                            'utra-r9',
+                            {
+                                'k': 'ref',
+                                't': 'ARFCN_ValueUTRA',
+                            },
+                        ],
+                    ],
+                    'extadd': [
+                        [
+                            'eutra2-v9e0',
+                            {
+                                'k': 'ref',
+                                't': 'ARFCN_ValueEUTRA_v9e0',
+                            },
+                        ],
+                    ],
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'ProximityIndication_v930_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ProximityIndication_v930_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'Q_OffsetRange': {
         'k': 'enum',
         'names': [
@@ -30127,6 +40758,83 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'RACH_ReportNR_r18': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rach-ReportListNR-r18',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'cellIdListNR-r18',
+                {
+                    'k': 'ref',
+                    't': 'CellIdListNR_r18',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RACH_Report_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'numberOfPreamblesSent-r16',
+                {
+                    'k': 'ref',
+                    't': 'NumberOfPreamblesSent_r11',
+                },
+                False,
+                None,
+            ],
+            [
+                'contentionDetected-r16',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RACH_Report_v1610': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'initialCEL-r16',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 3,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'edt-Fallback-r16',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'RACH_Skip_r14': {
         'k': 'seq',
         'ext': False,
@@ -30232,11 +40940,81 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'RAND_CDMA2000': {
+        'k': 'bits',
+        'size': [32, 32],
+        'ext': False,
+    },
     'RAN_AreaCode_r15': {
         'k': 'int',
         'lb': 0,
         'ub': 255,
         'ext': False,
+    },
+    'RAN_AreaConfig_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'trackingAreaCode-5GC-r15',
+                {
+                    'k': 'ref',
+                    't': 'TrackingAreaCode_5GC_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'ran-AreaCodeList-r15',
+                {
+                    'k': 'seqof',
+                    'size': [1, 32],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'RAN_AreaCode_r15',
+                    },
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RAN_NotificationAreaInfo_r15': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'cellList',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_RAN_AreaCellList_r15',
+                },
+            ],
+            [
+                'ran-AreaConfigList',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_RAN_AreaConfigList_r15',
+                },
+            ],
+        ],
+        'extadd': [],
+    },
+    'RAT_Type': {
+        'k': 'enum',
+        'names': [
+            'eutra',
+            'utra',
+            'geran-cs',
+            'geran-ps',
+            'cdma2000-1XRTT',
+            'nr',
+            'eutra-nr',
+            'spare1',
+        ],
+        'ext': [],
     },
     'RCLWI_Config_r13': {
         'k': 'seq',
@@ -30806,6 +41584,743 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'RLF_Report_r9': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'measResultLastServCell-r9',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'rsrpResult-r9',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'rsrqResult-r9',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'measResultNeighCells-r9',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListEUTRA-r9',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2EUTRA_r9',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListUTRA-r9',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2UTRA_r9',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListGERAN-r9',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultListGERAN',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultsCDMA2000-r9',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2CDMA2000_r9',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': [
+                    'locationInfo-r10',
+                    'failedPCellId-r10',
+                    'reestablishmentCellId-r10',
+                    'timeConnFailure-r10',
+                    'connectionFailureType-r10',
+                    'previousPCellId-r10',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'locationInfo-r10',
+                            {
+                                'k': 'ref',
+                                't': 'LocationInfo_r10',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'failedPCellId-r10',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'cellGlobalId-r10',
+                                        {
+                                            'k': 'ref',
+                                            't': 'CellGlobalIdEUTRA',
+                                        },
+                                    ],
+                                    [
+                                        'pci-arfcn-r10',
+                                        {
+                                            'k': 'seq',
+                                            'ext': False,
+                                            'comp': [
+                                                [
+                                                    'physCellId-r10',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'PhysCellId',
+                                                    },
+                                                    False,
+                                                    None,
+                                                ],
+                                                [
+                                                    'carrierFreq-r10',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'ARFCN_ValueEUTRA',
+                                                    },
+                                                    False,
+                                                    None,
+                                                ],
+                                            ],
+                                            'extadd': [],
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'reestablishmentCellId-r10',
+                            {
+                                'k': 'ref',
+                                't': 'CellGlobalIdEUTRA',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'timeConnFailure-r10',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 1023,
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'connectionFailureType-r10',
+                            {
+                                'k': 'enum',
+                                'names': ['rlf', 'hof'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'previousPCellId-r10',
+                            {
+                                'k': 'ref',
+                                't': 'CellGlobalIdEUTRA',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['failedPCellId-v1090'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'failedPCellId-v1090',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'carrierFreq-v1090',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ARFCN_ValueEUTRA_v9e0',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': [
+                    'basicFields-r11',
+                    'previousUTRA-CellId-r11',
+                    'selectedUTRA-CellId-r11',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'basicFields-r11',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'c-RNTI-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'C_RNTI',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'rlf-Cause-r11',
+                                        {
+                                            'k': 'enum',
+                                            'names': [
+                                                't310-Expiry',
+                                                'randomAccessProblem',
+                                                'rlc-MaxNumRetx',
+                                                't312-Expiry-r12',
+                                            ],
+                                            'ext': None,
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'timeSinceFailure-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'TimeSinceFailure_r11',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'previousUTRA-CellId-r11',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'carrierFreq-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ARFCN_ValueUTRA',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'physCellId-r11',
+                                        {
+                                            'k': 'choice',
+                                            'ext': False,
+                                            'alts': [
+                                                [
+                                                    'fdd-r11',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'PhysCellIdUTRA_FDD',
+                                                    },
+                                                ],
+                                                [
+                                                    'tdd-r11',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'PhysCellIdUTRA_TDD',
+                                                    },
+                                                ],
+                                            ],
+                                            'extadd': [],
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'cellGlobalId-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'CellGlobalIdUTRA',
+                                        },
+                                        True,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'selectedUTRA-CellId-r11',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'carrierFreq-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ARFCN_ValueUTRA',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'physCellId-r11',
+                                        {
+                                            'k': 'choice',
+                                            'ext': False,
+                                            'alts': [
+                                                [
+                                                    'fdd-r11',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'PhysCellIdUTRA_FDD',
+                                                    },
+                                                ],
+                                                [
+                                                    'tdd-r11',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'PhysCellIdUTRA_TDD',
+                                                    },
+                                                ],
+                                            ],
+                                            'extadd': [],
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': [
+                    'failedPCellId-v1250',
+                    'measResultLastServCell-v1250',
+                    'lastServCellRSRQ-Type-r12',
+                    'measResultListEUTRA-v1250',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'failedPCellId-v1250',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'tac-FailedPCell-r12',
+                                        {
+                                            'k': 'ref',
+                                            't': 'TrackingAreaCode',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultLastServCell-v1250',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Range_v1250',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'lastServCellRSRQ-Type-r12',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_Type_r12',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListEUTRA-v1250',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultList2EUTRA_v1250',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['drb-EstablishedWithQCI-1-r13'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'drb-EstablishedWithQCI-1-r13',
+                            {
+                                'k': 'enum',
+                                'names': ['qci1'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultLastServCell-v1360'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultLastServCell-v1360',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_Range_v1360',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['logMeasResultListBT-r15', 'logMeasResultListWLAN-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'logMeasResultListBT-r15',
+                            {
+                                'k': 'ref',
+                                't': 'LogMeasResultListBT_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'logMeasResultListWLAN-r15',
+                            {
+                                'k': 'ref',
+                                't': 'LogMeasResultListWLAN_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': [
+                    'measResultListNR-r16',
+                    'previousNR-PCellId-r16',
+                    'failedNR-PCellId-r16',
+                    'reconnectCellId-r16',
+                    'timeUntilReconnection-r16',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListNR-r16',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultCellListNR_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'previousNR-PCellId-r16',
+                            {
+                                'k': 'ref',
+                                't': 'CellGlobalIdNR_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'failedNR-PCellId-r16',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'cellGlobalId',
+                                        {
+                                            'k': 'ref',
+                                            't': 'CellGlobalIdNR_r16',
+                                        },
+                                    ],
+                                    [
+                                        'pci-arfcn',
+                                        {
+                                            'k': 'seq',
+                                            'ext': False,
+                                            'comp': [
+                                                [
+                                                    'physCellId-r16',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'PhysCellIdNR_r15',
+                                                    },
+                                                    False,
+                                                    None,
+                                                ],
+                                                [
+                                                    'carrierFreq-r16',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'ARFCN_ValueNR_r15',
+                                                    },
+                                                    False,
+                                                    None,
+                                                ],
+                                            ],
+                                            'extadd': [],
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'reconnectCellId-r16',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'nrReconnectCellId',
+                                        {
+                                            'k': 'ref',
+                                            't': 'CellGlobalIdNR_r16',
+                                        },
+                                    ],
+                                    [
+                                        'eutraReconnectCellId',
+                                        {
+                                            'k': 'seq',
+                                            'ext': False,
+                                            'comp': [
+                                                [
+                                                    'cellGlobalId-r16',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'CellGlobalIdEUTRA',
+                                                    },
+                                                    False,
+                                                    None,
+                                                ],
+                                                [
+                                                    'trackingAreaCode-EPC-r16',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'TrackingAreaCode',
+                                                    },
+                                                    True,
+                                                    None,
+                                                ],
+                                                [
+                                                    'trackingAreaCode-5GC-r16',
+                                                    {
+                                                        'k': 'ref',
+                                                        't': 'TrackingAreaCode_5GC_r15',
+                                                    },
+                                                    True,
+                                                    None,
+                                                ],
+                                            ],
+                                            'extadd': [],
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'timeUntilReconnection-r16',
+                            {
+                                'k': 'ref',
+                                't': 'TimeUntilReconnection_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measResultListNR-v1640', 'measResultListExtNR-r16'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measResultListNR-v1640',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'carrierFreqNR-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ARFCN_ValueNR_r15',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'measResultListExtNR-r16',
+                            {
+                                'k': 'ref',
+                                't': 'MeasResultFreqListNR_r16',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['voiceFallbackHO-r18'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'voiceFallbackHO-r18',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
     'RLF_TimersAndConstantsMCG_Failure_r16': {
         'k': 'choice',
         'ext': False,
@@ -31210,6 +42725,599 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'RNReconfigurationComplete_r10': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'rnReconfigurationComplete-r10',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RNReconfigurationComplete_r10_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RNReconfigurationComplete_r10_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RNReconfiguration_r10': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'rnReconfiguration-r10',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RNReconfiguration_r10_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RNReconfiguration_r10_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rn-SystemInfo-r10',
+                {
+                    'k': 'ref',
+                    't': 'RN_SystemInfo_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'rn-SubframeConfig-r10',
+                {
+                    'k': 'ref',
+                    't': 'RN_SubframeConfig_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RN_SubframeConfig_r10': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'subframeConfigPattern-r10',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'subframeConfigPatternFDD-r10',
+                            {
+                                'k': 'bits',
+                                'size': [8, 8],
+                                'ext': False,
+                            },
+                        ],
+                        [
+                            'subframeConfigPatternTDD-r10',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 31,
+                                'ext': False,
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'rpdcch-Config-r10',
+                {
+                    'k': 'seq',
+                    'ext': True,
+                    'comp': [
+                        [
+                            'resourceAllocationType-r10',
+                            {
+                                'k': 'enum',
+                                'names': [
+                                    'type0',
+                                    'type1',
+                                    'type2Localized',
+                                    'type2Distributed',
+                                    'spare4',
+                                    'spare3',
+                                    'spare2',
+                                    'spare1',
+                                ],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'resourceBlockAssignment-r10',
+                            {
+                                'k': 'choice',
+                                'ext': True,
+                                'alts': [
+                                    [
+                                        'type01-r10',
+                                        {
+                                            'k': 'choice',
+                                            'ext': False,
+                                            'alts': [
+                                                [
+                                                    'nrb6-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [6, 6],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                                [
+                                                    'nrb15-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [8, 8],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                                [
+                                                    'nrb25-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [13, 13],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                                [
+                                                    'nrb50-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [17, 17],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                                [
+                                                    'nrb75-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [19, 19],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                                [
+                                                    'nrb100-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [25, 25],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                            ],
+                                            'extadd': [],
+                                        },
+                                    ],
+                                    [
+                                        'type2-r10',
+                                        {
+                                            'k': 'choice',
+                                            'ext': False,
+                                            'alts': [
+                                                [
+                                                    'nrb6-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [5, 5],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                                [
+                                                    'nrb15-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [7, 7],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                                [
+                                                    'nrb25-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [9, 9],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                                [
+                                                    'nrb50-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [11, 11],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                                [
+                                                    'nrb75-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [12, 12],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                                [
+                                                    'nrb100-r10',
+                                                    {
+                                                        'k': 'bits',
+                                                        'size': [13, 13],
+                                                        'ext': False,
+                                                    },
+                                                ],
+                                            ],
+                                            'extadd': [],
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'demodulationRS-r10',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'interleaving-r10',
+                                        {
+                                            'k': 'enum',
+                                            'names': ['crs'],
+                                            'ext': None,
+                                        },
+                                    ],
+                                    [
+                                        'noInterleaving-r10',
+                                        {
+                                            'k': 'enum',
+                                            'names': ['crs', 'dmrs'],
+                                            'ext': None,
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'pdsch-Start-r10',
+                            {
+                                'k': 'int',
+                                'lb': 1,
+                                'ub': 3,
+                                'ext': False,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'pucch-Config-r10',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'tdd',
+                                        {
+                                            'k': 'choice',
+                                            'ext': False,
+                                            'alts': [
+                                                [
+                                                    'channelSelectionMultiplexingBundling',
+                                                    {
+                                                        'k': 'seq',
+                                                        'ext': False,
+                                                        'comp': [
+                                                            [
+                                                                'n1PUCCH-AN-List-r10',
+                                                                {
+                                                                    'k': 'seqof',
+                                                                    'size': [1, 4],
+                                                                    'ext': False,
+                                                                    'of': {
+                                                                        'k': 'int',
+                                                                        'lb': 0,
+                                                                        'ub': 2047,
+                                                                        'ext': False,
+                                                                    },
+                                                                },
+                                                                False,
+                                                                None,
+                                                            ],
+                                                        ],
+                                                        'extadd': [],
+                                                    },
+                                                ],
+                                                [
+                                                    'fallbackForFormat3',
+                                                    {
+                                                        'k': 'seq',
+                                                        'ext': False,
+                                                        'comp': [
+                                                            [
+                                                                'n1PUCCH-AN-P0-r10',
+                                                                {
+                                                                    'k': 'int',
+                                                                    'lb': 0,
+                                                                    'ub': 2047,
+                                                                    'ext': False,
+                                                                },
+                                                                False,
+                                                                None,
+                                                            ],
+                                                            [
+                                                                'n1PUCCH-AN-P1-r10',
+                                                                {
+                                                                    'k': 'int',
+                                                                    'lb': 0,
+                                                                    'ub': 2047,
+                                                                    'ext': False,
+                                                                },
+                                                                True,
+                                                                None,
+                                                            ],
+                                                        ],
+                                                        'extadd': [],
+                                                    },
+                                                ],
+                                            ],
+                                            'extadd': [],
+                                        },
+                                    ],
+                                    [
+                                        'fdd',
+                                        {
+                                            'k': 'seq',
+                                            'ext': False,
+                                            'comp': [
+                                                [
+                                                    'n1PUCCH-AN-P0-r10',
+                                                    {
+                                                        'k': 'int',
+                                                        'lb': 0,
+                                                        'ub': 2047,
+                                                        'ext': False,
+                                                    },
+                                                    False,
+                                                    None,
+                                                ],
+                                                [
+                                                    'n1PUCCH-AN-P1-r10',
+                                                    {
+                                                        'k': 'int',
+                                                        'lb': 0,
+                                                        'ub': 2047,
+                                                        'ext': False,
+                                                    },
+                                                    True,
+                                                    None,
+                                                ],
+                                            ],
+                                            'extadd': [],
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RN_SystemInfo_r10': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'systemInformationBlockType1-r10',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': '_cont_systemInformationBlockType1-r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'systemInformationBlockType2-r10',
+                {
+                    'k': 'ref',
+                    't': 'SystemInformationBlockType2',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'RRCConnectionReconfiguration': {
         'k': 'seq',
         'ext': False,
@@ -31301,6 +43409,378 @@ TYPES = {
                     'extadd': [],
                 },
                 False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'rrcConnectionReconfigurationComplete-r8',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionReconfigurationComplete_r8_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReconfigurationComplete_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_v1020_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rlf-InfoAvailable-r10',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'logMeasAvailable-r10',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReconfigurationComplete_v1130_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_v1130_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'connEstFailInfoAvailable-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReconfigurationComplete_v1250_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_v1250_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'logMeasAvailableMBSFN-r12',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReconfigurationComplete_v1430_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_v1430_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'perCC-GapIndicationList-r14',
+                {
+                    'k': 'ref',
+                    't': 'PerCC_GapIndicationList_r14',
+                },
+                True,
+                None,
+            ],
+            [
+                'numFreqEffective-r14',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 12,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'numFreqEffectiveReduced-r14',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 12,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReconfigurationComplete_v1510_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_v1510_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'scg-ConfigResponseNR-r15',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReconfigurationComplete_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'logMeasAvailableBT-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'logMeasAvailableWLAN-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'flightPathInfoAvailable-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReconfigurationComplete_v1700_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_v1700_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'selectedCondReconfigurationToApply-r17',
+                {
+                    'k': 'ref',
+                    't': 'CondReconfigurationId_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReconfigurationComplete_v1710_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_v1710_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gnss-ValidityDuration-r17',
+                {
+                    'k': 'ref',
+                    't': 'GNSS_ValidityDuration_r17',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReconfigurationComplete_v1800_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_v1800_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gnss-PositionFixDuration-r18',
+                {
+                    'k': 'ref',
+                    't': 'GNSS_PositionFixDuration_r18',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReconfigurationComplete_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReconfigurationComplete_v1020_IEs',
+                },
+                True,
                 None,
             ],
         ],
@@ -32013,11 +44493,3095 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'RRCConnectionReestablishment': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'rrcConnectionReestablishment-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RRCConnectionReestablishment_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare7',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare6',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare5',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare4',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentComplete': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'rrcConnectionReestablishmentComplete-r8',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionReestablishmentComplete_r8_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentComplete_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReestablishmentComplete_v920_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentComplete_v1020_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'logMeasAvailable-r10',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReestablishmentComplete_v1130_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentComplete_v1130_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'connEstFailInfoAvailable-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReestablishmentComplete_v1250_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentComplete_v1250_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'logMeasAvailableMBSFN-r12',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReestablishmentComplete_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentComplete_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'logMeasAvailableBT-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'logMeasAvailableWLAN-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'flightPathInfoAvailable-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReestablishmentComplete_v1710_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentComplete_v1710_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gnss-ValidityDuration-r17',
+                {
+                    'k': 'ref',
+                    't': 'GNSS_ValidityDuration_r17',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReestablishmentComplete_v1800_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentComplete_v1800_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gnss-PositionFixDuration-r18',
+                {
+                    'k': 'ref',
+                    't': 'GNSS_PositionFixDuration_r18',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentComplete_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReestablishmentComplete_v1020_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentComplete_v920_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rlf-InfoAvailable-r9',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReestablishmentComplete_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentReject': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'rrcConnectionReestablishmentReject-r8',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionReestablishmentReject_r8_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentReject_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReestablishmentReject_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishmentReject_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishment_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'radioResourceConfigDedicated',
+                {
+                    'k': 'ref',
+                    't': 'RadioResourceConfigDedicated',
+                },
+                False,
+                None,
+            ],
+            [
+                'nextHopChainingCount',
+                {
+                    'k': 'ref',
+                    't': 'NextHopChainingCount',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReestablishment_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReestablishment_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReject': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'rrcConnectionReject-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RRCConnectionReject_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReject_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'waitTime',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 16,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReject_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReject_v1020_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'extendedWaitTime-r10',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 1800,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReject_v1130_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReject_v1130_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'deprioritisationReq-r11',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'deprioritisationType-r11',
+                            {
+                                'k': 'enum',
+                                'names': ['frequency', 'e-utra'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'deprioritisationTimer-r11',
+                            {
+                                'k': 'enum',
+                                'names': ['min5', 'min10', 'min15', 'min30'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReject_v1320_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReject_v1320_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-SuspendIndication-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionReject_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionReject_v1020_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'rrcConnectionRelease-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RRCConnectionRelease_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'releaseCause',
+                {
+                    'k': 'ref',
+                    't': 'ReleaseCause',
+                },
+                False,
+                None,
+            ],
+            [
+                'redirectedCarrierInfo',
+                {
+                    'k': 'ref',
+                    't': 'RedirectedCarrierInfo',
+                },
+                True,
+                None,
+            ],
+            [
+                'idleModeMobilityControlInfo',
+                {
+                    'k': 'ref',
+                    't': 'IdleModeMobilityControlInfo',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionRelease_v890_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease_v1020_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'extendedWaitTime-r10',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 1800,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionRelease_v1320_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease_v1320_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'resumeIdentity-r13',
+                {
+                    'k': 'ref',
+                    't': 'ResumeIdentity_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionRelease_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'drb-ContinueROHC-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nextHopChainingCount-r15',
+                {
+                    'k': 'ref',
+                    't': 'NextHopChainingCount',
+                },
+                True,
+                None,
+            ],
+            [
+                'measIdleConfig-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasIdleConfigDedicated_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'rrc-InactiveConfig-r15',
+                {
+                    'k': 'ref',
+                    't': 'RRC_InactiveConfig_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'cn-Type-r15',
+                {
+                    'k': 'enum',
+                    'names': ['epc', 'fivegc'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionRelease_v1540_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease_v1540_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'waitTime',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 16,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionRelease_v15b0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease_v15b0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'noLastCellUpdate-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionRelease_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'fullI-RNTI-r16',
+                {
+                    'k': 'ref',
+                    't': 'I_RNTI_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'shortI-RNTI-r16',
+                {
+                    'k': 'ref',
+                    't': 'ShortI_RNTI_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-Config-r16',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'release',
+                            {
+                                'k': 'null',
+                            },
+                        ],
+                        [
+                            'setup',
+                            {
+                                'k': 'ref',
+                                't': 'PUR_Config_r16',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'rrc-InactiveConfig-v1610',
+                {
+                    'k': 'ref',
+                    't': 'RRC_InactiveConfig_v1610',
+                },
+                True,
+                None,
+            ],
+            [
+                'releaseIdleMeasConfig-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'altFreqPriorities-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                't323-r16',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'min5',
+                        'min10',
+                        'min20',
+                        'min30',
+                        'min60',
+                        'min120',
+                        'min180',
+                        'min720',
+                    ],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionRelease_v1650_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease_v1650_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mpsPriorityIndication-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease_v890_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': '_cont_lateNonCriticalExtension',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionRelease_v920_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionRelease_v920_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'cellInfoList-r9',
+                {
+                    'k': 'choice',
+                    'ext': True,
+                    'alts': [
+                        [
+                            'geran-r9',
+                            {
+                                'k': 'ref',
+                                't': 'CellInfoListGERAN_r9',
+                            },
+                        ],
+                        [
+                            'utra-FDD-r9',
+                            {
+                                'k': 'ref',
+                                't': 'CellInfoListUTRA_FDD_r9',
+                            },
+                        ],
+                        [
+                            'utra-TDD-r9',
+                            {
+                                'k': 'ref',
+                                't': 'CellInfoListUTRA_TDD_r9',
+                            },
+                        ],
+                    ],
+                    'extadd': [
+                        [
+                            'utra-TDD-r10',
+                            {
+                                'k': 'ref',
+                                't': 'CellInfoListUTRA_TDD_r10',
+                            },
+                        ],
+                    ],
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionRelease_v1020_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResumeComplete_r13': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'rrcConnectionResumeComplete-r13',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionResumeComplete_r13_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResumeComplete_r13_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'selectedPLMN-Identity-r13',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 6,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'dedicatedInfoNAS-r13',
+                {
+                    'k': 'ref',
+                    't': 'DedicatedInfoNAS',
+                },
+                True,
+                None,
+            ],
+            [
+                'rlf-InfoAvailable-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'logMeasAvailable-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'connEstFailInfoAvailable-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'mobilityState-r13',
+                {
+                    'k': 'enum',
+                    'names': ['normal', 'medium', 'high', 'spare'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'mobilityHistoryAvail-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'logMeasAvailableMBSFN-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionResumeComplete_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResumeComplete_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'logMeasAvailableBT-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'logMeasAvailableWLAN-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'idleMeasAvailable-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'flightPathInfoAvailable-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionResumeComplete_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResumeComplete_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'measResultListIdle-r16',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultListIdle_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultListExtIdle-r16',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultListExtIdle_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultListIdleNR-r16',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultListIdleNR_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'scg-ConfigResponseNR-r16',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionResumeComplete_v1710_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResumeComplete_v1710_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gnss-ValidityDuration-r17',
+                {
+                    'k': 'ref',
+                    't': 'GNSS_ValidityDuration_r17',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionResumeComplete_v1800_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResumeComplete_v1800_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gnss-PositionFixDuration-r18',
+                {
+                    'k': 'ref',
+                    't': 'GNSS_PositionFixDuration_r18',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResume_r13': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'rrcConnectionResume-r13',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RRCConnectionResume_r13_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResume_r13_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'radioResourceConfigDedicated-r13',
+                {
+                    'k': 'ref',
+                    't': 'RadioResourceConfigDedicated',
+                },
+                True,
+                None,
+            ],
+            [
+                'nextHopChainingCount-r13',
+                {
+                    'k': 'ref',
+                    't': 'NextHopChainingCount',
+                },
+                False,
+                None,
+            ],
+            [
+                'measConfig-r13',
+                {
+                    'k': 'ref',
+                    't': 'MeasConfig',
+                },
+                True,
+                None,
+            ],
+            [
+                'antennaInfoDedicatedPCell-r13',
+                {
+                    'k': 'ref',
+                    't': 'AntennaInfoDedicated_v10i0',
+                },
+                True,
+                None,
+            ],
+            [
+                'drb-ContinueROHC-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionResume_v1430_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResume_v1430_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'otherConfig-r14',
+                {
+                    'k': 'ref',
+                    't': 'OtherConfig_r9',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionResume_v1510_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResume_v1510_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'sk-Counter-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 65535,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'nr-RadioBearerConfig1-r15',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nr-RadioBearerConfig2-r15',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionResume_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResume_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'fullConfig-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionResume_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResume_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'idleModeMeasurementReq-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'restoreMCG-SCells-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'restoreSCG-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'sCellToAddModList-r16',
+                {
+                    'k': 'ref',
+                    't': 'SCellToAddModList_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'sCellToReleaseList-r16',
+                {
+                    'k': 'ref',
+                    't': 'SCellToReleaseListExt_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'sCellGroupToReleaseList-r16',
+                {
+                    'k': 'ref',
+                    't': 'SCellGroupToReleaseList_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'sCellGroupToAddModList-r16',
+                {
+                    'k': 'ref',
+                    't': 'SCellGroupToAddModList_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nr-SecondaryCellGroupConfig-r16',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'p-MaxEUTRA-r16',
+                {
+                    'k': 'ref',
+                    't': 'P_Max',
+                },
+                True,
+                None,
+            ],
+            [
+                'p-MaxUE-FR1-r16',
+                {
+                    'k': 'ref',
+                    't': 'P_Max',
+                },
+                True,
+                None,
+            ],
+            [
+                'tdm-PatternConfig-r16',
+                {
+                    'k': 'ref',
+                    't': 'TDM_PatternConfig_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'tdm-PatternConfig2-r16',
+                {
+                    'k': 'ref',
+                    't': 'TDM_PatternConfig_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionResume_v1700_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionResume_v1700_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'scg-State-r17',
+                {
+                    'k': 'enum',
+                    'names': ['deactivated'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetup': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'rrcConnectionSetup-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RRCConnectionSetup_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare7',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare6',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare5',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare4',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'rrcConnectionSetupComplete-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RRCConnectionSetupComplete_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'selectedPLMN-Identity',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 6,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'registeredMME',
+                {
+                    'k': 'ref',
+                    't': 'RegisteredMME',
+                },
+                True,
+                None,
+            ],
+            [
+                'dedicatedInfoNAS',
+                {
+                    'k': 'ref',
+                    't': 'DedicatedInfoNAS',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1020_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gummei-Type-r10',
+                {
+                    'k': 'enum',
+                    'names': ['native', 'mapped'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'rlf-InfoAvailable-r10',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'logMeasAvailable-r10',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'rn-SubframeConfigReq-r10',
+                {
+                    'k': 'enum',
+                    'names': ['required', 'notRequired'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1130_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1130_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'connEstFailInfoAvailable-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1250_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1250_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mobilityState-r12',
+                {
+                    'k': 'enum',
+                    'names': ['normal', 'medium', 'high', 'spare'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'mobilityHistoryAvail-r12',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'logMeasAvailableMBSFN-r12',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1320_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1320_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ce-ModeB-r13',
+                {
+                    'k': 'enum',
+                    'names': ['supported'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                's-TMSI-r13',
+                {
+                    'k': 'ref',
+                    't': 'S_TMSI',
+                },
+                True,
+                None,
+            ],
+            [
+                'attachWithoutPDN-Connectivity-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'up-CIoT-EPS-Optimisation-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'cp-CIoT-EPS-Optimisation-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1330_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1330_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ue-CE-NeedULGaps-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1430_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1430_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'dcn-ID-r14',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 65535,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'logMeasAvailableBT-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'logMeasAvailableWLAN-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'idleMeasAvailable-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'flightPathInfoAvailable-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'connectTo5GC-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'registeredAMF-r15',
+                {
+                    'k': 'ref',
+                    't': 'RegisteredAMF_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                's-NSSAI-list-r15',
+                {
+                    'k': 'seqof',
+                    'size': [1, 8],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'S_NSSAI_r15',
+                    },
+                },
+                True,
+                None,
+            ],
+            [
+                'ng-5G-S-TMSI-Bits-r15',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'ng-5G-S-TMSI-r15',
+                            {
+                                'k': 'ref',
+                                't': 'NG_5G_S_TMSI_r15',
+                            },
+                        ],
+                        [
+                            'ng-5G-S-TMSI-Part2-r15',
+                            {
+                                'k': 'bits',
+                                'size': [8, 8],
+                                'ext': False,
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1540_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1540_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gummei-Type-v1540',
+                {
+                    'k': 'enum',
+                    'names': ['mappedFrom5G-v1540'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'guami-Type-r15',
+                {
+                    'k': 'enum',
+                    'names': ['native', 'mapped'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rlos-Request-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'cp-CIoT-5GS-Optimisation-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'up-CIoT-5GS-Optimisation-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'pur-ConfigID-r16',
+                {
+                    'k': 'ref',
+                    't': 'PUR_ConfigID_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'lte-M-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'iab-NodeIndication-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1690_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1690_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ul-RRC-Segmentation-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1710_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1710_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gnss-ValidityDuration-r17',
+                {
+                    'k': 'ref',
+                    't': 'GNSS_ValidityDuration_r17',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1800_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v1800_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gnss-PositionFixDuration-r18',
+                {
+                    'k': 'ref',
+                    't': 'GNSS_PositionFixDuration_r18',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetupComplete_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': '_cont_lateNonCriticalExtension',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetupComplete_v1020_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetup_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'radioResourceConfigDedicated',
+                {
+                    'k': 'ref',
+                    't': 'RadioResourceConfigDedicated',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetup_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetup_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'dedicatedInfoNAS-r16',
+                {
+                    'k': 'ref',
+                    't': 'DedicatedInfoNAS',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCConnectionSetup_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCConnectionSetup_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCEarlyDataComplete_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'rrcEarlyDataComplete-r15',
+                            {
+                                'k': 'ref',
+                                't': 'RRCEarlyDataComplete_r15_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCEarlyDataComplete_r15_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'dedicatedInfoNAS-r15',
+                {
+                    'k': 'ref',
+                    't': 'DedicatedInfoNAS',
+                },
+                True,
+                None,
+            ],
+            [
+                'extendedWaitTime-r15',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 1800,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'idleModeMobilityControlInfo-r15',
+                {
+                    'k': 'ref',
+                    't': 'IdleModeMobilityControlInfo',
+                },
+                True,
+                None,
+            ],
+            [
+                'idleModeMobilityControlInfoExt-r15',
+                {
+                    'k': 'ref',
+                    't': 'IdleModeMobilityControlInfo_v9e0',
+                },
+                True,
+                None,
+            ],
+            [
+                'redirectedCarrierInfo-r15',
+                {
+                    'k': 'ref',
+                    't': 'RedirectedCarrierInfo_r15_IEs',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'RRCEarlyDataComplete_v1590_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRCEarlyDataComplete_v1590_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRC_InactiveConfig_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'fullI-RNTI-r15',
+                {
+                    'k': 'ref',
+                    't': 'I_RNTI_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'shortI-RNTI-r15',
+                {
+                    'k': 'ref',
+                    't': 'ShortI_RNTI_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'ran-PagingCycle-r15',
+                {
+                    'k': 'enum',
+                    'names': ['rf32', 'rf64', 'rf128', 'rf256'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'ran-NotificationAreaInfo-r15',
+                {
+                    'k': 'ref',
+                    't': 'RAN_NotificationAreaInfo_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'periodic-RNAU-timer-r15',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'min5',
+                        'min10',
+                        'min20',
+                        'min30',
+                        'min60',
+                        'min120',
+                        'min360',
+                        'min720',
+                    ],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nextHopChainingCount-r15',
+                {
+                    'k': 'ref',
+                    't': 'NextHopChainingCount',
+                },
+                True,
+                None,
+            ],
+            [
+                'dummy',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RRC_InactiveConfig_v1610': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ran-PagingCycle-v1610',
+                {
+                    'k': 'enum',
+                    'names': ['rf512', 'rf1024'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'RRC_TransactionIdentifier': {
         'k': 'int',
         'lb': 0,
         'ub': 3,
         'ext': False,
+    },
+    'RSRP_ChangeThresh_r16': {
+        'k': 'enum',
+        'names': [
+            'dB4',
+            'dB6',
+            'dB8',
+            'dB10',
+            'dB14',
+            'dB18',
+            'dB22',
+            'dB26',
+            'dB30',
+            'dB34',
+            'spare6',
+            'spare5',
+            'spare4',
+            'spare3',
+            'spare2',
+            'spare1',
+        ],
+        'ext': None,
     },
     'RSRP_Range': {
         'k': 'int',
@@ -32041,6 +47605,12 @@ TYPES = {
         'k': 'int',
         'lb': 0,
         'ub': 13,
+        'ext': False,
+    },
+    'RSRP_Range_v1360': {
+        'k': 'int',
+        'lb': -17,
+        'ub': -1,
         'ext': False,
     },
     'RSRP_ThresholdsPrachInfoList_r13': {
@@ -32095,6 +47665,29 @@ TYPES = {
         'lb': -30,
         'ub': 46,
         'ext': False,
+    },
+    'RSRQ_Type_r12': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'allSymbols-r12',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'wideBand-r12',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
     },
     'RSSI_Range_r13': {
         'k': 'int',
@@ -32192,6 +47785,275 @@ TYPES = {
         'k': 'enum',
         'names': ['dB-6', 'dB-3', 'dB0', 'dB3', 'dB6', 'dB9', 'dB12', 'rssNotUsed'],
         'ext': None,
+    },
+    'RSTD_InterFreqInfoList_r10': {
+        'k': 'seqof',
+        'size': [1, 3],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'RSTD_InterFreqInfo_r10',
+        },
+    },
+    'RSTD_InterFreqInfo_r10': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'carrierFreq-r10',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA',
+                },
+                False,
+                None,
+            ],
+            [
+                'measPRS-Offset-r10',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 39,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['carrierFreq-v1090'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'carrierFreq-v1090',
+                            {
+                                'k': 'ref',
+                                't': 'ARFCN_ValueEUTRA_v9e0',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['measPRS-Offset-r15'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'measPRS-Offset-r15',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'rstd0-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 79,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd1-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 159,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd2-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 319,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd3-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 639,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd4-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 1279,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd5-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 159,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd6-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 319,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd7-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 639,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd8-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 1279,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd9-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 319,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd10-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 639,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd11-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 1279,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd12-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 319,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd13-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 639,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd14-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 1279,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd15-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 639,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd16-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 1279,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd17-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 639,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd18-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 1279,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd19-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 639,
+                                            'ext': False,
+                                        },
+                                    ],
+                                    [
+                                        'rstd20-r15',
+                                        {
+                                            'k': 'int',
+                                            'lb': 0,
+                                            'ub': 1279,
+                                            'ext': False,
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
     },
     'RS_ConfigSSB_NR_r15': {
         'k': 'seq',
@@ -32360,6 +48222,12 @@ TYPES = {
                 },
             },
         ],
+    },
+    'RS_IndexNR_r15': {
+        'k': 'int',
+        'lb': 0,
+        'ub': 63,
+        'ext': False,
     },
     'RS_SINR_RangeNR_r15': {
         'k': 'int',
@@ -35004,6 +50872,126 @@ TYPES = {
             },
         ],
     },
+    'RedirectedCarrierInfo': {
+        'k': 'choice',
+        'ext': True,
+        'alts': [
+            [
+                'eutra',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA',
+                },
+            ],
+            [
+                'geran',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqsGERAN',
+                },
+            ],
+            [
+                'utra-FDD',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueUTRA',
+                },
+            ],
+            [
+                'utra-TDD',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueUTRA',
+                },
+            ],
+            [
+                'cdma2000-HRPD',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqCDMA2000',
+                },
+            ],
+            [
+                'cdma2000-1xRTT',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqCDMA2000',
+                },
+            ],
+        ],
+        'extadd': [
+            [
+                'utra-TDD-r10',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqListUTRA_TDD_r10',
+                },
+            ],
+            [
+                'nr-r15',
+                {
+                    'k': 'ref',
+                    't': 'CarrierInfoNR_r15',
+                },
+            ],
+            [
+                'nr-r17',
+                {
+                    'k': 'ref',
+                    't': 'CarrierInfoNR_r17',
+                },
+            ],
+        ],
+    },
+    'RedirectedCarrierInfo_r15_IEs': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'eutra',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+            ],
+            [
+                'geran',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqsGERAN',
+                },
+            ],
+            [
+                'utra-FDD',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueUTRA',
+                },
+            ],
+            [
+                'cdma2000-HRPD',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqCDMA2000',
+                },
+            ],
+            [
+                'cdma2000-1xRTT',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqCDMA2000',
+                },
+            ],
+            [
+                'utra-TDD',
+                {
+                    'k': 'ref',
+                    't': 'CarrierFreqListUTRA_TDD_r10',
+                },
+            ],
+        ],
+        'extadd': [],
+    },
     'RedistributionFactor_r13': {
         'k': 'int',
         'lb': 1,
@@ -35131,6 +51119,127 @@ TYPES = {
         'size': None,
         'ext': False,
         'containing': None,
+    },
+    'ReferenceTime_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'refDays-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 72999,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'refSeconds-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 86399,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'refMilliSeconds-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 999,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'refQuarterMicroSeconds-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 3999,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RegisteredAMF_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Identity-r15',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_Identity',
+                },
+                True,
+                None,
+            ],
+            [
+                'amf-Identifier-r15',
+                {
+                    'k': 'ref',
+                    't': 'AMF_Identifier_r15',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'RegisteredMME': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Identity',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_Identity',
+                },
+                True,
+                None,
+            ],
+            [
+                'mmegi',
+                {
+                    'k': 'bits',
+                    'size': [16, 16],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'mmec',
+                {
+                    'k': 'ref',
+                    't': 'MMEC',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ReleaseCause': {
+        'k': 'enum',
+        'names': [
+            'loadBalancingTAUrequired',
+            'other',
+            'cs-FallbackHighPriority-v1020',
+            'rrc-Suspend-v1320',
+        ],
+        'ext': None,
     },
     'ReportConfigEUTRA': {
         'k': 'seq',
@@ -37212,6 +53321,66 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'ResultsPerSSB_IndexIdle_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ssb-Index-r16',
+                {
+                    'k': 'ref',
+                    't': 'RS_IndexNR_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'ssb-Results-r16',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'ssb-RSRP-Result-r16',
+                            {
+                                'k': 'ref',
+                                't': 'RSRP_RangeNR_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'ssb-RSRQ-Result-r16',
+                            {
+                                'k': 'ref',
+                                't': 'RSRQ_RangeNR_r15',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ResultsPerSSB_IndexList_r16': {
+        'k': 'seqof',
+        'size': [1, 32],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'ResultsPerSSB_IndexIdle_r16',
+        },
+    },
+    'ResumeIdentity_r13': {
+        'k': 'bits',
+        'size': [40, 40],
+        'ext': False,
+    },
     'RetxBSR_Timer_r12': {
         'k': 'enum',
         'names': [
@@ -37238,6 +53407,240 @@ TYPES = {
                     'ext': [],
                 },
                 False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SCGFailureInformationNR_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'scgFailureInformationNR-r15',
+                                        {
+                                            'k': 'ref',
+                                            't': 'SCGFailureInformationNR_r15_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SCGFailureInformationNR_r15_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'failureReportSCG-NR-r15',
+                {
+                    'k': 'ref',
+                    't': 'FailureReportSCG_NR_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'SCGFailureInformationNR_v1590_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SCGFailureInformationNR_v1590_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SCGFailureInformation_r12': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'scgFailureInformation-r12',
+                                        {
+                                            'k': 'ref',
+                                            't': 'SCGFailureInformation_r12_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SCGFailureInformation_r12_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'failureReportSCG-r12',
+                {
+                    'k': 'ref',
+                    't': 'FailureReportSCG_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'SCGFailureInformation_v12d0a_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SCGFailureInformation_v12d0a_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': '_cont_lateNonCriticalExtension',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
                 None,
             ],
         ],
@@ -37819,6 +54222,15 @@ TYPES = {
             't': 'SCellToAddMod_r10',
         },
     },
+    'SCellToAddModList_r16': {
+        'k': 'seqof',
+        'size': [1, 31],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'SCellToAddMod_r16',
+        },
+    },
     'SCellToAddMod_r10': {
         'k': 'seq',
         'ext': True,
@@ -37967,6 +54379,100 @@ TYPES = {
             },
         ],
     },
+    'SCellToAddMod_r16': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'sCellIndex-r16',
+                {
+                    'k': 'ref',
+                    't': 'SCellIndex_r13',
+                },
+                False,
+                None,
+            ],
+            [
+                'cellIdentification-r16',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'physCellId-r16',
+                            {
+                                'k': 'ref',
+                                't': 'PhysCellId',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'dl-CarrierFreq-r16',
+                            {
+                                'k': 'ref',
+                                't': 'ARFCN_ValueEUTRA_r9',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'radioResourceConfigCommonSCell-r16',
+                {
+                    'k': 'ref',
+                    't': 'RadioResourceConfigCommonSCell_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'radioResourceConfigDedicatedSCell-r16',
+                {
+                    'k': 'ref',
+                    't': 'RadioResourceConfigDedicatedSCell_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'antennaInfoDedicatedSCell-r16',
+                {
+                    'k': 'ref',
+                    't': 'AntennaInfoDedicated_v10i0',
+                },
+                True,
+                None,
+            ],
+            [
+                'srs-SwitchFromServCellIndex-r16',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 31,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'sCellState-r16',
+                {
+                    'k': 'enum',
+                    'names': ['activated', 'dormant'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'SCellToReleaseListExt_r13': {
         'k': 'seqof',
         'size': [1, 31],
@@ -38078,6 +54584,27 @@ TYPES = {
             'sibType28-v1610',
             'sibType29-v1610',
         ],
+    },
+    'SI_OrPSI_GERAN': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'si',
+                {
+                    'k': 'ref',
+                    't': 'SystemInfoListGERAN',
+                },
+            ],
+            [
+                'psi',
+                {
+                    'k': 'ref',
+                    't': 'SystemInfoListGERAN',
+                },
+            ],
+        ],
+        'extadd': [],
     },
     'SI_Periodicity_r12': {
         'k': 'enum',
@@ -39094,6 +55621,31 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'SL_CommTxResourceReq_r12': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r12',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                True,
+                None,
+            ],
+            [
+                'destinationInfoList-r12',
+                {
+                    'k': 'ref',
+                    't': 'SL_DestinationInfoList_r12',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'SL_DestinationIdentity_r12': {
         'k': 'bits',
         'size': [24, 24],
@@ -39910,6 +56462,285 @@ TYPES = {
             },
         ],
     },
+    'SL_DiscRxPoolList_r12': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'SL_DiscResourcePool_r12',
+        },
+    },
+    'SL_DiscSysInfoReportFreqList_r13': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'SL_DiscSysInfoReport_r13',
+        },
+    },
+    'SL_DiscSysInfoReport_r13': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'plmn-IdentityList-r13',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_IdentityList',
+                },
+                True,
+                None,
+            ],
+            [
+                'cellIdentity-13',
+                {
+                    'k': 'ref',
+                    't': 'CellIdentity',
+                },
+                True,
+                None,
+            ],
+            [
+                'carrierFreqInfo-13',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                True,
+                None,
+            ],
+            [
+                'discRxResources-r13',
+                {
+                    'k': 'ref',
+                    't': 'SL_DiscRxPoolList_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'discTxPoolCommon-r13',
+                {
+                    'k': 'ref',
+                    't': 'SL_DiscTxPoolList_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'discTxPowerInfo-r13',
+                {
+                    'k': 'ref',
+                    't': 'SL_DiscTxPowerInfoList_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'discSyncConfig-r13',
+                {
+                    'k': 'ref',
+                    't': 'SL_SyncConfigNFreq_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'discCellSelectionInfo-r13',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'q-RxLevMin-r13',
+                            {
+                                'k': 'ref',
+                                't': 'Q_RxLevMin',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'q-RxLevMinOffset-r13',
+                            {
+                                'k': 'int',
+                                'lb': 1,
+                                'ub': 8,
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'cellReselectionInfo-r13',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'q-Hyst-r13',
+                            {
+                                'k': 'enum',
+                                'names': [
+                                    'dB0',
+                                    'dB1',
+                                    'dB2',
+                                    'dB3',
+                                    'dB4',
+                                    'dB5',
+                                    'dB6',
+                                    'dB8',
+                                    'dB10',
+                                    'dB12',
+                                    'dB14',
+                                    'dB16',
+                                    'dB18',
+                                    'dB20',
+                                    'dB22',
+                                    'dB24',
+                                ],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'q-RxLevMin-r13',
+                            {
+                                'k': 'ref',
+                                't': 'Q_RxLevMin',
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            't-ReselectionEUTRA-r13',
+                            {
+                                'k': 'ref',
+                                't': 'T_Reselection',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'tdd-Config-r13',
+                {
+                    'k': 'ref',
+                    't': 'TDD_Config',
+                },
+                True,
+                None,
+            ],
+            [
+                'freqInfo-r13',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'ul-CarrierFreq-r13',
+                            {
+                                'k': 'ref',
+                                't': 'ARFCN_ValueEUTRA',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'ul-Bandwidth-r13',
+                            {
+                                'k': 'enum',
+                                'names': ['n6', 'n15', 'n25', 'n50', 'n75', 'n100'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'additionalSpectrumEmission-r13',
+                            {
+                                'k': 'ref',
+                                't': 'AdditionalSpectrumEmission',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'p-Max-r13',
+                {
+                    'k': 'ref',
+                    't': 'P_Max',
+                },
+                True,
+                None,
+            ],
+            [
+                'referenceSignalPower-r13',
+                {
+                    'k': 'int',
+                    'lb': -60,
+                    'ub': 50,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['freqInfo-v1370'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'freqInfo-v1370',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'additionalSpectrumEmission-v1370',
+                                        {
+                                            'k': 'ref',
+                                            't': 'AdditionalSpectrumEmission_v10l0',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
+    },
     'SL_DiscSysInfoToReportFreqList_r13': {
         'k': 'seqof',
         'size': [1, 8],
@@ -40013,6 +56844,15 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'SL_DiscTxPoolList_r12': {
+        'k': 'seqof',
+        'size': [1, 4],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'SL_DiscResourcePool_r12',
+        },
+    },
     'SL_DiscTxPoolToAddModList_r12': {
         'k': 'seqof',
         'size': [1, 4],
@@ -40040,6 +56880,31 @@ TYPES = {
                 {
                     'k': 'ref',
                     't': 'SL_DiscResourcePool_r12',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SL_DiscTxPowerInfoList_r12': {
+        'k': 'seqof',
+        'size': [3, 3],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'SL_DiscTxPowerInfo_r12',
+        },
+    },
+    'SL_DiscTxPowerInfo_r12': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'discMaxTxPower-r12',
+                {
+                    'k': 'ref',
+                    't': 'P_Max',
                 },
                 False,
                 None,
@@ -40119,6 +56984,44 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'SL_DiscTxResourceReqPerFreqList_r13': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'SL_DiscTxResourceReq_r13',
+        },
+    },
+    'SL_DiscTxResourceReq_r13': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreqDiscTx-r13',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 8,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'discTxResourceReq-r13',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 63,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'SL_DiscTxResource_r13': {
         'k': 'choice',
         'ext': False,
@@ -40160,6 +57063,31 @@ TYPES = {
         'k': 'seq',
         'ext': False,
         'comp': [
+            [
+                'gapPatternList-r13',
+                {
+                    'k': 'ref',
+                    't': 'SL_GapPatternList_r13',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SL_GapFreqInfo_r13': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r13',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                True,
+                None,
+            ],
             [
                 'gapPatternList-r13',
                 {
@@ -40232,6 +57160,15 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'SL_GapRequest_r13': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'SL_GapFreqInfo_r13',
+        },
     },
     'SL_HoppingConfigComm_r12': {
         'k': 'seq',
@@ -41708,6 +58645,62 @@ TYPES = {
         'k': 'enum',
         'names': ['gnss', 'enb', 'ue'],
         'ext': None,
+    },
+    'SL_V2X_CommFreqList_r14': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'int',
+            'lb': 0,
+            'ub': 7,
+            'ext': False,
+        },
+    },
+    'SL_V2X_CommTxFreqList_r14': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'SL_V2X_CommTxResourceReq_r14',
+        },
+    },
+    'SL_V2X_CommTxResourceReq_r14': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreqCommTx-r14',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 7,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'v2x-TypeTxSync-r14',
+                {
+                    'k': 'ref',
+                    't': 'SL_TypeTxSync_r14',
+                },
+                True,
+                None,
+            ],
+            [
+                'v2x-DestinationInfoList-r14',
+                {
+                    'k': 'ref',
+                    't': 'SL_DestinationInfoList_r12',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
     },
     'SL_V2X_ConfigDedicated_r14': {
         'k': 'seq',
@@ -44735,6 +61728,55 @@ TYPES = {
             't': 'STAG_Id_r11',
         },
     },
+    'S_NSSAI_r15': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'sst',
+                {
+                    'k': 'bits',
+                    'size': [8, 8],
+                    'ext': False,
+                },
+            ],
+            [
+                'sst-SD',
+                {
+                    'k': 'bits',
+                    'size': [32, 32],
+                    'ext': False,
+                },
+            ],
+        ],
+        'extadd': [],
+    },
+    'S_TMSI': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mmec',
+                {
+                    'k': 'ref',
+                    't': 'MMEC',
+                },
+                False,
+                None,
+            ],
+            [
+                'm-TMSI',
+                {
+                    'k': 'bits',
+                    'size': [32, 32],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'SatelliteId_r18': {
         'k': 'int',
         'lb': 0,
@@ -45301,6 +62343,344 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'SecurityConfigSMC': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'securityAlgorithmConfig',
+                {
+                    'k': 'ref',
+                    't': 'SecurityAlgorithmConfig',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SecurityModeCommand': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'securityModeCommand-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'SecurityModeCommand_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SecurityModeCommand_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'securityConfigSMC',
+                {
+                    'k': 'ref',
+                    't': 'SecurityConfigSMC',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'SecurityModeCommand_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SecurityModeCommand_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SecurityModeComplete': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'securityModeComplete-r8',
+                            {
+                                'k': 'ref',
+                                't': 'SecurityModeComplete_r8_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SecurityModeComplete_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'SecurityModeComplete_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SecurityModeComplete_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SecurityModeFailure': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'securityModeFailure-r8',
+                            {
+                                'k': 'ref',
+                                't': 'SecurityModeFailure_r8_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SecurityModeFailure_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'SecurityModeFailure_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SecurityModeFailure_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SensingResult_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'resourceIndex-r15',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 2000,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'ServCellIndex_r10': {
         'k': 'int',
         'lb': 0,
@@ -45311,6 +62691,11 @@ TYPES = {
         'k': 'int',
         'lb': 0,
         'ub': 31,
+        'ext': False,
+    },
+    'ShortI_RNTI_r15': {
+        'k': 'bits',
+        'size': [24, 24],
         'ext': False,
     },
     'ShortTTI_Length_r15': {
@@ -45336,6 +62721,339 @@ TYPES = {
                 {
                     'k': 'ref',
                     't': 'ShortTTI_Length_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SidelinkUEInformation_r12': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'sidelinkUEInformation-r12',
+                                        {
+                                            'k': 'ref',
+                                            't': 'SidelinkUEInformation_r12_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SidelinkUEInformation_r12_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'commRxInterestedFreq-r12',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                True,
+                None,
+            ],
+            [
+                'commTxResourceReq-r12',
+                {
+                    'k': 'ref',
+                    't': 'SL_CommTxResourceReq_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'discRxInterest-r12',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'discTxResourceReq-r12',
+                {
+                    'k': 'int',
+                    'lb': 1,
+                    'ub': 63,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'SidelinkUEInformation_v1310_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SidelinkUEInformation_v1310_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'commTxResourceReqUC-r13',
+                {
+                    'k': 'ref',
+                    't': 'SL_CommTxResourceReq_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'commTxResourceInfoReqRelay-r13',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'commTxResourceReqRelay-r13',
+                            {
+                                'k': 'ref',
+                                't': 'SL_CommTxResourceReq_r12',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'commTxResourceReqRelayUC-r13',
+                            {
+                                'k': 'ref',
+                                't': 'SL_CommTxResourceReq_r12',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'ue-Type-r13',
+                            {
+                                'k': 'enum',
+                                'names': ['relayUE', 'remoteUE'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'discTxResourceReq-v1310',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'carrierFreqDiscTx-r13',
+                            {
+                                'k': 'int',
+                                'lb': 1,
+                                'ub': 8,
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'discTxResourceReqAddFreq-r13',
+                            {
+                                'k': 'ref',
+                                't': 'SL_DiscTxResourceReqPerFreqList_r13',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'discTxResourceReqPS-r13',
+                {
+                    'k': 'ref',
+                    't': 'SL_DiscTxResourceReq_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'discRxGapReq-r13',
+                {
+                    'k': 'ref',
+                    't': 'SL_GapRequest_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'discTxGapReq-r13',
+                {
+                    'k': 'ref',
+                    't': 'SL_GapRequest_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'discSysInfoReportFreqList-r13',
+                {
+                    'k': 'ref',
+                    't': 'SL_DiscSysInfoReportFreqList_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'SidelinkUEInformation_v1430_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SidelinkUEInformation_v1430_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'v2x-CommRxInterestedFreqList-r14',
+                {
+                    'k': 'ref',
+                    't': 'SL_V2X_CommFreqList_r14',
+                },
+                True,
+                None,
+            ],
+            [
+                'p2x-CommTxType-r14',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'v2x-CommTxResourceReq-r14',
+                {
+                    'k': 'ref',
+                    't': 'SL_V2X_CommTxFreqList_r14',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'SidelinkUEInformation_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'SidelinkUEInformation_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'reliabilityInfoListSL-r15',
+                {
+                    'k': 'ref',
+                    't': 'SL_ReliabilityList_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
                 },
                 True,
                 None,
@@ -46602,6 +64320,17 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'SystemInfoListGERAN': {
+        'k': 'seqof',
+        'size': [1, 10],
+        'ext': False,
+        'of': {
+            'k': 'octets',
+            'size': [1, 23],
+            'ext': False,
+            'containing': None,
+        },
     },
     'SystemInfoValueTagList_r13': {
         'k': 'seqof',
@@ -50259,6 +67988,61 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'TDM_AssistanceInfo_r11': {
+        'k': 'choice',
+        'ext': True,
+        'alts': [
+            [
+                'drx-AssistanceInfo-r11',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'drx-CycleLength-r11',
+                            {
+                                'k': 'enum',
+                                'names': ['sf40', 'sf64', 'sf80', 'sf128', 'sf160', 'sf256', 'spare2', 'spare1'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'drx-Offset-r11',
+                            {
+                                'k': 'int',
+                                'lb': 0,
+                                'ub': 255,
+                                'ext': False,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'drx-ActiveTime-r11',
+                            {
+                                'k': 'enum',
+                                'names': ['sf20', 'sf30', 'sf40', 'sf60', 'sf80', 'sf100', 'spare2', 'spare1'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            ],
+            [
+                'idc-SubframePatternList-r11',
+                {
+                    'k': 'ref',
+                    't': 'IDC_SubframePatternList_r11',
+                },
+            ],
+        ],
+        'extadd': [],
+    },
     'TDM_PatternConfig_r15': {
         'k': 'choice',
         'ext': False,
@@ -50298,6 +68082,52 @@ TYPES = {
                     ],
                     'extadd': [],
                 },
+            ],
+        ],
+        'extadd': [],
+    },
+    'TMGI_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Id-r9',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'plmn-Index-r9',
+                            {
+                                'k': 'int',
+                                'lb': 1,
+                                'ub': 6,
+                                'ext': False,
+                            },
+                        ],
+                        [
+                            'explicitValue-r9',
+                            {
+                                'k': 'ref',
+                                't': 'PLMN_Identity',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'serviceId-r9',
+                {
+                    'k': 'octets',
+                    'size': [3, 3],
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
             ],
         ],
         'extadd': [],
@@ -50596,6 +68426,40 @@ TYPES = {
         ],
         'ext': None,
     },
+    'TargetMBSFN_AreaList_r12': {
+        'k': 'seqof',
+        'size': [0, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'TargetMBSFN_Area_r12',
+        },
+    },
+    'TargetMBSFN_Area_r12': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'mbsfn-AreaId-r12',
+                {
+                    'k': 'ref',
+                    't': 'MBSFN_AreaId_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'carrierFreq-r12',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'ThresholdCDMA2000': {
         'k': 'int',
         'lb': 0,
@@ -50740,6 +68604,60 @@ TYPES = {
         'ub': 1048575,
         'ext': False,
     },
+    'TimeReferenceInfo_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'time-r15',
+                {
+                    'k': 'ref',
+                    't': 'ReferenceTime_r15',
+                },
+                False,
+                None,
+            ],
+            [
+                'uncertainty-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 12,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'timeInfoType-r15',
+                {
+                    'k': 'enum',
+                    'names': ['localClock'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'referenceSFN-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 1023,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'TimeSinceFailure_r11': {
+        'k': 'int',
+        'lb': 0,
+        'ub': 172800,
+        'ext': False,
+    },
     'TimeToTrigger': {
         'k': 'enum',
         'names': [
@@ -50762,9 +68680,77 @@ TYPES = {
         ],
         'ext': None,
     },
+    'TimeUntilReconnection_r16': {
+        'k': 'int',
+        'lb': 0,
+        'ub': 172800,
+        'ext': False,
+    },
+    'TraceReference_r10': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Identity-r10',
+                {
+                    'k': 'ref',
+                    't': 'PLMN_Identity',
+                },
+                False,
+                None,
+            ],
+            [
+                'traceId-r10',
+                {
+                    'k': 'octets',
+                    'size': [3, 3],
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'TrackingAreaCode': {
         'k': 'bits',
         'size': [16, 16],
+        'ext': False,
+    },
+    'TrackingAreaCodeList_r10': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'TrackingAreaCode',
+        },
+    },
+    'TrackingAreaCodeList_v1130': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'plmn-Identity-perTAC-List-r11',
+                {
+                    'k': 'seqof',
+                    'size': [1, 8],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'PLMN_Identity',
+                    },
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'TrackingAreaCodeNR_r15': {
+        'k': 'bits',
+        'size': [24, 24],
         'ext': False,
     },
     'TrackingAreaCode_5GC_r15': {
@@ -50780,6 +68766,120 @@ TYPES = {
             'k': 'ref',
             't': 'TrackingAreaCode',
         },
+    },
+    'TrafficPatternInfoList_r14': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'TrafficPatternInfo_r14',
+        },
+    },
+    'TrafficPatternInfoList_v1530': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'TrafficPatternInfo_v1530',
+        },
+    },
+    'TrafficPatternInfo_r14': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'trafficPeriodicity-r14',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'sf20',
+                        'sf50',
+                        'sf100',
+                        'sf200',
+                        'sf300',
+                        'sf400',
+                        'sf500',
+                        'sf600',
+                        'sf700',
+                        'sf800',
+                        'sf900',
+                        'sf1000',
+                    ],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'timingOffset-r14',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 10239,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'priorityInfoSL-r14',
+                {
+                    'k': 'ref',
+                    't': 'SL_Priority_r13',
+                },
+                True,
+                None,
+            ],
+            [
+                'logicalChannelIdentityUL-r14',
+                {
+                    'k': 'int',
+                    'lb': 3,
+                    'ub': 10,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'messageSize-r14',
+                {
+                    'k': 'bits',
+                    'size': [6, 6],
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'TrafficPatternInfo_v1530': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'trafficDestination-r15',
+                {
+                    'k': 'ref',
+                    't': 'SL_DestinationIdentity_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'reliabilityInfoSL-r15',
+                {
+                    'k': 'ref',
+                    't': 'SL_Reliability_r15',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
     },
     'TunnelConfigLWIP_r13': {
         'k': 'seq',
@@ -50906,6 +69006,1858 @@ TYPES = {
             ],
         ],
         'extadd': [],
+    },
+    'UEAssistanceInformation_r11': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'ueAssistanceInformation-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'UEAssistanceInformation_r11_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEAssistanceInformation_r11_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'powerPrefIndication-r11',
+                {
+                    'k': 'enum',
+                    'names': ['normal', 'lowPowerConsumption'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEAssistanceInformation_v1430_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEAssistanceInformation_v1430_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'bw-Preference-r14',
+                {
+                    'k': 'ref',
+                    't': 'BW_Preference_r14',
+                },
+                True,
+                None,
+            ],
+            [
+                'sps-AssistanceInformation-r14',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'trafficPatternInfoListSL-r14',
+                            {
+                                'k': 'ref',
+                                't': 'TrafficPatternInfoList_r14',
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'trafficPatternInfoListUL-r14',
+                            {
+                                'k': 'ref',
+                                't': 'TrafficPatternInfoList_r14',
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'rlm-Report-r14',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'rlm-Event-r14',
+                            {
+                                'k': 'enum',
+                                'names': ['earlyOutOfSync', 'earlyInSync'],
+                                'ext': None,
+                            },
+                            False,
+                            None,
+                        ],
+                        [
+                            'excessRep-MPDCCH-r14',
+                            {
+                                'k': 'enum',
+                                'names': ['excessRep1', 'excessRep2'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'delayBudgetReport-r14',
+                {
+                    'k': 'ref',
+                    't': 'DelayBudgetReport_r14',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEAssistanceInformation_v1450_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEAssistanceInformation_v1450_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'overheatingAssistance-r14',
+                {
+                    'k': 'ref',
+                    't': 'OverheatingAssistance_r14',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEAssistanceInformation_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEAssistanceInformation_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'sps-AssistanceInformation-v1530',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'trafficPatternInfoListSL-v1530',
+                            {
+                                'k': 'ref',
+                                't': 'TrafficPatternInfoList_v1530',
+                            },
+                            False,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEAssistanceInformation_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEAssistanceInformation_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'overheatingAssistance-v1610',
+                {
+                    'k': 'ref',
+                    't': 'OverheatingAssistance_v1610',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEAssistanceInformation_v1700_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEAssistanceInformation_v1700_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'uplinkData-r17',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'scg-DeactivationPreference-r17',
+                {
+                    'k': 'enum',
+                    'names': ['scgDeactivationPreferred', 'noPreference'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEAssistanceInformation_v1710_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEAssistanceInformation_v1710_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'overheatingAssistance-v1710',
+                {
+                    'k': 'ref',
+                    't': 'OverheatingAssistance_v1710',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'ueCapabilityEnquiry-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'UECapabilityEnquiry_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ue-CapabilityRequest',
+                {
+                    'k': 'ref',
+                    't': 'UE_CapabilityRequest',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v1180_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'requestedFrequencyBands-r11',
+                {
+                    'k': 'seqof',
+                    'size': [1, 16],
+                    'ext': False,
+                    'of': {
+                        'k': 'ref',
+                        't': 'FreqBandIndicator_r11',
+                    },
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v1310_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v1310_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'requestReducedFormat-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'requestSkipFallbackComb-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'requestedMaxCCsDL-r13',
+                {
+                    'k': 'int',
+                    'lb': 2,
+                    'ub': 32,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'requestedMaxCCsUL-r13',
+                {
+                    'k': 'int',
+                    'lb': 2,
+                    'ub': 32,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'requestReducedIntNonContComb-r13',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v1430_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v1430_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'requestDiffFallbackCombList-r14',
+                {
+                    'k': 'ref',
+                    't': 'BandCombinationList_r14',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v1510_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v1510_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'requestedFreqBandsNR-MRDC-r15',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'requestSTTI-SPT-Capability-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'eutra-nr-only-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v1550_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v1550_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'requestedCapabilityNR-r15',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v1560_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v1560_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'requestedCapabilityCommon-r15',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-SegAllowed-r16',
+                {
+                    'k': 'enum',
+                    'names': ['enabled'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v1710_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v1710_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'sidelinkRequest-r17',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v17b0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v17b0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-MaxCapaSegAllowed-r17',
+                {
+                    'k': 'int',
+                    'lb': 2,
+                    'ub': 16,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityEnquiry_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityEnquiry_v1180_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityInformation': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'ueCapabilityInformation-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'UECapabilityInformation_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare7',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare6',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare5',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare4',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityInformation_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ue-CapabilityRAT-ContainerList',
+                {
+                    'k': 'ref',
+                    't': 'UE_CapabilityRAT_ContainerList',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityInformation_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityInformation_v1250_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ue-RadioPagingInfo-r12',
+                {
+                    'k': 'ref',
+                    't': 'UE_RadioPagingInfo_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UECapabilityInformation_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UECapabilityInformation_v1250_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationRequest_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'ueInformationRequest-r9',
+                                        {
+                                            'k': 'ref',
+                                            't': 'UEInformationRequest_r9_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationRequest_r9_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rach-ReportReq-r9',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'rlf-ReportReq-r9',
+                {
+                    'k': 'bool',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationRequest_v930_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationRequest_v1020_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'logMeasReportReq-r10',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationRequest_v1130_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationRequest_v1130_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'connEstFailReportReq-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationRequest_v1250_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationRequest_v1250_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mobilityHistoryReportReq-r12',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationRequest_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationRequest_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'idleModeMeasurementReq-r15',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'flightPathInfoReq-r15',
+                {
+                    'k': 'ref',
+                    't': 'FlightPathInfoReportConfig_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationRequest_v1710_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationRequest_v1710_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'coarseLocationReq-r17',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationRequest_v1800_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationRequest_v1800_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rach-ReportReqNR-r18',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationRequest_v930_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationRequest_v1020_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationResponse_r9': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rrc-TransactionIdentifier',
+                {
+                    'k': 'ref',
+                    't': 'RRC_TransactionIdentifier',
+                },
+                False,
+                None,
+            ],
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'ueInformationResponse-r9',
+                                        {
+                                            'k': 'ref',
+                                            't': 'UEInformationResponse_r9_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationResponse_r9_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rach-Report-r9',
+                {
+                    'k': 'ref',
+                    't': 'RACH_Report_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'rlf-Report-r9',
+                {
+                    'k': 'ref',
+                    't': 'RLF_Report_r9',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationResponse_v930_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationResponse_v1020_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'logMeasReport-r10',
+                {
+                    'k': 'ref',
+                    't': 'LogMeasReport_r10',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationResponse_v1130_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationResponse_v1130_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'connEstFailReport-r11',
+                {
+                    'k': 'ref',
+                    't': 'ConnEstFailReport_r11',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationResponse_v1250_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationResponse_v1250_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'mobilityHistoryReport-r12',
+                {
+                    'k': 'ref',
+                    't': 'MobilityHistoryReport_r12',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationResponse_v1530_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationResponse_v1530_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'measResultListIdle-r15',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultListIdle_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'flightPathInfoReport-r15',
+                {
+                    'k': 'ref',
+                    't': 'FlightPathInfoReport_r15',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationResponse_v1610_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationResponse_v1610_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rach-Report-v1610',
+                {
+                    'k': 'ref',
+                    't': 'RACH_Report_v1610',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultListExtIdle-r16',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultListExtIdle_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'measResultListIdleNR-r16',
+                {
+                    'k': 'ref',
+                    't': 'MeasResultListIdleNR_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationResponse_v1710_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationResponse_v1710_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'coarseLocationInfo-r17',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationResponse_v1800_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationResponse_v1800_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rach-ReportNR-r18',
+                {
+                    'k': 'ref',
+                    't': 'RACH_ReportNR_r18',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UEInformationResponse_v930_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': '_cont_lateNonCriticalExtension',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'UEInformationResponse_v1020_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UE_CapabilityRAT_Container': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'rat-Type',
+                {
+                    'k': 'ref',
+                    't': 'RAT_Type',
+                },
+                False,
+                None,
+            ],
+            [
+                'ueCapabilityRAT-Container',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UE_CapabilityRAT_ContainerList': {
+        'k': 'seqof',
+        'size': [0, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'UE_CapabilityRAT_Container',
+        },
+    },
+    'UE_CapabilityRequest': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'RAT_Type',
+        },
+    },
+    'UE_RadioPagingInfo_r12': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'ue-Category-v1250',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 0,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [
+            {
+                'k': 'extgrp',
+                'names': ['ue-CategoryDL-v1310', 'ce-ModeA-r13', 'ce-ModeB-r13'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'ue-CategoryDL-v1310',
+                            {
+                                'k': 'enum',
+                                'names': ['m1'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'ce-ModeA-r13',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'ce-ModeB-r13',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': [
+                    'wakeUpSignal-r15',
+                    'wakeUpSignal-TDD-r15',
+                    'wakeUpSignalMinGap-eDRX-r15',
+                    'wakeUpSignalMinGap-eDRX-TDD-r15',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'wakeUpSignal-r15',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'wakeUpSignal-TDD-r15',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'wakeUpSignalMinGap-eDRX-r15',
+                            {
+                                'k': 'enum',
+                                'names': ['ms40', 'ms240', 'ms1000', 'ms2000'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'wakeUpSignalMinGap-eDRX-TDD-r15',
+                            {
+                                'k': 'enum',
+                                'names': ['ms40', 'ms240', 'ms1000', 'ms2000'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': [
+                    'ue-CategoryDL-v1610',
+                    'groupWakeUpSignal-r16',
+                    'groupWakeUpSignalTDD-r16',
+                    'groupWakeUpSignalAlternation-r16',
+                    'groupWakeUpSignalAlternationTDD-r16',
+                ],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'ue-CategoryDL-v1610',
+                            {
+                                'k': 'enum',
+                                'names': ['m2'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'groupWakeUpSignal-r16',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'groupWakeUpSignalTDD-r16',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'groupWakeUpSignalAlternation-r16',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                        [
+                            'groupWakeUpSignalAlternationTDD-r16',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+            {
+                'k': 'extgrp',
+                'names': ['inactiveStatePO-Determination-r17'],
+                'node': {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [
+                        [
+                            'inactiveStatePO-Determination-r17',
+                            {
+                                'k': 'enum',
+                                'names': ['true'],
+                                'ext': None,
+                            },
+                            True,
+                            None,
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            },
+        ],
     },
     'UE_TimersAndConstants': {
         'k': 'seq',
@@ -51101,6 +71053,644 @@ TYPES = {
             },
         ],
     },
+    'ULDedicatedMessageSegment_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'ulDedicatedMessageSegment-r16',
+                            {
+                                'k': 'ref',
+                                't': 'ULDedicatedMessageSegment_r16_IEs',
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULDedicatedMessageSegment_r16_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'segmentNumber-r16',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 15,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'rrc-MessageSegmentContainer-r16',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'rrc-MessageSegmentType-r16',
+                {
+                    'k': 'enum',
+                    'names': ['notLastSegment', 'lastSegment'],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULHandoverPreparationTransfer': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'ulHandoverPreparationTransfer-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ULHandoverPreparationTransfer_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULHandoverPreparationTransfer_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'cdma2000-Type',
+                {
+                    'k': 'ref',
+                    't': 'CDMA2000_Type',
+                },
+                False,
+                None,
+            ],
+            [
+                'meid',
+                {
+                    'k': 'bits',
+                    'size': [56, 56],
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+            [
+                'dedicatedInfo',
+                {
+                    'k': 'ref',
+                    't': 'DedicatedInfoCDMA2000',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'ULHandoverPreparationTransfer_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULHandoverPreparationTransfer_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULInformationTransfer': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'ulInformationTransfer-r8',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ULInformationTransfer_r8_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'ulInformationTransfer-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ULInformationTransfer_r16_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULInformationTransferIRAT_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'ulInformationTransferIRAT-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ULInformationTransferIRAT_r16_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULInformationTransferIRAT_r16_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ul-DCCH-MessageNR-r16',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULInformationTransferMRDC_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'ulInformationTransferMRDC-r15',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ULInformationTransferMRDC_r15_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULInformationTransferMRDC_r15_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'ul-DCCH-MessageNR-r15',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULInformationTransfer_r16_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'dedicatedInfoType-r16',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'dedicatedInfoNAS-r16',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoNAS',
+                            },
+                        ],
+                        [
+                            'dedicatedInfoCDMA2000-1XRTT-r16',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoCDMA2000',
+                            },
+                        ],
+                        [
+                            'dedicatedInfoCDMA2000-HRPD-r16',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoCDMA2000',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'dedicatedInfoF1c-r16',
+                {
+                    'k': 'ref',
+                    't': 'DedicatedInfoF1c_r16',
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'ULInformationTransfer_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULInformationTransfer_r8_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'dedicatedInfoType',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'dedicatedInfoNAS',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoNAS',
+                            },
+                        ],
+                        [
+                            'dedicatedInfoCDMA2000-1XRTT',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoCDMA2000',
+                            },
+                        ],
+                        [
+                            'dedicatedInfoCDMA2000-HRPD',
+                            {
+                                'k': 'ref',
+                                't': 'DedicatedInfoCDMA2000',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'ULInformationTransfer_v8a0_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ULInformationTransfer_v8a0_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
     'UL_AM_RLC': {
         'k': 'seq',
         'ext': False,
@@ -51202,6 +71792,292 @@ TYPES = {
         'names': ['len1', 'len2'],
         'ext': None,
     },
+    'UL_DCCH_Message': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'message',
+                {
+                    'k': 'ref',
+                    't': 'UL_DCCH_MessageType',
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UL_DCCH_MessageType': {
+        'k': 'choice',
+        'ext': False,
+        'alts': [
+            [
+                'c1',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'csfbParametersRequestCDMA2000',
+                            {
+                                'k': 'ref',
+                                't': 'CSFBParametersRequestCDMA2000',
+                            },
+                        ],
+                        [
+                            'measurementReport',
+                            {
+                                'k': 'ref',
+                                't': 'MeasurementReport',
+                            },
+                        ],
+                        [
+                            'rrcConnectionReconfigurationComplete',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionReconfigurationComplete',
+                            },
+                        ],
+                        [
+                            'rrcConnectionReestablishmentComplete',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionReestablishmentComplete',
+                            },
+                        ],
+                        [
+                            'rrcConnectionSetupComplete',
+                            {
+                                'k': 'ref',
+                                't': 'RRCConnectionSetupComplete',
+                            },
+                        ],
+                        [
+                            'securityModeComplete',
+                            {
+                                'k': 'ref',
+                                't': 'SecurityModeComplete',
+                            },
+                        ],
+                        [
+                            'securityModeFailure',
+                            {
+                                'k': 'ref',
+                                't': 'SecurityModeFailure',
+                            },
+                        ],
+                        [
+                            'ueCapabilityInformation',
+                            {
+                                'k': 'ref',
+                                't': 'UECapabilityInformation',
+                            },
+                        ],
+                        [
+                            'ulHandoverPreparationTransfer',
+                            {
+                                'k': 'ref',
+                                't': 'ULHandoverPreparationTransfer',
+                            },
+                        ],
+                        [
+                            'ulInformationTransfer',
+                            {
+                                'k': 'ref',
+                                't': 'ULInformationTransfer',
+                            },
+                        ],
+                        [
+                            'counterCheckResponse',
+                            {
+                                'k': 'ref',
+                                't': 'CounterCheckResponse',
+                            },
+                        ],
+                        [
+                            'ueInformationResponse-r9',
+                            {
+                                'k': 'ref',
+                                't': 'UEInformationResponse_r9',
+                            },
+                        ],
+                        [
+                            'proximityIndication-r9',
+                            {
+                                'k': 'ref',
+                                't': 'ProximityIndication_r9',
+                            },
+                        ],
+                        [
+                            'rnReconfigurationComplete-r10',
+                            {
+                                'k': 'ref',
+                                't': 'RNReconfigurationComplete_r10',
+                            },
+                        ],
+                        [
+                            'mbmsCountingResponse-r10',
+                            {
+                                'k': 'ref',
+                                't': 'MBMSCountingResponse_r10',
+                            },
+                        ],
+                        [
+                            'interFreqRSTDMeasurementIndication-r10',
+                            {
+                                'k': 'ref',
+                                't': 'InterFreqRSTDMeasurementIndication_r10',
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            ],
+            [
+                'messageClassExtension',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c2',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'ueAssistanceInformation-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'UEAssistanceInformation_r11',
+                                        },
+                                    ],
+                                    [
+                                        'inDeviceCoexIndication-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'InDeviceCoexIndication_r11',
+                                        },
+                                    ],
+                                    [
+                                        'mbmsInterestIndication-r11',
+                                        {
+                                            'k': 'ref',
+                                            't': 'MBMSInterestIndication_r11',
+                                        },
+                                    ],
+                                    [
+                                        'scgFailureInformation-r12',
+                                        {
+                                            'k': 'ref',
+                                            't': 'SCGFailureInformation_r12',
+                                        },
+                                    ],
+                                    [
+                                        'sidelinkUEInformation-r12',
+                                        {
+                                            'k': 'ref',
+                                            't': 'SidelinkUEInformation_r12',
+                                        },
+                                    ],
+                                    [
+                                        'wlanConnectionStatusReport-r13',
+                                        {
+                                            'k': 'ref',
+                                            't': 'WLANConnectionStatusReport_r13',
+                                        },
+                                    ],
+                                    [
+                                        'rrcConnectionResumeComplete-r13',
+                                        {
+                                            'k': 'ref',
+                                            't': 'RRCConnectionResumeComplete_r13',
+                                        },
+                                    ],
+                                    [
+                                        'ulInformationTransferMRDC-r15',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ULInformationTransferMRDC_r15',
+                                        },
+                                    ],
+                                    [
+                                        'scgFailureInformationNR-r15',
+                                        {
+                                            'k': 'ref',
+                                            't': 'SCGFailureInformationNR_r15',
+                                        },
+                                    ],
+                                    [
+                                        'measReportAppLayer-r15',
+                                        {
+                                            'k': 'ref',
+                                            't': 'MeasReportAppLayer_r15',
+                                        },
+                                    ],
+                                    [
+                                        'failureInformation-r15',
+                                        {
+                                            'k': 'ref',
+                                            't': 'FailureInformation_r15',
+                                        },
+                                    ],
+                                    [
+                                        'ulDedicatedMessageSegment-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ULDedicatedMessageSegment_r16',
+                                        },
+                                    ],
+                                    [
+                                        'purConfigurationRequest-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'PURConfigurationRequest_r16',
+                                        },
+                                    ],
+                                    [
+                                        'failureInformation-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'FailureInformation_r16',
+                                        },
+                                    ],
+                                    [
+                                        'mcgFailureInformation-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'MCGFailureInformation_r16',
+                                        },
+                                    ],
+                                    [
+                                        'ulInformationTransferIRAT-r16',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ULInformationTransferIRAT_r16',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'messageClassExtensionFuture-r11',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+            ],
+        ],
+        'extadd': [],
+    },
     'UL_DelayConfig_r13': {
         'k': 'choice',
         'ext': False,
@@ -51285,6 +72161,88 @@ TYPES = {
                     ],
                     'extadd': [],
                 },
+            ],
+        ],
+        'extadd': [],
+    },
+    'UL_PDCP_DelayResultList_r13': {
+        'k': 'seqof',
+        'size': [1, 6],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'UL_PDCP_DelayResult_r13',
+        },
+    },
+    'UL_PDCP_DelayResult_r13': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'qci-Id-r13',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'qci1',
+                        'qci2',
+                        'qci3',
+                        'qci4',
+                        'spare4',
+                        'spare3',
+                        'spare2',
+                        'spare1',
+                    ],
+                    'ext': None,
+                },
+                False,
+                None,
+            ],
+            [
+                'excessDelay-r13',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 31,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'UL_PDCP_DelayValueResultList_r16': {
+        'k': 'seqof',
+        'size': [1, 11],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'UL_PDCP_DelayValueResult_r16',
+        },
+    },
+    'UL_PDCP_DelayValueResult_r16': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'drb-Id-r16',
+                {
+                    'k': 'ref',
+                    't': 'DRB_Identity',
+                },
+                False,
+                None,
+            ],
+            [
+                'averageDelay-r16',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 10000,
+                    'ext': False,
+                },
+                False,
+                None,
             ],
         ],
         'extadd': [],
@@ -52235,11 +73193,338 @@ TYPES = {
         ],
         'extadd': [],
     },
+    'ValidityAreaList_r16': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'ValidityArea_r16',
+        },
+    },
+    'ValidityArea_r16': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'carrierFreq-r16',
+                {
+                    'k': 'ref',
+                    't': 'ARFCN_ValueEUTRA_r9',
+                },
+                False,
+                None,
+            ],
+            [
+                'validityCellList-r16',
+                {
+                    'k': 'ref',
+                    't': 'ValidityCellList_r16',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'ValidityCellList_r16': {
+        'k': 'seqof',
+        'size': [1, 8],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'PhysCellIdRange',
+        },
+    },
     'VelocityStateVector_r17': {
         'k': 'int',
         'lb': -131072,
         'ub': 131071,
         'ext': False,
+    },
+    'VictimSystemType_r11': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'gps-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'glonass-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'bds-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'galileo-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'wlan-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'bluetooth-r11',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'VictimSystemType_v1610': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'navic-r16',
+                {
+                    'k': 'enum',
+                    'names': ['true'],
+                    'ext': None,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'VisitedCellInfoList_r12': {
+        'k': 'seqof',
+        'size': [1, 16],
+        'ext': False,
+        'of': {
+            'k': 'ref',
+            't': 'VisitedCellInfo_r12',
+        },
+    },
+    'VisitedCellInfo_r12': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'visitedCellId-r12',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'cellGlobalId-r12',
+                            {
+                                'k': 'ref',
+                                't': 'CellGlobalIdEUTRA',
+                            },
+                        ],
+                        [
+                            'pci-arfcn-r12',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [
+                                    [
+                                        'physCellId-r12',
+                                        {
+                                            'k': 'ref',
+                                            't': 'PhysCellId',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                    [
+                                        'carrierFreq-r12',
+                                        {
+                                            'k': 'ref',
+                                            't': 'ARFCN_ValueEUTRA_r9',
+                                        },
+                                        False,
+                                        None,
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+            [
+                'timeSpent-r12',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 4095,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'WLANConnectionStatusReport_r13': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'criticalExtensions',
+                {
+                    'k': 'choice',
+                    'ext': False,
+                    'alts': [
+                        [
+                            'c1',
+                            {
+                                'k': 'choice',
+                                'ext': False,
+                                'alts': [
+                                    [
+                                        'wlanConnectionStatusReport-r13',
+                                        {
+                                            'k': 'ref',
+                                            't': 'WLANConnectionStatusReport_r13_IEs',
+                                        },
+                                    ],
+                                    [
+                                        'spare3',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare2',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                    [
+                                        'spare1',
+                                        {
+                                            'k': 'null',
+                                        },
+                                    ],
+                                ],
+                                'extadd': [],
+                            },
+                        ],
+                        [
+                            'criticalExtensionsFuture',
+                            {
+                                'k': 'seq',
+                                'ext': False,
+                                'comp': [],
+                                'extadd': [],
+                            },
+                        ],
+                    ],
+                    'extadd': [],
+                },
+                False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'WLANConnectionStatusReport_r13_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'wlan-Status-r13',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_Status_r13',
+                },
+                False,
+                None,
+            ],
+            [
+                'lateNonCriticalExtension',
+                {
+                    'k': 'octets',
+                    'size': None,
+                    'ext': False,
+                    'containing': None,
+                },
+                True,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'ref',
+                    't': 'WLANConnectionStatusReport_v1430_IEs',
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'WLANConnectionStatusReport_v1430_IEs': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'wlan-Status-v1430',
+                {
+                    'k': 'ref',
+                    't': 'WLAN_Status_v1430',
+                },
+                False,
+                None,
+            ],
+            [
+                'nonCriticalExtension',
+                {
+                    'k': 'seq',
+                    'ext': False,
+                    'comp': [],
+                    'extadd': [],
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
     },
     'WLAN_BandIndicator_r13': {
         'k': 'enum',
@@ -52764,6 +74049,66 @@ TYPES = {
         'ub': 141,
         'ext': False,
     },
+    'WLAN_RTT_r15': {
+        'k': 'seq',
+        'ext': True,
+        'comp': [
+            [
+                'rttValue-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 16777215,
+                    'ext': False,
+                },
+                False,
+                None,
+            ],
+            [
+                'rttUnits-r15',
+                {
+                    'k': 'enum',
+                    'names': [
+                        'microseconds',
+                        'hundredsofnanoseconds',
+                        'tensofnanoseconds',
+                        'nanoseconds',
+                        'tenthsofnanoseconds',
+                    ],
+                    'ext': [],
+                },
+                False,
+                None,
+            ],
+            [
+                'rttAccuracy-r15',
+                {
+                    'k': 'int',
+                    'lb': 0,
+                    'ub': 255,
+                    'ext': False,
+                },
+                True,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'WLAN_Status_r13': {
+        'k': 'enum',
+        'names': [
+            'successfulAssociation',
+            'failureWlanRadioLink',
+            'failureWlanUnavailable',
+            'failureTimeout',
+        ],
+        'ext': None,
+    },
+    'WLAN_Status_v1430': {
+        'k': 'enum',
+        'names': ['suspended', 'resumed'],
+        'ext': None,
+    },
     'WLAN_SuspendConfig_r14': {
         'k': 'seq',
         'ext': False,
@@ -52921,6 +74266,31 @@ TYPES = {
                     'ext': None,
                 },
                 False,
+                None,
+            ],
+        ],
+        'extadd': [],
+    },
+    'WayPointLocation_r15': {
+        'k': 'seq',
+        'ext': False,
+        'comp': [
+            [
+                'wayPointLocation-r15',
+                {
+                    'k': 'ref',
+                    't': 'LocationInfo_r10',
+                },
+                False,
+                None,
+            ],
+            [
+                'timeStamp-r15',
+                {
+                    'k': 'ref',
+                    't': 'AbsoluteTimeInfo_r10',
+                },
+                True,
                 None,
             ],
         ],

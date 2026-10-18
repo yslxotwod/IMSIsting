@@ -1154,8 +1154,23 @@ lcore_gtpc_msg_name() {
 #   octets 1..2  : Length (payload octets after this 4-octet header)
 #   octet 3      : Spare (high nibble, must be 0) | Instance (low nibble)
 #   octets 4..   : Value
+# Walk a GTP-C IE stream. The second argument picks how the next IE is found:
+#   pad    (default) — IEs padded to a 4-octet boundary, padding not counted
+#                      in Length. This is what the functions above emit and
+#                      what tools/gtp-oracle walks.
+#   exact  — no padding: the next IE starts at 4+Length, which is how tshark
+#                      reads a GTPv2-C stream. Used by --mbms-session.
 lcore_gtpc_parse_ies() {
     local hex; hex=$(lcore_nfc "${1:-}")
+    # Default is exact: TS 29.274 §8.2 gives an IE a 4-octet header and a Length
+    # that is the real value length, with nothing after it. The pad mode stays
+    # only to read captures produced by older versions of this tree, which
+    # padded every IE to a 4-octet boundary -- the convention of GTPv1-C
+    # (TS 29.060), not GTPv2-C. A padded message is what tshark calls
+    # "[Malformed Packet: GTPv2]", so the default must not be the mode that
+    # reads it.
+    local mode="${2:-exact}"
+    case "$mode" in pad|exact) ;; *) printf 'ERROR\tIE walk mode is pad or exact, got %s\n' "$(lcore_sanitize "$mode")" >&2; return 1 ;; esac
     lcore_is_hex "$hex" || return 1
     local off=0 total=$(( ${#hex} / 2 ))
     local n=0
@@ -1192,11 +1207,21 @@ lcore_gtpc_parse_ies() {
             87) printf 'ie.%d.decoded\tF-TEID=%s\n' "$n" "$(lcore_fteid_decode "$val")" ;;           # §8.22
             83) printf 'ie.%d.decoded\tServingNetwork=%s\n' "$n" "$(lcore_plmn_from_octets "${val:0:6}")" ;;  # §8.18
             111) printf 'ie.%d.decoded\tP-TMSI=%s\n' "$n" "$val" ;;                                  # §8.41, 4 octets
+            80)  printf 'ie.%d.decoded\tQoS=%s\n' "$n" "$(lcore_qos_decode "$val")" ;;               # §8.15
+            138) printf 'ie.%d.decoded\tMBMS Duration=%s\n' "$n" "$(lcore_mbms_duration_decode "$val")" ;;  # §8.69
+            139) printf 'ie.%d.decoded\tMBMS Service Area=%s\n' "$n" "$(lcore_mbms_area_decode "$val")" ;;  # §8.70
+            140) printf 'ie.%d.decoded\tMBMS Session Identifier=0x%s\n' "$n" "$val" ;;                # §8.71, 1 octet
+            141) printf 'ie.%d.decoded\tMBMS Flow Identifier=0x%s\n' "$n" "$val" ;;                   # §8.72, 2 octets
+            142) printf 'ie.%d.decoded\tMBMS IP Multicast Distribution=%s\n' "$n" "$(lcore_mbms_mcdist_decode "$val")" ;;  # §8.73
+            158) printf 'ie.%d.decoded\tTMGI=%s\n' "$n" "$(lcore_tmgi_decode "$val")" ;;             # §8.89
+            171) printf 'ie.%d.decoded\tMBMS Flags=%s\n' "$n" "$(lcore_mbms_flags_decode "$val")" ;;  # §8.99
         esac
         off=$(( off + 4 + len ))
-        # GTP-C IEs are padded to a 4-octet boundary; padding is not
-        # counted in Length.
-        while (( off % 4 != 0 )); do off=$(( off + 1 )); done
+        # In pad mode GTP-C IEs are padded to a 4-octet boundary and the
+        # padding is not counted in Length; in exact mode there is none.
+        if [[ "$mode" == pad ]]; then
+            while (( off % 4 != 0 )); do off=$(( off + 1 )); done
+        fi
         n=$(( n + 1 ))
     done
     if (( off < total )); then
@@ -2065,6 +2090,9 @@ lcore_cli_status_tsv() {
     printf 'plans\t%s\n' "$plans"
     printf 's6a_app_id\t16777251\n'
     printf 'refs\tRFC 6733, TS 29.272, TS 29.274, TS 29.281, TS 36.413\n'
+    printf 'verbs\tdecode-diameter, decode-gtp-c, decode-gtp-u, build-air, build-ulr, build-clr, gtp-csr-forge, gtp-modify-bearer, gtp-in-gtp, mbms-session, gtpc-send, diameter-send, gtpdoor-detect, cdr-fraud-check, fs20-audit, plan, s1ap, surface, require-core\n'
+    printf 'gtp_in_gtp\tyes\n'
+    printf 'mbms_session\tyes\n'
     printf 'decode_only\t%s\n' "$(lcore_find_core_testbed >/dev/null 2>&1 && echo no || echo yes)"
 }
 
@@ -2191,8 +2219,13 @@ lcore_gtpc_ie() {
     [[ "$type" =~ ^[0-9]+$ ]] || { printf 'ERROR\tIE type must be numeric\n' >&2; return 2; }
     lcore_is_hex "$val" || { printf 'ERROR\tIE value must be hex\n' >&2; return 2; }
     local len=$(( ${#val} / 2 ))
+    # NO PADDING. TS 29.274 §8.2 makes the Length field the actual length of the
+    # value and puts nothing after it; 4-octet padding is the GTPv1-C (TS 29.060)
+    # convention and does not carry over. This builder used to pad, and the
+    # in-tree oracle used to pad with it, so the two agreed with each other and
+    # both disagreed with the wire: tshark 4.2.2 reports "[Malformed Packet:
+    # GTPv2]" on every padded IE, and pycrate advances by exactly 4+Length.
     local ie; printf -v ie '%02X%04X%02X%s' "$(( type & 0xFF ))" "$(( len & 0xFFFF ))" "$(( inst & 0x0F ))" "$val"
-    while (( (${#ie} / 2) % 4 != 0 )); do ie+="00"; done
     printf '%s' "$ie"
 }
 # A GTPv2-C message: Flags(1) Type(1) Length(2) [TEID(4)] Seq(3) Spare(1) body.
@@ -2227,6 +2260,491 @@ lcore_apn_encode() {
     done
     printf '%s' "$out"
 }
+
+# ── GTP-in-GTP and MBMS Session Start ──────────────────────────────────
+#
+#   --gtp-in-gtp    a GTPv1-U G-PDU whose T-PDU payload is another GTP
+#                   message (TS 29.281 §5.1)
+#   --mbms-session  a GTPv2-C MBMS Session Start Request (TS 29.274
+#                   §7.13.1, message type 231)
+#
+# Both are octets and nothing else. `sent` is 0 on every path: publishing
+# them is --gtpc-send's job (armed separately) or a --plan naming a testbed.
+
+# One's-complement 16-bit checksum over a whole number of hex words.
+lcore_csum16() {
+    local h; h=$(lcore_nfc "${1:-}")
+    (( ${#h} % 4 == 0 )) || {
+        printf 'ERROR\tchecksum input is not a whole number of 16-bit words\n' >&2; return 1; }
+    local sum=0 i
+    for (( i = 0; i < ${#h}; i += 4 )); do
+        sum=$(( sum + 16#${h:$i:4} ))
+        sum=$(( (sum & 0xFFFF) + (sum >> 16) ))
+    done
+    printf '%04X' $(( (~sum) & 0xFFFF ))
+}
+
+# A dotted quad to the four octets an IPv4 header carries.
+lcore_ipv4_hex() {
+    local q="${1:-}" a b c d
+    IFS='.' read -r a b c d <<<"$q"
+    [[ "$a" =~ ^[0-9]{1,3}$ && "$b" =~ ^[0-9]{1,3}$ &&
+       "$c" =~ ^[0-9]{1,3}$ && "$d" =~ ^[0-9]{1,3}$ ]] || return 1
+    (( 10#$a <= 255 && 10#$b <= 255 && 10#$c <= 255 && 10#$d <= 255 )) || return 1
+    printf '%02X%02X%02X%02X' "$((10#$a))" "$((10#$b))" "$((10#$c))" "$((10#$d))"
+}
+
+# IPv4 header (RFC 791 §3.1) plus payload: 20-octet header, checksum computed.
+lcore_ipv4_build() {
+    local src="${1:-}" dst="${2:-}" payload; payload=$(lcore_nfc "${3:-}")
+    local proto="${4:-17}" saddr daddr
+    saddr=$(lcore_ipv4_hex "$src") || {
+        printf 'ERROR\tsource is not a dotted quad: %s\n' "$(lcore_sanitize "$src")" >&2; return 2; }
+    daddr=$(lcore_ipv4_hex "$dst") || {
+        printf 'ERROR\tdestination is not a dotted quad: %s\n' "$(lcore_sanitize "$dst")" >&2; return 2; }
+    [[ -z "$payload" ]] || lcore_is_hex "$payload" || {
+        printf 'ERROR\tIPv4 payload must be hex\n' >&2; return 2; }
+    local total=$(( 20 + ${#payload} / 2 ))
+    (( total <= 65535 )) || {
+        printf 'ERROR\tIPv4 total length %d does not fit the 16-bit field\n' "$total" >&2; return 2; }
+    local hdr; printf -v hdr '4500%04X0000000040%02X0000%s%s' \
+        "$total" "$(( proto & 0xFF ))" "$saddr" "$daddr"
+    printf '%s%s%s%s' "${hdr:0:20}" "$(lcore_csum16 "$hdr")" "${hdr:24}" "$payload"
+}
+
+# A G-PDU per TS 29.281 §5.1: Flags(1) Type=0xFF(1) Length(2) TEID(4),
+# plus the 4-octet trailer the S flag introduces (§4.2: sequence number,
+# N-PDU number, next extension header type). Length counts the octets after
+# the 8-octet mandatory header, so the trailer belongs to it.
+lcore_gtpu_gtpdu() {
+    local teid="${1:-}" payload; payload=$(lcore_nfc "${2:-}")
+    local seq="${3:-}"
+    [[ "$teid" =~ ^[0-9A-Fa-f]{1,8}$ ]] || {
+        printf 'ERROR\tTEID must be 1..8 hex digits, got %s\n' "$(lcore_sanitize "$teid")" >&2; return 2; }
+    lcore_is_hex "$payload" || { printf 'ERROR\tT-PDU payload must be hex\n' >&2; return 2; }
+    [[ -n "$payload" ]] || { printf 'ERROR\tT-PDU payload is empty\n' >&2; return 2; }
+    local flags="30" trailer="" len=$(( ${#payload} / 2 ))
+    if [[ -n "$seq" ]]; then
+        [[ "$seq" =~ ^[0-9A-Fa-f]{1,4}$ ]] || {
+            printf 'ERROR\tsequence number must be 1..4 hex digits, got %s\n' "$(lcore_sanitize "$seq")" >&2; return 2; }
+        flags="32"
+        printf -v trailer '%04X0000' "$(( 16#$seq & 0xFFFF ))"
+        len=$(( len + 4 ))
+    fi
+    local out; printf -v out '%sFF%04X%08X' "$flags" "$(( len & 0xFFFF ))" "$(( 16#$teid ))"
+    printf '%s%s%s' "$out" "$trailer" "$payload"
+}
+
+# One GTP-C IE with no padding: type(1) length(2) spare/instance(1) value.
+# tshark reads a GTPv2-C stream as 4+Length with no padding and calls a
+# padded stream Malformed Packet, so the MBMS builder follows the decoder
+# the brief made the authority. lcore_gtpc_ie keeps the padded form for the
+# verbs that were already here.
+lcore_gtpc_ie_raw() {
+    local type="${1:-}" val; val=$(lcore_nfc "${2:-}")
+    local inst="${3:-0}"
+    [[ "$type" =~ ^[0-9]+$ ]] || { printf 'ERROR\tIE type must be numeric\n' >&2; return 2; }
+    lcore_is_hex "$val" || { printf 'ERROR\tIE value must be hex\n' >&2; return 2; }
+    printf '%02X%04X%02X%s' "$(( type & 0xFF ))" "$(( (${#val} / 2) & 0xFFFF ))" "$(( inst & 0x0F ))" "$val"
+}
+
+# §8.15 Bearer QoS: octet 5 flags, octet 6 QCI, then MBR uplink, MBR
+# downlink, GBR uplink, GBR downlink, five octets each, kbit/s.
+lcore_qos_decode() {
+    local v; v=$(lcore_nfc "${1:-}")
+    (( ${#v} >= 4 )) || { printf 'truncated'; return 0; }
+    local out; printf -v out 'qci=%d flags=0x%s' "$(( 16#${v:2:2} ))" "${v:0:2}"
+    if (( ${#v} >= 44 )); then
+        out+=$(printf ' mbr_ul=%d mbr_dl=%d gbr_ul=%d gbr_dl=%d' \
+            "$(( 16#${v:4:10} ))" "$(( 16#${v:14:10} ))" \
+            "$(( 16#${v:24:10} ))" "$(( 16#${v:34:10} ))")
+    fi
+    printf '%s' "$out"
+}
+
+# §8.69 MBMS Session Duration, three octets: bits ssss ssss ssss ssss
+# sddd dddd — a 17-bit second count then a 7-bit day count (TS 29.061
+# §17.7.7). All zero means "indefinite", an always-on session.
+lcore_mbms_duration_decode() {
+    local v; v=$(lcore_nfc "${1:-}")
+    (( ${#v} == 6 )) || { printf 'length=%d (three octets expected)' "$(( ${#v} / 2 ))"; return 0; }
+    local n=$(( 16#$v ))
+    local secs=$(( n >> 7 )) days=$(( n & 0x7F ))
+    if (( secs == 0 && days == 0 )); then
+        printf 'indefinite'
+    else
+        printf 'seconds=%d days=%d' "$secs" "$days"
+    fi
+}
+
+# §8.70 MBMS Service Area: the first octet is the number of service area
+# codes minus one (TS 29.061 §17.7.6), then two octets per code; the code 0
+# means the whole PLMN.
+lcore_mbms_area_decode() {
+    local v; v=$(lcore_nfc "${1:-}")
+    (( ${#v} >= 2 )) || { printf 'truncated'; return 0; }
+    local n0; n0=$(( 16#${v:0:2} ))
+    local cnt; cnt=$(( n0 + 1 ))
+    local ids="" i
+    for (( i = 2; i + 4 <= ${#v}; i += 4 )); do
+        ids+="${ids:+,}$(( 16#${v:$i:4} ))"
+    done
+    local got=$(( (${#v} - 2) / 4 ))
+    local out; printf -v out 'codes=%d ids=%s' "$got" "${ids:-none}"
+    if (( got != cnt )); then
+        out+=$(printf ' note=first octet 0x%s claims %d code(s) but %d pair(s) follow' "${v:0:2}" "$cnt" "$got")
+    fi
+    printf '%s' "$out"
+}
+
+# §8.73 MBMS IP Multicast Distribution: Common TEID (4 octets), then a
+# type(2 bits) length(6 bits) octet and the address for the distribution
+# address, the same for the source address, then the MBMS HC indicator. The
+# length is in octets: 4 for IPv4, 16 for IPv6.
+lcore_mbms_mcdist_decode() {
+    local v; v=$(lcore_nfc "${1:-}")
+    (( ${#v} >= 8 )) || { printf 'truncated'; return 0; }
+    local out="cteid=0x${v:0:8}" off=8 i label tl olen addr
+    for i in 1 2; do
+        (( off + 2 <= ${#v} )) || break
+        tl=$(( 16#${v:$off:2} ))
+        olen=$(( tl & 0x3F ))
+        off=$(( off + 2 ))
+        (( off + olen * 2 <= ${#v} )) || { printf '%s truncated' "$out"; return 0; }
+        addr="${v:$off:$((olen * 2))}"
+        off=$(( off + olen * 2 ))
+        if (( i == 1 )); then label=dist; else label=src; fi
+        if (( olen == 4 )); then
+            out+=$(printf ' %s=%d.%d.%d.%d' "$label" \
+                "$(( 16#${addr:0:2} ))" "$(( 16#${addr:2:2} ))" \
+                "$(( 16#${addr:4:2} ))" "$(( 16#${addr:6:2} ))")
+        else
+            out+=" ${label}=0x${addr}"
+        fi
+    done
+    if (( off + 2 <= ${#v} )); then
+        out+=" hc=$(( 16#${v:$off:2} ))"
+    fi
+    printf '%s' "$out"
+}
+
+# §8.89 TMGI: the MBMS Service ID (3 octets) then MCC/MNC (3 octets), with
+# no leading identity-type octet — that octet belongs to the NAS TMGI of
+# TS 24.008, not to this GTP-C IE.
+lcore_tmgi_decode() {
+    local v; v=$(lcore_nfc "${1:-}")
+    (( ${#v} >= 12 )) || { printf 'truncated'; return 0; }
+    printf 'service_id=%s plmn=%s' "${v:0:6}" "$(lcore_plmn_from_octets "${v:6:6}")"
+}
+
+# MBMS Flags: six spare bits, LMRI, MSRI (the layout the independent
+# implementation carries; Wireshark shows the octet without dissecting it).
+lcore_mbms_flags_decode() {
+    local v; v=$(lcore_nfc "${1:-}")
+    (( ${#v} >= 2 )) || { printf 'truncated'; return 0; }
+    local b=$(( 16#${v:0:2} ))
+    printf 'lmri=%d msri=%d spare=0x%02X' "$(( (b >> 1) & 1 ))" "$(( b & 1 ))" "$(( b & 0xFC ))"
+}
+
+lcore_cmd_gtp_in_gtp() {
+    local outer="11223344" inner="55667788" payload="DEADBEEF0102"
+    local seq="" oseq="" with_ip=0 out=""
+    local src="192.168.1.1" dst="172.16.0.1"
+    while (( $# > 0 )); do
+        case "$1" in
+            --with-ip) with_ip=1; shift ;;
+            --outer-teid|--inner-teid|--payload|--seq|--outer-seq|--src|--dst|--out)
+                (( $# >= 2 )) || {
+                    printf 'ERROR\t%s needs a value\n' "$(lcore_sanitize "$1")" >&2; return 2; }
+                case "$1" in
+                    --outer-teid) outer="$2" ;;
+                    --inner-teid) inner="$2" ;;
+                    --payload)    payload="$2" ;;
+                    --seq)        seq="$2" ;;
+                    --outer-seq)  oseq="$2" ;;
+                    --src)        src="$2" ;;
+                    --dst)        dst="$2" ;;
+                    --out)        out="$2" ;;
+                esac
+                shift 2 ;;
+            *)
+                printf 'ERROR\tunknown argument: %s\n' "$(lcore_sanitize "$1")" >&2
+                printf 'WHY\tusage: --gtp-in-gtp [--outer-teid hex] [--inner-teid hex] [--payload hex] [--seq hex] [--outer-seq hex] [--with-ip --src a.b.c.d --dst a.b.c.d] [--out path]\n' >&2
+                return 2 ;;
+        esac
+    done
+
+    local inner_pkt encap csum="" ip_total=""
+    inner_pkt=$(lcore_gtpu_gtpdu "$inner" "$payload" "$seq") || return $?
+    encap="$inner_pkt"
+    if (( with_ip )); then
+        local inner_oct=$(( ${#inner_pkt} / 2 ))
+        local udp; printf -v udp '%04X%04X%04X0000' 2152 2152 "$(( 8 + inner_oct ))"
+        local ipp; ipp=$(lcore_ipv4_build "$src" "$dst" "${udp}${inner_pkt}" 17) || return $?
+        csum="${ipp:20:4}"
+        ip_total=$(( ${#ipp} / 2 ))
+        encap="$ipp"
+    fi
+    local outer_pkt; outer_pkt=$(lcore_gtpu_gtpdu "$outer" "$encap" "$oseq") || return $?
+
+    # Prove the build by reading it back with this module's own GTP-U reader.
+    local rb; rb=$(lcore_gtpu_parse_header "$outer_pkt") || {
+        printf 'ERROR\tthe builder produced octets its own GTP-U reader rejects\n' >&2; return 1; }
+    local off=0
+    if (( with_ip )); then off=$(( (20 + 8) * 2 )); fi
+    local rb2; rb2=$(lcore_gtpu_parse_header "${encap:$off}") || rb2=""
+
+    printf 'gtp_in_gtp\t1\n'
+    printf 'outer_layer\tGTPv1-U G-PDU (TS 29.281 §5.1)\n'
+    printf 'inner_layer\tGTPv1-U G-PDU\n'
+    printf 'outer_teid\t0x%s\n' "$(printf '%08X' "$(( 16#$outer ))")"
+    printf 'inner_teid\t0x%s\n' "$(printf '%08X' "$(( 16#$inner ))")"
+    printf 'ip_layer\tnone\n'
+    if (( with_ip )); then
+        printf 'ip_layer_note\tthis is GTP, not IP: no IPv4/UDP wraps the outer GTP-U header, so the value is an encapsulation of octets and not a routable datagram. The IPv4/UDP 2152 packet --with-ip asks for sits *inside* the outer G-PDU, around the inner G-PDU\n'
+    else
+        printf 'ip_layer_note\tthis is GTP, not IP: the outer layer is the 8-octet GTP-U header with no IPv4/UDP around it, so the value is an encapsulation of octets and not a routable datagram\n'
+    fi
+    printf 'payload\t%s\n' "$(lcore_nfc "$payload")"
+    printf 'seq_inner\t%s\n' "${seq:-none}"
+    printf 'seq_outer\t%s\n' "${oseq:-none}"
+    if (( with_ip )); then
+        printf 'inner_ipv4\t%s->%s\n' "$src" "$dst"
+        printf 'inner_ipv4_bytes\t%s\n' "$ip_total"
+        printf 'inner_udp\t2152->2152\n'
+        printf 'inner_ipv4_checksum\t0x%s\n' "$csum"
+    fi
+    printf 'bytes\t%s\n' "$(( ${#outer_pkt} / 2 ))"
+    printf 'hex\t%s\n' "$outer_pkt"
+    printf 'readback.outer_teid\t0x%s\n' "$(printf '%s\n' "$rb" | awk -F'\t' '$1=="teid_hex"{print $2}')"
+    printf 'readback.outer_length_agrees\t%s\n' "$(printf '%s\n' "$rb" | awk -F'\t' '$1=="length_agrees"{print $2}')"
+    if [[ -n "$rb2" ]]; then
+        printf 'readback.inner_teid\t0x%s\n' "$(printf '%s\n' "$rb2" | awk -F'\t' '$1=="teid_hex"{print $2}')"
+        printf 'readback.inner_payload\t%s\n' "$(printf '%s\n' "$rb2" | awk -F'\t' '$1=="payload"{print $2}')"
+    fi
+    printf 'sent\t0\n'
+    printf 'ref\tTS 29.281 §5.1: a G-PDU is Flags, Type 0xFF, Length and TEID followed by an uninterpreted T-PDU\n'
+    printf 'ref\tTS 29.281 §4.2: the E/S/PN bits and the 4-octet trailer (sequence number, N-PDU number, next extension header type) they introduce\n'
+    printf 'ref\tTS 29.281 §5.1: Length counts the octets after the 8-octet mandatory header, trailer included\n'
+    printf 'ref\tTS 29.274 §5.1: not used for the outer layer — a GTPv2-C header has no uninterpreted payload octets, so an inner message there would need an IE\n'
+    printf 'ref\tRFC 791 §3.1: the IPv4 header and its one'"'"'s-complement checksum, used only when --with-ip asks for it\n'
+    printf 'limit\tthe outer layer is GTPv1-U because TS 29.281 §5.1 gives the G-PDU an octet payload a data-plane forwarder never interprets; a GTPv2-C outer would have to carry the inner message in a typed IE and is a different artefact\n'
+    printf 'limit\tno outer IP/UDP is built by default, so this is the encapsulated G-PDU and not a wire frame; --with-ip adds inner-tunnel IPv4/UDP 2152 framing\n'
+    printf 'limit\ttshark 4.2.2 does not recurse into a G-PDU payload, so the default form reads as one gtp layer with T-PDU Data; the two-layer reading is only visible with --with-ip\n'
+    printf 'capability\tartefact: encapsulated octets; effect: none; handoff: --gtpc-send for a GTPv2-C leg or --plan gtp-inject for a testbed\n'
+    if [[ -n "$out" ]]; then
+        command -v xxd >/dev/null 2>&1 || {
+            printf 'ERROR\t--out needs xxd, which is not on PATH\n' >&2; return 1; }
+        mkdir -p "$(dirname "$out")" 2>/dev/null
+        printf '%s' "$outer_pkt" | xxd -r -p > "$out" 2>/dev/null || {
+            printf 'ERROR\tcould not write %s\n' "$(lcore_sanitize "$out")" >&2; return 1; }
+        printf 'out_file\t%s\n' "$(lcore_sanitize "$out")"
+    fi
+    return 0
+}
+
+lcore_cmd_mbms_session() {
+    local teid="0" seq="1"
+    local mcc="310" mnc="260" service_id="010203"
+    local duration="3600" days="0" area_ids="1,2"
+    local mcd_cteid="00000001" mcd_dist="239.1.1.1" mcd_src="10.0.0.5" hc="0"
+    local session_id="01" flow_id="0001" mbms_flags="00"
+    local fteid_teid="0000000A" fteid_iface="10" fteid_ip="10.0.0.10"
+    local qci="9" mbr_ul="10000" mbr_dl="10000" gbr_ul="0" gbr_dl="0"
+    local mood=0 out=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --mood) mood=1; shift ;;
+            --imsi|--m-tmsi)
+                printf 'ERROR\t%s is not built: TS 29.274 Table 7.13.1-1 does not list an IMSI among the IEs of MBMS Session Start Request\n' "$(lcore_sanitize "$1")" >&2
+                printf 'WHY\tthe mandatory set the clause fixes is 80, 87, 138, 139, 142, 158; placing an IMSI would invent a position the clause does not fix\n' >&2
+                return 2 ;;
+            --counting)
+                printf 'ERROR\t--counting is not built: TS 29.274 defines no MBMS Counting IE\n' >&2
+                printf 'WHY\tno IE type in Table 8.1-1 carries a counting request for this message, and neither the clause table nor the tshark IE registry names one\n' >&2
+                return 2 ;;
+            --distribution-indication)
+                printf 'ERROR\t--distribution-indication is not built: IE 143 MBMS Distribution Acknowledge belongs to the MBMS Session Start response\n' >&2
+                printf 'WHY\tTS 29.274 Table 7.13.2-1 lists IE 143 on the response; the request table (7.13.1-1) does not, so there is nothing to place in this message\n' >&2
+                return 2 ;;
+            --teid|--seq|--mcc|--mnc|--service-id|--duration|--days|--area-ids|--mcd-cteid|--mcd-dist|--mcd-src|--hc|--session-id|--flow-id|--flags|--fteid-teid|--fteid-iface|--fteid-ip|--qci|--mbr-ul|--mbr-dl|--gbr-ul|--gbr-dl|--out)
+                (( $# >= 2 )) || {
+                    printf 'ERROR\t%s needs a value\n' "$(lcore_sanitize "$1")" >&2; return 2; }
+                case "$1" in
+                    --teid) teid="$2" ;;
+                    --seq) seq="$2" ;;
+                    --mcc) mcc="$2" ;;
+                    --mnc) mnc="$2" ;;
+                    --service-id) service_id="$2" ;;
+                    --duration) duration="$2" ;;
+                    --days) days="$2" ;;
+                    --area-ids) area_ids="$2" ;;
+                    --mcd-cteid) mcd_cteid="$2" ;;
+                    --mcd-dist) mcd_dist="$2" ;;
+                    --mcd-src) mcd_src="$2" ;;
+                    --hc) hc="$2" ;;
+                    --session-id) session_id="$2" ;;
+                    --flow-id) flow_id="$2" ;;
+                    --flags) mbms_flags="$2" ;;
+                    --fteid-teid) fteid_teid="$2" ;;
+                    --fteid-iface) fteid_iface="$2" ;;
+                    --fteid-ip) fteid_ip="$2" ;;
+                    --qci) qci="$2" ;;
+                    --mbr-ul) mbr_ul="$2" ;;
+                    --mbr-dl) mbr_dl="$2" ;;
+                    --gbr-ul) gbr_ul="$2" ;;
+                    --gbr-dl) gbr_dl="$2" ;;
+                    --out) out="$2" ;;
+                esac
+                shift 2 ;;
+            *)
+                printf 'ERROR\tunknown argument: %s\n' "$(lcore_sanitize "$1")" >&2
+                printf 'WHY\tusage: --mbms-session [--teid hex] [--seq hex] [--mcc 3d --mnc 2or3d] [--service-id hex6] [--duration seconds --days n] [--area-ids a,b] [--mcd-cteid hex] [--mcd-dist a.b.c.d --mcd-src a.b.c.d] [--hc 0or1] [--session-id hex2] [--flow-id hex4] [--flags hex2] [--fteid-teid hex --fteid-iface n --fteid-ip a.b.c.d] [--qci n --mbr-ul n --mbr-dl n --gbr-ul n --gbr-dl n] [--mood] [--out path]\n' >&2
+                return 2 ;;
+        esac
+    done
+
+    [[ "$teid" =~ ^[0-9A-Fa-f]{1,8}$ ]] || {
+        printf 'ERROR\tTEID must be 1..8 hex digits, got %s\n' "$(lcore_sanitize "$teid")" >&2; return 2; }
+    [[ "$seq" =~ ^[0-9A-Fa-f]{1,6}$ ]] || {
+        printf 'ERROR\tsequence number must be 1..6 hex digits, got %s\n' "$(lcore_sanitize "$seq")" >&2; return 2; }
+    [[ "$mcc" =~ ^[0-9]{3}$ && "$mnc" =~ ^[0-9]{2,3}$ ]] || {
+        printf 'ERROR\tMCC is 3 digits and MNC 2 or 3 digits\n' >&2; return 2; }
+    [[ "$service_id" =~ ^[0-9A-Fa-f]{6}$ ]] || {
+        printf 'ERROR\tMBMS Service ID is 3 octets of hex, got %s\n' "$(lcore_sanitize "$service_id")" >&2; return 2; }
+    [[ "$duration" =~ ^[0-9]+$ && "$days" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--duration and --days take decimal numbers\n' >&2; return 2; }
+    (( 10#$duration <= 86400 )) || {
+        printf 'ERROR\tMBMS Session Duration of %s seconds exceeds the 86400 the clause allows (TS 29.274 §8.69 via TS 29.061 §17.7.7)\n' "$(lcore_sanitize "$duration")" >&2; return 2; }
+    (( 10#$days <= 18 )) || {
+        printf 'ERROR\tMBMS Session Duration of %s days exceeds the 18 the clause allows (TS 29.274 §8.69 via TS 29.061 §17.7.7)\n' "$(lcore_sanitize "$days")" >&2; return 2; }
+    [[ "$session_id" =~ ^[0-9A-Fa-f]{2}$ ]] || {
+        printf 'ERROR\tMBMS Session Identifier is 1 octet of hex, got %s\n' "$(lcore_sanitize "$session_id")" >&2; return 2; }
+    [[ "$flow_id" =~ ^[0-9A-Fa-f]{4}$ ]] || {
+        printf 'ERROR\tMBMS Flow Identifier is 2 octets of hex, got %s\n' "$(lcore_sanitize "$flow_id")" >&2; return 2; }
+    [[ "$mbms_flags" =~ ^[0-9A-Fa-f]{2}$ ]] || {
+        printf 'ERROR\t--flags is 1 octet of hex, got %s\n' "$(lcore_sanitize "$mbms_flags")" >&2; return 2; }
+    [[ "$fteid_teid" =~ ^[0-9A-Fa-f]{1,8}$ ]] || {
+        printf 'ERROR\tF-TEID TEID must be 1..8 hex digits, got %s\n' "$(lcore_sanitize "$fteid_teid")" >&2; return 2; }
+    [[ "$fteid_iface" =~ ^[0-9]+$ ]] && (( 10#$fteid_iface <= 63 )) || {
+        printf 'ERROR\tF-TEID interface type is 0..63, got %s\n' "$(lcore_sanitize "$fteid_iface")" >&2; return 2; }
+    [[ "$mcd_cteid" =~ ^[0-9A-Fa-f]{1,8}$ ]] || {
+        printf 'ERROR\tCommon TEID must be 1..8 hex digits, got %s\n' "$(lcore_sanitize "$mcd_cteid")" >&2; return 2; }
+    [[ "$hc" =~ ^[01]$ ]] || {
+        printf 'ERROR\t--hc is 0 (uncompressed header) or 1 (compressed header), got %s\n' "$(lcore_sanitize "$hc")" >&2; return 2; }
+    local n
+    for n in "$qci" "$mbr_ul" "$mbr_dl" "$gbr_ul" "$gbr_dl"; do
+        [[ "$n" =~ ^[0-9]+$ ]] || {
+            printf 'ERROR\tQCI and the QoS rates take decimal numbers\n' >&2; return 2; }
+    done
+    (( 10#$qci <= 255 )) || {
+        printf 'ERROR\tQCI is one octet (0..255), got %s\n' "$(lcore_sanitize "$qci")" >&2; return 2; }
+    for n in "$mbr_ul" "$mbr_dl" "$gbr_ul" "$gbr_dl"; do
+        # Five octets per rate (§8.15): anything wider would push the IE out.
+        (( 10#$n <= 1099511627775 )) || {
+            printf 'ERROR\ta QoS rate is five octets (max 1099511627775), got %s\n' "$(lcore_sanitize "$n")" >&2; return 2; }
+    done
+
+    local qos_val; printf -v qos_val '00%02X%010X%010X%010X%010X' \
+        "$(( 10#$qci ))" "$(( 10#$mbr_ul ))" "$(( 10#$mbr_dl ))" \
+        "$(( 10#$gbr_ul ))" "$(( 10#$gbr_dl ))"
+    local fteid_ip_hex; fteid_ip_hex=$(lcore_ipv4_hex "$fteid_ip") || {
+        printf 'ERROR\t--fteid-ip is not a dotted quad: %s\n' "$(lcore_sanitize "$fteid_ip")" >&2; return 2; }
+    local fteid_val; printf -v fteid_val '%02X%08X%s' \
+        "$(( 0x80 | 10#$fteid_iface ))" "$(( 16#$fteid_teid ))" "$fteid_ip_hex"
+    local dur_val; printf -v dur_val '%06X' "$(( (10#$duration << 7) | 10#$days ))"
+
+    local codes=() code old_ifs="$IFS"
+    IFS=','
+    for code in $area_ids; do codes+=("$code"); done
+    IFS="$old_ifs"
+    local cnt=${#codes[@]}
+    (( cnt >= 1 && cnt <= 256 )) || {
+        printf 'ERROR\tthe service area carries 1..256 codes, got %d\n' "$cnt" >&2; return 2; }
+    local sa_val; printf -v sa_val '%02X' "$(( cnt - 1 ))"
+    for code in "${codes[@]}"; do
+        [[ "$code" =~ ^[0-9]{1,5}$ ]] && (( 10#$code <= 65535 )) || {
+            printf 'ERROR\tservice area code is not a 0..65535 number: %s\n' "$(lcore_sanitize "$code")" >&2; return 2; }
+        printf -v sa_val '%s%04X' "$sa_val" "$(( 10#$code ))"
+    done
+    local dist_hex src_hex
+    dist_hex=$(lcore_ipv4_hex "$mcd_dist") || {
+        printf 'ERROR\t--mcd-dist is not a dotted quad: %s\n' "$(lcore_sanitize "$mcd_dist")" >&2; return 2; }
+    src_hex=$(lcore_ipv4_hex "$mcd_src") || {
+        printf 'ERROR\t--mcd-src is not a dotted quad: %s\n' "$(lcore_sanitize "$mcd_src")" >&2; return 2; }
+    local mcd_val; printf -v mcd_val '%08X04%s04%s%02X' \
+        "$(( 16#$mcd_cteid ))" "$dist_hex" "$src_hex" "$(( hc & 0xFF ))"
+    local plmn_hex; plmn_hex=$(lcore_plmn_bcd "$mcc" "$mnc") || return 2
+    local tmgi_val="${service_id}${plmn_hex}"
+
+    # Presence comes from TS 29.274 Table 7.13.1-1; the order below is the
+    # mandatory set first and then the optional ones this verb fills. The
+    # clause does not fix an order (see the limit row): each IE carries its
+    # own Type and Instance, so a reader keys on those.
+    local body="" ie
+    ie=$(lcore_gtpc_ie_raw 80 "$qos_val") || return 2; body+="$ie"
+    ie=$(lcore_gtpc_ie_raw 87 "$fteid_val") || return 2; body+="$ie"
+    ie=$(lcore_gtpc_ie_raw 138 "$dur_val") || return 2; body+="$ie"
+    ie=$(lcore_gtpc_ie_raw 139 "$sa_val") || return 2; body+="$ie"
+    ie=$(lcore_gtpc_ie_raw 142 "$mcd_val") || return 2; body+="$ie"
+    ie=$(lcore_gtpc_ie_raw 158 "$tmgi_val") || return 2; body+="$ie"
+    ie=$(lcore_gtpc_ie_raw 140 "$session_id") || return 2; body+="$ie"
+    ie=$(lcore_gtpc_ie_raw 141 "$flow_id") || return 2; body+="$ie"
+    ie=$(lcore_gtpc_ie_raw 171 "$mbms_flags") || return 2; body+="$ie"
+
+    local msg; msg=$(lcore_gtpc_msg 231 "$teid" "$seq" "$body") || return 1
+    local body_hex="${msg:24}"
+
+    # Prove the build by walking it back with this module's own IE reader, in
+    # the exact (unpadded) mode the builder wrote.
+    local walk; walk=$(lcore_gtpc_parse_ies "$body_hex" exact) || {
+        printf 'ERROR\tthe builder wrote IEs its own reader cannot walk\n' >&2; return 1; }
+
+    printf 'mbms_session\t1\n'
+    if (( mood )); then printf 'variant\tmood\n'; else printf 'variant\trequest\n'; fi
+    printf 'gtp_version\t2\n'
+    printf 'message_type\t231\n'
+    printf 'message_name\tMBMS Session Start Request\n'
+    printf 'teid\t0x%s\n' "$(printf '%08X' "$(( 16#$teid ))")"
+    printf 'seq\t0x%s\n' "$(printf '%06X' "$(( 16#$seq ))")"
+    printf 'teid_flag\tset (GTP-C flags 0x48)\n'
+    printf 'ie_count\t%s\n' "$(printf '%s\n' "$walk" | awk -F'\t' '$1=="ie_count"{print $2}')"
+    printf '%s\n' "$walk" | grep -v '^ie_count'
+    printf 'body\t%s\n' "$body_hex"
+    printf 'bytes\t%s\n' "$(( ${#msg} / 2 ))"
+    printf 'hex\t%s\n' "$msg"
+    printf 'sent\t0\n'
+    printf 'ref\tTS 29.274 §7.13.1 and Table 7.13.1-1: MBMS Session Start Request, message type 231\n'
+    printf 'ref\tTS 29.274 §8.15: Bearer QoS — flags, QCI, then MBR uplink/downlink and GBR uplink/downlink, five octets each\n'
+    printf 'ref\tTS 29.274 §8.22: F-TEID — the Sender F-TEID for Control Plane, IPv4 form\n'
+    printf 'ref\tTS 29.274 §8.69: MBMS Session Duration, three octets, seconds then days (TS 29.061 §17.7.7)\n'
+    printf 'ref\tTS 29.274 §8.70: MBMS Service Area, first octet is the number of codes minus one (TS 29.061 §17.7.6)\n'
+    printf 'ref\tTS 29.274 §8.73: MBMS IP Multicast Distribution — Common TEID, distribution address, source address, HC indicator\n'
+    printf 'ref\tTS 29.274 §8.89: TMGI — MBMS Service ID (3 octets) then MCC/MNC (3 octets)\n'
+    printf 'ref\tTS 29.274 §5.6.1: Message Length does not count the first four octets of the header\n'
+    printf 'limit\tTable 7.13.1-1 fixes which IEs are present, not the order they appear in: each IE carries its own Type and Instance, so TS 29.274 §8.1 leaves the order to the sender. This build writes the mandatory set first (80, 87, 138, 139, 142, 158) and the optional ones after (140, 141, 171); it does not claim that order is mandated\n'
+    printf 'limit\tno IMSI and no M-TMSI: neither the mandatory nor the optional set of Table 7.13.1-1 carries one, so --imsi and --m-tmsi are refused rather than placed somewhere the clause does not fix\n'
+    printf 'limit\tno MBMS Counting IE: TS 29.274 defines no such IE, so --counting is refused\n'
+    printf 'limit\tthe MBMS Distribution Indication in the brief is IE 143 MBMS Distribution Acknowledge, which Table 7.13.2-1 puts on the response and not on this request, so --distribution-indication is refused\n'
+    printf 'limit\tthe IEs are not padded to a 4-octet boundary, because tshark reads a GTPv2-C IE stream as 4+Length and calls a padded stream Malformed Packet; the older GTP-C builders in this module pad, so both conventions exist and this divergence is deliberate\n'
+    printf 'limit\tthis is a message, not a transmission: sent is 0, and --gtpc-send on UDP 2123 is a separate decision\n'
+    printf 'capability\tartefact: MBMS Session Start Request octets; effect: none; handoff: --gtpc-send or a --plan naming a testbed\n'
+    if (( mood )); then
+        printf 'mood_marker\t1\n'
+        printf 'mood_note\tMBMS over Demand is not an IE and not another message: it is this same MBMS Session Start Request, originated by the network after the UE asked for the service over a unicast bearer\n'
+        printf 'limit\tMooD: what can be stated from the clause is the message type (231), the mandatory IE set and the fact that the TMGI names the service; TS 29.274 Table 7.13.1-1 has no MooD-specific field, so the octets are identical to the non-MooD build and this row is the only marker — a receiver cannot tell this message was MooD-originated\n'
+    fi
+    if [[ -n "$out" ]]; then
+        command -v xxd >/dev/null 2>&1 || {
+            printf 'ERROR\t--out needs xxd, which is not on PATH\n' >&2; return 1; }
+        mkdir -p "$(dirname "$out")" 2>/dev/null
+        printf '%s' "$msg" | xxd -r -p > "$out" 2>/dev/null || {
+            printf 'ERROR\tcould not write %s\n' "$(lcore_sanitize "$out")" >&2; return 1; }
+        printf 'out_file\t%s\n' "$(lcore_sanitize "$out")"
+    fi
+    return 0
+}
+
 lcore_cmd_gtp_csr_forge() {
     local imsi="${1:-310150123456789}" apn="${2:-internet}" mcc="${3:-310}" mnc="${4:-260}"
     [[ "$imsi" =~ ^[0-9]{10,15}$ ]] || { printf 'ERROR\tIMSI must be 10..15 digits\n' >&2; return 2; }
@@ -2436,7 +2954,8 @@ lcore_selftest() {
     # The verb must fail when the walk does: a GUI button reads the exit code.
     chk dcd-walk-rc "$(lcore_cmd_decode_diameter 01000028C000013C010000530000000100000001000001084000000C00000001FFFF >/dev/null 2>&1; echo $?)" "1"
     chk gcd-walk-rc "$(lcore_cmd_decode_gtp_c 482000240000000100000001000000011F00 >/dev/null 2>&1; echo $?)" "1"
-    chk gcd-walk-ok "$(lcore_cmd_decode_gtp_c 482000140000000100000001000000015200010006000000 >/dev/null 2>&1; echo $?)" "0"
+    # These two are padded literals: 5200010006 plus three pad octets.
+    chk gcd-walk-ok "$(lcore_cmd_decode_gtp_c 482000140000000100000001000000015200010006 >/dev/null 2>&1; echo $?)" "0"
     # A zero-length AVP is below the 8-octet minimum and is rejected.
     chk avp-zero-len  "$(lcore_diameter_parse_avps 0000010840000000 >/dev/null 2>&1; echo $?)" "1"
     # A well-formed but value-less AVP parses.
@@ -2714,10 +3233,13 @@ lcore_selftest() {
     # An IE that overruns the buffer must be an error, not a silent truncation.
     chk gtpie-overrun "$(lcore_gtpc_parse_ies 0100FF0001 >/dev/null 2>&1; echo $?)" "1"
 
-    # Two IEs in sequence, with 4-octet padding between them.
+    # Two IEs in sequence. The literal below is a PADDED message on purpose:
+    # pad mode exists only to read captures produced by older versions of this
+    # tree, and this is the test that keeps that mode working. The unpadded
+    # form is the default and is exercised by everything else.
     # IE1: type 02 len 0002 inst 00 value 0010 (4 octets total, aligned).
     # IE2: type 01 len 0009 inst 00 value <9 octets> -> total 13, pad 3.
-    out=$(lcore_gtpc_parse_ies "0200010010000000${imsi_ie}")
+    out=$(lcore_gtpc_parse_ies "0200010010000000${imsi_ie}" pad)
     chk gtpie-two-count "$(fld "$out" ie_count)" "2"
     chk gtpie-two-0     "$(fld "$out" ie.0.type)" "2"
     chk gtpie-two-1     "$(fld "$out" ie.1.type)" "1"
@@ -2857,7 +3379,12 @@ lcore_selftest() {
     forged=$(lcore_cmd_gtp_csr_forge 310150123456789 internet | awk -F'\t' '$1=="message"{print $2}')
     fpay=$(lcore_gtpc_parse_header "$forged" | awk -F'\t' '$1=="payload"{print $2}')
     chk forge-imsi "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1=="ie.0.decoded"{print $2}')" "IMSI=310150123456789"
+    # The forged request carries four IEs -- IMSI (1), APN (71), RAT (82) and
+    # Serving Network (83). It read as two while the walk assumed 4-octet
+    # padding, which is the GTPv1-C convention: after the APN the padded walk
+    # jumped three octets into the next header and gave up.
     chk forge-sn "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1=="ie.3.type"{print $2}')" "83"
+    chk forge-ie-count "$(lcore_gtpc_parse_ies "$fpay" | awk -F'\t' '$1=="ie_count"{print $2}')" "4"
     chk forge-len "$(lcore_gtpc_parse_header "$forged" | awk -F'\t' '$1=="length_agrees"{print $2}')" "yes"
     chk cli-unknown "$(lcore_cli_main --nope >/dev/null 2>&1; echo $?)" "2"
 
@@ -2907,7 +3434,10 @@ lcore_selftest() {
     chk mb-flag "$(printf '%s' "$mb" | awk -F'\t' '$1=="message"{print substr($2,1,2)}')" "48"
     chk mb-teid "$(printf '%s' "$mb" | awk -F'\t' '$1=="message"{print substr($2,9,8)}')" "DEADBEEF"
     # GTPdoor: a clean Echo (Recovery only) is clean; an Echo with an extra IE flags.
-    chk gtpdoor-clean "$(lcore_cmd_gtpdoor "4001000c0000000003000100000000" | awk -F'\t' '$1=="findings"{print $2}')" "0"
+    # An Echo Request with its Recovery IE and nothing else. No TEID: the T flag
+    # is clear, so the message is flags/type/length + sequence + spare + IEs.
+    # The literal is unpadded, like every message this module now builds.
+    chk gtpdoor-clean "$(lcore_cmd_gtpdoor "4001000d000001000300010000" | awk -F'\t' '$1=="findings"{print $2}')" "0"
     chk gtpdoor-flag  "$(lcore_cmd_gtpdoor "4001000c0000000001000100000000" | awk -F'\t' '$1=="findings"{print ($2>0)?"y":"n"}')" "y"
     # CDR fraud: a 30x volume spike is overbilling.
     printf 'imsi\tbytes\tavg\n310260000000001\t3000\t100\n310260000000002\t120\t100\n' > "$d/cdr.tsv"
@@ -2918,6 +3448,222 @@ lcore_selftest() {
     printf 'imsi_plmn_consistency=true\n' > "$d/fs20.tsv"
     chk fs20-missing "$(lcore_cmd_fs20 "$d/fs20.tsv" | awk -F'\t' '$1=="controls_missing"{print $2}')" "4"
     chk fs20-present "$(lcore_cmd_fs20 "$d/fs20.tsv" | awk -F'\t' '$1=="imsi_plmn_consistency"{print $2}')" "yes"
+
+    # ── 14. GTP-in-GTP and MBMS Session Start ───────────────────────────
+    # Known-answer vectors. A, B and C were read back by tshark 4.2.2 (the
+    # field values quoted next to each one are what it printed) and by
+    # pycrate's TS29281_GTPU G-PDU reader, which agrees on the TEIDs, the
+    # length and the T-PDU octets; the hex below is what those two
+    # independent readers accepted, so the assertions compare against a
+    # literal and not against this module's own output. The MBMS message was
+    # read back by tshark only — pycrate's IE walk is not used as an oracle
+    # here, because it and tshark disagree about GTPv2-C IE padding (see the
+    # limit row the builder emits).
+    #
+    # A: outer G-PDU (TEID 0x11223344) whose T-PDU is another G-PDU
+    #    (TEID 0x55667788) carrying DEADBEEF0102.  tshark: gtp.teid
+    #    0x11223344, gtp.message 0xff, gtp.length 14, one gtp layer, no
+    #    malformed packet (it does not recurse into a G-PDU payload).
+    local k_gin_a="30FF000E1122334430FF000655667788DEADBEEF0102"
+    # B: the same with a sequence number on the inner G-PDU: flags 0x32 set
+    #    the S bit, Length 0x000A counts the 4-octet trailer.
+    local k_gin_b="30FF00121122334432FF000A5566778812340000DEADBEEF0102"
+    # C: --with-ip, so the T-PDU is an IPv4/UDP packet (192.168.1.1 ->
+    #    172.16.0.1, 2152 -> 2152) around the inner G-PDU.  tshark reads two
+    #    layers: gtp.teid 0x11223344,0x55667788 and gtp.length 42,6.
+    local k_gin_c="30FF002A112233444500002A0000000040110D09C0A80101AC100001086808680016000030FF000655667788DEADBEEF0102"
+    # MBMS Session Start Request, type 231, TEID 0, sequence 1: the six
+    # mandatory IEs of Table 7.13.1-1 (80, 87, 138, 139, 142, 158) then the
+    # optional 140, 141 and 171, unpadded.  tshark: gtpv2.message_type 231,
+    # mbms_service_id 010203, mcc 310 / mnc 260, session duration 3600 s,
+    # service area 2 codes (1, 2), distribution 239.1.1.1 from 10.0.0.5,
+    # session id 01, flow id 0001, F-TEID 10.0.0.10 type 10, no malformed.
+    local k_mbms="48E7006C00000000000001005000160000090000002710000000271000000000000000000000570009008A0000000A0A00000A8A0003000708008B00050001000100028E000F000000000104EF010101040A000005009E0006000102031300628C000100018D0002000001AB00010000"
+
+    out=$(lcore_cmd_gtp_in_gtp); rc=$?
+    chk gin-rc            "$rc" "0"
+    chk gin-kat-default   "$(fld "$out" hex)" "$k_gin_a"
+    chk gin-kat-bytes     "$(fld "$out" bytes)" "22"
+    chk gin-kat-ip-layer  "$(fld "$out" ip_layer)" "none"
+    chk gin-kat-outer     "$(fld "$out" outer_teid)" "0x11223344"
+    chk gin-kat-inner     "$(fld "$out" inner_teid)" "0x55667788"
+    chk gin-kat-sent      "$(fld "$out" sent)" "0"
+    chk gin-kat-readback  "$(fld "$out" readback.inner_payload)" "DEADBEEF0102"
+    chk gin-kat-readback2 "$(fld "$out" readback.inner_teid)" "0x55667788"
+    chk gin-kat-lenagree  "$(fld "$out" readback.outer_length_agrees)" "yes"
+    # The note that says this is not an IP datagram must be present and say so.
+    chk gin-ip-note       "$(fld "$out" ip_layer_note | grep -c 'this is GTP, not IP')" "1"
+    chk gin-ref-rows      "$(printf '%s\n' "$out" | grep -c '^ref	')" "5"
+    chk gin-limit-rows    "$(printf '%s\n' "$out" | grep -c '^limit	')" "3"
+    chk gin-ref-29281     "$(printf '%s\n' "$out" | grep -c '^ref	TS 29.281 §5.1')" "2"
+    chk gin-outer-is-v1u  "$(fld "$out" outer_layer | grep -c 'GTPv1-U')" "1"
+    chk gin-capability    "$(fld "$out" capability | grep -c 'effect: none')" "1"
+
+    out=$(lcore_cmd_gtp_in_gtp --seq 1234)
+    chk gin-kat-seq       "$(fld "$out" hex)" "$k_gin_b"
+    out=$(lcore_cmd_gtp_in_gtp --with-ip)
+    chk gin-kat-withip    "$(fld "$out" hex)" "$k_gin_c"
+    chk gin-kat-withip-n  "$(fld "$out" bytes)" "50"
+    chk gin-kat-csum      "$(fld "$out" inner_ipv4_checksum)" "0x0D09"
+    chk gin-kat-withip-ip "$(fld "$out" inner_ipv4)" "192.168.1.1->172.16.0.1"
+    # The IPv4 header alone, no payload: Length 20 and checksum 0x0D1F.  The
+    # checksum is the whole point of the helper, so it is a literal too.
+    chk gin-ipv4-hdr "$(lcore_ipv4_build 192.168.1.1 172.16.0.1 "" 17)" \
+        "450000140000000040110D1FC0A80101AC100001"
+    chk gin-ipv4-bad "$(lcore_ipv4_build 192.168.1.999 10.0.0.1 "" 17 >/dev/null 2>&1; echo $?)" "2"
+
+    # Written to disk, the artefact is the same octets.
+    out=$(lcore_cmd_gtp_in_gtp --out "$d/gin.bin")
+    chk gin-out-row   "$(fld "$out" out_file)" "$d/gin.bin"
+    chk gin-out-bytes "$(wc -c < "$d/gin.bin" | tr -d ' ')" "22"
+    chk gin-out-hex   "$(od -An -tx1 -v "$d/gin.bin" | tr -d ' \n' | tr 'a-f' 'A-F')" "$k_gin_a"
+
+    # Bad input is rc 2 with nothing on stdout.
+    chk gin-rc-bad-teid   "$(lcore_cmd_gtp_in_gtp --outer-teid XYZ >/dev/null 2>&1; echo $?)" "2"
+    chk gin-rc-odd-hex    "$(lcore_cmd_gtp_in_gtp --payload ABC >/dev/null 2>&1; echo $?)" "2"
+    chk gin-rc-bad-seq    "$(lcore_cmd_gtp_in_gtp --seq 12345 >/dev/null 2>&1; echo $?)" "2"
+    chk gin-rc-bad-quad   "$(lcore_cmd_gtp_in_gtp --with-ip --dst 1.2.3 >/dev/null 2>&1; echo $?)" "2"
+    chk gin-rc-unknown    "$(lcore_cmd_gtp_in_gtp --nope >/dev/null 2>&1; echo $?)" "2"
+    chk gin-rc-empty      "$(lcore_cmd_gtp_in_gtp --payload '' >/dev/null 2>&1; echo $?)" "2"
+
+    # The unpadded IE writer: type 171 (0xAB), length 1, instance 0, value 00,
+    # and no padding octets after it.
+    chk ie-raw-unpadded "$(lcore_gtpc_ie_raw 171 00)" "AB00010000"
+    chk ie-raw-len      "$(lcore_gtpc_ie_raw 140 01 | cut -c3-6)" "0001"
+
+    out=$(lcore_cmd_mbms_session); rc=$?
+    chk mbms-rc          "$rc" "0"
+    chk mbms-kat         "$(fld "$out" hex)" "$k_mbms"
+    chk mbms-bytes       "$(fld "$out" bytes)" "112"
+    chk mbms-ie-count    "$(fld "$out" ie_count)" "9"
+    chk mbms-message     "$(fld "$out" message_type)" "231"
+    chk mbms-message-nm  "$(fld "$out" message_name)" "MBMS Session Start Request"
+    chk mbms-teid        "$(fld "$out" teid)" "0x00000000"
+    chk mbms-seq         "$(fld "$out" seq)" "0x000001"
+    chk mbms-variant     "$(fld "$out" variant)" "request"
+    chk mbms-sent        "$(fld "$out" sent)" "0"
+    chk mbms-ref-rows    "$(printf '%s\n' "$out" | grep -c '^ref	')" "8"
+    chk mbms-limit-rows  "$(printf '%s\n' "$out" | grep -c '^limit	')" "6"
+    # Table 7.13.1-1 fixes presence, not order: the limit row has to say so.
+    chk mbms-order-limit "$(fld "$out" limit | grep -c 'not the order')" "1"
+
+    # The IEs decode to the values that were asked for.
+    chk mbms-tmgi     "$(fld "$out" ie.5.decoded)" "TMGI=service_id=010203 plmn=310-260"
+    chk mbms-duration "$(fld "$out" ie.2.decoded)" "MBMS Duration=seconds=3600 days=0"
+    chk mbms-area     "$(fld "$out" ie.3.decoded)" "MBMS Service Area=codes=2 ids=1,2"
+    chk mbms-mcdist   "$(fld "$out" ie.4.decoded)" \
+        "MBMS IP Multicast Distribution=cteid=0x00000001 dist=239.1.1.1 src=10.0.0.5 hc=0"
+    chk mbms-fteid    "$(fld "$out" ie.1.decoded)" \
+        "F-TEID=interface=S11 MME GTP-C (10) teid=10 ipv4=10.0.0.10"
+    chk mbms-qos      "$(fld "$out" ie.0.decoded | grep -c 'qci=9 .*mbr_ul=10000')" "1"
+    chk mbms-sessid   "$(fld "$out" ie.6.decoded)" "MBMS Session Identifier=0x01"
+    chk mbms-flowid   "$(fld "$out" ie.7.decoded)" "MBMS Flow Identifier=0x0001"
+    chk mbms-flags    "$(fld "$out" ie.8.decoded)" "MBMS Flags=lmri=0 msri=0 spare=0x00"
+    # The mandatory set is IEs 80, 87, 138, 139, 142, 158 — in that order first.
+    chk mbms-mand-order "$(printf '%s\n' "$out" | awk -F'\t' '$1 ~ /^ie\.[0-5]\.type$/ {printf "%s ", $2}')" \
+        "80 87 138 139 142 158 "
+
+    # The walk in exact mode agrees with the writer: nine IEs, none padded.
+    local body; body=$(fld "$out" body)
+    chk mbms-walk-exact "$(lcore_gtpc_parse_ies "$body" exact | awk -F'\t' '$1=="ie_count"{print $2}')" "9"
+    chk mbms-walk-mode  "$(lcore_gtpc_parse_ies "$body" bogus >/dev/null 2>&1; echo $?)" "1"
+    # Pad mode on the same (unpadded) stream must NOT report the same count:
+    # the two conventions genuinely differ, which is why the mode exists.
+    chk mbms-walk-differs "$(lcore_gtpc_parse_ies "$body" pad 2>/dev/null | awk -F'\t' '$1=="ie_count"{print $2}' | grep -q '^9$' && echo same || echo differs)" "differs"
+
+    # MooD: the same session signalled unicast.  Identical octets, marked, and
+    # the limit row says a receiver cannot tell the two apart.
+    local mood_out; mood_out=$(lcore_cmd_mbms_session --mood)
+    chk mbms-mood-variant "$(fld "$mood_out" variant)" "mood"
+    chk mbms-mood-hex     "$(fld "$mood_out" hex)" "$k_mbms"
+    chk mbms-mood-marker  "$(fld "$mood_out" mood_marker)" "1"
+    chk mbms-mood-note    "$(fld "$mood_out" mood_note | grep -c 'unicast bearer')" "1"
+    chk mbms-mood-limit   "$(printf '%s\n' "$mood_out" | grep -c 'no MooD-specific field')" "1"
+
+    # Refusals: the brief's list does not match the clause table, and the
+    # verbs say which IE is missing rather than inventing a position.
+    chk mbms-rc-imsi     "$(lcore_cmd_mbms_session --imsi 310150123456789 >/dev/null 2>&1; echo $?)" "2"
+    chk mbms-rc-mtmsi    "$(lcore_cmd_mbms_session --m-tmsi DEADBEEF >/dev/null 2>&1; echo $?)" "2"
+    chk mbms-rc-counting "$(lcore_cmd_mbms_session --counting 1 >/dev/null 2>&1; echo $?)" "2"
+    chk mbms-rc-distind  "$(lcore_cmd_mbms_session --distribution-indication 1 >/dev/null 2>&1; echo $?)" "2"
+    chk mbms-rc-duration "$(lcore_cmd_mbms_session --duration 90000 >/dev/null 2>&1; echo $?)" "2"
+    chk mbms-rc-days     "$(lcore_cmd_mbms_session --days 19 >/dev/null 2>&1; echo $?)" "2"
+    chk mbms-rc-hc       "$(lcore_cmd_mbms_session --hc 2 >/dev/null 2>&1; echo $?)" "2"
+    chk mbms-rc-service  "$(lcore_cmd_mbms_session --service-id 0102 >/dev/null 2>&1; echo $?)" "2"
+    chk mbms-rc-mcc      "$(lcore_cmd_mbms_session --mcc 31 >/dev/null 2>&1; echo $?)" "2"
+    chk mbms-rc-area     "$(lcore_cmd_mbms_session --area-ids 1,abc >/dev/null 2>&1; echo $?)" "2"
+    chk mbms-rc-unknown  "$(lcore_cmd_mbms_session --nope >/dev/null 2>&1; echo $?)" "2"
+    # The refusal names what is missing on stderr, not on stdout.
+    chk mbms-refuse-why  "$(lcore_cmd_mbms_session --counting 1 2>&1 >/dev/null | grep -c '^WHY	')" "1"
+    chk mbms-refuse-out  "$(lcore_cmd_mbms_session --imsi 1 2>/dev/null | wc -l | tr -d ' ')" "0"
+
+    # ── live oracle: tshark, when it is installed ──────────────────────
+    # tshark is the authority for both artefacts.  The pcap is the artefact
+    # wrapped in the framing tshark needs to reach the dissector (Ethernet,
+    # IPv4, UDP 2152), built by python3 so nothing here re-implements the
+    # module's own encoding.  When tshark is absent the rows say SKIP and the
+    # suite still passes: no assertion is dropped, it is reported as skipped.
+    if command -v tshark >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        ts_pcap() {  # ts_pcap <hex> <path>
+            python3 - "$1" "$2" <<'PYEOF'
+import struct, sys
+pl = bytes.fromhex(sys.argv[1])
+eth = bytes(12) + b"\x08\x00"
+udp = struct.pack("!HHHH", 2152, 2152, 8 + len(pl), 0)
+ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + 8 + len(pl), 0, 0, 64, 17, 0,
+                 bytes([10, 0, 0, 1]), bytes([10, 0, 0, 2]))
+fr = eth + ip + udp + pl
+with open(sys.argv[2], "wb") as fh:
+    fh.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+    fh.write(struct.pack("<IIII", 1, 0, len(fr), len(fr)))
+    fh.write(fr)
+PYEOF
+        }
+        ts_fields() {  # ts_fields <pcap> <field>...
+            local pc="$1"; shift
+            local a=() f
+            for f in "$@"; do a+=(-e "$f"); done
+            tshark -r "$pc" -T fields "${a[@]}" 2>/dev/null | tr -d '\r'
+        }
+        ts_clean() {  # ts_clean <pcap>: no "Malformed Packet" anywhere
+            tshark -r "$1" -V 2>/dev/null | grep -c 'Malformed Packet'
+        }
+
+        ts_pcap "$k_gin_a" "$d/gin_a.pcap"
+        chk tshark-gin-teid        "$(ts_fields "$d/gin_a.pcap" gtp.teid)" "0x11223344"
+        chk tshark-gin-message     "$(ts_fields "$d/gin_a.pcap" gtp.message)" "0xff"
+        chk tshark-gin-length      "$(ts_fields "$d/gin_a.pcap" gtp.length)" "14"
+        chk tshark-gin-clean       "$(ts_clean "$d/gin_a.pcap")" "0"
+
+        ts_pcap "$k_gin_c" "$d/gin_c.pcap"
+        chk tshark-gin2-teids      "$(ts_fields "$d/gin_c.pcap" gtp.teid)" "0x11223344,0x55667788"
+        chk tshark-gin2-messages   "$(ts_fields "$d/gin_c.pcap" gtp.message)" "0xff,0xff"
+        chk tshark-gin2-lengths    "$(ts_fields "$d/gin_c.pcap" gtp.length)" "42,6"
+        chk tshark-gin2-ipdst      "$(ts_fields "$d/gin_c.pcap" ip.dst)" "10.0.0.2,172.16.0.1"
+        chk tshark-gin2-clean      "$(ts_clean "$d/gin_c.pcap")" "0"
+
+        ts_pcap "$k_mbms" "$d/mbms.pcap"
+        chk tshark-mbms-type       "$(ts_fields "$d/mbms.pcap" gtpv2.message_type)" "231"
+        chk tshark-mbms-teid       "$(ts_fields "$d/mbms.pcap" gtpv2.teid)" "0x00000000"
+        chk tshark-mbms-seq        "$(ts_fields "$d/mbms.pcap" gtpv2.seq)" "0x000001"
+        chk tshark-mbms-service-id "$(ts_fields "$d/mbms.pcap" gtpv2.mbms_service_id)" "010203"
+        chk tshark-mbms-duration   "$(ts_fields "$d/mbms.pcap" gtpv2.mbms_session_duration_secs | cut -f1)" "3600"
+        chk tshark-mbms-days       "$(ts_fields "$d/mbms.pcap" gtpv2.mbms_session_duration_days | cut -f1)" "0"
+        chk tshark-mbms-areas      "$(ts_fields "$d/mbms.pcap" gtpv2.mbms_service_area_id)" "1,2"
+        chk tshark-mbms-dist-addr  "$(ts_fields "$d/mbms.pcap" gtpv2.mbms_ip_mc_dist_addrv4)" "239.1.1.1"
+        chk tshark-mbms-src-addr   "$(ts_fields "$d/mbms.pcap" gtpv2.mbms_ip_mc_src_addrv4)" "10.0.0.5"
+        chk tshark-mbms-hc         "$(ts_fields "$d/mbms.pcap" gtpv2.mbms_hc_indicator | cut -f1)" "0"
+        chk tshark-mbms-session-id "$(ts_fields "$d/mbms.pcap" gtpv2.mbms_session_id)" "01"
+        chk tshark-mbms-flow-id    "$(ts_fields "$d/mbms.pcap" gtpv2.mbms_flow_id)" "0001"
+        chk tshark-mbms-fteid-teid "$(ts_fields "$d/mbms.pcap" gtpv2.f_teid_gre_key)" "0x0000000a"
+        chk tshark-mbms-fteid-ip   "$(ts_fields "$d/mbms.pcap" gtpv2.f_teid_ipv4)" "10.0.0.10"
+        chk tshark-mbms-clean      "$(ts_clean "$d/mbms.pcap")" "0"
+        # The IE registry has no name for MBMS Flags (IE 171): tshark shows the
+        # octet without dissecting it, so no assertion claims its contents.
+    else
+        printf 'tshark-gin-*	SKIP	no tshark (or python3) on PATH; the artefact assertions above still ran\n'
+        printf 'tshark-mbms-*	SKIP	no tshark (or python3) on PATH; the artefact assertions above still ran\n'
+    fi
 
     rm -rf "$d"
     printf 'ASSERTIONS\t%s\n' "$(( ok + bad ))"
@@ -2945,6 +3691,8 @@ lcore_menu() {
   [9]  S1AP procedure / identity reference
   [10] attack surface notes
   [11] status
+  [12] build a GTP-in-GTP encapsulation (GTPv1-U outer, GTPv1-U inner)
+  [13] build an MBMS Session Start Request (GTPv2-C 231) / MooD variant
   [0]  back
 
 M
@@ -2979,6 +3727,15 @@ M
                 read -rp "  press enter " _ ;;
             11) lcore_cli_status_tsv | column -t -s$'\t' 2>/dev/null || lcore_cli_status_tsv
                 read -rp "  press enter " _ ;;
+            12) lcore_cmd_gtp_in_gtp | column -t -s$'\t' 2>/dev/null || lcore_cmd_gtp_in_gtp
+                read -rp "  press enter " _ ;;
+            13) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a choice; cannot prompt in CLI mode" >&2
+                else read -rp "  [r]equest or [m]ood> " v
+                     case "$v" in
+                         m|M) lcore_cmd_mbms_session --mood | column -t -s$'\t' 2>/dev/null || lcore_cmd_mbms_session --mood ;;
+                         *)   lcore_cmd_mbms_session | column -t -s$'\t' 2>/dev/null || lcore_cmd_mbms_session ;;
+                     esac
+                     read -rp "  press enter " _; fi ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -3071,6 +3828,8 @@ lcore_cli_main() {
         --build-clr)     lcore_cmd_build_clr "${1:-310150123456789}" ;;
         --gtp-csr-forge) lcore_cmd_gtp_csr_forge "${1:-310150123456789}" "${2:-internet}" "${3:-310}" "${4:-260}" ;;
         --gtp-modify-bearer) lcore_cmd_gtp_modify_bearer "${1:-}" "${2:-5}" ;;
+        --gtp-in-gtp)    lcore_cmd_gtp_in_gtp "$@" ;;
+        --mbms-session)  lcore_cmd_mbms_session "$@" ;;
         --gtpc-send)     lcore_cmd_gtpc_send "${1:-}" "${2:-2123}" "${3:-}" ;;
         --diameter-send) lcore_cmd_diameter_send "${1:-}" "${2:-3868}" "${3:-}" ;;
         --gtpdoor-detect) lcore_cmd_gtpdoor "${1:-}" ;;
@@ -3098,6 +3857,19 @@ Usage: $0 COMMAND
                               forge a GTP-C Create Session Request
   --gtp-modify-bearer <TEID> [EBI]
                               forge a GTP-C Modify Bearer (F-TEID redirect)
+  --gtp-in-gtp [--outer-teid hex] [--inner-teid hex] [--payload hex]
+               [--seq hex] [--outer-seq hex] [--with-ip --src a.b.c.d
+               --dst a.b.c.d] [--out path]
+                              build a GTPv1-U G-PDU whose payload is another
+                              G-PDU (TS 29.281 §5.1): no IP layer unless
+                              --with-ip asks for the inner IPv4/UDP 2152
+  --mbms-session [--mood] [--teid hex] [--seq hex] [--mcc 310 --mnc 260]
+               [--service-id hex6] [--duration secs] [--days n]
+               [--area-ids a,b] [--mcd-dist a.b.c.d --mcd-src a.b.c.d]
+               [--session-id hex2] [--flow-id hex4] [--out path]
+                              build a GTPv2-C MBMS Session Start Request
+                              (TS 29.274 §7.13.1, type 231); --mood marks the
+                              MBMS-over-Demand (unicast-originated) variant
   --gtpc-send <host> [port] [hex]
                               send the Create Session Request over UDP 2123
                               (needs LTE_ARMED=1; reports disarmed otherwise)

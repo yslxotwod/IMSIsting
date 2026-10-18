@@ -169,19 +169,24 @@ Measured, not quoted from a doc. The six gates as they stand:
 | `run-selftests.sh` | 0 | **57 passed, 0 failed, 0 missing** |
 | `check-paths.sh` | 0 | all path checks passed |
 | `gen-icons-xml.sh --check` | 0 | up to date, 67 entries |
-| `check-verbs.sh` | 0 | 609 placed, 88 CLI-only, 34 modifiers, 172 exempt; no unplaced verb |
+| `check-verbs.sh` | 0 | 654 placed, 94 CLI-only, 111 modifiers, 172 exempt; no unplaced verb |
 | `check-gui-text.sh` | 0 | no control, label or tooltip named after a verb |
 | `gen-module-index.sh --check` | 0 | up to date, 57 modules |
 
-All six are green with the Phase 12 work in the tree. Detail:
+All six are green with the Phase 12 and Phase 14 work in the tree. Detail:
 
-- **Working tree is dirty**, and this time the documents record it: the four
-  formerly-held modules have their offensive halves built and documented in
-  `docs/OFFENSIVE_ROADMAP.md` (Phase 12). The shape is the same in all four —
-  detection reads what it is given, the offensive verbs take no flag, each carries
-  a one-line standing note in its own TSV output, and each exits 3 where the last
-  hop would leave the machine. **Do not add an authorisation gate back**: see
+- **Working tree is dirty**, and the documents record it: the four formerly-held
+  modules have their offensive halves built (Phase 12) and the Phase 14 gap table
+  has eleven rows moved to BUILT. The shape is the same in all of them — detection
+  reads what it is given, the offensive verbs take no flag, each carries a one-line
+  standing note in its own TSV output, and each exits 3 where the last hop would
+  leave the machine. **Do not add an authorisation gate back**: see
   `docs/SESSION_HANDOFF.md`, "Standing policy: modules are not gated".
+- **The proof for the new coders is external, not internal.** pycrate for
+  RRC/LPP/PWS, tshark for NAS/GTP, the published tables for GPS C/A and PRACH.
+  `tools/lte_rrc_layout.py` now carries 18 roots (was 15, and with no DCCH/CCCH
+  root the three message builders in `10_lte_air` refused by default) — a generated
+  table is only as useful as the roots it was generated from.
 - **`module_index.tsv` is generated.** When a module's verb list changes, run
   `./tools/gen-module-index.sh`; never hand-edit the TSV. Every new verb also needs
   a home: a control in its submenu spec in `main1.c`, a `~` prefix if it is

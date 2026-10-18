@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Slicing Escape — S-NSSAI codec, slice selection, isolation testing
+# Slicing Escape — S-NSSAI codec, slice selection, isolation testing,
+#                  5QI/TSN QoS descriptions and slice/QoS consistency
 #                                                                   (tag: slic)
 #
 # Capability split, per MODULE_CONVENTIONS.md §9:
@@ -13,6 +14,16 @@
 #     absent the module says "not determinable from this capture" and names
 #     the missing field. A false "isolated" is the one answer that must never
 #     be produced.
+#   * The QoS side is a table, not a guess: TS 23.501 Table 5.7.4-1 is
+#     carried once and every 5QI verb reads it. A 5QI that is neither a row of
+#     the table nor operator-specific (128-254) is refused, and a TSN/QoS
+#     description whose GFBR/MFBR contradicts its resource type is refused
+#     too, because a non-GBR flow has no GBR QoS information. Where the table
+#     does not give a cell (5QI 75 is reserved in the carried copy) the module
+#     prints `unknown`, never a plausible number.
+#   * --tsn-config emits the field set of QosFlowLevelQosParameters but no
+#     NGAP octets: tools/ngap_asn1.py has no encoder for that type, and the
+#     module says so in a `limit` row instead of inventing PER bits.
 #   * A slice-escape run needs a 5G SA testbed with two slices and a
 #     subscription that is authorised for only one of them. That is a
 #     `status: handoff` plan naming the testbed.
@@ -23,17 +34,31 @@
 #   TS 23.501 §5.15.2.2    network slicing; Table 5.15.2.2-1 SST values
 #   TS 23.501 §5.15.5.2.1  NSSF role in slice selection
 #   TS 23.501 §5.15.5.3    S-NSSAI mapping between the HPLMN and the VPLMN
+#   TS 23.501 §5.7.3       QoS flow / GBR vs non-GBR; gBR-QosInformation
+#   TS 23.501 §5.7.4       the three 5QI resource types and the 5QI value
+#                          ranges: 1-127 standardized, 128-254 operator-specific
+#   TS 23.501 Table 5.7.4-1  standardized 5QI to QoS characteristics
+#   TS 23.501 §5.7.4.3     TSC assistance information (periodicity, burst
+#                          arrival time, N6 jitter range)
 #   TS 24.501 §9.11.3.37   NSSAI / S-NSSAI information elements
 #   TS 24.501 §9.11.3.46   rejected NSSAI and its cause values
 #   TS 24.501 §8.2.6       Registration procedure (requested -> allowed NSSAI)
 #   TS 23.502 §4.2.3       slice-specific authorisation and the NSSF
 #   TS 29.244              PFCP: F-TEID, Node ID (for the isolation evidence)
-#   TS 38.413              NGAP: PDU Session Resource Setup carries the S-NSSAI
+#   TS 38.413              NGAP: PDU Session Resource Setup carries the S-NSSAI;
+#                          QosFlowLevelQosParameters, GBR-QosInformation and
+#                          PacketDelayBudget ::= INTEGER (0..1023) in 0.5 ms
+#                          units — the pdb_0_5ms_units column
 #   GSMA IR.88 / 5G SA     visited-network slice mapping enforcement
 #
 # Known-answer authorities used by --selftest:
 #   * TS 23.003 §28.4.2 for the byte layout, and TS 23.501 Table 5.15.2.2-1
 #     for the SST assignments (1 eMBB, 2 URLLC, 3 MIoT, 4 V2X, 5 HMTC).
+#   * TS 23.501 Table 5.7.4-1 for every 5QI row --selftest asserts: the
+#     resource type, priority level, PDB, PER, MDBV and averaging window are
+#     literals from the table, so a mistyped row fails. Cells the carried table
+#     does not give are printed `unknown` and asserted as such; the module does
+#     not fill them from a plausible-looking default.
 #   * Wireshark 4.2.2 `tshark`: the 5GS NAS framing used by --selection
 #     ([extended protocol discriminator 0x7E][spare half octet | security
 #     header type][message type][IEs]) was confirmed by exporting a PDU to the
@@ -133,6 +158,601 @@ sst	name	standard	source
 128-255	operator-specific	operator	TS 23.501 5.15.2.2: SST values 128-255 are operator-specific
 note	0 is not assigned by the table; an unassigned value is reported as unknown and never mapped to eMBB		
 EOF
+}
+
+# ── 5QI — TS 23.501 Table 5.7.4-1 ───────────────────────────────────────
+# The standardized-5QI table is carried once, `|`-separated, and every 5QI verb
+# reads it, so --five-qi, --five-qi-table, --tsn-config and --slice-qos-check
+# cannot drift apart. Fields:
+#   5qi|resource_type|priority|pdb_ms|per|mdbv|averaging_window|report_status|service
+# "N/A" is the table's own cell value: the column does not apply to that 5QI (a
+# non-GBR flow has no MDBV and no averaging window). The module writes
+# "unknown" only where it cannot state a cell, and never puts a plausible
+# number in its place. 5QI 75 is carried as "reserved": the copy of the table
+# this module was taken from lists it as reserved for future use in that
+# release (NOTE 14) and gives no characteristics, so all its cells are unknown.
+slic_5qi_table_raw() {
+    cat <<'EOF'
+1|GBR|20|100|10^-2|N/A|2000|standardized|Conversational Voice
+2|GBR|40|150|10^-3|N/A|2000|standardized|Conversational Video (Live Streaming)
+3|GBR|30|50|10^-3|N/A|2000|standardized|Real Time Gaming, V2X messages, electricity distribution (medium voltage), process automation (monitoring)
+4|GBR|50|300|10^-6|N/A|2000|standardized|Non-Conversational Video (Buffered Streaming)
+5|non-GBR|10|100|10^-6|N/A|N/A|standardized|IMS Signalling
+6|non-GBR|60|300|10^-6|N/A|N/A|standardized|Video (Buffered Streaming), TCP-based
+7|non-GBR|70|100|10^-3|N/A|N/A|standardized|Voice, Video (Live Streaming), Interactive Gaming
+8|non-GBR|80|300|10^-6|N/A|N/A|standardized|Video (Buffered Streaming), TCP-based
+9|non-GBR|90|300|10^-6|N/A|N/A|standardized|Video (Buffered Streaming), TCP-based
+65|GBR|7|75|10^-2|N/A|2000|standardized|Mission Critical user plane Push To Talk voice (MCPTT)
+66|GBR|20|100|10^-2|N/A|2000|standardized|Non-Mission-Critical user plane Push To Talk voice
+67|GBR|15|100|10^-3|N/A|2000|standardized|Mission Critical Video user plane
+69|non-GBR|5|60|10^-6|N/A|N/A|standardized|Mission Critical delay sensitive signalling (MC-PTT signalling)
+70|non-GBR|55|200|10^-6|N/A|N/A|standardized|Mission Critical Data
+71|GBR|56|150|10^-6|N/A|2000|standardized|"Live" Uplink Streaming
+72|GBR|56|300|10^-4|N/A|2000|standardized|"Live" Uplink Streaming
+73|GBR|56|300|10^-8|N/A|2000|standardized|"Live" Uplink Streaming
+74|GBR|56|500|10^-8|N/A|2000|standardized|"Live" Uplink Streaming
+75|unknown|unknown|unknown|unknown|unknown|unknown|reserved|not given by the carried copy of the table (NOTE 14)
+76|GBR|56|500|10^-4|N/A|2000|standardized|"Live" Uplink Streaming
+79|non-GBR|65|50|10^-2|N/A|N/A|standardized|V2X messages
+80|non-GBR|68|10|10^-6|N/A|N/A|standardized|Low Latency eMBB applications, Augmented Reality
+82|delay-critical GBR|19|10|10^-4|255|2000|standardized|Discrete Automation
+83|delay-critical GBR|22|10|10^-4|1354|2000|standardized|Discrete Automation, V2X messages (platooning)
+84|delay-critical GBR|24|30|10^-5|1354|2000|standardized|Intelligent transport systems
+85|delay-critical GBR|21|5|10^-5|255|2000|standardized|Electricity distribution (high voltage), V2X messages (remote driving)
+86|delay-critical GBR|18|5|10^-4|1354|2000|standardized|V2X messages (advanced driving, collision avoidance)
+87|delay-critical GBR|25|5|10^-3|500|2000|standardized|Interactive service (motion tracking data)
+88|delay-critical GBR|25|10|10^-3|1125|2000|standardized|Interactive service (motion tracking data)
+89|delay-critical GBR|25|15|10^-4|17000|2000|standardized|Visual content for cloud/edge/split rendering
+90|delay-critical GBR|25|20|10^-4|63000|2000|standardized|Visual content for cloud/edge/split rendering
+EOF
+}
+
+# slic_5qi_row <5qi> — the raw table row for an assigned 5QI, nothing if the
+# value is not a row of the table.
+slic_5qi_row() {
+    local q="${1:-}"
+    [[ "$q" =~ ^[0-9]{1,3}$ ]] || return 1
+    slic_5qi_table_raw | awk -F'|' -v q="$q" '$1==q{print; exit}'
+}
+
+# slic_5qi_get <5qi> <field> — one cell of the table, empty when the row or the
+# field does not exist (the caller distinguishes absent from "N/A").
+slic_5qi_get() {
+    local q="${1:-}" f="${2:-}" row
+    row=$(slic_5qi_row "$q") || return 1
+    [[ -n "$row" ]] || return 1
+    case "$f" in
+        resource_type) awk -F'|' '{print $2}' <<<"$row" ;;
+        priority)      awk -F'|' '{print $3}' <<<"$row" ;;
+        pdb_ms)        awk -F'|' '{print $4}' <<<"$row" ;;
+        per)           awk -F'|' '{print $5}' <<<"$row" ;;
+        mdbv)          awk -F'|' '{print $6}' <<<"$row" ;;
+        avg_window)    awk -F'|' '{print $7}' <<<"$row" ;;
+        status)        awk -F'|' '{print $8}' <<<"$row" ;;
+        service)       awk -F'|' '{print $9}' <<<"$row" ;;
+        *) return 1 ;;
+    esac
+}
+
+slic_5qi_reserved() { [[ "${1:-}" == "75" ]]; }
+
+# standardized | reserved | operator-specific | unassigned | invalid
+slic_5qi_status() {
+    local q="${1:-}"
+    [[ "$q" =~ ^[0-9]{1,3}$ ]] || { printf 'invalid'; return 0; }
+    (( q <= 255 )) || { printf 'invalid'; return 0; }
+    if slic_5qi_reserved "$q"; then printf 'reserved'; return 0; fi
+    [[ -n "$(slic_5qi_row "$q")" ]] && { printf 'standardized'; return 0; }
+    if (( q >= 128 && q <= 254 )); then printf 'operator-specific'; return 0; fi
+    printf 'unassigned'
+}
+
+# The PDB is signalled in TS 38.413 as PacketDelayBudget ::= INTEGER (0..1023)
+# in units of 0.5 ms, so a 30 ms budget is 60 units.
+slic_5qi_pdb_units() {
+    local ms="${1:-}"
+    [[ "$ms" =~ ^[0-9]+$ ]] || { printf 'unknown'; return 0; }
+    printf '%d' "$(( ms * 2 ))"
+}
+
+# slic_5qi_desc <5qi> — the characteristics of one 5QI.
+#   rc 0  the 5QI was decoded (standardized, reserved or operator-specific)
+#   rc 1  a valid 5QI value that the table does not assign and that is not in
+#         the operator-specific range: refused rather than guessed
+#   rc 2  not a 5QI value at all
+slic_5qi_desc() {
+    local q="${1:-}"
+    [[ -n "$q" ]] || { printf 'ERROR\tusage: --five-qi <5qi>\n' >&2; return 2; }
+    if [[ ! "$q" =~ ^[0-9]{1,3}$ ]] || (( q > 255 )); then
+        printf 'ERROR\t5QI must be a decimal value 0-255; got "%s"\n' "$(slic_sanitize "$q")" >&2
+        printf 'WHY\tthe 5QI is a one-octet identifier (TS 23.501 5.7.4); "%s" is not one\n' "$(slic_sanitize "$q")" >&2
+        return 2
+    fi
+    local st; st=$(slic_5qi_status "$q")
+    case "$st" in
+        unassigned)
+            printf 'ERROR\t5QI %s is not in TS 23.501 Table 5.7.4-1 and is not operator-specific\n' "$q" >&2
+            printf 'WHY\tthe carried table assigns 1-9, 65-67, 69-74, 76, 79-80 and 82-90; 75 is reserved in it and 128-254 are operator-specific. A value in neither set has no characteristics this module can state, and a plausible-looking row would be a guess\n' >&2
+            return 1 ;;
+        reserved)
+            printf '5qi\t%s\n' "$q"
+            printf 'status\treserved\n'
+            printf 'resource_type\tunknown\n'
+            printf 'priority_level\tunknown\n'
+            printf 'pdb_ms\tunknown\n'
+            printf 'pdb_0_5ms_units\tunknown\n'
+            printf 'per\tunknown\n'
+            printf 'mdbv_bytes\tunknown\n'
+            printf 'averaging_window_ms\tunknown\n'
+            printf 'service\tunknown\n'
+            printf 'table\tTS 23.501 Table 5.7.4-1\n'
+            printf 'note\t%s\n' "the carried copy of Table 5.7.4-1 lists 5QI 75 as reserved for future use and not supported in the release it was taken from (NOTE 14), so every characteristic is unknown here; a later release may assign it and this module does not guess the values"
+            return 0 ;;
+        operator-specific)
+            printf '5qi\t%s\n' "$q"
+            printf 'status\toperator-specific\n'
+            printf 'resource_type\tunknown\n'
+            printf 'priority_level\tunknown\n'
+            printf 'pdb_ms\tunknown\n'
+            printf 'pdb_0_5ms_units\tunknown\n'
+            printf 'per\tunknown\n'
+            printf 'mdbv_bytes\tunknown\n'
+            printf 'averaging_window_ms\tunknown\n'
+            printf 'service\tunknown\n'
+            printf 'range\t128-254 operator-specific (TS 23.501 5.7.4)\n'
+            printf 'note\t%s\n' "Table 5.7.4-1 gives no characteristics for 128-254: such a 5QI is pre-configured in the RAN, or signalled with the 5QI as a dynamically assigned 5QI inside QosFlowLevelQosParameters (TS 38.413). A default printed here would invent a QoS contract"
+            return 0 ;;
+    esac
+    local rt pri pdb per mdbv avg svc
+    rt=$(slic_5qi_get "$q" resource_type)
+    pri=$(slic_5qi_get "$q" priority)
+    pdb=$(slic_5qi_get "$q" pdb_ms)
+    per=$(slic_5qi_get "$q" per)
+    mdbv=$(slic_5qi_get "$q" mdbv)
+    avg=$(slic_5qi_get "$q" avg_window)
+    svc=$(slic_5qi_get "$q" service)
+    printf '5qi\t%s\n' "$q"
+    printf 'status\tstandardized\n'
+    printf 'resource_type\t%s\n' "$rt"
+    printf 'priority_level\t%s\n' "$pri"
+    printf 'pdb_ms\t%s\n' "$pdb"
+    printf 'pdb_0_5ms_units\t%s\n' "$(slic_5qi_pdb_units "$pdb")"
+    printf 'per\t%s\n' "$per"
+    printf 'mdbv_bytes\t%s\n' "$mdbv"
+    printf 'averaging_window_ms\t%s\n' "$avg"
+    printf 'service\t%s\n' "$svc"
+    printf 'standardized\t%s\n' "yes"
+    printf 'table\tTS 23.501 Table 5.7.4-1\n'
+    case "$rt" in
+        GBR) printf 'gbr_info_required\t%s\n' "yes: GFBR/MFBR in each direction (TS 23.501 5.7.3.3, gBR-QosInformation in TS 38.413)" ;;
+        "delay-critical GBR") printf 'gbr_info_required\t%s\n' "yes: GFBR/MFBR plus the MDBV above (TS 23.501 5.7.4, delay-critical GBR)" ;;
+        *) printf 'gbr_info_required\t%s\n' "no: a non-GBR flow carries no GBR QoS information" ;;
+    esac
+    [[ "$mdbv" == "N/A" ]] || printf 'mdbv_note\t%s\n' "the MDBV applies only to delay-critical GBR: (PDB - CN PDB) is the window it must fit in"
+    return 0
+}
+
+slic_cmd_five_qi() {
+    local q="${1:-}"
+    [[ -n "$q" ]] || { printf 'ERROR\tusage: --five-qi <5qi>\n' >&2; return 2; }
+    slic_5qi_desc "$q"
+}
+
+# --five-qi-table [resource-type] — the whole table, clause cited once.
+slic_cmd_five_qi_table() {
+    local want="${1:-}" field=2 value="" label=""
+    case "${want,,}" in
+        ""|all) ;;
+        gbr) value="GBR"; label="GBR" ;;
+        non-gbr|nongbr) value="non-GBR"; label="non-GBR" ;;
+        delay-critical-gbr|dc-gbr|delay-critical|dcgbr) value="delay-critical GBR"; label="delay-critical GBR" ;;
+        reserved) field=8; value="reserved"; label="reserved" ;;
+        *)
+            printf 'ERROR\tunknown resource type "%s"\n' "$(slic_sanitize "$want")" >&2
+            printf 'WHY\twant gbr, non-gbr, delay-critical-gbr, reserved or all\n' >&2
+            return 2 ;;
+    esac
+    printf '5qi\tresource_type\tpriority\tpdb_ms\tpdb_0_5ms_units\tper\tmdbv_bytes\taveraging_window_ms\tstatus\tservice\n'
+    slic_5qi_table_raw | awk -F'|' -v f="$field" -v v="$value" '
+        (v == "" || $f == v) {
+            u = ($4 == "unknown") ? "unknown" : $4 * 2
+            printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, u, $5, $6, $7, $8, $9
+        }'
+    printf 'source\tTS 23.501 Table 5.7.4-1 (Standardized 5QI to QoS characteristics mapping), clause 5.7.4\n'
+    printf 'note\t%s\n' "N/A is the table's own cell (the column does not apply to that 5QI); unknown is a cell the carried table does not give (5QI 75 is reserved, NOTE 14). 5QI 128-254 are operator-specific and are listed here as a range row below"
+    printf 'operator_specific\t128-254\tunknown\tunknown\tunknown\tunknown\tunknown\tunknown\toperator-specific\tcharacteristics pre-configured in the RAN or signalled dynamically in QosFlowLevelQosParameters (TS 38.413)\n'
+    printf 'pdb_units\t%s\n' "pdb_0_5ms_units is the PDB in the 0.5 ms granularity of TS 38.413 PacketDelayBudget ::= INTEGER (0..1023)"
+}
+
+# ── TSN / QoS configuration — TS 23.501 §5.7.4.3, TS 38.413 ─────────────
+# A TSN/QoS description as KEY=VALUE. Bits rates are bit/s with an optional
+# k/M/G suffix; the TSC assistance information is in microseconds, which is the
+# unit TS 38.413 carries (periodicity, burst arrival time, N6 jitter range).
+slic_tsn_bps() {
+    local v="${1:-}" n u e
+    v="${v//[[:space:]]/}"
+    [[ "$v" =~ ^([0-9]+)([kKmMgG]?)$ ]] || return 1
+    n="${BASH_REMATCH[1]}"; u="${BASH_REMATCH[2],,}"
+    case "$u" in
+        "") e=1 ;;
+        k)  e=1000 ;;
+        m)  e=1000000 ;;
+        g)  e=1000000000 ;;
+    esac
+    # The NGAP GBR QoS information field is 32 bits wide, in bit/s.
+    (( n > 4000000000 / e )) && return 1
+    printf '%d' "$(( n * e ))"
+}
+
+slic_bps_display() {
+    local b="${1:-}"
+    [[ "$b" =~ ^[0-9]+$ ]] || { printf 'unknown'; return 0; }
+    if (( b >= 1000000000 && b % 1000000000 == 0 )); then printf '%d Gbit/s' "$(( b / 1000000000 ))"
+    elif (( b >= 1000000 && b % 1000000 == 0 )); then printf '%d Mbit/s' "$(( b / 1000000 ))"
+    elif (( b >= 1000 && b % 1000 == 0 )); then printf '%d kbit/s' "$(( b / 1000 ))"
+    else printf '%d bit/s' "$b"; fi
+}
+
+# Can tools/ngap_asn1.py carry a QosFlowLevelQosParameters? Probed, never
+# assumed: the module emits NGAP octets only from an encoder that exists.
+slic_ngap_qos_encoder() {
+    local t="$IMSISTING_ROOT/tools/ngap_asn1.py"
+    [[ -r "$t" ]] || { printf 'missing'; return 0; }
+    if grep -qi 'qos_flow_level_qos_parameters' "$t" 2>/dev/null; then
+        printf 'present'
+    else
+        printf 'absent'
+    fi
+}
+
+# slic_tsn_config <conf>
+slic_tsn_config() {
+    local file="${1:-}"
+    [[ -n "$file" ]] || { printf 'ERROR\tusage: --tsn-config <conf>\n' >&2; return 2; }
+    [[ -r "$file" ]] || { printf 'ERROR\tcannot read %s\n' "$(slic_sanitize "$file")" >&2; return 1; }
+    local fq="" gfbr_ul="" gfbr_dl="" mfbr_ul="" mfbr_dl="" avg="" qfi=""
+    local tsc_per="" tsc_burst="" tsc_jit=""
+    local line k v
+    while IFS= read -r line; do
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" == *=* ]] || {
+            printf 'ERROR\t%s is not KEY=VALUE\n' "$(slic_sanitize "$line")" >&2; return 2; }
+        k=$(printf '%s' "${line%%=*}" | tr -d ' ' | tr 'A-Z' 'a-z')
+        v=$(printf '%s' "${line#*=}" | tr -d ' ')
+        case "$k" in
+            5qi|five-qi|five_qi)  fq="$v" ;;
+            gfbr_ul|gfbr-up)        gfbr_ul="$v" ;;
+            gfbr_dl|gfbr-down)      gfbr_dl="$v" ;;
+            mfbr_ul|mfbr-up)        mfbr_ul="$v" ;;
+            mfbr_dl|mfbr-down)      mfbr_dl="$v" ;;
+            averaging_window)       avg="$v" ;;
+            qfi)                    qfi="$v" ;;
+            tsc_periodicity)        tsc_per="$v" ;;
+            tsc_burst_arrival_time) tsc_burst="$v" ;;
+            tsc_jitter_range|tsc_jitter) tsc_jit="$v" ;;
+            *)
+                printf 'ERROR\tunknown key "%s" in %s\n' "$(slic_sanitize "$k")" "$(slic_sanitize "$file")" >&2
+                printf 'WHY\taccepted keys: 5qi, qfi, gfbr_ul, gfbr_dl, mfbr_ul, mfbr_dl, averaging_window, tsc_periodicity, tsc_burst_arrival_time, tsc_jitter_range. An ignored key would silently drop part of the QoS description\n' >&2
+                return 2 ;;
+        esac
+    done < "$file"
+
+    [[ -n "$fq" ]] || {
+        printf 'ERROR\t%s carries no 5qi= line\n' "$(slic_sanitize "$file")" >&2
+        printf 'WHY\tthe 5QI is what every other characteristic hangs from; without it there is no QoS flow to describe\n' >&2
+        return 2; }
+
+    local st; st=$(slic_5qi_status "$fq")
+    [[ "$st" == "unassigned" ]] && {
+        printf 'ERROR\t5QI %s is not in TS 23.501 Table 5.7.4-1\n' "$(slic_sanitize "$fq")" >&2
+        printf 'WHY\tuse --five-qi-table for the assigned values; a TSN/QoS description needs a 5QI whose resource type is known, because that decides whether GFBR/MFBR may appear at all\n' >&2
+        return 1; }
+
+    local rt; rt=$(slic_5qi_get "$fq" resource_type)
+    [[ -n "$rt" ]] || rt="unknown"   # operator-specific / reserved
+    local is_gbr=0
+    case "$rt" in GBR|"delay-critical GBR") is_gbr=1 ;; esac
+
+    local b
+    if (( is_gbr == 0 )); then
+        if [[ -n "$gfbr_ul" || -n "$gfbr_dl" || -n "$mfbr_ul" || -n "$mfbr_dl" || -n "$avg" ]]; then
+            printf 'ERROR\t5QI %s is %s, which carries no GBR QoS information\n' "$fq" "$rt" >&2
+            printf 'WHY\tonly a GBR or delay-critical GBR flow has GFBR/MFBR and an averaging window (TS 23.501 5.7.3.3); a non-GBR flow with a guaranteed bitrate is a description the core cannot honour\n' >&2
+            return 2
+        fi
+    else
+        [[ -n "$gfbr_ul" && -n "$gfbr_dl" && -n "$mfbr_ul" && -n "$mfbr_dl" ]] || {
+            printf 'ERROR\t5QI %s is %s: gfbr_ul, gfbr_dl, mfbr_ul and mfbr_dl are all required\n' "$fq" "$rt" >&2
+            printf 'WHY\ta GBR flow carries GFBR and MFBR in each direction in gBR-QosInformation (TS 38.413); 0 is a legal value, an absent direction is not describable\n' >&2
+            return 2; }
+    fi
+
+    local g_ul=0 g_dl=0 m_ul=0 m_dl=0
+    if (( is_gbr == 1 )); then
+        g_ul=$(slic_tsn_bps "$gfbr_ul") || { printf 'ERROR\tgfbr_ul "%s" is not a bit rate\n' "$(slic_sanitize "$gfbr_ul")" >&2; printf 'WHY\tgive bit/s, or a value with a k/M/G suffix\n' >&2; return 2; }
+        g_dl=$(slic_tsn_bps "$gfbr_dl") || { printf 'ERROR\tgfbr_dl "%s" is not a bit rate\n' "$(slic_sanitize "$gfbr_dl")" >&2; return 2; }
+        m_ul=$(slic_tsn_bps "$mfbr_ul") || { printf 'ERROR\tmfbr_ul "%s" is not a bit rate\n' "$(slic_sanitize "$mfbr_ul")" >&2; return 2; }
+        m_dl=$(slic_tsn_bps "$mfbr_dl") || { printf 'ERROR\tmfbr_dl "%s" is not a bit rate\n' "$(slic_sanitize "$mfbr_dl")" >&2; return 2; }
+        (( g_ul <= m_ul )) || { printf 'ERROR\tgfbr_ul %s exceeds mfbr_ul %s\n' "$g_ul" "$m_ul" >&2; printf 'WHY\tthe guaranteed rate must not exceed the maximum (TS 23.501 5.7.3.3)\n' >&2; return 2; }
+        (( g_dl <= m_dl )) || { printf 'ERROR\tgfbr_dl %s exceeds mfbr_dl %s\n' "$g_dl" "$m_dl" >&2; return 2; }
+        [[ -n "$avg" ]] || avg=$(slic_5qi_get "$fq" avg_window)
+        [[ "$avg" == "N/A" ]] && avg=2000
+        [[ "$avg" =~ ^[0-9]+$ ]] && (( avg > 0 )) || { printf 'ERROR\taveraging_window "%s" must be a positive number of milliseconds\n' "$(slic_sanitize "$avg")" >&2; return 2; }
+    fi
+
+    [[ -z "$qfi" ]] || { [[ "$qfi" =~ ^[0-9]+$ ]] && (( qfi <= 63 )) || {
+        printf 'ERROR\tqfi "%s" is not 0-63\n' "$(slic_sanitize "$qfi")" >&2
+        printf 'WHY\tthe QFI is 6 bits in TS 24.501/38.413\n' >&2
+        return 2; }; }
+
+    # TSC assistance information: all three fields are optional, but the
+    # periodicity is what the other two are relative to.
+    if [[ -n "$tsc_burst" || -n "$tsc_jit" ]]; then
+        [[ -n "$tsc_per" ]] || {
+            printf 'ERROR\ttsc_burst_arrival_time/tsc_jitter_range given without tsc_periodicity\n' >&2
+            printf 'WHY\tthe burst arrival time and the N6 jitter range are relative to the traffic periodicity (TS 23.501 5.7.4.3 TSC assistance information)\n' >&2
+            return 2; }
+    fi
+    local t
+    for t in "$tsc_per" "$tsc_burst"; do
+        [[ -z "$t" ]] && continue
+        [[ "$t" =~ ^[0-9]+$ ]] && (( t > 0 )) || {
+            printf 'ERROR\tTSC value "%s" must be a positive number of microseconds\n' "$(slic_sanitize "$t")" >&2
+            printf 'WHY\tTS 38.413 carries the TSC assistance information (periodicity, burst arrival time) in microseconds\n' >&2
+            return 2; }
+    done
+    local jmin="" jmax=""
+    if [[ -n "$tsc_jit" ]]; then
+        if [[ "$tsc_jit" == *-* ]]; then
+            jmin="${tsc_jit%%-*}"; jmax="${tsc_jit#*-}"
+            [[ "$jmin" =~ ^[0-9]+$ && "$jmax" =~ ^[0-9]+$ ]] || {
+                printf 'ERROR\ttsc_jitter_range "%s" must be min-max in microseconds\n' "$(slic_sanitize "$tsc_jit")" >&2; return 2; }
+            (( jmin <= jmax )) || {
+                printf 'ERROR\ttsc_jitter_range "%s" has min above max\n' "$(slic_sanitize "$tsc_jit")" >&2; return 2; }
+        else
+            [[ "$tsc_jit" =~ ^[0-9]+$ ]] || {
+                printf 'ERROR\ttsc_jitter_range "%s" must be a number or min-max in microseconds\n' "$(slic_sanitize "$tsc_jit")" >&2; return 2; }
+            jmin="$tsc_jit"; jmax="$tsc_jit"
+        fi
+    fi
+
+    # The description itself. Field order follows QosFlowLevelQosParameters so
+    # it can be read next to the NGAP message it would become.
+    printf 'input\t%s\n' "$(slic_sanitize "$file")"
+    # The 5QI's own default averaging window is kept apart from the effective
+    # one below: two rows with the same key would make the value depend on
+    # which row a reader happened to hit first.
+    slic_5qi_desc "$fq" | awk -F'\t' 'BEGIN{OFS="\t"} $1=="averaging_window_ms"{$1="fiveqi_default_averaging_window_ms"}1'
+    [[ -n "$qfi" ]] && printf 'qfi\t%s\n' "$qfi"
+    if (( is_gbr == 1 )); then
+        printf 'gfbr_ul_bps\t%d\n' "$g_ul"
+        printf 'gfbr_dl_bps\t%d\n' "$g_dl"
+        printf 'mfbr_ul_bps\t%d\n' "$m_ul"
+        printf 'mfbr_dl_bps\t%d\n' "$m_dl"
+        printf 'gfbr_ul_display\t%s\n' "$(slic_bps_display "$g_ul")"
+        printf 'gfbr_dl_display\t%s\n' "$(slic_bps_display "$g_dl")"
+        printf 'averaging_window_ms\t%s\n' "$avg"
+    else
+        printf 'gfbr_ul_bps\t%s\n' "N/A"
+        printf 'gfbr_dl_bps\t%s\n' "N/A"
+        printf 'mfbr_ul_bps\t%s\n' "N/A"
+        printf 'mfbr_dl_bps\t%s\n' "N/A"
+        printf 'averaging_window_ms\t%s\n' "N/A"
+    fi
+    if [[ -n "$tsc_per" ]]; then
+        printf 'tsc_assistance\tpresent\n'
+        printf 'tsc_periodicity_us\t%s\n' "$tsc_per"
+        [[ -n "$tsc_burst" ]] && printf 'tsc_burst_arrival_time_us\t%s\n' "$tsc_burst"
+        [[ -n "$jmin" ]] && printf 'tsc_n6_jitter_range_us\t%s-%s\n' "$jmin" "$jmax"
+    else
+        printf 'tsc_assistance\tabsent\n'
+    fi
+
+    # NGAP octets only from an encoder that exists.
+    local enc; enc=$(slic_ngap_qos_encoder)
+    if [[ "$enc" == "present" ]]; then
+        printf 'ngap_qos_level_parameters\tnot-emitted\n'
+        printf 'limit\t%s\n' "tools/ngap_asn1.py now greps for qos_flow_level_qos_parameters, but this module has no verified entry point to call, so no octets are emitted; inventing the ASN.1 PER bits would be worse than omitting them"
+    else
+        printf 'ngap_qos_level_parameters\tnot-emitted\n'
+        printf 'limit\t%s\n' "tools/ngap_asn1.py carries no QosFlowLevelQosParameters encoder (grep -i qos_flow_level_qos_parameters: $enc), so no NGAP octets are emitted; the rows above are the field set such a message would carry, and hand-building the ASN.1 PER bits would produce octets nobody can verify"
+    fi
+    printf 'refs\tTS 23.501 5.7.3, 5.7.4 (Table 5.7.4-1), 5.7.4.3 TSC assistance information; TS 38.413 QosFlowLevelQosParameters, GBR-QosInformation, TSCAssistanceInformation\n'
+    printf 'note\t%s\n' "nothing is transmitted: this is the description an N2 QoS profile would be built from"
+    return 0
+}
+
+slic_cmd_tsn_config() {
+    local file="${1:-}"
+    [[ -n "$file" ]] || { printf 'ERROR\tusage: --tsn-config <conf>\n' >&2; return 2; }
+    slic_tsn_config "$file"
+}
+
+# ── slice/flow QoS consistency — SST against the 5QI resource type ──────
+# Each rule is a sentence, and the sentence is printed on the finding line: a
+# verdict whose rule is hidden cannot be argued with or corrected.
+slic_sst_expected_rt() {
+    case "${1:-}" in
+        1) printf 'non-GBR GBR' ;;
+        2) printf 'GBR delay-critical GBR' ;;
+        3) printf 'non-GBR GBR' ;;
+        4) printf 'non-GBR GBR delay-critical GBR' ;;
+        5) printf 'GBR delay-critical GBR' ;;
+        *) printf '' ;;
+    esac
+}
+
+# Per-row evaluation of one slice/flow. Arguments: slice sst fiveqi gfbr_ul gfbr_dl mfbr_ul mfbr_dl
+# Emits `check` rows and `finding` rows; returns the number of conflicting rows
+# through SLIC_QOS_BAD.
+SLIC_QOS_BAD=0
+slic_qos_row() {
+    local slice="${1:-}" sst="${2:-}" fiveqi="${3:-}"
+    local gu="${4:-}" gd="${5:-}" mu="${6:-}" md="${7:-}"
+    local st rt name verdict="ok" rule="-"
+    local -a findings=()
+    st=$(slic_5qi_status "$fiveqi")
+    rt=$(slic_5qi_get "$fiveqi" resource_type); [[ -n "$rt" ]] || rt="unknown"
+    name=$(slic_sst_name "$sst")
+    local known=1; slic_sst_known "$sst" || known=0
+
+    local sev="HIGH"
+    case "$st" in
+        unassigned|invalid)
+            findings+=( "HIGH" "5qi_not_in_table" "the 5QI is not a row of TS 23.501 Table 5.7.4-1 and is not operator-specific, so its resource type is unknown and the SST/5QI consistency cannot be judged (5QI $fiveqi)" )
+            verdict="not-determinable"; rule="5qi_not_in_table" ;;
+    esac
+
+    if [[ "$verdict" == "ok" && "$st" == "standardized" ]]; then
+        if (( known == 0 )) && (( sst >= 128 && sst <= 255 )); then
+            verdict="not-determinable"; rule="sst_operator_specific"
+            findings+=( "INFO" "sst_operator_specific" "an operator-specific SST ($sst) declares no 3GPP service type, so the 5QI/resource-type consistency cannot be checked without the operator's SST map" )
+        elif (( known == 0 )); then
+            verdict="not-determinable"; rule="sst_not_in_table"
+            findings+=( "INFO" "sst_not_in_table" "SST $sst is not one of 1-5 in TS 23.501 Table 5.15.2.2-1, so no expected resource type exists for it" )
+        else
+            case "$sst:$rt" in
+                1:"delay-critical GBR")
+                    verdict="conflict"; rule="sst1_no_delay_critical"
+                    findings+=( "HIGH" "sst1_no_delay_critical" "an SST 1 (eMBB) slice must not carry a delay-critical GBR flow: that resource type is the URLLC class (TS 23.501 5.7.4), so the SST and the 5QI disagree about the service — declared SST 1 (eMBB) with 5QI $fiveqi ($rt)" ) ;;
+                2:"non-GBR")
+                    verdict="conflict"; rule="sst2_requires_guarantee"
+                    findings+=( "HIGH" "sst2_requires_guarantee" "an SST 2 (URLLC) slice carrying a non-GBR 5QI has no guaranteed bitrate and no delay-critical handling: URLLC needs GBR or delay-critical GBR (TS 23.501 5.7.4) — declared SST 2 (URLLC) with 5QI $fiveqi (non-GBR)" ) ;;
+                3:"delay-critical GBR")
+                    verdict="conflict"; rule="sst3_no_delay_critical"
+                    findings+=( "HIGH" "sst3_no_delay_critical" "an SST 3 (MIoT/mMTC) slice must not carry a delay-critical GBR flow: mMTC is the non-GBR mass class (TS 23.501 5.15.2.2-1), and a delay-critical flow reserves resources mMTC does not need — declared SST 3 (MIoT) with 5QI $fiveqi ($rt)" ) ;;
+                5:"non-GBR")
+                    verdict="conflict"; rule="sst5_requires_guarantee"
+                    findings+=( "MEDIUM" "sst5_requires_guarantee" "an SST 5 (HMTC) slice carrying a non-GBR 5QI has no resource guarantee: HMTC flows are ordered as GBR or delay-critical GBR (TS 23.501 5.7.4) — declared SST 5 (HMTC) with 5QI $fiveqi (non-GBR)" ) ;;
+            esac
+        fi
+    fi
+
+    # GBR bookkeeping, independent of the SST rule.
+    if [[ "$verdict" != "not-determinable" && "$st" == "standardized" ]]; then
+        case "$rt" in
+            GBR|"delay-critical GBR")
+                if [[ -z "$gu" || -z "$gd" || -z "$mu" || -z "$md" ]]; then
+                    [[ "$verdict" == "ok" ]] && { verdict="conflict"; rule="gbr_requires_bitrate"; }
+                    local have=""
+                    [[ -n "$gu" ]] && have+=" ul_gfbr=$gu"
+                    [[ -n "$gd" ]] && have+=" dl_gfbr=$gd"
+                    [[ -n "$mu" ]] && have+=" ul_mfbr=$mu"
+                    [[ -n "$md" ]] && have+=" dl_mfbr=$md"
+                    [[ -n "$have" ]] || have=" none"
+                    findings+=( "HIGH" "gbr_requires_bitrate" "a $rt flow must carry GFBR and MFBR in each direction (TS 23.501 5.7.3.3, gBR-QosInformation in TS 38.413); this row declares${have}, and a missing direction is a profile the core cannot honour" )
+                else
+                    (( gu <= mu )) || { [[ "$verdict" == "ok" ]] && { verdict="conflict"; rule="mfbr_lt_gfbr"; }
+                        findings+=( "HIGH" "mfbr_lt_gfbr" "MFBR must be >= GFBR in the same direction; this row has gfbr_ul=$gu > mfbr_ul=$mu" ); }
+                    (( gd <= md )) || { [[ "$verdict" == "ok" ]] && { verdict="conflict"; rule="mfbr_lt_gfbr"; }
+                        findings+=( "HIGH" "mfbr_lt_gfbr" "MFBR must be >= GFBR in the same direction; this row has gfbr_dl=$gd > mfbr_dl=$md" ); }
+                fi ;;
+            non-GBR)
+                if [[ -n "$gu$gd$mu$md" ]]; then
+                    [[ "$verdict" == "ok" ]] && { verdict="conflict"; rule="non_gbr_has_bitrate"; }
+                    findings+=( "HIGH" "non_gbr_has_bitrate" "a non-GBR flow has no GBR QoS information, so a GFBR/MFBR on it is either a mis-mapped flow or a profile the core will not honour (TS 23.501 5.7.3.3)" )
+                fi ;;
+        esac
+    fi
+
+    printf 'check\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(slic_sanitize "$slice")" "$(slic_sanitize "$sst")" "$(slic_sanitize "$name")" \
+        "$(slic_sanitize "$fiveqi")" "$(slic_sanitize "$rt")" "$verdict" "$rule"
+    local i
+    for (( i = 0; i + 2 < ${#findings[@]}; i += 3 )); do
+        [[ -n "${findings[$i]:-}" ]] || continue
+        printf 'finding\t%s\t%s\t%s\t%s\n' "$(slic_sanitize "$slice")" \
+            "${findings[$i]}" "${findings[$i+1]}" "${findings[$((i+2))]}"
+        [[ "${findings[$i]}" == "HIGH" ]] && SLIC_QOS_BAD=$(( SLIC_QOS_BAD + 1 ))
+    done
+    return 0
+}
+
+# slic_slice_qos_check <tsv>
+#   slice  sst  5qi  [gfbr_ul_bps gfbr_dl_bps mfbr_ul_bps mfbr_dl_bps]
+# The header names the columns; an unknown column is refused, never ignored.
+slic_slice_qos_check() {
+    local file="${1:-}"
+    [[ -n "$file" ]] || { printf 'ERROR\tusage: --slice-qos-check <tsv>\n' >&2; return 2; }
+    [[ -r "$file" ]] || { printf 'ERROR\tcannot read %s\n' "$(slic_sanitize "$file")" >&2; return 1; }
+    local header="" line
+    while IFS= read -r line; do
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        header="$line"; break
+    done < "$file"
+    [[ -n "$header" ]] || { printf 'ERROR\t%s has no header row\n' "$(slic_sanitize "$file")" >&2; return 2; }
+    slic_split "$header"
+    local -A col=()
+    local i
+    for (( i = 0; i < ${#SLIC_F[@]}; i++ )); do
+        case "${SLIC_F[$i],,}" in
+            slice|name)          col[slice]=$i ;;
+            sst)                 col[sst]=$i ;;
+            5qi|fiveqi|five_qi)  col[fiveqi]=$i ;;
+            gfbr_ul_bps)         col[gu]=$i ;;
+            gfbr_dl_bps)         col[gd]=$i ;;
+            mfbr_ul_bps)         col[mu]=$i ;;
+            mfbr_dl_bps)         col[md]=$i ;;
+            *)
+                printf 'ERROR\tunknown column "%s" in the header of %s\n' "$(slic_sanitize "${SLIC_F[$i]}")" "$(slic_sanitize "$file")" >&2
+                printf 'WHY\taccepted columns: slice, sst, 5qi, gfbr_ul_bps, gfbr_dl_bps, mfbr_ul_bps, mfbr_dl_bps. Ignoring a column would drop the fact it was meant to contribute\n' >&2
+                return 2 ;;
+        esac
+    done
+    local need
+    for need in slice sst fiveqi; do
+        [[ -n "${col[$need]:-}" ]] || {
+            printf 'ERROR\tthe header of %s has no %s column\n' "$(slic_sanitize "$file")" "$need" >&2
+            printf 'WHY\tthe check needs the slice name, its declared S-NSSAI SST and its 5QI for every row\n' >&2
+            return 2; }
+    done
+    SLIC_QOS_BAD=0
+    printf 'input\t%s\n' "$(slic_sanitize "$file")"
+    printf 'header\tslice\tsst\tsst_name\t5qi\tresource_type\tverdict\trule\n'
+    local n=0 bad=0
+    while IFS= read -r line; do
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" == "$header" ]] && continue
+        slic_split "$line"
+        local slice="${SLIC_F[${col[slice]}]:-}"
+        local sst="${SLIC_F[${col[sst]}]:-}"
+        local fiveqi="${SLIC_F[${col[fiveqi]}]:-}"
+        local gu="" gd="" mu="" md=""
+        [[ -n "${col[gu]:-}" ]] && gu="${SLIC_F[${col[gu]}]:-}"
+        [[ -n "${col[gd]:-}" ]] && gd="${SLIC_F[${col[gd]}]:-}"
+        [[ -n "${col[mu]:-}" ]] && mu="${SLIC_F[${col[mu]}]:-}"
+        [[ -n "${col[md]:-}" ]] && md="${SLIC_F[${col[md]}]:-}"
+        if [[ ! "$sst" =~ ^[0-9]{1,3}$ ]] || (( sst > 255 )); then
+            printf 'ERROR\tSST "%s" on slice "%s" is not 0-255\n' "$(slic_sanitize "$sst")" "$(slic_sanitize "$slice")" >&2
+            printf 'WHY\tSST is one octet (TS 23.501 5.15.2.2)\n' >&2
+            return 2
+        fi
+        local v
+        for v in "$gu" "$gd" "$mu" "$md"; do
+            [[ -z "$v" ]] && continue
+            [[ "$v" =~ ^[0-9]+$ ]] || {
+                printf 'ERROR\tbit rate "%s" on slice "%s" is not a number of bit/s\n' "$(slic_sanitize "$v")" "$(slic_sanitize "$slice")" >&2
+                return 2; }
+        done
+        local before=$SLIC_QOS_BAD
+        slic_qos_row "$slice" "$sst" "$fiveqi" "$gu" "$gd" "$mu" "$md"
+        (( SLIC_QOS_BAD > before )) && bad=$(( bad + 1 ))
+        n=$(( n + 1 ))
+    done < "$file"
+    (( n > 0 )) || { printf 'ERROR\t%s has no data rows\n' "$(slic_sanitize "$file")" >&2; return 1; }
+    printf 'rows\t%d\n' "$n"
+    printf 'conflicts\t%d\n' "$bad"
+    printf 'verdict\t%s\n' "$([[ $bad -gt 0 ]] && echo conflicts || echo consistent)"
+    return 0
+}
+
+slic_cmd_slice_qos_check() {
+    local file="${1:-}"
+    [[ -n "$file" ]] || { printf 'ERROR\tusage: --slice-qos-check <tsv>\n' >&2; return 2; }
+    slic_slice_qos_check "$file"
 }
 
 # ── S-NSSAI codec — TS 23.003 §28.4.2 ───────────────────────────────────
@@ -772,9 +1392,15 @@ slic_cli_status_tsv() {
     printf 'plans_dir\t%s\n' "$SLIC_PLANS"
     printf 'plans\t%s\n' "$plans"
     printf 'sst_assigned\t1,2,3,4,5\n'
+    printf 'five_qi_rows\t%s\n' "$(slic_5qi_table_raw | grep -c .)"
+    printf 'five_qi_id_range\t%s\n' "1-127 standardized, 128-254 operator-specific, 255 unused by the table"
+    printf 'five_qi_table\tTS 23.501 Table 5.7.4-1\n'
+    printf 'five_qi_unknown_cells\t%s\n' "5QI 75: reserved in the carried table (NOTE 14), all characteristics unknown"
+    printf 'qos_verbs\t--five-qi, --five-qi-table, --tsn-config, --slice-qos-check\n'
+    printf 'tsn_ngap_encoder\t%s\n' "$(slic_ngap_qos_encoder)"
     printf 'python3\t%s\n' "$(command -v python3 >/dev/null 2>&1 && echo yes || echo no)"
     printf 'isolation_verdict\t%s\n' "not-determinable without a slice-to-TEID binding"
-    printf 'refs\tTS 23.003, TS 23.501, TS 23.502, TS 24.501, TS 29.244, TS 38.413\n'
+    printf 'refs\tTS 23.003, TS 23.501 (5.7.3, 5.7.4, Table 5.7.4-1, 5.7.4.3, 5.15), TS 23.502, TS 24.501, TS 29.244, TS 38.413\n'
 }
 
 slic_cmd_encode() {
@@ -1065,7 +1691,188 @@ PY
     chk split-empty "${SLIC_F[1]}" ""
     chk split-third "${SLIC_F[2]}" "y"
 
-    # ── 10. Argument validation returns non-zero ────────────────────────
+    # ── 10. 5QI, TSN/QoS and slice/QoS consistency ──────────────────────
+    # Table 5.7.4-1 rows as literals: resource type, priority, PDB, PER,
+    # MDBV and averaging window. A mistyped row fails here.
+    out=$(slic_5qi_desc 1); rc=$?
+    chk fiveqi-1-rc      "$rc" "0"
+    chk fiveqi-1-status  "$(fld "$out" status)" "standardized"
+    chk fiveqi-1-rt      "$(fld "$out" resource_type)" "GBR"
+    chk fiveqi-1-prio    "$(fld "$out" priority_level)" "20"
+    chk fiveqi-1-pdb     "$(fld "$out" pdb_ms)" "100"
+    chk fiveqi-1-units   "$(fld "$out" pdb_0_5ms_units)" "200"
+    chk fiveqi-1-per     "$(fld "$out" per)" "10^-2"
+    chk fiveqi-1-mdbv    "$(fld "$out" mdbv_bytes)" "N/A"
+    chk fiveqi-1-avg     "$(fld "$out" averaging_window_ms)" "2000"
+    out=$(slic_5qi_desc 5)
+    chk fiveqi-5-rt      "$(fld "$out" resource_type)" "non-GBR"
+    chk fiveqi-5-prio    "$(fld "$out" priority_level)" "10"
+    chk fiveqi-5-pdb     "$(fld "$out" pdb_ms)" "100"
+    chk fiveqi-5-per     "$(fld "$out" per)" "10^-6"
+    chk fiveqi-5-avg     "$(fld "$out" averaging_window_ms)" "N/A"
+    out=$(slic_5qi_desc 65)
+    chk fiveqi-65-rt     "$(fld "$out" resource_type)" "GBR"
+    chk fiveqi-65-prio   "$(fld "$out" priority_level)" "7"
+    chk fiveqi-65-pdb    "$(fld "$out" pdb_ms)" "75"
+    chk fiveqi-65-per    "$(fld "$out" per)" "10^-2"
+    out=$(slic_5qi_desc 66)
+    chk fiveqi-66-prio   "$(fld "$out" priority_level)" "20"
+    chk fiveqi-66-pdb    "$(fld "$out" pdb_ms)" "100"
+    chk fiveqi-66-per    "$(fld "$out" per)" "10^-2"
+    out=$(slic_5qi_desc 67)
+    chk fiveqi-67-prio   "$(fld "$out" priority_level)" "15"
+    chk fiveqi-67-pdb    "$(fld "$out" pdb_ms)" "100"
+    chk fiveqi-67-per    "$(fld "$out" per)" "10^-3"
+    out=$(slic_5qi_desc 82)
+    chk fiveqi-82-rt     "$(fld "$out" resource_type)" "delay-critical GBR"
+    chk fiveqi-82-prio   "$(fld "$out" priority_level)" "19"
+    chk fiveqi-82-pdb    "$(fld "$out" pdb_ms)" "10"
+    chk fiveqi-82-units  "$(fld "$out" pdb_0_5ms_units)" "20"
+    chk fiveqi-82-per    "$(fld "$out" per)" "10^-4"
+    chk fiveqi-82-mdbv   "$(fld "$out" mdbv_bytes)" "255"
+    out=$(slic_5qi_desc 84)
+    chk fiveqi-84-rt     "$(fld "$out" resource_type)" "delay-critical GBR"
+    chk fiveqi-84-prio   "$(fld "$out" priority_level)" "24"
+    chk fiveqi-84-pdb    "$(fld "$out" pdb_ms)" "30"
+    chk fiveqi-84-units  "$(fld "$out" pdb_0_5ms_units)" "60"
+    chk fiveqi-84-per    "$(fld "$out" per)" "10^-5"
+    chk fiveqi-84-mdbv   "$(fld "$out" mdbv_bytes)" "1354"
+    out=$(slic_5qi_desc 85)
+    chk fiveqi-85-rt     "$(fld "$out" resource_type)" "delay-critical GBR"
+    chk fiveqi-85-prio   "$(fld "$out" priority_level)" "21"
+    chk fiveqi-85-pdb    "$(fld "$out" pdb_ms)" "5"
+    chk fiveqi-85-units  "$(fld "$out" pdb_0_5ms_units)" "10"
+    chk fiveqi-85-per    "$(fld "$out" per)" "10^-5"
+    chk fiveqi-85-mdbv   "$(fld "$out" mdbv_bytes)" "255"
+    chk fiveqi-85-avg    "$(fld "$out" averaging_window_ms)" "2000"
+    # A dynamic (operator-specific) value: the characteristics are unknown, and
+    # the module says so instead of inventing a default row.
+    out=$(slic_5qi_desc 137); rc=$?
+    chk fiveqi-137-rc     "$rc" "0"
+    chk fiveqi-137-status "$(fld "$out" status)" "operator-specific"
+    chk fiveqi-137-rt     "$(fld "$out" resource_type)" "unknown"
+    chk fiveqi-137-prio   "$(fld "$out" priority_level)" "unknown"
+    chk fiveqi-137-pdb    "$(fld "$out" pdb_ms)" "unknown"
+    chk fiveqi-137-nodefault "$(fld "$out" averaging_window_ms)" "unknown"
+    chk fiveqi-200-status "$(slic_5qi_desc 200 | awk -F'\t' '$1=="status"{print $2}')" "operator-specific"
+    # 5QI 75 is reserved in the carried copy: every cell unknown, not N/A.
+    out=$(slic_5qi_desc 75); rc=$?
+    chk fiveqi-75-rc     "$rc" "0"
+    chk fiveqi-75-status "$(fld "$out" status)" "reserved"
+    chk fiveqi-75-rt     "$(fld "$out" resource_type)" "unknown"
+    chk fiveqi-75-prio   "$(fld "$out" priority_level)" "unknown"
+    chk fiveqi-75-service "$(fld "$out" service)" "unknown"
+    # Values the table does not assign are refused, not guessed.
+    chk fiveqi-rc-unassigned "$(slic_5qi_desc 12 >/dev/null 2>&1; echo $?)" "1"
+    chk fiveqi-rc-255        "$(slic_5qi_desc 255 >/dev/null 2>&1; echo $?)" "1"
+    chk fiveqi-rc-68         "$(slic_5qi_desc 68 >/dev/null 2>&1; echo $?)" "1"
+    chk fiveqi-rc-oob        "$(slic_5qi_desc 300 >/dev/null 2>&1; echo $?)" "2"
+    chk fiveqi-rc-nan        "$(slic_5qi_desc abc >/dev/null 2>&1; echo $?)" "2"
+    chk fiveqi-rc-empty      "$(slic_5qi_desc >/dev/null 2>&1; echo $?)" "2"
+    # The table prints 30 standardized rows plus the one reserved row, and the
+    # clause is cited once.
+    out=$(slic_cmd_five_qi_table)
+    chk fiveqi-table-rows     "$(printf '%s\n' "$out" | awk -F'\t' '$1 ~ /^[0-9]+$/ && ($2=="GBR" || $2=="non-GBR" || $2=="delay-critical GBR" || $2=="unknown")' | wc -l)" "31"
+    chk fiveqi-table-gbr      "$(slic_cmd_five_qi_table gbr | awk -F'\t' '$1 ~ /^[0-9]+$/' | wc -l)" "12"
+    chk fiveqi-table-nongbr   "$(slic_cmd_five_qi_table non-gbr | awk -F'\t' '$1 ~ /^[0-9]+$/' | wc -l)" "9"
+    chk fiveqi-table-dcgbr    "$(slic_cmd_five_qi_table delay-critical-gbr | awk -F'\t' '$1 ~ /^[0-9]+$/' | wc -l)" "9"
+    chk fiveqi-table-reserved "$(slic_cmd_five_qi_table reserved | awk -F'\t' '$1 ~ /^[0-9]+$/' | wc -l)" "1"
+    chk fiveqi-table-cite     "$(printf '%s\n' "$out" | grep -c 'Table 5.7.4-1')" "1"
+    chk fiveqi-table-85units  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="85"{print $5}')" "10"
+    chk fiveqi-table-badrt    "$(slic_cmd_five_qi_table bogus >/dev/null 2>&1; echo $?)" "2"
+
+    # --tsn-config: a TSC flow, and the refusals that keep it honest.
+    cat > "$d/tsn.conf" <<'CONF'
+5qi=82
+qfi=1
+gfbr_ul=2M
+gfbr_dl=2M
+mfbr_ul=10M
+mfbr_dl=10M
+averaging_window=2000
+tsc_periodicity=1000
+tsc_burst_arrival_time=500
+tsc_jitter_range=100-200
+CONF
+    out=$(slic_cmd_tsn_config "$d/tsn.conf"); rc=$?
+    chk tsn-rc        "$rc" "0"
+    chk tsn-gfbr-ul   "$(fld "$out" gfbr_ul_bps)" "2000000"
+    chk tsn-mfbr-dl   "$(fld "$out" mfbr_dl_bps)" "10000000"
+    chk tsn-display   "$(fld "$out" gfbr_ul_display)" "2 Mbit/s"
+    chk tsn-avg       "$(fld "$out" averaging_window_ms)" "2000"
+    chk tsn-avg-unique "$(printf '%s\n' "$out" | awk -F'\t' '$1=="averaging_window_ms"' | wc -l)" "1"
+    chk tsn-avg-fiqi   "$(fld "$out" fiveqi_default_averaging_window_ms)" "2000"
+    chk tsn-qfi       "$(fld "$out" qfi)" "1"
+    chk tsn-period    "$(fld "$out" tsc_periodicity_us)" "1000"
+    chk tsn-burst     "$(fld "$out" tsc_burst_arrival_time_us)" "500"
+    chk tsn-jitter    "$(fld "$out" tsc_n6_jitter_range_us)" "100-200"
+    # No encoder for QosFlowLevelQosParameters: say so in a limit row.
+    chk tsn-no-octets "$(fld "$out" ngap_qos_level_parameters)" "not-emitted"
+    chk tsn-limit-row "$(printf '%s\n' "$out" | awk -F'\t' '$1=="limit"' | wc -l)" "1"
+    chk tsn-limit-names-encoder "$(printf '%s\n' "$out" | awk -F'\t' '$1=="limit"{print $2}' | grep -c 'QosFlowLevelQosParameters')" "1"
+    # A non-GBR 5QI carries no GBR QoS information.
+    printf '5qi=9\ngfbr_ul=1M\n' > "$d/ngbr.conf"
+    chk tsn-ngbr-rc   "$(slic_cmd_tsn_config "$d/ngbr.conf" >/dev/null 2>&1; echo $?)" "2"
+    printf 'qfi=1\n' > "$d/no5qi.conf"
+    chk tsn-no5qi-rc  "$(slic_cmd_tsn_config "$d/no5qi.conf" >/dev/null 2>&1; echo $?)" "2"
+    printf '5qi=82\nfoo=bar\n' > "$d/badkey.conf"
+    chk tsn-badkey-rc "$(slic_cmd_tsn_config "$d/badkey.conf" >/dev/null 2>&1; echo $?)" "2"
+    printf '5qi=1\ngfbr_ul=1M\ngfbr_dl=1M\nmfbr_ul=1M\nmfbr_dl=1M\ntsc_periodicity=1000\ntsc_jitter_range=300-100\n' > "$d/jit.conf"
+    chk tsn-jitter-rc "$(slic_cmd_tsn_config "$d/jit.conf" >/dev/null 2>&1; echo $?)" "2"
+    printf '5qi=1\ngfbr_ul=1M\ngfbr_dl=1M\nmfbr_ul=1M\nmfbr_dl=1M\ntsc_burst_arrival_time=5\n' > "$d/noper.conf"
+    chk tsn-noper-rc  "$(slic_cmd_tsn_config "$d/noper.conf" >/dev/null 2>&1; echo $?)" "2"
+    printf '5qi=1\ngfbr_ul=1M\ngfbr_dl=1M\nmfbr_ul=1M\nmfbr_dl=1M\n' > "$d/gbr-noavg.conf"
+    out=$(slic_cmd_tsn_config "$d/gbr-noavg.conf"); rc=$?
+    chk tsn-avg-default "$rc/$(fld "$out" averaging_window_ms)" "0/2000"
+    chk tsn-missing     "$(slic_cmd_tsn_config /nonexistent.conf >/dev/null 2>&1; echo $?)" "1"
+    chk tsn-none        "$(slic_cmd_tsn_config >/dev/null 2>&1; echo $?)" "2"
+    chk tsn-gfbr-gt-mfbr "$(printf '5qi=1\ngfbr_ul=9M\ngfbr_dl=1M\nmfbr_ul=1M\nmfbr_dl=1M\n' > "$d/gt.conf"; slic_cmd_tsn_config "$d/gt.conf" >/dev/null 2>&1; echo $?)" "2"
+
+    # --slice-qos-check: SST against the 5QI resource type, rule printed.
+    printf 'slice\tsst\t5qi\tgfbr_ul_bps\tgfbr_dl_bps\tmfbr_ul_bps\tmfbr_dl_bps\nembb-voice\t1\t1\t1000000\t1000000\t2000000\t2000000\nembb-ar\t1\t82\t2000000\t2000000\t10000000\t10000000\nurllc-ctrl\t2\t69\t\t\t\t\nmiot-meters\t3\t85\t1000\t1000\t5000\t5000\nv2x-car\t4\t83\t5000000\t5000000\t20000000\t20000000\nhmtc-cam\t5\t6\t\t\t\t\nop-slice\t200\t9\t\t\t\t\n' > "$d/slices.tsv"
+    out=$(slic_cmd_slice_qos_check "$d/slices.tsv"); rc=$?
+    chk qos-rc          "$rc" "0"
+    chk qos-rows        "$(fld "$out" rows)" "7"
+    chk qos-conflicts   "$(fld "$out" conflicts)" "3"
+    chk qos-verdict     "$(fld "$out" verdict)" "conflicts"
+    chk qos-sst1        "$(printf '%s\n' "$out" | grep -c '^finding	embb-ar	HIGH	sst1_no_delay_critical')" "1"
+    chk qos-sst2        "$(printf '%s\n' "$out" | grep -c '^finding	urllc-ctrl	HIGH	sst2_requires_guarantee')" "1"
+    chk qos-sst3        "$(printf '%s\n' "$out" | grep -c '^finding	miot-meters	HIGH	sst3_no_delay_critical')" "1"
+    chk qos-sst5-medium "$(printf '%s\n' "$out" | grep -c '^finding	hmtc-cam	MEDIUM	sst5_requires_guarantee')" "1"
+    # The rule sentence travels with the finding, not somewhere else.
+    chk qos-rule-text   "$(printf '%s\n' "$out" | grep -c '^finding	embb-ar	HIGH	sst1_no_delay_critical	an SST 1 (eMBB) slice must not carry a delay-critical GBR flow')" "1"
+    chk qos-check-ok    "$(printf '%s\n' "$out" | grep -c '^check	v2x-car	4	.*	ok	-')" "1"
+    chk qos-operatorsst "$(printf '%s\n' "$out" | grep -c '^check	op-slice	200	unknown	9	non-GBR	not-determinable	sst_operator_specific')" "1"
+    # A clean configuration is consistent and silent.
+    printf 'slice\tsst\t5qi\tgfbr_ul_bps\tgfbr_dl_bps\tmfbr_ul_bps\tmfbr_dl_bps\nembb\t1\t1\t1\t1\t2\t2\nurllc\t2\t85\t1\t1\t9\t9\n' > "$d/clean.tsv"
+    out=$(slic_cmd_slice_qos_check "$d/clean.tsv")
+    chk qos-clean-conflicts "$(fld "$out" conflicts)" "0"
+    chk qos-clean-verdict   "$(fld "$out" verdict)" "consistent"
+    chk qos-clean-nofind    "$(printf '%s\n' "$out" | grep -c '^finding')" "0"
+    # GBR bookkeeping rules fire independently of the SST rule.
+    printf 'slice\tsst\t5qi\tgfbr_ul_bps\tgfbr_dl_bps\tmfbr_ul_bps\tmfbr_dl_bps\ngbr-nobit\t4\t1\t\t\t\t\nngbr-bit\t4\t9\t1\t1\t2\t2\nmfbr-low\t4\t1\t9\t1\t1\t1\n' > "$d/book.tsv"
+    out=$(slic_cmd_slice_qos_check "$d/book.tsv")
+    chk qos-gbr-nobit   "$(printf '%s\n' "$out" | grep -c '^finding	gbr-nobit	HIGH	gbr_requires_bitrate')" "1"
+    chk qos-ngbr-bit    "$(printf '%s\n' "$out" | grep -c '^finding	ngbr-bit	HIGH	non_gbr_has_bitrate')" "1"
+    chk qos-mfbr-low    "$(printf '%s\n' "$out" | grep -c '^finding	mfbr-low	HIGH	mfbr_lt_gfbr')" "1"
+    chk qos-conflicts2  "$(fld "$out" conflicts)" "3"
+    # Refusals: an unknown column is named, never ignored.
+    printf 'slice\tsst\t5qi\tbandwidth\nembb\t1\t1\t5\n' > "$d/badcol.tsv"
+    chk qos-badcol-rc   "$(slic_cmd_slice_qos_check "$d/badcol.tsv" >/dev/null 2>&1; echo $?)" "2"
+    printf 'slice\tsst\nembb\t1\n' > "$d/nocol.tsv"
+    chk qos-nocol-rc    "$(slic_cmd_slice_qos_check "$d/nocol.tsv" >/dev/null 2>&1; echo $?)" "2"
+    printf 'slice\tsst\t5qi\nembb\t999\t1\n' > "$d/badsst.tsv"
+    chk qos-badsst-rc   "$(slic_cmd_slice_qos_check "$d/badsst.tsv" >/dev/null 2>&1; echo $?)" "2"
+    chk qos-nofile-rc   "$(slic_cmd_slice_qos_check /nonexistent.tsv >/dev/null 2>&1; echo $?)" "1"
+    chk qos-none-rc     "$(slic_cmd_slice_qos_check >/dev/null 2>&1; echo $?)" "2"
+    # A 5QI outside the table is a finding, not a silent "ok".
+    printf 'slice\tsst\t5qi\nweird\t1\t12\n' > "$d/unassigned.tsv"
+    out=$(slic_cmd_slice_qos_check "$d/unassigned.tsv")
+    chk qos-unassigned  "$(printf '%s\n' "$out" | grep -c '^finding	weird	HIGH	5qi_not_in_table')" "1"
+    chk qos-unassigned-verdict "$(fld "$out" verdict)" "conflicts"
+    chk qos-unassigned-conflicts "$(fld "$out" conflicts)" "1"
+
+    # ── 11. Argument validation returns non-zero ────────────────────────
     chk val-encode-none  "$(slic_cmd_encode >/dev/null 2>&1; echo $?)" "2"
     chk val-decode-none  "$(slic_cmd_decode >/dev/null 2>&1; echo $?)" "2"
     chk val-decode-bad   "$(slic_cmd_decode 0102 >/dev/null 2>&1; echo $?)" "1"
@@ -1101,11 +1908,18 @@ slic_menu() {
   [7]  decode a 5GS NAS slice message
   [8]  vulnerability classes
   [9]  plan: slice escape lab
-  [10] status
+  [10] 5QI characteristics (TS 23.501 Table 5.7.4-1)
+  [11] 5QI table (filter by resource type)
+  [12] TSN/QoS configuration description
+  [13] slice/QoS consistency check
+  [14] status
   [0]  back
 
 M
-        read -rp "  choice> " c
+        # EOF leaves the menu. Without the '|| return 0' a piped or closed stdin
+        # spins forever: read fails, c stays empty, the case matches nothing and
+        # the loop comes straight back. Every other menu in the tree does this.
+        read -rp "  choice> " c || return 0
         case "$c" in
             1) slic_sst_table | column -t -s$'\t' 2>/dev/null || slic_sst_table
                read -rp "  press enter " _ ;;
@@ -1131,7 +1945,22 @@ M
             8) slic_surface_notes | column -t -s$'\t' 2>/dev/null || slic_surface_notes
                read -rp "  press enter " _ ;;
             9) slic_cmd_plan slice-escape-lab; read -rp "  press enter " _ ;;
-            10) slic_cli_status_tsv | column -t -s$'\t' 2>/dev/null || slic_cli_status_tsv
+            10) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a 5QI; cannot prompt in CLI mode" >&2
+               else read -rp "  5QI> " p; slic_cmd_five_qi "$p" | column -t -s$'\t' 2>/dev/null || true
+                    read -rp "  press enter " _; fi ;;
+            11) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a resource type; cannot prompt in CLI mode" >&2
+               else read -rp "  resource type (blank = all: gbr|non-gbr|delay-critical-gbr|reserved)> " p
+                    slic_cmd_five_qi_table "$p" | column -t -s$'\t' 2>/dev/null || true
+                    read -rp "  press enter " _; fi ;;
+            12) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a conf file; cannot prompt in CLI mode" >&2
+               else read -rp "  tsn conf path> " p
+                    slic_cmd_tsn_config "$p" | column -t -s$'\t' 2>/dev/null || true
+                    read -rp "  press enter " _; fi ;;
+            13) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a tsv; cannot prompt in CLI mode" >&2
+               else read -rp "  slice/flow tsv path> " p
+                    slic_cmd_slice_qos_check "$p" | column -t -s$'\t' 2>/dev/null || true
+                    read -rp "  press enter " _; fi ;;
+            14) slic_cli_status_tsv | column -t -s$'\t' 2>/dev/null || slic_cli_status_tsv
                 read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -1162,13 +1991,17 @@ slic_cli_main() {
                                  printf 'cause\t%s\n' "$cz"
                                  printf 'cause_name\t%s\n' "$([[ -n "$cz" ]] && slic_5gmm_cause_name "$cz" || printf '')"
                              } ;;
+        --five-qi)           slic_cmd_five_qi "${1:-}" ;;
+        --five-qi-table)     slic_cmd_five_qi_table "${1:-}" ;;
+        --tsn-config)        slic_cmd_tsn_config "${1:-}" ;;
+        --slice-qos-check)   slic_cmd_slice_qos_check "${1:-}" ;;
         --surface)           slic_surface_notes ;;
         --plan)              slic_cmd_plan "${1:-}" ;;
         --selftest)          slic_selftest ;;
         --menu)              slic_menu ;;
         *)
             cat >&2 <<EOF
-Slicing Escape — S-NSSAI codec, slice selection, isolation testing
+Slicing Escape — S-NSSAI codec, slice selection, isolation, 5QI/TSN QoS
 
 Usage: $0 COMMAND
   --status-tsv                        module state as TSV
@@ -1182,6 +2015,18 @@ Usage: $0 COMMAND
                                       isolation it cannot establish
   --detect <slice-events.tsv>         session-level slice anomaly rules
   --nas5gs <hex>                      decode a 5GS plain NAS slice message
+  --five-qi <5qi>                     decode one 5QI to its TS 23.501
+                                      Table 5.7.4-1 characteristics
+  --five-qi-table [resource-type]     the whole table as TSV; filter by
+                                      gbr | non-gbr | delay-critical-gbr |
+                                      reserved
+  --tsn-config <conf>                 a TSN/QoS description (5qi=, gfbr_*,
+                                      mfbr_*, averaging_window=, tsc_*) as TSV.
+                                      No NGAP octets: the encoder does not
+                                      exist, and a limit row says so
+  --slice-qos-check <tsv>             flag a slice whose 5QI resource type
+                                      contradicts its S-NSSAI SST; each
+                                      finding carries the rule it broke
   --surface                           the vulnerability classes
   --plan slice-escape-lab             write the handed-off lab plan
   --selftest                          verify the codec and rules

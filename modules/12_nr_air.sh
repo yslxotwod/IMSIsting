@@ -6,7 +6,10 @@
 #   TS 38.104 Table 5.4.2.1-1   NR-ARFCN ranges and the global raster
 #   TS 38.104 Table 5.4.3.3-1   synchronisation raster (SS Ref -> GSCN)
 #   TS 38.211 §7.4.2.2/.3       PSS/SSS sequences, PCI = 3*N_ID(1) + N_ID(2)
-#   TS 38.211 §7.4.3.1          PBCH scrambling (nu = N_ID(1) mod 4 for i_ssb<4)
+#   TS 38.211 §7.4.3            SS/PBCH block: 240 subcarriers, PSS/SSS/PBCH
+#   TS 38.211 §7.3.3.1          PBCH scrambling (nu = i_SSB mod 4, mod 8 for
+#                               L_max 64) and the PBCH DMRS of §7.4.1.4.1
+#   TS 38.211 §5.3.1            CP-OFDM cyclic prefix (144/2048 and 16/2048)
 #   TS 38.212 §7.1.1            BCCH-BCH-Message = MIB, 24 bits of payload
 #   TS 38.331 §6.2.2            MIB / SIB1 ASN.1 field order and ranges
 #   TS 38.331 §6.2.2            RRC PDU ASN.1: DL-/UL-DCCH-Message,
@@ -1593,10 +1596,15 @@ def build_grid(pci, scs, nfft, mib_bits, i_ssb, sfn, hrf, l_max, kssb_msb):
               3: list(range(v, 240, 4))}
 
     # DMRS: TS 38.211 7.4.1.4.1, c_init = 2^11*(i_SSB+1)*(N_ID^cell//4+1)
-    # + 2^6*(i_SSB+1) + N_ID^cell mod 4. Only i_SSB = 0 is emitted here.
+    # + 2^6*(i_SSB+1) + N_ID^cell mod 4. The pinned chips are the ones this
+    # c_init produces at i_SSB = 0, the only i_SSB an independent implementation
+    # was pinned for. Another i_SSB is a different sequence with no vector to
+    # compare against, so the check reports "not checked" instead of failing a
+    # sequence it cannot judge (the decoder still re-derives the comb from the
+    # clause and the round trip in the selftest still runs).
     c_init = (2 ** 11) * (i_ssb + 1) * (pci // 4 + 1) + 64 * (i_ssb + 1) + v
     dmrs = qpsk(gold(c_init, 2 * 144))
-    if pci in DMRS_PINNED:
+    if pci in DMRS_PINNED and i_ssb == 0:
         pin = DMRS_PINNED[pci]
         got = "".join(("0" if c.real > 0 else "1") + ("0" if c.imag > 0 else "1")
                       for c in dmrs[:len(pin) // 2])
@@ -1656,10 +1664,245 @@ def build_grid(pci, scs, nfft, mib_bits, i_ssb, sfn, hrf, l_max, kssb_msb):
     return grids
 
 
+def arg_opt(name, default=None):
+    """Value of the flag NAME in sys.argv, or DEFAULT. The burst mode's
+    parameters arrive as flags so the slot path's positional interface stays
+    exactly what it was for every existing caller."""
+    a = sys.argv
+    return a[a.index(name) + 1] if name in a else default
+
+
+def read_back(path, fmt):
+    """Read an IQ file with the jamming module's own loader convention
+    (modules/33_jamming_detect.sh load_iq): cf32 is interleaved little-endian
+    float32, ci16 interleaved int16 / 32768, cu8 unsigned bytes with 127.5
+    subtracted and 127.5 as full scale. Written here rather than imported
+    because module 33 keeps its loader inside a heredoc; the numbers are its
+    numbers, so a file this function accepts is a file that loader accepts."""
+    if fmt == "cf32":
+        d = np.fromfile(path, dtype="<f4").astype(np.float64)
+        return d[0::2] + 1j * d[1::2]
+    if fmt == "ci16":
+        d = np.fromfile(path, dtype="<i2").astype(np.float64)
+        return (d[0::2] + 1j * d[1::2]) / 32768.0
+    d = np.fromfile(path, dtype=np.uint8).astype(np.float64)
+    return ((d[0::2] - 127.5) + 1j * (d[1::2] - 127.5)) / 127.5
+
+
+def burst_waveform(out, pci, scs, nfft, sfn):
+    """One SS/PBCH burst as complex baseband I/Q, for a receiver to consume as
+    a waveform rather than as a grid description.
+
+    TS 38.211 7.4.3.1 puts PSS, SSS, PBCH and PBCH DMRS on 240 consecutive
+    subcarriers of 4 consecutive OFDM symbols, and 5.3.1 gives each of those
+    symbols its cyclic prefix. The four 240-long blocks come from build_grid(),
+    i.e. the very sequences, RE layout and BCH chain that produce the slot
+    file; what is added here is only WHERE each block lands in the raster and
+    in WHICH sample format it is written.
+
+    The placement needs two numbers a waveform cannot invent: the common
+    resource block N_CRB^SSB (offsetToPointA) and k_SSB, the subcarrier offset
+    inside it. This module carries no CORESET#0 / point-A table, so both are
+    taken as 0 and printed as such: the SSB sits on subcarrier 0 of the raster.
+    A baseband grid is DC-centred (the slot path maps the same block to bins
+    -120..119), so raster subcarrier r is FFT bin r - N/2.
+
+    Formats and scales are modules/33_jamming_detect.sh's build(): cf32 is
+    interleaved float32 I/Q, ci16 int16 at 32767 with the loader's 32768
+    divisor, cu8 round(x*127 + 127.5) with the loader's 127.5 full scale.
+    """
+    fmt = arg_opt("--format", "cf32")
+    nrb = int(arg_opt("--nrb", 51))
+    i_ssb = int(arg_opt("--i-ssb", 0))
+    reps = int(arg_opt("--reps", 1))
+    l_max = int(arg_opt("--l-max", 64 if scs >= 120 else 8))
+    l0 = int(arg_opt("--l0", 0))
+    mu = {15: 0, 30: 1, 60: 2, 120: 3, 240: 4}[scs]
+    n_raster = 12 * nrb
+
+    if fmt not in ("cf32", "ci16", "cu8"):
+        sys.stderr.write("ERROR\tformat must be cf32|ci16|cu8\n")
+        return 2
+    if n_raster < 240:
+        sys.stderr.write("ERROR\tthe SS/PBCH block is 20 RBs = 240 subcarriers "
+                         "(TS 38.211 7.4.3.1); --n-rb %d is narrower\n" % nrb)
+        return 2
+    if n_raster > nfft:
+        sys.stderr.write("ERROR\t--n-rb %d needs %d subcarriers but N_FFT is "
+                         "%d\n" % (nrb, n_raster, nfft))
+        return 2
+    if reps < 1:
+        sys.stderr.write("ERROR\t--reps must be >= 1\n")
+        return 2
+    if not 0 <= i_ssb <= 63:
+        sys.stderr.write("ERROR\ti_SSB %d is outside 0..63\n" % i_ssb)
+        return 2
+    if l_max not in (4, 8, 10, 20, 64):
+        sys.stderr.write("ERROR\tL_max %d has no TS 38.212 7.1.1 branch\n" % l_max)
+        return 2
+    if not 0 <= l0 <= 139:
+        sys.stderr.write("ERROR\tburst start symbol %d is outside a radio "
+                         "frame\n" % l0)
+        return 2
+    if 144 * nfft % 2048 or 16 * nfft * (2 ** mu) % 2048:
+        sys.stderr.write("ERROR\tN_FFT %d is off the mu=%d numerology grid: the "
+                         "CP of TS 38.211 5.3.1 is not a whole number of "
+                         "samples at this rate\n" % (nfft, mu))
+        return 2
+
+    grids = build_grid(pci, scs, nfft, mib_payload(sfn), i_ssb, sfn, 0, l_max, 0)
+    bch_pin_check()
+
+    bins = [(k - n_raster // 2) % nfft for k in range(240)]
+    burst = np.zeros(0, dtype=complex)
+    raster_re = 0
+    cps = []
+    for l in range(4):
+        f = np.zeros(nfft, dtype=complex)
+        for j, b in enumerate(bins):
+            f[b] = grids[l][j]
+        raster_re += int(np.count_nonzero(f))
+        s = l0 + l
+        cp = cp_lengths(mu, s // 14, nfft)[s % 14]
+        cps.append(cp)
+        body = np.fft.ifft(f) * np.sqrt(nfft)
+        burst = np.concatenate([burst, body[-cp:], body])
+
+    pss_re = int(np.count_nonzero(grids[0]))
+    sss_re = int(np.count_nonzero(grids[2][56:183]))
+    ssb_re = sum(int(np.count_nonzero(g)) for g in grids)
+    if raster_re != ssb_re:
+        sys.stderr.write("ERROR\tthe mapping put %d of the SSB's %d REs into the "
+                         "raster\n" % (raster_re, ssb_re))
+        return 2
+
+    x = np.tile(burst, reps)
+    peak = float(np.max(np.abs(x))) if x.size else 0.0
+    if peak <= 0.0:
+        sys.stderr.write("ERROR\tthe burst built to all zeros\n")
+        return 2
+    x = x / peak                      # full scale 1.0, then quantise once
+    n = int(x.size)
+
+    def write_iq(xq, fmt, path):
+        """Quantise and write in module 33's format conventions. Returns the
+        bytes per sample, so the caller can check the file length against it."""
+        if fmt == "cf32":
+            xq.astype("<c8").tofile(path)
+            return 8
+        if fmt == "ci16":
+            b = np.empty(2 * xq.size, dtype="<i2")
+            b[0::2] = np.clip(np.round(xq.real * 32767.0), -32768,
+                              32767).astype("<i2")
+            b[1::2] = np.clip(np.round(xq.imag * 32767.0), -32768,
+                              32767).astype("<i2")
+            b.tofile(path)
+            return 4
+        b = np.empty(2 * xq.size, dtype=np.uint8)
+        b[0::2] = np.clip(np.round(xq.real * 127.0 + 127.5), 0,
+                          255).astype(np.uint8)
+        b[1::2] = np.clip(np.round(xq.imag * 127.0 + 127.5), 0,
+                          255).astype(np.uint8)
+        b.tofile(path)
+        return 2
+
+    # The peak is MEASURED on the file, not assumed from the array: float32
+    # rounding of the components can land a hair above 1.0, so the normalising
+    # gain is pulled back and the file rewritten until the file itself is at or
+    # below full scale. It converges in one extra pass or not at all.
+    per = 0
+    loaded_peak = 0.0
+    gain = 1.0
+    for _ in range(6):
+        per = write_iq(x * gain, fmt, out)
+        back = read_back(out, fmt)
+        if back.size != n:
+            sys.stderr.write("ERROR\t%s reads back %d samples, %d were "
+                             "written\n" % (out, back.size, n))
+            return 2
+        loaded_peak = float(np.max(np.abs(back)))
+        if 0.0 < loaded_peak <= 1.0:
+            break
+        # One part per 10^6 is far below any real correction and far above the
+        # 1.2e-7 float32 resolution, so the rewritten file cannot land on the
+        # same rounded components again.
+        gain = gain / loaded_peak * (1.0 - 1e-6)
+    else:
+        sys.stderr.write("ERROR\t%s loads back at peak %.6f, outside (0, 1]: "
+                         "the waveform is not full scale\n" % (out, loaded_peak))
+        return 2
+    import os
+    if os.path.getsize(out) != n * per:
+        sys.stderr.write("ERROR\t%s is %d bytes, %d samples x %d bytes = %d\n"
+                         % (out, os.path.getsize(out), n, per, n * per))
+        return 2
+
+    fs = scs * 1000 * nfft
+    print("waveform_file\t%s" % out)
+    print("format\t%s" % fmt)
+    print("rate\t%d" % fs)
+    print("samples\t%d" % n)
+    print("bytes\t%d" % (n * per))
+    print("seconds\t%.6f" % (n / float(fs)))
+    print("n_rb\t%d" % nrb)
+    print("scs_khz\t%d" % scs)
+    print("pci\t%d" % pci)
+    print("i_ssb\t%d" % i_ssb)
+    print("symbols\t4")
+    print("peak_full_scale\t%.6f" % loaded_peak)
+    print("peak_ok\t1")
+    print("bytes_per_sample\t%d" % per)
+    print("ssb_case\t%s" % arg_opt("--case", "unknown"))
+    print("fft_size\t%d" % nfft)
+    print("mu\t%d" % mu)
+    print("l_max\t%d" % l_max)
+    print("reps\t%d" % reps)
+    print("symbols_total\t%d" % (4 * reps))
+    print("cp_pattern\t%s" % ",".join(str(c) for c in cps))
+    print("cp_short\t%d" % min(cps))
+    print("cp_long\t%d" % max(cps))
+    print("start_symbol\t%d" % l0)
+    print("slot\t%d" % (l0 // 14))
+    print("symbol_in_slot\t%d" % (l0 % 14))
+    print("start_symbol_half_frame\t%d" % int(arg_opt("--sym-hf", l0)))
+    print("half_frame\t%d" % int(arg_opt("--hf", 0)))
+    print("grid_subcarriers\t%d" % n_raster)
+    print("ssb_bin_first\t%d" % (0 - n_raster // 2))
+    print("ssb_re_pss\t%d" % pss_re)
+    print("ssb_re_sss\t%d" % sss_re)
+    print("ssb_re_dmrs\t%d" % CHECKS.get("dmrs_re", (0, False))[0])
+    print("ssb_re_pbch\t%d" % CHECKS.get("pbch_re", (0, False))[0])
+    print("ssb_re\t%d" % ssb_re)
+    print("raster_re\t%d" % raster_re)
+    print("loaded_samples\t%d" % int(back.size))
+    print("format_loader\tmodules/33_jamming_detect.sh load_iq (dtype/scale/"
+          "interleave identical)")
+    # That loader rejects a file under 2048 samples, so a 20 RB burst at a
+    # small raster needs --reps to be readable by it.
+    print("consumer_min_samples\t2048")
+    print("mapping\tk_SSB=0, offsetToPointA=0 (this module carries no "
+          "CORESET#0 table; the MIB these payloads carry has ssb-"
+          "SubcarrierOffset = 0, so k_SSB = 0 is what the burst itself says): "
+          "SSB subcarrier k -> raster subcarrier k of %d, FFT bin k-%d, "
+          "DC-centred grid" % (n_raster, n_raster // 2))
+    print("kssb_msb\t0")
+    print("generator_version\t%s" % GEN_VERSION)
+    print("ref\tTS 38.211 7.4.3 (SS/PBCH block: 240 subcarriers, PSS/SSS/PBCH/"
+          "PBCH DMRS) + 5.3 (CP-OFDM): ONE SSB burst at baseband - four OFDM "
+          "symbols with one CP each, tiled --reps times back to back (no gap "
+          "between bursts); NOT a full SSB burst set (no other candidates, no "
+          "20 ms period, no half-frame timing) and NOT attached to a carrier "
+          "(no RF centre frequency, no CORESET#0)")
+    print("built\tyes")
+    return 0
+
+
 def main():
     if len(sys.argv) < 6:
         sys.stderr.write("ERROR\tusage: nr_ssb_bb.py <out.c16> <pci> <scs_khz> "
-                         "<nfft> <sf> [--slot N] [--detail FILE] [--i8 FILE]\n")
+                         "<nfft> <sf> [--slot N] [--detail FILE] [--i8 FILE] "
+                         "[--burst --format F --nrb N --i-ssb I --reps R "
+                         "--l-max L --l0 S]\n")
         return 2
     out, pci, scs, nfft, sf = (sys.argv[1], int(sys.argv[2]), int(sys.argv[3]),
                                int(sys.argv[4]), int(sys.argv[5]))
@@ -1691,6 +1934,12 @@ def main():
     # frame bit and the k_SSB MSB are 0 as well.
     l_max = 64 if scs >= 120 else 8
     hrf, kssb_msb = 0, 0
+    if "--burst" in sys.argv:
+        # The waveform export (--ssb-waveform): one SSB burst in a channel
+        # raster, instead of one slot of the carrier. l_max, i_SSB and the
+        # burst's subframe symbol index come in as flags because they are the
+        # cell's parameters, not the generator's defaults.
+        return burst_waveform(out, pci, scs, nfft, sf)
     grids = build_grid(pci, scs, nfft, mib_payload(sf), 0, sf, hrf, l_max,
                        kssb_msb)
     bch_pin_check()
@@ -1898,6 +2147,12 @@ def load_c16(path):
     return raw[0::2] + 1j * raw[1::2]
 
 
+def arg_opt(name, default=None):
+    """Value of the flag NAME in sys.argv, or DEFAULT."""
+    a = sys.argv
+    return a[a.index(name) + 1] if name in a else default
+
+
 def first_energy(iq, thresh=1.0):
     """First sample of the first symbol that carries energy. A slot can open
     with empty symbols (an SSB-only burst does), and a purely zero window has
@@ -1961,7 +2216,7 @@ def detect_slot_geometry(nsamples, mu, lo, hi):
 
 def split_slot(iq, pat, nfft):
     pos, syms, starts = 0, [], []
-    for l in range(14):
+    for l in range(len(pat)):
         starts.append(pos)
         syms.append(iq[pos + pat[l]:pos + pat[l] + nfft])
         pos += pat[l] + nfft
@@ -2185,7 +2440,10 @@ def payload_descramble(a, l_max, ncellid):
 
 def payload_deinterleave(a):
     """TS 38.212 7.1.1 read backwards: the MIB's six SFN bits, the SFN's four
-    LSBs, the half frame bit, the k_SSB MSB and the rest of the MIB."""
+    LSBs, the half frame bit, the k_SSB MSB and the rest of the MIB. The three
+    a_{A+5}..a_{A+7} bits are also where the UPPER bits of the SSB index live
+    for L_max 10/20/64 (payload_generate); they are returned raw so
+    bch_decode can apply the L_max branch, which differs in which bit is which."""
     mib = [0] * 24
     for k in range(6):
         mib[1 + k] = a[PBCH_G[k]]
@@ -2200,7 +2458,8 @@ def payload_deinterleave(a):
         field = (field << 1) | mib[1 + k]
     sfn = ((field << 4) | (a[PBCH_G[6]] << 3) | (a[PBCH_G[7]] << 2) |
            (a[PBCH_G[8]] << 1) | a[PBCH_G[9]])
-    return mib, sfn, a[PBCH_G[10]], a[PBCH_G[11]]
+    return (mib, sfn, a[PBCH_G[10]], a[PBCH_G[11]],
+            (a[PBCH_G[11]], a[PBCH_G[12]], a[PBCH_G[13]]))
 
 
 def bch_decode(coded, pci, l_max):
@@ -2225,10 +2484,22 @@ def bch_decode(coded, pci, l_max):
         if crc24c_bits(bits[:32]) != bits[32:]:
             continue
         a, v = payload_descramble(bits[:32], l_max, pci)
-        mib, sfn, hrf, kssb_msb = payload_deinterleave(a)
+        mib, sfn, hrf, kssb_msb, idx_bits = payload_deinterleave(a)
+        # TS 38.212 7.1.1 Table 7.1.1-1: L_max decides which of a_{A+5}..a_{A+7}
+        # are SSB index bits — L_max 10 carries i_SSB bit 3, 20 carries bits 3-4,
+        # 64 carries bits 3-5, and 4/8 carry none (a_{A+5} is the k_SSB MSB).
+        # nu is only i_SSB mod 8 (38.211 7.3.3.1), so the full index is
+        # nu | payload >> 3.
+        upper = 0
+        if l_max == 10:
+            upper = idx_bits[2] << 3
+        elif l_max == 20:
+            upper = (idx_bits[1] << 4) | (idx_bits[2] << 3)
+        elif l_max == 64:
+            upper = (idx_bits[0] << 5) | (idx_bits[1] << 4) | (idx_bits[2] << 3)
         out.update({"decode_ok": 1, "nu": nu, "v": v, "mib": mib, "sfn": sfn,
                     "hrf": hrf, "kssb_msb": kssb_msb, "payload": bits[:32],
-                    "k": bits})
+                    "k": bits, "i_ssb": upper | nu})
         return out
     return out
 
@@ -2236,7 +2507,8 @@ def bch_decode(coded, pci, l_max):
 def main():
     if len(sys.argv) < 4:
         sys.stderr.write("ERROR\tusage: nr_ssb_decode.py <in.c16> <scs_khz> "
-                         "<nfft_nominal> [--grid FILE]\n")
+                         "<nfft_nominal> [--grid FILE] [--nfft N --nsym M "
+                         "--l0 S] [--ssb-bin B] [--l-max L]\n")
         return 2
     path, scs, nfft_nom = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
     grid_out = None
@@ -2244,12 +2516,45 @@ def main():
         grid_out = sys.argv[sys.argv.index("--grid") + 1]
     mu = {15: 0, 30: 1, 60: 2, 120: 3, 240: 4}[scs]
     iq = load_c16(path)
+    # A file that is not a slot: the --ssb-waveform burst is four symbols, so
+    # its timing is not searched for, it is checked against the CP formula for
+    # the symbols it claims. --ssb-bin is the FFT bin of SSB subcarrier 0 (the
+    # slot path's -120 is "the SSB is centred on DC"); --l-max picks the
+    # TS 38.212 7.1.1 payload branch.
+    fixed = None
+    if "--nfft" in sys.argv:
+        fixed = (int(arg_opt("--nfft")), int(arg_opt("--nsym", 14)),
+                 int(arg_opt("--l0", 0)))
+    ssb_bin = int(arg_opt("--ssb-bin", -120))
+    l_max_dec = int(arg_opt("--l-max", 64 if scs >= 120 else 8))
+    # Only used by the pinned-DMRS comparison, which is pinned for i_SSB = 0:
+    # the DMRS c_init of TS 38.211 7.4.1.4.1 depends on i_SSB.
+    pin_ssb = int(arg_opt("--i-ssb", 0))
 
     # 1. Timing. The CP formula plus the sample count fixes the candidate
     # (N_FFT, slot) pairs; the SSB itself then picks between them, because a
     # wrong symbol length scrambles the grid and no PSS root correlates.
-    hits = detect_slot_geometry(iq.size, mu, max(128, nfft_nom // 2),
-                                nfft_nom * 2)
+    if fixed:
+        nfft, nsym, l0 = fixed
+        pat = []
+        for s in range(l0, l0 + nsym):
+            c = spec_cp_pattern(nfft, mu, s // 14)
+            if c is None:
+                print("ERROR\tN_FFT %d is off the mu=%d numerology grid "
+                      "(TS 38.211 5.3.1)" % (nfft, mu))
+                return 2
+            pat.append(c[s % 14])
+        if sum(pat) + nsym * nfft != iq.size:
+            print("ERROR\t%d samples is not the %d symbols of %d+CP that the CP "
+                  "formula gives from subframe symbol %d (needs %d)"
+                  % (iq.size, nsym, nfft, l0, sum(pat) + nsym * nfft))
+            return 2
+        hits = [(nfft, l0 // 14, pat)]
+        print("geometry_source\texplicit (--nfft/--nsym/--l0)")
+    else:
+        hits = detect_slot_geometry(iq.size, mu, max(128, nfft_nom // 2),
+                                    nfft_nom * 2)
+        print("geometry_source\tsearched")
     print("geometry_candidates\t%d" % len(hits))
     if not hits:
         print("ERROR\tno (N_FFT, slot) pair makes %d samples into 14 CP+body "
@@ -2258,15 +2563,15 @@ def main():
         return 2
 
     per_sym_start = first_energy(iq)
-    period, period_rho = detect_period(iq, per_sym_start, nfft_nom * 2)
+    period, period_rho = detect_period(iq, per_sym_start,
+                                       nfft if fixed else nfft_nom * 2)
 
     chosen = None
     ranked = []
     for nfft, nslot, pat in hits:
         syms, starts, consumed = split_slot(iq, pat, nfft)
-        block = [np.concatenate([np.fft.fft(s)[nfft - 120:nfft],
-                                 np.fft.fft(s)[0:120]]) / np.sqrt(nfft)
-                 for s in syms]
+        bi = (ssb_bin + np.arange(240)) % nfft
+        block = [np.fft.fft(s)[bi] / np.sqrt(nfft) for s in syms]
         r = -1.0
         for b in block:
             for nid2 in range(3):
@@ -2278,7 +2583,9 @@ def main():
     ranked.sort(key=lambda t: -t[0])
     r, nfft, nslot, pat, syms, starts, block = ranked[0]
     chosen = (nfft, nslot)
+    bi = (ssb_bin + np.arange(240)) % nfft
     print("geometry_selected\t%d/%d" % (nfft, nslot))
+    print("ssb_subcarrier_bin\t%d" % ssb_bin)
     print("geometry_pss_correlation\t%.4f" % r)
     if len(ranked) > 1:
         print("geometry_runner_up\t%d/%d\t%.4f" % (ranked[1][1], ranked[1][2],
@@ -2313,7 +2620,7 @@ def main():
     print("cp_pattern\t%s" % ",".join(str(x) for x in pat))
     print("cp_long_expected\t%d" % max(pat))
     print("cp_short_expected\t%d" % min(pat))
-    print("cp_in_spec_set\t%d" % (1 if set(pat) == set(
+    print("cp_in_spec_set\t%d" % (1 if set(pat) <= set(
         spec_cp_pattern(nfft, mu, nslot) or []) else 0))
     print("period_detected\t%d" % period)
     print("period_correlation\t%.4f" % period_rho)
@@ -2326,7 +2633,8 @@ def main():
     print("cp_symbols_bad\t%d" % cp_bad)
     print("symbol_energy_max\t%.4g" % symbol_energy_max)
     print("slot_samples\t%d" % iq.size)
-    print("subframe_samples\t%d" % (iq.size * (2 ** mu)))
+    if not fixed:
+        print("subframe_samples\t%d" % (iq.size * (2 ** mu)))
     print("slot_us\t%.1f" % (1000.0 * iq.size / (nfft * scs * 1000)))
 
     # 3. Sequences. Blind search over every symbol, against this file's own
@@ -2376,8 +2684,9 @@ def main():
     # else in the block.
     out_max = 0.0
     blk_rms = float(np.sqrt(np.mean([np.mean(np.abs(b) ** 2) for b in block]))) or 1.0
+    rest = np.setdiff1d(np.arange(nfft), bi)
     for s in syms:
-        out = np.fft.fft(s)[120:nfft - 120] / np.sqrt(nfft)
+        out = np.fft.fft(s)[rest] / np.sqrt(nfft)
         if out.size:
             out_max = max(out_max, float(np.max(np.abs(out))) / blk_rms)
     print("out_of_block_max\t%.4f" % out_max)
@@ -2436,8 +2745,12 @@ def main():
         print("sss_neighbours_empty\t%d" % (1 if all(
             abs(ssb[2][k]) <= present
             for k in list(range(48, 56)) + list(range(183, 192))) else 0))
+        # The pinned DMRS chips are c_init's output at i_SSB = 0. A file that
+        # carries another SSB index was built from a different sequence, so
+        # --i-ssb (when the caller knows it) turns this into "not checked"
+        # instead of a disagreement the pin cannot actually judge.
         pin = DMRS_PINNED.get(pci)
-        if pin:
+        if pin and pin_ssb == 0:
             got = "".join(("0" if ssb[1][k].real > 0 else "1") +
                           ("0" if ssb[1][k].imag > 0 else "1")
                           for k in spec_dmrs_re(v, 1)[:len(pin) // 2])
@@ -2459,14 +2772,19 @@ def main():
                 c = ssb[s][k]
                 coded += [0 if c.real > 0 else 1, 0 if c.imag > 0 else 1]
         # L_max selects nu's width in TS 38.211 7.3.3.1 and the 7.1.1 payload
-        # branch: 4 or 8 in FR1, 64 for the FR2 SSB cases D/E.
-        l_max_dec = 64 if scs >= 120 else 8
+        # branch: 4 or 8 in FR1, 64 for the FR2 SSB cases D/E. --l-max names it
+        # when the waveform came from a band whose case says so (Case A is 4).
         print("pbch_bits_used\t%d" % len(coded))
+        print("l_max_assumed\t%d" % l_max_dec)
         res = bch_decode(coded, pci, l_max_dec)
         print("bch_decode_ok\t%d" % res["decode_ok"])
         print("bch_nu_attempts\t%d" % res["attempts"])
         if res["decode_ok"]:
             print("bch_i_ssb\t%d" % res["nu"])
+            # The whole index, not just the scrambling part: for L_max 64 the
+            # upper three bits ride in the PBCH payload (7.1.1), so a receiver
+            # that only reports nu would call i_SSB 63 "7".
+            print("bch_i_ssb_full\t%d" % res["i_ssb"])
             print("bch_descramble_v\t%d" % res["v"])
             print("mib_hex\t%s" % "".join(
                 "%x" % int("".join(str(x) for x in res["mib"][i:i + 4]), 2)
@@ -3391,6 +3709,12 @@ nair_status() {
     printf 'conf_present\t%s\n' "$([[ -f "$NAIR_CONF" ]] && echo yes || echo no)"
     printf 'log\t%s\n'          "$NAIR_LOG"
     printf 'dir\t%s\n'          "$NAIR_DIR"
+    # The waveform export is a build capability, not a running state: report
+    # whether this module can produce the file the jamming module reads.
+    printf 'ssb_waveform\t%s\n' "$(declare -F nair_cmd_ssb_waveform >/dev/null 2>&1 \
+        && command -v python3 >/dev/null 2>&1 \
+        && echo 'available (--ssb-waveform, cf32|ci16|cu8)' \
+        || echo 'missing (needs python3)')"
 }
 
 # ── CLI verbs ───────────────────────────────────────────────────────────
@@ -3503,6 +3827,213 @@ nair_cmd_ssb() {
     nair_ssb_position "$i" "$case_" || {
         printf 'ERROR\ti_ssb %s not valid for case %s\n' "$(nair_sanitize "$i")" "$case_" >&2; return 1; }
     printf 'scs_khz\t%s\nssb_period_ms\t20\nssb_rb\t20\n' "$scs"
+}
+
+
+# ── SSB waveform export ─────────────────────────────────────────────────
+# The receive-side half of this module renders an SSB as bits and grid
+# parameters. That is not a waveform: nothing can key a radio with it, and
+# nothing can hand it to the jamming module as an IQ file. This verb writes
+# ONE SS/PBCH burst (TS 38.211 7.4.3: PSS + SSS + PBCH + PBCH DMRS on 240
+# subcarriers of 4 consecutive symbols) with the 5.3.1 cyclic prefixes, mapped
+# into an NR channel raster of --n-rb RBs and inverse-FFTed at --rate.
+#
+# The sequences are NOT re-derived here: the generator's own build_grid() and
+# payload/BCH chain produce the 240-long blocks, so a waveform that this
+# module's decoder accepts and a waveform the jamming module transmits differ
+# only in the mapping and the sample format.
+#
+# The three formats are modules/33_jamming_detect.sh's build(): cf32 is
+# interleaved little-endian float32, ci16 int16 at 32767 (its loader divides
+# by 32768), cu8 round(x*127 + 127.5) (its loader subtracts 127.5 and divides
+# by 127.5). Same dtype, same scale, same interleave, so ITS loader reads this
+# file with no translation.
+#
+# Stated, because it is not in the clause: --n-rb gives the raster width but
+# the SSB's position in that raster needs N_CRB^SSB (offsetToPointA) and k_SSB,
+# and this module carries no CORESET#0 / point-A table. Both are taken as 0 —
+# the SSB sits on subcarrier 0 of the raster — and printed as
+# `ssb_subcarrier_offset`. A receiver told only the raster will not find the
+# SSB elsewhere in it.
+nair_cmd_ssb_waveform() {
+    local out="${1:-}"
+    if [[ -z "$out" ]]; then
+        printf 'ERROR\tusage: --ssb-waveform <out.iq> [--format cf32|ci16|cu8] [--rate <sps>] [--n-rb <n>] [--pci <n>] [--i-ssb <n>] [--scs <khz>] [--reps <n>]\n' >&2
+        return 2
+    fi
+    shift
+    # Defaults are the module's own house cell: pci 1, 30 kHz SSB (Case C),
+    # 51 RB = 20 MHz at 30 kHz, 30.72 MHz = 1024 x 30 kHz.
+    local fmt=cf32 rate=30720000 nrb=51 pci=1 i_ssb=0 scs=30 reps=1
+    while (( $# )); do
+        case "$1" in
+            --i-have-a-lab-and-authorisation)
+                # Retired by the standing policy: this module is not gated, so
+                # the old flag is a usage error rather than a no-op.
+                printf 'ERROR\t--i-have-a-lab-and-authorisation is retired: module 12 is not gated\n' >&2
+                printf 'WHY\tthe flag only ever carried a disclaimer; this verb writes a file and keys nothing\n' >&2
+                return 2 ;;
+            --format|--rate|--n-rb|--pci|--i-ssb|--scs|--reps)
+                if (( $# < 2 )); then
+                    printf 'ERROR\t%s needs a value\n' "$1" >&2; return 2
+                fi
+                local opt="$1" val="$2"
+                shift 2
+                case "$opt" in
+                    --format) fmt="$val" ;;
+                    --rate)   rate="$val" ;;
+                    --n-rb)   nrb="$val" ;;
+                    --pci)    pci="$val" ;;
+                    --i-ssb)  i_ssb="$val" ;;
+                    --scs)    scs="$val" ;;
+                    --reps)   reps="$val" ;;
+                esac ;;
+            *)
+                printf 'ERROR\tunknown option for --ssb-waveform: %s\n' "$(nair_sanitize "$1")" >&2
+                printf 'WHY\tthe verb takes --format, --rate, --n-rb, --pci, --i-ssb, --scs and --reps\n' >&2
+                return 2 ;;
+        esac
+    done
+
+    # Sample format aliases, the same ones module 33 accepts from drivers, so a
+    # caller can pass `cs8`/`c16` and get the format it asked for.
+    case "$fmt" in
+        cf32) ;;
+        ci16|cs16|sc16|c16) fmt=ci16 ;;
+        cu8|cs8|csv)        fmt=cu8 ;;
+        *) printf 'ERROR\tformat must be cf32|ci16|cu8 (or a driver alias: cs8|c16|sc16|cs16|csv)\n' >&2
+           printf 'WHY\tthose are the three layouts modules/33_jamming_detect.sh load_iq() reads\n' >&2
+           return 2 ;;
+    esac
+
+    [[ "$pci"   =~ ^[0-9]+$ ]] || { printf 'ERROR\tpci must be numeric\n' >&2; return 2; }
+    if (( pci > 1007 )); then
+        printf 'ERROR\tpci %s is out of range\n' "$pci" >&2
+        printf 'WHY\tNR PCI is 3*N_ID(1) + N_ID(2) with N_ID(1) 0..335: 0..1007\n' >&2
+        return 2
+    fi
+    [[ "$i_ssb" =~ ^[0-9]+$ ]] || { printf 'ERROR\ti_ssb must be numeric\n' >&2; return 2; }
+    [[ "$nrb"   =~ ^[0-9]+$ ]] || { printf 'ERROR\t--n-rb must be numeric\n' >&2; return 2; }
+    [[ "$reps"  =~ ^[0-9]+$ ]] || { printf 'ERROR\t--reps must be numeric\n' >&2; return 2; }
+    [[ "$rate"  =~ ^[0-9]+$ ]] || { printf 'ERROR\t--rate must be numeric samples/second\n' >&2; return 2; }
+    if (( reps < 1 )); then
+        printf 'ERROR\t--reps must be >= 1\n' >&2
+        printf 'WHY\tone burst is the shortest waveform; --reps 0 would write no samples, which the consumer rejects\n' >&2
+        return 2
+    fi
+    if (( rate < 1 )); then
+        printf 'ERROR\t--rate must be > 0\n' >&2
+        printf 'WHY\tthe sample rate fixes N_FFT = rate / SCS and the file length\n' >&2
+        return 2
+    fi
+    if (( nrb < 20 )); then
+        printf 'ERROR\t--n-rb %s cannot hold the SS/PBCH block\n' "$nrb" >&2
+        printf 'WHY\tTS 38.211 7.4.3.1 gives the block 240 subcarriers = 20 RB\n' >&2
+        return 2
+    fi
+    if (( nrb > 275 )); then
+        printf 'ERROR\t--n-rb %s exceeds the widest NR channel\n' "$nrb" >&2
+        printf 'WHY\t275 RB is the maximum of TS 38.101-1 Table 5.3.2-1\n' >&2
+        return 2
+    fi
+    case "$scs" in
+        15|30|120|240) ;;
+        60) printf 'ERROR\t60 kHz is a data numerology, not an SSB SCS\n' >&2
+            printf 'WHY\tTS 38.213 4.1 defines the SS/PBCH block at 15/30/120/240 kHz only\n' >&2
+            return 2 ;;
+        *)  printf 'ERROR\t--scs %s has no SSB case\n' "$(nair_sanitize "$scs")" >&2
+            printf 'WHY\tTS 38.213 4.1 defines cases A-E at 15/30/120/240 kHz\n' >&2
+            return 2 ;;
+    esac
+
+    # The SSB case (and so L_max and the burst's subframe symbol) follows from
+    # the SSB SCS: 15 kHz is Case A (L_max 4), 30 kHz is Case B or C — B is
+    # L_max 4 and only exists below 3 GHz, and without a band here the
+    # superset C (L_max 8) is the honest choice, printed as such.
+    local case_ l_max pos l0
+    case "$scs" in
+        15)  case_=A ;;
+        30)  case_=C ;;
+        120) case_=D ;;
+        240) case_=E ;;
+    esac
+    l_max=$(nair_ssb_pattern "$case_" | awk -F'\t' '$1=="max_ssb"{print $2}')
+    if (( i_ssb >= l_max )); then
+        printf 'ERROR\ti_ssb %s is outside SSB case %s for %s kHz (L_max %s)\n' "$i_ssb" "$case_" "$scs" "$l_max" >&2
+        printf 'WHY\tTS 38.213 Table 4.1-1 numbers the candidates of a case 0..L_max-1\n' >&2
+        return 2
+    fi
+    pos=$(nair_ssb_position "$i_ssb" "$case_") || {
+        printf 'ERROR\ti_ssb %s has no candidate in SSB case %s\n' "$i_ssb" "$case_" >&2; return 2; }
+    # nair_ssb_position reports the symbol inside the 5 ms HALF-FRAME, which is
+    # what a sniffer aligns on. The CP of TS 38.211 5.3.1 is a function of the
+    # position inside the SUBFRAME (long CP at symbol 0 and at 7*2^mu), so the
+    # half-frame index is reduced modulo the symbols of one subframe. The file
+    # is a standalone burst: it carries no half-frame anchor, and both numbers
+    # are printed so that is not silently lost.
+    local sym_hf hf
+    sym_hf=$(awk -F'\t' '$1=="symbol_in_half_frame"{print $2}' <<<"$pos")
+    hf=$(awk -F'\t' '$1=="half_frame"{print $2}' <<<"$pos")
+
+    # N_FFT = f_s / dF must be a whole number of samples per symbol, and the
+    # 5.3.1 CP must be a whole number of samples too: 144*N_FFT/2048 and
+    # 16*N_FFT*2^mu/2048 both integral. That is what makes N_FFT a multiple of
+    # 128, and a rate that is not is refused instead of rounded.
+    local nfft mu
+    nfft=$(( rate / (scs * 1000) ))
+    if (( nfft * scs * 1000 != rate )); then
+        printf 'ERROR\t--rate %s is not an integer number of %s kHz samples per symbol (rate/spacing = %s)\n' \
+               "$rate" "$scs" "$(awk -v r="$rate" -v s="$scs" 'BEGIN{printf "%.6f", r/(s*1000)}')" >&2
+        printf 'WHY\tOFDM needs a whole number of samples per symbol: N_FFT = rate / SCS\n' >&2
+        return 2
+    fi
+    case "$scs" in 15) mu=0 ;; 30) mu=1 ;; 120) mu=3 ;; 240) mu=4 ;; esac
+    if (( (144 * nfft) % 2048 != 0 || (16 * nfft * (2 ** mu)) % 2048 != 0 )); then
+        printf 'ERROR\t--rate %s at %s kHz gives N_FFT %s, which is off the mu=%s numerology grid\n' \
+               "$rate" "$scs" "$nfft" "$mu" >&2
+        printf 'WHY\tthe CP of TS 38.211 5.3.1 is 144/2048 and 16/2048 of a symbol, so it is a whole number of samples only when N_FFT is a multiple of 128\n' >&2
+        return 2
+    fi
+    if (( nrb * 12 > nfft )); then
+        printf 'ERROR\t--n-rb %s needs %s subcarriers but N_FFT is %s at --rate %s / --scs %s\n' \
+               "$nrb" "$(( nrb * 12 ))" "$nfft" "$rate" "$scs" >&2
+        printf 'WHY\tthe raster has to fit inside one OFDM symbol: raise --rate or lower --n-rb\n' >&2
+        return 2
+    fi
+    # The burst is four consecutive symbols; if they would leave the subframe
+    # the CP lookup and the slot number stop describing one subframe, so that
+    # is refused rather than silently wrapped.
+    # mu is known now, so the half-frame symbol can be reduced to the subframe
+    # symbol the CP formula is written in.
+    l0=$(( sym_hf % (14 * (2 ** mu)) ))
+    if (( l0 + 3 >= 14 * (2 ** mu) )); then
+        printf 'ERROR\ti_ssb %s starts at subframe symbol %s; four symbols do not fit a %s kHz subframe (%s symbols)\n' \
+               "$i_ssb" "$l0" "$scs" "$(( 14 * (2 ** mu) ))" >&2
+        printf 'WHY\tthe cyclic prefix is defined per subframe symbol, so the burst cannot cross the boundary\n' >&2
+        return 2
+    fi
+
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is required to build the SSB waveform\n' >&2; return 1; }
+    nair_write_bb_gen || {
+        printf 'ERROR\t%s writes the SSB generator\n' "$NAIR_BB_PY" >&2; return 1; }
+
+    mkdir -p "$(dirname -- "$out")" 2>/dev/null
+    local py rc
+    py=$(python3 "$NAIR_BB_PY" "$out" "$pci" "$scs" "$nfft" 0 --burst \
+                --format "$fmt" --nrb "$nrb" --i-ssb "$i_ssb" --reps "$reps" \
+                --l-max "$l_max" --l0 "$l0" --case "$case_" \
+                --hf "$hf" --sym-hf "$sym_hf" 2>&1); rc=$?
+    if (( rc != 0 )); then
+        printf '%s\n' "$py" >&2
+        printf 'ERROR\tthe SSB burst could not be built for pci %s at %s kHz: no file was written\n' \
+               "$pci" "$scs" >&2
+        printf 'WHY\tthe generator refuses to write a file its own pinned checks reject\n' >&2
+        return 2
+    fi
+    [[ -s "$out" ]] || {
+        printf 'ERROR\tthe generator wrote no samples to %s\n' "$out" >&2; return 1; }
+    printf '%s\n' "$py"
 }
 
 nair_cmd_prach() {
@@ -5328,6 +5859,171 @@ nair_selftest() {
     # moves. 6ebb83 is py3gpp's nrCRCEncode(137c9519, "24C") parity.
     chk bch-crc24c-pinned   "$(printf '%s' "$(fld "$out" bch_k_hex)" | cut -c9-16)" "6ebb83"
 
+    # 18. --ssb-waveform: the SSB burst as IQ, in the three formats the jamming
+    #     module reads. The *sequences* are the ones section 17 pins against
+    #     py3gpp; what is checked here is the layer this verb adds — where the
+    #     240 REs land in the raster, the cyclic prefix, the file format, the
+    #     peak — and a write -> decode round trip through the independent
+    #     decoder, which re-derives SSB subcarrier 0 from the spec rather than
+    #     from this module's mapping.
+    #     Geometry under test: 30 kHz SSB, 51 RB = 612 subcarriers in N_FFT
+    #     1024, SSB at subcarrier 0 of the raster (k_SSB = 0, this module has
+    #     no CORESET#0 table) = FFT bin -306, i_SSB 0 at subframe symbol 2 of
+    #     SSB case C (TS 38.213 4.1). Four symbols of 1024 + 72 CP = 4384.
+    cat > "$d/wave_lib.py" <<'NAIR_WAVE_LIB'
+"""Read an IQ file exactly the way modules/33_jamming_detect.sh load_iq()
+does, so a check here is a check against that consumer's convention and not
+against this module's own writer."""
+import sys
+
+import numpy as np
+
+
+def load(path, fmt):
+    if fmt == "cf32":
+        d = np.fromfile(path, dtype="<f4").astype(np.float64)
+        return d[0::2] + 1j * d[1::2]
+    if fmt == "ci16":
+        d = np.fromfile(path, dtype="<i2").astype(np.float64)
+        return (d[0::2] + 1j * d[1::2]) / 32768.0
+    d = np.fromfile(path, dtype=np.uint8).astype(np.float64)
+    return ((d[0::2] - 127.5) + 1j * (d[1::2] - 127.5)) / 127.5
+
+
+def main():
+    cmd, path, fmt = sys.argv[1], sys.argv[2], sys.argv[3]
+    if fmt not in ("cf32", "ci16", "cu8"):
+        sys.stderr.write("ERROR\tformat must be cf32|ci16|cu8\n")
+        return 2
+    x = load(path, fmt)
+    if cmd == "load":
+        # A loader needs a whole number of samples and a first sample its
+        # format can produce; ±1.5 is the ci16/cu8 headroom, cf32 is <= 1.
+        ok = x.size > 0 and 0.0 <= abs(x[0]) <= 1.5
+        print("%d %d" % (x.size, 1 if ok else 0))
+    elif cmd == "peak":
+        print("%.6f" % float(np.max(np.abs(x))))
+    else:
+        sys.stderr.write("ERROR\tusage: wave_lib.py load|peak <file> <fmt>\n")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+NAIR_WAVE_LIB
+
+    local wfmt wv wsize wout wrc wrun
+    for wfmt in cf32 ci16 cu8; do
+        wv="$d/burst.$wfmt"
+        wout=$(nair_cmd_ssb_waveform "$wv" --format "$wfmt" 2>&1); wrc=$?
+        chk "wave-$wfmt-rc"        "$wrc" "0"
+        chk "wave-$wfmt-samples"   "$(fld "$wout" samples)" "4384"
+        chk "wave-$wfmt-rate"      "$(fld "$wout" rate)" "30720000"
+        chk "wave-$wfmt-nrb"       "$(fld "$wout" n_rb)" "51"
+        chk "wave-$wfmt-symbols"   "$(fld "$wout" symbols)" "4"
+        case "$wfmt" in cf32) wsize=8 ;; ci16) wsize=4 ;; cu8) wsize=2 ;; esac
+        # (a) The file is exactly samples x bytes-per-sample, in both the
+        #     generator's own accounting and the size on disk.
+        chk "wave-$wfmt-bytes-tsv" "$(fld "$wout" bytes)" "$(( 4384 * wsize ))"
+        chk "wave-$wfmt-bytes-disk" "$(stat -c %s "$wv")" "$(( 4384 * wsize ))"
+        chk "wave-$wfmt-bps"       "$(fld "$wout" bytes_per_sample)" "$wsize"
+        # (b) The peak is measured, not assumed: the generator normalises and
+        #     reports the peak it read back through the loader's convention,
+        #     and that number is what is asserted here.
+        chk "wave-$wfmt-peak-ok"   "$(fld "$wout" peak_ok)" "1"
+        chk "wave-$wfmt-peak-le1"  "$(awk -v p="$(fld "$wout" peak_full_scale)" \
+             'BEGIN{print (p > 0 && p <= 1.0) ? "yes" : "no"}')" "yes"
+        # (d) ... and the file loads back through module 33's convention: the
+        #     sample count survives the round trip and the first sample is in
+        #     range for its format.
+        chk "wave-$wfmt-load"      "$(python3 "$d/wave_lib.py" load "$wv" "$wfmt")" "4384 1"
+        # (e) The REs mapped into the raster are the REs the grid code drove:
+        #     127 PSS + 127 SSS + 144 PBCH DMRS + 432 PBCH = 830, and the FFT
+        #     grid has 830 driven bins. The generator refuses to write if the
+        #     two counts disagree, so a file existing at all is the evidence.
+        chk "wave-$wfmt-ssb-re"    "$(fld "$wout" ssb_re)" "830"
+        chk "wave-$wfmt-raster-re" "$(fld "$wout" raster_re)" "830"
+        chk "wave-$wfmt-re-sum"    "$(awk -F'\t' '$1 ~ /^ssb_re_(pss|sss|dmrs|pbch)$/ {s += $2} END {print s}' <<<"$wout")" "830"
+    done
+
+    # (c) Determinism: the same inputs write a byte-identical file. A waveform
+    #     a consumer can only use once is not a waveform.
+    nair_cmd_ssb_waveform "$d/again.cf32" --format cf32 >/dev/null 2>&1
+    chk wave-deterministic "$(cmp -s "$d/burst.cf32" "$d/again.cf32" && echo same || echo differs)" "same"
+
+    # --reps tiles the burst; the length is the burst times the count.
+    wout=$(nair_cmd_ssb_waveform "$d/reps2.ci16" --format ci16 --reps 2 2>&1)
+    chk wave-reps-samples   "$(fld "$wout" samples)" "8768"
+    chk wave-reps-bytes     "$(fld "$wout" bytes)" "35072"
+    chk wave-reps-symbols   "$(fld "$wout" symbols_total)" "8"
+    chk wave-reps-load      "$(python3 "$d/wave_lib.py" load "$d/reps2.ci16" ci16)" "8768 1"
+
+    # Round trip through the module's own decoder. The decoder normally reads
+    # a 14-symbol slot with the SSB centred on DC; --nfft/--nsym/--l0/--ssb-bin
+    # let it read this 4-symbol burst at raster subcarrier 0. i_SSB 3 is used
+    # on purpose: it proves the DMRS c_init and the PBCH scrambling of
+    # TS 38.211 7.4.1.4.1 / 7.3.3.1 carry a non-zero SSB index, which the
+    # slot path never emits.
+    nair_cmd_ssb_waveform "$d/rt.c16" --format ci16 --pci 42 --i-ssb 3 >/dev/null 2>&1
+    dec=$(python3 "$NAIR_BB_DEC_PY" "$d/rt.c16" 30 1024 --nfft 1024 --nsym 4 \
+                --l0 2 --ssb-bin -306 --l-max 8 --i-ssb 3 2>&1); drc=$?
+    chk wave-rt-rc        "$drc" "0"
+    chk wave-rt-pci       "$(fld "$dec" pci_recovered)" "42"
+    chk wave-rt-i-ssb     "$(fld "$dec" bch_i_ssb)" "3"
+    chk wave-rt-crc       "$(fld "$dec" pbch_crc24c_ok)" "1"
+    chk wave-rt-cp        "$(fld "$dec" cp_symbols_bad)" "0"
+    chk wave-rt-cp-ok     "$(fld "$dec" cp_symbols_ok)" "4"
+    chk wave-rt-dmrs      "$(fld "$dec" dmrs_re_present)" "144"
+    chk wave-rt-pbch      "$(fld "$dec" pbch_bits_used)" "864"
+    chk wave-rt-re-audit  "$(fld "$dec" re_outside_spec)" "0"
+    # i_SSB 3 is only L_max/2 of the story: nu = i_SSB mod 8 travels in the PBCH
+    # scrambling (38.211 7.3.3.1), while the upper bits ride in the payload
+    # (38.212 7.1.1). Both have to come back for the index to be the index.
+    chk wave-rt-i-ssb-full "$(fld "$dec" bch_i_ssb_full)" "3"
+
+    # The FR2 path of the same claim: SSB case D, L_max 64, i_SSB 63, so nu is
+    # 7 and the top three payload bits are 7. TS 38.213 Table 4.1-1 puts
+    # candidate 63 at symbol 216 of the half-frame, which is symbol 104 of the
+    # subframe (216 mod 112); 30 RB = 360 subcarriers puts SSB subcarrier 0 at
+    # FFT bin -180 of 512. Getting 63 back means the mapping, the scrambling and
+    # the payload branch all agree with the clause the burst was built from.
+    nair_cmd_ssb_waveform "$d/rtD.c16" --format ci16 --scs 120 --n-rb 30 \
+        --rate 61440000 --pci 1007 --i-ssb 63 >/dev/null 2>&1
+    dec=$(python3 "$NAIR_BB_DEC_PY" "$d/rtD.c16" 120 512 --nfft 512 --nsym 4 \
+                --l0 104 --ssb-bin -180 --l-max 64 --i-ssb 63 2>&1); drc=$?
+    chk wave-rtD-rc       "$drc" "0"
+    chk wave-rtD-pci      "$(fld "$dec" pci_recovered)" "1007"
+    chk wave-rtD-nu       "$(fld "$dec" bch_i_ssb)" "7"
+    chk wave-rtD-i-ssb    "$(fld "$dec" bch_i_ssb_full)" "63"
+    chk wave-rtD-crc      "$(fld "$dec" pbch_crc24c_ok)" "1"
+    chk wave-rtD-re       "$(fld "$dec" re_outside_spec)" "0"
+    chk wave-rtD-cp       "$(fld "$dec" cp_symbols_bad)" "0"
+    # The burst metadata says where the candidate sits, both frames: the file
+    # itself is not anchored to a half-frame, so that difference is printed.
+    wout=$(nair_cmd_ssb_waveform "$d/rtD2.cf32" --scs 120 --n-rb 30 \
+        --rate 61440000 --pci 1007 --i-ssb 63 2>&1)
+    chk wave-rtD-start    "$(fld "$wout" start_symbol)" "104"
+    chk wave-rtD-start-hf "$(fld "$wout" start_symbol_half_frame)" "216"
+    chk wave-rtD-half     "$(fld "$wout" half_frame)" "1"
+
+    # Bad input is a usage error, not a zero-length file: rc 2 and a reason.
+    for wrun in "--format c8" "--scs 60" "--n-rb 10" "--rate 7200000" \
+                "--pci 1008" "--reps 0" "--i-ssb 9" "--bogus 1"; do
+        # shellcheck disable=SC2086
+        wout=$(nair_cmd_ssb_waveform "$d/nope.iq" $wrun 2>&1); wrc=$?
+        chk "wave-bad-rc-$(printf '%s' "$wrun" | tr ' ' '_')" "$wrc" "2"
+        chk "wave-bad-err-$(printf '%s' "$wrun" | tr ' ' '_')" \
+            "$(grep -c '^ERROR' <<<"$wout")" "1"
+        # A refusal carries the reason, not just the verdict.
+        chk "wave-bad-why-$(printf '%s' "$wrun" | tr ' ' '_')" \
+            "$(grep -c '^WHY' <<<"$wout")" "1"
+    done
+    chk wave-nofile "$(test -e "$d/nope.iq" && echo yes || echo no)" "no"
+    # The retired gate is a usage error: this module is not gated.
+    chk wave-retired-gate "$(nair_cmd_ssb_waveform "$d/g.iq" \
+        --i-have-a-lab-and-authorisation >/dev/null 2>&1; echo $?)" "2"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -5358,6 +6054,7 @@ nair_menu() {
   [14] start gNB
   [15] stop gNB
   [16] status
+  [17] SSB waveform export (IQ for the jamming module)
   [0]  back
 
 M
@@ -5432,6 +6129,21 @@ M
             14) nair_start | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
             15) nair_stop  | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
             16) nair_status | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
+            17)
+                read -rp "  out file ($NAIR_DIR/ssb.wave.c16)> " w
+                read -rp "  format (cf32|ci16|cu8) [ci16]> " wf
+                read -rp "  rate sps [30720000]> " wr
+                read -rp "  n_rb [51]> " wn
+                read -rp "  pci [1]> " wp
+                read -rp "  i_ssb [0]> " wi
+                read -rp "  scs kHz (15|30|120|240) [30]> " ws
+                read -rp "  reps [1]> " wrp
+                nair_cmd_ssb_waveform "${w:-$NAIR_DIR/ssb.wave.c16}" \
+                    --format "${wf:-ci16}" --rate "${wr:-30720000}" \
+                    --n-rb "${wn:-51}" --pci "${wp:-1}" --i-ssb "${wi:-0}" \
+                    --scs "${ws:-30}" --reps "${wrp:-1}" \
+                    | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -5449,6 +6161,7 @@ nair_cli_main() {
         --decode-mib)   nair_cmd_decode_mib "${1:-}" ;;
         --decode-sib1)  nair_cmd_decode_sib1 "${1:-}" ;;
         --ssb)          nair_cmd_ssb "${1:-n78}" "${2:-0}" ;;
+        --ssb-waveform) nair_cmd_ssb_waveform "$@" ;;
         --prach)        nair_cmd_prach "${1:-1}" "${2:-1}" "${3:-15}" ;;
         --gen-gnb-conf)
             # --tx is a modifier, not an action: it selects the TRANSMITTING
@@ -5508,6 +6221,17 @@ Usage: $0 COMMAND
   --decode-sib1 <hex>           decode SIB1: PLMN list, TAC, cellIdentity
   --decode-rrc <hex>            decode an RRC PDU built by this module
   --ssb <band> [i_ssb]          SSB burst set pattern and half-frame timing
+  --ssb-waveform <out> [--format cf32|ci16|cu8] [--rate <sps>] [--n-rb <n>]
+                 [--pci <n>] [--i-ssb <n>] [--scs <khz>] [--reps <n>]
+                                write ONE SS/PBCH burst (PSS+SSS+PBCH+PBCH
+                                DMRS, 4 CP-OFDM symbols) as IQ at baseband,
+                                mapped into an --n-rb raster and inverse-FFTed
+                                at --rate. cf32/ci16/cu8 are modules/33_
+                                jamming_detect.sh's own formats, so its loader
+                                reads the file unchanged. The SSB sits at
+                                subcarrier 0 of the raster (k_SSB=0, point A=0:
+                                this module has no CORESET#0 table). --reps
+                                tiles the burst.
   --prach <index> [fdm] [scs]   PRACH occasions from the SIB1 RACH config
   --beam-sweep <measId=N,ssb=i:r,...>
                                 infer the serving beam from reported SSB

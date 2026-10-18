@@ -1267,22 +1267,22 @@ renumbering (`docs/MODULE_ROSTER.md`): `38` was the jamming module that is now
 | Proposed | Home | Status | Note |
 |---|---|---|---|
 | Barrage, narrowband, duty-cycle jamming | `33_jamming_detect` | **BUILT** | Phase 9: barrage and narrowband modes, AWGN/CW/chirp shapes, a structural pulse train, the TS 36.104 EARFCN raster, behind the lab gate |
-| PSS/SSS, PBCH, PUCCH jamming | `33_jamming_detect` + `10_lte_air` | **ABSENT** | `10_lte_air` has no PSS/SSS/PBCH sequence generator — its only PSS/SSS/PUCCH mentions are PUCCH *power* parameters and a clause comment — and "the Phase 2 codec work" is the RRC ASN.1 layout, not PHY sequences. Nothing in the tree generates those reference signals, so there is nothing to feed the constructor |
-| NR SSB jamming | `33_jamming_detect` + `12_nr_air` | **PARTIAL** | `12_nr_air` does build SSB (`--ssb`, 306 references); `33_jamming_detect` has no mode that consumes it. The producer exists, the consumer does not |
-| GPS/GNSS jamming | `33_jamming_detect` + `01_radio` | **ABSENT** | `01_radio` has no GPS/GNSS code at all (0 matches); the "sync dependency" this row asserted is not a thing in this tree |
-| Physical SIM swap, COMP128v1, Milenage, eSIM ES9+ | `16_sim` | **PARTIAL** | APDU build/parse, EF access, OTA (165 references) and the SGP.22 RSP profile operations exist; COMP128-1 and Milenage live in `tools/gsm_crypto.py` (94 references, used by `20_gsm_cve`), not as `16_sim` verbs. ES9+ is not built |
+| PSS/SSS, PBCH, PUCCH jamming | `33_jamming_detect` + `10_lte_air` | **BUILT (except PUCCH)** | `tools/lte_phy.py` owns `pss_sequence`/`sss_sequence`/`pbch_encode`, and `33_jamming_detect --shape pss|sss|pbch` now builds each as OFDM samples at an LTE rate, narrowband only, with known-answer assertions that demodulate the module's own symbol and compare the 62 subcarriers or the 480 PBCH bits against `lte_phy.py`'s CLI. PUCCH is refused with a reason rather than invented: `lte_phy.py` carries only `cinit_pucch`, no format sequence, no hopping, no orthogonal cover |
+| NR SSB jamming | `33_jamming_detect` + `12_nr_air` | **BUILT** | `12_nr_air --ssb-waveform` writes one SSB burst as baseband samples (4 OFDM symbols, 4384 samples at 30.72 MHz, PSS 127 + SSS 127 + DMRS 144 + PBCH 432 REs, formats cf32/ci16/cu8 byte-identical to the constructor's writers), and `33_jamming_detect --shape nr-ssb` consumes it |
+| GPS/GNSS jamming | `33_jamming_detect` + `01_radio` | **BUILT** | `tools/phy_seqs.py --seq gps-ca` generates IS-GPS-200 C/A code for PRN 1..32 (Table 3-Ia both columns, 32/32 known answers), and `33_jamming_detect --shape gps-ca` writes it as samples — byte-equal to the producer on the first ON window. Above PRN 32 there is no C/A code and the producer says so |
+| Physical SIM swap, COMP128v1, Milenage, eSIM ES9+ | `16_sim` | **BUILT** | `--sim-auth <comp128-1|2|3|milenage|tuak>` runs the card's own algorithms and relabels to SRES/Kc or RES/CK/IK/AK/MAC-A plus AUTN; `--sim-auth-check` asserts TS 35.208 test set 1 row by row (f1 4A9FFAC354DFAFB3, f5 AA689C648370, AUTN 55F328B43577B9B94A9FFAC354DFAFB3) and the COMP128 vectors, and ES9+ emits the four SGP.22 v2.2.2 requests with a `limit` row for the fields it does not carry |
 | PC/SC transport | `00_deps` | **DECLARED** | `pcsc` appears three times in `00_deps` as a declared dependency; no module opens a PC/SC context, and hardware paths are `handoff` by contract |
-| SIMjacker / WIB S@T push | `52_stk` + `41_ota_sms` | **PARTIAL** | `52_stk` builds the `0xD0` envelope and COMPREHENSION-TLVs; `41_ota_sms` names S@T/WIB only in a header comment — the push itself is not built |
+| SIMjacker / WIB S@T push | `52_stk` + `41_ota_sms` | **BUILT (S@T) / REFUSED (WIB)** | `41_ota_sms --sat-push` builds the whole push as it really travels: a (U)SIM Data download SMS-SUBMIT whose body is a TS 31.115 packet under TAR 505348 carrying S@T 0x2D macros, cross-checked against `52_stk --build`. The `0xD0` envelope the row called the transport is what the card emits when the browser runs the macro, not what the wire carries. `--wib-push` refuses rc 2: the WIB leaf command bytes have no source here |
 | UMTS IMSI catcher, AKA reflection | `08_umts_air` | **PARTIAL** | UARFCN (65), SIB maps (126), UIA1/UIA2 MAC-I (23) and AKA relay analysis (30) are real; UMTS *transmit* is the gap, and without it there is no catcher |
 | 5G AKA linkability | `14_suci` | **BUILT** | `--build-suci`, `--parse-suci`, `--deconceal`, `--verify-hnkey`, `--hkdf`, `--msin-encode`: the NET half is wired |
 | TAU/RAU reject builder | `32_nas_signaling` | **BUILT** | Phase 16, this cut: nine EPS and eight 5GS pre-authentication messages, octets only |
-| Measurement reports, RLF/RRC release spam, CA/DC | `10_lte_air` | **ABSENT** | 0 matches for measurement report, RLF and RRC release in `10_lte_air`; "RRC work already in flight" was not true |
-| PWS / CMAS / ETWS false alert | `10_lte_air` | **ABSENT** | The SIB codec does exist (SIB1/SIB2 decoders), but there is no PWS/CMAS/ETWS handling anywhere and no emergency-services disclaimer in that module (0 matches) — the note this row carried was wrong |
-| GTP-in-GTP, TEID brute force | `11_lte_core` | **PARTIAL** | TEID handling is real (68 references); GTP-in-GTP encapsulation is absent (0 matches) |
+| Measurement reports, RLF/RRC release spam, CA/DC | `10_lte_air` | **BUILT (CA/DC not built)** | `--build-meas-report`, `--build-rrc-release` and `--build-reest-reject` encode through the generated RRC table at 617 assertions, with ten pycrate-pinned vectors (`02000F14`, `022044B5…` family, `1401`, `02A3000CE482019CA0`, `1703`, `1602`, `0141100672`, `04`, `03`, `14`). The table needed three message roots added (`UL-DCCH-Message`, `DL-DCCH-Message`, `DL-CCCH-Message`) before it could address a message at all. Carrier aggregation / dual connectivity is still absent |
+| PWS / CMAS / ETWS false alert | `10_lte_air` | **BUILT (encode only)** | `--build-sib10 --warning-type --serial`, `--build-sib11`/`--build-sib12` with segmentation, and `--enb-sib-schedule` which writes the SIB into the eNB configuration. What is still absent is everything above the octets: no SBc-AP Write-Replace-Warning delivery (nothing in the tree speaks SIBc-AP), and the scheduling half only recently exists |
+| GTP-in-GTP, TEID brute force | `11_lte_core` | **BUILT (encapsulation) / absent (brute force)** | `--gtp-in-gtp` emits a GTPv1-U outer header whose uninterpreted payload is a whole GTP message (TS 29.281 §5.1 is why that pairing works and a GTPv2-C outer would be a different artefact), verified by tshark as two GTP layers at `--with-ip`. TEID brute force is still not a verb |
 | IMS registration hijack | `30_volte_ims` | **BUILT** | "SIP REGISTER spoof (registration hijack)" is a verb, guarded by an operator-ownership flag |
-| O-RAN E2/A1/O1, slicing escape, URLLC/TSN | `48_oran`, `34_slicing` | **PARTIAL** | `48_oran` has `--a1-put`, `--e2-control`, `--xapp-attack`; `34_slicing` has `--isolation-check` and `--detect`. URLLC/TSN is absent |
-| OTDOA/UTDOA/PRS spoofing | `46_lpp` + `10_lte_air` | **PARTIAL** | `46_lpp` forges LPP positions (`--forge-position`, `--build-header`, `--detect-forgery`); PRS signal generation is absent |
-| MBMS / MooD | `11_lte_core` | **ABSENT** | MBMS appears only as GTP message-name strings (four lines); nothing decodes or builds an MBMS session and there is no MooD handling. "hooks present" overstated it |
+| O-RAN E2/A1/O1, slicing escape, URLLC/TSN | `48_oran`, `34_slicing` | **BUILT** | `48_oran --qos-policy` writes an A1 policy body that re-shapes a slice's PRB and 5QI set, with `--qos-policy-check` validating exactly the documented fields; `34_slicing` gained the standardised 5QI table (31 rows, TS 23.501 Table 5.7.4-1, eight rows asserted as literals, `unknown` and `N/A` kept distinct), `--tsn-config` for TSC assistance information, and `--slice-qos-check` whose findings each carry the rule sentence |
+| OTDOA/UTDOA/PRS spoofing | `46_lpp` + `10_lte_air` | **BUILT (LPP) / handoff (UTDOA octets)** | `46_lpp --otdoa-assist`, `--otdoa-request` and `--prs-plan` encode real LPP PDUs through the generated table, pycrate-verified (five pinned vectors, three randomised parity sweeps 36/36, 32/32, 18/18). UTDOA has no LPP IE at all — it is LPPa — so `--utdoa-config` prints the typed fields and emits no octets, naming the pycrate module that has them. PRS samples come from `tools/phy_seqs.py --seq prs`, which `33_jamming_detect --shape prs` consumes |
+| MBMS / MooD | `11_lte_core` | **BUILT (session) / marker only (MooD)** | `--mbms-session` emits a type-231 message with its mandatory IEs, which tshark reads back field for field (service id, MCC/MNC, duration, area ids, multicast distribution, source, F-TEID). It refuses the fields TS 29.274 Table 7.13.1-1 does not carry (`--imsi`, `--counting`, `--distribution-indication`) rather than inventing them. MooD is identical octets with a marker: no wire field distinguishes it, and a `limit` row says so |
 | Operator-side SIM swap and portal enumeration | `31_sim_defense`, `44_carrier_api` | **BUILT** | Phase 12 built both halves; the `scope-no-*` assertions were replaced by gate assertions |
 
 *Two scope reversals, stated as such.* `31_sim_defense`'s header says its
@@ -1293,10 +1293,17 @@ proposal to "move the swap builder into `44_carrier_api`" is therefore not a
 filing decision — it is the Phase 12 decision, and those two `scope-no-*`
 assertions are deleted when the verbs land, exactly as Phase 12 describes.
 
-*Five that are genuinely additive — none of them built.*
+*Five that are genuinely additive — four now built.*
 
-Nothing in this list has a verb today; it is what remains after the audit above,
-and each item names the work that would have to exist first.
+This started as "none of them built". After the Phase 14 build wave: (1) PRACH
+jamming is built (`tools/phy_seqs.py --seq prach`, consumed by
+`33_jamming_detect --shape prach`, known-answer as constant modulus to 1e-6 at
+the preamble's own rate); (3) the AKA re-sync oracle is `16_sim --sim-auth`
+being checked against the standards' vectors; (4) GTP-in-GTP is
+`11_lte_core --gtp-in-gtp`; (5) the ES9+ builder is `16_sim --es9-plus`, which
+emits the four SGP.22 v2.2.2 requests and refuses `handleNotification` because
+it belongs to a different flow. Only (2), AKA reflection on UMTS, is still
+unbuilt, and it needs `08_umts_air` transmit, which is not a small piece.
 
 1. **PRACH jamming, paired with the IMSI catcher.** The only jamming mode here
    that composes with work already in the tree rather than duplicating it: deny

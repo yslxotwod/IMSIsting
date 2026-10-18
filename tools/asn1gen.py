@@ -71,6 +71,16 @@ DEFAULT_TYPES = [
     "SystemInformationBlockType13_r9",
     "RRCConnectionReconfiguration",
     "INTER.HandoverCommand",
+    # The three message-level roots. Without them the table can decode a SIB or
+    # a reconfiguration body but cannot address a DCCH or CCCH message at all,
+    # which left 10_lte_air's measurement-report, release and
+    # re-establishment-reject builders refusing with rc 3 for want of a root --
+    # the same shape of gap as SIB1-NB in the LTE table (see the nbiot family).
+    # A message root also brings the 5-bit c1/criticalExtensions envelope with
+    # it, so an encoder emits the whole message rather than a bare body.
+    "UL-DCCH-Message",
+    "DL-DCCH-Message",
+    "DL-CCCH-Message",
 ]
 
 # The ASN.1 namespaces this generator can be pointed at.  The table format and

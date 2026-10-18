@@ -89,8 +89,14 @@ jamd_split() {
 jamd_py() {
     command -v python3 >/dev/null 2>&1 || {
         printf 'ERROR\tpython3 missing — cannot analyse IQ\n' >&2; return 1; }
+    # Producers write their samples into this module's temp tree, never into
+    # the operator's captures directory: a build that fails must leave no
+    # file that looks like a capture.
+    local JAMD_TMP="$MOD_TMP"
+    mkdir -p "$JAMD_TMP" 2>/dev/null
+    export JAMD_TMP
     python3 - "$@" <<'PY'
-import sys, os, math
+import sys, os, math, tempfile, shutil
 try:
     import numpy as np
     from scipy import signal as sps
@@ -421,11 +427,47 @@ def cmd_counters(argv):
 # `seg_off` seconds of silence, repeated, so a 0.5 duty cycle is structurally
 # half the samples at zero and the analyser's activity_fraction reads it back.
 
-JAMD_SHAPES = ('awgn', 'cw', 'chirp')
-# Named, refused, and reported in its own field. It is a handoff: the
-# sequence needs a modulator this module does not have, so it is not one
-# of the shapes the constructor will produce.
-JAMD_SHAPES_REFUSED = ('lte-ssb',)
+JAMD_SHAPES = ('awgn', 'cw', 'chirp',
+               'pss', 'sss', 'pbch', 'prach', 'prs', 'gps-ca', 'nr-ssb')
+# Named, refused, and reported in its own fields: the name, why it is refused
+# and (for a shape someone might expect) what to use instead. --status,
+# --status-tsv and --tx-status print every one of these, and --tx-build prints
+# the matching line before exiting 3, so a caller that saw a name in
+# JAMD_SHAPES_REFUSED never has to guess why it is not in JAMD_SHAPES.
+JAMD_SHAPES_REFUSED = ('lte-ssb', 'pucch')
+JAMD_SHAPE_REASON = (
+    ('lte-ssb',
+     'replaced by three shapes: an LTE sync block is PSS + SSS + PBCH, and '
+     '--shape pss, --shape sss and --shape pbch now build each of them from '
+     'tools/lte_phy.py; no producer in this tree emits one "lte-ssb" sample '
+     'stream, so there is nothing to copy under that name'),
+    ('pucch',
+     'tools/lte_phy.py carries only the PUCCH scrambling seed (cinit_pucch, '
+     'TS 36.211 5.4.1.1) -- no format 1/2/3 sequence, no group or sequence '
+     'hopping, no orthogonal cover -- so there is no PUCCH waveform to copy '
+     'and this module will not invent one'),
+)
+# The shapes whose samples come from a producer elsewhere in the tree. Each
+# one names its producer in JAMD_SHAPE_PRODUCER, prints it in the `producer`
+# row of --tx-build, and is placed at baseband centre by the same machinery
+# the synthesised shapes use (peak, pulse train, writers).
+JAMD_SIGNAL_SHAPES = ('pss', 'sss', 'pbch', 'prach', 'prs', 'gps-ca', 'nr-ssb')
+JAMD_SHAPE_PRODUCER = (
+    ('awgn', 'this module: numpy FFT mask in build()'),
+    ('cw', 'this module: complex exponential in build()'),
+    ('chirp', 'this module: linear sweep in build()'),
+    ('pss',
+     'tools/lte_phy.py: pss_sequence + sync_re_positions + ofdm_modulate'),
+    ('sss',
+     'tools/lte_phy.py: sss_sequence + sync_re_positions + ofdm_modulate'),
+    ('pbch',
+     'tools/lte_phy.py: pbch_encode + pbch_scramble + pbch_frame_bits + '
+     'qpsk_modulate + pbch_re_positions + ofdm_modulate'),
+    ('prach', 'tools/phy_seqs.py gen --seq prach (TS 36.211 5.7.2)'),
+    ('prs', 'tools/phy_seqs.py gen --seq prs (TS 36.211 6.10.4)'),
+    ('gps-ca', 'tools/phy_seqs.py gen --seq gps-ca (IS-GPS-200 3.2.2)'),
+    ('nr-ssb', 'modules/12_nr_air.sh --ssb-waveform (TS 38.211 7.4.3)'),
+)
 JAMD_MODES = ('barrage', 'narrowband')
 
 
@@ -451,20 +493,477 @@ def parse_hz(s):
     return v
 
 
+# ── reference-signal shapes: the producers that already exist ────────────
+#
+# Seven of the shapes below are not synthesised here. They are the reference
+# signals a receiver actually hunts for -- LTE PSS, SSS and PBCH, the LTE
+# PRACH preamble and PRS, the GPS L1 C/A code, the NR SS/PBCH block -- and
+# every one of them already has a producer in this tree. This module copies
+# those samples. It does not reimplement a sequence, a resource map or an
+# OFDM modulator, and it does not approximate one when the producer is
+# missing: it refuses and says which tool it needed.
+#
+# What this module does own is the placement step, the same one the
+# synthesised shapes go through: the samples are put at baseband centre,
+# fitted to the capture length, peak-normalised to --peak, pulsed by
+# --on/--off, and written by the one writer in build(). A shape built
+# in-process says so in `producer`; a shape built by a subprocess puts the
+# exact command in `producer_command`, so a reader can run it and compare.
+SIG_DEFAULTS = {'prn': 1, 'pci': 1, 'root': 1, 'ncs': 0, 'v': 0, 'i-ssb': 0,
+                'n-rb': 0, 'ports': 1, 'mib': 0, 'n-rb-prs': 100,
+                'n-rb-dl': 100, 'scs': 30}
+
+
+def die2(msg, why=None):
+    """A usage error: rc 2, one ERROR line, and the reason when there is one."""
+    sys.stderr.write('ERROR\t%s\n' % msg)
+    if why:
+        sys.stderr.write('WHY\t%s\n' % why)
+    sys.exit(2)
+
+
+def parse_sig(text):
+    """`k=v,k=v` from the caller; whatever it omits keeps its default."""
+    sig = dict(SIG_DEFAULTS)
+    for part in str(text or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '=' not in part:
+            raise ValueError('signal argument %r is not key=value' % part)
+        k, v = part.split('=', 1)
+        k = k.strip()
+        if k not in sig:
+            raise ValueError('unknown signal argument %r (known: %s)'
+                             % (k, ', '.join(sorted(sig))))
+        sig[k] = v.strip()
+    for k in sig:
+        try:
+            sig[k] = int(str(sig[k]).strip(), 10)
+        except (TypeError, ValueError):
+            raise ValueError('signal argument %s=%r is not an integer'
+                             % (k, sig[k]))
+    return sig
+
+
+def jamd_root():
+    """The checkout the producers live in, from IMSISTING_ROOT or the cwd."""
+    for cand in (os.environ.get('IMSISTING_ROOT', ''), os.getcwd()):
+        if cand and os.path.isfile(os.path.join(cand, 'tools', 'phy_seqs.py')):
+            return cand
+    return ''
+
+
+def jamd_tmp():
+    d = os.environ.get('JAMD_TMP') or ''
+    return d if d and os.path.isdir(d) else None
+
+
+def read_cf32_iq(path):
+    """A cf32 file as complex128. Values are exactly the float32 that were
+    written, so a byte comparison against the producer stays meaningful."""
+    raw = np.fromfile(path, dtype='<f4')
+    if raw.size < 2:
+        raise ValueError('%s holds %d float32 values' % (path, raw.size))
+    return raw[0::2].astype(np.float64) + 1j * raw[1::2].astype(np.float64)
+
+
+def fit_to(x, n):
+    """Exactly n samples: the producer's own rounding must not resize the
+    capture a caller asked for. Returns (x, padded, trimmed) so the rows can
+    say which happened."""
+    if len(x) == n:
+        return np.asarray(x), 0, 0
+    if len(x) > n:
+        return np.asarray(x[:n]), 0, len(x) - n
+    return (np.concatenate([x, np.zeros(n - len(x), dtype=x.dtype)]),
+            n - len(x), 0)
+
+
+def run_producer(argv, want):
+    """Run a producer, return its stdout rows. A producer that fails is
+    reported in its own words: its message is the trustworthy one, and
+    substituting noise for a missing sequence is the fabricated success this
+    whole module is written to avoid."""
+    import subprocess
+    try:
+        p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as e:
+        die2('cannot run the %s producer (%s): %s' % (want, argv[0], e),
+             'that tool is this shape\'s only source, so there is no signal '
+             'to place and nothing is substituted for one')
+    if p.returncode != 0:
+        detail = (p.stderr.decode('utf-8', 'replace').strip()
+                  .replace('\n', ' | ').replace('\t', ' '))
+        die2('the %s producer exited %d: %s'
+             % (want, p.returncode, detail or 'no message'),
+             'the producer\'s own words are above; no capture was written')
+    rows = {}
+    for line in p.stdout.decode('utf-8', 'replace').splitlines():
+        parts = line.split('\t')
+        if len(parts) >= 2:
+            rows[parts[0]] = parts[1]
+    return rows
+
+
+def phy_seqs_iq(seq, want, rate, secs, extra):
+    """IQ from tools/phy_seqs.py, plus its rows and the PRS mapping sidecar.
+
+    The producer writes cf32 always, and this module re-quantises once in
+    build()'s writer, so a ci16 or cu8 capture goes through exactly one
+    quantiser whichever shape produced it.
+    """
+    root = jamd_root()
+    tool = os.path.join(root, 'tools', 'phy_seqs.py') if root else ''
+    if not tool or not os.path.isfile(tool):
+        die2('no tools/phy_seqs.py under %s' % (root or os.getcwd()),
+             'the %s shape is that file\'s output; a missing producer is a '
+             'missing capability, not a licence to synthesise one here' % want)
+    d = tempfile.mkdtemp(prefix='jamd_%s_' % want, dir=jamd_tmp())
+    out = os.path.join(d, 'samples.cf32')
+    try:
+        argv = [sys.executable, tool, 'gen', '--seq', seq,
+                '--rate', str(rate), '--secs', '%.9f' % secs,
+                '--format', 'cf32', '--out', out] + list(extra)
+        rows = run_producer(argv, want)
+        x = read_cf32_iq(out)
+        remap = None
+        side = out + '.remap.tsv'
+        if os.path.isfile(side):
+            with open(side, 'r') as fh:
+                remap = fh.read()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return x, rows, remap
+
+
+def producer_cmd(seq, rate, secs, extra):
+    """The command line, with the temp path written as <out>."""
+    return ('python3 tools/phy_seqs.py gen --seq %s --rate %d --secs %r '
+            '--format cf32 %s --out <out>' % (seq, rate, secs, ' '.join(extra)))
+
+
+def lte_phy_import():
+    """tools/lte_phy.py, imported in-process: its sequences, its resource
+    maps and its OFDM chain are the producer for pss/sss/pbch."""
+    root = jamd_root()
+    tp = os.path.join(root, 'tools') if root else ''
+    if not tp or not os.path.isfile(os.path.join(tp, 'lte_phy.py')):
+        die2('no tools/lte_phy.py under %s' % (root or os.getcwd()),
+             'the pss/sss/pbch shapes are that file\'s sequences and its '
+             'modulator; there is no second copy in this module')
+    if tp not in sys.path:
+        sys.path.insert(0, tp)
+    try:
+        import lte_phy
+    except Exception as e:
+        die2('cannot import tools/lte_phy.py: %s' % e,
+             'without it there is no sequence to place and none is invented')
+    return lte_phy
+
+
+def lte_lookup(phy, rate):
+    """(n_rb, n_fft) for an LTE sample rate, from lte_phy's own table."""
+    for bw, n_rb, n_fft, fs in phy.LTE_OFDM:
+        if fs == int(rate):
+            return n_rb, n_fft
+    die2('--rate %d is not an LTE sample rate' % int(rate),
+         'an LTE reference signal is sampled at one of the bandwidths in '
+         'tools/lte_phy.py LTE_OFDM: %s Hz (N_RB x 12 x 15 kHz, TS 36.211 '
+         '6.12); there is nothing to resample it to'
+         % ', '.join(str(fs) for bw, n_rb, n_fft, fs in phy.LTE_OFDM))
+
+
+def signal_lte(shape, rate, sig):
+    """One slot of an LTE reference signal, from lte_phy's own grid code.
+
+    One slot (7 symbols), not a 10 ms frame: lte_phy's FFT is pure Python, a
+    frame is 140 symbols of it, and a jamming constructor emits the signal at
+    whatever duty the operator asked for. The `repeat` row says the slot is
+    tiled, so nobody reads a slot cadence as a frame cadence.
+    """
+    phy = lte_phy_import()
+    n_rb, n_fft = lte_lookup(phy, rate)
+    n_sc = n_rb * 12
+    cell = int(sig['pci'])
+    if shape in ('pss', 'sss'):
+        if not 0 <= cell <= 503:
+            die2('--pci %d is outside an LTE cell id (0..503)' % cell)
+        grid = phy.sync_grid(n_rb, cell, 0)
+        l_sss, l_pss = phy.sync_symbols(0)
+        # Blank the other sync signal: one shape, one sequence, so a capture
+        # can be cross-correlated for exactly the signal it claims.
+        grid[l_pss if shape == 'sss' else l_sss] = [0j] * n_sc
+        l_used = l_pss if shape == 'pss' else l_sss
+        which = 'pss' if shape == 'pss' else 'sss'
+        pos = phy.sync_re_positions(n_rb, 0)[which]
+        extra = [
+            ('signal', 'LTE %s, %s (62 subcarriers at k = %d..%d of the centre '
+                       '72, slot 0 symbol %d)'
+             % (which.upper(),
+                'TS 36.211 6.11.1 with the 36.211 Table 7.2.1-1 Gold sequence'
+                if shape == 'pss' else
+                'TS 36.211 6.11.2, m0/m1 from cell id N_ID^(1)',
+                pos[1], pos[2], l_used)),
+            ('cell_id', str(cell)),
+            ('n_id_2', str(cell % 3)),
+            ('lte_n_rb', str(n_rb)),
+            ('lte_n_fft', str(n_fft)),
+            ('lte_sample_rate_hz', str(int(rate))),
+            ('lte_symbol', str(l_used)),
+            ('repeat', 'one slot (7 symbols, %d samples) tiled to the capture '
+                       'length: a cell sends this in slots 0 and 10 of a 10 ms '
+                       'frame, this constructor emits it continuously so the '
+                       'duty cycle is --on/--off, not the frame timing'
+             % phy.slot_samples(n_fft)),
+        ]
+        clause = ('the 72 subcarriers PSS/SSS occupy (6 RB of 15 kHz, '
+                  'TS 36.211 6.11)')
+    else:
+        if not 0 <= cell <= 503:
+            die2('--pci %d is outside an LTE cell id (0..503)' % cell)
+        if not 1 <= int(sig['ports']) <= 4:
+            die2('--ports %d is not an antenna port count (1..4)' % int(sig['ports']))
+        mib = int(sig['mib'])
+        if not 0 <= mib < (1 << 24):
+            die2('--mib %d is outside the 24-bit MIB' % mib)
+        bits = [(mib >> (23 - i)) & 1 for i in range(24)]
+        block = phy.pbch_encode(bits, int(sig['ports']), cell)
+        frame = phy.pbch_frame_bits(phy.pbch_scramble(block, cell), 0)
+        syms = phy.qpsk_modulate(frame)
+        grid = [[0j] * n_sc for _ in range(7)]
+        pos = phy.pbch_re_positions(n_rb, cell)
+        if len(pos) != len(syms):
+            raise ValueError('PBCH map has %d REs for %d QPSK symbols'
+                             % (len(pos), len(syms)))
+        for (l, k), v in zip(pos, syms):
+            grid[l][k] = v
+        extra = [
+            ('signal', 'LTE PBCH: %d QPSK REs of slot 1 (TS 36.211 6.6.4), '
+                       'mapped by pbch_re_positions, CRS of 4 ports skipped'
+             % len(pos)),
+            ('cell_id', str(cell)),
+            ('mib', '%06x' % mib),
+            ('nof_ports', str(int(sig['ports']))),
+            ('pbch_re', str(len(pos))),
+            ('pbch_coded_bits', str(len(block))),
+            ('pbch_frame_bits', str(len(frame))),
+            ('lte_n_rb', str(n_rb)),
+            ('lte_n_fft', str(n_fft)),
+            ('lte_sample_rate_hz', str(int(rate))),
+            ('repeat', 'one slot (7 symbols, %d samples) tiled to the capture '
+                       'length: a cell sends PBCH in slot 1 of every frame and '
+                       'repeats the codeword over 4 frames; this constructor '
+                       'emits it continuously' % phy.slot_samples(n_fft)),
+        ]
+        clause = ('the 72 subcarriers PBCH occupies (6 RB of 15 kHz, '
+                  'TS 36.211 6.6.4)')
+    samples, lengths = phy.ofdm_modulate(grid, n_fft)
+    x = np.asarray(samples, dtype=np.complex128)
+    extra.append(('slot_samples', str(len(x))))
+    return x, extra, int(round(72 * 15000)), clause
+
+
+def signal_iq(shape, rate, secs, n, sig):
+    """The named signal's samples plus the rows that describe where they came
+    from. Returns a dict; `rate` and `n` can come back changed (prs is
+    RE-domain, so its rate is the producer's frame rate, not --rate)."""
+    if shape in ('pss', 'sss', 'pbch'):
+        block, extra, occ, clause = signal_lte(shape, rate, sig)
+        x, pad, cut = fit_to(np.resize(block, n), n)
+        extra.append(('occupied_basis', clause))
+        extra.append(('padded_samples', str(pad)))
+        extra.append(('trimmed_samples', str(cut)))
+        extra.append(('producer_command',
+                      'in-process import of tools/lte_phy.py (no subprocess)'))
+        return {'x': x, 'rate': int(rate), 'n': n, 'occ': occ, 'rows': extra}
+
+    if shape == 'gps-ca':
+        argv = ['--prn', str(sig['prn'])]
+        x, rows, _ = phy_seqs_iq('gps-ca', 'gps-ca', rate, secs, argv)
+        x, pad, cut = fit_to(x, n)
+        chip = int(rows.get('chip_rate_hz', '1023000'))
+        extra = [
+            ('signal', 'GPS L1 C/A spreading code, IS-GPS-200 3.2.2 '
+                       '(G1/G2 taps and the PRN delay from Table 3-Ia)'),
+            ('producer_command', producer_cmd('gps-ca', rate, secs, argv)),
+            ('repeat', 'the 1023-chip period is repeated by the producer; '
+                       'samples are a zero-order hold of the chip train at '
+                       '--rate (real baseband: Q = 0, no carrier, no nav data)'),
+            ('prn', rows.get('prn', str(sig['prn']))),
+            ('g2_delay_chips', rows.get('g2_delay_chips', '-')),
+            ('chip_rate_hz', str(chip)),
+            ('chips_per_period', rows.get('chips_per_period', '-')),
+            ('padded_samples', str(pad)),
+            ('trimmed_samples', str(cut)),
+            ('occupied_basis', 'the code\'s own chip rate (1.023 Mcps); its '
+                               'BPSK main lobe is twice that, and the '
+                               'zero-order hold puts it wherever --rate is'),
+        ]
+        return {'x': x, 'rate': int(rate), 'n': n, 'occ': chip, 'rows': extra}
+
+    if shape == 'prach':
+        argv = ['--preamble', str(sig['root']), '--ncs', str(sig['ncs']),
+                '--v', str(sig['v'])]
+        x, rows, _ = phy_seqs_iq('prach', 'prach', rate, secs, argv)
+        x, pad, cut = fit_to(x, n)
+        ra = int(rows.get('n_ra_hz', '1048750'))
+        extra = [
+            ('signal', 'LTE PRACH preamble, format 0 (TS 36.211 5.7.2): '
+                       'Zadoff-Chu root %s, N_CS zone %s, v = %s'
+             % (rows.get('preamble_root_u', '?'), rows.get('ncs_zone', '?'),
+                rows.get('v', '?'))),
+            ('producer_command', producer_cmd('prach', rate, secs, argv)),
+            ('repeat', 'the producer tiles whole 1 ms PRACH occasions (CP, '
+                       'sequence, guard); this constructor does not move the '
+                       'occasion, only pulses the whole capture'),
+            ('preamble_format', rows.get('preamble_format', '-')),
+            ('preamble_root_u', rows.get('preamble_root_u', '-')),
+            ('ncs_zone', rows.get('ncs_zone', '-')),
+            ('ncs', rows.get('ncs', '-')),
+            ('cv', rows.get('cv', '-')),
+            ('n_ra_hz', str(ra)),
+            ('cp_samples', rows.get('cp_samples', '-')),
+            ('seq_samples', rows.get('seq_samples', '-')),
+            ('guard_samples', rows.get('guard_samples', '-')),
+            ('subframe_samples', rows.get('subframe_samples', '-')),
+            ('padded_samples', str(pad)),
+            ('trimmed_samples', str(cut)),
+            ('occupied_basis', '1.04875 MHz = 839 subcarriers over the 800 us '
+                               'sequence, TS 36.211 5.7.2'),
+        ]
+        return {'x': x, 'rate': int(rate), 'n': n, 'occ': ra, 'rows': extra}
+
+    if shape == 'prs':
+        argv = ['--pci', str(sig['pci']), '--n-rb-prs', str(sig['n-rb-prs']),
+                '--n-rb-dl', str(sig['n-rb-dl'])]
+        x, rows, remap = phy_seqs_iq('prs', 'prs', rate, secs, argv)
+        rate_used = int(rows.get('rate', '1760000'))
+        n_used = len(x)
+        extra = [
+            ('signal', 'LTE PRS (TS 36.211 6.10.4): %s symbols per frame, %s '
+                       'resources per symbol, QPSK from the 6.10.4.2 seed '
+                       'c_init = 2^10 (7 (n_s+1) + l + 1) (2 N_ID_PRS + 1)'
+             % (rows.get('symbols_per_frame', '?'),
+                rows.get('re_per_symbol', '?'))),
+            ('producer_command', producer_cmd('prs', rate, secs, argv)),
+            ('rate_basis', 'RE-domain: one sample per PRS resource element, so '
+                           'the rate is the producer\'s frame rate, not a '
+                           'waveform sample rate -- resampling it would invent '
+                           'a waveform nobody transmits'),
+            ('requested_rate_hz', str(int(rate))),
+            ('pci', rows.get('pci', str(sig['pci']))),
+            ('n_id_prs', rows.get('n_id_prs', '-')),
+            ('n_rb_prs', rows.get('n_rb_prs', '-')),
+            ('n_rb_dl', rows.get('n_rb_dl', '-')),
+            ('prs_bandwidth_hz', str(int(rows.get('n_rb_prs', '0')) * 12 * 15000)),
+            ('symbols_per_frame', rows.get('symbols_per_frame', '-')),
+            ('samples_per_frame', rows.get('samples_per_frame', '-')),
+            ('mapping_rows', rows.get('mapping_rows', '-')),
+            ('frames', rows.get('frames', '-')),
+            ('occupied_basis', 'RE-domain samples occupy their whole file: '
+                               'every value is one PRS resource element'),
+        ]
+        out = {'x': x, 'rate': rate_used, 'n': n_used, 'occ': rate_used,
+               'rows': extra, 'remap': remap}
+        return out
+
+    if shape == 'nr-ssb':
+        root = jamd_root()
+        gen = os.path.join(root, 'modules', '12_nr_air.sh') if root else ''
+        if not gen or not os.path.isfile(gen):
+            die2('no modules/12_nr_air.sh under %s' % (root or os.getcwd()),
+                 'the NR SSB waveform is that module\'s output; there is no '
+                 'second SSB builder in this tree and none is written here')
+        scs = int(sig['scs'])
+        nfft = int(round(float(rate) / (scs * 1000.0)))
+        if nfft <= 0 or nfft * scs * 1000 != int(rate):
+            die2('--rate %d is not N_FFT x --scs %d kHz for a whole N_FFT'
+                 % (int(rate), scs),
+                 'the SSB generator samples at rate = N_FFT x SCS (TS 38.211 '
+                 '5.3); 30720000 with --scs 30 gives N_FFT 1024, 15360000 '
+                 'with --scs 15 does too')
+        # 4 SSB symbols cannot be shorter than 4 x N_FFT, so this estimate
+        # never asks for too few repetitions.
+        reps = int(math.ceil(n / float(4 * nfft))) or 1
+        n_rb = int(sig['n-rb']) or 51
+        d = tempfile.mkdtemp(prefix='jamd_nrssb_', dir=jamd_tmp())
+        out = os.path.join(d, 'ssb.cf32')
+        try:
+            argv = [gen, '--ssb-waveform', out, '--format', 'cf32',
+                    '--rate', str(int(rate)), '--n-rb', str(n_rb),
+                    '--pci', str(sig['pci']), '--i-ssb', str(sig['i-ssb']),
+                    '--scs', str(scs), '--reps', str(reps)]
+            rows = run_producer(argv, 'nr-ssb')
+            burst = read_cf32_iq(out)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        x, pad, cut = fit_to(np.resize(burst, max(n, len(burst))), n)
+        scs_hz = int(rows.get('scs_khz', str(scs))) * 1000
+        # The producer writes --reps bursts end to end; the interesting number
+        # is one burst (4 symbols of (N_FFT + CP)), so report it per burst and
+        # the rep count separately rather than the tiled total.
+        reps_n = max(1, int(rows.get('reps', reps) or reps))
+        burst_total = int(rows.get('samples', len(burst)))
+        extra = [
+            ('signal', 'NR SS/PBCH block (TS 38.211 7.4.3): 240 subcarriers, '
+                       '%s kHz SCS, i_ssb %s, PCI %s'
+             % (rows.get('scs_khz', '?'), rows.get('i_ssb', '?'),
+                rows.get('pci', '?'))),
+            ('producer_command', 'bash modules/12_nr_air.sh --ssb-waveform '
+                                 '<out> --format cf32 --rate %d --n-rb %d '
+                                 '--pci %d --i-ssb %d --scs %d --reps %d'
+             % (int(rate), n_rb, sig['pci'], sig['i-ssb'], scs, reps)),
+            ('repeat', '%s SSB burst(s) of 4 symbols tiled to the capture '
+                       'length: an SSB is one burst per SSB period in a real '
+                       'frame, this constructor emits it continuously'
+             % rows.get('reps', str(reps))),
+            ('pci', rows.get('pci', '-')),
+            ('i_ssb', rows.get('i_ssb', '-')),
+            ('scs_khz', rows.get('scs_khz', '-')),
+            ('nr_n_rb', rows.get('n_rb', '-')),
+            ('fft_size', rows.get('fft_size', '-')),
+            ('ssb_symbols', rows.get('symbols', '-')),
+            ('reps', rows.get('reps', '-')),
+            ('ssb_burst_samples', str(burst_total // reps_n)),
+            ('padded_samples', str(pad)),
+            ('trimmed_samples', str(cut)),
+            ('occupied_basis', '240 subcarriers x SCS (TS 38.211 7.4.3)'),
+        ]
+        return {'x': x, 'rate': int(rate), 'n': n,
+                'occ': int(240 * scs_hz), 'rows': extra}
+
+    raise ValueError('signal_iq has no builder for %s' % shape)
+
+
 def build(path, mode, shape, fmt, rate, secs, centre_hz, band_hz, peak_fs,
-          on_s, off_s, seed, earfcn):
+          on_s, off_s, seed, earfcn, sig_text=''):
     """Construct an interfering waveform and write it in fmt.
 
     mode       'barrage' fills the whole capture band; 'narrowband' fills
-               band_hz or less, centred on offset_hz from the capture centre
-    shape      awgn | cw | chirp | lte-ssb (the last is a handoff, see below)
+               band_hz or less, centred on offset_hz from the capture centre.
+               A reference-signal shape is narrowband by nature and refuses
+               anything else rather than emit a full-band copy of a slice
+    shape      awgn | cw | chirp, or one of JAMD_SIGNAL_SHAPES, whose samples
+               come from the producer named in JAMD_SHAPE_PRODUCER
     peak_fs    peak magnitude in full scale, 0 < peak_fs <= 1. A driver that
                clips reports success and radiates splatter, so the peak is
                clamped here rather than left to the SDR's own protection
     on_s/off_s the pulse train; off_s = 0 means continuous
+    sig_text   k=v,k=v producer parameters (PRN, PCI, preamble root, ...)
     """
     if mode not in JAMD_MODES:
         raise ValueError('mode must be barrage or narrowband: %s' % mode)
+    if shape in JAMD_SHAPES_REFUSED:
+        why = dict(JAMD_SHAPE_REASON)[shape]
+        sys.stderr.write('ERROR\tshape %s is refused and not built: %s\n'
+                         % (shape, why))
+        sys.stderr.write('WHY\ta refused shape is reported with the reason it '
+                         'is refused and no file is written; filling one with '
+                         'noise, or with a sequence this module made up, is '
+                         'the fabricated success it exists to prevent\n')
+        print('shape_reason\t%s\t%s' % (shape, san(why)))
+        sys.exit(3)
     if shape not in JAMD_SHAPES:
         raise ValueError('shape must be %s: %s' % ('|'.join(JAMD_SHAPES), shape))
     rate = int(rate)
@@ -477,42 +976,75 @@ def build(path, mode, shape, fmt, rate, secs, centre_hz, band_hz, peak_fs,
     if on_s <= 0 or off_s < 0:
         raise ValueError('the pulse train needs on_s > 0 and off_s >= 0')
 
-    # Narrowband cannot be narrower than a few FFT bins or it is a rounding
-    # error; barrage is the whole band by definition.
-    if mode == 'barrage':
+    declared = None
+    if band_hz not in (None, '', 0, '0'):
+        declared = int(band_hz)
+        if declared <= 0:
+            raise ValueError('occupied bandwidth must be positive: %s' % band_hz)
+
+    if shape in JAMD_SIGNAL_SHAPES and mode != 'narrowband':
+        die2('shape %s is a reference signal, so it is built in narrowband '
+             'mode, not %s' % (shape, mode),
+             'a named reference signal occupies its own slice of the band; '
+             '"barrage" would mean filling the whole capture with it, which no '
+             'producer emits. Use --mode narrowband for the name, or --shape '
+             'awgn / --shape chirp for a signal that does fill the band')
+
+    rng = np.random.default_rng(int(seed))
+    n = int(rate * secs)
+    extra = []
+    if shape in JAMD_SIGNAL_SHAPES:
+        got = signal_iq(shape, rate, secs, n, parse_sig(sig_text))
+        x, occ_hz, extra = got['x'], got['occ'], got['rows']
+        rate, n = got['rate'], got['n']
+        secs = n / float(rate)
+        if got.get('remap'):
+            side = path + '.remap.tsv'
+            with open(side, 'w') as fh:
+                fh.write(got['remap'])
+            extra.append(('mapping_file', san(side)))
+        if occ_hz > rate:
+            die2('--rate %d Hz is narrower than the %s signal itself (%d Hz)'
+                 % (rate, shape, occ_hz),
+                 'the capture cannot hold a signal wider than its own band: '
+                 'raise --rate (it is also the sample rate the produced file '
+                 'is written at)')
+        if declared is not None and declared < occ_hz:
+            die2('--band %d Hz is narrower than the %s signal\'s own %d Hz'
+                 % (declared, shape, occ_hz),
+                 'the constructor places the producer\'s signal as it is and '
+                 'will not decimate a reference signal to fit a window')
+        if declared is not None and declared > rate:
+            die2('--band %d Hz is wider than the %d Hz capture band'
+                 % (declared, rate),
+                 'the producer fills a %d Hz file one sample per sample, so a '
+                 'window wider than the file describes a band the samples do '
+                 'not cover and the report would name a width nothing holds. '
+                 'Omit --band, or raise --rate' % rate)
+    elif mode == 'barrage':
         occ_hz = rate
     else:
-        occ_hz = int(band_hz)
+        occ_hz = int(declared) if declared is not None else 0
         if occ_hz <= 0:
             raise ValueError('narrowband needs a positive occupied bandwidth')
         if occ_hz > rate:
-            raise ValueError('occupied %d Hz does not fit the %d Hz capture band'
-                             % (occ_hz, rate))
+            die2('occupied %d Hz does not fit the %d Hz capture band'
+                 % (occ_hz, rate),
+                 'a narrowband burst is written at --rate, so a --band wider '
+                 'than the file cannot be filled: raise --rate, or lower '
+                 '--band')
         nbin = 4.0 * rate / max(1, int(rate * secs))
         if occ_hz < nbin:
             raise ValueError('occupied %d Hz is below the analyser resolution '
                              '(%.0f Hz at %d samples)' % (occ_hz, nbin,
                                                           int(rate * secs)))
 
-    if shape == 'lte-ssb':
-        sys.stderr.write(
-            'ERROR\tshape lte-ssb is a handoff, not a waveform this module builds: '
-            'the sequence is LTE PSS/SSS/PBCH+CRS, but turning QPSK symbols into '
-            'OFDM samples needs a modulator this module does not have, and writing '
-            'noise where the waveform would be is the fabricated success this '
-            'toolkit exists to prevent\n')
-        sys.stderr.write(
-            'WHY\tthe symbols are constructible and are built by 10_lte_air; the '
-            'samples are not, so --tx-build refuses rather than writing a file that '
-            'looks like a waveform\n')
-        sys.exit(3)
-
-    rng = np.random.default_rng(int(seed))
-    n = int(rate * secs)
     if n < 2048:
         raise ValueError('too few samples (%d); need at least 2048' % n)
 
-    if mode == 'barrage':
+    if shape in JAMD_SIGNAL_SHAPES:
+        pass                      # x is the producer's samples, already placed
+    elif mode == 'barrage':
         x = (rng.normal(0, 1, n) + 1j * rng.normal(0, 1, n)) / np.sqrt(2.0)
     else:
         base = (rng.normal(0, 1, n) + 1j * rng.normal(0, 1, n)) / np.sqrt(2.0)
@@ -546,8 +1078,19 @@ def build(path, mode, shape, fmt, rate, secs, centre_hz, band_hz, peak_fs,
     if peak > 0:
         x = x * (peak_fs / peak)
     measured = float(np.max(np.abs(x)))
+    # A shape built from a unit-modulus table (PSS, SSS, PRACH, the GPS C/A
+    # code) normalises to exactly full scale, and the last rounding can land a
+    # hair above 1.0. Pull the gain back instead of refusing: 1e-6 is far below
+    # any real correction and far above the 1.2e-7 float32 resolution, so this
+    # converges in one pass and the file written is measured at or below full
+    # scale -- the same guarantee, stated as a measurement, not a promise.
+    for _ in range(8):
+        if measured <= 1.0:
+            break
+        x = x * ((1.0 - 1e-6) / measured)
+        measured = float(np.max(np.abs(x)))
     if measured > 1.0:
-        raise ValueError('waveform peak %.4f exceeds full scale after scaling' % measured)
+        raise ValueError('waveform peak %.6f exceeds full scale after scaling' % measured)
 
     if fmt == 'cf32':
         x.astype('<c8').tofile(path)
@@ -575,6 +1118,8 @@ def build(path, mode, shape, fmt, rate, secs, centre_hz, band_hz, peak_fs,
         drivers = 'hackrf (CS8), rtlsdr (CS8)'
     band = int(rate) if mode == 'barrage' else int(occ_hz)
     e = hz_to_earfcn(centre_hz) if earfcn else None
+    # Where the samples came from, for every shape, before where they went.
+    extra.insert(0, ('producer', dict(JAMD_SHAPE_PRODUCER)[shape]))
     print('path\t%s' % san(path))
     print('mode\t%s' % mode)
     print('shape\t%s' % shape)
@@ -594,6 +1139,8 @@ def build(path, mode, shape, fmt, rate, secs, centre_hz, band_hz, peak_fs,
     print('off_s\t%.6f' % off_s)
     print('gated_samples\t%d' % off)
     print('driver_format\t%s' % drivers)
+    for k, v in extra:
+        print('%s\t%s' % (k, san(v)))
     print('constructed\tyes')
 
 
@@ -605,23 +1152,31 @@ def build(path, mode, shape, fmt, rate, secs, centre_hz, band_hz, peak_fs,
 # and "does the generator produce what it claims" stay separable assertions.
 def gen(path, kind, fmt, rate, secs):
     n = int(rate * secs)
-    rng = np.random.default_rng(20240101)
-    noise = (rng.normal(0, 1, n) + 1j * rng.normal(0, 1, n))
-    carrier = (rng.normal(0, 1, n) + 1j * rng.normal(0, 1, n)) * 0.3
-    x = noise + carrier
-    half = n // 2
-    if kind == 'raised':
-        x[half:] = x[half:] + (rng.normal(0, 1, n - half) + 1j * rng.normal(0, 1, n - half)) * 3.0
-    elif kind == 'narrow':
-        m = n - half
-        itf = (rng.normal(0, 1, m) + 1j * rng.normal(0, 1, m))
-        XI = np.fft.fft(itf)
-        fr = np.fft.fftfreq(m, d=1.0 / rate)
-        XI[np.abs(fr - 200000.0) >= 25000.0] = 0
-        itf = np.fft.ifft(XI) * 10.0
-        x[half:] = x[half:] + itf
-    elif kind == 'clean':
-        pass
+    if kind == 'prach':
+        # A receive-side capture whose interference is a real PRACH preamble
+        # rather than a synthetic carrier. It occupies one narrow slice, so
+        # the verdict is a measurement of what this analyser sees in the
+        # signal a base station is actually listening for.
+        x, _rows, _remap = phy_seqs_iq('prach', 'prach', int(rate), float(secs),
+                                       ['--preamble', '1', '--ncs', '0',
+                                        '--v', '0'])
+        x, _pad, _cut = fit_to(x, n)
+    elif kind in ('clean', 'raised', 'narrow'):
+        rng = np.random.default_rng(20240101)
+        noise = (rng.normal(0, 1, n) + 1j * rng.normal(0, 1, n))
+        carrier = (rng.normal(0, 1, n) + 1j * rng.normal(0, 1, n)) * 0.3
+        x = noise + carrier
+        half = n // 2
+        if kind == 'raised':
+            x[half:] = x[half:] + (rng.normal(0, 1, n - half) + 1j * rng.normal(0, 1, n - half)) * 3.0
+        elif kind == 'narrow':
+            m = n - half
+            itf = (rng.normal(0, 1, m) + 1j * rng.normal(0, 1, m))
+            XI = np.fft.fft(itf)
+            fr = np.fft.fftfreq(m, d=1.0 / rate)
+            XI[np.abs(fr - 200000.0) >= 25000.0] = 0
+            itf = np.fft.ifft(XI) * 10.0
+            x[half:] = x[half:] + itf
     else:
         sys.stderr.write('ERROR\tunknown fixture kind %s\n' % kind)
         sys.exit(2)
@@ -665,6 +1220,44 @@ def main():
         if mode == 'shapes-refused':
             print(' '.join(JAMD_SHAPES_REFUSED))
             return None
+        if mode == 'shape-table':
+            # One process for the whole table: every verb that reports the
+            # shapes needs all of it, and six python startups per verb is six
+            # numpy imports for one answer.
+            print('shapes\t%s' % ' '.join(JAMD_SHAPES))
+            print('signal_shapes\t%s' % ' '.join(JAMD_SIGNAL_SHAPES))
+            print('shapes_refused\t%s' % ' '.join(JAMD_SHAPES_REFUSED))
+            print('modes\t%s' % ' '.join(JAMD_MODES))
+            for s_ in JAMD_SHAPES:
+                print('shape_producer\t%s\t%s' % (s_, dict(JAMD_SHAPE_PRODUCER)[s_]))
+            for s_ in JAMD_SHAPES_REFUSED:
+                print('shape_refused_reason\t%s\t%s'
+                      % (s_, dict(JAMD_SHAPE_REASON)[s_]))
+            return 0
+        if mode == 'signal-shapes':
+            print(' '.join(JAMD_SIGNAL_SHAPES))
+            return None
+        if mode == 'shape-producers':
+            # shape, producer: one TSV row per shape so --status can show
+            # where every name's samples come from without a second lookup.
+            for name, prod in JAMD_SHAPE_PRODUCER:
+                print('%s\t%s' % (name, prod))
+            return None
+        if mode == 'shape-reasons':
+            # shape, reason: the machine-readable half of a refusal.
+            for name, why in JAMD_SHAPE_REASON:
+                print('%s\t%s' % (name, why))
+            return None
+        if mode == 'shape-reason':
+            why = dict(JAMD_SHAPE_REASON).get(rest[0] if rest else '', '')
+            print(why)
+            return None
+        if mode == 'shape-known':
+            print('yes' if (rest and rest[0] in JAMD_SHAPES) else 'no')
+            return None
+        if mode == 'sig-defaults':
+            print(','.join('%s=%d' % (k, v) for k, v in sorted(SIG_DEFAULTS.items())))
+            return None
         if mode == 'modes':
             print(' '.join(JAMD_MODES))
             return None
@@ -682,10 +1275,12 @@ def main():
         if mode == 'build':
             # build <path> <mode> <shape> <fmt> <rate> <secs> <centre_hz>
             #       <band_hz> <peak_fs> <on_s> <off_s> <seed> <earfcn 0|1>
+            #       [<k=v,k=v producer parameters>]
             return build(rest[0], rest[1], rest[2], rest[3], int(rest[4]),
-                         float(rest[5]), parse_hz(rest[6]), int(rest[7]),
+                         float(rest[5]), parse_hz(rest[6]), rest[7],
                          float(rest[8]), float(rest[9]), float(rest[10]),
-                         int(rest[11]), int(rest[12]))
+                         int(rest[11]), int(rest[12]),
+                         rest[13] if len(rest) > 13 else '')
         sys.stderr.write('unknown mode %s\n' % mode)
         sys.exit(2)
     except SystemExit:
@@ -774,9 +1369,9 @@ jamd_cmd_fixture() {
         esac
     done
     case "$kind" in
-        clean|raised|narrow) ;;
-        "") printf 'ERROR\tusage: --fixture <clean|raised|narrow> <out> [--format cf32|ci16|cu8] [--rate hz] [--secs s]\n' >&2; return 2 ;;
-        *) printf 'ERROR\tunknown fixture kind %s (want clean|raised|narrow)\n' "$kind" >&2; return 2 ;;
+        clean|raised|narrow|prach) ;;
+        "") printf 'ERROR\tusage: --fixture <clean|raised|narrow|prach> <out> [--format cf32|ci16|cu8] [--rate hz] [--secs s]\n' >&2; return 2 ;;
+        *) printf 'ERROR\tunknown fixture kind %s (want clean|raised|narrow|prach)\n' "$kind" >&2; return 2 ;;
     esac
     [[ -n "$out" ]] || {
         mkdir -p "$JAMD_IQ_DIR" 2>/dev/null || true
@@ -795,15 +1390,20 @@ jamd_cmd_fixture() {
 
     # The label says which verdict the analyser must return, not what the file
     # contains, so the two halves are checked against each other downstream.
-    local want
+    local want ref
     case "$kind" in
-        clean)  want="clean" ;;
-        raised) want="barrage" ;;
-        narrow) want="narrowband" ;;
+        clean)  want="clean"
+                ref="clean = AWGN with a weak in-band carrier" ;;
+        raised) want="barrage"
+                ref="raised = the noise floor lifts by 3x halfway through (barrage)" ;;
+        narrow) want="narrowband"
+                ref="narrow = a 25 kHz offset carrier appears halfway through (narrowband)" ;;
+        prach)  want="narrowband"
+                ref="prach = a real PRACH format-0 preamble from tools/phy_seqs.py, one 1.04875 MHz slice (TS 36.211 5.7.2)" ;;
     esac
     printf 'fixture\t%s\npath\t%s\nformat\t%s\nrate_hz\t%s\nseconds\t%s\nbytes\t%s\nexpected_verdict\t%s\nkeys_nothing\tyes\n' \
         "$kind" "$out" "$fmt" "$rate" "$secs" "$(stat -c %s "$out" 2>/dev/null || echo 0)" "$want"
-    printf 'ref\tTS 36.211/36.104 shaped fixtures; clean = AWGN, raised = floor lift (barrage), narrow = 25 kHz offset carrier (narrowband)\n'
+    printf 'ref\t%s\n' "$ref"
     return 0
 }
 
@@ -1039,6 +1639,7 @@ jamd_scope_check() {
 
 JAMD_TX_ARMED=0
 JAMD_TX_DEFAULT_RATE=20000000
+JAMD_TX_SHAPE_NAMES="awgn cw chirp pss sss pbch prach prs gps-ca nr-ssb lte-ssb pucch"
 
 #
 # stderr, deliberately. Every verb that prints machine-readable TSV prints it on
@@ -1173,14 +1774,22 @@ jamd_tx_gain() {
 # frequency; the flags carry the same facts with their names attached, so a
 # wrong call fails at the flag instead of silently transposing band_hz and peak.
 #
-#   --mode barrage|narrowband   --shape awgn|cw|chirp|lte-ssb
+#   --mode barrage|narrowband   --shape awgn|cw|chirp|<a signal shape>
 #   --format cf32|ci16|cu8      --rate <sps>        --secs <s>
 #   --centre <Hz|MHz>|--earfcn <n>                  --band <Hz>
 #   --peak <0..1>  --on <s>  --off <s>  --seed <n>  --out <path>
+#
+# The reference-signal shapes take their own parameters, all optional and all
+# passed to the producer that owns the signal rather than interpreted here:
+#   --prn <1..32>       --pci <0..503>      --root <1..838>   --ncs <0..15>
+#   --v <n>             --i-ssb <n>         --n-rb <n>        --ports <1..4>
+#   --mib <hex>         --n-rb-prs <n>      --n-rb-dl <n>     --scs <kHz>
 jamd_tx_build() {
     local mode="barrage" shape="awgn" fmt="cu8"
     local rate="" secs="" centre="" band="" peak=""
     local on_s="" off_s="" seed="20240101" out=""
+    local s_prn="" s_pci="" s_root="" s_ncs="" s_v="" s_issb="" s_nrb=""
+    local s_ports="" s_mib="" s_nrbprs="" s_nrbd="" s_scs=""
     while (($#)); do
         case "$1" in
             --mode)   mode="${2:-}"; shift 2 ;;
@@ -1196,6 +1805,18 @@ jamd_tx_build() {
             --off)    off_s="${2:-}"; shift 2 ;;
             --seed)   seed="${2:-}"; shift 2 ;;
             --out)    out="${2:-}"; shift 2 ;;
+            --prn)    s_prn="${2:-}"; shift 2 ;;
+            --pci)    s_pci="${2:-}"; shift 2 ;;
+            --root)   s_root="${2:-}"; shift 2 ;;
+            --ncs)    s_ncs="${2:-}"; shift 2 ;;
+            --v)      s_v="${2:-}"; shift 2 ;;
+            --i-ssb)  s_issb="${2:-}"; shift 2 ;;
+            --n-rb)   s_nrb="${2:-}"; shift 2 ;;
+            --ports)  s_ports="${2:-}"; shift 2 ;;
+            --mib)    s_mib="${2:-}"; shift 2 ;;
+            --n-rb-prs) s_nrbprs="${2:-}"; shift 2 ;;
+            --n-rb-dl)  s_nrbd="${2:-}"; shift 2 ;;
+            --scs)    s_scs="${2:-}"; shift 2 ;;
             *) printf 'ERROR\t--tx-build does not take %s (see --help)\n' "$1" >&2; return 2 ;;
         esac
     done
@@ -1209,6 +1830,14 @@ jamd_tx_build() {
     [[ -n "$off_s" ]] || off_s="0.0"
     [[ -n "$centre" ]] || {
         printf 'ERROR\t--tx-build needs a centre frequency: <MHz|Hz> or --earfcn <n>\n' >&2; return 2; }
+    # The names bash will hand to the builder: the shapes it constructs plus the
+    # ones it refuses BY NAME (the refusal and its reason are decided in python,
+    # so the reason sits next to the shape tables; this list only stops a typo
+    # from reaching it as a traceback).
+    case " $JAMD_TX_SHAPE_NAMES " in *" $shape "*) ;; *)
+        printf 'ERROR\tshape must be one of %s: %s\n' "$JAMD_TX_SHAPE_NAMES" "$shape" >&2
+        printf 'WHY\trun --shapes for what each name is and which tool produces it\n' >&2
+        return 2 ;; esac
     case "$mode" in barrage|narrowband) ;; *)
         printf 'ERROR\tmode must be barrage or narrowband: %s\n' "$mode" >&2; return 2 ;; esac
     case "$fmt" in
@@ -1217,8 +1846,29 @@ jamd_tx_build() {
         csv|c16|sc16|cs16) fmt="ci16" ;;
         *) printf 'ERROR\tformat must be cf32|ci16|cu8 (or a driver alias: cs8|c16|sc16|cs16)\n' >&2; return 2 ;;
     esac
-    [[ -n "$band" ]] || band="1000000"
+    if [[ -z "$band" ]]; then
+        # A synthesised narrowband shape needs a width from the caller. A named
+        # reference signal has one: the producer's noise bandwidth is a fact,
+        # so the constructor places the signal as the producer emits it and
+        # the width row reports that fact instead of a number typed here.
+        case "$shape" in
+            pss|sss|pbch|prach|prs|gps-ca|nr-ssb) band="" ;;
+            *) band="1000000" ;;
+        esac
+    fi
     [[ "$rate" =~ ^[0-9]+$ ]] || { printf 'ERROR\tsample rate must be a positive integer\n' >&2; return 2; }
+
+    # Producer parameters, assembled as k=v pairs. An empty value is simply
+    # absent, so the producer's own default answers for it -- and a name this
+    # module does not know is refused by the Python side, not guessed at.
+    local sig="" kv
+    for kv in "prn=$s_prn" "pci=$s_pci" "root=$s_root" "ncs=$s_ncs" \
+              "v=$s_v" "i-ssb=$s_issb" "n-rb=$s_nrb" "ports=$s_ports" \
+              "mib=$s_mib" "n-rb-prs=$s_nrbprs" "n-rb-dl=$s_nrbd" \
+              "scs=$s_scs"; do
+        [[ -n "${kv#*=}" ]] || continue
+        sig="${sig:+$sig,}$kv"
+    done
 
     local centre_hz earfcn_flag=0
     centre_hz=$(jamd_py_freq "$centre" 2>/dev/null) || {
@@ -1233,7 +1883,8 @@ jamd_tx_build() {
     mkdir -p "$(dirname "$out")" 2>/dev/null
 
     jamd_py build "$out" "$mode" "$shape" "$fmt" "$rate" "$secs" \
-             "$centre_hz" "$band" "$peak" "$on_s" "$off_s" "$seed" "$earfcn_flag"
+             "$centre_hz" "$band" "$peak" "$on_s" "$off_s" "$seed" "$earfcn_flag" \
+             "$sig"
 }
 
 # Frequency and raster queries. Both are one line over the Python body, where
@@ -1259,12 +1910,16 @@ jamd_py_earfcn() {
 # without a radio, and reports the driver's own exit status -- so a transmit
 # line can only be printed when a driver call actually returned 0.
 jamd_tx_key() {
-    local mode="barrage" fmt="cu8" rate=""
+    local fmt="cu8" rate=""
+    # Every flag goes to the constructor unchanged -- including --rate and
+    # --shape, so a keyed run drives the file the caller described instead of
+    # a default one. The rate the driver is told comes back off the built
+    # rows, because a reference-signal shape can choose its own (prs is
+    # RE-domain, for one).
+    local -a passthru=("$@")
     while (($#)); do
         case "$1" in
-            --mode)   mode="${2:-}"; shift 2 ;;
             --format) fmt="${2:-}"; shift 2 ;;
-            --rate)   rate="${2:-}"; shift 2 ;;
             *) break ;;
         esac
     done
@@ -1279,10 +1934,15 @@ jamd_tx_key() {
     # Construct first: a build failure must not leave a half-sent pulse train.
     # The flags go straight through -- the constructor's interface is this
     # verb's interface, so there is nothing to translate.
-    local built; built=$(JAMD_LAB_AUTHORISED=1 jamd_tx_build "$@" 2>/dev/null) || return $?
+    local built; built=$(JAMD_LAB_AUTHORISED=1 jamd_tx_build "${passthru[@]}" 2>/dev/null) || return $?
     local path freq gain iq fmt_drv
     path=$(jamd_fld "$built" path)
     freq=$(jamd_fld "$built" centre_hz)
+    # The constructor owns the rate: a reference-signal shape may choose one
+    # the caller never typed, so the driver is told what the file is, not
+    # what this verb guessed.
+    rate=$(jamd_fld "$built" rate)
+    [[ -n "$rate" ]] || rate="$JAMD_TX_DEFAULT_RATE"
     [[ -f "$path" ]] || { printf 'ERROR\tconstructor wrote nothing at %s\n' "$path" >&2; return 1; }
     gain=$(jamd_tx_gain) || return $?
     fmt_drv=$(jamd_tx_iq_format "$drv")
@@ -1322,6 +1982,17 @@ jamd_tx_key() {
     return 0
 }
 
+# ── the shape table ─────────────────────────────────────────────────────
+# What can be built, where each name's samples come from, and what is refused
+# and why. No radio, no gate, no disclaimer: this is the answer to "what does
+# this module claim it can construct", which is exactly what a caller needs
+# before it asks for one.
+jamd_cmd_shapes() {
+    jamd_py shape-table 2>/dev/null
+    printf 'shape_mode\ta reference-signal shape is built in narrowband mode only\n'
+    return 0
+}
+
 # ── the two verbs ───────────────────────────────────────────────────────
 # --tx-status prints the disclaimer and what would happen, and keys nothing.
 # That is the verb a security team is meant to be able to run: it answers "what
@@ -1340,9 +2011,11 @@ jamd_cmd_tx_status() {
         printf 'radio_state\tno radio answered hackrf_info, bladeRF-cli -p, LimeUtil --find or uhd_find_devices\n'
     fi
     printf 'gain_db\t%s\n' "${JAMD_TX_GAIN:-0}"
-    printf 'modes\t%s\n' "$(jamd_py modes 2>/dev/null)"
-    printf 'shapes\t%s\n' "$(jamd_py shapes 2>/dev/null)"
-    printf 'shapes_refused\t%s\n' "$(jamd_py shapes-refused 2>/dev/null)"
+    # One row per name, so "where does this shape's signal come from" and
+    # "why is this name refused" are answered by the same verb that lists the
+    # names -- a caller never has to read the source to find out.
+    jamd_py shape-table 2>/dev/null
+    printf 'shape_mode\t%s\n' 'a reference-signal shape is built in narrowband mode only'
     printf 'formats\tcf32 ci16 cu8 (driver aliases cs8 c16 sc16 cs16)\n'
     printf 'peak_clamp\t1.0 full scale, default 0.70\n'
     printf 'detection_verbs\t--analyse --noise-floor --characterise --counters --discriminate --report\n'
@@ -1369,6 +2042,8 @@ jamd_cli_status_tsv() {
     printf 'tx_verbs\t--tx-status --tx-build\n'
     printf 'tx_gate\t%s\n' "$([[ "${JAMD_LAB_AUTHORISED:-0}" == 1 ]] && echo armed || echo closed)"
     printf 'tx_keyed_by\t--i-have-a-lab-and-authorisation or JAMD_LAB_AUTHORISED=1\n'
+    jamd_py shape-table 2>/dev/null
+    printf 'fixture_kinds\tclean raised narrow prach\n'
 }
 
 # ── selftest ────────────────────────────────────────────────────────────
@@ -1593,8 +2268,17 @@ print('yes' if len(x)==200000 else 'no')" "$d/armed.cu8" 2>/dev/null)" "yes"
             --freq 2650MHz >/dev/null 2>&1; echo $?)" "2"
     # A field that silently prints empty is the failure mode this catches:
     # JAMD_SHAPES is a Python tuple and "$JAMD_SHAPES" in bash is "".
-    chk tx-status-shapes "$(fld "$out" shapes)" "awgn cw chirp"
-    chk tx-status-shapes-refused "$(fld "$out" shapes_refused)" "lte-ssb"
+    # The shapes split into what this module synthesises from scratch and what
+    # it obtains from a producer that owns the sequence (tools/phy_seqs.py,
+    # tools/lte_phy.py, 12_nr_air --ssb-waveform). The status must name both,
+    # because "this module can generate an SSB" and "12_nr_air generates an SSB
+    # and this module transmits it" are different claims.
+    chk tx-status-shapes "$(fld "$out" shapes)" "awgn cw chirp pss sss pbch prach prs gps-ca nr-ssb"
+    # lte-ssb is not refused for lack of a producer -- 12_nr_air and the LTE
+    # table both exist -- it is refused because this module has no OFDM
+    # modulator, which is exactly what the nr-ssb shape proves by not needing
+    # one (it consumes the samples 12_nr_air already produced).
+    chk tx-status-shapes-refused "$(fld "$out" shapes_refused)" "lte-ssb pucch"
     chk tx-status-modes "$(fld "$out" modes)" "barrage narrowband"
 
     # 9. Status invariants.
@@ -1640,6 +2324,360 @@ print('yes' if len(x)==200000 else 'no')" "$d/armed.cu8" 2>/dev/null)" "yes"
     # Constructing samples must not be gated: it keys nothing, and a chain has
     # to be able to drive the receive path with the lab flag unset.
     chk fixture-ungated "$(JAMD_LAB_AUTHORISED=0 jamd_cmd_fixture clean "$d/fx_ungated.cf32" --secs 0.1 >/dev/null 2>&1; echo $?)" "0"
+    # 12. Reference-signal shapes, one known answer each. Every answer comes
+    #     from the tool that owns the sequence, run here for the same
+    #     parameters -- comparing this module's file against a sequence this
+    #     module produced would prove only that it is deterministic.
+    #
+    #     The builds below go through jamd_py build, the constructor that
+    #     jamd_tx_build parses flags for (12b drives the flag layer end to
+    #     end). Where the only difference between this module's file and the
+    #     producer's is the peak normalisation, the assertion says so and
+    #     states the tolerance instead of pretending to byte equality: the
+    #     producer's container full scale is its own, the module renormalises
+    #     once, and every sample must still be the producer's sample times one
+    #     scalar -- that is what the residual of 1e-6 full scale asserts.
+    local tools="${IMSISTING_ROOT:-.}/tools" srows sfile got gaterc
+    cat > "$d/kat.py" <<'KATPY'
+import os, sys
+import numpy as np
+
+sys.path.insert(0, os.path.join(os.environ.get('IMSISTING_ROOT', '.'), 'tools'))
+
+
+def read_iq(path):
+    d = np.fromfile(path, dtype='<f4').astype(np.float64)
+    return d[0::2] + 1j * d[1::2]
+
+
+def read_any(path, fmt):
+    if fmt == 'ci16':
+        d = np.fromfile(path, dtype='<i2').astype(np.float64)
+        return (d[0::2] + 1j * d[1::2]) / 32767.0
+    if fmt == 'cu8':
+        d = np.fromfile(path, dtype=np.uint8).astype(np.float64)
+        return ((d[0::2] - 127.5) + 1j * (d[1::2] - 127.5)) / 127.5
+    return read_iq(path)
+
+
+def body(x, n_fft, l):
+    import lte_phy as phy
+    cps = phy.cp_lengths(n_fft)
+    off = sum(cps[:l]) + l * n_fft + cps[l]
+    return np.fft.fft(x[off:off + n_fft]) / n_fft
+
+
+cmd = sys.argv[1]
+if cmd == 'sync':
+    import lte_phy as phy
+    path, which, cell = sys.argv[2], sys.argv[3], int(sys.argv[4])
+    n_rb, n_fft = 50, 1024
+    x = read_iq(path)
+    l_sss, l_pss = phy.sync_symbols(0)
+    S = body(x, n_fft, l_pss if which == 'pss' else l_sss)
+    bins = phy.subcarrier_bins(n_fft, n_rb * 12)
+    k0 = n_rb * 6 - 36
+    got = np.array([S[bins[k0 + 5 + i]] for i in range(62)])
+    rows = np.loadtxt(sys.argv[5], dtype=str, delimiter='\t')
+    want = np.array([complex(float(r[1]), float(r[2])) for r in rows])
+    ratio = got / want
+    alpha = ratio.mean()
+    print('spread\t%.3e' % (float(np.abs(ratio - alpha).max() / abs(alpha))))
+    print('rel_err\t%.3e' % float(np.abs(got / alpha - want).max()))
+    print('reserved\t%.3e'
+          % float(max(abs(S[bins[k0 + i]]) for i in (0, 1, 2, 3, 4))))
+    print('same_within_1e-5\t%s'
+          % ('yes' if float(np.abs(got / alpha - want).max()) < 1e-5 else 'no'))
+elif cmd == 'pbch':
+    import lte_phy as phy
+    path, cell = sys.argv[2], int(sys.argv[3])
+    n_rb, n_fft = 50, 1024
+    x = read_iq(path)
+    bins = phy.subcarrier_bins(n_fft, n_rb * 12)
+    cache, bits = {}, []
+    for (l, k) in phy.pbch_re_positions(n_rb, cell):
+        if l not in cache:
+            cache[l] = body(x, n_fft, l)
+        v = cache[l][bins[k]]
+        # TS 36.211 7.1.2: the first bit of the pair drives the real part.
+        bits.append(0 if v.real > 0 else 1)
+        bits.append(0 if v.imag > 0 else 1)
+    print('bits\t%d' % len(bits))
+    print('hex\t%s' % ''.join('%x' % int(''.join(map(str, bits[i:i + 4])), 2)
+                             for i in range(0, len(bits), 4)))
+elif cmd == 'gps':
+    x = read_iq(sys.argv[2])
+    live = x.real[np.abs(x) > 1e-12]
+    print('values\t%s' % ' '.join('%.0f' % v for v in np.unique(live)))
+    print('imag\t%.0e' % float(np.abs(x.imag).max()))
+    print('period1023\t%s'
+          % ('yes' if np.array_equal(x[:1023], x[1023:2046]) else 'no'))
+elif cmd == 'peak':
+    x = read_any(sys.argv[2], sys.argv[3])
+    p = float(np.abs(x).max())
+    print('peak\t%.6f' % p)
+    print('within_full_scale\t%s' % ('yes' if p <= 1.0 else 'no'))
+elif cmd == 'modulus':
+    x = read_iq(sys.argv[2])
+    live = np.abs(x) > 1e-12
+    a = np.abs(x[live])
+    print('modulus\t%.9f' % float(a.mean()))
+    print('spread\t%.3e' % float(np.abs(a - a.mean()).max()))
+    print('zeros\t%d' % int((~live).sum()))
+    print('constant_within_1e-6\t%s'
+          % ('yes' if float(np.abs(a - a.mean()).max()) < 1e-6 else 'no'))
+elif cmd == 'scalar':
+    m = read_iq(sys.argv[2])
+    p = read_iq(sys.argv[3])
+    n = int(sys.argv[4]) if len(sys.argv) > 4 else min(len(m), len(p))
+    m, p = m[:n], p[:n]
+    keep = np.abs(p) > 1e-12
+    alpha = complex((m[keep] / p[keep]).mean())
+    resid = float(np.abs(m[keep] - alpha * p[keep]).max())
+    print('scalar\t%.9f%+.3ej' % (alpha.real, alpha.imag))
+    print('resid\t%.3e' % resid)
+    print('same_within_1e-6\t%s' % ('yes' if resid < 1e-6 else 'no'))
+elif cmd == 'tile':
+    x = read_iq(sys.argv[2])
+    p, a, b = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+    print('tile\t%s' % ('yes' if np.array_equal(x[a:a + p], x[b:b + p]) else 'no'))
+elif cmd == 'zero':
+    x = read_iq(sys.argv[2])
+    a, b = int(sys.argv[3]), int(sys.argv[4])
+    print('max\t%.3e' % float(np.abs(x[a:b]).max()))
+KATPY
+
+    # 12a. GPS L1 C/A, IS-GPS-200 3.2.2. At 1.023 Msps the code is one sample
+    #      per chip and the values are exactly +-1, so the module's peak
+    #      normalisation is the identity here (scale 1.0) and byte equality
+    #      with the producer is the honest assertion, not a tolerance. The
+    #      pulse train rides on the same build: n = 51150, on 0.01 s (10230
+    #      samples) / off 0.01 s, so --on/--off must blank 2 x 10230 = 20460
+    #      samples and keep 30690 (gated_samples counts what was blanked).
+    srows=$(jamd_py build "$d/gps.cf32" narrowband gps-ca cf32 1023000 0.05 \
+            1575420000 "" 1.0 0.01 0.01 20240101 0 "prn=7") || bad=$((bad + 1))
+    chk gps-ca-built "$(fld "$srows" constructed)" "yes"
+    chk gps-ca-producer "$(fld "$srows" producer)" \
+        "tools/phy_seqs.py gen --seq gps-ca (IS-GPS-200 3.2.2)"
+    chk gps-ca-gate "$(fld "$srows" gated_samples)" "20460"
+    chk gps-ca-duty "$(fld "$srows" duty_cycle)" "0.500"
+    chk gps-ca-peak "$(fld "$srows" peak_full_scale)" "1.0000"
+    python3 "$tools/phy_seqs.py" gen --seq gps-ca --prn 7 --rate 1023000 --secs 0.05 \
+            --format cf32 --out "$d/gps_prod.cf32" >/dev/null 2>&1
+    # The gate blanks the second window, so the comparison is the first ON
+    # window: 10230 samples x 8 bytes. Inside it the module's file and the
+    # producer's are the same bytes, because at --peak 1.0 the peak scaling of
+    # a +-1 code is the identity -- that is the byte-equality claim, and it is
+    # made about the samples the module keeps, not about the gate.
+    chk gps-ca-byte-equal \
+        "$(cmp -n $((10230 * 8)) "$d/gps.cf32" "$d/gps_prod.cf32" && echo yes || echo no)" "yes"
+    got=$(python3 "$d/kat.py" gps "$d/gps.cf32")
+    chk gps-ca-code "$(fld "$got" values)" "-1 1"
+    chk gps-ca-no-carrier "$(fld "$got" imag)" "0e+00"
+    chk gps-ca-period "$(fld "$got" period1023)" "yes"
+    chk gps-ca-gated-off "$(python3 "$d/kat.py" zero "$d/gps.cf32" 10230 20460 | \
+            awk -F'\t' '$1=="max"{print ($2==0)?"zero":"nonzero"}')" "zero"
+
+    # 12a2. The same shape through the integer writer. ci16 is the format whose
+    #       scale factor is not the float one's (32767, clipped), so it is the
+    #       writer that would silently clip a normalised signal: 51150 samples
+    #       x 4 bytes, and the sample read back off disk is still +-1 in full
+    #       scale, i.e. the waveform survived the writer.
+    srows=$(jamd_py build "$d/gps16.ci16" narrowband gps-ca ci16 1023000 0.05 \
+            1575420000 "" 1.0 1.0 0.0 20240101 0 "prn=7") || bad=$((bad + 1))
+    chk gps-ca-ci16-format "$(fld "$srows" format)" "ci16"
+    chk gps-ca-ci16-bytes "$(fld "$srows" bytes)" "204600"
+    got=$(python3 "$d/kat.py" peak "$d/gps16.ci16" ci16)
+    chk gps-ca-ci16-peak "$(fld "$got" peak)" "1.000000"
+    chk gps-ca-ci16-no-clip "$(fld "$got" within_full_scale)" "yes"
+
+    # 12b. PRACH, TS 36.211 5.7.2. At the preamble's own 1.04875 Mcps the
+    #      format-0 block is one sample per chip, where the CAZAC really is
+    #      constant modulus; at 20 Msps the producer's FFT resampling rounds
+    #      the block edges, so the modulus claim is measured at the rate it
+    #      holds at. This is also the one shape driven through the flag layer:
+    #      --root/--ncs have to reach the producer, and 839 sequence samples
+    #      is the published format-0 length.
+    srows=$(JAMD_LAB_AUTHORISED=1 jamd_tx_build --mode narrowband --shape prach \
+            --format cf32 --rate 1048750 --secs 0.01 --centre 2650MHz --peak 1.0 \
+            --root 1 --ncs 0 --out "$d/prach.cf32" 2>/dev/null) || bad=$((bad + 1))
+    chk prach-built "$(fld "$srows" constructed)" "yes"
+    chk prach-peak-le-full-scale "$(fld "$srows" peak_full_scale | awk '$1>1.0{f=1} END{print f?"no":"yes"}')" "yes"
+    chk prach-sequence-length "$(fld "$srows" seq_samples)" "839"
+    chk prach-root "$(fld "$srows" preamble_root_u)" "1"
+    python3 "$tools/phy_seqs.py" gen --seq prach --preamble 1 --ncs 0 --v 0 \
+            --rate 1048750 --secs 0.01 --format cf32 --out "$d/prach_prod.cf32" \
+            >/dev/null 2>&1
+    got=$(python3 "$d/kat.py" modulus "$d/prach.cf32")
+    chk prach-constant-modulus "$(fld "$got" constant_within_1e-6)" "yes"
+    got=$(python3 "$d/kat.py" scalar "$d/prach.cf32" "$d/prach_prod.cf32")
+    chk prach-not-invented "$(fld "$got" same_within_1e-6)" "yes"
+
+    # 12c. PSS, TS 36.211 6.11.1. The oracle is the CLI's 62 published
+    #      values: demodulate the module's own OFDM symbol, take the 62
+    #      subcarriers, and compare after removing the one complex scalar the
+    #      constructor's peak normalisation applies. 1e-5 relative, because
+    #      that scalar is recovered from the same 62 values it is removed
+    #      with; the observed residual is 2e-8.
+    srows=$(jamd_py build "$d/pss.cf32" narrowband pss cf32 15360000 0.01 \
+            2650000000 "" 1.0 1.0 0.0 20240101 0 "pci=42") || bad=$((bad + 1))
+    chk pss-built "$(fld "$srows" constructed)" "yes"
+    chk pss-peak-le-full-scale "$(fld "$srows" peak_full_scale | awk '$1>1.0{f=1} END{print f?"no":"yes"}')" "yes"
+    chk pss-occupied "$(fld "$srows" occupied_hz)" "1080000"
+    python3 "$tools/lte_phy.py" pss --n-id-2 0 > "$d/pss_cli.tsv"
+    got=$(python3 "$d/kat.py" sync "$d/pss.cf32" pss 42 "$d/pss_cli.tsv")
+    chk pss-samples-match-cli "$(fld "$got" same_within_1e-5)" "yes"
+    chk pss-reserved-empty "$(printf '%s\n' "$got" | \
+            awk -F'\t' '$1=="reserved"{print ($2<1e-6)?"yes":"no"}')" "yes"
+    sfile=$(printf '%s\n' "$(jamd_py characterise "$d/pss.cf32" cf32 15360000)" | \
+            awk -F'\t' '$1=="characterisation"{print $2}')
+    chk pss-verdict "$sfile" "narrowband"
+
+    # 12d. SSS, TS 36.211 6.11.2, same extraction on slot 0 symbol 5. The SSS
+    #      values are real +-1, so a phase rotation would show up as a complex
+    #      scalar where the CLI says real -- asserted through rel_err.
+    srows=$(jamd_py build "$d/sss.cf32" narrowband sss cf32 15360000 0.01 \
+            2650000000 "" 1.0 1.0 0.0 20240101 0 "pci=42") || bad=$((bad + 1))
+    chk sss-built "$(fld "$srows" constructed)" "yes"
+    chk sss-peak-le-full-scale "$(fld "$srows" peak_full_scale | awk '$1>1.0{f=1} END{print f?"no":"yes"}')" "yes"
+    chk sss-symbol "$(fld "$srows" lte_symbol)" "5"
+    python3 "$tools/lte_phy.py" sss --cell 42 > "$d/sss_cli.tsv"
+    got=$(python3 "$d/kat.py" sync "$d/sss.cf32" sss 42 "$d/sss_cli.tsv")
+    chk sss-samples-match-cli "$(fld "$got" same_within_1e-5)" "yes"
+    chk sss-occupied "$(fld "$srows" occupied_hz)" "1080000"
+
+    # 12e. PBCH, TS 36.211 6.6.4. There is no CLI verb that emits PBCH
+    #      samples, so the known answer is the CLI's codeword: demodulate the
+    #      240 PBCH resource elements of the module's own slot, read the 480
+    #      QPSK bits off the constellation (7.1.2 bit order), and compare that
+    #      hex against `lte_phy pbch --frame 0`. Nothing in the module's path
+    #      is reused to make the comparison, so a wrong map or a wrong
+    #      scrambling seed fails here.
+    srows=$(jamd_py build "$d/pbch.cf32" narrowband pbch cf32 15360000 0.01 \
+            2650000000 "" 1.0 1.0 0.0 20240101 0 "pci=42,mib=0,ports=1") || bad=$((bad + 1))
+    chk pbch-built "$(fld "$srows" constructed)" "yes"
+    chk pbch-peak-le-full-scale "$(fld "$srows" peak_full_scale | awk '$1>1.0{f=1} END{print f?"no":"yes"}')" "yes"
+    chk pbch-re-count "$(fld "$srows" pbch_re)" "240"
+    python3 "$tools/lte_phy.py" pbch 000000 --cell 42 --ports 1 --frame 0 | \
+            awk -F'\t' '$1=="frame0"{print tolower($2)}' > "$d/pbch_cli.txt"
+    got=$(python3 "$d/kat.py" pbch "$d/pbch.cf32" 42)
+    chk pbch-bits "$(fld "$got" bits)" "480"
+    chk pbch-codeword "$(fld "$got" hex)" "$(cat "$d/pbch_cli.txt")"
+    chk pbch-occupied "$(fld "$srows" occupied_hz)" "1080000"
+
+    # 12f. NR SSB. The seam test: the module must hand back exactly what
+    #      12_nr_air wrote. It cannot be byte equality, and the reason is in
+    #      the numbers -- 12_nr_air pulls its own full scale to 0.999999 to
+    #      stay below 1.0 after a read-back, and this module renormalises that
+    #      to --peak 1.0, so the two files differ by one scalar and by nothing
+    #      else. Residual tolerance 1e-6 of full scale (float32 rounding of a
+    #      single multiply writes ~6e-8); the observed residual is 4e-8.
+    srows=$(jamd_py build "$d/ssb.cf32" narrowband nr-ssb cf32 30720000 0.0002 \
+            3500000000 "" 1.0 1.0 0.0 20240101 0 "scs=30,n-rb=51,pci=1,i-ssb=0") \
+            || bad=$((bad + 1))
+    chk nr-ssb-built "$(fld "$srows" constructed)" "yes"
+    chk nr-ssb-peak-le-full-scale "$(fld "$srows" peak_full_scale | awk '$1>1.0{f=1} END{print f?"no":"yes"}')" "yes"
+    chk nr-ssb-producer "$(fld "$srows" producer)" \
+        "modules/12_nr_air.sh --ssb-waveform (TS 38.211 7.4.3)"
+    chk nr-ssb-burst "$(fld "$srows" ssb_burst_samples)" "4384"
+    bash "${IMSISTING_ROOT:-.}/modules/12_nr_air.sh" --ssb-waveform "$d/ssb_prod.cf32" \
+            --format cf32 --rate 30720000 --n-rb 51 --pci 1 --i-ssb 0 --scs 30 \
+            --reps 1 >/dev/null 2>&1
+    got=$(python3 "$d/kat.py" scalar "$d/ssb.cf32" "$d/ssb_prod.cf32" 4384)
+    chk nr-ssb-samples-are-producer "$(fld "$got" same_within_1e-6)" "yes"
+
+    # 12g. PRS. TS 36.211 6.10.4 is an RE-domain sequence: one sample per
+    #      resource element, so the module must report the producer's own rate
+    #      rather than resample it into a waveform nobody transmits. The
+    #      sidecar RE map is part of the product and must be carried over.
+    srows=$(jamd_py build "$d/prs.cf32" narrowband prs cf32 20000000 0.01 \
+            2650000000 "" 1.0 1.0 0.0 20240101 0 "pci=1,n-rb-prs=100,n-rb-dl=100") \
+            || bad=$((bad + 1))
+    chk prs-built "$(fld "$srows" constructed)" "yes"
+    chk prs-peak-le-full-scale "$(fld "$srows" peak_full_scale | awk '$1>1.0{f=1} END{print f?"no":"yes"}')" "yes"
+    chk prs-rate-is-re-domain "$(fld "$srows" rate)" "1760000"
+    chk prs-requested-rate "$(fld "$srows" requested_rate_hz)" "20000000"
+    chk prs-mapping-carried "$([[ -s "$d/prs.cf32.remap.tsv" ]] && echo yes || echo no)" "yes"
+    python3 "$tools/phy_seqs.py" gen --seq prs --pci 1 --n-rb-prs 100 --n-rb-dl 100 \
+            --secs 0.01 --format cf32 --out "$d/prs_prod.cf32" >/dev/null 2>&1
+    got=$(python3 "$d/kat.py" scalar "$d/prs.cf32" "$d/prs_prod.cf32")
+    chk prs-samples-are-producer "$(fld "$got" same_within_1e-6)" "yes"
+    chk prs-mapping-identical "$(cmp -s "$d/prs.cf32.remap.tsv" "$d/prs_prod.cf32.remap.tsv" && echo yes || echo no)" "yes"
+
+    # 12h. What is refused, and the reason reaching the caller. A refusal that
+    #      prints nothing is indistinguishable from a bug, so the reason is a
+    #      machine-readable row on stdout as well as ERROR/WHY on stderr.
+    srows=$(jamd_py build "$d/pucch.cf32" narrowband pucch cf32 15360000 0.01 \
+            2650000000 "" 1.0 1.0 0.0 20240101 0 "" 2>/dev/null); gaterc=$?
+    chk pucch-refused "$gaterc" "3"
+    chk pucch-wrote-nothing "$([[ -e "$d/pucch.cf32" ]] && echo yes || echo no)" "no"
+    chk pucch-reason "$(printf '%s\n' "$srows" | grep -c 'cinit_pucch')" "1"
+    srows=$(jamd_py build "$d/lte-ssb.cf32" narrowband lte-ssb cf32 15360000 0.01 \
+            2650000000 "" 1.0 1.0 0.0 20240101 0 "" 2>/dev/null); gaterc=$?
+    chk lte-ssb-refused "$gaterc" "3"
+    chk lte-ssb-reason-names-replacements \
+        "$(printf '%s\n' "$srows" | grep -c -- '--shape sss')" "1"
+    # A reference signal is narrowband by nature: barrage must be refused with
+    # the reason, not silently treated as narrowband.
+    got=$(jamd_py build "$d/x.cf32" barrage pss cf32 15360000 0.01 2650000000 "" \
+            1.0 1.0 0.0 20240101 0 "" 2>&1 >/dev/null); gaterc=$?
+    chk signal-shape-refuses-barrage "$gaterc" "2"
+    chk signal-shape-barrage-why "$(printf '%s\n' "$got" | grep -c '^WHY')" "1"
+    # An LTE shape at a rate lte_phy has no FFT for must say which rates it
+    # has, rather than modulating at the wrong sample rate.
+    got=$(jamd_py build "$d/x.cf32" narrowband pss cf32 1234567 0.01 2650000000 "" \
+            1.0 1.0 0.0 20240101 0 "" 2>&1 >/dev/null); gaterc=$?
+    chk lte-shape-refuses-unknown-rate "$gaterc" "2"
+    chk lte-shape-names-rates "$(printf '%s\n' "$got" | grep -c '15360000')" "1"
+    # A --band the capture cannot hold is a usage error whichever branch builds
+    # the samples. The producer branch used to answer it with rc 0, writing a
+    # file whose band row named a width the samples do not cover; the
+    # synthesised branch answered with rc 1, which reads as an internal fault.
+    # Both now refuse with rc 2, say why, and leave nothing behind.
+    srows=$(jamd_py build "$d/band_wider.cf32" narrowband awgn cf32 1000000 \
+            0.02 1840000000 5000000 1.0 1.0 0.0 20240101 0 "" 2>&1 >/dev/null); gaterc=$?
+    chk band-wider-than-rate-refused "$gaterc" "2"
+    chk band-wider-than-rate-why "$(printf '%s\n' "$srows" | grep -c '^WHY')" "1"
+    srows=$(jamd_py build "$d/band_wider_ref.cf32" narrowband gps-ca cf32 2000000 \
+            0.01 1575420000 5000000 1.0 1.0 0.0 20240101 0 "prn=7" \
+            2>&1 >/dev/null); gaterc=$?
+    chk band-wider-than-rate-refsignal-refused "$gaterc" "2"
+    chk band-wider-than-rate-refsignal-why "$(printf '%s\n' "$srows" | grep -c '^WHY')" "1"
+    chk band-wider-than-rate-writes-nothing \
+        "$([[ -e "$d/band_wider.cf32" || -e "$d/band_wider_ref.cf32" ]] && echo yes || echo no)" "no"
+    # The flag layer refuses a name it does not know before it reaches python.
+    chk tx-build-unknown-shape "$(JAMD_LAB_AUTHORISED=1 jamd_tx_build --mode narrowband \
+            --shape wobble --format cf32 --rate 15360000 --centre 2650MHz \
+            --out "$d/x.cf32" >/dev/null 2>&1; echo $?)" "2"
+
+    # 12i. The shape table is answered by both verbs, and the bash-side name
+    #      list cannot drift from the python one without this failing.
+    out=$(jamd_cli_main --shapes 2>/dev/null)
+    chk shapes-verb-shapes "$(fld "$out" shapes)" "awgn cw chirp pss sss pbch prach prs gps-ca nr-ssb"
+    chk shapes-verb-refused "$(fld "$out" shapes_refused)" "lte-ssb pucch"
+    chk shapes-verb-nrssb "$(printf '%s\n' "$out" | awk -F'\t' \
+            '$1=="shape_producer"&&$2=="nr-ssb"{print $3}')" \
+        "modules/12_nr_air.sh --ssb-waveform (TS 38.211 7.4.3)"
+    chk shapes-verb-ungated "$(jamd_cli_main --shapes 2>&1 >/dev/null | grep -c '^WARNING')" "0"
+    chk shapes-names-agree "$(for n in $JAMD_TX_SHAPE_NAMES; do
+            printf '%s\n' "$out" | awk -F'\t' -v n="$n" \
+                '($1=="shape_producer"||$1=="shape_refused_reason")&&$2==n{f=1} END{exit !f}' \
+                || echo "$n"; done | wc -l)" "0"
+    chk status-names-shapes "$(jamd_cli_status_tsv | awk -F'\t' '$1=="shapes"{print $2}')" \
+        "awgn cw chirp pss sss pbch prach prs gps-ca nr-ssb"
+
+    # 12j. A PRACH-shaped capture is the analyser's own measurement of a real
+    #      preamble: one 1.04875 MHz slice of a 20 MHz span, which is what
+    #      "narrowband" means here. This is the fixture added for the new
+    #      shapes, and its label is the verdict it must get.
+    out=$(jamd_cmd_fixture prach "$d/fx_prach.cf32" --rate 20000000 --secs 0.02) \
+            || bad=$((bad + 1))
+    chk fixture-prach-label "$(fld "$out" expected_verdict)" "narrowband"
+    got=$(jamd_py characterise "$d/fx_prach.cf32" cf32 20000000)
+    chk fixture-prach-verdict "$(fld "$got" characterisation)" "narrowband"
+    chk fixture-prach-occupies-slice "$(printf '%s\n' "$got" | \
+            awk -F'\t' '$1=="occupied_fraction"{print ($2<0.25)?"yes":"no"}')" "yes"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
     trap - EXIT
@@ -1661,6 +2699,7 @@ jamd_menu() {
   [5]  discriminate: jamming / congestion / coverage hole
   [6]  write a regulatory report (confirmed jamming only)
   [7]  scope check (no transmit path)
+  [8]  shapes: what can be built and which tool produces each signal
   [0]  back
 
 M
@@ -1684,6 +2723,8 @@ M
             6) jamd_report | column -t -s$'\t' 2>/dev/null || true
                read -rp "  press enter " _ ;;
             7) jamd_scope_check; read -rp "  press enter " _ ;;
+            8) jamd_cmd_shapes | column -t -s$'\t' 2>/dev/null || true
+               read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1703,6 +2744,7 @@ jamd_cli_main() {
         --discriminate)            jamd_discriminate "${1:-}" ;;
         --report)                  jamd_report "${1:-}" ;;
         --fixture)                 jamd_cmd_fixture "$@" ;;
+        --shapes)                  jamd_cmd_shapes ;;
         --tx-status)               jamd_cmd_tx_status ;;
         --tx-build)                jamd_tx_build "$@" ;;
         --selftest)                jamd_selftest ;;
@@ -1719,16 +2761,35 @@ Usage: $0 COMMAND
   --counters <file>                         merge receiver counters into the record
   --discriminate [record]                   jamming / congestion / coverage hole
   --report [record]                         regulatory report (jamming only)
-  --fixture <clean|raised|narrow> <out>     write a capture whose verdict is known
+  --fixture <clean|raised|narrow|prach> <out>
+                                            write a capture whose verdict is known
              [--format cf32|ci16|cu8] [--rate <sps>] [--secs <s>]
-  --tx-status                               the disclaimer, the gate and the radio
-  --tx-build [--mode barrage|narrowband] [--shape awgn|cw|chirp|lte-ssb]
+  --tx-status                               the disclaimer, the gate, the radio,
+                                            every shape and where it comes from
+  --shapes                                  shapes, their producers, and the
+                                            names this module refuses, with why
+  --tx-build [--mode barrage|narrowband] [--shape <name>]
              [--format cf32|ci16|cu8] [--rate <sps>] [--secs <s>]
              --centre <MHz>|--earfcn <n> [--band <Hz>] [--peak <0..1>]
              [--on <s>] [--off <s>] [--seed <n>] [--out <path>]
                                             construct a waveform, no radio needed
   --selftest                                verify feature math and branches
   --menu                                    interactive menu
+
+Shapes and the producer each one's samples come from (--shapes prints this):
+  awgn cw chirp            synthesised here, numpy
+  pss sss pbch             tools/lte_phy.py  (TS 36.211 6.11.1, 6.11.2, 6.6.4)
+  prach                    tools/phy_seqs.py gen --seq prach  (TS 36.211 5.7.2)
+  prs                      tools/phy_seqs.py gen --seq prs    (TS 36.211 6.10.4)
+  gps-ca                   tools/phy_seqs.py gen --seq gps-ca (IS-GPS-200 3.2.2)
+  nr-ssb                   modules/12_nr_air.sh --ssb-waveform (TS 38.211 7.4.3)
+A reference-signal shape is built in --mode narrowband only, at the rate its
+producer samples at (LTE: 1920000 3840000 7680000 15360000 23040000 30720000;
+NR SSB: --rate must be N_FFT x --scs; prs is RE-domain and ignores --rate).
+Refused by name, with the reason in --shapes: lte-ssb (now pss/sss/pbch),
+pucch (no sequence in tools/lte_phy.py).
+Producer parameters, all optional: --prn --pci --root --ncs --v --i-ssb
+--n-rb --ports --mib --n-rb-prs --n-rb-dl --scs.
 
 Formats: cf32 (interleaved float32), ci16 (interleaved int16), cu8 (interleaved
 uint8). Detection needs no gate and no radio. --tx-build constructs a waveform

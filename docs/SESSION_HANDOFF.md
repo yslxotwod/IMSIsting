@@ -166,6 +166,32 @@ What replaces a gate, and what a reviewer should check instead:
 `33_jamming_detect` is the last module that still gates, from an explicit Phase 9
 decision; it is a one-function removal if that is revisited.
 
+### Four from the Phase 14 build wave
+
+1. **An oracle that shares the module's assumption is not an oracle.** GTPv2-C IEs were
+   emitted with 4-octet padding by `lcore_gtpc_ie`, and `tools/gtp-oracle/check_gtp_codec.py`
+   padded the same way, so the suite was green while tshark 4.2.2 called every message
+   `[Malformed Packet: GTPv2]`. TS 29.274 §8.2 makes Length the actual length and defines no
+   padding; the 4-octet alignment is GTPv1-C (TS 29.060). Both were fixed the same day. The
+   test for an oracle is not "does the module agree with it" but "could the two have been
+   wrong together".
+2. **`to_aper()` is aligned PER and `to_uper()` is not.** pycrate exposes both; LPP and RRC
+   in this tree are unaligned. Getting this backwards produces correct-looking octets that
+   agree with nothing on the wire.
+3. **A generated table is only as useful as its roots.** `tools/lte_rrc_layout.py` carried
+   fifteen roots — every SIB plus reconfiguration and handover — and no DCCH or CCCH message
+   root, so three message builders could not encode a message at all. The builders refused
+   honestly (`builders_ready 0`, rc 3) instead of emitting a body without its envelope, which
+   is how the gap survived review. Adding `UL-DCCH-Message`, `DL-DCCH-Message` and
+   `DL-CCCH-Message` to `DEFAULT_TYPES` in `tools/asn1gen.py` and regenerating took the table
+   from 15 to 18 roots and 1579 types, and `verify_rrc.py` re-certified it at 0 mismatches.
+4. **A flag name is not free: `modifier_re` in `tools/check-verbs.sh` is a hand-kept list.**
+   Widening it to a name another module already uses as a verb silently stops requiring a
+   control for that verb (`device` did exactly that to `52_stk --device`, and came straight
+   back out). The list is now the only lint in the tree that must be edited by hand after
+   every build wave; if a token is a real verb anywhere, place it in a group and let a button
+   pass it.
+
 ### Two from the Phase 16 message builders
 
 1. **An oracle that decodes the artefact is worth more than a round-trip.** The
