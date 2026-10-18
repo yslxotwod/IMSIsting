@@ -1602,6 +1602,41 @@ verb over a capture or a session log; and the SQN/resynchronisation behaviour,
 which is where the SUCI and the 5G-AKA halves meet `14_suci`'s profile A/B work.
 All of it is software over bytes already parsed — no radio, no core.
 
+**Built.** `tools/nas_auth_oracle.py`, reached from `19_cipher_audit` as
+`--auth-causes [eps|5gs]`, `--auth-session <tsv|->` and
+`--sqn-recover <ki> <op|opc> <material> <rand> <auts>`.
+
+The table says what each cause **proves**, not what it means to the UE: cause 20
+proves the network holds a key for this identity and that a real subscriber
+answered a challenge that did not come from its home network; cause 21 proves the
+key was right and the counter was out of range, the strongest confirmation an
+attacker gets without the key, and it arrives with AUTS; cause 2 proves the
+identity is not provisioned here. Both registries are checked number-for-number
+against tshark's own tables by `tools/check-auth-oracle.sh` — 14 of the 38 EMM
+causes and 12 of the 46 5GMM causes are tabulated, and the omitted ones are those
+that say nothing about an authentication stage, so the count is reported instead
+of the table pretending to be the whole registry. An unlisted cause is reported
+`unknown`, never as harmless: the same rule `--score` applies to an unknown
+algorithm.
+
+The session half groups outcomes by identity and says whether they are
+distinguishable and on which axis — cause, timing or retry count. Both sides of
+the bar are asserted: injected causes are identified, timing alone is enough when
+the causes agree, and a legitimate exchange with no failure cause is not flagged;
+two identical failures with nothing else separating them come out `uniform`,
+which is the false-positive case a naive detector gets wrong.
+
+The SQN half is `AUTS = (SQN xor f5*) || MAC-S`, so with the Ki the counter falls
+out in one XOR. Verified on TS 35.208 test set 1 — the sequence number recovered
+from a constructed AUTS is `ff9bb4d0b607`, and the OPC spelling of the same key
+agrees — with Milenage asked for from `tools/gsm_crypto.py` rather than
+re-implemented. Without the Ki the verb has nothing to say and says so, which
+makes it own-SIM only, like Phase 6 and Phase 18.
+
+Still absent: nothing here observes a live network. The cause rows are an
+analyst's reading of a session log, and the timing axis is whatever the log
+recorded — the module measures what it is given and does not infer a schedule.
+
 **Phase 18 — SIM applet abuse.** `52_stk`, `41_ota_sms`.
 
 This is WIBattack's actual vector, and the tree has every piece except the one

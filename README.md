@@ -151,10 +151,19 @@ or CCID call and no APDU exchange loop in the module.
 |---|---|---|
 | `17_pcap_analysis` | pcap/pcapng dissection with a self-contained reader | `none` |
 | `18_imsi_exposure` | Identity harvest, TMSI→IMSI correlation, exposure scoring | `built` |
-| `19_cipher_audit` | Negotiated cipher scoring and downgrade detection | `none` |
+| `19_cipher_audit` | Negotiated cipher scoring, downgrade detection, authentication-failure oracle | `none` |
 
 `19_cipher_audit` detects a downgrade; it does not perform one — there is no
-Security Mode Command injector and no A5/0 forcing anywhere in it.
+Security Mode Command injector and no A5/0 forcing anywhere in it. Its
+authentication side answers the question the cause codes exist to hide: an MME
+that says MAC failure, SYNCH failure or unknown-subscriber, on its own schedule,
+tells an observer which of the three it hit and whether the key was right. The
+cause table is read from TS 24.301 and TS 24.501 and checked number-for-number
+against tshark's two registries by `tools/check-auth-oracle.sh`, so the table is
+not this tree's opinion. `--sqn-recover` completes the SYNCH failure: AUTS
+conceals the subscriber's sequence number under `f5*`, so with the Ki — an own
+card, an own testbed — the counter falls out in one XOR, and without it stays
+concealed.
 
 ### Scanners
 | Module | Description | Attack |
@@ -377,6 +386,7 @@ and yet the APDU codec underneath it is real.
 | ReVoLTE keystream reuse | `30_volte_ims` | `partial` | Key-reuse detection and recovery are computed code. The over-the-air capture path is Phase 5. |
 | GEA downgrade — GPRS/EDGE | `50_gprs` | `partial` | GEA parameters, APN and PDP IEs encode for real, and a GEA downgrade is detected. Performing one needs an attach injector, which is Phase 10. |
 | Cipher audit (detection only) | `19_cipher_audit` | `built` | Scores the negotiated cipher and detects a downgrade. It does not perform one — there is no Security Mode Command injector anywhere in it. |
+| Authentication oracle | `19_cipher_audit` | `built` | Reads the EMM and 5GMM cause tables against what each proves, groups outcomes by identity and says whether they are distinguishable, and recovers the SQN a UE conceals in AUTS. Needs the Ki for that last part, so it is own-SIM only. |
 
 ### Signalling forgery — NAS, RRC and SIB
 
@@ -783,6 +793,7 @@ often identifies the problem with no hardware attached.
 ./tools/check-xnap-codec.sh       # XnAP octets vs pycrate and the clause
 ./tools/check-rua-codec.sh        # RUA octets vs pycrate and the clause
 ./tools/check-ranap-codec.sh      # RANAP octets vs pycrate and the clause
+./tools/check-auth-oracle.sh      # EMM and 5GMM causes vs tshark's registries
 ./tools/gen-module-index.sh       # regenerate the index
 ./tools/gen-icons-xml.sh --check  # the bundled icon set matches the tree
 ```

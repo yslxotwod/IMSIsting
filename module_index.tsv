@@ -18,7 +18,7 @@ MODULE	NAME	CATEGORY	VERBS	SELFTEST	HAS_INFO
 16_sim	SIM / eSIM / OTA Attacks	SIM / IDENTITY	--build-apdu --decode-ad --decode-iccid --decode-imsi --dpa-model --dpa-sim --dpa-sweep --file-id --get-response --menu --ota-key --parse-apdu --parse-ota --plan --read-binary --read-record --rsp --select-fid --selftest --spi --status-tsv 	1	0
 17_pcap_analysis	Capture Analysis	ANALYSIS	--build-sample --clear --conversations --extract --hierarchy --identities --ident-list --list --menu --selftest --status-tsv --summary 	1	0
 18_imsi_exposure	IMSI Harvest	SIM / IDENTITY	--audit --clear --cross --exposure-tsv --harvest --identities --map --marlin --marlin-msgs --menu --redact --report --selftest --status-tsv --subscribers-tsv 	1	0
-19_cipher_audit	Cipher Audit	ANALYSIS	--clear --downgrade-check --from-pcap --menu --parse-smc --score --selftest --session --sessions-load --status-tsv --table 	1	0
+19_cipher_audit	Cipher Audit	ANALYSIS	--auth-causes --auth-session --clear --downgrade-check --from-pcap --menu --parse-smc --score --selftest --session --sessions-load --sqn-recover --status-tsv --table 	1	0
 20_gsm_cve	GSM/UMTS CVE Kit	EXPLOIT KITS	--bcd --kc --list-cves --list-findings --menu --plan --probe --run-cve --runs-tsv --selftest --status-tsv 	1	0
 21_lte_cve	LTE CVE Kit	EXPLOIT KITS	--list-cves --menu --plan --plmn --probe --run-cve --runs-tsv --selftest --status-tsv --teid 	1	0
 22_nr_cve	5G CVE Kit	EXPLOIT KITS	--list-cves --list-findings --menu --plan --probe --run-cve --runs-tsv --selftest --snssai --status-tsv 	1	0

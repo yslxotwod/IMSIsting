@@ -14856,6 +14856,13 @@ static ModuleSubmenuEntry caud_entries[] = {
     { "Sessions",
       "document-open-symbolic",
       "#LOAD|--sessions-load:Load Sessions|~--session|#MANAGE|--clear:Clear" },
+    /* The failure side of authentication: the cause table says what a network
+       tells an observer by answering one way rather than another, and the
+       sequence-number verb recovers the counter a UE conceals in AUTS. Both
+       take arguments, so both render as an entry and a Run button. */
+    { "Authentication",
+      "auth-smartcard-symbolic",
+      "--auth-causes:Causes|~--auth-session:Session Outcomes|~--sqn-recover:Sequence Number" },
 };
 /* ── The CVE catalogue ───────────────────────────────────────────────────────
 

@@ -52,6 +52,12 @@ mkdir -p "$MOD_TMP" "$CAUD_DIR" 2>/dev/null
 # Module 21, used only to pull an SMC out of a capture. Optional: every
 # encoding and scoring path here works without it.
 CAUD_PCAP_MOD="${CAUD_PCAP_MOD:-$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/17_pcap_analysis.sh}"
+# The authentication half of this module is a calculator, not a table, and
+# it lives in tools/ so other modules can ask it the same questions.
+# Missing is a stated error, never a silently empty table.
+if [[ -z "${CAUD_AUTH_ORACLE:-}" ]]; then
+    CAUD_AUTH_ORACLE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/nas_auth_oracle.py"
+fi
 
 # ── sanitisation ────────────────────────────────────────────────────────
 caud_sanitize() {
@@ -765,6 +771,71 @@ caud_cmd_sessions_load() {
     printf 'loaded\t%s\ntotal\t%s\n' "$added" "$(caud_session_count)"
 }
 
+# ── authentication failures: what each one proves ───────────────────────
+# TS 24.301 §9.9.3.9 and TS 24.501 §9.7 as an oracle rather than a table: the
+# interesting column is not the cause's name but what the network just told an
+# observer by choosing it. The tables are refereed against tshark's registries
+# by tools/check-auth-oracle.sh, so this module does not get to invent them.
+caud_auth_available() {
+    [[ -n "$CAUD_AUTH_ORACLE" && -f "$CAUD_AUTH_ORACLE" && -r "$CAUD_AUTH_ORACLE" ]]
+}
+
+caud_auth_tool() {
+    caud_auth_available || {
+        printf 'ERROR\ttools/nas_auth_oracle.py is missing at %s\n' \
+            "$(caud_sanitize "$CAUD_AUTH_ORACLE")" >&2
+        return 1
+    }
+    python3 "$CAUD_AUTH_ORACLE" "$@"
+}
+
+caud_cmd_auth_causes() {
+    local gen="${1:-eps}"
+    case "${gen,,}" in
+        eps|4g|lte) gen=eps ;;
+        5gs|5g|nr)  gen=5gs ;;
+        *) printf 'ERROR\tusage: --auth-causes [eps|5gs]\n' >&2; return 2 ;;
+    esac
+    caud_auth_tool causes --gen "$gen" | awk -F'\t' '
+        NF == 0 { if (c != "") print c "\t" m "\t" n "\t" s "\t" p; c = ""; next }
+        $1 == "cause"      { c = $2 }
+        $1 == "mechanism"  { m = $2 }
+        $1 == "name"       { n = $2 }
+        $1 == "auth-stage" { s = $2 }
+        $1 == "proves"     { p = $2 }
+        END { if (c != "") print c "\t" m "\t" n "\t" s "\t" p }
+    ' | {
+        printf 'cause\tmechanism\tname\tauth_stage\tproves\n'
+        cat
+    }
+}
+
+caud_cmd_auth_session() {
+    local f="${1:-}"
+    [[ -n "$f" ]] || { printf 'ERROR\tusage: --auth-session <tsv|->\n' >&2; return 2; }
+    if [[ "$f" != "-" && ! -f "$f" ]]; then
+        printf 'ERROR\tno such file: %s\n' "$(caud_sanitize "$f")" >&2
+        return 1
+    fi
+    caud_auth_tool session "$f"
+}
+
+caud_cmd_sqn_recover() {
+    local ki="${1:-}" scheme="${2:-}" material="${3:-}" rand="${4:-}" auts="${5:-}"
+    if [[ -z "$auts" ]]; then
+        printf 'ERROR\tusage: --sqn-recover <ki> <op|opc> <material> <rand> <auts>\n' >&2
+        return 2
+    fi
+    local flag
+    case "${scheme,,}" in
+        op)  flag=--op ;;
+        opc) flag=--opc ;;
+        *) printf 'ERROR\t%s is neither op nor opc\n' "$(caud_sanitize "$scheme")" >&2
+           return 2 ;;
+    esac
+    caud_auth_tool recover-sqn --ki "$ki" "$flag" "$material" --rand "$rand" --auts "$auts"
+}
+
 # ── capture-driven SMC extraction ───────────────────────────────────────
 caud_pcap_available() {
     [[ -n "$CAUD_PCAP_MOD" && -f "$CAUD_PCAP_MOD" && -r "$CAUD_PCAP_MOD" ]]
@@ -804,6 +875,8 @@ caud_cli_status_tsv() {
     printf 'sessions_file\t%s\n' "$CAUD_SESSIONS"
     printf 'pcap_module\t%s\n' "$(caud_sanitize "$CAUD_PCAP_MOD")"
     printf 'pcap_available\t%s\n' "$(caud_pcap_available && echo present || echo missing)"
+    printf 'auth_oracle\t%s\n' "$(caud_sanitize "$CAUD_AUTH_ORACLE")"
+    printf 'auth_available\t%s\n' "$(caud_auth_available && echo present || echo missing)"
     printf 'dir\t%s\n'         "$CAUD_DIR"
 }
 
@@ -1232,8 +1305,88 @@ caud_selftest() {
     chk status-5g    "$(fld "$out" 5g_algs)"   "9"
     chk status-dir   "$(fld "$out" dir)"       "$CAUD_DIR"
     chk status-file  "$(fld "$out" sessions_file)" "$CAUD_SESSIONS"
+    chk status-auth  "$(fld "$out" auth_available)" "present"
     chk status-sess  "$(fld "$out" sessions)"  "1"
 
+
+    # ── 16. Authentication failures: what each cause proves, and AUTS ────
+    # The cause table is refereed against tshark's registries by
+    # tools/check-auth-oracle.sh; here the module's own plumbing is checked.
+    chk auth-tool-present "$(caud_auth_available; echo $?)" "0"
+    out=$(caud_cmd_auth_causes eps); rc=$?
+    chk auth-causes-rc     "$rc" "0"
+    chk auth-causes-header "$(printf '%s\n' "$out" | head -n1)" \
+        "$(printf 'cause\tmechanism\tname\tauth_stage\tproves')"
+    chk auth-causes-count  "$(printf '%s\n' "$out" | tail -n +2 | grep -c .)" "14"
+    chk auth-causes-mac    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="20"{print $3}')" \
+        "MAC failure"
+    chk auth-causes-synch  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="21"{print $3}')" \
+        "Synch failure"
+    chk auth-causes-mac-proves-key \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="20"{print ($5 ~ /holds a key/)?"yes":"no"}')" \
+        "yes"
+    chk auth-causes-synch-proves-key \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="21"{print ($5 ~ /key is right/)?"yes":"no"}')" \
+        "yes"
+    chk auth-causes-5gs    "$(caud_cmd_auth_causes 5gs | awk -F'\t' '$1=="21"{print $3}')" \
+        "Synch failure"
+    chk auth-causes-5gs-gen "$(caud_cmd_auth_causes 5gs | awk -F'\t' '$1=="21"{print $2}')" \
+        "5GMM"
+    chk auth-causes-badgen  "$(caud_cmd_auth_causes bogus >/dev/null 2>&1; echo $?)" "2"
+    chk auth-causes-alias   "$(caud_cmd_auth_causes 5g | tail -n +2 | grep -c .)" "12"
+
+    # Two identities: one whose failures differ per cause, one that never
+    # failed. The bar has two sides, and the second is the easy one to miss.
+    printf 'identity\tcause\tms\tretries\n' > "$d/auth_sessions.tsv"
+    printf '310260000000001\t20\t40\t1\n'  >> "$d/auth_sessions.tsv"
+    printf '310260000000001\t21\t120\t2\n' >> "$d/auth_sessions.tsv"
+    printf '310260000000002\t0\t55\t0\n'   >> "$d/auth_sessions.tsv"
+    out=$(caud_cmd_auth_session "$d/auth_sessions.tsv")
+    chk auth-session-distinguishable \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="identity.310260000000001.verdict"{print $2}')" \
+        "distinguishable"
+    chk auth-session-axis \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="identity.310260000000001.axis"{print $2}')" \
+        "cause,timing,retries"
+    chk auth-session-uniform \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="identity.310260000000002.verdict"{print $2}')" \
+        "uniform"
+    chk auth-session-legit-no-failures \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="identity.310260000000002.failures"{print $2}')" \
+        "0"
+    # Uniform failures on one cause must not be called distinguishable when
+    # neither the timings nor the retry counts separate them.
+    printf 'identity\tcause\tms\tretries\n' > "$d/auth_uniform.tsv"
+    printf '310260000000003\t20\t40\t1\n'  >> "$d/auth_uniform.tsv"
+    printf '310260000000003\t20\t41\t1\n'  >> "$d/auth_uniform.tsv"
+    chk auth-session-uniform-failures \
+        "$(caud_cmd_auth_session "$d/auth_uniform.tsv" \
+           | awk -F'\t' '$1=="identity.310260000000003.verdict"{print $2}')" \
+        "uniform"
+    chk auth-session-missing "$(caud_cmd_auth_session /nope >/dev/null 2>&1; echo $?)" "1"
+    chk auth-session-usage   "$(caud_cmd_auth_session >/dev/null 2>&1; echo $?)" "2"
+
+    # AUTS -> SQN on TS 35.208 test set 1. The AUTS below is (SQN xor f5*)
+    # followed by a stand-in MAC-S; only the concealment half is this tree's.
+    out=$(caud_cmd_sqn_recover \
+        465b5ce8b199b49faa5f0a2ee238a6bc op \
+        cdc202d5123e20f62b6d676ac72cb318 \
+        23553cbe9637a89d218ae64dae47bf35 \
+        ba853f3c123caabbccddeeff0011)
+    chk sqn-recover-test-set-1 \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="sqn"{print $2}')" "ff9bb4d0b607"
+    chk sqn-recover-ak \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="auts-ak-star"{print $2}')" \
+        "451e8beca43b"
+    chk sqn-recover-ind \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="sqn-ind"{print $2}')" "7"
+    chk sqn-recover-badscheme \
+        "$(caud_cmd_sqn_recover a nope b c d >/dev/null 2>&1; echo $?)" "2"
+    chk sqn-recover-usage "$(caud_cmd_sqn_recover >/dev/null 2>&1; echo $?)" "2"
+    chk sqn-recover-short-auts \
+        "$(caud_cmd_sqn_recover 465b5ce8b199b49faa5f0a2ee238a6bc op \
+            cdc202d5123e20f62b6d676ac72cb318 \
+            23553cbe9637a89d218ae64dae47bf35 aabb >/dev/null 2>&1; echo $?)" "1"
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1310,6 +1463,9 @@ caud_cli_main() {
         --sessions-load)   caud_cmd_sessions_load "${1:-}" ;;
         --from-pcap)       caud_cmd_from_pcap "${1:-}" "${2:-1}" ;;
         --clear)           caud_cmd_clear ;;
+        --auth-causes)     caud_cmd_auth_causes "${1:-eps}" ;;
+        --auth-session)    caud_cmd_auth_session "${1:-}" ;;
+        --sqn-recover)     caud_cmd_sqn_recover "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
         --selftest)        caud_selftest ;;
         --menu)            caud_menu ;;
         *)
@@ -1330,6 +1486,14 @@ Usage: $0 COMMAND
   --sessions-load <tsv>            load sessions from a TSV
   --from-pcap <pcap> [frame]       pull an SMC out of a capture (module 17)
   --clear                          empty the session store
+  --auth-causes [eps|5gs]          authentication causes, and what each one
+                                   proves about the subscriber behind it
+  --auth-session <tsv|->           authentication outcomes grouped by identity;
+                                   says whether the failures are distinguishable
+                                   on cause, timing or retry count
+  --sqn-recover <ki> <op|opc> <material> <rand> <auts>
+                                   recover the sequence number a UE conceals
+                                   in AUTS on SYNCH failure (own K only)
   --selftest                       verify tables, scoring and parsing
   --menu                           interactive menu
 
