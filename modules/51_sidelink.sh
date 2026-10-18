@@ -75,9 +75,12 @@ slnk_subchannels() {
         "$bwp" "$sub" "$(( bwp / sub ))" "$(( bwp % sub ))"
 }
 
-# ── SCI-1A frequency resource indicator width (TS 38.212 §8.3.1.1) ──────
+# ── SCI-1A frequency resource indicator width (TS 38.212 §7.3.1.1) ──────
 # Start-and-length is encoded over N*(N+1)/2 states, so the field is
-# ceil(log2(N*(N+1)/2)) bits.
+# ceil(log2(N*(N+1)/2)) bits, and it is absent (0 bits) when N=1 because the
+# only legal assignment is the single subchannel. The clause is 7.3.1.1, the
+# SCI format 1-A payload; earlier revisions of this comment cited 8.3.1.1,
+# which is the CRC and channel-coding clause, not the payload layout.
 slnk_freq_bits() {
     local n="${1:-}"
     [[ "$n" =~ ^[1-9][0-9]*$ ]] || { printf 'ERROR\tsubchannel count must be positive\n' >&2; return 2; }
@@ -101,19 +104,27 @@ slnk_l2id() {
 }
 
 slnk_sci_1a() {
-    cat <<'EOF'
-field	bits	meaning
-priority	3	PPPP (1..8)
-freq_resource_assignment	var	start subchannel + number of subchannels
-time_resource_assignment	5	up to three resources
-resource_reservation_period	5	periodic reservation
-dmrs_pattern	2	DMRS pattern
-sci_format_2a	1	whether a second-stage SCI follows
-beta_offset	2	SCI-2A beta offset
-num_dmrs	1	number of DMRS symbols
-mcs	5	modulation and coding scheme
-psfch_overhead	2	PSFCH symbol overhead
-EOF
+    # This used to print a ten-row table of bit widths. Several were not the
+    # widths in TS 38.212 Table 7.3.1.1.1-1: it said 5 bits for the resource
+    # reservation period (the table has 4), 2 for the DMRS pattern (1), 1 for
+    # the second-stage SCI format (2) and 2 for the PSFCH overhead (0 or 1).
+    # A table of numbers that reads like a decoder and is wrong is worse than
+    # no table, because a reader sizes a parser from it.
+    #
+    # The widths are not recoverable from anything in this tree. SCI format 1-A
+    # is a bit-packed PSCCH payload defined by TS 38.212 clause 7.3.1.1, not an
+    # ASN.1 IE, so there is no pycrate module to generate a layout table from
+    # and no oracle here to certify one against -- the generators cover ASN.1
+    # families only (tools/asn1gen.py: rrc, lpp, nbiot).
+    #
+    # What this module CAN prove is the one field whose width is arithmetic:
+    # the frequency resource assignment, encoded start-and-length over
+    # N(N+1)/2 states, which is why --freq-bits exists and is checked.
+    printf 'ERROR\tSCI format 1-A field widths are not decoded here\n' >&2
+    printf 'WHY\tSCI-1A is a bit-packed payload defined by TS 38.212 clause 7.3.1.1, not an ASN.1 IE, so no layout table in this tree can describe it and no oracle here can certify one. The table this verb used to print carried widths that did not match Table 7.3.1.1.1-1.\n' >&2
+    printf 'WHAT IS REAL\t--freq-bits <subchannels> computes the frequency resource assignment width from the start-and-length encoding: ceil(log2(N(N+1)/2)) bits.\n' >&2
+    printf 'NEXT\tadd a hand-written, clause-cited SCI-1A field table with a known-answer check against one captured PSCCH payload before any verb claims to parse one\n' >&2
+    return 2
 }
 
 slnk_its() {
@@ -122,6 +133,7 @@ certificate	type	purpose
 enrollment	ETSI TS 102 941	long-term; proves the ITS station to the authority
 authorization	ETSI TS 102 941	short-term pseudonym; signs CAM/DENM, rotated frequently
 application	ETSI TS 102 940	scoped to an application (e.g., platooning)
+note	reference	these are the certificate roles as the cited clauses define them; this module builds no certificate and validates none
 EOF
 }
 
@@ -165,7 +177,7 @@ status	handoff
 what	observing or emulating PC5 sidelink
 hardware	an SDR with transmit for a UE-side sidelink (USRP/BladeRF), or two UEs with V2X enabled
 software	srsRAN with sidelink support, or a UE test bench with the PC5 stack; an ITS PKI for the certificate layer
-flow	1. --subchannels and --freq-bits for a pool  2. --sci1a for the field layout  3. --relay-check on a relay config
+flow	1. --subchannels and --freq-bits for a pool  2. --its for the certificate roles  3. --relay-check on a relay config
 note	transmitting PC5 into the V2X band needs a licence and an ITS credential; this module analyses pools and configs
 EOF
 }
@@ -209,10 +221,12 @@ slnk_selftest() {
     chk l2id   "$(fld "$(slnk_l2id ffffff)" value)" "16777215"
     chk l2id-bad "$(slnk_l2id 1234567 >/dev/null 2>&1; echo $?)" "2"
 
-    # 4. Layout and certificate tables.
-    chk sci-mcs "$(slnk_sci_1a | awk -F'\t' '$1=="mcs"{print $2}')" "5"
-    chk sci-prio "$(slnk_sci_1a | awk -F'\t' '$1=="priority"{print $2}')" "3"
+    # 4. The SCI-1A reference refuses, and the certificate table cites its
+    #    clauses without pretending to validate anything.
+    chk sci1a-refuses "$(slnk_sci_1a >/dev/null 2>&1; echo $?)" "2"
+    chk sci1a-no-widths "$(slnk_sci_1a 2>/dev/null | grep -c '^mcs')" "0"
     chk its-pseudo "$(slnk_its | awk -F'\t' '$1=="authorization"{print ($3 ~ /pseudonym/)?"ok":"no"}')" "ok"
+    chk its-not-a-validator "$(slnk_its | awk -F'\t' '$1=="note"{print ($3 ~ /validates none/)?"ok":"no"}')" "ok"
 
     # 5. Relay check: open relay flagged, bounded relay abstains.
     printf 'remote_ue_allowed=true\nrelay_authorized=false\n' > "$d/open.conf"
@@ -287,8 +301,8 @@ Usage: $0 COMMAND
   --freq-bits <n_subchannels>   SCI-1A frequency resource field width
   --pfi <1..64>              PC5 QoS flow identifier
   --l2id <hex>               24-bit Layer-2 ID
-  --sci1a                    SCI format 1-A field reference
-  --its                      ETSI/1609.2 certificate reference
+  --sci1a                    SCI format 1-A: refuses, the widths are not in this tree
+  --its                      ETSI/1609.2 certificate roles (reference, no validator)
   --relay-check <conf>       UE-to-NW relay configuration findings
   --plan                     V2X handoff plan
   --selftest                 verify the arithmetic and detectors

@@ -2589,6 +2589,24 @@ button.mission-step:focus-visible .mission-step-inner {
   color: @text_dim;
 }
 
+/* The transmit warning, boxed so it reads as one block rather than a run of
+   notes. It uses the same amber as .status-warn and .log-warn: the stylesheet
+   has one colour for "look at this before you continue", and a second one
+   would be a second meaning. The warning is written by the module and read
+   here verbatim, so this class styles it and never restates it. */
+.jamd-warning {
+  background-color: @bg_sunken;
+  border: 1px solid #4a3d22;
+  border-left: 3px solid #d9b26f;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.jamd-warning label {
+  color: #d9b26f;
+  font-size: 12px;
+}
+
 /* Where a card's answer lands. The output card this toolkit grew up with is
    being retired, and a listing or a run belongs in the rectangle that started
    it - so each card carries its own, separated from the vector's own rows by a

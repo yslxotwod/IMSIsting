@@ -117,6 +117,64 @@ def _register_lpp():
     }
 
 
+def _register_nbiot():
+    """NB-IoT RRC (TS 36.331 clause 6.3, the ``-NB`` message set).
+
+    A family of its own rather than ten more roots in ``rrc``, for two reasons
+    that are about the data rather than taste.
+
+    The NB messages are not reachable from the LTE roots at all: an LTE SIB1
+    does not reference SIB1-NB, so a table generated for LTE carries no NB type
+    no matter how many closures it walks.  `45_iot` therefore had a decoder that
+    read hex at fixed character offsets and labelled the slices -- the message
+    set was in the schema, in this very MODULES list, and no table here could
+    decode it.
+
+    And they are a different size of job.  The ten NB roots reach about 300
+    named types; folding them into the 1031-type LTE table would rewrite a
+    generated 1.7 MB file, and its provenance comment, to add a set no LTE
+    message can call.  One table per family is what FAMILIES exists for.
+
+    The namespaces are the shared MODULES, because an NB message references
+    plenty of LTE leaf types (CellIdentity, TrackingAreaCode, the PLMN
+    identities) and a narrower namespace list would emit them as
+    ``unsupported``.
+    """
+    FAMILIES["nbiot"] = {
+        "modules": MODULES,
+        "aliases": MODULE_ALIASES,
+        "default_module": "NBIOT-RRC-Definitions",
+        "default_types": [
+            # The broadcast channel: the 34-bit MIB-NB and the wrapper an
+            # operator actually has bits from.
+            "NBIOT.MasterInformationBlock_NB",
+            "NBIOT.BCCH_BCH_Message_NB",
+            # SIB1-NB carries the cell identity, the PLMN list, the barring
+            # flags and the scheduling of everything else -- the message the
+            # module was already claiming to decode.
+            "NBIOT.SystemInformationBlockType1_NB",
+            # The SystemInformation container, whose sib-TypeAndInfo list is
+            # what a receiver reassembles from NPDSCH before it can read any
+            # other SIB.
+            "NBIOT.SystemInformation_NB",
+            # The SIBs whose fields decide whether a device attaches, reselects
+            # or is barred, stated as roots so their leaves are in the table.
+            "NBIOT.SystemInformationBlockType2_NB_r13",
+            "NBIOT.SystemInformationBlockType3_NB_r13",
+            "NBIOT.SystemInformationBlockType4_NB_r13",
+            "NBIOT.SystemInformationBlockType5_NB_r13",
+            # SIB14-NB is access barring: the one NB message whose contents
+            # directly decide whether a population of devices may transmit.
+            "NBIOT.SystemInformationBlockType14_NB_r13",
+            # The downlink shared channel wrapper, so a capture's bits can be
+            # handed over without being sliced first.
+            "NBIOT.BCCH_DL_SCH_Message_NB",
+        ],
+        "out": "lte_rrc_nb_layout.py",
+        "description": "NB-IoT RRC (TS 36.331 clause 6.3)",
+    }
+
+
 DEFAULT_MODULE = "EUTRA-RRC-Definitions"
 
 
@@ -750,7 +808,7 @@ def main(argv=None):
     parser.add_argument(
         "--family",
         default="rrc",
-        choices=("rrc", "lpp"),
+        choices=("rrc", "lpp", "nbiot"),
         help="which ASN.1 namespace to generate for (default: rrc)",
     )
     parser.add_argument(
@@ -759,7 +817,9 @@ def main(argv=None):
         help="comma separated type list, e.g. "
         "'SystemInformationBlockType1,INTER.HandoverCommand'. Defaults to the "
         "family's root set: SIB1..SIB8 + RRCConnectionReconfiguration + "
-        "HandoverCommand for rrc, LPP_Message for lpp.",
+        "HandoverCommand for rrc, LPP_Message for lpp, and the ten NB-IoT "
+        "broadcast messages (MIB-NB, SIB1-NB, SIB2..5-NB, SIB14-NB, the "
+        "SystemInformation container and the two BCCH wrappers) for nbiot.",
     )
     parser.add_argument(
         "--out",
@@ -774,6 +834,8 @@ def main(argv=None):
     _register_rrc()
     if args.family == "lpp":
         _register_lpp()
+    elif args.family == "nbiot":
+        _register_nbiot()
     use_family(args.family)
     if args.out is None:
         args.out = os.path.join(

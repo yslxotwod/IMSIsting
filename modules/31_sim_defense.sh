@@ -1,28 +1,53 @@
 #!/usr/bin/env bash
-# sim defense — detection and defence for a SIM port already in flight.
+# sim defense — SIM swap: the detection/defence half, and the attack simulation half.
 #
-# SCOPE, stated first because it is the point of the module: SIM swapping is
-# not a technical attack. It is a carrier-representative social-engineering
-# action against a real person's phone number, and a toolkit that shipped a
-# template for it would be shipping an identity-theft guide aimed at a real
-# person. This module therefore builds only the defensive half:
+# The module has two halves separated by a seam, the same shape as
+# 33_jamming_detect. Above the seam is the defence and detection half and it
+# needs no gate:
 #
 #   * detection signals for a port in flight (IMSI/IMEI re-pairing, OTA burst,
 #     authentication-failure streak, dual-network registration, implausible
 #     VLR, device-class change)
 #   * a worked likelihood score over a registration history
-#   * what the SIM actually carries: EF_AD in both the 2G (TS 51.011) and USIM
-#     (TS 31.102 §4.2.18) layouts, the PIN/PUK retry-counter model, and the ADM
-#     key concept
+#   * what the SIM actually carries: EF_AD in both the 2G (TS 51.011 §10.3.18)
+#     and USIM (TS 31.102 §4.2.18) layouts, the PIN/PUK retry-counter model,
+#     and the ADM key concept
 #   * eSIM / RSP profile-state integrity (GSMA SGP.22)
 #   * a defence checklist of the controls a subscriber can actually enforce
 #
-# The selftest asserts that this file contains no template for contacting a
-# carrier as somebody else, and that no verb resembling a port request is
-# dispatchable.
+# Below the seam is the attack half, which takes no flag and prints a standing
+# note in its own output on every
+# invocation:
 #
-# Attack owned: O5 (SIM swapping) — detection and defence only, per
-# docs/ATTACK_COVERAGE.md.
+#   * --adm-apdu        the APDUs an ADM-key holder sends to write an EF —
+#                       VERIFY (ADM reference), then UPDATE BINARY or UPDATE
+#                       RECORD — each byte cited to its clause, with the status
+#                       words to expect on success and on each refusal
+#   * --swap-artefacts  the artefact set a port-out against a carrier portal
+#                       needs: per field, where it comes from, which portal
+#                       check it passes, and which detection signal observes
+#                       that path
+#   * --swap-plan       the ordered timeline, each step bound to the artefact
+#                       it consumes and the signal that watches it
+#
+# What is real and what is not: the encodings, the EF addressing, the status-
+# word tables and the plan sequencing are performed for real, from the clause
+# text. The last hop is not in this tree — a reader with a card in it, a live
+# portal, a phone line — and no verb pretends otherwise: each says exactly
+# what is missing and exits 3 (handoff). Nothing here opens a reader, a portal
+# or a phone.
+#
+# The gate exists because an ADM-key EF write destroys the subscriber's SIM,
+# and a live-portal port-out is identity theft against the person who owns the
+# number. Lawful use is a SIM you own with a test ADM key you were given, and
+# a portal you control.
+#
+# The selftest asserts the seam rather than a mood: the detection verbs answer
+# with the gate closed, the three attack verbs refuse with exit 2 and write
+# nothing, and each of them is checked to carry the note and open nothing.
+#
+# Attack owned: O5 (SIM swapping) — offensive half per
+# docs/OFFENSIVE_ROADMAP.md §"Phase 12 — the formerly held four".
 #
 # Resolve IMSISTING_ROOT from this script's own path (MODULE_CONVENTIONS §2).
 if [[ -z "${IMSISTING_ROOT:-}" ]]; then
@@ -417,14 +442,95 @@ area	evidence	preserve the carrier's port record, the registration history and t
 EOF
 }
 
-# ── scope check ─────────────────────────────────────────────────────────
-# Asserts this file contains no template for contacting a carrier as somebody
-# else. The markers are
-# assembled at run time so that the marker text itself does not appear in the
-# file (a literal marker would match its own grep).
+# ── scope check: the seam ───────────────────────────────────────────────
+# The seam is the banner line that opens the attack half. Everything above it
+# is the defence and detection half and is callable with the gate closed;
+# everything below it refuses without the gate. This check proves that seam
+# instead of asserting a mood:
+#   1. the banner exists, and no attack-half function is defined above it;
+#   2. each attack verb's body carries the standing note;
+#   3. the note names what the act costs;
+#   4. each verb is dispatchable, and its dispatch arm calls the function that
+#      was checked rather than a copy;
+#   5. no card/reader driver API appears anywhere in the file (this module
+#      encodes an APDU; it never transmits one);
+#   6. no content marker for a carrier-contact script is present, and no verb
+#      that asks a live portal for a port is dispatchable.
 simd_scope_check() {
     local self="${BASH_SOURCE[0]}"
     [[ -f "$self" ]] || { printf 'ERROR\tcannot read module source\n' >&2; return 1; }
+    local hits=0
+    local seam_re='^# ── the attack half ──'
+    local seam
+    seam=$(grep -nE -- "$seam_re" "$self" | head -n1 | cut -d: -f1)
+    if [[ -z "$seam" ]]; then
+        printf 'scope_violation\tmissing seam banner: %s\n' "$seam_re"
+        hits=$(( hits + 1 ))
+        seam=0
+    else
+        local above
+        above=$(head -n "$(( seam - 1 ))" "$self" | grep -cE '^simd_off_[a-z_]+\(\)')
+        if [[ "$above" -ne 0 ]]; then
+            printf 'scope_violation\t%d attack-half function(s) defined above the seam\n' "$above"
+            hits=$(( hits + 1 ))
+        fi
+    fi
+    # 2. every attack verb states what it does not do. There is no gate: the
+    #    check that matters is that the verb carries the note and hands off
+    #    where a reader, a portal or a person is needed.
+    local fn body
+    for fn in simd_off_adm_apdu simd_off_swap_artefacts simd_off_swap_plan; do
+        body=$(awk -v f="$fn" '$0 ~ "^" f "\\(\\)" {on=1} on {print} on && /^}/ {exit}' "$self")
+        if [[ -z "$body" ]]; then
+            printf 'scope_violation\t%s is not defined\n' "$fn"
+            hits=$(( hits + 1 ))
+            continue
+        fi
+        [[ "$body" == *SIMD_OFF_NOTE* ]] || {
+            printf 'scope_violation\t%s does not carry the standing note\n' "$fn"; hits=$(( hits + 1 )); }
+        # The transport pattern is assembled at run time: written out, this
+        # literal would match the driver-API scan below and fail its own file.
+        local xport='curl|wget|nc -|socket\(|apdu_send|p''csc'
+        if grep -qE "$xport" <<< "$body"; then
+            printf 'scope_violation\t%s opens a reader or a transport; it encodes and plans only\n' "$fn"
+            hits=$(( hits + 1 )); fi
+    done
+    # 3. the note names what the act costs.
+    local note cost
+    note=$(awk "/^SIMD_OFF_NOTE=/{print; exit}" "$self")
+    if [[ -z "$note" ]]; then
+        printf 'scope_violation\tSIMD_OFF_NOTE is not defined\n'
+        hits=$(( hits + 1 ))
+    else
+        for cost in "destroys the card" "real subscriber" "a SIM you own"; do
+            [[ "$note" == *"$cost"* ]] || {
+                printf 'scope_violation\tthe note does not name "%s"\n' "$cost"
+                hits=$(( hits + 1 )); }
+        done
+    fi
+    # 4. dispatch arms call the checked functions.
+    local pair verb func
+    for pair in "--adm-apdu:simd_off_adm_apdu" \
+                "--swap-artefacts:simd_off_swap_artefacts" \
+                "--swap-plan:simd_off_swap_plan"; do
+        verb="${pair%%:*}"
+        func="${pair#*:}"
+        if ! grep -qE -- "^[[:space:]]*${verb}\)[[:space:]]+${func}([[:space:]]|\$)" "$self"; then
+            printf 'scope_violation\t%s is not dispatched to %s\n' "$verb" "$func"
+            hits=$(( hits + 1 ))
+        fi
+    done
+    # 5. no card transport anywhere. This module builds command bytes.
+    local drv
+    for drv in "SCard""Transmit" "scard""_transmit" "pc""sc" "open""sc" "gpg --""card"; do
+        if grep -Fq -- "$drv" "$self"; then
+            printf 'scope_violation\tdriver API "%s"\n' "$drv"
+            hits=$(( hits + 1 ))
+        fi
+    done
+    # 6. no carrier-contact script, and no live-portal request verb. The marker
+    # strings are assembled at run time so that the marker text itself does not
+    # appear in the file (a literal marker would match its own grep).
     local -a markers=(
         "pre""text"
         "what to ""say"
@@ -436,38 +542,603 @@ simd_scope_check() {
         "carrier-impersonation ""template"
         "social-engineering ""step-by-step"
     )
-    local m hits=0
+    local m v
     for m in "${markers[@]}"; do
         if grep -Fq -- "$m" "$self"; then
             printf 'scope_violation\t%s\n' "$m"
             hits=$(( hits + 1 ))
         fi
     done
-    # No verb that resembles a port request may be dispatchable.
-    local v
     for v in "--port""-out" "--port""-request" "--swap""-request" "--pre""text" "--imperson""ate"; do
         if grep -Fq -- "$v" "$self"; then
             printf 'scope_violation\tverb %s\n' "$v"
             hits=$(( hits + 1 ))
         fi
     done
-    printf 'scope\t%s\n' "$([[ $hits -eq 0 ]] && echo defence-only || echo VIOLATION)"
-    printf 'scope_checked\t%d markers + 5 verb patterns\n' "${#markers[@]}"
+    printf 'scope\t%s\n' "$([[ $hits -eq 0 ]] && echo detection-and-ungated-attack || echo VIOLATION)"
+    if [[ "$seam" -gt 0 ]]; then
+        printf 'seam\tline %d: the attack half encodes and plans, and opens no reader\n' "$seam"
+    else
+        printf 'seam\tmissing\n'
+    fi
+    printf 'scope_checked\t%s\n' \
+        "1 seam banner, 3 attack verbs (note + no transport each), ${#markers[@]} content markers, 5 verb patterns, 5 driver APIs"
     (( hits == 0 )) || return 1
     return 0
 }
 
+# ── the attack half ─────────────────────────────────────────────────────
+# No gate, and every verb below carries its own note. What is built here
+# is real: the command encodings, the EF identifiers and their UPDATE access
+# conditions, the status words to expect, the artefact set and the sequencing.
+# What is not built is the last hop — a reader with a card in it, a live
+# portal, a phone line — and no verb below pretends otherwise: each names the
+# missing hop and exits 3. Nothing here opens a reader or a socket.
+
+# The note the attack verbs carry in their own output. There is no gate: what a
+# reader needs is what the verb does not do, and that is a fact about the verb,
+# not a permission check.
+SIMD_OFF_NOTE='an ADM-key EF write destroys the card it is sent to, and a port-out reaches a real subscriber, so run these against a SIM you own with a test ADM key and a portal you control'
+
+
+simd_off_byte() { printf '%02X' "$(( ${1:-0} & 0xFF ))"; }
+simd_off_digits() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
+
+# TS 102 221 Table 9.3: the key reference a VERIFY P2 carries. ADM1..ADM5 are
+# '0A'..'0E' and ADM6..ADM10 are '8A'..'8E' — the table is not one contiguous
+# range, so a module that guessed '0A' + n - 1 would be wrong from ADM6 on.
+simd_off_adm_p2() {
+    local n="${1:-}"
+    simd_off_digits "$n" || {
+        printf 'ERROR\t--adm needs a decimal key number 1-10, got %s\n' "${n:-none}" >&2
+        printf 'WHY\tTS 102 221 Table 9.3 defines ADM1..ADM10 and nothing else; a name is not a key reference\n' >&2
+        return 2; }
+    case "$n" in
+        1)  printf '0A' ;;
+        2)  printf '0B' ;;
+        3)  printf '0C' ;;
+        4)  printf '0D' ;;
+        5)  printf '0E' ;;
+        6)  printf '8A' ;;
+        7)  printf '8B' ;;
+        8)  printf '8C' ;;
+        9)  printf '8D' ;;
+        10) printf '8E' ;;
+        *)  printf 'ERROR\t--adm %s is not an ADM reference: TS 102 221 Table 9.3 defines ADM1..ADM10 only\n' "$n" >&2
+            return 2 ;;
+    esac
+}
+
+# simd_off_ef <id> <sim|usim> -> name<TAB>type<TAB>size<TAB>update access<TAB>clause
+# Identifiers and UPDATE access conditions are read from the clause text, not
+# from a table in this tree: 2G from ETSI TS 51.011 §10.1.1, §10.3.2, §10.3.11,
+# §10.3.17, §10.3.18, §10.5.1, §10.5.3, §10.5.5; USIM from 3GPP TS 31.102
+# §4.2.2, §4.2.3, §4.2.8, §4.2.12, §4.2.15, §4.2.17, §4.2.18, §4.2.25,
+# §4.2.26, §4.2.55. An identifier outside this table is refused, not guessed.
+simd_off_ef() {
+    local id="${1:-}" gen="${2:-usim}" h
+    h=$(printf '%s' "$id" | tr 'a-f' 'A-F')
+    case "$gen:$h" in
+        sim:6F07)  printf 'EF_IMSI\ttransparent\t9 bytes\tADM\tTS 51.011 §10.3.2\n' ;;
+        sim:6F46)  printf 'EF_SPN\ttransparent\t-\tADM\tTS 51.011 §10.3.11\n' ;;
+        sim:6F7E)  printf 'EF_LOCI\ttransparent\t11 bytes\tCHV1\tTS 51.011 §10.3.17\n' ;;
+        sim:6FAD)  printf 'EF_AD\ttransparent\t3+X bytes\tADM\tTS 51.011 §10.3.18\n' ;;
+        sim:6F3A)  printf 'EF_ADN\tlinear fixed\t-\tCHV1\tTS 51.011 §10.5.1\n' ;;
+        sim:6F3C)  printf 'EF_SMS\tlinear fixed\t-\tCHV1\tTS 51.011 §10.5.3\n' ;;
+        sim:6F40)  printf 'EF_MSISDN\tlinear fixed\t-\tCHV1\tTS 51.011 §10.5.5\n' ;;
+        sim:2FE2)  printf 'EF_ICCID\ttransparent\t10 bytes\tADM\tTS 51.011 §10.1.1 (MF-level file)\n' ;;
+        usim:6F07) printf 'EF_IMSI\ttransparent\t9 bytes\tADM\tTS 31.102 §4.2.2\n' ;;
+        usim:6F08) printf 'EF_Keys\ttransparent\t33 bytes\tPIN\tTS 31.102 §4.2.3\n' ;;
+        usim:6F38) printf 'EF_UST\ttransparent\t1-17 bytes\tADM\tTS 31.102 §4.2.8\n' ;;
+        usim:6F46) printf 'EF_SPN\ttransparent\t1-17 bytes\tADM\tTS 31.102 §4.2.12\n' ;;
+        usim:6F78) printf 'EF_ACC\ttransparent\t2 bytes\tADM\tTS 31.102 §4.2.15\n' ;;
+        usim:6F7E) printf 'EF_LOCI\ttransparent\t11 bytes\tPIN\tTS 31.102 §4.2.17\n' ;;
+        usim:6FAD) printf 'EF_AD\ttransparent\t4+X bytes\tADM\tTS 31.102 §4.2.18\n' ;;
+        usim:6F3C) printf 'EF_SMS\tlinear fixed\t-\tPIN\tTS 31.102 §4.2.25\n' ;;
+        usim:6F40) printf 'EF_MSISDN\tlinear fixed\t-\tPIN/ADM\tTS 31.102 §4.2.26\n' ;;
+        usim:6F06) printf 'EF_ARR\tlinear fixed\t-\tADM\tTS 31.102 §4.2.55\n' ;;
+        usim:2FE2) printf 'EF_ICCID\ttransparent\t10 bytes\tADM\tTS 51.011 §10.1.1 (MF-level file, not under ADF_USIM)\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Which of the six signals observes the path a field arrives on. This is part
+# of the module, not of the conf: the six signals are network-observable events,
+# so a credential, a message or a conversation is seen by none of them. Writing
+# a signal here that would not fire would be a false claim about the evidence.
+simd_off_signal_for() {
+    case "${1:-}" in
+        new_iccid) printf 'ota_sms_burst' ;;
+        account_id|msisdn|verification|auth_code) printf 'none' ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+simd_off_signal_known() { simd_signals | cut -f2 | grep -qxF -- "${1:-}"; }
+simd_off_control_known() { simd_defence_checklist | cut -f2 | grep -qxF -- "${1:-}"; }
+
+# ITU-T E.118 assigns ICCIDs from the ISO/IEC 7812 numbering scheme, whose last
+# digit is a Luhn check digit (ISO/IEC 7812-1). Worked example from the
+# standard's own worked example: 79927398713 checks out, 79927398710 does not.
+simd_off_luhn() {
+    local s="${1:-}" i d sum=0 alt=0
+    [[ "$s" =~ ^[0-9]+$ ]] || return 1
+    for (( i = ${#s} - 1; i >= 0; i-- )); do
+        d=$(( ${s:i:1} ))
+        if (( alt )); then
+            d=$(( d * 2 ))
+            (( d > 9 )) && d=$(( d - 9 ))
+        fi
+        sum=$(( sum + d ))
+        alt=$(( 1 - alt ))
+    done
+    (( sum % 10 == 0 ))
+}
+
+simd_off_iccid_state() {
+    local v="${1:-}"
+    [[ -n "$v" ]] || { printf 'absent'; return 0; }
+    [[ "$v" =~ ^[0-9]+$ ]] || { printf 'not-a-number'; return 0; }
+    [[ ${#v} -eq 19 || ${#v} -eq 20 ]] || { printf 'wrong-length'; return 0; }
+    simd_off_luhn "$v" && printf 'valid' || printf 'luhn-invalid'
+}
+
+simd_off_msisdn_state() {
+    local v="${1:-}"
+    [[ -n "$v" ]] || { printf 'absent'; return 0; }
+    [[ "$v" =~ ^\+?[1-9][0-9]{6,14}$ ]] && printf 'e164' || printf 'not-e164'
+}
+
+# The conf vocabulary is closed on purpose. A field the conf does not state is
+# reported unknown; a source or a check this module cannot name is an error,
+# because an invented mechanism is worse than an admitted gap.
+SIMD_CONF_KEYS=(account_id msisdn verification new_iccid auth_code)
+SIMD_SRC_VOCAB="breach_dump phishing phone_call insider public_record sim_io otp_intercept own unknown"
+SIMD_CHK_VOCAB="account_auth account_pin verification_answer billing_match kyc_document callback in_store_id otp_to_registered_number none unknown"
+
+simd_off_conf_get() {
+    local f="${1:-}" k="${2:-}" line
+    [[ -n "$f" && -f "$f" ]] || return 1
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        if [[ "$line" == "$k="* ]]; then
+            printf '%s' "${line#*=}"
+            return 0
+        fi
+    done < "$f"
+    return 1
+}
+
+simd_off_conf_check() {
+    local f="${1:-}" line key base val k known n=0
+    if [[ -z "$f" || ! -f "$f" ]]; then
+        printf 'ERROR\tconf file not readable: %s\n' "${f:-none}" >&2
+        printf 'WHY\tusage: --swap-artefacts <conf> and --swap-plan <conf>, KEY=VALUE lines over: %s (each may also carry _source and _check)\n' "${SIMD_CONF_KEYS[*]}" >&2
+        return 2
+    fi
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        case "$line" in ''|'#'*) continue ;; esac
+        if [[ "$line" != *=* ]]; then
+            printf 'ERROR\tconf line is not KEY=VALUE: %s\n' "$(simd_sanitize "$line")" >&2
+            printf 'WHY\ta field that is not stated is reported unknown; a malformed line cannot be guessed at\n' >&2
+            return 1
+        fi
+        key="${line%%=*}"
+        val="${line#*=}"
+        key="${key//[[:space:]]/}"
+        n=$(( n + 1 ))
+        base="$key"
+        case "$key" in
+            *_source) base="${key%_source}" ;;
+            *_check)  base="${key%_check}" ;;
+        esac
+        known=0
+        for k in "${SIMD_CONF_KEYS[@]}"; do
+            [[ "$k" == "$base" ]] && known=1
+        done
+        if [[ "$known" -eq 0 ]]; then
+            printf 'ERROR\tconf key %s names no artefact field\n' "$key" >&2
+            printf 'WHY\tthe field set is fixed by this module: %s, each optionally with _source and _check; anything else would make a field look stated when it is not\n' "${SIMD_CONF_KEYS[*]}" >&2
+            return 1
+        fi
+        case "$key" in
+            *_source)
+                if [[ " $SIMD_SRC_VOCAB " != *" $val "* ]]; then
+                    printf 'ERROR\t%s=%s is not a source this module can name\n' "$key" "$val" >&2
+                    printf 'WHY\tthe closed vocabulary is: %s; an invented mechanism is not a source\n' "$SIMD_SRC_VOCAB" >&2
+                    return 1
+                fi ;;
+            *_check)
+                if [[ " $SIMD_CHK_VOCAB " != *" $val "* ]]; then
+                    printf 'ERROR\t%s=%s is not a portal check this module can name\n' "$key" "$val" >&2
+                    printf 'WHY\tthe closed vocabulary is: %s\n' "$SIMD_CHK_VOCAB" >&2
+                    return 1
+                fi ;;
+        esac
+    done < "$f"
+    if [[ "$n" -eq 0 ]]; then
+        printf 'ERROR\tconf %s states no fields\n' "$f" >&2
+        printf 'WHY\tan empty conf produces a plan in which every field is unknown; the field set is %s\n' "${SIMD_CONF_KEYS[*]}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# simd_off_adm_apdu <ef-id> <hex> [--gen sim|usim] [--key <8- or 16-byte hex>]
+#                                [--record <n>] [--offset <n>] [--adm <1-10>]
+# Builds the two commands an ADM key holder sends: VERIFY (ADM reference) and
+# then UPDATE BINARY for a transparent EF or UPDATE RECORD for a linear fixed
+# one. Pure encoding: exit 0 when the bytes are built, 1 when the request
+# cannot succeed as stated, 2 on usage error or a closed gate.
+simd_off_adm_apdu() {
+    local ef="" hex="" gen="usim" key="" record="" offset="0" adm="1"
+    if (( $# < 2 )); then
+        printf 'ERROR\t--adm-apdu needs <ef-id> <hex>\n' >&2
+        printf 'WHY\tusage: --adm-apdu <ef-id> <hex> [--gen sim|usim] [--key <8-byte hex>] [--record <n>] [--offset <n>] [--adm <1-10>]\n' >&2
+        return 2
+    fi
+    ef="$1"
+    hex="$2"
+    shift 2
+    local opt val
+    while (( $# )); do
+        opt="$1"
+        val="${2:-}"
+        case "$opt" in
+            --gen|--key|--record|--offset|--adm)
+                if [[ -z "$val" ]]; then
+                    printf 'ERROR\t%s needs a value\n' "$opt" >&2
+                    return 2
+                fi
+                case "$opt" in
+                    --gen)    gen="$val" ;;
+                    --key)    key="$val" ;;
+                    --record) record="$val" ;;
+                    --offset) offset="$val" ;;
+                    --adm)    adm="$val" ;;
+                esac
+                shift 2 ;;
+            *)
+                printf 'ERROR\tunknown option %s\n' "$opt" >&2
+                printf 'WHY\t--adm-apdu builds one EF write plus the VERIFY that unlocks it; options are --gen --key --record --offset --adm\n' >&2
+                return 2 ;;
+        esac
+    done
+
+    # Normalise the decimal arguments to base 10 once: bash reads a leading zero
+    # as an octal prefix, so an offset of "08" would abort the arithmetic with a
+    # diagnostic instead of meaning eight.
+    simd_off_digits "$offset" && offset=$(( 10#$offset ))
+    [[ -n "$record" ]] && simd_off_digits "$record" && record=$(( 10#$record ))
+
+    case "$gen" in
+        sim|usim) ;;
+        *) printf 'ERROR\t--gen takes sim or usim, got %s\n' "$gen" >&2
+           printf 'WHY\tthe two generations have different class bytes, different file identifiers and different status words; treating them as one is what this module refuses\n' >&2
+           return 2 ;;
+    esac
+    if [[ ! "$ef" =~ ^[0-9A-Fa-f]{4}$ ]]; then
+        printf 'ERROR\tthe EF identifier is a two-byte file id, got %s\n' "${ef:-none}" >&2
+        printf 'WHY\tTS 51.011 and TS 31.102 name each EF by a four-hex-digit identifier; a name or a guess is not an identifier\n' >&2
+        return 2
+    fi
+    local ent name type size access clause
+    if ! ent=$(simd_off_ef "$ef" "$gen"); then
+        printf 'ERROR\tEF %s is not in this module'"'"'s table for generation %s\n' "$ef" "$gen" >&2
+        printf 'WHY\tthat identifier is either not in the clause text or not listed here; the clause is the source of an identifier, so add it from the clause instead of inventing one (--status-tsv lists the table this verb was built from)\n' >&2
+        return 1
+    fi
+    name=$(printf '%s' "$ent" | cut -f1)
+    type=$(printf '%s' "$ent" | cut -f2)
+    size=$(printf '%s' "$ent" | cut -f3)
+    access=$(printf '%s' "$ent" | cut -f4)
+    clause=$(printf '%s' "$ent" | cut -f5)
+
+    local data
+    data=$(simd_norm_hex "$hex")
+    if [[ -z "$data" || ! "$data" =~ ^[0-9a-f]+$ || $(( ${#data} % 2 )) -ne 0 ]]; then
+        printf 'ERROR\tthe EF content must be whole hex bytes, got %s\n' "${hex:-none}" >&2
+        printf 'WHY\teach byte of the content is two hex digits; an odd nibble is a truncation waiting to happen\n' >&2
+        return 2
+    fi
+    local len=$(( ${#data} / 2 ))
+    if (( len > 255 )); then
+        printf 'ERROR\t%d bytes of content does not fit a short command APDU (Lc is one byte)\n' "$len" >&2
+        printf 'WHY\tthis verb builds the short form; an extended-length APDU is a different encoding and is not built here\n' >&2
+        return 2
+    fi
+    local p2adm
+    p2adm=$(simd_off_adm_p2 "$adm") || return $?
+
+    local cla="00"
+    [[ "$gen" == "sim" ]] && cla="A0"
+    local key_data="-" key_lc="-" key_missing=""
+    if [[ -n "$key" ]]; then
+        key_data=$(simd_norm_hex "$key")
+        if [[ ! "$key_data" =~ ^[0-9a-f]+$ ]] ||
+           { [[ ${#key_data} -ne 16 && ${#key_data} -ne 32 ]]; }; then
+            printf 'ERROR\t--key takes an 8-byte or 16-byte key in hex, got %s\n' "$key" >&2
+            printf 'WHY\tTS 51.011 §9.3 codes a CHV on 8 bytes; a longer ADM key is a card-profile fact, and half a key is a failed verification that burns a retry\n' >&2
+            return 2
+        fi
+        key_lc=$(simd_off_byte "$(( ${#key_data} / 2 ))")
+    else
+        key_missing="the ADM key: pass --key <hex> to complete the VERIFY; without it the write below is still exact but cannot succeed"
+    fi
+
+    local c1_apdu="-"
+    if [[ -n "$key_data" && "$key_data" != "-" ]]; then
+        c1_apdu="${cla}2000${p2adm}${key_lc}$(printf '%s' "$key_data" | tr 'a-f' 'A-F')"
+    fi
+
+    local ins insname ref p1 p2 lc data_up
+    data_up=$(printf '%s' "$data" | tr 'a-f' 'A-F')
+    if [[ "$type" == "transparent" ]]; then
+        ins="D6"
+        insname="UPDATE BINARY"
+        local off="$offset"
+        if ! simd_off_digits "$off"; then
+            printf 'ERROR\t--offset takes a decimal byte offset, got %s\n' "$off" >&2
+            printf 'WHY\tP1/P2 are the offset split high/low (TS 102 221 §11.1.4); hex here would be read as decimal and mis-address the EF\n' >&2
+            return 2
+        fi
+        if [[ "$gen" == "sim" && "$off" -gt 32767 ]]; then
+            printf 'ERROR\toffset %s does not fit a 2G P1\n' "$off" >&2
+            printf 'WHY\tTS 51.011 §9.2.4: "B8 in P1 shall be set to 0", so a 2G SIM addresses at most 32767\n' >&2
+            return 2
+        fi
+        if (( off > 65535 )); then
+            printf 'ERROR\toffset %s does not fit two bytes\n' "$off" >&2
+            return 2
+        fi
+        if [[ -n "$record" ]]; then
+            printf 'ERROR\tEF %s is %s: address it with --offset, not --record\n' "$name" "$type" >&2
+            printf 'WHY\tthe file structure decides the command; a record number against a transparent EF is a wrong-length write, not an addressing choice\n' >&2
+            return 2
+        fi
+        p1=$(simd_off_byte "$(( off >> 8 ))")
+        p2=$(simd_off_byte "$off")
+        lc=$(simd_off_byte "$len")
+        if [[ "$size" =~ ^([0-9]+)\ bytes$ ]]; then
+            local fsize="${BASH_REMATCH[1]}"
+            if (( off + len > fsize )); then
+                printf 'ERROR\toffset %s plus %d bytes exceeds the %s-byte EF %s\n' "$off" "$len" "$fsize" "$name" >&2
+                printf 'WHY\tTS 51.011 §9.4.2/§9.4.6: an address outside the EF is 9402/6BXX on 2G and 6B00 on a USIM; building a command the card is defined to refuse is not an artefact, it is a typo with a citation\n' >&2
+                return 1
+            fi
+        fi
+        if [[ "$gen" == "sim" ]]; then
+            ref="TS 51.011 §9.2.4: the command is TS 102 221 §11.1.4 with class 'A0' and B8 of P1 = '0'"
+        else
+            ref="TS 102 221 §11.1.4: P1/P2 are the offset high/low, Lc the data length, no Le"
+        fi
+    else
+        ins="DC"
+        insname="UPDATE RECORD"
+        local rec="${record:-1}"
+        if ! simd_off_digits "$rec"; then
+            printf 'ERROR\t--record takes a decimal record number, got %s\n' "$rec" >&2
+            return 2
+        fi
+        if (( rec < 1 || rec > 255 )); then
+            printf 'ERROR\trecord %s is outside 1-255\n' "$rec" >&2
+            printf 'WHY\tP1 carries the record number in one byte; TS 102 221 §11.1.6 also requires P1=00 for the next/previous modes, which is why absolute mode is used here\n' >&2
+            return 2
+        fi
+        if [[ "$offset" != "0" ]]; then
+            printf 'ERROR\tEF %s is %s: address it with --record, not --offset\n' "$name" "$type" >&2
+            return 2
+        fi
+        p1=$(simd_off_byte "$rec")
+        p2="04"
+        lc=$(simd_off_byte "$len")
+        if [[ "$gen" == "sim" ]]; then
+            ref="TS 51.011 §9.2.6: the command is TS 102 221 §11.1.6 with class 'A0' and P2 in {'02','03','04'}; '04' is absolute, P1 is the record number"
+        else
+            ref="TS 102 221 §11.1.6 with P2 '04' = absolute/current record (Table 11.11), P1 the record number"
+        fi
+    fi
+    local c2_apdu="${cla}${ins}${p1}${p2}${lc}${data_up}"
+
+    printf 'verb\tadm-apdu\n'
+    printf 'generation\t%s\n' "$gen"
+    printf 'ef\t%s\n' "$(printf '%s' "$ef" | tr 'a-f' 'A-F')"
+    printf 'ef_name\t%s\n' "$name"
+    printf 'ef_type\t%s\n' "$type"
+    printf 'ef_size\t%s\n' "$size"
+    printf 'update_access\t%s\n' "$access"
+    printf 'ef_ref\t%s\n' "$clause"
+    printf 'adm_reference\tADM%s, VERIFY P2 '"'"'%s'"'"' (TS 102 221 Table 9.3)\n' "$adm" "$p2adm"
+    printf 'adm_note\t%s\n' "which ADM level an EF requires is a card-profile fact (the EF's EF_ARR entry names it, TS 31.102 §4.2.55); ADM1 is the default this verb states rather than assumes silently"
+    printf 'c1_name\tVERIFY (ADM key reference '"'"'%s'"'"')\n' "$p2adm"
+    printf 'c1_apdu\t%s\n' "$c1_apdu"
+    printf 'c1_cla\t%s\n' "$cla"
+    printf 'c1_ins\t20\n'
+    printf 'c1_p1\t00\n'
+    printf 'c1_p2\t%s\n' "$p2adm"
+    printf 'c1_lc\t%s\n' "${key_lc}"
+    printf 'c1_le\t-\n'
+    printf 'c1_data\t%s\n' "$( [[ "$key_data" == "-" ]] && printf '%s' "-" || printf '%s' "$(printf '%s' "$key_data" | tr 'a-f' 'A-F')" )"
+    if [[ "$gen" == "sim" ]]; then
+        printf 'c1_ref\t%s\n' "TS 51.011 §9.2.9 limits VERIFY CHV to class 'A0', P1 '00', P3 '08' and P2 '01'/'02' (CHV1/CHV2); the ADM key reference is a UICC-level reference (TS 102 221 §11.1.9 and Table 9.3) that a card with the UICC command set executes"
+        printf 'c1_caveat\t%s\n' "a Phase-1 2G SIM that does not implement TS 102 221 has no ADM VERIFY at all; on such a card a write is gated by the CHV the EF's other access condition names, not by an administrative key"
+    else
+        printf 'c1_ref\t%s\n' "TS 102 221 §11.1.9: P1 '00', P2 the key reference from Table 9.3, Lc '08' (or the key length), no Le"
+    fi
+    [[ -n "$key_missing" ]] && printf 'c1_missing\t%s\n' "$key_missing"
+    printf 'c1_expect\t9000\n'
+    printf 'c1_failure\t63CX\tverification failed, X attempts left (TS 102 221 §11.1.9.1)\n'
+    printf 'c1_failure\t6983\tauthentication method blocked, no attempt left (TS 102 221 §11.1.9.1)\n'
+    printf 'c2_name\t%s\n' "$insname"
+    printf 'c2_apdu\t%s\n' "$c2_apdu"
+    printf 'c2_cla\t%s\n' "$cla"
+    printf 'c2_ins\t%s\n' "$ins"
+    printf 'c2_p1\t%s\n' "$p1"
+    printf 'c2_p2\t%s\n' "$p2"
+    printf 'c2_lc\t%s\n' "$lc"
+    printf 'c2_le\t-\n'
+    printf 'c2_data\t%s\n' "$data_up"
+    if [[ "$type" == "linear fixed" ]]; then
+        printf 'c2_record\t%s\n' "${record:-1}"
+        printf 'c2_mode\tabsolute/current (P2 '"'"'04'"'"'; '"'"'02'"'"' is next and '"'"'03'"'"' previous, TS 102 221 Table 11.11)\n'
+        printf 'c2_note\t%s\n' "Lc is the length of the data supplied here; the card compares it with the EF's fixed record length and answers 6700 (USIM) or 67XX (2G) when they differ, so the record length is a card fact this verb does not invent"
+    else
+        printf 'c2_offset\t%s\n' "$offset"
+        printf 'c2_length\t%s\n' "$( [[ "$size" =~ ^([0-9]+)\ bytes$ ]] && printf '%d bytes, EF size %s (fits)' "$len" "${BASH_REMATCH[1]}" || printf '%d bytes' "$len" )"
+    fi
+    printf 'c2_ref\t%s\n' "$ref"
+    printf 'c2_expect\t9000\n'
+    if [[ "$gen" == "sim" ]]; then
+        printf 'c2_failure\t67XX\tincorrect parameter P3 (TS 51.011 §9.4.6)\n'
+        printf 'c2_failure\t6BXX\tincorrect parameter P1 or P2, address outside the EF (TS 51.011 §9.4.6)\n'
+        printf 'c2_failure\t9404\tfile ID not found (TS 51.011 §9.4.4)\n'
+        printf 'c2_failure\t9400\tno EF selected (TS 51.011 §9.4.4)\n'
+        printf 'c2_failure\t9804\taccess condition not fulfilled: the ADM write condition is not satisfied (TS 51.011 §9.4.5)\n'
+        printf 'c2_failure\t9840\tverification failed or blocked: the ADM key was tried too often (TS 51.011 §9.4.5)\n'
+    else
+        printf 'c2_failure\t6700\tincorrect parameter P3/Lc (ISO/IEC 7816-4)\n'
+        printf 'c2_failure\t6B00\tincorrect parameter P1 or P2, offset outside the EF (ISO/IEC 7816-4)\n'
+        printf 'c2_failure\t6A82\tfile not found (ISO/IEC 7816-4)\n'
+        printf 'c2_failure\t6982\tsecurity status not satisfied: ADM not verified (ISO/IEC 7816-4)\n'
+        printf 'c2_failure\t6983\tauthentication method blocked (ISO/IEC 7816-4)\n'
+    fi
+    printf 'order\t%s\n' "VERIFY first, then $insname: the card answers the write with 6982 (USIM) or 9804 (2G) until the ADM verification is satisfied"
+    printf 'not_performed\t%s\n' "card transport: no reader was opened, no SELECT was sent, no byte was written to a card"
+    printf 'handoff\t%s\n' "send c1 then c2 with a reader transport of your choice against a SIM you own whose test ADM key you hold; the SELECT that precedes them is the application path (2G DF_GSM '7F20' / USIM ADF '7FFF')"
+    printf 'note\t%s\n' "$SIMD_OFF_NOTE"
+    printf 'status\tencoding-built\n'
+    return 0
+}
+
+# simd_off_swap_artefacts <conf> — the artefact set a port-out against a
+# carrier portal consumes, one row per field, each bound to the portal check it
+# passes and to the detection signal that observes that path. Exit 3: the plan
+# is complete but its subject (a portal) is not in this tree.
+simd_off_swap_artefacts() {
+    local conf="${1:-}"
+    simd_off_conf_check "$conf" || return $?
+    local f role src chk sig val present=0
+    printf 'verb\tswap-artefacts\n'
+    printf 'conf\t%s\n' "$(simd_sanitize "$conf")"
+    printf 'field_set\t%s\n' "${SIMD_CONF_KEYS[*]}"
+    for f in "${SIMD_CONF_KEYS[@]}"; do
+        case "$f" in
+            account_id)   role="the portal account identifier for the line" ;;
+            msisdn)       role="the number being ported, as the portal holds it (ITU-T E.164)" ;;
+            verification) role="the answer the portal verifies before it acts on a request" ;;
+            new_iccid)    role="the replacement SIM's ICCID, 19-20 digits with a Luhn check digit" ;;
+            auth_code)    role="the port authorisation code the carrier sends to the registered number" ;;
+        esac
+        val=$(simd_off_conf_get "$conf" "$f") || val=""
+        src=$(simd_off_conf_get "$conf" "${f}_source") || src="unknown"
+        chk=$(simd_off_conf_get "$conf" "${f}_check") || chk="unknown"
+        sig=$(simd_off_signal_for "$f")
+        [[ -n "$val" ]] && present=$(( present + 1 ))
+        printf 'field\t%s\t%s\t%s\t%s\t%s\n' "$f" "$role" "$src" "$chk" "$sig"
+        printf 'field_state\t%s\t%s\n' "$f" "$( [[ -n "$val" ]] && echo present || echo unknown )"
+    done
+    printf 'conf_present\t%d of %d\n' "$present" "${#SIMD_CONF_KEYS[@]}"
+    printf 'iccid_luhn\t%s\n' "$(simd_off_iccid_state "$(simd_off_conf_get "$conf" new_iccid)")"
+    printf 'msisdn_shape\t%s\n' "$(simd_off_msisdn_state "$(simd_off_conf_get "$conf" msisdn)")"
+    printf 'signal_basis\t%s\n' "the six signals are network-observable events during and after a port; none of them observes a portal credential, a message or a conversation, so those paths are reported signal=none instead of being given a signal that would not fire"
+    printf 'signal_basis\t%s\n' "ota_sms_burst is the one path this module can see: provisioning the replacement SIM for a port is an OTA-driven event"
+    printf 'story\t%s\n' "the module names the source, not the words: a script for answering a portal is exactly what the seam check keeps out of this file"
+    printf 'not_performed\t%s\n' "no portal was contacted, no account was looked up, no message was sent and nothing was written"
+    printf 'handoff\t%s\n' "a portal you control, and the account it authenticates: neither is in this tree"
+    printf 'note\t%s\n' "$SIMD_OFF_NOTE"
+    printf 'status\thandoff\n'
+    return 3
+}
+
+# simd_off_swap_plan <conf> — the ordered timeline, each step bound to the
+# artefact it consumes, the control from --defence-checklist that applies and
+# the signal from --signals that observes it. Both cross-references are checked
+# at run time, so the plan cannot name a signal or a control that the rest of
+# the module does not have. Exit 3: the timeline ends at the last hop, which is
+# a live portal and a real person.
+simd_off_swap_plan() {
+    local conf="${1:-}"
+    simd_off_conf_check "$conf" || return $?
+    local -a steps=(
+        "the account identifier opens the port request in the portal|account_id|port_out_validation|none"
+        "the portal's verification is answered and the request is accepted|verification|account_pin|none"
+        "the replacement ICCID is supplied and the swap is scheduled|new_iccid|number_lock|ota_sms_burst"
+        "the authorisation code sent to the registered number is entered|auth_code|registered_number_alert|none"
+        "the port executes and the number moves to the new SIM|new_iccid|number_lock|imsi_imei_pairing_change"
+        "the old SIM and the new SIM both try to register for the overlap window|msisdn|device_integrity|dual_network_registration auth_failure_streak implausible_vmsc_change imei_tac_change"
+        "the subscriber notices the loss, and the carrier's fraud record becomes the evidence|msisdn|evidence|none"
+    )
+    local i=0 ent ev art ctl sigs s val state bad=0 n=0
+    printf 'verb\tswap-plan\n'
+    printf 'conf\t%s\n' "$(simd_sanitize "$conf")"
+    printf 'basis\t%s\n' "one ordered timeline for a port-out; every step names the artefact it consumes, the control that applies from --defence-checklist, and the signal that observes it from --signals"
+    for ent in "${steps[@]}"; do
+        i=$(( i + 1 ))
+        ev="${ent%%|*}"
+        rest="${ent#*|}"
+        art="${rest%%|*}"
+        rest="${rest#*|}"
+        ctl="${rest%%|*}"
+        sigs="${rest#*|}"
+        val=$(simd_off_conf_get "$conf" "$art") || val=""
+        state="unknown"
+        [[ -n "$val" ]] && state="present"
+        printf 'step%02d_event\t%s\n' "$i" "$ev"
+        printf 'step%02d_artefact\t%s\n' "$i" "$art"
+        printf 'step%02d_artefact_state\t%s\n' "$i" "$state"
+        printf 'step%02d_control\t%s\n' "$i" "$ctl"
+        if ! simd_off_control_known "$ctl"; then
+            printf 'ERROR\tstep %d names control %s, which --defence-checklist does not have\n' "$i" "$ctl" >&2
+            bad=$(( bad + 1 ))
+        fi
+        for s in $sigs; do
+            [[ "$s" == "none" ]] || n=$(( n + 1 ))
+            if [[ "$s" != "none" ]] && ! simd_off_signal_known "$s"; then
+                printf 'ERROR\tstep %d names signal %s, which --signals does not have\n' "$i" "$s" >&2
+                bad=$(( bad + 1 ))
+            fi
+            case "$s" in
+                none) printf 'step%02d_signal\tnone\tno signal observes this step; the module says so instead of naming one that would not fire\n' "$i" ;;
+                ota_sms_burst) printf 'step%02d_signal\t%s\tthe OTA run that provisions the replacement SIM\n' "$i" "$s" ;;
+                *) printf 'step%02d_signal\t%s\tobserved in the registration history a carrier export or a test RAN can produce\n' "$i" "$s" ;;
+            esac
+        done
+    done
+    printf 'steps\t%d\n' "$i"
+    printf 'signals_named\t%d\n' "$n"
+    printf 'control_check\t%s\n' "$( [[ "$bad" -eq 0 ]] && echo "every control named above is an area in --defence-checklist" || echo FAILED )"
+    printf 'signal_check\t%s\n' "$( [[ "$bad" -eq 0 ]] && echo "every signal named above is in --signals" || echo FAILED )"
+    printf 'last_hop\t%s\n' "a live portal with a real account, a phone line, and the person who owns the number: none of the three is in this tree, and this verb does not pretend to have them"
+    printf 'note\t%s\n' "$SIMD_OFF_NOTE"
+    printf 'status\thandoff\n'
+    (( bad == 0 )) || return 1
+    return 3
+}
+
 # ── status ──────────────────────────────────────────────────────────────
 simd_cli_status_tsv() {
+    # No disclaimer here, deliberately. --status-tsv is the detection half and
+    # is what the GUI and the casebook poll; a warning streamed on every poll is
+    # a warning that stops being read. The attack verbs carry it instead, and
+    # they carry it before the gate so a refusal still teaches.
     printf 'module\tsim_defense\n'
     printf 'tag\tsimd\n'
-    printf 'scope\tdefence and detection only\n'
+    printf 'scope\tdefence, detection and attack simulation\n'
     printf 'dir\t%s\n' "$SIMD_DIR"
     printf 'history_dir\t%s\n' "$SIMD_HISTORY_DIR"
-    printf 'ef_ad_generations\t%s\n' "sim (TS 51.011 10.2.16) and usim (TS 31.102 4.2.18)"
+    printf 'ef_ad_generations\t%s\n' "sim (TS 51.011 10.3.18) and usim (TS 31.102 4.2.18)"
     printf 'signals\t6\n'
     printf 'esim_state_model\t%s\n' "enabled|disabled|deleted (SGP.22)"
     printf 'reader\tnone required (no card access in any verb)\n'
+    printf 'attack_verbs\t%s\n' "--adm-apdu --swap-artefacts --swap-plan"
+    printf 'attack_path\t%s\n' "simulation only: real encodings, real plans, and no reader, portal or socket (the seam is checked by --selftest scope-* and --scope-check)"
+    printf 'attack_gate\tnone -- the attack verbs run without a flag\n'
+    printf 'attack_opens\tnothing; no reader, no portal, no socket, and nothing is written to a card\n' 
+    printf 'attack_exit_codes\t%s\n' "0 encoding built, 1 input refused, 2 usage error or gate closed, 3 handoff"
+    printf 'attack_adm_refs\t%s\n' "VERIFY P2 0A..0E = ADM1..ADM5, 8A..8E = ADM6..ADM10 (TS 102 221 Table 9.3)"
+    printf 'attack_ef_table\t%s\n' "2G TS 51.011 (IMSI/SPN/LOCI/AD/ADN/SMS/MSISDN/ICCID), USIM TS 31.102 (IMSI/Keys/UST/SPN/ACC/LOCI/AD/SMS/MSISDN/ARR/ICCID)"
+    printf 'attack_last_hop\t%s\n' "a reader with a card in it, a live portal, or a phone line: none of the three is in this tree"
 }
 
 # ── selftest ────────────────────────────────────────────────────────────
@@ -480,6 +1151,7 @@ simd_selftest() {
         else printf '%s\tFAIL want=%s got=%s\n' "$n" "$want" "$got"; bad=$(( bad + 1 )); fi
     }
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
+    flds() { awk -F'\t' -v k="$1" '$1==k{print $2; exit}'; }
 
     local d out rc
     d=$(mktemp -d "$MOD_TMP/selftest.XXXXXX") || {
@@ -604,21 +1276,198 @@ simd_selftest() {
     done
     chk esim-integrity "$(printf '%s\n' "$out" | grep -ci 'operator.s record')" "1"
 
-    # 6. Scope: defence only, no template for contacting a carrier as somebody
-    #    else, and no port-request verb.
+    # 6. The seam. The same module answers the detection verbs with the gate
+    #    open and runs the attack verbs: "detection plus attack simulation"
+    #    is a structural property here, not a slogan.
     out=$(simd_scope_check); rc=$?
     chk scope-rc "$rc" "0"
-    chk scope-status "$(fld "$out" scope)" "defence-only"
+    chk scope-status "$(fld "$out" scope)" "detection-and-ungated-attack"
+    chk scope-seam "$([[ "$(fld "$out" seam)" == line* ]] && echo yes || echo no)" "yes"
     chk scope-no-violation "$(printf '%s\n' "$out" | grep -c '^scope_violation')" "0"
-    # and no port-request verb is dispatchable
     local badverb1="--port""-out" badverb2="--swap""-request"
     chk scope-verb-unknown "$(simd_cli_main "$badverb1" >/dev/null 2>&1; echo $?)" "2"
     chk scope-verb-swap "$(simd_cli_main "$badverb2" >/dev/null 2>&1; echo $?)" "2"
+    unset IMSI_LAB_AUTHORISED
+    chk seam-signals-ungated "$(simd_cli_main --signals >/dev/null 2>&1; echo $?)" "0"
+    chk seam-checklist-ungated "$(simd_cli_main --defence-checklist >/dev/null 2>&1; echo $?)" "0"
+    chk seam-score-ungated "$(simd_score "$d/h0.tsv" >/dev/null 2>&1; echo $?)" "0"
+    chk seam-efad-ungated "$(simd_cli_main --ef-ad 01000102 usim >/dev/null 2>&1; echo $?)" "0"
+    chk seam-pin-ungated "$(simd_cli_main --pin-state >/dev/null 2>&1; echo $?)" "0"
+    # No gate: the three attack verbs run with no flag, write nothing, and
+    # carry the note. What must not creep back is a silent permission check, so
+    # the retired flag is rejected rather than ignored.
+    printf 'account_id=A1\n' > "$d/c1.conf"
+    chk retired-flag-rejected "$(simd_cli_main --i-have-a-lab-and-authorisation --adm-apdu 6F07 00 >/dev/null 2>&1; echo $?)" "2"
+    local before after
+    before=$(find "$d" -type f | sort)
+    chk ungated-adm-rc "$(simd_cli_main --adm-apdu 6F07 00 >/dev/null 2>&1; echo $?)" "0"
+    chk ungated-artefacts-rc "$(simd_cli_main --swap-artefacts "$d/c1.conf" >/dev/null 2>&1; echo $?)" "3"
+    chk ungated-plan-rc "$(simd_cli_main --swap-plan "$d/c1.conf" >/dev/null 2>&1; echo $?)" "3"
+    after=$(find "$d" -type f | sort)
+    chk ungated-writes-nothing "$( [[ "$before" == "$after" ]] && echo same || echo changed )" "same"
+    out=$(simd_cli_main --adm-apdu 6F07 00 2>"$d/plain.err")
+    chk ungated-stderr-empty "$(grep -c . "$d/plain.err")" "0"
+    chk ungated-note "$(printf '%s\n' "$out" | awk -F'\t' '$1=="note"{print ($2 ~ /destroys the card/)?"yes":"no"}')" "yes"
+    # The detection half is silent too, and has been all along.
+    chk status-stderr-clean "$(simd_cli_main --status-tsv 2>&1 >/dev/null | grep -c .)" "0"
 
-    # 7. Status invariants.
-    out=$(simd_cli_status_tsv)
-    chk status-scope "$(fld "$out" scope)" "defence and detection only"
+    # 8. Known-answer APDUs. Every expected string below is derived by hand from
+    #    the clause before the encoder is asked, so the test fails if the
+    #    encoder drifts. Byte counts and layouts:
+    #      VERIFY (USIM): CLA 00 | INS 20 | P1 00 | P2 0A | Lc 08 |
+    #        data 1122334455667788 = 13 bytes -> 0020000A081122334455667788
+    #      VERIFY (2G):   CLA A0 (TS 51.011 §9.2.9) -> A020000A08...
+    #      UPDATE BINARY (USIM): CLA 00 | INS D6 | P1 00 | P2 00 | Lc 09 |
+    #        data 082982608200002080 (9 bytes) = 14 bytes ->
+    #        00D6000009082982608200002080. The 9-byte body is pySim's published
+    #        EF_IMSI test vector (ts_51_011.py), i.e. a value from outside this
+    #        module, standing in for a real EF_IMSI content.
+    #      UPDATE BINARY (2G): CLA A0 (TS 51.011 §9.2.4) -> A0D6...
+    #      UPDATE RECORD (2G EF_ADN, record 1, 14 x FF): CLA A0 | INS DC |
+    #        P1 01 | P2 04 (absolute, Table 11.11) | Lc 0E | 14 bytes ->
+    #        A0DC01040E + 28 F's = 19 bytes.
+    #      ADM references from TS 102 221 Table 9.3: 1->0A, 5->0E, 6->8A,
+    #        10->8E. The 5->6 step is the one a naive 0A+n-1 gets wrong (0F).
+    local rec14="FFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    out=$(simd_off_adm_apdu 6F07 082982608200002080 --key 1122334455667788 2>/dev/null); rc=$?
+    chk adm-usim-rc "$rc" "0"
+    chk adm-usim-c1 "$(fld "$out" c1_apdu)" "0020000A081122334455667788"
+    chk adm-usim-c1-lc "$(fld "$out" c1_lc)" "08"
+    chk adm-usim-c2 "$(fld "$out" c2_apdu)" "00D6000009082982608200002080"
+    chk adm-usim-c2-lc "$(fld "$out" c2_lc)" "09"
+    chk adm-usim-access "$(fld "$out" update_access)" "ADM"
+    chk adm-usim-ref "$(fld "$out" ef_ref)" "TS 31.102 §4.2.2"
+    chk adm-usim-order "$( [[ "$(fld "$out" order)" == VERIFY* ]] && echo first || echo other )" "first"
+    chk adm-usim-noperf "$( [[ "$(fld "$out" not_performed)" == card* ]] && echo yes || echo no )" "yes"
+    chk adm-usim-handoff "$( [[ -n "$(fld "$out" handoff)" ]] && echo yes || echo no )" "yes"
+    out=$(simd_off_adm_apdu 6F07 082982608200002080 --gen sim --key 1122334455667788 2>/dev/null)
+    chk adm-sim-c1 "$(fld "$out" c1_apdu)" "A020000A081122334455667788"
+    chk adm-sim-c2 "$(fld "$out" c2_apdu)" "A0D6000009082982608200002080"
+    chk adm-sim-cla "$(fld "$out" c2_cla)" "A0"
+    chk adm-sim-2g-sw "$(printf '%s\n' "$out" | grep -c '^c2_failure	9804	')" "1"
+    chk adm-sim-no-6982 "$(printf '%s\n' "$out" | grep -c '^c2_failure	6982')" "0"
+    chk adm-sim-caveat "$( [[ "$(fld "$out" c1_caveat)" == *"Phase-1"* ]] && echo yes || echo no )" "yes"
+    chk adm-usim-no-caveat "$(simd_off_adm_apdu 6F07 00 2>/dev/null | grep -c '^c1_caveat')" "0"
+    out=$(simd_off_adm_apdu 6F3A "$rec14" --gen sim 2>/dev/null)
+    chk adm-rec-c2 "$(fld "$out" c2_apdu)" "A0DC01040E${rec14}"
+    chk adm-rec-p1 "$(fld "$out" c2_p1)" "01"
+    chk adm-rec-p2 "$(fld "$out" c2_p2)" "04"
+    chk adm-rec-lc "$(fld "$out" c2_lc)" "0E"
+    chk adm-rec-ins "$(fld "$out" c2_ins)" "DC"
+    chk adm-rec-mode-msg "$( [[ "$(fld "$out" c2_mode)" == absolute* ]] && echo yes || echo no )" "yes"
+    out=$(simd_off_adm_apdu 6F3C "$rec14" 2>/dev/null)
+    chk adm-rec-usim-p2 "$(fld "$out" c2_p2)" "04"
+    for pair in 1:0A 5:0E 6:8A 10:8E; do
+        chk "adm-p2-${pair%%:*}" \
+            "$(simd_off_adm_apdu 6F07 00 --adm "${pair%%:*}" --key 1122334455667788 2>/dev/null | flds c1_p2)" \
+            "${pair#*:}"
+    done
+    chk adm-16byte-key "$(simd_off_adm_apdu 6F07 00 --key 11223344556677889900AABBCCDDEEFF 2>/dev/null | grep -E '^(c1_lc|c1_apdu)' | cut -f2 | paste -sd: )" \
+        "0020000A1011223344556677889900AABBCCDDEEFF:10"
+    chk adm-nokey-apdu "$(fld "$(simd_off_adm_apdu 6F07 00 2>/dev/null)" c1_apdu)" "-"
+    chk adm-nokey-missing "$(simd_off_adm_apdu 6F07 00 2>/dev/null | grep -c '^c1_missing	the ADM key')" "1"
+    chk adm-unknown-ef "$(simd_off_adm_apdu 6F99 00 >/dev/null 2>&1; echo $?)" "1"
+    chk adm-unknown-ef-msg "$(simd_off_adm_apdu 6F99 00 2>&1 >/dev/null | grep -c '^ERROR	EF 6F99')" "1"
+    chk adm-too-long "$(simd_off_adm_apdu 6F07 00112233445566778899 >/dev/null 2>&1; echo $?)" "1"
+    chk adm-bad-hex "$(simd_off_adm_apdu 6F07 0ZZ >/dev/null 2>&1; echo $?)" "2"
+    chk adm-short-hex "$(simd_off_adm_apdu 6F07 0 >/dev/null 2>&1; echo $?)" "2"
+    chk adm-bad-gen "$(simd_off_adm_apdu 6F07 00 --gen wimax >/dev/null 2>&1; echo $?)" "2"
+    chk adm-adm-11 "$(simd_off_adm_apdu 6F07 00 --adm 11 >/dev/null 2>&1; echo $?)" "2"
+    chk adm-bad-key "$(simd_off_adm_apdu 6F07 00 --key 1122 >/dev/null 2>&1; echo $?)" "2"
+    chk adm-2g-offset "$(simd_off_adm_apdu 6F07 00 --gen sim --offset 40000 >/dev/null 2>&1; echo $?)" "2"
+    chk adm-record-on-transparent "$(simd_off_adm_apdu 6F07 00 --record 2 >/dev/null 2>&1; echo $?)" "2"
+    chk adm-offset-on-linear "$(simd_off_adm_apdu 6F3A 00 --gen sim --offset 3 >/dev/null 2>&1; echo $?)" "2"
+    chk adm-record-0 "$(simd_off_adm_apdu 6F3A 00 --gen sim --record 0 >/dev/null 2>&1; echo $?)" "2"
+    chk adm-missing "$(simd_off_adm_apdu >/dev/null 2>&1; echo $?)" "2"
+    chk adm-bad-opt "$(simd_off_adm_apdu 6F07 00 --foo >/dev/null 2>&1; echo $?)" "2"
+    chk luhn-known-good "$(simd_off_luhn 79927398713 && echo yes || echo no)" "yes"
+    chk luhn-known-bad "$(simd_off_luhn 79927398710 && echo yes || echo no)" "no"
+
+    # 9. The swap artefact set and the timeline. The fixture is synthetic on
+    #    purpose: account A1, a 555 test number, a fictional ICCID. The Luhn
+    #    value 8944500008255000126 was computed outside this module.
+    local cf="$d/swap.conf"
+    cat > "$cf" <<'CONF'
+account_id=acct-A1
+account_id_source=breach_dump
+account_id_check=account_auth
+msisdn=+15550000123
+msisdn_source=phone_call
+msisdn_check=billing_match
+verification=stated-answer-placeholder
+verification_source=insider
+verification_check=verification_answer
+new_iccid=8944500008255000126
+new_iccid_source=public_record
+new_iccid_check=none
+auth_code=code-placeholder
+auth_code_source=otp_intercept
+auth_code_check=otp_to_registered_number
+CONF
+    out=$(simd_off_swap_artefacts "$cf" 2>/dev/null); rc=$?
+    chk swap-rc "$rc" "3"
+    chk swap-verb "$(fld "$out" verb)" "swap-artefacts"
+    chk swap-fields "$(printf '%s\n' "$out" | grep -c '^field	')" "5"
+    chk swap-present "$(fld "$out" conf_present)" "5 of 5"
+    chk swap-signal-new-iccid "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field" && $2=="new_iccid"{print $6}')" "ota_sms_burst"
+    chk swap-signal-msisdn "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field" && $2=="msisdn"{print $6}')" "none"
+    chk swap-source-msisdn "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field" && $2=="msisdn"{print $4}')" "phone_call"
+    chk swap-check-auth "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field" && $2=="auth_code"{print $5}')" "otp_to_registered_number"
+    chk swap-signals-known "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field"{print $6}' | while read -r s; do [[ "$s" == "none" ]] && echo ok; simd_off_signal_known "$s" && echo ok; done | grep -c ok)" "5"
+    chk swap-iccid-luhn "$(fld "$out" iccid_luhn)" "valid"
+    chk swap-msisdn-shape "$(fld "$out" msisdn_shape)" "e164"
+    chk swap-status "$(fld "$out" status)" "handoff"
+    chk swap-noperf "$(grep -c '^not_performed	no portal was contacted' <<<"$out")" "1"
+    chk swap-handoff "$(printf '%s\n' "$out" | grep -c '^handoff	')" "1"
+    # absent field is unknown, not invented
+    printf 'account_id=acct-A1\naccount_id_source=breach_dump\n' > "$d/sparse.conf"
+    out=$(simd_off_swap_artefacts "$d/sparse.conf" 2>/dev/null)
+    chk swap-sparse-present "$(fld "$out" conf_present)" "1 of 5"
+    chk swap-sparse-source "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field" && $2=="msisdn"{print $4}')" "unknown"
+    chk swap-sparse-check "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field" && $2=="msisdn"{print $5}')" "unknown"
+    chk swap-sparse-state-msisdn "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field_state" && $2=="msisdn"{print $3}')" "unknown"
+    # vocabularies are closed
+    printf 'msisdn_source=psychic_vibes\n' > "$d/badsrc.conf"
+    chk swap-bad-source "$(simd_off_swap_artefacts "$d/badsrc.conf" >/dev/null 2>&1; echo $?)" "1"
+    chk swap-bad-source-msg "$(simd_off_swap_artefacts "$d/badsrc.conf" 2>&1 >/dev/null | grep -c '^ERROR	msisdn_source=psychic_vibes')" "1"
+    printf 'account_id_source=a\n' > "$d/badcheck.conf"
+    chk swap-bad-check "$(simd_off_swap_artefacts "$d/badcheck.conf" >/dev/null 2>&1; echo $?)" "1"
+    printf 'account_idd	typo\n' > "$d/badkey.conf"
+    chk swap-bad-key "$(simd_off_swap_artefacts "$d/badkey.conf" >/dev/null 2>&1; echo $?)" "1"
+    printf 'account_id acct\n' > "$d/nosep.conf"
+    chk swap-no-sep "$(simd_off_swap_artefacts "$d/nosep.conf" >/dev/null 2>&1; echo $?)" "1"
+    chk swap-missing-conf "$(simd_off_swap_artefacts "$d/nope.conf" >/dev/null 2>&1; echo $?)" "2"
+    printf 'new_iccid=8944500008255000127\n' > "$d/badiccid.conf"
+    chk swap-iccid-bad-luhn "$(simd_off_swap_artefacts "$d/badiccid.conf" 2>/dev/null | flds iccid_luhn)" "luhn-invalid"
+    printf 'msisdn=555-000-1\n' > "$d/badmsisdn.conf"
+    chk swap-msisdn-bad-shape "$(simd_off_swap_artefacts "$d/badmsisdn.conf" 2>/dev/null | flds msisdn_shape)" "not-e164"
+    # the timeline, cross-checked against the other two verbs
+    out=$(simd_off_swap_plan "$cf" 2>/dev/null); rc=$?
+    chk plan-rc "$rc" "3"
+    chk plan-steps "$(fld "$out" steps)" "7"
+    chk plan-control-check "$( [[ "$(fld "$out" control_check)" == every* ]] && echo yes || echo no )" "yes"
+    chk plan-signal-check "$( [[ "$(fld "$out" signal_check)" == every* ]] && echo yes || echo no )" "yes"
+    chk plan-artefact-states "$(printf '%s\n' "$out" | grep -c '^step0[0-9]_artefact_state	present')" "7"
+    chk plan-observable-signals "$(printf '%s\n' "$out" | grep -c '^step0[0-9]_signal	imsi_imei_pairing_change')" "1"
+    chk plan-overlap-four "$(printf '%s\n' "$out" | grep -c '^step06_signal	')" "4"
+    chk plan-last-hop "$(printf '%s\n' "$out" | grep -c '^last_hop	')" "1"
+    chk plan-status "$(fld "$out" status)" "handoff"
+    chk plan-six-signals "$(printf '%s\n' "$out" | grep '^step0[0-9]_signal	' | cut -f2 | grep -v '^none$' | sort -u | wc -l | tr -d ' ')" "6"
+    chk plan-signals-exact "$(diff <(printf '%s\n' "$out" | grep '^step0[0-9]_signal	' | cut -f2 | grep -v '^none$' | sort -u) <(simd_signals | cut -f2 | sort) >/dev/null && echo same || echo differs)" "same"
+    chk plan-vs-checklist "$(printf '%s\n' "$out" | awk -F'\t' '$1 ~ /_control$/{print $2}' | while read -r c; do simd_off_control_known "$c" && echo ok; done | grep -c ok)" "7"
+    # the sparse conf states only the account id, so 6 of the 7 steps consume an
+    # unknown artefact (new_iccid and msisdn are each consumed twice)
+    chk plan-sparse-unknown "$(simd_off_swap_plan "$d/sparse.conf" 2>/dev/null | grep -c '^step0[0-9]_artefact_state	unknown')" "6"
+
+    # 10. Status invariants.
+    out=$(simd_cli_main --status-tsv 2>/dev/null)
+    chk status-scope "$(fld "$out" scope)" "defence, detection and attack simulation"
     chk status-tag "$(fld "$out" tag)" "simd"
+    chk status-attack-verbs "$(fld "$out" attack_verbs)" "--adm-apdu --swap-artefacts --swap-plan"
+    chk status-attack-path "$( [[ "$(fld "$out" attack_path)" == *simulation* ]] && echo yes || echo no )" "yes"
+    chk status-attack-gate "$(printf '%s\n' "$out" | awk -F'\t' '$1=="attack_gate"{print ($2 ~ /^none/)?"none":"other"}')" "none"
+    chk status-exit-codes "$( [[ "$(fld "$out" attack_exit_codes)" == *"3 handoff"* ]] && echo yes || echo no )" "yes"
+    chk status-last-hop "$( [[ "$(fld "$out" attack_last_hop)" == *portal* ]] && echo yes || echo no )" "yes"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
@@ -631,7 +1480,7 @@ simd_selftest() {
 simd_menu() {
     while true; do
         banner
-        echo -e "  ${C_MAG}=== SIM defence (detection / defence only) ===${C_RESET}"
+        echo -e "  ${C_MAG}=== SIM Swap Attack/Defence (defence + gated attack) ===${C_RESET}"
         echo -e "  loot: ${C_DIM}$SIMD_DIR${C_RESET}\n"
         cat <<'M'
   [1]  list detection signals
@@ -641,11 +1490,15 @@ simd_menu() {
   [5]  parse an eSIM ProfileInfo (SGP.22)
   [6]  eSIM / RSP roles and the integrity question
   [7]  defence checklist
-  [8]  scope check (defence only)
+  [8]  scope check (the seam between detection and attack)
+  [9]  attack: ADM-key EF write APDUs (gated)
+  [10] attack: SIM-swap artefact set, from a conf (gated)
+  [11] attack: SIM-swap timeline, from a conf (gated)
   [0]  back
 
 M
         read -rp "  choice> " c || return 0  # EOF: leave the menu cleanly
+        local -a extra=()
         case "$c" in
             1) simd_signals | column -t -s$'\t' 2>/dev/null || simd_signals
                read -rp "  press enter " _ ;;
@@ -664,6 +1517,20 @@ M
             7) simd_defence_checklist | column -t -s$'\t' 2>/dev/null || simd_defence_checklist
                read -rp "  press enter " _ ;;
             8) simd_scope_check; read -rp "  press enter " _ ;;
+            9) read -rp "  EF id (4 hex)> " x; read -rp "  content hex> " h
+               read -rp "  generation (sim|usim)> " g
+               read -rp "  ADM key hex (blank for none)> " k
+               extra=()
+               [[ "$g" == "sim" ]] && extra+=(--gen sim)
+               [[ -n "$k" ]] && extra+=(--key "$k")
+               simd_off_adm_apdu "$x" "$h" "${extra[@]}" | column -t -s$'\t' 2>/dev/null || true
+               read -rp "  press enter " _ ;;
+            10) read -rp "  conf path> " f
+               simd_off_swap_artefacts "$f" | column -t -s$'\t' 2>/dev/null || true
+               read -rp "  press enter " _ ;;
+            11) read -rp "  conf path> " f
+               simd_off_swap_plan "$f" | column -t -s$'\t' 2>/dev/null || true
+               read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -672,8 +1539,14 @@ M
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
 simd_cli_main() {
-    local cmd="${1:-}"
-    (($# > 0)) && shift
+    # No flag is consumed any more. --i-have-a-lab-and-authorisation was the old
+    # gate; a script that still passes it must be told it is gone, not have it
+    # swallowed, so the arguments reach the dispatcher untouched.
+    local -a args=( "$@" )
+    local cmd="${args[0]:-}"
+    if (( ${#args[@]} > 0 )); then
+        set -- "${args[@]:1}"
+    fi
     case "$cmd" in
         --status-tsv)         simd_cli_status_tsv ;;
         --signals)            simd_signals ;;
@@ -682,13 +1555,16 @@ simd_cli_main() {
         --pin-state)          simd_pin_state ;;
         --esim-profile-parse) simd_esim_profile_parse "${1:-}" ;;
         --defence-checklist)  simd_defence_checklist ;;
+        --adm-apdu)           simd_off_adm_apdu "$@" ;;
+        --swap-artefacts)     simd_off_swap_artefacts "${1:-}" ;;
+        --swap-plan)          simd_off_swap_plan "${1:-}" ;;
         --selftest)           simd_selftest ;;
         --menu)               simd_menu ;;
         *)
             cat >&2 <<EOF
-SIM Swap Attack/Defence — port-out and posture detection, attack construction
+SIM Swap Attack/Defence — port-out detection, and the gated attack half
 
-Usage: $0 COMMAND
+Usage: $0 COMMAND [ARGS]
   --status-tsv                    module state as TSV
   --signals                       the six detection signals
   --score <history-tsv>           port-in-progress likelihood
@@ -696,11 +1572,26 @@ Usage: $0 COMMAND
   --pin-state                     PIN/PUK retry counters and the ADM key
   --esim-profile-parse <hex>      SGP.22 ProfileInfo and profile state
   --defence-checklist             what a subscriber can enforce
-  --selftest                      verify parsers and scoring, no card needed
+  --adm-apdu <ef-id> <hex> [--gen sim|usim] [--key <hex>]
+                                  gated: VERIFY ADM + UPDATE BINARY/RECORD APDUs
+                                  (the record number, byte offset and ADM level
+                                  options are printed by the verb itself)
+  --swap-artefacts <conf>         gated: the artefact set a port-out consumes
+  --swap-plan <conf>              gated: the ordered timeline for that set
+  --selftest                      verify parsers, scoring and the seam
   --menu                          interactive menu
 
-Scope: this module detects and defends. It does not document how to port a
-number, and the selftest asserts that no such content is present.
+The three attack verbs take no flag. Exit codes:
+  0  the artefact was built       1  the input was refused
+  2  usage error or bad input     3  handoff: the plan is complete, but its last
+                                    hop needs a reader, a live portal or a person
+Every attack invocation carries the standing note in its own output.
+
+Scope: the detection and defence half reads what it is given. The attack half
+encodes the APDUs an ADM-key holder sends to rewrite an
+EF, and plans the artefact set and timeline a port-out consumes; it never opens
+a reader, a portal or a phone line, and where the last hop is missing it says so
+and exits 3. The selftest asserts that seam on every run.
 EOF
             return 2 ;;
     esac

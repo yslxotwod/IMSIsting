@@ -75,12 +75,13 @@ frame_ms	56.67	EN 300 392-2
 modulation	pi/4-DQPSK	EN 300 392-2
 gross_bitrate	36 kbit/s	EN 300 392-2
 duplex_split_400	10 MHz (380-390 UL / 390-400 DL)	EN 300 392-2
+guard_ms	0	EN 300 392-2 (no guard interval; 2040 bits at 36 kbit/s)
 cipher	TEA1-TEA4	EN 300 392-7
 EOF
 }
 n3g_tetra_tea() {
     case "$1" in
-        TEA1) echo "TEA1 — the original cipher, deliberately weakened (40-bit effective); unsuitable for confidentiality" ;;
+        TEA1) echo "TEA1 — the original cipher, weakened by design; the published cryptanalysis breaks it, so its traffic is not confidential" ;;
         TEA2) echo "TEA2 — 80-bit key, restricted distribution for public safety" ;;
         TEA3) echo "TEA3 — 80-bit key, export variant" ;;
         TEA4) echo "TEA4 — the open, weaker variant" ;;
@@ -97,6 +98,7 @@ tdma_slots	2	TS 102 361-1
 frame_ms	60	TS 102 361-1
 modulation	4FSK	TS 102 361-1
 bitrate	9.6 kbit/s	TS 102 361-1
+guard_ms	2.5	TS 102 361-1 (2.5 ms guard per 30 ms burst; 264 payload bits at 9.6 kbit/s)
 cipher	DMRA privacy / enhanced encryption	TS 102 361-4
 EOF
 }
@@ -117,6 +119,38 @@ n3g_tdma_slot() {
     [[ "$frame" =~ ^[0-9]+([.][0-9]+)?$ && "$slots" =~ ^[1-9][0-9]*$ ]] || {
         printf 'ERROR\tframe length must be numeric and slots a positive integer\n' >&2; return 2; }
     awk -v f="$frame" -v s="$slots" 'BEGIN{ printf "frame_ms\t%s\nslots\t%d\nslot_ms\t%.4f\n", f, s, f/s }'
+}
+
+# ── derived frame arithmetic ────────────────────────────────────────────
+# The tables above carry frame durations as typed constants. A typed constant
+# is only worth what its source is worth, so the same durations are derived
+# here from the air interface itself: a slot holds symbols, each symbol carries
+# bits, and the gross bit rate fixes how long those bits take. The published
+# durations then become known-answer checks on the derivation rather than
+# inputs to it.
+#
+# TETRA: 255 symbols per slot, pi/4-DQPSK (2 bits/symbol), 4 slots, 36 kbit/s
+#        -> 2040 bits/frame, 56.6667 ms/frame, 14.1667 ms/slot
+# DMR:   132 symbols per burst at 4FSK (2 bits/symbol), 2 slots, 30 ms burst
+#        -> 264 bits per burst, 60 ms per frame
+n3g_frame_math() {
+    local syms="${1:-}" bps="${2:-}" slots="${3:-}" rate="${4:-}" guard="${5:-0}"
+    [[ "$syms" =~ ^[1-9][0-9]*$ && "$slots" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'ERROR\tsymbols per slot and slot count must be positive integers\n' >&2; return 2; }
+    [[ "$bps" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        printf 'ERROR\tbits per symbol must be numeric\n' >&2; return 2; }
+    [[ "$rate" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'ERROR\tgross bit rate must be a positive integer (bit/s)\n' >&2; return 2; }
+    [[ "$guard" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        printf 'ERROR\tguard time must be numeric milliseconds per slot\n' >&2; return 2; }
+    awk -v s="$syms" -v b="$bps" -v n="$slots" -v r="$rate" -v g="$guard" 'BEGIN{
+        bits_slot = s * b
+        bits_frame = bits_slot * n
+        payload_ms = bits_frame / r * 1000.0
+        frame_ms = payload_ms + n * g
+        printf "symbols_per_slot\t%d\nbits_per_symbol\t%s\nbits_per_slot\t%.0f\nslots\t%d\nbits_per_frame\t%.0f\npayload_ms\t%.4f\nguard_ms_per_slot\t%s\nframe_ms\t%.4f\nslot_ms\t%.4f\n",
+               s, b, bits_slot, n, bits_frame, payload_ms, g, frame_ms, frame_ms / n
+    }'
 }
 
 # ── band classifier ─────────────────────────────────────────────────────
@@ -140,7 +174,7 @@ n3g_detect_note() {
 system	weakness	detection note
 TETRA TEA1	a deliberately weakened cipher	look for TEA1-ciphered traffic on a public-safety carrier; treat as cleartext for confidentiality purposes
 TETRA TEA4	open, weak variant	the open variant is used for interoperability; same caution
-DMR privacy	DMRA privacy is basic encryption, often ARC4	commercial privacy is not confidentiality; key management is weak
+DMR privacy	commercial privacy is a scrambler, not a confidentiality mechanism	privacy keys are often default or shared; treat it as obfuscation, never as protection
 GSM-R	shares the GSM stack and its older ciphers	rail signalling availability is safety-critical; observe, do not interfere
 EOF
 }
@@ -178,7 +212,11 @@ n3g_selftest() {
     chk tetra-slots "$(n3g_tetra_table | awk -F'\t' '$1=="tdma_slots"{print $2}')" "4"
     chk tetra-slot "$(fld "$(n3g_tdma_slot 56.67 4)" slot_ms)" "14.1675"
     chk tetra-bw "$(n3g_tetra_table | awk -F'\t' '$1=="carrier_spacing"{print $2}')" "25 kHz"
-    chk tetra-tea1 "$(n3g_tetra_tea TEA1)" "TEA1 — the original cipher, deliberately weakened (40-bit effective); unsuitable for confidentiality"
+    # The claim is the mechanism, not a key-bit figure copied from a paper:
+    # naming a number this tree cannot cite would be the same fault as a
+    # fabricated decoder, one decimal place quieter.
+    chk tetra-tea1 "$(n3g_tetra_tea TEA1)" "TEA1 — the original cipher, weakened by design; the published cryptanalysis breaks it, so its traffic is not confidential"
+    chk tetra-tea1-no-figure "$(n3g_tetra_tea TEA1 | grep -c '40-bit')" "0"
     chk tetra-tea2 "$(n3g_tetra_tea TEA2)" "TEA2 — 80-bit key, restricted distribution for public safety"
     chk tetra-tea-unknown "$(n3g_tetra_tea TEA9)" "unknown TEA — never classified as strong"
 
@@ -186,6 +224,20 @@ n3g_selftest() {
     chk dmr-slots "$(n3g_dmr_table | awk -F'\t' '$1=="tdma_slots"{print $2}')" "2"
     chk dmr-slot "$(fld "$(n3g_tdma_slot 60 2)" slot_ms)" "30.0000"
     chk dmr-mod "$(n3g_dmr_table | awk -F'\t' '$1=="modulation"{print $2}')" "4FSK"
+
+    # 2b. The published frame durations are DERIVED from the air interface here
+    # and then checked against the standard's own numbers: 56.67 ms for TETRA
+    # (2040 bits at 36 kbit/s) and 60 ms for DMR (528 bits at 9.6 kbit/s plus
+    # two 2.5 ms guards). A typed constant would only prove the constant.
+    chk frame-tetra "$(fld "$(n3g_frame_math 255 2 4 36000)" frame_ms)" "56.6667"
+    chk frame-tetra-slot "$(fld "$(n3g_frame_math 255 2 4 36000)" slot_ms)" "14.1667"
+    chk frame-tetra-vs-table "$(n3g_tetra_table | awk -F'\t' '$1=="frame_ms"{printf"%.2f",$2}')" "56.67"
+    chk frame-dmr "$(fld "$(n3g_frame_math 132 2 2 9600 2.5)" frame_ms)" "60.0000"
+    chk frame-dmr-payload "$(fld "$(n3g_frame_math 132 2 2 9600 2.5)" payload_ms)" "55.0000"
+    chk frame-dmr-vs-table "$(n3g_dmr_table | awk -F'\t' '$1=="frame_ms"{printf"%.0f",$2}')" "60"
+    chk frame-guard-agrees "$(n3g_dmr_table | awk -F'\t' '$1=="guard_ms"{print $2}')" "2.5"
+    chk frame-bad-rate "$(n3g_frame_math 255 2 4 0 >/dev/null 2>&1; echo $?)" "2"
+    chk frame-bad-guard "$(n3g_frame_math 132 2 2 9600 x >/dev/null 2>&1; echo $?)" "2"
 
     # 3. GSM-R band (EN 301 515).
     chk gsmr-ul "$(n3g_gsmr_table | awk -F'\t' '$1=="band"{print $2}' | cut -d' ' -f1)" "876-880"
@@ -251,6 +303,7 @@ n3g_cli_main() {
         --dmr)          n3g_dmr_table ;;
         --gsmr)         n3g_gsmr_table ;;
         --tdma)         n3g_tdma_slot "${1:-}" "${2:-}" ;;
+        --frame-math)   n3g_frame_math "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-0}" ;;
         --classify)     n3g_classify "${1:-}" "${2:-unknown}" ;;
         --detect-note)  n3g_detect_note ;;
         --plan)         n3g_plan ;;
@@ -266,7 +319,8 @@ Usage: $0 COMMAND
   --tea <TEA1..TEA4>        TETRA cipher description
   --dmr                     DMR reference (TS 102 361)
   --gsmr                    GSM-R band/feature reference (EN 301 515)
-  --tdma <frame_ms> <slots> TDMA slot arithmetic
+  --tdma <frame_ms> <slots> TDMA slot arithmetic (from a stated frame length)
+  --frame-math <syms> <bits/sym> <slots> <bit/s>  derive the frame length from the air interface
   --classify <khz> [mod]    identify the technology from channel spacing
   --detect-note             cipher-weakness and detection notes
   --plan                    receive-only handoff plan

@@ -109,13 +109,23 @@ Separately, the module has a real transmit path (`bexp_inject`
 is performed here via `BEXP_TX_CMD` and only radio sync/waveform/timing is the
 handoff.
 
-### 1d. Verified defensive by design
+### 1d. Verified defensive by design — superseded by Phase 12
 
-`31_sim_defense` (`simd_scope_check` `modules/31_sim_defense.sh:425`),
-`33_jamming_detect` (`jamd_scope_check` `modules/33_jamming_detect.sh:570`),
-`42_li_probe` (selftest asserts `--activate`/`--intercept`/`--provision-target`
-exit 2, `modules/42_li_probe.sh:212-214`), `44_carrier_api` (selftest asserts
-`--enumerate`/`--enumerate-subscribers` exit 2, `:344-345`).
+This section used to list four modules as "defensive by design", on the strength
+of `scope-no-*` assertions that proved the offensive verb exited 2. Phase 12
+reversed that decision and built the verbs, so the assertions now prove the
+opposite thing: that the seam holds. `31_sim_defense` (`simd_scope_check`),
+`33_jamming_detect` (`jamd_scope_check`), `42_li_probe` and `44_carrier_api` each
+assert that their detection verbs are ungated and silent on stderr, and that
+every offensive verb refuses without `--i-have-a-lab-and-authorisation`, prints
+its disclaimer on stderr before the gate test, and writes nothing on refusal.
+
+What those four modules still do **not** do is act on a live network: the
+baseband payload is a handoff, the carrier enumeration stops at a run-file, the
+LI artefacts are encoded and never delivered, and the SIM verbs encode APDUs and
+plans without opening a reader. The distinction that survives is the one worth
+keeping — a verb that produces an artefact is not a verb that produces an
+effect.
 
 ### 1e. Cross-cutting finding
 

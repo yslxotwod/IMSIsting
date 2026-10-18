@@ -135,6 +135,65 @@ kchn_builtin_chain() {
             printf '3\t19_cipher_audit\t--downgrade-check\t-\tno\tcheck the null-cipher downgrade path\n'
             printf '4\t22_nr_cve\t--list-cves\t-\tno\tlist the 5G CVE probes and handoffs\n'
             ;;
+        rf-effect)
+            # The receive path, end to end, with no radio and no pre-existing
+            # capture: the module writes a fixture whose verdict is fixed by
+            # construction and then has to reach that verdict through its real
+            # analyser. The transmit half is deliberately NOT a step. Arming the
+            # lab gate is an operator's act with a disclaimer attached, not
+            # something a chain should be able to do on its behalf, so the last
+            # step reports the gate state instead of opening it.
+            #
+            # --discriminate is also absent, for a different reason: it decides
+            # between jamming, congestion and a coverage hole from the feature
+            # record, and a synthetic capture carries none of the receiver
+            # counters (decode failures, RSRP/RSRQ deltas) that decision needs.
+            # On a fixture it correctly answers "indeterminate" and exits 1, so
+            # a chain step would report a failure the operator did not cause.
+            kchn_chain_header
+            printf '1\t33_jamming_detect\t--fixture\tclean /tmp/imsisting/jamming_detect/chain_clean.cf32\tno\twrite a known-clean capture\n'
+            printf '2\t33_jamming_detect\t--characterise\t/tmp/imsisting/jamming_detect/chain_clean.cf32 cf32 20000000\tno\ta clean capture must characterise as clean\n'
+            printf '3\t33_jamming_detect\t--fixture\tnarrow /tmp/imsisting/jamming_detect/chain_narrow.cf32\tno\twrite a known-narrowband capture\n'
+            printf '4\t33_jamming_detect\t--characterise\t/tmp/imsisting/jamming_detect/chain_narrow.cf32 cf32 20000000\tno\ta 25 kHz offset carrier must characterise as narrowband\n'
+            printf '5\t33_jamming_detect\t--analyse\t/tmp/imsisting/jamming_detect/chain_narrow.cf32 cf32 20000000\tno\tthe features, saved as the record\n'
+            printf '6\t33_jamming_detect\t--noise-floor\t/tmp/imsisting/jamming_detect/chain_narrow.cf32 cf32 20000000\tno\tthe noise floor over time\n'
+            printf '7\t33_jamming_detect\t--tx-status\t-\tno\tthe disclaimer and the gate state, keys nothing\n'
+            ;;
+        nbiot-audit)
+            # Every step is a worked vector, so this chain runs identically on a
+            # machine that has never seen a capture. The two decoders are given
+            # real messages rather than being asked for a usage line.
+            kchn_chain_header
+            printf '1\t45_iot\t--decode-sib1\tc30a8246815d5e6d058606e53b5073a801008008\tno\tdecode a real SystemInformationBlockType1-NB\n'
+            printf '2\t45_iot\t--decode-mib\taccac00000\tno\tdecode a real MasterInformationBlock-NB\n'
+            printf '3\t45_iot\t--npss-nss\t503\tno\tthe PCI 503 decomposition (NPSS is fixed, NSSS carries the PCI)\n'
+            printf '4\t45_iot\t--selftest\t-\tno\tthe codec known answers and the refusals\n'
+            ;;
+        lmr-survey)
+            # Non-3GPP land mobile radio: the frame arithmetic is derived from the
+            # air interface and checked against the published durations, so an
+            # operator can see whether the two still agree before trusting a
+            # survey. No radio and no capture.
+            kchn_chain_header
+            printf '1\t53_non3gpp\t--classify\t25\tno\ta 25 kHz channel is TETRA\n'
+            printf '2\t53_non3gpp\t--classify\t12.5\tno\ta 12.5 kHz channel is DMR\n'
+            printf '3\t53_non3gpp\t--frame-math\t255 2 4 36000\tno\tderive the TETRA frame from 2040 bits at 36 kbit/s\n'
+            printf '4\t53_non3gpp\t--frame-math\t132 2 2 9600 2.5\tno\tderive the DMR frame from 528 bits plus two guards\n'
+            printf '5\t53_non3gpp\t--detect-note\t-\tno\tthe cipher posture per technology\n'
+            printf '6\t51_sidelink\t--subchannels\t100 10\tno\tsidelink resource pool split\n'
+            printf '7\t51_sidelink\t--freq-bits\t10\tno\tSCI-1A frequency field width for 10 subchannels\n'
+            ;;
+        slice-oran-assess)
+            # The 5G control-plane surface that Phases 11 names: slice selection
+            # on the NAS side, then the RIC side that owns the policies.
+            kchn_chain_header
+            printf '1\t34_slicing\t--sst-table\t-\tno\tthe standardised slice types\n'
+            printf '2\t34_slicing\t--encode-s-nssai\t1 000001\tno\tencode a known S-NSSAI\n'
+            printf '3\t34_slicing\t--decode-s-nssai\t01000001\tno\tdecode it back\n'
+            printf '4\t48_oran\t--interfaces\t-\tno\tthe RIC interface map\n'
+            printf '5\t48_oran\t--e2sm\t-\tno\tthe E2 service models an xApp can drive\n'
+            printf '6\t48_oran\t--xapp-attack\t-\tno\tthe over-broad xApp model\n'
+            ;;
         *)
             return 1 ;;
     esac
@@ -143,7 +202,8 @@ kchn_builtin_chain() {
 # Every built-in chain must appear here. The selftest asserts this list and
 # the menu agree, so a new chain cannot ship unlisted.
 kchn_builtin_names() {
-    printf '%s\n' survey passive-audit gsm-assessment lte-core-audit 5g-privacy
+    printf '%s\n' survey passive-audit gsm-assessment lte-core-audit 5g-privacy \
+        rf-effect nbiot-audit lmr-survey slice-oran-assess
 }
 
 kchn_builtin_count() {
@@ -632,11 +692,11 @@ STUB
     for n in $(kchn_builtin_names); do
         kchn_chain_exists "$n" && chk_names=$((chk_names + 1))
     done
-    chk builtin-count        "$(kchn_builtin_count)" "5"
-    chk builtin-all-exist    "$chk_names" "5"
-    chk builtin-names        "$(kchn_builtin_names | sort | tr '\n' ' ')" "5g-privacy gsm-assessment lte-core-audit passive-audit survey "
-    chk builtin-listed       "$(kchn_list_chains | tail -n +2 | grep -c .)" "5"
-    chk builtin-listed-src   "$(kchn_list_chains | awk -F'\t' '$4=="builtin"' | grep -c .)" "5"
+    chk builtin-count        "$(kchn_builtin_count)" "9"
+    chk builtin-all-exist    "$chk_names" "9"
+    chk builtin-names        "$(kchn_builtin_names | sort | tr '\n' ' ')" "5g-privacy gsm-assessment lmr-survey lte-core-audit nbiot-audit passive-audit rf-effect slice-oran-assess survey "
+    chk builtin-listed       "$(kchn_list_chains | tail -n +2 | grep -c .)" "9"
+    chk builtin-listed-src   "$(kchn_list_chains | awk -F'\t' '$4=="builtin"' | grep -c .)" "9"
 
     # Every chain's steps parse into the six documented fields, with a
     # positive step number and a hardware flag of yes or no.
@@ -846,7 +906,7 @@ CHAIN
 
     out=$(kchn_cli_status_tsv)
     chk status-module  "$(fld "$out" module)"           "killchain"
-    chk status-builtin "$(fld "$out" builtin_chains)"   "5"
+    chk status-builtin "$(fld "$out" builtin_chains)"   "9"
     chk status-dir     "$(fld "$out" dir)"              "$KCHN_DIR"
     chk status-runsdir "$(fld "$out" runs_dir)"         "$KCHN_RUNS_DIR"
     chk status-fields  "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"

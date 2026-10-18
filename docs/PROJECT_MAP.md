@@ -154,45 +154,44 @@ Beyond those, the interesting tooling is the **oracle layer**: protocol code is
 checked against outside implementations rather than against itself —
 `tools/check-lte-phy-oracle.sh` against srsRAN_4G release_23_11,
 `tools/lpp_layout.py` generated from the 3GPP TS 36.331 ASN.1 by `tools/asn1gen.py`,
+`tools/lte_rrc_nb_layout.py` for the NB-IoT message set (`asn1gen.py --family nbiot`;
+no LTE root reaches SIB1-NB, so the LTE table could never carry it),
 `tools/gsm_crypto.py` with known-answer vectors for COMP128-1/2/3, Milenage, TUAK,
 Keccak-f[1600], A5/1. If you touch air-interface code, that is the standard you are
 held to.
 
 ## 7. Where the tree actually is right now
 
-Measured, not quoted from a doc. The five gates as they stand:
+Measured, not quoted from a doc. The six gates as they stand:
 
 | Gate | Exit | Result |
 |---|---|---|
 | `run-selftests.sh` | 0 | **57 passed, 0 failed, 0 missing** |
 | `check-paths.sh` | 0 | all path checks passed |
 | `gen-icons-xml.sh --check` | 0 | up to date, 67 entries |
-| `check-verbs.sh` | **1** | 1 unplaced verb: `16_sim --ota-key` |
-| `gen-module-index.sh --check` | **1** | module index is STALE |
+| `check-verbs.sh` | 0 | 609 placed, 88 CLI-only, 34 modifiers, 172 exempt; no unplaced verb |
+| `check-gui-text.sh` | 0 | no control, label or tooltip named after a verb |
+| `gen-module-index.sh --check` | 0 | up to date, 57 modules |
 
-Both red gates come from the same in-progress cut (below). Neither is a regression
-in shipped code — they are the expected cost of an unfinished change that touched a
-module's verb list.
+All six are green with the Phase 12 work in the tree. Detail:
 
-Detail:
-
-- **Working tree is dirty**, ~743 insertions across three files — i.e. there is
-  in-progress work that no document records:
-  - `imsisting.sh` (+126): application icon installed into the user's
-    `hicolor` theme plus a generated `.desktop` entry, rewritten only when the
-    content differs.
-  - `modules/41_ota_sms.sh` (+500/-…) and `modules/16_sim.sh` (+144/-85): OTA
-    security coding — the two modules that build and parse the same Command Header
-    are being synchronised against ETSI TS 102 225 SPI/KIc/KID.
-  - New untracked: `tools/check-ota-codec.sh` and `tools/ota-oracle/check_ota_coding.py`,
-    an independent statement of the bit layout cross-checked against pySim.
-- When the OTA cut lands, the follow-up is mechanical: place `--ota-key` in
-  `16_sim`'s submenu spec in `main1.c` (or prefix it `~` if it is deliberately
-  CLI-only), then `./tools/gen-module-index.sh` to regenerate the index, then both
-  red gates go green. Do not "fix" them by hand-editing `module_index.tsv`.
-- The launcher and `docs/` have diverged from `SESSION_HANDOFF.md`, which pins HEAD
-  `10a22c0` and claims 21 unplaced verbs as "baseline". Both are now wrong: HEAD is
-  five commits on, and the baseline is 1.
+- **Working tree is dirty**, and this time the documents record it: the four
+  formerly-held modules have their offensive halves built and documented in
+  `docs/OFFENSIVE_ROADMAP.md` (Phase 12). The shape is the same in all four —
+  detection reads what it is given, the offensive verbs take no flag, each carries
+  a one-line standing note in its own TSV output, and each exits 3 where the last
+  hop would leave the machine. **Do not add an authorisation gate back**: see
+  `docs/SESSION_HANDOFF.md`, "Standing policy: modules are not gated".
+- **`module_index.tsv` is generated.** When a module's verb list changes, run
+  `./tools/gen-module-index.sh`; never hand-edit the TSV. Every new verb also needs
+  a home: a control in its submenu spec in `main1.c`, a `~` prefix if it is
+  deliberately CLI-only, or an entry in `modifier_re` if it is a *flag* rather than
+  a verb. That last one is a trap — see `docs/SESSION_HANDOFF.md`; widening the
+  regex to a name another module already uses as a verb silently stops requiring a
+  control for it (`--device` did exactly that, and came straight back out).
+- **A module change needs a GUI restart.** The page re-reads the module on build;
+  a screenshot taken against a running instance shows the previous module's data.
+  Captures need ~20-25 s after launch or the frame is black.
 
 ## 8. Reading order
 

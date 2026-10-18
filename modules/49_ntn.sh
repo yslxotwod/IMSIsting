@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# ntn — 5G non-terrestrial networks: propagation delays, Doppler and SIB19.
+# ntn — 5G non-terrestrial networks: propagation delays, Doppler and K_offset.
 #
 # A satellite cell is a normal NR cell with two extra problems: a round-trip
 # delay far larger than any terrestrial timing assumes, and a Doppler shift that
-# scales with the closing velocity. 3GPP answers both in SIB19 (TA, k_offset,
+# scales with the closing velocity. 3GPP answers both in SIB19 (TA, K_offset,
 # ephemeris, cell reference location, mobility). This module computes the delays
-# and Doppler, models k_offset, and lays out the feeder/service link exposure.
+# and Doppler for the geometry you supply, and converts the SIB19 K_offset.
+#
+# K_offset is counted in 15 kHz reference slots, i.e. 1 ms each: TS 38.331
+# NTN-Config field description ("The unit of the field K_offset is number of
+# slots for a given subcarrier spacing of 15 kHz"), and TS 38.213 clause 9 adds
+# 2^(mu-mu_Koffset)*K_offset slots in the carrier's numerology with
+# mu_Koffset = 0 in FR1 and in FR2-NTN. So the carrier SCS changes the slot
+# count the UE schedules with, not the delay in milliseconds. SIB19 itself is
+# not decoded here: this tree has no NR RRC ASN.1 layout table.
 #
 # Attack owned: none direct — cell reconnaissance and timing analysis for NTN
 # access (extends 02_cell_recon and 12_nr_air to a satellite cell).
@@ -61,7 +69,7 @@ ntn_split() {
 
 ntn_status_tsv() {
     printf 'MODULE\tntn\n'
-    printf 'TARGET\tNTN propagation delay, Doppler, TA and SIB19 handling\n'
+    printf 'TARGET\tNTN propagation delay, Doppler, TA and K_offset handling\n'
     printf 'CONSTANT\tc=299792458 m/s (exact)\n'
     printf 'TRANSMIT\tnone — timing and link analysis\n'
     printf 'SELFTEST\tyes\n'
@@ -110,35 +118,79 @@ ntn_ta_units() {
     }'
 }
 ntn_koffset() {
-    local rtt_ms="${1:-}"
-    [[ "$rtt_ms" =~ ^[0-9]+([.][0-9]+)?$ ]] || { printf 'ERROR\trtt (ms) must be numeric\n' >&2; return 2; }
-    awk -v r="$rtt_ms" 'BEGIN{
-        slot_ms = 1.0
-        print "scs_khz\t15"
-        printf "slot_ms\t%.1f\n", slot_ms
-        k = r
-        ko = int(k/slot_ms); if (ko*slot_ms < k) ko++
-        printf "k_offset_min\t%d\n", ko
-        printf "note\tk_offset must at least cover the round-trip delay so the UE can apply TA before the slot is scheduled\n"
-    }'
+    # K_offset is an INTEGER (1..1023) of 15 kHz reference slots, so one slot
+    # of K_offset is exactly 1 ms (TS 38.211 Table 4.3.2-1: 1 slot per 1 ms
+    # subframe at mu=0) and the physical offset is K_offset ms for every
+    # carrier SCS. TS 38.213 clause 9 (and 8.2 for the RAR grant) has the UE
+    # add 2^(mu-mu_Koffset)*K_offset slots of the active UL BWP numerology,
+    # with mu_Koffset = 0 in FR1 and in FR2-NTN, which is what makes the
+    # carrier SCS matter: it scales the slot count, not the delay.
+    local k="${1:-}" scs="${2:-}" rate="${3:-}" mu=0 factor=1
+    [[ "$k" =~ ^[0-9]{1,4}$ ]] || {
+        printf 'ERROR\tk_offset must be a decimal integer number of slots\n' >&2; return 2; }
+    k=$(( 10#$k ))
+    (( k >= 1 && k <= 1023 )) || {
+        printf 'ERROR\tk_offset %d is outside cellSpecificKoffset-r17 INTEGER(1..1023) (TS 38.331)\n' "$k" >&2
+        return 2; }
+    if [[ -n "$scs" ]]; then
+        case "$scs" in
+            15)  mu=0 ;;
+            30)  mu=1 ;;
+            60)  mu=2 ;;
+            120) mu=3 ;;
+            *)   printf 'ERROR\tsubcarrier spacing must be 15, 30, 60 or 120 kHz (got %s)\n' "$scs" >&2; return 2 ;;
+        esac
+        factor=$(( 1 << mu ))
+    fi
+    if [[ -n "$rate" ]]; then
+        [[ "$rate" =~ ^[0-9]{1,15}$ ]] || {
+            printf 'ERROR\tsample rate must be a positive decimal integer in Hz (got %s)\n' "$rate" >&2
+            return 2; }
+        rate=$(( 10#$rate ))
+        (( rate > 0 )) || {
+            printf 'ERROR\tsample rate must be greater than zero (got %s)\n' "$rate" >&2
+            return 2; }
+    fi
+    printf 'k_offset_slots\t%d\n' "$k"
+    printf 'k_offset_unit\tslots at 15 kHz reference (TS 38.331 NTN-Config)\n'
+    printf 'slot_ms_used\t%.3f\n' 1.0
+    printf 'delay_ms\t%.3f\n' "$k"
+    if [[ -n "$scs" ]]; then
+        printf 'scs_khz\t%s\n' "$scs"
+        awk -v m="$mu" 'BEGIN{ printf "carrier_slot_ms\t%.3f\n", 1.0/(2^m) }'
+        printf 'applied_slots\t%d\n' $(( k * factor ))
+        printf 'applied_ms\t%.3f\n' "$k"
+        printf 'note\tK_offset counts 15 kHz slots; with SCS %s kHz the UE adds 2^%d*K_offset = %d carrier slots (TS 38.213 clause 9, mu_Koffset=0)\n' \
+            "$scs" "$mu" $(( k * factor ))
+    fi
+    if [[ -n "$rate" ]]; then
+        printf 'sample_rate_hz\t%s\n' "$rate"
+        awk -v k="$k" -v r="$rate" 'BEGIN{ printf "delay_samples\t%.0f\n", k*r/1000.0 }'
+    fi
 }
 
+# ── SIB19: decode or refuse ─────────────────────────────────────────────
+# A real decode needs the NR RRC ASN.1 layout table, i.e. a table generated
+# from TS 38.331 and differentially verified the way the LTE tables are
+# (tools/lte_rrc_layout.py, tools/lte_rrc_nb_layout.py, tools/lte-per-oracle/
+# verify_per.py). tools/asn1gen.py knows only the LTE families rrc and nbiot;
+# the pycrate RRCNR module does define SIB19_r17, but an NR table has never been
+# generated or certified here, so this verb refuses instead of printing hex
+# slices as if they were fields.
 ntn_sib19() {
-    cat <<'EOF'
-field	meaning
-ta_common	cell-level timing advance applied before the UE is scheduled
-k_offset	scheduling offset that covers the propagation delay
-ephemeris	orbital state: ECEF position/velocity or orbital elements
-cell_reference_location	on-earth reference point for distance-based TA
-mobility	trajectory parameters for a moving cell (LEO/MEO)
-EOF
+    printf 'ERROR\tSIB19 cannot be decoded: this tree has no NR RRC ASN.1 layout table\n' >&2
+    printf 'WHY\tSIB19 is a TS 38.331 ASN.1 IE. tools/asn1gen.py generates layout tables only for the LTE families rrc and nbiot; an NR table must be generated from the pycrate RRCNR module (SIB19_r17 is defined there) and verified case by case against it before a decoder here would be honest. Refusing rather than printing hex slices as fields.\n' >&2
+    printf 'NEXT\tadd an nr family to tools/asn1gen.py, emit the SIB19 layout table, certify it with tools/lte-per-oracle/verify_per.py --table, then wire --sib19-decode\n' >&2
+    return 2
 }
+# ── feeder link: not computed ───────────────────────────────────────────
+# SIB19 carries no feeder gateway position, so the gateway-satellite geometry
+# is not derivable from anything this module reads. What the old table called
+# "exposure" was a topology sketch, not a measurement or a computed quantity.
 ntn_feeder_link() {
-    cat <<'EOF'
-link	endpoints	exposure
-feeder	gateway <-> satellite	ground-to-space; the gateway is the trust anchor and the long-haul backhaul
-service	satellite <-> UE	user link; the satellite is a shared relay, so co-channel traffic is co-located
-EOF
+    printf 'ERROR\tfeeder link is not computed: SIB19 carries no gateway geometry\n' >&2
+    printf 'WHY\tSIB19 provides TA, K_offset, ephemeris and the cell reference location for the service link; the feeder (gateway-satellite) distance needs the gateway position, which is not signalled and not supplied here. A topology table is not an analysis, so this module prints none.\n' >&2
+    return 2
 }
 
 ntn_plan() {
@@ -146,8 +198,8 @@ ntn_plan() {
 status	handoff
 what	operating or observing an NTN cell
 hardware	an NTN-capable UE, or an SDR with a satellite pass to receive (a LEO beacon on the feeder/service downlink)
-software	a channel simulator with a Doppler model for the return path; SIB19 decoder on the receive side
-flow	1. --doppler and --range for the pass geometry  2. --ta and --koffset for the timing budget  3. --sib19 for the fields to decode
+software	computed here: --doppler, --range, --ta and --koffset (the SIB19 K_offset unit); refused here: --sib19 (no NR RRC table) and --feeder (no gateway geometry)
+flow	1. --doppler and --range for the pass geometry  2. --ta and --koffset for the timing budget  3. SIB19 decode needs a generated NR ASN.1 table first
 note	transmitting into a satellite link needs that operator's authorisation; this module computes on geometry you supply
 EOF
 }
@@ -188,13 +240,39 @@ ntn_selftest() {
     # a terrestrial-range distance stays inside the range, so the branch is real.
     chk ta-short "$(fld "$(ntn_ta_units 1)" note)" "within the LTE TA command range"
 
-    # 4. k_offset must cover the RTT: GEO 238.74 ms -> 239 slots at 15 kHz.
-    chk koffset-geo "$(fld "$(ntn_koffset 238.74)" k_offset_min)" "239"
-    chk koffset-ms  "$(fld "$(ntn_koffset 4.003)" k_offset_min)" "5"
+    # 4. K_offset. The unit is 15 kHz reference slots (TS 38.331 V18.3.0
+    #    NTN-Config field description), and one such slot is 1 ms (TS 38.211
+    #    Table 4.3.2-1: at mu=0 there is 1 slot per 1 ms subframe). So
+    #    K_offset=1 is 1.000 ms and K_offset=239 is 239.000 ms; at 30.72 MS/s
+    #    239 ms is 7,342,080 samples. The carrier SCS does not change the
+    #    delay, it changes the slot count: TS 38.213 V18.4.0 clause 9 has the
+    #    UE add 2^(mu-mu_Koffset)*K_offset slots of the active UL BWP with
+    #    mu_Koffset = 0 in FR1 and FR2-NTN, so SCS 30/60/120 kHz turns 239
+    #    reference slots into 478/956/1912 carrier slots of 0.5/0.25/0.125 ms.
+    chk koffset-one   "$(fld "$(ntn_koffset 1)" delay_ms)"                 "1.000"
+    chk koffset-slot  "$(fld "$(ntn_koffset 1)" slot_ms_used)"             "1.000"
+    chk koffset-unit  "$(fld "$(ntn_koffset 1)" k_offset_unit)"            "slots at 15 kHz reference (TS 38.331 NTN-Config)"
+    chk koffset-geo   "$(fld "$(ntn_koffset 239)" delay_ms)"               "239.000"
+    chk koffset-samp  "$(fld "$(ntn_koffset 239 15 30720000)" delay_samples)" "7342080"
+    chk koffset-a30   "$(fld "$(ntn_koffset 239 30)" applied_slots)"       "478"
+    chk koffset-a60   "$(fld "$(ntn_koffset 239 60)" applied_slots)"       "956"
+    chk koffset-a120  "$(fld "$(ntn_koffset 239 120)" applied_slots)"      "1912"
+    chk koffset-cslot "$(fld "$(ntn_koffset 239 30)" carrier_slot_ms)"     "0.500"
+    chk koffset-c120  "$(fld "$(ntn_koffset 239 120)" carrier_slot_ms)"    "0.125"
+    chk koffset-a30ms "$(fld "$(ntn_koffset 239 30)" applied_ms)"          "239.000"
+    chk koffset-120ms "$(fld "$(ntn_koffset 239 120)" delay_ms)"           "239.000"
+    chk koffset-zero  "$(ntn_koffset 0 >/dev/null 2>&1; echo $?)"          "2"
+    chk koffset-max   "$(ntn_koffset 1024 >/dev/null 2>&1; echo $?)"       "2"
+    chk koffset-dec   "$(ntn_koffset 12.5 >/dev/null 2>&1; echo $?)"       "2"
+    chk koffset-scs   "$(ntn_koffset 1 7 >/dev/null 2>&1; echo $?)"        "2"
+    chk koffset-rate  "$(ntn_koffset 1 15 0 >/dev/null 2>&1; echo $?)"     "2"
 
-    # 5. Tables.
-    chk sib19-koffset "$(ntn_sib19 | awk -F'\t' '$1=="k_offset"{print ($2 ~ /propagation delay/)?"ok":"no"}')" "ok"
-    chk feeder-gw "$(ntn_feeder_link | awk -F'\t' '$1=="feeder"{print ($3 ~ /trust anchor/)?"ok":"no"}')" "ok"
+    # 5. Capability refusals. SIB19 is an ASN.1 IE and no NR RRC layout table
+    #    exists in this tree, and SIB19 carries no gateway geometry, so both
+    #    verbs must say so and return non-zero rather than print a table.
+    chk sib19-refuse  "$(ntn_sib19 >/dev/null 2>&1; echo $?)"              "2"
+    chk sib19-why     "$(ntn_sib19 2>&1 >/dev/null | grep -c '^WHY')"      "1"
+    chk feeder-refuse "$(ntn_feeder_link >/dev/null 2>&1; echo $?)"        "2"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -210,9 +288,9 @@ ntn_menu() {
   [1]  Doppler shift
   [2]  Round-trip delay
   [3]  TA units
-  [4]  k_offset
-  [5]  SIB19 field reference
-  [6]  Feeder / service link reference
+  [4]  K_offset (slots -> ms, samples)
+  [5]  SIB19 decode (refused: no NR table)
+  [6]  Feeder link (refused: no geometry)
   [7]  Plan (handoff)
   [0]  back
 M
@@ -222,7 +300,8 @@ M
                ntn_doppler "$f" "$v" "${a:-0}"; read -rp "  enter " _ ;;
             2) read -rp "  one-way km> " k; ntn_range_rtt "$k"; read -rp "  enter " _ ;;
             3) read -rp "  one-way km> " k; ntn_ta_units "$k"; read -rp "  enter " _ ;;
-            4) read -rp "  rtt ms> " r; ntn_koffset "$r"; read -rp "  enter " _ ;;
+            4) read -rp "  k_offset slots> " k; read -rp "  scs kHz [15/30/60/120]> " s; read -rp "  sample rate Hz (blank skips)> " r
+               ntn_koffset "$k" "$s" "$r"; read -rp "  enter " _ ;;
             5) ntn_sib19; read -rp "  enter " _ ;;
             6) ntn_feeder_link; read -rp "  enter " _ ;;
             7) ntn_plan; read -rp "  enter " _ ;;
@@ -240,7 +319,7 @@ ntn_cli_main() {
         --doppler)     ntn_doppler "${1:-}" "${2:-}" "${3:-0}" ;;
         --range)       ntn_range_rtt "${1:-}" ;;
         --ta)          ntn_ta_units "${1:-}" ;;
-        --koffset)     ntn_koffset "${1:-}" ;;
+        --koffset)     ntn_koffset "${1:-}" "${2:-}" "${3:-}" ;;
         --sib19)       ntn_sib19 ;;
         --feeder)      ntn_feeder_link ;;
         --plan)        ntn_plan ;;
@@ -255,9 +334,9 @@ Usage: $0 COMMAND
   --doppler <hz> <mps> [deg]   Doppler shift for a closing velocity
   --range <one_way_km>      one-way and round-trip delay
   --ta <one_way_km>         TA units needed vs the LTE TA range
-  --koffset <rtt_ms>        minimum scheduling offset (slots, 15 kHz)
-  --sib19                   SIB19 field reference
-  --feeder                  feeder/service link exposure
+  --koffset <slots> [scs_khz] [sample_rate_hz]   K_offset (TS 38.331, 15 kHz reference slots) -> ms and samples
+  --sib19                   refused: no NR RRC ASN.1 layout table in this tree
+  --feeder                  refused: SIB19 carries no gateway geometry
   --plan                    NTN handoff plan
   --selftest                verify the timing geometry
   --menu                    interactive menu

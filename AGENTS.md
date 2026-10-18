@@ -19,3 +19,16 @@ Owner-qualified `wayfinder:` labels only — `wayfinder:map`, `wayfinder:researc
 ### Domain docs
 
 Domain docs are single-context: one `GLOSSARY.md` at the repo root, architecture decisions in `docs/adr/`. See `docs/agents/domain.md`.
+
+## Working rules
+
+### Commit and push at the end of every finished phase
+
+When a roadmap phase in `docs/OFFENSIVE_ROADMAP.md` is finished — gates green,
+suite green, docs updated — commit the work and push it. Do not leave a finished
+phase sitting in the working tree: the phase is not done until it is on the
+remote. The message names the phase and what it changed, not just "update".
+
+Sub-work inside a phase does not need its own commit; the phase boundary is the
+commit boundary. If a phase is half-finished, it is not committed as if it were
+done — say so in the response instead.

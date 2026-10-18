@@ -87,9 +87,12 @@ somewhere durable. Two things it encodes that cost time to learn:
 
 > "btw these output window are ugly so we gonna replace them module by module from now on."
 
-`build_output_card()` (`main1.c:~2560`) is **being retired**. When you touch a module page, replace
+`build_output_card()` (`main1.c:2603`) is **being retired**. When you touch a module page, replace
 its raw output card; do not leave a page half-migrated. The CVE pages are done — the remaining
-~54 module pages are not.
+~54 module pages are not. The work is filed as **Phase 20 — the module pages** in
+`docs/OFFENSIVE_ROADMAP.md`, with the measured surface, the per-page checklist and the order of
+work. **Scope is the 48 spec-driven modules only** — the operator's instruction is to leave the
+custom-built pages (`build != NULL`) alone for now, and `00_deps` is excluded by name.
 
 ### House style
 
@@ -133,6 +136,57 @@ its raw output card; do not leave a page half-migrated. The CVE pages are done �
    `action_waited` sees only the first line or two. The verdict is recorded there and *reported*
    from `action_run_unref` — the last release, when the process is reaped AND both streams are at
    EOF. This was silently truncating the old output cards too.
+
+### Standing policy: modules are not gated
+
+The operator's rule, given after reviewing Phase 12: **do not build modules behind
+an authorisation gate.** The four Phase 12 modules shipped with
+`--i-have-a-lab-and-authorisation` and were ungated on that instruction. If you are
+about to add a flag whose only job is to make the operator assert something,
+don't — the toolkit is a tool, and a warning that costs a flag stops being read.
+
+What replaces a gate, and what a reviewer should check instead:
+
+1. **The artefact is real, the effect is absent.** Encoding, framing, parsing,
+   request construction, command files: all done for real. Anything that would act
+   on a live system — a socket, a reader, a portal, a phone line, a modulator —
+   stops at the artefact and exits 3 with a named handoff.
+2. **The note goes in the output, where it is read.** One TSV row (`note`,
+   `STANDING_NOTE`) saying what the verb does not do. Not a stderr block: stderr
+   is for diagnostics, and `--status-tsv` in particular must stay silent there
+   because the GUI polls it.
+3. **The retired flag is rejected, not swallowed.** Passing
+   `--i-have-a-lab-and-authorisation` to an ungated module must be a usage error
+   (rc 2). A silent no-op in a script is worse than the gate ever was.
+4. **If a verb warns, warn where the reader is.** Two real defects came out of the
+   gated cut and the lesson outlives it: `31_sim_defense` printed its 10-line
+   disclaimer from `--status-tsv` (polled every few seconds — a warning nobody
+   reads) and *not* on the refusal path (where the one operator who needed it was).
+
+`33_jamming_detect` is the last module that still gates, from an explicit Phase 9
+decision; it is a one-function removal if that is revisited.
+
+### Two more, from the `45_iot` decode work### Two more, from the `45_iot` decode work
+
+1. **A decode that slices hex is not a decoder, and its output is worse than an error.** The old
+   `--decode-sib1` printed `hex[0:6]` as "MIB-NB", `hex[6:8]` as "SI Period × 1024" and
+   `hex[12:18]` as "Cell ID", with exit 0. SIB1-NB is not a MIB-NB, has no TDD field, and its cell
+   identity is **28 bits inside `cellAccessRelatedInfo-r13`**. Stable, plausible, invented, and
+   indistinguishable from a real reading in the text. When a format has a published layout, either
+   drive a real codec or refuse.
+2. **pycrate's `to_aper()` is ALIGNED PER; unaligned is `to_uper()`.** TS 36.331 RRC is unaligned.
+   Encoding a value with `to_aper` and decoding with the unaligned engine gives a plausible-looking
+   mismatch that reads as a broken table. Cost a detour into suspecting the generator.
+
+### The NB-IoT layout table (new, `45_iot`)
+
+`tools/lte_rrc_nb_layout.py` is generated data — `tools/asn1gen.py --family nbiot`, 10 roots over
+214 types, certified by `tools/lte-per-oracle/verify_per.py --table tools/lte_rrc_nb_layout.py`
+(214/214 types, 2848 cases, 0 disagreements, 912-node structural audit). It is a separate table
+because **no LTE root reaches `SystemInformationBlockType1_NB`** — the RRC closure never arrives at
+the NB message set. Regeneration needs the oracle venv
+(`/home/ysl/.lte-oracles/venv/bin/python`); running the codec needs neither pycrate nor anything
+outside the standard library.
 
 ### A C bug worth remembering
 

@@ -1,14 +1,27 @@
 #!/usr/bin/env bash
-# li_probe — lawful-interception discovery: the interfaces, and what a capture
-# can and cannot tell you about an intercept in progress.
+# li_probe — 3GPP lawful interception: the interfaces, the interception-posture
+# signals a capture can show, and an encoder for the X1/HI1 provisioning and
+# activation records and the X3/HI3 interception-product envelope.
 #
-# SCOPE, stated first: this module is detection-only. It models the 3GPP LI
-# architecture (TS 33.107, TS 33.108, TS 33.128 for 5G), names the handover
-# interfaces, and scores signalling patterns that a lawful intercept or an
-# IMSI catcher tends to leave behind. It does not activate, provision or operate
-# interception, and no such verb is dispatchable. The selftest asserts that.
+# SCOPE, stated first. This module cannot intercept anything and no verb here
+# pretends to. Two halves:
 #
-# Attack owned: O12/O13 adjacency (tracking via the core) — detection half only.
+#   * Detection (--interfaces, --iface, --architecture, --score, --report,
+#     --plan) reads what you give it and sends nothing.
+#   * Encoding (--provision-target, --activate, --intercept) builds real bytes
+#     for the protocol artefacts of a lawful-intercept system: exact field
+#     layout, length prefixes, orderings and encodings. It is a self-defined
+#     length-prefixed TLV envelope, NOT TS 33.108's ASN.1 — that module was not
+#     available to this author, so no HI2/HI3 PDU of the standard is claimed
+#     and no ASN.1 type name is invented. No encoder verb opens a socket, sends
+#     anything or asks for a flag; each one prints its artefact, carries a note
+#     saying what it never contacts, and exits 3 with a handoff: an
+#     interception is performed by an operator on the operator's own network,
+#     under statutory authority, and delivering an artefact is that operator's
+#     action, not this module's.
+#
+# Attack owned: O12/O13 adjacency (tracking via the core) — detection half; the
+# X1/X3 protocol artefacts are the encoder half.
 #
 # Resolve IMSISTING_ROOT from this script's own path (MODULE_CONVENTIONS §2).
 if [[ -z "${IMSISTING_ROOT:-}" ]]; then
@@ -49,20 +62,115 @@ declare -F ok   >/dev/null 2>&1 || ok()   { printf '[ok]   %s\n' "$*" >&2; }
 declare -F banner >/dev/null 2>&1 || banner() { :; }
 
 lipr_sanitize() { printf '%s' "${1:-}" | tr '\t\r\n' '   '; }
-LIPR_F=()
-lipr_split() {
-    LIPR_F=()
-    local i n
-    n=$(printf '%s' "$1" | awk -F'\t' '{print NF}')
-    for (( i = 1; i <= n; i++ )); do
-        LIPR_F+=("$(printf '%s' "$1" | cut -f"$i")")
+
+# Errors go to stderr, one record per line, and the function returns non-zero.
+# Two shapes, because two different things went wrong: lipr_fail is "the machine
+# could not do it" (rc 1), lipr_refuse is "this module will not do it" (rc 2)
+# and always states why.
+lipr_fail() {
+    printf 'ERROR\t%s\n' "$1" >&2
+    return 1
+}
+lipr_refuse() {
+    printf 'ERROR\t%s\n' "$1" >&2
+    printf 'WHY\t%s\n' "${2:-refused}" >&2
+    return 2
+}
+
+# ── byte arithmetic (§15: mask at the point of emission) ────────────────
+# printf '%02X' does not truncate: a value above 255 emits three digits. Every
+# octet this module emits goes through these three functions, so the mask is
+# applied exactly once, where the octet is produced.
+lipr_byte()  { printf '%02X' "$(( ${1:-0} & 0xFF ))"; }
+lipr_u16be() { printf '%04X' "$(( ${1:-0} & 0xFFFF ))"; }
+lipr_u32be() { printf '%08X' "$(( ${1:-0} & 0xFFFFFFFF ))"; }
+
+# Text field -> the octets of its bytes. od is coreutils and is the only
+# external the encoder needs; a missing od is an ERROR, not empty output.
+lipr_require_od() {
+    command -v od >/dev/null 2>&1 && return 0
+    lipr_fail "od (coreutils) is not on PATH; the text-field encoder needs it for byte-exact octets"
+    return 1
+}
+lipr_hexify() {
+    printf '%s' "${1:-}" | od -An -v -tx1 | tr -d ' \n' | tr 'a-f' 'A-F'
+}
+
+# Semi-octet BCD: two digits per octet, low-order nibble first, an odd digit
+# count padded with 0xF. This is the packing 3GPP signalling uses for telephone
+# numbers and for the IMSI's digits; the definition is restated here so the
+# encoding is not a black box. The caller validates that $1 is all digits.
+#   310150123456789 -> 13 10 05 21 43 65 87 F9   (15 digits, odd, padded F)
+#   1234            -> 21 43
+lipr_bcd() {
+    local d="${1:-}" i n out=""
+    n=${#d}
+    (( n > 0 )) || return 1
+    for (( i = 0; i < n; i += 2 )); do
+        local lo="${d:i:1}" hi="F"
+        (( i + 1 < n )) && hi="${d:i+1:1}"
+        out+="${hi}${lo}"
     done
+    printf '%s' "${out^^}"
+}
+
+# Hex -> raw bytes on disk. Pure bash printf %b, so no xxd/vim dependency.
+lipr_write_bytes() {
+    local path="${1:-}" hex="${2:-}" esc="" i
+    [[ -n "$path" ]] || { lipr_fail "empty --out path"; return 1; }
+    [[ "$hex" =~ ^([0-9A-Fa-f]{2})+$ ]] || { lipr_fail "refusing to write a non-hex artefact"; return 1; }
+    for (( i = 0; i < ${#hex}; i += 2 )); do
+        esc+="\\x${hex:i:2}"
+    done
+    mkdir -p "$(dirname "$path")" 2>/dev/null
+    printf '%b' "$esc" > "$path" || { lipr_fail "could not write $path"; return 1; }
+    [[ -s "$path" ]] || { lipr_fail "$path is empty after the write"; return 1; }
+    return 0
+}
+
+# The reader for the envelope this module writes. It decodes hand-computed
+# literals, which is what makes the selftest a known-answer test rather than a
+# round trip: the parser never sees what the encoder produced.
+lipr_parse() {
+    local h="${1:-}" n=0 off=0 tag len len_hex vhex
+    [[ -n "$h" ]] || { lipr_fail "no hex to parse"; return 1; }
+    [[ "$h" =~ ^[0-9A-Fa-f]+$ ]] || { lipr_fail "not hex: $(lipr_sanitize "$h")"; return 1; }
+    h="${h^^}"
+    n=${#h}
+    (( n % 2 == 0 )) || { lipr_fail "odd hex digit count: $n"; return 1; }
+    (( n >= 12 )) || { lipr_fail "shorter than the 6-octet header: $(( n / 2 )) octets"; return 1; }
+    [[ "${h:0:8}" == "4C495052" ]] || { lipr_fail "magic is ${h:0:8}, not 4C495052"; return 1; }
+    printf 'hdr\tmagic\tLIPR\n'
+    printf 'hdr\tversion\t0x%s\n' "${h:8:2}"
+    printf 'hdr\ttype\t0x%s\n' "${h:10:2}"
+    off=6
+    while (( off * 2 < n )); do
+        (( (off + 3) * 2 <= n )) || { lipr_fail "truncated TLV header at octet $off"; return 1; }
+        tag="${h:off*2:2}"
+        len_hex="${h:off*2+2:4}"
+        [[ "$len_hex" =~ ^[0-9A-Fa-f]{4}$ ]] || { lipr_fail "TLV 0x$tag has a non-hex length field"; return 1; }
+        len=$(( 16#$len_hex ))
+        (( (off + 3 + len) * 2 <= n )) || {
+            lipr_fail "TLV 0x$tag claims $len value octets but only $(( n / 2 - off - 3 )) remain"
+            return 1; }
+        vhex="${h:(off+3)*2:len*2}"
+        printf 'tlv\t0x%s\t%d\t%s\n' "$tag" "$len" "$vhex"
+        off=$(( off + 3 + len ))
+    done
+    (( off * 2 == n )) || { lipr_fail "trailing octets after the last TLV"; return 1; }
+    return 0
 }
 
 lipr_status_tsv() {
     printf 'MODULE\tli_probe\n'
-    printf 'TARGET\t3GPP lawful-interception interfaces and interception-posture signals\n'
-    printf 'SCOPE\tdetection-only — no activation, provisioning or interception verb\n'
+    printf 'TARGET\t3GPP lawful-interception interfaces, interception-posture signals, and a protocol-artefact encoder\n'
+    printf 'SCOPE\tdetection verbs read what they are given; the X1/HI1 provisioning and activation records and the X3/HI3 interception-product envelope are encoded byte-exact, and nothing is sent or intercepted\n'
+    printf 'DETECTION_VERBS\t--interfaces --iface --architecture --score --report --plan\n'
+    printf 'ENCODE_VERBS\t--provision-target --activate --intercept\n'
+    printf 'ENCODE_GATE\tnone -- the encoder verbs run without a flag\n'
+    printf 'DELIVERS\tnothing; every encoder exits 3 with a handoff after printing the artefact\n'
+    printf 'ENVELOPE\tself-defined length-prefixed TLV (magic LIPR); NOT an ASN.1 PDU from TS 33.108\n'
+    printf 'HANDOFF\trc 3 after the artefact is printed: delivery needs an ADMF/DF2/DF3 on the operator own network, which this module never contacts\n'
     printf 'SELFTEST\tyes\n'
 }
 
@@ -99,7 +207,7 @@ EOF
 # that a lawful intercept or an IMSI catcher tends to produce. These are the
 # signals, weighted, per TS 33.107 §6 and IMSI-catcher behaviour. Input TSV:
 #   ts<TAB>imsi<TAB>event<TAB>cell<TAB>silent
-# event in {identity_request, auth_request, location_update, sms, detach}.
+# event in {identity_request, auth_request, location_update, silent_sms, detach}.
 lipr_score() {
     local file="${1:-}"
     [[ -f "$file" ]] || { printf 'ERROR\tno such signalling file: %s\n' "$file" >&2; return 1; }
@@ -152,9 +260,508 @@ status	handoff
 what	confirming an intercept from the network side rather than inferring it
 hardware	a lab core (Open5GS/Osmocom) with its ADMF/DF mediation, or an operator's lawful-authorisation audit
 software	the mediation function's own logs, the X1 provisioning record, and the operator's LI-management audit trail
+encoder	--provision-target and --activate build the X1 record as bytes; they hand it off and never deliver it
 flow	1. collect signalling into the TSV this module scores  2. --score for the posture  3. --report for the handling
-note	only the operator (or its national authority) can confirm an active intercept; this module never performs one
+note	only the operator (or its national authority) can confirm an active intercept; this module encodes the artefacts and contacts nothing
 EOF
+}
+
+# ════════════════════════════════════════════════════════════════════════
+# ── the encoder half ────────────────────────────────────────────────────
+#
+# This section is a protocol encoder, not an interceptor. Three things sit
+# between the operator and an artefact, and they are separate on purpose,
+# because the failure this tree keeps paying for is a module that skips one and
+# prints a success line anyway:
+#
+#   1. the envelope. Real bytes: field layout, length prefixes, orderings,
+#      encodings. A length-prefixed TLV with tags this module defines and
+#      prints. It is NOT TS 33.108's ASN.1: that module was not available to
+#      this author, and the failure this tree has paid for three times is a
+#      fabricated ASN.1 type with invented fields. A labelled self-defined
+#      envelope is honest; an invented HI2Operation is not.
+#
+# Nothing here opens a socket, and no verb can claim an artefact was sent,
+# activated or intercepted. --intercept takes its payload as an argument
+# precisely because this module captures nothing.
+
+LIPR_ENVELOPE_MAGIC=4C495052      # "LIPR", this module's own magic
+LIPR_ENVELOPE_VERSION=1
+
+# The note every encoder verb carries. It is a TSV row rather than a stderr
+# block: a verb that refuses nothing has no reason to shout, and a reader who
+# parses the output still learns what the artefact is for and what it is not.
+#
+#   3GPP TS 33.107/33.108 define the X1/HI1, X2/HI2 and X3/HI3 interfaces. This
+#   module encodes artefacts in a self-defined envelope and delivers none of them.
+LIPR_NOTE='lawful interception is operated by a network under statutory authority; these verbs encode artefacts and contact no ADMF, DF2, DF3 or LEMF'
+
+# ── the envelope builder ────────────────────────────────────────────────
+# Layout: magic(4) version(1) artefact_type(1) then repeated
+#         tag(1) length(2, big-endian) value(length)
+# Every field row records the value's offset, its length and its octets, so a
+# reader can find the field in the hex without trusting this module's word.
+LIPR_ART_HEX=""
+LIPR_ART_OFF=0
+LIPR_FIELD_ROWS=()
+
+lipr_art_reset() {
+    LIPR_ART_HEX=""
+    LIPR_ART_OFF=0
+    LIPR_FIELD_ROWS=()
+}
+lipr_art_start() {   # $1 = artefact type octet
+    LIPR_ART_HEX="${LIPR_ENVELOPE_MAGIC}$(lipr_byte "$LIPR_ENVELOPE_VERSION")$(lipr_byte "${1:-0}")"
+    LIPR_ART_OFF=6
+}
+lipr_tlv() {         # tag name display_value encoding value_hex
+    local tag="${1:-0}" name="${2:-}" value="${3:-}" enc="${4:-}" vhex="${5:-}"
+    local vlen=$(( ${#vhex} / 2 )) off="$LIPR_ART_OFF"
+    LIPR_ART_HEX+="$(lipr_byte "$tag")$(lipr_u16be "$vlen")${vhex}"
+    LIPR_FIELD_ROWS+=("$(printf 'field\t%s\t%s\t%d\t%s\t%d\t%s' \
+        "$name" "$(lipr_sanitize "$value")" "$vlen" "$enc" "$off" "$vhex")")
+    LIPR_ART_OFF=$(( off + 3 + vlen ))
+}
+lipr_emit_common() {  # label type_octet interface ordering
+    local label="$1" tcode="$2" iface="$3" ordering="$4"
+    printf 'artefact\t%s\n' "$label"
+    printf 'interface\t%s\n' "$iface"
+    printf 'artefact_type\t0x%s\n' "$(lipr_byte "$tcode")"
+    printf 'envelope\t%s\n' 'self-defined: magic 4C495052 ("LIPR") + version 0x01 + artefact type + repeated tag(1) length(2, big-endian) value(N)'
+    printf 'standard\t%s\n' 'TS 33.108 names the X1/HI1, X2/HI2 and X3/HI3 interfaces; its ASN.1 module was not available to this author, so this is a self-defined envelope and NOT an ASN.1 PDU of the standard'
+    printf 'ordering\t%s\n' "$ordering"
+    printf 'artefact_bytes\t%d\n' "$(( ${#LIPR_ART_HEX} / 2 ))"
+    printf 'artefact_hex\t%s\n' "$LIPR_ART_HEX"
+    if (( ${#LIPR_FIELD_ROWS[@]} > 0 )); then
+        printf '%s\n' "${LIPR_FIELD_ROWS[@]}"
+    fi
+    printf 'field_count\t%d\n' "${#LIPR_FIELD_ROWS[@]}"
+}
+lipr_emit_out() {     # $1 = --out path or empty
+    local out="${1:-}"
+    [[ -n "$out" ]] || return 0
+    lipr_write_bytes "$out" "$LIPR_ART_HEX" || return 1
+    printf 'out_file\t%s\n' "$(lipr_sanitize "$out")"
+    printf 'out_bytes\t%d\n' "$(( ${#LIPR_ART_HEX} / 2 ))"
+    return 0
+}
+lipr_emit_handoff() {  # $1 = exact handoff text
+    printf 'status\thandoff\n'
+    printf 'sent\t0\n'
+    printf 'handoff\t%s\n' "$1"
+}
+
+# ── conf: a small KEY=VALUE file, validated rather than trusted ─────────
+# An unknown key is refused, not ignored: a mistyped key silently dropped
+# produces a request that does not say what its author thinks it says.
+LIPR_C_TYPE="" LIPR_C_TARGET="" LIPR_C_WARRANT="" LIPR_C_SERVICES=""
+LIPR_C_DF2="" LIPR_C_DF3=""
+LIPR_ID_CODE="" LIPR_ID_HEX="" LIPR_ID_ENC="" LIPR_ID_TEXT=""
+LIPR_SERVICES_MASK="" LIPR_SERVICES_TEXT=""
+LIPR_CONF_IGNORED=""
+
+lipr_trim() {
+    local s="${1:-}"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+# Identity types and codes are this module's own table (printed in every
+# artefact), not an ASN.1 ENUMERATED read out of the standard.
+#   imsi -> 1, msisdn -> 2, supi -> 3, uri -> 4, email -> 5
+# IMSI and MSISDN are carried as semi-octet BCD, the others as text octets.
+lipr_identity_encode() {
+    local t="${1:-}" v="${2:-}"
+    case "$t" in
+        imsi)
+            [[ "$v" =~ ^[0-9]{6,15}$ ]] || {
+                lipr_refuse "TARGET '$v' is not an IMSI" \
+                    "an IMSI is at most 15 digits and at least 6 (a 3-digit MCC, a 2- or 3-digit MNC and at least one MSIN digit); anything else is a different identity form -- say TARGET_TYPE=supi or uri instead of guessing"
+                return 2; }
+            LIPR_ID_CODE=1
+            LIPR_ID_HEX=$(lipr_bcd "$v") || return 1
+            LIPR_ID_ENC="bcd semi-octet (2 digits/octet, low nibble first, odd count padded 0xF)"
+            LIPR_ID_TEXT="$v"
+            ;;
+        msisdn)
+            [[ "$v" =~ ^[0-9]{1,15}$ ]] || {
+                lipr_refuse "TARGET '$v' is not an MSISDN" \
+                    "an E.164 number is at most 15 digits; the country code is part of the digits, do not add a + or separators"
+                return 2; }
+            LIPR_ID_CODE=2
+            LIPR_ID_HEX=$(lipr_bcd "$v") || return 1
+            LIPR_ID_ENC="bcd semi-octet (2 digits/octet, low nibble first, odd count padded 0xF)"
+            LIPR_ID_TEXT="$v"
+            ;;
+        supi)
+            [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$ ]] || {
+                lipr_refuse "TARGET '$v' is not a usable SUPI text" \
+                    "a 5G SUPI is carried here as its text form (for example imsi-<digits>); this encoder will not validate the 5G identity grammar itself, so it accepts 1..64 ASCII characters and refuses anything else rather than encoding a different identity"
+                return 2; }
+            LIPR_ID_CODE=3
+            LIPR_ID_HEX=$(lipr_hexify "$v") || return 1
+            LIPR_ID_ENC="utf-8 octets of the text form"
+            LIPR_ID_TEXT="$v"
+            ;;
+        uri)
+            [[ "$v" =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]+$ ]] || {
+                lipr_refuse "TARGET '$v' is not a URI" \
+                    "a URI target needs a scheme and no whitespace (for example sip:user@example.invalid); a bare address is TARGET_TYPE=email or supi, and an IMSI is TARGET_TYPE=imsi"
+                return 2; }
+            LIPR_ID_CODE=4
+            LIPR_ID_HEX=$(lipr_hexify "$v") || return 1
+            LIPR_ID_ENC="utf-8 octets of the URI"
+            LIPR_ID_TEXT="$v"
+            ;;
+        email)
+            [[ "$v" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || {
+                lipr_refuse "TARGET '$v' is not an email address" \
+                    "an email target needs one local part, one @ and a dotted domain, with no whitespace"
+                return 2; }
+            LIPR_ID_CODE=5
+            LIPR_ID_HEX=$(lipr_hexify "$v") || return 1
+            LIPR_ID_ENC="utf-8 octets of the address"
+            LIPR_ID_TEXT="$v"
+            ;;
+        *)
+            lipr_refuse "TARGET_TYPE '$t' is not one this encoder carries" \
+                "the forms are imsi, msisdn, supi, uri and email; there is no silent default, because an identity encoded under the wrong type is a request for the wrong target"
+            return 2 ;;
+    esac
+    return 0
+}
+
+# SERVICES -> a one-octet bitmask. 0x01 IRI toward DF2 (X2/HI2), 0x02 CC toward
+# DF3 (X3/HI3). Order and repetition in the conf do not matter; an unknown
+# service is refused, because a bit this module invents means nothing to the
+# receiving DF.
+lipr_services_mask() {   # prints the decimal mask; rc 2 on refusal
+    local text="${1:-}" svc rest mask=0
+    [[ -n "$text" ]] || {
+        lipr_refuse "SERVICES is empty" "a provisioning request that asks for no service requests nothing; use SERVICES=iri, SERVICES=cc or SERVICES=iri,cc"
+        return 2; }
+    [[ "$text" =~ ^[a-z]+(,[a-z]+)*$ ]] || {
+        lipr_refuse "SERVICES '$text' is not a comma-separated list of service names" "the list is iri and/or cc, with no spaces: iri,cc"
+        return 2; }
+    rest="$text"
+    while [[ -n "$rest" ]]; do
+        if [[ "$rest" == *,* ]]; then svc="${rest%%,*}"; rest="${rest#*,}"; else svc="$rest"; rest=""; fi
+        case "$svc" in
+            iri) mask=$(( mask | 1 )) ;;
+            cc)  mask=$(( mask | 2 )) ;;
+            *) lipr_refuse "unknown service '$svc' in SERVICES" "the services are iri (X2/HI2 intercept-related information, delivered by DF2) and cc (X3/HI3 content of communication, delivered by DF3); this module has no code for anything else"
+               return 2 ;;
+        esac
+    done
+    LIPR_SERVICES_TEXT="$text"
+    LIPR_SERVICES_MASK="$mask"
+    printf '%s' "$mask"
+}
+
+# host:port, where host is a name, an IPv4 literal, or a bracketed IPv6
+# literal, and the port is 1..65535.
+lipr_validate_dest() {
+    local what="$1" v="$2" host="${2%:*}" port="${2##*:}"
+    [[ -n "$v" ]] || { lipr_refuse "$what is empty" "a delivery destination is host:port"; return 2; }
+    [[ "$v" == *:* ]] || { lipr_refuse "$what '$v' has no port" "a delivery destination is host:port, for example 10.0.0.2:9002"; return 2; }
+    [[ -n "$host" ]] || { lipr_refuse "$what '$v' has an empty host" "a delivery destination is host:port"; return 2; }
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || { lipr_refuse "$what '$v' has a non-numeric port" "the port is the digits after the last colon, 1..65535"; return 2; }
+    (( 10#$port >= 1 && 10#$port <= 65535 )) || {
+        lipr_refuse "$what '$v' has port $port outside 1..65535" "a delivery function listens on a real TCP port; 0 and above 65535 are not ports"
+        return 2; }
+    if [[ "$host" =~ ^\[[0-9A-Fa-f:]+\]$ ]]; then
+        return 0
+    fi
+    [[ "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]] || {
+        lipr_refuse "$what host '$host' is not a name or an address" "the host is a DNS name, an IPv4 literal, or a bracketed IPv6 literal; a scheme, a path or a trailing dot is not"
+        return 2; }
+    return 0
+}
+
+# $1 path, $2 mode (provision|activate). Populates the LIPR_* fields or refuses
+# with rc 2. Nothing is encoded here.
+lipr_conf_load() {
+    local path="${1:-}" mode="${2:-provision}" line key val lineno=0
+    LIPR_C_TYPE="" LIPR_C_TARGET="" LIPR_C_WARRANT="" LIPR_C_SERVICES=""
+    LIPR_C_DF2="" LIPR_C_DF3="" LIPR_CONF_IGNORED=""
+    LIPR_ID_CODE="" LIPR_ID_HEX="" LIPR_ID_ENC="" LIPR_ID_TEXT=""
+    LIPR_SERVICES_MASK="" LIPR_SERVICES_TEXT=""
+    [[ -n "$path" ]] || { lipr_refuse "no conf file given" "the interface is --provision-target <conf> or --activate <conf>; the conf is a small KEY=VALUE file"; return 2; }
+    [[ -e "$path" ]] || { lipr_fail "no such conf file: $path"; return 1; }
+    [[ -f "$path" ]] || { lipr_fail "not a regular file: $path"; return 1; }
+    [[ -r "$path" ]] || { lipr_fail "conf file is not readable: $path"; return 1; }
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        lineno=$(( lineno + 1 ))
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" == *=* ]] || {
+            lipr_refuse "conf line $lineno has no KEY=VALUE: $(lipr_sanitize "$line")" "every non-comment line is one KEY=VALUE pair; a line this module cannot read is a line it will not guess at"
+            return 2; }
+        key=$(lipr_trim "${line%%=*}")
+        val=$(lipr_trim "${line#*=}")
+        case "$key" in
+            TARGET_TYPE) LIPR_C_TYPE="$val" ;;
+            TARGET)      LIPR_C_TARGET="$val" ;;
+            WARRANT)     LIPR_C_WARRANT="$val" ;;
+            SERVICES)    LIPR_C_SERVICES="$val" ;;
+            DF2_DEST)    LIPR_C_DF2="$val" ;;
+            DF3_DEST)    LIPR_C_DF3="$val" ;;
+            *) lipr_refuse "unknown conf key '$key' at line $lineno" "the keys are TARGET_TYPE, TARGET, WARRANT, SERVICES, DF2_DEST and DF3_DEST; a mistyped key that is silently ignored encodes a request that does not say what its author thought it said"
+               return 2 ;;
+        esac
+    done < "$path"
+
+    [[ -n "$LIPR_C_TYPE" ]] || { lipr_refuse "conf has no TARGET_TYPE" "TARGET_TYPE names the identity form: imsi, msisdn, supi, uri or email"; return 2; }
+    [[ -n "$LIPR_C_TARGET" ]] || { lipr_refuse "conf has no TARGET" "TARGET is the identity the warrant names; there is nothing to provision without it"; return 2; }
+    [[ -n "$LIPR_C_WARRANT" ]] || { lipr_refuse "conf has no WARRANT" "WARRANT is the authorisation reference the record is tied to; an intercept record with no authorisation reference is the thing this module exists to stop"; return 2; }
+    [[ "$LIPR_C_WARRANT" =~ ^[^[:cntrl:]]{1,64}$ ]] || { lipr_refuse "WARRANT is not 1..64 printable characters" "the reference is a short printable string; control characters cannot be carried in a text field and are refused rather than stripped"; return 2; }
+
+    lipr_identity_encode "$LIPR_C_TYPE" "$LIPR_C_TARGET" || return 2
+    lipr_services_mask "$LIPR_C_SERVICES" >/dev/null || return 2
+
+    if [[ "$mode" == "provision" ]]; then
+        if (( LIPR_SERVICES_MASK & 1 )) && [[ -z "$LIPR_C_DF2" ]]; then
+            lipr_refuse "SERVICES includes iri but DF2_DEST is missing" "an IRI request has to say where DF2 delivers it; without a destination the request is undeliverable"
+            return 2
+        fi
+        if (( LIPR_SERVICES_MASK & 2 )) && [[ -z "$LIPR_C_DF3" ]]; then
+            lipr_refuse "SERVICES includes cc but DF3_DEST is missing" "a content-of-communication request has to say where DF3 delivers it; without a destination the request is undeliverable"
+            return 2
+        fi
+        if [[ -n "$LIPR_C_DF2" ]] && (( ! (LIPR_SERVICES_MASK & 1) )); then
+            lipr_refuse "DF2_DEST is set but SERVICES does not include iri" "a destination for a service that was not requested is a contradiction; drop the key or add iri to SERVICES"
+            return 2
+        fi
+        if [[ -n "$LIPR_C_DF3" ]] && (( ! (LIPR_SERVICES_MASK & 2) )); then
+            lipr_refuse "DF3_DEST is set but SERVICES does not include cc" "a destination for a service that was not requested is a contradiction; drop the key or add cc to SERVICES"
+            return 2
+        fi
+        [[ -n "$LIPR_C_DF2" ]] && { lipr_validate_dest DF2_DEST "$LIPR_C_DF2" || return 2; }
+        [[ -n "$LIPR_C_DF3" ]] && { lipr_validate_dest DF3_DEST "$LIPR_C_DF3" || return 2; }
+    else
+        # An activation record is about a target already provisioned: the
+        # delivery destinations belong to the provisioning record, so they are
+        # reported as carried nowhere rather than dropped in silence.
+        if [[ -n "$LIPR_C_DF2" || -n "$LIPR_C_DF3" ]]; then
+            LIPR_CONF_IGNORED="DF2_DEST and DF3_DEST are provisioning destinations; the activation record does not carry them"
+        fi
+    fi
+    return 0
+}
+
+# Whole seconds since the epoch for the activation and capture timestamps.
+# LIPR_NOW makes a harness run reproducible; without it the clock is read once.
+lipr_now() {
+    local n="${LIPR_NOW:-}"
+    if [[ -z "$n" ]]; then
+        n=$(date -u +%s 2>/dev/null) || { lipr_fail "cannot read the clock for the timestamp"; return 1; }
+    fi
+    [[ "$n" =~ ^[0-9]{1,10}$ ]] || { lipr_refuse "LIPR_NOW '$n' is not whole seconds since the epoch" "the timestamp is an unsigned 32-bit second count; set LIPR_NOW to a number in 0..4294967295"; return 2; }
+    (( 10#$n <= 4294967295 )) || { lipr_refuse "LIPR_NOW '$n' does not fit an unsigned 32-bit second count" "0..4294967295"; return 2; }
+    printf '%s' "$(( 10#$n ))"
+}
+
+lipr_seq() {
+    local n="${LIPR_SEQ:-0}"
+    [[ "$n" =~ ^[0-9]{1,10}$ ]] || { lipr_refuse "LIPR_SEQ '$n' is not a sequence number" "the sequence is an unsigned 32-bit integer; 0 is the first octet string of a session"; return 2; }
+    (( 10#$n <= 4294967295 )) || { lipr_refuse "LIPR_SEQ '$n' does not fit an unsigned 32-bit integer" "0..4294967295"; return 2; }
+    printf '%s' "$(( 10#$n ))"
+}
+
+# ── --provision-target ──────────────────────────────────────────────────
+# The X1/HI1 provisioning request as bytes: the target identity, the warrant
+# reference, the services and the DF2/DF3 delivery destination. It contacts
+# nothing.
+lipr_cmd_provision() {
+    local conf="" out=""
+    while (( $# )); do
+        case "$1" in
+            --out) out="${2:-}"; shift 2 ;;
+            --*)
+                lipr_refuse "--provision-target does not take $1" "the interface is --provision-target <conf> [--out <path>]"
+                return 2 ;;
+            *)
+                if [[ -z "$conf" ]]; then conf="$1"; shift
+                else lipr_refuse "two conf paths given: $conf and $1" "one invocation provisions one target"; return 2; fi ;;
+        esac
+    done
+    lipr_require_od || return 1
+    lipr_conf_load "$conf" provision || return $?
+
+    lipr_art_reset
+    lipr_art_start 1
+    lipr_tlv 1 target_identity_type "$LIPR_C_TYPE" \
+        "u8 code, this module's table: 0x01 imsi 0x02 msisdn 0x03 supi 0x04 uri 0x05 email" \
+        "$(lipr_byte "$LIPR_ID_CODE")"
+    lipr_tlv 2 target_identity "$LIPR_ID_TEXT" "$LIPR_ID_ENC" "$LIPR_ID_HEX"
+    lipr_tlv 3 warrant_reference "$LIPR_C_WARRANT" \
+        "utf-8 octets of the authorisation reference" "$(lipr_hexify "$LIPR_C_WARRANT")"
+    lipr_tlv 4 services "$LIPR_SERVICES_TEXT" \
+        "u8 bitmask, this module's table: 0x01 IRI toward DF2, 0x02 CC toward DF3" \
+        "$(lipr_byte "$LIPR_SERVICES_MASK")"
+    if (( LIPR_SERVICES_MASK & 1 )); then
+        lipr_tlv 5 df2_destination "$LIPR_C_DF2" \
+            "utf-8 host:port of the DF2 delivery function (IRI, X2/HI2)" "$(lipr_hexify "$LIPR_C_DF2")"
+    fi
+    if (( LIPR_SERVICES_MASK & 2 )); then
+        lipr_tlv 6 df3_destination "$LIPR_C_DF3" \
+            "utf-8 host:port of the DF3 delivery function (CC, X3/HI3)" "$(lipr_hexify "$LIPR_C_DF3")"
+    fi
+
+    lipr_emit_common "provisioning_request" 1 "X1/HI1 administration (ADMF -> DF2/DF3)" \
+        "target_identity_type, target_identity, warrant_reference, services, df2_destination, df3_destination (this module's order)"
+    printf 'note\t%s\n' "$LIPR_NOTE"
+    lipr_emit_out "$out" || return 1
+    lipr_emit_handoff "an ADMF on X1/HI1 that accepts this provisioning request and drives DF2 (IRI, X2/HI2) and DF3 (CC, X3/HI3); this module encodes the request, opens no socket and sends nothing, so delivery is the operator's action on the operator's own core"
+    return 3
+}
+
+# ── --activate ──────────────────────────────────────────────────────────
+# The activation record for an already-provisioned target. Withdrawal is the
+# same verb with --action withdraw: one record shape, two action codes.
+lipr_cmd_activate() {
+    local conf="" out="" action="activate" acode=""
+    while (( $# )); do
+        case "$1" in
+            --action) action="${2:-}"; shift 2 ;;
+            --out)    out="${2:-}"; shift 2 ;;
+            --*)
+                lipr_refuse "--activate does not take $1" "the interface is --activate <conf> [--action activate|withdraw] [--out <path>]"
+                return 2 ;;
+            *)
+                if [[ -z "$conf" ]]; then conf="$1"; shift
+                else lipr_refuse "two conf paths given: $conf and $1" "one invocation activates or withdraws one target"; return 2; fi ;;
+        esac
+    done
+    case "$action" in
+        activate) acode=1 ;;
+        withdraw) acode=2 ;;
+        *) lipr_refuse "action '$action' is not activate or withdraw" "the activation record carries one action code; this module's table is 0x01 activate and 0x02 withdraw"
+           return 2 ;;
+    esac
+    lipr_require_od || return 1
+    lipr_conf_load "$conf" activate || return $?
+    local now
+    now=$(lipr_now) || return $?
+
+    lipr_art_reset
+    lipr_art_start 2
+    lipr_tlv 1 target_identity_type "$LIPR_C_TYPE" \
+        "u8 code, this module's table: 0x01 imsi 0x02 msisdn 0x03 supi 0x04 uri 0x05 email" \
+        "$(lipr_byte "$LIPR_ID_CODE")"
+    lipr_tlv 2 target_identity "$LIPR_ID_TEXT" "$LIPR_ID_ENC" "$LIPR_ID_HEX"
+    lipr_tlv 3 warrant_reference "$LIPR_C_WARRANT" \
+        "utf-8 octets of the authorisation reference" "$(lipr_hexify "$LIPR_C_WARRANT")"
+    lipr_tlv 4 services "$LIPR_SERVICES_TEXT" \
+        "u8 bitmask, this module's table: 0x01 IRI toward DF2, 0x02 CC toward DF3" \
+        "$(lipr_byte "$LIPR_SERVICES_MASK")"
+    lipr_tlv 7 action "$action" \
+        "u8 code, this module's table: 0x01 activate, 0x02 withdraw" "$(lipr_byte "$acode")"
+    lipr_tlv 8 activation_time "$now" \
+        "u32 big-endian, seconds since the Unix epoch, UTC" "$(lipr_u32be "$now")"
+
+    lipr_emit_common "activation_record" 2 "X1/HI1 administration (ADMF -> DF2/DF3)" \
+        "target_identity_type, target_identity, warrant_reference, services, action, activation_time (this module's order)"
+    printf 'note\t%s\n' "$LIPR_NOTE"
+    if [[ -n "$LIPR_CONF_IGNORED" ]]; then
+        printf 'note\t%s\n' "$LIPR_CONF_IGNORED"
+    fi
+    lipr_emit_out "$out" || return 1
+    lipr_emit_handoff "the ADMF on X1/HI1 that owns this target's existing intercept: an activation or withdrawal record that reaches it starts or ends a real collection, so this module encodes the record, opens no socket, and hands delivery to the operator"
+    return 3
+}
+
+# ── --intercept ─────────────────────────────────────────────────────────
+# The X3/HI3 interception-product envelope around a payload the operator
+# supplies. It captures nothing: the payload is an argument, and the output
+# says so.
+lipr_cmd_intercept() {
+    local payload="" case_id="" out="" now seq
+    while (( $# )); do
+        case "$1" in
+            --case) case_id="${2:-}"; shift 2 ;;
+            --out)  out="${2:-}"; shift 2 ;;
+            --*)
+                lipr_refuse "--intercept does not take $1" "the interface is --intercept <hex> [--case <id>] [--out <path>]; LIPR_NOW and LIPR_SEQ set the timestamp and sequence for a reproducible run"
+                return 2 ;;
+            *)
+                if [[ -z "$payload" ]]; then payload="$1"; shift
+                else lipr_refuse "two payloads given: $payload and $1" "one envelope carries one payload"; return 2; fi ;;
+        esac
+    done
+    lipr_require_od || return 1
+
+    [[ -n "$payload" ]] || {
+        lipr_refuse "no payload given" "the envelope carries content the operator supplied; this module captures nothing, so an empty payload would be an envelope around nothing -- the provisioning and activation verbs are the signalling records"
+        return 2; }
+    [[ "$payload" =~ ^([0-9A-Fa-f]{2})+$ ]] || {
+        lipr_refuse "payload is not an even-length hex octet string: $(lipr_sanitize "$payload")" "the payload is raw octets in hex, two digits per octet; an odd digit count or a non-hex character is refused rather than padded or truncated"
+        return 2; }
+    payload="${payload^^}"
+
+    if [[ -n "$case_id" ]]; then
+        [[ "$case_id" =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || {
+            lipr_refuse "case id '$case_id' is not a usable correlation identifier" "the correlation identifier ties the product to one intercept; it is 1..64 characters from A-Z a-z 0-9 . _ : - and nothing else"
+            return 2; }
+    else
+        case_id="unassigned"
+    fi
+    now=$(lipr_now) || return $?
+    seq=$(lipr_seq) || return $?
+
+    lipr_art_reset
+    lipr_art_start 3
+    lipr_tlv 9 correlation_id "$case_id" \
+        "utf-8 octets of the correlation identifier; 'unassigned' when no --case was given" \
+        "$(lipr_hexify "$case_id")"
+    lipr_tlv 10 capture_time "$now" \
+        "u32 big-endian, seconds since the Unix epoch, UTC" "$(lipr_u32be "$now")"
+    lipr_tlv 11 sequence_number "$seq" \
+        "u32 big-endian, the product's position in the session" "$(lipr_u32be "$seq")"
+    lipr_tlv 12 payload "$payload" \
+        "the operator's octets, encoded in place and unchanged" "$payload"
+
+    lipr_emit_common "interception_product" 3 "X3/HI3 content of communication (DF3 -> LEMF)" \
+        "correlation_id, capture_time, sequence_number, payload (this module's order)"
+    printf 'note\t%s\n' "$LIPR_NOTE"
+    printf 'payload_source\targument (this module captured nothing)\n'
+    printf 'captured\t0\n'
+    printf 'intercepted\t0\n'
+    if [[ "$case_id" == "unassigned" ]]; then
+        printf 'note\tno --case was given; the correlation identifier is the literal string unassigned, which a DF3 has to replace before this envelope can be tied to an intercept\n'
+    fi
+    lipr_emit_out "$out" || return 1
+    lipr_emit_handoff "a DF3 on X3/HI3 that carries this product towards an LEMF; the payload here is the octet string the operator supplied, not a capture, so this module encodes the envelope, opens no socket, and hands delivery to the operator"
+    return 3
+}
+
+# ── scope check ─────────────────────────────────────────────────────────
+# The seam this guards: the encoder verbs produce an artefact and deliver
+# nothing, and the detection verbs stay ungated because they read what they are
+# handed. A gate on a reader is theatre; a delivery claim on a writer is a lie.
+lipr_scope_check() {
+    local self="${BASH_SOURCE[0]}" hits=0 v body
+    [[ -f "$self" ]] || { lipr_fail "cannot read module source"; return 1; }
+    for v in lipr_cmd_provision lipr_cmd_activate lipr_cmd_intercept; do
+        body=$(awk -v fn="$v() {" 'index($0, fn) == 1 { f = 1 } f { print } f && /^}/ { exit }' "$self")
+        if [[ -z "$body" ]]; then
+            printf 'scope_violation\t%s is missing\n' "$v"; hits=$(( hits + 1 )); continue
+        fi
+        # It must exit 3 with a handoff rather than return 0 as if it delivered.
+        grep -q 'return 3' <<< "$body" || {
+            printf 'scope_violation\t%s does not end in a handoff (return 3)\n' "$v"; hits=$(( hits + 1 )); }
+        # And it must say what it did not do.
+        grep -q "LIPR_NOTE" <<< "$body" || {
+            printf 'scope_violation\t%s does not carry the note about what it never contacts\n' "$v"; hits=$(( hits + 1 )); }
+        if grep -qE 'curl|wget|nc -|socket\(|urllib' <<< "$body"; then
+            printf 'scope_violation\t%s opens a transport; this module delivers nothing\n' "$v"; hits=$(( hits + 1 )); fi
+    done
+    printf 'scope\t%s\n' "$([[ $hits -eq 0 ]] && echo encodes-and-hands-off || echo VIOLATION)"
+    printf 'scope_checked\t3 encoder verbs x (handoff + note + no transport)\n'
+    (( hits == 0 )) || return 1
+    return 0
 }
 
 lipr_selftest() {
@@ -166,6 +773,8 @@ lipr_selftest() {
         else printf '%s\tFAIL want=%s got=%s\n' "$n" "$want" "$got"; bad=$(( bad + 1 )); fi
     }
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
+    has() { printf '%s\n' "$1" | grep -qi -- "$2" && echo yes || echo no; }
+    tlvfield() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1=="field" && $2==k {print $7; exit}'; }
 
     local d
     d=$(mktemp -d "$MOD_TMP/selftest.XXXXXX") || {
@@ -194,7 +803,7 @@ lipr_selftest() {
     { printf 'ts\timsi\tevent\tcell\tsilent\n'
       for i in 1 2 3 4; do printf '2026-01-01T00:0%d:00Z\t310150000000002\tidentity_request\tcellA\t\n' "$i"; done
       printf '2026-01-01T00:05:00Z\t310150000000002\tsilent_sms\tcellA\tyes\n'
-      for c in A B C D E F; do printf '2026-01-01T00:1%s:00Z\t310150000000002\tlocation_update\tcell%s\t\n' "$(printf '%d' $(( $(printf '%d' "'$c") - 65 )))" "$c"; done
+      for c in A B C D E F; do printf '2026-01-01T00:1%d:00Z\t310150000000002\tlocation_update\tcell%s\t\n' "$(( $(printf '%d' "'$c") - 65 ))" "$c"; done
     } > "$d/noisy.tsv"
     out=$(lipr_score "$d/noisy.tsv")
     chk noisy-forced "$(printf '%s\n' "$out" | awk -F'\t' '$1=="forced_identity_burst"{print $2}')" "HIGH"
@@ -208,10 +817,209 @@ lipr_selftest() {
     chk report-escalation "$(lipr_report | awk -F'\t' '$1=="escalation"{print ($2 ~ /ADMF/)?"yes":"no"}')" "yes"
     chk plan-status "$(fld "$(lipr_plan)" status)" "handoff"
 
-    # 4. Scope, behavioural: no activation/interception verb is dispatchable.
-    chk scope-no-activate  "$(lipr_cli_main --activate >/dev/null 2>&1; echo $?)" "2"
-    chk scope-no-intercept "$(lipr_cli_main --intercept >/dev/null 2>&1; echo $?)" "2"
-    chk scope-no-provision "$(lipr_cli_main --provision-target >/dev/null 2>&1; echo $?)" "2"
+    # 4. Known-answer vectors for the two encodings the envelope rests on.
+    #    BCD is hand-computed from its definition: two digits per octet,
+    #    low-order nibble first, odd count padded 0xF.
+    #      310150123456789 -> 13 10 05 21 43 65 87 F9
+    #      15551234567     -> 51 55 21 43 65 F7
+    #      1234            -> 21 43
+    chk bcd-imsi15 "$(lipr_bcd 310150123456789)" "13100521436587F9"
+    chk bcd-msisdn11 "$(lipr_bcd 15551234567)" "5155214365F7"
+    chk bcd-even "$(lipr_bcd 1234)" "2143"
+    chk imsi-refused "$(lipr_identity_encode imsi 31015A >/dev/null 2>&1; echo $?)" "2"
+    chk imsi-too-long "$(lipr_identity_encode imsi 3101501234567890 >/dev/null 2>&1; echo $?)" "2"
+    #    A URI is carried as the octets of its text: hand-computed ASCII.
+    chk identity-uri-code "$(lipr_identity_encode uri 'https://a.b/c' >/dev/null 2>&1; printf '%s' "$LIPR_ID_CODE")" "4"
+    chk identity-uri-hex  "$(lipr_identity_encode uri 'https://a.b/c' >/dev/null 2>&1; printf '%s' "$LIPR_ID_HEX")" "68747470733A2F2F612E622F63"
+    chk identity-bad-type "$(lipr_identity_encode tmsi 12345 >/dev/null 2>&1; echo $?)" "2"
+    #    SERVICES: one octet, bit 0 IRI, bit 1 CC. Order and repetition are the
+    #    conf author's business; an unknown service is refused.
+    chk services-iri "$(lipr_services_mask iri)" "1"
+    chk services-cc "$(lipr_services_mask cc)" "2"
+    chk services-both "$(lipr_services_mask iri,cc)" "3"
+    chk services-order "$(lipr_services_mask cc,iri)" "3"
+    chk services-dupe "$(lipr_services_mask iri,iri)" "1"
+    chk services-unknown "$(lipr_services_mask gprs >/dev/null 2>&1; echo $?)" "2"
+    chk services-empty "$(lipr_services_mask '' >/dev/null 2>&1; echo $?)" "2"
+
+    # 5. No gate: every encoder verb runs with no flag and hands off, rc 3.
+    #    prints ERROR and WHY on stderr, leaves stdout empty and writes
+    #    nothing -- including when an --out path was supplied.
+    local conf="$d/prov.conf"
+    cat > "$conf" <<'CONF'
+TARGET_TYPE=imsi
+TARGET=310150123456789
+WARRANT=W-2026-0001
+SERVICES=iri,cc
+DF2_DEST=10.0.0.2:9002
+DF3_DEST=10.0.0.2:9003
+CONF
+    local dout derr rc
+    # The encoder runs with no flag and no environment variable: there is no
+    # gate. What it still must not do is deliver, and that is what the handoff
+    # and the empty stderr below are checking.
+    dout=$(lipr_cli_main --provision-target "$conf" 2>/dev/null); rc=$?
+    chk ungated-provision-rc "$rc" "3"
+    chk ungated-provision-stdout "$(printf '%s\n' "$dout" | grep -c '^artefact	provisioning_request')" "1"
+    derr=$(lipr_cli_main --provision-target "$conf" 2>&1 >/dev/null)
+    chk ungated-stderr-empty "$(printf '%s\n' "$derr" | grep -c .)" "0"
+    chk ungated-status-handoff "$(printf '%s\n' "$dout" | awk -F'\t' '$1=="status"{print $2}')" "handoff"
+    chk ungated-sent-zero "$(printf '%s\n' "$dout" | awk -F'\t' '$1=="sent"{print $2}')" "0"
+    chk ungated-note "$(printf '%s\n' "$dout" | grep -c '^note')" "1"
+    chk ungated-activate "$(lipr_cli_main --activate "$conf" >/dev/null 2>&1; echo $?)" "3"
+    chk ungated-intercept "$(lipr_cli_main --intercept 0A1B2C >/dev/null 2>&1; echo $?)" "3"
+
+    # 6. Armed, the provisioning request is byte-exact. The expected hex is
+    #    hand-assembled from the layout this module prints, field by field:
+    #      4C495052                  magic "LIPR"
+    #      01 01                     version 1, type 1 (provisioning request)
+    #      01 0001 01                identity_type = 1 (imsi)
+    #      02 0008 13100521436587F9  identity = the BCD above
+    #      03 000B 572D323032362D30303031  warrant "W-2026-0001" as ASCII
+    #      04 0001 03                services = IRI|CC
+    #      05 000D 31302E302E302E323A39303032  "10.0.0.2:9002" as ASCII
+    #      06 000D 31302E302E302E323A39303033  "10.0.0.2:9003" as ASCII
+    #    = 6 + 4 + 11 + 14 + 4 + 16 + 16 = 71 octets.
+    local PHEX="4C4950520101"
+    PHEX+="01000101"
+    PHEX+="02000813100521436587F9"
+    PHEX+="03000B572D323032362D30303031"
+    PHEX+="04000103"
+    PHEX+="05000D31302E302E302E323A39303032"
+    PHEX+="06000D31302E302E302E323A39303033"
+    out=$(lipr_cli_main --provision-target "$conf" 2>/dev/null); rc=$?
+    chk provision-rc "$rc" "3"
+    chk provision-hex "$(fld "$out" artefact_hex)" "$PHEX"
+    chk provision-bytes "$(fld "$out" artefact_bytes)" "71"
+    chk provision-type "$(fld "$out" artefact_type)" "0x01"
+    chk provision-field-count "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field"{c++} END{print c+0}')" "6"
+    chk provision-identity "$(tlvfield "$out" target_identity)" "13100521436587F9"
+    chk provision-warrant "$(tlvfield "$out" warrant_reference)" "572D323032362D30303031"
+    chk provision-services "$(tlvfield "$out" services)" "03"
+    chk provision-df3 "$(tlvfield "$out" df3_destination)" "31302E302E302E323A39303033"
+    chk provision-offsets-tie "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field"{o=$6+3+$4} END{print o}')" "71"
+    chk provision-status "$(fld "$out" status)" "handoff"
+    chk provision-sent "$(fld "$out" sent)" "0"
+
+    #    The flag works where the env does not, before or after the verb.
+    # The old gate flag is gone, and passing it is a usage error rather than a
+    # silent no-op: an operator who still has it in a script must find out.
+    chk retired-gate-flag "$(lipr_cli_main --i-have-a-lab-and-authorisation --provision-target "$conf" >/dev/null 2>&1; echo $?)" "2"
+
+    #    The bytes on disk are the bytes in the hex, not a second rendering.
+    out=$(lipr_cli_main --provision-target "$conf" --out "$d/prov.bin" 2>/dev/null)
+    chk out-file-path "$(fld "$out" out_file)" "$d/prov.bin"
+    chk out-file-bytes "$(stat -c %s "$d/prov.bin" 2>/dev/null)" "71"
+    chk out-file-hex "$(od -An -v -tx1 "$d/prov.bin" | tr -d ' \n' | tr 'a-f' 'A-F')" "$PHEX"
+
+    # 7. The parser reads a hand-written literal, never the encoder's output:
+    #    the field values are the ASCII and BCD expectations above.
+    local parsed
+    parsed=$(lipr_parse "$PHEX"); rc=$?
+    chk parse-rc "$rc" "0"
+    chk parse-type "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="hdr" && $2=="type"{print $3}')" "0x01"
+    chk parse-version "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="hdr" && $2=="version"{print $3}')" "0x01"
+    chk parse-tlvs "$(printf '%s\n' "$parsed" | grep -c '^tlv')" "6"
+    chk parse-order "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="tlv"{printf "%s%s", sep, $2; sep=" "}')" "0x01 0x02 0x03 0x04 0x05 0x06"
+    chk parse-identity "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="tlv" && $2=="0x02"{print $4}')" "13100521436587F9"
+    chk parse-warrant "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="tlv" && $2=="0x03"{print $4}')" "572D323032362D30303031"
+    chk parse-truncated "$(lipr_parse "${PHEX%????}" >/dev/null 2>&1; echo $?)" "1"
+    chk parse-bad-magic "$(lipr_parse "00000000${PHEX:8}" >/dev/null 2>&1; echo $?)" "1"
+    chk parse-nonhex "$(lipr_parse "ZZ" >/dev/null 2>&1; echo $?)" "1"
+
+    # 8. The activation record: same shape, action code 0x01/0x02 and a u32
+    #    big-endian timestamp. 1767225600 is 2026-01-01T00:00:00Z and its
+    #    big-endian form is 0x6955B900, which is what the literal asserts.
+    local AH="4C4950520102"
+    AH+="01000101"
+    AH+="02000813100521436587F9"
+    AH+="03000B572D323032362D30303031"
+    AH+="04000103"
+    AH+="07000102"
+    AH+="0800046955B900"
+    out=$(LIPR_NOW=1767225600 lipr_cli_main --activate "$conf" --action withdraw 2>/dev/null); rc=$?
+    chk activate-rc "$rc" "3"
+    chk activate-hex "$(fld "$out" artefact_hex)" "$AH"
+    chk activate-bytes "$(fld "$out" artefact_bytes)" "50"
+    chk activate-type "$(fld "$out" artefact_type)" "0x02"
+    chk activate-action "$(tlvfield "$out" action)" "02"
+    chk activate-time "$(tlvfield "$out" activation_time)" "6955B900"
+    chk activate-record-name "$(fld "$out" artefact)" "activation_record"
+    chk activate-default "$(LIPR_NOW=1767225600 lipr_cli_main --activate "$conf" 2>/dev/null | awk -F'\t' '$1=="field" && $2=="action"{print $7}')" "01"
+    chk activate-has-note "$(printf '%s\n' "$out" | grep -c "^note")" "2"
+    chk activate-bad-action "$(lipr_cli_main --activate "$conf" --action freeze >/dev/null 2>&1; echo $?)" "2"
+    chk activate-parses "$(lipr_parse "$AH" | grep -c '^tlv')" "6"
+
+    # 9. The interception-product envelope. 1767225600 again; sequence 7.
+    #      4C495052 01 03            version 1, type 3 (interception product)
+    #      09 0009 434153452D30303031  "CASE-0001" as ASCII
+    #      0A 0004 6955B900          capture time
+    #      0B 0004 00000007          sequence 7
+    #      0C 0003 0A1B2C            the payload, encoded in place
+    #    = 6 + 12 + 7 + 7 + 6 = 38 octets.
+    local IH="4C4950520103"
+    IH+="090009434153452D30303031"
+    IH+="0A00046955B900"
+    IH+="0B000400000007"
+    IH+="0C00030A1B2C"
+    out=$(LIPR_NOW=1767225600 LIPR_SEQ=7 lipr_cli_main --intercept 0A1B2C --case CASE-0001 2>/dev/null); rc=$?
+    chk intercept-rc "$rc" "3"
+    chk intercept-hex "$(fld "$out" artefact_hex)" "$IH"
+    chk intercept-bytes "$(fld "$out" artefact_bytes)" "38"
+    chk intercept-payload "$(tlvfield "$out" payload)" "0A1B2C"
+    chk intercept-payload-in-place "$(printf '%s' "$(fld "$out" artefact_hex)" | grep -c '0C00030A1B2C')" "1"
+    chk intercept-correlation "$(tlvfield "$out" correlation_id)" "434153452D30303031"
+    chk intercept-time "$(tlvfield "$out" capture_time)" "6955B900"
+    chk intercept-seq "$(tlvfield "$out" sequence_number)" "00000007"
+    chk intercept-captured "$(fld "$out" captured)" "0"
+    chk intercept-parses "$(lipr_parse "$IH" | grep -c '^tlv')" "4"
+    chk intercept-default-case "$(LIPR_NOW=0 lipr_cli_main --intercept FF 2>/dev/null | awk -F'\t' '$1=="field" && $2=="correlation_id"{print $3}')" "unassigned"
+    chk intercept-empty "$(lipr_cli_main --intercept '' >/dev/null 2>&1; echo $?)" "2"
+    chk intercept-odd "$(lipr_cli_main --intercept 0A1B2 >/dev/null 2>&1; echo $?)" "2"
+    chk intercept-nonhex "$(lipr_cli_main --intercept 0A1BZZ >/dev/null 2>&1; echo $?)" "2"
+    chk intercept-bad-case "$(lipr_cli_main --intercept 0A --case 'bad id' >/dev/null 2>&1; echo $?)" "2"
+
+    # 10. The conf is validated, not trusted: an unknown key, a missing
+    #     destination and a contradictory one are refused rather than encoded.
+    printf 'TARGET_TYPE=imsi\nTARGET=310150123456789\nWARRANT=W\nSERVICES=iri,cc\nTICKET=1\nDF2_DEST=a:1\nDF3_DEST=b:2\n' > "$d/unknown.conf"
+    chk conf-unknown-key "$(lipr_cli_main --provision-target "$d/unknown.conf" >/dev/null 2>&1; echo $?)" "2"
+    printf 'TARGET_TYPE=imsi\nTARGET=310150123456789\nWARRANT=W\nSERVICES=iri,cc\nDF2_DEST=a:1\n' > "$d/nodf3.conf"
+    chk conf-missing-df3 "$(lipr_cli_main --provision-target "$d/nodf3.conf" >/dev/null 2>&1; echo $?)" "2"
+    printf 'TARGET_TYPE=imsi\nTARGET=310150123456789\nWARRANT=W\nSERVICES=iri\nDF2_DEST=a:1\nDF3_DEST=b:2\n' > "$d/contra.conf"
+    chk conf-contradictory-dest "$(lipr_cli_main --provision-target "$d/contra.conf" >/dev/null 2>&1; echo $?)" "2"
+    printf 'TARGET_TYPE=imsi\nTARGET=310150123456789\nWARRANT=W\nSERVICES=iri\nDF2_DEST=a:70000\n' > "$d/badport.conf"
+    chk conf-bad-port "$(lipr_cli_main --provision-target "$d/badport.conf" >/dev/null 2>&1; echo $?)" "2"
+    printf 'TARGET_TYPE=imsi\nTARGET=310150123456789\nSERVICES=iri\nDF2_DEST=a:1\n' > "$d/nowarrant.conf"
+    chk conf-no-warrant "$(lipr_cli_main --provision-target "$d/nowarrant.conf" >/dev/null 2>&1; echo $?)" "2"
+    chk conf-missing-file "$(lipr_cli_main --provision-target "$d/nope.conf" >/dev/null 2>&1; echo $?)" "1"
+
+    # 11. There is no gate and therefore no stderr block. What the module still
+    #     owes a reader is the standing note, in the output, saying what these
+    #     verbs do not do: encode artefacts, contact nothing.
+    dout=$(lipr_cli_main --provision-target "$conf" 2>/dev/null)
+    derr=$(lipr_cli_main --provision-target "$conf" 2>&1 >/dev/null)
+    chk stderr-empty "$(printf '%s\n' "$derr" | grep -c .)" "0"
+    chk note-on-stdout "$(printf '%s\n' "$dout" | grep -c '^note	lawful interception is operated')" "1"
+    chk note-names-admf "$(printf '%s\n' "$dout" | grep -c 'contact no ADMF, DF2, DF3 or LEMF')" "1"
+    chk stdout-has-no-warning "$(printf '%s\n' "$dout" | grep -c '^WARNING')" "0"
+    chk stdout-tabular "$(printf '%s\n' "$dout" | awk -F'\t' 'NF==7 && $1=="field"{c++} END{print c+0}')" "6"
+
+    # 12. Scope: the seam between the ungated detection verbs and the gated
+    #     encoder verbs, and the verbs are dispatchable.
+    out=$(lipr_scope_check); rc=$?
+    chk scope-rc "$rc" "0"
+    chk scope-value "$(fld "$out" scope)" "encodes-and-hands-off"
+    chk scope-violations "$(printf '%s\n' "$out" | grep -c '^scope_violation')" "0"
+    chk scope-verbs-dispatch "$(printf '%s\n' "$out" | awk -F'\t' '$1=="scope_checked"{print ($2 ~ /3 encoder verbs/)?"yes":"no"}')" "yes"
+
+    # 13. --status-tsv stops implying detection-only, and says there is no gate.
+    out=$(LIPR_GATE_ARMED=0 IMSI_LAB_AUTHORISED=0 lipr_status_tsv)
+    chk status-module "$(fld "$out" MODULE)" "li_probe"
+    chk status-no-gate "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ENCODE_GATE"{print ($2 ~ /^none/)?"none":"other"}')" "none"
+    chk status-delivers-nothing "$(printf '%s\n' "$out" | awk -F'\t' '$1=="DELIVERS"{print ($2 ~ /nothing/)?"no":"yes"}')" "no"
+    chk status-encode-verbs "$(fld "$out" ENCODE_VERBS)" "--provision-target --activate --intercept"
+    chk status-no-detection-only "$(printf '%s\n' "$out" | grep -ci 'detection-only')" "0"
+    chk status-scope-no-gate "$(printf '%s\n' "$out" | awk -F'\t' '$1=="SCOPE"{print ($2 ~ /gate/)?"yes":"no"}')" "no"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -229,7 +1037,12 @@ lipr_menu() {
   [3]  Score interception-posture signals
   [4]  Reporting guidance
   [5]  Plan (handoff)
+  [6]  Provisioning request bytes
+  [7]  Activation or withdrawal record
+  [8]  Interception-product envelope
   [0]  back
+
+  6-8 encode artefacts and send nothing; each carries a note saying so.
 M
         read -rp "  choice> " c || return 0
         case "$c" in
@@ -238,6 +1051,15 @@ M
             3) read -rp "  signalling tsv> " p; lipr_score "$p"; read -rp "  enter " _ ;;
             4) lipr_report; read -rp "  enter " _ ;;
             5) lipr_plan; read -rp "  enter " _ ;;
+            6) read -rp "  conf> " p; lipr_cmd_provision "$p"; read -rp "  enter " _ ;;
+            7) read -rp "  conf> " p; read -rp "  action (activate/withdraw)> " ac
+               case "$ac" in
+                   withdraw) lipr_cmd_activate "$p" --action withdraw ;;
+                   *)        lipr_cmd_activate "$p" ;;
+               esac; read -rp "  enter " _ ;;
+            8) read -rp "  payload hex> " ph; read -rp "  case id (blank = unassigned)> " cid
+               if [[ -n "$cid" ]]; then lipr_cmd_intercept "$ph" --case "$cid"
+               else lipr_cmd_intercept "$ph"; fi; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -245,35 +1067,68 @@ M
 }
 
 lipr_cli_main() {
-    local cmd="${1:-}"
-    (($# > 0)) && shift
+    # Scan for the authorisation flag anywhere in the argument list so it can
+    # precede or follow the verb, then remove it before dispatch. The env
+    # variable is the alternative for a driver with no flag to pass.
+    # No flag is stripped any more. --i-have-a-lab-and-authorisation was the old
+    # gate; if a script still passes it, the verb must reject it rather than
+    # accept it and do nothing, so it reaches the dispatcher untouched.
+    local -a args=( "$@" ) rest=()
+    local cmd="${args[0]:-}"
+    (( ${#args[@]} > 1 )) && rest=( "${args[@]:1}" )
     case "$cmd" in
         --status-tsv)  lipr_status_tsv ;;
         --interfaces)  lipr_interfaces ;;
-        --iface)       lipr_name_of "${1:-}" ;;
+        --iface)       lipr_name_of "${rest[0]:-}" ;;
         --architecture) lipr_architecture ;;
-        --score|--detect) lipr_score "${1:-}" ;;
+        --score|--detect) lipr_score "${rest[0]:-}" ;;
         --report)      lipr_report ;;
         --plan)        lipr_plan ;;
+        --provision-target) lipr_cmd_provision "${rest[@]}" ;;
+        --activate)    lipr_cmd_activate "${rest[@]}" ;;
+        --intercept)   lipr_cmd_intercept "${rest[@]}" ;;
         --selftest)    lipr_selftest ;;
         --menu)        lipr_menu ;;
         *)
             cat >&2 <<EOF
-LI Interception — 3GPP lawful-interception interfaces, activation and posture
+LI Interception — 3GPP lawful-interception interfaces, posture signals, and a
+gated encoder for X1/HI1 and X3/HI3 protocol artefacts
 
 Usage: $0 COMMAND
-  --status-tsv         module state as TSV
+  --status-tsv         module state as TSV, including the encoder gate
   --interfaces         X1/HI1, X2/HI2, X3/HI3 reference (TS 33.108)
   --iface <X1|X2|X3>   name one interface
   --architecture       ADMF/POI/DF2/DF3/LEMF roles
   --score <tsv>        interception-posture score over signalling events
   --report             what to record and where to escalate
   --plan               network-side confirmation handoff
-  --selftest           verify the model and the scorer, no capture needed
+  --provision-target <conf> [--out <path>]
+                       GATED: encode an X1/HI1 provisioning request as bytes
+  --activate <conf> [--action activate|withdraw] [--out <path>]
+                       GATED: encode an X1/HI1 activation record (one shape,
+                       action 0x01 activate or 0x02 withdraw)
+  --intercept <hex> [--case <id>] [--out <path>]
+                       GATED: encode an X3/HI3 interception-product envelope
+                       around a payload YOU supply; it captures nothing
+  --selftest           verify the model, the scorer and the encodings
   --menu               interactive menu
 
-Scope: this module detects and reports. It does not perform, activate or
-provision lawful interception, and the selftest asserts no such verb exists.
+The encoder verbs take a small KEY=VALUE conf (TARGET_TYPE, TARGET, WARRANT,
+SERVICES, DF2_DEST, DF3_DEST) or a payload in hex. LIPR_NOW and LIPR_SEQ pin the
+timestamp and sequence so a harness run is reproducible. Exit codes: 0 done,
+1 an I/O or clock failure, 2 refused or bad input, 3 the artefact is built and
+printed and delivery is a handoff. The wire form is this module's own
+length-prefixed TLV, with a tagged field table printed beside the hex; it is
+NOT TS 33.108's ASN.1, because that module was not available to this author.
+
+Scope: the detection verbs read what you give them and send nothing. The three
+encoder verbs build real bytes -- field layout, length prefixes, orderings,
+encodings -- open no socket, and exit 3 with a handoff; none of them asks for a
+flag. Lawful
+interception is performed by a network operator on its own network under
+statutory authority; a provisioning request that reaches a live ADMF interferes
+with real intercepts and real criminal investigations, and a lab core is not a
+substitute for that authority if the traffic is real.
 EOF
             return 2 ;;
     esac

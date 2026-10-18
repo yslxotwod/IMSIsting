@@ -3916,6 +3916,15 @@ ENGINE_TABLES = {
         "/home/ysl/.lte-oracles/venv/bin/python tools/asn1gen.py "
         "--family lpp --out tools/lpp_layout.py",
     ),
+    "nbiot": (
+        "lte_rrc_nb_layout.py",
+        "LTE_RRC_NB_LAYOUT",
+        "NB-IoT messages are decoded by the generated engine, so both\n"
+        "tools/lte_per.py and the generated tools/lte_rrc_nb_layout.py have\n"
+        "to be present.\nRegenerate it with: "
+        "/home/ysl/.lte-oracles/venv/bin/python tools/asn1gen.py "
+        "--family nbiot --out tools/lte_rrc_nb_layout.py",
+    ),
 }
 
 
@@ -4178,7 +4187,7 @@ def cmd_type_decode(args):
     bits = "".join(format(b, "08b") for b in data)[:nbits]
 
     try:
-        codec, per = engine()
+        codec, per = engine(getattr(args, "family", "rrc"))
     except Exception as exc:                            # noqa: BLE001
         print("ERROR\t%s" % exc, file=sys.stderr)
         return 1
@@ -4721,6 +4730,10 @@ def main(argv):
     td.add_argument("--json", action="store_true",
                     help="print the decoded value as JSON instead of dotted "
                          "field lines")
+    td.add_argument("--family", default="rrc", choices=sorted(ENGINE_TABLES),
+                    help="which generated layout table the type lives in; "
+                         "the NB-IoT message set is its own family because no "
+                         "LTE message reaches it (default: rrc)")
     td.set_defaults(func=cmd_type_decode)
 
     lpp = sub.add_parser("lpp-encode",

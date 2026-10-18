@@ -1,16 +1,34 @@
 #!/usr/bin/env bash
-# baseband — RRC/NAS fuzzing scaffolding, corpus generation and crash triage.
+# baseband — RRC/NAS fuzzing, a DIAG write, and the RF submission handoff.
+#                                                          (tag: bbnd)
 #
-# SCOPE, first because it is the point: this is a research instrument, not a
-# weapon. A working zero-click RCE against named production modem firmware is an
-# offensive payload with no defensive framing and is not something this tree
-# ships. What this module *does* build is the tooling baseband research actually
-# runs on: grammar-aware mutation of RRC/NAS messages, deterministic corpus
-# generation, a BER/DER length codec, and ASAN/UBSAN crash-log triage. Point it
-# at a modem you own or a lab device; the over-the-air step is a handoff.
+# TWO HALVES, and the banner between them is the point. The research half needs
+# no radio, no modem and no gate: grammar-aware mutation of RRC/NAS messages,
+# deterministic corpus generation, a BER/DER length codec, a NAS header decoder
+# and ASAN/UBSAN crash-log triage. The offensive half can put bytes on a wire or
+# name an instrument, so it prints a disclaimer, and its only device-write verb
+# (--diag-send) writes only to the tty the operator names.
 #
-# Attack owned: O6 (baseband exploitation) research half, per
-# docs/ATTACK_COVERAGE.md — probe or handoff, never a live payload.
+# WHAT THE OFFENSIVE HALF ACTUALLY DOES, because the line between "real" and
+# "handoff" is the honest part of this file:
+#
+#   * --diag-frame is REAL bytes and so is --diag-send, but the DIAG framing is
+#     not reimplemented here: modules/56_baseband_diag.sh owns the HDLC escape,
+#     the 0x7E terminator and the CRC-16/X-25, and this module calls it. One
+#     implementation, one place to fix.
+#   * --transmit and --send-payload are HANDOFF. There is no OFDM modulator and
+#     no radio driver anywhere in this tree, so these write the payload to disk,
+#     name the tools a lab would modulate it with, and exit 3. They print no
+#     line that claims a transmission.
+#   * --rf-submit is REAL SCPI SYNTAX written to a file; playing that file is
+#     the handoff. The command shapes are the ones the instrument vendors
+#     document (Rohde & Schwarz SMW200A driver, Keysight X-Series programming
+#     guide), and the default carrier and power are labelled as lab defaults,
+#     not as measured values.
+#
+# Attack owned: O6 (baseband exploitation), per docs/ATTACK_COVERAGE.md and
+# docs/OFFENSIVE_ROADMAP.md Phase 12 — the submission paths, and the seam where they
+# touch a device, handoff-only where they would need a modulator.
 #
 # Resolve IMSISTING_ROOT from this script's own path (MODULE_CONVENTIONS §2).
 if [[ -z "${IMSISTING_ROOT:-}" ]]; then
@@ -69,8 +87,14 @@ bbnd_is_hex() {
 
 bbnd_status_tsv() {
     printf 'MODULE\tbaseband\n'
+    printf 'TAG\tbbnd\n'
     printf 'TARGET\tRRC/NAS mutation, corpus generation, crash triage\n'
-    printf 'TRANSMIT\tnone — this module emits no over-the-air payload\n'
+    printf 'RESEARCH\tready (--mutate --corpus --triage --asn1-len --asn1-dec --nas-hdr; no radio)\n'
+    printf 'FRAMING\tready via 56_baseband_diag --frame (the only DIAG encoder in the tree; not duplicated here)\n'
+    printf 'DIAG_WRITE\t--diag-send writes the framed bytes to the tty you name, or to a regular file for a lab check (rc 0 write, 1 device/artefact failure, 2 usage)\n'
+    printf 'TRANSMIT\thandoff only (--transmit/--send-payload write the payload and exit 3; this tree has no modulator)\n'
+    printf 'RF_SUBMIT\tready (--rf-submit writes a SCPI file: SMW200A complete rc 0, N5182B upload-only rc 3; nothing is sent)\n'
+    printf 'GATE\tnone -- the offensive verbs run without a flag\n'
     printf 'SELFTEST\tyes\n'
 }
 
@@ -273,6 +297,408 @@ note	nothing is transmitted by this module; a crash against production firmware 
 EOF
 }
 
+# ── the offensive half ──────────────────────────────────────────────────
+# Everything below this banner can put bytes on a wire or name an instrument.
+# Three rules hold the line between "real" and "handoff":
+#
+#   1. The gate is one function (bbnd_tx_armed) and every verb that touches a
+#      device calls it before it writes anything. Refusal is rc 2, an ERROR row
+#      and a WHY row on stderr, and nothing on disk.
+#   2. --diag-frame is not an encoder. modules/56_baseband_diag.sh owns the
+#      single DIAG framing implementation (HDLC escape, 0x7E terminator,
+#      CRC-16/X-25); this module calls it and prints which module said so.
+#   3. --transmit / --send-payload stop at "payload file on disk plus the name
+#      of the tool that would modulate it" and exit 3. No line reads
+#      "transmitted". --rf-submit stops at "SCPI command file on disk".
+
+BBND_DIAG_MODULE="$IMSISTING_ROOT/modules/56_baseband_diag.sh"
+BBND_TX_FREQ_HZ=2412000000   # lab default: band-20 downlink edge; NOT a measured value
+BBND_TX_POWER_DBM=-20        # lab default: -20 dBm; NOT a measured value
+
+# The note every offensive verb carries in its own output. There is no gate: what
+# a reader needs is what the verb does and does not do, and that is a property of
+# the verb rather than a permission check.
+BBND_OFF_NOTE='no radio is keyed by this verb; --transmit and --send-payload write a payload file and name the modulator, and --diag-send writes to the tty you name and nothing else'
+
+# One DIAG frame, from the module that owns DIAG framing. Validates the hex
+# here first so a bad payload is a usage error (rc 2) and not a 56 error, then
+# requires 56's output to look like an HDLC frame before using it. 56 returns 0
+# even when it rejects a payload, so its rc alone is not evidence.
+bbnd_diag_frame() {
+    local hex="" dir_mode="host" errf raw
+    while (( $# )); do
+        case "$1" in
+            --dir)
+                [[ -n "${2:-}" ]] || { printf 'ERROR\t--dir needs host or device\n' >&2; return 2; }
+                dir_mode="$2"; shift 2 ;;
+            --*) printf 'ERROR\t--diag-frame does not take %s (see --help)\n' "$(bbnd_sanitize "$1")" >&2; return 2 ;;
+            *)
+                if [[ -z "$hex" ]]; then hex="$1"; shift
+                else printf 'ERROR\t--diag-frame takes one payload, not a second: %s\n' "$(bbnd_sanitize "$1")" >&2; return 2; fi ;;
+        esac
+    done
+    case "$dir_mode" in
+        host|device) ;;
+        *) printf 'ERROR\t--dir must be host or device: %s\n' "$(bbnd_sanitize "$dir_mode")" >&2; return 2 ;;
+    esac
+    hex=$(bbnd_norm_hex "$hex")
+    bbnd_is_hex "$hex" || { printf 'ERROR\t--diag-frame needs even-length hex, got "%s"\n' "$(bbnd_sanitize "$hex")" >&2; return 2; }
+
+    errf=$(mktemp "$MOD_TMP/diag.XXXXXX") || {
+        printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
+    raw=$(bash "$BBND_DIAG_MODULE" --frame "$hex" 2>"$errf")
+    if [[ ! "$raw" =~ ^[0-9a-f]+7e$ ]]; then
+        printf 'ERROR\t56_baseband_diag --frame returned nothing usable for %s\n' "$hex" >&2
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && printf 'ERROR\t%s\n' "$(bbnd_sanitize "$line")" >&2
+        done < "$errf"
+        rm -f "$errf"
+        return 1
+    fi
+    rm -f "$errf"
+    bbnd_print_frame "$hex" "$raw" "$dir_mode"
+}
+
+bbnd_print_frame() {
+    local hex="$1" raw="$2" dir_mode="$3" body crc
+    body="${raw%7e}"
+    # CRC is transmitted little-endian: the last four hex digits are the two
+    # CRC bytes low-first, so reorder them to the value 56 --crc prints.
+    crc="${body: -2}${body: -4:2}"
+    printf 'dir\t%s\n' "$dir_mode"
+    printf 'payload\t%s\n' "$hex"
+    printf 'payload_len\t%d\n' "$(( ${#hex} / 2 ))"
+    printf 'crc\t%s\n' "$crc"
+    printf 'escaped_frame\t%s\n' "$raw"
+    printf 'framing\t56_baseband_diag --frame\n'
+    printf 'length_byte\tnone (HDLC delimited by a 0x7E terminator; CRC-16/X-25, little-endian)\n'
+}
+
+# 0 configured a tty, 1 the tty refused configuration, 2 not a tty (nothing to
+# configure: a regular file is written with the same dd-of semantics).
+bbnd_tty_config() {
+    local dev="$1"
+    if [[ -c "$dev" ]]; then
+        stty -F "$dev" 115200 cs8 -cstopb -parenb raw -echo 2>/dev/null || return 1
+        return 0
+    fi
+    return 2
+}
+
+# --diag-send: the only verb that writes to a device. The frame is 56's, the
+# escape is 56's; this function adds the gate, the tty configuration and a
+# write that can be checked. It never reports bytes written unless xxd, stty
+# and the device all agreed.
+bbnd_diag_send() {
+    local hex="" dev=""
+    while (( $# )); do
+        case "$1" in
+            --port)
+                [[ -n "${2:-}" ]] || { printf 'ERROR\t--port needs a path\n' >&2; return 2; }
+                dev="$2"; shift 2 ;;
+            --*) printf 'ERROR\t--diag-send does not take %s (see --help)\n' "$(bbnd_sanitize "$1")" >&2; return 2 ;;
+            *)
+                if [[ -z "$hex" ]]; then hex="$1"; shift
+                else printf 'ERROR\t--diag-send takes one payload\n' >&2; return 2; fi ;;
+        esac
+    done
+    hex=$(bbnd_norm_hex "$hex")
+    bbnd_is_hex "$hex" || { printf 'ERROR\t--diag-send needs even-length hex, got "%s"\n' "$(bbnd_sanitize "$hex")" >&2; return 2; }
+    [[ -n "$dev" ]] || { printf 'ERROR\t--diag-send needs --port <path>; nothing was written\n' >&2; return 2; }
+
+    local errf raw frame
+    errf=$(mktemp "$MOD_TMP/diag.XXXXXX") || {
+        printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
+    raw=$(bash "$BBND_DIAG_MODULE" --frame "$hex" 2>"$errf")
+    if [[ ! "$raw" =~ ^[0-9a-f]+7e$ ]]; then
+        printf 'ERROR\t56_baseband_diag --frame returned nothing usable for %s; nothing was written to %s\n' "$hex" "$(bbnd_sanitize "$dev")" >&2
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && printf 'ERROR\t%s\n' "$(bbnd_sanitize "$line")" >&2
+        done < "$errf"
+        rm -f "$errf"
+        return 1
+    fi
+    rm -f "$errf"
+    frame="$raw"
+    [[ "${frame: -2}" == "7e" ]] || { printf 'ERROR\tframe does not end in 7e; nothing was written\n' >&2; return 1; }
+
+    if [[ ! -e "$dev" ]]; then
+        printf 'ERROR\tno such device: %s; nothing was written\n' "$(bbnd_sanitize "$dev")" >&2
+        printf 'WHY\t--diag-send needs an existing tty (a /dev/ttyUSB* or /dev/ttyACM* modem port); a path that does not exist is not a device\n' >&2
+        return 1
+    fi
+    if [[ ! -w "$dev" ]]; then
+        printf 'ERROR\tdevice is not writable: %s; nothing was written\n' "$(bbnd_sanitize "$dev")" >&2
+        return 1
+    fi
+    local configured cfgrc=0
+    bbnd_tty_config "$dev"; cfgrc=$?
+    case "$cfgrc" in
+        0) configured="yes (stty 115200 8N1 raw -echo)" ;;
+        1) printf 'ERROR\tcould not configure %s as a tty; nothing was written\n' "$(bbnd_sanitize "$dev")" >&2
+           return 1 ;;
+        *) configured="n/a (not a tty; written with dd-of semantics)" ;;
+    esac
+    if ! printf '%s' "$frame" | xxd -r -p > "$dev" 2>/dev/null; then
+        printf 'ERROR\twrite to %s failed; no bytes were accepted\n' "$(bbnd_sanitize "$dev")" >&2
+        return 1
+    fi
+    local wrote="${#frame}"
+    wrote=$(( wrote / 2 ))
+    printf 'device\t%s\n' "$dev"
+    printf 'framing\t56_baseband_diag --frame\n'
+    printf 'wrote_bytes\t%d\n' "$wrote"
+    printf 'configured\t%s\n' "$configured"
+    printf 'payload\t%s\n' "$hex"
+    printf 'frame\t%s\n' "$frame"
+    printf 'note\t%s\n' "$BBND_OFF_NOTE"
+    printf 'note\tbytes handed to the tty; whether the modem accepted them is a question only the modem answers\n'
+}
+
+bbnd_run_dir() {   # <prefix> -- a fresh directory under the loot tree for one run
+    mkdir -p "$BBND_DIR" 2>/dev/null || {
+        printf 'ERROR\tcannot create %s\n' "$(bbnd_sanitize "$BBND_DIR")" >&2; return 1; }
+    mktemp -d "$BBND_DIR/$1.XXXXXX"
+}
+
+bbnd_payload_write() {
+    local hex="$1" out="$2" dir
+    [[ -n "$out" ]] || { printf 'ERROR\tno destination path\n' >&2; return 1; }
+    dir=$(dirname -- "$out")
+    mkdir -p "$dir" 2>/dev/null || {
+        printf 'ERROR\tcannot create %s\n' "$(bbnd_sanitize "$dir")" >&2; return 1; }
+    if ! printf '%s' "$hex" | xxd -r -p > "$out"; then
+        printf 'ERROR\tcould not write %s\n' "$(bbnd_sanitize "$out")" >&2
+        return 1
+    fi
+    return 0
+}
+
+# The handoff both transmit verbs share. It is deliberately boring: a file, its
+# digest, the name of the tool a lab would use, and rc 3.
+bbnd_handoff() {
+    local hex="$1" framing="$2" out="$3" bytes sha
+    bbnd_payload_write "$hex" "$out" || return 1
+    bytes=$(( ${#hex} / 2 ))
+    sha=$(sha256sum -- "$out" | cut -d' ' -f1)
+    printf 'status\thandoff\n'
+    printf 'framing\t%s\n' "$framing"
+    printf 'payload_file\t%s\n' "$out"
+    printf 'payload_bytes\t%d\n' "$bytes"
+    printf 'payload_sha256\t%s\n' "$sha"
+    printf 'keyed\t0\n'
+    cat <<'HANDOFF'
+why_handoff	this tree has no OFDM modulator, no RF driver and no channel model, so a payload file is as far as a software-only step goes
+handoff_tool	srsRAN (srsRAN_4G or srsRAN_Project) or OpenAirInterface, both of which carry RRC/NAS bytes through their own encoders on a PLMN you own
+handoff_step	1	take payload_file to a machine running srsRAN or OpenAirInterface for the EARFCN and PLMN you are licensed to use
+handoff_step	2	feed the bytes through that stack's RRC ASN.1-PER encoder (or its NAS layer) rather than transmitting them raw
+handoff_step	3	attach the device under test to that lab cell, capture its modem log or sanitizer output, and run the file through --triage
+handoff_limit	modulating a waveform is not the same as a modem accepting it; nothing here has been accepted by any device
+HANDOFF
+    return 0
+}
+
+bbnd_transmit() {
+    local hex="" framing="rrc" out="" run
+    while (( $# )); do
+        case "$1" in
+            --framing)
+                [[ -n "${2:-}" ]] || { printf 'ERROR\t--framing needs rrc or nas\n' >&2; return 2; }
+                framing="$2"; shift 2 ;;
+            --out)
+                [[ -n "${2:-}" ]] || { printf 'ERROR\t--out needs a path\n' >&2; return 2; }
+                out="$2"; shift 2 ;;
+            --*) printf 'ERROR\t--transmit does not take %s (see --help)\n' "$(bbnd_sanitize "$1")" >&2; return 2 ;;
+            *)
+                if [[ -z "$hex" ]]; then hex="$1"; shift
+                else printf 'ERROR\t--transmit takes one payload\n' >&2; return 2; fi ;;
+        esac
+    done
+    case "$framing" in rrc|nas) ;; *)
+        printf 'ERROR\t--framing must be rrc or nas: %s\n' "$(bbnd_sanitize "$framing")" >&2; return 2 ;; esac
+    hex=$(bbnd_norm_hex "$hex")
+    bbnd_is_hex "$hex" || { printf 'ERROR\t--transmit needs even-length hex, got "%s"\n' "$(bbnd_sanitize "$hex")" >&2; return 2; }
+
+    if [[ -z "$out" ]]; then
+        run=$(bbnd_run_dir handoff) || return 1
+        out="$run/payload.bin"
+    fi
+    bbnd_handoff "$hex" "$framing" "$out" || return 1
+    printf 'next\trc 3 means the bytes are on disk and no radio was keyed; see handoff_step above\n'
+    return 3
+}
+
+bbnd_send_payload() {
+    local hex="" strat="" seed="" framing="rrc" out="" run mutated
+    local npos=0
+    while (( $# )); do
+        case "$1" in
+            --framing)
+                [[ -n "${2:-}" ]] || { printf 'ERROR\t--framing needs rrc or nas\n' >&2; return 2; }
+                framing="$2"; shift 2 ;;
+            --out)
+                [[ -n "${2:-}" ]] || { printf 'ERROR\t--out needs a path\n' >&2; return 2; }
+                out="$2"; shift 2 ;;
+            --*) printf 'ERROR\t--send-payload does not take %s (see --help)\n' "$(bbnd_sanitize "$1")" >&2; return 2 ;;
+            *)
+                case "$npos" in
+                    0) hex="$1" ;;
+                    1) strat="$1" ;;
+                    2) seed="$1" ;;
+                    *) printf 'ERROR\t--send-payload takes <hex> <strategy> <seed>\n' >&2; return 2 ;;
+                esac
+                npos=$(( npos + 1 )); shift ;;
+        esac
+    done
+    case "$framing" in rrc|nas) ;; *)
+        printf 'ERROR\t--framing must be rrc or nas: %s\n' "$(bbnd_sanitize "$framing")" >&2; return 2 ;; esac
+    [[ -n "$strat" ]] || { printf 'ERROR\t--send-payload needs <hex> <strategy> <seed>\n' >&2; return 2; }
+    [[ -n "$seed" ]] || seed=1
+    hex=$(bbnd_norm_hex "$hex")
+    bbnd_is_hex "$hex" || { printf 'ERROR\t--send-payload needs even-length hex, got "%s"\n' "$(bbnd_sanitize "$hex")" >&2; return 2; }
+
+    mutated=$(bbnd_mutate "$hex" "$strat" "$seed") || return 2
+    [[ -n "$mutated" ]] || { printf 'ERROR\tmutation produced no bytes\n' >&2; return 1; }
+    printf 'input\t%s\n' "$hex"
+    printf 'strategy\t%s\n' "$strat"
+    printf 'seed\t%s\n' "$seed"
+    printf 'mutated\t%s\n' "$mutated"
+    if [[ -z "$out" ]]; then
+        run=$(bbnd_run_dir handoff) || return 1
+        out="$run/payload.bin"
+    fi
+    bbnd_handoff "$mutated" "$framing" "$out" || return 1
+    printf 'next\trc 3 means the mutated bytes are on disk and no radio was keyed; see handoff_step above\n'
+    return 3
+}
+
+# --rf-submit: a SCPI command file for a lab signal generator, and nothing else.
+# Every command carries its source in the file itself:
+#   SMW200A   SOURce:BB:ARBitrary:WAVeform:SELect / :STATe, SOURce:FREQuency:FIXed,
+#             SOURce:POWer:LEVel:IMMediate:AMPLitude, OUTPut:STATe -- all quoted
+#             from the R&S SMW200A SCPI tree as generated in the vendor's RsSmw
+#             5.50.42 driver; MMEM:DATA is R&S's documented binary-block upload.
+#   N5182B    :MEMory:DATA "WFM1:<file>",<block> from the Keysight X-Series
+#             User's Guide (I/Q data into the instrument file system); the core
+#             SOURce:FREQuency / POWer / OUTPut commands are SCPI-99. The
+#             waveform-select and ARB-on commands are NOT emitted: no Keysight
+#             document this tree can cite quotes them, so playback is left as an
+#             operator step and the verb exits 3 instead of pretending the file
+#             is a complete sequence.
+# Defaults are labelled as lab defaults, never as measured values.
+bbnd_rf_submit() {
+    local hex="" instr="smw200a" freq="$BBND_TX_FREQ_HZ" power="$BBND_TX_POWER_DBM"
+    local run wv scpi bytes digits header
+    while (( $# )); do
+        case "$1" in
+            --instrument)
+                [[ -n "${2:-}" ]] || { printf 'ERROR\t--instrument needs smw200a or n5182b\n' >&2; return 2; }
+                instr="$2"; shift 2 ;;
+            --freq)
+                [[ -n "${2:-}" ]] || { printf 'ERROR\t--freq needs a value in Hz\n' >&2; return 2; }
+                freq="$2"; shift 2 ;;
+            --power)
+                [[ -n "${2:-}" ]] || { printf 'ERROR\t--power needs a value in dBm\n' >&2; return 2; }
+                power="$2"; shift 2 ;;
+            --*) printf 'ERROR\t--rf-submit does not take %s (see --help)\n' "$(bbnd_sanitize "$1")" >&2; return 2 ;;
+            *)
+                if [[ -z "$hex" ]]; then hex="$1"; shift
+                else printf 'ERROR\t--rf-submit takes one payload\n' >&2; return 2; fi ;;
+        esac
+    done
+    case "$instr" in smw200a|n5182b) ;; *)
+        printf 'ERROR\t--instrument must be smw200a or n5182b: %s\n' "$(bbnd_sanitize "$instr")" >&2; return 2 ;; esac
+    [[ "$freq" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--freq must be an integer number of Hz: %s\n' "$(bbnd_sanitize "$freq")" >&2; return 2; }
+    [[ "$power" =~ ^-?[0-9]+([.][0-9]+)?$ ]] || { printf 'ERROR\t--power must be a number in dBm: %s\n' "$(bbnd_sanitize "$power")" >&2; return 2; }
+    hex=$(bbnd_norm_hex "$hex")
+    bbnd_is_hex "$hex" || { printf 'ERROR\t--rf-submit needs even-length hex, got "%s"\n' "$(bbnd_sanitize "$hex")" >&2; return 2; }
+
+    run=$(bbnd_run_dir rf) || return 1
+    wv="$run/payload.bin"
+    scpi="$run/submit.scpi"
+    bbnd_payload_write "$hex" "$wv" || return 1
+
+    bytes=$(( ${#hex} / 2 ))
+    digits=${#bytes}
+    header="#${digits}${bytes}"
+
+    if [[ "$instr" == "smw200a" ]]; then
+        {
+            printf '# SCPI command file for a Rohde & Schwarz SMW200A\n'
+            printf '# generated by modules/35_baseband.sh --rf-submit; nothing was sent to any instrument\n'
+            printf '# sources: R&S SMW200A SCPI tree (RsSmw 5.50.42 driver) for\n'
+            printf '#   BB:ARBitrary:WAVeform:SELect, BB:ARBitrary:STATe, FREQuency:FIXed, POWer:LEVel:IMMediate:AMPLitude, OUTPut:STATe\n'
+            printf '#   MMEM:DATA is R&S binary block upload. *CLS is an IEEE 488.2 common command.\n'
+            printf '# 1. THE FILE THIS MODULE WRITES IS NOT A WAVEFORM. payload.bin holds the %s\n' "$bytes"
+            printf '#    message byte(s); an R&S ARB .wv is a container of I/Q sample pairs with its own\n'
+            printf '#    header, and turning bits into samples needs a modulator this module does not have.\n'
+            printf '#    Produce payload.wv with your modulation tool, upload it as a binary block, and the\n'
+            printf '#    commands below then select it by name:\n'
+            printf '#    MMEM:DATA '"'"'/var/user/payload.wv'"'"',<block header><the wv container>\n'
+            printf '#    (the block header for a %s-byte container is #%s%s)\n' "$bytes" "${#bytes}" "$bytes"
+            printf '*CLS\n'
+            printf 'SOURce1:FREQuency:FIXed %s\n' "$freq"
+            printf 'SOURce1:POWer:LEVel:IMMediate:AMPLitude %s\n' "$power"
+            printf 'SOURce1:BB:ARBitrary:STATe OFF\n'
+            printf "SOURce1:BB:ARBitrary:WAVeform:SELect 'payload.wv'\n"
+            printf 'SOURce1:BB:ARBitrary:STATe ON\n'
+            printf 'OUTPut1:STATe ON\n'
+            printf '# 2. the generator is now armed on %s Hz at %s dBm; keying it is the operator act\n' "$freq" "$power"
+            printf '# 3. after the run: OUTPut1:STATe OFF then SOURce1:BB:ARBitrary:STATe OFF\n'
+        } > "$scpi" 2>/dev/null || {
+            printf 'ERROR\tcould not write %s\n' "$(bbnd_sanitize "$scpi")" >&2; return 1; }
+    else
+        {
+            printf '# SCPI command file for a Keysight N5182B (MXG X-Series)\n'
+            printf '# generated by modules/35_baseband.sh --rf-submit; nothing was sent to any instrument\n'
+            printf '# Each command below names its source:\n'
+            printf '#   *CLS                              IEEE 488.2 common command (clear status)\n'
+            printf '#   :MEMory:DATA "WFM1:<file>",<blk>  Keysight X-Series User Guide: I/Q data into the instrument file system\n'
+            printf '#   [:SOURce]:FREQuency[:CW|FIXed]    SCPI-99 SOURce subsystem\n'
+            printf '#   [:SOURce]:POWer[:LEVel][:IMMediate][:AMPLitude]  SCPI-99\n'
+            printf '#   :OUTPut[:STATe]                   SCPI-99\n'
+            printf '# 1. payload.bin holds the %s message byte(s) this module wrote; it is NOT a waveform.\n' "$bytes"
+            printf '#    :WFM1:payload.wv must be a Keysight I/Q waveform container, which needs a modulator\n'
+            printf '#    this module does not have. Upload that container as a binary block, not as text:\n'
+            printf '#    :MEMory:DATA "WFM1:payload.wv",<block header><the container>\n'
+            printf '*CLS\n'
+            printf ':SOURce1:FREQuency:FIXed %s\n' "$freq"
+            printf ':SOURce1:POWer:LEVel:IMMediate:AMPLitude %s\n' "$power"
+            printf ':OUTPut:STATe ON\n'
+            printf '# 2. PLAYBACK IS NOT IN THIS FILE ON PURPOSE: the waveform-select and ARB-on commands\n'
+            printf '#    are not quoted by any Keysight document this tree can cite, so they are not guessed.\n'
+            printf '#    Operator step: Mode > Dual ARB > Select Waveform, then ARB Off On\n'
+            printf '#    (X-Series Signal Generators User Guide, Dual ARB Player section).\n'
+            printf '# 3. after the run: :OUTPut:STATe OFF\n'
+            printf '# WHAT I WOULD NEED: a Keysight X-Series SCPI Command Reference, to emit the\n'
+            printf '# RADio:ARB waveform-select and ARB-state lines instead of leaving them to the operator.\n'
+        } > "$scpi" 2>/dev/null || {
+            printf 'ERROR\tcould not write %s\n' "$(bbnd_sanitize "$scpi")" >&2; return 1; }
+    fi
+
+    if [[ "$instr" == "smw200a" ]]; then
+        printf 'status\tscpi_written\n'
+        printf 'playback\tin file (every command sourced)\n'
+    else
+        printf 'status\tscpi_written_handoff\n'
+        printf 'playback\toperator step: Mode > Dual ARB > Select Waveform, then ARB Off On\n'
+        printf 'what_i_would_need\ta Keysight X-Series SCPI Command Reference to emit RADio:ARB waveform-select and ARB-state lines\n'
+    fi
+    printf 'instrument\t%s\n' "$instr"
+    printf 'scpi_file\t%s\n' "$scpi"
+    printf 'payload_file\t%s\n' "$wv"
+    printf 'payload_is_waveform\tno -- raw message bytes; an ARB container needs a modulator this module does not have\n'
+    printf 'payload_bytes\t%d\n' "$bytes"
+    printf 'block_header\t%s\n' "$header"
+    printf 'freq_hz\t%s\n' "$freq"
+    printf 'power_dbm\t%s\n' "$power"
+    printf 'freq_default\t%s\n' "$([[ "$freq" == "$BBND_TX_FREQ_HZ" ]] && echo 'lab default, not measured' || echo override)"
+    printf 'power_default\t%s\n' "$([[ "$power" == "$BBND_TX_POWER_DBM" ]] && echo 'lab default, not measured' || echo override)"
+    printf 'note\tthe .wv file is raw bytes in this instrument format, not a validated ARB waveform; the R&S ARB Toolbox or Keysight Signal Studio produces the real one\n'
+    [[ "$instr" == "smw200a" ]] && return 0
+    return 3
+}
+
 bbnd_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -371,9 +797,110 @@ bbnd_selftest() {
     printf 'some error happened\n' > "$d/e.log"
     chk triage-error-not-crash "$(fld "$(bbnd_triage "$d/e.log")" none)" "0"
 
-    # 6. Scope assertion, behavioural: there is no transmit verb to dispatch.
-    chk scope-no-transmit "$(bbnd_cli_main --transmit >/dev/null 2>&1; echo $?)" "2"
-    chk scope-no-payload  "$(bbnd_cli_main --send-payload >/dev/null 2>&1; echo $?)" "2"
+    # 6. The offensive half: no gate, a standing note, and what each verb can
+    # and cannot claim. These replace the old scope-no-transmit/scope-no-payload
+    # assertions, which only said "there is no verb"; these test the verb.
+
+    # 6a. Every offensive verb runs with no flag. What it owes a reader is the
+    # note, in its own output, and silence on stderr while it succeeds.
+    : > "$d/plain.dev"
+    out=$(bbnd_cli_main --diag-send 00 --port "$d/plain.dev" 2>"$d/plain.err"); rc=$?
+    chk ungated-send-rc   "$rc" "0"
+    chk ungated-send-stderr "$(grep -c . "$d/plain.err")" "0"
+    chk ungated-note      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="note"{print (($2 ~ /no radio is keyed/)?"yes":"no")}' | head -1)" "yes"
+    # The retired gate flag is rejected rather than swallowed: a script that
+    # still passes it must find out, not go quiet.
+    chk retired-flag-rejected "$(bbnd_cli_main --i-have-a-lab-and-authorisation --diag-send 00 --port "$d/plain.dev" >/dev/null 2>&1; echo $?)" "2"
+
+    # 6b. It writes the bytes 56 framed. KAT: 56's own vector for payload 00 is
+    # 0078f07e (CRC-16/X-25 of 0x00 is 0xF078, little-endian).
+    chk send-bytes-00 "$(xxd -p "$d/plain.dev" 2>/dev/null | tr -d '\n')" "0078f07e"
+    : > "$d/plain2.dev"
+    bbnd_cli_main --diag-send 0100 --port "$d/plain2.dev" >/dev/null 2>&1
+    chk send-bytes-0100 "$(xxd -p "$d/plain2.dev" 2>/dev/null | tr -d '\n')" "01009f167e"
+    # A device that does not exist is rc 1 (attempted, no device), distinct from
+    # a usage error (2) and from success (0).
+    chk send-missing-rc "$(bbnd_cli_main --diag-send 00 --port "$d/absent" >/dev/null 2>&1; echo $?)" "1"
+    # And a refusal for a bad request still writes nothing.
+    chk send-no-port-rc "$(bbnd_cli_main --diag-send 00 >/dev/null 2>&1; echo $?)" "2"
+
+    # 6d. --diag-frame is a consumer of 56, not a second encoder. These are the
+    # seam's known-answer tests: the exact frames 56 prints for the same bytes.
+    out=$(bbnd_cli_main --diag-frame 00)
+    chk df-crc-00     "$(fld "$out" crc)" "f078"
+    chk df-frame-00   "$(fld "$out" escaped_frame)" "0078f07e"
+    chk df-framing    "$(fld "$out" framing)" "56_baseband_diag --frame"
+    chk df-len        "$(fld "$out" payload_len)" "1"
+    chk df-matches-56 "$([[ "$(fld "$out" escaped_frame)" == "$(bash "$BBND_DIAG_MODULE" --frame 00)" ]] && echo yes || echo no)" "yes"
+    # A payload containing 0x7E and 0x7D exercises the escape on the seam too.
+    out=$(bbnd_cli_main --diag-frame 7e7d)
+    chk df-escape     "$(fld "$out" escaped_frame)" "7d5e7d5df1cd7e"
+    chk df-dir-default "$(fld "$out" dir)" "host"
+    out=$(bbnd_cli_main --diag-frame 0100 --dir device)
+    chk df-dir-device "$(fld "$out" dir)" "device"
+    chk df-frame-0100 "$(fld "$out" escaped_frame)" "01009f167e"
+    chk df-bad-hex    "$(bbnd_cli_main --diag-frame zz >/dev/null 2>&1; echo $?)" "2"
+    chk df-odd-hex    "$(bbnd_cli_main --diag-frame 0 >/dev/null 2>&1; echo $?)" "2"
+    chk df-bad-dir    "$(bbnd_cli_main --diag-frame 00 --dir radio >/dev/null 2>&1; echo $?)" "2"
+
+    # 6e. Handoff: exit 3, the exact payload on disk, and no line that reads as
+    # a completed transmission.
+    local rout rrc
+    rout=$(bbnd_cli_main --transmit deadbeef --framing nas --out "$d/tx.bin" 2>/dev/null); rrc=$?
+    chk tx-rc        "$rrc" "3"
+    chk tx-bytes     "$(xxd -p "$d/tx.bin" 2>/dev/null | tr -d '\n')" "deadbeef"
+    chk tx-status    "$(fld "$rout" status)" "handoff"
+    chk tx-framing   "$(fld "$rout" framing)" "nas"
+    chk tx-not-keyed  "$(fld "$rout" keyed)" "0"
+    chk tx-claims-none "$(printf '%s\n' "$rout" | grep -ci 'transmitted')" "0"
+    chk tx-bad-framing "$(bbnd_cli_main --transmit 00 --framing lte >/dev/null 2>&1; echo $?)" "2"
+
+    # 6f. --send-payload mutates through the existing engine, then hands off.
+    local want
+    want=$(bbnd_mutate deadbeef bitflip 42)
+    rout=$(bbnd_cli_main --send-payload deadbeef bitflip 42 --out "$d/mut.bin" 2>/dev/null); rrc=$?
+    chk sp-rc      "$rrc" "3"
+    chk sp-mutated "$(fld "$rout" mutated)" "$want"
+    chk sp-bytes   "$(xxd -p "$d/mut.bin" 2>/dev/null | tr -d '\n')" "$want"
+    chk sp-changed "$([[ "$want" != "deadbeef" ]] && echo yes || echo no)" "yes"
+
+    # 6g. --rf-submit writes real SCPI for the named generator. The command
+    # strings asserted here are the vendors' documented shapes, quoted in the
+    # comment above bbnd_rf_submit.
+    rout=$(bbnd_cli_main --rf-submit deadbeef --instrument smw200a 2>/dev/null); rrc=$?
+    local scpi
+    scpi=$(fld "$rout" scpi_file)
+    chk rf-rc          "$rrc" "0"
+    chk rf-scpi-exists "$([[ -f "$scpi" ]] && echo yes || echo no)" "yes"
+    chk rf-select      "$(grep -c "^SOURce1:BB:ARBitrary:WAVeform:SELect 'payload.wv'" "$scpi")" "1"
+    chk rf-arb-on      "$(grep -c '^SOURce1:BB:ARBitrary:STATe ON' "$scpi")" "1"
+    chk rf-mmem        "$(grep -c '^#    MMEM:DATA' "$scpi")" "1"
+    chk rf-block-hdr   "$(fld "$rout" block_header)" "#14"
+    chk rf-payload-bytes "$(xxd -p "$(fld "$rout" payload_file)" 2>/dev/null | tr -d '\n')" "deadbeef"
+    # The file this module writes is the message, and saying otherwise is the lie
+    # a lab instrument would find first: an ARB .wv is a container of I/Q pairs.
+    chk rf-not-a-waveform "$(fld "$rout" payload_is_waveform | cut -d' ' -f1)" "no"
+    chk rf-select-names-wv "$(grep -c "WAVeform:SELect 'payload.wv'" "$scpi")" "1"
+    chk rf-default-lab "$(fld "$rout" freq_default)" "lab default, not measured"
+    chk rf-bad-instr   "$(bbnd_cli_main --rf-submit 00 --instrument e4438c >/dev/null 2>&1; echo $?)" "2"
+    chk rf-bad-power   "$(bbnd_cli_main --rf-submit 00 --power high >/dev/null 2>&1; echo $?)" "2"
+    # The Keysight branch stops where its sources stop: verified upload and
+    # SCPI-99 core commands, playback left as an operator step, so rc 3.
+    rout=$(bbnd_cli_main --rf-submit 00 --instrument n5182b 2>/dev/null); rrc=$?
+    scpi=$(fld "$rout" scpi_file)
+    chk rf-keysight-rc     "$rrc" "3"
+    chk rf-keysight-status "$(fld "$rout" status)" "scpi_written_handoff"
+    chk rf-keysight-mem    "$(grep -c '^#    :MEMory:DATA' "$scpi")" "1"
+    chk rf-keysight-freq   "$(grep -c '^:SOURce1:FREQuency:FIXed 2412000000' "$scpi")" "1"
+    chk rf-keysight-noplay "$(grep -c '^:SOURce1:RADio:ARB' "$scpi")" "0"
+    chk rf-keysight-need   "$(grep -c 'WHAT I WOULD NEED' "$scpi")" "1"
+
+    # 6h. The status line stopped implying detection-only.
+    out=$(bbnd_status_tsv)
+    chk status-no-gate "$(printf '%s\n' "$out" | awk -F'\t' '$1=="GATE"{print ($2 ~ /^none/)?"none":"other"}')" "none"
+    chk status-transmit   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="TRANSMIT"{print $2}' | grep -c 'handoff only')" "1"
+    chk status-diag-plain "$(printf '%s\n' "$out" | awk -F'\t' '$1=="DIAG_WRITE"{print ($2 ~ /^--diag-send/)?"yes":"no"}')" "yes"
+    chk status-framing    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="FRAMING"{print $2}' | grep -c '56_baseband_diag')" "1"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -394,8 +921,13 @@ bbnd_menu() {
   [6]  Triage a sanitizer log
   [7]  Layer reference
   [8]  Plan (handoff)
+  [9]  DIAG frame (via 56_baseband_diag)
+  [10] DIAG send to a modem tty
+  [11] Hand a payload off (write file, name the tool)
+  [12] RF submission file (SCPI)
   [0]  back
 M
+        echo "  NOTE: --diag-send writes to the tty you name and nothing else"
         read -rp "  choice> " c || return 0
         case "$c" in
             1) read -rp "  length> " n; bbnd_asn1_len_encode "$n"; read -rp "  enter " _ ;;
@@ -408,6 +940,12 @@ M
             6) read -rp "  log path> " p; bbnd_triage "$p"; read -rp "  enter " _ ;;
             7) bbnd_layers; read -rp "  enter " _ ;;
             8) bbnd_plan; read -rp "  enter " _ ;;
+            9) read -rp "  hex> " h; bbnd_diag_frame "$h"; read -rp "  enter " _ ;;
+            10) read -rp "  hex> " h; read -rp "  device> " p
+                bbnd_diag_send "$h" --port "$p"; read -rp "  enter " _ ;;
+            11) read -rp "  hex> " h; read -rp "  framing (rrc|nas)> " f
+                bbnd_transmit "$h" --framing "${f:-rrc}"; read -rp "  enter " _ ;;
+            12) read -rp "  hex> " h; bbnd_rf_submit "$h"; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -415,25 +953,44 @@ M
 }
 
 bbnd_cli_main() {
-    local cmd="${1:-}"
-    (($# > 0)) && shift
+    # No flag is consumed: the arguments reach the dispatcher untouched, so a
+    # retired --i-have-a-lab-and-authorisation is a usage error rather than a
+    # silent no-op.
+    local -a bbnd_args=()
+    local a
+    for a in "$@"; do
+        case "$a" in
+            *) bbnd_args+=("$a") ;;
+        esac
+    done
+    local cmd="${bbnd_args[0]:-}"
+    local -a rest=()
+    (( ${#bbnd_args[@]} > 1 )) && rest=("${bbnd_args[@]:1}")
+
     case "$cmd" in
         --status-tsv)   bbnd_status_tsv ;;
-        --asn1-len)     bbnd_asn1_len_encode "${1:-}" ;;
-        --asn1-dec)     bbnd_asn1_len_decode "${1:-}" ;;
-        --mutate)       bbnd_mutate "${1:-}" "${2:-bitflip}" "${3:-1}" ;;
-        --corpus)       bbnd_corpus "${1:-}" "${2:-16}" "${3:-bitflip}" ;;
-        --nas-hdr)      bbnd_nas_hdr "${1:-}" ;;
-        --triage)       bbnd_triage "${1:-}" ;;
+        --asn1-len)     bbnd_asn1_len_encode "${rest[0]:-}" ;;
+        --asn1-dec)     bbnd_asn1_len_decode "${rest[0]:-}" ;;
+        --mutate)       bbnd_mutate "${rest[0]:-}" "${rest[1]:-bitflip}" "${rest[2]:-1}" ;;
+        --corpus)       bbnd_corpus "${rest[0]:-}" "${rest[1]:-16}" "${rest[2]:-bitflip}" ;;
+        --nas-hdr)      bbnd_nas_hdr "${rest[0]:-}" ;;
+        --triage)       bbnd_triage "${rest[0]:-}" ;;
         --layers)       bbnd_layers ;;
         --plan)         bbnd_plan ;;
+        --diag-frame)   bbnd_diag_frame "${rest[@]}" ;;
+        --diag-send)    bbnd_diag_send "${rest[@]}" ;;
+        --transmit)     bbnd_transmit "${rest[@]}" ;;
+        --send-payload) bbnd_send_payload "${rest[@]}" ;;
+        --rf-submit)    bbnd_rf_submit "${rest[@]}" ;;
         --selftest)     bbnd_selftest ;;
         --menu)         bbnd_menu ;;
         *)
             cat >&2 <<EOF
-Baseband Fuzzing — RRC/NAS mutation, corpus generation, crash triage
+Baseband Fuzzing — RRC/NAS fuzzing, a gated DIAG write, and the RF handoff
 
 Usage: $0 COMMAND
+
+Research half (no radio, no gate):
   --status-tsv            module state as TSV
   --asn1-len <n>          BER/DER definite length encode
   --asn1-dec <hex>        BER/DER definite length decode
@@ -443,11 +1000,28 @@ Usage: $0 COMMAND
   --triage <log|->        ASAN/UBSAN crash-log triage
   --layers                protocol-layer reference
   --plan                  over-the-air handoff plan
-  --selftest              verify codecs and mutation, no radio needed
-  --menu                  interactive menu
 
-Scope: a research instrument. It mutates, generates corpora and triages crashes.
-It emits no over-the-air payload; the fuzz step is a handoff to hardware you own.
+Offensive half (disclaimer on stderr, gate where a device is written):
+  --diag-frame <hex> [--dir host|device]
+                          DIAG/QCDM frame from 56_baseband_diag (its framing
+                          verb; this module reimplements none of it)
+  --diag-send <hex> --port <path>
+                          write that frame to a modem tty, or to a regular file
+                          for a lab check
+  --transmit <hex> [--framing rrc|nas] [--out <path>]
+                          write the payload, print the over-the-air handoff (exit 3)
+  --send-payload <hex> <strategy> <seed> [--framing rrc|nas] [--out <path>]
+                          mutate with --mutate's engine, then hand off (exit 3)
+  --rf-submit <hex> [--instrument smw200a|n5182b] [--freq <hz>] [--power <dbm>]
+                          write a SCPI command file for a lab signal generator
+
+No flag is needed to run any of them. --diag-send writes to the tty you name and
+nothing else; --transmit and --send-payload write a payload file and print the
+handoff; --rf-submit writes an instrument command file.
+Exit codes: 0 success, 1 device/artefact failure, 2 bad usage,
+3 handoff (the bytes are on disk and nothing was transmitted).
+Scope: a research instrument. The over-the-air step needs a modulator this tree
+does not have, so --transmit names a tool and stops; nothing here radiates.
 EOF
             return 2 ;;
     esac

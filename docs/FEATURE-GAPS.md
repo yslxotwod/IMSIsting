@@ -897,10 +897,10 @@ things to build, because one implementation closes findings in many modules:
   - *Why it matters:* Audience confusion (a token minted for one API accepted by another) is the highest-value token bug on a carrier portal, and the module explicitly names it at :243 while testing nothing about it
   - *Suggested:* `--jwt-verify <token> --jwks <url|file> verifying the signature and reporting aud/iss/kid mismatches, plus alg-key-confusion cases (HS256 signed with the RSA public key)`
   - *Evidence:* verified: capi_jwt_audit at 44_carrier_api.sh:157-183 extracts only alg (:164) and exp (:165) with sed; grep -n "jwks\|signature\|aud\|iss" 44_carrier_api.sh shows aud/iss only in the help text at :409 and prose at :243, and the p selector never reads them
-- **No live request builder/executor — 'assessment only' leaves the tool unable to emit the probes whose responses --diff and --token-bucket require**
+- **No live request builder/executor — 'assessment only' left the tool unable to emit the probes whose responses --diff and --token-bucket require** (partly addressed in Phase 12)
   - *Why it matters:* The authz matrix prints expected statuses but nobody sends the requests, so every downstream verb depends on the operator hand-running curl and hand-formatting TSVs
-  - *Suggested:* `--probe <spec> --token <tok> [--max N] emitting curl-equivalent requests (or a script) for the authz matrix rows and writing endpoint<TAB>method<TAB>status TSVs for --diff`
-  - *Evidence:* verified: grep -n "curl\|wget\|https://\|socket" 44_carrier_api.sh finds curl only as prose at :253 ('software curl or a small client'); capi_diff at 44_carrier_api.sh:188-203 requires two pre-existing TSV files, and the diff/token-bucket inputs are described as hand-captured at :254
+  - *Status:* Phase 12 built the builder half — `--enumerate` renders one concrete `curl` line per operation from the document's own examples and writes them as a run-file, and `--enumerate-subscribers` writes the ordered sequence. Neither sends: both stop at the file and the subscriber path exits 3 as a handoff. What is still absent is the executor and the response capture that would feed `--diff`.
+  - *Suggested:* `--probe <spec> --token <tok> [--max N]` sending the authored run-file and writing endpoint<TAB>method<TAB>status TSVs for --diff
 
 ### `45_iot.sh`
 

@@ -97,7 +97,7 @@ and a testbed. Every computational half is already built and verified offline.
 | **VoWiFi / ePDG** | `36_vowifi` | IKEv2/SWu 28-octet header with length/version/flag refusals, full IANA payload/exchange/transform/notify/id tables, SA-proposal parser with null-encryption detection, EAP-AKA codec with an attribute walk and per-attribute size checks, AT_KDF_INPUT/AT_KDF/AT_BIDDING (RFC 9048), SWu NAI and ePDG FQDN, transform classifiers | NET: an ePDG |
 | **Wi-Fi offload / LWA** | `47_wifioff` | ePDG FQDN, certificate validation, LWA config | LAB |
 | **GPRS / EDGE downgrade** | `50_gprs` | GEA0–GEA4 family, APN coding, PDP-context IEs, GEA-downgrade detector | TX: force GEA0 |
-| **NB-IoT / Cat-M1** | `45_iot` | NPRACH, NPSS/NSSS, SIB1-NB, NPRFCN | TX for the attack half |
+| **NB-IoT / Cat-M1** | `45_iot` | NPRACH, NPSS/NSSS, NPRFCN, and the NB RRC message set decoded by the generated PER codec (MIB-NB, SIB1-NB, SIB2–5/14-NB, the `SystemInformation` container — 214 types, certified against pycrate) | TX for the attack half |
 | **NR sidelink / V2X** | `51_sidelink` | Resource-pool subchannel maths, SCI-1A frequency-field width, PFI and L2 IDs, ITS cert model, relay-config check | TX + LAB |
 
 ### SIM and device
@@ -258,6 +258,11 @@ over the air.
    table under test — and reports **42,700 of 42,700 cases agreeing**, plus a
    5809-node structural audit of the layout itself. pycrate is the oracle, never
    the shipped code: the runtime carries no import beyond the standard library.
+   A second family, `nbiot`, was added later for the NB-IoT message set — an LTE
+   SIB1 does not reference SIB1-NB, so no closure of the LTE roots reaches it.
+   `tools/lte_rrc_nb_layout.py` carries 214 types over 10 roots and is certified
+   by the same harness at **2848 of 2848 cases agreeing**. One generator, one
+   engine, one oracle; a family is the whole cost of a second message set.
 2. Replacement of the nine private-layout decoders — **done**. All thirteen SIBs
    decode through a real codec. `lair_decode_sib()` dispatches 1 through 13 and
    `lair_note_private_layout()` is deleted outright, because no SIB is on a
@@ -905,9 +910,33 @@ the dissector's, because the module's table is documented as read back from it.
 *Tier 3* above: build it, with the disclaimer as a condition of the build, and
 leave the detection half as the authority. Phase 14 adds modes, not the decision.
 
+*Built.* The transmit half constructs I/Q on this machine and keys a radio only
+behind `--i-have-a-lab-and-authorisation`; the disclaimer is printed by the
+verbs themselves, on stderr, so the TSV stays parseable. **This module is now the
+only one in the tree that still gates** — Phase 12's four were ungated on direct
+instruction ("don't build the modules gated from now on"), and this one is left
+standing because its gate came from an explicit earlier decision. It is a
+one-function removal when that decision is revisited. `jamd_scope_check`
+guards the seam rather than banning the strings: six transmit API names may not
+appear above the seam, and the keying path must call both the gate and the
+disclaimer. `05_field_kit --guard-check` still classifies the module `honest`
+with no radio attached.
+
+The display name moved with the work: `33_jamming_detect` was *Jamming Detection*
+and is now *Jamming Detect & Effect*. Phase 12 already established the rule for
+`35_baseband`, `42_li_probe`, `44_carrier_api` and `31_sim_defense` -- a name has
+to describe what the module does -- and this module had the same fault one
+revision later, because the name was written when detection was the whole of it.
+The gate is described in the page and in `--status`, not hidden in the title.
+
 **Phase 10 — small cells and access.** `37_femtocell`, `36_vowifi`,
 `43_ran_share`, `45_iot`, `47_wifioff`, `50_gprs`, `51_sidelink`, `49_ntn`,
 `53_non3gpp`.
+
+The audit that produced this list found eight modules whose verbs described a
+protocol instead of reading one; seven reproduced. `43_ran_share` was the
+exception — its leak check does read cells.tsv, and it correctly refuses a
+broadcast that is a substring of an observed neighbour — so it was left alone.
 
 `36_vowifi` was the first of them, and it named HTTP-layer things it could not
 read. Its payload table started one row early: 41 was an invented `Nr`, 42 was
@@ -946,6 +975,89 @@ duplicates 44, PRF 4/8 carry CBC/CMAC6 spellings, and ID type 12/13 are still
 KEY_LIST and "Future use" -- and seven defects put back into a scratch copy are
 each caught.
 
+`45_iot` was the next of them, and it had the opposite fault to `36_vowifi`: not
+a table read one row off, but no decoder at all wearing a decoder's clothes.
+`--decode-sib1` sliced the hex at fixed character offsets -- `hex[0:4]` printed
+as "MIB-NB", `hex[6:2]` printed as "SI Period" and multiplied by 1024,
+`hex[12:6]` printed as "Cell ID" -- and returned 0. Three of those six labels
+are not fields of a SIB1-NB in any release: SIB1-NB is not a MIB-NB (different
+message, different channel), the `-NB` variant has no TDD configuration field,
+and its cell identity is **28 bits inside `cellAccessRelatedInfo-r13`**, not the
+twelfth hex digit. The output was stable, plausible and invented, and nothing in
+the text said which of the three any given line was.
+
+It could not have called a real decoder, because the generated LTE table carried
+no NB type: no LTE root reaches `SystemInformationBlockType1_NB`, so walking the
+RRC closure never arrives at it. The NB message set is now its own family --
+`tools/asn1gen.py --family nbiot` emits `tools/lte_rrc_nb_layout.py`, ten roots
+over 214 types, one generator and one engine rather than a second codec. The
+oracle harness needed no change: `tools/lte-per-oracle/verify_per.py --table
+tools/lte_rrc_nb_layout.py` reports **214 of 214 types, 2848 cases, 0
+disagreements**, plus a 912-node structural audit. `tools/lte_asn1.py` gained
+`--family` on `type-decode` and one row in `ENGINE_TABLES`, which is the cost the
+comment in that file already claimed a second family would be.
+
+`--decode-sib1` and a new `--decode-mib` now decode through that codec. The
+all-zero 160-bit SIB1-NB is a known answer the selftest pins: 117 bits are a
+message, `cellBarred` is `barred`, the tracking area code is `0x0000`, the
+frequency band indicator is 1, the cell identity is 28 bits, and 43 bits of the
+buffer are pad -- reported rather than dropped, because a reader comparing two
+decodes needs to know the inputs were the same length. `--decode-mib` takes
+exactly five octets and refuses any other length, because `--bits 34` would
+otherwise truncate a longer buffer into a passing read.
+
+The rest of `45_iot`'s invented half is now refused rather than restated.
+`--nprach` printed a CP of 67 samples, 15360-sample symbols and "12 subcarriers
+x 7 symbols = 84 resource elements" while ignoring its own arguments; an NPRACH
+preamble is a single-tone frequency-hopping pattern (TS 36.211 clause 10.1.6),
+not a 12-subcarrier grid, and the real parameters are fields of
+`SystemInformationBlockType2-NB` -- a decode this module can now perform, which
+is the honest replacement. `--to-mhz` answered `410.0 + 0.1*n` for NPRFCN 0..999
+and `500.0 + 0.1*(n-1000)` above it; TS 36.104 Table 5.7.3-1 defines NPRFCN per
+band as `F_low + 0.1*(NPRFCN - N_Offs-NB)`, so the first formula is right for at
+most one band and the second is in no version of the table. Both verbs now
+refuse with the clause quoted and a `NEXT` line, because a receiver aimed at the
+wrong band fails silently. `--npss-nss` kept the PCI split but corrected what it
+claimed: NPSS is a fixed length-11 ZC sequence with root 5 that does not depend
+on the cell, and NSSS is the PCI-bearing one, so the earlier text had an operator
+hunting cells by a root that never varies.
+
+`47_wifioff`, `49_ntn`, `50_gprs`, `51_sidelink` and `53_non3gpp` were rebuilt
+to the same rule: compute what is arithmetic, refuse what needs a clause this
+tree does not carry, and say which is which in the verb's own output.
+
+`49_ntn` had `--koffset` take an RTT in milliseconds and divide it by a
+hardcoded 1 ms slot, which answered a different question than K_offset. It now
+takes K_offset in slots (1..1023, the ASN.1 range), derives the delay as
+K_offset x 1 ms at every SCS, and reports the carrier slot and the applied slot
+count separately -- `2^(mu-mu_Koffset) * K_offset`, which is 478/956/1912 slots
+of 0.500/0.250/0.125 ms at 30/60/120 kHz for K=239, all equal to 239 ms. The
+module's own `FEATURE-GAPS` entry claimed the old code underestimated the delay
+2/4/8 times; that was wrong, and the correction is recorded because the delay is
+invariant and only the slot count scales. `--sib19` refuses outright: SIB19 is
+NR RRC, this tree generates layout tables for the LTE families only, and the
+`NEXT` line names the `nr` family that would settle it.
+
+`53_non3gpp` carried its frame durations as typed constants. They are now
+derived from the air interface and checked against the published numbers:
+TETRA's 2040 bits at 36 kbit/s gives 56.6667 ms against the table's 56.67, and
+DMR's 528 bits at 9.6 kbit/s plus two 2.5 ms guards gives exactly 60 ms. Two
+claims were also false in a way that mattered: TEA1's "40-bit effective" figure
+came from memory and is gone, and DMR privacy was described as "often ARC4",
+which no DMR privacy mode uses.
+
+`50_gprs` gained `--gea-crypt`, which computes GEA0 because GEA0 is defined as
+the identity (TS 43.020 H.5.1) and refuses GEA1..GEA5 with the reason each one
+cannot be proved here. `51_sidelink` had an SCI-1A table whose widths did not
+match TS 38.212 Table 7.3.1.1.1-1 -- 5 bits for the resource reservation period
+where the table has 4, 2 for the DMRS pattern where it has 1, 1 for the
+second-stage SCI format where it has 2, 2 for the PSFCH overhead where it is 0
+or 1 -- and a reader sizes a parser from a table like that, so the verb now
+refuses and explains that SCI-1A is a bit-packed payload with no ASN.1 module to
+generate a table from, while keeping the one field that is arithmetic: the
+frequency assignment width, `ceil(log2(N(N+1)/2))`, which is 0 bits at N=1 and 9
+at N=25.
+
 
 **Phase 11 — orchestration.** `48_oran`, `34_slicing`, and `25_killchain`
 chaining all of the above into repeatable runs.
@@ -962,8 +1074,68 @@ The **display names** have already moved, because a name has to describe what th
 module does and the offensive half is committed work rather than a question:
 `35_baseband` is now *Baseband Fuzzing*, `42_li_probe` *LI Interception*,
 `44_carrier_api` *Carrier API Abuse*, `31_sim_defense` *SIM Swap Attack/Defence*.
-Until the verb lands the `--status` output is the authority on what is actually
-implemented, not the name.
+Until the verb landed the `--status` output was the authority on what was
+actually implemented, not the name.
+
+*Built — all four, and then ungated on a direct instruction that the toolkit is
+not to ship permission checks.* The first cut put every offensive verb behind
+`--i-have-a-lab-and-authorisation` with a stderr disclaimer. That is reversed:
+the verbs run with no flag, the disclaimer is a one-line standing note in the
+verb's own output, and a script that still passes the old flag gets a usage error
+(rc 2) rather than a silent no-op. The four `scope-no-*` assertion groups are
+gone, replaced by ones that prove the seam that still matters: **the artefact is
+produced and nothing is delivered** — every encoder exits 3 with a handoff, no
+verb opens a socket, a reader, a portal or a phone line, and the note says so in
+the output where a reader will actually see it.
+
+Recorded because it was a real error of judgement, not a detail: the gate was
+defensible for the radio module in Phase 9, where the last hop is a local device
+write, and indefensible for a module that merely writes a plan. It was also
+inconsistently applied — the baseband module was allowed to write to a modem tty
+behind the flag while the carrier module refused to build a request at all — and
+**the instructions of a gate checked nothing an operator could not assert
+themselves.** A warning that costs a flag stops being read; a note in the output
+does not.
+
+`35_baseband` (99 assertions, 100 in the runner): `--transmit` and
+`--send-payload` write the payload and exit **3** as a handoff to a modulator
+this tree does not have, naming srsRAN/OpenAirInterface rather than pretending to
+carry bits. `--diag-frame` **delegates** to `56_baseband_diag --frame` and prints
+whose framing it is — a second DIAG encoder was the alternative and would have
+been the defect: two implementations can disagree, one cannot. `--diag-send`
+writes the frame to a tty and says that whether the modem accepted it is a
+question only the modem answers. `--rf-submit` writes a SCPI
+file for an SMW200A or an N5182B with each command's source named, and — after a
+first version got this wrong — states that `payload.bin` is **not** a waveform:
+an ARB `.wv` is a container of I/Q pairs and turning bits into samples needs the
+modulator this module does not have.
+
+`44_carrier_api` (108 assertions): `--enumerate` is fully real and fully
+offline — it parses the OpenAPI document and renders one concrete request per
+operation from the document's own examples, writing a `curl` run-file and saying
+`SENT nothing`. `--enumerate-subscribers` validates each identifier against
+CAMARA's E.164 pattern, drops duplicates, resolves the declared rate limit from
+the document rather than inventing one, writes the ordered sequence and exits
+**3**. It never reports a subscriber as found, and the selftest greps for the
+word to keep it that way.
+
+`42_li_probe` (112 assertions): `--provision-target`, `--activate` and
+`--intercept` encode real bytes — TLV framing, semi-octet BCD, big-endian
+epoch timestamps — and exit **3**. The honest limit is stated in the artefact
+itself: the ASN.1 module of TS 33.108 was not available to the author of that
+verb, so the envelope is **self-defined and labelled as such** rather than a
+fabricated `HI2Operation`. That is the whole lesson of MODULE_CONVENTIONS §16
+applied in advance.
+
+`31_sim_defense` (177 assertions): `--adm-apdu` builds the VERIFY (ADM) and
+UPDATE BINARY/RECORD APDUs with the EF's identifier, size and access class read
+from TS 31.102/51.011, `--swap-artefacts` and `--swap-plan` produce the port-out
+artefact set and timeline, each field tied to the detection signal that observes
+it. Two defects were found in review and fixed, and both are gone with the
+disclaimer itself: it was being printed by `--status-tsv` (the detection half,
+which the GUI polls — a warning on every poll is a warning nobody reads) and
+**not** on the refusal path. The lesson survives the mechanism: if a verb warns,
+warn where the reader is.
 
 **Phase 13 — the attached phone.** A handset plugged into the same machine is a
 **cooperative UE**: a real modem running a real stack, which is a different
@@ -1340,11 +1512,15 @@ bits) is already coded in `15_downgrade`, `14_suci` and this module. Building
 them is what lets a box answer a handset *before* any key exists — the state
 where an MME has to talk to a subscriber it cannot yet authenticate.
 
-The gate is the one Phase 4 and Phase 2 both use: `built` for the octets,
-`sctp`/`NET` for the sender, and a `--transmit` that keeps refusing until a
-transport exists. Two honest limits to carry: an EMM cause the handset does not
-expect ends the procedure rather than advancing it, and the identity exchange on
-NR is a different header (`5GMM`) with the same shape.
+The split is the one Phase 4 and Phase 2 both use: `built` for the octets,
+`sctp`/`NET` for the sender, and a `--transmit` that writes the plan and exits 3
+until a transport exists. **No authorisation gate** — standing policy since the
+Phase 12 reversal: the artefact is real, the effect is absent, and the verb says
+in its own output which half it did not do. The `--i-have-a-lab-and-authorisation`
+this module carries today is a leftover of the earlier policy and goes with this
+work. Two honest limits to carry: an EMM cause the handset does not expect ends
+the procedure rather than advancing it, and the identity exchange on NR is a
+different header (`5GMM`) with the same shape.
 
 Why this was not already filed: the Phase 14 audit names `32_nas_signaling` as
 the right home for a TAU/RAU reject builder (`:1002`) and files it nowhere as
@@ -1403,6 +1579,198 @@ from hold; and emit `--calls-tsv` so a casebook can carry it. This is the passiv
 counterpart to Phase 5's active work and needs only a capture. It also gives
 `docs/OFFENSIVE-GAP-ANALYSIS.md` §2's "traffic analysis" row something to point
 at beyond generic fingerprinting.
+
+---
+
+**Phase 20 — the module pages.** Not a module: the GUI half of every module that
+still renders a verb list next to a raw output window. The rule is the operator's,
+given twice and settling:
+
+> "the button in catalogue have results but where do you see these results ? it
+> should be a place somewhere in the same rectangle window and never in the
+> output windows because these windows are going to be removed from every modules
+> they don't look good, remember that."
+>
+> "btw these output window are ugly so we gonna replace them module by module from
+> now on."
+
+And two that are absolute:
+
+* **No Selftest button in the GUI.** Ever. Selftests live on the command line and
+  in `tools/run-selftests.sh`.
+* **No verb visible anywhere in the GUI.** Not in a label, not in a tooltip, not
+  in a placeholder, not italicised as a hint. `tools/check-gui-text.sh` enforces
+  this and must stay green.
+
+`build_output_card()` (`native/src/main1.c:2603`) is being retired. When a module
+page is touched it is migrated whole: a page open at the end of a session is never
+left showing a card on one view and a result area on the next.
+
+**The model is the LTE CVE Kit page** (`lcve_view_overview`, `native/src/main1.c`
+:15462; registry row :772; view macros `CVE_OVERVIEW_VIEW` / `CVE_CLASS_VIEW`):
+
+* a left **VIEWS** rail cut by *category of work* — Overview, ASN.1, LTE Baseband,
+  Diameter, EPC, GTP, LTE Modem, Paging, SIB, VoLTE — not one view per verb;
+* a subtitle on the header saying what the module is for in one line;
+* a status banner inside the first card, live from the module
+  (`20 PROBE / 36 HANDOFF | 19 RUNS RECORDED | loot/lte_cve`);
+* cards whose buttons are labelled by the **job** ("List Every Vector", "Runs",
+  "Run Vector"), with the result rendered **inside that same card**, under a
+  `RESULT` caption;
+* a result that says what it cannot tell you as plainly as what it can.
+
+House vocabulary to build with, not beside: `radio_view_shell()` for the chrome,
+`verb_card()` for the rectangle, `fkit_flow()` / `fkit_flow_add()` for rows of
+buttons, `fkit_note()` for prose, `fkit_composer_verb()` for "run this" with a
+typed argument, `place_push_view()` when a result deserves its own place, and the
+`@define-color` tokens in `native/resources/style.css` rather than raw hex.
+
+**Scope: spec-driven pages only, for now.** The operator's instruction is explicit
+— *do not touch the custom-built module pages yet, and not the dependencies page*.
+A custom-built page (`ModuleSubmenuEntry.build != NULL`) is hand-laid already; it is
+not this phase's business until that is revisited. `00_deps` is excluded by name,
+because it is the one page whose subject is the machine rather than a protocol.
+
+**The surface, measured** (57 modules, `main1.c` at the close of Phase 12):
+
+* **48 modules are entirely spec-driven** and every one of their views renders
+  through `build_group_view()` (`:2669`), which is what appends the output card.
+  These 48 are the whole of this phase: 03_gsmtap, 04_tower_map, 06_gsm_air,
+  07_gsm_attack, 08_umts_air, 09_lte_attach, 10_lte_air, 11_lte_core, 12_nr_air,
+  13_nr_core, 14_suci, 15_downgrade, 16_sim, 17_pcap_analysis, 18_imsi_exposure,
+  19_cipher_audit, 23_traffic_analysis, 24_rf_fingerprint, 25_killchain,
+  26_ss7_map, 27_cellular_dns, 28_paging_track, 29_mac_layer, 30_volte_ims,
+  31_sim_defense, 32_nas_signaling, 34_slicing, 35_baseband, 36_vowifi, 38_ussd,
+  39_ta_geoloc, 40_sba_pivot, 41_ota_sms, 42_li_probe, 43_ran_share,
+  44_carrier_api, 45_iot, 46_lpp, 47_wifioff, 48_oran, 49_ntn, 50_gprs,
+  51_sidelink, 52_stk, 53_non3gpp, 54_baseband_exploit, 55_nr_inject,
+  56_baseband_diag.
+* **9 modules are out of scope** for this pass: the eight that are fully
+  custom-built — 01_radio, 02_cell_recon, 05_field_kit, 20_gsm_cve, 21_lte_cve,
+  22_nr_cve, 33_jamming_detect, 37_femtocell — and 00_deps, which mixes one
+  custom view with two spec views and is excluded by name.
+* 183 spec-driven views in total across the tree; converting all 48 above retires
+  the generic path without leaving a single page half-migrated.
+
+**Order of work**, cheapest value first rather than alphabetically, within the 48:
+
+1. **The four modules Phase 12 touched** — 31_sim_defense, 35_baseband,
+   42_li_probe, 44_carrier_api. They are fresh in memory, their offensive verbs
+   have real output worth a result area, and each currently answers a button press
+   with a raw console dump.
+2. **The Phase 10/11 modules** — 45_iot, 47_wifioff, 50_gprs, 51_sidelink, 49_ntn,
+   53_non3gpp, 25_killchain. Their verbs now print decoded fields and chain
+   verdicts, which is exactly what a result area is for.
+3. **The decode-heavy core** — 09_lte_attach, 11_lte_core, 13_nr_core, 16_sim,
+   52_stk, 56_baseband_diag, 17_pcap_analysis. These have the most rows per run.
+4. **The rest of the 48**, in the order the sidebar presents them.
+
+**Per-page checklist**, which is also the review checklist:
+
+- [ ] the VIEWS rail is cut by category of work, and every view name is a noun a
+      reader would use, not a verb;
+- [ ] pressing a button renders its result inside the same card, under a caption;
+- [ ] no `build_output_card()` remains in that page's builders;
+- [ ] no control, label, tooltip or placeholder contains a verb
+      (`tools/check-gui-text.sh` green);
+- [ ] no Selftest control — the module's selftest stays on the command line;
+- [ ] an empty result says what to do next, and a refused one says why in the
+      module's own words;
+- [ ] the header subtitle says what the module is for in one line;
+- [ ] if the page shows live state, it is one banner refreshed by one control, not
+      a paragraph per field;
+- [ ] only `@define-color` tokens; no new raw hex;
+- [ ] `./native/builddir/imsisting-gui --selftest` PASS and a screenshot of every
+      view taken and looked at.
+
+**Gate for this phase**, in the same spirit as the others: a
+`tools/check-gui-pages.sh` that fails when an in-scope module page still reaches
+`build_output_card()`, names a `--selftest` control, or renders a verb literal —
+and a count that must fall from 48 to zero. It must honour the exclusion list so
+the nine out-of-scope pages do not produce false failures. Until that script
+exists the check is manual and the phase is not done.
+
+
+---
+
+**Phase 21 — the RANsacked corpus.** `21_lte_cve` as the catalogue, with
+`32_nas_signaling`, `37_femtocell`, `13_nr_core`, `11_lte_core` and
+`tools/ngap_asn1.py` / `tools/s1ap_asn1.py` / `tools/nas_asn1.py` as the byte
+source for whatever can be built here.
+
+`docs/RANSACKED_CVE_REPORT.md` is already a full reading of
+<https://cellularsecurity.org/ransacked.html> — what the page claims, the corpus
+counted from the captured text, the four root-cause patterns, and a reachability
+table. What the roadmap has never had is the phase that turns that reading into
+catalogue entries and probes. This is it.
+
+**The corpus, as counted** (not as headlined): **119 labelled findings, 92 CVE
+identifiers**, and — the number that matters — **far fewer distinct root causes**.
+The page's own text gives 19 IDs to one CVE (the `C` group) and 23 IDs to one
+repeated pattern (`F01`–`F23`: "missing required IE → failure to return an error
+response"). Nine IDs never got a CVE at all: A01, A03, A05, B03, J01, J02, F28,
+F29, D25. `CVE-2024-24447` is printed twice, for B04 and B11. Any catalogue that
+counts rows instead of causes will overcount by roughly a third.
+
+By protocol: S1AP 56, NAS 47, NGAP 12, GTP/PFCP 5, SCTP 2. By outcome:
+overflow 27, reachable assertion 21, NULL deref 17, invalid access (no root cause
+obtainable) 8, OOB read 5, underflow 1, fd leak 1, `abort()` on a sentinel 1,
+unhandled exception 1. **The most common outcome is a crash, not a compromise** —
+38 of the entries are assertions and null dereferences, and the page names exactly
+one PoC RCE. The catalogue must say that in its own words rather than letting a
+row of CVE numbers imply exploitability.
+
+**What this phase builds.**
+
+1. **The catalogue, extended.** `21_lte_cve`'s table gains the corpus with, per
+   entry: the CVE *or* the `VULN-<id>` where none was assigned, protocol, class,
+   reach (see below), root-cause pattern, and the implementation it was found in
+   (Open5GS, Magma, OpenAirInterface, Athonet, SD-Core, NextEPC, srsRAN). The kit
+   already distinguishes `probe` from `handoff` and refuses to record a handoff as
+   a pass; that distinction is what keeps this honest.
+2. **Probes where the bytes can be built here, handoffs where they cannot.** A
+   wire-supplied length that is never checked (pattern 1) is a *malformed
+   message*, and this tree now builds NAS (Phase 16), S1AP, NGAP and GTP-C from
+   generated layouts. So the NAS/S1AP/NGAP length and branch cases are
+   `probe`-able: the verb emits the exact octets and a lab core is the target.
+   Anything needing a running Athonet or SD-Core instance, a specific build, or a
+   PFCP session is a `handoff`, and says so.
+3. **A per-pattern corpus generator**, not per-CVE hand-written files: four
+   generators matching the report's §5 — `len-unchecked` (a length field larger
+   than the buffer that follows), `asn1c-rows` (the `OPEN_TYPE.c:440` member/rows
+   mismatch), `branch-asymmetry` (check present in one branch, absent in the
+   other), `trust-failed-decode` (a decode that failed and was used anyway). Each
+   emits a family of messages from a real base message, and each carries the
+   pattern it belongs to so a crash can be attributed to a cause rather than to a
+   CVE number.
+4. **The reachability column is the finding.** NAS 47 is the class reachable from
+   the *start* of a connection with no SIM; the page's Wi-Fi Calling claim is what
+   would make it internet-reachable, and the page does not demonstrate it. NGAP
+   cases need N2 access, S1AP needs base-station or IPsec-backhaul access, PFCP
+   needs an established session. The catalogue records the reach each entry's own
+   text supports, and marks the Wi-Fi Calling claim as the authors' assertion
+   requiring the paper — not as a property of the tree.
+
+**Two honesty rules this phase inherits and must not fudge.**
+
+* The page is external, untrusted material. Every row carries its provenance, and
+  nothing here may claim a reproduction. `docs/RANSACKED_CVE_REPORT.md` §8 already
+  records what the page does not contain; the catalogue cites it rather than
+  paraphrasing around it.
+* A malformed message a lab core *answers* is not a vulnerability. The tree has
+  been burned by the opposite assumption before (`docs/CONFIRMED-BUGS.md`: a
+  detector that answered CLEAN on every input), so every probe needs a negative
+  control: a well-formed message of the same type that must **not** be reported as
+  a hit, and a recorded `answered | crashed | silent` verdict rather than a
+  "vulnerable" boolean.
+
+**Gate.** A `tools/check-ransacked-catalogue.sh` that asserts: every entry has a
+CVE or a `VULN-` id, a protocol, a class, a reach and a pattern; the totals match
+the report (119 findings / 92 CVEs / 9 without a CVE / 44 overflow+assertion
+split stated correctly); no entry is `probe` unless the tree has a builder for its
+protocol; and every `probe` row has a negative control. Zero handoffs recorded as
+passes, ever — that rule is already enforced by the kit and must stay enforced.
+
 
 ---
 

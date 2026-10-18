@@ -34,11 +34,30 @@ n_placed=0
 n_exempt=0
 n_cli=0
 declare -a unreachable=()
+declare -a n_modifier=()
 
 # Plumbing and modifier verbs. These are not user actions: the launcher, the
 # test runner and the module internals call them. They are allowed to have no
 # button.
+#
+# A modifier is a flag that changes what another verb is allowed to do rather
+# than being a verb of its own -- --earfcn names a carrier for --tx-build, and
+# --i-have-a-lab-and-authorisation is the gate a keyed transmit path consults.
+# The gate is exempt and NOT placed on purpose: a GUI button that arms a
+# transmitter is exactly the control this module refuses to provide, so the
+# flag stays on the command line where the disclaimer has already been shown.
 exempt_re='^--(menu|selftest|status-tsv|info|__index_probe__|yes|quiet|help|version)$'
+
+# A builder's named flags. These are arguments of --tx-build, not verbs: the
+# listing below is deliberately explicit rather than a wildcard, so a new flag
+# still has to be classified by a human who knows whether it is an argument or
+# an action. 33_jamming_detect's constructor takes its twelve facts as flags
+# because twelve positional arguments is an interface nobody can call safely.
+# The list is explicit on purpose. A wildcard here would silently stop requiring
+# a control for a verb, and widening it to a name another module already uses as a
+# verb does exactly that: `device` was added for 35_baseband --device and had to
+# come straight back out, because 52_stk --device is a verb with its own button.
+modifier_re='^--(earfcn|i-have-a-lab-and-authorisation|mode|shape|format|rate|secs|centre|band|peak|on|off|seed|out|gen|key|dir|framing|freq|instrument|power|action|case|base|port)$'
 
 # main1.c with every submenu table stripped out. A verb found in here is wired
 # from C code -- a custom view building its own controls -- rather than named in
@@ -79,6 +98,12 @@ for f in "$ROOT"/modules/*.sh; do
             continue
         fi
 
+        if [[ "$v" =~ $modifier_re ]]; then
+            n_modifier+=("$mod $v")
+            (( listall )) && printf 'MODIFIER %-22s %s\n' "$mod" "$v"
+            continue
+        fi
+
         # A '~' prefix in a group spec marks a verb that needs an argument only
         # the operator knows: it is deliberately kept on the command line.
         if grep -qE -- "~${v}([^a-z0-9-]|\$)" <<< "$spec"; then
@@ -115,8 +140,8 @@ else
     printf '\n'
     if (( fail == 0 )); then
         printf 'every documented verb is placed in a submenu or exempt\n'
-        printf '  %d placed as one-click buttons, %d CLI-only (need an argument), %d exempt plumbing verbs\n' \
-            "$n_placed" "$n_cli" "$n_exempt"
+        printf '  %d placed as one-click buttons, %d CLI-only (need an argument), %d modifiers, %d exempt plumbing verbs\n' \
+            "$n_placed" "$n_cli" "${#n_modifier[@]}" "$n_exempt"
     else
         printf '%d verb(s) are neither placed in a submenu nor exempt\n' "$fail"
     fi

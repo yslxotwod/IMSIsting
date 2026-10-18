@@ -650,9 +650,15 @@ static const ModuleDefinition modules[] = {
     { "53_non3gpp",          "TETRA / DMR / GSM-R",  "RADIO",
       "imsisting-53_non3gpp-symbolic",
       "Non-3GPP land mobile radio: TETRA, DMR and GSM-R structure, ciphers and band classification." },
-    { "33_jamming_detect",   "Jamming Detection",    "RADIO",
+    /* The name carried "Detection" from the revision when detection was the
+       whole module. Phase 9 built the transmit half behind the lab gate, so the
+       name has to say the module does both -- the same rule this file already
+       applies to 35_baseband, 42_li_probe, 44_carrier_api and 31_sim_defense:
+       a name that describes half the module is a name that lies about the
+       other half, and the gate is described in the page, not in the title. */
+    { "33_jamming_detect",   "Jamming Detect & Effect", "RADIO",
       "imsisting-33_jamming_detect-symbolic",
-      "Measures interference and discriminates jamming from congestion or a coverage hole." },
+      "Detection and measurement are the authority: jamming told apart from congestion and a coverage hole. Behind an explicit lab gate it also constructs the waveform." },
 
     /* ACCESS — attach, registration and the access-network edge */
     { "09_lte_attach",       "LTE Attach Forge",     "ACCESS",
@@ -2744,6 +2750,33 @@ create_placeholder_page(AppState *state, const ModuleDefinition *module)
     return box;
 }
 
+/* Point the run target at one view's output buffer.
+ *
+ * This used to happen only inside the row-activated handler, so a module page
+ * opened directly - the first view, by definition, is never activated - left
+ * state->active_output pointing at nothing. A verb run from that page then had
+ * its output captured and dropped: the radio indicator said Error, the Events
+ * drawer recorded the failure, and the output card the operator was looking at
+ * stayed empty. One click on a view row in the left column "fixed" it, which is
+ * how a bug like this survives: it looks like the first run was unlucky.
+ *
+ * Every path that puts a view on screen calls this, so "what is on screen" and
+ * "where output goes" cannot disagree. */
+static void
+module_page_retarget_output(ModulePage *mp, int index)
+{
+    if (mp == NULL || mp->state == NULL) return;
+    if (index < 0 || index >= mp->n_views) return;
+
+    GtkTextBuffer *vb = g_object_get_data(
+        G_OBJECT(mp->views[index].page), "output-buffer");
+    if (vb == NULL) return;
+
+    mp->state->active_output = vb;
+    if (mp->page != NULL)
+        g_object_set_data(G_OBJECT(mp->page), "output-buffer", vb);
+}
+
 static void
 module_page_submenu_row_activated(GtkListBox *list, GtkListBoxRow *row,
                                   gpointer user_data)
@@ -2762,15 +2795,7 @@ module_page_submenu_row_activated(GtkListBox *list, GtkListBoxRow *row,
 
         /* Output goes to the submenu on screen. The page's record is kept in
            step so switching tabs away and back retargets correctly. */
-        if (mp->state != NULL) {
-            GtkTextBuffer *vb = g_object_get_data(
-                G_OBJECT(mp->views[index].page), "output-buffer");
-            if (vb != NULL) {
-                mp->state->active_output = vb;
-                if (mp->page != NULL)
-                    g_object_set_data(G_OBJECT(mp->page), "output-buffer", vb);
-            }
-        }
+        module_page_retarget_output(mp, index);
     }
 }
 
@@ -2829,6 +2854,11 @@ module_page_build_submenu(ModulePage *mp)
     if (mp->n_views > 0) {
         gtk_list_box_select_row(GTK_LIST_BOX(list),
             gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0));
+
+        /* The first view is on screen from the moment the module opens, so it
+           is the output target from that moment too - see the note on
+           module_page_retarget_output. */
+        module_page_retarget_output(mp, 0);
 
         /* Opening a module is arriving at its first view, so that is the
            place worth remembering - unless a recent row asked for another
@@ -3176,9 +3206,20 @@ create_module_page(AppState *state, const ModuleDefinition *module,
                            g_strdup(module->id), g_free);
     g_object_set_data_full(G_OBJECT(outer), "module-page",
                            mp, (GDestroyNotify) module_page_free);
-    /* notebook_page_switched() reads this to aim a run's output at the page
-       on screen. The page owns the buffer through its text views. */
-    g_object_set_data(G_OBJECT(outer), "output-buffer", out);
+
+    /* The console a run writes to is the visible view's, so that is what this
+       page advertises to notebook_page_switched(). It used to advertise a
+       page-wide buffer that no widget displayed: opening a module and pressing
+       a verb on its first view then produced an Error verdict in the Events
+       drawer and an empty output card, because the text went into a buffer
+       nothing was rendering. Clicking a view in the left column appeared to
+       cure it, since that path aimed at the view's own buffer. */
+    mp->page = outer;
+    g_object_set_data(G_OBJECT(outer), "output-buffer",
+                      mp->n_views > 0
+                          ? g_object_get_data(G_OBJECT(mp->views[0].page),
+                                              "output-buffer")
+                          : out);
 
     return outer;
 }
@@ -15687,6 +15728,12 @@ static ModuleSubmenuEntry simd_entries[] = {
     { "Inspection",
       "auth-smartcard-symbolic",
       "--ef-ad:EF AD|--esim-profile-parse:Parse eSIM Profile|--pin-state:PIN State" },
+    /* The attack half. The group is named by what it produces, and no control
+       here is named after a verb. */
+    { "Attack Simulation",
+      "security-high-symbolic",
+      "--adm-apdu=6F07 082982608200002080 --key 1122334455667788:Card Write APDUs"
+      "|--swap-artefacts:Port-out Artefacts|--swap-plan:Port-out Timeline" },
 };
 static void
 mod_arg_clicked(GtkButton *button, gpointer user_data)
@@ -15809,7 +15856,15 @@ jamd_status_summary(const char *module_id)
 
 /* The module's own warning, as the module prints it. jamd_tx_disclaimer writes
    to stderr on every transmit verb, so the same text the command line shows is
-   the text this page shows -- one source, not two. */
+   the text this page shows -- one source, not two.
+
+   The module hard-wraps at the terminal's width because that is where it is
+   usually read. Re-broken here into one paragraph per blank-free run, so the
+   box wraps to the card instead of inheriting a column width from a terminal
+   this page is not. A wrapped line ending in nothing in particular joins the
+   line after it; a line that had been left short on purpose ("that applies
+   where you are: ...") still ends its paragraph, which is why the module's own
+   structure survives the join. */
 static void
 jamd_append_disclaimer(GtkWidget *card_body, const char *module_id)
 {
@@ -15817,21 +15872,26 @@ jamd_append_disclaimer(GtkWidget *card_body, const char *module_id)
     const char *argv[] = { script, "--tx-status", NULL };
     g_autofree char *raw = run_capture_stderr(argv);
     g_auto(GStrv) lines = NULL;
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GString *para = g_string_new(NULL);
     gboolean shown = FALSE;
 
     gtk_widget_add_css_class(box, "jamd-warning");
     lines = g_strsplit(raw != NULL ? raw : "", "\n", -1);
     for (int i = 0; lines[i] != NULL; i++) {
-        const char *line = lines[i];
         const char *tab;
 
-        if (!g_str_has_prefix(line, "WARNING")) continue;
-        tab = strchr(line, '\t');
-        if (tab == NULL) continue;
-        gtk_box_append(GTK_BOX(box), fkit_note(tab + 1));
+        if (!g_str_has_prefix(lines[i], "WARNING")) continue;
+        tab = strchr(lines[i], '\t');
+        if (tab == NULL || tab[1] == '\0') continue;
+        if (para->len > 0) g_string_append_c(para, ' ');
+        g_string_append(para, tab + 1);
+    }
+    if (para->len > 0) {
+        gtk_box_append(GTK_BOX(box), fkit_note(para->str));
         shown = TRUE;
     }
+    g_string_free(para, TRUE);
     if (!shown)
         gtk_box_append(GTK_BOX(box),
             fkit_note("The module did not print its warning. Until it does, "
@@ -15943,6 +16003,35 @@ jamd_build_capture(AppState *state, const char *module_id,
         "and the same antenna. Change either and the shift you are reading is "
         "your own change, not the air's."));
     gtk_box_append(GTK_BOX(body), floor_card);
+
+    /* No capture of your own yet? The module can write one whose verdict is
+       fixed by construction -- a clean band, a floor that lifts halfway
+       through, or a 25 kHz carrier off centre -- and then has to reach that
+       verdict through the same analyser it would run on a real capture. It is
+       a sample-arithmetic file, not a recording, so nothing here is evidence
+       about any band: it is how you find out whether the analyser is reading
+       what it claims to read before you point it at something that matters. */
+    GtkWidget *fx_body;
+    GtkWidget *fx = verb_card("OR WRITE A CAPTURE WHOSE ANSWER IS KNOWN", &fx_body);
+    gtk_box_append(GTK_BOX(fx_body),
+        mod_arg_row(state, module_id, status, "Clean Band",
+            "--fixture", "clean /tmp/imsisting/jamming_detect/capture.iq cf32 20000000 0.5",
+            "A capture of nothing but noise. The analyser must call it clean; "
+            "if it does not, every verdict it gives on a real file is suspect."));
+    gtk_box_append(GTK_BOX(fx_body),
+        mod_arg_row(state, module_id, status, "Floor Lifts Halfway",
+            "--fixture", "raised /tmp/imsisting/jamming_detect/capture.iq cf32 20000000 0.5",
+            "Noise whose floor rises by 9 dB at the halfway point: the shape a "
+            "barrage jammer leaves. Run the Capture view on the file it writes."));
+    gtk_box_append(GTK_BOX(fx_body),
+        mod_arg_row(state, module_id, status, "Narrow Carrier Off Centre",
+            "--fixture", "narrow /tmp/imsisting/jamming_detect/capture.iq cf32 20000000 0.5",
+            "A 25 kHz carrier 200 kHz off centre over half the file: the shape a "
+            "narrowband jammer leaves, and the one congestion does not."));
+    gtk_box_append(GTK_BOX(fx_body), fkit_note(
+        "The kind, then the output path, then format, sample rate and seconds. "
+        "Writing samples keys no radio and needs no lab gate."));
+    gtk_box_append(GTK_BOX(body), fx);
 
     (void) out;
     return outer;
@@ -16228,6 +16317,15 @@ static ModuleSubmenuEntry bbnd_entries[] = {
     { "Fuzz",
       "security-high-symbolic",
       "--mutate:Mutate|--plan:Plan" },
+    /* The offensive half. None of these keys a radio: the first encodes a DIAG
+       frame through 56_baseband_diag, the second writes it to the port you name,
+       and the rest write an artefact and print the handoff. */
+    { "Modem Path",
+      "network-transmit-receive-symbolic",
+      "--diag-frame:DIAG Frame|--diag-send:Write to Modem|--rf-submit:Generator Commands" },
+    { "Over the Air",
+      "imsisting-01_radio-symbolic",
+      "--transmit:Prepare Transmission|--send-payload:Mutate and Prepare" },
 };
 static ModuleSubmenuEntry vowi_entries[] = {
     { "Overview",
@@ -16910,6 +17008,11 @@ static ModuleSubmenuEntry lipr_entries[] = {
     { "Probe",
       "system-search-symbolic",
       "--iface=X1|--report:Report|--plan:Plan" },
+    /* The encoder half: real bytes for the X1/HI1 and HI3 artefacts, and a
+       handoff rather than a send. */
+    { "Encode",
+      "document-save-symbolic",
+      "--provision-target:Provisioning Artefact|--activate:Activation Record|--intercept:Product Envelope" },
 };
 static ModuleSubmenuEntry rans_entries[] = {
     { "Overview",
@@ -16929,14 +17032,28 @@ static ModuleSubmenuEntry capi_entries[] = {
     { "Compare",
       "system-search-symbolic",
       "--diff:Diff|--plan:Plan" },
+    /* Enumeration: the surface plan and the subscriber sequence. Both stop at
+       the artefact -- the page says so. */
+    { "Enumeration",
+      "system-search-symbolic",
+      "--enumerate:Map the Surface|--enumerate-subscribers:Subscriber Sequence" },
 };
 static ModuleSubmenuEntry iot_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
-      "--decode-sib1:Decode SIB1|--nprach:NPRACH|--npss-nss:NPSS/NSS" },
-    { "Tools",
-      "preferences-system-symbolic",
-      "--to-mhz=0" },
+      /* Both decoders are given a worked message rather than no argument.
+         A button that only prints "usage:" teaches nothing, and these two are
+         the ones whose answer is checkable: the MIB vector is the 34-bit
+         broadcast block, and the SIB1-NB vector is a whole SystemInformation-
+         BlockType1-NB. Either can be replaced by pasting bits from a capture
+         on the command line. */
+      "--decode-sib1=c30a8246815d5e6d058606e53b5073a801008008:Decode SIB1"
+      "|--decode-mib=accac00000:Decode MIB"
+      /* The two refusals are buttons on purpose: an operator who asks gets the
+         reason, the clause that would settle it, and what to do instead. A
+         hidden verb would leave the gap to be discovered by accident. */
+      "|#LIMITS|--nprach:NPRACH Not In Tree|--to-mhz=0:NPRFCN Not In Tree"
+      "|#SEQUENCES|--npss-nss=503:PCI 503 Split" },
 };
 static ModuleSubmenuEntry lpp_entries[] = {
     { "Overview",
@@ -16979,7 +17096,14 @@ static ModuleSubmenuEntry ntn_entries[] = {
 static ModuleSubmenuEntry gprs_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
-      "#TABLE|--gea-table:GEA Table|#ATTACK|--gea-downgrade:GEA Downgrade|#PARAMS|--gea=1" },
+      "#TABLE|--gea-table:GEA Table"
+      "|#ATTACK|--gea-downgrade:GEA Downgrade"
+      /* The demonstration carries a worked packet, so the button shows what
+         GEA0 does to data instead of printing a usage line: the input Kc and
+         IV are arbitrary, the plaintext is "Hello", and the answer is that
+         five cleartext octets come back out. */
+      "|--gea-crypt=0 0011223344556677 00000000 48656c6c6f:GEA0 Leaks Plaintext"
+      "|#PARAMS|--gea=1" },
     { "APN",
       "network-server-symbolic",
       "--apn-decode:Decode APN|--apn-encode:Encode APN|--apn-ie:APN IE" },
@@ -16990,7 +17114,7 @@ static ModuleSubmenuEntry gprs_entries[] = {
 static ModuleSubmenuEntry slnk_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
-      "--relay-check:Relay Check|--sci1a:SCI1-A|--its" },
+      "--relay-check:Relay Check|--sci1a:SCI1-A Limits|--its" },
     { "Config",
       "preferences-system-symbolic",
       "#PARAMS|--l2id=000001|--pfi=1|#TABLES|--subchannels:Subchannels|--freq-bits:Frequency Bits" },
@@ -17015,7 +17139,9 @@ static ModuleSubmenuEntry n3g_entries[] = {
       "--classify:Classify|--detect-note:Detect Note" },
     { "Radio",
       "network-wireless-symbolic",
-      "#TETRA|--tetra:TETRA|#DMR|--dmr:DMR|#RAIL|--gsmr:GSM-R|#LEGACY|--tdma:TDMA|--tea:TEA" },
+      "#TETRA|--tetra:TETRA|--frame-math=255 2 4 36000:Derive TETRA Frame"
+      "|#DMR|--dmr:DMR|--frame-math=132 2 2 9600 2.5:Derive DMR Frame"
+      "|#RAIL|--gsmr:GSM-R|#LEGACY|--tdma:TDMA|--tea:TEA" },
     { "Planning",
       "preferences-system-symbolic",
       "--plan:Plan" },
