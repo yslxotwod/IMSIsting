@@ -46,6 +46,15 @@ radio -d`` and pipes it in.  The selftest runs the parsers over embedded
 fixtures that include the traps -- a timestamp that looks like octets, an odd
 digit count, a blob whose label lies -- so the refusals are tested as hard as
 the acceptances.
+
+``--decode`` closes the loop: each proven PDU is handed to the verb the file
+would otherwise only name, and the decoder's rows come back under that line
+number.  The point is that the reader never decodes anything itself.  A
+``+CRSM`` APDU goes to ``16_sim --parse-apdu``, EPS NAS to ``32_nas_signaling
+--decode-nas``, and a protected PDU is not handed anywhere, because there is
+nothing to hand over.  Only a command beginning ``modules/<id>.sh`` is ever
+executed, and a decoder that exits non-zero is reported as ``failed`` with its
+stderr rather than folded into a success.
 """
 
 from __future__ import annotations
@@ -54,6 +63,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 
 # ── the shapes a radio log line can take ────────────────────────────────────
@@ -208,6 +218,72 @@ def candidate_commands(layer: str, hexstr: str) -> list[str]:
     if layer == "apdu":
         return ["modules/16_sim.sh --parse-apdu %s" % hexstr]
     return []
+
+
+def decode_plan(parsed: dict) -> list[dict]:
+    """The PDUs worth handing to a decoder, in log order.
+
+    Only the first candidate per record is planned: the second exists so an
+    operator can compare decoders by hand, not so both run on every line.  A
+    protected PDU has no candidate at all -- naming a decoder for octets it
+    cannot read would be the same lie the protected branch exists to avoid.
+    """
+    plan = []
+    for rec in parsed["records"]:
+        pdu = rec.get("pdu") or {}
+        nexts = pdu.get("next") or []
+        if not nexts or not rec.get("hex"):
+            continue
+        argv = nexts[0].split()
+        if not argv:
+            continue
+        plan.append({"line": rec["line"], "layer": pdu.get("layer", "?"),
+                     "hex": rec["hex"], "argv": argv, "command": nexts[0]})
+    return plan
+
+
+def _module_of(argv: list) -> str:
+    """The module a planned command names, or "" when it names anything else.
+
+    Every candidate this file emits starts with ``modules/<id>.sh``.  Checking
+    that again here means a future candidate string cannot turn ``--decode``
+    into a way to execute arbitrary commands out of a log file.
+    """
+    if len(argv) >= 3 and argv[0].startswith("modules/") and argv[0].endswith(".sh"):
+        return argv[0]
+    return ""
+
+
+def run_plan(parsed: dict, root: str, timeout: int = 40) -> list:
+    """Run each planned verb and keep its rows.  A decoder that fails is data."""
+    results = []
+    for item in decode_plan(parsed):
+        module = _module_of(item["argv"])
+        path = os.path.join(root, module) if module else ""
+        out = {"line": item["line"], "layer": item["layer"],
+               "command": item["command"], "status": "not-run", "rows": {}}
+        if not module or not os.path.isfile(path):
+            out["status"] = "no-decoder"
+            results.append(out)
+            continue
+        try:
+            proc = subprocess.run(item["argv"], cwd=root, capture_output=True,
+                                  text=True, timeout=timeout)
+            out["rc"] = proc.returncode
+            out["status"] = "decoded" if proc.returncode == 0 else "failed"
+            for row in proc.stdout.splitlines():
+                if "\t" in row:
+                    key, _, value = row.partition("\t")
+                    out["rows"][key.strip()] = value.strip()
+            if proc.returncode != 0 and not out["rows"]:
+                out["stderr"] = (proc.stderr or "").strip().splitlines()[:2]
+        except subprocess.TimeoutExpired:
+            out["status"] = "timeout"
+        except OSError as exc:
+            out["status"] = "error"
+            out["stderr"] = [str(exc)]
+        results.append(out)
+    return results
 
 
 def unproven_hint(octets: bytes, hexstr: str) -> dict:
@@ -387,6 +463,31 @@ def selftest() -> int:
     _check("counts-partition", parsed["lines"], sum(
         1 for l in FIXTURE.splitlines() if l.strip()), results)
 
+    # The decode step plans only what a decoder can read: the APDU and the two
+    # cleartext NAS PDUs.  The protected one has no candidate, so it cannot be
+    # planned -- naming a decoder for it would be the lie the branch avoids.
+    plan = decode_plan(parsed)
+    _check("decode-plan-count", len(plan), 3, results)
+    _check("decode-plan-layers", [p["layer"] for p in plan], ["apdu", "nas-eps", "nas-5gs"], results)
+    _check("decode-plan-skips-protected", all(p["line"] != 6 for p in plan), True, results)
+    _check("decode-plan-carries-hex", plan[1]["hex"].lower(), "07410bf110", results)
+    # A planned command that does not start with modules/<id>.sh is refused.
+    _check("decode-refuses-foreign-command",
+           _module_of(["sh", "-c", "echo pwned"]), "", results)
+    _check("decode-accepts-module-command",
+           _module_of(["modules/32_nas_signaling.sh", "--decode-nas", "eps", "0741"]),
+           "modules/32_nas_signaling.sh", results)
+    # A tree with no modules directory yields no-decoder rows rather than a crash.
+    _check("decode-missing-module-is-data",
+           [d["status"] for d in run_plan({"records": [{"line": 1, "hex": "07", "pdu": {
+               "layer": "nas-eps", "next": ["modules/32_nas_signaling.sh --decode-nas eps 07"]}}]},
+               "/nonexistent-tree")], ["no-decoder"], results)
+    # Against this tree the planned verbs really run and return rows.
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ran = [d for d in run_plan(parsed, here) if d["status"] == "decoded"]
+    _check("decode-runs-real-verbs", len(ran) >= 2, True, results)
+    _check("decode-returns-fields", bool(ran and ran[0]["rows"]), True, results)
+
     failed = len([1 for _, ok, _, _ in results if not ok])
     print("\n%d assertions, %d failed" % (len(results), failed))
     return 1 if failed else 0
@@ -402,7 +503,7 @@ def cmd_shapes(_args) -> int:
     return 0
 
 
-def _rows(parsed: dict, source: str, with_commands: bool) -> int:
+def _rows(parsed: dict, source: str, with_commands: bool, decoded: list = ()) -> int:
     """The whole report as key<TAB>value rows, for the agent that wraps this."""
     def row(key, value):
         print("%s\t%s" % (key, value))
@@ -441,6 +542,16 @@ def _rows(parsed: dict, source: str, with_commands: bool) -> int:
         if with_commands:
             for i, cmd in enumerate(pdu.get("next") or [], 1):
                 row(prefix + "next.%d" % i, cmd)
+    for i, dec in enumerate(decoded, 1):
+        prefix = "decoded.%02d." % i
+        row(prefix + "line", dec["line"])
+        row(prefix + "layer", dec["layer"])
+        row(prefix + "status", dec["status"])
+        row(prefix + "command", dec["command"])
+        for key in sorted(dec["rows"]):
+            row(prefix + "field." + key, dec["rows"][key])
+        for line in dec.get("stderr") or []:
+            row(prefix + "stderr", line)
     return 0
 
 
@@ -456,8 +567,18 @@ def cmd_parse(args) -> int:
             text = fh.read()
         source = args.path
     parsed = parse_text(text)
+    decoded = []
+    if args.decode:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        decoded = run_plan(parsed, root, timeout=args.timeout)
+        if not args.rows and not args.json:
+            for dec in decoded:
+                print("decoded line %-5d %-8s %-6s %s"
+                      % (dec["line"], dec["layer"], dec["status"], dec["command"]))
+                for key in sorted(dec["rows"]):
+                    print("             %-24s %s" % (key, dec["rows"][key]))
     if args.rows:
-        return _rows(parsed, source, args.commands)
+        return _rows(parsed, source, args.commands, decoded)
     for rec in parsed["records"]:
         if args.only and (rec.get("pdu") or {}).get("layer") != args.only:
             continue
@@ -498,6 +619,10 @@ def main(argv: list) -> int:
     p_parse.add_argument("--commands", action="store_true", help="name the verb that would decode each PDU")
     p_parse.add_argument("--rows", action="store_true",
                          help="key<TAB>value rows, the shape ue_agent.sh speaks")
+    p_parse.add_argument("--decode", action="store_true",
+                         help="hand each proven PDU to the decoder verb it names")
+    p_parse.add_argument("--timeout", type=int, default=40,
+                         help="seconds per decoder invocation")
     p_parse.set_defaults(func=cmd_parse)
     sub.add_parser("shapes", help="every line shape this file knows").set_defaults(func=cmd_shapes)
     sub.add_parser("selftest", help="run the parsers over embedded fixtures").set_defaults(func=lambda a: selftest())

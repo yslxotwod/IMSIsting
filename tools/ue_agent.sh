@@ -253,12 +253,13 @@ ue_cmd_cells() {
 # handset.  This verb is the fetch and the row shape; nothing here guesses at
 # the octets.
 ue_cmd_radio_log() {
-    local file="" lines=400 commands=0
+    local file="" lines=400 commands=0 decode=0
     while (( $# )); do
         case "$1" in
             --file)     file="${2:-}"; shift 2 ;;
             --lines)    lines="${2:-400}"; shift 2 ;;
             --commands) commands=1; shift ;;
+            --decode)   decode=1; shift ;;
             *)          shift ;;
         esac
     done
@@ -266,6 +267,7 @@ ue_cmd_radio_log() {
     [[ -f "$parser" ]] || { printf 'ERROR\tno %s\n' "$parser" >&2; return 1; }
     local args=() log="" source="file"
     (( commands )) && args+=(--commands)
+    (( decode )) && args+=(--decode)
     if [[ -n "$file" ]]; then
         [[ -f "$file" ]] || { ue_emit status no-such-file; ue_emit path "$file"; return 2; }
         log="$file"
@@ -446,6 +448,11 @@ EOF
     ue_check radio-log-adb-pdus   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="pdus"{print $2}')"   "2"
     ue_check radio-log-missing-rc "$(bash "${BASH_SOURCE[0]}" --radio-log --file "$stub_dir/nope.log" >/dev/null 2>&1; echo $?)" "2"
     ue_check radio-log-nohandset-rc "$(UE_ADB=definitely-not-adb bash "${BASH_SOURCE[0]}" --radio-log >/dev/null 2>&1; echo $?)" "3"
+    # The decode step runs the verbs it names: the NAS line comes back with a
+    # message name from 32_nas_signaling, not with this file's own guess.
+    out=$(bash "${BASH_SOURCE[0]}" --radio-log --file "$log_file" --decode 2>/dev/null)
+    ue_check radio-log-decoded-count "$(printf '%s\n' "$out" | awk -F'\t' '$1~/^decoded\.[0-9]+\.status$/{n++} END{print n+0}')" "2"
+    ue_check radio-log-decoded-nas "$(printf '%s\n' "$out" | awk -F'\t' '$1~/^decoded\.[0-9]+\.field\.message_name$/{print $2}')" "Attach request"
 
     # 5. Argument handling and the disarmed-by-default surface: no verb here
     #    writes to the handset, and collect without a path is a usage error.
@@ -487,7 +494,7 @@ Usage: $0 COMMAND
   --identity    model, build, IMEI, IMSI, SIM -- each with its source
   --radio       SIM state, operator, network type, signal
   --cells       the serving cell as the handset sees it
-  --radio-log [--file PATH] [--lines N] [--commands]
+  --radio-log [--file PATH] [--lines N] [--commands] [--decode]
                 the modems own radio buffer, sorted into PDUs and text
                 (no handset? give it a saved log with --file)
   --collect <device-path> [local-dir]
