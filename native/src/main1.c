@@ -21479,19 +21479,219 @@ static ModuleSubmenuEntry tgeo_entries[] = {
     { "Timing Advance", "dialog-information-symbolic", NULL, tgeo_build_ta },
     { "Position", "system-search-symbolic", NULL, tgeo_build_place },
 };
+/* 40_sba_pivot — the service-based interface of a 5G core.
+ *
+ * A 5G core is a set of HTTP/2 services that trust each other's tokens. The page
+ * reads the wire encoding, then reads the tokens, then shows where one service's
+ * token is not the next service's authority.
+ */
+static GtkWidget *
+sbap_build_wire(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("WIRE",
+        "HTTP/2 frames and HPACK, which is what every SBI request is underneath "
+        "its JSON.", &body);
+    GtkWidget *frame_body, *settings_body, *hpack_body, *types_body;
+    GtkWidget *frame = verb_card("FRAME HEADER", &frame_body);
+    GtkWidget *settings = verb_card("SETTINGS", &settings_body);
+    GtkWidget *hpack = verb_card("HPACK", &hpack_body);
+    GtkWidget *types = verb_card("FRAME TYPES", &types_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(frame_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a Header",
+                "--h2-parse", "000000040100000001",
+                "Nine octets: the length, the type, the flags and the stream id. "
+                "A frame that announces more than it carries is how a stream "
+                "desynchronises."));
+        gtk_box_append(GTK_BOX(frame_body), res);
+        gtk_box_append(GTK_BOX(frame_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Frame",
+                "--h2-build", "4 1 0 000300000064",
+                "A frame type, its flags, its stream id and a payload. Building "
+                "one is how a sequence that no client would send gets written."));
+        gtk_box_append(GTK_BOX(frame_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Settings",
+                "--settings", "000300000064",
+                "A SETTINGS payload. A peer that raises MAX_CONCURRENT_STREAMS "
+                "is inviting the request count that Rapid Reset depends on."));
+    }
+    gtk_box_append(GTK_BOX(body), frame);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(hpack_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode a Block",
+                "--hpack", "82 84",
+                "An HPACK block as hex. Static and dynamic table references are "
+                "resolved, so the header names come out rather than the indices."));
+        gtk_box_append(GTK_BOX(hpack_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), hpack);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(types_body),
+            mod_arg_row(state, module_id, status, "List the Types",
+                "--h2-types", "",
+                "The eleven frame types of RFC 9113 with what each one can do to "
+                "a stream."));
+        gtk_box_append(GTK_BOX(types_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), types);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+sbap_build_tokens(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("TOKENS",
+        "The bearer token a service trusts, read for the three properties that "
+        "decide whether it can be replayed elsewhere.", &body);
+    GtkWidget *jwt_body, *audit_body, *pivot_body, *scope_body;
+    GtkWidget *jwt = verb_card("READ A TOKEN", &jwt_body);
+    GtkWidget *audit = verb_card("AUDIT", &audit_body);
+    GtkWidget *pivot = verb_card("PIVOT", &pivot_body);
+    GtkWidget *scope = verb_card("SCOPE", &scope_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(jwt_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode",
+                "--jwt", "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.",
+                "A token. The header, the claims and whether the algorithm is "
+                "none - the one case where a token is a claim rather than a "
+                "proof."));
+        gtk_box_append(GTK_BOX(jwt_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), jwt);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(audit_body),
+            mod_arg_row_prefilled(state, module_id, status, "Audit the Claims",
+                "--jwt-audit", "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0. 5G",
+                "A token and the audience it should carry. The findings are the "
+                "claims a service will check and the ones it will not."));
+        gtk_box_append(GTK_BOX(audit_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), audit);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pivot_body),
+            mod_arg_row_prefilled(state, module_id, status, "Replay Elsewhere",
+                "--token-pivot", "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0. AMF",
+                "A token and a target function. The answer says whether that "
+                "service would accept it, which is a question about scopes and "
+                "audience rather than about cryptography."));
+        gtk_box_append(GTK_BOX(pivot_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pivot);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(scope_body),
+            mod_arg_row_prefilled(state, module_id, status, "Check a Scope",
+                "--scope", "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0. namf-comm",
+                "A token and the scope a call needs. A service that reads only "
+                "the prefix of a scope accepts far more than its author intended."));
+        gtk_box_append(GTK_BOX(scope_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), scope);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+sbap_build_core(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CORE",
+        "Discovery, the service paths it returns, and the request flood that needs "
+        "nothing but one stream.", &body);
+    GtkWidget *nrf_body, *paths_body, *reset_body, *plan_body;
+    GtkWidget *nrf = verb_card("DISCOVERY", &nrf_body);
+    GtkWidget *paths = verb_card("SERVICE PATHS", &paths_body);
+    GtkWidget *reset = verb_card("RAPID RESET", &reset_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(nrf_body),
+            mod_arg_row_prefilled(state, module_id, status, "Ask the Registry",
+                "--nrf", "AMF",
+                "A function to find, then optionally who is asking. The answer is "
+                "the discovery request a real NF sends, field by field."));
+        gtk_box_append(GTK_BOX(nrf_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), nrf);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(paths_body),
+            mod_arg_row(state, module_id, status, "List the Paths",
+                "--nf-paths", "",
+                "The service paths each function publishes, which is the map a "
+                "pivot is planned on."));
+        gtk_box_append(GTK_BOX(paths_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), paths);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(reset_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Sequence",
+                "--rapid-reset", "3",
+                "How many streams to describe. The sequence is CVE-2023-44487 "
+                "written as frames: a HEADERS and an immediate RST_STREAM, which "
+                "costs the peer far more than it costs the sender."));
+        gtk_box_append(GTK_BOX(reset_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), reset);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What an SBI lab needs: a core you own, a TLS terminator, and the "
+                "recordings that make a token replay provable."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry sbap_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--nf-paths:NF Paths|--nrf|--token-pivot:Token Pivot" },
-    { "HTTP/2",
-      "network-transmit-receive-symbolic",
-      "--h2-parse:Parse HTTP/2|--h2-build:Build HTTP/2|--h2-types:HTTP/2 Types|--hpack:HPACK Decode|--sbi-send:Send to NF" },
-    { "JWT",
-      "channel-secure-symbolic",
-      "--jwt|--jwt-audit:JWT Audit" },
-    { "Attacks",
-      "security-high-symbolic",
-      "#ATTACK|--rapid-reset:Rapid Reset|~--scope|#OPTIONS|--settings:Settings|--plan:Plan" },
+    { "Wire", "dialog-information-symbolic", NULL, sbap_build_wire },
+    { "Tokens", "channel-secure-symbolic", NULL, sbap_build_tokens },
+    { "Core", "network-wireless-symbolic", NULL, sbap_build_core },
 };
 static ModuleSubmenuEntry otasm_entries[] = {
     { "Overview",
