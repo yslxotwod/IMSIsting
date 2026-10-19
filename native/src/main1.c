@@ -18730,16 +18730,171 @@ static ModuleSubmenuEntry rff_entries[] = {
       "system-search-symbolic",
       "#ADD|--sig-add:Add Signature|#SIGS|--sigs-tsv:Signatures TSV|#MANAGE|--clear-sigs:Clear Signatures" },
 };
+/* 29_mac_layer — what the scheduler gives away without a key.
+ *
+ * A MAC PDU is in the clear. Who is scheduled, how often and how many resource
+ * blocks they were given are all readable, which is what turns a bearer into a
+ * profile of the application running on it.
+ */
+static GtkWidget *
+macl_build_pdu(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MAC PDU",
+        "The subheader chain: which logical channel, how long, and where each "
+        "boundary falls.", &body);
+    GtkWidget *dec_body, *dci_body;
+    GtkWidget *dec = verb_card("READ A PDU", &dec_body);
+    GtkWidget *dci = verb_card("DCI", &dci_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dec_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode",
+                "--decode-mac", "1F11880600000000",
+                "A MAC PDU as hex, then optionally the direction. The answer is "
+                "every subheader with its LCID, its length and the byte range of "
+                "the SDU it points at."));
+        gtk_box_append(GTK_BOX(dec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dci_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a DCI",
+                "--dci", "2000",
+                "A DCI bit string as hex. Allocations are announced before they "
+                "happen, so the DCI is the earliest readable statement of what a "
+                "cell is about to do."));
+        gtk_box_append(GTK_BOX(dci_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dci);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+macl_build_schedule(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SCHEDULING",
+        "The cadence a cell grants in: intervals, allocation size and the "
+        "application that shape implies.", &body);
+    GtkWidget *track_body, *pattern_body, *list_body;
+    GtkWidget *track = verb_card("TRACK AN RNTI", &track_body);
+    GtkWidget *pattern = verb_card("READ A CAPTURE", &pattern_body);
+    GtkWidget *list = verb_card("A GRANT LIST", &list_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(track_body),
+            mod_arg_row(state, module_id, status, "Track",
+                "--rnti-track", "capture.pcap",
+                "A capture. Every RNTI and LCID seen is reported with the frames "
+                "it appeared in, which is how a device is followed across a "
+                "capture without decrypting anything."));
+        gtk_box_append(GTK_BOX(track_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), track);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pattern_body),
+            mod_arg_row(state, module_id, status, "Read the Cadence",
+                "--sched-pattern", "capture.pcap",
+                "The grant cadence from the MAC PDUs in a capture: period, "
+                "allocation size and how regular the pattern is."));
+        gtk_box_append(GTK_BOX(pattern_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pattern);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(list_body),
+            mod_arg_row_prefilled(state, module_id, status, "Analyse a List",
+                "--sched-parse", "0:4E21:9:6 0.008:4E21:9:6 0.016:4E21:9:6",
+                "A grant list, one entry per grant. The answer names the "
+                "application the cadence fits, which is a statement about the "
+                "shape and not about the content."));
+        gtk_box_append(GTK_BOX(list_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), list);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+macl_build_reference(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("REFERENCE",
+        "The two tables the decoder is built on, and the structural gap that makes "
+        "a rewritten bearer invisible to the user plane.", &body);
+    GtkWidget *lcid_body, *rnti_body, *gap_body;
+    GtkWidget *lcid = verb_card("LCID", &lcid_body);
+    GtkWidget *rnti = verb_card("RNTI", &rnti_body);
+    GtkWidget *gap = verb_card("INTEGRITY GAP", &gap_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(lcid_body),
+            mod_arg_row(state, module_id, status, "Read the Table",
+                "--lcid-table", "",
+                "Every LCID with its channel and its clause. The reserved range "
+                "is where a decoder and a baseband can disagree about what a byte "
+                "means."));
+        gtk_box_append(GTK_BOX(lcid_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), lcid);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(rnti_body),
+            mod_arg_row(state, module_id, status, "Read the Space",
+                "--rnti-table", "",
+                "The RNTI space and its reserved values, which is how a reader "
+                "tells a real allocation from a control value."));
+        gtk_box_append(GTK_BOX(rnti_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), rnti);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(gap_body),
+            mod_arg_row(state, module_id, status, "Read the Gap",
+                "--integrity-gap", "",
+                "User plane has no integrity protection and the control plane "
+                "does. That asymmetry is the precondition for every user-plane "
+                "rewrite in this tree, and it is a protocol property, not a bug."));
+        gtk_box_append(GTK_BOX(gap_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), gap);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry macl_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--decode-mac:Decode MAC|--rnti-track:Track RNTI|--sched-parse:Parse Scheduling" },
-    { "Tables",
-      "preferences-system-symbolic",
-      "--lcid-table:LCID Table|--rnti-table:RNTI Table" },
-    { "Analysis",
-      "system-search-symbolic",
-      "~--dci|--sched-pattern:Scheduling Pattern|--integrity-gap:Integrity Gap" },
+    { "MAC PDU", "dialog-information-symbolic", NULL, macl_build_pdu },
+    { "Scheduling", "system-search-symbolic", NULL, macl_build_schedule },
+    { "Reference", "preferences-system-symbolic", NULL, macl_build_reference },
 };
 /* 32_nas_signaling — the pre-authentication NAS surface.
  *
