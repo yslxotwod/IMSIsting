@@ -21103,16 +21103,126 @@ static ModuleSubmenuEntry femt_entries[] = {
     { "Backhaul", "network-wired-symbolic", NULL, scell_build_backhaul },
     { "Live Subscribers", "view-list-symbolic", NULL, scell_build_live },
 };
+/* 38_ussd — the 90-character channel into the network.
+ *
+ * USSD is a text protocol a network parses, so the page is about what a string
+ * becomes on the wire and what a network does with the strings that arrive
+ * unasked.
+ */
+static GtkWidget *
+ussd_build_strings(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("STRINGS",
+        "A USSD string as it is typed, as it is packed, and as the network reads "
+        "the code at its front.", &body);
+    GtkWidget *build_body, *pack_body, *mmi_body, *codes_body;
+    GtkWidget *build = verb_card("BUILD", &build_body);
+    GtkWidget *pack = verb_card("PACK AND UNPACK", &pack_body);
+    GtkWidget *mmi = verb_card("MMI", &mmi_body);
+    GtkWidget *codes = verb_card("SERVICE CODES", &codes_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Message",
+                "--build", "*100#",
+                "A USSD string. The answer is the message the network receives: "
+                "the 7-bit packed body, its length and its DCS."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pack_body),
+            mod_arg_choices(state, module_id, status, "GSM 7-bit", "",
+                "The packing in both directions, because an off-by-one in the "
+                "septet boundary is the classic way a USSD string gets mangled.",
+                (const char *[]) { "--pack *100#", "--unpack 2A1998" },
+                (const char *[]) { "Pack", "Unpack" }, 2));
+        gtk_box_append(GTK_BOX(pack_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pack);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(mmi_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read an MMI",
+                "--mmi", "**21*1234#",
+                "A man-machine interface string. The answer names the operation "
+                "it performs, so a string that forwards calls cannot be mistaken "
+                "for one that queries a balance."));
+        gtk_box_append(GTK_BOX(mmi_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), mmi);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(codes_body),
+            mod_arg_row(state, module_id, status, "List the Codes",
+                "--ss-codes", "",
+                "The supplementary service codes with what each one does when it "
+                "arrives as a string rather than from a menu."));
+        gtk_box_append(GTK_BOX(codes_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), codes);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ussd_build_attacks(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("UNSOLICITED",
+        "The strings that arrive without being asked for, and what a handset does "
+        "with one.", &body);
+    GtkWidget *detect_body, *plan_body;
+    GtkWidget *detect = verb_card("DETECT", &detect_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(detect_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a Log",
+                "--detect", "ussd.log",
+                "A log of USSD exchanges. The findings are the strings a handset "
+                "should not have received: an MMI operation pushed rather than "
+                "typed is the shape of a USSD attack."));
+        gtk_box_append(GTK_BOX(detect_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), detect);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What a USSD lab needs, and what to record so a pushed operation "
+                "can be shown to have arrived from the network."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry ussd_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--detect:Detect|--mmi=*#21#|--ss-codes:SS Codes" },
-    { "Codec",
-      "document-open-symbolic",
-      "--pack:Pack|--unpack:Unpack|--build:Build" },
-    { "Planning",
-      "preferences-system-symbolic",
-      "--plan:Plan" },
+    { "Strings", "dialog-information-symbolic", NULL, ussd_build_strings },
+    { "Unsolicited", "security-high-symbolic", NULL, ussd_build_attacks },
 };
 static ModuleSubmenuEntry tgeo_entries[] = {
     { "Overview",
