@@ -19237,21 +19237,230 @@ static ModuleSubmenuEntry jamd_entries[] = {
     { "The Gate", "security-high-symbolic", NULL, jamd_build_gate },
 };
 
+/* 34_slicing — network slicing.
+ *
+ * A slice is three numbers and a set of policies about what may cross between
+ * slices. The page keeps the numbers from the policies: what a slice identifier
+ * is, what a flow inside it may ask for, and what the network lets escape.
+ */
+static GtkWidget *
+slic_build_identity(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SLICE IDENTITY",
+        "S-NSSAI as the standard writes it: the slice type, the discriminator "
+        "that makes two slices of one type distinct, and the containers that "
+        "carry them.", &body);
+    GtkWidget *codec_body, *table_body, *nssai_body;
+    GtkWidget *codec = verb_card("ENCODE AND DECODE", &codec_body);
+    GtkWidget *table = verb_card("SLICE TYPES", &table_body);
+    GtkWidget *nssai = verb_card("CONTAINERS", &nssai_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(codec_body),
+            mod_arg_choices(state, module_id, status, "Identifier", "",
+                "A slice type and an optional discriminator, or the hex the two "
+                "pack into.",
+                (const char *[]) { "--encode-s-nssai 1 000001",
+                                   "--decode-s-nssai 01000001" },
+                (const char *[]) { "Encode", "Decode" }, 2));
+        gtk_box_append(GTK_BOX(codec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), codec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(table_body),
+            mod_arg_row(state, module_id, status, "List the Types",
+                "--sst-table", "",
+                "The standardised slice types with the clause each comes from. "
+                "An unassigned value is reported as unassigned rather than "
+                "guessed at."));
+        gtk_box_append(GTK_BOX(table_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), table);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(nssai_body),
+            mod_arg_row_prefilled(state, module_id, status, "Parse a Container",
+                "--nssai-parse", "000101000001",
+                "An NSSAI as hex: the length byte, then one entry per slice. The "
+                "answer names each slice and where the container ends."));
+        gtk_box_append(GTK_BOX(nssai_body), res);
+        gtk_box_append(GTK_BOX(nssai_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read NAS",
+                "--nas5gs", "7E004D01",
+                "A 5GS message as hex, to see the slice request inside the "
+                "signalling that carries it."));
+    }
+    gtk_box_append(GTK_BOX(body), nssai);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+slic_build_qos(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("QOS",
+        "What a flow inside a slice may ask for, and which of those asks the "
+        "standard allows.", &body);
+    GtkWidget *qi_body, *qi_table_body, *tsn_body, *check_body;
+    GtkWidget *qi = verb_card("5QI", &qi_body);
+    GtkWidget *qi_table = verb_card("5QI TABLE", &qi_table_body);
+    GtkWidget *tsn = verb_card("TSC ASSISTANCE", &tsn_body);
+    GtkWidget *check = verb_card("CHECK A SLICE", &check_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(qi_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Class",
+                "--five-qi", "9",
+                "A 5QI value. The answer is its resource type, its priority and "
+                "its packet delay budget - the three things a scheduler acts on."));
+        gtk_box_append(GTK_BOX(qi_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), qi);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(qi_table_body),
+            mod_arg_row(state, module_id, status, "List the Classes",
+                "--five-qi-table", "",
+                "Every standardised 5QI with its resource type and budgets. The "
+                "table keeps not-applicable distinct from unknown, because they "
+                "are different answers."));
+        gtk_box_append(GTK_BOX(qi_table_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), qi_table);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tsn_body),
+            mod_arg_row(state, module_id, status, "Build TSC Assistance",
+                "--tsn-config", "",
+                "The time-sensitive assistance information a slice can carry, "
+                "with the refusals the standard requires: no bitrate on a "
+                "non-GBR flow, and no guaranteed rate above the maximum."));
+        gtk_box_append(GTK_BOX(tsn_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tsn);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(check_body),
+            mod_arg_row(state, module_id, status, "Check the Slice",
+                "--slice-qos-check", "slice.tsv",
+                "A slice description as TSV. Each finding names the rule it "
+                "breaks; a description that breaks none is reported as clean."));
+        gtk_box_append(GTK_BOX(check_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), check);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+slic_build_boundary(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("BOUNDARY",
+        "What may cross between slices, and what a capture would have to show for "
+        "the crossing to be established.", &body);
+    GtkWidget *sel_body, *iso_body, *detect_body, *surface_body, *plan_body;
+    GtkWidget *sel = verb_card("SELECTION", &sel_body);
+    GtkWidget *iso = verb_card("ISOLATION", &iso_body);
+    GtkWidget *detect = verb_card("ANOMALY", &detect_body);
+    GtkWidget *surface = verb_card("SURFACE", &surface_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sel_body),
+            mod_arg_row_prefilled(state, module_id, status, "Walk the Selection",
+                "--selection", "01 0101",
+                "The requested slice, then optionally the allowed and rejected "
+                "lists. The answer includes the case that matters: a slice "
+                "granted that was never asked for."));
+        gtk_box_append(GTK_BOX(sel_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sel);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(iso_body),
+            mod_arg_row(state, module_id, status, "Test Isolation",
+                "--isolation-check", "capture.pcap",
+                "A capture and optionally a slice map. It reports the evidence it "
+                "found and never claims isolation it cannot establish - a clean "
+                "capture is not a clean network."));
+        gtk_box_append(GTK_BOX(iso_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), iso);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(detect_body),
+            mod_arg_row(state, module_id, status, "Read Events",
+                "--detect", "slice-events.tsv",
+                "Session-level events as TSV. The rules are about a sequence, so "
+                "a single row is never the finding."));
+        gtk_box_append(GTK_BOX(detect_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), detect);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(surface_body),
+            mod_arg_row(state, module_id, status, "Read the Surface",
+                "--surface", "",
+                "Where a slice boundary is enforced, and which of those points is "
+                "configuration rather than code."));
+        gtk_box_append(GTK_BOX(surface_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), surface);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What a slicing lab needs: two slices, one UE, and the recording "
+                "that makes a crossing arguable."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry slic_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--nssai-parse:Parse NSSAI|--detect:Detect|--surface:Surface" },
-    { "Encode / Decode",
-      "document-open-symbolic",
-      "#CODEC|--decode-s-nssai:Decode S-NSSAI|--encode-s-nssai:Encode S-NSSAI|#TABLE|--sst-table:SST Table|#NAS|--nas5gs:NAS 5GS" },
-    { "Policy",
-      "preferences-system-symbolic",
-      "--isolation-check:Isolation Check|--selection:Selection|--plan:Plan" },
-    /* QoS: the standardised 5QI table, the TSN parameters that ride in it, and
-       the per-slice consistency check. */
-    { "QoS",
-      "preferences-system-symbolic",
-      "--five-qi=1:5QI 1|--five-qi-table:5QI Table|~--tsn-config:TSN-QoS Config|~--slice-qos-check:Slice QoS Check" },
+    { "Slice Identity", "dialog-information-symbolic", NULL, slic_build_identity },
+    { "QoS", "preferences-system-symbolic", NULL, slic_build_qos },
+    { "Boundary", "network-transmit-receive-symbolic", NULL, slic_build_boundary },
 };
 /* 35_baseband — Baseband Fuzzing.
  *
