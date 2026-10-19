@@ -16775,8 +16775,8 @@ lair_build_messages(AppState *state, const char *module_id,
                 "whether a cell broadcasts them is a separate question the "
                 "scheduling card answers.",
                 (const char *[]) { "--build-sib10 --message-id 4352 --serial 0 --warning-type 0001",
-                                   "--build-sib11 --message-id 4660 --serial 22136 --segment DEADBEEF",
-                                   "--build-sib12 --message-id 4660 --segment FF0001 --warning-area 0102" },
+                                   "--build-sib11 --message-id 4660 --serial 22136 --segment-type notLastSegment --segment-number 0 --segment DEADBEEF",
+                                   "--build-sib12 --message-id 4660 --serial 22136 --segment-type notLastSegment --segment-number 0 --segment FF0001 --warning-area 0102" },
                 (const char *[]) { "SIB10", "SIB11", "SIB12" }, 3));
         gtk_box_append(GTK_BOX(pws_body), res);
         gtk_box_append(GTK_BOX(pws_body), fkit_note(
