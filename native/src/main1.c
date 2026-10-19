@@ -2781,6 +2781,7 @@ table_body(GtkWidget *list, GtkWidget *grid, GStrv fields, int cols)
 {
     AppState *state = g_object_get_data(G_OBJECT(list), "state");
     int row = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(grid), "rows"));
+    if (row == 0) row = 1;   /* row zero is already placed, heading or data */
     int col;
 
     for (col = 0; col < cols; col++)
@@ -2952,23 +2953,53 @@ console_row_append(GtkWidget *list, const char *text)
                                                      "answer-cols"));
 
         if (n >= 3) {
-            if (grid == NULL) {
-                gtk_box_append(GTK_BOX(list), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
-                grid = gtk_grid_new();
-                gtk_widget_add_css_class(grid, "answer-table");
-                gtk_grid_set_column_spacing(GTK_GRID(grid), 18);
-                gtk_grid_set_row_spacing(GTK_GRID(grid), 3);
-                g_object_set_data(G_OBJECT(grid), "rows", GINT_TO_POINTER(1));
+            const char *label = g_object_get_data(G_OBJECT(list), "record-label");
+            char *const *pending = g_object_get_data(G_OBJECT(list), "record-pending");
+            char *pending_line = g_object_get_data(G_OBJECT(list), "record-line");
+
+            /* The first row may be a header ("chain  steps  source") or the
+               first record. It cannot be told from itself, so it waits for the
+               second: a row whose first cell repeats is a label column, and the
+               label becomes the chip on every row below it. */
+            if (pending == NULL && label == NULL && grid == NULL) {
+                g_object_set_data_full(G_OBJECT(list), "record-pending",
+                                       g_strdupv((char **)fields),
+                                       (GDestroyNotify) g_strfreev);
+                g_object_set_data_full(G_OBJECT(list), "record-line",
+                                       g_strdup(text), g_free);
                 g_object_set_data(G_OBJECT(list), "answer-grid", grid);
-                g_object_set_data(G_OBJECT(list), "answer-cols",
-                                  GINT_TO_POINTER(n));
-                for (int c = 0; c < n; c++)
-                    table_cell_add(grid, fields[c], c, 0, TRUE, c == n - 1);
-                gtk_box_append(GTK_BOX(list), grid);
                 return;
             }
-            if (n == cols) {
-                table_body(list, grid, fields, cols);
+            if (pending != NULL && label == NULL) {
+                char *const *rot = (char *const *) fields;
+
+                g_object_set_data(G_OBJECT(list), "answer-grid", grid);
+                if (g_strcmp0(pending[0], fields[0]) == 0) {
+                    /* "signal  foo  ..." six times: the first cell is a type,
+                       not a value. */
+                    g_object_set_data_full(G_OBJECT(list), "record-label",
+                                           g_strdup(fields[0]), g_free);
+                    rot = (char *const *) pending + 1;
+                    record_row_append(list, pending_line, (GStrv) rot);
+                    rot = (char *const *) fields + 1;
+                    record_row_append(list, (char *) text, (GStrv) rot);
+                } else {
+                    record_row_append(list, pending_line, (GStrv) pending);
+                    record_row_append(list, (char *) text, (GStrv) fields);
+                }
+                g_object_set_data(G_OBJECT(list), "record-pending", NULL);
+                g_object_set_data(G_OBJECT(list), "answer-cols",
+                                  GINT_TO_POINTER(n));
+                return;
+            }
+            {
+                char *const *rot = (char *const *) fields;
+                gint recs = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(list), "records"));
+
+                g_object_set_data(G_OBJECT(list), "answer-grid", grid);
+                if (label != NULL && g_strcmp0(label, fields[0]) == 0) rot++;
+                record_row_append(list, (char *) text, (GStrv) rot);
+                (void) recs;
                 return;
             }
         }
@@ -16863,19 +16894,205 @@ static ModuleSubmenuEntry vims_entries[] = {
       "preferences-system-symbolic",
       "--plan:Plan" },
 };
+/* 31_sim_defense — Port-out Risk.
+ *
+ * The module has two halves that answer different questions, so the page is cut
+ * the same way: what the signalling says about a number being moved, what a card
+ * carries, and what the attack half builds. Each card holds the control that
+ * runs it and the answer underneath, in the card, with a Stop beside the
+ * summary when the run is long.
+ */
+static GtkWidget *
+simd_build_detection(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("PORT-OUT RISK",
+        "Evidence that a number is being moved, and the controls a subscriber "
+        "can put in place before it is.", &body);
+    GtkWidget *score_body, *signals_body, *check_body;
+    GtkWidget *score = verb_card("PORT-OUT SCORE", &score_body);
+    GtkWidget *signals = verb_card("DETECTION SIGNALS", &signals_body);
+    GtkWidget *check = verb_card("SUBSCRIBER CONTROLS", &check_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(score_body),
+            mod_arg_row(state, module_id, status, "Score the History",
+                "--score", "history.tsv",
+                "A TSV of port-out signals in time order. Each row is one "
+                "observed event; the score rises with the pattern, not with "
+                "any single event."));
+        gtk_box_append(GTK_BOX(score_body), res);
+    }
+    gtk_box_append(GTK_BOX(score_body), fkit_note(
+        "A high score is not proof of a port-out in progress: it is the shape "
+        "the signalling leaves when one is being attempted. The module reports "
+        "which signals fired and which did not."));
+    gtk_box_append(GTK_BOX(body), score);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(signals_body),
+            mod_arg_row(state, module_id, status, "List the Signals",
+                "--signals", "",
+                "The six signals the score is built from, with what each one "
+                "would look like on the air."));
+        gtk_box_append(GTK_BOX(signals_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), signals);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(check_body),
+            mod_arg_row(state, module_id, status, "Read the Controls",
+                "--defence-checklist", "",
+                "What a subscriber can enforce with the carrier directly: "
+                "port-out locks, SIM-PIN, and the questions that decide the "
+                "verification answer."));
+        gtk_box_append(GTK_BOX(check_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), check);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+simd_build_card(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CARD INSPECTION",
+        "What a SIM carries and what state its authentication is in. No reader "
+        "is opened; every verb works from bytes.", &body);
+    GtkWidget *ad_body, *pin_body, *esim_body;
+    GtkWidget *ad = verb_card("EF_AD", &ad_body);
+    GtkWidget *pin = verb_card("PIN AND PUK STATE", &pin_body);
+    GtkWidget *esim = verb_card("eSIM PROFILE", &esim_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ad_body),
+            mod_arg_row(state, module_id, status, "Read EF_AD",
+                "--ef-ad", "6F07 sim",
+                "The bytes of EF_AD, then the card generation. The same field "
+                "has two layouts and the generation picks one."));
+        gtk_box_append(GTK_BOX(ad_body), res);
+    }
+    gtk_box_append(GTK_BOX(ad_body), fkit_note(
+        "The two layouts place the MNC length and the operational flags at "
+        "different offsets. Reading one layout as the other is how a card is "
+        "misreported as restricted."));
+    gtk_box_append(GTK_BOX(body), ad);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pin_body),
+            mod_arg_row(state, module_id, status, "Read the Counters",
+                "--pin-state", "",
+                "The PIN and PUK retry counters and the ADM key level, which "
+                "decide how many attempts remain before the card blocks."));
+        gtk_box_append(GTK_BOX(pin_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pin);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(esim_body),
+            mod_arg_row(state, module_id, status, "Read the Profile",
+                "--esim-profile-parse", "hex",
+                "A SGP.22 ProfileInfo blob, as hex. The profile state decides "
+                "whether the subscription is enabled, disabled or deleted."));
+        gtk_box_append(GTK_BOX(esim_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), esim);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+simd_build_attack(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ATTACK SIMULATION",
+        "The commands an ADM-key holder sends and the artefact set a port-out "
+        "consumes. Every verb builds bytes and stops there.", &body);
+    GtkWidget *apdu_body, *art_body, *plan_body;
+    GtkWidget *apdu = verb_card("CARD WRITE APDUs", &apdu_body);
+    GtkWidget *art = verb_card("PORT-OUT ARTEFACTS", &art_body);
+    GtkWidget *plan = verb_card("PORT-OUT TIMELINE", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(apdu_body),
+            mod_arg_row(state, module_id, status, "Build the APDUs",
+                "--adm-apdu", "6F07 082982608200002080 --key 1122334455667788",
+                "The EF identifier, then the value to write, then the ADM key "
+                "as hex. The verb prints the VERIFY and the UPDATE as separate "
+                "commands and never sends them."));
+        gtk_box_append(GTK_BOX(apdu_body), res);
+    }
+    gtk_box_append(GTK_BOX(apdu_body), fkit_note(
+        "An ADM-key write to an ADM-protected EF cannot be undone: the card "
+        "stops authenticating. The verb is built for a card you own, with a "
+        "test key you were given."));
+    gtk_box_append(GTK_BOX(body), apdu);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(art_body),
+            mod_arg_row(state, module_id, status, "Build the Artefacts",
+                "--swap-artefacts", "conf",
+                "A KEY=VALUE file describing the number being moved. The verb "
+                "prints the identifiers, the warrant-free artefacts and the "
+                "order the portal expects them in."));
+        gtk_box_append(GTK_BOX(art_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), art);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Build the Timeline",
+                "--swap-plan", "conf",
+                "The same file. The timeline places each artefact against the "
+                "portal step that consumes it and says which hop needs a person."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry simd_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--score:Score|--defence-checklist:Defence Checklist|--signals:Signals" },
-    { "Inspection",
-      "auth-smartcard-symbolic",
-      "--ef-ad:EF AD|--esim-profile-parse:Parse eSIM Profile|--pin-state:PIN State" },
-    /* The attack half. The group is named by what it produces, and no control
-       here is named after a verb. */
-    { "Attack Simulation",
-      "security-high-symbolic",
-      "--adm-apdu=6F07 082982608200002080 --key 1122334455667788:Card Write APDUs"
-      "|--swap-artefacts:Port-out Artefacts|--swap-plan:Port-out Timeline" },
+    { "Overview", "dialog-information-symbolic", NULL, simd_build_detection },
+    { "Inspection", "auth-smartcard-symbolic", NULL, simd_build_card },
+    { "Attack Simulation", "security-high-symbolic", NULL, simd_build_attack },
 };
 static void
 mod_arg_clicked(GtkButton *button, gpointer user_data)
