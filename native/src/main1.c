@@ -20154,18 +20154,173 @@ static ModuleSubmenuEntry stk_entries[] = {
       "document-send-symbolic",
       "#COMMAND|--cmd=21|--result=00|--device=81|#PLAN|--plan:Plan" },
 };
+/* 53_non3gpp — TETRA / DMR / GSM-R.
+ *
+ * Land mobile radio is three air interfaces that are recognised by channel
+ * spacing, framed by arithmetic, and protected by ciphers whose standing is the
+ * finding. The page keeps those three things apart.
+ */
+static GtkWidget *
+n3g_build_identify(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("IDENTIFICATION",
+        "Which land mobile technology a signal is, from its channel spacing, and "
+        "what its ciphering does and does not protect.", &body);
+    GtkWidget *cls_body, *note_body;
+    GtkWidget *cls = verb_card("CLASSIFICATION", &cls_body);
+    GtkWidget *note = verb_card("CIPHER NOTES", &note_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cls_body),
+            mod_arg_row_prefilled(state, module_id, status, "Classify",
+                "--classify", "25",
+                "The channel spacing in kHz, then optionally the modulation. "
+                "25 kHz is TETRA, 12.5 kHz is DMR, 200 kHz is GSM-R; the answer "
+                "names the candidates rather than guessing one."));
+        gtk_box_append(GTK_BOX(cls_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cls);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(note_body),
+            mod_arg_row(state, module_id, status, "Read the Notes",
+                "--detect-note", "",
+                "Which cipher each technology offers and what is publicly known "
+                "about it. TEA1 is described by what has been published, not by "
+                "an invented key length."));
+        gtk_box_append(GTK_BOX(note_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), note);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+n3g_build_frames(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("FRAMES",
+        "Frame length derived from the air interface, and the slot arithmetic "
+        "that follows from it.", &body);
+    GtkWidget *tetra_body, *dmr_body, *tdma_body;
+    GtkWidget *tetra = verb_card("TETRA", &tetra_body);
+    GtkWidget *dmr = verb_card("DMR", &dmr_body);
+    GtkWidget *tdma = verb_card("SLOT ARITHMETIC", &tdma_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tetra_body),
+            mod_arg_row_prefilled(state, module_id, status, "Derive the Frame",
+                "--frame-math", "255 2 4 36000",
+                "Symbols, bits per symbol, slots, then the channel bit rate. "
+                "The frame length falls out; it is never typed in."));
+        gtk_box_append(GTK_BOX(tetra_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tetra);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dmr_body),
+            mod_arg_row_prefilled(state, module_id, status, "Derive the Burst",
+                "--frame-math", "132 2 2 9600 2.5",
+                "The same arithmetic for a DMR burst, with the guard time in "
+                "milliseconds. The two slots carry different sync patterns and "
+                "the arithmetic treats them as one frame."));
+        gtk_box_append(GTK_BOX(dmr_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dmr);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tdma_body),
+            mod_arg_row_prefilled(state, module_id, status, "Divide the Frame",
+                "--tdma", "60 4",
+                "A frame length in milliseconds and a slot count. This is the "
+                "arithmetic only: the frame length is an input here, not a "
+                "derivation, which is why the card above exists."));
+        gtk_box_append(GTK_BOX(tdma_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tdma);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+n3g_build_reference(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("REFERENCE",
+        "The three standards this module summarises, and what a receive-only lab "
+        "needs to start.", &body);
+    GtkWidget *tetra_body, *dmr_body, *gsmr_body, *tea_body, *plan_body;
+    GtkWidget *tetra = verb_card("TETRA BANDS", &tetra_body);
+    GtkWidget *dmr = verb_card("DMR BANDS", &dmr_body);
+    GtkWidget *gsmr = verb_card("GSM-R", &gsmr_body);
+    GtkWidget *tea = verb_card("TETRA CIPHERS", &tea_body);
+    GtkWidget *plan = verb_card("LAB HANDOFF", &plan_body);
+
+#define N3G_REF_CARD(widget, card_body, label, verb, hint_text)                \
+    G_STMT_START {                                                             \
+        GtkWidget *res_ = result_rect_new(state, NULL);                        \
+        mod_card_begin(res_);                                                  \
+        gtk_box_append(GTK_BOX(card_body),                                     \
+            mod_arg_row(state, module_id, status, label, verb, "",             \
+                        hint_text));                                           \
+        gtk_box_append(GTK_BOX(card_body), res_);                              \
+    } G_STMT_END
+
+    N3G_REF_CARD(tetra, tetra_body, "Read the Bands", "--tetra",
+        "Frame structure and band plan per EN 300 392.");
+    gtk_box_append(GTK_BOX(body), tetra);
+
+    N3G_REF_CARD(dmr, dmr_body, "Read the Bands", "--dmr",
+        "Two-slot TDMA structure and band plan per TS 102 361.");
+    gtk_box_append(GTK_BOX(body), dmr);
+
+    N3G_REF_CARD(gsmr, gsmr_body, "Read the Band", "--gsmr",
+        "Railway GSM: the bands and the features that differ from public GSM.");
+    gtk_box_append(GTK_BOX(body), gsmr);
+
+    N3G_REF_CARD(tea, tea_body, "Read the Ciphers", "--tea",
+        "TEA1 to TEA4, with what is published about each rather than an "
+        "estimate.");
+    gtk_box_append(GTK_BOX(body), tea);
+
+    N3G_REF_CARD(plan, plan_body, "Read the Plan", "--plan",
+        "What a receive-only lab needs: the antennas, the decoders, and what to "
+        "record.");
+    gtk_box_append(GTK_BOX(body), plan);
+#undef N3G_REF_CARD
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry n3g_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--classify:Classify|--detect-note:Detect Note" },
-    { "Radio",
-      "network-wireless-symbolic",
-      "#TETRA|--tetra:TETRA|--frame-math=255 2 4 36000:Derive TETRA Frame"
-      "|#DMR|--dmr:DMR|--frame-math=132 2 2 9600 2.5:Derive DMR Frame"
-      "|#RAIL|--gsmr:GSM-R|#LEGACY|--tdma:TDMA|--tea:TEA" },
-    { "Planning",
-      "preferences-system-symbolic",
-      "--plan:Plan" },
+    { "Identification", "dialog-information-symbolic", NULL, n3g_build_identify },
+    { "Frames", "network-wireless-symbolic", NULL, n3g_build_frames },
+    { "Reference", "preferences-system-symbolic", NULL, n3g_build_reference },
 };
 static ModuleSubmenuEntry bexp_entries[] = {
     { "Overview",
