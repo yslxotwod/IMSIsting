@@ -16363,30 +16363,286 @@ static ModuleSubmenuEntry nair_entries[] = {
       "media-playback-start-symbolic",
       "--ssb-waveform=/tmp/imsisting/nr_air/ssb.cf32:Write SSB Samples" },
 };
+/* 13_nr_core — 5G core.
+ *
+ * The module reads and builds the four protocols a 5G core speaks, plus the one
+ * handshake between two radio nodes. The page is cut the way the module is:
+ * what a network function advertises, what the messages say, what the crypto
+ * derives, and what a forged procedure carries.
+ */
+static GtkWidget *
+ncore_build_services(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SERVICES",
+        "What a 5G core advertises to itself: the network functions, their API "
+        "roots, and the discovery request one sends for another.", &body);
+    GtkWidget *list_body, *disc_body;
+    GtkWidget *list = verb_card("NETWORK FUNCTIONS", &list_body);
+    GtkWidget *disc = verb_card("DISCOVERY", &disc_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(list_body),
+            mod_arg_row(state, module_id, status, "List the Functions",
+                "--nf-list", "",
+                "Every network function with its service table and the API root "
+                "it publishes. The roots are what a request has to name."));
+        gtk_box_append(GTK_BOX(list_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), list);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(disc_body),
+            mod_arg_row_prefilled(state, module_id, status, "Ask the Registry",
+                "--nf-discovery", "NRF",
+                "The function or service being looked for, then optionally who "
+                "is asking. The answer is the discovery request a real NF sends, "
+                "field by field."));
+        gtk_box_append(GTK_BOX(disc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), disc);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ncore_build_decode(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DECODE",
+        "One message at a time, read as far as its own length fields allow.",
+        &body);
+    GtkWidget *nas_body, *ngap_body, *pfcp_body, *gtpu_body, *guti_body, *id_body;
+    GtkWidget *nas = verb_card("NAS 5GS", &nas_body);
+    GtkWidget *ngap = verb_card("NGAP", &ngap_body);
+    GtkWidget *pfcp = verb_card("PFCP", &pfcp_body);
+    GtkWidget *gtpu = verb_card("GTP-U", &gtpu_body);
+    GtkWidget *guti = verb_card("5G-GUTI", &guti_body);
+    GtkWidget *id = verb_card("UE ID PAIR", &id_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(nas_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Message",
+                "--decode-nas-5gs", "7E004916",
+                "A 5GS mobility message as hex. The security header decides the "
+                "message type, and a plain message and a protected one do not "
+                "share an offset."));
+        gtk_box_append(GTK_BOX(nas_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), nas);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ngap_body),
+            mod_arg_row(state, module_id, status, "Read the Message",
+                "--decode-ngap", "hex",
+                "An NGAP PDU as hex: the initiating message, the procedure code "
+                "and the name that code carries."));
+        gtk_box_append(GTK_BOX(ngap_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ngap);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pfcp_body),
+            mod_arg_row(state, module_id, status, "Read the Message",
+                "--decode-pfcp", "hex",
+                "A PFCP message as hex: the message type, the session endpoint "
+                "and the sequence number the response must echo."));
+        gtk_box_append(GTK_BOX(pfcp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pfcp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(gtpu_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Datagram",
+                "--decode-gtpu", "34FF009001000000",
+                "An N3 GTP-U datagram, including the QFI extension: on this "
+                "interface the flow identifier travels in the extension header, "
+                "not in a field of its own."));
+        gtk_box_append(GTK_BOX(gtpu_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), gtpu);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(guti_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Identity",
+                "--decode-5g-guti", "0010200000001",
+                "A 5G-GUTI as hex: the plmn, the AMF region, set and pointer, "
+                "then the temporary identity itself."));
+        gtk_box_append(GTK_BOX(guti_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), guti);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(id_body),
+            mod_arg_row_prefilled(state, module_id, status, "Pair the Ids",
+                "--ue-id-pair", "12 34",
+                "The RAN-side id, then the AMF-side id. Both are needed to "
+                "address a UE, and each is assigned by a different node."));
+        gtk_box_append(GTK_BOX(id_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), id);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ncore_build_crypto(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CRYPTO",
+        "The key ladder a 5G authentication walks, and the one derivation that "
+        "places the serving network in it.", &body);
+    GtkWidget *flow_body, *k_body;
+    GtkWidget *flow = verb_card("AUTHENTICATION FLOW", &flow_body);
+    GtkWidget *k = verb_card("KSEAF", &k_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(flow_body),
+            mod_arg_row(state, module_id, status, "Read the Flow",
+                "--aka-flow", "",
+                "5G-AKA and EAP-AKA-prime in order, with which key each step "
+                "produces. The serving network name enters the ladder here, "
+                "which is what binds a key to the network that asked."));
+        gtk_box_append(GTK_BOX(flow_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), flow);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(k_body),
+            mod_arg_row_prefilled(state, module_id, status, "Derive the Anchor",
+                "--kseaf", "00112233445566778899aabbccddeeff5a6f9e2b3c4d5e6f77889900aabbccdd 5G:mnc260.mcc310.3gppnetwork.org",
+                "KAUSF as hex, then the serving network name. KSEAF is "
+                "HMAC-SHA-256 over the key and the name with a 0x6C separator, "
+                "so a name the handset does not expect yields a different key."));
+        gtk_box_append(GTK_BOX(k_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), k);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ncore_build_forge(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("FORGE",
+        "The procedures a core accepts from a node it has not authenticated, "
+        "built byte for byte and sent by the operator.", &body);
+    GtkWidget *ngap_body, *xn_body, *pfcp_body, *send_body;
+    GtkWidget *ngap = verb_card("NGAP", &ngap_body);
+    GtkWidget *xn = verb_card("XN", &xn_body);
+    GtkWidget *pfcp = verb_card("PFCP", &pfcp_body);
+    GtkWidget *send = verb_card("SEND", &send_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ngap_body),
+            mod_arg_choices(state, module_id, status, "Procedure", "",
+                "Each builds one initiating message with its NAS-PDU or its "
+                "identity list already inside it.",
+                (const char *[]) { "--ngap-initial-ue", "--ngap-downlink-nas",
+                                   "--ngap-paging", "--ngap-ngsetup" },
+                (const char *[]) { "Initial UE", "Downlink NAS", "Paging",
+                                   "NG Setup" }, 4));
+        gtk_box_append(GTK_BOX(ngap_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ngap);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(xn_body),
+            mod_arg_choices(state, module_id, status, "Peer handshake", "",
+                "Xn rides SCTP 38422 with PPID 61; a message sent with the NGAP "
+                "PPID is dissected as a different protocol.",
+                (const char *[]) { "--xnap-setup", "--xnap-decode" },
+                (const char *[]) { "Open to a Peer", "Decode One" }, 2));
+        gtk_box_append(GTK_BOX(xn_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), xn);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pfcp_body),
+            mod_arg_choices(state, module_id, status, "Session", "",
+                "The rules a session is made of, the establishment request that "
+                "carries them, or the GTP-U header that steers the result.",
+                (const char *[]) { "--pfcp-rules", "--pfcp-build",
+                                   "--gtpu-header" },
+                (const char *[]) { "Rules", "Session Request",
+                                   "N3 Header" }, 3));
+        gtk_box_append(GTK_BOX(pfcp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pfcp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(send_body),
+            mod_arg_row_prefilled(state, module_id, status, "NGAP to an AMF",
+                "--ngap-send", "10.0.0.1 38412",
+                "Host and port on SCTP 38412, PPID 60. A build that was not "
+                "armed reports that it is disarmed instead of failing silently."));
+        gtk_box_append(GTK_BOX(send_body), res);
+        gtk_box_append(GTK_BOX(send_body),
+            mod_arg_row_prefilled(state, module_id, status, "PFCP to a UPF",
+                "--pfcp-send", "10.0.0.2 8805",
+                "Host and port on UDP 8805. Same arming rule as the NGAP "
+                "sender."));
+        gtk_box_append(GTK_BOX(send_body),
+            mod_arg_choices(state, module_id, status, "Plan", "",
+                "What a testbed needs for the named attack, and what to record.",
+                (const char *[]) { "--plan n2-expose", "--plan nrf-discovery",
+                                   "--plan sepp-bypass", "--plan ipx-attack" },
+                (const char *[]) { "N2 Exposure", "NRF Discovery",
+                                   "SEPP Bypass", "IPX Attack" }, 4));
+    }
+    gtk_box_append(GTK_BOX(body), send);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry ncore_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--nf-list:List NFs|--nf-discovery=NRF|--ue-id-pair:UE Id Pair" },
-    { "Decode",
-      "document-open-symbolic",
-      "#NAS|--decode-nas-5gs:Decode NAS-5GS|#NGAP|--decode-ngap:Decode NGAP|#PFCP|--decode-pfcp:Decode PFCP|#GTPU|--decode-gtpu:Decode GTP-U|--gtpu-header:GTP-U Header|#IDENTITY|--decode-5g-guti:Decode 5G-GUTI" },
-    { "Crypto",
-      "channel-secure-symbolic",
-      "--aka-flow:AKA Flow|--kseaf:KSEAF" },
-    { "Rules",
-      "preferences-system-symbolic",
-      "#BUILD|--pfcp-build:Build Session Request|#SEND|--pfcp-send:Send to UPF|--pfcp-rules:PFCP Rules|--plan:Plan" },
-    { "Forge NGAP",
-      "network-transmit-receive-symbolic",
-      "#BUILD|--ngap-initial-ue:Initial UE Message|--ngap-downlink-nas:Downlink NAS|--ngap-paging:Page a Handset|--ngap-ngsetup:Open the Node|#SEND|--ngap-send:Send to AMF" },
-    /* Xn is the interface between two NG-RAN nodes, so its setup message is
-     * the same handshake as NG Setup addressed to a peer instead of a core.
-     * Built here, not sent from here: Xn rides SCTP 38422 on PPID 61, and a
-     * message sent with NGAP's PPID 60 is dissected as a different protocol
-     * that reads every field differently. */
-    { "Forge Xn",
-      "network-transmit-receive-symbolic",
-      "#BUILD|--xnap-setup:Open to the Peer|#READ|--xnap-decode:Decode Xn" },
+    { "Services", "dialog-information-symbolic", NULL, ncore_build_services },
+    { "Decode", "document-open-symbolic", NULL, ncore_build_decode },
+    { "Crypto", "channel-secure-symbolic", NULL, ncore_build_crypto },
+    { "Forge", "network-transmit-receive-symbolic", NULL, ncore_build_forge },
 };
 static ModuleSubmenuEntry suci_entries[] = {
     { "Overview",
