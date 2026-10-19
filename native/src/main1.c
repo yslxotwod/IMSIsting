@@ -2721,6 +2721,8 @@ static GtkWidget *mod_arg_choices(AppState *state, const char *module_id,
                                   const char *placeholder, const char *hint,
                                   const char *const *verbs,
                                   const char *const *labels, int n);
+static void mod_card_begin(GtkWidget *result);
+static void mod_card_end(void);
 static gboolean record_copy_reset(gpointer button);
 static void record_copy_clicked(GtkButton *button, gpointer user_data);
 
@@ -15102,24 +15104,37 @@ tmap_build_overview(AppState *state, const char *module_id,
     GtkWidget *survey = verb_card("RUN A SURVEY PASS", &survey_body);
     GtkWidget *read = verb_card("RECORDED POINTS", &read_body);
 
+        mod_card_begin(NULL);
     gtk_box_append(GTK_BOX(survey_body),
         mod_arg_row(state, module_id, status, "Start Survey",
             "--survey", "gsm GSM900", "Radio technology (gsm or lte), then a "
             "band for GSM. LTE takes a band list or nothing at all."));
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(survey_body), res);
+    }
     gtk_box_append(GTK_BOX(survey_body), fkit_note(
         "A pass records one point per cell it decodes. A cell received without a "
         "position fix is still recorded; it appears in the without-fix count of "
         "the next card rather than as an error."));
     gtk_box_append(GTK_BOX(body), survey);
 
+        mod_card_begin(NULL);
     gtk_box_append(GTK_BOX(read_body),
         mod_arg_row(state, module_id, status, "Read the Points",
             "--list-tsv", "", "Every recorded point, as stored."));
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(read_body), res);
+    }
     gtk_box_append(GTK_BOX(read_body),
         mod_arg_row(state, module_id, status, "Count the Points",
             "--history", "", "How many points have a fix, how many do not, and "
             "how many distinct cells they describe."));
     gtk_box_append(GTK_BOX(body), read);
+    mod_card_end();
 
     (void) out;
     return outer;
@@ -15137,20 +15152,33 @@ tmap_build_gps(AppState *state, const char *module_id,
     GtkWidget *daemon = verb_card("GPS DAEMON", &daemon_body);
     GtkWidget *quality = verb_card("CURRENT FIX", &quality_body);
 
+        mod_card_begin(NULL);
     gtk_box_append(GTK_BOX(daemon_body),
         mod_arg_row(state, module_id, status, "Start gpsd",
             "--start-gpsd", "/dev/ttyUSB0", "The serial device the GPS receiver "
             "is on. Left empty, the module uses /dev/ttyUSB0."));
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(daemon_body), res);
+    }
     gtk_box_append(GTK_BOX(daemon_body), fkit_note(
         "A running daemon does not imply a position fix: gpsd may be running while "
         "still acquiring. The following card reports whether a fix exists."));
     gtk_box_append(GTK_BOX(body), daemon);
 
+        mod_card_begin(NULL);
     gtk_box_append(GTK_BOX(quality_body),
         mod_arg_row(state, module_id, status, "Read the Fix",
             "--gps-quality-tsv", "", "Mode, satellites, accuracy and age of the "
             "last fix \u2014 or the single word \"no\"."));
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(quality_body), res);
+    }
     gtk_box_append(GTK_BOX(body), quality);
+    mod_card_end();
 
     (void) out;
     return outer;
@@ -15181,14 +15209,27 @@ tmap_build_export(AppState *state, const char *module_id,
         "format. All three describe the same records.",
         verbs, labels, 3);
     gtk_box_append(GTK_BOX(export_body), choices);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(export_body), res);
+    }
     gtk_box_append(GTK_BOX(body), export);
 
+        mod_card_begin(NULL);
     gtk_box_append(GTK_BOX(clean_body),
         mod_arg_row(state, module_id, status, "Clear the Store",
             "--clear", "", "Removes every recorded point and cannot be undone. It is the only "
             "destructive operation on this page, and is therefore separated from "
             "the exporters."));
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(clean_body), res);
+    }
     gtk_box_append(GTK_BOX(body), clean);
+    mod_card_end();
 
     (void) out;
     return outer;
@@ -16879,6 +16920,16 @@ mod_entry_activate(GtkEntry *entry, gpointer user_data)
    Shared by every page that answers with a module run rather than a fixed
    listing -- the small-cell page and the jamming page both grew one, and a
    second copy is where the two would drift apart. */
+/* Which card is being filled right now. A page builder sets this before it
+   appends its rows and clears it after, so every control in that card knows
+   which result rect to report into without every call growing an argument. */
+static GtkWidget *mod_card_result;
+
+static void
+mod_card_begin(GtkWidget *result) { mod_card_result = result; }
+static void
+mod_card_end(void) { mod_card_result = NULL; }
+
 static GtkWidget *
 mod_arg_row(AppState *state, const char *module_id, GtkWidget *status,
               const char *button_label, const char *verb,
@@ -16900,6 +16951,8 @@ mod_arg_row(AppState *state, const char *module_id, GtkWidget *status,
     g_object_set_data(G_OBJECT(button), "verb", (gpointer) verb);
     g_object_set_data(G_OBJECT(button), "action-label", (gpointer) button_label);
     g_object_set_data(G_OBJECT(button), "arg-entry", entry);
+    if (mod_card_result != NULL)
+        g_object_set_data(G_OBJECT(button), "result", mod_card_result);
     g_signal_connect(button, "clicked", G_CALLBACK(mod_arg_clicked), NULL);
     g_signal_connect(entry, "activate", G_CALLBACK(mod_entry_activate), button);
 
@@ -16954,6 +17007,8 @@ mod_arg_choices(AppState *state, const char *module_id, GtkWidget *status,
         g_object_set_data(G_OBJECT(button), "verb", (gpointer) verbs[i]);
         g_object_set_data(G_OBJECT(button), "action-label", (gpointer) labels[i]);
         g_object_set_data(G_OBJECT(button), "arg-entry", entry);
+        if (mod_card_result != NULL)
+            g_object_set_data(G_OBJECT(button), "result", mod_card_result);
         g_signal_connect(button, "clicked", G_CALLBACK(mod_arg_clicked), NULL);
         gtk_box_append(GTK_BOX(row), button);
     }
