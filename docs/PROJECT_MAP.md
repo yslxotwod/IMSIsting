@@ -169,8 +169,9 @@ Measured, not quoted from a doc. The six gates as they stand:
 | `run-selftests.sh` | 0 | **57 passed, 0 failed, 0 missing** |
 | `check-paths.sh` | 0 | all path checks passed |
 | `gen-icons-xml.sh --check` | 0 | up to date, 67 entries |
-| `check-verbs.sh` | 0 | 654 placed, 94 CLI-only, 111 modifiers, 172 exempt; no unplaced verb |
+| `check-verbs.sh` | 0 | 746 placed, 0 CLI-only, 114 modifiers, 172 exempt; every documented verb has a control |
 | `check-gui-text.sh` | 0 | no control, label or tooltip named after a verb |
+| `check-gui-pages.sh` | 0 | 21 checks, 0 log wells left on the spec-driven path |
 | `gen-module-index.sh --check` | 0 | up to date, 57 modules |
 
 All six are green with the Phase 12 and Phase 14 work in the tree. Detail:

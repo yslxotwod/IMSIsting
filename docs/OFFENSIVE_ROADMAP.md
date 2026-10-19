@@ -1718,6 +1718,41 @@ octets, two calls multiplexed on one five-tuple, and two streams of one call.
 still renders a verb list next to a raw output window. The rule is the operator's,
 given twice and settling:
 
+*Built — all 48.* Every spec-driven module page is gone and each module has its own
+builders. The measured end state: **203 custom views and 4 spec views in the whole
+file**, the four being `00_deps`, which this phase excluded by name; `tools/check-gui-pages.sh`
+reports **0 log wells** on the path it guards; `tools/check-verbs.sh` reports **746
+verbs placed as one-click buttons and 0 CLI-only** — every documented verb in the
+tree has a control.
+
+Four things were built once and reused by every page, which is why the last thirty
+went faster than the first three:
+
+1. **The answer surface.** Each card owns a `ResultRect`: a hairline, one line saying
+   what to do before anything has run, a summary row (`N records · done`), and the
+   records. It is created before the card's controls and bound with `mod_card_begin()`,
+   so a control never needs to know which card it is in.
+2. **Three renderings chosen by the shape of the answer.** A two-field row is a label
+   and a value; three or more fields are **record rows** — mark, identity, chip, a dim
+   line of context, Copy — never a spreadsheet; a repeating first cell becomes the chip,
+   and a real header row is recognised because the row under it disagrees with it.
+3. **`display_text()`.** Module output is translated before it is drawn: a `--flag`
+   becomes `· Scan ·` from its own label and `02_cell_recon` becomes `cell recon`, so no
+   verb token from module output reaches the screen. Copy keeps the original bytes.
+4. **The verdict.** A run ends with one summary line. A one- or two-record success also
+   raises a toast and leaves the receipt sentence in the card; a refusal never compacts,
+   because a refusal has to be readable where it lands.
+
+Three defects were found by looking at the result rather than by reading the code, and
+each is now guarded:
+
+- the closed target panel was **eating every click** on the right fifth of the window
+  (`rtarget_revealer` kept a 300 px hit area with no child in it);
+- the verdict test was `strstr(line, "ERROR")`, so a DNS decode reporting
+  `rcode_name NOERROR` was summarised as `failed (exit 0)`;
+- a five-choice row clipped its last button and a seven-choice row worse, so a row is
+  four buttons maximum and the remainder continue on the next row inside the same card.
+
 *Started — the shared answer surface is built; the per-page work is what is
 left.* The thing that made every module page look like a terminal was not the
 card, it was `build_output_card()`: a near-black scroller under an OUTPUT

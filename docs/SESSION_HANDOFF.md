@@ -248,6 +248,27 @@ reason is structural: an article makes a heading read as prose, prose invites a
 sentence, and a sentence is what the note underneath is for. View names follow
 the same rule ("Exchange", "Certificates", "Decode").
 
+### Five from the Phase 20 page conversion
+
+1. **A page is designed per verb, not per module.** The same control shape does not fit
+   a verb that needs a value and one that does not: a form row with a hint for the first,
+   a single action for the second, a feed for anything that lists. Forty-eight pages taken
+   one at a time was faster to get right than one bulk edit, and the bulk edit was tried
+   first and rejected on sight.
+2. **A row of choice buttons is four wide.** Five and seven clipped off the card, and a
+   button that has fallen off the card cannot be pressed. A `GtkFlowBox` was tried instead
+   and made it worse (one button per line, caption detached), so the fix is structural:
+   four, then continue in the same card.
+3. **The verdict is anchored, not searched.** `strstr(line, "ERROR")` read
+   `rcode_name NOERROR` as a failure. Only a line whose first field is `ERROR`, or a
+   `\tERROR` field, marks a run failed.
+4. **A placeholder is a hint and must never be sent.** A prefilled worked vector is a
+   different thing from a placeholder: `mod_arg_row_prefilled` exists because the first
+   decoder card ran with an empty argument and answered `usage:`.
+5. **Lists are records, not spreadsheets.** Mark, identity, chip, dim context, Copy, and a
+   summary line above. A repeating first cell is that chip; a header row is recognised
+   because the row beneath it disagrees with it, and is dropped rather than drawn.
+
 ### The closed target panel was eating every click on the right
 
 The target panel is a `GtkRevealer` slid in from the right edge. Closing it set
