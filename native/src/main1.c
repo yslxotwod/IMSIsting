@@ -21170,21 +21170,177 @@ static ModuleSubmenuEntry wifioff_entries[] = {
     { "Exchange", "dialog-information-symbolic", NULL, wifioff_build_exchange },
     { "Certificates", "channel-secure-symbolic", NULL, wifioff_build_certs },
 };
+/* 48_oran — the RAN Intelligent Controller.
+ *
+ * An O-RAN deployment publishes its own interface map, its own policy model, and
+ * its own notion of what an xApp is allowed to change. The page reads all three,
+ * then shows what a forged policy would be written with.
+ */
+static GtkWidget *
+oran_build_interfaces(AppState *state, const char *module_id,
+                      GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("INTERFACES",
+        "Which interface carries which decision, and the service model that says "
+        "what an xApp can ask for on E2.", &body);
+    GtkWidget *map_body, *e2sm_body;
+    GtkWidget *map = verb_card("INTERFACE MAP", &map_body);
+    GtkWidget *e2sm = verb_card("SERVICE MODELS", &e2sm_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(map_body),
+            mod_arg_row(state, module_id, status, "Read the Map",
+                "--interfaces", "",
+                "E2 for the near-real-time loop, A1 for policy, O1 and O2 for "
+                "management, and the fronthaul below all of it. The answer says "
+                "which side terminates each one."));
+        gtk_box_append(GTK_BOX(map_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), map);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(e2sm_body),
+            mod_arg_row(state, module_id, status, "Read the Models",
+                "--e2sm", "",
+                "The E2 service models with their ran functions and their "
+                "reports. A control action is only meaningful inside one of "
+                "these, which is why they are listed first."));
+        gtk_box_append(GTK_BOX(e2sm_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), e2sm);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+oran_build_control(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CONTROL",
+        "What an xApp can reach, and what a forged A1 policy asks the controller "
+        "to believe.", &body);
+    GtkWidget *attack_body, *auth_body, *a1_body, *e2_body;
+    GtkWidget *attack = verb_card("xAPP MODEL", &attack_body);
+    GtkWidget *auth = verb_card("xAPP AUTHORITY", &auth_body);
+    GtkWidget *a1 = verb_card("A1 POLICY", &a1_body);
+    GtkWidget *e2 = verb_card("E2 CONTROL", &e2_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(attack_body),
+            mod_arg_row(state, module_id, status, "Read the Model",
+                "--xapp-attack", "",
+                "What an over-broad xApp can change without a policy that names "
+                "it: the PRB quota of another slice, a handover trigger, an "
+                "admission decision."));
+        gtk_box_append(GTK_BOX(attack_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), attack);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(auth_body),
+            mod_arg_row(state, module_id, status, "Read the Authority",
+                "--xapp-authority", "xapps.tsv",
+                "A table of loaded xApps. The answer is the authority each one "
+                "actually holds, which is rarely the authority its manifest "
+                "claims."));
+        gtk_box_append(GTK_BOX(auth_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), auth);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(a1_body),
+            mod_arg_choices(state, module_id, status, "Policy", "",
+                "A forged A1 PUT, or the check that reads one back. The PUT "
+                "names the policy type, the instance and the scope it applies "
+                "to.",
+                (const char *[]) { "--a1-put QoS 1 slice7", "--qos-policy" },
+                (const char *[]) { "A1 PUT", "QoS Policy" }, 2));
+        gtk_box_append(GTK_BOX(a1_body), res);
+        gtk_box_append(GTK_BOX(a1_body),
+            mod_arg_row(state, module_id, status, "Check a Policy",
+                "--qos-policy-check", "policy.json",
+                "A policy body. Every field is validated and an unknown key is "
+                "refused rather than ignored, because a controller that ignores "
+                "a field is a controller whose policy means something else."));
+    }
+    gtk_box_append(GTK_BOX(body), a1);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(e2_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Control",
+                "--e2-control", "3 1 0",
+                "A RAN function, an action and a UE id. The answer is the "
+                "RIC Control message shape (E2AP procedure 6); nothing is sent."));
+        gtk_box_append(GTK_BOX(e2_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), e2);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+oran_build_assess(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ASSESSMENT",
+        "A deployment configuration read for the findings it carries, and what a "
+        "testbed needs to go further.", &body);
+    GtkWidget *assess_body, *plan_body;
+    GtkWidget *assess = verb_card("DEPLOYMENT", &assess_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(assess_body),
+            mod_arg_row(state, module_id, status, "Check the Configuration",
+                "--assess", "oran.conf",
+                "A KEY=VALUE deployment file. Each finding states the control it "
+                "breaks; a configuration that breaks none is reported as clean."));
+        gtk_box_append(GTK_BOX(assess_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), assess);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What an O-RAN testbed needs: a near-real-time RIC, one E2 node, "
+                "and an xApp whose authority is narrower than the attack."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry oran_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--assess:Assess|--interfaces:Interfaces|--e2sm:E2SM" },
-    { "Attacks",
-      "security-high-symbolic",
-      "#XAPP|--xapp-attack:xApp Attack|--xapp-authority:xApp Authority|#INTERFACE|--a1-put:A1 PUT|--e2-control:E2 Control" },
-    { "Planning",
-      "preferences-system-symbolic",
-      "--plan:Plan" },
-    /* A1 policy poisoning aimed at QoS rather than at admission: the body that
-       asks the RIC to re-shape a slice's resources. */
-    { "QoS Policy",
-      "security-high-symbolic",
-      "--qos-policy:A1 QoS Policy|~--qos-policy-check:QoS Policy Check" },
+    { "Interfaces", "dialog-information-symbolic", NULL, oran_build_interfaces },
+    { "Control", "security-high-symbolic", NULL, oran_build_control },
+    { "Assessment", "preferences-system-symbolic", NULL, oran_build_assess },
 };
 /* 49_ntn — 5G NTN / Satellite.
  *
