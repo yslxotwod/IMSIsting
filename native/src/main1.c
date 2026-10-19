@@ -15111,14 +15111,14 @@ tmap_build_overview(AppState *state, const char *module_id,
     GtkWidget *survey = verb_card("RUN A SURVEY PASS", &survey_body);
     GtkWidget *read = verb_card("RECORDED POINTS", &read_body);
 
-        mod_card_begin(NULL);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
     gtk_box_append(GTK_BOX(survey_body),
         mod_arg_row(state, module_id, status, "Start Survey",
             "--survey", "gsm GSM900", "Radio technology (gsm or lte), then a "
             "band for GSM. LTE takes a band list or nothing at all."));
-    {
-        GtkWidget *res = result_rect_new(state, NULL);
-        mod_card_begin(res);
         gtk_box_append(GTK_BOX(survey_body), res);
     }
     gtk_box_append(GTK_BOX(survey_body), fkit_note(
@@ -15127,13 +15127,13 @@ tmap_build_overview(AppState *state, const char *module_id,
         "the next card rather than as an error."));
     gtk_box_append(GTK_BOX(body), survey);
 
-        mod_card_begin(NULL);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
     gtk_box_append(GTK_BOX(read_body),
         mod_arg_row(state, module_id, status, "Read the Points",
             "--list-tsv", "", "Every recorded point, as stored."));
-    {
-        GtkWidget *res = result_rect_new(state, NULL);
-        mod_card_begin(res);
         gtk_box_append(GTK_BOX(read_body), res);
     }
     gtk_box_append(GTK_BOX(read_body),
@@ -15159,14 +15159,14 @@ tmap_build_gps(AppState *state, const char *module_id,
     GtkWidget *daemon = verb_card("GPS DAEMON", &daemon_body);
     GtkWidget *quality = verb_card("CURRENT FIX", &quality_body);
 
-        mod_card_begin(NULL);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
     gtk_box_append(GTK_BOX(daemon_body),
         mod_arg_row(state, module_id, status, "Start gpsd",
             "--start-gpsd", "/dev/ttyUSB0", "The serial device the GPS receiver "
             "is on. Left empty, the module uses /dev/ttyUSB0."));
-    {
-        GtkWidget *res = result_rect_new(state, NULL);
-        mod_card_begin(res);
         gtk_box_append(GTK_BOX(daemon_body), res);
     }
     gtk_box_append(GTK_BOX(daemon_body), fkit_note(
@@ -15174,14 +15174,14 @@ tmap_build_gps(AppState *state, const char *module_id,
         "still acquiring. The following card reports whether a fix exists."));
     gtk_box_append(GTK_BOX(body), daemon);
 
-        mod_card_begin(NULL);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
     gtk_box_append(GTK_BOX(quality_body),
         mod_arg_row(state, module_id, status, "Read the Fix",
             "--gps-quality-tsv", "", "Mode, satellites, accuracy and age of the "
             "last fix \u2014 or the single word \"no\"."));
-    {
-        GtkWidget *res = result_rect_new(state, NULL);
-        mod_card_begin(res);
         gtk_box_append(GTK_BOX(quality_body), res);
     }
     gtk_box_append(GTK_BOX(body), quality);
@@ -15224,15 +15224,15 @@ tmap_build_export(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), export);
 
-        mod_card_begin(NULL);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
     gtk_box_append(GTK_BOX(clean_body),
         mod_arg_row(state, module_id, status, "Clear the Store",
             "--clear", "", "Removes every recorded point and cannot be undone. It is the only "
             "destructive operation on this page, and is therefore separated from "
             "the exporters."));
-    {
-        GtkWidget *res = result_rect_new(state, NULL);
-        mod_card_begin(res);
         gtk_box_append(GTK_BOX(clean_body), res);
     }
     gtk_box_append(GTK_BOX(body), clean);
