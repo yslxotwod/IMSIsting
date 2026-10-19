@@ -11362,6 +11362,11 @@ rtarget_toggled(GtkToggleButton *button, gpointer user_data)
     if (state == NULL || state->rtarget_revealer == NULL) return;
     if (on) rtarget_refresh(state);
     gtk_revealer_set_reveal_child(GTK_REVEALER(state->rtarget_revealer), on);
+    /* A closed panel must not intercept anything. Its size request keeps a
+       footprint at the right edge, so without this the 300px band it occupies
+       is dead to the pointer and every control that lands under it silently
+       does nothing - which is exactly how this was found. */
+    gtk_widget_set_can_target(state->rtarget_revealer, on);
 }
 
 /* ── What the target panel shows back ────────────────────────────────
@@ -12057,6 +12062,8 @@ build_target_panel(AppState *state)
     }
     gtk_widget_set_size_request(revealer, 300, -1);
     gtk_widget_set_vexpand(revealer, TRUE);
+    /* Born closed, so born not taking clicks (see rtarget_toggled). */
+    gtk_widget_set_can_target(revealer, FALSE);
     state->rtarget_revealer = revealer;
 
     return revealer;

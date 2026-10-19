@@ -240,6 +240,20 @@ field manual. The operator called this out on a heading that read "TAKE IT
 SOMEWHERE"; the replacement is "EXPORT" with the sentence beneath it, and that is
 the register for every page from that point on.
 
+### The closed target panel was eating every click on the right
+
+The target panel is a `GtkRevealer` slid in from the right edge. Closing it set
+`reveal-child FALSE`, which hides its child — but the revealer keeps its
+`size_request(300)`, and a childless widget still takes target. So while the
+panel was closed, **the right 300px of every page was dead to the pointer**:
+buttons there painted, hovered, and did nothing. Everything left of
+`window_width - 300` worked, which reads as "some buttons are broken".
+
+Bisection that found it: every click at x < 880 fired, every click at x > 880
+did not, on pages that share nothing else. Fix:
+`gtk_widget_set_can_target(revealer, on)` in the toggle, and `FALSE` at
+construction. Any slide-in panel added later needs the same line.
+
 ### A C bug worth remembering
 
 ```c
