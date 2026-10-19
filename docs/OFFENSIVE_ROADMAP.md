@@ -1941,6 +1941,122 @@ passes, ever — that rule is already enforced by the kit and must stay enforced
 
 ---
 
+**Phase 22 — the four protocols this tree does not speak.** `26_ss7_map`
+(SGsAP), `41_ota_sms` (SMPP), `46_lpp` (SUPL), `16_sim` (eSIM RSP).
+
+Absence was checked against the code, not against this file: `grep -riE
+'sgsap|supl|ulp'` over `modules/` and `tools/` returns **nothing at all**, and
+`smpp` appears once, as prose at `modules/41_ota_sms.sh:1975` promising a
+scripted ESME that does not exist. The fourth is the exception and is recorded
+as one: **eSIM RSP is half built already** — `16_sim --es9-plus` builds the four
+synchronous ES9+ requests (request line, the headers SGP.22 §6.5.1 mandates,
+JSON bodies key-ordered to §6.5.2.6..6.5.2.10, and a `curl` command as `--out`)
+and sends nothing. What that module states from inside, and this phase inherits:
+ES2+ (§6.5.2.1..6.5.2.5), ES10b/ES10c (§5.7) and `ES9+.HandleNotification`
+(§6.5.2.9) are not implemented, and **ES8+ — the bound profile package itself —
+returns zero hits in the tree**. So this phase is three absent protocols and one
+half-present one, with four independent verdicts rather than one claim.
+
+1. **SGsAP** — TS 29.118, MME ↔ MSC over SCTP **29118**, message = one octet
+   type followed by IEs whose form is IEI (1 octet) + length (**2 octets**) +
+   value, with its own IE table (`IMSI`, `TAI`, `LAI`, `VLR-Name`, `SGs-Cause`,
+   `Service-Indicator`, `UE-EMM-Mode`, `Paging-Retry`). Deliverable: build
+   `Location-Update-Request`, `Paging-Request`, `Downlink-Unitdata` (the SMS
+   delivery that carries a TPDU on a circuit that is not CS) and
+   `Service-Request` for CS fallback; decode the same in the other direction.
+   Referee: `tshark`'s `sgsap` dissector on PPID 0 / port 29118, in both
+   directions, plus a negation control for every flag octet. Why it matters:
+   this is the interface on which a subscriber is *paged and messaged* without
+   a data bearer, and nothing in this tree reads it.
+2. **SMPP 3.4** — ESME ↔ SMSC over TCP **2775**; header 4-octet length +
+   command id + command status + sequence number, body as null-terminated
+   C-Octet strings and fixed integers. Deliverable: `submit_sm` with a chosen
+   `source_addr`, `deliver_sm`, `bind_transceiver`, and the response path, so a
+   message can be *aimed* rather than described. Referee: `tshark`'s `smpp`
+   dissector over a real TCP stream, with the spine (length field and the
+   C-Octet boundaries) checked octet by octet. Honest boundary: this builds and
+   speaks the protocol to a peer that authorises it; it does not give anyone an
+   SMSC account, and the phase says so in the same breath.
+3. **SUPL / OMA ULP** — the envelope that makes a handset compute and report
+   its own position. `46_lpp` already carries the LPP payloads (the positioning
+   protocol itself); what is absent is the transport around them: `SUPL INIT`
+   (network → SET, the trigger), `SUPL START`/`POS` (SET ↔ HLR/SLP, the
+   carriage), over TCP 7275 with the session id and SET id in their own
+   encodings. Deliverable: build the initiator half, decode the responder half,
+   and let the existing LPP codec ride inside it — the composition is the point,
+   and it is verifiable without a network. Referee: `tshark`'s `ulp` dissector
+   on a loopback capture of the built message, with the LPP payload re-decoded
+   by `46_lpp` after being carried.
+4. **eSIM RSP** — SGP.22, and the half that exists already. `16_sim
+   --es9-plus` builds `initiateAuthentication`, `authenticateClient`,
+   `getBoundProfilePackage` and `cancelSession` requests; what is absent is
+   everything on the other side of that boundary: **ES8+**, the bound profile
+   package (a versioned TLV carrying the profile's segments), the response
+   parsers for the four ES9+ calls, `HandleNotification`, and ES10b/ES10c
+   against a real eUICC. Deliverable: build the ES8+ envelope and parse the ES9+
+   responses, with the same "bytes, not prose" contract as the rest of the tree.
+   Referee, stated plainly: **there is no external referee for this half** — no
+   dissector, no pycrate module. It is checked against SGP.22's own field tables
+   and by round-trip (build → parse → build), which is weaker than the other
+   three and must be printed as weaker rather than presented as equal. The phase
+   therefore ranks it last and marks it `built (round-trip only)`.
+
+Gate for all four: each gets a `tools/check-<name>-codec.sh` in the house shape
+(oracle where an oracle exists, round-trip where it does not), a module verb
+pair `--<name>-build` / `--<name>-decode`, a GUI row, and a `partial` sentence
+naming exactly which procedures are absent. Transmission stays behind the
+existing arming variables — `MAP_ARMED` for SGsAP, and a new gate for SMPP and
+SUPL, because both are sockets to somebody else's service.
+
+**Phase 23 — the graphical additions.** Not a module: the part of the answer a
+table renders badly. The precedent is already in the tree and is one function —
+`rtarget_spark_draw()` in `native/src/main1.c` draws the WiFi recon targets
+sparkline from `AppState.rtarget_spark[]`, a cairo callback on a
+`GtkDrawingArea`, no new dependency.
+
+The rule that keeps this from becoming decoration: **a chart is built only where
+the data has an axis and the axis is the finding.** A verdict, a hex blob and a
+single number do not get one. Everywhere a chart exists, the numbers underneath
+it stay the record, and the chart must be recomputable from the same rows — a
+chart that cannot be reconstructed from the table it sits beside is a picture,
+not an instrument.
+
+Four shapes cover every candidate that survived a sweep of all 57 modules and
+their verbs: a **timeline** (interval per row), a **strip** (one mark per element
+of a series, height or colour carrying the value), a **distribution** (bars over
+buckets) and a **line** (a value against time, the sparkline generalised). The
+candidates that earn one, with the verb each reads:
+
+- call timeline — `23_traffic_analysis --calls-tsv`: one bar per call, so
+  overlap between two calls on one cell is visible, which a row table cannot
+  show at all;
+- keystream strip — `30_volte_ims --detect-keystream-reuse`: one mark per
+  aligned frame, coloured by whether it fired, so the reuse pattern's length and
+  its position inside a call's silence are both legible;
+- subscriber timeline — `37_femtocell --live` over `subscribers.tsv`: one marker
+  per sighting, grouped by identity, so a handset that appears, disappears and
+  returns is one line rather than three rows to count;
+- identity distribution — `03_gsmtap --identities-tsv`: sightings per identity,
+  which is the "who is loudest" question a log answers badly;
+- rate — `32_nas_signaling --rate` and `28_paging_track --paging-storm`: a value
+  against time, already printed as a series.
+
+Deliverable: one chart widget in `native/src/main1.c` (a `GtkDrawingArea` with
+one draw callback per shape, sharing a scale and a gutter), a `.chart-*` block in
+`native/resources/style.css` in the same vocabulary as `.scell-feed-*`, and one
+chart per page listed above — read from the module's existing TSV, never from a
+new verb. Gate: every chart's drawn range is asserted against the same rows the
+table prints (a `check-charts.sh` that recomputes the geometry from the TSV and
+compares the numbers, not the pixels), and the no-verb-in-GUI rule continues to
+apply to axis labels and captions.
+
+What this phase deliberately does **not** do: no 3D, no animation, no chart that
+exists to fill an empty panel, and no chart on a page whose answer is a verdict.
+A page with nothing to plot keeps the table.
+
+
+---
+
 ## What "complete" means for a TX module
 
 A module is finished when all four are true:
