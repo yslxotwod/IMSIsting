@@ -310,93 +310,41 @@ ue_cmd_radio() {
 }
 
 # The serving cell is the one observation that cannot be inferred from the
-# bench's own radio: this is what the phone was actually camped on.
-# Every CellIdentity the dump printed, as rows: "rat<TAB>n<TAB>name" and
-# "field<TAB>n<TAB>name<TAB>value".  The first block is the serving cell and the
-# rest are what the modem knows of the neighbourhood.  A field can be a number,
-# "Unknown", or absent, and those are three different answers, so none is
-# dropped quietly.  Three layouts are in the wild: no spaces around "=", spaces
-# around it, and the same fields inside a CellInfo wrapper.
-ue_cell_blocks() {
-    awk '
-    {
-        line = $0
-        while (match(line, /CellIdentity[A-Za-z]*:/) > 0) {
-            rest = substr(line, RSTART)
-            depth = 0; end = 0
-            for (i = 1; i <= length(rest); i++) {
-                c = substr(rest, i, 1)
-                if (c == "{") { depth++ }
-                else if (c == "}") { depth--; if (depth == 0) { end = i; break } }
-            }
-            if (end == 0) { end = length(rest) }
-            obj = substr(rest, 1, end)
-            rat = obj
-            sub(/:.*/, "", rat)
-            sub(/^CellIdentity/, "", rat)
-            nb++
-            printf "rat\t%d\t%s\n", nb, (rat == "" ? "unknown" : rat)
-            gsub(/[{}]/, " ", obj)
-            gsub(/ *= */, "=", obj)
-            gsub(/,/, " ", obj)
-            cnt = split(obj, parts, /[ \t]+/)
-            for (k = 1; k <= cnt; k++) {
-                eq = index(parts[k], "=")
-                if (eq == 0) { continue }
-                name = substr(parts[k], 1, eq - 1)
-                val = substr(parts[k], eq + 1)
-                if (name ~ /^m[A-Za-z]+$/ && val != "") {
-                    printf "field\t%d\t%s\t%s\n", nb, substr(name, 2), val
-                }
-            }
-            line = substr(line, RSTART + end)
-        }
-    }'
-}
-
+# bench's own radio: this is what the phone was actually camped on.  The dump
+# is parsed by tools/ue_cells.py rather than by an awk here, because the shapes
+# that broke it are not grep-shaped: the same cell printed several times, the
+# identity nested inside a CellInfo wrapper that also carries its signal
+# strength, band lists that contain commas, and a hardened build that writes
+# "[****]" where a number belongs.  That parser has its own fixtures.
 ue_cmd_cells() {
-    ue_cmd_probe >/dev/null 2>&1
-    local rc=$?; (( rc == 3 )) && { ue_unavailable; return 3; }
-    local reg rows
-    reg=$(ue_shell 'dumpsys telephony.registry' | tr -d '\r')
-    rows=$(printf '%s\n' "$reg" | ue_cell_blocks)
-    if [[ -z "$rows" ]]; then
-        ue_emit status no-cell-info
-        ue_emit reason "telephony.registry carried no CellIdentity; the handset may be idle or the API withheld it"
-        return 3
-    fi
-    ue_emit status cell-seen
-    ue_emit blocks "$(printf '%s\n' "$rows" | grep -c '^rat')"
-    local kind idx name val
-    while IFS=$'\t' read -r kind idx name val; do
-        case "$kind" in
-            rat)   [[ "$idx" == "1" ]] && ue_emit rat "$name"
-                   ue_emit "cells.$idx.rat" "$name" ;;
-            field) ue_emit "cells.$idx.$name" "$val"
-                   [[ "$idx" == "1" ]] && ue_emit "cell.$name" "$val" ;;
+    local file=""
+    while (( $# )); do
+        case "$1" in
+            --file) file="${2:-}"; shift 2 ;;
+            *)      shift ;;
         esac
-    done <<< "$rows"
-
-    # The serving cell cannot be described without these four.  A field the dump
-    # marked Unknown says the modem withheld it; a field the dump never printed
-    # says this build does not publish it.  One is a policy, the other is a
-    # version, and the operator needs to know which.
-    local f v missing="" withheld=""
-    for f in Ci Pci Tac Earfcn; do
-        v=$(printf '%s\n' "$rows" | awk -F'\t' -v n="$f" '$1=="field" && $2==1 && $3==n {print $4; exit}')
-        if [[ -z "$v" ]]; then
-            missing="$missing $f"
-        elif [[ "$v" == Unknown || "$v" == unknown || "$v" == null ]]; then
-            withheld="$withheld $f"
-        fi
     done
-    [[ -n "$missing" ]] && ue_emit missing "${missing# }"
-    [[ -n "$withheld" ]] && ue_emit withheld "${withheld# }"
-
-    local rsrp
-    rsrp=$(printf '%s\n' "$reg" | grep -oE 'm?[Rr]srp *= *-?[0-9]+' | head -1 | sed 's/.*= *//')
-    [[ -n "$rsrp" ]] && ue_emit signal_rsrp "$rsrp"
-    return 0
+    local parser="$ROOT/tools/ue_cells.py"
+    if [[ ! -f "$parser" ]]; then
+        printf 'ERROR\t%s is missing\nWHY\tthe registry layout is not a shell job\n' "$parser"
+        return 1
+    fi
+    local text=""
+    if [[ -n "$file" ]]; then
+        if [[ ! -f "$file" ]]; then
+            printf 'ERROR\tno such file: %s\n' "$file"
+            return 2
+        fi
+        text="$file"
+    else
+        ue_cmd_probe >/dev/null 2>&1
+        local rc=$?; (( rc == 3 )) && { ue_unavailable; return 3; }
+        local reg
+        reg=$(ue_shell 'dumpsys telephony.registry' | tr -d '\r')
+        printf '%s\n' "$reg" | python3 "$parser" rows
+        return $?
+    fi
+    python3 "$parser" rows --file "$text"
 }
 
 # The modem's own account of what it did: `adb logcat -b radio`, sorted into
@@ -529,8 +477,11 @@ case "$*" in
         if [[ "${UE_STUB_CELLS:-}" == "withheld" ]]; then
             printf '  mCellIdentity=CellIdentityLte:{ mCi = 12345678 mPci = Unknown mTac = 26011 mMcc = 310 mMnc = 260 }\n'
         else
-            printf '  mCellIdentity=CellIdentityLte:{ mCi = 12345678 mPci = 301 mTac = 26011 mEarfcn = 6300 mBands = [3] mBandwidth = 20000 mMcc = 310 mMnc = 260 }\n'
-            printf '  mCellInfo=[CellInfoLte:{ mRegistered=YES mCellIdentityLte=CellIdentityLte:{ mCi = 87654321 mPci = 12 mTac = Unknown mEarfcn = 1300 mMcc = 310 mMnc = 260 }}]\n'
+            # The shape a hardened build actually prints: identifiers redacted,
+            # band lists that contain commas, and the serving cell repeated bare
+            # and then inside CellInfo carrying its signal strength.
+            printf '  mCellIdentity=CellIdentityLte:{ mCi = [****] mPci = [****] mTac = [****] mEarfcn = [****] mBands = [3] mBandwidth = 20000 mMcc = 208 mMnc = 20 mAlphaLong = LycaMobile mAlphaShort = LycaMobile mAdditionalPlmns = {} mCsgInfo = null }\n'
+            printf '  mCellInfo=[CellInfoLte:{ mRegistered=YES mTimeStamp=1 mCellIdentityLte=CellIdentityLte:{ mCi = [****] mPci = [****] mTac = [****] mEarfcn = [****] mBands = [3] mBandwidth = 20000 mMcc = 208 mMnc = 20 } mCellSignalStrengthLte = { rsrp = -97 rsrq = -12 } }, CellInfoLte:{ mRegistered=NO mTimeStamp=2 mCellIdentityLte=CellIdentityLte:{ mCi = [****] mPci = [****] mTac = [****] mEarfcn = [****] mBands = [20,3] mBandwidth = 10000 mMcc = null mMnc = null } mCellSignalStrengthLte = { rsrp = -111 } }]\n'
         fi ;;
     # The radio buffer: prose, an AT trace, a proven APDU and a proven NAS PDU.
     "logcat -b radio -d -v threadtime -t 400") printf '01-02 03:04:05.678  1234  5678 D RILJ    : [UNSL]< UNSOL_RESPONSE_NETWORK_STATE\n01-02 03:04:05.679  1234  5678 D AT      : AT> AT+CSQ\n01-02 03:04:05.681  1234  5678 D RIL     : AT< +CRSM: 144,0,\"002F0A0B0C\"\n01-02 03:04:05.682  1234  5678 D RILC    : NAS: 07 41 0b f1 10\n' ;;
@@ -587,21 +538,23 @@ EOF
 
     out=$(bash "${BASH_SOURCE[0]}" --cells 2>/dev/null)
     ue_check cell-rat      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="rat"{print $2}')"           "Lte"
-    ue_check cell-ci       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Ci"{print $2}')"       "12345678"
-    ue_check cell-pci      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Pci"{print $2}')"      "301"
-    ue_check cell-tac      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Tac"{print $2}')"      "26011"
-    ue_check cell-earfcn   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Earfcn"{print $2}')"   "6300"
-    ue_check cell-mcc      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Mcc"{print $2}')"      "310"
-    # Two blocks now: the serving cell and a neighbour.  A neighbour's Unknown
-    # field is still a field, and it must reach the reader as "Unknown" rather
-    # than vanish.
+    # A redacted identifier is a value the handset HAS and will not print.  It
+    # reaches the reader as the token the handset used, never as empty and never
+    # as a number the parser guessed.
+    ue_check cell-ci       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Ci"{print $2}')"       "[****]"
+    ue_check cell-mcc      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Mcc"{print $2}')"      "208"
+    ue_check cell-bw       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Bandwidth"{print $2}')" "20000"
+    # Three printed blocks, two cells: the serving cell is printed bare and then
+    # inside CellInfo, and reading both as separate cells invents a neighbour.
     ue_check cell-blocks   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="blocks"{print $2}')"       "2"
-    ue_check cell-nb-pci   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cells.2.Pci"{print $2}')"  "12"
-    ue_check cell-nb-tac   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cells.2.Tac"{print $2}')"  "Unknown"
-    ue_check cell-rsrp     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="signal_rsrp"{print $2}')"  "-95"
+    ue_check cell-deduped  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="duplicates"{print $2}')"   "1"
+    ue_check cell-withheld "$(printf '%s\n' "$out" | awk -F'\t' '$1=="withheld"{print $2}')"     "Ci Pci Tac Earfcn"
+    ue_check cell-nb-bands "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cells.2.Bands"{print $2}')" "[20,3]"
+    ue_check cell-nb-null  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cells.2.Mcc"{print $2}')"  "null"
+    ue_check cell-rsrp     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="signal_rsrp"{print $2}')"  "-97"
     out=$(UE_STUB_CELLS=withheld PATH="$stub_dir:$saved_path" UE_ADB="$stub_dir/adb" bash "${BASH_SOURCE[0]}" --cells 2>/dev/null)
-    ue_check cell-withheld "$(printf '%s\n' "$out" | awk -F'\t' '$1=="withheld"{print $2}')"     "Pci"
-    ue_check cell-missing  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="missing"{print $2}')"      "Earfcn"
+    ue_check cell-withheld-w "$(printf '%s\n' "$out" | awk -F'\t' '$1=="withheld"{print $2}')"   "Pci"
+    ue_check cell-missing   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="missing"{print $2}')"     "Earfcn"
     ue_check cell-status   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')"        "cell-seen"
 
     # 4b. The radio log: a saved log parses without a handset, a live one comes
@@ -720,7 +673,7 @@ ue_main() {
         --probe)     ue_cmd_probe ;;
         --identity)  ue_cmd_identity ;;
         --radio)     ue_cmd_radio ;;
-        --cells)     ue_cmd_cells ;;
+        --cells)     ue_cmd_cells "${@:2}" ;;
         --radio-log) ue_cmd_radio_log "$@" ;;
         --collect)   ue_cmd_collect "${1:-}" "${2:-}" ;;
         --plan)      ue_cmd_plan ;;
@@ -733,7 +686,7 @@ Usage: $0 COMMAND
   --probe       adb present, device present, serial and state
   --identity    model, build, IMEI, IMSI, SIM -- each with its source
   --radio       SIM state, operator, network type, signal
-  --cells       the serving cell as the handset sees it
+  --cells       the serving cell as the handset sees it [--file dump.txt]
   --radio-log [--file PATH] [--lines N] [--commands] [--decode]
                 the modems own radio buffer, sorted into PDUs and text
                 (no handset? give it a saved log with --file)

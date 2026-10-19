@@ -355,8 +355,12 @@ def parse_text(text: str) -> dict:
             continue
         records.append(rec)
         shapes[rec["shape"]] = shapes.get(rec["shape"], 0) + 1
-        layer = (rec.get("pdu") or {}).get("layer", "-")
-        layers[layer] = layers.get(layer, 0) + 1
+        # A layer is a claim about a PDU.  Counting prose lines under "-" makes
+        # the summary read as if 401 records had an unreadable layer when in
+        # fact 401 records were never PDUs to begin with.
+        layer = (rec.get("pdu") or {}).get("layer")
+        if layer:
+            layers[layer] = layers.get(layer, 0) + 1
     pdus = [r for r in records if r.get("pdu") and r.get("hex")]
     return {
         "lines": len([l for l in lines if l.strip()]),
@@ -497,6 +501,16 @@ def selftest() -> int:
     ran = [d for d in run_plan(parsed, here) if d["status"] == "decoded"]
     _check("decode-runs-real-verbs", len(ran) >= 2, True, results)
     _check("decode-returns-fields", bool(ran and ran[0]["rows"]), True, results)
+
+    # A layer is a claim about a PDU.  Prose lines must not be counted under a
+    # layer, or the summary reads as if every log line had an unreadable layer.
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _rows(parse_text("01-02 03:04:05.678  1  2 D RILJ : [UNSL]< UNSOL_RESPONSE_NETWORK_STATE\n"), "stdin", False)
+    layers = [ln for ln in buf.getvalue().splitlines() if ln.startswith("layer.")]
+    _check("prose-has-no-layer", layers, [], results)
 
     failed = len([1 for _, ok, _, _ in results if not ok])
     print("\n%d assertions, %d failed" % (len(results), failed))
