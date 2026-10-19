@@ -187,6 +187,10 @@ def _clean(fields_dict):
         # of 2.1 billion dBm.
         if value == "2147483647":
             value = "unknown"
+        if name == "TimeStamp":
+            # The snapshot's own clock, repeated on every block: not a fact
+            # about the cell.
+            continue
         out[name] = value
     return out
 
@@ -194,20 +198,30 @@ def _clean(fields_dict):
 IDENTITY_FIELDS = ("Ci", "Pci", "Tac", "Earfcn", "Mcc", "Mnc", "Bands", "Bandwidth")
 
 
-def _identity_key(cell):
-    """What makes two blocks the same cell.
+def _known(value):
+    return bool(value) and value not in WITHHELD_TOKENS
 
-    A redacted field is not compared: when the handset will not name a cell,
-    two cells with the same bands and the same operator are indistinguishable
-    in this output, and listing them twice would invent a second cell.
+
+def _compatible(one, two):
+    """Whether two blocks can be the same cell.
+
+    Not the same question as "do they print identical values".  A neighbour in
+    the CellInfo list prints `mMcc = null` while the same cell appears a few
+    lines later with its operator named, and the same is true of the band list
+    depending on which snapshot printed it.  Comparing the strings lists that
+    cell twice -- once with a signal and no operator, once with an operator and
+    no signal.  Two values that are both known must agree; a value one side
+    never printed constrains nothing.
     """
-    parts = []
     for name in IDENTITY_FIELDS:
-        value = cell.get(name, "")
-        if value in WITHHELD_TOKENS:
-            value = ""
-        parts.append((name, value))
-    return tuple(parts)
+        a, b = one.get(name, ""), two.get(name, "")
+        if _known(a) and _known(b) and a != b:
+            return False
+    return True
+
+
+def _source_of(cell):
+    return "CellInfo" if cell.get("_source") == "CellInfo" else "CellIdentity"
 
 
 def parse(text):
@@ -221,24 +235,22 @@ def parse(text):
     ordered = infos + bare
 
     cells = []
-    index = {}
     duplicates = 0
     for block in ordered:
         f = _clean(_lift(block["fields"] if block["kind"] == "CellInfo" else _lift(block["fields"])))
         if not f:
             continue
-        key = _identity_key(f)
-        if key in index:
+        f.setdefault("rat", block["rat"] or "unknown")
+        f.setdefault("_source", block["kind"])
+        merged = next((c for c in cells if _compatible(c, f)), None)
+        if merged is not None:
             duplicates += 1
-            merged = index[key]
             for name, value in f.items():
-                if value and not merged.get(name):
+                if value and not _known(merged.get(name, "")):
                     merged[name] = value
             if f.get("Registered") == "yes":
                 merged["Registered"] = "yes"
             continue
-        f.setdefault("rat", block["rat"] or "unknown")
-        index[key] = f
         cells.append(f)
 
     # Registration is the fact that decides which cell is serving; dump order
@@ -267,9 +279,14 @@ def rows(text, out):
     row("rat", serving.get("rat", "unknown"))
 
     for i, cell in enumerate(cells, 1):
+        row("cells.%d.Source" % i, _source_of(cell))
+        if i == 1:
+            row("cell.Source", _source_of(cell))
         for name in sorted(cell):
             value = cell[name]
             if not value or value.endswith("="):
+                continue
+            if name.startswith("_"):
                 continue
             row("cells.%d.%s" % (i, name), value)
             if i == 1:
@@ -306,6 +323,12 @@ FIXTURE = """\
 # are printed right after a status code, with no field name in front of either.
 UNNAMED = """\
   mCellInfo=[CellInfoLte:{ mRegistered=YES mTimeStamp=18966047046ns mCellConnectionStatus=1 CellIdentityLte:{ mCi = [****] mPci = [****] mTac = [****] mEarfcn = [****] mBands = [20, 3, 1, 7, 28] mBandwidth = 10000 mMcc = 208 mMnc = 20 mAlphaLong =  mAlphaShort =  mAdditionalPlmns = {} mCsgInfo = null } CellSignalStrengthLte:{ rsrp = -75 rsrq = -5 rssi = 2147483647 cqi = 15 level = 4 } parametersUseForLevel = 0 android.telephony.CellConfigLte :{ isEndcAvailable = false }}]
+"""
+
+
+MERGE = """\
+  mCellInfo=[CellInfoLte:{ mRegistered=NO mCellConnectionStatus=2 CellIdentityLte:{ mBands = [3] mBandwidth = 20000 mMcc = null mMnc = null } CellSignalStrengthLte:{ rsrp = -95 level = 3 }}, CellInfoLte:{ mRegistered=NO mCellConnectionStatus=2 CellIdentityLte:{ mBands = [7] mBandwidth = 15000 mMcc = null mMnc = null } CellSignalStrengthLte:{ rsrp = -97 }}]
+  mCellIdentity=CellIdentityLte:{ mBands = [3] mBandwidth = 20000 mMcc = 208 mMnc = 20 mAlphaLong = LycaMobile }
 """
 
 
@@ -381,6 +404,17 @@ def selftest():
     chk("unnamed-signal", "cell.rsrp\t-75" in live, True)
     chk("unnamed-no-object-values", any("{" in l for l in live.splitlines()), False)
     chk("unnamed-maxvalue-is-unknown", "cell.rssi\tunknown" in live, True)
+
+    # The same cell twice: once from the CellInfo list with its signal and no
+    # operator, once as a bare identity with the operator and no signal.
+    merged = parse(MERGE)
+    chk("compat-merge-count", len(merged["cells"]), 2)
+    chk("compat-merge-folded", merged["duplicates"], 1)
+    three = merged["cells"][0]
+    chk("compat-merge-keeps-signal", three.get("rsrp"), "-95")
+    chk("compat-merge-takes-operator", three.get("Mcc"), "208")
+    chk("compat-merge-takes-name", three.get("AlphaLong"), "LycaMobile")
+    chk("compat-no-overmerge", merged["cells"][1].get("Bands"), "[7]")
 
     passed = sum(1 for r in results if r)
     sys.stdout.write("\n%d assertions, %d failed\n" % (len(results), len(results) - passed))
