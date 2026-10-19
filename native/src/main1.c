@@ -21385,13 +21385,99 @@ static ModuleSubmenuEntry ussd_entries[] = {
     { "Strings", "dialog-information-symbolic", NULL, ussd_build_strings },
     { "Unsolicited", "security-high-symbolic", NULL, ussd_build_attacks },
 };
+/* 39_ta_geoloc — a timing advance is a distance.
+ *
+ * One TA is about 78 metres of radial distance and nothing about bearing. The
+ * page computes what one measurement gives, and what two or three give when a
+ * cell's own coordinates are known.
+ */
+static GtkWidget *
+tgeo_build_ta(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("TIMING ADVANCE",
+        "What one timing advance says about distance, and the arithmetic that "
+        "turns it into metres.", &body);
+    GtkWidget *ta_body, *cells_body;
+    GtkWidget *ta = verb_card("ONE MEASUREMENT", &ta_body);
+    GtkWidget *cells = verb_card("KNOWN CELLS", &cells_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ta_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a TA",
+                "--ta", "12",
+                "The timing advance as the network reports it. The answer is a "
+                "distance and a ring, never a point: one measurement cannot place "
+                "a handset."));
+        gtk_box_append(GTK_BOX(ta_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ta);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cells_body),
+            mod_arg_row(state, module_id, status, "Read the Cells",
+                "--cells", "cells.tsv",
+                "Cells with their coordinates. Without them a trilateration is "
+                "arithmetic on invented positions, and the module says so."));
+        gtk_box_append(GTK_BOX(cells_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cells);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+tgeo_build_place(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("POSITION",
+        "What several measurements agree on, and the uncertainty that comes with "
+        "the answer.", &body);
+    GtkWidget *tri_body, *plan_body;
+    GtkWidget *tri = verb_card("TRILATERATE", &tri_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tri_body),
+            mod_arg_row(state, module_id, status, "Solve for Position",
+                "--trilaterate", "measurements.tsv",
+                "Measurements against known cells. The answer carries its own "
+                "residual: a solve that does not converge is reported as one that "
+                "does not converge."));
+        gtk_box_append(GTK_BOX(tri_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tri);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What a positioning lab needs, and why a timing advance alone is "
+                "evidence of a ring rather than a place."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry tgeo_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--ta=1|--trilaterate:Trilaterate|--cells:Cells" },
-    { "Planning",
-      "preferences-system-symbolic",
-      "--plan:Plan" },
+    { "Timing Advance", "dialog-information-symbolic", NULL, tgeo_build_ta },
+    { "Position", "system-search-symbolic", NULL, tgeo_build_place },
 };
 static ModuleSubmenuEntry sbap_entries[] = {
     { "Overview",
