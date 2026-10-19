@@ -25355,45 +25355,486 @@ static ModuleSubmenuEntry n3g_entries[] = {
     { "Frames", "network-wireless-symbolic", NULL, n3g_build_frames },
     { "Reference", "preferences-system-symbolic", NULL, n3g_build_reference },
 };
+/* 54_baseband_exploit — the CVEs a baseband answers to.
+ *
+ * A modem is a network-facing program running on a chip that cannot be patched by
+ * the person holding the phone. The page separates the catalogue from the two
+ * things it can build: an L2 frame and a registration response.
+ */
+static GtkWidget *
+bexp_build_catalogue(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CATALOGUE",
+        "The CVEs this module carries, with the checks that decide whether an "
+        "emulated stack is reachable by one of them.", &body);
+    GtkWidget *list_body, *one_body, *states_body, *cp_body;
+    GtkWidget *list = verb_card("ENTRIES", &list_body);
+    GtkWidget *one = verb_card("ONE CVE", &one_body);
+    GtkWidget *states = verb_card("STACK STATES", &states_body);
+    GtkWidget *cp = verb_card("CONTROL PLANE", &cp_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(list_body),
+            mod_arg_row(state, module_id, status, "List Every Entry",
+                "--list-cves", "",
+                "Each catalogued CVE with the state it needs and the check that "
+                "says whether a stack in that state is reachable."));
+        gtk_box_append(GTK_BOX(list_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), list);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(one_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read One",
+                "--cve", "CVE-2020-0069",
+                "A CVE identifier. The answer is the state it needs, what it does "
+                "and how the module would establish reachability - never a payload."));
+        gtk_box_append(GTK_BOX(one_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), one);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(states_body),
+            mod_arg_row(state, module_id, status, "Read the States",
+                "--states", "",
+                "The stack states the catalogue distinguishes, which is what turns "
+                "a list of CVEs into a plan for one device."));
+        gtk_box_append(GTK_BOX(states_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), states);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cp_body),
+            mod_arg_row(state, module_id, status, "Check the Control Plane",
+                "--cp-check", "capture.pcap",
+                "Whether a captured control plane is in a state any catalogued CVE "
+                "applies to. A check that cannot establish reachability says so."));
+        gtk_box_append(GTK_BOX(cp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cp);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+bexp_build_build(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("BUILD",
+        "The two messages this module builds: an L2 frame and a registration "
+        "response, and the corpus of frame cases behind the first.", &body);
+    GtkWidget *frame_body, *corpus_body, *reg_body, *id_body;
+    GtkWidget *frame = verb_card("L2 FRAME", &frame_body);
+    GtkWidget *corpus = verb_card("L2 CORPUS", &corpus_body);
+    GtkWidget *reg = verb_card("REGISTRATION", &reg_body);
+    GtkWidget *id = verb_card("IDENTITY", &id_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(frame_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Frame",
+                "--l2-build", "0 0001",
+                "A channel type and the payload. The answer is the L2 frame with "
+                "its header, which is the layer a baseband parses before anything "
+                "above it exists."));
+        gtk_box_append(GTK_BOX(frame_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), frame);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(corpus_body),
+            mod_arg_choices(state, module_id, status, "Corpus", "",
+                "The cases this module enumerates, and one case built on its own.",
+                (const char *[]) { "--l2-corpus", "--l2-case 3" },
+                (const char *[]) { "List Cases", "One Case" }, 2));
+        gtk_box_append(GTK_BOX(corpus_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), corpus);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(reg_body),
+            mod_arg_choices(state, module_id, status, "Answer a registration", "",
+                "An accept and a reject are the two answers to a registration "
+                "attempt, and the difference between them is where a forged "
+                "network puts a device next.",
+                (const char *[]) { "--forge-reg-accept 001010000000001",
+                                   "--forge-reg-reject 001010000000001 15" },
+                (const char *[]) { "Accept", "Reject" }, 2));
+        gtk_box_append(GTK_BOX(reg_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), reg);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(id_body),
+            mod_arg_row_prefilled(state, module_id, status, "Forge an Identity",
+                "--forge-identity", "310150123456789",
+                "An IMSI. The answer is the identity as the baseband would present "
+                "it, and the note says what that is and is not evidence of."));
+        gtk_box_append(GTK_BOX(id_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), id);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+bexp_build_stage(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("STAGING",
+        "What it takes to get a built frame in front of a device, and what the "
+        "module will not do on its own.", &body);
+    GtkWidget *emu_body, *inject_body, *send_body, *plan_body;
+    GtkWidget *emu = verb_card("EMULATE", &emu_body);
+    GtkWidget *inject = verb_card("INJECT", &inject_body);
+    GtkWidget *send = verb_card("SEND", &send_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(emu_body),
+            mod_arg_row_prefilled(state, module_id, status, "Start an Emulation",
+                "--emulate", "310260",
+                "A PLMN to appear as. The answer is the stack the module would "
+                "drive and what it still needs, not a running network."));
+        gtk_box_append(GTK_BOX(emu_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), emu);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(inject_body),
+            mod_arg_row_prefilled(state, module_id, status, "Prepare an Injection",
+                "--inject", "0102",
+                "The frame to place. The answer is the plan for putting it in front "
+                "of a modem - which for a baseband means a lab device, never a "
+                "handset in the street."));
+        gtk_box_append(GTK_BOX(inject_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), inject);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(send_body),
+            mod_arg_row_prefilled(state, module_id, status, "Send",
+                "--send", "0102",
+                "The one verb here that would put bytes on the air. It refuses "
+                "unless the request says, with --yes, that the device is yours."));
+        gtk_box_append(GTK_BOX(send_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), send);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What a baseband lab needs: a device with a debuggable modem, a "
+                "wired path to it, and the recording that makes a claim about it "
+                "checkable."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry bexp_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--list-cves:List CVEs|--emulate:Emulate|--states:States" },
-    { "Forge",
-      "security-high-symbolic",
-      "--forge-identity:Forge Identity|--forge-reg-accept:Forge Reg Accept|--forge-reg-reject:Forge Reg Reject" },
-    { "Analysis",
-      "system-search-symbolic",
-      "#CVE|--cve=CVE-2023-33042|#CHECK|--cp-check:CP Check|#L2|--l2-case:L2 Case|--l2-corpus:L2 Corpus|~--l2-build" },
-    { "Transmit",
-      "network-transmit-receive-symbolic",
-      "#FRAME|~--inject|#CASE|~--send" },
-    { "Planning",
-      "preferences-system-symbolic",
-      "--plan:Plan" },
+    { "Catalogue", "dialog-information-symbolic", NULL, bexp_build_catalogue },
+    { "Build", "document-send-symbolic", NULL, bexp_build_build },
+    { "Staging", "security-high-symbolic", NULL, bexp_build_stage },
 };
+/* 55_nr_inject — the NR access procedure, read and built.
+ *
+ * A random access occasion, a response, a MAC PDU. Each is a small message with a
+ * large number of ways to be wrong, and the page is organised by where in the
+ * procedure the operator is.
+ */
+static GtkWidget *
+nrj_build_access(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("RANDOM ACCESS",
+        "The occasion and the response: which preamble goes where, and what the "
+        "network answers with.", &body);
+    GtkWidget *rar_body, *bo_body, *rnti_body, *tbs_body;
+    GtkWidget *rar = verb_card("RESPONSE", &rar_body);
+    GtkWidget *bo = verb_card("BACKOFF", &bo_body);
+    GtkWidget *rnti = verb_card("RA-RNTI", &rnti_body);
+    GtkWidget *tbs = verb_card("TRANSPORT BLOCK", &tbs_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(rar_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Response",
+                "--rar", "0x4E21 1 0",
+                "An identity, a timing advance and a grant. The answer is the "
+                "response the network would send, which is the message a device "
+                "acts on before it has authenticated anything."));
+        gtk_box_append(GTK_BOX(rar_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), rar);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(bo_body),
+            mod_arg_choices(state, module_id, status, "Backoff", "",
+                "The backoff indicator and its index, which is how a network paces "
+                "the devices contending for one occasion.",
+                (const char *[]) { "--rar-backoff 3", "--rar-backoff-idx 2" },
+                (const char *[]) { "Indicator", "Index" }, 2));
+        gtk_box_append(GTK_BOX(bo_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), bo);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(rnti_body),
+            mod_arg_choices(state, module_id, status, "Compute the RNTI", "",
+                "The RA-RNTI for the same occasion in NR and in LTE, which is "
+                "computed rather than quoted and so can be checked.",
+                (const char *[]) { "--ra-rnti-nr 0 0 0", "--ra-rnti-lte 0 0 0" },
+                (const char *[]) { "NR", "LTE" }, 2));
+        gtk_box_append(GTK_BOX(rnti_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), rnti);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tbs_body),
+            mod_arg_row_prefilled(state, module_id, status, "Size a Block",
+                "--tbs", "10 4",
+                "A modulation and a number of resource blocks. The transport block "
+                "size is the arithmetic every HARQ round depends on."));
+        gtk_box_append(GTK_BOX(tbs_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tbs);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+nrj_build_mac(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MAC AND DCI",
+        "The MAC layer under NR: subheaders, LCIDs, and the downlink control "
+        "information that announces an allocation.", &body);
+    GtkWidget *sub_body, *lcid_body, *dci_body;
+    GtkWidget *sub = verb_card("SUBHEADER", &sub_body);
+    GtkWidget *lcid = verb_card("LCID", &lcid_body);
+    GtkWidget *dci = verb_card("DCI", &dci_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sub_body),
+            mod_arg_choices(state, module_id, status, "Build or read", "",
+                "A MAC PDU, a subheader on its own, and the field a decoder most "
+                "often gets wrong when a payload is short.",
+                (const char *[]) { "--mac-pdu 3C0001", "--mac-sub 3C 1" },
+                (const char *[]) { "Read a PDU", "Read a Subheader" }, 2));
+        gtk_box_append(GTK_BOX(sub_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sub);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(lcid_body),
+            mod_arg_choices(state, module_id, status, "LCID", "",
+                "The table, and one entry named from it.",
+                (const char *[]) { "--lcid-table", "--lcid 60" },
+                (const char *[]) { "Table", "One Value" }, 2));
+        gtk_box_append(GTK_BOX(lcid_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), lcid);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dci_body),
+            mod_arg_choices(state, module_id, status, "Control information", "",
+                "A DCI read and built, which is the earliest readable statement of "
+                "what a cell is about to allocate.",
+                (const char *[]) { "--dci 1 0", "--dci-encode 1 0 0 0",
+                                   "--dci-parse 1 0" },
+                (const char *[]) { "Decode", "Encode", "Parse Fields" }, 3));
+        gtk_box_append(GTK_BOX(dci_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dci);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+nrj_build_link(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("LINK LAYER",
+        "Scrambling, the Gold sequence and framing: the parts a capture has to be "
+        "put back together from before any message is visible.", &body);
+    GtkWidget *gold_body, *scr_body, *frame_body;
+    GtkWidget *gold = verb_card("SEQUENCE", &gold_body);
+    GtkWidget *scr = verb_card("SCRAMBLING", &scr_body);
+    GtkWidget *frame = verb_card("FRAMING", &frame_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(gold_body),
+            mod_arg_row_prefilled(state, module_id, status, "Generate",
+                "--gold", "0 16",
+                "Two states and a length. The pseudo-random sequence is the same "
+                "one scrambling, DMRS and PBCH all draw from, so it is the first "
+                "thing to check against a reference."));
+        gtk_box_append(GTK_BOX(gold_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), gold);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(scr_body),
+            mod_arg_row_prefilled(state, module_id, status, "Descramble",
+                "--descramble", "0 0102",
+                "A sequence index and the bits. Descrambling is what has to happen "
+                "before a capture becomes a message."));
+        gtk_box_append(GTK_BOX(scr_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), scr);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(frame_body),
+            mod_arg_row(state, module_id, status, "Read a Frame",
+                "--frame", "capture.iq cf32 122880000",
+                "A capture. The answer is the frame boundary estimate and the "
+                "symbols it aligned on, which everything downstream depends on."));
+        gtk_box_append(GTK_BOX(frame_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), frame);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+nrj_build_attack(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("EXPLOITS",
+        "The catalogued attacks on the access procedure, and what each needs before "
+        "it is anything other than a description.", &body);
+    GtkWidget *list_body, *one_body, *replay_body, *stage_body;
+    GtkWidget *list = verb_card("CATALOGUE", &list_body);
+    GtkWidget *one = verb_card("ONE EXPLOIT", &one_body);
+    GtkWidget *replay = verb_card("AUTH REPLAY", &replay_body);
+    GtkWidget *stage = verb_card("STAGING", &stage_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(list_body),
+            mod_arg_row(state, module_id, status, "List the Exploits",
+                "--exploits", "",
+                "Every catalogued attack with the state it needs, named by class "
+                "rather than by a payload."));
+        gtk_box_append(GTK_BOX(list_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), list);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(one_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read One",
+                "--exploit", "rar-collision",
+                "An exploit by name. The answer is the state it needs and what "
+                "would have to be true of the device."));
+        gtk_box_append(GTK_BOX(one_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), one);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(replay_body),
+            mod_arg_choices(state, module_id, status, "Authentication", "",
+                "What a capture gives, and what replaying it would do.",
+                (const char *[]) { "--auth-capture capture.pcap",
+                                   "--auth-replay 0102" },
+                (const char *[]) { "Capture", "Replay" }, 2));
+        gtk_box_append(GTK_BOX(replay_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), replay);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(stage_body),
+            mod_arg_choices(state, module_id, status, "Get it in front of a device", "",
+                "The plan, and the transmit path itself. The inject verb needs a "
+                "radio you own and a lawful basis; the plan does not.",
+                (const char *[]) { "--plan", "--inject 0102 --yes" },
+                (const char *[]) { "Plan", "Inject" }, 2));
+        gtk_box_append(GTK_BOX(stage_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), stage);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry nrj_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--exploits:Exploits|--exploit=rrc-setup-crash|--descramble:Descramble" },
-    { "PHY",
-      "network-wireless-symbolic",
-      "#SEQUENCE|--gold=12345,84|#TRANSPORT|--tbs=9,52,12,0" },
-    { "DCI",
-      "utilities-terminal-symbolic",
-      "--dci-parse=0A0F3C9001,1_0|~--dci-encode" },
-    { "RAR",
-      "document-new-symbolic",
-      "--rar=33,128,4601,4026|--rar-backoff=20|~--rar-backoff-idx" },
-    { "MAC",
-      "network-receive-symbolic",
-      "#DECODE|--mac-pdu:MAC PDU|--mac-sub:MAC Subheader|#LCID|--lcid=0|--lcid-table:LCID Table|#FRAME|~--frame" },
-    { "RNTI",
-      "preferences-system-symbolic",
-      "#RNTI|--ra-rnti-nr:RA-RNTI NR|--ra-rnti-lte:RA-RNTI LTE|#DCI|--dci|#PLAN|--plan:Plan" },
-    { "Transmit",
-      "network-transmit-receive-symbolic",
-      "#AUTH|~--auth-capture|--auth-replay:Auth Replay|#FRAME|~--inject" },
+    { "Random Access", "dialog-information-symbolic", NULL, nrj_build_access },
+    { "MAC and DCI", "utilities-terminal-symbolic", NULL, nrj_build_mac },
+    { "Link Layer", "network-wireless-symbolic", NULL, nrj_build_link },
+    { "Exploits", "security-high-symbolic", NULL, nrj_build_attack },
 };
 
 /* 56_baseband_diag — the device's own diagnostic port.
