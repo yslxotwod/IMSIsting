@@ -2712,6 +2712,12 @@ console_tsv_split(const char *text, char **key_out, const char **val_out)
     return TRUE;
 }
 
+static GtkWidget *mod_arg_row_prefilled(AppState *state, const char *module_id,
+                                        GtkWidget *status,
+                                        const char *button_label,
+                                        const char *verb, const char *value,
+                                        const char *hint);
+
 static GtkWidget *mod_arg_row(AppState *state, const char *module_id,
                               GtkWidget *status, const char *button_label,
                               const char *verb, const char *placeholder,
@@ -2923,29 +2929,39 @@ record_row_append(GtkWidget *list, const char *text, GStrv fields)
    every cell is a lowercase identifier (letters, digits, underscores) and at
    least one cell of the next row is not. */
 static gboolean
+cell_is_name(const char *c)
+{
+    gboolean has_letter = FALSE;
+
+    if (c == NULL || *c == '\0') return FALSE;
+    for (; *c != '\0'; c++) {
+        if (g_ascii_islower(*c)) { has_letter = TRUE; continue; }
+        if (g_ascii_isdigit(*c) || *c == '_') continue;
+        return FALSE;
+    }
+    return has_letter;
+}
+
+/* True when the deferred row is column names rather than a first record.
+ *
+ * A heading row is made of names - lowercase words, possibly underscored - and
+ * the row beneath it is not: somewhere in it there is a number, a capital, or a
+ * sentence. That is the difference between "chain steps hardware_steps source"
+ * and "survey 3 1 builtin", and it has to be tested only where the first cells
+ * already differ: a column that repeats down the page ("signal", six times) is a
+ * label column, and its first row is a record.
+ */
+static gboolean
 fields_look_like_headings(char *const *head, char *const *body)
 {
-    gboolean body_differs = FALSE;
     int i;
 
-    for (i = 0; head[i] != NULL; i++) {
-        const char *c = head[i];
-
-        if (*c == '\0') return FALSE;
-        for (; *c != '\0'; c++)
-            if (!g_ascii_islower(*c) && !g_ascii_isdigit(*c) && *c != '_')
-                return FALSE;
-    }
-    for (i = 0; body[i] != NULL; i++) {
-        const char *c = body[i];
-        gboolean ident = (*c != '\0');
-
-        for (; *c != '\0'; c++)
-            if (!g_ascii_islower(*c) && !g_ascii_isdigit(*c) && *c != '_')
-                { ident = FALSE; break; }
-        if (!ident) body_differs = TRUE;
-    }
-    return body_differs;
+    for (i = 0; head[i] != NULL; i++)
+        if (!cell_is_name(head[i])) return FALSE;
+    for (i = 0; body[i] != NULL; i++)
+        if (head[i] == NULL || (cell_is_name(head[i]) && !cell_is_name(body[i])))
+            return TRUE;
+    return FALSE;
 }
 
 static void
@@ -16804,19 +16820,184 @@ static ModuleSubmenuEntry ncve_entries[] = {
     { "SUCI Privacy", "imsisting-14_suci-symbolic", NULL, ncve_view_suci_privacy },
     { "UPF / PFCP", "imsisting-23_traffic_analysis-symbolic", NULL, ncve_view_upf_pfcp },
 };
+/* 25_killchain — Cellular Killchain.
+ *
+ * A chain is an ordered list of module runs, so the page is about order: what a
+ * chain contains, what a run did, and how to stop halfway. The run list is a feed
+ * because that is what it is - a growing set of records, newest first, each worth
+ * copying out.
+ */
+static GtkWidget *
+kchn_build_chains(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CHAINS",
+        "Every recorded chain with its step and hardware counts, and what one of "
+        "them resolves to before anything runs.", &body);
+    GtkWidget *list_body, *show_body, *add_body;
+    GtkWidget *list = verb_card("CATALOGUE", &list_body);
+    GtkWidget *show = verb_card("RESOLVE ONE", &show_body);
+    GtkWidget *add = verb_card("NEW CHAIN", &add_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(list_body),
+            mod_arg_row(state, module_id, status, "List the Chains",
+                "--list-chains", "",
+                "Each chain, its step count and how many of those steps need a "
+                "radio. A chain that needs hardware will skip those steps on a "
+                "machine without one, and say so."));
+        gtk_box_append(GTK_BOX(list_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), list);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(show_body),
+            mod_arg_row_prefilled(state, module_id, status, "Resolve the Steps",
+                "--show-chain", "survey",
+                "The chain's name. The answer is the steps in order, what each "
+                "one runs and whether it needs hardware, without running any of "
+                "them."));
+        gtk_box_append(GTK_BOX(show_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), show);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(add_body),
+            mod_arg_row(state, module_id, status, "Create a Chain",
+                "--add-chain", "my-chain",
+                "The name of a new chain. The file is created empty, in the "
+                "module's own directory, and the answer gives its path to edit."));
+        gtk_box_append(GTK_BOX(add_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), add);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+kchn_build_execution(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("EXECUTION",
+        "Run a chain against this machine, and read what it recorded afterwards.",
+        &body);
+    GtkWidget *run_body, *multi_body, *runs_body;
+    GtkWidget *run = verb_card("RUN ONE CHAIN", &run_body);
+    GtkWidget *multi = verb_card("RUN PER TARGET", &multi_body);
+    GtkWidget *runs = verb_card("RUN HISTORY", &runs_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_row_prefilled(state, module_id, status, "Run the Chain",
+                "--run", "nbiot-audit",
+                "The chain's name. Every step is recorded to a report whether "
+                "it passes, fails or is skipped for want of hardware."));
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_choices(state, module_id, status, "Dry run", "",
+                "Resolve the steps and write no report, or continue after a "
+                "failed step - the overall exit stays non-zero either way.",
+                (const char *[]) { "--run survey --dry-run",
+                                   "--run survey --keep-going" },
+                (const char *[]) { "Resolve Only", "Keep Going" }, 2));
+        gtk_box_append(GTK_BOX(run_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), run);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(multi_body),
+            mod_arg_row_prefilled(state, module_id, status, "Run per Target",
+                "--run-multi", "nbiot-audit targets.tsv",
+                "A chain, then a file whose first column is one target per line. "
+                "The chain runs once per target with {{target}} expanded."));
+        gtk_box_append(GTK_BOX(multi_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), multi);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(runs_body),
+            mod_arg_row(state, module_id, status, "List the Runs",
+                "--runs-tsv", "",
+                "Every recorded run, newest first: the chain, when it ran, and "
+                "how many steps passed, failed or were skipped."));
+        gtk_box_append(GTK_BOX(runs_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), runs);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+kchn_build_control(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CONTROL",
+        "A running chain checks for a pause request between steps, and resumes "
+        "from its checkpoint.", &body);
+    GtkWidget *pause_body, *state_body;
+    GtkWidget *pause = verb_card("PAUSE AND RESUME", &pause_body);
+    GtkWidget *st = verb_card("CHECKPOINT", &state_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pause_body),
+            mod_arg_choices(state, module_id, status, "Request", "",
+                "A chain pauses between steps, never inside one: a step that is "
+                "already running is left to finish.",
+                (const char *[]) { "--pause", "--resume" },
+                (const char *[]) { "Pause", "Resume" }, 2));
+        gtk_box_append(GTK_BOX(pause_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pause);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(state_body),
+            mod_arg_row(state, module_id, status, "Read the Checkpoint",
+                "--run-status-tsv", "",
+                "The active checkpoint and whether a pause has been requested, "
+                "so a second operator can tell what the first one is doing."));
+        gtk_box_append(GTK_BOX(state_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), st);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry kchn_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "#INSPECT|--list-chains:List Chains|--show-chain=survey|#EXECUTE|--run=survey" },
-    { "Execution",
-      "media-playback-start-symbolic",
-      "#RUN|--run-multi:Run Multiple|#OPTIONS|--dry-run:Dry Run|--keep-going:Keep Going|#STATUS|--run-status-tsv:Run Status" },
-    { "Control",
-      "preferences-system-symbolic",
-      "--pause:Pause|--resume:Resume" },
-    { "Authoring",
-      "document-new-symbolic",
-      "--add-chain:Add Chain|--runs-tsv:Runs TSV" },
+    { "Chains", "dialog-information-symbolic", NULL, kchn_build_chains },
+    { "Execution", "media-playback-start-symbolic", NULL, kchn_build_execution },
+    { "Control", "media-playback-pause-symbolic", NULL, kchn_build_control },
 };
 static ModuleSubmenuEntry tana_entries[] = {
     { "Overview",
