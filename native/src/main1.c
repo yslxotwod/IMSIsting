@@ -16021,26 +16021,325 @@ static ModuleSubmenuEntry lair_entries[] = {
       "|--build-sib12=--message-id 4372 --serial 3 --segment-type notLastSegment --segment-number 0 --payload 0001:SIB12 Segment"
       "|--enb-sib-schedule=--sib 10 --hex 0001:SIB Schedule" },
 };
+/* 11_lte_core — LTE EPC core.
+ *
+ * Forty-three verbs, which is a page that has to be cut hard. The cut is by
+ * what the operator is doing: reading a message, building one, sending one, or
+ * auditing a network's exposure. The two transport builders get a view of their
+ * own because they are about the encapsulation rather than the protocol.
+ */
+static GtkWidget *
+lcore_build_read(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("READ",
+        "The three protocols a core speaks to itself: Diameter on S6a, GTP-C on "
+        "the control plane, GTP-U on the user plane.", &body);
+    GtkWidget *dia_body, *gtpc_body, *gtpu_body;
+    GtkWidget *dia = verb_card("DIAMETER", &dia_body);
+    GtkWidget *gtpc = verb_card("GTP CONTROL", &gtpc_body);
+    GtkWidget *gtpu = verb_card("GTP USER", &gtpu_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dia_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Message",
+                "--decode-diameter", "010000D0C000013E01000023000000010000000100000108400000176D6D652E6C6F63616C646F6D61696E0000000128400000136C6F63616C646F6D61696E000000011B400000136C6F63616C646F6D61696E00000001154000000C0000000000000107400000296D6D652E6C6F63616C646F6D61696E3B30303041423046453B30303030303030310000000000000140000017333130313530313233343536373839000000057F4000000B02F810000000058040000020000005824000000C00000001000005844000000C00000000",
+                "A Diameter message as hex: the command, the application and "
+                "every AVP with its length and flags."));
+        gtk_box_append(GTK_BOX(dia_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dia);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(gtpc_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Message",
+                "--decode-gtp-c", "40200029000001000100080013100521436587F94700090008696E7465726E6574520001000653000300130062",
+                "A GTPv2-C message as hex. The IE walk stops where the length "
+                "says it stops, which is what makes a malformed message visible."));
+        gtk_box_append(GTK_BOX(gtpc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), gtpc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(gtpu_body),
+            mod_arg_row(state, module_id, status, "Read the Message",
+                "--decode-gtp-u", "hex",
+                "A GTP-U datagram as hex, including the extension chain: the "
+                "next-extension byte is followed rather than assumed."));
+        gtk_box_append(GTK_BOX(gtpu_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), gtpu);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+lcore_build_build(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("BUILD",
+        "The messages a core accepts from a network that is not its own, built "
+        "byte for byte.", &body);
+    GtkWidget *s6a_body, *gtp_body;
+    GtkWidget *s6a = verb_card("S6A DIAMETER", &s6a_body);
+    GtkWidget *gtp = verb_card("GTP CONTROL", &gtp_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(s6a_body),
+            mod_arg_row_prefilled(state, module_id, status, "Authentication Info",
+                "--build-air", "310150123456789",
+                "An Authentication-Information-Request for the subscriber. The "
+                "answer is the Diameter message and the AVPs that carry the "
+                "identity."));
+        gtk_box_append(GTK_BOX(s6a_body), res);
+    }
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(s6a_body),
+            mod_arg_row_prefilled(state, module_id, status, "Update Location",
+                "--build-ulr", "310150123456789",
+                "An Update-Location-Request: the message that moves a subscriber "
+                "to whichever core answers it first."));
+        gtk_box_append(GTK_BOX(s6a_body), res);
+    }
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(s6a_body),
+            mod_arg_row_prefilled(state, module_id, status, "Cancel Location",
+                "--build-clr", "310150123456789",
+                "A Cancel-Location-Request (317), the message that detaches a "
+                "subscriber from the core they are actually on."));
+        gtk_box_append(GTK_BOX(s6a_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), s6a);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(gtp_body),
+            mod_arg_row_prefilled(state, module_id, status, "Create Session",
+                "--gtp-csr-forge", "310150123456789 internet 310 260",
+                "The subscriber, the APN, then the plmn. The forged request "
+                "names a serving gateway that does not exist, which is the "
+                "point of it."));
+        gtk_box_append(GTK_BOX(gtp_body), res);
+    }
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(gtp_body),
+            mod_arg_row_prefilled(state, module_id, status, "Modify Bearer",
+                "--gtp-modify-bearer", "11223344 5",
+                "A TEID, then optionally the bearer id. The redirect moves a "
+                "live bearer to a different endpoint and the message is small "
+                "enough to be unremarkable."));
+        gtk_box_append(GTK_BOX(gtp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), gtp);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+lcore_build_encapsulate(AppState *state, const char *module_id,
+                        GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ENCAPSULATION",
+        "Messages whose payload is another message, and the broadcast session "
+        "that has no GTP inside it.", &body);
+    GtkWidget *inner_body, *mbms_body;
+    GtkWidget *inner = verb_card("GTP IN GTP", &inner_body);
+    GtkWidget *mbms = verb_card("MBMS SESSION", &mbms_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(inner_body),
+            mod_arg_row(state, module_id, status, "Nest a Datagram",
+                "--gtp-in-gtp", "",
+                "An outer GTPv1-U G-PDU whose payload is another G-PDU. TS 29.281 "
+                "says the payload is uninterpreted, which is exactly why a "
+                "middlebox that does not look inside can be walked past."));
+        gtk_box_append(GTK_BOX(inner_body), res);
+    }
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(inner_body),
+            mod_arg_row(state, module_id, status, "Nest with IP Layer",
+                "--gtp-in-gtp", "--with-ip --src 192.168.1.1 --dst 172.16.0.1",
+                "The same nesting with the inner IPv4 and UDP headers written "
+                "out, for a stack that expects a complete datagram."));
+        gtk_box_append(GTK_BOX(inner_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), inner);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(mbms_body),
+            mod_arg_row(state, module_id, status, "Start a Session",
+                "--mbms-session", "",
+                "A GTPv2-C MBMS Session Start (type 231, TS 29.274 clause "
+                "7.13.1). IE order is the sender's, which the module says in "
+                "its own output rather than implying a rule."));
+        gtk_box_append(GTK_BOX(mbms_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), mbms);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+lcore_build_audit(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("AUDIT",
+        "What a core exposes at its interconnect, and what it does about it.",
+        &body);
+    GtkWidget *fs20_body, *cdr_body, *echo_body, *surface_body, *plan_body;
+    GtkWidget *fs20 = verb_card("FS.20 CONTROLS", &fs20_body);
+    GtkWidget *cdr = verb_card("CDR ANOMALY", &cdr_body);
+    GtkWidget *echo = verb_card("ECHO ABUSE", &echo_body);
+    GtkWidget *surface = verb_card("ATTACK SURFACE", &surface_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(fs20_body),
+            mod_arg_row(state, module_id, status, "Check the Config",
+                "--fs20-audit", "roaming.conf",
+                "A GSM association interconnect configuration. Each control it "
+                "breaks is named, and a configuration that breaks none is "
+                "reported as clean."));
+        gtk_box_append(GTK_BOX(fs20_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), fs20);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cdr_body),
+            mod_arg_row(state, module_id, status, "Check the Records",
+                "--cdr-fraud-check", "cdrs.tsv",
+                "A TSV of call records. The findings are the shapes overbilling "
+                "or bypass leaves, not a verdict on any single row."));
+        gtk_box_append(GTK_BOX(cdr_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cdr);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(echo_body),
+            mod_arg_row(state, module_id, status, "Check an Echo",
+                "--gtpdoor-detect", "4001000d000001000300010000",
+                "A GTP Echo message as hex. The check is about the padding and "
+                "the IE set, which is where the GTPdoor-class abuse lives."));
+        gtk_box_append(GTK_BOX(echo_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), echo);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(surface_body),
+            mod_arg_choices(state, module_id, status, "Read", "",
+                "The surface the core exposes, or the identity-carrying S1AP "
+                "procedures that reach it.",
+                (const char *[]) { "--surface", "--s1ap" },
+                (const char *[]) { "Surface", "S1AP" }, 2));
+        gtk_box_append(GTK_BOX(surface_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), surface);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_choices(state, module_id, status, "Plan", "",
+                "What a testbed needs for the named attack, and what to record.",
+                (const char *[]) { "--plan ulr-hijack", "--plan gtp-inject",
+                                   "--plan sctp-scan" },
+                (const char *[]) { "ULR Hijack", "GTP Inject", "SCTP Scan" }, 3));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+
+    {
+        GtkWidget *send_body;
+        GtkWidget *send = verb_card("SEND TO A CORE", &send_body);
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(send_body),
+            mod_arg_row_prefilled(state, module_id, status, "GTP to a Core",
+                "--gtpc-send", "10.0.0.1 2123",
+                "Host and port; the message is the forged Create Session "
+                "Request. A disarmed build reports that it is disarmed rather "
+                "than failing silently."));
+        gtk_box_append(GTK_BOX(send_body), res);
+        gtk_box_append(GTK_BOX(send_body),
+            mod_arg_row_prefilled(state, module_id, status, "Diameter to an HSS",
+                "--diameter-send", "10.0.0.2 3868",
+                "Host and port on TCP 3868, or TLS when the environment asks "
+                "for it. Same arming rule as the GTP sender."));
+        gtk_box_append(GTK_BOX(send_body),
+            mod_arg_row(state, module_id, status, "Require a Core",
+                "--require-core", "",
+                "Refuse to run a verb that needs a core when none answers, "
+                "instead of reporting a failure that looks like the core's."));
+        gtk_box_append(GTK_BOX(body), send);
+    }
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry lcore_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--decode-gtp-c:Decode GTP-C|--decode-gtp-u:Decode GTP-U|--decode-diameter:Decode Diameter" },
-    { "Attacks",
-      "security-high-symbolic",
-      "#FORGE|--gtp-modify-bearer:Modify Bearer|--gtp-csr-forge:Forge CSR|--gtpc-send:Send to Core|--diameter-send:Send to HSS|#AUDIT|--gtpdoor-detect:Detect GTPdoor|--cdr-fraud-check:CDR Fraud Check|--fs20-audit:FS.20 Audit" },
-    { "Build",
-      "document-new-symbolic",
-      "--build-air:Build AIR|--build-ulr:Build ULR|--build-clr:Build CLR|--s1ap" },
-    { "Recon",
-      "system-search-symbolic",
-      "--surface:Surface|--require-core:Require Core|--plan:Plan" },
-    /* The two builders that read the transport rather than the protocol: an
-       outer GTPv1-U header carrying an inner GTP message, and an MBMS session
-       with no GTP signaller above it. */
-    { "Encapsulation",
-      "network-transmit-receive-symbolic",
-      "--gtp-in-gtp=--payload DEADBEEF --with-ip:GTP in GTP"
-      "|--mbms-session=--mood:MBMS Session" },
+    { "Read", "dialog-information-symbolic", NULL, lcore_build_read },
+    { "Build", "document-new-symbolic", NULL, lcore_build_build },
+    { "Encapsulation", "network-transmit-receive-symbolic", NULL,
+      lcore_build_encapsulate },
+    { "Audit", "system-search-symbolic", NULL, lcore_build_audit },
 };
 static ModuleSubmenuEntry nair_entries[] = {
     { "Overview",
