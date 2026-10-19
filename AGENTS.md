@@ -22,6 +22,23 @@ Domain docs are single-context: one `GLOSSARY.md` at the repo root, architecture
 
 ## Working rules
 
+### Bump VERSION on every push
+
+`VERSION` is the only place the number lives: `imsisting.sh` reads it at
+startup and the GUI reads it at runtime, so bumping it updates the CLI, the
+window header and `--version` with no rebuild. Every push that changes the tree
+bumps it first:
+
+- **patch** (`0.7.1`) — a fix, no new behaviour
+- **minor** (`0.8.0`) — a new module, verb, page or capability
+- **major** (`1.0.0`) — someone's script breaks
+
+Use `tools/bump-version.sh patch|minor|major` — it moves the number forward and
+refuses to move it back, and it does not commit, so the phase commit carries it.
+Then `meson setup --reconfigure native/builddir` and rebuild, or the header
+keeps showing the old number. `tools/release.sh X.Y.Z` is the other half: bump,
+commit, tag and push in one step, on a clean tree.
+
 ### Commit and push at the end of every finished phase
 
 When a roadmap phase in `docs/OFFENSIVE_ROADMAP.md` is finished — gates green,

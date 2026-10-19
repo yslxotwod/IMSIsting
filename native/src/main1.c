@@ -17808,25 +17808,266 @@ static ModuleSubmenuEntry slic_entries[] = {
       "preferences-system-symbolic",
       "--five-qi=1:5QI 1|--five-qi-table:5QI Table|~--tsn-config:TSN-QoS Config|~--slice-qos-check:Slice QoS Check" },
 };
+/* 35_baseband — Baseband Fuzzing.
+ *
+ * Two halves, and the page keeps them apart because they answer different
+ * questions: whether a mutation decodes (research, no radio) and what happens
+ * when it is handed to a modem or a signal generator (the offensive half, which
+ * writes an artefact and prints the handoff rather than radiating).
+ */
+static GtkWidget *
+bbnd_build_fuzz(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MUTATION",
+        "Grammar-aware mutation of an RRC or NAS message, corpus generation and "
+        "crash-log triage. Nothing here needs a radio.", &body);
+    GtkWidget *mut_body, *corp_body, *triage_body;
+    GtkWidget *mut = verb_card("MUTATE A MESSAGE", &mut_body);
+    GtkWidget *corp = verb_card("GENERATE A CORPUS", &corp_body);
+    GtkWidget *triage = verb_card("TRIAGE A CRASH LOG", &triage_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(mut_body),
+            mod_arg_row(state, module_id, status, "Mutate",
+                "--mutate", "4001020304 bitflip 20240101",
+                "The message as hex, the strategy, then the seed. The seed makes "
+                "the run repeatable: the same three arguments give the same "
+                "bytes, which is what makes a crash reproducible."));
+        gtk_box_append(GTK_BOX(mut_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), mut);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(corp_body),
+            mod_arg_row(state, module_id, status, "Generate",
+                "--corpus", "4001020304 64 bitflip",
+                "The seed message as hex, how many variants, then the strategy. "
+                "The output names the corpus file it writes."));
+        gtk_box_append(GTK_BOX(corp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), corp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(triage_body),
+            mod_arg_row(state, module_id, status, "Triage",
+                "--triage", "crash.log",
+                "An ASAN or UBSAN log, or a path the module reads. Each finding "
+                "names the frame, the access and whether it is reachable from "
+                "the decoder."));
+        gtk_box_append(GTK_BOX(triage_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), triage);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+bbnd_build_encoding(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ENCODING",
+        "The codecs a fuzzer needs to build a message by hand: BER/DER length, "
+        "the NAS security header, and the protocol-layer reference.", &body);
+    GtkWidget *len_body, *dec_body, *hdr_body, *layers_body;
+    GtkWidget *len = verb_card("ASN.1 LENGTH", &len_body);
+    GtkWidget *dec = verb_card("ASN.1 DECODE", &dec_body);
+    GtkWidget *hdr = verb_card("NAS SECURITY HEADER", &hdr_body);
+    GtkWidget *layers = verb_card("PROTOCOL LAYERS", &layers_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(len_body),
+            mod_arg_row(state, module_id, status, "Encode the Length",
+                "--asn1-len", "200",
+                "A definite length in octets. Prints the short form, the long "
+                "form and the octets to place on the wire."));
+        gtk_box_append(GTK_BOX(len_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), len);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dec_body),
+            mod_arg_row(state, module_id, status, "Decode the Length",
+                "--asn1-dec", "8180",
+                "Length octets as hex. Refuses a length that does not use its "
+                "shortest form, which is what a decoder must reject."));
+        gtk_box_append(GTK_BOX(dec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(hdr_body),
+            mod_arg_row(state, module_id, status, "Decode the Header",
+                "--nas-hdr", "0700440f",
+                "The first octets of a NAS message. Prints the security header "
+                "type, the protocol discriminator and the message type."));
+        gtk_box_append(GTK_BOX(hdr_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), hdr);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(layers_body),
+            mod_arg_row(state, module_id, status, "Read the Reference",
+                "--layers", "",
+                "Which layer each message belongs to and which file in this tree "
+                "speaks it."));
+        gtk_box_append(GTK_BOX(layers_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), layers);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+bbnd_build_modem(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MODEM PATH",
+        "The diagnostic channel to a modem you own, and the command file for a "
+        "signal generator. Neither keys a radio from this page.", &body);
+    GtkWidget *df_body, *ds_body, *rf_body;
+    GtkWidget *df = verb_card("DIAG FRAME", &df_body);
+    GtkWidget *ds = verb_card("WRITE TO MODEM", &ds_body);
+    GtkWidget *rf = verb_card("GENERATOR COMMANDS", &rf_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(df_body),
+            mod_arg_row(state, module_id, status, "Frame It",
+                "--diag-frame", "0102030405",
+                "A payload as hex. The frame, the CRC and the escaped bytes come "
+                "from the DIAG implementation this tree already has, not from a "
+                "second copy of it."));
+        gtk_box_append(GTK_BOX(df_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), df);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ds_body),
+            mod_arg_row(state, module_id, status, "Send It",
+                "--diag-send", "0102030405 --port /dev/ttyUSB0",
+                "The payload, then the serial port the modem is on. The verb "
+                "reports what it wrote; whether the modem accepted it is a "
+                "question only the modem answers."));
+        gtk_box_append(GTK_BOX(ds_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ds);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(rf_body),
+            mod_arg_row(state, module_id, status, "Write the Commands",
+                "--rf-submit", "2f010203 --instrument smw200a",
+                "A payload as hex, then the instrument. The file names every "
+                "command it writes and says which document each one came from."));
+        gtk_box_append(GTK_BOX(rf_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), rf);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+bbnd_build_air(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("OVER THE AIR",
+        "The payload a modulator needs and the handoff that carries it there. "
+        "This module has no modulator, and says so instead of pretending.", &body);
+    GtkWidget *tx_body, *sp_body, *plan_body;
+    GtkWidget *tx = verb_card("PREPARE A TRANSMISSION", &tx_body);
+    GtkWidget *sp = verb_card("MUTATE AND PREPARE", &sp_body);
+    GtkWidget *plan = verb_card("HANDOFF PLAN", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tx_body),
+            mod_arg_row(state, module_id, status, "Prepare",
+                "--transmit", "2f010203",
+                "The message as hex, then the framing. The payload is written to "
+                "a file and the run ends as a handoff: the radio step belongs to "
+                "a modulator this tree does not contain."));
+        gtk_box_append(GTK_BOX(tx_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tx);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sp_body),
+            mod_arg_row(state, module_id, status, "Mutate and Prepare",
+                "--send-payload", "2f010203 bitflip 20240101",
+                "The message, the mutation strategy and the seed. Mutates with "
+                "the same engine as the research half, then hands the result "
+                "over rather than sending it."));
+        gtk_box_append(GTK_BOX(sp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What the over-the-air step needs: a stack, a licensed carrier "
+                "for the band, and a device you are allowed to disrupt."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry bbnd_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--triage|--layers:Layers|--corpus:Corpus" },
-    { "ASN.1",
-      "document-open-symbolic",
-      "--asn1-dec:ASN.1 Decode|--asn1-len:ASN.1 Length|--nas-hdr:NAS Header" },
-    { "Fuzz",
-      "security-high-symbolic",
-      "--mutate:Mutate|--plan:Plan" },
-    /* The offensive half. None of these keys a radio: the first encodes a DIAG
-       frame through 56_baseband_diag, the second writes it to the port you name,
-       and the rest write an artefact and print the handoff. */
-    { "Modem Path",
-      "network-transmit-receive-symbolic",
-      "--diag-frame:DIAG Frame|--diag-send:Write to Modem|--rf-submit:Generator Commands" },
-    { "Over the Air",
-      "imsisting-01_radio-symbolic",
-      "--transmit:Prepare Transmission|--send-payload:Mutate and Prepare" },
+    { "Mutation", "security-high-symbolic", NULL, bbnd_build_fuzz },
+    { "Encoding", "document-open-symbolic", NULL, bbnd_build_encoding },
+    { "Modem Path", "network-transmit-receive-symbolic", NULL, bbnd_build_modem },
+    { "Over the Air", "imsisting-01_radio-symbolic", NULL, bbnd_build_air },
 };
 static ModuleSubmenuEntry vowi_entries[] = {
     { "Overview",
