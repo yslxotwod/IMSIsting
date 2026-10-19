@@ -240,6 +240,14 @@ field manual. The operator called this out on a heading that read "TAKE IT
 SOMEWHERE"; the replacement is "EXPORT" with the sentence beneath it, and that is
 the register for every page from that point on.
 
+**No article in front of a heading.** A card heading is the operation, not a
+phrase: "EXCHANGE", "GATEWAY NAME", "EAP EXCHANGE", "THUMBPRINT", "ROLES",
+"REPORT", "POSTURE SCORE" — not "THE EXCHANGE", "THE ROLES", "SCORE THE
+POSTURE". The operator corrected a page that had "The" on every card, and the
+reason is structural: an article makes a heading read as prose, prose invites a
+sentence, and a sentence is what the note underneath is for. View names follow
+the same rule ("Exchange", "Certificates", "Decode").
+
 ### The closed target panel was eating every click on the right
 
 The target panel is a `GtkRevealer` slid in from the right edge. Closing it set

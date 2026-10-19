@@ -703,7 +703,7 @@ static const ModuleDefinition modules[] = {
       "PLMN coding, MOCN/MORAN/GWCN classification and cross-operator leakage detection." },
     { "47_wifioff",          "Wi-Fi Offload / LWA",  "ACCESS",
       "imsisting-47_wifioff-symbolic",
-      "Wi-Fi offload and LWA: ePDG FQDN, certificate validation and LWA configuration." },
+      "Wi-Fi offload: the ePDG FQDN, the EAP exchange byte for byte, and the assertions a certificate makes." },
 
     /* CORE NETWORK — the network behind the RAN, and the interconnect */
     { "11_lte_core",         "LTE Core (EPC)",       "CORE NETWORK",
@@ -18862,8 +18862,8 @@ lipr_build_interfaces(AppState *state, const char *module_id,
         "The three handover interfaces of TS 33.108 and the roles on either side "
         "of them. Reference only; nothing is contacted.", &body);
     GtkWidget *map_body, *roles_body, *one_body;
-    GtkWidget *map = verb_card("THE INTERFACE MAP", &map_body);
-    GtkWidget *roles = verb_card("THE ROLES", &roles_body);
+    GtkWidget *map = verb_card("INTERFACE MAP", &map_body);
+    GtkWidget *roles = verb_card("ROLES", &roles_body);
     GtkWidget *one = verb_card("ONE INTERFACE", &one_body);
     const char *which[] = { "--iface", "--iface", "--iface" };
     const char *labels[] = { "X1", "X2", "X3" };
@@ -18920,8 +18920,8 @@ lipr_build_posture(AppState *state, const char *module_id,
         "What the signalling says about an interception that is already active, "
         "and what to do about it. No capture is taken here.", &body);
     GtkWidget *score_body, *report_body, *plan_body;
-    GtkWidget *score = verb_card("SCORE THE POSTURE", &score_body);
-    GtkWidget *report = verb_card("THE REPORT", &report_body);
+    GtkWidget *score = verb_card("POSTURE SCORE", &score_body);
+    GtkWidget *report = verb_card("REPORT", &report_body);
     GtkWidget *plan = verb_card("CONFIRMATION PLAN", &plan_body);
 
     {
@@ -19059,9 +19059,9 @@ capi_build_surface(AppState *state, const char *module_id,
         "What the document declares: its title, its servers, its paths and the "
         "auth scheme each operation asks for.", &body);
     GtkWidget *doc_body, *matrix_body, *report_body;
-    GtkWidget *doc = verb_card("THE DOCUMENT", &doc_body);
+    GtkWidget *doc = verb_card("DOCUMENT", &doc_body);
     GtkWidget *matrix = verb_card("AUTHORISATION MATRIX", &matrix_body);
-    GtkWidget *report = verb_card("THE REPORT", &report_body);
+    GtkWidget *report = verb_card("REPORT", &report_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -19216,7 +19216,7 @@ capi_build_enumeration(AppState *state, const char *module_id,
         "One concrete request per operation, and the sequence a subscriber sweep "
         "would send. Both write a run-file and stop there.", &body);
     GtkWidget *surface_body, *subs_body;
-    GtkWidget *surface = verb_card("THE SURFACE PLAN", &surface_body);
+    GtkWidget *surface = verb_card("SURFACE PLAN", &surface_body);
     GtkWidget *subs = verb_card("SUBSCRIBER SEQUENCE", &subs_body);
 
     {
@@ -19430,13 +19430,133 @@ static ModuleSubmenuEntry lpp_entries[] = {
       "--otdoa-assist:OTDOA Assistance|--otdoa-request:OTDOA Request"
       "|--utdoa-config=utdoa:UTDOA Fields|--prs-plan:PRS Schedule" },
 };
+/* 47_wifioff — VoWiFi / ePDG Attacks.
+ *
+ * The module answers two kinds of question: what a handset and an ePDG say to
+ * each other, and whether the certificate on the far end is the one it claims.
+ * The page is cut there, and the one refusal it carries is a card rather than a
+ * missing button.
+ */
+static GtkWidget *
+wifioff_build_exchange(AppState *state, const char *module_id,
+                       GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("EXCHANGE",
+        "How a handset finds the ePDG and what it says once it is there, in "
+        "octets. Nothing is contacted; the messages are built and read.", &body);
+    GtkWidget *fqdn_body, *flow_body;
+    GtkWidget *fqdn = verb_card("GATEWAY NAME", &fqdn_body);
+    GtkWidget *flow = verb_card("EAP EXCHANGE", &flow_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(fqdn_body),
+            mod_arg_row(state, module_id, status, "Resolve the Name",
+                "--epdg-fqdn", "310260",
+                "MCC and MNC, five or six digits. The answer is the FQDN the "
+                "handset is provisioned with, and the one place a network can "
+                "redirect every VoWiFi call it serves."));
+        gtk_box_append(GTK_BOX(fqdn_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), fqdn);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(flow_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the Exchange",
+                "--auth-flow", "310150123456789",
+                "The subscriber identity, then optionally the identity to "
+                "request and which AKA variant. The output is the EAP "
+                "Request/Response pairs in order, byte for byte."));
+        gtk_box_append(GTK_BOX(flow_body), res);
+    }
+    gtk_box_append(GTK_BOX(flow_body), fkit_note(
+        "The direction of every message matters: a handset sends the Response "
+        "where the network sends the Request, and a flow that has them the wrong "
+        "way round will not match any capture. The output labels each one."));
+    gtk_box_append(GTK_BOX(body), flow);
+
+    /* A refusal deserves a button as much as an answer does: an operator who
+       asks about LWA should be told there is no codec here, not left to find
+       out that the verb is missing. */
+    {
+        GtkWidget *lwa_body;
+        GtkWidget *lwa = verb_card("LWA / LWIP FRAMING", &lwa_body);
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(lwa_body),
+            mod_arg_row(state, module_id, status, "Ask About Framing",
+                "--lwa-config", "",
+                "Refuses: this module carries no LWA or LWIP codec, so the "
+                "framing of a 3GPP-WLAN aggregation bearer is not something it "
+                "can show. The refusal names what would be needed."));
+        gtk_box_append(GTK_BOX(lwa_body), res);
+        gtk_box_append(GTK_BOX(body), lwa);
+    }
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+wifioff_build_certs(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CERTIFICATES",
+        "What the far end presents, and whether each assertion it makes is one "
+        "it was given the evidence for.", &body);
+    GtkWidget *thumb_body, *valid_body;
+    GtkWidget *thumb = verb_card("THUMBPRINT", &thumb_body);
+    GtkWidget *valid = verb_card("ASSERTIONS", &valid_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(thumb_body),
+            mod_arg_row(state, module_id, status, "Hash the Certificate",
+                "--cert-thumb", "epdg.pem",
+                "The certificate as a file. The SHA-256 is what a pinning "
+                "policy compares against, and what identifies the same "
+                "certificate across two captures."));
+        gtk_box_append(GTK_BOX(thumb_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), thumb);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(valid_body),
+            mod_arg_row(state, module_id, status, "Read the Assertions",
+                "--validate-cert", "epdg.pem",
+                "The certificate, then optionally a CA bundle and a name to "
+                "match. Each assertion is reported with the evidence it has: a "
+                "chain that verifies, a name that matches, or neither."));
+        gtk_box_append(GTK_BOX(valid_body), res);
+    }
+    gtk_box_append(GTK_BOX(valid_body), fkit_note(
+        "A certificate that is internally consistent is not a certificate that "
+        "belongs to the network it claims: the assertions are the only thing "
+        "worth reading, and each one is stated in its own words."));
+    gtk_box_append(GTK_BOX(body), valid);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry wifioff_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--auth-flow:Auth Flow|--lwa-config:LWA Config|--epdg-fqdn" },
-    { "Certificates",
-      "channel-secure-symbolic",
-      "--cert-thumb:Cert Thumbprint|--validate-cert:Validate Cert" },
+    { "Exchange", "dialog-information-symbolic", NULL, wifioff_build_exchange },
+    { "Certificates", "channel-secure-symbolic", NULL, wifioff_build_certs },
 };
 static ModuleSubmenuEntry oran_entries[] = {
     { "Overview",
