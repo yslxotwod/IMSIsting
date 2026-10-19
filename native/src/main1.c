@@ -18704,31 +18704,302 @@ static ModuleSubmenuEntry kchn_entries[] = {
     { "Execution", "media-playback-start-symbolic", NULL, kchn_build_execution },
     { "Control", "media-playback-pause-symbolic", NULL, kchn_build_control },
 };
+/* 23_traffic_analysis — what a capture says about the people in it.
+ *
+ * Flows are the unit: who talked to whom, how much, and with what shape. The
+ * interesting question is never one flow but the set of them.
+ */
+static GtkWidget *
+tana_build_flows(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("FLOWS",
+        "Who talked to whom, how much, and what the shape of the exchange says "
+        "about the application behind it.", &body);
+    GtkWidget *flows_body, *feat_body, *cls_body;
+    GtkWidget *flows = verb_card("READ THE FLOWS", &flows_body);
+    GtkWidget *feat = verb_card("FEATURES", &feat_body);
+    GtkWidget *cls = verb_card("CLASSIFY", &cls_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(flows_body),
+            mod_arg_row(state, module_id, status, "List the Flows",
+                "--flows", "capture.pcap",
+                "A capture. Every flow with its endpoints, its byte count and its "
+                "direction - the raw material for everything after it."));
+        gtk_box_append(GTK_BOX(flows_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), flows);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(feat_body),
+            mod_arg_row(state, module_id, status, "Read the Features",
+                "--features", "capture.pcap",
+                "The features computed per flow: packet sizes, inter-arrival "
+                "timing, and the proportion each direction carries."));
+        gtk_box_append(GTK_BOX(feat_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), feat);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cls_body),
+            mod_arg_row(state, module_id, status, "Classify",
+                "--classify", "capture.pcap",
+                "Which application the flow set looks like, on the features rather "
+                "than the ports - a port is what an application says about itself, "
+                "not what it does."));
+        gtk_box_append(GTK_BOX(cls_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cls);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+tana_build_store(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("STORE",
+        "The reference set a classification is measured against, and the call "
+        "records a capture can yield.", &body);
+    GtkWidget *refs_body, *add_body, *calls_body, *clear_body;
+    GtkWidget *refs = verb_card("REFERENCES", &refs_body);
+    GtkWidget *add = verb_card("ADD", &add_body);
+    GtkWidget *calls = verb_card("CALL RECORDS", &calls_body);
+    GtkWidget *clear = verb_card("CLEAR", &clear_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(refs_body),
+            mod_arg_row(state, module_id, status, "List the References",
+                "--refs-tsv", "",
+                "Every reference fingerprint on file. Nothing classifies usefully "
+                "until one has been recorded."));
+        gtk_box_append(GTK_BOX(refs_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), refs);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(add_body),
+            mod_arg_row_prefilled(state, module_id, status, "Add a Reference",
+                "--fingerprint-add", "voip capture.pcap",
+                "A label and a capture. The features are recorded so a later "
+                "capture can be compared with this one."));
+        gtk_box_append(GTK_BOX(add_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), add);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(calls_body),
+            mod_arg_row(state, module_id, status, "Read the Calls",
+                "--calls-tsv", "capture.pcap",
+                "The call records a capture yields: who called whom, when it "
+                "started and how long it ran."));
+        gtk_box_append(GTK_BOX(calls_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), calls);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(clear_body),
+            mod_arg_row(state, module_id, status, "Clear the References",
+                "--clear-refs", "",
+                "Removes every reference fingerprint. Alone on its own card "
+                "because it is the one act here that cannot be undone."));
+        gtk_box_append(GTK_BOX(clear_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), clear);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry tana_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--flows={capture}|--classify={capture}|--features:Features" },
-    { "Fingerprints",
-      "system-search-symbolic",
-      "#ADD|--fingerprint-add:Add Fingerprint|#REFS|--refs-tsv:References TSV|#MANAGE|--clear-refs:Clear References" },
-    /* Calls is a separate view because it answers a separate question: which
-       of these streams is one conversation, and who was in it. The table
-       names the dialogue when the capture holds one and says so when it
-       does not. */
-    { "Calls",
-      "call-start-symbolic",
-      "--calls-tsv={capture}:Call Table" },
+    { "Flows", "dialog-information-symbolic", NULL, tana_build_flows },
+    { "Store", "preferences-system-symbolic", NULL, tana_build_store },
 };
+/* 24_rf_fingerprint — the transmitter, not the message.
+ *
+ * Two radios sending the same bits differ in the analogue imperfections around
+ * them. A fingerprint is what remains after the message has been read and thrown
+ * away.
+ */
+static GtkWidget *
+rff_build_measure(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MEASUREMENT",
+        "What can be measured from a capture, and what each measurement needs "
+        "before it means anything.", &body);
+    GtkWidget *feat_body, *cls_body, *trans_body;
+    GtkWidget *feat = verb_card("FEATURES", &feat_body);
+    GtkWidget *cls = verb_card("CLASSIFY", &cls_body);
+    GtkWidget *trans = verb_card("TRANSIENT", &trans_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(feat_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Features",
+                "--features", "capture.iq cf32 20000000",
+                "A capture, its format and its sample rate. The features are the "
+                "ones that survive the message being different: frequency error, "
+                "IQ imbalance, phase noise and the ramp at the start."));
+        gtk_box_append(GTK_BOX(feat_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), feat);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cls_body),
+            mod_arg_row_prefilled(state, module_id, status, "Classify",
+                "--classify", "capture.iq cf32 20000000",
+                "Which recorded signature the capture is nearest, and how far from "
+                "it. A capture near nothing says so rather than being assigned to "
+                "the closest of a bad set."));
+        gtk_box_append(GTK_BOX(cls_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cls);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(trans_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a Transient",
+                "--transient", "capture.iq cf32 20000000",
+                "The on/off ramp of a transmission, where a handset and a signal "
+                "generator differ most, and a captured preamble carries the most "
+                "about the device."));
+        gtk_box_append(GTK_BOX(trans_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), trans);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+rff_build_signatures(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SIGNATURES",
+        "The signature store: what has been recorded, and what can be added to it.",
+        &body);
+    GtkWidget *list_body, *add_body, *clear_body;
+    GtkWidget *list = verb_card("STORE", &list_body);
+    GtkWidget *add = verb_card("ADD", &add_body);
+    GtkWidget *clear = verb_card("CLEAR", &clear_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(list_body),
+            mod_arg_row(state, module_id, status, "List the Signatures",
+                "--sigs-tsv", "",
+                "Every signature on file with the feature values it was recorded "
+                "at, which is what a later classification is measured against."));
+        gtk_box_append(GTK_BOX(list_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), list);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(add_body),
+            mod_arg_row_prefilled(state, module_id, status, "Add a Signature",
+                "--sig-add", "phone-a capture.iq cf32 20000000",
+                "A label, a capture, its format and its rate. Nothing classifies "
+                "until something has been recorded to classify against."));
+        gtk_box_append(GTK_BOX(add_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), add);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(clear_body),
+            mod_arg_row(state, module_id, status, "Clear the Store",
+                "--clear-sigs", "",
+                "Removes every signature. Alone on its own card because it is the "
+                "one act on this page that cannot be undone."));
+        gtk_box_append(GTK_BOX(clear_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), clear);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+rff_build_csi(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CSI",
+        "Channel state information: what a receiver reports about the channel, and "
+        "what a change in it means.", &body);
+    GtkWidget *parse_body, *motion_body;
+    GtkWidget *parse = verb_card("READ", &parse_body);
+    GtkWidget *motion = verb_card("MOTION", &motion_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row(state, module_id, status, "Read the Report",
+                "--csi-parse", "hex",
+                "A CSI report as hex. The answer is the channel matrix and what "
+                "each value is normalised against - a report without its context "
+                "cannot tell you that."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(motion_body),
+            mod_arg_row(state, module_id, status, "Detect Motion",
+                "--csi-motion", "csi.tsv",
+                "A series of CSI reports. A channel that changes without a "
+                "transmitter moving is a room with something moving in it - "
+                "sensing rather than communication."));
+        gtk_box_append(GTK_BOX(motion_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), motion);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry rff_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--features:Features|--classify:Classify|~--csi-parse" },
-    { "CSI",
-      "network-wireless-symbolic",
-      "--csi-motion:CSI Motion|--transient:Transient" },
-    { "Signatures",
-      "system-search-symbolic",
-      "#ADD|--sig-add:Add Signature|#SIGS|--sigs-tsv:Signatures TSV|#MANAGE|--clear-sigs:Clear Signatures" },
+    { "Measurement", "dialog-information-symbolic", NULL, rff_build_measure },
+    { "Signatures", "imsisting-24_rf_fingerprint-symbolic", NULL,
+      rff_build_signatures },
+    { "CSI", "network-wireless-symbolic", NULL, rff_build_csi },
 };
 /* 29_mac_layer — what the scheduler gives away without a key.
  *
@@ -19488,19 +19759,211 @@ static ModuleSubmenuEntry cdns_entries[] = {
     { "Detection", "system-search-symbolic", NULL, cdns_build_detect },
     { "Bearer Options", "preferences-system-symbolic", NULL, cdns_build_options },
 };
+/* 28_paging_track — paging is the one broadcast that says a subscriber is wanted.
+ *
+ * A paging record is an identity and a cause. Followed over time it says whether
+ * a device is being paged, how often, and by whom.
+ */
+static GtkWidget *
+pgt_build_paging(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("PAGING",
+        "The message a network sends to find a device, read and written.", &body);
+    GtkWidget *req_body, *parse_body, *cause_body;
+    GtkWidget *req = verb_card("BUILD A REQUEST", &req_body);
+    GtkWidget *parse = verb_card("READ A RECORD", &parse_body);
+    GtkWidget *cause = verb_card("CAUSE", &cause_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(req_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build",
+                "--build-paging-req", "0x4E21 1",
+                "An identity and the cause. The answer is the paging record as "
+                "octets - what a device has to be listening for."));
+        gtk_box_append(GTK_BOX(req_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), req);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row(state, module_id, status, "Read",
+                "--paging-parse", "hex",
+                "A paging message as hex. Each record is printed with its identity "
+                "type and its cause; an unknown type is refused rather than guessed."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cause_body),
+            mod_arg_choices(state, module_id, status, "Name a code", "",
+                "The paging cause and the paging mode, named from the tables this "
+                "module decodes against.",
+                (const char *[]) { "--paging-cause 1", "--page-mode 1" },
+                (const char *[]) { "Cause", "Mode" }, 2));
+        gtk_box_append(GTK_BOX(cause_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cause);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+pgt_build_tracking(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("TRACKING",
+        "A device followed across a capture: who paged it, how often, and the "
+        "patterns that make a tracker visible.", &body);
+    GtkWidget *hist_body, *storm_body, *flap_body, *det_body;
+    GtkWidget *hist = verb_card("HISTORY", &hist_body);
+    GtkWidget *storm = verb_card("PAGING STORM", &storm_body);
+    GtkWidget *flap = verb_card("FLAPPING", &flap_body);
+    GtkWidget *det = verb_card("DETECT", &det_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(hist_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the History",
+                "--paging-history", "paging.tsv",
+                "A paging log. Each identity is followed over time, which is how a "
+                "device answering to paging becomes a movement record."));
+        gtk_box_append(GTK_BOX(hist_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), hist);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(storm_body),
+            mod_arg_row(state, module_id, status, "Measure a Storm",
+                "--paging-storm", "capture.pcap",
+                "Paging rate per second and per identity. A storm is a network "
+                "under stress or a handset being hunted; the two look alike in the "
+                "count but not in the identity spread."));
+        gtk_box_append(GTK_BOX(storm_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), storm);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(flap_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Flapping",
+                "--flapping-tsv", "paging.tsv",
+                "A device that attaches and detaches repeatedly leaves a pattern "
+                "here: the same identity wanted again and again at the edge of "
+                "coverage."));
+        gtk_box_append(GTK_BOX(flap_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), flap);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(det_body),
+            mod_arg_row(state, module_id, status, "Detect",
+                "--detect", "capture.pcap",
+                "The findings: paging for an identity that never answers, and the "
+                "causes that give a tracker away."));
+        gtk_box_append(GTK_BOX(det_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), det);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+pgt_build_torpedo(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("TORPEDO",
+        "The paging channel as a delivery mechanism: what reaches a handset that "
+        "never answered, and what a lab needs to try it.", &body);
+    GtkWidget *torp_body, *edrx_body, *pei_body, *tx_body;
+    GtkWidget *torp = verb_card("MODEL", &torp_body);
+    GtkWidget *edrx = verb_card("eDRX", &edrx_body);
+    GtkWidget *pei = verb_card("PEI", &pei_body);
+    GtkWidget *tx = verb_card("ORIGIN", &tx_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(torp_body),
+            mod_arg_row(state, module_id, status, "Read the Model",
+                "--torpedo-model", "",
+                "The published model step by step: a paging message carrying a "
+                "cause the device acts on, with no connection ever set up. It "
+                "describes an attack; it performs nothing."));
+        gtk_box_append(GTK_BOX(torp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), torp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(edrx_body),
+            mod_arg_row(state, module_id, status, "Read eDRX",
+                "--edrx-occ", "capture.pcap",
+                "How often an eDRX device is reachable, which is the window a "
+                "paging attempt has to hit."));
+        gtk_box_append(GTK_BOX(edrx_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), edrx);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pei_body),
+            mod_arg_choices(state, module_id, status, "PEI", "",
+                "The paging early indication, and the correlation that ties a "
+                "paging record to the device it was meant for.",
+                (const char *[]) { "--pei-occ capture.pcap",
+                                   "--piercer-correlate paging.tsv" },
+                (const char *[]) { "PEI Occurrence", "Correlate" }, 2));
+        gtk_box_append(GTK_BOX(pei_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pei);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tx_body),
+            mod_arg_choices(state, module_id, status, "Plan", "",
+                "What a paging lab needs, and the transmit path itself, which "
+                "needs a radio you own and a lawful basis.",
+                (const char *[]) { "--plan", "--po 001010000000001 2 gsm",
+                                   "--paging-tx 001010000000001 2 gsm" },
+                (const char *[]) { "Plan", "Point of Origin",
+                                   "Transmit" }, 3));
+        gtk_box_append(GTK_BOX(tx_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tx);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry pgt_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--detect:Detect|--paging-parse:Parse Paging|--piercer-correlate:Piercer Correlate" },
-    { "Model",
-      "system-search-symbolic",
-      "--torpedo-model:Torpedo Model|--po=001010000000001 2 gsm|--plan:Plan" },
-    { "Occasion",
-      "preferences-system-symbolic",
-      "~--edrx-occ|~--pei-occ|~--page-mode|~--paging-cause" },
-    { "Attack",
-      "security-high-symbolic",
-      "#BUILD|~--build-paging-req|#TX|~--paging-tx|~--paging-storm|#HISTORY|~--paging-history|~--flapping-tsv" },
+    { "Paging", "dialog-information-symbolic", NULL, pgt_build_paging },
+    { "Tracking", "system-search-symbolic", NULL, pgt_build_tracking },
+    { "Torpedo", "security-high-symbolic", NULL, pgt_build_torpedo },
 };
 /* 30_volte_ims — the IMS core a carrier puts voice behind.
  *
