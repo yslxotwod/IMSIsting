@@ -15900,16 +15900,153 @@ static ModuleSubmenuEntry fkit_entries[] = {
     { "Emitter",  "media-record-symbolic",       NULL, fkit_build_emitter },
     { "Guards",   "security-high-symbolic",      NULL, fkit_build_guards },
 };
+/* 06_gsm_air — the 2G air interface, which is still in the clear.
+ *
+ * Nothing about GSM is encrypted until A5 runs, and A5/1 has been broken since
+ * 2009. The page reads the broadcast channels and shows what follows from them.
+ */
+static GtkWidget *
+gair_build_decode(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DECODE",
+        "A capture taken apart one layer at a time: the synchronisation channel, "
+        "the system information, and the paging channel.", &body);
+    GtkWidget *pcap_body, *sch_body, *si_body, *pg_body;
+    GtkWidget *pcap = verb_card("CAPTURE", &pcap_body);
+    GtkWidget *sch = verb_card("SCH", &sch_body);
+    GtkWidget *si = verb_card("SYSTEM INFORMATION", &si_body);
+    GtkWidget *pg = verb_card("PAGING", &pg_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pcap_body),
+            mod_arg_row(state, module_id, status, "Read a Capture",
+                "--decode-pcap", "capture.pcap",
+                "A capture. The answer is the channels it contained and how much "
+                "of each decoded, because a capture can look complete and be one "
+                "channel short."));
+        gtk_box_append(GTK_BOX(pcap_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pcap);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sch_body),
+            mod_arg_row(state, module_id, status, "Read the SCH",
+                "--decode-sch", "hex",
+                "A synchronisation burst. The answer is the base station identity "
+                "and the frame number offset, which is what makes every later "
+                "cipher count computable."));
+        gtk_box_append(GTK_BOX(sch_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sch);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(si_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read SI",
+                "--decode-si", "2b 00",
+                "A system information message, type and body. SI3 and SI4 are "
+                "where a cell states what it will accept, and a forged one is what "
+                "a downgrade is built from."));
+        gtk_box_append(GTK_BOX(si_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), si);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pg_body),
+            mod_arg_row_prefilled(state, module_id, status, "Compute a Channel",
+                "--paging-group", "310150123456789 1",
+                "An IMSI and its low bits. The paging channel is computed from the "
+                "subscriber identity, so knowing the identity tells you when to "
+                "listen."));
+        gtk_box_append(GTK_BOX(pg_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pg);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+gair_build_exposure(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("EXPOSURE",
+        "What a capture gives up without breaking any cipher: the identities in "
+        "the clear and the traffic a known keystream unlocks.", &body);
+    GtkWidget *ks_body, *id_body, *audit_body, *tsv_body;
+    GtkWidget *ks = verb_card("KEYSTREAM", &ks_body);
+    GtkWidget *id = verb_card("IDENTITIES", &id_body);
+    GtkWidget *audit = verb_card("CIPHER AUDIT", &audit_body);
+    GtkWidget *tsv = verb_card("EXPOSURE TABLE", &tsv_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ks_body),
+            mod_arg_row_prefilled(state, module_id, status, "Generate",
+                "--a5-1-keystream", "00112233445566778899AABBCCDDEEFF 0 114",
+                "A key, a frame number and a burst count. The keystream is what A5/1 "
+                "produces, and knowing it is the whole of a passive decryption."));
+        gtk_box_append(GTK_BOX(ks_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ks);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(id_body),
+            mod_arg_row(state, module_id, status, "Read the Identities",
+                "--identity-exposure", "capture.pcap",
+                "Which subscriber identities a capture carries in the clear, and "
+                "where. Paging and location updates are the two that leak most."));
+        gtk_box_append(GTK_BOX(id_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), id);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(audit_body),
+            mod_arg_row(state, module_id, status, "Audit the Cipher",
+                "--cipher-audit", "capture.pcap",
+                "Whether the traffic was enciphered at all, which algorithm, and "
+                "how many frames before the cipher came up were readable. The gap "
+                "before encryption is the interesting part."));
+        gtk_box_append(GTK_BOX(audit_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), audit);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tsv_body),
+            mod_arg_row(state, module_id, status, "Exposure Table",
+                "--imsi-exposure-tsv", "capture.pcap",
+                "One row per exposure event: identity, method, frame and how it "
+                "was carried."));
+        gtk_box_append(GTK_BOX(tsv_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tsv);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry gair_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--decode-pcap={capture}|--decode-si:Decode SI|--decode-sch:Decode SCH" },
-    { "Cipher",
-      "channel-secure-symbolic",
-      "--cipher-audit:Cipher Audit|--a5-1-keystream:A5/1 Keystream" },
-    { "Paging & Identity",
-      "system-search-symbolic",
-      "--paging-group=001010000000001|--imsi-exposure-tsv:IMSI Exposure|~--identity-exposure:Identity Exposure" },
+    { "Decode", "dialog-information-symbolic", NULL, gair_build_decode },
+    { "Exposure", "system-search-symbolic", NULL, gair_build_exposure },
 };
 static ModuleSubmenuEntry gatk_entries[] = {
     { "Overview",
@@ -15954,19 +16091,153 @@ static ModuleSubmenuEntry gatk_entries[] = {
       "preferences-system-symbolic",
       "--c1=-100 -90 33 5|--plan:Plan|--plan-tsv:Plan TSV" },
 };
+/* 08_umts_air — 3G, where the cipher was broken properly and the identity was not.
+ *
+ * UMTS fixed GSM's cipher and kept the same structural leak: the identity is sent
+ * before there is anything to protect it with.
+ */
+static GtkWidget *
+uair_build_decode(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DECODE",
+        "The broadcast channels of a 3G cell and the identity exchange that "
+        "precedes any protection.", &body);
+    GtkWidget *pcap_body, *sib_body, *fields_body, *carriers_body;
+    GtkWidget *pcap = verb_card("CAPTURE", &pcap_body);
+    GtkWidget *sib = verb_card("SIB", &sib_body);
+    GtkWidget *fields = verb_card("FIELDS", &fields_body);
+    GtkWidget *carriers = verb_card("CARRIERS", &carriers_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pcap_body),
+            mod_arg_row(state, module_id, status, "Read a Capture",
+                "--decode-pcap", "capture.pcap",
+                "A capture. The answer is the channels decoded and the cipher state "
+                "of each, because 3G ciphering starts after the identity is sent."));
+        gtk_box_append(GTK_BOX(pcap_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pcap);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sib_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a SIB",
+                "--decode-sib", "3",
+                "A system information block number. SIB3 and SIB5 are where a cell "
+                "states its reselection and neighbour rules, which is what a "
+                "downgrade manipulates."));
+        gtk_box_append(GTK_BOX(sib_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sib);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(fields_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Fields",
+                "--sib-fields", "3",
+                "Every field of one SIB with its clause, so a value can be checked "
+                "against the standard rather than against a decoder."));
+        gtk_box_append(GTK_BOX(fields_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), fields);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(carriers_body),
+            mod_arg_choices(state, module_id, status, "Carriers", "",
+                "The carriers a SIB6 lists, and the frequency arithmetic between a "
+                "UARFCN and a hertz value.",
+                (const char *[]) { "--sib6-carriers 1", "--uarfcn 10638",
+                                   "--mhz 2140" },
+                (const char *[]) { "SIB6 Carriers", "UARFCN to Hz",
+                                   "Hz to UARFCN" }, 3));
+        gtk_box_append(GTK_BOX(carriers_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), carriers);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+uair_build_integrity(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("INTEGRITY",
+        "The AKA exchange and the integrity protection that follows it, which is "
+        "the control plane's only defence.", &body);
+    GtkWidget *aka_body, *mac_body, *count_body, *tsv_body;
+    GtkWidget *aka = verb_card("AKA", &aka_body);
+    GtkWidget *mac = verb_card("MAC-I", &mac_body);
+    GtkWidget *count = verb_card("COUNT", &count_body);
+    GtkWidget *tsv = verb_card("EVIDENCE", &tsv_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(aka_body),
+            mod_arg_row(state, module_id, status, "Walk the Exchange",
+                "--aka-flow", "",
+                "The authentication and key agreement step by step, with what each "
+                "message protects and what it leaves in the clear before it."));
+        gtk_box_append(GTK_BOX(aka_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), aka);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(mac_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the Input",
+                "--mac-input", "0011223344556677 1 0 0",
+                "A key, a count and the message. The answer is the MAC input, and "
+                "that is where a replay becomes provable: the count is inside it."));
+        gtk_box_append(GTK_BOX(mac_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), mac);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(count_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a Count",
+                "--count-i", "1 2 0",
+                "The hyper frame number and the frame number, and the count they "
+                "form. An integrity failure after a handover is usually this "
+                "arithmetic."));
+        gtk_box_append(GTK_BOX(count_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), count);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tsv_body),
+            mod_arg_row(state, module_id, status, "Read the Evidence",
+                "--integrity-tsv", "capture.pcap",
+                "One row per protected message with its count and its check "
+                "result, across a capture."));
+        gtk_box_append(GTK_BOX(tsv_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tsv);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry uair_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--decode-pcap={capture}|--decode-sib:Decode SIB|--sib-fields:SIB Fields" },
-    { "Integrity",
-      "channel-secure-symbolic",
-      "--aka-flow:AKA Flow|--count-i:COUNT-I|--integrity-tsv:Integrity TSV" },
-    { "MAC",
-      "network-receive-symbolic",
-      "--mac-input:MAC Input|--sib6-carriers:SIB6 Carriers" },
-    { "Frequencies",
-      "preferences-system-symbolic",
-      "--mhz=2140|--uarfcn=10700" },
+    { "Decode", "dialog-information-symbolic", NULL, uair_build_decode },
+    { "Integrity", "channel-secure-symbolic", NULL, uair_build_integrity },
 };
 /* 09_lte_attach — LTE Attach Forge.
  *
