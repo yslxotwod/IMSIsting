@@ -2919,6 +2919,35 @@ record_row_append(GtkWidget *list, const char *text, GStrv fields)
     }
 }
 
+/* True when the deferred row is column names rather than a first record:
+   every cell is a lowercase identifier (letters, digits, underscores) and at
+   least one cell of the next row is not. */
+static gboolean
+fields_look_like_headings(char *const *head, char *const *body)
+{
+    gboolean body_differs = FALSE;
+    int i;
+
+    for (i = 0; head[i] != NULL; i++) {
+        const char *c = head[i];
+
+        if (*c == '\0') return FALSE;
+        for (; *c != '\0'; c++)
+            if (!g_ascii_islower(*c) && !g_ascii_isdigit(*c) && *c != '_')
+                return FALSE;
+    }
+    for (i = 0; body[i] != NULL; i++) {
+        const char *c = body[i];
+        gboolean ident = (*c != '\0');
+
+        for (; *c != '\0'; c++)
+            if (!g_ascii_islower(*c) && !g_ascii_isdigit(*c) && *c != '_')
+                { ident = FALSE; break; }
+        if (!ident) body_differs = TRUE;
+    }
+    return body_differs;
+}
+
 static void
 console_row_append(GtkWidget *list, const char *text)
 {
@@ -2974,6 +3003,20 @@ console_row_append(GtkWidget *list, const char *text)
                 char *const *rot = (char *const *) fields;
 
                 g_object_set_data(G_OBJECT(list), "answer-grid", grid);
+                /* A column-heading row is names, not data: every cell is a
+                   lowercase identifier while the rows beneath carry values.
+                   Drawing it would list "algo key_bits input" as a record, and
+                   the chip heuristic would then pull a field name off the
+                   second row and wear it as a badge. Drop it: the summary line
+                   says how many records there are, and each row says what it
+                   is. */
+                if (fields_look_like_headings(pending, fields)) {
+                    g_object_set_data(G_OBJECT(list), "record-pending", NULL);
+                    g_object_set_data(G_OBJECT(list), "answer-cols",
+                                      GINT_TO_POINTER(n));
+                    record_row_append(list, (char *) text, (GStrv) fields);
+                    return;
+                }
                 if (g_strcmp0(pending[0], fields[0]) == 0) {
                     /* "signal  foo  ..." six times: the first cell is a type,
                        not a value. */
@@ -19585,23 +19628,191 @@ static ModuleSubmenuEntry ntn_entries[] = {
       "preferences-system-symbolic",
       "--plan:Plan" },
 };
+/* 50_gprs — GPRS / EDGE.
+ *
+ * The module is a ciphering table, the two APN codings, one PDP IE and a
+ * downgrade check. Every verb here either computes something checkable or says
+ * in its own words why it cannot, so the page gives each one a card and lets the
+ * answer be the answer.
+ */
+static GtkWidget *
+gprs_build_ciphering(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CIPHERING",
+        "GEA0 to GEA5: what each one protects, which of them this tree can "
+        "compute, and what a network that negotiates downwards gives away.",
+        &body);
+    GtkWidget *table_body, *one_body, *crypt_body, *down_body;
+    GtkWidget *table = verb_card("ALGORITHM TABLE", &table_body);
+    GtkWidget *one = verb_card("ONE ALGORITHM", &one_body);
+    GtkWidget *crypt = verb_card("CIPHER A PACKET", &crypt_body);
+    GtkWidget *down = verb_card("DOWNGRADE CHECK", &down_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(table_body),
+            mod_arg_row(state, module_id, status, "Read the Table",
+                "--gea-table", "",
+                "Every GEA with its clause, its key size and whether this tree "
+                "implements it. Five rows, one of which is computable here."));
+        gtk_box_append(GTK_BOX(table_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), table);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(one_body),
+            mod_arg_row_prefilled(state, module_id, status, "Name One",
+                "--gea", "1",
+                "0 to 5. The answer states the algorithm's standing: GEA0 is no "
+                "ciphering at all, and the export-controlled ones are named as "
+                "such rather than described as if they were weak."));
+        gtk_box_append(GTK_BOX(one_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), one);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(crypt_body),
+            mod_arg_row_prefilled(state, module_id, status, "Cipher the Packet",
+                "--gea-crypt", "0 0011223344556677 00000000 48656c6c6f",
+                "Algorithm, Kc, the 32-bit input, then the plaintext. Only GEA0 "
+                "is computable here and its answer is the plaintext back, which "
+                "is the point: on a GEA0 cell, the key is decorative."));
+        gtk_box_append(GTK_BOX(crypt_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), crypt);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(down_body),
+            mod_arg_row_prefilled(state, module_id, status, "Check the Choice",
+                "--gea-downgrade", "0,1,2 0",
+                "What the network offered, then what it selected. A selection "
+                "outside the offer is reported as such and exits non-zero."));
+        gtk_box_append(GTK_BOX(down_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), down);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+gprs_build_apn(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("APN",
+        "The access point name as TS 23.003 codes it, in both directions, and "
+        "the IE that carries it in a session request.", &body);
+    GtkWidget *enc_body, *dec_body, *ie_body;
+    GtkWidget *enc = verb_card("ENCODE", &enc_body);
+    GtkWidget *dec = verb_card("DECODE", &dec_body);
+    GtkWidget *ie = verb_card("SESSION IE", &ie_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(enc_body),
+            mod_arg_row_prefilled(state, module_id, status, "Encode the Name",
+                "--apn-encode", "internet",
+                "Each label prefixed by its length, the way a DNS name is "
+                "written. The answer is the octets and the length octet."));
+        gtk_box_append(GTK_BOX(enc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), enc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dec_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode the Octets",
+                "--apn-decode", "08696e7465726e6574",
+                "The coded form as hex. A length octet that runs past the end is "
+                "refused rather than trimmed."));
+        gtk_box_append(GTK_BOX(dec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ie_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the IE",
+                "--apn-ie", "internet",
+                "The same name, wrapped as TS 24.008 clause 10.5.6.1 wants it: "
+                "identifier 0x28, a length, then the coded value."));
+        gtk_box_append(GTK_BOX(ie_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ie);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+gprs_build_pdp(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("PDP",
+        "The requested address IE and the handoff a lab session needs.", &body);
+    GtkWidget *addr_body, *plan_body;
+    GtkWidget *addr = verb_card("REQUESTED ADDRESS", &addr_body);
+    GtkWidget *plan = verb_card("LAB HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(addr_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the IE",
+                "--pdp-ie", "0100",
+                "The PDP type octet, then optionally the address octets. A type "
+                "that takes no address and is given one is refused, not "
+                "silently shortened."));
+        gtk_box_append(GTK_BOX(addr_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), addr);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What a Gb or Gn lab needs before a session can be watched: the "
+                "element to point at, the interface, and what to record."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry gprs_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "#TABLE|--gea-table:GEA Table"
-      "|#ATTACK|--gea-downgrade:GEA Downgrade"
-      /* The demonstration carries a worked packet, so the button shows what
-         GEA0 does to data instead of printing a usage line: the input Kc and
-         IV are arbitrary, the plaintext is "Hello", and the answer is that
-         five cleartext octets come back out. */
-      "|--gea-crypt=0 0011223344556677 00000000 48656c6c6f:GEA0 Leaks Plaintext"
-      "|#PARAMS|--gea=1" },
-    { "APN",
-      "network-server-symbolic",
-      "--apn-decode:Decode APN|--apn-encode:Encode APN|--apn-ie:APN IE" },
-    { "PDP",
-      "preferences-system-symbolic",
-      "--pdp-ie:PDP IE|--plan:Plan" },
+    { "Ciphering", "dialog-information-symbolic", NULL, gprs_build_ciphering },
+    { "APN", "network-server-symbolic", NULL, gprs_build_apn },
+    { "PDP", "preferences-system-symbolic", NULL, gprs_build_pdp },
 };
 static ModuleSubmenuEntry slnk_entries[] = {
     { "Overview",
