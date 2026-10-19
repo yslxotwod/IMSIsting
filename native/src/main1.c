@@ -22386,19 +22386,155 @@ static ModuleSubmenuEntry iot_entries[] = {
     { "Sequences", "network-wireless-symbolic", NULL, iot_build_sequences },
     { "Limits", "security-low-symbolic", NULL, iot_build_limits },
 };
+/* 46_lpp — the positioning protocol.
+ *
+ * LPP is where a network tells a handset where the cells are and asks where the
+ * handset is. Both directions are ASN.1, both are encoded through the generated
+ * table, and both are things a forged message can lie about.
+ */
+static GtkWidget *
+lpp_build_messages(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MESSAGES",
+        "A positioning message read and built: the header that routes it and the "
+        "position it claims.", &body);
+    GtkWidget *parse_body, *build_body, *forge_body, *pids_body;
+    GtkWidget *parse = verb_card("READ A POSITION", &parse_body);
+    GtkWidget *build = verb_card("HEADER", &build_body);
+    GtkWidget *forge = verb_card("FORGE", &forge_body);
+    GtkWidget *pids = verb_card("PROTOCOL IDS", &pids_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row(state, module_id, status, "Read a Position",
+                "--parse-position", "hex",
+                "An LPP position message. The answer is every field the table "
+                "carries, so a message with an unexpected extension is visible "
+                "rather than quietly accepted."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_choices(state, module_id, status, "Header", "",
+                "The LPP header in either direction: built, or read back from "
+                "octets you already have.",
+                (const char *[]) { "--build-header", "--decode-header 0402" },
+                (const char *[]) { "Build", "Decode" }, 2));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(forge_body),
+            mod_arg_row(state, module_id, status, "Forge a Position",
+                "--forge-position", "52.0 4.0",
+                "A latitude and a longitude. The answer is a position message "
+                "that decodes cleanly - which is the whole point: a forged "
+                "position is not a malformed one."));
+        gtk_box_append(GTK_BOX(forge_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), forge);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pids_body),
+            mod_arg_row(state, module_id, status, "List the PIDs",
+                "--list-pids", "",
+                "The protocol discriminators an LPP message can carry, and which "
+                "of them this module can encode."));
+        gtk_box_append(GTK_BOX(pids_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pids);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+lpp_build_procedures(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("PROCEDURES",
+        "The three positioning procedures, each encoded through the generated "
+        "table and checked against pycrate octet for octet.", &body);
+    GtkWidget *otdoa_body, *utdoa_body, *prs_body, *detect_body;
+    GtkWidget *otdoa = verb_card("OTDOA", &otdoa_body);
+    GtkWidget *utdoa = verb_card("UTDOA", &utdoa_body);
+    GtkWidget *prs = verb_card("PRS SCHEDULE", &prs_body);
+    GtkWidget *detect = verb_card("DETECT A FORGERY", &detect_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(otdoa_body),
+            mod_arg_choices(state, module_id, status, "Procedure", "",
+                "The assistance data a network sends, and the request a handset "
+                "makes for it. Both are real encodings, not descriptions.",
+                (const char *[]) { "--otdoa-assist", "--otdoa-request" },
+                (const char *[]) { "Assistance Data", "Request" }, 2));
+        gtk_box_append(GTK_BOX(otdoa_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), otdoa);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(utdoa_body),
+            mod_arg_row(state, module_id, status, "Uplink Fields",
+                "--utdoa-config", "utdoa",
+                "The uplink positioning fields. UTDOA has no LPP container - it "
+                "is LPPa - so this prints typed fields and emits no octets, and "
+                "says so."));
+        gtk_box_append(GTK_BOX(utdoa_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), utdoa);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(prs_body),
+            mod_arg_row(state, module_id, status, "Plan the Symbols",
+                "--prs-plan", "",
+                "The positioning reference signal schedule: which symbols carry "
+                "it and how many resource elements that leaves for data."));
+        gtk_box_append(GTK_BOX(prs_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), prs);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(detect_body),
+            mod_arg_row(state, module_id, status, "Check a Message",
+                "--detect-forgery", "hex",
+                "An LPP message from a capture. The findings are the fields that "
+                "disagree with the cell they were sent from: a position no cell "
+                "in range could produce."));
+        gtk_box_append(GTK_BOX(detect_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), detect);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry lpp_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--list-pids:List PIDs|--parse-position:Parse Position|--detect-forgery:Detect Forgery" },
-    { "Build",
-      "document-new-symbolic",
-      "--build-header:Build Header|--forge-position:Forge Position|--decode-header:Decode Header" },
-    /* Positioning procedures, encoded through the generated LPP table and
-       checked against pycrate octet for octet. */
-    { "Procedures",
-      "system-search-symbolic",
-      "--otdoa-assist:OTDOA Assistance|--otdoa-request:OTDOA Request"
-      "|--utdoa-config=utdoa:UTDOA Fields|--prs-plan:PRS Schedule" },
+    { "Messages", "dialog-information-symbolic", NULL, lpp_build_messages },
+    { "Procedures", "system-search-symbolic", NULL, lpp_build_procedures },
 };
 /* 47_wifioff — VoWiFi / ePDG Attacks.
  *
