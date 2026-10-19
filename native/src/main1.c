@@ -815,7 +815,7 @@ static const ModuleDefinition modules[] = {
       "Lawful-interception interfaces and posture signals, plus the artefacts an interception is built from, encoded and never delivered." },
     { "44_carrier_api",      "Carrier API Abuse",    "INTERCEPT / CARRIER",
       "imsisting-44_carrier_api-symbolic",
-      "Carrier API surface, authorisation-boundary testing and token/rate-limit audit." }
+      "Carrier API surface, authorisation-boundary testing and token/rate-limit audit, plus the request plan an enumeration runs and never sends." }
 
 };
 
@@ -19001,21 +19001,223 @@ static ModuleSubmenuEntry rans_entries[] = {
       "network-server-symbolic",
       "--plmn-decode:Decode PLMN|--plmn-encode:Encode PLMN|--plan:Plan" },
 };
+/* 44_carrier_api — Carrier API Abuse.
+ *
+ * The assessor reads a document and reports; the other half renders requests
+ * and stops at the file. The page separates them the same way, because one is
+ * reading and the other is preparing, and only one of them needs a path typed
+ * in.
+ */
+static GtkWidget *
+capi_build_surface(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SURFACE",
+        "What the document declares: its title, its servers, its paths and the "
+        "auth scheme each operation asks for.", &body);
+    GtkWidget *doc_body, *matrix_body, *report_body;
+    GtkWidget *doc = verb_card("THE DOCUMENT", &doc_body);
+    GtkWidget *matrix = verb_card("AUTHORISATION MATRIX", &matrix_body);
+    GtkWidget *report = verb_card("THE REPORT", &report_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(doc_body),
+            mod_arg_row(state, module_id, status, "Read the Surface",
+                "--openapi", "swagger.json",
+                "An OpenAPI 3 document as JSON. YAML is refused with the exact "
+                "conversion, because nothing in this tree parses YAML."));
+        gtk_box_append(GTK_BOX(doc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), doc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(matrix_body),
+            mod_arg_row(state, module_id, status, "Build the Matrix",
+                "--authz-matrix", "swagger.json",
+                "Four cases per operation: no token, expired token, token for "
+                "another subscriber, token for this one. Expected statuses, not "
+                "requests."));
+        gtk_box_append(GTK_BOX(matrix_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), matrix);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(report_body),
+            mod_arg_row(state, module_id, status, "Write the Report",
+                "--report", "", "The assessment skeleton: findings, evidence, "
+                "and what the owner should change."));
+        gtk_box_append(GTK_BOX(report_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), report);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+capi_build_attacks(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CONTROLS",
+        "The three controls a carrier API is judged on: rate limiting, token "
+        "handling and resistance to credential stuffing.", &body);
+    GtkWidget *stuff_body, *bucket_body, *jwt_body;
+    GtkWidget *stuff = verb_card("CREDENTIAL STUFFING", &stuff_body);
+    GtkWidget *bucket = verb_card("RATE LIMIT", &bucket_body);
+    GtkWidget *jwt = verb_card("TOKEN AUDIT", &jwt_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(stuff_body),
+            mod_arg_row(state, module_id, status, "Test the Controls",
+                "--stuffing", "stuffing.conf",
+                "A KEY=VALUE file describing the endpoint's declared controls. "
+                "The verb says which of them would stop a stuffing run."));
+        gtk_box_append(GTK_BOX(stuff_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), stuff);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(bucket_body),
+            mod_arg_row(state, module_id, status, "Compute the Bucket",
+                "--token-bucket", "10 60 200 30",
+                "Rate, burst, requests and seconds. The output is when the "
+                "bucket empties, not a request."));
+        gtk_box_append(GTK_BOX(bucket_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), bucket);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(jwt_body),
+            mod_arg_row(state, module_id, status, "Audit the Token",
+                "--jwt-audit", "eyJhbGciOiJub25lIn0.eyJleHAiOjB9.",
+                "The token as it was captured. The audit reports alg=none, an "
+                "expiry that has passed, and an audience that does not match."));
+        gtk_box_append(GTK_BOX(jwt_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), jwt);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+capi_build_compare(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("COMPARE",
+        "Two captures of the same endpoint, diffed, and the handoff for what to "
+        "do with the difference.", &body);
+    GtkWidget *diff_body, *plan_body;
+    GtkWidget *diff = verb_card("RESPONSE DIFFERENTIAL", &diff_body);
+    GtkWidget *plan = verb_card("ASSESSMENT HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(diff_body),
+            mod_arg_row(state, module_id, status, "Diff the Captures",
+                "--diff", "a.tsv b.tsv",
+                "Two TSV captures, one per case. The difference is the finding; "
+                "a status that changes with the token is the bug."));
+        gtk_box_append(GTK_BOX(diff_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), diff);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Handoff",
+                "--plan", "",
+                "What an assessment needs before it starts: written scope, a "
+                "test subscription, and the owner's contact."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+capi_build_enumeration(AppState *state, const char *module_id,
+                       GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ENUMERATION",
+        "One concrete request per operation, and the sequence a subscriber sweep "
+        "would send. Both write a run-file and stop there.", &body);
+    GtkWidget *surface_body, *subs_body;
+    GtkWidget *surface = verb_card("THE SURFACE PLAN", &surface_body);
+    GtkWidget *subs = verb_card("SUBSCRIBER SEQUENCE", &subs_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(surface_body),
+            mod_arg_row(state, module_id, status, "Map the Surface",
+                "--enumerate", "swagger.json",
+                "The same document. Every operation becomes one curl line, "
+                "filled from the document's own examples; the answer says how "
+                "many were rendered."));
+        gtk_box_append(GTK_BOX(surface_body), res);
+    }
+    gtk_box_append(GTK_BOX(surface_body), fkit_note(
+        "Nothing is sent. The run-file is the sequence an operator runs, and it "
+        "says so at the top, so a file cannot be mistaken for a log."));
+    gtk_box_append(GTK_BOX(body), surface);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(subs_body),
+            mod_arg_row(state, module_id, status, "Build the Sequence",
+                "--enumerate-subscribers", "subs.conf",
+                "A KEY=VALUE file naming the document and the candidate list. "
+                "Identifiers are validated as E.164 and deduplicated before any "
+                "request is rendered."));
+        gtk_box_append(GTK_BOX(subs_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), subs);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry capi_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--openapi:OpenAPI|--authz-matrix:Authz Matrix|--report:Report" },
-    { "Attacks",
-      "security-high-symbolic",
-      "--stuffing:Credential Stuffing|--token-bucket:Token Bucket|--jwt-audit:JWT Audit" },
-    { "Compare",
-      "system-search-symbolic",
-      "--diff:Diff|--plan:Plan" },
-    /* Enumeration: the surface plan and the subscriber sequence. Both stop at
-       the artefact -- the page says so. */
-    { "Enumeration",
-      "system-search-symbolic",
-      "--enumerate:Map the Surface|--enumerate-subscribers:Subscriber Sequence" },
+    { "Surface", "document-open-symbolic", NULL, capi_build_surface },
+    { "Controls", "security-high-symbolic", NULL, capi_build_attacks },
+    { "Compare", "system-search-symbolic", NULL, capi_build_compare },
+    { "Enumeration", "network-transmit-receive-symbolic", NULL, capi_build_enumeration },
 };
 static ModuleSubmenuEntry iot_entries[] = {
     { "Overview",
