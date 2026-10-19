@@ -852,6 +852,132 @@ lcve_cmd_runs_tsv() {
     cat "$LCVE_RUNS"
 }
 
+# ── the RANSacked corpus ────────────────────────────────────────────────
+# A catalogue read from data, not restated in this script: every row was
+# extracted from the report's vulnerability section, and the extraction is
+# checked against the report's own totals by tools/check-ransacked-corpus.sh.
+# Columns: id alt impl gen proto pattern reach kind needs description
+if [[ -z "${LCVE_CATALOG:-}" ]]; then
+    LCVE_CATALOG="$IMSISTING_ROOT/tools/ransacked_catalog.tsv"
+fi
+if [[ -z "${LCVE_GEN:-}" ]]; then
+    LCVE_GEN="$IMSISTING_ROOT/tools/ransacked_gen.py"
+fi
+
+lcve_catalog_require() {
+    if [[ ! -r "$LCVE_CATALOG" ]]; then
+        printf 'ERROR\tthe RANSacked catalogue is missing: %s\n' "$LCVE_CATALOG" >&2
+        printf 'WHY\tthe corpus is data, so an absent file is an absent corpus and not an empty one\n' >&2
+        return 1
+    fi
+    return 0
+}
+
+lcve_corpus_count() {
+    lcve_catalog_require || return 1
+    tail -n +1 "$LCVE_CATALOG" | grep -c . || true
+}
+
+# --corpus [--impl X] [--proto Y] [--pattern Z] [--reach R] [--kind K]
+lcve_cmd_corpus() {
+    local impl="" proto="" pattern="" reach="" kind="" a
+    while (($#)); do
+        a="$1"; shift || true
+        case "$a" in
+            --impl)    impl="${1:-}";    shift || true ;;
+            --proto)   proto="${1:-}";   shift || true ;;
+            --pattern) pattern="${1:-}"; shift || true ;;
+            --reach)   reach="${1:-}";   shift || true ;;
+            --kind)    kind="${1:-}";    shift || true ;;
+            *) printf 'ERROR\tunknown option %s\n' "$a" >&2; return 2 ;;
+        esac
+    done
+    lcve_catalog_require || return 1
+    printf 'id\talt\timpl\tgen\tproto\tpattern\treach\tkind\tneeds\tlabel\n'
+    awk -F'\t' -v impl="$impl" -v proto="$proto" -v pattern="$pattern" \
+               -v reach="$reach" -v kind="$kind" '
+        (impl==""    || $3==impl) &&
+        (proto==""   || $5==proto) &&
+        (pattern=="" || $6==pattern) &&
+        (reach==""   || $7==reach) &&
+        (kind==""    || $8==kind) { printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10 }' "$LCVE_CATALOG"
+}
+
+lcve_cmd_corpus_entry() {
+    local want="${1:-}"
+    if [[ -z "$want" ]]; then
+        printf 'ERROR\tusage: --corpus-entry <CVE|VULN id>\n' >&2
+        return 2
+    fi
+    lcve_catalog_require || return 1
+    local row
+    row=$(awk -F'\t' -v w="${want^^}" 'toupper($1)==w || (","toupper($2)"," ~ ","w",")' "$LCVE_CATALOG")
+    if [[ -z "$row" ]]; then
+        printf 'ERROR\t%s is not in the RANSacked corpus\n' "$want" >&2
+        printf 'NOTE\tthe catalogue holds what the report published; an id it does not list is not a finding it did not make\n' >&2
+        return 1
+    fi
+    printf '%s\n' "$row" | awk -F'\t' '{
+        printf "id\t%s\nalt_ids\t%s\nimplementation\t%s\ngeneration\t%s\nprotocol\t%s\n",
+               $1, ($2==""?"-":$2), $3, $4, $5
+        printf "pattern\t%s\nreach\t%s\nkind\t%s\nneeds\t%s\nlabel\t%s\n",
+               $6, $7, $8, $9, $10 }'
+    # The reach is the finding, and it is the report's, not this tree's.
+    case "$(printf '%s' "$row" | cut -f7)" in
+        nas-no-sim) printf 'reach_note\treachable at connection start with no SIM; the page says Wi-Fi Calling makes it internet-reachable, which the page does not itself demonstrate\n' ;;
+        s1-access)  printf 'reach_note\tneeds base-station or IPsec-backhaul access to the core\n' ;;
+        n2-access)  printf 'reach_note\tneeds N2 access, which is the base-station side in 5G\n' ;;
+        gtp-bearer) printf 'reach_note\tneeds an established bearer or a routing position on the user plane\n' ;;
+        *)          printf 'reach_note\t-\n' ;;
+    esac
+}
+
+lcve_cmd_corpus_stats() {
+    lcve_catalog_require || return 1
+    local rows
+    rows=$(lcve_corpus_count)
+    printf 'entries\t%s\n' "$rows"
+    awk -F'\t' '{impl[$3]++; proto[$5]++; pat[$6]++; reach[$7]++; kind[$8]++}
+        END {
+            for (k in impl)  printf "impl.%s\t%d\n", k, impl[k]
+            for (k in proto) printf "proto.%s\t%d\n", k, proto[k]
+            for (k in pat)   printf "pattern.%s\t%d\n", k, pat[k]
+            for (k in reach) printf "reach.%s\t%d\n", k, reach[k]
+            for (k in kind)  printf "kind.%s\t%d\n", k, kind[k]
+        }' "$LCVE_CATALOG" | sort
+}
+
+# --gen <pattern> [--out DIR]  →  the four message-shape families
+lcve_cmd_gen() {
+    local pattern="" outdir=""
+    while (($#)); do
+        case "${1:-}" in
+            --out) outdir="${2:-}"; shift 2 || shift || true ;;
+            --*)   printf 'ERROR\tunknown option %s\n' "$1" >&2; return 2 ;;
+            *)     pattern="$1"; shift || true ;;
+        esac
+    done
+    if [[ -z "$pattern" ]]; then
+        if [[ -x "$LCVE_GEN" ]] || [[ -r "$LCVE_GEN" ]]; then
+            python3 "$LCVE_GEN" list
+            return 0
+        fi
+        printf 'ERROR\tthe generator is missing: %s\n' "$LCVE_GEN" >&2
+        return 1
+    fi
+    if [[ ! -r "$LCVE_GEN" ]]; then
+        printf 'ERROR\tthe generator is missing: %s\n' "$LCVE_GEN" >&2
+        printf 'WHY\tthe corpus is generated from a base message, so an absent generator is an absent corpus\n' >&2
+        return 1
+    fi
+    if [[ -n "$outdir" ]]; then
+        python3 "$LCVE_GEN" gen "$pattern" --out "$outdir"
+    else
+        python3 "$LCVE_GEN" gen "$pattern"
+    fi
+}
+
 lcve_cmd_probe() {
     local what="${1:-}"
     case "$what" in
@@ -1243,6 +1369,39 @@ SIP
     chk status-sdr-nofile  "$(fld "$out" sdr)" "none"
     chk status-fields-none "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"
 
+    # ── 18. the RANSacked corpus ───────────────────────────────────────
+    local ncat
+    ncat=$(lcve_corpus_count)
+    chk corpus-count       "$ncat" "98"
+    chk corpus-hdr         "$(lcve_cmd_corpus | head -1)" "$(printf 'id\talt\timpl\tgen\tproto\tpattern\treach\tkind\tneeds\tlabel')"
+    chk corpus-fields      "$(lcve_cmd_corpus | awk -F'\t' 'NR>1 && NF!=10' | grep -c . || true)" "0"
+    chk corpus-rows        "$(lcve_cmd_corpus | tail -n +2 | grep -c .)" "$ncat"
+    chk corpus-filter-proto "$(lcve_cmd_corpus --proto NAS | tail -n +2 | awk -F'\t' '$5!="NAS"' | grep -c . || true)" "0"
+    chk corpus-filter-kind  "$(lcve_cmd_corpus --kind handoff | tail -n +2 | awk -F'\t' '$8!="handoff"' | grep -c . || true)" "0"
+    chk corpus-nas-reach    "$(lcve_cmd_corpus --reach nas-no-sim | tail -n +2 | grep -c .)" "24"
+    chk corpus-entry-known  "$(lcve_cmd_corpus_entry CVE-2024-24445 | awk -F'\t' '$1=="kind"{print $2}')" "probe"
+    chk corpus-entry-vuln   "$(lcve_cmd_corpus_entry VULN-B01 | awk -F'\t' '$1=="id"{print $2}')" "CVE-2024-24445"
+    chk corpus-entry-unknown-rc "$(lcve_cmd_corpus_entry CVE-1999-0001 >/dev/null 2>&1; echo $?)" "1"
+    chk corpus-entry-usage-rc   "$(lcve_cmd_corpus_entry >/dev/null 2>&1; echo $?)" "2"
+    chk corpus-stats-entries    "$(lcve_cmd_corpus_stats | awk -F'\t' '$1=="entries"{print $2}')" "$ncat"
+    chk corpus-missing-rc       "$(LCVE_CATALOG="$d/nope.tsv" lcve_cmd_corpus >/dev/null 2>&1; echo $?)" "1"
+
+    # ── 19. the four generated families ────────────────────────────────
+    local pat fam rc2
+    for pat in len-unchecked asn1c-rows branch-asymmetry trust-failed-decode; do
+        fam=$(lcve_cmd_gen "$pat" 2>/dev/null)
+        chk "gen-$pat-rc"   "$?" "0"
+        chk "gen-$pat-rows" "$(printf '%s\n' "$fam" | awk -F'\t' -v p="$pat" '$2==p' | grep -c .)" "6"
+        chk "gen-$pat-hex"  "$(printf '%s\n' "$fam" | awk -F'\t' '$1 ~ /^hex\./ && $2 !~ /^[0-9a-f]+$/' | grep -c . || true)" "0"
+    done
+    chk gen-list-patterns  "$(lcve_cmd_gen | awk -F'\t' 'NR>1' | grep -c .)" "4"
+    lcve_cmd_gen no-such-pattern >/dev/null 2>&1; rc2=$?
+    chk gen-unknown-rc     "$rc2" "2"
+    chk gen-missing-rc     "$(LCVE_GEN="$d/nope.py" lcve_cmd_gen len-unchecked >/dev/null 2>&1; echo $?)" "1"
+    # --out writes one file per variant and nothing else
+    lcve_cmd_gen len-unchecked --out "$d/gen" >/dev/null 2>&1
+    chk gen-out-files      "$(find "$d/gen" -name '*.hex' | wc -l | tr -d ' ')" "6"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1306,6 +1465,10 @@ lcve_cli_main() {
     case "$cmd" in
         --status-tsv)  lcve_cli_status_tsv ;;
         --list-cves)   lcve_cmd_list_cves ;;
+        --corpus)      lcve_cmd_corpus "$@" ;;
+        --corpus-entry) lcve_cmd_corpus_entry "${1:-}" ;;
+        --corpus-stats) lcve_cmd_corpus_stats ;;
+        --gen)         lcve_cmd_gen "$@" ;;
         --run-cve)     lcve_run_cve "${1:-}" ;;
         --probe)       lcve_cmd_probe "${1:-}" ;;
         --plan)        lcve_cmd_plan "${1:-}" ;;
@@ -1321,6 +1484,12 @@ LTE CVE Kit — 4G baseband, NAS/ASN.1, EPC and VoLTE probes
 Usage: $0 COMMAND
   --status-tsv              module state as TSV
   --list-cves               every documented id, with kind and required testbed
+  --corpus                  the RANSacked entries, filterable by --impl --proto
+                            --pattern --reach --kind
+  --corpus-entry <ID>       one corpus entry, its reach and what that reach means
+  --corpus-stats            the corpus counted five ways
+  --gen <PATTERN>           build a message family: len-unchecked | asn1c-rows
+                            | branch-asymmetry | trust-failed-decode
   --run-cve <ID>            run the probe for ID, or write its handoff plan
   --probe <WHAT>            ASN1|ASN1-LIB|RRC|NAS|NAS-COUNT|DIAMETER|GTP-AMP|
                             GTP|SIP|IMS|PAGING|PAGING-OC|SIB1|SIB-SCHED|

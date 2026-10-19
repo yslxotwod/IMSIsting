@@ -20,7 +20,7 @@ MODULE	NAME	CATEGORY	VERBS	SELFTEST	HAS_INFO
 18_imsi_exposure	IMSI Harvest	SIM / IDENTITY	--audit --clear --cross --exposure-tsv --harvest --identities --map --marlin --marlin-msgs --menu --redact --report --selftest --status-tsv --subscribers-tsv 	1	0
 19_cipher_audit	Cipher Audit	ANALYSIS	--auth-causes --auth-session --clear --downgrade-check --from-pcap --menu --parse-smc --score --selftest --session --sessions-load --sqn-recover --status-tsv --table 	1	0
 20_gsm_cve	GSM/UMTS CVE Kit	EXPLOIT KITS	--bcd --kc --list-cves --list-findings --menu --plan --probe --run-cve --runs-tsv --selftest --status-tsv 	1	0
-21_lte_cve	LTE CVE Kit	EXPLOIT KITS	--list-cves --menu --plan --plmn --probe --run-cve --runs-tsv --selftest --status-tsv --teid 	1	0
+21_lte_cve	LTE CVE Kit	EXPLOIT KITS	--corpus --corpus-entry --corpus-stats --gen --list-cves --menu --plan --plmn --probe --run-cve --runs-tsv --selftest --status-tsv --teid 	1	0
 22_nr_cve	5G CVE Kit	EXPLOIT KITS	--list-cves --list-findings --menu --plan --probe --run-cve --runs-tsv --selftest --snssai --status-tsv 	1	0
 23_traffic_analysis	Traffic Analysis	ANALYSIS	--calls-tsv --classify --clear-refs --features --fingerprint-add --flows --menu --refs-tsv --selftest --status-tsv 	1	0
 24_rf_fingerprint	RF Fingerprint / CSI	TRACKING	--classify --clear-sigs --csi-motion --csi-parse --features --menu --selftest --sig-add --sigs-tsv --status-tsv --transient 	1	0

@@ -71,9 +71,9 @@ asked: a value list for one record, a list of records with per-row Copy for many
 | Module | Description |
 |---|---|
 | `09_lte_attach` | NAS EMM/ESM encode-decode, BCD IMSI/IMEI, attach forging, identity-exposure detection |
-| `10_lte_air` | LTE air interface: MIB/SIB decode, DCCH message builders, PWS SIB10-12, srsRAN eNB orchestration |
+| `10_lte_air` | LTE air interface: MIB/SIB decode, DCCH builders, CMAS/ETWS warning messages (SIB10-12), srsRAN eNB orchestration |
 | `11_lte_core` | EPC: Diameter S6a/S6d, GTP-C, GTP-U, S1AP, GTP-in-GTP, MBMS session start |
-| `21_lte_cve` | Catalogued LTE stack CVEs by class, one card per vector |
+| `21_lte_cve` | 98 catalogued LTE/5G stack CVEs from the public corpus, filterable by implementation and reach, plus four message families built from each code pattern |
 
 ### 5G / NR
 | Module | Description |
@@ -186,7 +186,8 @@ computes rather than describes.
 |---|---|---|
 | NAS pre-authentication messages | `32_nas_signaling` | Seventeen messages built as octets — Attach/TAU/Service reject, Identity Request, Authentication Request/Reject/Failure, Security Mode Command/Reject in EPS and 5GS — each checked against tshark. The NAS-MAC and AUTN are refused rather than placed at an unconfirmed offset. |
 | RRC reconfiguration, release and reject | `10_lte_air`, `12_nr_air` | MeasurementReport, RRCConnectionRelease and RRCConnectionReestablishmentReject encoded through the generated PER layout; NR reconfiguration beside them. |
-| SIB forging and public warnings | `10_lte_air` | SIB1 decode, and SIB10/11/12 built from pycrate-pinned vectors. The scheduling that would announce them is refused for srsRAN release_23_11 by name, because that release has no SIB10-12 parser. |
+| **CMAS / ETWS / PWS alert forgery** | `10_lte_air` | The full warning chain in RRC: SIB10 carries the primary notification (message identifier, serial, `warningType` split into class and category), SIB11 and SIB12 the segments that follow, and SIB12 the coordinate segment. Every builder is pinned to pycrate vectors — `04400000000040`, `048D159E00026F56DF7780`, `886E02223FC0FFC00040412040204000`. `--enb-sib-schedule` writes the `sib.conf` fragment that would announce one, and refuses on srsRAN release_23_11 by name because that release registers only sib1-sib7, sib9 and sib13 — a SIB10 entry fails in `sib_info_item_c::pack`. Master implements it. |
+| SIB1 decode and DCCH forgery | `10_lte_air`, `12_nr_air` | SIB1/SIB2 read; MeasurementReport, RRCConnectionRelease and ReestablishmentReject encoded through the generated PER layout. |
 | Forged reject cause | `15_downgrade` | Built, with the transmit verb last on its card. |
 | GTP-in-GTP and MBMS session start | `11_lte_core` | Both built and dissected by tshark; the outer layer treats the inner as uninterpreted payload, which is exactly the middlebox gap. |
 
@@ -548,6 +549,7 @@ often identifies the problem with no hardware attached.
 ./tools/check-auth-oracle.sh      # EMM and 5GMM causes vs tshark's registries
 ./tools/check-calls.sh            # call grouping vs tshark's RTP and SIP dissectors
 ./tools/check-keystream.sh        # reuse detection: stream identity vs tshark, verdict vs a constructed pad
+./tools/check-ransacked-corpus.sh # the CVE catalogue against itself, and each generated family vs tshark
 ./tools/gen-module-index.sh       # regenerate the index
 ./tools/gen-icons-xml.sh --check  # the bundled icon set matches the tree
 ```
