@@ -2712,6 +2712,15 @@ console_tsv_split(const char *text, char **key_out, const char **val_out)
     return TRUE;
 }
 
+static GtkWidget *mod_arg_row(AppState *state, const char *module_id,
+                              GtkWidget *status, const char *button_label,
+                              const char *verb, const char *placeholder,
+                              const char *hint);
+static GtkWidget *mod_arg_choices(AppState *state, const char *module_id,
+                                  GtkWidget *status, const char *caption,
+                                  const char *placeholder, const char *hint,
+                                  const char *const *verbs,
+                                  const char *const *labels, int n);
 static gboolean record_copy_reset(gpointer button);
 static void record_copy_clicked(GtkButton *button, gpointer user_data);
 
@@ -15062,19 +15071,134 @@ static ModuleSubmenuEntry gtap_entries[] = {
       "document-save-symbolic",
       "--export-pcap:Export PCAP" },
 };
+/* --------------------------------------------------------------------------
+   04_tower_map — Tower Survey.
+ *
+ * Four views, cut by the question being asked rather than by verb: what the
+ * receiver can hear, where it is, how the result leaves, and the one
+ * destructive act. Three shapes of control, chosen per verb rather than by a
+ * rule:
+ *
+ *   a survey needs a radio technology and a band   -> form row, hint under it
+ *   gpsd needs a device                            -> form row, hint under it
+ *   exporting is one act with a format choice      -> one row, one path, three
+ *                                                     small buttons
+ *   listing is not an act at all                   -> a list, refreshed
+ *
+ * The Export view is the reason this file exists: three identical full-width
+ * pills reading "Export KML / Export CSV / Export GeoJSON" said nothing about
+ * being one decision, and nothing about the destination they share.
+   -------------------------------------------------------------------------- */
+
+static GtkWidget *
+tmap_build_overview(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("THE SURVEY",
+        "One point per cell, with a fix or without. Nothing here is written to "
+        "the store until the survey runs.", &body);
+    GtkWidget *survey_body, *read_body;
+    GtkWidget *survey = verb_card("RUN A PASS", &survey_body);
+    GtkWidget *read = verb_card("WHAT IS IN THE STORE", &read_body);
+
+    gtk_box_append(GTK_BOX(survey_body),
+        mod_arg_row(state, module_id, status, "Start Survey",
+            "--survey", "gsm GSM900", "Radio technology (gsm or lte), then a "
+            "band for GSM. LTE takes a band list or nothing at all."));
+    gtk_box_append(GTK_BOX(survey_body), fkit_note(
+        "A pass records one point per cell it can decode. A cell heard without "
+        "a position is still recorded — it is the 'without fix' count in the "
+        "next card, not a failure."));
+    gtk_box_append(GTK_BOX(body), survey);
+
+    gtk_box_append(GTK_BOX(read_body),
+        mod_arg_row(state, module_id, status, "Read the Points",
+            "--list-tsv", "", "Every recorded point, as stored."));
+    gtk_box_append(GTK_BOX(read_body),
+        mod_arg_row(state, module_id, status, "Count the Points",
+            "--history", "", "How many points have a fix, how many do not, and "
+            "how many distinct cells they describe."));
+    gtk_box_append(GTK_BOX(body), read);
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+tmap_build_gps(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("THE FIX",
+        "Where the receiver is. Survey points carry this position or they "
+        "carry none.", &body);
+    GtkWidget *daemon_body, *quality_body;
+    GtkWidget *daemon = verb_card("START THE GPS DAEMON", &daemon_body);
+    GtkWidget *quality = verb_card("READ THE CURRENT FIX", &quality_body);
+
+    gtk_box_append(GTK_BOX(daemon_body),
+        mod_arg_row(state, module_id, status, "Start gpsd",
+            "--start-gpsd", "/dev/ttyUSB0", "The serial device the GPS receiver "
+            "is on. Left empty, the module uses /dev/ttyUSB0."));
+    gtk_box_append(GTK_BOX(daemon_body), fkit_note(
+        "Starting a daemon is not the same as having a fix: gpsd can be up and "
+        "still be searching. The next card is the one that answers whether a "
+        "position exists."));
+    gtk_box_append(GTK_BOX(body), daemon);
+
+    gtk_box_append(GTK_BOX(quality_body),
+        mod_arg_row(state, module_id, status, "Read the Fix",
+            "--gps-quality-tsv", "", "Mode, satellites, accuracy and age of the "
+            "last fix \u2014 or the single word \"no\"."));
+    gtk_box_append(GTK_BOX(body), quality);
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+tmap_build_export(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("TAKE IT SOMEWHERE",
+        "The same survey written three ways. Each file is written into this "
+        "module's own loot directory.", &body);
+    GtkWidget *export_body, *clean_body;
+    GtkWidget *export = verb_card("WRITE THE SURVEY", &export_body);
+    GtkWidget *clean = verb_card("EMPTY THE STORE", &clean_body);
+    static const char *const verbs[] = {
+        "--export-csv", "--export-kml", "--export-geojson"
+    };
+    static const char *const labels[] = { "CSV", "KML", "GeoJSON" };
+    GtkWidget *choices;
+
+    /* One row: the path, then the three formats as one choice. */
+    choices = mod_arg_choices(state, module_id, status, "Destination",
+        "optional path — left empty, the module names the file",
+        "CSV is the data; KML opens in Google Earth and carries only the points "
+        "that have a fix; GeoJSON is what a web map eats. All three hold the "
+        "same points.",
+        verbs, labels, 3);
+    gtk_box_append(GTK_BOX(export_body), choices);
+    gtk_box_append(GTK_BOX(body), export);
+
+    gtk_box_append(GTK_BOX(clean_body),
+        mod_arg_row(state, module_id, status, "Clear the Store",
+            "--clear", "", "Removes every recorded point. This is the one act on "
+            "this page that cannot be undone, which is why it is alone in its "
+            "own card and not beside the exporters."));
+    gtk_box_append(GTK_BOX(body), clean);
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry tmap_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "#SURVEY|--survey:Start Survey|#SESSIONS|--list-tsv:Sessions|--history:History" },
-    { "GPS",
-      "find-location-symbolic",
-      "--start-gpsd:Start gpsd|--gps-quality-tsv:GPS Quality" },
-    { "Export",
-      "document-save-symbolic",
-      "--export-kml:Export KML|--export-csv:Export CSV|--export-geojson:Export GeoJSON" },
-    { "Manage",
-      "preferences-system-symbolic",
-      "--clear:Clear" },
+    { "Overview", "dialog-information-symbolic", NULL, tmap_build_overview },
+    { "GPS", "find-location-symbolic", NULL, tmap_build_gps },
+    { "Export", "document-save-symbolic", NULL, tmap_build_export },
 };
 /* --------------------------------------------------------------------------
    The field kit is a pre-flight instrument and an honesty check, so the page
@@ -16769,6 +16893,58 @@ mod_arg_row(AppState *state, const char *module_id, GtkWidget *status,
     gtk_box_append(GTK_BOX(row), button);
     if (hint == NULL) return row;
 
+    column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_box_append(GTK_BOX(column), row);
+    gtk_box_append(GTK_BOX(column), fkit_note(hint));
+    return column;
+}
+
+/* One row, several destinations.
+ *
+ * "Export KML | Export CSV | Export GeoJSON" as three identical pills is what
+ * this replaces: three buttons that differ only in their last word, stacked
+ * across the card, saying nothing about the fact that they are one act with a
+ * choice of format. Here the choice is visible as a choice - one path to type
+ * and one small button per format, in a single row - because the operator is
+ * making one decision, not three.
+ */
+static GtkWidget *
+mod_arg_choices(AppState *state, const char *module_id, GtkWidget *status,
+                const char *caption, const char *placeholder, const char *hint,
+                const char *const *verbs, const char *const *labels, int n)
+{
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *entry = gtk_entry_new();
+    GtkWidget *column;
+
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), placeholder);
+    gtk_widget_set_hexpand(entry, TRUE);
+    if (caption != NULL) {
+        GtkWidget *cap = gtk_label_new(caption);
+        gtk_widget_add_css_class(cap, "form-caption");
+        gtk_widget_set_size_request(cap, 150, -1);
+        gtk_label_set_xalign(GTK_LABEL(cap), 0.0f);
+        gtk_box_append(GTK_BOX(row), cap);
+    }
+    gtk_box_append(GTK_BOX(row), entry);
+
+    for (int i = 0; i < n; i++) {
+        GtkWidget *button = gtk_button_new_with_label(labels[i]);
+
+        gtk_widget_add_css_class(button, "verb-button");
+        gtk_widget_add_css_class(button, "compact");
+        if (i == 0) gtk_widget_add_css_class(button, "primary");
+        g_object_set_data(G_OBJECT(button), "state", state);
+        g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
+        g_object_set_data(G_OBJECT(button), "status", status);
+        g_object_set_data(G_OBJECT(button), "verb", (gpointer) verbs[i]);
+        g_object_set_data(G_OBJECT(button), "action-label", (gpointer) labels[i]);
+        g_object_set_data(G_OBJECT(button), "arg-entry", entry);
+        g_signal_connect(button, "clicked", G_CALLBACK(mod_arg_clicked), NULL);
+        gtk_box_append(GTK_BOX(row), button);
+    }
+
+    if (hint == NULL) return row;
     column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_box_append(GTK_BOX(column), row);
     gtk_box_append(GTK_BOX(column), fkit_note(hint));
