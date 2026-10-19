@@ -812,7 +812,7 @@ static const ModuleDefinition modules[] = {
     /* INTERCEPT / CARRIER — lawful intercept and carrier-side interfaces */
     { "42_li_probe",         "LI Interception",         "INTERCEPT / CARRIER",
       "imsisting-42_li_probe-symbolic",
-      "Lawful-interception interfaces and interception-posture signals. Detection only." },
+      "Lawful-interception interfaces and posture signals, plus the artefacts an interception is built from, encoded and never delivered." },
     { "44_carrier_api",      "Carrier API Abuse",    "INTERCEPT / CARRIER",
       "imsisting-44_carrier_api-symbolic",
       "Carrier API surface, authorisation-boundary testing and token/rate-limit audit." }
@@ -18675,10 +18675,20 @@ scell_build_live(AppState *state, const char *module_id,
         status, &entry, "--live", "Feed",
         "seconds on UDP 4729, or a .pcap to read",
         "Read Feed"));
+    /* The backhaul side of the same table: a capture of S1AP over SCTP, or one
+       association held open on the S1 port. Both end in the same rows, because
+       the join is on the NAS inside, not on how it arrived. */
+    gtk_box_append(GTK_BOX(feed_body), fkit_composer_verb(state, module_id,
+        status, &entry, "--s1-tap", "Tap",
+        "port, then seconds (36412 30)",
+        "Hold Association"));
     gtk_box_append(GTK_BOX(feed_body), fkit_note(
         "The window listens on GSMTAP and hands every payload to the decoder "
         "that owns its format, so a capture read here and a capture read on "
-        "Live Traffic produce the same rows. Nothing is decoded twice."));
+        "Live Traffic produce the same rows. An S1 tap holds the association "
+        "open on its own port and reads the NAS as it arrives, which is the only "
+        "way to watch a handset that is already attached. Nothing is decoded "
+        "twice."));
 
     window = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_widget_add_css_class(window, "scell-feed-window");
@@ -18794,18 +18804,194 @@ static ModuleSubmenuEntry otasm_entries[] = {
       "mail-message-new-symbolic",
       "--sat-push=+15551234567 +15559876543:S@T Browser Push|~--wib-push:WIB Push (refuses)" },
 };
+/* 42_li_probe — LI Interception.
+ *
+ * The module reads a network's lawful-interception posture and, in its other
+ * half, encodes the artefacts that posture is exercised with. The page keeps the
+ * two apart: an assessment page that needs no bytes, and an encoder page whose
+ * cards each build one artefact and stop there.
+ */
+static GtkWidget *
+lipr_build_interfaces(AppState *state, const char *module_id,
+                      GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("INTERFACES",
+        "The three handover interfaces of TS 33.108 and the roles on either side "
+        "of them. Reference only; nothing is contacted.", &body);
+    GtkWidget *map_body, *roles_body, *one_body;
+    GtkWidget *map = verb_card("THE INTERFACE MAP", &map_body);
+    GtkWidget *roles = verb_card("THE ROLES", &roles_body);
+    GtkWidget *one = verb_card("ONE INTERFACE", &one_body);
+    const char *which[] = { "--iface", "--iface", "--iface" };
+    const char *labels[] = { "X1", "X2", "X3" };
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(map_body),
+            mod_arg_row(state, module_id, status, "Read the Map",
+                "--interfaces", "",
+                "Which interface carries what: X1 the administration, X2 the "
+                "intercept-related information, X3 the content."));
+        gtk_box_append(GTK_BOX(map_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), map);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(roles_body),
+            mod_arg_row(state, module_id, status, "Read the Roles",
+                "--architecture", "",
+                "ADMF, POI, DF2, DF3 and the LEMF, and which of them decides, "
+                "delivers or observes."));
+        gtk_box_append(GTK_BOX(roles_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), roles);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(one_body),
+            mod_arg_choices(state, module_id, status, "Interface", "",
+                "Pick one for the detail the map leaves out.",
+                which, labels, 3));
+        gtk_box_append(GTK_BOX(one_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), one);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+lipr_build_posture(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("POSTURE",
+        "What the signalling says about an interception that is already active, "
+        "and what to do about it. No capture is taken here.", &body);
+    GtkWidget *score_body, *report_body, *plan_body;
+    GtkWidget *score = verb_card("SCORE THE POSTURE", &score_body);
+    GtkWidget *report = verb_card("THE REPORT", &report_body);
+    GtkWidget *plan = verb_card("CONFIRMATION PLAN", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(score_body),
+            mod_arg_row(state, module_id, status, "Score the Events",
+                "--score", "events.tsv",
+                "A TSV of signalling events in time order. The score rises when "
+                "one subscriber's events appear at two network elements at once."));
+        gtk_box_append(GTK_BOX(score_body), res);
+    }
+    gtk_box_append(GTK_BOX(score_body), fkit_note(
+        "A high score is not proof: the same shape appears when a routing change "
+        "moves a subscriber mid-procedure. The report says which signals fired."));
+    gtk_box_append(GTK_BOX(body), score);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(report_body),
+            mod_arg_row(state, module_id, status, "Write the Report",
+                "--report", "",
+                "What to record when the score is high, and who to escalate to: "
+                "the regulator's security desk, not the carrier's support line."));
+        gtk_box_append(GTK_BOX(report_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), report);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What a network-side confirmation needs: an operator who will "
+                "look, and the specific element to look at."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+lipr_build_encode(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ENCODE",
+        "The three artefacts an interception is built from, as bytes. Every verb "
+        "encodes and stops: nothing is delivered to any element.", &body);
+    GtkWidget *prov_body, *act_body, *prod_body;
+    GtkWidget *prov = verb_card("PROVISIONING REQUEST", &prov_body);
+    GtkWidget *act = verb_card("ACTIVATION RECORD", &act_body);
+    GtkWidget *prod = verb_card("INTERCEPTION PRODUCT", &prod_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(prov_body),
+            mod_arg_row(state, module_id, status, "Build the Request",
+                "--provision-target", "target.conf",
+                "A KEY=VALUE file: the target, the warrant, the services and the "
+                "two delivery functions. The envelope is this module's own and "
+                "says so - it is not an ASN.1 PDU of the standard."));
+        gtk_box_append(GTK_BOX(prov_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), prov);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(act_body),
+            mod_arg_row(state, module_id, status, "Build the Record",
+                "--activate", "target.conf",
+                "The same file. One shape carries both actions: activate and "
+                "withdraw differ in one octet, which the output names."));
+        gtk_box_append(GTK_BOX(act_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), act);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(prod_body),
+            mod_arg_row(state, module_id, status, "Build the Envelope",
+                "--intercept", "deadbeef",
+                "The product as hex, plus the case identifier it belongs to. "
+                "This module captures nothing, so the payload is an argument by "
+                "design."));
+        gtk_box_append(GTK_BOX(prod_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), prod);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry lipr_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--interfaces:Interfaces|--architecture:Architecture|--score:Score" },
-    { "Probe",
-      "system-search-symbolic",
-      "--iface=X1|--report:Report|--plan:Plan" },
-    /* The encoder half: real bytes for the X1/HI1 and HI3 artefacts, and a
-       handoff rather than a send. */
-    { "Encode",
-      "document-save-symbolic",
-      "--provision-target:Provisioning Artefact|--activate:Activation Record|--intercept:Product Envelope" },
+    { "Interfaces", "dialog-information-symbolic", NULL, lipr_build_interfaces },
+    { "Posture", "system-search-symbolic", NULL, lipr_build_posture },
+    { "Encode", "document-save-symbolic", NULL, lipr_build_encode },
 };
 static ModuleSubmenuEntry rans_entries[] = {
     { "Overview",
