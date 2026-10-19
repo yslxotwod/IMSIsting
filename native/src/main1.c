@@ -17190,6 +17190,48 @@ mod_arg_row(AppState *state, const char *module_id, GtkWidget *status,
     return column;
 }
 
+/* The same row, with the field holding a real value instead of a hint.
+ *
+ * A placeholder is a hint and must not be sent: the module would receive an
+ * empty argument and answer "usage". Some verbs have a worked example that IS a
+ * legal argument - a known-answer vector, a default chain name - and for those
+ * the field starts full, so the button demonstrates instead of complaining.
+ */
+static GtkWidget *
+mod_arg_row_prefilled(AppState *state, const char *module_id, GtkWidget *status,
+                      const char *button_label, const char *verb,
+                      const char *value, const char *hint)
+{
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *entry = gtk_entry_new();
+    GtkWidget *button = gtk_button_new_with_label(button_label);
+    GtkWidget *column;
+
+    gtk_editable_set_text(GTK_EDITABLE(entry), value);
+    gtk_widget_set_hexpand(entry, TRUE);
+    gtk_widget_add_css_class(button, "verb-button");
+    gtk_widget_add_css_class(button, "primary");
+    g_object_set_data(G_OBJECT(button), "state", state);
+    g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
+    g_object_set_data(G_OBJECT(button), "status", status);
+    g_object_set_data(G_OBJECT(button), "verb", (gpointer) verb);
+    g_object_set_data(G_OBJECT(button), "action-label", (gpointer) button_label);
+    g_object_set_data(G_OBJECT(button), "arg-entry", entry);
+    if (mod_card_result != NULL)
+        g_object_set_data(G_OBJECT(button), "result", mod_card_result);
+    g_signal_connect(button, "clicked", G_CALLBACK(mod_arg_clicked), NULL);
+    g_signal_connect(entry, "activate", G_CALLBACK(mod_entry_activate), button);
+
+    gtk_box_append(GTK_BOX(row), entry);
+    gtk_box_append(GTK_BOX(row), button);
+    if (hint == NULL) return row;
+
+    column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_box_append(GTK_BOX(column), row);
+    gtk_box_append(GTK_BOX(column), fkit_note(hint));
+    return column;
+}
+
 /* One row, several destinations.
  *
  * "Export KML | Export CSV | Export GeoJSON" as three identical pills is what
@@ -19219,22 +19261,160 @@ static ModuleSubmenuEntry capi_entries[] = {
     { "Compare", "system-search-symbolic", NULL, capi_build_compare },
     { "Enumeration", "network-transmit-receive-symbolic", NULL, capi_build_enumeration },
 };
+/* 45_iot — NB-IoT / Cat-M1.
+ *
+ * Two decoders, one arithmetic split, and two refusals that are on the page on
+ * purpose: an operator who asks why the physical layer is missing should get the
+ * clause that would settle it rather than a verb that quietly does nothing.
+ */
+static GtkWidget *
+iot_build_decode(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DECODE",
+        "The two broadcast messages, decoded through the generated codec. Bits "
+        "in, fields out; no radio and no schema package.", &body);
+    GtkWidget *sib_body, *mib_body;
+    GtkWidget *sib = verb_card("SYSTEM INFORMATION BLOCK TYPE 1", &sib_body);
+    GtkWidget *mib = verb_card("MASTER INFORMATION BLOCK", &mib_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sib_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode SIB1",
+                "--decode-sib1", "c30a8246815d5e6d058606e53b5073a801008008",
+                "The message as hex, from a capture or from the worked vector. "
+                "The answer names every field the block carries, including the "
+                "cell identity and the barring flag."));
+        gtk_box_append(GTK_BOX(sib_body), res);
+    }
+    gtk_box_append(GTK_BOX(sib_body), fkit_note(
+        "A buffer that ends before the block does is refused rather than read: "
+        "the decoder reports how many bits it consumed, so a truncated message "
+        "cannot pass for a short one."));
+    gtk_box_append(GTK_BOX(body), sib);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(mib_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode MIB",
+                "--decode-mib", "accac00000",
+                "34 bits, carried in five octets of hex. The verb refuses any "
+                "other length instead of truncating a longer buffer into a "
+                "passing read."));
+        gtk_box_append(GTK_BOX(mib_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), mib);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+iot_build_sequences(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SEQUENCES",
+        "What a physical cell identity decides in NB-IoT, and what it does not.",
+        &body);
+    GtkWidget *split_body;
+    GtkWidget *split = verb_card("IDENTITY SPLIT", &split_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(split_body),
+            mod_arg_row(state, module_id, status, "Split the Identity",
+                "--npss-nss", "503",
+                "The physical cell identity, 0 to 503. It divides into N_ID(1) "
+                "and N_ID(2); the narrowband primary sequence does not depend on "
+                "either, and the secondary one is what carries the cell."));
+        gtk_box_append(GTK_BOX(split_body), res);
+    }
+    gtk_box_append(GTK_BOX(split_body), fkit_note(
+        "The split is arithmetic and checkable. The sequences themselves are not "
+        "generated here: the NR and LTE baseband generators in this tree do not "
+        "speak narrowband, and inventing one would be the failure this module was "
+        "rebuilt to remove."));
+    gtk_box_append(GTK_BOX(body), split);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+iot_build_limits(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("LIMITS",
+        "The two questions this module cannot answer, and the table that would "
+        "settle each one.", &body);
+    GtkWidget *nprach_body, *nprfcn_body, *plan_body;
+    GtkWidget *nprach = verb_card("NPRACH PARAMETERS", &nprach_body);
+    GtkWidget *nprfcn = verb_card("NPRFCN TO FREQUENCY", &nprfcn_body);
+    GtkWidget *plan = verb_card("HANDOFF PLAN", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(nprach_body),
+            mod_arg_row(state, module_id, status, "Ask for NPRACH",
+                "--nprach", "",
+                "Refuses, and says why: a preamble is single-tone frequency "
+                "hopping per TS 36.211 clause 10.1.6, and the constant table "
+                "that used to sit here was not that."));
+        gtk_box_append(GTK_BOX(nprach_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), nprach);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(nprfcn_body),
+            mod_arg_row(state, module_id, status, "Convert NPRFCN",
+                "--to-mhz", "0",
+                "Refuses, and says why: TS 36.104 Table 5.7.3-1 defines the "
+                "raster per band, so one formula cannot be right for every band "
+                "and the per-band table is not in this tree."));
+        gtk_box_append(GTK_BOX(nprfcn_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), nprfcn);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_choices(state, module_id, status, "Vector", "",
+                "The handoff a vector needs when it reaches the point where "
+                "samples are required.",
+                (const char *[]) { "--plan", "--plan" },
+                (const char *[]) { "Fake Cell", "NPRACH Flood" }, 2));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry iot_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      /* Both decoders are given a worked message rather than no argument.
-         A button that only prints "usage:" teaches nothing, and these two are
-         the ones whose answer is checkable: the MIB vector is the 34-bit
-         broadcast block, and the SIB1-NB vector is a whole SystemInformation-
-         BlockType1-NB. Either can be replaced by pasting bits from a capture
-         on the command line. */
-      "--decode-sib1=c30a8246815d5e6d058606e53b5073a801008008:Decode SIB1"
-      "|--decode-mib=accac00000:Decode MIB"
-      /* The two refusals are buttons on purpose: an operator who asks gets the
-         reason, the clause that would settle it, and what to do instead. A
-         hidden verb would leave the gap to be discovered by accident. */
-      "|#LIMITS|--nprach:NPRACH Not In Tree|--to-mhz=0:NPRFCN Not In Tree"
-      "|#SEQUENCES|--npss-nss=503:PCI 503 Split" },
+    { "Decode", "dialog-information-symbolic", NULL, iot_build_decode },
+    { "Sequences", "network-wireless-symbolic", NULL, iot_build_sequences },
+    { "Limits", "security-low-symbolic", NULL, iot_build_limits },
 };
 static ModuleSubmenuEntry lpp_entries[] = {
     { "Overview",
