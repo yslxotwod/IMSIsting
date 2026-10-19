@@ -17554,23 +17554,208 @@ static ModuleSubmenuEntry imsi_entries[] = {
     { "Findings", "auth-smartcard-symbolic", NULL, imsi_build_findings },
     { "Response", "document-save-symbolic", NULL, imsi_build_response },
 };
+/* 19_cipher_audit — what the algorithm negotiation gave away.
+ *
+ * The audit reads the Security Mode Command and the sessions around it: which
+ * algorithm was chosen, whether a weaker one was accepted, and what the sequence
+ * number says about a replay.
+ */
+static GtkWidget *
+caud_build_messages(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MESSAGES",
+        "The negotiation itself: what a Security Mode Command asked for, and what "
+        "each algorithm it can name is worth.", &body);
+    GtkWidget *smc_body, *table_body, *cause_body;
+    GtkWidget *smc = verb_card("SECURITY MODE COMMAND", &smc_body);
+    GtkWidget *table = verb_card("ALGORITHMS", &table_body);
+    GtkWidget *cause = verb_card("AUTH CAUSES", &cause_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(smc_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Command",
+                "--parse-smc", "0002",
+                "A Security Mode Command as hex. The answer is the cipher and the "
+                "integrity algorithm it selects, and whether that selection is a "
+                "downgrade from what the handset offered."));
+        gtk_box_append(GTK_BOX(smc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), smc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(table_body),
+            mod_arg_row(state, module_id, status, "List the Algorithms",
+                "--table", "",
+                "Every algorithm the three generations use, with its key length, "
+                "its standing and the clause that defines it. A broken one is "
+                "named broken rather than weak."));
+        gtk_box_append(GTK_BOX(table_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), table);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cause_body),
+            mod_arg_row(state, module_id, status, "List the Causes",
+                "--auth-causes", "",
+                "The authentication failure causes a network can send, and what "
+                "each one tells an attacker about the key."));
+        gtk_box_append(GTK_BOX(cause_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cause);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+caud_build_sessions(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SESSIONS",
+        "The sessions the negotiation belongs to, loaded from a capture or from a "
+        "table.", &body);
+    GtkWidget *load_body, *pcap_body, *one_body, *auth_body;
+    GtkWidget *load = verb_card("LOAD", &load_body);
+    GtkWidget *pcap = verb_card("FROM A CAPTURE", &pcap_body);
+    GtkWidget *one = verb_card("ONE SESSION", &one_body);
+    GtkWidget *auth = verb_card("AUTHENTICATION", &auth_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(load_body),
+            mod_arg_row(state, module_id, status, "Load a Table",
+                "--sessions-load", "sessions.tsv",
+                "A session table. Each row is one attachment, and the audit needs "
+                "at least two to see a downgrade across them."));
+        gtk_box_append(GTK_BOX(load_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), load);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pcap_body),
+            mod_arg_row(state, module_id, status, "Read a Capture",
+                "--from-pcap", "capture.pcap",
+                "A capture. The sessions are extracted from the negotiation "
+                "messages it carries, not from a summary."));
+        gtk_box_append(GTK_BOX(pcap_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pcap);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(one_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read One",
+                "--session", "1",
+                "A session number. The answer is that session's algorithms, its "
+                "sequence numbers and what changed since the one before."));
+        gtk_box_append(GTK_BOX(one_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), one);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(auth_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read Auth",
+                "--auth-session", "1",
+                "The authentication exchange inside a session: the challenge, the "
+                "response, and whether the answer proves the key or only the "
+                "algorithm."));
+        gtk_box_append(GTK_BOX(auth_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), auth);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+caud_build_findings(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("FINDINGS",
+        "What the sessions add up to: a score, a downgrade, and a sequence number "
+        "that can be recovered.", &body);
+    GtkWidget *score_body, *down_body, *sqn_body, *clear_body;
+    GtkWidget *score = verb_card("SCORE", &score_body);
+    GtkWidget *down = verb_card("DOWNGRADE", &down_body);
+    GtkWidget *sqn = verb_card("SEQUENCE NUMBER", &sqn_body);
+    GtkWidget *clear = verb_card("CLEAR", &clear_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(score_body),
+            mod_arg_row(state, module_id, status, "Score the Session",
+                "--score", "",
+                "The cipher strength the sessions settled on, with the reason for "
+                "the number so it can be argued with."));
+        gtk_box_append(GTK_BOX(score_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), score);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(down_body),
+            mod_arg_row(state, module_id, status, "Check for a Downgrade",
+                "--downgrade-check", "",
+                "Whether a session negotiated something weaker than the one "
+                "before it, or weaker than the handset offered. Either is a "
+                "finding; which one it is matters."));
+        gtk_box_append(GTK_BOX(down_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), down);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sqn_body),
+            mod_arg_row(state, module_id, status, "Recover the Sequence",
+                "--sqn-recover", "",
+                "The sequence number a challenge implies, and whether the network "
+                "repeats one. A repeated SQN is how a replay becomes possible."));
+        gtk_box_append(GTK_BOX(sqn_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sqn);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(clear_body),
+            mod_arg_row(state, module_id, status, "Clear the Sessions",
+                "--clear", "",
+                "Forgets every session this module has loaded. Alone, because it "
+                "cannot be undone."));
+        gtk_box_append(GTK_BOX(clear_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), clear);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry caud_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--from-pcap={capture}|--score:Score|--table:Table" },
-    { "SMC",
-      "channel-secure-symbolic",
-      "--parse-smc:Parse SMC|--downgrade-check:Downgrade Check" },
-    { "Sessions",
-      "document-open-symbolic",
-      "#LOAD|--sessions-load:Load Sessions|~--session|#MANAGE|--clear:Clear" },
-    /* The failure side of authentication: the cause table says what a network
-       tells an observer by answering one way rather than another, and the
-       sequence-number verb recovers the counter a UE conceals in AUTS. Both
-       take arguments, so both render as an entry and a Run button. */
-    { "Authentication",
-      "auth-smartcard-symbolic",
-      "--auth-causes:Causes|~--auth-session:Session Outcomes|~--sqn-recover:Sequence Number" },
+    { "Messages", "dialog-information-symbolic", NULL, caud_build_messages },
+    { "Sessions", "channel-secure-symbolic", NULL, caud_build_sessions },
+    { "Findings", "system-search-symbolic", NULL, caud_build_findings },
 };
 /* ── The CVE catalogue ───────────────────────────────────────────────────────
 
