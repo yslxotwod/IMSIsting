@@ -106,7 +106,7 @@ ue_cmd_probe() {
         ue_emit how "accept the 'Allow USB debugging?' prompt after replugging"
         return 3
     fi
-    ue_emit devices "$(printf '%s' "$devices" | wc -l | tr -d ' ')"
+    ue_emit devices "$(printf '%s\n' "$devices" | grep -c '[^[:space:]]')"
     # The first usable line is the device, unless UE_SERIAL names one.
     local line serial state
     line=$(printf '%s\n' "$devices" | awk '$2 != "offline" {print; exit}')
@@ -442,6 +442,7 @@ EOF
     out=$(bash "${BASH_SOURCE[0]}" --probe 2>/dev/null)
     ue_check probe-serial  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="serial"{print $2}')" "R58M12345"
     ue_check probe-state   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="state"{print $2}')"  "device"
+    ue_check probe-devices "$(printf '%s\n' "$out" | awk -F'\t' '$1=="devices"{print $2}')" "1"
     ue_check probe-online  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')" "online"
 
     out=$(bash "${BASH_SOURCE[0]}" --identity 2>/dev/null)
@@ -528,6 +529,7 @@ STUB
     ue_check unauth-probe-rc     "$rc" "3"
     ue_check unauth-probe-serial "$(printf '%s\n' "$out" | awk -F'\t' '$1=="serial"{print $2}')" "33201FDH2004W1"
     ue_check unauth-probe-state  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="state"{print $2}')"  "unauthorized"
+    ue_check unauth-probe-count  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="devices"{print $2}')" "1"
     ue_check unauth-probe-note   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="note"{print $2}')" \
                                  "the handset is attached and has not authorised this computer"
     ue_check unauth-probe-how    "$(printf '%s\n' "$out" | grep -c '^how')" "4"
