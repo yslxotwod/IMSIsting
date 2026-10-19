@@ -19814,16 +19814,180 @@ static ModuleSubmenuEntry gprs_entries[] = {
     { "APN", "network-server-symbolic", NULL, gprs_build_apn },
     { "PDP", "preferences-system-symbolic", NULL, gprs_build_pdp },
 };
+/* 51_sidelink — PC5 sidelink.
+ *
+ * The module is arithmetic on the resource grid, two identifier codings, and
+ * three checks whose answers are judgements it has to justify. Every card says
+ * which of those it is, and the SCI-1A refusal is a card because an operator who
+ * asks about the widths should be told why they are not here.
+ */
+static GtkWidget *
+slnk_build_grid(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("RESOURCE GRID",
+        "How the bandwidth part divides into subchannels, and how wide the "
+        "frequency field that names one is.", &body);
+    GtkWidget *sub_body, *bits_body, *sci_body;
+    GtkWidget *sub = verb_card("SUBCHANNELS", &sub_body);
+    GtkWidget *bits = verb_card("FREQUENCY FIELD", &bits_body);
+    GtkWidget *sci = verb_card("SCI 1-A WIDTHS", &sci_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sub_body),
+            mod_arg_row_prefilled(state, module_id, status, "Divide the Part",
+                "--subchannels", "100 10",
+                "The bandwidth part in PRBs, then the subchannel size. The "
+                "answer is how many subchannels fit and how many PRBs are left "
+                "over, which is where a pool that does not tile the part shows."));
+        gtk_box_append(GTK_BOX(sub_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sub);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(bits_body),
+            mod_arg_row_prefilled(state, module_id, status, "Size the Field",
+                "--freq-bits", "10",
+                "How many subchannels the pool has. The width of the frequency "
+                "resource field is the ceiling of the base-2 logarithm, and it "
+                "is arithmetic, so it is computed rather than quoted."));
+        gtk_box_append(GTK_BOX(bits_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), bits);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sci_body),
+            mod_arg_row(state, module_id, status, "Ask for the Widths",
+                "--sci1a", "",
+                "Refuses: the field widths of SCI 1-A are a table this tree "
+                "does not carry, and the table that used to sit here was wrong "
+                "in four places. Only the frequency width is arithmetic."));
+        gtk_box_append(GTK_BOX(sci_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sci);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+slnk_build_ids(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("IDENTIFIERS",
+        "The two numbers a sidelink bearer is addressed by, and the certificate "
+        "roles ETSI 1609.2 puts around them.", &body);
+    GtkWidget *pfi_body, *l2_body, *its_body;
+    GtkWidget *pfi = verb_card("PC5 QoS FLOW", &pfi_body);
+    GtkWidget *l2 = verb_card("LAYER-2 ID", &l2_body);
+    GtkWidget *its = verb_card("CERTIFICATE ROLES", &its_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pfi_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Flow",
+                "--pfi", "1",
+                "1 to 64. The answer states which range carries which latency "
+                "and priority class, because the number alone decides how a "
+                "bearer is treated."));
+        gtk_box_append(GTK_BOX(pfi_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pfi);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(l2_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Id",
+                "--l2id", "000001",
+                "24 bits as hex. It names a group rather than a person, which "
+                "is the point: a sidelink broadcast has no subscriber identity "
+                "in it unless the application puts one there."));
+        gtk_box_append(GTK_BOX(l2_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), l2);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(its_body),
+            mod_arg_row(state, module_id, status, "Read the Roles",
+                "--its", "",
+                "Which certificate a station presents for which message. "
+                "Reference only: this module carries no validator."));
+        gtk_box_append(GTK_BOX(its_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), its);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+slnk_build_relay(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("RELAY AND HANDOFF",
+        "A UE-to-network relay configuration, read for the findings it carries, "
+        "and the plan a V2X lab starts from.", &body);
+    GtkWidget *relay_body, *plan_body;
+    GtkWidget *relay = verb_card("RELAY CONFIGURATION", &relay_body);
+    GtkWidget *plan = verb_card("V2X HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(relay_body),
+            mod_arg_row(state, module_id, status, "Check the Configuration",
+                "--relay-check", "relay.conf",
+                "A KEY=VALUE file describing the relay. Each finding states the "
+                "rule it breaks; a configuration with no finding is reported as "
+                "clean rather than as empty."));
+        gtk_box_append(GTK_BOX(relay_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), relay);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What a V2X lab needs: the two radios, the pools to configure, "
+                "and what to record so a run can be repeated."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry slnk_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--relay-check:Relay Check|--sci1a:SCI1-A Limits|--its" },
-    { "Config",
-      "preferences-system-symbolic",
-      "#PARAMS|--l2id=000001|--pfi=1|#TABLES|--subchannels:Subchannels|--freq-bits:Frequency Bits" },
-    { "Planning",
-      "preferences-system-symbolic",
-      "--plan:Plan" },
+    { "Resource Grid", "dialog-information-symbolic", NULL, slnk_build_grid },
+    { "Identifiers", "network-wireless-symbolic", NULL, slnk_build_ids },
+    { "Relay and Handoff", "preferences-system-symbolic", NULL, slnk_build_relay },
 };
 static ModuleSubmenuEntry stk_entries[] = {
     { "Overview",
