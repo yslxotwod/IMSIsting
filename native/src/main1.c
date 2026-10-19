@@ -20586,19 +20586,206 @@ static ModuleSubmenuEntry bbnd_entries[] = {
     { "Modem Path", "network-transmit-receive-symbolic", NULL, bbnd_build_modem },
     { "Over the Air", "imsisting-01_radio-symbolic", NULL, bbnd_build_air },
 };
+/* 36_vowifi — voice over Wi-Fi, which is IKEv2 into an ePDG.
+ *
+ * The handset builds an IKEv2 SA, runs EAP-AKA' inside it, and only then carries
+ * SIP. The page follows that order and treats each layer as its own message.
+ */
+static GtkWidget *
+vowi_build_ike(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("IKEV2",
+        "The tunnel a handset opens to an ePDG: the exchange, the proposals "
+        "inside it, and the identity it presents.", &body);
+    GtkWidget *build_body, *parse_body, *walk_body;
+    GtkWidget *build = verb_card("BUILD", &build_body);
+    GtkWidget *parse = verb_card("READ", &parse_body);
+    GtkWidget *walk = verb_card("WALK", &walk_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build an Exchange",
+                "--ike-build", "1 310260",
+                "An exchange type and the identity to present. The answer is the "
+                "IKEv2 message with its proposal, its transform set and its "
+                "nonce."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row(state, module_id, status, "Read a Message",
+                "--ike-parse", "hex",
+                "An IKEv2 message as hex. The answer is the exchange, the flags "
+                "and each payload with its length checked against the message."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(walk_body),
+            mod_arg_row(state, module_id, status, "Walk a Proposal",
+                "--walk", "hex",
+                "A proposal chain. Every transform is walked in order, because a "
+                "proposal with an unexpected algorithm is how a downgrade is "
+                "offered rather than forced."));
+        gtk_box_append(GTK_BOX(walk_body), res);
+        gtk_box_append(GTK_BOX(walk_body),
+            mod_arg_choices(state, module_id, status, "Reference", "",
+                "The transform types this tree carries, and the two-attribute "
+                "check that a null algorithm fails.",
+                (const char *[]) { "--types", "--null-check",
+                                   "--transform 1 3", "--encr 12",
+                                   "--integrity 5", "--esn 1" },
+                (const char *[]) { "Types", "Null Check", "Transform",
+                                   "Encryption", "Integrity", "ESN" }, 6));
+    }
+    gtk_box_append(GTK_BOX(body), walk);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+vowi_build_eap(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("EAP-AKA'",
+        "The authentication that runs inside the tunnel: an identity request, a "
+        "challenge, and the attributes that carry them.", &body);
+    GtkWidget *build_body, *parse_body, *attr_body;
+    GtkWidget *build = verb_card("BUILD", &build_body);
+    GtkWidget *parse = verb_card("READ", &parse_body);
+    GtkWidget *attr = verb_card("ATTRIBUTES", &attr_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build an Exchange",
+                "--eap-build", "identity 310150123456789",
+                "A message type and the subscriber it is about. The answer is the "
+                "EAP packet with its attributes, in the direction the carrier "
+                "actually sends it."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row(state, module_id, status, "Read a Packet",
+                "--eap-parse", "hex",
+                "An EAP packet as hex. The answer names the type, the subtype and "
+                "every attribute; a packet whose length disagrees with its "
+                "attributes is refused."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(attr_body),
+            mod_arg_choices(state, module_id, status, "One attribute", "",
+                "A single EAP attribute decoded on its own, which is how a "
+                "message assembled elsewhere gets checked.",
+                (const char *[]) { "--eap-attr 0100", "--payload", "--dh" },
+                (const char *[]) { "Attribute", "Payload", "Diffie-Hellman" }, 3));
+        gtk_box_append(GTK_BOX(attr_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), attr);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+vowi_build_gateway(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("GATEWAY",
+        "How a handset finds the ePDG, what it presents when it gets there, and "
+        "what the tree cannot check without a real gateway.", &body);
+    GtkWidget *epdg_body, *nai_body, *plan_body, *notify_body;
+    GtkWidget *epdg = verb_card("DISCOVERY", &epdg_body);
+    GtkWidget *nai = verb_card("IDENTITY", &nai_body);
+    GtkWidget *notify = verb_card("NOTIFY", &notify_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(epdg_body),
+            mod_arg_row_prefilled(state, module_id, status, "Resolve the Name",
+                "--epdg", "310260",
+                "An identity. The answer is the FQDN a handset resolves, which is "
+                "the one place a network can redirect every VoWiFi call it serves."));
+        gtk_box_append(GTK_BOX(epdg_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), epdg);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(nai_body),
+            mod_arg_choices(state, module_id, status, "NAI", "",
+                "The network access identifier forms, and the identity type a "
+                "handset puts in front of them.",
+                (const char *[]) { "--nai 310150123456789 310260",
+                                   "--id-type imsi" },
+                (const char *[]) { "Build NAI", "Identity Type" }, 2));
+        gtk_box_append(GTK_BOX(nai_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), nai);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(notify_body),
+            mod_arg_row(state, module_id, status, "Read a Notify",
+                "--notify", "hex",
+                "An IKEv2 Notify payload. It is how a gateway tells a handset to "
+                "move, back off or retry, and the codes are the interesting part."));
+        gtk_box_append(GTK_BOX(notify_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), notify);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What a VoWiFi lab needs: an ePDG you own, a test eSIM, and the "
+                "recording that separates a handset's behaviour from the network's."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry vowi_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--walk:Walk|--epdg=001 01|--types:Types|~--payload|~--transform|~--id-type|~--notify|~--null-check" },
-    { "IKE",
-      "channel-secure-symbolic",
-      "--ike-parse:Parse IKE|--ike-build:Build IKE" },
-    { "EAP",
-      "auth-smartcard-symbolic",
-      "--eap-parse:Parse EAP|--eap-build:Build EAP|--nai=001010000000001 310 260|~--eap-attr" },
-    { "Crypto",
-      "security-high-symbolic",
-      "--integrity:Integrity|--encr:Encryption|--plan:Plan|~--dh|~--esn" },
+    { "IKEv2", "dialog-information-symbolic", NULL, vowi_build_ike },
+    { "EAP-AKA'", "channel-secure-symbolic", NULL, vowi_build_eap },
+    { "Gateway", "network-wireless-symbolic", NULL, vowi_build_gateway },
 };
 /* --------------------------------------------------------------------------
    The small-cell page, laid out the way the LTE CVE Kit page is: a named view
