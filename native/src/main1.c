@@ -1752,9 +1752,14 @@ action_line_cb(GObject *source, GAsyncResult *result, gpointer user_data)
             g_string_append(run->captured, line);
             g_string_append_c(run->captured, '\n');
         }
-        /* Anything on stderr, or an ERROR marker on stdout, marks the run
-           failed even if the exit status is 0. */
-        if (is_err || strstr(line, "ERROR") != NULL)
+        /* Anything on stderr, or a record whose FIRST FIELD is ERROR, marks
+           the run failed even if the exit status is 0. The test has to be
+           anchored: a module reporting `rcode_name NOERROR` was being read as
+           a failure because the word happens to end in ERROR, and a summary
+           that says `failed (exit 0)` teaches the operator to distrust the
+           summary rather than the module. */
+        if (is_err || g_str_has_prefix(line, "ERROR") ||
+            strstr(line, "\tERROR") != NULL)
             run->saw_error = TRUE;
     }
 
@@ -18960,16 +18965,172 @@ static ModuleSubmenuEntry ss7_entries[] = {
       "preferences-system-symbolic",
       "#PARAMS|--opcode=1|--ssn=6|#FORMAT|--pc-format:PC Format|#CHECKS|--require-stp:Require STP|--visited-plmn:Visited PLMN|#PLAN|--plan:Plan" },
 };
+/* 27_cellular_dns — the DNS a cellular bearer carries.
+ *
+ * On a licensed bearer DNS is application traffic, which means a change to it is
+ * a change nothing below the application can see. The page reads a message,
+ * builds one, and shows the rewrite sequence.
+ */
+static GtkWidget *
+cdns_build_messages(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MESSAGES",
+        "A DNS message read and written without an external resolver library, "
+        "which is what makes a compression pointer visible when it is wrong.",
+        &body);
+    GtkWidget *dec_body, *query_body, *resp_body;
+    GtkWidget *dec = verb_card("READ A MESSAGE", &dec_body);
+    GtkWidget *query = verb_card("BUILD A QUERY", &query_body);
+    GtkWidget *resp = verb_card("REWRITE A RESPONSE", &resp_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dec_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Message",
+                "--decode-dns", "abcd01000001000000000000076578616d706c6503636f6d0000010001",
+                "A DNS message as hex. Names are decompressed, so the answer shows "
+                "the name the pointer actually reached rather than the bytes that "
+                "were sent."));
+        gtk_box_append(GTK_BOX(dec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(query_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Query",
+                "--build-query", "example.com A",
+                "A name, then optionally the record type. The answer is the "
+                "message and its length, which is what a tampered reply has to "
+                "still fit."));
+        gtk_box_append(GTK_BOX(query_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), query);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(resp_body),
+            mod_arg_row_prefilled(state, module_id, status, "Rewrite an Answer",
+                "--build-response", "abcd01000001000000000000076578616d706c6503636f6d0000010001 10.0.0.1",
+                "A query and the address to answer with. This is the aLTEr step in "
+                "isolation: one A record replaced inside a message that is still "
+                "valid."));
+        gtk_box_append(GTK_BOX(resp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), resp);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+cdns_build_detect(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DETECTION",
+        "What a capture says about the resolver a bearer chose and whether its "
+        "answers were changed.", &body);
+    GtkWidget *disc_body, *det_body, *alter_body;
+    GtkWidget *disc = verb_card("RESOLVER DISCOVERY", &disc_body);
+    GtkWidget *det = verb_card("REWRITE SIGNALS", &det_body);
+    GtkWidget *alter = verb_card("THE SEQUENCE", &alter_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(disc_body),
+            mod_arg_row(state, module_id, status, "Find the Resolver",
+                "--resolver-discovery", "capture.pcap",
+                "A capture. The answer names the resolver the bearer was given "
+                "and how it was given it - PCO, DHCP or hardcoded."));
+        gtk_box_append(GTK_BOX(disc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), disc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(det_body),
+            mod_arg_row(state, module_id, status, "Check the Answers",
+                "--detect", "capture.pcap",
+                "The signals of a rewritten answer: a TTL that resets, a record "
+                "that disagrees with a second path, a name resolved to one "
+                "address everywhere."));
+        gtk_box_append(GTK_BOX(det_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), det);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(alter_body),
+            mod_arg_row(state, module_id, status, "Read the Sequence",
+                "--alter", "",
+                "The aLTEr sequence step by step, with the condition each step "
+                "needs. It is a description of a published attack, not a tool "
+                "that performs it."));
+        gtk_box_append(GTK_BOX(alter_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), alter);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+cdns_build_options(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("BEARER OPTIONS",
+        "The protocol configuration options a bearer carries, which is where a "
+        "resolver is usually handed to a handset.", &body);
+    GtkWidget *pco_body, *plan_body;
+    GtkWidget *pco = verb_card("PROTOCOL OPTIONS", &pco_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pco_body),
+            mod_arg_row_prefilled(state, module_id, status, "Walk the Container",
+                "--pco", "8021",
+                "A PCO container as hex. Each protocol id and its payload is "
+                "printed, and a truncated container is refused rather than read "
+                "past its end."));
+        gtk_box_append(GTK_BOX(pco_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pco);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "alter-lab",
+                "What an aLTEr lab needs: a bearer you control, a resolver you "
+                "own, and the recording that makes a rewrite provable."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry cdns_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--decode-dns:Decode DNS|--detect:Detect|--resolver-discovery:Resolver Discovery" },
-    { "Build",
-      "document-new-symbolic",
-      "--build-query:Build Query|--build-response:Build Response|--alter" },
-    { "Options",
-      "preferences-system-symbolic",
-      "--pco=8021|--plan:Plan" },
+    { "Messages", "dialog-information-symbolic", NULL, cdns_build_messages },
+    { "Detection", "system-search-symbolic", NULL, cdns_build_detect },
+    { "Bearer Options", "preferences-system-symbolic", NULL, cdns_build_options },
 };
 static ModuleSubmenuEntry pgt_entries[] = {
     { "Overview",
