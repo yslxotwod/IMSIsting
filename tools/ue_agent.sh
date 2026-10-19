@@ -557,6 +557,15 @@ EOF
     ue_check cell-missing   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="missing"{print $2}')"     "Earfcn"
     ue_check cell-status   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')"        "cell-seen"
 
+    # The saved-dump path: the same parser with no handset in the room.  This is
+    # how a live layout gets pinned, and it must not need a device to work.
+    local dump="$stub_dir/registry.txt"
+    printf '  mCellInfo=[CellInfoLte:{ mRegistered=YES mCellConnectionStatus=1 CellIdentityLte:{ mCi = [****] mPci = [****] mTac = [****] mEarfcn = [****] mBands = [20, 3] mBandwidth = 10000 mMcc = 208 mMnc = 20 } CellSignalStrengthLte:{ rsrp = -75 cqi = 15 level = 4 }}]\n' > "$dump"
+    out=$(UE_ADB=definitely-not-adb bash "${BASH_SOURCE[0]}" --cells --file "$dump" 2>/dev/null)
+    ue_check cell-file-blocks   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="blocks"{print $2}')"      "1"
+    ue_check cell-file-scalar   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.CellConnectionStatus"{print $2}')" "1"
+    ue_check cell-file-withheld "$(printf '%s\n' "$out" | awk -F'\t' '$1=="withheld"{print $2}')" "Ci Pci Tac Earfcn"
+
     # 4b. The radio log: a saved log parses without a handset, a live one comes
     #     through adb, and the parser is never asked to invent octets.
     local log_file="$stub_dir/radio.log"
@@ -673,7 +682,7 @@ ue_main() {
         --probe)     ue_cmd_probe ;;
         --identity)  ue_cmd_identity ;;
         --radio)     ue_cmd_radio ;;
-        --cells)     ue_cmd_cells "${@:2}" ;;
+        --cells)     ue_cmd_cells "$@" ;;
         --radio-log) ue_cmd_radio_log "$@" ;;
         --collect)   ue_cmd_collect "${1:-}" "${2:-}" ;;
         --plan)      ue_cmd_plan ;;

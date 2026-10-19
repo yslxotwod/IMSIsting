@@ -101,29 +101,70 @@ def blocks(text):
     return found
 
 
-def _lift(block_fields):
-    """Lift a wrapper object's inner fields so both block kinds read alike.
+def _scalar(text):
+    """The value part of a segment, with any class name in front of it removed."""
+    text = re.sub(r"\s*[A-Za-z_][\w.]*\s*:\s*$", "", text.strip().rstrip(",").strip())
+    return text.strip().rstrip(",").strip()
 
-    CellInfo does not repeat the identity's fields: it nests them under
-    `mCellIdentityLte=CellIdentityLte:{...}` and the signal under
-    `mCellSignalStrengthLte={...}`.  Reading only the top level of a CellInfo
-    therefore yields a registration flag and no cell at all -- a shape that
-    looks like a parser bug and is really a layout nobody looked at.
+
+def _lift(block_fields):
+    """Lift wrapper objects so both block kinds read alike, at any depth.
+
+    A dump does not always name the objects it embeds.  Three shapes reach the
+    same field scanner:
+
+        mCellIdentityLte=CellIdentityLte:{...}      named, one object
+        mCellConnectionStatus=1 CellIdentityLte:{...} CellSignalStrengthLte:{...}
+                                                    unnamed objects glued to the
+                                                    value that precedes them
+        mConfig=0 android.telephony.CellConfigLte :{...}
+
+    Read literally, the first works and the others put a whole cell, then its
+    signal strength, into the string value of a status code -- so the cell's
+    identifiers never become fields and a serving cell reports "missing Ci Pci
+    Tac Earfcn" while the same dump printed all four, redacted.  A value can
+    carry more than one object, so they are walked, not just the first.
     """
     out = {}
+    children = []
     for key, value in block_fields.items():
-        if key.startswith("mCellIdentity") or key.startswith("mCellSignalStrength"):
-            inner = value
-            head, sep, rest = inner.partition("{")
-            if not sep:
-                continue
-            body = rest[:-1] if rest.endswith("}") else rest
-            for k2, v2 in fields(body).items():
-                out.setdefault(k2, v2)
-        elif key == "mRegistered":
+        if key == "mRegistered" and "{" not in value:
             out["Registered"] = "yes" if value.upper().startswith("YES") else "no"
-        else:
-            out[key] = value
+            continue
+
+        rest = value
+        kept = None
+        while True:
+            brace = rest.find("{")
+            if brace < 0:
+                tail = _scalar(rest)
+                if tail and kept is None:
+                    kept = tail
+                break
+            head = _scalar(rest[:brace])
+            if head and kept is None:
+                kept = head
+            depth = 0
+            end = len(rest)
+            for i in range(brace, len(rest)):
+                if rest[i] == "{":
+                    depth += 1
+                elif rest[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            children.append(fields(rest[brace + 1:end]))
+            rest = rest[end + 1:]
+
+        if kept is None and "{" not in value:
+            kept = value
+        if kept:
+            out[key] = kept
+
+    for child in children:
+        for name, value in _lift(child).items():
+            out.setdefault(name, value)
     return out
 
 
@@ -135,9 +176,17 @@ def _clean(fields_dict):
             pass
         if value.endswith("="):
             continue
-        # A nested object we did not flatten is not a value a table can carry.
-        if value.startswith("{") and value.endswith("}"):
+        # A nested object that survived the lift is not a value a table can
+        # carry, and neither is a class name left over from one.
+        if "{" in value or "}" in value:
             continue
+        if re.match(r"^[A-Za-z_][\w.]*\s*:$", value):
+            continue
+        # 2147483647 is Integer.MAX_VALUE, which the platform writes where a
+        # measurement was never taken.  Printing it as an RSSI invents a reading
+        # of 2.1 billion dBm.
+        if value == "2147483647":
+            value = "unknown"
         out[name] = value
     return out
 
@@ -253,6 +302,13 @@ FIXTURE = """\
 """
 
 
+# The live shape from a GrapheneOS Pixel: the identity and the signal strength
+# are printed right after a status code, with no field name in front of either.
+UNNAMED = """\
+  mCellInfo=[CellInfoLte:{ mRegistered=YES mTimeStamp=18966047046ns mCellConnectionStatus=1 CellIdentityLte:{ mCi = [****] mPci = [****] mTac = [****] mEarfcn = [****] mBands = [20, 3, 1, 7, 28] mBandwidth = 10000 mMcc = 208 mMnc = 20 mAlphaLong =  mAlphaShort =  mAdditionalPlmns = {} mCsgInfo = null } CellSignalStrengthLte:{ rsrp = -75 rsrq = -5 rssi = 2147483647 cqi = 15 level = 4 } parametersUseForLevel = 0 android.telephony.CellConfigLte :{ isEndcAvailable = false }}]
+"""
+
+
 def selftest():
     import io
     results = []
@@ -312,6 +368,19 @@ def selftest():
     rows(gap, buf)
     chk("absent-fields-named", [l for l in buf.getvalue().splitlines() if l.startswith("missing\t")],
         ["missing\tTac Earfcn"])
+
+    # The unnamed-object layout: the identifiers must still arrive, and no row
+    # may carry a whole object or a class name as if it were a value.
+    buf = io.StringIO()
+    chk("unnamed-rc", rows(UNNAMED, buf), 0)
+    live = buf.getvalue()
+    chk("unnamed-serving-ci", "cell.Ci\t[****]" in live, True)
+    chk("unnamed-withheld", [l for l in live.splitlines() if l.startswith("withheld\t")],
+        ["withheld\tCi Pci Tac Earfcn"])
+    chk("unnamed-status-scalar", "cell.CellConnectionStatus\t1" in live, True)
+    chk("unnamed-signal", "cell.rsrp\t-75" in live, True)
+    chk("unnamed-no-object-values", any("{" in l for l in live.splitlines()), False)
+    chk("unnamed-maxvalue-is-unknown", "cell.rssi\tunknown" in live, True)
 
     passed = sum(1 for r in results if r)
     sys.stdout.write("\n%d assertions, %d failed\n" % (len(results), len(results) - passed))
