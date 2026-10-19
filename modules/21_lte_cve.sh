@@ -878,30 +878,18 @@ lcve_corpus_count() {
     tail -n +1 "$LCVE_CATALOG" | grep -c . || true
 }
 
-# --corpus [--impl X] [--proto Y] [--pattern Z] [--reach R] [--kind K]
+# --corpus [REACH] [CLASS] [KIT]  →  the entries, filed by kit and class
 lcve_cmd_corpus() {
-    local impl="" proto="" pattern="" reach="" kind="" a
-    while (($#)); do
-        a="$1"; shift || true
-        case "$a" in
-            --impl)    impl="${1:-}";    shift || true ;;
-            --proto)   proto="${1:-}";   shift || true ;;
-            --pattern) pattern="${1:-}"; shift || true ;;
-            --reach)   reach="${1:-}";   shift || true ;;
-            --kind)    kind="${1:-}";    shift || true ;;
-            *) printf 'ERROR\tunknown option %s\n' "$a" >&2; return 2 ;;
-        esac
-    done
+    # Positional, not flags: reach, class, kit. "-" is this module's way of
+    # saying "any", and the three columns are what the filing is made of.
+    local reach="${1:--}" klass="${2:--}" kit="${3:--}"
     lcve_catalog_require || return 1
-    printf 'id\talt\timpl\tgen\tproto\tpattern\treach\tkind\tneeds\tlabel\n'
-    awk -F'\t' -v impl="$impl" -v proto="$proto" -v pattern="$pattern" \
-               -v reach="$reach" -v kind="$kind" '
-        (impl==""    || $3==impl) &&
-        (proto==""   || $5==proto) &&
-        (pattern=="" || $6==pattern) &&
-        (reach==""   || $7==reach) &&
-        (kind==""    || $8==kind) { printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-                                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10 }' "$LCVE_CATALOG"
+    printf 'id\talt\timpl\tgen\tproto\tpattern\treach\tkind\tneeds\tlabel\tmodule\tclass\n'
+    awk -F'\t' -v reach="$reach" -v klass="$klass" -v kit="$kit" '
+        (reach=="-" || $7==reach) &&
+        (!klass || klass=="-" || $12==klass) &&
+        (kit=="-"   || $11==kit) { printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12 }' "$LCVE_CATALOG"
 }
 
 lcve_cmd_corpus_entry() {
@@ -922,7 +910,8 @@ lcve_cmd_corpus_entry() {
         printf "id\t%s\nalt_ids\t%s\nimplementation\t%s\ngeneration\t%s\nprotocol\t%s\n",
                $1, ($2==""?"-":$2), $3, $4, $5
         printf "pattern\t%s\nreach\t%s\nkind\t%s\nneeds\t%s\nlabel\t%s\n",
-               $6, $7, $8, $9, $10 }'
+               $6, $7, $8, $9, $10
+        printf "module\t%s\nclass\t%s\n", $11, $12 }'
     # The reach is the finding, and it is the report's, not this tree's.
     case "$(printf '%s' "$row" | cut -f7)" in
         nas-no-sim) printf 'reach_note\treachable at connection start with no SIM; the page says Wi-Fi Calling makes it internet-reachable, which the page does not itself demonstrate\n' ;;
@@ -938,13 +927,15 @@ lcve_cmd_corpus_stats() {
     local rows
     rows=$(lcve_corpus_count)
     printf 'entries\t%s\n' "$rows"
-    awk -F'\t' '{impl[$3]++; proto[$5]++; pat[$6]++; reach[$7]++; kind[$8]++}
+    awk -F'\t' '{impl[$3]++; proto[$5]++; pat[$6]++; reach[$7]++; kind[$8]++; cls[$12]++; kit[$11]++}
         END {
             for (k in impl)  printf "impl.%s\t%d\n", k, impl[k]
             for (k in proto) printf "proto.%s\t%d\n", k, proto[k]
             for (k in pat)   printf "pattern.%s\t%d\n", k, pat[k]
             for (k in reach) printf "reach.%s\t%d\n", k, reach[k]
             for (k in kind)  printf "kind.%s\t%d\n", k, kind[k]
+            for (k in cls)   printf "class.%s\t%d\n", k, cls[k]
+            for (k in kit)   printf "kit.%s\t%d\n", k, kit[k]
         }' "$LCVE_CATALOG" | sort
 }
 
@@ -1373,12 +1364,14 @@ SIP
     local ncat
     ncat=$(lcve_corpus_count)
     chk corpus-count       "$ncat" "98"
-    chk corpus-hdr         "$(lcve_cmd_corpus | head -1)" "$(printf 'id\talt\timpl\tgen\tproto\tpattern\treach\tkind\tneeds\tlabel')"
-    chk corpus-fields      "$(lcve_cmd_corpus | awk -F'\t' 'NR>1 && NF!=10' | grep -c . || true)" "0"
+    chk corpus-hdr         "$(lcve_cmd_corpus | head -1)" "$(printf 'id\talt\timpl\tgen\tproto\tpattern\treach\tkind\tneeds\tlabel\tmodule\tclass')"
+    chk corpus-fields      "$(lcve_cmd_corpus | awk -F'\t' 'NR>1 && NF!=12' | grep -c . || true)" "0"
     chk corpus-rows        "$(lcve_cmd_corpus | tail -n +2 | grep -c .)" "$ncat"
-    chk corpus-filter-proto "$(lcve_cmd_corpus --proto NAS | tail -n +2 | awk -F'\t' '$5!="NAS"' | grep -c . || true)" "0"
-    chk corpus-filter-kind  "$(lcve_cmd_corpus --kind handoff | tail -n +2 | awk -F'\t' '$8!="handoff"' | grep -c . || true)" "0"
-    chk corpus-nas-reach    "$(lcve_cmd_corpus --reach nas-no-sim | tail -n +2 | grep -c .)" "24"
+    chk corpus-columns      "$(lcve_cmd_corpus | head -1 | awk -F'\t' '{print NF}')" "12"
+    chk corpus-class-nas    "$(lcve_cmd_corpus - nas | tail -n +2 | awk -F'\t' '$12!="nas"' | grep -c . || true)" "0"
+    chk corpus-kit-lte      "$(lcve_cmd_corpus - - 21_lte_cve | tail -n +2 | grep -c .)" "82"
+    chk corpus-kit-nr       "$(lcve_cmd_corpus - - 22_nr_cve | tail -n +2 | grep -c .)" "16"
+    chk corpus-nas-reach    "$(lcve_cmd_corpus nas-no-sim | tail -n +2 | grep -c .)" "24"
     chk corpus-entry-known  "$(lcve_cmd_corpus_entry CVE-2024-24445 | awk -F'\t' '$1=="kind"{print $2}')" "probe"
     chk corpus-entry-vuln   "$(lcve_cmd_corpus_entry VULN-B01 | awk -F'\t' '$1=="id"{print $2}')" "CVE-2024-24445"
     chk corpus-entry-unknown-rc "$(lcve_cmd_corpus_entry CVE-1999-0001 >/dev/null 2>&1; echo $?)" "1"
@@ -1484,8 +1477,10 @@ LTE CVE Kit — 4G baseband, NAS/ASN.1, EPC and VoLTE probes
 Usage: $0 COMMAND
   --status-tsv              module state as TSV
   --list-cves               every documented id, with kind and required testbed
-  --corpus                  the RANSacked entries, filterable by --impl --proto
-                            --pattern --reach --kind
+  --corpus [REACH] [CLASS] [KIT]
+                            the RANSacked entries, filed into the kit and the
+                            class each one belongs to; each argument filters,
+                            and - means any
   --corpus-entry <ID>       one corpus entry, its reach and what that reach means
   --corpus-stats            the corpus counted five ways
   --gen <PATTERN>           build a message family: len-unchecked | asn1c-rows

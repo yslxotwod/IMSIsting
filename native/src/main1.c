@@ -19270,10 +19270,21 @@ cve_listing_clicked(GtkButton *button, gpointer user_data)
 {
     CveListing *l = user_data;
     g_autofree char *script = module_script_path(l->module_id);
-    const char *argv[] = { script, l->verb, NULL };
+    g_auto(GStrv) parts = NULL;
+    const char *argv[16];
+    guint n = 0;
     g_autofree char *text = NULL;
 
     (void) button;
+    /* A listing is usually one word, but a family build or a filtered corpus is
+       a verb and a word after it, so the string is split the way a shell would
+       split it rather than passed as one argument. */
+    argv[n++] = script;
+    if (l->verb != NULL && g_shell_parse_argv(l->verb, NULL, &parts, NULL)) {
+        for (guint i = 0; parts[i] != NULL && n < G_N_ELEMENTS(argv) - 1; i++)
+            argv[n++] = parts[i];
+    }
+    argv[n] = NULL;
     cve_result_pressed(NULL, l->res);
     text = run_capture(argv);
     if (text == NULL) {
@@ -19356,6 +19367,31 @@ cve_add_card(AppState *state, const char *module_id, const CveRow *r,
     gtk_box_append(GTK_BOX(body), card);
 }
 
+typedef struct {
+    char *id;
+    char *alt;
+    char *impl;
+    char *gen;
+    char *proto;
+    char *pattern;
+    char *reach;
+    char *kind;
+    char *needs;
+    char *what;
+    char *module;
+    char *klass;
+} CorpusRow;
+
+/* The published corpus is read once and filed into these views, so the two
+   builders below need it before its own section further down. */
+static GPtrArray *corpus_rows(void);
+static guint corpus_count_for(const char *module_id, const char *klass,
+                              guint *no_sim);
+static void corpus_fill_card(AppState *state, CorpusRow *r, GtkWidget *status,
+                             GtkWidget *body);
+static GtkWidget *cve_corpus_card(AppState *state, const char *module_id,
+                                  GtkWidget *status);
+
 /* One class: every vector the module files under it, in the order the module
    lists them, which is the order it wants them read in. */
 static GtkWidget *
@@ -19369,6 +19405,7 @@ cve_build_class(AppState *state, const char *module_id, const char *klass,
     g_autofree char *count = NULL;
     GtkWidget *label;
     guint shown = 0;
+    guint published_n = 0;
 
     for (guint i = 0; i < rows->len; i++) {
         CveRow *r = g_ptr_array_index(rows, i);
@@ -19379,7 +19416,44 @@ cve_build_class(AppState *state, const char *module_id, const char *klass,
         shown++;
     }
 
-    count = g_strdup_printf("%u VECTOR%s IN THIS CLASS", shown, shown == 1 ? "" : "S");
+    /* The same class in somebody else's catalogue: the published entries that
+       were filed here, shown after this module's own vectors, with one line
+       saying which catalogue they came from. */
+    published_n = corpus_count_for(module_id, klass, NULL);
+    if (published_n > 0) {
+        GPtrArray *published = corpus_rows();
+        guint filed = 0;
+
+        gtk_box_append(GTK_BOX(body),
+            fkit_note("Everything above this line was catalogued by this tree. "
+                      "The entries below were published by the RANSacked report "
+                      "and are filed here because they belong to the same "
+                      "class: the reach on each one is the report's claim, and "
+                      "the button builds the message shape it belongs to."));
+        for (guint i = 0; i < published->len; i++) {
+            CorpusRow *rr = g_ptr_array_index(published, i);
+
+            if (g_strcmp0(rr->module, module_id) != 0 ||
+                g_strcmp0(rr->klass, klass) != 0)
+                continue;
+            corpus_fill_card(state, rr, status, body);
+            filed++;
+        }
+        shown += filed;
+    }
+
+    /* Two catalogues, counted apart: this tree's vectors and somebody else's
+       published entries, because "how many are mine" is the question the
+       number is read for. */
+    if (published_n > 0)
+        count = g_strdup_printf("%u VECTOR%s OF THIS TREE   |   %u PUBLISHED "
+                                "ENTR%s FILED IN THIS CLASS",
+                                shown - published_n,
+                                (shown - published_n) == 1 ? "" : "S",
+                                published_n, published_n == 1 ? "Y" : "IES");
+    else
+        count = g_strdup_printf("%u VECTOR%s IN THIS CLASS", shown,
+                                shown == 1 ? "" : "S");
     label = gtk_label_new(count);
     gtk_widget_add_css_class(label, "cve-count");
     gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
@@ -19530,6 +19604,14 @@ cve_build_overview(AppState *state, const char *module_id,
     gtk_box_append(GTK_BOX(body), catalogue);
     gtk_box_append(GTK_BOX(body), one);
     gtk_box_append(GTK_BOX(body), helper_card);
+    {
+        /* Only the kits the report covers get this card; a kit whose page has
+           no published entries does not pretend to have an empty corpus. */
+        GtkWidget *corpus = cve_corpus_card(state, module_id, status);
+
+        if (corpus != NULL)
+            gtk_box_append(GTK_BOX(body), corpus);
+    }
     return outer;
 }
 
@@ -19593,10 +19675,267 @@ static ModuleSubmenuEntry gcve_entries[] = {
     { "SIM Toolkit", "imsisting-52_stk-symbolic", NULL, gcve_view_sim_toolkit },
     { "SS7 / MAP", "imsisting-26_ss7_map-symbolic", NULL, gcve_view_ss7_map },
 };
+/* ── the RANSacked corpus ─────────────────────────────────────────────
+   A second catalogue, and a different one from the module's own: the entries
+   here were published by somebody else, the reach column is their claim about
+   what is reachable before authentication, and four of the families below are
+   deliberately malformed messages.
+
+   The corpus belongs to neither kit alone: every entry carries the kit it was
+   published against and the class it belongs in, so it is shown inside the
+   same class views the module's own vectors use rather than on a page of its
+   own. One reader, because there is one file. */
+#define CORPUS_MODULE "21_lte_cve"
+
+
+static void
+corpus_row_free(gpointer p)
+{
+    CorpusRow *r = p;
+
+    g_free(r->id);    g_free(r->alt);    g_free(r->impl);
+    g_free(r->gen);   g_free(r->proto);  g_free(r->pattern);
+    g_free(r->reach); g_free(r->kind);   g_free(r->needs);
+    g_free(r->what);  g_free(r->module); g_free(r->klass);
+    g_free(r);
+}
+
+static GPtrArray *
+corpus_rows(void)
+{
+    static GPtrArray *cache = NULL;
+    g_autofree char *script = NULL;
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+
+    if (cache != NULL)
+        return cache;
+
+    cache = g_ptr_array_new_with_free_func(corpus_row_free);
+    script = module_script_path(CORPUS_MODULE);
+    {
+        const char *argv[] = { script, "--corpus", NULL };
+
+        text = run_capture(argv);
+    }
+    if (text == NULL)
+        return cache;
+    lines = g_strsplit(text, "\n", -1);
+    for (int i = 0; lines[i] != NULL; i++) {
+        g_auto(GStrv) f = g_strsplit(lines[i], "\t", 12);
+        CorpusRow *r;
+
+        if (f[0] == NULL || f[11] == NULL)
+            continue;
+        if (g_strcmp0(f[0], "id") == 0)
+            continue;
+        r = g_new0(CorpusRow, 1);
+        r->id = g_strdup(f[0]);
+        r->alt = g_strdup(f[1]);
+        r->impl = g_strdup(f[2]);
+        r->gen = g_strdup(f[3]);
+        r->proto = g_strdup(f[4]);
+        r->pattern = g_strdup(f[5]);
+        r->reach = g_strdup(f[6]);
+        r->kind = g_strdup(f[7]);
+        r->needs = g_strdup(f[8]);
+        r->what = g_strdup(f[9]);
+        r->module = g_strdup(f[10]);
+        r->klass = g_strdup(f[11]);
+        g_ptr_array_add(cache, r);
+    }
+    return cache;
+}
+
+/* How many published entries this kit files under a class; a NULL class means
+   every class, which is the question the overview asks. */
+static guint
+corpus_count_for(const char *module_id, const char *klass, guint *no_sim)
+{
+    GPtrArray *rows = corpus_rows();
+    guint n = 0;
+
+    if (no_sim != NULL)
+        *no_sim = 0;
+    for (guint i = 0; i < rows->len; i++) {
+        CorpusRow *r = g_ptr_array_index(rows, i);
+
+        if (g_strcmp0(r->module, module_id) != 0)
+            continue;
+        if (klass != NULL && g_strcmp0(r->klass, klass) != 0)
+            continue;
+        n++;
+        if (no_sim != NULL && g_strcmp0(r->reach, "nas-no-sim") == 0)
+            (*no_sim)++;
+    }
+    return n;
+}
+
+/* What a reach column means, said once, because the column is a machine word
+   and the difference between "reachable with no SIM" and "reachable from the
+   backhaul" is the whole finding. */
+static const char *
+corpus_reach_sentence(const char *reach)
+{
+    if (g_strcmp0(reach, "nas-no-sim") == 0)
+        return "reachable at connection start, with no SIM - a stranger's phone "
+               "reaches this one";
+    if (g_strcmp0(reach, "s1-access") == 0)
+        return "needs base-station or backhaul access to the core";
+    if (g_strcmp0(reach, "n2-access") == 0)
+        return "needs N2 access, which is the base-station side in 5G";
+    if (g_strcmp0(reach, "gtp-bearer") == 0)
+        return "needs an established bearer or a position on the user plane";
+    return "the page does not state a reach for this one";
+}
+
+/* One published entry, drawn the way a vector card is drawn: the same meta
+   rows, its own result strip, and the button that builds the message shape
+   this entry belongs to. */
+static void
+corpus_fill_card(AppState *state, CorpusRow *r, GtkWidget *status, GtkWidget *body)
+{
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card(r->id, &card_body);
+    GtkWidget *flow = fkit_flow();
+    GtkWidget *build = gtk_button_new_with_label("Build This Pattern");
+    CveResult *res = NULL;
+    g_autofree char *gen = g_strdup_printf("--gen %s", r->pattern);
+
+    cve_fill_meta(card_body, "implementation", r->impl);
+    cve_fill_meta(card_body, "protocol", r->proto);
+    cve_fill_meta(card_body, "generation", r->gen);
+    cve_fill_meta(card_body, "pattern", r->pattern);
+    cve_fill_meta(card_body, "reach", r->reach);
+    if (r->alt != NULL && *r->alt != '\0')
+        cve_fill_meta(card_body, "report id", r->alt);
+    gtk_box_append(GTK_BOX(card_body), fkit_note(corpus_reach_sentence(r->reach)));
+    if (r->needs != NULL && *r->needs != '\0')
+        cve_fill_meta(card_body, "needs", r->needs);
+    gtk_box_append(GTK_BOX(card_body), fkit_note(r->what));
+
+    (void) state;
+    (void) status;
+    gtk_widget_add_css_class(build, "verb-button");
+    fkit_flow_add(flow, build, "primary");
+    gtk_box_append(GTK_BOX(card_body), flow);
+    gtk_box_append(GTK_BOX(card_body), cve_result_strip(&res));
+    gtk_box_append(GTK_BOX(body), card);
+
+    /* The button is created before the strip exists, so it is wired here,
+       after the strip has been made: the same order the vector cards use. */
+    {
+        CveListing *l = g_new0(CveListing, 1);
+
+        l->res = res;
+        l->module_id = g_strdup(CORPUS_MODULE);
+        l->verb = g_strdup(gen);
+        g_signal_connect(build, "clicked", G_CALLBACK(cve_listing_clicked), l);
+        g_object_set_data_full(G_OBJECT(build), "cve-listing", l, cve_listing_free);
+    }
+}
+
+/* The corpus as one card: how much of it this kit files, the four reaches, the
+   four message families and the lookup. It sits on the page's overview because
+   those verbs belong to the page, not to one of its classes. */
+static GtkWidget *
+cve_corpus_card(AppState *state, const char *module_id, GtkWidget *status)
+{
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card("PUBLISHED CORPUS", &card_body);
+    GtkWidget *filter_body, *family_body, *lookup_body;
+    GtkWidget *filter_card = verb_card("REACH", &filter_body);
+    GtkWidget *family_card = verb_card("MESSAGE FAMILIES", &family_body);
+    GtkWidget *lookup_card = verb_card("ONE ENTRY", &lookup_body);
+    CveResult *filter_res = NULL, *family_res = NULL, *lookup_res = NULL;
+    GtkWidget *banner;
+    g_autofree char *text = NULL;
+    guint no_sim = 0;
+    guint mine = corpus_count_for(module_id, NULL, &no_sim);
+
+    if (mine == 0) {
+        gtk_widget_unparent(card);
+        return NULL;
+    }
+
+    text = g_strdup_printf("%u ENTRIES FILED HERE   |   %u REACHABLE WITH NO SIM   "
+                           "|   4 MESSAGE FAMILIES", mine, no_sim);
+    banner = gtk_label_new(text);
+    gtk_widget_add_css_class(banner, "crec-survey-status");
+    gtk_label_set_xalign(GTK_LABEL(banner), 0.0f);
+    gtk_label_set_selectable(GTK_LABEL(banner), TRUE);
+    gtk_box_append(GTK_BOX(card_body), banner);
+    gtk_box_append(GTK_BOX(card_body),
+        fkit_note("Every entry here was published by the RANSacked report, not "
+                  "found by this bench. Each one is filed in the class of the "
+                  "view that holds it, so it is read beside the vectors it "
+                  "belongs with."));
+
+    {
+        static const struct { const char *label; const char *verb; } reaches[] = {
+            { "With No SIM",   "--corpus nas-no-sim" },
+            { "From The S1",   "--corpus s1-access" },
+            { "From The N2",   "--corpus n2-access" },
+            { "On The Bearer", "--corpus gtp-bearer" },
+        };
+        GtkWidget *flow = fkit_flow();
+
+        for (guint i = 0; i < G_N_ELEMENTS(reaches); i++)
+            fkit_flow_add(flow, cve_listing_button(filter_res, CORPUS_MODULE,
+                            reaches[i].label, reaches[i].verb, "flat"), NULL);
+        gtk_box_append(GTK_BOX(filter_body), flow);
+    }
+    gtk_box_append(GTK_BOX(filter_body), cve_result_strip(&filter_res));
+    gtk_box_append(GTK_BOX(filter_body),
+        fkit_note("The reach is the report's, not this bench's: every entry such "
+                  "a filter shows was published as reachable from where it says, "
+                  "and building a message for it does not change that."));
+
+    {
+        static const struct { const char *label; const char *verb; } families[] = {
+            { "Length Unchecked",    "--gen len-unchecked" },
+            { "Container Rows",      "--gen asn1c-rows" },
+            { "Branch Asymmetry",    "--gen branch-asymmetry" },
+            { "Trust Failed Decode", "--gen trust-failed-decode" },
+        };
+        GtkWidget *flow = fkit_flow();
+
+        for (guint i = 0; i < G_N_ELEMENTS(families); i++)
+            fkit_flow_add(flow, cve_listing_button(family_res, CORPUS_MODULE,
+                            families[i].label, families[i].verb, "flat"), NULL);
+        gtk_box_append(GTK_BOX(family_body), flow);
+    }
+    gtk_box_append(GTK_BOX(family_body), cve_result_strip(&family_res));
+    gtk_box_append(GTK_BOX(family_body),
+        fkit_note("Six messages per family, built by this tree's own codecs. "
+                  "Some are deliberately wrong: a length that is believed, a "
+                  "container whose count lies. Nothing here is sent - the octets "
+                  "are what a lab peer or a parser gets handed."));
+
+    {
+        GtkWidget *row, *entry = NULL;
+
+        row = fkit_composer_verb(state, CORPUS_MODULE, status, &entry,
+                "--corpus-entry", "Entry", "CVE-2024-24445", "Explain");
+        gtk_box_append(GTK_BOX(lookup_body), row);
+        cve_result_wire(cve_composer_button(row), lookup_res, "Explain an entry");
+    }
+    gtk_box_append(GTK_BOX(lookup_body), cve_result_strip(&lookup_res));
+
+    gtk_box_append(GTK_BOX(card_body), filter_card);
+    gtk_box_append(GTK_BOX(card_body), family_card);
+    gtk_box_append(GTK_BOX(card_body), lookup_card);
+    return card;
+}
+
 CVE_OVERVIEW_VIEW(lcve_view_overview, "LTE CVE CATALOGUE",
     "Every catalogued LTE vulnerability, one card per vector, filed by the part "
     "of the network it lives in.",
     "RRC", "CVE-2017-6975", FALSE, lcve_helpers)
+
+CVE_CLASS_VIEW(lcve_view_nas, "nas", "NAS",
+    "Vectors in the non-access stratum, the signalling that runs from the "
+    "handset to the core and outlives any one base station.")
 
 CVE_CLASS_VIEW(lcve_view_asn1, "asn1", "ASN.1",
     "Vectors in the decoders every other LTE interface is built on, so a fault "
@@ -19619,8 +19958,9 @@ CVE_CLASS_VIEW(lcve_view_volte, "volte", "VOLTE",
     "Vectors in the IMS stack that carries voice over LTE.")
 
 static ModuleSubmenuEntry lcve_entries[] = {
-    { "Overview", "dialog-information-symbolic", NULL, lcve_view_overview },
+    { "Overview", "dialog-information-symbolic", "~--corpus-stats", lcve_view_overview },
     { "ASN.1", "imsisting-32_nas_signaling-symbolic", NULL, lcve_view_asn1 },
+    { "NAS", "imsisting-32_nas_signaling-symbolic", NULL, lcve_view_nas },
     { "LTE Baseband", "imsisting-35_baseband-symbolic", NULL, lcve_view_baseband },
     { "Diameter", "imsisting-11_lte_core-symbolic", NULL, lcve_view_diameter },
     { "EPC", "network-server-symbolic", NULL, lcve_view_epc },
@@ -19634,6 +19974,10 @@ CVE_OVERVIEW_VIEW(ncve_view_overview, "5G CVE CATALOGUE",
     "Every catalogued 5G vulnerability, one card per vector, filed by the part "
     "of the network it lives in.",
     "NRF", "CVE-2020-11197", TRUE, ncve_helpers)
+
+CVE_CLASS_VIEW(ncve_view_nas, "nas", "NAS",
+    "Vectors in the 5G non-access stratum, where a message from a stranger's "
+    "handset reaches a core function before anything authenticates it.")
 
 CVE_CLASS_VIEW(ncve_view_asn1, "asn1", "ASN.1",
     "Vectors in the decoders every other 5G interface is built on, so a fault "
@@ -19660,6 +20004,7 @@ CVE_CLASS_VIEW(ncve_view_upf_pfcp, "upf-pfcp", "UPF / PFCP",
 static ModuleSubmenuEntry ncve_entries[] = {
     { "Overview", "dialog-information-symbolic", NULL, ncve_view_overview },
     { "ASN.1", "imsisting-32_nas_signaling-symbolic", NULL, ncve_view_asn1 },
+    { "NAS", "imsisting-32_nas_signaling-symbolic", NULL, ncve_view_nas },
     { "N2 / N4", "imsisting-13_nr_core-symbolic", NULL, ncve_view_n2_n4 },
     { "NR Baseband", "imsisting-55_nr_inject-symbolic", NULL, ncve_view_nr_baseband },
     { "NR RRC", "imsisting-12_nr_air-symbolic", NULL, ncve_view_nr_rrc },

@@ -73,14 +73,14 @@ asked: a value list for one record, a list of records with per-row Copy for many
 | `09_lte_attach` | NAS EMM/ESM encode-decode, BCD IMSI/IMEI, attach forging, identity-exposure detection |
 | `10_lte_air` | LTE air interface: MIB/SIB decode, DCCH builders, CMAS/ETWS warning messages (SIB10-12), srsRAN eNB orchestration |
 | `11_lte_core` | EPC: Diameter S6a/S6d, GTP-C, GTP-U, S1AP, GTP-in-GTP, MBMS session start |
-| `21_lte_cve` | 98 catalogued LTE/5G stack CVEs from the public corpus, filterable by implementation and reach, plus four message families built from each code pattern |
+| `21_lte_cve` | 98 catalogued LTE/5G stack CVEs from the public corpus, filed into the same class views as this tree's own vectors and filterable by reach, plus four message families built from each code pattern |
 
 ### 5G / NR
 | Module | Description |
 |---|---|
 | `12_nr_air` | SSB/MIB/SIB1, PRACH, beam sweep, SSB waveform, gNB orchestration |
 | `13_nr_core` | 5G SBA: NRF discovery, NGAP, PFCP, 5G-AKA, KSEAF, forgery |
-| `22_nr_cve` | Catalogued 5G CVEs |
+| `22_nr_cve` | Catalogued 5G CVEs, with the published NGAP and NAS entries filed beside them |
 | `40_sba_pivot` | Pivot across the service-based architecture: NRF, AMF, SMF reachability |
 | `49_ntn` | Non-terrestrial access: Doppler, RTT, timing advance, k_offset |
 | `51_sidelink` | NR sidelink on PC5: resource pools, SCI-1A limits, ITS certificates, relay checks |

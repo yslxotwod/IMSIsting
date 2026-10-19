@@ -70,8 +70,15 @@ def note(text):
 # ── 1. the catalogue against itself ─────────────────────────────────────
 rows = [l.rstrip("\n").split("\t") for l in open(CATALOG, encoding="utf-8") if l.strip()]
 chk("catalog-rows", len(rows), 98)
-chk("catalog-fields", max(len(r) for r in rows), 10)
-chk("catalog-no-wide-rows", sum(1 for r in rows if len(r) != 10), 0)
+# Twelve columns: the ten the report prints, then the kit and the class each
+# entry is filed under. The filing is this tree's reading, so it is asserted
+# here rather than trusted.
+chk("catalog-fields", max(len(r) for r in rows), 12)
+chk("catalog-no-wide-rows", sum(1 for r in rows if len(r) != 12), 0)
+chk("catalog-kits", sorted({r[10] for r in rows}), ["21_lte_cve", "22_nr_cve"])
+chk("catalog-classes", sorted({r[11] for r in rows}),
+    ["asn1", "epc", "gtp", "n2-n4", "nas"])
+chk("catalog-filed-rows", sum(1 for r in rows if r[10] == "21_lte_cve"), 82)
 
 ids = [r[0] for r in rows]
 chk("catalog-row-key-unique", sorted(r[0] + "/" + r[1] for r in rows),
