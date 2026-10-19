@@ -101,7 +101,9 @@ ue_cmd_probe() {
     if [[ -z "$devices" ]]; then
         ue_emit state no-device
         ue_emit status no-device
-        ue_emit note "the adb server is up; no handset is attached or none is authorised"
+        ue_emit note "the adb server is up; no handset is presenting an adb interface"
+        ue_emit how "set the phone's USB option to file transfer or PTP; 'no data transfer' and MIDI present no adb interface"
+        ue_emit how "accept the 'Allow USB debugging?' prompt after replugging"
         return 3
     fi
     ue_emit devices "$(printf '%s' "$devices" | wc -l | tr -d ' ')"
@@ -113,13 +115,55 @@ ue_cmd_probe() {
     ue_emit serial "$serial"
     ue_emit state "$state"
     ue_emit status "$([[ "$state" == "device" ]] && echo online || echo "$state")"
-    [[ "$state" == "device" ]] || return 3
+    if [[ "$state" != "device" ]]; then
+        case "$state" in
+            unauthorized)
+                ue_emit note "the handset is attached and has not authorised this computer"
+                ue_emit how "unlock the phone and accept the 'Allow USB debugging?' prompt"
+                ue_emit how "tick 'Always allow from this computer' so it stops asking on every replug"
+                ue_emit how "no prompt appears: Developer options - revoke USB debugging authorisations, then replug"
+                ue_emit how "a stale authorisation looks the same: adb kill-server, then adb start-server" ;;
+            offline)
+                ue_emit note "the handset is listed offline: the adb server's view of it is stale"
+                ue_emit how "adb kill-server; adb start-server; replug the cable" ;;
+            *)
+                ue_emit note "the handset is in state $state"
+                ue_emit how "adb devices -l names the state; authorise it on the phone, then replug" ;;
+        esac
+        return 3
+    fi
+}
+
+# The one reason a verb cannot read anything, in the handset's own words.  Every
+# verb asks this rather than inventing its own shrug, so "unauthorized" is never
+# reported as "absent" — the two need different things from a human.
+ue_unavailable() {
+    local line state
+    line=$(ue_adbcmd devices -l 2>/dev/null | tr -d '\r' | sed -n '2,$p' \
+           | awk '$2 != "offline" {print; exit}')
+    state=$(printf '%s' "$line" | awk '{print $2}')
+    ue_emit status unavailable
+    case "$state" in
+        unauthorized)
+            ue_emit reason "the handset is attached but has not authorised this computer"
+            ue_emit how "accept the 'Allow USB debugging?' prompt on the phone"
+            ue_emit how "tick 'Always allow from this computer', or revoke authorisations and replug"
+            ue_emit usb_mode "file transfer or PTP; 'no data transfer' and MIDI present no adb interface" ;;
+        offline)
+            ue_emit reason "the handset is listed offline: the server's view of it is stale"
+            ue_emit how "adb kill-server; adb start-server; replug" ;;
+        *)
+            ue_emit reason "no handset is presenting an adb interface"
+            ue_emit how "choose file transfer (or PTP) in the USB options; 'no data transfer' and MIDI present none"
+            ue_emit how "accept the 'Allow USB debugging?' prompt after replugging" ;;
+    esac
+    return 3
 }
 
 ue_cmd_identity() {
     ue_cmd_probe >/dev/null 2>&1
     local rc=$?
-    (( rc == 3 )) && { ue_emit status unavailable; ue_emit reason "no handset to ask"; return 3; }
+    (( rc == 3 )) && { ue_unavailable; return 3; }
     ue_emit status online
     ue_emit serial "$(ue_serial_line)"
     ue_emit model "$(ue_prop ro.product.model)"
@@ -206,7 +250,7 @@ ue_luhn() {
 
 ue_cmd_radio() {
     ue_cmd_probe >/dev/null 2>&1
-    local rc=$?; (( rc == 3 )) && { ue_emit status unavailable; return 3; }
+    local rc=$?; (( rc == 3 )) && { ue_unavailable; return 3; }
     ue_emit status online
     ue_emit sim_state "$(ue_sim_state)"
     ue_emit sim_operator "$(ue_prop gsm.sim.operator.numeric)"
@@ -226,7 +270,7 @@ ue_cmd_radio() {
 # bench's own radio: this is what the phone was actually camped on.
 ue_cmd_cells() {
     ue_cmd_probe >/dev/null 2>&1
-    local rc=$?; (( rc == 3 )) && { ue_emit status unavailable; return 3; }
+    local rc=$?; (( rc == 3 )) && { ue_unavailable; return 3; }
     local reg
     reg=$(ue_shell 'dumpsys telephony.registry' | tr -d '\r')
     local ident
@@ -306,7 +350,7 @@ ue_cmd_collect() {
         return 2
     fi
     ue_cmd_probe >/dev/null 2>&1
-    local rc=$?; (( rc == 3 )) && { ue_emit status unavailable; return 3; }
+    local rc=$?; (( rc == 3 )) && { ue_unavailable; return 3; }
     [[ -n "$local_dir" ]] || local_dir="${TMP_DIR:-/tmp/imsisting}/ue-pull"
     mkdir -p "$local_dir" || return 1
     ue_emit status pulling
@@ -326,6 +370,7 @@ step	what it needs	why it is not automatic
 pair	USB debugging enabled, the host key accepted on the handset	nothing here can accept the prompt for you; that is a human at the glass
 probe	adb devices shows "device"	"unauthorized" means the prompt is still up, "offline" means the server is stale
 read	no permission beyond what adb already holds	every verb here is a read; a write is not part of this tool
+usb mode	file transfer or PTP in the phone's USB options	"no data transfer" and MIDI present no adb interface at all, so no verb here can see the handset
 identify	READ_PHONE_STATE for IMSI, nothing for IMEI on a modern build	the OS hides both; report the source, do not pretend
 cells	dumpsys telephony.registry	a stock build answers; a locked-down MDM build may not
 collect	the path named explicitly	adb pull takes a path, and a path is a decision the caller makes
@@ -463,6 +508,37 @@ EOF
     out=$(bash "${BASH_SOURCE[0]}" --plan 2>/dev/null)
     ue_check plan-rows  "$(printf '%s\n' "$out" | grep -c '^step')" "1"
     ue_check plan-pair  "$(printf '%s\n' "$out" | grep -c '^pair')" "1"
+
+    # 7. A handset that is plugged in and has not been authorised is NOT the
+    #    same as one that is absent: it is a prompt waiting on a human, and a
+    #    verb that called it "no handset to ask" sent the reader looking for a
+    #    cable.  Both verbs must name the state and the step that clears it.
+    local unauth_dir; unauth_dir=$(mktemp -d)
+    cat > "$unauth_dir/adb" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+    version) printf 'Android Debug Bridge version 1.0.41\n' ;;
+    "devices -l") printf 'List of devices attached\n33201FDH2004W1\tunauthorized usb:1-2 transport_id:3\n' ;;
+    *) printf 'stub: unhandled command: %s\n' "$*" >&2; exit 127 ;;
+esac
+STUB
+    chmod +x "$unauth_dir/adb"
+
+    out=$(UE_ADB="$unauth_dir/adb" PATH="$unauth_dir:$saved_path" bash "${BASH_SOURCE[0]}" --probe 2>/dev/null); rc=$?
+    ue_check unauth-probe-rc     "$rc" "3"
+    ue_check unauth-probe-serial "$(printf '%s\n' "$out" | awk -F'\t' '$1=="serial"{print $2}')" "33201FDH2004W1"
+    ue_check unauth-probe-state  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="state"{print $2}')"  "unauthorized"
+    ue_check unauth-probe-note   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="note"{print $2}')" \
+                                 "the handset is attached and has not authorised this computer"
+    ue_check unauth-probe-how    "$(printf '%s\n' "$out" | grep -c '^how')" "4"
+
+    out=$(UE_ADB="$unauth_dir/adb" PATH="$unauth_dir:$saved_path" bash "${BASH_SOURCE[0]}" --identity 2>/dev/null); rc=$?
+    ue_check unauth-identity-rc     "$rc" "3"
+    ue_check unauth-identity-reason "$(printf '%s\n' "$out" | awk -F'\t' '$1=="reason"{print $2}')" \
+                                    "the handset is attached but has not authorised this computer"
+    ue_check unauth-identity-usb    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="usb_mode"{print $2}')" \
+                                    "file transfer or PTP; 'no data transfer' and MIDI present no adb interface"
+    rm -rf "$unauth_dir"
 
     UE_SERIAL="$saved_serial"
     export PATH="$saved_path"
