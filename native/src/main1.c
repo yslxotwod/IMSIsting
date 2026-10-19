@@ -17009,19 +17009,200 @@ static ModuleSubmenuEntry sim_entries[] = {
     { "OTA", "document-send-symbolic", NULL, sim_build_ota },
     { "Authentication", "security-high-symbolic", NULL, sim_build_auth },
 };
+/* 17_pcap_analysis — capture analysis.
+ *
+ * Every card needs the same first argument, so every card is prefilled with the
+ * sample capture the module can write for itself. Press the sample card first and
+ * the other four answer; open a capture of your own and replace the path.
+ */
+#define PCAP_SAMPLE "/tmp/imsisting/sample.pcap"
+
+static GtkWidget *
+pcap_build_capture(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CAPTURE",
+        "What is in the file: its format and byte order, its frames, and what one "
+        "frame carries.", &body);
+    GtkWidget *sum_body, *list_body, *ext_body;
+    GtkWidget *sum = verb_card("SUMMARY", &sum_body);
+    GtkWidget *list = verb_card("FRAMES", &list_body);
+    GtkWidget *ext = verb_card("ONE FRAME", &ext_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sum_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the File",
+                "--summary", PCAP_SAMPLE,
+                "A capture file. The answer is its class, its byte order and its "
+                "frame count, which is what decides whether the rest of the "
+                "analysis means anything."));
+        gtk_box_append(GTK_BOX(sum_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sum);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(list_body),
+            mod_arg_row_prefilled(state, module_id, status, "List the Frames",
+                "--list", PCAP_SAMPLE,
+                "Every frame with its time, its length and what was recognised "
+                "in it."));
+        gtk_box_append(GTK_BOX(list_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), list);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ext_body),
+            mod_arg_row_prefilled(state, module_id, status, "Extract a Frame",
+                "--extract", PCAP_SAMPLE " 1 1",
+                "The file, a frame number and a depth. The bytes come out as hex, "
+                "ready for a decoder that wants a payload rather than a capture."));
+        gtk_box_append(GTK_BOX(ext_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ext);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+pcap_build_flows(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("FLOWS",
+        "Which endpoints talked to which, and what rides inside what.", &body);
+    GtkWidget *conv_body, *hier_body;
+    GtkWidget *conv = verb_card("CONVERSATIONS", &conv_body);
+    GtkWidget *hier = verb_card("ENCAPSULATION", &hier_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(conv_body),
+            mod_arg_row_prefilled(state, module_id, status, "List the Pairs",
+                "--conversations", PCAP_SAMPLE,
+                "Each endpoint pair with its frame and byte counts. This is the "
+                "first table that says whether a capture is worth reading."));
+        gtk_box_append(GTK_BOX(conv_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), conv);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(hier_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Stack",
+                "--hierarchy", PCAP_SAMPLE,
+                "The protocols nested in each other, in the order they were "
+                "found. A tunnel inside a tunnel shows here before it shows "
+                "anywhere else."));
+        gtk_box_append(GTK_BOX(hier_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), hier);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+pcap_build_identities(AppState *state, const char *module_id,
+                      GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("IDENTITIES",
+        "The subscriber identities a capture carries, and which of them are worth "
+        "recording.", &body);
+    GtkWidget *id_body, *list_body;
+    GtkWidget *id = verb_card("IDENTITIES", &id_body);
+    GtkWidget *list = verb_card("DISTINCT", &list_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(id_body),
+            mod_arg_row_prefilled(state, module_id, status, "Extract Identities",
+                "--identities", PCAP_SAMPLE,
+                "Every identity found, with the frame, the protocol and the "
+                "addresses around it - so one identity can be followed back to "
+                "the exchange it appeared in."));
+        gtk_box_append(GTK_BOX(id_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), id);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(list_body),
+            mod_arg_row_prefilled(state, module_id, status, "Count the Distinct",
+                "--ident-list", PCAP_SAMPLE,
+                "The same identities collapsed to one row each, with a frame "
+                "count: which identity the capture is actually about."));
+        gtk_box_append(GTK_BOX(list_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), list);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+pcap_build_sample(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SAMPLE",
+        "A capture to work on when there is none, and the one act on this page "
+        "that cannot be undone.", &body);
+    GtkWidget *mk_body, *clear_body;
+    GtkWidget *mk = verb_card("WRITE A SAMPLE", &mk_body);
+    GtkWidget *clear = verb_card("CLEAR THE REGISTRY", &clear_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(mk_body),
+            mod_arg_row_prefilled(state, module_id, status, "Write the File",
+                "--build-sample", PCAP_SAMPLE,
+                "A path to write to. The capture is small, well formed, and "
+                "carries one of everything the other cards read, so every card on "
+                "this page can be exercised before a lab capture exists."));
+        gtk_box_append(GTK_BOX(mk_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), mk);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(clear_body),
+            mod_arg_row(state, module_id, status, "Clear the Registry",
+                "--clear", "",
+                "Forgets the captures this module has recorded. It removes the "
+                "registry, not the files, which is why it sits alone rather than "
+                "beside the builder."));
+        gtk_box_append(GTK_BOX(clear_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), clear);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry pcap_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--summary={capture}|--list={capture}|--extract={capture} 1 1" },
-    { "Flows",
-      "network-transmit-receive-symbolic",
-      "--conversations:Conversations|--hierarchy:Hierarchy" },
-    { "Identity",
-      "auth-smartcard-symbolic",
-      "--identities:Identities|--ident-list:Identity List" },
-    { "Manage",
-      "preferences-system-symbolic",
-      "#SAMPLE|--build-sample:Build Sample|#MANAGE|--clear:Clear" },
+    { "Capture", "dialog-information-symbolic", NULL, pcap_build_capture },
+    { "Flows", "network-transmit-receive-symbolic", NULL, pcap_build_flows },
+    { "Identities", "auth-smartcard-symbolic", NULL, pcap_build_identities },
+    { "Sample", "preferences-system-symbolic", NULL, pcap_build_sample },
 };
 static ModuleSubmenuEntry imsi_entries[] = {
     { "Overview",
