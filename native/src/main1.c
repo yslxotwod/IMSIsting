@@ -17359,19 +17359,200 @@ static ModuleSubmenuEntry pcap_entries[] = {
     { "Identities", "auth-smartcard-symbolic", NULL, pcap_build_identities },
     { "Sample", "preferences-system-symbolic", NULL, pcap_build_sample },
 };
+/* 18_imsi_exposure — who has been asking.
+ *
+ * An IMSI catcher leaves a record: the same subscriber asked for its identity
+ * twice, or identities appearing in a place they should not. The page reads that
+ * record and says what a subscriber or an operator can do about it.
+ */
+static GtkWidget *
+imsi_build_harvest(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("HARVEST",
+        "What a capture or a log contributes, and which identities it puts in the "
+        "record.", &body);
+    GtkWidget *harvest_body, *msgs_body, *marlin_body;
+    GtkWidget *harvest = verb_card("FILE", &harvest_body);
+    GtkWidget *msgs = verb_card("MESSAGES", &msgs_body);
+    GtkWidget *marlin = verb_card("MARLIN", &marlin_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(harvest_body),
+            mod_arg_row(state, module_id, status, "Read a File",
+                "--harvest", "capture.pcap",
+                "A capture or a log. Each identity found is recorded with the "
+                "place it appeared and what was asked of it."));
+        gtk_box_append(GTK_BOX(harvest_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), harvest);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(msgs_body),
+            mod_arg_row(state, module_id, status, "Read the Messages",
+                "--marlin-msgs", "",
+                "The identity-request message types this module treats as "
+                "evidence, and why each one is a question a network does not "
+                "need to ask twice."));
+        gtk_box_append(GTK_BOX(msgs_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), msgs);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(marlin_body),
+            mod_arg_row(state, module_id, status, "Read the Reference",
+                "--marlin", "",
+                "The IMSI-catcher detection method this module implements, named "
+                "so the finding can be cited rather than asserted."));
+        gtk_box_append(GTK_BOX(marlin_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), marlin);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+imsi_build_findings(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("FINDINGS",
+        "The identities in the record, what they map to, and which of them cross "
+        "a network boundary they should not.", &body);
+    GtkWidget *ids_body, *subs_body, *exp_body, *cross_body;
+    GtkWidget *ids = verb_card("IDENTITIES", &ids_body);
+    GtkWidget *subs = verb_card("SUBSCRIBERS", &subs_body);
+    GtkWidget *exp = verb_card("EXPOSURE", &exp_body);
+    GtkWidget *cross = verb_card("CROSSINGS", &cross_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ids_body),
+            mod_arg_row(state, module_id, status, "List the Identities",
+                "--identities", "",
+                "Every identity in the record as a feed: the identity, its kind, "
+                "and where it was seen."));
+        gtk_box_append(GTK_BOX(ids_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ids);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(subs_body),
+            mod_arg_row(state, module_id, status, "Count the Subscribers",
+                "--subscribers-tsv", "",
+                "The identities collapsed to one row per subscriber, which is the "
+                "number that matters rather than the number of sightings."));
+        gtk_box_append(GTK_BOX(subs_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), subs);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(exp_body),
+            mod_arg_row(state, module_id, status, "Rank the Exposure",
+                "--exposure-tsv", "",
+                "Each identity with an exposure score and the reason for it, so "
+                "the ranking can be argued with."));
+        gtk_box_append(GTK_BOX(exp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), exp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cross_body),
+            mod_arg_row(state, module_id, status, "Find Crossings",
+                "--cross", "",
+                "Identities seen across more than one network or technology: the "
+                "shape that means a device is being followed rather than "
+                "roaming."));
+        gtk_box_append(GTK_BOX(cross_body), res);
+        gtk_box_append(GTK_BOX(cross_body),
+            mod_arg_row(state, module_id, status, "Map the Places",
+                "--map", "",
+                "Where the sightings happened, as a table a map can be drawn "
+                "from. A record with no location is said to have none."));
+    }
+    gtk_box_append(GTK_BOX(body), cross);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+imsi_build_response(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("RESPONSE",
+        "What to do with the record: report it, redact it, or forget it.", &body);
+    GtkWidget *report_body, *redact_body, *clear_body;
+    GtkWidget *report = verb_card("REPORT", &report_body);
+    GtkWidget *redact = verb_card("REDACT", &redact_body);
+    GtkWidget *clear = verb_card("CLEAR", &clear_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(report_body),
+            mod_arg_row(state, module_id, status, "Write the Report",
+                "--report", "",
+                "The findings as text, with what was measured and what was not. "
+                "An empty record produces a report that says the record is "
+                "empty, not a clean bill of health."));
+        gtk_box_append(GTK_BOX(report_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), report);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(redact_body),
+            mod_arg_row(state, module_id, status, "Redact a File",
+                "--redact", "report.txt",
+                "A file whose identities should not be shared. Redaction is by "
+                "pattern and it says what it changed, so the result can be "
+                "checked against the original."));
+        gtk_box_append(GTK_BOX(redact_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), redact);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(clear_body),
+            mod_arg_row(state, module_id, status, "Clear the Record",
+                "--clear", "",
+                "Forgets every identity this module has recorded. It is the one "
+                "act on this page that cannot be undone, which is why it sits "
+                "alone."));
+        gtk_box_append(GTK_BOX(clear_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), clear);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry imsi_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--audit:Audit|--report:Report|--harvest={capture}" },
-    { "Analysis",
-      "system-search-symbolic",
-      "#CORRELATE|--cross:Cross-reference|--map:Map|#MARLIN|--marlin:Marlin|--marlin-msgs:Marlin Messages" },
-    { "Identity",
-      "auth-smartcard-symbolic",
-      "--identities:Identities|--subscribers-tsv:Subscribers TSV|--exposure-tsv:Exposure TSV" },
-    { "Manage",
-      "preferences-system-symbolic",
-      "--redact:Redact|--clear:Clear" },
+    { "Harvest", "dialog-information-symbolic", NULL, imsi_build_harvest },
+    { "Findings", "auth-smartcard-symbolic", NULL, imsi_build_findings },
+    { "Response", "document-save-symbolic", NULL, imsi_build_response },
 };
 static ModuleSubmenuEntry caud_entries[] = {
     { "Overview",
