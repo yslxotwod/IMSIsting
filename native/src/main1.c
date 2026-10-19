@@ -15155,25 +15155,136 @@ static ModuleSubmenuEntry crec_entries[] = {
       NULL,
       crec_build_export },
 };
+/* 03_gsmtap — the tap: everything a phone's stack hands to the host.
+ *
+ * One UDP listener that demultiplexes by GSMTAP type. It is the only view in the
+ * toolkit that sees the same traffic the handset sees, rather than what a radio
+ * could overhear.
+ */
+static GtkWidget *
+gtap_build_live(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("LIVE TAP",
+        "Listen on the GSMTAP port and demultiplex by type. Nothing is decoded "
+        "twice: a payload goes to the module that owns its format.", &body);
+    GtkWidget *listen_body, *watch_body, *filter_body;
+    GtkWidget *listen = verb_card("LISTEN", &listen_body);
+    GtkWidget *watch = verb_card("WATCHLIST", &watch_body);
+    GtkWidget *filter = verb_card("FILTER", &filter_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(listen_body),
+            mod_arg_row_prefilled(state, module_id, status, "Listen",
+                "--listen", "4729 30",
+                "Port, then seconds. The answer is every message received with "
+                "its type and the decoder that took it."));
+        gtk_box_append(GTK_BOX(listen_body), res);
+        gtk_box_append(GTK_BOX(listen_body),
+            mod_arg_choices(state, module_id, status, "Other inputs", "",
+                "Read a pcap instead of a socket, or a stream on stdin.",
+                (const char *[]) { "--read capture.pcap", "--pipe 4729" },
+                (const char *[]) { "Read a Pcap", "Read a Pipe" }, 2));
+    }
+    gtk_box_append(GTK_BOX(body), listen);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(watch_body),
+            mod_arg_choices(state, module_id, status, "Identities", "",
+                "The identities seen, and the watchlist that turns a live tap into "
+                "an alert when one of them appears.",
+                (const char *[]) { "--identities-tsv", "--watchlist" },
+                (const char *[]) { "Identities", "Watchlist" }, 2));
+        gtk_box_append(GTK_BOX(watch_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), watch);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(filter_body),
+            mod_arg_choices(state, module_id, status, "Narrow the stream", "",
+                "The filters a tap needs when the whole stream is too much: one "
+                "channel, uplink only, or a time window.",
+                (const char *[]) { "--channel 0", "--uplink 1",
+                                   "--since 0 --until 60", "--any-port 4729" },
+                (const char *[]) { "Channel", "Uplink", "Time Window",
+                                   "Any Port" }, 4));
+        gtk_box_append(GTK_BOX(filter_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), filter);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+gtap_build_header(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("HEADER",
+        "The GSMTAP header in front of every payload: what the capture claims "
+        "about where the message came from.", &body);
+    GtkWidget *parse_body, *build_body, *export_body;
+    GtkWidget *parse = verb_card("READ", &parse_body);
+    GtkWidget *build = verb_card("BUILD", &build_body);
+    GtkWidget *export = verb_card("EXPORT", &export_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row(state, module_id, status, "Read a Header",
+                "--parse-header", "hex",
+                "A GSMTAP header as hex. The answer is the version, the type, the "
+                "timeslot, the ARFCN and the signal level, which is what a "
+                "downstream reader trusts without checking."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Header",
+                "--build-header", "1 0 0 128",
+                "Type, timeslot, ARFCN and signal level. A header is a claim, and "
+                "building one is how you find out what a reader will believe."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(export_body),
+            mod_arg_choices(state, module_id, status, "Write it out", "",
+                "A tap is more useful when its output can be handed on: a pcap "
+                "for Wireshark, a TSV for a spreadsheet, or a forwarded stream.",
+                (const char *[]) { "--export-pcap out.pcap", "--decode-tsv capture.pcap",
+                                   "--forward 10.0.0.2:4729" },
+                (const char *[]) { "Export a Pcap", "Decode a Capture",
+                                   "Forward" }, 3));
+        gtk_box_append(GTK_BOX(export_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), export);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry gtap_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "#LIVE|--listen:Listen Live|#OFFLINE|--read={capture}|~--port|~--iface|~--pipe|~--forward" },
-    { "Filter",
-      "system-search-symbolic",
-      "~--arfcn|~--channel|~--uplink|~--any-port|~--since|~--until" },
-    { "Watchlist",
-      "emblem-important-symbolic",
-      "~--watchlist" },
-    { "Decode",
-      "document-open-symbolic",
-      "--decode-tsv:Decoded TSV|--identities-tsv:Identities" },
-    { "Headers",
-      "utilities-terminal-symbolic",
-      "--build-header:Build Header|--parse-header:Parse Header" },
-    { "Export",
-      "document-save-symbolic",
-      "--export-pcap:Export PCAP" },
+    { "Live Tap", "dialog-information-symbolic", NULL, gtap_build_live },
+    { "Header", "utilities-terminal-symbolic", NULL, gtap_build_header },
 };
 /* --------------------------------------------------------------------------
    04_tower_map — Tower Survey.
@@ -16815,13 +16926,156 @@ static ModuleSubmenuEntry suci_entries[] = {
     { "Keys", "channel-secure-symbolic", NULL, suci_build_keys },
     { "Audit", "system-search-symbolic", NULL, suci_build_audit },
 };
+/* 15_downgrade — pushing a handset down a generation.
+ *
+ * A reject with a cause is what a network says when it will not serve a device at
+ * the generation it asked for. The page builds those rejects and detects the
+ * fallback they produce.
+ */
+static GtkWidget *
+dwn_build_reject(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("REJECTS",
+        "The messages that tell a handset its generation is not available here, "
+        "built with the cause that decides where it goes next.", &body);
+    GtkWidget *att_body, *tau_body, *smc_body, *cause_body;
+    GtkWidget *att = verb_card("ATTACH REJECT", &att_body);
+    GtkWidget *tau = verb_card("TAU REJECT", &tau_body);
+    GtkWidget *smc = verb_card("SECURITY MODE", &smc_body);
+    GtkWidget *cause = verb_card("CAUSES", &cause_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(att_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build",
+                "--build-reject", "attach 15",
+                "The procedure and the cause. The answer is the reject as octets, "
+                "and the cause is the whole of the mechanism: a handset told it is "
+                "not allowed here looks for a generation that will have it."));
+        gtk_box_append(GTK_BOX(att_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), att);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tau_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build",
+                "--build-reject", "tau 12",
+                "The tracking-area update reject. It arrives later in the "
+                "procedure than an attach reject, which is what makes it look like "
+                "a network fault rather than a policy."));
+        gtk_box_append(GTK_BOX(tau_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tau);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(smc_body),
+            mod_arg_row(state, module_id, status, "Build",
+                "--build-security-mode", "0 0",
+                "A security mode command offering the null cipher and no integrity. "
+                "A handset that accepts it is on the air in the clear."));
+        gtk_box_append(GTK_BOX(smc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), smc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cause_body),
+            mod_arg_choices(state, module_id, status, "Name a cause", "",
+                "The causes that move a handset between generations, and the "
+                "null-cipher table the security mode command draws on.",
+                (const char *[]) { "--causes", "--reject-cause 15",
+                                   "--null-cipher-table" },
+                (const char *[]) { "All Causes", "One Cause",
+                                   "Null Ciphers" }, 3));
+        gtk_box_append(GTK_BOX(cause_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cause);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+dwn_build_path(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("PATH AND DETECTION",
+        "The chain a downgrade runs as, the signature it leaves, and what a lab "
+        "needs to observe it.", &body);
+    GtkWidget *path_body, *det_body, *sib_body, *tx_body;
+    GtkWidget *path = verb_card("PATH", &path_body);
+    GtkWidget *det = verb_card("DETECT", &det_body);
+    GtkWidget *sib = verb_card("SIB1", &sib_body);
+    GtkWidget *tx = verb_card("HANDOFF", &tx_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(path_body),
+            mod_arg_row(state, module_id, status, "Read the Path",
+                "--path", "",
+                "The downgrade as a sequence with the condition each step needs, "
+                "so a step that cannot hold is visible before anything is built."));
+        gtk_box_append(GTK_BOX(path_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), path);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(det_body),
+            mod_arg_row(state, module_id, status, "Detect",
+                "--detect", "capture.pcap",
+                "The findings in a capture: a reject whose cause moves a device, "
+                "and the fallback that follows it."));
+        gtk_box_append(GTK_BOX(det_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), det);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sib_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a SIB1",
+                "--build-sib1", "310260 0x1234",
+                "A PLMN and a tracking area. A forged SIB1 is the other half of "
+                "the mechanism: it tells a handset the cell is a different one "
+                "than it is."));
+        gtk_box_append(GTK_BOX(sib_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sib);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tx_body),
+            mod_arg_choices(state, module_id, status, "Handoff and transmit", "",
+                "What a downgrade lab needs, and the transmit path itself - the "
+                "one verb here that puts anything on the air.",
+                (const char *[]) { "--plan", "--tx-reject 001010000000001 15" },
+                (const char *[]) { "Plan", "Transmit a Reject" }, 2));
+        gtk_box_append(GTK_BOX(tx_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tx);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry dwn_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--detect:Detect|--path=steer-down|--causes:Causes" },
-    { "Build",
-      "security-high-symbolic",
-      "#BUILD|--build-security-mode:Build Security Mode|--build-reject:Build Reject|--tx-reject:Transmit Reject|--build-sib1:Build SIB1|--null-cipher-table:Null Cipher Table|#PLAN|--reject-cause=22 EMM|--plan:Plan" },
+    { "Rejects", "dialog-information-symbolic", NULL, dwn_build_reject },
+    { "Path and Detection", "system-search-symbolic", NULL, dwn_build_path },
 };
 /* 16_sim — the card itself.
  *
