@@ -19146,19 +19146,210 @@ static ModuleSubmenuEntry pgt_entries[] = {
       "security-high-symbolic",
       "#BUILD|~--build-paging-req|#TX|~--paging-tx|~--paging-storm|#HISTORY|~--paging-history|~--flapping-tsv" },
 };
+/* 30_volte_ims — the IMS core a carrier puts voice behind.
+ *
+ * SIP is text, and everything interesting about it is in the headers: who is
+ * registering, from where, and with what credentials. The page reads a message,
+ * builds one, and separates the registration from the call.
+ */
+static GtkWidget *
+vims_build_sip(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SIP",
+        "A SIP message read and built. The headers decide routing, and a message "
+        "that parses is not the same as a message the core will act on.", &body);
+    GtkWidget *parse_body, *build_body;
+    GtkWidget *parse = verb_card("READ A MESSAGE", &parse_body);
+    GtkWidget *build = verb_card("BUILD A MESSAGE", &build_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Message",
+                "--sip-parse", "REGISTER sip:ims.mnc260.mcc310.3gppnetwork.org SIP/2.0",
+                "A SIP message as text. The answer is each header with the value "
+                "that decides routing, authentication or identity."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Message",
+                "--sip-build", "REGISTER 310150123456789 ims.mnc260.mcc310.3gppnetwork.org",
+                "A method, a subscriber and the core's name. The answer is the "
+                "message as text, with the headers the method requires."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+vims_build_registration(AppState *state, const char *module_id,
+                        GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("REGISTRATION",
+        "Who is registered, how the registration was authenticated, and what the "
+        "identity in it gives away.", &body);
+    GtkWidget *list_body, *reg_body, *aka_body, *imei_body;
+    GtkWidget *list = verb_card("REGISTRATIONS", &list_body);
+    GtkWidget *reg = verb_card("REGISTER", &reg_body);
+    GtkWidget *aka = verb_card("AKA", &aka_body);
+    GtkWidget *imei = verb_card("IDENTITY LEAK", &imei_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(list_body),
+            mod_arg_row(state, module_id, status, "List Them",
+                "--ims-registration", "",
+                "The registrations in the record, as a feed: the subscriber, the "
+                "contact it registered and where the registration came from."));
+        gtk_box_append(GTK_BOX(list_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), list);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(reg_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Register",
+                "--register-spoof", "310150123456789",
+                "A subscriber. The answer is a REGISTER whose contact is not the "
+                "subscriber's, which is the registration-hijack shape."));
+        gtk_box_append(GTK_BOX(reg_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), reg);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(aka_body),
+            mod_arg_row(state, module_id, status, "Register with AKA",
+                "--register-aka", "310150123456789",
+                "A subscriber. The answer is the REGISTER with an "
+                "Authorization header whose AKA response a real core can verify."));
+        gtk_box_append(GTK_BOX(aka_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), aka);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(imei_body),
+            mod_arg_row(state, module_id, status, "Read the Leak",
+                "--imei-leak", "capture.pcap",
+                "A capture. The finding is the handset model a network can read "
+                "from the headers a handset volunteers, which no subscriber "
+                "intends to send."));
+        gtk_box_append(GTK_BOX(imei_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), imei);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+vims_build_calls(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CALLS",
+        "Established calls, the media underneath them, and the three attacks that "
+        "target the media rather than the signalling.", &body);
+    GtkWidget *calls_body, *reuse_body, *ig_body, *flood_body;
+    GtkWidget *calls = verb_card("CALLS", &calls_body);
+    GtkWidget *reuse = verb_card("KEYSTREAM", &reuse_body);
+    GtkWidget *ig = verb_card("IMP4GT", &ig_body);
+    GtkWidget *flood = verb_card("FLOOD", &flood_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(calls_body),
+            mod_arg_row(state, module_id, status, "List the Calls",
+                "--calls", "",
+                "The calls in the record with their parties, their duration and "
+                "the media path each one used."));
+        gtk_box_append(GTK_BOX(calls_body), res);
+        gtk_box_append(GTK_BOX(calls_body),
+            mod_arg_row(state, module_id, status, "One Call",
+                "--call", "call-1",
+                "A single call by id, which is the form a report cites."));
+    }
+    gtk_box_append(GTK_BOX(body), calls);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(reuse_body),
+            mod_arg_choices(state, module_id, status, "Media", "",
+                "Keystream reuse detected in a capture, and the recovery that "
+                "follows from it.",
+                (const char *[]) { "--detect-keystream-reuse capture.pcap",
+                                   "--keystream-recover capture.pcap" },
+                (const char *[]) { "Detect", "Recover" }, 2));
+        gtk_box_append(GTK_BOX(reuse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), reuse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ig_body),
+            mod_arg_row(state, module_id, status, "Read the Model",
+                "--imp4gt-model", "",
+                "The IMP4GT model: what a GTP-in-GTP rewrite does to an IPsec SA, "
+                "step by step. It describes a published attack; it performs "
+                "nothing."));
+        gtk_box_append(GTK_BOX(ig_body),
+            mod_arg_row(state, module_id, status, "Read the ReVoLTE Demo",
+                "--revolte-demo", "",
+                "The keystream-reuse demonstration as a sequence: the same "
+                "keystream across two calls, and what having two ciphertexts "
+                "under one keystream gives an attacker."));
+        gtk_box_append(GTK_BOX(ig_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ig);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(flood_body),
+            mod_arg_row_prefilled(state, module_id, status, "Size a Flood",
+                "--sip-flood", "1000 60",
+                "A request count and a window. The answer is the load that would "
+                "put on a core, computed rather than asserted."));
+        gtk_box_append(GTK_BOX(flood_body), res);
+        gtk_box_append(GTK_BOX(flood_body),
+            mod_arg_row(state, module_id, status, "Send",
+                "--sip-send", "10.0.0.1 5060",
+                "Where a message would go. This is the one verb on the page that "
+                "leaves the machine, so it is last and it names its destination."));
+    }
+    gtk_box_append(GTK_BOX(body), flood);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry vims_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--ims-registration:IMS Registration|--sip-parse:Parse SIP|~--sip-build|--detect-keystream-reuse:Keystream Reuse|~--calls|~--tag" },
-    { "Attacks",
-      "security-high-symbolic",
-      "#FLOOD|--sip-flood:SIP Flood|#SPOOF|--register-spoof:Register Spoof|~--register-aka|~--call|~--sip-send|#EXPOSURE|--imei-leak:IMEI Leak|#DEMO|--revolte-demo:ReVoLTE Demo|~--i-have-a-lab-and-authorisation" },
-    { "Keystream",
-      "channel-secure-symbolic",
-      "--keystream-recover:Recover Keystream|--imp4gt-model:IMP4GT Model" },
-    { "Planning",
-      "preferences-system-symbolic",
-      "--plan:Plan" },
+    { "SIP", "dialog-information-symbolic", NULL, vims_build_sip },
+    { "Registration", "channel-secure-symbolic", NULL, vims_build_registration },
+    { "Calls", "media-playback-start-symbolic", NULL, vims_build_calls },
 };
 /* 31_sim_defense — Port-out Risk.
  *
