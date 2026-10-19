@@ -21706,13 +21706,112 @@ static ModuleSubmenuEntry lipr_entries[] = {
     { "Posture", "system-search-symbolic", NULL, lipr_build_posture },
     { "Encode", "document-save-symbolic", NULL, lipr_build_encode },
 };
+/* 43_ran_share — an operator's shared network.
+ *
+ * A RAN share puts two networks on one radio. The leak that matters is a cell
+ * broadcasting a competitor's identity: it tells every handset in range who else
+ * is on the mast.
+ */
+static GtkWidget *
+rans_build_plmn(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("PLMN",
+        "An identity packed and read back, and what a broadcast list says about "
+        "who is on a shared mast.", &body);
+    GtkWidget *dec_body, *enc_body, *eplmn_body;
+    GtkWidget *dec = verb_card("READ AN IDENTITY", &dec_body);
+    GtkWidget *enc = verb_card("PACK AN IDENTITY", &enc_body);
+    GtkWidget *eplmn = verb_card("EQUIVALENT LIST", &eplmn_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dec_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode",
+                "--plmn-decode", "00F110",
+                "A packed identity as hex. The answer is the MCC, the MNC and how "
+                "many digits the MNC actually carries, which is where two "
+                "operators' identities collide."));
+        gtk_box_append(GTK_BOX(dec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(enc_body),
+            mod_arg_row_prefilled(state, module_id, status, "Encode",
+                "--plmn-encode", "310 260",
+                "An MCC and an MNC. A three-digit MNC packs differently from a "
+                "two-digit one, and that difference is the whole subject."));
+        gtk_box_append(GTK_BOX(enc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), enc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(eplmn_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a List",
+                "--eplmn", "310260,310410",
+                "The equivalent-identity list a cell broadcasts. Each entry is a "
+                "network a handset may treat as its own."));
+        gtk_box_append(GTK_BOX(eplmn_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), eplmn);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+rans_build_leak(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("LEAK",
+        "Whether a cell broadcasts an identity it should not, and what a lab "
+        "needs to prove the finding.", &body);
+    GtkWidget *cell_body, *plan_body;
+    GtkWidget *cell = verb_card("CELLS", &cell_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cell_body),
+            mod_arg_row(state, module_id, status, "Check the Broadcast",
+                "--leak-check", "cells.tsv",
+                "A table of cells with what each broadcasts and what a neighbour "
+                "observed. The check is anchored on whole identities: 001-01 is "
+                "not a substring of 001-010."));
+        gtk_box_append(GTK_BOX(cell_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cell);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_choices(state, module_id, status, "Read", "",
+                "How the share is configured, and what a lab needs to test it.",
+                (const char *[]) { "--mode", "--plan" },
+                (const char *[]) { "Mode", "Plan" }, 2));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry rans_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "~--leak-check|--mode=mocn|--eplmn=001-01,001-02" },
-    { "PLMN",
-      "network-server-symbolic",
-      "--plmn-decode:Decode PLMN|--plmn-encode:Encode PLMN|--plan:Plan" },
+    { "PLMN", "dialog-information-symbolic", NULL, rans_build_plmn },
+    { "Leak", "system-search-symbolic", NULL, rans_build_leak },
 };
 /* 44_carrier_api — Carrier API Abuse.
  *
