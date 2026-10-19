@@ -16850,6 +16850,21 @@ mod_arg_clicked(GtkButton *button, gpointer user_data)
     for (int i = 0; parts[i] != NULL; i++)
         if (parts[i][0] != '\0') g_ptr_array_add(argv, parts[i]);
     g_ptr_array_add(argv, NULL);
+    /* A hand-built card owns its own answer surface just as a spec card does:
+       the button carries the card's result rect, this begins it, and
+       action_run_unref ends it because result_rect_new has registered the
+       buffer -> rect link. Without this the records went to the page buffer,
+       which no longer has a card to draw them in. */
+    {
+        GtkWidget *holder = g_object_get_data(G_OBJECT(button), "result");
+
+        if (holder != NULL) {
+            ResultRect *rr = g_object_get_data(G_OBJECT(holder), "result-rect");
+
+            if (rr != NULL) result_begin(state, rr);
+        }
+    }
+
     imsisting_action_run(state, module_id, label, status,
                          (const char *const *) argv->pdata, FALSE);
 }
