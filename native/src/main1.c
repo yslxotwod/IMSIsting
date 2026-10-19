@@ -18215,31 +18215,212 @@ static ModuleSubmenuEntry macl_entries[] = {
       "system-search-symbolic",
       "~--dci|--sched-pattern:Scheduling Pattern|--integrity-gap:Integrity Gap" },
 };
+/* 32_nas_signaling — the pre-authentication NAS surface.
+ *
+ * Before a handset is authenticated it will accept a handful of messages from
+ * anyone. The page reads what a capture carries, models what a storm costs, and
+ * builds exactly those messages - saying in every case what was not built.
+ */
+static GtkWidget *
+nasf_build_read(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("READ",
+        "What a capture carries: the message mix, the rate, who is in it, and what "
+        "each cause code means.", &body);
+    GtkWidget *dec_body, *rate_body, *mix_body, *cause_body;
+    GtkWidget *dec = verb_card("ONE MESSAGE", &dec_body);
+    GtkWidget *rate = verb_card("RATE", &rate_body);
+    GtkWidget *mix = verb_card("PROCEDURE MIX", &mix_body);
+    GtkWidget *cause = verb_card("CAUSES", &cause_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dec_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Message",
+                "--decode-nas", "eps 07440F",
+                "A NAS message as hex. A plain message and a protected one do not "
+                "end at the same octet, and the answer says which it read."));
+        gtk_box_append(GTK_BOX(dec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(rate_body),
+            mod_arg_row(state, module_id, status, "Measure the Rate",
+                "--rate", "capture.pcap",
+                "A capture. The answer is messages per second per procedure, "
+                "which is the number a storm is defined by."));
+        gtk_box_append(GTK_BOX(rate_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), rate);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(mix_body),
+            mod_arg_row(state, module_id, status, "Read the Mix",
+                "--procedure-mix", "capture.pcap",
+                "The share each procedure takes. A capture that is nine tenths "
+                "one message is not a network doing several things."));
+        gtk_box_append(GTK_BOX(mix_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), mix);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cause_body),
+            mod_arg_row(state, module_id, status, "List the Causes",
+                "--causes", "",
+                "The EMM and 5GMM cause codes with their names. A rejection's "
+                "cause is the only part of the decision a handset is told."));
+        gtk_box_append(GTK_BOX(cause_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cause);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+nasf_build_model(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MODEL",
+        "What a storm would cost the network that receives it, and the shape of "
+        "the storm itself.", &body);
+    GtkWidget *storm_body, *cost_body;
+    GtkWidget *storm = verb_card("STORM PROFILE", &storm_body);
+    GtkWidget *cost = verb_card("COST MODEL", &cost_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(storm_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Profile",
+                "--storm-profile", "capture.pcap",
+                "A rate and a duration. The answer is how many messages that is, "
+                "what a core has to do for each, and where the first queue "
+                "overflows."));
+        gtk_box_append(GTK_BOX(storm_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), storm);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cost_body),
+            mod_arg_row(state, module_id, status, "Read the Cost",
+                "--cost-model", "",
+                "The per-message cost a core pays: the lookup, the state change "
+                "and the answer. It is a model with stated inputs, not a "
+                "measurement."));
+        gtk_box_append(GTK_BOX(cost_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cost);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+nasf_build_messages(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MESSAGES",
+        "The messages a handset accepts before it is authenticated, built octet "
+        "for octet. Nothing here is sent.", &body);
+    GtkWidget *eps_body, *gs_body;
+    GtkWidget *eps = verb_card("EPS", &eps_body);
+    GtkWidget *gs = verb_card("5GS", &gs_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(eps_body),
+            mod_arg_choices(state, module_id, status, "Message", "",
+                "A worked vector per message: the cause code and the identity "
+                "type are the two fields that change what the handset does next.",
+                (const char *[]) { "--build-nas eps attach-reject --cause 15",
+                                   "--build-nas eps tau-reject --cause 12",
+                                   "--build-nas eps identity-request --identity imsi",
+                                   "--build-nas eps auth-reject",
+                                   "--build-nas eps security-mode-reject --cause 23" },
+                (const char *[]) { "Attach Reject", "TAU Reject",
+                                   "Identity Request", "Auth Reject",
+                                   "Security Mode Reject" }, 5));
+        gtk_box_append(GTK_BOX(eps_body), res);
+        gtk_box_append(GTK_BOX(eps_body), fkit_note(
+            "The output carries a limit row: the NAS-MAC is not built, because "
+            "it needs K_ASME and an integrity algorithm, and an Authentication "
+            "Request carries RAND only - an AUTN at an unconfirmed offset would "
+            "be a message no handset accepts."));
+    }
+    gtk_box_append(GTK_BOX(body), eps);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(gs_body),
+            mod_arg_choices(state, module_id, status, "5GS", "",
+                "The 5GMM equivalents. The header is a different length and the "
+                "cause codes are a different table, so they are built, not "
+                "converted.",
+                (const char *[]) { "--build-nas 5gs registration-reject --cause 22",
+                                   "--build-nas 5gs service-reject --cause 21" },
+                (const char *[]) { "Registration Reject",
+                                   "Service Reject" }, 2));
+        gtk_box_append(GTK_BOX(gs_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), gs);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+nasf_build_plan(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("PLAN",
+        "What a signalling-storm lab needs, and what it must record.", &body);
+    GtkWidget *plan_body;
+    GtkWidget *plan = verb_card("LAB PLAN", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row_prefilled(state, module_id, status, "Write the Plan",
+                "--transmit", "00101 5",
+                "The plmn and a duration. What is written is the plan - the "
+                "message sequence, the rate and the stop condition - not the "
+                "transmission."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry nasf_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--decode-nas:Decode NAS|--causes:Causes|--storm-profile:Storm Profile" },
-    { "Model",
-      "system-search-symbolic",
-      "--cost-model:Cost Model|--procedure-mix:Procedure Mix|--rate={capture}" },
-    /* The pre-authentication message builders. Each button runs a worked
-       vector so the card shows a real message rather than a usage line; the
-       module's own output carries the `limit` row that says what was not
-       built (the NAS-MAC, the AUTN) and that nothing was sent. */
-    { "Messages",
-      "document-send-symbolic",
-      "--build-nas=eps attach-reject --cause 15:Attach Reject"
-      "|--build-nas=eps tau-reject --cause 12:TAU Reject"
-      "|--build-nas=eps identity-request --identity imsi:Identity Request"
-      "|--build-nas=eps auth-reject:Authentication Reject"
-      "|--build-nas=eps security-mode-reject --cause 23:Security Mode Reject"
-      "|--build-nas=5gs registration-reject --cause 22:Registration Reject" },
-    { "Transmit",
-      "media-playback-start-symbolic",
-      "--transmit=00101 5:Write the Lab Plan" },
-    { "Planning",
-      "preferences-system-symbolic",
-      "--plan:Plan" },
+    { "Read", "dialog-information-symbolic", NULL, nasf_build_read },
+    { "Model", "system-search-symbolic", NULL, nasf_build_model },
+    { "Messages", "document-send-symbolic", NULL, nasf_build_messages },
+    { "Plan", "preferences-system-symbolic", NULL, nasf_build_plan },
 };
 static ModuleSubmenuEntry ss7_entries[] = {
     { "Overview",
