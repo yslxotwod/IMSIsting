@@ -190,27 +190,50 @@ ue_cmd_identity() {
         ue_emit imei_source "$src"
         ue_emit imei_luhn "$(ue_luhn "$imei" >/dev/null 2>&1 && echo ok || echo fail)"
     else
+        # The reason is evidence, not a story: a hardened build (GrapheneOS,
+        # a redacting OEM, an MDM) answers with a null field, a permission
+        # denial and a refusal to run the service at all, and those are three
+        # different facts about the handset.
+        local why
+        why=$(printf '%s\n' "$sub" | grep -iE 'device id|permission|denial|error|null|exception' \
+              | head -1 | sed 's/^[[:space:]]*//')
         ue_emit imei unavailable
+        ue_emit imei_evidence "${why:-the service answered, and it named no Device ID at all}"
         ue_emit imei_note "both paths are closed on this handset without root; an IMEI is not a secret the radio needs, it is a secret the OS hides"
     fi
 
     # IMSI: same story, one more indirection -- the subscriber id is behind a
     # per-subscription call and needs READ_PHONE_STATE even where it is not
     # redacted.
-    local imsi
-    imsi=$(ue_shell 'service call iphonesubinfo 7' | ue_parcel_string | tr -dc '0-9')
+    local imsi imsi_raw
+    imsi_raw=$(ue_shell 'service call iphonesubinfo 7' | tr -d '\r')
+    imsi=$(printf '%s' "$imsi_raw" | ue_parcel_string | tr -dc '0-9')
     if (( ${#imsi} >= 14 && ${#imsi} <= 16 )); then
         ue_emit imsi "$imsi"
         ue_emit imsi_mcc_mnc "$(printf '%s' "$imsi" | cut -c1-5)"
         ue_emit imsi_source "service call iphonesubinfo 7"
     else
+        local ireason
+        ireason=$(printf '%s\n' "$imsi_raw" | grep -vE '^[[:space:]]*$' \
+                  | grep -iE 'permission|denial|error|null|exception|unknown' | head -1 \
+                  | sed 's/^[[:space:]]*//')
         ue_emit imsi unavailable
+        ue_emit imsi_evidence "${ireason:-the per-subscription call answered with no digits}"
         ue_emit imsi_note "closed without READ_PHONE_STATE; the radio modules can still read it off the wire"
     fi
 
+    # Some builds publish a LIST here ("20825,20825") and some a single value.
+    # The row is the network the SIM is registered to, so take the first entry
+    # and name the two halves of it rather than printing a comma.
+    local numeric
+    numeric=$(ue_numeric)
     ue_emit sim_state "$(ue_sim_state)"
-    ue_emit sim_operator "$(ue_prop gsm.sim.operator.numeric)"
+    ue_emit sim_operator "$numeric"
     ue_emit sim_operator_name "$(ue_prop gsm.sim.operator.alpha)"
+    if [[ "$numeric" =~ ^[0-9]{5,6}$ ]]; then
+        ue_emit sim_mcc "$(printf '%s' "$numeric" | cut -c1-3)"
+        ue_emit sim_mnc "$(printf '%s' "$numeric" | cut -c4-)"
+    fi
 }
 
 ue_sim_state() {
@@ -248,13 +271,20 @@ ue_luhn() {
     (( (sum + ${rev:n-1:1}) % 10 == 0 ))
 }
 
+# `gsm.sim.operator.numeric` is a LIST on some builds ("20825,20825") and a
+# single value on others.  The first entry is the registration; the comma is
+# not part of an MCC/MNC.
+ue_numeric() {
+    ue_prop "${1:-gsm.sim.operator.numeric}" | tr ',' '\n' | head -1 | tr -d '[:space:]'
+}
+
 ue_cmd_radio() {
     ue_cmd_probe >/dev/null 2>&1
     local rc=$?; (( rc == 3 )) && { ue_unavailable; return 3; }
     ue_emit status online
     ue_emit sim_state "$(ue_sim_state)"
-    ue_emit sim_operator "$(ue_prop gsm.sim.operator.numeric)"
-    ue_emit network_operator "$(ue_prop gsm.operator.numeric)"
+    ue_emit sim_operator "$(ue_numeric)"
+    ue_emit network_operator "$(ue_numeric gsm.operator.numeric)"
     ue_emit network_type "$(ue_prop gsm.network.type)"
     ue_emit roaming "$(ue_prop gsm.roaming.state)"
     ue_emit data_state "$(ue_prop gsm.data.state)"
@@ -404,7 +434,7 @@ case "$*" in
     "shell getprop ro.build.id") printf 'TP1A.220624.014\r\n' ;;
     "shell getprop ro.build.fingerprint") printf 'samsung/beyond1/beyond1:13/TP1A.220624.014/x:user/release-keys\r\n' ;;
     "shell getprop gsm.sim.state") printf 'READY\r\n' ;;
-    "shell getprop gsm.sim.operator.numeric") printf '310260\r\n' ;;
+    "shell getprop gsm.sim.operator.numeric") printf '310260,310260\r\n' ;;
     "shell getprop gsm.sim.operator.alpha") printf 'T-Mobile\r\n' ;;
     "shell getprop gsm.operator.numeric") printf '310260\r\n' ;;
     "shell getprop gsm.network.type") printf 'LTE\r\n' ;;
@@ -530,6 +560,7 @@ STUB
     ue_check unauth-probe-serial "$(printf '%s\n' "$out" | awk -F'\t' '$1=="serial"{print $2}')" "33201FDH2004W1"
     ue_check unauth-probe-state  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="state"{print $2}')"  "unauthorized"
     ue_check unauth-probe-count  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="devices"{print $2}')" "1"
+
     ue_check unauth-probe-note   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="note"{print $2}')" \
                                  "the handset is attached and has not authorised this computer"
     ue_check unauth-probe-how    "$(printf '%s\n' "$out" | grep -c '^how')" "4"
@@ -540,6 +571,15 @@ STUB
                                     "the handset is attached but has not authorised this computer"
     ue_check unauth-identity-usb    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="usb_mode"{print $2}')" \
                                     "file transfer or PTP; 'no data transfer' and MIDI present no adb interface"
+    # 8. The operator code arrives as a list on a real handset.  The comma is
+    #    not part of an MCC/MNC, so the row and its two halves must be the
+    #    first entry only.
+    out=$(PATH="$stub_dir:$saved_path" UE_ADB="$stub_dir/adb" bash "${BASH_SOURCE[0]}" --radio 2>/dev/null)
+    ue_check radio-sim-operator   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="sim_operator"{print $2}')" "310260"
+    ue_check radio-network-op     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="network_operator"{print $2}')" "310260"
+    out=$(PATH="$stub_dir:$saved_path" UE_ADB="$stub_dir/adb" bash "${BASH_SOURCE[0]}" --identity 2>/dev/null)
+    ue_check identity-sim-mcc     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="sim_mcc"{print $2}')" "310"
+    ue_check identity-sim-mnc     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="sim_mnc"{print $2}')" "260"
     rm -rf "$unauth_dir"
 
     UE_SERIAL="$saved_serial"
