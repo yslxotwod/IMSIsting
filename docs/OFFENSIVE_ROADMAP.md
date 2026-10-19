@@ -93,7 +93,7 @@ and a testbed. Every computational half is already built and verified offline.
 
 | Capability | Module | Built today | Missing to fire |
 |---|---|---|---|
-| **Small Cell / eNB** | `37_femtocell` | 27-bit CSG-Id codec, PCI-confusion detection, Iuh (HNBAP registration, RUA Connect/DirectTransfer and RANAP InitialUE-Message byte-exact), TR-069/CWMP audit, a byte-exact S1 Setup Request built and decoded against `tshark`, closed-cell detection over the real SIB1 codec, and a live subscriber window fed by GSMTAP | DEVICE: an HeNB you own; NET for the gateway side and the SCTP association |
+| **Small Cell / eNB** | `37_femtocell` | 27-bit CSG-Id codec, PCI-confusion detection, Iuh (HNBAP registration, RUA Connect/DirectTransfer and RANAP InitialUE-Message byte-exact), TR-069/CWMP audit, a byte-exact S1 Setup Request built and decoded against `tshark`, closed-cell detection over the real SIB1 codec, and a live subscriber window with three feeds (GSMTAP, the NAS inside an S1 backhaul capture, and one SCTP association held open on the S1 port) | DEVICE: an HeNB you own; NET for the gateway side and the SCTP association |
 | **VoWiFi / ePDG** | `36_vowifi` | IKEv2/SWu 28-octet header with length/version/flag refusals, full IANA payload/exchange/transform/notify/id tables, SA-proposal parser with null-encryption detection, EAP-AKA codec with an attribute walk and per-attribute size checks, AT_KDF_INPUT/AT_KDF/AT_BIDDING (RFC 9048), SWu NAI and ePDG FQDN, transform classifiers | NET: an ePDG |
 | **Wi-Fi offload / LWA** | `47_wifioff` | ePDG FQDN, certificate validation, LWA config | LAB |
 | **GPRS / EDGE downgrade** | `50_gprs` | GEA0–GEA4 family, APN coding, PDP-context IEs, GEA-downgrade detector | TX: force GEA0 |

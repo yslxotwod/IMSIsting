@@ -726,9 +726,12 @@ def find_identities(app, proto):
     them by "8 bytes that look like BCD" produces a flood of false
     positives, so each candidate is validated against the real structure:
 
-      IMSI  TS 24.008 10.5.1.4: length octet (5..8) then that many BCD
-            octets. The first three digits are the MCC, which must be a
-            plausible assigned value.
+      IMSI  TS 24.008 10.5.1.4 / TS 24.301 9.9.3.4: a length octet then BCD
+            octets. The length counts the BCD octets alone in the DTAP form
+            and ALSO counts the identity-type octet in the EPS form, so a
+            15-digit IMSI is L=9 there and only L=8 or less in the DTAP form.
+            The first three digits are the MCC, which must be an assigned
+            value.
       IMEI  TS 24.008 10.5.1.4 / TS 23.003: 8 BCD octets giving a 15-digit
             IMEI or 16-digit IMEISV. The first two digits are the Reporting
             Body Identifier and must be one of the assigned values, and the
@@ -742,26 +745,38 @@ def find_identities(app, proto):
     # ── IMSI: length-prefixed BCD ──────────────────────────────────────
     for i in range(0, n - 1):
         ln = app[i]
-        if not (5 <= ln <= 8):
+        if not (5 <= ln <= 9):
             continue
-        if i + 1 + ln > n:
-            continue
-        digits = bcd_swap(app[i + 1:i + 1 + ln])
-        # The odd-digit filler F lands in the LAST nibble after the swap,
-        # whatever the byte count, so it is stripped by position rather
-        # than by parity: a 15-digit IMSI in 8 BCD octets swaps to 16
-        # characters ending in F, and a 16-digit IMSI swaps to 16 digits.
-        if digits.endswith("F"):
-            digits = digits[:-1]
-        if not digits.isdigit():
-            continue
-        if not (14 <= len(digits) <= 16):
-            continue
-        if digits[0] not in "01234567":
-            continue
-        mcc = int(digits[0:3])
-        if mcc in MCC_ASSIGNED:
-            res.append(("imsi", digits, "length-prefixed BCD at offset %d" % i))
+        # Two length conventions, both on the wire. The DTAP form counts the
+        # BCD octets; the EPS form (TS 24.301 9.9.3.4) counts them plus the
+        # identity-type octet that follows the length. Only the second one can
+        # spell a normal 15-digit IMSI, and a scan that knows only the first
+        # finds an IMSI when the surrounding framing happens to offer a small
+        # number in the length position.
+        candidates = [(i + 1, ln, "dtap")]
+        if (i + 1 < n and (app[i + 1] & 0x07) == 0x01):
+            candidates.insert(0, (i + 2, ln - 1, "eps"))
+        for start, count, form in candidates:
+            if count < 1 or start + count > n:
+                continue
+            digits = bcd_swap(app[start:start + count])
+            # The odd-digit filler F lands in the LAST nibble after the swap,
+            # whatever the byte count, so it is stripped by position rather
+            # than by parity: a 15-digit IMSI in 8 BCD octets swaps to 16
+            # characters ending in F, and a 16-digit IMSI swaps to 16 digits.
+            if digits.endswith("F"):
+                digits = digits[:-1]
+            if not digits.isdigit():
+                continue
+            if not (14 <= len(digits) <= 16):
+                continue
+            if digits[0] not in "01234567":
+                continue
+            mcc = int(digits[0:3])
+            if mcc in MCC_ASSIGNED:
+                res.append(("imsi", digits,
+                            "length-prefixed BCD at offset %d (%s form)" % (i, form)))
+                break
 
     # ── IMEI / IMEISV: 8 BCD octets ────────────────────────────────────
     for i in range(0, max(0, n - 7)):
@@ -799,6 +814,10 @@ def find_identities(app, proto):
 # digits reports every BCD string in the capture as an IMSI, which is
 # worse than reporting nothing.
 MCC_ASSIGNED = {
+    # 001 is the 3GPP test PLMN (TS 23.122 annex), not an assigned country
+    # code, and every lab fixture in this tree uses it. Leaving it out made the
+    # scanner reject the one IMSI a bench capture actually carries.
+    1,
     202, 204, 206, 208, 212, 213, 214, 216, 218, 219, 220, 221, 222, 226,
     228, 230, 231, 232, 234, 235, 238, 240, 242, 244, 246, 247, 248, 250,
     255, 256, 257, 259, 260, 262, 266, 267, 268, 270, 272, 274, 276, 278,

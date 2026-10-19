@@ -699,6 +699,11 @@ gtap_identities() {
     # format, rather than re-implementing NAS/RR parsing here.
     local lte="$IMSISTING_ROOT/modules/09_lte_attach.sh"
     local gsm="$IMSISTING_ROOT/modules/06_gsm_air.sh"
+    # The per-generation decoders read the messages that carry an identity in a
+    # field they already parse (an IDENTITY REQUEST). The structural reader
+    # reads the mobile identity element itself, so an Attach Request or a TAU
+    # Request yields the subscriber instead of nothing.
+    local nasid="$IMSISTING_ROOT/tools/nas_identity.py"
     local found=0
 
     printf 'frame\tkind\tvalue\tsource\n'
@@ -715,12 +720,19 @@ gtap_identities() {
         [[ -z "$dec" ]] && continue
         # A payload carrying an IMSI in the clear is the finding. The decoder
         # is asked to classify it; if it cannot, nothing is claimed.
-        local out
-        out=$("$dec" --identity-exposure "$pl" 2>/dev/null) || continue
+        local out="" src; src=$(basename "$dec")
+        out=$("$dec" --identity-exposure "$pl" 2>/dev/null) || out=""
+        if [[ -z "$out" && -x "$nasid" ]]; then
+            out=$("$nasid" decode "$pl" 2>/dev/null | awk -F'\t' '
+                $1 == "identity_kind" { k = $2 }
+                $1 == "identity" && $2 ~ /^[0-9]+$/ { print k "\t" $2; exit }')
+            [[ -n "$out" ]] && src="tools/nas_identity.py"
+        fi
+        [[ -z "$out" ]] && continue
         while IFS= read -r r; do
             [[ -z "$r" ]] && continue
             printf '%s\t%s\t%s\t%s\n' "$fr" "$(gtap_sanitize "$(cut -f1 <<<"$r")")" \
-                "$(gtap_sanitize "$(cut -f2 <<<"$r")")" "$(basename "$dec")"
+                "$(gtap_sanitize "$(cut -f2 <<<"$r")")" "$src"
             found=$((found + 1))
         done <<< "$out"
     done < <(tail -n +2 "$GTAP_TSV")

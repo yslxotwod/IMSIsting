@@ -238,7 +238,7 @@ already hold, and neither emits a frame.
 |---|---|---|
 | `35_baseband` | RRC/NAS fuzzing, corpus generation, crash triage, baseband CVE catalogue | `built` |
 | `36_vowifi` | IKEv2/IPsec SWu, EAP-AKA, ePDG attach flow, tunnel weakness detection | `built` |
-| `37_femtocell` | CSG/PCI audit, S1AP/NGAP-adjacent Iuh build and decode (HNBAP and RUA), closed-cell detection, live subscriber feed, TR-069 audit | `partial` |
+| `37_femtocell` | CSG/PCI audit, S1AP/NGAP-adjacent Iuh build and decode (HNBAP and RUA), closed-cell detection, live subscriber feed from GSMTAP, S1AP captures and an SCTP tap, TR-069 audit | `partial` |
 | `38_ussd` | GSM 03.38 7-bit codec, service codes, USSD flow and tunnelling analysis | `built` |
 | `39_ta_geoloc` | Timing-advance ranging and multilateration with GDOP | `partial` |
 | `40_sba_pivot` | NF discovery, token audience/scope checks, HTTP/2 SBI, pivot mapping | `partial` |
@@ -432,7 +432,7 @@ and yet the APDU codec underneath it is real.
 | USSD flows and tunnelling | `38_ussd` | `built` | GSM 03.38 7-bit codec, service codes, the flow. |
 | Remote SIM provisioning / eSIM | `16_sim` | `phase 6` | A real ISO-7816 C-APDU is built and OTA/IMSI/ICCID decode. All four offensive paths — OTA replay, programmable-SIM write, eSIM install, live APDU session — are `status: handoff` plan files. **There is no PC/SC or CCID call and no APDU exchange loop in the module.** |
 | VoWiFi / ePDG attach | `36_vowifi` | `built` | IKEv2/IPsec SWu, EAP-AKA, the ePDG attach flow, tunnel weakness detection. |
-| Rogue HeNB / small cell | `37_femtocell` | `partial` | The S1 Setup Request, the two HNBAP registrations and the two RUA messages are built to the octet and confirmed against `tshark`; closed-cell detection runs on the real SIB1 codec and the live window joins a GSMTAP feed to its identity rows. RANAP itself is framed and not built. |
+| Rogue HeNB / small cell | `37_femtocell` | `partial` | The S1 Setup Request, the two HNBAP registrations and the two RUA messages are built to the octet and confirmed against `tshark`; closed-cell detection runs on the real SIB1 codec and the live window joins a GSMTAP feed to its identity rows, or to the NAS inside an S1 backhaul capture, or to one SCTP association held open on the S1 port. RANAP InitialUE-Message is built; the RAB and relocation procedures still need an E-RAB list no plan file can fill. |
 | Wi-Fi offload (LWA) | `47_wifioff` | `phase 10` | ePDG FQDN, certificate-validation checks and LWA configuration analysis. Assessment only today. |
 
 ### Tracking, positioning and RF
@@ -797,6 +797,7 @@ often identifies the problem with no hardware attached.
 ./tools/check-x2ap-codec.sh       # X2AP octets vs pycrate and the clause
 ./tools/check-xnap-codec.sh       # XnAP octets vs pycrate and the clause
 ./tools/check-rua-codec.sh        # RUA octets vs pycrate and the clause
+./tools/check-nas-identity.sh      # NAS mobile identity vs pycrate and tshark
 ./tools/check-ranap-codec.sh      # RANAP octets vs pycrate and the clause
 ./tools/check-auth-oracle.sh      # EMM and 5GMM causes vs tshark's registries
 ./tools/check-calls.sh            # call grouping vs tshark's RTP and SIP dissectors

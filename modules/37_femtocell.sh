@@ -951,7 +951,30 @@ femt_iuh_ue() {
 # module joins that store to its identity rows and writes one line per
 # identity sighting, so the file only ever grows by what is new.
 FEMT_SUBS_HEADER=$'time\tframe\tidentity_kind\tidentity\tsource\ttype\tarfcn\tchannel\tuplink'
+
+# The GSMTAP store's own header. An S1 backhaul capture is shaped into this so
+# the join below reads one kind of file no matter where the frames came from.
+FEMT_STORE_HEADER=$'frame\ttype\tchannel\tarfcn\tuplink\ttimeslot\tsignal_dbm\tsnr_db\tframe_number\tpayload_len\tpayload_hex\tts_epoch\tts_utc'
+
 femt_subs_path() { printf '%s/subscribers.tsv\n' "$FEMT_DIR"; }
+
+# A capture of the S1 backhaul carries NAS inside S1AP over SCTP, which is not
+# GSMTAP: 03_gsmtap refuses it and nothing is harvested. This shapes the same
+# rows out of it, so the same join and the same identity reader serve both
+# feeds. Only a payload tshark hands over as an S1AP NAS-PDU becomes a row;
+# a capture with no NAS in it produces a store with no rows, not an error.
+femt_s1ap_store() {
+    local pcap="${1:-}"
+    command -v tshark >/dev/null 2>&1 || return 1
+    printf '%s\n' "$FEMT_STORE_HEADER"
+    tshark -r "$pcap" -T fields -e frame.number -e s1ap.NAS_PDU -e frame.time_epoch \
+        2>/dev/null |
+    awk -F'\t' -v OFS='\t' 'NF >= 2 && $2 != "" {
+        gsub(":", "", $2)
+        printf "%s\t%s\t-\t-\t-\t0\t-\t-\t%s\t%d\t%s\t%s\t-\n",
+               $1, "LTE NAS", $1, length($2) / 2, $2, ($3 == "" ? 0 : $3)
+    }'
+}
 
 # Three paths in, new rows out. Deliberately free of any capture call so it
 # can be asserted against a fixture with no radio attached, and so the same
@@ -1008,6 +1031,7 @@ femt_live() {
     local work; work=$(mktemp -d "$MOD_TMP/live.XXXXXX") || {
         printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
     local ids="$work/identities.tsv"
+    local idenv=()
 
     if [[ -n "$pcap" ]]; then
         if [[ ! -f "$pcap" ]]; then
@@ -1015,12 +1039,27 @@ femt_live() {
             printf 'ERROR\tno such capture: %s\n' "$pcap" >&2
             return 2
         fi
-        if ! "$gtap" --read "$pcap" >/dev/null 2>&1; then
-            rm -rf "$work"
-            printf 'ERROR\t03_gsmtap could not read %s\n' "$pcap" >&2
-            return 1
+        if "$gtap" --read "$pcap" >/dev/null 2>&1; then
+            printf 'feed_source\tpcap:%s\n' "$(basename "$pcap")"
+        else
+            mkdir -p "$work/gsmtap" || { rm -rf "$work"; return 1; }
+            local alt="$work/gsmtap/decoded.tsv"
+            if ! femt_s1ap_store "$pcap" > "$alt"; then
+                rm -rf "$work"
+                printf 'ERROR\t03_gsmtap could not read %s, and no S1AP NAS came out of it either\n' \
+                    "$pcap" >&2
+                return 1
+            fi
+            if [[ $(tail -n +2 "$alt" | grep -c . || true) -eq 0 ]]; then
+                rm -rf "$work"
+                printf 'rows_seen\t0\nnew_rows\t0\nstatus\tno-frames\n'
+                printf 'note\tthe capture carries no S1AP NAS-PDU and no GSMTAP; a row is only written for a sighting\n'
+                return 0
+            fi
+            store="$alt"
+            idenv=(env "LOOT_DIR=$work")
+            printf 'feed_source\tpcap:%s (S1AP NAS over SCTP)\n' "$(basename "$pcap")"
         fi
-        printf 'feed_source\tpcap:%s\n' "$(basename "$pcap")"
     else
         printf 'feed_source\tgsmtap:udp/4729 listen %ss\n' "$secs"
         local lout lrc
@@ -1042,7 +1081,7 @@ femt_live() {
         return 0
     fi
 
-    if ! "$gtap" --identities-tsv > "$ids" 2>/dev/null; then
+    if ! "${idenv[@]}" "$gtap" --identities-tsv > "$ids" 2>/dev/null; then
         rm -rf "$work"
         printf 'rows_seen\t0\nnew_rows\t0\nstatus\tno-identities\n'
         printf 'note\tthe feed carried frames but none announced an identity; a row is only written for a sighting\n'
@@ -1066,6 +1105,74 @@ femt_live() {
     printf 'new_rows\t%s\n' "$n"
     printf 'status\tbuilt\n'
     rm -rf "$work"
+    return 0
+}
+
+# A tap on the S1 backhaul: one SCTP association, every NAS-PDU inside it read
+# as it arrives. Receiving needs no arming -- nothing is transmitted -- but it
+# does need the port, so the tool is asked to listen and its refusal is passed
+# through unchanged.
+#
+# Every message is its own sighting, so rows are appended and not deduped: two
+# Attach Requests from one handset are two sightings, and a table that hides
+# the second one cannot show a retry storm.
+femt_s1_tap() {
+    local port="${1:-36412}" secs="${2:-30}" host="${3:-0.0.0.0}"
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || {
+        printf 'ERROR\tport must be 1..65535\n' >&2; return 2; }
+    [[ "$secs" =~ ^[0-9]+$ ]] && (( secs >= 1 && secs <= 3600 )) || {
+        printf 'ERROR\t--seconds must be 1..3600\n' >&2; return 2; }
+
+    local sctp="$IMSISTING_ROOT/tools/sctp_assoc.py"
+    local s1ap="$IMSISTING_ROOT/tools/s1ap_asn1.py"
+    local nasid="$IMSISTING_ROOT/tools/nas_identity.py"
+    [[ -f "$sctp" && -f "$s1ap" && -f "$nasid" ]] || {
+        printf 'ERROR\ttools/sctp_assoc.py, tools/s1ap_asn1.py and tools/nas_identity.py are all needed\n' >&2
+        return 1; }
+
+    printf 'tap\tsctp/%s listening %ss on %s\n' "$port" "$secs" "$host"
+    local out
+    out=$(python3 "$sctp" listen "$port" --host "$host" --count 1000 \
+              --timeout "$secs" 2>&1) || {
+        printf 'status\tfailed\n'
+        printf 'note\t%s\n' "$(printf '%s\n' "$out" | grep -m1 . || echo 'the listener printed no reason')"
+        return 1; }
+
+    local subs; subs=$(femt_subs_path)
+    [[ -f "$subs" ]] || printf '%s\n' "$FEMT_SUBS_HEADER" > "$subs"
+
+    local peer="-" hex="" status="" msg=0 rows=0 kinds=""
+    while IFS= read -r line; do
+        case "$line" in
+            peer$'\t'*)   peer="${line#*$'\t'}" ;;
+            hex$'\t'*)    hex="${line#*$'\t'}" ;;
+            status$'\t'*) status="${line#*$'\t'}" ;;
+        esac
+        [[ "$line" == status$'\t'* ]] || continue
+        [[ "$status" == "received" ]] || { hex=""; continue; }
+        msg=$((msg + 1))
+        local nas
+        nas=$(python3 "$s1ap" decode "$hex" 2>/dev/null |
+              awk -F'\t' '$1=="ie" && $2 ~ /^NAS-PDU / { sub(/^NAS-PDU [a-z]+ /, "", $2); print $2 }')
+        hex=""
+        [[ -n "$nas" ]] || continue
+        while IFS=$'\t' read -r kind value; do
+            [[ -n "$kind" && -n "$value" ]] || continue
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t-\t-\t-\n' \
+                "$(date -u +%FT%TZ)" "$msg" "$kind" "$value" "sctp/$port" "LTE NAS" >> "$subs"
+            rows=$((rows + 1))
+            kinds="$kinds $kind"
+        done < <(python3 "$nasid" decode "$nas" 2>/dev/null |
+                 awk -F'\t' '$1=="identity_kind" { k=$2 }
+                              $1=="identity" && $2 ~ /^[0-9]+$/ { print k "\t" $2 }')
+    done <<< "$out"
+
+    printf 'peer\t%s\n' "$peer"
+    printf 'messages\t%s\n' "$msg"
+    printf 'rows_written\t%s\n' "$rows"
+    printf 'feed_store\t%s\n' "${subs#"$IMSISTING_ROOT"/}"
+    printf 'dedupe\tnone: every message is its own sighting\n'
+    printf 'status\t%s\n' "$( [[ "$rows" -gt 0 ]] && echo built || echo no-identities )"
     return 0
 }
 
@@ -1442,6 +1549,53 @@ CWMPSTUB
     local second; second=$(femt_live_rows "$store" "$ids" "$subs")
     chk live-dedupe   "$(printf '%s' "$second" | grep -c . || true)" "0"
 
+    # 17. An S1 backhaul capture is not GSMTAP and used to be refused. Its
+    #     NAS-PDU is read instead, through the same join, and an EPS mobile
+    #     identity that is not an IDENTITY REQUEST still names the subscriber.
+    local s1pcap s1hex
+    s1pcap=$(mktemp "$MOD_TMP/s1ap_nas.XXXXXX") || return 1
+    s1hex=$(python3 "$IMSISTING_ROOT/tools/s1ap_asn1.py" initial-ue \
+                --mme-ue-id 0x1 --enb-ue-id 0x2 \
+                --nas 074101090902080121436587f9 |
+            awk -F'\t' '$1=="hex"{print $2}')
+    python3 - "$s1pcap" "$s1hex" <<'S1PCAP'
+import struct, sys
+
+def csum(data):
+    if len(data) % 2:
+        data += b"\x00"
+    total = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+
+payload = bytes.fromhex(sys.argv[2])
+chunk = (struct.pack("!BBH", 0, 0x03, 16 + len(payload)) +
+         struct.pack("!IHHI", 1, 0, 0, 18) + payload)
+sctp = struct.pack("!HHII", 36412, 36412, 0, 0) + chunk
+sctp = sctp[:8] + struct.pack("!I", csum(sctp)) + sctp[12:]
+ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(sctp), 1, 0, 64, 132, 0,
+                 bytes([10, 0, 0, 1]), bytes([10, 0, 0, 2]))
+ip = ip[:10] + struct.pack("!H", csum(ip)) + ip[12:]
+frame = bytes.fromhex("0200000000020200000000010800") + ip + sctp
+header = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)
+record = struct.pack("<IIII", 0, 0, len(frame), len(frame))
+with open(sys.argv[1], "wb") as handle:
+    handle.write(header + record + frame)
+S1PCAP
+    out=$(femt_live "$s1pcap" 2>/dev/null)
+    chk live-s1ap-source "$(printf '%s\n' "$out" | awk -F'\t' '$1=="feed_source"{print $2}' | grep -c 'S1AP NAS')" "1"
+    chk live-s1ap-new    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="new_rows"{print $2}')" "1"
+    local lsubs; lsubs=$(femt_subs_path)
+    chk live-s1ap-id     "$(tail -1 "$lsubs" | cut -f4)" "208010123456789"
+    chk live-s1ap-kind   "$(tail -1 "$lsubs" | cut -f3)" "imsi"
+    chk live-s1ap-src    "$(tail -1 "$lsubs" | cut -f5)" "tools/nas_identity.py"
+    rm -f "$s1pcap"
+
+    # 18. The tap checks its arguments before it binds anything.
+    chk s1-tap-bad-port "$(femt_s1_tap 0 5 >/dev/null 2>&1; echo $?)" "2"
+    chk s1-tap-bad-secs "$(femt_s1_tap 36412 0 >/dev/null 2>&1; echo $?)" "2"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1545,6 +1699,7 @@ femt_cli_main() {
         --ue-register) femt_ue_register "$@" ;;
         --hnbap)       femt_hnbap_decode "${1:--}" ;;
         --live)        femt_live "$@" ;;
+        --s1-tap)      femt_s1_tap "$@" ;;
         --iuh)         femt_iuh_stack ;;
         --tr069-audit) femt_tr069_audit "${1:-}" ;;
         --plan)        femt_plan ;;
@@ -1602,7 +1757,11 @@ Usage: $0 COMMAND
   --live [seconds | capture.pcap] [iface]
                         join the GSMTAP feed to its identity rows and append
                         new subscriber sightings to the live view's file; a
-                        capture reads through the same join with no radio
+                        capture reads through the same join with no radio, and
+                        an S1 backhaul capture is read for its NAS instead
+  --s1-tap [port] [seconds] [bind-address]
+                        hold one SCTP association on the S1 port and write a
+                        row for every identity that arrives; receives only
   --iuh                 Iuh (HNBAP/RUA/RANAP) reference
   --tr069-audit <conf>  TR-069/CWMP local management findings
   --plan                lab HeNB handoff plan

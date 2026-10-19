@@ -720,3 +720,29 @@ type at all. `09_lte_attach` selftest 168 assertions PASS.
 **Rule.** When a codec, its writer and its selftest are written together, the selftest is not a
 referee — it is a third copy of the same assumption. A second implementation (here
 `32_nas_signaling`) or an independent dissector has to read the bytes, or the bug is invisible.
+
+## 39. `17_pcap_analysis` could not see a normal IMSI, and could not see MCC 001 (2026)
+
+Two defects in the same scan, both of which made a real subscriber look like an absence.
+
+The IMSI branch accepted a length octet of 5–8 and then read that many BCD octets from the octet
+after it. That is the DTAP convention (TS 24.008 10.5.1.4), where the length counts the BCD octets
+alone. The EPS mobile identity (TS 24.301 9.9.3.4) counts the identity-type octet too, so a normal
+15-digit IMSI arrives as `L=9` followed by a type octet and eight BCD octets — a length the scanner
+had already excluded. It found IMSIs only when the surrounding framing happened to offer a small
+number where it wanted one; on a synthetic S1AP capture it reported a 15-digit IMEI and no IMSI.
+
+`MCC_ASSIGNED` listed the assigned country codes but not `001`, the 3GPP test PLMN (TS 23.122
+annex), which is the MCC every lab fixture in this tree carries. A comment three hundred lines above
+claimed the test range was accepted; the code that decides had no such entry.
+
+Fixed by reading both length conventions (EPS form gated on the identity-type octet being IMSI, so
+the DTAP reading cannot invent one) and by adding `001` with the reason in place. Verified on two
+synthetic S1AP captures: `001010000000001` and `208010123456789` are both reported, at the offset of
+the length octet, "(eps form)"; before the fix the first was invisible and the second was found only
+by coincidence. The same slice added `tools/nas_identity.py` with 35 assertions and
+`tools/nas-oracle/check_nas_identity.py`, whose referee is pycrate and tshark: 30 assertions AGREE,
+four negation controls caught.
+
+**Rule.** A length convention is part of the format, not a detail of it. A scanner that knows one
+convention reports the other as "no identity in this capture", which reads exactly like a clean one.
