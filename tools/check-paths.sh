@@ -34,8 +34,11 @@ problem() {
 # this check failed on a clean checkout and passed on the author's box -- a
 # gate whose colour came from an untracked directory. A module that needs a
 # wordlist should create it the way every other runtime directory is created.
+# `docs` used to be required here too. It is gone on purpose: the tree ships no
+# documentation directory, and a gate that demands one would fail on a clean
+# checkout of the tree it is meant to check.
 for d in modules tools native native/src native/resources \
-         captures logs loot state tmp docs; do
+         captures logs loot state tmp; do
     if [[ -d "$ROOT/$d" ]]; then
         (( jsonout )) || printf 'OK    dir  %s\n' "$d"
     else
