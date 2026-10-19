@@ -16644,16 +16644,171 @@ static ModuleSubmenuEntry ncore_entries[] = {
     { "Crypto", "channel-secure-symbolic", NULL, ncore_build_crypto },
     { "Forge", "network-transmit-receive-symbolic", NULL, ncore_build_forge },
 };
+/* 14_suci — the subscription identifier a 5G core can hide.
+ *
+ * A SUCI is an encrypted MSIN and the thing that makes 5G identifiers linkable
+ * or not. The page builds one, opens one, and derives the key that decides
+ * whether opening it is possible at all.
+ */
+static GtkWidget *
+suci_build_identity(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("IDENTITY",
+        "The concealed identifier as the air carries it, and the same identifier "
+        "with the concealment removed.", &body);
+    GtkWidget *build_body, *parse_body, *msin_body, *conceal_body;
+    GtkWidget *build = verb_card("BUILD", &build_body);
+    GtkWidget *parse = verb_card("PARSE", &parse_body);
+    GtkWidget *msin = verb_card("MSIN", &msin_body);
+    GtkWidget *conceal = verb_card("CONCEAL", &conceal_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a SUCI",
+                "--build-suci", "310150123456789",
+                "An IMSI. The answer is the SUCI with its scheme and its public "
+                "key id, which is what an attacker without the private key "
+                "actually sees."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row_prefilled(state, module_id, status, "Parse a SUCI",
+                "--parse-suci", "01F130001010000001",
+                "A SUCI as hex. The answer is the plmn, the routing indicator "
+                "and the scheme, none of which is concealed."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(msin_body),
+            mod_arg_choices(state, module_id, status, "MSIN", "",
+                "The digits packed as BCD, or the same file read back.",
+                (const char *[]) { "--msin-encode 0123456789",
+                                   "--msin-decode 1032547698" },
+                (const char *[]) { "Encode", "Decode" }, 2));
+        gtk_box_append(GTK_BOX(msin_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), msin);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(conceal_body),
+            mod_arg_choices(state, module_id, status, "Concealment", "",
+                "The direction that matters: what an operator can open, and the "
+                "concealment that hid it.",
+                (const char *[]) { "--conceal", "--deconceal" },
+                (const char *[]) { "Conceal", "Deconceal" }, 2));
+        gtk_box_append(GTK_BOX(conceal_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), conceal);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+suci_build_keys(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("KEYS",
+        "The key ladder from a subscriber's key to the profile that conceals an "
+        "identity, and the check that says whether a home network got it right.",
+        &body);
+    GtkWidget *gen_body, *hkdf_body, *verify_body;
+    GtkWidget *gen = verb_card("GENERATE", &gen_body);
+    GtkWidget *hkdf = verb_card("DERIVE", &hkdf_body);
+    GtkWidget *verify = verb_card("VERIFY", &verify_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(gen_body),
+            mod_arg_row(state, module_id, status, "Generate a Key Pair",
+                "--genkey", "",
+                "A profile A/B key pair: the private key the home network keeps "
+                "and the public key it publishes for this scheme."));
+        gtk_box_append(GTK_BOX(gen_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), gen);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(hkdf_body),
+            mod_arg_row_prefilled(state, module_id, status, "Derive the Profile",
+                "--hkdf", "00112233445566778899aabbccddeeff 00112233445566778899aabbccddeeff 0102",
+                "The key, the SN name and the identifier, deriving the "
+                "concealment profile by HKDF as TS 33.501 specifies it."));
+        gtk_box_append(GTK_BOX(hkdf_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), hkdf);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(verify_body),
+            mod_arg_row(state, module_id, status, "Check a Home Network",
+                "--verify-hnkey", "",
+                "Whether a published home-network key is the one that produces "
+                "the SUCIs observed: a network whose key does not match is a "
+                "network whose concealment a third party can read."));
+        gtk_box_append(GTK_BOX(verify_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), verify);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+suci_build_audit(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("AUDIT",
+        "What a capture says about linkability, and what a lab needs to test it.",
+        &body);
+    GtkWidget *audit_body;
+    GtkWidget *audit = verb_card("LINKABILITY", &audit_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(audit_body),
+            mod_arg_row(state, module_id, status, "Audit a Capture",
+                "--audit", "capture.pcap",
+                "A capture of registration attempts. The finding is whether the "
+                "same subscriber can be followed across them - a rotating MSIN "
+                "over a fixed routing indicator is still one subscriber."));
+        gtk_box_append(GTK_BOX(audit_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), audit);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry suci_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--parse-suci:Parse SUCI|--build-suci:Build SUCI|--audit:Audit" },
-    { "Conceal",
-      "channel-secure-symbolic",
-      "#CONCEAL|--conceal:Conceal|~--deconceal|#CRYPTO|--genkey:Generate Key|--hkdf:HKDF|--verify-hnkey:Verify HN Key" },
-    { "MSIN",
-      "auth-smartcard-symbolic",
-      "--msin-decode:Decode MSIN|--msin-encode:Encode MSIN" },
+    { "Identity", "dialog-information-symbolic", NULL, suci_build_identity },
+    { "Keys", "channel-secure-symbolic", NULL, suci_build_keys },
+    { "Audit", "system-search-symbolic", NULL, suci_build_audit },
 };
 static ModuleSubmenuEntry dwn_entries[] = {
     { "Overview",
