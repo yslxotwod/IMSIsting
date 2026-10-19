@@ -15095,21 +15095,21 @@ tmap_build_overview(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("THE SURVEY",
-        "One point per cell, with a fix or without. Nothing here is written to "
-        "the store until the survey runs.", &body);
+    GtkWidget *outer = radio_view_shell("CELL SURVEY",
+        "One record per cell, with or without a position fix. The store is "
+        "written only when a survey pass runs.", &body);
     GtkWidget *survey_body, *read_body;
-    GtkWidget *survey = verb_card("RUN A PASS", &survey_body);
-    GtkWidget *read = verb_card("WHAT IS IN THE STORE", &read_body);
+    GtkWidget *survey = verb_card("RUN A SURVEY PASS", &survey_body);
+    GtkWidget *read = verb_card("RECORDED POINTS", &read_body);
 
     gtk_box_append(GTK_BOX(survey_body),
         mod_arg_row(state, module_id, status, "Start Survey",
             "--survey", "gsm GSM900", "Radio technology (gsm or lte), then a "
             "band for GSM. LTE takes a band list or nothing at all."));
     gtk_box_append(GTK_BOX(survey_body), fkit_note(
-        "A pass records one point per cell it can decode. A cell heard without "
-        "a position is still recorded — it is the 'without fix' count in the "
-        "next card, not a failure."));
+        "A pass records one point per cell it decodes. A cell received without a "
+        "position fix is still recorded; it appears in the without-fix count of "
+        "the next card rather than as an error."));
     gtk_box_append(GTK_BOX(body), survey);
 
     gtk_box_append(GTK_BOX(read_body),
@@ -15130,21 +15130,20 @@ tmap_build_gps(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("THE FIX",
-        "Where the receiver is. Survey points carry this position or they "
-        "carry none.", &body);
+    GtkWidget *outer = radio_view_shell("POSITION FIX",
+        "The receiver position. A survey record carries this position or it "
+        "carries none.", &body);
     GtkWidget *daemon_body, *quality_body;
-    GtkWidget *daemon = verb_card("START THE GPS DAEMON", &daemon_body);
-    GtkWidget *quality = verb_card("READ THE CURRENT FIX", &quality_body);
+    GtkWidget *daemon = verb_card("GPS DAEMON", &daemon_body);
+    GtkWidget *quality = verb_card("CURRENT FIX", &quality_body);
 
     gtk_box_append(GTK_BOX(daemon_body),
         mod_arg_row(state, module_id, status, "Start gpsd",
             "--start-gpsd", "/dev/ttyUSB0", "The serial device the GPS receiver "
             "is on. Left empty, the module uses /dev/ttyUSB0."));
     gtk_box_append(GTK_BOX(daemon_body), fkit_note(
-        "Starting a daemon is not the same as having a fix: gpsd can be up and "
-        "still be searching. The next card is the one that answers whether a "
-        "position exists."));
+        "A running daemon does not imply a position fix: gpsd may be running while "
+        "still acquiring. The following card reports whether a fix exists."));
     gtk_box_append(GTK_BOX(body), daemon);
 
     gtk_box_append(GTK_BOX(quality_body),
@@ -15162,12 +15161,12 @@ tmap_build_export(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("TAKE IT SOMEWHERE",
-        "The same survey written three ways. Each file is written into this "
-        "module's own loot directory.", &body);
+    GtkWidget *outer = radio_view_shell("EXPORT",
+        "The recorded survey in three interchange formats. Each file is "
+        "written to this module's loot directory.", &body);
     GtkWidget *export_body, *clean_body;
-    GtkWidget *export = verb_card("WRITE THE SURVEY", &export_body);
-    GtkWidget *clean = verb_card("EMPTY THE STORE", &clean_body);
+    GtkWidget *export = verb_card("EXPORT THE SURVEY", &export_body);
+    GtkWidget *clean = verb_card("CLEAR THE STORE", &clean_body);
     static const char *const verbs[] = {
         "--export-csv", "--export-kml", "--export-geojson"
     };
@@ -15177,18 +15176,18 @@ tmap_build_export(AppState *state, const char *module_id,
     /* One row: the path, then the three formats as one choice. */
     choices = mod_arg_choices(state, module_id, status, "Destination",
         "optional path — left empty, the module names the file",
-        "CSV is the data; KML opens in Google Earth and carries only the points "
-        "that have a fix; GeoJSON is what a web map eats. All three hold the "
-        "same points.",
+        "CSV carries the tabular data. KML carries only records with a position "
+        "fix and opens in any KML viewer. GeoJSON is the web-map interchange "
+        "format. All three describe the same records.",
         verbs, labels, 3);
     gtk_box_append(GTK_BOX(export_body), choices);
     gtk_box_append(GTK_BOX(body), export);
 
     gtk_box_append(GTK_BOX(clean_body),
         mod_arg_row(state, module_id, status, "Clear the Store",
-            "--clear", "", "Removes every recorded point. This is the one act on "
-            "this page that cannot be undone, which is why it is alone in its "
-            "own card and not beside the exporters."));
+            "--clear", "", "Removes every recorded point and cannot be undone. It is the only "
+            "destructive operation on this page, and is therefore separated from "
+            "the exporters."));
     gtk_box_append(GTK_BOX(body), clean);
 
     (void) out;

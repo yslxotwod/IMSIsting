@@ -230,6 +230,16 @@ the NB message set. Regeneration needs the oracle venv
 (`/home/ysl/.lte-oracles/venv/bin/python`); running the codec needs neither pycrate nor anything
 outside the standard library.
 
+### Standing copy rule for the interface
+
+Interface text is **formal**: a card heading names the operation ("EXPORT",
+"CLEAR THE STORE", "CELL SURVEY"), a subtitle states what the card does and what
+it does not do, a note states a limit or a consequence. No conversational
+phrasing, no jokes, no second person, nothing that would look out of place in a
+field manual. The operator called this out on a heading that read "TAKE IT
+SOMEWHERE"; the replacement is "EXPORT" with the sentence beneath it, and that is
+the register for every page from that point on.
+
 ### A C bug worth remembering
 
 ```c
