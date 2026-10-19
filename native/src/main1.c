@@ -21697,28 +21697,362 @@ static ModuleSubmenuEntry nrj_entries[] = {
       "#AUTH|~--auth-capture|--auth-replay:Auth Replay|#FRAME|~--inject" },
 };
 
+/* 56_baseband_diag — the device's own diagnostic port.
+ *
+ * Seven views is what this module needs and no less: framing, NV, identity, EFS,
+ * AT, and what to do about a port that answers. Each card takes one value and
+ * says what the answer means, because every one of these verbs is a question
+ * about a device that is plugged in.
+ */
+static GtkWidget *
+bbdg_build_framing(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("FRAMING",
+        "The DIAG transport: a checksum, an escape rule and a delimiter. Every "
+        "other verb in this module is inside one of these frames.", &body);
+    GtkWidget *crc_body, *frame_body, *unframe_body, *codec_body;
+    GtkWidget *crc = verb_card("CHECKSUM", &crc_body);
+    GtkWidget *frame = verb_card("FRAME", &frame_body);
+    GtkWidget *unframe = verb_card("UNFRAME", &unframe_body);
+    GtkWidget *codec = verb_card("ESCAPE", &codec_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(crc_body),
+            mod_arg_row_prefilled(state, module_id, status, "Compute the CRC",
+                "--crc", "313233343536373839",
+                "A payload as hex. CRC-16/X-25 over it, the checksum a frame "
+                "carries and the one a captured frame can be checked against."));
+        gtk_box_append(GTK_BOX(crc_body), res);
+        gtk_box_append(GTK_BOX(crc_body),
+            mod_arg_choices(state, module_id, status, "Reference", "",
+                "The framing known-answer vectors this module is checked "
+                "against, and what a command byte means.",
+                (const char *[]) { "--kat", "--cmd-name 38" },
+                (const char *[]) { "Known Answers", "Name a Code" }, 2));
+    }
+    gtk_box_append(GTK_BOX(body), crc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(frame_body),
+            mod_arg_row_prefilled(state, module_id, status, "Frame a Payload",
+                "--frame", "0032",
+                "A payload as hex. The answer is the delimited, escaped frame "
+                "with its checksum - what would go on the wire."));
+        gtk_box_append(GTK_BOX(frame_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), frame);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(unframe_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a Frame",
+                "--unframe", "7e000a6b6d000007000000000000007e",
+                "A frame as hex. The payload comes back with its checksum "
+                "checked, so a corrupted capture is refused rather than read."));
+        gtk_box_append(GTK_BOX(unframe_body), res);
+        gtk_box_append(GTK_BOX(unframe_body),
+            mod_arg_choices(state, module_id, status, "Stream", "",
+                "Split a byte stream into frames, or escape and unescape a "
+                "payload without framing it.",
+                (const char *[]) { "--demux 7e000a6b6d000007000000000000007e",
+                                   "--log-classify 10" },
+                (const char *[]) { "Demux a Stream", "Classify a Command" }, 2));
+    }
+    gtk_box_append(GTK_BOX(body), unframe);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(codec_body),
+            mod_arg_choices(state, module_id, status, "Escape", "",
+                "The two halves of the escaping rule, applied to a payload.",
+                (const char *[]) { "--escape 7e7d", "--unescape 7d5e7d5d" },
+                (const char *[]) { "Escape", "Unescape" }, 2));
+        gtk_box_append(GTK_BOX(body), codec);
+    }
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+bbdg_build_nv(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("NV ITEMS",
+        "The device's non-volatile items: read one, build the request that reads "
+        "it, and build the write that changes it.", &body);
+    GtkWidget *read_body, *build_body, *scan_body;
+    GtkWidget *read = verb_card("READ", &read_body);
+    GtkWidget *build = verb_card("BUILD", &build_body);
+    GtkWidget *scan = verb_card("SCAN", &scan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(read_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read an Item",
+                "--nv-read", "178",
+                "An NV item number. The answer is the item's contents and the "
+                "structure it is read as; the number alone does not say which."));
+        gtk_box_append(GTK_BOX(read_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), read);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_choices(state, module_id, status, "Build", "",
+                "The read request, the write request for one item, or a decode of "
+                "a payload you already have.",
+                (const char *[]) { "--nv-build read 178", "--nv-write 178 00",
+                                   "--nv-parse 01 02 03 04" },
+                (const char *[]) { "Read Request", "Write Item",
+                                   "Parse a Payload" }, 3));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(scan_body),
+            mod_arg_row(state, module_id, status, "Scan the Range",
+                "--nv-scan", "",
+                "Which items this device answers for. A scan on a device without "
+                "the port reports that, rather than an empty table."));
+        gtk_box_append(GTK_BOX(scan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), scan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+bbdg_build_identity(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("IDENTITY",
+        "Who the device is: its identity string, its version, and the packed "
+        "decimals those two carry.", &body);
+    GtkWidget *state_body, *ver_body, *bcd_body;
+    GtkWidget *st = verb_card("DEVICE STATE", &state_body);
+    GtkWidget *ver = verb_card("VERSION", &ver_body);
+    GtkWidget *bcd = verb_card("PACKED DECIMAL", &bcd_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(state_body),
+            mod_arg_choices(state, module_id, status, "Build a request", "",
+                "The state request for one stack, then the same request read "
+                "back as fields.",
+                (const char *[]) { "--state-build gsm", "--state-info wcdma",
+                                   "--state", "--status" },
+                (const char *[]) { "Build GSM", "State WCDMA", "State",
+                                   "Status" }, 4));
+        gtk_box_append(GTK_BOX(state_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), st);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ver_body),
+            mod_arg_choices(state, module_id, status, "Version", "",
+                "The request that asks the device for its version, and the parse "
+                "of the answer it gives.",
+                (const char *[]) { "--verno", "--verno-parse 01" },
+                (const char *[]) { "Request", "Parse Answer" }, 2));
+        gtk_box_append(GTK_BOX(ver_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ver);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(bcd_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode the Digits",
+                "--bcd", "3035230506641263",
+                "Packed decimal as hex: two digits per octet, low nibble first. "
+                "The answer names every digit and checks the result with Luhn."));
+        gtk_box_append(GTK_BOX(bcd_body), res);
+        gtk_box_append(GTK_BOX(bcd_body),
+            mod_arg_row_prefilled(state, module_id, status, "Check the Digits",
+                "--luhn", "353325060462136",
+                "A decimal string. The check digit is the one thing an invented "
+                "IMEI usually gets wrong."));
+    }
+    gtk_box_append(GTK_BOX(body), bcd);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+bbdg_build_efs(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("EFS",
+        "The device's file system, over the same port. Read a path, stat one, "
+        "walk a directory, and build the write that changes a file.", &body);
+    GtkWidget *read_body, *walk_body, *write_body;
+    GtkWidget *read = verb_card("READ", &read_body);
+    GtkWidget *walk = verb_card("WALK", &walk_body);
+    GtkWidget *write = verb_card("WRITE", &write_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(read_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a Path",
+                "--efs-read", "/nv/item_files/modem/mmode/ue_usage_setting",
+                "A path. The answer is the file's contents and the mode it was "
+                "opened with; the module opens read-only unless told otherwise."));
+        gtk_box_append(GTK_BOX(read_body), res);
+        gtk_box_append(GTK_BOX(read_body),
+            mod_arg_row_prefilled(state, module_id, status, "Stat a Path",
+                "--efs-stat", "/nv",
+                "A path whose size and kind matter. On a device with no EFS "
+                "service the answer says the port did not answer."));
+    }
+    gtk_box_append(GTK_BOX(body), read);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(walk_body),
+            mod_arg_row_prefilled(state, module_id, status, "Walk a Directory",
+                "--efs-walk", "/nv",
+                "A directory. Every entry is listed with its kind, which is how "
+                "an operator finds the item a modem reads at boot."));
+        gtk_box_append(GTK_BOX(walk_body), res);
+        gtk_box_append(GTK_BOX(walk_body),
+            mod_arg_choices(state, module_id, status, "Service", "",
+                "What the EFS service answers, and the decode of a reply.",
+                (const char *[]) { "--efs-hello", "--efs-open /nv read",
+                                   "--efs-parse 01 02 03" },
+                (const char *[]) { "Hello", "Open", "Parse a Reply" }, 3));
+    }
+    gtk_box_append(GTK_BOX(body), walk);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(write_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Write",
+                "--efs-write", "/nv/item_files/modem/mmode/ue_usage_setting 00",
+                "A path and the bytes to write. The command is built, not sent: "
+                "the write happens when the port is opened with a write mode."));
+        gtk_box_append(GTK_BOX(write_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), write);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+bbdg_build_at(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("AT COMMANDS",
+        "The other port a modem exposes, and the two things to know about a "
+        "machine that has one.", &body);
+    GtkWidget *at_body, *ports_body, *audit_body, *plan_body;
+    GtkWidget *at = verb_card("SEND A COMMAND", &at_body);
+    GtkWidget *ports = verb_card("PORTS", &ports_body);
+    GtkWidget *audit = verb_card("AUDIT", &audit_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(at_body),
+            mod_arg_choices(state, module_id, status, "Ask the device", "",
+                "The identity and the serial number, or a parse of a command "
+                "somebody already sent.",
+                (const char *[]) { "--at ATI", "--at AT+CGSN",
+                                   "--at-parse AT+CGSN" },
+                (const char *[]) { "ATI", "Serial", "Parse" }, 3));
+        gtk_box_append(GTK_BOX(at_body),
+            mod_arg_choices(state, module_id, status, "Port", "",
+                "The device node the commands go to, and a raw read or write "
+                "through it.",
+                (const char *[]) { "--config", "--read /dev/ttyUSB0 16",
+                                   "--write-hex /dev/ttyUSB0 7e000a"},
+                (const char *[]) { "Configuration", "Read", "Write" }, 3));
+        gtk_box_append(GTK_BOX(at_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), at);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ports_body),
+            mod_arg_row(state, module_id, status, "List the Ports",
+                "--ports", "",
+                "Which serial ports answer, and what each one is. A modem with "
+                "no driver is not a modem with no port, and this is where the "
+                "difference shows."));
+        gtk_box_append(GTK_BOX(ports_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ports);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(audit_body),
+            mod_arg_row(state, module_id, status, "Audit a Capture",
+                "--audit", "7e000a6b6d000007000000000000007e",
+                "A captured stream. The findings are the commands that act "
+                "without the device saying so, which is the shape an implant "
+                "leaves."));
+        gtk_box_append(GTK_BOX(audit_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), audit);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_choices(state, module_id, status, "Check and plan", "",
+                "Whether this module is honest about a device it cannot reach, "
+                "and what a lab needs to go further.",
+                (const char *[]) { "--guard-check", "--plan" },
+                (const char *[]) { "Guard Check", "Plan" }, 2));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry bbdg_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--status:Status|--kat:Framing KATs|--cmd-name=38:Name Code|--plan:Handoff Plan" },
-    { "Framing",
-      "utilities-terminal-symbolic",
-      "#CHECKSUM|--crc=313233343536373839:CRC 906E|#FRAME|--frame=0032:Frame|--unframe=7e000a6b6d000007000000000000007e:Unframe|~--demux|#CODEC|~--escape|~--unescape|--log-classify=10:Classify" },
-    { "NV",
-      "drive-harddisk-symbolic",
-      "#BUILD|--nv-build=read 178:Build Read|--nv-read=178:Read NV178|--nv-write=178 00:Write NV178|#DECODE|~--nv-parse|--nv-scan:NV Scan" },
-    { "Identity",
-      "avatar-default-symbolic",
-      "#REQUEST|--state-build=gsm:Build GSM|--state-info=gsm:State GSM|--state-info=wcdma:State WCDMA|--state-info=cm:State CM|~--state|#VERSION|--verno:Version Req|~--verno-parse|#BCD|--bcd=3035230506641263:Decode IMEI|--luhn=353325060462136:Luhn" },
-    { "EFS",
-      "folder-symbolic",
-      "#OPEN|--efs-open=/nv/item_files/modem/mmode/ue_usage_setting read:Open RO|#READ|--efs-read=/nv/item_files/modem/mmode/ue_usage_setting:Read|#WRITE|--efs-write=/nv/item_files/modem/mmode/ue_usage_setting 00:Write|#STAT|--efs-stat=/nv:Stat|--efs-hello:Hello|#DECODE|~--efs-parse|--efs-walk=/nv:EFS Walk" },
-    { "AT / Device",
-      "network-wireless-symbolic",
-      "#AT|--at=ATI:ATI|--at=AT+CGSN:CGSN|~--at-parse|#DEVICE|--ports:Ports|~--config|~--read|~--write-hex|--audit=7e000a6b6d000007000000000000007e:Audit" },
-    { "Planning",
-      "preferences-system-symbolic",
-      "--guard-check:Guard Check|--plan:Plan" },
+    { "Framing", "utilities-terminal-symbolic", NULL, bbdg_build_framing },
+    { "NV Items", "drive-harddisk-symbolic", NULL, bbdg_build_nv },
+    { "Identity", "avatar-default-symbolic", NULL, bbdg_build_identity },
+    { "EFS", "folder-symbolic", NULL, bbdg_build_efs },
+    { "AT Commands", "network-wireless-symbolic", NULL, bbdg_build_at },
 };
 
 static void
