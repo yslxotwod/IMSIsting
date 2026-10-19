@@ -21693,29 +21693,237 @@ static ModuleSubmenuEntry sbap_entries[] = {
     { "Tokens", "channel-secure-symbolic", NULL, sbap_build_tokens },
     { "Core", "network-wireless-symbolic", NULL, sbap_build_core },
 };
+/* 41_ota_sms — the binary SMS that reaches a card.
+ *
+ * Three layers stack: an SMS TPDU, a TS 31.115 packet inside it, and an OTA
+ * command inside that. The page takes them in that order, then shows the two
+ * pokes that are written entirely in the top layer.
+ */
+static GtkWidget *
+otasm_build_tpdu(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("TPDU",
+        "The SMS transport: an address, a data coding scheme, a timestamp and the "
+        "user data that carries everything else.", &body);
+    GtkWidget *build_body, *parse_body, *parts_body;
+    GtkWidget *build = verb_card("BUILD", &build_body);
+    GtkWidget *parse = verb_card("READ", &parse_body);
+    GtkWidget *parts = verb_card("FIELDS", &parts_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_choices(state, module_id, status, "Message", "",
+                "A submit and a deliver TPDU, each built from its own fields. The "
+                "two differ in more than the first octet.",
+                (const char *[]) { "--tpdu-submit 15551234567 00 4100",
+                                   "--tpdu-deliver 15551234567 00 4100" },
+                (const char *[]) { "Submit", "Deliver" }, 2));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row(state, module_id, status, "Read a TPDU",
+                "--tpdu-parse", "hex",
+                "A TPDU as hex. The answer names every field, including the ones "
+                "that decide whether a handset shows the message to its owner."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parts_body),
+            mod_arg_choices(state, module_id, status, "Field", "",
+                "A single field built or read on its own, which is how a message "
+                "gets assembled around a payload you already have.",
+                (const char *[]) { "--tp-dcs-build f6", "--tp-addr-build 15551234567",
+                                   "--tp-scts-build 2026-01-01T00:00:00Z" },
+                (const char *[]) { "DCS", "Address", "Timestamp" }, 3));
+        gtk_box_append(GTK_BOX(parts_body), res);
+        gtk_box_append(GTK_BOX(parts_body),
+            mod_arg_choices(state, module_id, status, "Known answers", "",
+                "The transport-level vectors this module is checked against.",
+                (const char *[]) { "--tp-kat", "--tp-fcs 00",
+                                   "--tp-dcs f6", "--tp-addr 0b915155214365f7",
+                                   "--plan-tp" },
+                (const char *[]) { "Known Answers", "FCS", "Read DCS",
+                                   "Read Address", "Transport Plan" }, 5));
+        gtk_box_append(GTK_BOX(parts_body),
+            mod_arg_choices(state, module_id, status, "More fields", "",
+                "The remaining single fields, each built or read on its own.",
+                (const char *[]) { "--tp-pid 7f", "--tp-scts 2026-01-01T00:00:00Z",
+                                   "--tp-st 00", "--tp-ud-build 4100",
+                                   "--tp-ud-read 4100" },
+                (const char *[]) { "Read PID", "Read Timestamp", "Read Status",
+                                   "Build User Data", "Read User Data" }, 5));
+    }
+    gtk_box_append(GTK_BOX(body), parts);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+otasm_build_packet(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("OTA PACKET",
+        "The TS 31.115 packet inside the SMS: a TAR, a counter, the keys that "
+        "decide whether the card accepts it, and the command it carries.", &body);
+    GtkWidget *build_body, *parse_body, *spi_body;
+    GtkWidget *build = verb_card("BUILD", &build_body);
+    GtkWidget *parse = verb_card("READ", &parse_body);
+    GtkWidget *spi = verb_card("SPI", &spi_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row(state, module_id, status, "Build a Packet",
+                "--packet", "B000000001 01",
+                "A TAR and a command, or a full packet assembled from its parts. "
+                "The counter is what a replay has to beat."));
+
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Carry a Packet in SMS",
+                "--packet-sms", "B000000001 01",
+                "The same packet wrapped the way an SMSC delivers it: a TPDU with "
+                "the 0x7F PID and the 0xF6 coding that say SIM data download."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row(state, module_id, status, "Read a Packet",
+                "--parse-packet", "hex",
+                "A packet as hex. The answer is the TAR, the counter, the key "
+                "identifiers and the command, which are the five things that "
+                "decide what happens next."));
+
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_choices(state, module_id, status, "Carried in SMS", "",
+                "A packet still inside its SMS envelope, and the response a card "
+                "sends back inside one.",
+                (const char *[]) { "--parse-packet-sms 0041000b915155214365f70000",
+                                   "--parse-resp-sms 0041000b915155214365f70000" },
+                (const char *[]) { "Parse Message", "Parse Response" }, 2));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(spi_body),
+            mod_arg_choices(state, module_id, status, "Options", "",
+                "The security parameters as bits, and the counter check that a "
+                "card performs before it acts on a command.",
+                (const char *[]) { "--spi-build 1 0", "--counter-check 1 2" },
+                (const char *[]) { "Build SPI", "Counter Check" }, 2));
+        gtk_box_append(GTK_BOX(spi_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), spi);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+otasm_build_push(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("POKES",
+        "The two messages that need no packet layer at all: a type-0 SMS and a "
+        "S@T push, which a browser on the card executes.", &body);
+    GtkWidget *type0_body, *sat_body, *wib_body, *wrap_body;
+    GtkWidget *type0 = verb_card("TYPE 0", &type0_body);
+    GtkWidget *sat = verb_card("S@T PUSH", &sat_body);
+    GtkWidget *wib = verb_card("WIB PUSH", &wib_body);
+    GtkWidget *wrap = verb_card("WRAP FOR AN SMSC", &wrap_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(type0_body),
+            mod_arg_row(state, module_id, status, "Build a Type 0",
+                "--type0-build", "",
+                "A type-0 SMS is acknowledged and never shown to the subscriber. "
+                "The answer says what the handset does with it, which is the "
+                "finding."));
+        gtk_box_append(GTK_BOX(type0_body), res);
+        gtk_box_append(GTK_BOX(type0_body),
+            mod_arg_row(state, module_id, status, "Read a Type 0",
+                "--type0", "0041000b915155214365f70000", ""));
+    }
+    gtk_box_append(GTK_BOX(body), type0);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sat_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Push",
+                "--sat-push", "15551234567 15559876543",
+                "A subscriber and an exfiltration address. The answer is the full "
+                "SMS whose user data a S@T browser on the card executes."));
+        gtk_box_append(GTK_BOX(sat_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sat);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(wib_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a WIB Push",
+                "--wib-push", "15551234567 15559876543",
+                "The WIB equivalent. The module refuses this one and says which "
+                "leaf command bytes it does not have, rather than writing a "
+                "message that would not execute."));
+        gtk_box_append(GTK_BOX(wib_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), wib);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(wrap_body),
+            mod_arg_row(state, module_id, status, "Wrap for Delivery",
+                "--smsc-wrap", "0041000b915155214365f70000",
+                "A TPDU wrapped in the SMSC envelope a network expects, and the "
+                "plan for what a lab needs to deliver it."));
+        gtk_box_append(GTK_BOX(wrap_body), res);
+        gtk_box_append(GTK_BOX(wrap_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "What a SIM OTA lab needs: a test card, an SMSC you control, and "
+                "the recording that proves the message arrived."));
+    }
+    gtk_box_append(GTK_BOX(body), wrap);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry otasm_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "~--parse-packet|--packet:Packet|--counter-check:Counter Check|"
-      "~--packet-sms|~--parse-packet-sms|~--parse-resp-sms:Response Packet" },
-    { "SPI",
-      "auth-smartcard-symbolic",
-      "--spi-build:Build SPI|~--spi|--plan:Plan" },
-    { "TP layer",
-      "mail-message-new-symbolic",
-      "~--tpdu-parse:Parse TPDU|--tpdu-deliver:Build DELIVER|--tpdu-submit:Build SUBMIT|--smsc-wrap:Wrap SMSC"
-      "|--tp-pid:TP-PID|--tp-dcs:TP-DCS|--tp-dcs-build:Build DCS|--tp-scts:TP-SCTS|--tp-scts-build:Build SCTS"
-      "|--tp-addr:Address|--tp-addr-build:Build Address|--tp-fcs:TP-FCS|--tp-st:TP-ST|--plan-tp:Handoff" },
-    { "Type 0",
-      "dialog-warning-symbolic",
-      "~--type0:Audit Type 0|--type0-build:Build Type 0|--tp-kat:Packing KAT|--tp-ud-build:Pack Text|--tp-ud-read:Unpack Text" },
-    /* S@T push: the SIM Toolkit browser push as it really travels, as a
-       (U)SIM Data download SMS. ~--wib-push is CLI-only on purpose: the verb
-       refuses with rc 2 until the WIB leaf commands are sourced, and a button
-       whose only possible answer is a refusal is not a control. */
-    { "SAT push",
-      "mail-message-new-symbolic",
-      "--sat-push=+15551234567 +15559876543:S@T Browser Push|~--wib-push:WIB Push (refuses)" },
+    { "TPDU", "dialog-information-symbolic", NULL, otasm_build_tpdu },
+    { "OTA Packet", "document-send-symbolic", NULL, otasm_build_packet },
+    { "Pokes", "security-high-symbolic", NULL, otasm_build_push },
 };
 /* 42_li_probe — LI Interception.
  *
