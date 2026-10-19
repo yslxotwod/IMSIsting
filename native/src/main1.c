@@ -19103,22 +19103,223 @@ static ModuleSubmenuEntry nasf_entries[] = {
     { "Messages", "document-send-symbolic", NULL, nasf_build_messages },
     { "Plan", "preferences-system-symbolic", NULL, nasf_build_plan },
 };
+/* 26_ss7_map — the signalling network a carrier's peers can query.
+ *
+ * MAP is a request/response protocol with a small set of operations that answer
+ * questions about a subscriber. Every one of them is a question the subscriber
+ * never sees being asked.
+ */
+static GtkWidget *
+ss7_build_queries(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("QUERIES",
+        "The operations that ask a home location register about a subscriber, "
+        "built as octets and named by what they return.", &body);
+    GtkWidget *sri_body, *ati_body, *isd_body;
+    GtkWidget *sri = verb_card("ROUTING", &sri_body);
+    GtkWidget *ati = verb_card("IDENTITY", &ati_body);
+    GtkWidget *isd = verb_card("SUBSCRIBER DATA", &isd_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sri_body),
+            mod_arg_choices(state, module_id, status, "Operation", "",
+                "Routing for a number, routing for a short message, and the "
+                "register that asks a peer to send everything to you instead.",
+                (const char *[]) { "--build-sri 310150123456789",
+                                   "--build-sri-sm 310150123456789",
+                                   "--build-register-ss 310150123456789" },
+                (const char *[]) { "Routing Info", "Routing for SMS",
+                                   "Register SS" }, 3));
+        gtk_box_append(GTK_BOX(sri_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sri);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ati_body),
+            mod_arg_choices(state, module_id, status, "Ask", "",
+                "The identity operations: the IMSI behind a number, and the "
+                "location a handset is attached at.",
+                (const char *[]) { "--build-ati 310150123456789",
+                                   "--build-sai 310150123456789" },
+                (const char *[]) { "IMSI for Number", "Serving Cell" }, 2));
+        gtk_box_append(GTK_BOX(ati_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ati);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(isd_body),
+            mod_arg_choices(state, module_id, status, "Read", "",
+                "The subscriber data a home location register will hand to a peer "
+                "it trusts, and the activation that writes rather than reads.",
+                (const char *[]) { "--build-isd 310150123456789",
+                                   "--build-ulr 310150123456789",
+                                   "--build-activate-ss 310150123456789" },
+                (const char *[]) { "Insert Data", "Update Location",
+                                   "Activate SS" }, 3));
+        gtk_box_append(GTK_BOX(isd_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), isd);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ss7_build_decode(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DECODE",
+        "A capture read from the MSU inwards: the SS7 transport, the TCAP "
+        "dialogue, and the MAP operation inside it.", &body);
+    GtkWidget *msu_body, *sigtran_body, *tcap_body, *map_body;
+    GtkWidget *msu = verb_card("MSU", &msu_body);
+    GtkWidget *sigtran = verb_card("SIGTRAN", &sigtran_body);
+    GtkWidget *tcap = verb_card("TCAP", &tcap_body);
+    GtkWidget *map = verb_card("MAP", &map_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(msu_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read an MSU",
+                "--decode-msu", "84830F0A011203",
+                "An MSU as hex. The answer is the point codes, the SIO and the "
+                "user part, which is what decides whose network a message is in."));
+        gtk_box_append(GTK_BOX(msu_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), msu);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sigtran_body),
+            mod_arg_row(state, module_id, status, "Read Sigtran",
+                "--decode-sigtran", "hex",
+                "An M3UA or M2PA message. Signalling over IP is where the same "
+                "traffic reaches a network that never had SS7 on the wire."));
+        gtk_box_append(GTK_BOX(sigtran_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sigtran);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tcap_body),
+            mod_arg_row(state, module_id, status, "Read TCAP",
+                "--decode-tcap", "hex",
+                "A TCAP message. The dialogue portion is where a transaction "
+                "states who it is and what it wants, and it is the layer a filter "
+                "tends to miss."));
+        gtk_box_append(GTK_BOX(tcap_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tcap);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(map_body),
+            mod_arg_row(state, module_id, status, "Read MAP",
+                "--decode-map", "hex",
+                "A MAP component. The answer is the opcode, the identity it "
+                "concerns and every parameter this tree knows by name."));
+        gtk_box_append(GTK_BOX(map_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), map);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ss7_build_analysis(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ANALYSIS",
+        "What a capture says about who queried whom, what the fallback reveals, "
+        "and how to build the GRX recon itself.", &body);
+    GtkWidget *flow_body, *detect_body, *fb_body, *ref_body;
+    GtkWidget *flow = verb_card("FLOW", &flow_body);
+    GtkWidget *detect = verb_card("DETECT", &detect_body);
+    GtkWidget *fb = verb_card("FALLBACK", &fb_body);
+    GtkWidget *ref = verb_card("REFERENCE", &ref_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(flow_body),
+            mod_arg_row(state, module_id, status, "Read the Flow",
+                "--flow", "capture.pcap",
+                "A capture. Each query and answer is paired, which is how a "
+                "sweep of one number from one peer becomes visible as a sweep."));
+        gtk_box_append(GTK_BOX(flow_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), flow);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(detect_body),
+            mod_arg_row(state, module_id, status, "Detect",
+                "--detect", "capture.pcap",
+                "The findings: a subscriber location asked for by a peer that has "
+                "no reason to ask, and the operations that leak a visited network."));
+        gtk_box_append(GTK_BOX(detect_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), detect);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(fb_body),
+            mod_arg_row(state, module_id, status, "Read the Fallback",
+                "--fallback-detect", "capture.pcap",
+                "A handset falling back to 2G/3G leaves a signature in the "
+                "signalling. This is that signature, and it is what the whole "
+                "downgrade chain depends on."));
+        gtk_box_append(GTK_BOX(fb_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), fb);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ref_body),
+            mod_arg_choices(state, module_id, status, "Reference", "",
+                "The operation and subsystem tables the decoder is built on, and "
+                "the published recon that reaches further than one query.",
+                (const char *[]) { "--opcode 22", "--ssn 6", "--surface",
+                                   "--visited-plmn", "--grx-recon",
+                                   "--pc-format", "--build-psi",
+                                   "--build-m3ua", "--require-stp" },
+                (const char *[]) { "Opcode", "Subsystem", "Surface",
+                                   "Visited PLMN", "GRX Recon",
+                                   "Point Code", "Build PSI", "Build M3UA",
+                                   "Require STP" }, 9));
+        gtk_box_append(GTK_BOX(ref_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ref);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry ss7_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--surface:Surface|--grx-recon:GRX Recon|--detect:Detect" },
-    { "Build",
-      "document-new-symbolic",
-      "--build-ati:Build ATI|--build-sri:Build SRI|--build-sri-sm:Build SRI-SM|--build-sai:Build SAI (auth vectors)|--build-psi:Build PSI|--build-ulr:Build ULR|--build-isd:Build ISD|--build-register-ss:Build RegisterSS|--build-activate-ss:Build ActivateSS|--build-m3ua:Wrap MSU in M3UA|--m3ua-send:Send to STP" },
-    { "Decode",
-      "document-open-symbolic",
-      "--decode-map:Decode MAP|--decode-msu:Decode MSU|--decode-tcap:Decode TCAP|--decode-sigtran:Decode SIGTRAN" },
-    { "Detection",
-      "dialog-warning-symbolic",
-      "--fallback-detect:Fallback Detect|--flow:Flow" },
-    { "Options",
-      "preferences-system-symbolic",
-      "#PARAMS|--opcode=1|--ssn=6|#FORMAT|--pc-format:PC Format|#CHECKS|--require-stp:Require STP|--visited-plmn:Visited PLMN|#PLAN|--plan:Plan" },
+    { "Queries", "dialog-information-symbolic", NULL, ss7_build_queries },
+    { "Decode", "utilities-terminal-symbolic", NULL, ss7_build_decode },
+    { "Analysis", "system-search-symbolic", NULL, ss7_build_analysis },
 };
 /* 27_cellular_dns — the DNS a cellular bearer carries.
  *
