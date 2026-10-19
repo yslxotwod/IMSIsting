@@ -21322,16 +21322,171 @@ static ModuleSubmenuEntry slnk_entries[] = {
     { "Identifiers", "network-wireless-symbolic", NULL, slnk_build_ids },
     { "Relay and Handoff", "preferences-system-symbolic", NULL, slnk_build_relay },
 };
+/* 52_stk — the SIM Application Toolkit.
+ *
+ * The toolkit is a command channel into a card that the network drives. The page
+ * separates what a command says, what it would be built out of, and the two
+ * fingerprints that mean a toolkit is being used against a subscriber.
+ */
+static GtkWidget *
+stk_build_commands(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("COMMANDS",
+        "A proactive command as the card receives it: what its type means, and "
+        "what a command of that type is built from.", &body);
+    GtkWidget *parse_body, *build_body, *lookup_body;
+    GtkWidget *parse = verb_card("READ A COMMAND", &parse_body);
+    GtkWidget *build = verb_card("BUILD A COMMAND", &build_body);
+    GtkWidget *lookup = verb_card("IDENTIFIERS", &lookup_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Command",
+                "--parse", "D009010301260002028182",
+                "A D0 command as hex. Each comprehension TLV is printed with its "
+                "tag, its length and its value, so a command that hides a target "
+                "in a tag the reader skips is visible."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the Command",
+                "--build", "21 03",
+                "The command type as hex, then its qualifier. The answer is the "
+                "D0 command, including the command number the card checks when "
+                "it answers."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(lookup_body),
+            mod_arg_choices(state, module_id, status, "Name a value", "",
+                "A command type, a device identity or a result code, as hex. An "
+                "octet this tree does not carry is reported as unknown rather "
+                "than guessed.",
+                (const char *[]) { "--cmd 21", "--device 81", "--result 00" },
+                (const char *[]) { "Command Type", "Device Identity",
+                                   "Result Code" }, 3));
+        gtk_box_append(GTK_BOX(lookup_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), lookup);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+stk_build_sat(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SAT AND WIB",
+        "The toolkit browsers a card can carry, which turn a binary SMS into a "
+        "remote command interpreter.", &body);
+    GtkWidget *cmds_body, *audit_body, *fp_body, *log_body;
+    GtkWidget *cmds = verb_card("COMMAND SURFACE", &cmds_body);
+    GtkWidget *audit = verb_card("APPLET DETECTION", &audit_body);
+    GtkWidget *fp = verb_card("TOOLKIT SMS", &fp_body);
+    GtkWidget *log = verb_card("COMMAND LOG", &log_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cmds_body),
+            mod_arg_row(state, module_id, status, "Read the Surface",
+                "--sat-cmds", "",
+                "What a S@T browser accepts: the prologue and the command set a "
+                "pushed message is written in."));
+        gtk_box_append(GTK_BOX(cmds_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cmds);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(audit_body),
+            mod_arg_row_prefilled(state, module_id, status, "Look for an Applet",
+                "--sat-audit", "A0000000090001",
+                "An AID or a name. The answer says whether the applet is one of "
+                "the toolkit browsers and what that means for the card."));
+        gtk_box_append(GTK_BOX(audit_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), audit);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(fp_body),
+            mod_arg_row_prefilled(state, module_id, status, "Fingerprint a Message",
+                "--simjacker-detect", "7F F6",
+                "The TP-PID and TP-DCS of an SMS. A toolkit data download in "
+                "either of the two binary codings is the fingerprint, and the "
+                "answer names what the pair means."));
+        gtk_box_append(GTK_BOX(fp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), fp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(log_body),
+            mod_arg_row(state, module_id, status, "Audit a Log",
+                "--audit", "commands.log",
+                "A log of commands the card received. The findings are the "
+                "commands that act off-device, which are the ones a subscriber "
+                "cannot see happening."));
+        gtk_box_append(GTK_BOX(log_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), log);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+stk_build_plan(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("HANDOFF",
+        "What a SIM-ME lab needs before a command reaches a card.", &body);
+    GtkWidget *plan_body;
+    GtkWidget *plan = verb_card("SIM-ME HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "A reader, a test card and a controller. The plan says what to "
+                "record so a command that changes the card can be traced."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry stk_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--parse:Parse|--build:Build|--audit:Audit" },
-    { "SAT",
-      "auth-smartcard-symbolic",
-      "--sat-audit:SAT Audit|--sat-cmds:SAT Commands|--simjacker-detect:Simjacker Detect" },
-    { "Command",
-      "document-send-symbolic",
-      "#COMMAND|--cmd=21|--result=00|--device=81|#PLAN|--plan:Plan" },
+    { "Commands", "dialog-information-symbolic", NULL, stk_build_commands },
+    { "SAT and WIB", "security-high-symbolic", NULL, stk_build_sat },
+    { "Handoff", "document-send-symbolic", NULL, stk_build_plan },
 };
 /* 53_non3gpp — TETRA / DMR / GSM-R.
  *
