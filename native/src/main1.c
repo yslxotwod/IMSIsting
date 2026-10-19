@@ -16666,38 +16666,222 @@ static ModuleSubmenuEntry latt_entries[] = {
     { "Attach", "dialog-information-symbolic", NULL, latt_build_attach },
     { "Identity", "auth-smartcard-symbolic", NULL, latt_build_identity },
 };
+/* 10_lte_air — the LTE air interface and the eNB a lab runs against it.
+ *
+ * Three kinds of work: reading a capture, building the messages a cell sends, and
+ * running the cell itself.
+ */
+static GtkWidget *
+lair_build_read(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("READ",
+        "A capture decoded from the broadcast channel upwards, and the X2 "
+        "signalling between cells.", &body);
+    GtkWidget *bch_body, *sib_body, *x2_body;
+    GtkWidget *bch = verb_card("BROADCAST", &bch_body);
+    GtkWidget *sib = verb_card("SYSTEM INFORMATION", &sib_body);
+    GtkWidget *x2 = verb_card("X2", &x2_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(bch_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the MIB",
+                "--decode-mib", "hex",
+                "A master information block as hex. The answer is the bandwidth, "
+                "the PHICH configuration and the system frame number - the three "
+                "facts a capture needs before it can be read at all."));
+        gtk_box_append(GTK_BOX(bch_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), bch);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sib_body),
+            mod_arg_choices(state, module_id, status, "Read a SIB", "",
+                "SIB1 states the PLMN and the scheduling of everything else; SIB2 "
+                "the radio resource configuration; SIB10 to SIB12 the warning "
+                "messages.",
+                (const char *[]) { "--decode-sib 1", "--decode-sib 2",
+                                   "--decode-sib 10", "--power-ref" },
+                (const char *[]) { "SIB1", "SIB2", "SIB10",
+                                   "Power Reference" }, 4));
+        gtk_box_append(GTK_BOX(sib_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sib);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(x2_body),
+            mod_arg_row(state, module_id, status, "Read X2",
+                "--x2-decode", "hex",
+                "An X2AP message. Handover and load information travel here, which "
+                "is what ties two cells into one network."));
+        gtk_box_append(GTK_BOX(x2_body),
+            mod_arg_choices(state, module_id, status, "Setup", "",
+                "The X2 setup exchange that pairs two cells, and a hex dump of the "
+                "capture the decode came from.",
+                (const char *[]) { "--x2-setup", "--hex" },
+                (const char *[]) { "Setup", "Hex Dump" }, 2));
+        gtk_box_append(GTK_BOX(x2_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), x2);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+lair_build_messages(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MESSAGES",
+        "The downlink messages a cell sends that move a handset: measurement "
+        "control, release, and the warning channel.", &body);
+    GtkWidget *dcch_body, *pws_body, *paging_body;
+    GtkWidget *dcch = verb_card("DCCH", &dcch_body);
+    GtkWidget *pws = verb_card("PWS", &pws_body);
+    GtkWidget *paging = verb_card("PAGING", &paging_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dcch_body),
+            mod_arg_choices(state, module_id, status, "Build", "",
+                "A measurement report with its RSRP and RSRQ, the release that "
+                "moves a handset to another carrier, and the reestablishment "
+                "reject that leaves it with no cell at all.",
+                (const char *[]) { "--build-meas-report --rsrp -80 --rsrq -10",
+                                   "--build-rrc-release --release-cause 2",
+                                   "--build-reest-reject" },
+                (const char *[]) { "Measurement Report", "Release",
+                                   "Reest. Reject" }, 3));
+        gtk_box_append(GTK_BOX(dcch_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dcch);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pws_body),
+            mod_arg_choices(state, module_id, status, "Warning message", "",
+                "A public warning as SIB10, SIB11 or SIB12. The octets are real; "
+                "whether a cell broadcasts them is a separate question the "
+                "scheduling card answers.",
+                (const char *[]) { "--build-sib10 --message-id 4352 --serial 0 --warning-type 0001",
+                                   "--build-sib11 --message-id 4660 --serial 22136 --segment DEADBEEF",
+                                   "--build-sib12 --message-id 4660 --segment FF0001 --warning-area 0102" },
+                (const char *[]) { "SIB10", "SIB11", "SIB12" }, 3));
+        gtk_box_append(GTK_BOX(pws_body), res);
+        gtk_box_append(GTK_BOX(pws_body), fkit_note(
+            "SIB10 carries the primary notification, SIB11 and SIB12 the segments "
+            "that follow. The 48-bit warning security information is not an RRC "
+            "field and is not built here."));
+    }
+    gtk_box_append(GTK_BOX(body), pws);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(paging_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a Paging Frame",
+                "--paging-frame", "310150123456789 1",
+                "An identity and a discontinuous reception cycle. The frame a "
+                "handset listens on is computed from the identity, so knowing it "
+                "tells you when to listen."));
+        gtk_box_append(GTK_BOX(paging_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), paging);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+lair_build_cell(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CELL",
+        "The eNB this module can start, read and stop, and the scheduling that "
+        "decides what it broadcasts.", &body);
+    GtkWidget *conf_body, *sched_body, *run_body, *tx_body;
+    GtkWidget *conf = verb_card("CONFIGURATION", &conf_body);
+    GtkWidget *sched = verb_card("SCHEDULING", &sched_body);
+    GtkWidget *run = verb_card("RUN", &run_body);
+    GtkWidget *tx = verb_card("TRANSMIT", &tx_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(conf_body),
+            mod_arg_choices(state, module_id, status, "Generate", "",
+                "The eNB configuration for a band and an EARFCN, and the core "
+                "network configuration beside it.",
+                (const char *[]) { "--gen-enb-conf --earfcn 6300",
+                                   "--count 1", "--status" },
+                (const char *[]) { "eNB Config", "Count", "Status" }, 3));
+        gtk_box_append(GTK_BOX(conf_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), conf);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sched_body),
+            mod_arg_choices(state, module_id, status, "Broadcast", "",
+                "The configuration that announces a SIB in SIB1, which is what "
+                "decides whether a handset reads it at all. srsRAN 4G release_23_11 "
+                "registers sib1 to sib7, sib9 and sib13 - a SIB10 entry needs its "
+                "master branch, and the verb says which.",
+                (const char *[]) { "--enb-sib-schedule --sib 12",
+                                   "--enb-sib-schedule --sib 12 --srsran-version master" },
+                (const char *[]) { "Schedule", "For Master" }, 2));
+        gtk_box_append(GTK_BOX(sched_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sched);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_choices(state, module_id, status, "Run the cell", "",
+                "Starting and stopping are separate acts: a cell that was never "
+                "stopped holds the radio and the next run finds it busy.",
+                (const char *[]) { "--start", "--stop", "--status" },
+                (const char *[]) { "Start", "Stop", "Status" }, 3));
+        gtk_box_append(GTK_BOX(run_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), run);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tx_body),
+            mod_arg_row(state, module_id, status, "Transmit RRC",
+                "--rrc-tx", "hex",
+                "An RRC message to encode and place on the downlink. It stops at "
+                "coded bits: putting them on the air needs a cell and a licence."));
+        gtk_box_append(GTK_BOX(tx_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tx);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry lair_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "#CONTROL|--start:Start|--stop:Stop|#STATUS|--status:Status" },
-    { "Decode",
-      "document-open-symbolic",
-      "--decode-sib:Decode SIB|--decode-mib:Decode MIB|--paging-frame:Paging Frame" },
-    /* X2AP is what two base stations say to each other, and it is the
-       message a fake cell answers a real one with. It gets its own view
-       because it is a different protocol from the air interface, not a
-       filter on it. */
-    { "X2",
-      "network-transmit-receive-symbolic",
-      "--x2-setup:Build X2 Setup|--x2-decode:Decode X2" },
-    { "Tools",
-      "preferences-system-symbolic",
-      "--earfcn=6300|--power-ref:Power Reference|--gen-enb-conf:Generate eNB Config" },
-    { "Transmit",
-      "media-playback-start-symbolic",
-      "--rrc-tx:Build and Transmit RRC" },
-    /* The message builders. Each button carries a worked argument line so it
-       demonstrates the encoder instead of printing a usage error, and none of
-       them sends: the octets land in the output card and a file. */
-    { "Messages",
-      "document-send-symbolic",
-      "--build-meas-report=--meas-id 1 --rsrp 60 --rsrq 20:Measure Report"
-      "|--build-rrc-release=--tid 0 --release-cause other:RRC Release"
-      "|--build-reest-reject:Re-est Reject"
-      "|#PWS|--build-sib10=--message-id 4370 --serial 1 --warning-type 2A00:SIB10 Alert"
-      "|--build-sib11=--message-id 4371 --serial 2 --segment-type lastSegment --segment-number 0 --payload 0001:SIB11 Segment"
-      "|--build-sib12=--message-id 4372 --serial 3 --segment-type notLastSegment --segment-number 0 --payload 0001:SIB12 Segment"
-      "|--enb-sib-schedule=--sib 10 --hex 0001:SIB Schedule" },
+    { "Read", "dialog-information-symbolic", NULL, lair_build_read },
+    { "Messages", "document-send-symbolic", NULL, lair_build_messages },
+    { "Cell", "imsisting-01_radio-symbolic", NULL, lair_build_cell },
 };
 /* 11_lte_core — LTE EPC core.
  *
@@ -17019,27 +17203,172 @@ static ModuleSubmenuEntry lcore_entries[] = {
       lcore_build_encapsulate },
     { "Audit", "system-search-symbolic", NULL, lcore_build_audit },
 };
+/* 12_nr_air — NR and the gNB a lab runs.
+ *
+ * The same three shapes as LTE, with the synchronisation burst in place of the
+ * MIB as the thing a capture is found by.
+ */
+static GtkWidget *
+nair_build_read(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("READ",
+        "A capture found, decoded and measured: the SSB first, because nothing "
+        "else is readable without it.", &body);
+    GtkWidget *ssb_body, *dec_body, *prach_body;
+    GtkWidget *ssb = verb_card("SYNCHRONISATION", &ssb_body);
+    GtkWidget *dec = verb_card("DECODE", &dec_body);
+    GtkWidget *prach = verb_card("RANDOM ACCESS", &prach_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ssb_body),
+            mod_arg_choices(state, module_id, status, "Look at the burst", "",
+                "Which SSB the cell is on, the beam sweep it runs, and the "
+                "frequency it sits at.",
+                (const char *[]) { "--ssb", "--beam-sweep", "--arfcn 632628" },
+                (const char *[]) { "SSB", "Beam Sweep", "ARFCN" }, 3));
+        gtk_box_append(GTK_BOX(ssb_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ssb);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dec_body),
+            mod_arg_choices(state, module_id, status, "Decode", "",
+                "The MIB, SIB1, and any RRC message the capture carries.",
+                (const char *[]) { "--decode-mib", "--decode-sib1",
+                                   "--decode-rrc" },
+                (const char *[]) { "MIB", "SIB1", "RRC" }, 3));
+        gtk_box_append(GTK_BOX(dec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(prach_body),
+            mod_arg_row_prefilled(state, module_id, status, "Compute a Preamble",
+                "--prach", "0 0",
+                "The occasion and the preamble index. The root sequence and the "
+                "cyclic shift are computed, so the answer can be checked against "
+                "the standard rather than trusted."));
+        gtk_box_append(GTK_BOX(prach_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), prach);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+nair_build_send(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SEND",
+        "What a cell can be made to say, and the waveform that carries it.", &body);
+    GtkWidget *msg_body, *wave_body;
+    GtkWidget *msg = verb_card("MESSAGES", &msg_body);
+    GtkWidget *wave = verb_card("WAVEFORM", &wave_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(msg_body),
+            mod_arg_choices(state, module_id, status, "Build", "",
+                "A reconfiguration that moves a handset, and a measurement report "
+                "that gives a cell something to believe.",
+                (const char *[]) { "--build-rrc-reconfig", "--build-meas-report" },
+                (const char *[]) { "Reconfiguration", "Measurement Report" }, 2));
+        gtk_box_append(GTK_BOX(msg_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), msg);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(wave_body),
+            mod_arg_row_prefilled(state, module_id, status, "Write the Burst",
+                "--ssb-waveform", "/tmp/imsisting/nr_ssb.cf32 --n-rb 20 --pci 42 --i-ssb 0",
+                "An SSB written as samples: four OFDM symbols, baseband, no carrier. "
+                "It is the one thing here that is arithmetic all the way down, and "
+                "the self-decode reads it back."));
+        gtk_box_append(GTK_BOX(wave_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), wave);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+nair_build_cell(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CELL",
+        "The gNB this module can start and stop, its configuration, and the core "
+        "beside it.", &body);
+    GtkWidget *conf_body, *run_body, *tx_body;
+    GtkWidget *conf = verb_card("CONFIGURATION", &conf_body);
+    GtkWidget *run = verb_card("RUN", &run_body);
+    GtkWidget *tx = verb_card("TRANSMIT", &tx_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(conf_body),
+            mod_arg_choices(state, module_id, status, "Generate", "",
+                "The gNB configuration for a band and a bandwidth, and the core "
+                "network configuration beside it.",
+                (const char *[]) { "--gen-gnb-conf --n-rb 51 --scs 30",
+                                   "--gen-core-conf", "--status" },
+                (const char *[]) { "gNB Config", "Core Config", "Status" }, 3));
+        gtk_box_append(GTK_BOX(conf_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), conf);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_choices(state, module_id, status, "Run the cell", "",
+                "Starting and stopping are separate acts: a cell that was never "
+                "stopped holds the radio.",
+                (const char *[]) { "--start", "--stop", "--status" },
+                (const char *[]) { "Start", "Stop", "Status" }, 3));
+        gtk_box_append(GTK_BOX(run_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), run);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tx_body),
+            mod_arg_row(state, module_id, status, "Transmit",
+                "--tx", "/tmp/imsisting/nr_ssb.cf32 cf32 30720000",
+                "A waveform to put on the air, with its format and rate. It needs "
+                "a radio you own and a lawful basis, and it is last on the page for "
+                "that reason."));
+        gtk_box_append(GTK_BOX(tx_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tx);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry nair_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "#CONTROL|--start:Start|--stop:Stop|#STATUS|--status:Status|~--tx" },
-    { "Decode",
-      "document-open-symbolic",
-      "--decode-mib:Decode MIB|--decode-sib1:Decode SIB1|--decode-rrc:Decode RRC" },
-    { "Build",
-      "security-high-symbolic",
-      "#RRC|--build-rrc-reconfig:Build RRC Reconfig|--build-meas-report:Build Meas Report|#BEAM|--beam-sweep:Beam Sweep" },
-    { "Signals",
-      "network-wireless-symbolic",
-      "--ssb:SSB|--prach:PRACH|--pci=0 0" },
-    { "Tools",
-      "preferences-system-symbolic",
-      "--arfcn=640000|--gen-gnb-conf:Generate gNB Config|--gen-core-conf:Generate Core Config" },
-    /* One SSB burst as baseband samples, which is the artefact the tree could
-       not produce before: every other NR signal path here stops at coded bits. */
-    { "Waveform",
-      "media-playback-start-symbolic",
-      "--ssb-waveform=/tmp/imsisting/nr_air/ssb.cf32:Write SSB Samples" },
+    { "Read", "dialog-information-symbolic", NULL, nair_build_read },
+    { "Send", "document-send-symbolic", NULL, nair_build_send },
+    { "Cell", "imsisting-01_radio-symbolic", NULL, nair_build_cell },
 };
 /* 13_nr_core — 5G core.
  *
