@@ -16663,30 +16663,351 @@ static ModuleSubmenuEntry dwn_entries[] = {
       "security-high-symbolic",
       "#BUILD|--build-security-mode:Build Security Mode|--build-reject:Build Reject|--tx-reject:Transmit Reject|--build-sib1:Build SIB1|--null-cipher-table:Null Cipher Table|#PLAN|--reject-cause=22 EMM|--plan:Plan" },
 };
+/* 16_sim — the card itself.
+ *
+ * A SIM is a small computer with a file system, a set of algorithms and an OTA
+ * port. The page follows that: building the commands, reading the files, the
+ * algorithms it runs, and the two channels that reach it without being touched.
+ */
+static GtkWidget *
+sim_build_apdu(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("COMMANDS",
+        "The APDUs a card is driven with, built and read back. Nothing here "
+        "opens a reader.", &body);
+    GtkWidget *parse_body, *build_body, *resp_body;
+    GtkWidget *parse = verb_card("READ ONE", &parse_body);
+    GtkWidget *build = verb_card("BUILD ONE", &build_body);
+    GtkWidget *resp = verb_card("GET RESPONSE", &resp_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the APDU",
+                "--parse-apdu", "00A40004023F00",
+                "A command or a response APDU as hex. The class, the instruction "
+                "and the P1/P2 meaning are read from the command, not guessed "
+                "from the length."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the APDU",
+                "--build-apdu", "00 A4 00 04 3F00",
+                "Class, instruction, P1, P2, then optionally the data and the "
+                "expected length. The le octet is added only when the command "
+                "takes one."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(resp_body),
+            mod_arg_row_prefilled(state, module_id, status, "Ask for the Rest",
+                "--get-response", "00",
+                "The length to fetch. A card answers a long response with 61xx "
+                "and holds the rest until this is sent."));
+        gtk_box_append(GTK_BOX(resp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), resp);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+sim_build_files(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("FILES",
+        "The card's file system as commands: select a file, read it, and say "
+        "what a file id is.", &body);
+    GtkWidget *sel_body, *bin_body, *rec_body, *id_body;
+    GtkWidget *sel = verb_card("SELECT", &sel_body);
+    GtkWidget *bin = verb_card("READ BINARY", &bin_body);
+    GtkWidget *rec = verb_card("READ RECORD", &rec_body);
+    GtkWidget *id = verb_card("FILE ID", &id_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sel_body),
+            mod_arg_row_prefilled(state, module_id, status, "Select the File",
+                "--select-fid", "3F00",
+                "A file id. The answer is the SELECT command, with the "
+                "application path a USIM needs rather than the 2G one."));
+        gtk_box_append(GTK_BOX(sel_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sel);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(bin_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read Transparent",
+                "--read-binary", "0 0A",
+                "An offset and a length in bytes. The offset is where a hidden "
+                "byte would have to live, which is why it is an argument."));
+        gtk_box_append(GTK_BOX(bin_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), bin);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(rec_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a Record",
+                "--read-record", "1 04 0A",
+                "The record number, the mode (04 is absolute) and the length. A "
+                "linear fixed file is read one record at a time."));
+        gtk_box_append(GTK_BOX(rec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), rec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(id_body),
+            mod_arg_row_prefilled(state, module_id, status, "Name the File",
+                "--file-id", "6F07",
+                "A file id. The answer names the file and the standard it is "
+                "defined in; an id this tree does not carry is said to be "
+                "unknown rather than guessed."));
+        gtk_box_append(GTK_BOX(id_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), id);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+sim_build_decode(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CONTENTS",
+        "The three transparent files that identify a card and its subscriber,",
+        &body);
+    GtkWidget *iccid_body, *imsi_body, *ad_body;
+    GtkWidget *iccid = verb_card("ICCID", &iccid_body);
+    GtkWidget *imsi = verb_card("IMSI", &imsi_body);
+    GtkWidget *ad = verb_card("EF AD", &ad_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(iccid_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Serial",
+                "--decode-iccid", "98680011536813441479",
+                "Ten octets of packed BCD. The answer is the serial, its issuer "
+                "and account fields, and the Luhn check that a printed ICCID has "
+                "to pass."));
+        gtk_box_append(GTK_BOX(iccid_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), iccid);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(imsi_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Subscriber",
+                "--decode-imsi", "08090113100521436587F9",
+                "The identity file. The length byte and the parity nibble are "
+                "checked, because an odd-length identity is where a swapped "
+                "half-octet shows."));
+        gtk_box_append(GTK_BOX(imsi_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), imsi);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ad_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Flags",
+                "--decode-ad", "80000000",
+                "EF_AD in either layout: the two generations define the same "
+                "octet differently, so the layout is chosen rather than assumed."));
+        gtk_box_append(GTK_BOX(ad_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ad);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+sim_build_ota(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("OTA",
+        "The channel that reaches a card without touching it: a binary SMS the "
+        "card accepts, and the keys that decide what it accepts.", &body);
+    GtkWidget *parse_body, *spi_body, *rsp_body, *plan_body;
+    GtkWidget *parse = verb_card("READ A MESSAGE", &parse_body);
+    GtkWidget *spi = verb_card("SPI", &spi_body);
+    GtkWidget *rsp = verb_card("RSP ROLES", &rsp_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the TPDU",
+                "--parse-ota", "41000b915155214365f77ff644027000003f0d00000000505348000000000000422f012d02010105280601012d032600822d032601822d191300820b1401000b915155896745f30000085300b505ad4e91",
+                "An OTA SMS TPDU as hex: the TAR, the SPI, the key identifiers "
+                "and the counter that a replay would have to exceed."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(spi_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Bits",
+                "--spi", "1",
+                "The SPI as a decimal number. Each bit is a decision the card "
+                "makes about a message, so the answer names the decision and not "
+                "the bit."));
+        gtk_box_append(GTK_BOX(spi_body), res);
+        gtk_box_append(GTK_BOX(spi_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Key Set",
+                "--ota-key", "0F 02",
+                "One or both key identifiers. The answer is the key set, the "
+                "mode and the strength: KIc 0F is the OTA ciphering key, and the "
+                "mode is what decides which algorithm it feeds."));
+    }
+    gtk_box_append(GTK_BOX(body), spi);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(rsp_body),
+            mod_arg_row(state, module_id, status, "Read the Roles",
+                "--rsp", "",
+                "Which side of an eSIM download decides what, and the states a "
+                "profile can be in. Reference only: no ES9+ endpoint is "
+                "contacted."));
+        gtk_box_append(GTK_BOX(rsp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), rsp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_choices(state, module_id, status, "Plan", "",
+                "What each path needs before it can be attempted, and what to "
+                "record while it runs.",
+                (const char *[]) { "--plan ota-replay", "--plan sat-wib",
+                                   "--plan esim-download", "--plan apdu-live",
+                                   "--plan dpa-lab" },
+                (const char *[]) { "OTA Replay", "S@T / WIB", "eSIM Download",
+                                   "Live APDU", "DPA Rig" }, 5));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+sim_build_auth(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("AUTHENTICATION",
+        "The algorithms a card runs, checked against the standards' own test "
+        "vectors, and the requests a profile download starts with.", &body);
+    GtkWidget *check_body, *milenage_body, *es9_body, *dpa_body;
+    GtkWidget *check = verb_card("STANDARD VECTORS", &check_body);
+    GtkWidget *milenage = verb_card("MILENAGE", &milenage_body);
+    GtkWidget *es9 = verb_card("ES9+", &es9_body);
+    GtkWidget *dpa = verb_card("SIDE CHANNEL", &dpa_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(check_body),
+            mod_arg_row(state, module_id, status, "Check the Vectors",
+                "--sim-auth-check", "",
+                "Every published known-answer vector through the module's own "
+                "authentication path. A vector that disagrees is a finding about "
+                "the implementation, not about the vector."));
+        gtk_box_append(GTK_BOX(check_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), check);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(milenage_body),
+            mod_arg_row_prefilled(state, module_id, status, "Derive a Vector",
+                "--sim-auth", "milenage 465B5CE8B199B49FAA5F0A2EE238A6BC 23553CBE9637A89D218AE64D0E1759CF --op CDC202D526D4F5B6B7C0B69B3F4A5C47",
+                "The algorithm, the key and the challenge, then the operator key "
+                "variant. The answer is RES, CK, IK, AUTN - the whole vector, not "
+                "a summary of it."));
+        gtk_box_append(GTK_BOX(milenage_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), milenage);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(es9_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build a Request",
+                "--es9-plus", "initiateAuthentication --smds smds.example.net:443",
+                "An SGP.22 ES9+ operation and the subscription manager host. The "
+                "answer is the HTTP request, deterministic down to the JSON key "
+                "order; nothing is sent."));
+        gtk_box_append(GTK_BOX(es9_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), es9);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dpa_body),
+            mod_arg_choices(state, module_id, status, "COMP128-1 leakage", "",
+                "The level-zero model, a recovery run against synthetic traces, "
+                "and the sweeps that say how many traces it takes.",
+                (const char *[]) { "--dpa-model 00112233445566778899AABBCCDDEEFF 00112233445566778899AABBCCDDEEFF",
+                                   "--dpa-sim 00112233445566778899AABBCCDDEEFF 2000",
+                                   "--dpa-sweep 00112233445566778899AABBCCDDEEFF" },
+                (const char *[]) { "Leak Point", "Recover the Key",
+                                   "Trace Budget" }, 3));
+        gtk_box_append(GTK_BOX(dpa_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dpa);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry sim_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--parse-apdu:Parse APDU|--build-apdu:Build APDU|--get-response:Get Response" },
-    { "Read",
-      "document-open-symbolic",
-      "#READ|--read-binary:Read Binary|--read-record:Read Record|#SELECT|--select-fid=3F00|--file-id" },
-    { "Decode",
-      "auth-smartcard-symbolic",
-      "--decode-iccid:Decode ICCID|--decode-imsi:Decode IMSI|--decode-ad:Decode AD" },
-    { "OTA",
-      "document-send-symbolic",
-      "#PARSE|--parse-ota:Parse OTA|#CONFIG|--spi=1|~--ota-key:OTA Key|--rsp:RSP|#PLAN|--plan:Plan" },
-    { "Side channel",
-      "auth-smartcard-symbolic",
-      "#DPA (COMP128-1)|~--dpa-model:Leak Point (ki rand)|~--dpa-sim:Key Recovery (ki)|~--dpa-sweep:Sweeps (ki)|#PLAN|--plan=dpa-lab:DPA Rig" },
-    /* The card's own authentication: the algorithms a SIM runs, checked against
-       the standards' test vectors, and the ES9+ requests a profile download
-       starts with. */
-    { "Authentication",
-      "security-high-symbolic",
-      "--sim-auth-check=std:Check Standard Vectors"
-      "|--sim-auth=milenage 465B5CE8B199B49FAA5F0A2EE238A6BC 23553CBE9637A89D218AE64D0E1759CF --op CDC202D526D4F5B6B7C0B69B3F4A5C47:Milenage Vector"
-      "|--es9-plus=initiateAuthentication --smds smds.example.net:443:ES9+ Request" },
+    { "Commands", "dialog-information-symbolic", NULL, sim_build_apdu },
+    { "Files", "document-open-symbolic", NULL, sim_build_files },
+    { "Contents", "auth-smartcard-symbolic", NULL, sim_build_decode },
+    { "OTA", "document-send-symbolic", NULL, sim_build_ota },
+    { "Authentication", "security-high-symbolic", NULL, sim_build_auth },
 };
 static ModuleSubmenuEntry pcap_entries[] = {
     { "Overview",
