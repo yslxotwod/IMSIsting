@@ -16048,48 +16048,339 @@ static ModuleSubmenuEntry gair_entries[] = {
     { "Decode", "dialog-information-symbolic", NULL, gair_build_decode },
     { "Exposure", "system-search-symbolic", NULL, gair_build_exposure },
 };
+/* 07_gsm_attack — the 2G air interface as an attacker's surface.
+ *
+ * Four views, because there are four kinds of work here: reading the channels,
+ * building the messages that move a handset, the cipher arithmetic that decides
+ * whether reading is enough, and the attacks that use all of it.
+ */
+static GtkWidget *
+gatk_build_decode(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DECODE",
+        "The channel structure of a 2G cell: bursts, multiframes, the paging "
+        "schedule, and the blocks a handset contends on.", &body);
+    GtkWidget *burst_body, *frame_body;
+    GtkWidget *burst = verb_card("BURST AND FRAME", &burst_body);
+    GtkWidget *frame = verb_card("CHANNELS", &frame_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(burst_body),
+            mod_arg_choices(state, module_id, status, "Structure", "",
+                "How a burst is laid out, what a frame contains, and the map of "
+                "channels a multiframe carries.",
+                (const char *[]) { "--burst-layout", "--frame-facts",
+                                   "--multiframe-map", "--fcch-facts" },
+                (const char *[]) { "Burst", "Frame", "Multiframe", "FCCH" }, 4));
+        gtk_box_append(GTK_BOX(burst_body),
+            mod_arg_choices(state, module_id, status, "Payload", "",
+                "The SCH payload, and the LAPDm framing that carries signalling "
+                "over a traffic channel.",
+                (const char *[]) { "--sch-payload", "--lapdm-bursts",
+                                   "--lapdm-fill 0 1" },
+                (const char *[]) { "SCH Payload", "LAPDm Bursts",
+                                   "LAPDm Fill" }, 3));
+        gtk_box_append(GTK_BOX(burst_body), res);
+        gtk_box_append(GTK_BOX(burst_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a Burst",
+                "--dummy-burst", "0 0",
+                "A sequence number and the fill. A dummy burst is what the network "
+                "sends when it has nothing to say, and its fill byte varies by "
+                "vendor - one of the few passive fingerprints 2G offers."));
+    }
+    gtk_box_append(GTK_BOX(body), burst);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(frame_body),
+            mod_arg_choices(state, module_id, status, "Timing", "",
+                "Where a handset listens, and the frame number arithmetic that "
+                "decides it.",
+                (const char *[]) { "--paging-schedule 310150123456789 1",
+                                   "--paging-group 310150123456789",
+                                   "--fn-split 1234567", "--fn-join 1 2 3" },
+                (const char *[]) { "Paging Schedule", "Paging Group",
+                                   "Split FN", "Join FN" }, 4));
+        gtk_box_append(GTK_BOX(frame_body), res);
+        gtk_box_append(GTK_BOX(frame_body),
+            mod_arg_choices(state, module_id, status, "Blocks and constants", "",
+                "The random access and control blocks, the timing advance limits, "
+                "the LAPDm window, and the cell selection criterion.",
+                (const char *[]) { "--rach-blocks", "--ccch-blocks",
+                                   "--sdcch-map", "--ta", "--n201", "--c1",
+                                   "--lapdm-ui 0 1" },
+                (const char *[]) { "RACH", "CCCH", "SDCCH", "TA", "N201",
+                                   "C1", "LAPDm UI" }, 7));
+    }
+    gtk_box_append(GTK_BOX(body), frame);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+gatk_build_messages(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MESSAGES",
+        "The messages a network sends a handset, built as octets. These are what a "
+        "forged cell says.", &body);
+    GtkWidget *call_body, *reg_body, *ident_body, *class_body;
+    GtkWidget *call = verb_card("CALL SETUP", &call_body);
+    GtkWidget *reg = verb_card("REGISTRATION", &reg_body);
+    GtkWidget *ident = verb_card("IDENTITY", &ident_body);
+    GtkWidget *class = verb_card("CLASSMARK", &class_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(call_body),
+            mod_arg_choices(state, module_id, status, "Assign and page", "",
+                "The assignment that starts a call without the handset asking, and "
+                "the paging request that finds it first.",
+                (const char *[]) { "--build-immediate-assignment 310150123456789",
+                                   "--build-paging-request 310150123456789" },
+                (const char *[]) { "Immediate Assignment", "Paging Request" }, 2));
+        gtk_box_append(GTK_BOX(call_body), res);
+        gtk_box_append(GTK_BOX(call_body),
+            mod_arg_row_prefilled(state, module_id, status, "Acknowledge",
+                "--tx-ack", "1",
+                "The acknowledgement counter. An assignment nobody acknowledges is a "
+                "failed call, which tells the operator the handset refused rather "
+                "than the cell being wrong."));
+    }
+    gtk_box_append(GTK_BOX(body), call);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(reg_body),
+            mod_arg_choices(state, module_id, status, "Registration", "",
+                "The acceptance that registers a handset, and the reallocation that "
+                "moves it to a temporary identity.",
+                (const char *[]) { "--build-lu-accept 310150123456789",
+                                   "--build-tmsi-realloc 310150123456789 01020304" },
+                (const char *[]) { "Location Update Accept",
+                                   "TMSI Reallocation" }, 2));
+        gtk_box_append(GTK_BOX(reg_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), reg);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ident_body),
+            mod_arg_choices(state, module_id, status, "Ask for identity", "",
+                "The request that makes a handset say who it is, and the identity "
+                "type it carries.",
+                (const char *[]) { "--build-identity-request 1",
+                                   "--mobile-identity 310150123456789" },
+                (const char *[]) { "Identity Request", "Read an Identity" }, 2));
+        gtk_box_append(GTK_BOX(ident_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ident);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(class_body),
+            mod_arg_choices(state, module_id, status, "Classmark", "",
+                "What a handset claims about itself, which is the input to every "
+                "downgrade: a network that believes 'I cannot do 3G' strips 3G.",
+                (const char *[]) { "--classmark1", "--classmark1-encode",
+                                   "--classmark3", "--classmark 0102" },
+                (const char *[]) { "Classmark 1", "Encode", "Classmark 3",
+                                   "Read One" }, 4));
+        gtk_box_append(GTK_BOX(class_body),
+            mod_arg_choices(state, module_id, status, "Downgrade", "",
+                "The claim that strips a generation: a classmark that says 3G is "
+                "not supported, which a network accepts unless it checks.",
+                (const char *[]) { "--classmark-downgrade" },
+                (const char *[]) { "Downgrade" }, 1));
+        gtk_box_append(GTK_BOX(class_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), class);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+gatk_build_ciphers(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CIPHERS",
+        "A5/1 through A5/4, the 3G ciphers, and the recovery of a key from traffic "
+        "the cipher produced.", &body);
+    GtkWidget *a5_body, *g_body, *rec_body;
+    GtkWidget *a5 = verb_card("A5", &a5_body);
+    GtkWidget *g = verb_card("KASUMI AND F8/F9", &g_body);
+    GtkWidget *rec = verb_card("KEY RECOVERY", &rec_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(a5_body),
+            mod_arg_choices(state, module_id, status, "Serialize", "",
+                "The 114-bit A5/1 keystream is published and checkable; A5/2 was "
+                "withdrawn for being broken and is kept for testing only.",
+                (const char *[]) { "--a5-1-keystream 00112233445566778899AABBCCDDEEFF 0 114",
+                                   "--a5-2-keystream 00112233445566778899AABBCCDDEEFF 0 114",
+                                   "--a5-3-keystream 00112233445566778899AABBCCDDEEFF00 0 114",
+                                   "--a5-4-keystream 00112233445566778899AABBCCDDEEFF 0 114",
+                                   "--a5-count 1 2 0", "--alg-name 1" },
+                (const char *[]) { "A5/1", "A5/2", "A5/3", "A5/4", "Count",
+                                   "Name" }, 6));
+        gtk_box_append(GTK_BOX(a5_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), a5);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(g_body),
+            mod_arg_choices(state, module_id, status, "3G ciphers", "",
+                "The block cipher underneath, and the two modes 3G uses it in: "
+                "confidentiality and integrity.",
+                (const char *[]) { "--kasumi 00112233445566778899AABBCCDDEEFF 0102030405060708",
+                                   "--f8-keystream 00112233445566778899AABBCCDDEEFF 0 1 0",
+                                   "--f9-mac 00112233445566778899AABBCCDDEEFF 0 1 0102" },
+                (const char *[]) { "KASUMI", "F8", "F9" }, 3));
+        gtk_box_append(GTK_BOX(g_body),
+            mod_arg_choices(state, module_id, status, "GSM mode", "",
+                "The cipher mode command a network uses to tell a handset which "
+                "algorithm to run, and the decryption that follows from a known key.",
+                (const char *[]) { "--build-cipher-mode 1 0 0",
+                                   "--decrypt 00112233445566778899AABBCCDDEEFF 0 0102" },
+                (const char *[]) { "Cipher Mode", "Decrypt" }, 2));
+        gtk_box_append(GTK_BOX(g_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), g);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(rec_body),
+            mod_arg_choices(state, module_id, status, "Recover a key", "",
+                "Known plaintext, a search, and the verification that says whether "
+                "the key found is the key used. The verification is the part that "
+                "matters: a search always returns something.",
+                (const char *[]) { "--kc-known-plaintext 00112233445566778899AABBCCDDEEFF 0102 0304",
+                                   "--kc-search 0011223344 0",
+                                   "--kc-verify 00112233445566778899AABBCCDDEEFF 0102 0304",
+                                   "--kc-recovery 0102 0304" },
+                (const char *[]) { "Known Plaintext", "Search", "Verify",
+                                   "Recovery" }, 4));
+        gtk_box_append(GTK_BOX(rec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), rec);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+gatk_build_attacks(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ATTACKS",
+        "The published attacks on 2G as sequences, with what each needs and what it "
+        "establishes. The transmit path is last and named for what it needs.", &body);
+    GtkWidget *seq_body, *deanon_body, *plan_body, *tx_body;
+    GtkWidget *seq = verb_card("SEQUENCES", &seq_body);
+    GtkWidget *deanon = verb_card("DEANONYMIZATION", &deanon_body);
+    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *tx = verb_card("TRANSMIT", &tx_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(seq_body),
+            mod_arg_choices(state, module_id, status, "Walk a sequence", "",
+                "The IM SI catcher sequence, the A5 downgrade, and the paging race: "
+                "each is a series of ordinary messages in an order that should not "
+                "occur.",
+                (const char *[]) { "--vector-imsi-catcher", "--vector-a5-downgrade",
+                                   "--vector-kc-recovery" },
+                (const char *[]) { "IMSI Catcher", "A5 Downgrade",
+                                   "Kc Recovery" }, 3));
+        gtk_box_append(GTK_BOX(seq_body),
+            mod_arg_choices(state, module_id, status, "Sequence", "",
+                "The catcher sequence as a run of ordinary messages in an order "
+                "that should not occur, and the paging race it depends on.",
+                (const char *[]) { "--imsi-catcher-sequence", "--paging-race" },
+                (const char *[]) { "Sequence", "Paging Race" }, 2));
+        gtk_box_append(GTK_BOX(seq_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), seq);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(deanon_body),
+            mod_arg_choices(state, module_id, status, "TMSI", "",
+                "The published de-anonymisation: record a TMSI, look it up later, "
+                "and confirm the correlation with a second observation.",
+                (const char *[]) { "--vector-tmsi-deanon",
+                                   "--deanon-record 01020304 aabb",
+                                   "--deanon-lookup 01020304" },
+                (const char *[]) { "Vector", "Record", "Lookup" }, 3));
+        gtk_box_append(GTK_BOX(deanon_body),
+            mod_arg_choices(state, module_id, status, "Store", "",
+                "What has been recorded, and the second observation that confirms a "
+                "correlation rather than asserting one.",
+                (const char *[]) { "--deanon-list", "--deanon-confirm 1 2" },
+                (const char *[]) { "List", "Confirm" }, 2));
+        gtk_box_append(GTK_BOX(deanon_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), deanon);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_choices(state, module_id, status, "Plan", "",
+                "What a 2G lab needs, and the tables it is built from.",
+                (const char *[]) { "--plan", "--plan-tsv", "--ccch-conf" },
+                (const char *[]) { "Plan", "Plan TSV", "CCCH Config" }, 3));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tx_body),
+            mod_arg_row(state, module_id, status, "Transmit",
+                "--transmit", "capture.pcap",
+                "The one verb here that puts a carrier on the air. It needs a radio "
+                "you own and a lawful basis, and it is the last control on the page "
+                "for that reason."));
+        gtk_box_append(GTK_BOX(tx_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), tx);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry gatk_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--imsi-catcher-sequence:IMSI Catcher Sequence|--paging-race:Paging Race|--kc-recovery:Kc Recovery" },
-    { "Vectors",
-      "security-high-symbolic",
-      "#TRANSMIT VECTORS|--vector-imsi-catcher:IMSI Catcher (O1)|--vector-a5-downgrade:A5/1 Downgrade|"
-      "--vector-tmsi-deanon:TMSI De-anonymisation|--vector-kc-recovery:Kc Recovery|"
-      "#TRANSMIT|~--transmit:Transmit BCCH Carrier|"
-      "#TRANSMIT GATE|--tx-ack:Transmit Acknowledgement" },
-    { "Air interface",
-      "network-wireless-symbolic",
-      "#BURSTS AND CHANNELS|--burst-layout:Burst Layout|--dummy-burst:C0 Idle Burst|"
-      "--ccch-conf:CCCH_CONF|--sch-payload:SCH Payload|--fcch-facts:FCCH Facts|"
-      "--multiframe-map:51-Frame Map|--ccch-blocks:CCCH Blocks|--rach-blocks:RACH Blocks|"
-      "--sdcch-map:SDCCH Map|"
-      "#TIMING|--frame-facts:Frame Facts|~--fn-split:Frame Split|~--fn-join:Frame Join|~--ta:Timing Advance|"
-      "#PAGING|~--paging-schedule:Paging Schedule" },
-    { "Identity",
-      "auth-smartcard-symbolic",
-      "#BUILD|--build-identity-request:Build Identity Request|--build-cipher-mode:Build Cipher Mode|"
-      "--build-lu-accept:Build LU Accept|--build-tmsi-realloc:Build TMSI Realloc|"
-      "--build-paging-request:Build Paging Request|"
-      "--build-immediate-assignment:Build Immediate Assignment|~--mobile-identity:Mobile Identity|"
-      "#CLASSMARK|--classmark|--classmark-downgrade:Classmark Downgrade|--classmark1|"
-      "--classmark1-encode:Classmark 1 Encode|~--classmark3:Classmark 3 Decode|"
-      "#LAPDM|--lapdm-ui:LAPDm UI Frame|--lapdm-fill:Fill Frame|--lapdm-bursts:LAPDm Bursts|"
-      "--n201:N201 Limit" },
-    { "Ciphers",
-      "channel-secure-symbolic",
-      "#A5 FAMILY|--a5-1-keystream:A5/1 Keystream|~--a5-count:A5/1 COUNT|--a5-2-keystream:A5/2 Keystream|"
-      "--a5-3-keystream:A5/3 Keystream|--a5-4-keystream:A5/4 Keystream|"
-      "#KGCORE|~--kasumi:KASUMI|~--f8-keystream:f8 Keystream|~--f9-mac:f9 MAC|--alg-name:Algorithm Name|"
-      "#RECOVERY|~--kc-verify:Kc Verify|~--kc-search:Kc Search|~--kc-known-plaintext:Known Plaintext|"
-      "~--decrypt:Decrypt" },
-    { "TMSI store",
-      "edit-find-symbolic",
-      "--deanon-list:Recorded Pairings|~--deanon-lookup:TMSI Lookup|~--deanon-record:TMSI Record|"
-      "~--deanon-confirm:TMSI Confirm" },
-    { "C1",
-      "preferences-system-symbolic",
-      "--c1=-100 -90 33 5|--plan:Plan|--plan-tsv:Plan TSV" },
+    { "Decode", "dialog-information-symbolic", NULL, gatk_build_decode },
+    { "Messages", "document-send-symbolic", NULL, gatk_build_messages },
+    { "Ciphers", "channel-secure-symbolic", NULL, gatk_build_ciphers },
+    { "Attacks", "security-high-symbolic", NULL, gatk_build_attacks },
 };
 /* 08_umts_air — 3G, where the cipher was broken properly and the identity was not.
  *
