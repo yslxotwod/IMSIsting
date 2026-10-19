@@ -15852,19 +15852,141 @@ static ModuleSubmenuEntry uair_entries[] = {
       "preferences-system-symbolic",
       "--mhz=2140|--uarfcn=10700" },
 };
+/* 09_lte_attach — LTE Attach Forge.
+ *
+ * The module builds and reads the messages an attach is made of. Two of them are
+ * the interesting ones here: the request a handset sends, and the identity
+ * request a network sends in the clear when it wants the IMSI.
+ *
+ * The previous table carried six controls for verbs the module does not
+ * implement - decode-guti, encode-guti, nas-mac, build-attach-accept and two
+ * more - each of which printed the usage banner and exited zero. They are gone
+ * rather than styled: a button that does nothing is worse than a missing one.
+ */
+static GtkWidget *
+latt_build_attach(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ATTACH",
+        "The request that starts a session, built byte for byte, and the same "
+        "bytes read back as fields.", &body);
+    GtkWidget *enc_body, *dec_body, *stack_body;
+    GtkWidget *enc = verb_card("BUILD A REQUEST", &enc_body);
+    GtkWidget *dec = verb_card("READ A MESSAGE", &dec_body);
+    GtkWidget *stack = verb_card("UE STACK", &stack_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(enc_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the Request",
+                "--encode-attach", "310150123456789",
+                "The subscriber identity. The answer is the NAS message as hex, "
+                "with the plmn, the identity type and the TAC derived from it."));
+        gtk_box_append(GTK_BOX(enc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), enc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dec_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Message",
+                "--decode-nas", "0741E208090113100521436587F9",
+                "The NAS message as hex. The security header decides how the "
+                "rest is read: a plain message and a protected one do not share "
+                "an offset."));
+        gtk_box_append(GTK_BOX(dec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(stack_body),
+            mod_arg_row(state, module_id, status, "Read the Stack",
+                "--ue-stack", "",
+                "Which LTE UE stack this machine has, by name if it has none. "
+                "A modem on a serial port counts, and is reported as such."));
+        gtk_box_append(GTK_BOX(stack_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), stack);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+latt_build_identity(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("IDENTITY",
+        "How a subscriber identity is coded on the wire, and the one request that "
+        "makes a handset say it in the clear.", &body);
+    GtkWidget *enc_body, *dec_body, *exp_body;
+    GtkWidget *enc = verb_card("ENCODE", &enc_body);
+    GtkWidget *dec = verb_card("DECODE", &dec_body);
+    GtkWidget *exp = verb_card("EXPOSURE", &exp_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(enc_body),
+            mod_arg_row_prefilled(state, module_id, status, "Encode the Identity",
+                "--imsi-encode", "310150123456789",
+                "The IMSI as digits. The answer is the packed BCD and the EPS "
+                "mobile identity that carries it, which is where a swapped "
+                "half-octet shows."));
+        gtk_box_append(GTK_BOX(enc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), enc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dec_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode the Octets",
+                "--imsi-decode", "08090113100521436587F9",
+                "The identity as hex. IMSI, IMEI and GUTI share a length octet "
+                "and nothing else, so the type decides the reading."));
+        gtk_box_append(GTK_BOX(dec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(exp_body),
+            mod_arg_row_prefilled(state, module_id, status, "Check the Request",
+                "--identity-exposure", "075301",
+                "A plain-NAS IDENTITY REQUEST asking for the IMSI is the "
+                "canonical exposure: the answer names the finding and its "
+                "severity, and a protected request is reported as not exposed."));
+        gtk_box_append(GTK_BOX(exp_body), res);
+    }
+    gtk_box_append(GTK_BOX(exp_body), fkit_note(
+        "The check reads the security header before the body. A protected "
+        "request carries the same message type and means something different, "
+        "which is why the security context is printed beside the finding."));
+    gtk_box_append(GTK_BOX(body), exp);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry latt_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--decode-nas:Decode NAS|--encode-attach:Encode Attach|--ue-stack:UE Stack" },
-    { "Identity",
-      "auth-smartcard-symbolic",
-      "--imsi-decode:Decode IMSI|--imsi-encode:Encode IMSI|~--identity-exposure:Identity Exposure" },
-    { "GUTI",
-      "network-wired-symbolic",
-      "#CODEC|--decode-guti:Decode GUTI|--encode-guti:Encode GUTI|#ATTACH|--encode-attach-guti:Encode Attach (GUTI)" },
-    { "Integrity",
-      "channel-secure-symbolic",
-      "#NAS-MAC|--nas-mac:NAS MAC|#DOWNLINK|--build-attach-accept:Build Attach Accept|--build-tau-accept:Build TAU Accept" },
+    { "Attach", "dialog-information-symbolic", NULL, latt_build_attach },
+    { "Identity", "auth-smartcard-symbolic", NULL, latt_build_identity },
 };
 static ModuleSubmenuEntry lair_entries[] = {
     { "Overview",
