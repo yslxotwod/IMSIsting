@@ -1718,6 +1718,41 @@ octets, two calls multiplexed on one five-tuple, and two streams of one call.
 still renders a verb list next to a raw output window. The rule is the operator's,
 given twice and settling:
 
+*Started — the shared answer surface is built; the per-page work is what is
+left.* The thing that made every module page look like a terminal was not the
+card, it was `build_output_card()`: a near-black scroller under an OUTPUT
+heading, identical on all 48 spec-driven pages because all 48 go through
+`build_group_view()`. Replacing it once replaced it everywhere, so what is built
+now is the vocabulary rather than forty-eight bespoke layouts:
+
+- a hairline, one line of summary (`9 records  ·  done`), and the records;
+- a two-field answer reads as a key/value table, a three-or-more-field answer
+  reads as a real table with the module's own headings, right-aligned counts and
+  a Copy per row, and a free-form answer falls back to a record row with its
+  badge and meta line;
+- **no verb and no module id reaches the screen**: `display_text()` rewrites
+  `--scan` as *Scan* and `02_cell_recon` as *cell recon* on every rendering
+  path, while Copy still hands back the bytes the module actually printed;
+- one-or-two-record answers become a **toast** plus a one-line receipt, because a
+  path or a count is not a table; refusals never compact, because a refusal has
+  to be readable where it lands;
+- **Stop** sits in the summary row of whatever card owns the run, sends SIGTERM
+  and then SIGKILL to the whole process tree (`kill_tree()` reads /proc), is
+  offered as "Force Stop" on a second press, and a stopped run is its own
+  verdict rather than a failure.
+
+Gate: `tools/check-gui-pages.sh` — 21 checks, exits 2 if the shapes it looks for
+are renamed away, honours the exclusion list (the eight hand-built pages and
+`00_deps`), and currently reports `every spec-driven module page answers in its
+own card`.
+
+What is **not** done: each of the 48 pages still has its views cut as
+`Overview / <one view per verb group>` from the spec strings, and the operator's
+rule is that a view is a *category of work*, not a pocket of verbs — that part is
+per-page and has not been rewritten. The landing overview page and the
+placeholder page still own an output card; both are outside the scope the
+operator set.
+
 > "the button in catalogue have results but where do you see these results ? it
 > should be a place somewhere in the same rectangle window and never in the
 > output windows because these windows are going to be removed from every modules

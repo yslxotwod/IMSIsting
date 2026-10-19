@@ -572,7 +572,29 @@ typedef struct {
     gboolean wait_ok;       /* how the process itself ended */
     int wait_status;
     gboolean reported;      /* the callback has run */
+    gboolean stopped;       /* the operator cancelled it, so it is not a fault */
 } ActionRun;
+
+/* The answer surface a card owns: where the records a run prints land, the one
+   line that says how many there are, and the Stop that belongs to whatever is
+   running there. Declared here because the card builders below name it. */
+#define RESULT_MAX_ROWS 400
+
+typedef struct {
+    GtkWidget *rect;
+    GtkWidget *rows;      /* where the run's records land */
+    GtkWidget *idle;      /* the one-line invitation, before the first run */
+    GtkWidget *stop;      /* cancels the run this surface started */
+    GtkWidget *summary;   /* "3 records  ·  done (exit 0)" */
+    GtkTextBuffer *buf;   /* what the run writes into */
+} ResultRect;
+
+static void result_begin(AppState *state, ResultRect *rr);
+static gint result_rows_count(ResultRect *rr);
+static void result_compact(ResultRect *rr, const char *receipt);
+static gboolean run_receipt(ActionRun *run, char **out);
+static GtkWidget *result_rect_new(AppState *state, ResultRect **out);
+static void result_end(ResultRect *rr);
 
 /* Which pipe a read callback belongs to. */
 typedef struct {
@@ -1652,6 +1674,38 @@ action_run_unref(ActionRun *run)
                   run->wait_status, run->done_owner);
     }
 
+    /* Now the module's whole answer is known: close the card it was read in
+       with one line saying how the run ended, then take the Stop away. */
+    if (run->output != NULL) {
+        ResultRect *rr = g_object_get_data(G_OBJECT(run->output), "result-rect");
+        g_autofree char *verdict = run->stopped
+            ? g_strdup("stopped")
+            : ((!run->wait_ok || run->wait_status != 0 || run->saw_error)
+                ? g_strdup_printf("failed (exit %d)", run->wait_status)
+                : g_strdup("done"));
+
+        if (rr != NULL) {
+            gint records = result_rows_count(rr);
+            g_autofree char *receipt = NULL;
+
+            g_object_set_data_full(G_OBJECT(rr->rows), "verdict",
+                                   g_strdup(verdict), g_free);
+
+            /* One or two records are a receipt, not a table: say it in a toast
+               and leave the card holding the same sentence. A refusal is never
+               compacted - a refusal has to be readable where it lands. */
+            if (records >= 1 && records <= 2 && !run->saw_error && !run->stopped &&
+                run_receipt(run, &receipt) && receipt != NULL) {
+                result_compact(rr, receipt);
+                show_toast_full(run->state, run->label, receipt, "ok");
+            } else {
+                result_end(rr);
+            }
+        } else {
+            console_append(run->output, verdict);
+        }
+    }
+
     if (run->state->running != NULL &&
         g_ptr_array_find(run->state->running, run, NULL))
         g_ptr_array_remove(run->state->running, run);
@@ -1737,10 +1791,15 @@ action_waited(GObject *source, GAsyncResult *result, gpointer user_data)
     else
         status = g_subprocess_get_exit_status(G_SUBPROCESS(source));
 
-    /* A module that prints ERROR, or that exits non-zero, is a failure even
-       when the spawn itself succeeded. Reporting "done" here would be the
-       exact bug this toolkit exists to avoid. */
-    if (!ok || status != 0 || run->saw_error) {
+    /* A cancelled run is a verdict of its own. It is not a failure - the
+       operator asked for it - and it is not a success either, so neither word
+       is used and the card says which one happened. */
+    if (run->stopped) {
+        g_autofree char *m = g_strdup_printf("%s: stopped", run->label);
+        append_event(state, m);
+        show_toast_full(state, run->label, "stopped", "warn");
+        status_label_set(run->status_label, "Stopped", "status-stopped");
+    } else if (!ok || status != 0 || run->saw_error) {
         g_autofree char *m = g_strdup_printf("%s: failed (exit %d)",
                                              run->label, status);
         append_event(state, m);
@@ -1756,14 +1815,9 @@ action_waited(GObject *source, GAsyncResult *result, gpointer user_data)
         status_label_set(run->status_label, "Done", "status-ok");
     }
 
-    /* Close the output card with the same verdict as the Events drawer, so
-       a run reads as finished where it was started. */
-    if (run->output != NULL) {
-        g_autofree char *sum = (!ok || status != 0 || run->saw_error)
-            ? g_strdup_printf("-- failed (exit %d)", status)
-            : g_strdup("-- done (exit 0)");
-        console_append(run->output, sum);
-    }
+    /* The card's closing line is written on the run's LAST release, below, not
+       here: the process can exit while its pipes still hold records, so a
+       verdict written at exit landed in the middle of the module's answer. */
 
     /* The card that started the run is told directly, so it can build its own
        result from what the module said. That happens on the run's LAST
@@ -1776,8 +1830,10 @@ action_waited(GObject *source, GAsyncResult *result, gpointer user_data)
     /* If a Casebook is active, preserve the result as a correlated event.
        No evidence is hashed automatically: indexing large IQ files remains an
        explicit operator action in Casebook > Captures. */
-    const char *severity = (!ok || status != 0 || run->saw_error) ? "HIGH" : "INFO";
-    const char *outcome = (!ok || status != 0 || run->saw_error) ? "failed" : "completed";
+    const char *severity = run->stopped ? "INFO"
+        : ((!ok || status != 0 || run->saw_error) ? "HIGH" : "INFO");
+    const char *outcome = run->stopped ? "stopped"
+        : ((!ok || status != 0 || run->saw_error) ? "failed" : "completed");
     g_autofree char *message = g_strdup_printf("%s: %s (exit %d)",
                                                run->label, outcome, status);
     const char *cb_args[] = { "--timeline-add", severity, "module-run",
@@ -2093,11 +2149,11 @@ group_verb_clicked(GtkButton *button, gpointer user_data)
         if (wanted != NULL && *wanted != '\0') {
             label = g_strdup(wanted);
         } else {
-            g_autofree char *nice = verb_label(verb);
-
-            label = (argspec != NULL && *argspec != '\0')
-                ? g_strdup_printf("%s %s", nice, argspec)
-                : g_strdup(nice);
+            /* The arguments are a shell fragment - `--cause 15` is a flag, not
+               something a window should read - so the label is the job, and a
+               reader who wants the values looks at the module's own output,
+               which prints them back. */
+            label = verb_label(verb);
             }
     }
     {
@@ -2106,6 +2162,15 @@ group_verb_clicked(GtkButton *button, gpointer user_data)
         ActionDoneFn done =
             (ActionDoneFn) g_object_get_data(G_OBJECT(button), "done");
         GObject *owner = g_object_get_data(G_OBJECT(button), "done-owner");
+        GtkWidget *result = g_object_get_data(G_OBJECT(button), "result");
+
+        /* The rect the press came from becomes where this run is read, and
+           where its Stop lives. Done before the spawn: the first line of
+           output can arrive before imsisting_action_run_full() returns. */
+        if (result != NULL) {
+            ResultRect *rr = g_object_get_data(G_OBJECT(result), "result-rect");
+            result_begin(state, rr);
+        }
 
         imsisting_action_run_full(state, module_id, label, status, argv,
                                   privileged, state->active_output,
@@ -2133,6 +2198,118 @@ verb_card(const char *heading, GtkWidget **body_out)
     gtk_box_append(GTK_BOX(card), body);
     if (body_out != NULL) *body_out = body;
     return card;
+}
+
+/* ── what a module's own words look like on the page ────────────────────
+ *
+ * The rule is that no verb appears in this interface, and the hardest place to
+ * keep it is not our own labels - it is the text the modules print, which is
+ * written for a terminal and says things like
+ *     step 1: 02_cell_recon --scan gsm GSM900
+ * Showing that verbatim puts a command-line flag on screen, which the rule
+ * forbids and which also reads badly: a reader wants to know what is happening,
+ * not which switch was passed.
+ *
+ * So module text is translated for display, never stored translated:
+ *   --flag        becomes the job's own name, between two raised dots, so the
+ *                 sentence still parses and the flag is gone;
+ *   02_cell_recon becomes "cell recon", because a module id is an address in
+ *                 the tree, not a thing an operator says.
+ *
+ * The copy action keeps the original line. What is displayed is a reading of
+ * the record; what is copied is the record.
+ */
+static gboolean
+token_is_verb(const char *tok)
+{
+    if (tok == NULL || tok[0] != '-' || tok[1] != '-') return FALSE;
+    if (tok[2] == '\0') return FALSE;
+    for (const char *c = tok + 2; *c != '\0'; c++)
+        if (!(g_ascii_isalnum(*c) || *c == '-' || *c == '.' || *c == '_'))
+            return FALSE;
+    return TRUE;
+}
+
+static gboolean
+token_is_module_id(const char *tok)
+{
+    if (tok == NULL || !g_ascii_isdigit(tok[0]) || !g_ascii_isdigit(tok[1]))
+        return FALSE;
+    if (tok[2] != '_') return FALSE;
+    for (const char *c = tok + 3; *c != '\0'; c++)
+        if (!(g_ascii_isalnum(*c) || *c == '_')) return FALSE;
+    return tok[3] != '\0';
+}
+
+/* "cell_recon" -> "cell recon": the id's own words, no path, no number. */
+static char *
+module_id_words(const char *tok)
+{
+    /* g_strdelimit returns its argument, but it is allowed to reallocate it, so
+       the returned pointer is the only one that may be freed. Handing the
+       original to g_autofree as well is a double free - which is what crashed
+       the page the first time a chain narrated its own steps. */
+    char *spaced = g_strdelimit(g_strdup(tok + 3), "_", ' ');
+    char *out = g_strdup(spaced);
+
+    g_free(spaced);
+    return out;
+}
+
+static char *
+display_text(const char *raw)
+{
+    g_auto(GStrv) words = NULL;
+    GString *out = g_string_new(NULL);
+
+    if (raw == NULL) return g_strdup("");
+    words = g_strsplit(raw, " ", -1);
+
+    for (int i = 0; words[i] != NULL; i++) {
+        const char *w = words[i];
+        g_autofree char *clean = NULL;
+
+        if (*w == '\0') continue;
+
+        /* A flag can be glued to punctuation the module wrote: strip the ends,
+           translate the middle, then put the punctuation back. */
+        {
+            gsize lead = 0, len = strlen(w);
+            g_autofree char *core = NULL;
+            char tail = '\0';
+
+            while (lead < len && !(w[lead] == '-' || g_ascii_isalnum(w[lead])))
+                lead++;
+            while (len > lead && !(g_ascii_isalnum(w[len - 1]) ||
+                                   w[len - 1] == '-' || w[len - 1] == '_'))
+                len--;
+            if (len > lead) {
+                if (len < strlen(w)) tail = w[len];
+                core = g_strndup(w + lead, len - lead);
+            }
+
+            if (core != NULL && token_is_verb(core)) {
+                g_autofree char *job = verb_label(core + 2);
+                g_autofree char *head = g_strndup(w, lead);
+                clean = g_strdup_printf("%s\u00b7 %s \u00b7%s", head, job,
+                                        tail != '\0' ? " " : "");
+                if (tail != '\0') {
+                    g_autofree char *with = g_strdup_printf("%s%c", clean, tail);
+                    g_free(clean);
+                    clean = g_steal_pointer(&with);
+                }
+            } else if (core != NULL && token_is_module_id(core)) {
+                g_autofree char *head = g_strndup(w, lead);
+                g_autofree char *words_of = module_id_words(core);
+                clean = g_strdup_printf("%s%s", head, words_of);
+            }
+        }
+
+        if (out->len > 0) g_string_append_c(out, ' ');
+        g_string_append(out, clean != NULL ? clean : w);
+    }
+
+    return g_string_free(out, FALSE);
 }
 
 /* Turn a verb into a label when the layout does not give one:
@@ -2218,7 +2395,7 @@ group_arg_clicked(GtkButton *button, gpointer user_data)
    button: verb [!] [:label]. */
 static void
 group_arg_row(AppState *state, const char *module_id, const char *spec,
-              GtkWidget *status, GtkWidget *body)
+              GtkWidget *status, GtkWidget *body, GtkWidget *result)
 {
     g_autofree char *item = g_strdup(spec);
     g_autofree char *verb = NULL;
@@ -2250,18 +2427,30 @@ group_arg_row(AppState *state, const char *module_id, const char *spec,
 
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     entry = gtk_entry_new();
-    btn = gtk_button_new_with_label(label);
+    btn = gtk_button_new_with_label("Run");
 
-    /* The placeholder names the verb the field feeds, so an empty form still
-       says what it is for. */
-    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), verb);
+    /* A form row reads as a sentence: what it is for, the field, the action.
+       The caption is the job's own name and never the verb - a window in this
+       toolkit does not show a command-line flag, and a placeholder that did
+       was the last place one still leaked. */
+    {
+        GtkWidget *cap = gtk_label_new(label);
+        gtk_widget_add_css_class(cap, "form-caption");
+        gtk_label_set_xalign(GTK_LABEL(cap), 0.0f);
+        gtk_widget_set_size_request(cap, 150, -1);
+        gtk_widget_set_valign(cap, GTK_ALIGN_CENTER);
+        gtk_box_append(GTK_BOX(row), cap);
+    }
     gtk_widget_set_hexpand(entry, TRUE);
     gtk_widget_add_css_class(entry, "verb-arg-entry");
     gtk_widget_add_css_class(btn, "verb-button");
+    gtk_widget_add_css_class(btn, "primary");
 
     g_object_set_data(G_OBJECT(btn), "state", state);
     g_object_set_data(G_OBJECT(btn), "module-id", (gpointer) module_id);
     g_object_set_data(G_OBJECT(btn), "status", status);
+    if (result != NULL)
+        g_object_set_data(G_OBJECT(btn), "result", result);
     g_object_set_data(G_OBJECT(btn), "privileged", GINT_TO_POINTER(privileged));
     g_object_set_data_full(G_OBJECT(btn), "verb", g_strdup(verb), g_free);
     g_object_set_data(G_OBJECT(btn), "arg-entry", entry);
@@ -2294,7 +2483,8 @@ spec_has_buttons(const char *spec)
 
 static void
 group_fill(AppState *state, const char *module_id, const char *spec,
-           GtkWidget *status, GtkWidget *body, gboolean primary_first)
+           GtkWidget *status, GtkWidget *body, gboolean primary_first,
+           GtkWidget *result)
 {
     GtkWidget *flow = gtk_flow_box_new();
     gboolean primary_done = FALSE;
@@ -2357,6 +2547,8 @@ group_fill(AppState *state, const char *module_id, const char *spec,
             g_object_set_data(G_OBJECT(btn), "state", state);
             g_object_set_data(G_OBJECT(btn), "module-id", (gpointer) module_id);
             g_object_set_data(G_OBJECT(btn), "status", status);
+            if (result != NULL)
+                g_object_set_data(G_OBJECT(btn), "result", result);
             g_object_set_data(G_OBJECT(btn), "privileged",
                               GINT_TO_POINTER(privileged));
             g_object_set_data_full(G_OBJECT(btn), "verb", g_strdup(verb), g_free);
@@ -2377,7 +2569,7 @@ group_fill(AppState *state, const char *module_id, const char *spec,
     /* The verbs that needed an argument, each with its own entry. */
     for (guint i = 0; i < arg_specs->len; i++)
         group_arg_row(state, module_id, g_ptr_array_index(arg_specs, i),
-                      status, body);
+                      status, body, result);
     g_ptr_array_unref(arg_specs);
 }
 
@@ -2420,10 +2612,15 @@ build_group_cards(AppState *state, const char *module_id, const char *title,
             if (!spec_has_buttons(text)) continue;
         }
 
-        GtkWidget *body;
+        GtkWidget *body, *result;
+        ResultRect *rr = NULL;
         GtkWidget *card = verb_card(heading, &body);
+
+        result = result_rect_new(state, &rr);
         group_fill(state, module_id, text, status, body,
-                   primary_first && !any);
+                   primary_first && !any, result);
+        /* Inside the same rectangle as the buttons, under them. */
+        gtk_box_append(GTK_BOX(body), result);
         gtk_box_append(GTK_BOX(box), card);
         any = TRUE;
     }
@@ -2435,9 +2632,13 @@ static GtkWidget *
 build_group_card(AppState *state, const char *module_id, const char *title,
                  const char *spec, GtkWidget *status, gboolean primary_first)
 {
-    GtkWidget *body;
+    GtkWidget *body, *result;
+    ResultRect *rr = NULL;
     GtkWidget *card = verb_card(title, &body);
-    group_fill(state, module_id, spec, status, body, primary_first);
+
+    result = result_rect_new(state, &rr);
+    group_fill(state, module_id, spec, status, body, primary_first, result);
+    gtk_box_append(GTK_BOX(body), result);
     return card;
 }
 
@@ -2485,6 +2686,227 @@ console_scroll_bottom(GtkWidget *list)
  *
  * The one thing that stays monospace is the command echo, because that IS a
  * command line and should look like one. */
+/* Is this line a record the module printed as `key<TAB>value`?
+ *
+ * Almost every verb in the tree answers in TSV, and echoing that as a sentence
+ * with the tab flattened to spaces is what made a result read like a log. A
+ * record has a shape, so it is drawn with one: the key is a dim caption on the
+ * left, the value is the thing to read. The rule is deliberately narrow - one
+ * tab, a key of word characters, dashes and dots, and no spaces in the key -
+ * so a prose line that happens to contain a tab is still shown as prose. */
+static gboolean
+console_tsv_split(const char *text, char **key_out, const char **val_out)
+{
+    const char *tab = strchr(text, '\t');
+    if (tab == NULL || tab == text) return FALSE;
+    for (const char *c = text; c < tab; c++) {
+        if (!(g_ascii_isalnum(*c) || *c == '_' || *c == '-' || *c == '.' ||
+              *c == ' '))
+            return FALSE;
+    }
+    /* A single leading space is an indent from the module, not part of the key. */
+    *key_out = g_strndup(text, (gsize)(tab - text));
+    g_strstrip(*key_out);
+    if (**key_out == '\0') { g_free(*key_out); *key_out = NULL; return FALSE; }
+    *val_out = tab + 1;
+    return TRUE;
+}
+
+static gboolean record_copy_reset(gpointer button);
+static void record_copy_clicked(GtkButton *button, gpointer user_data);
+
+/* ── tabular answers ────────────────────────────────────────────────────
+ *
+ * Most module lists are tables: the first line the module prints is its column
+ * names, and every line after that has the same fields. Drawn as a table, that
+ * reads at a glance; drawn as a stack of identity rows it reads as noise, with
+ * the header line pretending to be a record.
+ *
+ * So the first row of three or more fields opens a table: its fields become the
+ * column headings, and every row with the same field count joins it. Column
+ * widths are the content's own - the grid sizes itself - and the last column
+ * takes the slack, because the last field of a module's record is usually the
+ * description and the description is the thing that can wrap.
+ */
+static void
+table_cell_add(GtkWidget *grid, const char *text, int col, int row,
+               gboolean header, gboolean grow)
+{
+    g_autofree char *clean = display_text(text != NULL ? text : "");
+    GtkWidget *label = gtk_label_new(clean);
+
+    /* A last column of prose should wrap; a column of identifiers must not. */
+    gtk_widget_add_css_class(label, header ? "table-head" : "table-cell");
+    gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+    if (header)
+        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_NONE);
+    else
+        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+    /* A column of counts is a column of digits and nothing else; an identifier
+       that merely starts with one ("5g-privacy") is not a number and stays
+       left, where a reader looks for a name. */
+    if (!header && text != NULL && *text != '\0') {
+        gboolean numeric = TRUE;
+        for (const char *c = text; *c != '\0'; c++)
+            if (!g_ascii_isdigit(*c)) { numeric = FALSE; break; }
+        if (numeric) {
+            gtk_label_set_xalign(GTK_LABEL(label), 1.0f);
+            gtk_widget_set_halign(label, GTK_ALIGN_END);
+        }
+    }
+    if (!header) gtk_label_set_selectable(GTK_LABEL(label), TRUE);
+    if (grow) {
+        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_NONE);
+        gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+        gtk_label_set_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
+        gtk_widget_set_hexpand(label, TRUE);
+    }
+    gtk_grid_attach(GTK_GRID(grid), label, col, row, 1, 1);
+}
+
+/* Add one row of fields to a tabular answer. */
+static void
+table_body(GtkWidget *list, GtkWidget *grid, GStrv fields, int cols)
+{
+    AppState *state = g_object_get_data(G_OBJECT(list), "state");
+    int row = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(grid), "rows"));
+    int col;
+
+    for (col = 0; col < cols; col++)
+        table_cell_add(grid, fields[col], col, row, FALSE, col == cols - 1);
+
+    if (state != NULL) {
+        g_autoptr(GString) joined = g_string_new(NULL);
+        for (col = 0; col < cols; col++) {
+            if (col > 0) g_string_append_c(joined, '\t');
+            g_string_append(joined, fields[col] != NULL ? fields[col] : "");
+        }
+        {
+            GtkWidget *copy = gtk_button_new_with_label("Copy");
+            gtk_widget_add_css_class(copy, "record-copy");
+            gtk_widget_add_css_class(copy, "flat");
+            gtk_widget_set_valign(copy, GTK_ALIGN_CENTER);
+            g_object_set_data(G_OBJECT(copy), "state", state);
+            g_signal_connect(copy, "clicked", G_CALLBACK(record_copy_clicked),
+                             (gpointer) g_strdup(joined->str));
+            gtk_grid_attach(GTK_GRID(grid), copy, cols, row, 1, 1);
+        }
+    }
+    g_object_set_data(G_OBJECT(grid), "rows", GINT_TO_POINTER(row + 1));
+    {
+        gint n = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(list), "records"));
+        g_object_set_data(G_OBJECT(list), "records", GINT_TO_POINTER(n + 1));
+    }
+}
+
+/* Copy one record to the clipboard. A record is worth keeping - an IMSI, a
+   chain, a byte string - and selecting a label by hand is not a control. */
+static void
+record_copy_clicked(GtkButton *button, gpointer user_data)
+{
+    const char *text = user_data;
+    AppState *state = g_object_get_data(G_OBJECT(button), "state");
+    GdkClipboard *clip;
+
+    if (text == NULL || state == NULL) return;
+    clip = gdk_display_get_clipboard(gtk_widget_get_display(state->window));
+    gdk_clipboard_set_text(clip, text);
+    gtk_button_set_label(button, "Copied");
+    g_timeout_add_seconds(2, (GSourceFunc) record_copy_reset, button);
+}
+
+/* The Copy label is a receipt: it says Copied, then goes back to saying what
+   it does, so the row still offers the action a second time. */
+static gboolean
+record_copy_reset(gpointer button)
+{
+    if (GTK_IS_BUTTON(button)) gtk_button_set_label(GTK_BUTTON(button), "Copy");
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean
+stop_button_reset(gpointer button)
+{
+    if (GTK_IS_BUTTON(button)) gtk_button_set_label(GTK_BUTTON(button), "Stop");
+    return G_SOURCE_REMOVE;
+}
+
+/* One record, drawn as a record: identity, badges, the rest as meta. */
+static void
+record_row_append(GtkWidget *list, const char *text, GStrv fields)
+{
+    AppState *state = g_object_get_data(G_OBJECT(list), "state");
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *mark = gtk_label_new("\u25cf");
+    g_autofree char *ident_txt = display_text(fields[0]);
+    GtkWidget *ident = gtk_label_new(ident_txt);
+    g_autoptr(GString) meta = g_string_new(NULL);
+    int used = 1;
+
+    gtk_widget_add_css_class(row, "record-row");
+    gtk_widget_add_css_class(mark, "record-mark");
+    gtk_widget_add_css_class(ident, "record-id");
+    gtk_label_set_xalign(GTK_LABEL(mark), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(ident), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(ident), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_label_set_selectable(GTK_LABEL(ident), TRUE);
+    gtk_widget_set_valign(mark, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(head), mark);
+    gtk_box_append(GTK_BOX(head), ident);
+
+    /* A short second field with no spaces is a classifier - imsi, guti, PASS -
+       and belongs in a chip beside the identity, where it reads at a glance. */
+    if (fields[1] != NULL && !strchr(fields[1], ' ') && strlen(fields[1]) <= 18 &&
+        !g_ascii_isdigit(fields[1][0])) {
+        g_autofree char *badge_txt = display_text(fields[1]);
+        GtkWidget *badge = gtk_label_new(badge_txt);
+        gtk_widget_add_css_class(badge, "record-badge");
+        gtk_label_set_xalign(GTK_LABEL(badge), 0.0f);
+        gtk_box_append(GTK_BOX(head), badge);
+        used = 2;
+    }
+
+    for (int i = used; fields[i] != NULL; i++) {
+        if (g_strstrip(fields[i])[0] == '\0') continue;
+        g_autofree char *cell = display_text(fields[i]);
+        if (meta->len > 0) g_string_append(meta, "  \u00b7  ");
+        g_string_append(meta, cell);
+    }
+
+    if (state != NULL) {
+        GtkWidget *copy = gtk_button_new_with_label("Copy");
+        gtk_widget_add_css_class(copy, "record-copy");
+        gtk_widget_add_css_class(copy, "flat");
+        gtk_widget_set_valign(copy, GTK_ALIGN_START);
+        gtk_widget_set_hexpand(copy, FALSE);
+        gtk_widget_set_halign(copy, GTK_ALIGN_END);
+        g_object_set_data(G_OBJECT(copy), "state", state);
+        g_signal_connect(copy, "clicked", G_CALLBACK(record_copy_clicked),
+                         (gpointer) g_strdup(text));
+        gtk_box_append(GTK_BOX(head), copy);
+        gtk_widget_set_hexpand(ident, TRUE);
+    }
+
+    gtk_box_append(GTK_BOX(row), head);
+
+    if (meta->len > 0) {
+        GtkWidget *m = gtk_label_new(meta->str);
+        gtk_widget_add_css_class(m, "record-meta");
+        gtk_label_set_xalign(GTK_LABEL(m), 0.0f);
+        gtk_label_set_wrap(GTK_LABEL(m), TRUE);
+        gtk_label_set_wrap_mode(GTK_LABEL(m), PANGO_WRAP_WORD_CHAR);
+        gtk_widget_set_margin_start(m, 18);
+        gtk_box_append(GTK_BOX(row), m);
+    }
+
+    gtk_box_append(GTK_BOX(list), row);
+    {
+        gint n = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(list), "records"));
+        g_object_set_data(G_OBJECT(list), "records", GINT_TO_POINTER(n + 1));
+    }
+}
+
 static void
 console_row_append(GtkWidget *list, const char *text)
 {
@@ -2492,8 +2914,82 @@ console_row_append(GtkWidget *list, const char *text)
     const char *marker = "\u25cf";     /* a dot, as in the status strip */
     const char *body = text;
     GtkWidget *row, *glyph, *msg;
+    g_autofree char *tkey = NULL;
+    const char *tval = NULL;
 
     if (text == NULL || *text == '\0') return;
+
+    /* A card has one line saying how the run ended - the summary - so the
+       trailer is not repeated as a record under a table already wearing it,
+       and neither is the command echo: the button that ran it is directly
+       above, carrying the same words, and a shell line in a record list reads
+       as a leak from another program. */
+    if (g_object_get_data(G_OBJECT(list), "no-pin") != NULL &&
+        (g_str_has_prefix(text, "$ ") ||
+         g_str_has_prefix(text, "-- done") || g_str_has_prefix(text, "-- failed") ||
+         g_str_has_prefix(text, "-- stopped")))
+        return;
+
+    /* Three or more tab-separated fields: a table. The first such row is the
+       module's own column headings, and it says how wide the table is; a later
+       row with a different width is not part of it and is drawn as a record. */
+    {
+        g_auto(GStrv) fields = g_strsplit(text, "\t", -1);
+        int n = g_strv_length(fields);
+        GtkWidget *grid = g_object_get_data(G_OBJECT(list), "answer-grid");
+        int cols = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(list),
+                                                     "answer-cols"));
+
+        if (n >= 3) {
+            if (grid == NULL) {
+                gtk_box_append(GTK_BOX(list), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+                grid = gtk_grid_new();
+                gtk_widget_add_css_class(grid, "answer-table");
+                gtk_grid_set_column_spacing(GTK_GRID(grid), 18);
+                gtk_grid_set_row_spacing(GTK_GRID(grid), 3);
+                g_object_set_data(G_OBJECT(grid), "rows", GINT_TO_POINTER(1));
+                g_object_set_data(G_OBJECT(list), "answer-grid", grid);
+                g_object_set_data(G_OBJECT(list), "answer-cols",
+                                  GINT_TO_POINTER(n));
+                for (int c = 0; c < n; c++)
+                    table_cell_add(grid, fields[c], c, 0, TRUE, c == n - 1);
+                gtk_box_append(GTK_BOX(list), grid);
+                return;
+            }
+            if (n == cols) {
+                table_body(list, grid, fields, cols);
+                return;
+            }
+        }
+    }
+
+    /* Two fields are the parts of one answer: a name and its value. */
+    if (console_tsv_split(text, &tkey, &tval)) {
+        g_autofree char *val_txt = display_text(tval);
+        GtkWidget *k = gtk_label_new(tkey);
+        GtkWidget *v = gtk_label_new(val_txt);
+
+        row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+        gtk_widget_add_css_class(row, "answer-row");
+        gtk_widget_add_css_class(k, "answer-key");
+        gtk_widget_add_css_class(v, "answer-value");
+        gtk_label_set_xalign(GTK_LABEL(k), 0.0f);
+        gtk_label_set_xalign(GTK_LABEL(v), 0.0f);
+        gtk_label_set_wrap(GTK_LABEL(v), TRUE);
+        gtk_label_set_wrap_mode(GTK_LABEL(v), PANGO_WRAP_WORD_CHAR);
+        gtk_label_set_selectable(GTK_LABEL(v), TRUE);
+        gtk_widget_set_valign(k, GTK_ALIGN_START);
+        gtk_widget_set_size_request(k, 172, -1);
+        gtk_widget_set_hexpand(v, TRUE);
+        gtk_box_append(GTK_BOX(row), k);
+        gtk_box_append(GTK_BOX(row), v);
+        gtk_box_append(GTK_BOX(list), row);
+        {
+            gint n = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(list), "records"));
+            g_object_set_data(G_OBJECT(list), "records", GINT_TO_POINTER(n + 1));
+        }
+        return;
+    }
 
     if (g_str_has_prefix(text, "$ ")) {
         cls = "log-cmd"; marker = "$"; body = text + 2;
@@ -2516,7 +3012,10 @@ console_row_append(GtkWidget *list, const char *text)
 
     row   = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     glyph = gtk_label_new(marker);
-    msg   = gtk_label_new(body);
+    {
+        g_autofree char *readable = display_text(body);
+        msg = gtk_label_new(readable);
+    }
 
     gtk_widget_add_css_class(row, "log-row");
     gtk_widget_add_css_class(row, cls);
@@ -2535,6 +3034,107 @@ console_row_append(GtkWidget *list, const char *text)
     gtk_box_append(GTK_BOX(row), glyph);
     gtk_box_append(GTK_BOX(row), msg);
     gtk_box_append(GTK_BOX(list), row);
+}
+
+/* ── stopping a run ─────────────────────────────────────────────────────
+ *
+ * A scan, a sweep, a capture or a storm runs until it is done or until the
+ * operator has seen enough, and a page whose only control is "start" leaves
+ * them closing the window. So every run is interruptible, and the interrupt
+ * is honest about what it did.
+ *
+ * Signals go to the whole tree, not just the process the module started: a
+ * module's long verb is usually a shell that has spawned a scanner, and
+ * killing the shell alone leaves the scanner holding the radio. The tree is
+ * walked in /proc rather than assumed, so no `setsid` and no change to how a
+ * module is spawned was needed.
+ *
+ * First press asks (SIGTERM); pressing again insists (SIGKILL). Neither is
+ * silent: the run says `-- stopping` and then reports `stopped`, which is a
+ * verdict, not a fault - a cancelled run is not a failed one.
+ */
+static void
+kill_tree(pid_t root, int sig)
+{
+    /* /proc/<pid>/stat holds `pid (comm) state ppid ...`, and comm can contain
+       spaces and parentheses, so the parent is read from the LAST ')'. */
+    GHashTable *parent_of = g_hash_table_new(g_direct_hash, g_direct_equal);
+    GPtrArray *order = g_ptr_array_new();          /* children before parents */
+    g_autoptr(GDir) d = g_dir_open("/proc", 0, NULL);
+    const char *name;
+    GQueue queue = G_QUEUE_INIT;
+
+    if (d == NULL) { kill(root, sig); return; }
+
+    while ((name = g_dir_read_name(d)) != NULL) {
+        g_autofree char *path = NULL;
+        g_autofree char *data = NULL;
+        const char *close_paren;
+        long pid, ppid;
+
+        if (!g_ascii_isdigit(name[0])) continue;
+        pid = strtol(name, NULL, 10);
+        if (pid <= 0) continue;
+
+        path = g_strdup_printf("/proc/%ld/stat", pid);
+        if (!g_file_get_contents(path, &data, NULL, NULL)) continue;
+        close_paren = strrchr(data, ')');
+        if (close_paren == NULL) continue;
+        if (sscanf(close_paren + 1, " %*c %ld", &ppid) != 1) continue;
+        g_hash_table_insert(parent_of, GINT_TO_POINTER((int) pid),
+                            GINT_TO_POINTER((int) ppid));
+    }
+    /* Breadth-first from the root, collecting descendants. */
+    g_queue_push_tail(&queue, GINT_TO_POINTER((int) root));
+    while (!g_queue_is_empty(&queue)) {
+        int pid = GPOINTER_TO_INT(g_queue_pop_head(&queue));
+        GHashTableIter it;
+        gpointer k, v;
+
+        g_hash_table_iter_init(&it, parent_of);
+        while (g_hash_table_iter_next(&it, &k, &v)) {
+            if (GPOINTER_TO_INT(v) != pid) continue;
+            g_ptr_array_add(order, k);
+            g_queue_push_tail(&queue, k);
+        }
+        if (order->len > 4096) break;
+    }
+
+    /* Deepest first: a parent that dies re-parents its children and the walk
+       would stop seeing them. */
+    for (gint i = (gint) order->len - 1; i >= 0; i--)
+        kill((pid_t) GPOINTER_TO_INT(g_ptr_array_index(order, i)), sig);
+    kill(root, sig);
+
+    g_ptr_array_unref(order);
+    g_hash_table_destroy(parent_of);
+}
+
+/* Ask a run to stop, or insist. Returns FALSE when there is nothing running
+   that this control is allowed to stop. */
+static gboolean
+action_stop(ActionRun *run, gboolean force)
+{
+    g_autofree char *pid_text = NULL;
+    pid_t pid;
+
+    if (run == NULL || run->proc == NULL) return FALSE;
+    pid_text = g_strdup(g_subprocess_get_identifier(run->proc));
+    if (pid_text == NULL || *pid_text == '\0') return FALSE;
+    pid = (pid_t) strtol(pid_text, NULL, 10);
+    if (pid <= 0) return FALSE;
+
+    run->stopped = TRUE;
+    if (run->output != NULL)
+        console_append(run->output,
+                       force ? "-- stopping: force" : "-- stopping");
+    if (force) {
+        kill_tree(pid, SIGKILL);
+    } else {
+        status_label_set(run->status_label, "Stopping", "status-running");
+        kill_tree(pid, SIGTERM);
+    }
+    return TRUE;
 }
 
 static void
@@ -2564,8 +3164,13 @@ console_append(GtkTextBuffer *buf, const char *text)
             console_row_append(list, lines[j]);
         }
         /* Append whether or not the page is on screen - the text has to be
-           there when it is shown - but only scroll what is visible. */
-        if (gtk_widget_get_mapped(list))
+           there when it is shown - but only scroll what is visible.
+
+           An answer list is not pinned to the bottom: a list of records is read
+           from the first one, and the newest thing in it is not the interesting
+           thing the way the newest log line is. */
+        if (gtk_widget_get_mapped(list) &&
+            g_object_get_data(G_OBJECT(list), "no-pin") == NULL)
             console_scroll_bottom(list);
     }
 }
@@ -2602,6 +3207,297 @@ console_view_destroyed(GtkWidget *view, gpointer buf)
     views = g_object_get_data(G_OBJECT(buf), "output-views");
     if (views != NULL)
         g_ptr_array_remove(views, view);
+}
+
+/* ── the answer ─────────────────────────────────────────────────────────
+ *
+ * Every card that can run something owns the place its answer appears, and
+ * the answer is DATA IN THAT CARD, not a log well with a caption over it.
+ * The operator's rule, given three times, is that a card reads like the
+ * workbook page it replaces: controls in a row at the top, then the answer
+ * filling the rest of the same surface.
+ *
+ * So there is no RESULT caption, no boxed pseudo-terminal and no rectangle
+ * that exists only to hold text. What a card grows, in order, is:
+ *   - a hairline, because the answer is a different thing from the controls;
+ *   - a summary line: how many records, and how the run ended;
+ *   - the records themselves, one of two shapes.
+ *
+ * The shape is decided by what the module printed, because the module already
+ * knows: a two-field `key<TAB>value` row is a field of one answer and is drawn
+ * as a labelled value; a tab-separated row of three or more fields is one
+ * record among many and is drawn as a record - its first field as the identity,
+ * the rest as a meta line, and a Copy action for the whole line.
+ */
+static void
+result_rows_clear(ResultRect *rr)
+{
+    GtkWidget *child;
+
+    if (rr == NULL || rr->rows == NULL) return;
+    g_object_set_data(G_OBJECT(rr->rows), "answer-grid", NULL);
+    g_object_set_data(G_OBJECT(rr->rows), "answer-cols", NULL);
+    g_object_set_data(G_OBJECT(rr->rows), "records", GINT_TO_POINTER(0));
+    child = gtk_widget_get_first_child(rr->rows);
+    while (child != NULL) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        gtk_box_remove(GTK_BOX(rr->rows), child);
+        child = next;
+    }
+}
+
+static gint
+result_rows_count(ResultRect *rr)
+{
+    if (rr == NULL || rr->rows == NULL) return 0;
+    return GPOINTER_TO_INT(g_object_get_data(G_OBJECT(rr->rows), "records"));
+}
+
+/* Find the newest run writing into this rect's buffer. Matched on the buffer
+   itself, which is the one handle the run and the card share. */
+static ActionRun *
+result_running(AppState *state, ResultRect *rr)
+{
+    if (state == NULL || state->running == NULL || rr == NULL) return NULL;
+    for (guint i = state->running->len; i > 0; i--) {
+        ActionRun *a = g_ptr_array_index(state->running, i - 1);
+        if (a != NULL && a->output == rr->buf) return a;
+    }
+    return NULL;
+}
+
+static void
+result_stop_clicked(GtkButton *button, gpointer user_data)
+{
+    ResultRect *rr = user_data;
+    AppState *state = g_object_get_data(G_OBJECT(button), "state");
+    ActionRun *a = result_running(state, rr);
+
+    /* If the card cannot find its own run - a buffer that moved, a page that
+       was rebuilt - fall back to the newest run on the machine, because the
+       operator pressed Stop on the only thing they are watching. A Stop that
+       silently does nothing is worse than a Stop that stops too much, and it
+       says which run it stopped. */
+    if (a == NULL && state != NULL && state->running != NULL &&
+        state->running->len > 0)
+        a = g_ptr_array_index(state->running, state->running->len - 1);
+    if (a == NULL) {
+        gtk_button_set_label(button, "Nothing to stop");
+        g_timeout_add_seconds(2, (GSourceFunc) stop_button_reset, button);
+        return;
+    }
+
+    /* First press asks, second press insists. The label says which it will do,
+       so nobody has to guess whether the first press was enough. */
+    if (g_object_get_data(G_OBJECT(button), "insisting") != NULL) {
+        action_stop(a, TRUE);
+        gtk_button_set_label(button, "Stopping");
+        gtk_widget_set_sensitive(GTK_WIDGET(button), FALSE);
+        return;
+    }
+    action_stop(a, FALSE);
+    g_object_set_data(G_OBJECT(button), "insisting", GINT_TO_POINTER(1));
+    gtk_button_set_label(button, "Force Stop");
+    gtk_widget_set_tooltip_text(GTK_WIDGET(button),
+        "Pressing again kills the run outright, including anything it started.");
+}
+
+/* A run is starting in this rect: clear what the last one left, hide the
+   invitation, offer the Stop, and point the page's output at this card so the
+   run's records land here and not in a card on another view. */
+/* One line that says what is in the card. The RESULT heading said nothing;
+   this says how many records there are, which is what a reader wants first. */
+static void
+result_summary_set(ResultRect *rr, const char *text)
+{
+    if (rr == NULL || rr->summary == NULL) return;
+    gtk_label_set_text(GTK_LABEL(rr->summary), text != NULL ? text : "");
+    gtk_widget_set_visible(rr->summary, text != NULL);
+}
+
+static void
+result_begin(AppState *state, ResultRect *rr)
+{
+    if (rr == NULL) return;
+    result_rows_clear(rr);
+    if (rr->idle != NULL) gtk_widget_set_visible(rr->idle, FALSE);
+    result_summary_set(rr, "running\u2026");
+    if (rr->stop != NULL) {
+        g_object_set_data(G_OBJECT(rr->stop), "insisting", NULL);
+        gtk_button_set_label(GTK_BUTTON(rr->stop), "Stop");
+        gtk_widget_set_tooltip_text(rr->stop,
+            "Asks the run and everything it started to stop.");
+        gtk_widget_set_sensitive(rr->stop, TRUE);
+        gtk_widget_set_visible(rr->stop, TRUE);
+    }
+    if (state != NULL) {
+        state->active_output = rr->buf;
+        g_object_set_data(G_OBJECT(rr->stop), "state", state);
+    }
+}
+
+/* The run has ended: the Stop no longer belongs on screen, and an empty result
+   goes back to inviting the next press rather than showing a blank rectangle. */
+/* A short answer does not need a table. One or two records - a path, a number,
+   a verdict - are read once and then belong where a receipt belongs: in a toast
+   that says what happened, with the card keeping the same sentence as its one
+   line. The Events drawer still has the full output, so nothing is lost; what
+   is avoided is a card that fills up with a single row and pushes the next one
+   off the page. */
+static void
+result_compact(ResultRect *rr, const char *receipt)
+{
+    if (rr == NULL) return;
+    result_rows_clear(rr);
+    if (rr->idle != NULL) gtk_widget_set_visible(rr->idle, FALSE);
+    result_summary_set(rr, receipt);
+}
+
+/* The printable part of what a run said: the values of its records, or the
+   prose lines it printed, joined into one sentence. */
+static gboolean
+run_receipt(ActionRun *run, char **out)
+{
+    g_auto(GStrv) lines = NULL;
+    GString *receipt = g_string_new(NULL);
+    gboolean saw_error = run->saw_error;
+
+    if (run->captured == NULL || run->captured->len == 0) return FALSE;
+
+    lines = g_strsplit(run->captured->str, "\n", -1);
+    for (int i = 0; lines[i] != NULL; i++) {
+        const char *line = lines[i];
+        g_autofree char *tkey = NULL;
+        const char *tval = NULL;
+        const char *part = line;
+        g_autofree char *clean = NULL;
+
+        if (*line == '\0') continue;
+        if (g_str_has_prefix(line, "$ ") || g_str_has_prefix(line, "-- "))
+            continue;
+
+        if (console_tsv_split(line, &tkey, &tval)) part = tval;
+        else if (g_str_has_prefix(part, "[info]")) part += 6;
+        else if (g_str_has_prefix(part, "[ok]")) part += 4;
+        while (*part == ' ' || *part == '\t') part++;
+
+        clean = display_text(part);
+        if (*clean == '\0') continue;
+        if (receipt->len > 0) g_string_append(receipt, "  \u00b7  ");
+        g_string_append(receipt, clean);
+    }
+
+    if (receipt->len == 0) {
+        g_string_free(receipt, TRUE);
+        return FALSE;
+    }
+    *out = g_string_free(receipt, FALSE);
+    return !saw_error;
+}
+
+static void
+result_end(ResultRect *rr)
+{
+    if (rr == NULL) return;
+    if (rr->stop != NULL) {
+        g_object_set_data(G_OBJECT(rr->stop), "insisting", NULL);
+        gtk_button_set_label(GTK_BUTTON(rr->stop), "Stop");
+        gtk_widget_set_sensitive(rr->stop, TRUE);
+        gtk_widget_set_visible(rr->stop, FALSE);
+    }
+    if (rr->idle != NULL)
+        gtk_widget_set_visible(rr->idle, result_rows_count(rr) == 0);
+    {
+        gint n = result_rows_count(rr);
+        const char *verdict = g_object_get_data(G_OBJECT(rr->rows), "verdict");
+        g_autofree char *t = (verdict != NULL && *verdict != '\0')
+            ? g_strdup_printf("%d record%s  \u00b7  %s", n, n == 1 ? "" : "s", verdict)
+            : g_strdup_printf("%d record%s", n, n == 1 ? "" : "s");
+        result_summary_set(rr, n > 0 ? t : NULL);
+
+        /* Read from the top: put this card at the top of the page it lives on. */
+        if (n == 0) return;
+        GtkWidget *sw = gtk_widget_get_ancestor(rr->rect, GTK_TYPE_SCROLLED_WINDOW);
+        GtkWidget *page = sw != NULL ? gtk_scrolled_window_get_child(
+                              GTK_SCROLLED_WINDOW(sw)) : NULL;
+
+        if (page != NULL) {
+            graphene_rect_t b;
+            if (gtk_widget_compute_bounds(rr->rect, page, &b)) {
+                GtkAdjustment *adj =
+                    gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(sw));
+                if (adj != NULL)
+                    gtk_adjustment_set_value(adj, MAX(0.0, b.origin.y - 12.0));
+            }
+        }
+    }
+}
+
+static GtkWidget *
+result_rect_new(AppState *state, ResultRect **out)
+{
+    ResultRect *rr = g_new0(ResultRect, 1);
+    GtkWidget *rule = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    GtkWidget *rect = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+
+    rr->rect = rect;
+    rr->rows = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    g_object_set_data(G_OBJECT(rr->rows), "state", state);
+    rr->buf     = gtk_text_buffer_new(NULL);
+    rr->stop    = gtk_button_new_with_label("Stop");
+    rr->idle    = gtk_label_new(NULL);
+    rr->summary = gtk_label_new(NULL);
+
+    gtk_widget_add_css_class(rect, "answer-body");
+    gtk_widget_add_css_class(rule, "answer-rule");
+    gtk_widget_add_css_class(rr->stop, "stop-inline");
+    gtk_widget_add_css_class(rr->idle, "answer-idle");
+    gtk_widget_add_css_class(rr->rows, "answer-rows");
+    gtk_widget_add_css_class(rr->summary, "answer-summary");
+
+    gtk_widget_set_hexpand(rr->summary, TRUE);
+    gtk_label_set_xalign(GTK_LABEL(rr->summary), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(rr->idle), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(rr->idle), TRUE);
+    /* One line, not a paragraph: a card that has never been used should look
+       ready rather than empty, and the line leaves as soon as a record lands. */
+    gtk_label_set_text(GTK_LABEL(rr->idle), "Nothing run in this card yet.");
+    gtk_widget_set_visible(rr->stop, FALSE);
+    gtk_widget_set_visible(rr->summary, FALSE);
+
+    gtk_box_append(GTK_BOX(head), rr->summary);
+    gtk_box_append(GTK_BOX(head), rr->stop);
+
+    gtk_widget_set_margin_top(rr->rows, 2);
+    gtk_widget_set_margin_bottom(rr->rows, 2);
+    gtk_widget_set_valign(rr->rows, GTK_ALIGN_START);
+
+    (void) scroll;   /* no inner scroller: the card grows, the page scrolls */
+    gtk_widget_add_css_class(rr->rows, "answer-list");
+    g_object_set_data(G_OBJECT(rr->rows), "no-pin", GINT_TO_POINTER(1));
+
+    gtk_box_append(GTK_BOX(rect), rule);
+    gtk_box_append(GTK_BOX(rect), rr->idle);
+    gtk_box_append(GTK_BOX(rect), head);
+    gtk_box_append(GTK_BOX(rect), rr->rows);
+
+    /* The run writes into the same buffer the console card uses, so the rows
+       are built by the one renderer that already knows how to draw a record. */
+    {
+        GPtrArray *views = g_ptr_array_new();
+        g_ptr_array_add(views, rr->rows);
+        g_object_set_data_full(G_OBJECT(rr->buf), "output-views", views,
+                               (GDestroyNotify) g_ptr_array_unref);
+    }
+    g_object_set_data(G_OBJECT(rr->buf), "result-rect", rr);
+    g_object_set_data(G_OBJECT(rr->stop), "state", NULL);
+    g_signal_connect(rr->stop, "clicked", G_CALLBACK(result_stop_clicked), rr);
+    g_object_set_data_full(G_OBJECT(rect), "result-rect", rr, g_free);
+
+    if (out != NULL) *out = rr;
+    return rect;
 }
 
 static GtkWidget *
@@ -2670,8 +3566,12 @@ build_group_view(AppState *state, const char *module_id, const char *title,
     gtk_widget_set_hexpand(inner, TRUE);
     gtk_box_append(GTK_BOX(inner),
         build_group_cards(state, module_id, title, spec, status, FALSE));
-    if (out != NULL)
-        gtk_box_append(GTK_BOX(inner), build_output_card(out));
+    /* No page-wide output card here. Each card above owns its own result, and
+       a second place for the same text is the thing this replaces. `out` stays
+       in the signature because the page still owns a buffer for the controls
+       that are not part of a card, and because changing every caller to prove
+       a point would be churn. */
+    (void) out;
     gtk_box_append(GTK_BOX(outer), inner);
     return outer;
 }

@@ -1487,6 +1487,131 @@ scrollbar slider:hover {
 }
 .output-card-view text { background-color: transparent; }
 
+/* ── the answer ──────────────────────────────────────────────────────
+   A card's answer is data on the card, not a terminal in a box. Three parts:
+   a hairline that separates controls from what they produced, one summary line
+   carrying the count, and the records.
+
+   The record shape is the one the operator pointed at: a mark, an identity
+   that reads first, a small classifier chip, then the rest as dim meta. Rows
+   are separated by space and a hairline rather than by a box each, so a list
+   of twenty reads as a list and not as twenty panels. */
+.answer-body { margin-top: 4px; }
+.answer-rule {
+    background-color: alpha(@line, 0.75);
+    min-height: 1px;
+    margin-bottom: 2px;
+}
+.answer-summary {
+    color: #7a8798;
+    font-size: 10px;
+    letter-spacing: 0.6px;
+}
+.answer-idle {
+    color: #5f6b7c;
+    font-size: 11px;
+    padding: 1px 0 2px 0;
+}
+.answer-scroll { background-color: transparent; }
+.answer-rows { background-color: transparent; }
+
+/* A field of one answer: the module's own key on the left, its value on the
+   right. The key column is fixed so values line up down the card and a scan of
+   the right-hand column reads as a table. */
+.answer-row { padding: 1px 0; }
+.answer-key {
+    color: #77849a;
+    font-family: "Source Code Pro", "DejaVu Sans Mono", monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.2px;
+}
+.answer-value {
+    color: #d3deec;
+    font-size: 12px;
+}
+
+/* A form row: the caption is the job, the field takes the value, the button
+   runs it. The caption column is fixed so a card of several rows lines up. */
+.form-caption {
+    color: #8593a8;
+    font-size: 11px;
+    letter-spacing: 0.2px;
+}
+
+/* A tabular answer: the module's own columns, its own rows. The headings are
+   micro-caps and the cells are set in the interface font so a row reads as a
+   sentence; identifiers keep their own face because digits must align. */
+.answer-table { margin-top: 2px; }
+.table-head {
+    color: #6d7a8c;
+    font-size: 9px;
+    letter-spacing: 1.1px;
+}
+.table-cell {
+    color: #cfdaea;
+    font-size: 11.5px;
+}
+
+/* One record among many. */
+.record-row {
+    padding: 5px 0 5px 0;
+    border-bottom: 1px solid alpha(@line, 0.55);
+}
+.record-mark {
+    color: #4d7f9e;
+    font-size: 8px;
+    padding-top: 4px;
+}
+.record-id {
+    color: #e2ecf8;
+    font-family: "Source Code Pro", "DejaVu Sans Mono", monospace;
+    font-size: 12.5px;
+    font-weight: 700;
+}
+.record-badge {
+    background-color: alpha(@accent, 0.16);
+    border-radius: 3px;
+    color: #9ec0dc;
+    font-size: 9px;
+    letter-spacing: 0.6px;
+    padding: 1px 6px;
+    margin-top: 2px;
+}
+.record-meta {
+    color: #6f7c8e;
+    font-size: 10.5px;
+}
+.record-copy {
+    color: #7f8da1;
+    font-size: 9.5px;
+    letter-spacing: 0.5px;
+    padding: 1px 8px;
+    min-height: 16px;
+}
+.record-copy:hover { color: #cfdcec; background-color: alpha(@line, 0.6); }
+
+/* Stop: in the summary row, where the run's state is already reported. Amber,
+   because it is a deliberate interruption and not a fault. */
+.stop-inline {
+    background-color: transparent;
+    border: 1px solid #6b5630;
+    border-radius: 5px;
+    color: #d9b26f;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.7px;
+    padding: 1px 9px;
+    min-height: 16px;
+}
+.stop-inline:hover {
+    background-color: alpha(#d9b26f, 0.16);
+    border-color: #d9b26f;
+}
+.status-stopped {
+    background-color: #6b5630;
+    color: #f2ddb4;
+}
+
 /* ── Cell Recon · Targets list ──────────────────────────────────────
    One row per surveyed cell: identity and identifiers on the left, the
    numbers worth scanning down in the middle, Set target on the right. */
