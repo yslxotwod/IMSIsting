@@ -370,6 +370,12 @@ def parse_text(text: str) -> dict:
         "unproven": len([r for r in pdus if r["pdu"].get("layer") == "unproven"]),
         "refused": len([r for r in records if r.get("reason")]),
         "prose": len([r for r in records if r["shape"] == "prose"]),
+        # Which subsystems spoke.  A buffer that is all prose still has to say
+        # WHO was talking: RILJ prose means the modem interface logged and
+        # carried no PDUs, while a buffer of unrelated tags means the wrong
+        # buffer was read at all.  Those are different findings.
+        "prose_tags": __import__("collections").Counter(
+            r.get("tag") or "-" for r in records if r["shape"] == "prose"),
     }
 
 
@@ -456,6 +462,10 @@ def selftest() -> int:
 
     # Prose is counted apart from refusals: a quiet log is not a broken one.
     _check("prose-counted-not-refused", parsed["prose"], 3, results)
+    # Prose still names its author.  A buffer whose prose is all RILJ logged the
+    # modem interface and carried no PDUs; a buffer of strangers read the wrong
+    # buffer.  Without the tag the two look identical.
+    _check("prose-tags-name-the-subsystem", dict(parsed["prose_tags"]).get("RILJ"), 3, results)
     _check("refused-is-only-unusable-octets", parsed["refused"], 1, results)
 
     js = json.dumps(parsed)
@@ -516,6 +526,8 @@ def _rows(parsed: dict, source: str, with_commands: bool, decoded: list = ()) ->
         row("shape." + key, count)
     for key, count in sorted(parsed["layers"].items()):
         row("layer." + str(key), count)
+    for tag, count in parsed["prose_tags"].most_common(8):
+        row("prose_tag." + tag, count)
     index = 0
     for rec in parsed["records"]:
         if rec.get("reason"):

@@ -177,12 +177,13 @@ ue_cmd_identity() {
     # IMEI: `dumpsys iphonesubinfo` carried it in cleartext through Android 9
     # and redacts it from 10 onward, where the field reads "Device ID = <null>"
     # or the service refuses.  Report which happened rather than a guess.
-    local sub imei src
+    local sub imei src imei_raw=""
     sub=$(ue_shell 'dumpsys iphonesubinfo' | tr -d '\r')
     imei=$(printf '%s\n' "$sub" | sed -n 's/.*Device ID *= *//p' | head -1 | tr -d ' ')
     src='dumpsys iphonesubinfo'
     if [[ -z "$imei" || ! "$imei" =~ ^[0-9]{14,16}$ ]]; then
-        imei=$(printf '%s\n' "$(ue_shell 'service call iphonesubinfo 1')" | ue_parcel_string | tr -dc '0-9')
+        imei_raw=$(ue_shell 'service call iphonesubinfo 1' | tr -d '\r')
+        imei=$(printf '%s\n' "$imei_raw" | ue_parcel_string | tr -dc '0-9')
         src='service call iphonesubinfo 1 (transaction ids vary by release)'
     fi
     if [[ "$imei" =~ ^[0-9]{14,16}$ ]]; then
@@ -197,6 +198,15 @@ ue_cmd_identity() {
         local why
         why=$(printf '%s\n' "$sub" | grep -iE 'device id|permission|denial|error|null|exception' \
               | head -1 | sed 's/^[[:space:]]*//')
+        if printf '%s' "$imei_raw" | grep -qi 'ffffffff'; then
+            # The OS's own null is the fact; the empty parcel says WHY it is a
+            # null rather than a number.  Both belong in the one row.
+            if [[ -n "$why" ]]; then
+                why="$why (the binder call returned an empty string: withheld on this build, not absent from it)"
+            else
+                why="the binder call succeeded and returned an empty string -- withheld on this build, not absent from it"
+            fi
+        fi
         ue_emit imei unavailable
         ue_emit imei_evidence "${why:-the service answered, and it named no Device ID at all}"
         ue_emit imei_note "both paths are closed on this handset without root; an IMEI is not a secret the radio needs, it is a secret the OS hides"
@@ -217,6 +227,9 @@ ue_cmd_identity() {
         ireason=$(printf '%s\n' "$imsi_raw" | grep -vE '^[[:space:]]*$' \
                   | grep -iE 'permission|denial|error|null|exception|unknown' | head -1 \
                   | sed 's/^[[:space:]]*//')
+        if [[ -z "$ireason" ]] && printf '%s' "$imsi_raw" | grep -qi 'ffffffff'; then
+            ireason="the binder call succeeded and returned an empty string -- withheld on this build, not absent from it"
+        fi
         ue_emit imsi unavailable
         ue_emit imsi_evidence "${ireason:-the per-subscription call answered with no digits}"
         ue_emit imsi_note "closed without READ_PHONE_STATE; the radio modules can still read it off the wire"
@@ -298,27 +311,92 @@ ue_cmd_radio() {
 
 # The serving cell is the one observation that cannot be inferred from the
 # bench's own radio: this is what the phone was actually camped on.
+# Every CellIdentity the dump printed, as rows: "rat<TAB>n<TAB>name" and
+# "field<TAB>n<TAB>name<TAB>value".  The first block is the serving cell and the
+# rest are what the modem knows of the neighbourhood.  A field can be a number,
+# "Unknown", or absent, and those are three different answers, so none is
+# dropped quietly.  Three layouts are in the wild: no spaces around "=", spaces
+# around it, and the same fields inside a CellInfo wrapper.
+ue_cell_blocks() {
+    awk '
+    {
+        line = $0
+        while (match(line, /CellIdentity[A-Za-z]*:/) > 0) {
+            rest = substr(line, RSTART)
+            depth = 0; end = 0
+            for (i = 1; i <= length(rest); i++) {
+                c = substr(rest, i, 1)
+                if (c == "{") { depth++ }
+                else if (c == "}") { depth--; if (depth == 0) { end = i; break } }
+            }
+            if (end == 0) { end = length(rest) }
+            obj = substr(rest, 1, end)
+            rat = obj
+            sub(/:.*/, "", rat)
+            sub(/^CellIdentity/, "", rat)
+            nb++
+            printf "rat\t%d\t%s\n", nb, (rat == "" ? "unknown" : rat)
+            gsub(/[{}]/, " ", obj)
+            gsub(/ *= */, "=", obj)
+            gsub(/,/, " ", obj)
+            cnt = split(obj, parts, /[ \t]+/)
+            for (k = 1; k <= cnt; k++) {
+                eq = index(parts[k], "=")
+                if (eq == 0) { continue }
+                name = substr(parts[k], 1, eq - 1)
+                val = substr(parts[k], eq + 1)
+                if (name ~ /^m[A-Za-z]+$/ && val != "") {
+                    printf "field\t%d\t%s\t%s\n", nb, substr(name, 2), val
+                }
+            }
+            line = substr(line, RSTART + end)
+        }
+    }'
+}
+
 ue_cmd_cells() {
     ue_cmd_probe >/dev/null 2>&1
     local rc=$?; (( rc == 3 )) && { ue_unavailable; return 3; }
-    local reg
+    local reg rows
     reg=$(ue_shell 'dumpsys telephony.registry' | tr -d '\r')
-    local ident
-    ident=$(printf '%s\n' "$reg" | grep -o 'CellIdentity[^}]*}' | head -1)
-    if [[ -z "$ident" ]]; then
+    rows=$(printf '%s\n' "$reg" | ue_cell_blocks)
+    if [[ -z "$rows" ]]; then
         ue_emit status no-cell-info
         ue_emit reason "telephony.registry carried no CellIdentity; the handset may be idle or the API withheld it"
         return 3
     fi
     ue_emit status cell-seen
-    local rat
-    rat=$(printf '%s' "$reg" | grep -o 'CellIdentity[A-Z][A-Za-z]*' | head -1 | sed 's/CellIdentity//')
-    ue_emit rat "${rat:-unknown}"
-    local key value
-    for key in mCi mPci mTac mEarfcn mMcc mMnc mBandwidth mNrArfcn; do
-        value=$(printf '%s' "$ident" | sed -n "s/.*$key *= *\([-0-9]*\).*/\1/p" | head -1)
-        [[ -n "$value" ]] && ue_emit "cell.${key#m}" "$value"
+    ue_emit blocks "$(printf '%s\n' "$rows" | grep -c '^rat')"
+    local kind idx name val
+    while IFS=$'\t' read -r kind idx name val; do
+        case "$kind" in
+            rat)   [[ "$idx" == "1" ]] && ue_emit rat "$name"
+                   ue_emit "cells.$idx.rat" "$name" ;;
+            field) ue_emit "cells.$idx.$name" "$val"
+                   [[ "$idx" == "1" ]] && ue_emit "cell.$name" "$val" ;;
+        esac
+    done <<< "$rows"
+
+    # The serving cell cannot be described without these four.  A field the dump
+    # marked Unknown says the modem withheld it; a field the dump never printed
+    # says this build does not publish it.  One is a policy, the other is a
+    # version, and the operator needs to know which.
+    local f v missing="" withheld=""
+    for f in Ci Pci Tac Earfcn; do
+        v=$(printf '%s\n' "$rows" | awk -F'\t' -v n="$f" '$1=="field" && $2==1 && $3==n {print $4; exit}')
+        if [[ -z "$v" ]]; then
+            missing="$missing $f"
+        elif [[ "$v" == Unknown || "$v" == unknown || "$v" == null ]]; then
+            withheld="$withheld $f"
+        fi
     done
+    [[ -n "$missing" ]] && ue_emit missing "${missing# }"
+    [[ -n "$withheld" ]] && ue_emit withheld "${withheld# }"
+
+    local rsrp
+    rsrp=$(printf '%s\n' "$reg" | grep -oE 'm?[Rr]srp *= *-?[0-9]+' | head -1 | sed 's/.*= *//')
+    [[ -n "$rsrp" ]] && ue_emit signal_rsrp "$rsrp"
+    return 0
 }
 
 # The modem's own account of what it did: `adb logcat -b radio`, sorted into
@@ -443,7 +521,17 @@ case "$*" in
     "shell dumpsys iphonesubinfo") printf 'Phone Subscriber Info:\n  Service Info: Device ID = 356938035643809\n' ;;
     "shell service call iphonesubinfo 1") printf 'Result: Parcel(\n  0x00000000 0x00330033 0x00390036 0x00380033 0x00300033 0x00350033 0x00340036 0x00330033 0x00390038 0x00000000 '"'"'.'"'"')\n' ;;
     "shell service call iphonesubinfo 7") printf 'Result: Parcel(0x0000000f 0x00310033 0x00310030 0x00300035 0x00320031 0x00340033 0x00360035 0x00380037 0x00000039 '"'"'.'"'"')\n' ;;
-    "shell dumpsys telephony.registry") printf '  mServiceState=ServiceState{ mVoiceRegState=0 mDataRegState=0 }\n  mSignalStrength=SignalStrength: 20 -1 -1 -1 -1 mGsmSignalStrength = 20 mRsrp = -95 mRsrq = -11\n  mCellIdentity=CellIdentityLte:{ mCi=12345678 mPci=301 mTac=26011 mEarfcn=6300 mMcc=310 mMnc=260 mBandwidth=20000}\n' ;;
+    "shell dumpsys telephony.registry")
+        printf '  mServiceState=ServiceState{ mVoiceRegState=0 mDataRegState=0 }\n  mSignalStrength=SignalStrength: 20 -1 -1 -1 -1 mGsmSignalStrength = 20 mRsrp = -95 mRsrq = -11\n'
+        # The modern layout puts spaces around "=" and prints a neighbour block
+        # after the serving one; the withheld variant is what a handset that
+        # refuses to publish its identity looks like.
+        if [[ "${UE_STUB_CELLS:-}" == "withheld" ]]; then
+            printf '  mCellIdentity=CellIdentityLte:{ mCi = 12345678 mPci = Unknown mTac = 26011 mMcc = 310 mMnc = 260 }\n'
+        else
+            printf '  mCellIdentity=CellIdentityLte:{ mCi = 12345678 mPci = 301 mTac = 26011 mEarfcn = 6300 mBands = [3] mBandwidth = 20000 mMcc = 310 mMnc = 260 }\n'
+            printf '  mCellInfo=[CellInfoLte:{ mRegistered=YES mCellIdentityLte=CellIdentityLte:{ mCi = 87654321 mPci = 12 mTac = Unknown mEarfcn = 1300 mMcc = 310 mMnc = 260 }}]\n'
+        fi ;;
     # The radio buffer: prose, an AT trace, a proven APDU and a proven NAS PDU.
     "logcat -b radio -d -v threadtime -t 400") printf '01-02 03:04:05.678  1234  5678 D RILJ    : [UNSL]< UNSOL_RESPONSE_NETWORK_STATE\n01-02 03:04:05.679  1234  5678 D AT      : AT> AT+CSQ\n01-02 03:04:05.681  1234  5678 D RIL     : AT< +CRSM: 144,0,\"002F0A0B0C\"\n01-02 03:04:05.682  1234  5678 D RILC    : NAS: 07 41 0b f1 10\n' ;;
     *) printf 'stub: unhandled command: %s\n' "$*" >&2; exit 127 ;;
@@ -504,6 +592,16 @@ EOF
     ue_check cell-tac      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Tac"{print $2}')"      "26011"
     ue_check cell-earfcn   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Earfcn"{print $2}')"   "6300"
     ue_check cell-mcc      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell.Mcc"{print $2}')"      "310"
+    # Two blocks now: the serving cell and a neighbour.  A neighbour's Unknown
+    # field is still a field, and it must reach the reader as "Unknown" rather
+    # than vanish.
+    ue_check cell-blocks   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="blocks"{print $2}')"       "2"
+    ue_check cell-nb-pci   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cells.2.Pci"{print $2}')"  "12"
+    ue_check cell-nb-tac   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cells.2.Tac"{print $2}')"  "Unknown"
+    ue_check cell-rsrp     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="signal_rsrp"{print $2}')"  "-95"
+    out=$(UE_STUB_CELLS=withheld PATH="$stub_dir:$saved_path" UE_ADB="$stub_dir/adb" bash "${BASH_SOURCE[0]}" --cells 2>/dev/null)
+    ue_check cell-withheld "$(printf '%s\n' "$out" | awk -F'\t' '$1=="withheld"{print $2}')"     "Pci"
+    ue_check cell-missing  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="missing"{print $2}')"      "Earfcn"
     ue_check cell-status   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')"        "cell-seen"
 
     # 4b. The radio log: a saved log parses without a handset, a live one comes
@@ -580,6 +678,30 @@ STUB
     out=$(PATH="$stub_dir:$saved_path" UE_ADB="$stub_dir/adb" bash "${BASH_SOURCE[0]}" --identity 2>/dev/null)
     ue_check identity-sim-mcc     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="sim_mcc"{print $2}')" "310"
     ue_check identity-sim-mnc     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="sim_mnc"{print $2}')" "260"
+    # 9. A hardened OS that REDACTES answers the binder call successfully with an
+    #    empty string.  That is not the same as a missing field, a permission
+    #    denial, or a service that will not run, and the evidence row says which.
+    local redact_dir; redact_dir=$(mktemp -d)
+    cat > "$redact_dir/adb" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+    version) printf 'Android Debug Bridge version 1.0.41\n' ;;
+    "devices -l") printf 'List of devices attached\n33201FDH2004W1\tdevice usb:1-2 transport_id:3\n' ;;
+    shell\ getprop\ *) printf '\r\n' ;;
+    "shell dumpsys iphonesubinfo") printf 'Phone Subscriber Info:\n  Service Info: Device ID = <null>\n' ;;
+    "shell service call iphonesubinfo 1"|"shell service call iphonesubinfo 7") printf "Result: Parcel( 00000000 ffffffff '........')\n" ;;
+    *) printf 'stub: unhandled command: %s\n' "$*" >&2; exit 127 ;;
+esac
+STUB
+    chmod +x "$redact_dir/adb"
+    out=$(UE_ADB="$redact_dir/adb" PATH="$redact_dir:$saved_path" bash "${BASH_SOURCE[0]}" --identity 2>/dev/null)
+    ue_check redacted-imei "$(printf '%s\n' "$out" | awk -F'\t' '$1=="imei"{print $2}')" "unavailable"
+    ue_check redacted-imei-evidence \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="imei_evidence"{print $2}' | grep -c 'withheld on this build')" "1"
+    ue_check redacted-imsi-evidence \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="imsi_evidence"{print $2}' | grep -c 'withheld on this build')" "1"
+    rm -rf "$redact_dir"
+
     rm -rf "$unauth_dir"
 
     UE_SERIAL="$saved_serial"
