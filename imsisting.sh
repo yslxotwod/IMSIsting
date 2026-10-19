@@ -710,8 +710,31 @@ if (( ! IMSISTING_SOURCED )) && [[ "${IMSISTING_GUI:-0}" != "1" ]]; then
 fi
 
 # ── main menu ───────────────────────────────────────────────
+# Is a GUI already up ON THIS DISPLAY?
+#
+# The plain `pgrep -x imsisting-gui` test that used to live here was blind to
+# the display, so any instance anywhere - a screenshot run on a virtual X
+# server, a second session, a window left open on another monitor's DISPLAY -
+# made every later launch print "already running" and do nothing. The symptom
+# the operator sees is a GUI that will not start, with no error to explain it.
+gui_running_here() {
+    local pid d want="${DISPLAY:-}"
+
+    for pid in $(pgrep -x imsisting-gui 2>/dev/null); do
+        d=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null |
+            sed -n 's/^DISPLAY=//p' | head -1)
+        [[ -z "$d" ]] && d="$want"
+        if [[ "$d" == "$want" ]]; then
+            printf '%s' "$pid"
+            return 0
+        fi
+    done
+    return 1
+}
+
 launch_gui() {
-    if ! pgrep -x imsisting-gui >/dev/null 2>&1; then
+    local running
+    if ! running=$(gui_running_here); then
         local bin="$IMSISTING_ROOT/native/builddir/imsisting-gui"
         [[ -x "$bin" ]] || bin="$IMSISTING_ROOT/native/build/imsisting-gui"
         if [[ ! -x "$bin" ]]; then
@@ -723,7 +746,7 @@ launch_gui() {
         nohup "$bin" >/dev/null 2>&1 &
         sleep 1
     else
-        info "imsisting-gui is already running"
+        info "imsisting-gui is already running on this display (pid $running)"
         sleep 1
     fi
 }
