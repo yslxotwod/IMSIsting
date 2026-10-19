@@ -19617,16 +19617,170 @@ static ModuleSubmenuEntry oran_entries[] = {
       "security-high-symbolic",
       "--qos-policy:A1 QoS Policy|~--qos-policy-check:QoS Policy Check" },
 };
+/* 49_ntn — 5G NTN / Satellite.
+ *
+ * The satellite moves, and every question on this page is a consequence of that
+ * one fact: how far, how fast, how much timing advance that costs, and how much
+ * of it the standard lets a network pre-compensate.
+ */
+static GtkWidget *
+ntn_build_geometry(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("GEOMETRY",
+        "What a satellite's motion does to the signal: the shift, the delay, and "
+        "the timing advance that follows from the delay.", &body);
+    GtkWidget *dop_body, *range_body, *ta_body;
+    GtkWidget *dop = verb_card("DOPPLER SHIFT", &dop_body);
+    GtkWidget *range = verb_card("RANGE AND DELAY", &range_body);
+    GtkWidget *ta = verb_card("TIMING ADVANCE", &ta_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dop_body),
+            mod_arg_row_prefilled(state, module_id, status, "Compute the Shift",
+                "--doppler", "1000 100 45",
+                "Carrier frequency in Hz, closing velocity in m/s, then the "
+                "elevation angle. The answer is the shift a receiver must "
+                "pre-compensate, and the rate it changes at."));
+        gtk_box_append(GTK_BOX(dop_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dop);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(range_body),
+            mod_arg_row_prefilled(state, module_id, status, "Compute the Delay",
+                "--range", "500",
+                "The one-way distance in kilometres. Light takes 3.34 "
+                "microseconds per kilometre, and the round trip is what the "
+                "timing advance has to cover."));
+        gtk_box_append(GTK_BOX(range_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), range);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ta_body),
+            mod_arg_row_prefilled(state, module_id, status, "Compute the Advance",
+                "--ta", "500",
+                "The timing advance the delay needs, in the units the air "
+                "interface counts, against the range the format can express. "
+                "The comparison is the finding."));
+        gtk_box_append(GTK_BOX(ta_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ta);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ntn_build_link(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("TIMING CONTROL",
+        "The offset a network signals so a handset transmits early enough, and "
+        "the two questions the SIB that carries it cannot answer here.", &body);
+    GtkWidget *k_body, *sib_body, *feeder_body;
+    GtkWidget *k = verb_card("K-OFFSET", &k_body);
+    GtkWidget *sib = verb_card("SIB19", &sib_body);
+    GtkWidget *feeder = verb_card("FEEDER LINK", &feeder_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(k_body),
+            mod_arg_row_prefilled(state, module_id, status, "Convert the Offset",
+                "--koffset", "239 30 30720000",
+                "The offset in 15 kHz reference slots, then optionally the "
+                "carrier's subcarrier spacing and the sample rate. The delay is "
+                "the same at every spacing; what the spacing changes is how many "
+                "slots that delay is worth."));
+        gtk_box_append(GTK_BOX(k_body), res);
+    }
+    gtk_box_append(GTK_BOX(k_body), fkit_note(
+        "K_offset is always counted in 15 kHz reference slots, which is why a "
+        "239-slot offset is 239 ms on a 30 kHz carrier and on a 120 kHz one. The "
+        "carrier spacing scales the slot count, not the delay."));
+    gtk_box_append(GTK_BOX(body), k);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sib_body),
+            mod_arg_row(state, module_id, status, "Ask for SIB19",
+                "--sib19", "",
+                "Refuses: SIB19 is an NR RRC ASN.1 IE and this tree generates "
+                "layout tables for LTE only. The refusal names the family that "
+                "would have to exist first."));
+        gtk_box_append(GTK_BOX(sib_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sib);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(feeder_body),
+            mod_arg_row(state, module_id, status, "Ask for the Feeder",
+                "--feeder", "",
+                "Refuses: the feeder link's geometry is not in the SIB, because "
+                "a gateway position is network configuration rather than "
+                "broadcast information."));
+        gtk_box_append(GTK_BOX(feeder_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), feeder);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ntn_build_plan(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("HANDOFF",
+        "What a satellite link needs before a measurement means anything.", &body);
+    GtkWidget *plan_body;
+    GtkWidget *plan = verb_card("NTN HANDOFF", &plan_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Read the Plan",
+                "--plan", "",
+                "The geometry to record alongside a measurement: position, "
+                "elevation and the offset in force, without which a delay "
+                "reading cannot be compared with any other."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry ntn_entries[] = {
-    { "Overview",
-      "dialog-information-symbolic",
-      "--sib19:SIB19|--doppler=1000 100 45|--range=500" },
-    { "Link",
-      "network-wireless-symbolic",
-      "--feeder:Feeder|--koffset:K-Offset|--ta:TA" },
-    { "Planning",
-      "preferences-system-symbolic",
-      "--plan:Plan" },
+    { "Geometry", "dialog-information-symbolic", NULL, ntn_build_geometry },
+    { "Timing Control", "network-wireless-symbolic", NULL, ntn_build_link },
+    { "Handoff", "preferences-system-symbolic", NULL, ntn_build_plan },
 };
 /* 50_gprs — GPRS / EDGE.
  *
