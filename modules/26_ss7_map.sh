@@ -24,6 +24,8 @@
 #   ITU-T Q.774              TCAP procedures (begin/continue/end/abort)
 #   3GPP TS 29.002 §17.4.1   MAP operation codes (local values)
 #   3GPP TS 29.002 §17.7.10  MAP SS-Code values
+#   3GPP TS 29.118 §8, §9   SGsAP message content and information elements
+#                            (MME <-> MSC over SCTP port 29118)
 #   3GPP TS 23.003 §8.2      IMSI / MSISDN encoding, subsystem numbers
 #   GSMA IR.34               GRX/IPX interconnect and the roaming trust model
 #   GSMA IR.88               roaming security (SEPP/DEA exposure)
@@ -2254,9 +2256,10 @@ ss7_fallback_detect() {
 }
 
 ss7_selftest() {
-    local bad=0
+    local bad=0 asserts=0
     chk() {
         local n="$1" got="$2" want="$3"
+        asserts=$((asserts + 1))
         if [[ "$got" == "$want" ]]; then printf '%s\tPASS\n' "$n"
         else printf '%s\tFAIL want=%s got=%s\n' "$n" "$want" "$got"; bad=$((bad + 1)); fi
     }
@@ -2777,9 +2780,93 @@ ss7_selftest() {
     chk m3ua-send-class       "$(ss7_m3ua_parse "$m3ua" | awk -F'\t' '$1=="m3ua_class"{print $2; exit}')" "1"
     chk m3ua-send-type-name   "$(ss7_m3ua_parse "$m3ua" | awk -F'\t' '$1=="m3ua_type_name"{print $2; exit}')" "DATA"
 
-    rm -rf "$d"
+    # ── 14. SGsAP — TS 29.118; every expected hex below was decoded by
+    #      tshark 4.2.2 as the named message with these fields, and
+    #      tools/check-sgsap.sh re-runs that decode.  The length indicator is
+    #      one octet (§9.3a), so the hex shows IEI + length + value.
+    out=$(ss7_cmd_sgsap_build location-update-request --imsi 310150123456789 --lai 310-150-1); rc=$?
+    chk sgsap-lur-rc      "$rc" "0"
+    chk sgsap-lur-type    "$(fld "$out" message_type)" "0x09"
+    chk sgsap-lur-name    "$(fld "$out" message_name)" "LOCATION-UPDATE-REQUEST"
+    chk sgsap-lur-octets  "$(fld "$out" octets)" "78"
+    chk sgsap-lur-ies     "$(fld "$out" ie_count)" "4"
+    chk sgsap-lur-hex     "$(fld "$out" hex)" "09010839015110325476980937066D6D65633031096D6D65676930303031036D6D6503657063066D6E63313530066D63633331300B336770706E6574776F726B036F72670A010204051300510001"
+    chk sgsap-lur-imsi    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="1"{print $3"|"$4"|"$5"|"$6}')" "01|IMSI|8|3901511032547698"
+    chk sgsap-lur-mme-len "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="2"{print $5}')" "55"
+    chk sgsap-lur-mme-hex "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="2"{print $6}')" "066D6D65633031096D6D65676930303031036D6D6503657063066D6E63313530066D63633331300B336770706E6574776F726B036F7267"
+    chk sgsap-lai-value   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="4"{print $3"|"$6}')" "04|1300510001"
+    # The IMSI IE starts at octet 2: IEI 01, then ONE length octet (08), then
+    # eight value octets.  A 2-octet big-endian length would read 0008 here.
+    chk sgsap-len-iei     "$(printf '%s' "$(fld "$out" hex)" | cut -c1-6)" "090108"
+    chk sgsap-len-value   "$(printf '%s' "$(fld "$out" hex)" | cut -c7-22)" "3901511032547698"
+
+    out=$(ss7_cmd_sgsap_build paging-request --imsi 310150123456789 --service-indicator cs --lai 310-150-1)
+    chk sgsap-paging-hex    "$(fld "$out" hex)" "0101083901511032547698022304766C7231066D6E63313530066D63633331300B336770706E6574776F726B036F726720010104051300510001"
+    chk sgsap-paging-octets "$(fld "$out" octets)" "58"
+    chk sgsap-vlr-len       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="2"{print $5}')" "35"
+    chk sgsap-vlr-hex       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="2"{print $6}')" "04766C7231066D6E63313530066D63633331300B336770706E6574776F726B036F7267"
+    chk sgsap-si-value      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="3"{print $6}')" "01"
+
+    out=$(ss7_cmd_sgsap_build downlink-unitdata --imsi 310150123456789 --nas 0901020200)
+    chk sgsap-dlud-hex "$(fld "$out" hex)" "070108390151103254769816050901020200"
+    chk sgsap-nas-ie   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="2"{print $3"|"$5"|"$6}')" "16|5|0901020200"
+
+    out=$(ss7_cmd_sgsap_build service-request --imsi 310150123456789 --service-indicator cs --tai 310-150-1 --emm-mode connected)
+    chk sgsap-svc-hex "$(fld "$out" hex)" "060108390151103254769820010123051300510001250101"
+    chk sgsap-emm-ie  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="4"{print $3"|"$6}')" "25|01"
+    chk sgsap-tac-ie  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="3"{print $3"|"$6}')" "23|1300510001"
+    # TS 29.018 §18.4.10: an even digit count ends with 1111 in bits 8-5.
+    chk sgsap-imsi-even "$(ss7_cmd_sgsap_build downlink-unitdata --imsi 31015012345678 --nas 0901020200 | awk -F'\t' '$1=="ie"&&$2=="1"{print $6}')" "31015110325476F8"
+
+    # Round trip: parse what was just built, one row per IE.
+    out=$(ss7_cmd_sgsap_parse "$(ss7_cmd_sgsap_build location-update-request --imsi 310150123456789 --lai 310-150-1 | awk -F'\t' '$1=="hex"{print $2}')")
+    chk sgsap-parse-name    "$(fld "$out" message_name)" "LOCATION-UPDATE-REQUEST"
+    chk sgsap-parse-ies     "$(fld "$out" ie_count)" "4"
+    chk sgsap-parse-rows    "$(printf '%s\n' "$out" | grep -c '^ie'$'\t')" "4"
+    chk sgsap-parse-imsi    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="1"{print $7}')" "IMSI 310150123456789 (odd)"
+    chk sgsap-parse-mme     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="2"{print $7}')" "mmec01.mmegi0001.mme.epc.mnc150.mcc310.3gppnetwork.org"
+    chk sgsap-parse-lai     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="4"{print $7}')" "MCC 310 MNC 150 LAC 1"
+    chk sgsap-parse-lu      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="3"{print $7}')" "Normal location update"
+    chk sgsap-parse-complete "$(fld "$out" mandatory)" "complete"
+    out=$(ss7_cmd_sgsap_parse "$(ss7_cmd_sgsap_build downlink-unitdata --imsi 310150123456789 --nas 0901020200 | awk -F'\t' '$1=="hex"{print $2}')")
+    chk sgsap-parse-nas     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie"&&$2=="2"{print $7}')" "CP-DATA (TS 24.011 §7.2)"
+
+    # Refusals: an unassigned type octet, a truncated IE, a missing length.
+    chk sgsap-parse-unknown "$(ss7_cmd_sgsap_parse 00010203 >/dev/null 2>&1; echo $?)" "1"
+    chk sgsap-parse-trunc   "$(ss7_cmd_sgsap_parse 0901010899 >/dev/null 2>&1; echo $?)" "1"
+    chk sgsap-parse-no-len  "$(ss7_cmd_sgsap_parse 090101 >/dev/null 2>&1; echo $?)" "1"
+    chk sgsap-parse-unassigned-iei "$(ss7_cmd_sgsap_parse 09019A01 >/dev/null 2>&1; echo $?)" "1"
+
+    # The IE table (Table 9.3.1) and its §9.4 value codings.
+    chk sgsap-ie-imsi    "$(ss7_cmd_sgsap_ie imsi | awk -F'\t' '$1=="iei"{print $2}')" "01"
+    chk sgsap-ie-cause   "$(ss7_cmd_sgsap_ie 0x08 | awk -F'\t' '$1=="name"{print $2}')" "SGs cause"
+    chk sgsap-ie-cause6  "$(ss7_cmd_sgsap_ie sgs-cause | awk -F'\t' '$1=="value"&&$2=="6"{print $3}')" "UE unreachable"
+    chk sgsap-ie-cause13 "$(ss7_cmd_sgsap_ie 8 | awk -F'\t' '$1=="value"&&$2=="13"{print $3}')" "MT CS fallback call rejected by the user"
+    chk sgsap-ie-tmsi    "$(ss7_cmd_sgsap_ie 7 | awk -F'\t' '$1=="name"{print $2}')" "TMSI status"
+    chk sgsap-ie-lai     "$(ss7_cmd_sgsap_ie lai | awk -F'\t' '$1=="clause"{print $2}')" "9.4.11"
+    chk sgsap-ie-tai     "$(ss7_cmd_sgsap_ie 0x23 | awk -F'\t' '$1=="clause"{print $2}')" "9.4.21a"
+    chk sgsap-ie-nas     "$(ss7_cmd_sgsap_ie nas-message-container | awk -F'\t' '$1=="value_octets"{print $2}')" "2-251"
+    chk sgsap-ie-emm     "$(ss7_cmd_sgsap_ie emm-mode | awk -F'\t' '$1=="name"{print $2}')" "UE EMM mode"
+    chk sgsap-ie-unassigned "$(ss7_cmd_sgsap_ie 0x1a | awk -F'\t' '$1=="name"{print $2}')" "unassigned"
+    chk sgsap-ie-noname  "$(ss7_cmd_sgsap_ie nope >/dev/null 2>&1; echo $?)" "2"
+
+    # Refusals for things the standard does not define, or does not allow in
+    # the chosen message.
+    chk sgsap-paging-retry-ie "$(ss7_cmd_sgsap_ie paging-retry >/dev/null 2>&1; echo $?)" "1"
+    chk sgsap-paging-retry    "$(ss7_cmd_sgsap_build paging-request --imsi 310150123456789 --service-indicator cs --paging-retry 3 >/dev/null 2>&1; echo $?)" "1"
+    chk sgsap-cause-wrong-msg "$(ss7_cmd_sgsap_build paging-request --imsi 310150123456789 --service-indicator cs --sgs-cause 6 >/dev/null 2>&1; echo $?)" "1"
+    chk sgsap-flag-wrong-msg  "$(ss7_cmd_sgsap_build downlink-unitdata --imsi 310150123456789 --nas 0901020200 --lai 310-150-1 >/dev/null 2>&1; echo $?)" "2"
+    chk sgsap-lu-type-oob     "$(ss7_cmd_sgsap_build location-update-request --imsi 310150123456789 --lai 310-150-1 --lu-type 3 >/dev/null 2>&1; echo $?)" "1"
+    chk sgsap-missing-lai     "$(ss7_cmd_sgsap_build location-update-request --imsi 310150123456789 >/dev/null 2>&1; echo $?)" "2"
+    chk sgsap-missing-si      "$(ss7_cmd_sgsap_build service-request --imsi 310150123456789 >/dev/null 2>&1; echo $?)" "2"
+    chk sgsap-mme-55          "$(ss7_cmd_sgsap_build location-update-request --imsi 310150123456789 --lai 310-150-1 --mme-name mme.epc.mnc150.mcc310.3gppnetwork.org >/dev/null 2>&1; echo $?)" "1"
+    chk sgsap-nas-short       "$(ss7_cmd_sgsap_build downlink-unitdata --imsi 310150123456789 --nas 09 >/dev/null 2>&1; echo $?)" "1"
+    chk sgsap-imsi-bad        "$(ss7_cmd_sgsap_build downlink-unitdata --imsi 31015 --nas 0901020200 >/dev/null 2>&1; echo $?)" "1"
+
+        rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
+    printf 'ASSERTIONS\t%d\n' "$asserts"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -2822,6 +2909,7 @@ ss7_menu() {
   [26] decode a Diameter Visited-PLMN-Id
   [27] MAP opcode reference
   [28] status
+  [29] build an SGsAP message (MME <-> MSC)
   [0]  back
 
 M
@@ -2894,10 +2982,868 @@ M
                 read -rp "  press enter " _ ;;
             28) ss7_cli_status_tsv | column -t -s$'\t' 2>/dev/null || ss7_cli_status_tsv
                 read -rp "  press enter " _ ;;
+            29) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need an IMSI; cannot prompt in CLI mode" >&2
+                else read -rp "  IMSI> " p; read -rp "  LAI (MCC-MNC-LAC) [310-150-1]> " s
+                     ss7_cmd_sgsap_build location-update-request --imsi "$p" --lai "${s:-310-150-1}"
+                     read -rp "  press enter " _; fi ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
     done
+}
+
+# ── SGsAP — TS 29.118: MME <-> MSC over SCTP port 29118 ─────────────────
+# A message is one octet of message type (Table 9.2.1) followed by
+# information elements of IEI (1 octet), length indicator (1 octet) and the
+# value.  The length indicator counts VALUE octets only -- §9.3a: "The
+# length indicator of the information elements consists of one octet and
+# contains the binary encoding of the number of octets of the value part in
+# the information elements."  It is therefore not a 2-octet big-endian
+# length, and the "Length" column of the §8 tables is IEI+length+value
+# (SGs cause 3, IMSI 6-10, and so on).  Every octet emitted below comes from
+# one of those clauses, or from the clause they point at (TS 23.003 §19.4.2
+# for the FQDNs, TS 24.008 §10.5.1.3 / TS 24.301 §9.9.3.32 for the PLMN and
+# area codes, TS 29.018 §18.4.10 for the IMSI value part).  Values that no
+# clause pins down are refused with ERROR+WHY instead of guessed.
+
+# Table 9.2.1 message types: <key> <type> <NAME>
+ss7_sgsap_message_table() {
+    cat <<'T'
+paging-request	01	PAGING-REQUEST
+paging-reject	02	PAGING-REJECT
+service-request	06	SERVICE-REQUEST
+downlink-unitdata	07	DOWNLINK-UNITDATA
+uplink-unitdata	08	UPLINK-UNITDATA
+location-update-request	09	LOCATION-UPDATE-REQUEST
+location-update-accept	0a	LOCATION-UPDATE-ACCEPT
+location-update-reject	0b	LOCATION-UPDATE-REJECT
+tmsi-reallocation-complete	0c	TMSI-REALLOCATION-COMPLETE
+alert-request	0d	ALERT-REQUEST
+alert-ack	0e	ALERT-ACK
+alert-reject	0f	ALERT-REJECT
+ue-activity-indication	10	UE-ACTIVITY-INDICATION
+eps-detach-indication	11	EPS-DETACH-INDICATION
+eps-detach-ack	12	EPS-DETACH-ACK
+imsi-detach-indication	13	IMSI-DETACH-INDICATION
+imsi-detach-ack	14	IMSI-DETACH-ACK
+reset-indication	15	RESET-INDICATION
+reset-ack	16	RESET-ACK
+service-abort-request	17	SERVICE-ABORT-REQUEST
+mo-csfb-indication	18	MO-CSFB-INDICATION
+mm-information-request	1a	MM-INFORMATION-REQUEST
+release-request	1b	RELEASE-REQUEST
+status	1d	STATUS
+ue-unreachable	1f	UE-UNREACHABLE
+T
+}
+
+# Table 9.3.1 information elements: <IEI> <NAME> <§9.4 subclause> <value octets>
+ss7_sgsap_ie_table() {
+    cat <<'T'
+01	IMSI	9.4.6	4-8
+02	VLR name	9.4.22	1-255
+03	TMSI	9.4.20	4
+04	Location area identifier	9.4.11	5
+05	Channel needed	9.4.23	1
+06	eMLPP priority	9.4.24	1
+07	TMSI status	9.4.21	1
+08	SGs cause	9.4.18	1
+09	MME name	9.4.13	55
+0a	EPS location update type	9.4.2	1
+0b	Global CN-Id	9.4.4	5
+0e	Mobile identity	9.4.14	unspecified
+0f	Reject cause	9.4.16	1
+10	IMSI detach from EPS service type	9.4.7	1
+11	IMSI detach from non-EPS service type	9.4.8	1
+15	IMEISV	9.4.5	8
+16	NAS message container	9.4.15	2-251
+17	MM information	9.4.12	unspecified
+1b	Erroneous message	9.4.3	unspecified
+1c	CLI	9.4.1	1-12
+1d	LCS client identity	9.4.9	unspecified
+1e	LCS indicator	9.4.10	1
+1f	SS code	9.4.19	1
+20	Service indicator	9.4.17	1
+21	UE Time Zone	9.4.21b	1
+22	Mobile Station Classmark 2	9.4.14a	3
+23	Tracking area identity	9.4.21a	5
+24	E-UTRAN Cell Global Identity	9.4.3a	7
+25	UE EMM mode	9.4.21c	1
+26	Additional paging indicators	9.4.25	1
+27	TMSI based NRI container	9.4.26	2
+28	Selected CS domain operator	9.4.27	3
+29	Maximum UE Availability Time	9.4.28	unspecified
+2a	SM Delivery Timer	9.4.29	2
+2b	SM Delivery Start Time	9.4.30	4
+2c	Additional UE Unreachable indicators	9.4.31	unspecified
+2d	Maximum Retransmission Time	9.4.32	4
+2e	Requested Retransmission Time	9.4.33	4
+T
+}
+
+# The tables write IEIs and message types in the lower-case hex of the
+# standard; lookups compare case-insensitively so 0x0A and 0a name the same
+# element.
+ss7_sgsap_message_name() {
+    ss7_sgsap_message_table | awk -F'\t' -v k="${1:-}" 'tolower($2)==tolower(k){print $3; exit}'
+}
+ss7_sgsap_message_key() {
+    ss7_sgsap_message_table | awk -F'\t' -v k="${1:-}" 'tolower($2)==tolower(k){print $1; exit}'
+}
+ss7_sgsap_ie_name() {
+    ss7_sgsap_ie_table | awk -F'\t' -v k="${1:-}" 'tolower($1)==tolower(k){print $2; exit}'
+}
+ss7_sgsap_ie_row() {
+    ss7_sgsap_ie_table | awk -F'\t' -v k="${1:-}" 'tolower($1)==tolower(k){print; exit}'
+}
+
+# Does a build spec (see ss7_sgsap_build_spec) carry an IE key?
+ss7_sgsap_spec_has() {
+    local spec="${1:-}" want="${2:-}" _ sk _
+    [[ -n "$spec" && -n "$want" ]] || return 1
+    while IFS=$'\t' read -r _ sk _; do
+        [[ "$sk" == "$want" ]] && return 0
+    done <<< "$spec"
+    return 1
+}
+
+# The §8 table that gives a buildable message its content, for WHY rows.
+ss7_sgsap_clause_of() {
+    case "${1:-}" in
+        location-update-request) printf '8.11.1.1' ;;
+        paging-request)          printf '8.14.1.1' ;;
+        downlink-unitdata)       printf '8.4.1' ;;
+        service-request)         printf '8.17.1' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Buildable message -> its §8 rows as "IEI<TAB>key<TAB>M|O", IN TABLE ORDER.
+# The dissectors (and the standard) walk a message's IEs in the table's
+# order, so the builder emits in this order and refuses a flag whose row the
+# table does not carry.
+ss7_sgsap_build_spec() {
+    case "${1:-}" in
+        location-update-request) cat <<'T'
+01	imsi	M
+09	mme-name	M
+0a	lu-type	M
+04	lai	M
+04	old-lai	O
+23	tai	O
+T
+            ;;
+        paging-request) cat <<'T'
+01	imsi	M
+02	vlr-name	M
+20	service-indicator	M
+03	tmsi	O
+04	lai	O
+26	csri	O
+T
+            ;;
+        downlink-unitdata) cat <<'T'
+01	imsi	M
+16	nas	M
+T
+            ;;
+        service-request) cat <<'T'
+01	imsi	M
+20	service-indicator	M
+23	tai	O
+25	emm-mode	O
+T
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# ── SGsAP value codings ─────────────────────────────────────────────────
+ss7_sgsap_lu_type_name() {
+    case "${1:-}" in
+        1) printf 'IMSI attach' ;;
+        2) printf 'Normal location update' ;;
+        *) return 1 ;;
+    esac
+}
+ss7_sgsap_lu_type_value() {  # §9.4.2
+    case "${1:-}" in
+        normal|normal-location-update|2) printf '02' ;;
+        imsi-attach|1) printf '01' ;;
+        *) return 1 ;;
+    esac
+}
+ss7_sgsap_service_indicator_name() {  # §9.4.17
+    case "${1:-}" in
+        1) printf 'CS call indicator' ;;
+        2) printf 'SMS indicator' ;;
+        *) return 1 ;;
+    esac
+}
+ss7_sgsap_service_indicator_value() {
+    case "${1:-}" in
+        cs|cs-call|cs-call-indicator|1) printf '01' ;;
+        sms|sms-indicator|2) printf '02' ;;
+        *) return 1 ;;
+    esac
+}
+ss7_sgsap_cause_name() {  # §9.4.18
+    case "${1:-}" in
+        0)  printf 'Normal unspecified' ;;
+        1)  printf 'IMSI detached for EPS services' ;;
+        2)  printf 'IMSI detached for EPS and non-EPS services' ;;
+        3)  printf 'IMSI unknown' ;;
+        4)  printf 'IMSI detached for non-EPS services' ;;
+        5)  printf 'IMSI implicitly detached for non-EPS services' ;;
+        6)  printf 'UE unreachable' ;;
+        7)  printf 'Message not compatible with the protocol state' ;;
+        8)  printf 'Missing mandatory information element' ;;
+        9)  printf 'Invalid mandatory information' ;;
+        10) printf 'Conditional information element error' ;;
+        11) printf 'Semantically incorrect message' ;;
+        12) printf 'Message unknown' ;;
+        13) printf 'MT CS fallback call rejected by the user' ;;
+        14) printf 'UE temporarily unreachable' ;;
+        *) return 1 ;;
+    esac
+}
+ss7_sgsap_emm_mode_name() {  # §9.4.21c
+    case "${1:-}" in
+        0) printf 'EMM-IDLE' ;;
+        1) printf 'EMM-CONNECTED' ;;
+        *) return 1 ;;
+    esac
+}
+ss7_sgsap_emm_mode_value() {
+    case "${1:-}" in
+        idle|emm-idle|0) printf '00' ;;
+        connected|emm-connected|1) printf '01' ;;
+        *) return 1 ;;
+    esac
+}
+
+# ── PLMN, area codes and FQDNs ──────────────────────────────────────────
+# MCC-MNC -> the 3-octet PLMN of TS 24.008 §10.5.1.3 / TS 24.301 §9.9.3.32:
+# octet 1 = MCC digit 2 | MCC digit 1, octet 2 = MNC digit 3 | MCC digit 3,
+# octet 3 = MNC digit 2 | MNC digit 1 (a 2-digit MNC has 1111 as digit 3).
+ss7_sgsap_plmn() {
+    local s="${1:-}" mcc mnc o1 o2 o3
+    [[ "$s" =~ ^[0-9]{3}-[0-9]{2,3}$ ]] || return 1
+    mcc="${s%%-*}"; mnc="${s#*-}"
+    o1=$(( (16#${mcc:1:1} << 4) | 16#${mcc:0:1} ))
+    if (( ${#mnc} == 3 )); then
+        o2=$(( (16#${mnc:2:1} << 4) | 16#${mcc:2:1} ))
+    else
+        o2=$(( (0xF << 4) | 16#${mcc:2:1} ))
+    fi
+    o3=$(( (16#${mnc:1:1} << 4) | 16#${mnc:0:1} ))
+    printf '%s%s%s' "$(ss7_byte "$o1")" "$(ss7_byte "$o2")" "$(ss7_byte "$o3")"
+}
+
+# 3 octets -> "MCC-MNC".  A 1111 third MNC digit means a 2-digit MNC.
+ss7_sgsap_plmn_text() {
+    local h="${1^^}" o1 o2 o3 m1 m2 m3 n1 n2 n3
+    (( ${#h} >= 6 )) || return 1
+    o1=$(( 16#${h:0:2} )); o2=$(( 16#${h:2:2} )); o3=$(( 16#${h:4:2} ))
+    m1=$(( o1 & 0xF )); m2=$(( (o1 >> 4) & 0xF )); m3=$(( o2 & 0xF ))
+    n1=$(( o3 & 0xF )); n2=$(( (o3 >> 4) & 0xF )); n3=$(( (o2 >> 4) & 0xF ))
+    (( m1 <= 9 && m2 <= 9 && m3 <= 9 && n1 <= 9 && n2 <= 9 )) || return 1
+    if (( n3 <= 9 )); then
+        printf '%s%s%s-%s%s%s' "$m1" "$m2" "$m3" "$n1" "$n2" "$n3"
+    else
+        printf '%s%s%s-%s%s' "$m1" "$m2" "$m3" "$n1" "$n2"
+    fi
+}
+
+# MCC-MNC -> SS7_PLMN_MCC / SS7_PLMN_MNC, both 3 digits (TS 23.003 §19.2:
+# "Both the <MNC> and <MCC> fields are 3 digits long.  If the MNC of the PLMN
+# is 2 digits, then a zero shall be added at the beginning.").
+ss7_sgsap_split_plmn() {
+    local s="${1:-}" mcc mnc
+    [[ "$s" =~ ^([0-9]{3})-([0-9]{2,3})$ ]] || return 1
+    mcc="${BASH_REMATCH[1]}"; mnc="${BASH_REMATCH[2]}"
+    (( ${#mnc} == 2 )) && mnc="0$mnc"
+    SS7_PLMN_MCC="$mcc"
+    SS7_PLMN_MNC="$mnc"
+}
+
+# MCC-MNC-LAC / MCC-MNC-TAC -> the 5-octet value of the SGsAP LAI (§9.4.11)
+# or TAI (§9.4.21a): the 24.008 / 24.301 area-identity value part from ITS
+# octet 2, i.e. PLMN (3 octets) then the 2-octet code with bit 8 of the first
+# octet as the MSB.
+ss7_sgsap_area_hex() {
+    local s="${1:-}" mcc mnc code p
+    [[ "$s" =~ ^([0-9]{3})-([0-9]{2,3})-([0-9]{1,5})$ ]] || return 1
+    mcc="${BASH_REMATCH[1]}"; mnc="${BASH_REMATCH[2]}"; code="${BASH_REMATCH[3]}"
+    (( 10#$code <= 65535 )) || return 1
+    p=$(ss7_sgsap_plmn "$mcc-$mnc") || return 1
+    printf '%s%s%s' "$p" "$(ss7_byte $(( (10#$code >> 8) & 0xFF )))" "$(ss7_byte $(( 10#$code & 0xFF )))"
+}
+
+# 5 octets -> "MCC 310 MNC 150 LAC 1" (or TAC).
+ss7_sgsap_area_text() {
+    local what="${1:-}" h="${2^^}" p
+    (( ${#h} == 10 )) || return 1
+    p=$(ss7_sgsap_plmn_text "${h:0:6}") || return 1
+    printf 'MCC %s MNC %s %s %s' "${p%-*}" "${p#*-}" "$what" "$(( 16#${h:6:4} ))"
+}
+
+# FQDN -> length-prefixed labels, TS 23.003 §19.4.2.1: "each label is coded
+# as a one octet length field followed by that number of octets coded as 8 bit
+# ASCII characters"; no terminating zero-length label.
+ss7_sgsap_fqdn() {
+    local s="${1:-}" out="" lab j
+    [[ -n "$s" ]] || return 1
+    [[ "$s" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+    [[ "$s" != .* && "$s" != *. && "$s" != *..* ]] || return 1
+    local -a labs=()
+    local IFS='.'
+    read -r -a labs <<< "$s"
+    for lab in "${labs[@]}"; do
+        (( ${#lab} >= 1 && ${#lab} <= 63 )) || return 1
+        out+="$(ss7_byte "${#lab}")"
+        for (( j = 0; j < ${#lab}; j++ )); do
+            out+=$(ss7_byte "$(printf '%d' "'${lab:$j:1}")")
+        done
+    done
+    (( ${#out} / 2 <= 255 )) || return 1
+    printf '%s' "$out"
+}
+
+# hex -> printable ASCII, for FQDN labels only (non-printable bytes refuse).
+ss7_sgsap_text() {
+    local h="${1^^}" out="" i c
+    for (( i = 0; i < ${#h}; i += 2 )); do
+        c=$(( 16#${h:$i:2} ))
+        (( c >= 0x20 && c <= 0x7e )) || return 1
+        out+=$(printf "\\x${h:$i:2}")
+    done
+    printf '%s' "$out"
+}
+
+ss7_sgsap_fqdn_decode() {
+    local h="${1^^}" i=0 n lab out=""
+    (( ${#h} > 0 )) || return 1
+    while (( i < ${#h} )); do
+        n=$(( 16#${h:$i:2} ))
+        (( n >= 1 && n <= 63 )) || return 1
+        (( i + 2 + n * 2 <= ${#h} )) || return 1
+        lab=$(ss7_sgsap_text "${h:$((i+2)):$((n*2))}") || return 1
+        out+="${out:+.}$lab"
+        i=$(( i + 2 + n * 2 ))
+    done
+    printf '%s' "$out"
+}
+
+# ── IMSI value part — TS 29.018 §18.4.10 (the clause §9.4.6 points at) ──
+# Octet 3: digit 1 in bits 8-5, odd/even in bit 4, "001" in bits 3-1.  Then
+# two digits per octet, the LOWER digit in bits 4-1; an even number of digits
+# ends with 1111 in bits 8-5 of the last octet.
+# TS 29.118 Table 8.11.1.1 sizes the IMSI IE at 6-10 octets; TS 129 018
+# §18.4.10 spends the first value octet on digit 1, the odd/even bit and the
+# 001 filler, so 4-8 value octets remain and the digit count is 6-15.
+ss7_sgsap_imsi() {
+    local d="${1:-}" par out i a b
+    [[ "$d" =~ ^[0-9]{6,15}$ ]] || return 1
+    if (( ${#d} % 2 )); then par=8; else par=0; fi
+    out=$(ss7_byte $(( (16#${d:0:1} << 4) | par | 1 )))
+    for (( i = 1; i < ${#d}; i += 2 )); do
+        a="${d:$i:1}"
+        if (( i + 1 < ${#d} )); then
+            b="${d:$((i+1)):1}"
+            out+=$(ss7_byte $(( (16#$b << 4) | 16#$a )))
+        else
+            out+=$(ss7_byte $(( 0xF0 | 16#$a )))
+        fi
+    done
+    printf '%s' "$out"
+}
+
+ss7_sgsap_imsi_decode() {
+    local h="${1^^}" out="" par i o lo hi
+    ss7_is_hex "$h" || return 1
+    (( ${#h} >= 2 )) || return 1
+    o=$(( 16#${h:0:2} ))
+    out=$(( o >> 4 ))
+    par=$(( (o >> 3) & 1 ))
+    for (( i = 2; i < ${#h}; i += 2 )); do
+        o=$(( 16#${h:$i:2} ))
+        lo=$(( o & 0xF )); hi=$(( (o >> 4) & 0xF ))
+        (( lo <= 9 )) && out+="$lo"
+        (( hi <= 9 )) && out+="$hi"
+    done
+    printf '%s (%s)' "$out" "$([[ $par -eq 1 ]] && echo odd || echo even)"
+}
+
+# One row's decoded text: <IEI> <value hex> -> short text, or non-zero.
+ss7_sgsap_ie_text() {
+    local iei vh t
+    iei=$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')
+    vh="${2^^}"
+    case "$iei" in
+        01) t=$(ss7_sgsap_imsi_decode "$vh") || return 1; printf 'IMSI %s' "$t" ;;
+        02|09) t=$(ss7_sgsap_fqdn_decode "$vh") || return 1; printf '%s' "$t" ;;
+        04) ss7_sgsap_area_text LAC "$vh" ;;
+        23) ss7_sgsap_area_text TAC "$vh" ;;
+        0a) (( ${#vh} == 2 )) || return 1
+            t=$(ss7_sgsap_lu_type_name "$(( 16#$vh ))") || return 1; printf '%s' "$t" ;;
+        08) (( ${#vh} == 2 )) || return 1
+            t=$(ss7_sgsap_cause_name "$(( 16#$vh ))") || return 1; printf '%s' "$t" ;;
+        20) (( ${#vh} == 2 )) || return 1
+            t=$(ss7_sgsap_service_indicator_name "$(( 16#$vh ))") || return 1; printf '%s' "$t" ;;
+        25) (( ${#vh} == 2 )) || return 1
+            t=$(ss7_sgsap_emm_mode_name "$(( 16#$vh ))") || return 1; printf '%s' "$t" ;;
+        16) if [[ "${vh:0:4}" == "0901" ]]; then
+                printf 'CP-DATA (TS 24.011 §7.2)'
+            else
+                printf '%d octets, carried verbatim' "$(( ${#vh} / 2 ))"
+            fi ;;
+        *) return 1 ;;
+    esac
+}
+
+# ── --sgsap-build ───────────────────────────────────────────────────────
+ss7_cmd_sgsap_build() {
+    local msg="${1:-}"
+    if [[ -z "$msg" ]]; then
+        printf 'ERROR\tusage: --sgsap-build <message> [--imsi IMSI] [--lai MCC-MNC-LAC] ...\n' >&2
+        printf 'WHY\tmessages wired here: location-update-request, paging-request, downlink-unitdata, service-request (TS 29.118 Table 9.2.1)\n' >&2
+        return 2
+    fi
+    local row type name
+    row=$(ss7_sgsap_message_table | awk -F'\t' -v k="$msg" 'tolower($1)==tolower(k){print; exit}')
+    if [[ -z "$row" ]]; then
+        printf 'ERROR\t%s is not a message key from TS 29.118 Table 9.2.1\n' "$(ss7_sanitize "$msg")" >&2
+        printf 'WHY\tkeys: %s\n' "$(ss7_sgsap_message_table | cut -f1 | paste -sd ' ')" >&2
+        return 2
+    fi
+    type=$(printf '%s\n' "$row" | cut -f2)
+    name=$(printf '%s\n' "$row" | cut -f3)
+    local spec
+    spec=$(ss7_sgsap_build_spec "$msg" 2>/dev/null)
+    if [[ -z "$spec" ]]; then
+        printf 'ERROR\tno builder is wired for %s\n' "$name" >&2
+        printf 'WHY\tTable 9.2.1 lists it, but this verb assembles only the four §8 tables named in --help; the other messages would need their own Table 8.x row set before any octet could be claimed\n' >&2
+        return 2
+    fi
+    shift
+    local -A val=()
+    local plmn="310-150" mmec="01" mmegi="0001" csri="" out="" plmn_set=0 mmec_set=0 mmegi_set=0
+    local -a keyed=()
+    local flag key
+    while (( $# > 0 )); do
+        flag="${1:-}"
+        case "$flag" in
+            --out)
+                if [[ -z "${2:-}" ]]; then
+                    printf 'ERROR\t--out needs a path\n' >&2
+                    return 2
+                fi
+                out="${2}"; shift 2 ;;
+            --csri)  csri=1; shift ;;
+            --plmn)  plmn="${2:-}"; plmn_set=1; shift 2 ;;
+            --mmec)  mmec="${2:-}"; mmec_set=1; shift 2 ;;
+            --mmegi) mmegi="${2:-}"; mmegi_set=1; shift 2 ;;
+            --paging-retry)
+                printf 'ERROR\tTS 29.118 defines no Paging-Retry information element, so no octets are emitted for --paging-retry\n' >&2
+                printf 'WHY\tTable 9.3.1 (information element identifiers) and §9.4 contain no such IE; retransmission is §10.2 "Retry counters" (Ns timers/counters, not an IE), and the only time-related IEs are 0x2d Maximum Retransmission Time (§9.4.32) and 0x2e Requested Retransmission Time (§9.4.33)\n' >&2
+                return 1 ;;
+            --sgs-cause)
+                printf 'ERROR\tSGs cause cannot be attached to %s: that message table carries no row for it\n' "$name" >&2
+                printf 'WHY\tTS 29.118 §9.4.18 defines IEI 0x08, but Tables 8.11.1.1, 8.14.1.1, 8.4.1 and 8.17.1 -- the four messages this verb builds -- do not list it; it appears in the detach/reject exchanges (e.g. EPS-DETACH-ACK)\n' >&2
+                return 1 ;;
+            --imsi|--mme-name|--vlr-name|--lai|--tai|--old-lai|--lu-type|--service-indicator|--emm-mode|--nas|--tmsi)
+                key="${flag#--}"
+                if [[ -z "${2:-}" ]]; then
+                    printf 'ERROR\t%s needs a value\n' "$flag" >&2
+                    return 2
+                fi
+                val["$key"]="${2}"
+                keyed+=("$key")
+                shift 2 ;;
+            "")
+                shift ;;
+            *)
+                printf 'ERROR\t--sgsap-build does not take %s (see --help)\n' "$(ss7_sanitize "$flag")" >&2
+                return 2 ;;
+        esac
+    done
+
+    # A flag whose §8 row does not exist for this message is refused: the
+    # standard's message content tables, not this tool, decide what a message
+    # may carry.
+    local ok sk
+    for key in "${keyed[@]}"; do
+        ok=0
+        while IFS=$'\t' read -r _ sk _; do
+            [[ "$sk" == "$key" ]] && ok=1
+        done <<< "$spec"
+        if (( ! ok )); then
+            printf 'ERROR\t--%s is not an information element of %s\n' "$key" "$name" >&2
+            printf 'WHY\tTable %s lists these IEs, in this order: %s\n' "$(ss7_sgsap_clause_of "$msg")" \
+                "$(printf '%s\n' "$spec" | awk -F'\t' '{printf "%s ", $2}')" >&2
+            return 2
+        fi
+    done
+    if [[ -n "$csri" ]]; then
+        if ! ss7_sgsap_spec_has "$spec" csri; then
+            printf 'ERROR\t--csri (Additional paging indicators, IEI 0x26) is not an information element of %s\n' "$name" >&2
+            printf 'WHY\tTable %s lists these IEs, in this order: %s\n' "$(ss7_sgsap_clause_of "$msg")" \
+                "$(printf '%s\n' "$spec" | awk -F'\t' '{printf "%s ", $2}')" >&2
+            return 2
+        fi
+    fi
+    if (( plmn_set )) && ! ss7_sgsap_spec_has "$spec" mme-name && ! ss7_sgsap_spec_has "$spec" vlr-name; then
+        printf 'ERROR\t%s carries no MME name and no VLR name, so --plmn has nothing to name\n' "$name" >&2
+        printf 'WHY\tTable %s lists no 0x09 or 0x02 row; --plmn only feeds the FQDN that such a row carries\n' "$(ss7_sgsap_clause_of "$msg")" >&2
+        return 2
+    fi
+    if (( mmec_set )) && ! ss7_sgsap_spec_has "$spec" mme-name; then
+        printf 'ERROR\t%s carries no MME name, so --mmec has nothing to name\n' "$name" >&2
+        printf 'WHY\tTable %s lists no 0x09 MME name row\n' "$(ss7_sgsap_clause_of "$msg")" >&2
+        return 2
+    fi
+    if (( mmegi_set )) && ! ss7_sgsap_spec_has "$spec" mme-name; then
+        printf 'ERROR\t%s carries no MME name, so --mmegi has nothing to name\n' "$name" >&2
+        printf 'WHY\tTable %s lists no 0x09 MME name row\n' "$(ss7_sgsap_clause_of "$msg")" >&2
+        return 2
+    fi
+
+    local -a ies=()
+    local iei pres vh k i idx=0 miss=""
+    while IFS=$'\t' read -r iei k pres; do
+        [[ -n "$iei" ]] || continue
+        vh=""
+        case "$k" in
+            imsi)
+                if [[ -z "${val[imsi]:-}" ]]; then
+                    printf 'ERROR\t%s carries IMSI as a mandatory IE (Table %s) and --imsi is required\n' "$name" "$(ss7_sgsap_clause_of "$msg")" >&2
+                    return 2
+                fi
+                vh=$(ss7_sgsap_imsi "${val[imsi]}") || {
+                    printf 'ERROR\tcannot encode IMSI %s\n' "$(ss7_sanitize "${val[imsi]}")" >&2
+                    printf 'WHY\tTS 29.018 §18.4.10 (the clause TS 29.118 §9.4.6 points at) encodes 6-15 TBCD digits: digit 1 in bits 8-5 of octet 3, an odd/even bit 4, then two digits per octet with the lower digit in bits 4-1; Table 8.11.1.1 caps the IMSI IE at 10 octets, so 5 digits cannot be represented\n' >&2
+                    return 1; } ;;
+            mme-name)
+                local mm="${val[mme-name]:-}"
+                if [[ -z "$mm" ]]; then
+                    ss7_sgsap_split_plmn "$plmn" || {
+                        printf 'ERROR\t--plmn %s is not MCC-MNC (3-digit MCC, 2- or 3-digit MNC)\n' "$(ss7_sanitize "$plmn")" >&2
+                        return 1; }
+                    mm="mmec${mmec}.mmegi${mmegi}.mme.epc.mnc${SS7_PLMN_MNC}.mcc${SS7_PLMN_MCC}.3gppnetwork.org"
+                fi
+                vh=$(ss7_sgsap_fqdn "$mm") || {
+                    printf 'ERROR\tcannot encode MME name %s as length-prefixed labels\n' "$(ss7_sanitize "$mm")" >&2
+                    printf 'WHY\tTS 23.003 §19.4.2.1 codes each label as one length octet then its 8-bit ASCII characters; labels are 1-63 characters of A-Za-z0-9 and hyphen\n' >&2
+                    return 1; }
+                if (( ${#vh} / 2 != 55 )); then
+                    printf 'ERROR\tMME name %s encodes to %d octets, not 55\n' "$(ss7_sanitize "$mm")" "$(( ${#vh} / 2 ))" >&2
+                    printf 'WHY\tTS 29.118 §9.4.13 fixes the value part of the MME name IE (not including IEI and length indicator) at 55 octets, octets 3-57; the clause gives no padding octet for a shorter FQDN, so this refuses rather than inventing one.  The §19.4.2.4 form mmec<MMEC>.mmegi<MMEGI>.mme.epc.mnc<MNC>.mcc<MCC>.3gppnetwork.org reaches 55 octets when MNC and MCC are the 3-digit forms of §19.2\n' >&2
+                    return 1
+                fi ;;
+            vlr-name)
+                local vn="${val[vlr-name]:-}"
+                if [[ -z "$vn" ]]; then
+                    ss7_sgsap_split_plmn "$plmn" || {
+                        printf 'ERROR\t--plmn %s is not MCC-MNC\n' "$(ss7_sanitize "$plmn")" >&2
+                        return 1; }
+                    vn="vlr1.mnc${SS7_PLMN_MNC}.mcc${SS7_PLMN_MCC}.3gppnetwork.org"
+                fi
+                vh=$(ss7_sgsap_fqdn "$vn") || {
+                    printf 'ERROR\tcannot encode VLR name %s as length-prefixed labels\n' "$(ss7_sanitize "$vn")" >&2
+                    printf 'WHY\tTS 29.118 §9.4.22 codes octets 3..n as the FQDN of TS 23.003, each label as one length octet then its 8-bit ASCII characters; the value is variable length (3-n for the whole IE)\n' >&2
+                    return 1; } ;;
+            lai)
+                if [[ -z "${val[lai]:-}" ]]; then
+                    printf 'ERROR\t%s carries the New location area identifier as a mandatory IE (Table %s); pass --lai MCC-MNC-LAC\n' "$name" "$(ss7_sgsap_clause_of "$msg")" >&2
+                    return 2
+                fi
+                vh=$(ss7_sgsap_area_hex "${val[lai]}") || {
+                    printf 'ERROR\tcannot encode LAI %s\n' "$(ss7_sanitize "${val[lai]}")" >&2
+                    printf 'WHY\tTS 29.118 §9.4.11 puts octets 3-7 as the value part of the TS 24.008 Location area identification: PLMN (3 octets) then LAC (2 octets); give MCC-MNC-LAC (MCC 3 digits, MNC 2 or 3, LAC 0-65535)\n' >&2
+                    return 1; } ;;
+            old-lai)
+                [[ -n "${val[old-lai]:-}" ]] || continue
+                vh=$(ss7_sgsap_area_hex "${val[old-lai]}") || {
+                    printf 'ERROR\tcannot encode old LAI %s\n' "$(ss7_sanitize "${val[old-lai]}")" >&2
+                    printf 'WHY\tTS 29.118 §9.4.11: the old location area identifier is the same 5-octet area identity as the new one; give MCC-MNC-LAC\n' >&2
+                    return 1; } ;;
+            tai)
+                [[ -n "${val[tai]:-}" ]] || continue
+                vh=$(ss7_sgsap_area_hex "${val[tai]}") || {
+                    printf 'ERROR\tcannot encode TAI %s\n' "$(ss7_sanitize "${val[tai]}")" >&2
+                    printf 'WHY\tTS 29.118 §9.4.21a puts octets 3-7 as the value part of the TS 24.301 Tracking area identity: PLMN (3 octets) then TAC (2 octets, bit 8 of the first octet is the MSB); give MCC-MNC-TAC\n' >&2
+                    return 1; } ;;
+            service-indicator)
+                if [[ -z "${val[service-indicator]:-}" ]]; then
+                    printf 'ERROR\t%s carries Service indicator as a mandatory IE (Table %s); pass --service-indicator cs|sms\n' "$name" "$(ss7_sgsap_clause_of "$msg")" >&2
+                    return 2
+                fi
+                vh=$(ss7_sgsap_service_indicator_value "${val[service-indicator]}") || {
+                    printf 'ERROR\t--service-indicator %s is not encodable\n' "$(ss7_sanitize "${val[service-indicator]}")" >&2
+                    printf 'WHY\tTS 29.118 §9.4.17 defines 1 CS call indicator and 2 SMS indicator; 0 and 3-255 are treated as 1 but are not values this builder puts on the wire\n' >&2
+                    return 1; } ;;
+            emm-mode)
+                [[ -n "${val[emm-mode]:-}" ]] || continue
+                vh=$(ss7_sgsap_emm_mode_value "${val[emm-mode]}") || {
+                    printf 'ERROR\t--emm-mode %s is not encodable\n' "$(ss7_sanitize "${val[emm-mode]}")" >&2
+                    printf 'WHY\tTS 29.118 §9.4.21c defines 0 EMM-IDLE and 1 EMM-CONNECTED; 2-255 are reserved\n' >&2
+                    return 1; } ;;
+            lu-type)
+                vh=$(ss7_sgsap_lu_type_value "${val[lu-type]:-normal}") || {
+                    printf 'ERROR\t--lu-type %s is not encodable\n' "$(ss7_sanitize "${val[lu-type]:-}")" >&2
+                    printf 'WHY\tTS 29.118 §9.4.2 defines 1 IMSI attach and 2 Normal location update; 0 and 3-255 "shall not be sent" and are treated as 00000010\n' >&2
+                    return 1; } ;;
+            nas)
+                local nh
+                nh=$(ss7_nfc "${val[nas]:-}")
+                if [[ -z "$nh" ]]; then
+                    printf 'ERROR\t%s carries the NAS message container as a mandatory IE; pass --nas <hex>\n' "$name" >&2
+                    return 2
+                fi
+                if ! ss7_is_hex "$nh"; then
+                    printf 'ERROR\tNAS message container %s is not an even-length hex string\n' "$(ss7_sanitize "${val[nas]}")" >&2
+                    return 1
+                fi
+                if (( ${#nh} / 2 < 2 || ${#nh} / 2 > 251 )); then
+                    printf 'ERROR\tNAS message container is %d octets\n' "$(( ${#nh} / 2 ))" >&2
+                    printf 'WHY\tTS 29.118 §9.4.15 carries the SMS message as octets 3-253 of the IE, and Table 8.4.1 gives the whole IE 4-253 octets, so the value part is 2-251 octets\n' >&2
+                    return 1
+                fi
+                vh="$nh" ;;
+            tmsi)
+                [[ -n "${val[tmsi]:-}" ]] || continue
+                vh=$(ss7_nfc "${val[tmsi]}")
+                if ! ss7_is_hex "$vh" || (( ${#vh} != 8 )); then
+                    printf 'ERROR\t--tmsi %s is not 4 octets of hex\n' "$(ss7_sanitize "${val[tmsi]}")" >&2
+                    printf 'WHY\tTable 8.14.1.1 gives the TMSI IE (0x03) as TLV 6, i.e. 4 value octets\n' >&2
+                    return 1
+                fi ;;
+            csri)
+                [[ -n "$csri" ]] || continue
+                vh="01" ;;
+        esac
+        [[ -n "$vh" ]] || continue
+        local vlen=$(( ${#vh} / 2 ))
+        if (( vlen > 255 )); then
+            printf 'ERROR\tIE %s value is %d octets\n' "$k" "$vlen" >&2
+            printf 'WHY\tTS 29.118 §9.3a makes the length indicator one octet, so a value cannot exceed 255 octets\n' >&2
+            return 1
+        fi
+        ies+=("$iei|$k|$vh")
+    done <<< "$spec"
+
+    if (( ${#ies[@]} == 0 )); then
+        printf 'ERROR\tno information element was produced for %s\n' "$name" >&2
+        return 1
+    fi
+
+    local hexh rest
+    hexh="$type"
+    for row in "${ies[@]}"; do
+        iei="${row%%|*}"
+        rest="${row#*|}"
+        vh="${rest#*|}"
+        hexh+="${iei}$(ss7_byte "$(( ${#vh} / 2 ))")${vh}"
+    done
+    # The tables write IEIs in the lower-case hex of the standard, the value
+    # encoders in upper case; one message is one string, so settle on upper.
+    hexh="${hexh^^}"
+
+    printf 'message\t%s\n' "$msg"
+    printf 'message_type\t0x%s\n' "$type"
+    printf 'message_name\t%s\n' "$name"
+    printf 'octets\t%s\n' "$(( ${#hexh} / 2 ))"
+    printf 'ie_count\t%s\n' "${#ies[@]}"
+    i=0
+    for row in "${ies[@]}"; do
+        i=$((i + 1))
+        iei="${row%%|*}"
+        rest="${row#*|}"
+        k="${rest%%|*}"
+        vh="${rest#*|}"
+        printf 'ie\t%s\t%s\t%s\t%s\t%s\n' "$i" "${iei^^}" "$(ss7_sgsap_ie_name "$iei")" "$(( ${#vh} / 2 ))" "${vh^^}"
+    done
+    printf 'hex\t%s\n' "$hexh"
+    printf 'sctp_port\t29118\n'
+    printf 'sctp_ppid\t0\n'
+    printf 'carrier\tSCTP port 29118, PPID 0 -- SGsAP is carried directly over SCTP\n'
+    printf 'sent\t0\n'
+    printf 'note\tIE order follows Table %s; the length indicator is one octet (§9.3a)\n' "$(ss7_sgsap_clause_of "$msg")"
+    if [[ -n "$out" ]]; then
+        if ! command -v xxd >/dev/null 2>&1; then
+            printf 'ERROR\t--out needs xxd on PATH to write bytes; the hex row above is the message\n' >&2
+            return 1
+        fi
+        if ! printf '%s' "$hexh" | xxd -r -p > "$out"; then
+            printf 'ERROR\tcannot write %s\n' "$(ss7_sanitize "$out")" >&2
+            return 1
+        fi
+        printf 'out\t%s\n' "$(ss7_sanitize "$out")"
+    fi
+    return 0
+}
+
+# ── --sgsap-parse ───────────────────────────────────────────────────────
+ss7_cmd_sgsap_parse() {
+    local raw="${1:-}"
+    if [[ -z "$raw" ]]; then
+        printf 'ERROR\tusage: --sgsap-parse <hex>\n' >&2
+        return 2
+    fi
+    local hex
+    hex=$(ss7_nfc "$raw")
+    hex="${hex#0x}"
+    hex="${hex#0X}"
+    if ! ss7_is_hex "$hex"; then
+        printf 'ERROR\t%s is not an even-length hex string\n' "$(ss7_sanitize "$raw")" >&2
+        return 1
+    fi
+    if (( ${#hex} < 2 )); then
+        printf 'ERROR\tthere is no message type octet in %s\n' "$(ss7_sanitize "$raw")" >&2
+        return 1
+    fi
+    local type="${hex:0:2}" name
+    name=$(ss7_sgsap_message_name "$type")
+    if [[ -z "$name" ]]; then
+        printf 'ERROR\tmessage type 0x%s is not assigned in TS 29.118 Table 9.2.1: this is not a known SGsAP message, and no information element list is claimed for it\n' "$type" >&2
+        printf 'WHY\tTable 9.2.1 leaves 0x00, 0x03-0x05, 0x19, 0x1c and 0x1e unassigned; the type octet is the only field that says which §8 content table applies, so nothing after it can be claimed\n' >&2
+        return 1
+    fi
+    # Rows are collected and printed once, so a caller that pipes into head
+    # does not sprinkle the terminal with broken-pipe diagnostics.
+    local -a lines=()
+    lines+=("message_type	0x$type" "message_name	$name" "octets	$(( ${#hex} / 2 ))")
+    local off=1 n=$(( ${#hex} / 2 )) idx=0 iei iname ilen vh text row
+    local -a seen=()
+    while (( off < n )); do
+        iei="${hex:$((off * 2)):2}"
+        iname=$(ss7_sgsap_ie_name "$iei")
+        if [[ -z "$iname" ]]; then
+            printf 'ERROR\tIEI 0x%s at octet %d is unassigned in Table 9.3.1, so the octet after it is not known to be a length indicator and the rest of the message is not walked\n' "$iei" "$((off + 1))" >&2
+            printf 'WHY\tTS 29.118 Table 9.3.1 assigns the information element identifiers; an unassigned IEI promises no format, so stepping over it would be a guess\n' >&2
+            return 1
+        fi
+        if (( off + 1 >= n )); then
+            printf 'ERROR\tIE %s (0x%s) at octet %d has no length octet: the message ends after the IEI\n' "$iname" "$iei" "$((off + 1))" >&2
+            printf 'WHY\tTS 29.118 §9.3a: an information element is IEI, then a one-octet length indicator, then that many value octets\n' >&2
+            return 1
+        fi
+        ilen=$(( 16#${hex:$(((off + 1) * 2)):2} ))
+        if (( off + 2 + ilen > n )); then
+            printf 'ERROR\tIE %s (0x%s) at octet %d claims %d value octets but only %d follow\n' "$iname" "$iei" "$((off + 1))" "$ilen" "$((n - off - 2))" >&2
+            printf 'WHY\tTS 29.118 §9.3a: the length indicator counts the value octets that follow it\n' >&2
+            return 1
+        fi
+        vh="${hex:$(((off + 2) * 2)):$((ilen * 2))}"
+        if [[ "${iei,,}" == "04" && "$(ss7_sgsap_message_key "$type")" == location-update-request ]]; then
+            local nprev=0 x
+            for x in "${seen[@]}"; do
+                [[ "${x,,}" == "04" ]] && nprev=$((nprev + 1))
+            done
+            (( nprev >= 1 )) && iname="Old location area identifier"
+        fi
+        idx=$((idx + 1))
+        seen+=("$iei")
+        text=$(ss7_sgsap_ie_text "$iei" "$vh") || text=""
+        printf -v row 'ie\t%s\t%s\t%s\t%s\t%s\t%s' "$idx" "$iei" "$iname" "$ilen" "$vh" "${text:--}"
+        lines+=("$row")
+        off=$(( off + 2 + ilen ))
+    done
+    lines+=("ie_count	$idx")
+
+    # Mandatory rows of the four wired §8 tables: report what is absent rather
+    # than calling an incomplete message complete.
+    local spec k pres x present miss=""
+    spec=$(ss7_sgsap_build_spec "$(ss7_sgsap_message_key "$type")" 2>/dev/null)
+    if [[ -n "$spec" ]]; then
+        while IFS=$'\t' read -r iei k pres; do
+            [[ -n "$iei" && "$pres" == "M" ]] || continue
+            present=0
+            for x in "${seen[@]}"; do
+                [[ "${x,,}" == "${iei,,}" ]] && present=1
+            done
+            (( present )) || miss+="$(ss7_sgsap_ie_name "$iei"), "
+        done <<< "$spec"
+        if [[ -z "$miss" ]]; then
+            lines+=("mandatory	complete")
+        else
+            lines+=("mandatory	missing: ${miss%, }")
+        fi
+    fi
+    printf '%s\n' "${lines[@]}"
+    return 0
+}
+
+# ── --sgsap-ie ──────────────────────────────────────────────────────────
+ss7_cmd_sgsap_ie() {
+    local q="${1:-}"
+    if [[ -z "$q" ]]; then
+        printf 'ERROR\tusage: --sgsap-ie <name|number>\n' >&2
+        return 2
+    fi
+    local iei="" row key
+    if [[ "$q" =~ ^0[xX]([0-9A-Fa-f]{1,2})$ ]]; then
+        iei=$(ss7_byte $(( 16#${BASH_REMATCH[1]} )))
+    elif [[ "$q" =~ ^[0-9]{1,3}$ ]]; then
+        if (( 10#$q > 255 )); then
+            printf 'ERROR\t%s is larger than an octet; an IEI is one octet (Table 9.3.1)\n' "$(ss7_sanitize "$q")" >&2
+            return 2
+        fi
+        iei=$(ss7_byte $(( 10#$q )))
+    fi
+    local -a lines=()
+    if [[ -n "$iei" ]]; then
+        iei=$(ss7_byte $(( 16#$iei )))
+        row=$(ss7_sgsap_ie_row "$iei")
+        if [[ -z "$row" ]]; then
+            lines+=("iei	$iei" "name	unassigned"
+                    "status	TS 29.118 Table 9.3.1 assigns no information element to this IEI")
+            printf '%s\n' "${lines[@]}"
+            return 0
+        fi
+    else
+        key=$(printf '%s' "$q" | tr 'A-Z' 'a-z')
+        key="${key// /-}"
+        case "$key" in
+            paging-retry|paging_retry|pagingretry)
+                printf 'ERROR\tTS 29.118 has no Paging-Retry information element to name\n' >&2
+                printf 'WHY\tTable 9.3.1 (information element identifiers) and §9.4 contain no such IE; retransmission is §10.2 "Retry counters" (Ns timers/counters, not an IE), and the only time-related IEs are 0x2d Maximum Retransmission Time (§9.4.32) and 0x2e Requested Retransmission Time (§9.4.33)\n' >&2
+                return 1 ;;
+            lai)             key="location-area-identifier" ;;
+            tai)             key="tracking-area-identity" ;;
+            nas|nas-container) key="nas-message-container" ;;
+            lu-type)         key="eps-location-update-type" ;;
+            emm-mode)        key="ue-emm-mode" ;;
+            ecgi|cell-id)    key="e-utran-cell-global-identity" ;;
+            nri)             key="tmsi-based-nri-container" ;;
+        esac
+        row=$(ss7_sgsap_ie_table | awk -F'\t' -v k="$key" '{ n=tolower($2); gsub(/ /,"-",n); if (n==k) { print; exit } }')
+        if [[ -z "$row" ]]; then
+            printf 'ERROR\tno information element named %s in TS 29.118 Table 9.3.1\n' "$(ss7_sanitize "$q")" >&2
+            printf 'WHY\tnames come from Table 9.3.1; try a number (--sgsap-ie 0x08) or one of the table names such as sgs-cause, service-indicator, ue-emm-mode\n' >&2
+            return 2
+        fi
+        iei=$(printf '%s\n' "$row" | cut -f1)
+    fi
+    local iname clause vlen c
+    iname=$(printf '%s\n' "$row" | cut -f2)
+    clause=$(printf '%s\n' "$row" | cut -f3)
+    vlen=$(printf '%s\n' "$row" | cut -f4)
+    lines+=("iei	$iei" "name	$iname" "clause	$clause"
+            "value_octets	$vlen"
+            "format	IEI then a one-octet length indicator then the value (TS 29.118 §9.3a)")
+    case "$iei" in
+        0A) lines+=("value	1	IMSI attach" "value	2	Normal location update") ;;
+        08) for c in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+                lines+=("value	$c	$(ss7_sgsap_cause_name "$c")")
+            done ;;
+        20) lines+=("value	1	CS call indicator" "value	2	SMS indicator") ;;
+        25) lines+=("value	0	EMM-IDLE" "value	1	EMM-CONNECTED") ;;
+        26) lines+=("flag	csri	bit 1 of the value octet; bits 8-2 are spare and set to zero (§9.4.25)") ;;
+    esac
+    printf '%s\n' "${lines[@]}"
+    return 0
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
@@ -2956,6 +3902,9 @@ ss7_cli_main() {
         --decode-sigtran) ss7_cmd_decode_sigtran "${1:-}" ;;
         --build-m3ua)    ss7_cmd_build_m3ua "${1:-}" "${2:-}" "${3:-}" ;;
         --m3ua-send)     ss7_cmd_m3ua_send "${1:-}" "${2:-2905}" "${3:-}" "${4:-}" ;;
+        --sgsap-build)   ss7_cmd_sgsap_build "$@" ;;
+        --sgsap-parse)   ss7_cmd_sgsap_parse "${1:-}" ;;
+        --sgsap-ie)      ss7_cmd_sgsap_ie "${1:-}" ;;
         --decode-map)    ss7_cmd_decode_map "${1:-}" ;;
         --build-sri)     ss7_cmd_build_sri "${1:-}" ;;
         --build-sri-sm)  ss7_cmd_build_sri_sm "${1:-}" ;;
@@ -3018,6 +3967,24 @@ Usage: $0 COMMAND
   --surface                  attack surface notes
   --require-stp              report the lab STP, by name if absent
   --plan <stp-lab|ipx-path>  write a handed-off plan naming the testbed
+  --sgsap-build <message>    build an SGsAP message (TS 29.118): one octet of
+                             message type, then IEs of IEI + ONE octet length +
+                             value; messages are location-update-request,
+                             paging-request, downlink-unitdata, service-request
+                             (the length indicator is one octet, §9.3a).
+                             Flags, each spelled as a double-dash option on the
+                             command line: imsi IMSI (required), lai MCC-MNC-LAC
+                             (LUR needs it), tai MCC-MNC-TAC, old-lai
+                             MCC-MNC-LAC, mme-name FQDN, vlr-name FQDN, plmn
+                             MCC-MNC, mmec HEX, mmegi HEX, lu-type
+                             normal|imsi-attach, service-indicator cs|sms,
+                             emm-mode idle|connected, nas HEX (the CP-DATA
+                             message of TS 24.011 §7.2, verbatim), tmsi HEX,
+                             csri, out PATH
+  --sgsap-parse <hex>        decode an SGsAP message, one row per IE with its
+                             name, length and value
+  --sgsap-ie <name|number>   name one information element from Table 9.3.1, with
+                             its §9.4 clause and value coding where one exists
   --selftest                 verify codecs against known answers
   --menu                     interactive menu
 EOF

@@ -35,6 +35,17 @@
 # --oracle-check re-encodes the same values with pycrate and fails if a bit
 # moved.
 #
+# The TRANSPORT around LPP lives here too: SUPL, OMA ULP 2.0 (TCP 7275). LPP
+# says where the device is; SUPL is the envelope a network element actually
+# opens a socket to send it in. --supl-build writes ULP-PDUs (SUPL INIT,
+# SUPL START, SUPL POS, and Ver2-SUPLSETINIT, the only one carrying a target
+# SET id), --supl-parse reads them back field by field, --supl-session writes
+# the SET session id and SET id on their own, and --supl-pos puts an existing
+# LPP-Message inside a SUPL POS so that --supl-parse hands those very bytes
+# back to --parse-position. The ASN.1 is OMA-TS-ULP-V2_0_5-20191028-A, packed
+# with UNALIGNED PER; the expected octets in the selftest are pycrate's, and
+# tools/check-supl.sh re-checks them with tshark's ULP dissector.
+#
 # Synopsis (the usage text above stays short on purpose: tools/check-verbs.sh
 # harvests every --token from this module's usage output and reports the ones no
 # menu reaches, so an option list there would look like ten commands):
@@ -1000,7 +1011,7 @@ LPP_PROC_PY
 lpp_proc_run() {
     local verb="$1"; shift
     command -v python3 >/dev/null 2>&1 || {
-        err "python3 is required for $verb"
+        err "python3 is required for the SUPL verbs (--supl-build/--supl-parse/--supl-session/--supl-pos)"
         return 2
     }
     local py
@@ -1015,6 +1026,998 @@ lpp_otdoa_assist()  { lpp_proc_run otdoa-assist  "$@"; }
 lpp_otdoa_request() { lpp_proc_run otdoa-request "$@"; }
 lpp_utdoa_config()  { lpp_proc_run utdoa-config  "$@"; }
 lpp_prs_plan()      { lpp_proc_run prs-plan      "$@"; }
+
+# ── SUPL / OMA ULP 2.0: the transport that carries LPP ──────────
+# LPP is the payload; SUPL is how it moves. A real SLP reaches a handset by
+# opening TCP 7275 and sending a ULP-PDU whose UlpMessage carries first the
+# SUPL session handshake and then exactly the LPP-Message bytes that
+# --forge-position builds. That envelope is ASN.1 (OMA-TS-ULP-V2_0_5-20191028-A)
+# packed with UNALIGNED PER, and its extension additions are untagged open
+# types (X.691 12.2), which is why the LPP payload sits behind a length
+# determinant inside PosPayLoad instead of inline.
+#
+# Implemented, and nothing else invented:
+#   ULP-PDU / Version / SessionID / SetSessionID / SETId / SlpSessionID /
+#   SLPAddress / FQDN, SUPLINIT, SUPLSTART with SETCapabilities,
+#   PosTechnology, PrefMethod, PosProtocol, LocationId, GsmCellInformation,
+#   Status, SUPLPOS with PosPayLoad -> Ver2-PosPayLoad-extension ->
+#   lPPPayload, and Ver2-SUPLSETINIT with targetSETID.
+# Refused by name, with ERROR/WHY rather than a guess: SETId's ver2-imei,
+# SUPLINIT's notification/qoP/mac/keyIdentity, SUPLSTART's qoP and
+# nmr/ta/non-GSM cells, SUPLPOS's velocity and tia801Payload/rrcPayload/
+# rrlpPayload alternatives, fragmented open types, and every UlpMessage
+# alternative this file does not encode (msSUPLRESPONSE, msSUPLPOSINIT,
+# msSUPLEND, msSUPLAUTHREQ, msSUPLAUTHRESP, the NOTIFY/TRIGGERED family).
+# The envelope is still decoded and printed before the refusal, so a reader
+# learns what the message is even when the body is out of scope.
+lpp_supl_py() {
+    local py="$MOD_TMP/lpp_supl.py" tmp="$MOD_TMP/.lpp_supl.$$.py"
+    mkdir -p "$MOD_TMP" 2>/dev/null
+    cat > "$tmp" <<'LPP_SUPL_PY'
+"""SUPL / OMA ULP transport codec (uPER) - dev copy."""
+import sys
+
+POS_METHODS = ('agpsSETassisted','agpsSETbased','agpsSETassistedpref','agpsSETbasedpref',
+               'autonomousGPS','aflt','ecid','eotd','otdoa','noPosition')
+POS_METHODS_EXT = ('ver2-historicalDataRetrieval','ver2-agnssSETassisted','ver2-agnssSETbased',
+                   'ver2-agnssSETassistedpref','ver2-agnssSETbasedpref','ver2-autonomousGNSS',
+                   'ver2-sessioninfoquery','ver2-mbs')
+SLP_MODES = ('proxy','nonProxy')
+PREF_METHODS = ('agpsSETassistedPreferred','agpsSETBasedPreferred','noPreference')
+STATUSES = ('stale','current','unknown')
+POS_TECH = ('agpsSETassisted','agpsSETBased','autonomousGPS','aflt','ecid','eotd','otdoa')
+POS_PROTOCOL = ('tia801','rrlp','rrc')
+SET_ID = ('msisdn','mdn','min','imsi','nai','iPAddress')
+SET_ID_EXT = ('ver2-imei',)
+ULP_MSG = ('msSUPLINIT','msSUPLSTART','msSUPLRESPONSE','msSUPLPOSINIT','msSUPLPOS',
+           'msSUPLEND','msSUPLAUTHREQ','msSUPLAUTHRESP')
+ULP_MSG_EXT = ('msSUPLTRIGGEREDSTART','msSUPLTRIGGEREDRESPONSE','msSUPLTRIGGEREDSTOP',
+               'msSUPLNOTIFY','msSUPLNOTIFYRESPONSE','msSUPLSETINIT','msSUPLREPORT')
+
+def ceil_log2(n):
+    b = 0
+    while (1 << b) < n:
+        b += 1
+    return b
+
+class BitW(object):
+    def __init__(self):
+        self.bits = []
+    def u(self, n, v):
+        assert 0 <= v < (1 << n), (n, v)
+        for i in range(n - 1, -1, -1):
+            self.bits.append((v >> i) & 1)
+    def b(self, v):
+        self.bits.append(1 if v else 0)
+    def raw(self, data):
+        for byte in data:
+            self.u(8, byte)
+    def pad(self):
+        while len(self.bits) % 8:
+            self.bits.append(0)
+    def tobytes(self):
+        self.pad()
+        out = bytearray()
+        for i in range(0, len(self.bits), 8):
+            v = 0
+            for bit in self.bits[i:i+8]:
+                v = (v << 1) | bit
+            out.append(v)
+        return bytes(out)
+
+class BitR(object):
+    def __init__(self, data):
+        self.bits = []
+        for byte in data:
+            for i in range(7, -1, -1):
+                self.bits.append((byte >> i) & 1)
+        self.pos = 0
+    def left(self):
+        return len(self.bits) - self.pos
+    def u(self, n):
+        if self.left() < n:
+            raise ValueError('truncated: need %d bits, %d left' % (n, self.left()))
+        v = 0
+        for _ in range(n):
+            v = (v << 1) | self.bits[self.pos]
+            self.pos += 1
+        return v
+    def b(self):
+        return self.u(1) == 1
+    def raw(self, n):
+        """read n bits and return them as octets (n must be a multiple of 8)"""
+        if n % 8:
+            return bytes(self.u(8) for _ in range(n // 8))
+        return bytes(self.u(8) for _ in range(n // 8))
+
+# ---- constrained helpers (unaligned PER) ----
+def w_int(w, v, lo, hi):
+    if hi > lo:
+        w.u(ceil_log2(hi - lo + 1), v - lo)
+
+def r_int(r, lo, hi):
+    if hi == lo:
+        return lo
+    return lo + r.u(ceil_log2(hi - lo + 1))
+
+def w_octstr(w, data, lo, hi):
+    n = len(data)
+    if not (lo <= n <= hi):
+        raise ValueError('octet string of %d outside %d..%d' % (n, lo, hi))
+    if hi > lo:
+        w.u(ceil_log2(hi - lo + 1), n - lo)
+    w.raw(data)
+
+def r_octstr(r, lo, hi):
+    n = r_int(r, lo, hi)
+    return r.raw(n)
+
+def w_visstr(w, s, lo, hi):
+    data = s.encode('ascii')
+    n = len(data)
+    if not (lo <= n <= hi):
+        raise ValueError('visible string of %d outside %d..%d' % (n, lo, hi))
+    if hi > lo:
+        w.u(ceil_log2(hi - lo + 1), n - lo)
+    w.raw(data)
+
+def r_visstr(r, lo, hi):
+    n = r_int(r, lo, hi)
+    return r.raw(n).decode('ascii')
+
+def w_enum(w, names, value, ext=()):
+    if value in ext:
+        raise ValueError('extension enum value not supported here')
+    w.b(0)
+    w.u(ceil_log2(len(names)), names.index(value))
+
+def r_enum_index(r, names, ext=()):
+    """returns (name, is_extension, ext_index)"""
+    isext = r.b()
+    if isext:
+        idx = r.u(ceil_log2(len(ext))) if len(ext) > 1 else (0 if ext else None)
+        return None, True, idx
+    return names[r.u(ceil_log2(len(names)))], False, None
+
+def w_choice(w, names, value, ext=()):
+    """value is (alt, payload); ext alternatives are index-only."""
+    alt = value[0]
+    if alt in names:
+        w.b(0)
+        w.u(ceil_log2(len(names)), names.index(alt))
+    else:
+        w.b(1)
+        if len(ext) > 1:
+            w.u(ceil_log2(len(ext)), ext.index(alt))
+    return value[1]
+
+def r_choice_head(r, names, ext=()):
+    isext = r.b()
+    if isext:
+        idx = r.u(ceil_log2(len(ext))) if len(ext) > 1 else 0
+        return ext[idx], True, True
+    return names[r.u(ceil_log2(len(names)))], True, False
+
+# ---- value tables / TBCD ----
+def tbcd_octets(digits):
+    d = [int(c) for c in digits]
+    if len(d) > 16:
+        raise ValueError('at most 16 digits')
+    if len(d) % 2:
+        d.append(0xF)
+    out = bytearray()
+    for i in range(0, len(d), 2):
+        out.append((d[i+1] << 4) | d[i])
+    if len(out) != 8:
+        raise ValueError('SETId imsi/msisdn is 8 octets, got %d' % len(out))
+    return bytes(out)
+
+def tbcd_digits(data):
+    out = []
+    for byte in data:
+        for nib in (byte & 0xF, byte >> 4):
+            if nib == 0xF:
+                return ''.join(out)
+            if nib > 9:
+                raise ValueError('bad BCD nibble %X' % nib)
+            out.append(str(nib))
+    return ''.join(out)
+
+def hex2bytes(s, n=None):
+    s = s.replace(' ', '')
+    if len(s) % 2:
+        raise ValueError('odd hex length %d' % len(s))
+    data = bytes.fromhex(s)
+    if n is not None and len(data) != n:
+        raise ValueError('want %d octets, got %d' % (n, len(data)))
+    return data
+
+# ---- ULP-PDU assembly ----
+def build_pdu(body):
+    """body(BitW) encodes version, sessionID, message; prepends the 2-octet length."""
+    w = BitW()
+    body(w)
+    bits = len(w.bits)
+    total = 2 + (bits + 7) // 8
+    out = bytearray([(total >> 8) & 0xFF, total & 0xFF])
+    out += w.tobytes()
+    return bytes(out)
+
+def enc_version(w, maj=2, mn=0, servind=0):
+    w.u(8, maj); w.u(8, mn); w.u(8, servind)
+
+def enc_session(w, set_sid, slp_sid):
+    w.b(set_sid is not None); w.b(slp_sid is not None)
+    if set_sid is not None:
+        enc_set_session(w, set_sid[0], set_sid[1], set_sid[2])
+    if slp_sid is not None:
+        enc_slp_session(w, slp_sid[0], slp_sid[1], slp_sid[2])
+
+
+
+FQDN_ALPHABET = ('-', '.',) + tuple('0123456789') + tuple(chr(c) for c in range(ord('A'), ord('Z')+1)) + tuple(chr(c) for c in range(ord('a'), ord('z')+1))
+
+def w_fqdn(w, s, lo=1, hi=255):
+    """FQDN ::= VisibleString (FROM ("a".."z"|"A".."Z"|"0".."9"|".-")) (SIZE(1..255)).
+    Restricted alphabet of 64 characters, sorted by ASCII, 6 bits per character."""
+    bad = [c for c in s if c not in FQDN_ALPHABET]
+    if bad:
+        raise ValueError('character outside FQDN permitted alphabet: %r' % bad[0])
+    n = len(s)
+    if not (lo <= n <= hi):
+        raise ValueError('fqdn of %d characters outside %d..%d' % (n, lo, hi))
+    w.u(8, n - lo)
+    for c in s:
+        w.u(6, FQDN_ALPHABET.index(c))
+
+def r_fqdn(r, lo=1, hi=255):
+    n = lo + r.u(8)
+    out = []
+    for _ in range(n):
+        i = r.u(6)
+        out.append(FQDN_ALPHABET[i])
+    return ''.join(out)
+
+def enc_setid(w, kind, digits=None, ip=None):
+    w.b(0)                       # CHOICE extension marker
+    w.u(3, SET_ID.index(kind))
+    if kind in ('msisdn', 'imsi', 'mdn'):
+        w.raw(tbcd_octets(digits))
+    elif kind == 'iPAddress':
+        enc_ip(w, ip)
+    else:
+        raise ValueError('cannot encode SETId %s' % kind)
+
+def enc_ip(w, dotted):
+    parts = dotted.split('.')
+    if len(parts) != 4:
+        raise ValueError('ipv4 as a.b.c.d, got %r' % dotted)
+    w.u(1, 0)                    # ipv4Address is choice alternative 0
+    for p in parts:
+        w.u(8, int(p))
+
+def enc_set_session(w, sid, kind, digits):
+    w.u(16, sid)
+    enc_setid(w, kind, digits=digits)
+
+def enc_slpaddr(w, kind, value):
+    w.b(0)                       # CHOICE extension marker
+    if kind == 'fqdn':
+        w.u(1, 1)
+        w_fqdn(w, value, 1, 255)
+    elif kind == 'ipv4':
+        w.u(1, 0)
+        enc_ip(w, value)
+    else:
+        raise ValueError('cannot encode SLPAddress %s' % kind)
+
+def enc_slp_session(w, sid, kind, value):
+    w.raw(hex2bytes(sid, 4))
+    enc_slpaddr(w, kind, value)
+
+# SEQUENCE preamble rule (X.691 18.2/18.3, verified against pycrate bit lists):
+# an extensible SEQUENCE emits the extension-presence bit FIRST, then one
+# presence bit per OPTIONAL root component in component order, then the root
+# component values in order.
+def enc_suplinit(w, posmethod, slpmode, slpaddr=None):
+    w.b(0)                       # extension additions absent
+    w.b(0)                       # notification
+    w.b(slpaddr is not None)     # sLPAddress
+    w.b(0)                       # qoP
+    w.b(0)                       # mac
+    w.b(0)                       # keyIdentity
+    w_enum(w, POS_METHODS, posmethod, POS_METHODS_EXT)
+    if slpaddr is not None:
+        enc_slpaddr(w, slpaddr[0], slpaddr[1])
+    w.u(1, SLP_MODES.index(slpmode))
+
+def enc_pos_tech(w, techs):
+    w.b(0)                       # extension additions absent
+    for name in POS_TECH:
+        w.b(name in techs)
+
+def enc_pos_protocol(w, protos):
+    w.b(0)
+    for name in POS_PROTOCOL:
+        w.b(name in protos)
+
+def enc_set_capabilities(w, techs, prefmethod, protos):
+    w.b(0)                       # extension additions absent
+    enc_pos_tech(w, techs)
+    w.u(2, PREF_METHODS.index(prefmethod))
+    enc_pos_protocol(w, protos)
+
+def enc_gsm_cell(w, mcc, mnc, lac, ci):
+    w.b(0)                       # extension additions absent
+    w.b(0)                       # nmr
+    w.b(0)                       # ta
+    w.u(10, mcc); w.u(10, mnc); w.u(16, lac); w.u(16, ci)
+
+def enc_location(w, mcc, mnc, lac, ci, status):
+    w.b(0)                       # extension additions absent
+    w.b(0); w.u(2, 0)            # cellInfo: gsmCell
+    enc_gsm_cell(w, mcc, mnc, lac, ci)
+    w_enum(w, STATUSES, status)
+
+def enc_suplstart(w, techs, prefmethod, protos, mcc, mnc, lac, ci, status, qop=False):
+    w.b(0)                       # extension additions absent
+    w.b(qop)
+    enc_set_capabilities(w, techs, prefmethod, protos)
+    enc_location(w, mcc, mnc, lac, ci, status)
+
+def enc_ver2_pospayload(w, lpps):
+    w.b(0)                       # extension additions absent
+    w.b(1)                       # lPPPayload present
+    w.b(0)                       # tia801Payload absent
+    w.u(2, len(lpps) - 1)        # SEQUENCE SIZE(1..3) OF
+    for p in lpps:
+        w_octstr(w, p, 1, 60000)
+
+def w_open_type(w, encode_fn):
+    """X.691 12.2 / 23.2: an extension addition value inside an extensible
+    CHOICE is encoded as an untagged open type: the inner uPER encoding of
+    the chosen alternative, padded to an octet boundary, prefixed by its
+    length in octets (an unconstrained length determinant)."""
+    inner = BitW()
+    encode_fn(inner)
+    inner.pad()
+    data = inner.tobytes()
+    n = len(data)
+    if n < 128:
+        w.b(0); w.u(7, n)
+    elif n < 16384:
+        w.b(1); w.b(0); w.u(14, n)
+    else:
+        raise ValueError('open type of %d octets needs fragmentation, refused' % n)
+    w.raw(data)
+
+def enc_suplpos(w, lpps):
+    w.b(0)                       # extension additions absent
+    w.b(0)                       # velocity absent
+    w.b(1)                       # posPayLoad: extension addition chosen
+    w.b(0)                       # index is normally small
+    w.u(6, 0)                    # extension index 0 = ver2-PosPayLoad-extension
+    w_open_type(w, lambda x: enc_ver2_pospayload(x, lpps))
+
+def enc_ver2_suplsetinit(w, kind, digits):
+    w.b(0)                       # extension additions absent
+    w.b(0)                       # qoP absent
+    w.b(0)                       # applicationID absent
+    enc_setid(w, kind, digits)   # targetSETID SETId
+
+def enc_msg_ext(w, ext_index, encode_fn):
+    """An extentension alternative of UlpMessage is an untagged open type too."""
+    w.b(1)                       # extension alternative chosen
+    w.b(0)                       # index is normally small
+    w.u(6, ext_index)
+    w_open_type(w, encode_fn)
+
+def hex_upper(data):
+    return ''.join('%02X' % b for b in data)
+
+# ---------------------------------------------------------------- decoding ---
+
+def r_choice_root(r, names):
+    """Read an extensible CHOICE head; returns (alt_name, index). Raises on
+    extension alternatives, which this build does not decode."""
+    ext = r.b()
+    n = ceil_log2(len(names)) if len(names) > 1 else 0
+    idx = r.u(n) if n else 0
+    if ext:
+        raise Refused('CHOICE extension alternative (index %d) is not decoded' % idx)
+    if idx >= len(names):
+        raise Refused('CHOICE index %d outside the %d root alternatives' % (idx, len(names)))
+    return names[idx], idx
+
+def r_choice_ext(r, root, extnames):
+    if not r.b():
+        n = ceil_log2(len(root)) if len(root) > 1 else 0
+        idx = r.u(n) if n else 0
+        if idx >= len(root):
+            raise Refused('CHOICE index %d outside the %d root alternatives' % (idx, len(root)))
+        return root[idx]
+    if r.b():
+        raise Refused('CHOICE extension index larger than 63 is not decoded')
+    idx = r.u(6)
+    if idx >= len(extnames):
+        raise Refused('CHOICE extension index %d outside the %d known additions' % (idx, len(extnames)))
+    return extnames[idx]
+
+def r_open_type(r):
+    """X.691 12.2: read an untagged open type and return its inner BitR."""
+    if r.b():
+        return None, None
+    n = r.u(7)
+    data = r.raw(n * 8)
+    return data, BitR(data)
+
+LAST_ROWS = []
+
+class Refused(Exception):
+    pass
+
+def dec_version(r, rows):
+    maj = r.u(8); mn = r.u(8); servind = r.u(8)
+    rows.append(('version.maj', 'INTEGER', str(maj)))
+    rows.append(('version.min', 'INTEGER', str(mn)))
+    rows.append(('version.servind', 'INTEGER', str(servind)))
+    return {'maj': maj, 'min': mn, 'servind': servind}
+
+def dec_setid(r, rows, prefix='sessionID.setSessionID.setId'):
+    ext = r.b()
+    if ext:
+        raise Refused('SETId extension alternative ver2-imei is not decoded')
+    idx = r.u(3)
+    if idx >= 6:
+        raise Refused('SETId index %d outside the 6 root alternatives' % idx)
+    kind = SET_ID[idx]
+    rows.append((prefix, 'Choice', '%s (%d)' % (kind, idx)))
+    if kind in ('msisdn', 'mdn', 'imsi'):
+        raw = r.raw(64)
+        digits = tbcd_digits(raw)
+        rows.append((prefix + '.' + kind, 'OCTET STRING (8)', hex_upper(raw)))
+        rows.append((prefix + '.' + kind + '.digits', 'TBCD digits', digits))
+        return {'kind': kind, 'raw': hex_upper(raw), 'digits': digits}
+    if kind == 'iPAddress':
+        val = dec_ip_addr(r, rows, prefix)
+        rows.append((prefix + '.iPAddress', 'Choice', 'iPAddress'))
+        return {'kind': kind, 'raw': val, 'digits': val}
+    if kind == 'nai':
+        raw = r.raw((1 + r.u(10)) * 8)
+        rows.append((prefix + '.nai', 'IA5String (1..1000)', raw.decode('ascii', 'replace')))
+        return {'kind': kind, 'raw': hex_upper(raw), 'digits': raw.decode('ascii', 'replace')}
+    raw = r.raw(34)
+    rows.append((prefix + '.min', 'BIT STRING (34)', hex_upper(raw)))
+    return {'kind': kind, 'raw': hex_upper(raw), 'digits': hex_upper(raw)}
+
+def dec_set_session(r, rows):
+    sid = r.u(16)
+    rows.append(('sessionID.setSessionID.sessionId', 'INTEGER (0..65535)', str(sid)))
+    st = dec_setid(r, rows)
+    st['sessionId'] = sid
+    return st
+
+def dec_ip_addr(r, rows, prefix):
+    # IPAddress ::= CHOICE { ipv4Address OCTET STRING(SIZE(4)),
+    #                        ipv6Address OCTET STRING(SIZE(16)) } -- NOT extensible,
+    # so there is one index bit and no extension marker (ULP-Components.asn:53).
+    idx = r.u(1)
+    if idx == 0:
+        raw = r.raw(32)
+        val = '.'.join(str(b) for b in raw)
+        rows.append((prefix + '.iPAddress', 'Choice', 'ipv4Address (0)'))
+        rows.append((prefix + '.iPAddress.ipv4Address', 'OCTET STRING (4)', val))
+        return val
+    raw = r.raw(128)
+    rows.append((prefix + '.iPAddress', 'Choice', 'ipv6Address (1)'))
+    rows.append((prefix + '.iPAddress.ipv6Address', 'OCTET STRING (16)', hex_upper(raw)))
+    return hex_upper(raw)
+
+def dec_slpid(r, rows):
+    alt = r_choice_ext(r, ['iPAddress', 'fqdn'], [])
+    if alt == 'iPAddress':
+        return dec_ip_addr(r, rows, 'sessionID.slpSessionID.slpId')
+    val = r_fqdn(r)
+    rows.append(('sessionID.slpSessionID.slpId', 'Choice', 'fqdn (1)'))
+    rows.append(('sessionID.slpSessionID.slpId.fqdn', 'VisibleString (1..255)', val))
+    return val
+
+def dec_slp_session(r, rows):
+    raw = r.raw(32)
+    rows.append(('sessionID.slpSessionID.sessionID', 'OCTET STRING (4)', hex_upper(raw)))
+    val = dec_slpid(r, rows)
+    return {'sid': hex_upper(raw), 'slpId': val}
+
+def dec_pos_method(r, rows):
+    name = r_choice_ext(r, POS_METHODS, POS_METHODS_EXT)
+    rows.append(('msSUPLINIT.posMethod', 'Enumerated', name))
+    return name
+
+def dec_supl_init(r, rows):
+    if r.b():
+        raise Refused('SUPLINIT version 2 extension additions are not decoded')
+    pres = [r.b() for _ in range(5)]
+    rows.append(('msSUPLINIT', 'Sequence', 'posMethod, notification, sLPAddress, qoP, sLPMode, mac, keyIdentity'))
+    rows.append(('msSUPLINIT.preamble', 'BIT STRING (5)', ''.join(str(int(b)) for b in pres)))
+    names = ('notification', 'sLPAddress', 'qoP', 'mac', 'keyIdentity')
+    for name, bit in zip(names, pres):
+        if bit and name != 'sLPAddress':
+            raise Refused('SUPLINIT optional component %s is present; its ASN.1 type is not modelled here' % name)
+    posmethod = dec_pos_method(r, rows)
+    slp = None
+    if pres[1]:
+        slp = dec_slpid(r, rows)
+    slpmode = r.u(1)
+    rows.append(('msSUPLINIT.sLPMode', 'Enumerated', SLP_MODES[slpmode]))
+    return {'posMethod': posmethod, 'sLPAddress': slp, 'sLPMode': SLP_MODES[slpmode]}
+
+def dec_supl_start(r, rows):
+    if r.b():
+        raise Refused('SUPLSTART version 2 extension additions are not decoded')
+    qop = r.b()
+    if qop:
+        raise Refused('SUPLSTART.qoP is present; QoP is not modelled here')
+    rows.append(('msSUPLSTART', 'Sequence', 'sETCapabilities, locationId'))
+    if r.b():
+        raise Refused('SETCapabilities version 2 extension additions are not decoded')
+    rows.append(('msSUPLSTART.sETCapabilities', 'Sequence', 'posTechnology, prefMethod, posProtocol'))
+    if r.b():
+        raise Refused('PosTechnology version 2 extension additions are not decoded')
+    tech = [r.b() for _ in POS_TECH]
+    rows.append(('msSUPLSTART.sETCapabilities.posTechnology', 'Sequence', '7 BOOLEAN'))
+    for name, bit in zip(POS_TECH, tech):
+        rows.append(('msSUPLSTART.sETCapabilities.posTechnology.' + name, 'BOOLEAN', 'true' if bit else 'false'))
+    pref = r.u(2)
+    rows.append(('msSUPLSTART.sETCapabilities.prefMethod', 'Enumerated', PREF_METHODS[pref]))
+    if r.b():
+        raise Refused('PosProtocol version 2 extension additions are not decoded')
+    prot = [r.b() for _ in POS_PROTOCOL]
+    rows.append(('msSUPLSTART.sETCapabilities.posProtocol', 'Sequence', 'tia801, rrlp, rrc'))
+    for name, bit in zip(POS_PROTOCOL, prot):
+        rows.append(('msSUPLSTART.sETCapabilities.posProtocol.' + name, 'BOOLEAN', 'true' if bit else 'false'))
+    if r.b():
+        raise Refused('LocationId version 2 extension additions are not decoded')
+    alt = r_choice_ext(r, ['gsmCell', 'wcdmaCell', 'cdmaCell'], ['ver2-CellInfo-extension'])
+    if alt != 'gsmCell':
+        raise Refused('CellInfo alternative %s is not modelled here' % alt)
+    rows.append(('msSUPLSTART.locationId.cellInfo', 'Choice', 'gsmCell (0)'))
+    if r.b():
+        raise Refused('GsmCellInformation version 2 extension additions are not decoded')
+    nmr = r.b(); ta = r.b()
+    if nmr or ta:
+        raise Refused('gsmCell.nmr or gsmCell.ta is present; those types are not modelled here')
+    mcc = r.u(10); mnc = r.u(10); lac = r.u(16); ci = r.u(16)
+    rows.append(('msSUPLSTART.locationId.cellInfo.gsmCell.refMCC', 'INTEGER (0..999)', str(mcc)))
+    rows.append(('msSUPLSTART.locationId.cellInfo.gsmCell.refMNC', 'INTEGER (0..999)', str(mnc)))
+    rows.append(('msSUPLSTART.locationId.cellInfo.gsmCell.refLAC', 'INTEGER (0..65535)', str(lac)))
+    rows.append(('msSUPLSTART.locationId.cellInfo.gsmCell.refCI', 'INTEGER (0..65535)', str(ci)))
+    name = r_choice_ext(r, STATUSES, [])
+    rows.append(('msSUPLSTART.locationId.status', 'Enumerated', name))
+    return {'prefMethod': PREF_METHODS[pref], 'mcc': mcc, 'mnc': mnc, 'lac': lac, 'ci': ci, 'status': name}
+
+def dec_supl_pos(r, rows):
+    if r.b():
+        raise Refused('SUPLPOS version 2 extension additions are not decoded')
+    if r.b():
+        raise Refused('SUPLPOS.velocity is present; Velocity is not modelled here')
+    alt = r_choice_ext(r, ['tia801payload', 'rrcPayload', 'rrlpPayload'],
+                       ['ver2-PosPayLoad-extension'])
+    if alt != 'ver2-PosPayLoad-extension':
+        raise Refused('PosPayLoad alternative %s is not modelled here' % alt)
+    rows.append(('msSUPLPOS.posPayLoad', 'Choice', 'ver2-PosPayLoad-extension (3, open type)'))
+    data, inner = r_open_type(r)
+    if data is None:
+        raise Refused('fragmented open type is not decoded')
+    rows.append(('msSUPLPOS.posPayLoad.ver2-PosPayLoad-extension', 'open type', '%d octets %s' % (len(data), hex_upper(data))))
+    if inner.b():
+        raise Refused('Ver2-PosPayLoad-extension is extensible; only the root part is decoded')
+    lpp_present = inner.b(); tia_present = inner.b()
+    if not lpp_present:
+        raise Refused('Ver2-PosPayLoad-extension.lPPPayload is absent; nothing to carry')
+    if tia_present:
+        raise Refused('Ver2-PosPayLoad-extension.tia801Payload is present; only lPPPayload is modelled')
+    n = 1 + inner.u(2)
+    lpps = []
+    for i in range(n):
+        size = 1 + inner.u(ceil_log2(60000))
+        raw = inner.raw(size * 8)
+        lpps.append(raw)
+        rows.append(('msSUPLPOS.lPPPayload[%d]' % i, 'OCTET STRING (1..60000)', hex_upper(raw)))
+    left = inner.left()
+    if left >= 8:
+        raise Refused('%d trailing bits after lPPPayload in the open type' % left)
+    if left and inner.u(left) != 0:
+        raise Refused('non-zero padding bits after lPPPayload in the open type')
+    rows.append(('msSUPLPOS.lPPPayload', 'SEQUENCE (SIZE(1..3)) OF OCTET STRING', '%d item(s) %s' % (len(lpps), ' '.join(hex_upper(x) for x in lpps))))
+    return {'lPPPayload': [hex_upper(x) for x in lpps], 'lpp_payload_hex': hex_upper(lpps[0])}
+
+def r_msg_choice(r, rows):
+    if not r.b():
+        idx = r.u(3)
+        if idx >= len(ULP_MSG):
+            raise Refused('UlpMessage index %d outside the 8 root alternatives' % idx)
+        return ULP_MSG[idx], False
+    if r.b():
+        raise Refused('UlpMessage extension index larger than 63 is not decoded')
+    idx = r.u(6)
+    if idx >= len(ULP_MSG_EXT):
+        raise Refused('UlpMessage extension index %d outside the %d known additions' % (idx, len(ULP_MSG_EXT)))
+    return ULP_MSG_EXT[idx], True
+
+def dec_msg_ext(r, msg, rows):
+    data, inner = r_open_type(r)
+    if data is None:
+        raise Refused('fragmented open type is not decoded')
+    rows.append(('message.' + msg, 'open type', '%d octets %s' % (len(data), hex_upper(data))))
+    if msg != 'msSUPLSETINIT':
+        raise Refused('message %s is an extension alternative whose ASN.1 this build does not encode' % msg)
+    if inner.b():
+        raise Refused('Ver2-SUPLSETINIT version 2 extension additions are not decoded')
+    qop = inner.b(); appid = inner.b()
+    if qop or appid:
+        raise Refused('Ver2-SUPLSETINIT.qoP or .applicationID is present; those types are not modelled here')
+    rows.append(('msSUPLSETINIT', 'Sequence', 'targetSETID, qoP OPTIONAL, applicationID OPTIONAL'))
+    target = dec_setid(inner, rows, prefix='msSUPLSETINIT.targetSETID')
+    left = inner.left()
+    if left >= 8:
+        raise Refused('%d trailing bits after targetSETID' % left)
+    if left and inner.u(left) != 0:
+        raise Refused('non-zero padding bits after targetSETID')
+    return {'targetSETID': target}
+
+def dec_ulp(hexstr):
+    try:
+        data = bytes.fromhex(hexstr.replace(' ', '').replace(':', ''))
+    except ValueError:
+        raise Refused('payload is not hexadecimal')
+    if len(data) < 4:
+        raise Refused('payload of %d octets is too short for a ULP-PDU' % len(data))
+    declared = int.from_bytes(data[0:2], 'big')
+    bodylen = (len(data) - 2) * 8
+    if declared != len(data):
+        raise Refused('ULP-PDU length field says %d octets but %d octets were given' % (declared, len(data)))
+    r = BitR(data[2:])
+    rows = []
+    global LAST_ROWS
+    LAST_ROWS = rows
+    rows.append(('ULP-PDU', 'Sequence', 'length, version, sessionID, message'))
+    rows.append(('ULP-PDU.length', 'INTEGER (0..65535)', str(declared)))
+    dec_version(r, rows)
+    spres = [r.b(), r.b()]
+    rows.append(('sessionID', 'Sequence', 'setSessionID OPTIONAL, slpSessionID OPTIONAL'))
+    rows.append(('sessionID.presence', 'BIT STRING (2)', ''.join(str(int(b)) for b in spres)))
+    if not any(spres):
+        raise Refused('sessionID has neither setSessionID nor slpSessionID')
+    if spres[0]:
+        dec_set_session(r, rows)
+    if spres[1]:
+        dec_slp_session(r, rows)
+    msg, is_ext = r_msg_choice(r, rows)
+    rows.append(('message', 'Choice', msg))
+    extra = {}
+    if is_ext:
+        extra = dec_msg_ext(r, msg, rows)
+    elif msg == 'msSUPLINIT':
+        extra = dec_supl_init(r, rows)
+    elif msg == 'msSUPLSTART':
+        extra = dec_supl_start(r, rows)
+    elif msg == 'msSUPLPOS':
+        extra = dec_supl_pos(r, rows)
+    else:
+        raise Refused('message %s root part is not modelled here' % msg)
+    left = r.left()
+    if left >= 8:
+        raise Refused('%d trailing bits after the message' % left)
+    if left and r.u(left) != 0:
+        raise Refused('non-zero padding bits after the message')
+    return msg, rows, extra
+
+
+# ------------------------------------------------------------------- CLI ----
+
+DEFAULT_SESSION_ID = '001A'
+DEFAULT_SET_DIGITS = '311040213456789'
+DEFAULT_SLP_SID = '12345678'
+DEFAULT_SLP_FQDN = 'slp.example.com'
+DEFAULT_POS_METHOD = 'ecid'
+DEFAULT_SLP_MODE = 'proxy'
+
+SET_ID_ROOT = ('msisdn', 'mdn', 'min', 'imsi', 'nai', 'iPAddress')
+
+def bad(msg, why=None):
+    sys.stderr.write('ERROR\t%s\n' % msg)
+    if why:
+        sys.stderr.write('WHY\t%s\n' % why)
+    sys.exit(2)
+
+def fail(msg, why):
+    sys.stderr.write('ERROR\t%s\n' % msg)
+    sys.stderr.write('WHY\t%s\n' % why)
+    sys.exit(1)
+
+class Args(object):
+    def __init__(self, argv):
+        self.pos = []
+        self.opts = {}
+        self.flags = set()
+        i = 0
+        while i < len(argv):
+            a = argv[i]
+            if a.startswith('--'):
+                if '=' in a:
+                    k, v = a[2:].split('=', 1)
+                    if not v:
+                        bad('option %s needs a value' % a, 'spell it as %s=<value> or %s <value>' % (a, a))
+                    self.opts[k] = v
+                elif i + 1 < len(argv) and not argv[i + 1].startswith('--'):
+                    self.opts[a[2:]] = argv[i + 1]
+                    i += 1
+                else:
+                    self.flags.add(a[2:])
+            else:
+                self.pos.append(a)
+            i += 1
+
+def get_sid(a):
+    raw = a.opts.get('session-id', DEFAULT_SESSION_ID)
+    if len(raw) != 4 or any(c not in '0123456789abcdefABCDEF' for c in raw):
+        bad('session id is %r, wanted 4 hex digits (2 octets)' % raw,
+            'SetSessionID.sessionId is INTEGER (0..65535), so it is exactly 2 octets')
+    return int(raw, 16)
+
+def get_setid(a):
+    kind = a.opts.get('set-id', 'imsi')
+    if kind not in ('imsi', 'msisdn'):
+        bad('set id kind is %r' % kind,
+            'this build encodes the two SETId alternatives whose digits a network element can check: '
+            'imsi (index 3) and msisdn (index 0); mdn/min/nai/iPAddress/ver2-imei are not built')
+    digits = a.opts.get('set-digits', DEFAULT_SET_DIGITS)
+    if not digits.isdigit():
+        bad('set digits are %r, wanted decimal digits' % digits,
+            'an imsi/msisdn SETId is 8 octets of TBCD, 15 significant digits padded with F')
+    return kind, digits
+
+def get_slp(a):
+    sid = a.opts.get('slp-session-id', DEFAULT_SLP_SID)
+    if len(sid) != 8 or any(c not in '0123456789abcdefABCDEF' for c in sid):
+        bad('slp session id is %r, wanted 8 hex digits (4 octets)' % sid,
+            'SlpSessionID.sessionID is OCTET STRING (SIZE(4))')
+    if 'slp-ipv4' in a.opts:
+        return sid, 'ipv4', a.opts['slp-ipv4']
+    return sid, 'fqdn', a.opts.get('slp-fqdn', DEFAULT_SLP_FQDN)
+
+def get_lpps(a):
+    if 'lpp' not in a.opts:
+        bad('a SUPL POS needs an LPP payload', 'pass it as: --lpp <lpp-hex> (the pdu_hex printed by --forge-position)')
+    try:
+        data = hex2bytes(a.opts['lpp'])
+    except ValueError as e:
+        bad('lpp payload is not hexadecimal: %s' % e, 'pass the LPP-Message bytes as hex, no 0x prefix')
+    if not (1 <= len(data) <= 60000):
+        bad('lpp payload is %d octets' % len(data),
+            'PosPayLoad.lPPPayload is OCTET STRING (SIZE(1..60000)); a SUPL POS carries 1..3 of them')
+    return [data]
+
+def emit(header, rows):
+    sys.stdout.write('\t'.join(header) + '\n')
+    for r in rows:
+        sys.stdout.write('\t'.join(str(x) for x in r) + '\n')
+
+def cmd_build(msg, a):
+    if msg not in ('init', 'start', 'pos', 'setinit'):
+        bad('unknown SUPL message %r' % msg,
+            'this build encodes SUPL INIT, SUPL START, SUPL POS and SUPL SETINIT; the other UlpMessage alternatives are refused by name')
+    sid = get_sid(a)
+    kind, digits = get_setid(a)
+    try:
+        tbcd = tbcd_octets(digits)
+    except ValueError as e:
+        bad('set digits %r cannot be TBCD encoded: %s' % (digits, e), 'give 15 decimal digits, or fewer with an F pad nibble')
+    slp_sid, slp_kind, slp_val = get_slp(a)
+    posmethod = a.opts.get('pos-method', DEFAULT_POS_METHOD)
+    if posmethod not in POS_METHODS:
+        bad('pos method %r is not a root PosMethod alternative' % posmethod,
+            'root alternatives: %s; the version 2 additions need a different encoder' % ', '.join(POS_METHODS))
+    slpmode = a.opts.get('slp-mode', DEFAULT_SLP_MODE)
+    if slpmode not in SLP_MODES:
+        bad('slp mode %r is not proxy or nonProxy' % slpmode, 'SLPMode ::= ENUMERATED { proxy, nonProxy }')
+    lpps = get_lpps(a) if msg == 'pos' else None
+    set_sid = None if msg in ('init', 'setinit') else (sid, kind, digits)
+    slp_sid_t = None if msg == 'start' else (slp_sid, slp_kind, slp_val)
+
+    def body(w):
+        enc_version(w)
+        enc_session(w, set_sid, slp_sid_t)
+        if msg == 'init':
+            w.b(0); w.u(3, 0)
+            enc_suplinit(w, posmethod, slpmode)
+        elif msg == 'start':
+            w.b(0); w.u(3, 1)
+            enc_suplstart(w, ('agpsSETBased', 'ecid', 'otdoa'), 'agpsSETBasedPreferred', ('rrc',),
+                          310, 410, 0x1234, 0x5678, 'current')
+        elif msg == 'setinit':
+            # SUPLINIT carries no target SET id (it is not in its ASN.1);
+            # Ver2-SUPLSETINIT is the trigger that does, and it is an
+            # extension alternative, so it rides in an open type.
+            enc_msg_ext(w, 5, lambda x: enc_ver2_suplsetinit(x, kind, digits))
+        else:
+            w.b(0); w.u(3, 4)
+            enc_suplpos(w, lpps)
+
+    data = build_pdu(body)
+    bits = len(data) * 8
+    lpp_hex = ' '.join(hex_upper(x) for x in lpps) if lpps else '-'
+    name = {'init': 'SUPL INIT', 'start': 'SUPL START', 'pos': 'SUPL POS',
+            'setinit': 'SUPL SETINIT'}[msg]
+    emit(('message', 'bytes', 'bits', 'hex', 'encoding', 'lpp_payload'),
+         ((name, len(data), bits, hex_upper(data), 'UALIGNED PER (X.691 UNALIGNED)', lpp_hex),))
+    return 0
+
+def cmd_parse(hexstr, a):
+    try:
+        msg, rows, extra = dec_ulp(hexstr)
+    except Refused as e:
+        if LAST_ROWS:
+            emit(('field', 'type', 'value'), LAST_ROWS)
+        fail('cannot decode this SUPL payload', str(e))
+    except ValueError as e:
+        fail('cannot decode this SUPL payload', str(e))
+    rows = rows + [('lpp_payload', 'OCTET STRING', extra['lpp_payload_hex'])] if extra.get('lpp_payload_hex') else rows
+    emit(('field', 'type', 'value'), rows)
+    return 0
+
+def cmd_session(a):
+    if not a.pos:
+        bad('--supl-session needs the SET session id', 'pass the SetSessionID.sessionId as 4 hex digits, e.g. 001a')
+    raw = a.pos[0]
+    if len(raw) != 4 or any(c not in '0123456789abcdefABCDEF' for c in raw):
+        bad('session id is %r, wanted 4 hex digits (2 octets)' % raw,
+            'SetSessionID.sessionId is INTEGER (0..65535), so it is exactly 2 octets')
+    sid = int(raw, 16)
+    kind, digits = get_setid(a)
+    try:
+        w = BitW(); enc_setid(w, kind, digits)
+        setid_hex = hex_upper(w.tobytes())
+        w = BitW(); enc_set_session(w, sid, kind, digits)
+        sses_hex = hex_upper(w.tobytes())
+    except ValueError as e:
+        bad('cannot encode this SET id: %s' % e, 'an imsi/msisdn SETId is 8 octets of TBCD, 15 significant digits padded with F')
+    idx = SET_ID_ROOT.index(kind)
+    emit(('field', 'type', 'value'), (
+        ('sessionId', 'INTEGER (0..65535)', str(sid)),
+        ('setId', 'Choice', '%s (%d)' % (kind, idx)),
+        ('setId.digits', 'TBCD digits', digits),
+        ('setId.hex', 'SETId', setid_hex),
+        ('setSessionID.hex', 'SetSessionID', sses_hex),
+    ))
+    return 0
+
+def cmd_pos(a):
+    if not a.pos and 'lpp' not in a.opts:
+        bad('a SUPL POS needs an LPP payload',
+            'pass it as --lpp <hex>; --supl-pos --lpp <hex> is the same build as --supl-build pos')
+    if a.pos:
+        a.opts.setdefault('lpp', a.pos[0])
+    return cmd_build('pos', a)
+
+def main(argv):
+    if not argv:
+        bad('no verb', 'build <init|start|pos>, parse <hex> or session <id-hex>')
+    verb, rest = argv[0], argv[1:]
+    if verb in ('-h', '--help', 'help'):
+        bad('help was asked for', 'the bash side documents the verbs: --help lists --supl-build, --supl-parse, --supl-session and --supl-pos')
+    a = Args(rest)
+    if verb == 'build':
+        if not a.pos:
+            bad('build needs a message name', 'one of init, start, pos')
+        return cmd_build(a.pos[0], a)
+    if verb == 'parse':
+        if not a.pos:
+            bad('parse needs the payload hex', 'pass the ULP-PDU bytes as hex, no 0x prefix')
+        return cmd_parse(a.pos[0], a)
+    if verb == 'session':
+        return cmd_session(a)
+    if verb == 'pos':
+        return cmd_pos(a)
+    bad('unknown verb %r' % verb, 'build, parse, session and pos are the only verbs this driver knows')
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
+LPP_SUPL_PY
+    if [[ ! -s "$tmp" ]]; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if cmp -s "$tmp" "$py" 2>/dev/null; then
+        rm -f "$tmp"
+    else
+        mv -f "$tmp" "$py" || { rm -f "$tmp"; return 1; }
+    fi
+    printf '%s\n' "$py"
+}
+
+# The driver speaks the module output contract itself (TSV header, ERROR/WHY
+# on stderr, rc 2 for bad input, rc 1 for "I decoded the envelope but this
+# part is out of scope"), so this wrapper only has to make sure it started.
+lpp_supl_run() {
+    local verb="$1"; shift
+    command -v python3 >/dev/null 2>&1 || {
+        err "python3 is required for the SUPL verbs (--supl-build/--supl-parse/--supl-session/--supl-pos)"
+        return 2
+    }
+    local py
+    py=$(lpp_supl_py) || {
+        err "cannot write the SUPL codec under $MOD_TMP"
+        return 2
+    }
+    python3 "$py" "$verb" "$@"
+}
+
+lpp_supl_build() {
+    local msg="${1:-}"
+    case "$msg" in
+        '')
+            err "usage: --supl-build <init|start|pos|setinit>"
+            err "  init    SLP -> SET trigger. Its ASN.1 has NO target SET id."
+            err "  start   SET -> SLP: SET capabilities and the cell it is in"
+            err "  pos     the LPP carriage, needs the lpp option: --lpp <hex>"
+            err "  setinit Ver2-SUPLSETINIT, the trigger that DOES carry a target SET id"
+            return 2 ;;
+    esac
+    shift || true
+    lpp_supl_run build "$msg" "$@"
+}
+
+lpp_supl_parse() {
+    local hex="${1:-}"
+    if [[ -z "$hex" ]]; then
+        err "usage: --supl-parse <hex>"
+        return 2
+    fi
+    lpp_supl_run parse "$hex"
+}
+
+lpp_supl_session() {
+    if (($# == 0)); then
+        err "usage: --supl-session <id-hex> [--set-id imsi|msisdn] [--set-digits <digits>]"
+        err "  <id-hex> is SetSessionID.sessionId (4 hex digits): the part every message repeats"
+        return 2
+    fi
+    lpp_supl_run session "$@"
+}
+
+# <hex> or --lpp <hex>: the same build, because the payload is the point.
+lpp_supl_pos() {
+    local hex=''
+    local -a pass=()
+    while (($#)); do
+        case "$1" in
+            --lpp)   hex="${2:-}"; shift 2 || shift ;;
+            --lpp=*) hex="${1#--lpp=}"; shift ;;
+            *)       pass+=("$1"); shift ;;
+        esac
+    done
+    if [[ -z "$hex" ]]; then
+        # --supl-pos <hex> is the same build as --supl-pos --lpp <hex>: the
+        # first bare argument is the LPP payload, anything else is an option.
+        local -a rest=()
+        local a
+        for a in ${pass[@]+"${pass[@]}"}; do
+            if [[ -z "$hex" && "$a" != --* ]]; then
+                hex="$a"
+            else
+                rest+=("$a")
+            fi
+        done
+        pass=(${rest[@]+"${rest[@]}"})
+    fi
+    if [[ -z "$hex" ]]; then
+        err "usage: --supl-pos <lpp-hex> (or --supl-pos --lpp <lpp-hex>)"
+        err "  the LPP-Message bytes ride unchanged in PosPayLoad -> ver2-PosPayLoad-extension -> lPPPayload"
+        return 2
+    fi
+    lpp_supl_run pos --lpp "$hex" "${pass[@]+"${pass[@]}"}"
+}
 
 # ── forge a position report ───────────────────────────────────────────
 # <lat>,<lon> [radius-metres] -- builds a real LPP-Message carrying a
@@ -1404,6 +2407,70 @@ lpp_selftest() {
         printf '%s\tSKIP\n' oracle-present
     fi
 
+    # ── SUPL / OMA ULP 2.0: the transport around LPP ──────────────────
+    # LPP is the payload; SUPL is the envelope that moves it over TCP 7275.
+    # Every literal below is what pycrate produces for the same value (an
+    # independent implementation of OMA TS ULP 2.0's ASN.1), and
+    # tools/check-supl.sh replays these same octets through tshark 4.2.2's
+    # ULP dissector on a real TCP flow. None of it is pinned to this file's
+    # own encoder output.
+    local s1 s2 s3 sr back reparsed
+    s1=$(lpp_supl_build init 2>/dev/null); chk supl-init-rc "$?" 0
+    chk supl-init-hex "$(lpp_field "$s1" "SUPL INIT" 4)" \
+        0018020000448D159E10EE31D41ABD9B2D71A81A34C80030
+    chk supl-init-bytes "$(lpp_field "$s1" "SUPL INIT" 2)" 24
+    s2=$(lpp_supl_build start 2>/dev/null); chk supl-start-rc "$?" 0
+    chk supl-start-hex "$(lpp_field "$s2" "SUPL START" 4)" \
+        001B02000080068C4C0410490D961FE4412A2013666848D159E080
+    s3=$(lpp_supl_build pos --lpp D2020028410124FB55FFA544 2>/dev/null); chk supl-pos-rc "$?" 0
+    chk supl-pos-hex "$(lpp_field "$s3" "SUPL POS" 4)" \
+        0032020000C0068C4C0410490D961FE448D159E10EE31D41ABD9B2D71A81A34C90800F40005E90100142080927DAAFFD2A20
+    chk supl-pos-carries "$(lpp_field "$s3" "SUPL POS" 6)" D2020028410124FB55FFA544
+
+    # The composition that is the point: the bytes --supl-parse hands back are
+    # the ones --parse-position decodes unchanged. A single wrong bit in the
+    # open type or in an lPPPayload length lands here, not in a comment.
+    sr=$(lpp_supl_parse "$(lpp_field "$s3" "SUPL POS" 4)" 2>/dev/null); chk supl-parse-rc "$?" 0
+    chk supl-parse-message "$(lpp_field "$sr" message 3)" msSUPLPOS
+    back=$(lpp_field "$sr" lpp_payload 3)
+    chk supl-roundtrip-lpp "$back" D2020028410124FB55FFA544
+    reparsed=$(lpp_parse_position "$back" 2>/dev/null)
+    chk supl-roundtrip-status "$(lpp_field "$reparsed" status 2)" decoded
+    chk supl-roundtrip-shape "$(lpp_field "$reparsed" shape 2)" ellipsoidPoint
+    chk supl-roundtrip-lat "$(lpp_field "$reparsed" latitude 2)" 51.5006983
+    chk supl-roundtrip-lon "$(lpp_field "$reparsed" longitude 2)" -0.1246047
+
+    # --supl-session prints the two pieces every message repeats, alone.
+    sr=$(lpp_supl_session 001a 2>/dev/null); chk supl-session-rc "$?" 0
+    chk supl-session-hex "$(lpp_field "$sr" setSessionID.hex 3)" 001A313010412436587F90
+    chk supl-setid-hex "$(lpp_field "$sr" setId.hex 3)" 313010412436587F90
+    chk supl-setid-digits "$(lpp_field "$sr" setId.digits 3)" 311040213456789
+    sr=$(lpp_supl_session 001a --set-id msisdn --set-digits 001010000000001 2>/dev/null)
+    chk supl-msisdn-choice "$(lpp_field "$sr" setId 3)" 'msisdn (0)'
+
+    # SUPLINIT's ASN.1 has no target SET id (the message is posMethod,
+    # notification/sLPAddress/qoP/mac/keyIdentity, sLPMode); SETINIT is the
+    # trigger that does, so the target id is pinned there rather than invented.
+    s3=$(lpp_supl_build setinit 2>/dev/null); chk supl-setinit-rc "$?" 0
+    chk supl-setinit-hex "$(lpp_field "$s3" "SUPL SETINIT" 4)" \
+        0021020000448D159E10EE31D41ABD9B2D71A81A34CA142418980820921B2C3FC8
+    sr=$(lpp_supl_parse "$(lpp_field "$s3" "SUPL SETINIT" 4)" 2>/dev/null); chk supl-setinit-parse-rc "$?" 0
+    chk supl-setinit-target "$(lpp_field "$sr" msSUPLSETINIT.targetSETID 3)" 'imsi (3)'
+
+    # Refusals are refusals: no invented tags, no silent truncation, no
+    # "closest match" for a message this file does not encode.
+    chk supl-unknown-message "$(lpp_supl_build foo >/dev/null 2>&1; echo $?)" 2
+    chk supl-pos-needs-lpp "$(lpp_supl_build pos >/dev/null 2>&1; echo $?)" 2
+    chk supl-parse-short "$(lpp_supl_parse 0018 >/dev/null 2>&1; echo $?)" 1
+    chk supl-parse-length-lie \
+        "$(lpp_supl_parse 0026020000448D159E10EE31D41ABD9B2D71A81A34C80030 >/dev/null 2>&1; echo $?)" 1
+    # A corrupted UlpMessage Choice: the root alternative is now msSUPLEND
+    # (index 5), which this file does not encode. It must say so by name.
+    chk supl-parse-other-message \
+        "$(lpp_supl_parse 0018020000448D159E10EE31D41ABD9B2D71A81A34C94030 >/dev/null 2>&1; echo $?)" 1
+    chk supl-parse-other-why \
+        "$(lpp_supl_parse 0018020000448D159E10EE31D41ABD9B2D71A81A34C94030 2>&1 >/dev/null | grep -c '^WHY.*msSUPLEND')" 1
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1425,6 +2492,11 @@ lpp_menu() {
   [8]  Build a UE OTDOA response (measurements / capabilities)
   [9]  State the UTDOA uplink fields (LPPa)
   [10] Plan PRS occasions for a PRS-ConfigurationIndex
+  [11] Build a SUPL INIT (the SLP -> SET trigger, ULP over TCP 7275)
+  [12] Build a SUPL START (SET capabilities + the cell it is in)
+  [13] Build a SUPL POS carrying an LPP payload
+  [14] Parse a SUPL INIT / START / POS
+  [15] Encode the SET session id / SET id on their own
   [0]  back
 
 M
@@ -1471,6 +2543,23 @@ M
             10)
                 read -rp "  PRS configurationIndex [0]> " i
                 lpp_prs_plan --prs-index "${i:-0}"; read -rp "  press enter " _ ;;
+            11)
+                lpp_supl_build init; read -rp "  press enter " _ ;;
+            12)
+                lpp_supl_build start; read -rp "  press enter " _ ;;
+            13)
+                read -rp "  LPP-Message hex (the pdu_hex --forge-position prints)> " h
+                read -rp "  SetSessionID.sessionId hex [001a]> " s
+                lpp_supl_pos --lpp "${h:-D2020028410124FB55FFA544}" --session-id "${s:-001A}"
+                read -rp "  press enter " _ ;;
+            14)
+                read -rp "  ULP-PDU hex> " h
+                lpp_supl_parse "$h"; read -rp "  press enter " _ ;;
+            15)
+                read -rp "  SetSessionID.sessionId hex [001a]> " s
+                read -rp "  set id kind imsi|msisdn [imsi]> " k
+                lpp_supl_session "${s:-001A}" --set-id "${k:-imsi}"
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1493,6 +2582,10 @@ lpp_cli_main() {
         --otdoa-request) lpp_otdoa_request "$@" ;;
         --utdoa-config)  lpp_utdoa_config "$@" ;;
         --prs-plan)      lpp_prs_plan "$@" ;;
+        --supl-build)    lpp_supl_build    "$@" ;;
+        --supl-parse)    lpp_supl_parse    "$@" ;;
+        --supl-session)  lpp_supl_session  "$@" ;;
+        --supl-pos)      lpp_supl_pos      "$@" ;;
         --selftest)     lpp_selftest ;;
         --menu)         lpp_menu ;;
         *) cat >&2 <<EOF
@@ -1517,6 +2610,17 @@ Usage: $0 COMMAND
                        why they are not LPP messages
   --prs-plan           PRS occasions implied by a PRS-ConfigurationIndex, then
                        the samples handoff (a command named, not run)
+  --supl-build <init|start|pos|setinit>
+                       build the OMA ULP envelope around LPP (TCP 7275):
+                       init is the SLP->SET trigger, start the SET's
+                       capabilities, pos the carriage that holds an LPP
+                       payload, setinit the trigger with a target SET id
+  --supl-parse <hex>   decode a SUPL message: one field per line, with
+                       its ASN.1 type (Choice / Sequence / Enumerated)
+  --supl-session <id-hex>
+                       encode the SET session id and SET id on their own
+  --supl-pos <lpp-hex> build the SUPL POS that carries this LPP payload
+                       (the long form passes the payload as the lpp option)
   --selftest           verify tables and parsers
   --menu               interactive menu
 EOF

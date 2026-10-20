@@ -30,6 +30,14 @@
 # ordinary message with an empty body. Nothing here transmits: delivery is a
 # handoff to a loopback SMSC you run (--plan-tp).
 #
+# The third layer is SMPP 3.4 (ESME <-> SMSC, TCP 2775): bind_transceiver,
+# submit_sm and deliver_sm are built and parsed here -- the 16-octet header,
+# C-Octet Strings whose terminating NUL counts in the field, and the integer
+# body fields -- with the matching *_resp and the command-id/direction table.
+# tools/check-smpp.sh writes each built PDU into a pcap and reads it back with
+# the tshark SMPP dissector, which is what proves the length octets and every
+# C-Octet boundary against where the dissector puts the field.
+#
 # Resolve IMSISTING_ROOT from this script's own path (MODULE_CONVENTIONS §2).
 if [[ -z "${IMSISTING_ROOT:-}" ]]; then
     _sl_src="${BASH_SOURCE[0]}"
@@ -95,6 +103,8 @@ otasm_status_tsv() {
     printf 'KAT\tTS 23.038 §6.1.2.1.1 packing vectors (hi=e834, hello=e8329bfd06)\n'
     printf 'PUSH\tS@T push built (--sat-push): 42/deck/card + 2d macros in a TS 31.115 packet, TAR 505348, SMS TP-PID 0x7F\n'
     printf 'WIB\trefused (--wib-push): no citable WIB command encoding, so no push is invented\n'
+    printf 'SMPP\theader and C-Octet body build/parse for bind_transceiver, submit_sm and deliver_sm (oracle: tools/check-smpp.sh)\n'
+    printf 'SMPP_RESP\tmatching *_resp with the request sequence number; query_sm/submit_multi/data_sm/outbind/broadcast responses refused with WHY\n'
     printf 'SELFTEST\tyes\n'
 }
 
@@ -1983,6 +1993,728 @@ scope	a Type 0 message is acknowledged and discarded without indication or
 EOF
 }
 
+# ── SMPP 3.4 (ESME <-> SMSC) ────────────────────────────────────────────
+# Header (§4.1): command_length(4) | command_id(4) | command_status(4) |
+# sequence_number(4), all big-endian, then a body of C-Octet Strings and
+# fixed-width integers. A C-Octet String ends at its first NUL and the NUL is
+# part of the field, so NULL is one octet 0x00 and a non-empty string is one
+# octet longer than its text. A command_id with bit 31 set is the response to
+# the request carrying the same id without that bit (Table 5-2). Ids come from
+# Table 5-2, status names from §5.1.3, field widths and ranges from the §5.2
+# body-field definitions. The builder emits only mandatory fields: optional
+# parameters are TLVs and are refused rather than guessed.
+OTASM_SMPP_PORT=2775
+
+# Integer argument: decimal or 0x-prefixed hex on stdout, 1 when it is neither.
+_otasm_smpp_int() {
+    local v="${1:-}"
+    v="${v//[[:space:]]/}"
+    [[ -n "$v" ]] || return 1
+    if [[ "$v" =~ ^0[xX][0-9a-fA-F]+$ ]]; then
+        printf '%d' "$(( v ))"
+    elif [[ "$v" =~ ^[0-9]+$ ]]; then
+        printf '%d' "$(( 10#$v ))"
+    else
+        return 1
+    fi
+}
+
+# Validate an integer field argument; stdout carries the value when it parses,
+# stderr carries ERROR+WHY when it does not. Returns 1 on a non-integer.
+_otasm_smpp_uint() {
+    local field="$1" raw="$2" n
+    if ! n=$(_otasm_smpp_int "$raw"); then
+        printf 'ERROR\t%s: "%s" is not an integer\n' "$field" "$raw" >&2
+        printf 'WHY\t%s is encoded as a fixed-width integer; "%s" has no such encoding and is not rounded into one\n' "$field" "$raw" >&2
+        return 1
+    fi
+    printf '%d' "$n"
+}
+
+_otasm_smpp_u8() { printf '%02x' "$(( ${1:-0} & 0xff ))"; }
+
+# C-Octet String from text: lowercase hex with the terminating NUL appended.
+# Refuses non-printable bytes (this builder carries printable ASCII and does
+# not pick a character set) and refuses text that would overflow the field.
+_otasm_smpp_cstr() {
+    local text="${1-}" max="${2:-0}" field="${3:-field}" h
+    if [[ "$text" == *[![:print:]]* ]]; then
+        printf 'ERROR\t%s carries a character this builder will not encode\n' "$field" >&2
+        printf 'WHY\t%s is a C-Octet String of octets whose last octet is NUL; this builder carries printable ASCII and will not choose a character set for anything else\n' "$field" >&2
+        return 1
+    fi
+    if (( ${#text} + 1 > max )); then
+        printf 'ERROR\t%s is %d octets with its NUL; the SMPP 3.4 limit is %d\n' "$field" "$(( ${#text} + 1 ))" "$max" >&2
+        printf 'WHY\tno truncation is applied: a shortened address or identifier would be a different value than the one given\n' >&2
+        return 1
+    fi
+    h=$(printf '%s' "$text" | od -An -v -tx1 | tr -d ' \n')
+    printf '%s00' "${h,,}"
+}
+
+# Render the content octets of a C-Octet String as text for the parse rows.
+# Non-printable content is shown as hex rather than as a byte soup that would
+# break the row.
+_otasm_smpp_text() {
+    local h="${1-}" i b out=''
+    if [[ -z "$h" ]]; then printf '(null)'; return 0; fi
+    for (( i = 0; i < ${#h}; i += 2 )); do
+        b="${h:i:2}"
+        if [[ ! "$b" =~ ^(2[0-9a-f]|[3-6][0-9a-f]|7[0-9a-e])$ ]]; then
+            printf 'hex:%s' "$h"
+            return 0
+        fi
+        out+=$(printf "\\x$b")
+    done
+    printf '%s' "$out"
+}
+
+# Command id -> name, kind, direction. Table 5-2 of SMPP 3.4.
+_otasm_smpp_cmd() {
+    case "${1:-}" in
+        00000001) printf 'bind_receiver\trequest\tesme->smsc\n' ;;
+        00000002) printf 'bind_transmitter\trequest\tesme->smsc\n' ;;
+        00000003) printf 'query_sm\trequest\tesme->smsc\n' ;;
+        00000004) printf 'submit_sm\trequest\tesme->smsc\n' ;;
+        00000005) printf 'deliver_sm\trequest\tsmsc->esme\n' ;;
+        00000006) printf 'unbind\trequest\teither\n' ;;
+        00000007) printf 'replace_sm\trequest\tesme->smsc\n' ;;
+        00000008) printf 'cancel_sm\trequest\tesme->smsc\n' ;;
+        00000009) printf 'bind_transceiver\trequest\tesme->smsc\n' ;;
+        0000000b) printf 'outbind\trequest\tsmsc->esme\n' ;;
+        00000015) printf 'enquire_link\trequest\teither\n' ;;
+        00000021) printf 'submit_multi\trequest\tesme->smsc\n' ;;
+        00000102) printf 'alert_notification\tnotification\tsmsc->esme\n' ;;
+        00000103) printf 'data_sm\trequest\teither\n' ;;
+        00000111) printf 'broadcast_sm\trequest\tesme->smsc\n' ;;
+        00000112) printf 'query_broadcast_sm\trequest\tesme->smsc\n' ;;
+        00000113) printf 'cancel_broadcast_sm\trequest\tesme->smsc\n' ;;
+        80000000) printf 'generic_nack\tresponse\teither\n' ;;
+        80000001) printf 'bind_receiver_resp\tresponse\tsmsc->esme\n' ;;
+        80000002) printf 'bind_transmitter_resp\tresponse\tsmsc->esme\n' ;;
+        80000003) printf 'query_sm_resp\tresponse\tsmsc->esme\n' ;;
+        80000004) printf 'submit_sm_resp\tresponse\tsmsc->esme\n' ;;
+        80000005) printf 'deliver_sm_resp\tresponse\tesme->smsc\n' ;;
+        80000006) printf 'unbind_resp\tresponse\teither\n' ;;
+        80000007) printf 'replace_sm_resp\tresponse\tsmsc->esme\n' ;;
+        80000008) printf 'cancel_sm_resp\tresponse\tsmsc->esme\n' ;;
+        80000009) printf 'bind_transceiver_resp\tresponse\tsmsc->esme\n' ;;
+        80000015) printf 'enquire_link_resp\tresponse\teither\n' ;;
+        80000021) printf 'submit_multi_resp\tresponse\tsmsc->esme\n' ;;
+        80000103) printf 'data_sm_resp\tresponse\teither\n' ;;
+        80000111) printf 'broadcast_sm_resp\tresponse\tsmsc->esme\n' ;;
+        80000112) printf 'query_broadcast_sm_resp\tresponse\tsmsc->esme\n' ;;
+        80000113) printf 'cancel_broadcast_sm_resp\tresponse\tsmsc->esme\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Command name (or a numeric id) -> 8-digit id. Returns 1 when neither parses.
+_otasm_smpp_id() {
+    local q="${1:-}" n
+    q="${q,,}"
+    q="${q//-/_}"
+    q="${q// /_}"
+    if [[ "$q" =~ ^0x[0-9a-f]+$ ]]; then
+        n=$(( q ))
+        (( n >= 0 && n <= 0xffffffff )) || return 1
+        printf '%08x' "$n"
+        return 0
+    fi
+    if [[ "$q" =~ ^[0-9]+$ ]]; then
+        n=$(( 10#$q ))
+        (( n >= 0 && n <= 0xffffffff )) || return 1
+        printf '%08x' "$n"
+        return 0
+    fi
+    case "$q" in
+        bind_receiver)           printf '00000001' ;;
+        bind_transmitter)        printf '00000002' ;;
+        query_sm)                printf '00000003' ;;
+        submit_sm)               printf '00000004' ;;
+        deliver_sm)              printf '00000005' ;;
+        unbind)                  printf '00000006' ;;
+        replace_sm)              printf '00000007' ;;
+        cancel_sm)               printf '00000008' ;;
+        bind_transceiver)        printf '00000009' ;;
+        outbind)                 printf '0000000b' ;;
+        enquire_link)            printf '00000015' ;;
+        submit_multi)            printf '00000021' ;;
+        alert_notification)      printf '00000102' ;;
+        data_sm)                 printf '00000103' ;;
+        broadcast_sm)            printf '00000111' ;;
+        query_broadcast_sm)      printf '00000112' ;;
+        cancel_broadcast_sm)     printf '00000113' ;;
+        generic_nack)            printf '80000000' ;;
+        bind_receiver_resp)      printf '80000001' ;;
+        bind_transmitter_resp)   printf '80000002' ;;
+        query_sm_resp)           printf '80000003' ;;
+        submit_sm_resp)          printf '80000004' ;;
+        deliver_sm_resp)         printf '80000005' ;;
+        unbind_resp)             printf '80000006' ;;
+        replace_sm_resp)         printf '80000007' ;;
+        cancel_sm_resp)          printf '80000008' ;;
+        bind_transceiver_resp)   printf '80000009' ;;
+        enquire_link_resp)       printf '80000015' ;;
+        submit_multi_resp)       printf '80000021' ;;
+        data_sm_resp)            printf '80000103' ;;
+        broadcast_sm_resp)       printf '80000111' ;;
+        query_broadcast_sm_resp) printf '80000112' ;;
+        cancel_broadcast_sm_resp) printf '80000113' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Split a command id into OTASM_SMPP_NAME / _KIND / _DIR. Returns 1 when the id
+# is not in Table 5-2.
+OTASM_SMPP_NAME=''
+OTASM_SMPP_KIND=''
+OTASM_SMPP_DIR=''
+_otasm_smpp_info() {
+    local info rest
+    info=$(_otasm_smpp_cmd "${1:-}") || return 1
+    OTASM_SMPP_NAME="${info%%$'\t'*}"
+    rest="${info#*$'\t'}"
+    OTASM_SMPP_KIND="${rest%%$'\t'*}"
+    OTASM_SMPP_DIR="${rest#*$'\t'}"
+    return 0
+}
+
+# command_status -> name. §5.1.3.
+_otasm_smpp_status() {
+    case "${1:-}" in
+        00000000) printf 'ESME_ROK' ;;
+        00000001) printf 'ESME_RINVMSGLEN' ;;
+        00000002) printf 'ESME_RINVCMDLEN' ;;
+        00000003) printf 'ESME_RINVCMDID' ;;
+        00000004) printf 'ESME_RINVBNDSTS' ;;
+        00000005) printf 'ESME_RALYBND' ;;
+        00000006) printf 'ESME_RINVPRTFLG' ;;
+        00000007) printf 'ESME_RINVREGDLVFLG' ;;
+        00000008) printf 'ESME_RSYSERR' ;;
+        0000000a) printf 'ESME_RINVSRCADR' ;;
+        0000000b) printf 'ESME_RINVDSTADR' ;;
+        0000000c) printf 'ESME_RINVMSGID' ;;
+        0000000d) printf 'ESME_RBINDFAIL' ;;
+        0000000e) printf 'ESME_RINVPASWD' ;;
+        0000000f) printf 'ESME_RINVSYSID' ;;
+        00000011) printf 'ESME_RCANCELFAIL' ;;
+        00000013) printf 'ESME_RREPLACEFAIL' ;;
+        00000014) printf 'ESME_RMSGQFUL' ;;
+        00000015) printf 'ESME_RINVSERTYP' ;;
+        00000033) printf 'ESME_RINVNUMDESTS' ;;
+        00000034) printf 'ESME_RINVDLNAME' ;;
+        00000040) printf 'ESME_RINVDESTFLAG' ;;
+        00000042) printf 'ESME_RINVSUBREP' ;;
+        00000043) printf 'ESME_RINVESMCLASS' ;;
+        00000044) printf 'ESME_RCNTSUBDL' ;;
+        00000045) printf 'ESME_RSUBMITFAIL' ;;
+        00000048) printf 'ESME_RINVSRCTON' ;;
+        00000049) printf 'ESME_RINVSRCNPI' ;;
+        00000050) printf 'ESME_RINVDSTTON' ;;
+        00000051) printf 'ESME_RINVDSTNPI' ;;
+        00000053) printf 'ESME_RINVSYSTYP' ;;
+        00000054) printf 'ESME_RINVREPFLAG' ;;
+        00000055) printf 'ESME_RINVNUMMSGS' ;;
+        00000058) printf 'ESME_RTHROTTLED' ;;
+        00000061) printf 'ESME_RINVSCHED' ;;
+        00000062) printf 'ESME_RINVEXPIRY' ;;
+        00000063) printf 'ESME_RINVDFTMSGID' ;;
+        00000064) printf 'ESME_RX_T_APPN' ;;
+        00000065) printf 'ESME_RX_P_APPN' ;;
+        00000066) printf 'ESME_RX_R_APPN' ;;
+        00000067) printf 'ESME_RQUERYFAIL' ;;
+        000000c0) printf 'ESME_RINVOPTPARSTREAM' ;;
+        000000c1) printf 'ESME_ROPTPARNOTALLWD' ;;
+        000000c2) printf 'ESME_RINVPARLEN' ;;
+        000000c3) printf 'ESME_RMISSINGOPTPARAM' ;;
+        000000c4) printf 'ESME_RINVOPTPARAMVAL' ;;
+        000000c5) printf 'ESME_RDELIVERYFAILURE' ;;
+        000000fe) printf 'ESME_RUNKNOWNERR' ;;
+        *) printf 'unassigned' ;;
+    esac
+}
+
+# Body layout of the command ids this module decodes: one "kind<TAB>name" per
+# field, in wire order. Absent ids return 1 (the body is not walked here).
+_otasm_smpp_layout() {
+    case "${1:-}" in
+        00000001|00000002|00000009)
+            printf 'cstr\tsystem_id\ncstr\tpassword\ncstr\tsystem_type\nu8\tinterface_version\nu8\taddr_ton\nu8\taddr_npi\ncstr\taddress_range\n' ;;
+        00000004|00000005)
+            printf 'cstr\tservice_type\nu8\tsource_addr_ton\nu8\tsource_addr_npi\ncstr\tsource_addr\nu8\tdest_addr_ton\nu8\tdest_addr_npi\ncstr\tdestination_addr\nu8\tesm_class\nu8\tprotocol_id\nu8\tpriority_flag\ncstr\tschedule_delivery_time\ncstr\tvalidity_period\nu8\tregistered_delivery\nu8\treplace_if_present_flag\nu8\tdata_coding\nu8\tsm_default_msg_id\nu8\tsm_length\noctets\tshort_message\n' ;;
+        00000006|00000015) printf '' ;;
+        80000000|80000006|80000007|80000008|80000015) printf '' ;;
+        80000001|80000002|80000009) printf 'cstr\tsystem_id\n' ;;
+        80000004|80000005|80000103) printf 'cstr\tmessage_id\n' ;;
+        80000003) printf 'cstr\tmessage_id\ncstr\tfinal_date\nu8\tmessage_state\nu8\terror_code\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Header rows shared by --smpp-parse and the response builder.
+_otasm_smpp_header_tsv() {
+    local hex="$1" cid="$2"
+    printf 'command_length\t%d\n' "$(( 16#${hex:0:8} ))"
+    printf 'command_id\t%s\n' "$cid"
+    printf 'command_status\t%s\n' "${hex:16:8}"
+    printf 'command_status_name\t%s\n' "$(_otasm_smpp_status "${hex:16:8}")"
+    printf 'sequence_number\t%s\n' "${hex:24:8}"
+    if _otasm_smpp_info "$cid"; then
+        printf 'name\t%s\n' "$OTASM_SMPP_NAME"
+        printf 'kind\t%s\n' "$OTASM_SMPP_KIND"
+        printf 'direction\t%s\n' "$OTASM_SMPP_DIR"
+    fi
+}
+
+# Walk one layout over the body, printing field rows with their offsets and
+# stopping at the first boundary that cannot be established. Leaves the next
+# offset in OTASM_SMPP_OFF.
+OTASM_SMPP_OFF=16
+_otasm_smpp_walk_body() {
+    local hex="$1" off="$2" end="$3" layout="$4"
+    local kind name byte sz got n
+    OTASM_SMPP_OFF=$off
+    if [[ -z "$layout" ]]; then
+        return 0
+    fi
+    while IFS=$'\t' read -r kind name; do
+        case "$kind" in
+            cstr)
+                sz=0
+                got=0
+                while (( off + sz < end )); do
+                    if [[ "${hex:$(( (off + sz) * 2 )):2}" == "00" ]]; then
+                        got=1
+                        break
+                    fi
+                    sz=$(( sz + 1 ))
+                done
+                if (( got == 0 )); then
+                    printf 'ERROR\tC-Octet String %s at offset %d runs to the end of the PDU without a NUL\n' "$name" "$off" >&2
+                    printf 'WHY\tthe last octet of a C-Octet String is its NUL and the NUL counts in the field; without one the next field has no boundary, so nothing after it is decoded\n' >&2
+                    return 1
+                fi
+                printf 'field\t%d\t%s\tC-Octet-String\t%s\t%s\n' \
+                    "$off" "$name" "${hex:$(( off * 2 )):$(( (sz + 1) * 2 ))}" \
+                    "$(_otasm_smpp_text "${hex:$(( off * 2 )):$(( sz * 2 ))}")"
+                off=$(( off + sz + 1 ))
+                ;;
+            u8)
+                if (( off >= end )); then
+                    printf 'ERROR\t%s starts at offset %d but the PDU ends at %d\n' "$name" "$off" "$end" >&2
+                    printf 'WHY\ta missing octet means the PDU is truncated; it is not read as zero because zero is a different value\n' >&2
+                    return 1
+                fi
+                byte="${hex:$(( off * 2 )):2}"
+                printf 'field\t%d\t%s\tInteger\t%s\t%d\n' "$off" "$name" "$byte" "$(( 16#$byte ))"
+                if [[ "$name" == "sm_length" ]]; then
+                    n=$(( 16#$byte ))
+                fi
+                off=$(( off + 1 ))
+                ;;
+            octets)
+                if (( off + n > end )); then
+                    printf 'ERROR\tshort_message needs %d octets from offset %d but the PDU ends at %d\n' "$n" "$off" "$end" >&2
+                    printf 'WHY\tsm_length counts the octets of short_message; with fewer octets present the PDU is truncated and the missing ones are not invented\n' >&2
+                    return 1
+                fi
+                printf 'field\t%d\t%s\tOctet-String\t%s\t%d octets\n' \
+                    "$off" "$name" "${hex:$(( off * 2 )):$(( n * 2 ))}" "$n"
+                off=$(( off + n ))
+                ;;
+        esac
+        :
+    done <<< "$layout"
+    OTASM_SMPP_OFF=$off
+    return 0
+}
+
+# --smpp-pdu <name|id> — name a command id and its direction.
+otasm_smpp_pdu() {
+    local q="${1:-}" id
+    if [[ -z "$q" ]]; then
+        printf 'ERROR\t--smpp-pdu needs a command name or a command id\n' >&2
+        printf 'WHY\tnothing was named, so no command id, direction or PDU can be reported\n' >&2
+        return 2
+    fi
+    if ! id=$(_otasm_smpp_id "$q"); then
+        printf 'ERROR\tunknown SMPP command: %s\n' "$q" >&2
+        printf 'WHY\tnot a name from the SMPP 3.4 PDU table nor a command id in 0x00000000-0xFFFFFFFF (Table 5-2); names look like submit_sm or submit_sm_resp and ids like 4 or 0x80000004\n' >&2
+        return 1
+    fi
+    if ! _otasm_smpp_info "$id"; then
+        printf 'ERROR\t0x%s is not a PDU command id\n' "$id" >&2
+        printf 'WHY\tthe SMPP 3.4 PDU table lists the request ids 0x00000001-0x00000113 and the responses 0x80000000-0x80000113; 0x%s is in neither list and has no direction\n' "$id" >&2
+        return 1
+    fi
+    printf 'query\t0x%s\n' "$id"
+    printf 'command_id\t%s\n' "$id"
+    printf 'command_id_dec\t%d\n' "$(( 16#$id ))"
+    printf 'name\t%s\n' "$OTASM_SMPP_NAME"
+    printf 'kind\t%s\n' "$OTASM_SMPP_KIND"
+    printf 'direction\t%s\n' "$OTASM_SMPP_DIR"
+    if (( (16#$id & 0x80000000) != 0 )); then
+        printf 'response_bit\t1\n'
+    else
+        printf 'response_bit\t0\n'
+    fi
+}
+
+# --smpp-build <pdu> [--flag value ...] — submit_sm, deliver_sm, bind_transceiver.
+otasm_smpp_build() {
+    local pdu="${1:-}" tlv=0
+    shift || true
+    pdu="${pdu,,}"
+    pdu="${pdu//-/_}"
+    local src='' dst='' msg='' service_type=''
+    local dcs='00' rd='00' seq='1' esm_class='00' protocol_id='00' priority='00'
+    local sm_default_msg_id='00' src_ton='05' src_npi='00' dst_ton='01' dst_npi='01'
+    local system_id='' password='' system_type='' interface_version='0x34'
+    local addr_ton='00' addr_npi='00' address_range=''
+    while (($#)); do
+        case "$1" in
+            --src|--dst|--msg|--service-type|--dcs|--rd|--seq|--esm-class|--protocol-id|--priority|--sm-default-msg-id|--src-ton|--src-npi|--dst-ton|--dst-npi|--system-id|--password|--system-type|--interface-version|--addr-ton|--addr-npi|--address-range)
+                if (($# < 2)); then
+                    printf 'ERROR\t%s needs a value\n' "$1" >&2
+                    printf 'WHY\t--smpp-build takes "--flag value" pairs; a flag with no value has no encoding\n' >&2
+                    return 2
+                fi
+                case "$1" in
+                    --src)               src="$2" ;;
+                    --dst)               dst="$2" ;;
+                    --msg)               msg="$2" ;;
+                    --service-type)      service_type="$2" ;;
+                    --dcs)               dcs="$2" ;;
+                    --rd)                rd="$2" ;;
+                    --seq)               seq="$2" ;;
+                    --esm-class)         esm_class="$2" ;;
+                    --protocol-id)       protocol_id="$2" ;;
+                    --priority)          priority="$2" ;;
+                    --sm-default-msg-id) sm_default_msg_id="$2" ;;
+                    --src-ton)           src_ton="$2" ;;
+                    --src-npi)           src_npi="$2" ;;
+                    --dst-ton)           dst_ton="$2" ;;
+                    --dst-npi)           dst_npi="$2" ;;
+                    --system-id)         system_id="$2" ;;
+                    --password)          password="$2" ;;
+                    --system-type)       system_type="$2" ;;
+                    --interface-version) interface_version="$2" ;;
+                    --addr-ton)          addr_ton="$2" ;;
+                    --addr-npi)          addr_npi="$2" ;;
+                    --address-range)     address_range="$2" ;;
+                esac
+                shift 2
+                ;;
+            --tlv) tlv=1; shift ;;
+            *)
+                printf 'ERROR\tunknown option: %s\n' "$1" >&2
+                printf 'WHY\t--smpp-build accepts --src --dst --msg --service-type --dcs --rd --seq --src-ton --src-npi --dst-ton --dst-npi --esm-class --protocol-id --priority --sm-default-msg-id --system-id --password --system-type --interface-version --addr-ton --addr-npi --address-range\n' >&2
+                return 2
+                ;;
+        esac
+    done
+    case "$pdu" in
+        submit_sm|deliver_sm|bind_transceiver) ;;
+        '')
+            printf 'ERROR\t--smpp-build needs a PDU name\n' >&2
+            printf 'WHY\tthis tree builds submit_sm, deliver_sm and bind_transceiver\n' >&2
+            return 2 ;;
+        *)
+            printf 'ERROR\t--smpp-build does not build %s\n' "$pdu" >&2
+            printf 'WHY\tthis tree builds submit_sm, deliver_sm and bind_transceiver; submit_multi, data_sm and the broadcast PDUs carry fields (distribution lists, mandatory TLVs, broadcast areas) that are not encoded here, so no PDU is invented for them\n' >&2
+            return 2 ;;
+    esac
+    if (( tlv )); then
+        printf 'ERROR\t--smpp-build does not encode optional parameters\n' >&2
+        printf 'WHY\toptional parameters are TLVs with their own tag, length and value layout; this builder emits the mandatory body fields only and will not invent a TLV\n' >&2
+        return 2
+    fi
+    local v f
+    if ! v=$(_otasm_smpp_uint sequence_number "$seq"); then return 2; fi
+    if (( v < 1 || v > 0x7fffffff )); then
+        printf 'ERROR\tsequence_number %d is outside 1..0x7FFFFFFF\n' "$v" >&2
+        printf 'WHY\tSMPP 3.4 reserves 0x00000000 and keeps bit 31 clear in a request sequence number; %d does not fit that range\n' "$v" >&2
+        return 2
+    fi
+    seq=$v
+    for f in src_ton src_npi dst_ton dst_npi esm_class protocol_id priority sm_default_msg_id addr_ton addr_npi interface_version; do
+        if ! v=$(_otasm_smpp_uint "$f" "${!f}"); then return 2; fi
+        if (( v > 255 )); then
+            printf 'ERROR\t%s is %d and does not fit its one-octet field\n' "$f" "$v" >&2
+            printf 'WHY\tthe SMPP body carries %s as a single octet; a value above 255 has no encoding\n' "$f" >&2
+            return 2
+        fi
+        printf -v "$f" '%d' "$v"
+    done
+    if ! v=$(_otasm_smpp_uint data_coding "$dcs"); then return 2; fi
+    if (( v > 255 )); then
+        printf 'ERROR\tdata_coding %d does not fit its one-octet field\n' "$v" >&2
+        printf 'WHY\tdata_coding is a single octet; a value above 255 has no encoding\n' >&2
+        return 2
+    fi
+    dcs=$v
+    if ! v=$(_otasm_smpp_uint registered_delivery "$rd"); then return 2; fi
+    if (( v > 0x1f )); then
+        printf 'ERROR\tregistered_delivery 0x%02x sets reserved bits\n' "$v" >&2
+        printf 'WHY\tbits 5-7 of registered_delivery are reserved in SMPP 3.4; only the receipt (bits 0-1), the SME acknowledgement (bits 2-3) and the intermediate notification (bit 4) are encodable, so 0x%02x is refused\n' "$v" "$v" >&2
+        return 2
+    fi
+    rd=$v
+    local body='' cmd_id='' dir='' msg_hex='' sm_len_hex=''
+    case "$pdu" in
+        submit_sm|deliver_sm)
+            if [[ "$pdu" == "submit_sm" ]]; then
+                cmd_id='00000004'
+                dir='esme->smsc'
+            else
+                cmd_id='00000005'
+                dir='smsc->esme'
+            fi
+            msg_hex=$(otasm_norm_hex "$msg")
+            if [[ -n "$msg_hex" ]]; then
+                if [[ ! "$msg_hex" =~ ^[0-9a-f]+$ ]] || (( ${#msg_hex} % 2 )); then
+                    printf 'ERROR\tshort_message is not whole octets of hex: %s\n' "$msg" >&2
+                    printf 'WHY\tshort_message is an Octet String counted by sm_length; an odd digit or a non-hex character cannot be rounded without inventing an octet\n' >&2
+                    return 1
+                fi
+            fi
+            if (( ${#msg_hex} / 2 > 254 )); then
+                printf 'ERROR\tshort_message is %d octets\n' "$(( ${#msg_hex} / 2 ))" >&2
+                printf 'WHY\tSMPP 3.4 caps short_message at 254 octets and sm_length is one octet; longer content must ride in the message_payload optional parameter, which this builder does not encode\n' >&2
+                return 1
+            fi
+            sm_len_hex=$(printf '%02x' "$(( ${#msg_hex} / 2 ))")
+            body=$(_otasm_smpp_cstr "$service_type" 6 service_type) || return 1
+            body+="$(_otasm_smpp_u8 "$src_ton")$(_otasm_smpp_u8 "$src_npi")"
+            body+="$(_otasm_smpp_cstr "$src" 21 source_addr)" || return 1
+            body+="$(_otasm_smpp_u8 "$dst_ton")$(_otasm_smpp_u8 "$dst_npi")"
+            body+="$(_otasm_smpp_cstr "$dst" 21 destination_addr)" || return 1
+            body+="$(_otasm_smpp_u8 "$esm_class")$(_otasm_smpp_u8 "$protocol_id")$(_otasm_smpp_u8 "$priority")"
+            body+='0000'
+            body+="$(_otasm_smpp_u8 "$rd")"
+            body+='00'
+            body+="$(_otasm_smpp_u8 "$dcs")"
+            body+="$(_otasm_smpp_u8 "$sm_default_msg_id")"
+            body+="$sm_len_hex$msg_hex"
+            ;;
+        bind_transceiver)
+            cmd_id='00000009'
+            dir='esme->smsc'
+            if [[ -z "$system_id" ]]; then
+                printf 'ERROR\tsystem_id is empty\n' >&2
+                printf 'WHY\tsystem_id identifies the ESME in a bind (1-16 octets); an empty identity is not a bind this builder will invent\n' >&2
+                return 2
+            fi
+            if [[ -z "$password" ]]; then
+                printf 'ERROR\tpassword is empty\n' >&2
+                printf 'WHY\tbind_transceiver carries the ESME password (1-9 octets); an empty one is not written in place of what was asked for\n' >&2
+                return 2
+            fi
+            body=$(_otasm_smpp_cstr "$system_id" 16 system_id) || return 1
+            body+="$(_otasm_smpp_cstr "$password" 9 password)" || return 1
+            body+="$(_otasm_smpp_cstr "$system_type" 13 system_type)" || return 1
+            body+="$(_otasm_smpp_u8 "$interface_version")"
+            body+="$(_otasm_smpp_u8 "$addr_ton")$(_otasm_smpp_u8 "$addr_npi")"
+            body+="$(_otasm_smpp_cstr "$address_range" 41 address_range)" || return 1
+            ;;
+    esac
+    local len=$(( 16 + ${#body} / 2 )) hex
+    hex="$(printf '%08x' "$len")${cmd_id}00000000$(printf '%08x' "$seq")${body}"
+    printf 'pdu\t%s\n' "$pdu"
+    printf 'command_id\t%s\n' "$cmd_id"
+    printf 'direction\t%s\n' "$dir"
+    printf 'command_length\t%d\n' "$len"
+    printf 'sequence_number\t%08x\n' "$seq"
+    if [[ "$pdu" == "bind_transceiver" ]]; then
+        printf 'system_id\t%s\n' "$system_id"
+        printf 'password\t%s\n' "$password"
+        printf 'system_type\t%s\n' "${system_type:-(null)}"
+        printf 'interface_version\t%s\n' "$(_otasm_smpp_u8 "$interface_version")"
+        printf 'addr_ton\t%s\n' "$(_otasm_smpp_u8 "$addr_ton")"
+        printf 'addr_npi\t%s\n' "$(_otasm_smpp_u8 "$addr_npi")"
+        printf 'address_range\t%s\n' "${address_range:-(null)}"
+    else
+        printf 'service_type\t%s\n' "${service_type:-(null)}"
+        printf 'source_addr\t%s\n' "${src:-(null)}"
+        printf 'destination_addr\t%s\n' "${dst:-(null)}"
+        printf 'data_coding\t%s\n' "$(_otasm_smpp_u8 "$dcs")"
+        printf 'registered_delivery\t%s\n' "$(_otasm_smpp_u8 "$rd")"
+        printf 'short_message\t%s\n' "$msg_hex"
+        printf 'short_message_octets\t%d\n' "$(( ${#msg_hex} / 2 ))"
+    fi
+    printf 'octets\t%d\n' "$len"
+    printf 'hex\t%s\n' "$hex"
+    printf 'built\tyes\n'
+}
+
+# --smpp-parse <hex> — header, then one row per body field with its offset.
+otasm_smpp_parse() {
+    local raw="${1:-}" hex
+    hex=$(otasm_norm_hex "$raw")
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\t--smpp-parse needs a PDU in hex\n' >&2
+        printf 'WHY\tnothing was given, so there is no header and no body to decode\n' >&2
+        return 2
+    fi
+    if [[ ! "$hex" =~ ^[0-9a-f]+$ ]] || (( ${#hex} % 2 )); then
+        printf 'ERROR\tnot a whole number of hex octets: %s\n' "$raw" >&2
+        printf 'WHY\ta PDU is octets; an odd hex digit or a character outside 0-9a-f cannot be decoded without inventing an octet\n' >&2
+        return 1
+    fi
+    local total=$(( ${#hex} / 2 ))
+    if (( total < 16 )); then
+        printf 'ERROR\t%d octets is shorter than the 16-octet SMPP header\n' "$total" >&2
+        printf 'WHY\tthe header is command_length, command_id, command_status and sequence_number, four octets each (§4.1); a shorter frame has no command id to decode\n' >&2
+        return 1
+    fi
+    local cid="${hex:8:8}" clen=$(( 16#${hex:0:8} ))
+    _otasm_smpp_header_tsv "$hex" "$cid"
+    printf 'body_octets\t%d\n' "$(( total - 16 ))"
+    if (( clen != total )); then
+        printf 'command_length_actual\t%d\n' "$total"
+        printf 'parsed\tno\n'
+        printf 'ERROR\tcommand_length says %d octets but the PDU is %d\n' "$clen" "$total" >&2
+        printf 'WHY\tthe length field is the first four octets and must equal the whole PDU (§4.1); a consumer would take %d octets and this input is not that frame, so no body is decoded as if the field were right\n' "$clen" >&2
+        return 1
+    fi
+    if ! _otasm_smpp_info "$cid"; then
+        printf 'parsed\tno\n'
+        printf 'ERROR\tcommand id 0x%s is not in the SMPP 3.4 PDU table\n' "$cid" >&2
+        printf 'WHY\twithout a PDU definition the body has no field list; nothing is decoded (Table 5-2)\n' >&2
+        return 1
+    fi
+    local layout
+    if ! layout=$(_otasm_smpp_layout "$cid"); then
+        printf 'parsed\tno\n'
+        printf 'ERROR\t%s has no layout in this module\n' "$OTASM_SMPP_NAME" >&2
+        printf 'WHY\tthis parser walks the layouts it has established (bind_*, submit_sm, deliver_sm, their responses and query_sm_resp); %s is defined by SMPP 3.4 but its body is not walked here, so no field values are guessed\n' "$OTASM_SMPP_NAME" >&2
+        return 1
+    fi
+    if ! _otasm_smpp_walk_body "$hex" 16 "$total" "$layout"; then
+        printf 'parsed\tno\n'
+        return 1
+    fi
+    if (( OTASM_SMPP_OFF < total )); then
+        printf 'optional_parameters\t%d\n' "$(( total - OTASM_SMPP_OFF ))"
+        printf 'optional_parameters_hex\t%s\n' "${hex:$(( OTASM_SMPP_OFF * 2 ))}"
+        printf 'optional_parameters_decoded\tno\n'
+    fi
+    printf 'parsed\tyes\n'
+}
+
+# --smpp-response <request-hex> [--status n] — the matching *_resp PDU.
+otasm_smpp_response() {
+    local raw="${1:-}" status_arg='00' mid='' sysid=''
+    shift || true
+    while (($#)); do
+        case "$1" in
+            --status|--message-id|--system-id)
+                if (($# < 2)); then
+                    printf 'ERROR\t%s needs a value\n' "$1" >&2
+                    printf 'WHY\t--smpp-response takes "--flag value" pairs; a flag with no value has no encoding\n' >&2
+                    return 2
+                fi
+                case "$1" in
+                    --status)     status_arg="$2" ;;
+                    --message-id) mid="$2" ;;
+                    --system-id)  sysid="$2" ;;
+                esac
+                shift 2
+                ;;
+            *)
+                printf 'ERROR\tunknown option: %s\n' "$1" >&2
+                printf 'WHY\t--smpp-response accepts --status, --message-id and --system-id\n' >&2
+                return 2
+                ;;
+        esac
+    done
+    local hex
+    hex=$(otasm_norm_hex "$raw")
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\t--smpp-response needs the request PDU in hex\n' >&2
+        printf 'WHY\tthe response copies the request sequence number and pairs with its command id; without the request there is neither\n' >&2
+        return 2
+    fi
+    if [[ ! "$hex" =~ ^[0-9a-f]+$ ]] || (( ${#hex} % 2 )); then
+        printf 'ERROR\tnot a whole number of hex octets: %s\n' "$raw" >&2
+        printf 'WHY\ta PDU is octets; the request cannot be read as one\n' >&2
+        return 1
+    fi
+    local total=$(( ${#hex} / 2 ))
+    if (( total < 16 )); then
+        printf 'ERROR\t%d octets is shorter than the 16-octet SMPP header\n' "$total" >&2
+        printf 'WHY\tthe sequence number sits at offset 12; a shorter frame has none to copy\n' >&2
+        return 1
+    fi
+    if (( 16#${hex:0:8} != total )); then
+        printf 'ERROR\tcommand_length says %d octets but the request is %d\n' "$(( 16#${hex:0:8} ))" "$total" >&2
+        printf 'WHY\tthe request is not a whole PDU (§4.1), so its sequence number is not copied into a response that would look well formed\n' >&2
+        return 1
+    fi
+    local cid="${hex:8:8}" seq="${hex:24:8}" v
+    if ! _otasm_smpp_info "$cid"; then
+        printf 'ERROR\tcommand id 0x%s is not in the SMPP 3.4 PDU table\n' "$cid" >&2
+        printf 'WHY\tthere is no response id defined for it (Table 5-2), so none is invented\n' >&2
+        return 1
+    fi
+    if [[ "$OTASM_SMPP_KIND" == "response" ]]; then
+        printf 'ERROR\t%s is already a response\n' "$OTASM_SMPP_NAME" >&2
+        printf 'WHY\ta response answers a request; it has no response of its own, so a matching *_resp does not exist\n' >&2
+        return 1
+    fi
+    if ! v=$(_otasm_smpp_uint command_status "$status_arg"); then return 2; fi
+    if (( v > 0xffffffff )); then
+        printf 'ERROR\tcommand_status %d does not fit four octets\n' "$v" >&2
+        printf 'WHY\tthe field is four octets; a larger value has no encoding\n' >&2
+        return 2
+    fi
+    local status=$(printf '%08x' "$v")
+    local rid='' body_kind='' refuse=''
+    case "$cid" in
+        00000001) rid='80000001'; body_kind='system_id' ;;
+        00000002) rid='80000002'; body_kind='system_id' ;;
+        00000009) rid='80000009'; body_kind='system_id' ;;
+        00000004) rid='80000004'; body_kind='message_id' ;;
+        00000005) rid='80000005'; body_kind='message_id' ;;
+        00000006) rid='80000006'; body_kind='none' ;;
+        00000007) rid='80000007'; body_kind='none' ;;
+        00000008) rid='80000008'; body_kind='none' ;;
+        00000015) rid='80000015'; body_kind='none' ;;
+        00000003) refuse='query_sm_resp carries message_id, final_date, message_state and error_code, which are the SMSC answer to a query and not derivable from the request; this verb copies the sequence number and command status, it does not make up a query answer' ;;
+        00000021) refuse='submit_multi_resp carries an unsuccess_sme array whose per-destination error codes are not derivable from the request; no body is invented' ;;
+        00000103) refuse='data_sm_resp carries a message_id for content that rides in the message_payload optional parameter; this verb does not encode TLVs, so it builds no data_sm_resp' ;;
+        0000000b) refuse='outbind is answered by a bind_receiver or bind_transmitter PDU, not by a *_resp; this verb builds responses only and will not substitute a bind' ;;
+        00000102) refuse='alert_notification has no response PDU in SMPP 3.4; writing one would invent a command id' ;;
+        00000111|00000112|00000113) refuse='the broadcast response bodies are not established by this module; no *_resp is invented for them' ;;
+        *) refuse='this request has no response id in this module (Table 5-2 pairing)' ;;
+    esac
+    if [[ -n "$refuse" ]]; then
+        printf 'ERROR\tno response built for %s\n' "$OTASM_SMPP_NAME" >&2
+        printf 'WHY\t%s\n' "$refuse" >&2
+        return 1
+    fi
+    local body=''
+    case "$body_kind" in
+        system_id)  body=$(_otasm_smpp_cstr "$sysid" 16 system_id) || return 1 ;;
+        message_id) body=$(_otasm_smpp_cstr "$mid" 65 message_id) || return 1 ;;
+        none)       body='' ;;
+    esac
+    local len=$(( 16 + ${#body} / 2 )) resp_hex
+    resp_hex="$(printf '%08x' "$len")${rid}${status}${seq}${body}"
+    printf 'request\t%s\n' "$OTASM_SMPP_NAME"
+    printf 'request_command_id\t%s\n' "$cid"
+    printf 'request_sequence_number\t%s\n' "$seq"
+    _otasm_smpp_info "$rid" && printf 'response\t%s\n' "$OTASM_SMPP_NAME"
+    printf 'response_command_id\t%s\n' "$rid"
+    printf 'command_status\t%s\n' "$status"
+    printf 'command_status_name\t%s\n' "$(_otasm_smpp_status "$status")"
+    printf 'sequence_number\t%s\n' "$seq"
+    printf 'command_length\t%d\n' "$len"
+    printf 'hex\t%s\n' "$resp_hex"
+    printf 'built\tyes\n'
+}
+
 otasm_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -2369,6 +3101,68 @@ PY
     chk scope-no-send    "$(otasm_cli_main --send >/dev/null 2>&1; echo $?)" "2"
     chk scope-no-deliver "$(otasm_cli_main --deliver >/dev/null 2>&1; echo $?)" "2"
 
+    # 8. SMPP 3.4: header and C-Octet body construction, the response pairing,
+    #    the command-id table and the refusals. Every expected hex was assembled
+    #    field by field from Table 5-2 and the §5.2 field widths, then decoded
+    #    back with the tshark SMPP dissector by tools/check-smpp.sh.
+    local smpp_submit smpp_deliver smpp_bind smpp_bind_resp smpp_submit_resp smpp_out badlen trunc serr
+    smpp_submit=0000003c00000004000000000000000100050031353535313233343536370001013135353539383736353433000000000000010000000548656c6c6f
+    smpp_deliver=0000003c00000005000000000000000300050031353535313233343536370001013135353539383736353433000000000000010000000548656c6c6f
+    smpp_bind=0000002a000000090000000000000002736d7070636c69656e74310070617373776f7264000034000000
+    smpp_bind_resp=00000017800000090000000000000002534d5343303100
+    smpp_submit_resp=0000001180000004000000000000000100
+    smpp_out=$(otasm_smpp_build submit_sm --src 15551234567 --dst 15559876543 --msg 48656c6c6f --dcs 00 --rd 01 --seq 1 2>/dev/null)
+    chk smpp-submit-hex       "$(fld "$smpp_out" hex)"            "$smpp_submit"
+    chk smpp-submit-length    "$(fld "$smpp_out" command_length)" "60"
+    smpp_out=$(otasm_smpp_build deliver_sm --src 15551234567 --dst 15559876543 --msg 48656c6c6f --dcs 00 --rd 01 --seq 3 2>/dev/null)
+    chk smpp-deliver-hex      "$(fld "$smpp_out" hex)"            "$smpp_deliver"
+    smpp_out=$(otasm_smpp_build bind_transceiver --system-id smppclient1 --password password --seq 2 2>/dev/null)
+    chk smpp-bind-hex         "$(fld "$smpp_out" hex)"            "$smpp_bind"
+    chk smpp-bind-length      "$(fld "$smpp_out" command_length)" "42"
+    smpp_out=$(otasm_smpp_response "$smpp_bind" --system-id SMSC01 2>/dev/null)
+    chk smpp-bind-resp-hex    "$(fld "$smpp_out" hex)"            "$smpp_bind_resp"
+    chk smpp-bind-resp-id     "$(fld "$smpp_out" response_command_id)" "80000009"
+    smpp_out=$(otasm_smpp_response "$smpp_submit" 2>/dev/null)
+    chk smpp-submit-resp-hex  "$(fld "$smpp_out" hex)"            "$smpp_submit_resp"
+    chk smpp-submit-resp-seq  "$(fld "$smpp_out" sequence_number)" "00000001"
+    chk smpp-submit-resp-name "$(fld "$smpp_out" response)"       "submit_sm_resp"
+    smpp_out=$(otasm_smpp_parse "$smpp_submit" 2>/dev/null)
+    chk smpp-parse-length     "$(fld "$smpp_out" command_length)" "60"
+    chk smpp-parse-id         "$(fld "$smpp_out" command_id)"     "00000004"
+    chk smpp-parse-name       "$(fld "$smpp_out" name)"           "submit_sm"
+    chk smpp-parse-dir        "$(fld "$smpp_out" direction)"      "esme->smsc"
+    chk smpp-parse-src-off    "$(printf '%s\n' "$smpp_out" | awk -F'\t' '$1=="field" && $3=="source_addr" {print $2}')" "19"
+    chk smpp-parse-src        "$(printf '%s\n' "$smpp_out" | awk -F'\t' '$1=="field" && $3=="source_addr" {print $6}')" "15551234567"
+    chk smpp-parse-dst        "$(printf '%s\n' "$smpp_out" | awk -F'\t' '$1=="field" && $3=="destination_addr" {print $6}')" "15559876543"
+    chk smpp-parse-msg        "$(printf '%s\n' "$smpp_out" | awk -F'\t' '$1=="field" && $3=="short_message" {print $5}')" "48656c6c6f"
+    chk smpp-parse-msglen     "$(printf '%s\n' "$smpp_out" | awk -F'\t' '$1=="field" && $3=="sm_length" {print $5}')" "05"
+    chk smpp-parse-parsed     "$(fld "$smpp_out" parsed)"         "yes"
+    smpp_out=$(otasm_smpp_parse "$smpp_bind" 2>/dev/null)
+    chk smpp-parse-bind-sysid "$(printf '%s\n' "$smpp_out" | awk -F'\t' '$1=="field" && $3=="system_id" {print $6}')" "smppclient1"
+    chk smpp-parse-bind-pw    "$(printf '%s\n' "$smpp_out" | awk -F'\t' '$1=="field" && $3=="password" {print $6}')" "password"
+    chk smpp-parse-bind-ifv   "$(printf '%s\n' "$smpp_out" | awk -F'\t' '$1=="field" && $3=="interface_version" {print $5}')" "34"
+    smpp_out=$(otasm_smpp_pdu submit_sm 2>/dev/null)
+    chk smpp-pdu-id           "$(fld "$smpp_out" command_id)"     "00000004"
+    chk smpp-pdu-dir          "$(fld "$smpp_out" direction)"      "esme->smsc"
+    smpp_out=$(otasm_smpp_pdu 0x80000004 2>/dev/null)
+    chk smpp-pdu-resp-name    "$(fld "$smpp_out" name)"           "submit_sm_resp"
+    chk smpp-pdu-resp-dir     "$(fld "$smpp_out" direction)"      "smsc->esme"
+    chk smpp-pdu-unknown-rc   "$(otasm_smpp_pdu no_such_pdu >/dev/null 2>&1; echo $?)" "1"
+    chk smpp-build-unknown    "$(otasm_smpp_build submit_multi >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-build-tlv        "$(otasm_smpp_build submit_sm --src 1 --dst 2 --tlv >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-build-badhex     "$(otasm_smpp_build submit_sm --src 1 --dst 2 --msg abc >/dev/null 2>&1; echo $?)" "1"
+    chk smpp-build-longmsg    "$(otasm_smpp_build submit_sm --src 1 --dst 2 --msg "$(printf '%0510d' 0)" >/dev/null 2>&1; echo $?)" "1"
+    chk smpp-resp-query-sm    "$(otasm_smpp_response 00000010000000030000000000000001 >/dev/null 2>&1; echo $?)" "1"
+    badlen="00000010${smpp_submit:8}"
+    serr=$(otasm_smpp_parse "$badlen" 2>&1 >/dev/null)
+    chk smpp-parse-badlen-rc  "$(otasm_smpp_parse "$badlen" >/dev/null 2>&1; echo $?)" "1"
+    chk smpp-parse-badlen-why "$(printf '%s\n' "$serr" | awk -F'\t' '$1=="WHY"{print $1; exit}')" "WHY"
+    chk smpp-parse-nonul-rc   "$(otasm_smpp_parse 0000001100000009000000000000000141 >/dev/null 2>&1; echo $?)" "1"
+    trunc="00000037${smpp_submit:8:${#smpp_submit}-18}"
+    chk smpp-parse-trunc-rc   "$(otasm_smpp_parse "$trunc" >/dev/null 2>&1; echo $?)" "1"
+    chk smpp-parse-unknown-rc "$(otasm_smpp_parse 00000010deadbeef0000000000000001 >/dev/null 2>&1; echo $?)" "1"
+    chk smpp-resp-status-name "$(otasm_smpp_response "$smpp_submit" --status 0x0d 2>/dev/null | awk -F'\t' '$1=="command_status_name"{print $2}')" "ESME_RBINDFAIL"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -2402,6 +3196,11 @@ otasm_menu() {
   --- S@T push / WIB ---
   [18] Build an S@T push (deck of 0x2d macros in TAR 505348, SMS TP-PID 0x7F)
   [19] WIB push (refused: no citable command encoding)
+  --- SMPP 3.4 (ESME <-> SMSC, TCP 2775) ---
+  [20] Build an SMPP PDU (submit_sm, deliver_sm, bind_transceiver)
+  [21] Parse an SMPP PDU with field offsets
+  [22] Build the matching SMPP response
+  [23] Name an SMPP command id and its direction
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -2489,6 +3288,28 @@ M
            15) read -rp "  f<hex> for TP-FCS, s<hex> for TP-ST> " m
                if [[ "${m:0:1}" == f ]]; then otasm_tp_fcs_parse "${m:1}"; else otasm_tp_st_parse "${m:1}"; fi
                read -rp "  enter " _ ;;
+            20) read -rp "  pdu submit_sm|deliver_sm|bind_transceiver> " p
+                case "$p" in
+                    bind_transceiver)
+                        read -rp "  system_id> " si
+                        read -rsp "  password (hidden)> " pw; echo
+                        otasm_smpp_build "$p" --system-id "$si" --password "$pw" ;;
+                    *)
+                        read -rp "  source_addr> " sa
+                        read -rp "  destination_addr> " da
+                        read -rp "  short_message hex (blank = none)> " mh
+                        read -rp "  data_coding hex (blank = 00)> " dc
+                        read -rp "  registered_delivery hex (blank = 00)> " rg
+                        otasm_smpp_build "$p" --src "$sa" --dst "$da" --msg "$mh" --dcs "${dc:-00}" --rd "${rg:-00}" ;;
+                esac
+                echo; read -rp "  enter " _ ;;
+            21) read -rp "  PDU hex> " ph; otasm_smpp_parse "$ph"; read -rp "  enter " _ ;;
+            22) read -rp "  request PDU hex> " rh
+                read -rp "  command_status hex (blank = 0)> " sh
+                if [[ -n "$sh" ]]; then otasm_smpp_response "$rh" --status "$sh"
+                else otasm_smpp_response "$rh"; fi
+                read -rp "  enter " _ ;;
+            23) read -rp "  command name or id> " q; otasm_smpp_pdu "$q"; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -2531,6 +3352,10 @@ otasm_cli_main() {
         --wib-push)       otasm_wib_push ;;
         --plan)           otasm_plan ;;
         --plan-tp)        otasm_plan_tp ;;
+        --smpp-build)     otasm_smpp_build "${1:-}" "${@:2}" ;;
+        --smpp-parse)     otasm_smpp_parse "${1:-}" ;;
+        --smpp-response)  otasm_smpp_response "${1:-}" "${@:2}" ;;
+        --smpp-pdu)       otasm_smpp_pdu "${1:-}" ;;
         --selftest)       otasm_selftest ;;
         --menu)           otasm_menu ;;
         *)
@@ -2576,6 +3401,19 @@ Usage: $0 COMMAND
   --wib-push                         refused: no citable WIB command encoding
   --plan                             own-SIM delivery handoff plan
   --plan-tp                          loopback-SMSC handoff plan for the TP layer
+  --smpp-build <pdu> [flags]         build submit_sm, deliver_sm or
+                                     bind_transceiver; fields are --src --dst
+                                     --msg (hex) --dcs --rd --service-type
+                                     --src-ton --src-npi --dst-ton --dst-npi
+                                     --seq, or --system-id --password
+                                     --system-type --interface-version; an
+                                     integer flag is decimal unless 0x-prefixed
+  --smpp-parse <hex>                 decode the header, then one row per body
+                                     field with its octet offset
+  --smpp-response <request> [--status n]
+                                     build the matching *_resp PDU, same
+                                     sequence number, response command id
+  --smpp-pdu <name|id>               name a command id and its direction
   --selftest                         verify SPI, packet and replay logic
   --menu                             interactive menu
 

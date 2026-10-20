@@ -18307,12 +18307,93 @@ sim_build_auth(AppState *state, const char *module_id,
     return outer;
 }
 
+/* eSIM remote provisioning: the profile package a SM-DP+ sends, and the
+ * responses an SM-DS returns. SGP.22 fixes the TLV structure; it does not fix
+ * the SCP03t bodies, and the verbs say so rather than inventing them. */
+static GtkWidget *
+sim_build_esim(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("ESIM PROVISIONING",
+        "The bound profile package as segments, and the ES9+ responses that answer "
+        "a provisioning request.", &body);
+    GtkWidget *build_body, *parse_body, *resp_body, *note_body;
+    GtkWidget *build = verb_card("BUILD A SEGMENT", &build_body);
+    GtkWidget *parse = verb_card("READ A PACKAGE", &parse_body);
+    GtkWidget *resp = verb_card("READ A RESPONSE", &resp_body);
+    GtkWidget *note = verb_card("NOTIFICATION", &note_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_choices(state, module_id, status, "Segment", "",
+                "Each segment is fixed by SGP.22 and gets its clause on the row. "
+                "The 87/88/86 bodies are SCP03t, which SGP.22 does not define, so "
+                "they are supplied as hex rather than synthesised.",
+                (const char *[]) { "--es8-build bpp-header --transaction-id 0123456789ABCDEF --host-id 6D61686C7A656974",
+                                   "--es8-build configure-isdp --dp-oid 1.2.840.113549",
+                                   "--es8-build store-metadata --iccid 98001032547698103214",
+                                   "--es8-build replace-session-keys" },
+                (const char *[]) { "BPP Header", "Configure ISD-P",
+                                   "Store Metadata", "Session Keys" }, 4));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row_prefilled(state, module_id, status, "Walk the Package",
+                "--es8-parse", "BF240AB80806062A864886F70D",
+                "A BER-TLV package as hex. Each node is printed with its tag, its "
+                "length and its name, and a tag SGP.22 does not name is reported "
+                "as opaque rather than guessed."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(resp_body),
+            mod_arg_row(state, module_id, status, "Read a Response",
+                "--es9-response", "initiateAuthentication {}",
+                "An ES9+ operation and its JSON body. The answer is the status and "
+                "every field the response carries, including the ones this module "
+                "has no use for - a response read selectively is a response read "
+                "wrong."));
+        gtk_box_append(GTK_BOX(resp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), resp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(note_body),
+            mod_arg_row(state, module_id, status, "Read a Notification",
+                "--es9-notification", "{\"pendingNotification\":\"\"}",
+                "The HandleNotification body an eUICC sends a SM-DS. Clause 6.5.2.9 "
+                "defines no response body, so the check is the request and the "
+                "204-with-empty-body rule."));
+        gtk_box_append(GTK_BOX(note_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), note);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry sim_entries[] = {
     { "Commands", "dialog-information-symbolic", NULL, sim_build_apdu },
     { "Files", "document-open-symbolic", NULL, sim_build_files },
     { "Contents", "auth-smartcard-symbolic", NULL, sim_build_decode },
     { "OTA", "document-send-symbolic", NULL, sim_build_ota },
     { "Authentication", "security-high-symbolic", NULL, sim_build_auth },
+    { "eSIM RSP", "auth-smartcard-symbolic", NULL, sim_build_esim },
 };
 /* 17_pcap_analysis — capture analysis.
  *
@@ -21077,10 +21158,82 @@ ss7_build_analysis(AppState *state, const char *module_id,
     return outer;
 }
 
+/* SGsAP: the interface between an MME and a 2G/3G circuit-switched core.
+ *
+ * It is the one place a 4G core talks to a legacy one, and it carries the
+ * subscriber's IMSI in the clear because there is no cipher on it. */
+static GtkWidget *
+ss7_build_sgsap(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SGsAP",
+        "The four messages that carry a subscriber between the packet core and "
+        "the circuit core, built and read octet by octet.", &body);
+    GtkWidget *build_body, *parse_body, *ie_body;
+    GtkWidget *build = verb_card("BUILD A MESSAGE", &build_body);
+    GtkWidget *parse = verb_card("READ ONE", &parse_body);
+    GtkWidget *ie = verb_card("INFORMATION ELEMENTS", &ie_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_choices(state, module_id, status, "Message", "",
+                "A location update, a paging request, a downlink message and the "
+                "service request that follows it. Each is a fixed set of "
+                "information elements, and the element that is missing is what a "
+                "decoder notices first.",
+                (const char *[]) { "--sgsap-build location-update-request --imsi 310150123456789",
+                                   "--sgsap-build paging-request --imsi 310150123456789",
+                                   "--sgsap-build downlink-unitdata --imsi 310150123456789"
+                                   " --nas 09010202",
+                                   "--sgsap-build service-request --imsi 310150123456789" },
+                (const char *[]) { "Location Update", "Paging", "Downlink",
+                                   "Service Request" }, 4));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read",
+                "--sgsap-parse",
+                "09010839015110325476980937066D6D65633031096D6D65676930303031036D6D6503657063066D6E63313530066D63633331300B336770706E6574776F726B036F72670A010204051300510001",
+                "A message as hex. The answer is one row per information element "
+                "at the offset the envelope puts it, and whether the mandatory "
+                "ones are all there."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ie_body),
+            mod_arg_choices(state, module_id, status, "Name one", "",
+                "The information element tables, and the value codings that have "
+                "one: a location update type, a cause, a service indicator.",
+                (const char *[]) { "--sgsap-ie lai", "--sgsap-ie 0x08",
+                                   "--sgsap-ie lu-type", "--sgsap-ie 0x26" },
+                (const char *[]) { "LAI", "SGs Cause", "LU Type",
+                                   "EMM Mode" }, 4));
+        gtk_box_append(GTK_BOX(ie_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ie);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry ss7_entries[] = {
     { "Queries", "dialog-information-symbolic", NULL, ss7_build_queries },
     { "Decode", "utilities-terminal-symbolic", NULL, ss7_build_decode },
     { "Analysis", "system-search-symbolic", NULL, ss7_build_analysis },
+    { "SGsAP", "network-transmit-receive-symbolic", NULL, ss7_build_sgsap },
 };
 /* 27_cellular_dns — the DNS a cellular bearer carries.
  *
@@ -24607,9 +24760,86 @@ otasm_build_push(AppState *state, const char *module_id,
     return outer;
 }
 
+/* SMPP: the Short Message Peer-to-Peer protocol an SMSC speaks to the outside
+ * world. A different layer from the TPDU, with its own header — and the layer an
+ * SMS-scam investigation usually starts from. */
+static GtkWidget *
+otasm_build_smpp(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SMPP",
+        "The protocol between an SMSC and the systems that feed it: a 16-octet "
+        "header, then fields whose lengths are the header's claim.", &body);
+    GtkWidget *build_body, *parse_body, *resp_body, *ref_body;
+    GtkWidget *build = verb_card("BUILD A PDU", &build_body);
+    GtkWidget *parse = verb_card("READ A PDU", &parse_body);
+    GtkWidget *resp = verb_card("ANSWER ONE", &resp_body);
+    GtkWidget *ref = verb_card("REFERENCE", &ref_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_choices(state, module_id, status, "Operation", "",
+                "A submit and a deliver differ only in direction; a bind "
+                "transceiver is the session that carries both.",
+                (const char *[]) { "--smpp-build submit_sm --src 15551234567 --dst 15559876543 --msg 48656c6c6f",
+                                   "--smpp-build deliver_sm --src 15551234567 --dst 15559876543 --msg 48656c6c6f",
+                                   "--smpp-build bind_transceiver --system-id smppclient1 --password password" },
+                (const char *[]) { "Submit", "Deliver", "Bind" }, 3));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read",
+                "--smpp-parse", "0000003c00000004000000000000000100050031353535313233343536370001013135353539383736353433000000000000010000000548656c6c6f",
+                "A PDU as hex. The answer walks the body field by field at the "
+                "offset the standard puts it, and reports a length that disagrees "
+                "with the header rather than reading past it."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(resp_body),
+            mod_arg_row_prefilled(state, module_id, status, "Answer",
+                "--smpp-response", "0000003c0000000400000000000000010005003135353531323334353637",
+                "A request. The response is derived - same sequence number, the "
+                "response bit set - because a session that gets the sequence wrong "
+                "hangs rather than fails."));
+        gtk_box_append(GTK_BOX(resp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), resp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ref_body),
+            mod_arg_row_prefilled(state, module_id, status, "Name a Command",
+                "--smpp-pdu", "submit_sm",
+                "A command name or id. The answer is the name, the direction and "
+                "whether a response is expected, which is how a session is "
+                "reconstructed from a capture."));
+        gtk_box_append(GTK_BOX(ref_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ref);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry otasm_entries[] = {
     { "TPDU", "dialog-information-symbolic", NULL, otasm_build_tpdu },
     { "OTA Packet", "document-send-symbolic", NULL, otasm_build_packet },
+    { "SMPP", "network-transmit-receive-symbolic", NULL, otasm_build_smpp },
     { "Pokes", "security-high-symbolic", NULL, otasm_build_push },
 };
 /* 42_li_probe — LI Interception.
@@ -25427,9 +25657,73 @@ lpp_build_procedures(AppState *state, const char *module_id,
     return outer;
 }
 
+/* SUPL: the protocol that carries LPP. A positioning request is a SUPL session,
+ * and the LPP message rides inside it as an open type. */
+static GtkWidget *
+lpp_build_supl(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SUPL",
+        "The session a position request travels in: an SLP triggers the handset, "
+        "the handset reports its capabilities, and LPP does the measuring.", &body);
+    GtkWidget *build_body, *parse_body, *pos_body;
+    GtkWidget *build = verb_card("BUILD A MESSAGE", &build_body);
+    GtkWidget *parse = verb_card("READ ONE", &parse_body);
+    GtkWidget *pos = verb_card("CARRY LPP", &pos_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_choices(state, module_id, status, "Message", "",
+                "An init, a start, and the ver2 set-init that is the only one "
+                "which carries a target identity - the ASN.1 has no SET id in "
+                "SUPL INIT, and the message is built as the ASN.1 defines it.",
+                (const char *[]) { "--supl-build init", "--supl-build start",
+                                   "--supl-build setinit",
+                                   "--supl-session 0123456789ABCDEF" },
+                (const char *[]) { "INIT", "START", "SET Init",
+                                   "Session Id" }, 4));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read",
+                "--supl-parse", "0018020000448D159E10EE31D41ABD9B2D71A81A34C80030",
+                "A ULP message as hex. Every field is printed with its type, "
+                "because an open type is where a decoder stops naming things."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(pos_body),
+            mod_arg_row_prefilled(state, module_id, status, "Wrap",
+                "--supl-pos",
+                "--lpp D2020028410124FB55FFA544",
+                "An LPP payload to carry. The wrapper is the SUPL POS message "
+                "and the answer is read back by tshark as ULP with an LPP tree "
+                "inside it."));
+        gtk_box_append(GTK_BOX(pos_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), pos);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry lpp_entries[] = {
     { "Messages", "dialog-information-symbolic", NULL, lpp_build_messages },
     { "Procedures", "system-search-symbolic", NULL, lpp_build_procedures },
+    { "SUPL", "network-transmit-receive-symbolic", NULL, lpp_build_supl },
 };
 /* 47_wifioff — VoWiFi / ePDG Attacks.
  *

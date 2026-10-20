@@ -16,6 +16,15 @@
 #     authenticateClient, getBoundProfilePackage, cancelSession) as a curl
 #     command + body; it builds the request and sends nothing (ES2+/ES10 are
 #     not implemented here)
+#   * SGP.22 ES8+ TLV builder for the BoundProfilePackage (§2.5.4): BF36 header,
+#     BF23 InitialiseSecureChannel (§5.5.1), BF24 ConfigureISDP (§5.5.2), BF25
+#     StoreMetadata (§5.5.3), BF26 ReplaceSessionKeys (§5.5.4) and the A0/A1/A2/
+#     A3 segment wrappers; the clause that fixes each octet is printed with it
+#   * a BPP TLV walker (--es8-parse) and the ES9+ response-body parsers
+#     (--es9-response, --es9-notification; §6.5.1.4 and §6.5.2.6..§6.5.2.10)
+# The SCP03t protection layer (§2.5.4 -> SGP.02 §2.6.4) and the profile element
+# chain (SIMAlliance Profile Package [5]) are NOT built here: SGP.22 does not
+# fix those octets, so the builders take them as hex or hand off.
 #
 # What needs hardware and is therefore written as a PLAN FILE:
 #   * talking to a physical UICC          -> PC/SC reader (pcscd + CCID)
@@ -2581,11 +2590,1058 @@ sim_cmd_es9_plus() {
     return 0
 }
 
+# ── ES8+ / BPP — SM-DP+ to eUICC (SGP.22 v2.2.2 §5.5.1..§5.5.5) ─────────
+# Every octet the builders emit is derived from a clause, and that clause is
+# quoted in the `ref` row printed beside the value. The protection layer is
+# NOT implemented: the '87'/'88'/'86' payloads are SCP03t-protected (§2.5.4,
+# SGP.02 §2.6.4) and have to arrive already protected. Where the clause does
+# not state an octet, the verb prints the field structure, names the missing
+# clause in a `limit` row, and returns 3 (handoff) instead of 0.
+sim_es8_len() { # value byte count -> BER length octets (short form, 81, 82, 83)
+    local n="${1:-0}"
+    if   (( n < 0x80 ));      then printf '%02X' "$n"
+    elif (( n < 0x100 ));     then printf '81%02X' "$n"
+    elif (( n < 0x10000 ));   then printf '82%04X' "$n"
+    elif (( n < 0x1000000 )); then printf '83%06X' "$n"
+    else return 1; fi
+}
+
+sim_es8_tlv() { # tag value-hex -> full TLV hex; empty + rc 1 on bad hex
+    local tag="${1^^}" val="${2:-}"
+    [[ "$tag" =~ ^([0-9A-F]{2})+$ ]] || return 1
+    [[ -z "$val" || "$val" =~ ^([0-9A-F]{2})+$ ]] || return 1
+    local l
+    l=$(sim_es8_len $(( ${#val} / 2 ))) || return 1
+    printf '%s%s%s' "$tag" "$l" "$val"
+}
+
+sim_es8_utf8hex() { # text -> UTF-8 octets as uppercase hex
+    python3 -c 'import sys; sys.stdout.write(sys.argv[1].encode("utf-8").hex().upper())' \
+        "${1:-}"
+}
+
+sim_es8_oidhex() { # dotted OID -> DER contents of the OBJECT IDENTIFIER (X.690 8.19)
+    python3 -c '
+import sys
+try:
+    arcs = [int(a) for a in sys.argv[1].strip().split(".")]
+except ValueError:
+    sys.exit(2)
+if len(arcs) < 2 or arcs[0] < 0 or arcs[0] > 2 or arcs[1] < 0 or (arcs[0] < 2 and arcs[1] >= 40):
+    sys.exit(3)
+def b128(v):
+    out = [v & 0x7f]
+    v >>= 7
+    while v:
+        out.append((v & 0x7f) | 0x80)
+        v >>= 7
+    return bytes(reversed(out))
+print((b128(40 * arcs[0] + arcs[1]) + b"".join(b128(a) for a in arcs[2:])).hex().upper())
+' "${1:-}"
+}
+
+sim_es8_bits() { # "ppr1 ppr2" -> BIT STRING value hex (unused-bits octet + bits)
+    python3 -c '
+import sys
+ids = {"pprupdatecontrol": 0, "ppr1": 1, "ppr2": 2}
+names = [n for n in sys.argv[1].replace(",", " ").split() if n]
+try:
+    bits = sorted({ids[n.lower()] for n in names})
+except KeyError:
+    sys.exit(2)
+if not bits:
+    sys.exit(3)
+buf = bytearray(bits[-1] // 8 + 1)
+for b in bits:
+    buf[b // 8] |= 1 << (7 - b % 8)
+sys.stdout.write("%02X%s" % (7 - bits[-1] % 8, buf.hex().upper()))
+' "${1:-}"
+}
+
+sim_es8_usage() {
+    cat >&2 <<'EOF'
+ERROR	usage: --es8-build <segment> [flags]
+  ES8+ segments. Nesting and tags are the ones the clause text states; every
+  value carries a `ref` row with the sentence it came from.
+    bpp-header        BF36 { BF23 { ... } }  the BPP header (2.5.4)
+        --transaction-id <2..32 hex>   TransactionId ::= OCTET STRING (SIZE(1..16))
+        --host-id <2..32 hex>          controlRefTemplate.hostId, OctetTo16
+        --smdp-otpk <130 hex>          smdpOtpk, 65 octets: 04 then the X point
+        --smdp-sign <even hex>         smdpSign, the SM-DP+ signature
+    initialise-secure-channel  BF23 alone, same flags (5.5.1)
+    configure-isdp    BF24 { B8 { OBJECT IDENTIFIER } }   --dp-oid <a.b.c> (5.5.2)
+    store-metadata    BF25 { 5A 91 92 93 94 95 B6 B7 99 }              (5.5.3)
+        --iccid <20 hex>              iccid, Iccid as coded in EFiccid (5A)
+        --service-provider-name <s>   serviceProviderName, UTF8String (SIZE(0..32)) (91)
+        --profile-name <s>            profileName, UTF8String (SIZE(0..64)) (92)
+        --icon-type jpg|png           iconType, INTEGER {jpg(0), png(1)} (93)
+        --icon <hex>                  icon, OCTET STRING (SIZE(0..1024)) (94), needs --icon-type
+        --profile-class test|provisioning|operational   profileClass (95)
+        --profile-owner <6 hex>       profileOwner.mccMnc, TS 24.008 coding (B7)
+        --ppr ppr1[,ppr2]             profilePolicyRules, PprIds BIT STRING (99)
+        --notification install|enable|disable|delete=<fqdn>   notificationConfigurationInfo (B6)
+    replace-session-keys  BF26 { 80 81 82 }   --mac-chaining --ppk-enc --ppk-cmac (5.5.4)
+    sequence-87 --payload <hex>   A0 { '87' TLV(s) }   ConfigureISDP segment (2.5.4)
+    sequence-88 --payload <hex>   A1 { '88' TLV(s) }   StoreMetadata segment (2.5.4)
+    sequence-86 --payload <hex>   A3 { '86' TLV(s) }   profile element segment (2.5.4)
+    bpp               BF36 { BF23 A0 A1 [A2] A3 }   --first-87 --88 --86 [--second-87]
+  exit: 0 built  1 refused  2 usage  3 handoff (a clause the octets need is missing)
+EOF
+}
+
+sim_es8_seg()   { printf 'segment\t%s\n' "$1"; printf 'spec\t%s\n' "$2"; }
+sim_es8_ref()   { printf 'ref\t%s\t%s\t%s\n' "$1" "$2" "$3"; }
+sim_es8_field() { printf 'field\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"; }
+sim_es8_limit() { printf 'limit\t%s\n' "$1"; }
+sim_es8_note()  { printf 'note\t%s\n' "$1"; }
+sim_es8_out() { # full TLV hex -> hex / bytes / status rows
+    printf 'hex\t%s\n' "${1^^}"
+    printf 'bytes\t%d\n' "$(( ${#1} / 2 ))"
+    printf 'status\tbuilt\n'
+}
+sim_es8_handoff() { printf 'status\thandoff\n'; }
+
+# The BF23 field structure, printed whether or not the octets could be built:
+# this is the shape §5.5.1 states, in the order it states it.
+sim_es8_bf23_fields() { # txn host otpk sign (placeholders allowed)
+    sim_es8_field "BF23.remoteOpId" "82" "INTEGER" "01" \
+        "5.5.1: remoteOpId (RemoteOpId ::= [2] INTEGER { installBoundProfilePackage(1) }); AUTOMATIC TAGS (Annex A) put the untagged member at [2], so 82 01 01"
+    sim_es8_field "BF23.transactionId" "80" "OCTET STRING (SIZE(1..16))" "${1:-<from --transaction-id>}" \
+        "5.5.1: transactionId [0] TransactionId"
+    sim_es8_field "BF23.controlRefTemplate" "A6" "SEQUENCE" "-" \
+        "5.5.1: controlRefTemplate [6] IMPLICIT ControlRefTemplate ([6] is constructed, so the identifier octet is A6)"
+    sim_es8_field "BF23.controlRefTemplate.keyType" "80" "Octet1" "88" \
+        "5.5.1: keyType [0] Octet1, AES='88'"
+    sim_es8_field "BF23.controlRefTemplate.keyLen" "81" "Octet1" "10" \
+        "5.5.1: keyLen [1] Octet1, shall be 0x10"
+    sim_es8_field "BF23.controlRefTemplate.hostId" "84" "OctetTo16" "${2:-<from --host-id>}" \
+        "5.5.1: hostId [4] OctetTo16"
+    sim_es8_field "BF23.smdpOtpk" "5F49" "OCTET STRING" "${3:-<from --smdp-otpk>}" \
+        "5.5.1: smdpOtpk [APPLICATION 73] OCTET STRING, tag '5F49'"
+    sim_es8_field "BF23.smdpSign" "5F37" "OCTET STRING" "${4:-<from --smdp-sign>}" \
+        "5.5.1: smdpSign [APPLICATION 55] OCTET STRING, tag '5F37'"
+}
+
+sim_es8_bf23_refs() {
+    sim_es8_ref "BoundProfilePackage" "BF36" \
+        "2.5.4: BoundProfilePackage ::= [54] SEQUENCE { -- Tag 0xBF36"
+    sim_es8_ref "InitialiseSecureChannelRequest" "BF23" \
+        "5.5.1: InitialiseSecureChannelRequest ::= [35] SEQUENCE { -- Tag 0xBF23"
+    sim_es8_ref "remoteOpId" "82" \
+        "5.5.1 RemoteOpId ::= [2] INTEGER { installBoundProfilePackage(1) } + Annex A AUTOMATIC TAGS => 82 01 01"
+    sim_es8_ref "transactionId" "80" \
+        "5.5.1: transactionId [0] TransactionId; TransactionId ::= OCTET STRING (SIZE(1..16))"
+    sim_es8_ref "controlRefTemplate" "A6" \
+        "5.5.1: controlRefTemplate [6] IMPLICIT ControlRefTemplate => 0xA6 (0x06 | constructed bit 0x20)"
+    sim_es8_ref "keyType" "80" "5.5.1: keyType [0] Octet1, AES='88'"
+    sim_es8_ref "keyLen" "81" "5.5.1: keyLen [1] Octet1, shall be 0x10"
+    sim_es8_ref "hostId" "84" "5.5.1: hostId [4] OctetTo16"
+    sim_es8_ref "smdpOtpk" "5F49" "5.5.1: smdpOtpk [APPLICATION 73] OCTET STRING, tag 0x5F49"
+    sim_es8_ref "smdpSign" "5F37" "5.5.1: smdpSign [APPLICATION 55] OCTET STRING, tag 0x5F37"
+    sim_es8_ref "length form" "BER" \
+        "X.690 8.1.3: one length octet below 128, else 0x81/0x82/0x83 with that many length octets (the encoding inside a BPP is BER/DER, SGP.22 2.5.4)"
+}
+
+sim_cmd_es8_build() {
+    local seg="${1:-}"
+    shift 2>/dev/null || true
+    local txn='' host='' otpk='' sign='' oid='' iccid='' spn='' pname='' pclass=''
+    local itype='' icon='' owner='' ppr='' notif='' payload='' p87='' p88='' p87b='' p86=''
+    local mac='' penc='' pcmac=''
+    while (( $# )); do
+        case "$1" in
+            --transaction-id) txn="${2:-}";   shift 2 2>/dev/null || shift ;;
+            --host-id)        host="${2:-}";  shift 2 2>/dev/null || shift ;;
+            --mac-chaining)   mac="${2:-}";   shift 2 2>/dev/null || shift ;;
+            --ppk-enc)        penc="${2:-}";  shift 2 2>/dev/null || shift ;;
+            --ppk-cmac)       pcmac="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --smdp-otpk)      otpk="${2:-}";  shift 2 2>/dev/null || shift ;;
+            --smdp-sign)      sign="${2:-}";  shift 2 2>/dev/null || shift ;;
+            --dp-oid)         oid="${2:-}";   shift 2 2>/dev/null || shift ;;
+            --iccid)          iccid="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --service-provider-name) spn="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --profile-name)   pname="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --profile-class)  pclass="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --icon-type)      itype="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --icon)           icon="${2:-}";  shift 2 2>/dev/null || shift ;;
+            --profile-owner)  owner="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --ppr)            ppr="${2:-}";   shift 2 2>/dev/null || shift ;;
+            --notification)   notif="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --payload)        payload="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --first-87)       p87="${2:-}";   shift 2 2>/dev/null || shift ;;
+            --88)             p88="${2:-}";   shift 2 2>/dev/null || shift ;;
+            --second-87)      p87b="${2:-}";  shift 2 2>/dev/null || shift ;;
+            --86)             p86="${2:-}";   shift 2 2>/dev/null || shift ;;
+            --help|-h)        sim_es8_usage; return 2 ;;
+            '')               sim_es8_usage; return 2 ;;
+            *) printf 'ERROR\tunsupported flag %s for --es8-build\n' "$(sim_sanitize "$1")" >&2
+               return 2 ;;
+        esac
+    done
+
+    local txn_n="${txn}" host_n="$host" otpk_n="$otpk" sign_n="$sign"
+    [[ -z "$txn"  ]] || txn_n="${txn^^}"
+    [[ -z "$host" ]] || host_n="${host^^}"
+    [[ -z "$otpk" ]] || otpk_n="${otpk^^}"
+    [[ -z "$sign" ]] || sign_n="${sign^^}"
+
+    case "$seg" in
+        bpp-header|initialise-secure-channel|initiate-secure-channel|bf23)
+            local want_bpp=0
+            [[ "$seg" == bpp-header ]] && want_bpp=1
+            local segspec="ES8+.InitialiseSecureChannel (5.5.1)"
+            (( want_bpp )) && segspec="ES8+.InitialiseSecureChannel (5.5.1) wrapped in the BoundProfilePackage header (2.5.4)"
+            sim_es8_seg "$seg" "$segspec"
+            if (( want_bpp )); then
+                sim_es8_ref "BoundProfilePackage" "BF36" \
+                    "2.5.4: BoundProfilePackage ::= [54] SEQUENCE { -- Tag 0xBF36 ... initialiseSecureChannelRequest [35] InitialiseSecureChannelRequest, -- Tag 0xBF23"
+            fi
+            sim_es8_bf23_refs
+            sim_es8_bf23_fields "$txn_n" "$host_n" "$otpk_n" "$sign_n"
+
+            # Refusals first: a wrong-length input is refused (rc 1), a missing
+            # one is a handoff (rc 3) because nothing about the octets is unknown.
+            if [[ -n "$txn" ]] && ! sim_is_hex "$txn"; then
+                printf 'ERROR\ttransactionId is not hex: TransactionId ::= OCTET STRING (SIZE(1..16)) (5.5.1)\n' >&2
+                return 1
+            fi
+            if [[ -n "$txn" ]] && (( ${#txn} < 2 || ${#txn} > 32 )); then
+                printf 'ERROR\ttransactionId is %d hex digits: TransactionId ::= OCTET STRING (SIZE(1..16)) allows 1..16 octets (5.5.1)\n' "${#txn}" >&2
+                return 1
+            fi
+            if [[ -n "$host" ]] && ! sim_is_hex "$host"; then
+                printf 'ERROR\thostId is not hex: OctetTo16 (5.5.1)\n' >&2; return 1
+            fi
+            if [[ -n "$host" ]] && (( ${#host} > 32 )); then
+                printf 'ERROR\thostId is %d hex digits: OctetTo16 allows 1..16 octets (5.5.1)\n' "${#host}" >&2
+                return 1
+            fi
+            if [[ -n "$otpk" ]] && ! sim_is_hex "$otpk"; then
+                printf 'ERROR\tsmdpOtpk is not hex\n' >&2; return 1
+            fi
+            if [[ -n "$otpk" ]] && (( ${#otpk} != 130 )); then
+                printf 'ERROR\tsmdpOtpk is %d hex digits: an uncompressed P-256 point is 65 octets, 04 then X then Y (130 hex digits)\n' "${#otpk}" >&2
+                return 1
+            fi
+            if [[ -n "$sign" ]] && ! sim_is_hex "$sign"; then
+                printf 'ERROR\tsmdpSign is not hex\n' >&2; return 1
+            fi
+            if [[ -z "$txn" || -z "$host" || -z "$otpk" || -z "$sign" ]]; then
+                local miss=''
+                [[ -z "$txn"  ]] && miss+="--transaction-id "
+                [[ -z "$host" ]] && miss+="--host-id "
+                [[ -z "$otpk" ]] && miss+="--smdp-otpk "
+                [[ -z "$sign" ]] && miss+="--smdp-sign "
+                sim_es8_limit "missing input: ${miss% }; the field structure above is what 5.5.1 states, the octets are not emitted without every member"
+                sim_es8_limit "the clause text gives no default for any member of InitialiseSecureChannelRequest (5.5.1), so there is nothing to invent"
+                sim_es8_handoff
+                return 3
+            fi
+            local crt val
+            crt=$(sim_es8_tlv A6 "$(sim_es8_tlv 80 88)$(sim_es8_tlv 81 10)$(sim_es8_tlv 84 "$host")") || return 1
+            val="$(sim_es8_tlv 82 01)$(sim_es8_tlv 80 "$txn")${crt}$(sim_es8_tlv 5F49 "$otpk")$(sim_es8_tlv 5F37 "$sign")"
+            local bf23
+            bf23=$(sim_es8_tlv BF23 "$val") || return 1
+            sim_es8_note "smdpSign is emitted as supplied: 5.5.1 does not state the octet length of the signature, so none is imposed here"
+            if (( want_bpp )); then
+                sim_es8_out "$(sim_es8_tlv BF36 "$bf23")"
+            else
+                sim_es8_out "$bf23"
+            fi
+            return 0 ;;
+
+        configure-isdp|config-isdp|bf24)
+            sim_es8_seg "$seg" "ES8+.ConfigureISDP (5.5.2)"
+            sim_es8_ref "ConfigureISDPRequest" "BF24" \
+                "5.5.2: ConfigureISDPRequest ::= [36] SEQUENCE { -- Tag 0xBF24"
+            sim_es8_ref "dpProprietaryData" "B8" \
+                "5.5.2: dpProprietaryData [24] DpProprietaryData OPTIONAL -- Tag 0xB8 (maximum size including tag and length field: 128 bytes)"
+            sim_es8_ref "dpOid" "06" \
+                "5.5.2: DpProprietaryData ::= SEQUENCE { dpOid OBJECT IDENTIFIER; -- the DER contents of the OID are X.690 8.19 }"
+            sim_es8_field "BF24.dpProprietaryData" "B8" "SEQUENCE (max 128 octets with tag+length)" \
+                "$([[ -n "$oid" ]] && echo "set, dpOid $oid" || echo absent)" "5.5.2: OPTIONAL"
+            sim_es8_field "BF24.dpProprietaryData.dpOid" "06" "OBJECT IDENTIFIER" \
+                "${oid:-<from --dp-oid>}" "5.5.2: dpOid"
+            local oidhex val
+            if [[ -n "$oid" ]]; then
+                if ! oidhex=$(sim_es8_oidhex "$oid"); then
+                    printf 'ERROR\t--dp-oid %s is not a valid dotted OID (first arc 0..2, second < 40 when the first is 0 or 1); 5.5.2 types dpOid as OBJECT IDENTIFIER\n' \
+                        "$(sim_sanitize "$oid")" >&2
+                    return 2
+                fi
+                val=$(sim_es8_tlv B8 "$(sim_es8_tlv 06 "$oidhex")") || return 1
+            else
+                val=''
+                sim_es8_note "dpProprietaryData is OPTIONAL (5.5.2): with no --dp-oid the only lawful encoding is the empty SEQUENCE"
+            fi
+            sim_es8_out "$(sim_es8_tlv BF24 "$val")"
+            return 0 ;;
+
+        store-metadata|bf25)
+            sim_es8_seg "$seg" "ES8+.StoreMetadata (5.5.3)"
+            sim_es8_ref "StoreMetadataRequest" "BF25" \
+                "5.5.3: StoreMetadataRequest ::= [37] SEQUENCE { -- Tag 0xBF25"
+            sim_es8_ref "iccid" "5A" \
+                "5.5.3: iccid Iccid; Iccid ::= [APPLICATION 26] OCTET STRING (SIZE(10)) -- the ICCID as coded in EFiccid, corresponding tag is 0x5A"
+            sim_es8_ref "serviceProviderName" "91" "5.5.3: serviceProviderName [17] UTF8String (SIZE(0..32)) -- Tag 0x91"
+            sim_es8_ref "profileName" "92" "5.5.3: profileName [18] UTF8String (SIZE(0..64)) -- Tag 0x92"
+            sim_es8_ref "iconType" "93" "5.5.3: iconType [19] IconType OPTIONAL -- Tag 0x93; IconType ::= INTEGER {jpg(0), png(1)}"
+            sim_es8_ref "icon" "94" "5.5.3: icon [20] OCTET STRING (SIZE(0..1024)) OPTIONAL -- Tag 0x94"
+            sim_es8_ref "profileClass" "95" "5.5.3: profileClass [21] ProfileClass DEFAULT operational -- Tag 0x95; ProfileClass ::= INTEGER {test(0), provisioning(1), operational(2)}"
+            sim_es8_ref "profileOwner" "B7" "5.5.3: profileOwner [23] OperatorId OPTIONAL -- Tag 0xB7"
+            sim_es8_ref "profilePolicyRules" "99" "5.5.3: profilePolicyRules [25] PprIds OPTIONAL -- Tag 0x99; PprIds ::= BIT STRING {pprUpdateControl(0), ppr1(1), ppr2(2)}"
+            sim_es8_ref "notificationConfigurationInfo" "B6" \
+                "5.5.3: notificationConfigurationInfo [22] SEQUENCE OF NotificationConfigurationInformation OPTIONAL -- no tag is printed in 5.5.3; B6 is what [22] constructed gives"
+            sim_es8_field "BF25.iccid" "5A" "OCTET STRING (SIZE(10))" "${iccid:-<from --iccid>}" "5.5.3: mandatory member"
+            sim_es8_field "BF25.serviceProviderName" "91" "UTF8String (SIZE(0..32))" "$([[ -n "$spn" ]] && echo set || echo absent)" "5.5.3"
+            sim_es8_field "BF25.profileName" "92" "UTF8String (SIZE(0..64))" "$([[ -n "$pname" ]] && echo set || echo absent)" "5.5.3"
+            sim_es8_field "BF25.iconType" "93" "INTEGER {jpg(0),png(1)}" "${itype:-absent}" "5.5.3 OPTIONAL"
+            sim_es8_field "BF25.icon" "94" "OCTET STRING (SIZE(0..1024))" "$([[ -n "$icon" ]] && echo set || echo absent)" "5.5.3 OPTIONAL, shall only be present if iconType is present"
+            sim_es8_field "BF25.profileClass" "95" "INTEGER {test(0),provisioning(1),operational(2)}" "${pclass:-absent (DEFAULT operational)}" "5.5.3 DEFAULT operational"
+            sim_es8_field "BF25.profileOwner" "B7" "OperatorId" "${owner:-absent}" "5.5.3 OPTIONAL"
+            sim_es8_field "BF25.profilePolicyRules" "99" "PprIds BIT STRING" "${ppr:-absent}" "5.5.3 OPTIONAL"
+            sim_es8_field "BF25.notificationConfigurationInfo" "B6" "SEQUENCE OF NotificationConfigurationInformation" "${notif:-absent}" "5.5.3 OPTIONAL"
+
+            if [[ -z "$iccid" ]]; then
+                sim_es8_limit "missing input: --iccid; iccid is a mandatory member of StoreMetadataRequest (5.5.3), so the SEQUENCE cannot be built"
+                sim_es8_handoff
+                return 3
+            fi
+            if ! sim_is_hex "$iccid" || (( ${#iccid} != 20 )); then
+                printf 'ERROR\ticcid is %d hex digits: Iccid ::= [APPLICATION 26] OCTET STRING (SIZE(10)) as coded in EFiccid (5.5.3), i.e. 20 hex digits\n' "${#iccid}" >&2
+                return 1
+            fi
+            local pclass_hex=''
+            case "$pclass" in
+                '') ;;
+                test)         pclass_hex=00 ;;
+                provisioning) pclass_hex=01 ;;
+                operational)  pclass_hex=02 ;;
+                *) printf 'ERROR\t--profile-class %s: ProfileClass ::= INTEGER {test(0), provisioning(1), operational(2)} (5.5.3)\n' \
+                       "$(sim_sanitize "$pclass")" >&2; return 2 ;;
+            esac
+            if [[ -n "$itype" && "$itype" != jpg && "$itype" != png ]]; then
+                printf 'ERROR\t--icon-type %s: IconType ::= INTEGER {jpg(0), png(1)} (5.5.3)\n' \
+                    "$(sim_sanitize "$itype")" >&2; return 2
+            fi
+            if [[ -n "$icon" && -z "$itype" ]]; then
+                printf 'ERROR\t--icon given without --icon-type: 5.5.3 says the icon shall only be present if iconType is present\n' >&2
+                return 1
+            fi
+            if [[ -n "$icon" ]] && ! sim_is_hex "$icon"; then
+                printf 'ERROR\t--icon is not hex\n' >&2; return 1
+            fi
+            local val
+            val=$(sim_es8_tlv 5A "$iccid") || return 1
+            [[ -n "$spn" ]]   && val+=$(sim_es8_tlv 91 "$(sim_es8_utf8hex "$spn")")
+            [[ -n "$pname" ]] && val+=$(sim_es8_tlv 92 "$(sim_es8_utf8hex "$pname")")
+            if [[ -n "$itype" ]]; then
+                [[ "$itype" == jpg ]] && val+=$(sim_es8_tlv 93 00) || val+=$(sim_es8_tlv 93 01)
+            fi
+            [[ -n "$icon" ]] && val+=$(sim_es8_tlv 94 "$icon")
+            [[ -n "$pclass_hex" ]] && val+=$(sim_es8_tlv 95 "$pclass_hex")
+            if [[ -n "$owner" ]]; then
+                if ! sim_is_hex "$owner" || (( ${#owner} != 6 )); then
+                    printf 'ERROR\t--profile-owner is %d hex digits: OperatorId.mccMnc is OCTET STRING (SIZE(3)) (5.5.3), 6 hex digits\n' "${#owner}" >&2
+                    return 1
+                fi
+                val+=$(sim_es8_tlv B7 "$(sim_es8_tlv 80 "$owner")")
+                sim_es8_note "profileOwner: OperatorId ::= SEQUENCE { mccMnc OCTET STRING (SIZE(3)) } (5.5.3) has no tag printed for mccMnc; 80 is the context tag Annex A AUTOMATIC TAGS assigns the untagged member"
+            fi
+            if [[ -n "$ppr" ]]; then
+                local pprhex
+                if ! pprhex=$(sim_es8_bits "$ppr"); then
+                    printf 'ERROR\t--ppr %s: PprIds ::= BIT STRING {pprUpdateControl(0), ppr1(1), ppr2(2)} (5.5.3)\n' \
+                        "$(sim_sanitize "$ppr")" >&2; return 2
+                fi
+                val+=$(sim_es8_tlv 99 "$pprhex")
+            fi
+            if [[ -n "$notif" ]]; then
+                local evt="${notif%%=*}" fqdn="${notif#*=}"
+                local evt_hex=''
+                case "$evt" in
+                    install) evt_hex=0780 ;;
+                    enable)  evt_hex=0640 ;;
+                    disable) evt_hex=0520 ;;
+                    delete)  evt_hex=0410 ;;
+                    *) printf 'ERROR\t--notification %s: NotificationEvent ::= BIT STRING {notificationInstall(0), notificationEnable(1), notificationDisable(2), notificationDelete(3)} (5.7.10)\n' \
+                           "$(sim_sanitize "$notif")" >&2; return 2 ;;
+                esac
+                [[ "$notif" == *"="* ]] || { printf 'ERROR\t--notification needs <event>=<fqdn>\n' >&2; return 2; }
+                val+=$(sim_es8_tlv B6 "$(sim_es8_tlv 30 "$(sim_es8_tlv 80 "$evt_hex")$(sim_es8_tlv 81 "$(sim_es8_utf8hex "$fqdn")")")")
+                sim_es8_note "notificationConfigurationInfo: the SEQUENCE members of NotificationConfigurationInformation (5.5.3) carry no tags in the text; 80/81 are the Annex A AUTOMATIC TAGS assignment, the SEQUENCE itself keeps its universal tag 30"
+            fi
+            sim_es8_out "$(sim_es8_tlv BF25 "$val")"
+            return 0 ;;
+
+        replace-session-keys|bf26)
+            sim_es8_seg "$seg" "ES8+.ReplaceSessionKeys (5.5.4)"
+            sim_es8_ref "ReplaceSessionKeysRequest" "BF26" \
+                "5.5.4: ReplaceSessionKeysRequest ::= [38] SEQUENCE { -- tag 0xBF26"
+            sim_es8_ref "initialMacChainingValue" "80" \
+                "5.5.4: initialMacChainingValue OCTET STRING (first member; no tag in the text, 80 is the Annex A AUTOMATIC TAGS assignment)"
+            sim_es8_ref "ppkEnc" "81" "5.5.4: ppkEnc OCTET STRING (second member, context tag 81 by AUTOMATIC TAGS)"
+            sim_es8_ref "ppkCmac" "82" "5.5.4: ppkCmac OCTET STRING (third member, context tag 82 by AUTOMATIC TAGS)"
+            sim_es8_field "BF26.initialMacChainingValue" "80" "OCTET STRING" "${mac:-<from --mac-chaining>}" "5.5.4 first member"
+            sim_es8_field "BF26.ppkEnc" "81" "OCTET STRING" "${penc:-<from --ppk-enc>}" "5.5.4 second member"
+            sim_es8_field "BF26.ppkCmac" "82" "OCTET STRING" "${pcmac:-<from --ppk-cmac>}" "5.5.4 third member"
+            local missk=''
+            [[ -z "$mac"   ]] && missk+="--mac-chaining "
+            [[ -z "$penc"  ]] && missk+="--ppk-enc "
+            [[ -z "$pcmac" ]] && missk+="--ppk-cmac "
+            if [[ -n "$missk" ]]; then
+                sim_es8_limit "missing input: ${missk% }; 5.5.4 states no default for any of the three keys, and their sizes are not stated in 5.5.4 (16 octets in the SCP03t scheme, SGP.02 2.6.4)"
+                sim_es8_handoff
+                return 3
+            fi
+            local k
+            for k in "$mac" "$penc" "$pcmac"; do
+                if ! sim_is_hex "$k" || (( ${#k} != 32 )); then
+                    printf 'ERROR	key material is %d hex digits: the SCP03t keys and the MAC chaining value are 16 octets (SGP.02 2.6.4); 5.5.4 itself states no length\n' "${#k}" >&2
+                    return 1
+                fi
+            done
+            sim_es8_out "$(sim_es8_tlv BF26 "$(sim_es8_tlv 80 "${mac^^}")$(sim_es8_tlv 81 "${penc^^}")$(sim_es8_tlv 82 "${pcmac^^}")")"
+            return 0 ;;
+
+        sequence-87|sequence-88|sequence-86|segments)
+            local outer tag
+            case "$seg" in
+                sequence-87) outer=A0; tag=87 ;;
+                sequence-88) outer=A1; tag=88 ;;
+                *)           outer=A3; tag=86 ;;
+            esac
+            sim_es8_seg "$seg" "one BPP segment: A? { '<tag>' TLV(s) } (2.5.4)"
+            sim_es8_ref "segment wrapper" "$outer" \
+                "2.5.4: firstSequenceOf87 [0] / sequenceOf88 [1] / sequenceOf86 [3] of BoundProfilePackage (A0, A1, A3 constructed)"
+            sim_es8_ref "SCP03t payload" "$tag" \
+                "2.5.4: the SCP03t payload TLVs are tag '87' (ConfigureISDP), '88' (StoreMetadata), '86' (profile elements); their values are protected (§2.6.4 SGP.02) and are passed through"
+            if [[ -z "$payload" ]]; then
+                sim_es8_limit "missing input: --payload; the '$tag' payload is the SCP03t-protected command block (2.5.4, §2.6.4 SGP.02) and this module does not implement the protection"
+                sim_es8_handoff
+                return 3
+            fi
+            if ! sim_is_hex "$payload"; then
+                printf 'ERROR\t--payload is not hex\n' >&2; return 1
+            fi
+            if [[ "${payload^^}" != "$tag"* ]]; then
+                # A segment of tag '87'/'88'/'86' may hold only TLVs of that tag
+                # (2.5.4). What the operator passed is a profile element that the
+                # SCP03t layer has not touched yet, and SGP.22 does not fix those
+                # octets (the protection is SGP.02, the element chain SIMalliance
+                # [5]). Print the structure, emit nothing, hand off.
+                sim_es8_field "segment.$tag" "$tag" "OCTET STRING" "<SCP03t-protected payload>" \
+                    "2.5.4: the value of a '$tag' TLV is the SCP03t-protected command block"
+                sim_es8_limit "payload starts with ${payload:0:2}: a profile element (BF24, BF25, BF26, profile header) is not a segment: SCP03t protection runs over it first, and that protection (SGP.02 SCP03t) is not implemented here, so the octets are not emitted"
+                sim_es8_handoff
+                return 3
+            fi
+            sim_es8_out "$(sim_es8_tlv "$outer" "${payload^^}")"
+            return 0 ;;
+
+        bpp|bound-profile-package)
+            sim_es8_seg "$seg" "the whole Bound Profile Package (2.5.4)"
+            sim_es8_ref "BoundProfilePackage" "BF36" \
+                "2.5.4: BoundProfilePackage ::= [54] SEQUENCE { -- Tag 0xBF36; initialiseSecureChannelRequest [35] InitialiseSecureChannelRequest, firstSequenceOf87 [0], sequenceOf88 [1], secondSequenceOf87 [2] OPTIONAL, sequenceOf86 [3] }"
+            sim_es8_ref "segment order" "-" \
+                "2.5.4: TLV command for key agreement in clear; '87' ConfigureISDP; '88' StoreMetadata; optional '87' Profile Protection Keys; '86' profile element chain"
+            sim_es8_bf23_refs
+            sim_es8_bf23_fields "$txn_n" "$host_n" "$otpk_n" "$sign_n"
+            local miss=''
+            [[ -z "$txn" ]] && miss+="--transaction-id "
+            [[ -z "$host" ]] && miss+="--host-id "
+            [[ -z "$otpk" ]] && miss+="--smdp-otpk "
+            [[ -z "$sign" ]] && miss+="--smdp-sign "
+            [[ -z "$p87" ]] && miss+="--first-87 "
+            [[ -z "$p88" ]] && miss+="--88 "
+            [[ -z "$p86" ]] && miss+="--86 "
+            if [[ -n "$miss" ]]; then
+                sim_es8_limit "missing input: ${miss% }; the chain is printed as structure above, the octets are not emitted"
+                sim_es8_handoff
+                return 3
+            fi
+            local part='' crt='' bf23=''
+            for part in "$txn" "$host" "$otpk" "$sign" "$p87" "$p88" "$p86" ${p87b:+$p87b}; do
+                sim_is_hex "$part" || { printf 'ERROR\tnot hex: %s\n' "$(sim_sanitize "$part")" >&2; return 1; }
+            done
+            crt=$(sim_es8_tlv A6 "$(sim_es8_tlv 80 88)$(sim_es8_tlv 81 10)$(sim_es8_tlv 84 "$host")") || return 1
+            bf23=$(sim_es8_tlv BF23 "$(sim_es8_tlv 82 01)$(sim_es8_tlv 80 "$txn")${crt}$(sim_es8_tlv 5F49 "$otpk")$(sim_es8_tlv 5F37 "$sign")") || return 1
+            local inner="$bf23$(sim_es8_tlv A0 "$p87")$(sim_es8_tlv A1 "$p88")"
+            [[ -n "$p87b" ]] && inner+="$(sim_es8_tlv A2 "$p87b")"
+            inner+="$(sim_es8_tlv A3 "$p86")"
+            sim_es8_out "$(sim_es8_tlv BF36 "$inner")"
+            return 0 ;;
+
+        '') sim_es8_usage; return 2 ;;
+        *)  printf 'ERROR\tunknown --es8-build segment %s; built: bpp-header, initialise-secure-channel, configure-isdp, store-metadata, replace-session-keys, sequence-87, sequence-88, sequence-86, bpp\n' \
+                "$(sim_sanitize "$seg")" >&2
+            return 2 ;;
+    esac
+}
+
+# ── TLV walker — the BPP / PendingNotification envelope, without a phone ──
+# Names and clause numbers here are the ones §2.5.4, §5.5.1..§5.5.4, §5.7.9,
+# §5.7.10 and Annex A state. Where a tag has no clause, the walker says so in
+# a `limit` row and returns 3 rather than guessing a name for it.
+sim_es8_walk() { # <hex> <bpp|pending> -> rows; rc 0 parsed / 1 malformed / 3 handoff
+    python3 - "${1:-}" "${2:-bpp}" <<'PY'
+import sys
+
+hexs = (sys.argv[1] if len(sys.argv) > 1 else "").strip().replace(" ", "")
+mode = sys.argv[2] if len(sys.argv) > 2 else "bpp"
+
+def die(msg, rc=1):
+    sys.stderr.write("ERROR\t" + msg + "\n")
+    sys.exit(rc)
+
+if not hexs:
+    die("no hex: pass the TLV bytes as an even-length hex string", 2)
+try:
+    data = bytes.fromhex(hexs)
+except ValueError:
+    die("not an even-length hex string", 2)
+
+NAMES = {
+    "BF36": ("BoundProfilePackage", "2.5.4"),
+    "BF23": ("InitialiseSecureChannelRequest", "5.5.1"),
+    "BF24": ("ConfigureISDPRequest", "5.5.2"),
+    "B8":   ("dpProprietaryData", "5.5.2"),
+    "06":   ("OBJECT IDENTIFIER", "5.5.2 / X.690 8.19"),
+    "BF25": ("StoreMetadataRequest", "5.5.3"),
+    "5A":   ("iccid (Iccid, [APPLICATION 26] OCTET STRING)", "5.5.3"),
+    "91":   ("serviceProviderName UTF8String", "5.5.3"),
+    "92":   ("profileName UTF8String", "5.5.3"),
+    "93":   ("iconType INTEGER {jpg(0),png(1)}", "5.5.3"),
+    "94":   ("icon OCTET STRING", "5.5.3"),
+    "95":   ("profileClass INTEGER {test(0),provisioning(1),operational(2)}", "5.5.3"),
+    "B6":   ("notificationConfigurationInfo SEQUENCE OF NotificationConfigurationInformation", "5.5.3"),
+    "B7":   ("profileOwner OperatorId", "5.5.3"),
+    "99":   ("profilePolicyRules PprIds BIT STRING {pprUpdateControl(0),ppr1(1),ppr2(2)}", "5.5.3"),
+    "BF26": ("ReplaceSessionKeysRequest", "5.5.4"),
+    "A0":   ("BoundProfilePackage.firstSequenceOf87", "2.5.4"),
+    "A1":   ("BoundProfilePackage.sequenceOf88", "2.5.4"),
+    "A2":   ("BoundProfilePackage.secondSequenceOf87 (OPTIONAL)", "2.5.4"),
+    "A3":   ("BoundProfilePackage.sequenceOf86", "2.5.4"),
+    "87":   ("SCP03t payload '87' (ConfigureISDP)", "2.5.4"),
+    "88":   ("SCP03t payload '88' (StoreMetadata)", "2.5.4"),
+    "86":   ("SCP03t payload '86' (profile element)", "2.5.4"),
+    "5F49": ("smdpOtpk [APPLICATION 73] OCTET STRING", "5.5.1"),
+    "5F37": ("signature [APPLICATION 55] OCTET STRING", "5.5.1 / 5.7.9"),
+    "A6":   ("controlRefTemplate [6]", "5.5.1"),
+    "80":   ("context [0]", "no clause names this octet on its own"),
+    "81":   ("context [1]", "no clause names this octet on its own"),
+    "84":   ("context [4]", "5.5.1"),
+    "04":   ("OCTET STRING", "X.690 8.7"),
+    "02":   ("INTEGER", "X.690 8.3"),
+    "03":   ("BIT STRING", "X.690 8.6"),
+    "0C":   ("UTF8String", "X.690"),
+    "30":   ("SEQUENCE", "X.690 8.9"),
+    "BF37": ("ProfileInstallationResult [55]", "5.7.9"),
+    "BF27": ("ProfileInstallationResultData [39]", "5.7.9"),
+    "BF2F": ("NotificationMetadata [47]", "5.7.9 / 5.7.10"),
+    "5F0F": ("aid [APPLICATION 15] OCTET STRING (SIZE(5..16))", "5.7.9"),
+}
+CTX = {
+    "A6/80":  ("controlRefTemplate.keyType Octet1 (AES = '88')", "5.5.1"),
+    "A6/81":  ("controlRefTemplate.keyLen Octet1 (shall be 0x10)", "5.5.1"),
+    "A6/84":  ("controlRefTemplate.hostId OctetTo16", "5.5.1"),
+    "BF23/82": ("remoteOpId (RemoteOpId ::= [2] INTEGER)", "5.5.1"),
+    "BF23/80": ("transactionId [0] TransactionId OCTET STRING (SIZE(1..16))", "5.5.1"),
+    "BF23/A6": ("controlRefTemplate [6] IMPLICIT", "5.5.1"),
+    "BF23/5F49": ("smdpOtpk [APPLICATION 73]", "5.5.1"),
+    "BF23/5F37": ("smdpSign [APPLICATION 55]", "5.5.1"),
+    "BF26/80": ("initialMacChainingValue OCTET STRING", "5.5.4 member 1 (tag by AUTOMATIC TAGS, Annex A)"),
+    "BF26/81": ("ppkEnc OCTET STRING", "5.5.4 member 2 (tag by AUTOMATIC TAGS, Annex A)"),
+    "BF26/82": ("ppkCmac OCTET STRING", "5.5.4 member 3 (tag by AUTOMATIC TAGS, Annex A)"),
+    "BF2F/80": ("seqNumber [0] INTEGER", "5.7.9"),
+    "BF2F/81": ("profileManagementOperation [1] NotificationEvent (one bit set)", "5.7.9"),
+    "BF2F/82": ("notificationAddress UTF8String", "5.7.9 (untagged member, [2] by AUTOMATIC TAGS)"),
+    "BF2F/5A": ("iccid OPTIONAL (Iccid)", "5.7.9"),
+    "BF27/80": ("transactionId [0] TransactionId", "5.7.9"),
+    "BF27/BF2F": ("notificationMetadata [47] NotificationMetadata", "5.7.9"),
+    "BF27/06": ("smdpOid OBJECT IDENTIFIER", "5.7.9"),
+    "BF27/A2": ("finalResult [2] CHOICE {successResult, errorResult}", "5.7.9"),
+    "BF37/BF27": ("profileInstallationResultData [39] ProfileInstallationResultData", "5.7.9"),
+    "BF37/5F37": ("euiccSignPIR [APPLICATION 55] OCTET STRING", "5.7.9"),
+    "BF37/BF27/A2/30": ("finalResult: SuccessResult/ErrorResult SEQUENCE", "5.7.9"),
+    "BF37/BF27/A2/30/5F0F": ("successResult.aid [APPLICATION 15]", "5.7.9"),
+    "BF37/BF27/A2/30/80": ("successResult.simaResponse OR errorResult.bppCommandId (same octet, decided by which alternative is present)", "5.7.9 + Annex A"),
+    "BF37/BF27/A2/30/81": ("errorResult.errorReason INTEGER", "5.7.9"),
+    "BF37/BF27/A2/30/82": ("errorResult.simaResponse OPTIONAL", "5.7.9"),
+}
+
+PPR = {0: "pprUpdateControl", 1: "ppr1", 2: "ppr2"}
+NEVENT = {0: "notificationInstall", 1: "notificationEnable", 2: "notificationDisable", 3: "notificationDelete"}
+
+def bits(v, names):
+    if not v:
+        return ""
+    unused = v[0]
+    body = int.from_bytes(v[1:], "big")
+    total = len(v[1:]) * 8
+    out = []
+    for i in range(total - unused):
+        if body & (1 << (total - 1 - i)):
+            out.append(names.get(i, "bit%d" % i))
+    return ",".join(out)
+
+def oid(v):
+    if not v:
+        return ""
+    first = v[0]
+    arcs = [first // 40, first % 40] if first < 80 else [2, first - 80]
+    val = 0
+    for b in v[1:]:
+        val = (val << 7) | (b & 0x7f)
+        if not b & 0x80:
+            arcs.append(val)
+            val = 0
+    return ".".join(str(a) for a in arcs)
+
+def iccid(v):
+    if len(v) != 10:
+        return ""
+    d = "".join("%02X" % b for b in v)
+    s = "".join(d[i + 1] + d[i] for i in range(0, 20, 2))
+    return s.rstrip("F")
+
+def meaning(path, th, v):
+    p = full_path(path, th)
+    if th == "5A" and len(v) == 10:
+        return "= ICCID %s" % iccid(v)
+    if th == "95" and v:
+        return "= " + {0: "test", 1: "provisioning", 2: "operational"}.get(v[0], "?")
+    if th == "93" and v:
+        return "= " + {0: "jpg", 1: "png"}.get(v[0], "?")
+    if th == "99":
+        return "= " + bits(v, PPR)
+    if p.endswith("BF23/82") and v:
+        return "= " + {1: "installBoundProfilePackage"}.get(v[0], "?")
+    if p.endswith("A6/80") and v:
+        return "= keyType AES" if v[0] == 0x88 else "= keyType 0x%02X" % v[0]
+    if p.endswith("A6/81") and v:
+        return "= keyLen %d octets" % v[0]
+    if th == "06" and v:
+        return "= " + oid(v)
+    if p.endswith("BF2F/80") and v:
+        return "= seqNumber %d" % int.from_bytes(v, "big")
+    if p.endswith("BF2F/81"):
+        return "= " + bits(v, NEVENT)
+    return ""
+
+def preview(v):
+    h = v.hex().upper()
+    return h if len(h) <= 40 else h[:40] + "..."
+
+def tag_at(buf, i):
+    if i >= len(buf):
+        raise ValueError("tag octet missing at offset 0x%X" % i)
+    start, b = i, buf[i]
+    if (b & 0x1f) == 0x1f:
+        i += 1
+        while True:
+            if i >= len(buf):
+                raise ValueError("truncated multi-octet tag at 0x%X" % start)
+            c = buf[i]
+            i += 1
+            if not c & 0x80:
+                break
+        if i - start > 4:
+            raise ValueError("tag longer than 4 octets at 0x%X" % start)
+    else:
+        i += 1
+    return buf[start:i].hex().upper(), b, i
+
+def length_at(buf, i):
+    if i >= len(buf):
+        raise ValueError("length octet missing at offset 0x%X" % i)
+    b = buf[i]
+    if b < 0x80:
+        return b, i + 1
+    if b == 0x80:
+        raise ValueError("indefinite length (0x80) at 0x%X: X.690 8.1.3.6 form, not used in a DER RSP object" % i)
+    n = b & 0x7f
+    if n > 4:
+        raise ValueError("length-of-length %d at 0x%X: refusing to guess" % (n, i))
+    return int.from_bytes(buf[i + 1:i + 1 + n], "big"), i + 1 + n
+
+EXPECT = {"bpp": ("BF36", "BoundProfilePackage", "2.5.4"),
+          "pending": ("BF37", "ProfileInstallationResult", "5.7.9")}
+unknown = []
+opaque = set()
+handoff = 0
+rows = 0
+
+def full_path(path, th):
+    return (path + "/" + th) if path else th
+
+def name_of(path, th):
+    full = full_path(path, th)
+    if full in CTX:
+        return CTX[full]
+    tail = "/".join(full.split("/")[-2:])
+    if tail in CTX:
+        return CTX[tail]
+    return NAMES.get(th)
+
+def walk(start, end, depth, path):
+    global rows
+    i = start
+    while i < end:
+        off = i
+        th, t0, j = tag_at(data, i)
+        ln, k = length_at(data, j)
+        if k + ln > end:
+            raise ValueError("tag %s at 0x%X claims %d octets, only %d remain"
+                             % (th, off, ln, max(0, end - k)))
+        v = data[k:k + ln]
+        nm = name_of(path, th)
+        name, clause = nm if nm else ("?", "no clause in SGP.22 v2.2.2 2.5.4/5.5.x/5.7.9/5.7.10 names this octet")
+        m = meaning(path, th, v)
+        value = preview(v) + (" " + m if m else "")
+        print("tlv\t%d\t%s\t%s\t%d\t%s\t%s\t%s" % (depth, path, th, ln, value, name, clause))
+        rows += 1
+        if not nm:
+            unknown.append((path, th, "0x%X" % off))
+        if th in ("87", "88", "86"):
+            opaque.add(th)
+        i = k + ln
+        if (t0 & 0x20) and ln and th not in ("87", "88", "86"):
+            walk(k, k + ln, depth + 1, full_path(path, th))
+    return i
+
+try:
+    th, t0, j = tag_at(data, 0)
+except ValueError as e:
+    die(str(e))
+
+ln, k = length_at(data, j)
+root = EXPECT.get(mode, EXPECT["bpp"])
+root_hex, root_name, root_clause = root
+print("bytes\t%d" % len(data))
+print("root\t%s\t%s\t%s" % (th, NAMES.get(th, ("?", root_clause))[0], NAMES.get(th, ("?", root_clause))[1]))
+if mode == "pending" and th not in ("BF37", "30"):
+    print("limit\troot tag %s: a PendingNotification is a CHOICE of 'BF37' ProfileInstallationResult or an untagged OtherSignedNotification SEQUENCE (5.7.10); this is neither" % th)
+    handoff = 1
+elif mode == "bpp" and th != root_hex:
+    print("note\troot tag %s is a %s, not the BF36 BoundProfilePackage (2.5.4) a whole BPP is; walking it as given, every field still carries its clause" % (th, NAMES.get(th, ("?",))[0]))
+
+try:
+    end = walk(0, len(data), 0, "")
+except ValueError as e:
+    die(str(e))
+if end < len(data):
+    print("limit\t%d trailing octets after the first top-level TLV at 0x%X: a BPP is one BF36 (2.5.4)" % (len(data) - end, end))
+    handoff = 1
+if opaque:
+    print("limit\ttag(s) %s are SCP03t payloads (2.5.4): their values are printed opaque; the plaintext inside needs S-ENC/S-CMAC from the eUICC session (2.6.4 SGP.02) and this walker does not have them" % ",".join(sorted(opaque)))
+for path, th, off in unknown:
+    print("limit\ttag %s at %s (depth %d): no clause in SGP.22 v2.2.2 2.5.4 / 5.5.x / 5.7.9 / 5.7.10 names it; Annex A declares EXTENSIBILITY IMPLIED, so a decoder may not report an error, but this walker does not name it" % (th, path, path.count("/")))
+    handoff = 1
+print("status\t%s" % ("handoff" if handoff else "parsed"))
+sys.exit(3 if handoff else 0)
+PY
+}
+
+sim_cmd_es8_parse() {
+    local hex="${1:-}"
+    [[ -z "$hex" ]] && {
+        printf 'ERROR\tusage: --es8-parse <hex>   (a Bound Profile Package: the base64 boundProfilePackage response field, decoded; e.g. pipe it through base64 -d and xxd -p)\n' >&2
+        return 2; }
+    hex="${hex// /}"
+    sim_is_hex "$hex" && [[ -n "$hex" ]] || {
+        printf 'ERROR\t--es8-parse takes an even-length hex string\n' >&2; return 2; }
+    printf 'op\tES8+ Bound Profile Package parse\n'
+    printf 'spec\tSGP.22 v2.2.2 2.5.4 (BPP and segment tags), 5.5.1..5.5.4 (BF23..BF26), Annex A (AUTOMATIC TAGS, EXTENSIBILITY IMPLIED)\n'
+    printf 'sent\t0\n'
+    sim_es8_walk "$hex" bpp
+}
+
+# ── ES9+ response bodies + HandleNotification (SGP.22 §6.5.2.6..§6.5.2.10) ──
+# --es9-plus builds the four synchronous requests. These two verbs read the
+# other direction: the <JSON responseMessage> body, with the header object of
+# §6.5.1.4, and the one ES9+ call the builder refuses (§6.5.2.9).
+sim_es9_response_py() { # <op> <json> <expected-txn> -> rows; rc 0/1/2/3
+    python3 - "${1:-}" "${2:-}" "${3:-}" <<'PY'
+import base64, binascii, json, re, sys
+
+ALIAS = {
+    "initiateAuthentication": "initiateAuthentication", "initiate-authentication": "initiateAuthentication",
+    "authenticateClient": "authenticateClient", "authenticate-client": "authenticateClient",
+    "getBoundProfilePackage": "getBoundProfilePackage", "get-bound-profile-package": "getBoundProfilePackage",
+    "cancelSession": "cancelSession", "cancel-session": "cancelSession",
+}
+SPEC = {
+    "initiateAuthentication": dict(
+        fn="ES9+.InitiateAuthentication", clause="6.5.2.6", path="initiateAuthentication",
+        declared=["transactionId", "serverSigned1", "serverSignature1", "euiccCiPKIdToBeUsed", "serverCertificate"],
+        required=["transactionId", "serverSigned1", "serverSignature1", "euiccCiPKIdToBeUsed", "serverCertificate"],
+        b64=["serverSigned1", "serverSignature1", "euiccCiPKIdToBeUsed", "serverCertificate"]),
+    "authenticateClient": dict(
+        fn="ES9+.AuthenticateClient", clause="6.5.2.8", path="authenticateClient",
+        declared=["transactionId", "profileMetadata", "smdpSigned2", "smdpSignature2", "smdpCertificate"],
+        required=["transactionId", "profileMetadata", "smdpSigned2", "smdpSignature2", "smdpCertificate"],
+        b64=["profileMetadata", "smdpSigned2", "smdpSignature2", "smdpCertificate"]),
+    "getBoundProfilePackage": dict(
+        fn="ES9+.GetBoundProfilePackage", clause="6.5.2.7", path="getBoundProfilePackage",
+        declared=["transactionId", "boundProfilePackage"],
+        required=["transactionId", "boundProfilePackage"],
+        b64=["boundProfilePackage"]),
+    "cancelSession": dict(
+        fn="ES9+.CancelSession", clause="6.5.2.10", path="cancelSession",
+        declared=[], required=[], b64=[]),
+}
+
+def die(msg, rc=1):
+    sys.stderr.write("ERROR\t" + msg + "\n")
+    sys.exit(rc)
+
+op = sys.argv[1] if len(sys.argv) > 1 else ""
+raw = sys.argv[2] if len(sys.argv) > 2 else ""
+want = (sys.argv[3] if len(sys.argv) > 3 else "").strip().upper()
+
+if op not in ALIAS:
+    die("unknown ES9+ operation %s; parsed: %s" % (op, ", ".join(SPEC)), 2)
+op = ALIAS[op]
+sp = SPEC[op]
+
+def s(v):
+    t = str(v).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    return t if len(t) <= 200 else t[:200] + "..."
+
+try:
+    body = json.loads(raw)
+except Exception as e:
+    die("the input is not JSON: %s" % e)
+if not isinstance(body, dict):
+    die("the <JSON body> of an ES9+ response is a JSON object, not %s" % type(body).__name__)
+
+hdr = body.get("header")
+if not isinstance(hdr, dict):
+    die("no header object: SGP.22 6.5.1.4 requires header.functionExecutionStatus, so this is not an ES9+ response body")
+fes = hdr.get("functionExecutionStatus")
+if not isinstance(fes, dict):
+    die("header has no functionExecutionStatus object: 6.5.1.4 requires it")
+st = fes.get("status")
+if not isinstance(st, str) or not st:
+    die("header.functionExecutionStatus.status missing: 6.5.1.4 required [\"status\"]")
+
+print("op\t%s" % sp["fn"])
+print("spec\tSGP.22 v2.2.2 %s response JSON schema; header object 6.5.1.4" % sp["clause"])
+print("mep\tHTTP POST https://<smds>/gsma/rsp2/es9plus/%s" % sp["path"])
+print("expects\tHTTP 200 with this JSON body (6.3: a normal request-response is 200 whatever the function status)")
+print("schema\t%s\trequired %s"
+      % (", ".join(sp["declared"]) or "(none: 6.5.2.10 defines no response body)",
+         ", ".join(sp["required"]) or "(none)"))
+print("header\tfunctionExecutionStatus.status\t%s\t6.5.1.4 required [status]: Executed-Success / Executed-WithWarning / Failed / Expired" % s(st))
+if st not in ("Executed-Success", "Executed-WithWarning", "Failed", "Expired"):
+    print("limit\tstatus %s is not one of the four values 6.5.1.4 lists; reported as given" % s(st))
+scd = fes.get("statusCodeData")
+scd_bad = 0
+if isinstance(scd, dict):
+    for k, cl in (("subjectCode", "required [subjectCode]"), ("reasonCode", "required [reasonCode]")):
+        if k in scd:
+            print("header\tfunctionExecutionStatus.statusCodeData.%s\t%s\t6.5.1.4 %s" % (k, s(scd[k]), cl))
+        else:
+            print("limit\tstatusCodeData carries no %s: 6.5.1.4 requires [subjectCode, reasonCode] whenever statusCodeData is present" % k)
+            scd_bad = 1
+    for k in ("subjectIdentifier", "message"):
+        if k in scd:
+            print("header\tfunctionExecutionStatus.statusCodeData.%s\t%s\t6.5.1.4" % (k, s(scd[k])))
+elif st in ("Failed", "Expired"):
+    print("limit\tstatus is %s but there is no statusCodeData object: 6.5.1.4 puts subjectCode/reasonCode there" % st)
+
+handoff = scd_bad
+seen = set()
+for k in body:
+    if k == "header":
+        continue
+    seen.add(k)
+    v = body[k]
+    if k == "transactionId":
+        okpat = isinstance(v, str) and re.fullmatch(r"[0-9A-F]{2,32}", v) is not None
+        print("field\ttransactionId\t%s\t6.5.2.x: hexadecimal TransactionID, pattern ^[0-9,A-F]{2,32}$%s"
+              % (s(v), "" if okpat else " -- does not match the pattern"))
+        if not okpat:
+            print("limit\ttransactionId does not match ^[0-9,A-F]{2,32}$ (6.5.2.6..6.5.2.10)")
+            handoff = 1
+    elif k in sp["b64"]:
+        if not isinstance(v, str):
+            print("limit\t%s is not a JSON string: 6.5.2.x types every binary field as a base64 string" % k)
+            handoff = 1
+            continue
+        try:
+            b = base64.b64decode(v, validate=True)
+        except (binascii.Error, ValueError):
+            die("%s is not valid base64 (6.5.2.x format: base64)" % k)
+        print("field\t%s\tbase64, %d octets, begins %s\t6.5.2.x: base64 encoded binary data"
+              % (k, len(b), b[:16].hex().upper()))
+        if k == "boundProfilePackage":
+            if b[:2] == bytes([0xBF, 0x36]):
+                print("field\tboundProfilePackage.root\tBF36 BoundProfilePackage\t2.5.4 BoundProfilePackage ::= [54] SEQUENCE -- Tag 'BF36'")
+                print("next\t--es8-parse <hex of boundProfilePackage> walks it without a phone")
+            else:
+                print("limit\tboundProfilePackage does not begin BF36: 2.5.4 types it [54] SEQUENCE, Tag 'BF36'")
+                handoff = 1
+        if k == "profileMetadata":
+            if b[:2] == bytes([0xBF, 0x25]):
+                print("field\tprofileMetadata.root\tBF25 StoreMetadataRequest\t5.5.3 [37] SEQUENCE; 6.5.2.8 describes this field as the StoreMetadataRequest data object")
+                print("next\t--es8-parse <hex of profileMetadata> walks it")
+            else:
+                print("limit\tprofileMetadata does not begin BF25: 6.5.2.8 describes it as the StoreMetadataRequest of 5.5.3, Tag 'BF25'")
+                handoff = 1
+    else:
+        print("limit\tkey %s is not in the %s schema (6.5.2.x); Annex A EXTENSIBILITY IMPLIED lets a decoder ignore it, this parser reports it"
+              % (s(k), sp["clause"]))
+        handoff = 1
+
+for f in sp["required"]:
+    if f not in seen:
+        print("limit\trequired field %s missing (SGP.22 %s required list)" % (f, sp["clause"]))
+        handoff = 1
+
+txn = body.get("transactionId")
+if want and isinstance(txn, str):
+    if txn.upper() == want:
+        print("match\ttransactionId\techoed %s equals the transactionId the request carried" % s(txn))
+    else:
+        print("match\ttransactionId\tMISMATCH: response echoes %s, request carried %s" % (s(txn), s(want)))
+        sys.stderr.write("ERROR\ttransactionId mismatch: the response echoes %s, the request carried %s (SGP.22 5.6.1/5.6.2 tie the exchange to it)\n"
+                         % (s(txn), s(want)))
+        sys.exit(1)
+elif want and txn is None:
+    print("match\ttransactionId\tnothing to compare: this body carries no transactionId")
+elif isinstance(txn, str):
+    print("match\ttransactionId\tnot checked: no --transaction-id given; the body echoes %s" % s(txn))
+
+if op == "cancelSession":
+    extra = set(body) - {"header"}
+    print("note\t6.5.2.10: the ES9+.CancelSession function has no JSON body part of the response, so the header is all that can be checked"
+          + ("; unexpected keys are reported above" if extra else ""))
+if st in ("Failed", "Expired"):
+    print("note\tfunction execution status %s: the call reached the SM-DP+ and the function failed; subjectCode/reasonCode above say where" % st)
+
+print("status\t%s" % ("handoff" if handoff else "parsed"))
+sys.exit(3 if handoff else 0)
+PY
+}
+
+sim_es9_response_usage() {
+    cat >&2 <<'EOF'
+ERROR	usage: --es9-response <op> <json> [--transaction-id <hex>]
+  ops (SGP.22 v2.2.2 6.5.2.6..6.5.2.10). <json> is the <JSON body> of the
+  RESPONSE; @file reads it from a file. The header object (6.5.1.4) is required:
+    initiateAuthentication  transactionId, serverSigned1, serverSignature1,
+                            euiccCiPKIdToBeUsed, serverCertificate
+    authenticateClient      transactionId, profileMetadata, smdpSigned2,
+                            smdpSignature2, smdpCertificate
+    getBoundProfilePackage  transactionId, boundProfilePackage  (BF36, 2.5.4)
+    cancelSession           no body at all: the function has no JSON response (6.5.2.10)
+  exit: 0 parsed  1 refused (no header / mismatch / not JSON)  2 usage  3 handoff
+        (a required field is missing, or a blob does not start with its tag)
+EOF
+}
+
+sim_cmd_es9_response() {
+    local op="${1:-}" json="${2:-}"
+    shift 2 2>/dev/null || true
+    local want=''
+    while (( $# )); do
+        case "$1" in
+            --transaction-id|--expect-transaction-id) want="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --help|-h) sim_es9_response_usage; return 2 ;;
+            *) printf 'ERROR\tunsupported flag %s for --es9-response\n' "$(sim_sanitize "$1")" >&2
+               return 2 ;;
+        esac
+    done
+    if [[ -z "$op" || -z "$json" ]]; then
+        sim_es9_response_usage
+        return 2
+    fi
+    if [[ "$json" == @* ]]; then
+        local f="${json#@}"
+        [[ -f "$f" ]] || { printf 'ERROR\tno such file: %s\n' "$f" >&2; return 1; }
+        json=$(cat "$f") || return 1
+    fi
+    sim_es9_response_py "$op" "$json" "$want"
+}
+
+sim_es9_notification_usage() {
+    cat >&2 <<'EOF'
+ERROR	usage: --es9-notification <json>   (@file reads the body from a file)
+  The ES9+.HandleNotification <JSON body> (SGP.22 v2.2.2 6.5.2.9):
+    {"pendingNotification": "<base64 of the PendingNotification, 5.7.10>"}
+  The binary is walked as a TLV ((BF37 ProfileInstallationResult | 30
+  OtherSignedNotification) inside A0/A1... of the LPA notification flow) and
+  every field is printed with its clause. The response is 204 with an empty
+  body (6.2, 6.3): there is no JSON response schema to parse (6.5.2.9).
+  exit: 0 parsed  1 refused  2 usage  3 handoff (a TLV has no clause)
+EOF
+}
+
+sim_cmd_es9_notification() {
+    local json="${1:-}"
+    shift 2>/dev/null || true
+    while (( $# )); do
+        case "$1" in
+            --help|-h) sim_es9_notification_usage; return 2 ;;
+            *) printf 'ERROR\tunsupported flag %s for --es9-notification\n' "$(sim_sanitize "$1")" >&2
+               return 2 ;;
+        esac
+    done
+    if [[ -z "$json" ]]; then
+        sim_es9_notification_usage
+        return 2
+    fi
+    if [[ "$json" == @* ]]; then
+        local f="${json#@}"
+        [[ -f "$f" ]] || { printf 'ERROR\tno such file: %s\n' "$f" >&2; return 1; }
+        json=$(cat "$f") || return 1
+    fi
+    local hex
+    hex=$(printf '%s' "$json" | python3 -c '
+import base64, binascii, json, sys
+raw = sys.stdin.read()
+def die(msg, rc=1):
+    sys.stderr.write("ERROR\t" + msg + "\n")
+    sys.exit(rc)
+if not raw.strip():
+    die("no JSON given", 2)
+try:
+    body = json.loads(raw)
+except Exception as e:
+    die("the <JSON body> is not JSON: %s" % e)
+if not isinstance(body, dict):
+    die("the <JSON body> of HandleNotification is a JSON object")
+if "pendingNotification" not in body:
+    die("no pendingNotification key: 6.5.2.9 requires [pendingNotification], so this is not a HandleNotification request")
+v = body["pendingNotification"]
+if not isinstance(v, str):
+    die("pendingNotification is not a base64 string (6.5.2.9 format: base64)")
+try:
+    b = base64.b64decode(v, validate=True)
+except (binascii.Error, ValueError):
+    die("pendingNotification is not valid base64")
+extra = [k for k in body if k != "pendingNotification"]
+if extra:
+    sys.stderr.write("note\tkeys beyond pendingNotification are not in the 6.5.2.9 schema: %s\n" % ", ".join(extra))
+sys.stdout.write(b.hex().upper())
+') || return 1
+    printf 'op\tES9+.HandleNotification\n'
+    printf 'spec\tSGP.22 v2.2.2 6.5.2.9 (request schema), 5.6.4 (procedure), 5.7.10 (PendingNotification)\n'
+    printf 'mep\tHTTP POST https://<smds>/gsma/rsp2/es9plus/handleNotification\n'
+    printf 'expects\t204 No Content with an empty body (6.2: the POST response body SHALL be empty; 6.3: 204 for a normal notification); 6.5.2.9 defines no JSON response body\n'
+    printf 'field\tpendingNotification\tbase64 -> %d octets\t6.5.2.9 required [pendingNotification]; the octets are the PendingNotification of 5.7.10\n' "$(( ${#hex} / 2 ))"
+    printf 'sent\t0\n'
+    sim_es8_walk "$hex" pending
+}
+
 # ── selftest — no reader, no root, no network ───────────────────────────
 sim_selftest() {
-    local bad=0
+    local bad=0 n_checks=0
     chk() {
         local n="$1" got="$2" want="$3"
+        n_checks=$((n_checks + 1))
         if [[ "$got" == "$want" ]]; then printf '%s\tPASS\n' "$n"
         else printf '%s\tFAIL want=%s got=%s\n' "$n" "$want" "$got"; bad=$((bad + 1)); fi
     }
@@ -3332,6 +4388,211 @@ sim_selftest() {
     chk es9-out-sent   "$(grep -c 'sent 0 when written' "$es9f")" "1"
     chk es9-out-spec   "$(grep -c '6.5.2.10' "$es9f")" "1"
 
+
+    # ── 19. SGP.22 ES8+ TLV builder: every octet from a clause it names ──
+    # The hex asserted below is exactly the octets the cited clause names --
+    # tag, length and value -- so a moved tag or a changed length form fails
+    # here instead of looking plausible in an operator's hands.
+    out=$(sim_cmd_es8_build configure-isdp --dp-oid 1.2.840.113549)
+    chk es8-isdp-hex      "$(fld "$out" hex)" "BF240AB80806062A864886F70D"
+    chk es8-isdp-bytes    "$(fld "$out" bytes)" "13"
+    chk es8-isdp-status   "$(fld "$out" status)" "built"
+    chk es8-isdp-bf24-ref "$(printf '%s\n' "$out" | grep -c '^ref	ConfigureISDPRequest	BF24	5.5.2')" "1"
+    chk es8-isdp-b8-ref   "$(printf '%s\n' "$out" | grep -c '^ref	dpProprietaryData	B8	5.5.2')" "1"
+    chk es8-isdp-oid-row  "$(printf '%s\n' "$out" | grep -c '^field	BF24.dpProprietaryData.dpOid	06	OBJECT IDENTIFIER	1.2.840.113549	5.5.2')" "1"
+    # dpProprietaryData is OPTIONAL (5.5.2): with no --dp-oid the only lawful
+    # encoding is the empty SEQUENCE, BF24 00.
+    out=$(sim_cmd_es8_build configure-isdp)
+    chk es8-isdp-empty    "$(fld "$out" hex)" "BF2400"
+    chk es8-isdp-opt-note "$(printf '%s\n' "$out" | grep -c 'dpProprietaryData is OPTIONAL (5.5.2)')" "1"
+    # X.690 8.19: first arc 0..2, and below 2 the second arc must stay < 40.
+    chk es8-isdp-arc1     "$(sim_cmd_es8_build configure-isdp --dp-oid 3.1 >/dev/null 2>&1; echo $?)" "2"
+    chk es8-isdp-arc2     "$(sim_cmd_es8_build configure-isdp --dp-oid 1.40 >/dev/null 2>&1; echo $?)" "2"
+    chk es8-isdp-not-oid  "$(sim_cmd_es8_build configure-isdp --dp-oid 1.2.x >/dev/null 2>&1; echo $?)" "2"
+
+    # StoreMetadata (5.5.3). The iccid is the ten EFiccid octets, emitted
+    # unchanged behind 5A -- the BCD swap happened when EF_ICCID was written.
+    out=$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 \
+            --service-provider-name GSMA_TEST --profile-name GSMA_TEST_PROFILE --profile-class test)
+    chk es8-md-hex        "$(fld "$out" hex)" "BF252D5A0A98001032547698103214910947534D415F54455354921147534D415F544553545F50524F46494C45950100"
+    chk es8-md-bytes      "$(fld "$out" bytes)" "48"
+    chk es8-md-iccid-ref  "$(printf '%s\n' "$out" | grep -c '^ref	iccid	5A	5.5.3')" "1"
+    chk es8-md-spn-ref    "$(printf '%s\n' "$out" | grep -c '^ref	serviceProviderName	91	5.5.3')" "1"
+    chk es8-md-name-ref   "$(printf '%s\n' "$out" | grep -c '^ref	profileName	92	5.5.3')" "1"
+    chk es8-md-class-ref  "$(printf '%s\n' "$out" | grep -c '^ref	profileClass	95	5.5.3')" "1"
+    # profileOwner [23] -> B7 { 80 mccMnc }; PprIds -> 99 02 0640 for ppr1.
+    out=$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --profile-owner 42F618 --ppr ppr1)
+    chk es8-md-owner-ppr  "$(fld "$out" hex)" "BF25175A0A98001032547698103214B705800342F61899020640"
+    chk es8-md-owner-note "$(printf '%s\n' "$out" | grep -c 'AUTOMATIC TAGS assigns the untagged member')" "1"
+    out=$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --ppr pprUpdateControl,ppr1)
+    chk es8-md-ppr-bits   "$(printf '%s' "$(fld "$out" hex)" | grep -c '990206C0$')" "1"
+    # notificationConfigurationInfo [22] -> B6 { SEQUENCE { 80 event, 81 fqdn } }.
+    out=$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --notification install=smdp.example.com)
+    chk es8-md-notif      "$(fld "$out" hex)" "BF25265A0A98001032547698103214B6183016800207808110736D64702E6578616D706C652E636F6D"
+    chk es8-md-notif-note "$(printf '%s\n' "$out" | grep -c 'the SEQUENCE members of NotificationConfigurationInformation (5.5.3) carry no tags')" "1"
+    out=$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --icon-type png --icon 89504E47)
+    chk es8-md-icon       "$(fld "$out" hex)" "BF25155A0A98001032547698103214930101940489504E47"
+    # A missing mandatory member hands off; a wrong one is refused.
+    chk es8-md-no-iccid   "$(sim_cmd_es8_build store-metadata >/dev/null 2>&1; echo $?)" "3"
+    chk es8-md-no-iccid-lim "$(sim_cmd_es8_build store-metadata 2>/dev/null | grep -c 'missing input: --iccid')" "1"
+    chk es8-md-short-iccid "$(sim_cmd_es8_build store-metadata --iccid 980010325476981032 >/dev/null 2>&1; echo $?)" "1"
+    chk es8-md-icon-ality  "$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --icon 8950 >/dev/null 2>&1; echo $?)" "1"
+    chk es8-md-bad-ppr    "$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --ppr ppr9 >/dev/null 2>&1; echo $?)" "2"
+    chk es8-md-bad-class  "$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --profile-class gold >/dev/null 2>&1; echo $?)" "2"
+    chk es8-md-bad-event  "$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --notification reboot=x >/dev/null 2>&1; echo $?)" "2"
+
+    # ReplaceSessionKeys (5.5.4): the three untagged members become 80/81/82
+    # because Annex A declares AUTOMATIC TAGS.
+    out=$(sim_cmd_es8_build replace-session-keys --mac-chaining 00112233445566778899AABBCCDDEEFF \
+            --ppk-enc 0102030405060708090A0B0C0D0E0F10 --ppk-cmac 1112131415161718191A1B1C1D1E1F20)
+    chk es8-rsk-hex       "$(fld "$out" hex)" "BF2636801000112233445566778899AABBCCDDEEFF81100102030405060708090A0B0C0D0E0F1082101112131415161718191A1B1C1D1E1F20"
+    chk es8-rsk-bytes     "$(fld "$out" bytes)" "57"
+    chk es8-rsk-automatic "$(printf '%s\n' "$out" | grep -c 'tag 8[012] by AUTOMATIC TAGS')" "2"
+    chk es8-rsk-missing   "$(sim_cmd_es8_build replace-session-keys --mac-chaining 00 >/dev/null 2>&1; echo $?)" "3"
+    chk es8-rsk-short     "$(sim_cmd_es8_build replace-session-keys --mac-chaining 00112233445566778899AABBCCDDEE --ppk-enc 00112233445566778899AABBCCDDEEFF --ppk-cmac 00112233445566778899AABBCCDDEEFF >/dev/null 2>&1; echo $?)" "1"
+
+    # InitialiseSecureChannel (5.5.1) inside the BF36 header of 2.5.4. The
+    # 174-octet shape is the one a real SM-DP+ BPP starts with:
+    #   BF36 81 AA  BF23 81 A6  82 01 01  80 10 <txn>
+    #   A6 10 80 01 88 81 01 10 84 08 <host>  5F49 41 04 <64>  5F37 40 <64>
+    local otpk="04$(printf '11%.0s' {1..64})"
+    local sig="$(printf '22%.0s' {1..64})"
+    out=$(sim_cmd_es8_build bpp-header --transaction-id 0123456789ABCDEF --host-id 6D61686C7A656974 \
+            --smdp-otpk "$otpk" --smdp-sign "$sig")
+    chk es8-bf23-hex      "$(fld "$out" hex)" "BF3681AABF2381A682010180080123456789ABCDEFA61080018881011084086D61686C7A6569745F494104$(printf '11%.0s' {1..64})5F3740$(printf '22%.0s' {1..64})"
+    chk es8-bf23-bytes    "$(fld "$out" bytes)" "174"
+    chk es8-bf23-crt-ref  "$(printf '%s\n' "$out" | grep -c '^ref	controlRefTemplate	A6	5.5.1: controlRefTemplate \[6\] IMPLICIT')" "1"
+    out=$(sim_cmd_es8_build initialise-secure-channel --transaction-id 01 --host-id 00 --smdp-otpk "$otpk" --smdp-sign "$sig")
+    chk es8-bf23-no-bf36  "$(printf '%s' "$(fld "$out" hex)" | cut -c1-6)" "BF2381"
+    chk es8-bf23-missing  "$(sim_cmd_es8_build bpp-header --transaction-id 01 --host-id 00 --smdp-otpk "$otpk" >/dev/null 2>&1; echo $?)" "3"
+    chk es8-bf23-miss-lim "$(sim_cmd_es8_build bpp-header --transaction-id 01 --host-id 00 --smdp-otpk "$otpk" 2>/dev/null | grep -c 'missing input: --smdp-sign')" "1"
+    chk es8-bf23-long-txn "$(sim_cmd_es8_build bpp-header --transaction-id 00112233445566778899AABBCCDDEEFF11 --host-id 00 --smdp-otpk "$otpk" --smdp-sign "$sig" >/dev/null 2>&1; echo $?)" "1"
+    chk es8-bf23-bad-otpk "$(sim_cmd_es8_build bpp-header --transaction-id 01 --host-id 00 --smdp-otpk 04 --smdp-sign "$sig" >/dev/null 2>&1; echo $?)" "1"
+
+    # The segment wrappers: A0 firstSequenceOf87, A1 sequenceOf88, A3
+    # sequenceOf86, each carrying its own tag+length around the '87'/'88'/'86'.
+    chk es8-seg-87        "$(fld "$(sim_cmd_es8_build sequence-87 --payload 8701AA)" hex)" "A0038701AA"
+    chk es8-seg-88        "$(fld "$(sim_cmd_es8_build sequence-88 --payload 8801BB)" hex)" "A1038801BB"
+    chk es8-seg-86        "$(fld "$(sim_cmd_es8_build sequence-86 --payload 8601DD)" hex)" "A3038601DD"
+    chk es8-seg-no-payload "$(sim_cmd_es8_build sequence-87 >/dev/null 2>&1; echo $?)" "3"
+    # A profile element is not a segment: SCP03t protects it first, and that
+    # protection (SGP.02) is not built here, so the builder hands off.
+    chk es8-seg-not-seg   "$(sim_cmd_es8_build sequence-87 --payload BF2400 >/dev/null 2>&1; echo $?)" "3"
+    chk es8-seg-lim       "$(sim_cmd_es8_build sequence-87 --payload BF2400 2>/dev/null | grep -c 'SCP03t protection runs over it first')" "1"
+    chk es8-seg-not-hex   "$(sim_cmd_es8_build sequence-87 --payload ZZ >/dev/null 2>&1; echo $?)" "1"
+
+    # The whole BPP in the order 2.5.4 states:
+    #   BF36 { BF23, A0 '87', A1 '88', A2 '87' OPTIONAL, A3 '86' }
+    out=$(sim_cmd_es8_build bpp --transaction-id 0123456789ABCDEF --host-id 6D61686C7A656974 \
+            --smdp-otpk "$otpk" --smdp-sign "$sig" --first-87 8701AA --88 8801BB \
+            --second-87 8701CC --86 8601DD)
+    chk es8-bpp-len       "$(printf '%s' "$(fld "$out" hex)" | wc -c | tr -d ' ')" "388"
+    chk es8-bpp-prefix    "$(printf '%s' "$(fld "$out" hex)" | cut -c1-16)" "BF3681BEBF2381A6"
+    chk es8-bpp-order     "$(printf '%s' "$(fld "$out" hex)" | grep -c 'A0038701AAA1038801BBA2038701CCA3038601DD$')" "1"
+    chk es8-bpp-missing   "$(sim_cmd_es8_build bpp --transaction-id 01 --host-id 00 --smdp-otpk "$otpk" --smdp-sign "$sig" --first-87 8701AA --88 8801BB >/dev/null 2>&1; echo $?)" "3"
+    chk es8-bpp-unknown   "$(sim_cmd_es8_build nonsense >/dev/null 2>&1; echo $?)" "2"
+    chk es8-bpp-noargs    "$(sim_cmd_es8_build >/dev/null 2>&1; echo $?)" "2"
+    chk es8-bpp-badflag   "$(sim_cmd_es8_build configure-isdp --nope 1 >/dev/null 2>&1; echo $?)" "2"
+
+    # ── 20. BPP walker: depth, tag, length, value, clause -- no phone ────
+    out=$(sim_cmd_es8_parse "BF240AB80806062A864886F70D"); rc=$?
+    chk es8-parse-isdp-rc "$rc" "0"
+    chk es8-parse-isdp-root "$(printf '%s\n' "$out" | grep -c '^root	BF24	ConfigureISDPRequest	5.5.2')" "1"
+    chk es8-parse-isdp-note "$(printf '%s\n' "$out" | grep -c 'not the BF36 BoundProfilePackage (2.5.4) a whole BPP is')" "1"
+    chk es8-parse-isdp-d0 "$(printf '%s\n' "$out" | grep -c '^tlv	0		BF24	10	B80806062A864886F70D')" "1"
+    chk es8-parse-isdp-d1 "$(printf '%s\n' "$out" | grep -c '^tlv	1	BF24	B8	8	06062A864886F70D')" "1"
+    chk es8-parse-isdp-oid "$(printf '%s\n' "$out" | grep -c '= 1.2.840.113549')" "1"
+    chk es8-parse-status  "$(printf '%s\n' "$out" | grep -c '^status	parsed')" "1"
+    # A whole BPP down to the segment wrapper and the opaque '87'.
+    out=$(sim_cmd_es8_parse "BF3605A0038701AA"); rc=$?
+    chk es8-parse-bpp-rc  "$rc" "0"
+    chk es8-parse-bpp-a0  "$(printf '%s\n' "$out" | grep -c '^tlv	1	BF36	A0	3	8701AA	BoundProfilePackage.firstSequenceOf87	2.5.4')" "1"
+    chk es8-parse-bpp-87  "$(printf '%s\n' "$out" | grep -c '^tlv	2	BF36/A0	87	1	AA	SCP03t payload')" "1"
+    # A malformed envelope is an error; an unnamed tag is a handoff, not a guess.
+    chk es8-parse-trunc   "$(sim_cmd_es8_parse BF3603A00387 >/dev/null 2>&1; echo $?)" "1"
+    chk es8-parse-odd     "$(sim_cmd_es8_parse ABC >/dev/null 2>&1; echo $?)" "2"
+    chk es8-parse-noarg   "$(sim_cmd_es8_parse >/dev/null 2>&1; echo $?)" "2"
+    out=$(sim_cmd_es8_parse "BF36049F7F01AA"); rc=$?
+    chk es8-parse-unk-rc  "$rc" "3"
+    chk es8-parse-unk-lim "$(printf '%s\n' "$out" | grep -c 'no clause in SGP.22 v2.2.2 2.5.4 / 5.5.x / 5.7.9 / 5.7.10 names it')" "1"
+
+    # ── 21. ES9+ response bodies (6.5.1.4, 6.5.2.6..6.5.2.10) ───────────
+    local iresp='{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"transactionId":"0123456789ABCDEF","serverSigned1":"MAA=","serverSignature1":"MAA=","euiccCiPKIdToBeUsed":"MAA=","serverCertificate":"MAA="}'
+    out=$(sim_cmd_es9_response initiateAuthentication "$iresp" --transaction-id 0123456789ABCDEF); rc=$?
+    chk es9r-init-rc      "$rc" "0"
+    chk es9r-init-op      "$(printf '%s\n' "$out" | grep -c '^op	ES9+.InitiateAuthentication')" "1"
+    chk es9r-init-header  "$(printf '%s\n' "$out" | grep -c '^header	functionExecutionStatus.status	Executed-Success')" "1"
+    chk es9r-init-txn     "$(printf '%s\n' "$out" | grep -c '^field	transactionId	0123456789ABCDEF')" "1"
+    chk es9r-init-fields  "$(printf '%s\n' "$out" | grep -c '^field	\(serverSigned1\|serverSignature1\|euiccCiPKIdToBeUsed\|serverCertificate\)	base64, 2 octets, begins 3000')" "4"
+    chk es9r-init-match   "$(printf '%s\n' "$out" | grep -c '^match	transactionId	echoed 0123456789ABCDEF')" "1"
+    chk es9r-init-status  "$(printf '%s\n' "$out" | grep -c '^status	parsed')" "1"
+    # authenticateClient: profileMetadata is the StoreMetadataRequest (BF25).
+    out=$(sim_cmd_es9_response authenticateClient \
+        '{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"transactionId":"01","profileMetadata":"vyUA","smdpSigned2":"MAA=","smdpSignature2":"MAA=","smdpCertificate":"MAA="}'); rc=$?
+    chk es9r-authc-rc     "$rc" "0"
+    chk es9r-authc-root   "$(printf '%s\n' "$out" | grep -c '^field	profileMetadata.root	BF25 StoreMetadataRequest')" "1"
+    # getBoundProfilePackage: the base64 decodes to a BF36 BoundProfilePackage.
+    out=$(sim_cmd_es9_response getBoundProfilePackage \
+        '{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"transactionId":"01","boundProfilePackage":"vzYFoAOHAao="}'); rc=$?
+    chk es9r-bpp-rc       "$rc" "0"
+    chk es9r-bpp-root     "$(printf '%s\n' "$out" | grep -c '^field	boundProfilePackage.root	BF36 BoundProfilePackage')" "1"
+    chk es9r-bpp-walk     "$(printf '%s\n' "$out" | grep -c '^next	--es8-parse <hex of boundProfilePackage>')" "1"
+    chk es9r-bpp-missing  "$(sim_cmd_es9_response getBoundProfilePackage '{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"transactionId":"01"}' >/dev/null 2>&1; echo $?)" "3"
+    chk es9r-bpp-miss-lim "$(sim_cmd_es9_response getBoundProfilePackage '{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"transactionId":"01"}' 2>/dev/null | grep -c 'required field boundProfilePackage missing')" "1"
+    # cancelSession: 6.5.2.10 defines no response body, so only the header is checkable.
+    out=$(sim_cmd_es9_response cancelSession '{"header":{"functionExecutionStatus":{"status":"Executed-Success"}}}'); rc=$?
+    chk es9r-cancel-rc    "$rc" "0"
+    chk es9r-cancel-note  "$(printf '%s\n' "$out" | grep -c 'has no JSON body part of the response')" "1"
+    # The status object of 6.5.1.4 when the function failed.
+    out=$(sim_cmd_es9_response getBoundProfilePackage '{"header":{"functionExecutionStatus":{"status":"Failed","statusCodeData":{"subjectCode":"8.1.1","reasonCode":"3.9","subjectIdentifier":"iccid","message":"no such profile"}}},"transactionId":"AB"}'); rc=$?
+    chk es9r-failed-rc    "$rc" "3"
+    chk es9r-failed-sub   "$(printf '%s\n' "$out" | grep -c '^header	functionExecutionStatus.statusCodeData.subjectCode	8.1.1')" "1"
+    chk es9r-failed-why   "$(printf '%s\n' "$out" | grep -c '^header	functionExecutionStatus.statusCodeData.reasonCode	3.9')" "1"
+    chk es9r-failed-id    "$(printf '%s\n' "$out" | grep -c '^header	functionExecutionStatus.statusCodeData.subjectIdentifier	iccid')" "1"
+    chk es9r-failed-msg   "$(printf '%s\n' "$out" | grep -c '^header	functionExecutionStatus.statusCodeData.message	no such profile')" "1"
+    chk es9r-failed-note  "$(printf '%s\n' "$out" | grep -c 'the function failed; subjectCode/reasonCode above say where')" "1"
+    # 6.5.1.4 requires both codes whenever statusCodeData is present.
+    chk es9r-scd-short    "$(sim_cmd_es9_response initiateAuthentication '{"header":{"functionExecutionStatus":{"status":"Executed-Success","statusCodeData":{"subjectCode":"1.1"}}},"transactionId":"01","serverSigned1":"MAA=","serverSignature1":"MAA=","euiccCiPKIdToBeUsed":"MAA=","serverCertificate":"MAA="}' >/dev/null 2>&1; echo $?)" "3"
+    # The transactionId echo, and every way a body can fail to be a response.
+    chk es9r-mismatch     "$(sim_cmd_es9_response cancelSession '{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"transactionId":"CD"}' --transaction-id AB >/dev/null 2>&1; echo $?)" "1"
+    chk es9r-mismatch-err "$(sim_cmd_es9_response cancelSession '{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"transactionId":"CD"}' --transaction-id AB 2>&1 >/dev/null | grep -c '^ERROR	transactionId mismatch')" "1"
+    chk es9r-badpat-txn   "$(sim_cmd_es9_response cancelSession '{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"transactionId":"xyz"}' >/dev/null 2>&1; echo $?)" "3"
+    chk es9r-no-header    "$(sim_cmd_es9_response initiateAuthentication '{"transactionId":"01"}' >/dev/null 2>&1; echo $?)" "1"
+    chk es9r-no-fes       "$(sim_cmd_es9_response initiateAuthentication '{"header":{}}' >/dev/null 2>&1; echo $?)" "1"
+    chk es9r-no-status    "$(sim_cmd_es9_response initiateAuthentication '{"header":{"functionExecutionStatus":{}}}' >/dev/null 2>&1; echo $?)" "1"
+    chk es9r-not-json     "$(sim_cmd_es9_response initiateAuthentication nope >/dev/null 2>&1; echo $?)" "1"
+    chk es9r-bad-op       "$(sim_cmd_es9_response nope '{}' >/dev/null 2>&1; echo $?)" "2"
+    chk es9r-no-args      "$(sim_cmd_es9_response >/dev/null 2>&1; echo $?)" "2"
+    chk es9r-bad-b64      "$(sim_cmd_es9_response initiateAuthentication '{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"serverSigned1":"!!!"}' >/dev/null 2>&1; echo $?)" "1"
+    chk es9r-unknown-key  "$(sim_cmd_es9_response cancelSession '{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"sneaky":"x"}' 2>/dev/null | grep -c 'not in the 6.5.2.10 schema')" "1"
+
+    # HandleNotification (6.5.2.9): the one ES9+ call --es9-plus still refuses.
+    local notif_b64; notif_b64=$(printf 'BF3706BF2703800101' | xxd -r -p | base64 -w0)
+    out=$(sim_cmd_es9_notification "{\"pendingNotification\":\"$notif_b64\"}"); rc=$?
+    chk es9n-rc           "$rc" "0"
+    chk es9n-op           "$(printf '%s\n' "$out" | grep -c '^op	ES9+.HandleNotification')" "1"
+    chk es9n-field        "$(printf '%s\n' "$out" | grep -c '^field	pendingNotification	base64 -> 9 octets')" "1"
+    chk es9n-root         "$(printf '%s\n' "$out" | grep -c '^root	BF37	ProfileInstallationResult')" "1"
+    chk es9n-tlv          "$(printf '%s\n' "$out" | grep -c '^tlv	1	BF37	BF27	3	800101	profileInstallationResultData')" "1"
+    chk es9n-expects      "$(printf '%s\n' "$out" | grep -c '204 No Content with an empty body')" "1"
+    # OtherSignedNotification is the untagged SEQUENCE alternative of 5.7.10.
+    chk es9n-seq-root     "$(sim_cmd_es9_notification '{"pendingNotification":"MAMCAQE="}' 2>/dev/null | grep -c '^root	30	SEQUENCE')" "1"
+    chk es9n-no-key       "$(sim_cmd_es9_notification '{"header":{}}' >/dev/null 2>&1; echo $?)" "1"
+    chk es9n-not-json     "$(sim_cmd_es9_notification nope >/dev/null 2>&1; echo $?)" "1"
+    chk es9n-bad-b64      "$(sim_cmd_es9_notification '{"pendingNotification":"!!"}' >/dev/null 2>&1; echo $?)" "1"
+    chk es9n-no-args      "$(sim_cmd_es9_notification >/dev/null 2>&1; echo $?)" "2"
+
+    # The four verbs are where --help lists every verb, and the ES9+ builder
+    # keeps its own line and its own refusals.
+    out=$(sim_cli_main --__no_such_verb__ 2>&1) || true
+    chk usage-es8-build   "$(printf '%s\n' "$out" | grep -c '^  --es8-build <segment>')" "1"
+    chk usage-es8-parse   "$(printf '%s\n' "$out" | grep -c '^  --es8-parse <hex>')" "1"
+    chk usage-es9-resp    "$(printf '%s\n' "$out" | grep -c '^  --es9-response <op> <json>')" "1"
+    chk usage-es9-notif   "$(printf '%s\n' "$out" | grep -c '^  --es9-notification <json>')" "1"
+    chk usage-es9-plus    "$(printf '%s\n' "$out" | grep -c '^  --es9-plus <op> --smds')" "1"
+    chk es9-plus-hnotif   "$(sim_cmd_es9_plus handleNotification --smds h >/dev/null 2>&1; echo $?)" "2"
+
+    printf 'ASSERTIONS\t%d\n' "$n_checks"
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -3368,6 +4629,10 @@ sim_menu() {
   [j]  DPA model: noise / trace-count / model-mismatch sweeps
   [k]  SIM auth vector: COMP128-1/2/3, Milenage or TUAK
   [l]  SGP.22 ES9+ request builder (nothing is sent)
+  [m]  SGP.22 ES8+ TLV builder (BPP segments)
+  [n]  walk a Bound Profile Package TLV by TLV
+  [o]  parse an ES9+ response body
+  [p]  parse an ES9+ HandleNotification (6.5.2.9)
   [0]  back
 
 M
@@ -3446,6 +4711,19 @@ M
                sim_cmd_es9_plus initiateAuthentication --smds "$p" \
                    --euicc-challenge "$q" --euicc-info1 "$r" | column -t -s$'\t'
                read -rp "  press enter " _ ;;
+            m) read -rp "  segment [bpp-header|configure-isdp|store-metadata|replace-session-keys|bpp]> " p
+               sim_cmd_es8_build "$p" | column -t -s$'\t' 2>/dev/null || sim_cmd_es8_build "$p"
+               read -rp "  press enter " _ ;;
+            n) read -rp "  BPP hex> " p
+               sim_cmd_es8_parse "$p" | column -t -s$'\t' 2>/dev/null || sim_cmd_es8_parse "$p"
+               read -rp "  press enter " _ ;;
+            o) read -rp "  op [initiateAuthentication|authenticateClient|getBoundProfilePackage|cancelSession]> " p
+               read -rp "  response JSON> " q
+               sim_cmd_es9_response "$p" "$q" | column -t -s$'\t' 2>/dev/null || sim_cmd_es9_response "$p" "$q"
+               read -rp "  press enter " _ ;;
+            p) read -rp "  HandleNotification JSON> " p
+               sim_cmd_es9_notification "$p" | column -t -s$'\t' 2>/dev/null || sim_cmd_es9_notification "$p"
+               read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -3479,6 +4757,10 @@ sim_cli_main() {
         --sim-auth)       sim_cmd_sim_auth "$@" ;;
         --sim-auth-check) sim_cmd_sim_auth_check ;;
         --es9-plus)       sim_cmd_es9_plus "$@" ;;
+        --es8-build)      sim_cmd_es8_build "$@" ;;
+        --es8-parse)      sim_cmd_es8_parse "${1:-}" ;;
+        --es9-response)   sim_cmd_es9_response "$@" ;;
+        --es9-notification) sim_cmd_es9_notification "${1:-}" ;;
         --selftest)       sim_selftest ;;
         --menu)           sim_menu ;;
         *)
@@ -3509,6 +4791,12 @@ Usage: $0 COMMAND
   --sim-auth-check                  published known-answer vectors through --sim-auth
   --es9-plus <op> --smds <host[:port]> [flags]
                                     SGP.22 ES9+ HTTP/JSON request builder; nothing is sent
+  --es8-build <segment> [flags]     SGP.22 ES8+ TLV builder (5.5.1..5.5.5): bpp-header,
+                                    initialise-secure-channel, configure-isdp, store-metadata,
+                                    replace-session-keys, sequence-87|88|86, bpp
+  --es8-parse <hex>                 walk a Bound Profile Package TLV by TLV: depth, tag, len, clause
+  --es9-response <op> <json>        parse an ES9+ response body (6.5.1.4 header + 6.5.2.x fields)
+  --es9-notification <json>         parse ES9+.HandleNotification (6.5.2.9) and the ASN.1 it carries
   --plan <ota-replay|sat-wib|esim-download|apdu-live|dpa-lab>
                                     write a handoff plan naming the hardware
   --selftest                        verify encoders/decoders without a reader
