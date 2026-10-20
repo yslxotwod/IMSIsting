@@ -65,7 +65,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 ### 3G / UMTS
 | Module | Description |
 |---|---|
-| `08_umts_air` | UTRAN decode, SIB fields, AKA walk, COUNT/MAC-I integrity arithmetic |
+| `08_umts_air` | UTRAN decode and SIB fields, forged RRC setup/reject/paging, the TS 25.212 BCH chain, a WCDMA downlink carrier, and the COUNT/MAC-I AKA walk |
 
 ### 4G / LTE
 | Module | Description |
@@ -521,13 +521,15 @@ its `--help`, not in its name.
 
 Two holes are worth naming precisely, because their size is easy to overstate:
 
-- **3G over the air.** `08_umts_air` decodes UTRAN, reads SIB fields, walks the
-  AKA exchange and does the COUNT/MAC-I integrity arithmetic — and it has no
-  builder, no forgery and no transmitter. There is no 3G IMSI catcher and no
-  forged UTRAN message anywhere in the tree. The 3G attacks that *are* here are
-  offline and SIM-side: Milenage and TUAK vectors (`16_sim --sim-auth`), SQN
-  recovery from an AUTS (`19_cipher_audit --sqn-recover`), and the F8/F9 ciphers
-  in `07_gsm_attack`. Nothing in the tree puts a 3G carrier on the air.
+- **3G camping, not 3G capture.** `08_umts_air` now forges the downlink
+  (`--build-rrc-setup`, `--build-rrc-reject`, `--build-paging`, each read back by
+  an independent dissector), carries a real MIB through the whole TS 25.212 chain
+  onto the P-CCPCH (`--transmit --bch-hex`), and builds a WCDMA carrier with
+  CPICH and both sync channels. What it does not do is make a handset *camp and
+  then surrender its identity*: the SIB transport is empty, the MM identity
+  request is not in the tree, and a handset that already holds an AKA context
+  will not answer an unauthenticated network. `--catcher-model` names all eight
+  steps and which of them exist rather than implying the chain is complete.
 - **The CVE catalogues.** `20_gsm_cve`, `21_lte_cve` and `22_nr_cve` catalogue
   vulnerabilities and check reachability against a stack state. None of the three
   contains an exploit primitive, and none claims to.

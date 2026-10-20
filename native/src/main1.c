@@ -16526,9 +16526,133 @@ uair_build_integrity(AppState *state, const char *module_id,
     return outer;
 }
 
+/* 3. The forged downlink messages, and reading one back. */
+static GtkWidget *
+uair_build_messages(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("UTRAN MESSAGES",
+        "The downlink messages a network writes and a handset acts on, as PER "
+        "octets. Nothing leaves this machine from this view.", &body);
+    GtkWidget *card_body;
+    GtkWidget *card;
+
+    card = verb_card("CONNECTION SETUP", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the Setup",
+                "--build-rrc-setup", "",
+                "DL-CCCH rrcConnectionSetup: a TMSI, a LAI, a new U-RNTI and four "
+                "signalling radio bearers. An independent dissector reads every "
+                "field back, which is what tools/check-umts-rrc.sh proves."));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("REJECT AND PAGE", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_choices(state, module_id, status, "Message",
+                "Message", "A rejection with its cause and wait time, or a paging "
+                "record for one subscriber.",
+                (const char *[]) { "--build-rrc-reject", "--build-paging" },
+                (const char *[]) { "Reject", "Page" }, 2));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("READ ONE BACK", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Parse",
+                "--parse-rrc", "dl-ccch:10448d159e000402000220",
+                "A channel and the octets. The channel decides which top-level "
+                "SEQUENCE the bits are read as, and a message with a present "
+                "integrity check is read in a different order."));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
+/* 4. The transmit half: a carrier, the BCH that makes it a cell, and the chain
+      a catcher would have to complete. */
+static GtkWidget *
+uair_build_downlink(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DOWNLINK",
+        "A WCDMA carrier built as samples, and the chain a 3G catcher would have "
+        "to complete. No radio is keyed unless one answers.", &body);
+    GtkWidget *card_body;
+    GtkWidget *card;
+
+    card = verb_card("BUILD A CARRIER", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build",
+                "--transmit", "2140",
+                "The carrier in MHz, in a licensed band. Without a BCH the result "
+                "says plainly that a handset can synchronise to the carrier and "
+                "cannot read a cell from it."));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("CARRY A MIB", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build with the BCH",
+                "--transmit", "2140 --bch-hex 012345",
+                "The same carrier carrying a 24-bit MIB through the whole TS 25.212 "
+                "chain and onto the P-CCPCH. The answer changes from 'no' to "
+                "'partly' when a BCH is carried."));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("THE CATCHER CHAIN", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row(state, module_id, status, "Read the Chain",
+                "--catcher-model", "",
+                "Eight steps, each with the clause it comes from and whether this "
+                "tree can perform it. The gaps are named, not hidden."));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry uair_entries[] = {
     { "Decode", "dialog-information-symbolic", NULL, uair_build_decode },
     { "Integrity", "channel-secure-symbolic", NULL, uair_build_integrity },
+    { "Messages", "document-send-symbolic", NULL, uair_build_messages },
+    { "Downlink", "network-transmit-receive-symbolic", NULL, uair_build_downlink },
 };
 /* 09_lte_attach — LTE Attach Forge.
  *
