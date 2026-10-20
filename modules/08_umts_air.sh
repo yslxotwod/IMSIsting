@@ -1745,11 +1745,23 @@ uair_selftest() {
     # The chain model is a reference: it must be complete and it must not be
     # able to claim a step is built when the verb behind it is absent.
     chk catcher-steps   "$(uair_cli_main --catcher-model | grep -c '^[0-9]')" "8"
-    chk catcher-built   "$(uair_cli_main --catcher-model | grep -c 'built:')" "4"
-    chk catcher-gap     "$(uair_cli_main --catcher-model | grep -cE 'absent:|partial:|limit:')" "3"
+    chk catcher-built   "$(uair_cli_main --catcher-model | grep -c 'built:')" "5"
+    chk catcher-gap     "$(uair_cli_main --catcher-model | grep -cE 'absent:|partial:|limit:')" "1"
     chk catcher-parse   "$(uair_cli_main --catcher-model | grep -c 'parse:')" "1"
     chk catcher-rc      "$(uair_cli_main --catcher-model >/dev/null 2>&1; echo $?)" "0"
     chk tx-help-verbs   "$(uair_usage | grep -cE '^  --(transmit|catcher-model)( |$)')" "2"
+
+    # The two messages the catcher chain was missing. The MM octets are the
+    # known answer; the RRC wrapper is only asserted to state its own limit.
+    chk id-imsi         "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="mm_hex"{print $2}')" "05001801"
+    chk id-imei         "$(uair_cli_main --catcher-identity --identity imei | awk -F'\t' '$1=="mm_hex"{print $2}')" "05001802"
+    chk id-imsi-bare    "$(uair_cli_main --catcher-identity --bare | awk -F'\t' '$1=="mm_hex"{print $2}')" "05001801"
+    chk id-type-index   "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="type_index"{print $2}')" "5"
+    chk id-no-referee   "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="verified"{print $2}' | grep -c '^no external referee')" "1"
+    chk id-txid-bad     "$(uair_cli_main --catcher-identity --txid 9 >/dev/null 2>&1; echo $?)" "2"
+    chk auth-replay     "$(uair_cli_main --catcher-auth --rand 00112233445566778899aabbccddeeff --autn ffeeddccbbaa99887766554433221100 | awk -F'\t' '$1=="mm_hex"{print $2}')" "050012211000112233445566778899aabbccddeeff2010ffeeddccbbaa99887766554433221100"
+    chk auth-needs-both "$(uair_cli_main --catcher-auth --rand 0011 >/dev/null 2>&1; echo $?)" "2"
+    chk auth-not-a-break "$(uair_cli_main --catcher-auth --rand 00112233445566778899aabbccddeeff --autn ffeeddccbbaa99887766554433221100 | grep -c 'not.*an AKA break')" "1"
 
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -1781,6 +1793,8 @@ uair_menu() {
   [13] parse a received RRC message
   [14] build the downlink carrier (CPICH + SCH, and the BCH if given)
   [15] the IMSI-catcher chain: what is built, what is absent
+  [16] build the MM identification request (the message that yields the IMSI)
+  [17] build the authentication replay (a captured RAND and AUTN)
   [0]  back
 
 M
@@ -1843,6 +1857,13 @@ M
                 read -rp "  press enter " _ ;;
             15) umtsa_cmd_catcher_model | column -t -s$'\t' 2>/dev/null
                 read -rp "  press enter " _ ;;
+            16) umtsa_cmd_identity_request | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            17)
+                read -rp "  RAND (32 hex)> " r
+                read -rp "  AUTN (32 hex)> " a
+                umtsa_cmd_auth_replay --rand "$r" --autn "$a" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1871,6 +1892,8 @@ uair_cli_main() {
         --parse-rrc)        uair_parse_rrc        "${1:-}" ;;
         --transmit)         umtsa_cmd_transmit "$@" ;;
         --catcher-model)    umtsa_cmd_catcher_model ;;
+        --catcher-identity) umtsa_cmd_identity_request "$@" ;;
+        --catcher-auth)     umtsa_cmd_auth_replay "$@" ;;
         --selftest)       uair_selftest ;;
         --help)           uair_usage; return 0 ;;
         --menu)           uair_menu ;;
@@ -1911,6 +1934,12 @@ Transmit half (a carrier and the BCH that makes it a cell)
                                 answers, otherwise prints the call and hands off
   --catcher-model               the 3G IMSI-catcher chain, step by step, with
                                 what is built and what is absent
+  --catcher-identity [--identity imsi|imei|imeisv|tmsi] [--txid 0..3]
+             [--domain cs|ps] [--bare]
+                                the MM IDENTITY REQUEST and its RRC wrapper
+  --catcher-auth --rand <32 hex> --autn <32 hex>
+                                the MM AUTHENTICATION REQUEST that replays a
+                                captured RAND and AUTN (no key is computed)
 
   --selftest                    verify arithmetic, assemblers and forged RRC octets
   --help                        this usage block

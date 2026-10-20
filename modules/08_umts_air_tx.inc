@@ -177,8 +177,8 @@ umtsa_cmd_catcher_model() {
     printf '3\tthe handset reads SIB1/SIB3/SIB5 for PLMN, cell identity, location area and reselection\tTS 25.331 8.1.1\tpartial: --decode-sib reads them and --transmit carries a BCH, but no verb packs a SIB onto that transport; the MIB says where the SIBs would be and nothing fills them\n'
     printf '4\tthe handset sends RRC CONNECTION REQUEST naming its initial UE identity (TMSI or IMSI)\tTS 25.331 8.1.3\tparse: --parse-rrc classifies it\n'
     printf '5\tthe network answers RRC CONNECTION SETUP\tTS 25.331 8.1.3\tbuilt: --build-rrc-setup\n'
-    printf '6\tthe CN sends a NAS IDENTITY REQUEST (MM), which asks for the IMSI in the clear\tTS 24.008 8.2.5\tabsent: the MM identity-request encoder is not in this module; 09_lte_attach carries EPS EMM, which is a different message set and cannot be substituted\n'
-    printf '7\tthe handset answers with its IMSI because no authentication has happened yet\tTS 24.008 9.4.12\tlimit: a handset that completed AKA on the real network will not accept an unauthenticated network, and this tree cannot compute a valid AUTN without the subscriber key\n'
+    printf '6\tthe CN sends a NAS IDENTITY REQUEST (MM), which asks for the IMSI in the clear\tTS 24.008 9.2.5, TS 25.331 10.2\tbuilt: --catcher-identity writes the four MM octets and wraps them in a DL DIRECT TRANSFER (the MM part is byte-exact; the RRC wrapper is derived from the ASN.1 and has no referee on this machine, which the verb says in its own output)\n'
+    printf '7\tthe handset is authenticated by the network before it will answer anything else\tTS 33.102 6.3\tbuilt as a replay only: --catcher-auth re-sends a RAND and AUTN seen once on the real network, which is what a catcher actually does; computing a fresh AUTN needs K, which no passive capture yields\n'
     printf '8\tthe network releases the connection so the handset returns to idle and repeats\tTS 25.331 8.1.4\tbuilt: --build-rrc-reject carries the wait time\n'
     printf 'verdict\tsteps 1 and 4-8 exist in this tree as samples and octets; steps 2-3 are the transport gap, and step 7 is why a catcher built from only these pieces does not work against a handset with a cached AKA context\n'
     return 0
@@ -186,3 +186,48 @@ umtsa_cmd_catcher_model() {
 
 # Strip tabs and newlines: every argument this file echoes goes through here.
 umtsa_sanitize() { printf '%s' "${1:-}" | tr '\t\r\n' '   '; }
+
+# The identity request and the authentication replay. Both are pure message
+# construction: they write octets and nothing leaves the machine. The identity
+# request is the message a catcher exists to send; the auth replay is how it
+# gets past a handset that will not answer an unauthenticated network.
+umtsa_catcher_tool() { printf '%s/tools/umts_catcher.py' "$IMSISTING_ROOT"; }
+
+umtsa_cmd_identity_request() {
+    local identity="imsi" txid="0" domain="cs" bare=""
+    while (( $# )); do
+        case "$1" in
+            --identity) identity="${2:-}"; shift 2 ;;
+            --txid)     txid="${2:-}"; shift 2 ;;
+            --domain)   domain="${2:-}"; shift 2 ;;
+            --bare)     bare="--bare"; shift ;;
+            *) printf 'ERROR\t--catcher-identity does not take %s\n' "$(umtsa_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is needed to build the message\n' >&2; return 1; }
+    timeout 60 python3 "$(umtsa_catcher_tool)" identity \
+        --identity "$identity" --txid "$txid" --domain "$domain" $bare || return $?
+}
+
+umtsa_cmd_auth_replay() {
+    local rand="" autn=""
+    # Two bare hex values are RAND then AUTN: a form row asks for the pair, and
+    # a form row should not have to spell a flag to give it.
+    if (( $# >= 2 )) && [[ "${1:-}" =~ ^[0-9a-fA-F]{32}$ ]] && [[ "${2:-}" =~ ^[0-9a-fA-F]{32}$ ]]; then
+        rand="$1"; autn="$2"; shift 2
+    fi
+    while (( $# )); do
+        case "$1" in
+            --rand) rand="${2:-}"; shift 2 ;;
+            --autn) autn="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--catcher-auth does not take %s\n' "$(umtsa_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    if [[ -z "$rand" || -z "$autn" ]]; then
+        printf 'ERROR\t--catcher-auth needs --rand <32 hex> and --autn <32 hex>\n' >&2
+        printf 'WHY\tthey are the two values a real AUTHENTICATION REQUEST carried; without both there is nothing to replay, and this tool holds no key to make new ones\n' >&2
+        return 2
+    fi
+    timeout 60 python3 "$(umtsa_catcher_tool)" auth --rand "$rand" --autn "$autn" || return $?
+}

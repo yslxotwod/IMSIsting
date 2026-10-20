@@ -16630,6 +16630,24 @@ uair_build_downlink(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), card);
 
+    card = verb_card("IDENTIFICATION", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_choices(state, module_id, status, "Ask for",
+                "Identity type", "The MM IDENTITY REQUEST a catcher sends once the "
+                "connection is up. The message is four octets and asks the handset "
+                "to state its identity in the clear.",
+                (const char *[]) { "--catcher-identity",
+                                   "--catcher-identity --identity imei",
+                                   "--catcher-identity --identity tmsi" },
+                (const char *[]) { "IMSI", "IMEI", "TMSI" }, 3));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
     card = verb_card("THE CATCHER CHAIN", &card_body);
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -16639,6 +16657,23 @@ uair_build_downlink(AppState *state, const char *module_id,
                 "--catcher-model", "",
                 "Eight steps, each with the clause it comes from and whether this "
                 "tree can perform it. The gaps are named, not hidden."));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("AUTHENTICATION REPLAY", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Replay",
+                "--catcher-auth",
+                "00112233445566778899aabbccddeeff ffeeddccbbaa99887766554433221100",
+                "The RAND first, then the AUTN, both 32 hex digits. A catcher does "
+                "not break AKA: it re-sends an AUTHENTICATION REQUEST the real "
+                "network sent once and takes the RES that follows. This holds no "
+                "key and computes no MAC."));
         gtk_box_append(GTK_BOX(card_body), res);
         mod_card_end();
     }
@@ -22149,12 +22184,21 @@ mod_arg_clicked(GtkButton *button, gpointer user_data)
     g_autofree char *typed = g_strdup(
         entry != NULL ? gtk_editable_get_text(GTK_EDITABLE(entry)) : "");
     g_auto(GStrv) parts = g_strsplit(typed, " ", -1);
+    /* Owned for the whole call: argv points into this array, and freeing it at
+       the end of the block below left argv holding freed strings -- the button
+       then ran the module with a garbage verb. */
+    g_auto(GStrv) vparts = NULL;
     g_autofree char *script = module_script_path(module_id);
     g_autoptr(GPtrArray) argv = g_ptr_array_new();
 
     (void) user_data;
     g_ptr_array_add(argv, script);
-    g_ptr_array_add(argv, (gpointer) verb);
+    /* The verb is usually one token, but a control that carries fixed arguments
+       as well ("--catcher-auth --rand … --autn …") needs them split, so the
+       operator never has to type a flag to use a button. */
+    vparts = g_strsplit(verb != NULL ? verb : "", " ", -1);
+    for (int i = 0; vparts[i] != NULL; i++)
+        if (vparts[i][0] != '\0') g_ptr_array_add(argv, vparts[i]);
     for (int i = 0; parts[i] != NULL; i++)
         if (parts[i][0] != '\0') g_ptr_array_add(argv, parts[i]);
     g_ptr_array_add(argv, NULL);
@@ -22215,7 +22259,7 @@ mod_arg_row(AppState *state, const char *module_id, GtkWidget *status,
     g_object_set_data(G_OBJECT(button), "state", state);
     g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
     g_object_set_data(G_OBJECT(button), "status", status);
-    g_object_set_data(G_OBJECT(button), "verb", (gpointer) verb);
+    g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
     g_object_set_data(G_OBJECT(button), "action-label", (gpointer) button_label);
     g_object_set_data(G_OBJECT(button), "arg-entry", entry);
     if (mod_card_result != NULL)
@@ -22257,7 +22301,7 @@ mod_arg_row_prefilled(AppState *state, const char *module_id, GtkWidget *status,
     g_object_set_data(G_OBJECT(button), "state", state);
     g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
     g_object_set_data(G_OBJECT(button), "status", status);
-    g_object_set_data(G_OBJECT(button), "verb", (gpointer) verb);
+    g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
     g_object_set_data(G_OBJECT(button), "action-label", (gpointer) button_label);
     g_object_set_data(G_OBJECT(button), "arg-entry", entry);
     if (mod_card_result != NULL)
@@ -22313,8 +22357,8 @@ mod_arg_choices(AppState *state, const char *module_id, GtkWidget *status,
         g_object_set_data(G_OBJECT(button), "state", state);
         g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
         g_object_set_data(G_OBJECT(button), "status", status);
-        g_object_set_data(G_OBJECT(button), "verb", (gpointer) verbs[i]);
-        g_object_set_data(G_OBJECT(button), "action-label", (gpointer) labels[i]);
+        g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verbs[i]), g_free);
+        g_object_set_data_full(G_OBJECT(button), "action-label", g_strdup(labels[i]), g_free);
         g_object_set_data(G_OBJECT(button), "arg-entry", entry);
         if (mod_card_result != NULL)
             g_object_set_data(G_OBJECT(button), "result", mod_card_result);
