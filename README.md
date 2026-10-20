@@ -513,13 +513,24 @@ their own selftests:
 The code is written and reviewed. **"Written" and "works" are not the same
 claim,** and this section exists so nobody has to guess which one applies.
 
-That distinction runs the other way too, and it is the one the [Modules](#modules)
-section now answers per module: **a verb existing is not the same claim as the
-attack being implemented.** A module that prints a plan file naming an SDR looks
-exactly like one that prints protocol octets, unless you read what it emits. The
-`Attack` column says which, and the two genuine holes in the tree are named
-there — `08_umts_air` has no offensive side at all, and `20_gsm_cve`,
-`21_lte_cve` and `22_nr_cve` contain no exploit primitive.
+That distinction runs the other way too: **a verb existing is not the same claim
+as the attack being implemented.** A module that prints a plan file naming an SDR
+looks exactly like one that prints protocol octets, unless you read what it
+emits. What each module actually implements is in its own `--status-tsv` and in
+its `--help`, not in its name.
+
+Two holes are worth naming precisely, because their size is easy to overstate:
+
+- **3G over the air.** `08_umts_air` decodes UTRAN, reads SIB fields, walks the
+  AKA exchange and does the COUNT/MAC-I integrity arithmetic — and it has no
+  builder, no forgery and no transmitter. There is no 3G IMSI catcher and no
+  forged UTRAN message anywhere in the tree. The 3G attacks that *are* here are
+  offline and SIM-side: Milenage and TUAK vectors (`16_sim --sim-auth`), SQN
+  recovery from an AUTS (`19_cipher_audit --sqn-recover`), and the F8/F9 ciphers
+  in `07_gsm_attack`. Nothing in the tree puts a 3G carrier on the air.
+- **The CVE catalogues.** `20_gsm_cve`, `21_lte_cve` and `22_nr_cve` catalogue
+  vulnerabilities and check reachability against a stack state. None of the three
+  contains an exploit primitive, and none claims to.
 
 ---
 
