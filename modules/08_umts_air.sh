@@ -1756,8 +1756,12 @@ uair_selftest() {
     chk id-imsi         "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="mm_hex"{print $2}')" "05001801"
     chk id-imei         "$(uair_cli_main --catcher-identity --identity imei | awk -F'\t' '$1=="mm_hex"{print $2}')" "05001802"
     chk id-imsi-bare    "$(uair_cli_main --catcher-identity --bare | awk -F'\t' '$1=="mm_hex"{print $2}')" "05001801"
-    chk id-type-index   "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="type_index"{print $2}')" "5"
-    chk id-no-referee   "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="verified"{print $2}' | grep -c '^no external referee')" "1"
+    # The RRC wrapper is withheld, deliberately: the pycrate transcription of
+    # TS 25.331 refuses the bit layout this tool builds ("bitlen overflow") and
+    # encodes the same message as 1400060a003002, so the module reports the MM
+    # message and the reason instead of a wrapper the ASN.1 rejects.
+    chk id-wrapper-withheld "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="rrc_hex"{print $2}')" "not emitted"
+    chk id-names-referee    "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="limit"{print $2}' | grep -c '1400060a003002')" "1"
     chk id-txid-bad     "$(uair_cli_main --catcher-identity --txid 9 >/dev/null 2>&1; echo $?)" "2"
     chk auth-replay     "$(uair_cli_main --catcher-auth --rand 00112233445566778899aabbccddeeff --autn ffeeddccbbaa99887766554433221100 | awk -F'\t' '$1=="mm_hex"{print $2}')" "050012211000112233445566778899aabbccddeeff2010ffeeddccbbaa99887766554433221100"
     chk auth-needs-both "$(uair_cli_main --catcher-auth --rand 0011 >/dev/null 2>&1; echo $?)" "2"

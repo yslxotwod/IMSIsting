@@ -172,22 +172,37 @@ def main(argv):
             rrc, nbits, pad = rrc_direct_transfer(mm, args.txid, args.domain)
         except ValueError as exc:
             return err(str(exc), "the fields are range-checked against the ASN.1 rather than clamped")
-        emit([("rrc_hex", rrc.hex()),
-              ("rrc_bytes", len(rrc)),
-              ("rrc_bits", nbits),
-              ("rrc_pad_bits", pad),
-              ("channel", "dl-dcch"),
-              ("type_index", DL_DCCH_INDEX_DOWNLINK_DIRECT_TRANSFER),
-              ("type_name", "downlinkDirectTransfer"),
-              ("integrity_check_info", "absent"),
-              ("rrc_transaction_identifier", args.txid),
-              ("cn_domain_identity", args.domain + "-domain"),
-              ("verified", "no external referee: tshark 4.2.2 decodes GSMTAP RRC "
-               "DL-DCCH as far as the transaction identifier and stops, and there "
-               "is no pycrate 3G module on this machine, so the wrapper is "
-               "derived field by field from the ASN.1 and is not claimed as "
-               "byte-verified"),
-              ("ref", "TS 25.331 10.2 DL-DCCH-Message, DownlinkDirectTransfer-r3-IEs")])
+        # The wrapper is checked against a reference produced by pycrate's
+        # transcription of TS 25.331 (tools/umts_rrc_oracle.py, which decodes
+        # this very message). It does not match today, so it is not emitted:
+        # the MM message below is exact, and a wrapper that the ASN.1 refuses is
+        # not something to put on the air or in a report.
+        ref_hex = ("1400060a003002" if (args.txid == 0 and args.domain == "cs"
+                                        and mm.hex() == "05001801") else None)
+        wrapper_ok = ref_hex is not None and rrc.hex() == ref_hex
+        if wrapper_ok:
+            emit([("rrc_hex", rrc.hex()),
+                  ("rrc_bytes", len(rrc)),
+                  ("rrc_bits", nbits),
+                  ("rrc_pad_bits", pad),
+                  ("channel", "dl-dcch"),
+                  ("type_index", DL_DCCH_INDEX_DOWNLINK_DIRECT_TRANSFER),
+                  ("type_name", "downlinkDirectTransfer"),
+                  ("integrity_check_info", "absent"),
+                  ("rrc_transaction_identifier", args.txid),
+                  ("cn_domain_identity", args.domain + "-domain"),
+                  ("verified", "matches the pycrate transcription of TS 25.331 "
+                   "(tools/umts_rrc_oracle.py) bit for bit"),
+                  ("ref", "TS 25.331 10.2 DL-DCCH-Message, DownlinkDirectTransfer-r3-IEs")])
+        else:
+            emit([("rrc_hex", "not emitted"),
+                  ("limit", "the RRC wrapper this tool builds does not match the "
+                   "ASN.1: pycrate encodes a 4-octet NAS direct transfer as "
+                   "%s (55 bits) and refuses this build outright "
+                   "(\"bitlen overflow\"). The MM message above is exact; the "
+                   "wrapper needs its bit layout rebuilt before it is emitted."
+                   % (ref_hex or "<no reference for this argument set>")),
+                  ("ref", "tools/umts_rrc_oracle.py; TS 25.331 10.2")])
         return 0
 
     if args.cmd == "auth":

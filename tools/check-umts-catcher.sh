@@ -55,10 +55,14 @@ chk resp_wrongtype "$(python3 "$TOOL" auth-response 05001200 >/dev/null 2>&1; ec
 # The RRC wrapper has no referee on this machine and the tool says so in its own
 # output. The check asserts the statement is present, not that the bytes are
 # verified: claiming the second without a decoder would be the lie.
-chk wrapper_states_its_limit "$(fld verified identity | grep -c '^no external referee')" "1"
-chk wrapper_channel "$(fld channel identity)" "dl-dcch"
-chk wrapper_index   "$(fld type_index identity)" "5"
-chk wrapper_txid    "$(fld rrc_transaction_identifier identity)" "0"
+# The wrapper used to be claimed as "derived from the ASN.1, no referee". The
+# pycrate transcription (tools/umts_rrc_oracle.py) now serves as the referee and
+# disagrees, so the tool withholds it. These checks pin the withdrawal: a
+# wrapper that the ASN.1 refuses must not be emitted as if it were a message.
+chk wrapper_withheld "$(fld rrc_hex identity)" "not emitted"
+chk wrapper_names_the_reference "$(fld limit identity | grep -c '1400060a003002')" "1"
+chk wrapper_names_the_refusal "$(fld limit identity | grep -c 'bitlen overflow')" "1"
+chk wrapper_bare_still_works "$(fld mm_hex identity)" "05001801"
 
 printf '\nCHECKS\t%d\nPASSED\t%d\nFAILED\t%d\n' "$n" "$((n - bad))" "$bad"
 (( bad > 0 )) && { printf 'RESULT\tFAIL(%d)\n' "$bad"; exit 1; }
