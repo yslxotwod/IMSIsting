@@ -116,6 +116,65 @@ def mm_auth_request(rand, autn, cipher=False):
     return body
 
 
+def milenage_autn(args):
+    """AUTN = (SQN xor f5) || AMF || f1, with f1 and f5 from tools/gsm_crypto.py.
+
+    That tool is the tree's Milenage, and it is held against TS 35.208 test set 1
+    by modules/16_sim.sh --sim-auth-check, so this path is a consumer of a checked
+    primitive rather than a second implementation of it. Returns None after
+    printing a refusal when the inputs are wrong or the tool is missing.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tool = os.path.join(root, "tools", "gsm_crypto.py")
+    if not os.path.exists(tool):
+        err("tools/gsm_crypto.py is not in this tree", "the Milenage path lives there")
+        return None
+    if args.op is None and args.opc is None:
+        err("--ki also needs --op or --opc", "the operator variant is part of the key material")
+        return None
+    if args.sqn is None:
+        err("--ki also needs --sqn", "the sequence number is what makes this AUTN fresh")
+        return None
+    try:
+        ki = bytes.fromhex(args.ki)
+        op = bytes.fromhex(args.op) if args.op else None
+        opc = bytes.fromhex(args.opc) if args.opc else None
+        sqn = bytes.fromhex(args.sqn)
+        amf = bytes.fromhex(args.amf)
+        rand = bytes.fromhex(args.rand) if args.rand else os.urandom(16)
+    except ValueError:
+        err("--ki, --op/--opc, --sqn, --amf and --rand take hex", "16, 16, 6, 2 and 16 octets")
+        return None
+    if len(ki) != 16 or len(rand) != 16 or len(sqn) != 6 or len(amf) != 2:
+        err("wrong lengths", "K is 16 octets, RAND 16, SQN 6, AMF 2")
+        return None
+    cmd = [shutil.which("python3") or "python3", tool, "--milenage",
+           "--ki", ki.hex(), "--rand", rand.hex(), "--sqn", sqn.hex(), "--amf", amf.hex()]
+    cmd += ["--op", op.hex()] if op is not None else ["--opc", opc.hex()]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        err("could not run tools/gsm_crypto.py", "the Milenage path needs python3")
+        return None
+    got = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            got[parts[0]] = parts[1].strip()
+    if "f1" not in got or "f5" not in got:
+        err("tools/gsm_crypto.py did not answer with f1 and f5", "it is the only Milenage in this tree")
+        return None
+    f1 = bytes.fromhex(got["f1"])
+    f5 = bytes.fromhex(got["f5"])
+    ak = (int.from_bytes(sqn, "big") ^ int.from_bytes(f5, "big")).to_bytes(6, "big")
+    autn = ak + amf + f1
+    return (rand, autn, got.get("opc", ""), got["f1"], got["f5"], sqn.hex().upper())
+
+
 def parse_auth_response(hexs):
     raw = bytes.fromhex(hexs)
     if len(raw) < 3:
@@ -161,9 +220,17 @@ def main(argv):
     p.add_argument("--bare", action="store_true", help="the MM PDU alone, without the RRC wrapper")
 
     p = sub.add_parser("auth", help="MM AUTHENTICATION REQUEST (replay of RAND and AUTN)")
-    p.add_argument("--rand", required=True)
-    p.add_argument("--autn", required=True)
+    p.add_argument("--rand", default=None)
+    p.add_argument("--autn", default=None)
     p.add_argument("--ksi", default=None, help="ciphering key sequence number 0..7")
+    # The other way to get an AUTN: compute one, which needs the subscriber key.
+    # Legal only for a SIM you own, and it is the difference between replaying
+    # an exchange and being able to start a new one.
+    p.add_argument("--ki", default=None, help="subscriber key K, 16 octets, for a SIM you own")
+    p.add_argument("--op", default=None, help="operator variant OP, 16 octets")
+    p.add_argument("--opc", default=None, help="OPc if you hold it instead of OP")
+    p.add_argument("--sqn", default=None, help="SQN, 6 octets")
+    p.add_argument("--amf", default="B9B9", help="AMF, 2 octets (default B9B9)")
 
     p = sub.add_parser("auth-response", help="read an AUTHENTICATION RESPONSE back")
     p.add_argument("hex")
@@ -203,11 +270,21 @@ def main(argv):
         return 0
 
     if args.cmd == "auth":
-        try:
-            rand = bytes.fromhex(args.rand)
-            autn = bytes.fromhex(args.autn)
-        except ValueError:
-            return err("--rand and --autn take hex", "16 octets each")
+        computed = None
+        if args.ki is not None:
+            computed = milenage_autn(args)
+            if computed is None:
+                return 2
+            rand, autn, opc, f1, f5, sqn = computed
+        elif args.rand is None or args.autn is None:
+            return err("--rand and --autn are both needed, or --ki with --op/--opc and --sqn",
+                       "a replay takes the pair a real network sent; a computed one takes the key")
+        else:
+            try:
+                rand = bytes.fromhex(args.rand)
+                autn = bytes.fromhex(args.autn)
+            except ValueError:
+                return err("--rand and --autn take hex", "16 octets each")
         try:
             pdu = mm_auth_request(rand, autn, cipher=args.ksi is not None)
         except ValueError as exc:
@@ -216,9 +293,20 @@ def main(argv):
               ("mm_bytes", len(pdu)),
               ("rand", rand.hex()),
               ("autn", autn.hex()),
-              ("what_it_is", "a replay: the same RAND and AUTN the real network sent once, addressed at the next handset"),
-              ("what_it_is_not", "an AKA break: this tool holds no K and computes no MAC; a handset that has never seen this RAND and AUTN will reject it"),
-              ("ref", "TS 24.008 9.2.1 AUTHENTICATION REQUEST; TS 33.102 6.3.3")])
+              ("what_it_is", "a replay: the same RAND and AUTN the real network sent once, addressed at the next handset"
+                              if computed is None else
+                              "a fresh AUTHENTICATION REQUEST for a SIM whose K you hold"),
+              ("what_it_is_not", "an AKA break: without a key this tool computes no MAC, and a handset that has never seen this RAND and AUTN will reject it"),
+              ("ref", "TS 24.008 9.2.1 AUTHENTICATION REQUEST; TS 33.102 6.3.3")] +
+             ([] if computed is None else [
+              ("milenage_opc", opc),
+              ("milenage_f1", f1),
+              ("milenage_f5", f5),
+              ("sqn", sqn),
+              ("how_the_autn_was_made", "(SQN xor f5) || AMF || f1, TS 33.102 6.3.3, from the key named on the command line"),
+              ("what_it_is_now", "a fresh AUTN for a SIM whose K you hold: a handset with that SIM accepts it, because the MAC it checks is the MAC that was computed"),
+              ("holds", "your key, for your SIM, and nothing else"),
+              ("ref_key", "TS 35.205/35.206/35.208; the vector this path is checked against is TS 35.208 set 1")]))
         return 0
 
     if args.cmd == "auth-response":

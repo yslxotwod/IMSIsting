@@ -16699,6 +16699,35 @@ uair_build_downlink(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), card);
 
+    /* The wall a catcher hits is the handset's own AKA check. A replay clears it
+       only for a RAND the handset has already seen; a fresh AUTN clears it for a
+       handset holding that SIM, and computing one needs the key -- lawful only
+       for a SIM you own. The primitive is checked against TS 35.208 set 1
+       elsewhere in the tree, so this card spends no new claim: it shows the AUTN
+       that set fixes, from that set's own key and RAND. */
+    card = verb_card("AUTHENTICATION FROM A KEY", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Compute the AUTN",
+                "--catcher-auth",
+                "--ki 465B5CE8B199B49FAA5F0A2EE238A6BC "
+                "--op CDC202D5123E20F62B6D676AC72CB318 "
+                "--sqn FF9BB4D0B607 --amf B9B9 "
+                "--rand 23553CBE9637A89D218AE64DAE47BF35",
+                "The subscriber key, the operator variant, the sequence number and "
+                "the RAND. The AUTN that comes back is the one TS 35.208 test set 1 "
+                "fixes, because the key and the RAND are that set's."));
+        gtk_box_append(GTK_BOX(card_body), fkit_note(
+            "The only card on this page that can start an exchange instead of "
+            "replaying one, and only with a key you already hold. Against a SIM "
+            "you do not own it is identity theft, not research."));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
     (void) out;
     return outer;
 }
