@@ -16630,6 +16630,26 @@ uair_build_downlink(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), card);
 
+    card = verb_card("SYSTEM INFORMATION", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_choices(state, module_id, status, "Message",
+                "A message to build, or the worked vectors", 
+                "The blocks a camper reads before it can ask for anything. Each "
+                "octet is held against pycrate's transcription of TS 25.331 and, "
+                "where a dissector exists, against tshark over GSMTAP.",
+                (const char *[]) { "--sib-vectors",
+                                   "--build-sib sib3 --cell-id 0x1234567 --sib4",
+                                   "--build-sib sib5",
+                                   "--build-sib mib --value-tag 3" },
+                (const char *[]) { "Vectors", "SIB3", "SIB5", "MIB" }, 4));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
     card = verb_card("IDENTIFICATION", &card_body);
     {
         GtkWidget *res = result_rect_new(state, NULL);

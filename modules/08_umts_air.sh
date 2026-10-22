@@ -1761,6 +1761,16 @@ uair_selftest() {
     # refused by the ASN.1 with "bitlen overflow"; these two assertions are what
     # would catch that again.
     chk id-wrapper-hex      "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="rrc_hex"{print $2}')" "1400060a003002"
+    # SYSTEM INFORMATION: the vectors the checker pinned, reachable from here.
+    local sv
+    sv=$(umtsa_cmd_sib_vectors 2>/dev/null)
+    chk sib-vectors-sib3  "$(printf '%s\n' "$sv" | awk -F'\t' '$1=="sib3"{print $3}')" "448d159c11433420ca70"
+    chk sib-vectors-sib3-bits "$(printf '%s\n' "$sv" | awk -F'\t' '$1=="sib3"{print $2}')" "76"
+    chk sib-vectors-sib5  "$(printf '%s\n' "$sv" | awk -F'\t' '$1=="sib5"{print $3}')" "085800ffff807ffc000b010a30021811cfb1200430229f630412011210021811cfb2c0"
+    chk sib-build-3       "$(uair_cli_main --build-sib sib3 --cell-id 0x1234567 --sib4 2>/dev/null | awk -F'\t' '$1=="hex"{print $2}')" "448d159c11433420ca70"
+    chk sib-build-bad     "$(uair_cli_main --build-sib sib9 >/dev/null 2>&1; echo $?)" "2"
+    chk sib-build-none    "$(uair_cli_main --build-sib >/dev/null 2>&1; echo $?)" "2"
+
     chk id-wrapper-verified "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="verified"{print $2}' | grep -c 'bit for bit against the pycrate')" "1"
     chk id-txid-bad     "$(uair_cli_main --catcher-identity --txid 9 >/dev/null 2>&1; echo $?)" "2"
     chk auth-replay     "$(uair_cli_main --catcher-auth --rand 00112233445566778899aabbccddeeff --autn ffeeddccbbaa99887766554433221100 | awk -F'\t' '$1=="mm_hex"{print $2}')" "050012211000112233445566778899aabbccddeeff2010ffeeddccbbaa99887766554433221100"
@@ -1890,6 +1900,8 @@ uair_cli_main() {
         --count-i)        uair_count_i "${1:-}" "${2:-}" ;;
         --integrity-tsv)  uair_integrity_analysis_tsv ;;
         --decode-pcap)    uair_decode_pcap "${1:-}" ;;
+        --build-sib)        umtsa_cmd_build_sib "$@" ;;
+        --sib-vectors)      umtsa_cmd_sib_vectors ;;
         --build-rrc-setup)  uair_build_rrc_setup  "${1:-}" ;;
         --build-rrc-reject) uair_build_rrc_reject "${1:-}" ;;
         --build-paging)     uair_build_paging     "${1:-}" ;;

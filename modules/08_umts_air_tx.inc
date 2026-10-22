@@ -15,6 +15,53 @@
 
 umtsa_phy() { printf '%s/tools/umts_phy.py' "$IMSISTING_ROOT"; }
 umtsa_bch() { printf '%s/tools/umts_bch.py' "$IMSISTING_ROOT"; }
+umtsa_sib() { printf '%s/tools/umts_sib.py' "$IMSISTING_ROOT"; }
+
+# SYSTEM INFORMATION: the pieces a camper reads before it can ask for anything.
+# Every octet comes from tools/umts_sib.py, which holds its messages against
+# pycrate's transcription of TS 25.331 bit for bit and against tshark over
+# GSMTAP; this function is the module's door to it and claims nothing on its own.
+umtsa_cmd_build_sib() {
+    local kind="${1:-}"
+    case "$kind" in
+        sib3|sib5|sib1|mib|si|fach|list) shift ;;
+        ""|help|-h|--help)
+            printf 'ERROR\t--build-sib needs a message: sib3 sib5 sib1 mib si fach list\n' >&2
+            printf 'WHY\teach of them is a different message with different arguments; the tool prints which on --help\n' >&2
+            return 2 ;;
+        *)  printf 'ERROR\t--build-sib does not know %s\n' "$(umtsa_sanitize "$kind")" >&2
+            printf 'WHY\tthe messages are sib3, sib5, sib1, mib, si and fach\n' >&2
+            return 2 ;;
+    esac
+    local tool; tool="$(umtsa_sib)"
+    [[ -x "$tool" || -f "$tool" ]] || {
+        printf 'ERROR\tthe SIB encoder is missing: %s\n' "$tool" >&2
+        printf 'WHY\ttools/umts_sib.py is what builds these messages; without it this verb has nothing to say\n' >&2
+        return 1; }
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is not on this machine, so the SIB encoder cannot run\n' >&2; return 1; }
+    python3 "$tool" "$kind" "$@"
+}
+
+# The three messages that were checked hardest, so a page can show an answer
+# without the operator typing anything.
+umtsa_cmd_sib_vectors() {
+    local tool; tool="$(umtsa_sib)"
+    [[ -f "$tool" ]] || { printf 'ERROR\tthe SIB encoder is missing: %s\n' "$tool" >&2; return 1; }
+    local hex bits name
+    printf 'message\tbits\thex\n'
+    for name in sib3 sib5; do
+        local args
+        if [[ "$name" == sib3 ]]; then args=(--cell-id 0x1234567 --sib4); else args=(); fi
+        hex=$(python3 "$tool" "$name" "${args[@]}" 2>/dev/null | awk -F'\t' '$1=="hex"{print $2; exit}')
+        bits=$(python3 "$tool" "$name" "${args[@]}" 2>/dev/null | awk -F'\t' '$1=="bits"{print $2; exit}')
+        printf '%s\t%s\t%s\n' "$name" "$bits" "$hex"
+    done
+    printf 'si(firstSegment)\t237\t04a210b001ffff00fff800160214600430239f62400860453ec608240220\n'
+    printf 'si(lastSegmentShort)\t75\t0ca26708010c08e7d960\n'
+    printf 'ref\tTS 25.331 10.2 (SYSTEM INFORMATION, FirstSegment, LastSegmentShort); vectors pinned by tools/check-umts-sib.sh\n'
+    printf 'referee\tpycrate RRC3G for the ASN.1, tshark 4.2.2 over GSMTAP rrc_sub_type 7 for BCCH-FACH\n'
+}
 # The host module owns the loot directory; this file only names a file inside it.
 # Falling back to UAIR_DIR keeps the two in step if the include is ever sourced
 # from a module that calls it something else.
