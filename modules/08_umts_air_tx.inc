@@ -45,6 +45,29 @@ umtsa_cmd_build_sib() {
 
 # The three messages that were checked hardest, so a page can show an answer
 # without the operator typing anything.
+# The uplink: what a handset sends. One thin verb over tools/umts_uplink.py so
+# the three pieces sit behind one name -- the RRC CONNECTION REQUEST that opens
+# a connection, the PRACH preamble that announces it, and the DPCCH/DPDCH slot
+# structure of the message part that carries it.
+umtsa_uplink() {
+    local tool="$IMSISTING_ROOT/tools/umts_uplink.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\ttools/umts_uplink.py is not in this tree\n' >&2
+        printf 'WHY\tthe uplink encoder is a tool, and this verb is a name for it\n' >&2; return 1; }
+    command -v python3 >/dev/null 2>&1 || { printf 'ERROR\tpython3 is needed for the uplink encoder\n' >&2; return 1; }
+    python3 "$tool" "$@"
+}
+
+umtsa_cmd_uplink() {
+    local sub="${1:-}"
+    (($# > 0)) && shift
+    case "$sub" in
+        request|prach|message-part|list) umtsa_uplink "$sub" "$@" ;;
+        "") printf 'ERROR\tusage: --uplink <request|prach|message-part|list> [args]\n' >&2; return 2 ;;
+        *)  printf 'ERROR\tunknown uplink piece: %s\n' "$(umtsa_sanitize "$sub")" >&2
+            printf 'WHY\tthe pieces are request, prach, message-part and list\n' >&2; return 2 ;;
+    esac
+}
+
 umtsa_cmd_sib_vectors() {
     local tool; tool="$(umtsa_sib)"
     [[ -f "$tool" ]] || { printf 'ERROR\tthe SIB encoder is missing: %s\n' "$tool" >&2; return 1; }

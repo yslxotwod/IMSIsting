@@ -1770,6 +1770,12 @@ uair_selftest() {
     chk sib-build-3       "$(uair_cli_main --build-sib sib3 --cell-id 0x1234567 --sib4 2>/dev/null | awk -F'\t' '$1=="hex"{print $2}')" "448d159c11433420ca70"
     chk sib-build-bad     "$(uair_cli_main --build-sib sib9 >/dev/null 2>&1; echo $?)" "2"
     chk sib-build-none    "$(uair_cli_main --build-sib >/dev/null 2>&1; echo $?)" "2"
+    # The uplink: the request the handset sends, and the preamble in front of it.
+    chk uplink-request  "$(uair_cli_main --uplink request --tmsi 12345678 2>/dev/null | awk -F'\t' '$1=="hex"{print $2}')" "2112345678001008000b00"
+    chk uplink-request-bits "$(uair_cli_main --uplink request --tmsi 12345678 2>/dev/null | awk -F'\t' '$1=="bits"{print $2}')" "83"
+    chk uplink-prach    "$(uair_cli_main --uplink prach --signature 3 --slot 2 2>/dev/null | awk -F'\t' '$1=="samples"{print $2}')" "76800"
+    chk uplink-msgpart  "$(uair_cli_main --uplink message-part --sf 64 2>/dev/null | awk -F'\t' '$1=="slots"{print $2}')" "15"
+    chk uplink-bad      "$(uair_cli_main --uplink nonsense >/dev/null 2>&1; echo $?)" "2"
 
     chk id-wrapper-verified "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="verified"{print $2}' | grep -c 'bit for bit against the pycrate')" "1"
     chk id-txid-bad     "$(uair_cli_main --catcher-identity --txid 9 >/dev/null 2>&1; echo $?)" "2"
@@ -1902,6 +1908,7 @@ uair_cli_main() {
         --decode-pcap)    uair_decode_pcap "${1:-}" ;;
         --build-sib)        umtsa_cmd_build_sib "$@" ;;
         --sib-vectors)      umtsa_cmd_sib_vectors ;;
+        --uplink)           umtsa_cmd_uplink "$@" ;;
         --build-rrc-setup)  uair_build_rrc_setup  "${1:-}" ;;
         --build-rrc-reject) uair_build_rrc_reject "${1:-}" ;;
         --build-paging)     uair_build_paging     "${1:-}" ;;
@@ -1957,6 +1964,14 @@ Transmit half (a carrier and the BCH that makes it a cell)
                                 the MM AUTHENTICATION REQUEST that replays a
                                 captured RAND and AUTN (no key is computed)
 
+  --build-sib <sib3|sib5|sib1|mib|si|fach> [args]
+                                encode a system-information block, or the
+                                SYSTEM INFORMATION container over FACH
+  --sib-vectors                 the pinned SIB vectors, bits and hex
+  --uplink <request|prach|message-part|list> [args]
+                                what a handset sends: the RRC CONNECTION
+                                REQUEST, the PRACH preamble as chips or samples,
+                                and the message-part slot structure
   --selftest                    verify arithmetic, assemblers and forged RRC octets
   --help                        this usage block
   --menu                        interactive menu

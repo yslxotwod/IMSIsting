@@ -3481,6 +3481,14 @@ run_receipt(ActionRun *run, char **out)
         if (*line == '\0') continue;
         if (g_str_has_prefix(line, "$ ") || g_str_has_prefix(line, "-- "))
             continue;
+        /* A citation is documentation, not the answer. A card whose only rows
+           are refs and limits has nothing to put in a toast, and a toast that
+           reads "ref protocolErrorIndicator -> 0 (1 bit) [ProtocolError..." is
+           not a receipt. */
+        if (g_str_has_prefix(line, "ref\t") || g_str_has_prefix(line, "limit\t") ||
+            g_str_has_prefix(line, "note\t") || g_str_has_prefix(line, "referee\t") ||
+            g_str_has_prefix(line, "held_against\t"))
+            continue;
 
         if (console_tsv_split(line, &tkey, &tval)) part = tval;
         else if (g_str_has_prefix(part, "[info]")) part += 6;
@@ -16709,20 +16717,52 @@ uair_build_downlink(AppState *state, const char *module_id,
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
+        /* The arguments carry flags, and a field full of flags puts a verb on
+           screen. A choice row keeps them in argv where they belong and shows
+           only the act. */
         gtk_box_append(GTK_BOX(card_body),
-            mod_arg_row_prefilled(state, module_id, status, "Compute the AUTN",
-                "--catcher-auth",
-                "--ki 465B5CE8B199B49FAA5F0A2EE238A6BC "
-                "--op CDC202D5123E20F62B6D676AC72CB318 "
-                "--sqn FF9BB4D0B607 --amf B9B9 "
-                "--rand 23553CBE9637A89D218AE64DAE47BF35",
+            mod_arg_choices(state, module_id, status, "Key material",
+                "A worked set of key material, or your own in the same shape",
                 "The subscriber key, the operator variant, the sequence number and "
                 "the RAND. The AUTN that comes back is the one TS 35.208 test set 1 "
-                "fixes, because the key and the RAND are that set's."));
+                "fixes, because the key and the RAND are that set's.",
+                (const char *[]) {
+                    "--catcher-auth --ki 465B5CE8B199B49FAA5F0A2EE238A6BC "
+                    "--op CDC202D5123E20F62B6D676AC72CB318 "
+                    "--sqn FF9BB4D0B607 --amf B9B9 "
+                    "--rand 23553CBE9637A89D218AE64DAE47BF35" },
+                (const char *[]) { "Compute the AUTN" }, 1));
         gtk_box_append(GTK_BOX(card_body), fkit_note(
             "The only card on this page that can start an exchange instead of "
             "replaying one, and only with a key you already hold. Against a SIM "
             "you do not own it is identity theft, not research."));
+        gtk_box_append(GTK_BOX(card_body), res);
+        mod_card_end();
+    }
+    gtk_box_append(GTK_BOX(body), card);
+
+    /* The other direction. Everything above is what a network sends; this is
+       what a handset sends back, which is the half a catcher needs to answer
+       with. The request is the message that opens a connection, the preamble is
+       what announces it on the RACH, and the message part is the slot structure
+       that carries it. */
+    card = verb_card("UPLINK", &card_body);
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body), fkit_note(
+            "What a handset sends. The request is built octet for octet; the "
+            "preamble is 4096 chips at 3.84 Mcps; the message part is the slot "
+            "structure, not a waveform."));
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_choices(state, module_id, status, "Piece",
+                "A piece to build, or the pinned uplink vectors",
+                "The three things a handset sends, and what each answers with.",
+                (const char *[]) { "--uplink request --tmsi 12345678",
+                                   "--uplink prach --signature 3 --slot 2",
+                                   "--uplink message-part --sf 64",
+                                   "--uplink list" },
+                (const char *[]) { "Request", "Preamble", "Message Part", "List" }, 4));
         gtk_box_append(GTK_BOX(card_body), res);
         mod_card_end();
     }
