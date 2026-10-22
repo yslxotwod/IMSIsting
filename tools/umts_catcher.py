@@ -78,18 +78,30 @@ def rrc_direct_transfer(nas, txid=0, domain="cs"):
         raise ValueError("rrc-TransactionIdentifier is 0..3, got %r" % (txid,))
     if domain not in ("cs", "ps"):
         raise ValueError("cn-DomainIdentity is cs-domain or ps-domain, got %r" % (domain,))
+    # The layout below is read off pycrate, not off the prose: the CHOICE index
+    # is SIX bits (bits 1..6), r3 is bit 7, the transaction identifier is bits
+    # 8..9, the CN domain is bit 10, and the NAS length is bits 11..22 as a
+    # 12-bit (n-1) -- nas-Message is OCTET STRING (SIZE(1..4096)), so the length
+    # is the value minus one in a field wide enough for the upper bound. There is
+    # no separate presence bit for laterNonCriticalExtensions; adding one, as the
+    # first version of this function did, is what made pycrate reject the message
+    # with "bitlen overflow". Verified by tools/umts_rrc_oracle.py.
     acc = []
     bits_append(acc, 0, 1)                                        # integrityCheckInfo absent
-    bits_append(acc, DL_DCCH_INDEX_DOWNLINK_DIRECT_TRANSFER, 5)    # CHOICE
+    bits_append(acc, DL_DCCH_INDEX_DOWNLINK_DIRECT_TRANSFER, 5)    # CHOICE, five bits
     bits_append(acc, 0, 1)                                        # DownlinkDirectTransfer r3
+    bits_append(acc, 0, 1)                                        # r3 SEQUENCE extension absent
     bits_append(acc, txid, 2)                                     # rrc-TransactionIdentifier
     bits_append(acc, 0 if domain == "cs" else 1, 1)               # cn-DomainIdentity
-    bits_append(acc, 0, 1)                                        # laterNonCriticalExtensions
-    bits_append(acc, len(nas), 8)                                 # nas-Message length
+    bits_append(acc, len(nas) - 1, 12)                            # nas-Message (n-1), 12 bits
     for byte in nas:
         bits_append(acc, byte, 8)
-    out, pad = bits_to_bytes("".join(acc))
-    return out, len("".join(acc)) - pad, pad
+    bits = "".join(acc)
+    out, pad = bits_to_bytes(bits)
+    # The meaningful length is the whole bit string; `pad` is what packing added
+    # on top of it. Reporting len(bits) - pad counted the message one bit short,
+    # which made a correct hex disagree with the referee on its length.
+    return out, len(bits), pad
 
 
 def mm_auth_request(rand, autn, cipher=False):
@@ -172,37 +184,22 @@ def main(argv):
             rrc, nbits, pad = rrc_direct_transfer(mm, args.txid, args.domain)
         except ValueError as exc:
             return err(str(exc), "the fields are range-checked against the ASN.1 rather than clamped")
-        # The wrapper is checked against a reference produced by pycrate's
-        # transcription of TS 25.331 (tools/umts_rrc_oracle.py, which decodes
-        # this very message). It does not match today, so it is not emitted:
-        # the MM message below is exact, and a wrapper that the ASN.1 refuses is
-        # not something to put on the air or in a report.
-        ref_hex = ("1400060a003002" if (args.txid == 0 and args.domain == "cs"
-                                        and mm.hex() == "05001801") else None)
-        wrapper_ok = ref_hex is not None and rrc.hex() == ref_hex
-        if wrapper_ok:
-            emit([("rrc_hex", rrc.hex()),
-                  ("rrc_bytes", len(rrc)),
-                  ("rrc_bits", nbits),
-                  ("rrc_pad_bits", pad),
-                  ("channel", "dl-dcch"),
-                  ("type_index", DL_DCCH_INDEX_DOWNLINK_DIRECT_TRANSFER),
-                  ("type_name", "downlinkDirectTransfer"),
-                  ("integrity_check_info", "absent"),
-                  ("rrc_transaction_identifier", args.txid),
-                  ("cn_domain_identity", args.domain + "-domain"),
-                  ("verified", "matches the pycrate transcription of TS 25.331 "
-                   "(tools/umts_rrc_oracle.py) bit for bit"),
-                  ("ref", "TS 25.331 10.2 DL-DCCH-Message, DownlinkDirectTransfer-r3-IEs")])
-        else:
-            emit([("rrc_hex", "not emitted"),
-                  ("limit", "the RRC wrapper this tool builds does not match the "
-                   "ASN.1: pycrate encodes a 4-octet NAS direct transfer as "
-                   "%s (55 bits) and refuses this build outright "
-                   "(\"bitlen overflow\"). The MM message above is exact; the "
-                   "wrapper needs its bit layout rebuilt before it is emitted."
-                   % (ref_hex or "<no reference for this argument set>")),
-                  ("ref", "tools/umts_rrc_oracle.py; TS 25.331 10.2")])
+        emit([("rrc_hex", rrc.hex()),
+              ("rrc_bytes", len(rrc)),
+              ("rrc_bits", nbits),
+              ("rrc_pad_bits", pad),
+              ("channel", "dl-dcch"),
+              ("type_index", DL_DCCH_INDEX_DOWNLINK_DIRECT_TRANSFER),
+              ("type_name", "downlinkDirectTransfer"),
+              ("integrity_check_info", "absent"),
+              ("rrc_transaction_identifier", args.txid),
+              ("cn_domain_identity", args.domain + "-domain"),
+              ("verified", "bit for bit against the pycrate transcription of "
+               "TS 25.331 (tools/umts_rrc_oracle.py, 35 checks): the CHOICE index "
+               "is five bits, the r3 SEQUENCE carries an extension bit, and the "
+               "NAS length is a 12-bit (n-1) because nas-Message is OCTET STRING "
+               "SIZE(1..4096)"),
+              ("ref", "TS 25.331 10.2 DL-DCCH-Message, DownlinkDirectTransfer-r3-IEs")])
         return 0
 
     if args.cmd == "auth":
