@@ -4,6 +4,8 @@ A GTK4 cellular security toolkit for Linux, with a full CLI behind it. Shell
 modules covering 2G/GSM, 3G/UMTS, 4G/LTE and 5G/NR, plus passive analysis over
 captures and per-generation CVE kits.
 
+<img width="1196" height="641" alt="image" src="https://github.com/user-attachments/assets/eb755e2e-414e-4132-bf17-15e815aa8c99" />
+
 Every module is a standalone script. The GUI is a view over them, not a
 container — nothing is locked behind the interface.
 
