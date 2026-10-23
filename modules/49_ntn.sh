@@ -169,20 +169,29 @@ ntn_koffset() {
     fi
 }
 
-# ── SIB19: decode or refuse ─────────────────────────────────────────────
-# A real decode needs the NR RRC ASN.1 layout table, i.e. a table generated
-# from TS 38.331 and differentially verified the way the LTE tables are
-# (tools/lte_rrc_layout.py, tools/lte_rrc_nb_layout.py, tools/lte-per-oracle/
-# verify_per.py). tools/asn1gen.py knows only the LTE families rrc and nbiot;
-# the pycrate RRCNR module does define SIB19_r17, but an NR table has never been
-# generated or certified here, so this verb refuses instead of printing hex
-# slices as if they were fields.
+# ── SIB19: decode ───────────────────────────────────────────────────────
+# Decoded as TS 38.331 defines it, through the generated unaligned-PER table
+# (tools/nr_rrc_layout.py, 326 types, certified case by case against pycrate by
+# tools/lte-per-oracle/verify_per.py). Nothing here slices hex: every field the
+# decoder prints is a field the schema names, and a bit string that is not a
+# SIB19 is refused rather than read until something plausible comes out.
 ntn_sib19() {
-    printf 'ERROR\tSIB19 cannot be decoded: this tree has no NR RRC ASN.1 layout table\n' >&2
-    printf 'WHY\tSIB19 is a TS 38.331 ASN.1 IE. tools/asn1gen.py generates layout tables only for the LTE families rrc and nbiot; an NR table must be generated from the pycrate RRCNR module (SIB19_r17 is defined there) and verified case by case against it before a decoder here would be honest. Refusing rather than printing hex slices as fields.\n' >&2
-    printf 'NEXT\tthe nr family has been tried and does not certify yet: a root walk of NR.SIB19_r17 and NR.SystemInformation emits 204 types, and tools/lte-per-oracle/verify_per.py --table disagrees on the constrained integers (ARFCN_ValueEUTRA 0..262143 encodes as 18 bits here and 16 under pycrate on the same constraint), so the fault is in how the verifier drives those types or in the NR PER configuration, not in the schema. Fix that disagreement first, then wire --sib19-decode.\n' >&2
-    return 2
+    local hex="${1:-}"
+    local root="${IMSISTING_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+    if [[ ! -r "$root/tools/nr_rrc.py" || ! -r "$root/tools/nr_rrc_layout.py" ]]; then
+        printf 'ERROR\tSIB19 cannot be decoded: tools/nr_rrc_layout.py is missing\n' >&2
+        printf 'WHY\tThe decoder is tools/nr_rrc.py over the generated table tools/nr_rrc_layout.py. Regenerate it with tools/asn1gen.py --family nr and re-certify it with tools/lte-per-oracle/verify_per.py --table tools/nr_rrc_layout.py; a decoder without its table prints fields it invented.\n' >&2
+        return 2
+    fi
+    if [[ -z "$hex" ]]; then
+        printf 'ERROR\tsib19 needs a message as hex\n' >&2
+        printf 'WHY\tSIB19 is a TS 38.331 IE carried on BCCH-DL-SCH, and this module reads it from bits you supply: the message is decoded, the transport block it arrived in is not.\n' >&2
+        printf 'USAGE\t--sib19 <hex>\n' >&2
+        return 2
+    fi
+    python3 "$root/tools/nr_rrc.py" decode SIB19_r17 "$hex" || return 1
 }
+
 # ── feeder link: not computed ───────────────────────────────────────────
 # SIB19 carries no feeder gateway position, so the gateway-satellite geometry
 # is not derivable from anything this module reads. What the old table called
@@ -267,11 +276,17 @@ ntn_selftest() {
     chk koffset-scs   "$(ntn_koffset 1 7 >/dev/null 2>&1; echo $?)"        "2"
     chk koffset-rate  "$(ntn_koffset 1 15 0 >/dev/null 2>&1; echo $?)"     "2"
 
-    # 5. Capability refusals. SIB19 is an ASN.1 IE and no NR RRC layout table
-    #    exists in this tree, and SIB19 carries no gateway geometry, so both
-    #    verbs must say so and return non-zero rather than print a table.
-    chk sib19-refuse  "$(ntn_sib19 >/dev/null 2>&1; echo $?)"              "2"
+    # 5. SIB19 decodes through the generated NR table; the feeder link is still
+    #    refused, because SIB19 carries no gateway geometry for it to use.
+    chk sib19-nobits  "$(ntn_sib19 >/dev/null 2>&1; echo $?)"              "2"
     chk sib19-why     "$(ntn_sib19 2>&1 >/dev/null | grep -c '^WHY')"      "1"
+    # A vector whose answer is known by construction: pycrate encodes a SIB19
+    # carrying t-Service-r17 = 4294967296 as 46 bits, padded to 200400000000.
+    chk sib19-tsvc    "$(ntn_sib19 200400000000 2>/dev/null | awk -F'\t' '$1=="t-Service-r17"{print $2}')" "4294967296"
+    chk sib19-bits    "$(ntn_sib19 200400000000 2>/dev/null | awk -F'\t' '$1=="bits_read"{print $2}')"      "46"
+    # An all-absent SIB19 is legal (every component is OPTIONAL, 7 bits), so
+    # the refusal case has to be a bit string that is not hex at all.
+    chk sib19-badhex  "$(ntn_sib19 zz >/dev/null 2>&1; echo $?)"           "1"
     chk feeder-refuse "$(ntn_feeder_link >/dev/null 2>&1; echo $?)"        "2"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
@@ -289,7 +304,7 @@ ntn_menu() {
   [2]  Round-trip delay
   [3]  TA units
   [4]  K_offset (slots -> ms, samples)
-  [5]  SIB19 decode (refused: no NR table)
+  [5]  SIB19 decode (TS 38.331)
   [6]  Feeder link (refused: no geometry)
   [7]  Plan (handoff)
   [0]  back
@@ -302,7 +317,7 @@ M
             3) read -rp "  one-way km> " k; ntn_ta_units "$k"; read -rp "  enter " _ ;;
             4) read -rp "  k_offset slots> " k; read -rp "  scs kHz [15/30/60/120]> " s; read -rp "  sample rate Hz (blank skips)> " r
                ntn_koffset "$k" "$s" "$r"; read -rp "  enter " _ ;;
-            5) ntn_sib19; read -rp "  enter " _ ;;
+            5) read -rp "  SIB19 as hex> " _s19; ntn_sib19 "$_s19"; read -rp "  enter " _ ;;
             6) ntn_feeder_link; read -rp "  enter " _ ;;
             7) ntn_plan; read -rp "  enter " _ ;;
             0) return ;;
@@ -320,7 +335,7 @@ ntn_cli_main() {
         --range)       ntn_range_rtt "${1:-}" ;;
         --ta)          ntn_ta_units "${1:-}" ;;
         --koffset)     ntn_koffset "${1:-}" "${2:-}" "${3:-}" ;;
-        --sib19)       ntn_sib19 ;;
+        --sib19)       ntn_sib19 "${1:-}" ;;
         --feeder)      ntn_feeder_link ;;
         --plan)        ntn_plan ;;
         --selftest)    ntn_selftest ;;
@@ -335,7 +350,7 @@ Usage: $0 COMMAND
   --range <one_way_km>      one-way and round-trip delay
   --ta <one_way_km>         TA units needed vs the LTE TA range
   --koffset <slots> [scs_khz] [sample_rate_hz]   K_offset (TS 38.331, 15 kHz reference slots) -> ms and samples
-  --sib19                   refused: no NR RRC ASN.1 layout table in this tree
+  --sib19 <hex>             decode a SIB19 (TS 38.331) from its bits
   --feeder                  refused: SIB19 carries no gateway geometry
   --plan                    NTN handoff plan
   --selftest                verify the timing geometry

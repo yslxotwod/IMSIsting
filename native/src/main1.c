@@ -5685,7 +5685,11 @@ static const ChipRow chip_rows[] = {
     { "08_umts_air",         "--rate",                NEED_CAP, DOES_READS },
     { "08_umts_air",         "--seconds",             NEED_CAP, DOES_READS },
     { "08_umts_air",         "--selftest",            NEED_NO, DOES_READS },
+    { "08_umts_air",         "--sib-code",            NEED_CAP, DOES_READS },
     { "08_umts_air",         "--sib-fields",          NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--sib-offset",          NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--sib-sf",              NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--sibs",                NEED_CAP, DOES_READS },
     { "08_umts_air",         "--sib-vectors",         NEED_CAP, DOES_READS },
     { "08_umts_air",         "--sib6-carriers",       NEED_CAP, DOES_READS },
     { "08_umts_air",         "--status-tsv",          NEED_NO, DOES_READS },
@@ -31968,11 +31972,12 @@ ntn_build_link(AppState *state, const char *module_id,
 
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(sib_body),
-            mod_arg_row(state, module_id, status, "Ask for SIB19",
-                "--sib19", "",
-                "Refuses: SIB19 is an NR RRC ASN.1 IE and this tree generates "
-                "layout tables for LTE only. The refusal names the family that "
-                "would have to exist first."));
+            mod_arg_row_prefilled(state, module_id, status, "Decode SIB19",
+                "--sib19", "200400000000",
+                "The message bits as hex. Decoded through the generated NR RRC "
+                "table (TS 38.331, unaligned PER): every field printed is one "
+                "the schema names, and bits the message does not use are "
+                "counted rather than read."));
         gtk_box_append(GTK_BOX(sib_body), res);
     }
     gtk_box_append(GTK_BOX(body), sib);

@@ -1742,11 +1742,26 @@ uair_selftest() {
     chk tx-bch-carried  "$(printf '%s\n' "$txb" | awk -F'\t' '$1=="carrier_is_a_cell"{print $2}' | cut -d' ' -f1)" "partly"
     chk tx-bch-file     "$([[ -s "$(printf '%s\n' "$txb" | awk -F'\t' '$1=="bch_file"{print $2}')" ]] && echo yes || echo no)" "yes"
     chk tx-bch-short    "$(uair_cli_main --transmit --freq 2140 --bch-hex 0123 --no-key >/dev/null 2>&1; echo $?)" "2"
+    # The SIBs are the half of the downlink that was missing: the packer puts
+    # them on the FACH transport, the S-CCPCH carries that frame, and the mix
+    # is the cell.  Each row below is an assertion that the wiring happened.
+    txp=$(uair_cli_main --transmit --freq 2140 --seconds 0.05 --bch-hex 012345 \
+              --sibs sib1,sib3,sib5 --no-key 2>/dev/null)
+    chk tx-sib-msgs     "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="sib_messages"{print $2}')" "4"
+    chk tx-sib-transport "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="sib_transport"{print $2}' | grep -c 'S-CCPCH')" "1"
+    chk tx-sib-frames   "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="sib_frames"{print $2}' | cut -d' ' -f1)" "5"
+    chk tx-cell-file    "$([[ -s "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="cell_file"{print $2}')" ]] && echo yes || echo no)" "yes"
+    chk tx-cell-is-cell "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="carrier_is_a_cell"{print $2}' | cut -d' ' -f1)" "yes"
+    chk tx-sib-badsf    "$(uair_cli_main --transmit --freq 2140 --sibs sib1 --sib-sf 64 --no-key >/dev/null 2>&1; echo $?)" "2"
+    chk tx-sib-badcode  "$(uair_cli_main --transmit --freq 2140 --sibs sib1 --sib-code 0 --no-key >/dev/null 2>&1; echo $?)" "2"
+    chk tx-sib-badname  "$(uair_cli_main --transmit --freq 2140 --sibs sib99 --no-key >/dev/null 2>&1; echo $?)" "2"
+    chk pack-verb       "$(uair_cli_main --build-sib pack --add sib1 2>/dev/null | awk -F'\t' '$1=="frames"{print $2}')" "1"
+    chk pack-frame      "$(uair_cli_main --build-sib pack --add sib1 2>/dev/null | awk -F'\t' '$1=="msg[0].frame_bits"{print $2}')" "300"
     # The chain model is a reference: it must be complete and it must not be
     # able to claim a step is built when the verb behind it is absent.
     chk catcher-steps   "$(uair_cli_main --catcher-model | grep -c '^[0-9]')" "8"
-    chk catcher-built   "$(uair_cli_main --catcher-model | grep -c 'built:')" "5"
-    chk catcher-gap     "$(uair_cli_main --catcher-model | grep -cE 'absent:|partial:|limit:')" "1"
+    chk catcher-built   "$(uair_cli_main --catcher-model | grep -c 'built:')" "6"
+    chk catcher-gap     "$(uair_cli_main --catcher-model | grep -cE 'absent:|partial:|limit:')" "0"
     chk catcher-parse   "$(uair_cli_main --catcher-model | grep -c 'parse:')" "1"
     chk catcher-rc      "$(uair_cli_main --catcher-model >/dev/null 2>&1; echo $?)" "0"
     chk tx-help-verbs   "$(uair_usage | grep -cE '^  --(transmit|catcher-model)( |$)')" "2"
@@ -1950,11 +1965,16 @@ Usage: $0 COMMAND
   --build-paging [conf]         build PAGING TYPE 1 octets (PCCH)
   --parse-rrc <ch>:<hex>        classify and walk a received RRC message
 
-Transmit half (a carrier and the BCH that makes it a cell)
+Transmit half (a carrier, the BCH and the SIBs that make it a cell)
   --transmit --freq <MHz> [--psc <0..511>] [--rate <sps>] [--seconds <s>]
-             [--gain <dB>] [--bch-hex <24-bit MIB>] [--no-key]
-                                build the downlink; keys a radio only when one
-                                answers, otherwise prints the call and hands off
+             [--gain <dB>] [--bch-hex <24-bit MIB>]
+             [--sibs [mib,]sib1,sib3,sib5] [--sib-sf 256|128]
+             [--sib-code <1..sf-1>] [--sib-offset <0..149>] [--no-key]
+                                build the downlink; --sibs packs the SIBs onto
+                                the FACH, spreads them on an S-CCPCH and mixes
+                                that onto the carrier.  Keys a radio only when
+                                one answers, otherwise prints the call and
+                                hands off
   --catcher-model               the 3G IMSI-catcher chain, step by step, with
                                 what is built and what is absent
   --catcher-identity [--identity imsi|imei|imeisv|tmsi] [--txid 0..3]
@@ -1964,9 +1984,11 @@ Transmit half (a carrier and the BCH that makes it a cell)
                                 the MM AUTHENTICATION REQUEST that replays a
                                 captured RAND and AUTN (no key is computed)
 
-  --build-sib <sib3|sib5|sib1|mib|si|fach> [args]
-                                encode a system-information block, or the
-                                SYSTEM INFORMATION container over FACH
+  --build-sib <sib3|sib5|sib1|mib|si|fach|pack> [args]
+                                encode a system-information block, the SYSTEM
+                                INFORMATION container over FACH, or `pack`:
+                                SIBs -> message -> FACH transport block ->
+                                channel-coded frame ready for the S-CCPCH
   --sib-vectors                 the pinned SIB vectors, bits and hex
   --uplink <request|prach|message-part|list> [args]
                                 what a handset sends: the RRC CONNECTION

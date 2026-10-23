@@ -130,6 +130,47 @@ def _register_lpp():
     }
 
 
+def _register_nr():
+    """NR RRC (TS 38.331), the 5G broadcast and connection messages.
+
+    A family of its own for the same reason NB-IoT is one: an LTE root cannot
+    reach an NR message, because no TS 36.331 type references SIB19 or any
+    other TS 38.331 definition.  `49_ntn` needed SIB19 -- the non-terrestrial
+    cell's ephemeris and timing -- and had nothing to decode it with.
+
+    The two NR namespaces are both carried, because the RRC message set spans
+    them: SIB19 and the other SystemInformation blocks are in
+    NR-RRC-Definitions, while the D2D and inter-node messages live in
+    NR-InterNodeDefinitions and are referenced from there.
+    """
+    from pycrate_asn1dir import RRCNR
+
+    FAMILIES["nr"] = {
+        "modules": [
+            ("NR-RRC-Definitions", RRCNR.NR_RRC_Definitions),
+            ("NR-InterNodeDefinitions", RRCNR.NR_InterNodeDefinitions),
+        ],
+        "aliases": {
+            "NR": "NR-RRC-Definitions",
+            "INN": "NR-InterNodeDefinitions",
+        },
+        "default_module": "NR-RRC-Definitions",
+        "default_types": [
+            # The block 49_ntn was refusing to decode: the NTN ephemeris, the
+            # timing advance parameters and the coverage-enhancement flags.
+            "NR.SIB19_r17",
+            # The wrapper the SIBs are actually carried in, so a capture's
+            # bits can be handed over without being sliced first.
+            "NR.SystemInformation",
+            # The two message sets an air-interface decoder needs first.
+            "NR.BCCH_BCH_Message",
+            "NR.BCCH_DL_SCH_Message",
+        ],
+        "out": "nr_rrc_layout.py",
+        "description": "NR RRC (TS 38.331)",
+    }
+
+
 def _register_nbiot():
     """NB-IoT RRC (TS 36.331 clause 6.3, the ``-NB`` message set).
 
@@ -828,7 +869,7 @@ def main(argv=None):
     parser.add_argument(
         "--family",
         default="rrc",
-        choices=("rrc", "lpp", "nbiot"),
+        choices=("rrc", "lpp", "nbiot", "nr"),
         help="which ASN.1 namespace to generate for (default: rrc)",
     )
     parser.add_argument(
@@ -852,7 +893,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     _register_rrc()
-    if args.family == "lpp":
+    if args.family == "nr":
+        _register_nr()
+    elif args.family == "lpp":
         _register_lpp()
     elif args.family == "nbiot":
         _register_nbiot()

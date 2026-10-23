@@ -890,6 +890,108 @@ if os.path.exists(bch):
 else:
     skip("cross-tool: umts_bch.py stages", "no tools/umts_bch.py in this tree")
 
+def mstage(d, key):
+    """A packer stage row: the key is already the whole row name."""
+    m = STAGE_RE.match(d[key][0])
+    return bits_of_hex(m.group(1), int(m.group(2)))
+
+
+# --- section 3b: the packer, SIBs onto the FACH transport ---------------
+# `pack` is the verb that was missing: it takes SIBs, builds the SYSTEM
+# INFORMATION messages, runs each message through the FACH chain and prints
+# the channel-coded frame an S-CCPCH can spread.  Every frame is recomputed
+# here from the payload bits with the independent chain above.
+PK = run("pack", "--add", "sib1", "--add", "sib3", "--add", "sib5")
+chk("pack: exits 0", PK.returncode, 0)
+pd = rows_of(PK)
+chk("pack: says the transport is BCCH-FACH and not the BCH",
+    any("FACH" in r and "BCH" in r for r in pd.get("transport", [])), True)
+chk("pack: prints the slot format it packs for",
+    one(pd, "slot_format").startswith("0 -- SF=256"), True)
+chk("pack: Ndata,* is 15 slots of 20 data bits",
+    one(pd, "ndata_star"), "300")
+chk("pack: the transport block is an octet count",
+    int(one(pd, "tb_bits")) % 8, 0)
+n_msgs = int(one(pd, "frames"))
+chk("pack: sib5 is segmented into two frames (one TB per TTI)",
+    n_msgs, 4)
+PAY_RE = re.compile(r"^combination=(\d+) kind=(\S+) sib=(\S+) bits=(\d+) "
+                    r"octets=(\d+) pad=(\d+) hex=([0-9a-f]*)$")
+kinds = []
+for i in range(n_msgs):
+    m = PAY_RE.match(one(pd, "msg[%d].payload" % i))
+    if not m:
+        chk("pack: message %d parses" % i, one(pd, "msg[%d].payload" % i),
+            "combination=... kind=... sib=... bits=... hex=...")
+        continue
+    comb, kind, sib, nbits, nocts, pad, hx = m.groups()
+    nbits = int(nbits)
+    kinds.append((kind, sib))
+    chk("pack: message %d is padded to whole octets" % i,
+        (nbits + int(pad)) % 8, 0)
+    chk("pack: message %d's hex is its octet count" % i,
+        len(hx), 2 * int(nocts))
+    tb = tb_bits(hx, nbits) + [0] * int(pad)
+    chk("pack: message %d's transport block is the whole padding" % i,
+        len(tb) % 8, 0)
+    crc = crc_attach_here(tb)
+    chk("pack: message %d CRC16 matches a long division" % i,
+        get_bits(*mstage(pd, "msg[%d].stage:crc" % i)), bits_text(crc))
+    cc = conv_here(crc, 3)
+    chk("pack: message %d uses the 1/3 FACH code" % i,
+        get_bits(*mstage(pd, "msg[%d].stage:conv" % i)), bits_text(cc))
+    rm = rm_here(cc, 300)
+    chk("pack: message %d rate matching matches 4.2.7.5" % i,
+        get_bits(*mstage(pd, "msg[%d].stage:ratematch" % i)), bits_text(rm))
+    il = ilv2_here(rm, 300)
+    fh = one(pd, "msg[%d].frame_hex" % i)
+    chk("pack: message %d's frame is the clause 4.2.11 output" % i,
+        "".join(format(int(c, 16), "04b") for c in fh)[:300], bits_text(il))
+    chk("pack: message %d's frame is %d bits" % (i, 300),
+        one(pd, "msg[%d].frame_bits" % i), "300")
+chk("pack: sib5 is sent as firstSegment then lastSegmentShort",
+    [k for k, s2 in kinds if s2 == "sib5"],
+    ["firstSegment", "lastSegmentShort"])
+chk("pack: sib1 and sib3 are completeSIB-List messages",
+    [k for k, s2 in kinds if s2 in ("sib1", "sib3")],
+    ["completeSIB-List", "completeSIB-List"])
+
+# the same SIBs through `si` must give the same message octets: the packer
+# adds the transport, not a second encoder
+SI = run("si", "--add", "sib1", "--add", "sib3", "--add", "sib5",
+         "--fach-tb-bits", one(pd, "tb_bits"), "--pack", "one")
+sd = rows_of(SI)
+chk("pack/si: the message octets are identical",
+    [one(pd, "msg[%d].payload" % i).split("hex=")[-1] for i in range(n_msgs)],
+    [one(sd, "msg[%d]" % i).split("hex=")[-1] for i in range(n_msgs)])
+
+# and the frame is what the S-CCPCH tool spreads: its referee is
+# tools/check-umts-sccpch.sh, so only the argument contract is checked here
+scc = os.path.join(os.path.dirname(TOOL), "umts_sccpch.py")
+if os.path.exists(scc):
+    sp = subprocess.run([sys.executable, scc, "stages", "--frame-hex",
+                         one(pd, "msg[0].frame_hex"), "--sf", "256"],
+                        capture_output=True, text=True)
+    chk("pack/sccpch: a packed frame is a whole S-CCPCH frame",
+        (sp.returncode, "sf\t256" in sp.stdout), (0, True))
+    sp = subprocess.run([sys.executable, scc, "stages", "--frame-hex",
+                         one(pd, "msg[0].frame_hex"), "--sf", "128"],
+                        capture_output=True, text=True)
+    chk("pack/sccpch: the SF=128 slot format refuses a 300 bit frame",
+        sp.returncode, 2)
+else:
+    skip("pack/sccpch: cross-tool contract", "no tools/umts_sccpch.py")
+
+for name, args in (("refuse SF=64", ["pack", "--sf", "64"]),
+                   ("refuse a block that is not octets",
+                    ["pack", "--tb-bits", "285"]),
+                   ("refuse a block bigger than Ndata,*",
+                    ["pack", "--tb-bits", "290"])):
+    r = run(*args)
+    chk("pack: %s" % name,
+        (r.returncode, ("ERROR\t" in r.stdout or "ERROR\t" in r.stderr)),
+        (2, True))
+
 # --- section 4: the tool's own contract ---------------------------------
 p = run("list")
 d = rows_of(p)

@@ -1363,8 +1363,9 @@ def cmd_sib5(args):
     return 0
 
 
-def cmd_si(args):
-    names = args.add or ["mib", "sib1", "sib3", "sib5"]
+def _add_entries(specs):
+    """Turn repeated --add TYPE[:HEX[:BITS]] into encoded SIB entries."""
+    names = specs or ["mib", "sib1", "sib3", "sib5"]
     entries = []
     for spec in names:
         parts = spec.split(":")
@@ -1378,6 +1379,11 @@ def cmd_si(args):
         else:
             bits = _sib_encoder(name, _default_params(name)).bits()
         entries.append({"sib": name, "bits": bits})
+    return entries
+
+
+def cmd_si(args):
+    entries = _add_entries(args.add)
     tb_bits = _parse_int(args.fach_tb_bits, "fach-tb-bits") if args.fach_tb_bits else 360
     if tb_bits <= 0 or tb_bits % 8:
         _die(2, "--fach-tb-bits %d is not a positive multiple of 8" % tb_bits,
@@ -1443,6 +1449,131 @@ def _parse_hex_bits(h, nbits):
     if n <= 0 or n > len(bits):
         _die(2, "%d bits does not fit the %d bits of hex %r" % (n, len(bits), h), "")
     return bits[:n]
+
+
+# ---------------------------------------------------------------------------
+# The packer: SIBs -> SYSTEM INFORMATION messages -> a FACH transport block ->
+# the channel-coded frame an S-CCPCH carries.
+#
+# This is the phase the catcher model called absent ("no verb packs a SIB onto
+# that transport").  The transport is not the BCH -- the BCH carries the MIB
+# only (TS 25.212 4.2.13.6) -- it is the BCCH mapped to a FACH, and the FACH is
+# mapped to a Secondary CCPCH (TS 25.331 8.1.1.1.2/8.1.1.1.3).  The bits this
+# verb prints are exactly what tools/umts_sccpch.py spreads and scrambles.
+# ---------------------------------------------------------------------------
+# TS 25.211 5.3.3.4 Table 18, the two rows with no pilot and no TFCI field:
+# (slot format, SF, data bits per slot, Ndata,* = 15 * data bits per slot)
+SCCPCH_FORMATS = {
+    256: (0, 256, 20, 300),
+    128: (4, 128, 40, 600),
+}
+
+PACK_LIMITS = [
+    ("transport",
+     "the transport is BCCH-FACH on an S-CCPCH, not the BCH: the BCH carries "
+     "the MIB only, with one fixed transport format (TS 25.212 4.2.13.6), so "
+     "nothing here writes to the BCH chain in tools/umts_bch.py"),
+    ("slot-format",
+     "only the two S-CCPCH slot formats with no pilot and no TFCI are built "
+     "(TS 25.211 5.3.3.4 Table 18 formats 0 and 4).  A TFCI field would need "
+     "the (32,10) Reed-Muller code of TS 25.212 4.3, which this tree does not "
+     "have, and the release text does not support a pilot field at all"),
+    ("transport-block",
+     "the FACH transport block size is an RLC attribute carried in SIB5 "
+     "(CommonTransChTFS, TS 25.331 10.2.1), so --tb-bits is an input; the "
+     "default is the largest block that survives the chain with ndata >= "
+     "tb+16, which is what the no-puncturing check in `fach` enforces"),
+    ("one-tb-per-tti",
+     "one transport block per 10 ms TTI (M1 = 1), so a SYSTEM INFORMATION "
+     "message longer than one transport block is a segment (clause 8.1.1.1.3) "
+     "and each segment is its own frame -- the packer emits one frame per "
+     "segment and does not chain frames into a TTI"),
+]
+
+
+def cmd_pack(args):
+    entries = _add_entries(args.add)
+    sf = _parse_int(args.sf, "sf") if args.sf else 256
+    if sf not in SCCPCH_FORMATS:
+        _die(2, "--sf %d is not an S-CCPCH format this tool builds" % sf,
+             "the built rows of TS 25.211 5.3.3.4 Table 18 are SF=256 "
+             "(format 0, 20 data bits per slot) and SF=128 (format 4, 40); "
+             "every other row carries a TFCI field")
+    fmt, sf, per_slot, ndata = SCCPCH_FORMATS[sf]
+    rate = {"third": 3, "half": 2}[args.coding or "third"]
+    if args.tb_bits:
+        tb_bits = _parse_int(args.tb_bits, "tb-bits")
+    else:
+        tb_bits = ((ndata - CRC_BITS) // 8) * 8
+    if tb_bits <= 0 or tb_bits % 8:
+        _die(2, "--tb-bits %d is not a positive multiple of 8" % tb_bits,
+             "a transport block is an integer number of octets")
+    if ndata < tb_bits + CRC_BITS:
+        _die(2, "Ndata,* = %d is smaller than the %d bit block plus CRC"
+             % (ndata, tb_bits),
+             "the FACH chain in this tool does not puncture below its own "
+             "input; pick a smaller --tb-bits or the SF=128 slot format")
+    pack = args.pack or "one"
+    msgs = pack_si(entries, tb_bits, pack)
+    rows = [("cli", "pack")]
+    rows.append(("transport",
+                 "BCCH -> FACH -> S-CCPCH (TS 25.331 8.1.1.1.2, TS 25.211 "
+                 "5.3.3.4); the BCH is not involved"))
+    rows.append(("slot_format", "%d -- SF=%d, %d data bits per slot, no "
+                 "pilot, no TFCI (TS 25.211 5.3.3.4 Table 18)"
+                 % (fmt, sf, per_slot)))
+    rows.append(("sf", "%d" % sf))
+    rows.append(("ndata_star", "%d" % ndata))
+    rows.append(("tb_bits", "%d" % tb_bits))
+    rows.append(("coding", "1/%d" % rate))
+    rows.append(("pack", pack))
+    for ent in entries:
+        rows.append(("sib", "%s bits=%d hex=%s"
+                     % (ent["sib"], len(ent["bits"]), _bits_hex(ent["bits"]))))
+    for i, m in enumerate(msgs):
+        seg = m.get("seg") if m["kind"] != "completeSIB-List" else m["entries"]
+        bits = si_message_bits(m["kind"], m["ent"], seg)
+        pad = (-len(bits)) % 8
+        tb = [int(c) for c in bits] + [0] * pad
+        tb_hex = _bits_hex(bits)
+        rows.append(("msg[%d].payload" % i,
+                     "combination=%d kind=%s sib=%s bits=%d octets=%d pad=%d "
+                     "hex=%s" % (SI_COMBINATION.get(m["kind"], 0), m["kind"],
+                                 m["ent"]["sib"], len(bits),
+                                 (len(bits) + 7) // 8, pad, tb_hex)))
+        stage_rows, par = fach_chain(tb, ndata, rate)
+        frame_bits = None
+        for name, sb, ref, note in stage_rows:
+            if name == "ilv2":
+                frame_bits = sb
+            rows.append(("msg[%d].stage:%s" % (i, name),
+                         "%s bits=%d ref=%s -- %s"
+                         % (_bits_hex(sb), len(sb), ref, note)))
+        rows.append(("msg[%d].rate_match" % i,
+                     "Ndata,*=%d Xi=%d dN=%+d e_ini=%d e_plus=%d e_minus=%d"
+                     % (par["xi"], par["xi"], par["dn"], par["e_ini"],
+                        par["e_plus"], par["e_minus"])))
+        if frame_bits is None or len(frame_bits) != ndata:
+            _die(1, "internal: message %d produced %s bits, not Ndata,* = %d"
+                 % (i, "no" if frame_bits is None else len(frame_bits), ndata))
+        fh = _bits_hex(frame_bits)
+        fpad = (-len(_bits_str(frame_bits))) % 8
+        rows.append(("msg[%d].frame_hex" % i, fh))
+        rows.append(("msg[%d].frame_bits" % i, "%d" % len(frame_bits)))
+        rows.append(("msg[%d].frame_pad" % i, "%d" % fpad))
+    rows.append(("frames", "%d" % len(msgs)))
+    rows.append(("next",
+                 "tools/umts_sccpch.py encode --sf %d --code 3 --frame-hex "
+                 "<msg[i].frame_hex> --out sccpch.cf32 (one file per frame)"
+                 % sf))
+    rows.append(("handoff",
+                 "the octets and the channel-coded frame end here; the S-CCPCH "
+                 "physical layer is tools/umts_sccpch.py and the transmitter is "
+                 "modules/08_umts_air.sh --transmit"))
+    for key, text in PACK_LIMITS:
+        rows.append(("limit", "%s: %s" % (key, text)))
+    _emit(rows)
+    return 0
 
 
 def cmd_fach(args):
@@ -1559,6 +1690,15 @@ def _parser():
     p.add_argument("--fach-tb-bits", dest="fach_tb_bits")
     p.add_argument("--pack", choices=("one", "combine"))
     p.set_defaults(func=cmd_si)
+
+    p = sub.add_parser("pack", help="SIBs onto the FACH transport, whole chain")
+    p.add_argument("--add", action="append", metavar="TYPE[:HEX[:BITS]]")
+    p.add_argument("--sf", type=str, help="S-CCPCH spreading factor: 256 or 128")
+    p.add_argument("--tb-bits", dest="tb_bits",
+                   help="transport block size in bits (from SIB5's TFS)")
+    p.add_argument("--coding", choices=("third", "half"))
+    p.add_argument("--pack", choices=("one", "combine"))
+    p.set_defaults(func=cmd_pack)
 
     p = sub.add_parser("fach", help="one FACH transport block through TS 25.212")
     p.add_argument("--tb-hex", dest="tb_hex", required=True)

@@ -67,7 +67,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 ### 3G / UMTS
 | Module | Description |
 |---|---|
-| `08_umts_air` | UTRAN decode and SIB fields, forged RRC setup/reject/paging, the TS 25.212 BCH chain, a WCDMA downlink carrier, and the COUNT/MAC-I AKA walk |
+| `08_umts_air` | UTRAN decode and SIB fields, forged RRC setup/reject/paging, the TS 25.212 BCH chain, a WCDMA downlink carrier, SIB1/SIB3/SIB5 packed onto the BCCH-FACH transport and spread on an S-CCPCH, and the COUNT/MAC-I AKA walk |
 
 ### 4G / LTE
 | Module | Description |
@@ -565,7 +565,7 @@ it, or both.
 | module | what it does | what stops it |
 |---|---|---|
 | `07_gsm_attack` | full GSM catcher sequence, forged BCCH carrier, A5/1 downgrade forcing | C1 must beat the real cell, the forged command must land in the right LAPDm window, and whether a handset accepts a clone depends on the handset and the location area |
-| `08_umts_air` | RRC forgery (setup/reject/paging), BCH through the whole TS 25.212 chain, WCDMA carrier with CPICH and both sync channels, MM identity request, uplink RACH | no duplex loop: nothing here receives UMTS uplink and answers it in one process |
+| `08_umts_air` | RRC forgery (setup/reject/paging), BCH through the whole TS 25.212 chain, WCDMA carrier with CPICH and both sync channels, SIB1/SIB3/SIB5 through the FACH chain onto an S-CCPCH, MM identity request, uplink RACH | no duplex loop: nothing here receives UMTS uplink and answers it in one process |
 | `33_jamming_detect` | ten waveform shapes including PSS/SSS/PBCH, PRACH, PRS and GPS C/A | `pucch` and `lte-ssb` are refused: this tree carries no PUCCH sequence generator, and LTE SSB is covered by pss+sss+pbch |
 | `45_iot` | NB-IoT RRC decoders through a generated codec | NPRACH and NPRFCN are refused — the parameters were not verifiable against the standard text, so they are named, not guessed |
 | `35_baseband` | mutation, corpus generation, crash triage, DIAG framing | no modulator: a payload is a handoff to srsRAN or OpenAirInterface |
@@ -601,7 +601,7 @@ the location and state halves are unverified by this tree.
 | `50_gprs` | GEA1–GEA5: no public algorithm text or reference vectors. GEA0 is computed (it is the identity) |
 | `16_sim` | the profile-element chain carried inside the `86` segments (SCP03t protects the block, it does not parse it), `HandleNotification` (the standard defines no response body), AUTS resynchronisation, and a live session — `--es8-scp03t` builds the 84/85/86 TLVs from a supplied key set and both challenges, but a card cryptogram can only be confirmed by an eUICC |
 | `41_ota_sms` | WIB push: only the leaf command bytes are missing, so it is refused rather than half-built |
-| `49_ntn` | SIB19 — no NR RRC layout table in the tree, and generating one is its own project |
+| `49_ntn` | feeder link — SIB19 carries no gateway geometry, so the gateway-satellite distance is not derivable from anything the cell broadcasts |
 | `46_lpp` | UTDOA is LPPa, not LPP, so it is stated as a handoff instead of encoded as the wrong protocol |
 | `26_ss7_map` | the ATI answer body: below it, `SubscriberState` is not encodable by any referee available here, so the location and state fields are named as unverified rather than shipped on a guess |
 | `20_gsm_cve`, `21_lte_cve`, `22_nr_cve` | catalogues and reachability checks. No exploit primitive in any of the three, and none claimed |
