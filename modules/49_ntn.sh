@@ -180,7 +180,7 @@ ntn_koffset() {
 ntn_sib19() {
     printf 'ERROR\tSIB19 cannot be decoded: this tree has no NR RRC ASN.1 layout table\n' >&2
     printf 'WHY\tSIB19 is a TS 38.331 ASN.1 IE. tools/asn1gen.py generates layout tables only for the LTE families rrc and nbiot; an NR table must be generated from the pycrate RRCNR module (SIB19_r17 is defined there) and verified case by case against it before a decoder here would be honest. Refusing rather than printing hex slices as fields.\n' >&2
-    printf 'NEXT\tadd an nr family to tools/asn1gen.py, emit the SIB19 layout table, certify it with tools/lte-per-oracle/verify_per.py --table, then wire --sib19-decode\n' >&2
+    printf 'NEXT\tthe nr family has been tried and does not certify yet: a root walk of NR.SIB19_r17 and NR.SystemInformation emits 204 types, and tools/lte-per-oracle/verify_per.py --table disagrees on the constrained integers (ARFCN_ValueEUTRA 0..262143 encodes as 18 bits here and 16 under pycrate on the same constraint), so the fault is in how the verifier drives those types or in the NR PER configuration, not in the schema. Fix that disagreement first, then wire --sib19-decode.\n' >&2
     return 2
 }
 # ── feeder link: not computed ───────────────────────────────────────────
