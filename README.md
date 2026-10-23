@@ -521,18 +521,77 @@ its `--help`, not in its name.
 
 Two holes are worth naming precisely, because their size is easy to overstate:
 
-- **3G camping, not 3G capture.** `08_umts_air` now forges the downlink
+- **3G camping, not 3G capture.** `08_umts_air` forges the downlink
   (`--build-rrc-setup`, `--build-rrc-reject`, `--build-paging`, each read back by
   an independent dissector), carries a real MIB through the whole TS 25.212 chain
-  onto the P-CCPCH (`--transmit --bch-hex`), and builds a WCDMA carrier with
-  CPICH and both sync channels. What it does not do is make a handset *camp and
-  then surrender its identity*: the SIB transport is empty, the MM identity
-  request is not in the tree, and a handset that already holds an AKA context
+  onto the P-CCPCH (`--transmit --bch-hex`), builds a WCDMA carrier with CPICH
+  and both sync channels, packs SIB1/SIB3/SIB5 onto BCCH-FACH
+  (`tools/umts_sib.py`), and builds the messages a catcher sends *upward*
+  (`--catcher-identity` MM IDENTITY REQUEST, `--catcher-auth` replay, uplink RACH).
+  What it still does not do is run the loop: nothing here receives UMTS uplink
+  and answers it in one process, and a handset that already holds an AKA context
   will not answer an unauthenticated network. `--catcher-model` names all eight
   steps and which of them exist rather than implying the chain is complete.
 - **The CVE catalogues.** `20_gsm_cve`, `21_lte_cve` and `22_nr_cve` catalogue
   vulnerabilities and check reachability against a stack state. None of the three
   contains an exploit primitive, and none claims to.
+
+---
+
+## What is not built
+
+The tree states its own limits rather than leaving them to be discovered. Every
+verb that cannot do something says so in one of two ways: a `limit` row naming
+what it did not do and why (89 of them across the modules), or a refusal with an
+`ERROR`/`WHY` pair and a non-zero exit (about 2500). A tool in `tools/` that
+cannot run its oracle **skips** and exits 2 — a skip is never a pass.
+
+The gaps fall into three classes, and only the first two are code.
+
+### 1. Needs a radio, or a second radio
+
+These build the message, the frame or the samples and stop at the antenna. The
+code is complete; the operation needs a licensed transmitter, a receiver beside
+it, or both.
+
+| module | what it does | what stops it |
+|---|---|---|
+| `07_gsm_attack` | full GSM catcher sequence, forged BCCH carrier, A5/1 downgrade forcing | C1 must beat the real cell, the forged command must land in the right LAPDm window, and whether a handset accepts a clone depends on the handset and the location area |
+| `08_umts_air` | RRC forgery (setup/reject/paging), BCH through the whole TS 25.212 chain, WCDMA carrier with CPICH and both sync channels, MM identity request, uplink RACH | no duplex loop: nothing here receives UMTS uplink and answers it in one process |
+| `33_jamming_detect` | ten waveform shapes including PSS/SSS/PBCH, PRACH, PRS and GPS C/A | `pucch` and `lte-ssb` are refused: this tree carries no PUCCH sequence generator, and LTE SSB is covered by pss+sss+pbch |
+| `45_iot` | NB-IoT RRC decoders through a generated codec | NPRACH and NPRFCN are refused — the parameters were not verifiable against the standard text, so they are named, not guessed |
+| `35_baseband` | mutation, corpus generation, crash triage, DIAG framing | no modulator: a payload is a handoff to srsRAN or OpenAirInterface |
+
+### 2. Needs the far side to answer
+
+The request is built correctly and the answer is decoded. What is missing is a
+peer, and a peer on a carrier network is an authorisation, not a commit.
+
+| module | built | missing |
+|---|---|---|
+| `26_ss7_map` | ten MAP operations, TCAP/SCCP/MTP3/M3UA/SGsAP, four decoders, **response builders** and **dialogue pairing** (transaction and invoke ids), M3UA over a real SCTP association | an STP that accepts your point code and an HLR that answers. `--m3ua-send` is disarmed unless `MAP_ARMED=1`, and even armed it needs a reachable STP. There is **no TDM MTP2**: an operator peering only over E1/TDM is out of reach |
+| `44_carrier_api` | OpenAPI parsing, authorisation matrix, request rendering, subscriber-sequence ordering | no executor — it writes `curl` lines and sends nothing |
+| `42_li_probe` | TLV framing, semi-octet BCD, provisioning / activation / product artefacts | the envelope is **self-defined**, not the TS 33.108 ASN.1, and nothing is delivered to an ADMF |
+| `11_lte_core`, `13_nr_core`, `40_sba_pivot`, `30_volte_ims` | GTP-C, Diameter, NGAP, PFCP, SBI and SIP message builders with senders over real SCTP/UDP associations | a core that answers, and `LTE_ARMED`/`NR_ARMED` set |
+
+### 3. Needs something that is not available here
+
+| module | refused, and why |
+|---|---|
+| `50_gprs` | GEA1–GEA5: no public algorithm text or reference vectors. GEA0 is computed (it is the identity) |
+| `16_sim` | ES8+ bodies 87/88/86 (SCP03t is SGP.02), the PPP chain inside 86, `HandleNotification` (the standard defines no response body), AUTS resynchronisation |
+| `41_ota_sms` | WIB push: only the leaf command bytes are missing, so it is refused rather than half-built |
+| `49_ntn` | SIB19 — no NR RRC layout table in the tree, and generating one is its own project |
+| `46_lpp` | UTDOA is LPPa, not LPP, so it is stated as a handoff instead of encoded as the wrong protocol |
+| `20_gsm_cve`, `21_lte_cve`, `22_nr_cve` | catalogues and reachability checks. No exploit primitive in any of the three, and none claimed |
+
+### How to audit it yourself
+
+```bash
+grep -n "limit" modules/<module>.sh        # what a module says it did not do
+bash modules/<module>.sh --help            # a refusal names its reason
+bash tools/check-<protocol>.sh             # SKIP (exit 2) when its oracle is absent
+```
 
 ---
 

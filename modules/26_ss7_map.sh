@@ -698,6 +698,65 @@ ss7_map_invoke() {
     ss7_tlv A1 "$inner"
 }
 
+# CONTINUE: carries the destination transaction id the peer used, so a dialogue
+# is two messages rather than two unrelated ones (Q.773 3.2).
+ss7_tcap_continue() {
+    local dtid="${1:-00000001}" comps="${2:-}"
+    dtid=$(ss7_nfc "$dtid"); ss7_is_hex "$dtid" || return 1
+    ss7_is_hex "$comps" || return 1
+    ss7_tlv 65 "$(ss7_tlv 49 "$dtid")$(ss7_tlv 6C "$comps")"
+}
+
+# END: the last message of a dialogue.
+ss7_tcap_end() {
+    local dtid="${1:-00000001}" comps="${2:-}"
+    dtid=$(ss7_nfc "$dtid"); ss7_is_hex "$dtid" || return 1
+    ss7_is_hex "$comps" || return 1
+    ss7_tlv 64 "$(ss7_tlv 49 "$dtid")$(ss7_tlv 6C "$comps")"
+}
+
+# MAP returnResultLast: A2 { invokeID INTEGER, SEQUENCE { opCode INTEGER,
+# parameter } }. The parameter carries its own universal SEQUENCE tag, which is
+# what a capture shows and what the ANY of the result holds (TS 29.002 17.1.8).
+ss7_map_result() {
+    local iid="${1:-1}" op="${2:-}" arg="${3:-}"
+    [[ "$iid" =~ ^[0-9]+$ && "$op" =~ ^[0-9]+$ ]] || return 1
+    arg=$(ss7_nfc "$arg"); ss7_is_hex "$arg" || arg=""
+    local res
+    if [[ -n "$arg" ]]; then
+        res="$(ss7_ber_int "$op")$(ss7_tlv 30 "$arg")"
+    else
+        res="$(ss7_ber_int "$op")"
+    fi
+    ss7_tlv A2 "$(ss7_ber_int "$iid")$(ss7_tlv 30 "$res")"
+}
+
+# sendRoutingInfo-ack parameter (TS 29.002 17.4.1, read from the text):
+#   SendRoutingInfoRes ::= [3] SEQUENCE {
+#       imsi                [9] IMSI OPTIONAL,
+#       extendedRoutingInfo     ExtendedRoutingInfo OPTIONAL, ... }
+#   ExtendedRoutingInfo ::= CHOICE { routingInfo RoutingInfo, camelRoutingInfo [8] }
+#   RoutingInfo         ::= CHOICE { roamingNumber ISDN-AddressString, forwardingData }
+# The first two CHOICEs are untagged, ISDN-AddressString is an OCTET STRING,
+# so the address appears as a plain 0x04 TLV and the message itself carries the
+# [3] tag, not a universal SEQUENCE. Three tags that a hand-built guess gets
+# wrong: 30 for the outer, 80 for the imsi, and an invented routingInfo tag.
+ss7_map_sri_res() {
+    local imsi_hex="${1:-}" addr_hex="${2:-}"
+    local body=""
+    [[ -n "$imsi_hex" ]] && body+="$(ss7_tlv 89 "$imsi_hex")"
+    [[ -n "$addr_hex" ]] && body+="$(ss7_tlv 04 "$addr_hex")"
+    ss7_tlv A3 "$body"
+}
+
+# An AddressString is one octet of nature-of-address/numbering-plan followed by
+# TBCD digits (TS 29.002 17.7.8): 0x91 is international, ISDN/telephony.
+ss7_map_address() {
+    local digits="${1:-}"
+    local tbcd; tbcd=$(ss7_imsi_hex "$digits") || return 1
+    printf '91%s' "$tbcd"
+}
+
 # Parse a TCAP message (optionally the SCCP payload of an MSU) and report the
 # transaction portion plus every component. Emits TSV rows.
 ss7_tcap_parse() {
@@ -2083,6 +2142,128 @@ ss7_cmd_build_sri() {
     printf 'roundtrip_opcode\t%s\n' "$(ss7_cmd_decode_map "$msu" | awk -F'\t' '$1=="component"{print $5; exit}')"
 }
 
+# ── responses: the other half of a dialogue ─────────────────────────────
+# A request builder proves the module can ask. These build what a peer sends
+# back, so a dialogue can be completed and read rather than only opened.
+ss7_cmd_build_response() {
+    local kind="${1:-}"; shift || true
+    local inv=1 otid="" imsi="" msc="" wrap="" dpc=1 opc=2 cssn=6 ossn=8
+    while (( $# )); do
+        case "$1" in
+            --invoke)   inv="${2:-1}"; shift 2 ;;
+            --otid)     otid="${2:-}"; shift 2 ;;
+            --imsi)     imsi="${2:-}"; shift 2 ;;
+            --msc)      msc="${2:-}"; shift 2 ;;
+            --wrap)     wrap="${2:-}"; shift 2 ;;
+            --dpc)      dpc="${2:-1}"; shift 2 ;;
+            --opc)      opc="${2:-2}"; shift 2 ;;
+            --cssn)     cssn="${2:-6}"; shift 2 ;;
+            --ossn)     ossn="${2:-8}"; shift 2 ;;
+            --help|-h)  printf 'usage: --build-response <sri-ack|sri-sm-ack|ulr-ack|ati-ack> [--invoke N] [--otid hex] [--imsi <digits>] [--msc <digits>]\n'; return 0 ;;
+            *)          printf 'ERROR\t--build-response does not take %s\n' "$(ss7_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ "$inv" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--invoke must be a number\n' >&2; return 2; }
+    local op name ih="" mh=""
+    case "$kind" in
+        sri-ack)     op=22; name="SendRoutingInfo-ack" ;;
+        sri-sm-ack)  op=45; name="SendRoutingInfoForSM-ack" ;;
+        ulr-ack)     op=2;  name="UpdateLocation-ack" ;;
+        ati-ack)     op=71; name="AnyTimeInterrogation-ack" ;;
+        *)  printf 'ERROR\t--build-response needs a kind: sri-ack, sri-sm-ack, ulr-ack, ati-ack\n' >&2; return 2 ;;
+    esac
+    [[ -n "$imsi" ]] && { ih=$(ss7_imsi_hex "$imsi") || { printf 'ERROR\tIMSI must be 5 to 15 digits: %s\n' "$(ss7_sanitize "$imsi")" >&2; return 2; }; }
+    [[ -n "$msc"  ]] && { mh=$(ss7_map_address "$msc")  || { printf 'ERROR\t--msc must be digits: %s\n' "$(ss7_sanitize "$msc")" >&2; return 2; }; }
+    local param comps tcap
+    param=$(ss7_map_sri_res "$ih" "$mh")
+    comps=$(ss7_map_result "$inv" "$op" "$param")
+    if [[ -n "$otid" ]]; then
+        tcap=$(ss7_tcap_end "$otid" "$comps") || { printf 'ERROR\t--otid must be hex\n' >&2; return 2; }
+    else
+        tcap="$comps"
+    fi
+    printf 'message\t%s\n' "$name"
+    printf 'opcode\t%s\n' "$op"
+    printf 'opcode_name\t%s\n' "$(ss7_map_opcode_name "$op" 2>/dev/null)"
+    printf 'component\treturnResultLast\n'
+    printf 'invoke_id\t%s\n' "$inv"
+    printf 'imsi_hex\t%s\n' "$ih"
+    printf 'msc_hex\t%s\n' "$mh"
+    printf 'parameter\t%s\n' "$param"
+    printf 'components\t%s\n' "$comps"
+    printf 'octets\t%s\n' "$(( ${#tcap} / 2 ))"
+    printf 'hex\t%s\n' "$tcap"
+    printf 'ref\tTS 29.002 17.4.1 (sendRoutingInfo res); Q.773 3.3 (returnResultLast)\n'
+    # The lower layers, so the answer can be put on a wire or into a capture
+    # without the caller re-deriving SCCP and MTP3 by hand.
+    case "$wrap" in
+        "") ;;
+        sccp|msu|m3ua)
+            local sccp msu
+            sccp=$(ss7_sccp_build_udt "$dpc" "$cssn" "$opc" "$ossn" "$tcap") || {
+                printf 'ERROR\tcannot wrap: point code or SSN out of range\n' >&2; return 2; }
+            msu=$(ss7_msu_build "$dpc" "$opc" 3 "$sccp") || {
+                printf 'ERROR\tcannot build the MTP3 layer\n' >&2; return 2; }
+            printf 'sccp_hex\t%s\n' "$sccp"
+            printf 'msu_hex\t%s\n' "$msu"
+            if [[ "$wrap" == "m3ua" ]]; then
+                local m3ua
+                m3ua=$(ss7_build_m3ua "$msu") || {
+                    printf 'ERROR\tcannot build the M3UA layer\n' >&2; return 2; }
+                printf 'm3ua_hex\t%s\n' "$m3ua"
+            fi
+            printf 'layers\ttcap'
+            [[ "$wrap" != "sccp" ]] && printf ' + sccp + mtp3'
+            [[ "$wrap" == "sccp" ]] && printf ' + sccp'
+            [[ "$wrap" == "m3ua" ]] && printf ' + m3ua/sctp'
+            printf '\n'
+            ;;
+        *)  printf 'ERROR\t--wrap must be sccp, msu or m3ua: %s\n' "$(ss7_sanitize "$wrap")" >&2; return 2 ;;
+    esac
+}
+
+# Pair a request with the answer that came back. A dialogue is complete only
+# when the answer's destination transaction id is the request's originator id
+# and the invoke id matches the one the request used (Q.773 3.2); anything else
+# is an orphan, a mismatch, or an answer to a different question.
+ss7_cmd_dialogue() {
+    local req="${1:-}" ans="${2:-}"
+    if [[ -z "$req" || -z "$ans" ]]; then
+        printf 'ERROR\tusage: --dialogue <request-hex> <answer-hex>\n' >&2
+        return 2
+    fi
+    # Either side may arrive as a bare TCAP message, an SCCP message or a full
+    # MSU, because that is what a capture hands you. --decode-map already knows
+    # how to strip the envelope, so reuse it rather than a second unwrapper.
+    local r d
+    r=$(ss7_cmd_decode_map "$req" 2>/dev/null) || { printf 'ERROR\tthe request does not decode as TCAP/MAP\n' >&2; return 1; }
+    d=$(ss7_cmd_decode_map "$ans" 2>/dev/null) || { printf 'ERROR\tthe answer does not decode as TCAP/MAP\n' >&2; return 1; }
+    local rotid rinv aotid adtid ainv
+    rotid=$(printf '%s\n' "$r" | awk -F'\t' '$1=="otid"{print $2; exit}')
+    rinv=$(printf '%s\n' "$r" | awk -F'\t' '$1=="component"{print $4; exit}')
+    aotid=$(printf '%s\n' "$d" | awk -F'\t' '$1=="otid"{print $2; exit}')
+    adtid=$(printf '%s\n' "$d" | awk -F'\t' '$1=="dtid"{print $2; exit}')
+    ainv=$(printf '%s\n' "$d" | awk -F'\t' '$1=="component"{print $4; exit}')
+    local verdict="complete" why="the answer carries the request's transaction id and invoke id"
+    if [[ -z "$adtid" ]]; then
+        verdict="orphan"; why="the answer has no destination transaction id, so nothing ties it to the request"
+    elif [[ "$adtid" != "$rotid" ]]; then
+        verdict="mismatched"; why="the answer's destination transaction id is not the request's originator id"
+    elif [[ -n "$rinv" && -n "$ainv" && "$rinv" != "$ainv" ]]; then
+        verdict="mismatched"; why="the invoke ids differ: this answers a different operation in the same dialogue"
+    fi
+    printf 'request_otid\t%s\n' "${rotid:--}"
+    printf 'request_invoke\t%s\n' "${rinv:--}"
+    printf 'answer_otid\t%s\n' "${aotid:--}"
+    printf 'answer_dtid\t%s\n' "${adtid:--}"
+    printf 'answer_invoke\t%s\n' "${ainv:--}"
+    printf 'verdict\t%s\n' "$verdict"
+    printf 'why\t%s\n' "$why"
+    printf 'ref\tITU-T Q.773 3.2 (transaction identifiers); Q.773 3.3 (components)\n'
+    [[ "$verdict" == "complete" ]] && return 0
+    return 3
+}
+
 ss7_cmd_build_sri_sm() {
     local msisdn="${1:-}"
     [[ -n "$msisdn" ]] || { printf 'ERROR\tusage: --build-sri-sm <msisdn>\n' >&2; return 2; }
@@ -2511,6 +2692,34 @@ ss7_selftest() {
     out=$(ss7_cmd_decode_map "$msu")
     chk map-sri-op    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="component"{print $5}')" "22"
     chk map-sri-opname "$(printf '%s\n' "$out" | awk -F'\t' '$1=="component"{print $6}')" "sendRoutingInfo"
+    # The response half: a peer's answer must build and read back as one.
+    # A separate variable: $out still holds the SRI decode that the next
+    # assertion reads, and clobbering it silently empties that check.
+    local rout
+    rout=$(ss7_cmd_build_response sri-ack --imsi 310150123456789 --msc 310150987654321)
+    chk resp-opname  "$(printf '%s\n' "$rout" | awk -F'\t' '$1=="message"{print $2}')" "SendRoutingInfo-ack"
+    chk resp-param   "$(printf '%s\n' "$rout" | awk -F'\t' '$1=="parameter"{print $2}')" "A315890813100521436587F904099113100589674523F1"
+    chk resp-result  "$(printf '%s\n' "$rout" | awk -F'\t' '$1=="component"{print $2}')" "returnResultLast"
+    chk resp-bad     "$(ss7_cmd_build_response nope >/dev/null 2>&1; echo $?)" "2"
+    chk resp-badflag "$(ss7_cmd_build_response sri-ack --msc 12 --wat >/dev/null 2>&1; echo $?)" "2"
+    # A response wrapped in END carries the peer's destination transaction id.
+    rout=$(ss7_cmd_build_response sri-ack --imsi 310150123456789 --otid 00000001)
+    local rend; rend=$(ss7_cmd_decode_tcap "$(printf '%s' "$rout" | awk -F'\t' '$1=="hex"{print $2}')")
+    chk resp-end-type "$(printf '%s\n' "$rend" | awk -F'\t' '$1=="tcap_message_type"{print $2}')" "end"
+    chk resp-end-dtid "$(printf '%s\n' "$rend" | awk -F'\t' '$1=="dtid"{print $2}')" "00000001"
+    chk resp-end-comp "$(printf '%s\n' "$rend" | awk -F'\t' '$1=="component"{print $3}')" "returnResultLast"
+    # Dialogue pairing: the answer must be tied to the request, not merely
+    # similar to it.
+    local dreq dans dout
+    dreq=$(ss7_cmd_build_sri 310150123456789 | awk -F'\t' '$1=="hex"{print $2}')
+    dans=$(ss7_cmd_build_response sri-ack --imsi 310150123456789 --otid 00000001 | awk -F'\t' '$1=="hex"{print $2}')
+    dout=$(ss7_cmd_dialogue "$dreq" "$dans")
+    chk dlg-complete   "$(printf '%s\n' "$dout" | awk -F'\t' '$1=="verdict"{print $2}')" "complete"
+    chk dlg-complete-rc "$(ss7_cmd_dialogue "$dreq" "$dans" >/dev/null 2>&1; echo $?)" "0"
+    chk dlg-no-dtid    "$(ss7_cmd_dialogue "$dreq" "$(ss7_tcap_begin 00000009 "$(ss7_map_result 1 22)")" 2>/dev/null | awk -F'\t' '$1=="verdict"{print $2}')" "orphan"
+    chk dlg-mismatch   "$(ss7_cmd_dialogue "$dreq" "$(ss7_cmd_build_response sri-ack --imsi 310150123456789 --otid 00000002 | awk -F'\t' '$1=="hex"{print $2}')" 2>/dev/null | awk -F'\t' '$1=="verdict"{print $2}')" "mismatched"
+    chk dlg-mismatch-rc "$(ss7_cmd_dialogue "$dreq" "$(ss7_cmd_build_response sri-ack --imsi 310150123456789 --otid 00000002 | awk -F'\t' '$1=="hex"{print $2}')" >/dev/null 2>&1; echo $?)" "3"
+    chk dlg-usage      "$(ss7_cmd_dialogue >/dev/null 2>&1; echo $?)" "2"
     chk map-sri-sccp  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="called_ssn"{print $2}')" "6"
     # Decoding a full MSU must walk MTP3 -> SCCP -> TCAP.
     out=$(ss7_cmd_decode_map "$msu")
@@ -3907,6 +4116,8 @@ ss7_cli_main() {
         --sgsap-ie)      ss7_cmd_sgsap_ie "${1:-}" ;;
         --decode-map)    ss7_cmd_decode_map "${1:-}" ;;
         --build-sri)     ss7_cmd_build_sri "${1:-}" ;;
+        --build-response) ss7_cmd_build_response "$@" ;;
+        --dialogue)      ss7_cmd_dialogue "${1:-}" "${2:-}" ;;
         --build-sri-sm)  ss7_cmd_build_sri_sm "${1:-}" ;;
         --build-ati)     ss7_cmd_build_ati "${1:-}" ;;
         --build-sai)         ss7_cmd_build_extra sai "${1:-}" "${2:-}" ;;
@@ -3938,6 +4149,15 @@ Usage: $0 COMMAND
   --decode-tcap <hex>        parse TCAP transaction + component portions
   --decode-map <hex>         decode MAP, unwrapping MSU or SCCP if present
   --build-sri <msisdn>       build a wire-ready SRI MSU
+  --build-response <kind>    build what a peer sends BACK, so a dialogue
+                             can be completed: sri-ack, sri-sm-ack,
+                             ulr-ack, ati-ack; --imsi, --msc, --invoke,
+                             --otid (wraps the result in a TCAP END),
+                             --wrap sccp|msu|m3ua adds the lower layers
+  --dialogue <req> <ans>     pair a request with an answer: compares the
+                             transaction and invoke ids and says whether the
+                             dialogue is complete, an orphan, or mismatched
+                             (exit 0 complete, 3 anything else)
   --build-sri-sm <msisdn>    build a wire-ready SRI-SM MSU
   --build-ati <imsi>         build a wire-ready ATI MSU
   --build-sai <imsi> [n]     build a SendAuthenticationInfo MSU (n vectors, default 5)
