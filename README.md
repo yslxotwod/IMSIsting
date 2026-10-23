@@ -577,7 +577,19 @@ peer, and a peer on a carrier network is an authorisation, not a commit.
 
 | module | built | missing |
 |---|---|---|
-| `26_ss7_map` | ten MAP operations, TCAP/SCCP/MTP3/M3UA/SGsAP, four decoders, **response builders** and **dialogue pairing** (transaction and invoke ids), M3UA over a real SCTP association | an STP that accepts your point code and an HLR that answers. `--m3ua-send` is disarmed unless `MAP_ARMED=1`, and even armed it needs a reachable STP. There is **no TDM MTP2**: an operator peering only over E1/TDM is out of reach |
+| `26_ss7_map` | ten MAP operations, TCAP/SCCP/MTP3/M3UA/SGsAP, four decoders, **response builders** and **dialogue pairing** (transaction and invoke ids), M3UA over a real SCTP association, **`--lab`** (peer up, ask, pair, verdict in one command), and `tools/ss7_responder.py`, a peer that encodes its answer with pycrate so a pass means two implementations agreed on the wire | an STP that accepts your point code and an HLR that answers. `--m3ua-send` is disarmed unless `MAP_ARMED=1`, and even armed it needs a reachable STP. There is **no TDM MTP2**: an operator peering only over E1/TDM is out of reach. Reach is a routing position (an assigned point code, a routed association, SSN 6 permission) plus admission — no software substitutes for it, and `--lab` says so in its own output |
+
+Identity directions in `26_ss7_map`, stated rather than implied: `SendRoutingInfo`
+and `SendRoutingInfoForSM` take a **number** and answer with an IMSI and a serving
+MSC; `--imsi` flips both to carry the IMSI instead (tag 81 where TS 29.002
+defines `msisdn [0]`, so tshark calls it malformed — some HLRs answer it because
+they read the field as TBCD and ignore the tag, and the ones that filter do not).
+`AnyTimeInterrogation` takes an IMSI in the standard's CHOICE and `--msisdn` uses
+the number arm, which tshark decodes cleanly. The **ATI answer body is not
+referee-checked**: pycrate here cannot encode `SubscriberState` (every arm of the
+CHOICE rejects its value) and writes `ageOfLocationInformation` untagged where
+TS 29.002 defines `[0]`, so `--build-response ati-ack` takes your parameter and
+the location and state halves are unverified by this tree.
 | `44_carrier_api` | OpenAPI parsing, authorisation matrix, request rendering, subscriber-sequence ordering | no executor — it writes `curl` lines and sends nothing |
 | `42_li_probe` | TLV framing, semi-octet BCD, provisioning / activation / product artefacts | the envelope is **self-defined**, not the TS 33.108 ASN.1, and nothing is delivered to an ADMF |
 | `11_lte_core`, `13_nr_core`, `40_sba_pivot`, `30_volte_ims` | GTP-C, Diameter, NGAP, PFCP, SBI and SIP message builders with senders over real SCTP/UDP associations | a core that answers, and `LTE_ARMED`/`NR_ARMED` set |
@@ -591,6 +603,7 @@ peer, and a peer on a carrier network is an authorisation, not a commit.
 | `41_ota_sms` | WIB push: only the leaf command bytes are missing, so it is refused rather than half-built |
 | `49_ntn` | SIB19 — no NR RRC layout table in the tree, and generating one is its own project |
 | `46_lpp` | UTDOA is LPPa, not LPP, so it is stated as a handoff instead of encoded as the wrong protocol |
+| `26_ss7_map` | the ATI answer body: below it, `SubscriberState` is not encodable by any referee available here, so the location and state fields are named as unverified rather than shipped on a guess |
 | `20_gsm_cve`, `21_lte_cve`, `22_nr_cve` | catalogues and reachability checks. No exploit primitive in any of the three, and none claimed |
 
 ### How to audit it yourself

@@ -1225,6 +1225,17 @@ ss7_arg_sri() {  # SendRoutingInfoArg ::= SEQUENCE { msisdn [0] }
     ss7_tlv 30 "$(ss7_tlv 80 "$mh")"
 }
 
+# The reverse direction: many HLRs accept an IMSI where the field is defined as
+# an MSISDN, because the argument is only checked for being a TBCD address.
+# That is the query that answers "which number is this card", and it is the one
+# operators filter first. Tag 81 is the next context tag in the SEQUENCE, so a
+# decoder that knows the field names it as an unexpected IMSI rather than
+# silently decoding TBCD digits as a phone number.
+ss7_arg_sri_imsi() {
+    local ih; ih=$(ss7_imsi_hex "${1:-}") || return 1
+    ss7_tlv 30 "$(ss7_tlv 81 "$ih")"
+}
+
 ss7_arg_sri_sm() {  # { msisdn [0], sm-RP-PRI [1] BOOLEAN, serviceCentreAddress [2] }
     local mh sh
     mh=$(ss7_msisdn_hex "${1:-}") || return 1
@@ -1232,11 +1243,28 @@ ss7_arg_sri_sm() {  # { msisdn [0], sm-RP-PRI [1] BOOLEAN, serviceCentreAddress 
     ss7_tlv 30 "$(ss7_tlv 80 "$mh")$(ss7_tlv 81 01)$(ss7_tlv 82 "$sh")"
 }
 
-ss7_arg_ati() {  # { subscriberIdentity [0] CHOICE{imsi[0]}, requestedInfo [1], gsmSCF-Address [3] }
+ss7_arg_sri_sm_imsi() {  # the same request with the identity reversed
+    local ih sh
+    ih=$(ss7_imsi_hex "${1:-}") || return 1
+    sh=$(ss7_msisdn_hex "${2:-33689000000}") || return 1
+    ss7_tlv 30 "$(ss7_tlv 81 "$ih")$(ss7_tlv 82 01)$(ss7_tlv 83 "$sh")"
+}
+
+# subscriberIdentity [0] is a CHOICE: imsi [0] or msisdn [1]. The IMSI arm is the
+# one that asks about a card; the MSISDN arm asks about a number and is what
+# returns location and subscriber state for a phone rather than a SIM.
+ss7_arg_ati() {
     local ih gh
     ih=$(ss7_imsi_hex "${1:-}") || return 1
     gh=$(ss7_msisdn_hex "${2:-33600000000}") || return 1
     ss7_tlv 30 "$(ss7_tlv A0 "$(ss7_tlv 80 "$ih")")$(ss7_tlv A1 "$(ss7_tlv 80 "")")$(ss7_tlv 83 "$gh")"
+}
+
+ss7_arg_ati_msisdn() {
+    local mh gh
+    mh=$(ss7_msisdn_hex "${1:-}") || return 1
+    gh=$(ss7_msisdn_hex "${2:-33600000000}") || return 1
+    ss7_tlv 30 "$(ss7_tlv A0 "$(ss7_tlv 81 "$mh")")$(ss7_tlv A1 "$(ss7_tlv 80 "")")$(ss7_tlv 83 "$gh")"
 }
 
 ss7_arg_psi() {  # { imsi [0], requestedInfo [1] { locationInformation [0], subscriberState [1] } }
@@ -1319,6 +1347,12 @@ ss7_build_msu() {
 # real direction (ATI only legitimately originates at the GMLC, ISD only runs
 # HLR -> VLR), so a caller-chosen SSN would let the build describe an exchange
 # the protocol does not permit.
+ss7_build_sri_imsi() { local a; a=$(ss7_arg_sri_imsi "${1:-}") || return 1
+                       ss7_build_msu 22 "$a" "${2:-1}" "${3:-00000001}" 6 145 "${4:-1}" "${5:-2}"; }
+ss7_build_sri_sm_imsi() { local a; a=$(ss7_arg_sri_sm_imsi "${1:-}" "${2:-}") || return 1
+                       ss7_build_msu 45 "$a" "${3:-1}" "${4:-00000001}" 6 145 "${5:-1}" "${6:-2}"; }
+ss7_build_ati_msisdn() { local a; a=$(ss7_arg_ati_msisdn "${1:-}" "${2:-}") || return 1
+                       ss7_build_msu 71 "$a" "${3:-1}" "${4:-00000001}" 6 145 "${5:-1}" "${6:-2}"; }
 ss7_build_sri()    { local a; a=$(ss7_arg_sri    "${1:-}")            || return 1
                      ss7_build_msu 22 "$a" "${2:-1}" "${3:-00000001}" 6 8   "${4:-1}" "${5:-2}"; }
 ss7_build_sri_sm() { local a; a=$(ss7_arg_sri_sm "${1:-}" "${2:-}")   || return 1
@@ -2133,15 +2167,76 @@ ss7_cmd_decode_sigtran() {
     ss7_cmd_decode_msu "$pdu"
 }
 
+# ── the lab round trip, as one command ──────────────────────────────────
+# Everything the SS7 module can do without a carrier in the loop, in one
+# invocation: start the peer that answers, ask it a routing question, pair the
+# answer with the request, and say whether the dialogue closed. The peer encodes
+# its answer with pycrate, so a pass means two independent implementations
+# agreed on the wire - not that this module agrees with itself. No route to a
+# carrier is involved and none is implied: that is a routing table on somebody
+# else's STP and no software can supply it.
+ss7_cmd_lab() {
+    local msisdn="${1:-17045550001}"
+    local py="${SS7_ORACLE_PY:-/home/ysl/.lte-oracles/venv/bin/python}"
+    local resp="$IMSISTING_ROOT/tools/ss7_responder.py"
+    [[ -f "$resp" ]] || { printf 'ERROR\tno responder at tools/ss7_responder.py\n' >&2; return 3; }
+    [[ -x "$py" ]] || {
+        printf 'ERROR\tno pycrate interpreter at %s, so the lab peer could not answer with an implementation independent of this module\n' "$(ss7_sanitize "$py")" >&2
+        printf 'WHY\ta pass here has to mean two encoders agreed; this module answering itself would prove nothing (the GTPv2 padding bug was exactly that)\n' >&2
+        return 3
+    }
+    command -v python3 >/dev/null 2>&1 || { printf 'ERROR\tpython3 is needed to run the responder\n' >&2; return 3; }
+    local port=$(( 29000 + ($$ % 500) ))
+    local log="$MOD_TMP/responder.log"
+    mkdir -p "$MOD_TMP" 2>/dev/null
+    python3 "$resp" --port "$port" --once --wait 25 > "$log" 2>&1 &
+    local rpid=$!
+    local i
+    for i in $(seq 1 50); do
+        grep -q '^listening' "$log" 2>/dev/null && break
+        sleep 0.1
+    done
+    if ! grep -q '^listening' "$log" 2>/dev/null; then
+        kill "$rpid" 2>/dev/null
+        printf 'ERROR\tthe responder never opened %s:%s over SCTP\n' "127.0.0.1" "$port" >&2
+        sed 's/^/  /' "$log" | head -4 >&2
+        return 1
+    fi
+    local req sent reply dlg
+    req=$(ss7_build_sri "$msisdn") || { kill "$rpid" 2>/dev/null; return 1; }
+    sent=$(MAP_ARMED=1 ss7_cmd_m3ua_send 127.0.0.1 "$port" "$req" 2>/dev/null || true)
+    wait "$rpid" 2>/dev/null
+    reply=$(printf '%s\n' "$sent" | awk -F'\t' '$1=="reply_msu_hex"{print $2}')
+    dlg=$(ss7_cmd_dialogue "$req" "$reply" 2>/dev/null || true)
+    printf 'lab_peer\t%s\n' "tools/ss7_responder.py on 127.0.0.1:$port over SCTP, MAP body encoded by pycrate"
+    printf 'lab_reaches\tno carrier: loopback only, no route to any STP\n'
+    printf 'lab_request_octets\t%s\n' "$(( ${#req} / 2 ))"
+    printf 'lab_reply_octets\t%s\n' "${#reply}"
+    printf 'lab_verdict\t%s\n' "$(awk -F'\t' '$1=="verdict"{print $2}' <<<"$dlg")"
+    printf 'lab_why\t%s\n' "$(awk -F'\t' '$1=="why"{print $2}' <<<"$dlg")"
+    printf 'lab_ref\t%s\n' "ITU-T Q.773 3.2 and 3.3 (transaction and component identifiers)"
+    printf 'limit\t%s\n' "what this does not prove is reach: an STP has to route a point code you were assigned to an association you own, and real subscriber data comes from a real HLR, neither of which any software can substitute"
+    [[ "$(awk -F'\t' '$1=="verdict"{print $2}' <<<"$dlg")" == "complete" ]] && return 0
+    printf 'ERROR\tthe dialogue did not close: %s\n' "$(awk -F'\t' '$1=="verdict"{print $2}' <<<"$dlg")" >&2
+    return 1
+}
+
 ss7_cmd_build_sri() {
-    local msisdn="${1:-}"
-    [[ -n "$msisdn" ]] || { printf 'ERROR\tusage: --build-sri <msisdn>\n' >&2; return 2; }
+    local msisdn="${1:-}" mode="msisdn"
+    [[ "${2:-}" == "--imsi" ]] && mode="imsi"
+    [[ -n "$msisdn" ]] || { printf 'ERROR\tusage: --build-sri <msisdn|imsi> [--imsi]\n' >&2; return 2; }
     local msu inv_hex
-    msu=$(ss7_build_sri "$msisdn") || { printf 'ERROR\tcannot encode MSISDN: %s\n' "$(ss7_sanitize "$msisdn")" >&2; return 1; }
+    if [[ "$mode" == "imsi" ]]; then
+        msu=$(ss7_build_sri_imsi "$msisdn") || { printf 'ERROR\tcannot encode IMSI: %s\n' "$(ss7_sanitize "$msisdn")" >&2; return 1; }
+    else
+        msu=$(ss7_build_sri "$msisdn") || { printf 'ERROR\tcannot encode MSISDN: %s\n' "$(ss7_sanitize "$msisdn")" >&2; return 1; }
+    fi
     printf 'message\tSendRoutingInfo (SRI)\n'
     printf 'opcode\t22\n'
     printf 'opcode_name\t%s\n' "$(ss7_map_opcode_name 22)"
-    printf 'msisdn\t%s\n' "$(ss7_sanitize "$msisdn")"
+    printf 'identity\t%s\n' "$mode"
+    [[ "$mode" == "imsi" ]] && printf 'limit\t%s\n' "tag 81 carries the IMSI where TS 29.002 defines msisdn [0], so this is not a spec-shaped request: tshark reports it malformed and an HLR answers only because it parses the field as TBCD and ignores the tag. Many do; the ones that filter do not."
+    printf '%s\t%s\n' "$mode" "$(ss7_sanitize "$msisdn")"
     printf 'octets\t%s\n' "$(( ${#msu} / 2 ))"
     printf 'hex\t%s\n' "$msu"
     printf 'roundtrip_opcode\t%s\n' "$(ss7_cmd_decode_map "$msu" | awk -F'\t' '$1=="component"{print $5; exit}')"
@@ -2280,28 +2375,42 @@ ss7_cmd_dialogue() {
 }
 
 ss7_cmd_build_sri_sm() {
-    local msisdn="${1:-}"
-    [[ -n "$msisdn" ]] || { printf 'ERROR\tusage: --build-sri-sm <msisdn>\n' >&2; return 2; }
+    local msisdn="${1:-}" mode="msisdn"
+    [[ "${2:-}" == "--imsi" ]] && mode="imsi"
+    [[ -n "$msisdn" ]] || { printf 'ERROR\tusage: --build-sri-sm <msisdn|imsi> [--imsi]\n' >&2; return 2; }
     local msu
-    msu=$(ss7_build_sri_sm "$msisdn") || { printf 'ERROR\tcannot encode MSISDN: %s\n' "$(ss7_sanitize "$msisdn")" >&2; return 1; }
+    if [[ "$mode" == "imsi" ]]; then
+        msu=$(ss7_build_sri_sm_imsi "$msisdn") || { printf 'ERROR\tcannot encode IMSI: %s\n' "$(ss7_sanitize "$msisdn")" >&2; return 1; }
+    else
+        msu=$(ss7_build_sri_sm "$msisdn") || { printf 'ERROR\tcannot encode MSISDN: %s\n' "$(ss7_sanitize "$msisdn")" >&2; return 1; }
+    fi
     printf 'message\tSendRoutingInfoForSM (SRI-SM)\n'
     printf 'opcode\t45\n'
     printf 'opcode_name\t%s\n' "$(ss7_map_opcode_name 45)"
-    printf 'msisdn\t%s\n' "$(ss7_sanitize "$msisdn")"
+    printf 'identity\t%s\n' "$mode"
+    [[ "$mode" == "imsi" ]] && printf 'limit\t%s\n' "tag 81 carries the IMSI where TS 29.002 defines msisdn [0], so this is not a spec-shaped request: tshark reports it malformed and an HLR answers only because it parses the field as TBCD and ignores the tag. Many do; the ones that filter do not."
+    printf '%s\t%s\n' "$mode" "$(ss7_sanitize "$msisdn")"
     printf 'octets\t%s\n' "$(( ${#msu} / 2 ))"
     printf 'hex\t%s\n' "$msu"
     printf 'roundtrip_opcode\t%s\n' "$(ss7_cmd_decode_map "$msu" | awk -F'\t' '$1=="component"{print $5; exit}')"
 }
 
 ss7_cmd_build_ati() {
-    local imsi="${1:-}"
-    [[ -n "$imsi" ]] || { printf 'ERROR\tusage: --build-ati <imsi>\n' >&2; return 2; }
+    local imsi="${1:-}" mode="imsi"
+    [[ "${2:-}" == "--msisdn" ]] && mode="msisdn"
+    [[ -n "$imsi" ]] || { printf 'ERROR\tusage: --build-ati <imsi|msisdn> [--msisdn]\n' >&2; return 2; }
     local msu
-    msu=$(ss7_build_ati "$imsi") || { printf 'ERROR\tcannot encode IMSI: %s\n' "$(ss7_sanitize "$imsi")" >&2; return 1; }
+    if [[ "$mode" == "msisdn" ]]; then
+        msu=$(ss7_build_ati_msisdn "$imsi") || { printf 'ERROR\tcannot encode MSISDN: %s\n' "$(ss7_sanitize "$imsi")" >&2; return 1; }
+    else
+        msu=$(ss7_build_ati "$imsi") || { printf 'ERROR\tcannot encode IMSI: %s\n' "$(ss7_sanitize "$imsi")" >&2; return 1; }
+    fi
     printf 'message\tAnyTimeInterrogation (ATI)\n'
     printf 'opcode\t71\n'
     printf 'opcode_name\t%s\n' "$(ss7_map_opcode_name 71)"
-    printf 'imsi\t%s\n' "$(ss7_sanitize "$imsi")"
+    printf 'identity\t%s\n' "$mode"
+    [[ "$mode" == "msisdn" ]] && printf 'ref\t%s\n' "subscriberIdentity [0] is a CHOICE of imsi [0] | msisdn [1] (TS 29.002), so the number arm is spec-shaped and tshark decodes it without a malformed report."
+    printf '%s\t%s\n' "$mode" "$(ss7_sanitize "$imsi")"
     printf 'octets\t%s\n' "$(( ${#msu} / 2 ))"
     printf 'hex\t%s\n' "$msu"
     printf 'roundtrip_opcode\t%s\n' "$(ss7_cmd_decode_map "$msu" | awk -F'\t' '$1=="component"{print $5; exit}')"
@@ -2827,6 +2936,23 @@ ss7_selftest() {
     chk val-build-sri-bad      "$(ss7_cmd_build_sri notanumber >/dev/null 2>&1; echo $?)" "1"
     chk val-build-sri-sm-none  "$(ss7_cmd_build_sri_sm >/dev/null 2>&1; echo $?)" "2"
     chk val-build-ati-none     "$(ss7_cmd_build_ati >/dev/null 2>&1; echo $?)" "2"
+    # The identity can now be reversed in all three operations. The SRI/SRI-SM
+    # arms are not spec-shaped (tag 81 where the SEQUENCE defines msisdn [0]) and
+    # say so in a limit row; ATI's number arm IS the standard's CHOICE.
+    out=$(ss7_cmd_build_sri 310150123456789 --imsi)
+    chk rev-sri-tag      "$(printf '%s\n' "$out" | grep -c '810813100521436587F9')" "1"
+    chk rev-sri-identity "$(fld "$out" identity)" "imsi"
+    chk rev-sri-limit    "$(printf '%s\n' "$out" | grep -c '^limit	')" "1"
+    out=$(ss7_cmd_build_sri_sm 310150123456789 --imsi)
+    chk rev-srism-tag    "$(printf '%s\n' "$out" | grep -c '810813100521436587F9')" "1"
+    chk rev-srism-op     "$(fld "$out" opcode)" "45"
+    out=$(ss7_cmd_build_ati 33612345678 --msisdn)
+    chk rev-ati-arm      "$(printf '%s\n' "$out" | grep -c 'A0')" "1"
+    chk rev-ati-identity "$(fld "$out" identity)" "msisdn"
+    chk rev-ati-ref      "$(printf '%s\n' "$out" | grep -c '^ref	')" "1"
+    # --lab refuses rather than pretending when the independent encoder is gone:
+    # a peer that answered with this module's own encoder would prove nothing.
+    chk lab-needs-oracle "$(SS7_ORACLE_PY=/nonexistent ss7_cmd_lab >/dev/null 2>&1; echo $?)" "3"
     chk val-build-ati-bad      "$(ss7_cmd_build_ati 12 >/dev/null 2>&1; echo $?)" "1"
     chk val-decode-tcap-none   "$(ss7_cmd_decode_tcap >/dev/null 2>&1; echo $?)" "2"
     chk val-decode-tcap-bad    "$(ss7_cmd_decode_tcap zzzz >/dev/null 2>&1; echo $?)" "1"
@@ -4134,11 +4260,12 @@ ss7_cli_main() {
         --sgsap-parse)   ss7_cmd_sgsap_parse "${1:-}" ;;
         --sgsap-ie)      ss7_cmd_sgsap_ie "${1:-}" ;;
         --decode-map)    ss7_cmd_decode_map "${1:-}" ;;
-        --build-sri)     ss7_cmd_build_sri "${1:-}" ;;
+        --build-sri)     ss7_cmd_build_sri "${1:-}" "${2:-}" ;;
         --build-response) ss7_cmd_build_response "$@" ;;
         --dialogue)      ss7_cmd_dialogue "${1:-}" "${2:-}" ;;
-        --build-sri-sm)  ss7_cmd_build_sri_sm "${1:-}" ;;
-        --build-ati)     ss7_cmd_build_ati "${1:-}" ;;
+        --build-sri-sm)  ss7_cmd_build_sri_sm "${1:-}" "${2:-}" ;;
+        --build-ati)     ss7_cmd_build_ati "${1:-}" "${2:-}" ;;
+        --lab)           ss7_cmd_lab "${1:-}" ;;
         --build-sai)         ss7_cmd_build_extra sai "${1:-}" "${2:-}" ;;
         --build-psi)         ss7_cmd_build_extra psi "${1:-}" ;;
         --build-ulr)         ss7_cmd_build_extra ulr "${1:-}" "${2:-}" "${3:-}" ;;
@@ -4178,7 +4305,8 @@ Usage: $0 COMMAND
                              dialogue is complete, an orphan, or mismatched
                              (exit 0 complete, 3 anything else)
   --build-sri-sm <msisdn>    build a wire-ready SRI-SM MSU
-  --build-ati <imsi>         build a wire-ready ATI MSU
+  --build-ati <id> [--msisdn]  build a wire-ready ATI MSU (identity is imsi by default)
+  --lab [msisdn]             start the peer, ask, pair, and report the verdict
   --build-sai <imsi> [n]     build a SendAuthenticationInfo MSU (n vectors, default 5)
   --build-psi <imsi>         build a ProvideSubscriberInfo MSU
   --build-ulr <imsi> [msc] [vlr]

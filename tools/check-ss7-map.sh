@@ -183,7 +183,41 @@ BAD="$(printf '%s' "$TCAP" | sed 's/490400000001/490400000009/')"
 d2=$("$MODULE" --dialogue "$REQ" "$BAD" 2>/dev/null || true)
 chk dialogue-mismatch "$(hex_of "$d2" verdict)" "mismatched"
 
+# ── lane 4: the responder, a dialogue that actually closes ──────────────
+# This is the lane that matters most: it is the only one where an answer in this
+# tree is produced by a different implementation than the one that asked. The
+# responder encodes the MAP body with pycrate; the module wraps it and the
+# module's own --dialogue decides whether the two agree. If pycrate is absent the
+# lane SKIPS rather than passing on a self-consistent answer, because that is the
+# whole point of it.
+ORACLE="${SS7_ORACLE_PY:-/home/ysl/.lte-oracles/venv/bin/python}"
+RESPONDER="$ROOT/tools/ss7_responder.py"
+if [[ -x $ORACLE && -f $RESPONDER ]]; then
+    PORT=$(( 29000 + $$ % 500 ))
+    RLOG="$WORK/responder.log"
+    python3 "$RESPONDER" --port "$PORT" --once --wait 25 > "$RLOG" 2>&1 &
+    RPID=$!
+    for _ in $(seq 1 50); do grep -q '^listening' "$RLOG" 2>/dev/null && break; sleep 0.1; done
+    REQ2="$(hex_of "$("$MODULE" --build-sri 17045550001 2>/dev/null)" hex)"
+    SENT=$(MAP_ARMED=1 "$MODULE" --m3ua-send 127.0.0.1 "$PORT" "$REQ2" 2>/dev/null || true)
+    wait "$RPID" 2>/dev/null || true
+    chk responder-listen   "$(grep -c '^listening' "$RLOG")" "1"
+    chk responder-aspup    "$(grep -c 'ASPUP.*answered.*ASPUP-ACK' "$RLOG")" "1"
+    chk responder-aspac    "$(grep -c 'ASPAC.*answered.*ASPAC-ACK' "$RLOG")" "1"
+    chk responder-answered "$(hex_of "$SENT" reply_msu_octets)" "66"
+    REPLY="$(hex_of "$SENT" reply_msu_hex)"
+    chk responder-oracle   "$(grep -c '^answer[[:space:]]*sent' "$RLOG")" "1"
+    D3=$("$MODULE" --dialogue "$REQ2" "$REPLY" 2>/dev/null || true)
+    chk responder-dialogue "$(hex_of "$D3" verdict)" "complete"
+    # The IMSI in the answer is the responder's table, not the module's: if the
+    # two encoders agreed by accident this value would still be right, so the
+    # check is that the answer carries one at all and that the ids line up.
+    chk responder-answer-imsi "$(grep -oc '890813100521436587F9' <<<"${REPLY^^}")" "1"
+else
+    skip responder "no pycrate interpreter at $ORACLE, so the answer would be our own encoder agreeing with itself"
+fi
+
 printf 'CHECKS\t%d\nFAILED\t%d\nSKIPPED\t%d\n' "$nchk" "$nfail" "$nskip"
 if (( nfail > 0 )); then printf 'RESULT\tFAIL\n'; exit 1; fi
-if (( nskip == 3 )); then printf 'RESULT\tSKIP\n'; exit 2; fi
+if (( nskip >= 3 )); then printf 'RESULT\tSKIP\n'; exit 2; fi
 printf 'RESULT\tPASS\n'

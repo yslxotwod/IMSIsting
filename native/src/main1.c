@@ -6132,6 +6132,7 @@ static const ChipRow chip_rows[] = {
     { "26_ss7_map",          "--build-register-ss",   NEED_NO, DOES_BUILDS },
     { "26_ss7_map",          "--build-sai",           NEED_NO, DOES_BUILDS },
     { "26_ss7_map",          "--build-sri",           NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--lab",                 NEED_NO, DOES_BUILDS },
     { "26_ss7_map",          "--build-sri-sm",        NEED_NO, DOES_BUILDS },
     { "26_ss7_map",          "--build-ulr",           NEED_NO, DOES_BUILDS },
     { "26_ss7_map",          "--decode-map",          NEED_NO, DOES_READS },
@@ -26243,6 +26244,8 @@ ss7_build_decode(AppState *state, const char *module_id,
     GtkWidget *tcap = verb_card("READ THE TCAP MESSAGES", &tcap_body);
     GtkWidget *map = verb_card("MAP THEM", &map_body);
     GtkWidget *dlg = verb_card("PAIR A REQUEST WITH ITS ANSWER", &dlg_body);
+    GtkWidget *lab_body;
+    GtkWidget *lab = verb_card("RUN THE WHOLE LOOP", &lab_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26311,6 +26314,26 @@ ss7_build_decode(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(dlg_body), res);
     }
     gtk_box_append(GTK_BOX(body), dlg);
+    mod_card_end();
+
+    /* The whole loop as one press: peer up, ask a routing question, pair the
+       answer, verdict. It is the only control here that runs a second process
+       of this tree, and it says in its own output that nothing left the
+       machine. A pass means pycrate's encoder and this module's agreed. */
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(lab_body),
+            mod_arg_row_prefilled(state, module_id, status, "Run the Lab Round Trip",
+                "--lab", "17045550001",
+                "A test number. The module starts its own MAP peer on loopback "
+                "over SCTP, sends a routing query, and pairs the answer with the "
+                "request. The peer encodes its answer with pycrate, so a pass "
+                "means two independent implementations agreed on the wire. No "
+                "carrier is reached: reach is a routing position, not software."));
+        gtk_box_append(GTK_BOX(lab_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), lab);
     mod_card_end();
 
     (void) out;
