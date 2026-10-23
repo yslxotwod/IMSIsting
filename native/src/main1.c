@@ -550,6 +550,9 @@ struct _AppState {
     GtkMediaStream *splash_media;     /* the film, polled for "has it ended" */
     gint64          splash_film_us;   /* when the film started playing */
     gint64          splash_start_us;  /* when the splash first appeared */
+    /* The page's one answer surface, NULL when the page still uses the
+       per-card well. */
+    GtkWidget *answer_view;
 };
 
 /* A run that has ended, handed to whoever asked to be told. `text` is the
@@ -563,6 +566,11 @@ typedef struct {
     char *module_id;
     char *label;
     GtkWidget *status_label;
+    /* The page's one answer surface. A page that sets this sends every run's
+       text here instead of growing a well under the button that was pressed:
+       one surface per page, replaced on each run, coloured by the module's own
+       first word. NULL on pages still using the per-card surface. */
+    GtkWidget *answer_view;
     GSubprocess *proc;
     GDataInputStream *out;
     GDataInputStream *err;
@@ -1660,6 +1668,110 @@ status_label_set(GtkWidget *label, const char *text, const char *css)
     if (css != NULL && *css != '\0')
         gtk_widget_add_css_class(label, css);
 }
+static char *display_text(const char *raw);
+static void mod_card_begin_answer(GtkWidget *answer_view);
+
+/* ── the page's answer surface ──────────────────────────────────────────
+   wifisting's shape, copied deliberately: ONE text view per page, its
+   contents REPLACED on every run, every line coloured by the word it starts
+   with. It never accumulates, so it cannot grow into a log, and it does not
+   parse the output into rows, so a module that emits `key<TAB>value` keeps
+   its own alignment. Colours are fixed rather than taken from the accent
+   because an error has to read as an error on both themes. */
+static void
+answer_view_write(GtkWidget *view, const char *text)
+{
+    if (view == NULL || !GTK_IS_TEXT_VIEW(view)) return;
+
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));
+    static gboolean tags_ready = FALSE;
+
+    if (!tags_ready) {
+        gtk_text_buffer_create_tag(buf, "av-error", "foreground", "#ff6b6b", NULL);
+        gtk_text_buffer_create_tag(buf, "av-warn",  "foreground", "#ffb454", NULL);
+        gtk_text_buffer_create_tag(buf, "av-ok",    "foreground", "#4ade80", NULL);
+        gtk_text_buffer_create_tag(buf, "av-dim",   "foreground", "#8b93a1", NULL);
+        tags_ready = TRUE;
+    }
+
+    gtk_text_buffer_set_text(buf, "", -1);
+    if (text == NULL || *text == '\0') return;
+
+    g_auto(GStrv) lines = g_strsplit(text, "\n", -1);
+
+    for (guint i = 0; lines[i] != NULL; i++) {
+        const char *l = lines[i];
+        const char *tag = NULL;
+        GtkTextIter end;
+
+        while (*l == ' ' || *l == '\t') l++;
+        if (l[0] == '[') l++;
+        if (!g_ascii_strncasecmp(l, "error", 5) || !g_ascii_strncasecmp(l, "why", 3) ||
+            !g_ascii_strncasecmp(l, "fail", 4) || !g_ascii_strncasecmp(l, "notdecoded", 10))
+            tag = "av-error";
+        else if (!g_ascii_strncasecmp(l, "warn", 4))
+            tag = "av-warn";
+        else if (!g_ascii_strncasecmp(l, "ok", 2) || !g_ascii_strncasecmp(l, "pass", 4))
+            tag = "av-ok";
+        else if (!g_ascii_strncasecmp(l, "note", 4) || !g_ascii_strncasecmp(l, "limit", 5) ||
+                 !g_ascii_strncasecmp(l, "why", 3) || !g_ascii_strncasecmp(l, "ref", 3) ||
+                 !g_ascii_strncasecmp(l, "handoff", 7) || !g_ascii_strncasecmp(l, "next", 4))
+            tag = "av-dim";
+
+        gtk_text_buffer_get_end_iter(buf, &end);
+        if (tag != NULL)
+            gtk_text_buffer_insert_with_tags_by_name(buf, &end, lines[i], -1, tag, NULL);
+        else {
+            g_autofree char *shown = display_text(lines[i]);
+
+            gtk_text_buffer_insert(buf, &end, shown, -1);
+        }
+        gtk_text_buffer_get_end_iter(buf, &end);
+        gtk_text_buffer_insert(buf, &end, "\n", -1);
+    }
+}
+
+/* Which surface the card being filled answers into. Kept beside the card
+   stack because a page has one surface and many cards. */
+static GtkWidget *mod_card_answer = NULL;
+
+static void
+mod_card_begin_answer(GtkWidget *answer_view)
+{
+    mod_card_answer = answer_view;
+}
+
+/* The surface a page mounts: a hairline, then the view. Nothing else - no
+   caption, no summary bar, no per-row buttons. */
+static GtkWidget *
+answer_view_new(AppState *state, GtkWidget **view_out)
+{
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    GtkWidget *rule = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    GtkWidget *view = gtk_text_view_new();
+
+    gtk_widget_add_css_class(rule, "answer-rule");
+    gtk_widget_add_css_class(view, "answer-text");
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(view), FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(view), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(view), TRUE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view), GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(view), 2);
+    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(view), 6);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(view), 2);
+    gtk_widget_set_size_request(scroll, -1, 190);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), view);
+
+    gtk_box_append(GTK_BOX(col), rule);
+    gtk_box_append(GTK_BOX(col), scroll);
+
+    if (view_out != NULL) *view_out = view;
+    return col;
+}
+
 
 static void action_read_line(ActionRun *run, gboolean is_err);
 /* Defined with the module output card further down; the action runner
@@ -1685,7 +1797,24 @@ action_run_unref(ActionRun *run)
 
     /* Now the module's whole answer is known: close the card it was read in
        with one line saying how the run ended, then take the Stop away. */
-    if (run->output != NULL) {
+    /* A page with its own answer surface takes the run's whole text, replaced,
+       and skips the per-card machinery entirely: no card to close, no summary
+       bar, no receipt compaction. */
+    gboolean answer_written = FALSE;
+
+    if (run->state != NULL && run->state->answer_view != NULL &&
+        run->captured != NULL && run->captured->len > 0) {
+        answer_view_write(run->state->answer_view, run->captured->str);
+        if (run->saw_error || !run->wait_ok || run->wait_status != 0)
+            show_toast_full(run->state, run->label, "failed", "error");
+        else
+            show_toast_full(run->state, run->label, "done", "ok");
+        answer_written = TRUE;
+    }
+
+    if (answer_written) {
+        /* nothing to close: the page surface already holds the answer */
+    } else if (run->output != NULL) {
         ResultRect *rr = g_object_get_data(G_OBJECT(run->output), "result-rect");
         g_autofree char *verdict = run->stopped
             ? g_strdup("stopped")
@@ -19250,6 +19379,10 @@ radio_bench_run_button(GtkWidget *button, AppState *state,
     g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
     g_object_set_data(G_OBJECT(button), "status", status);
     g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
+    if (mod_card_answer != NULL)
+        g_object_set_data(G_OBJECT(button), "answer-view", mod_card_answer);
+    if (mod_card_answer != NULL)
+        g_object_set_data(G_OBJECT(button), "answer-view", mod_card_answer);
     if (args != NULL)
         g_object_set_data_full(G_OBJECT(button), "args", g_strdup(args), g_free);
     g_signal_connect(button, "clicked", G_CALLBACK(group_verb_clicked), NULL);
@@ -19378,6 +19511,8 @@ radio_bench_arg_action(AppState *state, const char *module_id,
     g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
     g_object_set_data(G_OBJECT(button), "status", status);
     g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
+    if (mod_card_answer != NULL)
+        g_object_set_data(G_OBJECT(button), "answer-view", mod_card_answer);
     g_object_set_data(G_OBJECT(button), "arg-entry", entry);
     g_signal_connect(button, "clicked", G_CALLBACK(group_arg_clicked), NULL);
     gtk_box_append(GTK_BOX(row), caption);
@@ -20503,6 +20638,8 @@ fkit_composer_verb(AppState *state, const char *module_id, GtkWidget *status,
     g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
     g_object_set_data(G_OBJECT(button), "status", status);
     g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
+    if (mod_card_answer != NULL)
+        g_object_set_data(G_OBJECT(button), "answer-view", mod_card_answer);
     g_object_set_data(G_OBJECT(button), "arg-entry", entry);
     g_signal_connect(button, "clicked", G_CALLBACK(group_arg_clicked), NULL);
     gtk_box_append(GTK_BOX(row), caption);
@@ -21621,6 +21758,8 @@ latt_build_attach(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
+    GtkWidget *av_view = NULL;
+    GtkWidget *av_col = answer_view_new(state, &av_view);
     GtkWidget *outer = radio_view_shell("HOW A HANDSET ATTACHES",
         "The request that starts a session, built byte for byte, and the same "
         "bytes read back as fields.", &body);
@@ -21632,14 +21771,13 @@ latt_build_attach(AppState *state, const char *module_id,
     {
         GtkWidget *res = result_rect_new(state, NULL);
 
-        mod_card_begin(res);
+        mod_card_begin_answer(av_view);
         gtk_box_append(GTK_BOX(enc_body),
             mod_arg_row_prefilled(state, module_id, status, "Build the Request",
                 "--encode-attach", "310150123456789",
                 "The subscriber identity. The answer is the NAS message as hex, "
                 "with the plmn, the identity type and the TAC derived from it."));
-        gtk_box_append(GTK_BOX(enc_body), res);
-    }
+            }
     gtk_box_append(GTK_BOX(body), enc);
 
     {
@@ -21652,8 +21790,7 @@ latt_build_attach(AppState *state, const char *module_id,
                 "The NAS message as hex. The security header decides how the "
                 "rest is read: a plain message and a protected one do not share "
                 "an offset."));
-        gtk_box_append(GTK_BOX(dec_body), res);
-    }
+            }
     gtk_box_append(GTK_BOX(body), dec);
 
     {
@@ -21665,10 +21802,11 @@ latt_build_attach(AppState *state, const char *module_id,
                 "--ue-stack", "",
                 "Which LTE UE stack this machine has, by name if it has none. "
                 "A modem on a serial port counts, and is reported as such."));
-        gtk_box_append(GTK_BOX(stack_body), res);
-    }
+            }
     gtk_box_append(GTK_BOX(body), stack);
-    mod_card_end();
+    /* One answer surface for the whole page: every card's answer lands here,
+       replaced on each run, so nothing grows a well under its own button. */
+    gtk_box_append(GTK_BOX(body), av_col);
 
     (void) out;
     return outer;
@@ -21679,6 +21817,8 @@ latt_build_identity(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
+    GtkWidget *av_view = NULL;
+    GtkWidget *av_col = answer_view_new(state, &av_view);
     GtkWidget *outer = radio_view_shell("IDENTITY",
         "How a subscriber identity is coded on the wire, and the one request that "
         "makes a handset say it in the clear.", &body);
@@ -21690,15 +21830,14 @@ latt_build_identity(AppState *state, const char *module_id,
     {
         GtkWidget *res = result_rect_new(state, NULL);
 
-        mod_card_begin(res);
+        mod_card_begin_answer(av_view);
         gtk_box_append(GTK_BOX(enc_body),
             mod_arg_row_prefilled(state, module_id, status, "Encode the Identity",
                 "--imsi-encode", "310150123456789",
                 "The IMSI as digits. The answer is the packed BCD and the EPS "
                 "mobile identity that carries it, which is where a swapped "
                 "half-octet shows."));
-        gtk_box_append(GTK_BOX(enc_body), res);
-    }
+            }
     gtk_box_append(GTK_BOX(body), enc);
 
     {
@@ -21710,8 +21849,7 @@ latt_build_identity(AppState *state, const char *module_id,
                 "--imsi-decode", "08090113100521436587F9",
                 "The identity as hex. IMSI, IMEI and GUTI share a length octet "
                 "and nothing else, so the type decides the reading."));
-        gtk_box_append(GTK_BOX(dec_body), res);
-    }
+            }
     gtk_box_append(GTK_BOX(body), dec);
 
     {
@@ -21724,14 +21862,15 @@ latt_build_identity(AppState *state, const char *module_id,
                 "A plain-NAS IDENTITY REQUEST asking for the IMSI is the "
                 "canonical exposure: the answer names the finding and its "
                 "severity, and a protected request is reported as not exposed."));
-        gtk_box_append(GTK_BOX(exp_body), res);
-    }
+            }
     gtk_box_append(GTK_BOX(exp_body), fkit_note(
         "The check reads the security header before the body. A protected "
         "request carries the same message type and means something different, "
         "which is why the security context is printed beside the finding."));
     gtk_box_append(GTK_BOX(body), exp);
-    mod_card_end();
+    /* One answer surface for the whole page: every card's answer lands here,
+       replaced on each run, so nothing grows a well under its own button. */
+    gtk_box_append(GTK_BOX(body), av_col);
 
     (void) out;
     return outer;
@@ -26098,11 +26237,12 @@ ss7_build_decode(AppState *state, const char *module_id,
     GtkWidget *outer = radio_view_shell("READ A MESSAGE",
         "A capture read from the MSU inwards: the SS7 transport, the TCAP "
         "dialogue, and the MAP operation inside it.", &body);
-    GtkWidget *msu_body, *sigtran_body, *tcap_body, *map_body;
+    GtkWidget *msu_body, *sigtran_body, *tcap_body, *map_body, *dlg_body;
     GtkWidget *msu = verb_card("READ THE MSU", &msu_body);
     GtkWidget *sigtran = verb_card("READ THE SIGTRAN MESSAGES", &sigtran_body);
     GtkWidget *tcap = verb_card("READ THE TCAP MESSAGES", &tcap_body);
     GtkWidget *map = verb_card("MAP THEM", &map_body);
+    GtkWidget *dlg = verb_card("PAIR A REQUEST WITH ITS ANSWER", &dlg_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26152,6 +26292,25 @@ ss7_build_decode(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(map_body), res);
     }
     gtk_box_append(GTK_BOX(body), map);
+    mod_card_end();
+
+    /* A dialogue is two messages, and the useful question is not what each one
+       says but whether they are the same conversation. The worked pair below is
+       an SRI and the answer to it. */
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dlg_body),
+            mod_arg_row_prefilled(state, module_id, status, "Pair Them",
+                "--dialogue",
+                "8301800000090003070B040301000604030200081F621D4804000000016C15A113020101020116300B80099113100521436587F9 "
+                "64204904000000016C18A2160201013011020116300CA30A890813100521436587F9",
+                "The request, then the answer. The verdict compares the originator "
+                "transaction id with the destination one and the two invoke ids, "
+                "so an answer to a different question is not mistaken for a reply."));
+        gtk_box_append(GTK_BOX(dlg_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dlg);
     mod_card_end();
 
     (void) out;
@@ -27195,6 +27354,8 @@ mod_arg_row(AppState *state, const char *module_id, GtkWidget *status,
     g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
     g_object_set_data(G_OBJECT(button), "status", status);
     g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
+    if (mod_card_answer != NULL)
+        g_object_set_data(G_OBJECT(button), "answer-view", mod_card_answer);
     g_object_set_data(G_OBJECT(button), "action-label", (gpointer) button_label);
     g_object_set_data(G_OBJECT(button), "arg-entry", entry);
     if (mod_card_result != NULL)
@@ -27243,6 +27404,8 @@ mod_arg_row_prefilled(AppState *state, const char *module_id, GtkWidget *status,
     g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
     g_object_set_data(G_OBJECT(button), "status", status);
     g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
+    if (mod_card_answer != NULL)
+        g_object_set_data(G_OBJECT(button), "answer-view", mod_card_answer);
     g_object_set_data(G_OBJECT(button), "action-label", (gpointer) button_label);
     g_object_set_data(G_OBJECT(button), "arg-entry", entry);
     if (mod_card_result != NULL)
@@ -27301,6 +27464,8 @@ mod_arg_choices(AppState *state, const char *module_id, GtkWidget *status,
         g_object_set_data(G_OBJECT(button), "module-id", (gpointer) module_id);
         g_object_set_data(G_OBJECT(button), "status", status);
         g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verbs[i]), g_free);
+        if (mod_card_answer != NULL)
+            g_object_set_data(G_OBJECT(button), "answer-view", mod_card_answer);
         g_object_set_data_full(G_OBJECT(button), "action-label", g_strdup(labels[i]), g_free);
         g_object_set_data(G_OBJECT(button), "arg-entry", entry);
         if (mod_card_result != NULL)
@@ -27656,6 +27821,8 @@ goal_step_row(AppState *state, GtkWidget *status, const GoalStep *step)
         g_object_set_data(G_OBJECT(button), "status", status);
         g_object_set_data_full(G_OBJECT(button), "verb",
                                g_strdup(step->verb), g_free);
+        if (mod_card_answer != NULL)
+            g_object_set_data(G_OBJECT(button), "answer-view", mod_card_answer);
         g_object_set_data(G_OBJECT(button), "action-label",
                           (gpointer) step->label);
         /* The result rectangle is the one mod_card_begin() set for this card,
