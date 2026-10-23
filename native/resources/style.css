@@ -1590,6 +1590,81 @@ scrollbar slider:hover {
 }
 .record-copy:hover { color: #cfdcec; background-color: alpha(@line, 0.6); }
 
+/* ── a card's two chips ───────────────────────────────────────────────────
+   Every card says, in its caption row, what it needs before it can mean
+   anything and what pressing it does. The chips are small on purpose: they are
+   a caption, not a paragraph. Their weight carries the severity - a reader
+   button is the quietest thing on the row, a transmitter the loudest - because
+   the one thing a beginner must not miss is the card that keys a radio. */
+.card-caption {
+    padding: 13px 16px 0 16px;
+}
+.card-caption .card-heading {
+    padding: 0;
+}
+.chip {
+    background-color: alpha(@bg_sunken, 0.6);
+    border: 1px solid @line;
+    border-radius: 3px;
+    color: @text_dim;
+    font-size: 9px;
+    letter-spacing: 0.6px;
+    padding: 1px 7px;
+}
+/* What the card needs. A radio, a capture or a SIM is a precondition, so the
+   chip is outlined rather than filled: it is information, not a warning. */
+.chip-need-radio,
+.chip-need-capture,
+.chip-need-sim {
+    border-color: alpha(@accent, 0.4);
+    color: alpha(@accent, 0.9);
+}
+.chip-need-none {
+    border-color: @line;
+    color: @text_dim;
+}
+/* What the card does. Reads and builds are local; modifying a card, sending
+   packets and transmitting are not, and each one steps louder than the last. */
+.chip-does-reads {
+    border-color: @line;
+    color: @text_dim;
+}
+.chip-does-builds {
+    border-color: alpha(@accent, 0.3);
+    color: @text;
+}
+.chip-does-modifies {
+    border-color: alpha(@accent, 0.55);
+    color: alpha(@accent, 0.95);
+}
+.chip-does-sends {
+    background-color: alpha(@accent, 0.1);
+    border-color: alpha(@accent, 0.65);
+    color: @text;
+}
+.chip-does-transmits {
+    background-color: alpha(@accent, 0.18);
+    border-color: alpha(@accent, 0.85);
+    color: @text;
+}
+/* A route's two captions. They are not chips: they name the lines under
+   them, the way a field name names its value. */
+.goal-label {
+    color: @text_dim;
+    font-size: 9px;
+    letter-spacing: 1.1px;
+    margin-top: 4px;
+}
+/* The beginner fold. It is an offer, not a warning: quiet, and closed. */
+.card-more {
+    color: @text_dim;
+    font-size: 10px;
+    margin-top: 2px;
+}
+.card-more > box {
+    margin-top: 8px;
+}
+
 /* Stop: in the summary row, where the run's state is already reported. Amber,
    because it is a deliberate interruption and not a fault. */
 .stop-inline {
@@ -1925,7 +2000,7 @@ notebook > header > tabs > tab {
    most viewports, which would push a bottom-anchored pool off-screen.
    Note: panels here are translucent (rgba 0.45-0.6), so this glow also lifts
    their fill slightly wherever it passes underneath. */
-window {
+window.app-window {
     background-image:
         radial-gradient(720px 430px at 2% 0%,
                         alpha(@accent, 0.28), alpha(@accent, 0.0) 70%),
@@ -1946,7 +2021,7 @@ window {
    ones, and the shared border sits only on the outer edges. The window
    behind them is the darker ground the card floats on -- two low-alpha pools
    of palette colour give it depth without a second accent. */
-window {
+window.app-window {
     background-color: #04060a;
     background-image:
         radial-gradient(760px 460px at 12% -6%,
@@ -3110,4 +3185,23 @@ window.motion-reduced * {
 
 .scell-feed-copy {
   min-width: 58px;
+}
+
+/* ── popup surfaces ───────────────────────────────────────────────────────
+   A drop-down list opens in its own surface. The window rules give the base
+   tone and the corner glows; without this the list arrives inside a large
+   translucent rectangle whose size has nothing to do with the list. The popup
+   paints only the panel it needs, and it hugs the rows it holds. */
+window.popup,
+window.tooltip,
+popover,
+popover > contents,
+popover.menu,
+popover.menu > contents {
+    background-image: none;
+    background-color: @bg_panel2;
+    box-shadow: none;
+    border: 1px solid @line;
+    border-radius: 8px;
+    padding: 2px;
 }

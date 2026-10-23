@@ -342,8 +342,13 @@ struct _AppState {
     /* The six permanent pages as a list at the top of the drawer. Held so
        the highlight can follow the notebook instead of being rebuilt. */
     GtkWidget *drawer_nav;
-    GtkWidget *drawer_nav_rows[7];
+    GtkWidget *drawer_nav_rows[8];
     gboolean   drawer_nav_syncing;
+    /* Beginner mode, on until the operator turns it off. It changes what a
+       card puts in front of a reader - one worked example per action, the rest
+       behind More - and nothing else: the expert page is the page that was
+       always there. */
+    gboolean   beginner;
     GtkWidget *status_sdr, *status_tx, *status_cells, *status_gps, *status_freq;
     /* The strip's own heartbeat. Without it the chips look equally certain
        whether the radio answered a second ago or the poll died an hour ago -
@@ -869,6 +874,10 @@ static void live_capture_label_update(AppState *state);
 static char *live_pcap_default_path(void);
 static gboolean live_pcap_rotate_cb(gpointer user_data);
 static void rtarget_apply(AppState *state);
+/* The goals front door and the beginner toggle are built where the form rows
+   live, after this point in the file; the header reaches them through these. */
+static GtkWidget *goals_build_page(AppState *state);
+static void beginner_apply(AppState *state);
 static void sidebar_set_active(AppState *state, const char *module_id);
 static void drawer_set_open(AppState *state, gboolean open);
 static GtkWidget *empty_state(const char *icon, const char *title,
@@ -2189,18 +2198,31 @@ static GtkWidget *
 verb_card(const char *heading, GtkWidget **body_out)
 {
     GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    GtkWidget *caption = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *h = gtk_label_new(heading);
+    GtkWidget *chips = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     GtkWidget *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
 
     gtk_widget_add_css_class(card, "card");
     gtk_widget_add_css_class(h, "card-heading");
+    gtk_widget_add_css_class(caption, "card-caption");
+    gtk_widget_add_css_class(chips, "card-chips");
     gtk_label_set_xalign(GTK_LABEL(h), 0.0f);
+    gtk_widget_set_hexpand(h, TRUE);
+    gtk_widget_set_valign(chips, GTK_ALIGN_CENTER);
     gtk_widget_set_margin_start(body, 14);
     gtk_widget_set_margin_end(body, 14);
     gtk_widget_set_margin_bottom(body, 14);
 
-    gtk_box_append(GTK_BOX(card), h);
+    /* The caption row holds the heading and the two chips. The chips are filled
+       by verb_cards_walk() once the whole card exists, because what a card does
+       is a fact about all of its controls, not about the one being added. */
+    gtk_box_append(GTK_BOX(caption), h);
+    gtk_box_append(GTK_BOX(caption), chips);
+    gtk_box_append(GTK_BOX(card), caption);
     gtk_box_append(GTK_BOX(card), body);
+    g_object_set_data(G_OBJECT(card), "card-chips", chips);
+    g_object_set_data(G_OBJECT(card), "card-body", body);
     if (body_out != NULL) *body_out = body;
     return card;
 }
@@ -2259,6 +2281,4742 @@ module_id_words(const char *tok)
 
     g_free(spaced);
     return out;
+}
+
+/* ── plain words for the tree's own field names ─────────────────────────
+ *
+ * Every module answers in records, and the left-hand field of a record is the
+ * last place this interface still spoke in the tree's shorthand: an answer row
+ * read
+ *     rsrp_dbm      -97
+ * because that is what the module printed. The key is the module's word for the
+ * quantity, not the quantity. This table gives each key plain words once, and
+ * every place that draws a key - the answer row's caption, the small classifier
+ * badge on a record, a table's column heading - draws the words instead.
+ *
+ * The table is keyed by what the tree actually prints, one row per key, sorted
+ * so the lookup is a binary search. tools/check-glossary.sh harvests the same
+ * keys out of the modules and fails when a rendered key has no row here, when a
+ * row is never rendered, or when a view name or button carries a verb token. It
+ * is the gate that keeps this list honest, so it lives beside the list rather
+ * than in a comment.
+ *
+ * Two rules decided the wording. Where the standard's own term is more precise
+ * than a plain one, the standard term stays and the words explain it in
+ * parentheses - accuracy beats friendliness, and a wrong word is worse than a
+ * word the reader has to look up. Where the key is a quantity with a unit, the
+ * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
+ */
+static const char *const plain_keys[] = {
+    "a1_not_tls\ta1 not tls",
+    "a5_1\ta5 1",
+    "a5_1_after\ta5 1 after",
+    "a5_1_available\ta5 1 available",
+    "a5_1_backend\ta5 1 backend",
+    "a5_1_before\ta5 1 before",
+    "a5_1_key_bits\ta5 1 key bits",
+    "a5_1_keystream_224\ta5 1 keystream 224",
+    "a5_1_search\ta5 1 search",
+    "a5_2\ta5 2",
+    "a5_2_effective\ta5 2 effective",
+    "a5_2_key_bits\ta5 2 key bits",
+    "a5_2_search\ta5 2 search",
+    "a5_3\ta5 3",
+    "a5_3_key_bits\ta5 3 key bits",
+    "a5_3_note\ta5 3 note",
+    "a5_version\ta5 version",
+    "aa\taa",
+    "abba\tabba",
+    "abort\tabort",
+    "absent\tnot installed",
+    "accac00000\taccac00000",
+    "ack\tack",
+    "action\taction",
+    "actor\tactor",
+    "actual_octets\tactual octets",
+    "ad\tad",
+    "additional_response_data\tadditional response data",
+    "addr\taddress",
+    "addr_alpha\taddress alpha",
+    "addr_alpha_septets\taddress alpha septets",
+    "addr_digits\taddress digits",
+    "addr_length\taddress length",
+    "addr_npi\taddress npi",
+    "addr_octets\taddress octets",
+    "addr_ton\taddress ton",
+    "addr_value\taddress value",
+    "address\taddress",
+    "address_indicator\taddress indicator",
+    "address_range\taddress range",
+    "adm_key\tadm key",
+    "adm_note\tadm note",
+    "adm_reference\tadm reference",
+    "advance_symbols\tadvance symbols",
+    "after\tafter",
+    "aka_challenges\taka challenges",
+    "aka_res_hex\taka res bytes",
+    "alert_notification\talert notification",
+    "alg\talg",
+    "alg_none\talg none",
+    "alg_octet\talg octet",
+    "algo\talgorithm",
+    "algorithm\talgorithm",
+    "algorithm_alt\talgorithm alt",
+    "algorithm_id\talgorithm id",
+    "all\tall",
+    "allowed\tallowed",
+    "alpha\talpha",
+    "alt\talt",
+    "alt_ids\talt ids",
+    "alt_m\taltitude (m)",
+    "alt_transport\talternate transport",
+    "altport\taltport",
+    "ambiguous\tambiguous",
+    "amf\taccess manager",
+    "amf_pointer\tamf pointer",
+    "amf_region\tamf region",
+    "amf_region_id\tamf region id",
+    "amf_set_id\tamf set id",
+    "amf_ue_ngap_id\taccess manager connection ID",
+    "amf_ue_ngap_id_bits\tamf handset NGAP id bits",
+    "amplification\tamplification",
+    "amplification_factor\tamplification factor",
+    "anchors\tanchors",
+    "ancount\tancount",
+    "angle_deg\tangle (degrees)",
+    "answer_ip\tanswer ip",
+    "antenna_ports\tantenna ports",
+    "any_channel\tany channel",
+    "apdu\tAPDU",
+    "apdu_count\tAPDU count",
+    "apdu_hex\tAPDU bytes",
+    "apdu_log\tAPDU log",
+    "api\tapi",
+    "api_root\tapi root",
+    "apn\tdata network name",
+    "application_id\tapplication id",
+    "application_name\tapplication name",
+    "applied\tapplied",
+    "applied_ms\tapplied (ms)",
+    "applied_slots\tapplied slots",
+    "apply_action\tapply action",
+    "arcount\tarcount",
+    "arfcn\tchannel number",
+    "args\targuments",
+    "artefact\tartefact",
+    "artefact_bytes\tartefact bytes",
+    "artefact_hex\tartefact bytes",
+    "artefact_type\tartefact type",
+    "as_bytes\tas bytes",
+    "asn1\tasn1",
+    "assertions\tassertions",
+    "assigned\tassigned",
+    "association\tassociation",
+    "atime\tatime",
+    "attach\tattach",
+    "attack\tattack",
+    "attack_adm_refs\tattack adm refs",
+    "attack_coverage\tattack coverage",
+    "attack_ef_table\tattack ef table",
+    "attack_exit_codes\tattack exit codes",
+    "attack_gate\tattack gate",
+    "attack_last_hop\tattack last hop",
+    "attack_opens\tattack opens",
+    "attack_path\tattack path",
+    "attack_status\tattack status",
+    "attack_surface\tattack surface",
+    "attack_verbs\tattack commands",
+    "attacker_lead_frames\tattacker lead frames",
+    "attacker_lead_ms\tattacker lead (ms)",
+    "attacker_position\tattacker position",
+    "aud\taud",
+    "audience_mismatch\taudience mismatch",
+    "auth\tauthentication",
+    "auth_available\tauth available",
+    "auth_failure_streak\tauth failure streak",
+    "auth_nonce\tauth nonce",
+    "auth_oracle\tauth oracle",
+    "auth_realm\tauth realm",
+    "auth_response\tauth response",
+    "auth_stage\tauth stage",
+    "auth_storm\tauth storm",
+    "auth_uri\tauth uri",
+    "auth_username\tauth username",
+    "autn\tauthentication token",
+    "autn_basis\tauthentication token basis",
+    "auts\tauts",
+    "available\tavailable",
+    "averaging_window_ms\taveraging window (ms)",
+    "avg_bytes\taverage bytes",
+    "avp_count\tavp count",
+    "b3_bit1_field\tb3 bit1 field",
+    "b3_bit1_field_source\tb3 bit1 field source",
+    "b3_bit1_value\tb3 bit1 value",
+    "b3_ciphering_indicator\tb3 cipher indicator",
+    "b3_csg_display\tb3 csg display",
+    "b3_extended_drx\tb3 extended drx",
+    "b3_prose_public_safety\tb3 prose public safety",
+    "back\tback",
+    "backoff_ms\tbackoff (ms)",
+    "band\tband",
+    "band_name_mhz\tband name (MHz)",
+    "bands\tbands",
+    "bandwidth_khz\tbandwidth in kHz",
+    "base_header_octets\tbase header octets",
+    "baseband\tbaseband",
+    "baseband_exploit\tbaseband exploit",
+    "basis\tbasis",
+    "baud\tserial speed",
+    "bbdg\tbbdg",
+    "bbnd\tbaseband",
+    "bcc\tbcc",
+    "bcch_blocks\tbcch blocks",
+    "bcch_modification_info\tbcch modification information",
+    "bcd\tbcd",
+    "bcd_codec\tbcd codec",
+    "bcd_msin\tbcd msin",
+    "bch_file\tbch file",
+    "bch_hex\tbch bytes",
+    "beam_gap_vs_serving_db\tbeam gap vs serving (dB)",
+    "before\tbefore",
+    "best_offered\tbest offered",
+    "bi_index\tbi index",
+    "binary\tbinary",
+    "bind_receiver\tbind receiver",
+    "bind_receiver_resp\tbind receiver resp",
+    "bind_transceiver\tbind transceiver",
+    "bind_transceiver_resp\tbind transceiver resp",
+    "bind_transmitter\tbind transmitter",
+    "bind_transmitter_resp\tbind transmitter resp",
+    "bit_range\tbit range",
+    "bit_us\tbit (µs)",
+    "bits\tbits",
+    "bits_consumed\tbits consumed",
+    "bits_per_burst\tbits per burst",
+    "bits_per_frame\tbits per frame",
+    "bits_per_observation\tbits per observation",
+    "bits_per_slot\tbits per slot",
+    "bits_per_symbol\tbits per symbol",
+    "bits_remaining\tbits remaining",
+    "bitstring\tbitstring",
+    "bladerf\tbladerf",
+    "block\tblock",
+    "block_first_offset\tblock first offset",
+    "block_header\tblock header",
+    "block_last_offset\tblock last offset",
+    "blocked_causes\tblocked causes",
+    "blocks_per_multiframe\tblocks per multiframe",
+    "bn_range\tbn range",
+    "body\tbody",
+    "body_bits\tbody bits",
+    "body_bytes\tbody bytes",
+    "body_hex\tbody bytes",
+    "body_len\tbody length",
+    "body_matches_length\tbody matches length",
+    "body_octets\tbody octets",
+    "body_raw\tbody raw",
+    "body_with_flags\tbody with flags",
+    "branch\tbranch",
+    "branches\tbranches",
+    "break_status\tbreak status",
+    "broadcast_sm\tbroadcast sm",
+    "broadcast_sm_resp\tbroadcast sm resp",
+    "brotli\tbrotli",
+    "brotli_before_fix\tbrotli before fix",
+    "bs_ag_blks_res\tbs ag blks res",
+    "bs_cc_chans\tbs cc chans",
+    "bs_ccch_sdcch_comb\tbs ccch sdcch comb",
+    "bs_colour_code\tbs colour code",
+    "bs_pa_mfrms\tbs pa mfrms",
+    "bsic\tbsic",
+    "buffer_bits\tbuffer bits",
+    "build_with\tbuild with",
+    "builder_table\tbuilder table",
+    "builders\tbuilders",
+    "builders_5gs\tbuilders 5GS",
+    "builders_count\tbuilders count",
+    "builders_eps\tbuilders EPS",
+    "builders_ready\tbuilders ready",
+    "builders_sent\tbuilders sent",
+    "built\tbuilt",
+    "built_l2_pseudo_length\tbuilt l2 pseudo length",
+    "built_message\tbuilt message",
+    "built_octets\tbuilt octets",
+    "built_spec\tbuilt spec",
+    "builtin_chains\tbuiltin chains",
+    "burst\tburst",
+    "burst_c16\tburst c16",
+    "burst_cipher_bits\tburst cipher bits",
+    "burst_cs8\tburst cs8",
+    "burst_len_symbols\tburst length symbols",
+    "burst_ms\tburst (ms)",
+    "burst_samples\tburst samples",
+    "burst_slots\tburst slots",
+    "burst_structure\tburst structure",
+    "bursts\tbursts",
+    "bursts_per_block\tbursts per block",
+    "bwp_indicator\tbwp indicator",
+    "bwp_prb\tbwp prb",
+    "byte1\tbyte1",
+    "byte2\tbyte2",
+    "byte3\tbyte3",
+    "byte4\tbyte4",
+    "bytecode_imei\tbytecode handset serial",
+    "bytecode_location\tbytecode location",
+    "bytecode_sms\tbytecode sms",
+    "bytes\tbytes",
+    "bytes_per_s\tbytes per s",
+    "bytes_s\tbytes s",
+    "c0_filling_bn61_86\tc0 filling bn61 86",
+    "c16\tc16",
+    "c1_apdu\tc1 APDU",
+    "c1_caveat\tc1 caveat",
+    "c1_cla\tc1 cla",
+    "c1_data\tc1 data",
+    "c1_expect\tc1 expect",
+    "c1_failure\tc1 failure",
+    "c1_index\tc1 index",
+    "c1_ins\tc1 ins",
+    "c1_lc\tc1 lc",
+    "c1_le\tc1 le",
+    "c1_missing\tc1 missing",
+    "c1_name\tc1 name",
+    "c1_p1\tc1 p1",
+    "c1_p2\tc1 p2",
+    "c1_ref\tc1 ref",
+    "c2_apdu\tc2 APDU",
+    "c2_cla\tc2 cla",
+    "c2_data\tc2 data",
+    "c2_expect\tc2 expect",
+    "c2_failure\tc2 failure",
+    "c2_ins\tc2 ins",
+    "c2_lc\tc2 lc",
+    "c2_le\tc2 le",
+    "c2_length\tc2 length",
+    "c2_mode\tc2 mode",
+    "c2_name\tc2 name",
+    "c2_note\tc2 note",
+    "c2_offset\tc2 offset",
+    "c2_p1\tc2 p1",
+    "c2_p2\tc2 p2",
+    "c2_record\tc2 record",
+    "c2_ref\tc2 ref",
+    "c_init\tc init",
+    "c_init_hex\tc init bytes",
+    "call\tcall",
+    "called_party\tcalled party",
+    "calling_code\tcalling code",
+    "calling_party\tcalling party",
+    "calls\tcalls",
+    "can_install\tcan install",
+    "can_transmit\tcan transmit",
+    "can_tx\tcan tx",
+    "can_without_key\tcan without key",
+    "cancel_broadcast_sm\tcancel broadcast sm",
+    "cancel_broadcast_sm_resp\tcancel broadcast sm resp",
+    "cancel_sm\tcancel sm",
+    "cancel_sm_resp\tcancel sm resp",
+    "candidates\tcandidates",
+    "candidates_file\tcandidates file",
+    "cannot_without_key\tcannot without key",
+    "capability\tcapability",
+    "capacity\tcapacity",
+    "captcha\tcaptcha",
+    "capture\tcapture",
+    "capture_count\tcapture count",
+    "captured\tcaptured",
+    "captured_at\tcaptured at",
+    "captures\tcaptures",
+    "captures_dir\tcaptures dir",
+    "card_hex\tcard bytes",
+    "carrier\tcarrier",
+    "carrier_api\tcarrier api",
+    "carrier_components\tcarrier components",
+    "carrier_count\tcarrier count",
+    "carrier_format\tcarrier format",
+    "carrier_hz\tcarrier (Hz)",
+    "carrier_indicator\tcarrier indicator",
+    "carrier_is_a_cell\tcarrier is a cell",
+    "carrier_psc\tcarrier psc",
+    "carrier_rate\tcarrier rate",
+    "carrier_ref\tcarrier ref",
+    "carrier_seconds\tcarrier seconds",
+    "carrier_slot_ms\tcarrier slot length in ms",
+    "carries\tcarries",
+    "carries_nas_pdu\tcarries NAS PDU",
+    "case\tcase",
+    "cases\tcases",
+    "cause\treason",
+    "cause_hex\treason bytes",
+    "cause_ie\treason ie",
+    "cause_ie_on_wire\treason ie on wire",
+    "cause_ie_role\treason ie role",
+    "cause_meaning\treason meaning",
+    "cause_name\treason name",
+    "cause_wire_octet\treason wire octet",
+    "causes\tcauses",
+    "causes_present\tcauses present",
+    "caveat\tcaveat",
+    "cb_size_index\tcb size index",
+    "cbgfi\tcbgfi",
+    "cbgti\tcbgti",
+    "cc\tcc",
+    "cc_bytes\tcc bytes",
+    "cc_verdict\tcc verdict",
+    "ccch\tccch",
+    "ccch_block\tccch block",
+    "ccch_block_index\tccch block index",
+    "ccch_blocks\tccch blocks",
+    "ccch_conf\tccch config",
+    "ccch_group\tccch group",
+    "ccch_slot\tccch slot",
+    "cd\tcd",
+    "cdns\tcdns",
+    "cdr_anomaly\tcdr anomaly",
+    "cell\tcell",
+    "cell_allocation_arfcns\tcell allocation arfcns",
+    "cell_barred\tcell barred",
+    "cell_barred_fields\tcell barred fields",
+    "cell_id\tcell ID",
+    "cell_identity\tcell ID",
+    "cell_identity_bits\tcell identity bits",
+    "cell_identity_hex\tcell identity bytes",
+    "cell_reselection_priority\tcell reselection priority",
+    "cell_reserved_for_other_use\tcell reserved for other use",
+    "cellid\tcellid",
+    "cells\tcells",
+    "cellular_dns\tcellular dns",
+    "cert\tcert",
+    "cf32\tcf32",
+    "cfi\tcfi",
+    "chain\tchain",
+    "chains\tchains",
+    "chains_dir\tchains dir",
+    "challenge_algorithm\tchallenge algorithm",
+    "challenge_nonce\tchallenge nonce",
+    "challenge_qop\tchallenge qop",
+    "challenge_realm\tchallenge realm",
+    "changed\tchanged",
+    "changed_note\tchanged note",
+    "channel\tchannel",
+    "channel_description\tchannel description",
+    "channel_description_octets\tchannel description octets",
+    "channel_long\tchannel long",
+    "channel_needed\tchannel needed",
+    "channel_needed_first\tchannel needed first",
+    "channel_needed_first_bits\tchannel needed first bits",
+    "channel_needed_iei_bit8\tchannel needed iei bit8",
+    "channel_needed_nibble\tchannel needed nibble",
+    "channel_needed_second\tchannel needed second",
+    "channel_needed_second_bits\tchannel needed second bits",
+    "channel_needed_second_note\tchannel needed second note",
+    "channel_pinned\tchannel pinned",
+    "channel_type\tchannel type",
+    "channel_type_field\tchannel type field",
+    "check\tcheck",
+    "check_digit\tcheck digit",
+    "checked\tchecked",
+    "checks\tchecks",
+    "chi\tchi",
+    "chi_meaning\tchi meaning",
+    "chips\tchips",
+    "chl\tchl",
+    "chl_len_octets\tchl length octets",
+    "chl_note\tchl note",
+    "chosen\tchosen",
+    "chunk_flags\tchunk flags",
+    "chunk_name\tchunk name",
+    "chunk_octets\tchunk octets",
+    "chunk_type\tchunk type",
+    "ci\tcell ID",
+    "cipher\tcipher",
+    "cipher_id\tcipher id",
+    "cipher_mode_setting_iei\tcipher mode setting iei",
+    "cipher_mode_settings\tcipher mode settings",
+    "cipher_negotiated\tcipher negotiated",
+    "cipher_null\tcipher null",
+    "ciphered\tciphered",
+    "ciphering\tcipher",
+    "ciphering_indicator\tcipher indicator",
+    "ciphering_indicator_byte\tcipher indicator byte",
+    "ciphering_meaning\tcipher meaning",
+    "ciphering_mode_command_l3\tcipher mode command l3",
+    "ciphertext\tciphertext",
+    "ciphertext_seconds\tciphertext seconds",
+    "ck\tcipher key",
+    "cla\tcla",
+    "claimed\tclaimed",
+    "class\tclass",
+    "classmark\tclassmark",
+    "classmark_after\tclassmark after",
+    "classmark_before\tclassmark before",
+    "clause\tclause",
+    "clean\tclean",
+    "cleared_field\tcleared field",
+    "close\tclose",
+    "closed\tclosed",
+    "cm3\tcm3",
+    "cm_call_state\tcm call state",
+    "cm_opmode\tcm opmode",
+    "cm_sysmode\tcm sysmode",
+    "cmd\tcmd",
+    "cmd_dec\tcmd dec",
+    "cmd_name\tcmd name",
+    "cmd_type\tcmd type",
+    "cmsp\tcmsp",
+    "cn_domain\tcn domain",
+    "cn_domain_note\tcn domain note",
+    "cn_paged_ue_identity\tcn paged handset identity",
+    "cntr\tcntr",
+    "cntr_hex\tcntr bytes",
+    "cntr_note\tcntr note",
+    "coarse\tcoarse",
+    "code\tcode",
+    "code_name\tcode name",
+    "coded_bits\tcoded bits",
+    "collision_detected\tcollision detected",
+    "combined\tcombined",
+    "command\tcommand",
+    "command_code\tcommand code",
+    "command_id\tcommand id",
+    "command_id_dec\tcommand id dec",
+    "command_length\tcommand length",
+    "command_length_actual\tcommand length actual",
+    "command_name\tcommand name",
+    "command_number\tcommand number",
+    "command_status\tcommand status",
+    "command_status_name\tcommand status name",
+    "commands\tcommands",
+    "commit\tcommit",
+    "comp128_zero_bits\tcomp128 zero bits",
+    "comp_date\tcomp date",
+    "comp_time\tcomp time",
+    "comparative_features\tcomparative features",
+    "compared_bits\tcompared bits",
+    "complete_ies\tcomplete ies",
+    "component\tcomponent",
+    "computed\tcomputed",
+    "concealed\tconcealed",
+    "conf\tconfig",
+    "conf_present\tconfig present",
+    "config\tconfig",
+    "config_protocol\tconfig protocol",
+    "configured\tconfigured",
+    "confirmed\tconfirmed",
+    "conflicts\tconflicts",
+    "congestion\tcongestion",
+    "conn\tconn",
+    "consequence\tconsequence",
+    "consequence_if_not\tconsequence if not",
+    "consistency\tconsistency",
+    "construct\tconstruct",
+    "constructor\tconstructor",
+    "constructor_unresolved\tconstructor unresolved",
+    "contact\tcontact",
+    "container\tcontainer",
+    "container_bits\tcontainer bits",
+    "container_hex\tcontainer bytes",
+    "content_length_lines\tcontent length lines",
+    "content_type\tcontent type",
+    "contradicted\tcontradicted",
+    "control\tcontrol",
+    "control_check\tcontrol check",
+    "control_plane_integrity\tcontrol plane integrity",
+    "controls_missing\tcontrols missing",
+    "controls_present\tcontrols present",
+    "core\tcore",
+    "corpus_lines\tcorpus lines",
+    "count\tcount",
+    "count_hex\tcount bytes",
+    "count_i\tcount i",
+    "count_i_bits\tcount i bits",
+    "counter\tcounter",
+    "counter_dec\tcounter dec",
+    "counter_meaning\tcounter meaning",
+    "counter_mode\tcounter mode",
+    "country\tcountry",
+    "counts_seen\tcounts seen",
+    "coverage_hole\tcoverage hole",
+    "cp_long\tcp long",
+    "cp_short\tcp short",
+    "cpi\tcpi",
+    "cpi_meaning\tcpi meaning",
+    "cpl\tcpl",
+    "cpl_check\tcpl check",
+    "cpl_len_octets\tcpl length octets",
+    "cpl_octets\tcpl octets",
+    "crc\tcrc",
+    "crc_hex\tcrc bytes",
+    "created\tcreated",
+    "critical\tcritical",
+    "critical_extensions\tcritical extensions",
+    "criticality\tcriticality",
+    "cross_slice_markers\tcross slice markers",
+    "crosscheck_imei\tcrosscheck handset serial",
+    "crosscheck_location\tcrosscheck location",
+    "crosscheck_sms\tcrosscheck sms",
+    "crypto_unavailable\tcrypto unavailable",
+    "cryptography\tcryptography",
+    "cs8\tcs8",
+    "cs_page\tcs page",
+    "csg\tcsg",
+    "csg_id\tcsg id",
+    "csg_mode\tcsg mode",
+    "cstr\tcstr",
+    "ctime\tctime",
+    "curl\tcurl",
+    "curve\tcurve",
+    "curve_markers\tcurve markers",
+    "cve\tcve",
+    "cwmp_body_bytes\tcwmp body bytes",
+    "cwmp_body_path\tcwmp body path",
+    "cycle_multiframes\tcycle multiframes",
+    "cycles_per_hsfn_wrap\tcycles per hsfn wrap",
+    "cyclic_shift\tcyclic shift",
+    "d0_hex\td0 bytes",
+    "d1_hex\td1 bytes",
+    "d2_hex\td2 bytes",
+    "d_bits\td bits",
+    "d_first_ts\td first ts",
+    "d_last_ts\td last ts",
+    "d_span_s\td span s",
+    "da\tda",
+    "dai\tdai",
+    "data\tdata",
+    "data_coding\tdata coding",
+    "data_len\tdata length",
+    "data_payload\tdata payload",
+    "data_ppid\tdata ppid",
+    "data_ppid_name\tdata ppid name",
+    "data_sm\tdata sm",
+    "data_sm_resp\tdata sm resp",
+    "data_ssn\tdata ssn",
+    "data_stream\tdata stream",
+    "data_tsn\tdata tsn",
+    "database\tdatabase",
+    "dci_bits\tdci bits",
+    "dci_format\tdci format",
+    "dcs\tdcs",
+    "dcs_alphabet\tdcs alphabet",
+    "dcs_class\tdcs class",
+    "dcs_class0_immediate_display\tdcs class0 immediate display",
+    "dcs_compressed\tdcs compressed",
+    "dcs_group\tdcs group",
+    "dcs_group_bits\tdcs group bits",
+    "dcs_meaning\tdcs meaning",
+    "deck_hex\tdeck bytes",
+    "decode_hint\tdecode hint",
+    "decode_note\tdecode note",
+    "decode_only\tdecode only",
+    "decode_with\tdecode with",
+    "decoded\tdecoded",
+    "dedicated_mode_or_tbf\tdedicated mode or tbf",
+    "dedicated_mode_or_tbf_name\tdedicated mode or tbf name",
+    "dedupe\tdedupe",
+    "default_credential_markers\tdefault credential markers",
+    "default_credentials\tdefault credentials",
+    "default_paging_cycle\tdefault paging cycle",
+    "delay_ms\tdelay (ms)",
+    "delay_samples\tdelay in samples",
+    "deliver_sm\tdeliver sm",
+    "deliver_sm_resp\tdeliver sm resp",
+    "delivery\tdelivery",
+    "denied\tdenied",
+    "dependency\tdependency",
+    "description\tdescription",
+    "dest_addr_npi\tdest address npi",
+    "dest_addr_ton\tdest address ton",
+    "destination\tdestination",
+    "destination_addr\tdestination address",
+    "destination_interface\tdestination interface",
+    "destination_name\tdestination name",
+    "detach_type\tdetach type",
+    "detach_type_name\tdetach type name",
+    "detail\tdetail",
+    "detect_by\tdetect by",
+    "detection\tdetection",
+    "detection_needs_gate\tdetection needs gate",
+    "detection_verbs\tdetection commands",
+    "determinable\tdeterminable",
+    "device\tdevice",
+    "device_fingerprint\tdevice fingerprint",
+    "devices\tdevices",
+    "devices_covering\tdevices covering",
+    "dialect\tdialect",
+    "dialog_portion_len\tdialog portion length",
+    "digest_check\tdigest check",
+    "digits\tdigits",
+    "dir\tdirectory",
+    "direction\tdirection",
+    "direction_name\tdirection name",
+    "directions\tdirections",
+    "disarmed\tdisarmed",
+    "disclosed\tdisclosed",
+    "discovered\tdiscovered",
+    "discovery_requests\tdiscovery requests",
+    "discriminator\tdiscriminator",
+    "distance_km_max\tdistance km maximum",
+    "distinct_cells\tdistinct cells",
+    "distro\tdistro",
+    "dl\tdownlink",
+    "dl_arfcn\tdownlink channel number",
+    "dl_bandwidth\tdownlink bandwidth",
+    "dl_bandwidth_index\tdownlink bandwidth index",
+    "dl_bandwidth_prb\tdownlink bandwidth prb",
+    "dl_block_offsets\tdownlink block offsets",
+    "dl_hz\tdownlink (Hz)",
+    "dl_mhz\tdownlink (MHz)",
+    "dl_offsets\tdownlink offsets",
+    "dmrs_c_init\tdmrs c init",
+    "dmrs_pinned_agree\tdmrs pinned agree",
+    "dmrs_re\tdmrs re",
+    "dmrs_sequence_init\tdmrs sequence init",
+    "dmrs_type_a_position\tdmrs type a position",
+    "dn_bytes\tdn bytes",
+    "dnn\tdata network name",
+    "do\tdo",
+    "doppler_hz\tdoppler (Hz)",
+    "downgrade_effective\tdowngrade effective",
+    "downgrade_signature\tdowngrade signature",
+    "downlink_mhz\tdownlink (MHz)",
+    "dpc\tdpc",
+    "driver\tdriver",
+    "driver_format\tdriver format",
+    "dropped\tdropped",
+    "drx\tsleep cycle",
+    "drx_t\tdrx t",
+    "dst\tdestination",
+    "dt\tdt",
+    "dtid\tdtid",
+    "dual_network_registration\tdual network registration",
+    "dummy\tdummy",
+    "dummy_burst\tdummy burst",
+    "duplex\tduplex",
+    "duplex_spacing_mhz\tduplex spacing (MHz)",
+    "duplicate_counts\tduplicate counts",
+    "duplicated_mandatory_headers\tduplicated mandatory headers",
+    "dur\tdur",
+    "duration_microseconds\tduration microseconds",
+    "duration_s\tduration s",
+    "e0_56\te0 56",
+    "e164\te164",
+    "e2_no_ipsec\te2 no ipsec",
+    "e2ap_procedure_code\te2ap procedure code",
+    "e2sm\te2sm",
+    "e57_113\te57 113",
+    "e_bits\te bits",
+    "e_flag\te flag",
+    "earfcn\tchannel number",
+    "ebi\tebi",
+    "ecgi\tcell global ID",
+    "echo_anomaly\techo anomaly",
+    "echo_request_bytes\techo request bytes",
+    "echo_response_bytes\techo response bytes",
+    "edrx\tedrx",
+    "edrx_cycle_hsfn\tedrx cycle hsfn",
+    "edrx_cycle_ms\tedrx cycle (ms)",
+    "edrx_note\tedrx note",
+    "edrx_ref\tedrx ref",
+    "eea\tcipher (LTE)",
+    "ef\tef",
+    "ef_ad_generations\tef ad generations",
+    "ef_name\tef name",
+    "ef_ref\tef ref",
+    "ef_size\tef size",
+    "ef_type\tef type",
+    "effect\teffect",
+    "eia\tintegrity (LTE)",
+    "either\teither",
+    "embedded_mmi_trigger\tembedded mmi trigger",
+    "embedded_url\tembedded url",
+    "emm_cause\temm reason",
+    "emm_cause_name\temm reason name",
+    "enb\ttower",
+    "enb_conf\ttower config",
+    "enb_id\ttower ID",
+    "enb_pid\ttower pid",
+    "enc_alg\tenc alg",
+    "enc_id\tenc id",
+    "encap\tencap",
+    "encapsulation\tencapsulation",
+    "encoding\tencoding",
+    "encrypted\tencrypted",
+    "encrypted_bits\tencrypted bits",
+    "end_to_end_id\tend to end id",
+    "endpoint\tendpoint",
+    "engine\tengine",
+    "engine_path\tengine path",
+    "enquire_link\tenquire link",
+    "enquire_link_resp\tenquire link resp",
+    "entries\tentries",
+    "entry\tentry",
+    "envelope\tenvelope",
+    "epd\tepd",
+    "epd_name\tepd name",
+    "ephemeral_key_octets\tephemeral key octets",
+    "ephemeral_keys\tephemeral keys",
+    "ephemeral_public_key\tephemeral public key",
+    "eps_attach_type\tEPS attach type",
+    "eps_attach_type_name\tEPS attach type name",
+    "eps_bearer_identity\tEPS bearer identity",
+    "eps_mobile_identity\tEPS mobile identity",
+    "errno\terrno",
+    "error\terror",
+    "error_bound_m\terror bound m",
+    "error_code\terror code",
+    "error_m\terror m",
+    "es10_command\tes10 command",
+    "es_ind\tes ind",
+    "escaped_frame\tescaped frame",
+    "esim_state_model\teSIM state model",
+    "esm_class\tesm class",
+    "establishment_cause\testablishment reason",
+    "estimate\testimate",
+    "evaluated\tevaluated",
+    "event\tevent",
+    "evidence\tevidence",
+    "exact\texact",
+    "exchange_name\texchange name",
+    "exchange_type\texchange type",
+    "excluded_cell\texcluded cell",
+    "exclusive\texclusive",
+    "expected_ies\texpected ies",
+    "expected_response\texpected response",
+    "expected_scope\texpected scope",
+    "expected_verdict\texpected verdict",
+    "expects\texpects",
+    "expired\texpired",
+    "expiry_ok\texpiry ok",
+    "exploit\texploit",
+    "exposes\texposes",
+    "exposing\texposing",
+    "exposure\texposure",
+    "exposure_file\texposure file",
+    "ext_count\text count",
+    "extended\textended",
+    "extended_paging\textended paging",
+    "extended_protocol_discriminator\textended protocol discriminator",
+    "extension_bit\textension bit",
+    "extension_octets\textension octets",
+    "f6\tf6",
+    "f_id\tf id",
+    "f_teid\tf tunnel ID",
+    "factor\tfactor",
+    "fail\tfail",
+    "failed\tfailed",
+    "failures\tfailures",
+    "fallback_parser\tfallback parser",
+    "fallback_ready\tfallback ready",
+    "false\tfalse",
+    "far_id\tfar id",
+    "fc\tfc",
+    "fcs\tfcs",
+    "fcs_meaning\tfcs meaning",
+    "fdra\tfdra",
+    "feature_bits\tfeature bits",
+    "feature_version\tfeature version",
+    "features\tfeatures",
+    "feed_source\tfeed source",
+    "feed_store\tfeed store",
+    "femtocell\tsmall cell",
+    "ffffff\tffffff",
+    "field\tfield",
+    "field_constructor\tfield constructor",
+    "field_count\tfield count",
+    "field_set\tfield set",
+    "field_state\tfield state",
+    "fields\tfields",
+    "fields_ok\tfields ok",
+    "fields_parsed\tfields parsed",
+    "file\tfile",
+    "file_fd\tfile fd",
+    "files\tfiles",
+    "files_known\tfiles known",
+    "fill_octet\tfill octet",
+    "filler\tfiller",
+    "filtered\tfiltered",
+    "final_date\tfinal date",
+    "finding\tfinding",
+    "finding_detail\tfinding detail",
+    "findings\tfindings",
+    "fingerprint_count\tfingerprint count",
+    "fingerprints\tfingerprints",
+    "first16hex\tfirst16hex",
+    "first_fn\tfirst fn",
+    "first_frame\tfirst frame",
+    "first_mismatch_bit\tfirst mismatch bit",
+    "first_occasion\tfirst occasion",
+    "first_seen\tfirst seen",
+    "first_symbol\tfirst symbol",
+    "first_ts\tfirst ts",
+    "five_qi\tquality class",
+    "five_qi_id_range\tfive quality id range",
+    "five_qi_rows\tfive quality rows",
+    "five_qi_table\tfive quality table",
+    "five_qi_unknown_cells\tfive quality unknown cells",
+    "fiveg_guti_octets\tfiveg network-assigned ID octets",
+    "fiveg_tmsi\tfiveg temporary ID",
+    "fiveg_tmsi_hex\tfiveg temporary ID bytes",
+    "fix\tfix",
+    "fixed_bit_value\tfixed bit value",
+    "fixed_bits\tfixed bits",
+    "fixture\tfixture",
+    "fixture_kinds\tfixture kinds",
+    "flag\tflag",
+    "flags\tflags",
+    "flags_alert\tflags alert",
+    "flags_octet\tflags octet",
+    "flapping\tflapping attachments",
+    "flapping_identities\tflapping identities",
+    "flow\tflow",
+    "flow_step\tflow step",
+    "flows\tflows",
+    "fn\tfn",
+    "fn_check\tfn check",
+    "fn_mod_42432\tfn mod 42432",
+    "fn_recovered\tfn recovered",
+    "forced_identity_burst\tforced identity burst",
+    "format\tformat",
+    "format_default\tformat default",
+    "formats\tformats",
+    "formatted\tformatted",
+    "formula\tformula",
+    "fr\tfr",
+    "frame\tframe",
+    "frame_bits\tframe bits",
+    "frame_count\tframe count",
+    "frame_hex\tframe bytes",
+    "frame_kind\tframe kind",
+    "frame_ms\tframe length (ms)",
+    "frame_number\tframe number",
+    "frame_number_bits\tframe number bits",
+    "frame_octets\tframe octets",
+    "frame_samples\tframe samples",
+    "frame_slots\tframe slots",
+    "frames\tframes",
+    "frames_required\tframes required",
+    "framing\tframing",
+    "free\tfree",
+    "free5gc\tfree5gc",
+    "freq\tfrequency",
+    "freq_band_indicator\tfreq band indicator",
+    "freq_default\tfreq default",
+    "freq_domain_occasions\tfreq domain occasions",
+    "freq_field_bits\tfreq field bits",
+    "freq_hz\tfrequency (Hz)",
+    "freq_max_mhz\tfreq maximum (MHz)",
+    "freq_mhz\tfrequency (MHz)",
+    "freq_min_mhz\tfreq minimum (MHz)",
+    "frequency\tfrequency",
+    "frequency_offset_khz\tfrequency offset (kHz)",
+    "fresh\tfresh",
+    "fresh_bits\tfresh bits",
+    "from\tfrom",
+    "fronthaul_no_macsec\tfronthaul no macsec",
+    "fs\tfs",
+    "fseid_fields\tfseid fields",
+    "full_name\tfull name",
+    "function\tfunction",
+    "gain\tgain",
+    "gain_db\tgain (dB)",
+    "gain_max_db\tgain maximum (dB)",
+    "gain_min_db\tgain minimum (dB)",
+    "gate\tgate",
+    "gate_flag\tgate flag",
+    "gate_status\tgate status",
+    "gated\tgated",
+    "gbr\tguaranteed bit rate",
+    "gbr_info_required\tguaranteed bit rate information required",
+    "gen\tgeneration",
+    "generation\tgeneration",
+    "generator\tgenerator",
+    "generic_nack\tgeneric nack",
+    "gfbr_dl_bps\tgfbr downlink (bit/s)",
+    "gfbr_dl_display\tgfbr downlink display",
+    "gfbr_ul_bps\tgfbr uplink (bit/s)",
+    "gfbr_ul_display\tgfbr uplink display",
+    "global_ng_ran_node_id\tglobal ng ran node id",
+    "global_ran_node_id\tglobal ran node id",
+    "gnb\ttower",
+    "gnb_id\ttower ID",
+    "gnb_pid\ttower pid",
+    "gnb_running\ttower running",
+    "gprs\tgprs",
+    "gprs_supported\tgprs supported",
+    "gps\tgps",
+    "gradual_decline_with_handover\tgradual decline with handover",
+    "grid_latitude\tgrid latitude",
+    "grid_longitude\tgrid longitude",
+    "group\tgroup",
+    "gscn\tgscn",
+    "gsm\tGSM",
+    "gsm_algs\tGSM algs",
+    "gsm_cve\tGSM cve",
+    "gsm_paging_block\tGSM paging block",
+    "gsm_paging_group\tGSM paging group",
+    "gsm_scanner\tGSM scanner",
+    "gsm_stack\tGSM stack",
+    "gsm_stack_present\tGSM stack present",
+    "gsm_tool\tGSM tool",
+    "gsma_ref\tgsma ref",
+    "gsmtap_consumers\tgsmtap consumers",
+    "gsmtap_port\tgsmtap port",
+    "gsmtap_sub_type\tgsmtap sub type",
+    "gsn_peer\tgsn peer",
+    "gt_digits\tgt digits",
+    "gt_encoding_scheme\tgt encoding scheme",
+    "gt_hex\tgt bytes",
+    "gt_indicator\tgt indicator",
+    "gt_nai_raw\tgt nai raw",
+    "gt_numbering_plan\tgt numbering plan",
+    "gt_translation_type\tgt translation type",
+    "gtp_in_gtp\tGTP in GTP",
+    "gtp_version\tGTP version",
+    "gtpu\tGTP-U",
+    "gtpu_flows\tGTP-U flows",
+    "guard_bits\tguard bits",
+    "guard_ms_per_slot\tguard time per slot (ms)",
+    "guards\tguards",
+    "guti\tnetwork-assigned ID",
+    "guti_mapped\tnetwork-assigned ID mapped",
+    "hackrf\tHackRF",
+    "hackrf_info\tHackRF information",
+    "half1_messages\thalf1 messages",
+    "half1_rate_msg_s\thalf1 rate message s",
+    "half1_unique_subscribers\thalf1 unique subscribers",
+    "half2_messages\thalf2 messages",
+    "half2_rate_msg_s\thalf2 rate message s",
+    "half2_unique_subscribers\thalf2 unique subscribers",
+    "half_frame\thalf frame",
+    "handoff\twhat this step does not do",
+    "handoffs\thandoffs",
+    "hardware\thardware",
+    "hardware_steps\thardware steps",
+    "harq_process\tharq process",
+    "hdr\theader",
+    "hdr_hex\theader bytes",
+    "hdr_octets\theader octets",
+    "header\theader",
+    "header2\theader2",
+    "header_admin_protocol\theader admin protocol",
+    "header_bytes\theader bytes",
+    "header_content_length\theader content length",
+    "header_content_type\theader content type",
+    "header_hex\theader bytes",
+    "header_host\theader host",
+    "header_octets\theader octets",
+    "header_user_agent\theader user agent",
+    "hello\thello",
+    "hex\tbytes",
+    "high\thigh",
+    "highest_segment_index\thighest segment index",
+    "history\thistory",
+    "history_dir\thistory dir",
+    "hit\thit",
+    "hits\thits",
+    "hkdf\thkdf",
+    "hl_flag_bn60\thl flag bn60",
+    "hn_public_key\thome network public key",
+    "hn_public_key_id\thome network public key id",
+    "hnb_identity\thnb identity",
+    "hnb_markers\thnb markers",
+    "hnb_name\thnb name",
+    "hnbap_hex\thnbap bytes",
+    "hnbap_octets\thnbap octets",
+    "honest_baseline\thonest baseline",
+    "hop_by_hop_id\thop by hop id",
+    "hopping\thopping",
+    "host_pkt_window\thost pkt window",
+    "hplmn_2digit\thplmn 2digit",
+    "hplmn_3digit\thplmn 3digit",
+    "hu_flag_bn87\thu flag bn87",
+    "hyperframe_frames\thyperframe frames",
+    "hyperframe_h\thyperframe h",
+    "i_s\ti s",
+    "i_ssb\tSSB index",
+    "ia_rest_octets\tia rest octets",
+    "iats\tiats",
+    "iccid\tICCID",
+    "iccid_luhn\tICCID luhn",
+    "id\tID",
+    "ident_store\tident store",
+    "identifier\tidentifier",
+    "identities\tidentities",
+    "identities_known\tidentities known",
+    "identities_never_answering\tidentities never answering",
+    "identities_paged_3plus_without_answer\tidentities paged three or more times with no answer",
+    "identity\tidentity",
+    "identity_count\tidentity count",
+    "identity_name\tidentity name",
+    "identity_note\tidentity note",
+    "identity_request\tidentity request",
+    "identity_request_l3\tidentity request l3",
+    "identity_request_lapdm\tidentity request lapdm",
+    "identity_type\tidentity type",
+    "identity_type_code\tidentity type code",
+    "identity_type_name\tidentity type name",
+    "idle\tidle",
+    "ids\tIDs",
+    "ie\tie",
+    "ie_count\tie count",
+    "ie_subset\tie subset",
+    "iei\tiei",
+    "ik\tintegrity key",
+    "ik_bits\tik bits",
+    "imei\thandset serial",
+    "imei_exposed\thandset serial exposed",
+    "imei_len\thandset serial length",
+    "imei_luhn\thandset serial luhn",
+    "imei_tac_change\thandset serial tracking area change",
+    "imei_taf_markers\thandset serial taf markers",
+    "imeisv\thandset serial (with software version)",
+    "immediate_assignment_l2pl\timmediate assignment l2pl",
+    "immediate_assignment_l3\timmediate assignment l3",
+    "imp4gt\timp4gt",
+    "impact\timpact",
+    "impl\timpl",
+    "implausible_vmsc_change\timplausible vmsc change",
+    "implementation\timplementation",
+    "implementations\timplementations",
+    "imsi\tsubscriber ID",
+    "imsi_cleartext\tsubscriber ID cleartext",
+    "imsi_exposure\tsubscriber ID exposure",
+    "imsi_ie\tsubscriber ID ie",
+    "imsi_imei_pairing_change\tsubscriber ID handset serial pairing change",
+    "imsi_len\tsubscriber ID length",
+    "imsi_mod_1000\tsubscriber ID mod 1000",
+    "imsi_paging_block\tsubscriber ID paging block",
+    "imsi_plmn_consistency\tsubscriber ID network ID consistency",
+    "in\tin",
+    "in_this_tree\tin this tree",
+    "inconsistent\tinconsistent",
+    "indefinite\tindefinite",
+    "indeterminate\tindeterminate",
+    "index\tindex",
+    "indexed\tindexed",
+    "info\tinformation",
+    "initial_ue_identity\tinitial handset identity",
+    "initiator\tinitiator",
+    "initiator_spi\tinitiator spi",
+    "injected\tinjected",
+    "inner_ipv4\tinner ipv4",
+    "inner_ipv4_bytes\tinner ipv4 bytes",
+    "inner_ipv4_checksum\tinner ipv4 checksum",
+    "inner_layer\tinner layer",
+    "inner_teid\tinner tunnel ID",
+    "inner_tpdu\tinner tpdu",
+    "inner_tpdu_hex\tinner tpdu bytes",
+    "inner_udp\tinner udp",
+    "input\tinput",
+    "input_bits\tinput bits",
+    "input_is_sch_frame\tinput is sch frame",
+    "inputs\tinputs",
+    "ins\tins",
+    "install\tinstall",
+    "instrument\tinstrument",
+    "int_alg\tint alg",
+    "int_id\tint id",
+    "integrity\tintegrity check",
+    "integrity_algorithm\tintegrity algorithm",
+    "integrity_available\tintegrity available",
+    "integrity_check_info\tintegrity check information",
+    "integrity_id\tintegrity id",
+    "integrity_null\tintegrity null",
+    "integrity_protected\tintegrity protected",
+    "intercepted\tintercepted",
+    "interface\tinterface",
+    "interface_version\tinterface version",
+    "interpretation\tinterpretation",
+    "interpreter\tinterpreter",
+    "interval_s\tinterval s",
+    "intra_freq_reselection\tintra freq reselection",
+    "invalid\tinvalid",
+    "ip_layer\tip layer",
+    "ip_layer_note\tip layer note",
+    "ip_literal_contacts\tip literal contacts",
+    "ip_peer\tip peer",
+    "iq_file_count\tiq file count",
+    "iq_formats\tiq formats",
+    "iq_samples_per_subframe\tiq samples per subframe",
+    "isdp_aid\tisdp aid",
+    "isolation\tisolation",
+    "isolation_verdict\tisolation verdict",
+    "iss\tiss",
+    "issuer\tissuer",
+    "item\titem",
+    "item_hex\titem bytes",
+    "iter_pkt_window\titer pkt window",
+    "iuh_port\tiuh port",
+    "jamd\tjamd",
+    "jamming\tjamming",
+    "jamming_detect\tjamming detect",
+    "json\tJSON",
+    "k_offset_slots\tk offset slots",
+    "k_offset_unit\tk offset unit",
+    "k_pi\tk pi",
+    "k_w\tk w",
+    "kasme\tbase key",
+    "kausf\tkausf",
+    "kc\tkc",
+    "kc_bits\tkc bits",
+    "kc_bits_required\tkc bits required",
+    "kc_effective_bits\tkc effective bits",
+    "kc_frame_bits\tkc frame bits",
+    "kc_zero_rand\tkc zero rand",
+    "keccak_iterations\tkeccak iterations",
+    "keep_going\tkeep going",
+    "kernel\tkernel",
+    "key\tkey",
+    "key_absent\tkey absent",
+    "key_bits\tkey bits",
+    "key_curve\tkey curve",
+    "key_encoding\tkey encoding",
+    "key_fields\tkey fields",
+    "key_interface\tkey interface",
+    "key_length_bits\tkey length bits",
+    "key_malformed\tkey malformed",
+    "key_missing\tkey missing",
+    "key_note\tkey note",
+    "key_ref\tkey ref",
+    "key_source\tkey source",
+    "key_state\tkey state",
+    "key_unreadable\tkey unreadable",
+    "key_validated\tkey validated",
+    "key_wrong_curve\tkey wrong curve",
+    "keydir\tkeydir",
+    "keyed\tkeyed",
+    "keyfile\tkeyfile",
+    "keygen\tkeygen",
+    "keys_nothing\tkeys nothing",
+    "keystream\tkeystream",
+    "keystream_bits\tkeystream bits",
+    "keystream_bits_required\tkeystream bits required",
+    "ki\tki",
+    "ki_present\tki present",
+    "kic\tkic",
+    "kid\tkid",
+    "killchain\tkillchain",
+    "kind\tkind",
+    "known\tknown",
+    "known_frames\tknown frames",
+    "known_plain_bits\tknown not encrypted bits",
+    "known_plaintext\tknown plaintext",
+    "kseaf\tanchor key",
+    "kseaf_bits\tkseaf bits",
+    "ksi\tkey set index",
+    "l1_state\tl1 state",
+    "l2_block\tl2 block",
+    "l2_id\tl2 id",
+    "l2_octets\tl2 octets",
+    "l2_pseudo_length\tl2 pseudo length",
+    "l2_pseudo_length_octet\tl2 pseudo length octet",
+    "l2_pseudo_source\tl2 pseudo source",
+    "l3\tl3",
+    "l3_octets\tl3 octets",
+    "l_ra\tl ra",
+    "lab_authorised\tlab authorised",
+    "lab_plmn\tlab network ID",
+    "label\tlabel",
+    "lac\tlocation area",
+    "lai\tlai",
+    "lai_field\tlai field",
+    "lai_iei\tlai iei",
+    "lai_octets\tlai octets",
+    "laid_out_in\tlaid out in",
+    "laid_out_out\tlaid out out",
+    "lair\tlair",
+    "lapdm_address\tlapdm address",
+    "lapdm_bits\tlapdm bits",
+    "lapdm_control\tlapdm control",
+    "lapdm_frame\tlapdm frame",
+    "lapdm_header\tlapdm header",
+    "lapdm_length\tlapdm length",
+    "lapdm_octets\tlapdm octets",
+    "last_fn\tlast fn",
+    "last_frame\tlast frame",
+    "last_hop\tlast hop",
+    "last_hop_detail\tlast hop detail",
+    "last_response_data\tlast response data",
+    "last_seen\tlast seen",
+    "last_status_word\tlast status word",
+    "last_ts\tlast ts",
+    "lat\tlatitude",
+    "later_non_critical_extensions\tlater non critical extensions",
+    "latitude\tlatitude",
+    "latitude_sign\tlatitude sign",
+    "latt\tlatt",
+    "layer\tlayer",
+    "layers\tlayers",
+    "layout\tlayout",
+    "lc\tlc",
+    "lcid\tlcid",
+    "lcid_source\tlcid source",
+    "lcore\tlcore",
+    "lcs\tlcs",
+    "le\tle",
+    "leaks\tleaks",
+    "learned_from\tlearned from",
+    "leg\tleg",
+    "legacy_pairing_markers\tlegacy pairing markers",
+    "legacy_stack\tlegacy stack",
+    "len\tlength",
+    "length\tlength",
+    "length_agrees\tlength agrees",
+    "length_alert\tlength alert",
+    "length_byte\tlength byte",
+    "length_field\tlength field",
+    "length_mismatch\tlength mismatch",
+    "length_note\tlength note",
+    "length_octet\tlength octet",
+    "length_octets\tlength octets",
+    "lengths_checked\tlengths checked",
+    "li_probe\tli probe",
+    "limesdr\tlimesdr",
+    "limit\tlimit",
+    "line\tline",
+    "load_with_intact_decode\tload with intact decode",
+    "loaded\tloaded",
+    "location\tlocation",
+    "location_estimate\tlocation estimate",
+    "location_exposed\tlocation exposed",
+    "location_reason\tlocation reason",
+    "location_update\tlocation update",
+    "location_update_burst\tlocation update burst",
+    "lock\tlock",
+    "lock_owner\tlock owner",
+    "lock_state\tlock state",
+    "lockout\tlockout",
+    "log\tlog",
+    "lon\tlongitude",
+    "long\tlong",
+    "longest_len\tlongest length",
+    "longitude\tlongitude",
+    "loot\tloot",
+    "loot_dir\tloot dir",
+    "lpp\tlpp",
+    "lte\tLTE",
+    "lte_air\tLTE air",
+    "lte_algs\tLTE algs",
+    "lte_attach\tLTE attach",
+    "lte_core\tLTE core",
+    "lte_cve\tLTE cve",
+    "lte_pf\tLTE pf",
+    "lte_scanner\tLTE scanner",
+    "lte_ta_max\tLTE timing advance maximum",
+    "luhn\tluhn",
+    "m3ua\tM3UA",
+    "m3ua_class\tM3UA class",
+    "m3ua_class_name\tM3UA class name",
+    "m3ua_hex\tM3UA bytes",
+    "m3ua_length\tM3UA length",
+    "m3ua_octets\tM3UA octets",
+    "m3ua_reserved\tM3UA reserved",
+    "m3ua_type\tM3UA type",
+    "m3ua_type_name\tM3UA type name",
+    "m3ua_version\tM3UA version",
+    "m_tmsi\ttemporary ID",
+    "mac\tmessage check value",
+    "mac_i_bits\tmac i bits",
+    "mac_input\tmac input",
+    "mac_input_bits\tmac input bits",
+    "mac_input_hex\tmac input bytes",
+    "mac_octets\tmac octets",
+    "magic\tmagic",
+    "magic_class\tmagic class",
+    "map\tMAP",
+    "map_peer\tMAP peer",
+    "mapped_identity\tmapped identity",
+    "mappings\tmappings",
+    "margin_db\tmargin (dB)",
+    "match\tmatch",
+    "max\tmaximum",
+    "max_identities_per_paging_occasion\tmost identities in one page",
+    "max_one_way_m\tmaximum one way m",
+    "max_pages_per_subscriber\tmaximum pages per subscriber",
+    "max_records_per_occasion\tmaximum records per occasion",
+    "max_ssb\tmaximum ssb",
+    "max_ta\tmaximum timing advance",
+    "max_version\tmaximum version",
+    "mbms_session\tmbms session",
+    "mbr\tmaximum bit rate",
+    "mcc\tcountry code",
+    "mcc_malformed\tcountry code malformed",
+    "mcc_mnc\tnetwork ID",
+    "mcs\tmcs",
+    "mcs_table\tmcs table",
+    "mdbv_bytes\tmdbv bytes",
+    "mdbv_note\tmdbv note",
+    "me_visible\tme visible",
+    "meaning\tmeaning",
+    "measured_results_on_rach\tmeasured results on rach",
+    "measurement_identity\tmeasurement identity",
+    "measurement_method\tmeasurement method",
+    "measurement_report_optional_bitmap\tmeasurement report options",
+    "mechanism\tmechanism",
+    "media_endpoints\tmedia endpoints",
+    "medium\tmedium",
+    "mep\tmep",
+    "merged_into\tmerged into",
+    "message\tmessage",
+    "message_authentication_code\tmessage authentication code",
+    "message_hex\tmessage bytes",
+    "message_id\tmessage id",
+    "message_name\tmessage name",
+    "message_priority\tmessage priority",
+    "message_state\tmessage state",
+    "message_type\tmessage type",
+    "message_type_name\tmessage type name",
+    "messages\tmessages",
+    "method\tmethod",
+    "method_note\tmethod note",
+    "metric\tmetric",
+    "mf\tmf",
+    "mf26_frames\tmf26 frames",
+    "mf26_index\tmf26 index",
+    "mf26_ms\tmf26 (ms)",
+    "mf51_frames\tmf51 frames",
+    "mf51_index\tmf51 index",
+    "mf51_ms\tmf51 (ms)",
+    "mfa\tmfa",
+    "mfbr_dl_bps\tmfbr downlink (bit/s)",
+    "mfbr_ul_bps\tmfbr uplink (bit/s)",
+    "mgmt_banner\tmgmt banner",
+    "mgmt_cwmp_port\tmgmt cwmp port",
+    "mgmt_note\tmgmt note",
+    "mib\tMIB",
+    "mib_value_tag\tMIB value tag",
+    "milenage\tmilenage",
+    "milenage_opc\tmilenage opc",
+    "min_response_delay_ms\tminimum response delay (ms)",
+    "min_version\tminimum version",
+    "minimum\tminimum",
+    "mismatch\tmismatch",
+    "miss\tmiss",
+    "missing\tmissing",
+    "missing_ies\tmissing ies",
+    "missing_mandatory\tmissing mandatory",
+    "mitre\tmitre",
+    "mix\tmix",
+    "mixed\tmixed",
+    "mixed_bits\tmixed bits",
+    "mixed_bits_len\tmixed bits length",
+    "mme\tmobility manager",
+    "mmec\tmmec",
+    "mnc\tnetwork code",
+    "mnc_2digit\tnetwork code 2digit",
+    "mnc_3digit\tnetwork code 3digit",
+    "mnc_digits\tnetwork code digits",
+    "mnc_length\tnetwork code length",
+    "mnc_length_raw\tnetwork code length raw",
+    "mob_cai_rev\tmob cai rev",
+    "mob_firmware_rev\tmob firmware rev",
+    "mob_model\tmob model",
+    "mobile_allocation\tmobile allocation",
+    "mobile_allocation_note\tmobile allocation note",
+    "mobile_identity\tmobile identity",
+    "mobile_identity_raw\tmobile identity raw",
+    "mobile_identity_type\tmobile identity type",
+    "mode\tmode",
+    "mode_code\tmode code",
+    "model\tmodel",
+    "modulation\tmodulation",
+    "modulator\tmodulator",
+    "module\tmodule",
+    "modules_dir\tmodules dir",
+    "mood\tmood",
+    "mood_marker\tmood marker",
+    "mood_note\tmood note",
+    "mr\tmr",
+    "msg1_fdm\tmsg1 fdm",
+    "msg_bits\tmessage bits",
+    "msg_bytes\tmessage bytes",
+    "msg_hex\tmessage bytes",
+    "msg_kind\tmessage kind",
+    "msg_layout\tmessage layout",
+    "msg_name\tmessage name",
+    "msg_octets\tmessage octets",
+    "msg_type\tmessage type",
+    "msg_type_hex\tmessage type bytes",
+    "msg_type_name\tmessage type name",
+    "msin\tsubscriber number",
+    "msin_exposed\tmsin exposed",
+    "msisdn\tmsisdn",
+    "msisdn_exposed\tmsisdn exposed",
+    "msisdn_shape\tmsisdn shape",
+    "msm_ver\tmsm ver",
+    "msu_hex\tmsu bytes",
+    "msu_octets\tmsu octets",
+    "msu_source\tmsu source",
+    "mt_lp\tmt lp",
+    "mt_mms\tmt mms",
+    "mt_rd\tmt rd",
+    "mt_reserved_bit4\tmt reserved bit4",
+    "mt_rp\tmt rp",
+    "mt_sri\tmt sri",
+    "mt_srq_ct\tmt srq ct",
+    "mt_srr\tmt srr",
+    "mt_udhi\tmt udhi",
+    "mt_vpf\tmt vpf",
+    "mti\tmti",
+    "mti_code\tmti code",
+    "mti_meaning\tmti meaning",
+    "mtime\tmtime",
+    "mtp3\tmtp3",
+    "multiframe_frames\tmultiframe frames",
+    "multiframe_index\tmultiframe index",
+    "multiframe_ms\tmultiframe (ms)",
+    "multiframe_phase\tmultiframe phase",
+    "multiframes\tmultiframes",
+    "mutated\tmutated",
+    "n201\tn201",
+    "n2_ngap_markers\tn2 NGAP markers",
+    "n32_markers\tn32 markers",
+    "n4_pfcp_markers\tn4 PFCP markers",
+    "n_cb\tn cb",
+    "n_d\tn d",
+    "n_id\tn id",
+    "n_id_1\tn id 1",
+    "n_id_2\tn id 2",
+    "n_prb\tn prb",
+    "name\tname",
+    "nas_bits\tNAS bits",
+    "nas_hex\tmessage bytes",
+    "nas_key_set\tNAS key set",
+    "nas_key_set_id\tNAS key set id",
+    "nas_key_set_identifier\tNAS key set identifier",
+    "nas_key_set_identifier_name\tNAS key set identifier name",
+    "nas_mac\tNAS mac",
+    "nas_msg_name\tNAS message name",
+    "nas_msg_type\tNAS message type",
+    "nas_pdu\tNAS PDU",
+    "nas_signaling\tNAS signaling",
+    "nasf\tnasf",
+    "national_indicator\tnational indicator",
+    "nb\tnumber",
+    "nc\tnc",
+    "ncc\tncc",
+    "ndi\tndi",
+    "needed\tneeded",
+    "needs\tneeds",
+    "needs_calibration_for\tneeds calibration for",
+    "negctl\tnegative control",
+    "neigh_cell_config\tneigh cell config",
+    "neigh_cells\tneigh cells",
+    "neighbors\tneighbors",
+    "neighbour_cell\tneighbour cell",
+    "network_originated\tnetwork originated",
+    "new_rows\tnew rows",
+    "next\tnext step",
+    "next_extension_header_name\tnext extension header name",
+    "next_extension_header_type\tnext extension header type",
+    "next_payload\tnext payload",
+    "next_payload_name\tnext payload name",
+    "next_step\tnext step",
+    "nf\tnf",
+    "nf_addresses\tnf addresses",
+    "nf_types\tnf types",
+    "ngap\tNGAP",
+    "ngap_qos_level_parameters\tNGAP quality of service level parameters",
+    "ngksi\tngksi",
+    "ni\tni",
+    "ni_name\tni name",
+    "nibbles\tnibbles",
+    "nist_vector\tnist vector",
+    "nlink\tnlink",
+    "no\tno",
+    "no_audience\tno audience",
+    "no_expiry\tno expiry",
+    "no_repeat_paging\tno repeat paging",
+    "no_response\tno response",
+    "nof_ports\tnof ports",
+    "non3gpp\tnon3gpp",
+    "non_critical_extension\tnon critical extension",
+    "non_critical_extensions\tnon critical extensions",
+    "nonce_carries_rand\tnonce carries rand",
+    "none\tnone",
+    "none_matched\tnone matched",
+    "nonstandard_port\tnonstandard port",
+    "normal\tnormal",
+    "normal_paging\tnormal paging",
+    "not_applicable\tnot applicable",
+    "not_attempted\tnot attempted",
+    "not_determinable\tnot determinable",
+    "not_performed\tnot performed",
+    "not_set\tnot set",
+    "note\tnote",
+    "note_pin_flags\tnote pin flags",
+    "notification\tnotification",
+    "now\tnow",
+    "npdu_number\tnpdu number",
+    "nr\tNR",
+    "nr_core\tNR core",
+    "nr_cve\tNR cve",
+    "nr_inject\tNR inject",
+    "nr_pf\tNR pf",
+    "nrarfcn\tchannel number",
+    "nrf\tnetwork registry",
+    "ns\tns",
+    "nscount\tnscount",
+    "nssai\tslice selection",
+    "ntn\tNTN",
+    "null_algorithm\tnull algorithm",
+    "null_cipher\tnull cipher",
+    "null_ciphers\tnull ciphers",
+    "null_scheme\tnull scheme",
+    "null_scheme_markers\tnull scheme markers",
+    "null_transform\tnull transform",
+    "num_read\tnumber read",
+    "num_written\tnumber written",
+    "number_of_commands\tnumber of commands",
+    "numerology\tnumerology",
+    "numpy\tnumpy",
+    "nv\tnv",
+    "o1_weak_auth\to1 weak auth",
+    "oa\toa",
+    "objective\tobjective",
+    "observation\tobservation",
+    "observations\tobservations",
+    "observed_block\tobserved block",
+    "observed_blocks\tobserved blocks",
+    "observed_ciphertext\tobserved ciphertext",
+    "observed_plmn\tobserved network ID",
+    "occasions_per_frame\toccasions per frame",
+    "octet\toctet",
+    "octet1\toctet1",
+    "octet2\toctet2",
+    "octets\toctets",
+    "octets_file\toctets file",
+    "odd_even\todd even",
+    "offered\toffered",
+    "offset\toffset",
+    "ofm\tofm",
+    "ok\tok",
+    "ok_responses\tok responses",
+    "one_way_km\tone way (km)",
+    "one_way_m\tone way m",
+    "one_way_ms\tone way (ms)",
+    "op\top",
+    "opc\topc",
+    "opcode\topcode",
+    "opcode_name\topcode name",
+    "open\topen",
+    "open5gs\topen5gs",
+    "open_relay\topen relay",
+    "operation\toperation",
+    "operator\toperator",
+    "operator_specific\toperator specific",
+    "optional_parameters\toptional parameters",
+    "optional_parameters_decoded\toptional parameters decoded",
+    "optional_parameters_hex\toptional parameters bytes",
+    "optional_privacy_markers\toptional privacy markers",
+    "oran\tO-RAN",
+    "order\torder",
+    "ordering\tordering",
+    "org\torg",
+    "ota\tOTA",
+    "ota_counter\tOTA counter",
+    "ota_key_present\tOTA key present",
+    "ota_key_weakness\tOTA key weakness",
+    "ota_packet_hex\tOTA packet bytes",
+    "ota_sms\tOTA sms",
+    "ota_sms_burst\tOTA sms burst",
+    "ota_valid\tOTA valid",
+    "otid\totid",
+    "out\tout",
+    "out_bytes\tout bytes",
+    "out_file\tout file",
+    "out_octets\tout octets",
+    "outbind\toutbind",
+    "outcome\toutcome",
+    "outer_header_creation\touter header creation",
+    "outer_layer\touter layer",
+    "outer_teid\touter tunnel ID",
+    "output_bits\toutput bits",
+    "output_hex\toutput bytes",
+    "over_count_records\tover count records",
+    "overall\toverall",
+    "overflow\toverflow",
+    "override\toverride",
+    "overruns\toverruns",
+    "oversample\toversample",
+    "oversized_content_length\toversized content length",
+    "owner\towner",
+    "p0\tp0",
+    "p0_nominal_pucch_dbm\tp0 nominal pucch (dBm)",
+    "p0_nominal_pusch_dbm\tp0 nominal pusch (dBm)",
+    "p0_ue_pusch_dbm\tp0 handset pusch (dBm)",
+    "p1\tp1",
+    "p2\tp2",
+    "p_cmax_dbm\tp cmax (dBm)",
+    "p_rnti_search_space\tp rnti search space",
+    "package\tpackage",
+    "packed\tpacked",
+    "packet\tpacket",
+    "packet_bytes\tpacket bytes",
+    "packing_rule\tpacking rule",
+    "pad_bits\tpad bits",
+    "pad_length\tpad length",
+    "padding_octets\tpadding octets",
+    "page_mode\tpage mode",
+    "page_mode_bits\tpage mode bits",
+    "page_mode_iei_bit4\tpage mode iei bit4",
+    "page_mode_name\tpage mode name",
+    "page_mode_nibble\tpage mode nibble",
+    "page_mode_spare_bits32\tpage mode spare bits32",
+    "paging_anomaly\tpaging anomaly",
+    "paging_block_index\tpaging block index",
+    "paging_block_period_ms\tpaging block period (ms)",
+    "paging_blocks_max\tpaging blocks maximum",
+    "paging_blocks_per_mf\tpaging blocks per mf",
+    "paging_blocks_per_second\tpaging blocks per second",
+    "paging_blocks_total\tpaging blocks total",
+    "paging_cause\tpaging reason",
+    "paging_cause_code\tpaging reason code",
+    "paging_frame\tpaging frame",
+    "paging_frame_mod\tpaging frame mod",
+    "paging_frame_numbers\tpaging frame numbers",
+    "paging_group\tpaging group",
+    "paging_hyperframe\tpaging hyperframe",
+    "paging_hyperframe_rule\tpaging hyperframe rule",
+    "paging_occasion\tpaging occasion",
+    "paging_record_list\tpaging record list",
+    "paging_record_type\tpaging record type",
+    "paging_records\tpaging records",
+    "paging_reorganization\tpaging reorganization",
+    "paging_requests\tpaging requests",
+    "paging_responses\tpaging responses",
+    "paging_tmsi\tpaged temporary ID",
+    "paging_track\tpaging track",
+    "pair\tpair",
+    "paper\tpaper",
+    "param_name\tparam name",
+    "param_octets\tparam octets",
+    "param_tag\tparam tag",
+    "param_value\tparam value",
+    "parameter\tparameter",
+    "params\tparams",
+    "parity\tparity",
+    "parity_agrees\tparity agrees",
+    "parsed\tparsed",
+    "partial\tpartial",
+    "passed\tpassed",
+    "password\tpassword",
+    "path\tpath",
+    "pattern\tpattern",
+    "pause\tpause",
+    "payload\tpayload",
+    "payload_bits\tpayload bits",
+    "payload_bytes\tpayload bytes",
+    "payload_file\tpayload file",
+    "payload_hex\tpayload bytes",
+    "payload_is_waveform\tpayload is waveform",
+    "payload_len\tpayload length",
+    "payload_ms\tpayload (ms)",
+    "payload_octets\tpayload octets",
+    "payload_sha256\tpayload sha256",
+    "payload_source\tpayload source",
+    "pbch_encoding\tpbch encoding",
+    "pbch_re\tpbch re",
+    "pc\tpc",
+    "pc_indicator\tpc indicator",
+    "pcap_available\tcapture file available",
+    "pcap_module\tcapture file module",
+    "pcap_reader\tcapture file reader",
+    "pcfich\tpcfich",
+    "pci\tcell ID (physical)",
+    "pcntr\tpcntr",
+    "pcscd\tpcscd",
+    "pd\tpd",
+    "pd_attempts\tpd attempts",
+    "pd_meaning\tpd meaning",
+    "pd_responses\tpd responses",
+    "pdb_0_5ms_units\tpdb 0 5ms units",
+    "pdb_ms\tpdb (ms)",
+    "pdb_units\tpdb units",
+    "pdcch_aggregation\tpdcch aggregation",
+    "pdcch_bits\tpdcch bits",
+    "pdcch_cce_available\tpdcch cce available",
+    "pdcch_cce_needed\tpdcch cce needed",
+    "pdcch_config_sib1\tpdcch config sib1",
+    "pdcch_config_sib1_hi4\tpdcch config sib1 hi4",
+    "pdcch_config_sib1_lo4\tpdcch config sib1 lo4",
+    "pdcch_fits\tpdcch fits",
+    "pdcch_hex\tpdcch bytes",
+    "pdi\tpdi",
+    "pdisc\tpdisc",
+    "pdr_far_id\tpdr far id",
+    "pdr_id\tpdr id",
+    "pdr_qer_id\tpdr qer id",
+    "pdsch_to_harq\tpdsch to harq",
+    "pdu\tPDU",
+    "pdu_bits\tPDU bits",
+    "pdu_hex\tPDU bytes",
+    "pdu_session_container_first_octet\tPDU session container first byte",
+    "pdu_session_container_type\tPDU session container type",
+    "pdu_type\tPDU type",
+    "pdu_type_name\tPDU type name",
+    "peak_clamp\tpeak clamp",
+    "peer\tpeer",
+    "peer_ip\tpeer ip",
+    "peer_whitelist\tpeer whitelist",
+    "pei_frame\tpei frame",
+    "pei_frame_relative_to_pf\tpei frame relative to pf",
+    "pei_offset_frames\tpei offset frames",
+    "per\tper",
+    "per_frame\tper frame",
+    "per_unit_m\tper unit m",
+    "period\tperiod",
+    "period_frames\tperiod frames",
+    "period_ms\tperiod (ms)",
+    "pf_offset\tpf offset",
+    "pf_rhs\tpf rhs",
+    "pf_sfn\tpf sfn",
+    "pfcp\tPFCP",
+    "pfcp_messages\tPFCP messages",
+    "pfcp_tool\tPFCP tool",
+    "pfi\tpfi",
+    "pgt\tpgt",
+    "phich_duration\tphich duration",
+    "phich_duration_index\tphich duration index",
+    "phich_resource\tphich resource",
+    "phich_resource_index\tphich resource index",
+    "pi\tpi",
+    "pi_dcs_present\tpi dcs present",
+    "pi_pid_present\tpi pid present",
+    "pi_udl_present\tpi UDL present",
+    "pid\tprocess ID",
+    "pid_bits76\tpid bits76",
+    "pid_group\tpid group",
+    "pid_meaning\tpid meaning",
+    "pid_silent\tpid silent",
+    "pidfile\tpidfile",
+    "pin_enable_flag\tpin enable flag",
+    "pin_enable_flag_source\tpin enable flag source",
+    "pip\tpip",
+    "pkexec\tpkexec",
+    "pkg_manager\tpkg manager",
+    "plain\tnot encrypted",
+    "plain_nas\tnot encrypted NAS",
+    "plaintext\tplaintext",
+    "plaintext_cwmp\tplaintext cwmp",
+    "plan\tplan",
+    "plan_count\tplan count",
+    "plan_dir\tplan dir",
+    "plan_file\tplan file",
+    "plans\tplans",
+    "plans_dir\tplans dir",
+    "playback\tplayback",
+    "plmn\tnetwork ID",
+    "plmn_bytes\tnetwork ID bytes",
+    "plmn_colour_code\tnetwork ID colour code",
+    "plmn_count\tnetwork ID count",
+    "plmn_octets\tnetwork ID octets",
+    "plmn_primary\tnetwork ID primary",
+    "plmn_secondary\tnetwork ID secondary",
+    "plmns\tplmns",
+    "pn_flag\tpn flag",
+    "po_count_in_ptw\tpo count in ptw",
+    "po_frame\tpo frame",
+    "po_in_ptw\tpo in ptw",
+    "po_index\tpo index",
+    "po_subframe\tpo subframe",
+    "points\tpoints",
+    "policy_instance_id\tpolicy instance id",
+    "policy_type_id\tpolicy type id",
+    "poly\tpoly",
+    "por\tpor",
+    "por_cipher\tpor cipher",
+    "por_meaning\tpor meaning",
+    "por_rccds\tpor rccds",
+    "por_submit\tpor submit",
+    "port\tport",
+    "posted\tposted",
+    "power_dbm\tpower (dBm)",
+    "power_default\tpower default",
+    "ppid\tppid",
+    "prach_config_index\tprach config index",
+    "prach_format\tprach format",
+    "prach_ta_max_ts\tprach timing advance maximum ts",
+    "prach_tcp_ts\tprach tcp ts",
+    "prach_tseq_ts\tprach tseq ts",
+    "prb_bundling\tprb bundling",
+    "preamble_count\tpreamble count",
+    "preamble_index\tpreamble index",
+    "preamble_initial_rx_target_dbm\tpreamble initial rx target (dBm)",
+    "preamble_trans_max\tpreamble trans maximum",
+    "precedence\tprecedence",
+    "precondition\tprecondition",
+    "premium_rate_number\tpremium rate number",
+    "presence_antenna_port1\tpresence antenna port1",
+    "present\tinstalled",
+    "prins_markers\tprins markers",
+    "priority\tpriority",
+    "priority_flag\tpriority flag",
+    "priority_level\tpriority level",
+    "priority_present\tpriority present",
+    "probe\tprobe",
+    "probe_tools_missing\tprobe tools missing",
+    "probes\tprobes",
+    "procedure\tprocedure",
+    "procedure_code\tprocedure code",
+    "procedure_name\tprocedure name",
+    "procedure_transaction_identity\tprocedure transaction identity",
+    "profile\tprofile",
+    "profile_a\tprofile a",
+    "profile_b\tprofile b",
+    "profile_state\tprofile state",
+    "profile_state_raw\tprofile state raw",
+    "profile_type\tprofile type",
+    "profile_version\tprofile version",
+    "protection\tprotection",
+    "protection_markers\tprotection markers",
+    "protection_scheme\tprotection scheme",
+    "proto\tprotocol",
+    "proto_pad_octets\tprotocol pad octets",
+    "protocol\tprotocol",
+    "protocol_data\tprotocol data",
+    "protocol_data_octets\tprotocol data octets",
+    "protocol_data_tag\tprotocol data tag",
+    "protocol_discriminator\tprotocol discriminator",
+    "protocol_discriminator_name\tprotocol discriminator name",
+    "protocol_error_indicator\tprotocol error indicator",
+    "protocol_id\tprotocol id",
+    "protocol_type\tprotocol type",
+    "protocol_version\tprotocol version",
+    "protocols\tprotocols",
+    "proves\tproves",
+    "ps\tps",
+    "psc\tscrambling code",
+    "pss_chips\tpss chips",
+    "pss_pinned_agree\tpss pinned agree",
+    "pss_root_selected_by\tpss root selected by",
+    "ptw\tptw",
+    "ptw_end_frame\tptw end frame",
+    "ptw_end_sfn\tptw end sfn",
+    "ptw_frames\tptw frames",
+    "ptw_length_s\tptw length s",
+    "ptw_start_frame\tptw start frame",
+    "ptw_start_hsfn\tptw start hsfn",
+    "ptw_start_sfn\tptw start sfn",
+    "pucch_resource_indicator\tpucch resource indicator",
+    "purpose\tpurpose",
+    "pusch_encoding\tpusch encoding",
+    "push_hex\tpush bytes",
+    "put_with\tput with",
+    "pycrate\tpycrate",
+    "python3\tpython3",
+    "q_hyst\tq hyst",
+    "q_rx_lev_min\tq rx lev minimum",
+    "qci\tquality class",
+    "qdcount\tqdcount",
+    "qer_id\tqer id",
+    "qfi\tqfi",
+    "qfi_hex\tqfi bytes",
+    "qos_verbs\tquality of service commands",
+    "qpp_f1\tqpp f1",
+    "qpp_f2\tqpp f2",
+    "qr\tqr",
+    "qtype\tqtype",
+    "qualifier\tqualifier",
+    "queries\tqueries",
+    "query\tquery",
+    "query_broadcast_sm\tquery broadcast sm",
+    "query_broadcast_sm_resp\tquery broadcast sm resp",
+    "query_requester\tquery requester",
+    "query_sm\tquery sm",
+    "query_sm_resp\tquery sm resp",
+    "r3_ies_optional_bitmap\tr3 ies optional bitmap",
+    "r_field\tr field",
+    "ra\tra",
+    "ra_rnti\trandom-access ID",
+    "rac\trouting area",
+    "race_window_frames\trace window frames",
+    "radial_velocity_mps\tradial velocity mps",
+    "radio\tradio",
+    "radio_required\tradio required",
+    "radio_state\tradio state",
+    "radius_m\tradius m",
+    "ran\tran",
+    "ran_function\tran function",
+    "ran_function_id\tran function id",
+    "ran_function_note\tran function note",
+    "ran_node_name\tran node name",
+    "ran_share\tran share",
+    "ran_ue_ngap_id\ttower connection ID",
+    "ran_ue_ngap_id_bits\tran handset NGAP id bits",
+    "ranap_carried_by\tranap carried by",
+    "ranap_domain\tranap domain",
+    "ranap_hex\tranap bytes",
+    "ranap_message\tranap message",
+    "ranap_octets\tranap octets",
+    "ranap_plmn\tranap network ID",
+    "ranap_procedure\tranap procedure",
+    "rand\trandom challenge",
+    "rand_len\trand length",
+    "range\trange",
+    "range_m\trange m",
+    "rank\trank",
+    "rapid\trapid",
+    "raster_khz\traster (kHz)",
+    "rat\tradio access technology",
+    "rat_change\trat change",
+    "rat_changes\trat changes",
+    "rate\trate",
+    "rate_ceiling_msg_s\trate ceiling message s",
+    "rate_hz\trate (Hz)",
+    "rate_limit\trate limit",
+    "rate_matching\trate matching",
+    "rate_max_msps\trate maximum msps",
+    "rate_min_msps\trate minimum msps",
+    "rate_msg_s\trate message s",
+    "rate_rps\trate rps",
+    "rate_sps\trate (samples/s)",
+    "ratio\tratio",
+    "rats_seen\trats seen",
+    "raw\traw",
+    "raw_payload\traw payload",
+    "rccds\trccds",
+    "rccds_len\trccds length",
+    "rccds_meaning\trccds meaning",
+    "rccds_note\trccds note",
+    "rcode\trcode",
+    "rcode_name\trcode name",
+    "rd\trd",
+    "re\tre",
+    "reach\treach",
+    "reach_note\treach note",
+    "read\tread",
+    "reader\treader",
+    "readlink\treadlink",
+    "reason\treason",
+    "reasoning\treasoning",
+    "rebuilt\trebuilt",
+    "record\trecord",
+    "recorded\trecorded",
+    "records\trecords",
+    "recoverable\trecoverable",
+    "recovered\trecovered",
+    "recovered_fn\trecovered fn",
+    "recovered_keystream\trecovered keystream",
+    "redact_default\tredact default",
+    "redirected_earfcn\tredirected channel number",
+    "redirection_info\tredirection information",
+    "ref\treference",
+    "referee\treferee",
+    "reference\treference",
+    "refs\trefs",
+    "register\tregister",
+    "register_lengths\tregister lengths",
+    "registered_delivery\tregistered delivery",
+    "registers\tregisters",
+    "registration_cause\tregistration reason",
+    "regs\tregs",
+    "reject\trejection",
+    "rejected\trejected",
+    "rejection_cause\trejection reason",
+    "rejects\trejects",
+    "rel_date\trel date",
+    "rel_time\trel time",
+    "relation\trelation",
+    "relay_filtered\trelay filtered",
+    "relay_unauthorized\trelay unauthorized",
+    "release_cause\trelease reason",
+    "released\treleased",
+    "remainder_prb\tremainder prb",
+    "rendered_d0_imei\trendered d0 handset serial",
+    "rendered_d0_location\trendered d0 location",
+    "rendered_d0_sms\trendered d0 sms",
+    "repeat_every_multiframes\trepeat every multiframes",
+    "repeat_paging\trepeat paging",
+    "repeated_public_keys\trepeated public keys",
+    "replace_if_present_flag\treplace if present flag",
+    "replace_sm\treplace sm",
+    "replace_sm_resp\treplace sm resp",
+    "replay_note\treplay note",
+    "report\treport",
+    "report_file\treport file",
+    "report_messages\treport messages",
+    "reported_ssb_count\treported ssb count",
+    "reporting_triggers\treporting triggers",
+    "request\trequest",
+    "request_bytes\trequest bytes",
+    "request_command_id\trequest command id",
+    "request_reference\trequest reference",
+    "request_reference_octets\trequest reference octets",
+    "request_sequence_number\trequest sequence number",
+    "requested\trequested",
+    "requested_count\trequested count",
+    "requests\trequests",
+    "required\trequired",
+    "requires\trequires",
+    "requires_sdr\trequires SDR",
+    "res\tauthentication answer",
+    "res_len\tres length",
+    "reserved\treserved",
+    "reserved_alert\treserved alert",
+    "reset\treset",
+    "residual_rmse\tresidual rmse",
+    "resolver\tresolver",
+    "resolver_ip\tresolver ip",
+    "resource_type\tresource type",
+    "responder_spi\tresponder spi",
+    "response\tresponse",
+    "response_bit\tresponse bit",
+    "response_bytes\tresponse bytes",
+    "response_command_id\tresponse command id",
+    "response_delay_ms\tresponse delay (ms)",
+    "response_hex\tresponse bytes",
+    "response_raw\tresponse raw",
+    "responses\tresponses",
+    "result\tresult",
+    "reused_ephemeral_keys\treused ephemeral keys",
+    "reused_key\treused key",
+    "reused_keys\treused keys",
+    "revision\trevision",
+    "revolte\trevolte",
+    "rf_power\tRF power",
+    "rfc_vector\trfc vector",
+    "rfn\trfn",
+    "rfu_bytes\trfu bytes",
+    "rhl\trhl",
+    "ric_action_id\tric action id",
+    "ric_ingress_open\tric ingress open",
+    "risk\trisk",
+    "rnti\tradio network temporary ID",
+    "rnti_source\trnti source",
+    "rnti_store\trnti store",
+    "role\trole",
+    "root_sequence\troot sequence",
+    "rounding_error_khz\trounding error (kHz)",
+    "roundtrip\troundtrip",
+    "roundtrip_answer\troundtrip answer",
+    "roundtrip_app\troundtrip app",
+    "roundtrip_command\troundtrip command",
+    "roundtrip_id\troundtrip id",
+    "roundtrip_length_ok\troundtrip length ok",
+    "roundtrip_name\troundtrip name",
+    "roundtrip_opcode\troundtrip opcode",
+    "roundtrip_protocol_data\troundtrip protocol data",
+    "roundtrip_qname\troundtrip qname",
+    "roundtrip_qr\troundtrip qr",
+    "roundtrip_sd\troundtrip slice detail",
+    "roundtrip_sst\troundtrip slice type",
+    "roundtrip_us\troundtrip (µs)",
+    "routing_indicator\trouting indicator",
+    "routing_on\trouting on",
+    "row\trow",
+    "rows\trows",
+    "rows_seen\trows seen",
+    "rows_written\trows written",
+    "rpl\trpl",
+    "rr_conf\trr config",
+    "rrc_bits\tRRC bits",
+    "rrc_hex\tRRC bytes",
+    "rrc_hex_padded_bits\tRRC bytes padded bits",
+    "rrc_layout\tRRC layout",
+    "rrc_message\tRRC message",
+    "rrc_message_id\tRRC message id",
+    "rrc_message_sequence_number\tRRC message sequence number",
+    "rrc_octets\tRRC octets",
+    "rrc_pad_bits\tRRC pad bits",
+    "rrc_state_indicator\tRRC state indicator",
+    "rrc_transaction_identifier\tRRC transaction identifier",
+    "rrc_tx_id\tRRC tx id",
+    "rsrp\tsignal strength (RSRP)",
+    "rsrp_dbm\tsignal strength (dBm)",
+    "rsrp_mapping\tsignal strength mapping",
+    "rsrq\tsignal quality (RSRQ)",
+    "rssi\treceived level",
+    "rtt_ms\trtt (ms)",
+    "rua_cause\trua reason",
+    "rua_context\trua context",
+    "rua_hex\trua bytes",
+    "rua_message\trua message",
+    "rua_octets\trua octets",
+    "rua_ranap\trua ranap",
+    "rua_transport\trua transport",
+    "rule\trule",
+    "run\trun",
+    "runner_up_index\trunner up index",
+    "runner_up_rsrp_dbm\trunner up signal strength (dBm)",
+    "runner_up_rsrp_index\trunner up signal strength index",
+    "running\trunning",
+    "runs\truns",
+    "runs_dir\truns dir",
+    "runs_file\truns file",
+    "rv\trv",
+    "rx_sdr\trx SDR",
+    "rx_sdr_present\trx SDR present",
+    "s1ap\tS1AP",
+    "s1ap_enb_id\tS1AP tower id",
+    "s1ap_enb_ue_id\tS1AP tower handset id",
+    "s1ap_hex\tS1AP bytes",
+    "s1ap_m_tmsi\tS1AP m temporary ID",
+    "s1ap_mcc\tS1AP country code",
+    "s1ap_mme_code\tS1AP mme code",
+    "s1ap_mme_ue_id\tS1AP mme handset id",
+    "s1ap_mnc\tS1AP network code",
+    "s1ap_name\tS1AP name",
+    "s1ap_nas_hex\tS1AP NAS bytes",
+    "s1ap_octets\tS1AP octets",
+    "s1ap_tac\tS1AP tracking area",
+    "s1ap_verb\tS1AP command",
+    "s6a_answers\ts6a answers",
+    "s6a_app_id\ts6a app id",
+    "s6a_requests\ts6a requests",
+    "s_flag\ts flag",
+    "s_id\ts id",
+    "s_nssai\ts slice selection",
+    "s_rnti\ts rnti",
+    "s_tmsi\ttemporary ID",
+    "same_as_before\tsame as before",
+    "sample_format\tsample format",
+    "sample_rate\tsample rate",
+    "sample_rate_hz\tsample rate (Hz)",
+    "sample_rate_msps\tsample rate msps",
+    "samples\tsamples",
+    "sat_browser_markers\tsat browser markers",
+    "sat_present\tsat present",
+    "sba_pivot\tSBA pivot",
+    "sbi\tSBI",
+    "sc\tsc",
+    "sccp\tSCCP",
+    "sccp_class\tSCCP class",
+    "sccp_data\tSCCP data",
+    "sccp_message_name\tSCCP message name",
+    "sccp_message_type\tSCCP message type",
+    "sch_bits\tsch bits",
+    "sch_bits_order\tsch bits order",
+    "sch_bits_tx\tsch bits tx",
+    "sch_bits_tx_order\tsch bits tx order",
+    "sch_frame_fn\tsch frame fn",
+    "sch_frame_t3\tsch frame t3",
+    "sch_info_bits\tsch information bits",
+    "sch_info_hex\tsch information bytes",
+    "sch_info_octets\tsch information octets",
+    "sch_period\tsch period",
+    "sched_info_key\tsched information key",
+    "sched_info_value\tsched information value",
+    "sched_store\tsched store",
+    "schedule_delivery_time\tschedule delivery time",
+    "scheduling_blocks\tscheduling blocks",
+    "scheduling_info\tscheduling information",
+    "scheme\tscheme",
+    "scheme_name\tscheme name",
+    "scheme_output\tscheme output",
+    "scheme_output_octets\tscheme output octets",
+    "scipy\tscipy",
+    "scm\tscm",
+    "scope\tscope",
+    "scope_checked\tscope checked",
+    "scope_violation\toutside the stated scope",
+    "score\tscore",
+    "score_enc_alg\tscore enc alg",
+    "score_enc_severity\tscore enc severity",
+    "score_enc_status\tscore enc status",
+    "score_gen\tscore gen",
+    "score_int_alg\tscore int alg",
+    "score_int_severity\tscore int severity",
+    "score_int_status\tscore int status",
+    "scpi_file\tscpi file",
+    "scpi_written\tscpi written",
+    "scpi_written_handoff\tscpi written handoff",
+    "scrambled\tscrambled",
+    "scs_khz\tsubcarrier spacing (kHz)",
+    "scs_ref_khz\tscs ref (kHz)",
+    "sctp\tsctp",
+    "sctp_dport\tsctp dport",
+    "sctp_note\tsctp note",
+    "sctp_port\tsctp port",
+    "sctp_ports\tsctp ports",
+    "sctp_ppid\tsctp ppid",
+    "sctp_sport\tsctp sport",
+    "sctp_vtag\tsctp vtag",
+    "scts\tscts",
+    "scts_day\tscts day",
+    "scts_hour\tscts hour",
+    "scts_local\tscts local",
+    "scts_minute\tscts minute",
+    "scts_month\tscts month",
+    "scts_second\tscts second",
+    "scts_tz\tscts tz",
+    "scts_tz_quarters\tscts tz quarters",
+    "scts_year\tscts year",
+    "sd\tslice detail",
+    "sd_decimal\tslice detail decimal",
+    "sd_present\tslice detail present",
+    "sdcch\tsdcch",
+    "sdr\tradio",
+    "sdr_call\tSDR call",
+    "sdr_centre_hz\tSDR centre (Hz)",
+    "sdr_devices\tSDR devices",
+    "sdr_gain_db\tSDR gain (dB)",
+    "sdr_index\tSDR index",
+    "sdr_iq\tSDR iq",
+    "sdr_iq_format\tSDR iq format",
+    "sdr_probe\tSDR probe",
+    "sdr_rate_hz\tSDR rate (Hz)",
+    "sdr_serial\tSDR serial",
+    "sdr_tools\tSDR tools",
+    "seam\tseam",
+    "search\tsearch",
+    "sec_header\tsec header",
+    "sec_meaning\tsec meaning",
+    "seconds\tseconds",
+    "secured\tsecured",
+    "secured_data\tsecured data",
+    "secured_data_len\tsecured data length",
+    "secured_note\tsecured note",
+    "security_context\tsecurity context",
+    "security_header\tsecurity header",
+    "security_header_name\tsecurity header name",
+    "security_header_type\tsecurity header type",
+    "security_meaning\tsecurity meaning",
+    "security_protected\tsecurity protected",
+    "seed\tseed",
+    "segment\tsegment",
+    "segment_fields\tsegment fields",
+    "segv\tsegv",
+    "seid\tseid",
+    "seid_hex\tseid bytes",
+    "seid_present\tseid present",
+    "selectable\tselectable",
+    "selected\tselected",
+    "selected_driver\tradio in use",
+    "selected_name\tselected name",
+    "selected_nas_cipher\tselected NAS cipher",
+    "selected_nas_integrity\tselected NAS integrity",
+    "selection\tselection",
+    "sent\tsent",
+    "separator\tseparator",
+    "seq\tsequence number",
+    "seq_inner\tseq inner",
+    "seq_len\tsequence length",
+    "seq_outer\tseq outer",
+    "sequence\tsequence",
+    "sequence_number\tsequence number",
+    "sequence_number_octets\tsequence number octets",
+    "serial\tserial",
+    "serial_radios\tserial radios",
+    "served_ta\tserved timing advance",
+    "service\tservice",
+    "service_type\tservice type",
+    "serving_beam_index\tserving beam index",
+    "serving_cell_config_common\tserving cell config common",
+    "serving_cell_rsrp_dbm\tserving cell signal strength (dBm)",
+    "serving_cell_rsrp_index\tserving cell signal strength index",
+    "serving_network\tserving network",
+    "serving_rsrp_dbm\tserving signal strength (dBm)",
+    "serving_rsrp_index\tserving signal strength index",
+    "session\tsession",
+    "session_related\tsession related",
+    "session_requests\tsession requests",
+    "sessions\tsessions",
+    "sessions_file\tsessions file",
+    "set_frequency_cmd\tset frequency cmd",
+    "set_gain_cmd\tset gain cmd",
+    "set_rate_cmd\tset rate cmd",
+    "severity\tseverity",
+    "severity_if_missing\tseverity if missing",
+    "sfn\tsfn",
+    "sfn_bit_width\tsfn bit width",
+    "sha256\tSHA-256",
+    "shape\tshape",
+    "shape_mode\tshape mode",
+    "share_pct\tshare (percent)",
+    "shared_endpoints\tshared endpoints",
+    "short\tshort",
+    "short_message\tshort message",
+    "short_message_octets\tshort message octets",
+    "si\tsi",
+    "si1\tsi1",
+    "si1_rule\tsi1 rule",
+    "si2\tsi2",
+    "si3\tsi3",
+    "si3_rule\tsi3 rule",
+    "si4\tsi4",
+    "si_len\tsi length",
+    "si_name\tsi name",
+    "si_records\tsi records",
+    "si_window_length\tsi window length",
+    "sia\tsia",
+    "sib\tSIB",
+    "sib1_bits\tsib1 bits",
+    "sib1_cell_barred\tsib1 cell barred",
+    "sib1_cell_id\tsib1 cell id",
+    "sib1_csg_identity\tsib1 csg identity",
+    "sib1_csg_indication\tsib1 csg indication",
+    "sib1_hex\tsib1 bytes",
+    "sib1_mcc\tsib1 country code",
+    "sib1_mnc\tsib1 network code",
+    "sib1_records\tsib1 records",
+    "sib1_tac\tsib1 tracking area",
+    "sib9_bits\tsib9 bits",
+    "sib9_hex\tsib9 bytes",
+    "sib9_name\tsib9 name",
+    "sib9_name_hex\tsib9 name bytes",
+    "sib_conf_file\tSIB config file",
+    "sib_conf_section\tSIB config section",
+    "sib_entries\tSIB entries",
+    "sib_fields\tSIB fields",
+    "sib_records\tSIB records",
+    "sib_tag\tSIB tag",
+    "sidelink\tsidelink",
+    "sig_len\tsig length",
+    "signal\tsignal",
+    "signal_basis\tsignal basis",
+    "signal_check\tsignal check",
+    "signal_hits\tsignal hits",
+    "signals\tsignals",
+    "signals_named\tsignals named",
+    "signature_count\tsignature count",
+    "signature_len\tsignature length",
+    "signatures\tsignatures",
+    "signed\tsigned",
+    "signer\tsigner",
+    "silent\tsilent",
+    "silent_offdevice\tsilent offdevice",
+    "silent_sms\tsilent sms",
+    "sim_defense\tSIM defense",
+    "sim_tool\tSIM tool",
+    "simd\tsimd",
+    "sinr\tsignal-to-interference ratio",
+    "sio\tsio",
+    "sip_call_id\tSIP call id",
+    "sip_messages\tSIP messages",
+    "size\tsize",
+    "sizes\tsizes",
+    "skip\tskip",
+    "slic\tslic",
+    "slice\tslice",
+    "slice_1\tslice 1",
+    "slice_2\tslice 2",
+    "slice_3\tslice 3",
+    "slices\tslices",
+    "slicing\tslicing",
+    "slot\tslot",
+    "slot_bits\tslot bits",
+    "slot_cycle_index\tslot cycle index",
+    "slot_ms\tslot length (ms)",
+    "slot_ms_used\tslot ms used",
+    "slot_samples\tslot samples",
+    "slot_us\tslot (µs)",
+    "slots\tslots",
+    "sls\tsls",
+    "sm_cap\tsm cap",
+    "sm_default_msg_id\tsm default message id",
+    "sm_length\tsm length",
+    "smc_bits\tsmc bits",
+    "smc_octet\tsmc octet",
+    "smf\tsession manager",
+    "snr\tsignal-to-noise ratio",
+    "snssai_values\tslice selection values",
+    "so_lsa\tso lsa",
+    "socat\tsocat",
+    "software_emitters\tsoftware emitters",
+    "source\tsource",
+    "source_addr\tsource address",
+    "source_addr_npi\tsource address npi",
+    "source_addr_ton\tsource address ton",
+    "source_name\tsource name",
+    "sources\tsources",
+    "span_s\tspan s",
+    "spare\tspare",
+    "spare_bits\tspare bits",
+    "spec\tspec",
+    "specific_facilities\tspecific facilities",
+    "speed\tspeed",
+    "speed_mps\tspeed (m/s)",
+    "spi\tspi",
+    "spi_b2b1_por\tspi b2b1 por",
+    "spi_b2b1_rccds\tspi b2b1 rccds",
+    "spi_b3_ciphering\tspi b3 cipher",
+    "spi_b4b3_por_rccds\tspi b4b3 por rccds",
+    "spi_b5_por_ciphering\tspi b5 por cipher",
+    "spi_b5b4_counter\tspi b5b4 counter",
+    "spi_b6_por_submit\tspi b6 por submit",
+    "spi_b8b7_por_reserved\tspi b8b7 por reserved",
+    "spi_b8b7b6_reserved\tspi b8b7b6 reserved",
+    "spi_ciphering\tspi cipher",
+    "spi_counter\tspi counter",
+    "spi_hex\tspi bytes",
+    "spi_octet1\tspi octet1",
+    "spi_octet2\tspi octet2",
+    "spi_off\tspi off",
+    "spi_por\tspi por",
+    "spi_por_rccds\tspi por rccds",
+    "spi_por_transport\tspi por transport",
+    "spi_rccds\tspi rccds",
+    "spi_source\tspi source",
+    "spi_weakness\tspi weakness",
+    "srb_information_setup_list\tsrb information setup list",
+    "src\tsource",
+    "sres\tsres",
+    "sres_zero_rand\tsres zero rand",
+    "srnc_identity\tsrnc identity",
+    "srs_request\tsrs request",
+    "srsenb\tsrsenb",
+    "srsran\tsrsran",
+    "ss7\tSS7",
+    "ss7_map\tSS7 MAP",
+    "ss_name\tss name",
+    "ss_screen\tss screen",
+    "ssb_case\tssb case",
+    "ssb_case_default\tssb case default",
+    "ssb_entries\tssb entries",
+    "ssb_period_ms\tssb period (ms)",
+    "ssb_rb\tssb rb",
+    "ssb_scs_khz\tssb scs (kHz)",
+    "ssb_subcarrier_offset\tssb subcarrier offset",
+    "ssb_symbols\tssb symbols",
+    "ssb_waveform\tssb waveform",
+    "ssn\tssn",
+    "ssn_indicator\tssn indicator",
+    "ssn_name\tssn name",
+    "ssp_markers\tssp markers",
+    "ssrcs\tssrcs",
+    "sss_chips\tsss chips",
+    "sss_pinned_agree\tsss pinned agree",
+    "sss_selected_by\tsss selected by",
+    "sst\tslice type",
+    "sst_assigned\tslice type assigned",
+    "sst_known\tslice type known",
+    "sst_name\tslice type name",
+    "st\tst",
+    "st_bits7\tst bits7",
+    "st_meaning\tst meaning",
+    "st_retryable\tst retryable",
+    "standard\tstandard",
+    "standardized\tstandardized",
+    "start_symbol\tstart symbol",
+    "started\tstarted",
+    "stat\tstat",
+    "state\tstate",
+    "state4\tstate4",
+    "state_file\tstate file",
+    "state_registers\tstate registers",
+    "state_source\tstate source",
+    "state_space_bits\tstate space bits",
+    "states\tstates",
+    "status\tstatus",
+    "status_a\tstatus a",
+    "status_alt\tstatus alt",
+    "status_b\tstatus b",
+    "status_meaning\tstatus meaning",
+    "status_name\tstatus name",
+    "stealing_flags_per_burst\tstealing flags per burst",
+    "steer_meas_id\tsteer meas id",
+    "steer_report\tsteer report",
+    "steering_headroom\tsteering headroom",
+    "steering_reject\tsteering rejection",
+    "steering_rejects\tsteering rejects",
+    "steering_value\tsteering value",
+    "step\tstep",
+    "step_hex\tstep bytes",
+    "steps\tsteps",
+    "stk\tstk",
+    "stk_command_keyword\tstk command keyword",
+    "stopped\tstopped",
+    "store\tstore",
+    "stored\tstored",
+    "story\tstory",
+    "stp\tstp",
+    "strategy\tstrategy",
+    "stream\tstream",
+    "stream_id\tstream id",
+    "streams\tstreams",
+    "structure\tstructure",
+    "sub\tsub",
+    "subcarrier_spacing_common\tsubcarrier spacing common",
+    "subcarrier_spacing_name\tsubcarrier spacing name",
+    "subchannel\tsubchannel",
+    "subchannel_prb\tsubchannel prb",
+    "subchannels\tsubchannels",
+    "subcmd\tsubcmd",
+    "subcmd_hex\tsubcmd bytes",
+    "subframe\tsubframe",
+    "subframes\tsubframes",
+    "subgroup\tsubgroup",
+    "subgroups\tsubgroups",
+    "subheader\tsubheader",
+    "subheader_bits\tsubheader bits",
+    "subject\tsubject",
+    "subject_confusion\tsubject confusion",
+    "submit\tsubmit",
+    "submit_multi\tsubmit multi",
+    "submit_multi_resp\tsubmit multi resp",
+    "submit_sm\tsubmit sm",
+    "submit_sm_resp\tsubmit sm resp",
+    "subscriber\tsubscriber",
+    "subscribers_file\tsubscribers file",
+    "subscription\tsubscription",
+    "subset\tsubset",
+    "subsys\tsubsys",
+    "subsys_name\tsubsys name",
+    "subtype\tsubtype",
+    "subtype_name\tsubtype name",
+    "suci\tconcealed subscriber ID",
+    "suci_octets\tsuci octets",
+    "sucis\tsucis",
+    "summary\tsummary",
+    "superframe_frames\tsuperframe frames",
+    "superframe_index\tsuperframe index",
+    "superframe_ms\tsuperframe (ms)",
+    "superframe_no\tsuperframe no",
+    "supi\tsubscriber ID (permanent)",
+    "supi_type\tsupi type",
+    "supi_type_name\tsupi type name",
+    "supported\tsupported",
+    "supported_ta\tsupported timing advance",
+    "surface\tsurface",
+    "sw\tsw",
+    "sw1\tsw1",
+    "sw2\tsw2",
+    "sym\tsym",
+    "symbol\tsymbol",
+    "symbol_in_half_frame\tsymbol in half frame",
+    "symbols\tsymbols",
+    "symbols_per_slot\tsymbols per slot",
+    "system_frame_number\tsystem frame number",
+    "system_frame_number_msb\tsystem frame number msb",
+    "system_id\tsystem id",
+    "system_info_value_tag\tsystem information value tag",
+    "system_type\tsystem type",
+    "t1\tt1",
+    "t1p\tt1p",
+    "t2\tt2",
+    "t3\tt3",
+    "t3212\tt3212",
+    "t3212_minutes\tt3212 minutes",
+    "t3410\tattach timer",
+    "t3412\tattach timer",
+    "t3p\tt3p",
+    "t_div_n\tt div n",
+    "t_id\tt id",
+    "t_reselection_eutra\tt reselection eutra",
+    "ta\ttiming advance",
+    "ta_geoloc\ttiming advance geolocation",
+    "ta_hex\ttiming advance bytes",
+    "ta_unit_s\ttiming advance unit s",
+    "ta_units\ttiming advance units",
+    "table\ttable",
+    "tables\ttables",
+    "tac\ttracking area",
+    "tac_lac\ttracking or location area",
+    "tag\ttag",
+    "tai\ttai",
+    "tail_bits\ttail bits",
+    "tap\ttap",
+    "tar\ttar",
+    "tar_entries\ttar entries",
+    "tar_known\ttar known",
+    "targ_byte_window\ttarg byte window",
+    "targ_pkt_window\ttarg pkt window",
+    "target\ttarget",
+    "target_imsi\ttarget subscriber ID",
+    "target_nf\ttarget nf",
+    "target_ue\ttarget handset",
+    "tau\ttau",
+    "tb1_mcs\ttb1 mcs",
+    "tb1_ndi\ttb1 ndi",
+    "tb1_rv\ttb1 rv",
+    "tb2_mcs\ttb2 mcs",
+    "tb2_ndi\ttb2 ndi",
+    "tb2_rv\ttb2 rv",
+    "tb_bits\ttb bits",
+    "tc\ttc",
+    "tc_rnti\ttemporary connection ID",
+    "tc_rnti_hex\ttc rnti bytes",
+    "tcap\tTCAP",
+    "tcap_message_type\tTCAP message type",
+    "tcap_tag\tTCAP tag",
+    "tch_f\ttch f",
+    "tch_h_or_tch_f\ttch h or tch f",
+    "tci\ttci",
+    "tcp\ttcp",
+    "tdma_frame_ms\ttdma frame (ms)",
+    "tdma_frames\ttdma frames",
+    "tdra\ttdra",
+    "tdra_note\ttdra note",
+    "te_drx_frames\tte drx frames",
+    "te_drx_hsfn\tte drx hsfn",
+    "te_drx_index\tte drx index",
+    "te_drx_seconds\tte drx seconds",
+    "technology\ttechnology",
+    "teid\ttunnel ID",
+    "teid_fields\ttunnel ID fields",
+    "teid_flag\ttunnel ID flag",
+    "teid_hex\ttunnel ID bytes",
+    "teid_validation\ttunnel ID validation",
+    "temp_kind\ttemp kind",
+    "temp_value\ttemp value",
+    "testbed\ttestbed",
+    "text7bit\ttext7bit",
+    "thresh_serving_low\tthresh serving low",
+    "tid\ttid",
+    "time_domain_occasions\ttime domain occasions",
+    "time_domain_resource_assignment\ttime domain resource assignment",
+    "time_ms\ttime (ms)",
+    "timeslot\ttimeslot",
+    "timing\ttiming",
+    "timing_advance\ttiming advance",
+    "timing_advance_value\ttiming advance value",
+    "timing_budget_cycles\ttiming budget cycles",
+    "timing_budget_note\ttiming budget note",
+    "tls\ttls",
+    "tls_optional\ttls optional",
+    "tlv\ttlv",
+    "tmsi\ttemporary ID",
+    "tmsi_mapped\ttemporary ID mapped",
+    "to\tto",
+    "to_schedule\tto schedule",
+    "toa\ttoa",
+    "toa_npi\ttoa npi",
+    "toa_npi_meaning\ttoa npi meaning",
+    "toa_ton\ttoa ton",
+    "toa_ton_meaning\ttoa ton meaning",
+    "tool\ttool",
+    "tools_broken\ttools broken",
+    "tools_found\ttools found",
+    "tools_missing\ttools missing",
+    "tools_registered\ttools registered",
+    "top\ttop",
+    "top_candidate\ttop candidate",
+    "topc\ttopc",
+    "total\ttotal",
+    "total_m\ttotal m",
+    "total_occasions\ttotal occasions",
+    "tp_da\ttp da",
+    "tp_dcs\ttp dcs",
+    "tp_fo\ttp fo",
+    "tp_layer\ttp layer",
+    "tp_pid\ttp pid",
+    "tp_udl\ttp UDL",
+    "tpc_pucch\ttpc pucch",
+    "tpdu\ttpdu",
+    "tpdu_octets\ttpdu octets",
+    "tpdu_with_sca\ttpdu with sca",
+    "tracking_area_code\ttracking area code",
+    "tracking_area_code_hex\ttracking area code bytes",
+    "trailing\ttrailing",
+    "transaction_number\ttransaction number",
+    "transfer_encoding_lines\ttransfer encoding lines",
+    "transform_id\ttransform id",
+    "transform_precoding\ttransform precoding",
+    "transition\ttransition",
+    "transmit\ttransmit",
+    "transmit_path\ttransmit path",
+    "transmitted\ttransmitted",
+    "transparent\ttransparent",
+    "transport\ttransport",
+    "trigger\ttrigger",
+    "true\ttrue",
+    "truncated\ttruncated",
+    "ts\ttime",
+    "tsc\ttsc",
+    "tsc_assistance\ttsc assistance",
+    "tsc_burst_arrival_time_us\ttsc burst arrival time (µs)",
+    "tsc_n6_jitter_range_us\ttsc n6 jitter range (µs)",
+    "tsc_periodicity_us\ttsc periodicity (µs)",
+    "tsc_rule\ttsc rule",
+    "tshark\ttshark",
+    "tsn_ngap_encoder\ttsn NGAP encoder",
+    "tuak\ttuak",
+    "tunnel_verdict\ttunnel verdict",
+    "turbo_bits\tturbo bits",
+    "tx\ttx",
+    "tx_armed\ttx armed",
+    "tx_backend\ttx backend",
+    "tx_burst_ms\ttx burst (ms)",
+    "tx_burst_samples\ttx burst samples",
+    "tx_burst_subframes\ttx burst subframes",
+    "tx_call\ttx call",
+    "tx_capable\ttx capable",
+    "tx_centre_freq_hz\ttx centre freq (Hz)",
+    "tx_centre_hz\ttx centre (Hz)",
+    "tx_centre_source\ttx centre source",
+    "tx_cmd\ttx cmd",
+    "tx_device\ttx device",
+    "tx_driver\ttx driver",
+    "tx_gain_db\ttx gain (dB)",
+    "tx_gate\ttx gate",
+    "tx_iq\ttx iq",
+    "tx_iq_format\ttx iq format",
+    "tx_keyed_by\ttx keyed by",
+    "tx_mode\ttx mode",
+    "tx_note\ttx note",
+    "tx_rate_hz\ttx rate (Hz)",
+    "tx_rc\ttx rc",
+    "tx_sample_rate_hz\ttx sample rate (Hz)",
+    "tx_sdr\ttx SDR",
+    "tx_sdr_present\ttx SDR present",
+    "tx_slots\ttx slots",
+    "tx_subframe_ms\ttx subframe (ms)",
+    "tx_symbols\ttx symbols",
+    "tx_verbs\ttx commands",
+    "tx_waveform\ttx waveform",
+    "type\ttype",
+    "type0_dcs\ttype0 dcs",
+    "type0_is_type0\ttype0 is type0",
+    "type0_mti\ttype0 mti",
+    "type0_pid\ttype0 pid",
+    "type1_shared_octet\ttype1 shared octet",
+    "type_index\ttype index",
+    "type_name\ttype name",
+    "type_of_identity\ttype of identity",
+    "u8\tu8",
+    "uarfcn\tchannel number",
+    "uarfcn_max\tchannel number maximum",
+    "ucs2\tucs2",
+    "ud\tud",
+    "ud_bytes\tud bytes",
+    "ud_empty\tud empty",
+    "ud_hex\tud bytes",
+    "ud_octets\tud octets",
+    "udh\tudh",
+    "udh_hex\tudh bytes",
+    "udh_present\tudh present",
+    "udh_source\tudh source",
+    "udhi\tudhi",
+    "udhl\tudhl",
+    "udl\tUDL",
+    "udl_units\tUDL units",
+    "udp\tudp",
+    "ue_behaviour\thandset behaviour",
+    "ue_enc_caps\thandset enc caps",
+    "ue_id\thandset id",
+    "ue_id_arg\thandset id argument",
+    "ue_id_h\thandset id h",
+    "ue_id_modulus\thandset id modulus",
+    "ue_id_source\thandset id source",
+    "ue_identity_bits\thandset identity bits",
+    "ue_identity_choice\thandset identity choice",
+    "ue_identity_hex\thandset identity bytes",
+    "ue_int_caps\thandset int caps",
+    "uhd_find_devices\tuhd find devices",
+    "uia\tcipher (UMTS)",
+    "ul\tuplink",
+    "ul_alloc_rb\tuplink alloc rb",
+    "ul_block_offsets\tuplink block offsets",
+    "ul_carrier_id\tuplink carrier id",
+    "ul_carrier_rb\tuplink carrier rb",
+    "ul_centre_hz\tuplink centre (Hz)",
+    "ul_channel\tuplink channel",
+    "ul_cp_long\tuplink cp long",
+    "ul_cp_short\tuplink cp short",
+    "ul_dmrs_c_init\tuplink dmrs c init",
+    "ul_dmrs_pinned_agree\tuplink dmrs pinned agree",
+    "ul_dmrs_re\tuplink dmrs re",
+    "ul_dmrs_symbol\tuplink dmrs symbol",
+    "ul_grant\tuplink grant",
+    "ul_grant_hex\tuplink grant bytes",
+    "ul_interference_dbm\tuplink interference (dBm)",
+    "ul_interference_raw\tuplink interference raw",
+    "ul_mhz\tuplink (MHz)",
+    "ul_offsets\tuplink offsets",
+    "ul_pci_scrambling_id\tuplink cell ID scrambling id",
+    "ul_rate_hz\tuplink rate (Hz)",
+    "ul_scs_khz\tuplink scs (kHz)",
+    "umts_algs\tUMTS algs",
+    "umts_stack\tUMTS stack",
+    "unassigned\tunassigned",
+    "unattributed\tunattributed",
+    "unbind\tunbind",
+    "unbind_resp\tunbind resp",
+    "unconfirmed\tunconfirmed",
+    "undecodable\tundecodable",
+    "unique_subscribers\tunique subscribers",
+    "unknown\tunknown",
+    "unlocks\tunlocks",
+    "unlocks_note\tunlocks note",
+    "unparseable\tunparseable",
+    "unproven\tunproven",
+    "unrequested_allowed\tunrequested allowed",
+    "unrestricted_access\tunrestricted access",
+    "unspecified\tunspecified",
+    "unused\tunused",
+    "unverified\tunverified",
+    "up_bytes\tup bytes",
+    "up_down_ratio_defined\tup down ratio defined",
+    "update_access\tupdate access",
+    "updated\tupdated",
+    "upf\tpacket gateway",
+    "upf_markers\tupf markers",
+    "url\turl",
+    "urr_id\turr id",
+    "useful_keystream_bits_per_frame\tuseful keystream bits per frame",
+    "user_confirm\tuser confirm",
+    "user_plane_integrity\tuser plane integrity",
+    "usrp\tusrp",
+    "ussd\tussd",
+    "utran_drx_cycle_length_coefficient\tUTRAN DRX cycle coefficient",
+    "valid\tvalid",
+    "validity_period\tvalidity period",
+    "value\tvalue",
+    "variant\tvariant",
+    "vbs_notif\tvbs notif",
+    "vector\tvector",
+    "vectors\tvectors",
+    "velocity_mps\tvelocity mps",
+    "vendor\tvendor",
+    "verb\tcommand",
+    "verbs\tcommands",
+    "verdict\tverdict",
+    "verification\tverification",
+    "verified\tverified",
+    "verify\tverify",
+    "version\tversion",
+    "version_alert\tversion alert",
+    "version_flag\tversion flag",
+    "version_major\tversion major",
+    "version_minor\tversion minor",
+    "version_refused\tversion refused",
+    "version_verified\tversion verified",
+    "versions\tversions",
+    "vgcs\tvgcs",
+    "vims\tvims",
+    "volte_ims\tvolte IMS",
+    "volume_threshold\tvolume threshold",
+    "vowifi\tvowifi",
+    "vp\tvp",
+    "vp_octets\tvp octets",
+    "vrb_to_prb\tvrb to prb",
+    "wait_time\twait time",
+    "wake_frames_before_po\twake frames before po",
+    "wakes_for_incoming_call\twakes for incoming call",
+    "walk\twalk",
+    "wan_management_exposed\twan management exposed",
+    "warn\twarning",
+    "warning\twarning",
+    "was\twas",
+    "watch\twatch",
+    "watchlist\twatchlist",
+    "waveform\twaveform",
+    "waveform_bytes\twaveform bytes",
+    "waveform_cp_symbols_bad\twaveform cp symbols bad",
+    "waveform_cp_symbols_ok\twaveform cp symbols ok",
+    "waveform_crc24c_ok\twaveform crc24c ok",
+    "waveform_dmrs_correlation\twaveform dmrs correlation",
+    "waveform_dmrs_pinned_agree\twaveform dmrs pinned agree",
+    "waveform_file\twaveform file",
+    "waveform_geometry\twaveform geometry",
+    "waveform_mib_sfn\twaveform MIB sfn",
+    "waveform_pci_recovered\twaveform cell ID recovered",
+    "waveform_pdu_match\twaveform PDU match",
+    "waveform_pdu_recovered\twaveform PDU recovered",
+    "waveform_pss_correlation\twaveform pss correlation",
+    "waveform_pss_n_id_2\twaveform pss n id 2",
+    "waveform_pusch\twaveform pusch",
+    "waveform_re_outside_alloc\twaveform re outside alloc",
+    "waveform_re_outside_spec\twaveform re outside spec",
+    "waveform_samples\twaveform samples",
+    "waveform_sha256\twaveform sha256",
+    "waveform_slot\twaveform slot",
+    "waveform_sss_correlation\twaveform sss correlation",
+    "waveform_sss_n_id_1\twaveform sss n id 1",
+    "waveform_us\twaveform (µs)",
+    "weight\tweight",
+    "what_i_would_need\twhat i would need",
+    "when\twhen",
+    "where\twhere",
+    "why\twhy",
+    "wib_present\twib present",
+    "wide_cell_spread\twide cell spread",
+    "window_frames\twindow frames",
+    "window_seconds\twindow seconds",
+    "wire_code\twire code",
+    "wire_octets\twire octets",
+    "with_fix\twith fix",
+    "without_fix\twithout fix",
+    "would_send\twould send",
+    "wrap_seconds\twrap seconds",
+    "write\twrite",
+    "written\twritten",
+    "wrote_bytes\twrote bytes",
+    "wus_frame\twus frame",
+    "wus_frame_note\twus frame note",
+    "xapp\txapp",
+    "xapp_unsigned\txapp unsigned",
+    "yes\tyes",
+    "zero_teids\tzero teids",
+    "zp_csi_rs\tzp CSI rs",
+    "zzzz\tzzzz",
+};
+
+/* Compare a bare key against one "key<TAB>words" row. */
+static int
+plain_key_cmp(const void *a, const void *b)
+{
+    const char *key = *(const char *const *) a;
+    const char *row = *(const char *const *) b;
+    size_t n = strcspn(row, "\t");
+    int c = strncmp(key, row, n);
+
+    if (c != 0) return c;
+    return key[n] == '\0' ? 0 : 1;
+}
+
+/* The plain words for a field name, or NULL when the tree has no row for it. */
+static const char *
+plain_words_for_key(const char *key)
+{
+    const char *const *hit;
+
+    if (key == NULL || *key == '\0') return NULL;
+    hit = bsearch(&key, plain_keys, G_N_ELEMENTS(plain_keys),
+                  sizeof plain_keys[0], plain_key_cmp);
+    if (hit == NULL) return NULL;
+    return strchr(*hit, '\t') + 1;
+}
+
+/* What a key label draws: the dictionary's words when the tree knows the key,
+   the key itself when it does not. A key that no row explains is shown as it
+   was printed, never relabelled into something it might not be. */
+static char *
+plain_key_text(const char *key)
+{
+    const char *words = plain_words_for_key(key);
+
+    if (key == NULL) return g_strdup("");
+    return g_strdup(words != NULL ? words : key);
+}
+
+/* ── what a card needs and what it does ─────────────────────────────────
+ *
+ * A card's caption says both, in two small chips: one for what has to be in
+ * place before the card can mean anything (a radio, a capture, a SIM, or
+ * nothing at all), one for what pressing it actually does to the world (reads,
+ * builds octets, changes a card, sends packets, or keys a transmitter).
+ *
+ * The two are a table keyed by module and verb, not a guess made from the
+ * verb's name: a name is not a promise. The empty verb is the module's own
+ * default, used by a card that is only a table of what the module found. A verb
+ * that is in neither table is a gate failure in tools/check-glossary.sh, so a
+ * control cannot ship with a chip that sounds safe and is not.
+ *
+ * The classifications the operator gave are the ones here: --transmit,
+ * --send-*, --smtp, --sip-send, --mount, --gtpc-send, --diameter-send,
+ * --sbi-send, --s1-attach and --iuh-attach send; --nv-write, --efs-write,
+ * --adm-apdu, --write-hex, --sat-push and --ota-key modify a card; a decoder
+ * reads; a builder that only produces octets or a file builds. */
+typedef enum {
+    NEED_NO = 0,
+    NEED_RADIO,
+    NEED_CAP,
+    NEED_SIM
+} ChipNeed;
+
+typedef enum {
+    DOES_READS = 0,
+    DOES_BUILDS,
+    DOES_MODIFIES,
+    DOES_SENDS,
+    DOES_TRANSMITS
+} ChipDoes;
+
+typedef struct {
+    const char *module;
+    const char *verb;      /* "" is the module's default */
+    ChipNeed    need;
+    ChipDoes    does;
+} ChipRow;
+
+static const ChipRow chip_rows[] = {
+    { "00_deps",             "--__index_probe__",     NEED_NO, DOES_READS },
+    { "00_deps",             "--check-versions",      NEED_NO, DOES_READS },
+    { "00_deps",             "--distro-info",         NEED_NO, DOES_READS },
+    { "00_deps",             "--help",                NEED_NO, DOES_READS },
+    { "00_deps",             "--info",                NEED_NO, DOES_READS },
+    { "00_deps",             "--install-all",         NEED_NO, DOES_READS },
+    { "00_deps",             "--install-missing",     NEED_NO, DOES_READS },
+    { "00_deps",             "--install-package",     NEED_NO, DOES_READS },
+    { "00_deps",             "--install-pip",         NEED_NO, DOES_READS },
+    { "00_deps",             "--menu",                NEED_NO, DOES_READS },
+    { "00_deps",             "--missing-only",        NEED_NO, DOES_READS },
+    { "00_deps",             "--quiet",               NEED_NO, DOES_READS },
+    { "00_deps",             "--report",              NEED_NO, DOES_READS },
+    { "00_deps",             "--selftest",            NEED_NO, DOES_READS },
+    { "00_deps",             "--status-tsv",          NEED_NO, DOES_READS },
+    { "00_deps",             "--version",             NEED_NO, DOES_READS },
+    { "00_deps",             "--yes",                 NEED_NO, DOES_READS },
+    { "01_radio",            "--__index_probe__",     NEED_NO, DOES_READS },
+    { "01_radio",            "--band-check",          NEED_NO, DOES_READS },
+    { "01_radio",            "--caps-tsv",            NEED_NO, DOES_READS },
+    { "01_radio",            "--help",                NEED_NO, DOES_READS },
+    { "01_radio",            "--info",                NEED_NO, DOES_READS },
+    { "01_radio",            "--list-tsv",            NEED_NO, DOES_READS },
+    { "01_radio",            "--lock-claim",          NEED_RADIO, DOES_READS },
+    { "01_radio",            "--lock-recover",        NEED_RADIO, DOES_READS },
+    { "01_radio",            "--lock-release",        NEED_RADIO, DOES_READS },
+    { "01_radio",            "--lock-status-tsv",     NEED_NO, DOES_READS },
+    { "01_radio",            "--menu",                NEED_NO, DOES_READS },
+    { "01_radio",            "--plan",                NEED_NO, DOES_READS },
+    { "01_radio",            "--processes-tsv",       NEED_NO, DOES_READS },
+    { "01_radio",            "--quiet",               NEED_NO, DOES_READS },
+    { "01_radio",            "--record",              NEED_RADIO, DOES_READS },
+    { "01_radio",            "--select",              NEED_RADIO, DOES_READS },
+    { "01_radio",            "--selftest",            NEED_NO, DOES_READS },
+    { "01_radio",            "--set-freq",            NEED_RADIO, DOES_READS },
+    { "01_radio",            "--set-gain",            NEED_RADIO, DOES_READS },
+    { "01_radio",            "--set-rate",            NEED_RADIO, DOES_READS },
+    { "01_radio",            "--status-tsv",          NEED_NO, DOES_READS },
+    { "01_radio",            "--version",             NEED_NO, DOES_READS },
+    { "01_radio",            "--yes",                 NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--__index_probe__",     NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--arfcn",               NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--clear",               NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--export",              NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--help",                NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--info",                NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--list",                NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--list-tsv",            NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--menu",                NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--plmn",                NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--quiet",               NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--scan",                NEED_RADIO, DOES_READS },
+    { "02_cell_recon",       "--selftest",            NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--set-target",          NEED_RADIO, DOES_READS },
+    { "02_cell_recon",       "--status-tsv",          NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--target-tsv",          NEED_RADIO, DOES_READS },
+    { "02_cell_recon",       "--version",             NEED_NO, DOES_READS },
+    { "02_cell_recon",       "--yes",                 NEED_NO, DOES_READS },
+    { "03_gsmtap",           "--__index_probe__",     NEED_NO, DOES_READS },
+    { "03_gsmtap",           "--any-port",            NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--arfcn",               NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--build-header",        NEED_CAP, DOES_BUILDS },
+    { "03_gsmtap",           "--channel",             NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--decode-tsv",          NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--export-pcap",         NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--forward",             NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--help",                NEED_NO, DOES_READS },
+    { "03_gsmtap",           "--identities-tsv",      NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--iface",               NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--info",                NEED_NO, DOES_READS },
+    { "03_gsmtap",           "--listen",              NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--menu",                NEED_NO, DOES_READS },
+    { "03_gsmtap",           "--parse-header",        NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--pipe",                NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--port",                NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--quiet",               NEED_NO, DOES_READS },
+    { "03_gsmtap",           "--read",                NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--selftest",            NEED_NO, DOES_READS },
+    { "03_gsmtap",           "--since",               NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--status-tsv",          NEED_NO, DOES_READS },
+    { "03_gsmtap",           "--until",               NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--uplink",              NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--version",             NEED_NO, DOES_READS },
+    { "03_gsmtap",           "--watchlist",           NEED_CAP, DOES_READS },
+    { "03_gsmtap",           "--yes",                 NEED_NO, DOES_READS },
+    { "04_tower_map",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "04_tower_map",        "--clear",               NEED_NO, DOES_READS },
+    { "04_tower_map",        "--export-csv",          NEED_NO, DOES_READS },
+    { "04_tower_map",        "--export-geojson",      NEED_NO, DOES_READS },
+    { "04_tower_map",        "--export-kml",          NEED_NO, DOES_READS },
+    { "04_tower_map",        "--gps-quality-tsv",     NEED_NO, DOES_READS },
+    { "04_tower_map",        "--help",                NEED_NO, DOES_READS },
+    { "04_tower_map",        "--history",             NEED_NO, DOES_READS },
+    { "04_tower_map",        "--info",                NEED_NO, DOES_READS },
+    { "04_tower_map",        "--list-tsv",            NEED_NO, DOES_READS },
+    { "04_tower_map",        "--menu",                NEED_NO, DOES_READS },
+    { "04_tower_map",        "--quiet",               NEED_NO, DOES_READS },
+    { "04_tower_map",        "--selftest",            NEED_NO, DOES_READS },
+    { "04_tower_map",        "--start-gpsd",          NEED_RADIO, DOES_READS },
+    { "04_tower_map",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "04_tower_map",        "--survey",              NEED_RADIO, DOES_READS },
+    { "04_tower_map",        "--version",             NEED_NO, DOES_READS },
+    { "04_tower_map",        "--yes",                 NEED_NO, DOES_READS },
+    { "05_field_kit",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "05_field_kit",        "--capability",          NEED_NO, DOES_READS },
+    { "05_field_kit",        "--emit",                NEED_NO, DOES_BUILDS },
+    { "05_field_kit",        "--guard-check",         NEED_NO, DOES_READS },
+    { "05_field_kit",        "--help",                NEED_NO, DOES_READS },
+    { "05_field_kit",        "--info",                NEED_NO, DOES_READS },
+    { "05_field_kit",        "--menu",                NEED_NO, DOES_READS },
+    { "05_field_kit",        "--quiet",               NEED_NO, DOES_READS },
+    { "05_field_kit",        "--scenarios",           NEED_NO, DOES_READS },
+    { "05_field_kit",        "--selftest",            NEED_NO, DOES_READS },
+    { "05_field_kit",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "05_field_kit",        "--version",             NEED_NO, DOES_READS },
+    { "05_field_kit",        "--yes",                 NEED_NO, DOES_READS },
+    { "06_gsm_air",          "--__index_probe__",     NEED_NO, DOES_READS },
+    { "06_gsm_air",          "--a5-1-keystream",      NEED_CAP, DOES_BUILDS },
+    { "06_gsm_air",          "--cipher-audit",        NEED_CAP, DOES_READS },
+    { "06_gsm_air",          "--decode-pcap",         NEED_CAP, DOES_READS },
+    { "06_gsm_air",          "--decode-sch",          NEED_CAP, DOES_READS },
+    { "06_gsm_air",          "--decode-si",           NEED_CAP, DOES_READS },
+    { "06_gsm_air",          "--help",                NEED_NO, DOES_READS },
+    { "06_gsm_air",          "--identity-exposure",   NEED_CAP, DOES_READS },
+    { "06_gsm_air",          "--imsi-exposure-tsv",   NEED_CAP, DOES_READS },
+    { "06_gsm_air",          "--info",                NEED_NO, DOES_READS },
+    { "06_gsm_air",          "--menu",                NEED_NO, DOES_READS },
+    { "06_gsm_air",          "--paging-group",        NEED_CAP, DOES_READS },
+    { "06_gsm_air",          "--quiet",               NEED_NO, DOES_READS },
+    { "06_gsm_air",          "--selftest",            NEED_NO, DOES_READS },
+    { "06_gsm_air",          "--status-tsv",          NEED_NO, DOES_READS },
+    { "06_gsm_air",          "--version",             NEED_NO, DOES_READS },
+    { "06_gsm_air",          "--yes",                 NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--__index_probe__",     NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--a5-1-keystream",      NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--a5-2-keystream",      NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--a5-3-keystream",      NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--a5-4-keystream",      NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--a5-count",            NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--alg-name",            NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--build-cipher-mode",   NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--build-identity-request", NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--build-immediate-assignment", NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--build-lu-accept",     NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--build-paging-request", NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--build-tmsi-realloc",  NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--burst-layout",        NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--c1",                  NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--ccch-blocks",         NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--ccch-conf",           NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--classmark",           NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--classmark-downgrade", NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--classmark1",          NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--classmark1-encode",   NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--classmark3",          NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--deanon-confirm",      NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--deanon-list",         NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--deanon-lookup",       NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--deanon-record",       NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--decrypt",             NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--dummy-burst",         NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--f8-keystream",        NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--f9-mac",              NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--fcch-facts",          NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--fn-join",             NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--fn-split",            NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--frame-facts",         NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--help",                NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--imsi-catcher-sequence", NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--info",                NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--kasumi",              NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--kc-known-plaintext",  NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--kc-recovery",         NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--kc-search",           NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--kc-verify",           NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--lapdm-bursts",        NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--lapdm-fill",          NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--lapdm-ui",            NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--menu",                NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--mobile-identity",     NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--multiframe-map",      NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--n201",                NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--paging-race",         NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--paging-schedule",     NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--plan",                NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--plan-tsv",            NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--quiet",               NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--rach-blocks",         NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--sch-payload",         NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--sdcch-map",           NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--selftest",            NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--status-tsv",          NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--ta",                  NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--transmit",            NEED_NO, DOES_TRANSMITS },
+    { "07_gsm_attack",       "--tx-ack",              NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--vector-a5-downgrade", NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--vector-imsi-catcher", NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--vector-kc-recovery",  NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--vector-tmsi-deanon",  NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--version",             NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--yes",                 NEED_NO, DOES_READS },
+    { "08_umts_air",         "--__index_probe__",     NEED_NO, DOES_READS },
+    { "08_umts_air",         "--aka-flow",            NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--autn",                NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--bare",                NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--bch-hex",             NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--build-paging",        NEED_CAP, DOES_BUILDS },
+    { "08_umts_air",         "--build-rrc-reject",    NEED_CAP, DOES_BUILDS },
+    { "08_umts_air",         "--build-rrc-setup",     NEED_CAP, DOES_BUILDS },
+    { "08_umts_air",         "--build-sib",           NEED_CAP, DOES_BUILDS },
+    { "08_umts_air",         "--catcher-auth",        NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--catcher-identity",    NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--catcher-model",       NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--count-i",             NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--decode-pcap",         NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--decode-sib",          NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--domain",              NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--freq",                NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--gain",                NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--help",                NEED_NO, DOES_READS },
+    { "08_umts_air",         "--identity",            NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--info",                NEED_NO, DOES_READS },
+    { "08_umts_air",         "--integrity-tsv",       NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--mac-input",           NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--menu",                NEED_NO, DOES_READS },
+    { "08_umts_air",         "--mhz",                 NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--no-key",              NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--parse-rrc",           NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--psc",                 NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--quiet",               NEED_NO, DOES_READS },
+    { "08_umts_air",         "--rand",                NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--rate",                NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--seconds",             NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--selftest",            NEED_NO, DOES_READS },
+    { "08_umts_air",         "--sib-fields",          NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--sib-vectors",         NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--sib6-carriers",       NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--status-tsv",          NEED_NO, DOES_READS },
+    { "08_umts_air",         "--transmit",            NEED_CAP, DOES_TRANSMITS },
+    { "08_umts_air",         "--txid",                NEED_CAP, DOES_TRANSMITS },
+    { "08_umts_air",         "--uarfcn",              NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--uplink",              NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--version",             NEED_NO, DOES_READS },
+    { "08_umts_air",         "--yes",                 NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--__index_probe__",     NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--decode-nas",          NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--encode-attach",       NEED_NO, DOES_BUILDS },
+    { "09_lte_attach",       "--help",                NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--identity-exposure",   NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--imsi-decode",         NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--imsi-encode",         NEED_NO, DOES_BUILDS },
+    { "09_lte_attach",       "--info",                NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--menu",                NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--quiet",               NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--selftest",            NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--status-tsv",          NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--ue-stack",            NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--version",             NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--yes",                 NEED_NO, DOES_READS },
+    { "10_lte_air",          "--__index_probe__",     NEED_NO, DOES_READS },
+    { "10_lte_air",          "--build-meas-report",   NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--build-reest-reject",  NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--build-rrc-release",   NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--build-sib10",         NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--build-sib11",         NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--build-sib12",         NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--count",               NEED_NO, DOES_READS },
+    { "10_lte_air",          "--critical-extensions-future", NEED_NO, DOES_READS },
+    { "10_lte_air",          "--data-coding",         NEED_NO, DOES_READS },
+    { "10_lte_air",          "--decode-mib",          NEED_NO, DOES_READS },
+    { "10_lte_air",          "--decode-sib",          NEED_NO, DOES_READS },
+    { "10_lte_air",          "--dummy",               NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--earfcn",              NEED_NO, DOES_READS },
+    { "10_lte_air",          "--enb-sib-schedule",    NEED_NO, DOES_READS },
+    { "10_lte_air",          "--gen-enb-conf",        NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--help",                NEED_NO, DOES_READS },
+    { "10_lte_air",          "--hex",                 NEED_NO, DOES_READS },
+    { "10_lte_air",          "--info",                NEED_NO, DOES_READS },
+    { "10_lte_air",          "--late-non-critical",   NEED_NO, DOES_READS },
+    { "10_lte_air",          "--meas-id",             NEED_NO, DOES_READS },
+    { "10_lte_air",          "--menu",                NEED_NO, DOES_READS },
+    { "10_lte_air",          "--message-id",          NEED_NO, DOES_READS },
+    { "10_lte_air",          "--neigh",               NEED_NO, DOES_READS },
+    { "10_lte_air",          "--non-critical-extension", NEED_NO, DOES_READS },
+    { "10_lte_air",          "--out",                 NEED_NO, DOES_READS },
+    { "10_lte_air",          "--paging-frame",        NEED_NO, DOES_READS },
+    { "10_lte_air",          "--payload",             NEED_NO, DOES_READS },
+    { "10_lte_air",          "--payload-text",        NEED_NO, DOES_READS },
+    { "10_lte_air",          "--power-ref",           NEED_NO, DOES_READS },
+    { "10_lte_air",          "--prio",                NEED_NO, DOES_READS },
+    { "10_lte_air",          "--quiet",               NEED_NO, DOES_READS },
+    { "10_lte_air",          "--release-cause",       NEED_NO, DOES_READS },
+    { "10_lte_air",          "--rrc-tx",              NEED_NO, DOES_TRANSMITS },
+    { "10_lte_air",          "--rsrp",                NEED_NO, DOES_READS },
+    { "10_lte_air",          "--rsrq",                NEED_NO, DOES_READS },
+    { "10_lte_air",          "--segment",             NEED_NO, DOES_READS },
+    { "10_lte_air",          "--segment-number",      NEED_NO, DOES_READS },
+    { "10_lte_air",          "--segment-type",        NEED_NO, DOES_READS },
+    { "10_lte_air",          "--selftest",            NEED_NO, DOES_READS },
+    { "10_lte_air",          "--serial",              NEED_NO, DOES_READS },
+    { "10_lte_air",          "--sib",                 NEED_NO, DOES_READS },
+    { "10_lte_air",          "--srsran-version",      NEED_NO, DOES_READS },
+    { "10_lte_air",          "--start",               NEED_NO, DOES_READS },
+    { "10_lte_air",          "--status",              NEED_NO, DOES_READS },
+    { "10_lte_air",          "--status-tsv",          NEED_NO, DOES_READS },
+    { "10_lte_air",          "--stop",                NEED_NO, DOES_READS },
+    { "10_lte_air",          "--t320",                NEED_NO, DOES_READS },
+    { "10_lte_air",          "--tid",                 NEED_NO, DOES_READS },
+    { "10_lte_air",          "--version",             NEED_NO, DOES_READS },
+    { "10_lte_air",          "--warning-area",        NEED_NO, DOES_READS },
+    { "10_lte_air",          "--warning-message",     NEED_NO, DOES_READS },
+    { "10_lte_air",          "--warning-type",        NEED_NO, DOES_READS },
+    { "10_lte_air",          "--x2-decode",           NEED_NO, DOES_READS },
+    { "10_lte_air",          "--x2-setup",            NEED_NO, DOES_READS },
+    { "10_lte_air",          "--yes",                 NEED_NO, DOES_READS },
+    { "11_lte_core",         "--__index_probe__",     NEED_NO, DOES_READS },
+    { "11_lte_core",         "--area-ids",            NEED_NO, DOES_READS },
+    { "11_lte_core",         "--build-air",           NEED_NO, DOES_BUILDS },
+    { "11_lte_core",         "--build-clr",           NEED_NO, DOES_BUILDS },
+    { "11_lte_core",         "--build-ulr",           NEED_NO, DOES_BUILDS },
+    { "11_lte_core",         "--cdr-fraud-check",     NEED_NO, DOES_READS },
+    { "11_lte_core",         "--days",                NEED_NO, DOES_READS },
+    { "11_lte_core",         "--decode-diameter",     NEED_NO, DOES_READS },
+    { "11_lte_core",         "--decode-gtp-c",        NEED_NO, DOES_READS },
+    { "11_lte_core",         "--decode-gtp-u",        NEED_NO, DOES_READS },
+    { "11_lte_core",         "--diameter-send",       NEED_NO, DOES_SENDS },
+    { "11_lte_core",         "--dst",                 NEED_NO, DOES_READS },
+    { "11_lte_core",         "--duration",            NEED_NO, DOES_READS },
+    { "11_lte_core",         "--flow-id",             NEED_NO, DOES_READS },
+    { "11_lte_core",         "--fs20-audit",          NEED_NO, DOES_READS },
+    { "11_lte_core",         "--gtp-csr-forge",       NEED_NO, DOES_READS },
+    { "11_lte_core",         "--gtp-in-gtp",          NEED_NO, DOES_READS },
+    { "11_lte_core",         "--gtp-modify-bearer",   NEED_NO, DOES_READS },
+    { "11_lte_core",         "--gtpc-send",           NEED_NO, DOES_SENDS },
+    { "11_lte_core",         "--gtpdoor-detect",      NEED_NO, DOES_READS },
+    { "11_lte_core",         "--help",                NEED_NO, DOES_READS },
+    { "11_lte_core",         "--info",                NEED_NO, DOES_READS },
+    { "11_lte_core",         "--inner-teid",          NEED_NO, DOES_READS },
+    { "11_lte_core",         "--mbms-session",        NEED_NO, DOES_READS },
+    { "11_lte_core",         "--mcc",                 NEED_NO, DOES_READS },
+    { "11_lte_core",         "--mcd-dist",            NEED_NO, DOES_READS },
+    { "11_lte_core",         "--mcd-src",             NEED_NO, DOES_READS },
+    { "11_lte_core",         "--menu",                NEED_NO, DOES_READS },
+    { "11_lte_core",         "--mnc",                 NEED_NO, DOES_READS },
+    { "11_lte_core",         "--mood",                NEED_NO, DOES_READS },
+    { "11_lte_core",         "--out",                 NEED_NO, DOES_READS },
+    { "11_lte_core",         "--outer-seq",           NEED_NO, DOES_READS },
+    { "11_lte_core",         "--outer-teid",          NEED_NO, DOES_READS },
+    { "11_lte_core",         "--payload",             NEED_NO, DOES_READS },
+    { "11_lte_core",         "--plan",                NEED_NO, DOES_READS },
+    { "11_lte_core",         "--quiet",               NEED_NO, DOES_READS },
+    { "11_lte_core",         "--require-core",        NEED_NO, DOES_READS },
+    { "11_lte_core",         "--s1ap",                NEED_NO, DOES_READS },
+    { "11_lte_core",         "--selftest",            NEED_NO, DOES_READS },
+    { "11_lte_core",         "--seq",                 NEED_NO, DOES_READS },
+    { "11_lte_core",         "--service-id",          NEED_NO, DOES_READS },
+    { "11_lte_core",         "--session-id",          NEED_NO, DOES_READS },
+    { "11_lte_core",         "--src",                 NEED_NO, DOES_READS },
+    { "11_lte_core",         "--status-tsv",          NEED_NO, DOES_READS },
+    { "11_lte_core",         "--surface",             NEED_NO, DOES_READS },
+    { "11_lte_core",         "--teid",                NEED_NO, DOES_READS },
+    { "11_lte_core",         "--version",             NEED_NO, DOES_READS },
+    { "11_lte_core",         "--with-ip",             NEED_NO, DOES_READS },
+    { "11_lte_core",         "--yes",                 NEED_NO, DOES_READS },
+    { "12_nr_air",           "--__index_probe__",     NEED_NO, DOES_READS },
+    { "12_nr_air",           "--arfcn",               NEED_NO, DOES_READS },
+    { "12_nr_air",           "--beam-sweep",          NEED_NO, DOES_BUILDS },
+    { "12_nr_air",           "--build-meas-report",   NEED_NO, DOES_BUILDS },
+    { "12_nr_air",           "--build-rrc-reconfig",  NEED_NO, DOES_BUILDS },
+    { "12_nr_air",           "--decode-mib",          NEED_NO, DOES_READS },
+    { "12_nr_air",           "--decode-rrc",          NEED_NO, DOES_READS },
+    { "12_nr_air",           "--decode-sib1",         NEED_NO, DOES_READS },
+    { "12_nr_air",           "--format",              NEED_NO, DOES_READS },
+    { "12_nr_air",           "--gen-core-conf",       NEED_NO, DOES_BUILDS },
+    { "12_nr_air",           "--gen-gnb-conf",        NEED_NO, DOES_BUILDS },
+    { "12_nr_air",           "--help",                NEED_NO, DOES_READS },
+    { "12_nr_air",           "--i-ssb",               NEED_NO, DOES_READS },
+    { "12_nr_air",           "--info",                NEED_NO, DOES_READS },
+    { "12_nr_air",           "--menu",                NEED_NO, DOES_READS },
+    { "12_nr_air",           "--n-rb",                NEED_NO, DOES_READS },
+    { "12_nr_air",           "--pci",                 NEED_NO, DOES_READS },
+    { "12_nr_air",           "--prach",               NEED_NO, DOES_BUILDS },
+    { "12_nr_air",           "--quiet",               NEED_NO, DOES_READS },
+    { "12_nr_air",           "--rate",                NEED_NO, DOES_READS },
+    { "12_nr_air",           "--reps",                NEED_NO, DOES_READS },
+    { "12_nr_air",           "--scs",                 NEED_NO, DOES_READS },
+    { "12_nr_air",           "--selftest",            NEED_NO, DOES_READS },
+    { "12_nr_air",           "--ssb",                 NEED_NO, DOES_READS },
+    { "12_nr_air",           "--ssb-waveform",        NEED_NO, DOES_BUILDS },
+    { "12_nr_air",           "--start",               NEED_NO, DOES_READS },
+    { "12_nr_air",           "--status",              NEED_NO, DOES_READS },
+    { "12_nr_air",           "--status-tsv",          NEED_NO, DOES_READS },
+    { "12_nr_air",           "--stop",                NEED_NO, DOES_READS },
+    { "12_nr_air",           "--tx",                  NEED_NO, DOES_TRANSMITS },
+    { "12_nr_air",           "--version",             NEED_NO, DOES_READS },
+    { "12_nr_air",           "--yes",                 NEED_NO, DOES_READS },
+    { "13_nr_core",          "--__index_probe__",     NEED_NO, DOES_READS },
+    { "13_nr_core",          "--aka-flow",            NEED_NO, DOES_READS },
+    { "13_nr_core",          "--decode-5g-guti",      NEED_NO, DOES_READS },
+    { "13_nr_core",          "--decode-gtpu",         NEED_NO, DOES_READS },
+    { "13_nr_core",          "--decode-nas-5gs",      NEED_NO, DOES_READS },
+    { "13_nr_core",          "--decode-ngap",         NEED_NO, DOES_READS },
+    { "13_nr_core",          "--decode-pfcp",         NEED_NO, DOES_READS },
+    { "13_nr_core",          "--gtpu-header",         NEED_NO, DOES_READS },
+    { "13_nr_core",          "--help",                NEED_NO, DOES_READS },
+    { "13_nr_core",          "--info",                NEED_NO, DOES_READS },
+    { "13_nr_core",          "--kseaf",               NEED_NO, DOES_READS },
+    { "13_nr_core",          "--menu",                NEED_NO, DOES_READS },
+    { "13_nr_core",          "--nf-discovery",        NEED_NO, DOES_READS },
+    { "13_nr_core",          "--nf-list",             NEED_NO, DOES_READS },
+    { "13_nr_core",          "--ngap-downlink-nas",   NEED_NO, DOES_SENDS },
+    { "13_nr_core",          "--ngap-initial-ue",     NEED_NO, DOES_SENDS },
+    { "13_nr_core",          "--ngap-ngsetup",        NEED_NO, DOES_SENDS },
+    { "13_nr_core",          "--ngap-paging",         NEED_NO, DOES_SENDS },
+    { "13_nr_core",          "--ngap-send",           NEED_NO, DOES_SENDS },
+    { "13_nr_core",          "--pfcp-build",          NEED_NO, DOES_BUILDS },
+    { "13_nr_core",          "--pfcp-rules",          NEED_NO, DOES_READS },
+    { "13_nr_core",          "--pfcp-send",           NEED_NO, DOES_SENDS },
+    { "13_nr_core",          "--plan",                NEED_NO, DOES_READS },
+    { "13_nr_core",          "--quiet",               NEED_NO, DOES_READS },
+    { "13_nr_core",          "--selftest",            NEED_NO, DOES_READS },
+    { "13_nr_core",          "--status-tsv",          NEED_NO, DOES_READS },
+    { "13_nr_core",          "--ue-id-pair",          NEED_NO, DOES_READS },
+    { "13_nr_core",          "--version",             NEED_NO, DOES_READS },
+    { "13_nr_core",          "--xnap-decode",         NEED_NO, DOES_READS },
+    { "13_nr_core",          "--xnap-setup",          NEED_NO, DOES_SENDS },
+    { "13_nr_core",          "--yes",                 NEED_NO, DOES_READS },
+    { "14_suci",             "--__index_probe__",     NEED_NO, DOES_READS },
+    { "14_suci",             "--audit",               NEED_NO, DOES_READS },
+    { "14_suci",             "--build-suci",          NEED_NO, DOES_BUILDS },
+    { "14_suci",             "--conceal",             NEED_NO, DOES_BUILDS },
+    { "14_suci",             "--deconceal",           NEED_NO, DOES_READS },
+    { "14_suci",             "--genkey",              NEED_NO, DOES_BUILDS },
+    { "14_suci",             "--help",                NEED_NO, DOES_READS },
+    { "14_suci",             "--hkdf",                NEED_NO, DOES_BUILDS },
+    { "14_suci",             "--info",                NEED_NO, DOES_READS },
+    { "14_suci",             "--menu",                NEED_NO, DOES_READS },
+    { "14_suci",             "--msin-decode",         NEED_NO, DOES_READS },
+    { "14_suci",             "--msin-encode",         NEED_NO, DOES_BUILDS },
+    { "14_suci",             "--parse-suci",          NEED_NO, DOES_READS },
+    { "14_suci",             "--quiet",               NEED_NO, DOES_READS },
+    { "14_suci",             "--selftest",            NEED_NO, DOES_READS },
+    { "14_suci",             "--status-tsv",          NEED_NO, DOES_READS },
+    { "14_suci",             "--verify-hnkey",        NEED_NO, DOES_READS },
+    { "14_suci",             "--version",             NEED_NO, DOES_READS },
+    { "14_suci",             "--yes",                 NEED_NO, DOES_READS },
+    { "15_downgrade",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "15_downgrade",        "--build-reject",        NEED_NO, DOES_BUILDS },
+    { "15_downgrade",        "--build-security-mode", NEED_NO, DOES_BUILDS },
+    { "15_downgrade",        "--build-sib1",          NEED_NO, DOES_BUILDS },
+    { "15_downgrade",        "--causes",              NEED_NO, DOES_READS },
+    { "15_downgrade",        "--detect",              NEED_NO, DOES_READS },
+    { "15_downgrade",        "--help",                NEED_NO, DOES_READS },
+    { "15_downgrade",        "--info",                NEED_NO, DOES_READS },
+    { "15_downgrade",        "--menu",                NEED_NO, DOES_READS },
+    { "15_downgrade",        "--null-cipher-table",   NEED_NO, DOES_READS },
+    { "15_downgrade",        "--path",                NEED_NO, DOES_READS },
+    { "15_downgrade",        "--plan",                NEED_NO, DOES_READS },
+    { "15_downgrade",        "--quiet",               NEED_NO, DOES_READS },
+    { "15_downgrade",        "--reject-cause",        NEED_NO, DOES_READS },
+    { "15_downgrade",        "--selftest",            NEED_NO, DOES_READS },
+    { "15_downgrade",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "15_downgrade",        "--tx-reject",           NEED_NO, DOES_TRANSMITS },
+    { "15_downgrade",        "--version",             NEED_NO, DOES_READS },
+    { "15_downgrade",        "--yes",                 NEED_NO, DOES_READS },
+    { "16_sim",              "--__index_probe__",     NEED_NO, DOES_READS },
+    { "16_sim",              "--amf",                 NEED_NO, DOES_READS },
+    { "16_sim",              "--build-apdu",          NEED_NO, DOES_MODIFIES },
+    { "16_sim",              "--decode-ad",           NEED_NO, DOES_READS },
+    { "16_sim",              "--decode-iccid",        NEED_NO, DOES_READS },
+    { "16_sim",              "--decode-imsi",         NEED_NO, DOES_READS },
+    { "16_sim",              "--dpa-model",           NEED_NO, DOES_READS },
+    { "16_sim",              "--dpa-sim",             NEED_SIM, DOES_READS },
+    { "16_sim",              "--dpa-sweep",           NEED_SIM, DOES_READS },
+    { "16_sim",              "--es8-build",           NEED_NO, DOES_MODIFIES },
+    { "16_sim",              "--es8-parse",           NEED_NO, DOES_READS },
+    { "16_sim",              "--es9-notification",    NEED_SIM, DOES_READS },
+    { "16_sim",              "--es9-plus",            NEED_SIM, DOES_READS },
+    { "16_sim",              "--es9-response",        NEED_SIM, DOES_READS },
+    { "16_sim",              "--file-id",             NEED_NO, DOES_READS },
+    { "16_sim",              "--get-response",        NEED_NO, DOES_READS },
+    { "16_sim",              "--help",                NEED_NO, DOES_READS },
+    { "16_sim",              "--info",                NEED_NO, DOES_READS },
+    { "16_sim",              "--iterations",          NEED_NO, DOES_READS },
+    { "16_sim",              "--klength",             NEED_NO, DOES_READS },
+    { "16_sim",              "--menu",                NEED_NO, DOES_READS },
+    { "16_sim",              "--op",                  NEED_NO, DOES_READS },
+    { "16_sim",              "--opc",                 NEED_NO, DOES_READS },
+    { "16_sim",              "--ota-key",             NEED_SIM, DOES_MODIFIES },
+    { "16_sim",              "--parse-apdu",          NEED_NO, DOES_READS },
+    { "16_sim",              "--parse-ota",           NEED_NO, DOES_READS },
+    { "16_sim",              "--plan",                NEED_NO, DOES_READS },
+    { "16_sim",              "--quiet",               NEED_NO, DOES_READS },
+    { "16_sim",              "--read-binary",         NEED_SIM, DOES_READS },
+    { "16_sim",              "--read-record",         NEED_SIM, DOES_READS },
+    { "16_sim",              "--rsp",                 NEED_NO, DOES_READS },
+    { "16_sim",              "--select-fid",          NEED_SIM, DOES_READS },
+    { "16_sim",              "--selftest",            NEED_NO, DOES_READS },
+    { "16_sim",              "--sim-auth",            NEED_SIM, DOES_READS },
+    { "16_sim",              "--sim-auth-check",      NEED_NO, DOES_READS },
+    { "16_sim",              "--smds",                NEED_SIM, DOES_READS },
+    { "16_sim",              "--spi",                 NEED_NO, DOES_READS },
+    { "16_sim",              "--sqn",                 NEED_NO, DOES_READS },
+    { "16_sim",              "--status-tsv",          NEED_NO, DOES_READS },
+    { "16_sim",              "--top",                 NEED_NO, DOES_READS },
+    { "16_sim",              "--version",             NEED_NO, DOES_READS },
+    { "16_sim",              "--yes",                 NEED_NO, DOES_READS },
+    { "17_pcap_analysis",    "--__index_probe__",     NEED_NO, DOES_READS },
+    { "17_pcap_analysis",    "--build-sample",        NEED_CAP, DOES_BUILDS },
+    { "17_pcap_analysis",    "--clear",               NEED_CAP, DOES_READS },
+    { "17_pcap_analysis",    "--conversations",       NEED_CAP, DOES_READS },
+    { "17_pcap_analysis",    "--extract",             NEED_CAP, DOES_BUILDS },
+    { "17_pcap_analysis",    "--help",                NEED_NO, DOES_READS },
+    { "17_pcap_analysis",    "--hierarchy",           NEED_CAP, DOES_READS },
+    { "17_pcap_analysis",    "--ident-list",          NEED_CAP, DOES_READS },
+    { "17_pcap_analysis",    "--identities",          NEED_CAP, DOES_BUILDS },
+    { "17_pcap_analysis",    "--info",                NEED_NO, DOES_READS },
+    { "17_pcap_analysis",    "--list",                NEED_CAP, DOES_READS },
+    { "17_pcap_analysis",    "--menu",                NEED_NO, DOES_READS },
+    { "17_pcap_analysis",    "--quiet",               NEED_NO, DOES_READS },
+    { "17_pcap_analysis",    "--selftest",            NEED_NO, DOES_READS },
+    { "17_pcap_analysis",    "--status-tsv",          NEED_NO, DOES_READS },
+    { "17_pcap_analysis",    "--summary",             NEED_CAP, DOES_READS },
+    { "17_pcap_analysis",    "--version",             NEED_NO, DOES_READS },
+    { "17_pcap_analysis",    "--yes",                 NEED_NO, DOES_READS },
+    { "18_imsi_exposure",    "--__index_probe__",     NEED_NO, DOES_READS },
+    { "18_imsi_exposure",    "--audit",               NEED_CAP, DOES_READS },
+    { "18_imsi_exposure",    "--clear",               NEED_CAP, DOES_READS },
+    { "18_imsi_exposure",    "--cross",               NEED_CAP, DOES_BUILDS },
+    { "18_imsi_exposure",    "--exposure-tsv",        NEED_CAP, DOES_READS },
+    { "18_imsi_exposure",    "--harvest",             NEED_CAP, DOES_BUILDS },
+    { "18_imsi_exposure",    "--help",                NEED_NO, DOES_READS },
+    { "18_imsi_exposure",    "--identities",          NEED_CAP, DOES_BUILDS },
+    { "18_imsi_exposure",    "--info",                NEED_NO, DOES_READS },
+    { "18_imsi_exposure",    "--map",                 NEED_CAP, DOES_READS },
+    { "18_imsi_exposure",    "--marlin",              NEED_CAP, DOES_BUILDS },
+    { "18_imsi_exposure",    "--marlin-msgs",         NEED_CAP, DOES_READS },
+    { "18_imsi_exposure",    "--menu",                NEED_NO, DOES_READS },
+    { "18_imsi_exposure",    "--quiet",               NEED_NO, DOES_READS },
+    { "18_imsi_exposure",    "--redact",              NEED_CAP, DOES_BUILDS },
+    { "18_imsi_exposure",    "--report",              NEED_CAP, DOES_READS },
+    { "18_imsi_exposure",    "--selftest",            NEED_NO, DOES_READS },
+    { "18_imsi_exposure",    "--status-tsv",          NEED_NO, DOES_READS },
+    { "18_imsi_exposure",    "--subscribers-tsv",     NEED_CAP, DOES_READS },
+    { "18_imsi_exposure",    "--version",             NEED_NO, DOES_READS },
+    { "18_imsi_exposure",    "--yes",                 NEED_NO, DOES_READS },
+    { "19_cipher_audit",     "--__index_probe__",     NEED_NO, DOES_READS },
+    { "19_cipher_audit",     "--auth-causes",         NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--auth-session",        NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--clear",               NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--downgrade-check",     NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--from-pcap",           NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--help",                NEED_NO, DOES_READS },
+    { "19_cipher_audit",     "--info",                NEED_NO, DOES_READS },
+    { "19_cipher_audit",     "--menu",                NEED_NO, DOES_READS },
+    { "19_cipher_audit",     "--parse-smc",           NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--quiet",               NEED_NO, DOES_READS },
+    { "19_cipher_audit",     "--score",               NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--selftest",            NEED_NO, DOES_READS },
+    { "19_cipher_audit",     "--session",             NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--sessions-load",       NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--sqn-recover",         NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--status-tsv",          NEED_NO, DOES_READS },
+    { "19_cipher_audit",     "--table",               NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--version",             NEED_NO, DOES_READS },
+    { "19_cipher_audit",     "--yes",                 NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--__index_probe__",     NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--bcd",                 NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--help",                NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--info",                NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--kc",                  NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--list-cves",           NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--list-findings",       NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--menu",                NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--plan",                NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--probe",               NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--quiet",               NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--run-cve",             NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--runs-tsv",            NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--selftest",            NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--status-tsv",          NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--version",             NEED_NO, DOES_READS },
+    { "20_gsm_cve",          "--yes",                 NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--__index_probe__",     NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--corpus",              NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--corpus-entry",        NEED_NO, DOES_BUILDS },
+    { "21_lte_cve",          "--corpus-stats",        NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--gen",                 NEED_NO, DOES_BUILDS },
+    { "21_lte_cve",          "--help",                NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--info",                NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--list-cves",           NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--menu",                NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--plan",                NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--plmn",                NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--probe",               NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--quiet",               NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--run-cve",             NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--runs-tsv",            NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--selftest",            NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--status-tsv",          NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--teid",                NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--version",             NEED_NO, DOES_READS },
+    { "21_lte_cve",          "--yes",                 NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--__index_probe__",     NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--help",                NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--info",                NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--list-cves",           NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--list-findings",       NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--menu",                NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--plan",                NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--probe",               NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--quiet",               NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--run-cve",             NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--runs-tsv",            NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--selftest",            NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--snssai",              NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--status-tsv",          NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--version",             NEED_NO, DOES_READS },
+    { "22_nr_cve",           "--yes",                 NEED_NO, DOES_READS },
+    { "23_traffic_analysis", "--__index_probe__",     NEED_NO, DOES_READS },
+    { "23_traffic_analysis", "--calls-tsv",           NEED_CAP, DOES_READS },
+    { "23_traffic_analysis", "--classify",            NEED_CAP, DOES_READS },
+    { "23_traffic_analysis", "--clear-refs",          NEED_CAP, DOES_READS },
+    { "23_traffic_analysis", "--features",            NEED_CAP, DOES_READS },
+    { "23_traffic_analysis", "--fingerprint-add",     NEED_CAP, DOES_READS },
+    { "23_traffic_analysis", "--flows",               NEED_CAP, DOES_READS },
+    { "23_traffic_analysis", "--help",                NEED_NO, DOES_READS },
+    { "23_traffic_analysis", "--info",                NEED_NO, DOES_READS },
+    { "23_traffic_analysis", "--menu",                NEED_NO, DOES_READS },
+    { "23_traffic_analysis", "--quiet",               NEED_NO, DOES_READS },
+    { "23_traffic_analysis", "--refs-tsv",            NEED_CAP, DOES_READS },
+    { "23_traffic_analysis", "--selftest",            NEED_NO, DOES_READS },
+    { "23_traffic_analysis", "--status-tsv",          NEED_NO, DOES_READS },
+    { "23_traffic_analysis", "--version",             NEED_NO, DOES_READS },
+    { "23_traffic_analysis", "--yes",                 NEED_NO, DOES_READS },
+    { "24_rf_fingerprint",   "--__index_probe__",     NEED_NO, DOES_READS },
+    { "24_rf_fingerprint",   "--classify",            NEED_RADIO, DOES_READS },
+    { "24_rf_fingerprint",   "--clear-sigs",          NEED_RADIO, DOES_READS },
+    { "24_rf_fingerprint",   "--csi-motion",          NEED_RADIO, DOES_READS },
+    { "24_rf_fingerprint",   "--csi-parse",           NEED_RADIO, DOES_READS },
+    { "24_rf_fingerprint",   "--features",            NEED_RADIO, DOES_READS },
+    { "24_rf_fingerprint",   "--help",                NEED_NO, DOES_READS },
+    { "24_rf_fingerprint",   "--info",                NEED_NO, DOES_READS },
+    { "24_rf_fingerprint",   "--menu",                NEED_NO, DOES_READS },
+    { "24_rf_fingerprint",   "--quiet",               NEED_NO, DOES_READS },
+    { "24_rf_fingerprint",   "--selftest",            NEED_NO, DOES_READS },
+    { "24_rf_fingerprint",   "--sig-add",             NEED_RADIO, DOES_READS },
+    { "24_rf_fingerprint",   "--sigs-tsv",            NEED_RADIO, DOES_READS },
+    { "24_rf_fingerprint",   "--status-tsv",          NEED_NO, DOES_READS },
+    { "24_rf_fingerprint",   "--transient",           NEED_RADIO, DOES_READS },
+    { "24_rf_fingerprint",   "--version",             NEED_NO, DOES_READS },
+    { "24_rf_fingerprint",   "--yes",                 NEED_NO, DOES_READS },
+    { "25_killchain",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "25_killchain",        "--add-chain",           NEED_NO, DOES_READS },
+    { "25_killchain",        "--dry-run",             NEED_NO, DOES_READS },
+    { "25_killchain",        "--help",                NEED_NO, DOES_READS },
+    { "25_killchain",        "--info",                NEED_NO, DOES_READS },
+    { "25_killchain",        "--keep-going",          NEED_NO, DOES_READS },
+    { "25_killchain",        "--list-chains",         NEED_NO, DOES_READS },
+    { "25_killchain",        "--menu",                NEED_NO, DOES_READS },
+    { "25_killchain",        "--pause",               NEED_NO, DOES_READS },
+    { "25_killchain",        "--quiet",               NEED_NO, DOES_READS },
+    { "25_killchain",        "--resume",              NEED_NO, DOES_READS },
+    { "25_killchain",        "--run",                 NEED_NO, DOES_READS },
+    { "25_killchain",        "--run-multi",           NEED_NO, DOES_READS },
+    { "25_killchain",        "--run-status-tsv",      NEED_NO, DOES_READS },
+    { "25_killchain",        "--runs-tsv",            NEED_NO, DOES_READS },
+    { "25_killchain",        "--selftest",            NEED_NO, DOES_READS },
+    { "25_killchain",        "--show-chain",          NEED_NO, DOES_READS },
+    { "25_killchain",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "25_killchain",        "--version",             NEED_NO, DOES_READS },
+    { "25_killchain",        "--yes",                 NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--__index_probe__",     NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--build-activate-ss",   NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--build-ati",           NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--build-isd",           NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--build-m3ua",          NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--build-psi",           NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--build-register-ss",   NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--build-sai",           NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--build-sri",           NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--build-sri-sm",        NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--build-ulr",           NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--decode-map",          NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--decode-msu",          NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--decode-sigtran",      NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--decode-tcap",         NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--detect",              NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--fallback-detect",     NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--flow",                NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--grx-recon",           NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--help",                NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--info",                NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--menu",                NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--opcode",              NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--pc-format",           NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--plan",                NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--quiet",               NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--require-stp",         NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--selftest",            NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--sgsap-build",         NEED_NO, DOES_SENDS },
+    { "26_ss7_map",          "--sgsap-ie",            NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--sgsap-parse",         NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--ssn",                 NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--status-tsv",          NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--surface",             NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--version",             NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--visited-plmn",        NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--yes",                 NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--__index_probe__",     NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--alter",               NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--build-query",         NEED_NO, DOES_BUILDS },
+    { "27_cellular_dns",     "--build-response",      NEED_NO, DOES_BUILDS },
+    { "27_cellular_dns",     "--decode-dns",          NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--detect",              NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--help",                NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--info",                NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--menu",                NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--pco",                 NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--plan",                NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--quiet",               NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--resolver-discovery",  NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--selftest",            NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--status-tsv",          NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--version",             NEED_NO, DOES_READS },
+    { "27_cellular_dns",     "--yes",                 NEED_NO, DOES_READS },
+    { "28_paging_track",     "--__index_probe__",     NEED_NO, DOES_READS },
+    { "28_paging_track",     "--build-paging-req",    NEED_NO, DOES_BUILDS },
+    { "28_paging_track",     "--detect",              NEED_NO, DOES_READS },
+    { "28_paging_track",     "--edrx-occ",            NEED_NO, DOES_READS },
+    { "28_paging_track",     "--flapping-tsv",        NEED_NO, DOES_READS },
+    { "28_paging_track",     "--help",                NEED_NO, DOES_READS },
+    { "28_paging_track",     "--info",                NEED_NO, DOES_READS },
+    { "28_paging_track",     "--menu",                NEED_NO, DOES_READS },
+    { "28_paging_track",     "--page-mode",           NEED_NO, DOES_READS },
+    { "28_paging_track",     "--paging-cause",        NEED_NO, DOES_READS },
+    { "28_paging_track",     "--paging-history",      NEED_NO, DOES_READS },
+    { "28_paging_track",     "--paging-parse",        NEED_NO, DOES_READS },
+    { "28_paging_track",     "--paging-storm",        NEED_NO, DOES_READS },
+    { "28_paging_track",     "--paging-tx",           NEED_NO, DOES_READS },
+    { "28_paging_track",     "--pei-occ",             NEED_NO, DOES_READS },
+    { "28_paging_track",     "--piercer-correlate",   NEED_NO, DOES_READS },
+    { "28_paging_track",     "--plan",                NEED_NO, DOES_READS },
+    { "28_paging_track",     "--po",                  NEED_NO, DOES_READS },
+    { "28_paging_track",     "--quiet",               NEED_NO, DOES_READS },
+    { "28_paging_track",     "--selftest",            NEED_NO, DOES_READS },
+    { "28_paging_track",     "--status-tsv",          NEED_NO, DOES_READS },
+    { "28_paging_track",     "--torpedo-model",       NEED_NO, DOES_READS },
+    { "28_paging_track",     "--version",             NEED_NO, DOES_READS },
+    { "28_paging_track",     "--yes",                 NEED_NO, DOES_READS },
+    { "29_mac_layer",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "29_mac_layer",        "--dci",                 NEED_CAP, DOES_READS },
+    { "29_mac_layer",        "--decode-mac",          NEED_CAP, DOES_READS },
+    { "29_mac_layer",        "--help",                NEED_NO, DOES_READS },
+    { "29_mac_layer",        "--info",                NEED_NO, DOES_READS },
+    { "29_mac_layer",        "--integrity-gap",       NEED_CAP, DOES_READS },
+    { "29_mac_layer",        "--lcid-table",          NEED_CAP, DOES_READS },
+    { "29_mac_layer",        "--menu",                NEED_NO, DOES_READS },
+    { "29_mac_layer",        "--quiet",               NEED_NO, DOES_READS },
+    { "29_mac_layer",        "--rnti-table",          NEED_CAP, DOES_READS },
+    { "29_mac_layer",        "--rnti-track",          NEED_CAP, DOES_READS },
+    { "29_mac_layer",        "--sched-parse",         NEED_CAP, DOES_READS },
+    { "29_mac_layer",        "--sched-pattern",       NEED_CAP, DOES_READS },
+    { "29_mac_layer",        "--selftest",            NEED_NO, DOES_READS },
+    { "29_mac_layer",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "29_mac_layer",        "--version",             NEED_NO, DOES_READS },
+    { "29_mac_layer",        "--yes",                 NEED_NO, DOES_READS },
+    { "30_volte_ims",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "30_volte_ims",        "--call",                NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--calls",               NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--detect-keystream-reuse", NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--help",                NEED_NO, DOES_READS },
+    { "30_volte_ims",        "--i-have-a-lab-and-authorisation", NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--imei-leak",           NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--imp4gt-model",        NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--ims-registration",    NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--info",                NEED_NO, DOES_READS },
+    { "30_volte_ims",        "--keystream-recover",   NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--menu",                NEED_NO, DOES_READS },
+    { "30_volte_ims",        "--plan",                NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--quiet",               NEED_NO, DOES_READS },
+    { "30_volte_ims",        "--register-aka",        NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--register-spoof",      NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--revolte-demo",        NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--selftest",            NEED_NO, DOES_READS },
+    { "30_volte_ims",        "--sip-build",           NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--sip-flood",           NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--sip-parse",           NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--sip-send",            NEED_CAP, DOES_SENDS },
+    { "30_volte_ims",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "30_volte_ims",        "--version",             NEED_NO, DOES_READS },
+    { "30_volte_ims",        "--yes",                 NEED_NO, DOES_READS },
+    { "31_sim_defense",      "--__index_probe__",     NEED_NO, DOES_READS },
+    { "31_sim_defense",      "--adm-apdu",            NEED_SIM, DOES_MODIFIES },
+    { "31_sim_defense",      "--defence-checklist",   NEED_SIM, DOES_READS },
+    { "31_sim_defense",      "--ef-ad",               NEED_SIM, DOES_READS },
+    { "31_sim_defense",      "--esim-profile-parse",  NEED_SIM, DOES_READS },
+    { "31_sim_defense",      "--gen",                 NEED_SIM, DOES_BUILDS },
+    { "31_sim_defense",      "--help",                NEED_NO, DOES_READS },
+    { "31_sim_defense",      "--info",                NEED_NO, DOES_READS },
+    { "31_sim_defense",      "--key",                 NEED_SIM, DOES_READS },
+    { "31_sim_defense",      "--menu",                NEED_NO, DOES_READS },
+    { "31_sim_defense",      "--pin-state",           NEED_SIM, DOES_READS },
+    { "31_sim_defense",      "--quiet",               NEED_NO, DOES_READS },
+    { "31_sim_defense",      "--score",               NEED_SIM, DOES_READS },
+    { "31_sim_defense",      "--selftest",            NEED_NO, DOES_READS },
+    { "31_sim_defense",      "--signals",             NEED_SIM, DOES_READS },
+    { "31_sim_defense",      "--status-tsv",          NEED_NO, DOES_READS },
+    { "31_sim_defense",      "--swap-artefacts",      NEED_SIM, DOES_READS },
+    { "31_sim_defense",      "--swap-plan",           NEED_SIM, DOES_READS },
+    { "31_sim_defense",      "--version",             NEED_NO, DOES_READS },
+    { "31_sim_defense",      "--yes",                 NEED_NO, DOES_READS },
+    { "32_nas_signaling",    "--__index_probe__",     NEED_NO, DOES_READS },
+    { "32_nas_signaling",    "--algorithms",          NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--autn",                NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--auts",                NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--build-nas",           NEED_CAP, DOES_BUILDS },
+    { "32_nas_signaling",    "--cause",               NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--causes",              NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--cost-model",          NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--decode-nas",          NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--help",                NEED_NO, DOES_READS },
+    { "32_nas_signaling",    "--identity",            NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--info",                NEED_NO, DOES_READS },
+    { "32_nas_signaling",    "--ksi",                 NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--ksi-type",            NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--menu",                NEED_NO, DOES_READS },
+    { "32_nas_signaling",    "--out",                 NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--plan",                NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--procedure-mix",       NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--quiet",               NEED_NO, DOES_READS },
+    { "32_nas_signaling",    "--rand",                NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--rate",                NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--selftest",            NEED_NO, DOES_READS },
+    { "32_nas_signaling",    "--status-tsv",          NEED_NO, DOES_READS },
+    { "32_nas_signaling",    "--storm-profile",       NEED_CAP, DOES_READS },
+    { "32_nas_signaling",    "--transmit",            NEED_CAP, DOES_TRANSMITS },
+    { "32_nas_signaling",    "--version",             NEED_NO, DOES_READS },
+    { "32_nas_signaling",    "--yes",                 NEED_NO, DOES_READS },
+    { "33_jamming_detect",   "--__index_probe__",     NEED_NO, DOES_READS },
+    { "33_jamming_detect",   "--analyse",             NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--band",                NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--centre",              NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--characterise",        NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--counters",            NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--discriminate",        NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--earfcn",              NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--fixture",             NEED_NO, DOES_BUILDS },
+    { "33_jamming_detect",   "--format",              NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--help",                NEED_NO, DOES_READS },
+    { "33_jamming_detect",   "--i-have-a-lab-and-authorisation", NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--i-ssb",               NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--info",                NEED_NO, DOES_READS },
+    { "33_jamming_detect",   "--menu",                NEED_NO, DOES_READS },
+    { "33_jamming_detect",   "--mib",                 NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--mode",                NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--n-rb",                NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--n-rb-dl",             NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--n-rb-prs",            NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--ncs",                 NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--noise-floor",         NEED_RADIO, DOES_BUILDS },
+    { "33_jamming_detect",   "--off",                 NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--on",                  NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--out",                 NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--pci",                 NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--peak",                NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--ports",               NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--prn",                 NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--quiet",               NEED_NO, DOES_READS },
+    { "33_jamming_detect",   "--rate",                NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--report",              NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--root",                NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--scs",                 NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--secs",                NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--seed",                NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--selftest",            NEED_NO, DOES_READS },
+    { "33_jamming_detect",   "--seq",                 NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--shape",               NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--shapes",              NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--ssb-waveform",        NEED_RADIO, DOES_TRANSMITS },
+    { "33_jamming_detect",   "--status-tsv",          NEED_NO, DOES_READS },
+    { "33_jamming_detect",   "--tx-build",            NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--tx-status",           NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--v",                   NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--version",             NEED_NO, DOES_READS },
+    { "33_jamming_detect",   "--yes",                 NEED_NO, DOES_READS },
+    { "34_slicing",          "--__index_probe__",     NEED_NO, DOES_READS },
+    { "34_slicing",          "--decode-s-nssai",      NEED_NO, DOES_READS },
+    { "34_slicing",          "--detect",              NEED_NO, DOES_READS },
+    { "34_slicing",          "--encode-s-nssai",      NEED_NO, DOES_BUILDS },
+    { "34_slicing",          "--five-qi",             NEED_NO, DOES_READS },
+    { "34_slicing",          "--five-qi-table",       NEED_NO, DOES_READS },
+    { "34_slicing",          "--help",                NEED_NO, DOES_READS },
+    { "34_slicing",          "--info",                NEED_NO, DOES_READS },
+    { "34_slicing",          "--isolation-check",     NEED_NO, DOES_READS },
+    { "34_slicing",          "--menu",                NEED_NO, DOES_READS },
+    { "34_slicing",          "--nas5gs",              NEED_NO, DOES_READS },
+    { "34_slicing",          "--nssai-parse",         NEED_NO, DOES_READS },
+    { "34_slicing",          "--plan",                NEED_NO, DOES_READS },
+    { "34_slicing",          "--quiet",               NEED_NO, DOES_READS },
+    { "34_slicing",          "--selection",           NEED_NO, DOES_READS },
+    { "34_slicing",          "--selftest",            NEED_NO, DOES_READS },
+    { "34_slicing",          "--slice-qos-check",     NEED_NO, DOES_READS },
+    { "34_slicing",          "--sst-table",           NEED_NO, DOES_READS },
+    { "34_slicing",          "--status-tsv",          NEED_NO, DOES_READS },
+    { "34_slicing",          "--surface",             NEED_NO, DOES_READS },
+    { "34_slicing",          "--tsn-config",          NEED_NO, DOES_READS },
+    { "34_slicing",          "--version",             NEED_NO, DOES_READS },
+    { "34_slicing",          "--yes",                 NEED_NO, DOES_READS },
+    { "35_baseband",         "--__index_probe__",     NEED_NO, DOES_READS },
+    { "35_baseband",         "--asn1-dec",            NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--asn1-len",            NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--corpus",              NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--diag-frame",          NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--diag-send",           NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--dir",                 NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--framing",             NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--freq",                NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--help",                NEED_NO, DOES_READS },
+    { "35_baseband",         "--info",                NEED_NO, DOES_READS },
+    { "35_baseband",         "--instrument",          NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--layers",              NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--menu",                NEED_NO, DOES_READS },
+    { "35_baseband",         "--mutate",              NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--nas-hdr",             NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--out",                 NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--plan",                NEED_NO, DOES_READS },
+    { "35_baseband",         "--port",                NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--power",               NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--quiet",               NEED_NO, DOES_READS },
+    { "35_baseband",         "--rf-submit",           NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--selftest",            NEED_NO, DOES_READS },
+    { "35_baseband",         "--send-payload",        NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--status-tsv",          NEED_NO, DOES_READS },
+    { "35_baseband",         "--transmit",            NEED_RADIO, DOES_TRANSMITS },
+    { "35_baseband",         "--triage",              NEED_RADIO, DOES_READS },
+    { "35_baseband",         "--version",             NEED_NO, DOES_READS },
+    { "35_baseband",         "--yes",                 NEED_NO, DOES_READS },
+    { "36_vowifi",           "--__index_probe__",     NEED_NO, DOES_READS },
+    { "36_vowifi",           "--dh",                  NEED_NO, DOES_READS },
+    { "36_vowifi",           "--eap-attr",            NEED_NO, DOES_READS },
+    { "36_vowifi",           "--eap-build",           NEED_NO, DOES_READS },
+    { "36_vowifi",           "--eap-parse",           NEED_NO, DOES_READS },
+    { "36_vowifi",           "--encr",                NEED_NO, DOES_READS },
+    { "36_vowifi",           "--epdg",                NEED_NO, DOES_READS },
+    { "36_vowifi",           "--esn",                 NEED_NO, DOES_READS },
+    { "36_vowifi",           "--help",                NEED_NO, DOES_READS },
+    { "36_vowifi",           "--id-type",             NEED_NO, DOES_READS },
+    { "36_vowifi",           "--ike-build",           NEED_NO, DOES_READS },
+    { "36_vowifi",           "--ike-parse",           NEED_NO, DOES_READS },
+    { "36_vowifi",           "--info",                NEED_NO, DOES_READS },
+    { "36_vowifi",           "--integrity",           NEED_NO, DOES_READS },
+    { "36_vowifi",           "--menu",                NEED_NO, DOES_READS },
+    { "36_vowifi",           "--nai",                 NEED_NO, DOES_READS },
+    { "36_vowifi",           "--notify",              NEED_NO, DOES_READS },
+    { "36_vowifi",           "--null-check",          NEED_NO, DOES_READS },
+    { "36_vowifi",           "--payload",             NEED_NO, DOES_READS },
+    { "36_vowifi",           "--plan",                NEED_NO, DOES_READS },
+    { "36_vowifi",           "--quiet",               NEED_NO, DOES_READS },
+    { "36_vowifi",           "--selftest",            NEED_NO, DOES_READS },
+    { "36_vowifi",           "--status-tsv",          NEED_NO, DOES_READS },
+    { "36_vowifi",           "--transform",           NEED_NO, DOES_READS },
+    { "36_vowifi",           "--types",               NEED_NO, DOES_READS },
+    { "36_vowifi",           "--version",             NEED_NO, DOES_READS },
+    { "36_vowifi",           "--walk",                NEED_NO, DOES_READS },
+    { "36_vowifi",           "--yes",                 NEED_NO, DOES_READS },
+    { "37_femtocell",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "37_femtocell",        "--apply",               NEED_NO, DOES_READS },
+    { "37_femtocell",        "--cell-profile",        NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--csg-decode",          NEED_NO, DOES_READS },
+    { "37_femtocell",        "--csg-encode",          NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--detect",              NEED_NO, DOES_READS },
+    { "37_femtocell",        "--discover",            NEED_NO, DOES_READS },
+    { "37_femtocell",        "--help",                NEED_NO, DOES_READS },
+    { "37_femtocell",        "--hnbap",               NEED_NO, DOES_READS },
+    { "37_femtocell",        "--info",                NEED_NO, DOES_READS },
+    { "37_femtocell",        "--iuh",                 NEED_NO, DOES_READS },
+    { "37_femtocell",        "--iuh-attach",          NEED_NO, DOES_SENDS },
+    { "37_femtocell",        "--iuh-register",        NEED_NO, DOES_READS },
+    { "37_femtocell",        "--iuh-rua",             NEED_NO, DOES_READS },
+    { "37_femtocell",        "--iuh-ue",              NEED_NO, DOES_READS },
+    { "37_femtocell",        "--live",                NEED_NO, DOES_READS },
+    { "37_femtocell",        "--menu",                NEED_NO, DOES_READS },
+    { "37_femtocell",        "--pci-conflict",        NEED_NO, DOES_READS },
+    { "37_femtocell",        "--plan",                NEED_NO, DOES_READS },
+    { "37_femtocell",        "--quiet",               NEED_NO, DOES_READS },
+    { "37_femtocell",        "--ranap-decode",        NEED_NO, DOES_READS },
+    { "37_femtocell",        "--ranap-initial-ue",    NEED_NO, DOES_READS },
+    { "37_femtocell",        "--rua-connect",         NEED_NO, DOES_READS },
+    { "37_femtocell",        "--rua-decode",          NEED_NO, DOES_READS },
+    { "37_femtocell",        "--rua-transfer",        NEED_NO, DOES_READS },
+    { "37_femtocell",        "--s1-attach",           NEED_NO, DOES_SENDS },
+    { "37_femtocell",        "--s1-tap",              NEED_NO, DOES_READS },
+    { "37_femtocell",        "--s1ap",                NEED_NO, DOES_READS },
+    { "37_femtocell",        "--s1ap-nas",            NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--s1ap-paging",         NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--s1setup",             NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--selftest",            NEED_NO, DOES_READS },
+    { "37_femtocell",        "--sib1",                NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--sib9",                NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "37_femtocell",        "--tr069-audit",         NEED_NO, DOES_READS },
+    { "37_femtocell",        "--ue-register",         NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--version",             NEED_NO, DOES_READS },
+    { "37_femtocell",        "--yes",                 NEED_NO, DOES_READS },
+    { "38_ussd",             "--__index_probe__",     NEED_NO, DOES_READS },
+    { "38_ussd",             "--build",               NEED_NO, DOES_READS },
+    { "38_ussd",             "--detect",              NEED_NO, DOES_READS },
+    { "38_ussd",             "--help",                NEED_NO, DOES_READS },
+    { "38_ussd",             "--info",                NEED_NO, DOES_READS },
+    { "38_ussd",             "--menu",                NEED_NO, DOES_READS },
+    { "38_ussd",             "--mmi",                 NEED_NO, DOES_READS },
+    { "38_ussd",             "--pack",                NEED_NO, DOES_READS },
+    { "38_ussd",             "--plan",                NEED_NO, DOES_READS },
+    { "38_ussd",             "--quiet",               NEED_NO, DOES_READS },
+    { "38_ussd",             "--selftest",            NEED_NO, DOES_READS },
+    { "38_ussd",             "--ss-codes",            NEED_NO, DOES_READS },
+    { "38_ussd",             "--status-tsv",          NEED_NO, DOES_READS },
+    { "38_ussd",             "--unpack",              NEED_NO, DOES_READS },
+    { "38_ussd",             "--version",             NEED_NO, DOES_READS },
+    { "38_ussd",             "--yes",                 NEED_NO, DOES_READS },
+    { "39_ta_geoloc",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "39_ta_geoloc",        "--cells",               NEED_CAP, DOES_READS },
+    { "39_ta_geoloc",        "--help",                NEED_NO, DOES_READS },
+    { "39_ta_geoloc",        "--info",                NEED_NO, DOES_READS },
+    { "39_ta_geoloc",        "--menu",                NEED_NO, DOES_READS },
+    { "39_ta_geoloc",        "--plan",                NEED_CAP, DOES_READS },
+    { "39_ta_geoloc",        "--quiet",               NEED_NO, DOES_READS },
+    { "39_ta_geoloc",        "--selftest",            NEED_NO, DOES_READS },
+    { "39_ta_geoloc",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "39_ta_geoloc",        "--ta",                  NEED_CAP, DOES_READS },
+    { "39_ta_geoloc",        "--trilaterate",         NEED_CAP, DOES_READS },
+    { "39_ta_geoloc",        "--version",             NEED_NO, DOES_READS },
+    { "39_ta_geoloc",        "--yes",                 NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--h2-build",            NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--h2-parse",            NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--h2-types",            NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--help",                NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--hpack",               NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--info",                NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--jwt",                 NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--jwt-audit",           NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--menu",                NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--nf-paths",            NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--nrf",                 NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--plan",                NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--quiet",               NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--rapid-reset",         NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--scope",               NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--selftest",            NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--settings",            NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--token-pivot",         NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--version",             NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--yes",                 NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--__index_probe__",     NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--counter-check",       NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--dcs",                 NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--dst",                 NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--dst-npi",             NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--dst-ton",             NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--help",                NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--info",                NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--interface-version",   NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--menu",                NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--msg",                 NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--packet",              NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--packet-sms",          NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--parse-packet",        NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--parse-packet-sms",    NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--parse-resp-sms",      NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--password",            NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--plan",                NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--plan-tp",             NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--quiet",               NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--rd",                  NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--sat-push",            NEED_SIM, DOES_MODIFIES },
+    { "41_ota_sms",          "--selftest",            NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--seq",                 NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--service-type",        NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--smpp-build",          NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--smpp-parse",          NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--smpp-pdu",            NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--smpp-response",       NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--smsc-wrap",           NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--spi",                 NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--spi-build",           NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--src",                 NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--src-npi",             NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--src-ton",             NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--status",              NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--status-tsv",          NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--system-id",           NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--system-type",         NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-addr",             NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-addr-build",       NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-dcs",              NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-dcs-build",        NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-fcs",              NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-kat",              NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-pid",              NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-scts",             NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-scts-build",       NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-st",               NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-ud-build",         NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tp-ud-read",          NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tpdu-deliver",        NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tpdu-parse",          NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--tpdu-submit",         NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--type0",               NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--type0-build",         NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--version",             NEED_NO, DOES_READS },
+    { "41_ota_sms",          "--wib-push",            NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--yes",                 NEED_NO, DOES_READS },
+    { "42_li_probe",         "--__index_probe__",     NEED_NO, DOES_READS },
+    { "42_li_probe",         "--action",              NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--activate",            NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--architecture",        NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--case",                NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--help",                NEED_NO, DOES_READS },
+    { "42_li_probe",         "--iface",               NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--info",                NEED_NO, DOES_READS },
+    { "42_li_probe",         "--intercept",           NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--interfaces",          NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--menu",                NEED_NO, DOES_READS },
+    { "42_li_probe",         "--out",                 NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--plan",                NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--provision-target",    NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--quiet",               NEED_NO, DOES_READS },
+    { "42_li_probe",         "--report",              NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--score",               NEED_CAP, DOES_READS },
+    { "42_li_probe",         "--selftest",            NEED_NO, DOES_READS },
+    { "42_li_probe",         "--status-tsv",          NEED_NO, DOES_READS },
+    { "42_li_probe",         "--version",             NEED_NO, DOES_READS },
+    { "42_li_probe",         "--yes",                 NEED_NO, DOES_READS },
+    { "43_ran_share",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "43_ran_share",        "--eplmn",               NEED_NO, DOES_READS },
+    { "43_ran_share",        "--help",                NEED_NO, DOES_READS },
+    { "43_ran_share",        "--info",                NEED_NO, DOES_READS },
+    { "43_ran_share",        "--leak-check",          NEED_NO, DOES_READS },
+    { "43_ran_share",        "--menu",                NEED_NO, DOES_READS },
+    { "43_ran_share",        "--mode",                NEED_NO, DOES_READS },
+    { "43_ran_share",        "--plan",                NEED_NO, DOES_READS },
+    { "43_ran_share",        "--plmn-decode",         NEED_NO, DOES_READS },
+    { "43_ran_share",        "--plmn-encode",         NEED_NO, DOES_READS },
+    { "43_ran_share",        "--quiet",               NEED_NO, DOES_READS },
+    { "43_ran_share",        "--selftest",            NEED_NO, DOES_READS },
+    { "43_ran_share",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "43_ran_share",        "--version",             NEED_NO, DOES_READS },
+    { "43_ran_share",        "--yes",                 NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--__index_probe__",     NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--authz-matrix",        NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--base",                NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--diff",                NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--enumerate",           NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--enumerate-subscribers", NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--help",                NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--info",                NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--jwt-audit",           NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--menu",                NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--openapi",             NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--out",                 NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--plan",                NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--quiet",               NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--report",              NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--selftest",            NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--status-tsv",          NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--stuffing",            NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--token-bucket",        NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--version",             NEED_NO, DOES_READS },
+    { "44_carrier_api",      "--yes",                 NEED_NO, DOES_READS },
+    { "45_iot",              "--__index_probe__",     NEED_NO, DOES_READS },
+    { "45_iot",              "--decode-mib",          NEED_RADIO, DOES_READS },
+    { "45_iot",              "--decode-sib1",         NEED_RADIO, DOES_READS },
+    { "45_iot",              "--help",                NEED_NO, DOES_READS },
+    { "45_iot",              "--info",                NEED_NO, DOES_READS },
+    { "45_iot",              "--menu",                NEED_NO, DOES_READS },
+    { "45_iot",              "--nprach",              NEED_RADIO, DOES_READS },
+    { "45_iot",              "--npss-nss",            NEED_RADIO, DOES_READS },
+    { "45_iot",              "--plan",                NEED_NO, DOES_READS },
+    { "45_iot",              "--quiet",               NEED_NO, DOES_READS },
+    { "45_iot",              "--selftest",            NEED_NO, DOES_READS },
+    { "45_iot",              "--status-tsv",          NEED_NO, DOES_READS },
+    { "45_iot",              "--to-mhz",              NEED_RADIO, DOES_READS },
+    { "45_iot",              "--version",             NEED_NO, DOES_READS },
+    { "45_iot",              "--yes",                 NEED_NO, DOES_READS },
+    { "46_lpp",              "--__index_probe__",     NEED_NO, DOES_READS },
+    { "46_lpp",              "--build-header",        NEED_CAP, DOES_BUILDS },
+    { "46_lpp",              "--decode-header",       NEED_CAP, DOES_READS },
+    { "46_lpp",              "--detect-forgery",      NEED_CAP, DOES_READS },
+    { "46_lpp",              "--forge-position",      NEED_CAP, DOES_BUILDS },
+    { "46_lpp",              "--help",                NEED_NO, DOES_READS },
+    { "46_lpp",              "--info",                NEED_NO, DOES_READS },
+    { "46_lpp",              "--list-pids",           NEED_CAP, DOES_READS },
+    { "46_lpp",              "--menu",                NEED_NO, DOES_READS },
+    { "46_lpp",              "--otdoa-assist",        NEED_CAP, DOES_READS },
+    { "46_lpp",              "--otdoa-request",       NEED_CAP, DOES_READS },
+    { "46_lpp",              "--parse-position",      NEED_CAP, DOES_READS },
+    { "46_lpp",              "--prs-plan",            NEED_CAP, DOES_READS },
+    { "46_lpp",              "--quiet",               NEED_NO, DOES_READS },
+    { "46_lpp",              "--selftest",            NEED_NO, DOES_READS },
+    { "46_lpp",              "--status-tsv",          NEED_NO, DOES_READS },
+    { "46_lpp",              "--supl-build",          NEED_CAP, DOES_READS },
+    { "46_lpp",              "--supl-parse",          NEED_CAP, DOES_READS },
+    { "46_lpp",              "--supl-pos",            NEED_CAP, DOES_READS },
+    { "46_lpp",              "--supl-session",        NEED_CAP, DOES_READS },
+    { "46_lpp",              "--utdoa-config",        NEED_CAP, DOES_READS },
+    { "46_lpp",              "--version",             NEED_NO, DOES_READS },
+    { "46_lpp",              "--yes",                 NEED_NO, DOES_READS },
+    { "47_wifioff",          "--__index_probe__",     NEED_NO, DOES_READS },
+    { "47_wifioff",          "--auth-flow",           NEED_NO, DOES_READS },
+    { "47_wifioff",          "--cert-thumb",          NEED_NO, DOES_READS },
+    { "47_wifioff",          "--epdg-fqdn",           NEED_NO, DOES_READS },
+    { "47_wifioff",          "--help",                NEED_NO, DOES_READS },
+    { "47_wifioff",          "--info",                NEED_NO, DOES_READS },
+    { "47_wifioff",          "--lwa-config",          NEED_NO, DOES_READS },
+    { "47_wifioff",          "--menu",                NEED_NO, DOES_READS },
+    { "47_wifioff",          "--quiet",               NEED_NO, DOES_READS },
+    { "47_wifioff",          "--selftest",            NEED_NO, DOES_READS },
+    { "47_wifioff",          "--status-tsv",          NEED_NO, DOES_READS },
+    { "47_wifioff",          "--validate-cert",       NEED_NO, DOES_READS },
+    { "47_wifioff",          "--version",             NEED_NO, DOES_READS },
+    { "47_wifioff",          "--yes",                 NEED_NO, DOES_READS },
+    { "48_oran",             "--__index_probe__",     NEED_NO, DOES_READS },
+    { "48_oran",             "--a1-put",              NEED_NO, DOES_READS },
+    { "48_oran",             "--assess",              NEED_NO, DOES_READS },
+    { "48_oran",             "--e2-control",          NEED_NO, DOES_READS },
+    { "48_oran",             "--e2sm",                NEED_NO, DOES_READS },
+    { "48_oran",             "--help",                NEED_NO, DOES_READS },
+    { "48_oran",             "--info",                NEED_NO, DOES_READS },
+    { "48_oran",             "--interfaces",          NEED_NO, DOES_READS },
+    { "48_oran",             "--menu",                NEED_NO, DOES_READS },
+    { "48_oran",             "--plan",                NEED_NO, DOES_READS },
+    { "48_oran",             "--qos-policy",          NEED_NO, DOES_READS },
+    { "48_oran",             "--qos-policy-check",    NEED_NO, DOES_READS },
+    { "48_oran",             "--quiet",               NEED_NO, DOES_READS },
+    { "48_oran",             "--selftest",            NEED_NO, DOES_READS },
+    { "48_oran",             "--status-tsv",          NEED_NO, DOES_READS },
+    { "48_oran",             "--version",             NEED_NO, DOES_READS },
+    { "48_oran",             "--xapp-attack",         NEED_NO, DOES_READS },
+    { "48_oran",             "--xapp-authority",      NEED_NO, DOES_READS },
+    { "48_oran",             "--yes",                 NEED_NO, DOES_READS },
+    { "49_ntn",              "--__index_probe__",     NEED_NO, DOES_READS },
+    { "49_ntn",              "--doppler",             NEED_RADIO, DOES_READS },
+    { "49_ntn",              "--feeder",              NEED_RADIO, DOES_READS },
+    { "49_ntn",              "--help",                NEED_NO, DOES_READS },
+    { "49_ntn",              "--info",                NEED_NO, DOES_READS },
+    { "49_ntn",              "--koffset",             NEED_RADIO, DOES_READS },
+    { "49_ntn",              "--menu",                NEED_NO, DOES_READS },
+    { "49_ntn",              "--plan",                NEED_NO, DOES_READS },
+    { "49_ntn",              "--quiet",               NEED_NO, DOES_READS },
+    { "49_ntn",              "--range",               NEED_RADIO, DOES_READS },
+    { "49_ntn",              "--selftest",            NEED_NO, DOES_READS },
+    { "49_ntn",              "--sib19",               NEED_RADIO, DOES_READS },
+    { "49_ntn",              "--status-tsv",          NEED_NO, DOES_READS },
+    { "49_ntn",              "--ta",                  NEED_RADIO, DOES_READS },
+    { "49_ntn",              "--version",             NEED_NO, DOES_READS },
+    { "49_ntn",              "--yes",                 NEED_NO, DOES_READS },
+    { "50_gprs",             "--__index_probe__",     NEED_NO, DOES_READS },
+    { "50_gprs",             "--apn-decode",          NEED_RADIO, DOES_READS },
+    { "50_gprs",             "--apn-encode",          NEED_RADIO, DOES_READS },
+    { "50_gprs",             "--apn-ie",              NEED_RADIO, DOES_READS },
+    { "50_gprs",             "--gea",                 NEED_RADIO, DOES_READS },
+    { "50_gprs",             "--gea-crypt",           NEED_RADIO, DOES_READS },
+    { "50_gprs",             "--gea-downgrade",       NEED_RADIO, DOES_READS },
+    { "50_gprs",             "--gea-table",           NEED_RADIO, DOES_READS },
+    { "50_gprs",             "--help",                NEED_NO, DOES_READS },
+    { "50_gprs",             "--info",                NEED_NO, DOES_READS },
+    { "50_gprs",             "--menu",                NEED_NO, DOES_READS },
+    { "50_gprs",             "--pdp-ie",              NEED_RADIO, DOES_READS },
+    { "50_gprs",             "--plan",                NEED_NO, DOES_READS },
+    { "50_gprs",             "--quiet",               NEED_NO, DOES_READS },
+    { "50_gprs",             "--selftest",            NEED_NO, DOES_READS },
+    { "50_gprs",             "--status-tsv",          NEED_NO, DOES_READS },
+    { "50_gprs",             "--version",             NEED_NO, DOES_READS },
+    { "50_gprs",             "--yes",                 NEED_NO, DOES_READS },
+    { "51_sidelink",         "--__index_probe__",     NEED_NO, DOES_READS },
+    { "51_sidelink",         "--freq-bits",           NEED_RADIO, DOES_READS },
+    { "51_sidelink",         "--help",                NEED_NO, DOES_READS },
+    { "51_sidelink",         "--info",                NEED_NO, DOES_READS },
+    { "51_sidelink",         "--its",                 NEED_RADIO, DOES_READS },
+    { "51_sidelink",         "--l2id",                NEED_RADIO, DOES_READS },
+    { "51_sidelink",         "--menu",                NEED_NO, DOES_READS },
+    { "51_sidelink",         "--pfi",                 NEED_RADIO, DOES_READS },
+    { "51_sidelink",         "--plan",                NEED_NO, DOES_READS },
+    { "51_sidelink",         "--quiet",               NEED_NO, DOES_READS },
+    { "51_sidelink",         "--relay-check",         NEED_RADIO, DOES_READS },
+    { "51_sidelink",         "--sci1a",               NEED_RADIO, DOES_READS },
+    { "51_sidelink",         "--selftest",            NEED_NO, DOES_READS },
+    { "51_sidelink",         "--status-tsv",          NEED_NO, DOES_READS },
+    { "51_sidelink",         "--subchannels",         NEED_RADIO, DOES_READS },
+    { "51_sidelink",         "--version",             NEED_NO, DOES_READS },
+    { "51_sidelink",         "--yes",                 NEED_NO, DOES_READS },
+    { "52_stk",              "--__index_probe__",     NEED_NO, DOES_READS },
+    { "52_stk",              "--audit",               NEED_SIM, DOES_READS },
+    { "52_stk",              "--build",               NEED_NO, DOES_READS },
+    { "52_stk",              "--cmd",                 NEED_SIM, DOES_READS },
+    { "52_stk",              "--device",              NEED_SIM, DOES_READS },
+    { "52_stk",              "--help",                NEED_NO, DOES_READS },
+    { "52_stk",              "--info",                NEED_NO, DOES_READS },
+    { "52_stk",              "--menu",                NEED_NO, DOES_READS },
+    { "52_stk",              "--parse",               NEED_NO, DOES_READS },
+    { "52_stk",              "--plan",                NEED_NO, DOES_READS },
+    { "52_stk",              "--quiet",               NEED_NO, DOES_READS },
+    { "52_stk",              "--result",              NEED_SIM, DOES_READS },
+    { "52_stk",              "--sat-audit",           NEED_SIM, DOES_READS },
+    { "52_stk",              "--sat-cmds",            NEED_SIM, DOES_READS },
+    { "52_stk",              "--selftest",            NEED_NO, DOES_READS },
+    { "52_stk",              "--simjacker-detect",    NEED_SIM, DOES_READS },
+    { "52_stk",              "--status-tsv",          NEED_NO, DOES_READS },
+    { "52_stk",              "--version",             NEED_NO, DOES_READS },
+    { "52_stk",              "--yes",                 NEED_NO, DOES_READS },
+    { "53_non3gpp",          "--__index_probe__",     NEED_NO, DOES_READS },
+    { "53_non3gpp",          "--classify",            NEED_RADIO, DOES_READS },
+    { "53_non3gpp",          "--detect-note",         NEED_RADIO, DOES_READS },
+    { "53_non3gpp",          "--dmr",                 NEED_RADIO, DOES_READS },
+    { "53_non3gpp",          "--frame-math",          NEED_RADIO, DOES_READS },
+    { "53_non3gpp",          "--gsmr",                NEED_RADIO, DOES_READS },
+    { "53_non3gpp",          "--help",                NEED_NO, DOES_READS },
+    { "53_non3gpp",          "--info",                NEED_NO, DOES_READS },
+    { "53_non3gpp",          "--menu",                NEED_NO, DOES_READS },
+    { "53_non3gpp",          "--plan",                NEED_NO, DOES_READS },
+    { "53_non3gpp",          "--quiet",               NEED_NO, DOES_READS },
+    { "53_non3gpp",          "--selftest",            NEED_NO, DOES_READS },
+    { "53_non3gpp",          "--status-tsv",          NEED_NO, DOES_READS },
+    { "53_non3gpp",          "--tdma",                NEED_RADIO, DOES_READS },
+    { "53_non3gpp",          "--tea",                 NEED_RADIO, DOES_READS },
+    { "53_non3gpp",          "--tetra",               NEED_RADIO, DOES_READS },
+    { "53_non3gpp",          "--version",             NEED_NO, DOES_READS },
+    { "53_non3gpp",          "--yes",                 NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--__index_probe__",     NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--cp-check",            NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--cve",                 NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--emulate",             NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--forge-identity",      NEED_NO, DOES_BUILDS },
+    { "54_baseband_exploit", "--forge-reg-accept",    NEED_NO, DOES_BUILDS },
+    { "54_baseband_exploit", "--forge-reg-reject",    NEED_NO, DOES_BUILDS },
+    { "54_baseband_exploit", "--help",                NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--info",                NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--inject",              NEED_NO, DOES_TRANSMITS },
+    { "54_baseband_exploit", "--l2-build",            NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--l2-case",             NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--l2-corpus",           NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--list-cves",           NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--menu",                NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--plan",                NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--quiet",               NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--selftest",            NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--send",                NEED_NO, DOES_SENDS },
+    { "54_baseband_exploit", "--states",              NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--status-tsv",          NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--version",             NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--yes",                 NEED_NO, DOES_READS },
+    { "55_nr_inject",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "55_nr_inject",        "--auth-capture",        NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--auth-replay",         NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--dci",                 NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--dci-encode",          NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--dci-parse",           NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--descramble",          NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--exploit",             NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--exploits",            NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--frame",               NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--gold",                NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--help",                NEED_NO, DOES_READS },
+    { "55_nr_inject",        "--info",                NEED_NO, DOES_READS },
+    { "55_nr_inject",        "--inject",              NEED_RADIO, DOES_TRANSMITS },
+    { "55_nr_inject",        "--lcid",                NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--lcid-table",          NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--mac-pdu",             NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--mac-sub",             NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--menu",                NEED_NO, DOES_READS },
+    { "55_nr_inject",        "--plan",                NEED_NO, DOES_READS },
+    { "55_nr_inject",        "--quiet",               NEED_NO, DOES_READS },
+    { "55_nr_inject",        "--ra-rnti-lte",         NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--ra-rnti-nr",          NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--rar",                 NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--rar-backoff",         NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--rar-backoff-idx",     NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--selftest",            NEED_NO, DOES_READS },
+    { "55_nr_inject",        "--status-tsv",          NEED_NO, DOES_READS },
+    { "55_nr_inject",        "--tbs",                 NEED_RADIO, DOES_READS },
+    { "55_nr_inject",        "--version",             NEED_NO, DOES_READS },
+    { "55_nr_inject",        "--yes",                 NEED_RADIO, DOES_READS },
+    { "56_baseband_diag",    "--__index_probe__",     NEED_NO, DOES_READS },
+    { "56_baseband_diag",    "--at",                  NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--at-parse",            NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--audit",               NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--bcd",                 NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--cmd-name",            NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--config",              NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--crc",                 NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--demux",               NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--efs-hello",           NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--efs-open",            NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--efs-parse",           NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--efs-read",            NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--efs-stat",            NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--efs-walk",            NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--efs-write",           NEED_CAP, DOES_MODIFIES },
+    { "56_baseband_diag",    "--escape",              NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--frame",               NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--guard-check",         NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--help",                NEED_NO, DOES_READS },
+    { "56_baseband_diag",    "--info",                NEED_NO, DOES_READS },
+    { "56_baseband_diag",    "--kat",                 NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--log-classify",        NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--luhn",                NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--menu",                NEED_NO, DOES_READS },
+    { "56_baseband_diag",    "--nv-build",            NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--nv-parse",            NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--nv-read",             NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--nv-scan",             NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--nv-write",            NEED_CAP, DOES_MODIFIES },
+    { "56_baseband_diag",    "--plan",                NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--ports",               NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--quiet",               NEED_NO, DOES_READS },
+    { "56_baseband_diag",    "--read",                NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--selftest",            NEED_NO, DOES_READS },
+    { "56_baseband_diag",    "--state",               NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--state-build",         NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--state-info",          NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--status",              NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--status-tsv",          NEED_NO, DOES_READS },
+    { "56_baseband_diag",    "--unescape",            NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--unframe",             NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--verno",               NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--verno-parse",         NEED_CAP, DOES_READS },
+    { "56_baseband_diag",    "--version",             NEED_NO, DOES_READS },
+    { "56_baseband_diag",    "--write-hex",           NEED_CAP, DOES_MODIFIES },
+    { "56_baseband_diag",    "--yes",                 NEED_NO, DOES_READS },
+};
+
+static const char *
+chip_need_label(ChipNeed need)
+{
+    switch (need) {
+    case NEED_RADIO:   return "NEEDS A RADIO";
+    case NEED_CAP: return "NEEDS A CAPTURE";
+    case NEED_SIM:     return "NEEDS A SIM";
+    case NEED_NO:
+    default:           return "NO RADIO NEEDED";
+    }
+}
+
+static const char *
+chip_does_label(ChipDoes does)
+{
+    switch (does) {
+    case DOES_BUILDS:     return "BUILDS";
+    case DOES_MODIFIES:   return "MODIFIES A CARD";
+    case DOES_SENDS:      return "SENDS PACKETS";
+    case DOES_TRANSMITS:  return "TRANSMITS";
+    case DOES_READS:
+    default:              return "READS";
+    }
+}
+
+/* CSS class per chip, so a transmitter and a reader do not wear the same
+   colour. The class names say what they are, which is what a theme needs. */
+static const char *
+chip_need_class(ChipNeed need)
+{
+    switch (need) {
+    case NEED_RADIO:   return "chip-need-radio";
+    case NEED_CAP: return "chip-need-capture";
+    case NEED_SIM:     return "chip-need-sim";
+    case NEED_NO:
+    default:           return "chip-need-none";
+    }
+}
+
+static const char *
+chip_does_class(ChipDoes does)
+{
+    switch (does) {
+    case DOES_BUILDS:    return "chip-does-builds";
+    case DOES_MODIFIES:  return "chip-does-modifies";
+    case DOES_SENDS:     return "chip-does-sends";
+    case DOES_TRANSMITS: return "chip-does-transmits";
+    case DOES_READS:
+    default:             return "chip-does-reads";
+    }
+}
+
+/* The row for one module+verb. A NULL verb asks for the module's default. */
+static const ChipRow *
+chip_row_for(const char *module_id, const char *verb)
+{
+    const char *want = verb;
+
+    if (module_id == NULL || verb == NULL) return NULL;
+    for (guint i = 0; i < G_N_ELEMENTS(chip_rows); i++)
+        if (g_strcmp0(chip_rows[i].module, module_id) == 0 &&
+            g_strcmp0(chip_rows[i].verb, want) == 0)
+            return &chip_rows[i];
+    return NULL;
+}
+
+/* Two cards can hold verbs of several kinds; the chip reports the strongest,
+   because "this card can key a transmitter" is the fact a reader must not miss,
+   and the weaker action is still visible as the button they pressed. */
+static int
+chip_need_weight(ChipNeed need) { return (int) need; }
+static int
+chip_does_weight(ChipDoes does) { return (int) does; }
+
+typedef struct {
+    gboolean  any;
+    ChipNeed  need;
+    ChipDoes  does;
+} ChipFacts;
+
+static void
+chip_facts_merge(ChipFacts *facts, const ChipRow *row)
+{
+    if (row == NULL) return;
+    if (!facts->any) {
+        facts->any = TRUE;
+        facts->need = row->need;
+        facts->does = row->does;
+        return;
+    }
+    if (chip_need_weight(row->need) > chip_need_weight(facts->need))
+        facts->need = row->need;
+    if (chip_does_weight(row->does) > chip_does_weight(facts->does))
+        facts->does = row->does;
+}
+
+static GtkWidget *
+chip_label(const char *text, const char *modifier)
+{
+    GtkWidget *label = gtk_label_new(text);
+
+    gtk_widget_add_css_class(label, "chip");
+    if (modifier != NULL) gtk_widget_add_css_class(label, modifier);
+    gtk_label_set_xalign(GTK_LABEL(label), 0.5f);
+    gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+    return label;
+}
+
+/* Recursively gather the chips a subtree asks for. Every control that runs a
+   verb carries the verb and its module as object data, which is what makes this
+   a property of the page rather than a sentence repeated at every call site. */
+static void
+chip_facts_scan(GtkWidget *widget, const char *module_id, ChipFacts *facts)
+{
+    for (GtkWidget *child = gtk_widget_get_first_child(widget);
+         child != NULL; child = gtk_widget_get_next_sibling(child)) {
+        const char *verb = g_object_get_data(G_OBJECT(child), "verb");
+        const char *mod = g_object_get_data(G_OBJECT(child), "module-id");
+
+        if (verb != NULL)
+            chip_facts_merge(facts,
+                             chip_row_for(mod != NULL ? mod : module_id, verb));
+        chip_facts_scan(child, module_id, facts);
+    }
+}
+
+/* Does this card already offer a worked example of the verb? */
+static gboolean
+advance_example_present(GtkWidget *widget, const char *verb)
+{
+    for (GtkWidget *child = gtk_widget_get_first_child(widget);
+         child != NULL; child = gtk_widget_get_next_sibling(child)) {
+        const char *wverb = g_object_get_data(G_OBJECT(child), "advance-verb");
+        gboolean example =
+            GPOINTER_TO_INT(g_object_get_data(G_OBJECT(child), "advance-example"));
+
+        if (example && wverb != NULL && g_strcmp0(wverb, verb) == 0)
+            return TRUE;
+        if (advance_example_present(child, verb)) return TRUE;
+    }
+    return FALSE;
+}
+
+typedef struct {
+    AppState  *state;
+    const char *module_id;
+} CardPass;
+
+/* Fold one card's advanced controls behind a single More section.
+ *
+ * Beginner mode is not a smaller interface: every control is still there, one
+ * click away. What it changes is what a reader meets first. A card that offers
+ * a worked example of an action and also three blank fields for a variation
+ * of the same action reads, to someone who does not know the vocabulary, as four
+ * different jobs. So the blank ones fold, and the example stays.
+ *
+ * Two things fold. A control whose spec starts '~' - a verb no default fits, so
+ * the field is the job - and an example beyond the first of its verb. Nothing
+ * folds when folding would leave the card with no control at all: a card whose
+ * only path is a typed field keeps that field, because an empty card is not a
+ * simpler one.
+ */
+static void
+card_fold(AppState *state, GtkWidget *card, GtkWidget *body, const char *module_id)
+{
+    GPtrArray *folded = g_ptr_array_new();
+    GtkWidget *expander = NULL;
+    GtkWidget *revealed = NULL;
+    guint visible_control = 0;
+
+    (void) module_id;
+
+    for (GtkWidget *child = gtk_widget_get_first_child(body);
+         child != NULL; child = gtk_widget_get_next_sibling(child)) {
+        const char *verb = g_object_get_data(G_OBJECT(child), "advance-verb");
+        gboolean needs_arg =
+            GPOINTER_TO_INT(g_object_get_data(G_OBJECT(child), "advance-typed"));
+        gboolean example =
+            GPOINTER_TO_INT(g_object_get_data(G_OBJECT(child), "advance-example"));
+        gboolean fold = FALSE;
+
+        if (verb == NULL) continue;
+        if (needs_arg && advance_example_present(body, verb)) fold = TRUE;
+        if (needs_arg && !advance_example_present(body, verb) &&
+            g_object_get_data(G_OBJECT(child), "advance-spec-tilde") != NULL)
+            fold = TRUE;
+        if (example && g_object_get_data(G_OBJECT(child), "advance-used") != NULL)
+            fold = TRUE;
+        if (example)
+            g_object_set_data(G_OBJECT(child), "advance-used", GINT_TO_POINTER(1));
+        if (fold) g_ptr_array_add(folded, child);
+        else visible_control++;
+    }
+
+    /* Nothing that runs would remain: keep the card as it is. A reader who has
+       to type something is better served by the field than by an empty card
+       with a More fold and nothing outside it. Only widgets that carry a verb
+       count as controls; a result rectangle or a note is not one. */
+    if (folded->len == 0 || visible_control == 0) {
+        g_ptr_array_unref(folded);
+        return;
+    }
+
+    expander = gtk_expander_new("More");
+    gtk_widget_add_css_class(expander, "card-more");
+    revealed = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_expander_set_child(GTK_EXPANDER(expander), revealed);
+
+    for (guint i = 0; i < folded->len; i++) {
+        GtkWidget *item = g_ptr_array_index(folded, i);
+
+        g_object_ref(item);
+        gtk_box_remove(GTK_BOX(body), item);
+        gtk_box_append(GTK_BOX(revealed), item);
+        g_object_unref(item);
+    }
+    gtk_box_append(GTK_BOX(body), expander);
+    g_ptr_array_unref(folded);
+    (void) state;
+}
+
+/* The pass over a built page: every card gets its two chips, and in beginner
+   mode every card folds what it can. It runs once, after the page exists,
+   because a card's facts are a property of the whole card - and because a
+   builder is free to create its cards in any order, which is why this is not
+   carried in a global "current card" the way the result rectangle is. */
+static void
+verb_cards_walk(AppState *state, GtkWidget *widget, const char *own_module)
+{
+    for (GtkWidget *child = gtk_widget_get_first_child(widget);
+         child != NULL; child = gtk_widget_get_next_sibling(child)) {
+        GtkWidget *chips = g_object_get_data(G_OBJECT(child), "card-chips");
+        GtkWidget *body = g_object_get_data(G_OBJECT(child), "card-body");
+        const char *card_module = g_object_get_data(G_OBJECT(child),
+                                                    "card-module");
+        if (card_module == NULL) card_module = own_module;
+
+        if (chips != NULL &&
+            !GPOINTER_TO_INT(g_object_get_data(G_OBJECT(chips), "chips-filled"))) {
+            const char *module_id = card_module;
+            ChipFacts facts = { FALSE, NEED_NO, DOES_READS };
+
+            chip_facts_scan(child, module_id, &facts);
+            /* No default. A verb that is in neither chip table leaves the
+               caption without chips, and tools/check-glossary.sh fails on it
+               rather than letting a card wear a safe-sounding guess. */
+            if (facts.any) {
+                gtk_box_append(GTK_BOX(chips),
+                    chip_label(chip_need_label(facts.need),
+                               chip_need_class(facts.need)));
+                gtk_box_append(GTK_BOX(chips),
+                    chip_label(chip_does_label(facts.does),
+                               chip_does_class(facts.does)));
+            }
+            g_object_set_data(G_OBJECT(chips), "chips-filled",
+                              GINT_TO_POINTER(1));
+        }
+        if (body != NULL && state != NULL && state->beginner)
+            card_fold(state, child, body, card_module);
+        verb_cards_walk(state, child, own_module);
+    }
 }
 
 static char *
@@ -2432,7 +7190,7 @@ group_arg_row(AppState *state, const char *module_id, const char *spec,
 
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     entry = gtk_entry_new();
-    btn = gtk_button_new_with_label("Run");
+    btn = gtk_button_new_with_label("Run it");
 
     /* A form row reads as a sentence: what it is for, the field, the action.
        The caption is the job's own name and never the verb - a window in this
@@ -2466,6 +7224,13 @@ group_arg_row(AppState *state, const char *module_id, const char *spec,
 
     gtk_box_append(GTK_BOX(row), entry);
     gtk_box_append(GTK_BOX(row), btn);
+    /* A '~' verb is an advanced control: no default argument fits it, so the
+       field is the job. Marked here, folded by card_fold() if the card also
+       shows a worked example of the same action. */
+    g_object_set_data_full(G_OBJECT(row), "advance-verb", g_strdup(verb), g_free);
+    g_object_set_data(G_OBJECT(row), "advance-typed", GINT_TO_POINTER(TRUE));
+    g_object_set_data(G_OBJECT(row), "advance-spec-tilde",
+                      GINT_TO_POINTER(TRUE));
     gtk_box_append(GTK_BOX(body), row);
 }
 
@@ -2754,7 +7519,12 @@ static void
 table_cell_add(GtkWidget *grid, const char *text, int col, int row,
                gboolean header, gboolean grow)
 {
-    g_autofree char *clean = display_text(text != NULL ? text : "");
+    /* A heading is a field name, so it is drawn in words the reader knows when
+       the dictionary has an entry for it, and in the field's own name when it
+       does not. */
+    g_autofree char *clean = header
+        ? plain_key_text(text != NULL ? text : "")
+        : display_text(text != NULL ? text : "");
     GtkWidget *label = gtk_label_new(clean);
 
     /* A last column of prose should wrap; a column of identifiers must not. */
@@ -2805,7 +7575,7 @@ table_body(GtkWidget *list, GtkWidget *grid, GStrv fields, int cols)
             g_string_append(joined, fields[col] != NULL ? fields[col] : "");
         }
         {
-            GtkWidget *copy = gtk_button_new_with_label("Copy");
+            GtkWidget *copy = gtk_button_new_with_label("Copy it");
             gtk_widget_add_css_class(copy, "record-copy");
             gtk_widget_add_css_class(copy, "flat");
             gtk_widget_set_valign(copy, GTK_ALIGN_CENTER);
@@ -2882,7 +7652,11 @@ record_row_append(GtkWidget *list, const char *text, GStrv fields)
        and belongs in a chip beside the identity, where it reads at a glance. */
     if (fields[1] != NULL && !strchr(fields[1], ' ') && strlen(fields[1]) <= 18 &&
         !g_ascii_isdigit(fields[1][0])) {
-        g_autofree char *badge_txt = display_text(fields[1]);
+        /* The chip is a field's word, so a known classifier is shown in plain
+           words: "imsi" becomes "subscriber identity", not a verb-free puzzle. */
+        g_autofree char *badge_txt = plain_words_for_key(fields[1]) != NULL
+            ? plain_key_text(fields[1])
+            : display_text(fields[1]);
         GtkWidget *badge = gtk_label_new(badge_txt);
         gtk_widget_add_css_class(badge, "record-badge");
         gtk_label_set_xalign(GTK_LABEL(badge), 0.0f);
@@ -2898,7 +7672,7 @@ record_row_append(GtkWidget *list, const char *text, GStrv fields)
     }
 
     if (state != NULL) {
-        GtkWidget *copy = gtk_button_new_with_label("Copy");
+        GtkWidget *copy = gtk_button_new_with_label("Copy it");
         gtk_widget_add_css_class(copy, "record-copy");
         gtk_widget_add_css_class(copy, "flat");
         gtk_widget_set_valign(copy, GTK_ALIGN_START);
@@ -3072,7 +7846,10 @@ console_row_append(GtkWidget *list, const char *text)
     /* Two fields are the parts of one answer: a name and its value. */
     if (console_tsv_split(text, &tkey, &tval)) {
         g_autofree char *val_txt = display_text(tval);
-        GtkWidget *k = gtk_label_new(tkey);
+        /* The key is the module's word for the quantity; the row draws the
+           dictionary's words for it, or the key itself when no row exists. */
+        g_autofree char *key_txt = plain_key_text(tkey);
+        GtkWidget *k = gtk_label_new(key_txt);
         GtkWidget *v = gtk_label_new(val_txt);
 
         row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
@@ -3560,7 +8337,7 @@ result_rect_new(AppState *state, ResultRect **out)
     rr->rows = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     g_object_set_data(G_OBJECT(rr->rows), "state", state);
     rr->buf     = gtk_text_buffer_new(NULL);
-    rr->stop    = gtk_button_new_with_label("Stop");
+    rr->stop    = gtk_button_new_with_label("Stop it");
     rr->idle    = gtk_label_new(NULL);
     rr->summary = gtk_label_new(NULL);
 
@@ -3620,7 +8397,7 @@ build_output_card(GtkTextBuffer *buf)
     GtkWidget *card   = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkWidget *head   = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     GtkWidget *title  = gtk_label_new("OUTPUT");
-    GtkWidget *clear  = gtk_button_new_with_label("Clear");
+    GtkWidget *clear  = gtk_button_new_with_label("Clear what is stored");
     GtkWidget *scroll = gtk_scrolled_window_new();
     GtkWidget *view   = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
@@ -3989,7 +8766,7 @@ build_overview_view(AppState *state, const ModuleDefinition *module,
     /* 01 · CONTEXT — what this module is and what it can do. */
     {
         GtkWidget *body;
-        GtkWidget *card = verb_card("01 · CONTEXT", &body);
+        GtkWidget *card = verb_card("READ THE CONTEXT", &body);
         gtk_box_append(GTK_BOX(body), overview_row("Id", module->id));
         gtk_box_append(GTK_BOX(body), overview_row("Category", module->category));
         if (module->desc != NULL && *module->desc != '\0')
@@ -4018,7 +8795,7 @@ build_overview_view(AppState *state, const ModuleDefinition *module,
     /* 03 · EVIDENCE — where the output goes and how it is preserved. */
     {
         GtkWidget *body;
-        GtkWidget *card = verb_card("03 · EVIDENCE", &body);
+        GtkWidget *card = verb_card("READ THE EVIDENCE", &body);
         GtkWidget *note = gtk_label_new(
             "Every run is logged in the Events drawer and, when a case is "
             "open, appended to its timeline. Index captures under Casebook > "
@@ -4225,6 +9002,12 @@ create_module_page(AppState *state, const ModuleDefinition *module,
                            g_strdup(module->id), g_free);
     g_object_set_data_full(G_OBJECT(outer), "module-page",
                            mp, (GDestroyNotify) module_page_free);
+
+    /* Every card now says what it needs and what it does, and in beginner mode
+       the controls that wait on a typed argument fold behind one More. Done
+       once, on the finished page, because a card's facts belong to the card as
+       a whole rather than to the last control appended to it. */
+    verb_cards_walk(state, outer, module->id);
 
     /* The console a run writes to is the visible view's, so that is what this
        page advertises to notebook_page_switched(). It used to advertise a
@@ -4476,21 +9259,22 @@ drawer_nav_row_selected(GtkListBox *list, GtkListBoxRow *row, gpointer user_data
 static GtkWidget *
 build_drawer_nav(AppState *state)
 {
-    static const char *names[7] = {
+    static const char *names[8] = {
         "Dashboard", "Live Traffic", "Casebook", "Stats", "Notifications",
-        "Help", "Settings"
+        "Help", "Settings", "Workflows"
     };
-    static const char *icons[7] = {
+    static const char *icons[8] = {
         "view-grid-symbolic", "network-wireless-symbolic", "folder-symbolic",
         "office-chart-bar-symbolic", "notification-symbolic",
-        "help-browser-symbolic", "emblem-system-symbolic"
+        "help-browser-symbolic", "emblem-system-symbolic",
+        "view-list-symbolic"
     };
 
     GtkWidget *nav = gtk_list_box_new();
     gtk_widget_add_css_class(nav, "drawer-nav");
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(nav), GTK_SELECTION_SINGLE);
 
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 8; i++) {
         GtkWidget *rowbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 9);
         GtkWidget *icon = imsisting_icon_image(icons[i]);
         GtkWidget *label = gtk_label_new(names[i]);
@@ -4554,6 +9338,7 @@ static const struct {
     { "notifications", "Notifications", "notification-symbolic" },
     { "help",          "Help",          "help-browser-symbolic" },
     { "settings",      "Settings",      "emblem-system-symbolic" },
+    { "goals",         "Workflows",   "view-list-symbolic" },
 };
 
 #define SETTINGS_PLACE_PAGE 6
@@ -4920,8 +9705,8 @@ build_event_drawer(AppState *state)
     GtkWidget *label  = gtk_label_new("EVENTS");
     GtkWidget *errs   = gtk_check_button_new_with_label("Errors only");
     GtkWidget *asroll = gtk_check_button_new_with_label("Auto-scroll");
-    GtkWidget *copy   = gtk_button_new_with_label("Copy");
-    GtkWidget *clear  = gtk_button_new_with_label("Clear");
+    GtkWidget *copy   = gtk_button_new_with_label("Copy it");
+    GtkWidget *clear  = gtk_button_new_with_label("Clear what is stored");
 
     gtk_widget_add_css_class(bar, "event-toolbar");
     gtk_widget_add_css_class(label, "menu-heading");
@@ -6493,7 +11278,7 @@ casebook_file_view(const char *path)
     GtkWidget *bar    = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *where  = gtk_label_new(path);
     GtkWidget *scroll = gtk_scrolled_window_new();
-    GtkWidget *open   = gtk_button_new_with_label("Open with system");
+    GtkWidget *open   = gtk_button_new_with_label("Open with the system viewer");
     g_autofree char *base = g_path_get_basename(path);
     GStatBuf st;
 
@@ -6610,7 +11395,7 @@ loot_add_row(AppState *state, const LootEntry *e)
     GtkWidget *text  = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
     GtkWidget *name  = gtk_label_new(e->name);
     GtkWidget *meta  = gtk_label_new(NULL);
-    GtkWidget *open  = gtk_button_new_with_label("Open");
+    GtkWidget *open  = gtk_button_new_with_label("Open it");
     g_autofree char *sz = loot_fmt_size(e->size);
     g_autofree char *when = NULL;
     g_autofree char *sub = NULL;
@@ -6678,7 +11463,7 @@ loot_refresh(AppState *state)
         GtkWidget *row = gtk_list_box_row_new();
         GtkWidget *es  = empty_state("folder-symbolic",
             empty ? "No evidence yet" : "Nothing matches",
-            empty ? "run a module that collects something, then Refresh"
+            empty ? "run a module that collects something, then Refresh the list"
                   : "clear the search to see every file again");
         gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), es);
         gtk_list_box_row_set_selectable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -6735,7 +11520,7 @@ create_evidence_page(AppState *state)
     GtkWidget *title  = gtk_label_new("Evidence Browser");
     GtkWidget *sub    = gtk_label_new(NULL);
     GtkWidget *list   = gtk_list_box_new();
-    GtkWidget *refresh = gtk_button_new_with_label("Refresh");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh the list it");
     GtkWidget *lscroll = gtk_scrolled_window_new();
     g_autofree char *dir = g_build_filename(IMSISTING_ROOT, "loot", NULL);
 
@@ -7226,8 +12011,8 @@ casebook_list_filter_changed(GtkEditable *editable, gpointer user_data)
 
 /* The Casebook home: the facts an investigator wants before touching a tab —
    the case, its scope and authorization, the current target, how much evidence
-   and how many alerts it holds, and the latest alert line. Refreshed by
-   casebook_home_refresh(), which runs with Refresh All. */
+   and how many alerts it holds, and the latest alert line. Refresh the listed by
+   casebook_home_refresh(), which runs with Refresh the list All. */
 static GtkWidget *
 build_casebook_home(AppState *state)
 {
@@ -7373,7 +12158,7 @@ casebook_refresh_tab(AppState *state, guint tab)
     case CASEBOOK_TAB_CAPTURES:
         casebook_list_fill(state->casebook_captures_list, "--captures-tsv",
             cb_row_capture, "No captures indexed.",
-            "Index Files, then Refresh.");
+            "Index Files, then Refresh the list.");
         break;
     case CASEBOOK_TAB_TIMELINE:
         casebook_list_fill(state->casebook_timeline_list, "--timeline-tsv",
@@ -7401,7 +12186,7 @@ casebook_refresh_tab(AppState *state, guint tab)
     state->casebook_filled |= (1u << tab);
 }
 
-/* Refresh All, and the Refresh button on any tab, still mean every tab. */
+/* Refresh the list All, and the Refresh the list button on any tab, still mean every tab. */
 static void
 casebook_refresh(AppState *state)
 {
@@ -7699,8 +12484,8 @@ create_casebook_overview(AppState *state)
     GtkWidget *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     GtkWidget *create_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     GtkWidget *select_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget *create = gtk_button_new_with_label("Create Case");
-    GtkWidget *select = gtk_button_new_with_label("Select Case");
+    GtkWidget *create = gtk_button_new_with_label("Start a case");
+    GtkWidget *select = gtk_button_new_with_label("Choose a case");
     GtkWidget *hint = gtk_label_new(
         "Targets are set from the Target panel in the header, so the target "
         "stays reachable from every page - and is recorded into the case.");
@@ -7766,7 +12551,7 @@ create_casebook_listing(AppState *state, GtkWidget **list_out,
                         const char *command3)
 {
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget *refresh = gtk_button_new_with_label("Refresh");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh the list it");
     GtkWidget *scroll = gtk_scrolled_window_new();
     GtkWidget *list = gtk_list_box_new();
     GtkWidget *search = gtk_search_entry_new();
@@ -7799,9 +12584,9 @@ create_casebook_nodes(AppState *state)
 {
     GtkWidget *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget *add = gtk_button_new_with_label("Add Sensor");
-    GtkWidget *probe = gtk_button_new_with_label("Probe");
-    GtkWidget *refresh = gtk_button_new_with_label("Refresh");
+    GtkWidget *add = gtk_button_new_with_label("Add a receiver");
+    GtkWidget *probe = gtk_button_new_with_label("Probe the device");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh the list it");
     state->node_name_entry = gtk_entry_new();
     state->node_host_entry = gtk_entry_new();
     state->node_transport_entry = gtk_entry_new();
@@ -7850,7 +12635,7 @@ create_casebook_page(AppState *state)
     GtkWidget *title = gtk_label_new("Casebook");
     GtkWidget *sub = gtk_label_new(
         "Cases, targets, evidence, captures, alerts, sensors and reports");
-    GtkWidget *refresh = gtk_button_new_with_label("Refresh All");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh the list everything");
     GtkWidget *tabs = gtk_notebook_new();
 
     gtk_widget_add_css_class(outer, "casebook");
@@ -8071,7 +12856,7 @@ create_stats_page(AppState *state)
     /* ---- by category ---- */
     {
         GtkWidget *body;
-        GtkWidget *card = verb_card("BY CATEGORY", &body);
+        GtkWidget *card = verb_card("SORT BY CATEGORY", &body);
         g_autoptr(GPtrArray) cats = category_order();
         GHashTableIter it;
         gpointer k, v;
@@ -8091,7 +12876,7 @@ create_stats_page(AppState *state)
     /* ---- where things live ---- */
     {
         GtkWidget *body;
-        GtkWidget *card = verb_card("LOCATIONS", &body);
+        GtkWidget *card = verb_card("READ THE LOCATIONS", &body);
         const char *rows[][2] = {
             { "Project root", IMSISTING_ROOT },
             { "Modules",      IMSISTING_ROOT "/modules" },
@@ -8195,7 +12980,7 @@ create_notifications_page(AppState *state)
     GtkWidget *title = gtk_label_new("Notifications");
     GtkWidget *sub = gtk_label_new(
         "Everything the toolkit has announced, newest first.");
-    GtkWidget *clear = gtk_button_new_with_label("Clear");
+    GtkWidget *clear = gtk_button_new_with_label("Clear what is stored");
     GtkWidget *list = gtk_list_box_new();
 
     gtk_widget_add_css_class(title, "page-title");
@@ -8506,8 +13291,16 @@ settings_choice(const char *label, const char *key, const char *const *values,
                 const char *note, void (*apply)(AppState *, guint),
                 AppState *state)
 {
-    GtkWidget *dd = gtk_drop_down_new_from_strings(labels);
+    /* gtk_drop_down_new_from_strings() reads until a NULL, and the label
+       tables callers pass are sized exactly, so without this copy the popup
+       lists whatever static strings follow the array in the binary. */
+    const char **items = g_new0(const char *, n + 1);
+    GtkWidget *dd;
     SettingsChoice *c = g_new0(SettingsChoice, 1);
+
+    for (guint i = 0; i < n; i++) items[i] = labels[i];
+    dd = gtk_drop_down_new_from_strings(items);
+    g_free(items);
     SettingsReset *spec = g_new0(SettingsReset, 1);
     const char *cur = settings_get(key, NULL);
     guint sel = fallback;
@@ -8585,6 +13378,16 @@ settings_motion_apply(AppState *state, guint index)
         gtk_widget_remove_css_class(state->window, "motion-reduced");
 }
 
+/* The reader setting is a rebuild, because folding happens while a page is
+   built: a page built under the other answer has to be built again. */
+static void
+settings_reader_apply(AppState *state, guint index)
+{
+    if (state == NULL) return;
+    state->beginner = (index == 0);
+    beginner_apply(state);
+}
+
 static GtkWidget *
 settings_card(const char *heading, GtkWidget **body_out)
 {
@@ -8610,6 +13413,8 @@ settings_view_interface(AppState *state)
     static const char *art_l[] = { "Films and the still", "Films only", "The still only" };
     static const char *drawer_v[] = { "hover", "click" };
     static const char *drawer_l[] = { "Pointer at the edge", "Click the edge" };
+    static const char *reader_v[] = { "beginner", "expert" };
+    static const char *reader_l[] = { "Beginner", "Expert" };
 
     GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     GtkWidget *card, *body;
@@ -8632,6 +13437,13 @@ settings_view_interface(AppState *state)
         NULL, sort_v, sort_l, 3, s,
         "The order the full catalogue is laid out in.",
         settings_sort_apply, state));
+    gtk_box_append(GTK_BOX(body), settings_choice("Reader",
+        "ui.reader", reader_v, reader_l, 2,
+        g_strcmp0(settings_get("ui.reader", "beginner"), "expert") == 0 ? 1 : 0,
+        "Beginner puts one worked example first and files the other fields "
+        "behind More; expert shows every control at once. Neither mode removes "
+        "anything: the difference is what a card puts first.",
+        settings_reader_apply, state));
     gtk_box_append(GTK_BOX(col), card);
 
     card = settings_card("TYPE AND MOTION", &body);
@@ -8938,8 +13750,8 @@ settings_view_diagnostics(AppState *state)
     card = settings_card("MAINTENANCE", &body);
     {
         GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-        GtkWidget *deps  = gtk_button_new_with_label("Check dependencies");
-        GtkWidget *radio = gtk_button_new_with_label("Probe SDRs");
+        GtkWidget *deps  = gtk_button_new_with_label("Check the tools");
+        GtkWidget *radio = gtk_button_new_with_label("Probe the radios");
         GtkWidget *st    = gtk_label_new("Idle");
 
         gtk_widget_add_css_class(st, "status-pill");
@@ -9397,7 +14209,7 @@ notebook_page_switched(GtkNotebook *nb, GtkWidget *child, guint page,
        page, which is on no list entry and so clears the highlight. */
     if (state->drawer_nav != NULL) {
         state->drawer_nav_syncing = TRUE;
-        if (page < 6 && state->drawer_nav_rows[page] != NULL)
+        if (page < 8 && state->drawer_nav_rows[page] != NULL)
             gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
                 GTK_LIST_BOX_ROW(state->drawer_nav_rows[page]));
         else
@@ -10838,9 +15650,9 @@ create_live_traffic_page(AppState *state)
     GtkWidget *sub    = gtk_label_new(
         "GSMTAP on udp/4729 — the feed gr-gsm, srsRAN and Open5GS all emit.");
     GtkWidget *status = gtk_label_new("stopped");
-    GtkWidget *start  = gtk_button_new_with_label("Start");
-    GtkWidget *clear  = gtk_button_new_with_label("Clear");
-    GtkWidget *pause  = gtk_button_new_with_label("Pause");
+    GtkWidget *start  = gtk_button_new_with_label("Start it");
+    GtkWidget *clear  = gtk_button_new_with_label("Clear what is stored");
+    GtkWidget *pause  = gtk_button_new_with_label("Pause the run");
     GtkWidget *follow = gtk_toggle_button_new_with_label("Follow");
     GtkWidget *inspector_btn  = gtk_toggle_button_new_with_label("Inspect");
     GtkWidget *inspector_pop  = gtk_popover_new();
@@ -10850,7 +15662,7 @@ create_live_traffic_page(AppState *state)
     GtkWidget *bar    = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *flabel = gtk_label_new("Filter");
     GtkWidget *fentry = gtk_entry_new();
-    GtkWidget *fclear = gtk_button_new_with_label("Reset");
+    GtkWidget *fclear = gtk_button_new_with_label("Reset it");
     GtkWidget *bar2   = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *ulbtn  = gtk_toggle_button_new_with_label("UL");
     GtkWidget *dlbtn  = gtk_toggle_button_new_with_label("DL");
@@ -11180,7 +15992,7 @@ drawer_set_open(AppState *state, gboolean open)
     if (open && state->drawer_nav != NULL) {
         int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(state->notebook));
         state->drawer_nav_syncing = TRUE;
-        if (cur >= 0 && cur < 7 && state->drawer_nav_rows[cur] != NULL)
+        if (cur >= 0 && cur < 8 && state->drawer_nav_rows[cur] != NULL)
             gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
                 GTK_LIST_BOX_ROW(state->drawer_nav_rows[cur]));
         else
@@ -11933,8 +16745,8 @@ build_target_panel(AppState *state)
     GtkWidget *title    = gtk_label_new("TARGET");
     GtkWidget *id_body  = NULL, *live_body = NULL, *ctx_body = NULL;
     GtkWidget *mark_row, *mark_text, *mark_icon;
-    GtkWidget *apply    = gtk_button_new_with_label("Apply");
-    GtkWidget *clear    = gtk_button_new_with_label("Clear");
+    GtkWidget *apply    = gtk_button_new_with_label("Apply the profile");
+    GtkWidget *clear    = gtk_button_new_with_label("Clear what is stored");
 
     gtk_widget_add_css_class(panel, "target-panel");
     gtk_widget_add_css_class(title, "target-title");
@@ -11943,7 +16755,7 @@ build_target_panel(AppState *state)
 
     /* ---- Identity ---- */
     {
-        GtkWidget *zone = rtarget_zone("IDENTITY", &id_body);
+        GtkWidget *zone = rtarget_zone("TARGET IDENTITY", &id_body);
 
         mark_row  = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
         mark_icon = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -12466,6 +17278,10 @@ boot_restore_session(AppState *state, GtkApplication *app)
        colour still applies. */
 
     state->window = gtk_application_window_new(app);
+    /* The window rules below paint two corner glows on every surface. A popup
+       is a surface too, so the class keeps those rules on the app window and
+       off the drop-down list. */
+    gtk_widget_add_css_class(state->window, "app-window");
     gtk_window_set_title(GTK_WINDOW(state->window), "IMSIsting");
     gtk_window_set_default_size(GTK_WINDOW(state->window), 1180, 760);
     /* The layout's measured floor is ~448px plus the 52px titlebar. Without a
@@ -12780,6 +17596,12 @@ boot_build_ui(AppState *state, GtkApplication *app)
         gtk_label_new("Help"));
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
         create_settings_page(state), gtk_label_new("Settings"));
+    /* Page 7 is the goals front door. It is appended after the seven pages the
+       drawer resolves by index, so every existing index still means what it
+       did; the header button is the way in, because it is a way of choosing a
+       question rather than a page of the tool. */
+    gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
+        goals_build_page(state), gtk_label_new("Workflows"));
 
     g_signal_connect(state->notebook, "switch-page",
                      G_CALLBACK(notebook_page_switched), state);
@@ -13737,6 +18559,11 @@ main(int argc, char **argv)
     settings_load();
     AppState state = { 0 };
     state.stderr_fd = -1;
+    /* Beginner unless Settings says otherwise: the default reader is someone
+       who does not yet know what RSRP stands for. Expert mode is the page the
+       toolkit always had, and neither mode removes a control. */
+    state.beginner = g_strcmp0(settings_get("ui.reader", "beginner"),
+                               "expert") != 0;
     g_app_state = &state;
 
     /* --selftest: verify the GUI's own invariants without a display. This is
@@ -14043,7 +18870,7 @@ deps_create_row(DepsPage *page, const char *group, const char *tool,
     GtkWidget *name     = gtk_label_new(tool);
     GtkWidget *group_lbl = gtk_label_new(group);
     GtkWidget *status   = gtk_label_new(installed ? "INSTALLED" : "MISSING");
-    GtkWidget *install  = gtk_button_new_with_label("Install");
+    GtkWidget *install  = gtk_button_new_with_label("Install the tools");
     DepsRow   *entry    = g_new0(DepsRow, 1);
     g_autofree char *meta_text = g_strdup_printf("package: %s%s%s",
         package, (meta != NULL && *meta != '\0') ? "  ·  " : "",
@@ -14262,14 +19089,14 @@ deps_build_packages(AppState *state, const char *module_id,
     GtkWidget *search  = gtk_search_entry_new();
     GtkWidget *critical = gtk_toggle_button_new_with_label("Critical");
     GtkWidget *optional = gtk_toggle_button_new_with_label("Optional");
-    GtkWidget *refresh = gtk_button_new_with_label("Refresh");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh the list it");
     GtkWidget *summary = gtk_label_new("Dependency state not read yet.");
     GtkWidget *list    = gtk_list_box_new();
     GtkWidget *busy    = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *spinner = gtk_spinner_new();
     GtkWidget *busy_lbl = gtk_label_new("");
     GtkWidget *entry   = gtk_entry_new();
-    GtkWidget *install = gtk_button_new_with_label("Install");
+    GtkWidget *install = gtk_button_new_with_label("Install the tools");
     DepsPage  *manager = g_new0(DepsPage, 1);
 
     (void) out;
@@ -14372,7 +19199,7 @@ deps_build_packages(AppState *state, const char *module_id,
    buttons. Spec syntax is documented on ModuleSubmenuEntry above. */
 
 static ModuleSubmenuEntry deps_entries[] = {
-    { "Overview",
+    { "The first question",
       "dialog-information-symbolic",
       /* Split into a CHECK card and an INSTALL card: looking is safe and
          installing is privileged, and the page should say so rather than
@@ -14380,19 +19207,19 @@ static ModuleSubmenuEntry deps_entries[] = {
 
          The three install buttons carry the '!' privilege marker BEFORE the
          colon, which is where the spec grammar expects it. They previously
-         had it only on the end of the label ("Install Missing!"), so
+         had it only on the end of the label ("Install what is missing"), so
          privileged was always false and the installs ran as the operator,
          failing on every write. With the marker here they go through
          `pkexec <script> <verb>`, which is what the polkit rule in
          tools/49-imsisting.rules matches on. */
-      "#CHECK|--check-versions:Refresh|#INSTALL|--install-missing!:Install Missing!|--install-all!:Install Full Toolchain!|--install-pip!:Install Pipx Tools!|#AUDIT|--missing-only:Missing Only|--report:Report" },
+      "#CHECK|--check-versions:Refresh the list|#INSTALL|--install-missing!:Install what is missing|--install-all!:Install the full toolchain|--install-pip!:Install the pipx tools|#AUDIT|--missing-only:Show what is missing|--report:Show the report" },
     { "Packages",
       "system-software-install-symbolic",
       NULL,
       deps_build_packages },
     { "System",
       "preferences-system-symbolic",
-      "--distro-info:Distro Info" },
+      "--distro-info:Show the distribution" },
 };
 /* Radio Bench: an operational workspace for selecting, tuning and recording. */
 typedef struct {
@@ -14446,8 +19273,8 @@ radio_bench_add_device(RadioBench *bench, char **f, int index,
     GtkWidget *ident = gtk_label_new(serial);
     GtkWidget *meta = gtk_label_new(summary);
     GtkWidget *icon = imsisting_icon_image("network-wireless-symbolic");
-    GtkWidget *select = gtk_button_new_with_label("Select");
-    GtkWidget *caps = gtk_button_new_with_label("Capabilities");
+    GtkWidget *select = gtk_button_new_with_label("Select a device");
+    GtkWidget *caps = gtk_button_new_with_label("Read the capabilities");
 
     gtk_image_set_pixel_size(GTK_IMAGE(icon), 28);
     gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
@@ -14514,7 +19341,7 @@ radio_bench_fill(RadioBench *bench, GtkWidget *status)
     if (count == 0) {
         GtkWidget *row = gtk_list_box_row_new();
         GtkWidget *empty = gtk_label_new(
-            "No SDRs detected - connect a supported radio, then Refresh.");
+            "No SDRs detected - connect a supported radio, then Refresh the list.");
         gtk_widget_add_css_class(empty, "cell-empty");
         gtk_widget_set_margin_top(empty, 14);
         gtk_widget_set_margin_bottom(empty, 14);
@@ -14568,15 +19395,15 @@ radio_build_bench(AppState *state, const char *module_id,
     GtkWidget *hero = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *selection = gtk_label_new("SELECTED  checking...");
     GtkWidget *telemetry = gtk_label_new("TUNE  checking...");
-    GtkWidget *refresh = gtk_button_new_with_label("Refresh hardware");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh the list the hardware");
     GtkWidget *device_body;
-    GtkWidget *device_card = verb_card("DEVICE INVENTORY", &device_body);
+    GtkWidget *device_card = verb_card("READ THE DEVICE INVENTORY", &device_body);
     GtkWidget *scroll = gtk_scrolled_window_new();
     GtkWidget *devices = gtk_list_box_new();
     GtkWidget *tune_body;
-    GtkWidget *tune_card = verb_card("QUICK TUNE", &tune_body);
+    GtkWidget *tune_card = verb_card("TUNE THE RADIO", &tune_body);
     GtkWidget *capture_body;
-    GtkWidget *capture_card = verb_card("CAPTURE", &capture_body);
+    GtkWidget *capture_card = verb_card("READ A CAPTURE", &capture_body);
     RadioBench *bench = g_new0(RadioBench, 1);
 
     bench->state = state;
@@ -14680,13 +19507,13 @@ radio_build_tuning(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("TUNING CONSOLE",
+    GtkWidget *outer = radio_view_shell("TUNE THE RADIO",
         "Set the receiver profile deliberately. Select an SDR in Overview first; results are recorded below.",
         &body);
     g_autofree char *summary = radio_status_summary(module_id);
     GtkWidget *profile = gtk_label_new(summary);
     GtkWidget *tune_body;
-    GtkWidget *tune = verb_card("RECEIVER SETTINGS", &tune_body);
+    GtkWidget *tune = verb_card("READ THE RECEIVER SETTINGS", &tune_body);
 
     gtk_widget_add_css_class(profile, "radio-bench-status");
     gtk_widget_add_css_class(profile, "radio-bench-telemetry");
@@ -14708,7 +19535,7 @@ radio_build_ownership(AppState *state, const char *module_id,
                       GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("DEVICE OWNERSHIP",
+    GtkWidget *outer = radio_view_shell("WHO OWNS THE DEVICE",
         "An SDR is exclusive hardware. Claim it before a long operation, then release it when the work is complete.",
         &body);
     g_autofree char *script = module_script_path(module_id);
@@ -14720,8 +19547,8 @@ radio_build_ownership(AppState *state, const char *module_id,
         (lock && *lock) ? lock : "unknown", (owner && *owner) ? owner : "none");
     GtkWidget *banner = gtk_label_new(owner_text);
     GtkWidget *control_body;
-    GtkWidget *control = verb_card("LOCK CONTROL", &control_body);
-    GtkWidget *recover = gtk_button_new_with_label("Recover stale lock");
+    GtkWidget *control = verb_card("READ THE LOCK CONTROL", &control_body);
+    GtkWidget *recover = gtk_button_new_with_label("Release a stale lock");
 
     gtk_widget_add_css_class(banner, "radio-bench-status");
     gtk_widget_add_css_class(banner, "radio-bench-telemetry");
@@ -14744,15 +19571,15 @@ radio_build_diagnostics(AppState *state, const char *module_id,
                         GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("RADIO DIAGNOSTICS",
+    GtkWidget *outer = radio_view_shell("WHAT THE RADIO REPORTS",
         "Check practical coverage and inspect processes that may have the SDR open before troubleshooting a failed run.",
         &body);
     GtkWidget *coverage_body;
-    GtkWidget *coverage = verb_card("BAND COVERAGE", &coverage_body);
+    GtkWidget *coverage = verb_card("FIND THE BAND THAT COVERS IT", &coverage_body);
     GtkWidget *health_body;
-    GtkWidget *health = verb_card("HARDWARE HEALTH", &health_body);
-    GtkWidget *processes = gtk_button_new_with_label("Inspect SDR processes");
-    GtkWidget *plan = gtk_button_new_with_label("Show control plan");
+    GtkWidget *health = verb_card("READ THE HARDWARE HEALTH", &health_body);
+    GtkWidget *processes = gtk_button_new_with_label("Inspect the radio processes");
+    GtkWidget *plan = gtk_button_new_with_label("Read the control plan");
 
     gtk_box_append(GTK_BOX(coverage_body), radio_bench_arg_action(
         state, module_id, status, "Frequency", "MHz  e.g. 942", "--band-check", "Check coverage"));
@@ -14769,7 +19596,7 @@ radio_build_diagnostics(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry radio_entries[] = {
-    { "Overview",
+    { "The first question",
       "dialog-information-symbolic",
       NULL,
       radio_build_bench },
@@ -14788,7 +19615,7 @@ static ModuleSubmenuEntry radio_entries[] = {
 };
 /* ── Cell Recon · Targets ───────────────────────────────────────────
    Laid out like wifisting's Wi-Fi Recon target list: a toolbar naming what
-   is selected with Refresh / Export on the right, then one row per surveyed
+   is selected with Refresh the list / Export on the right, then one row per surveyed
    cell with a Set target action. Rows come from the module's --list-tsv.
 
    An empty store is drawn as an empty state, not as an error: "run a scan
@@ -14880,7 +19707,7 @@ crec_targets_add_row(CrecTargets *t, char **f)
     GtkWidget *ident   = gtk_label_new(sub);
     GtkWidget *metalbl = gtk_label_new(meta);
     GtkWidget *icon    = imsisting_icon_image("network-wireless-symbolic");
-    GtkWidget *pick    = gtk_button_new_with_label("Set target");
+    GtkWidget *pick    = gtk_button_new_with_label("Tune the target");
 
     gtk_image_set_pixel_size(GTK_IMAGE(icon), 28);
 
@@ -14950,7 +19777,7 @@ crec_targets_fill(CrecTargets *t)
     }
     if (rows == 0)
         crec_targets_empty(t->list,
-            "No cells surveyed yet — run Start scan, then Refresh.");
+            "No cells surveyed yet — run Start scan, then Refresh the list.");
 }
 
 static void
@@ -14981,8 +19808,8 @@ crec_build_targets(AppState *state, const char *module_id,
     GtkWidget *inner = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     GtkWidget *bar   = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *selected = gtk_label_new("No target selected");
-    GtkWidget *export_btn = gtk_button_new_with_label("Export CSV");
-    GtkWidget *refresh   = gtk_button_new_with_label("Refresh");
+    GtkWidget *export_btn = gtk_button_new_with_label("Write the table as CSV");
+    GtkWidget *refresh   = gtk_button_new_with_label("Refresh the list it");
     GtkWidget *scroll = gtk_scrolled_window_new();
     GtkWidget *list   = gtk_list_box_new();
     CrecTargets *t = g_new0(CrecTargets, 1);
@@ -15051,14 +19878,14 @@ crec_build_overview(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CELL SURVEY",
+    GtkWidget *outer = radio_view_shell("SURVEY THE CELLS",
         "Start a focused survey, then inspect and promote discovered cells from Targets.", &body);
     g_autofree char *summary = crec_status_summary(module_id);
     GtkWidget *banner = gtk_label_new(summary);
     GtkWidget *scan_body;
-    GtkWidget *scan = verb_card("SURVEY SOURCE", &scan_body);
-    GtkWidget *gsm = gtk_button_new_with_label("Start GSM survey");
-    GtkWidget *lte = gtk_button_new_with_label("Start LTE survey");
+    GtkWidget *scan = verb_card("READ THE SURVEY SOURCE", &scan_body);
+    GtkWidget *gsm = gtk_button_new_with_label("Survey the GSM bands");
+    GtkWidget *lte = gtk_button_new_with_label("Survey the LTE bands");
 
     gtk_widget_add_css_class(banner, "crec-survey-status");
     gtk_label_set_xalign(GTK_LABEL(banner), 0.0f);
@@ -15081,10 +19908,10 @@ crec_build_channel(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CHANNEL INTELLIGENCE",
+    GtkWidget *outer = radio_view_shell("WHAT THE CHANNEL SAYS",
         "Translate GSM, LTE, or NR channel numbers into downlink frequencies before selecting a survey range.", &body);
     GtkWidget *card_body;
-    GtkWidget *card = verb_card("ARFCN LOOKUP", &card_body);
+    GtkWidget *card = verb_card("LOOK UP A CHANNEL", &card_body);
 
     gtk_box_append(GTK_BOX(card_body), radio_bench_arg_action(
         state, module_id, status, "RAT + channel", "gsm 1  |  lte 6300  |  nr 620000", "--arfcn", "Resolve"));
@@ -15098,10 +19925,10 @@ crec_build_network(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("NETWORK IDENTITY",
+    GtkWidget *outer = radio_view_shell("WHICH NETWORK",
         "Resolve the MCC-MNC before correlating a surveyed cell with its operator and country.", &body);
     GtkWidget *card_body;
-    GtkWidget *card = verb_card("PLMN RESOLUTION", &card_body);
+    GtkWidget *card = verb_card("LOOK UP THE OPERATOR", &card_body);
 
     gtk_box_append(GTK_BOX(card_body), radio_bench_arg_action(
         state, module_id, status, "MCC-MNC", "e.g. 208-01", "--plmn", "Resolve"));
@@ -15115,12 +19942,12 @@ crec_build_export(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SURVEY HANDOFF",
+    GtkWidget *outer = radio_view_shell("HAND OFF THE SURVEY",
         "Export the current survey into the case workspace, or clear the working store when a new collection begins.", &body);
     GtkWidget *card_body;
-    GtkWidget *card = verb_card("DATA MANAGEMENT", &card_body);
-    GtkWidget *export_btn = gtk_button_new_with_label("Export survey CSV");
-    GtkWidget *clear = gtk_button_new_with_label("Clear survey store");
+    GtkWidget *card = verb_card("MANAGE THE DATA", &card_body);
+    GtkWidget *export_btn = gtk_button_new_with_label("Write the survey as CSV");
+    GtkWidget *clear = gtk_button_new_with_label("Clear the survey");
 
     radio_bench_run_button(export_btn, state, module_id, status, "--export", NULL);
     radio_bench_run_button(clear, state, module_id, status, "--clear", NULL);
@@ -15140,7 +19967,7 @@ static ModuleSubmenuEntry crec_entries[] = {
        network, and how do I get the data out. The Overview splits into a
        CONTROLS card and a SURVEY card, the shape wifisting uses for
        "start it" versus "read the result". */
-    { "Overview",
+    { "The first question",
       "dialog-information-symbolic",
       NULL,
       crec_build_overview },
@@ -15158,7 +19985,7 @@ static ModuleSubmenuEntry crec_entries[] = {
       "network-workgroup-symbolic",
       NULL,
       crec_build_network },
-    { "Export",
+    { "Export the survey",
       "document-save-symbolic",
       NULL,
       crec_build_export },
@@ -15178,15 +20005,15 @@ gtap_build_live(AppState *state, const char *module_id,
         "Listen on the GSMTAP port and demultiplex by type. Nothing is decoded "
         "twice: a payload goes to the module that owns its format.", &body);
     GtkWidget *listen_body, *watch_body, *filter_body;
-    GtkWidget *listen = verb_card("LISTEN", &listen_body);
-    GtkWidget *watch = verb_card("WATCHLIST", &watch_body);
-    GtkWidget *filter = verb_card("FILTER", &filter_body);
+    GtkWidget *listen = verb_card("LISTEN FOR MESSAGES", &listen_body);
+    GtkWidget *watch = verb_card("READ THE WATCHLIST", &watch_body);
+    GtkWidget *filter = verb_card("FILTER THEM", &filter_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(listen_body),
-            mod_arg_row_prefilled(state, module_id, status, "Listen",
+            mod_arg_row_prefilled(state, module_id, status, "Listen for messages",
                 "--listen", "4729 30",
                 "Port, then seconds. The answer is every message received with "
                 "its type and the decoder that took it."));
@@ -15203,7 +20030,7 @@ gtap_build_live(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(watch_body),
-            mod_arg_choices(state, module_id, status, "Identities", "",
+            mod_arg_choices(state, module_id, status, "Read the identities", "",
                 "The identities seen, and the watchlist that turns a live tap into "
                 "an alert when one of them appears.",
                 (const char *[]) { "--identities-tsv", "--watchlist" },
@@ -15237,13 +20064,13 @@ gtap_build_header(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("HEADER",
+    GtkWidget *outer = radio_view_shell("READ A HEADER",
         "The GSMTAP header in front of every payload: what the capture claims "
         "about where the message came from.", &body);
     GtkWidget *parse_body, *build_body, *export_body;
-    GtkWidget *parse = verb_card("READ", &parse_body);
-    GtkWidget *build = verb_card("BUILD", &build_body);
-    GtkWidget *export = verb_card("EXPORT", &export_body);
+    GtkWidget *parse = verb_card("READ THE STATE", &parse_body);
+    GtkWidget *build = verb_card("BUILD ONE", &build_body);
+    GtkWidget *export = verb_card("EXPORT THE SURVEY", &export_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -15291,8 +20118,8 @@ gtap_build_header(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry gtap_entries[] = {
-    { "Live Tap", "dialog-information-symbolic", NULL, gtap_build_live },
-    { "Header", "utilities-terminal-symbolic", NULL, gtap_build_header },
+    { "The live tap", "dialog-information-symbolic", NULL, gtap_build_live },
+    { "Read a header", "utilities-terminal-symbolic", NULL, gtap_build_header },
 };
 /* --------------------------------------------------------------------------
    04_tower_map — Tower Survey.
@@ -15318,12 +20145,12 @@ tmap_build_overview(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CELL SURVEY",
+    GtkWidget *outer = radio_view_shell("SURVEY THE CELLS",
         "One record per cell, with or without a position fix. The store is "
         "written only when a survey pass runs.", &body);
     GtkWidget *survey_body, *read_body;
     GtkWidget *survey = verb_card("RUN A SURVEY PASS", &survey_body);
-    GtkWidget *read = verb_card("RECORDED POINTS", &read_body);
+    GtkWidget *read = verb_card("READ THE RECORDED POINTS", &read_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -15370,8 +20197,8 @@ tmap_build_gps(AppState *state, const char *module_id,
         "The receiver position. A survey record carries this position or it "
         "carries none.", &body);
     GtkWidget *daemon_body, *quality_body;
-    GtkWidget *daemon = verb_card("GPS DAEMON", &daemon_body);
-    GtkWidget *quality = verb_card("CURRENT FIX", &quality_body);
+    GtkWidget *daemon = verb_card("START THE POSITION DAEMON", &daemon_body);
+    GtkWidget *quality = verb_card("READ THE CURRENT FIX", &quality_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -15410,7 +20237,7 @@ tmap_build_export(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("EXPORT",
+    GtkWidget *outer = radio_view_shell("EXPORT THE SURVEY",
         "The recorded survey in three interchange formats. Each file is "
         "written to this module's loot directory.", &body);
     GtkWidget *export_body, *clean_body;
@@ -15457,9 +20284,9 @@ tmap_build_export(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry tmap_entries[] = {
-    { "Overview", "dialog-information-symbolic", NULL, tmap_build_overview },
-    { "GPS", "find-location-symbolic", NULL, tmap_build_gps },
-    { "Export", "document-save-symbolic", NULL, tmap_build_export },
+    { "The first question", "dialog-information-symbolic", NULL, tmap_build_overview },
+    { "The position fix", "find-location-symbolic", NULL, tmap_build_gps },
+    { "Export the survey", "document-save-symbolic", NULL, tmap_build_export },
 };
 /* --------------------------------------------------------------------------
    The field kit is a pre-flight instrument and an honesty check, so the page
@@ -15581,8 +20408,8 @@ fkit_build_overview(AppState *state, const char *module_id,
         &body);
     GtkWidget *machine_body;
     GtkWidget *checks_body;
-    GtkWidget *machine = verb_card("THIS MACHINE", &machine_body);
-    GtkWidget *checks = verb_card("CHECKS", &checks_body);
+    GtkWidget *machine = verb_card("READ THIS MACHINE", &machine_body);
+    GtkWidget *checks = verb_card("READ THE CHECKS", &checks_body);
     GtkWidget *flow = fkit_flow();
     g_autofree char *summary = fkit_status_summary(module_id);
     GtkWidget *banner = gtk_label_new(summary);
@@ -15700,7 +20527,7 @@ fkit_build_emitter(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SYNTHETIC SOURCE",
+    GtkWidget *outer = radio_view_shell("BUILD A REFERENCE CAPTURE",
         "Spec-shaped GSMTAP frames, so the decoder and the live view can be exercised with "
         "no radio, no antenna and no transmission licence.", &body);
     GtkWidget *live_body;
@@ -15851,16 +20678,16 @@ fkit_build_guards(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("HONESTY CHECK",
+    GtkWidget *outer = radio_view_shell("WHAT THE NUMBERS ADMIT",
         "Every radio-gated verb, run with nothing attached. Non-zero and naming what is "
         "missing is the honest answer; success is the failure this view exists to catch.",
         &body);
     GtkWidget *matrix_body;
-    GtkWidget *matrix = verb_card("GUARD MATRIX", &matrix_body);
+    GtkWidget *matrix = verb_card("READ THE GUARD MATRIX", &matrix_body);
     GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *summary = gtk_label_new(NULL);
-    GtkWidget *run = gtk_button_new_with_label("Run guard check");
-    GtkWidget *refresh = gtk_button_new_with_label("Refresh");
+    GtkWidget *run = gtk_button_new_with_label("Check the guard");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh the list it");
     GtkWidget *scroll = gtk_scrolled_window_new();
     GtkWidget *list = gtk_list_box_new();
     FkitGuards *guards = g_new0(FkitGuards, 1);
@@ -15904,7 +20731,7 @@ fkit_build_guards(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry fkit_entries[] = {
-    { "Overview", "dialog-information-symbolic", NULL, fkit_build_overview },
+    { "The first question", "dialog-information-symbolic", NULL, fkit_build_overview },
     { "Emitter",  "media-record-symbolic",       NULL, fkit_build_emitter },
     { "Guards",   "security-high-symbolic",      NULL, fkit_build_guards },
 };
@@ -15918,14 +20745,14 @@ gair_build_decode(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("DECODE",
+    GtkWidget *outer = radio_view_shell("READ A MESSAGE",
         "A capture taken apart one layer at a time: the synchronisation channel, "
         "the system information, and the paging channel.", &body);
     GtkWidget *pcap_body, *sch_body, *si_body, *pg_body;
-    GtkWidget *pcap = verb_card("CAPTURE", &pcap_body);
-    GtkWidget *sch = verb_card("SCH", &sch_body);
-    GtkWidget *si = verb_card("SYSTEM INFORMATION", &si_body);
-    GtkWidget *pg = verb_card("PAGING", &pg_body);
+    GtkWidget *pcap = verb_card("READ A CAPTURE", &pcap_body);
+    GtkWidget *sch = verb_card("READ THE SCH", &sch_body);
+    GtkWidget *si = verb_card("READ THE SYSTEM INFORMATION", &si_body);
+    GtkWidget *pg = verb_card("PAGE A HANDSET", &pg_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -15989,20 +20816,20 @@ gair_build_exposure(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("EXPOSURE",
+    GtkWidget *outer = radio_view_shell("WHAT IS EXPOSED",
         "What a capture gives up without breaking any cipher: the identities in "
         "the clear and the traffic a known keystream unlocks.", &body);
     GtkWidget *ks_body, *id_body, *audit_body, *tsv_body;
-    GtkWidget *ks = verb_card("KEYSTREAM", &ks_body);
-    GtkWidget *id = verb_card("IDENTITIES", &id_body);
-    GtkWidget *audit = verb_card("CIPHER AUDIT", &audit_body);
+    GtkWidget *ks = verb_card("READ THE KEYSTREAM", &ks_body);
+    GtkWidget *id = verb_card("READ THE IDENTITIES", &id_body);
+    GtkWidget *audit = verb_card("AUDIT THE CIPHER", &audit_body);
     GtkWidget *tsv = verb_card("EXPOSURE TABLE", &tsv_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(ks_body),
-            mod_arg_row_prefilled(state, module_id, status, "Generate",
+            mod_arg_row_prefilled(state, module_id, status, "Generate one",
                 "--a5-1-keystream", "00112233445566778899AABBCCDDEEFF 0 114",
                 "A key, a frame number and a burst count. The keystream is what A5/1 "
                 "produces, and knowing it is the whole of a passive decryption."));
@@ -16053,8 +20880,8 @@ gair_build_exposure(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry gair_entries[] = {
-    { "Decode", "dialog-information-symbolic", NULL, gair_build_decode },
-    { "Exposure", "system-search-symbolic", NULL, gair_build_exposure },
+    { "Read a message", "dialog-information-symbolic", NULL, gair_build_decode },
+    { "What is exposed", "system-search-symbolic", NULL, gair_build_exposure },
 };
 /* 07_gsm_attack — the 2G air interface as an attacker's surface.
  *
@@ -16067,25 +20894,25 @@ gatk_build_decode(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("DECODE",
+    GtkWidget *outer = radio_view_shell("READ A MESSAGE",
         "The channel structure of a 2G cell: bursts, multiframes, the paging "
         "schedule, and the blocks a handset contends on.", &body);
     GtkWidget *burst_body, *frame_body;
-    GtkWidget *burst = verb_card("BURST AND FRAME", &burst_body);
-    GtkWidget *frame = verb_card("CHANNELS", &frame_body);
+    GtkWidget *burst = verb_card("READ THE BURST AND FRAME", &burst_body);
+    GtkWidget *frame = verb_card("READ THE CHANNELS", &frame_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(burst_body),
-            mod_arg_choices(state, module_id, status, "Structure", "",
+            mod_arg_choices(state, module_id, status, "Read the structure", "",
                 "How a burst is laid out, what a frame contains, and the map of "
                 "channels a multiframe carries.",
                 (const char *[]) { "--burst-layout", "--frame-facts",
                                    "--multiframe-map", "--fcch-facts" },
                 (const char *[]) { "Burst", "Frame", "Multiframe", "FCCH" }, 4));
         gtk_box_append(GTK_BOX(burst_body),
-            mod_arg_choices(state, module_id, status, "Payload", "",
+            mod_arg_choices(state, module_id, status, "Read the payload", "",
                 "The SCH payload, and the LAPDm framing that carries signalling "
                 "over a traffic channel.",
                 (const char *[]) { "--sch-payload", "--lapdm-bursts",
@@ -16106,7 +20933,7 @@ gatk_build_decode(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(frame_body),
-            mod_arg_choices(state, module_id, status, "Timing", "",
+            mod_arg_choices(state, module_id, status, "Read the timing", "",
                 "Where a handset listens, and the frame number arithmetic that "
                 "decides it.",
                 (const char *[]) { "--paging-schedule 310150123456789 1",
@@ -16137,14 +20964,14 @@ gatk_build_messages(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("MESSAGES",
+    GtkWidget *outer = radio_view_shell("BUILD A MESSAGE",
         "The messages a network sends a handset, built as octets. These are what a "
         "forged cell says.", &body);
     GtkWidget *call_body, *reg_body, *ident_body, *class_body;
-    GtkWidget *call = verb_card("CALL SETUP", &call_body);
-    GtkWidget *reg = verb_card("REGISTRATION", &reg_body);
-    GtkWidget *ident = verb_card("IDENTITY", &ident_body);
-    GtkWidget *class = verb_card("CLASSMARK", &class_body);
+    GtkWidget *call = verb_card("READ HOW A CALL IS SET UP", &call_body);
+    GtkWidget *reg = verb_card("READ HOW REGISTRATION WORKS", &reg_body);
+    GtkWidget *ident = verb_card("READ THE IDENTITY", &ident_body);
+    GtkWidget *class = verb_card("READ THE CLASSMARK", &class_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -16199,7 +21026,7 @@ gatk_build_messages(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(class_body),
-            mod_arg_choices(state, module_id, status, "Classmark", "",
+            mod_arg_choices(state, module_id, status, "Read the classmark", "",
                 "What a handset claims about itself, which is the input to every "
                 "downgrade: a network that believes 'I cannot do 3G' strips 3G.",
                 (const char *[]) { "--classmark1", "--classmark1-encode",
@@ -16230,15 +21057,15 @@ gatk_build_ciphers(AppState *state, const char *module_id,
         "A5/1 through A5/4, the 3G ciphers, and the recovery of a key from traffic "
         "the cipher produced.", &body);
     GtkWidget *a5_body, *g_body, *rec_body;
-    GtkWidget *a5 = verb_card("A5", &a5_body);
-    GtkWidget *g = verb_card("KASUMI AND F8/F9", &g_body);
-    GtkWidget *rec = verb_card("KEY RECOVERY", &rec_body);
+    GtkWidget *a5 = verb_card("BUILD THE A5 KEYSTREAM", &a5_body);
+    GtkWidget *g = verb_card("READ KASUMI AND F8/F9", &g_body);
+    GtkWidget *rec = verb_card("RECOVER THE KEY", &rec_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(a5_body),
-            mod_arg_choices(state, module_id, status, "Serialize", "",
+            mod_arg_choices(state, module_id, status, "Serialize it", "",
                 "The 114-bit A5/1 keystream is published and checkable; A5/2 was "
                 "withdrawn for being broken and is kept for testing only.",
                 (const char *[]) { "--a5-1-keystream 00112233445566778899AABBCCDDEEFF 0 114",
@@ -16256,7 +21083,7 @@ gatk_build_ciphers(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(g_body),
-            mod_arg_choices(state, module_id, status, "3G ciphers", "",
+            mod_arg_choices(state, module_id, status, "List the 3G ciphers", "",
                 "The block cipher underneath, and the two modes 3G uses it in: "
                 "confidentiality and integrity.",
                 (const char *[]) { "--kasumi 00112233445566778899AABBCCDDEEFF 0102030405060708",
@@ -16302,14 +21129,14 @@ gatk_build_attacks(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("ATTACKS",
+    GtkWidget *outer = radio_view_shell("WALK THE ATTACK",
         "The published attacks on 2G as sequences, with what each needs and what it "
         "establishes. The transmit path is last and named for what it needs.", &body);
     GtkWidget *seq_body, *deanon_body, *plan_body, *tx_body;
-    GtkWidget *seq = verb_card("SEQUENCES", &seq_body);
-    GtkWidget *deanon = verb_card("DEANONYMIZATION", &deanon_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
-    GtkWidget *tx = verb_card("TRANSMIT", &tx_body);
+    GtkWidget *seq = verb_card("READ THE SEQUENCES", &seq_body);
+    GtkWidget *deanon = verb_card("LIFT THE ANONYMITY", &deanon_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
+    GtkWidget *tx = verb_card("TRANSMIT IT", &tx_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -16324,7 +21151,7 @@ gatk_build_attacks(AppState *state, const char *module_id,
                 (const char *[]) { "IMSI Catcher", "A5 Downgrade",
                                    "Kc Recovery" }, 3));
         gtk_box_append(GTK_BOX(seq_body),
-            mod_arg_choices(state, module_id, status, "Sequence", "",
+            mod_arg_choices(state, module_id, status, "Read the sequence", "",
                 "The catcher sequence as a run of ordinary messages in an order "
                 "that should not occur, and the paging race it depends on.",
                 (const char *[]) { "--imsi-catcher-sequence", "--paging-race" },
@@ -16345,7 +21172,7 @@ gatk_build_attacks(AppState *state, const char *module_id,
                                    "--deanon-lookup 01020304" },
                 (const char *[]) { "Vector", "Record", "Lookup" }, 3));
         gtk_box_append(GTK_BOX(deanon_body),
-            mod_arg_choices(state, module_id, status, "Store", "",
+            mod_arg_choices(state, module_id, status, "Read the store", "",
                 "What has been recorded, and the second observation that confirms a "
                 "correlation rather than asserting one.",
                 (const char *[]) { "--deanon-list", "--deanon-confirm 1 2" },
@@ -16358,7 +21185,7 @@ gatk_build_attacks(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(plan_body),
-            mod_arg_choices(state, module_id, status, "Plan", "",
+            mod_arg_choices(state, module_id, status, "Read the plan", "",
                 "What a 2G lab needs, and the tables it is built from.",
                 (const char *[]) { "--plan", "--plan-tsv", "--ccch-conf" },
                 (const char *[]) { "Plan", "Plan TSV", "CCCH Config" }, 3));
@@ -16370,7 +21197,7 @@ gatk_build_attacks(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(tx_body),
-            mod_arg_row(state, module_id, status, "Transmit",
+            mod_arg_row(state, module_id, status, "Transmit it",
                 "--transmit", "capture.pcap",
                 "The one verb here that puts a carrier on the air. It needs a radio "
                 "you own and a lawful basis, and it is the last control on the page "
@@ -16385,10 +21212,10 @@ gatk_build_attacks(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry gatk_entries[] = {
-    { "Decode", "dialog-information-symbolic", NULL, gatk_build_decode },
-    { "Messages", "document-send-symbolic", NULL, gatk_build_messages },
-    { "Ciphers", "channel-secure-symbolic", NULL, gatk_build_ciphers },
-    { "Attacks", "security-high-symbolic", NULL, gatk_build_attacks },
+    { "Read a message", "dialog-information-symbolic", NULL, gatk_build_decode },
+    { "Build a message", "document-send-symbolic", NULL, gatk_build_messages },
+    { "The ciphers", "channel-secure-symbolic", NULL, gatk_build_ciphers },
+    { "The attack in steps", "security-high-symbolic", NULL, gatk_build_attacks },
 };
 /* 08_umts_air — 3G, where the cipher was broken properly and the identity was not.
  *
@@ -16400,14 +21227,14 @@ uair_build_decode(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("DECODE",
+    GtkWidget *outer = radio_view_shell("READ A MESSAGE",
         "The broadcast channels of a 3G cell and the identity exchange that "
         "precedes any protection.", &body);
     GtkWidget *pcap_body, *sib_body, *fields_body, *carriers_body;
-    GtkWidget *pcap = verb_card("CAPTURE", &pcap_body);
-    GtkWidget *sib = verb_card("SIB", &sib_body);
-    GtkWidget *fields = verb_card("FIELDS", &fields_body);
-    GtkWidget *carriers = verb_card("CARRIERS", &carriers_body);
+    GtkWidget *pcap = verb_card("READ A CAPTURE", &pcap_body);
+    GtkWidget *sib = verb_card("READ THE SYSTEM BLOCK", &sib_body);
+    GtkWidget *fields = verb_card("READ THE FIELDS", &fields_body);
+    GtkWidget *carriers = verb_card("READ THE CARRIERS", &carriers_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -16450,7 +21277,7 @@ uair_build_decode(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(carriers_body),
-            mod_arg_choices(state, module_id, status, "Carriers", "",
+            mod_arg_choices(state, module_id, status, "Read the carriers", "",
                 "The carriers a SIB6 lists, and the frequency arithmetic between a "
                 "UARFCN and a hertz value.",
                 (const char *[]) { "--sib6-carriers 1", "--uarfcn 10638",
@@ -16471,14 +21298,14 @@ uair_build_integrity(AppState *state, const char *module_id,
                      GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("INTEGRITY",
+    GtkWidget *outer = radio_view_shell("CHECK CHECKSUM",
         "The AKA exchange and the integrity protection that follows it, which is "
         "the control plane's only defence.", &body);
     GtkWidget *aka_body, *mac_body, *count_body, *tsv_body;
-    GtkWidget *aka = verb_card("AKA", &aka_body);
-    GtkWidget *mac = verb_card("MAC-I", &mac_body);
-    GtkWidget *count = verb_card("COUNT", &count_body);
-    GtkWidget *tsv = verb_card("EVIDENCE", &tsv_body);
+    GtkWidget *aka = verb_card("PROVE A CARD WITH AKA", &aka_body);
+    GtkWidget *mac = verb_card("READ THE MAC-I", &mac_body);
+    GtkWidget *count = verb_card("COUNT THEM", &count_body);
+    GtkWidget *tsv = verb_card("READ THE EVIDENCE", &tsv_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -16546,7 +21373,7 @@ uair_build_messages(AppState *state, const char *module_id,
     GtkWidget *card_body;
     GtkWidget *card;
 
-    card = verb_card("CONNECTION SETUP", &card_body);
+    card = verb_card("READ HOW A CONNECTION IS SET UP", &card_body);
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
@@ -16566,7 +21393,7 @@ uair_build_messages(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(card_body),
-            mod_arg_choices(state, module_id, status, "Message",
+            mod_arg_choices(state, module_id, status, "Read the message",
                 "Message", "A rejection with its cause and wait time, or a paging "
                 "record for one subscriber.",
                 (const char *[]) { "--build-rrc-reject", "--build-paging" },
@@ -16602,7 +21429,7 @@ uair_build_downlink(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("DOWNLINK",
+    GtkWidget *outer = radio_view_shell("PRETEND TO BE A TOWER",
         "A WCDMA carrier built as samples, and the chain a 3G catcher would have "
         "to complete. No radio is keyed unless one answers.", &body);
     GtkWidget *card_body;
@@ -16613,7 +21440,7 @@ uair_build_downlink(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(card_body),
-            mod_arg_row_prefilled(state, module_id, status, "Build",
+            mod_arg_row_prefilled(state, module_id, status, "Build one",
                 "--transmit", "2140",
                 "The carrier in MHz, in a licensed band. Without a BCH the result "
                 "says plainly that a handset can synchronise to the carrier and "
@@ -16638,12 +21465,12 @@ uair_build_downlink(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), card);
 
-    card = verb_card("SYSTEM INFORMATION", &card_body);
+    card = verb_card("READ THE SYSTEM INFORMATION", &card_body);
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(card_body),
-            mod_arg_choices(state, module_id, status, "Message",
+            mod_arg_choices(state, module_id, status, "Read the message",
                 "A message to build, or the worked vectors", 
                 "The blocks a camper reads before it can ask for anything. Each "
                 "octet is held against pycrate's transcription of TS 25.331 and, "
@@ -16658,7 +21485,7 @@ uair_build_downlink(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), card);
 
-    card = verb_card("IDENTIFICATION", &card_body);
+    card = verb_card("IDENTIFY THE CARD", &card_body);
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
@@ -16676,7 +21503,7 @@ uair_build_downlink(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), card);
 
-    card = verb_card("THE CATCHER CHAIN", &card_body);
+    card = verb_card("READ THE CATCHER CHAIN", &card_body);
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
@@ -16690,12 +21517,12 @@ uair_build_downlink(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), card);
 
-    card = verb_card("AUTHENTICATION REPLAY", &card_body);
+    card = verb_card("REPLAY THE AUTHENTICATION", &card_body);
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(card_body),
-            mod_arg_row_prefilled(state, module_id, status, "Replay",
+            mod_arg_row_prefilled(state, module_id, status, "Replay it",
                 "--catcher-auth",
                 "00112233445566778899aabbccddeeff ffeeddccbbaa99887766554433221100",
                 "The RAND first, then the AUTN, both 32 hex digits. A catcher does "
@@ -16713,7 +21540,7 @@ uair_build_downlink(AppState *state, const char *module_id,
        for a SIM you own. The primitive is checked against TS 35.208 set 1
        elsewhere in the tree, so this card spends no new claim: it shows the AUTN
        that set fixes, from that set's own key and RAND. */
-    card = verb_card("AUTHENTICATION FROM A KEY", &card_body);
+    card = verb_card("PROVE A CARD FROM A KEY", &card_body);
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
@@ -16746,7 +21573,7 @@ uair_build_downlink(AppState *state, const char *module_id,
        with. The request is the message that opens a connection, the preamble is
        what announces it on the RACH, and the message part is the slot structure
        that carries it. */
-    card = verb_card("UPLINK", &card_body);
+    card = verb_card("READ THE UPLINK", &card_body);
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
@@ -16755,7 +21582,7 @@ uair_build_downlink(AppState *state, const char *module_id,
             "preamble is 4096 chips at 3.84 Mcps; the message part is the slot "
             "structure, not a waveform."));
         gtk_box_append(GTK_BOX(card_body),
-            mod_arg_choices(state, module_id, status, "Piece",
+            mod_arg_choices(state, module_id, status, "Read one piece",
                 "A piece to build, or the pinned uplink vectors",
                 "The three things a handset sends, and what each answers with.",
                 (const char *[]) { "--uplink request --tmsi 12345678",
@@ -16773,10 +21600,10 @@ uair_build_downlink(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry uair_entries[] = {
-    { "Decode", "dialog-information-symbolic", NULL, uair_build_decode },
-    { "Integrity", "channel-secure-symbolic", NULL, uair_build_integrity },
-    { "Messages", "document-send-symbolic", NULL, uair_build_messages },
-    { "Downlink", "network-transmit-receive-symbolic", NULL, uair_build_downlink },
+    { "Read a message", "dialog-information-symbolic", NULL, uair_build_decode },
+    { "Check checksum", "channel-secure-symbolic", NULL, uair_build_integrity },
+    { "Build a message", "document-send-symbolic", NULL, uair_build_messages },
+    { "Pretend to be a tower", "network-transmit-receive-symbolic", NULL, uair_build_downlink },
 };
 /* 09_lte_attach — LTE Attach Forge.
  *
@@ -16794,13 +21621,13 @@ latt_build_attach(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("ATTACH",
+    GtkWidget *outer = radio_view_shell("HOW A HANDSET ATTACHES",
         "The request that starts a session, built byte for byte, and the same "
         "bytes read back as fields.", &body);
     GtkWidget *enc_body, *dec_body, *stack_body;
     GtkWidget *enc = verb_card("BUILD A REQUEST", &enc_body);
     GtkWidget *dec = verb_card("READ A MESSAGE", &dec_body);
-    GtkWidget *stack = verb_card("UE STACK", &stack_body);
+    GtkWidget *stack = verb_card("READ THE UE STACK", &stack_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -16856,9 +21683,9 @@ latt_build_identity(AppState *state, const char *module_id,
         "How a subscriber identity is coded on the wire, and the one request that "
         "makes a handset say it in the clear.", &body);
     GtkWidget *enc_body, *dec_body, *exp_body;
-    GtkWidget *enc = verb_card("ENCODE", &enc_body);
-    GtkWidget *dec = verb_card("DECODE", &dec_body);
-    GtkWidget *exp = verb_card("EXPOSURE", &exp_body);
+    GtkWidget *enc = verb_card("BUILD THE MESSAGE", &enc_body);
+    GtkWidget *dec = verb_card("READ A MESSAGE", &dec_body);
+    GtkWidget *exp = verb_card("READ WHAT IS EXPOSED", &exp_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -16911,8 +21738,8 @@ latt_build_identity(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry latt_entries[] = {
-    { "Attach", "dialog-information-symbolic", NULL, latt_build_attach },
-    { "Identity", "auth-smartcard-symbolic", NULL, latt_build_identity },
+    { "How a handset attaches", "dialog-information-symbolic", NULL, latt_build_attach },
+    { "The identity", "auth-smartcard-symbolic", NULL, latt_build_identity },
 };
 /* 10_lte_air — the LTE air interface and the eNB a lab runs against it.
  *
@@ -16924,13 +21751,13 @@ lair_build_read(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("READ",
+    GtkWidget *outer = radio_view_shell("READ THE STATE",
         "A capture decoded from the broadcast channel upwards, and the X2 "
         "signalling between cells.", &body);
     GtkWidget *bch_body, *sib_body, *x2_body;
-    GtkWidget *bch = verb_card("BROADCAST", &bch_body);
-    GtkWidget *sib = verb_card("SYSTEM INFORMATION", &sib_body);
-    GtkWidget *x2 = verb_card("X2", &x2_body);
+    GtkWidget *bch = verb_card("READ THE BROADCAST", &bch_body);
+    GtkWidget *sib = verb_card("READ THE SYSTEM INFORMATION", &sib_body);
+    GtkWidget *x2 = verb_card("READ THE X2 MESSAGES", &x2_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -16970,7 +21797,7 @@ lair_build_read(AppState *state, const char *module_id,
                 "An X2AP message. Handover and load information travel here, which "
                 "is what ties two cells into one network."));
         gtk_box_append(GTK_BOX(x2_body),
-            mod_arg_choices(state, module_id, status, "Setup", "",
+            mod_arg_choices(state, module_id, status, "Check the setup", "",
                 "The X2 setup exchange that pairs two cells, and a hex dump of the "
                 "capture the decode came from.",
                 (const char *[]) { "--x2-setup", "--hex" },
@@ -16989,19 +21816,19 @@ lair_build_messages(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("MESSAGES",
+    GtkWidget *outer = radio_view_shell("BUILD A MESSAGE",
         "The downlink messages a cell sends that move a handset: measurement "
         "control, release, and the warning channel.", &body);
     GtkWidget *dcch_body, *pws_body, *paging_body;
-    GtkWidget *dcch = verb_card("DCCH", &dcch_body);
-    GtkWidget *pws = verb_card("PWS", &pws_body);
-    GtkWidget *paging = verb_card("PAGING", &paging_body);
+    GtkWidget *dcch = verb_card("READ THE DCCH", &dcch_body);
+    GtkWidget *pws = verb_card("READ THE PWS", &pws_body);
+    GtkWidget *paging = verb_card("PAGE A HANDSET", &paging_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(dcch_body),
-            mod_arg_choices(state, module_id, status, "Build", "",
+            mod_arg_choices(state, module_id, status, "Build one", "",
                 "A measurement report with its RSRP and RSRQ, the release that "
                 "moves a handset to another carrier, and the reestablishment "
                 "reject that leaves it with no cell at all.",
@@ -17018,7 +21845,7 @@ lair_build_messages(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(pws_body),
-            mod_arg_choices(state, module_id, status, "Warning message", "",
+            mod_arg_choices(state, module_id, status, "Name the warning", "",
                 "A public warning as SIB10, SIB11 or SIB12. The octets are real; "
                 "whether a cell broadcasts them is a separate question the "
                 "scheduling card answers.",
@@ -17061,16 +21888,16 @@ lair_build_cell(AppState *state, const char *module_id,
         "The eNB this module can start, read and stop, and the scheduling that "
         "decides what it broadcasts.", &body);
     GtkWidget *conf_body, *sched_body, *run_body, *tx_body;
-    GtkWidget *conf = verb_card("CONFIGURATION", &conf_body);
-    GtkWidget *sched = verb_card("SCHEDULING", &sched_body);
-    GtkWidget *run = verb_card("RUN", &run_body);
-    GtkWidget *tx = verb_card("TRANSMIT", &tx_body);
+    GtkWidget *conf = verb_card("READ THE CONFIGURATION", &conf_body);
+    GtkWidget *sched = verb_card("READ THE SCHEDULING", &sched_body);
+    GtkWidget *run = verb_card("RUN IT", &run_body);
+    GtkWidget *tx = verb_card("TRANSMIT IT", &tx_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(conf_body),
-            mod_arg_choices(state, module_id, status, "Generate", "",
+            mod_arg_choices(state, module_id, status, "Generate one", "",
                 "The eNB configuration for a band and an EARFCN, and the core "
                 "network configuration beside it.",
                 (const char *[]) { "--gen-enb-conf --earfcn 6300",
@@ -17084,7 +21911,7 @@ lair_build_cell(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(sched_body),
-            mod_arg_choices(state, module_id, status, "Broadcast", "",
+            mod_arg_choices(state, module_id, status, "Read the broadcast", "",
                 "The configuration that announces a SIB in SIB1, which is what "
                 "decides whether a handset reads it at all. srsRAN 4G release_23_11 "
                 "registers sib1 to sib7, sib9 and sib13 - a SIB10 entry needs its "
@@ -17127,8 +21954,8 @@ lair_build_cell(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry lair_entries[] = {
-    { "Read", "dialog-information-symbolic", NULL, lair_build_read },
-    { "Messages", "document-send-symbolic", NULL, lair_build_messages },
+    { "Read the state", "dialog-information-symbolic", NULL, lair_build_read },
+    { "Build a message", "document-send-symbolic", NULL, lair_build_messages },
     { "Cell", "imsisting-01_radio-symbolic", NULL, lair_build_cell },
 };
 /* 11_lte_core — LTE EPC core.
@@ -17143,13 +21970,13 @@ lcore_build_read(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("READ",
+    GtkWidget *outer = radio_view_shell("READ THE STATE",
         "The three protocols a core speaks to itself: Diameter on S6a, GTP-C on "
         "the control plane, GTP-U on the user plane.", &body);
     GtkWidget *dia_body, *gtpc_body, *gtpu_body;
-    GtkWidget *dia = verb_card("DIAMETER", &dia_body);
-    GtkWidget *gtpc = verb_card("GTP CONTROL", &gtpc_body);
-    GtkWidget *gtpu = verb_card("GTP USER", &gtpu_body);
+    GtkWidget *dia = verb_card("READ THE DIAMETER MESSAGES", &dia_body);
+    GtkWidget *gtpc = verb_card("READ THE GTP CONTROL MESSAGES", &gtpc_body);
+    GtkWidget *gtpu = verb_card("READ THE GTP USER MESSAGES", &gtpu_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -17200,12 +22027,12 @@ lcore_build_build(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("BUILD",
+    GtkWidget *outer = radio_view_shell("BUILD THE MESSAGE",
         "The messages a core accepts from a network that is not its own, built "
         "byte for byte.", &body);
     GtkWidget *s6a_body, *gtp_body;
-    GtkWidget *s6a = verb_card("S6A DIAMETER", &s6a_body);
-    GtkWidget *gtp = verb_card("GTP CONTROL", &gtp_body);
+    GtkWidget *s6a = verb_card("READ THE S6A DIAMETER MESSAGES", &s6a_body);
+    GtkWidget *gtp = verb_card("READ THE GTP CONTROL MESSAGES", &gtp_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -17279,12 +22106,12 @@ lcore_build_encapsulate(AppState *state, const char *module_id,
                         GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("ENCAPSULATION",
+    GtkWidget *outer = radio_view_shell("HOW IT IS ENCAPSULATED",
         "Messages whose payload is another message, and the broadcast session "
         "that has no GTP inside it.", &body);
     GtkWidget *inner_body, *mbms_body;
-    GtkWidget *inner = verb_card("GTP IN GTP", &inner_body);
-    GtkWidget *mbms = verb_card("MBMS SESSION", &mbms_body);
+    GtkWidget *inner = verb_card("READ GTP INSIDE GTP", &inner_body);
+    GtkWidget *mbms = verb_card("READ THE MBMS SESSION", &mbms_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -17335,15 +22162,15 @@ lcore_build_audit(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("AUDIT",
+    GtkWidget *outer = radio_view_shell("WHAT THE AUDIT CHECKS",
         "What a core exposes at its interconnect, and what it does about it.",
         &body);
     GtkWidget *fs20_body, *cdr_body, *echo_body, *surface_body, *plan_body;
-    GtkWidget *fs20 = verb_card("FS.20 CONTROLS", &fs20_body);
-    GtkWidget *cdr = verb_card("CDR ANOMALY", &cdr_body);
-    GtkWidget *echo = verb_card("ECHO ABUSE", &echo_body);
-    GtkWidget *surface = verb_card("ATTACK SURFACE", &surface_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *fs20 = verb_card("READ THE FS.20 CONTROLS", &fs20_body);
+    GtkWidget *cdr = verb_card("FIND AN ANOMALY", &cdr_body);
+    GtkWidget *echo = verb_card("TEST FOR ECHO ABUSE", &echo_body);
+    GtkWidget *surface = verb_card("READ THE ATTACK SURFACE", &surface_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -17404,7 +22231,7 @@ lcore_build_audit(AppState *state, const char *module_id,
 
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(plan_body),
-            mod_arg_choices(state, module_id, status, "Plan", "",
+            mod_arg_choices(state, module_id, status, "Read the plan", "",
                 "What a testbed needs for the named attack, and what to record.",
                 (const char *[]) { "--plan ulr-hijack", "--plan gtp-inject",
                                    "--plan sctp-scan" },
@@ -17445,11 +22272,11 @@ lcore_build_audit(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry lcore_entries[] = {
-    { "Read", "dialog-information-symbolic", NULL, lcore_build_read },
-    { "Build", "document-new-symbolic", NULL, lcore_build_build },
+    { "Read the state", "dialog-information-symbolic", NULL, lcore_build_read },
+    { "Build the message", "document-new-symbolic", NULL, lcore_build_build },
     { "Encapsulation", "network-transmit-receive-symbolic", NULL,
       lcore_build_encapsulate },
-    { "Audit", "system-search-symbolic", NULL, lcore_build_audit },
+    { "What the audit checks", "system-search-symbolic", NULL, lcore_build_audit },
 };
 /* 12_nr_air — NR and the gNB a lab runs.
  *
@@ -17461,13 +22288,13 @@ nair_build_read(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("READ",
+    GtkWidget *outer = radio_view_shell("READ THE STATE",
         "A capture found, decoded and measured: the SSB first, because nothing "
         "else is readable without it.", &body);
     GtkWidget *ssb_body, *dec_body, *prach_body;
-    GtkWidget *ssb = verb_card("SYNCHRONISATION", &ssb_body);
-    GtkWidget *dec = verb_card("DECODE", &dec_body);
-    GtkWidget *prach = verb_card("RANDOM ACCESS", &prach_body);
+    GtkWidget *ssb = verb_card("READ THE SYNCHRONISATION", &ssb_body);
+    GtkWidget *dec = verb_card("READ A MESSAGE", &dec_body);
+    GtkWidget *prach = verb_card("READ RANDOM ACCESS", &prach_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -17486,7 +22313,7 @@ nair_build_read(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(dec_body),
-            mod_arg_choices(state, module_id, status, "Decode", "",
+            mod_arg_choices(state, module_id, status, "Read one", "",
                 "The MIB, SIB1, and any RRC message the capture carries.",
                 (const char *[]) { "--decode-mib", "--decode-sib1",
                                    "--decode-rrc" },
@@ -17518,17 +22345,17 @@ nair_build_send(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SEND",
+    GtkWidget *outer = radio_view_shell("SEND TO A CORE",
         "What a cell can be made to say, and the waveform that carries it.", &body);
     GtkWidget *msg_body, *wave_body;
-    GtkWidget *msg = verb_card("MESSAGES", &msg_body);
-    GtkWidget *wave = verb_card("WAVEFORM", &wave_body);
+    GtkWidget *msg = verb_card("BUILD A MESSAGE", &msg_body);
+    GtkWidget *wave = verb_card("BUILD A WAVEFORM", &wave_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(msg_body),
-            mod_arg_choices(state, module_id, status, "Build", "",
+            mod_arg_choices(state, module_id, status, "Build one", "",
                 "A reconfiguration that moves a handset, and a measurement report "
                 "that gives a cell something to believe.",
                 (const char *[]) { "--build-rrc-reconfig", "--build-meas-report" },
@@ -17564,15 +22391,15 @@ nair_build_cell(AppState *state, const char *module_id,
         "The gNB this module can start and stop, its configuration, and the core "
         "beside it.", &body);
     GtkWidget *conf_body, *run_body, *tx_body;
-    GtkWidget *conf = verb_card("CONFIGURATION", &conf_body);
-    GtkWidget *run = verb_card("RUN", &run_body);
-    GtkWidget *tx = verb_card("TRANSMIT", &tx_body);
+    GtkWidget *conf = verb_card("READ THE CONFIGURATION", &conf_body);
+    GtkWidget *run = verb_card("RUN IT", &run_body);
+    GtkWidget *tx = verb_card("TRANSMIT IT", &tx_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(conf_body),
-            mod_arg_choices(state, module_id, status, "Generate", "",
+            mod_arg_choices(state, module_id, status, "Generate one", "",
                 "The gNB configuration for a band and a bandwidth, and the core "
                 "network configuration beside it.",
                 (const char *[]) { "--gen-gnb-conf --n-rb 51 --scs 30",
@@ -17599,7 +22426,7 @@ nair_build_cell(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(tx_body),
-            mod_arg_row(state, module_id, status, "Transmit",
+            mod_arg_row(state, module_id, status, "Transmit it",
                 "--tx", "/tmp/imsisting/nr_ssb.cf32 cf32 30720000",
                 "A waveform to put on the air, with its format and rate. It needs "
                 "a radio you own and a lawful basis, and it is last on the page for "
@@ -17614,8 +22441,8 @@ nair_build_cell(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry nair_entries[] = {
-    { "Read", "dialog-information-symbolic", NULL, nair_build_read },
-    { "Send", "document-send-symbolic", NULL, nair_build_send },
+    { "Read the state", "dialog-information-symbolic", NULL, nair_build_read },
+    { "Send to a core", "document-send-symbolic", NULL, nair_build_send },
     { "Cell", "imsisting-01_radio-symbolic", NULL, nair_build_cell },
 };
 /* 13_nr_core — 5G core.
@@ -17634,8 +22461,8 @@ ncore_build_services(AppState *state, const char *module_id,
         "What a 5G core advertises to itself: the network functions, their API "
         "roots, and the discovery request one sends for another.", &body);
     GtkWidget *list_body, *disc_body;
-    GtkWidget *list = verb_card("NETWORK FUNCTIONS", &list_body);
-    GtkWidget *disc = verb_card("DISCOVERY", &disc_body);
+    GtkWidget *list = verb_card("READ THE NETWORK FUNCTIONS", &list_body);
+    GtkWidget *disc = verb_card("FIND THE FUNCTIONS", &disc_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -17674,16 +22501,16 @@ ncore_build_decode(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("DECODE",
+    GtkWidget *outer = radio_view_shell("READ A MESSAGE",
         "One message at a time, read as far as its own length fields allow.",
         &body);
     GtkWidget *nas_body, *ngap_body, *pfcp_body, *gtpu_body, *guti_body, *id_body;
-    GtkWidget *nas = verb_card("NAS 5GS", &nas_body);
-    GtkWidget *ngap = verb_card("NGAP", &ngap_body);
-    GtkWidget *pfcp = verb_card("PFCP", &pfcp_body);
-    GtkWidget *gtpu = verb_card("GTP-U", &gtpu_body);
-    GtkWidget *guti = verb_card("5G-GUTI", &guti_body);
-    GtkWidget *id = verb_card("UE ID PAIR", &id_body);
+    GtkWidget *nas = verb_card("READ THE 5GS NAS MESSAGE", &nas_body);
+    GtkWidget *ngap = verb_card("READ THE NGAP MESSAGES", &ngap_body);
+    GtkWidget *pfcp = verb_card("READ THE PFCP MESSAGES", &pfcp_body);
+    GtkWidget *gtpu = verb_card("READ THE GTP-U", &gtpu_body);
+    GtkWidget *guti = verb_card("DECODE THE NETWORK-ASSIGNED ID", &guti_body);
+    GtkWidget *id = verb_card("BUILD THE UE ID PAIR", &id_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -17769,12 +22596,12 @@ ncore_build_crypto(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CRYPTO",
+    GtkWidget *outer = radio_view_shell("KEYS AND CRYPTO",
         "The key ladder a 5G authentication walks, and the one derivation that "
         "places the serving network in it.", &body);
     GtkWidget *flow_body, *k_body;
-    GtkWidget *flow = verb_card("AUTHENTICATION FLOW", &flow_body);
-    GtkWidget *k = verb_card("KSEAF", &k_body);
+    GtkWidget *flow = verb_card("READ THE AUTHENTICATION FLOW", &flow_body);
+    GtkWidget *k = verb_card("DERIVE THE KSEAF", &k_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -17812,20 +22639,20 @@ ncore_build_forge(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("FORGE",
+    GtkWidget *outer = radio_view_shell("FORGE THE MESSAGE",
         "The procedures a core accepts from a node it has not authenticated, "
         "built byte for byte and sent by the operator.", &body);
     GtkWidget *ngap_body, *xn_body, *pfcp_body, *send_body;
-    GtkWidget *ngap = verb_card("NGAP", &ngap_body);
-    GtkWidget *xn = verb_card("XN", &xn_body);
-    GtkWidget *pfcp = verb_card("PFCP", &pfcp_body);
-    GtkWidget *send = verb_card("SEND", &send_body);
+    GtkWidget *ngap = verb_card("READ THE NGAP MESSAGES", &ngap_body);
+    GtkWidget *xn = verb_card("READ THE XN MESSAGES", &xn_body);
+    GtkWidget *pfcp = verb_card("READ THE PFCP MESSAGES", &pfcp_body);
+    GtkWidget *send = verb_card("SEND IT", &send_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(ngap_body),
-            mod_arg_choices(state, module_id, status, "Procedure", "",
+            mod_arg_choices(state, module_id, status, "Read the procedure", "",
                 "Each builds one initiating message with its NAS-PDU or its "
                 "identity list already inside it.",
                 (const char *[]) { "--ngap-initial-ue", "--ngap-downlink-nas",
@@ -17840,7 +22667,7 @@ ncore_build_forge(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(xn_body),
-            mod_arg_choices(state, module_id, status, "Peer handshake", "",
+            mod_arg_choices(state, module_id, status, "Read the peer handshake", "",
                 "Xn rides SCTP 38422 with PPID 61; a message sent with the NGAP "
                 "PPID is dissected as a different protocol.",
                 (const char *[]) { "--xnap-setup", "--xnap-decode" },
@@ -17853,7 +22680,7 @@ ncore_build_forge(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(pfcp_body),
-            mod_arg_choices(state, module_id, status, "Session", "",
+            mod_arg_choices(state, module_id, status, "Read the session", "",
                 "The rules a session is made of, the establishment request that "
                 "carries them, or the GTP-U header that steers the result.",
                 (const char *[]) { "--pfcp-rules", "--pfcp-build",
@@ -17879,7 +22706,7 @@ ncore_build_forge(AppState *state, const char *module_id,
                 "Host and port on UDP 8805. Same arming rule as the NGAP "
                 "sender."));
         gtk_box_append(GTK_BOX(send_body),
-            mod_arg_choices(state, module_id, status, "Plan", "",
+            mod_arg_choices(state, module_id, status, "Read the plan", "",
                 "What a testbed needs for the named attack, and what to record.",
                 (const char *[]) { "--plan n2-expose", "--plan nrf-discovery",
                                    "--plan sepp-bypass", "--plan ipx-attack" },
@@ -17894,10 +22721,10 @@ ncore_build_forge(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry ncore_entries[] = {
-    { "Services", "dialog-information-symbolic", NULL, ncore_build_services },
-    { "Decode", "document-open-symbolic", NULL, ncore_build_decode },
-    { "Crypto", "channel-secure-symbolic", NULL, ncore_build_crypto },
-    { "Forge", "network-transmit-receive-symbolic", NULL, ncore_build_forge },
+    { "The services", "dialog-information-symbolic", NULL, ncore_build_services },
+    { "Read a message", "document-open-symbolic", NULL, ncore_build_decode },
+    { "Keys and crypto", "channel-secure-symbolic", NULL, ncore_build_crypto },
+    { "Forge the message", "network-transmit-receive-symbolic", NULL, ncore_build_forge },
 };
 /* 14_suci — the subscription identifier a 5G core can hide.
  *
@@ -17914,10 +22741,10 @@ suci_build_identity(AppState *state, const char *module_id,
         "The concealed identifier as the air carries it, and the same identifier "
         "with the concealment removed.", &body);
     GtkWidget *build_body, *parse_body, *msin_body, *conceal_body;
-    GtkWidget *build = verb_card("BUILD", &build_body);
-    GtkWidget *parse = verb_card("PARSE", &parse_body);
-    GtkWidget *msin = verb_card("MSIN", &msin_body);
-    GtkWidget *conceal = verb_card("CONCEAL", &conceal_body);
+    GtkWidget *build = verb_card("BUILD ONE", &build_body);
+    GtkWidget *parse = verb_card("READ IT", &parse_body);
+    GtkWidget *msin = verb_card("READ THE SUBSCRIBER NUMBER", &msin_body);
+    GtkWidget *conceal = verb_card("CONCEAL AN IDENTITY", &conceal_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -17985,9 +22812,9 @@ suci_build_keys(AppState *state, const char *module_id,
         "identity, and the check that says whether a home network got it right.",
         &body);
     GtkWidget *gen_body, *hkdf_body, *verify_body;
-    GtkWidget *gen = verb_card("GENERATE", &gen_body);
-    GtkWidget *hkdf = verb_card("DERIVE", &hkdf_body);
-    GtkWidget *verify = verb_card("VERIFY", &verify_body);
+    GtkWidget *gen = verb_card("GENERATE ONE", &gen_body);
+    GtkWidget *hkdf = verb_card("DERIVE THE VALUES", &hkdf_body);
+    GtkWidget *verify = verb_card("VERIFY IT", &verify_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18036,11 +22863,11 @@ suci_build_audit(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("AUDIT",
+    GtkWidget *outer = radio_view_shell("WHAT THE AUDIT CHECKS",
         "What a capture says about linkability, and what a lab needs to test it.",
         &body);
     GtkWidget *audit_body;
-    GtkWidget *audit = verb_card("LINKABILITY", &audit_body);
+    GtkWidget *audit = verb_card("READ THE LINKABILITY", &audit_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18061,9 +22888,9 @@ suci_build_audit(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry suci_entries[] = {
-    { "Identity", "dialog-information-symbolic", NULL, suci_build_identity },
-    { "Keys", "channel-secure-symbolic", NULL, suci_build_keys },
-    { "Audit", "system-search-symbolic", NULL, suci_build_audit },
+    { "The identity", "dialog-information-symbolic", NULL, suci_build_identity },
+    { "The keys", "channel-secure-symbolic", NULL, suci_build_keys },
+    { "What the audit checks", "system-search-symbolic", NULL, suci_build_audit },
 };
 /* 15_downgrade — pushing a handset down a generation.
  *
@@ -18080,16 +22907,16 @@ dwn_build_reject(AppState *state, const char *module_id,
         "The messages that tell a handset its generation is not available here, "
         "built with the cause that decides where it goes next.", &body);
     GtkWidget *att_body, *tau_body, *smc_body, *cause_body;
-    GtkWidget *att = verb_card("ATTACH REJECT", &att_body);
-    GtkWidget *tau = verb_card("TAU REJECT", &tau_body);
-    GtkWidget *smc = verb_card("SECURITY MODE", &smc_body);
-    GtkWidget *cause = verb_card("CAUSES", &cause_body);
+    GtkWidget *att = verb_card("READ WHY AN ATTACH WAS REJECTED", &att_body);
+    GtkWidget *tau = verb_card("READ WHY A TAU WAS REJECTED", &tau_body);
+    GtkWidget *smc = verb_card("READ THE SECURITY MODE COMMAND", &smc_body);
+    GtkWidget *cause = verb_card("READ THE REASONS", &cause_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(att_body),
-            mod_arg_row_prefilled(state, module_id, status, "Build",
+            mod_arg_row_prefilled(state, module_id, status, "Build one",
                 "--build-reject", "attach 15",
                 "The procedure and the cause. The answer is the reject as octets, "
                 "and the cause is the whole of the mechanism: a handset told it is "
@@ -18102,7 +22929,7 @@ dwn_build_reject(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(tau_body),
-            mod_arg_row_prefilled(state, module_id, status, "Build",
+            mod_arg_row_prefilled(state, module_id, status, "Build one",
                 "--build-reject", "tau 12",
                 "The tracking-area update reject. It arrives later in the "
                 "procedure than an attach reject, which is what makes it look like "
@@ -18115,7 +22942,7 @@ dwn_build_reject(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(smc_body),
-            mod_arg_row(state, module_id, status, "Build",
+            mod_arg_row(state, module_id, status, "Build one",
                 "--build-security-mode", "0 0",
                 "A security mode command offering the null cipher and no integrity. "
                 "A handset that accepts it is on the air in the clear."));
@@ -18148,14 +22975,14 @@ dwn_build_path(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("PATH AND DETECTION",
+    GtkWidget *outer = radio_view_shell("DETECT A PATH",
         "The chain a downgrade runs as, the signature it leaves, and what a lab "
         "needs to observe it.", &body);
     GtkWidget *path_body, *det_body, *sib_body, *tx_body;
-    GtkWidget *path = verb_card("PATH", &path_body);
-    GtkWidget *det = verb_card("DETECT", &det_body);
-    GtkWidget *sib = verb_card("SIB1", &sib_body);
-    GtkWidget *tx = verb_card("HANDOFF", &tx_body);
+    GtkWidget *path = verb_card("READ THE PATH", &path_body);
+    GtkWidget *det = verb_card("DETECT ONE", &det_body);
+    GtkWidget *sib = verb_card("READ THE SYSTEM BLOCK TYPE 1", &sib_body);
+    GtkWidget *tx = verb_card("READ THE HANDOFF", &tx_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18173,7 +23000,7 @@ dwn_build_path(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(det_body),
-            mod_arg_row(state, module_id, status, "Detect",
+            mod_arg_row(state, module_id, status, "Detect one",
                 "--detect", "capture.pcap",
                 "The findings in a capture: a reject whose cause moves a device, "
                 "and the fallback that follows it."));
@@ -18213,8 +23040,8 @@ dwn_build_path(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry dwn_entries[] = {
-    { "Rejects", "dialog-information-symbolic", NULL, dwn_build_reject },
-    { "Path and Detection", "system-search-symbolic", NULL, dwn_build_path },
+    { "The rejects", "dialog-information-symbolic", NULL, dwn_build_reject },
+    { "Detect a path", "system-search-symbolic", NULL, dwn_build_path },
 };
 /* 16_sim — the card itself.
  *
@@ -18233,7 +23060,7 @@ sim_build_apdu(AppState *state, const char *module_id,
     GtkWidget *parse_body, *build_body, *resp_body;
     GtkWidget *parse = verb_card("READ ONE", &parse_body);
     GtkWidget *build = verb_card("BUILD ONE", &build_body);
-    GtkWidget *resp = verb_card("GET RESPONSE", &resp_body);
+    GtkWidget *resp = verb_card("READ THE RESPONSE", &resp_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18287,10 +23114,10 @@ sim_build_files(AppState *state, const char *module_id,
         "The card's file system as commands: select a file, read it, and say "
         "what a file id is.", &body);
     GtkWidget *sel_body, *bin_body, *rec_body, *id_body;
-    GtkWidget *sel = verb_card("SELECT", &sel_body);
+    GtkWidget *sel = verb_card("SELECT ONE", &sel_body);
     GtkWidget *bin = verb_card("READ BINARY", &bin_body);
     GtkWidget *rec = verb_card("READ RECORD", &rec_body);
-    GtkWidget *id = verb_card("FILE ID", &id_body);
+    GtkWidget *id = verb_card("READ THE FILE ID", &id_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18351,13 +23178,13 @@ sim_build_decode(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CONTENTS",
+    GtkWidget *outer = radio_view_shell("WHAT IS INSIDE",
         "The three transparent files that identify a card and its subscriber,",
         &body);
     GtkWidget *iccid_body, *imsi_body, *ad_body;
-    GtkWidget *iccid = verb_card("ICCID", &iccid_body);
-    GtkWidget *imsi = verb_card("IMSI", &imsi_body);
-    GtkWidget *ad = verb_card("EF AD", &ad_body);
+    GtkWidget *iccid = verb_card("READ THE CARD SERIAL", &iccid_body);
+    GtkWidget *imsi = verb_card("READ THE SUBSCRIBER IDENTITY", &imsi_body);
+    GtkWidget *ad = verb_card("READ THE CARD'S SETTINGS", &ad_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18407,14 +23234,14 @@ sim_build_ota(AppState *state, const char *module_id,
               GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("OTA",
+    GtkWidget *outer = radio_view_shell("OVER THE AIR",
         "The channel that reaches a card without touching it: a binary SMS the "
         "card accepts, and the keys that decide what it accepts.", &body);
     GtkWidget *parse_body, *spi_body, *rsp_body, *plan_body;
     GtkWidget *parse = verb_card("READ A MESSAGE", &parse_body);
-    GtkWidget *spi = verb_card("SPI", &spi_body);
-    GtkWidget *rsp = verb_card("RSP ROLES", &rsp_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *spi = verb_card("READ THE SPI", &spi_body);
+    GtkWidget *rsp = verb_card("READ THE RSP ROLES", &rsp_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18464,7 +23291,7 @@ sim_build_ota(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(plan_body),
-            mod_arg_choices(state, module_id, status, "Plan", "",
+            mod_arg_choices(state, module_id, status, "Read the plan", "",
                 "What each path needs before it can be attempted, and what to "
                 "record while it runs.",
                 (const char *[]) { "--plan ota-replay", "--plan sat-wib",
@@ -18486,14 +23313,14 @@ sim_build_auth(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("AUTHENTICATION",
+    GtkWidget *outer = radio_view_shell("HOW A CARD PROVES ITSELF",
         "The algorithms a card runs, checked against the standards' own test "
         "vectors, and the requests a profile download starts with.", &body);
     GtkWidget *check_body, *milenage_body, *es9_body, *dpa_body;
-    GtkWidget *check = verb_card("STANDARD VECTORS", &check_body);
-    GtkWidget *milenage = verb_card("MILENAGE", &milenage_body);
-    GtkWidget *es9 = verb_card("ES9+", &es9_body);
-    GtkWidget *dpa = verb_card("SIDE CHANNEL", &dpa_body);
+    GtkWidget *check = verb_card("READ THE STANDARD VECTORS", &check_body);
+    GtkWidget *milenage = verb_card("READ THE MILENAGE", &milenage_body);
+    GtkWidget *es9 = verb_card("READ THE ES9+ EXCHANGE", &es9_body);
+    GtkWidget *dpa = verb_card("READ THE SIDE CHANNEL", &dpa_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18570,7 +23397,7 @@ sim_build_esim(AppState *state, const char *module_id,
     GtkWidget *build = verb_card("BUILD A SEGMENT", &build_body);
     GtkWidget *parse = verb_card("READ A PACKAGE", &parse_body);
     GtkWidget *resp = verb_card("READ A RESPONSE", &resp_body);
-    GtkWidget *note = verb_card("NOTIFICATION", &note_body);
+    GtkWidget *note = verb_card("READ THE NOTIFICATION", &note_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18636,12 +23463,12 @@ sim_build_esim(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry sim_entries[] = {
-    { "Commands", "dialog-information-symbolic", NULL, sim_build_apdu },
-    { "Files", "document-open-symbolic", NULL, sim_build_files },
-    { "Contents", "auth-smartcard-symbolic", NULL, sim_build_decode },
-    { "OTA", "document-send-symbolic", NULL, sim_build_ota },
-    { "Authentication", "security-high-symbolic", NULL, sim_build_auth },
-    { "eSIM RSP", "auth-smartcard-symbolic", NULL, sim_build_esim },
+    { "The commands", "dialog-information-symbolic", NULL, sim_build_apdu },
+    { "The files", "document-open-symbolic", NULL, sim_build_files },
+    { "What is inside", "auth-smartcard-symbolic", NULL, sim_build_decode },
+    { "Over the air", "document-send-symbolic", NULL, sim_build_ota },
+    { "How a card proves itself", "security-high-symbolic", NULL, sim_build_auth },
+    { "The eSIM provisioning", "auth-smartcard-symbolic", NULL, sim_build_esim },
 };
 /* 17_pcap_analysis — capture analysis.
  *
@@ -18656,12 +23483,12 @@ pcap_build_capture(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CAPTURE",
+    GtkWidget *outer = radio_view_shell("READ A CAPTURE",
         "What is in the file: its format and byte order, its frames, and what one "
         "frame carries.", &body);
     GtkWidget *sum_body, *list_body, *ext_body;
-    GtkWidget *sum = verb_card("SUMMARY", &sum_body);
-    GtkWidget *list = verb_card("FRAMES", &list_body);
+    GtkWidget *sum = verb_card("READ THE SUMMARY", &sum_body);
+    GtkWidget *list = verb_card("READ THE FRAMES", &list_body);
     GtkWidget *ext = verb_card("ONE FRAME", &ext_body);
 
     {
@@ -18714,8 +23541,8 @@ pcap_build_flows(AppState *state, const char *module_id,
     GtkWidget *outer = radio_view_shell("FLOWS",
         "Which endpoints talked to which, and what rides inside what.", &body);
     GtkWidget *conv_body, *hier_body;
-    GtkWidget *conv = verb_card("CONVERSATIONS", &conv_body);
-    GtkWidget *hier = verb_card("ENCAPSULATION", &hier_body);
+    GtkWidget *conv = verb_card("READ THE CONVERSATIONS", &conv_body);
+    GtkWidget *hier = verb_card("READ THE ENCAPSULATION", &hier_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18756,8 +23583,8 @@ pcap_build_identities(AppState *state, const char *module_id,
         "The subscriber identities a capture carries, and which of them are worth "
         "recording.", &body);
     GtkWidget *id_body, *list_body;
-    GtkWidget *id = verb_card("IDENTITIES", &id_body);
-    GtkWidget *list = verb_card("DISTINCT", &list_body);
+    GtkWidget *id = verb_card("READ THE IDENTITIES", &id_body);
+    GtkWidget *list = verb_card("COUNT THE DISTINCT", &list_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18794,7 +23621,7 @@ pcap_build_sample(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SAMPLE",
+    GtkWidget *outer = radio_view_shell("BUILD A SAMPLE",
         "A capture to work on when there is none, and the one act on this page "
         "that cannot be undone.", &body);
     GtkWidget *mk_body, *clear_body;
@@ -18833,10 +23660,10 @@ pcap_build_sample(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry pcap_entries[] = {
-    { "Capture", "dialog-information-symbolic", NULL, pcap_build_capture },
-    { "Flows", "network-transmit-receive-symbolic", NULL, pcap_build_flows },
-    { "Identities", "auth-smartcard-symbolic", NULL, pcap_build_identities },
-    { "Sample", "preferences-system-symbolic", NULL, pcap_build_sample },
+    { "Read a capture", "dialog-information-symbolic", NULL, pcap_build_capture },
+    { "The flows", "network-transmit-receive-symbolic", NULL, pcap_build_flows },
+    { "The identities", "auth-smartcard-symbolic", NULL, pcap_build_identities },
+    { "Build a sample", "preferences-system-symbolic", NULL, pcap_build_sample },
 };
 /* 18_imsi_exposure — who has been asking.
  *
@@ -18849,13 +23676,13 @@ imsi_build_harvest(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("HARVEST",
+    GtkWidget *outer = radio_view_shell("HARVEST THE IDENTITIES",
         "What a capture or a log contributes, and which identities it puts in the "
         "record.", &body);
     GtkWidget *harvest_body, *msgs_body, *marlin_body;
-    GtkWidget *harvest = verb_card("FILE", &harvest_body);
-    GtkWidget *msgs = verb_card("MESSAGES", &msgs_body);
-    GtkWidget *marlin = verb_card("MARLIN", &marlin_body);
+    GtkWidget *harvest = verb_card("READ THE FILE", &harvest_body);
+    GtkWidget *msgs = verb_card("BUILD A MESSAGE", &msgs_body);
+    GtkWidget *marlin = verb_card("READ THE MARLIN RATIO", &marlin_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18908,10 +23735,10 @@ imsi_build_findings(AppState *state, const char *module_id,
         "The identities in the record, what they map to, and which of them cross "
         "a network boundary they should not.", &body);
     GtkWidget *ids_body, *subs_body, *exp_body, *cross_body;
-    GtkWidget *ids = verb_card("IDENTITIES", &ids_body);
-    GtkWidget *subs = verb_card("SUBSCRIBERS", &subs_body);
-    GtkWidget *exp = verb_card("EXPOSURE", &exp_body);
-    GtkWidget *cross = verb_card("CROSSINGS", &cross_body);
+    GtkWidget *ids = verb_card("READ THE IDENTITIES", &ids_body);
+    GtkWidget *subs = verb_card("READ THE SUBSCRIBERS", &subs_body);
+    GtkWidget *exp = verb_card("READ WHAT IS EXPOSED", &exp_body);
+    GtkWidget *cross = verb_card("READ THE CROSSINGS", &cross_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -18977,12 +23804,12 @@ imsi_build_response(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("RESPONSE",
+    GtkWidget *outer = radio_view_shell("READ A RESPONSE",
         "What to do with the record: report it, redact it, or forget it.", &body);
     GtkWidget *report_body, *redact_body, *clear_body;
-    GtkWidget *report = verb_card("REPORT", &report_body);
-    GtkWidget *redact = verb_card("REDACT", &redact_body);
-    GtkWidget *clear = verb_card("CLEAR", &clear_body);
+    GtkWidget *report = verb_card("READ THE REPORT", &report_body);
+    GtkWidget *redact = verb_card("MASK THE IDENTITIES", &redact_body);
+    GtkWidget *clear = verb_card("CLEAR WHAT IS STORED", &clear_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -19029,9 +23856,9 @@ imsi_build_response(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry imsi_entries[] = {
-    { "Harvest", "dialog-information-symbolic", NULL, imsi_build_harvest },
-    { "Findings", "auth-smartcard-symbolic", NULL, imsi_build_findings },
-    { "Response", "document-save-symbolic", NULL, imsi_build_response },
+    { "Harvest the identities", "dialog-information-symbolic", NULL, imsi_build_harvest },
+    { "The findings", "auth-smartcard-symbolic", NULL, imsi_build_findings },
+    { "Read a response", "document-save-symbolic", NULL, imsi_build_response },
 };
 /* 19_cipher_audit — what the algorithm negotiation gave away.
  *
@@ -19044,13 +23871,13 @@ caud_build_messages(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("MESSAGES",
+    GtkWidget *outer = radio_view_shell("BUILD A MESSAGE",
         "The negotiation itself: what a Security Mode Command asked for, and what "
         "each algorithm it can name is worth.", &body);
     GtkWidget *smc_body, *table_body, *cause_body;
     GtkWidget *smc = verb_card("SECURITY MODE COMMAND", &smc_body);
-    GtkWidget *table = verb_card("ALGORITHMS", &table_body);
-    GtkWidget *cause = verb_card("AUTH CAUSES", &cause_body);
+    GtkWidget *table = verb_card("READ THE ALGORITHMS", &table_body);
+    GtkWidget *cause = verb_card("READ WHAT AN AUTH FAILURE MEANS", &cause_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -19104,10 +23931,10 @@ caud_build_sessions(AppState *state, const char *module_id,
         "The sessions the negotiation belongs to, loaded from a capture or from a "
         "table.", &body);
     GtkWidget *load_body, *pcap_body, *one_body, *auth_body;
-    GtkWidget *load = verb_card("LOAD", &load_body);
-    GtkWidget *pcap = verb_card("FROM A CAPTURE", &pcap_body);
+    GtkWidget *load = verb_card("LOAD FROM FILE", &load_body);
+    GtkWidget *pcap = verb_card("READ IT FROM A CAPTURE", &pcap_body);
     GtkWidget *one = verb_card("ONE SESSION", &one_body);
-    GtkWidget *auth = verb_card("AUTHENTICATION", &auth_body);
+    GtkWidget *auth = verb_card("PROVE A CARD", &auth_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -19172,10 +23999,10 @@ caud_build_findings(AppState *state, const char *module_id,
         "What the sessions add up to: a score, a downgrade, and a sequence number "
         "that can be recovered.", &body);
     GtkWidget *score_body, *down_body, *sqn_body, *clear_body;
-    GtkWidget *score = verb_card("SCORE", &score_body);
-    GtkWidget *down = verb_card("DOWNGRADE", &down_body);
-    GtkWidget *sqn = verb_card("SEQUENCE NUMBER", &sqn_body);
-    GtkWidget *clear = verb_card("CLEAR", &clear_body);
+    GtkWidget *score = verb_card("SCORE IT", &score_body);
+    GtkWidget *down = verb_card("TEST A DOWNGRADE", &down_body);
+    GtkWidget *sqn = verb_card("READ THE SEQUENCE NUMBER", &sqn_body);
+    GtkWidget *clear = verb_card("CLEAR WHAT IS STORED", &clear_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -19232,9 +24059,9 @@ caud_build_findings(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry caud_entries[] = {
-    { "Messages", "dialog-information-symbolic", NULL, caud_build_messages },
-    { "Sessions", "channel-secure-symbolic", NULL, caud_build_sessions },
-    { "Findings", "system-search-symbolic", NULL, caud_build_findings },
+    { "Build a message", "dialog-information-symbolic", NULL, caud_build_messages },
+    { "The sessions", "channel-secure-symbolic", NULL, caud_build_sessions },
+    { "The findings", "system-search-symbolic", NULL, caud_build_findings },
 };
 /* ── The CVE catalogue ───────────────────────────────────────────────────────
 
@@ -19666,8 +24493,8 @@ cve_add_card(AppState *state, const char *module_id, const CveRow *r,
     GtkWidget *card_body;
     GtkWidget *card = verb_card(r->id, &card_body);
     GtkWidget *flow = fkit_flow();
-    GtkWidget *run = gtk_button_new_with_label("Run This Vector");
-    GtkWidget *plan = gtk_button_new_with_label("Add To Plan");
+    GtkWidget *run = gtk_button_new_with_label("Run the vector");
+    GtkWidget *plan = gtk_button_new_with_label("Add the step to the plan");
     CveResult *res = NULL;
     const char *kind = g_strcmp0(r->kind, "handoff") == 0
         ? "handoff - the far end has to be something this module does not drive"
@@ -19820,9 +24647,9 @@ cve_build_overview(AppState *state, const char *module_id,
     GtkWidget *body;
     GtkWidget *outer = radio_view_shell(title, subtitle, &body);
     GtkWidget *catalogue_body, *run_body, *helpers_body;
-    GtkWidget *catalogue = verb_card("CATALOGUE", &catalogue_body);
+    GtkWidget *catalogue = verb_card("READ THE CATALOGUE", &catalogue_body);
     GtkWidget *one = verb_card("RUN ONE", &run_body);
-    GtkWidget *helper_card = verb_card("HELPERS", &helpers_body);
+    GtkWidget *helper_card = verb_card("READ THE HELPERS", &helpers_body);
     CveResult *cat_res = NULL, *one_res = NULL, *help_res = NULL;
     GtkWidget *cat_result, *one_result, *help_result;
     GtkWidget *banner;
@@ -19876,7 +24703,7 @@ cve_build_overview(AppState *state, const char *module_id,
         static const struct { const char *label; const char *verb; const char *cls; } whole[] = {
             { "List Every Vector", "--list-cves",     "primary" },
             { "Runs",              "--runs-tsv",      "flat" },
-            { "Findings",          "--list-findings", "flat" },
+            { "Read the findings",     "--list-findings", "flat" },
         };
         GtkWidget *flow = fkit_flow();
 
@@ -19954,55 +24781,55 @@ cve_build_overview(AppState *state, const char *module_id,
     }
 
 static const char *const gcve_helpers[] = {
-    "--bcd:BCD:enc or dec, then a value",
-    "--kc:Kc:two 32-digit hex keys, then v1, v2 or v3",
-    "--plan:Plan:a CVE id",
+    "--bcd:BCD: a value to encode or decode",
+    "--kc:Kc: two 32-digit hex keys, then v1, v2 or v3",
+    "--plan:Plan: a CVE id",
     NULL
 };
 static const char *const lcve_helpers[] = {
-    "--teid:TEID:a decimal TEID",
-    "--plmn:PLMN:six hex digits, e.g. 02F801",
-    "--plan:Plan:a CVE id",
+    "--teid:TEID: a decimal tunnel ID",
+    "--plmn:PLMN: six hex digits, e.g. 02F801",
+    "--plan:Plan: a CVE id",
     NULL
 };
 static const char *const ncve_helpers[] = {
-    "--snssai:S-NSSAI:SST, or SST and SD, e.g. 010203",
-    "--plan:Plan:a CVE id",
+    "--snssai:S-NSSAI: SST, or SST and SD, e.g. 010203",
+    "--plan:Plan: a CVE id",
     NULL
 };
 
-CVE_OVERVIEW_VIEW(gcve_view_overview, "GSM CVE CATALOGUE",
+CVE_OVERVIEW_VIEW(gcve_view_overview, "FLAWS RECORDED AGAINST GSM",
     "Every catalogued GSM vulnerability, one card per vector, filed by the part "
     "of the network it lives in.",
-    "IDENTITY", "CVE-2019-15962", TRUE, gcve_helpers)
+    "FLAWS THAT LEAK IDENTITIES", "CVE-2019-15962", TRUE, gcve_helpers)
 
-CVE_CLASS_VIEW(gcve_view_baseband,  "baseband",     "GSM BASEBAND",
+CVE_CLASS_VIEW(gcve_view_baseband,  "baseband",     "FLAWS IN THE GSM MODEM",
     "Vectors that reach the modem's own code rather than the network around it.")
-CVE_CLASS_VIEW(gcve_view_femtocell, "femtocell",    "FEMTOCELL",
+CVE_CLASS_VIEW(gcve_view_femtocell, "femtocell",    "FLAWS IN THE SMALL CELL",
     "Vectors against the small cell that carries the operator's own traffic.")
-CVE_CLASS_VIEW(gcve_view_gprs,      "gprs",         "GPRS",
+CVE_CLASS_VIEW(gcve_view_gprs,      "gprs",         "FLAWS IN GPRS",
     "Vectors in packet data, where a session exists before it is authenticated.")
-CVE_CLASS_VIEW(gcve_view_cipher,    "gsm-cipher",   "GSM CIPHER",
+CVE_CLASS_VIEW(gcve_view_cipher,    "gsm-cipher",   "FLAWS IN THE GSM CIPHER",
     "Vectors against the A5 ciphering this module can already reason about.")
-CVE_CLASS_VIEW(gcve_view_identity,  "identity",     "IDENTITY",
+CVE_CLASS_VIEW(gcve_view_identity,  "identity",     "FLAWS THAT LEAK IDENTITIES",
     "Vectors that make the network give up a subscriber's identity.")
-CVE_CLASS_VIEW(gcve_view_sim_ota,   "sim-ota",      "SIM OTA",
+CVE_CLASS_VIEW(gcve_view_sim_ota,   "sim-ota",      "FLAWS IN CARD UPDATES",
     "Vectors delivered over the air to the card, not to the phone.")
-CVE_CLASS_VIEW(gcve_view_sim_toolkit, "sim-toolkit", "SIM TOOLKIT",
+CVE_CLASS_VIEW(gcve_view_sim_toolkit, "sim-toolkit", "FLAWS IN THE CARD TOOLKIT",
     "Vectors in the card's own application toolkit.")
-CVE_CLASS_VIEW(gcve_view_ss7_map,   "ss7-map",      "SS7 / MAP",
+CVE_CLASS_VIEW(gcve_view_ss7_map,   "ss7-map",      "FLAWS IN SS7 AND MAP",
     "Vectors on the signalling network behind the radio.")
 
 static ModuleSubmenuEntry gcve_entries[] = {
-    { "Overview", "dialog-information-symbolic", NULL, gcve_view_overview },
+    { "The first question", "dialog-information-symbolic", NULL, gcve_view_overview },
     { "Baseband", "imsisting-35_baseband-symbolic", NULL, gcve_view_baseband },
     { "Femtocell", "imsisting-37_femtocell-symbolic", NULL, gcve_view_femtocell },
-    { "GPRS", "imsisting-50_gprs-symbolic", NULL, gcve_view_gprs },
+    { "FLAWS IN GPRS", "imsisting-50_gprs-symbolic", NULL, gcve_view_gprs },
     { "GSM Cipher", "imsisting-19_cipher_audit-symbolic", NULL, gcve_view_cipher },
-    { "Identity", "imsisting-18_imsi_exposure-symbolic", NULL, gcve_view_identity },
-    { "SIM OTA", "imsisting-41_ota_sms-symbolic", NULL, gcve_view_sim_ota },
+    { "The identity", "imsisting-18_imsi_exposure-symbolic", NULL, gcve_view_identity },
+    { "FLAWS IN CARD UPDATES", "imsisting-41_ota_sms-symbolic", NULL, gcve_view_sim_ota },
     { "SIM Toolkit", "imsisting-52_stk-symbolic", NULL, gcve_view_sim_toolkit },
-    { "SS7 / MAP", "imsisting-26_ss7_map-symbolic", NULL, gcve_view_ss7_map },
+    { "FLAWS IN SS7 AND MAP", "imsisting-26_ss7_map-symbolic", NULL, gcve_view_ss7_map },
 };
 /* ── the RANSacked corpus ─────────────────────────────────────────────
    A second catalogue, and a different one from the module's own: the entries
@@ -20127,7 +24954,7 @@ corpus_fill_card(AppState *state, CorpusRow *r, GtkWidget *status, GtkWidget *bo
     GtkWidget *card_body;
     GtkWidget *card = verb_card(r->id, &card_body);
     GtkWidget *flow = fkit_flow();
-    GtkWidget *build = gtk_button_new_with_label("Build This Pattern");
+    GtkWidget *build = gtk_button_new_with_label("Build the pattern");
     CveResult *res = NULL;
     g_autofree char *gen = g_strdup_printf("--gen %s", r->pattern);
 
@@ -20171,10 +24998,10 @@ static GtkWidget *
 cve_corpus_card(AppState *state, const char *module_id, GtkWidget *status)
 {
     GtkWidget *card_body;
-    GtkWidget *card = verb_card("PUBLISHED CORPUS", &card_body);
+    GtkWidget *card = verb_card("READ THE PUBLISHED CORPUS", &card_body);
     GtkWidget *filter_body, *family_body, *lookup_body;
-    GtkWidget *filter_card = verb_card("REACH", &filter_body);
-    GtkWidget *family_card = verb_card("MESSAGE FAMILIES", &family_body);
+    GtkWidget *filter_card = verb_card("READ THE REACH", &filter_body);
+    GtkWidget *family_card = verb_card("READ THE MESSAGE FAMILIES", &family_body);
     GtkWidget *lookup_card = verb_card("ONE ENTRY", &lookup_body);
     CveResult *filter_res = NULL, *family_res = NULL, *lookup_res = NULL;
     GtkWidget *banner;
@@ -20257,92 +25084,92 @@ cve_corpus_card(AppState *state, const char *module_id, GtkWidget *status)
     return card;
 }
 
-CVE_OVERVIEW_VIEW(lcve_view_overview, "LTE CVE CATALOGUE",
+CVE_OVERVIEW_VIEW(lcve_view_overview, "FLAWS RECORDED AGAINST LTE",
     "Every catalogued LTE vulnerability, one card per vector, filed by the part "
     "of the network it lives in.",
     "RRC", "CVE-2017-6975", FALSE, lcve_helpers)
 
-CVE_CLASS_VIEW(lcve_view_nas, "nas", "NAS",
+CVE_CLASS_VIEW(lcve_view_nas, "nas", "FLAWS IN NAS",
     "Vectors in the non-access stratum, the signalling that runs from the "
     "handset to the core and outlives any one base station.")
 
-CVE_CLASS_VIEW(lcve_view_asn1, "asn1", "ASN.1",
+CVE_CLASS_VIEW(lcve_view_asn1, "asn1", "FLAWS IN ASN.1 PARSING",
     "Vectors in the decoders every other LTE interface is built on, so a fault "
     "here is reachable from more than one of them.")
-CVE_CLASS_VIEW(lcve_view_baseband, "baseband", "LTE BASEBAND",
+CVE_CLASS_VIEW(lcve_view_baseband, "baseband", "FLAWS IN THE LTE BASEBAND",
     "Vectors that reach the modem's own code rather than the network around it.")
-CVE_CLASS_VIEW(lcve_view_diameter, "diameter", "DIAMETER",
+CVE_CLASS_VIEW(lcve_view_diameter, "diameter", "FLAWS IN DIAMETER",
     "Vectors on the signalling between the core and the subscriber database.")
-CVE_CLASS_VIEW(lcve_view_epc, "epc", "EPC",
+CVE_CLASS_VIEW(lcve_view_epc, "epc", "FLAWS IN THE PACKET CORE",
     "Vectors against the evolved packet core itself rather than the air around it.")
-CVE_CLASS_VIEW(lcve_view_gtp, "gtp", "GTP",
+CVE_CLASS_VIEW(lcve_view_gtp, "gtp", "FLAWS IN GTP",
     "Vectors in the tunnelling that carries user traffic once a session exists.")
-CVE_CLASS_VIEW(lcve_view_lte_baseband, "lte-baseband", "LTE MODEM",
+CVE_CLASS_VIEW(lcve_view_lte_baseband, "lte-baseband", "FLAWS IN LTE MODEM FIRMWARE",
     "Vectors in the LTE stack a handset runs, reached from the network side.")
-CVE_CLASS_VIEW(lcve_view_paging, "paging", "PAGING",
+CVE_CLASS_VIEW(lcve_view_paging, "paging", "FLAWS IN PAGING",
     "Vectors in the paging that reaches an idle handset.")
-CVE_CLASS_VIEW(lcve_view_sib, "sib", "SIB",
+CVE_CLASS_VIEW(lcve_view_sib, "sib", "FLAWS IN SYSTEM INFORMATION",
     "Vectors in the system information a cell broadcasts to everyone.")
-CVE_CLASS_VIEW(lcve_view_volte, "volte", "VOLTE",
+CVE_CLASS_VIEW(lcve_view_volte, "volte", "FLAWS IN VOICE OVER LTE",
     "Vectors in the IMS stack that carries voice over LTE.")
 
 static ModuleSubmenuEntry lcve_entries[] = {
-    { "Overview", "dialog-information-symbolic", "~--corpus-stats", lcve_view_overview },
-    { "ASN.1", "imsisting-32_nas_signaling-symbolic", NULL, lcve_view_asn1 },
-    { "NAS", "imsisting-32_nas_signaling-symbolic", NULL, lcve_view_nas },
+    { "The first question", "dialog-information-symbolic", "~--corpus-stats", lcve_view_overview },
+    { "FLAWS IN ASN.1 PARSING", "imsisting-32_nas_signaling-symbolic", NULL, lcve_view_asn1 },
+    { "FLAWS IN NAS", "imsisting-32_nas_signaling-symbolic", NULL, lcve_view_nas },
     { "LTE Baseband", "imsisting-35_baseband-symbolic", NULL, lcve_view_baseband },
     { "Diameter", "imsisting-11_lte_core-symbolic", NULL, lcve_view_diameter },
-    { "EPC", "network-server-symbolic", NULL, lcve_view_epc },
-    { "GTP", "imsisting-23_traffic_analysis-symbolic", NULL, lcve_view_gtp },
+    { "The packet core", "network-server-symbolic", NULL, lcve_view_epc },
+    { "FLAWS IN GTP", "imsisting-23_traffic_analysis-symbolic", NULL, lcve_view_gtp },
     { "LTE Modem", "imsisting-54_baseband_exploit-symbolic", NULL, lcve_view_lte_baseband },
-    { "Paging", "imsisting-28_paging_track-symbolic", NULL, lcve_view_paging },
-    { "SIB", "imsisting-10_lte_air-symbolic", NULL, lcve_view_sib },
+    { "Page a handset", "imsisting-28_paging_track-symbolic", NULL, lcve_view_paging },
+    { "FLAWS IN SYSTEM INFORMATION", "imsisting-10_lte_air-symbolic", NULL, lcve_view_sib },
     { "VoLTE", "imsisting-30_volte_ims-symbolic", NULL, lcve_view_volte },
 };
-CVE_OVERVIEW_VIEW(ncve_view_overview, "5G CVE CATALOGUE",
+CVE_OVERVIEW_VIEW(ncve_view_overview, "FLAWS RECORDED AGAINST 5G",
     "Every catalogued 5G vulnerability, one card per vector, filed by the part "
     "of the network it lives in.",
-    "NRF", "CVE-2020-11197", TRUE, ncve_helpers)
+    "FLAWS IN THE NRF", "CVE-2020-11197", TRUE, ncve_helpers)
 
-CVE_CLASS_VIEW(ncve_view_nas, "nas", "NAS",
+CVE_CLASS_VIEW(ncve_view_nas, "nas", "FLAWS IN NAS",
     "Vectors in the 5G non-access stratum, where a message from a stranger's "
     "handset reaches a core function before anything authenticates it.")
 
-CVE_CLASS_VIEW(ncve_view_asn1, "asn1", "ASN.1",
+CVE_CLASS_VIEW(ncve_view_asn1, "asn1", "FLAWS IN ASN.1 PARSING",
     "Vectors in the decoders every other 5G interface is built on, so a fault "
     "here is reachable from more than one of them.")
-CVE_CLASS_VIEW(ncve_view_n2_n4, "n2-n4", "N2 / N4",
+CVE_CLASS_VIEW(ncve_view_n2_n4, "n2-n4", "FLAWS IN N2 AND N4",
     "Vectors on the control and user plane between the radio and the core.")
-CVE_CLASS_VIEW(ncve_view_nr_baseband, "nr-baseband", "NR BASEBAND",
+CVE_CLASS_VIEW(ncve_view_nr_baseband, "nr-baseband", "FLAWS IN THE NR BASEBAND",
     "Vectors that reach the modem's own code rather than the network around it.")
-CVE_CLASS_VIEW(ncve_view_nr_rrc, "nr-rrc", "NR RRC",
+CVE_CLASS_VIEW(ncve_view_nr_rrc, "nr-rrc", "FLAWS IN NR RRC",
     "Vectors in the radio resource control that runs before a session exists.")
-CVE_CLASS_VIEW(ncve_view_nrf, "nrf", "NRF",
+CVE_CLASS_VIEW(ncve_view_nrf, "nrf", "FLAWS IN THE NRF",
     "Vectors against the function registry every other core function trusts.")
-CVE_CLASS_VIEW(ncve_view_sba_http2, "sba-http2", "SBA / HTTP2",
+CVE_CLASS_VIEW(ncve_view_sba_http2, "sba-http2", "FLAWS IN THE SERVICE API",
     "Vectors in the service-based interface itself rather than in a service.")
-CVE_CLASS_VIEW(ncve_view_sepp, "sepp", "SEPP",
+CVE_CLASS_VIEW(ncve_view_sepp, "sepp", "FLAWS IN THE SEPP",
     "Vectors on the interconnect between one operator and the next.")
-CVE_CLASS_VIEW(ncve_view_slicing, "slicing", "SLICING",
+CVE_CLASS_VIEW(ncve_view_slicing, "slicing", "FLAWS IN NETWORK SLICING",
     "Vectors in the isolation that is supposed to keep one slice out of another.")
-CVE_CLASS_VIEW(ncve_view_suci_privacy, "suci-privacy", "SUCI PRIVACY",
+CVE_CLASS_VIEW(ncve_view_suci_privacy, "suci-privacy", "FLAWS THAT LEAK THE SUBSCRIBER ID",
     "Vectors against the concealment of the subscriber's own identity.")
-CVE_CLASS_VIEW(ncve_view_upf_pfcp, "upf-pfcp", "UPF / PFCP",
+CVE_CLASS_VIEW(ncve_view_upf_pfcp, "upf-pfcp", "FLAWS IN THE USER PLANE",
     "Vectors in the session management that programs the user plane function.")
 
 static ModuleSubmenuEntry ncve_entries[] = {
-    { "Overview", "dialog-information-symbolic", NULL, ncve_view_overview },
-    { "ASN.1", "imsisting-32_nas_signaling-symbolic", NULL, ncve_view_asn1 },
-    { "NAS", "imsisting-32_nas_signaling-symbolic", NULL, ncve_view_nas },
-    { "N2 / N4", "imsisting-13_nr_core-symbolic", NULL, ncve_view_n2_n4 },
+    { "The first question", "dialog-information-symbolic", NULL, ncve_view_overview },
+    { "FLAWS IN ASN.1 PARSING", "imsisting-32_nas_signaling-symbolic", NULL, ncve_view_asn1 },
+    { "FLAWS IN NAS", "imsisting-32_nas_signaling-symbolic", NULL, ncve_view_nas },
+    { "FLAWS IN N2 AND N4", "imsisting-13_nr_core-symbolic", NULL, ncve_view_n2_n4 },
     { "NR Baseband", "imsisting-55_nr_inject-symbolic", NULL, ncve_view_nr_baseband },
-    { "NR RRC", "imsisting-12_nr_air-symbolic", NULL, ncve_view_nr_rrc },
-    { "NRF", "imsisting-40_sba_pivot-symbolic", NULL, ncve_view_nrf },
-    { "SBA / HTTP2", "network-workgroup-symbolic", NULL, ncve_view_sba_http2 },
-    { "SEPP", "network-wired-symbolic", NULL, ncve_view_sepp },
+    { "FLAWS IN NR RRC", "imsisting-12_nr_air-symbolic", NULL, ncve_view_nr_rrc },
+    { "FLAWS IN THE NRF", "imsisting-40_sba_pivot-symbolic", NULL, ncve_view_nrf },
+    { "The service API", "network-workgroup-symbolic", NULL, ncve_view_sba_http2 },
+    { "The SEPP", "network-wired-symbolic", NULL, ncve_view_sepp },
     { "Slicing", "imsisting-34_slicing-symbolic", NULL, ncve_view_slicing },
     { "SUCI Privacy", "imsisting-14_suci-symbolic", NULL, ncve_view_suci_privacy },
-    { "UPF / PFCP", "imsisting-23_traffic_analysis-symbolic", NULL, ncve_view_upf_pfcp },
+    { "FLAWS IN THE USER PLANE", "imsisting-23_traffic_analysis-symbolic", NULL, ncve_view_upf_pfcp },
 };
 /* 25_killchain — Cellular Killchain.
  *
@@ -20360,9 +25187,9 @@ kchn_build_chains(AppState *state, const char *module_id,
         "Every recorded chain with its step and hardware counts, and what one of "
         "them resolves to before anything runs.", &body);
     GtkWidget *list_body, *show_body, *add_body;
-    GtkWidget *list = verb_card("CATALOGUE", &list_body);
+    GtkWidget *list = verb_card("READ THE CATALOGUE", &list_body);
     GtkWidget *show = verb_card("RESOLVE ONE", &show_body);
-    GtkWidget *add = verb_card("NEW CHAIN", &add_body);
+    GtkWidget *add = verb_card("ADD A CHAIN", &add_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -20415,13 +25242,13 @@ kchn_build_execution(AppState *state, const char *module_id,
                      GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("EXECUTION",
+    GtkWidget *outer = radio_view_shell("HOW THE RUN EXECUTES",
         "Run a chain against this machine, and read what it recorded afterwards.",
         &body);
     GtkWidget *run_body, *multi_body, *runs_body;
     GtkWidget *run = verb_card("RUN ONE CHAIN", &run_body);
     GtkWidget *multi = verb_card("RUN PER TARGET", &multi_body);
-    GtkWidget *runs = verb_card("RUN HISTORY", &runs_body);
+    GtkWidget *runs = verb_card("READ THE RUN HISTORY", &runs_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -20479,19 +25306,19 @@ kchn_build_control(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CONTROL",
+    GtkWidget *outer = radio_view_shell("CONTROL PLANE",
         "A running chain checks for a pause request between steps, and resumes "
         "from its checkpoint.", &body);
     GtkWidget *pause_body, *state_body;
     GtkWidget *pause = verb_card("PAUSE AND RESUME", &pause_body);
-    GtkWidget *st = verb_card("CHECKPOINT", &state_body);
+    GtkWidget *st = verb_card("READ THE CHECKPOINT", &state_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
 
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(pause_body),
-            mod_arg_choices(state, module_id, status, "Request", "",
+            mod_arg_choices(state, module_id, status, "Read the request", "",
                 "A chain pauses between steps, never inside one: a step that is "
                 "already running is left to finish.",
                 (const char *[]) { "--pause", "--resume" },
@@ -20519,9 +25346,9 @@ kchn_build_control(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry kchn_entries[] = {
-    { "Chains", "dialog-information-symbolic", NULL, kchn_build_chains },
-    { "Execution", "media-playback-start-symbolic", NULL, kchn_build_execution },
-    { "Control", "media-playback-pause-symbolic", NULL, kchn_build_control },
+    { "The chains", "dialog-information-symbolic", NULL, kchn_build_chains },
+    { "How the run executes", "media-playback-start-symbolic", NULL, kchn_build_execution },
+    { "The control plane", "media-playback-pause-symbolic", NULL, kchn_build_control },
 };
 /* 23_traffic_analysis — what a capture says about the people in it.
  *
@@ -20538,8 +25365,8 @@ tana_build_flows(AppState *state, const char *module_id,
         "about the application behind it.", &body);
     GtkWidget *flows_body, *feat_body, *cls_body;
     GtkWidget *flows = verb_card("READ THE FLOWS", &flows_body);
-    GtkWidget *feat = verb_card("FEATURES", &feat_body);
-    GtkWidget *cls = verb_card("CLASSIFY", &cls_body);
+    GtkWidget *feat = verb_card("READ THE FEATURES", &feat_body);
+    GtkWidget *cls = verb_card("CLASSIFY ONE", &cls_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -20569,7 +25396,7 @@ tana_build_flows(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(cls_body),
-            mod_arg_row(state, module_id, status, "Classify",
+            mod_arg_row(state, module_id, status, "Classify one",
                 "--classify", "capture.pcap",
                 "Which application the flow set looks like, on the features rather "
                 "than the ports - a port is what an application says about itself, "
@@ -20592,10 +25419,10 @@ tana_build_store(AppState *state, const char *module_id,
         "The reference set a classification is measured against, and the call "
         "records a capture can yield.", &body);
     GtkWidget *refs_body, *add_body, *calls_body, *clear_body;
-    GtkWidget *refs = verb_card("REFERENCES", &refs_body);
-    GtkWidget *add = verb_card("ADD", &add_body);
-    GtkWidget *calls = verb_card("CALL RECORDS", &calls_body);
-    GtkWidget *clear = verb_card("CLEAR", &clear_body);
+    GtkWidget *refs = verb_card("READ THE REFERENCES", &refs_body);
+    GtkWidget *add = verb_card("ADD ONE", &add_body);
+    GtkWidget *calls = verb_card("READ THE CALL RECORDS", &calls_body);
+    GtkWidget *clear = verb_card("CLEAR WHAT IS STORED", &clear_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -20651,8 +25478,8 @@ tana_build_store(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry tana_entries[] = {
-    { "Flows", "dialog-information-symbolic", NULL, tana_build_flows },
-    { "Store", "preferences-system-symbolic", NULL, tana_build_store },
+    { "The flows", "dialog-information-symbolic", NULL, tana_build_flows },
+    { "The store", "preferences-system-symbolic", NULL, tana_build_store },
 };
 /* 24_rf_fingerprint — the transmitter, not the message.
  *
@@ -20669,9 +25496,9 @@ rff_build_measure(AppState *state, const char *module_id,
         "What can be measured from a capture, and what each measurement needs "
         "before it means anything.", &body);
     GtkWidget *feat_body, *cls_body, *trans_body;
-    GtkWidget *feat = verb_card("FEATURES", &feat_body);
-    GtkWidget *cls = verb_card("CLASSIFY", &cls_body);
-    GtkWidget *trans = verb_card("TRANSIENT", &trans_body);
+    GtkWidget *feat = verb_card("READ THE FEATURES", &feat_body);
+    GtkWidget *cls = verb_card("CLASSIFY ONE", &cls_body);
+    GtkWidget *trans = verb_card("READ THE TRANSIENT", &trans_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -20690,7 +25517,7 @@ rff_build_measure(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(cls_body),
-            mod_arg_row_prefilled(state, module_id, status, "Classify",
+            mod_arg_row_prefilled(state, module_id, status, "Classify one",
                 "--classify", "capture.iq cf32 20000000",
                 "Which recorded signature the capture is nearest, and how far from "
                 "it. A capture near nothing says so rather than being assigned to "
@@ -20726,9 +25553,9 @@ rff_build_signatures(AppState *state, const char *module_id,
         "The signature store: what has been recorded, and what can be added to it.",
         &body);
     GtkWidget *list_body, *add_body, *clear_body;
-    GtkWidget *list = verb_card("STORE", &list_body);
-    GtkWidget *add = verb_card("ADD", &add_body);
-    GtkWidget *clear = verb_card("CLEAR", &clear_body);
+    GtkWidget *list = verb_card("READ THE STORE", &list_body);
+    GtkWidget *add = verb_card("ADD ONE", &add_body);
+    GtkWidget *clear = verb_card("CLEAR WHAT IS STORED", &clear_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -20776,12 +25603,12 @@ rff_build_csi(AppState *state, const char *module_id,
               GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CSI",
+    GtkWidget *outer = radio_view_shell("CHANNEL STATE REPORTS",
         "Channel state information: what a receiver reports about the channel, and "
         "what a change in it means.", &body);
     GtkWidget *parse_body, *motion_body;
-    GtkWidget *parse = verb_card("READ", &parse_body);
-    GtkWidget *motion = verb_card("MOTION", &motion_body);
+    GtkWidget *parse = verb_card("READ THE STATE", &parse_body);
+    GtkWidget *motion = verb_card("DETECT MOTION", &motion_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -20815,10 +25642,10 @@ rff_build_csi(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry rff_entries[] = {
-    { "Measurement", "dialog-information-symbolic", NULL, rff_build_measure },
+    { "The measurement", "dialog-information-symbolic", NULL, rff_build_measure },
     { "Signatures", "imsisting-24_rf_fingerprint-symbolic", NULL,
       rff_build_signatures },
-    { "CSI", "network-wireless-symbolic", NULL, rff_build_csi },
+    { "Channel state reports", "network-wireless-symbolic", NULL, rff_build_csi },
 };
 /* 29_mac_layer — what the scheduler gives away without a key.
  *
@@ -20836,13 +25663,13 @@ macl_build_pdu(AppState *state, const char *module_id,
         "boundary falls.", &body);
     GtkWidget *dec_body, *dci_body;
     GtkWidget *dec = verb_card("READ A PDU", &dec_body);
-    GtkWidget *dci = verb_card("DCI", &dci_body);
+    GtkWidget *dci = verb_card("READ THE DCI", &dci_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(dec_body),
-            mod_arg_row_prefilled(state, module_id, status, "Decode",
+            mod_arg_row_prefilled(state, module_id, status, "Read one",
                 "--decode-mac", "1F11880600000000",
                 "A MAC PDU as hex, then optionally the direction. The answer is "
                 "every subheader with its LCID, its length and the byte range of "
@@ -20874,19 +25701,19 @@ macl_build_schedule(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SCHEDULING",
+    GtkWidget *outer = radio_view_shell("HOW SLOTS ARE SCHEDULED",
         "The cadence a cell grants in: intervals, allocation size and the "
         "application that shape implies.", &body);
     GtkWidget *track_body, *pattern_body, *list_body;
     GtkWidget *track = verb_card("TRACK AN RNTI", &track_body);
     GtkWidget *pattern = verb_card("READ A CAPTURE", &pattern_body);
-    GtkWidget *list = verb_card("A GRANT LIST", &list_body);
+    GtkWidget *list = verb_card("BUILD A GRANT LIST", &list_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(track_body),
-            mod_arg_row(state, module_id, status, "Track",
+            mod_arg_row(state, module_id, status, "Track a handset",
                 "--rnti-track", "capture.pcap",
                 "A capture. Every RNTI and LCID seen is reported with the frames "
                 "it appeared in, which is how a device is followed across a "
@@ -20930,13 +25757,13 @@ macl_build_reference(AppState *state, const char *module_id,
                      GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("REFERENCE",
+    GtkWidget *outer = radio_view_shell("REFERENCE VALUES",
         "The two tables the decoder is built on, and the structural gap that makes "
         "a rewritten bearer invisible to the user plane.", &body);
     GtkWidget *lcid_body, *rnti_body, *gap_body;
-    GtkWidget *lcid = verb_card("LCID", &lcid_body);
-    GtkWidget *rnti = verb_card("RNTI", &rnti_body);
-    GtkWidget *gap = verb_card("INTEGRITY GAP", &gap_body);
+    GtkWidget *lcid = verb_card("READ THE LCID", &lcid_body);
+    GtkWidget *rnti = verb_card("READ THE RNTI", &rnti_body);
+    GtkWidget *gap = verb_card("READ THE INTEGRITY GAP", &gap_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -20982,9 +25809,9 @@ macl_build_reference(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry macl_entries[] = {
-    { "MAC PDU", "dialog-information-symbolic", NULL, macl_build_pdu },
-    { "Scheduling", "system-search-symbolic", NULL, macl_build_schedule },
-    { "Reference", "preferences-system-symbolic", NULL, macl_build_reference },
+    { "The MAC PDU", "dialog-information-symbolic", NULL, macl_build_pdu },
+    { "How slots are scheduled", "system-search-symbolic", NULL, macl_build_schedule },
+    { "The reference values", "preferences-system-symbolic", NULL, macl_build_reference },
 };
 /* 32_nas_signaling — the pre-authentication NAS surface.
  *
@@ -20997,14 +25824,14 @@ nasf_build_read(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("READ",
+    GtkWidget *outer = radio_view_shell("READ THE STATE",
         "What a capture carries: the message mix, the rate, who is in it, and what "
         "each cause code means.", &body);
     GtkWidget *dec_body, *rate_body, *mix_body, *cause_body;
     GtkWidget *dec = verb_card("ONE MESSAGE", &dec_body);
-    GtkWidget *rate = verb_card("RATE", &rate_body);
-    GtkWidget *mix = verb_card("PROCEDURE MIX", &mix_body);
-    GtkWidget *cause = verb_card("CAUSES", &cause_body);
+    GtkWidget *rate = verb_card("READ THE RATE", &rate_body);
+    GtkWidget *mix = verb_card("READ THE PROCEDURE MIX", &mix_body);
+    GtkWidget *cause = verb_card("READ THE REASONS", &cause_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -21068,8 +25895,8 @@ nasf_build_model(AppState *state, const char *module_id,
         "What a storm would cost the network that receives it, and the shape of "
         "the storm itself.", &body);
     GtkWidget *storm_body, *cost_body;
-    GtkWidget *storm = verb_card("STORM PROFILE", &storm_body);
-    GtkWidget *cost = verb_card("COST MODEL", &cost_body);
+    GtkWidget *storm = verb_card("READ THE STORM PROFILE", &storm_body);
+    GtkWidget *cost = verb_card("READ THE COST MODEL", &cost_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -21107,18 +25934,18 @@ nasf_build_messages(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("MESSAGES",
+    GtkWidget *outer = radio_view_shell("BUILD A MESSAGE",
         "The messages a handset accepts before it is authenticated, built octet "
         "for octet. Nothing here is sent.", &body);
     GtkWidget *eps_body, *gs_body;
-    GtkWidget *eps = verb_card("EPS", &eps_body);
-    GtkWidget *gs = verb_card("5GS", &gs_body);
+    GtkWidget *eps = verb_card("READ THE EPS PROCEDURE", &eps_body);
+    GtkWidget *gs = verb_card("READ THE 5G SESSION", &gs_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(eps_body),
-            mod_arg_choices(state, module_id, status, "Message", "",
+            mod_arg_choices(state, module_id, status, "Read the message", "",
                 "A worked vector per message: the cause code and the identity "
                 "type are the two fields that change what the handset does next.",
                 (const char *[]) { "--build-nas eps attach-reject --cause 15",
@@ -21142,7 +25969,7 @@ nasf_build_messages(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(gs_body),
-            mod_arg_choices(state, module_id, status, "5GS", "",
+            mod_arg_choices(state, module_id, status, "Read the 5G session", "",
                 "The 5GMM equivalents. The header is a different length and the "
                 "cause codes are a different table, so they are built, not "
                 "converted.",
@@ -21188,10 +26015,10 @@ nasf_build_plan(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry nasf_entries[] = {
-    { "Read", "dialog-information-symbolic", NULL, nasf_build_read },
-    { "Model", "system-search-symbolic", NULL, nasf_build_model },
-    { "Messages", "document-send-symbolic", NULL, nasf_build_messages },
-    { "Plan", "preferences-system-symbolic", NULL, nasf_build_plan },
+    { "Read the state", "dialog-information-symbolic", NULL, nasf_build_read },
+    { "The model", "system-search-symbolic", NULL, nasf_build_model },
+    { "Build a message", "document-send-symbolic", NULL, nasf_build_messages },
+    { "The plan", "preferences-system-symbolic", NULL, nasf_build_plan },
 };
 /* 26_ss7_map — the signalling network a carrier's peers can query.
  *
@@ -21208,15 +26035,15 @@ ss7_build_queries(AppState *state, const char *module_id,
         "The operations that ask a home location register about a subscriber, "
         "built as octets and named by what they return.", &body);
     GtkWidget *sri_body, *ati_body, *isd_body;
-    GtkWidget *sri = verb_card("ROUTING", &sri_body);
-    GtkWidget *ati = verb_card("IDENTITY", &ati_body);
-    GtkWidget *isd = verb_card("SUBSCRIBER DATA", &isd_body);
+    GtkWidget *sri = verb_card("READ THE ROUTING", &sri_body);
+    GtkWidget *ati = verb_card("READ THE IDENTITY", &ati_body);
+    GtkWidget *isd = verb_card("READ THE SUBSCRIBER DATA", &isd_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(sri_body),
-            mod_arg_choices(state, module_id, status, "Operation", "",
+            mod_arg_choices(state, module_id, status, "Name the operation", "",
                 "Routing for a number, routing for a short message, and the "
                 "register that asks a peer to send everything to you instead.",
                 (const char *[]) { "--build-sri 310150123456789",
@@ -21268,14 +26095,14 @@ ss7_build_decode(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("DECODE",
+    GtkWidget *outer = radio_view_shell("READ A MESSAGE",
         "A capture read from the MSU inwards: the SS7 transport, the TCAP "
         "dialogue, and the MAP operation inside it.", &body);
     GtkWidget *msu_body, *sigtran_body, *tcap_body, *map_body;
-    GtkWidget *msu = verb_card("MSU", &msu_body);
-    GtkWidget *sigtran = verb_card("SIGTRAN", &sigtran_body);
-    GtkWidget *tcap = verb_card("TCAP", &tcap_body);
-    GtkWidget *map = verb_card("MAP", &map_body);
+    GtkWidget *msu = verb_card("READ THE MSU", &msu_body);
+    GtkWidget *sigtran = verb_card("READ THE SIGTRAN MESSAGES", &sigtran_body);
+    GtkWidget *tcap = verb_card("READ THE TCAP MESSAGES", &tcap_body);
+    GtkWidget *map = verb_card("MAP THEM", &map_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -21336,14 +26163,14 @@ ss7_build_analysis(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("ANALYSIS",
+    GtkWidget *outer = radio_view_shell("WHAT THE DATA SAYS",
         "What a capture says about who queried whom, what the fallback reveals, "
         "and how to build the GRX recon itself.", &body);
     GtkWidget *flow_body, *detect_body, *fb_body, *ref_body;
-    GtkWidget *flow = verb_card("FLOW", &flow_body);
-    GtkWidget *detect = verb_card("DETECT", &detect_body);
-    GtkWidget *fb = verb_card("FALLBACK", &fb_body);
-    GtkWidget *ref = verb_card("REFERENCE", &ref_body);
+    GtkWidget *flow = verb_card("READ THE FLOW", &flow_body);
+    GtkWidget *detect = verb_card("DETECT ONE", &detect_body);
+    GtkWidget *fb = verb_card("READ THE FALLBACK", &fb_body);
+    GtkWidget *ref = verb_card("READ THE REFERENCE VALUES", &ref_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -21361,7 +26188,7 @@ ss7_build_analysis(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(detect_body),
-            mod_arg_row(state, module_id, status, "Detect",
+            mod_arg_row(state, module_id, status, "Detect one",
                 "--detect", "capture.pcap",
                 "The findings: a subscriber location asked for by a peer that has "
                 "no reason to ask, and the operations that leak a visited network."));
@@ -21386,7 +26213,7 @@ ss7_build_analysis(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(ref_body),
-            mod_arg_choices(state, module_id, status, "Reference", "",
+            mod_arg_choices(state, module_id, status, "Read the reference", "",
                 "The operation and subsystem tables the decoder is built on, and "
                 "the published recon that reaches further than one query.",
                 (const char *[]) { "--opcode 22", "--ssn 6", "--surface",
@@ -21415,19 +26242,19 @@ ss7_build_sgsap(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SGsAP",
+    GtkWidget *outer = radio_view_shell("SGsAP MESSAGES",
         "The four messages that carry a subscriber between the packet core and "
         "the circuit core, built and read octet by octet.", &body);
     GtkWidget *build_body, *parse_body, *ie_body;
     GtkWidget *build = verb_card("BUILD A MESSAGE", &build_body);
     GtkWidget *parse = verb_card("READ ONE", &parse_body);
-    GtkWidget *ie = verb_card("INFORMATION ELEMENTS", &ie_body);
+    GtkWidget *ie = verb_card("READ THE INFORMATION ELEMENTS", &ie_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(build_body),
-            mod_arg_choices(state, module_id, status, "Message", "",
+            mod_arg_choices(state, module_id, status, "Read the message", "",
                 "A location update, a paging request, a downlink message and the "
                 "service request that follows it. Each is a fixed set of "
                 "information elements, and the element that is missing is what a "
@@ -21478,10 +26305,10 @@ ss7_build_sgsap(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry ss7_entries[] = {
-    { "Queries", "dialog-information-symbolic", NULL, ss7_build_queries },
-    { "Decode", "utilities-terminal-symbolic", NULL, ss7_build_decode },
-    { "Analysis", "system-search-symbolic", NULL, ss7_build_analysis },
-    { "SGsAP", "network-transmit-receive-symbolic", NULL, ss7_build_sgsap },
+    { "The queries", "dialog-information-symbolic", NULL, ss7_build_queries },
+    { "Read a message", "utilities-terminal-symbolic", NULL, ss7_build_decode },
+    { "What the data says", "system-search-symbolic", NULL, ss7_build_analysis },
+    { "The SGsAP messages", "network-transmit-receive-symbolic", NULL, ss7_build_sgsap },
 };
 /* 27_cellular_dns — the DNS a cellular bearer carries.
  *
@@ -21494,7 +26321,7 @@ cdns_build_messages(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("MESSAGES",
+    GtkWidget *outer = radio_view_shell("BUILD A MESSAGE",
         "A DNS message read and written without an external resolver library, "
         "which is what makes a compression pointer visible when it is wrong.",
         &body);
@@ -21552,13 +26379,13 @@ cdns_build_detect(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("DETECTION",
+    GtkWidget *outer = radio_view_shell("WHAT WAS DETECTED",
         "What a capture says about the resolver a bearer chose and whether its "
         "answers were changed.", &body);
     GtkWidget *disc_body, *det_body, *alter_body;
-    GtkWidget *disc = verb_card("RESOLVER DISCOVERY", &disc_body);
-    GtkWidget *det = verb_card("REWRITE SIGNALS", &det_body);
-    GtkWidget *alter = verb_card("THE SEQUENCE", &alter_body);
+    GtkWidget *disc = verb_card("FIND THE RESOLVER", &disc_body);
+    GtkWidget *det = verb_card("REWRITE THE SIGNALS", &det_body);
+    GtkWidget *alter = verb_card("READ THE SEQUENCE", &alter_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -21608,12 +26435,12 @@ cdns_build_options(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("BEARER OPTIONS",
+    GtkWidget *outer = radio_view_shell("WHAT A BEARER CAN CARRY",
         "The protocol configuration options a bearer carries, which is where a "
         "resolver is usually handed to a handset.", &body);
     GtkWidget *pco_body, *plan_body;
-    GtkWidget *pco = verb_card("PROTOCOL OPTIONS", &pco_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *pco = verb_card("READ THE PROTOCOL OPTIONS", &pco_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -21646,9 +26473,9 @@ cdns_build_options(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry cdns_entries[] = {
-    { "Messages", "dialog-information-symbolic", NULL, cdns_build_messages },
-    { "Detection", "system-search-symbolic", NULL, cdns_build_detect },
-    { "Bearer Options", "preferences-system-symbolic", NULL, cdns_build_options },
+    { "Build a message", "dialog-information-symbolic", NULL, cdns_build_messages },
+    { "What was detected", "system-search-symbolic", NULL, cdns_build_detect },
+    { "What a bearer can carry", "preferences-system-symbolic", NULL, cdns_build_options },
 };
 /* 28_paging_track — paging is the one broadcast that says a subscriber is wanted.
  *
@@ -21660,18 +26487,18 @@ pgt_build_paging(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("PAGING",
+    GtkWidget *outer = radio_view_shell("PAGE A HANDSET",
         "The message a network sends to find a device, read and written.", &body);
     GtkWidget *req_body, *parse_body, *cause_body;
     GtkWidget *req = verb_card("BUILD A REQUEST", &req_body);
     GtkWidget *parse = verb_card("READ A RECORD", &parse_body);
-    GtkWidget *cause = verb_card("CAUSE", &cause_body);
+    GtkWidget *cause = verb_card("READ THE REASON", &cause_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(req_body),
-            mod_arg_row_prefilled(state, module_id, status, "Build",
+            mod_arg_row_prefilled(state, module_id, status, "Build one",
                 "--build-paging-req", "0x4E21 1",
                 "An identity and the cause. The answer is the paging record as "
                 "octets - what a device has to be listening for."));
@@ -21714,14 +26541,14 @@ pgt_build_tracking(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("TRACKING",
+    GtkWidget *outer = radio_view_shell("TRACK A HANDSET",
         "A device followed across a capture: who paged it, how often, and the "
         "patterns that make a tracker visible.", &body);
     GtkWidget *hist_body, *storm_body, *flap_body, *det_body;
-    GtkWidget *hist = verb_card("HISTORY", &hist_body);
-    GtkWidget *storm = verb_card("PAGING STORM", &storm_body);
-    GtkWidget *flap = verb_card("FLAPPING", &flap_body);
-    GtkWidget *det = verb_card("DETECT", &det_body);
+    GtkWidget *hist = verb_card("READ THE HISTORY", &hist_body);
+    GtkWidget *storm = verb_card("SIZE A PAGING STORM", &storm_body);
+    GtkWidget *flap = verb_card("READ THE FLAPPING", &flap_body);
+    GtkWidget *det = verb_card("DETECT ONE", &det_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -21765,7 +26592,7 @@ pgt_build_tracking(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(det_body),
-            mod_arg_row(state, module_id, status, "Detect",
+            mod_arg_row(state, module_id, status, "Detect one",
                 "--detect", "capture.pcap",
                 "The findings: paging for an identity that never answers, and the "
                 "causes that give a tracker away."));
@@ -21783,14 +26610,14 @@ pgt_build_torpedo(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("TORPEDO",
+    GtkWidget *outer = radio_view_shell("PAGE A HANDSET OFF THE NETWORK",
         "The paging channel as a delivery mechanism: what reaches a handset that "
         "never answered, and what a lab needs to try it.", &body);
     GtkWidget *torp_body, *edrx_body, *pei_body, *tx_body;
-    GtkWidget *torp = verb_card("MODEL", &torp_body);
-    GtkWidget *edrx = verb_card("eDRX", &edrx_body);
-    GtkWidget *pei = verb_card("PEI", &pei_body);
-    GtkWidget *tx = verb_card("ORIGIN", &tx_body);
+    GtkWidget *torp = verb_card("READ THE MODEL", &torp_body);
+    GtkWidget *edrx = verb_card("READ THE eDRX SETTINGS", &edrx_body);
+    GtkWidget *pei = verb_card("READ THE PEI", &pei_body);
+    GtkWidget *tx = verb_card("READ THE ORIGIN", &tx_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -21835,7 +26662,7 @@ pgt_build_torpedo(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(tx_body),
-            mod_arg_choices(state, module_id, status, "Plan", "",
+            mod_arg_choices(state, module_id, status, "Read the plan", "",
                 "What a paging lab needs, and the transmit path itself, which "
                 "needs a radio you own and a lawful basis.",
                 (const char *[]) { "--plan", "--po 001010000000001 2 gsm",
@@ -21852,9 +26679,9 @@ pgt_build_torpedo(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry pgt_entries[] = {
-    { "Paging", "dialog-information-symbolic", NULL, pgt_build_paging },
-    { "Tracking", "system-search-symbolic", NULL, pgt_build_tracking },
-    { "Torpedo", "security-high-symbolic", NULL, pgt_build_torpedo },
+    { "Page a handset", "dialog-information-symbolic", NULL, pgt_build_paging },
+    { "Track a handset", "system-search-symbolic", NULL, pgt_build_tracking },
+    { "Page a handset off the network", "security-high-symbolic", NULL, pgt_build_torpedo },
 };
 /* 30_volte_ims — the IMS core a carrier puts voice behind.
  *
@@ -21867,7 +26694,7 @@ vims_build_sip(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SIP",
+    GtkWidget *outer = radio_view_shell("SIP MESSAGES",
         "A SIP message read and built. The headers decide routing, and a message "
         "that parses is not the same as a message the core will act on.", &body);
     GtkWidget *parse_body, *build_body;
@@ -21908,14 +26735,14 @@ vims_build_registration(AppState *state, const char *module_id,
                         GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("REGISTRATION",
+    GtkWidget *outer = radio_view_shell("HOW REGISTRATION WORKS",
         "Who is registered, how the registration was authenticated, and what the "
         "identity in it gives away.", &body);
     GtkWidget *list_body, *reg_body, *aka_body, *imei_body;
-    GtkWidget *list = verb_card("REGISTRATIONS", &list_body);
-    GtkWidget *reg = verb_card("REGISTER", &reg_body);
-    GtkWidget *aka = verb_card("AKA", &aka_body);
-    GtkWidget *imei = verb_card("IDENTITY LEAK", &imei_body);
+    GtkWidget *list = verb_card("READ THE REGISTRATIONS", &list_body);
+    GtkWidget *reg = verb_card("REGISTER THE NODE", &reg_body);
+    GtkWidget *aka = verb_card("PROVE A CARD WITH AKA", &aka_body);
+    GtkWidget *imei = verb_card("READ THE IDENTITY LEAK", &imei_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -21976,14 +26803,14 @@ vims_build_calls(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CALLS",
+    GtkWidget *outer = radio_view_shell("CALLS BEING HANDLED",
         "Established calls, the media underneath them, and the three attacks that "
         "target the media rather than the signalling.", &body);
     GtkWidget *calls_body, *reuse_body, *ig_body, *flood_body;
-    GtkWidget *calls = verb_card("CALLS", &calls_body);
-    GtkWidget *reuse = verb_card("KEYSTREAM", &reuse_body);
-    GtkWidget *ig = verb_card("IMP4GT", &ig_body);
-    GtkWidget *flood = verb_card("FLOOD", &flood_body);
+    GtkWidget *calls = verb_card("READ THE CALLS", &calls_body);
+    GtkWidget *reuse = verb_card("READ THE KEYSTREAM", &reuse_body);
+    GtkWidget *ig = verb_card("READ THE IMP4GT", &ig_body);
+    GtkWidget *flood = verb_card("SIZE A FLOOD", &flood_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -22005,7 +26832,7 @@ vims_build_calls(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(reuse_body),
-            mod_arg_choices(state, module_id, status, "Media", "",
+            mod_arg_choices(state, module_id, status, "Read the media", "",
                 "Keystream reuse detected in a capture, and the recovery that "
                 "follows from it.",
                 (const char *[]) { "--detect-keystream-reuse capture.pcap",
@@ -22057,9 +26884,9 @@ vims_build_calls(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry vims_entries[] = {
-    { "SIP", "dialog-information-symbolic", NULL, vims_build_sip },
-    { "Registration", "channel-secure-symbolic", NULL, vims_build_registration },
-    { "Calls", "media-playback-start-symbolic", NULL, vims_build_calls },
+    { "The SIP messages", "dialog-information-symbolic", NULL, vims_build_sip },
+    { "How registration works", "channel-secure-symbolic", NULL, vims_build_registration },
+    { "Calls being handled", "media-playback-start-symbolic", NULL, vims_build_calls },
 };
 /* 31_sim_defense — Port-out Risk.
  *
@@ -22074,13 +26901,13 @@ simd_build_detection(AppState *state, const char *module_id,
                      GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("PORT-OUT RISK",
+    GtkWidget *outer = radio_view_shell("IS THE NUMBER BEING PORTED",
         "Evidence that a number is being moved, and the controls a subscriber "
         "can put in place before it is.", &body);
     GtkWidget *score_body, *signals_body, *check_body;
-    GtkWidget *score = verb_card("PORT-OUT SCORE", &score_body);
-    GtkWidget *signals = verb_card("DETECTION SIGNALS", &signals_body);
-    GtkWidget *check = verb_card("SUBSCRIBER CONTROLS", &check_body);
+    GtkWidget *score = verb_card("SCORE THE PORT-OUT", &score_body);
+    GtkWidget *signals = verb_card("READ THE DETECTION SIGNALS", &signals_body);
+    GtkWidget *check = verb_card("READ THE SUBSCRIBER CONTROLS", &check_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -22137,13 +26964,13 @@ simd_build_card(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CARD INSPECTION",
+    GtkWidget *outer = radio_view_shell("INSPECT THE CARD",
         "What a SIM carries and what state its authentication is in. No reader "
         "is opened; every verb works from bytes.", &body);
     GtkWidget *ad_body, *pin_body, *esim_body;
-    GtkWidget *ad = verb_card("EF_AD", &ad_body);
-    GtkWidget *pin = verb_card("PIN AND PUK STATE", &pin_body);
-    GtkWidget *esim = verb_card("eSIM PROFILE", &esim_body);
+    GtkWidget *ad = verb_card("READ THE CARD'S SETTINGS", &ad_body);
+    GtkWidget *pin = verb_card("READ THE PIN AND PUK STATE", &pin_body);
+    GtkWidget *esim = verb_card("READ THE eSIM PROFILE", &esim_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -22198,13 +27025,13 @@ simd_build_attack(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("ATTACK SIMULATION",
+    GtkWidget *outer = radio_view_shell("SIMULATE THE ATTACK",
         "The commands an ADM-key holder sends and the artefact set a port-out "
         "consumes. Every verb builds bytes and stops there.", &body);
     GtkWidget *apdu_body, *art_body, *plan_body;
-    GtkWidget *apdu = verb_card("CARD WRITE APDUs", &apdu_body);
-    GtkWidget *art = verb_card("PORT-OUT ARTEFACTS", &art_body);
-    GtkWidget *plan = verb_card("PORT-OUT TIMELINE", &plan_body);
+    GtkWidget *apdu = verb_card("WRITE TO THE CARD", &apdu_body);
+    GtkWidget *art = verb_card("READ THE PORT-OUT ARTEFACTS", &art_body);
+    GtkWidget *plan = verb_card("READ THE PORT-OUT TIMELINE", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -22257,9 +27084,9 @@ simd_build_attack(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry simd_entries[] = {
-    { "Overview", "dialog-information-symbolic", NULL, simd_build_detection },
-    { "Inspection", "auth-smartcard-symbolic", NULL, simd_build_card },
-    { "Attack Simulation", "security-high-symbolic", NULL, simd_build_attack },
+    { "The first question", "dialog-information-symbolic", NULL, simd_build_detection },
+    { "Inspect the card", "auth-smartcard-symbolic", NULL, simd_build_card },
+    { "Simulate the attack", "security-high-symbolic", NULL, simd_build_attack },
 };
 static void
 mod_arg_clicked(GtkButton *button, gpointer user_data)
@@ -22330,6 +27157,25 @@ mod_card_begin(GtkWidget *result) { mod_card_result = result; }
 static void
 mod_card_end(void) { mod_card_result = NULL; }
 
+/* Mark a control that takes a typed argument.
+ *
+ * The beginner pass needs to know three things about a control, and all three
+ * are facts its builder already has: which verb it runs, whether it insists on
+ * a typed argument, and whether the field is a worked example rather than a
+ * blank. Folding a control later cannot ask the widget back for these, so they
+ * ride along as object data. */
+static GtkWidget *
+mod_arg_mark(GtkWidget *widget, const char *verb, gboolean example)
+{
+    g_object_set_data_full(G_OBJECT(widget), "advance-verb",
+                           g_strdup(verb), g_free);
+    g_object_set_data(G_OBJECT(widget), "advance-typed", GINT_TO_POINTER(TRUE));
+    if (example)
+        g_object_set_data(G_OBJECT(widget), "advance-example",
+                          GINT_TO_POINTER(TRUE));
+    return widget;
+}
+
 static GtkWidget *
 mod_arg_row(AppState *state, const char *module_id, GtkWidget *status,
               const char *button_label, const char *verb,
@@ -22358,11 +27204,17 @@ mod_arg_row(AppState *state, const char *module_id, GtkWidget *status,
 
     gtk_box_append(GTK_BOX(row), entry);
     gtk_box_append(GTK_BOX(row), button);
+    g_object_set_data_full(G_OBJECT(row), "advance-verb",
+                           g_strdup(verb), g_free);
+    g_object_set_data(G_OBJECT(row), "advance-typed", GINT_TO_POINTER(TRUE));
     if (hint == NULL) return row;
 
     column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_box_append(GTK_BOX(column), row);
     gtk_box_append(GTK_BOX(column), fkit_note(hint));
+    g_object_set_data_full(G_OBJECT(column), "advance-verb",
+                           g_strdup(verb), g_free);
+    g_object_set_data(G_OBJECT(column), "advance-typed", GINT_TO_POINTER(TRUE));
     return column;
 }
 
@@ -22400,11 +27252,13 @@ mod_arg_row_prefilled(AppState *state, const char *module_id, GtkWidget *status,
 
     gtk_box_append(GTK_BOX(row), entry);
     gtk_box_append(GTK_BOX(row), button);
+    mod_arg_mark(row, verb, TRUE);
     if (hint == NULL) return row;
 
     column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_box_append(GTK_BOX(column), row);
     gtk_box_append(GTK_BOX(column), fkit_note(hint));
+    mod_arg_mark(column, verb, TRUE);
     return column;
 }
 
@@ -22460,6 +27314,516 @@ mod_arg_choices(AppState *state, const char *module_id, GtkWidget *status,
     gtk_box_append(GTK_BOX(column), row);
     gtk_box_append(GTK_BOX(column), fkit_note(hint));
     return column;
+}
+
+/* ── GOALS: twelve routes through what the toolkit already does ─────────
+ *
+ * A reader who does not know the vocabulary does not want a list of modules;
+ * they want the answer to a question they already have. This page is that list:
+ * twelve questions, each opened into an ordered list of steps, and every step is
+ * a verb that already exists in a module that is already installed. Nothing here
+ * adds a capability. It is a route through the ones there are, written in the
+ * words of the question rather than the words of the tool.
+ *
+ * The page is data: a route names its steps, a step names a module, a verb and
+ * - where the verb needs an argument - one worked example. The builder below
+ * turns that into the same form rows and buttons a module page uses, so a step
+ * answers in its own card exactly as a card elsewhere does.
+ *
+ * tools/check-glossary.sh reads this table and fails if a step names a verb the
+ * module does not document, because a route that points at nothing is a broken
+ * promise rather than a broken button.
+ */
+#define GOALS_PAGE 7   /* the eighth notebook page, after Settings */
+
+typedef struct {
+    const char *module_id;
+    const char *verb;
+    const char *label;     /* the step's own words */
+    const char *example;   /* argument text, or NULL for a one-click verb */
+    const char *hint;      /* the mechanism, never the label */
+} GoalStep;
+
+typedef struct {
+    const char *title;
+    const char *needs;
+    const char *shows;
+    const GoalStep *steps;
+    int n_steps;
+} GoalRoute;
+
+static const GoalStep goal_steps_towers[] = {
+    { "01_radio", "--list-tsv", "List the attached radios",
+      NULL,
+      "Each SDR by driver, serial and state. Nothing is keyed by this step." },
+    { "01_radio", "--status-tsv", "Read the radio in use",
+      NULL,
+      "The selected device, its gain, centre frequency, sample rate and lock "
+      "state." },
+    { "02_cell_recon", "--scan", "Scan the bands for cells",
+      "gsm",
+      "One survey pass over a radio access technology. Every cell heard is "
+      "stored, with the channel number and signal strength it was heard on." },
+    { "04_tower_map", "--survey", "Survey the cells while moving",
+      "lte",
+      "One point per cell, recorded with the current position when a fix "
+      "exists, so the map has distances rather than guesses." },
+    { "04_tower_map", "--export-geojson", "Write the survey as a map",
+      NULL,
+      "GeoJSON for a map tool or a GIS, one feature per surveyed cell." },
+};
+
+static const GoalStep goal_steps_sim[] = {
+    { "16_sim", "--parse-apdu", "Read a card command",
+      "00A40004027F20",
+      "A SELECT for the USIM file 7F20. The answer names the file and its "
+      "length, which is what makes every later card step possible." },
+    { "16_sim", "--decode-iccid", "Decode the card serial",
+      "98280012345678901234",
+      "Ten BCD octets of the card's serial file. The answer is the ICCID, with "
+      "the check digit verified." },
+    { "31_sim_defense", "--pin-state", "Check the PIN counters",
+      NULL,
+      "The PIN and PUK retry counters and the ADM key state, read from the "
+      "card rather than assumed." },
+    { "31_sim_defense", "--ef-ad", "Read the card's own settings",
+      "800001",
+      "The administrative data file in either layout: PIN and PUK states and "
+      "the ADM key flags." },
+};
+
+static const GoalStep goal_steps_port[] = {
+    { "31_sim_defense", "--signals", "List the port-out signals",
+      NULL,
+      "The six signals that separate a number being ported from a card that "
+      "has been lost, with the artefact each one reads." },
+    { "31_sim_defense", "--defence-checklist", "Read the defence checklist",
+      NULL,
+      "What a subscriber can put in place before a port is attempted, in the "
+      "order that leaves a record." },
+    { "31_sim_defense", "--pin-state", "Check the PIN counters",
+      NULL,
+      "A port-out that succeeds while the PIN is untouched is one of the "
+      "strongest signals there is." },
+};
+
+static const GoalStep goal_steps_jamming[] = {
+    { "33_jamming_detect", "--fixture", "Build a reference capture",
+      "clean /tmp/jamd_clean.cf32",
+      "A synthetic capture whose answer is known by construction: a clean "
+      "carrier at a known rate. It is the control the next step is measured "
+      "against." },
+    { "33_jamming_detect", "--analyse", "Measure a capture",
+      "/tmp/jamd_clean.cf32 cf32 20000000",
+      "Noise floor, occupancy and the shape of the spectrum, saved as the "
+      "record every later step reads." },
+    { "33_jamming_detect", "--discriminate", "Decide jamming or congestion",
+      NULL,
+      "Compares the record against the innocent explanations - congestion, a "
+      "coverage hole, a narrowband interferer - before it says jamming." },
+    { "33_jamming_detect", "--report", "Write the report",
+      NULL,
+      "A regulatory report, produced only when the verdict is jamming and "
+      "naming the measurements it rests on." },
+};
+
+static const GoalStep goal_steps_api[] = {
+    { "44_carrier_api", "--plan", "Read the assessment plan",
+      NULL,
+      "The order of the checks, the gate each one passes through, and what it "
+      "does not touch." },
+    { "44_carrier_api", "--report", "Write the report skeleton",
+      NULL,
+      "A section per check and a place for the finding, with no finding "
+      "claimed." },
+    { "44_carrier_api", "--token-bucket", "Test a rate limit",
+      "10 20 100 60",
+      "Ten requests a second, burst twenty, over one hundred requests in "
+      "sixty seconds: the arithmetic of what a limit would allow." },
+};
+
+static const GoalStep goal_steps_capture[] = {
+    { "17_pcap_analysis", "--build-sample", "Build a sample capture",
+      "/tmp/sample.pcap",
+      "A small synthetic capture, so the reading path can be tried with no "
+      "radio and no real traffic." },
+    { "17_pcap_analysis", "--summary", "Read the capture header",
+      "/tmp/sample.pcap",
+      "Global header, frame count and link type: what the file is before it "
+      "is believed." },
+    { "17_pcap_analysis", "--hierarchy", "Count the protocols",
+      "/tmp/sample.pcap",
+      "How many frames each protocol claims, which is how a capture that is "
+      "mostly noise declares itself." },
+    { "17_pcap_analysis", "--identities", "Harvest the identities",
+      "/tmp/sample.pcap",
+      "Every IMSI, IMEI and TMSI in the capture, into the identity store the "
+      "next route reads." },
+    { "03_gsmtap", "--decode-tsv", "Read the decoded signalling",
+      NULL,
+      "The GSMTAP store as one row per message: channel, frame, message type "
+      "and what carried it." },
+};
+
+static const GoalStep goal_steps_fake[] = {
+    { "18_imsi_exposure", "--marlin-msgs", "Read the exposure catalogue",
+      NULL,
+      "The messages that carry an identity in the clear, and the ones that do "
+      "not, so an absence is not read as a finding." },
+    { "06_gsm_air", "--imsi-exposure-tsv", "Read where identities crossed the air",
+      NULL,
+      "Every point in the store where an IMSI was sent without the network's "
+      "protection." },
+    { "18_imsi_exposure", "--exposure-tsv", "Read the findings",
+      NULL,
+      "One row per finding with its reason and its score." },
+    { "18_imsi_exposure", "--report", "Write the report",
+      NULL,
+      "The full report in the loot directory, with the evidence each finding "
+      "rests on." },
+};
+
+static const GoalStep goal_steps_broadcast[] = {
+    { "02_cell_recon", "--plmn", "Look up an operator",
+      "208-01",
+      "A mobile country and network code to operator and country." },
+    { "10_lte_air", "--earfcn", "Turn a channel number into a frequency",
+      "6300",
+      "Band, downlink and uplink frequencies and the carrier spacing." },
+    { "10_lte_air", "--decode-mib", "Read the master block",
+      "accac00000",
+      "Bandwidth, PHICH configuration and the system frame number: the three "
+      "settings every later block depends on." },
+    { "10_lte_air", "--decode-sib", "Read a system information block",
+      "3",
+      "SIB3 and SIB5 are where a cell states its reselection and neighbour "
+      "rules." },
+};
+
+static const GoalStep goal_steps_identity[] = {
+    { "09_lte_attach", "--encode-attach", "Build an attach request",
+      "310150123456789",
+      "The NAS message as hex, with the PLMN, identity type and tracking area "
+      "derived from the subscriber identity." },
+    { "09_lte_attach", "--decode-nas", "Read the message back",
+      "0741E208090113100521436587F9",
+      "Every information element in the message, including the identity it "
+      "carries and the type it claims to be." },
+    { "16_sim", "--decode-imsi", "Read an IMSI from a card file",
+      "0829154392071483",
+      "EF_IMSI: the length byte, the parity nibble and the digits, checked "
+      "rather than assumed." },
+    { "14_suci", "--msin-decode", "Read a subscriber number",
+      "21436587",
+      "Nibble-swapped BCD back to decimal, with the filler dropped." },
+};
+
+static const GoalStep goal_steps_cipher[] = {
+    { "19_cipher_audit", "--table", "Read the algorithm table",
+      "all",
+      "Every cipher and integrity algorithm with its 3GPP reference and the "
+      "weakness that reference admits." },
+    { "19_cipher_audit", "--score", "Score a negotiated pair",
+      "lte 128-eea2 128-eia2",
+      "The strength of one cipher and integrity pair against the pairs the same "
+      "network could have chosen." },
+    { "19_cipher_audit", "--parse-smc", "Read a security mode command",
+      "0002",
+      "The algorithms the command selects, and whether the selection is a "
+      "downgrade from what the card can do." },
+    { "19_cipher_audit", "--downgrade-check", "Find downgrades",
+      NULL,
+      "Looks through the session store for a session weaker than the card and "
+      "the network both support." },
+};
+
+static const GoalStep goal_steps_lab[] = {
+    { "37_femtocell", "--plan", "Read the lab handoff plan",
+      NULL,
+      "What a lab small cell needs, in order, and which of the steps touch a "
+      "network." },
+    { "37_femtocell", "--sib1", "Write the cell's broadcast settings",
+      "208 01 1 1",
+      "The SIB1 that declares the cell: PLMN, tracking area, cell identity and "
+      "whether the cell is closed." },
+    { "37_femtocell", "--sib9", "Write the home cell's name",
+      "lab-cell",
+      "The SIB9 that carries the home eNodeB name, which is how a handset "
+      "shows the cell to its owner." },
+    { "37_femtocell", "--csg-encode", "Encode a closed group",
+      "1",
+      "A 27-bit closed subscriber group identity as hex, the value a cell uses "
+      "to admit only its own handsets." },
+};
+
+static const GoalStep goal_steps_chain[] = {
+    { "25_killchain", "--list-chains", "List the chains",
+      NULL,
+      "Every chain file with its step count and how many of the steps need "
+      "hardware." },
+    { "25_killchain", "--runs-tsv", "Read the recorded runs",
+      NULL,
+      "One row per run with its outcome, so an earlier run can be compared "
+      "with this one." },
+    { "25_killchain", "--run-status-tsv", "Read the active run's state",
+      NULL,
+      "The checkpoint, the pause state and the step a run would resume from." },
+};
+
+static const GoalRoute goal_routes[] = {
+    { "SEE THE TOWERS AROUND ME",
+      "Needs a radio and a receiver that can hear the bands in use.",
+      "Every cell in range, with its operator, band and signal strength, and "
+      "the survey written as a map.",
+      goal_steps_towers, G_N_ELEMENTS(goal_steps_towers) },
+    { "READ MY OWN SIM",
+      "Needs a card reader and a card.",
+      "The card's serial, its PIN state and the files a handset reads before "
+      "it trusts the network.",
+      goal_steps_sim, G_N_ELEMENTS(goal_steps_sim) },
+    { "CHECK WHETHER MY NUMBER IS BEING PORTED",
+      "Needs no hardware. Every signal is defined before it is observed.",
+      "The six signals in the order they arrive, and the controls that leave a "
+      "record before a port succeeds.",
+      goal_steps_port, G_N_ELEMENTS(goal_steps_port) },
+    { "FIND OUT WHETHER A BAND IS BEING JAMMED",
+      "Needs no hardware for the reference capture; a receiver for a real one.",
+      "A verdict of jamming, congestion or a coverage hole, with the "
+      "measurements it rests on and the report when it is jamming.",
+      goal_steps_jamming, G_N_ELEMENTS(goal_steps_jamming) },
+    { "TEST MY OPERATOR'S API",
+      "Needs the operator's published interface description.",
+      "The checks worth making, in order, and a report that claims no finding "
+      "it has not made.",
+      goal_steps_api, G_N_ELEMENTS(goal_steps_api) },
+    { "CAPTURE AND READ SIGNALLING",
+      "Needs a capture, or the sample this route builds first.",
+      "Every message in the capture, the identities it carries, and the "
+      "protocols it is made of.",
+      goal_steps_capture, G_N_ELEMENTS(goal_steps_capture) },
+    { "WATCH FOR A FAKE TOWER",
+      "Needs a capture taken while the suspect cell was in range.",
+      "Where an identity crossed the air unprotected, scored, with the "
+      "catalogue of messages that do it.",
+      goal_steps_fake, G_N_ELEMENTS(goal_steps_fake) },
+    { "READ WHAT A TOWER BROADCASTS",
+      "Needs no hardware: the blocks are read from bytes in hex.",
+      "A cell's operator, its channel and band, its bandwidth and its "
+      "neighbour rules.",
+      goal_steps_broadcast, G_N_ELEMENTS(goal_steps_broadcast) },
+    { "RECOVER AN IDENTITY",
+      "Needs no hardware: identities are built and read from bytes in hex.",
+      "The identity a message carries, the type it claims, and the subscriber "
+      "number behind it.",
+      goal_steps_identity, G_N_ELEMENTS(goal_steps_identity) },
+    { "AUDIT A CIPHER",
+      "Needs no hardware: the tables are the specification's own.",
+      "Which cipher and integrity algorithms were negotiated, how strong they "
+      "are, and whether the pair is a downgrade.",
+      goal_steps_cipher, G_N_ELEMENTS(goal_steps_cipher) },
+    { "BUILD A FAKE CELL IN A LAB",
+      "Needs a shielded lab and an authorisation before anything transmits.",
+      "The broadcast a small cell would send, byte for byte, and the plan that "
+      "says which step touches a network.",
+      goal_steps_lab, G_N_ELEMENTS(goal_steps_lab) },
+    { "RUN AN ATTACK CHAIN",
+      "Needs the chain files that ship with the toolkit.",
+      "The steps of a chain, the state of the last run and the checkpoint the "
+      "next one resumes from.",
+      goal_steps_chain, G_N_ELEMENTS(goal_steps_chain) },
+};
+
+/* One step, as the same form row a module page uses: the label says what it
+   does, the field holds the worked example, and the mechanism is in the note
+   under it. An argumentless step is one button. */
+static GtkWidget *
+goal_step_row(AppState *state, GtkWidget *status, const GoalStep *step)
+{
+    if (step->example != NULL && *step->example != '\0')
+        return mod_arg_row_prefilled(state, step->module_id, status,
+                                     step->label, step->verb, step->example,
+                                     step->hint);
+    else {
+        GtkWidget *button = gtk_button_new_with_label(step->label);
+        GtkWidget *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+
+        gtk_widget_add_css_class(button, "verb-button");
+        gtk_widget_add_css_class(button, "primary");
+        gtk_widget_set_halign(button, GTK_ALIGN_START);
+        g_object_set_data(G_OBJECT(button), "state", state);
+        g_object_set_data(G_OBJECT(button), "module-id",
+                          (gpointer) step->module_id);
+        g_object_set_data(G_OBJECT(button), "status", status);
+        g_object_set_data_full(G_OBJECT(button), "verb",
+                               g_strdup(step->verb), g_free);
+        g_object_set_data(G_OBJECT(button), "action-label",
+                          (gpointer) step->label);
+        /* The result rectangle is the one mod_card_begin() set for this card,
+           exactly as on a module page, so the answer lands in this card. */
+        if (mod_card_result != NULL)
+            g_object_set_data(G_OBJECT(button), "result", mod_card_result);
+        g_signal_connect(button, "clicked",
+                         G_CALLBACK(group_verb_clicked), NULL);
+        gtk_box_append(GTK_BOX(column), button);
+        gtk_box_append(GTK_BOX(column), fkit_note(step->hint));
+        return column;
+    }
+}
+
+/* Beginner mode is a rebuild, not a repaint: folding happens while a page is
+   built, so a page built under the other setting has to be built again. The
+   view the page was showing is remembered across the rebuild, so a reader who
+   was in the middle of one stays there. */
+static void
+beginner_apply(AppState *state)
+{
+    GtkWidget *pages[16];
+    int n = 0;
+
+    if (state == NULL || state->notebook == NULL) return;
+    int total = gtk_notebook_get_n_pages(GTK_NOTEBOOK(state->notebook));
+
+    for (int i = 0; i < total && n < 16; i++) {
+        GtkWidget *page = gtk_notebook_get_nth_page(
+            GTK_NOTEBOOK(state->notebook), i);
+
+        if (page != NULL && g_object_get_data(G_OBJECT(page), "module-id") != NULL)
+            pages[n++] = g_object_ref(page);
+    }
+    for (int i = 0; i < n; i++) {
+        GtkWidget *page = pages[i];
+        char *module_id = g_strdup(g_object_get_data(G_OBJECT(page),
+                                                     "module-id"));
+        ModulePage *mp = g_object_get_data(G_OBJECT(page), "module-page");
+        const ModuleDefinition *module = dashboard_module(module_id);
+
+        if (mp != NULL && state->pending_view == NULL &&
+            gtk_stack_get_visible_child_name(GTK_STACK(mp->stack)) != NULL)
+            state->pending_view = g_strdup(
+                gtk_stack_get_visible_child_name(GTK_STACK(mp->stack)));
+
+        int index = gtk_notebook_page_num(GTK_NOTEBOOK(state->notebook), page);
+
+        if (index >= 0)
+            gtk_notebook_remove_page(GTK_NOTEBOOK(state->notebook), index);
+
+        /* Removing the page dropped its reference to the module page, which
+           frees what the page held. Reopening builds it under the new
+           setting. */
+        if (module != NULL) open_module(state, module);
+        else g_clear_pointer(&state->pending_view, g_free);
+        g_free(module_id);
+        g_object_unref(page);
+    }
+}
+
+/* What a route needs and what it leaves behind, read from the same chip tables
+   the cards wear rather than written out a second time by hand. A route's need
+   is the strongest prerequisite among its steps; its consequence is the
+   strongest effect, because a route that sends one packet does send packets. */
+static ChipNeed
+goal_route_need(const GoalRoute *route)
+{
+    ChipNeed need = NEED_NO;
+
+    for (int s = 0; s < route->n_steps; s++) {
+        const ChipRow *row = chip_row_for(route->steps[s].module_id,
+                                          route->steps[s].verb);
+
+        if (row != NULL && chip_need_weight(row->need) > chip_need_weight(need))
+            need = row->need;
+    }
+    return need;
+}
+
+static ChipDoes
+goal_route_does(const GoalRoute *route)
+{
+    ChipDoes does = DOES_READS;
+
+    for (int s = 0; s < route->n_steps; s++) {
+        const ChipRow *row = chip_row_for(route->steps[s].module_id,
+                                          route->steps[s].verb);
+
+        if (row != NULL && chip_does_weight(row->does) > chip_does_weight(does))
+            does = row->does;
+    }
+    return does;
+}
+
+static GtkWidget *
+goals_build_page(AppState *state)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("TWELVE QUESTIONS",
+        "Twelve questions, each opened into the steps that answer it. Every "
+        "step runs a module that is already installed; nothing here is a new "
+        "capability, only a route through the ones the toolkit has.", &body);
+    GtkWidget *status = gtk_label_new("idle");
+    GtkWidget *lead = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *lead_cap = gtk_label_new("Last step");
+
+    gtk_widget_add_css_class(status, "status-pill");
+    gtk_widget_add_css_class(status, "status-idle");
+    gtk_widget_add_css_class(lead_cap, "form-caption");
+    gtk_label_set_xalign(GTK_LABEL(lead_cap), 0.0f);
+    gtk_widget_set_size_request(lead_cap, 150, -1);
+    gtk_widget_set_valign(status, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(lead), lead_cap);
+    gtk_box_append(GTK_BOX(lead), status);
+    gtk_box_append(GTK_BOX(body), lead);
+
+    for (guint r = 0; r < G_N_ELEMENTS(goal_routes); r++) {
+        const GoalRoute *route = &goal_routes[r];
+        GtkWidget *card_body;
+        GtkWidget *card = verb_card(route->title, &card_body);
+        GtkWidget *result = result_rect_new(state, NULL);
+        GtkWidget *needs_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        GtkWidget *needs_cap = gtk_label_new("YOU NEED");
+        GtkWidget *shows_cap = gtk_label_new("YOU WILL SEE");
+        ChipNeed need = goal_route_need(route);
+        ChipDoes does = goal_route_does(route);
+
+        gtk_widget_add_css_class(needs_cap, "goal-label");
+        gtk_widget_add_css_class(shows_cap, "goal-label");
+        gtk_label_set_xalign(GTK_LABEL(needs_cap), 0.0f);
+        gtk_label_set_xalign(GTK_LABEL(shows_cap), 0.0f);
+        gtk_widget_set_valign(needs_cap, GTK_ALIGN_CENTER);
+        gtk_box_append(GTK_BOX(needs_row), needs_cap);
+        gtk_box_append(GTK_BOX(needs_row),
+                       chip_label(chip_need_label(need), chip_need_class(need)));
+        gtk_box_append(GTK_BOX(needs_row),
+                       chip_label(chip_does_label(does), chip_does_class(does)));
+        mod_card_begin(result);
+        gtk_box_append(GTK_BOX(card_body), needs_row);
+        gtk_box_append(GTK_BOX(card_body), fkit_note(route->needs));
+        gtk_box_append(GTK_BOX(card_body), shows_cap);
+        gtk_box_append(GTK_BOX(card_body), fkit_note(route->shows));
+        for (int s = 0; s < route->n_steps; s++)
+            gtk_box_append(GTK_BOX(card_body),
+                           goal_step_row(state, status, &route->steps[s]));
+        /* The answer to any step in the route lands here, in this card, the
+           same way a module page answers in the card that ran it. */
+        gtk_box_append(GTK_BOX(card_body), result);
+        mod_card_end();
+        gtk_box_append(GTK_BOX(body), card);
+    }
+
+    /* Chips only, no folding: a route is already the beginner's view of the
+       toolkit, and folding its steps would hide the route. */
+    verb_cards_walk(NULL, outer, NULL);
+
+    /* Twelve routes and their steps are taller than any window, so the page
+       scrolls the way a module page does. */
+    {
+        GtkWidget *scroll = gtk_scrolled_window_new();
+
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+        gtk_widget_set_vexpand(scroll, TRUE);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), outer);
+        return scroll;
+    }
 }
 
 /* --------------------------------------------------------------------------
@@ -22564,17 +27928,17 @@ jamd_build_overview(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("JAMMING DETECT",
+    GtkWidget *outer = radio_view_shell("JAMMING OR CONGESTION",
         "Tell deliberate interference apart from congestion and from a hole in "
         "the coverage -- and, behind a gate, build what a shielded room needs "
         "to prove either half works.", &body);
     GtkWidget *halves_body, *first_body;
-    GtkWidget *halves = verb_card("THE TWO HALVES", &halves_body);
+    GtkWidget *halves = verb_card("READ THE TWO HALVES", &halves_body);
     GtkWidget *first = verb_card("READ THIS BEFORE TRUSTING A NUMBER", &first_body);
     GtkWidget *flow = fkit_flow();
     g_autofree char *summary = jamd_status_summary(module_id);
     GtkWidget *banner = gtk_label_new(summary);
-    GtkWidget *selftest = gtk_button_new_with_label("Verify the Maths");
+    GtkWidget *selftest = gtk_button_new_with_label("Verify the arithmetic");
 
     gtk_widget_add_css_class(banner, "crec-survey-status");
     gtk_label_set_xalign(GTK_LABEL(banner), 0.0f);
@@ -22627,7 +27991,7 @@ jamd_build_capture(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("THE CAPTURE",
+    GtkWidget *outer = radio_view_shell("CAPTURE",
         "What the receiver heard: spectral occupancy, the noise floor, and "
         "whether anything moved.", &body);
     GtkWidget *measure_body, *floor_body;
@@ -22670,7 +28034,7 @@ jamd_build_capture(AppState *state, const char *module_id,
        about any band: it is how you find out whether the analyser is reading
        what it claims to read before you point it at something that matters. */
     GtkWidget *fx_body;
-    GtkWidget *fx = verb_card("OR WRITE A CAPTURE WHOSE ANSWER IS KNOWN", &fx_body);
+    GtkWidget *fx = verb_card("BUILD A CAPTURE WITH A KNOWN ANSWER", &fx_body);
     gtk_box_append(GTK_BOX(fx_body),
         mod_arg_row(state, module_id, status, "Clean Band",
             "--fixture", "clean /tmp/imsisting/jamming_detect/capture.iq cf32 20000000 0.5",
@@ -22702,7 +28066,7 @@ jamd_build_profile(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("THE PROFILE",
+    GtkWidget *outer = radio_view_shell("PROFILE",
         "Narrowband or barrage, how much of the band it takes, and whether it "
         "was present the whole time or only part of it.", &body);
     GtkWidget *name_body, *call_body;
@@ -22748,12 +28112,12 @@ jamd_build_discriminate(AppState *state, const char *module_id,
                         GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("WHOSE TROUBLE IS IT",
+    GtkWidget *outer = radio_view_shell("WHOSE TROUBLE IT IS",
         "Interference, load, or no coverage: three explanations for one set of "
         "bad numbers, separated by what the receiver was doing at the time.",
         &body);
     GtkWidget *verdict_body, *evidence_body;
-    GtkWidget *verdict = verb_card("THE VERDICT", &verdict_body);
+    GtkWidget *verdict = verb_card("READ THE VERDICT", &verdict_body);
     GtkWidget *evidence = verb_card("WHERE THE EVIDENCE COMES FROM", &evidence_body);
 
     gtk_box_append(GTK_BOX(verdict_body),
@@ -22796,7 +28160,7 @@ jamd_build_report(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("THE WRITE-UP",
+    GtkWidget *outer = radio_view_shell("REPORT",
         "A regulator-readable report, produced only when the profile actually "
         "supports one.", &body);
     GtkWidget *write_body;
@@ -22890,8 +28254,8 @@ jamd_build_shapes(AppState *state, const char *module_id,
         "copy of the maths that could disagree with it.", &body);
     GtkWidget *list_body, *pss_body, *ssb_body;
     GtkWidget *list = verb_card("WHAT CAN BE BUILT, AND BY WHAT", &list_body);
-    GtkWidget *pss = verb_card("AN LTE SYNC SIGNAL, AS SAMPLES", &pss_body);
-    GtkWidget *ssb = verb_card("AN NR SSB BURST, AS SAMPLES", &ssb_body);
+    GtkWidget *pss = verb_card("SAMPLE THE LTE SYNC SIGNAL", &pss_body);
+    GtkWidget *ssb = verb_card("SAMPLE THE NR SSB BURST", &ssb_body);
 
     gtk_box_append(GTK_BOX(list_body),
         mod_arg_row(state, module_id, status, "List the Shapes",
@@ -22937,14 +28301,14 @@ jamd_build_gate(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("THE GATE",
+    GtkWidget *outer = radio_view_shell("GATE",
         "What this module refuses, what it accepts, and what has to be true "
         "about the room before the radio is opened.", &body);
     GtkWidget *state_body, *call_body;
     GtkWidget *state_card = verb_card("WHAT THE MODULE SAYS ABOUT ITSELF", &state_body);
     GtkWidget *call = verb_card("WHAT HAPPENS WHEN THE GATE IS ARMED", &call_body);
     GtkWidget *flow = fkit_flow();
-    GtkWidget *status_btn = gtk_button_new_with_label("Read the Gate State");
+    GtkWidget *status_btn = gtk_button_new_with_label("Read the gate state");
     g_autofree char *script = module_script_path(module_id);
     const char *argv[] = { script, "--tx-status", NULL };
     g_autofree char *raw = run_capture(argv);
@@ -23000,14 +28364,14 @@ jamd_build_gate(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry jamd_entries[] = {
-    { "Overview", "dialog-information-symbolic", NULL, jamd_build_overview },
-    { "Capture", "imsisting-01_radio-symbolic", NULL, jamd_build_capture },
+    { "The first question", "dialog-information-symbolic", NULL, jamd_build_overview },
+    { "Read a capture", "imsisting-01_radio-symbolic", NULL, jamd_build_capture },
     { "Profile", "imsisting-24_rf_fingerprint-symbolic", NULL, jamd_build_profile },
     { "Discriminate", "imsisting-23_traffic_analysis-symbolic", NULL, jamd_build_discriminate },
-    { "Report", "document-save-symbolic", NULL, jamd_build_report },
-    { "Waveform", "document-new-symbolic", NULL, jamd_build_waveform },
-    { "Shapes", "network-wireless-symbolic", NULL, jamd_build_shapes },
-    { "The Gate", "security-high-symbolic", NULL, jamd_build_gate },
+    { "The report", "document-save-symbolic", NULL, jamd_build_report },
+    { "Build a waveform", "document-new-symbolic", NULL, jamd_build_waveform },
+    { "The signal shapes", "network-wireless-symbolic", NULL, jamd_build_shapes },
+    { "The gate", "security-high-symbolic", NULL, jamd_build_gate },
 };
 
 /* 34_slicing — network slicing.
@@ -23021,20 +28385,20 @@ slic_build_identity(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SLICE IDENTITY",
+    GtkWidget *outer = radio_view_shell("WHICH SLICE",
         "S-NSSAI as the standard writes it: the slice type, the discriminator "
         "that makes two slices of one type distinct, and the containers that "
         "carry them.", &body);
     GtkWidget *codec_body, *table_body, *nssai_body;
-    GtkWidget *codec = verb_card("ENCODE AND DECODE", &codec_body);
-    GtkWidget *table = verb_card("SLICE TYPES", &table_body);
-    GtkWidget *nssai = verb_card("CONTAINERS", &nssai_body);
+    GtkWidget *codec = verb_card("BUILD AND READ", &codec_body);
+    GtkWidget *table = verb_card("READ THE SLICE TYPES", &table_body);
+    GtkWidget *nssai = verb_card("READ THE CONTAINERS", &nssai_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(codec_body),
-            mod_arg_choices(state, module_id, status, "Identifier", "",
+            mod_arg_choices(state, module_id, status, "Name the identifier", "",
                 "A slice type and an optional discriminator, or the hex the two "
                 "pack into.",
                 (const char *[]) { "--encode-s-nssai 1 000001",
@@ -23084,13 +28448,13 @@ slic_build_qos(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("QOS",
+    GtkWidget *outer = radio_view_shell("QUALITY OF SERVICE",
         "What a flow inside a slice may ask for, and which of those asks the "
         "standard allows.", &body);
     GtkWidget *qi_body, *qi_table_body, *tsn_body, *check_body;
-    GtkWidget *qi = verb_card("5QI", &qi_body);
-    GtkWidget *qi_table = verb_card("5QI TABLE", &qi_table_body);
-    GtkWidget *tsn = verb_card("TSC ASSISTANCE", &tsn_body);
+    GtkWidget *qi = verb_card("READ THE QUALITY CLASS", &qi_body);
+    GtkWidget *qi_table = verb_card("LIST THE QUALITY CLASSES", &qi_table_body);
+    GtkWidget *tsn = verb_card("BUILD TSC ASSISTANCE", &tsn_body);
     GtkWidget *check = verb_card("CHECK A SLICE", &check_body);
 
     {
@@ -23153,15 +28517,15 @@ slic_build_boundary(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("BOUNDARY",
+    GtkWidget *outer = radio_view_shell("WHERE THE BOUNDARY IS",
         "What may cross between slices, and what a capture would have to show for "
         "the crossing to be established.", &body);
     GtkWidget *sel_body, *iso_body, *detect_body, *surface_body, *plan_body;
-    GtkWidget *sel = verb_card("SELECTION", &sel_body);
-    GtkWidget *iso = verb_card("ISOLATION", &iso_body);
-    GtkWidget *detect = verb_card("ANOMALY", &detect_body);
-    GtkWidget *surface = verb_card("SURFACE", &surface_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *sel = verb_card("READ THE SELECTION", &sel_body);
+    GtkWidget *iso = verb_card("TEST ISOLATION", &iso_body);
+    GtkWidget *detect = verb_card("SCORE THE ANOMALY", &detect_body);
+    GtkWidget *surface = verb_card("READ WHAT IS EXPOSED", &surface_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -23231,9 +28595,9 @@ slic_build_boundary(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry slic_entries[] = {
-    { "Slice Identity", "dialog-information-symbolic", NULL, slic_build_identity },
-    { "QoS", "preferences-system-symbolic", NULL, slic_build_qos },
-    { "Boundary", "network-transmit-receive-symbolic", NULL, slic_build_boundary },
+    { "Which slice", "dialog-information-symbolic", NULL, slic_build_identity },
+    { "Quality of service", "preferences-system-symbolic", NULL, slic_build_qos },
+    { "Where the boundary is", "network-transmit-receive-symbolic", NULL, slic_build_boundary },
 };
 /* 35_baseband — Baseband Fuzzing.
  *
@@ -23247,7 +28611,7 @@ bbnd_build_fuzz(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("MUTATION",
+    GtkWidget *outer = radio_view_shell("MUTATE THE MESSAGE",
         "Grammar-aware mutation of an RRC or NAS message, corpus generation and "
         "crash-log triage. Nothing here needs a radio.", &body);
     GtkWidget *mut_body, *corp_body, *triage_body;
@@ -23260,7 +28624,7 @@ bbnd_build_fuzz(AppState *state, const char *module_id,
 
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(mut_body),
-            mod_arg_row(state, module_id, status, "Mutate",
+            mod_arg_row(state, module_id, status, "Mutate it",
                 "--mutate", "4001020304 bitflip 20240101",
                 "The message as hex, the strategy, then the seed. The seed makes "
                 "the run repeatable: the same three arguments give the same "
@@ -23274,7 +28638,7 @@ bbnd_build_fuzz(AppState *state, const char *module_id,
 
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(corp_body),
-            mod_arg_row(state, module_id, status, "Generate",
+            mod_arg_row(state, module_id, status, "Generate one",
                 "--corpus", "4001020304 64 bitflip",
                 "The seed message as hex, how many variants, then the strategy. "
                 "The output names the corpus file it writes."));
@@ -23287,7 +28651,7 @@ bbnd_build_fuzz(AppState *state, const char *module_id,
 
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(triage_body),
-            mod_arg_row(state, module_id, status, "Triage",
+            mod_arg_row(state, module_id, status, "Triage it",
                 "--triage", "crash.log",
                 "An ASAN or UBSAN log, or a path the module reads. Each finding "
                 "names the frame, the access and whether it is reachable from "
@@ -23306,14 +28670,14 @@ bbnd_build_encoding(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("ENCODING",
+    GtkWidget *outer = radio_view_shell("HOW IT IS ENCODED",
         "The codecs a fuzzer needs to build a message by hand: BER/DER length, "
         "the NAS security header, and the protocol-layer reference.", &body);
     GtkWidget *len_body, *dec_body, *hdr_body, *layers_body;
-    GtkWidget *len = verb_card("ASN.1 LENGTH", &len_body);
-    GtkWidget *dec = verb_card("ASN.1 DECODE", &dec_body);
-    GtkWidget *hdr = verb_card("NAS SECURITY HEADER", &hdr_body);
-    GtkWidget *layers = verb_card("PROTOCOL LAYERS", &layers_body);
+    GtkWidget *len = verb_card("READ THE ASN.1 LENGTH", &len_body);
+    GtkWidget *dec = verb_card("READ ASN.1", &dec_body);
+    GtkWidget *hdr = verb_card("READ THE NAS SECURITY HEADER", &hdr_body);
+    GtkWidget *layers = verb_card("READ THE PROTOCOL LAYERS", &layers_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -23381,9 +28745,9 @@ bbnd_build_modem(AppState *state, const char *module_id,
         "The diagnostic channel to a modem you own, and the command file for a "
         "signal generator. Neither keys a radio from this page.", &body);
     GtkWidget *df_body, *ds_body, *rf_body;
-    GtkWidget *df = verb_card("DIAG FRAME", &df_body);
-    GtkWidget *ds = verb_card("WRITE TO MODEM", &ds_body);
-    GtkWidget *rf = verb_card("GENERATOR COMMANDS", &rf_body);
+    GtkWidget *df = verb_card("READ THE DIAG FRAME", &df_body);
+    GtkWidget *ds = verb_card("WRITE TO THE MODEM", &ds_body);
+    GtkWidget *rf = verb_card("READ THE GENERATOR COMMANDS", &rf_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -23449,7 +28813,7 @@ bbnd_build_air(AppState *state, const char *module_id,
 
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(tx_body),
-            mod_arg_row(state, module_id, status, "Prepare",
+            mod_arg_row(state, module_id, status, "Prepare it",
                 "--transmit", "2f010203",
                 "The message as hex, then the framing. The payload is written to "
                 "a file and the run ends as a handoff: the radio step belongs to "
@@ -23491,9 +28855,9 @@ bbnd_build_air(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry bbnd_entries[] = {
-    { "Mutation", "security-high-symbolic", NULL, bbnd_build_fuzz },
-    { "Encoding", "document-open-symbolic", NULL, bbnd_build_encoding },
-    { "Modem Path", "network-transmit-receive-symbolic", NULL, bbnd_build_modem },
+    { "Mutate the message", "security-high-symbolic", NULL, bbnd_build_fuzz },
+    { "How it is encoded", "document-open-symbolic", NULL, bbnd_build_encoding },
+    { "The modem path", "network-transmit-receive-symbolic", NULL, bbnd_build_modem },
     { "Over the Air", "imsisting-01_radio-symbolic", NULL, bbnd_build_air },
 };
 /* 36_vowifi — voice over Wi-Fi, which is IKEv2 into an ePDG.
@@ -23506,13 +28870,13 @@ vowi_build_ike(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("IKEV2",
+    GtkWidget *outer = radio_view_shell("IKEV2 EXCHANGE",
         "The tunnel a handset opens to an ePDG: the exchange, the proposals "
         "inside it, and the identity it presents.", &body);
     GtkWidget *build_body, *parse_body, *walk_body;
-    GtkWidget *build = verb_card("BUILD", &build_body);
-    GtkWidget *parse = verb_card("READ", &parse_body);
-    GtkWidget *walk = verb_card("WALK", &walk_body);
+    GtkWidget *build = verb_card("BUILD ONE", &build_body);
+    GtkWidget *parse = verb_card("READ THE STATE", &parse_body);
+    GtkWidget *walk = verb_card("WALK IT", &walk_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -23550,7 +28914,7 @@ vowi_build_ike(AppState *state, const char *module_id,
                 "offered rather than forced."));
         gtk_box_append(GTK_BOX(walk_body), res);
         gtk_box_append(GTK_BOX(walk_body),
-            mod_arg_choices(state, module_id, status, "Reference", "",
+            mod_arg_choices(state, module_id, status, "Read the reference", "",
                 "The transform types this tree carries, and the two-attribute "
                 "check that a null algorithm fails.",
                 (const char *[]) { "--types", "--null-check",
@@ -23571,13 +28935,13 @@ vowi_build_eap(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("EAP-AKA'",
+    GtkWidget *outer = radio_view_shell("EAP-AKA' EXCHANGE",
         "The authentication that runs inside the tunnel: an identity request, a "
         "challenge, and the attributes that carry them.", &body);
     GtkWidget *build_body, *parse_body, *attr_body;
-    GtkWidget *build = verb_card("BUILD", &build_body);
-    GtkWidget *parse = verb_card("READ", &parse_body);
-    GtkWidget *attr = verb_card("ATTRIBUTES", &attr_body);
+    GtkWidget *build = verb_card("BUILD ONE", &build_body);
+    GtkWidget *parse = verb_card("READ THE STATE", &parse_body);
+    GtkWidget *attr = verb_card("READ THE ATTRIBUTES", &attr_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -23632,10 +28996,10 @@ vowi_build_gateway(AppState *state, const char *module_id,
         "How a handset finds the ePDG, what it presents when it gets there, and "
         "what the tree cannot check without a real gateway.", &body);
     GtkWidget *epdg_body, *nai_body, *plan_body, *notify_body;
-    GtkWidget *epdg = verb_card("DISCOVERY", &epdg_body);
-    GtkWidget *nai = verb_card("IDENTITY", &nai_body);
-    GtkWidget *notify = verb_card("NOTIFY", &notify_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *epdg = verb_card("FIND THE FUNCTIONS", &epdg_body);
+    GtkWidget *nai = verb_card("READ THE IDENTITY", &nai_body);
+    GtkWidget *notify = verb_card("NOTIFY THE CARD", &notify_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -23653,7 +29017,7 @@ vowi_build_gateway(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(nai_body),
-            mod_arg_choices(state, module_id, status, "NAI", "",
+            mod_arg_choices(state, module_id, status, "Read the NAI", "",
                 "The network access identifier forms, and the identity type a "
                 "handset puts in front of them.",
                 (const char *[]) { "--nai 310150123456789 310260",
@@ -23693,9 +29057,9 @@ vowi_build_gateway(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry vowi_entries[] = {
-    { "IKEv2", "dialog-information-symbolic", NULL, vowi_build_ike },
-    { "EAP-AKA'", "channel-secure-symbolic", NULL, vowi_build_eap },
-    { "Gateway", "network-wireless-symbolic", NULL, vowi_build_gateway },
+    { "The IKEv2 exchange", "dialog-information-symbolic", NULL, vowi_build_ike },
+    { "The EAP-AKA' exchange", "channel-secure-symbolic", NULL, vowi_build_eap },
+    { "The gateway", "network-wireless-symbolic", NULL, vowi_build_gateway },
 };
 /* --------------------------------------------------------------------------
    The small-cell page, laid out the way the LTE CVE Kit page is: a named view
@@ -23745,7 +29109,7 @@ scell_build_overview(AppState *state, const char *module_id,
                      GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SMALL CELL / eNB",
+    GtkWidget *outer = radio_view_shell("BUILD A SMALL CELL",
         "A closed cell, the box that runs it, and the backhaul it hands traffic to.",
         &body);
     GtkWidget *state_body;
@@ -23760,7 +29124,7 @@ scell_build_overview(AppState *state, const char *module_id,
     gtk_label_set_selectable(GTK_LABEL(banner), TRUE);
     gtk_box_append(GTK_BOX(body), banner);
 
-    gtk_box_append(GTK_BOX(body), verb_card("THE MODULE", &state_body));
+    gtk_box_append(GTK_BOX(body), verb_card("READ WHAT THE MODULE CARRIES", &state_body));
     gtk_box_append(GTK_BOX(state_body), fkit_note(
         "27-bit CSG codec, SIB1/SIB9 over a real PER codec, PCI-confusion "
         "detection, and a TR-069/CWMP audit of a local management plane. "
@@ -23823,12 +29187,12 @@ scell_build_commission(AppState *state, const char *module_id,
                        GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("COMMISSIONING",
+    GtkWidget *outer = radio_view_shell("COMMISSION THE CELL",
         "The settings a small cell is told to run, and the broadcasts that state them.",
         &body);
     GtkWidget *doc_body;
     GtkWidget *sib_body;
-    GtkWidget *doc = verb_card("THE WHOLE PROFILE", &doc_body);
+    GtkWidget *doc = verb_card("READ THE WHOLE PROFILE", &doc_body);
     GtkWidget *sib = verb_card("ONE BROADCAST AT A TIME", &sib_body);
 
     gtk_box_append(GTK_BOX(doc_body), mod_arg_row(state, module_id, status,
@@ -23860,8 +29224,8 @@ scell_build_management(AppState *state, const char *module_id,
         &body);
     GtkWidget *box_body;
     GtkWidget *audit_body;
-    GtkWidget *box = verb_card("THE BOX", &box_body);
-    GtkWidget *audit = verb_card("A CONFIG FILE", &audit_body);
+    GtkWidget *box = verb_card("ASK THE BOX", &box_body);
+    GtkWidget *audit = verb_card("READ A CONFIG FILE", &audit_body);
 
     gtk_box_append(GTK_BOX(box_body), mod_arg_row(state, module_id, status,
         "Ask the Box", "--discover", "host [port]",
@@ -23890,19 +29254,19 @@ scell_build_identity(AppState *state, const char *module_id,
                      GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CSG AND PCI",
+    GtkWidget *outer = radio_view_shell("CLOSED CELLS AND CELL IDS",
         "The two numbers that decide who may attach, and who confuses whom.",
         &body);
     GtkWidget *csg_body;
     GtkWidget *pci_body;
-    GtkWidget *csg = verb_card("CLOSED SUBSCRIBER GROUP", &csg_body);
-    GtkWidget *pci = verb_card("PCI REUSE", &pci_body);
+    GtkWidget *csg = verb_card("READ THE CLOSED GROUP", &csg_body);
+    GtkWidget *pci = verb_card("READ CELL ID REUSE", &pci_body);
 
     gtk_box_append(GTK_BOX(csg_body), mod_arg_row(state, module_id, status,
-        "Encode", "--csg-encode", "decimal id",
+        "Build the bytes", "--csg-encode", "decimal id",
         "A CSG-Id is 27 bits (TS 36.413). Anything wider is refused, not truncated."));
     gtk_box_append(GTK_BOX(csg_body), mod_arg_row(state, module_id, status,
-        "Decode", "--csg-decode", "hex",
+        "Read one", "--csg-decode", "hex",
         "Eight hex octets in, the decimal id out."));
     gtk_box_append(GTK_BOX(body), csg);
 
@@ -23922,11 +29286,11 @@ scell_build_backhaul(AppState *state, const char *module_id,
                      GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("BACKHAUL",
+    GtkWidget *outer = radio_view_shell("BACKHAUL LINK",
         "Every other module in this tree attacks the air. This view is the other leg.",
         &body);
     GtkWidget *ref_body;
-    GtkWidget *ref = verb_card("THE STACK", &ref_body);
+    GtkWidget *ref = verb_card("READ THE STACK", &ref_body);
     GtkWidget *flow = fkit_flow();
 
     fkit_flow_add(flow, scell_button(state, module_id, status,
@@ -23946,7 +29310,7 @@ scell_build_backhaul(AppState *state, const char *module_id,
     gtk_box_append(GTK_BOX(body), ref);
 
     GtkWidget *s1_body;
-    GtkWidget *s1 = verb_card("S1 SETUP", &s1_body);
+    GtkWidget *s1 = verb_card("READ THE S1 SETUP", &s1_body);
     gtk_box_append(GTK_BOX(s1_body), mod_arg_row(state, module_id, status,
         "Build S1 Setup", "--s1setup",
         "001 01 0xA1C01 LabHeNB 00f1",
@@ -23985,7 +29349,7 @@ scell_build_backhaul(AppState *state, const char *module_id,
     gtk_box_append(GTK_BOX(body), s1);
 
     GtkWidget *iuh_body;
-    GtkWidget *iuh = verb_card("HNBAP AND RUA", &iuh_body);
+    GtkWidget *iuh = verb_card("READ THE HNBAP AND RUA MESSAGES", &iuh_body);
     gtk_box_append(GTK_BOX(iuh_body), mod_arg_row(state, module_id, status,
         "Build HNB Register", "--iuh-register",
         "deadbeef 0xA1C0100",
@@ -24182,7 +29546,7 @@ scell_feed_add_row(GtkWidget *list, const char *line)
     gtk_box_append(GTK_BOX(hbox), glyph);
     gtk_box_append(GTK_BOX(hbox), left);
 
-    copy = gtk_button_new_with_label("Copy");
+    copy = gtk_button_new_with_label("Copy it");
     gtk_widget_set_valign(copy, GTK_ALIGN_CENTER);
     gtk_widget_add_css_class(copy, "scell-feed-copy");
     gtk_widget_add_css_class(copy, "flat");
@@ -24265,11 +29629,11 @@ scell_build_live(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("LIVE SUBSCRIBERS",
+    GtkWidget *outer = radio_view_shell("SUBSCRIBERS SEEN LIVE",
         "What a relayed backhaul would show: who attached, through which box, when.",
         &body);
     GtkWidget *feed_body;
-    GtkWidget *feed = verb_card("FEED", &feed_body);
+    GtkWidget *feed = verb_card("READ THE LIVE FEED", &feed_body);
     GtkWidget *list_head;
     GtkWidget *scroll;
     GtkWidget *list;
@@ -24312,7 +29676,7 @@ scell_build_live(AppState *state, const char *module_id,
     gtk_label_set_xalign(GTK_LABEL(sf->summary), 0.0f);
     gtk_widget_set_hexpand(sf->summary, TRUE);
     gtk_widget_add_css_class(sf->summary, "scell-feed-summary");
-    refresh = gtk_button_new_with_label("Refresh");
+    refresh = gtk_button_new_with_label("Refresh the list it");
     gtk_widget_set_valign(refresh, GTK_ALIGN_CENTER);
     gtk_widget_add_css_class(refresh, "flat");
     gtk_box_append(GTK_BOX(list_head), sf->summary);
@@ -24353,13 +29717,13 @@ scell_build_live(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry femt_entries[] = {
-    { "Overview", "dialog-information-symbolic", NULL, scell_build_overview },
-    { "Closed Cell", "system-search-symbolic", NULL, scell_build_detect },
-    { "Commissioning", "document-new-symbolic", NULL, scell_build_commission },
-    { "Management Plane", "preferences-system-symbolic", NULL, scell_build_management },
-    { "CSG and PCI", "network-server-symbolic", NULL, scell_build_identity },
-    { "Backhaul", "network-wired-symbolic", NULL, scell_build_backhaul },
-    { "Live Subscribers", "view-list-symbolic", NULL, scell_build_live },
+    { "The first question", "dialog-information-symbolic", NULL, scell_build_overview },
+    { "The closed cell", "system-search-symbolic", NULL, scell_build_detect },
+    { "Commission the cell", "document-new-symbolic", NULL, scell_build_commission },
+    { "The management plane", "preferences-system-symbolic", NULL, scell_build_management },
+    { "Closed cells and cell IDs", "network-server-symbolic", NULL, scell_build_identity },
+    { "The backhaul link", "network-wired-symbolic", NULL, scell_build_backhaul },
+    { "Subscribers seen live", "view-list-symbolic", NULL, scell_build_live },
 };
 /* 38_ussd — the 90-character channel into the network.
  *
@@ -24376,10 +29740,10 @@ ussd_build_strings(AppState *state, const char *module_id,
         "A USSD string as it is typed, as it is packed, and as the network reads "
         "the code at its front.", &body);
     GtkWidget *build_body, *pack_body, *mmi_body, *codes_body;
-    GtkWidget *build = verb_card("BUILD", &build_body);
+    GtkWidget *build = verb_card("BUILD ONE", &build_body);
     GtkWidget *pack = verb_card("PACK AND UNPACK", &pack_body);
-    GtkWidget *mmi = verb_card("MMI", &mmi_body);
-    GtkWidget *codes = verb_card("SERVICE CODES", &codes_body);
+    GtkWidget *mmi = verb_card("READ THE MMI", &mmi_body);
+    GtkWidget *codes = verb_card("READ THE SERVICE CODES", &codes_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -24441,12 +29805,12 @@ ussd_build_attacks(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("UNSOLICITED",
+    GtkWidget *outer = radio_view_shell("UNSOLICITED MESSAGES",
         "The strings that arrive without being asked for, and what a handset does "
         "with one.", &body);
     GtkWidget *detect_body, *plan_body;
-    GtkWidget *detect = verb_card("DETECT", &detect_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *detect = verb_card("DETECT ONE", &detect_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -24479,8 +29843,8 @@ ussd_build_attacks(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry ussd_entries[] = {
-    { "Strings", "dialog-information-symbolic", NULL, ussd_build_strings },
-    { "Unsolicited", "security-high-symbolic", NULL, ussd_build_attacks },
+    { "The strings", "dialog-information-symbolic", NULL, ussd_build_strings },
+    { "Unsolicited messages", "security-high-symbolic", NULL, ussd_build_attacks },
 };
 /* 39_ta_geoloc — a timing advance is a distance.
  *
@@ -24498,7 +29862,7 @@ tgeo_build_ta(AppState *state, const char *module_id,
         "turns it into metres.", &body);
     GtkWidget *ta_body, *cells_body;
     GtkWidget *ta = verb_card("ONE MEASUREMENT", &ta_body);
-    GtkWidget *cells = verb_card("KNOWN CELLS", &cells_body);
+    GtkWidget *cells = verb_card("READ THE KNOWN CELLS", &cells_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -24539,8 +29903,8 @@ tgeo_build_place(AppState *state, const char *module_id,
         "What several measurements agree on, and the uncertainty that comes with "
         "the answer.", &body);
     GtkWidget *tri_body, *plan_body;
-    GtkWidget *tri = verb_card("TRILATERATE", &tri_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *tri = verb_card("TRILATERATE THE POSITION", &tri_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -24573,8 +29937,8 @@ tgeo_build_place(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry tgeo_entries[] = {
-    { "Timing Advance", "dialog-information-symbolic", NULL, tgeo_build_ta },
-    { "Position", "system-search-symbolic", NULL, tgeo_build_place },
+    { "Timing advance", "dialog-information-symbolic", NULL, tgeo_build_ta },
+    { "The position", "system-search-symbolic", NULL, tgeo_build_place },
 };
 /* 40_sba_pivot — the service-based interface of a 5G core.
  *
@@ -24587,14 +29951,14 @@ sbap_build_wire(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("WIRE",
+    GtkWidget *outer = radio_view_shell("WIRE BYTES",
         "HTTP/2 frames and HPACK, which is what every SBI request is underneath "
         "its JSON.", &body);
     GtkWidget *frame_body, *settings_body, *hpack_body, *types_body;
-    GtkWidget *frame = verb_card("FRAME HEADER", &frame_body);
-    GtkWidget *settings = verb_card("SETTINGS", &settings_body);
-    GtkWidget *hpack = verb_card("HPACK", &hpack_body);
-    GtkWidget *types = verb_card("FRAME TYPES", &types_body);
+    GtkWidget *frame = verb_card("READ THE FRAME HEADER", &frame_body);
+    GtkWidget *settings = verb_card("READ THE SETTINGS", &settings_body);
+    GtkWidget *hpack = verb_card("READ THE HPACK", &hpack_body);
+    GtkWidget *types = verb_card("READ THE FRAME TYPES", &types_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -24658,15 +30022,15 @@ sbap_build_tokens(AppState *state, const char *module_id,
         "decide whether it can be replayed elsewhere.", &body);
     GtkWidget *jwt_body, *audit_body, *pivot_body, *scope_body;
     GtkWidget *jwt = verb_card("READ A TOKEN", &jwt_body);
-    GtkWidget *audit = verb_card("AUDIT", &audit_body);
-    GtkWidget *pivot = verb_card("PIVOT", &pivot_body);
-    GtkWidget *scope = verb_card("SCOPE", &scope_body);
+    GtkWidget *audit = verb_card("AUDIT IT", &audit_body);
+    GtkWidget *pivot = verb_card("TAKE THE NEXT HOP", &pivot_body);
+    GtkWidget *scope = verb_card("READ THE SCOPE", &scope_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(jwt_body),
-            mod_arg_row_prefilled(state, module_id, status, "Decode",
+            mod_arg_row_prefilled(state, module_id, status, "Read one",
                 "--jwt", "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.",
                 "A token. The header, the claims and whether the algorithm is "
                 "none - the one case where a token is a claim rather than a "
@@ -24722,14 +30086,14 @@ sbap_build_core(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CORE",
+    GtkWidget *outer = radio_view_shell("CORE NETWORK",
         "Discovery, the service paths it returns, and the request flood that needs "
         "nothing but one stream.", &body);
     GtkWidget *nrf_body, *paths_body, *reset_body, *plan_body;
-    GtkWidget *nrf = verb_card("DISCOVERY", &nrf_body);
-    GtkWidget *paths = verb_card("SERVICE PATHS", &paths_body);
-    GtkWidget *reset = verb_card("RAPID RESET", &reset_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *nrf = verb_card("FIND THE FUNCTIONS", &nrf_body);
+    GtkWidget *paths = verb_card("READ THE SERVICE PATHS", &paths_body);
+    GtkWidget *reset = verb_card("READ THE RAPID RESET", &reset_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -24786,9 +30150,9 @@ sbap_build_core(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry sbap_entries[] = {
-    { "Wire", "dialog-information-symbolic", NULL, sbap_build_wire },
-    { "Tokens", "channel-secure-symbolic", NULL, sbap_build_tokens },
-    { "Core", "network-wireless-symbolic", NULL, sbap_build_core },
+    { "The wire bytes", "dialog-information-symbolic", NULL, sbap_build_wire },
+    { "The tokens", "channel-secure-symbolic", NULL, sbap_build_tokens },
+    { "The core network", "network-wireless-symbolic", NULL, sbap_build_core },
 };
 /* 41_ota_sms — the binary SMS that reaches a card.
  *
@@ -24805,15 +30169,15 @@ otasm_build_tpdu(AppState *state, const char *module_id,
         "The SMS transport: an address, a data coding scheme, a timestamp and the "
         "user data that carries everything else.", &body);
     GtkWidget *build_body, *parse_body, *parts_body;
-    GtkWidget *build = verb_card("BUILD", &build_body);
-    GtkWidget *parse = verb_card("READ", &parse_body);
-    GtkWidget *parts = verb_card("FIELDS", &parts_body);
+    GtkWidget *build = verb_card("BUILD ONE", &build_body);
+    GtkWidget *parse = verb_card("READ THE STATE", &parse_body);
+    GtkWidget *parts = verb_card("READ THE FIELDS", &parts_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(build_body),
-            mod_arg_choices(state, module_id, status, "Message", "",
+            mod_arg_choices(state, module_id, status, "Read the message", "",
                 "A submit and a deliver TPDU, each built from its own fields. The "
                 "two differ in more than the first octet.",
                 (const char *[]) { "--tpdu-submit 15551234567 00 4100",
@@ -24839,7 +30203,7 @@ otasm_build_tpdu(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(parts_body),
-            mod_arg_choices(state, module_id, status, "Field", "",
+            mod_arg_choices(state, module_id, status, "Name the field", "",
                 "A single field built or read on its own, which is how a message "
                 "gets assembled around a payload you already have.",
                 (const char *[]) { "--tp-dcs-build f6", "--tp-addr-build 15551234567",
@@ -24855,7 +30219,7 @@ otasm_build_tpdu(AppState *state, const char *module_id,
                 (const char *[]) { "Known Answers", "FCS", "Read DCS",
                                    "Read Address", "Transport Plan" }, 5));
         gtk_box_append(GTK_BOX(parts_body),
-            mod_arg_choices(state, module_id, status, "More fields", "",
+            mod_arg_choices(state, module_id, status, "Read more fields", "",
                 "The remaining single fields, each built or read on its own.",
                 (const char *[]) { "--tp-pid 7f", "--tp-scts 2026-01-01T00:00:00Z",
                                    "--tp-st 00", "--tp-ud-build 4100",
@@ -24875,13 +30239,13 @@ otasm_build_packet(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("OTA PACKET",
+    GtkWidget *outer = radio_view_shell("OVER-THE-AIR PACKET",
         "The TS 31.115 packet inside the SMS: a TAR, a counter, the keys that "
         "decide whether the card accepts it, and the command it carries.", &body);
     GtkWidget *build_body, *parse_body, *spi_body;
-    GtkWidget *build = verb_card("BUILD", &build_body);
-    GtkWidget *parse = verb_card("READ", &parse_body);
-    GtkWidget *spi = verb_card("SPI", &spi_body);
+    GtkWidget *build = verb_card("BUILD ONE", &build_body);
+    GtkWidget *parse = verb_card("READ THE STATE", &parse_body);
+    GtkWidget *spi = verb_card("READ THE SPI", &spi_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -24926,7 +30290,7 @@ otasm_build_packet(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(spi_body),
-            mod_arg_choices(state, module_id, status, "Options", "",
+            mod_arg_choices(state, module_id, status, "Read the options", "",
                 "The security parameters as bits, and the counter check that a "
                 "card performs before it acts on a command.",
                 (const char *[]) { "--spi-build 1 0", "--counter-check 1 2" },
@@ -24945,13 +30309,13 @@ otasm_build_push(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("POKES",
+    GtkWidget *outer = radio_view_shell("TEST POKES",
         "The two messages that need no packet layer at all: a type-0 SMS and a "
         "S@T push, which a browser on the card executes.", &body);
     GtkWidget *type0_body, *sat_body, *wib_body, *wrap_body;
-    GtkWidget *type0 = verb_card("TYPE 0", &type0_body);
-    GtkWidget *sat = verb_card("S@T PUSH", &sat_body);
-    GtkWidget *wib = verb_card("WIB PUSH", &wib_body);
+    GtkWidget *type0 = verb_card("BUILD A TYPE 0", &type0_body);
+    GtkWidget *sat = verb_card("BUILD THE S@T PUSH", &sat_body);
+    GtkWidget *wib = verb_card("BUILD THE WIB PUSH", &wib_body);
     GtkWidget *wrap = verb_card("WRAP FOR AN SMSC", &wrap_body);
 
     {
@@ -25025,20 +30389,20 @@ otasm_build_smpp(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SMPP",
+    GtkWidget *outer = radio_view_shell("SMPP MESSAGES",
         "The protocol between an SMSC and the systems that feed it: a 16-octet "
         "header, then fields whose lengths are the header's claim.", &body);
     GtkWidget *build_body, *parse_body, *resp_body, *ref_body;
     GtkWidget *build = verb_card("BUILD A PDU", &build_body);
     GtkWidget *parse = verb_card("READ A PDU", &parse_body);
     GtkWidget *resp = verb_card("ANSWER ONE", &resp_body);
-    GtkWidget *ref = verb_card("REFERENCE", &ref_body);
+    GtkWidget *ref = verb_card("READ THE REFERENCE VALUES", &ref_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(build_body),
-            mod_arg_choices(state, module_id, status, "Operation", "",
+            mod_arg_choices(state, module_id, status, "Name the operation", "",
                 "A submit and a deliver differ only in direction; a bind "
                 "transceiver is the session that carries both.",
                 (const char *[]) { "--smpp-build submit_sm --src 15551234567 --dst 15559876543 --msg 48656c6c6f",
@@ -25094,10 +30458,10 @@ otasm_build_smpp(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry otasm_entries[] = {
-    { "TPDU", "dialog-information-symbolic", NULL, otasm_build_tpdu },
-    { "OTA Packet", "document-send-symbolic", NULL, otasm_build_packet },
-    { "SMPP", "network-transmit-receive-symbolic", NULL, otasm_build_smpp },
-    { "Pokes", "security-high-symbolic", NULL, otasm_build_push },
+    { "The TPDU", "dialog-information-symbolic", NULL, otasm_build_tpdu },
+    { "The over-the-air packet", "document-send-symbolic", NULL, otasm_build_packet },
+    { "The SMPP messages", "network-transmit-receive-symbolic", NULL, otasm_build_smpp },
+    { "The pokes", "security-high-symbolic", NULL, otasm_build_push },
 };
 /* 42_li_probe — LI Interception.
  *
@@ -25115,8 +30479,8 @@ lipr_build_interfaces(AppState *state, const char *module_id,
         "The three handover interfaces of TS 33.108 and the roles on either side "
         "of them. Reference only; nothing is contacted.", &body);
     GtkWidget *map_body, *roles_body, *one_body;
-    GtkWidget *map = verb_card("INTERFACE MAP", &map_body);
-    GtkWidget *roles = verb_card("ROLES", &roles_body);
+    GtkWidget *map = verb_card("READ THE INTERFACE MAP", &map_body);
+    GtkWidget *roles = verb_card("READ THE ROLES", &roles_body);
     GtkWidget *one = verb_card("ONE INTERFACE", &one_body);
     const char *which[] = { "--iface", "--iface", "--iface" };
     const char *labels[] = { "X1", "X2", "X3" };
@@ -25152,7 +30516,7 @@ lipr_build_interfaces(AppState *state, const char *module_id,
 
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(one_body),
-            mod_arg_choices(state, module_id, status, "Interface", "",
+            mod_arg_choices(state, module_id, status, "Name the interface", "",
                 "Pick one for the detail the map leaves out.",
                 which, labels, 3));
         gtk_box_append(GTK_BOX(one_body), res);
@@ -25173,9 +30537,9 @@ lipr_build_posture(AppState *state, const char *module_id,
         "What the signalling says about an interception that is already active, "
         "and what to do about it. No capture is taken here.", &body);
     GtkWidget *score_body, *report_body, *plan_body;
-    GtkWidget *score = verb_card("POSTURE SCORE", &score_body);
-    GtkWidget *report = verb_card("REPORT", &report_body);
-    GtkWidget *plan = verb_card("CONFIRMATION PLAN", &plan_body);
+    GtkWidget *score = verb_card("SCORE THE POSTURE", &score_body);
+    GtkWidget *report = verb_card("READ THE REPORT", &report_body);
+    GtkWidget *plan = verb_card("READ THE CONFIRMATION PLAN", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -25229,13 +30593,13 @@ lipr_build_encode(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("ENCODE",
+    GtkWidget *outer = radio_view_shell("BUILD THE MESSAGE",
         "The three artefacts an interception is built from, as bytes. Every verb "
         "encodes and stops: nothing is delivered to any element.", &body);
     GtkWidget *prov_body, *act_body, *prod_body;
-    GtkWidget *prov = verb_card("PROVISIONING REQUEST", &prov_body);
-    GtkWidget *act = verb_card("ACTIVATION RECORD", &act_body);
-    GtkWidget *prod = verb_card("INTERCEPTION PRODUCT", &prod_body);
+    GtkWidget *prov = verb_card("READ THE PROVISIONING REQUEST", &prov_body);
+    GtkWidget *act = verb_card("READ THE ACTIVATION RECORD", &act_body);
+    GtkWidget *prod = verb_card("READ THE INTERCEPTION PRODUCT", &prod_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -25284,9 +30648,9 @@ lipr_build_encode(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry lipr_entries[] = {
-    { "Interfaces", "dialog-information-symbolic", NULL, lipr_build_interfaces },
-    { "Posture", "system-search-symbolic", NULL, lipr_build_posture },
-    { "Encode", "document-save-symbolic", NULL, lipr_build_encode },
+    { "The interfaces", "dialog-information-symbolic", NULL, lipr_build_interfaces },
+    { "The posture", "system-search-symbolic", NULL, lipr_build_posture },
+    { "Build the message", "document-save-symbolic", NULL, lipr_build_encode },
 };
 /* 43_ran_share — an operator's shared network.
  *
@@ -25299,19 +30663,19 @@ rans_build_plmn(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("PLMN",
+    GtkWidget *outer = radio_view_shell("WHICH OPERATOR",
         "An identity packed and read back, and what a broadcast list says about "
         "who is on a shared mast.", &body);
     GtkWidget *dec_body, *enc_body, *eplmn_body;
     GtkWidget *dec = verb_card("READ AN IDENTITY", &dec_body);
     GtkWidget *enc = verb_card("PACK AN IDENTITY", &enc_body);
-    GtkWidget *eplmn = verb_card("EQUIVALENT LIST", &eplmn_body);
+    GtkWidget *eplmn = verb_card("READ THE EQUIVALENT LIST", &eplmn_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(dec_body),
-            mod_arg_row_prefilled(state, module_id, status, "Decode",
+            mod_arg_row_prefilled(state, module_id, status, "Read one",
                 "--plmn-decode", "00F110",
                 "A packed identity as hex. The answer is the MCC, the MNC and how "
                 "many digits the MNC actually carries, which is where two "
@@ -25324,7 +30688,7 @@ rans_build_plmn(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(enc_body),
-            mod_arg_row_prefilled(state, module_id, status, "Encode",
+            mod_arg_row_prefilled(state, module_id, status, "Build the bytes",
                 "--plmn-encode", "310 260",
                 "An MCC and an MNC. A three-digit MNC packs differently from a "
                 "two-digit one, and that difference is the whole subject."));
@@ -25354,12 +30718,12 @@ rans_build_leak(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("LEAK",
+    GtkWidget *outer = radio_view_shell("WHAT LEAKS",
         "Whether a cell broadcasts an identity it should not, and what a lab "
         "needs to prove the finding.", &body);
     GtkWidget *cell_body, *plan_body;
-    GtkWidget *cell = verb_card("CELLS", &cell_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *cell = verb_card("READ THE CELLS", &cell_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -25392,8 +30756,8 @@ rans_build_leak(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry rans_entries[] = {
-    { "PLMN", "dialog-information-symbolic", NULL, rans_build_plmn },
-    { "Leak", "system-search-symbolic", NULL, rans_build_leak },
+    { "Which operator", "dialog-information-symbolic", NULL, rans_build_plmn },
+    { "What leaks", "system-search-symbolic", NULL, rans_build_leak },
 };
 /* 44_carrier_api — Carrier API Abuse.
  *
@@ -25407,13 +30771,13 @@ capi_build_surface(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SURFACE",
+    GtkWidget *outer = radio_view_shell("WHAT IS EXPOSED",
         "What the document declares: its title, its servers, its paths and the "
         "auth scheme each operation asks for.", &body);
     GtkWidget *doc_body, *matrix_body, *report_body;
-    GtkWidget *doc = verb_card("DOCUMENT", &doc_body);
-    GtkWidget *matrix = verb_card("AUTHORISATION MATRIX", &matrix_body);
-    GtkWidget *report = verb_card("REPORT", &report_body);
+    GtkWidget *doc = verb_card("WRITE IT DOWN", &doc_body);
+    GtkWidget *matrix = verb_card("READ THE AUTHORISATION MATRIX", &matrix_body);
+    GtkWidget *report = verb_card("READ THE REPORT", &report_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -25468,9 +30832,9 @@ capi_build_attacks(AppState *state, const char *module_id,
         "The three controls a carrier API is judged on: rate limiting, token "
         "handling and resistance to credential stuffing.", &body);
     GtkWidget *stuff_body, *bucket_body, *jwt_body;
-    GtkWidget *stuff = verb_card("CREDENTIAL STUFFING", &stuff_body);
-    GtkWidget *bucket = verb_card("RATE LIMIT", &bucket_body);
-    GtkWidget *jwt = verb_card("TOKEN AUDIT", &jwt_body);
+    GtkWidget *stuff = verb_card("TEST CREDENTIAL STUFFING", &stuff_body);
+    GtkWidget *bucket = verb_card("TEST THE RATE LIMIT", &bucket_body);
+    GtkWidget *jwt = verb_card("AUDIT THE TOKEN", &jwt_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -25521,12 +30885,12 @@ capi_build_compare(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("COMPARE",
+    GtkWidget *outer = radio_view_shell("COMPARE TWO RUNS",
         "Two captures of the same endpoint, diffed, and the handoff for what to "
         "do with the difference.", &body);
     GtkWidget *diff_body, *plan_body;
     GtkWidget *diff = verb_card("RESPONSE DIFFERENTIAL", &diff_body);
-    GtkWidget *plan = verb_card("ASSESSMENT HANDOFF", &plan_body);
+    GtkWidget *plan = verb_card("HAND OFF THE ASSESSMENT", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -25564,12 +30928,12 @@ capi_build_enumeration(AppState *state, const char *module_id,
                        GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("ENUMERATION",
+    GtkWidget *outer = radio_view_shell("WHAT IS EXPOSED",
         "One concrete request per operation, and the sequence a subscriber sweep "
         "would send. Both write a run-file and stop there.", &body);
     GtkWidget *surface_body, *subs_body;
-    GtkWidget *surface = verb_card("SURFACE PLAN", &surface_body);
-    GtkWidget *subs = verb_card("SUBSCRIBER SEQUENCE", &subs_body);
+    GtkWidget *surface = verb_card("READ THE SURFACE PLAN", &surface_body);
+    GtkWidget *subs = verb_card("READ THE SUBSCRIBER SEQUENCE", &subs_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -25608,10 +30972,10 @@ capi_build_enumeration(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry capi_entries[] = {
-    { "Surface", "document-open-symbolic", NULL, capi_build_surface },
-    { "Controls", "security-high-symbolic", NULL, capi_build_attacks },
-    { "Compare", "system-search-symbolic", NULL, capi_build_compare },
-    { "Enumeration", "network-transmit-receive-symbolic", NULL, capi_build_enumeration },
+    { "What is exposed", "document-open-symbolic", NULL, capi_build_surface },
+    { "The controls", "security-high-symbolic", NULL, capi_build_attacks },
+    { "Compare two runs", "system-search-symbolic", NULL, capi_build_compare },
+    { "What is exposed", "network-transmit-receive-symbolic", NULL, capi_build_enumeration },
 };
 /* 45_iot — NB-IoT / Cat-M1.
  *
@@ -25624,12 +30988,12 @@ iot_build_decode(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("DECODE",
+    GtkWidget *outer = radio_view_shell("READ A MESSAGE",
         "The two broadcast messages, decoded through the generated codec. Bits "
         "in, fields out; no radio and no schema package.", &body);
     GtkWidget *sib_body, *mib_body;
     GtkWidget *sib = verb_card("SYSTEM INFORMATION BLOCK TYPE 1", &sib_body);
-    GtkWidget *mib = verb_card("MASTER INFORMATION BLOCK", &mib_body);
+    GtkWidget *mib = verb_card("READ THE MASTER BLOCK", &mib_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -25677,7 +31041,7 @@ iot_build_sequences(AppState *state, const char *module_id,
         "What a physical cell identity decides in NB-IoT, and what it does not.",
         &body);
     GtkWidget *split_body;
-    GtkWidget *split = verb_card("IDENTITY SPLIT", &split_body);
+    GtkWidget *split = verb_card("SPLIT THE IDENTITY", &split_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -25712,7 +31076,7 @@ iot_build_limits(AppState *state, const char *module_id,
         "The two questions this module cannot answer, and the table that would "
         "settle each one.", &body);
     GtkWidget *nprach_body, *nprfcn_body, *plan_body;
-    GtkWidget *nprach = verb_card("NPRACH PARAMETERS", &nprach_body);
+    GtkWidget *nprach = verb_card("READ THE NPRACH PARAMETERS", &nprach_body);
     GtkWidget *nprfcn = verb_card("NPRFCN TO FREQUENCY", &nprfcn_body);
     GtkWidget *plan = verb_card("HANDOFF PLAN", &plan_body);
 
@@ -25749,7 +31113,7 @@ iot_build_limits(AppState *state, const char *module_id,
 
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(plan_body),
-            mod_arg_choices(state, module_id, status, "Vector", "",
+            mod_arg_choices(state, module_id, status, "Read the vector", "",
                 "The handoff a vector needs when it reaches the point where "
                 "samples are required.",
                 (const char *[]) { "--plan", "--plan" },
@@ -25764,9 +31128,9 @@ iot_build_limits(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry iot_entries[] = {
-    { "Decode", "dialog-information-symbolic", NULL, iot_build_decode },
-    { "Sequences", "network-wireless-symbolic", NULL, iot_build_sequences },
-    { "Limits", "security-low-symbolic", NULL, iot_build_limits },
+    { "Read a message", "dialog-information-symbolic", NULL, iot_build_decode },
+    { "The sequences", "network-wireless-symbolic", NULL, iot_build_sequences },
+    { "The limits", "security-low-symbolic", NULL, iot_build_limits },
 };
 /* 46_lpp — the positioning protocol.
  *
@@ -25779,14 +31143,14 @@ lpp_build_messages(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("MESSAGES",
+    GtkWidget *outer = radio_view_shell("BUILD A MESSAGE",
         "A positioning message read and built: the header that routes it and the "
         "position it claims.", &body);
     GtkWidget *parse_body, *build_body, *forge_body, *pids_body;
     GtkWidget *parse = verb_card("READ A POSITION", &parse_body);
-    GtkWidget *build = verb_card("HEADER", &build_body);
-    GtkWidget *forge = verb_card("FORGE", &forge_body);
-    GtkWidget *pids = verb_card("PROTOCOL IDS", &pids_body);
+    GtkWidget *build = verb_card("READ A HEADER", &build_body);
+    GtkWidget *forge = verb_card("FORGE ONE", &forge_body);
+    GtkWidget *pids = verb_card("READ THE PROTOCOL IDS", &pids_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -25805,7 +31169,7 @@ lpp_build_messages(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(build_body),
-            mod_arg_choices(state, module_id, status, "Header", "",
+            mod_arg_choices(state, module_id, status, "Read a header", "",
                 "The LPP header in either direction: built, or read back from "
                 "octets you already have.",
                 (const char *[]) { "--build-header", "--decode-header 0402" },
@@ -25853,16 +31217,16 @@ lpp_build_procedures(AppState *state, const char *module_id,
         "The three positioning procedures, each encoded through the generated "
         "table and checked against pycrate octet for octet.", &body);
     GtkWidget *otdoa_body, *utdoa_body, *prs_body, *detect_body;
-    GtkWidget *otdoa = verb_card("OTDOA", &otdoa_body);
-    GtkWidget *utdoa = verb_card("UTDOA", &utdoa_body);
-    GtkWidget *prs = verb_card("PRS SCHEDULE", &prs_body);
+    GtkWidget *otdoa = verb_card("READ THE OTDOA", &otdoa_body);
+    GtkWidget *utdoa = verb_card("READ THE UTDOA", &utdoa_body);
+    GtkWidget *prs = verb_card("READ THE PRS SCHEDULE", &prs_body);
     GtkWidget *detect = verb_card("DETECT A FORGERY", &detect_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(otdoa_body),
-            mod_arg_choices(state, module_id, status, "Procedure", "",
+            mod_arg_choices(state, module_id, status, "Read the procedure", "",
                 "The assistance data a network sends, and the request a handset "
                 "makes for it. Both are real encodings, not descriptions.",
                 (const char *[]) { "--otdoa-assist", "--otdoa-request" },
@@ -25921,7 +31285,7 @@ lpp_build_supl(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SUPL",
+    GtkWidget *outer = radio_view_shell("POSITIONING MESSAGES",
         "The session a position request travels in: an SLP triggers the handset, "
         "the handset reports its capabilities, and LPP does the measuring.", &body);
     GtkWidget *build_body, *parse_body, *pos_body;
@@ -25933,7 +31297,7 @@ lpp_build_supl(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(build_body),
-            mod_arg_choices(state, module_id, status, "Message", "",
+            mod_arg_choices(state, module_id, status, "Read the message", "",
                 "An init, a start, and the ver2 set-init that is the only one "
                 "which carries a target identity - the ASN.1 has no SET id in "
                 "SUPL INIT, and the message is built as the ASN.1 defines it.",
@@ -25962,7 +31326,7 @@ lpp_build_supl(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(pos_body),
-            mod_arg_row_prefilled(state, module_id, status, "Wrap",
+            mod_arg_row_prefilled(state, module_id, status, "Wrap it",
                 "--supl-pos",
                 "--lpp D2020028410124FB55FFA544",
                 "An LPP payload to carry. The wrapper is the SUPL POS message "
@@ -25978,9 +31342,9 @@ lpp_build_supl(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry lpp_entries[] = {
-    { "Messages", "dialog-information-symbolic", NULL, lpp_build_messages },
-    { "Procedures", "system-search-symbolic", NULL, lpp_build_procedures },
-    { "SUPL", "network-transmit-receive-symbolic", NULL, lpp_build_supl },
+    { "Build a message", "dialog-information-symbolic", NULL, lpp_build_messages },
+    { "The procedures", "system-search-symbolic", NULL, lpp_build_procedures },
+    { "Positioning messages", "network-transmit-receive-symbolic", NULL, lpp_build_supl },
 };
 /* 47_wifioff — VoWiFi / ePDG Attacks.
  *
@@ -25998,8 +31362,8 @@ wifioff_build_exchange(AppState *state, const char *module_id,
         "How a handset finds the ePDG and what it says once it is there, in "
         "octets. Nothing is contacted; the messages are built and read.", &body);
     GtkWidget *fqdn_body, *flow_body;
-    GtkWidget *fqdn = verb_card("GATEWAY NAME", &fqdn_body);
-    GtkWidget *flow = verb_card("EAP EXCHANGE", &flow_body);
+    GtkWidget *fqdn = verb_card("READ THE GATEWAY NAME", &fqdn_body);
+    GtkWidget *flow = verb_card("READ THE EAP EXCHANGE", &flow_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26038,7 +31402,7 @@ wifioff_build_exchange(AppState *state, const char *module_id,
        out that the verb is missing. */
     {
         GtkWidget *lwa_body;
-        GtkWidget *lwa = verb_card("LWA / LWIP FRAMING", &lwa_body);
+        GtkWidget *lwa = verb_card("READ THE LWA FRAMING", &lwa_body);
         GtkWidget *res = result_rect_new(state, NULL);
 
         mod_card_begin(res);
@@ -26066,8 +31430,8 @@ wifioff_build_certs(AppState *state, const char *module_id,
         "What the far end presents, and whether each assertion it makes is one "
         "it was given the evidence for.", &body);
     GtkWidget *thumb_body, *valid_body;
-    GtkWidget *thumb = verb_card("THUMBPRINT", &thumb_body);
-    GtkWidget *valid = verb_card("ASSERTIONS", &valid_body);
+    GtkWidget *thumb = verb_card("READ THE THUMBPRINT", &thumb_body);
+    GtkWidget *valid = verb_card("READ THE ASSERTIONS", &valid_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26107,8 +31471,8 @@ wifioff_build_certs(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry wifioff_entries[] = {
-    { "Exchange", "dialog-information-symbolic", NULL, wifioff_build_exchange },
-    { "Certificates", "channel-secure-symbolic", NULL, wifioff_build_certs },
+    { "The exchange", "dialog-information-symbolic", NULL, wifioff_build_exchange },
+    { "The certificates", "channel-secure-symbolic", NULL, wifioff_build_certs },
 };
 /* 48_oran — the RAN Intelligent Controller.
  *
@@ -26125,8 +31489,8 @@ oran_build_interfaces(AppState *state, const char *module_id,
         "Which interface carries which decision, and the service model that says "
         "what an xApp can ask for on E2.", &body);
     GtkWidget *map_body, *e2sm_body;
-    GtkWidget *map = verb_card("INTERFACE MAP", &map_body);
-    GtkWidget *e2sm = verb_card("SERVICE MODELS", &e2sm_body);
+    GtkWidget *map = verb_card("READ THE INTERFACE MAP", &map_body);
+    GtkWidget *e2sm = verb_card("READ THE SERVICE MODELS", &e2sm_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26164,14 +31528,14 @@ oran_build_control(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CONTROL",
+    GtkWidget *outer = radio_view_shell("CONTROL PLANE",
         "What an xApp can reach, and what a forged A1 policy asks the controller "
         "to believe.", &body);
     GtkWidget *attack_body, *auth_body, *a1_body, *e2_body;
-    GtkWidget *attack = verb_card("xAPP MODEL", &attack_body);
-    GtkWidget *auth = verb_card("xAPP AUTHORITY", &auth_body);
-    GtkWidget *a1 = verb_card("A1 POLICY", &a1_body);
-    GtkWidget *e2 = verb_card("E2 CONTROL", &e2_body);
+    GtkWidget *attack = verb_card("READ THE xAPP MODEL", &attack_body);
+    GtkWidget *auth = verb_card("READ THE xAPP AUTHORITY", &auth_body);
+    GtkWidget *a1 = verb_card("READ THE A1 POLICY", &a1_body);
+    GtkWidget *e2 = verb_card("READ THE E2 CONTROL", &e2_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26203,7 +31567,7 @@ oran_build_control(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(a1_body),
-            mod_arg_choices(state, module_id, status, "Policy", "",
+            mod_arg_choices(state, module_id, status, "Read the policy", "",
                 "A forged A1 PUT, or the check that reads one back. The PUT "
                 "names the policy type, the instance and the scope it applies "
                 "to.",
@@ -26241,12 +31605,12 @@ oran_build_assess(AppState *state, const char *module_id,
                   GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("ASSESSMENT",
+    GtkWidget *outer = radio_view_shell("WHAT TO CHECK FIRST",
         "A deployment configuration read for the findings it carries, and what a "
         "testbed needs to go further.", &body);
     GtkWidget *assess_body, *plan_body;
-    GtkWidget *assess = verb_card("DEPLOYMENT", &assess_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *assess = verb_card("READ THE DEPLOYMENT", &assess_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26278,9 +31642,9 @@ oran_build_assess(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry oran_entries[] = {
-    { "Interfaces", "dialog-information-symbolic", NULL, oran_build_interfaces },
-    { "Control", "security-high-symbolic", NULL, oran_build_control },
-    { "Assessment", "preferences-system-symbolic", NULL, oran_build_assess },
+    { "The interfaces", "dialog-information-symbolic", NULL, oran_build_interfaces },
+    { "The control plane", "security-high-symbolic", NULL, oran_build_control },
+    { "What to check first", "preferences-system-symbolic", NULL, oran_build_assess },
 };
 /* 49_ntn — 5G NTN / Satellite.
  *
@@ -26297,9 +31661,9 @@ ntn_build_geometry(AppState *state, const char *module_id,
         "What a satellite's motion does to the signal: the shift, the delay, and "
         "the timing advance that follows from the delay.", &body);
     GtkWidget *dop_body, *range_body, *ta_body;
-    GtkWidget *dop = verb_card("DOPPLER SHIFT", &dop_body);
-    GtkWidget *range = verb_card("RANGE AND DELAY", &range_body);
-    GtkWidget *ta = verb_card("TIMING ADVANCE", &ta_body);
+    GtkWidget *dop = verb_card("READ THE DOPPLER SHIFT", &dop_body);
+    GtkWidget *range = verb_card("READ RANGE AND DELAY", &range_body);
+    GtkWidget *ta = verb_card("READ TIMING ADVANCE", &ta_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26357,9 +31721,9 @@ ntn_build_link(AppState *state, const char *module_id,
         "The offset a network signals so a handset transmits early enough, and "
         "the two questions the SIB that carries it cannot answer here.", &body);
     GtkWidget *k_body, *sib_body, *feeder_body;
-    GtkWidget *k = verb_card("K-OFFSET", &k_body);
-    GtkWidget *sib = verb_card("SIB19", &sib_body);
-    GtkWidget *feeder = verb_card("FEEDER LINK", &feeder_body);
+    GtkWidget *k = verb_card("READ THE K OFFSET", &k_body);
+    GtkWidget *sib = verb_card("READ THE SYSTEM BLOCK TYPE 19", &sib_body);
+    GtkWidget *feeder = verb_card("READ THE FEEDER LINK", &feeder_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26443,9 +31807,9 @@ ntn_build_plan(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry ntn_entries[] = {
-    { "Geometry", "dialog-information-symbolic", NULL, ntn_build_geometry },
-    { "Timing Control", "network-wireless-symbolic", NULL, ntn_build_link },
-    { "Handoff", "preferences-system-symbolic", NULL, ntn_build_plan },
+    { "The geometry", "dialog-information-symbolic", NULL, ntn_build_geometry },
+    { "Timing control", "network-wireless-symbolic", NULL, ntn_build_link },
+    { "The handoff", "preferences-system-symbolic", NULL, ntn_build_plan },
 };
 /* 50_gprs — GPRS / EDGE.
  *
@@ -26459,15 +31823,15 @@ gprs_build_ciphering(AppState *state, const char *module_id,
                      GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CIPHERING",
+    GtkWidget *outer = radio_view_shell("HOW TRAFFIC IS CIPHERED",
         "GEA0 to GEA5: what each one protects, which of them this tree can "
         "compute, and what a network that negotiates downwards gives away.",
         &body);
     GtkWidget *table_body, *one_body, *crypt_body, *down_body;
-    GtkWidget *table = verb_card("ALGORITHM TABLE", &table_body);
+    GtkWidget *table = verb_card("LIST THE ALGORITHMS", &table_body);
     GtkWidget *one = verb_card("ONE ALGORITHM", &one_body);
     GtkWidget *crypt = verb_card("CIPHER A PACKET", &crypt_body);
-    GtkWidget *down = verb_card("DOWNGRADE CHECK", &down_body);
+    GtkWidget *down = verb_card("CHECK FOR A DOWNGRADE", &down_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26533,13 +31897,13 @@ gprs_build_apn(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("APN",
+    GtkWidget *outer = radio_view_shell("WHICH DATA NETWORK",
         "The access point name as TS 23.003 codes it, in both directions, and "
         "the IE that carries it in a session request.", &body);
     GtkWidget *enc_body, *dec_body, *ie_body;
-    GtkWidget *enc = verb_card("ENCODE", &enc_body);
-    GtkWidget *dec = verb_card("DECODE", &dec_body);
-    GtkWidget *ie = verb_card("SESSION IE", &ie_body);
+    GtkWidget *enc = verb_card("BUILD THE MESSAGE", &enc_body);
+    GtkWidget *dec = verb_card("READ A MESSAGE", &dec_body);
+    GtkWidget *ie = verb_card("READ THE SESSION ELEMENT", &ie_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26590,10 +31954,10 @@ gprs_build_pdp(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("PDP",
+    GtkWidget *outer = radio_view_shell("PDP CONTEXT",
         "The requested address IE and the handoff a lab session needs.", &body);
     GtkWidget *addr_body, *plan_body;
-    GtkWidget *addr = verb_card("REQUESTED ADDRESS", &addr_body);
+    GtkWidget *addr = verb_card("READ THE REQUESTED ADDRESS", &addr_body);
     GtkWidget *plan = verb_card("LAB HANDOFF", &plan_body);
 
     {
@@ -26629,9 +31993,9 @@ gprs_build_pdp(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry gprs_entries[] = {
-    { "Ciphering", "dialog-information-symbolic", NULL, gprs_build_ciphering },
-    { "APN", "network-server-symbolic", NULL, gprs_build_apn },
-    { "PDP", "preferences-system-symbolic", NULL, gprs_build_pdp },
+    { "How traffic is ciphered", "dialog-information-symbolic", NULL, gprs_build_ciphering },
+    { "Which data network", "network-server-symbolic", NULL, gprs_build_apn },
+    { "The PDP context", "preferences-system-symbolic", NULL, gprs_build_pdp },
 };
 /* 51_sidelink — PC5 sidelink.
  *
@@ -26649,9 +32013,9 @@ slnk_build_grid(AppState *state, const char *module_id,
         "How the bandwidth part divides into subchannels, and how wide the "
         "frequency field that names one is.", &body);
     GtkWidget *sub_body, *bits_body, *sci_body;
-    GtkWidget *sub = verb_card("SUBCHANNELS", &sub_body);
-    GtkWidget *bits = verb_card("FREQUENCY FIELD", &bits_body);
-    GtkWidget *sci = verb_card("SCI 1-A WIDTHS", &sci_body);
+    GtkWidget *sub = verb_card("READ THE SUBCHANNELS", &sub_body);
+    GtkWidget *bits = verb_card("READ THE FREQUENCY FIELD", &bits_body);
+    GtkWidget *sci = verb_card("READ THE SCI 1-A WIDTHS", &sci_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26709,9 +32073,9 @@ slnk_build_ids(AppState *state, const char *module_id,
         "The two numbers a sidelink bearer is addressed by, and the certificate "
         "roles ETSI 1609.2 puts around them.", &body);
     GtkWidget *pfi_body, *l2_body, *its_body;
-    GtkWidget *pfi = verb_card("PC5 QoS FLOW", &pfi_body);
-    GtkWidget *l2 = verb_card("LAYER-2 ID", &l2_body);
-    GtkWidget *its = verb_card("CERTIFICATE ROLES", &its_body);
+    GtkWidget *pfi = verb_card("READ THE PC5 FLOW", &pfi_body);
+    GtkWidget *l2 = verb_card("READ THE LAYER-2 ID", &l2_body);
+    GtkWidget *its = verb_card("READ WHAT EACH CERTIFICATE DOES", &its_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26768,7 +32132,7 @@ slnk_build_relay(AppState *state, const char *module_id,
         "A UE-to-network relay configuration, read for the findings it carries, "
         "and the plan a V2X lab starts from.", &body);
     GtkWidget *relay_body, *plan_body;
-    GtkWidget *relay = verb_card("RELAY CONFIGURATION", &relay_body);
+    GtkWidget *relay = verb_card("READ THE RELAY CONFIGURATION", &relay_body);
     GtkWidget *plan = verb_card("V2X HANDOFF", &plan_body);
 
     {
@@ -26804,9 +32168,9 @@ slnk_build_relay(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry slnk_entries[] = {
-    { "Resource Grid", "dialog-information-symbolic", NULL, slnk_build_grid },
-    { "Identifiers", "network-wireless-symbolic", NULL, slnk_build_ids },
-    { "Relay and Handoff", "preferences-system-symbolic", NULL, slnk_build_relay },
+    { "The resource grid", "dialog-information-symbolic", NULL, slnk_build_grid },
+    { "The identifiers", "network-wireless-symbolic", NULL, slnk_build_ids },
+    { "Relay and handoff", "preferences-system-symbolic", NULL, slnk_build_relay },
 };
 /* 52_stk — the SIM Application Toolkit.
  *
@@ -26825,7 +32189,7 @@ stk_build_commands(AppState *state, const char *module_id,
     GtkWidget *parse_body, *build_body, *lookup_body;
     GtkWidget *parse = verb_card("READ A COMMAND", &parse_body);
     GtkWidget *build = verb_card("BUILD A COMMAND", &build_body);
-    GtkWidget *lookup = verb_card("IDENTIFIERS", &lookup_body);
+    GtkWidget *lookup = verb_card("READ THE IDENTIFIERS", &lookup_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26878,14 +32242,14 @@ stk_build_sat(AppState *state, const char *module_id,
               GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("SAT AND WIB",
+    GtkWidget *outer = radio_view_shell("CARD'S OWN MESSAGES",
         "The toolkit browsers a card can carry, which turn a binary SMS into a "
         "remote command interpreter.", &body);
     GtkWidget *cmds_body, *audit_body, *fp_body, *log_body;
-    GtkWidget *cmds = verb_card("COMMAND SURFACE", &cmds_body);
-    GtkWidget *audit = verb_card("APPLET DETECTION", &audit_body);
-    GtkWidget *fp = verb_card("TOOLKIT SMS", &fp_body);
-    GtkWidget *log = verb_card("COMMAND LOG", &log_body);
+    GtkWidget *cmds = verb_card("READ WHAT CAN BE COMMANDED", &cmds_body);
+    GtkWidget *audit = verb_card("FIND AN APPLET", &audit_body);
+    GtkWidget *fp = verb_card("READ THE TOOLKIT SMS", &fp_body);
+    GtkWidget *log = verb_card("READ THE COMMAND LOG", &log_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -26970,9 +32334,9 @@ stk_build_plan(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry stk_entries[] = {
-    { "Commands", "dialog-information-symbolic", NULL, stk_build_commands },
-    { "SAT and WIB", "security-high-symbolic", NULL, stk_build_sat },
-    { "Handoff", "document-send-symbolic", NULL, stk_build_plan },
+    { "The commands", "dialog-information-symbolic", NULL, stk_build_commands },
+    { "The card's own messages", "security-high-symbolic", NULL, stk_build_sat },
+    { "The handoff", "document-send-symbolic", NULL, stk_build_plan },
 };
 /* 53_non3gpp — TETRA / DMR / GSM-R.
  *
@@ -26985,19 +32349,19 @@ n3g_build_identify(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("IDENTIFICATION",
+    GtkWidget *outer = radio_view_shell("IDENTIFY THE CARD",
         "Which land mobile technology a signal is, from its channel spacing, and "
         "what its ciphering does and does not protect.", &body);
     GtkWidget *cls_body, *note_body;
-    GtkWidget *cls = verb_card("CLASSIFICATION", &cls_body);
-    GtkWidget *note = verb_card("CIPHER NOTES", &note_body);
+    GtkWidget *cls = verb_card("READ THE CLASSIFICATION", &cls_body);
+    GtkWidget *note = verb_card("READ WHAT THE CIPHER DOES NOT HIDE", &note_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
 
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(cls_body),
-            mod_arg_row_prefilled(state, module_id, status, "Classify",
+            mod_arg_row_prefilled(state, module_id, status, "Classify one",
                 "--classify", "25",
                 "The channel spacing in kHz, then optionally the modulation. "
                 "25 kHz is TETRA, 12.5 kHz is DMR, 200 kHz is GSM-R; the answer "
@@ -27034,9 +32398,9 @@ n3g_build_frames(AppState *state, const char *module_id,
         "Frame length derived from the air interface, and the slot arithmetic "
         "that follows from it.", &body);
     GtkWidget *tetra_body, *dmr_body, *tdma_body;
-    GtkWidget *tetra = verb_card("TETRA", &tetra_body);
-    GtkWidget *dmr = verb_card("DMR", &dmr_body);
-    GtkWidget *tdma = verb_card("SLOT ARITHMETIC", &tdma_body);
+    GtkWidget *tetra = verb_card("READ THE TETRA", &tetra_body);
+    GtkWidget *dmr = verb_card("READ THE DMR", &dmr_body);
+    GtkWidget *tdma = verb_card("READ THE SLOT ARITHMETIC", &tdma_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27089,14 +32453,14 @@ n3g_build_reference(AppState *state, const char *module_id,
                     GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("REFERENCE",
+    GtkWidget *outer = radio_view_shell("REFERENCE VALUES",
         "The three standards this module summarises, and what a receive-only lab "
         "needs to start.", &body);
     GtkWidget *tetra_body, *dmr_body, *gsmr_body, *tea_body, *plan_body;
-    GtkWidget *tetra = verb_card("TETRA BANDS", &tetra_body);
-    GtkWidget *dmr = verb_card("DMR BANDS", &dmr_body);
-    GtkWidget *gsmr = verb_card("GSM-R", &gsmr_body);
-    GtkWidget *tea = verb_card("TETRA CIPHERS", &tea_body);
+    GtkWidget *tetra = verb_card("READ THE TETRA BANDS", &tetra_body);
+    GtkWidget *dmr = verb_card("READ THE DMR BANDS", &dmr_body);
+    GtkWidget *gsmr = verb_card("READ THE GSM-R", &gsmr_body);
+    GtkWidget *tea = verb_card("READ THE TETRA CIPHERS", &tea_body);
     GtkWidget *plan = verb_card("LAB HANDOFF", &plan_body);
 
 #define N3G_REF_CARD(widget, card_body, label, verb, hint_text)                \
@@ -27138,9 +32502,9 @@ n3g_build_reference(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry n3g_entries[] = {
-    { "Identification", "dialog-information-symbolic", NULL, n3g_build_identify },
-    { "Frames", "network-wireless-symbolic", NULL, n3g_build_frames },
-    { "Reference", "preferences-system-symbolic", NULL, n3g_build_reference },
+    { "Identify the card", "dialog-information-symbolic", NULL, n3g_build_identify },
+    { "The frames", "network-wireless-symbolic", NULL, n3g_build_frames },
+    { "The reference values", "preferences-system-symbolic", NULL, n3g_build_reference },
 };
 /* 54_baseband_exploit — the CVEs a baseband answers to.
  *
@@ -27153,14 +32517,14 @@ bexp_build_catalogue(AppState *state, const char *module_id,
                      GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("CATALOGUE",
+    GtkWidget *outer = radio_view_shell("MESSAGE CATALOGUE",
         "The CVEs this module carries, with the checks that decide whether an "
         "emulated stack is reachable by one of them.", &body);
     GtkWidget *list_body, *one_body, *states_body, *cp_body;
-    GtkWidget *list = verb_card("ENTRIES", &list_body);
+    GtkWidget *list = verb_card("READ THE ENTRIES", &list_body);
     GtkWidget *one = verb_card("ONE CVE", &one_body);
-    GtkWidget *states = verb_card("STACK STATES", &states_body);
-    GtkWidget *cp = verb_card("CONTROL PLANE", &cp_body);
+    GtkWidget *states = verb_card("READ THE STACK STATES", &states_body);
+    GtkWidget *cp = verb_card("READ THE CONTROL PLANE", &cp_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27220,14 +32584,14 @@ bexp_build_build(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("BUILD",
+    GtkWidget *outer = radio_view_shell("BUILD THE MESSAGE",
         "The two messages this module builds: an L2 frame and a registration "
         "response, and the corpus of frame cases behind the first.", &body);
     GtkWidget *frame_body, *corpus_body, *reg_body, *id_body;
-    GtkWidget *frame = verb_card("L2 FRAME", &frame_body);
-    GtkWidget *corpus = verb_card("L2 CORPUS", &corpus_body);
-    GtkWidget *reg = verb_card("REGISTRATION", &reg_body);
-    GtkWidget *id = verb_card("IDENTITY", &id_body);
+    GtkWidget *frame = verb_card("READ THE L2 FRAME", &frame_body);
+    GtkWidget *corpus = verb_card("READ THE L2 CORPUS", &corpus_body);
+    GtkWidget *reg = verb_card("READ HOW REGISTRATION WORKS", &reg_body);
+    GtkWidget *id = verb_card("READ THE IDENTITY", &id_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27291,14 +32655,14 @@ bexp_build_stage(AppState *state, const char *module_id,
                  GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("STAGING",
+    GtkWidget *outer = radio_view_shell("STAGING PLAN",
         "What it takes to get a built frame in front of a device, and what the "
         "module will not do on its own.", &body);
     GtkWidget *emu_body, *inject_body, *send_body, *plan_body;
-    GtkWidget *emu = verb_card("EMULATE", &emu_body);
-    GtkWidget *inject = verb_card("INJECT", &inject_body);
-    GtkWidget *send = verb_card("SEND", &send_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *emu = verb_card("EMULATE THE NODE", &emu_body);
+    GtkWidget *inject = verb_card("INJECT A MESSAGE", &inject_body);
+    GtkWidget *send = verb_card("SEND IT", &send_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27356,9 +32720,9 @@ bexp_build_stage(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry bexp_entries[] = {
-    { "Catalogue", "dialog-information-symbolic", NULL, bexp_build_catalogue },
-    { "Build", "document-send-symbolic", NULL, bexp_build_build },
-    { "Staging", "security-high-symbolic", NULL, bexp_build_stage },
+    { "The message catalogue", "dialog-information-symbolic", NULL, bexp_build_catalogue },
+    { "Build the message", "document-send-symbolic", NULL, bexp_build_build },
+    { "The staging plan", "security-high-symbolic", NULL, bexp_build_stage },
 };
 /* 55_nr_inject — the NR access procedure, read and built.
  *
@@ -27375,10 +32739,10 @@ nrj_build_access(AppState *state, const char *module_id,
         "The occasion and the response: which preamble goes where, and what the "
         "network answers with.", &body);
     GtkWidget *rar_body, *bo_body, *rnti_body, *tbs_body;
-    GtkWidget *rar = verb_card("RESPONSE", &rar_body);
-    GtkWidget *bo = verb_card("BACKOFF", &bo_body);
-    GtkWidget *rnti = verb_card("RA-RNTI", &rnti_body);
-    GtkWidget *tbs = verb_card("TRANSPORT BLOCK", &tbs_body);
+    GtkWidget *rar = verb_card("READ THE RESPONSE", &rar_body);
+    GtkWidget *bo = verb_card("READ THE BACKOFF", &bo_body);
+    GtkWidget *rnti = verb_card("COMPUTE THE RA-RNTI", &rnti_body);
+    GtkWidget *tbs = verb_card("READ THE TRANSPORT BLOCK", &tbs_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27397,7 +32761,7 @@ nrj_build_access(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(bo_body),
-            mod_arg_choices(state, module_id, status, "Backoff", "",
+            mod_arg_choices(state, module_id, status, "Read the backoff", "",
                 "The backoff indicator and its index, which is how a network paces "
                 "the devices contending for one occasion.",
                 (const char *[]) { "--rar-backoff 3", "--rar-backoff-idx 2" },
@@ -27445,9 +32809,9 @@ nrj_build_mac(AppState *state, const char *module_id,
         "The MAC layer under NR: subheaders, LCIDs, and the downlink control "
         "information that announces an allocation.", &body);
     GtkWidget *sub_body, *lcid_body, *dci_body;
-    GtkWidget *sub = verb_card("SUBHEADER", &sub_body);
-    GtkWidget *lcid = verb_card("LCID", &lcid_body);
-    GtkWidget *dci = verb_card("DCI", &dci_body);
+    GtkWidget *sub = verb_card("READ THE SUBHEADER", &sub_body);
+    GtkWidget *lcid = verb_card("READ THE LCID", &lcid_body);
+    GtkWidget *dci = verb_card("READ THE DCI", &dci_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27466,7 +32830,7 @@ nrj_build_mac(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(lcid_body),
-            mod_arg_choices(state, module_id, status, "LCID", "",
+            mod_arg_choices(state, module_id, status, "Read the LCID", "",
                 "The table, and one entry named from it.",
                 (const char *[]) { "--lcid-table", "--lcid 60" },
                 (const char *[]) { "Table", "One Value" }, 2));
@@ -27502,15 +32866,15 @@ nrj_build_link(AppState *state, const char *module_id,
         "Scrambling, the Gold sequence and framing: the parts a capture has to be "
         "put back together from before any message is visible.", &body);
     GtkWidget *gold_body, *scr_body, *frame_body;
-    GtkWidget *gold = verb_card("SEQUENCE", &gold_body);
-    GtkWidget *scr = verb_card("SCRAMBLING", &scr_body);
-    GtkWidget *frame = verb_card("FRAMING", &frame_body);
+    GtkWidget *gold = verb_card("READ THE SEQUENCE", &gold_body);
+    GtkWidget *scr = verb_card("READ THE SCRAMBLING", &scr_body);
+    GtkWidget *frame = verb_card("READ THE FRAMING", &frame_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(gold_body),
-            mod_arg_row_prefilled(state, module_id, status, "Generate",
+            mod_arg_row_prefilled(state, module_id, status, "Generate one",
                 "--gold", "0 16",
                 "Two states and a length. The pseudo-random sequence is the same "
                 "one scrambling, DMRS and PBCH all draw from, so it is the first "
@@ -27557,10 +32921,10 @@ nrj_build_attack(AppState *state, const char *module_id,
         "The catalogued attacks on the access procedure, and what each needs before "
         "it is anything other than a description.", &body);
     GtkWidget *list_body, *one_body, *replay_body, *stage_body;
-    GtkWidget *list = verb_card("CATALOGUE", &list_body);
+    GtkWidget *list = verb_card("READ THE CATALOGUE", &list_body);
     GtkWidget *one = verb_card("ONE EXPLOIT", &one_body);
-    GtkWidget *replay = verb_card("AUTH REPLAY", &replay_body);
-    GtkWidget *stage = verb_card("STAGING", &stage_body);
+    GtkWidget *replay = verb_card("REPLAY THE AUTHENTICATION", &replay_body);
+    GtkWidget *stage = verb_card("READ THE STAGING PLAN", &stage_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27590,7 +32954,7 @@ nrj_build_attack(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(replay_body),
-            mod_arg_choices(state, module_id, status, "Authentication", "",
+            mod_arg_choices(state, module_id, status, "Prove a card", "",
                 "What a capture gives, and what replaying it would do.",
                 (const char *[]) { "--auth-capture capture.pcap",
                                    "--auth-replay 0102" },
@@ -27618,10 +32982,10 @@ nrj_build_attack(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry nrj_entries[] = {
-    { "Random Access", "dialog-information-symbolic", NULL, nrj_build_access },
+    { "Random access", "dialog-information-symbolic", NULL, nrj_build_access },
     { "MAC and DCI", "utilities-terminal-symbolic", NULL, nrj_build_mac },
-    { "Link Layer", "network-wireless-symbolic", NULL, nrj_build_link },
-    { "Exploits", "security-high-symbolic", NULL, nrj_build_attack },
+    { "The link layer", "network-wireless-symbolic", NULL, nrj_build_link },
+    { "The exploits", "security-high-symbolic", NULL, nrj_build_attack },
 };
 
 /* 56_baseband_diag — the device's own diagnostic port.
@@ -27636,14 +33000,14 @@ bbdg_build_framing(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("FRAMING",
+    GtkWidget *outer = radio_view_shell("HOW FRAMES ARE FRAMED",
         "The DIAG transport: a checksum, an escape rule and a delimiter. Every "
         "other verb in this module is inside one of these frames.", &body);
     GtkWidget *crc_body, *frame_body, *unframe_body, *codec_body;
-    GtkWidget *crc = verb_card("CHECKSUM", &crc_body);
-    GtkWidget *frame = verb_card("FRAME", &frame_body);
-    GtkWidget *unframe = verb_card("UNFRAME", &unframe_body);
-    GtkWidget *codec = verb_card("ESCAPE", &codec_body);
+    GtkWidget *crc = verb_card("READ THE CHECKSUM", &crc_body);
+    GtkWidget *frame = verb_card("READ THE FRAME", &frame_body);
+    GtkWidget *unframe = verb_card("UNFRAME IT", &unframe_body);
+    GtkWidget *codec = verb_card("ESCAPE THE SLICE", &codec_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27655,7 +33019,7 @@ bbdg_build_framing(AppState *state, const char *module_id,
                 "carries and the one a captured frame can be checked against."));
         gtk_box_append(GTK_BOX(crc_body), res);
         gtk_box_append(GTK_BOX(crc_body),
-            mod_arg_choices(state, module_id, status, "Reference", "",
+            mod_arg_choices(state, module_id, status, "Read the reference", "",
                 "The framing known-answer vectors this module is checked "
                 "against, and what a command byte means.",
                 (const char *[]) { "--kat", "--cmd-name 38" },
@@ -27685,7 +33049,7 @@ bbdg_build_framing(AppState *state, const char *module_id,
                 "checked, so a corrupted capture is refused rather than read."));
         gtk_box_append(GTK_BOX(unframe_body), res);
         gtk_box_append(GTK_BOX(unframe_body),
-            mod_arg_choices(state, module_id, status, "Stream", "",
+            mod_arg_choices(state, module_id, status, "Read the stream", "",
                 "Split a byte stream into frames, or escape and unescape a "
                 "payload without framing it.",
                 (const char *[]) { "--demux 7e000a6b6d000007000000000000007e",
@@ -27698,7 +33062,7 @@ bbdg_build_framing(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(codec_body),
-            mod_arg_choices(state, module_id, status, "Escape", "",
+            mod_arg_choices(state, module_id, status, "Escape the slice", "",
                 "The two halves of the escaping rule, applied to a payload.",
                 (const char *[]) { "--escape 7e7d", "--unescape 7d5e7d5d" },
                 (const char *[]) { "Escape", "Unescape" }, 2));
@@ -27715,13 +33079,13 @@ bbdg_build_nv(AppState *state, const char *module_id,
               GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("NV ITEMS",
+    GtkWidget *outer = radio_view_shell("MODEM'S NV ITEMS",
         "The device's non-volatile items: read one, build the request that reads "
         "it, and build the write that changes it.", &body);
     GtkWidget *read_body, *build_body, *scan_body;
-    GtkWidget *read = verb_card("READ", &read_body);
-    GtkWidget *build = verb_card("BUILD", &build_body);
-    GtkWidget *scan = verb_card("SCAN", &scan_body);
+    GtkWidget *read = verb_card("READ THE STATE", &read_body);
+    GtkWidget *build = verb_card("BUILD ONE", &build_body);
+    GtkWidget *scan = verb_card("RUN A SCAN", &scan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27739,7 +33103,7 @@ bbdg_build_nv(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(build_body),
-            mod_arg_choices(state, module_id, status, "Build", "",
+            mod_arg_choices(state, module_id, status, "Build one", "",
                 "The read request, the write request for one item, or a decode of "
                 "a payload you already have.",
                 (const char *[]) { "--nv-build read 178", "--nv-write 178 00",
@@ -27776,15 +33140,15 @@ bbdg_build_identity(AppState *state, const char *module_id,
         "Who the device is: its identity string, its version, and the packed "
         "decimals those two carry.", &body);
     GtkWidget *state_body, *ver_body, *bcd_body;
-    GtkWidget *st = verb_card("DEVICE STATE", &state_body);
-    GtkWidget *ver = verb_card("VERSION", &ver_body);
-    GtkWidget *bcd = verb_card("PACKED DECIMAL", &bcd_body);
+    GtkWidget *st = verb_card("READ THE DEVICE STATE", &state_body);
+    GtkWidget *ver = verb_card("READ THE VERSION", &ver_body);
+    GtkWidget *bcd = verb_card("READ PACKED DECIMAL", &bcd_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(state_body),
-            mod_arg_choices(state, module_id, status, "Build a request", "",
+            mod_arg_choices(state, module_id, status, "Build the request", "",
                 "The state request for one stack, then the same request read "
                 "back as fields.",
                 (const char *[]) { "--state-build gsm", "--state-info wcdma",
@@ -27799,7 +33163,7 @@ bbdg_build_identity(AppState *state, const char *module_id,
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(ver_body),
-            mod_arg_choices(state, module_id, status, "Version", "",
+            mod_arg_choices(state, module_id, status, "Read the version", "",
                 "The request that asks the device for its version, and the parse "
                 "of the answer it gives.",
                 (const char *[]) { "--verno", "--verno-parse 01" },
@@ -27835,13 +33199,13 @@ bbdg_build_efs(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("EFS",
+    GtkWidget *outer = radio_view_shell("MODEM'S FILE SYSTEM",
         "The device's file system, over the same port. Read a path, stat one, "
         "walk a directory, and build the write that changes a file.", &body);
     GtkWidget *read_body, *walk_body, *write_body;
-    GtkWidget *read = verb_card("READ", &read_body);
-    GtkWidget *walk = verb_card("WALK", &walk_body);
-    GtkWidget *write = verb_card("WRITE", &write_body);
+    GtkWidget *read = verb_card("READ THE STATE", &read_body);
+    GtkWidget *walk = verb_card("WALK IT", &walk_body);
+    GtkWidget *write = verb_card("WRITE IT", &write_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27870,7 +33234,7 @@ bbdg_build_efs(AppState *state, const char *module_id,
                 "an operator finds the item a modem reads at boot."));
         gtk_box_append(GTK_BOX(walk_body), res);
         gtk_box_append(GTK_BOX(walk_body),
-            mod_arg_choices(state, module_id, status, "Service", "",
+            mod_arg_choices(state, module_id, status, "Read the service", "",
                 "What the EFS service answers, and the decode of a reply.",
                 (const char *[]) { "--efs-hello", "--efs-open /nv read",
                                    "--efs-parse 01 02 03" },
@@ -27900,14 +33264,14 @@ bbdg_build_at(AppState *state, const char *module_id,
               GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("AT COMMANDS",
+    GtkWidget *outer = radio_view_shell("RAW MODEM COMMANDS",
         "The other port a modem exposes, and the two things to know about a "
         "machine that has one.", &body);
     GtkWidget *at_body, *ports_body, *audit_body, *plan_body;
-    GtkWidget *at = verb_card("SEND A COMMAND", &at_body);
-    GtkWidget *ports = verb_card("PORTS", &ports_body);
-    GtkWidget *audit = verb_card("AUDIT", &audit_body);
-    GtkWidget *plan = verb_card("HANDOFF", &plan_body);
+    GtkWidget *at = verb_card("SEND THE CARD COMMAND", &at_body);
+    GtkWidget *ports = verb_card("READ THE PORTS", &ports_body);
+    GtkWidget *audit = verb_card("AUDIT IT", &audit_body);
+    GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27920,7 +33284,7 @@ bbdg_build_at(AppState *state, const char *module_id,
                                    "--at-parse AT+CGSN" },
                 (const char *[]) { "ATI", "Serial", "Parse" }, 3));
         gtk_box_append(GTK_BOX(at_body),
-            mod_arg_choices(state, module_id, status, "Port", "",
+            mod_arg_choices(state, module_id, status, "Read the port", "",
                 "The device node the commands go to, and a raw read or write "
                 "through it.",
                 (const char *[]) { "--config", "--read /dev/ttyUSB0 16",
@@ -27975,11 +33339,11 @@ bbdg_build_at(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry bbdg_entries[] = {
-    { "Framing", "utilities-terminal-symbolic", NULL, bbdg_build_framing },
-    { "NV Items", "drive-harddisk-symbolic", NULL, bbdg_build_nv },
-    { "Identity", "avatar-default-symbolic", NULL, bbdg_build_identity },
-    { "EFS", "folder-symbolic", NULL, bbdg_build_efs },
-    { "AT Commands", "network-wireless-symbolic", NULL, bbdg_build_at },
+    { "How frames are framed", "utilities-terminal-symbolic", NULL, bbdg_build_framing },
+    { "The modem's NV items", "drive-harddisk-symbolic", NULL, bbdg_build_nv },
+    { "The identity", "avatar-default-symbolic", NULL, bbdg_build_identity },
+    { "The modem's file system", "folder-symbolic", NULL, bbdg_build_efs },
+    { "Raw modem commands", "network-wireless-symbolic", NULL, bbdg_build_at },
 };
 
 static void

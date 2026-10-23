@@ -50,13 +50,30 @@ for piece in result_summary_set answer-rule record_row_append table_body display
 done
 
 # 3. Nothing displayed is allowed to show a verb token. The scrubber is the one
-#    place module text is translated, so the renderers must call it: every
-#    branch of console_row_append.
-if ! awk '/^console_row_append\(/{f=1} f{print} f&&/^}$/{exit}' "$MAIN" |
-        grep -q 'display_text'; then
-    violations+=("console_row_append renders module text without display_text")
+#    place module text is translated, so every renderer must reach it. The
+#    dispatch function delegates its three renderings to helpers, so checking
+#    only its own body would pass a helper that forgot to scrub -- and checking
+#    only the helpers would pass a dispatch that stopped calling them. Both: the
+#    helpers console_row_append calls by name must each scrub.
+renderers=$(awk '/^console_row_append\(/{f=1} f{print} f&&/^}$/{exit}' "$MAIN" |
+            grep -oE '[a-z_]+_append\(' | tr -d '(' | sort -u)
+if [[ -z "$renderers" ]]; then
+    violations+=("console_row_append dispatches to no renderer")
     fail=$((fail + 1))
+elif ! awk '/^console_row_append\(/{f=1} f{print} f&&/^}$/{exit}' "$MAIN" |
+        grep -q 'display_text'; then
+    :   # the dispatch itself need not scrub if its renderers do
 fi
+for r in $renderers; do
+    [[ "$r" == "console_row_append" ]] && continue
+    body=$(awk -v FN="$r(" 'index($0, FN) == 1 {f=1} f{print} f&&/^}$/{exit}' "$MAIN")
+    [[ -z "$body" ]] && continue
+    if ! grep -q 'display_text' <<< "$body"; then
+        violations+=("$r renders module text without display_text")
+        fail=$((fail + 1))
+    fi
+    checked=$((checked + 1))
+done
 checked=$((checked + 1))
 
 # 4. The remaining build_output_card callers must all be outside the scope: the
