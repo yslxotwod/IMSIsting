@@ -623,9 +623,9 @@ static const ModuleDefinition modules[] = {
     { "05_field_kit",        "Field Kit",            "SYSTEM",
       "imsisting-05_field_kit-symbolic",
       "RF pre-flight, honesty verification of every radio verb, and a synthetic GSMTAP source." },
-    { "25_killchain",        "Cellular Killchain",   "SYSTEM",
+    { "25_killchain",        "Killchain",            "SYSTEM",
       "imsisting-25_killchain-symbolic",
-      "Chains module verbs into repeatable runs from a TSV chain file." },
+      "Chains module verbs into repeatable runs from a TSV chain file, with a record of every run." },
 
     /* RECON — passive survey of the RF environment: no target, no identity */
     { "02_cell_recon",       "Cell Recon",           "RECON",
@@ -639,15 +639,15 @@ static const ModuleDefinition modules[] = {
       "GPS-tagged cell survey with CSV, KML and GeoJSON export." },
 
     /* RADIO — the air interface per RAT, plus radio-layer attacks and RF effects */
-    { "06_gsm_air",          "GSM Air Interface",    "RADIO",
+    { "06_gsm_air",          "GSM Air Interface / Catcher", "RADIO",
       "imsisting-06_gsm_air-symbolic",
-      "GSM system information, paging, cipher audit and A5/1 keystream, proved against the BGW vector." },
+      "GSM system information, paging, cipher audit and A5/1 keystream, proved against the BGW vector. The catcher chain is not built here yet; 07_gsm_attack holds the transmit path it would stand on." },
     { "07_gsm_attack",       "GSM Attack",           "RADIO",
       "imsisting-07_gsm_attack-symbolic",
       "IMSI-catcher sequence, A5/1 downgrade, TMSI de-anonymisation and Kc recovery." },
-    { "08_umts_air",         "UMTS Air Interface",   "RADIO",
+    { "08_umts_air",         "UMTS Air Interface / Catcher", "RADIO",
       "imsisting-08_umts_air-symbolic",
-      "UMTS UARFCN, SIB decode, RRC integrity (UIA1/UIA2) and the AKA relay flow." },
+      "UMTS UARFCN, SIB decode, RRC integrity (UIA1/UIA2), the AKA relay flow, and the whole catcher chain: carrier, BCH, system information on FACH, the uplink request and preamble, identity, authentication and release." },
     { "10_lte_air",          "LTE Air Interface",    "RADIO",
       "imsisting-10_lte_air-symbolic",
       "LTE EARFCN, RRC/SIB decode, paging maths and srsRAN eNB orchestration." },
@@ -698,9 +698,9 @@ static const ModuleDefinition modules[] = {
     { "38_ussd",             "USSD Forge",                 "ACCESS",
       "imsisting-38_ussd-symbolic",
       "USSD/MMI parsing, 7-bit packing and USSD/STK injection detection." },
-    { "43_ran_share",        "RAN Sharing",          "ACCESS",
+    { "43_ran_share",        "RAN Sharing Leakage",   "ACCESS",
       "imsisting-43_ran_share-symbolic",
-      "PLMN coding, MOCN/MORAN/GWCN classification and cross-operator leakage detection." },
+      "PLMN coding, MOCN/MORAN/GWCN classification, and the check that tells a shared cell from one that has leaked a neighbour's identity." },
     { "47_wifioff",          "Wi-Fi Offload / LWA",  "ACCESS",
       "imsisting-47_wifioff-symbolic",
       "Wi-Fi offload: the ePDG FQDN, the EAP exchange byte for byte, and the assertions a certificate makes." },
@@ -726,9 +726,9 @@ static const ModuleDefinition modules[] = {
        other half. Measurement is still the authority; the builders emit the
        messages an MME sends before it has authenticated anybody, and never send
        them. */
-    { "32_nas_signaling",    "NAS Signalling",       "CORE NETWORK",
+    { "32_nas_signaling",    "NAS Message Crafting",  "CORE NETWORK",
       "imsisting-32_nas_signaling-symbolic",
-      "Rate, procedure mix and storm detection over captures -- plus the pre-authentication messages (reject, identity, auth, security mode) built as octets and never sent." },
+      "Rate, procedure mix and storm detection over captures, and the pre-authentication messages built octet for octet: attach, TAU and service reject, identity request, authentication, security mode." },
     { "40_sba_pivot",        "5G SBA Pivot",         "CORE NETWORK",
       "imsisting-40_sba_pivot-symbolic",
       "HTTP/2 SBI framing, NRF discovery and OAuth2 token audit." },
@@ -752,7 +752,7 @@ static const ModuleDefinition modules[] = {
     { "41_ota_sms",          "OTA Binary SMS Attacks",       "SIM / IDENTITY",
       "imsisting-41_ota_sms-symbolic",
       "TS 23.048 OTA command-packet construction with an SPI/counter/key audit. Own-SIM and lab." },
-    { "52_stk",              "STK Attacks",    "SIM / IDENTITY",
+    { "52_stk",              "SIM Toolkit Attacks",    "SIM / IDENTITY",
       "imsisting-52_stk-symbolic",
       "TS 31.111 proactive commands: build, parse and audit for silent off-device actions." },
 
@@ -766,9 +766,9 @@ static const ModuleDefinition modules[] = {
     { "55_nr_inject",        "5G NR Injection",      "BASEBAND / DEVICE",
       "imsisting-55_nr_inject-symbolic",
       "NR RNTI tracking, MAC-NR framing, descrambling and the injection exploit set." },
-    { "56_baseband_diag",    "Baseband NV/EFS",      "BASEBAND / DEVICE",
+    { "56_baseband_diag",    "Baseband File System", "BASEBAND / DEVICE",
       "imsisting-56_baseband_diag-symbolic",
-      "Qualcomm DM/DIAG framing, NV and EFS2 codecs, state-info identity decode and the AT/device surface." },
+      "Qualcomm DM/DIAG framing, NV item and EFS2 file codecs, state-info identity decode and the AT/device surface." },
 
     /* TRACKING — locating and following a subscriber or a transmitter */
     { "24_rf_fingerprint",   "RF Fingerprint / CSI", "TRACKING",
@@ -777,7 +777,7 @@ static const ModuleDefinition modules[] = {
     { "28_paging_track",     "Paging / Torpedo",     "TRACKING",
       "imsisting-28_paging_track-symbolic",
       "Paging occasion maths, paging capture, and the Torpedo/Piercer models." },
-    { "39_ta_geoloc",        "TA Geolocation",       "TRACKING",
+    { "39_ta_geoloc",        "Timing-Advance Geolocation", "TRACKING",
       "imsisting-39_ta_geoloc-symbolic",
       "Timing-advance ranging and multi-cell trilateration from TA measurements." },
     { "46_lpp",              "LPP Position Forgery",      "TRACKING",
@@ -810,7 +810,7 @@ static const ModuleDefinition modules[] = {
       "5G NR, SBA and SUCI CVEs." },
 
     /* INTERCEPT / CARRIER — lawful intercept and carrier-side interfaces */
-    { "42_li_probe",         "LI Interception",         "INTERCEPT / CARRIER",
+    { "42_li_probe",         "Lawful Interception Probe", "INTERCEPT / CARRIER",
       "imsisting-42_li_probe-symbolic",
       "Lawful-interception interfaces and posture signals, plus the artefacts an interception is built from, encoded and never delivered." },
     { "44_carrier_api",      "Carrier API Abuse",    "INTERCEPT / CARRIER",
