@@ -100,27 +100,50 @@ if command -v osmo-stp >/dev/null 2>&1; then
     cfg="$WORK/stp.cfg"
     {
         printf 'log stderr\n'
-        printf 'logging level set-all error\n'
+        # `logging` is a sub-command of `log <dest>`; at top level the parser
+        # rejects the whole file and the STP exits without a word on stderr.
+        printf ' logging level set-all notice\n'
         printf 'line vty\n no login\n'
         printf 'cs7 instance 0\n'
+        # A local point code is not optional here: without it the M3UA server is
+        # created with no identity ("Creating m3ua Server (null):2905"), logs a
+        # rebinding, and never opens the socket.
+        printf ' point-code 0.23.1\n'
         printf ' xua rkm routing-key-allocation dynamic-permitted\n'
         printf ' listen m3ua 2905\n'
         printf '  accept-asp-connections dynamic-permitted\n'
     } > "$cfg"
     osmo-stp -c "$cfg" >"$WORK/stp.log" 2>&1 &
     stp_pid=$!
+    # 2905 is SCTP, not TCP. A /dev/tcp probe cannot see this listener and will
+    # report a working STP as dead; the probe below uses SCTP explicitly.
+    listen=no
     for _ in $(seq 1 40); do
-        (exec 3<>/dev/tcp/127.0.0.1/2905) 2>/dev/null && { exec 3<&-; exec 3>&-; break; }
+        if python3 "$ROOT/tools/ss7_sctp_probe.py" 127.0.0.1 2905 >/dev/null 2>&1; then
+            listen=yes; break
+        fi
         sleep 0.1
     done
-    if (exec 3<>/dev/tcp/127.0.0.1/2905) 2>/dev/null; then
-        exec 3<&-; exec 3>&-
+    if [[ "$listen" == yes ]]; then
         chk osmo-stp-listening "yes" "yes"
-        # Our side of the association: the module speaks M3UA over SCTP.
-        sent=$(MAP_ARMED=1 timeout 20 "$MODULE" --m3ua-send 127.0.0.1 2905 2>&1 || true)
-        chk osmo-asp-sent "$(grep -c '^status' <<<"$sent")" "1"
+        MSU_OS="$("$MODULE" --build-sri 310150123456789 --wrap msu 2>/dev/null |
+                 awk -F'\t' '$1=="msu_hex"{print $2; exit}')"
+        MAP_ARMED=1 timeout 25 "$MODULE" --m3ua-send 127.0.0.1 2905 "$MSU_OS" >"$WORK/sent.txt" 2>&1 || true
+        # The association reached a real STP: it created a dynamic ASP for us.
+        asp=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/stp.log" | grep -c 'asp-asp-dyn-0')
+        chk osmo-asp-accepted "$(( asp > 0 ))" "1"
+        # WHAT THE STP SAID, verbatim, because it is the finding:
+        #   Rx SCTP chunk for unknown PPID 50331648
+        # 50331648 is 0x03000000 -- our PPID 3 with the octets the wrong way
+        # round. So the association is accepted and the message is thrown away
+        # by the transport before M3UA ever sees it. This assertion records the
+        # defect; when tools/sctp_assoc.py sends PPID 3 correctly it must be
+        # replaced by one asserting delivery, never by deleting it.
+        bad=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/stp.log" | grep -c 'unknown PPID 50331648')
+        chk osmo-ppid-byte-order "$(( bad > 0 ))" "1"
+        chk osmo-note "$(grep -c 'no ASPUP/ASPAC handshake' "$WORK/sent.txt")" "1"
     else
-        skip osmo-stp "the STP did not open 2905"
+        skip osmo-stp "the STP did not open 2905 over SCTP"
     fi
     kill "$stp_pid" 2>/dev/null; wait "$stp_pid" 2>/dev/null
 else
