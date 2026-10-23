@@ -90,6 +90,9 @@ DEFAULT_TYPES = [
 # generator would be a second implementation of the same closure walk.
 FAMILIES = {}
 
+# The family whose names are in TYPES right now; the LTE one at import.
+ACTIVE_FAMILY = "rrc"
+
 
 def _register_rrc():
     FAMILIES["rrc"] = {
@@ -196,7 +199,9 @@ def use_family(name):
     path.
     """
     global MODULES, MODULE_ALIASES, DEFAULT_TYPES, DEFAULT_MODULE
+    global ACTIVE_FAMILY
     fam = FAMILIES[name]
+    ACTIVE_FAMILY = name
     MODULES = fam["modules"]
     MODULE_ALIASES = fam["aliases"]
     DEFAULT_TYPES = fam["default_types"]
@@ -727,6 +732,11 @@ def emit_table(types, roots, unsupported, collisions, generated_at):
     for r in roots:
         out.append("    %r," % r)
     out.append("]")
+    out.append("")
+    out.append("# The ASN.1 family the keys in TYPES belong to.  A verifier that is")
+    out.append("# handed this table must select that family before it indexes pycrate,")
+    out.append("# or it answers every key from whichever family it last selected.")
+    out.append("FAMILY = %r" % ACTIVE_FAMILY)
     out.append("")
     out.append("# Reason strings for every construct the generator could not express.")
     out.append("# Keyed by the type that contains it; the engine raises PerError on them.")

@@ -829,6 +829,32 @@ def main(argv=None):
 
     per = load_module(os.path.abspath(args.per), "lte_per")
     tbl = load_module(os.path.abspath(args.table), "lte_rrc_layout")
+    # The reference index is built from asn1gen's own registry, and that
+    # registry holds whichever family asn1gen last selected -- the LTE one at
+    # import.  Checking a table from another family without saying so resolves
+    # every key through the LTE namespaces, so a name that exists in both
+    # (ARFCN_ValueEUTRA is 0..65535 in TS 36.331 and 0..262143 in TS 38.331)
+    # is answered by the wrong object and every case disagrees.  A table that
+    # carries FAMILY selects it; a table without one keeps the old behaviour.
+    family = getattr(tbl, "FAMILY", None)
+    if family:
+        # asn1gen only fills FAMILIES when a family's register function runs,
+        # and main() is what normally calls them, so a freshly loaded module
+        # knows no families at all.  Register the table's own family first.
+        register = getattr(asn1gen, "_register_%s" % family, None)
+        if register is not None:
+            try:
+                register()
+            except Exception as exc:
+                sys.stderr.write("cannot register family %r: %s\n"
+                                 % (family, exc))
+                return 2
+        try:
+            asn1gen.use_family(family)
+        except Exception as exc:
+            sys.stderr.write("the table says family %r, which asn1gen cannot "
+                             "select: %s\n" % (family, exc))
+            return 2
     codec = per.codec_from_module(tbl)
 
     types = dict(getattr(tbl, "TYPES", {}) or {})
