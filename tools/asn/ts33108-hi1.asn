@@ -1,0 +1,347 @@
+-- TS 33.108 Annex M: the HI1 (X1) notification operation, as ASN.1.
+--
+-- Transcribed from ETSI TS 133 108 V16.3.0 (2021-04), Annex M.2
+-- ("ASN.1 description of LI management notification operation (HI1
+-- interface)"), and from ETSI TS 101 671 V3.14.1 for the eight types the
+-- module imports from HI2Operations.
+--
+-- Why it is here as text and not as a generated table: HI1 is encoded in BER
+-- (TS 33.108 clause 5.2.1 says the IRI parameters use the basic encoding
+-- rules), and every generated table in tools/ is a PER layout for
+-- tools/lte_per.py.  This file is the input a BER encoder is checked against.
+--
+-- Transcribed, not vendored: the text is the normative definition, and the
+-- PDF renders it with wrapped comments that ASN.1 cannot parse, so the lines
+-- that are prose continued from the line above are commented out.  Nothing
+-- else was changed.  Try it with:
+--   /home/ysl/.lte-oracles/venv/bin/python -c \
+--     "from pycrate_asn1c import asnproc; from pycrate_asn1c.glob import GLOBAL; \
+--      asnproc.compile_text(open('tools/asn/ts33108-hi1.asn').read()); \
+--      print(len(GLOBAL.MOD['ThreeGPP-HI1NotificationOperations']['_obj_']))"
+-- which prints 23 on a working copy.
+ThreeGPP-HI1NotificationOperations
+{itu-t(0) identified-organization(4) etsi(0) securityDomain(2) lawfulIntercept(2) threeGPP(4) hi1(0)
+notificationOperations(1) r16 (16) version-0(0)}
+
+DEFINITIONS IMPLICIT TAGS ::=
+
+BEGIN
+
+
+
+
+-- =============================
+-- Object Identifier Definitions
+-- =============================
+
+-- LawfulIntercept DomainId
+lawfulInterceptDomainId OBJECT IDENTIFIER ::= {itu-t(0) identified-organization(4) etsi(0)
+securityDomain(2) lawfulIntercept(2)}
+-- Security Subdomains
+threeGPPSUBDomainId OBJECT IDENTIFIER ::= {lawfulInterceptDomainId threeGPP(4)}
+-- hi1 Domain
+threeGPP-hi1NotificationOperationsId OBJECT IDENTIFIER ::= {threeGPPSUBDomainId hi1(0)
+notificationOperations(1)}
+threeGPP-hi1OperationId OBJECT IDENTIFIER ::= {threeGPP-hi1NotificationOperationsId r16 (16)
+version-0(0)}
+
+
+ThreeGPP-HI1-Operation ::= CHOICE
+{
+    liActivated                 [1] Notification,
+    liDeactivated               [2] Notification,
+    liModified                  [3] Notification,
+    alarms-indicator            [4] Alarm-Indicator,
+    threeGPP-National-HI1-ASN1parameters    [5] ThreeGPP-National-HI1-ASN1parameters,
+...}
+
+
+
+
+
+
+-- ==================
+-- PARAMETERS FORMATS
+-- ==================
+
+Notification ::= SEQUENCE
+{
+    domainID                        [0] OBJECT IDENTIFIER OPTIONAL,
+        -- Once using FTP delivery mechanism
+    lawfulInterceptionIdentifier    [1] LawfulInterceptionIdentifier,
+    -- This identifier is the LIID identity provided with the lawful authorization for each
+    -- target.
+    communicationIdentifier         [2] CommunicationIdentifier OPTIONAL,
+        -- Only the NO/AP/SP Identifier is provided (the one provided with the Lawful
+        -- authorization) in CS domain.
+    timeStamp                       [3] TimeStamp,
+    -- date and time of the report.
+    threeGPP-National-HI1-ASN1parameters        [5] ThreeGPP-National-HI1-ASN1parameters OPTIONAL,
+    target-Information              [6] Target-Information OPTIONAL,
+    network-Identifier              [7] Network-Identifier OPTIONAL,
+        -- Same definition of annexes B3, B8, B9, B.11.1. It is recommended to use the same value
+        -- than those decided by the CSP and the LEA as the NWO/PA/SvPIdentifier of
+        -- communicationIdentifier used in CS domain.
+    broadcastStatus                 [8] BroadcastStatus OPTIONAL,
+...}
+
+Alarm-Indicator ::= SEQUENCE
+{
+    domainID                        [0] OBJECT IDENTIFIER OPTIONAL,
+        -- Once using FTP delivery mechanism
+    communicationIdentifier         [1] CommunicationIdentifier OPTIONAL,
+        -- Only the NO/AP/SP Identifier is provided (the one provided with the
+        -- Lawful authorization)
+    timeStamp                       [2] TimeStamp,
+        -- date and time of the report.
+    alarm-information               [3] OCTET STRING (SIZE (1..25)),
+        -- Provides information about alarms (free format).
+    lawfulInterceptionIdentifier    [4] LawfulInterceptionIdentifier OPTIONAL,
+        -- This identifier is the LIID identity provided with the lawful authorization
+        -- for each target in according to national law
+    threeGPP-National-HI1-ASN1parameters        [5] ThreeGPP-National-HI1-ASN1parameters OPTIONAL,
+    target-Information              [6] Target-Information OPTIONAL,
+    network-Identifier              [7] Network-Identifier OPTIONAL,
+    -- the NO/AP/SP Identifier,
+        -- Same definition as annexes B3, B8, B9, B.11.1
+    network-Element-Information     [8] OCTET STRING (SIZE (1..256)) OPTIONAL,
+        -- This identifier may be a network element identifier such an IP address with its IP value,
+        -- that may not work properly. To be defined between the CSP and the LEA.
+...}
+
+ThreeGPP-National-HI1-ASN1parameters ::= SEQUENCE
+{
+    domainID        [0] OBJECT IDENTIFIER OPTIONAL,
+        -- Once using FTP delivery mechanism.
+    countryCode     [1] PrintableString (SIZE (2)),
+        -- Country Code according to ISO 3166-1 [39],
+        -- the country to which the parameters inserted after the extension marker apply.
+        -- In case a given country wants to use additional national parameters according to its law,
+        -- these national parameters should be defined using the ASN.1 syntax and added after the
+        -- extension marker (...).
+        -- It is recommended that "version parameter" and "vendor identification parameter" are
+        -- included in the national parameters definition. Vendor identifications can be
+        -- retrieved from IANA web site. Besides, it is recommended to avoid
+        -- using tags from 240 to 255 in a formal type definition.
+...}
+
+Target-Information ::= SEQUENCE
+{
+    communicationIdentifier [0] CommunicationIdentifier OPTIONAL,
+        -- Only the NO/AP/SP Identifier is provided (the one provided with the
+        -- Lawful authorization)
+    network-Identifier [1] Network-Identifier OPTIONAL,
+        -- the NO/PA/SPIdentifier,
+        -- Same definition of annexes B3, B8, B9, B.11.1
+    broadcastArea       [2] OCTET STRING (SIZE (1..256)) OPTIONAL,
+        -- A Broadcast Area is used to select the group of NEs (network elements) which an
+        -- interception applies to. This group may be built on the basis of network type, technology
+        -- type or geographic details to fit national regulation and jurisdiction. The pre-defined
+
+
+
+
+
+
+        -- values may be decided by the CSP and the LEA to determinate the specific part of the
+        -- network or plateform on which the target identity(ies) has to be activated or
+        -- desactivated.
+    targetType          [3] TargetType OPTIONAL,
+    deliveryInformation [4] DeliveryInformation OPTIONAL,
+    liActivatedTime     [5] TimeStamp OPTIONAL,
+    liDeactivatedTime   [6] TimeStamp OPTIONAL,
+    liModificationTime [7] TimeStamp OPTIONAL,
+    interceptionType    [8] InterceptionType OPTIONAL,
+...,
+    liSetUpTime        [9] TimeStamp OPTIONAL
+    -- date and time when the warrant is entered into the ADMF
+}
+
+TargetType ::= ENUMERATED
+{
+    mSISDN(0),
+    iMSI(1),
+    iMEI(2),
+    e164-Format(3),
+    nAI(4),
+    sip-URI(5),
+    tel-URI(6),
+    iMPU (7),
+    iMPI (8),
+...
+}
+
+DeliveryInformation ::= SEQUENCE
+{
+    hi2DeliveryNumber       [0] CalledPartyNumber OPTIONAL,
+    -- Circuit switch IRI delivery E164 number
+    hi3DeliveryNumber       [1] CalledPartyNumber OPTIONAL,
+    -- Circuit switch voice content delivery E164 number
+    hi2DeliveryIpAddress    [2] IPAddress OPTIONAL,
+    -- HI2 address of the LEMF.
+    hi3DeliveryIpAddress    [3] IPAddress OPTIONAL,
+    -- HI3 address of the LEMF.
+...}
+
+InterceptionType ::= ENUMERATED
+{
+      voiceIriCc(0),
+      voiceIriOnly(1),
+      dataIriCc(2),
+      dataIriOnly(3),
+      voiceAndDataIriCc(4),
+      voiceAndDataIriOnly(5),
+...}
+
+BroadcastStatus ::= ENUMERATED
+{
+    succesfull(0),
+    -- Example of usage: following a broadcasted command at least the target list of one node with a
+-- LI function has
+    -- been modified or confirm to include the target id requested by the LEA.
+    unsuccesfull(1),
+    -- case of usage: such information could be provided to the LEMF following the impossibility to
+-- get a positive confirmation from at least one node with an LI function on the broadcasted command
+-- made by the operator's mediation or the management of mediation.
+...}
+
+-- Types imported from HI2Operations (TS 101 671), copied verbatim.
+LawfulInterceptionIdentifier ::= OCTET STRING (SIZE (1..25))
+    -- It is recommended to use ASCII characters in "a"…"z", "A"…"Z", "-", "_", ".", and "0"…"9".
+    -- For subaddress option only "0"..."9" shall be used.
+
+TimeStamp ::= CHOICE
+{
+-- The minimum resolution required is one second.
+-- "Resolution" is the smallest incremental change that can be measured for time and
+-- is expressed with a definite number of decimal digits or bits.
+    localTime           [0] LocalTimeStamp,
+    utcTime             [1] UTCTime
+}
+
+LocalTimeStamp ::= SEQUENCE
+{
+    generalizedTime                 [0] GeneralizedTime,
+        -- The minimum resolution required is one second.
+        -- "Resolution" is the smallest incremental change that can be measured for time and
+        -- is expressed with a definite number of decimal digits or bits.
+    winterSummerIndication          [1] ENUMERATED
+    {
+        notProvided(0),
+        winterTime(1),
+        summerTime(2),
+        ...
+    }
+
+
+
+
+
+}
+
+CommunicationIdentifier ::= SEQUENCE
+{
+    communication-Identity-Number   [0] OCTET STRING (SIZE (1..8)) OPTIONAL,
+        -- Temporary Identifier of an intercepted call to uniquely identify an intercepted call
+        -- within the node. This parameter is mandatory if there is associated
+        -- information sent over HI3interface (CClink, data,..) or when
+        -- CommunicationIdentifier is used for IRI other than IRI-Report-record
+        -- This parameter was called "call-Identity-Number" in V1.1.1 of ES 201 671 [i.5]
+        -- The individual digits of the communication-Identity-Number shall be represented in
+        -- ASCII format, e.g. "12345678" = 8 octets 0x31 0x32 0x33 0x34 0x35 0x36 0x37 0x38.
+        -- For subaddress option only "0"..."9" shall be used.
+    network-Identifier              [1] Network-Identifier,
+    ...
+}
+-- NOTE: The same "CommunicationIdentifier" value is sent:
+-- with the HI3 information for correlation purpose between the IRI and the information sent
+-- on the HI3 interfaces (CCLink, data, ..) with each IRI associated to a same intercepted
+-- call for correlation purpose between the different IRI.
+
+Network-Identifier ::= SEQUENCE
+{
+    operator-Identifier         [0] OCTET STRING (SIZE (1..5)),
+        -- It is a notification of the NWO/AP/SvP in ASCII- characters.
+        -- For subaddress option only "0"..."9" shall be used.
+        -- The parameter is mandatory.
+    network-Element-Identifier [1] Network-Element-Identifier OPTIONAL,
+    ...
+}
+
+CalledPartyNumber ::= CHOICE
+{
+    iSUP-Format         [1] OCTET STRING (SIZE (1..25)),
+        -- Encoded in the same format as the called party number (parameter field)
+        -- of the ISUP (see EN 300 356 [5]).
+    mAP-Format          [2] OCTET STRING (SIZE (1..25)),
+        -- Encoded as AddressString of the MAP protocol 3GPP TS 09.02 [32].
+    dSS1-Format         [3] OCTET STRING (SIZE (1..25)),
+        -- Encoded in the format defined for the value part of the Called party number information
+        -- element of DSS1 protocol EN 300 403-1 [6].
+        -- The DSS1 Information element identifier and the DSS1 length are not included.
+    ...
+}
+
+IPAddress ::= SEQUENCE
+{
+    iP-type             [1] ENUMERATED
+    {
+        iPV4(0),
+        iPV6(1),
+        ...
+    },
+    iP-value            [2] IP-value,
+    iP-assignment       [3] ENUMERATED
+    {
+        static(1),
+            -- The static coding shall be used to report a static address.
+        dynamic(2),
+            -- The dynamic coding shall be used to report a dynamically allocated address.
+        notKnown(3),
+            -- The notKnown coding shall be used to report other then static or dynamically
+            -- allocated IP addresses.
+        ...
+    } OPTIONAL,
+    ...,
+    iPv6PrefixLength    [4] INTEGER (1..128) OPTIONAL,
+        -- Indicates the length of the prefix delegated by the CSP to the subscriber
+        -- example: 60 if IP address is "2001:db8:0:85a3::ac1f:8001/60"
+        -- Mandatory in case where the iP-value contains an IPv6 binary value
+    iPv4SubnetMask      [5] OCTET STRING (SIZE(4)) OPTIONAL
+        -- For IPv4 addresses, this indicates the subnetmask to be applied to the iP-value field.
+        -- The subnet mask is intended to be presented as a binary value, e.g. "ff ff ff f8" to
+        -- represent the dotted-decimal subnet mask of "255.255.255.248" corresponding to
+        -- a /29 CIDR-format subnet mask
+}
+
+IP-value ::= CHOICE
+{
+    iPBinaryAddress [1] OCTET STRING (SIZE(4..16)),
+        -- In case of IPv6, the Prefix Length is provided by the "iPv6PrefixLength"
+        -- In case of IPv4, the netmask is provided by the "iPv4SubnetMask"
+    iPTextAddress   [2] IA5String (SIZE(7..45)),
+        -- In case of IPv6, the delivered iPTextAddress field could include a complete
+        -- single IPv6-Address or an IPv6-Prefix for a subnetwork on the target side.
+        -- In case of IPv4, the delivered iPTextAddress field could include a single
+        -- IPv4 address or an IPv4address/netmask, for example "192.168.1.1" or "192.168.1.1/24"
+    ...
+}
+
+-- Referenced by Network-Identifier.
+Network-Element-Identifier ::= CHOICE
+{
+    e164-Format         [1] OCTET STRING (SIZE (1..25)),
+        -- E164 address of the node in international format. Coded in the same format as the
+        -- calling party number parameter of the ISUP (parameter part: EN 300 356 [5]).
+    x25-Format          [2] OCTET STRING (SIZE (1..25)),
+        -- X25 address
+    iP-Format           [3] OCTET STRING (SIZE (1..25)),
+        -- IP address
+    dNS-Format          [4] OCTET STRING (SIZE (1..25)),
+        -- DNS address
+    ...,
+    iP-Address          [5] IPAddress
+}
+
+CC-Link-Identifier ::= OCTET STRING (SIZE (1..8))
+END -- end of ThreeGPP-HI1NotificationOperations
