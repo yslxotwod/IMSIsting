@@ -4097,8 +4097,12 @@ ss7_cmd_m3ua_send() {
     printf 'msu_source\t%s\n' "$msu_source"
     printf 'msu_octets\t%s\n' "$(( ${#msu} / 2 ))"
     printf 'm3ua_octets\t%s\n' "$(( ${#m3ua} / 2 ))"
-    printf 'note\tno ASPUP/ASPAC handshake: an STP that requires an ACTIVE ASP will drop this\n'
-    timeout 30 python3 "$tool" send "$host" "$port" "$m3ua" --ppid 3 --wait "${MAP_WAIT:-0}"
+    printf 'handshake\tASPUP then ASPAC before the DATA\n'
+    printf 'note\tan STP drops DATA from an ASP that is not ACTIVE; the two management messages come first and their answers are reported below\n'
+    local hs=(--m3ua-handshake)
+    [[ -n "$rc" ]] && hs+=(--routing-context "$rc")
+    timeout 30 python3 "$tool" send "$host" "$port" "$m3ua" --ppid 3 \
+        --wait "${MAP_WAIT:-3}" "${hs[@]}"
 }
 
 ss7_cli_main() {

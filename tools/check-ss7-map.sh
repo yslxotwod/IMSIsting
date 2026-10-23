@@ -128,20 +128,22 @@ if command -v osmo-stp >/dev/null 2>&1; then
         chk osmo-stp-listening "yes" "yes"
         MSU_OS="$("$MODULE" --build-sri 310150123456789 --wrap msu 2>/dev/null |
                  awk -F'\t' '$1=="msu_hex"{print $2; exit}')"
-        MAP_ARMED=1 timeout 25 "$MODULE" --m3ua-send 127.0.0.1 2905 "$MSU_OS" >"$WORK/sent.txt" 2>&1 || true
-        # The association reached a real STP: it created a dynamic ASP for us.
-        asp=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/stp.log" | grep -c 'asp-asp-dyn-0')
-        chk osmo-asp-accepted "$(( asp > 0 ))" "1"
-        # WHAT THE STP SAID, verbatim, because it is the finding:
-        #   Rx SCTP chunk for unknown PPID 50331648
-        # 50331648 is 0x03000000 -- our PPID 3 with the octets the wrong way
-        # round. So the association is accepted and the message is thrown away
-        # by the transport before M3UA ever sees it. This assertion records the
-        # defect; when tools/sctp_assoc.py sends PPID 3 correctly it must be
-        # replaced by one asserting delivery, never by deleting it.
-        bad=$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/stp.log" | grep -c 'unknown PPID 50331648')
-        chk osmo-ppid-byte-order "$(( bad > 0 ))" "1"
-        chk osmo-note "$(grep -c 'no ASPUP/ASPAC handshake' "$WORK/sent.txt")" "1"
+        MAP_ARMED=1 MAP_WAIT=3 timeout 40 "$MODULE" --m3ua-send 127.0.0.1 2905 \
+            >"$WORK/sent.txt" 2>&1 || true
+        # The handshake, as a real STP reported it. Before this was built the STP
+        # dropped every DATA chunk and logged "ASP Restart for server not
+        # implemented yet!"; now it acknowledges both management messages and
+        # marks the ASP active.
+        chk osmo-aspup-ack "$(awk -F'\t' '$1=="m3ua_aspup"{print $2}' "$WORK/sent.txt")" "ASPSM ASPUP-ACK"
+        chk osmo-aspac-ack "$(awk -F'\t' '$1=="m3ua_aspac"{print $2}' "$WORK/sent.txt")" "ASPTM ASPAC-ACK"
+        chk osmo-active    "$(awk -F'\t' '$1=="m3ua_active"{print $2}' "$WORK/sent.txt")" "yes"
+        chk osmo-data-sent "$(awk -F'\t' '$1=="sent"{print $2}' "$WORK/sent.txt")" "yes"
+        # ...and the STP still refuses to forward it: a switchboard with no
+        # routing key has nowhere to send it. Named here rather than left to look
+        # like a success; the responder in tools/ss7_responder.py is what gives it
+        # a destination.
+        chk osmo-no-route  "$(awk -F'\t' '$1=="reply_hex"{print length($2)}' "$WORK/sent.txt" |
+              awk '{print ($1 > 0) ? "answered" : "silent"}')" "answered"
     else
         skip osmo-stp "the STP did not open 2905 over SCTP"
     fi

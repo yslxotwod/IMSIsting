@@ -72,8 +72,22 @@ SCTP_SNDINFO = 2
 SCTP_RCVINFO = 3
 
 # struct sctp_sndinfo: u16 sid, u16 flags, u32 ppid, u32 context, u32 assoc_id.
-_SNDINFO = "<HHIII"
-_SNDINFO_LEN = struct.calcsize(_SNDINFO)
+#
+# The PPID inside this struct is in NETWORK byte order, not host order -- the
+# kernel keeps it that way and gives it back the same way in sctp_rcvinfo, which
+# is why every reader calls ntohl() on it. Packing the whole struct little-endian
+# put our PPID 3 on the wire as 0x03000000, and a real STP said so plainly:
+#   Rx SCTP chunk for unknown PPID 50331648
+# so the association came up and every message was dropped before M3UA saw it.
+# Hence the split format: native u16 head, big-endian u32 ppid, native tail.
+_SNDINFO = "<HH"
+_SNDINFO_TAIL = "<II"
+_SNDINFO_LEN = struct.calcsize(_SNDINFO) + 4 + struct.calcsize(_SNDINFO_TAIL)
+
+
+def _pack_sndinfo(sid: int, flags: int, ppid: int, context: int, assoc_id: int) -> bytes:
+    return (struct.pack(_SNDINFO, sid, flags) + struct.pack(">I", ppid) +
+            struct.pack(_SNDINFO_TAIL, context, assoc_id))
 
 # struct sctp_rcvinfo: u16 sid, u16 ssn, u16 flags, 2 pad, u32 ppid, u32 tsn,
 # u32 cumtsn, u32 context, u32 assoc_id -- so the PPID sits at octet 8.
@@ -123,8 +137,7 @@ def norm_hex(text: str) -> str:
 
 def send_message(sock: socket.socket, payload: bytes, ppid: int) -> int:
     """Send one message with its PPID as an SCTP_SNDINFO control message."""
-    cmsg = (socket.IPPROTO_SCTP, SCTP_SNDINFO,
-            struct.pack(_SNDINFO, 0, 0, ppid, 0, 0))
+    cmsg = (socket.IPPROTO_SCTP, SCTP_SNDINFO, _pack_sndinfo(0, 0, ppid, 0, 0))
     return sock.sendmsg([payload], [cmsg])
 
 
@@ -170,8 +183,127 @@ def recv_message(sock: socket.socket, limit: int = 262144) -> tuple[bytes, int |
     return data, _ppid_from_cmsgs(cmsgs)
 
 
+
+# ── M3UA association handshake ──────────────────────────────────────────
+# A DATA chunk is the last thing an ASP sends, not the first. The sequence is
+# ASPUP / ASPUP-ACK, then ASPAC / ASPAC-ACK, and only then is the ASP ACTIVE and
+# permitted to transfer. Without it a real STP answers
+#   ASP Restart for server not implemented yet!
+# and drops everything, which is exactly what OsmoSTP did.
+#
+# Message classes (RFC 4666 §3.8): 0 management (ASPSM/ASPTM), 1 transfer.
+# Types: ASPUP 1, ASPUP-ACK 4, ASPDN 2, ASPDN-ACK 6, ASPAC 3, ASPAC-ACK 5.
+#
+# The class numbers below are not the ones in the first draft of this code: it
+# used class 0 for ASPSM, which is the MANAGEMENT class (Error, Notify), so an
+# ASPUP was on the wire as a Notify and OsmoSTP answered "Error 22 missing
+# parameter". Every value here was read back from tshark's own M3UA dissector:
+#   class 0 MGMT     : 0 ERR, 1 NTFY
+#   class 1 Transfer : 1 DATA
+#   class 3 ASPSM    : 1 ASPUP, 2 ASPDN, 3 BEAT, 4 ASPUP-ACK, 5 ASPDN-ACK, 6 BEAT-ACK
+#   class 4 ASPTM    : 1 ASPAC, 2 ASPIA, 3 ASPAC-ACK, 4 ASPIA-ACK
+M3UA_MGMT, M3UA_TRANSFER, M3UA_ASPSM, M3UA_ASPTM = 0, 1, 3, 4
+ASPUP, ASPUP_ACK, ASPDN, ASPDN_ACK, BEAT, BEAT_ACK = 1, 4, 2, 5, 3, 6
+ASPAC, ASPIA, ASPAC_ACK, ASPIA_ACK = 1, 2, 3, 4
+
+# Parameter tags: 0x0004 INFO String, 0x0006 Routing Context, 0x0011 ASP Identifier.
+TAG_INFO, TAG_ROUTING_CONTEXT, TAG_ASP_ID = 0x0004, 0x0006, 0x0011
+
+
+def m3ua_msg(cls: int, mtype: int, params: list) -> bytes:
+    """One M3UA message: version, reserved, class, type, length, parameters."""
+    body = b"".join(params)
+    return struct.pack(">BBBB", 1, 0, cls, mtype) + struct.pack(">I", 8 + len(body)) + body
+
+
+def m3ua_param(tag: int, value: bytes) -> bytes:
+    pad = (4 - len(value) % 4) % 4
+    return struct.pack(">HH", tag, 4 + len(value)) + value + b"\x00" * pad
+
+
+def m3ua_params(msg: bytes) -> list:
+    """(tag, value) for each parameter in an M3UA message, padding stripped."""
+    out, off = [], 8
+    while off + 4 <= len(msg):
+        tag, length = struct.unpack(">HH", msg[off:off + 4])
+        if length < 4 or off + length > len(msg):
+            break
+        out.append((tag, msg[off + 4:off + length]))
+        off += length + ((4 - length % 4) % 4)
+    return out
+
+
+def m3ua_phase(msg: bytes) -> tuple:
+    """(class, type, name) of an M3UA message, for a report row."""
+    if len(msg) < 8:
+        return (None, None, "short")
+    cls, mtype = msg[2], msg[3]
+    names = {(M3UA_ASPSM, ASPUP): "ASPSM ASPUP", (M3UA_ASPSM, ASPUP_ACK): "ASPSM ASPUP-ACK",
+             (M3UA_ASPSM, ASPDN): "ASPSM ASPDN", (M3UA_ASPSM, ASPDN_ACK): "ASPSM ASPDN-ACK",
+             (M3UA_ASPTM, ASPAC): "ASPTM ASPAC", (M3UA_ASPTM, ASPAC_ACK): "ASPTM ASPAC-ACK",
+             (M3UA_MGMT, 0): "Error", (M3UA_MGMT, 1): "Notify",
+             (M3UA_TRANSFER, 1): "DATA"}
+    return (cls, mtype, names.get((cls, mtype), "class %d type %d" % (cls, mtype)))
+
+
+def m3ua_error(msg: bytes) -> str:
+    """The Error message's code, in words, when the far end refused a step."""
+    for tag, value in m3ua_params(msg):
+        if tag == 0x000C and len(value) >= 2:
+            # The Error Code parameter's value is padded: OsmoSTP sends
+            # 00 00 00 16 for 22 (missing parameter), and tshark reads the LAST
+            # two octets too. Reading the first two would report code 0.
+            code = struct.unpack(">H", value[-2:])[0]
+            words = {1: "invalid version", 3: "unsupported message type",
+                     4: "unsupported message class", 17: "invalid ASP identifier",
+                     22: "missing parameter", 25: "invalid parameter value"}
+            return "%d (%s)" % (code, words.get(code, "code not in the table"))
+    return "no error code"
+
+
+def m3ua_handshake(sock: socket.socket, routing_context: int, asp_id: int,
+                   wait: float) -> dict:
+    """ASPUP, then ASPAC, reporting each step. Returns the report rows."""
+    steps = {}
+
+    def exchange(label: str, msg: bytes) -> bytes:
+        send_message(sock, msg, 3)
+        sock.settimeout(wait)
+        try:
+            data, _ppid = recv_message(sock)
+        except socket.timeout:
+            steps[label] = "no answer within %.1fs" % wait
+            return b""
+        return data
+
+    reply = exchange("aspup", m3ua_msg(M3UA_ASPSM, ASPUP,
+                                       [m3ua_param(TAG_ASP_ID, struct.pack(">I", asp_id))]))
+    if reply:
+        _cls, _type, name = m3ua_phase(reply)
+        steps["aspup"] = name
+        if name == "Error":
+            steps["aspup_error"] = m3ua_error(reply)
+            return steps
+    # A Routing Context of 0 is not "the first one": it is an invalid value, and
+    # OsmoSTP answers Error 25 (invalid parameter value) for it. With no context
+    # configured, the ASPAC goes out without the parameter, which RFC 4666 3.9.3
+    # defines as "all routing keys the ASP serves".
+    params = []
+    if routing_context > 0:
+        params.append(m3ua_param(TAG_ROUTING_CONTEXT, struct.pack(">I", routing_context)))
+    reply = exchange("aspac", m3ua_msg(M3UA_ASPTM, ASPAC, params))
+    if reply:
+        _cls, _type, name = m3ua_phase(reply)
+        steps["aspac"] = name
+        if name == "Error":
+            steps["aspac_error"] = m3ua_error(reply)
+            return steps
+    steps["active"] = "yes" if steps.get("aspac") == "ASPTM ASPAC-ACK" else "unknown"
+    return steps
+
 def send_to(host: str, port: int, payload: bytes, ppid: int,
-            timeout: float = 5.0, wait: float = 0.0) -> dict:
+            timeout: float = 5.0, wait: float = 0.0, handshake: bool = False,
+            routing_context: int = 0, asp_id: int = 1) -> dict:
     """Associate, send one message, optionally wait for one back."""
     report = {
         "target": "%s:%d" % (host, port),
@@ -205,6 +337,18 @@ def send_to(host: str, port: int, payload: bytes, ppid: int,
             return report
 
         report["assoc_state"] = _assoc_state(sock)
+        if handshake:
+            steps = m3ua_handshake(sock, routing_context, asp_id,
+                                   max(0.5, timeout / 2.0))
+            for key in ("aspup", "aspup_error", "aspac", "aspac_error", "active"):
+                if key in steps:
+                    report["m3ua_" + key] = steps[key]
+            if steps.get("aspac_error") or steps.get("aspup_error"):
+                report["status"] = "rejected-before-data"
+                report["error"] = ("the far end refused the handshake, so no DATA was "
+                                   "sent; an unauthenticated ASP must not pretend it "
+                                   "transferred anything")
+                return report
         send_message(sock, payload, ppid)
         report["sent"] = "yes"
         report["status"] = "sent"
@@ -393,6 +537,13 @@ def main(argv: list[str]) -> int:
     p.add_argument("--timeout", type=float, default=5.0)
     p.add_argument("--wait", type=float, default=0.0,
                    help="seconds to wait for one message back")
+    p.add_argument("--m3ua-handshake", action="store_true",
+                   help="ASPUP then ASPAC before the DATA; an STP drops DATA "
+                        "from an ASP that has not done this")
+    p.add_argument("--routing-context", type=lambda v: int(v, 0), default=0,
+                   help="routing context the ASPAC claims")
+    p.add_argument("--asp-id", type=lambda v: int(v, 0), default=1,
+                   help="ASP identifier in the ASPUP (0 means ASP restart)")
 
     p = sub.add_parser("listen", help="accept one association and read it")
     p.add_argument("port", type=int)
@@ -418,7 +569,10 @@ def main(argv: list[str]) -> int:
                 hex_text = args.payload
             payload = bytes.fromhex(norm_hex(hex_text))
             _emit(send_to(args.host, args.port, payload, args.ppid,
-                          timeout=args.timeout, wait=args.wait))
+                          timeout=args.timeout, wait=args.wait,
+                          handshake=args.m3ua_handshake,
+                          routing_context=args.routing_context,
+                          asp_id=args.asp_id))
         elif args.verb == "listen":
             for row in listen_once(args.port, args.host, args.timeout, args.count):
                 _emit(row)
