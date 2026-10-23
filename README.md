@@ -599,7 +599,7 @@ the location and state halves are unverified by this tree.
 | module | refused, and why |
 |---|---|
 | `50_gprs` | GEA1–GEA5: no public algorithm text or reference vectors. GEA0 is computed (it is the identity) |
-| `16_sim` | ES8+ bodies 87/88/86 (SCP03t is SGP.02), the PPP chain inside 86, `HandleNotification` (the standard defines no response body), AUTS resynchronisation |
+| `16_sim` | the profile-element chain carried inside the `86` segments (SCP03t protects the block, it does not parse it), `HandleNotification` (the standard defines no response body), AUTS resynchronisation, and a live session — `--es8-scp03t` builds the 84/85/86 TLVs from a supplied key set and both challenges, but a card cryptogram can only be confirmed by an eUICC |
 | `41_ota_sms` | WIB push: only the leaf command bytes are missing, so it is refused rather than half-built |
 | `49_ntn` | SIB19 — no NR RRC layout table in the tree, and generating one is its own project |
 | `46_lpp` | UTDOA is LPPa, not LPP, so it is stated as a handoff instead of encoded as the wrong protocol |

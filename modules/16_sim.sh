@@ -2658,6 +2658,111 @@ sys.stdout.write("%02X%s" % (7 - bits[-1] % 8, buf.hex().upper()))
 ' "${1:-}"
 }
 
+# --es8-scp03t : build the SCP03t command TLVs around a profile-package segment
+#
+# SGP.02 v4.3 4.1.3.3: the profile package is protected by a secure channel
+# that is SCP03 restricted to "MAC + encryption" (security level '33') and
+# framed in TLVs instead of APDUs. The cryptography is inherited wholesale, so
+# the keys, the chaining values and the KDF are the ones GPC Amendment D
+# defines; what this command adds is the framing, the segment ceiling of 1024
+# octets including tag and length, and the tags 84/85/86 and 9F44/9F45/9F46.
+sim_cmd_es8_scp03t() {
+    local k_enc='' k_mac='' host='' card='' kvn='30' payload='' tool rows
+    while (( $# )); do
+        case "$1" in
+            --k-enc)          k_enc="${2:-}";  shift 2 ;;
+            --k-mac)          k_mac="${2:-}";  shift 2 ;;
+            --host-challenge) host="${2:-}";   shift 2 ;;
+            --card-challenge) card="${2:-}";   shift 2 ;;
+            --kvn)            kvn="${2:-}";    shift 2 ;;
+            --payload)        payload="${2:-}"; shift 2 ;;
+            *)  printf 'ERROR\tunsupported flag %s for --es8-scp03t\n' "$(sim_sanitize "$1")" >&2
+                return 2 ;;
+        esac
+    done
+    tool="$IMSISTING_ROOT/tools/scp03t.py"
+    if [[ ! -f "$tool" ]]; then
+        printf 'ERROR\t%s is missing\n' "$tool" >&2; return 3
+    fi
+    local miss=''
+    [[ -z "$k_enc" ]] && miss+="--k-enc "
+    [[ -z "$k_mac" ]] && miss+="--k-mac "
+    [[ -z "$host"  ]] && miss+="--host-challenge "
+    [[ -z "$card"  ]] && miss+="--card-challenge "
+    sim_es8_seg scp03t "the command TLVs a profile package travels in (SGP.02 4.1.3.3)"
+    sim_es8_ref "SCP03t" "-" \
+        "4.1.3.3: a secure channel protocol based on GlobalPlatform SCP03 usable for TLV structures; 'the SCP03 key sets are used for SCP03t'"
+    sim_es8_ref "security level" "33" \
+        "4.1.3.3: SHALL be '33' - C DECRYPTION, R ENCRYPTION, C MAC and R MAC, the only option SCP03t defines"
+    sim_es8_ref "tags" "84 85 86" \
+        "4.1.3.3: '84' INITIALIZE UPDATE, '85' EXTERNAL AUTHENTICATE, '86' the encrypted profile data; errors are the same tag +0x80, two octets (9F44, 9F45, 9F46)"
+    if [[ -n "$miss" ]]; then
+        sim_es8_limit "missing input: ${miss% }; a session needs both halves of the key set and both challenges. The card's half is what INITIALIZE UPDATE returns, so without a card it has to be supplied and is then taken on trust"
+        sim_es8_handoff
+        return 3
+    fi
+    local k
+    for k in "$k_enc" "$k_mac" "$host" "$card"; do
+        if ! sim_is_hex "$k"; then
+            printf 'ERROR\tkey or challenge is not hex\n' >&2; return 1
+        fi
+    done
+    if (( ${#k_enc} != 32 || ${#k_mac} != 32 )); then
+        printf 'ERROR\tSCP03 keys are 16 octets each; got %d and %d hex digits\n' \
+            "${#k_enc}" "${#k_mac}" >&2
+        return 1
+    fi
+    if (( ${#host} != 16 || ${#card} != 16 )); then
+        printf 'ERROR\tboth challenges are 8 octets; got %d and %d hex digits\n' \
+            "${#host}" "${#card}" >&2
+        return 1
+    fi
+    rows=$(python3 "$tool" --derive --k-enc "${k_enc^^}" --k-mac "${k_mac^^}" \
+               --host-challenge "${host^^}" --card-challenge "${card^^}" --kvn "${kvn^^}") || {
+        printf 'ERROR\ttools/scp03t.py refused the key material\n' >&2; return 1; }
+    printf '%s\n' "$rows" | while IFS=$'\t' read -r key value extra; do
+        case "$key" in
+            s_enc|s_mac|s_rmac|card_cryptogram|host_cryptogram) printf '%s\t%s\n' "$key" "$value" ;;
+            tlv_84)                                              printf '%s\t%s\n' "$key" "$value" ;;
+            # With a payload the '85' comes from the same run that MACs the
+            # '86' TLVs; printing this one too would show the row twice.
+            tlv_85) [[ -z "$payload" ]] && printf '%s\t%s\n' "$key" "$value" ;;
+            ref)                                                 sim_es8_ref "derivation" "-" "$value" ;;
+        esac
+    done
+    if [[ -n "$payload" ]]; then
+        sim_is_hex "$payload" || { printf 'ERROR\t--payload is not hex\n' >&2; return 1; }
+        local count=0 wrapped
+        # One run is one session, so the '85' MAC printed here is the one the
+        # '86' MACs chain from; printing the '85' from a separate derivation
+        # would put two unrelated MACs on adjacent rows.
+        wrapped=$(python3 "$tool" --wrap "$payload" --k-enc "${k_enc^^}" --k-mac "${k_mac^^}" \
+                      --host-challenge "${host^^}" --card-challenge "${card^^}") || {
+            printf 'ERROR\ttools/scp03t.py could not protect the payload\n' >&2; return 1; }
+        printf '%s\n' "$wrapped" | sed -n 's/^tlv_85[[:space:]]*\(.*\)$/tlv_85\t\1/p'
+        printf '%s\n' "$wrapped" | while IFS=$'\t' read -r key value; do
+            case "$key" in
+                tlv_86_*) printf '%s\t%s\n' "$key" "$value" ;;
+            esac
+        done
+        count=$(printf '%s\n' "$wrapped" | sed -n 's/^segments[[:space:]]*//p')
+        sim_es8_field "command.count" "86" "INTEGER" "$count" \
+            "4.1.3.3: each command TLV triggers one response TLV, and the package is split into segments of at most 1024 octets including tag and length"
+        if (( count == 0 )); then
+            sim_es8_limit "the payload did not fit one '86' TLV; segment the package first (tools/scp03t.py --unsegment)"
+            sim_es8_handoff
+            return 3
+        fi
+    else
+        sim_es8_limit "no --payload: the session and the two initiation TLVs are built, the command TLVs are not"
+    fi
+    sim_es8_limit "no card here: the card challenge was supplied rather than negotiated, so card_cryptogram above cannot be checked against a real eUICC - the value printed is what the derivation predicts, not what a card confirmed"
+    sim_es8_ref "C-MAC" "-" \
+        "GPC Amendment D 6.2: the MAC chaining value starts at 16 zero octets and each C-MAC becomes the next one; both are 8 octets in SCP03t mode 8"
+    sim_es8_handoff
+    return 0
+}
+
 sim_es8_usage() {
     cat >&2 <<'EOF'
 ERROR	usage: --es8-build <segment> [flags]
@@ -4438,6 +4543,25 @@ sim_selftest() {
     chk es8-md-short-iccid "$(sim_cmd_es8_build store-metadata --iccid 980010325476981032 >/dev/null 2>&1; echo $?)" "1"
     chk es8-md-icon-ality  "$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --icon 8950 >/dev/null 2>&1; echo $?)" "1"
     chk es8-md-bad-ppr    "$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --ppr ppr9 >/dev/null 2>&1; echo $?)" "2"
+    # SCP03t (SGP.02 4.1.3.3). The session keys and the two cryptograms are the
+    # Annex D derivation over this key material and this context; the '84' TLV
+    # is the key version, the mandatory zero key id, and the host challenge.
+    out=$(sim_cmd_es8_scp03t --k-enc 000102030405060708090A0B0C0D0E0F \
+              --k-mac 101112131415161718191A1B1C1D1E1F \
+              --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF \
+              --payload BF2401020304)
+    chk scp03t-s-enc      "$(printf '%s\n' "$out" | sed -n 's/^s_enc[[:space:]]*//p')" "1771157962A029C5435A1AC81D0B9806"
+    chk scp03t-s-mac      "$(printf '%s\n' "$out" | sed -n 's/^s_mac[[:space:]]*//p')" "3E994A1F2EAF7182282B2E5ED3870B83"
+    chk scp03t-s-rmac     "$(printf '%s\n' "$out" | sed -n 's/^s_rmac[[:space:]]*//p')" "49214B50BD45D69A2FEB47C69DE5407E"
+    chk scp03t-card-cgram "$(printf '%s\n' "$out" | sed -n 's/^card_cryptogram[[:space:]]*//p')" "D71A889EFCF709E8"
+    chk scp03t-host-cgram "$(printf '%s\n' "$out" | sed -n 's/^host_cryptogram[[:space:]]*//p')" "75A94E14D36602F1"
+    chk scp03t-tlv-84     "$(printf '%s\n' "$out" | sed -n 's/^tlv_84[[:space:]]*//p')" "840A30000011223344556677"
+    chk scp03t-tlv-85     "$(printf '%s\n' "$out" | sed -n 's/^tlv_85[[:space:]]*//p')" "85113375A94E14D36602F17AF2A1E33C4D3206"
+    chk scp03t-tlv-86     "$(printf '%s\n' "$out" | grep -c '^tlv_86_1	8618')" "1"
+    chk scp03t-level      "$(printf '%s\n' "$out" | grep -c "SHALL be '33'")" "1"
+    chk scp03t-no-card    "$(printf '%s\n' "$out" | grep -c 'cannot be checked against a real eUICC')" "1"
+    chk scp03t-needs-keys "$(sim_cmd_es8_scp03t --k-enc 000102030405060708090A0B0C0D0E0F >/dev/null 2>&1; echo $?)" "3"
+    chk scp03t-short-key  "$(sim_cmd_es8_scp03t --k-enc 000102030405060708090A0B0C0D0E --k-mac 101112131415161718191A1B1C1D1E1F --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF >/dev/null 2>&1; echo $?)" "1"
     chk es8-md-bad-class  "$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --profile-class gold >/dev/null 2>&1; echo $?)" "2"
     chk es8-md-bad-event  "$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --notification reboot=x >/dev/null 2>&1; echo $?)" "2"
 
@@ -4757,6 +4881,7 @@ sim_cli_main() {
         --sim-auth)       sim_cmd_sim_auth "$@" ;;
         --sim-auth-check) sim_cmd_sim_auth_check ;;
         --es9-plus)       sim_cmd_es9_plus "$@" ;;
+        --es8-scp03t)     sim_cmd_es8_scp03t "$@" ;;
         --es8-build)      sim_cmd_es8_build "$@" ;;
         --es8-parse)      sim_cmd_es8_parse "${1:-}" ;;
         --es9-response)   sim_cmd_es9_response "$@" ;;
@@ -4795,6 +4920,10 @@ Usage: $0 COMMAND
                                     initialise-secure-channel, configure-isdp, store-metadata,
                                     replace-session-keys, sequence-87|88|86, bpp
   --es8-parse <hex>                 walk a Bound Profile Package TLV by TLV: depth, tag, len, clause
+  --es8-scp03t --k-enc <32hex> --k-mac <32hex> --host-challenge <16hex>
+                                    --card-challenge <16hex> [--payload <hex>]
+                                    the SCP03t command TLVs (84/85/86): session keys,
+                                    cryptograms and the encrypted package segments
   --es9-response <op> <json>        parse an ES9+ response body (6.5.1.4 header + 6.5.2.x fields)
   --es9-notification <json>         parse ES9+.HandleNotification (6.5.2.9) and the ASN.1 it carries
   --plan <ota-replay|sat-wib|esim-download|apdu-live|dpa-lab>

@@ -5926,6 +5926,7 @@ static const ChipRow chip_rows[] = {
     { "16_sim",              "--dpa-sim",             NEED_SIM, DOES_READS },
     { "16_sim",              "--dpa-sweep",           NEED_SIM, DOES_READS },
     { "16_sim",              "--es8-build",           NEED_NO, DOES_MODIFIES },
+    { "16_sim",              "--es8-scp03t",          NEED_NO, DOES_BUILDS },
     { "16_sim",              "--es8-parse",           NEED_NO, DOES_READS },
     { "16_sim",              "--es9-notification",    NEED_SIM, DOES_READS },
     { "16_sim",              "--es9-plus",            NEED_SIM, DOES_READS },
@@ -20239,6 +20240,27 @@ gtap_build_header(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(build_body), res);
     }
     gtk_box_append(GTK_BOX(body), build);
+
+    /* The SCP03t layer, which is the one SGP.22 leaves to SGP.02: the segments
+       above are opaque because this is where their contents are protected. */
+    {
+        GtkWidget *t_body;
+        GtkWidget *t = verb_card("PROTECT A SEGMENT", &t_body);
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(t_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the TLVs",
+                "--es8-scp03t",
+                "--k-enc 000102030405060708090A0B0C0D0E0F "
+                "--k-mac 101112131415161718191A1B1C1D1E1F "
+                "--host-challenge 0011223344556677 "
+                "--card-challenge 8899AABBCCDDEEFF --payload BF2401020304",
+                "The key set, the two challenges, and a segment to protect. The "
+                "answer is the 84/85/86 TLVs a profile package travels in, with the "
+                "derived session keys and both cryptograms beside them."));
+        gtk_box_append(GTK_BOX(t_body), res);
+        gtk_box_append(GTK_BOX(body), t);
+    }
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
