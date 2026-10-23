@@ -2147,13 +2147,18 @@ ss7_cmd_build_sri() {
 # back, so a dialogue can be completed and read rather than only opened.
 ss7_cmd_build_response() {
     local kind="${1:-}"; shift || true
-    local inv=1 otid="" imsi="" msc="" wrap="" dpc=1 opc=2 cssn=6 ossn=8
+    local inv=1 otid="" imsi="" msc="" wrap="" dpc=1 opc=2 cssn=6 ossn=8 rawparam="" 
     while (( $# )); do
         case "$1" in
             --invoke)   inv="${2:-1}"; shift 2 ;;
             --otid)     otid="${2:-}"; shift 2 ;;
             --imsi)     imsi="${2:-}"; shift 2 ;;
             --msc)      msc="${2:-}"; shift 2 ;;
+            # A caller that built the MAP parameter with an independent encoder
+            # (tools/ss7_responder.py uses pycrate) hands it over here, so the
+            # transport can be wrapped without this module also deciding what the
+            # answer says.
+            --parameter) rawparam="${2:-}"; shift 2 ;;
             --wrap)     wrap="${2:-}"; shift 2 ;;
             --dpc)      dpc="${2:-1}"; shift 2 ;;
             --opc)      opc="${2:-2}"; shift 2 ;;
@@ -2175,7 +2180,12 @@ ss7_cmd_build_response() {
     [[ -n "$imsi" ]] && { ih=$(ss7_imsi_hex "$imsi") || { printf 'ERROR\tIMSI must be 5 to 15 digits: %s\n' "$(ss7_sanitize "$imsi")" >&2; return 2; }; }
     [[ -n "$msc"  ]] && { mh=$(ss7_map_address "$msc")  || { printf 'ERROR\t--msc must be digits: %s\n' "$(ss7_sanitize "$msc")" >&2; return 2; }; }
     local param comps tcap
-    param=$(ss7_map_sri_res "$ih" "$mh")
+    if [[ -n "$rawparam" ]]; then
+        param=$(ss7_nfc "$rawparam")
+        ss7_is_hex "$param" || { printf 'ERROR\t--parameter must be hex: %s\n' "$(ss7_sanitize "$rawparam")" >&2; return 2; }
+    else
+        param=$(ss7_map_sri_res "$ih" "$mh")
+    fi
     comps=$(ss7_map_result "$inv" "$op" "$param")
     if [[ -n "$otid" ]]; then
         tcap=$(ss7_tcap_end "$otid" "$comps") || { printf 'ERROR\t--otid must be hex\n' >&2; return 2; }
