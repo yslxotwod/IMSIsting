@@ -31,6 +31,7 @@ have refuses instead of inventing one.
 Exit codes: 0 built, 1 bad input, 2 the request cannot be built as asked.
 """
 import argparse
+import struct
 import sys
 
 PD_MM = 0x05
@@ -42,6 +43,8 @@ IE_IDENTITY_TYPE = 0x08
 ID_TYPE = {"imsi": 0x01, "imei": 0x02, "imeisv": 0x03, "tmsi": 0x04}
 
 DL_DCCH_INDEX_DOWNLINK_DIRECT_TRANSFER = 5
+GSMTAP_PORT = 4729
+GSMTAP_TYPE_UM = 12
 
 
 def err(msg, why=None):
@@ -102,6 +105,83 @@ def rrc_direct_transfer(nas, txid=0, domain="cs"):
     # on top of it. Reporting len(bits) - pad counted the message one bit short,
     # which made a correct hex disagree with the referee on its length.
     return out, len(bits), pad
+
+
+def pcap_ul_frames(raw):
+    """Return framing metadata and payloads from classic raw-IP GSMTAP pcaps.
+
+    This helper validates capture/IP/UDP/GSMTAP boundaries. It intentionally
+    does not inspect RRC contents. IPv4 options and IPv6 extensions are skipped.
+    """
+    magics = {
+        b"\xd4\xc3\xb2\xa1": "<", b"\xa1\xb2\xc3\xd4": ">",
+        b"\x4d\x3c\xb2\xa1": "<", b"\xa1\xb2\x3c\x4d": ">",
+    }
+    if len(raw) < 24 or raw[:4] not in magics:
+        raise ValueError("not a complete classic pcap")
+    endian = magics[raw[:4]]
+    linktype = struct.unpack_from(endian + "I", raw, 20)[0]
+    if linktype not in (101, 12):
+        raise ValueError("linktype %d, expected raw IP (101)" % linktype)
+    frames = []
+    off = 24
+    record = 0
+    while off < len(raw):
+        if off + 16 > len(raw):
+            raise ValueError("truncated pcap record header at offset %d" % off)
+        sec, fraction, caplen, origlen = struct.unpack_from(endian + "IIII", raw, off)
+        off += 16
+        if caplen > len(raw) - off:
+            raise ValueError("truncated pcap packet at record %d" % record)
+        data = raw[off:off + caplen]
+        off += caplen
+        record += 1
+        if origlen < caplen:
+            raise ValueError("pcap original length is smaller than captured length")
+        if not data:
+            continue
+        version = data[0] >> 4
+        if version == 4:
+            if len(data) < 20 or (data[0] & 0x0f) != 5 or data[9] != 17:
+                continue
+            total = int.from_bytes(data[2:4], "big")
+            if total < 28 or total > len(data):
+                continue
+            udp = data[20:total]
+        elif version == 6:
+            if len(data) < 40 or data[6] != 17:
+                continue
+            plen = int.from_bytes(data[4:6], "big")
+            if plen < 8 or 40 + plen > len(data):
+                continue
+            udp = data[40:40 + plen]
+        else:
+            continue
+        if len(udp) < 8:
+            continue
+        src, dst, udp_len = struct.unpack_from("!HHH", udp, 0)
+        if GSMTAP_PORT not in (src, dst) or udp_len < 8 or udp_len > len(udp):
+            continue
+        gt = udp[8:udp_len]
+        if len(gt) < 16 or gt[0] != 2 or gt[2] != GSMTAP_TYPE_UM:
+            continue
+        hdrlen = gt[1] * 4
+        if hdrlen < 16 or hdrlen > len(gt):
+            continue
+        frames.append((gt[12], gt[hdrlen:], sec, fraction))
+    return frames
+
+
+def analyze_pcap(path):
+    with open(path, "rb") as f:
+        frames = pcap_ul_frames(f.read())
+    for index, (subtype, payload, sec, fraction) in enumerate(frames, 1):
+        # GSMTAP UM RRC subtype values per libosmocore: 4=DCCH, 8=DCH.
+        channel = {4: "DCCH", 8: "DCH"}.get(subtype, "other")
+        print("frame\t%d\t%d.%06d\t%d\t%s\t%d" %
+              (index, sec, fraction, subtype, channel, len(payload)))
+    print("frames\t%d" % len(frames))
+    print("scope\tGSMTAP UM RRC framing metadata only; payload not decoded")
 
 
 def mm_auth_request(rand, autn, cipher=False):
@@ -235,7 +315,16 @@ def main(argv):
     p = sub.add_parser("auth-response", help="read an AUTHENTICATION RESPONSE back")
     p.add_argument("hex")
 
+    p = sub.add_parser("pcap-analyze", help="passively summarize GSMTAP UM RRC frame metadata")
+    p.add_argument("pcap")
+
     args = ap.parse_args(argv)
+    if args.cmd == "pcap-analyze":
+        try:
+            analyze_pcap(args.pcap)
+        except (OSError, ValueError, struct.error) as exc:
+            return err(str(exc), "reads classic pcap raw-IP GSMTAP framing only")
+        return 0
 
     if args.cmd == "identity":
         try:
