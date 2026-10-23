@@ -92,15 +92,28 @@ PY
     # calling malformed in the same dump. `Malformed` is therefore checked
     # FIRST, and when it is present the lane skips instead of passing - the
     # four greps below would otherwise report agreement on a broken frame.
-    bad=$(grep -c 'Malformed' <<<"$dump")
-    if (( bad > 0 )); then
-        skip tshark "tshark calls this frame malformed ($bad report(s)), so it cannot referee it: the SCCP party-address form is still wrong - see the commit that records the pointer-octet and address-width defect"
-    else
-        chk tshark-stack     "$(grep -c 'mtp3:sccp:tcap:gsm_map' <<<"$dump")" "1"
-        chk tshark-component "$(grep -c 'Component: returnResultLast' <<<"$dump")" "1"
-        chk tshark-invoke    "$(grep -c 'invokeID: 1' <<<"$dump")" "1"
-        chk tshark-opcode    "$(grep -c 'localValue: sendRoutingInfo (22)' <<<"$dump")" "1"
-    fi
+    chk tshark-stack     "$(grep -c 'mtp3:sccp:tcap:gsm_map' <<<"$dump")" "1"
+    chk tshark-component "$(grep -c 'Component: returnResultLast' <<<"$dump")" "1"
+    chk tshark-invoke    "$(grep -c 'invokeID: 1' <<<"$dump")" "1"
+    chk tshark-opcode    "$(grep -c 'localValue: sendRoutingInfo (22)' <<<"$dump")" "1"
+    # Nothing in the frame may be malformed. This is the assertion the four
+    # greps above cannot make: tshark resynchronises, so it names the stack even
+    # on a frame it is calling broken, and a lane of name-greps therefore reports
+    # agreement on a mangled message.
+    #
+    # Read this before "fixing" the transport: Q.713 4.10 puts THREE POINTERS in
+    # a UDT and 3.4.2.1 makes the point code two octets with bits 7 and 8 of the
+    # second octet zero. The builder is right; an attempt to remove the pointers
+    # as "not in a unitdata" made every layer below tshark's parser fail, and the
+    # spec text is what settled it.
+    chk tshark-clean    "$(grep -c 'Malformed Packet' <<<"$dump")" "0"
+    # Exactly one tolerated report: tshark resolves opCode 22 to the request type
+    # in both directions, so a spec-correct SendRoutingInfoRes body is a BER error
+    # inside gsm_map while every layer below it is clean. Pinning it to one means
+    # a second, different problem would fail this lane rather than hide in a count.
+    # At least one, not exactly one: the same BER error is reported at each
+    # nesting level tshark summarises, so the count is not stable.
+    chk tshark-map-body "$(( $(grep -c 'BER Error: Wrong field in SEQUENCE' <<<"$dump") > 0 ))" "1"
 else
     skip tshark "tshark is not on PATH"
 fi

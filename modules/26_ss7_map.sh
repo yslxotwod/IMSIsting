@@ -570,6 +570,11 @@ ss7_sccp_addr_decode() {  # <hex> -> TSV
 #   09|0A  class  p1 p2 p3  [len called][called] [len calling][calling] [len data][data]
 # where p1 is measured from the p1 octet, p2 from the p2 octet, p3 from the
 # p3 octet.
+# Q.713 4.10: a UDT is three pointers followed by the parameters of Table 11, and
+# 3.4.2.1 makes the point code two octets with bits 7 and 8 of the second octet
+# zero. This builder is a correct reading of both. Do not "simplify" it by
+# removing the pointer octets: an attempt at that produced a frame every layer
+# below tshark's SCCP parser rejected, and the spec text is what settled it.
 ss7_sccp_build_udt() {
     local cpc="${1:-}" cssn="${2:-}" opc="${3:-}" ossn="${4:-}" data="${5:-}" mtype="${6:-09}"
     local called calling dlen
