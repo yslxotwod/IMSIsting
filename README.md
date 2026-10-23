@@ -67,7 +67,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 ### 3G / UMTS
 | Module | Description |
 |---|---|
-| `08_umts_air` | UTRAN decode and SIB fields, forged RRC setup/reject/paging, the TS 25.212 BCH chain, a WCDMA downlink carrier, SIB1/SIB3/SIB5 packed onto the BCCH-FACH transport and spread on an S-CCPCH, and the COUNT/MAC-I AKA walk |
+| `08_umts_air` | UTRAN decode and SIB fields, forged RRC setup/reject/paging, the TS 25.212 BCH chain, a WCDMA downlink carrier, SIB1/SIB3/SIB5 packed onto the BCCH-FACH transport, scheduled on non-colliding frames and spread on an S-CCPCH, the MIB derived from that SIB set and split into BCH blocks, and the COUNT/MAC-I AKA walk |
 
 ### 4G / LTE
 | Module | Description |
@@ -145,7 +145,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 ### Intercept and carrier
 | Module | Description |
 |---|---|
-| `42_li_probe` | Lawful-interception interfaces and posture signals, plus the X1/HI1 artefacts an interception is built from |
+| `42_li_probe` | Lawful-interception interfaces and posture signals, plus the TS 33.108 HI1 PDUs an interception is built from |
 | `44_carrier_api` | Carrier API surface, authorisation matrix, token and rate-limit audit, surface and subscriber enumeration |
 
 ### The radio itself
@@ -202,7 +202,7 @@ computes rather than describes.
 | 5G SBA and NGAP | `13_nr_core`, `40_sba_pivot` | NRF discovery, NGAP procedures, PFCP rules, and the reachability map across the service-based architecture. |
 | O-RAN and slicing | `48_oran`, `34_slicing` | A1 policy poisoning, E2 control shapes, the over-broad xApp model, slice isolation testing, 5QI and TSN assistance. |
 | Carrier API enumeration | `44_carrier_api` | A concrete request per operation rendered from the document's own examples, and the ordered subscriber sequence. Both stop at the file. |
-| Lawful interception artefacts | `42_li_probe` | The X1/HI1 provisioning, activation and product envelopes encoded as bytes, and never delivered. |
+| Lawful interception artefacts | `42_li_probe` | The provisioning and activation records as real TS 33.108 HI1 PDUs (liActivated / liDeactivated, BER), and the X3/HI3 product envelope as this module's own framing. Encoded, never delivered. |
 
 ### Baseband, device and radio
 
@@ -534,7 +534,11 @@ Two holes are worth naming precisely, because their size is easy to overstate:
   an independent dissector), carries a real MIB through the whole TS 25.212 chain
   onto the P-CCPCH (`--transmit --bch-hex`), builds a WCDMA carrier with CPICH
   and both sync channels, packs SIB1/SIB3/SIB5 onto BCCH-FACH
-  (`tools/umts_sib.py`), and builds the messages a catcher sends *upward*
+  (`tools/umts_sib.py pack --timeline`), spreads that frame on an S-CCPCH
+  (`tools/umts_sccpch.py`), derives the MIB from the SIB set it is about to
+  transmit and splits it into the 24-bit BCH blocks a cell puts out over its
+  80 ms period (`--transmit --sibs` with no `--bch-hex`), and builds the
+  messages a catcher sends *upward*
   (`--catcher-identity` MM IDENTITY REQUEST, `--catcher-auth` replay, uplink RACH).
   What it still does not do is run the loop: nothing here receives UMTS uplink
   and answers it in one process, and a handset that already holds an AKA context
@@ -565,7 +569,7 @@ it, or both.
 | module | what it does | what stops it |
 |---|---|---|
 | `07_gsm_attack` | full GSM catcher sequence, forged BCCH carrier, A5/1 downgrade forcing | C1 must beat the real cell, the forged command must land in the right LAPDm window, and whether a handset accepts a clone depends on the handset and the location area |
-| `08_umts_air` | RRC forgery (setup/reject/paging), BCH through the whole TS 25.212 chain, WCDMA carrier with CPICH and both sync channels, SIB1/SIB3/SIB5 through the FACH chain onto an S-CCPCH, MM identity request, uplink RACH | no duplex loop: nothing here receives UMTS uplink and answers it in one process |
+| `08_umts_air` | RRC forgery (setup/reject/paging), BCH through the whole TS 25.212 chain with the MIB split into the blocks an 80 ms period holds, WCDMA carrier with CPICH and both sync channels, SIB1/SIB3/SIB5 through the FACH chain onto an S-CCPCH in the frames the MIB schedules, MM identity request, uplink RACH | no duplex loop: nothing here receives UMTS uplink and answers it in one process |
 | `33_jamming_detect` | ten waveform shapes including PSS/SSS/PBCH, PRACH, PRS and GPS C/A | `pucch` and `lte-ssb` are refused: this tree carries no PUCCH sequence generator, and LTE SSB is covered by pss+sss+pbch |
 | `45_iot` | NB-IoT RRC decoders through a generated codec | NPRACH and NPRFCN are refused — the parameters were not verifiable against the standard text, so they are named, not guessed |
 | `35_baseband` | mutation, corpus generation, crash triage, DIAG framing | no modulator: a payload is a handoff to srsRAN or OpenAirInterface |
@@ -591,7 +595,7 @@ CHOICE rejects its value) and writes `ageOfLocationInformation` untagged where
 TS 29.002 defines `[0]`, so `--build-response ati-ack` takes your parameter and
 the location and state halves are unverified by this tree.
 | `44_carrier_api` | OpenAPI parsing, authorisation matrix, request rendering, subscriber-sequence ordering | no executor — it writes `curl` lines and sends nothing |
-| `42_li_probe` | TLV framing, semi-octet BCD, provisioning / activation / product artefacts | the envelope is **self-defined**, not the TS 33.108 ASN.1, and nothing is delivered to an ADMF |
+| `42_li_probe` | BER encoding of the TS 33.108 Annex M HI1 operation, semi-octet BCD, and this module's own X3/HI3 product envelope | HI1's Notification carries no target-identity field and no host:port, so the subscriber identity, the IRI/CC pair and the DF2/DF3 destinations are printed as `not_encoded` rather than dropped; the HI3 product envelope is still this module's own TLV framing because TS 33.108's HI3 record is not transcribed here; and nothing is delivered to an ADMF |
 | `11_lte_core`, `13_nr_core`, `40_sba_pivot`, `30_volte_ims` | GTP-C, Diameter, NGAP, PFCP, SBI and SIP message builders with senders over real SCTP/UDP associations | a core that answers, and `LTE_ARMED`/`NR_ARMED` set |
 
 ### 3. Needs something that is not available here

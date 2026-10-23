@@ -10,15 +10,18 @@
 #     --plan) reads what you give it and sends nothing.
 #   * Encoding (--provision-target, --activate, --intercept) builds real bytes
 #     for the protocol artefacts of a lawful-intercept system: exact field
-#     layout, length prefixes, orderings and encodings. It is a self-defined
-#     length-prefixed TLV envelope, NOT TS 33.108's ASN.1 — that module was not
-#     available to this author, so no HI2/HI3 PDU of the standard is claimed
-#     and no ASN.1 type name is invented. No encoder verb opens a socket, sends
-#     anything or asks for a flag; each one prints its artefact, carries a note
-#     saying what it never contacts, and exits 3 with a handoff: an
-#     interception is performed by an operator on the operator's own network,
-#     under statutory authority, and delivering an artefact is that operator's
-#     action, not this module's.
+#     layout, orderings and encodings. The provisioning and activation records
+#     are the TS 33.108 Annex M HI1 operation (ThreeGPP-HI1NotificationOperations)
+#     in BER, encoded by tools/li_hi1.py and compared octet for octet against
+#     pycrate by tools/check-li-ber.sh. The X3/HI3 interception product is this
+#     module's own length-prefixed TLV envelope (magic LIPR) and says so: TS
+#     33.108's HI3 record is not transcribed in this tree, and calling a
+#     self-defined envelope a TS 33.108 PDU is the fabrication this tree keeps
+#     paying for. No encoder verb opens a socket, sends anything or asks for a
+#     flag; each one prints its artefact, carries a note saying what it never
+#     contacts, and exits 3 with a handoff: an interception is performed by an
+#     operator on the operator's own network, under statutory authority, and
+#     delivering an artefact is that operator's action, not this module's.
 #
 # Attack owned: O12/O13 adjacency (tracking via the core) — detection half; the
 # X1/X3 protocol artefacts are the encoder half.
@@ -169,7 +172,8 @@ lipr_status_tsv() {
     printf 'ENCODE_VERBS\t--provision-target --activate --intercept\n'
     printf 'ENCODE_GATE\tnone -- the encoder verbs run without a flag\n'
     printf 'DELIVERS\tnothing; every encoder exits 3 with a handoff after printing the artefact\n'
-    printf 'ENVELOPE\tself-defined length-prefixed TLV (magic LIPR); NOT an ASN.1 PDU from TS 33.108\n'
+    printf 'PDU\tthe provisioning and activation records are 3GPP TS 33.108 Annex M HI1 (ThreeGPP-HI1NotificationOperations) BER PDUs, encoded by tools/li_hi1.py and compared against pycrate by tools/check-li-ber.sh\n'
+    printf 'LIMIT\twhat remains unmodelled: the X3/HI3 interception product is this module own length-prefixed TLV (magic LIPR), not a TS 33.108 PDU, because HI3 is not transcribed here; the HI1 Notification has no target-identity field, so TARGET, SERVICES and the DF2/DF3 destinations are printed as not encoded instead of being folded into a field they do not belong to; domainID, the national parameters, broadcastStatus, deliveryInformation, interceptionType and Network-Element-Identifier iP-Address are refused by tools/li_hi1.py when asked for\n'
     printf 'HANDOFF\trc 3 after the artefact is printed: delivery needs an ADMF/DF2/DF3 on the operator own network, which this module never contacts\n'
     printf 'SELFTEST\tyes\n'
 }
@@ -260,7 +264,7 @@ status	handoff
 what	confirming an intercept from the network side rather than inferring it
 hardware	a lab core (Open5GS/Osmocom) with its ADMF/DF mediation, or an operator's lawful-authorisation audit
 software	the mediation function's own logs, the X1 provisioning record, and the operator's LI-management audit trail
-encoder	--provision-target and --activate build the X1 record as bytes; they hand it off and never deliver it
+encoder	--provision-target and --activate build the TS 33.108 HI1 operation as BER bytes; they hand it off and never deliver it
 flow	1. collect signalling into the TSV this module scores  2. --score for the posture  3. --report for the handling
 note	only the operator (or its national authority) can confirm an active intercept; this module encodes the artefacts and contacts nothing
 EOF
@@ -274,12 +278,22 @@ EOF
 # because the failure this tree keeps paying for is a module that skips one and
 # prints a success line anyway:
 #
-#   1. the envelope. Real bytes: field layout, length prefixes, orderings,
-#      encodings. A length-prefixed TLV with tags this module defines and
-#      prints. It is NOT TS 33.108's ASN.1: that module was not available to
-#      this author, and the failure this tree has paid for three times is a
-#      fabricated ASN.1 type with invented fields. A labelled self-defined
-#      envelope is honest; an invented HI2Operation is not.
+#   1. the bytes. Two protocols, named apart because they are not the same
+#      thing:
+#
+#        X1/HI1 provisioning and activation are 3GPP TS 33.108 Annex M HI1
+#        (ThreeGPP-HI1NotificationOperations), BER per X.690. They are built by
+#        tools/li_hi1.py — a standard-library encoder, so the module carries no
+#        third-party dependency — and tools/check-li-ber.sh checks that encoder
+#        against pycrate, which compiles tools/asn/ts33108-hi1.asn and encodes
+#        the same values. A hand-written encoder that only agrees with itself
+#        would be worth nothing.
+#
+#        X3/HI3 interception products are this module's own length-prefixed TLV
+#        envelope (magic LIPR). TS 33.108's HI3 record is not transcribed in
+#        this tree, and the failure it has paid for three times is a fabricated
+#        ASN.1 type with invented fields. A labelled self-defined envelope is
+#        honest; an invented HI3 PDU is not.
 #
 # Nothing here opens a socket, and no verb can claim an artefact was sent,
 # activated or intercepted. --intercept takes its payload as an argument
@@ -293,8 +307,127 @@ LIPR_ENVELOPE_VERSION=1
 # parses the output still learns what the artefact is for and what it is not.
 #
 #   3GPP TS 33.107/33.108 define the X1/HI1, X2/HI2 and X3/HI3 interfaces. This
-#   module encodes artefacts in a self-defined envelope and delivers none of them.
+#   module encodes artefacts and delivers none of them.
 LIPR_NOTE='lawful interception is operated by a network under statutory authority; these verbs encode artefacts and contact no ADMF, DF2, DF3 or LEMF'
+
+# ── the HI1 encoder (TS 33.108 Annex M, BER) ────────────────────────────
+# tools/li_hi1.py is the encoder: Python's standard library only, no pycrate at
+# runtime, checked against pycrate by tools/check-li-ber.sh. This module owns the
+# conf, the validation and the reporting; the bytes come from the one encoder so
+# there is a single place to be right or wrong.
+LIPR_HI1_TOOL="$IMSISTING_ROOT/tools/li_hi1.py"
+
+# Its refusal (exit 3) becomes this module's refusal (exit 2) with the same
+# words: "the standard cannot carry that value" and "this module will not write
+# it" are the same answer to the operator.
+lipr_hi1_call() {   # prints the encoder's TSV; rc 0 on success
+    local out="" rc=0 e w
+    [[ -f "$LIPR_HI1_TOOL" ]] || {
+        lipr_fail "tools/li_hi1.py is missing; it is the HI1 encoder this module ships"
+        return 1; }
+    command -v python3 >/dev/null 2>&1 || {
+        lipr_fail "python3 is not on PATH; tools/li_hi1.py is the HI1 encoder"
+        return 1; }
+    out=$(python3 "$LIPR_HI1_TOOL" --encode "$@" 2>"$MOD_TMP/li_hi1.err") || rc=$?
+    if (( rc != 0 )); then
+        e=$(awk -F'\t' '$1=="ERROR"{print $2; exit}' "$MOD_TMP/li_hi1.err" 2>/dev/null)
+        w=$(awk -F'\t' '$1=="WHY"{print $2; exit}' "$MOD_TMP/li_hi1.err" 2>/dev/null)
+        if (( rc == 3 )); then
+            lipr_refuse "${e:-tools/li_hi1.py refused the value}" \
+                "${w:-the HI1 operation cannot carry that value}"
+            return 2
+        fi
+        lipr_fail "${e:-tools/li_hi1.py exited $rc}"
+        return 1
+    fi
+    [[ -n "$out" ]] || { lipr_fail "tools/li_hi1.py printed no PDU"; return 1; }
+    printf '%s\n' "$out"
+}
+
+# This module's TARGET_TYPE table is its own; TS 33.108's TargetType names only
+# some of the forms, so the ones with no code are reported rather than guessed at.
+lipr_target_type_code() {   # $1 module type, $2 target -> a TargetType name or ""
+    case "${1:-}" in
+        imsi)   printf 'imsi' ;;
+        msisdn) printf 'msisdn' ;;
+        uri)
+            case "${2:-}" in
+                sip:*) printf 'sip-uri' ;;
+                tel:*) printf 'tel-uri' ;;
+                *)     printf '' ;;
+            esac ;;
+        *) printf '' ;;
+    esac
+}
+
+# A row for what the PDU does not carry. It is printed rather than omitted: a
+# reader who supplied a field has to be told the artefact does not contain it.
+lipr_not_encoded() {   # $1 field, $2 the module's value, $3 why it is not in the PDU
+    printf 'not_encoded\t%s\t%s\t%s\n' "$1" "$(lipr_sanitize "${2:-}")" "$3"
+}
+
+# Print one HI1 artefact: this module's rows, then the encoder's field table.
+# LIPR_ART_HEX is set from the encoder so --out writes the PDU and nothing else.
+lipr_emit_hi1() {   # $1 label, $2 interface, $3 the encoder's TSV
+    local label="$1" iface="$2" tsout="$3"
+    LIPR_ART_HEX=$(printf '%s\n' "$tsout" | awk -F'\t' '$1=="pdu_hex"{print $2; exit}')
+    printf 'artefact\t%s\n' "$label"
+    printf 'interface\t%s\n' "$iface"
+    printf 'standard\t%s\n' "$(printf '%s\n' "$tsout" | awk -F'\t' '$1=="standard"{print $2; exit}')"
+    printf 'encoding\t%s\n' "$(printf '%s\n' "$tsout" | awk -F'\t' '$1=="encoding"{print $2; exit}')"
+    printf 'operation\t%s\n' "$(printf '%s\n' "$tsout" | awk -F'\t' '$1=="operation"{print $2; exit}')"
+    printf 'artefact_bytes\t%s\n' "$(printf '%s\n' "$tsout" | awk -F'\t' '$1=="pdu_bytes"{print $2; exit}')"
+    printf 'artefact_hex\t%s\n' "$LIPR_ART_HEX"
+    printf '%s\n' "$tsout" | awk -F'\t' '$1=="tlv"'
+    printf 'field_count\t%s\n' "$(printf '%s\n' "$tsout" | awk -F'\t' '$1=="tlv"{c++} END{print c+0}')"
+}
+
+# The conf keys that name HI1's Network-Identifier, which is optional: the
+# operator's identifier (1..5 ASCII) and the network element (form:value).
+LIPR_C_OPERATOR="" LIPR_C_NE=""
+
+# Build the HI1 operation for a loaded conf and print the encoder's TSV.
+# $1 = liActivated|liDeactivated, $2 = label, $3 = interface, $4 = the extra
+# note row for the operation? No: the caller emits its own rows around this.
+lipr_hi1_build() {   # $1 operation; sets LIPR_HI1_TSV
+    local op="$1" tcode now
+    now=$(lipr_now) || return $?
+    tcode=$(lipr_target_type_code "$LIPR_C_TYPE" "$LIPR_C_TARGET")
+    local -a hargs=( --operation "$op" --liid "$LIPR_C_WARRANT" --epoch "$now" )
+    [[ -n "$tcode" ]] && hargs+=( --target-type "$tcode" )
+    [[ -n "$LIPR_C_OPERATOR" ]] && hargs+=( --operator-id "$LIPR_C_OPERATOR" )
+    [[ -n "$LIPR_C_NE" ]] && hargs+=( --ne-id "$LIPR_C_NE" )
+    LIPR_HI1_TSV=$(lipr_hi1_call "${hargs[@]}") || return $?
+    LIPR_HI1_TCODE="$tcode"
+    return 0
+}
+
+# The rows for the conf fields that the HI1 Notification has no field for. The
+# standard's Notification carries the LIID, a time and the network identifier;
+# it does not carry the subscriber identity (the LIID is the correlation key),
+# the IRI/CC service pair, or a delivery destination with a port.
+lipr_hi1_not_encoded() {   # $1 = mode (provision|activate)
+    lipr_not_encoded target_identity "$LIPR_C_TARGET" \
+        "TS 33.108's HI1 Notification has no target-identity field: the LIID above is the identifier the lawful authorisation names, and the ADMF maps it to this subscriber. The octets of the identity are printed here because they were given, not because they are in the PDU."
+    if [[ -n "$LIPR_HI1_TCODE" ]]; then
+        printf 'target_type\t%s\n' "$(lipr_sanitize "$LIPR_C_TYPE")"
+    else
+        lipr_not_encoded target_type "$LIPR_C_TYPE" \
+            "TS 33.108's TargetType ENUMERATED names mSISDN, iMSI, iMEI, e164-Format, nAI, sip-URI, tel-URI, iMPU and iMPI; this identity form has no enumerator, so target-Information is left out rather than carrying a wrong code"
+    fi
+    if [[ -n "$LIPR_C_SERVICES" ]]; then
+        lipr_not_encoded services "$LIPR_C_SERVICES" \
+            "HI1 has no field that enables IRI and CC; InterceptionType's voice/data wording is a different question, and writing it here would claim a voice/data split the conf never stated"
+    fi
+    if [[ -n "$LIPR_C_DF2" ]]; then
+        lipr_not_encoded df2_destination "$LIPR_C_DF2" \
+            "HI1's DeliveryInformation carries an IPAddress, which has no port and no host name; a host:port delivery destination would lose the port, so it stays in the conf and this row says so"
+    fi
+    if [[ -n "$LIPR_C_DF3" ]]; then
+        lipr_not_encoded df3_destination "$LIPR_C_DF3" \
+            "as for DF2_DEST: the destination the conf names is not the address HI1 would carry, and it is not silently truncated to one"
+    fi
+}
 
 # ── the envelope builder ────────────────────────────────────────────────
 # Layout: magic(4) version(1) artefact_type(1) then repeated
@@ -328,7 +461,7 @@ lipr_emit_common() {  # label type_octet interface ordering
     printf 'interface\t%s\n' "$iface"
     printf 'artefact_type\t0x%s\n' "$(lipr_byte "$tcode")"
     printf 'envelope\t%s\n' 'self-defined: magic 4C495052 ("LIPR") + version 0x01 + artefact type + repeated tag(1) length(2, big-endian) value(N)'
-    printf 'standard\t%s\n' 'TS 33.108 names the X1/HI1, X2/HI2 and X3/HI3 interfaces; its ASN.1 module was not available to this author, so this is a self-defined envelope and NOT an ASN.1 PDU of the standard'
+    printf 'standard\t%s\n' 'TS 33.108 names the X1/HI1, X2/HI2 and X3/HI3 interfaces; its HI1 module is encoded by tools/li_hi1.py, and its HI3 record is NOT transcribed in this tree, so this artefact is a self-defined envelope and not a TS 33.108 PDU'
     printf 'ordering\t%s\n' "$ordering"
     printf 'artefact_bytes\t%d\n' "$(( ${#LIPR_ART_HEX} / 2 ))"
     printf 'artefact_hex\t%s\n' "$LIPR_ART_HEX"
@@ -484,7 +617,8 @@ lipr_validate_dest() {
 lipr_conf_load() {
     local path="${1:-}" mode="${2:-provision}" line key val lineno=0
     LIPR_C_TYPE="" LIPR_C_TARGET="" LIPR_C_WARRANT="" LIPR_C_SERVICES=""
-    LIPR_C_DF2="" LIPR_C_DF3="" LIPR_CONF_IGNORED=""
+    LIPR_C_DF2="" LIPR_C_DF3="" LIPR_C_OPERATOR="" LIPR_C_NE=""
+    LIPR_CONF_IGNORED=""
     LIPR_ID_CODE="" LIPR_ID_HEX="" LIPR_ID_ENC="" LIPR_ID_TEXT=""
     LIPR_SERVICES_MASK="" LIPR_SERVICES_TEXT=""
     [[ -n "$path" ]] || { lipr_refuse "no conf file given" "the interface is --provision-target <conf> or --activate <conf>; the conf is a small KEY=VALUE file"; return 2; }
@@ -508,7 +642,9 @@ lipr_conf_load() {
             SERVICES)    LIPR_C_SERVICES="$val" ;;
             DF2_DEST)    LIPR_C_DF2="$val" ;;
             DF3_DEST)    LIPR_C_DF3="$val" ;;
-            *) lipr_refuse "unknown conf key '$key' at line $lineno" "the keys are TARGET_TYPE, TARGET, WARRANT, SERVICES, DF2_DEST and DF3_DEST; a mistyped key that is silently ignored encodes a request that does not say what its author thought it said"
+            OPERATOR_ID) LIPR_C_OPERATOR="$val" ;;
+            NETWORK_ELEMENT) LIPR_C_NE="$val" ;;
+            *) lipr_refuse "unknown conf key '$key' at line $lineno" "the keys are TARGET_TYPE, TARGET, WARRANT, SERVICES, DF2_DEST, DF3_DEST and optionally OPERATOR_ID and NETWORK_ELEMENT (form:value, e164|x25|ip|dns); a mistyped key that is silently ignored encodes a request that does not say what its author thought it said"
                return 2 ;;
         esac
     done < "$path"
@@ -571,9 +707,11 @@ lipr_seq() {
 }
 
 # ── --provision-target ──────────────────────────────────────────────────
-# The X1/HI1 provisioning request as bytes: the target identity, the warrant
-# reference, the services and the DF2/DF3 delivery destination. It contacts
-# nothing.
+# The provisioning request as a real PDU: the TS 33.108 Annex M HI1 operation
+# (liActivated), BER-encoded by tools/li_hi1.py. TS 33.108 defines no separate
+# provisioning operation and no ASN.1 for the ADMF-to-DF leg, so the request is
+# the standard's own activation notification, and the conf fields the operation
+# has no room for are printed as not encoded. It contacts nothing.
 lipr_cmd_provision() {
     local conf="" out=""
     while (( $# )); do
@@ -589,38 +727,24 @@ lipr_cmd_provision() {
     done
     lipr_require_od || return 1
     lipr_conf_load "$conf" provision || return $?
+    lipr_hi1_build liActivated || return $?
 
     lipr_art_reset
-    lipr_art_start 1
-    lipr_tlv 1 target_identity_type "$LIPR_C_TYPE" \
-        "u8 code, this module's table: 0x01 imsi 0x02 msisdn 0x03 supi 0x04 uri 0x05 email" \
-        "$(lipr_byte "$LIPR_ID_CODE")"
-    lipr_tlv 2 target_identity "$LIPR_ID_TEXT" "$LIPR_ID_ENC" "$LIPR_ID_HEX"
-    lipr_tlv 3 warrant_reference "$LIPR_C_WARRANT" \
-        "utf-8 octets of the authorisation reference" "$(lipr_hexify "$LIPR_C_WARRANT")"
-    lipr_tlv 4 services "$LIPR_SERVICES_TEXT" \
-        "u8 bitmask, this module's table: 0x01 IRI toward DF2, 0x02 CC toward DF3" \
-        "$(lipr_byte "$LIPR_SERVICES_MASK")"
-    if (( LIPR_SERVICES_MASK & 1 )); then
-        lipr_tlv 5 df2_destination "$LIPR_C_DF2" \
-            "utf-8 host:port of the DF2 delivery function (IRI, X2/HI2)" "$(lipr_hexify "$LIPR_C_DF2")"
-    fi
-    if (( LIPR_SERVICES_MASK & 2 )); then
-        lipr_tlv 6 df3_destination "$LIPR_C_DF3" \
-            "utf-8 host:port of the DF3 delivery function (CC, X3/HI3)" "$(lipr_hexify "$LIPR_C_DF3")"
-    fi
-
-    lipr_emit_common "provisioning_request" 1 "X1/HI1 administration (ADMF -> DF2/DF3)" \
-        "target_identity_type, target_identity, warrant_reference, services, df2_destination, df3_destination (this module's order)"
+    lipr_emit_hi1 "provisioning_request" \
+        "X1/HI1 administration (ADMF -> DF2/DF3), carried as the TS 33.108 Hi1 operation" \
+        "$LIPR_HI1_TSV"
     printf 'note\t%s\n' "$LIPR_NOTE"
+    lipr_hi1_not_encoded provision
     lipr_emit_out "$out" || return 1
-    lipr_emit_handoff "an ADMF on X1/HI1 that accepts this provisioning request and drives DF2 (IRI, X2/HI2) and DF3 (CC, X3/HI3); this module encodes the request, opens no socket and sends nothing, so delivery is the operator's action on the operator's own core"
+    lipr_emit_handoff "an ADMF on X1/HI1 that accepts this activation notification and drives DF2 (IRI, X2/HI2) and DF3 (CC, X3/HI3); this module encodes the PDU, opens no socket and sends nothing, so delivery is the operator's action on the operator's own core"
     return 3
 }
 
 # ── --activate ──────────────────────────────────────────────────────────
-# The activation record for an already-provisioned target. Withdrawal is the
-# same verb with --action withdraw: one record shape, two action codes.
+# The activation record for an already-provisioned target: the TS 33.108 Annex M
+# HI1 operation, BER-encoded by tools/li_hi1.py. --action activate is
+# liActivated, --action withdraw is liDeactivated -- two alternatives of the
+# standard's CHOICE, not one record shape with a home-made action octet.
 lipr_cmd_activate() {
     local conf="" out="" action="activate" acode=""
     while (( $# )); do
@@ -643,27 +767,18 @@ lipr_cmd_activate() {
     esac
     lipr_require_od || return 1
     lipr_conf_load "$conf" activate || return $?
-    local now
-    now=$(lipr_now) || return $?
+    local hi1op
+    case "$acode" in
+        1) hi1op=liActivated ;;
+        2) hi1op=liDeactivated ;;
+    esac
+    lipr_hi1_build "$hi1op" || return $?
 
     lipr_art_reset
-    lipr_art_start 2
-    lipr_tlv 1 target_identity_type "$LIPR_C_TYPE" \
-        "u8 code, this module's table: 0x01 imsi 0x02 msisdn 0x03 supi 0x04 uri 0x05 email" \
-        "$(lipr_byte "$LIPR_ID_CODE")"
-    lipr_tlv 2 target_identity "$LIPR_ID_TEXT" "$LIPR_ID_ENC" "$LIPR_ID_HEX"
-    lipr_tlv 3 warrant_reference "$LIPR_C_WARRANT" \
-        "utf-8 octets of the authorisation reference" "$(lipr_hexify "$LIPR_C_WARRANT")"
-    lipr_tlv 4 services "$LIPR_SERVICES_TEXT" \
-        "u8 bitmask, this module's table: 0x01 IRI toward DF2, 0x02 CC toward DF3" \
-        "$(lipr_byte "$LIPR_SERVICES_MASK")"
-    lipr_tlv 7 action "$action" \
-        "u8 code, this module's table: 0x01 activate, 0x02 withdraw" "$(lipr_byte "$acode")"
-    lipr_tlv 8 activation_time "$now" \
-        "u32 big-endian, seconds since the Unix epoch, UTC" "$(lipr_u32be "$now")"
-
-    lipr_emit_common "activation_record" 2 "X1/HI1 administration (ADMF -> DF2/DF3)" \
-        "target_identity_type, target_identity, warrant_reference, services, action, activation_time (this module's order)"
+    lipr_emit_hi1 "activation_record" \
+        "X1/HI1 administration (ADMF -> DF2/DF3), carried as the TS 33.108 Hi1 operation" \
+        "$LIPR_HI1_TSV"
+    printf 'action\t%s\n' "$action"
     printf 'note\t%s\n' "$LIPR_NOTE"
     if [[ -n "$LIPR_CONF_IGNORED" ]]; then
         printf 'note\t%s\n' "$LIPR_CONF_IGNORED"
@@ -775,6 +890,9 @@ lipr_selftest() {
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
     has() { printf '%s\n' "$1" | grep -qi -- "$2" && echo yes || echo no; }
     tlvfield() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1=="field" && $2==k {print $7; exit}'; }
+    # The HI1 encoder prints tlv <path> <tag> <len> <offset> <hex>; the path is
+    # what a reader looks up, so the helper keys on it.
+    h1field() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1=="tlv" && $2==k {print $6; exit}'; }
 
     local d
     d=$(mktemp -d "$MOD_TMP/selftest.XXXXXX") || {
@@ -849,7 +967,7 @@ lipr_selftest() {
     cat > "$conf" <<'CONF'
 TARGET_TYPE=imsi
 TARGET=310150123456789
-WARRANT=W-2026-0001
+WARRANT=LIID-0001
 SERVICES=iri,cc
 DF2_DEST=10.0.0.2:9002
 DF3_DEST=10.0.0.2:9003
@@ -869,91 +987,59 @@ CONF
     chk ungated-activate "$(lipr_cli_main --activate "$conf" >/dev/null 2>&1; echo $?)" "3"
     chk ungated-intercept "$(lipr_cli_main --intercept 0A1B2C >/dev/null 2>&1; echo $?)" "3"
 
-    # 6. Armed, the provisioning request is byte-exact. The expected hex is
-    #    hand-assembled from the layout this module prints, field by field:
-    #      4C495052                  magic "LIPR"
-    #      01 01                     version 1, type 1 (provisioning request)
-    #      01 0001 01                identity_type = 1 (imsi)
-    #      02 0008 13100521436587F9  identity = the BCD above
-    #      03 000B 572D323032362D30303031  warrant "W-2026-0001" as ASCII
-    #      04 0001 03                services = IRI|CC
-    #      05 000D 31302E302E302E323A39303032  "10.0.0.2:9002" as ASCII
-    #      06 000D 31302E302E302E323A39303033  "10.0.0.2:9003" as ASCII
-    #    = 6 + 4 + 11 + 14 + 4 + 16 + 16 = 71 octets.
-    local PHEX="4C4950520101"
-    PHEX+="01000101"
-    PHEX+="02000813100521436587F9"
-    PHEX+="03000B572D323032362D30303031"
-    PHEX+="04000103"
-    PHEX+="05000D31302E302E302E323A39303032"
-    PHEX+="06000D31302E302E302E323A39303033"
-    out=$(lipr_cli_main --provision-target "$conf" 2>/dev/null); rc=$?
+    # 6. The provisioning request is the real thing: the TS 33.108 Annex M HI1
+    #    operation liActivated, BER per X.690, octet for octet the PDU pycrate
+    #    produces for the same value (tools/check-li-ber.sh is the comparison).
+    #    The literal is read off that referee, not off this module's encoder:
+    #      A1 21                      Notification, context tag [1], 33 octets
+    #        81 09 4C4949442D30303031   lawfulInterceptionIdentifier "LIID-0001"
+    #        A3 0F                      timeStamp [3], explicit because it is a CHOICE
+    #          81 0D 3236303...5A       utcTime "260101000000Z"
+    #        A6 03                      target-Information [6]
+    #          83 01 01                 targetType iMSI(1)
+    #    = 2 + 11 + 17 + 5 = 35 octets.
+    local PHI1="A12181094C4949442D30303031A30F810D3236303130313030303030305AA603830101"
+    out=$(LIPR_NOW=1767225600 lipr_cli_main --provision-target "$conf" 2>/dev/null); rc=$?
     chk provision-rc "$rc" "3"
-    chk provision-hex "$(fld "$out" artefact_hex)" "$PHEX"
-    chk provision-bytes "$(fld "$out" artefact_bytes)" "71"
-    chk provision-type "$(fld "$out" artefact_type)" "0x01"
-    chk provision-field-count "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field"{c++} END{print c+0}')" "6"
-    chk provision-identity "$(tlvfield "$out" target_identity)" "13100521436587F9"
-    chk provision-warrant "$(tlvfield "$out" warrant_reference)" "572D323032362D30303031"
-    chk provision-services "$(tlvfield "$out" services)" "03"
-    chk provision-df3 "$(tlvfield "$out" df3_destination)" "31302E302E302E323A39303033"
-    chk provision-offsets-tie "$(printf '%s\n' "$out" | awk -F'\t' '$1=="field"{o=$6+3+$4} END{print o}')" "71"
+    chk provision-hex "$(fld "$out" artefact_hex)" "$PHI1"
+    chk provision-bytes "$(fld "$out" artefact_bytes)" "35"
+    chk provision-operation "$(fld "$out" operation)" "liActivated"
+    chk provision-names-standard "$(has "$(fld "$out" standard)" 'TS 33.108')" "yes"
+    chk provision-names-hi1 "$(has "$(fld "$out" standard)" 'ThreeGPP-HI1NotificationOperations')" "yes"
+    chk provision-ber "$(has "$(fld "$out" encoding)" 'ber')" "yes"
+    chk provision-liid "$(h1field "$out" liActivated.lawfulInterceptionIdentifier)" "4C4949442D30303031"
+    chk provision-utc "$(h1field "$out" liActivated.timeStamp.utcTime)" "3236303130313030303030305A"
+    chk provision-target-type "$(h1field "$out" liActivated.target-Information.targetType)" "01"
+    chk provision-fields "$(printf '%s\n' "$out" | grep -c '^tlv')" "6"
+    chk provision-field-count "$(fld "$out" field_count)" "6"
     chk provision-status "$(fld "$out" status)" "handoff"
     chk provision-sent "$(fld "$out" sent)" "0"
+    #    The old lie is gone from the output, not just from the header comment.
+    chk provision-not-self-defined "$(printf '%s\n' "$out" | grep -ci 'self-defined')" "0"
+    chk provision-no-limits-row "$(printf '%s\n' "$out" | grep -c '^ENVELOPE')" "0"
+    #    A conf field the operation has no room for is printed as not encoded,
+    #    once per field, with the reason -- never folded into a field it is not.
+    chk provision-not-encoded-count "$(printf '%s\n' "$out" | grep -c '^not_encoded')" "4"
+    chk provision-not-encoded-names "$(printf '%s\n' "$out" | awk -F'\t' '$1=="not_encoded"{printf "%s%s", sep, $2; sep=" "}')" "target_identity services df2_destination df3_destination"
+    chk provision-target-reported "$(printf '%s\n' "$out" | grep -c '310150123456789')" "1"
 
-    #    The flag works where the env does not, before or after the verb.
-    # The old gate flag is gone, and passing it is a usage error rather than a
-    # silent no-op: an operator who still has it in a script must find out.
+    #    The retired gate flag is gone, and passing it is a usage error rather
+    #    than a silent no-op: an operator who still has it in a script must find
+    #    out.
     chk retired-gate-flag "$(lipr_cli_main --i-have-a-lab-and-authorisation --provision-target "$conf" >/dev/null 2>&1; echo $?)" "2"
 
-    #    The bytes on disk are the bytes in the hex, not a second rendering.
-    out=$(lipr_cli_main --provision-target "$conf" --out "$d/prov.bin" 2>/dev/null)
+    #    The bytes on disk are the PDU in the hex, not a second rendering.
+    out=$(LIPR_NOW=1767225600 lipr_cli_main --provision-target "$conf" --out "$d/prov.bin" 2>/dev/null)
     chk out-file-path "$(fld "$out" out_file)" "$d/prov.bin"
-    chk out-file-bytes "$(stat -c %s "$d/prov.bin" 2>/dev/null)" "71"
-    chk out-file-hex "$(od -An -v -tx1 "$d/prov.bin" | tr -d ' \n' | tr 'a-f' 'A-F')" "$PHEX"
+    chk out-file-bytes "$(stat -c %s "$d/prov.bin" 2>/dev/null)" "35"
+    chk out-file-hex "$(od -An -v -tx1 "$d/prov.bin" | tr -d ' \n' | tr 'a-f' 'A-F')" "$PHI1"
 
-    # 7. The parser reads a hand-written literal, never the encoder's output:
-    #    the field values are the ASCII and BCD expectations above.
-    local parsed
-    parsed=$(lipr_parse "$PHEX"); rc=$?
-    chk parse-rc "$rc" "0"
-    chk parse-type "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="hdr" && $2=="type"{print $3}')" "0x01"
-    chk parse-version "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="hdr" && $2=="version"{print $3}')" "0x01"
-    chk parse-tlvs "$(printf '%s\n' "$parsed" | grep -c '^tlv')" "6"
-    chk parse-order "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="tlv"{printf "%s%s", sep, $2; sep=" "}')" "0x01 0x02 0x03 0x04 0x05 0x06"
-    chk parse-identity "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="tlv" && $2=="0x02"{print $4}')" "13100521436587F9"
-    chk parse-warrant "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="tlv" && $2=="0x03"{print $4}')" "572D323032362D30303031"
-    chk parse-truncated "$(lipr_parse "${PHEX%????}" >/dev/null 2>&1; echo $?)" "1"
-    chk parse-bad-magic "$(lipr_parse "00000000${PHEX:8}" >/dev/null 2>&1; echo $?)" "1"
-    chk parse-nonhex "$(lipr_parse "ZZ" >/dev/null 2>&1; echo $?)" "1"
-
-    # 8. The activation record: same shape, action code 0x01/0x02 and a u32
-    #    big-endian timestamp. 1767225600 is 2026-01-01T00:00:00Z and its
-    #    big-endian form is 0x6955B900, which is what the literal asserts.
-    local AH="4C4950520102"
-    AH+="01000101"
-    AH+="02000813100521436587F9"
-    AH+="03000B572D323032362D30303031"
-    AH+="04000103"
-    AH+="07000102"
-    AH+="0800046955B900"
-    out=$(LIPR_NOW=1767225600 lipr_cli_main --activate "$conf" --action withdraw 2>/dev/null); rc=$?
-    chk activate-rc "$rc" "3"
-    chk activate-hex "$(fld "$out" artefact_hex)" "$AH"
-    chk activate-bytes "$(fld "$out" artefact_bytes)" "50"
-    chk activate-type "$(fld "$out" artefact_type)" "0x02"
-    chk activate-action "$(tlvfield "$out" action)" "02"
-    chk activate-time "$(tlvfield "$out" activation_time)" "6955B900"
-    chk activate-record-name "$(fld "$out" artefact)" "activation_record"
-    chk activate-default "$(LIPR_NOW=1767225600 lipr_cli_main --activate "$conf" 2>/dev/null | awk -F'\t' '$1=="field" && $2=="action"{print $7}')" "01"
-    chk activate-has-note "$(printf '%s\n' "$out" | grep -c "^note")" "2"
-    chk activate-bad-action "$(lipr_cli_main --activate "$conf" --action freeze >/dev/null 2>&1; echo $?)" "2"
-    chk activate-parses "$(lipr_parse "$AH" | grep -c '^tlv')" "6"
-
-    # 9. The interception-product envelope. 1767225600 again; sequence 7.
-    #      4C495052 01 03            version 1, type 3 (interception product)
+    # 7. The LIPR reader, on a hand-written literal -- never on the encoder's
+    #    output. The literal is the X3/HI3 product envelope, the one artefact
+    #    that is still this module's own framing:
+    #      4C495052 01 03            magic "LIPR", version 1, type 3 (product)
     #      09 0009 434153452D30303031  "CASE-0001" as ASCII
-    #      0A 0004 6955B900          capture time
+    #      0A 0004 6955B900          capture time (1767225600, big-endian)
     #      0B 0004 00000007          sequence 7
     #      0C 0003 0A1B2C            the payload, encoded in place
     #    = 6 + 12 + 7 + 7 + 6 = 38 octets.
@@ -962,10 +1048,45 @@ CONF
     IH+="0A00046955B900"
     IH+="0B000400000007"
     IH+="0C00030A1B2C"
+    local parsed
+    parsed=$(lipr_parse "$IH"); rc=$?
+    chk parse-rc "$rc" "0"
+    chk parse-type "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="hdr" && $2=="type"{print $3}')" "0x03"
+    chk parse-version "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="hdr" && $2=="version"{print $3}')" "0x01"
+    chk parse-tlvs "$(printf '%s\n' "$parsed" | grep -c '^tlv')" "4"
+    chk parse-order "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="tlv"{printf "%s%s", sep, $2; sep=" "}')" "0x09 0x0A 0x0B 0x0C"
+    chk parse-correlation "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="tlv" && $2=="0x09"{print $4}')" "434153452D30303031"
+    chk parse-payload "$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="tlv" && $2=="0x0C"{print $4}')" "0A1B2C"
+    chk parse-truncated "$(lipr_parse "${IH%????}" >/dev/null 2>&1; echo $?)" "1"
+    chk parse-bad-magic "$(lipr_parse "00000000${IH:8}" >/dev/null 2>&1; echo $?)" "1"
+    chk parse-nonhex "$(lipr_parse "ZZ" >/dev/null 2>&1; echo $?)" "1"
+
+    # 8. Withdrawal is liDeactivated and activation is liActivated: two
+    #    alternatives of the standard's CHOICE, so the difference is the context
+    #    tag 0xA2 against 0xA1 and nothing else. Both literals are the referee's.
+    local WHI1="A22181094C4949442D30303031A30F810D3236303130313030303030305AA603830101"
+    out=$(LIPR_NOW=1767225600 lipr_cli_main --activate "$conf" --action withdraw 2>/dev/null); rc=$?
+    chk activate-rc "$rc" "3"
+    chk activate-hex "$(fld "$out" artefact_hex)" "$WHI1"
+    chk activate-bytes "$(fld "$out" artefact_bytes)" "35"
+    chk activate-operation "$(fld "$out" operation)" "liDeactivated"
+    chk activate-action-row "$(fld "$out" action)" "withdraw"
+    chk activate-record-name "$(fld "$out" artefact)" "activation_record"
+    chk activate-liid "$(h1field "$out" liDeactivated.lawfulInterceptionIdentifier)" "4C4949442D30303031"
+    chk activate-default-hex "$(LIPR_NOW=1767225600 lipr_cli_main --activate "$conf" 2>/dev/null | awk -F'\t' '$1=="artefact_hex"{print $2}')" "$PHI1"
+    chk activate-default-op "$(LIPR_NOW=1767225600 lipr_cli_main --activate "$conf" 2>/dev/null | awk -F'\t' '$1=="operation"{print $2}')" "liActivated"
+    chk activate-has-note "$(printf '%s\n' "$out" | grep -c "^note")" "2"
+    chk activate-bad-action "$(lipr_cli_main --activate "$conf" --action freeze >/dev/null 2>&1; echo $?)" "2"
+
+    # 9. The interception-product envelope, the artefact that is still this
+    #    module's own framing because TS 33.108's HI3 record is not transcribed
+    #    in this tree. Its own standard row says so; that is the honest half of
+    #    what used to be one blanket lie.
     out=$(LIPR_NOW=1767225600 LIPR_SEQ=7 lipr_cli_main --intercept 0A1B2C --case CASE-0001 2>/dev/null); rc=$?
     chk intercept-rc "$rc" "3"
     chk intercept-hex "$(fld "$out" artefact_hex)" "$IH"
     chk intercept-bytes "$(fld "$out" artefact_bytes)" "38"
+    chk intercept-owns-framing "$(has "$(fld "$out" standard)" 'not a TS 33.108 PDU')" "yes"
     chk intercept-payload "$(tlvfield "$out" payload)" "0A1B2C"
     chk intercept-payload-in-place "$(printf '%s' "$(fld "$out" artefact_hex)" | grep -c '0C00030A1B2C')" "1"
     chk intercept-correlation "$(tlvfield "$out" correlation_id)" "434153452D30303031"
@@ -992,6 +1113,12 @@ CONF
     printf 'TARGET_TYPE=imsi\nTARGET=310150123456789\nSERVICES=iri\nDF2_DEST=a:1\n' > "$d/nowarrant.conf"
     chk conf-no-warrant "$(lipr_cli_main --provision-target "$d/nowarrant.conf" >/dev/null 2>&1; echo $?)" "2"
     chk conf-missing-file "$(lipr_cli_main --provision-target "$d/nope.conf" >/dev/null 2>&1; echo $?)" "1"
+    #     A warrant reference longer than HI1's SIZE (1..25) is the standard's
+    #     refusal, not this module's convenience: the LIID is an OCTET STRING
+    #     with a fixed size range, and truncating it would name another target.
+    printf 'TARGET_TYPE=imsi\nTARGET=310150123456789\nWARRANT=ABCDEFGHIJKLMNOPQRSTUVWXYZ\nSERVICES=iri\nDF2_DEST=a:1\n' > "$d/liid26.conf"
+    chk conf-liid-too-long "$(lipr_cli_main --provision-target "$d/liid26.conf" >/dev/null 2>&1; echo $?)" "2"
+    chk conf-liid-names-size "$(lipr_cli_main --provision-target "$d/liid26.conf" 2>&1 >/dev/null | grep -c 'SIZE')" "1"
 
     # 11. There is no gate and therefore no stderr block. What the module still
     #     owes a reader is the standing note, in the output, saying what these
@@ -1002,7 +1129,7 @@ CONF
     chk note-on-stdout "$(printf '%s\n' "$dout" | grep -c '^note	lawful interception is operated')" "1"
     chk note-names-admf "$(printf '%s\n' "$dout" | grep -c 'contact no ADMF, DF2, DF3 or LEMF')" "1"
     chk stdout-has-no-warning "$(printf '%s\n' "$dout" | grep -c '^WARNING')" "0"
-    chk stdout-tabular "$(printf '%s\n' "$dout" | awk -F'\t' 'NF==7 && $1=="field"{c++} END{print c+0}')" "6"
+    chk stdout-tabular "$(printf '%s\n' "$dout" | awk -F'\t' 'NF==6 && $1=="tlv"{c++} END{print c+0}')" "6"
 
     # 12. Scope: the seam between the ungated detection verbs and the gated
     #     encoder verbs, and the verbs are dispatchable.
@@ -1020,6 +1147,11 @@ CONF
     chk status-encode-verbs "$(fld "$out" ENCODE_VERBS)" "--provision-target --activate --intercept"
     chk status-no-detection-only "$(printf '%s\n' "$out" | grep -ci 'detection-only')" "0"
     chk status-scope-no-gate "$(printf '%s\n' "$out" | awk -F'\t' '$1=="SCOPE"{print ($2 ~ /gate/)?"yes":"no"}')" "no"
+    chk status-pdu "$(has "$(fld "$out" PDU)" 'TS 33.108')" "yes"
+    chk status-pdu-names-hi1 "$(has "$(fld "$out" PDU)" 'ThreeGPP-HI1NotificationOperations')" "yes"
+    chk status-no-envelope-row "$(printf '%s\n' "$out" | grep -c '^ENVELOPE')" "0"
+    chk status-limit-names-product "$(has "$(fld "$out" LIMIT)" 'X3/HI3')" "yes"
+    chk status-limit-names-target "$(has "$(fld "$out" LIMIT)" 'target-identity')" "yes"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -1042,7 +1174,8 @@ lipr_menu() {
   [8]  Interception-product envelope
   [0]  back
 
-  6-8 encode artefacts and send nothing; each carries a note saying so.
+  6-7 encode a real TS 33.108 HI1 PDU; 8 encodes this module's own product
+  envelope. None of them sends anything, and each carries a note saying so.
 M
         read -rp "  choice> " c || return 0
         case "$c" in
@@ -1091,11 +1224,12 @@ lipr_cli_main() {
         --menu)        lipr_menu ;;
         *)
             cat >&2 <<EOF
-LI Interception — 3GPP lawful-interception interfaces, posture signals, and a
-gated encoder for X1/HI1 and X3/HI3 protocol artefacts
+LI Interception — 3GPP lawful-interception interfaces, posture signals, and an
+encoder for the TS 33.108 HI1 operation (X1/HI1) and this module's own X3/HI3
+product envelope
 
 Usage: $0 COMMAND
-  --status-tsv         module state as TSV, including the encoder gate
+  --status-tsv         module state as TSV, including what the PDU does not model
   --interfaces         X1/HI1, X2/HI2, X3/HI3 reference (TS 33.108)
   --iface <X1|X2|X3>   name one interface
   --architecture       ADMF/POI/DF2/DF3/LEMF roles
@@ -1103,23 +1237,37 @@ Usage: $0 COMMAND
   --report             what to record and where to escalate
   --plan               network-side confirmation handoff
   --provision-target <conf> [--out <path>]
-                       GATED: encode an X1/HI1 provisioning request as bytes
+                       encode the provisioning request as a TS 33.108 HI1
+                       operation (liActivated) in BER
   --activate <conf> [--action activate|withdraw] [--out <path>]
-                       GATED: encode an X1/HI1 activation record (one shape,
-                       action 0x01 activate or 0x02 withdraw)
+                       encode the activation record: liActivated, or
+                       liDeactivated with --action withdraw
   --intercept <hex> [--case <id>] [--out <path>]
-                       GATED: encode an X3/HI3 interception-product envelope
-                       around a payload YOU supply; it captures nothing
+                       encode an X3/HI3 interception-product envelope (this
+                       module's own LIPR framing) around a payload YOU supply;
+                       it captures nothing
   --selftest           verify the model, the scorer and the encodings
   --menu               interactive menu
 
 The encoder verbs take a small KEY=VALUE conf (TARGET_TYPE, TARGET, WARRANT,
-SERVICES, DF2_DEST, DF3_DEST) or a payload in hex. LIPR_NOW and LIPR_SEQ pin the
-timestamp and sequence so a harness run is reproducible. Exit codes: 0 done,
-1 an I/O or clock failure, 2 refused or bad input, 3 the artefact is built and
-printed and delivery is a handoff. The wire form is this module's own
-length-prefixed TLV, with a tagged field table printed beside the hex; it is
-NOT TS 33.108's ASN.1, because that module was not available to this author.
+SERVICES, DF2_DEST, DF3_DEST, and optionally OPERATOR_ID and NETWORK_ELEMENT in
+form:value with form e164, x25, ip or dns) or a payload in hex. LIPR_NOW and
+LIPR_SEQ pin the timestamp and sequence so a harness run is reproducible. Exit
+codes: 0 done, 1 an I/O or clock failure, 2 refused or bad input, 3 the
+artefact is built and printed and delivery is a handoff.
+
+--provision-target and --activate print a real PDU of 3GPP TS 33.108 Annex M:
+the HI1 operation ThreeGPP-HI1NotificationOperations, BER-encoded per X.690 by
+tools/li_hi1.py, with the tagged field table printed beside the hex. That
+encoder has no third-party dependency, and tools/check-li-ber.sh compares it
+octet for octet against pycrate's ASN.1 compiler when the oracle venv is
+present. The conf fields the operation has no room for -- the subscriber
+identity, the IRI/CC pair, a delivery host:port -- are printed as not_encoded
+with the reason, never folded into a field they are not.
+
+--intercept is the exception and says so in its own output: TS 33.108's HI3
+record is not transcribed in this tree, so the product envelope is this
+module's own length-prefixed TLV (magic LIPR) and is not a TS 33.108 PDU.
 
 Scope: the detection verbs read what you give them and send nothing. The three
 encoder verbs build real bytes -- field layout, length prefixes, orderings,

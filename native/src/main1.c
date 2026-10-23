@@ -30818,7 +30818,9 @@ lipr_build_encode(AppState *state, const char *module_id,
     GtkWidget *body;
     GtkWidget *outer = radio_view_shell("BUILD THE MESSAGE",
         "The three artefacts an interception is built from, as bytes. Every verb "
-        "encodes and stops: nothing is delivered to any element.", &body);
+        "encodes and stops: nothing is delivered to any element. The first two "
+        "are the real 3GPP TS 33.108 HI1 operation; the third is this module's "
+        "own framing and says so.", &body);
     GtkWidget *prov_body, *act_body, *prod_body;
     GtkWidget *prov = verb_card("READ THE PROVISIONING REQUEST", &prov_body);
     GtkWidget *act = verb_card("READ THE ACTIVATION RECORD", &act_body);
@@ -30832,8 +30834,10 @@ lipr_build_encode(AppState *state, const char *module_id,
             mod_arg_row(state, module_id, status, "Build the Request",
                 "--provision-target", "target.conf",
                 "A KEY=VALUE file: the target, the warrant, the services and the "
-                "two delivery functions. The envelope is this module's own and "
-                "says so - it is not an ASN.1 PDU of the standard."));
+                "two delivery functions. The bytes are the TS 33.108 HI1 "
+                "operation (liActivated) in BER. The HI1 notification carries no "
+                "subscriber identity and no host:port destination, so those "
+                "fields are printed as not encoded instead of being dropped."));
         gtk_box_append(GTK_BOX(prov_body), res);
     }
     gtk_box_append(GTK_BOX(body), prov);
@@ -30845,8 +30849,9 @@ lipr_build_encode(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(act_body),
             mod_arg_row(state, module_id, status, "Build the Record",
                 "--activate", "target.conf",
-                "The same file. One shape carries both actions: activate and "
-                "withdraw differ in one octet, which the output names."));
+                "The same file. Activate is the HI1 liActivated operation and "
+                "withdraw is liDeactivated: two alternatives of the standard's "
+                "CHOICE, so the output names which one it wrote."));
         gtk_box_append(GTK_BOX(act_body), res);
     }
     gtk_box_append(GTK_BOX(body), act);
@@ -30860,7 +30865,9 @@ lipr_build_encode(AppState *state, const char *module_id,
                 "--intercept", "deadbeef",
                 "The product as hex, plus the case identifier it belongs to. "
                 "This module captures nothing, so the payload is an argument by "
-                "design."));
+                "design. Unlike the other two cards this is this module's own "
+                "TLV framing, not a TS 33.108 PDU, because HI3 is not "
+                "transcribed in this tree."));
         gtk_box_append(GTK_BOX(prod_body), res);
     }
     gtk_box_append(GTK_BOX(body), prod);
