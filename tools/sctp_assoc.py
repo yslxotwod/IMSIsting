@@ -221,6 +221,19 @@ def m3ua_param(tag: int, value: bytes) -> bytes:
     return struct.pack(">HH", tag, 4 + len(value)) + value + b"\x00" * pad
 
 
+def _protocol_data(msg: bytes):
+    """The MSU inside an M3UA DATA message, or None.
+
+    The Protocol Data parameter (tag 0x0210) carries a 4-octet protocol tag and
+    a 4-octet originating point code before the user data, so the MSU starts 8
+    octets into the value, not at the value.
+    """
+    for tag, value in m3ua_params(msg):
+        if tag == 0x0210 and len(value) >= 8:
+            return value[8:]
+    return None
+
+
 def m3ua_params(msg: bytes) -> list:
     """(tag, value) for each parameter in an M3UA message, padding stripped."""
     out, off = [], 8
@@ -360,6 +373,14 @@ def send_to(host: str, port: int, payload: bytes, ppid: int,
                 data, got_ppid = recv_message(sock)
                 report["reply_octets"] = str(len(data))
                 report["reply_hex"] = data.hex()
+                # When the reply is M3UA, hand back the MSU inside it as well:
+                # the caller asked to send an MSU and wants to compare an MSU,
+                # and making it strip an 8-octet header and a parameter it did
+                # not write would put the same parsing in every caller.
+                msu = _protocol_data(data)
+                if msu is not None:
+                    report["reply_msu_octets"] = str(len(msu))
+                    report["reply_msu_hex"] = msu.hex()
                 report["reply_ppid"] = str(got_ppid) if got_ppid is not None else "unknown"
                 report["status"] = "sent-and-received"
             except socket.timeout:
