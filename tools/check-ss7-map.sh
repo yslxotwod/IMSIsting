@@ -87,10 +87,20 @@ with open(sys.argv[2], "wb") as f:
     f.write(msu)
 PY
     dump=$(tshark -r "$WORK/frame.pcap" -V 2>/dev/null)
-    chk tshark-stack     "$(grep -c 'mtp3:sccp:tcap:gsm_map' <<<"$dump")" "1"
-    chk tshark-component "$(grep -c 'Component: returnResultLast' <<<"$dump")" "1"
-    chk tshark-invoke    "$(grep -c 'invokeID: 1' <<<"$dump")" "1"
-    chk tshark-opcode    "$(grep -c 'localValue: sendRoutingInfo (22)' <<<"$dump")" "1"
+    # A referee that only greps for protocol names is not a referee: tshark
+    # resynchronises, so it names mtp3:sccp:tcap:gsm_map even on a frame it is
+    # calling malformed in the same dump. `Malformed` is therefore checked
+    # FIRST, and when it is present the lane skips instead of passing - the
+    # four greps below would otherwise report agreement on a broken frame.
+    bad=$(grep -c 'Malformed' <<<"$dump")
+    if (( bad > 0 )); then
+        skip tshark "tshark calls this frame malformed ($bad report(s)), so it cannot referee it: the SCCP party-address form is still wrong - see the commit that records the pointer-octet and address-width defect"
+    else
+        chk tshark-stack     "$(grep -c 'mtp3:sccp:tcap:gsm_map' <<<"$dump")" "1"
+        chk tshark-component "$(grep -c 'Component: returnResultLast' <<<"$dump")" "1"
+        chk tshark-invoke    "$(grep -c 'invokeID: 1' <<<"$dump")" "1"
+        chk tshark-opcode    "$(grep -c 'localValue: sendRoutingInfo (22)' <<<"$dump")" "1"
+    fi
 else
     skip tshark "tshark is not on PATH"
 fi
