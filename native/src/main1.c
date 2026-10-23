@@ -678,7 +678,7 @@ static const ModuleDefinition modules[] = {
        applies to 35_baseband, 42_li_probe, 44_carrier_api and 31_sim_defense:
        a name that describes half the module is a name that lies about the
        other half, and the gate is described in the page, not in the title. */
-    { "33_jamming_detect",   "Jamming Detect & Effect", "RADIO",
+    { "33_jamming_detect",   "Jamming",              "RADIO",
       "imsisting-33_jamming_detect-symbolic",
       "Detection and measurement are the authority: jamming told apart from congestion and a coverage hole. Behind an explicit lab gate it also constructs the waveform." },
 
