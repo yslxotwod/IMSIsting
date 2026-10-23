@@ -652,13 +652,13 @@ static const ModuleDefinition modules[] = {
       "GPS-tagged cell survey with CSV, KML and GeoJSON export." },
 
     /* RADIO — the air interface per RAT, plus radio-layer attacks and RF effects */
-    { "06_gsm_air",          "GSM Air Interface / Catcher", "RADIO",
+    { "06_gsm_air",          "GSM Air / Catcher", "RADIO",
       "imsisting-06_gsm_air-symbolic",
       "GSM system information, paging, cipher audit and A5/1 keystream, proved against the BGW vector. The catcher chain is not built here yet; 07_gsm_attack holds the transmit path it would stand on." },
     { "07_gsm_attack",       "GSM Attack",           "RADIO",
       "imsisting-07_gsm_attack-symbolic",
       "IMSI-catcher sequence, A5/1 downgrade, TMSI de-anonymisation and Kc recovery." },
-    { "08_umts_air",         "UMTS Air Interface / Catcher", "RADIO",
+    { "08_umts_air",         "UMTS Air / Catcher", "RADIO",
       "imsisting-08_umts_air-symbolic",
       "UMTS UARFCN, SIB decode, RRC integrity (UIA1/UIA2), the AKA relay flow, and the whole catcher chain: carrier, BCH, system information on FACH, the uplink request and preamble, identity, authentication and release." },
     { "10_lte_air",          "LTE Air Interface",    "RADIO",
@@ -10421,8 +10421,15 @@ make_module_card(AppState *state, const ModuleDefinition *mod)
     gtk_label_set_xalign(GTK_LABEL(id), 0.0f);
 
     /* Bound the labels' NATURAL width - it is what decides how many tiles a
-       row holds. */
-    gtk_label_set_width_chars(GTK_LABEL(name), 18);
+       row holds. width-chars alone is only the requested width: a longer name
+       still raised the natural width and made its own tile wider than the
+       rest ("UMTS Air Interface / Catcher" did exactly that). max-width-chars
+       is the ceiling that makes the ellipsis actually apply, and the category
+       needs the same cap because "SIM / IDENTITY" and "CORE NETWORK" are not
+       the same length either. */
+    gtk_label_set_width_chars(GTK_LABEL(name), 20);
+    gtk_label_set_max_width_chars(GTK_LABEL(name), 20);
+    gtk_label_set_max_width_chars(GTK_LABEL(cat), 14);
 
     /* Tile size lives in style.css (button.module-card) so there is one
        place to change it; the old 218x188 request fought the stylesheet
@@ -20254,8 +20261,8 @@ gtap_build_header(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry gtap_entries[] = {
-    { "The live tap", "dialog-information-symbolic", NULL, gtap_build_live },
-    { "Read a header", "utilities-terminal-symbolic", NULL, gtap_build_header },
+    { "Live tap", "dialog-information-symbolic", NULL, gtap_build_live },
+    { "Header", "utilities-terminal-symbolic", NULL, gtap_build_header },
 };
 /* --------------------------------------------------------------------------
    04_tower_map — Tower Survey.
@@ -20420,9 +20427,9 @@ tmap_build_export(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry tmap_entries[] = {
-    { "The first question", "dialog-information-symbolic", NULL, tmap_build_overview },
-    { "The position fix", "find-location-symbolic", NULL, tmap_build_gps },
-    { "Export the survey", "document-save-symbolic", NULL, tmap_build_export },
+    { "Overview", "dialog-information-symbolic", NULL, tmap_build_overview },
+    { "Position fix", "find-location-symbolic", NULL, tmap_build_gps },
+    { "Export", "document-save-symbolic", NULL, tmap_build_export },
 };
 /* --------------------------------------------------------------------------
    The field kit is a pre-flight instrument and an honesty check, so the page
@@ -20869,7 +20876,7 @@ fkit_build_guards(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry fkit_entries[] = {
-    { "The first question", "dialog-information-symbolic", NULL, fkit_build_overview },
+    { "Overview", "dialog-information-symbolic", NULL, fkit_build_overview },
     { "Emitter",  "media-record-symbolic",       NULL, fkit_build_emitter },
     { "Guards",   "security-high-symbolic",      NULL, fkit_build_guards },
 };
@@ -21018,8 +21025,8 @@ gair_build_exposure(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry gair_entries[] = {
-    { "Read a message", "dialog-information-symbolic", NULL, gair_build_decode },
-    { "What is exposed", "system-search-symbolic", NULL, gair_build_exposure },
+    { "Message", "dialog-information-symbolic", NULL, gair_build_decode },
+    { "Exposure", "system-search-symbolic", NULL, gair_build_exposure },
 };
 /* 07_gsm_attack — the 2G air interface as an attacker's surface.
  *
@@ -21350,10 +21357,10 @@ gatk_build_attacks(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry gatk_entries[] = {
-    { "Read a message", "dialog-information-symbolic", NULL, gatk_build_decode },
-    { "Build a message", "document-send-symbolic", NULL, gatk_build_messages },
-    { "The ciphers", "channel-secure-symbolic", NULL, gatk_build_ciphers },
-    { "The attack in steps", "security-high-symbolic", NULL, gatk_build_attacks },
+    { "Message", "dialog-information-symbolic", NULL, gatk_build_decode },
+    { "Build message", "document-send-symbolic", NULL, gatk_build_messages },
+    { "Ciphers", "channel-secure-symbolic", NULL, gatk_build_ciphers },
+    { "Attack steps", "security-high-symbolic", NULL, gatk_build_attacks },
 };
 /* 08_umts_air — 3G, where the cipher was broken properly and the identity was not.
  *
@@ -21738,10 +21745,10 @@ uair_build_downlink(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry uair_entries[] = {
-    { "Read a message", "dialog-information-symbolic", NULL, uair_build_decode },
-    { "Check checksum", "channel-secure-symbolic", NULL, uair_build_integrity },
-    { "Build a message", "document-send-symbolic", NULL, uair_build_messages },
-    { "Pretend to be a tower", "network-transmit-receive-symbolic", NULL, uair_build_downlink },
+    { "Message", "dialog-information-symbolic", NULL, uair_build_decode },
+    { "Checksum", "channel-secure-symbolic", NULL, uair_build_integrity },
+    { "Build message", "document-send-symbolic", NULL, uair_build_messages },
+    { "Cell impersonation", "network-transmit-receive-symbolic", NULL, uair_build_downlink },
 };
 /* 09_lte_attach — LTE Attach Forge.
  *
@@ -21878,8 +21885,8 @@ latt_build_identity(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry latt_entries[] = {
-    { "How a handset attaches", "dialog-information-symbolic", NULL, latt_build_attach },
-    { "The identity", "auth-smartcard-symbolic", NULL, latt_build_identity },
+    { "Attach flow", "dialog-information-symbolic", NULL, latt_build_attach },
+    { "Identity", "auth-smartcard-symbolic", NULL, latt_build_identity },
 };
 /* 10_lte_air — the LTE air interface and the eNB a lab runs against it.
  *
@@ -22094,8 +22101,8 @@ lair_build_cell(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry lair_entries[] = {
-    { "Read the state", "dialog-information-symbolic", NULL, lair_build_read },
-    { "Build a message", "document-send-symbolic", NULL, lair_build_messages },
+    { "State", "dialog-information-symbolic", NULL, lair_build_read },
+    { "Build message", "document-send-symbolic", NULL, lair_build_messages },
     { "Cell", "imsisting-01_radio-symbolic", NULL, lair_build_cell },
 };
 /* 11_lte_core — LTE EPC core.
@@ -22412,11 +22419,11 @@ lcore_build_audit(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry lcore_entries[] = {
-    { "Read the state", "dialog-information-symbolic", NULL, lcore_build_read },
-    { "Build the message", "document-new-symbolic", NULL, lcore_build_build },
+    { "State", "dialog-information-symbolic", NULL, lcore_build_read },
+    { "Build message", "document-new-symbolic", NULL, lcore_build_build },
     { "Encapsulation", "network-transmit-receive-symbolic", NULL,
       lcore_build_encapsulate },
-    { "What the audit checks", "system-search-symbolic", NULL, lcore_build_audit },
+    { "Audit checks", "system-search-symbolic", NULL, lcore_build_audit },
 };
 /* 12_nr_air — NR and the gNB a lab runs.
  *
@@ -22581,8 +22588,8 @@ nair_build_cell(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry nair_entries[] = {
-    { "Read the state", "dialog-information-symbolic", NULL, nair_build_read },
-    { "Send to a core", "document-send-symbolic", NULL, nair_build_send },
+    { "State", "dialog-information-symbolic", NULL, nair_build_read },
+    { "Core messaging", "document-send-symbolic", NULL, nair_build_send },
     { "Cell", "imsisting-01_radio-symbolic", NULL, nair_build_cell },
 };
 /* 13_nr_core — 5G core.
@@ -22861,10 +22868,10 @@ ncore_build_forge(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry ncore_entries[] = {
-    { "The services", "dialog-information-symbolic", NULL, ncore_build_services },
-    { "Read a message", "document-open-symbolic", NULL, ncore_build_decode },
-    { "Keys and crypto", "channel-secure-symbolic", NULL, ncore_build_crypto },
-    { "Forge the message", "network-transmit-receive-symbolic", NULL, ncore_build_forge },
+    { "Services", "dialog-information-symbolic", NULL, ncore_build_services },
+    { "Message", "document-open-symbolic", NULL, ncore_build_decode },
+    { "Keys", "channel-secure-symbolic", NULL, ncore_build_crypto },
+    { "Message forgery", "network-transmit-receive-symbolic", NULL, ncore_build_forge },
 };
 /* 14_suci — the subscription identifier a 5G core can hide.
  *
@@ -23028,9 +23035,9 @@ suci_build_audit(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry suci_entries[] = {
-    { "The identity", "dialog-information-symbolic", NULL, suci_build_identity },
-    { "The keys", "channel-secure-symbolic", NULL, suci_build_keys },
-    { "What the audit checks", "system-search-symbolic", NULL, suci_build_audit },
+    { "Identity", "dialog-information-symbolic", NULL, suci_build_identity },
+    { "Keys", "channel-secure-symbolic", NULL, suci_build_keys },
+    { "Audit checks", "system-search-symbolic", NULL, suci_build_audit },
 };
 /* 15_downgrade — pushing a handset down a generation.
  *
@@ -23180,8 +23187,8 @@ dwn_build_path(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry dwn_entries[] = {
-    { "The rejects", "dialog-information-symbolic", NULL, dwn_build_reject },
-    { "Detect a path", "system-search-symbolic", NULL, dwn_build_path },
+    { "Rejects", "dialog-information-symbolic", NULL, dwn_build_reject },
+    { "Path detection", "system-search-symbolic", NULL, dwn_build_path },
 };
 /* 16_sim — the card itself.
  *
@@ -23603,12 +23610,12 @@ sim_build_esim(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry sim_entries[] = {
-    { "The commands", "dialog-information-symbolic", NULL, sim_build_apdu },
-    { "The files", "document-open-symbolic", NULL, sim_build_files },
-    { "What is inside", "auth-smartcard-symbolic", NULL, sim_build_decode },
-    { "Over the air", "document-send-symbolic", NULL, sim_build_ota },
-    { "How a card proves itself", "security-high-symbolic", NULL, sim_build_auth },
-    { "The eSIM provisioning", "auth-smartcard-symbolic", NULL, sim_build_esim },
+    { "Commands", "dialog-information-symbolic", NULL, sim_build_apdu },
+    { "Files", "document-open-symbolic", NULL, sim_build_files },
+    { "Contents", "auth-smartcard-symbolic", NULL, sim_build_decode },
+    { "Air interface", "document-send-symbolic", NULL, sim_build_ota },
+    { "Card authentication", "security-high-symbolic", NULL, sim_build_auth },
+    { "eSIM provisioning", "auth-smartcard-symbolic", NULL, sim_build_esim },
 };
 /* 17_pcap_analysis — capture analysis.
  *
@@ -23800,10 +23807,10 @@ pcap_build_sample(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry pcap_entries[] = {
-    { "Read a capture", "dialog-information-symbolic", NULL, pcap_build_capture },
-    { "The flows", "network-transmit-receive-symbolic", NULL, pcap_build_flows },
-    { "The identities", "auth-smartcard-symbolic", NULL, pcap_build_identities },
-    { "Build a sample", "preferences-system-symbolic", NULL, pcap_build_sample },
+    { "Capture", "dialog-information-symbolic", NULL, pcap_build_capture },
+    { "Flows", "network-transmit-receive-symbolic", NULL, pcap_build_flows },
+    { "Identities", "auth-smartcard-symbolic", NULL, pcap_build_identities },
+    { "Build sample", "preferences-system-symbolic", NULL, pcap_build_sample },
 };
 /* 18_imsi_exposure — who has been asking.
  *
@@ -23996,9 +24003,9 @@ imsi_build_response(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry imsi_entries[] = {
-    { "Harvest the identities", "dialog-information-symbolic", NULL, imsi_build_harvest },
-    { "The findings", "auth-smartcard-symbolic", NULL, imsi_build_findings },
-    { "Read a response", "document-save-symbolic", NULL, imsi_build_response },
+    { "Identity harvest", "dialog-information-symbolic", NULL, imsi_build_harvest },
+    { "Findings", "auth-smartcard-symbolic", NULL, imsi_build_findings },
+    { "Response", "document-save-symbolic", NULL, imsi_build_response },
 };
 /* 19_cipher_audit — what the algorithm negotiation gave away.
  *
@@ -24199,9 +24206,9 @@ caud_build_findings(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry caud_entries[] = {
-    { "Build a message", "dialog-information-symbolic", NULL, caud_build_messages },
-    { "The sessions", "channel-secure-symbolic", NULL, caud_build_sessions },
-    { "The findings", "system-search-symbolic", NULL, caud_build_findings },
+    { "Build message", "dialog-information-symbolic", NULL, caud_build_messages },
+    { "Sessions", "channel-secure-symbolic", NULL, caud_build_sessions },
+    { "Findings", "system-search-symbolic", NULL, caud_build_findings },
 };
 /* ── The CVE catalogue ───────────────────────────────────────────────────────
 
@@ -24961,7 +24968,7 @@ CVE_CLASS_VIEW(gcve_view_ss7_map,   "ss7-map",      "FLAWS IN SS7 AND MAP",
     "Vectors on the signalling network behind the radio.")
 
 static ModuleSubmenuEntry gcve_entries[] = {
-    { "The first question", "dialog-information-symbolic", NULL, gcve_view_overview },
+    { "Overview", "dialog-information-symbolic", NULL, gcve_view_overview },
     { "Baseband", "imsisting-35_baseband-symbolic", NULL, gcve_view_baseband },
     { "Femtocell", "imsisting-37_femtocell-symbolic", NULL, gcve_view_femtocell },
     { "FLAWS IN GPRS", "imsisting-50_gprs-symbolic", NULL, gcve_view_gprs },
@@ -25254,12 +25261,12 @@ CVE_CLASS_VIEW(lcve_view_volte, "volte", "FLAWS IN VOICE OVER LTE",
     "Vectors in the IMS stack that carries voice over LTE.")
 
 static ModuleSubmenuEntry lcve_entries[] = {
-    { "The first question", "dialog-information-symbolic", "~--corpus-stats", lcve_view_overview },
+    { "Overview", "dialog-information-symbolic", "~--corpus-stats", lcve_view_overview },
     { "FLAWS IN ASN.1 PARSING", "imsisting-32_nas_signaling-symbolic", NULL, lcve_view_asn1 },
     { "FLAWS IN NAS", "imsisting-32_nas_signaling-symbolic", NULL, lcve_view_nas },
     { "LTE Baseband", "imsisting-35_baseband-symbolic", NULL, lcve_view_baseband },
     { "Diameter", "imsisting-11_lte_core-symbolic", NULL, lcve_view_diameter },
-    { "The packet core", "network-server-symbolic", NULL, lcve_view_epc },
+    { "Packet core", "network-server-symbolic", NULL, lcve_view_epc },
     { "FLAWS IN GTP", "imsisting-23_traffic_analysis-symbolic", NULL, lcve_view_gtp },
     { "LTE Modem", "imsisting-54_baseband_exploit-symbolic", NULL, lcve_view_lte_baseband },
     { "Page a handset", "imsisting-28_paging_track-symbolic", NULL, lcve_view_paging },
@@ -25298,15 +25305,15 @@ CVE_CLASS_VIEW(ncve_view_upf_pfcp, "upf-pfcp", "FLAWS IN THE USER PLANE",
     "Vectors in the session management that programs the user plane function.")
 
 static ModuleSubmenuEntry ncve_entries[] = {
-    { "The first question", "dialog-information-symbolic", NULL, ncve_view_overview },
+    { "Overview", "dialog-information-symbolic", NULL, ncve_view_overview },
     { "FLAWS IN ASN.1 PARSING", "imsisting-32_nas_signaling-symbolic", NULL, ncve_view_asn1 },
     { "FLAWS IN NAS", "imsisting-32_nas_signaling-symbolic", NULL, ncve_view_nas },
     { "FLAWS IN N2 AND N4", "imsisting-13_nr_core-symbolic", NULL, ncve_view_n2_n4 },
     { "NR Baseband", "imsisting-55_nr_inject-symbolic", NULL, ncve_view_nr_baseband },
     { "FLAWS IN NR RRC", "imsisting-12_nr_air-symbolic", NULL, ncve_view_nr_rrc },
     { "FLAWS IN THE NRF", "imsisting-40_sba_pivot-symbolic", NULL, ncve_view_nrf },
-    { "The service API", "network-workgroup-symbolic", NULL, ncve_view_sba_http2 },
-    { "The SEPP", "network-wired-symbolic", NULL, ncve_view_sepp },
+    { "Service API", "network-workgroup-symbolic", NULL, ncve_view_sba_http2 },
+    { "SEPP", "network-wired-symbolic", NULL, ncve_view_sepp },
     { "Slicing", "imsisting-34_slicing-symbolic", NULL, ncve_view_slicing },
     { "SUCI Privacy", "imsisting-14_suci-symbolic", NULL, ncve_view_suci_privacy },
     { "FLAWS IN THE USER PLANE", "imsisting-23_traffic_analysis-symbolic", NULL, ncve_view_upf_pfcp },
@@ -25486,9 +25493,9 @@ kchn_build_control(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry kchn_entries[] = {
-    { "The chains", "dialog-information-symbolic", NULL, kchn_build_chains },
-    { "How the run executes", "media-playback-start-symbolic", NULL, kchn_build_execution },
-    { "The control plane", "media-playback-pause-symbolic", NULL, kchn_build_control },
+    { "Killchains", "dialog-information-symbolic", NULL, kchn_build_chains },
+    { "Run execution", "media-playback-start-symbolic", NULL, kchn_build_execution },
+    { "Control plane", "media-playback-pause-symbolic", NULL, kchn_build_control },
 };
 /* 23_traffic_analysis — what a capture says about the people in it.
  *
@@ -25618,8 +25625,8 @@ tana_build_store(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry tana_entries[] = {
-    { "The flows", "dialog-information-symbolic", NULL, tana_build_flows },
-    { "The store", "preferences-system-symbolic", NULL, tana_build_store },
+    { "Flows", "dialog-information-symbolic", NULL, tana_build_flows },
+    { "Store", "preferences-system-symbolic", NULL, tana_build_store },
 };
 /* 24_rf_fingerprint — the transmitter, not the message.
  *
@@ -25782,10 +25789,10 @@ rff_build_csi(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry rff_entries[] = {
-    { "The measurement", "dialog-information-symbolic", NULL, rff_build_measure },
+    { "Measurement", "dialog-information-symbolic", NULL, rff_build_measure },
     { "Signatures", "imsisting-24_rf_fingerprint-symbolic", NULL,
       rff_build_signatures },
-    { "Channel state reports", "network-wireless-symbolic", NULL, rff_build_csi },
+    { "Channel state", "network-wireless-symbolic", NULL, rff_build_csi },
 };
 /* 29_mac_layer — what the scheduler gives away without a key.
  *
@@ -25949,9 +25956,9 @@ macl_build_reference(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry macl_entries[] = {
-    { "The MAC PDU", "dialog-information-symbolic", NULL, macl_build_pdu },
-    { "How slots are scheduled", "system-search-symbolic", NULL, macl_build_schedule },
-    { "The reference values", "preferences-system-symbolic", NULL, macl_build_reference },
+    { "MAC PDU", "dialog-information-symbolic", NULL, macl_build_pdu },
+    { "Slot scheduling", "system-search-symbolic", NULL, macl_build_schedule },
+    { "Reference values", "preferences-system-symbolic", NULL, macl_build_reference },
 };
 /* 32_nas_signaling — the pre-authentication NAS surface.
  *
@@ -26155,10 +26162,10 @@ nasf_build_plan(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry nasf_entries[] = {
-    { "Read the state", "dialog-information-symbolic", NULL, nasf_build_read },
-    { "The model", "system-search-symbolic", NULL, nasf_build_model },
-    { "Build a message", "document-send-symbolic", NULL, nasf_build_messages },
-    { "The plan", "preferences-system-symbolic", NULL, nasf_build_plan },
+    { "State", "dialog-information-symbolic", NULL, nasf_build_read },
+    { "Model", "system-search-symbolic", NULL, nasf_build_model },
+    { "Build message", "document-send-symbolic", NULL, nasf_build_messages },
+    { "Plan", "preferences-system-symbolic", NULL, nasf_build_plan },
 };
 /* 26_ss7_map — the signalling network a carrier's peers can query.
  *
@@ -26487,10 +26494,10 @@ ss7_build_sgsap(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry ss7_entries[] = {
-    { "The queries", "dialog-information-symbolic", NULL, ss7_build_queries },
-    { "Read a message", "utilities-terminal-symbolic", NULL, ss7_build_decode },
-    { "What the data says", "system-search-symbolic", NULL, ss7_build_analysis },
-    { "The SGsAP messages", "network-transmit-receive-symbolic", NULL, ss7_build_sgsap },
+    { "Queries", "dialog-information-symbolic", NULL, ss7_build_queries },
+    { "Message", "utilities-terminal-symbolic", NULL, ss7_build_decode },
+    { "Data", "system-search-symbolic", NULL, ss7_build_analysis },
+    { "SGsAP", "network-transmit-receive-symbolic", NULL, ss7_build_sgsap },
 };
 /* 27_cellular_dns — the DNS a cellular bearer carries.
  *
@@ -26655,9 +26662,9 @@ cdns_build_options(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry cdns_entries[] = {
-    { "Build a message", "dialog-information-symbolic", NULL, cdns_build_messages },
-    { "What was detected", "system-search-symbolic", NULL, cdns_build_detect },
-    { "What a bearer can carry", "preferences-system-symbolic", NULL, cdns_build_options },
+    { "Build message", "dialog-information-symbolic", NULL, cdns_build_messages },
+    { "Detections", "system-search-symbolic", NULL, cdns_build_detect },
+    { "Bearer capacity", "preferences-system-symbolic", NULL, cdns_build_options },
 };
 /* 28_paging_track — paging is the one broadcast that says a subscriber is wanted.
  *
@@ -26861,9 +26868,9 @@ pgt_build_torpedo(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry pgt_entries[] = {
-    { "Page a handset", "dialog-information-symbolic", NULL, pgt_build_paging },
-    { "Track a handset", "system-search-symbolic", NULL, pgt_build_tracking },
-    { "Page a handset off the network", "security-high-symbolic", NULL, pgt_build_torpedo },
+    { "Paging", "dialog-information-symbolic", NULL, pgt_build_paging },
+    { "Tracking", "system-search-symbolic", NULL, pgt_build_tracking },
+    { "Silent paging", "security-high-symbolic", NULL, pgt_build_torpedo },
 };
 /* 30_volte_ims — the IMS core a carrier puts voice behind.
  *
@@ -27066,9 +27073,9 @@ vims_build_calls(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry vims_entries[] = {
-    { "The SIP messages", "dialog-information-symbolic", NULL, vims_build_sip },
-    { "How registration works", "channel-secure-symbolic", NULL, vims_build_registration },
-    { "Calls being handled", "media-playback-start-symbolic", NULL, vims_build_calls },
+    { "SIP", "dialog-information-symbolic", NULL, vims_build_sip },
+    { "Registration", "channel-secure-symbolic", NULL, vims_build_registration },
+    { "Calls", "media-playback-start-symbolic", NULL, vims_build_calls },
 };
 /* 31_sim_defense — Port-out Risk.
  *
@@ -27266,9 +27273,9 @@ simd_build_attack(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry simd_entries[] = {
-    { "The first question", "dialog-information-symbolic", NULL, simd_build_detection },
-    { "Inspect the card", "auth-smartcard-symbolic", NULL, simd_build_card },
-    { "Simulate the attack", "security-high-symbolic", NULL, simd_build_attack },
+    { "Overview", "dialog-information-symbolic", NULL, simd_build_detection },
+    { "Card inspection", "auth-smartcard-symbolic", NULL, simd_build_card },
+    { "Attack simulation", "security-high-symbolic", NULL, simd_build_attack },
 };
 static void
 mod_arg_clicked(GtkButton *button, gpointer user_data)
@@ -28554,14 +28561,14 @@ jamd_build_gate(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry jamd_entries[] = {
-    { "The first question", "dialog-information-symbolic", NULL, jamd_build_overview },
+    { "Overview", "dialog-information-symbolic", NULL, jamd_build_overview },
     { "Read a capture", "imsisting-01_radio-symbolic", NULL, jamd_build_capture },
     { "Profile", "imsisting-24_rf_fingerprint-symbolic", NULL, jamd_build_profile },
     { "Discriminate", "imsisting-23_traffic_analysis-symbolic", NULL, jamd_build_discriminate },
-    { "The report", "document-save-symbolic", NULL, jamd_build_report },
-    { "Build a waveform", "document-new-symbolic", NULL, jamd_build_waveform },
-    { "The signal shapes", "network-wireless-symbolic", NULL, jamd_build_shapes },
-    { "The gate", "security-high-symbolic", NULL, jamd_build_gate },
+    { "Report", "document-save-symbolic", NULL, jamd_build_report },
+    { "Build waveform", "document-new-symbolic", NULL, jamd_build_waveform },
+    { "Signal shapes", "network-wireless-symbolic", NULL, jamd_build_shapes },
+    { "Gate", "security-high-symbolic", NULL, jamd_build_gate },
 };
 
 /* 34_slicing — network slicing.
@@ -28785,9 +28792,9 @@ slic_build_boundary(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry slic_entries[] = {
-    { "Which slice", "dialog-information-symbolic", NULL, slic_build_identity },
-    { "Quality of service", "preferences-system-symbolic", NULL, slic_build_qos },
-    { "Where the boundary is", "network-transmit-receive-symbolic", NULL, slic_build_boundary },
+    { "Slice", "dialog-information-symbolic", NULL, slic_build_identity },
+    { "QoS", "preferences-system-symbolic", NULL, slic_build_qos },
+    { "Boundary", "network-transmit-receive-symbolic", NULL, slic_build_boundary },
 };
 /* 35_baseband — Baseband Fuzzing.
  *
@@ -29045,9 +29052,9 @@ bbnd_build_air(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry bbnd_entries[] = {
-    { "Mutate the message", "security-high-symbolic", NULL, bbnd_build_fuzz },
-    { "How it is encoded", "document-open-symbolic", NULL, bbnd_build_encoding },
-    { "The modem path", "network-transmit-receive-symbolic", NULL, bbnd_build_modem },
+    { "Mutation", "security-high-symbolic", NULL, bbnd_build_fuzz },
+    { "Encoding", "document-open-symbolic", NULL, bbnd_build_encoding },
+    { "Modem path", "network-transmit-receive-symbolic", NULL, bbnd_build_modem },
     { "Over the Air", "imsisting-01_radio-symbolic", NULL, bbnd_build_air },
 };
 /* 36_vowifi — voice over Wi-Fi, which is IKEv2 into an ePDG.
@@ -29247,9 +29254,9 @@ vowi_build_gateway(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry vowi_entries[] = {
-    { "The IKEv2 exchange", "dialog-information-symbolic", NULL, vowi_build_ike },
-    { "The EAP-AKA' exchange", "channel-secure-symbolic", NULL, vowi_build_eap },
-    { "The gateway", "network-wireless-symbolic", NULL, vowi_build_gateway },
+    { "IKEv2", "dialog-information-symbolic", NULL, vowi_build_ike },
+    { "EAP-AKA'", "channel-secure-symbolic", NULL, vowi_build_eap },
+    { "Gateway", "network-wireless-symbolic", NULL, vowi_build_gateway },
 };
 /* --------------------------------------------------------------------------
    The small-cell page, laid out the way the LTE CVE Kit page is: a named view
@@ -29907,13 +29914,13 @@ scell_build_live(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry femt_entries[] = {
-    { "The first question", "dialog-information-symbolic", NULL, scell_build_overview },
-    { "The closed cell", "system-search-symbolic", NULL, scell_build_detect },
-    { "Commission the cell", "document-new-symbolic", NULL, scell_build_commission },
-    { "The management plane", "preferences-system-symbolic", NULL, scell_build_management },
-    { "Closed cells and cell IDs", "network-server-symbolic", NULL, scell_build_identity },
-    { "The backhaul link", "network-wired-symbolic", NULL, scell_build_backhaul },
-    { "Subscribers seen live", "view-list-symbolic", NULL, scell_build_live },
+    { "Overview", "dialog-information-symbolic", NULL, scell_build_overview },
+    { "Closed cell", "system-search-symbolic", NULL, scell_build_detect },
+    { "Commissioning", "document-new-symbolic", NULL, scell_build_commission },
+    { "Management plane", "preferences-system-symbolic", NULL, scell_build_management },
+    { "Closed cells", "network-server-symbolic", NULL, scell_build_identity },
+    { "Backhaul", "network-wired-symbolic", NULL, scell_build_backhaul },
+    { "Live subscribers", "view-list-symbolic", NULL, scell_build_live },
 };
 /* 38_ussd — the 90-character channel into the network.
  *
@@ -30033,7 +30040,7 @@ ussd_build_attacks(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry ussd_entries[] = {
-    { "The strings", "dialog-information-symbolic", NULL, ussd_build_strings },
+    { "Strings", "dialog-information-symbolic", NULL, ussd_build_strings },
     { "Unsolicited messages", "security-high-symbolic", NULL, ussd_build_attacks },
 };
 /* 39_ta_geoloc — a timing advance is a distance.
@@ -30128,7 +30135,7 @@ tgeo_build_place(AppState *state, const char *module_id,
 
 static ModuleSubmenuEntry tgeo_entries[] = {
     { "Timing advance", "dialog-information-symbolic", NULL, tgeo_build_ta },
-    { "The position", "system-search-symbolic", NULL, tgeo_build_place },
+    { "Position", "system-search-symbolic", NULL, tgeo_build_place },
 };
 /* 40_sba_pivot — the service-based interface of a 5G core.
  *
@@ -30340,9 +30347,9 @@ sbap_build_core(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry sbap_entries[] = {
-    { "The wire bytes", "dialog-information-symbolic", NULL, sbap_build_wire },
-    { "The tokens", "channel-secure-symbolic", NULL, sbap_build_tokens },
-    { "The core network", "network-wireless-symbolic", NULL, sbap_build_core },
+    { "Wire bytes", "dialog-information-symbolic", NULL, sbap_build_wire },
+    { "Tokens", "channel-secure-symbolic", NULL, sbap_build_tokens },
+    { "Core network", "network-wireless-symbolic", NULL, sbap_build_core },
 };
 /* 41_ota_sms — the binary SMS that reaches a card.
  *
@@ -30648,10 +30655,10 @@ otasm_build_smpp(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry otasm_entries[] = {
-    { "The TPDU", "dialog-information-symbolic", NULL, otasm_build_tpdu },
-    { "The over-the-air packet", "document-send-symbolic", NULL, otasm_build_packet },
-    { "The SMPP messages", "network-transmit-receive-symbolic", NULL, otasm_build_smpp },
-    { "The pokes", "security-high-symbolic", NULL, otasm_build_push },
+    { "TPDU", "dialog-information-symbolic", NULL, otasm_build_tpdu },
+    { "Over-the-air packet", "document-send-symbolic", NULL, otasm_build_packet },
+    { "SMPP", "network-transmit-receive-symbolic", NULL, otasm_build_smpp },
+    { "Pokes", "security-high-symbolic", NULL, otasm_build_push },
 };
 /* 42_li_probe — LI Interception.
  *
@@ -30838,9 +30845,9 @@ lipr_build_encode(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry lipr_entries[] = {
-    { "The interfaces", "dialog-information-symbolic", NULL, lipr_build_interfaces },
-    { "The posture", "system-search-symbolic", NULL, lipr_build_posture },
-    { "Build the message", "document-save-symbolic", NULL, lipr_build_encode },
+    { "Interfaces", "dialog-information-symbolic", NULL, lipr_build_interfaces },
+    { "Posture", "system-search-symbolic", NULL, lipr_build_posture },
+    { "Build message", "document-save-symbolic", NULL, lipr_build_encode },
 };
 /* 43_ran_share — an operator's shared network.
  *
@@ -30946,8 +30953,8 @@ rans_build_leak(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry rans_entries[] = {
-    { "Which operator", "dialog-information-symbolic", NULL, rans_build_plmn },
-    { "What leaks", "system-search-symbolic", NULL, rans_build_leak },
+    { "Operator", "dialog-information-symbolic", NULL, rans_build_plmn },
+    { "Leakage", "system-search-symbolic", NULL, rans_build_leak },
 };
 /* 44_carrier_api — Carrier API Abuse.
  *
@@ -31162,10 +31169,10 @@ capi_build_enumeration(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry capi_entries[] = {
-    { "What is exposed", "document-open-symbolic", NULL, capi_build_surface },
-    { "The controls", "security-high-symbolic", NULL, capi_build_attacks },
-    { "Compare two runs", "system-search-symbolic", NULL, capi_build_compare },
-    { "What is exposed", "network-transmit-receive-symbolic", NULL, capi_build_enumeration },
+    { "Exposure", "document-open-symbolic", NULL, capi_build_surface },
+    { "Controls", "security-high-symbolic", NULL, capi_build_attacks },
+    { "Run comparison", "system-search-symbolic", NULL, capi_build_compare },
+    { "Enumeration", "network-transmit-receive-symbolic", NULL, capi_build_enumeration },
 };
 /* 45_iot — NB-IoT / Cat-M1.
  *
@@ -31318,9 +31325,9 @@ iot_build_limits(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry iot_entries[] = {
-    { "Read a message", "dialog-information-symbolic", NULL, iot_build_decode },
-    { "The sequences", "network-wireless-symbolic", NULL, iot_build_sequences },
-    { "The limits", "security-low-symbolic", NULL, iot_build_limits },
+    { "Message", "dialog-information-symbolic", NULL, iot_build_decode },
+    { "Sequences", "network-wireless-symbolic", NULL, iot_build_sequences },
+    { "Limits", "security-low-symbolic", NULL, iot_build_limits },
 };
 /* 46_lpp — the positioning protocol.
  *
@@ -31532,9 +31539,9 @@ lpp_build_supl(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry lpp_entries[] = {
-    { "Build a message", "dialog-information-symbolic", NULL, lpp_build_messages },
-    { "The procedures", "system-search-symbolic", NULL, lpp_build_procedures },
-    { "Positioning messages", "network-transmit-receive-symbolic", NULL, lpp_build_supl },
+    { "Build message", "dialog-information-symbolic", NULL, lpp_build_messages },
+    { "Procedures", "system-search-symbolic", NULL, lpp_build_procedures },
+    { "Positioning", "network-transmit-receive-symbolic", NULL, lpp_build_supl },
 };
 /* 47_wifioff — VoWiFi / ePDG Attacks.
  *
@@ -31661,8 +31668,8 @@ wifioff_build_certs(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry wifioff_entries[] = {
-    { "The exchange", "dialog-information-symbolic", NULL, wifioff_build_exchange },
-    { "The certificates", "channel-secure-symbolic", NULL, wifioff_build_certs },
+    { "Exchange", "dialog-information-symbolic", NULL, wifioff_build_exchange },
+    { "Certificates", "channel-secure-symbolic", NULL, wifioff_build_certs },
 };
 /* 48_oran — the RAN Intelligent Controller.
  *
@@ -31832,9 +31839,9 @@ oran_build_assess(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry oran_entries[] = {
-    { "The interfaces", "dialog-information-symbolic", NULL, oran_build_interfaces },
-    { "The control plane", "security-high-symbolic", NULL, oran_build_control },
-    { "What to check first", "preferences-system-symbolic", NULL, oran_build_assess },
+    { "Interfaces", "dialog-information-symbolic", NULL, oran_build_interfaces },
+    { "Control plane", "security-high-symbolic", NULL, oran_build_control },
+    { "Priorities", "preferences-system-symbolic", NULL, oran_build_assess },
 };
 /* 49_ntn — 5G NTN / Satellite.
  *
@@ -31997,9 +32004,9 @@ ntn_build_plan(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry ntn_entries[] = {
-    { "The geometry", "dialog-information-symbolic", NULL, ntn_build_geometry },
+    { "Geometry", "dialog-information-symbolic", NULL, ntn_build_geometry },
     { "Timing control", "network-wireless-symbolic", NULL, ntn_build_link },
-    { "The handoff", "preferences-system-symbolic", NULL, ntn_build_plan },
+    { "Handoff", "preferences-system-symbolic", NULL, ntn_build_plan },
 };
 /* 50_gprs — GPRS / EDGE.
  *
@@ -32183,9 +32190,9 @@ gprs_build_pdp(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry gprs_entries[] = {
-    { "How traffic is ciphered", "dialog-information-symbolic", NULL, gprs_build_ciphering },
-    { "Which data network", "network-server-symbolic", NULL, gprs_build_apn },
-    { "The PDP context", "preferences-system-symbolic", NULL, gprs_build_pdp },
+    { "Ciphering", "dialog-information-symbolic", NULL, gprs_build_ciphering },
+    { "Data network", "network-server-symbolic", NULL, gprs_build_apn },
+    { "PDP context", "preferences-system-symbolic", NULL, gprs_build_pdp },
 };
 /* 51_sidelink — PC5 sidelink.
  *
@@ -32358,8 +32365,8 @@ slnk_build_relay(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry slnk_entries[] = {
-    { "The resource grid", "dialog-information-symbolic", NULL, slnk_build_grid },
-    { "The identifiers", "network-wireless-symbolic", NULL, slnk_build_ids },
+    { "Resource grid", "dialog-information-symbolic", NULL, slnk_build_grid },
+    { "Identifiers", "network-wireless-symbolic", NULL, slnk_build_ids },
     { "Relay and handoff", "preferences-system-symbolic", NULL, slnk_build_relay },
 };
 /* 52_stk — the SIM Application Toolkit.
@@ -32524,9 +32531,9 @@ stk_build_plan(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry stk_entries[] = {
-    { "The commands", "dialog-information-symbolic", NULL, stk_build_commands },
-    { "The card's own messages", "security-high-symbolic", NULL, stk_build_sat },
-    { "The handoff", "document-send-symbolic", NULL, stk_build_plan },
+    { "Commands", "dialog-information-symbolic", NULL, stk_build_commands },
+    { "Card messages", "security-high-symbolic", NULL, stk_build_sat },
+    { "Handoff", "document-send-symbolic", NULL, stk_build_plan },
 };
 /* 53_non3gpp — TETRA / DMR / GSM-R.
  *
@@ -32692,9 +32699,9 @@ n3g_build_reference(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry n3g_entries[] = {
-    { "Identify the card", "dialog-information-symbolic", NULL, n3g_build_identify },
-    { "The frames", "network-wireless-symbolic", NULL, n3g_build_frames },
-    { "The reference values", "preferences-system-symbolic", NULL, n3g_build_reference },
+    { "Card identity", "dialog-information-symbolic", NULL, n3g_build_identify },
+    { "Frames", "network-wireless-symbolic", NULL, n3g_build_frames },
+    { "Reference values", "preferences-system-symbolic", NULL, n3g_build_reference },
 };
 /* 54_baseband_exploit — the CVEs a baseband answers to.
  *
@@ -32910,9 +32917,9 @@ bexp_build_stage(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry bexp_entries[] = {
-    { "The message catalogue", "dialog-information-symbolic", NULL, bexp_build_catalogue },
-    { "Build the message", "document-send-symbolic", NULL, bexp_build_build },
-    { "The staging plan", "security-high-symbolic", NULL, bexp_build_stage },
+    { "Message catalogue", "dialog-information-symbolic", NULL, bexp_build_catalogue },
+    { "Build message", "document-send-symbolic", NULL, bexp_build_build },
+    { "Staging plan", "security-high-symbolic", NULL, bexp_build_stage },
 };
 /* 55_nr_inject — the NR access procedure, read and built.
  *
@@ -33174,8 +33181,8 @@ nrj_build_attack(AppState *state, const char *module_id,
 static ModuleSubmenuEntry nrj_entries[] = {
     { "Random access", "dialog-information-symbolic", NULL, nrj_build_access },
     { "MAC and DCI", "utilities-terminal-symbolic", NULL, nrj_build_mac },
-    { "The link layer", "network-wireless-symbolic", NULL, nrj_build_link },
-    { "The exploits", "security-high-symbolic", NULL, nrj_build_attack },
+    { "Link layer", "network-wireless-symbolic", NULL, nrj_build_link },
+    { "Exploits", "security-high-symbolic", NULL, nrj_build_attack },
 };
 
 /* 56_baseband_diag — the device's own diagnostic port.
@@ -33529,11 +33536,11 @@ bbdg_build_at(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry bbdg_entries[] = {
-    { "How frames are framed", "utilities-terminal-symbolic", NULL, bbdg_build_framing },
-    { "The modem's NV items", "drive-harddisk-symbolic", NULL, bbdg_build_nv },
-    { "The identity", "avatar-default-symbolic", NULL, bbdg_build_identity },
-    { "The modem's file system", "folder-symbolic", NULL, bbdg_build_efs },
-    { "Raw modem commands", "network-wireless-symbolic", NULL, bbdg_build_at },
+    { "Frame structure", "utilities-terminal-symbolic", NULL, bbdg_build_framing },
+    { "NV items", "drive-harddisk-symbolic", NULL, bbdg_build_nv },
+    { "Identity", "avatar-default-symbolic", NULL, bbdg_build_identity },
+    { "EFS", "folder-symbolic", NULL, bbdg_build_efs },
+    { "Modem commands", "network-wireless-symbolic", NULL, bbdg_build_at },
 };
 
 static void
