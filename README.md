@@ -237,6 +237,9 @@ on the machine this was built on — that machine has no SDR attached at all. Wh
 follows is what each module's own code asks for, in its own words, together with
 what the parts actually cost.
 
+<img width="1335" height="621" alt="image" src="https://github.com/user-attachments/assets/c1de707d-57dd-4a50-9f33-b286c5608cc9" />
+
+
 ### What is on this machine right now
 
 `05_field_kit --guard-check` and `01_radio` probe for these, and the answers are
@@ -387,7 +390,7 @@ that is installed from a stack that is actually complete.
 The GUI opens on a **Dashboard** — every module as a card, grouped by category.
 Click a card and the module opens as its own tab. Six tabs are permanent:
 
-<img width="1196" height="641" alt="image" src="https://github.com/user-attachments/assets/c0f5c011-8660-4d35-b31a-5a7d56958126" />
+<img width="335" height="634" alt="image" src="https://github.com/user-attachments/assets/41d9556a-d047-4e7f-aa41-a642c19e3d16" />
 
 
 | Tab | What it is |
