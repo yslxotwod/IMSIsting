@@ -30,3 +30,6 @@ gui.stderr
 
 # Kate leaves its swap beside the file, named *.kate-swp
 *.kate-swp
+
+# Local working state for the skills deck, not source.
+/.dsh-mattskillsdeck-cache/
