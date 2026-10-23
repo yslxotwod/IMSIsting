@@ -6535,6 +6535,9 @@ static const ChipRow chip_rows[] = {
     { "41_ota_sms",          "--quiet",               NEED_NO, DOES_READS },
     { "41_ota_sms",          "--rd",                  NEED_SIM, DOES_READS },
     { "41_ota_sms",          "--sat-push",            NEED_SIM, DOES_MODIFIES },
+    { "41_ota_sms",          "--sat-concat",          NEED_NO,  DOES_BUILDS },
+    { "41_ota_sms",          "--sat-varref",          NEED_NO,  DOES_BUILDS },
+    { "41_ota_sms",          "--sat-subst",           NEED_NO,  DOES_BUILDS },
     { "41_ota_sms",          "--selftest",            NEED_NO, DOES_READS },
     { "41_ota_sms",          "--seq",                 NEED_SIM, DOES_READS },
     { "41_ota_sms",          "--service-type",        NEED_SIM, DOES_READS },
@@ -30568,6 +30571,30 @@ otasm_build_push(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(sat_body), res);
     }
     gtk_box_append(GTK_BOX(body), sat);
+
+    {
+        GtkWidget *bind_body, *res;
+        GtkWidget *bind = verb_card("BIND A RESULT INTO THE MESSAGE", &bind_body);
+        res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(bind_body),
+            mod_arg_row_prefilled(state, module_id, status, "Concatenate",
+                "--sat-concat", "03 01 02",
+                "S@T 01.00 6.2.4: a destination variable, then the values to join. "
+                "This is how two terminal responses become one outgoing body."));
+        gtk_box_append(GTK_BOX(bind_body),
+            mod_arg_row_prefilled(state, module_id, status, "Reference a Variable",
+                "--sat-varref", "01",
+                "S@T 01.00 5.5.1: the encapsulated variable reference, used "
+                "wherever a value is allowed."));
+        gtk_box_append(GTK_BOX(bind_body), res);
+        gtk_box_append(GTK_BOX(bind_body),
+            mod_arg_row_prefilled(state, module_id, status, "Substitute a Variable",
+                "--sat-subst", "0B 03",
+                "S@T 01.00 5.4.8: a length of 0xFF means the value is not in the "
+                "message, it is in that variable. A tag and a variable id."));
+        gtk_box_append(GTK_BOX(body), bind);
+    }
 
     {
         GtkWidget *res = result_rect_new(state, NULL);

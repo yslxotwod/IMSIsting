@@ -120,7 +120,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 | `16_sim` | SIM AKA (COMP128 1/2/3, Milenage, TUAK), USIM files, EF_AD, OTA parsing, eSIM profiles, ES9+ |
 | `18_imsi_exposure` | IMSI harvest and TMSI/IMSI correlation over a capture |
 | `31_sim_defense` | SIM swap: risk scoring, the six detection signals, plus gated APDU and port-out artefacts |
-| `41_ota_sms` | OTA binary SMS: TPDU packing, S@T push, WIB refused by name |
+| `41_ota_sms` | OTA binary SMS: TPDU packing, S@T push with its CONCATENATE / variable-reference / substitution byte code, WIB refused by name |
 | `52_stk` | TS 31.111 proactive commands: build, parse, audit for silent off-device actions |
 
 ### Baseband and device
@@ -537,9 +537,13 @@ Two holes are worth naming precisely, because their size is easy to overstate:
   (`tools/umts_sib.py pack --timeline`), spreads that frame on an S-CCPCH
   (`tools/umts_sccpch.py`), derives the MIB from the SIB set it is about to
   transmit and splits it into the 24-bit BCH blocks a cell puts out over its
-  80 ms period (`--transmit --sibs` with no `--bch-hex`), and builds the
+  80 ms period (`--transmit --sibs` with no `--bch-hex`), builds the
   messages a catcher sends *upward*
-  (`--catcher-identity` MM IDENTITY REQUEST, `--catcher-auth` replay, uplink RACH).
+  (`--catcher-identity` MM IDENTITY REQUEST, `--catcher-auth` replay), and builds
+  the handset's side of the random access as chips: the PRACH preamble, the RACH
+  message part spread with the signature's channelisation codes, weighted by the
+  signalled gain factors and scrambled by `S_r-msg,n` (`--uplink message-part`),
+  and the two joined into one transmission (`--uplink burst`).
   What it still does not do is run the loop: nothing here receives UMTS uplink
   and answers it in one process, and a handset that already holds an AKA context
   will not answer an unauthenticated network. `--catcher-model` names all eight
@@ -569,7 +573,7 @@ it, or both.
 | module | what it does | what stops it |
 |---|---|---|
 | `07_gsm_attack` | full GSM catcher sequence, forged BCCH carrier, A5/1 downgrade forcing | C1 must beat the real cell, the forged command must land in the right LAPDm window, and whether a handset accepts a clone depends on the handset and the location area |
-| `08_umts_air` | RRC forgery (setup/reject/paging), BCH through the whole TS 25.212 chain with the MIB split into the blocks an 80 ms period holds, WCDMA carrier with CPICH and both sync channels, SIB1/SIB3/SIB5 through the FACH chain onto an S-CCPCH in the frames the MIB schedules, MM identity request, uplink RACH | no duplex loop: nothing here receives UMTS uplink and answers it in one process |
+| `08_umts_air` | RRC forgery (setup/reject/paging), BCH through the whole TS 25.212 chain with the MIB split into the blocks an 80 ms period holds, WCDMA carrier with CPICH and both sync channels, SIB1/SIB3/SIB5 through the FACH chain onto an S-CCPCH in the frames the MIB schedules, MM identity request, uplink RACH as chips (preamble, spread/scrambled message part, and the burst that joins them) | no duplex loop: nothing here receives UMTS uplink and answers it in one process |
 | `33_jamming_detect` | ten waveform shapes including PSS/SSS/PBCH, PRACH, PRS and GPS C/A | `pucch` and `lte-ssb` are refused: this tree carries no PUCCH sequence generator, and LTE SSB is covered by pss+sss+pbch |
 | `45_iot` | NB-IoT RRC decoders through a generated codec | NPRACH and NPRFCN are refused — the parameters were not verifiable against the standard text, so they are named, not guessed |
 | `35_baseband` | mutation, corpus generation, crash triage, DIAG framing | no modulator: a payload is a handoff to srsRAN or OpenAirInterface |
@@ -604,7 +608,7 @@ the location and state halves are unverified by this tree.
 |---|---|
 | `50_gprs` | GEA1–GEA5: no public algorithm text or reference vectors. GEA0 is computed (it is the identity) |
 | `16_sim` | the profile-element chain carried inside the `86` segments (SCP03t protects the block, it does not parse it), `HandleNotification` (the standard defines no response body), AUTS resynchronisation, and a live session — `--es8-scp03t` builds the 84/85/86 TLVs from a supplied key set and both challenges, but a card cryptogram can only be confirmed by an eUICC |
-| `41_ota_sms` | WIB push: only the leaf command bytes are missing, so it is refused rather than half-built |
+| `41_ota_sms` | WIB push (the leaf command bytes have no citable public encoding) and a deck that binds a terminal response into a variable: S@T's CONCATENATE, variable-reference and substitution encodings are built, but PROVIDE LOCAL INFORMATION returns its datum in the terminal response rather than into a variable, so `--sat-push` emits the fixed-body form and the variable-bound body is assembled from `--sat-concat` / `--sat-varref` / `--sat-subst` by hand |
 | `49_ntn` | feeder link — SIB19 carries no gateway geometry, so the gateway-satellite distance is not derivable from anything the cell broadcasts |
 | `46_lpp` | UTDOA is LPPa, not LPP, so it is stated as a handoff instead of encoded as the wrong protocol |
 | `26_ss7_map` | the ATI answer body: below it, `SubscriberState` is not encodable by any referee available here, so the location and state fields are named as unverified rather than shipped on a guess |

