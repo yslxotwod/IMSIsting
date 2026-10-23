@@ -387,6 +387,9 @@ that is installed from a stack that is actually complete.
 The GUI opens on a **Dashboard** — every module as a card, grouped by category.
 Click a card and the module opens as its own tab. Six tabs are permanent:
 
+<img width="1196" height="641" alt="image" src="https://github.com/user-attachments/assets/c0f5c011-8660-4d35-b31a-5a7d56958126" />
+
+
 | Tab | What it is |
 |---|---|
 | **Dashboard** | Every module as a card, grouped by category. The main menu. |
