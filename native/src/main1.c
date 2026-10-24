@@ -2447,6 +2447,13 @@ module_id_words(const char *tok)
  * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
  */
 static const char *const plain_keys[] = {
+    "autn_case_amf\tautn case amf",
+    "mac_s\tmac s",
+    "mac_s_computed\tmac s computed",
+    "next_sqn\tnext sqn",
+    "next_sqn_hex\tnext sqn hex",
+    "sqn_ak\tsqn ak",
+    "sqn_ms\tsqn ms",
     "icon\ticon",
     "ink\tink",
     "ink_after\tink after",
@@ -6183,6 +6190,8 @@ static const ChipRow chip_rows[] = {
     { "15_downgrade",        "--yes",                 NEED_NO, DOES_READS },
     { "16_sim",              "--__index_probe__",     NEED_NO, DOES_READS },
     { "16_sim",              "--aka-responder",       NEED_NO, DOES_MODIFIES },
+    { "16_sim",              "--auts-build",          NEED_NO, DOES_BUILDS },
+    { "16_sim",              "--auts-verify",         NEED_NO, DOES_READS },
     { "16_sim",              "--usim-serve",          NEED_NO, DOES_READS },
     { "16_sim",              "--usim-tcp",            NEED_NO, DOES_SENDS },
     { "16_sim",              "--aka-serve",           NEED_NO, DOES_MODIFIES },
@@ -6504,6 +6513,8 @@ static const ChipRow chip_rows[] = {
     { "30_volte_ims",        "--call",                NEED_CAP, DOES_READS },
     { "30_volte_ims",        "--calls",               NEED_CAP, DOES_READS },
     { "30_volte_ims",        "--detect-keystream-reuse", NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--g711",                NEED_NO, DOES_BUILDS },
+    { "30_volte_ims",        "--rtp-stats",           NEED_NO, DOES_READS },
     { "30_volte_ims",        "--help",                NEED_NO, DOES_READS },
     { "30_volte_ims",        "--imei-leak",           NEED_CAP, DOES_READS },
     { "30_volte_ims",        "--imp4gt-model",        NEED_CAP, DOES_READS },
@@ -20860,6 +20871,17 @@ gtap_build_header(AppState *state, const char *module_id,
             "EF_ICCID, EF_AD and the service tables are refused with 6A82 "
             "rather than invented, and the 2G authenticate is refused by "
             "name: this card is the USIM path."));
+        gtk_box_append(GTK_BOX(serve_body),
+            mod_arg_row_prefilled(state, module_id, status, "Resynchronise a Stale SQN",
+                "--auts-build", "<ki> <opc> <rand> <sqn_ms>",
+                "The AUTS a card sends when the network's sequence number is "
+                "behind: (SQN_MS xor AK) || MAC-S. The network side reads it "
+                "back with the next card, recovers the counter and re-authenticates."));
+        gtk_box_append(GTK_BOX(serve_body),
+            mod_arg_row_prefilled(state, module_id, status, "Check the AUTS",
+                "--auts-verify", "<ki> <opc> <rand> <auts>",
+                "Recovers SQN_MS from the AUTS and verifies MAC-S, so a "
+                "resynchronisation is diagnosed rather than guessed."));
         gtk_box_append(GTK_BOX(body), serve);
     }
 
@@ -28046,10 +28068,65 @@ vims_build_calls(AppState *state, const char *module_id,
     return outer;
 }
 
+/* The media leg.
+ *
+ * A call has two halves: the dialog and the audio under it. The other cards
+ * cover the dialog; this one covers what the leg measured and the codec it
+ * measures with, because a call that connects and says nothing is the failure
+ * mode this half exists to make visible.
+ */
+static GtkWidget *
+vims_build_media(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("THE MEDIA UNDER A CALL",
+        "What the last call carried: how many packets went out, how many came "
+        "back, what was lost, and the G.711 tables that encode them.", &body);
+    GtkWidget *stats_body, *g711_body;
+    GtkWidget *stats = verb_card("READ THE LAST CALL'S MEDIA", &stats_body);
+    GtkWidget *g711 = verb_card("ENCODE AND DECODE G.711", &g711_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(stats_body),
+            mod_arg_row(state, module_id, status, "Report the Media",
+                "--rtp-stats", "",
+                "Packets sent and received, loss, jitter and the negotiated "
+                "codec, as measured by the last call this module placed."));
+        gtk_box_append(GTK_BOX(stats_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), stats);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(g711_body),
+            mod_arg_choices(state, module_id, status, "Run the codec", "",
+                "Both directions of the two payload types a SIP endpoint "
+                "answers with. The sample stream is a test vector, so the "
+                "answer can be read without a call.",
+                (const char *[]) { "--g711 PCMU encode 0000ff7f",
+                                   "--g711 PCMU decode ff80",
+                                   "--g711 PCMA encode 0000ff7f" },
+                (const char *[]) { "PCMU encode", "PCMU decode",
+                                   "PCMA encode" }, 3));
+        gtk_box_append(GTK_BOX(g711_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), g711);
+    gtk_box_append(GTK_BOX(body), fkit_note(
+        "Place a call from the command line: --call <host>[:port] with "
+        "--media mic --play --duration 30. This card reports what that call "
+        "measured; it does not dial."));
+    return outer;
+}
+
 static ModuleSubmenuEntry vims_entries[] = {
     { "SIP", "dialog-information-symbolic", NULL, vims_build_sip },
     { "Registration", "channel-secure-symbolic", NULL, vims_build_registration },
     { "Calls", "media-playback-start-symbolic", NULL, vims_build_calls },
+    { "Media", "audio-headphones-symbolic", NULL, vims_build_media },
 };
 /* 31_sim_defense — Port-out Risk.
  *

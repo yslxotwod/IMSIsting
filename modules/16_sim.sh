@@ -2232,7 +2232,7 @@ sim_cmd_sim_auth() {
             printf 'source\ttools/gsm_crypto.py --milenage (computed in a subprocess)\n'
             printf 'limit\tthe tool emits f1..f5* and never AUTN or AUTS; K is 128-bit only, f2/f3/f4 are 128-bit and f1 64-bit (TS 35.206 defaults) with no option to change the output lengths\n'
             printf 'limit\taes128_enc (FIPS-197) is a library function in tools/gsm_crypto.py with no CLI verb, so it is exercised here only through Milenage\n'
-            printf 'limit\tAUTS resynchronisation is not built: AUTS = (SQN_MS xor AK*) || MAC-S (3GPP TS 33.102) needs a second run with --sqn <sqn-ms>\n'
+            printf 'limit\tthis run emits f1..f5*; the AUTN is assembled by --sim-auth from them, and the AUTS side of a resync is --auts-build (card) / --auts-verify (network)\n'
             return 0 ;;
         tuak)
             [[ "$top" =~ ^[0-9A-F]{64}$ ]] || {
@@ -4397,7 +4397,7 @@ sim_selftest() {
     chk auth-mil-mac-s    "$(fld "$out" mac_s)" "01CFAF9EC4E871E9"
     chk auth-mil-autn     "$(fld "$out" autn)" "55F328B43577B9B94A9FFAC354DFAFB3"
     chk auth-mil-autn-basis "$(printf '%s\n' "$out" | grep -c '^autn_basis	SQN xor f5')" "1"
-    chk auth-mil-limit-auts "$(printf '%s\n' "$out" | grep -c '^limit	AUTS resynchronisation is not built')" "1"
+    chk auth-mil-limit-auts "$(printf '%s\n' "$out" | grep -c '^limit	this run emits f1..f5\*; the AUTN is assembled')" "1"
     # Without SQN/AMF there is no f1 and no AUTN: the verb must say so, not
     # print an empty row.
     out=$(sim_cmd_sim_auth milenage 465B5CE8B199B49FAA5F0A2EE238A6BC 23553CBE9637A89D218AE64DAE47BF35 \
@@ -4898,7 +4898,10 @@ sim_selftest() {
     # AUTHENTICATE, 3G: RES(8) || CK || IK, and the SQN counter moves.
     local sqn_before sqn_after usim_auth
     sqn_before=$(sim_kv sqn "$(sim_cmd_aka_responder --imsi 001010123456789 --rand 00000000000000000000000000000000 --no-persist 2>/dev/null)")
-    usim_auth=$(printf '00888100 20 23553CBE9637A89D218AE64DAE47BF35 5C000000000000000000000000000000\n' \
+    # The AUTN's SQN must be *ahead* of the card's for a vector: the card
+    # answers a stale network with 9862 + AUTS (asserted further down).
+    usim_auth=$(printf '00888100 20 %s %s%s\n' 23553CBE9637A89D218AE64DAE47BF35 \
+        "$(sim_auth_xor FF9BB4D0B608 AA689C648370)" 00000000000000000000 \
         | tr -d ' ' | sim_usim_serve --imsi 001010123456789 2>&1)
     chk usim-auth-sw    "$(printf '%s\n' "$usim_auth" | awk -F'\t' '$1=="sw"{print $2; exit}')" "9000"
     chk usim-auth-vec   "$(printf '%s\n' "$usim_auth" | awk -F'\t' '$1=="response"{print $2; exit}')" \
@@ -4922,6 +4925,62 @@ sim_selftest() {
     # dependency is asserted without starting a socket that would hang the run.
     chk usim-tcp-bad-port "$(sim_cmd_usim_tcp 0 --imsi 001010123456789 >/dev/null 2>&1; echo $?)" "2"
     chk usim-tcp-no-imsi  "$(sim_cmd_usim_tcp 2626 >/dev/null 2>&1; echo $?)" "2"
+
+    # ── AUTS: the resync a stale SQN needs (R8) ────────────────────────
+    # TS 35.208 set 1: AUTS = (SQN_MS xor AK) || MAC-S with AMF=0000 on f1*.
+    local auts_row auts_hex
+    auts_row=$(sim_auts_build 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 FF9BB4D0B607)
+    chk auts-ak    "$(fld "$auts_row" ak)"    "AA689C648370"
+    chk auts-macs  "$(fld "$auts_row" mac_s)" "CF44E93596E355C6"
+    chk auts-hex   "$(fld "$auts_row" auts)"  "55F328B43577CF44E93596E355C6"
+    chk auts-octets "$(fld "$auts_row" octets)" "14"
+
+    local ver; ver=$(sim_auts_verify 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 \
+        "$(fld "$auts_row" auts)")
+    chk auts-verify-verdict "$(fld "$ver" verdict)" "valid"
+    chk auts-verify-sqn     "$(fld "$ver" sqn_ms)"  "FF9BB4D0B607"
+    chk auts-verify-next    "$(fld "$ver" next_sqn_hex)" "FF9BB4D0B608"
+    # A one-nibble change in MAC-S must fail: that is what makes it a check.
+    chk auts-verify-tamper "$(sim_auts_verify 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 \
+        55F328B43577CF44E93596E355C7 2>/dev/null | awk -F'\t' '$1=="verdict"{print $2}')" "invalid"
+    chk auts-verify-tamper-rc "$(sim_auts_verify 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 \
+        55F328B43577CF44E93596E355C7 >/dev/null 2>&1; echo $?)" "1"
+    chk auts-short "$(sim_auts_build 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 FF9F >/dev/null 2>&1; echo $?)" "2"
+
+    # The card answers a network that is *behind* with 9862 + AUTS, and a
+    # network that is ahead with a vector. Both are the same APDU.
+    local rand_h="23553CBE9637A89D218AE64DAE47BF35"
+    local stale_ahead ahead_auth behind_auth
+    stale_ahead="AA689C648370"   # AK for this RAND
+    # AUTN with SQN FF9BB4D0B607 xor AK (equal to the card's SQN) -> not ahead.
+    ahead_auth=$(printf '00888100 20 %s %s00000000000000000000\n' "$rand_h" \
+        "$(sim_auth_xor FF9BB4D0B607 AA689C648370)" | tr -d ' ' | sim_usim_serve --imsi 001010123456789 2>&1)
+    chk usim-stale-sw    "$(printf '%s\n' "$ahead_auth" | awk -F'\t' '$1=="sw"{print $2; exit}')" "9862"
+    # The card's AUTS names the card's *current* SQN, so the assertion is the
+    # pair (verifies, and recovers the store's own counter) rather than a byte
+    # string that would drift every time the store moves.
+    local stale_auts stale_ver
+    stale_auts=$(printf '%s\n' "$ahead_auth" | awk -F'\t' '$1=="response"{print $2; exit}')
+    stale_ver=$(sim_auts_verify 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF "$rand_h" "$stale_auts")
+    chk usim-stale-auts  "$(printf '%s\n' "$stale_ver" | awk -F'\t' '$1=="verdict"{print $2; exit}')" "valid"
+    chk usim-stale-sqn   "$(printf '%s\n' "$stale_ver" | awk -F'\t' '$1=="sqn_ms"{print $2; exit}')" \
+        "$(sim_aka_row 001010123456789 | cut -f5)"
+    # Now a network one step ahead of the card *as it stands now* -- the
+    # earlier authenticate moved the store's SQN -- so the card computes a
+    # vector rather than resynchronising.
+    local sqn_now sqn_ahead
+    sqn_now=$(sim_aka_row 001010123456789 | cut -f5)
+    sqn_ahead=$(printf '%012X' "$(( 16#$sqn_now + 1 ))")
+    behind_auth=$(printf '00888100 20 %s %s00000000000000000000\n' "$rand_h" \
+        "$(sim_auth_xor "$sqn_ahead" AA689C648370)" | tr -d ' ' | sim_usim_serve --imsi 001010123456789 2>&1)
+    chk usim-ahead-sw    "$(printf '%s\n' "$behind_auth" | awk -F'\t' '$1=="sw"{print $2; exit}')" "9000"
+
 
     printf 'ASSERTIONS\t%d\n' "$n_checks"
     rm -rf "$d"
@@ -5458,6 +5517,88 @@ sim_cmd_key_remove() {
 #   * SQN comes from the store and is incremented afterwards (a USIM's job)
 #   * the quintet comes from the same --sim-auth path everything else uses
 #   * with --5g, the two KDF outputs the AUSF would need are derived too
+# ── AUTS: the resynchronisation the network cannot refuse (R8) ─────────
+#
+# A USIM keeps its own SQN. When the network's AUTN carries an SQN that is not
+# ahead of the card's, the card does not compute a vector and pretend: it
+# answers AUTHENTICATION FAILURE with AUTS, which is (SQN_MS xor AK) || MAC-S
+# (TS 33.102 6.3.5), so the network can see where the card actually is and move
+# its counter forward. Without it one stale SQN makes every attach fail with no
+# diagnosis -- the carrier-grade version of "it just doesn't work".
+#
+# MAC-S is f1* over the card's own SQN with AMF=0000 (the AUTS case), which is
+# the one Milenage output that is only ever used here.
+sim_auts_build() {  # <ki> <opc> <rand> <sqn_ms> [<amf>] -> rows
+    local ki="${1:-}" opc="${2:-}" rand="${3:-}" sqn="${4:-}" amf="${5:-0000}"
+    [[ -n "$ki" && -n "$opc" && -n "$rand" && -n "$sqn" ]] || {
+        printf 'ERROR\tusage: --auts-build <ki-32hex> <opc-32hex> <rand-32hex> <sqn_ms-12hex> [<amf-4hex>]\n' >&2
+        return 2; }
+    [[ "$ki" =~ ^[0-9A-Fa-f]{32}$ ]] || { printf 'ERROR\tKi is 16 octets (32 hex)\n' >&2; return 2; }
+    [[ "$opc" =~ ^[0-9A-Fa-f]{32}$ ]] || { printf 'ERROR\tOPc is 16 octets (32 hex)\n' >&2; return 2; }
+    [[ "$rand" =~ ^[0-9A-Fa-f]{32}$ ]] || { printf 'ERROR\tRAND is 16 octets (32 hex)\n' >&2; return 2; }
+    [[ "${sqn^^}" =~ ^[0-9A-F]{12}$ ]] || { printf 'ERROR\tSQN_MS is 6 octets (12 hex): %s\n' "$(sim_sanitize "$sqn")" >&2; return 2; }
+    [[ "${amf^^}" =~ ^[0-9A-F]{4}$ ]] || { printf 'ERROR\tAMF is 2 octets (4 hex)\n' >&2; return 2; }
+    sqn="${sqn^^}"; amf="${amf^^}"
+
+    # AUTS uses the AUTS case: AMF = 0000 in the f1* computation regardless of
+    # what the network's AUTN carried.
+    local raw; raw=$(sim_cmd_sim_auth milenage "$ki" "$rand" --opc "$opc" --sqn "$sqn" --amf 0000 2>/dev/null) || {
+        printf 'ERROR\tthe Milenage run failed\n' >&2; return 1; }
+    local mac_s ak
+    mac_s=$(sim_kv 'f1*' "$raw"); ak=$(sim_kv ak "$raw")
+    [[ -n "$mac_s" && -n "$ak" ]] || { printf 'ERROR\tno f1* or f5 in the run\n' >&2; return 1; }
+    local sqn_ak; sqn_ak=$(sim_auth_xor "$sqn" "$ak") || return 1
+    printf 'auts\t%s%s\n' "$sqn_ak" "$mac_s"
+    printf 'sqn_ms\t%s\n' "$sqn"
+    printf 'ak\t%s\n' "$ak"
+    printf 'mac_s\t%s\n' "$mac_s"
+    printf 'autn_case_amf\t0000\n'
+    printf 'octets\t%d\n' "$(( (${#sqn_ak} + ${#mac_s}) / 2 ))"
+    printf 'ref\t3GPP TS 33.102 6.3.5 (AUTS = SQN_MS xor AK || MAC-S), TS 35.206 f1*\n'
+}
+
+sim_auts_verify() {  # <ki> <opc> <rand> <auts-28hex> -> rows
+    local ki="${1:-}" opc="${2:-}" rand="${3:-}" auts="${4:-}"
+    [[ -n "$ki" && -n "$opc" && -n "$rand" && -n "$auts" ]] || {
+        printf 'ERROR\tusage: --auts-verify <ki-32hex> <opc-32hex> <rand-32hex> <auts-28hex>\n' >&2
+        return 2; }
+    [[ "${auts^^}" =~ ^[0-9A-F]{28}$ ]] || {
+        printf 'ERROR\tAUTS is 14 octets (28 hex): %s\n' "$(sim_sanitize "$auts")" >&2; return 2; }
+    auts="${auts^^}"
+    local sqn_ak="${auts:0:12}" mac_s="${auts:12:16}"
+
+    # AK comes from f5, which does not depend on SQN or AMF.
+    local raw; raw=$(sim_cmd_sim_auth milenage "$ki" "$rand" --opc "$opc" --sqn 000000000000 --amf 0000 2>/dev/null) || {
+        printf 'ERROR\tthe Milenage run failed\n' >&2; return 1; }
+    local ak; ak=$(sim_kv ak "$raw")
+    [[ -n "$ak" ]] || { printf 'ERROR\tno f5 in the run\n' >&2; return 1; }
+    local sqn_ms; sqn_ms=$(sim_auth_xor "$sqn_ak" "$ak") || return 1
+
+    local check; check=$(sim_cmd_sim_auth milenage "$ki" "$rand" --opc "$opc" --sqn "$sqn_ms" --amf 0000 2>/dev/null)
+    local want_mac; want_mac=$(sim_kv 'f1*' "$check")
+    [[ -n "$want_mac" ]] || { printf 'ERROR\tno f1* in the check run\n' >&2; return 1; }
+
+    printf 'auts\t%s\n' "$auts"
+    printf 'sqn_ak\t%s\n' "$sqn_ak"
+    printf 'ak\t%s\n' "$ak"
+    printf 'sqn_ms\t%s\n' "$sqn_ms"
+    printf 'mac_s\t%s\n' "$mac_s"
+    printf 'mac_s_computed\t%s\n' "$want_mac"
+    if [[ "$mac_s" == "$want_mac" ]]; then
+        printf 'verdict\tvalid\n'
+        printf 'next_sqn\t%s\n' "$(( 16#$sqn_ms + 1 ))"
+        printf 'next_sqn_hex\t%012X\n' "$(( 16#$sqn_ms + 1 ))"
+        printf 'action\tthe network sets its SQN to SQN_MS + 1 and re-authenticates\n'
+        return 0
+    fi
+    printf 'verdict\tinvalid\n'
+    printf 'note\tMAC-S does not verify: the AUTS is forged, corrupted, or computed with another key\n'
+    return 1
+}
+
+sim_cmd_auts_build()  { sim_auts_build "$@"; }
+sim_cmd_auts_verify() { sim_auts_verify "$@"; }
+
 # ── USIM over a socket: the card side of an attach (R7) ─────────────────
 #
 # Every earlier verb in this module speaks *to* a card or *as* the network. This
@@ -5607,22 +5748,66 @@ sim_usim_serve() {
                         if (( ${#data} != 64 )); then
                             sw="6700"; note="3G AUTHENTICATE carries RAND (16) and AUTN (16) octets"
                         else
-                            local rand="${data:0:32}" vec res ck ik
-                            vec=$(sim_cmd_aka_responder --imsi "$imsi" --rand "$rand" 2>/dev/null)
-                            # xres is what the store publishes; on this side of
-                            # the card it IS the RES the handset will send back.
-                            res=$(sim_kv xres "$vec"); ck=$(sim_kv ck "$vec"); ik=$(sim_kv ik "$vec")
-                            if [[ -z "$res" || -z "$ck" || -z "$ik" ]]; then
-                                sw="6F00"; note="the key store produced no vector for this subscriber"
+                            # RAND occupies the first 16 octets; the AUTN
+                            # follows it, and its first 6 octets are the
+                            # SQN masked with AK (TS 33.102 6.3.3).
+                            local r_rand="${data:0:32}" sqn_ak="${data:32:12}"
+                            local arow _k ki_a algo_a opc_a sqn_a amf_a r_ak r_net
+                            arow=$(sim_aka_row "$imsi")
+                            IFS=$'\t' read -r _k ki_a algo_a opc_a sqn_a amf_a _ <<<"$arow"
+                            # AK (f5) does not depend on SQN or AMF, so one run
+                            # with dummy values gives the value the AUTN was
+                            # masked with, and SQN_net = (SQN xor AK) xor AK.
+                            if [[ -n "$ki_a" && -n "$opc_a" ]]; then
+                                local araw
+                                if [[ "$algo_a" == tuak ]]; then
+                                    araw=$(sim_cmd_sim_auth tuak "$ki_a" "$r_rand" --top "$opc_a" \
+                                            --sqn 000000000000 --amf 0000 2>/dev/null)
+                                else
+                                    araw=$(sim_cmd_sim_auth milenage "$ki_a" "$r_rand" --opc "$opc_a" \
+                                            --sqn 000000000000 --amf 0000 2>/dev/null)
+                                fi
+                                r_ak=$(sim_kv ak "$araw")
+                            fi
+
+                            if [[ -n "$r_ak" ]]; then
+                                r_net=$(sim_auth_xor "$sqn_ak" "$r_ak") || r_net=""
+                            fi
+
+                            if [[ -n "$r_net" ]] && (( 16#$r_net <= 16#${sqn_a:-000000000000} )); then
+                                # The network is behind this card. Computing a
+                                # vector over a stale SQN is exactly how an
+                                # attach fails with no diagnosis, so the card
+                                # answers AUTHENTICATION FAILURE with AUTS and
+                                # lets the network resynchronise.
+                                local auts_row auts_hex
+                                auts_row=$(sim_auts_build "$ki_a" "$opc_a" "$r_rand" "$sqn_a")
+                                auts_hex=$(printf '%s\n' "$auts_row" | awk -F'\t' '$1=="auts"{print $2; exit}')
+                                if [[ -n "$auts_hex" ]]; then
+                                    resp="$auts_hex"; sw="9862"
+                                    note="the network's SQN $r_net is not ahead of the card's $sqn_a: AUTS returned so the network can resynchronise"
+                                else
+                                    sw="9862"
+                                    note="the network's SQN is not ahead of the card's and AUTS could not be built"
+                                fi
                             else
-                                case "$reslen" in
-                                    4) res="${res:0:8}" ;;
-                                    8) res="${res:0:16}" ;;
-                                    16) res="${res:0:32}" ;;
-                                esac
-                                resp="${res}${ck}${ik}"
-                                sw="9000"
-                                note="RES($(( ${#res} / 2 )) octets) || CK || IK from the key store"
+                                local rand="$r_rand" vec res ck ik
+                                vec=$(sim_cmd_aka_responder --imsi "$imsi" --rand "$rand" 2>/dev/null)
+                                # xres is what the store publishes; on this side of
+                                # the card it IS the RES the handset will send back.
+                                res=$(sim_kv xres "$vec"); ck=$(sim_kv ck "$vec"); ik=$(sim_kv ik "$vec")
+                                if [[ -z "$res" || -z "$ck" || -z "$ik" ]]; then
+                                    sw="6F00"; note="the key store produced no vector for this subscriber"
+                                else
+                                    case "$reslen" in
+                                        4) res="${res:0:8}" ;;
+                                        8) res="${res:0:16}" ;;
+                                        16) res="${res:0:32}" ;;
+                                    esac
+                                    resp="${res}${ck}${ik}"
+                                    sw="9000"
+                                    note="RES($(( ${#res} / 2 )) octets) || CK || IK from the key store"
+                                fi
                             fi
                         fi
                     elif [[ "$p1" == "80" ]]; then
@@ -5927,6 +6112,8 @@ sim_cli_main() {
         --key-remove)     sim_cmd_key_remove "$@" ;;
         --aka-responder)  sim_cmd_aka_responder "$@" ;;
         --aka-serve)      sim_cmd_aka_serve "$@" ;;
+        --auts-build)     sim_cmd_auts_build "$@" ;;
+        --auts-verify)    sim_cmd_auts_verify "$@" ;;
         --usim-serve)     sim_usim_serve "$@" ;;
         --usim-tcp)       sim_cmd_usim_tcp "$@" ;;
         --es9-plus)       sim_cmd_es9_plus "$@" ;;
@@ -5972,6 +6159,12 @@ Usage: $0 COMMAND
                                     one AKA event: quintet from the store, SQN incremented and saved; --5g adds KAUSF and RES*
   --aka-serve [--5g --sn <hex>|--sn-name <text>]
                                     resident responder: VECTOR <imsi> [<rand>] / LIST / QUIT on stdin
+  --auts-build <ki> <opc> <rand> <sqn_ms> [<amf>]
+                                    the AUTS a card sends when the network's SQN
+                                    is behind: (SQN_MS xor AK) || MAC-S
+  --auts-verify <ki> <opc> <rand> <auts>
+                                    the network side: recover SQN_MS and check
+                                    MAC-S, so a resync is diagnosed not guessed
   --usim-serve --imsi <digits> [--reslen 4|8|16]
                                     be the card: one hex C-APDU per line on stdin,
                                     one R-APDU back (SELECT, READ BINARY, VERIFY,
