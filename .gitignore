@@ -11,6 +11,8 @@
 
 # ── build output ────────────────────────────────────────────────────────
 /native/builddir/
+# release archives are cut by tools/make-tarball.sh beside the tree, not source
+/IMSIsting-*.tar.gz
 *.o
 *.obj
 __pycache__/

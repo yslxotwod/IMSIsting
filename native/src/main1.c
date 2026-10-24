@@ -5552,6 +5552,19 @@ static const char *const plain_keys[] = {
     "zero_teids\tzero teids",
     "zp_csi_rs\tzp CSI rs",
     "zzzz\tzzzz",
+	"actual\twhat the oracle returned for this fixture",
+	"cleartext_msin\tnull-scheme observations whose MSIN travelled in the clear",
+	"demo\tthe directory this run's fixture was written to",
+	"expected\twhat the oracle should say for this fixture",
+	"identifying\ta field two observations share that proves one subscriber",
+	"linked\tthis pair is one subscriber",
+	"linked_by\tthe strongest signal that joined the pair",
+	"linked_pairs\tpairs in the file that were joined",
+	"pairs\tobservation pairs the oracle compared",
+	"repeated_autn\tAUTN values that appeared more than once",
+	"repeated_sucis\tidentical SUCI octets that appeared more than once",
+	"shared_by_network\ta field every subscriber of this network shares, so it identifies nobody",
+	"weak\ta field that narrows the pair without proving it",
 };
 
 /* Compare a bare key against one "key<TAB>words" row. */
@@ -6081,6 +6094,8 @@ static const ChipRow chip_rows[] = {
     { "14_suci",             "--hn-show",             NEED_NO, DOES_READS },
     { "14_suci",             "--info",                NEED_NO, DOES_READS },
     { "14_suci",             "--keyfile",              NEED_NO, DOES_READS },
+    { "14_suci",             "--link-demo",            NEED_NO, DOES_BUILDS },
+    { "14_suci",             "--link-oracle",          NEED_NO, DOES_READS },
     { "14_suci",             "--mcc",                  NEED_NO, DOES_READS },
     { "14_suci",             "--menu",                NEED_NO, DOES_READS },
     { "14_suci",             "--mnc",                  NEED_NO, DOES_READS },
@@ -23359,11 +23374,13 @@ suci_build_home(AppState *state, const char *module_id,
         "that opens the arriving SUCI, and the AUSF that answers the serving "
         "network with a vector.", &body);
     GtkWidget *create_body, *show_body, *open_body, *auth_body, *serve_body;
+    GtkWidget *judge_body;
     GtkWidget *create = verb_card("BECOME ONE", &create_body);
     GtkWidget *show = verb_card("WHAT THIS HOST IS", &show_body);
     GtkWidget *open = verb_card("OPEN AN ARRIVING SUCI", &open_body);
     GtkWidget *auth = verb_card("ANSWER AN AUTHENTICATION", &auth_body);
     GtkWidget *serve = verb_card("SERVE IT", &serve_body);
+    GtkWidget *judge = verb_card("JUDGE THE OBSERVATIONS", &judge_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -23427,6 +23444,28 @@ suci_build_home(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(serve_body), res);
     }
     gtk_box_append(GTK_BOX(body), serve);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(judge_body),
+            mod_arg_row(state, module_id, status, "Judge a Capture",
+                "--link-oracle", "",
+                "A file of observed SUCIs, one per line, optionally with the AUTN "
+                "the network was given. Every pair comes back linked or not, and "
+                "when linked, the signal that gave it away: the SUCI octets, the "
+                "ephemeral key, a cleartext MSIN, the MSIN's length class, or an "
+                "AUTN two rounds were both handed."));
+        gtk_box_append(GTK_BOX(judge_body),
+            mod_arg_row(state, module_id, status, "Show It Working",
+                "--link-demo", "",
+                "Builds the fixture on this host's own home network and runs the "
+                "oracle on it: fresh rounds that do not link, a reused ephemeral "
+                "key that does, the null scheme, two subscribers, and one vector "
+                "given to two rounds."));
+        gtk_box_append(GTK_BOX(judge_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), judge);
     mod_card_end();
 
     (void) out;

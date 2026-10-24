@@ -963,6 +963,281 @@ suci_ri_nibble() {
     esac
 }
 
+# ── the linkability oracle ──────────────────────────────────────────────
+# TS 33.501 conceals the SUPI so that two attach attempts cannot be tied to
+# one subscriber. That is a claim about the *whole* observation, not just the
+# SUCI octets: an authentication round also exposes the protection scheme, the
+# home network's public key identifier, the routing indicator, the length of
+# the concealed MSIN, and (when a capture carries them) RAND and AUTN. This
+# oracle takes observations of authentication rounds and answers, pair by
+# pair, whether anything in them links the two rounds to one subscriber --
+# and, when the answer is no, which fields the pair shares anyway because the
+# whole home network shares them.
+#
+# Fields are classified before they are compared, because the classes are what
+# the answer depends on:
+#   identifying  the pair is one subscriber if these match: the SUCI octets,
+#                the ephemeral public key, the MSIN ciphertext, a cleartext
+#                MSIN under the null scheme, or an identical AUTN (the same
+#                authentication vector reached two observations)
+#   weak         the concealed MSIN's length: only its digit count, a class
+#                that two subscribers of one operator can easily share
+#   herd         scheme, home network public key identifier, routing
+#                indicator: every subscriber of that network carries them, so
+#                they never identify on their own
+suci_link_obs() { # <suci> -> scheme, hnkey, ri, eph, cipher, plain_msin, octets
+    local suci="${1:-}" parsed scheme hnkey ri out
+    parsed=$(suci_parse "$suci" 2>/dev/null) || return 1
+    scheme=$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="protection_scheme"{print $2}')
+    hnkey=$(printf  '%s\n' "$parsed" | awk -F'\t' '$1=="hn_public_key_id"{print $2}')
+    ri=$(printf     '%s\n' "$parsed" | awk -F'\t' '$1=="routing_indicator"{print $2}')
+    out=$(printf    '%s\n' "$parsed" | awk -F'\t' '$1=="scheme_output"{print $2}')
+    local eph="" cipher="$out" plain=""
+    case "$scheme" in
+        1) # profile A: a 32-octet X25519 ephemeral public key, then the ciphertext
+           if (( ${#out} >= 64 )); then eph="${out:0:64}"; cipher="${out:64}"; fi ;;
+        2) # profile B: a 33-octet compressed P-256 ephemeral public key
+           if (( ${#out} >= 66 )); then eph="${out:0:66}"; cipher="${out:66}"; fi ;;
+        0) # the null scheme: no ephemeral key, the MSIN is in the clear
+           plain=$(suci_msin_decode "$out" 2>/dev/null || echo "?") ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$scheme" "${hnkey:-?}" "${ri:-?}" "${eph:-none}" "${cipher:-none}" \
+        "${plain:-none}" "$(( ${#out} / 2 ))"
+}
+
+suci_link_oracle() { # <observations-file>
+    local file="${1:-}"
+    [[ -n "$file" ]] || { printf 'ERROR\tusage: --link-oracle <observations>\n' >&2; return 2; }
+    [[ -f "$file" ]] || { printf 'ERROR\tno such file: %s\n' "$(suci_sanitize "$file")" >&2; return 1; }
+    [[ -r "$file" ]] || { printf 'ERROR\tcannot read: %s\n' "$(suci_sanitize "$file")" >&2; return 1; }
+
+    local -a lbl=() su=() sch=() hnk=() ri=() eph=() cip=() pln=() oct=() autn=() rnd=()
+    local line label suci rest a r fields n=0 bad=0 o_autn="" o_rnd=""
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        # Keep the tab structure: a tab-separated observation carries extra
+        # columns, a bare line is a SUCI on its own.
+        line="${line%"${line##*[![:space:]]}"}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        [[ -z "$line" ]] && continue
+        if [[ "$line" == *$'\t'* ]]; then
+            label="${line%%$'\t'*}"
+            rest="${line#*$'\t'}"
+            suci="${rest%%$'\t'*}"
+            rest="${rest#"$suci"}"
+            o_autn=""; o_rnd=""
+            if [[ -n "$rest" ]]; then
+                rest="${rest#$'\t'}"
+                o_autn="${rest%%$'\t'*}"
+                o_rnd="${rest#"$o_autn"}"
+                o_rnd="${o_rnd#$'\t'}"
+            fi
+        else
+            label=""
+            suci="$line"
+            o_autn=""; o_rnd=""
+        fi
+        suci="${suci//[[:space:]]/}"
+        suci="${suci//0x/}"
+        suci="${suci,,}"
+        [[ -z "$suci" ]] && continue
+        n=$(( n + 1 ))
+        [[ -n "$label" ]] || label="obs${n}"
+        if ! fields=$(suci_link_obs "$suci"); then
+            bad=$(( bad + 1 ))
+            printf 'unparseable\t%s\t%s\n' "$(suci_sanitize "$label")" \
+                "$(suci_sanitize "${suci:0:40}")"
+            continue
+        fi
+        lbl+=("$(suci_sanitize "$label")")
+        su+=("$suci")
+        sch+=("$(cut -f1 <<< "$fields")")
+        hnk+=("$(cut -f2 <<< "$fields")")
+        ri+=("$(cut -f3 <<< "$fields")")
+        eph+=("$(cut -f4 <<< "$fields")")
+        cip+=("$(cut -f5 <<< "$fields")")
+        pln+=("$(cut -f6 <<< "$fields")")
+        oct+=("$(cut -f7 <<< "$fields")")
+        autn+=("${o_autn,,}")
+        rnd+=("${o_rnd,,}")
+    done < "$file"
+
+    (( ${#su[@]} > 0 )) || {
+        printf 'ERROR\tno parseable observations in %s: %s line(s) rejected\n' \
+            "$(suci_sanitize "$file")" "$bad" >&2; return 1; }
+
+    printf 'file\t%s\n' "$(suci_sanitize "$file")"
+    printf 'observations\t%s\n' "${#su[@]}"
+    printf 'unparseable\t%s\n' "$bad"
+
+    local i j pair=0 linked=0
+    local -a findings=()
+    for (( i = 0; i < ${#su[@]}; i++ )); do
+        for (( j = i + 1; j < ${#su[@]}; j++ )); do
+            pair=$(( pair + 1 ))
+            local why=() weak=() herd=()
+            [[ "${su[i]}" == "${su[j]}" ]]                                    && why+=("suci")
+            [[ "${eph[i]}" != "none" && "${eph[i]}" == "${eph[j]}" ]]         && why+=("eph_key")
+            [[ "${cip[i]}" != "none" && "${cip[i]}" == "${cip[j]}" ]]         && why+=("msin_ciphertext")
+            [[ "${pln[i]}" != "none" && "${pln[i]}" == "${pln[j]}" ]]         && why+=("cleartext_msin")
+            [[ -n "${autn[i]}" && "${autn[i]}" == "${autn[j]}" ]]             && why+=("autn")
+            [[ "${oct[i]}" == "${oct[j]}" ]]                                  && weak+=("msin_length")
+            [[ "${sch[i]}" == "${sch[j]}" ]]                                  && herd+=("scheme")
+            [[ "${hnk[i]}" == "${hnk[j]}" ]]                                  && herd+=("hn_public_key_id")
+            [[ "${ri[i]}"  == "${ri[j]}"  ]]                                  && herd+=("routing_indicator")
+
+            printf 'pair\t%s\t%s\n' "${lbl[i]}" "${lbl[j]}"
+            local w h
+            for w in "${why[@]}";  do printf 'identifying\t%s\n' "$w"; done
+            for w in "${weak[@]}"; do printf 'weak\t%s\n' "$w"; done
+            for h in "${herd[@]}"; do printf 'shared_by_network\t%s\n' "$h"; done
+            if (( ${#why[@]} > 0 )); then
+                linked=$(( linked + 1 ))
+                printf 'verdict\tlinked\n'
+                printf 'linked_by\t%s\n' "${why[0]}"
+            else
+                printf 'verdict\tnot-linked\n'
+                if (( ${#weak[@]} > 0 )); then
+                    printf 'note\tthe pair shares only %s: the concealed MSIN has the same length, which is a digit count, not an identity\n' \
+                        "$(printf '%s,' "${weak[@]}" | sed 's/,$//')"
+                else
+                    printf 'note\tno identifying field matches: the two observations share nothing but the home network\n'
+                fi
+            fi
+        done
+    done
+    printf 'pairs\t%s\n' "$pair"
+    printf 'linked_pairs\t%s\n' "$linked"
+
+    # Findings: the same three shapes the audit verb reports, but counted over
+    # observations instead of a bare SUCI list.
+    local e_reuse=0 s_ident=0 av_ident=0 clear=0 k
+    for (( k = 0; k < ${#su[@]}; k++ )); do
+        (( sch[k] == 0 )) && clear=$(( clear + 1 ))
+    done
+    e_reuse=$(printf '%s\n' "${eph[@]}" | grep -v '^none$' | sort | uniq -d | grep -c . || true)
+    s_ident=$(printf '%s\n' "${su[@]}"  | sort | uniq -d | grep -c . || true)
+    av_ident=$(printf '%s\n' "${autn[@]}" | grep -v '^$' | sort | uniq -d | grep -c . || true)
+    printf 'reused_ephemeral_keys\t%s\n' "$e_reuse"
+    printf 'repeated_sucis\t%s\n'        "$s_ident"
+    printf 'repeated_autn\t%s\n'         "$av_ident"
+    printf 'cleartext_msin\t%s\n'        "$clear"
+    if (( e_reuse > 0 )); then
+        printf 'finding\treused-ephemeral-key\n'
+        printf 'finding_detail\tan ephemeral public key appears in more than one observation: those rounds are one UE, and the reuse is not what TS 33.501 asks for\n'
+    fi
+    if (( s_ident > 0 )); then
+        printf 'finding\trepeated-suci\n'
+        printf 'finding_detail\tthe same SUCI octets appear more than once: the concealment was not refreshed between the rounds\n'
+    fi
+    if (( av_ident > 0 )); then
+        printf 'finding\trepeated-authentication-vector\n'
+        printf 'finding_detail\tthe same AUTN reached more than one observation: one vector was reused, so the pair is linkable by the vector itself\n'
+    fi
+    if (( clear > 0 )); then
+        printf 'finding\tcleartext-msin\n'
+        printf 'finding_detail\t%s observation(s) use the null scheme: the MSIN is in the clear and nothing is concealed\n' "$clear"
+    fi
+    if (( linked > 0 )); then
+        printf 'verdict\tLINKABLE\n'
+    else
+        printf 'verdict\tNOT-LINKED\n'
+    fi
+    return 0
+}
+
+# A demonstration with ground truth: the same subscriber's rounds must not
+# link, a reused ephemeral key must, and a null-scheme SUCI must. Runs against
+# the live home network when a profile exists, so the SUCIs are real output of
+# this module's own concealment, not fixtures pasted from somewhere.
+suci_link_demo() {
+    suci_hn_have || {
+        printf 'ERROR\tno home network profile: run --hn-create first\n' >&2; return 1; }
+    suci_have_cryptography || {
+        printf 'ERROR\t%s\n' "$(suci_missing_dep)" >&2; return 3; }
+
+    local dir="$MOD_TMP/link_demo"
+    rm -rf "$dir"; mkdir -p "$dir" 2>/dev/null
+    local pub scheme
+    pub=$(suci_hn_pget hn_public_key)
+    scheme=$(suci_hn_pget scheme)
+    [[ -n "$pub" ]] || { printf 'ERROR\tthe profile carries no public key\n' >&2; return 1; }
+    [[ -f "$(suci_hn_pget keyfile)" ]] || {
+        printf 'ERROR\tthe profile key file is gone: %s\n' \
+            "$(suci_sanitize "$(suci_hn_pget keyfile)")" >&2; return 1; }
+
+    local a1 a2 a3 b1 f1
+    a1=$(suci_build "$scheme" 0123456789 "$pub" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+    a2=$(suci_build "$scheme" 0123456789 "$pub" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+    a3=$(suci_build "$scheme" 0123456789 "$pub" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+    b1=$(suci_build "$scheme" 0987654321 "$pub" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+    [[ -n "$a1" && -n "$a2" && -n "$a3" && -n "$b1" ]] || {
+        printf 'ERROR\tconcealment failed; %s\n' "$(suci_sanitize "$a1")" >&2; return 1; }
+
+    # Same subscriber, three fresh rounds: no shared identifying field.
+    printf 'sub-A-round-1\t%s\nsub-A-round-2\t%s\nsub-A-round-3\t%s\nsub-B-round-1\t%s\n' \
+        "$a1" "$a2" "$a3" "$b1" > "$dir/fresh.tsv"
+
+    # The threat model the oracle exists for: the UE reuses its ephemeral key.
+    # The ciphertext is re-randomised by reversing it, so only the ephemeral
+    # key and the scheme output's length survive as shared fields.
+    local split=64 head tail reused
+    (( scheme == 2 )) && split=66
+    head="${a1:0:$(( 10 + split ))}"
+    tail="${a1:$(( 10 + split ))}"
+    reused="$head$(printf '%s' "$tail" | rev)"
+    printf 'sub-A-round-1\t%s\nsub-A-round-2-reused-eph\t%s\n' "$a1" "$reused" > "$dir/reuse.tsv"
+
+    # Null scheme: no concealment at all.
+    f1=$(suci_build 0 0123456789 "" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+    printf 'sub-A-null-1\t%s\nsub-A-null-2\t%s\n' "$f1" "$f1" > "$dir/null.tsv"
+
+    # Two rounds of the same subscriber that the home network answered with
+    # one authentication vector: the AUTN is what gives them away, not the SUCI.
+    local auth autn
+    auth=$(suci_hn_auth "$a1" 2>/dev/null)
+    autn=$(printf '%s\n' "$auth" | awk -F'\t' '$1=="autn"{print $2}')
+    if [[ -n "$autn" ]]; then
+        printf 'sub-A-autn-1\t%s\t%s\nsub-A-autn-2\t%s\t%s\n' \
+            "$a1" "$autn" "$a2" "$autn" > "$dir/same-av.tsv"
+    fi
+
+    printf 'demo\t%s\n' "$(suci_sanitize "$dir")"
+    local outp
+    outp=$(suci_link_oracle "$dir/fresh.tsv")
+    printf 'case\tfresh-concealment\n'
+    printf 'expected\tNOT-LINKED\n'
+    printf 'actual\t%s\n' "$(printf '%s\n' "$outp" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')"
+    printf 'pairs\t%s\n' "$(printf '%s\n' "$outp" | awk -F'\t' '$1=="pairs"{v=$2} END{print v}')"
+    printf 'sub-A-round-1\t%s\nsub-B-round-1\t%s\n' "$a1" "$b1" > "$dir/two-subs.tsv"
+    outp=$(suci_link_oracle "$dir/two-subs.tsv")
+    printf 'case\ttwo-subscribers\n'
+    printf 'expected\tNOT-LINKED\n'
+    printf 'actual\t%s\n' "$(printf '%s\n' "$outp" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')"
+    outp=$(suci_link_oracle "$dir/reuse.tsv")
+    printf 'case\treused-ephemeral-key\n'
+    printf 'expected\tLINKABLE\n'
+    printf 'actual\t%s\n' "$(printf '%s\n' "$outp" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')"
+    printf 'linked_by\t%s\n' "$(printf '%s\n' "$outp" | awk -F'\t' '$1=="linked_by"{v=$2} END{print v}')"
+    outp=$(suci_link_oracle "$dir/null.tsv")
+    printf 'case\tnull-scheme\n'
+    printf 'expected\tLINKABLE\n'
+    printf 'actual\t%s\n' "$(printf '%s\n' "$outp" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')"
+    if [[ -n "$autn" ]]; then
+        outp=$(suci_link_oracle "$dir/same-av.tsv")
+        printf 'case\tsame-authentication-vector\n'
+        printf 'expected\tLINKABLE\n'
+        printf 'actual\t%s\n' "$(printf '%s\n' "$outp" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')"
+        printf 'linked_by\t%s\n' "$(printf '%s\n' "$outp" | awk -F'\t' '$1=="linked_by"{v=$2} END{print v}')"
+    else
+        printf 'case\tsame-authentication-vector\n'
+        printf 'expected\tLINKABLE\n'
+        printf 'actual\tskipped (no subscriber for %s in the store)\n' "001010123456789"
+    fi
+    return 0
+}
+
 # ── CLI verbs ───────────────────────────────────────────────────────────
 # The status verb is the honest inventory of this module: what works with no
 # key at all, what needs the last hop, and what that last hop is. The optional
@@ -2092,6 +2367,90 @@ EOF
         printf 'hn-ausf\tSKIP %s not installed\n' "${dep:-python3}"
     fi
 
+    # 10. The linkability oracle. Signatures are pure string tests, so the
+    #     fixtures run with or without python3: only the concealing side needs it.
+    local obsf lf
+    obsf="$d/link"
+    mkdir -p "$obsf"
+    # scheme-0 SUCIs need no key at all
+    local ns1 ns2 ns3
+    ns1=$(suci_build 0 0123456789 "" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+    ns2=$(suci_build 0 0987654321 "" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+    ns3=$(suci_build 0 0123456789 "" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+    printf '%s\t%s\n%s\t%s\n' "n1" "$ns1" "n2" "$ns2" > "$obsf/null-pair.tsv"
+    printf '%s\t%s\n%s\t%s\n' "n1" "$ns1" "n2" "$ns3" > "$obsf/null-same.tsv"
+    chk link-null-diff "$(suci_link_oracle "$obsf/null-pair.tsv" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')" "NOT-LINKED"
+    chk link-null-same "$(suci_link_oracle "$obsf/null-same.tsv" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')" "LINKABLE"
+    chk link-null-by   "$(suci_link_oracle "$obsf/null-same.tsv" | awk -F'\t' '$1=="linked_by"{v=$2} END{print v}')" "suci"
+    chk link-null-clear "$(suci_link_oracle "$obsf/null-same.tsv" | awk -F'\t' '$1=="cleartext_msin"{v=$2} END{print v}')" "2"
+    chk link-null-finding "$(suci_link_oracle "$obsf/null-same.tsv" | grep -c '^finding	cleartext-msin')" "1"
+    chk link-length-weak "$(suci_link_oracle "$obsf/null-pair.tsv" | awk -F'\t' '$1=="weak"{print $2}')" "msin_length"
+    chk link-length-note "$(suci_link_oracle "$obsf/null-pair.tsv" | grep -c 'same length, which is a digit count')" "1"
+    chk link-noargs "$(suci_link_oracle >/dev/null 2>&1; echo $?)" "2"
+    chk link-missing-file "$(suci_link_oracle "$d/nope.tsv" >/dev/null 2>&1; echo $?)" "1"
+    printf 'a\n\n# comment only\n' > "$obsf/empty.tsv"
+    printf '\n   \n# comment only\n' > "$obsf/empty.tsv"
+    chk link-no-observations "$(suci_link_oracle "$obsf/empty.tsv" >/dev/null 2>&1; echo $?)" "1"
+    printf '%s\t%s\n' "x" "nothex" > "$obsf/bad.tsv"
+    chk link-junk-only "$(suci_link_oracle "$obsf/bad.tsv" >/dev/null 2>&1; echo $?)" "1"
+    # junk beside a good observation is reported and skipped, not fatal
+    printf '%s\t%s\n%s\t%s\n' "x" "nothex" "good" "$ns1" > "$obsf/bad-plus-good.tsv"
+    chk link-junk-count "$(suci_link_oracle "$obsf/bad-plus-good.tsv" | awk -F'\t' '$1=="unparseable" && NF==2 {v=$2} END{print v}')" "1"
+    chk link-junk-keeps-good "$(suci_link_oracle "$obsf/bad-plus-good.tsv" | awk -F'\t' '$1=="observations"{v=$2} END{print v}')" "1"
+    chk link-demo-no-profile "$(STATE_DIR="$d/none" TMP_DIR="$d/nonetmp" suci_link_demo >/dev/null 2>&1; echo $?)" "1"
+    if suci_have_cryptography; then
+        local pub2 sa sb sreuse head2 tail2 n
+        pub2=$(suci_hn_pget hn_public_key)
+        sa=$(suci_build 1 0123456789 "$pub2" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+        sb=$(suci_build 1 0987654321 "$pub2" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+        n=$(suci_build 1 1111111111 "$pub2" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+        printf 'a\t%s\nb\t%s\n' "$sa" "$sb" > "$obsf/fresh.tsv"
+        chk link-fresh-pairs "$(suci_link_oracle "$obsf/fresh.tsv" | awk -F'\t' '$1=="pairs"{v=$2} END{print v}')" "1"
+        chk link-fresh-verdict "$(suci_link_oracle "$obsf/fresh.tsv" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')" "NOT-LINKED"
+        chk link-fresh-eph "$(suci_link_oracle "$obsf/fresh.tsv" | awk -F'\t' '$1=="identifying"{print $2}')" ""
+        chk link-fresh-herd "$(suci_link_oracle "$obsf/fresh.tsv" | grep -c '^shared_by_network')" "3"
+        # same SUCI twice: the concealment was not refreshed
+        printf 'a\t%s\nb\t%s\n' "$sa" "$sa" > "$obsf/repeat.tsv"
+        chk link-repeat-verdict "$(suci_link_oracle "$obsf/repeat.tsv" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')" "LINKABLE"
+        chk link-repeat-count "$(suci_link_oracle "$obsf/repeat.tsv" | awk -F'\t' '$1=="repeated_sucis"{v=$2} END{print v}')" "1"
+        chk link-repeat-finding "$(suci_link_oracle "$obsf/repeat.tsv" | grep -c '^finding	repeated-suci')" "1"
+        # the reused ephemeral key: same scheme output, re-randomised ciphertext
+        head2="${sa:0:74}"; tail2="${sa:74}"
+        sreuse="$head2$(printf '%s' "$tail2" | rev)"
+        printf 'a\t%s\nb\t%s\n' "$sa" "$sreuse" > "$obsf/reuse.tsv"
+        chk link-reuse-verdict "$(suci_link_oracle "$obsf/reuse.tsv" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')" "LINKABLE"
+        chk link-reuse-by "$(suci_link_oracle "$obsf/reuse.tsv" | awk -F'\t' '$1=="linked_by"{v=$2} END{print v}')" "eph_key"
+        chk link-reuse-count "$(suci_link_oracle "$obsf/reuse.tsv" | awk -F'\t' '$1=="reused_ephemeral_keys"{v=$2} END{print v}')" "1"
+        # One subscriber seen once with the null scheme and once concealed: the
+        # oracle does not join those, and says so rather than guessing.
+        printf 'n\t%s\nc\t%s\n' "$ns1" "$sa" > "$obsf/mixed.tsv"
+        chk link-mixed-verdict "$(suci_link_oracle "$obsf/mixed.tsv" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')" "NOT-LINKED"
+        chk link-mixed-note "$(suci_link_oracle "$obsf/mixed.tsv" | grep -c 'share nothing but the home network')" "1"
+        # one vector handed to two rounds: the AUTN is the identifying signal
+        printf 'a\t%s\t%s\nb\t%s\t%s\n' "$sa" "B1FC39F26D89B9B9B0888D16DCE843A1" \
+            "$n" "B1FC39F26D89B9B9B0888D16DCE843A1" > "$obsf/av.tsv"
+        chk link-av-verdict "$(suci_link_oracle "$obsf/av.tsv" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')" "LINKABLE"
+        chk link-av-by "$(suci_link_oracle "$obsf/av.tsv" | awk -F'\t' '$1=="linked_by"{v=$2} END{print v}')" "autn"
+        chk link-av-count "$(suci_link_oracle "$obsf/av.tsv" | awk -F'\t' '$1=="repeated_autn"{v=$2} END{print v}')" "1"
+        chk link-av-finding "$(suci_link_oracle "$obsf/av.tsv" | grep -c '^finding	repeated-authentication-vector')" "1"
+        # the demo builds its own fixture and must agree with all five cases
+        local demo
+        demo=$(suci_link_demo)
+        chk demo-rc "$?" "0"
+        chk demo-cases "$(printf '%s\n' "$demo" | grep -c '^case	')" "5"
+        chk demo-agree "$(printf '%s\n' "$demo" | awk -F'\t' '
+            $1=="expected"{ e=$2; next }
+            $1=="actual"{ if (e != $2) bad++; e="" }
+            END{ print bad+0 }')" "0"
+        chk demo-fresh "$(printf '%s\n' "$demo" | awk -F'\t' '$1=="case"&&$2=="fresh-concealment"{c=1;next} c&&$1=="actual"{print $2;exit}')" "NOT-LINKED"
+        chk demo-reuse "$(printf '%s\n' "$demo" | awk -F'\t' '$1=="case"&&$2=="reused-ephemeral-key"{c=1;next} c&&$1=="actual"{print $2;exit}')" "LINKABLE"
+        chk demo-null "$(printf '%s\n' "$demo" | awk -F'\t' '$1=="case"&&$2=="null-scheme"{c=1;next} c&&$1=="actual"{print $2;exit}')" "LINKABLE"
+        chk demo-av "$(printf '%s\n' "$demo" | awk -F'\t' '$1=="case"&&$2=="same-authentication-vector"{c=1;next} c&&$1=="actual"{print $2;exit}')" "LINKABLE"
+        chk demo-reuse-by "$(printf '%s\n' "$demo" | awk -F'\t' '$1=="linked_by"{print $2;exit}')" "eph_key"
+    else
+        printf 'link-fixtures\tSKIP %s not installed\n' "$(suci_missing_dep)"
+    fi
+
     # 9. TSV injection: a tab in an untrusted string must not forge a row.
     local evil
     evil=$(suci_sanitize $'001\tfake\trow\nmore')
@@ -2127,6 +2486,8 @@ suci_menu() {
   [13] SIDF: deconceal a SUCI with the profile
   [14] AUSF: one 5G-AKA event for a SUCI
   [15] serve a home network on stdin
+  [16] linkability oracle over a file of SUCIs
+  [17] linkability demo (build the fixture, then judge it)
   [0]  back
 
 M
@@ -2193,6 +2554,11 @@ M
                 suci_hn_auth "$h" "$r" | column -t -s$'\t' 2>/dev/null
                 read -rp "  press enter " _ ;;
             15) suci_hn_serve ;;
+            16) read -rp "  observation file> " f
+                suci_link_oracle "$f" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            17) suci_link_demo | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -2219,6 +2585,8 @@ suci_cli_main() {
         --hn-deconceal)  suci_hn_deconceal "${1:-}" ;;
         --hn-auth)       suci_hn_auth "${1:-}" "${2:-}" ;;
         --hn-serve)      suci_hn_serve ;;
+        --link-oracle)   suci_link_oracle "${1:-}" ;;
+        --link-demo)     suci_link_demo ;;
         --conceal)       suci_conceal "${1:-1}" "${2:-}" "${3:-}" ;;
         --selftest)      suci_selftest ;;
         --menu)          suci_menu ;;
@@ -2256,6 +2624,14 @@ Usage: $0 COMMAND
                                      K store, RAND||AUTN, XRES*, HXRES*, KAUSF, KSEAF
   --hn-serve                         resident home network on stdin: SUCI, AUTH,
                                      SHOW, QUIT (one line each)
+  --link-oracle <obs-file>           pairwise linkability over observed SUCIs: for
+                                     every pair, linked or not, and by which signal
+                                     -- the SUCI itself, the ephemeral key, a
+                                     cleartext MSIN, the MSIN's length class, an
+                                     AUTN two rounds were both given, or nothing
+  --link-demo                        build the fixture on this host's own home
+                                     network and run the oracle on it: six rounds,
+                                     two subscribers, one reused ephemeral key
   --conceal <1|2> <msin> <hn-pubkey-hex>
                                      the raw ECIES concealment
   --selftest                         RFC 5869 vectors, BCD round trips, profile A/B
