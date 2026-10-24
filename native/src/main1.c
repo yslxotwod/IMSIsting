@@ -2447,6 +2447,8 @@ module_id_words(const char *tok)
  * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
  */
 static const char *const plain_keys[] = {
+    "per_hex\tper hex",
+    "read_back\tread back",
     "attaches\tattaches",
     "bound\tbound",
     "cell_source\tcell source",
@@ -5951,6 +5953,7 @@ static const ChipRow chip_rows[] = {
     { "10_lte_air",          "--build-meas-report",   NEED_NO, DOES_BUILDS },
     { "10_lte_air",          "--build-reest-reject",  NEED_NO, DOES_BUILDS },
     { "10_lte_air",          "--build-rrc-release",   NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--build-sib1",          NEED_NO, DOES_BUILDS },
     { "10_lte_air",          "--build-sib10",         NEED_NO, DOES_BUILDS },
     { "10_lte_air",          "--build-sib11",         NEED_NO, DOES_BUILDS },
     { "10_lte_air",          "--build-sib12",         NEED_NO, DOES_BUILDS },
@@ -22692,6 +22695,32 @@ lair_build_messages(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(dcch_body), res);
     }
     gtk_box_append(GTK_BOX(body), dcch);
+
+    /* The cell's own advertisement: which operator it claims to be. This is
+       the first thing a handset reads and the first thing it decides on. */
+    {
+        GtkWidget *sib1_body;
+        GtkWidget *sib1 = verb_card("TARGET AN OPERATOR", &sib1_body);
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sib1_body),
+            mod_arg_choices(state, module_id, status, "Choose the operator", "",
+                "The PLMN the cell broadcasts. A handset's selection matches "
+                "against it, and the answer names the operator the codes belong "
+                "to, the tracking area, and whether the cell is selectable.",
+                (const char *[]) { "--build-sib1 --plmn 001-01 --tac 1A2B --cellid 0011223",
+                                   "--build-sib1 --plmn 208-01 --tac 1A2B --cellid 0011223",
+                                   "--build-sib1 --plmn 310260 --tac 0001 --cellid 0000001" },
+                (const char *[]) { "Test PLMN", "Orange FR", "T-Mobile US" }, 3));
+        gtk_box_append(GTK_BOX(sib1_body), res);
+        gtk_box_append(GTK_BOX(sib1_body), fkit_note(
+            "The body is built by the same PER codec the reader uses and is "
+            "decoded back before it is printed: a target the tree cannot read "
+            "back is not a target it has built. SIB1 only - no MIB, no "
+            "scheduling, no transmitter."));
+        gtk_box_append(GTK_BOX(body), sib1);
+    }
 
     {
         GtkWidget *res = result_rect_new(state, NULL);

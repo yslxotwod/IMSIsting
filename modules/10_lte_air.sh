@@ -1290,6 +1290,115 @@ lair_decode_mib() {
     return 0
 }
 
+# ── SIB1 targeting: a cell that names a chosen operator (R6) ────────────
+#
+# SIB1 is where a UE decides whether a cell is *its* cell: PLMN selection
+# matches the broadcast PLMN list (TS 23.122 §4.4), tracking area decides
+# whether the UE believes it has moved, and the cell identity is the name the
+# handset reports afterwards. Building one for a chosen operator is the cheapest
+# real step toward a cell a handset will select, which is why the verb names the
+# operator the PLMN belongs to rather than printing bare digits.
+#
+# The encoding is tools/lte_asn1.py (TS 36.331 unaligned PER) and the same
+# body is read back by --decode-sib before the answer is printed: a target the
+# tree cannot decode is a target this tree has not built.
+lair_cmd_build_sib1() {
+    local mcc="" mnc="" tac="0001" cellid="0000001" band="20" qrx="" barred="notBarred"
+    while (( $# > 0 )); do
+        case "${1:-}" in
+            --plmn)
+                local plmn="${2:-}"
+                [[ "$plmn" =~ ^[0-9]{5,6}$ ]] || [[ "$plmn" == *-* ]] || {
+                    printf 'ERROR\t--plmn takes MCC and MNC: 20801, 208-01 or 310260\n' >&2
+                    return 2; }
+                if [[ "$plmn" == *-* ]]; then mcc="${plmn%%-*}"; mnc="${plmn#*-}"
+                else mcc="${plmn:0:3}"; mnc="${plmn:3}"; fi
+                shift 2 ;;
+            --mcc)   mcc="${2:-}"; shift 2 ;;
+            --mnc)   mnc="${2:-}"; shift 2 ;;
+            --tac)   tac="${2:-}"; shift 2 ;;
+            --cellid) cellid="${2:-}"; shift 2 ;;
+            --band)  band="${2:-}"; shift 2 ;;
+            --qrxlevmin) qrx="${2:-}"; shift 2 ;;
+            --barred) barred="barred"; shift ;;
+            *) printf 'ERROR\t--build-sib1 does not take %s\n' "$(lair_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$mcc" && -n "$mnc" ]] || {
+        printf 'ERROR\tusage: --build-sib1 --plmn <mccmnc> [--tac hex4] [--cellid hex7] [--band n] [--qrxlevmin n] [--barred]\n' >&2
+        return 2; }
+    [[ "$mcc" =~ ^[0-9]{3}$ ]] || { printf 'ERROR\tMCC must be 3 digits, got %s\n' "$(lair_sanitize "$mcc")" >&2; return 2; }
+    [[ "$mnc" =~ ^[0-9]{2,3}$ ]] || { printf 'ERROR\tMNC must be 2 or 3 digits, got %s\n' "$(lair_sanitize "$mnc")" >&2; return 2; }
+    [[ "$tac" =~ ^[0-9A-Fa-f]{4}$ ]] || { printf 'ERROR\t--tac is 4 hex digits (the TAC is 16 bits), got %s\n' "$(lair_sanitize "$tac")" >&2; return 2; }
+    [[ "$cellid" =~ ^[0-9A-Fa-f]{7}$ ]] || { printf 'ERROR\t--cellid is 7 hex digits (28-bit E-UTRAN cell identity), got %s\n' "$(lair_sanitize "$cellid")" >&2; return 2; }
+    [[ "$band" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--band is the E-UTRA band number\n' >&2; return 2; }
+    if [[ -n "$qrx" ]]; then
+        [[ "$qrx" =~ ^-?[0-9]+$ ]] || { printf 'ERROR\t--qrxlevmin is an integer in dBm\n' >&2; return 2; }
+    fi
+
+    local tool="$IMSISTING_ROOT/tools/lte_asn1.py"
+    [[ -r "$tool" ]] || { printf 'ERROR\tmissing %s\n' "$tool" >&2; return 1; }
+
+    local -a args=(sib1 --mcc "$mcc" --mnc "$mnc" --tac "${tac^^}" --cellid "${cellid^^}" --band "$band")
+    [[ -n "$qrx" ]] && args+=(--qrxlevmin "$qrx")
+    # The codec takes the value, not a bare flag: --barred barred.
+    args+=(--barred "$barred")
+
+    local out rc
+    out=$(python3 "$tool" "${args[@]}" 2>&1); rc=$?
+    if (( rc != 0 )); then
+        printf 'ERROR\ttools/lte_asn1.py refused: %s\n' \
+            "$(lair_sanitize "$(printf '%s' "$out" | head -1)")" >&2
+        return 1
+    fi
+    local per bits octets
+    per=$(printf '%s\n' "$out" | awk -F'\t' '$1=="per_hex"{print $2; exit}')
+    bits=$(printf '%s\n' "$out" | awk -F'\t' '$1=="bits"{print $2; exit}')
+    octets=$(printf '%s\n' "$out" | awk -F'\t' '$1=="octets"{print $2; exit}')
+    [[ -n "$per" ]] || { printf 'ERROR\tthe encoder returned no SIB1 body\n' >&2; return 1; }
+
+    # The read-back is the proof: the target has to survive its own decoder.
+    local back back_plmn back_tac operator selectable
+    back=$(lair_decode_sib1 "$per" 2>/dev/null)
+    back_plmn=$(printf '%s\n' "$back" | awk -F'\t' '$1=="plmn"{print $2; exit}')
+    back_tac=$(printf '%s\n' "$back" | awk -F'\t' '$1=="tracking_area_code"{print $2; exit}')
+    operator=$(lair_plmn_name "$mcc-$mnc")
+    selectable="yes"
+    [[ "$barred" == "barred" ]] && selectable="no"
+
+    printf 'message\tBCCH-DL-SCH-Message\n'
+    printf 'sib\tSystemInformationBlockType1\n'
+    printf 'layout\tTS 36.331 unaligned PER (tools/lte_asn1.py)\n'
+    printf 'plmn\t%s-%s\n' "$mcc" "$mnc"
+    printf 'mcc\t%s\n' "$mcc"
+    printf 'mnc\t%s\n' "$mnc"
+    printf 'operator\t%s\n' "$operator"
+    printf 'tracking_area_code\t%s\n' "$(( 16#${tac^^} ))"
+    printf 'cell_identity\t%s\n' "$(( 16#${cellid^^} ))"
+    printf 'cell_identity_hex\t%s\n' "${cellid^^}"
+    printf 'freq_band_indicator\t%s\n' "$band"
+    printf 'cell_barred\t%s\n' "$barred"
+    printf 'selectable\t%s\n' "$selectable"
+    printf 'bits\t%s\n' "$bits"
+    printf 'octets\t%s\n' "$octets"
+    printf 'per_hex\t%s\n' "${per^^}"
+    printf 'target\tthe PLMN list a UE matches in cell selection (TS 23.122 4.4), the tracking area it compares with its own, and the cell identity it reports afterwards\n'
+    if [[ "$back_plmn" == "$mcc-$mnc" && "$back_tac" == "$(( 16#${tac^^} ))" ]]; then
+        printf 'read_back\tthe built body decodes as %s-%s, TAC %s\n' "$mcc" "$mnc" "$(( 16#${tac^^} ))"
+    else
+        printf 'read_back\tMISMATCH: built for %s-%s but decoded as %s\n' "$mcc" "$mnc" "$back_plmn"
+        printf 'WARN\tthe built SIB1 does not decode back as the target; treat the bytes as unverified\n' >&2
+    fi
+    case "$mcc" in
+        001) printf 'note\tMCC 001 is the test PLMN (TS 23.122 Annex A): no commercial operator uses it, which is what makes it safe to broadcast in a lab\n' ;;
+        999) printf 'note\tMCC 999 is the internal/test PLMN: reserved, never a commercial operator\n' ;;
+    esac
+    printf 'ref\t3GPP TS 36.331 6.2.2 (SIB1), TS 23.122 4.4 (PLMN selection)\n'
+    printf 'limit\tSIB1 only: no MIB, no BCCH scheduling and no PHY, so this is the broadcast content and not a transmitting cell\n'
+    printf 'built\tyes\n'
+    printf 'sent\t0\n'
+}
+
 # SIB-type dispatcher: --decode-sib <hex> takes the SIB type from the
 # caller's second argument, defaulting to SIB1.
 #
@@ -2312,6 +2421,38 @@ lair_selftest() {
     chk plmn-octets-bad   "$(lair_plmn_from_octets 02F8 >/dev/null 2>&1; echo $?)" "1"
     chk plmn-octets-nonhex "$(lair_plmn_from_octets ZZZZZZ >/dev/null 2>&1; echo $?)" "1"
     chk plmn-name-20801   "$(lair_plmn_name 208-01)" "Orange FR"
+
+    # ── SIB1 targeting (R6) ────────────────────────────────────────────
+    # The body is built through tools/lte_asn1.py and read back through the
+    # decoder above; the pinned vector is the one that round trip produced, so
+    # a codec change that moves the bits shows up here and not in the field.
+    local sib1; sib1=$(lair_cmd_build_sib1 --plmn 208-01 --tac 1A2B --cellid 0011223 2>&1)
+    chk sib1-plmn   "$(fld "$sib1" plmn)" "208-01"
+    chk sib1-operator "$(fld "$sib1" operator)" "Orange FR"
+    chk sib1-tac    "$(fld "$sib1" tracking_area_code)" "6699"
+    chk sib1-cell   "$(fld "$sib1" cell_identity_hex)" "0011223"
+    chk sib1-band   "$(fld "$sib1" freq_band_indicator)" "20"
+    chk sib1-hex    "$(fld "$sib1" per_hex)" "404820031A2B0011223C0130208280"
+    chk sib1-bits   "$(fld "$sib1" bits)" "118"
+    chk sib1-selectable "$(fld "$sib1" selectable)" "yes"
+    chk sib1-readback "$(fld "$sib1" read_back)" "the built body decodes as 208-01, TAC 6699"
+    chk sib1-built  "$(fld "$sib1" built)" "yes"
+    chk sib1-sent   "$(fld "$sib1" sent)" "0"
+    chk sib1-limit-named "$(fld "$sib1" limit | grep -q 'no MIB' && echo yes || echo no)" "yes"
+    # A three-digit MNC has its own PLMN layout; the round trip proves it.
+    local sib1b; sib1b=$(lair_cmd_build_sib1 --plmn 310260 --tac 0001 --cellid 0000001 2>&1)
+    chk sib1-3mnc   "$(fld "$sib1b" plmn)" "310-260"
+    chk sib1-3mnc-readback "$(fld "$sib1b" read_back)" "the built body decodes as 310-260, TAC 1"
+    # A barred cell is built, decodes, and is not selectable.
+    local sib1c; sib1c=$(lair_cmd_build_sib1 --plmn 001-01 --barred 2>&1)
+    chk sib1-barred "$(fld "$sib1c" cell_barred)" "barred"
+    chk sib1-barred-selectable "$(fld "$sib1c" selectable)" "no"
+    chk sib1-lab-note "$(fld "$sib1c" note | grep -q 'test PLMN' && echo yes || echo no)" "yes"
+    # Refusals: the fields a cell cannot invent.
+    chk sib1-no-plmn  "$(lair_cmd_build_sib1 >/dev/null 2>&1; echo $?)" "2"
+    chk sib1-bad-tac  "$(lair_cmd_build_sib1 --plmn 001-01 --tac 12345 >/dev/null 2>&1; echo $?)" "2"
+    chk sib1-bad-cell "$(lair_cmd_build_sib1 --plmn 001-01 --cellid 0011 >/dev/null 2>&1; echo $?)" "2"
+    chk sib1-bad-plmn "$(lair_cmd_build_sib1 --plmn 0010 >/dev/null 2>&1; echo $?)" "2"
     chk plmn-name-unknown "$(lair_plmn_name 999-99)" "unknown"
 
     # A real SIB1, captured from pycrate 0.8.1 (an independent TS 36.331
@@ -4899,6 +5040,7 @@ lair_cli_main() {
         --paging-frame) lair_cmd_paging_frame "$@" ;;
         --gen-enb-conf) lair_cmd_gen_enb_conf "$@" ;;
         --clone-recon)  lair_cmd_clone_recon "$@" ;;
+        --build-sib1)   lair_cmd_build_sib1 "$@" ;;
         --build-sib10|--build-sib11|--build-sib12)
                         lair_cmd_build_sib${cmd#--build-sib} "$@" ;;
         --enb-sib-schedule) lair_cmd_enb_sib_schedule "$@" ;;
@@ -4921,6 +5063,11 @@ Usage: $0 COMMAND
   --earfcn <N>                     EARFCN -> band, DL MHz, UL MHz, spacing
   --decode-sib <hex> [1..13]
                                    parse a SIB body (default SIB1)
+  --build-sib1 --plmn <mccmnc> [--tac hex4] [--cellid hex7] [--band n]
+              [--qrxlevmin n] [--barred]
+                                   build the SIB1 a cell broadcasts: the PLMN a
+                                   handset's selection matches, the tracking
+                                   area and the cell identity it reports
   --decode-mib <hex>               decode the 24-bit LTE MIB (BCCH-BCH)
   --x2-setup <mcc> <mnc> <enb-id> <pci> <cell-id> <tac>
                                    write an X2SetupRequest (TS 36.423, aligned
