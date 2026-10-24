@@ -374,7 +374,8 @@ sudo ./imsisting.sh          # CLI menu
 ./imsisting.sh --tui         # launch the TUI
 ```
 
-<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/5a5784da-9f1d-43dd-b02c-8d8b2591a870" />
+<img width="1366" height="708" alt="image" src="https://github.com/user-attachments/assets/597fcd5c-9694-4c74-95d7-211a0a5c8e3b" />
+
 
 Or launch the built binary directly:
 
