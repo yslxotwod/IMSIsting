@@ -6213,6 +6213,8 @@ static const ChipRow chip_rows[] = {
     { "16_sim",              "--__index_probe__",     NEED_NO, DOES_READS },
     { "16_sim",              "--aka-responder",       NEED_NO, DOES_MODIFIES },
     { "16_sim",              "--auts-build",          NEED_NO, DOES_BUILDS },
+    { "16_sim",              "--eid",                 NEED_NO, DOES_READS },
+    { "16_sim",              "--request",             NEED_NO, DOES_READS },
     { "16_sim",              "--rsp-audit",           NEED_NO, DOES_READS },
     { "16_sim",              "--rsp-plan",            NEED_NO, DOES_READS },
     { "16_sim",              "--card-cryptogram",      NEED_NO, DOES_READS },
