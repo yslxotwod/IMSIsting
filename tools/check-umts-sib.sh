@@ -992,6 +992,135 @@ for name, args in (("refuse SF=64", ["pack", "--sf", "64"]),
         (r.returncode, ("ERROR\t" in r.stdout or "ERROR\t" in r.stderr)),
         (2, True))
 
+# --- section 3c: the MIB derived from the SIB set, and its BCH split ------
+# A cell's MIB lists the blocks it transmits.  Deriving it from the same set
+# the S-CCPCH carries is the difference between a consistent cell and two
+# tools that each look right.  The MIB does not fit a 24 bit BCH transport
+# block, so it goes out in consecutive blocks: the split has to concatenate
+# back to the encoded MIB bit for bit.
+REP_DEFAULT = {"sib1": 8, "sib3": 8, "sib5": 16}
+
+
+def hexes_to_bits(hx, nbits):
+    """The tool prints bit strings as hex octets: first bit in the MSB."""
+    return [int(b) for c in hx for b in format(int(c, 16), "04b")][:nbits]
+
+
+for spec, want in (("sib1", ["sysInfoType1"]),
+                   ("sib1,sib3", ["sysInfoType1", "sysInfoType3"]),
+                   ("sib1,sib3,sib5", ["sysInfoType1", "sysInfoType3",
+                                       "sysInfoType5"])):
+    r = run("mib", "--from-sibs", spec)
+    chk("mib/from-sibs %s: exits 0" % spec, r.returncode, 0)
+    d = rows_of(r)
+    seen = [v.split("; ")[-1].rstrip("]")
+            for v in d.get("ref", []) if "SIBSb-TypeAndTag" in v]
+    chk("mib/from-sibs %s: the reference list is the set, in order" % spec,
+        seen, want)
+    chk("mib/from-sibs %s: one reference per block" % spec,
+        len([v for v in d.get("ref", []) if "SIBSb-TypeAndTag" in v]),
+        len(want))
+    reps = [v.split("SIB_REP = ")[1].rstrip("]") for v in d.get("ref", [])
+            if "SIB_REP = " in v]
+    chk("mib/from-sibs %s: repeats follow the plan (SIB1/SIB3 8, SIB5 16)"
+        % spec,
+        reps, [str(REP_DEFAULT[n]) for n in spec.split(",")])
+
+# a different set is a different MIB: this is the coupling that was missing
+m_a = one(rows_of(run("mib", "--from-sibs", "sib1")), "hex")
+m_b = one(rows_of(run("mib", "--from-sibs", "sib1,sib3")), "hex")
+chk_true("mib/from-sibs: dropping a block changes the MIB", m_a != m_b,
+         "%s vs %s" % (m_a, m_b))
+m_t = one(rows_of(run("mib", "--schedule", "sib1:1:8")), "hex")
+m_f = one(rows_of(run("mib", "--from-sibs", "sib1")), "hex")
+chk("mib/from-sibs: one block equals the typed schedule for that block",
+    m_f, m_t)
+
+for name, args in (
+        ("refuse --from-sibs with --schedule",
+         ["mib", "--from-sibs", "sib1", "--schedule", "sib1:1:8"]),
+        ("refuse a block that is not schedulable",
+         ["mib", "--from-sibs", "mib"]),
+        ("refuse a duplicate in --from-sibs",
+         ["mib", "--from-sibs", "sib1,sib1"]),
+        ("refuse an empty --from-sibs",
+         ["mib", "--from-sibs", " , "]),
+        ("refuse --segments 0", ["mib", "--segments", "0"])):
+    r = run(*args)
+    chk("mib: %s" % name,
+        (r.returncode, "ERROR\t" in (r.stdout + r.stderr)), (2, True))
+
+# the split, against the MIB bits it claims to carry
+MIBS = run("mib", "--from-sibs", "sib1,sib3,sib5", "--segments", "24")
+chk("mib/segments: exits 0", MIBS.returncode, 0)
+md = rows_of(MIBS)
+chk("mib/segments: the BCH block size is named", one(md, "bch_tb_bits"), "24")
+nbits = int(one(md, "bits"))
+nsegs = int(one(md, "segments"))
+chk("mib/segments: ceil(bits / 24) blocks", nsegs, (nbits + 23) // 24)
+sx = [one(md, "seg[%d].hex" % i) for i in range(nsegs)]
+chk("mib/segments: every block is %d hex digits" % 6,
+    [len(h) for h in sx], [6] * nsegs)
+joined = hexes_to_bits("".join(sx), nbits)
+mib_bits = hexes_to_bits(one(md, "hex"), nbits)
+chk("mib/segments: the blocks concatenate back to the MIB", joined, mib_bits)
+chk("mib/segments: the reassembly row agrees with the MIB hex",
+    one(md, "reassemble").split()[1], one(md, "hex"))
+used = [int(v.split()[0]) for v in md.get("seg", [])]
+last_used = int(one(md, "seg[%d].bits" % (nsegs - 1)).split()[0])
+chk("mib/segments: only the last block is short", last_used,
+    nbits - 24 * (nsegs - 1))
+pads = [int(v.split(",")[1].split()[0])
+        for v in [one(md, "seg[%d].bits" % i) for i in range(nsegs)]]
+chk("mib/segments: the pad is the difference to the block size",
+    pads, [0] * (nsegs - 1) + [24 - last_used])
+
+# --- section 3d: the frame timeline --------------------------------------
+# One FACH transport block per TTI.  Two SIBs in one frame is a frame that
+# decodes as neither, so the planner has to place them on distinct frames and
+# the placement it prints is what the S-CCPCH encoder is told to honour.
+TL = run("pack", "--add", "sib1", "--add", "sib3", "--add", "sib5",
+         "--timeline")
+chk("timeline: exits 0", TL.returncode, 0)
+td = rows_of(TL)
+cycle = int(one(td, "schedule.cycle").split()[0])
+chk("timeline: the cycle is the longest repetition period (SIB5, 16)",
+    cycle, 16)
+n_msg = int(one(td, "frames"))
+sched = {}
+for row in td.get("schedule.frame", []):
+    f, rest = row.split(" ", 1)
+    sched[int(f)] = rest
+chk("timeline: one row per frame of the cycle", len(sched), cycle)
+chk("timeline: no frame carries two transport blocks",
+    [v for v in sched.values() if v.count("msg[") > 1], [])
+places = {}
+for i in range(n_msg):
+    v = one(td, "msg[%d].frame" % i)
+    st = int(v.split()[0].split("=")[1])
+    per = int(v.split()[1].split("=")[1])
+    places[i] = (st, per)
+    want_frames = [f for f in range(cycle) if (f - st) % per == 0]
+    got_frames = [f for f, v in sched.items() if v.startswith("msg[%d] " % i)]
+    chk("timeline: message %d is on exactly the frames its start and period "
+        "name" % i, got_frames, want_frames)
+chk("timeline: periods are the SIB's repetition period",
+    {i: p[1] for i, p in places.items()}, {0: 8, 1: 8, 2: 16, 3: 16})
+idle = [f for f, v in sched.items() if v == "idle"]
+chk("timeline: the idle frame count is printed",
+    one(td, "schedule.frames"),
+    "%d of %d frames carry a transport block, %d are idle"
+    % (cycle - len(idle), cycle, len(idle)))
+chk_true("timeline: at least one frame is idle (no stacking)",
+         len(idle) > 0, "%d idle" % len(idle))
+NT = run("pack", "--add", "sib1", "--timeline")
+ntd = rows_of(NT)
+chk("timeline: one block alone is one frame per 8 frame cycle",
+    (int(one(ntd, "schedule.cycle").split()[0]),
+     one(ntd, "msg[0].frame")), (8, "start=0 period=8 sib=sib1"))
+chk("timeline: without --timeline no schedule is printed",
+    rows_of(run("pack", "--add", "sib1")).get("schedule.cycle"), None)
+
 # --- section 4: the tool's own contract ---------------------------------
 p = run("list")
 d = rows_of(p)

@@ -8,7 +8,11 @@ tools/umts_phy.py.  This file is the other direction -- what a *handset* sends:
     request       RRC CONNECTION REQUEST, UL-CCCH, TS 25.331 clause 10.2.39
     prach         the PRACH preamble, TS 25.213 4.3.3.2/4.3.3.3 + TS 25.211 5.2.2.1.2
     message-part  the DPCCH/DPDCH slot structure of the RACH message part,
-                  TS 25.211 5.2.2.1.3, as a bit structure (not as chips)
+                  TS 25.211 5.2.2.1.3, spread with the signature's codes,
+                  weighted by beta_c/beta_d and scrambled (TS 25.213 4.2.2.2,
+                  4.3.1.3, 4.3.2.5) -- as chips and, with --out, as samples
+    burst         the whole random-access transmission: N preambles, a gap, and
+                  the message part, TS 25.211 5.2.2.1.1 figure 4
     list          the verbs and their flags
 
 Output is one row per fact, tab separated: the same shape as tools/umts_sib.py,
@@ -200,44 +204,44 @@ LIMITS = (
         "that timing is not built here.",
     ),
     (
-        "message-part-spreading",
-        "message-part names the channelisation codes but does not spread and does "
-        "not apply beta gains: TS 25.213 4.3.1.3 gives the control part "
-        "cc = Cch,256,16*s+15 and the data part cd = Cch,SF,SF*s/16 for preamble "
-        "signature s, TS 25.213 4.2.2.2 puts the data part on the I branch and the "
-        "control part on the Q branch multiplied by beta_d and beta_c, and "
-        "beta_c/beta_d are signalled by the network in the PRACH message-part "
-        "gains.  Without them any chip stream would be a shape, not a signal.",
+        "message-part-gain-quantisation",
+        "the gain factors are the 4-bit signalled words of TS 25.331 "
+        "GainFactor ::= INTEGER (0..15), mapped here to word/15 with 15 -> 1.0.  "
+        "The word-to-amplitude table itself is TS 25.214 5.1.2.2, which this tree "
+        "does not carry; the ratio between beta_c and beta_d is what the samples "
+        "preserve either way, and a caller who needs the exact amplitudes from "
+        "that table has to supply them.",
     ),
     (
-        "message-part-scrambling",
-        "message-part does not scramble: TS 25.213 4.3.2.5 needs S_r-msg,n(i) = "
-        "C_long,n(i + 4096) for i = 0..38399, and C_long,n(i) depends on "
-        "c_long,2,n(2*floor(i/2)) = Z_n((2*floor(i/2) + 16777232) mod (2^25-1)).  "
-        "The Gold sequence would therefore have to be run to symbol index about "
-        "16.8 million in a pure Python loop for every message part.  prach needs "
-        "only indices 0..4095, which is why the preamble is generated as chips and "
-        "the message part is not.",
+        "message-part-gap",
+        "burst puts the message part straight after the last preamble, which is "
+        "what TS 25.211 5.2.2.1.1 figure 4 draws.  The gap a real network uses is "
+        "signalled by higher layers and is an input here (--gap-chips), not "
+        "derived.",
     ),
     (
         "message-part-tfci-coding",
         "message-part takes the 30 TFCI bits as an input codeword and does not "
-        "encode a TFCI value: TS 25.212 4.3 (coding of the TFCI) turns a set of "
-        "transport format combinations into those 30 bits, and that coding is "
-        "built nowhere in this tree for the uplink direction.",
+        "encode one: TS 25.212 4.3.3 (coding of the TFCI) is what turns a 10-bit "
+        "TFC index into the 32-bit Reed-Muller word and 4.3.5.1 punctures it to "
+        "the 30 bits a slot carries, and that encoder is the `tfci` verb of this "
+        "same file -- so the honest statement here is that message-part does not "
+        "call it, not that it does not exist.",
     ),
     (
         "message-part-transport-chain",
         "message-part takes the data bits as an input bit string and does not run "
-        "the RACH transport channel: TS 25.212 4.2 (the uplink transport chain: "
-        "CRC attachment, transport block concatenation, channel coding, rate "
-        "matching, interleaving) is not built for the uplink here.",
+        "the RACH transport channel: TS 25.212 4.2 in uplink order (CRC, channel "
+        "coding, radio frame size equalisation, 1st interleaving, radio frame "
+        "segmentation, per-frame rate matching, 2nd interleaving) is the `chain` "
+        "verb, and message-part is where its output lands.",
     ),
     (
         "message-part-samples",
-        "message-part writes no samples file: without spreading, gains and "
-        "scrambling (see the three limits above) the only honest output is the bit "
-        "structure, so this verb has no --out.",
+        "message-part without --out writes no samples file: the bit structure is "
+        "the whole of what that call asks for.  With --out it writes the spread, "
+        "weighted and scrambled chips of one or two 10 ms frames, normalised by a "
+        "single linear factor that the beta ratio does not change.",
     ),
     (
         "prach-no-pulse-shaping",
@@ -286,6 +290,41 @@ LIMITS = (
         "over GSMTAP for the same octets, and a from-the-clause recomputation for "
         "the PRACH chips); round trips through this file prove nothing.",
     ),
+    (
+        "chain-turbo-coding",
+        "the `chain` verb codes with the convolutional code of TS 25.212 4.2.3.1 "
+        "(rate 1/2 or 1/3) or not at all.  Turbo coding (4.2.3.2, rate 1/3 with "
+        "the 1st and 2nd parity streams and the Trellis termination of 4.2.3.2.2) "
+        "is not built, so a transport format that names it is not this verb's to "
+        "produce.",
+    ),
+    (
+        "chain-code-block-segmentation",
+        "no code block segmentation (TS 25.212 4.2.2) is applied: the block goes in "
+        "whole.  A convolutional code's maximum block size is 504 bits, so a "
+        "transport block longer than that is a format this verb prints without "
+        "splitting rather than one it refuses, and the row says so.",
+    ),
+    (
+        "chain-compressed-mode",
+        "compressed mode (TS 25.212 4.4) is not built: there is no transmission gap, "
+        "no N_first/TGL, no p-bits inserted before the 1st interleaver (4.2.5.1) "
+        "and no compressed N_data,cm in the rate matching parameters.  Every frame "
+        "this verb produces is a normal frame.",
+    ),
+    (
+        "chain-no-transmission",
+        "`chain` produces the frame bits a message part would carry, not chips and "
+        "not a transmission: feed `data_hex` to message-part (or burst) for the "
+        "spreading, and see no-uplink-transmission for what is missing above that.",
+    ),
+    (
+        "tfci-hard-split",
+        "`tfci` encodes a single 10-bit TFC index in normal mode (TS 25.212 4.3.3 "
+        "+ 4.3.5.1).  Hard split mode (4.3.4, where the code word is split between "
+        "a DCH and a DSCH CCTrCH through the pi1/pi2 permutations of 4.3.4) is a "
+        "DSCH feature and is not built.",
+    ),
 )
 
 # The limit rows a given verb still owes (the rest are general).
@@ -295,9 +334,15 @@ VERB_LIMITS = {
                 "pycrate-referee"),
     "prach": ("no-uplink-transmission", "prach-no-pulse-shaping",
               "prach-decomposition-switches", "pycrate-referee"),
-    "message-part": ("message-part-spreading", "message-part-scrambling",
-                     "message-part-tfci-coding", "message-part-transport-chain",
-                     "message-part-samples", "pycrate-referee"),
+    "message-part": ("message-part-gain-quantisation", "message-part-tfci-coding",
+                     "message-part-transport-chain", "message-part-samples",
+                     "pycrate-referee"),
+    "burst": ("no-uplink-transmission", "message-part-gain-quantisation",
+              "message-part-gap", "message-part-tfci-coding",
+              "message-part-transport-chain"),
+    "chain": ("chain-turbo-coding", "chain-code-block-segmentation",
+              "chain-compressed-mode", "chain-no-transmission"),
+    "tfci": ("tfci-hard-split",),
 }
 
 
@@ -342,6 +387,30 @@ def _bits_hex(bits):
     pad = (-len(bits)) % 8
     bits = bits + "0" * pad
     return "%0*x" % (len(bits) // 4, int(bits, 2))
+
+
+def _fit_hex_bits(text, width, what, lead_note=""):
+    """A hex string whose value must fit `width` bits.
+
+    Hex is a whole number of nibbles, so a bit field whose width is not a
+    multiple of four arrives as "%04d" style padding: TS 25.331 12.1 zero-pads
+    the last octet.  The padding is therefore allowed and trimmed here, but
+    only if those trailing bits really are zero -- a hex string that carries
+    information past the field width is still refused.
+    """
+    given = len(text) * 4
+    iv = int(text, 16)
+    trimmed = 0
+    if given > width:
+        extra = given - width
+        if iv & ((1 << extra) - 1):
+            _die(2, "%s has %d bits, the field holds %d%s"
+                 % (what, given, width, lead_note),
+                 "the bits past the field are not zero, so this is not "
+                 "TS 25.331 12.1 octet padding")
+        iv >>= extra
+        trimmed = extra
+    return _bits_int(iv, width), width - given if given < width else 0, trimmed
 
 
 def _pad_bits(bits):
@@ -576,21 +645,140 @@ def cmd_request(a):
 
 
 # ── PRACH preamble (TS 25.213 4.3.3, TS 25.211 5.2.2.1.2) ──────────────
-def _gold_signs(n, count):
-    """Z_n(i) for i = 0..count-1, TS 25.213 4.3.2.2 (degree 25 Gold sequence)."""
+# The x and y m-sequences of TS 25.213 4.3.2.2 are linear recurrences of degree
+# 25, so the state 25 chips ahead is a fixed GF(2) matrix applied 25 times.  A
+# message part needs Z_n at index 16777232 + 2*q, about 16.8 million -- running
+# the shift register forward would be 16.8 million Python steps per call, so the
+# matrix is raised to the needed power instead and the run starts there.  The
+# sequence is identical either way; tools/check-umts-uplink.sh checks the jump
+# against a plain forward run over a window it can afford.
+_GF2_MASK = (1 << 25) - 1
+
+
+def _gf2_companion(taps):
+    """The 25x25 companion matrix of a recurrence, rows as bit masks."""
+    rows = [1 << (j + 1) for j in range(24)]
+    rows.append(sum(1 << t for t in taps))
+    return rows
+
+
+def _gf2_parity(x):
+    return bin(x).count("1") & 1
+
+
+def _gf2_matvec(m, v):
+    """m is 25 rows as bit masks over the input vector; the product is a vector
+    whose bit j is the parity of row j restricted to the set bits of v."""
+    return sum(_gf2_parity(m[j] & v) << j for j in range(25))
+
+
+def _gf2_matmul(a, b):
+    """Row j of a*b is the XOR of the rows of b that row j of a selects."""
+    out = []
+    for row in a:
+        acc = 0
+        i = 0
+        r = row
+        while r:
+            if r & 1:
+                acc ^= b[i]
+            r >>= 1
+            i += 1
+        out.append(acc)
+    return out
+
+
+def _advance(state, steps, taps):
+    """Run a 25-tap linear recurrence `steps` chips forward in O(log steps)."""
+    m = _gf2_companion(taps)
+    while steps:
+        if steps & 1:
+            state = _gf2_matvec(m, state)
+        steps >>= 1
+        if steps:
+            m = _gf2_matmul(m, m)
+    return state
+
+
+_X_TAPS = (0, 3)          # x_n(i+25) = x_n(i+3) + x_n(i)     modulo 2
+_Y_TAPS = (0, 1, 2, 3)    # y(i+25)   = y(i+3)+y(i+2)+y(i+1)+y(i) modulo 2
+
+
+def _gold_signs_at(n, start, count):
+    """Z_n(i) for i = start .. start+count-1, TS 25.213 4.3.2.2."""
     if not (0 <= n < (1 << 25)):
         _die(2, "scrambling code number %d is outside 0..2^25-2" % n)
-    x = [(n >> i) & 1 for i in range(25)]
-    x[24] = 1                                  # x_n(24) = 1 by definition
-    y = [1] * 25
+    if start < 0:
+        _die(2, "the Gold sequence index %d is negative" % start)
+    xs = (n & 0xFFFFFF) | (1 << 24)      # x_n(0..23) = bits of n, x_n(24) = 1
+    ys = _GF2_MASK                       # y(0..24) = 1
+    if start:
+        xs = _advance(xs, start, _X_TAPS)
+        ys = _advance(ys, start, _Y_TAPS)
     out = []
-    for i in range(count + 25):
-        if i >= 25:
-            # x_n(i+25) = x_n(i+3) + x_n(i) mod 2 ; y(i+25) = y(i+3)+y(i+2)+y(i+1)+y(i)
-            x.append(x[i - 25 + 3] ^ x[i - 25])
-            y.append(y[i - 25 + 3] ^ y[i - 25 + 2] ^ y[i - 25 + 1] ^ y[i - 25])
-        if i < count:
-            out.append(1 if (x[i] ^ y[i]) == 0 else -1)
+    ap = out.append
+    for _ in range(count):
+        ap(1 if ((xs & 1) ^ (ys & 1)) == 0 else -1)
+        xb = ((xs >> 3) ^ xs) & 1
+        xs = (xs >> 1) | (xb << 24)
+        yb = ((ys >> 3) ^ (ys >> 2) ^ (ys >> 1) ^ ys) & 1
+        ys = (ys >> 1) | (yb << 24)
+    return out
+
+
+def _gold_signs(n, count):
+    """Z_n(i) for i = 0..count-1, TS 25.213 4.3.2.2 (degree 25 Gold sequence)."""
+    return _gold_signs_at(n, 0, count)
+
+
+# ── channelisation codes and the message-part scrambling ─────────────────
+_OVSF_CACHE = {}
+
+
+def _ovsf(sf, k):
+    """Cch,sf,k, TS 25.213 4.3.1.1: Cch,sf,k = Cch,sf/2,floor(k/2) followed by
+    itself (k even) or by its negation (k odd)."""
+    if not (0 <= k < sf):
+        _die(2, "channelisation code Cch,%d,%d is outside the code tree" % (sf, k))
+    key = (sf, k)
+    if key in _OVSF_CACHE:
+        return _OVSF_CACHE[key]
+    if sf == 1:
+        out = (1,)
+    else:
+        parent = _ovsf(sf // 2, k // 2)
+        out = parent + parent if k % 2 == 0 else parent + tuple(-v for v in parent)
+    _OVSF_CACHE[key] = out
+    return out
+
+
+_C_LONG_PERIOD = (1 << 25) - 1
+_C_LONG_SHIFT = 16777232       # 4.3.2.2: c_long,2,n(i) = Z_n(i + 16777232)
+
+
+def _long_scrambling(n, start, count):
+    """C_long,n(i) for i = start .. start+count-1, TS 25.213 4.3.2.2:
+
+        C_long,n(i) = c_long,1,n(i) * (1 + j*(-1)**i * c_long,2,n(2*floor(i/2)))
+
+    with c_long,1,n(i) = Z_n(i) and c_long,2,n(i) = Z_n(i + 16777232 mod 2^25-1).
+    The two indices are jumped to in one pass each: the first is `start`, the
+    second is 2*floor(i/2) + 16777232, which moves one step per two chips.
+    """
+    c1 = _gold_signs_at(n, start, count)
+    q0 = start // 2
+    nq = (start + count - 1) // 2 - q0 + 1
+    m0 = (2 * q0 + _C_LONG_SHIFT) % _C_LONG_PERIOD
+    # the c_long,2 index is 2*floor(i/2) + 16777232, so it steps by TWO per q:
+    # both chips of a pair share one value, and the next pair is two indices on.
+    c2 = _gold_signs_at(n, m0, 2 * nq)[0::2]
+    out = []
+    ap = out.append
+    for t in range(count):
+        i = start + t
+        alt = 1 if (i & 1) == 0 else -1
+        # c2 advances every two chips: chip i uses index q = floor(i/2) - q0
+        ap(complex(c1[t], alt * c2[(i // 2) - q0]))
     return out
 
 
@@ -787,6 +975,223 @@ def _hex_field(text, what):
     return t
 
 
+# ── the message part as chips (TS 25.213 4.2.2.2, 4.3.1.3, 4.3.2.5) ────
+DATA_CODE_MIN_SF = 32
+DATA_CODE_MAX_SF = 256
+CONTROL_SF = 256
+
+
+def _spread(bits, code):
+    """Binary to real (+1 for '0', -1 for '1') then channelise: one symbol per
+    SF chips, TS 25.213 4.2.2.2."""
+    out = []
+    for b in bits:
+        sign = 1 if b == "0" else -1
+        out.extend(sign * c for c in code)
+    return out
+
+
+def _gain_from_word(word, name):
+    """A 4-bit signalled gain factor to an amplitude.
+
+    TS 25.331 10.3.6.xx GainFactor ::= INTEGER (0..15) is the signalled word;
+    TS 25.213 4.2.2.2 quantises the two amplitudes into 4-bit words and requires
+    "at least one of the values beta_c and beta_d has the amplitude 1.0".  The
+    word-to-amplitude table itself lives in TS 25.214 5.1.2.2, which this tree
+    does not carry, so the mapping used here is word/15 with 15 -> 1.0 and the
+    limit row says so.
+    """
+    if not (0 <= word <= 15):
+        _die(2, "%s %d is outside the 4-bit signalled range 0..15" % (name, word),
+             "TS 25.331 GainFactor ::= INTEGER (0..15)")
+    return 1.0 if word == 15 else word / 15.0
+
+
+def _message_part_chips(signature, fmt, data, tfci, beta_c, beta_d,
+                        scramble=True, code_number=0, frames=1):
+    """The 38400*chips_per_frame chips of a RACH message part.
+
+    Data part on the I branch spread by cd = Cch,SF,SF*s/16, control part on the
+    Q branch spread by cc = Cch,256,16*s+15, weighted by beta_d and beta_c, then
+    scrambled by S_r-msg,n(i) = C_long,n(i + 4096) aligned to each 10 ms frame.
+    """
+    sf, ndata = SLOT_FORMATS[fmt]
+    cd = _ovsf(sf, sf * signature // 16)
+    cc = _ovsf(CONTROL_SF, 16 * signature + 15)
+    chips = []
+    for frame in range(frames):
+        frame_chips = []
+        for slot in range(SLOTS_PER_FRAME):
+            # one data field per slot across the whole message part: a 20 ms
+            # part carries 2 x 15 x N_data distinct data bits, so the frame is
+            # part of the index and not a repeat of the first frame
+            k = (frame * SLOTS_PER_FRAME + slot) * ndata
+            dbits = data[k:k + ndata]
+            cbits = PILOT_PATTERNS[slot] + tfci[2 * slot:2 * slot + 2]
+            dsp = _spread(dbits, cd)
+            csp = _spread(cbits, cc)
+            if len(dsp) != CHIPS_PER_SLOT or len(csp) != CHIPS_PER_SLOT:
+                raise AssertionError("slot does not fill 2560 chips")
+            frame_chips.extend(complex(beta_d * dsp[c], beta_c * csp[c])
+                               for c in range(CHIPS_PER_SLOT))
+        if scramble:
+            # 4.3.2.5: the code is 10 ms long and restarts at each message part
+            # radio frame, offset by 4096 chips into the long sequence.
+            scr = _long_scrambling(code_number, _MSG_SCRAMBLE_OFFSET,
+                                   CHIPS_PER_FRAME)
+            frame_chips = [frame_chips[i] * scr[i] for i in range(CHIPS_PER_FRAME)]
+        chips.extend(frame_chips)
+    return chips
+
+
+_MSG_SCRAMBLE_OFFSET = 4096      # 4.3.2.5: S_r-msg,n(i) = C_long,n(i + 4096)
+
+
+def cmd_burst(a):
+    """Preamble repetitions and the message part joined into one transmission.
+
+    TS 25.211 5.2.2.1.1: "The random-access transmission consists of one or
+    several preambles of length 4096 chips and a message of length 10 ms or
+    20 ms", and 5.2.2.1.2/5.2.2.1.3 give the two parts.  Figure 4 draws them
+    adjacent.  The gap a real cell uses between the last preamble and the
+    message part is not fixed by that figure, so it is an input here.
+    """
+    if a.out is None:
+        _die(2, "burst needs --out",
+             "the verb joins two chip-level parts and writes them; the bit "
+             "structure of the preamble is what prach prints and of the message "
+             "part what message-part prints")
+    if not (1 <= a.preambles <= 64):
+        _die(2, "--preambles %d is outside 1..64" % a.preambles,
+             "a random-access attempt is one or several preambles; more than 64 "
+             "is a retry loop, not one transmission")
+    if a.gap_chips < 0:
+        _die(2, "--gap-chips %d is negative" % a.gap_chips,
+             "the gap between the last preamble and the message part is silence")
+    if a.gap_chips % CHIPS_PER_SLOT:
+        _die(2, "--gap-chips %d is not a whole number of slots" % a.gap_chips,
+             "TS 25.211 5.2.2.1.1: the transmission starts on access-slot "
+             "boundaries, which are 5120 chips apart, so a gap the network "
+             "signals is a slot multiple")
+    if not (0 <= a.signature < len(SIGNATURES)):
+        _die(2, "--signature %d is outside 0..15" % a.signature)
+    if not (0 <= a.psc < 512):
+        _die(2, "--psc %d is outside 0..511" % a.psc)
+    if not (0 <= a.code < 16):
+        _die(2, "--code %d is outside 0..15" % a.code)
+    if a.frames not in (1, 2):
+        _die(2, "--frames %d is not a message part length" % a.frames)
+    if a.format not in ("cf32", "ci16", "cu8"):
+        _die(2, "--format %r is not cf32, ci16 or cu8" % a.format)
+    if a.out == "-":
+        _die(2, "--out - is refused", "stdout carries the TSV summary")
+    beta_c = _gain_from_word(a.beta_c, "--beta-c")
+    beta_d = _gain_from_word(a.beta_d, "--beta-d")
+    if a.beta_c != 15 and a.beta_d != 15:
+        _die(2, "--beta-c %d and --beta-d %d both leave amplitude 1.0"
+             % (a.beta_c, a.beta_d),
+             "TS 25.213 4.2.2.2: one of the two gain factors is 1.0")
+    code_number = 16 * a.psc + a.code
+    spc = _rate_chip_samples(a.rate)
+
+    pre = _preamble_chips(a.signature, code_number, a.no_scrambling, False)
+    if a.frames == 1:
+        fmt = 3 if a.sf is None else None
+        if fmt is None:
+            for k, (sf, _n) in SLOT_FORMATS.items():
+                if sf == a.sf:
+                    fmt = k
+            if fmt is None:
+                _die(2, "--sf %d is not 256, 128, 64 or 32" % a.sf)
+    else:
+        if a.sf is None:
+            _die(2, "--frames 2 needs --sf",
+                 "a 20 ms message part carries 2 x 15 x N_data data bits, so the "
+                 "slot format has to be named rather than defaulted")
+        fmt = None
+        for k, (sf, _n) in SLOT_FORMATS.items():
+            if sf == a.sf:
+                fmt = k
+        if fmt is None:
+            _die(2, "--sf %d is not 256, 128, 64 or 32" % a.sf)
+    sf, ndata = SLOT_FORMATS[fmt]
+    data_bits = ndata * SLOTS_PER_FRAME * a.frames
+    data_text = _hex_field(a.data, "--data") if a.data else ""
+    if data_text:
+        data, _dp, _dt = _fit_hex_bits(
+            data_text, data_bits, "--data",
+            " over %d frame(s) of slot format %d" % (a.frames, fmt))
+    else:
+        data = "0" * data_bits
+    tfci = _bits_int(int(_hex_field(a.tfci or "0", "--tfci"), 16), 30)
+
+    msg = _message_part_chips(a.signature, fmt, data, tfci, beta_c, beta_d,
+                              scramble=not a.no_scrambling,
+                              code_number=code_number, frames=a.frames)
+    parts = []
+    for _ in range(a.preambles):
+        parts.extend(pre)
+    pre_chips = a.preambles * PREAMBLE_CHIPS
+    parts.extend([0j] * a.gap_chips)
+    parts.extend(msg)
+    peak = max(max(abs(v.real), abs(v.imag)) for v in parts)
+    scale = 1.0 / peak if peak > 0 else 1.0
+    samples = []
+    for v in parts:
+        z = v * scale
+        samples.extend([z] * spc)
+    with open(a.out, "wb") as fh:
+        fh.write(_quantise(samples, a.format))
+    rows = [
+        ("cli", "burst"),
+        ("signature", "%d of 0..15 (TS 25.213 4.3.3.3)" % a.signature),
+        ("preamble_code", "%d (n = 16*%d + %d)"
+         % (code_number, a.psc, a.code)),
+        ("preambles", str(a.preambles)),
+        ("preamble_chips", str(pre_chips)),
+        ("gap_chips", str(a.gap_chips)),
+        ("message_chips", str(len(msg))),
+        ("message_frames", str(a.frames)),
+        ("slot_format", "%d of 0..3, SF %d" % (fmt, sf)),
+        ("beta_c", "%d -> %.6f" % (a.beta_c, beta_c)),
+        ("beta_d", "%d -> %.6f" % (a.beta_d, beta_d)),
+        ("chips", str(len(parts))),
+        ("ms", "%.1f" % (len(parts) * 1000.0 / CHIP_RATE)),
+        ("samples_per_chip", str(spc)),
+        ("samples", str(len(samples))),
+        ("bytes", str(len(samples) * {"cf32": 8, "ci16": 4, "cu8": 2}[a.format])),
+        ("format", a.format),
+        ("out", a.out),
+        ("peak_chip", "%.6f" % peak),
+        ("scale", "%.6f -- one linear factor over the whole burst" % scale),
+        ("scrambling_code", "%d (n = 16*%d + %d, TS 25.213 4.3.3.2)"
+         % (code_number, a.psc, a.code)),
+        ("scrambling_start", "%d chips into C_long,n, reset at each 10 ms "
+         "message part frame (TS 25.213 4.3.2.5)" % _MSG_SCRAMBLE_OFFSET),
+        ("scrambling", "off -- the message part is unscrambled" if a.no_scrambling
+         else "S_r-msg,n(i) = C_long,n(i + %d) on the message part"
+              % _MSG_SCRAMBLE_OFFSET),
+        ("part[0]", "preamble x %d: chips 0..%d" % (a.preambles, pre_chips - 1)),
+        ("part[1]", "gap: chips %d..%d" % (pre_chips, pre_chips + a.gap_chips - 1)
+         if a.gap_chips else "gap: none"),
+        ("part[2]", "message part: chips %d..%d"
+         % (pre_chips + a.gap_chips, len(parts) - 1)),
+        ("ref", "TS 25.211 5.2.2.1.1: one or several preambles of 4096 chips and "
+                "a message of 10 or 20 ms"),
+        ("ref", "TS 25.211 5.2.2.1.3: the message part is 15 slots of 2560 chips "
+                "per 10 ms frame, data on I at SF %d, control on Q at SF 256"
+                % sf),
+        ("ref", "TS 25.213 4.3.2.5: the message part is scrambled by "
+                "S_r-msg,n(i) = C_long,n(i + 4096), restarting at each 10 ms "
+                "message part frame"),
+        ("ref", "TS 25.213 4.3.3.1: the preamble is C_pre,n,s(k) = "
+                "S_r-pre,n(k) x C_sig,s(k) x exp(j(pi/4 + k pi/2))"),
+    ]
+    _emit(rows)
+    _limits("burst")
+    return 0
+
+
 def cmd_message_part(a):
     if not (0 <= a.signature < len(SIGNATURES)):
         _die(2, "--signature %d is outside 0..15" % a.signature,
@@ -810,23 +1215,20 @@ def cmd_message_part(a):
             _die(2, "--k %d is outside 0..3" % fmt,
                  "TS 25.211 5.2.2.1.3: data part = 10*2^k bits with k = 0..3")
     sf, ndata = SLOT_FORMATS[fmt]
-    data_bits = ndata * SLOTS_PER_FRAME
+    data_bits = ndata * SLOTS_PER_FRAME * a.frames
     data_text = a.data or ""
     data_pad = 0
+    data_trim = 0
     if data_text:
         data_text = _hex_field(a.data, "--data")
         iv = int(data_text, 16)
-        given = len(data_text) * 4
-        if given > data_bits:
-            _die(2, "--data has %d bits, slot format %d carries %d data bits per "
-                    "10 ms" % (given, fmt, data_bits),
-                 "TS 25.211 5.2.2.1.3 Table 6: N_data bits per slot times 15 slots, "
-                 "and a hex digit is four bits, so a longer string is not this field")
         # hex gives multiples of four bits and N_data is not always a multiple of
-        # four (slot format 0 carries 150 data bits), so a short string is taken
-        # as a value and padded with zero bits at the front.
-        data_pad = data_bits - given
-        data = _bits_int(iv, data_bits)
+        # four (slot format 0 carries 150 data bits), so the string arrives
+        # either short by up to three bits -- padded at the front -- or long by
+        # the octet padding TS 25.331 12.1 adds, which _fit_hex_bits trims.
+        data, data_pad, data_trim = _fit_hex_bits(
+            data_text, data_bits, "--data",
+            " per 10 ms of slot format %d" % fmt)
     else:
         data = "0" * data_bits
 
@@ -864,6 +1266,8 @@ def cmd_message_part(a):
         ("tfci", tfci),
         ("data_bits", str(len(data))),
         ("data_pad", "%d zero bits at the front of the data part" % data_pad),
+        ("data_tail_pad", "%d zero bits trimmed from the last octet (TS 25.331 "
+                          "12.1 octet padding)" % data_trim),
         ("data", _bits_hex(data)),
     ]
     rows.extend(("pilot[%d]" % s, PILOT_PATTERNS[s]) for s in range(SLOTS_PER_FRAME))
@@ -890,8 +1294,455 @@ def cmd_message_part(a):
         ("ref", "binary to real: '0' -> +1, '1' -> -1 (TS 25.213 4.2.2.2)"),
     ]
     rows.extend(refs)
+
+    # The chips, when a file was asked for.  Without --out the verb stays what
+    # it was: the bit structure and the codes, no samples.
+    if a.out:
+        if a.format not in ("cf32", "ci16", "cu8"):
+            _die(2, "--format %r is not cf32, ci16 or cu8" % a.format)
+        if a.out == "-":
+            _die(2, "--out - is refused",
+                 "stdout carries the TSV summary, so the samples go to a path")
+        if a.frames not in (1, 2):
+            _die(2, "--frames %d is not a message part length" % a.frames,
+                 "TS 25.211 5.2.2.1.3: a message part is 10 ms (one radio frame) "
+                 "or 20 ms (two), the TTI of the RACH transport channel")
+        beta_c = _gain_from_word(a.beta_c, "--beta-c")
+        beta_d = _gain_from_word(a.beta_d, "--beta-d")
+        if a.beta_c != 15 and a.beta_d != 15:
+            _die(2, "--beta-c %d and --beta-d %d both leave amplitude 1.0"
+                 % (a.beta_c, a.beta_d),
+                 "TS 25.213 4.2.2.2: at least one of beta_c and beta_d has the "
+                 "amplitude 1.0 at every instant, so one of the two words is 15")
+        if not (0 <= a.psc < 512):
+            _die(2, "--psc %d is outside 0..511" % a.psc,
+                 "TS 25.213 4.3.3.2: 512 groups of 16 PRACH codes")
+        if not (0 <= a.code < 16):
+            _die(2, "--code %d is outside 0..15" % a.code,
+                 "TS 25.213 4.3.3.2: n = 16*m + k, k = 0..15")
+        code_number = 16 * a.psc + a.code
+        spc = _rate_chip_samples(a.rate)
+        chips = _message_part_chips(a.signature, fmt, data, tfci, beta_c, beta_d,
+                                    scramble=not a.no_scrambling,
+                                    code_number=code_number, frames=a.frames)
+        peak = max(max(abs(v.real), abs(v.imag)) for v in chips)
+        scale = 1.0 / peak if peak > 0 else 1.0
+        samples = []
+        for v in chips:
+            z = v * scale
+            samples.extend([z] * spc)
+        with open(a.out, "wb") as fh:
+            fh.write(_quantise(samples, a.format))
+        rows.extend([
+            ("chips", str(len(chips))),
+            ("frames", str(a.frames)),
+            ("ms", "%.1f" % (len(chips) * 1000.0 / CHIP_RATE)),
+            ("samples_per_chip", str(spc)),
+            ("samples", str(len(samples))),
+            ("bytes", str(len(samples) * {"cf32": 8, "ci16": 4, "cu8": 2}[a.format])),
+            ("format", a.format),
+            ("out", a.out),
+            ("beta_c", "%d -> %.6f (TS 25.213 4.2.2.2: control part, Q branch)"
+             % (a.beta_c, beta_c)),
+            ("beta_d", "%d -> %.6f (data part, I branch)" % (a.beta_d, beta_d)),
+            ("peak_chip", "%.6f -- largest of |I| and |Q| before normalisation"
+             % peak),
+            ("scale", "%.6f -- one linear factor, the beta ratio is untouched"
+             % scale),
+            ("scrambling_code", "%d (n = 16*%d + %d, TS 25.213 4.3.3.2)"
+             % (code_number, a.psc, a.code)),
+            ("scrambling_start", "%d chips into C_long,n, reset at each 10 ms "
+             "message part frame (TS 25.213 4.3.2.5)" % _MSG_SCRAMBLE_OFFSET),
+            ("scrambling", "off -- the chips are unscrambled" if a.no_scrambling
+             else "S_r-msg,n(i) = C_long,n(i + %d), applied as a complex multiply"
+                  % _MSG_SCRAMBLE_OFFSET),
+        ])
+
     _emit(rows)
     _limits("message-part")
+    return 0
+
+
+# ── the RACH transport channel, TS 25.212 4.2 ──────────────────────────
+# The uplink chain is NOT the downlink chain with different constants.  In the
+# uplink the order is CRC, channel coding, radio frame size equalisation
+# (4.2.4 -- "only performed in the UL"), 1st interleaving, radio frame
+# segmentation, and only THEN rate matching, which therefore runs per radio
+# frame on one segment instead of once over the whole TTI.  That is why
+# tools/umts_sib.py's FACH chain cannot be called from here, and why this file
+# carries its own copy of the pieces both directions share.
+CRC_EXPONENTS = {
+    24: (24, 23, 6, 5, 0),                 # gCRC24(D) = D24+D23+D6+D5+D+1
+    16: (16, 12, 5, 0),                    # gCRC16(D) = D16+D12+D5+1
+    12: (12, 11, 3, 2, 1, 0),              # gCRC12(D) = D12+D11+D3+D2+D+1
+    8: (8, 7, 4, 3, 1, 0),                 # gCRC8(D)  = D8+D7+D4+D3+D+1
+}
+CONV_POLY_UP = {2: (0o561, 0o753),         # rate 1/2: G0, G1
+                3: (0o557, 0o663, 0o711)}  # rate 1/3: G0, G1, G2
+CONV_K = 9                                 # constraint length, 4.2.3.1
+UP_TAIL = 8                                # tail bits, 4.2.3.1
+C2_UP = 30                                 # 2nd interleaver columns, 4.2.11
+# Table 7 of TS 25.212 4.2.11, C2 = 30, verbatim
+P2_UP = (0, 20, 10, 5, 15, 25, 3, 13, 23, 8, 18, 28, 1, 11, 21, 6, 16, 26, 4,
+         14, 24, 19, 9, 29, 12, 2, 7, 22, 27, 17)
+# Table 4 of TS 25.212 4.2.5.2, the inter-column permutation of the 1st
+# interleaver, which is the bit reversal of the column index on log2(C1) bits
+P1_UP = {1: (0,), 2: (0, 1), 4: (0, 2, 1, 3), 8: (0, 4, 2, 6, 1, 5, 3, 7)}
+# Table 8 of TS 25.212 4.3.3: the (32,10) sub-code basis, row i is Mi,0..Mi,9
+TFCI_BASIS = (
+    "1000010000", "0100011000", "1100010001", "0010011011", "1010010001",
+    "0110010010", "1110010100", "0001010110", "1001011110", "0101011011",
+    "1101010011", "0011010110", "1011010101", "0111011001", "1111011111",
+    "1000111100", "0100111101", "1100111010", "0010110111", "1010110101",
+    "0110110011", "1110110111", "0001110100", "1001111101", "0101111010",
+    "1101111001", "0011110010", "1011111100", "0111111110", "1111111111",
+    "0000010000", "0000111000",
+)
+
+
+def crc_poly(size):
+    """The generator polynomial as a bit mask, from its exponents."""
+    p = 0
+    for e in CRC_EXPONENTS[size]:
+        p |= 1 << e
+    return p
+
+
+def crc_parity(bits, size):
+    """TS 25.212 4.2.1: the remainder of the block times D**size, mod gCRC."""
+    poly = crc_poly(size)
+    acc = 0
+    for b in list(bits) + [0] * size:
+        acc = (acc << 1) | b
+        if acc & (1 << size):
+            acc ^= poly
+    return acc
+
+
+def crc_attach(bits, size):
+    """TS 25.212 4.2.1.2: p_im(Li+1-(k-Ai)), i.e. the parity appended in the
+    order p_L, p_(L-1), ..., p_1 -- the reverse of the division remainder."""
+    if size == 0:
+        return list(bits)
+    p = crc_parity(bits, size)
+    return list(bits) + [(p >> k) & 1 for k in range(size - 1, -1, -1)]
+
+
+def _parity_of(reg, poly):
+    return bin(reg & poly).count("1") & 1
+
+
+def conv_encode_up(bits, rate):
+    """TS 25.212 4.2.3.1: K = 9, start state all zeros, 8 tail bits, output
+    G0, G1[, G2] repeating per input bit."""
+    polys = CONV_POLY_UP[rate]
+    reg = 0
+    out = []
+    for b in list(bits) + [0] * UP_TAIL:
+        reg = ((reg << 1) | b) & ((1 << CONV_K) - 1)
+        for poly in polys:
+            out.append(_parity_of(reg, poly))
+    return out
+
+
+def equalise(bits, frames):
+    """TS 25.212 4.2.4: Ni = ceil(Ei/Fi), Ti = Fi*Ni, pad Ti-Ei bits.
+
+    "tik = {0, 1} for k = Ei+1 .. Ti" leaves the padding value open; zeros are
+    used here and the row says so.  Only the uplink performs this block.
+    """
+    n = -(-len(bits) // frames)
+    return list(bits) + [0] * (frames * n - len(bits)), n
+
+
+def interleave1(bits, frames):
+    """TS 25.212 4.2.5.2/4.2.5.3: write R1 x C1 row by row with C1 = Fi,
+    permute the columns by Table 4, read column by column."""
+    c1 = frames
+    if c1 not in P1_UP:
+        raise ValueError("C1 = %d is not 1, 2, 4 or 8" % c1)
+    r1 = len(bits) // c1
+    perm = P1_UP[c1]
+    out = []
+    for j in range(c1):
+        col = perm[j]
+        for i in range(r1):
+            out.append(bits[i * c1 + col])
+    return out
+
+
+def segment(bits, frames):
+    """TS 25.212 4.2.6: Yi = Xi/Fi, consecutive chunks of Yi bits."""
+    yi = len(bits) // frames
+    return [bits[i * yi:(i + 1) * yi] for i in range(frames)]
+
+
+def rm_offsets(dn, xi, frames):
+    """TS 25.212 4.2.7.1.2.1: the per-frame offset S the uplink initialises
+    e_ini from.  q is signed, q' carries the gcd correction when q is even."""
+    r = dn % xi if xi else 0
+    if r != 0 and 2 * r <= xi:
+        q = xi // r
+    else:
+        q = xi // (r - xi) if (r - xi) else 0
+    if q % 2 == 0:
+        from math import gcd
+        # q' is q + gcd(q, Fi)/Fi, a multiple of 1/8 rather than an integer, so
+        # it is kept as a numerator/denominator pair
+        g = gcd(abs(q), frames) if q else frames
+        qn, qd = q * frames + g, frames
+    else:
+        qn, qd = q, 1
+    s = [0] * frames
+    for x in range(frames):
+        col = ((x * qn) // qd) % frames
+        s[col] = (x * qn) // qd // frames
+    return s, q, (qn, qd)
+
+
+def uplink_rate_params(xi, ndata, frames):
+    """TS 25.212 4.2.7.1.2 (I = 1 for a RACH CCTrCH): dN = Ndata - Ni, and the
+    per-frame e_ini = (a S[P1(ni)] |dN| + 1) mod (a Ni), a = 2."""
+    dn = ndata - xi
+    s, q, qq = rm_offsets(dn, xi, frames)
+    p1 = P1_UP[frames]
+    return {"xi": xi, "dn": dn, "a": 2, "s": s, "q": q, "q_prime": qq,
+            "e_plus": 2 * xi, "e_minus": 2 * abs(dn),
+            "e_ini": [(2 * s[p1[ni]] * abs(dn) + 1) % (2 * xi)
+                      for ni in range(frames)]}
+
+
+def rate_match_frame(bits, par, frame_index):
+    """TS 25.212 4.2.7.5, applied to one radio frame's segment."""
+    if par["dn"] == 0:
+        return list(bits)
+    out = []
+    e = par["e_ini"][frame_index]
+    for b in bits:
+        e -= par["e_minus"]
+        if par["dn"] > 0:
+            while e <= 0:
+                out.append(b)
+                e += par["e_plus"]
+            out.append(b)
+        else:
+            if e <= 0:
+                e += par["e_plus"]
+            else:
+                out.append(b)
+    return out
+
+
+def interleave2_up(bits):
+    """TS 25.212 4.2.11: C2 = 30 columns, R2 rows, Table 7, read column by
+    column, padding pruned."""
+    u = len(bits)
+    r2 = -(-u // C2_UP)
+    padded = list(bits) + [0] * (r2 * C2_UP - u)
+    out = []
+    for j in range(C2_UP):
+        col = P2_UP[j]
+        for i in range(r2):
+            idx = i * C2_UP + col
+            if idx < u:
+                out.append(padded[idx])
+    return out
+
+
+def tfci_encode(index):
+    """TS 25.212 4.3.3: bi = sum_n a_n M_i,n mod 2 over the Table 8 basis, with
+    a0 the LSB of the TFC index.  Returns the 32-bit code word."""
+    if not (0 <= index <= 1023):
+        raise ValueError("a TFCI is 10 bits, so the index is 0..1023")
+    a = [(index >> n) & 1 for n in range(10)]
+    word = []
+    for row in TFCI_BASIS:
+        acc = 0
+        for n in range(10):
+            acc ^= a[n] & (1 if row[n] == "1" else 0)
+        word.append(acc)
+    return word
+
+
+def tfci_30(index):
+    """TS 25.212 4.3.5.1: for uplink physical channels k = 0..29 and dk =
+    b(k mod 32), so the first 30 bits of the 32-bit word are the field."""
+    return tfci_encode(index)[:30]
+
+
+def _bits_str(bits):
+    """The int list a stage carries, as the '0'/'1' string the rest of this file
+    (and _bits_hex) uses."""
+    return "".join(str(b) for b in bits)
+
+
+def rach_chain(tb_bits, crc_size, coding, frames, ndata):
+    """The whole TS 25.212 4.2 transport chain for a RACH, in uplink order.
+
+    `tb_bits` is a '0'/'1' string; every stage row carries an int list and is
+    stringified at the edge by cmd_chain.
+    """
+    rows = []
+    b = [int(c) for c in tb_bits]
+    rows.append(("tb", b, "TS 25.212 4.2.13.2",
+                 "one transport block of a RACH TrCH; the TTI is 10 or 20 ms "
+                 "and there is exactly one TrCH in the CCTrCH (I = 1)"))
+    b = crc_attach(b, crc_size) if crc_size else list(b)
+    rows.append(("crc", b, "TS 25.212 4.2.1.1 + 4.2.1.2",
+                 ("gCRC%d attached, parity appended p%d..p1" % (crc_size, crc_size))
+                 if crc_size else "no CRC: gCRC0, a transport format attribute"))
+    rows.append(("codeblock", b, "TS 25.212 4.2.2",
+                 "not applied: one code block, so B = %d is not split" % len(b)))
+    if coding:
+        b = conv_encode_up(b, coding)
+        rows.append(("conv", b, "TS 25.212 4.2.3.1",
+                     "rate 1/%d, K=9, G=%s, 8 tail bits, all-zero start"
+                     % (coding, ", ".join("%o" % q for q in CONV_POLY_UP[coding]))))
+    else:
+        rows.append(("conv", b, "TS 25.212 4.2.3",
+                     "no channel coding, a transport format attribute"))
+    ei = len(b)
+    b, ni = equalise(b, frames)
+    rows.append(("equalise", b, "TS 25.212 4.2.4",
+                 "Fi = %d, Ni = ceil(%d/%d) = %d, padded with %d zero bits -- "
+                 "this block exists in the UL only"
+                 % (frames, ei, frames, ni, frames * ni - ei)))
+    b = interleave1(b, frames)
+    rows.append(("ilv1", b, "TS 25.212 4.2.5.2 + 4.2.5.3 + Table 4",
+                 "C1 = %d, R1 = %d, permutation %s, read column by column"
+                 % (frames, len(b) // frames, list(P1_UP[frames]))))
+    segs = segment(b, frames)
+    for i, seg in enumerate(segs):
+        rows.append(("frameseg%d" % i, seg, "TS 25.212 4.2.6",
+                     "radio frame %d of %d, Yi = %d bits" % (i, frames, len(seg))))
+    par = uplink_rate_params(ni, ndata, frames)
+    matched = []
+    for i, seg in enumerate(segs):
+        m = rate_match_frame(seg, par, i)
+        matched.append(m)
+        what = ("%d repetitions" % par["dn"] if par["dn"] > 0
+                else ("%d punctures" % -par["dn"] if par["dn"] < 0 else "no change"))
+        rows.append(("ratematch%d" % i, m, "TS 25.212 4.2.7.1.2 + 4.2.7.1.3 + 4.2.7.5",
+                     "frame %d: Xi=%d, dN=%+d, e_ini=%d, e_plus=%d, e_minus=%d, %s, "
+                     "output %d bits = Ndata"
+                     % (i, par["xi"], par["dn"], par["e_ini"][i], par["e_plus"],
+                        par["e_minus"], what, len(m))))
+    x = [bit for seg in matched for bit in seg]
+    rows.append(("mux", x, "TS 25.212 4.2.8",
+                 "I = 1, so TrCH multiplexing is the identity"))
+    rows.append(("physseg", x, "TS 25.212 4.2.10.1",
+                 "P = 1, one PRACH, so physical channel segmentation is the "
+                 "identity"))
+    v = interleave2_up(x)
+    rows.append(("ilv2", v, "TS 25.212 4.2.11 + Table 7",
+                 "C2 = 30, R2 = %d, no padding for U = %d" % (len(v) // 30, len(v))))
+    per_slot = len(v) // (15 * frames)
+    for k in range(15 * frames):
+        rows.append(("slot%02d" % k, v[k * per_slot:(k + 1) * per_slot],
+                     "TS 25.211 5.2.2.1.3",
+                     "%d data bits of slot %d" % (per_slot, k % 15)))
+    return rows, v, par
+
+
+def cmd_tfci(a):
+    """TS 25.212 4.3.3 and 4.3.5.1: a TFC index to the 30 TFCI bits of a slot."""
+    if not (0 <= a.index <= 1023):
+        _die(2, "--index %d is outside 0..1023" % a.index,
+             "TS 25.212 4.3.3: the TFCI is 10 bits, so a TFC index is 0..1023")
+    word = tfci_encode(a.index)
+    bits30 = word[:30]
+    rows = [
+        ("cli", "tfci"),
+        ("index", "%d (10-bit TFC index, a0 = LSB)" % a.index),
+        ("word32", "%032x" % int("".join(str(b) for b in word), 2)),
+        ("word32_weight", str(sum(word))),
+        ("tfci30", "%030x" % int("".join(str(b) for b in bits30), 2)),
+        ("tfci30_bits", "".join(str(b) for b in bits30)),
+        ("next", "message-part --tfci %030x" % int("".join(str(b) for b in bits30), 2)),
+        ("ref", "TS 25.212 4.3.3: the (32,10) sub-code of the second order "
+                "Reed-Muller code, basis sequences Table 8"),
+        ("ref", "TS 25.212 4.3.5.1: uplink, k = 0..29 and dk = b(k mod 32), so "
+                "b30 and b31 are not transmitted"),
+    ]
+    _emit(rows)
+    _limits("tfci")
+    return 0
+
+
+def cmd_chain(a):
+    """The RACH transport channel: a transport block to the frame bits the
+    message part carries, by every stage of TS 25.212 4.2 in uplink order."""
+    if a.crc not in (0, 8, 12, 16, 24):
+        _die(2, "--crc %d is not a CRC this chain can attach" % a.crc,
+             "TS 25.212 4.2.1.1: gCRC24, gCRC16, gCRC12, gCRC8 or gCRC0")
+    if a.coding not in ("third", "half", "none"):
+        _die(2, "--coding %r is not third, half or none" % a.coding,
+             "TS 25.212 4.2.3: a RACH transport format codes with a "
+             "convolutional code rate 1/3 or 1/2, or with no coding")
+    if a.frames not in (1, 2):
+        _die(2, "--frames %d is not a RACH TTI" % a.frames,
+             "TS 25.212 4.2.13.2: the transmission time interval of a RACH is "
+             "either 10 ms or 20 ms")
+    if a.sf is not None and a.k is not None:
+        _die(2, "--sf and --k name the same thing",
+             "TS 25.211 5.2.2.1.3 Table 6 fixes one from the other")
+    if a.sf is not None:
+        fmt = None
+        for k, (sf, _nd) in SLOT_FORMATS.items():
+            if sf == a.sf:
+                fmt = k
+        if fmt is None:
+            _die(2, "--sf %d is not 256, 128, 64 or 32" % a.sf,
+                 "TS 25.211 5.2.2.1.3 Table 6: the data part is 10*2^k bits, "
+                 "k = 0..3, spread at SF 256, 128, 64 or 32")
+    else:
+        fmt = a.k if a.k is not None else 0
+        if not (0 <= fmt <= 3):
+            _die(2, "--k %d is outside 0..3" % fmt,
+                 "TS 25.211 5.2.2.1.3: data part = 10*2^k bits with k = 0..3")
+    sf, ndata = SLOT_FORMATS[fmt]
+    ndata_frame = ndata * SLOTS_PER_FRAME
+    tb = _hex_field(a.tb, "--tb") if a.tb else ""
+    tb_bits = _bits_int(int(tb, 16), len(tb) * 4) if tb else ""
+    coding = {"third": 3, "half": 2, "none": None}[a.coding]
+    rows, v, par = rach_chain(tb_bits or "", a.crc, coding, a.frames, ndata_frame)
+    parts = []
+    for name, bits, ref, note in rows:
+        parts.append(("stage:" + name, "%s bits=%d ref=%s -- %s"
+                      % (_bits_hex(_bits_str(bits)), len(bits), ref, note)))
+    per_frame = len(v) // a.frames
+    for i in range(a.frames):
+        fr = v[i * per_frame:(i + 1) * per_frame]
+        parts.append(("frame%d.hex" % i, _bits_hex(_bits_str(fr))))
+        parts.append(("frame%d.bits" % i, str(len(fr))))
+    parts.extend([
+        ("frames", str(a.frames)),
+        ("tti_ms", str(10 * a.frames)),
+        ("slot_format", "%d of 0..3, SF %d, %d data bits per slot" % (fmt, sf, ndata)),
+        ("ndata", "%d bits per radio frame" % ndata_frame),
+        ("tb_bits", str(len(tb_bits))),
+        ("crc", str(a.crc)),
+        ("coding", a.coding),
+        ("dN", "%+d" % par["dn"]),
+        ("rate_match", "Xi=%d, e_plus=%d, e_minus=%d, S=%s, e_ini=%s"
+         % (par["xi"], par["e_plus"], par["e_minus"], par["s"],
+            par["e_ini"])),
+        ("data_hex", _bits_hex(_bits_str(v))),
+        ("data_bits", str(len(v))),
+    ])
+    tfci_note = ""
+    if a.tfci_index is not None:
+        bits30 = tfci_30(a.tfci_index)
+        tfci_note = " --tfci %030x" % int("".join(str(b) for b in bits30), 2)
+        parts.append(("tfci_index", str(a.tfci_index)))
+        parts.append(("tfci30", "%030x" % int("".join(str(b) for b in bits30), 2)))
+    parts.append(("next", "message-part --sf %d --frames %d --data %s%s"
+                  % (sf, a.frames, _bits_hex(_bits_str(v)), tfci_note)))
+    parts.append(("ref", "TS 25.212 4.2: the uplink chain in uplink order, with "
+                         "radio frame size equalisation (4.2.4) before the 1st "
+                         "interleaver (4.2.5) and rate matching per radio frame"))
+    _emit(parts)
+    _limits("chain")
     return 0
 
 
@@ -908,8 +1759,26 @@ VERBS = (
      "PRACH preamble chips, TS 25.213 4.3.3.3"),
     ("message-part",
      "[--sf 256|128|64|32 | --k 0..3] [--signature 0..15] [--tfci HEX30] "
-     "[--data HEX]",
-     "RACH message part slot structure as bits, TS 25.211 5.2.2.1.3"),
+     "[--data HEX] [--psc 0..511] [--code 0..15] [--beta-c 0..15] "
+     "[--beta-d 0..15] [--frames 1|2] [--rate N|Hz] [--format cf32|ci16|cu8] "
+     "[--out PATH] [--no-scrambling]",
+     "RACH message part: slot structure as bits, and with --out the spread, "
+     "weighted and scrambled chips (TS 25.211 5.2.2.1.3, TS 25.213 4.2.2.2)"),
+    ("burst",
+     "[--signature 0..15] [--psc 0..511] [--code 0..15] [--preambles 1..64] "
+     "[--gap-chips N] [--sf 256|128|64|32] [--frames 1|2] [--data HEX] "
+     "[--tfci HEX30] [--beta-c 0..15] [--beta-d 0..15] [--rate N|Hz] "
+     "[--format cf32|ci16|cu8] [--out PATH] [--no-scrambling]",
+     "a whole random-access transmission: preambles then the message part "
+     "(TS 25.211 5.2.2.1.1)"),
+    ("chain",
+     "--tb HEX [--crc 0|8|12|16|24] [--coding third|half|none] "
+     "[--frames 1|2] [--sf 256|128|64|32 | --k 0..3] [--tfci-index 0..1023]",
+     "the RACH transport channel: a transport block through the whole "
+     "TS 25.212 4.2 uplink chain to the frame bits the message part carries"),
+    ("tfci",
+     "--index 0..1023",
+     "a TFC index to the 30 TFCI bits of a slot (TS 25.212 4.3.3 + 4.3.5.1)"),
     ("list", "", "this table"),
 )
 
@@ -976,7 +1845,61 @@ def main(argv):
                    help="preamble signature 0..15 (TS 25.213 4.3.1.3)")
     p.add_argument("--tfci", default=None, help="30 TFCI bits, hex")
     p.add_argument("--data", default=None, help="15*N_data data bits, hex")
+    p.add_argument("--psc", type=int, default=0,
+                   help="downlink primary scrambling code the PRACH code group "
+                        "comes from, 0..511 (TS 25.213 4.3.3.2)")
+    p.add_argument("--code", type=int, default=0,
+                   help="PRACH code index within the group, 0..15")
+    p.add_argument("--beta-c", dest="beta_c", type=int, default=15,
+                   help="signalled gain factor for the control part, 0..15")
+    p.add_argument("--beta-d", dest="beta_d", type=int, default=15,
+                   help="signalled gain factor for the data part, 0..15")
+    p.add_argument("--frames", type=int, default=1,
+                   help="message part length: 1 frame (10 ms) or 2 (20 ms)")
+    p.add_argument("--rate", type=int, default=1,
+                   help="samples per chip (1..64) or a sample rate in Hz")
+    p.add_argument("--format", default="cf32", help="cf32, ci16 or cu8")
+    p.add_argument("--out", default=None, help="samples file")
+    p.add_argument("--no-scrambling", dest="no_scrambling", action="store_true",
+                   help="leave the chips unscrambled")
     p.set_defaults(fn=cmd_message_part)
+
+    p = sub.add_parser("burst", help="a whole random-access transmission")
+    p.add_argument("--signature", type=int, default=0)
+    p.add_argument("--psc", type=int, default=0)
+    p.add_argument("--code", type=int, default=0)
+    p.add_argument("--preambles", type=int, default=1)
+    p.add_argument("--gap-chips", dest="gap_chips", type=int, default=0)
+    p.add_argument("--sf", type=int, default=None)
+    p.add_argument("--frames", type=int, default=1)
+    p.add_argument("--data", default=None)
+    p.add_argument("--tfci", default=None)
+    p.add_argument("--beta-c", dest="beta_c", type=int, default=15)
+    p.add_argument("--beta-d", dest="beta_d", type=int, default=15)
+    p.add_argument("--rate", type=int, default=1)
+    p.add_argument("--format", default="cf32")
+    p.add_argument("--out", default=None)
+    p.add_argument("--no-scrambling", dest="no_scrambling", action="store_true")
+    p.set_defaults(fn=cmd_burst)
+
+    p = sub.add_parser("chain",
+                       help="the RACH transport channel, TS 25.212 4.2 uplink")
+    p.add_argument("--tb", default=None, help="the transport block as hex bits")
+    p.add_argument("--crc", type=int, default=16,
+                   help="CRC size: 24, 16, 12, 8 or 0")
+    p.add_argument("--coding", default="third",
+                   help="channel coding: third (rate 1/3), half (rate 1/2), none")
+    p.add_argument("--frames", type=int, default=1,
+                   help="TTI: 1 frame (10 ms) or 2 (20 ms)")
+    p.add_argument("--sf", type=int, default=None, help="256, 128, 64 or 32")
+    p.add_argument("--k", type=int, default=None, help="slot format 0..3")
+    p.add_argument("--tfci-index", dest="tfci_index", type=int, default=None,
+                   help="also encode this TFC index into the 30 TFCI bits")
+    p.set_defaults(fn=cmd_chain)
+
+    p = sub.add_parser("tfci", help="TFC index to the 30 TFCI bits")
+    p.add_argument("--index", type=int, default=0, help="the 10-bit TFC index")
+    p.set_defaults(fn=cmd_tfci)
 
     p = sub.add_parser("list", help="the verbs and their flags")
     p.set_defaults(fn=cmd_list)

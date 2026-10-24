@@ -673,6 +673,10 @@ static const ModuleDefinition modules[] = {
     { "45_iot",              "NB-IoT / Cat-M1",      "RADIO",
       "imsisting-45_iot-symbolic",
       "NB-IoT and Cat-M1: NPRACH, NPSS/NSSS, SIB1-NB and NPRFCN." },
+
+    { "57_evil_twin",        "LTE Evil Twin",        "RADIO",
+      "imsisting-57_evil_twin-symbolic",
+      "A cell that only this lab hears: a reconnaissance row becomes an eNB or gNB, the host is checked for the core and the test UE, and the attach is bounded in seconds." },
     { "50_gprs",             "GPRS / EDGE",          "RADIO",
       "imsisting-50_gprs-symbolic",
       "GPRS/EDGE packet-switched: GEA ciphering, APN coding, PDP context and downgrade detection." },
@@ -782,6 +786,10 @@ static const ModuleDefinition modules[] = {
     { "56_baseband_diag",    "Baseband File System", "BASEBAND / DEVICE",
       "imsisting-56_baseband_diag-symbolic",
       "Qualcomm DM/DIAG framing, NV item and EFS2 file codecs, state-info identity decode and the AT/device surface." },
+
+    { "58_suci_catcher",     "5G SUCI Catcher",      "SIM / IDENTITY",
+      "imsisting-58_suci_catcher-symbolic",
+      "Pre-authentication identity capture: gNB and AMF slice build, catcher plan, live SUCI read." },
 
     /* TRACKING — locating and following a subscriber or a transmitter */
     { "24_rf_fingerprint",   "RF Fingerprint / CSI", "TRACKING",
@@ -2482,6 +2490,9 @@ static const char *const plain_keys[] = {
     "adm_reference\tadm reference",
     "advance_symbols\tadvance symbols",
     "after\tafter",
+    "air_ready\tair interface ready",
+    "air_verified\tair interface verified",
+    "ak\tanonymity key",
     "aka_challenges\taka challenges",
     "aka_res_hex\taka res bytes",
     "alert_notification\talert notification",
@@ -2506,6 +2517,7 @@ static const char *const plain_keys[] = {
     "amf_region\tamf region",
     "amf_region_id\tamf region id",
     "amf_set_id\tamf set id",
+    "amf_slice\tamf slice",
     "amf_ue_ngap_id\taccess manager connection ID",
     "amf_ue_ngap_id_bits\tamf handset NGAP id bits",
     "amplification\tamplification",
@@ -2513,7 +2525,10 @@ static const char *const plain_keys[] = {
     "anchors\tanchors",
     "ancount\tancount",
     "angle_deg\tangle (degrees)",
+    "answer_dtid\tanswer dialogue id",
+    "answer_invoke\tanswer invoke id",
     "answer_ip\tanswer ip",
+    "answer_otid\tanswer originating id",
     "antenna_ports\tantenna ports",
     "any_channel\tany channel",
     "apdu\tAPDU",
@@ -2604,8 +2619,8 @@ static const char *const plain_keys[] = {
     "bcd\tbcd",
     "bcd_codec\tbcd codec",
     "bcd_msin\tbcd msin",
-    "bch_file\tbch file",
-    "bch_hex\tbch bytes",
+    "bch_blocks\tbch blocks",
+    "bch_period\tbch period",
     "beam_gap_vs_serving_db\tbeam gap vs serving (dB)",
     "before\tbefore",
     "best_offered\tbest offered",
@@ -2621,11 +2636,14 @@ static const char *const plain_keys[] = {
     "bit_us\tbit (µs)",
     "bits\tbits",
     "bits_consumed\tbits consumed",
+    "bits_given\tbits given",
+    "bits_left\tbits left",
     "bits_per_burst\tbits per burst",
     "bits_per_frame\tbits per frame",
     "bits_per_observation\tbits per observation",
     "bits_per_slot\tbits per slot",
     "bits_per_symbol\tbits per symbol",
+    "bits_read\tbits read",
     "bits_remaining\tbits remaining",
     "bitstring\tbitstring",
     "bladerf\tbladerf",
@@ -2645,6 +2663,7 @@ static const char *const plain_keys[] = {
     "body_octets\tbody octets",
     "body_raw\tbody raw",
     "body_with_flags\tbody with flags",
+    "boundary\tboundary",
     "branch\tbranch",
     "branches\tbranches",
     "break_status\tbreak status",
@@ -2757,6 +2776,7 @@ static const char *const plain_keys[] = {
     "captured_at\tcaptured at",
     "captures\tcaptures",
     "captures_dir\tcaptures dir",
+    "card_cryptogram\tcard cryptogram",
     "card_hex\tcard bytes",
     "carrier\tcarrier",
     "carrier_api\tcarrier api",
@@ -2775,6 +2795,8 @@ static const char *const plain_keys[] = {
     "carries_nas_pdu\tcarries NAS PDU",
     "case\tcase",
     "cases\tcases",
+    "catcher_pid\tcatcher process id",
+    "catcher_running\tcatcher is running",
     "cause\treason",
     "cause_hex\treason bytes",
     "cause_ie\treason ie",
@@ -2806,10 +2828,16 @@ static const char *const plain_keys[] = {
     "cell_allocation_arfcns\tcell allocation arfcns",
     "cell_barred\tcell barred",
     "cell_barred_fields\tcell barred fields",
+    "cell_clip\tcell id in sib1",
+    "cell_components\tcell components",
+    "cell_config\tcell configuration",
+    "cell_config_path\tcell configuration file",
+    "cell_file\tcell from file",
     "cell_id\tcell ID",
     "cell_identity\tcell ID",
     "cell_identity_bits\tcell identity bits",
     "cell_identity_hex\tcell identity bytes",
+    "cell_peak_scale\tcell peak scale",
     "cell_reselection_priority\tcell reselection priority",
     "cell_reserved_for_other_use\tcell reserved for other use",
     "cellid\tcellid",
@@ -2871,6 +2899,7 @@ static const char *const plain_keys[] = {
     "ciphering_meaning\tcipher meaning",
     "ciphering_mode_command_l3\tcipher mode command l3",
     "ciphertext\tciphertext",
+    "gamma\tkeystream block XORed onto the packet",
     "ciphertext_seconds\tciphertext seconds",
     "ck\tcipher key",
     "cla\tcla",
@@ -2879,6 +2908,7 @@ static const char *const plain_keys[] = {
     "classmark\tclassmark",
     "classmark_after\tclassmark after",
     "classmark_before\tclassmark before",
+    "classified\tclassified",
     "clause\tclause",
     "clean\tclean",
     "cleared_field\tcleared field",
@@ -2922,8 +2952,10 @@ static const char *const plain_keys[] = {
     "comp_time\tcomp time",
     "comparative_features\tcomparative features",
     "compared_bits\tcompared bits",
+    "complete\tcomplete",
     "complete_ies\tcomplete ies",
     "component\tcomponent",
+    "components\tcomponents",
     "computed\tcomputed",
     "concealed\tconcealed",
     "conf\tconfig",
@@ -2959,6 +2991,7 @@ static const char *const plain_keys[] = {
     "count_hex\tcount bytes",
     "count_i\tcount i",
     "count_i_bits\tcount i bits",
+    "corpus\tcorpus",
     "counter\tcounter",
     "counter_dec\tcounter dec",
     "counter_meaning\tcounter meaning",
@@ -2967,7 +3000,9 @@ static const char *const plain_keys[] = {
     "counts_seen\tcounts seen",
     "coverage_hole\tcoverage hole",
     "cp_long\tcp long",
+    "cp_samples\tsamples per cyclic prefix",
     "cp_short\tcp short",
+    "cp_ts\tcyclic prefix timestamp",
     "cpi\tcpi",
     "cpi_meaning\tcpi meaning",
     "cpl\tcpl",
@@ -3039,6 +3074,7 @@ static const char *const plain_keys[] = {
     "decode_only\tdecode only",
     "decode_with\tdecode with",
     "decoded\tdecoded",
+    "deconceal\tdeconcealment",
     "dedicated_mode_or_tbf\tdedicated mode or tbf",
     "dedicated_mode_or_tbf_name\tdedicated mode or tbf name",
     "dedupe\tdedupe",
@@ -3180,6 +3216,7 @@ static const char *const plain_keys[] = {
     "entries\tentries",
     "entry\tentry",
     "envelope\tenvelope",
+    "epc\tepc",
     "epd\tepd",
     "epd_name\tepd name",
     "ephemeral_key_octets\tephemeral key octets",
@@ -3210,6 +3247,7 @@ static const char *const plain_keys[] = {
     "excluded_cell\texcluded cell",
     "exclusive\texclusive",
     "expected_ies\texpected ies",
+    "expected_next\texpected next step",
     "expected_response\texpected response",
     "expected_scope\texpected scope",
     "expected_verdict\texpected verdict",
@@ -3227,6 +3265,12 @@ static const char *const plain_keys[] = {
     "extended_protocol_discriminator\textended protocol discriminator",
     "extension_bit\textension bit",
     "extension_octets\textension octets",
+    "extra\textra",
+    "f1\tmilenage f1 mac-a",
+    "f2\tmilenage f2 res",
+    "f3\tmilenage f3 ck",
+    "f4\tmilenage f4 ik",
+    "f5\tmilenage f5 ak",
     "f6\tf6",
     "f_id\tf id",
     "f_teid\tf tunnel ID",
@@ -3237,6 +3281,7 @@ static const char *const plain_keys[] = {
     "fallback_parser\tfallback parser",
     "fallback_ready\tfallback ready",
     "false\tfalse",
+    "family\tfamily",
     "far_id\tfar id",
     "fc\tfc",
     "fcs\tfcs",
@@ -3291,6 +3336,7 @@ static const char *const plain_keys[] = {
     "fixed_bits\tfixed bits",
     "fixture\tfixture",
     "fixture_kinds\tfixture kinds",
+    "fixtures\tfixtures",
     "flag\tflag",
     "flags\tflags",
     "flags_alert\tflags alert",
@@ -3322,6 +3368,7 @@ static const char *const plain_keys[] = {
     "frame_octets\tframe octets",
     "frame_samples\tframe samples",
     "frame_slots\tframe slots",
+    "frame_structure\tframe structure",
     "frames\tframes",
     "frames_required\tframes required",
     "framing\tframing",
@@ -3350,6 +3397,7 @@ static const char *const plain_keys[] = {
     "gain_db\tgain (dB)",
     "gain_max_db\tgain maximum (dB)",
     "gain_min_db\tgain minimum (dB)",
+    "gap_ts\tgap timestamp",
     "gate\tgate",
     "gate_flag\tgate flag",
     "gate_status\tgate status",
@@ -3377,6 +3425,9 @@ static const char *const plain_keys[] = {
     "grid_latitude\tgrid latitude",
     "grid_longitude\tgrid longitude",
     "group\tgroup",
+    "group_samples\tsamples per group",
+    "group_us\tgroup microseconds",
+    "groups\tgroups",
     "gscn\tgscn",
     "gsm\tGSM",
     "gsm_algs\tGSM algs",
@@ -3419,6 +3470,7 @@ static const char *const plain_keys[] = {
     "half_frame\thalf frame",
     "handoff\twhat this step does not do",
     "handoffs\thandoffs",
+    "handshake\thandshake",
     "hardware\thardware",
     "hardware_steps\thardware steps",
     "harq_process\tharq process",
@@ -3454,7 +3506,9 @@ static const char *const plain_keys[] = {
     "hnbap_octets\thnbap octets",
     "honest_baseline\thonest baseline",
     "hop_by_hop_id\thop by hop id",
+    "hop_span\thop span",
     "hopping\thopping",
+    "host_cryptogram\thost cryptogram",
     "host_pkt_window\thost pkt window",
     "hplmn_2digit\thplmn 2digit",
     "hplmn_3digit\thplmn 3digit",
@@ -3476,8 +3530,10 @@ static const char *const plain_keys[] = {
     "identities_paged_3plus_without_answer\tidentities paged three or more times with no answer",
     "identity\tidentity",
     "identity_count\tidentity count",
+    "identity_length\tidentity length",
     "identity_name\tidentity name",
     "identity_note\tidentity note",
+    "identity_payload\tidentity payload",
     "identity_request\tidentity request",
     "identity_request_l3\tidentity request l3",
     "identity_request_lapdm\tidentity request lapdm",
@@ -3510,6 +3566,7 @@ static const char *const plain_keys[] = {
     "imsi\tsubscriber ID",
     "imsi_cleartext\tsubscriber ID cleartext",
     "imsi_exposure\tsubscriber ID exposure",
+    "imsi_hex\timsi in hex",
     "imsi_ie\tsubscriber ID ie",
     "imsi_imei_pairing_change\tsubscriber ID handset serial pairing change",
     "imsi_len\tsubscriber ID length",
@@ -3560,6 +3617,7 @@ static const char *const plain_keys[] = {
     "interval_s\tinterval s",
     "intra_freq_reselection\tintra freq reselection",
     "invalid\tinvalid",
+    "invoke_id\tinvoke id",
     "ip_layer\tip layer",
     "ip_layer_note\tip layer note",
     "ip_literal_contacts\tip literal contacts",
@@ -3644,7 +3702,14 @@ static const char *const plain_keys[] = {
     "l3_octets\tl3 octets",
     "l_ra\tl ra",
     "lab_authorised\tlab authorised",
+    "lab_peer\tlab peer",
     "lab_plmn\tlab network ID",
+    "lab_reaches\tlab reaches",
+    "lab_ref\tlab reference",
+    "lab_reply_octets\tlab reply octets",
+    "lab_request_octets\tlab request octets",
+    "lab_verdict\tlab verdict",
+    "lab_why\tlab reason",
     "label\tlabel",
     "lac\tlocation area",
     "lai\tlai",
@@ -3654,6 +3719,7 @@ static const char *const plain_keys[] = {
     "laid_out_in\tlaid out in",
     "laid_out_out\tlaid out out",
     "lair\tlair",
+    "lane\tlane",
     "lapdm_address\tlapdm address",
     "lapdm_bits\tlapdm bits",
     "lapdm_control\tlapdm control",
@@ -3703,6 +3769,7 @@ static const char *const plain_keys[] = {
     "limesdr\tlimesdr",
     "limit\tlimit",
     "line\tline",
+    "live\tlive capture",
     "load_with_intact_decode\tload with intact decode",
     "loaded\tloaded",
     "location\tlocation",
@@ -3754,6 +3821,7 @@ static const char *const plain_keys[] = {
     "magic_class\tmagic class",
     "map\tMAP",
     "map_peer\tMAP peer",
+    "malformed\tmalformed",
     "mapped_identity\tmapped identity",
     "mappings\tmappings",
     "margin_db\tmargin (dB)",
@@ -3813,6 +3881,7 @@ static const char *const plain_keys[] = {
     "mgmt_cwmp_port\tmgmt cwmp port",
     "mgmt_note\tmgmt note",
     "mib\tMIB",
+    "mib_source\tmib source",
     "mib_value_tag\tMIB value tag",
     "milenage\tmilenage",
     "milenage_opc\tmilenage opc",
@@ -3824,6 +3893,7 @@ static const char *const plain_keys[] = {
     "missing\tmissing",
     "missing_ies\tmissing ies",
     "missing_mandatory\tmissing mandatory",
+    "missing_tool\tmissing tool",
     "mitre\tmitre",
     "mix\tmix",
     "mixed\tmixed",
@@ -3843,6 +3913,7 @@ static const char *const plain_keys[] = {
     "mobile_allocation\tmobile allocation",
     "mobile_allocation_note\tmobile allocation note",
     "mobile_identity\tmobile identity",
+    "mobile_identity_length\tmobile identity length",
     "mobile_identity_raw\tmobile identity raw",
     "mobile_identity_type\tmobile identity type",
     "mode\tmode",
@@ -3856,6 +3927,7 @@ static const char *const plain_keys[] = {
     "mood_marker\tmood marker",
     "mood_note\tmood note",
     "mr\tmr",
+    "msc_hex\tmsc in hex",
     "msg1_fdm\tmsg1 fdm",
     "msg_bits\tmessage bits",
     "msg_bytes\tmessage bytes",
@@ -3906,10 +3978,17 @@ static const char *const plain_keys[] = {
     "n_id\tn id",
     "n_id_1\tn id 1",
     "n_id_2\tn id 2",
+    "n_init\tinitial count",
     "n_prb\tn prb",
+    "n_sc_nprach\tnprach subcarriers",
+    "n_sc_offset\tsubcarrier offset",
+    "n_sc_ra\trandom access subcarriers",
+    "n_start\tstart index",
     "name\tname",
+    "nas_authentication\tnas authentication request",
     "nas_bits\tNAS bits",
     "nas_hex\tmessage bytes",
+    "nas_identity_request\tnas identity request",
     "nas_key_set\tNAS key set",
     "nas_key_set_id\tNAS key set id",
     "nas_key_set_identifier\tNAS key set identifier",
@@ -3970,6 +4049,7 @@ static const char *const plain_keys[] = {
     "not_applicable\tnot applicable",
     "not_attempted\tnot attempted",
     "not_determinable\tnot determinable",
+    "not_encoded\tnot encoded",
     "not_performed\tnot performed",
     "not_set\tnot set",
     "note\tnote",
@@ -3977,6 +4057,8 @@ static const char *const plain_keys[] = {
     "notification\tnotification",
     "now\tnow",
     "npdu_number\tnpdu number",
+    "nprach_config\tnprach configuration",
+    "nprach_config_fields\tnprach configuration fields",
     "nr\tNR",
     "nr_core\tNR core",
     "nr_cve\tNR cve",
@@ -4142,6 +4224,7 @@ static const char *const plain_keys[] = {
     "payload_len\tpayload length",
     "payload_ms\tpayload (ms)",
     "payload_octets\tpayload octets",
+    "payload_owner\tpayload owner",
     "payload_sha256\tpayload sha256",
     "payload_source\tpayload source",
     "pbch_encoding\tpbch encoding",
@@ -4193,6 +4276,7 @@ static const char *const plain_keys[] = {
     "pei_offset_frames\tpei offset frames",
     "per\tper",
     "per_frame\tper frame",
+    "per_symbol_group\tper symbol group",
     "per_unit_m\tper unit m",
     "period\tperiod",
     "period_frames\tperiod frames",
@@ -4269,6 +4353,7 @@ static const char *const plain_keys[] = {
     "prach_tcp_ts\tprach tcp ts",
     "prach_tseq_ts\tprach tseq ts",
     "prb_bundling\tprb bundling",
+    "pre_auth\tbefore authentication",
     "preamble_count\tpreamble count",
     "preamble_index\tpreamble index",
     "preamble_initial_rx_target_dbm\tpreamble initial rx target (dBm)",
@@ -4362,6 +4447,7 @@ static const char *const plain_keys[] = {
     "race_window_frames\trace window frames",
     "radial_velocity_mps\tradial velocity mps",
     "radio\tradio",
+    "radio_io\tradio input output",
     "radio_required\tradio required",
     "radio_state\tradio state",
     "radius_m\tradius m",
@@ -4417,12 +4503,14 @@ static const char *const plain_keys[] = {
     "read\tread",
     "reader\treader",
     "readlink\treadlink",
+    "ready\tready",
     "reason\treason",
     "reasoning\treasoning",
     "rebuilt\trebuilt",
     "record\trecord",
     "recorded\trecorded",
     "records\trecords",
+    "records_dir\trecords directory",
     "recoverable\trecoverable",
     "recovered\trecovered",
     "recovered_fn\trecovered fn",
@@ -4436,9 +4524,12 @@ static const char *const plain_keys[] = {
     "refs\trefs",
     "register\tregister",
     "register_lengths\tregister lengths",
+    "registered\tregistered",
     "registered_delivery\tregistered delivery",
     "registers\tregisters",
     "registration_cause\tregistration reason",
+    "registration_request\tregistration request",
+    "registration_type\tregistration type",
     "regs\tregs",
     "reject\trejection",
     "rejected\trejected",
@@ -4470,6 +4561,8 @@ static const char *const plain_keys[] = {
     "request\trequest",
     "request_bytes\trequest bytes",
     "request_command_id\trequest command id",
+    "request_invoke\trequest invoke id",
+    "request_otid\trequest originating id",
     "request_reference\trequest reference",
     "request_reference_octets\trequest reference octets",
     "request_sequence_number\trequest sequence number",
@@ -4481,6 +4574,7 @@ static const char *const plain_keys[] = {
     "requires_sdr\trequires SDR",
     "res\tauthentication answer",
     "res_len\tres length",
+    "res_star\tres star",
     "reserved\treserved",
     "reserved_alert\treserved alert",
     "reset\treset",
@@ -4515,6 +4609,7 @@ static const char *const plain_keys[] = {
     "rnti_source\trnti source",
     "rnti_store\trnti store",
     "role\trole",
+    "root\troot",
     "root_sequence\troot sequence",
     "rounding_error_khz\trounding error (kHz)",
     "roundtrip\troundtrip",
@@ -4548,6 +4643,7 @@ static const char *const plain_keys[] = {
     "rrc_message_sequence_number\tRRC message sequence number",
     "rrc_octets\tRRC octets",
     "rrc_pad_bits\tRRC pad bits",
+    "rrc_setup_complete\trrc setup complete",
     "rrc_state_indicator\tRRC state indicator",
     "rrc_transaction_identifier\tRRC transaction identifier",
     "rrc_tx_id\tRRC tx id",
@@ -4593,9 +4689,12 @@ static const char *const plain_keys[] = {
     "s6a_answers\ts6a answers",
     "s6a_app_id\ts6a app id",
     "s6a_requests\ts6a requests",
+    "s_enc\tsignalling encryption key",
     "s_flag\ts flag",
     "s_id\ts id",
+    "s_mac\tsignalling mac key",
     "s_nssai\ts slice selection",
+    "s_rmac\tsignalling rmac key",
     "s_rnti\ts rnti",
     "s_tmsi\ttemporary ID",
     "same_as_before\tsame as before",
@@ -4612,6 +4711,7 @@ static const char *const plain_keys[] = {
     "sccp\tSCCP",
     "sccp_class\tSCCP class",
     "sccp_data\tSCCP data",
+    "sccp_hex\tsccp in hex",
     "sccp_message_name\tSCCP message name",
     "sccp_message_type\tSCCP message type",
     "sch_bits\tsch bits",
@@ -4695,6 +4795,7 @@ static const char *const plain_keys[] = {
     "secured\tsecured",
     "secured_data\tsecured data",
     "secured_data_len\tsecured data length",
+    "secp256r1\tsecp256r1 curve",
     "secured_note\tsecured note",
     "security_context\tsecurity context",
     "security_header\tsecurity header",
@@ -4705,6 +4806,7 @@ static const char *const plain_keys[] = {
     "seed\tseed",
     "segment\tsegment",
     "segment_fields\tsegment fields",
+    "segments\tsegments",
     "segv\tsegv",
     "seid\tseid",
     "seid_hex\tseid bytes",
@@ -4716,12 +4818,14 @@ static const char *const plain_keys[] = {
     "selected_nas_cipher\tselected NAS cipher",
     "selected_nas_integrity\tselected NAS integrity",
     "selection\tselection",
+    "selftest\tselftest",
     "sent\tsent",
     "separator\tseparator",
     "seq\tsequence number",
     "seq_inner\tseq inner",
     "seq_len\tsequence length",
     "seq_outer\tseq outer",
+    "seq_samples\tsamples in sequence",
     "sequence\tsequence",
     "sequence_number\tsequence number",
     "sequence_number_octets\tsequence number octets",
@@ -4770,6 +4874,7 @@ static const char *const plain_keys[] = {
     "si_window_length\tsi window length",
     "sia\tsia",
     "sib\tSIB",
+    "sib1\tsib1",
     "sib1_bits\tsib1 bits",
     "sib1_cell_barred\tsib1 cell barred",
     "sib1_cell_id\tsib1 cell id",
@@ -4778,18 +4883,29 @@ static const char *const plain_keys[] = {
     "sib1_hex\tsib1 bytes",
     "sib1_mcc\tsib1 country code",
     "sib1_mnc\tsib1 network code",
+    "sib1_plmn\tsib1 plmn",
+    "sib1_plmn_targeting\tsib1 plmn targeting",
     "sib1_records\tsib1 records",
     "sib1_tac\tsib1 tracking area",
     "sib9_bits\tsib9 bits",
     "sib9_hex\tsib9 bytes",
     "sib9_name\tsib9 name",
     "sib9_name_hex\tsib9 name bytes",
+    "sib_code\tsib code",
     "sib_conf_file\tSIB config file",
     "sib_conf_section\tSIB config section",
     "sib_entries\tSIB entries",
     "sib_fields\tSIB fields",
+    "sib_frame\tsib frame",
+    "sib_frames\tsib frames",
+    "sib_hex\tsib in hex",
+    "sib_messages\tsib messages",
+    "sib_offset\tsib offset",
     "sib_records\tSIB records",
+    "sib_schedule\tsib schedule",
+    "sib_slot_format\tsib slot format",
     "sib_tag\tSIB tag",
+    "sib_transport\tsib transport",
     "sidelink\tsidelink",
     "sig_len\tsig length",
     "signal\tsignal",
@@ -4838,6 +4954,8 @@ static const char *const plain_keys[] = {
     "smc_bits\tsmc bits",
     "smc_octet\tsmc octet",
     "smf\tsession manager",
+    "snn\tserving network name",
+    "snn_hex\tserving network name hex",
     "snr\tsignal-to-noise ratio",
     "snssai_values\tslice selection values",
     "so_lsa\tso lsa",
@@ -4986,6 +5104,7 @@ static const char *const plain_keys[] = {
     "subtype_name\tsubtype name",
     "suci\tconcealed subscriber ID",
     "suci_octets\tsuci octets",
+    "suci_parse\tsuci parse",
     "sucis\tsucis",
     "summary\tsummary",
     "superframe_frames\tsuperframe frames",
@@ -5044,6 +5163,7 @@ static const char *const plain_keys[] = {
     "target\ttarget",
     "target_imsi\ttarget subscriber ID",
     "target_nf\ttarget nf",
+    "target_type\ttarget type",
     "target_ue\ttarget handset",
     "tau\ttau",
     "tb1_mcs\ttb1 mcs",
@@ -5095,6 +5215,8 @@ static const char *const plain_keys[] = {
     "tls\ttls",
     "tls_optional\ttls optional",
     "tlv\ttlv",
+    "tlv_84\ttlv 84",
+    "tlv_85\ttlv 85",
     "tmsi\ttemporary ID",
     "tmsi_mapped\ttemporary ID mapped",
     "to\tto",
@@ -5125,6 +5247,7 @@ static const char *const plain_keys[] = {
     "tpdu\ttpdu",
     "tpdu_octets\ttpdu octets",
     "tpdu_with_sca\ttpdu with sca",
+    "trace\ttrace",
     "tracking_area_code\ttracking area code",
     "tracking_area_code_hex\ttracking area code bytes",
     "trailing\ttrailing",
@@ -5211,6 +5334,7 @@ static const char *const plain_keys[] = {
     "udl\tUDL",
     "udl_units\tUDL units",
     "udp\tudp",
+    "ue\tue",
     "ue_behaviour\thandset behaviour",
     "ue_enc_caps\thandset enc caps",
     "ue_id\thandset id",
@@ -5258,6 +5382,7 @@ static const char *const plain_keys[] = {
     "unknown\tunknown",
     "unlocks\tunlocks",
     "unlocks_note\tunlocks note",
+    "unmapped\tunmapped",
     "unparseable\tunparseable",
     "unproven\tunproven",
     "unrequested_allowed\tunrequested allowed",
@@ -6725,6 +6850,7 @@ static const ChipRow chip_rows[] = {
     { "50_gprs",             "--apn-ie",              NEED_RADIO, DOES_READS },
     { "50_gprs",             "--gea",                 NEED_RADIO, DOES_READS },
     { "50_gprs",             "--gea-crypt",           NEED_RADIO, DOES_READS },
+    { "50_gprs",             "--gea-kat",             NEED_NO, DOES_READS },
     { "50_gprs",             "--gea-downgrade",       NEED_RADIO, DOES_READS },
     { "50_gprs",             "--gea-table",           NEED_RADIO, DOES_READS },
     { "50_gprs",             "--help",                NEED_NO, DOES_READS },
@@ -6892,6 +7018,64 @@ static const ChipRow chip_rows[] = {
     { "56_baseband_diag",    "--version",             NEED_NO, DOES_READS },
     { "56_baseband_diag",    "--write-hex",           NEED_CAP, DOES_MODIFIES },
     { "56_baseband_diag",    "--yes",                 NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "",                       NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--__index_probe__",      NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--aka",                  NEED_NO, DOES_BUILDS },
+    { "58_suci_catcher",     "--build-cell",           NEED_NO, DOES_BUILDS },
+    { "58_suci_catcher",     "--build-nas",            NEED_NO, DOES_BUILDS },
+    { "58_suci_catcher",     "--build-rrc",            NEED_NO, DOES_BUILDS },
+    { "58_suci_catcher",     "--capture",              NEED_CAP, DOES_READS },
+    { "58_suci_catcher",     "--catch",                NEED_NO, DOES_BUILDS },
+    { "58_suci_catcher",     "--check-trace",          NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--decode-nas",           NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--deconceal",            NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--help",                 NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--kdf",                  NEED_NO, DOES_BUILDS },
+    { "58_suci_catcher",     "--menu",                 NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--op",                   NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--opc",                  NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--parse",                NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--plmn-decode",          NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--plmn-encode",          NEED_NO, DOES_BUILDS },
+    { "58_suci_catcher",     "--selftest",             NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--start",                NEED_RADIO, DOES_TRANSMITS },
+    { "58_suci_catcher",     "--status-tsv",           NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--stop",                 NEED_RADIO, DOES_TRANSMITS },
+    { "58_suci_catcher",     "--version",              NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--classify",             NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--classify-capture",     NEED_NO, DOES_READS },
+    { "58_suci_catcher",     "--corpus",               NEED_NO, DOES_BUILDS },
+    { "58_suci_catcher",     "--yes",                  NEED_NO, DOES_READS },
+    { "57_evil_twin",        "--prepare-lte",          NEED_NO, DOES_BUILDS },
+    { "57_evil_twin",        "--prepare-nr",           NEED_NO, DOES_BUILDS },
+    { "57_evil_twin",        "--preflight-lte",        NEED_NO, DOES_READS },
+    { "57_evil_twin",        "--preflight-nr",         NEED_NO, DOES_READS },
+    { "57_evil_twin",        "--lte-test",             NEED_RADIO, DOES_TRANSMITS },
+    { "57_evil_twin",        "--nr-test",              NEED_RADIO, DOES_TRANSMITS },
+    { "57_evil_twin",        "--ack-isolated-lab",     NEED_NO, DOES_READS },
+    { "57_evil_twin",        "--pci",                  NEED_NO, DOES_READS },
+    { "57_evil_twin",        "--out",                  NEED_NO, DOES_MODIFIES },
+    { "57_evil_twin",        "--band",                 NEED_NO, DOES_READS },
+    { "57_evil_twin",        "--format",               NEED_NO, DOES_READS },
+    { "08_umts_air",       "--mcc",                  NEED_NO, DOES_READS },
+    { "08_umts_air",       "--mnc",                  NEED_NO, DOES_READS },
+    { "10_lte_air",        "--clone-recon",          NEED_CAP, DOES_READS },
+    { "10_lte_air",        "--pci",                  NEED_NO, DOES_READS },
+    { "16_sim",            "--card-challenge",       NEED_NO, DOES_READS },
+    { "16_sim",            "--host-challenge",       NEED_NO, DOES_READS },
+    { "16_sim",            "--k-enc",                NEED_NO, DOES_READS },
+    { "16_sim",            "--k-mac",                NEED_NO, DOES_READS },
+    { "16_sim",            "--payload",              NEED_NO, DOES_READS },
+    { "26_ss7_map",        "--build-response",       NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",        "--dialogue",             NEED_NO, DOES_READS },
+    { "26_ss7_map",        "--imsi",                 NEED_NO, DOES_READS },
+    { "26_ss7_map",        "--invoke",               NEED_NO, DOES_READS },
+    { "26_ss7_map",        "--msc",                  NEED_NO, DOES_READS },
+    { "26_ss7_map",        "--msisdn",               NEED_NO, DOES_READS },
+    { "26_ss7_map",        "--otid",                 NEED_NO, DOES_READS },
+    { "26_ss7_map",        "--wrap",                 NEED_NO, DOES_READS },
+    { "45_iot",            "--nprach-decode",        NEED_NO, DOES_READS },
+    { "57_evil_twin",      "--selftest",             NEED_NO, DOES_READS },
 };
 
 static const char *
@@ -9479,6 +9663,7 @@ static const struct {
     { "goals",         "Workflows",   "view-list-symbolic" },
 };
 
+
 #define SETTINGS_PLACE_PAGE 6
 
 static void
@@ -10508,6 +10693,7 @@ static int g_dash_sort = DASH_SORT_WORKFLOW;
 static const char *dash_sort_names[] = {
     "Workflow", "Most used", "Name (A–Z)", "Category", NULL
 };
+
 
 static int
 dash_cmp(const void *pa, const void *pb)
@@ -31262,6 +31448,11 @@ iot_build_decode(AppState *state, const char *module_id,
                 "The message as hex, from a capture or from the worked vector. "
                 "The answer names every field the block carries, including the "
                 "cell identity and the barring flag."));
+        gtk_box_append(GTK_BOX(sib_body),
+            mod_arg_row_prefilled(state, module_id, status, "Decode NPRACH",
+                "--nprach-decode", "10",
+                "An NPRACH configuration bitmap as hex: the preamble set, the "
+                "subcarrier offset and the repetition level it selects."));
         gtk_box_append(GTK_BOX(sib_body), res);
     }
     gtk_box_append(GTK_BOX(sib_body), fkit_note(
@@ -32085,11 +32276,12 @@ gprs_build_ciphering(AppState *state, const char *module_id,
         "GEA0 to GEA5: what each one protects, which of them this tree can "
         "compute, and what a network that negotiates downwards gives away.",
         &body);
-    GtkWidget *table_body, *one_body, *crypt_body, *down_body;
+    GtkWidget *table_body, *one_body, *crypt_body, *down_body, *kat_body;
     GtkWidget *table = verb_card("LIST THE ALGORITHMS", &table_body);
     GtkWidget *one = verb_card("ONE ALGORITHM", &one_body);
     GtkWidget *crypt = verb_card("CIPHER A PACKET", &crypt_body);
     GtkWidget *down = verb_card("CHECK FOR A DOWNGRADE", &down_body);
+    GtkWidget *kat = verb_card("PROVE THE VECTORS", &kat_body);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -32099,7 +32291,8 @@ gprs_build_ciphering(AppState *state, const char *module_id,
             mod_arg_row(state, module_id, status, "Read the Table",
                 "--gea-table", "",
                 "Every GEA with its clause, its key size and whether this tree "
-                "implements it. Five rows, one of which is computable here."));
+                "implements it. GEA0, GEA3 and GEA4 compute here; GEA1, GEA2 "
+                "and GEA5 state why they do not."));
         gtk_box_append(GTK_BOX(table_body), res);
     }
     gtk_box_append(GTK_BOX(body), table);
@@ -32112,8 +32305,9 @@ gprs_build_ciphering(AppState *state, const char *module_id,
             mod_arg_row_prefilled(state, module_id, status, "Name One",
                 "--gea", "1",
                 "0 to 5. The answer states the algorithm's standing: GEA0 is no "
-                "ciphering at all, and the export-controlled ones are named as "
-                "such rather than described as if they were weak."));
+                "ciphering, GEA1 and GEA2 are broken in the literature and "
+                "prohibited, GEA3 and GEA4 are computed here, GEA5's algorithm "
+                "body is licence-gated."));
         gtk_box_append(GTK_BOX(one_body), res);
     }
     gtk_box_append(GTK_BOX(body), one);
@@ -32124,10 +32318,11 @@ gprs_build_ciphering(AppState *state, const char *module_id,
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(crypt_body),
             mod_arg_row_prefilled(state, module_id, status, "Cipher the Packet",
-                "--gea-crypt", "0 0011223344556677 00000000 48656c6c6f",
-                "Algorithm, Kc, the 32-bit input, then the plaintext. Only GEA0 "
-                "is computable here and its answer is the plaintext back, which "
-                "is the point: on a GEA0 cell, the key is decorative."));
+                "--gea-crypt", "0 0011223344556677 00000000 48656c6c6f 0",
+                "Algorithm, Kc, the 32-bit input, the plaintext, then direction. "
+                "GEA0 returns the plaintext, which is the point: on a GEA0 cell "
+                "the key is decorative. GEA3 takes a 64-bit Kc, GEA4 a 128-bit "
+                "one, and both return the gamma they used."));
         gtk_box_append(GTK_BOX(crypt_body), res);
     }
     gtk_box_append(GTK_BOX(body), crypt);
@@ -32144,6 +32339,20 @@ gprs_build_ciphering(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(down_body), res);
     }
     gtk_box_append(GTK_BOX(body), down);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(kat_body),
+            mod_arg_row(state, module_id, status, "Run the Vectors",
+                "--gea-kat", "",
+                "The published test data for GEA3 and GEA4, one row per vector. "
+                "Nine rows, each an octet-for-octet comparison against the "
+                "standard's own keystream."));
+        gtk_box_append(GTK_BOX(kat_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), kat);
     mod_card_end();
 
     (void) out;
@@ -33604,6 +33813,331 @@ static ModuleSubmenuEntry bbdg_entries[] = {
     { "Modem commands", "network-wireless-symbolic", NULL, bbdg_build_at },
 };
 
+
+static GtkWidget *
+suci_catcher_build_cell(AppState *state, const char *module_id,
+                        GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CELL SETUP",
+        "gNB and AMF slice configuration, catcher plan, and the switch that puts "
+        "it on the air.", &body);
+    GtkWidget *conf_body, *plan_body, *run_body;
+    GtkWidget *conf = verb_card("BUILD CELL CONFIG", &conf_body);
+    GtkWidget *plan = verb_card("WRITE CATCHER PLAN", &plan_body);
+    GtkWidget *run = verb_card("START AND STOP", &run_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(conf_body),
+            mod_arg_row(state, module_id, status, "Build cell",
+                "--build-cell", "20801 n78 640000 1",
+                "PLMN, and optionally band, ARFCN and PCI. Writes the gNB "
+                "configuration and the AMF slice for that network, then checks "
+                "that both name the same PLMN before anything starts."));
+        gtk_box_append(GTK_BOX(conf_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), conf);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row(state, module_id, status, "Write plan",
+                "--catch", "20801",
+                "Writes the pre-authentication sequence: RRC setup complete, "
+                "registration request, identity request for SUCI, and the order "
+                "the event trace has to show them in."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_choices(state, module_id, status, "Run cell", "",
+                "Starting and stopping are separate acts: a cell that was never "
+                "stopped holds the radio.",
+                (const char *[]) { "--start", "--stop", "--status-tsv" },
+                (const char *[]) { "Start", "Stop", "Status" }, 3));
+        gtk_box_append(GTK_BOX(run_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), run);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+suci_catcher_build_identity(AppState *state, const char *module_id,
+                            GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("IDENTITY READ",
+        "SUCI as handed over before authentication, and the key material that "
+        "turns it back into a subscriber.", &body);
+    GtkWidget *parse_body, *dec_body, *cap_body;
+    GtkWidget *parse = verb_card("PARSE SUCI", &parse_body);
+    GtkWidget *dec = verb_card("DECONCEAL MSIN", &dec_body);
+    GtkWidget *cap = verb_card("READ CAPTURE", &cap_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row(state, module_id, status, "Parse SUCI",
+                "--parse", "080100000021436587f9",
+                "SUCI octets as they came off the air. Routing indicator, home "
+                "network key id and protection scheme are read out without a key; "
+                "the MSIN stays concealed."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dec_body),
+            mod_arg_row(state, module_id, status, "Deconceal MSIN",
+                "--deconceal", "080100000021436587f9 00112233445566778899AABBCCDDEEFF",
+                "Same SUCI with the home network private key. Profile A or B, "
+                "delegated to 14_suci, which owns the concealment."));
+        gtk_box_append(GTK_BOX(dec_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dec);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cap_body),
+            mod_arg_row(state, module_id, status, "Read capture",
+                "--capture", "/path/capture.pcap",
+                "Capture containing identity responses. Each one is pulled out "
+                "with tshark's NAS-5GS dissector and handed to the parser above."));
+        gtk_box_append(GTK_BOX(cap_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cap);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        GtkWidget *cls_body;
+        GtkWidget *cls = verb_card("CLASSIFY SUCI", &cls_body);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cls_body),
+            mod_arg_row(state, module_id, status, "Classify SUCI",
+                "--classify", "080100000021436587f9",
+                "Protection scheme, curve, key id and routing indicator for one "
+                "or more SUCIs. Operator is reported as not-in-suci: no PLMN "
+                "travels inside a SUCI."));
+        gtk_box_append(GTK_BOX(cls_body),
+            mod_arg_row(state, module_id, status, "Classify capture",
+                "--classify-capture", "/path/capture.pcap",
+                "One row per identity response in a capture, classified from the "
+                "NAS-5GS fields the dissector already separates."));
+        gtk_box_append(GTK_BOX(cls_body), res);
+        gtk_box_append(GTK_BOX(body), cls);
+    }
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+suci_catcher_build_codecs(AppState *state, const char *module_id,
+                          GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CODECS",
+        "Every octet this module builds or reads, checkable on its own without "
+        "a radio.", &body);
+    GtkWidget *nas_body, *rrc_body, *plmn_body, *auth_body;
+    GtkWidget *nas = verb_card("NAS MESSAGES", &nas_body);
+    GtkWidget *rrc = verb_card("RRC SETUP COMPLETE", &rrc_body);
+    GtkWidget *plmn = verb_card("PLMN", &plmn_body);
+    GtkWidget *auth = verb_card("KEYS", &auth_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(nas_body),
+            mod_arg_choices(state, module_id, status, "Build message", "",
+                "The two 5GMM messages the exchange turns on.",
+                (const char *[]) { "--build-nas identity-request",
+                                   "--build-nas registration-request" },
+                (const char *[]) { "Identity Request",
+                                   "Registration Request" }, 2));
+        gtk_box_append(GTK_BOX(nas_body),
+            mod_arg_row(state, module_id, status, "Decode message",
+                "--decode-nas", "7E005B01",
+                "5GMM PDU as hex. Message type is read from the header, identity "
+                "and registration fields out of the body."));
+        gtk_box_append(GTK_BOX(nas_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), nas);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(rrc_body),
+            mod_arg_row(state, module_id, status, "Build completion",
+                "--build-rrc", "0 20801 7 01",
+                "RRC SETUP COMPLETE carrying the registration request. Declared "
+                "length is checked against the octets actually present."));
+        gtk_box_append(GTK_BOX(rrc_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), rrc);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plmn_body),
+            mod_arg_row(state, module_id, status, "Encode PLMN",
+                "--plmn-encode", "20801",
+                "PLMN as MCC then MNC into the three octets SIB1 and the AMF "
+                "slice both carry."));
+        gtk_box_append(GTK_BOX(plmn_body),
+            mod_arg_row(state, module_id, status, "Decode PLMN",
+                "--plmn-decode", "02F810",
+                "Those three octets back to MCC-MNC."));
+        gtk_box_append(GTK_BOX(plmn_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plmn);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(auth_body),
+            mod_arg_row(state, module_id, status, "Build corpus",
+                "--corpus", "",
+                "Fixture corpus: null scheme, profile A, profile B and the "
+                "malformed cases, each verified to classify as it declares."));
+        gtk_box_append(GTK_BOX(auth_body),
+            mod_arg_row(state, module_id, status, "AKA vector",
+                "--aka", "465B5CE8B199B49FAA5F0A2EE238A6BC 23553CBE9637A89D218AE64DAE47BF35 FF9BB4D0B607 B9B9 --op CDC202D5123E20F62B6D676AC72CB318",
+                "Milenage, delegated to 16_sim: Ki, RAND, SQN and AMF with an OP "
+                "or OPc. Rows are the ones a USIM would compute."));
+        gtk_box_append(GTK_BOX(auth_body),
+            mod_arg_row(state, module_id, status, "Derive key",
+                "--kdf", "<key-hex> <fc> <p0> <p1> <p2> [len]",
+                "SBA key derivation: one key, a function code and up to three "
+                "parameters in, the derived key out."));
+        gtk_box_append(GTK_BOX(auth_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), auth);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+suci_catcher_build_trace(AppState *state, const char *module_id,
+                        GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("EVENT TRACE",
+        "Live run event order, checked row by row against the plan.", &body);
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card("CHECK EVENT ORDER", &card_body);
+    GtkWidget *res = result_rect_new(state, NULL);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row_prefilled(state, module_id,
+        status, "Check trace", "--check-trace", "captures/registration.tsv",
+        "Tab-separated direction and event name per row. Sequence is verified "
+        "only; packet contents are not decoded."));
+    gtk_box_append(GTK_BOX(card_body), res);
+    gtk_box_append(GTK_BOX(body), card);
+    (void) out;
+    return outer;
+}
+
+static ModuleSubmenuEntry suci_catcher_entries[] = {
+    { "Cell", "network-wireless-symbolic", NULL, suci_catcher_build_cell },
+    { "Identity", "avatar-default-symbolic", NULL,
+      suci_catcher_build_identity },
+    { "Codecs", "utilities-terminal-symbolic", NULL,
+      suci_catcher_build_codecs },
+    { "Trace", "document-open-symbolic", NULL, suci_catcher_build_trace },
+};
+
+
+static GtkWidget *
+et_lab_build_setup(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("LAB SETUP",
+        "Reconnaissance row to cell, host preflight, and a bounded local "
+        "attach on hardware you own.", &body);
+    GtkWidget *prep_body, *check_body, *run_body;
+    GtkWidget *prep = verb_card("BUILD CELL", &prep_body);
+    GtkWidget *check = verb_card("CHECK HOST", &check_body);
+    GtkWidget *run = verb_card("RUN ATTACH", &run_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(prep_body),
+            mod_arg_row(state, module_id, status, "LTE cell",
+                "--prepare-lte", "loot/recon.tsv 1",
+                "One reconnaissance row, turned into an eNB configuration for a "
+                "network this lab owns. Optionally pin a PCI and choose the "
+                "output directory."));
+        gtk_box_append(GTK_BOX(prep_body),
+            mod_arg_row(state, module_id, status, "NR cell",
+                "--prepare-nr", "loot/recon.tsv 1",
+                "The same row as a gNB, for srsRAN or Open5GS. A band and a "
+                "format are optional; the PCI is the same knob as above."));
+        gtk_box_append(GTK_BOX(prep_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), prep);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(check_body),
+            mod_arg_choices(state, module_id, status, "What is installed", "",
+                "Before a test fails on the air, find out whether the core, the "
+                "eNB and the test UE are on this host at all.",
+                (const char *[]) { "--preflight-lte", "--preflight-nr" },
+                (const char *[]) { "LTE stack", "NR stack" }, 2));
+        gtk_box_append(GTK_BOX(check_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), check);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_row(state, module_id, status, "LTE attach",
+                "--lte-test", "loot/lab 60",
+                "A bounded local attach. The seconds argument closes the test "
+                "rather than leaving a cell up."));
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_row(state, module_id, status, "5G registration",
+                "--nr-test", "loot/lab 60",
+                "The same for a registration against the local core."));
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_row(state, module_id, status, "Acknowledge",
+                "--ack-isolated-lab", "",
+                "The run refuses without this: it is the operator saying the "
+                "lab is theirs and nothing here leaves it."));
+        gtk_box_append(GTK_BOX(run_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), run);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static ModuleSubmenuEntry et_lab_entries[] = {
+    { "Lab", "network-wireless-symbolic", NULL, et_lab_build_setup },
+};
+
 static void
 register_all_modules(void)
 {
@@ -33721,4 +34255,8 @@ register_all_modules(void)
                              G_N_ELEMENTS(nrj_entries), NULL);
     module_registry_register("56_baseband_diag", bbdg_entries,
                              G_N_ELEMENTS(bbdg_entries), NULL);
+    module_registry_register("58_suci_catcher", suci_catcher_entries,
+                             G_N_ELEMENTS(suci_catcher_entries), NULL);
+    module_registry_register("57_evil_twin", et_lab_entries,
+                             G_N_ELEMENTS(et_lab_entries), NULL);
 }

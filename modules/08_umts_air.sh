@@ -1740,18 +1740,33 @@ uair_selftest() {
     chk tx-freq-refused "$(uair_cli_main --transmit --no-key >/dev/null 2>&1; echo $?)" "2"
     txb=$(uair_cli_main --transmit --freq 2140 --seconds 0.01 --bch-hex 012345 --no-key 2>/dev/null)
     chk tx-bch-carried  "$(printf '%s\n' "$txb" | awk -F'\t' '$1=="carrier_is_a_cell"{print $2}' | cut -d' ' -f1)" "partly"
-    chk tx-bch-file     "$([[ -s "$(printf '%s\n' "$txb" | awk -F'\t' '$1=="bch_file"{print $2}')" ]] && echo yes || echo no)" "yes"
+    chk tx-bch-file     "$([[ -s "$(printf '%s\n' "$txb" | awk -F'\t' '$1=="bch_file[0]"{print $2}')" ]] && echo yes || echo no)" "yes"
     chk tx-bch-short    "$(uair_cli_main --transmit --freq 2140 --bch-hex 0123 --no-key >/dev/null 2>&1; echo $?)" "2"
     # The SIBs are the half of the downlink that was missing: the packer puts
     # them on the FACH transport, the S-CCPCH carries that frame, and the mix
     # is the cell.  Each row below is an assertion that the wiring happened.
-    txp=$(uair_cli_main --transmit --freq 2140 --seconds 0.05 --bch-hex 012345 \
-              --sibs sib1,sib3,sib5 --no-key 2>/dev/null)
+    txp=$(uair_cli_main --transmit --freq 2140 --seconds 0.2 --sibs sib1,sib3,sib5 \
+              --no-key 2>/dev/null)
     chk tx-sib-msgs     "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="sib_messages"{print $2}')" "4"
     chk tx-sib-transport "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="sib_transport"{print $2}' | grep -c 'S-CCPCH')" "1"
-    chk tx-sib-frames   "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="sib_frames"{print $2}' | cut -d' ' -f1)" "5"
+    chk tx-sib-schedule "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="sib_schedule"{print $2}' | cut -d' ' -f1)" "16"
+    chk tx-sib-frames   "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="sib_frames"{print $2}' | cut -d' ' -f1)" "6"
     chk tx-cell-file    "$([[ -s "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="cell_file"{print $2}')" ]] && echo yes || echo no)" "yes"
     chk tx-cell-is-cell "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="carrier_is_a_cell"{print $2}' | cut -d' ' -f1)" "yes"
+    # The MIB is derived from the set and split into BCH blocks, because it does
+    # not fit one: 84 bits into 24-bit transport blocks is four frames of the
+    # 80 ms MIB period.  A cell whose MIB does not name its SIBs is two tools
+    # that each look right.
+    chk tx-mib-source   "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="mib_source"{print $2}' | grep -c 'derived from --sibs')" "1"
+    chk tx-mib-blocks   "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="bch_blocks"{print $2}')" "4"
+    chk tx-mib-seg0     "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="bch_hex[0]"{print $2}')" "000040"
+    chk tx-mib-seg3     "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="bch_hex[3]"{print $2}')" "010000"
+    chk tx-mib-period   "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="bch_period"{print $2}' | cut -d' ' -f1)" "8"
+    chk tx-mib-frame3   "$(printf '%s\n' "$txp" | awk -F'\t' '$1=="bch_frame[3]"{print $2}')" "start=3 period=8"
+    chk tx-sib-frame-idle "$(printf '%s\n' "$txp" | grep -c '^sib_frame	.*idle$')" "10"
+    chk tx-sib-short    "$(uair_cli_main --transmit --freq 2140 --seconds 0.05 --sibs sib1,sib3,sib5 --no-key >/dev/null 2>&1; echo $?)" "2"
+    chk tx-mcc-bad      "$(uair_cli_main --transmit --freq 2140 --sibs sib1 --mcc 12 --no-key >/dev/null 2>&1; echo $?)" "2"
+    chk tx-mnc-bad      "$(uair_cli_main --transmit --freq 2140 --sibs sib1 --mnc 1234 --no-key >/dev/null 2>&1; echo $?)" "2"
     chk tx-sib-badsf    "$(uair_cli_main --transmit --freq 2140 --sibs sib1 --sib-sf 64 --no-key >/dev/null 2>&1; echo $?)" "2"
     chk tx-sib-badcode  "$(uair_cli_main --transmit --freq 2140 --sibs sib1 --sib-code 0 --no-key >/dev/null 2>&1; echo $?)" "2"
     chk tx-sib-badname  "$(uair_cli_main --transmit --freq 2140 --sibs sib99 --no-key >/dev/null 2>&1; echo $?)" "2"
@@ -1762,7 +1777,7 @@ uair_selftest() {
     chk catcher-steps   "$(uair_cli_main --catcher-model | grep -c '^[0-9]')" "8"
     chk catcher-built   "$(uair_cli_main --catcher-model | grep -c 'built:')" "6"
     chk catcher-gap     "$(uair_cli_main --catcher-model | grep -cE 'absent:|partial:|limit:')" "0"
-    chk catcher-parse   "$(uair_cli_main --catcher-model | grep -c 'parse:')" "1"
+    chk catcher-parse   "$(uair_cli_main --catcher-model | grep -c 'parse and build:')" "1"
     chk catcher-rc      "$(uair_cli_main --catcher-model >/dev/null 2>&1; echo $?)" "0"
     chk tx-help-verbs   "$(uair_usage | grep -cE '^  --(transmit|catcher-model)( |$)')" "2"
 
@@ -1790,6 +1805,17 @@ uair_selftest() {
     chk uplink-request-bits "$(uair_cli_main --uplink request --tmsi 12345678 2>/dev/null | awk -F'\t' '$1=="bits"{print $2}')" "83"
     chk uplink-prach    "$(uair_cli_main --uplink prach --signature 3 --slot 2 2>/dev/null | awk -F'\t' '$1=="samples"{print $2}')" "76800"
     chk uplink-msgpart  "$(uair_cli_main --uplink message-part --sf 64 2>/dev/null | awk -F'\t' '$1=="slots"{print $2}')" "15"
+    # The two uplink halves joined: two preambles, no gap, one 10 ms message
+    # part, which is 2 * 4096 + 38400 chips.
+    chk uplink-burst    "$(uair_cli_main --uplink burst --signature 4 --preambles 2 --out "$d/burst.cf32" 2>/dev/null | awk -F'\t' '$1=="chips"{print $2}')" "46592"
+    chk uplink-burst-start "$(uair_cli_main --uplink burst --signature 4 --preambles 2 --out "$d/burst.cf32" 2>/dev/null | awk -F'\t' '$1=="scrambling_start"{print $2+0}')" "4096"
+    # The transport channel above the message part: 64-bit block, gCRC16, rate
+    # 1/3, 10 ms at SF 128, which is 80x3 + 8x3 = 264 coded bits into 300 data
+    # bits, so dN = +36.
+    chk uplink-chain     "$(uair_cli_main --uplink chain --tb 0123456789abcdef --crc 16 --coding third --frames 1 --sf 128 2>/dev/null | awk -F'\t' '$1=="dN"{print $2+0}')" "36"
+    chk uplink-chain-ndata "$(uair_cli_main --uplink chain --tb 0123456789abcdef --crc 16 --coding third --frames 1 --sf 128 2>/dev/null | awk -F'\t' '$1=="ndata"{print $2+0}')" "300"
+    # TS 25.212 4.3.3: TFC index 1 is basis column 0, which has weight 16.
+    chk uplink-tfci      "$(uair_cli_main --uplink tfci --index 1 2>/dev/null | awk -F'\t' '$1=="word32_weight"{print $2+0}')" "16"
     chk uplink-bad      "$(uair_cli_main --uplink nonsense >/dev/null 2>&1; echo $?)" "2"
 
     chk id-wrapper-verified "$(uair_cli_main --catcher-identity | awk -F'\t' '$1=="verified"{print $2}' | grep -c 'bit for bit against the pycrate')" "1"
@@ -1969,12 +1995,16 @@ Transmit half (a carrier, the BCH and the SIBs that make it a cell)
   --transmit --freq <MHz> [--psc <0..511>] [--rate <sps>] [--seconds <s>]
              [--gain <dB>] [--bch-hex <24-bit MIB>]
              [--sibs [mib,]sib1,sib3,sib5] [--sib-sf 256|128]
-             [--sib-code <1..sf-1>] [--sib-offset <0..149>] [--no-key]
+             [--sib-code <1..sf-1>] [--sib-offset <0..149>]
+             [--mcc <3 digits>] [--mnc <2-3 digits>] [--no-key]
                                 build the downlink; --sibs packs the SIBs onto
-                                the FACH, spreads them on an S-CCPCH and mixes
-                                that onto the carrier.  Keys a radio only when
-                                one answers, otherwise prints the call and
-                                hands off
+                                the FACH, spreads them on an S-CCPCH, schedules
+                                them on frames that do not collide, and mixes
+                                that onto the carrier.  Without --bch-hex the
+                                MIB is derived from the SIB set and split into
+                                the 24-bit BCH blocks a cell puts out over its
+                                80 ms MIB period.  Keys a radio only when one
+                                answers, otherwise prints the call and hands off
   --catcher-model               the 3G IMSI-catcher chain, step by step, with
                                 what is built and what is absent
   --catcher-identity [--identity imsi|imei|imeisv|tmsi] [--txid 0..3]
@@ -1990,7 +2020,7 @@ Transmit half (a carrier, the BCH and the SIBs that make it a cell)
                                 SIBs -> message -> FACH transport block ->
                                 channel-coded frame ready for the S-CCPCH
   --sib-vectors                 the pinned SIB vectors, bits and hex
-  --uplink <request|prach|message-part|list> [args]
+  --uplink <request|prach|message-part|burst|chain|tfci|list> [args]
                                 what a handset sends: the RRC CONNECTION
                                 REQUEST, the PRACH preamble as chips or samples,
                                 and the message-part slot structure

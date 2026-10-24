@@ -1077,6 +1077,40 @@ def sib5_defaults():
     }
 
 
+# The repetition period a SIB gets when the schedule is derived rather than
+# typed.  These are the tree's existing defaults (mib_defaults below) lifted
+# into a table so one place decides: SIB1 and SIB3 are read first, SIB5 carries
+# the common physical channels and is repeated less often.
+SIB_REP_DEFAULT = {"sib1": 8, "sib3": 8, "sib5": 16, "sib7": 16, "sib11": 16,
+                   "sib4": 16, "sib6": 16, "sib11bis": 16, "sib12": 16,
+                   "sib13": 16, "sib14": 16, "sib18": 16}
+
+
+def _refs_from_sibs(spec):
+    """Build the MIB reference list from the SIBs a cell actually transmits."""
+    names = [n.strip().lower() for n in spec.replace(",", " ").split() if n.strip()]
+    if not names:
+        _die(2, "--from-sibs is empty",
+             "name the blocks the S-CCPCH carries, e.g. sib1,sib3,sib5")
+    seen = set()
+    refs = []
+    for name in names:
+        if name in seen:
+            _die(2, "--from-sibs repeats %s" % name,
+                 "one reference per block: a second entry would schedule the "
+                 "same block twice in one MIB")
+        seen.add(name)
+        if name not in SIBSB_ALIAS or SIBSB_ALIAS[name] is None:
+            _die(2, "--from-sibs: %r is not a schedulable system information "
+                 "block" % name,
+                 "SIBSb-TypeAndTag lists sysInfoType1..18, 5bis and "
+                 "sysInfoTypeSB1/SB2; the master information block itself is "
+                 "not scheduled in its own reference list")
+        rep = SIB_REP_DEFAULT.get(name, 16)
+        refs.append({"sib": name, "value": 1, "seg_count": 1, "rep": (rep, 0)})
+    return refs
+
+
 def mib_defaults():
     return {"value_tag": 1, "mcc": "001", "mnc": "01",
             "refs": [{"sib": "sib1", "value": 1, "seg_count": 1, "rep": (8, 0)},
@@ -1114,6 +1148,39 @@ def _default_params(name):
     if name == "sib5":
         return sib5_defaults()
     _die(2, "no default parameters for %s" % name, "")
+
+
+# The BCH transport block is 24 bits (tools/umts_bch.py BCH_TB_BITS; TS 25.212
+# 4.2.13.6 leaves the attributes to TS 25.331).  An encoded MIB is larger than
+# that -- 84 bits for the default three-block schedule -- so a cell puts it out
+# in consecutive BCH transport blocks and the UE reassembles it across the MIB
+# period.  This tool splits the bit string and says so; it does not invent the
+# segment header of TS 25.331 8.1.1.1.3.
+MIB_SEG_LIMITS = [
+    ("mib-segment-header",
+     "TS 25.331 8.1.1.1.3 puts a segment header (segment type, SIB type, "
+     "SEG_COUNT on the first segment, segment index after it) in front of the "
+     "data.  This split is a bare bit-string chunking: it reproduces the MIB "
+     "bits exactly and adds no header, so it is only what a receiver that "
+     "concatenates the blocks would read back"),
+    ("mib-segment-count",
+     "the number of segments a real cell uses is signalled by SEG_COUNT in the "
+     "first segment; here it is ceil(bits / tb_bits) and nothing else"),
+]
+
+
+def segment_mib(bits, tb_bits):
+    """Split an encoded MIB into BCH transport blocks, the last one padded."""
+    if tb_bits <= 0:
+        _die(2, "--segments %d is not a transport block size" % tb_bits,
+             "a BCH transport block is a positive number of bits, 24 in "
+             "tools/umts_bch.py [1] 4.2.13.6")
+    blocks = []
+    for i in range(0, len(bits), tb_bits):
+        chunk = [int(b) for b in bits[i:i + tb_bits]]
+        pad = tb_bits - len(chunk)
+        blocks.append((chunk + [0] * pad, len(chunk), pad))
+    return blocks
 
 
 def _finish(e, rows, extra=None):
@@ -1177,6 +1244,12 @@ def cmd_mib(args):
         p["mcc"] = args.mcc
     if args.mnc is not None:
         p["mnc"] = args.mnc
+    if args.from_sibs and args.schedule:
+        _die(2, "--from-sibs and --schedule name the same list",
+             "drop one: --from-sibs derives the reference list from the SIBs the "
+             "cell transmits, --schedule types it")
+    if args.from_sibs:
+        p["refs"] = _refs_from_sibs(args.from_sibs)
     if args.schedule:
         refs = []
         for spec in args.schedule:
@@ -1200,6 +1273,29 @@ def cmd_mib(args):
     e = enc_mib(p)
     rows = [("cli", "mib")]
     rows.extend(("ref", r) for r in e.refs)
+    if args.segments:
+        tb_bits = _parse_int(args.segments, "segments")
+        bits = e.bits()
+        blocks = segment_mib(bits, tb_bits)
+        rows.append(("bch_tb_bits", "%d" % tb_bits))
+        rows.append(("segments", "%d" % len(blocks)))
+        rows.append(("segment_frames",
+                     "%d frames of 10 ms, one transport block each; a cell "
+                     "repeats the whole MIB every 80 ms (8 frames), so %d "
+                     "segments fit one period" % (len(blocks), len(blocks))))
+        for i, (chunk, used, pad) in enumerate(blocks):
+            rows.append(("seg[%d].hex" % i, _bits_hex(chunk)))
+            rows.append(("seg[%d].bits" % i, "%d used, %d pad, %d total"
+                         % (used, pad, tb_bits)))
+        rows.append(("reassemble", "hex %s -- the segments in order, each "
+                     "truncated to its used bits, are the MIB above"
+                     % _bits_hex(bits)))
+        rows.append(("bch_command",
+                     "tools/umts_bch.py encode --bch-hex <seg[i].hex> "
+                     "--frames 8 --at-start <i> --period 8 --out bch_i.cf32 "
+                     "(one file per segment)"))
+        _emit(_finish(e, rows, extra=list(MIB_SEG_LIMITS)))
+        return 0
     _emit(_finish(e, rows))
     return 0
 
@@ -1491,6 +1587,63 @@ PACK_LIMITS = [
 ]
 
 
+def _timeline(msgs, refs):
+    """Place each SYSTEM INFORMATION message on a frame inside the rep cycle.
+
+    One FACH transport block per TTI, so two SIBs may not share a frame: the
+    UE decodes one block per 10 ms and a sum of two is neither.  The planner
+    walks the blocks in transmission order and gives each the first offset that
+    collides with nothing already placed, counting every repetition up to the
+    cycle length.  The cycle is the longest repetition period, because every
+    other period divides it (they are powers of two).
+    """
+    rep_of = {r["sib"]: r["rep"][0] for r in refs}
+    cycle = max([rep_of.get(m["ent"]["sib"], 16) for m in msgs] or [16])
+    free = [True] * cycle
+    frames = [None] * cycle
+    starts = [None] * len(msgs)
+    i = 0
+    while i < len(msgs):
+        sib = msgs[i]["ent"]["sib"]
+        seg = 0
+        while i + seg < len(msgs) and msgs[i + seg]["ent"]["sib"] == sib:
+            seg += 1
+        rep = rep_of.get(sib, 16)
+        if rep > cycle:
+            _die(1, "internal: %s repeats every %d frames but the cycle is %d"
+                 % (sib, rep, cycle))
+        place = None
+        for o in range(cycle):
+            slots = []
+            ok = True
+            for k in range(0, cycle, rep):
+                for j in range(seg):
+                    f = (o + k + j) % cycle
+                    if not free[f]:
+                        ok = False
+                        break
+                    slots.append((f, i + j))
+                if not ok:
+                    break
+            if ok:
+                place = (o, slots)
+                break
+        if place is None:
+            _die(2, "the SIB set does not fit in a %d frame cycle" % cycle,
+                 "each block needs %s consecutive frame(s); shorten the set or "
+                 "give one of them a longer repetition period" % seg)
+        o, slots = place
+        for f, idx in slots:
+            free[f] = False
+            frames[f] = idx
+            # the start is the first repetition's offset, not the last frame
+            # the planner happened to place: every later slot is +k*rep from it
+            if starts[idx] is None:
+                starts[idx] = {"start": f, "period": rep, "sib": sib}
+        i += seg
+    return cycle, frames, starts, rep_of
+
+
 def cmd_pack(args):
     entries = _add_entries(args.add)
     sf = _parse_int(args.sf, "sf") if args.sf else 256
@@ -1516,6 +1669,11 @@ def cmd_pack(args):
     pack = args.pack or "one"
     msgs = pack_si(entries, tb_bits, pack)
     rows = [("cli", "pack")]
+    timeline = None
+    if args.timeline:
+        refs = _refs_from_sibs(",".join(e["sib"] for e in entries))
+        timeline = _timeline(msgs, refs)
+        cycle, frames, starts, rep_of = timeline
     rows.append(("transport",
                  "BCCH -> FACH -> S-CCPCH (TS 25.331 8.1.1.1.2, TS 25.211 "
                  "5.3.3.4); the BCH is not involved"))
@@ -1527,6 +1685,26 @@ def cmd_pack(args):
     rows.append(("tb_bits", "%d" % tb_bits))
     rows.append(("coding", "1/%d" % rate))
     rows.append(("pack", pack))
+    if timeline:
+        rows.append(("schedule.cycle",
+                     "%d frames of 10 ms = %d ms (the longest repetition period "
+                     "in the set)" % (cycle, cycle * 10)))
+        for name in sorted(rep_of):
+            rows.append(("schedule.rep", "%s rep=%d (%d frames)"
+                         % (name, rep_of[name], rep_of[name])))
+        rows.append(("schedule.frames",
+                     "%d of %d frames carry a transport block, %d are idle"
+                     % (sum(1 for f in frames if f is not None), cycle,
+                        sum(1 for f in frames if f is None))))
+        for f in range(cycle):
+            rows.append(("schedule.frame", "%d %s" % (
+                f, "msg[%d] %s" % (frames[f], msgs[frames[f]]["ent"]["sib"])
+                if frames[f] is not None else "idle")))
+        for idx, st in enumerate(starts):
+            if st is not None:
+                rows.append(("msg[%d].frame" % idx,
+                             "start=%d period=%d sib=%s"
+                             % (st["start"], st["period"], st["sib"])))
     for ent in entries:
         rows.append(("sib", "%s bits=%d hex=%s"
                      % (ent["sib"], len(ent["bits"]), _bits_hex(ent["bits"]))))
@@ -1562,10 +1740,18 @@ def cmd_pack(args):
         rows.append(("msg[%d].frame_bits" % i, "%d" % len(frame_bits)))
         rows.append(("msg[%d].frame_pad" % i, "%d" % fpad))
     rows.append(("frames", "%d" % len(msgs)))
-    rows.append(("next",
-                 "tools/umts_sccpch.py encode --sf %d --code 3 --frame-hex "
-                 "<msg[i].frame_hex> --out sccpch.cf32 (one file per frame)"
-                 % sf))
+    if timeline:
+        rows.append(("next",
+                     "tools/umts_sccpch.py encode --sf %d --code 3 --frames %d "
+                     "--frame-hex <msg[i].frame_hex> --at-start <msg[i].frame "
+                     "start> --period <msg[i].frame period> --out sccpch_<i>.cf32 "
+                     "--format cf32 (one file per message; silence in the frames "
+                     "it does not occupy)" % (sf, cycle)))
+    else:
+        rows.append(("next",
+                     "tools/umts_sccpch.py encode --sf %d --code 3 --frame-hex "
+                     "<msg[i].frame_hex> --out sccpch.cf32 (one file per frame)"
+                     % sf))
     rows.append(("handoff",
                  "the octets and the channel-coded frame end here; the S-CCPCH "
                  "physical layer is tools/umts_sccpch.py and the transmitter is "
@@ -1630,6 +1816,12 @@ def _parser():
     p.add_argument("--mcc")
     p.add_argument("--mnc")
     p.add_argument("--schedule", action="append", metavar="SIB:VALUE:REP")
+    p.add_argument("--segments", metavar="TB_BITS",
+                   help="also split the encoded MIB into BCH transport blocks "
+                        "of this size, e.g. 24")
+    p.add_argument("--from-sibs", metavar="LIST",
+                   help="derive the reference list from the SIBs the cell "
+                        "transmits, e.g. sib1,sib3,sib5")
     p.set_defaults(func=cmd_mib)
 
     p = sub.add_parser("sib1", help="SysInfoType1")
@@ -1689,6 +1881,9 @@ def _parser():
     p.add_argument("--add", action="append", metavar="TYPE[:HEX[:BITS]]")
     p.add_argument("--fach-tb-bits", dest="fach_tb_bits")
     p.add_argument("--pack", choices=("one", "combine"))
+    p.add_argument("--timeline", action="store_true",
+                   help="place the messages on frames instead of stacking them "
+                        "in one TTI, and print the schedule")
     p.set_defaults(func=cmd_si)
 
     p = sub.add_parser("pack", help="SIBs onto the FACH transport, whole chain")
@@ -1698,6 +1893,9 @@ def _parser():
                    help="transport block size in bits (from SIB5's TFS)")
     p.add_argument("--coding", choices=("third", "half"))
     p.add_argument("--pack", choices=("one", "combine"))
+    p.add_argument("--timeline", action="store_true",
+                   help="place the messages on frames instead of stacking them "
+                        "in one TTI, and print the schedule")
     p.set_defaults(func=cmd_pack)
 
     p = sub.add_parser("fach", help="one FACH transport block through TS 25.212")

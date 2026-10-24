@@ -417,6 +417,7 @@ IMSISTING_MODULE_TABLE=(
     "RADIO|17|5G NTN / Satellite|ntn_menu|49_ntn"
     "RADIO|18|TETRA / DMR / GSM-R|n3g_menu|53_non3gpp"
     "RADIO|19|Jamming Detection|jamd_menu|33_jamming_detect"
+    "RADIO|20|LTE Evil Twin|et_menu|57_evil_twin"
 
     # ACCESS
     "ACCESS|20|LTE Attach Forge|latt_menu|09_lte_attach"
@@ -450,6 +451,7 @@ IMSISTING_MODULE_TABLE=(
     "BASEBAND / DEVICE|42|Baseband Exploits|bexp_menu|54_baseband_exploit"
     "BASEBAND / DEVICE|43|5G NR Injection|nrj_menu|55_nr_inject"
     "BASEBAND / DEVICE|44|Baseband NV/EFS|bbdg_menu|56_baseband_diag"
+    "SIM / IDENTITY|58|5G SUCI Catcher|suci_catcher_menu|58_suci_catcher"
 
     # TRACKING
     "TRACKING|45|RF Fingerprint / CSI|rff_menu|24_rf_fingerprint"

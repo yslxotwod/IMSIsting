@@ -3,11 +3,16 @@
 #
 # The circuit-switched half of 2G is covered by 06_gsm_air; the packet-switched
 # half is its own stack. This module states its GEA limits instead of implying
-# capability: GEA0 is identity ciphering and is computed here (--gea-crypt 0);
-# GEA1-GEA5 refuse with a reason, because their algorithms are export-controlled
-# and 3GPP ships no test vectors to prove an implementation against. APN and PDP
-# coding is computed and known-answer tested against the published spec tables;
-# the air-interface step is a handoff.
+# capability. GEA0 (identity), GEA3 (TS 55.216) and GEA4 (TS 55.226) are
+# computed here, and --gea-kat checks nine published vectors from TS 55.217,
+# TS 55.218 and TS 55.226 octet for octet. GEA1 and GEA2 refuse by name: 3GPP
+# never published them, they were recovered and broken in the cryptanalysis
+# literature (Beierle et al., EUROCRYPT 2021; Amzaleg and Dinur, IACR ePrint
+# 2022/424, which recovers a GEA-1 key in 2^40 time with about 4 MiB and runs
+# in hours on a laptop), and the recovered tap sets are not in this tree. GEA5
+# refuses because the algorithm body and the test data in TS 55.251/55.252 are
+# licence-gated. APN and PDP coding is computed and known-answer tested against
+# the published spec tables; the air-interface step is a handoff.
 #
 # Attack owned: 2G packet-switched (O5/O4 adjacency) — codec and detection half.
 #
@@ -41,6 +46,7 @@ mkdir -p "$TMP_DIR" "$LOOT_DIR" "$CAPTURES_DIR" "$LOGS_DIR" "$STATE_DIR" 2>/dev/
 
 MOD_TMP="$TMP_DIR/gprs"
 GPRS_DIR="$LOOT_DIR/gprs"
+GPRS_GEA_TOOL="$IMSISTING_ROOT/tools/gsm_gea.py"
 mkdir -p "$MOD_TMP" "$GPRS_DIR" 2>/dev/null
 
 declare -F info >/dev/null 2>&1 || info() { printf '[info] %s\n' "$*" >&2; }
@@ -64,7 +70,7 @@ gprs_hex2str() { local h="${1:-}"; printf '%b' "$(printf '%s' "$h" | sed 's/../\
 
 gprs_status_tsv() {
     printf 'MODULE\tgprs\n'
-    printf 'TARGET\tGPRS/EDGE: GEA0 identity ciphering + GEA capability table, APN/PDP coding, downgrade\n'
+    printf 'TARGET\tGPRS/EDGE: GEA0/GEA3/GEA4 ciphering with published vectors, APN/PDP coding, downgrade\n'
     printf 'TRANSMIT\tnone — codec and detection\n'
     printf 'SELFTEST\tyes\n'
 }
@@ -79,24 +85,24 @@ gprs_gea_table() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' GEA0 'TS 43.020 §H.5.1' 0 none yes \
         'identity — LLC ciphering disabled (TS 44.064); KAT-tested here'
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' GEA1 'TS 43.020 §D.4.9' 64 32-bit no \
-        'prohibited in mobile stations by the spec; no public algorithm text, no vectors'
+        'prohibited in MS; never published by 3GPP — recovered and broken in Beierle et al. EUROCRYPT 2021 (2^40), refined in IACR ePrint 2022/424'
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' GEA2 'TS 43.020 §D.4.9' 64 32-bit no \
-        'removed from the spec in 2021-06 "due to security" and prohibited in MS; no public algorithm, no vectors'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' GEA3 'TS 43.020 §D.4.9' 64 32-bit no \
-        'KASUMI-based and mandatory in MS, but the spec (TS 55.216) is export-controlled; no vectors'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' GEA4 'TS 43.020 §H.5.2.1.1' 128 32-bit no \
-        'KASUMI-128, spec TS 55.226 is export-controlled; no vectors'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' GEA5 'TS 43.020 §H.5.2.2' 128 '32-bit+CONSTANT-F' no \
-        'SNOW 3G per TS 55.251, which is not public; no vectors'
+        'removed 2021-06 "due to security", prohibited in MS; recovered in the same paper, attack near 2^45, refined in ePrint 2022/424'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' GEA3 'TS 55.216 V6.2.0' 64 32-bit yes \
+        'computed here per TS 55.216; 6 vectors from TS 55.217/55.218 pass in tools/gsm_gea.py'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' GEA4 'TS 55.226 V9.0.0' 128 32-bit yes \
+        'computed here per TS 55.226; 3 vectors from the same spec pass in tools/gsm_gea.py'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' GEA5 'TS 55.251 V14.0.0' 128 '32-bit+CONSTANT-F' no \
+        'TS 55.251/55.252 are published but every algorithmic clause and the test data are licence-gated'
 }
 gprs_gea_name() {
     case "$1" in
         0) echo "GEA0 (no encryption; identity)" ;;
-        1) echo "GEA1 (64-bit; prohibited in MS by TS 43.020 D.4.9)" ;;
-        2) echo "GEA2 (removed from TS 43.020 in 2021-06; prohibited in MS)" ;;
-        3) echo "GEA3 (64-bit KASUMI-based; spec export-controlled)" ;;
-        4) echo "GEA4 (128-bit KASUMI; spec export-controlled)" ;;
-        5) echo "GEA5 (128-bit SNOW 3G; TS 55.251 not public)" ;;
+        1) echo "GEA1 (64-bit; prohibited in MS, key recovery 2^40)" ;;
+        2) echo "GEA2 (64-bit; removed 2021-06, attack near 2^45)" ;;
+        3) echo "GEA3 (64-bit KASUMI; TS 55.216)" ;;
+        4) echo "GEA4 (128-bit KASUMI; TS 55.226)" ;;
+        5) echo "GEA5 (128-bit SNOW 3G; algorithm body licence-gated)" ;;
         *) echo "unknown GEA — never classified as safe" ;;
     esac
 }
@@ -105,11 +111,11 @@ gprs_gea_name() {
 # no external known-answer vector exists to prove an implementation here.
 gprs_gea_why() {
     case "$1" in
-        1) echo 'TS 43.020 §D.4.9 prohibits GEA1 in mobile stations and no 3GPP text specifies the algorithm; the published break (Beierle et al., EUROCRYPT 2021) carries no reference vectors to prove an implementation against' ;;
-        2) echo 'TS 43.020 removed GEA2 in 2021-06 ("due to security") and §D.4.9 prohibits it; no public algorithm text and no reference vectors' ;;
-        3) echo 'the algorithm is specified in TS 55.216, which defers to an export-controlled ETSI Task Force document; the 3GPP test-data spec TS 55.217 ships without vectors' ;;
-        4) echo 'the algorithm is specified in TS 55.226 (KASUMI-128) and is export-controlled; no public reference vectors exist to prove an implementation' ;;
-        5) echo 'the algorithm (SNOW 3G) is specified in TS 55.251, which is not part of the public 3GPP series; no reference vectors' ;;
+        1) echo 'TS 43.020 §D.4.9 prohibits GEA1 in mobile stations. 3GPP never published the algorithm; it was recovered and published in the cryptanalysis literature (Beierle et al., EUROCRYPT 2021), where the attack lives too: a 64-bit key falls in 2^40 from 65 keystream bits, and Amzaleg and Dinur (IACR ePrint 2022/424) cut the memory from 44 GiB to about 4 MiB, recovering it in hours on a laptop. Missing here is the recovered LFSR tap sets transcribed as a table with a vector, not the analysis' ;;
+        2) echo 'TS 43.020 removed GEA2 in 2021-06 ("due to security") and §D.4.9 prohibits it. Same publication path as GEA1: no 3GPP algorithm text, recovered in Beierle et al. EUROCRYPT 2021 with an attack near 2^45, refined in ePrint 2022/424. Not implemented here for the same reason: the recovered taps are not on this host' ;;
+        3) echo 'implemented — TS 55.216 V6.2.0, KASUMI-based, with the TS 55.217/55.218 test vectors' ;;
+        4) echo 'implemented — TS 55.226 V9.0.0, KASUMI-128, with its own test vectors' ;;
+        5) echo 'TS 55.251 V14.0.0 is published, but sections 5.3 to 5.6 (components, initialisation, keystream generation) and the TS 55.252 test data each read "only available under licence": the interfaces are public, the algorithm body is not' ;;
     esac
 }
 
@@ -117,23 +123,67 @@ gprs_gea_why() {
 # GEA0 is the only GEA this module can compute, because it is defined as the
 # identity (TS 43.020 §H.5.1: ciphering function disabled). Everything else
 # refuses: computing it would be an unproven guess (MODULE_CONVENTIONS §9/§16).
-gprs_gea_crypt() {
-    local n="${1:-}" kc="${2:-}" input="${3:-}" pt="${4:-}"
+# The published vectors are the whole argument for calling GEA3 and GEA4
+# implemented: each row below is an octet-for-octet comparison against the
+# standard's own test data, not a self-consistency check.
+gprs_gea_kat() {
+    [[ -f "$GPRS_GEA_TOOL" ]] || { printf 'ERROR\ttools/gsm_gea.py is missing\n' >&2; return 1; }
+    python3 "$GPRS_GEA_TOOL" --kat
+}
+
+gprs_gea_crypt() {  # <algo> <kc_hex> <input32_hex> <plaintext_hex> [direction]
+    local n="${1:-}" kc="${2:-}" input="${3:-}" pt="${4:-}" dir="${5:-0}"
     if ! [[ "$n" =~ ^[0-5]$ && "$kc" =~ ^([0-9a-fA-F]{0,32})$ \
-            && "$input" =~ ^[0-9a-fA-F]{8}$ && "$pt" =~ ^([0-9a-fA-F]{2})*$ ]]; then
-        printf 'ERROR\tusage: --gea-crypt <0-5> <kc_hex> <input32_hex> <plaintext_hex>\n' >&2
+            && "$input" =~ ^[0-9a-fA-F]{8}$ && "$pt" =~ ^([0-9a-fA-F]{2})*$ \
+            && "$dir" =~ ^[01]$ ]]; then
+        printf 'ERROR\tusage: --gea-crypt <0-5> <kc_hex> <input32_hex> <plaintext_hex> [0|1]\n' >&2
         return 2
     fi
-    if [[ "$n" != 0 ]]; then
+    if [[ "$n" != 0 && "$n" != 3 && "$n" != 4 ]]; then
         printf 'ERROR\t%s is not implemented in this module — no capability is claimed\n' \
             "$(gprs_gea_name "$n")" >&2
         printf 'WHY\t%s\n' "$(gprs_gea_why "$n")" >&2
         return 3
     fi
-    printf 'algo\tGEA0 (no encryption; identity)\n'
-    printf 'ciphertext\t%s\n' "${pt,,}"
-    printf 'note\tTS 43.020 §H.5.1 disables LLC ciphering (TS 44.064): ciphertext == plaintext\n'
+    if [[ "$n" == 0 ]]; then
+        printf 'algo\tGEA0 (no encryption; identity)\n'
+        printf 'ciphertext\t%s\n' "${pt,,}"
+        printf 'note\tTS 43.020 §H.5.1 disables LLC ciphering (TS 44.064): ciphertext == plaintext\n'
+        return 0
+    fi
+    if [[ ! -f "$GPRS_GEA_TOOL" ]]; then
+        printf 'ERROR\ttools/gsm_gea.py is missing\n' >&2
+        return 1
+    fi
+    local want=16
+    [[ "$n" == 4 ]] && want=32
+    if (( ${#kc} != want )); then
+        printf 'ERROR\tGEA%s takes a %d-hex-octet key, got %d octets\n' \
+            "$n" "$(( want / 2 ))" "$(( ${#kc} / 2 ))" >&2
+        return 2
+    fi
+    local out gamma ptlen
+    out=$(python3 "$GPRS_GEA_TOOL" --gea"$n" "$kc" "$input" "$dir" "$(( ${#pt} / 2 ))" 2>&1) || {
+        printf 'ERROR\tthe GEA%s keystream generator failed: %s\n' "$n" "$(gprs_sanitize "$out")" >&2
+        return 1; }
+    gamma=$(printf '%s\n' "$out" | awk -F'\t' '$1=="gamma"{print $2; exit}')
+    [[ -n "$gamma" ]] || { printf 'ERROR\tno gamma returned\n' >&2; return 1; }
+    printf 'algo\t%s\n' "$(gprs_gea_name "$n")"
+    printf 'input\t%s\n' "${input,,}"
+    printf 'direction\t%s\n' "$dir"
+    printf 'gamma\t%s\n' "$gamma"
+    # XOR in shell is a byte loop; the plaintext is short by contract.
+    local i ct="" b
+    for (( i=0; i<${#pt}; i+=2 )); do
+        b=$(( 0x${pt:i:2} ^ 0x${gamma:i:2} ))
+        printf -v b '%02x' "$b"
+        ct+="$b"
+    done
+    printf 'ciphertext\t%s\n' "$ct"
+    printf 'note\t%s\n' "$(gprs_gea_why "$n")"
+    return 0
 }
+
 
 
 # ── APN coding (TS 23.003 §9.1) ─────────────────────────────────────────
@@ -318,9 +368,12 @@ gprs_selftest() {
     chk gea1-refused "$(gprs_gea_table | awk -F'\t' '$1=="GEA1"{print $5}')" "no"
     chk gea5-refused "$(gprs_gea_table | awk -F'\t' '$1=="GEA5"{print $5}')" "no"
     chk gea4-key "$(gprs_gea_table | awk -F'\t' '$1=="GEA4"{print $3}')" "128"
-    chk gea3-clause "$(gprs_gea_table | awk -F'\t' '$1=="GEA3"{print $2}')" "TS 43.020 §D.4.9"
+    chk gea3-clause "$(gprs_gea_table | awk -F'\t' '$1=="GEA3"{print $2}')" "TS 55.216 V6.2.0"
+    chk gea4-clause "$(gprs_gea_table | awk -F'\t' '$1=="GEA4"{print $2}')" "TS 55.226 V9.0.0"
+    chk gea3-implemented "$(gprs_gea_table | awk -F'\t' '$1=="GEA3"{print $5}')" "yes"
+    chk gea5-not "$(gprs_gea_table | awk -F'\t' '$1=="GEA5"{print $5}')" "no"
     chk gea-name0 "$(gprs_gea_name 0)" "GEA0 (no encryption; identity)"
-    chk gea-name5 "$(gprs_gea_name 5)" "GEA5 (128-bit SNOW 3G; TS 55.251 not public)"
+    chk gea-name5 "$(gprs_gea_name 5)" "GEA5 (128-bit SNOW 3G; algorithm body licence-gated)"
     chk gea-unknown "$(gprs_gea_name 9)" "unknown GEA — never classified as safe"
 
     # 5. GEA0 known-answer (TS 43.020 §H.5.1: ciphering function disabled, so
@@ -329,9 +382,25 @@ gprs_selftest() {
         "00112233445566778899aabbccddeeff"
     chk gea1-exit3 "$(gprs_gea_crypt 1 0011223344556677 00000001 ab >/dev/null 2>&1; echo $?)" "3"
     chk gea1-why "$({ gprs_gea_crypt 1 0011223344556677 00000001 ab 2>&1 >/dev/null || true; } | grep -q 'D.4.9' && echo yes || echo no)" "yes"
-    chk gea3-why "$({ gprs_gea_crypt 3 0011223344556677 00000001 ab 2>&1 >/dev/null || true; } | grep -q '55.216' && echo yes || echo no)" "yes"
-    chk gea5-why "$({ gprs_gea_crypt 5 00112233445566778899aabbccddeeff 00000001 ab 2>&1 >/dev/null || true; } | grep -q '55.251' && echo yes || echo no)" "yes"
+    chk gea5-why "$({ gprs_gea_crypt 5 00112233445566778899aabbccddeeff 00000001 ab 2>&1 >/dev/null || true; } | grep -q 'licence' && echo yes || echo no)" "yes"
+    chk gea1-why "$({ gprs_gea_crypt 1 0011223344556677 00000001 ab 2>&1 >/dev/null || true; } | grep -q '2022/424' && echo yes || echo no)" "yes"
     chk gea-bad-algo "$(gprs_gea_crypt 9 00 00000000 ab >/dev/null 2>&1; echo $?)" "2"
+
+    # 5b. GEA3 and GEA4 against the standards' own test data. The first vector
+    #     of each is a full keystream comparison, so a gamma that is right in
+    #     length but wrong in bits cannot pass.
+    chk gea3-vector1 "$(fld "$(gprs_gea_crypt 3 2BD6459F82C5BC00 8E9421A3 \
+        0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 0)" gamma)" \
+        "5f359709de950d0105b17b6c90194280f880b48dccdc2afeed415dbef4354eebb21d073ccbbfb2d706bd7affd371fc96e3970d143dcb2624054826"
+    chk gea4-vector1 "$(fld "$(gprs_gea_crypt 4 D3C5D592327FB11C4035C6680AF8C6D1 0A3A59B4 \
+        000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 0)" gamma | cut -c1-32)" \
+        "6e217ce41ebefb5ec8094c1597429006"
+    chk gea-kat-all "$(gprs_gea_kat | awk -F'\t' '$1=="failed"{print $2}')" "0"
+    chk gea-kat-count "$(gprs_gea_kat | awk -F'\t' '$1=="vectors"{print $2}')" "9"
+    chk gea3-xor "$(fld "$(gprs_gea_crypt 3 2BD6459F82C5BC00 8E9421A3 0001020304 0)" ciphertext)" "5f34950ada"
+    chk gea5-refused "$(gprs_gea_crypt 5 00000000000000000000000000000000 00000000 ab >/dev/null 2>&1; echo $?)" "3"
+    chk gea1-refused "$(gprs_gea_crypt 1 0000000000000000 00000000 ab >/dev/null 2>&1; echo $?)" "3"
+    chk gea4-key-length "$(gprs_gea_crypt 4 0000000000000000 00000000 ab >/dev/null 2>&1; echo $?)" "2"
 
     # 6. Downgrade detector — the selection must be one the MS offered.
     chk gea-downgrade0 "$(fld "$(gprs_gea_downgrade 1,2,3 0)" verdict)" "DOWNGRADE — the network selected GEA0; user data is unprotected"
@@ -357,7 +426,9 @@ gprs_menu() {
   [4]  Build the APN / PDP-address IEs
   [5]  GEA downgrade check
   [6]  Plan (handoff)
-  [7]  GEA0 pass-through (the only GEA computed here)
+  [7]  GEA0 pass-through (identity ciphering)
+  [8]  GEA3 / GEA4 ciphering
+  [9]  Published GEA3/GEA4 test vectors
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -369,6 +440,10 @@ M
             5) read -rp "  offered csv> " o; read -rp "  selected> " s; gprs_gea_downgrade "$o" "$s"; read -rp "  enter " _ ;;
             6) gprs_plan; read -rp "  enter " _ ;;
             7) read -rp "  plaintext hex> " p; gprs_gea_crypt 0 "" 00000000 "$p"; read -rp "  enter " _ ;;
+            8) read -rp "  GEA 3 or 4> " n; read -rp "  kc hex> " k; read -rp "  input32 hex> " i
+               read -rp "  plaintext hex> " p; read -rp "  direction 0/1> " d
+               gprs_gea_crypt "$n" "$k" "$i" "$p" "${d:-0}"; read -rp "  enter " _ ;;
+            9) gprs_gea_kat; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -386,7 +461,8 @@ gprs_cli_main() {
         --apn-decode)   gprs_apn_decode "${1:-}" ;;
         --apn-ie)       gprs_apn_ie "${1:-}" ;;
         --pdp-ie)       gprs_pdp_type_ie "${1:-21}" "${2:-}" ;;
-        --gea-crypt)    gprs_gea_crypt "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+        --gea-crypt)    gprs_gea_crypt "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-0}" ;;
+        --gea-kat)      gprs_gea_kat ;;
         --gea-downgrade) gprs_gea_downgrade "${1:-}" "${2:-}" ;;
         --plan)         gprs_plan ;;
         --selftest)     gprs_selftest ;;
@@ -399,7 +475,9 @@ Usage: $0 COMMAND
   --status-tsv                 module state as TSV
   --gea-table                  per-algorithm clause, sizes, implemented? (TSV)
   --gea <n>                    name one GEA (0-5) with its standing
-  --gea-crypt <n> <kc> <in> <pt>   GEA ciphering; only GEA0 is computable here
+  --gea-crypt <n> <kc> <in> <pt> [0|1]  GEA ciphering. GEA0 (identity), GEA3
+                     and GEA4 compute; GEA1, GEA2 and GEA5 refuse by name
+  --gea-kat          the published GEA3/GEA4 test vectors, one row each
   --apn-encode <apn>           TS 23.003 §9.1 label coding
   --apn-decode <hex>           decode a coded APN
   --apn-ie <apn>               APN IE (TS 24.008 §10.5.6.1, IEI 28)

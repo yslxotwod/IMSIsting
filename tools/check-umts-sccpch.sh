@@ -281,6 +281,80 @@ check("encode-ci16-rc", run.returncode == 0, "")
 check("encode-ci16-bytes", os.path.getsize(out16) == 38400 * 4,
       "%d bytes" % os.path.getsize(out16))
 
+# --- frame placement: a channel occupies its frames and no others ---------
+# Two SIBs on one S-CCPCH that were repeated in every frame would be summed
+# into the same TTI, and a FACH TTI decodes one transport block.  The placement
+# is therefore part of the channel, not a choice at mix time.
+place = os.path.join(tmp, "place.cf32")
+run = subprocess.run([sys.executable, tool_path, "encode", "--frame-hex", fh,
+                      "--frames", "4", "--rate", "1", "--format", "cf32",
+                      "--at-start", "1", "--period", "2", "--out", place],
+                     capture_output=True, text=True)
+check("place-rc", run.returncode == 0, run.stderr.strip())
+pd = {}
+for line in run.stdout.splitlines():
+    if "\t" in line:
+        k, v = line.split("\t", 1)
+        pd.setdefault(k, []).append(v)
+check("place-at-start-range", pd.get("at_start") == ["1"],
+      "at_start %r" % pd.get("at_start"))
+check("place-period", pd.get("period") == ["2"], "period %r" % pd.get("period"))
+check("place-frames-written", pd.get("frames_written") == ["2"],
+      "frames_written %r" % pd.get("frames_written"))
+check("place-frames-silent", pd.get("frames_silent") == ["2"],
+      "frames_silent %r" % pd.get("frames_silent"))
+ps = np.fromfile(place, dtype="<f4")
+ps = ps[0::2] + 1j * ps[1::2]
+check("place-length", ps.size == 4 * 38400,
+      "%d samples, want %d" % (ps.size, 4 * 38400))
+frame_energy = [float(np.abs(ps[i * 38400:(i + 1) * 38400]).max())
+                for i in range(4)]
+check("place-occupies-exactly-its-frames",
+      [i for i, e in enumerate(frame_energy) if e > 0] == [1, 3],
+      "occupied %r, want [1, 3]" % [i for i, e in enumerate(frame_energy)
+                                   if e > 0])
+check("place-frames-are-the-whole-frame",
+      np.allclose(ps[38400:76800], np.asarray(frame) * 0.5, atol=1e-6),
+      "frame 1 is the channel, unattenuated by the placement")
+
+# and the placement is why two channels can be summed without stealing a TTI:
+# the same frame at two offsets occupies four frames with no overlap
+a = os.path.join(tmp, "place_a.cf32")
+b = os.path.join(tmp, "place_b.cf32")
+for path, start in ((a, 0), (b, 1)):
+    subprocess.run([sys.executable, tool_path, "encode", "--frame-hex", fh,
+                    "--frames", "4", "--rate", "1", "--format", "cf32",
+                    "--at-start", str(start), "--period", "2", "--out", path],
+                   capture_output=True, text=True)
+two = os.path.join(tmp, "place_two.cf32")
+run = subprocess.run([sys.executable, tool_path, "mix", "--in", a, "--in", b,
+                      "--no-scale", "--out", two], capture_output=True,
+                     text=True)
+check("place-mix-rc", run.returncode == 0, run.stderr.strip())
+ts = np.fromfile(two, dtype="<f4")
+ts = ts[0::2] + 1j * ts[1::2]
+occ = [i for i in range(4)
+       if float(np.abs(ts[i * 38400:(i + 1) * 38400]).max()) > 0]
+check("place-mix-fills-every-frame-once", occ == [0, 1, 2, 3],
+      "occupied %r, want [0, 1, 2, 3]" % occ)
+check("place-mix-no-frame-is-a-sum",
+      all(np.allclose(ts[i * 38400:(i + 1) * 38400],
+                      np.asarray(frame) * 0.5, atol=1e-6) for i in range(4)),
+      "each of the four frames is the channel itself, not 2x the channel")
+
+for name, extra in (("refuse at-start past the file",
+                     ["--frames", "2", "--at-start", "2"]),
+                    ("refuse a negative at-start",
+                     ["--frames", "2", "--at-start", "-1"]),
+                    ("refuse period 0",
+                     ["--frames", "2", "--period", "0"])):
+    r = subprocess.run([sys.executable, tool_path, "encode", "--frame-hex", fh,
+                        "--rate", "1", "--format", "cf32",
+                        "--out", os.path.join(tmp, "no.cf32")] + extra,
+                       capture_output=True, text=True)
+    check("place-%s" % name.split(" ")[1], r.returncode == 2,
+          "rc %d: %s" % (r.returncode, (r.stdout + r.stderr).strip()[:70]))
+
 # mix: sample for sample, first input is the reference
 mixout = os.path.join(tmp, "mix.cf32")
 run = subprocess.run([sys.executable, tool_path, "mix", "--in", out,

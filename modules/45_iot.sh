@@ -14,12 +14,19 @@
 # out of the message. The whole NB broadcast set is reachable through that
 # codec; the two verbs expose the two messages a capture usually has.
 #
-# NPRACH parameters and NPRFCN->MHz are REFUSED, on purpose. The first needs
-# NPRACH-ConfigSIB-NB out of a SIB2-NB (a decode, not a constant), and the
-# second needs the per-band N_Offs-NB column of TS 36.104 Table 5.7.3-1. What
-# the module used to print for both was invented: an 84-resource-element grid
-# that is not NPRACH, and a single 410 MHz intercept plus a 500 MHz branch that
-# appears in no version of the table.
+# NPRACH is computed, not tabulated. --nprach traces the symbol-group hopping
+# of TS 36.211 10.1.6.1 (one subcarrier per group, the first four groups
+# deterministic, the rest from the clause 7.2 sequence seeded with the cell id)
+# through tools/nbiot_nprach.py, and --nprach-decode lifts nprach-ConfigSIB-NB
+# out of a real SIB2-NB. What this module used to print instead was an
+# 84-resource-element grid that is not NPRACH at all, and it ignored its
+# arguments, so no input changed the answer.
+#
+# NPRFCN->MHz is still REFUSED. This module used to answer a single 410 MHz
+# intercept plus a 500 MHz branch above 1000, neither of which is a band rule;
+# and the column that would settle it is not where the old WHY claimed -- TS
+# 36.104 V16.6.0 Table 5.7.3-1 carries only the E-UTRA channel numbers, and
+# NPRFCN appears in none of 36.104, 36.101 or 36.211.
 # Standing up a cell, or flooding NPRACH, is a named-hardware plan (--plan).
 #
 # The decode half needs no radio and no schema package: tools/lte_per.py is
@@ -62,6 +69,7 @@ mkdir -p "$TMP_DIR" "$LOOT_DIR" "$CAPTURES_DIR" "$LOGS_DIR" "$STATE_DIR" 2>/dev/
 MOD_TMP="$TMP_DIR/iot"
 IOT_DIR="$LOOT_DIR/iot"
 IOT_PLAN_DIR="$IOT_DIR/plans"
+IOT_TOOL_NPRACH="$IMSISTING_ROOT/tools/nbiot_nprach.py"
 mkdir -p "$MOD_TMP" "$IOT_DIR" "$IOT_PLAN_DIR" 2>/dev/null
 
 # Palette
@@ -91,23 +99,71 @@ iot_status_tsv() {
 # ── NPRACH parameters: refused, see the WHY below ────────────────────────
 # NPRACH uses 12 subcarriers, preamble format 0 with N_cp=67 or N_cp=125
 iot_nprach_params() {
-    # This printed a CP of 67 samples, 15360-sample symbols, a 153600-sample
-    # frame and "12 subcarriers x 7 symbols = 84 resource elements". None of
-    # those are NPRACH numbers: NPRACH is a frequency-hopped single-tone
-    # preamble whose symbol groups are 1 subcarrier wide (TS 36.211 clause
-    # 10.1.6), not a 12-subcarrier grid, and the sample counts were normalised
-    # to a 3.84 MHz LTE raster this module never receives at. The arguments
-    # were ignored, so the output did not depend on them either.
-    #
-    # NPRACH's real parameters live in NPRACH-ConfigSIB-NB and
-    # NPRACH-ConfigCommon-NB in TS 36.331, which are in the NB layout table
-    # this module now carries -- so the honest move is to decode a configuration
-    # message rather than print constants that no message produced.
-    printf 'ERROR\tNPRACH parameters are not computed here\n' >&2
-    printf 'WHY\tThe output this verb used to print (CP 67, 15360-sample symbols, 84 resource elements) were not NPRACH values: an NPRACH preamble is a single-tone frequency-hopping pattern in TS 36.211 clause 10.1.6, not a 12-subcarrier grid. The arguments were ignored, so no input changed the answer.\n' >&2
-    printf 'WHAT IS REAL\t--decode-sib1 / --decode-mib read the NPRACH configuration out of a real message: it is a field of SystemInformationBlockType2-NB, which the NB layout table carries.\n' >&2
-    printf 'NEXT\tadd an --nprach-decode that takes a SIB2-NB buffer and reports nprach-ConfigSIB-NB as decoded fields\n' >&2
-    return 2
+    # An NPRACH preamble is a sequence of symbol groups, each ONE subcarrier
+    # wide, whose subcarrier is chosen by the hopping rule of TS 36.211
+    # 10.1.6.1. This verb used to print a CP of 67 samples, 15360-sample
+    # symbols and "12 subcarriers x 7 symbols = 84 resource elements", none of
+    # which are NPRACH numbers, and it ignored its arguments.
+    local cell="${1:-0}" init="${2:-0}" offset="${3:-0}" sub="${4:-12}"
+    local fmt="${5:-0}" groups="${6:-0}"
+    if [[ ! -f "$IOT_TOOL_NPRACH" ]]; then
+        printf 'ERROR\ttools/nbiot_nprach.py is missing\n' >&2
+        printf 'WHY\tNPRACH hopping is a per-symbol-group rule; without the tool this verb can only guess\n' >&2
+        return 1
+    fi
+    local out rc
+    out=$(python3 "$IOT_TOOL_NPRACH" pattern --cell "$cell" --init "$init" \
+            --offset "$offset" --num-subcarriers "$sub" --format "$fmt" \
+            --groups "$groups" 2>&1)
+    rc=$?
+    printf '%s\n' "$out"
+    return $rc
+}
+
+# ── NPRACH configuration out of a real SIB2-NB ──────────────────────────
+# The seven fields TS 36.211 10.1.6.1 names are all in nprach-ConfigSIB-NB of
+# SystemInformationBlockType2-NB, which the NB layout table carries. This verb
+# decodes the message and then lifts those fields out by name, so the answer is
+# the configuration a cell actually broadcast rather than a constant.
+iot_decode_sib2_nb() {
+    local hex="${1:-}"
+    [[ -n "$hex" ]] || { warn "usage: --nprach-decode <sib2-nb hex>"; return 2; }
+    local out
+    out=$(iot_nb_codec SystemInformationBlockType2_NB_r13 "$hex") || return 1
+    local consumed
+    consumed=$(printf '%s\n' "$out" | awk -F'\t' '$1=="bits_consumed"{print $2}')
+    if [[ -n "$consumed" ]] && (( consumed < 40 )); then
+        printf '%s\n' "$out" | sed '/^$/d;s/^/ERROR\t/'
+        printf 'NOTDECODED\tonly %s bits were a SIB2-NB; this is not one\n' "$consumed" >&2
+        return 1
+    fi
+    printf '%s\n' "$out"
+    # Lift the NPRACH configuration out by name. A field the message does not
+    # carry is named as absent rather than printed as zero.
+    local key val found=0
+    local -a wanted=(
+        "nprach-Periodicity-r13"
+        "nprach-SubcarrierOffset-r13"
+        "nprach-NumSubcarriers-r13"
+        "nprach-NumCBRA-StartSubcarriers-r13"
+        "nprach-SubcarrierMSG3-RangeStart-r13"
+        "numRepetitionsPerPreambleAttempt-r13"
+        "nprach-StartTime-r13"
+    )
+    local w
+    for w in "${wanted[@]}"; do
+        val=$(printf '%s\n' "$out" | awk -F'\t' -v k="$w" 'index($1, k) > 0 { print $2; exit }')
+        if [[ -n "$val" ]]; then
+            printf 'nprach_config\t%s\t%s\n' "$w" "$val"
+            found=$((found + 1))
+        else
+            printf 'nprach_config\t%s\tabsent\n' "$w"
+        fi
+    done
+    printf 'nprach_config_fields\t%d\n' "$found"
+    printf 'ref\t3GPP TS 36.331 6.3.1 SystemInformationBlockType2-NB nprach-ConfigSIB-NB; the field names and their meaning are 3GPP TS 36.211 10.1.6.1 (N_period, N_sc^offset, N_sc^NPRACH, N_sc_cont, N_MSG3, N_rep, N_start)\n'
+    printf 'limit\tthis reports the configuration the message carries; it does not decide whether the cell is valid, which needs N_sc^offset + N_sc^NPRACH <= N_sc^UL from the uplink bandwidth\n'
+    return 0
 }
 
 # ── NPSS/NSSS sequences (TS 36.211 §10.2.7) ─────────────────────────────
@@ -261,9 +317,9 @@ iot_nprfcn_to_mhz() {
     [[ "$nprfcn" =~ ^[0-9]+$ ]] || {
         printf 'ERROR\tNPRFCN must be a non-negative integer\n' >&2; return 2; }
     printf 'ERROR\tNPRFCN to MHz is not mapped here\n' >&2
-    printf 'WHY\tTS 36.104 Table 5.7.3-1 defines NPRFCN per operating band as F = F_low + 0.1*(NPRFCN - N_Offs-NB). This module used to answer 410.0 + 0.1*n for 0..999 and 500.0 + 0.1*(n-1000) above that; the first is right for at most one band and the second is in no version of the table. Aiming a receiver at the wrong band is silent failure.\n' >&2
+    printf 'WHY\tthis module used to answer 410.0 + 0.1*n for 0..999 and 500.0 + 0.1*(n-1000) above that, neither of which is a band rule; aiming a receiver at the wrong band is silent failure. And the column that would settle it is not where this module claimed: TS 36.104 V16.6.0 Table 5.7.3-1 is E-UTRA channel numbers (F_DL_low, N_Offs-DL, F_UL_low, N_Offs-UL per band) with no NPRFCN column, and NPRFCN does not appear anywhere in TS 36.104 V16.6.0, TS 36.101 V16.6.0 or TS 36.211 V16.2.0.\n' >&2
     printf 'WHAT IS REAL\t33_jamming_detect --earfcn <n> carries the LTE EARFCN raster from the same clause, which is the carrier an in-band NB-IoT cell sits on.\n' >&2
-    printf 'NEXT\ttranscribe the per-band N_Offs-NB column of Table 5.7.3-1 and check it against a published NB-IoT deployment before this verb answers\n' >&2
+    printf 'NEXT\tfind the clause that actually numbers the NB-IoT carrier (the 100 kHz raster is separate from the E-UTRA 100 kHz ARFCN step) and transcribe its per-band offsets, checking against a published deployment before this verb answers\n' >&2
     return 2
 }
 
@@ -393,8 +449,19 @@ iot_selftest() {
     }
 
     # 1. NPRACH refuses rather than printing constants no message produced.
-    chk nprach-refuses "$(iot_nprach_params 2140.0 0 3.75 >/dev/null 2>&1; echo $?)" "2"
-    chk nprach-no-84 "$(iot_nprach_params 2>/dev/null | grep -c '84 resource')" "0"
+    # The hopping rule is deterministic for the first four symbol groups, so
+    # these are hand-computed from TS 36.211 10.1.6.1 rather than read back
+    # from this module: n_init = 5 is n-tilde(0) = 5, 5 is odd so group 1 is
+    # 4, 4 < 6 so group 2 is 10, 10 is even so group 3 is 11.
+    chk nprach-prefix "$(iot_nprach_params 0 5 0 12 0 4 2>/dev/null | awk -F'\t' '$1=="group"{printf "%s,", $4}')" "5,4,10,11,"
+    chk nprach-cp "$(iot_nprach_params 0 5 0 12 0 4 2>/dev/null | awk -F'\t' '$1=="cp_samples"{print $2}')" "2048"
+    chk nprach-seq "$(iot_nprach_params 0 5 0 12 0 4 2>/dev/null | awk -F'\t' '$1=="seq_samples"{print $2}')" "40960"
+    chk nprach-group-us "$(iot_nprach_params 0 5 0 12 0 4 2>/dev/null | awk -F'\t' '$1=="group_us"{print $2}')" "1400.00"
+    chk nprach-fmt2-cp "$(iot_nprach_params 0 5 0 36 2 6 2>/dev/null | awk -F'\t' '$1=="cp_samples"{print $2}')" "24576"
+    chk nprach-no-84 "$(iot_nprach_params 0 5 0 12 0 4 2>/dev/null | grep -c '84 resource')" "0"
+    chk nprach-bad-format "$(iot_nprach_params 0 5 0 12 7 0 >/dev/null 2>&1; echo $?)" "2"
+    chk nprach-bad-init "$(iot_nprach_params 0 99 >/dev/null 2>&1; echo $?)" "2"
+    chk nprach-decode-no-args "$(iot_decode_sib2_nb >/dev/null 2>&1; echo $?)" "2"
 
     # 2. NPSS/NSSS: the PCI decomposition is real, and NPSS is stated as the
     #    fixed sequence it is. Known answers: PCI 1 -> (0,1); PCI 503 ->
@@ -522,7 +589,8 @@ iot_cli_main() {
     (($# > 0)) && shift
     case "$cmd" in
         --status-tsv)   iot_status_tsv ;;
-        --nprach)       iot_nprach_params "${1:-2140.0}" "${2:-0}" "${3:-3.75}" ;;
+        --nprach)       iot_nprach_params "${1:-0}" "${2:-0}" "${3:-0}" "${4:-12}" "${5:-0}" "${6:-0}" ;;
+        --nprach-decode) iot_decode_sib2_nb "${1:-}" ;;
         --npss-nss)     iot_npss_to_nss "${1:-0}" ;;
         --decode-sib1)  iot_decode_sib1_nb "${1:-}" ;;
         --decode-mib)   iot_decode_mib_nb "${1:-}" ;;
@@ -535,7 +603,9 @@ NB-IoT / Cat-M1 — narrowband IoT air interface
 
 Usage: $0 COMMAND
   --status-tsv       tool and store state as TSV
-  --nprach           refuses: NPRACH parameters are not in this tree
+  --nprach [<cell>] [<n_init>] [<offset>] [<subcarriers>] [<format>] [<groups>]
+                     NPRACH symbol-group hopping (3GPP TS 36.211 10.1.6.1)
+  --nprach-decode <hex>   read nprach-ConfigSIB-NB out of a SIB2-NB
   --npss-nss <pci>   PCI -> N_ID(1)/N_ID(2); NPSS is fixed, NSSS is the PCI-bearing one
   --decode-sib1 <hex>  decode a SystemInformationBlockType1-NB
   --decode-mib <hex>   decode a MasterInformationBlock-NB (5 octets, 34 bits)

@@ -429,6 +429,15 @@ def cmd_encode(args):
     if args.frames < 1 or args.frames > 100:
         return _die(2, "--frames %d is outside 1..100" % args.frames,
                     "one frame is %d chips" % CHIPS_PER_FRAME)
+    if args.at_start < 0 or args.at_start >= args.frames:
+        return _die(2, "--at-start %d is outside the %d frame file"
+                    % (args.at_start, args.frames),
+                    "the first frame a channel occupies has to be one of the "
+                    "frames the file holds")
+    if args.period < 1:
+        return _die(2, "--period %d is not a frame count" % args.period,
+                    "a repetition period of one means every frame, and zero "
+                    "means the channel never appears")
     if args.out in ("-", "/dev/stdout", "/dev/fd/1"):
         return _die(2, "--out must be a file path; stdout carries the TSV summary",
                     "the TSV summary is the output channel and the sample file "
@@ -440,7 +449,18 @@ def cmd_encode(args):
 
     # The frame offset is applied on the carrier timeline: the file starts at
     # the P-CCPCH frame boundary, the S-CCPCH frame starts offset*256 chips in.
-    body = np.repeat(np.asarray(frame * args.frames, dtype=np.complex128), sps)
+    #
+    # A channel that repeats every N frames is silent in the frames it does not
+    # occupy.  That is what keeps two SIBs from being summed into the same TTI:
+    # the UE decodes one FACH transport block per frame, so a sum of two is
+    # neither of them.  Silence, not a low amplitude, for the same reason.
+    used = [1 if (f >= args.at_start and
+                  (f - args.at_start) % args.period == 0) else 0
+            for f in range(args.frames)]
+    frames = int(sum(used))
+    plan = np.concatenate([np.asarray(frame, dtype=np.complex128) * u
+                           for u in used])
+    body = np.repeat(plan, sps)
     pad = np.zeros(offset * OFFSET_CHIPS * sps, dtype=np.complex128)
     x = np.concatenate([pad, body]) * 0.5
     payload = quantise(x, fmt)
@@ -466,6 +486,10 @@ def cmd_encode(args):
         ("code", "Cch,%d,%d" % (fmt_row[3], code)),
         ("offset", "%d" % offset),
         ("offset_chips", "%d" % (offset * OFFSET_CHIPS)),
+        ("at_start", "%d" % args.at_start),
+        ("period", "%d" % args.period),
+        ("frames_written", "%d" % frames),
+        ("frames_silent", "%d" % (args.frames - frames)),
         ("psc", "%d" % psc),
         ("scrambling_code", "%d" % (16 * psc)),
         ("format", fmt),
@@ -608,6 +632,11 @@ def _parser():
         p.add_argument("--psc", type=str, help="primary scrambling code, 0..511")
         if name == "encode":
             p.add_argument("--frames", type=int, default=1)
+            p.add_argument("--at-start", type=int, default=0,
+                           help="first frame this channel occupies, 0-based")
+            p.add_argument("--period", type=int, default=1,
+                           help="repeat every N frames; frames in between are "
+                                "silent, so two channels never share a TTI")
             p.add_argument("--rate", type=_rate_arg, default=1)
             p.add_argument("--format", default="cf32",
                            help="cf32, ci16 or cu8")

@@ -162,7 +162,7 @@ lair_band_of_earfcn() {
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         set -- $line
-        if (( n >= $6 && n <= $7 )); then printf '%s' "$1"; return 0; fi
+        if (( n >= ${6:-0} && n <= ${7:-0} )); then printf '%s' "$1"; return 0; fi
     done <<< "$LAIR_BANDS"
     return 1
 }
@@ -197,7 +197,7 @@ lair_earfcn_to_mhz() {
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         set -- $line
-        if (( n >= $6 && n <= $7 )); then
+        if (( n >= ${6:-0} && n <= ${7:-0} )); then
             awk -v lo="$2" -v off="$3" -v nn="$n" 'BEGIN{printf "%.1f", lo + 0.1*(nn - off)}'
             return 0
         fi
@@ -1760,6 +1760,48 @@ EOF
     return 0
 }
 
+# Read one row from the public cell-recon TSV and write a lab eNB config.
+# This is deliberately a config-only bridge: it never starts a transmitter.
+lair_cmd_clone_recon() {
+    local file="${1:-}" row="${2:-1}"
+    [[ -n "$file" && -f "$file" ]] || { printf 'ERROR\tusage: --clone-recon <cells.tsv> <row> [--pci <0..503>]\n' >&2; return 2; }
+    (($# >= 2)) || { printf 'ERROR\tusage: --clone-recon <cells.tsv> <row> [--pci <0..503>]\n' >&2; return 2; }
+    [[ "$row" =~ ^[0-9]+$ ]] && (( 10#$row > 0 )) || { printf 'ERROR\trow must be a positive data-row number\n' >&2; return 2; }
+    (( ${#row} <= 9 )) || { printf 'ERROR\trow number is too large\n' >&2; return 2; }
+    row=$((10#$row))
+    (( row > 0 )) || { printf 'ERROR\trow must be a positive data-row number\n' >&2; return 2; }
+    shift 2
+    local pci=1
+    while (( $# )); do
+        case "$1" in
+            --pci) [[ -n "${2:-}" && "$2" != --* ]] || { printf 'ERROR\t--pci needs a value\n' >&2; return 2; }; pci="$2"; shift 2 ;;
+            *) printf 'ERROR\tunknown option: %s\n' "$(lair_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+
+    local header data expected='rat gen arfcn freq_mhz plmn mcc mnc operator country cell_id tac_lac band rsrp_dbm cipher source ts'
+    [[ -r "$file" ]] || { printf 'ERROR\trecon file is not readable\n' >&2; return 2; }
+    IFS= read -r header < "$file" || { printf 'ERROR\tempty recon file\n' >&2; return 2; }
+    [[ "$(printf '%s' "$header" | sed 's/\r$//' | tr '\t' ' ' | xargs)" == "$expected" ]] || { printf 'ERROR\tunrecognized recon TSV header\n' >&2; return 2; }
+    data=$(sed -n "$((row + 1))p" "$file")
+    [[ -n "$data" ]] || { printf 'ERROR\tno recon row %s\n' "$row" >&2; return 2; }
+    [[ "$(awk -F '\t' '{print NF}' <<<"$data")" == 16 ]] || { printf 'ERROR\trecon row must have 16 TSV fields\n' >&2; return 2; }
+
+    local rat gen earfcn freq plmn mcc mnc operator country cellid tac band rsrp cipher source ts
+    IFS=$'\t' read -r rat gen earfcn freq plmn mcc mnc operator country cellid tac band rsrp cipher source ts <<< "$data"
+    [[ "$rat" == LTE && "$gen" == 4G ]] || { printf 'ERROR\tselected row is not LTE\n' >&2; return 2; }
+    [[ "$earfcn" =~ ^[0-9]+$ && "$mcc" =~ ^[0-9]{3}$ && "$mnc" =~ ^[0-9]{2,3}$ ]] || { printf 'ERROR\trow has invalid EARFCN or PLMN fields\n' >&2; return 2; }
+    [[ "$plmn" == "$mcc-$mnc" ]] || { printf 'ERROR\tPLMN does not match MCC/MNC fields\n' >&2; return 2; }
+    [[ "$cellid" =~ ^[0-9]+$ && "$tac" =~ ^[0-9]+$ ]] || { printf 'ERROR\trow lacks numeric cell_id or TAC\n' >&2; return 2; }
+    (( 10#$earfcn <= 262143 )) || { printf 'ERROR\tEARFCN must be 0..262143\n' >&2; return 2; }
+    (( 10#$tac <= 65535 && 10#$cellid <= 268435455 )) || { printf 'ERROR\tTAC or cell_id is out of range\n' >&2; return 2; }
+    [[ "$pci" =~ ^[0-9]+$ ]] && (( 10#$pci <= 503 )) || { printf 'ERROR\tPCI must be 0..503\n' >&2; return 2; }
+    lair_gen_enb_conf --earfcn "$earfcn" --mcc "$mcc" --mnc "$mnc" --tac "$tac" --cellid "$cellid" --pci "$pci" || return 1
+    lair_gen_rr_conf "$mcc" "$mnc" "$tac" "$cellid" "$pci" "$earfcn" "$LAIR_RRC" || return 1
+    printf 'OK\tselected_row=%s rat=%s earfcn=%s plmn=%s tac=%s cell_id=%s pci=%s\n' \
+        "$row" "$rat" "$earfcn" "$plmn" "$tac" "$cellid" "$pci"
+}
+
 lair_gen_rr_conf() {
     local mcc="${1:-001}" mnc="${2:-01}" tac="${3:-1}" \
           cellid="${4:-1}" pci="${5:-1}" earfcn="${6:-6300}" \
@@ -2515,6 +2557,26 @@ lair_selftest() {
     chk rrconf-mcc    "$(grep -c 'mcc = 208;' "$LAIR_RRC")" "1"
     chk rrconf-mnc    "$(grep -c 'mnc = 01;' "$LAIR_RRC")" "1"
     chk rrconf-mnclen "$(grep -c 'mnc_len = 2;' "$LAIR_RRC")" "1"
+
+    # Import a selected LTE recon row into a configuration without invoking
+    # the radio. The input schema is the public 02_cell_recon TSV contract.
+    cat > "$d/recon.tsv" <<'EOF'
+rat	gen	arfcn	freq_mhz	plmn	mcc	mnc	operator	country	cell_id	tac_lac	band	rsrp_dbm	cipher	source	ts
+LTE	4G	6300	806.0	208-01	208	01	Lab	XX	12345	42	20	-75		srsran	2026-01-01
+EOF
+    chk import-recon-rc "$(lair_cmd_clone_recon "$d/recon.tsv" 1 2>&1 >/dev/null; echo $?)" "0"
+    chk import-recon-earfcn "$(grep -c '^dl_earfcn = 6300$' "$LAIR_CONF")" "1"
+    chk import-recon-mcc "$(grep -c 'mcc = 208;' "$LAIR_RRC")" "1"
+    chk import-recon-mnc "$(grep -c 'mnc = 01;' "$LAIR_RRC")" "1"
+    chk import-recon-tac "$(grep -c 'tac = 42;' "$LAIR_RRC")" "1"
+    chk import-recon-cell "$(grep -c 'cell_id = 12345;' "$LAIR_RRC")" "1"
+    chk import-recon-pci-default "$(grep -c 'pci = 1;' "$LAIR_RRC")" "1"
+    chk import-recon-mnc3 "$(printf 'rat\tgen\tarfcn\tfreq_mhz\tplmn\tmcc\tmnc\toperator\tcountry\tcell_id\ttac_lac\tband\trsrp_dbm\tcipher\tsource\tts\nLTE\t4G\t6300\t806.0\t208-015\t208\t015\tLab\tXX\t12345\t42\t20\t-75\t\tsrsran\t2026-01-01\n' > "$d/recon-mnc3.tsv"; lair_cmd_clone_recon "$d/recon-mnc3.tsv" 1 >/dev/null 2>&1; grep -c 'mnc_len = 3;' "$LAIR_RRC")" "1"
+    chk import-recon-reject-missing-row "$(lair_cmd_clone_recon "$d/recon.tsv" >/dev/null 2>&1; echo $?)" "2"
+    chk import-recon-reject-pci-option "$(lair_cmd_clone_recon "$d/recon.tsv" 1 --pci >/dev/null 2>&1; echo $?)" "2"
+    chk import-reject-gsm "$(lair_cmd_clone_recon <(printf 'rat\tgen\tarfcn\tplmn\tmcc\tmnc\tcell_id\ttac_lac\nGSM\t2G\t42\t208-01\t208\t01\t1\t2\n') 2 >/dev/null 2>&1; echo $?)" "2"
+    chk import-reject-extra-field "$(lair_cmd_clone_recon <(printf 'rat\tgen\tarfcn\tplmn\tmcc\tmnc\tcell_id\ttac_lac\nLTE\t4G\t6300\t208-01\t208\t01\t1\t2\textra\n') 1 >/dev/null 2>&1; echo $?)" "2"
+    chk import-reject-out-of-range "$(sed 's/6300/999999/' "$d/recon.tsv" > "$d/bad-earfcn.tsv"; lair_cmd_clone_recon "$d/bad-earfcn.tsv" 1 >/dev/null 2>&1; echo $?)" "2"
 
     # Validation of the generator arguments.
     chk enbconf-bad-earfcn "$(lair_gen_enb_conf abc >/dev/null 2>&1; echo $?)" "2"
@@ -4836,6 +4898,7 @@ lair_cli_main() {
         --x2-decode)    lair_cmd_x2_decode "${1:-}" ;;
         --paging-frame) lair_cmd_paging_frame "$@" ;;
         --gen-enb-conf) lair_cmd_gen_enb_conf "$@" ;;
+        --clone-recon)  lair_cmd_clone_recon "$@" ;;
         --build-sib10|--build-sib11|--build-sib12)
                         lair_cmd_build_sib${cmd#--build-sib} "$@" ;;
         --enb-sib-schedule) lair_cmd_enb_sib_schedule "$@" ;;
@@ -4943,7 +5006,10 @@ Usage: $0 COMMAND
                                    needs the operator's own cell and a lawful
                                    basis; this verb writes configuration and
                                    transmits nothing (sent 0).
-  --start                          start srsenb with the generated conf
+  --clone-recon <cells.tsv> <row> [--pci <0..503>]
+                                    import one LTE recon row into enb.conf and
+                                    rr.conf. Config only; never starts or transmits.
+   --start                          start srsenb with the generated conf
   --stop                           stop it (idempotent)
   --status                         is the eNB running
   --power-ref [EARFCN] [N_PRB]     lab power and timing reference values

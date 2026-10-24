@@ -53,9 +53,11 @@ umtsa_cmd_build_sib() {
 # The three messages that were checked hardest, so a page can show an answer
 # without the operator typing anything.
 # The uplink: what a handset sends. One thin verb over tools/umts_uplink.py so
-# the three pieces sit behind one name -- the RRC CONNECTION REQUEST that opens
-# a connection, the PRACH preamble that announces it, and the DPCCH/DPDCH slot
-# structure of the message part that carries it.
+# the pieces sit behind one name -- the RRC CONNECTION REQUEST that opens a
+# connection, the PRACH preamble that announces it, the DPCCH/DPDCH slot
+# structure of the message part that carries it, the two of them joined into one
+# transmission with 'burst', and the transport channel and TFCI coding that sit
+# above the message part with 'chain' and 'tfci'.
 umtsa_uplink() {
     local tool="$IMSISTING_ROOT/tools/umts_uplink.py"
     [[ -f "$tool" ]] || { printf 'ERROR\ttools/umts_uplink.py is not in this tree\n' >&2
@@ -68,10 +70,10 @@ umtsa_cmd_uplink() {
     local sub="${1:-}"
     (($# > 0)) && shift
     case "$sub" in
-        request|prach|message-part|list) umtsa_uplink "$sub" "$@" ;;
-        "") printf 'ERROR\tusage: --uplink <request|prach|message-part|list> [args]\n' >&2; return 2 ;;
+        request|prach|message-part|burst|chain|tfci|list) umtsa_uplink "$sub" "$@" ;;
+        "") printf 'ERROR\tusage: --uplink <request|prach|message-part|burst|chain|tfci|list> [args]\n' >&2; return 2 ;;
         *)  printf 'ERROR\tunknown uplink piece: %s\n' "$(umtsa_sanitize "$sub")" >&2
-            printf 'WHY\tthe pieces are request, prach, message-part and list\n' >&2; return 2 ;;
+            printf 'WHY\tthe pieces are request, prach, message-part, burst, chain, tfci and list\n' >&2; return 2 ;;
     esac
 }
 
@@ -128,7 +130,7 @@ umtsa_tx_device() {
 # command it would have run, and exits 3: nothing was transmitted.
 umtsa_cmd_transmit() {
     local psc="0" rate="7680000" secs="1.0" gain="0" freq="" key="yes" bch=""
-    local sibs="" sibsf="256" sibcode="3" siboff="0"
+    local sibs="" sibsf="256" sibcode="3" siboff="0" mcc="" mnc=""
     # A bare number is the carrier in MHz. A form row should be able to ask for
     # one value without the operator having to spell a flag to give it.
     if (( $# > 0 )) && [[ "${1:-}" =~ ^[0-9]+$ ]]; then
@@ -146,6 +148,8 @@ umtsa_cmd_transmit() {
             --sib-sf)   sibsf="${2:-}"; shift 2 ;;
             --sib-code) sibcode="${2:-}"; shift 2 ;;
             --sib-offset) siboff="${2:-}"; shift 2 ;;
+            --mcc)      mcc="${2:-}"; shift 2 ;;
+            --mnc)      mnc="${2:-}"; shift 2 ;;
             --no-key)   key="no"; shift ;;
             *)  printf 'ERROR\t--transmit does not take %s\n' "$(umtsa_sanitize "$1")" >&2; return 2 ;;
         esac
@@ -193,6 +197,16 @@ umtsa_cmd_transmit() {
             printf 'ERROR\t--sib-offset must be 0..149, got %s\n' "$(umtsa_sanitize "$siboff")" >&2
             printf 'WHY\ttau_S-CCPCH = Tk * 256 chips with Tk in 0..149 (TS 25.211 7.1), so the offset is a frame-relative step unless it is a usage error\n' >&2
             return 2; }
+        if [[ -n "$mcc" && ! "$mcc" =~ ^[0-9]{3}$ ]]; then
+            printf 'ERROR\t--mcc must be three digits, got %s\n' "$(umtsa_sanitize "$mcc")" >&2
+            printf 'WHY\tthe MIB carries MCC as three BCD digits (TS 25.331 10.3.1.1); a two-digit country code is not a thing this field can hold\n' >&2
+            return 2
+        fi
+        if [[ -n "$mnc" && ! "$mnc" =~ ^[0-9]{2,3}$ ]]; then
+            printf 'ERROR\t--mnc must be two or three digits, got %s\n' "$(umtsa_sanitize "$mnc")" >&2
+            printf 'WHY\tMNC ::= SEQUENCE (SIZE (2..3)) OF Digit (TS 25.331 10.3.1.1), so one digit and four digits are both out of range\n' >&2
+            return 2
+        fi
         (( rate % 3840000 == 0 )) || {
             printf 'ERROR\t--rate %s is not a whole number of samples per UMTS chip\n' "$rate" >&2
             printf 'WHY\tthe sample files are mixed sample for sample across channels, so the carrier rate has to be 3840000 * n (3.84 Mcps); --rate 7680000 is two samples per chip\n' >&2
@@ -218,88 +232,167 @@ umtsa_cmd_transmit() {
     printf 'carrier_components\tP-CPICH (SF 256, code 0, primary scrambling) + P-SCH + S-SCH\n'
     printf 'carrier_ref\tTS 25.213 5.2 (scrambling), TS 25.211 5.3.3 (SCH)\n'
 
-    # The BCH is what turns a carrier a handset can see into a cell it can read.
-    # It is a separate tool because it is a separate chain (CRC, convolutional
-    # coding, rate matching, P-CCPCH), and because that chain has no external
-    # decoder to referee it: its proof lives in tools/check-umts-bch.sh.
-    if [[ -n "$bch" ]]; then
-        if ! command -v python3 >/dev/null 2>&1 || [[ ! -f "$(umtsa_bch)" ]]; then
-            printf 'ERROR\tthe BCH chain tool is not present, so --bch-hex cannot be honoured\n' >&2
-            printf 'WHY\ttools/umts_bch.py carries the TS 25.212 chain; without it the carrier has no broadcast channel\n' >&2
-            return 1
-        fi
-        # One frame is enough for the chain proof; a cell that is going to be
-        # mixed with SIB traffic needs the BCH repeated for the whole file, or
-        # the MIB exists for 10 ms and silence follows it.
-        local bchframes="1" cbytes csamp sps_n
-        if [[ -n "$sibs" ]]; then
-            sps_n=$(( rate / 3840000 ))
-            cbytes=$(stat -c %s "$iq" 2>/dev/null || printf '0')
-            csamp=$(( cbytes / 8 ))
-            bchframes=$(( csamp / (38400 * sps_n) ))
-            if (( bchframes < 1 )); then bchframes=1; fi
-        fi
-        local bchout
-        if ! bchout=$(timeout 300 python3 "$(umtsa_bch)" encode --bch-hex "$bch" \
-                        --out "$(umtsa_iq_path bch)" --format cf32 --rate "$rate" \
-                        --psc "$psc" --frames "$bchframes" 2>&1); then
-            printf 'ERROR\tthe BCH chain refused these bits\n' >&2
-            printf '%s\n' "$bchout" | sed 's/^/  /' >&2
-            return 1
-        fi
-        printf 'carrier_components\t+ P-CCPCH carrying the BCH (TS 25.212 4.6 chain)\n'
-        printf 'bch_hex\t%s\n' "$(umtsa_sanitize "$bch")"
-        printf 'bch_file\t%s\n' "$(umtsa_iq_path bch)"
-        if [[ -z "$sibs" ]]; then
-            printf 'carrier_is_a_cell\tpartly -- the MIB is on the BCH, so a UE can read the system frame number and the SIB schedule; the schedule points at an S-CCPCH this run did not build, so add --sibs sib1,sib3,sib5 to put the SIBs on it\n'
-        fi
-    else
-        printf 'carrier_is_a_cell\tno -- no BCH, so a UE can synchronise to this carrier and cannot read a MIB from it; add --bch-hex with the 24-bit MIB to carry one\n'
-    fi
-
-    # THE SIBs.  The BCH carries the MIB and nothing else (TS 25.212 4.2.13.6:
-    # one transport block per TTI on one P-CCPCH).  SIB1, SIB3 and SIB5 ride
-    # BCCH -> FACH -> S-CCPCH instead (TS 25.331 8.1.1.1.2, TS 25.211 5.3.3.4),
-    # so this is two tools: umts_sib.py pack builds the message and runs it
-    # through the FACH chain, umts_sccpch.py spreads the frame onto its own
-    # channel and mixes it onto the carrier.  S-CCPCH is a second physical
-    # channel under the same scrambling code, so the sum is the cell.
+    # THE PLAN BEFORE THE PIECES.  A cell is one schedule: the MIB says which
+    # SIBs exist and how often, and the S-CCPCH carries them in frames that do
+    # not overlap.  Both facts are computed once, here, from the SIB set -- the
+    # MIB is derived from the same list rather than typed, and the frame
+    # placement comes from the packer's timeline.  Without this the pieces each
+    # work and the cell contradicts itself.
+    local pk="" sibcycle=0 msgs=0 mib_source=""
+    local -a bchhexes=()
+    local mib_segs=0
     if [[ -n "$sibs" ]]; then
-        local sps frames csamp cbytes pk msgs i fhex f
-        sps=$(( rate / 3840000 ))
-        cbytes=$(stat -c %s "$iq" 2>/dev/null || printf '0')
-        csamp=$(( cbytes / 8 ))
-        frames=$(( (csamp - siboff * 256 * sps) / (38400 * sps) ))
-        if (( frames < 1 )); then
-            printf 'ERROR\t--seconds %s is shorter than one S-CCPCH frame at %s\n' "$secs" "$rate" >&2
-            printf 'WHY\tone 10 ms frame is 38400 chips, so at %s samples per second a carrier needs at least %s seconds before a SIB can be placed in it\n' \
-                   "$rate" "$(awk -v r="$rate" 'BEGIN{printf "%.4f", 38400/r}')" >&2
-            return 2
-        fi
-        local addargs=()
-        local one
+        local addargs=() one
         for one in ${sibs//,/ }; do addargs+=(--add "$one"); done
-        if ! pk=$(timeout 300 python3 "$(umtsa_sib)" pack --sf "$sibsf" "${addargs[@]}" 2>&1); then
+        if ! pk=$(timeout 300 python3 "$(umtsa_sib)" pack --sf "$sibsf" --timeline \
+                    "${addargs[@]}" 2>&1); then
             printf 'ERROR\tthe packer refused these SIBs\n' >&2
             printf '%s\n' "$pk" | sed 's/^/  /' >&2
             return 1
         fi
         msgs=$(printf '%s\n' "$pk" | awk -F'\t' '$1 == "frames" {print $2}')
+        sibcycle=$(printf '%s\n' "$pk" | awk -F'\t' '$1 == "schedule.cycle" {print $2}' | cut -d' ' -f1)
         [[ "$msgs" =~ ^[0-9]+$ ]] && (( msgs > 0 )) || {
             printf 'ERROR\tthe packer reported no transport blocks\n' >&2; return 1; }
+        [[ "$sibcycle" =~ ^[0-9]+$ ]] && (( sibcycle > 0 )) || {
+            printf 'ERROR\tthe packer reported no schedule cycle\n' >&2; return 1; }
+        local sps_n csamp cbytes avail
+        sps_n=$(( rate / 3840000 ))
+        cbytes=$(stat -c %s "$iq" 2>/dev/null || printf '0')
+        csamp=$(( cbytes / 8 ))
+        avail=$(( (csamp - siboff * 256 * sps_n) / (38400 * sps_n) ))
+        if (( avail < sibcycle )); then
+            printf 'ERROR\t--seconds %s holds %d frames but this SIB set needs a %d frame cycle\n' \
+                   "$secs" "$avail" "$sibcycle" >&2
+            printf 'WHY\tthe schedule repeats every %d frames (the longest repetition period in the set, %d ms); a carrier shorter than one cycle carries a partial schedule and a handset cannot read a block that never arrives.  Use --seconds %s or more\n' \
+                   "$sibcycle" "$(( sibcycle * 10 ))" \
+                   "$(awk -v c="$sibcycle" 'BEGIN{printf "%.3f", c * 0.01}')" >&2
+            return 2
+        fi
+        # The MIB is derived from the set unless the operator insists on their
+        # own bits, in which case the output says the schedule is unverified.
+        if [[ -z "$bch" ]]; then
+            # The MIB does not fit one BCH transport block: the encoded block for
+            # the default schedule is 84 bits and the block is 24, so a cell puts
+            # it out in consecutive blocks over the 80 ms MIB period.
+            local mibout mibbits
+            if ! mibout=$(timeout 300 python3 "$(umtsa_sib)" mib \
+                            --from-sibs "$(printf '%s' "$sibs" | tr ',' ' ')" \
+                            --segments 24 \
+                            ${mcc:+--mcc "$mcc"} ${mnc:+--mnc "$mnc"} 2>&1); then
+                printf 'ERROR\tthe MIB could not be derived from the SIB set\n' >&2
+                printf '%s\n' "$mibout" | sed 's/^/  /' >&2
+                return 1
+            fi
+            mibbits=$(printf '%s\n' "$mibout" | awk -F'\t' '$1 == "bits" {print $2}')
+            mib_segs=$(printf '%s\n' "$mibout" | awk -F'\t' '$1 == "segments" {print $2}')
+            [[ "$mibbits" =~ ^[0-9]+$ && "$mib_segs" =~ ^[0-9]+$ ]] && (( mib_segs > 0 )) || {
+                printf 'ERROR\tthe derived MIB has no transport blocks: %s bits, %s segments\n' \
+                       "$mibbits" "$mib_segs" >&2; return 1; }
+            local j
+            for (( j = 0; j < mib_segs; j++ )); do
+                local one
+                one=$(printf '%s\n' "$mibout" | awk -F'\t' -v k="seg[$j].hex" '$1 == k {print $2}')
+                [[ "$one" =~ ^[0-9a-fA-F]{6}$ ]] || {
+                    printf 'ERROR\tthe derived MIB segment %d is not six hex digits: %s\n' \
+                           "$j" "$(umtsa_sanitize "$one")" >&2; return 1; }
+                bchhexes+=("$one")
+            done
+            if (( mib_segs > 8 )); then
+                printf 'ERROR\tthe derived MIB needs %d BCH blocks, more than one 80 ms MIB period holds\n' \
+                       "$mib_segs" >&2
+                printf 'WHY\tthe MIB period is 8 frames of 10 ms and a cell puts one transport block in a frame, so at most 8 blocks fit a period; this MIB is %s bits\n' \
+                       "$mibbits" >&2
+                return 2
+            fi
+            mib_source="derived from --sibs, split into $mib_segs BCH blocks (tools/umts_sib.py mib --from-sibs --segments 24)"
+        else
+            bchhexes=("$bch")
+            mib_source="typed -- the reference list in this hex was not checked against --sibs"
+        fi
+    fi
+
+    # A typed MIB with no SIB set is still a MIB: one transport block, one
+    # frame, no schedule to place it in.
+    if [[ -n "$bch" && ${#bchhexes[@]} -eq 0 ]]; then
+        bchhexes=("$bch")
+    fi
+
+    # The BCH is what turns a carrier a handset can see into a cell it can read.
+    # It is a separate tool because it is a separate chain (CRC, convolutional
+    # coding, rate matching, P-CCPCH), and because that chain has no external
+    # decoder to referee it: its proof lives in tools/check-umts-bch.sh.
+    if (( ${#bchhexes[@]} > 0 )); then
+        if ! command -v python3 >/dev/null 2>&1 || [[ ! -f "$(umtsa_bch)" ]]; then
+            printf 'ERROR\tthe BCH chain tool is not present, so --bch-hex cannot be honoured\n' >&2
+            printf 'WHY\ttools/umts_bch.py carries the TS 25.212 chain; without it the carrier has no broadcast channel\n' >&2
+            return 1
+        fi
+        # The MIB repeats once per MIB period (80 ms, 8 frames), not in every
+        # frame: a file built for a whole SIB cycle would otherwise carry the
+        # same 24-bit block 16 times, which is not what a cell broadcasts.
+        local bchframes="1" bchperiod="1" bchstart=0 kb bchout
+        if [[ -n "$sibs" ]]; then
+            bchframes="$sibcycle"
+            bchperiod="8"
+        fi
+        for (( kb = 0; kb < ${#bchhexes[@]}; kb++ )); do
+            bchstart="$kb"
+            if (( bchstart >= bchframes )); then
+                printf 'ERROR\tMIB block %d starts at frame %d, past the %d frame file\n' \
+                       "$kb" "$bchstart" "$bchframes" >&2; return 1
+            fi
+            if ! bchout=$(timeout 300 python3 "$(umtsa_bch)" encode \
+                            --bch-hex "${bchhexes[$kb]}" \
+                            --out "$(umtsa_iq_path "bch$kb")" --format cf32 \
+                            --rate "$rate" --psc "$psc" --frames "$bchframes" \
+                            --at-start "$bchstart" --period "$bchperiod" 2>&1); then
+                printf 'ERROR\tthe BCH chain refused MIB block %d\n' "$kb" >&2
+                printf '%s\n' "$bchout" | sed 's/^/  /' >&2
+                return 1
+            fi
+            printf 'bch_hex[%d]\t%s\n' "$kb" "${bchhexes[$kb]}"
+            printf 'bch_file[%d]\t%s\n' "$kb" "$(umtsa_iq_path "bch$kb")"
+            printf 'bch_frame[%d]\tstart=%d period=%d\n' "$kb" "$bchstart" "$bchperiod"
+        done
+        printf 'bch_blocks\t%s\n' "${#bchhexes[@]}"
+        printf 'bch_period\t%s frames (%s ms)\n' "$bchperiod" "$(( bchperiod * 10 ))"
+        printf 'mib_source\t%s\n' "$mib_source"
+        printf 'carrier_components\t+ P-CCPCH carrying the BCH (TS 25.212 4.6 chain)\n'
+        if [[ -z "$sibs" ]]; then
+            printf 'carrier_is_a_cell\tpartly -- the MIB is on the BCH, so a UE can read the system frame number and the SIB schedule; the schedule points at an S-CCPCH this run did not build, so add --sibs sib1,sib3,sib5 to put the SIBs on it\n'
+        fi
+    else
+        printf 'carrier_is_a_cell\tno -- no BCH, so a UE can synchronise to this carrier and cannot read a MIB from it; add --bch-hex with the 24-bit MIB to carry one, or --sibs to derive one\n'
+    fi
+
+    # THE SIBs.  One FACH transport block per TTI, so the blocks are placed by
+    # the packer's timeline and each gets its own frames: a UE decodes one block
+    # per 10 ms and a sum of two is neither of them.  S-CCPCH is a second
+    # physical channel under the same scrambling code, so the sum of the files
+    # is the cell.
+    if [[ -n "$sibs" ]]; then
+        local i fhex f st per
         local mixins=("$iq")
-        [[ -n "$bch" ]] && mixins+=("$(umtsa_iq_path bch)")
+        local kb
+        for (( kb = 0; kb < ${#bchhexes[@]}; kb++ )); do
+            mixins+=("$(umtsa_iq_path "bch$kb")")
+        done
         for (( i = 0; i < msgs; i++ )); do
             fhex=$(printf '%s\n' "$pk" | awk -F'\t' -v k="msg[$i].frame_hex" '$1 == k {print $2}')
             [[ "$fhex" =~ ^[0-9a-fA-F]+$ ]] || {
                 printf 'ERROR\tthe packer printed no frame for message %d\n' "$i" >&2; return 1; }
+            st=$(printf '%s\n' "$pk" | awk -F'\t' -v k="msg[$i].frame" '$1 == k {print $2}' | tr ' ' '\n' | sed -n 's/^start=//p')
+            per=$(printf '%s\n' "$pk" | awk -F'\t' -v k="msg[$i].frame" '$1 == k {print $2}' | tr ' ' '\n' | sed -n 's/^period=//p')
+            [[ "$st" =~ ^[0-9]+$ && "$per" =~ ^[0-9]+$ ]] || {
+                printf 'ERROR\tthe packer printed no placement for message %d\n' "$i" >&2; return 1; }
             f=$(umtsa_iq_path "sib$i")
             if ! python3 "$(umtsa_sccpch)" encode --frame-hex "$fhex" --sf "$sibsf" \
                      --code "$sibcode" --offset "$siboff" --psc "$psc" \
-                     --frames "$frames" --rate "$rate" --format cf32 --out "$f" \
-                     >/dev/null 2>&1; then
+                     --frames "$sibcycle" --at-start "$st" --period "$per" \
+                     --rate "$rate" --format cf32 --out "$f" >/dev/null 2>&1; then
                 printf 'ERROR\tthe S-CCPCH encoder refused message %d\n' "$i" >&2
-                printf 'WHY\tthe frame the packer produced is not a whole slot format 0 frame; run --build-sib pack to see it\n' >&2
+                printf 'WHY\tthe frame the packer produced is not a whole slot format 0 frame; run --build-sib pack --timeline to see it\n' >&2
                 return 1
             fi
             mixins+=("$f")
@@ -307,6 +400,7 @@ umtsa_cmd_transmit() {
         local cell
         cell=$(umtsa_iq_path cell)
         local mi=()
+        local one
         for one in "${mixins[@]}"; do mi+=(--in "$one"); done
         local mixout
         if ! mixout=$(python3 "$(umtsa_sccpch)" mix "${mi[@]}" --out "$cell" \
@@ -327,16 +421,14 @@ umtsa_cmd_transmit() {
                "$( [[ "$sibsf" == 128 ]] && printf 40 || printf 20 )"
         printf 'sib_code\tCch,%s,%s\n' "$sibsf" "$sibcode"
         printf 'sib_offset\ttau_S-CCPCH = %s * 256 chips\n' "$siboff"
-        printf 'sib_frames\t%s frames of 10 ms per message\n' "$frames"
+        printf 'sib_schedule\t%s frames of 10 ms per cycle, one transport block per frame\n' "$sibcycle"
         printf 'sib_transport\tBCCH -> FACH -> S-CCPCH (TS 25.331 8.1.1.1.2, TS 25.211 5.3.3.4); the BCH carries the MIB, never a SIB\n'
+        printf '%s\n' "$pk" | awk -F'\t' '$1 == "schedule.frames" {printf "sib_frames\t%s\n", $2}'
+        printf '%s\n' "$pk" | awk -F'\t' '$1 == "schedule.frame" {printf "sib_frame\t%s\n", $2}'
         printf 'cell_file\t%s\n' "$cell"
-        printf 'cell_components\tP-CPICH + P-SCH + S-SCH + P-CCPCH (BCH, if --bch-hex) + S-CCPCH (SIBs)\n'
+        printf 'cell_components\tP-CPICH + P-SCH + S-SCH + P-CCPCH (BCH) + S-CCPCH (SIBs on their scheduled frames)\n'
         iq="$cell"
-        if [[ -n "$bch" ]]; then
-            printf 'carrier_is_a_cell\tyes on the transmit side -- the MIB is on the BCH and SIB1/SIB3/SIB5 are on the S-CCPCH, so a handset that syncs here reads a PLMN, a cell identity and a reselection list; what it still cannot do is attach, because nothing answers on the uplink\n'
-        else
-            printf 'carrier_is_a_cell\tpartly -- the SIBs are on the S-CCPCH and the MIB that schedules them is missing; add --bch-hex so the handset is told where to look\n'
-        fi
+        printf 'carrier_is_a_cell\tyes on the transmit side -- the MIB is on the BCH every 80 ms and SIB1/SIB3/SIB5 are on the S-CCPCH in the frames that MIB schedules, so a handset that syncs here reads a PLMN, a cell identity and a reselection list; what it still cannot do is attach, because nothing answers on the uplink\n'
     fi
 
     local dev
@@ -384,12 +476,12 @@ umtsa_cmd_catcher_model() {
     printf '1\tthe handset searches the downlink rasters, finds a carrier and synchronises to it on the SCH\tTS 25.214 4.3\tbuilt: --transmit builds CPICH + SCH\n'
     printf '2\tthe handset reads the MIB on the BCH to learn the system frame number and the SIB scheduling\tTS 25.212 4.2\tbuilt: tools/umts_bch.py carries the whole chain and modules/08_umts_air.sh --transmit puts it on the P-CCPCH, so --bch-hex keys a real MIB\n'
     printf '3\tthe handset reads SIB1/SIB3/SIB5 for PLMN, cell identity, location area and reselection\tTS 25.331 8.1.1\tbuilt: --build-sib pack builds the SYSTEM INFORMATION message and the FACH transport block (tools/umts_sib.py pack), tools/umts_sccpch.py spreads it on Cch,256,3, and --transmit --sibs mixes that S-CCPCH onto the carrier; the chain from SIB bits to chips is one command and tools/check-umts-sib.sh + tools/check-umts-sccpch.sh referee it without an external decoder\n'
-    printf '4\tthe handset sends RRC CONNECTION REQUEST naming its initial UE identity (TMSI or IMSI)\tTS 25.331 8.1.3\tparse: --parse-rrc classifies it\n'
+    printf '4\tthe handset sends RRC CONNECTION REQUEST naming its initial UE identity (TMSI or IMSI)\tTS 25.331 8.1.3\tparse and build: --parse-rrc classifies it, and --uplink burst builds what the handset puts on the air to send it -- preambles, gap, and the message part spread, weighted and scrambled (tools/umts_uplink.py, refereed by tools/check-umts-uplink.sh)\n'
     printf '5\tthe network answers RRC CONNECTION SETUP\tTS 25.331 8.1.3\tbuilt: --build-rrc-setup\n'
     printf '6\tthe CN sends a NAS IDENTITY REQUEST (MM), which asks for the IMSI in the clear\tTS 24.008 9.2.5, TS 25.331 10.2\tbuilt: --catcher-identity writes the four MM octets and wraps them in a DL DIRECT TRANSFER (the MM part is byte-exact; the RRC wrapper is derived from the ASN.1 and has no referee on this machine, which the verb says in its own output)\n'
     printf '7\tthe handset is authenticated by the network before it will answer anything else\tTS 33.102 6.3\tbuilt as a replay only: --catcher-auth re-sends a RAND and AUTN seen once on the real network, which is what a catcher actually does; computing a fresh AUTN needs K, which no passive capture yields\n'
     printf '8\tthe network releases the connection so the handset returns to idle and repeats\tTS 25.331 8.1.4\tbuilt: --build-rrc-reject carries the wait time\n'
-    printf 'verdict\tsteps 1-6 and 8 exist in this tree as samples and octets, and steps 1-3 now close the downlink: a handset that syncs to --transmit --sibs reads PLMN, cell identity and a reselection list. Step 7 is why a catcher built from only these pieces does not work against a handset with a cached AKA context -- and the uplink (nothing here answers RRC CONNECTION REQUEST) is the remaining gap\n'
+    printf 'verdict\tsteps 1-6 and 8 exist in this tree as samples and octets, steps 1-3 close the downlink: a handset that syncs to --transmit --sibs reads PLMN, cell identity and a reselection list, and step 4 is now built in both directions -- the request is parsed and the chips that carry it are generated. Step 7 is why a catcher built from only these pieces does not work against a handset with a cached AKA context -- and the loop (nothing here receives an uplink burst and answers it in the same process) is the remaining gap\n'
     return 0
 }
 

@@ -828,7 +828,7 @@ REFUSALS = (
     (("message-part", "--sf", "512"), "Table 6"),
     (("message-part", "--signature", "16"), "4.3.1.3"),
     # 152 bits of hex cannot fit the 150-bit data part of slot format 0
-    (("message-part", "--data", "f" * 38), "Table 6"),
+    (("message-part", "--data", "f" * 38), "the field holds"),
 )
 for args, clause in REFUSALS:
     p = run(*args)
@@ -842,13 +842,645 @@ for args, clause in REFUSALS:
 # every verb names what it does not build, in a limit row that cites a clause
 for args, key in ((("request",), "request-optional-ies"),
                   (("prach",), "prach-no-pulse-shaping"),
-                  (("message-part",), "message-part-scrambling"),
-                  (("message-part",), "message-part-tfci-coding")):
+                  (("message-part",), "message-part-gain-quantisation"),
+                  (("message-part",), "message-part-tfci-coding"),
+                  (("burst", "--out", os.path.join(WORK, "lim.cf32")),
+                   "message-part-gap")):
     lim = " ".join(rows_of(run(*args)).get("limit", []))
     chk_true("%s prints a limit row for %s" % (" ".join(args), key), key in lim,
              "limits: %r" % lim[:160])
     chk_true("%s cites a TS 25 clause in its limit rows" % " ".join(args),
              "TS 25." in lim, lim[:160])
+
+# ── 5b. the message part as chips -----------------------------------------
+# The referee below shares no code with the tool.  It computes the Gold
+# sequence at a DEEP index by a different route than the tool: the tool raises
+# the recurrence's companion matrix to a power, the referee evaluates t**m mod
+# the generator polynomial and dots it into the initial state (the standard
+# LFSR jump property).  That route is validated against the forward recurrence
+# at small indices and against two hand-derived symbols first, so the deep
+# comparison is not two copies of one idea agreeing with each other.
+PX = (1 << 25) | (1 << 3) | 1                       # X^25 + X^3 + 1
+PY = (1 << 25) | (1 << 3) | (1 << 2) | (1 << 1) | 1  # X^25+X^3+X^2+X+1
+
+
+def _polymulmod(a, b, mod):
+    r = 0
+    while b:
+        if b & 1:
+            r ^= a
+        b >>= 1
+        a <<= 1
+        while a.bit_length() >= mod.bit_length():
+            a ^= mod << (a.bit_length() - mod.bit_length())
+    return r
+
+
+def _polymodpow(exp, mod):
+    r = 1
+    a = 2                                           # the polynomial t
+    while exp:
+        if exp & 1:
+            r = _polymulmod(r, a, mod)
+        exp >>= 1
+        if exp:
+            a = _polymulmod(a, a, mod)
+    return r
+
+
+def _state_x(n):
+    return (n & 0xFFFFFF) | (1 << 24)               # x_n(0..23) = bits, x_n(24)=1
+
+
+_STATE_Y = (1 << 25) - 1                            # y(0..24) = 1
+
+
+def _poly_step(v, mod):
+    """Multiply by t modulo the generator: one shift and at most one reduce."""
+    v <<= 1
+    while v.bit_length() >= mod.bit_length():
+        v ^= mod << (v.bit_length() - mod.bit_length())
+    return v
+
+
+def gold_window(n, start, count):
+    """Z_n(i) for i = start..start+count-1 by t**i mod the generator polynomial.
+
+    The power is jumped to with `_polymodpow` and then advanced one index at a
+    time, so a 38400-chip window needs one modular exponentiation and one shift
+    per chip.  This never runs the shift register forward from index 0: the
+    index it is asked about is 16.8 million, and that is the whole point.
+    """
+    cx = _polymodpow(start, PX)
+    cy = _polymodpow(start, PY)
+    xs = _state_x(n)
+    out = []
+    ap = out.append
+    for _ in range(count):
+        bx = bin(cx & xs).count("1") & 1
+        by = bin(cy & _STATE_Y).count("1") & 1
+        ap(1 if (bx ^ by) == 0 else -1)
+        cx = _poly_step(cx, PX)
+        cy = _poly_step(cy, PY)
+    return out
+
+
+def gold_at(n, i):
+    """Z_n(i) by t**i mod the generator polynomial, TS 25.213 4.3.2.2."""
+    return gold_window(n, i, 1)[0]
+
+
+chk("gold-jump: the polynomial route reproduces the forward recurrence",
+    [gold_at(0, i) for i in range(64)], gold(0, 64))
+chk("gold-jump: and it does so for a code number that is not 0",
+    [gold_at(12345, i) for i in range(400)], gold(12345, 400))
+chk("gold-jump: hand value, n=0 symbol 0 is -1", gold_at(0, 0), -1)
+chk("gold-jump: hand value, n=1 symbol 0 is +1", gold_at(1, 0), 1)
+
+CLONG_SHIFT = 16777232
+CLONG_PERIOD = (1 << 25) - 1
+
+
+def c_long_msg(n, count):
+    """S_r-msg,n(i) for i = 0..count-1, TS 25.213 4.3.2.5:
+
+        S_r-msg,n(i) = C_long,n(i + 4096)
+        C_long,n(j) = c1(j) * (1 + j*(-1)**j * c2(2*floor(j/2)))
+    """
+    start = 4096
+    c1 = gold_window(n, start, count)
+    q0 = start // 2
+    nq = (start + count - 1) // 2 - q0 + 1
+    m0 = (2 * q0 + CLONG_SHIFT) % CLONG_PERIOD
+    c2 = gold_window(n, m0, 2 * nq)[0::2]
+    out = []
+    for t in range(count):
+        i = start + t
+        alt = 1 if i % 2 == 0 else -1
+        out.append(complex(c1[t], alt * c2[(i // 2) - q0]))
+    return out
+
+
+def ovsf(sf, k):
+    """Cch,sf,k, TS 25.213 4.3.1.1, built from the code number's bits: start
+    with [1] and read k from its most significant bit down, doubling the vector
+    and negating the second half when that bit is 1.  The tool recurses from the
+    bottom up; this walks down from the top, so a sign error in either shows."""
+    v = [1]
+    nbits = sf.bit_length() - 1
+    for p in range(nbits):
+        # the most significant bit of the code number is the first split, so
+        # the lowest level of the tree is the LAST bit -- reading k from its
+        # low end here silently builds Cch,sf,bitreverse(k) instead
+        if (k >> (nbits - 1 - p)) & 1:
+            v = v + [-a for a in v]
+        else:
+            v = v + v
+    return v
+
+
+chk("ovsf: Cch,1,0 is the single chip", ovsf(1, 0), [1])
+chk("ovsf: Cch,2,1 is (1,-1)", ovsf(2, 1), [1, -1])
+chk("ovsf: Cch,4,1 is (1,1,-1,-1), which is what 4.3.1.1 recurses to",
+    ovsf(4, 1), [1, 1, -1, -1])
+chk("ovsf: Cch,4,2 is (1,-1,1,-1)", ovsf(4, 2), [1, -1, 1, -1])
+chk("ovsf: Cch,4,3 is (1,-1,-1,1)", ovsf(4, 3), [1, -1, -1, 1])
+chk_true("ovsf: every code of every SF in the message part is orthogonal to "
+         "its sibling", all(
+             sum(a * b for a, b in zip(ovsf(sf, 2 * i), ovsf(sf, 2 * i + 1))) == 0
+             for sf in (32, 64, 128, 256) for i in range(sf // 2)))
+
+TABLE7 = (8, 2)
+TABLE6 = {0: (256, 10), 1: (128, 20), 2: (64, 40), 3: (32, 80)}
+
+
+def msg_chips(signature, k, beta_c, beta_d, tfci="0" * 30, data=None,
+              scrambled=True, n=0, frames=1, scale=1.0):
+    """The chips of a RACH message part recomputed from the clauses."""
+    sf, ndata = TABLE6[k]
+    cd = ovsf(sf, sf * signature // 16)
+    cc = ovsf(256, 16 * signature + 15)
+    if data is None:
+        data = "0" * (ndata * 15 * frames)
+    out = []
+    for _f in range(frames):
+        frame = []
+        for slot in range(15):
+            dbits = data[slot * ndata:(slot + 1) * ndata]
+            cbits = TABLE8[slot] + tfci[2 * slot:2 * slot + 2]
+            dsp = []
+            for b in dbits:
+                dsp.extend([(1 if b == "0" else -1) * code for code in cd])
+            csp = []
+            for b in cbits:
+                csp.extend([(1 if b == "0" else -1) * code for code in cc])
+            frame.extend(complex(beta_d * dsp[c], beta_c * csp[c])
+                         for c in range(2560))
+        if scrambled:
+            scr = c_long_msg(n, 38400)
+            frame = [frame[i] * scr[i] for i in range(38400)]
+        out.extend(frame)
+    return [v * scale for v in out]
+
+
+def msg_file(name, *args):
+    path = os.path.join(WORK, name)
+    p = run("message-part", "--out", path, *args)
+    chk("message-part %s: exits 0" % " ".join(args), p.returncode, 0)
+    if p.returncode != 0:
+        print(p.stderr)
+    return path, rows_of(p)
+
+
+def cmp_chips(name, path, ref, scale):
+    got, nbytes = read_cf32(path)
+    chk("%s: the file holds %d chips" % (name, len(ref)), len(got), len(ref))
+    bad = [i for i in range(min(len(got), len(ref)))
+           if not close(got[i], ref[i] * scale)]
+    chk("%s: every chip equals the clause recomputation" % name,
+        (len(bad), bad[:4]), (0, []))
+
+
+# (a) the control-only shape: beta_d = 0, data all zeros, no scrambling, so
+#     every chip is pure Q and can be read straight off the pilot patterns.
+path, d = msg_file("mp_a.cf32", "--k", "3", "--signature", "5", "--beta-c", "15",
+                   "--beta-d", "0", "--rate", "1", "--no-scrambling")
+chk("message-part: 38400 chips are 10 ms", int(one(d, "chips")), 38400)
+chk("message-part: sample count is chips x samples per chip",
+    int(one(d, "samples")), 38400)
+sc = float(one(d, "scale").split()[0])
+ref = msg_chips(5, 3, 1.0, 0.0, scrambled=False)
+cmp_chips("message-part/unscrambled", path, ref, sc)
+
+# (b) the real one: gains, both branches, scrambling, slot format 1.
+path, d = msg_file("mp_b.cf32", "--k", "1", "--signature", "2", "--psc", "3",
+                   "--code", "4", "--beta-c", "15", "--beta-d", "11",
+                   "--rate", "1")
+sc = float(one(d, "scale").split()[0])
+chk("message-part: the reported code number is 16*psc+code",
+    int(one(d, "scrambling_code").split()[0]), 16 * 3 + 4)
+chk("message-part: the scrambling starts 4096 chips into C_long,n",
+    int(one(d, "scrambling_start").split()[0]), 4096)
+ref = msg_chips(2, 1, 1.0, 11 / 15.0, scrambled=True, n=16 * 3 + 4)
+cmp_chips("message-part/scrambled", path, ref, sc)
+
+# (c) two frames: the scrambling restarts at each 10 ms message part frame and
+#     the same bits are repeated, so the second frame is the first frame.
+path2, d2 = msg_file("mp_c.cf32", "--k", "1", "--signature", "2", "--psc", "3",
+                     "--code", "4", "--beta-c", "15", "--beta-d", "11",
+                     "--frames", "2", "--rate", "1")
+sc2 = float(one(d2, "scale").split()[0])
+chk("message-part: a 20 ms part is two frames of chips", int(one(d2, "chips")),
+    76800)
+ref2 = msg_chips(2, 1, 1.0, 11 / 15.0, scrambled=True, n=16 * 3 + 4, frames=2)
+cmp_chips("message-part/two-frames", path2, ref2, sc2)
+got2, _ = read_cf32(path2)
+chk("message-part: the second frame is the first frame, because the code "
+    "restarts and the bits repeat",
+    sum(1 for i in range(38400) if not close(got2[i], got2[38400 + i])), 0)
+
+# (d) beta_c and beta_d are the amplitude ratio, and 15 is amplitude 1.0
+path3, d3 = msg_file("mp_d.cf32", "--k", "2", "--signature", "0", "--beta-c", "15",
+                     "--beta-d", "15", "--rate", "1", "--no-scrambling")
+got3, _ = read_cf32(path3)
+chk_true("message-part: beta_c = beta_d = 15 gives |I| == |Q| on every chip",
+         all(abs(abs(v.real) - abs(v.imag)) <= 1e-6 for v in got3),
+         "first chip %r" % (got3[0],))
+
+# (e) refusals the clause forces
+MP_REFUSALS = (
+    (("message-part", "--k", "1", "--beta-c", "14", "--beta-d", "13",
+      "--out", os.path.join(WORK, "x.cf32")), "amplitude 1.0"),
+    (("message-part", "--k", "1", "--beta-c", "16", "--out",
+      os.path.join(WORK, "x.cf32")), "0..15"),
+    (("message-part", "--k", "1", "--psc", "512", "--out",
+      os.path.join(WORK, "x.cf32")), "0..511"),
+    (("message-part", "--k", "1", "--code", "16", "--out",
+      os.path.join(WORK, "x.cf32")), "0..15"),
+    (("message-part", "--k", "1", "--frames", "3", "--out",
+      os.path.join(WORK, "x.cf32")), "message part length"),
+    (("message-part", "--k", "1", "--rate", "0", "--out",
+      os.path.join(WORK, "x.cf32")), "rate"),
+    (("message-part", "--k", "1", "--out", "-"), "refused"),
+)
+for args, needle in MP_REFUSALS:
+    p = run(*args)
+    chk("message-part %s refuses with exit 2" % " ".join(args), p.returncode, 2)
+    chk_true("message-part %s names the clause" % " ".join(args),
+             needle in (p.stdout + p.stderr), (p.stdout + p.stderr)[:200])
+
+# (f) burst: the preamble the tree already had, the gap, and the message part,
+#     in that order and nothing else.
+bpath = os.path.join(WORK, "burst.cf32")
+p = run("burst", "--signature", "3", "--psc", "1", "--code", "2", "--preambles",
+        "3", "--gap-chips", "2560", "--sf", "64", "--beta-c", "15",
+        "--beta-d", "8", "--rate", "1", "--out", bpath)
+chk("burst: exits 0", p.returncode, 0)
+if p.returncode != 0:
+    print(p.stderr)
+bd = rows_of(p)
+bsc = float(one(bd, "scale").split()[0])
+bchips, _ = read_cf32(bpath)
+want_len = 3 * 4096 + 2560 + 38400
+chk("burst: chips = preambles*4096 + gap + 38400", len(bchips), want_len)
+chk("burst: the row says the same", int(one(bd, "chips")), want_len)
+n = 16 * 1 + 2
+pre = preamble(3, n)
+bad = [k for k in range(3 * 4096)
+       if not close(bchips[k], pre[k % 4096] * bsc)]
+chk("burst: the preamble part is the tree's own preamble, repeated",
+    (len(bad), bad[:3]), (0, []))
+chk("burst: the gap is silent",
+    [k for k in range(3 * 4096, 3 * 4096 + 2560) if bchips[k] != 0], [])
+bmsg = msg_chips(3, 2, 1.0, 8 / 15.0, scrambled=True, n=n)
+bad = [k for k in range(38400)
+       if not close(bchips[3 * 4096 + 2560 + k], bmsg[k] * bsc)]
+chk("burst: the message part follows the gap and is the message part",
+    (len(bad), bad[:3]), (0, []))
+for args, needle in (
+        (("burst", "--out", os.path.join(WORK, "y.cf32"), "--gap-chips", "100"),
+         "slot"),
+        (("burst", "--out", os.path.join(WORK, "y.cf32"), "--preambles", "0"),
+         "1..64"),
+        (("burst", "--out", os.path.join(WORK, "y.cf32"), "--frames", "2"),
+         "needs --sf"),
+    (("burst",), "needs --out")):
+    p = run(*args)
+    chk("burst %s refuses with exit 2" % " ".join(args), p.returncode, 2)
+    chk_true("burst %s says why" % " ".join(args), needle in (p.stdout + p.stderr),
+             (p.stdout + p.stderr)[:200])
+
+# ── 5c. the RACH transport channel and the TFCI encoder ------------------
+# Every piece below is written from the clause and shares no code with the
+# tool: the CRC is a whole-integer polynomial division (the tool shifts an
+# accumulator), the convolutional code is a polynomial multiplication by the
+# generator taps (the tool runs a shift register and counts parity), the
+# rate-matching offset S is computed in exact rationals (the tool keeps a
+# numerator/denominator pair by hand), and the TFCI basis is transcribed here a
+# second time and combined with bit parallelism (the tool loops the ten bits).
+CRC_TAPS = {24: (24, 23, 6, 5, 0), 16: (16, 12, 5, 0), 12: (12, 11, 3, 2, 1, 0),
+            8: (8, 7, 4, 3, 1, 0)}
+CONV_TAPS = {2: (0o561, 0o753), 3: (0o557, 0o663, 0o711)}
+P1_TABLE = {1: (0,), 2: (0, 1), 4: (0, 2, 1, 3), 8: (0, 4, 2, 6, 1, 5, 3, 7)}
+P2_TABLE = (0, 20, 10, 5, 15, 25, 3, 13, 23, 8, 18, 28, 1, 11, 21, 6, 16, 26, 4,
+            14, 24, 19, 9, 29, 12, 2, 7, 22, 27, 17)
+TFCI_M = (
+    "1000010000", "0100011000", "1100010001", "0010011011", "1010010001",
+    "0110010010", "1110010100", "0001010110", "1001011110", "0101011011",
+    "1101010011", "0011010110", "1011010101", "0111011001", "1111011111",
+    "1000111100", "0100111101", "1100111010", "0010110111", "1010110101",
+    "0110110011", "1110110111", "0001110100", "1001111101", "0101111010",
+    "1101111001", "0011110010", "1011111100", "0111111110", "1111111111",
+    "0000010000", "0000111000",
+)
+
+
+def crc_ref(bits, size):
+    """TS 25.212 4.2.1: the remainder of b(x) * x**size by g(x), as a whole
+    integer XOR-divided from its most significant bit down."""
+    if size == 0:
+        return list(bits)
+    m = int("".join(str(b) for b in bits) + "0" * size, 2)
+    g = 0
+    for e in CRC_TAPS[size]:
+        g |= 1 << e
+    while m.bit_length() > size:
+        m ^= g << (m.bit_length() - g.bit_length())
+    parity = [(m >> k) & 1 for k in range(size - 1, -1, -1)]
+    return list(bits) + parity
+
+
+def conv_ref(bits, rate):
+    """TS 25.212 4.2.3.1 as polynomial multiplication: y = x(D) * G(D), with
+    G's taps read off the octal generator and D standing for a one-bit delay.
+    Eight zero tail bits are appended, as the clause fixes."""
+    x = [int(b) for b in bits] + [0] * 8
+    outs = [[0] * len(x) for _ in CONV_TAPS[rate]]
+    for gi, g in enumerate(CONV_TAPS[rate]):
+        # bit j of the octal generator is the coefficient of D**j, and a delay
+        # of j taps x[k-j]: reading the octal the other way round mirrors the
+        # polynomial, which is exactly the bug this comment exists to stop
+        taps = [j for j in range(9) if (g >> j) & 1]
+        for k in range(len(x)):
+            acc = 0
+            for e in taps:
+                if k - e >= 0:
+                    acc ^= x[k - e]
+            outs[gi][k] = acc
+    out = []
+    for k in range(len(x)):
+        for gi in range(len(outs)):
+            out.append(outs[gi][k])
+    return out
+
+
+def equalise_ref(bits, frames):
+    n = -(-len(bits) // frames)
+    return list(bits) + [0] * (frames * n - len(bits)), n
+
+
+def ilv1_ref(bits, frames):
+    """TS 25.212 4.2.5.2: R1 x C1 matrix written row by row, columns permuted
+    by Table 4, read column by column."""
+    c1 = frames
+    r1 = len(bits) // c1
+    mat = [bits[i * c1:(i + 1) * c1] for i in range(r1)]
+    perm = P1_TABLE[c1]
+    out = []
+    for j in range(c1):
+        for i in range(r1):
+            out.append(mat[i][perm[j]])
+    return out
+
+
+def seg_ref(bits, frames):
+    yi = len(bits) // frames
+    return [bits[i * yi:(i + 1) * yi] for i in range(frames)]
+
+
+def s_ref(dn, xi, frames):
+    """TS 25.212 4.2.7.1.2.1, in exact rationals so that the clause's "q' is a
+    multiple of 1/8" is carried as a fraction rather than by hand."""
+    from fractions import Fraction
+    r = dn % xi
+    if r != 0 and 2 * r <= xi:
+        q = xi // r
+    else:
+        q = xi // (r - xi)
+    if q % 2 == 0:
+        from math import gcd
+        qq = Fraction(q * frames + gcd(abs(q), frames), frames)
+    else:
+        qq = Fraction(q, 1)
+    s = [0] * frames
+    for x in range(frames):
+        v = x * qq
+        s[int(v) % frames] = int(v) // frames
+    return s
+
+
+def rm_ref(bits, dn, e_ini, e_plus, e_minus):
+    """TS 25.212 4.2.7.5, the rate matching pattern determination."""
+    if dn == 0:
+        return list(bits)
+    out = []
+    e = e_ini
+    for b in bits:
+        e -= e_minus
+        if dn > 0:
+            while e <= 0:
+                out.append(b)
+                e += e_plus
+            out.append(b)
+        elif e <= 0:
+            e += e_plus
+        else:
+            out.append(b)
+    return out
+
+
+def ilv2_ref(bits):
+    """TS 25.212 4.2.11: 30 columns, rows read out column by column after the
+    Table 7 permutation, padding pruned."""
+    u = len(bits)
+    r2 = -(-u // 30)
+    mat = [list(bits[i * 30:(i + 1) * 30]) for i in range(r2)]
+    if len(mat[-1]) < 30:
+        mat[-1] += [None] * (30 - len(mat[-1]))
+    out = []
+    for j in range(30):
+        for i in range(r2):
+            v = mat[i][P2_TABLE[j]]
+            if v is not None:
+                out.append(v)
+    return out
+
+
+def chain_ref(tb, crc, coding, frames, ndata):
+    """The whole chain, stage by stage, from the clauses.  `tb` is hex, as the
+    verb takes it, so it is expanded to its bits first."""
+    st = {}
+    b = [int(c) for c in "".join(format(int(h, 16), "04b") for h in tb)]
+    st["tb"] = list(b)
+    b = crc_ref(b, crc) if crc else list(b)
+    st["crc"] = list(b)
+    st["codeblock"] = list(b)
+    if coding:
+        b = conv_ref(b, coding)
+    st["conv"] = list(b)
+    b, ni = equalise_ref(b, frames)
+    st["equalise"] = list(b)
+    b = ilv1_ref(b, frames)
+    st["ilv1"] = list(b)
+    segs = seg_ref(b, frames)
+    dn = ndata - ni
+    s = s_ref(dn, ni, frames)
+    p1 = P1_TABLE[frames]
+    eini = [(2 * s[p1[i]] * abs(dn) + 1) % (2 * ni) for i in range(frames)]
+    matched = []
+    for i, seg in enumerate(segs):
+        st["frameseg%d" % i] = list(seg)
+        m = rm_ref(seg, dn, eini[i], 2 * ni, 2 * abs(dn))
+        st["ratematch%d" % i] = list(m)
+        matched.append(m)
+    x = [v for seg in matched for v in seg]
+    st["mux"] = list(x)
+    st["physseg"] = list(x)
+    st["ilv2"] = ilv2_ref(x)
+    return st, x, dn, eini
+
+
+def tfci_ref(index):
+    """TS 25.212 4.3.3 with the basis rows as bit masks: the code word is the
+    parity of the AND of the index with each basis column."""
+    rows = [int(r, 2) for r in TFCI_M]
+    a = 0
+    for n in range(10):
+        if (index >> n) & 1:
+            # row strings are Mi,0..Mi,9 left to right, so bit n of the index
+            # meets character n, which int() makes bit 9-n of the mask
+            a |= 1 << (9 - n)
+    word = [bin(r & a).count("1") & 1 for r in rows]
+    return word
+
+
+def row_bits(v):
+    """A stage row is 'HEX bits=N ref=... -- note'; return the first N bits."""
+    hexpart, rest = v.split(" bits=", 1)
+    n = int(rest.split(" ", 1)[0])
+    bits = "".join(format(int(c, 16), "04b") for c in hexpart)
+    return [int(c) for c in bits[:n]]
+
+
+# (a) the TFCI encoder over its whole input range, against the second
+#     transcription of Table 8, plus the structural properties a linear code has
+chk("tfci: index 0 is the all-zero word", tfci_ref(0), [0] * 32)
+chk("tfci: index 1 is basis column 0, weight 16",
+    (sum(tfci_ref(1)), tfci_ref(1)), (16, [int(r[0]) for r in TFCI_M]))
+chk("tfci: index 2 is basis column 1",
+    tfci_ref(2), [int(r[1]) for r in TFCI_M])
+chk_true("tfci: the code is linear, word(a) xor word(b) == word(a xor b)",
+         all([x ^ y for x, y in zip(tfci_ref(a), tfci_ref(b))] == tfci_ref(a ^ b)
+             for a, b in ((1, 2), (5, 9), (77, 512), (341, 682))))
+bad = []
+for idx in range(1024):
+    p = run("tfci", "--index", str(idx))
+    if p.returncode != 0:
+        bad.append((idx, "rc", p.returncode))
+        continue
+    d = rows_of(p)
+    word = [int(c) for c in format(int(one(d, "word32"), 16), "032b")]
+    bits30 = [int(c) for c in format(int(one(d, "tfci30"), 16), "030b")]
+    if word != tfci_ref(idx) or bits30 != tfci_ref(idx)[:30]:
+        bad.append((idx, word == tfci_ref(idx), bits30 == tfci_ref(idx)[:30]))
+chk("tfci: all 1024 TFC indices match the clause recomputation", bad, [])
+p = run("tfci", "--index", "3")
+chk("tfci: b30 and b31 are the two the uplink does not transmit",
+    [int(v, 16) for v in rows_of(p)["tfci30"]][0],
+    int("".join(str(b) for b in tfci_ref(3)[:30]), 2))
+
+# (b) the chain, stage by stage, for a set of transport formats that exercise
+#     both TTIs, all three codings, the three CRC sizes and every slot format
+CHAIN_CASES = (
+    ("10 ms, 1/3, CRC16, SF128", dict(tb="0123456789abcdef", crc=16, coding="third",
+                                      frames=1, sf=128)),
+    ("10 ms, 1/2, CRC12, SF256", dict(tb="deadbeef", crc=12, coding="half",
+                                      frames=1, sf=256)),
+    ("20 ms, 1/3, CRC16, SF64", dict(tb="0123456789abcdef00112233", crc=16,
+                                     coding="third", frames=2, sf=64)),
+    ("20 ms, 1/2, CRC8, SF32", dict(tb="a5a5a5a5a5", crc=8, coding="half",
+                                    frames=2, sf=32)),
+    ("10 ms, none, CRC0, SF128", dict(tb="ff00ff00", crc=0, coding="none",
+                                      frames=1, sf=128)),
+    ("20 ms, 1/3, CRC24, SF128", dict(tb="00112233445566778899aabbccddeeff",
+                                      crc=24, coding="third", frames=2, sf=128)),
+)
+for label, kw in CHAIN_CASES:
+    args = ["chain", "--tb", kw["tb"], "--crc", str(kw["crc"]),
+            "--coding", kw["coding"], "--frames", str(kw["frames"]),
+            "--sf", str(kw["sf"]), "--tfci-index", "7"]
+    p = run(*args)
+    chk("chain %s: exits 0" % label, p.returncode, 0)
+    if p.returncode != 0:
+        print(p.stderr)
+        continue
+    d = rows_of(p)
+    coding = {"third": 3, "half": 2, "none": None}[kw["coding"]]
+    want_st, _x, _dn, _eini = chain_ref(kw["tb"], kw["crc"], coding,
+                                        kw["frames"], kw["sf"] and
+                                        {256: 150, 128: 300, 64: 600, 32: 1200}[kw["sf"]])
+    for stage in ("tb", "crc", "codeblock", "conv", "equalise", "ilv1",
+                  "frameseg0", "ratematch0", "mux", "physseg", "ilv2"):
+        chk("chain %s: stage %s matches the clause recomputation"
+            % (label, stage), row_bits(one(d, "stage:" + stage)), want_st[stage])
+    if kw["frames"] == 2:
+        for stage in ("frameseg1", "ratematch1"):
+            chk("chain %s: stage %s matches the clause recomputation"
+                % (label, stage), row_bits(one(d, "stage:" + stage)),
+                want_st[stage])
+    chk("chain %s: each frame is Ndata bits" % label,
+        [int(one(d, "frame%d.bits" % i)) for i in range(kw["frames"])],
+        [int(one(d, "ndata").split()[0])] * kw["frames"])
+    chk("chain %s: dN is Ndata - Ni" % label,
+        int(one(d, "dN")),
+        int(one(d, "ndata").split()[0]) - ((-(-len(want_st["conv"])) // kw["frames"])))
+    chk("chain %s: data_bits is frames x Ndata" % label,
+        int(one(d, "data_bits")),
+        kw["frames"] * int(one(d, "ndata").split()[0]))
+    chk("chain %s: the TFC index reaches the 30 TFCI bits" % label,
+        [int(c) for c in format(int(one(d, "tfci30"), 16), "030b")],
+        tfci_ref(7)[:30])
+    # the frame bits are what message-part takes, and it takes them
+    chk("chain %s: message-part accepts data_hex and lands the same bit count"
+        % label,
+        run("message-part", "--sf", str(kw["sf"]), "--frames", str(kw["frames"]),
+            "--data", one(d, "data_hex"), "--tfci", one(d, "tfci30")
+            ).returncode, 0)
+
+# (c) the pieces the chain above could satisfy by accident
+p = run("chain", "--tb", "0123456789abcdef", "--crc", "16", "--coding", "third",
+        "--frames", "2", "--sf", "256")
+d = rows_of(p)
+chk("chain: a 20 ms TTI is two frames of the same size",
+    [int(one(d, "frame0.bits")), int(one(d, "frame1.bits"))], [150, 150])
+chk("chain: the 1st interleaver with C1 = 2 sends the even bits first",
+    row_bits(one(d, "stage:ilv1"))[:8],
+    [row_bits(one(d, "stage:equalise"))[i] for i in (0, 2, 4, 6, 8, 10, 12, 14)])
+q = run("chain", "--tb", "0123456789abcdef", "--crc", "16", "--coding", "third",
+        "--frames", "1", "--sf", "256")
+dq = rows_of(q)
+chk("chain: SF 256 is narrower than the coded block, so dN is negative there",
+    int(one(dq, "dN")) < 0, True)
+chk("chain: a wide slot format gives dN > 0, repetition",
+    int(rows_of(run("chain", "--tb", "0123456789abcdef", "--crc", "16",
+                    "--coding", "third", "--frames", "1", "--sf", "64"))
+        ["dN"][0]) > 0, True)
+chk("chain: 10 ms dN = Ndata - Ni, and the stage length follows it",
+    (int(one(dq, "dN")),
+     len(row_bits(one(dq, "stage:ratematch0"))) - len(row_bits(one(dq, "stage:frameseg0")))),
+    (int(one(dq, "dN")), int(one(dq, "dN"))))
+
+# (d) refusals
+for args, needle in (
+        (("chain", "--crc", "20"), "gCRC",),
+        (("chain", "--coding", "turbo"), "convolutional"),
+        (("chain", "--frames", "4"), "10 ms or 20 ms"),
+        (("chain", "--sf", "16"), "SF 256"),
+        (("chain", "--sf", "128", "--k", "1"), "same thing"),
+        (("tfci", "--index", "1024"), "0..1023"),
+        (("tfci", "--index", "-1"), "0..1023")):
+    p = run(*args)
+    chk("uplink %s refuses with exit 2" % " ".join(args), p.returncode, 2)
+    chk_true("uplink %s says why" % " ".join(args),
+             needle in (p.stdout + p.stderr), (p.stdout + p.stderr)[:160])
+
+# (e) the limit rows the new verbs owe
+for args, key in ((("chain", "--tb", "00"), "chain-compressed-mode"),
+                  (("chain", "--tb", "00"), "chain-turbo-coding"),
+                  (("tfci", "--index", "1"), "tfci-hard-split")):
+    lim = " ".join(rows_of(run(*args)).get("limit", []))
+    chk_true("%s prints the limit row %s" % (" ".join(args), key), key in lim,
+             "limits: %r" % lim[:160])
 
 # ── 6. the tool runs without numpy ────────────────────────────────────────
 blockdir = os.path.join(WORK, "nonumpy")

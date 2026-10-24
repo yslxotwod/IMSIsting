@@ -40,6 +40,7 @@ done
     printf '    <file>imsisting_splash3.mp4</file>\n'
     printf '    <file>imsisting_splash4.mp4</file>\n'
     printf '    <file>imsisting_splash5.mp4</file>\n'
+    printf '    <file>imsisting_splash6.mp4</file>\n'
     ( cd "$ROOT/native/resources" && find icons/symbolic -name '*.svg' | LC_ALL=C sort ) \
         | while read -r icon; do
               printf '    <file alias="icons/scalable/actions/%s">%s</file>\n' \

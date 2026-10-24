@@ -700,6 +700,14 @@ def cmd_encode(args):
     if args.psc < 0 or args.psc > PSC_MAX:
         _die(2, "--psc %d is outside 0..511" % args.psc,
              "TS 25.213 5.2.2 defines 512 primary scrambling codes")
+    if args.at_start < 0 or args.at_start >= args.frames:
+        _die(2, "--at-start %d is outside the %d frame file"
+             % (args.at_start, args.frames),
+             "the first frame the BCH occupies has to be one of the frames the "
+             "file holds")
+    if args.period < 1:
+        _die(2, "--period %d is not a frame count" % args.period,
+             "a period of one means every frame; zero would mean no frame at all")
     if args.frames < 1 or args.frames > 100:
         _die(2, "--frames %d is outside 1..100" % args.frames,
              "one frame is 38400 chips")
@@ -714,7 +722,16 @@ def cmd_encode(args):
     # +-1 each, so |Sdl,n| = sqrt(2), TS 25.213 5.2.2) lands on one axis with
     # a component of +-2 or 0.  A factor of 1/2 puts the peak component at
     # full scale without changing anything about the channel.
-    x = np.asarray(frame * args.frames, dtype=np.complex128) * 0.5
+    # A channel that does not occupy every frame is silent in the others: the
+    # BCH repeats once per MIB period (80 ms = 8 frames), so a file built for a
+    # whole SIB cycle must not carry the MIB in every frame of it.
+    used = [1 if (f >= args.at_start and
+                  (f - args.at_start) % args.period == 0) else 0
+            for f in range(args.frames)]
+    frames_written = int(sum(used))
+    plan = np.concatenate([np.asarray(frame, dtype=np.complex128) * u
+                           for u in used])
+    x = plan * 0.5
     if sps > 1:
         x = np.repeat(x, sps)
     payload = _quantise(x, fmt)
@@ -743,6 +760,9 @@ def cmd_encode(args):
         ("chip_samples", "%d" % sps),
         ("seconds", "%.9f" % (x.size / float(sps * CHIP_RATE))),
         ("frames", "%d" % args.frames),
+        ("at_start", "%d" % args.at_start),
+        ("period", "%d" % args.period),
+        ("frames_written", "%d" % frames_written),
         ("slots", "%d" % (args.frames * SLOTS_PER_FRAME)),
         ("chips", "%d" % (args.frames * CHIPS_PER_FRAME)),
         ("chips_on", "%d" % (args.frames * SLOTS_PER_FRAME
@@ -800,6 +820,11 @@ def _parser():
     e.add_argument("--rate", type=sps, default=1)
     e.add_argument("--psc", type=int, default=0)
     e.add_argument("--frames", type=int, default=1)
+    e.add_argument("--at-start", type=int, default=0,
+                   help="first frame the BCH occupies, 0-based")
+    e.add_argument("--period", type=int, default=1,
+                   help="repeat every N frames; the MIB period is 8 frames "
+                        "(80 ms, TS 25.331 8.1.1.1.1)")
     s = sub.add_parser("stages", help="print every intermediate bit vector")
     s.add_argument("--bch-hex", required=True)
     s.add_argument("--psc", type=int, default=0)

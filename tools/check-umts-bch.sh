@@ -555,6 +555,40 @@ expect("--psc 511 changes the waveform to the 5.2.2 code n=8176",
 expect("different primary codes give different chips",
        bool(np.any(d4 != read_samples(os.path.join(WORK, "f.cf32"), "cf32"))))
 
+# the MIB is repeated once per MIB period (80 ms), not in every frame of a
+# SIB cycle: a file built for a whole S-CCPCH cycle has to carry the block in
+# its own frames and silence elsewhere, or the same MIB lands in every TTI
+p5 = os.path.join(WORK, "period.cf32")
+rc, out, err = run("encode", "--bch-hex", WORKED, "--out", p5, "--frames", "8",
+                   "--at-start", "2", "--period", "8")
+m5 = tsv_map(read_tsv(out))
+d5 = read_samples(p5, "cf32")
+expect("--frames 8 --at-start 2 --period 8 exits 0", rc == 0, "rc=%d" % rc)
+expect_eq("the placement is printed", (m5.get("at_start"), m5.get("period")),
+          ("2", "8"))
+expect_eq("one frame of the eight is written", m5.get("frames_written"), "1")
+expect_eq("the file still holds every frame", int(m5.get("samples", -1)),
+          8 * SLOTS * CHIPS_SLOT)
+expect("frame 2 is the BCH and the other seven are silent",
+       bool(np.all(d5[2 * len(want_frame):3 * len(want_frame)]
+                   == np.asarray(want_frame)))
+       and not bool(np.any(d5[:2 * len(want_frame)]))
+       and not bool(np.any(d5[3 * len(want_frame):])),
+       "zeros %d" % int(np.sum(d5 == 0)))
+
+p6 = os.path.join(WORK, "period2.cf32")
+rc, out, err = run("encode", "--bch-hex", WORKED, "--out", p6, "--frames", "4",
+                   "--at-start", "0", "--period", "2")
+m6 = tsv_map(read_tsv(out))
+d6 = read_samples(p6, "cf32")
+expect_eq("--period 2 writes two of four frames", m6.get("frames_written"), "2")
+expect("--period 2 puts the block in frames 0 and 2",
+       bool(np.all(d6[0:len(want_frame)] == np.asarray(want_frame)))
+       and bool(np.all(d6[2 * len(want_frame):3 * len(want_frame)]
+                       == np.asarray(want_frame)))
+       and not bool(np.any(d6[len(want_frame):2 * len(want_frame)]))
+       and not bool(np.any(d6[3 * len(want_frame):])))
+
 # ---------------------------------------------------------------------------
 # 5. refusals and usage
 # ---------------------------------------------------------------------------

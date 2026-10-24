@@ -37,7 +37,7 @@ reporting success.
 
 ## Modules
 
-Fifty-seven modules, grouped by the part of the network they work on. Every verb a
+Fifty-eight modules, grouped by the part of the network they work on. Every verb a
 module documents has a control on its page, and every page answers in the card that
 asked: a value list for one record, a list of records with per-row Copy for many.
 
@@ -82,6 +82,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 |---|---|
 | `12_nr_air` | SSB/MIB/SIB1, PRACH, beam sweep, SSB waveform, gNB orchestration |
 | `13_nr_core` | 5G SBA: NRF discovery, NGAP, PFCP, 5G-AKA, KSEAF, forgery |
+| `58_suci_catcher` | 5G pre-authentication identity capture: gNB and AMF slice build, catcher plan, live SUCI read, SUCI classifier and corpus, NAS and RRC codecs |
 | `22_nr_cve` | Catalogued 5G CVEs, with the published NGAP and NAS entries filed beside them |
 | `40_sba_pivot` | Pivot across the service-based architecture: NRF, AMF, SMF reachability |
 | `49_ntn` | Non-terrestrial access: Doppler, RTT, timing advance, k_offset |
@@ -91,7 +92,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 | Module | Description |
 |---|---|
 | `53_non3gpp` | TETRA, DMR and GSM-R structure, ciphers and band classification |
-| `50_gprs` | GPRS/EDGE: GEA ciphers and their standing, APN and PDP coding |
+| `50_gprs` | GPRS/EDGE: GEA0/GEA3/GEA4 ciphering with published vectors, GEA standing, APN and PDP coding |
 
 ### The core and the interconnect
 | Module | Description |
@@ -110,7 +111,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 | `37_femtocell` | S1/Iuh attach, femtocell provisioning, GSMTAP and S1 tap |
 | `38_ussd` | USSD request forge, response decode, SS/MMI command surface |
 | `43_ran_share` | Network sharing: PLMN leaks and MOCN configuration review |
-| `45_iot` | NB-IoT: MIB-NB and SIB1-NB decoded through the generated PER codec, NPSS/NSSS, NPRACH and NPRFCN stated as absent |
+| `45_iot` | NB-IoT: MIB-NB, SIB1-NB and SIB2-NB decoded through the generated PER codec, NPSS/NSSS, NPRACH symbol-group hopping (TS 36.211 10.1.6.1), NPRFCN stated as absent |
 | `47_wifioff` | Wi-Fi offload: ePDG FQDN, EAP exchange byte for byte, certificate assertions |
 
 ### SIM and identity
@@ -179,7 +180,7 @@ computes rather than describes.
 | A5/1 downgrade | `07_gsm_attack` | The forcing sequence is constructed; putting it on the air is the same licensed-spectrum handoff as the catcher. |
 | Cross-generation steering / null cipher | `15_downgrade` | Reject-cause construction, SIB1 forgery, and cipher-change analysis across all four generations. |
 | ReVoLTE keystream reuse | `30_volte_ims` | Key-reuse detection, recovery, and the model of what two ciphertexts under one keystream give. |
-| GEA downgrade — GPRS/EDGE | `50_gprs` | GEA0 computed as the identity and GEA1-5 refused by name with the reason each is not implemented; APN and PDP IEs encode for real. |
+| GEA downgrade and ciphering — GPRS/EDGE | `50_gprs` | GEA3 and GEA4 compute against nine published vectors (TS 55.217/55.218/55.226), GEA0 is the identity, GEA1/2 are named as broken in the literature and prohibited, GEA5 as licence-gated; APN and PDP IEs encode for real. |
 | Cipher audit and authentication oracle | `19_cipher_audit` | Scores the negotiated cipher, detects a downgrade, reads the cause tables against what each proves, and recovers the SQN a UE conceals in AUTS. |
 
 ### Signalling forgery — NAS, RRC and SIB
@@ -200,6 +201,7 @@ computes rather than describes.
 | MAP operations | `26_ss7_map` | ATI, SRI, SRI-SM, SAI, PSI, ULR, ISD, RegisterSS and ActivateSS built byte-exact, with M3UA encapsulation both ways. |
 | SIP and IMS registration hijack | `30_volte_ims` | A forged REGISTER and the spoofed re-registration sequence; `--sip-flood` is a rate calculation, not a sender. |
 | 5G SBA and NGAP | `13_nr_core`, `40_sba_pivot` | NRF discovery, NGAP procedures, PFCP rules, and the reachability map across the service-based architecture. |
+| 5G SUCI capture | `58_suci_catcher` | The pre-authentication identity exchange: cell and AMF slice build, catcher plan, and the SUCI a UE hands over before any key exists. |
 | O-RAN and slicing | `48_oran`, `34_slicing` | A1 policy poisoning, E2 control shapes, the over-broad xApp model, slice isolation testing, 5QI and TSN assistance. |
 | Carrier API enumeration | `44_carrier_api` | A concrete request per operation rendered from the document's own examples, and the ordered subscriber sequence. Both stop at the file. |
 | Lawful interception artefacts | `42_li_probe` | The provisioning and activation records as real TS 33.108 HI1 PDUs (liActivated / liDeactivated, BER), and the X3/HI3 product envelope as this module's own framing. Encoded, never delivered. |
@@ -543,7 +545,11 @@ Two holes are worth naming precisely, because their size is easy to overstate:
   the handset's side of the random access as chips: the PRACH preamble, the RACH
   message part spread with the signature's channelisation codes, weighted by the
   signalled gain factors and scrambled by `S_r-msg,n` (`--uplink message-part`),
-  and the two joined into one transmission (`--uplink burst`).
+  the two joined into one transmission (`--uplink burst`), and the transport
+  channel above them in uplink order -- CRC, convolutional coding, radio frame
+  size equalisation, 1st interleaving, radio frame segmentation, per-frame rate
+  matching and 2nd interleaving (`--uplink chain`, TS 25.212 4.2) with the
+  (32,10) Reed-Muller TFCI encoder (`--uplink tfci`, TS 25.212 4.3.3).
   What it still does not do is run the loop: nothing here receives UMTS uplink
   and answers it in one process, and a handset that already holds an AKA context
   will not answer an unauthenticated network. `--catcher-model` names all eight
@@ -573,9 +579,9 @@ it, or both.
 | module | what it does | what stops it |
 |---|---|---|
 | `07_gsm_attack` | full GSM catcher sequence, forged BCCH carrier, A5/1 downgrade forcing | C1 must beat the real cell, the forged command must land in the right LAPDm window, and whether a handset accepts a clone depends on the handset and the location area |
-| `08_umts_air` | RRC forgery (setup/reject/paging), BCH through the whole TS 25.212 chain with the MIB split into the blocks an 80 ms period holds, WCDMA carrier with CPICH and both sync channels, SIB1/SIB3/SIB5 through the FACH chain onto an S-CCPCH in the frames the MIB schedules, MM identity request, uplink RACH as chips (preamble, spread/scrambled message part, and the burst that joins them) | no duplex loop: nothing here receives UMTS uplink and answers it in one process |
+| `08_umts_air` | RRC forgery (setup/reject/paging), BCH through the whole TS 25.212 chain with the MIB split into the blocks an 80 ms period holds, WCDMA carrier with CPICH and both sync channels, SIB1/SIB3/SIB5 through the FACH chain onto an S-CCPCH in the frames the MIB schedules, MM identity request, uplink RACH as chips (preamble, spread/scrambled message part, the burst that joins them) and the uplink transport chain with the TFCI encoder above it | no duplex loop: nothing here receives UMTS uplink and answers it in one process |
 | `33_jamming_detect` | ten waveform shapes including PSS/SSS/PBCH, PRACH, PRS and GPS C/A | `pucch` and `lte-ssb` are refused: this tree carries no PUCCH sequence generator, and LTE SSB is covered by pss+sss+pbch |
-| `45_iot` | NB-IoT RRC decoders through a generated codec | NPRACH and NPRFCN are refused — the parameters were not verifiable against the standard text, so they are named, not guessed |
+| `45_iot` | NB-IoT RRC decoders through a generated codec | NPRFCN is refused — the module used to answer a 410 MHz intercept and a 500 MHz branch, neither of which is a band rule, and the column that would settle it is not in TS 36.104 Table 5.7.3-1 at all |
 | `35_baseband` | mutation, corpus generation, crash triage, DIAG framing | no modulator: a payload is a handoff to srsRAN or OpenAirInterface |
 
 ### 2. Needs the far side to answer
@@ -606,7 +612,7 @@ the location and state halves are unverified by this tree.
 
 | module | refused, and why |
 |---|---|
-| `50_gprs` | GEA1–GEA5: no public algorithm text or reference vectors. GEA0 is computed (it is the identity) |
+| `50_gprs` | GEA1/GEA2: recovered only in the cryptanalysis literature, taps not in this tree. GEA5: algorithm body and test data licence-gated. GEA0/GEA3/GEA4 are computed and vector-tested. |
 | `16_sim` | the profile-element chain carried inside the `86` segments (SCP03t protects the block, it does not parse it), `HandleNotification` (the standard defines no response body), AUTS resynchronisation, and a live session — `--es8-scp03t` builds the 84/85/86 TLVs from a supplied key set and both challenges, but a card cryptogram can only be confirmed by an eUICC |
 | `41_ota_sms` | WIB push (the leaf command bytes have no citable public encoding) and a deck that binds a terminal response into a variable: S@T's CONCATENATE, variable-reference and substitution encodings are built, but PROVIDE LOCAL INFORMATION returns its datum in the terminal response rather than into a variable, so `--sat-push` emits the fixed-body form and the variable-bound body is assembled from `--sat-concat` / `--sat-varref` / `--sat-subst` by hand |
 | `49_ntn` | feeder link — SIB19 carries no gateway geometry, so the gateway-satellite distance is not derivable from anything the cell broadcasts |
