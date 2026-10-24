@@ -3711,6 +3711,9 @@ Usage: $0 COMMAND
                                      --text packs GSM 7-bit, --dry-run builds only.
                                      Password from OTASM_SMPP_PASSWORD keeps it
                                      out of the process list.
+                                     A stand-in SMSC for a run on this box:
+                                       python3 tools/smpp_client.py --serve --port 2775
+                                     it answers bind and submit and routes nothing.
   --selftest                         verify SPI, packet and replay logic
   --menu                             interactive menu
 

@@ -222,6 +222,42 @@ def run_transaction(host, port, timeout, bind_hex, submit_hexes, no_bind):
             pass
 
 
+# TS 23.038 6.2.1, the GSM 7-bit default alphabet, one character per septet
+# 0x00-0x7F. The escape septet 0x1B introduces the extension table, which this
+# reader does not decode: a message using it is reported as escaped rather than
+# rendered wrong.
+GSM7 = (
+    "@\u00a3$\u00a5\u00e8\u00e9\u00f9\u00ec\u00f2\u00c7\n\u00d8\u00f8\r\u00c5\u00e5"
+    "\u0394_\u03a6\u0393\u039b\u03a9\u03a0\u03a8\u03a3\u0398\u039e\u001b\u00c6\u00e6\u00df\u00c9"
+    " !\"#\u00a4%&'()*+,-./"
+    "0123456789:;<=>?"
+    "\u00a1ABCDEFGHIJKLMNOPQRSTUVWXYZ\u00c4\u00d6\u00d1\u00dc\u00a7"
+    "\u00bfabcdefghijklmnopqrstuvwxyz\u00e4\u00f6\u00f1\u00fc\u00e0"
+)
+
+
+def gsm7_unpack(octets, septets=None):
+    """Unpack packed septets back to text (TS 23.038 6.1.2.1.1, the inverse)."""
+    value = 0
+    bits = 0
+    index = 0
+    out = []
+    total = len(octets) * 8 // 7 if septets is None else septets
+    for _ in range(total):
+        while bits < 7 and index < len(octets):
+            value |= octets[index] << bits
+            index += 1
+            bits += 8
+        code = value & 0x7F
+        value >>= 7
+        bits -= 7
+        if code == 0x1B:
+            out.append("\\")
+            continue
+        out.append(GSM7[code])
+    return "".join(out)
+
+
 # ── loopback SMSC, so the framing is proven without a network ─────────────
 def _fake_smsc(listener, submit_answers, seen):
     conn, _ = listener.accept()
@@ -298,6 +334,24 @@ def self_test():
     checks.append(("status-name", status_name(0x00000000) == "esme_rok"))
     checks.append(("status-unknown", status_name(0xDEADBEEF) == "status_0xdeadbeef"))
     checks.append(("cmd-name", cmd_name(0x80000004) == "submit_sm_resp"))
+    # the reader's inverse, cross-checked against the module's own packer
+    checks.append(("gsm7-hello",
+                   gsm7_unpack(bytes.fromhex("e8329bfd06")) == "hello"))
+    checks.append(("gsm7-first-breath",
+                   gsm7_unpack(bytes.fromhex("e6b47c4e0789e5e5301d0d")) == "first breath"))
+    # a submit_sm body decoded the way the loopback SMSC decodes it: c-strings
+    # for service_type/schedule/validity mean an empty one is a single NULL octet
+    submit_body = (_cstr("") + b"\x05\x00" + _cstr("15551234567")
+                   + b"\x01\x01" + _cstr("15559876543")
+                   + b"\x00\x00\x00"            # esm_class, protocol_id, priority
+                   + _cstr("") + _cstr("")          # schedule_delivery_time, validity_period
+                   + b"\x00\x00\x00\x00"          # registered_delivery, replace, dcs, default
+                   + b"\x05" + bytes.fromhex("e8329bfd06"))
+    src, dst, dcs, short = decode_submit(submit_body)
+    checks.append(("submit-decode-src", src == "15551234567"))
+    checks.append(("submit-decode-dst", dst == "15559876543"))
+    checks.append(("submit-decode-dcs", dcs == 0x00))
+    checks.append(("submit-decode-short", short == bytes.fromhex("e8329bfd06")))
     # a truncated PDU must be refused, not guessed at
     try:
         parse_header(bytes.fromhex("00000010"))
@@ -334,6 +388,135 @@ def self_test():
     return 0 if not failed else 1
 
 
+# ── serve mode: the SMSC end of the same session ──────────────────────────
+# A loopback SMSC is the only way to watch a submit land without a carrier
+# account: it binds anyone, answers every PDU, decodes the submitted message and
+# routes nothing. It is a simulator and says so -- no subscription, no handset.
+def serve(listen_addr, port, once, timeout):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind((listen_addr, port))
+    except OSError as exc:
+        return die("listen", "%s:%d" % (listen_addr, port),
+                   "cannot listen on %s:%d: %s" % (listen_addr, port, exc), 3)
+    srv.listen(8)
+    row("listen", "%s:%d" % (listen_addr, port))
+    row("mode", "loopback-smsc")
+    row("routes_nothing", "this answers PDUs and decodes them; it delivers no message")
+    served = 0
+    message_seq = 0
+    try:
+        while True:
+            conn, peer = srv.accept()
+            row("accepted", "%s:%d" % (peer[0], peer[1]))
+            deadline_master = time.monotonic() + timeout
+            try:
+                while True:
+                    deadline = time.monotonic() + timeout
+                    try:
+                        pdu = recv_pdu(conn, deadline)
+                    except (TimeoutError, ConnectionError):
+                        break
+                    hdr = parse_header(pdu)
+                    row("serve_rx_command_id",
+                        "0x%08x\t%s" % (hdr["command_id"], cmd_name(hdr["command_id"])))
+                    row("serve_rx_sequence_number", "%08x" % hdr["sequence_number"])
+                    row("serve_rx_octets", str(hdr["command_length"]))
+                    status = 0
+                    body = b"\x00"
+                    if hdr["command_id"] == 0x00000009:
+                        try:
+                            system_id, _ = cstring(hdr["body"], 0, 16, "system_id")
+                        except ValueError:
+                            system_id = ""
+                            status = 0x0000000F
+                        row("bind_system_id", system_id or "(null)")
+                        body = (system_id or "loopback").encode("ascii") + b"\x00"
+                        resp_id = 0x80000009
+                    elif hdr["command_id"] == 0x00000004:
+                        message_seq += 1
+                        message_id = "loopback%04d" % message_seq
+                        try:
+                            src, dst, dcs, short = decode_submit(hdr["body"])
+                            row("serve_submit_source", src)
+                            row("serve_submit_destination", dst)
+                            row("serve_submit_data_coding", "0x%02x" % dcs)
+                            row("serve_short_message", short.hex())
+                            if dcs == 0x00:
+                                try:
+                                    row("serve_short_message_text",
+                                        gsm7_unpack(short, len(short) * 8 // 7).rstrip("@"))
+                                except IndexError:
+                                    row("serve_short_message_text", "(not 7-bit)")
+                        except ValueError as exc:
+                            status = 0x00000001
+                            row("serve_body_problem", str(exc))
+                        body = message_id.encode("ascii") + b"\x00"
+                        row("serve_message_id", message_id if not status else "-")
+                        resp_id = 0x80000004
+                    elif hdr["command_id"] == 0x00000015:
+                        body = b""
+                        resp_id = 0x80000015
+                    elif hdr["command_id"] == 0x00000006:
+                        body = b""
+                        resp_id = 0x80000006
+                        conn.sendall(struct.pack(">IIII", HEADER, resp_id, 0,
+                                                 hdr["sequence_number"]))
+                        served += 1
+                        row("serve_answered", "%s\t0x%08x" % (cmd_name(0x80000006), 0))
+                        break
+                    else:
+                        body = b""
+                        status = 0x00000003
+                        resp_id = hdr["command_id"] | 0x80000000
+                    resp = struct.pack(">IIII", HEADER + len(body), resp_id, status,
+                                       hdr["sequence_number"]) + body
+                    conn.sendall(resp)
+                    row("serve_answered", "0x%08x\t%s\t%s"
+                        % (resp_id, cmd_name(resp_id), status_name(status)))
+                    if status:
+                        row("serve_refused", status_name(status))
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+            served += 1
+            row("clients", str(served))
+            if once:
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.close()
+    row("served", str(served))
+    row("result", "serve-done")
+    return 0
+
+
+def decode_submit(body):
+    """service_type, then the addresses, then the message: SMPP 3.4 5.2.5 order."""
+    offset = 0
+    _, offset = cstring(body, offset, 6, "service_type")
+    offset += 2  # source_addr_ton, source_addr_npi
+    src, offset = cstring(body, offset, 21, "source_addr")
+    offset += 2  # dest_addr_ton, dest_addr_npi
+    dst, offset = cstring(body, offset, 21, "destination_addr")
+    offset += 3  # esm_class, protocol_id, priority_flag
+    offset += 2  # schedule_delivery_time, validity_period (both NULL here)
+    offset += 1  # registered_delivery
+    offset += 1  # replace_if_present_flag
+    dcs = body[offset]
+    offset += 1
+    offset += 1  # sm_default_msg_id
+    sm_len = body[offset]
+    offset += 1
+    short = body[offset:offset + sm_len]
+    if len(short) != sm_len:
+        raise ValueError("sm_length says %d octets but %d arrived" % (sm_len, len(short)))
+    return src, dst, dcs, short
+
 def main(argv):
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--self-test", action="store_true")
@@ -343,9 +526,16 @@ def main(argv):
     ap.add_argument("--bind", default="")
     ap.add_argument("--submit", action="append", default=[])
     ap.add_argument("--no-bind", action="store_true")
+    ap.add_argument("--serve", action="store_true")
+    ap.add_argument("--listen", default="127.0.0.1")
+    ap.add_argument("--once", action="store_true")
     args = ap.parse_args(argv)
     if args.self_test:
         return self_test()
+    if args.serve:
+        if not (0 < args.port < 65536):
+            return die("listen", "", "--port %d is outside 1..65535" % args.port, 2)
+        return serve(args.listen, args.port, args.once, args.timeout)
     if not args.host:
         return die("connect", "", "--host is required; without an SMSC address there is nowhere to send", 2)
     if not args.bind and not args.submit and not args.no_bind:
