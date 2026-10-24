@@ -1460,6 +1460,149 @@ EOF
 # Profile lifecycle per SGP.22 §2.5.5 / ES10b. A profile is in exactly one
 # state, and the mapping to the mobile equipment is strict: only an enabled
 # profile can be attached to, and enabling one disables the other.
+# ── profile state machine: the sequences the spec forbids (R12) ─────────
+#
+# An eUICC holds profiles in exactly three states -- enabled, disabled, deleted
+# (SGP.22 2.6.1) -- and the interesting attacks are not in the states but in the
+# sequences: a delete while enabled, two profiles enabled at once, an enable of
+# something already deleted. Each of those is a sentence the spec writes and a
+# card is supposed to enforce; this models the sentences so a sequence can be
+# judged before it is run at a card that cannot answer questions.
+#
+# The event file is one operation per line:
+#   install <iccid>    ES10b.LoadBoundProfilePackage: arrives disabled
+#   enable <iccid>     ES10b.EnableProfile: disables whichever profile held the slot
+#   disable <iccid>    ES10b.DisableProfile
+#   delete <iccid>     ES10b.DeleteProfile: only from disabled
+#   list               ES10b.ListProfile: records what the eUICC reports
+# '#' starts a comment.
+sim_profile_model() {
+    local file="${1:-}"
+    [[ -n "$file" ]] || {
+        printf 'ERROR\tusage: --profile-model <events-file>\n' >&2
+        printf 'NOTE\t  one operation per line: install|enable|disable|delete <iccid>, or list\n' >&2
+        return 2; }
+    if [[ "$file" != "-" && ! -r "$file" ]]; then
+        printf 'ERROR\tno readable event file at %s\n' "$(sim_sanitize "$file")" >&2
+        return 1
+    fi
+    printf 'model\tprofile state machine\n'
+    printf 'spec\tSGP.22 2.6.1 (Profile State), 5.7.x (ES10b profile management)\n'
+    printf 'states\tenabled, disabled, deleted\n'
+    local src="$file"
+    [[ "$src" == "-" ]] && src=/dev/stdin
+    local -A state=() has=()
+    local n=0 line op iccid findings=0 enabled_slot=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+        op="${line%% *}"; iccid=""
+        [[ "$line" == *" "* ]] && iccid="$(printf '%s' "${line#* }" | tr -d ' ')"
+        op="${op,,}"
+        n=$(( n + 1 ))
+        case "$op" in
+            list)
+                printf 'event.%d\tlist\t-\t-\t%s\n' "$n" \
+                    "$(for k in "${!state[@]}"; do printf '%s=%s ' "$k" "${state[$k]}"; done)"
+                continue ;;
+            install|enable|disable|delete) ;;
+            *)
+                printf 'ERROR\tevent %d: unknown operation %s (install|enable|disable|delete|list)\n' \
+                    "$n" "$(sim_sanitize "$op")" >&2
+                return 1 ;;
+        esac
+        [[ "$iccid" =~ ^[0-9A-Fa-f]{16,20}$ ]] || {
+            printf 'ERROR\tevent %d: %s needs an ICCID (8..10 octets of hex)\n' "$n" "$op" >&2
+            return 1; }
+        iccid="${iccid^^}"
+        local before="${state[$iccid]:-absent}"
+        local after="$before" verdict="ok" rule=""
+        case "$op" in
+            install)
+                if [[ "$before" != "absent" ]]; then
+                    verdict="refused"; rule="an ICCID is installed once; a second LoadBoundProfilePackage for it is a duplicate (5.7.5)"
+                elif [[ -n "$enabled_slot" ]]; then
+                    after="disabled"
+                    rule="a new profile arrives disabled; the enabled profile keeps the slot (2.6.1, 5.7.6)"
+                else
+                    after="disabled"
+                    rule="a new profile arrives disabled (2.6.1)"
+                fi ;;
+            enable)
+                if [[ "$before" == "absent" ]]; then
+                    verdict="refused"; rule="nothing to enable: the ICCID was never installed"
+                elif [[ "$before" == "deleted" ]]; then
+                    verdict="refused"; rule="a deleted profile cannot be enabled; it is removed, not hidden (2.6.1)"
+                elif [[ "$before" == "enabled" ]]; then
+                    verdict="refused"; rule="the profile is already enabled"
+                else
+                    if [[ -n "$enabled_slot" && "$enabled_slot" != "$iccid" ]]; then
+                        state["$enabled_slot"]="disabled"
+                        printf 'event.%d.side\t%s\tdisabled\t%s\n' "$n" "$enabled_slot" \
+                            "enabling one profile disables the one that held the slot (5.7.6)"
+                    fi
+                    after="enabled"; enabled_slot="$iccid"
+                    rule="exactly one profile is enabled at a time (2.6.1)"
+                fi ;;
+            disable)
+                if [[ "$before" == "absent" ]]; then
+                    verdict="refused"; rule="nothing to disable: the ICCID was never installed"
+                elif [[ "$before" == "deleted" ]]; then
+                    verdict="refused"; rule="a deleted profile has no state to change"
+                elif [[ "$before" == "disabled" ]]; then
+                    verdict="refused"; rule="the profile is already disabled"
+                else
+                    after="disabled"; enabled_slot=""
+                    rule="the slot is now empty; the modem has no profile to attach with"
+                fi ;;
+            delete)
+                if [[ "$before" == "absent" ]]; then
+                    verdict="refused"; rule="nothing to delete: the ICCID was never installed"
+                elif [[ "$before" == "enabled" ]]; then
+                    verdict="refused"
+                    rule="a profile must be disabled before it is deleted (5.7.7); deleting the enabled one is the sequence the spec forbids"
+                elif [[ "$before" == "deleted" ]]; then
+                    verdict="refused"; rule="the profile is already deleted"
+                else
+                    after="deleted"
+                    rule="ISD-P removed; re-installing the same ICCID is a fresh download (2.6.1)"
+                fi ;;
+        esac
+        if [[ "$verdict" == "refused" ]]; then
+            findings=$(( findings + 1 ))
+        else
+            state["$iccid"]="$after"
+        fi
+        printf 'event.%d\t%s\t%s\t%s\t%s\n' "$n" "$op" "$iccid" "$before" "$after"
+        [[ -n "$rule" ]] && printf 'event.%d.rule\t%s\n' "$n" "$rule"
+        printf 'event.%d.verdict\t%s\n' "$n" "$verdict"
+    done < "$src"
+    printf 'events\t%d\n' "$n"
+    printf 'refused\t%d\n' "$findings"
+    local k count=0
+    for k in "${!state[@]}"; do
+        printf 'final.%s\t%s\n' "$k" "${state[$k]}"
+        count=$(( count + 1 ))
+    done
+    printf 'profiles\t%d\n' "$count"
+    local enabled_count=0
+    for k in "${!state[@]}"; do [[ "${state[$k]}" == "enabled" ]] && enabled_count=$(( enabled_count + 1 )); done
+    if (( enabled_count > 1 )); then
+        printf 'finding\tHIGH\t%d profiles enabled at once; an eUICC has one enabled slot (2.6.1)\n' "$enabled_count"
+        findings=$(( findings + 1 ))
+    fi
+    if (( findings > 0 )); then
+        printf 'verdict\t%s\n' "the sequence contains $findings step(s) the spec forbids; a card that accepted them is not enforcing 2.6.1 and 5.7.x"
+        printf 'sent\t0\n'
+        return 1
+    fi
+    printf 'verdict\t%s\n' "every step is a transition SGP.22 allows; the sequence is legal by this model, which is not the same as a card having run it"
+    printf 'sent\t0\n'
+    return 0
+}
+
 sim_profile_state_table() {
     cat <<'EOF'
 state	es10_command	me_visible	notes
@@ -5097,6 +5240,34 @@ sim_selftest() {
     chk usage-aka-resp   "$(printf '%s\n' "$out" | grep -c '^  --aka-responder ')" "1"
     chk usage-aka-serve  "$(printf '%s\n' "$out" | grep -c '^  --aka-serve ')" "1"
 
+    # ── profile state machine (R12) ────────────────────────────────────
+    # Four sequences: the legal one, a delete while enabled, the one-slot
+    # rule when a second profile is enabled, and an enable after a delete.
+    local legal illegal oneslot afterdelete
+    legal=$(printf 'install 89440000000000000001\nenable 89440000000000000001\ndisable 89440000000000000001\ndelete 89440000000000000001\n' \
+        | sim_profile_model - 2>&1)
+    chk prof-legal-refused "$(printf '%s\n' "$legal" | awk -F'\t' '$1=="refused"{print $2; exit}')" "0"
+    chk prof-legal-final   "$(printf '%s\n' "$legal" | grep -c '^final.89440000000000000001	deleted$')" "1"
+    illegal=$(printf 'install 89440000000000000001\nenable 89440000000000000001\ndelete 89440000000000000001\n' \
+        | sim_profile_model - 2>&1)
+    chk prof-delete-enabled "$(printf '%s\n' "$illegal" | awk -F'\t' '$1=="event.3.verdict"{print $2; exit}')" "refused"
+    chk prof-delete-rule    "$(printf '%s\n' "$illegal" | grep -c 'disabled before it is deleted')" "1"
+    chk prof-illegal-rc     "$(printf 'install 89440000000000000001\nenable 89440000000000000001\ndelete 89440000000000000001\n' \
+        | sim_profile_model - >/dev/null 2>&1; echo $?)" "1"
+    oneslot=$(printf 'install 89440000000000000001\ninstall 89440000000000000002\nenable 89440000000000000001\nenable 89440000000000000002\n' \
+        | sim_profile_model - 2>&1)
+    chk prof-oneslot-side   "$(printf '%s\n' "$oneslot" | awk -F'\t' '$1=="event.4.side"{print $2; exit}')" "89440000000000000001"
+    chk prof-oneslot-count  "$(printf '%s\n' "$oneslot" | grep -c '^final\.')" "2"
+    chk prof-oneslot-refused "$(printf '%s\n' "$oneslot" | awk -F'\t' '$1=="refused"{print $2; exit}')" "0"
+    afterdelete=$(printf 'install 89440000000000000001\ndelete 89440000000000000001\nenable 89440000000000000001\n' \
+        | sim_profile_model - 2>&1)
+    chk prof-deleted-enable "$(printf '%s\n' "$afterdelete" | awk -F'\t' '$1=="event.3.verdict"{print $2; exit}')" "refused"
+    chk prof-delete-disabled "$(printf '%s\n' "$afterdelete" | awk -F'\t' '$1=="event.2.verdict"{print $2; exit}')" "ok"
+    chk prof-no-file "$(sim_profile_model /nonexistent/events.tsv >/dev/null 2>&1; echo $?)" "1"
+    chk prof-no-args "$(sim_profile_model >/dev/null 2>&1; echo $?)" "2"
+    chk prof-bad-op  "$(printf 'frobnicate 8944\n' | sim_profile_model - >/dev/null 2>&1; echo $?)" "1"
+    chk prof-bad-iccid "$(printf 'install 1234\n' | sim_profile_model - >/dev/null 2>&1; echo $?)" "1"
+
     # ── RSP binding audit (R10) ────────────────────────────────────────
     # SGP.22's protection is binding, not secrecy: the transactionId ties a
     # response to its request, the SM-DP+ signature ties the command to its
@@ -6403,6 +6574,7 @@ sim_cli_main() {
         --aka-serve)      sim_cmd_aka_serve "$@" ;;
         --auts-build)     sim_cmd_auts_build "$@" ;;
         --rsp-audit)      sim_rsp_audit "$@" ;;
+        --profile-model)  sim_profile_model "${1:--}" ;;
         --rsp-plan)       sim_rsp_plan "${1:-}" ;;
         --auts-verify)    sim_cmd_auts_verify "$@" ;;
         --usim-serve)     sim_usim_serve "$@" ;;
@@ -6450,6 +6622,10 @@ Usage: $0 COMMAND
                                     one AKA event: quintet from the store, SQN incremented and saved; --5g adds KAUSF and RES*
   --aka-serve [--5g --sn <hex>|--sn-name <text>]
                                     resident responder: VECTOR <imsi> [<rand>] / LIST / QUIT on stdin
+  --profile-model <events-file>     run a sequence of profile operations
+                                    (install|enable|disable|delete <iccid>, list)
+                                    through the SGP.22 2.6.1 state machine and
+                                    name every step the spec forbids
   --rsp-audit <response-json> [--request <json>] [--eid <hex>]
                                     audit an ES9+ exchange for the three ties
                                     that stop a profile being moved: transaction,
