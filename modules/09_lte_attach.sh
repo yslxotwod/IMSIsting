@@ -6,6 +6,18 @@
 # network. Nothing in this module is a plan — see 11_lte_core.sh for the
 # vectors that genuinely need a lab EPC.
 #
+# The middle of an attach is built here too (R4): --setup-complete wraps a NAS
+# PDU in the RRCConnectionSetupComplete a handset sends on UL-DCCH, and
+# --nas-responder holds the attach state across the UE's own messages, reading
+# the identity the subscriber states and answering with the network's next
+# message wherever this tree can encode one honestly. The RRC encoding lives in
+# tools/lte_rrc.py and the downlink NAS bytes come from 32_nas_signaling, so
+# neither layer is implemented twice.
+#
+# The message-type table is TS 24.301 §9.9.2.0 as tshark names it. It was
+# shifted by one from 0x4B upward before R4, which read a tracking-area update
+# request as a tracking-area update accept; --selftest now pins the values.
+#
 # Reference clause map (TS 24.301):
 #   9.9.2.0   EPS mobility management messages (Table 9.9.2.1.1)
 #   9.9.3.1   Attach request
@@ -308,37 +320,47 @@ latt_emm_cause_name() {
 # NAS message type — TS 24.301 §9.8 (Table 9.8.1). EMM half only; the ESM
 # half is noted where a NAS message-type byte may legally carry it.
 latt_msg_type_name() {
-    case "${1:-}" in
+    local code="${1:-}"
+    code="${code#0x}"; code="${code#0X}"
+    code="0x${code^^}"
+    # TS 24.301 §9.8.1, as tshark 4.2.2 names the same values in its nas-eps
+    # table (tools/nas-oracle/check_nas_built.py pins the builder against it).
+    # The gaps are real: 0x47 and 0x57..0x5B are not assigned, and this table
+    # says "unassigned" rather than inventing a name for them.
+    case "$code" in
         0x41) echo "ATTACH REQUEST" ;;
         0x42) echo "ATTACH ACCEPT" ;;
         0x43) echo "ATTACH COMPLETE" ;;
         0x44) echo "ATTACH REJECT" ;;
         0x45) echo "DETACH REQUEST" ;;
         0x46) echo "DETACH ACCEPT" ;;
-        0x47) echo "TRACKING AREA UPDATE REQUEST" ;;
-        0x48) echo "TRACKING AREA UPDATE ACCEPT" ;;
-        0x49) echo "TRACKING AREA UPDATE COMPLETE" ;;
-        0x4A) echo "TRACKING AREA UPDATE REJECT" ;;
-        0x4B) echo "EXTENDED SERVICE REQUEST" ;;
-        0x4C) echo "SERVICE REJECT" ;;
-        0x4D) echo "GUTI REALLOCATION COMMAND" ;;
-        0x4E) echo "GUTI REALLOCATION COMPLETE" ;;
-        0x4F) echo "AUTHENTICATION REQUEST" ;;
-        0x50) echo "AUTHENTICATION RESPONSE" ;;
-        0x51) echo "AUTHENTICATION REJECT" ;;
-        0x52) echo "AUTHENTICATION FAILURE" ;;
-        0x53) echo "IDENTITY REQUEST" ;;
-        0x54) echo "IDENTITY RESPONSE" ;;
-        0x55) echo "SECURITY MODE COMMAND" ;;
-        0x56) echo "SECURITY MODE COMPLETE" ;;
-        0x57) echo "SECURITY MODE REJECT" ;;
-        0x58) echo "EMM STATUS" ;;
-        0x59) echo "EMM INFORMATION" ;;
-        0x5A) echo "DOWNLINK NAS TRANSPORT" ;;
-        0x5B) echo "UPLINK NAS TRANSPORT" ;;
-        0x5C) echo "CS SERVICE NOTIFICATION" ;;
-        0x5D) echo "DOWNLINK GENERIC NAS TRANSPORT" ;;
-        0x5E) echo "UPLINK GENERIC NAS TRANSPORT" ;;
+        0x48) echo "TRACKING AREA UPDATE REQUEST" ;;
+        0x49) echo "TRACKING AREA UPDATE ACCEPT" ;;
+        0x4A) echo "TRACKING AREA UPDATE COMPLETE" ;;
+        0x4B) echo "TRACKING AREA UPDATE REJECT" ;;
+        0x4C) echo "EXTENDED SERVICE REQUEST" ;;
+        0x4D) echo "CONTROL PLANE SERVICE REQUEST" ;;
+        0x4E) echo "SERVICE REJECT" ;;
+        0x4F) echo "SERVICE ACCEPT" ;;
+        0x50) echo "GUTI REALLOCATION COMMAND" ;;
+        0x51) echo "GUTI REALLOCATION COMPLETE" ;;
+        0x52) echo "AUTHENTICATION REQUEST" ;;
+        0x53) echo "AUTHENTICATION RESPONSE" ;;
+        0x54) echo "AUTHENTICATION REJECT" ;;
+        0x55) echo "IDENTITY REQUEST" ;;
+        0x56) echo "IDENTITY RESPONSE" ;;
+        0x5C) echo "AUTHENTICATION FAILURE" ;;
+        0x5D) echo "SECURITY MODE COMMAND" ;;
+        0x5E) echo "SECURITY MODE COMPLETE" ;;
+        0x5F) echo "SECURITY MODE REJECT" ;;
+        0x60) echo "EMM STATUS" ;;
+        0x61) echo "EMM INFORMATION" ;;
+        0x62) echo "DOWNLINK NAS TRANSPORT" ;;
+        0x63) echo "UPLINK NAS TRANSPORT" ;;
+        0x64) echo "CS SERVICE NOTIFICATION" ;;
+        0x68) echo "DOWNLINK GENERIC NAS TRANSPORT" ;;
+        0x69) echo "UPLINK GENERIC NAS TRANSPORT" ;;
+        0x47|0x57|0x58|0x59|0x5A|0x5B) echo "unassigned" ;;
         0x01|0x02|0x03|0x04|0x05|0x06|0x07|0x08|0x09) echo "ESM message (PDN connectivity/bearer)" ;;
         *)    echo "unknown" ;;
     esac
@@ -531,7 +553,7 @@ latt_identity_exposure() {
     local mt sh it
     mt=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="message_type"{print $2}')
     sh=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="security_header"{print $2}')
-    [[ "$mt" == "53" ]] || {
+    [[ "$mt" == "55" ]] || {
         printf 'ERROR\tnot an IDENTITY REQUEST (message type 0x%s, %s)\n' \
             "$mt" "$(latt_msg_type_name "0x$mt")" >&2
         return 1
@@ -578,7 +600,7 @@ latt_decode_nas() {
     body=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="body"{print $2}')
 
     case "$mt" in
-        41|47)  # ATTACH REQUEST / TAU REQUEST
+        41|48)  # ATTACH REQUEST / TAU REQUEST
             local o4 at ksi
             o4="${body:0:2}"
             at=$(( (16#${o4:-0} >> 1) & 0x07 ))
@@ -589,14 +611,14 @@ latt_decode_nas() {
             printf 'nas_key_set_identifier_name\t%s\n' \
                 "$([[ "$ksi" == "7" ]] && echo 'no key available' || echo "KSI $ksi")"
             latt_decode_ies "${body:2}" ;;
-        42)  # ATTACH ACCEPT
+        42|49)  # ATTACH ACCEPT / TAU ACCEPT
             local o4
             o4="${body:0:2}"
             printf 'eps_attach_type\t%s\n' "$(( (16#${o4:-0} >> 1) & 0x07 ))"
             printf 'eps_attach_type_name\t%s\n' "$(latt_attach_type_name "$(( (16#${o4:-0} >> 1) & 0x07 ))")"
             printf 'guti\t%s\n' "${body:2:10}"
             latt_decode_ies "${body:12}" ;;
-        44|4A) # ATTACH REJECT / TAU REJECT
+        44|4B) # ATTACH REJECT / TAU REJECT
             local c="${body:0:2}"
             printf 'emm_cause\t%s\n' "$((16#${c:-0}))"
             printf 'emm_cause_name\t%s\n' "$(latt_emm_cause_name "$((16#${c:-0}))")"
@@ -614,23 +636,23 @@ latt_decode_nas() {
             esac
             printf 'ksi\t%s\n' "$(( (16#${o4:-0} >> 5) & 0x07 ))"
             latt_decode_ies "${body:2}" ;;
-        4F)  # AUTHENTICATION REQUEST — RAND + AUTN, 16 octets each
+        52)  # AUTHENTICATION REQUEST — RAND + AUTN, 16 octets each
             printf 'rand\t%s\n' "${body:0:32}"
             printf 'autn\t%s\n' "${body:32:32}"
             printf 'rand_len\t%s\n' "$(( ${#body} >= 32 ? 16 : ${#body} / 2 ))" ;;
-        50)  # AUTHENTICATION RESPONSE — RES
+        53)  # AUTHENTICATION RESPONSE — RES
             printf 'res\t%s\n' "${body}"
             printf 'res_len\t%s\n' "$(( ${#body} / 2 ))" ;;
-        52)  # AUTHENTICATION FAILURE — cause + optional AUTS
+        5C)  # AUTHENTICATION FAILURE — cause + optional AUTS
             local c="${body:0:2}"
             printf 'emm_cause\t%s\n' "$((16#${c:-0}))"
             printf 'emm_cause_name\t%s\n' "$(latt_emm_cause_name "$((16#${c:-0}))")"
             [[ -n "${body:2}" ]] && printf 'auts\t%s\n' "${body:2}" ;;
-        53)  # IDENTITY REQUEST
+        55)  # IDENTITY REQUEST
             local it="${body:0:2}"
             printf 'identity_type\t%s\n' "$it"
             printf 'identity_type_name\t%s\n' "$(latt_identity_type_name "$((16#${it:-0}))")" ;;
-        54)  # IDENTITY RESPONSE
+        56)  # IDENTITY RESPONSE
             local mid; mid=$(latt_eps_mobile_id_decode "$body" 2>/dev/null)
             if [[ -n "$mid" ]]; then
                 printf 'mobile_identity_type\t%s\n' "$(printf '%s' "$mid" | cut -f1)"
@@ -638,20 +660,20 @@ latt_decode_nas() {
             else
                 printf 'mobile_identity_raw\t%s\n' "$body"
             fi ;;
-        55)  # SECURITY MODE COMMAND
+        5D)  # SECURITY MODE COMMAND
             local c="${body:0:2}"
             printf 'selected_nas_cipher\t%s\n' "$(( 16#${c:-0} & 0x0F ))"
             printf 'selected_nas_integrity\t%s\n' "$(( (16#${c:-0} >> 4) & 0x0F ))"
             printf 'nas_mac\t%s\n' "${body:2:8}"
             latt_decode_ies "${body:10}" ;;
-        56)  # SECURITY MODE COMPLETE
+        5E)  # SECURITY MODE COMPLETE
             printf 'nas_mac\t%s\n' "${body:0:8}"
             latt_decode_ies "${body:8}" ;;
-        57)  # SECURITY MODE REJECT
+        5F)  # SECURITY MODE REJECT
             local c="${body:0:2}"
             printf 'emm_cause\t%s\n' "$((16#${c:-0}))"
             printf 'emm_cause_name\t%s\n' "$(latt_emm_cause_name "$((16#${c:-0}))")" ;;
-        58)  # EMM STATUS
+        60)  # EMM STATUS
             local c="${body:0:2}"
             printf 'emm_cause\t%s\n' "$((16#${c:-0}))"
             printf 'emm_cause_name\t%s\n' "$(latt_emm_cause_name "$((16#${c:-0}))")" ;;
@@ -783,6 +805,335 @@ latt_store_identity() {
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$(latt_sanitize "$kind")" "$(latt_sanitize "$value")" "$(latt_sanitize "$src")" \
         >> "$LATT_IDENT"
+}
+
+# ── RRCConnectionSetupComplete: the door the attach walks through ───────
+#
+# A UE answers RRCConnectionSetup with an RRCConnectionSetupComplete whose
+# dedicatedInfoNAS carries its FIRST NAS PDU -- in practice the attach request
+# or the identity it was asked for.  Building and reading that container is the
+# missing middle between "a cell exists" and "a subscriber answered": everything
+# 16_sim, 14_suci and 18_imsi_exposure want arrives inside it.
+#
+# The RRC half is not encoded here.  tools/lte_rrc.py owns the TS 36.331
+# unaligned-PER layout, including the UL-DCCH envelope, and this module only
+# names the fields; a second encoder is how the two would drift apart.
+LATT_RRC_TOOL="$IMSISTING_ROOT/tools/lte_rrc.py"
+
+latt_rrc_tool() {
+    [[ -f "$LATT_RRC_TOOL" ]] || {
+        printf 'ERROR\ttools/lte_rrc.py is missing, so no RRC message can be built\n' >&2
+        return 1; }
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is missing, so tools/lte_rrc.py cannot run\n' >&2
+        return 1; }
+}
+
+latt_cmd_setup_complete() {
+    local nas="" plmn="1" tx="0"
+    while (( $# > 0 )); do
+        case "${1:-}" in
+            --plmn) plmn="${2:-1}"; shift 2 ;;
+            --tx)   tx="${2:-0}";   shift 2 ;;
+            --*)    printf 'ERROR\t--setup-complete does not take %s\n' "$(latt_sanitize "$1")" >&2; return 2 ;;
+            *)
+                [[ -z "$nas" ]] || { printf 'ERROR\t--setup-complete takes one NAS PDU\n' >&2; return 2; }
+                nas="$1"; shift ;;
+        esac
+    done
+    [[ -n "$nas" ]] || {
+        printf 'ERROR\tusage: --setup-complete <nas_hex> [--plmn n] [--tx n]\n' >&2; return 2; }
+    local n; n=$(latt_nfc "$nas")
+    latt_is_hex "$n" || { printf 'ERROR\tdedicatedInfoNAS must be hex\n' >&2; return 2; }
+    [[ "$plmn" =~ ^[1-6]$ ]] || { printf 'ERROR\t--plmn is selectedPLMN-Identity, 1..6\n' >&2; return 2; }
+    [[ "$tx" =~ ^[0-3]$ ]] || { printf 'ERROR\t--tx is rrc-TransactionIdentifier, 0..3\n' >&2; return 2; }
+    latt_rrc_tool || return 1
+
+    local out rc
+    out=$(python3 "$LATT_RRC_TOOL" setup-complete --nas "$n" --plmn "$plmn" --tx "$tx" 2>&1); rc=$?
+    if (( rc != 0 )); then
+        printf 'ERROR\ttools/lte_rrc.py refused: %s\n' "$(latt_sanitize "$(printf '%s' "$out" | head -1)")" >&2
+        return 1
+    fi
+    local hex; hex=$(printf '%s\n' "$out" | awk -F'  +' '$1=="hex"{print $2}')
+    local bits; bits=$(printf '%s\n' "$out" | awk -F'  +' '$1=="bitlen"{print $2; exit}')
+    printf 'rrc_message\tRRCConnectionSetupComplete\n'
+    printf 'envelope\tUL-DCCH-Message/c1/rrcConnectionSetupComplete-r8\n'
+    printf 'selected_plmn_identity\t%s\n' "$plmn"
+    printf 'rrc_transaction_identifier\t%s\n' "$tx"
+    printf 'dedicated_info_nas\t%s\n' "${n^^}"
+    printf 'nas_octets\t%d\n' "$(( ${#n} / 2 ))"
+    printf 'rrc_bitlen\t%s\n' "${bits%% *}"
+    printf 'rrc_hex\t%s\n' "${hex^^}"
+    printf 'octets\t%d\n' "$(( ${#hex} / 2 ))"
+    printf 'ref\t3GPP TS 36.331 6.2.2 (RRCConnectionSetupComplete), 6.3.6 (UL-DCCH-Message)\n'
+    printf 'limit\tnothing below RRC is built: no RLC/MAC/PHY framing, so this is a message body, not a transmission\n'
+}
+
+# Read the container back.  A UE's Setup Complete is the first place a
+# network learns which subscriber is talking, so the NAS it carries is
+# decoded here and the identity it states is recorded in the module's store.
+latt_cmd_parse_setup_complete() {
+    local hex; hex=$(latt_nfc "${1:-}")
+    [[ -n "$hex" ]] || {
+        printf 'ERROR\tusage: --parse-setup-complete <rrc_hex>\n' >&2; return 2; }
+    latt_is_hex "$hex" || { printf 'ERROR\tnot valid hex\n' >&2; return 2; }
+    latt_rrc_tool || return 1
+
+    local out rc
+    out=$(python3 "$LATT_RRC_TOOL" decode --type setup-complete --hex "$hex" 2>&1); rc=$?
+    if (( rc != 0 )); then
+        printf 'ERROR\ttools/lte_rrc.py refused: %s\n' \
+            "$(latt_sanitize "$(printf '%s' "$out" | head -1)")" >&2
+        return 1
+    fi
+    local plmn nas
+    plmn=$(printf '%s\n' "$out" | awk -F'  +' '$1=="plmn"{print $2}')
+    nas=$(printf '%s\n' "$out" | awk -F'  +' '$1=="nas_hex"{print $2}')
+    printf 'rrc_message\tRRCConnectionSetupComplete\n'
+    printf 'selected_plmn_identity\t%s\n' "$plmn"
+    printf 'dedicated_info_nas\t%s\n' "${nas^^}"
+    printf 'nas_octets\t%d\n' "$(( ${#nas} / 2 ))"
+    [[ -n "$nas" ]] || {
+        printf 'note\tthe container carries no NAS PDU\n'
+        return 0; }
+
+    local hdr; hdr=$(latt_parse_nas_header "$nas") || return 1
+    printf '%s\n' "$hdr" | awk -F'\t' '$1=="security_header_name" || $1=="plain" || \
+        $1=="message_type" || $1=="message_name"' || true
+
+    # The identity the UE stated, if it stated one.  In an attach or TAU
+    # request the EPS mobile identity is the first IE after the mandatory
+    # attach-type octet, so its TLV starts at octet 4 of the message; an
+    # identity response carries nothing else, so its IE starts at octet 3.
+    local mid=""
+    case "$nas" in
+        0741*|0748*)  # attach request / TAU request: EPS mobile identity TLV
+            mid=$(latt_eps_mobile_id_decode "${nas:6}" 2>/dev/null || true) ;;
+        0756*)        # identity response: the mobile identity is the whole body
+            mid=$(latt_eps_mobile_id_decode "${nas:4}" 2>/dev/null || true) ;;
+    esac
+    if [[ -n "$mid" ]]; then
+        local kind digits
+        kind=$(printf '%s' "$mid" | cut -f1)
+        digits=$(printf '%s' "$mid" | cut -f2)
+        printf 'identity_kind\t%s\n' "$kind"
+        printf 'identity\t%s\n' "$digits"
+        latt_store_identity "setup-complete-$kind" "$digits" "latt:--parse-setup-complete"
+        printf 'identity_stored\tyes\n'
+    else
+        printf 'identity_stored\tno\n'
+        printf 'identity_note\tthe NAS PDU states no IMSI: a GUTI attach only names the subscriber once the network asks\n'
+    fi
+}
+
+# ── the NAS responder: the middle of an attach ─────────────────────────
+#
+# An eNB that only builds RRC messages cannot get a subscriber to say anything,
+# and a NAS decoder that only reads captures cannot answer.  This holds the
+# state between them: it takes the uplink NAS PDUs a UE actually sends, keeps
+# the attach state, and answers with the network's next message wherever this
+# tree can encode one honestly.
+#
+# What it does NOT do is pretend.  The downlink messages that need material
+# this tree cannot build -- an AUTN at a confirmed offset (32_nas_signaling
+# refuses it), a NAS-MAC over a key this tree does not hold -- are named in a
+# `next` row with the reason, so the operator sees exactly where a real eNB
+# would continue and this one stops.
+#
+# State is one 0600 TSV under STATE_DIR so a session survives a restart, which
+# is the difference between a responder and a demo.
+NASF_MODULE="$IMSISTING_ROOT/modules/32_nas_signaling.sh"
+
+# Resolved per call, not at load: --selftest points STATE_DIR at a temporary
+# tree after this file has been sourced, and a path frozen at load time would
+# keep writing into the operator's real state directory.
+latt_state_dir() { printf '%s/lte_attach' "$STATE_DIR"; }
+latt_ue_state()  { printf '%s/ue.tsv' "$(latt_state_dir)"; }
+
+latt_state_get() {  # <key> -> value, empty when the key is absent
+    [[ -f "$(latt_ue_state)" ]] || return 0
+    awk -F'\t' -v k="$1" '$1==k{print $2; exit}' "$(latt_ue_state)" 2>/dev/null || true
+}
+
+latt_state_set() {  # <key> <value> [<key> <value> ...] -> rewrite the store
+    mkdir -p "$(latt_state_dir)" 2>/dev/null
+    local tmp; tmp=$(mktemp "$(latt_state_dir)/state.XXXXXX") || return 1
+    local -a args=("$@") newkeys=() i
+    for (( i = 0; i + 1 < ${#args[@]}; i += 2 )); do newkeys+=("${args[i]}"); done
+    if [[ -f "$(latt_ue_state)" ]]; then
+        local k v keep
+        while IFS=$'\t' read -r k v; do
+            [[ -z "$k" ]] && continue
+            keep=1
+            for (( i = 0; i < ${#newkeys[@]}; i++ )); do
+                [[ "${newkeys[i]}" == "$k" ]] && keep=0
+            done
+            (( keep )) && printf '%s\t%s\n' "$k" "$v" >> "$tmp"
+        done < "$(latt_ue_state)"
+    fi
+    while (( $# >= 2 )); do
+        printf '%s\t%s\n' "$1" "$2" >> "$tmp"
+        shift 2
+    done
+    chmod 0600 "$tmp" 2>/dev/null
+    mv "$tmp" "$(latt_ue_state)" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+
+# Ask 32_nas_signaling for the network-side message.  One implementation of
+# the NAS encodings, not two: this module owns the state machine, that one owns
+# the bytes.
+latt_answer_build() {  # <message> [extra args...] -> hex on stdout
+    [[ -f "$NASF_MODULE" ]] || return 1
+    local msg="$1"; shift
+    local out
+    out=$(bash "$NASF_MODULE" --build-nas eps "$msg" "$@" 2>/dev/null) || return 1
+    printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2; exit}'
+}
+
+# The identity a UE states, in either place it can state one: the EPS mobile
+# identity IE of an attach/TAU request (first IE after octet 4), or the whole
+# body of an identity response.
+latt_identity_from_nas() {  # <nas_hex> -> KIND<TAB><digits>
+    local nas="$1" mid=""
+    case "$nas" in
+        0741*|0748*) mid=$(latt_eps_mobile_id_decode "${nas:6}" 2>/dev/null || true) ;;
+        0756*)       mid=$(latt_eps_mobile_id_decode "${nas:4}" 2>/dev/null || true) ;;
+    esac
+    [[ -n "$mid" ]] && printf '%s' "$mid"
+    return 0
+}
+
+latt_cmd_nas_responder() {
+    local source="${1:--}"
+    local state imsi step=0 line kind pdu mt
+    state=$(latt_state_get state); state="${state:-idle}"
+    imsi=$(latt_state_get imsi)
+    mkdir -p "$(latt_state_dir)" 2>/dev/null
+    chmod 0700 "$(latt_state_dir)" 2>/dev/null
+
+    if [[ "$source" != "-" && ! -r "$source" ]]; then
+        printf 'ERROR\tno readable input at %s\n' "$(latt_sanitize "$source")" >&2
+        return 2
+    fi
+
+    printf 'responder\tready\n'
+    printf 'state\t%s\n' "$state"
+    [[ -n "$imsi" ]] && printf 'imsi\t%s\n' "$imsi"
+    printf 'state_file\t%s\n' "$(latt_ue_state)"
+    printf 'input\t%s\n' "$([[ "$source" == "-" ]] && echo 'stdin' || latt_sanitize "$source")"
+
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        [[ -z "${line// /}" ]] && continue
+        [[ "$line" == \#* ]] && continue
+        kind="ul"; pdu="$line"
+        case "$line" in
+            ul\ *|UL\ *) kind="ul"; pdu="${line#* }" ;;
+            dl\ *|DL\ *) kind="dl"; pdu="${line#* }" ;;
+            note\ *) printf 'note\t%s\n' "$(latt_sanitize "${line#note }")"; continue ;;
+            reset)
+                state="idle"; imsi=""
+                latt_state_set state idle imsi ""
+                printf 'reset\tstate=idle\n'
+                continue ;;
+        esac
+        pdu=$(latt_nfc "$pdu")
+        if ! latt_is_hex "$pdu" || (( ${#pdu} < 4 )); then
+            printf 'ERROR\tnot a NAS PDU: %s\n' "$(latt_sanitize "$pdu")" >&2
+            continue
+        fi
+        step=$(( step + 1 ))
+        mt="${pdu:2:2}"
+        local mname; mname=$(latt_msg_type_name "0x$mt")
+
+        case "$kind:$mt" in
+            ul:41|ul:48)
+                local id; id=$(latt_identity_from_nas "$pdu")
+                if [[ -n "$id" ]]; then
+                    imsi=$(printf '%s' "$id" | cut -f2)
+                    latt_store_identity "$(printf '%s' "$id" | cut -f1)" "$imsi" \
+                        "latt:--nas-responder"
+                    state="attach-requested"
+                    local acc; acc=$(latt_answer_build attach-accept)
+                    printf 'step\t%s\n' "$step"
+                    printf 'uplink\t%s\n' "$mname"
+                    printf 'identity\t%s\n' "$imsi"
+                    printf 'state\t%s\n' "$state"
+                    printf 'downlink\tAttach accept\n'
+                    printf 'downlink_hex\t%s\n' "$acc"
+                    [[ -n "$acc" ]] && printf 'downlink_octets\t%d\n' "$(( ${#acc} / 2 ))"
+                    printf 'next\tAttach complete from the UE\n'
+                    printf 'limit\tthe accept carries no ESM message container, so no default bearer exists yet\n'
+                    latt_state_set state "$state" imsi "$imsi" \
+                        exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
+                else
+                    # A GUTI attach names no subscriber: ask for the IMSI.
+                    state="identity-requested"
+                    local req; req=$(latt_answer_build identity-request --identity imsi)
+                    printf 'step\t%s\n' "$step"
+                    printf 'uplink\t%s\n' "$mname"
+                    printf 'identity\tnone -- the UE gave a temporary identity\n'
+                    printf 'state\t%s\n' "$state"
+                    printf 'downlink\tIdentity request\n'
+                    printf 'downlink_hex\t%s\n' "$req"
+                    printf 'next\tIdentity response carrying the IMSI, in the clear\n'
+                    printf 'limit\tthis is the exposure: the IMSI is asked for before any security context exists\n'
+                    latt_state_set state "$state" \
+                        exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
+                fi ;;
+            ul:56)
+                local id; id=$(latt_identity_from_nas "$pdu")
+                if [[ -n "$id" ]]; then
+                    imsi=$(printf '%s' "$id" | cut -f2)
+                    latt_store_identity "$(printf '%s' "$id" | cut -f1)" "$imsi" \
+                        "latt:--nas-responder"
+                    state="attach-requested"
+                    local acc; acc=$(latt_answer_build attach-accept)
+                    printf 'step\t%s\n' "$step"
+                    printf 'uplink\t%s\n' "$mname"
+                    printf 'identity\t%s\n' "$imsi"
+                    printf 'state\t%s\n' "$state"
+                    printf 'downlink\tAttach accept\n'
+                    printf 'downlink_hex\t%s\n' "$acc"
+                    [[ -n "$acc" ]] && printf 'downlink_octets\t%d\n' "$(( ${#acc} / 2 ))"
+                    printf 'next\tAuthentication request (needs an AUTN at a confirmed offset)\n'
+                    printf 'limit\t32_nas_signaling refuses AUTN because its position after RAND could not be confirmed, so this tree cannot continue the authentication exchange\n'
+                    latt_state_set state "$state" imsi "$imsi" \
+                        exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
+                else
+                    printf 'step\t%s\n' "$step"
+                    printf 'uplink\t%s\n' "$mname"
+                    printf 'state\t%s\n' "$state"
+                    printf 'note\tthe identity response carried no decodable IMSI\n'
+                fi ;;
+            ul:43)
+                state="registered"
+                printf 'step\t%s\n' "$step"
+                printf 'uplink\t%s\n' "$mname"
+                printf 'state\t%s\n' "$state"
+                printf 'next\tPDN connectivity request, then the ESM bearer handshake\n'
+                latt_state_set state "$state" ;;
+            dl:*)
+                printf 'step\t%s\n' "$step"
+                printf 'downlink\t%s\n' "$mname"
+                printf 'state\t%s\n' "$state"
+                printf 'note\tno answer: this side is the network\n' ;;
+            *)
+                printf 'step\t%s\n' "$step"
+                printf 'uplink\t%s\n' "$mname"
+                printf 'state\t%s\n' "$state"
+                printf 'downlink\tnone\n'
+                printf 'next\tno transition for 0x%s in this responder\n' "$mt"
+                printf 'limit\tthe responder answers the attach handshake only; every other procedure is decoded and left to the operator\n' ;;
+        esac
+    done < <([[ "$source" == "-" ]] && cat || cat -- "$source")
+
+    printf 'exchanges\t%s\n' "$step"
+    printf 'final_state\t%s\n' "$(latt_state_get state)"
+    [[ -n "$(latt_state_get imsi)" ]] && printf 'final_imsi\t%s\n' "$(latt_state_get imsi)"
+    return 0
 }
 
 latt_identity_count() {
@@ -1010,12 +1361,12 @@ latt_selftest() {
     # The same octets under an established context: security header 1 moves
     # into the HIGH nibble of octet 1, so the byte is 0x17 and the message
     # type stays at octet 2.
-    out=$(latt_parse_nas_header "17530001")
+    out=$(latt_parse_nas_header "17550001")
     chk hdr2-sh      "$(fld "$out" security_header)" "1"
     chk hdr2-sh-name "$(fld "$out" security_header_name)" "INTEGRITY PROTECTED"
     chk hdr2-plain   "$(fld "$out" plain)" "no"
-    chk hdr2-mt      "$(fld "$out" message_type)" "53"
-    out=$(latt_parse_nas_header "27530001")
+    chk hdr2-mt      "$(fld "$out" message_type)" "55"
+    out=$(latt_parse_nas_header "27550001")
     chk hdr3-sh      "$(fld "$out" security_header)" "2"
     chk hdr3-sh-name "$(fld "$out" security_header_name)" "INTEGRITY PROTECTED AND NEW EPS SECURITY CONTEXT"
 
@@ -1034,8 +1385,8 @@ latt_selftest() {
     chk hdr-oddlen   "$(latt_parse_nas_header 00074 >/dev/null 2>&1; echo $?)" "1"
 
     # ── 5. Identity exposure: the classic finding ───────────────────────
-    # 07 53 01 = plain NAS (SH 0) IDENTITY REQUEST asking for IMSI.
-    out=$(latt_identity_exposure "075301"); rc=$?
+    # 07 55 01 = plain NAS (SH 0) IDENTITY REQUEST asking for IMSI.
+    out=$(latt_identity_exposure "075501"); rc=$?
     chk exposure-rc         "$rc" "0"
     chk exposure-flag       "$(fld "$out" exposure)" "yes"
     chk exposure-type       "$(fld "$out" identity_type_name)" "IMSI"
@@ -1044,18 +1395,18 @@ latt_selftest() {
 
     # Same request, but under an established security context
     # (SH 1 = integrity protected) MUST NOT be flagged.
-    out=$(latt_identity_exposure "175301"); rc=$?
+    out=$(latt_identity_exposure "175501"); rc=$?
     chk protected-rc        "$rc" "0"
     chk protected-flag      "$(fld "$out" exposure)" "no"
     chk protected-severity  "$(fld "$out" severity)" "none"
     chk protected-sh        "$(fld "$out" security_header)" "1"
 
     # SH 2 (integrity protected + new EPS security context) likewise.
-    out=$(latt_identity_exposure "275301")
+    out=$(latt_identity_exposure "275501")
     chk protected2-flag     "$(fld "$out" exposure)" "no"
 
     # A plain IMEI request is still an exposure, but medium severity.
-    out=$(latt_identity_exposure "075302")
+    out=$(latt_identity_exposure "075502")
     chk exposure-imei-flag  "$(fld "$out" exposure)" "yes"
     chk exposure-imei-name  "$(fld "$out" identity_type_name)" "IMEI"
     chk exposure-imei-sev   "$(fld "$out" severity)" "medium"
@@ -1083,26 +1434,26 @@ latt_selftest() {
     # Authentication request: RAND(16) || AUTN(16), fixed by TS 33.401.
     local rand="000102030405060708090A0B0C0D0E0F"
     local autn="101112131415161718191A1B1C1D1E1F"
-    out=$(latt_decode_nas "074F${rand}${autn}")
+    out=$(latt_decode_nas "0752${rand}${autn}")
     chk dec-auth-mt   "$(fld "$out" message_name)" "AUTHENTICATION REQUEST"
     chk dec-auth-rand "$(fld "$out" rand)" "$rand"
     chk dec-auth-autn "$(fld "$out" autn)" "$autn"
     chk dec-auth-rlen "$(fld "$out" rand_len)" "16"
 
     # Authentication response carrying an 8-octet RES.
-    out=$(latt_decode_nas "0750A1A2A3A4A5A6A7A8")
+    out=$(latt_decode_nas "0753A1A2A3A4A5A6A7A8")
     chk dec-res     "$(fld "$out" res)" "A1A2A3A4A5A6A7A8"
     chk dec-res-len "$(fld "$out" res_len)" "8"
 
     # Security mode command: cipher 2 (128-EEA2), integrity 2 (128-EIA2),
     # i.e. octet 4 = 0x22.
-    out=$(latt_decode_nas "075522000000000000")
+    out=$(latt_decode_nas "075D22000000000000")
     chk dec-smc-cipher "$(fld "$out" selected_nas_cipher)" "2"
     chk dec-smc-integ  "$(fld "$out" selected_nas_integrity)" "2"
     chk dec-smc-mac    "$(fld "$out" nas_mac)" "00000000"
 
     # Security mode complete under integrity protection (SH 1).
-    out=$(latt_decode_nas "17561122334455")
+    out=$(latt_decode_nas "175E1122334455")
     chk dec-smc-done-mt  "$(fld "$out" message_name)" "SECURITY MODE COMPLETE"
     chk dec-smc-done-mac "$(fld "$out" nas_mac)" "11223344"
 
@@ -1112,13 +1463,13 @@ latt_selftest() {
     chk dec-detach-type "$(fld "$out" detach_type_name)" "EPS detach"
 
     # Identity response carrying an IMSI as EPS mobile identity.
-    out=$(latt_decode_nas "075408090113100521436587F9")
+    out=$(latt_decode_nas "075608090113100521436587F9")
     chk dec-idresp-mt   "$(fld "$out" message_name)" "IDENTITY RESPONSE"
     chk dec-idresp-type "$(fld "$out" mobile_identity_type)" "IMSI"
     chk dec-idresp-imsi "$(fld "$out" mobile_identity)" "310150123456789"
 
     # TAU request (0x47) uses the same leading octet layout as attach.
-    out=$(latt_decode_nas "0747E208090113100521436587F9")
+    out=$(latt_decode_nas "0748E208090113100521436587F9")
     chk dec-tau-mt   "$(fld "$out" message_name)" "TRACKING AREA UPDATE REQUEST"
     chk dec-tau-type "$(fld "$out" eps_attach_type_name)" "EPS attach"
 
@@ -1152,8 +1503,8 @@ latt_selftest() {
     chk cause-22  "$(latt_emm_cause_name 22)"  "Congestion"
     chk cause-unk "$(latt_emm_cause_name 200)" "unassigned"
     chk mt-41     "$(latt_msg_type_name 0x41)" "ATTACH REQUEST"
-    chk mt-53     "$(latt_msg_type_name 0x53)" "IDENTITY REQUEST"
-    chk mt-55     "$(latt_msg_type_name 0x55)" "SECURITY MODE COMMAND"
+    chk mt-55     "$(latt_msg_type_name 0x55)" "IDENTITY REQUEST"
+    chk mt-5d     "$(latt_msg_type_name 0x5d)" "SECURITY MODE COMMAND"
     chk mt-unk    "$(latt_msg_type_name 0xFE)" "unknown"
     chk idt-1     "$(latt_identity_type_name 1)" "IMSI"
     chk idt-5     "$(latt_identity_type_name 5)" "GUTI"
@@ -1198,7 +1549,7 @@ latt_selftest() {
     out=$(latt_cmd_encode_attach 310150123456789)
     chk v-att-rc   "$rc" "0"
     chk v-att-hex  "$(fld "$out" nas_hex)" "0741E208090113100521436587F9"
-    out=$(latt_cmd_decode_nas 075301)
+    out=$(latt_cmd_decode_nas 075501)
     chk v-dec-nas-mt "$(fld "$out" message_name)" "IDENTITY REQUEST"
 
     # ── 11. Identity store round-trip ───────────────────────────────────
@@ -1220,6 +1571,68 @@ latt_selftest() {
     chk san-cr  "$(latt_sanitize $'a\rb')" "a b"
 
     rm -rf "$d"
+    # ── the middle of an attach (R4) ───────────────────────────────────
+    # The message-type table is tshark's own ordering (TS 24.301 §9.8.1), and
+    # it used to be shifted by one from 0x4B upward: a TAU request read as a
+    # TAU accept and an identity response read as a security mode complete.
+    chk mt-0x41   "$(latt_msg_type_name 0x41)" "ATTACH REQUEST"
+    chk mt-0x48   "$(latt_msg_type_name 0x48)" "TRACKING AREA UPDATE REQUEST"
+    chk mt-0x4b   "$(latt_msg_type_name 0x4b)" "TRACKING AREA UPDATE REJECT"
+    chk mt-0x4f   "$(latt_msg_type_name 0x4f)" "SERVICE ACCEPT"
+    chk mt-0x55   "$(latt_msg_type_name 0x55)" "IDENTITY REQUEST"
+    chk mt-0x56   "$(latt_msg_type_name 0x56)" "IDENTITY RESPONSE"
+    chk mt-0x5d   "$(latt_msg_type_name 0x5d)" "SECURITY MODE COMMAND"
+    chk mt-0x5e   "$(latt_msg_type_name 0x5e)" "SECURITY MODE COMPLETE"
+    chk mt-0x47-unassigned "$(latt_msg_type_name 0x47)" "unassigned"
+
+    # The RRC container: build it, read it back, and check that the identity a
+    # UE states inside it comes out again.
+    local nas="0741E208090113100521436587F9"
+    local rrc rrc_rc
+    rrc=$(latt_cmd_setup_complete "$nas" 2>&1); rrc_rc=$?
+    chk rrc-build-rc "$rrc_rc" "0"
+    chk rrc-message "$(fld "$rrc" rrc_message)" "RRCConnectionSetupComplete"
+    chk rrc-plmn "$(fld "$rrc" selected_plmn_identity)" "1"
+    chk rrc-nas "$(fld "$rrc" dedicated_info_nas)" "$nas"
+    chk rrc-nas-octets "$(fld "$rrc" nas_octets)" "14"
+    local rrc_hex; rrc_hex=$(fld "$rrc" rrc_hex)
+    chk rrc-hex-envelope "$(printf '%s' "$rrc_hex" | cut -c1-2)" "20"
+    chk rrc-hex-octets "$(( ${#rrc_hex} / 2 ))" "$(fld "$rrc" octets)"
+
+    local back; back=$(latt_cmd_parse_setup_complete "$rrc_hex" 2>&1)
+    chk rrc-back-nas "$(fld "$back" dedicated_info_nas)" "$nas"
+    chk rrc-back-name "$(fld "$back" message_name)" "ATTACH REQUEST"
+    chk rrc-back-identity "$(fld "$back" identity)" "310150123456789"
+    chk rrc-back-stored "$(fld "$back" identity_stored)" "yes"
+    chk rrc-back-kind "$(fld "$back" identity_kind)" "IMSI"
+    chk rrc-refused-empty "$(latt_cmd_setup_complete "" >/dev/null 2>&1; echo $?)" "2"
+    chk rrc-refused-plmn "$(latt_cmd_setup_complete "$nas" --plmn 9 >/dev/null 2>&1; echo $?)" "2"
+    chk rrc-refused-hex "$(latt_cmd_setup_complete 741E2 >/dev/null 2>&1; echo $?)" "2"
+
+    # The responder holds the attach and answers with the network's next
+    # message; the IMSI it read is the handover R1/R2/R3 want.
+    local session; session=$(printf 'reset\nul 0741E208090113100521436587F9\nul 0743\n' | \
+        latt_cmd_nas_responder - 2>&1)
+    chk resp-ready "$(fld "$session" responder)" "ready"
+    chk resp-state "$(fld "$session" final_state)" "registered"
+    chk resp-imsi "$(fld "$session" final_imsi)" "310150123456789"
+    chk resp-exchanges "$(fld "$session" exchanges)" "2"
+    chk resp-accept "$(printf '%s\n' "$session" | awk -F'\t' '$1=="downlink_hex"{print $2; exit}')" \
+        "0742011E5407000100F1100001"
+    chk resp-accept-named "$(printf '%s\n' "$session" | awk -F'\t' '$1=="downlink"{print $2; exit}')" \
+        "Attach accept"
+    # The identity is already in the module's store, whatever the state said.
+    chk resp-identity-stored "$(grep -q "nas-responder" "$LATT_IDENT" && echo yes || echo no)" "yes"
+
+    # A GUTI attach names no subscriber: the responder asks, and the limit it
+    # states is the one that matters -- the IMSI is requested in the clear.
+    local guti_session; guti_session=$(printf 'reset\nul 0741E2080906000102E0A1B2C3D4\n' | \
+        latt_cmd_nas_responder - 2>&1)
+    chk resp-guti-asks "$(printf '%s\n' "$guti_session" | awk -F'\t' '$1=="downlink"{print $2; exit}')" \
+        "Identity request"
+    chk resp-guti-state "$(fld "$guti_session" final_state)" "identity-requested"
+    chk resp-guti-noimsi "$(fld "$guti_session" final_imsi)" ""
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1311,6 +1724,9 @@ latt_cli_main() {
         --imsi-encode)      latt_cmd_imsi_encode "${1:-}" ;;
         --imsi-decode)      latt_cmd_imsi_decode "${1:-}" ;;
         --identity-exposure) latt_cmd_identity_exposure "${1:-}" ;;
+        --setup-complete)   latt_cmd_setup_complete "$@" ;;
+        --parse-setup-complete) latt_cmd_parse_setup_complete "${1:-}" ;;
+        --nas-responder)    latt_cmd_nas_responder "${1:--}" ;;
         --ue-stack)         latt_require_ue_stack ;;
         --selftest)         latt_selftest ;;
         --menu)             latt_menu ;;
@@ -1321,6 +1737,16 @@ LTE Attach Forge — EPS Mobility Management encode and decode (TS 24.301)
 Usage: $0 COMMAND
   --status-tsv                 module state as TSV
   --decode-nas <hex>           parse an EMM message header and its IEs
+  --setup-complete <nas_hex> [--plmn n] [--tx n]
+                             the UE's RRCConnectionSetupComplete on UL-DCCH,
+                             carrying the first NAS PDU (TS 36.331 6.2.2)
+  --parse-setup-complete <rrc_hex>
+                             read that container back: the selected PLMN, the
+                             NAS PDU, and the identity the UE stated
+  --nas-responder [<file>]   hold the attach state: each "ul <hex>" line is a
+                             UE NAS PDU, and the answering lines carry the
+                             network's next message. State persists in
+                             $STATE_DIR/lte_attach/ue.tsv
   --encode-attach <IMSI> [CAPS_HEX] [ESM_HEX]
                                build a byte-exact Attach Request
   --imsi-encode <IMSI>         IMSI -> EPS mobile identity (BCD, TS 23.003)

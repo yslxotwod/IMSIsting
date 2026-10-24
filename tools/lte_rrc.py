@@ -94,6 +94,13 @@ TYPES = lte_rrc_layout.TYPES
 DL_DCCH_C1_INDEX = 4
 DL_DCCH_PREFIX = "0" + format(DL_DCCH_C1_INDEX, "04b")
 
+# The UE's answer to RRCConnectionSetup travels on UL-DCCH, whose c1 CHOICE has
+# rrcConnectionSetupComplete-r8 as its fifth alternative (index 4) in the
+# generated table (tools/lte_rrc_layout.py:71811).  The envelope is the same
+# shape as DL-DCCH's: one extension bit, then the four-bit index.
+UL_DCCH_SETUP_COMPLETE_INDEX = 4
+UL_DCCH_SETUP_COMPLETE_PREFIX = "0" + format(UL_DCCH_SETUP_COMPLETE_INDEX, "04b")
+
 
 class Refused(ValueError):
     """A value this builder will not encode, because encoding it would lie."""
@@ -214,6 +221,34 @@ VIEWS = {
         "securityConfigHO": REF("SecurityConfigHO"),
     }),
 
+    # -- the first message a UE ever sends on the RRC connection: the identity
+    #    it selected and, inside dedicatedInfoNAS, the first NAS PDU.  This is
+    #    the door the rest of the attach walks through --
+    "RRCConnectionSetupComplete": SEQ({
+        "rrc-TransactionIdentifier": REF("RRC_TransactionIdentifier"),
+        "criticalExtensions": CH({
+            "c1": CH({
+                "rrcConnectionSetupComplete-r8": REF("RRCConnectionSetupComplete_r8_IEs"),
+            }),
+        }),
+    }),
+    "RRCConnectionSetupComplete_r8_IEs": SEQ({
+        "selectedPLMN-Identity": INT,
+        "registeredMME": REF("RegisteredMME"),
+        "dedicatedInfoNAS": REF("DedicatedInfoNAS"),
+        "nonCriticalExtension": REF("RRCConnectionSetupComplete_v8a0_IEs"),
+    }),
+    "RegisteredMME": SEQ({
+        "plmn-Identity": REF("PLMN_Identity"),
+        "mmegi": BITS,
+        "mmec": REF("MMEC"),
+    }),
+    "PLMN_Identity": SEQ({
+        "mcc": LIST(INT),
+        "mnc": LIST(INT),
+    }),
+    "DedicatedInfoNAS": OCTETS,
+    "MMEC": BITS,
     "HandoverCommand": SEQ({
         "criticalExtensions": CH({
             "c1": CH({
@@ -1537,6 +1572,50 @@ def cmd_handover_command(args):
     return _emit(args, "HandoverCommand", handover_command(inner))
 
 
+def _ul_dcch_setup_complete(value):
+    """Put a Setup Complete where TS 36.331 10.5 wants it: inside a UL-DCCH.
+
+    Same shape as `_wrap_dl_dcch`: the true bit string is envelope + body, and
+    only the transport pads it to octets, so the padding is reported rather
+    than hidden.
+    """
+    bits = CODEC.encode_bits("RRCConnectionSetupComplete", value)
+    return UL_DCCH_SETUP_COMPLETE_PREFIX, bits
+
+
+def cmd_setup_complete(args):
+    nas = args.nas
+    value = build("RRCConnectionSetupComplete", {
+        "rrc-TransactionIdentifier": args.tx,
+        "criticalExtensions": {"c1": {"rrcConnectionSetupComplete-r8": {
+            "selectedPLMN-Identity": args.plmn,
+            "dedicatedInfoNAS": nas,
+        }}},
+    })
+    prefix, body = _ul_dcch_setup_complete(value)
+    whole = prefix + body
+    padded = whole + "0" * (-len(whole) % 8)
+    octets = bytes(int(padded[i:i + 8], 2) for i in range(0, len(padded), 8))
+    if args.bits:
+        print(whole)
+    if args.hex:
+        print(octets.hex())
+    if args.bitlen:
+        print(len(whole))
+    if args.value:
+        print(json.dumps(_render(value), indent=2, sort_keys=True))
+    if args.bits or args.hex or args.bitlen or args.value:
+        return 0
+    print("type      RRCConnectionSetupComplete")
+    print("envelope  UL-DCCH-Message/c1/rrcConnectionSetupComplete-r8 (%s)"
+          % UL_DCCH_SETUP_COMPLETE_PREFIX)
+    print("bitlen    %d%s" % (len(whole), "" if len(padded) == len(whole)
+                              else "  (%d pad bits to octets)" % (len(padded) - len(whole))))
+    print("octets    %d" % len(octets))
+    print("hex       %s" % octets.hex())
+    return 0
+
+
 def cmd_template(args):
     inner = reconfiguration_case(args.case)
     if args.message == "handover-command":
@@ -1576,6 +1655,27 @@ def cmd_decode(args):
         print("type      RRCConnectionReconfiguration")
         print("bitlen    %d%s" % (n, "" if n == len(bits) else
                                   "  (of %d bits given)" % len(bits)))
+        print(json.dumps(_render(value), indent=2, sort_keys=True))
+        return 0
+
+    if args.type == "setup-complete":
+        if not bits.startswith(UL_DCCH_SETUP_COMPLETE_PREFIX):
+            raise Refused("the container is not a UL-DCCH-Message carrying "
+                          "rrcConnectionSetupComplete (prefix %s, got %s)"
+                          % (UL_DCCH_SETUP_COMPLETE_PREFIX, bits[:5]))
+        value, n = decode_bits("RRCConnectionSetupComplete",
+                               bits[len(UL_DCCH_SETUP_COMPLETE_PREFIX):])
+        print("type      RRCConnectionSetupComplete")
+        print("envelope  UL-DCCH-Message/c1/rrcConnectionSetupComplete-r8 (%s)"
+              % UL_DCCH_SETUP_COMPLETE_PREFIX)
+        print("bitlen    %d%s" % (n + len(UL_DCCH_SETUP_COMPLETE_PREFIX),
+                                  "" if n + len(UL_DCCH_SETUP_COMPLETE_PREFIX) == len(bits)
+                                  else "  (of %d bits given)" % len(bits)))
+        nas = value["criticalExtensions"][1][1].get("dedicatedInfoNAS", b"")
+        print("plmn      %s" % value["criticalExtensions"][1][1]
+              .get("selectedPLMN-Identity"))
+        print("nas_octets %d" % len(nas))
+        print("nas_hex   %s" % bytes(nas).hex())
         print(json.dumps(_render(value), indent=2, sort_keys=True))
         return 0
 
@@ -1675,7 +1775,19 @@ def main(argv):
 
     d = sub.add_parser("decode", help="decode a message, and for a handover command "
                                       "the reconfiguration in its container")
-    d.add_argument("--type", choices=("reconfiguration", "handover-command"),
+    s2 = sub.add_parser("setup-complete",
+                        help="build the UE's RRCConnectionSetupComplete on UL-DCCH, "
+                             "carrying the first NAS PDU")
+    s2.add_argument("--nas", required=True, metavar="HEX",
+                    help="the NAS PDU as hex (dedicatedInfoNAS)")
+    s2.add_argument("--plmn", type=int, default=1, metavar="N",
+                    help="selectedPLMN-Identity, 1..maxPLMN (default 1)")
+    s2.add_argument("--tx", type=int, default=0, metavar="N",
+                    help="rrc-TransactionIdentifier (0..3)")
+    _add_emit_flags(s2)
+    s2.set_defaults(func=cmd_setup_complete)
+
+    d.add_argument("--type", choices=("reconfiguration", "handover-command", "setup-complete"),
                    required=True)
     d.add_argument("--hex", required=True, help="the encoding, as hex")
     d.add_argument("--bits", type=int, default=None,

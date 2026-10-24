@@ -30,7 +30,7 @@ python3 - /tmp/imsisting-tui-check.typescript <<'PY'
 from pathlib import Path
 import sys
 text=Path(sys.argv[1]).read_text(errors='replace')
-for token in ('FIELD OPERATIONS CONSOLE','MODULE INDEX','MODULE BRIEF','SEARCH'):
+for token in ('IMSISTING', 'CATEGORIES', 'MODULES', 'SEARCH'):
     assert token in text, f'missing dashboard element: {token}'
 assert '\x1b[?1049h' in text, 'curses alternate screen not activated'
 print('TUI pseudo-terminal render: PASS')

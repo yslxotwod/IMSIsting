@@ -59,6 +59,16 @@ CASES = [
     ("eps-smc", "eps", "security-mode-command",
      ["--algorithms", "2", "2", "--ksi", "3"],
      {"msg_hex": "0x5d", "ksi": "3"}),
+    # The accept side of the attach handshake, which the responder answers
+    # with.  tshark has to read them as accepts, not as the rejects above.
+    ("eps-attach-accept", "eps", "attach-accept", [],
+     {"msg_hex": "0x42"}),
+    ("eps-tau-accept", "eps", "tau-accept", [],
+     {"msg_hex": "0x49"}),
+    ("eps-service-accept", "eps", "service-accept", [],
+     {"msg_hex": "0x4f"}),
+    ("eps-detach-accept", "eps", "detach-accept", [],
+     {"msg_hex": "0x46"}),
 ]
 
 UNVERIFIED_5GS = [

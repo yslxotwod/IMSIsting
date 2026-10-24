@@ -387,7 +387,9 @@ struct _AppState {
     /* The Stats tiles' value labels. The counts they show describe a
        filesystem that modules keep writing to while the app runs, so they are
        recomputed when the tab is opened rather than frozen at startup. */
-    GtkWidget *stat_selftests, *stat_loot_dirs, *stat_loot_files, *stat_offline;
+    GtkWidget *stat_loot_files;
+    GtkWidget *stat_modules, *stat_scripts, *stat_empty, *stat_presses, *stat_cold;
+    GtkWidget *stat_fleet_body, *stat_module_body;  /* the two index cards */
     guint      status_source;
 
     /* Sidebar active state. Each category is its own GtkListBox, so selection
@@ -2445,6 +2447,21 @@ module_id_words(const char *tok)
  * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
  */
 static const char *const plain_keys[] = {
+    "dedicated_info_nas\tdedicated info nas",
+    "downlink\tdownlink",
+    "downlink_hex\tdownlink hex",
+    "downlink_octets\tdownlink octets",
+    "exchanges\texchanges",
+    "final_imsi\tfinal imsi",
+    "final_state\tfinal state",
+    "identity_kind\tidentity kind",
+    "identity_stored\tidentity stored",
+    "nas_octets\tnas octets",
+    "responder\tresponder",
+    "rrc_bitlen\trrc bitlen",
+    "rrc_transaction_identifier\trrc transaction identifier",
+    "selected_plmn_identity\tselected plmn identity",
+    "uplink\tuplink",
     "a1_not_tls\ta1 not tls",
     "a5_1\ta5 1",
     "a5_1_after\ta5 1 after",
@@ -13202,6 +13219,198 @@ stat_bar_row(const char *label, guint n, guint max)
     return row;
 }
 
+/* ── The stats index ──────────────────────────────────────────────────
+   Every number on this page beyond the static table comes from one TSV that
+   tools/stats_index.py writes: scope, module, key, label, value, unit, source.
+   Two things make that file worth having. Each row names the artifact it was
+   read from, so the page prints the provenance beside the number instead of
+   asking the reader to trust it; and a module that cannot answer from its own
+   loot store contributes nothing at all, rather than a zero dressed up as a
+   measurement.
+
+   The tool answers in about a third of a second, so the page rebuilds it on
+   every visit. A cached index would be a number from an older session wearing
+   today's date. */
+
+typedef struct {
+    char *module, *key, *label, *value, *unit, *source;
+    gboolean fleet;
+} StatRow;
+
+static void
+stat_row_free(gpointer data)
+{
+    StatRow *row = data;
+
+    if (row == NULL) return;
+    g_free(row->module); g_free(row->key);   g_free(row->label);
+    g_free(row->value);  g_free(row->unit);  g_free(row->source);
+    g_free(row);
+}
+
+static char *
+stats_index_path(void)
+{
+    return g_build_filename(IMSISTING_ROOT, "loot", "stats", "index.tsv", NULL);
+}
+
+/* Rebuild the index. A failure is not something the operator can act on, so
+   the page simply draws without the index cards rather than inventing rows. */
+static void
+stats_index_rebuild(void)
+{
+    g_autofree char *tool = g_build_filename(IMSISTING_ROOT, "tools", "stats_index.py", NULL);
+    g_autofree char *rootarg = g_strdup_printf("--root=%s", IMSISTING_ROOT);
+    /* Resolved here rather than trusted to PATH: g_spawn_sync only searches
+       PATH when asked, and a spawn that silently finds nothing looks exactly
+       like a page with no numbers. */
+    g_autofree char *python = g_find_program_in_path("python3");
+    const char *argv[] = { python != NULL ? python : "python3", tool, rootarg, NULL };
+
+    if (!g_file_test(tool, G_FILE_TEST_EXISTS)) return;
+    g_spawn_sync(NULL, (char **) argv, NULL,
+                 G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL |
+                 G_SPAWN_SEARCH_PATH,
+                 NULL, NULL, NULL, NULL, NULL, NULL);
+}
+
+static GPtrArray *
+stats_index_rows(void)
+{
+    g_autofree char *path = stats_index_path();
+    g_autofree char *contents = NULL;
+    GPtrArray *rows = g_ptr_array_new_with_free_func(stat_row_free);
+
+    if (!g_file_get_contents(path, &contents, NULL, NULL)) return rows;
+    g_auto(GStrv) lines = g_strsplit(contents, "\n", -1);
+
+    for (int i = 1; lines[i] != NULL; i++) {
+        g_auto(GStrv) f = NULL;
+        StatRow *row;
+
+        if (*lines[i] == '\0') continue;
+        f = g_strsplit(lines[i], "\t", 8);
+        if (g_strv_length(f) < 7) continue;
+        row = g_new0(StatRow, 1);
+        row->fleet  = g_strcmp0(f[0], "fleet") == 0;
+        row->module = g_strdup(f[1]);
+        row->key    = g_strdup(f[2]);
+        row->label  = g_strdup(f[3]);
+        row->value  = g_strdup(f[4]);
+        row->unit   = g_strdup(f[5]);
+        row->source = g_strdup(f[6]);
+        g_ptr_array_add(rows, row);
+    }
+    return rows;
+}
+
+static const char *
+stats_value(GPtrArray *rows, const char *key, const char *fallback)
+{
+    for (guint i = 0; i < rows->len; i++) {
+        StatRow *row = g_ptr_array_index(rows, i);
+
+        if (row->fleet && g_strcmp0(row->key, key) == 0 && *row->value != '\0')
+            return row->value;
+    }
+    return fallback;
+}
+
+/* label — value — source. The source is dim monospace because it answers
+   "where did that come from", which is a question to be settled once, not read
+   every visit. */
+static GtkWidget *
+stat_metric_row(const char *label, const char *value, const char *unit,
+                const char *source)
+{
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *l = gtk_label_new(label);
+    GtkWidget *v = gtk_label_new(NULL);
+    GtkWidget *s = gtk_label_new(source);
+    g_autofree char *joined = (unit != NULL && *unit != '\0')
+                              ? g_strdup_printf("%s %s", value, unit)
+                              : g_strdup(value);
+
+    gtk_widget_add_css_class(l, "stat-row-label");
+    gtk_label_set_xalign(GTK_LABEL(l), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(l), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_size_request(l, 268, -1);
+
+    gtk_widget_add_css_class(v, "mono");
+    gtk_label_set_text(GTK_LABEL(v), joined);
+    gtk_label_set_xalign(GTK_LABEL(v), 1.0f);
+    gtk_widget_set_size_request(v, 120, -1);
+
+    gtk_widget_add_css_class(s, "mono");
+    gtk_widget_add_css_class(s, "dim");
+    gtk_label_set_xalign(GTK_LABEL(s), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(s), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_widget_set_hexpand(s, TRUE);
+    gtk_widget_set_tooltip_text(s, source);
+
+    gtk_box_append(GTK_BOX(row), l);
+    gtk_box_append(GTK_BOX(row), v);
+    gtk_box_append(GTK_BOX(row), s);
+    return row;
+}
+
+/* Empty a card body so a refresh redraws it instead of stacking a second copy
+   of every row under the first. */
+static void
+stat_card_clear(GtkWidget *body)
+{
+    GtkWidget *child;
+
+    if (body == NULL) return;
+    while ((child = gtk_widget_get_first_child(body)) != NULL)
+        gtk_box_remove(GTK_BOX(body), child);
+}
+
+/* The fleet card is a short list on purpose. Tiles already carry the headline
+   counts, so this card answers the questions the tiles raise: how big the loot
+   is, how much of it is idle, what the case holds, and how much capture data
+   exists. Everything else the index computes stays in the file for whoever
+   wants it, not on the page. */
+static void
+stat_card_fill_fleet(GtkWidget *body, GPtrArray *rows)
+{
+    static const char *shown[] = {
+        "loot_files", "loot_bytes", "empty_shelves", "presses", "cold_modules",
+        "cases", "timeline", "captures",
+    };
+
+    if (body == NULL) return;
+    stat_card_clear(body);
+    for (guint k = 0; k < G_N_ELEMENTS(shown); k++) {
+        for (guint i = 0; i < rows->len; i++) {
+            StatRow *row = g_ptr_array_index(rows, i);
+
+            if (!row->fleet || g_strcmp0(row->key, shown[k]) != 0) continue;
+            gtk_box_append(GTK_BOX(body),
+                           stat_metric_row(row->label, row->value, row->unit, row->source));
+            break;
+        }
+    }
+}
+
+static void
+stat_card_fill_modules(GtkWidget *body, GPtrArray *rows)
+{
+    if (body == NULL) return;
+    stat_card_clear(body);
+    for (guint i = 0; i < rows->len; i++) {
+        StatRow *row = g_ptr_array_index(rows, i);
+        const ModuleDefinition *def;
+        g_autofree char *label = NULL;
+
+        if (row->fleet) continue;
+        def = dashboard_module(row->module);
+        label = g_strdup_printf("%s · %s", def != NULL ? def->name : row->module, row->label);
+        gtk_box_append(GTK_BOX(body),
+                       stat_metric_row(label, row->value, row->unit, row->source));
+    }
+}
+
 /* The counts behind the Stats tiles. Recomputed on every visit, because loot
    is written by modules while the app runs and a frozen number is worse than
    no number at all. */
@@ -13234,11 +13443,13 @@ stats_counts(guint *selftests, guint *loot_dirs, guint *loot_files, guint *offli
     *offline    = off;
 }
 
+/* The tiles read text, not integers: an index row carries units and ratios,
+   and NULL leaves a tile alone rather than blanking a number that is still
+   true. */
 static void
-stat_set(GtkWidget *label, guint n)
+stat_set_text(GtkWidget *label, const char *text)
 {
-    g_autofree char *v = g_strdup_printf("%u", n);
-    if (label != NULL) gtk_label_set_text(GTK_LABEL(label), v);
+    if (label != NULL && text != NULL) gtk_label_set_text(GTK_LABEL(label), text);
 }
 
 static GtkWidget *
@@ -13268,36 +13479,66 @@ create_stats_page(AppState *state)
                             GINT_TO_POINTER(GPOINTER_TO_INT(v) + 1));
     }
     stats_counts(&selftests, &loot_dirs, &loot_files, &offline);
+    stats_index_rebuild();
+    g_autoptr(GPtrArray) index = stats_index_rows();
+    g_autofree char *v_modules = g_strdup(stats_value(index, "modules", NULL));
+    g_autofree char *v_scripts = g_strdup(stats_value(index, "installed", NULL));
 
     {
         g_autofree char *v = g_strdup_printf("%d", N_MODULES);
-        gtk_box_append(GTK_BOX(tiles), stat_tile(v, "MODULES"));
-    }
-    {
-        g_autofree char *v = g_strdup_printf("%u", selftests);
-        GtkWidget *t = stat_tile(v, "WITH SELFTEST");
-        state->stat_selftests = gtk_widget_get_first_child(t);
+        GtkWidget *t = stat_tile(v_modules ? v_modules : v, "MODULES");
+        state->stat_modules = gtk_widget_get_first_child(t);
         gtk_box_append(GTK_BOX(tiles), t);
     }
     {
-        g_autofree char *v = g_strdup_printf("%u", loot_dirs);
-        GtkWidget *t = stat_tile(v, "LOOT DIRS");
-        state->stat_loot_dirs = gtk_widget_get_first_child(t);
+        g_autofree char *v = g_strdup_printf("%u", selftests);
+        GtkWidget *t = stat_tile(v_scripts ? v_scripts : v, "SCRIPTS PRESENT");
+        state->stat_scripts = gtk_widget_get_first_child(t);
         gtk_box_append(GTK_BOX(tiles), t);
     }
     {
         g_autofree char *v = g_strdup_printf("%u", loot_files);
-        GtkWidget *t = stat_tile(v, "LOOT FILES");
+        GtkWidget *t = stat_tile(stats_value(index, "loot_files", v), "LOOT FILES");
         state->stat_loot_files = gtk_widget_get_first_child(t);
         gtk_box_append(GTK_BOX(tiles), t);
     }
     {
+        g_autofree char *v = g_strdup_printf("%u", loot_dirs);
+        GtkWidget *t = stat_tile(stats_value(index, "empty_shelves", v), "EMPTY SHELVES");
+        state->stat_empty = gtk_widget_get_first_child(t);
+        gtk_box_append(GTK_BOX(tiles), t);
+    }
+    {
+        g_autofree char *v = g_strdup_printf("%u", selftests);
+        GtkWidget *t = stat_tile(stats_value(index, "presses", v), "RUNS RECORDED");
+        state->stat_presses = gtk_widget_get_first_child(t);
+        gtk_box_append(GTK_BOX(tiles), t);
+    }
+    {
         g_autofree char *v = g_strdup_printf("%u", offline);
-        GtkWidget *t = stat_tile(v, "OFFLINE");
-        state->stat_offline = gtk_widget_get_first_child(t);
+        GtkWidget *t = stat_tile(stats_value(index, "cold_modules", v), "NEVER PRESSED");
+        state->stat_cold = gtk_widget_get_first_child(t);
         gtk_box_append(GTK_BOX(tiles), t);
     }
     gtk_box_append(GTK_BOX(inner), tiles);
+
+    /* ---- the fleet, then every module's own number ---- */
+    {
+        GtkWidget *body;
+        GtkWidget *card = verb_card("THE FLEET", &body);
+
+        state->stat_fleet_body = body;
+        stat_card_fill_fleet(body, index);
+        gtk_box_append(GTK_BOX(inner), card);
+    }
+    {
+        GtkWidget *body;
+        GtkWidget *card = verb_card("BY MODULE", &body);
+
+        state->stat_module_body = body;
+        stat_card_fill_modules(body, index);
+        gtk_box_append(GTK_BOX(inner), card);
+    }
 
     /* ---- by category ---- */
     {
@@ -13472,17 +13713,36 @@ create_notifications_page(AppState *state)
 
 /* Recount the tiles when the page is opened. Counting is cheap (56 stat calls
    plus a walk of loot/) and the alternative — numbers from launch time — is
-   actively misleading once a module has run. */
+   actively misleading once a module has run. The index is rebuilt first for the
+   same reason: a run that just finished changed what the modules can report. */
 static void
 stats_refresh(AppState *state)
-{    guint selftests = 0, loot_dirs = 0, loot_files = 0, offline = 0;
+{
+    guint selftests = 0, loot_dirs = 0, loot_files = 0, offline = 0;
+    g_autofree char *fallback_selftest = NULL;
+    g_autofree char *fallback_loot = NULL;
+    g_autofree char *fallback_dirs = NULL;
+    g_autofree char *fallback_offline = NULL;
+    g_autoptr(GPtrArray) index = NULL;
 
     stats_counts(&selftests, &loot_dirs, &loot_files, &offline);
-    stat_set(state->stat_selftests, selftests);
-    stat_set(state->stat_loot_dirs, loot_dirs);
-    stat_set(state->stat_loot_files, loot_files);
-    stat_set(state->stat_offline, offline);
+    stats_index_rebuild();
+    index = stats_index_rows();
+    fallback_selftest = g_strdup_printf("%u", selftests);
+    fallback_loot = g_strdup_printf("%u", loot_files);
+    fallback_dirs = g_strdup_printf("%u", loot_dirs);
+    fallback_offline = g_strdup_printf("%u", offline);
+
+    stat_set_text(state->stat_modules, stats_value(index, "modules", NULL));
+    stat_set_text(state->stat_scripts, stats_value(index, "installed", fallback_selftest));
+    stat_set_text(state->stat_loot_files, stats_value(index, "loot_files", fallback_loot));
+    stat_set_text(state->stat_empty, stats_value(index, "empty_shelves", fallback_dirs));
+    stat_set_text(state->stat_presses, stats_value(index, "presses", fallback_selftest));
+    stat_set_text(state->stat_cold, stats_value(index, "cold_modules", fallback_offline));
+    stat_card_fill_fleet(state->stat_fleet_body, index);
+    stat_card_fill_modules(state->stat_module_body, index);
 }
+
 /* The Help page lives in its own translation unit, native/src/help_page.c.
    It used to be a single string here, rendered through text_page(): one
    79-line scroll, so the answer to "where does loot/ go" and the answer to
@@ -19645,7 +19905,7 @@ deps_build_packages(AppState *state, const char *module_id,
    buttons. Spec syntax is documented on ModuleSubmenuEntry above. */
 
 static ModuleSubmenuEntry deps_entries[] = {
-    { "The first question",
+    { "Overview",
       "dialog-information-symbolic",
       /* Split into a CHECK card and an INSTALL card: looking is safe and
          installing is privileged, and the page should say so rather than
@@ -20048,7 +20308,7 @@ radio_build_diagnostics(AppState *state, const char *module_id,
 }
 
 static ModuleSubmenuEntry radio_entries[] = {
-    { "The first question",
+    { "Overview",
       "dialog-information-symbolic",
       NULL,
       radio_build_bench },
@@ -20419,7 +20679,7 @@ static ModuleSubmenuEntry crec_entries[] = {
        network, and how do I get the data out. The Overview splits into a
        CONTROLS card and a SURVEY card, the shape wifisting uses for
        "start it" versus "read the result". */
-    { "The first question",
+    { "Overview",
       "dialog-information-symbolic",
       NULL,
       crec_build_overview },
@@ -22214,9 +22474,78 @@ latt_build_identity(AppState *state, const char *module_id,
     return outer;
 }
 
+/* The middle of an attach: the RRC message that carries the first NAS PDU, and
+   the responder that keeps answering it. A handset that never gets this far
+   hands over nothing, so this page is the door the identity work walks through.
+   The responder page takes no input of its own: it reads UL/DL lines from the
+   answer surface's companion console and holds its state in the tree. */
+static GtkWidget *
+latt_build_middle(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *av_view = NULL;
+    GtkWidget *av_col = answer_view_new(state, &av_view);
+    GtkWidget *outer = radio_view_shell("THE MIDDLE OF AN ATTACH",
+        "The UE's RRCConnectionSetupComplete carries its first NAS message, and "
+        "the responder keeps the conversation alive long enough to read it.", &body);
+    GtkWidget *build_body, *read_body, *respond_body;
+    GtkWidget *build = verb_card("BUILD THE CONTAINER", &build_body);
+    GtkWidget *read = verb_card("READ THE CONTAINER", &read_body);
+    GtkWidget *respond = verb_card("HOLD THE CONVERSATION", &respond_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin_answer(av_view);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Wrap the NAS Message",
+                "--setup-complete", "0741E208090113100521436587F9",
+                "An uplink NAS message as hex. The answer is the UL-DCCH "
+                "container a handset sends on RRCConnectionSetupComplete, with "
+                "the selected PLMN and the NAS inside it."));
+            }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(read_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Container",
+                "--parse-setup-complete", "20001C0E83C410120200020200000001E2",
+                "The container as hex. The answer names the PLMN, the NAS "
+                "message type and, where the UE stated one, the identity it "
+                "gave - which is the moment a subscriber names itself."));
+            }
+    gtk_box_append(GTK_BOX(body), read);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(respond_body),
+            mod_arg_row(state, module_id, status, "Answer the Attach",
+                "--nas-responder", "",
+                "Reads uplink NAS lines from stdin and answers with the "
+                "network's next message, holding the state between them."));
+            }
+    gtk_box_append(GTK_BOX(respond_body), fkit_note(
+        "The responder builds only what this tree can encode honestly: the "
+        "identity request, the accept and the detach answer. Where a real "
+        "network would continue into authentication, the answer names the "
+        "message and why the bytes stop here."));
+    gtk_box_append(GTK_BOX(body), respond);
+    gtk_box_append(GTK_BOX(body), av_col);
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry latt_entries[] = {
     { "Attach flow", "dialog-information-symbolic", NULL, latt_build_attach },
     { "Identity", "auth-smartcard-symbolic", NULL, latt_build_identity },
+    { "Attach middle", "network-transmit-receive-symbolic", NULL, latt_build_middle },
 };
 /* 10_lte_air — the LTE air interface and the eNB a lab runs against it.
  *

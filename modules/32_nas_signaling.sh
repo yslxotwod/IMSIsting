@@ -1089,6 +1089,10 @@ nasf_cmd_transmit() {
 
 nasf_eps_type() {  # <name> -> message type as two hex digits
     case "${1:-}" in
+        attach-accept)          printf '42' ;;
+        detach-accept)          printf '46' ;;
+        tau-accept)             printf '49' ;;
+        service-accept)         printf '4F' ;;
         attach-reject)          printf '44' ;;
         tau-reject)             printf '4B' ;;
         service-reject)         printf '4E' ;;
@@ -1116,7 +1120,7 @@ nasf_5gs_type() {  # <name> -> message type as two hex digits
     esac
 }
 
-nasf_eps_messages()  { printf 'attach-reject tau-reject service-reject identity-request auth-request auth-reject auth-failure security-mode-command security-mode-reject'; }
+nasf_eps_messages()  { printf 'attach-accept detach-accept tau-accept service-accept attach-reject tau-reject service-reject identity-request auth-request auth-reject auth-failure security-mode-command security-mode-reject'; }
 nasf_5gs_messages()  { printf 'registration-reject service-reject identity-request auth-request auth-reject auth-failure security-mode-command security-mode-reject'; }
 
 # Identity type octets. EPS values from Wireshark 4.2.2 (`nas-eps.emm.id_type2`:
@@ -1147,16 +1151,73 @@ nasf_identity_code() {  # <gen> <name> -> octet
     esac
 }
 
+# EPS attach result (TS 24.301 §9.9.3.10) and EPS update result (§9.9.3.13).
+nasf_attach_result_name() {
+    case "${1:-}" in
+        0) printf 'reserved' ;;
+        1) printf 'EPS only' ;;
+        2) printf 'combined EPS/IMSI' ;;
+        *) printf 'reserved' ;;
+    esac
+}
+
+nasf_tau_result_name() {
+    case "${1:-}" in
+        0) printf 'TA updated' ;;
+        1) printf 'TA updated, ISR activated' ;;
+        *) printf 'reserved' ;;
+    esac
+}
+
+# PLMN identity, BCD, as TS 23.003 §2.2 orders it and both the TAI list and
+# the EPS mobile identity use it: octet 1 = MCC2|MCC1, octet 2 = MNC3|MCC3
+# (MNC3 is F for a two-digit MNC), octet 3 = MNC2|MNC1.  The octet order is
+# asserted in --selftest against `43_ran_share --plmn-encode`, which is the
+# module that owns PLMN coding.
+nasf_plmn_bcd() {  # <mcc 3 digits> <mnc 2 or 3 digits>
+    local mcc="${1:-}" mnc="${2:-}"
+    [[ "$mcc" =~ ^[0-9]{3}$ ]] || { printf 'ERROR\tMCC must be 3 digits\n' >&2; return 1; }
+    [[ "$mnc" =~ ^[0-9]{2,3}$ ]] || { printf 'ERROR\tMNC must be 2 or 3 digits\n' >&2; return 1; }
+    local o1 o2 o3
+    o1=$(( (10#${mcc:1:1} << 4) | 10#${mcc:0:1} ))
+    if (( ${#mnc} == 3 )); then
+        o2=$(( (10#${mnc:2:1} << 4) | 10#${mcc:2:1} ))
+    else
+        o2=$(( (0xF << 4) | 10#${mcc:2:1} ))
+    fi
+    o3=$(( (10#${mnc:1:1} << 4) | 10#${mnc:0:1} ))
+    printf '%02X%02X%02X' "$o1" "$o2" "$o3"
+}
+
+# TAI list IE (type 4, TLV, IEI 0x54) carrying one TAI.  Value part: the
+# list-type octet (spare + 3-bit type; 000 is a partial list), the TAI count,
+# then each TAI as a 3-octet BCD PLMN and a 2-octet TAC.
+nasf_tai_list() {  # <plmn 5 or 6 digits> <tac 4 hex>
+    local plmn="${1:-00101}" tac="${2:-0001}"
+    [[ "$plmn" =~ ^[0-9]{5,6}$ ]] || {
+        printf 'ERROR\t--tai wants a 5- or 6-digit PLMN (MCC + MNC), got %s\n' "$(nasf_sanitize "$plmn")" >&2; return 1; }
+    [[ "$tac" =~ ^[0-9A-Fa-f]{4}$ ]] || {
+        printf 'ERROR\t--tac wants 4 hex digits, got %s\n' "$(nasf_sanitize "$tac")" >&2; return 1; }
+    local bcd; bcd=$(nasf_plmn_bcd "${plmn:0:3}" "${plmn:3}") || return 1
+    # The value part is 7 octets: list type, count, PLMN (3), TAC (2).
+    printf '5407%s%02X%s%s' "00" 1 "$bcd" "${tac^^}"
+}
+
 nasf_hexlen() { printf '%d' "$(( ${#1} / 2 ))"; }
 
 # nasf_build <gen> <message> [flags] -> TSV on stdout
 nasf_build() {
     local gen="${1:-eps}" msg="${2:-}"; shift 2 2>/dev/null || { shift; }
     local cause="" ident="" rand="" autn="" auts="" eea="" eia="" ksi="0" ksitype="0" out=""
+    local accept_result="" tai_plmn="00101" tac="0001" t3412="1E"
     while (( $# > 0 )); do
         local flag="$1"
         case "$flag" in
             --cause)        cause="${2:-}";  shift 2 ;;
+            --result)       accept_result="${2:-}"; shift 2 ;;
+            --tai)          tai_plmn="${2:-}"; shift 2 ;;
+            --tac)          tac="${2:-}";    shift 2 ;;
+            --t3412)        t3412="${2:-}";  shift 2 ;;
             --identity)     ident="${2:-}";  shift 2 ;;
             --rand)         rand="${2:-}";   shift 2 ;;
             --autn)         autn="${2:-}";   shift 2 ;;
@@ -1255,6 +1316,46 @@ nasf_build() {
                 (( $(nasf_hexlen "$s") == 14 )) || { printf 'ERROR\t--auts must be 14 octets (28 hex digits); got %d\n' "$(nasf_hexlen "$s")" >&2; return 2; }
                 hex+="${s^^}"
                 fields+=" auts_octets=14"
+            fi
+            ;;
+        attach-accept|tau-accept)
+            # Mandatory IEs only, in the order TS 24.301 §8.2.1.2 / §8.2.2.2
+            # puts them: the result (type 1, TV), the T3412 timer (type 3, TV)
+            # and the TAI list (type 4, TLV).  The ESM message container is
+            # what carries the default bearer, and no activate-default-bearer
+            # request is built here yet, so the accept stops before it and the
+            # limitation is stated rather than papered over.
+            local result="${accept_result:-}"
+            if [[ "$msg" == "attach-accept" ]]; then
+                [[ -n "$result" ]] || result=1
+                [[ "$result" =~ ^[0-9]+$ ]] && (( result >= 0 && result <= 7 )) || {
+                    printf 'ERROR\t--result must be 0..7 (1 = EPS only)\n' >&2; return 2; }
+                hex+=$(nasf_byte "$result")
+                fields="attach_result=$result ($(nasf_attach_result_name "$result"))"
+            else
+                [[ -n "$result" ]] || result=0
+                [[ "$result" =~ ^[0-9]+$ ]] && (( result >= 0 && result <= 7 )) || {
+                    printf 'ERROR\t--result must be 0..7 (0 = TA updated)\n' >&2; return 2; }
+                hex+=$(nasf_byte "$result")
+                fields="update_result=$result ($(nasf_tau_result_name "$result"))"
+            fi
+            hex+="${t3412:-1E}"
+            fields+=" t3412=${t3412:-1E}"
+            local tai; tai=$(nasf_tai_list "${tai_plmn:-00101}" "${tac:-0001}") || return 2
+            hex+="$tai"
+            fields+=" tai_list=1"
+            limit="the ESM message container is not built: no activate-default-EPS-bearer-context request exists in this tree yet, so the accept carries no default bearer and a handset will ask for one"
+            ;;
+        service-accept|detach-accept)
+            # Both are allowed to carry nothing: TS 24.301 §9.8.1 lists no
+            # mandatory IE for either, and a detach accept with a cause is
+            # optional.
+            if [[ -n "$cause" ]]; then
+                [[ "$cause" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--cause must be a decimal number\n' >&2; return 2; }
+                hex+=$(nasf_byte "$cause")
+                fields="cause=$cause ($(nasf_cause_name "$gen" "$cause"))"
+            else
+                fields="no_ie=1"
             fi
             ;;
         security-mode-command)
@@ -1722,7 +1823,7 @@ PY
     chk status-ceil   "$(fld "$out" rate_ceiling_msg_s)" "$NASF_RATE_CEILING"
     chk status-tx     "$(fld "$out" transmit_path)" "handoff"
     chk status-gate   "$(fld "$out" gate | cut -d" " -f1)" "none"
-    chk status-builders "$(fld "$out" builders_count)" "17"
+    chk status-builders "$(fld "$out" builders_count)" "21"
     local evil
     evil=$(nasf_sanitize $'a\tb\nc')
     chk sanitize-tabs "$(printf '%s' "$evil" | tr -cd '\t' | wc -c)" "0"
@@ -1780,6 +1881,22 @@ PY
 
     # Refusals: an unverifiable IE, an unknown message, an unlisted cause, a
     # retired flag. Each is a non-zero exit with nothing on stdout.
+    # The accept side of the handshake, pinned octet for octet. The GSMTAP
+    # oracle in tools/nas-oracle/check_nas_built.py decodes these same bytes
+    # with tshark; these assertions keep them from drifting silently when the
+    # oracle cannot run.
+    chk b-attach-accept "$(nasf_build eps attach-accept | awk -F'\t' '$1=="hex"{print $2}')" \
+        "0742011E5407000100F1100001"
+    chk b-tau-accept "$(nasf_build eps tau-accept | awk -F'\t' '$1=="hex"{print $2}')" \
+        "0749001E5407000100F1100001"
+    chk b-service-accept "$(nasf_build eps service-accept | awk -F'\t' '$1=="hex"{print $2}')" "074F"
+    chk b-detach-accept "$(nasf_build eps detach-accept | awk -F'\t' '$1=="hex"{print $2}')" "0746"
+    chk b-attach-accept-tai "$(nasf_build eps attach-accept --tai 310260 --tac 1A2B | \
+        awk -F'\t' '$1=="hex"{print $2}')" "0742011E540700011300621A2B"
+    chk b-attach-accept-limit "$(nasf_build eps attach-accept | awk -F'\t' '$1=="limit"{print ($2 ~ /ESM message container/)?"yes":"no"}')" "yes"
+    chk b-bad-tai "$(nasf_build eps attach-accept --tai 0010 >/dev/null 2>&1; echo $?)" "2"
+    chk b-plmn-bcd "$(nasf_plmn_bcd 001 01)" "00F110"
+    chk b-plmn-bcd-match "$(nasf_plmn_bcd 310 260)" "$(bash "$IMSISTING_ROOT/modules/43_ran_share.sh" --plmn-encode 310 260)"
     chk b-autn-refused "$(nasf_cmd_build eps auth-request --rand 000102030405060708090a0b0c0d0e0f --autn 101112131415161718191a1b1c1d1e1f >/dev/null 2>&1; echo $?)" "2"
     chk b-bad-message  "$(nasf_cmd_build eps attach-request --cause 15 >/dev/null 2>&1; echo $?)" "2"
     chk b-bad-cause    "$(nasf_cmd_build eps attach-reject --cause 999 >/dev/null 2>&1; echo $?)" "2"
@@ -1796,7 +1913,7 @@ PY
             >"$d/oracle.out" 2>"$d/oracle.err"
         local orc=$?
         chk oracle-rc "$orc" "0"
-        chk oracle-checked "$(grep -c '^ok	' "$d/oracle.out")" "10"
+        chk oracle-checked "$(grep -c '^ok	' "$d/oracle.out")" "14"
         chk oracle-agree "$(awk -F'\t' '$1=="RESULT"{print $2}' "$d/oracle.out")" "PASS"
     else
         printf 'oracle\tSKIP\ttshark is not on PATH, so the built vectors were \

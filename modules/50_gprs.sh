@@ -381,9 +381,17 @@ gprs_selftest() {
     chk gea0-kat "$(fld "$(gprs_gea_crypt 0 0011223344556677 00000001 00112233445566778899aabbccddeeff)" ciphertext)" \
         "00112233445566778899aabbccddeeff"
     chk gea1-exit3 "$(gprs_gea_crypt 1 0011223344556677 00000001 ab >/dev/null 2>&1; echo $?)" "3"
-    chk gea1-why "$({ gprs_gea_crypt 1 0011223344556677 00000001 ab 2>&1 >/dev/null || true; } | grep -q 'D.4.9' && echo yes || echo no)" "yes"
-    chk gea5-why "$({ gprs_gea_crypt 5 00112233445566778899aabbccddeeff 00000001 ab 2>&1 >/dev/null || true; } | grep -q 'licence' && echo yes || echo no)" "yes"
-    chk gea1-why "$({ gprs_gea_crypt 1 0011223344556677 00000001 ab 2>&1 >/dev/null || true; } | grep -q '2022/424' && echo yes || echo no)" "yes"
+    # The refusal reason is captured before it is searched. Piping straight
+    # into `grep -q` let grep exit on the first match, close the pipe, and the
+    # writer died of SIGPIPE (141) -- which `pipefail` then reported as the
+    # check's status, so a correct refusal read as a failure. A here-string
+    # reads to the end and cannot raise it.
+    local why1 why5
+    why1=$({ gprs_gea_crypt 1 0011223344556677 00000001 ab 2>&1 >/dev/null || true; } 2>&1)
+    why5=$({ gprs_gea_crypt 5 00112233445566778899aabbccddeeff 00000001 ab 2>&1 >/dev/null || true; } 2>&1)
+    chk gea1-why "$(grep -q 'D.4.9' <<<"$why1" && echo yes || echo no)" "yes"
+    chk gea5-why "$(grep -q 'licence' <<<"$why5" && echo yes || echo no)" "yes"
+    chk gea1-why "$(grep -q '2022/424' <<<"$why1" && echo yes || echo no)" "yes"
     chk gea-bad-algo "$(gprs_gea_crypt 9 00 00000000 ab >/dev/null 2>&1; echo $?)" "2"
 
     # 5b. GEA3 and GEA4 against the standards' own test data. The first vector
