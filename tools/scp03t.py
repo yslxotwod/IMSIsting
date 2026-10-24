@@ -322,6 +322,38 @@ def unpack_response(keys, tlvs):
     return keys.decrypt(ciphertext, for_response=True)
 
 
+def openssl_cmac(key, message):
+    """AES-CMAC computed by `openssl mac` rather than by `cryptography`.
+
+    This exists for exactly one purpose: to be an implementation this file does
+    not share code with. The KDF here is CMAC in counter mode with a layout
+    SCP03 fixes (Annex D 4.1.5), so if OpenSSL's CMAC -- which is SP 800-38B and
+    nothing else -- reproduces every derived value from the same inputs, then the
+    derivation is the spec's and not just self-consistent.
+
+    Returns None when openssl is absent or too old to know `mac`, so the caller
+    can report SKIP rather than a pass it did not earn.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("openssl") is None:
+        return None
+    try:
+        done = subprocess.run(
+            ["openssl", "mac", "-macopt", "cipher:AES-128-CBC",
+             "-macopt", "hexkey:" + key.hex(), "CMAC"],
+            input=message, capture_output=True, check=False)
+    except OSError:
+        return None
+    if done.returncode != 0 or not done.stdout.strip():
+        return None
+    try:
+        return bytes.fromhex(done.stdout.decode().strip())
+    except ValueError:
+        return None
+
+
 def _selfcheck():
     """Known-answer vectors, then round trips through the codec.
 
@@ -376,6 +408,47 @@ def _selfcheck():
     chk("kdf-host-cryptogram", a.host_cryptogram,
         bytes.fromhex("75A94E14D36602F1"))
     chk("cryptogram-len", len(a.card_cryptogram), 8)
+
+    # ── the derivation against an implementation outside this file ──────
+    # Every value above is a CMAC over an input this file assembles. OpenSSL
+    # computes CMAC and nothing else, so agreeing with it on each input means
+    # the inputs are the spec's layout and not a private convention.
+    def openssl_kdf(constant, context, base_key, bits=None):
+        if bits is None:
+            bits = len(base_key) * 8
+        label = b"\x00" * 11 + bytes([constant])
+        out = b""
+        i = 1
+        while len(out) < bits // 8:
+            info = label + b"\x00" + bits.to_bytes(2, "big") + bytes([i]) + context
+            block = openssl_cmac(base_key, info)
+            if block is None:
+                return None
+            out += block
+            i += 1
+        return out[: bits // 8]
+
+    ssl_enc = openssl_kdf(CONST_S_ENC, a.context, kek)
+    if ssl_enc is None:
+        checks.append(("openssl-available", True, "SKIP", "SKIP"))
+        print("skip\topenssl CMAC not available; the derivation is checked "
+              "against itself only")
+    else:
+        chk("openssl-s-enc", a.s_enc, ssl_enc)
+        chk("openssl-s-mac", a.s_mac, openssl_kdf(CONST_S_MAC, a.context, kmk))
+        chk("openssl-s-rmac", a.s_rmac, openssl_kdf(CONST_S_RMAC, a.context, kmk))
+        chk("openssl-card-cryptogram", a.card_cryptogram,
+            openssl_kdf(CONST_CARD_CRYPTOGRAM, a.context, a.s_mac, 64))
+        chk("openssl-host-cryptogram", a.host_cryptogram,
+            openssl_kdf(CONST_HOST_CRYPTOGRAM, a.context, a.s_mac, 64))
+        # The KDF is counter mode, and L (the bit length) is part of the CMAC
+        # input, so a 256-bit request is a different derivation from a 128-bit
+        # one -- not the same first block plus a second. Both blocks must
+        # therefore differ from each other and from the one-block answer.
+        two = openssl_kdf(CONST_S_ENC, a.context, kek, 256)
+        chk("openssl-kdf-2-blocks-distinct", two[:16] != two[16:], True)
+        chk("openssl-kdf-L-in-input", two[:16] != a.s_enc, True)
+        chk("openssl-kdf-2-blocks-len", len(two), 32)
 
     # A command TLV round trip: encrypt, MAC, then read it back.
     keys = SessionKeys(kek, kmk, host, card)

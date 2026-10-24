@@ -2689,7 +2689,7 @@ sys.stdout.write("%02X%s" % (7 - bits[-1] % 8, buf.hex().upper()))
 # defines; what this command adds is the framing, the segment ceiling of 1024
 # octets including tag and length, and the tags 84/85/86 and 9F44/9F45/9F46.
 sim_cmd_es8_scp03t() {
-    local k_enc='' k_mac='' host='' card='' kvn='30' payload='' tool rows
+    local k_enc='' k_mac='' host='' card='' kvn='30' payload='' card_crypt='' tool rows
     while (( $# )); do
         case "$1" in
             --k-enc)          k_enc="${2:-}";  shift 2 ;;
@@ -2698,6 +2698,7 @@ sim_cmd_es8_scp03t() {
             --card-challenge) card="${2:-}";   shift 2 ;;
             --kvn)            kvn="${2:-}";    shift 2 ;;
             --payload)        payload="${2:-}"; shift 2 ;;
+            --card-cryptogram) card_crypt="${2:-}"; shift 2 ;;
             *)  printf 'ERROR\tunsupported flag %s for --es8-scp03t\n' "$(sim_sanitize "$1")" >&2
                 return 2 ;;
         esac
@@ -2723,6 +2724,14 @@ sim_cmd_es8_scp03t() {
         sim_es8_handoff
         return 3
     fi
+    if [[ -n "$card_crypt" ]]; then
+        sim_is_hex "$card_crypt" || { printf 'ERROR\t--card-cryptogram is not hex\n' >&2; return 1; }
+        (( ${#card_crypt} == 16 )) || {
+            printf 'ERROR\tthe 84 response carries an 8-octet card cryptogram; got %d hex digits\n' \
+                "${#card_crypt}" >&2
+            return 1; }
+    fi
+
     local k
     for k in "$k_enc" "$k_mac" "$host" "$card"; do
         if ! sim_is_hex "$k"; then
@@ -2752,6 +2761,23 @@ sim_cmd_es8_scp03t() {
             ref)                                                 sim_es8_ref "derivation" "-" "$value" ;;
         esac
     done
+    if [[ -n "$card_crypt" ]]; then
+        # The derivation predicts the card cryptogram for these challenges; a
+        # card that returned one is checked against that prediction rather
+        # than believed. This is the verification R11 is about.
+        local expected; expected=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="card_cryptogram"{print toupper($2); exit}')
+        printf 'card_cryptogram_supplied\t%s\n' "${card_crypt^^}"
+        printf 'card_cryptogram_expected\t%s\n' "$expected"
+        if [[ "${card_crypt^^}" == "$expected" ]]; then
+            printf 'card_cryptogram_matches\tyes\n'
+            printf 'verdict\tthe supplied cryptogram is the one these keys and challenges derive: the channel is the one this session names\n'
+        else
+            printf 'card_cryptogram_matches\tno\n'
+            printf 'verdict\tmismatch: the card is not running this key set, or the challenges are not the ones it saw\n'
+            printf 'sent\t0\n'
+            return 1
+        fi
+    fi
     if [[ -n "$payload" ]]; then
         sim_is_hex "$payload" || { printf 'ERROR\t--payload is not hex\n' >&2; return 1; }
         local count=0 wrapped
@@ -2778,7 +2804,11 @@ sim_cmd_es8_scp03t() {
     else
         sim_es8_limit "no --payload: the session and the two initiation TLVs are built, the command TLVs are not"
     fi
-    sim_es8_limit "no card here: the card challenge was supplied rather than negotiated, so card_cryptogram above cannot be checked against a real eUICC - the value printed is what the derivation predicts, not what a card confirmed"
+    if [[ -n "$card_crypt" ]]; then
+        sim_es8_limit "the challenges were supplied rather than negotiated: a match proves the key set and those challenges agree, not that a live card sent the cryptogram. Two independent implementations agreeing on the derivation is what tools/check-scp03t.sh establishes"
+    else
+        sim_es8_limit "no card here: the card challenge was supplied rather than negotiated, so card_cryptogram above is what the derivation predicts, not what a card confirmed -- pass --card-cryptogram to check one against it"
+    fi
     sim_es8_ref "C-MAC" "-" \
         "GPC Amendment D 6.2: the MAC chaining value starts at 16 zero octets and each C-MAC becomes the next one; both are 8 octets in SCP03t mode 8"
     sim_es8_handoff
@@ -4581,7 +4611,7 @@ sim_selftest() {
     chk scp03t-tlv-85     "$(printf '%s\n' "$out" | sed -n 's/^tlv_85[[:space:]]*//p')" "85113375A94E14D36602F17AF2A1E33C4D3206"
     chk scp03t-tlv-86     "$(printf '%s\n' "$out" | grep -c '^tlv_86_1	8618')" "1"
     chk scp03t-level      "$(printf '%s\n' "$out" | grep -c "SHALL be '33'")" "1"
-    chk scp03t-no-card    "$(printf '%s\n' "$out" | grep -c 'cannot be checked against a real eUICC')" "1"
+    chk scp03t-no-card    "$(printf '%s\n' "$out" | grep -c 'is what the derivation predicts, not what a card confirmed')" "1"
     chk scp03t-needs-keys "$(sim_cmd_es8_scp03t --k-enc 000102030405060708090A0B0C0D0E0F >/dev/null 2>&1; echo $?)" "3"
     chk scp03t-short-key  "$(sim_cmd_es8_scp03t --k-enc 000102030405060708090A0B0C0D0E --k-mac 101112131415161718191A1B1C1D1E1F --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF >/dev/null 2>&1; echo $?)" "1"
     chk es8-md-bad-class  "$(sim_cmd_es8_build store-metadata --iccid 98001032547698103214 --profile-class gold >/dev/null 2>&1; echo $?)" "2"
@@ -4870,7 +4900,45 @@ sim_selftest() {
     chk usage-aka-resp   "$(printf '%s\n' "$out" | grep -c '^  --aka-responder ')" "1"
     chk usage-aka-serve  "$(printf '%s\n' "$out" | grep -c '^  --aka-serve ')" "1"
 
-    # ── the card side (R7) ─────────────────────────────────────────────
+    # ── SCP03t: the derivation, and a card's cryptogram (R11) ──────────
+    # The keys SGP.02 2.6.4 rides on: S-ENC/S-MAC/S-RMAC from the Annex D
+    # counter-mode KDF, then the card and host cryptograms over S-MAC.
+    local scp_enc=000102030405060708090A0B0C0D0E0F
+    local scp_mac=101112131415161718191A1B1C1D1E1F
+    local scp; scp=$(sim_cli_main --es8-scp03t --k-enc "$scp_enc" --k-mac "$scp_mac" \
+        --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF 2>&1)
+    chk scp-s-enc  "$(fld "$scp" s_enc)"  "1771157962A029C5435A1AC81D0B9806"
+    chk scp-s-mac  "$(fld "$scp" s_mac)"  "3E994A1F2EAF7182282B2E5ED3870B83"
+    chk scp-s-rmac "$(fld "$scp" s_rmac)" "49214B50BD45D69A2FEB47C69DE5407E"
+    chk scp-card-c "$(fld "$scp" card_cryptogram)" "D71A889EFCF709E8"
+    chk scp-host-c "$(fld "$scp" host_cryptogram)" "75A94E14D36602F1"
+    # A card's cryptogram checked against what the derivation predicts: this
+    # is the verification, and a mismatch has to fail rather than print.
+    local scp_ok; scp_ok=$(sim_cli_main --es8-scp03t --k-enc "$scp_enc" --k-mac "$scp_mac" \
+        --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF \
+        --card-cryptogram D71A889EFCF709E8 2>&1)
+    chk scp-verify-yes "$(fld "$scp_ok" card_cryptogram_matches)" "yes"
+    chk scp-verify-rc  "$(sim_cli_main --es8-scp03t --k-enc "$scp_enc" --k-mac "$scp_mac" \
+        --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF \
+        --card-cryptogram D71A889EFCF709E8 >/dev/null 2>&1; echo $?)" "0"
+    chk scp-verify-no-rc "$(sim_cli_main --es8-scp03t --k-enc "$scp_enc" --k-mac "$scp_mac" \
+        --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF \
+        --card-cryptogram 0000000000000000 >/dev/null 2>&1; echo $?)" "1"
+    chk scp-verify-no "$(sim_cli_main --es8-scp03t --k-enc "$scp_enc" --k-mac "$scp_mac" \
+        --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF \
+        --card-cryptogram 0000000000000000 2>/dev/null | awk -F'\t' '$1=="card_cryptogram_matches"{print $2}')" "no"
+    chk scp-verify-short "$(sim_cli_main --es8-scp03t --k-enc "$scp_enc" --k-mac "$scp_mac" \
+        --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF \
+        --card-cryptogram 0011 >/dev/null 2>&1; echo $?)" "1"
+    # The outside implementation agrees with every value above, or the check
+    # says SKIP rather than pretending.
+    if command -v openssl >/dev/null 2>&1; then
+        chk scp-openssl "$(bash "$IMSISTING_ROOT/tools/check-scp03t.sh" 2>/dev/null | grep -c '^RESULT	PASS')" "1"
+    else
+        chk scp-openssl "skip" "skip"
+    fi
+
+    # ── the card side (R7) ─────────────────────────────────────────────    # ── the card side (R7) ─────────────────────────────────────────────
     # A UE emulator's own conversation: SELECT the USIM application, read
     # EF_IMSI, authenticate with the TS 35.208 set-1 vector. The R-APDU is the
     # answer a handset would take off the wire, so it is asserted whole.
