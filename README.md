@@ -371,13 +371,18 @@ sudo ./imsisting.sh          # CLI menu
 ./imsisting.sh --list        # module list
 ./imsisting.sh --index       # the module index as TSV
 ./imsisting.sh --gui         # launch the GUI
+./imsisting.sh --tui         # launch the TUI
 ```
+
+<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/5a5784da-9f1d-43dd-b02c-8d8b2591a870" />
 
 Or launch the built binary directly:
 
 ```bash
 ./native/builddir/imsisting-gui
 ```
+
+<img width="964" height="523" alt="imsisting" src="https://github.com/user-attachments/assets/97afe07a-1b0e-43fe-a931-66cd5dc0fd37" />
 
 The GUI asks for your password per action via `pkexec`, not once at startup.
 
