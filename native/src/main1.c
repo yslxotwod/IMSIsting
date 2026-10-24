@@ -2626,6 +2626,8 @@ static const char *const plain_keys[] = {
     "best_offered\tbest offered",
     "bi_index\tbi index",
     "binary\tbinary",
+    "bind\twhether the session opened with bind_transceiver",
+    "bind_octets\tbind PDU length in octets",
     "bind_receiver\tbind receiver",
     "bind_receiver_resp\tbind receiver resp",
     "bind_transceiver\tbind transceiver",
@@ -2899,6 +2901,7 @@ static const char *const plain_keys[] = {
     "ciphering_meaning\tcipher meaning",
     "ciphering_mode_command_l3\tcipher mode command l3",
     "ciphertext\tciphertext",
+    "dry_run\tbuild-only; no socket was opened",
     "gamma\tkeystream block XORed onto the packet",
     "ciphertext_seconds\tciphertext seconds",
     "ck\tcipher key",
@@ -5090,8 +5093,10 @@ static const char *const plain_keys[] = {
     "subject\tsubject",
     "subject_confusion\tsubject confusion",
     "submit\tsubmit",
+    "submit_hex\tsubmit_sm octets handed to the transport",
     "submit_multi\tsubmit multi",
     "submit_multi_resp\tsubmit multi resp",
+    "submit_octets\tsubmit_sm PDU length in octets",
     "submit_sm\tsubmit sm",
     "submit_sm_resp\tsubmit sm resp",
     "subscriber\tsubscriber",
@@ -5200,7 +5205,10 @@ static const char *const plain_keys[] = {
     "temp_kind\ttemp kind",
     "temp_value\ttemp value",
     "testbed\ttestbed",
+    "text\tthe message text before 7-bit packing",
     "text7bit\ttext7bit",
+    "text_septets\tGSM 7-bit septets the text occupies",
+    "text_short_message\tpacked TP-UD octets carried in short_message",
     "thresh_serving_low\tthresh serving low",
     "tid\ttid",
     "time_domain_occasions\ttime domain occasions",
@@ -6670,6 +6678,16 @@ static const ChipRow chip_rows[] = {
     { "41_ota_sms",          "--smpp-parse",          NEED_SIM, DOES_READS },
     { "41_ota_sms",          "--smpp-pdu",            NEED_SIM, DOES_READS },
     { "41_ota_sms",          "--smpp-response",       NEED_SIM, DOES_READS },
+    /* The send path carries a built PDU over TCP. It needs no SIM and no radio:
+     * an SMSC authenticates the ESME by system_id/password (SMPP 3.4 5.2.1), which
+     * is the one SMS path that has no subscriber on this side of the wire. */
+    { "41_ota_sms",          "--smpp-send",           NEED_NO,  DOES_TRANSMITS },
+    { "41_ota_sms",          "--host",                NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--port",                NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--timeout",             NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--text",                NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--no-bind",             NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--dry-run",             NEED_NO,  DOES_READS },
     { "41_ota_sms",          "--smsc-wrap",           NEED_SIM, DOES_READS },
     { "41_ota_sms",          "--spi",                 NEED_NO, DOES_READS },
     { "41_ota_sms",          "--spi-build",           NEED_NO, DOES_READS },
@@ -30893,10 +30911,57 @@ otasm_build_smpp(AppState *state, const char *module_id,
     return outer;
 }
 
+
+/* The one SMS path with no subscriber on this side: the SMSC authenticates the
+ * ESME, not a card. Two rows -- one that stops before the socket, one that opens
+ * it -- so the octets can be read before a session exists. */
+static GtkWidget *
+otasm_build_send(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SEND IT",
+        "An SMSC accepts a submit from an ESME that binds with an identity and a "
+        "password. No SIM is in that exchange, which is the whole point of the "
+        "row.", &body);
+    GtkWidget *dry_body, *live_body;
+    GtkWidget *dry = verb_card("BUILD IT, SEND NOTHING", &dry_body);
+    GtkWidget *live = verb_card("BIND, THEN SUBMIT", &live_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dry_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build",
+                "--smpp-send", "--host 127.0.0.1 --dst 15559876543 --text hello --dry-run",
+                "--dry-run stops before the socket, so the submit_sm octets and "
+                "their length field can be read on their own."));
+        gtk_box_append(GTK_BOX(dry_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dry);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(live_body),
+            mod_arg_row_prefilled(state, module_id, status, "Send",
+                "--smpp-send", "--host 127.0.0.1 --system-id esme1 --src 15551234567 --dst 15559876543 --text hello",
+                "binds, submits, then reads the response. Put the password in "
+                "OTASM_SMPP_PASSWORD to keep it out of the process list."));
+        gtk_box_append(GTK_BOX(live_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), live);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry otasm_entries[] = {
     { "TPDU", "dialog-information-symbolic", NULL, otasm_build_tpdu },
     { "Over-the-air packet", "document-send-symbolic", NULL, otasm_build_packet },
     { "SMPP", "network-transmit-receive-symbolic", NULL, otasm_build_smpp },
+    { "Send to an SMSC", "mail-send-symbolic", NULL, otasm_build_send },
     { "Pokes", "security-high-symbolic", NULL, otasm_build_push },
 };
 /* 42_li_probe — LI Interception.

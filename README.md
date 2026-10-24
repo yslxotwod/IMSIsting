@@ -121,7 +121,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 | `16_sim` | SIM AKA (COMP128 1/2/3, Milenage, TUAK), USIM files, EF_AD, OTA parsing, eSIM profiles, ES9+ |
 | `18_imsi_exposure` | IMSI harvest and TMSI/IMSI correlation over a capture |
 | `31_sim_defense` | SIM swap: risk scoring, the six detection signals, plus gated APDU and port-out artefacts |
-| `41_ota_sms` | OTA binary SMS: TPDU packing, S@T push with its CONCATENATE / variable-reference / substitution byte code, WIB refused by name |
+| `41_ota_sms` | OTA binary SMS: TPDU packing, S@T push with its CONCATENATE / variable-reference / substitution byte code, SMPP 3.4 built/parsed and carried to an SMSC over TCP, WIB refused by name |
 | `52_stk` | TS 31.111 proactive commands: build, parse, audit for silent off-device actions |
 
 ### Baseband and device
@@ -614,7 +614,7 @@ the location and state halves are unverified by this tree.
 |---|---|
 | `50_gprs` | GEA1/GEA2: recovered only in the cryptanalysis literature, taps not in this tree. GEA5: algorithm body and test data licence-gated. GEA0/GEA3/GEA4 are computed and vector-tested. |
 | `16_sim` | the profile-element chain carried inside the `86` segments (SCP03t protects the block, it does not parse it), `HandleNotification` (the standard defines no response body), AUTS resynchronisation, and a live session — `--es8-scp03t` builds the 84/85/86 TLVs from a supplied key set and both challenges, but a card cryptogram can only be confirmed by an eUICC |
-| `41_ota_sms` | WIB push (the leaf command bytes have no citable public encoding) and a deck that binds a terminal response into a variable: S@T's CONCATENATE, variable-reference and substitution encodings are built, but PROVIDE LOCAL INFORMATION returns its datum in the terminal response rather than into a variable, so `--sat-push` emits the fixed-body form and the variable-bound body is assembled from `--sat-concat` / `--sat-varref` / `--sat-subst` by hand |
+| `41_ota_sms` | SMPP optional TLVs, submit_multi, data_sm and SMPP-over-TLS (the session is plaintext TCP 2775 by design, so the transport is named in the output); WIB push (the leaf command bytes have no citable public encoding) and a deck that binds a terminal response into a variable: S@T's CONCATENATE, variable-reference and substitution encodings are built, but PROVIDE LOCAL INFORMATION returns its datum in the terminal response rather than into a variable, so `--sat-push` emits the fixed-body form and the variable-bound body is assembled from `--sat-concat` / `--sat-varref` / `--sat-subst` by hand |
 | `49_ntn` | feeder link — SIB19 carries no gateway geometry, so the gateway-satellite distance is not derivable from anything the cell broadcasts |
 | `46_lpp` | UTDOA is LPPa, not LPP, so it is stated as a handoff instead of encoded as the wrong protocol |
 | `26_ss7_map` | the ATI answer body: below it, `SubscriberState` is not encodable by any referee available here, so the location and state fields are named as unverified rather than shipped on a guess |

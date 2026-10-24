@@ -2597,6 +2597,172 @@ otasm_smpp_build() {
     printf 'built\tyes\n'
 }
 
+# --smpp-send — carry a built PDU to an SMSC over TCP and read the answer.
+# The octets come from otasm_smpp_build; tools/smpp_client.py owns the frame
+# read because a shell cannot honour a deadline on "length octets, then again".
+# No SIM is involved anywhere in this path: an SMSC authenticates an ESME by
+# system_id/password in bind_transceiver (SMPP 3.4 5.2.1), not by a subscriber.
+otasm_smpp_send() {
+    local host='' port='2775' timeout='10' no_bind=0 dry=0
+    local src='' dst='' msg='' text='' seq='1' dcs=''
+    local system_id='' password='' system_type='' interface_version=''
+    local -a build_args=()
+    while (($#)); do
+        case "$1" in
+            --host|--port|--timeout|--msg|--text|--dcs|--src|--dst|--seq|\
+            --service-type|--src-ton|--src-npi|--dst-ton|--dst-npi|\
+            --system-id|--password|--system-type|--interface-version)
+                if (($# < 2)); then
+                    printf 'ERROR\t%s needs a value\n' "$1" >&2
+                    printf 'WHY\t--smpp-send takes "--flag value" pairs; a flag with no value has no encoding\n' >&2
+                    return 2
+                fi
+                case "$1" in
+                    --host)    host="$2" ;;
+                    --port)    port="$2" ;;
+                    --timeout) timeout="$2" ;;
+                    --msg)     msg="$2"; build_args+=(--msg "$2") ;;
+                    --text)    text="$2" ;;
+                    --dcs)     dcs="$2"; build_args+=(--dcs "$2") ;;
+                    --seq)     seq="$2" ;;
+                    --system-id)         system_id="$2" ;;
+                    --password)          password="$2" ;;
+                    --system-type)       system_type="$2" ;;
+                    --interface-version) interface_version="$2" ;;
+                    *)         build_args+=("$1" "$2") ;;
+                esac
+                shift 2
+                ;;
+            --no-bind)   no_bind=1; shift ;;
+            --dry-run)   dry=1; shift ;;
+            *)
+                printf 'ERROR\tunknown option: %s\n' "$1" >&2
+                printf 'WHY\t--smpp-send accepts --host --port --timeout --dst --src --msg --text --dcs --rd --seq --service-type --src-ton --src-npi --dst-ton --dst-npi --system-id --password --system-type --interface-version --no-bind --dry-run\n' >&2
+                return 2
+                ;;
+        esac
+    done
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\t--smpp-send needs --host\n' >&2
+        printf 'WHY\tno SMSC address was given, so there is nowhere to open a session; --smpp-build alone emits octets and transmits nothing\n' >&2
+        return 2
+    fi
+    if [[ ! "$host" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+        printf 'ERROR\t--host is not a hostname or address: %s\n' "$host" >&2
+        printf 'WHY\tthe value is passed to a socket connect; anything outside letters, digits, dot, colon, underscore and hyphen has no address form here\n' >&2
+        return 2
+    fi
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+        printf 'ERROR\t--port is not in 1..65535: %s\n' "$port" >&2
+        printf 'WHY\tport 2775 is the SMPP assignment; any port outside 1..65535 has no TCP encoding\n' >&2
+        return 2
+    fi
+    if [[ ! "$timeout" =~ ^[0-9]+$ ]] || (( timeout < 1 || timeout > 600 )); then
+        printf 'ERROR\t--timeout is not in 1..600 seconds: %s\n' "$timeout" >&2
+        printf 'WHY\tthe deadline bounds the bind and every response read; zero would fail before the SMSC answers and above 600 the harness timeout fires first\n' >&2
+        return 2
+    fi
+    if [[ -z "$dst" ]]; then
+        # the destination rides in build_args; keep a copy for the pre-flight gate
+        local i
+        for ((i = 0; i < ${#build_args[@]}; i++)); do
+            if [[ "${build_args[i]}" == "--dst" ]]; then dst="${build_args[i+1]:-}"; fi
+        done
+    fi
+    if [[ -z "$dst" ]]; then
+        printf 'ERROR\t--smpp-send needs --dst\n' >&2
+        printf 'WHY\tsubmit_sm carries destination_addr (SMPP 3.4 5.2.5); without a destination the SMSC has no subscriber to route to and the PDU is not a submission\n' >&2
+        return 2
+    fi
+    : "${system_id:=${OTASM_SMPP_SYSTEM_ID:-}}"
+    : "${password:=${OTASM_SMPP_PASSWORD:-}}"
+    if [[ -n "$system_id" && -z "$password" ]]; then
+        printf 'ERROR\tsystem_id was given with no password\n' >&2
+        printf 'WHY\tbind_transceiver carries both (5.2.1); set OTASM_SMPP_PASSWORD instead of --password to keep it out of the process list\n' >&2
+        return 2
+    fi
+    local msg_hex=''
+    if [[ -n "$text" && -n "$msg" ]]; then
+        printf 'ERROR\t--text and --msg were both given\n' >&2
+        printf 'WHY\t--text is packed into short_message as GSM 7-bit and --msg is short_message octets already; two sources for one field cannot both be honoured\n' >&2
+        return 2
+    fi
+    if [[ -n "$text" ]]; then
+        msg_hex=$(otasm_tp_pack_text "$text") || return 1
+        build_args=(--msg "$msg_hex" "${build_args[@]}")
+        printf 'text\t%s\n' "$text"
+        printf 'text_septets\t%d\n' "${#text}"
+        printf 'text_short_message\t%s\n' "$msg_hex"
+    elif [[ -n "$msg" ]]; then
+        msg_hex=$(otasm_norm_hex "$msg")
+    else
+        printf 'ERROR\t--smpp-send needs --text or --msg\n' >&2
+        printf 'WHY\tshort_message is the payload of the submission; an empty one is not sent in place of what was asked for\n' >&2
+        return 2
+    fi
+    if [[ ! "$seq" =~ ^[0-9]+$ ]] && [[ ! "$seq" =~ ^0x[0-9a-fA-F]+$ ]]; then
+        printf 'ERROR\t--seq is not an integer: %s\n' "$seq" >&2
+        printf 'WHY\tsequence_number is a 31-bit integer field; %s has no encoding\n' "$seq" >&2
+        return 2
+    fi
+    local seq_dec=$seq
+    if [[ "$seq" =~ ^0x ]]; then seq_dec=$(( seq )); fi
+    if (( seq_dec < 1 || seq_dec + 1 > 0x7fffffff )); then
+        printf 'ERROR\t--seq %d leaves no room for the submit sequence number\n' "$seq_dec" >&2
+        printf 'WHY\tthe bind takes --seq and the submit takes --seq+1, and SMPP 3.4 5.1.2 keeps both inside 1..0x7FFFFFFF\n' >&2
+        return 2
+    fi
+    local hex bind_hex='' submit_hex='' rows
+    rows=$(otasm_smpp_build submit_sm "${build_args[@]}" --seq "$(( seq_dec + 1 ))") || return $?
+    submit_hex=$(printf '%s\n' "$rows" | awk -F'\t' '$1 == "hex" { print $2; exit }')
+    if [[ -z "$submit_hex" ]]; then
+        printf 'ERROR\tthe submit_sm builder returned no octets\n' >&2
+        printf 'WHY\tan empty hex row means the PDU was not assembled, and sending a headerless stream would desynchronise the session\n' >&2
+        return 1
+    fi
+    if (( no_bind == 0 )) && [[ -n "$system_id" ]]; then
+        local -a bind_args=(--system-id "$system_id" --password "$password" --seq "$seq_dec")
+        [[ -n "$system_type" ]] && bind_args+=(--system-type "$system_type")
+        [[ -n "$interface_version" ]] && bind_args+=(--interface-version "$interface_version")
+        rows=$(otasm_smpp_build bind_transceiver "${bind_args[@]}") || return $?
+        bind_hex=$(printf '%s\n' "$rows" | awk -F'\t' '$1 == "hex" { print $2; exit }')
+        if [[ -z "$bind_hex" ]]; then
+            printf 'ERROR\tthe bind_transceiver builder returned no octets\n' >&2
+            printf 'WHY\tan empty hex row means the bind was not assembled, and submitting on an unbound session is refused by every SMSC\n' >&2
+            return 1
+        fi
+        printf 'bind_octets\t%d\n' "$(( ${#bind_hex} / 2 ))"
+    else
+        printf 'bind\tnot-requested\n'
+    fi
+    printf 'submit_octets\t%d\n' "$(( ${#submit_hex} / 2 ))"
+    printf 'submit_hex\t%s\n' "$submit_hex"
+    if (( no_bind )) && [[ -n "$system_id" ]]; then
+        printf 'note\t--no-bind leaves the session unbound; the SMSC answers an unbound submit_sm with ESME_RINVBNDSTS (0x00000004)\n'
+    fi
+    if (( dry )); then
+        printf 'dry_run\tno socket opened\n'
+        printf 'sent\tno\n'
+        return 0
+    fi
+    local py="${IMSISTING_ROOT:-.}/tools/smpp_client.py"
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'ERROR\tpython3 is not on PATH\n' >&2
+        printf 'WHY\ttools/smpp_client.py frames the session; without an interpreter the PDU has no transport, and this verb will not open a raw socket behind your back\n' >&2
+        return 1
+    fi
+    if [[ ! -r "$py" ]]; then
+        printf 'ERROR\ttools/smpp_client.py is missing under %s\n' "${IMSISTING_ROOT:-.}" >&2
+        printf 'WHY\tthe transport lives in that file; without it the octets above were built but nothing can carry them\n' >&2
+        return 1
+    fi
+    local -a cargs=(--host "$host" --port "$port" --timeout "$timeout" --submit "$submit_hex")
+    if [[ -n "$bind_hex" && $no_bind -eq 0 ]]; then cargs+=(--bind "$bind_hex"); else cargs+=(--no-bind); fi
+    local rc=0
+    python3 "$py" "${cargs[@]}" || rc=$?
+    return "$rc"
+}
+
 # --smpp-parse <hex> — header, then one row per body field with its offset.
 otasm_smpp_parse() {
     local raw="${1:-}" hex
@@ -3221,6 +3387,41 @@ PY
     chk smpp-parse-unknown-rc "$(otasm_smpp_parse 00000010deadbeef0000000000000001 >/dev/null 2>&1; echo $?)" "1"
     chk smpp-resp-status-name "$(otasm_smpp_response "$smpp_submit" --status 0x0d 2>/dev/null | awk -F'\t' '$1=="command_status_name"{print $2}')" "ESME_RBINDFAIL"
 
+    # ── SMPP send: the built PDU gets a transport, and the transport refuses
+    # what it cannot carry. Every assertion below is offline: --dry-run stops
+    # before the socket, so no host is contacted by the selftest.
+    smpp_snd=$(otasm_smpp_send --host 127.0.0.1 --dst 67890 --text hi --dry-run 2>/dev/null)
+    chk smpp-send-dry-rc    "$(otasm_smpp_send --host 127.0.0.1 --dst 67890 --text hi --dry-run >/dev/null 2>&1; echo $?)" "0"
+    chk smpp-send-dry-what  "$(fld "$smpp_snd" dry_run)" "no socket opened"
+    chk smpp-send-dry-sent  "$(fld "$smpp_snd" sent)" "no"
+    # The verb must carry exactly what --smpp-build emits for the same fields:
+    # one builder, one set of octets, no second encoder to drift.
+    chk smpp-send-reuses-builder "$(fld "$smpp_snd" submit_hex)" \
+        "$(otasm_smpp_build submit_sm --dst 67890 --msg e834 --seq 2 2>/dev/null | awk -F'\t' '$1=="hex"{print $2; exit}')"
+    chk smpp-send-text-ud   "$(fld "$smpp_snd" text_short_message)" "e834"
+    chk smpp-send-seq       "$(printf '%s' "$(fld "$smpp_snd" submit_hex)" | cut -c25-32)" "00000002"
+    chk smpp-send-octets    "$(fld "$smpp_snd" submit_octets)" "$(( ${#smpp_snd} > 0 ? $(fld "$smpp_snd" submit_octets) : 0 ))"
+    # A build that is refused must not reach a socket: each refusal is rc 2.
+    chk smpp-send-no-host   "$(otasm_smpp_send --dst 67890 --text hi --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-send-no-dst    "$(otasm_smpp_send --host 127.0.0.1 --text hi --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-send-no-body   "$(otasm_smpp_send --host 127.0.0.1 --dst 67890 --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-send-two-body  "$(otasm_smpp_send --host 127.0.0.1 --dst 67890 --msg 00 --text hi --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-send-bad-port  "$(otasm_smpp_send --host 127.0.0.1 --port 70000 --dst 67890 --text hi --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-send-bad-tmo   "$(otasm_smpp_send --host 127.0.0.1 --timeout 0 --dst 67890 --text hi --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-send-bad-host  "$(otasm_smpp_send --host 'a b' --dst 67890 --text hi --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-send-sysid-nopw "$(otasm_smpp_send --host 127.0.0.1 --dst 67890 --text hi --system-id x --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-send-seq-room  "$(otasm_smpp_send --host 127.0.0.1 --dst 67890 --text hi --seq 0x7fffffff --dry-run >/dev/null 2>&1; echo $?)" "2"
+    send_nb=$(otasm_smpp_send --host 127.0.0.1 --dst 67890 --text hi --system-id x --password y --no-bind --dry-run 2>/dev/null)
+    chk smpp-send-nobind    "$(fld "$send_nb" bind)" "not-requested"
+    # The transport frame is proven by the client's own loopback SMSC, which
+    # binds, submits and reads both answers inside one process: no network.
+    if command -v python3 >/dev/null 2>&1 && [[ -r "$IMSISTING_ROOT/tools/smpp_client.py" ]]; then
+        chk smpp-send-client-self $(
+            python3 "$IMSISTING_ROOT/tools/smpp_client.py" --self-test 2>/dev/null \
+                | awk -F'\t' '$1=="result"{print $2; exit}') "PASS"
+    else
+        chk smpp-send-client-self "skipped-no-python3" "skipped-no-python3"
+    fi
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -3259,6 +3460,7 @@ otasm_menu() {
   [21] Parse an SMPP PDU with field offsets
   [22] Build the matching SMPP response
   [23] Name an SMPP command id and its direction
+  [24] Send a PDU to an SMSC over TCP (bind + submit, no SIM)
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -3368,6 +3570,25 @@ M
                 else otasm_smpp_response "$rh"; fi
                 read -rp "  enter " _ ;;
             23) read -rp "  command name or id> " q; otasm_smpp_pdu "$q"; read -rp "  enter " _ ;;
+            24)
+                read -rp "  SMSC host> " sh_host
+                read -rp "  port [2775]> " sh_port
+                read -rp "  system_id (blank for --no-bind)> " sh_sid
+                read -rp "  password> " sh_pw
+                read -rp "  source address> " sh_src
+                read -rp "  destination address> " sh_dst
+                read -rp "  message text> " sh_text
+                local -a sh_args=(--host "$sh_host" --src "$sh_src" --dst "$sh_dst")
+                [[ -n "$sh_port" ]] && sh_args+=(--port "$sh_port")
+                [[ -n "$sh_text" ]] && sh_args+=(--text "$sh_text")
+                if [[ -n "$sh_sid" ]]; then
+                    sh_args+=(--system-id "$sh_sid")
+                    OTASM_SMPP_PASSWORD="$sh_pw" otasm_smpp_send "${sh_args[@]}"
+                else
+                    sh_args+=(--no-bind)
+                    otasm_smpp_send "${sh_args[@]}"
+                fi
+                read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -3417,6 +3638,7 @@ otasm_cli_main() {
         --smpp-parse)     otasm_smpp_parse "${1:-}" ;;
         --smpp-response)  otasm_smpp_response "${1:-}" "${@:2}" ;;
         --smpp-pdu)       otasm_smpp_pdu "${1:-}" ;;
+        --smpp-send)      otasm_smpp_send "$@" ;;
         --selftest)       otasm_selftest ;;
         --menu)           otasm_menu ;;
         *)
@@ -3478,6 +3700,17 @@ Usage: $0 COMMAND
                                      build the matching *_resp PDU, same
                                      sequence number, response command id
   --smpp-pdu <name|id>               name a command id and its direction
+  --smpp-send --host H [--port 2775] [--system-id ID --password PW]
+              [--src S] --dst D (--text T | --msg HEX) [--dcs h] [--rd h]
+              [--seq n] [--timeout s] [--no-bind] [--dry-run]
+                                     open a TCP session to an SMSC -- bind_transceiver
+                                     when an identity is given, then submit_sm --
+                                     and read the response. No SIM is involved:
+                                     an SMSC authenticates the ESME by
+                                     system_id/password (SMPP 3.4 5.2.1).
+                                     --text packs GSM 7-bit, --dry-run builds only.
+                                     Password from OTASM_SMPP_PASSWORD keeps it
+                                     out of the process list.
   --selftest                         verify SPI, packet and replay logic
   --menu                             interactive menu
 
