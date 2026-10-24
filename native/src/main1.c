@@ -2447,6 +2447,17 @@ module_id_words(const char *tok)
  * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
  */
 static const char *const plain_keys[] = {
+    "icon\ticon",
+    "ink\tink",
+    "ink_after\tink after",
+    "ink_before\tink before",
+    "inside_canvas\tinside canvas",
+    "raster\traster",
+    "usim\tusim",
+    "listener\tlistener",
+    "not_served\tnot served",
+    "rapdu\trapdu",
+    "serves\tserves",
     "per_hex\tper hex",
     "read_back\tread back",
     "attaches\tattaches",
@@ -6172,6 +6183,8 @@ static const ChipRow chip_rows[] = {
     { "15_downgrade",        "--yes",                 NEED_NO, DOES_READS },
     { "16_sim",              "--__index_probe__",     NEED_NO, DOES_READS },
     { "16_sim",              "--aka-responder",       NEED_NO, DOES_MODIFIES },
+    { "16_sim",              "--usim-serve",          NEED_NO, DOES_READS },
+    { "16_sim",              "--usim-tcp",            NEED_NO, DOES_SENDS },
     { "16_sim",              "--aka-serve",           NEED_NO, DOES_MODIFIES },
     { "16_sim",              "--algo",                NEED_NO, DOES_READS },
     { "16_sim",              "--amf",                 NEED_NO, DOES_READS },
@@ -20819,6 +20832,36 @@ gtap_build_header(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(parse_body), res);
     }
     gtk_box_append(GTK_BOX(body), parse);
+
+    /* The card itself, not a command sent to one: the responses below are what
+       a handset reads off the wire, and the vector behind the authenticate is
+       the store's own. */
+    {
+        GtkWidget *serve_body;
+        GtkWidget *serve = verb_card("BE THE CARD", &serve_body);
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(serve_body),
+            mod_arg_row_prefilled(state, module_id, status, "Serve the USIM",
+                "--usim-serve", "--imsi 001010123456789",
+                "One hex C-APDU per line on stdin: select the application, "
+                "read the IMSI, authenticate. Each line answers with the "
+                "response and the status word a card would return."));
+        gtk_box_append(GTK_BOX(serve_body),
+            mod_arg_row_prefilled(state, module_id, status, "Serve it on a Socket",
+                "--usim-tcp", "2626 --imsi 001010123456789",
+                "The same card on a TCP port, one responder fork per "
+                "connection. The subscription key and the sequence number stay "
+                "in the store, so two connections share one card."));
+        gtk_box_append(GTK_BOX(serve_body), res);
+        gtk_box_append(GTK_BOX(serve_body), fkit_note(
+            "The file system serves EF_IMSI because the store knows the IMSI. "
+            "EF_ICCID, EF_AD and the service tables are refused with 6A82 "
+            "rather than invented, and the 2G authenticate is refused by "
+            "name: this card is the USIM path."));
+        gtk_box_append(GTK_BOX(body), serve);
+    }
 
     {
         GtkWidget *res = result_rect_new(state, NULL);

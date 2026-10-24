@@ -588,6 +588,25 @@ sim_decode_iccid() {
         "$digits" "${#digits}" "$issuer" "$cc" "$country" "$filler" "$check" "$luhn"
 }
 
+# IMSI -> BCD for EF_IMSI. Standard GSM packing (TS 23.003 §2.3): two digits
+# per octet, the first digit in the LOW nibble, and an F filler in the high
+# nibble when the count is odd. --selftest cross-checks this against
+# `09_lte_attach --imsi-encode`, which is the module that owns the NAS form.
+sim_bcd_encode() {  # <digits> -> packed hex
+    local d="${1:-}"
+    [[ "$d" =~ ^[0-9]{14,15}$ ]] || return 1
+    local out="" i nib
+    for (( i = 0; i < ${#d}; i += 2 )); do
+        nib="${d:i:1}"
+        if (( i + 1 < ${#d} )); then
+            out+="${d:i+1:1}${nib}"
+        else
+            out+="F${nib}"
+        fi
+    done
+    printf '%s' "$out"
+}
+
 sim_decode_imsi() {
     local h; h=$(sim_norm_hex "${1:-}")
     [[ -n "$h" && "${h//[^0-9A-F]/}" == "$h" ]] || { printf 'ERROR\tnot hex\n' >&2; return 2; }
@@ -2346,6 +2365,9 @@ sim_cmd_sim_auth_check() {
     kat auth-rejects-unknown  "$(sim_cmd_sim_auth comp128-9 00112233445566778899AABBCCDDEEFF 00112233445566778899AABBCCDDEEFF >/dev/null 2>&1; echo $?)" "2"
     kat auth-rejects-no-sqn-rand "$(sim_cmd_sim_auth milenage 465B5CE8B199B49FAA5F0A2EE238A6BC 23553CBE9637A89D218AE64DAE47BF35 >/dev/null 2>&1; echo $?)" "2"
 
+    # The card side runs last: it authenticates against the same store, and
+    # an AUTHENTICATE here legitimately moves SQN, so anything asserted
+    # after it would be asserting this test's own side effect.
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -4737,6 +4759,7 @@ sim_selftest() {
         --opc CD63CB71954A9F4E48A5994E37A02BAF --sqn FF9BB4D0B607 >/dev/null 2>&1
     chk aka-add-replaces    "$(sim_aka_live "$st")" "1"
 
+
     # TS 35.208 test set 1 through the responder: RAND and SQN from the
     # standard, so RES/CK/IK/AUTN are fixed values and not this tree's opinion.
     out=$(sim_cmd_aka_responder --imsi 001010123456789 \
@@ -4847,8 +4870,62 @@ sim_selftest() {
     chk usage-aka-resp   "$(printf '%s\n' "$out" | grep -c '^  --aka-responder ')" "1"
     chk usage-aka-serve  "$(printf '%s\n' "$out" | grep -c '^  --aka-serve ')" "1"
 
+    # ── the card side (R7) ─────────────────────────────────────────────
+    # A UE emulator's own conversation: SELECT the USIM application, read
+    # EF_IMSI, authenticate with the TS 35.208 set-1 vector. The R-APDU is the
+    # answer a handset would take off the wire, so it is asserted whole.
+    # The store is re-seeded here because the removal test above emptied it.
+    sim_cmd_key_add --imsi 001010123456789 \
+        --ki 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        --opc CD63CB71954A9F4E48A5994E37A02BAF --sqn FF9BB4D0B607 >/dev/null 2>&1
+    chk bcd-imsi "$(sim_bcd_encode 001010123456789)" "00010121436587F9"
+    chk bcd-imsi-3mnc "$(sim_bcd_encode 310150123456789)" \
+        "$(bash "$IMSISTING_ROOT/modules/09_lte_attach.sh" --imsi-encode 310150123456789 \
+            | awk -F'\t' '$1=="bcd"{print $2; exit}')"
+    chk usim-ef-imsi "$(sim_usim_ef_imsi 001010123456789)" "0800010121436587F9"
+
+    local usim_in usim_out
+    usim_in=$(printf '00A4040009A0000000871002FF86\n00A4000C026F07\n00B000000A\n')
+    usim_out=$(printf '%s' "$usim_in" | sim_usim_serve --imsi 001010123456789 2>&1)
+    chk usim-serve-ready "$(fld "$usim_out" responder)" "usim"
+    chk usim-select-aid  "$(printf '%s\n' "$usim_out" | awk -F'\t' '$1=="sw"{n++; if(n==1) print $2}')" "9000"
+    chk usim-select-ef   "$(printf '%s\n' "$usim_out" | awk -F'\t' '$1=="selected"{print $2; exit}')" "6F07"
+    chk usim-read-imsi   "$(printf '%s\n' "$usim_out" | awk -F'\t' '$1=="response"{n++; if(n==3) print $2}')" "0800010121436587F9"
+    chk usim-rapdu       "$(printf '%s\n' "$usim_out" | awk -F'\t' '$1=="rapdu"{n++; if(n==3) print $2}')" "0800010121436587F99000"
+        "0800010121436587F99000"
+    chk usim-sent        "$(fld "$usim_out" sent)" "0"
+
+    # AUTHENTICATE, 3G: RES(8) || CK || IK, and the SQN counter moves.
+    local sqn_before sqn_after usim_auth
+    sqn_before=$(sim_kv sqn "$(sim_cmd_aka_responder --imsi 001010123456789 --rand 00000000000000000000000000000000 --no-persist 2>/dev/null)")
+    usim_auth=$(printf '00888100 20 23553CBE9637A89D218AE64DAE47BF35 5C000000000000000000000000000000\n' \
+        | tr -d ' ' | sim_usim_serve --imsi 001010123456789 2>&1)
+    chk usim-auth-sw    "$(printf '%s\n' "$usim_auth" | awk -F'\t' '$1=="sw"{print $2; exit}')" "9000"
+    chk usim-auth-vec   "$(printf '%s\n' "$usim_auth" | awk -F'\t' '$1=="response"{print $2; exit}')" \
+        "A54211D5E3BA50BFB40BA9A3C58B2A05BBF0D987B21BF8CBF769BCD751044604127672711C6D3441"
+    sqn_after=$(sim_aka_row 001010123456789 | cut -f5)
+    chk usim-auth-sqn   "$(( 16#$sqn_after > 16#$sqn_before ? 1 : 0 ))" "1"
+    # The refusals a card gives, and the one it names instead of guessing.
+    chk usim-no-imsi    "$(sim_usim_serve </dev/null >/dev/null 2>&1; echo $?)" "2"
+    chk usim-2g-refused "$(printf '0088010020%s\n' 23553CBE9637A89D218AE64DAE47BF3500000000000000000000000000000000 | \
+        sim_usim_serve --imsi 001010123456789 2>/dev/null | awk -F'\t' '$1=="sw"{print $2; exit}')" "6A86"
+    chk usim-unknown-file "$(printf '00A4000C026F38\n' | sim_usim_serve --imsi 001010123456789 2>/dev/null | \
+        awk -F'\t' '$1=="sw"{print $2; exit}')" "6A82"
+    chk usim-unknown-ins "$(printf '00F0000000\n' | sim_usim_serve --imsi 001010123456789 2>/dev/null | \
+        awk -F'\t' '$1=="sw"{print $2; exit}')" "6D00"
+    chk usim-sm-refused "$(printf '8CA4000002\n' | sim_usim_serve --imsi 001010123456789 2>/dev/null | \
+        awk -F'\t' '$1=="sw"{print $2; exit}')" "6E00"
+    chk usim-read-no-ef "$(printf '00B0000002\n' | sim_usim_serve --imsi 001010123456789 2>/dev/null | \
+        awk -F'\t' '$1=="sw"{print $2; exit}')" "6986"
+    # --usim-tcp opens a real listener, so the test only exercises its
+    # refusals: a bad port and a missing IMSI both answer 2, and the socat
+    # dependency is asserted without starting a socket that would hang the run.
+    chk usim-tcp-bad-port "$(sim_cmd_usim_tcp 0 --imsi 001010123456789 >/dev/null 2>&1; echo $?)" "2"
+    chk usim-tcp-no-imsi  "$(sim_cmd_usim_tcp 2626 >/dev/null 2>&1; echo $?)" "2"
+
     printf 'ASSERTIONS\t%d\n' "$n_checks"
     rm -rf "$d"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -5381,6 +5458,234 @@ sim_cmd_key_remove() {
 #   * SQN comes from the store and is incremented afterwards (a USIM's job)
 #   * the quintet comes from the same --sim-auth path everything else uses
 #   * with --5g, the two KDF outputs the AUSF would need are derived too
+# ── USIM over a socket: the card side of an attach (R7) ─────────────────
+#
+# Every earlier verb in this module speaks *to* a card or *as* the network. This
+# one is the card: a 7816 APDU responder that a UE emulator can drive, so an
+# attach needs no physical USIM. The commands are the ones a handset actually
+# sends -- SELECT by AID or file id, READ BINARY, VERIFY, AUTHENTICATE, GET
+# RESPONSE -- and the answer to AUTHENTICATE is computed from the key store by
+# the same Milenage/TUAK path --aka-responder uses, with the SQN counter
+# persisted per vector exactly as it is there.
+#
+# WHAT IS REAL: the APDU parse, the SELECT/READ state (which EF is current),
+# the vector, the SQN increment, and the status words.
+# WHAT IS NOT: no AUTS. A card returns 9862 with 14 octets of AUTS when the
+# network's SQN is behind its own; f1* is not built here (R8), so this card
+# never emits that path and says so instead of returning a made-up AUTS.
+# EF_IMSI is served because the store knows the IMSI; EF_ICCID, EF_AD and the
+# service tables are not served, because the store does not hold them and a
+# card that invents a profile is worse than a card that reports 6A82.
+SIM_USIM_AID_USIM="A0000000871002FF86"
+SIM_USIM_AID_ISIM="A0000000871004"
+
+sim_usim_ef_imsi() {  # <imsi> -> EF_IMSI content (length octet + BCD)
+    local imsi="${1:-}"
+    [[ "$imsi" =~ ^[0-9]{14,15}$ ]] || return 1
+    local bcd; bcd=$(sim_bcd_encode "$imsi") || return 1
+    printf '%02X%s' "$(( ${#bcd} / 2 ))" "$bcd"
+}
+
+sim_usim_serve() {
+    local imsi="" reslen="8" persist=1
+    while (( $# > 0 )); do
+        case "$1" in
+            --imsi)   imsi="${2:-}"; shift 2 ;;
+            --reslen) reslen="${2:-8}"; shift 2 ;;
+            --no-persist) persist=0; shift ;;
+            -h|--help)
+                printf 'usage: --usim-serve --imsi <imsi> [--reslen 4|8|16] [--no-persist]\n' >&2
+                printf '       reads one hex C-APDU per line on stdin, answers one R-APDU per line\n' >&2
+                return 0 ;;
+            *) printf 'ERROR\t--usim-serve does not take %s\n' "$(sim_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$imsi" ]] || {
+        printf 'ERROR\tusage: --usim-serve --imsi <imsi> [--reslen 4|8|16]\n' >&2; return 2; }
+    [[ "$imsi" =~ ^[0-9]{14,15}$ ]] || {
+        printf 'ERROR\tIMSI must be 14 or 15 digits: %s\n' "$(sim_sanitize "$imsi")" >&2; return 2; }
+    local row; row=$(sim_aka_row "$imsi")
+    if [[ -z "$row" ]]; then
+        printf 'ERROR\tno subscriber %s in the key store; --key-add writes one\n' "$(sim_sanitize "$imsi")" >&2
+        return 1
+    fi
+    [[ "$reslen" =~ ^(4|8|16)$ ]] || {
+        printf 'ERROR\t--reslen is 4, 8 or 16 octets\n' >&2; return 2; }
+
+    local ef_imsi; ef_imsi=$(sim_usim_ef_imsi "$imsi") || {
+        printf 'ERROR\tthe IMSI could not be BCD-encoded\n' >&2; return 1; }
+
+    local cur_df="3F00" cur_ef="" n=0 line h gots
+    printf 'responder\tusim\n'
+    printf 'imsi\t%s\n' "$imsi"
+    printf 'store\t%s\n' "$(sim_aka_store)"
+    printf 'serves\tEF_IMSI (6F07)\n'
+    printf 'not_served\tEF_ICCID, EF_AD, EF_UST: the store holds no profile for them\n'
+
+    # `|| [[ -n $line ]]` is load-bearing: a client that sends its last APDU
+    # without a trailing newline would otherwise have that APDU swallowed.
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+        [[ "$line" == \#* ]] && continue
+        n=$(( n + 1 ))
+        local hdr
+        hdr=$(sim_parse_capdu "$line" 2>/dev/null) || {
+            printf 'apdu\t%s\n' "$(sim_sanitize "$line")"
+            printf 'sw\t6700\n'
+            printf 'status\t%s\n' "$(sim_sw_label 6700)"
+            printf 'note\tthe input is not a well-formed C-APDU\n'
+            continue; }
+        local cla ins p1 p2 data
+        cla=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="cla"{print $2; exit}')
+        ins=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="ins"{print $2; exit}')
+        p1=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="p1"{print $2; exit}')
+        p2=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="p2"{print $2; exit}')
+        data=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="data"{print $2; exit}')
+        local sw="6D00" resp="" cmd="unknown" note=""
+
+        # Class: 00/80 are the plain classes; anything with the secure-messaging
+        # bit set is refused rather than guessed (this card has no SCP).
+        if (( (16#$cla & 0x0C) != 0 )); then
+            sw="6E00"; cmd="secure messaging"; note="this card has no secure messaging"
+        else
+            case "$ins" in
+                A4)
+                    cmd="SELECT"
+                    if [[ "$p1" == "04" ]]; then
+                        # The AID a handset sends is the RID plus the USIM
+                        # application code and whatever proprietary tail its
+                        # card vendor uses, so the match is on the prefix that
+                        # TS 31.102 defines, not on the whole string.
+                        local aid="${data:0:14}"
+                        if [[ "$aid" == "${SIM_USIM_AID_USIM:0:14}" || "$aid" == "${SIM_USIM_AID_ISIM:0:14}" ]]; then
+                            cur_df="7FFF"; cur_ef=""; sw="9000"
+                            resp="621F8202$SIM_USIM_AID_USIM"
+                            note="USIM application selected"
+                        else
+                            sw="6A82"; note="no application with that AID on this card"
+                        fi
+                    elif [[ "$p1" == "00" ]]; then
+                        local fid="${data:0:4}"
+                        case "$fid" in
+                            3F00|7FFF|7F20|7F10) cur_df="$fid"; cur_ef=""; sw="9000"; note="DF selected" ;;
+                            6F07) cur_ef="6F07"; sw="9000"; resp="$ef_imsi"; note="EF_IMSI selected (content returned in the FCI)" ;;
+                            6F38|2FE2|6FAD)
+                                cur_ef="$fid"; sw="6A82"
+                                note="$(sim_file_name "$fid" | cut -d'|' -f1) is not served: the store holds no content for it" ;;
+                            *) sw="6A82"; note="no such file on this card" ;;
+                        esac
+                    else
+                        sw="6A86"; note="only SELECT by AID (P1=04) or by file id (P1=00) is supported"
+                    fi ;;
+                B0)
+                    cmd="READ BINARY"
+                    if [[ -z "$cur_ef" ]]; then
+                        sw="6986"; note="no EF selected"
+                    elif [[ "$cur_ef" != "6F07" ]]; then
+                        sw="6A82"; note="the selected file is not served"
+                    else
+                        local off=$(( 16#$p1 * 256 + 16#$p2 ))
+                        local total=$(( ${#ef_imsi} / 2 ))
+                        if (( off >= total )); then
+                            sw="6B00"; note="offset outside EF_IMSI ($total octets)"
+                        else
+                            resp="${ef_imsi:$(( off * 2 ))}"
+                            sw="9000"
+                            note="EF_IMSI from offset $off"
+                        fi
+                    fi ;;
+                20)
+                    cmd="VERIFY"
+                    # The store has no PIN record, so this card cannot check one.
+                    # It says so rather than pretending the PIN was verified.
+                    sw="9000"
+                    note="no PIN record in the store: this card does not authenticate a PIN" ;;
+                88)
+                    cmd="AUTHENTICATE"
+                    if [[ "$p1" == "81" ]]; then
+                        if (( ${#data} != 64 )); then
+                            sw="6700"; note="3G AUTHENTICATE carries RAND (16) and AUTN (16) octets"
+                        else
+                            local rand="${data:0:32}" vec res ck ik
+                            vec=$(sim_cmd_aka_responder --imsi "$imsi" --rand "$rand" 2>/dev/null)
+                            # xres is what the store publishes; on this side of
+                            # the card it IS the RES the handset will send back.
+                            res=$(sim_kv xres "$vec"); ck=$(sim_kv ck "$vec"); ik=$(sim_kv ik "$vec")
+                            if [[ -z "$res" || -z "$ck" || -z "$ik" ]]; then
+                                sw="6F00"; note="the key store produced no vector for this subscriber"
+                            else
+                                case "$reslen" in
+                                    4) res="${res:0:8}" ;;
+                                    8) res="${res:0:16}" ;;
+                                    16) res="${res:0:32}" ;;
+                                esac
+                                resp="${res}${ck}${ik}"
+                                sw="9000"
+                                note="RES($(( ${#res} / 2 )) octets) || CK || IK from the key store"
+                            fi
+                        fi
+                    elif [[ "$p1" == "80" ]]; then
+                        # The 2G AUTHENTICATE is the GSM access path (COMP128
+                        # SRES/Kc), not the USIM one. This card is a USIM over
+                        # Milenage/TUAK, so it refuses by name rather than
+                        # computing SRES from a key it was not provisioned with.
+                        sw="6A86"
+                        note="P1=80 is the GSM AUTHENTICATE: this card serves the USIM path (P1=81) only"
+                    else
+                        sw="6A86"; note="only P1=81 (3G) and P1=80 (2G) AUTHENTICATE are built"
+                    fi ;;
+                C0)
+                    cmd="GET RESPONSE"; sw="9000"; note="nothing further to collect" ;;
+                F2)
+                    cmd="STATUS"; sw="6A81"; note="STATUS is not served: no card manager state is modelled" ;;
+                *)
+                    sw="6D00"; note="instruction not supported by this card" ;;
+            esac
+        fi
+
+        printf 'apdu\t%s\n' "$(sim_sanitize "$line")"
+        printf 'ins\t0x%s\n' "$ins"
+        printf 'command\t%s\n' "$cmd"
+        [[ -n "$cur_ef" ]] && printf 'selected\t%s\n' "$cur_ef"
+        printf 'sw\t%s\n' "$sw"
+        printf 'status\t%s\n' "$(sim_sw_label "$sw")"
+        [[ -n "$resp" ]] && printf 'response\t%s\n' "$resp"
+        [[ -n "$note" ]] && printf 'note\t%s\n' "$note"
+        # The card's answer, in the form a UE reads off the wire.
+        printf 'rapdu\t%s%s\n' "$resp" "$sw"
+    done
+    printf 'exchanges\t%s\n' "$n"
+    printf 'sent\t0\n'
+    printf 'limit\tthis is the card side of the attach and not the network side: the vector comes from the key store and the file system serves EF_IMSI only; AUTS is not built (R8)\n'
+    return 0
+}
+
+# The same responder over a TCP socket, for a UE emulator that expects a card
+# on a port rather than on stdin. socat forks one responder per connection and
+# the state (SQN) lives in the store, so two connections share one card.
+sim_cmd_usim_tcp() {
+    local port="${1:-}" imsi=""
+    shift 2>/dev/null || true
+    while (( $# > 0 )); do
+        case "$1" in
+            --imsi) imsi="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--usim-tcp does not take %s\n' "$(sim_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || {
+        printf 'ERROR\tusage: --usim-tcp <port> --imsi <imsi>\n' >&2; return 2; }
+    [[ -n "$imsi" ]] || { printf 'ERROR\tusage: --usim-tcp <port> --imsi <imsi>\n' >&2; return 2; }
+    command -v socat >/dev/null 2>&1 || {
+        printf 'ERROR\tsocat is needed to listen on a port and it is not on PATH\n' >&2; return 1; }
+    printf 'listener\ttcp:%s\n' "$port"
+    printf 'responder\tusim --imsi %s\n' "$imsi"
+    printf 'sent\t0\n'
+    printf 'limit\tthe socket carries APDUs both ways; nothing is put on the air\n'
+    exec socat "TCP-LISTEN:$port,reuseaddr,fork" \
+        "EXEC:${BASH_SOURCE[0]} --usim-serve --imsi $imsi"
+}
+
 sim_cmd_aka_responder() {
     local imsi='' rand='' sqn='' sn='' sn_name='' fiveg=0 persist=1
     while (( $# )); do
@@ -5622,6 +5927,8 @@ sim_cli_main() {
         --key-remove)     sim_cmd_key_remove "$@" ;;
         --aka-responder)  sim_cmd_aka_responder "$@" ;;
         --aka-serve)      sim_cmd_aka_serve "$@" ;;
+        --usim-serve)     sim_usim_serve "$@" ;;
+        --usim-tcp)       sim_cmd_usim_tcp "$@" ;;
         --es9-plus)       sim_cmd_es9_plus "$@" ;;
         --es8-scp03t)     sim_cmd_es8_scp03t "$@" ;;
         --es8-build)      sim_cmd_es8_build "$@" ;;
@@ -5665,6 +5972,13 @@ Usage: $0 COMMAND
                                     one AKA event: quintet from the store, SQN incremented and saved; --5g adds KAUSF and RES*
   --aka-serve [--5g --sn <hex>|--sn-name <text>]
                                     resident responder: VECTOR <imsi> [<rand>] / LIST / QUIT on stdin
+  --usim-serve --imsi <digits> [--reslen 4|8|16]
+                                    be the card: one hex C-APDU per line on stdin,
+                                    one R-APDU back (SELECT, READ BINARY, VERIFY,
+                                    AUTHENTICATE P1=81, GET RESPONSE)
+  --usim-tcp <port> --imsi <digits>
+                                    the same card on a TCP socket, one socat fork
+                                    per connection; the SQN lives in the store
   --es9-plus <op> --smds <host[:port]> [flags]
                                     SGP.22 ES9+ HTTP/JSON request builder; nothing is sent
   --es8-build <segment> [flags]     SGP.22 ES8+ TLV builder (5.5.1..5.5.5): bpp-header,
