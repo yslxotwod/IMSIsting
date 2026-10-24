@@ -73,8 +73,17 @@ if ! ( cd "$vdir" && ./tools/check-paths.sh >/dev/null 2>&1 ); then
 fi
 
 # A module has to run from the extracted tree with nothing else from here.
-if ! ( cd "$vdir" && bash modules/26_ss7_map.sh --sgsap-build location-update-request \
-        --imsi 310150123456789 --lai 310-150-4660 2>/dev/null | grep -q '^hex' ); then
+#
+# The output is captured BEFORE it is searched. Piping the module straight into
+# `grep -q` fails under `set -o pipefail` even when the module is healthy: grep
+# exits at the first match, the module is still writing its later rows, takes
+# SIGPIPE and reports 141, and the pipeline inherits it. That reads as "a
+# module did not run" for a module that ran perfectly.
+smoke=""
+smoke=$( cd "$vdir" && bash modules/26_ss7_map.sh --sgsap-build \
+          location-update-request --imsi 310150123456789 \
+          --lai 310-150-4660 2>/dev/null ) || smoke=""
+if ! printf '%s\n' "$smoke" | grep -q '^hex'; then
     printf 'make-tarball: a module did not run from the extracted tree\n' >&2
     exit 1
 fi
