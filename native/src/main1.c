@@ -2707,6 +2707,7 @@ static const char *const plain_keys[] = {
     "bursts_per_block\tbursts per block",
     "bwp_indicator\tbwp indicator",
     "bwp_prb\tbwp prb",
+    "bye\tbye",
     "byte1\tbyte1",
     "byte2\tbyte2",
     "byte3\tbyte3",
@@ -3089,6 +3090,7 @@ static const char *const plain_keys[] = {
     "delivery\tdelivery",
     "denied\tdenied",
     "dependency\tdependency",
+    "derived\tderived",
     "description\tdescription",
     "dest_addr_npi\tdest address npi",
     "dest_addr_ton\tdest address ton",
@@ -3664,6 +3666,7 @@ static const char *const plain_keys[] = {
     "kc_effective_bits\tkc effective bits",
     "kc_frame_bits\tkc frame bits",
     "kc_zero_rand\tkc zero rand",
+    "kdf_source\tkdf source clause",
     "keccak_iterations\tkeccak iterations",
     "keep_going\tkeep going",
     "kernel\tkernel",
@@ -3693,6 +3696,7 @@ static const char *const plain_keys[] = {
     "keystream_bits\tkeystream bits",
     "keystream_bits_required\tkeystream bits required",
     "ki\tki",
+    "ki_masked\tki masked",
     "ki_present\tki present",
     "kic\tkic",
     "kid\tkid",
@@ -3870,6 +3874,7 @@ static const char *const plain_keys[] = {
     "merged_into\tmerged into",
     "message\tmessage",
     "message_authentication_code\tmessage authentication code",
+    "message_bits\tmessage bits",
     "message_hex\tmessage bytes",
     "message_id\tmessage id",
     "message_name\tmessage name",
@@ -4559,6 +4564,7 @@ static const char *const plain_keys[] = {
     "release_cause\trelease reason",
     "released\treleased",
     "remainder_prb\tremainder prb",
+    "removed\tremoved",
     "rendered_d0_imei\trendered d0 handset serial",
     "rendered_d0_location\trendered d0 location",
     "rendered_d0_sms\trendered d0 sms",
@@ -4611,6 +4617,7 @@ static const char *const plain_keys[] = {
     "reused_ephemeral_keys\treused ephemeral keys",
     "reused_key\treused key",
     "reused_keys\treused keys",
+    "reveal\treveal",
     "revision\trevision",
     "revolte\trevolte",
     "rf_power\tRF power",
@@ -4645,6 +4652,7 @@ static const char *const plain_keys[] = {
     "routing_indicator\trouting indicator",
     "routing_on\trouting on",
     "row\trow",
+    "row_end\trow end",
     "rows\trows",
     "rows_seen\trows seen",
     "rows_written\trows written",
@@ -4809,6 +4817,8 @@ static const char *const plain_keys[] = {
     "sec_meaning\tsec meaning",
     "seconds\tseconds",
     "secp256r1\tsecp256r1 curve",
+    "secret2\tsecond card secret (opc or top)",
+    "secret2_masked\tsecret2 masked",
     "secured\tsecured",
     "secured_data\tsecured data",
     "secured_data_len\tsecured data length",
@@ -4847,6 +4857,8 @@ static const char *const plain_keys[] = {
     "sequence_number_octets\tsequence number octets",
     "serial\tserial",
     "serial_radios\tserial radios",
+    "serve\tserve",
+    "served\tserved",
     "served_ta\tserved timing advance",
     "service\tservice",
     "service_type\tservice type",
@@ -4970,6 +4982,8 @@ static const char *const plain_keys[] = {
     "smc_bits\tsmc bits",
     "smc_octet\tsmc octet",
     "smf\tsession manager",
+    "sn\tserving network name, hex",
+    "sn_text\tserving network name, text",
     "snn\tserving network name",
     "snn_hex\tserving network name hex",
     "snr\tsignal-to-noise ratio",
@@ -5012,6 +5026,8 @@ static const char *const plain_keys[] = {
     "spi_rccds\tspi rccds",
     "spi_source\tspi source",
     "spi_weakness\tspi weakness",
+    "sqn\tsequence number",
+    "sqn_next\tsequence number after this vector",
     "srb_information_setup_list\tsrb information setup list",
     "src\tsource",
     "sres\tsres",
@@ -5081,6 +5097,7 @@ static const char *const plain_keys[] = {
     "stk_command_keyword\tstk command keyword",
     "stopped\tstopped",
     "store\tstore",
+    "store_mode\tstore mode",
     "stored\tstored",
     "story\tstory",
     "stp\tstp",
@@ -5113,6 +5130,7 @@ static const char *const plain_keys[] = {
     "submit_sm\tsubmit sm",
     "submit_sm_resp\tsubmit sm resp",
     "subscriber\tsubscriber",
+    "subscribers\tsubscribers",
     "subscribers_file\tsubscribers file",
     "subscription\tsubscription",
     "subset\tsubset",
@@ -5431,6 +5449,7 @@ static const char *const plain_keys[] = {
     "variant\tvariant",
     "vbs_notif\tvbs notif",
     "vector\tvector",
+    "vector_count\tauthentication vectors served from this store",
     "vectors\tvectors",
     "velocity_mps\tvelocity mps",
     "vendor\tvendor",
@@ -5511,6 +5530,7 @@ static const char *const plain_keys[] = {
     "wus_frame_note\twus frame note",
     "xapp\txapp",
     "xapp_unsigned\txapp unsigned",
+    "xres\texpected response (network side of RES)",
     "yes\tyes",
     "zero_teids\tzero teids",
     "zp_csi_rs\tzp CSI rs",
@@ -6067,6 +6087,9 @@ static const ChipRow chip_rows[] = {
     { "15_downgrade",        "--version",             NEED_NO, DOES_READS },
     { "15_downgrade",        "--yes",                 NEED_NO, DOES_READS },
     { "16_sim",              "--__index_probe__",     NEED_NO, DOES_READS },
+    { "16_sim",              "--aka-responder",       NEED_NO, DOES_MODIFIES },
+    { "16_sim",              "--aka-serve",           NEED_NO, DOES_MODIFIES },
+    { "16_sim",              "--algo",                NEED_NO, DOES_READS },
     { "16_sim",              "--amf",                 NEED_NO, DOES_READS },
     { "16_sim",              "--build-apdu",          NEED_NO, DOES_MODIFIES },
     { "16_sim",              "--decode-ad",           NEED_NO, DOES_READS },
@@ -6084,8 +6107,14 @@ static const ChipRow chip_rows[] = {
     { "16_sim",              "--file-id",             NEED_NO, DOES_READS },
     { "16_sim",              "--get-response",        NEED_NO, DOES_READS },
     { "16_sim",              "--help",                NEED_NO, DOES_READS },
+    { "16_sim",              "--imsi",                NEED_NO, DOES_READS },
     { "16_sim",              "--info",                NEED_NO, DOES_READS },
     { "16_sim",              "--iterations",          NEED_NO, DOES_READS },
+    { "16_sim",              "--key-add",             NEED_NO, DOES_MODIFIES },
+    { "16_sim",              "--key-list",            NEED_NO, DOES_READS },
+    { "16_sim",              "--key-remove",          NEED_NO, DOES_MODIFIES },
+    { "16_sim",              "--key-show",            NEED_NO, DOES_READS },
+    { "16_sim",              "--ki",                  NEED_NO, DOES_READS },
     { "16_sim",              "--klength",             NEED_NO, DOES_READS },
     { "16_sim",              "--menu",                NEED_NO, DOES_READS },
     { "16_sim",              "--op",                  NEED_NO, DOES_READS },
@@ -6095,14 +6124,18 @@ static const ChipRow chip_rows[] = {
     { "16_sim",              "--parse-ota",           NEED_NO, DOES_READS },
     { "16_sim",              "--plan",                NEED_NO, DOES_READS },
     { "16_sim",              "--quiet",               NEED_NO, DOES_READS },
+    { "16_sim",              "--rand",                NEED_NO, DOES_READS },
     { "16_sim",              "--read-binary",         NEED_SIM, DOES_READS },
     { "16_sim",              "--read-record",         NEED_SIM, DOES_READS },
+    { "16_sim",              "--reveal",              NEED_NO, DOES_READS },
     { "16_sim",              "--rsp",                 NEED_NO, DOES_READS },
     { "16_sim",              "--select-fid",          NEED_SIM, DOES_READS },
     { "16_sim",              "--selftest",            NEED_NO, DOES_READS },
     { "16_sim",              "--sim-auth",            NEED_SIM, DOES_READS },
     { "16_sim",              "--sim-auth-check",      NEED_NO, DOES_READS },
     { "16_sim",              "--smds",                NEED_SIM, DOES_READS },
+    { "16_sim",              "--sn",                  NEED_NO, DOES_READS },
+    { "16_sim",              "--sn-name",             NEED_NO, DOES_READS },
     { "16_sim",              "--spi",                 NEED_NO, DOES_READS },
     { "16_sim",              "--sqn",                 NEED_NO, DOES_READS },
     { "16_sim",              "--status-tsv",          NEED_NO, DOES_READS },
@@ -23782,6 +23815,93 @@ sim_build_auth(AppState *state, const char *module_id,
     return outer;
 }
 
+/* The subscriber key store and the AKA responder: the only place this tree
+ * holds a card secret. The file is 0600 under STATE_DIR and every row that
+ * names a secret prints it masked until --reveal asks for it. The responder
+ * walks SQN on disk, one increment per vector, because a replayed SQN is what
+ * the network catches — not something a flag here should decide. */
+static GtkWidget *
+sim_build_aka(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("KEYS AND THE AKA RESPONDER",
+        "The card secret lives in one 0600 file; the responder turns it into the "
+        "vectors a network accepts, and walks the sequence number the way a USIM "
+        "does. TS 35.208 test set 1 is the prefilled key, so the first answer is "
+        "a published one.", &body);
+    GtkWidget *add_body, *resp_body, *serve_body;
+    GtkWidget *add = verb_card("STORE A CARD SECRET", &add_body);
+    GtkWidget *resp = verb_card("ANSWER ONE CHALLENGE", &resp_body);
+    GtkWidget *serve = verb_card("STAY LISTENING", &serve_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(add_body),
+            mod_arg_row_prefilled(state, module_id, status, "Store TS 35.208 Set 1",
+                "--key-add",
+                "--imsi 001010123456789 --ki 465B5CE8B199B49FAA5F0A2EE238A6BC "
+                "--op CDC202D5123E20F62B6D676AC72CB318 --sqn FF9BB4D0B607",
+                "K, the operator key (OP is derived to OPC here) and a starting "
+                "SQN. The row that comes back masks both secrets and names the "
+                "mode the file was written with."));
+        gtk_box_append(GTK_BOX(add_body),
+            mod_arg_choices(state, module_id, status, "Look at the Store", "",
+                "The store is a TSV under STATE_DIR. Listing masks the secrets; "
+                "--reveal is the one control that prints them, because a secret "
+                "printed by accident is a secret burned.",
+                (const char *[]) { "--key-list",
+                                   "--key-list --reveal",
+                                   "--key-show --imsi 001010123456789",
+                                   "--key-remove --imsi 001010123456789" },
+                (const char *[]) { "List Subscribers", "List with Secrets",
+                                   "Show One", "Remove One" }, 4));
+        gtk_box_append(GTK_BOX(add_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), add);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(resp_body),
+            mod_arg_row_prefilled(state, module_id, status, "3G AKA Vector",
+                "--aka-responder",
+                "--imsi 001010123456789 --rand 23553CBE9637A89D218AE64DAE47BF35",
+                "One authentication event for a stored IMSI. The answer is the "
+                "quintet for TS 35.208 set 1 (RES A54211D5E3BA50BF, AUTN "
+                "55F328B43577B9B94A9FFAC354DFAFB3) and the SQN the next event "
+                "will start from."));
+        gtk_box_append(GTK_BOX(resp_body),
+            mod_arg_row_prefilled(state, module_id, status, "5G HE AV Inputs",
+                "--aka-responder",
+                "--imsi 001010123456789 --5g --sn-name 5G:mnc001.mcc001.3gppnetwork.org",
+                "The same vector plus the two KDF outputs an AUSF needs: KAUSF "
+                "over (SN name, SQN xor AK) and RES* over (SN name, RAND, RES), "
+                "per TS 33.220 Annex B.2. The SN name is fed as text, which is "
+                "how the standard writes it."));
+        gtk_box_append(GTK_BOX(resp_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), resp);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(serve_body),
+            mod_arg_row_prefilled(state, module_id, status, "Serve Requests",
+                "--aka-serve", "",
+                "A resident responder on stdin: VECTOR <imsi> [<rand>], LIST, "
+                "QUIT. Each vector walks the stored SQN forward, so two callers "
+                "on one store never hand out the same sequence number twice."));
+        gtk_box_append(GTK_BOX(serve_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), serve);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 /* eSIM remote provisioning: the profile package a SM-DP+ sends, and the
  * responses an SM-DS returns. SGP.22 fixes the TLV structure; it does not fix
  * the SCP03t bodies, and the verbs say so rather than inventing them. */
@@ -23868,6 +23988,7 @@ static ModuleSubmenuEntry sim_entries[] = {
     { "Contents", "auth-smartcard-symbolic", NULL, sim_build_decode },
     { "Air interface", "document-send-symbolic", NULL, sim_build_ota },
     { "Card authentication", "security-high-symbolic", NULL, sim_build_auth },
+    { "Keys and AKA", "auth-smartcard-symbolic", NULL, sim_build_aka },
     { "eSIM provisioning", "auth-smartcard-symbolic", NULL, sim_build_esim },
 };
 /* 17_pcap_analysis — capture analysis.

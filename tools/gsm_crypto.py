@@ -68,6 +68,8 @@ rather than a zero-filled result: a silently wrong SRES/Kc is worse than none.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import random
 import sys
 
@@ -741,6 +743,118 @@ AES128_VECTORS = [
      "00112233445566778899aabbccddeeff",
      "69c4e0d86a7b0430d8cdb78070b4c55a"),
 ]
+
+
+# ── 5G key derivation (TS 33.220 Annex B.2, as used by TS 33.501 A.2) ──────
+# S = FC || P0 || L0 || P1 || L1 || ... || Pn || Ln, each Li a 2-byte
+# big-endian BIT length; output = HMAC-SHA-256(key, S) truncated to the
+# capability the caller asks for.  FC values this tree uses:
+#   0x6A KAUSF  (AUSF key,      P0 = SN name, P1 = SQN xor AK)
+#   0x6B RES*   (resync-proof RES, P0 = SN name, P1 = RAND, P2 = RES)
+#   0x6C KSEAF  (SEAF key,      P0 = SN name)                -- 13_nr_core
+# The function is deliberately unaware of which FC means what: the caller
+# passes the inputs, and the caller is the module that names the clause.
+
+KDF_FC = {
+    0x6A: ("KAUSF", "AUSF key (TS 33.501 A.4.1): P0 = SN name, P1 = SQN xor AK"),
+    0x6B: ("RES*", "5G RES star (TS 33.501 A.4.1): P0 = SN name, P1 = RAND, P2 = RES"),
+    0x6C: ("KSEAF", "SEAF key (TS 33.501 A.5): P0 = SN name"),
+}
+
+
+def kdf_parts(fc: int, params, out_bits: int = 256):
+    """Return (message_bytes, description_rows) for one KDF invocation.
+
+    Lengths are BIT lengths in two bytes, so a parameter longer than 8191
+    bytes cannot be expressed; that is a property of the scheme, not of this
+    code, and it is refused rather than wrapped.
+    """
+    if not 0 <= fc <= 0xFF:
+        raise ValueError("FC must fit in one octet, got %d" % fc)
+    parts = [bytes([fc])]
+    rows = []
+    for i, raw in enumerate(params):
+        p = bytes(raw)
+        bits = len(p) * 8
+        if bits > 0xFFFF:
+            raise ValueError("P%d is %d bytes; the scheme caps a parameter at "
+                             "65535 bits (8191 bytes)" % (i, len(p)))
+        parts.append(p)
+        parts.append(bits.to_bytes(2, "big"))
+        rows.append((i, p, bits))
+    msg = b"".join(parts)
+    return msg, rows, (out_bits + 7) // 8
+
+
+def kdf(key: bytes, fc: int, params) -> bytes:
+    """HMAC-SHA-256(key, FC || P0 || L0 || ...) truncated to 256 bits."""
+    msg, _rows, nbytes = kdf_parts(fc, params)
+    return hmac.new(key, msg, hashlib.sha256).digest()[:nbytes]
+
+
+def kausf(k: bytes, sn_name: bytes, sqn_ak: bytes) -> bytes:
+    """AUSF key: KDF(K, FC=0x6A, SN name, SQN xor AK)."""
+    return kdf(k, 0x6A, (sn_name, sqn_ak))
+
+
+def res_star(k: bytes, sn_name: bytes, rand: bytes, res: bytes) -> bytes:
+    """5G RES*: KDF(K, FC=0x6B, SN name, RAND, RES)."""
+    return kdf(k, 0x6B, (sn_name, rand, res))
+
+
+def kseaf(kausf_key: bytes, sn_name: bytes) -> bytes:
+    """SEAF key: KDF(KAUSF, FC=0x6C, SN name)."""
+    return kdf(kausf_key, 0x6C, (sn_name,))
+
+
+def _cli_kdf(a) -> int:
+    """--kdf <fc> --key <hex> --p0 <hex> [--p1 <hex>] [--p2 <hex>]."""
+    try:
+        fc = int(a.kdf, 16)
+    except (TypeError, ValueError):
+        print("ERROR\t--kdf wants one octet of hex, e.g. 6A", file=sys.stderr)
+        return 2
+    if not a.key or not a.p0:
+        print("ERROR\t--kdf needs --key and --p0", file=sys.stderr)
+        return 2
+    try:
+        key = bytes.fromhex(a.key)
+    except ValueError:
+        print("ERROR\t--key must be hex", file=sys.stderr)
+        return 1
+    if not key:
+        print("ERROR\t--key is empty", file=sys.stderr)
+        return 1
+    params = []
+    for i, v in enumerate((a.p0, a.p1, a.p2)):
+        if v is None:
+            continue
+        if i != len(params):
+            print("ERROR\tgive the KDF parameters in order starting at --p0",
+                  file=sys.stderr)
+            return 2
+        try:
+            params.append(bytes.fromhex(v))
+        except ValueError:
+            print("ERROR\t--p%d must be hex" % i, file=sys.stderr)
+            return 1
+    try:
+        msg, rows, nbytes = kdf_parts(fc, params)
+        out = hmac.new(key, msg, hashlib.sha256).digest()[:nbytes]
+    except ValueError as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+    name, why = KDF_FC.get(fc, ("FC 0x%02X" % fc, "no clause is named for this FC here"))
+    print("fc\t%02X" % fc)
+    print("derived\t%s" % name)
+    print("key_bits\t%d" % (len(key) * 8))
+    print("message_bits\t%d" % (len(msg) * 8))
+    for i, p, bits in rows:
+        print("p%d\t%s\tp%d_bits\t%d" % (i, p.hex().upper(), i, bits))
+    print("out\t%s" % out.hex().upper())
+    print("source\tTS 33.220 Annex B.2: HMAC-SHA-256(key, FC || P0 || L0 || ...), Li = bit length")
+    print("clause\t%s" % why)
+    return 0
 
 
 def _crypto_kat_checks():
@@ -1578,6 +1692,13 @@ def main(argv=None) -> int:
                    help="TUAK CK_sz in bits (default 128)")
     p.add_argument("--ik-sz", type=int, default=128, choices=(128, 256),
                    help="TUAK IK_sz in bits (default 128)")
+    p.add_argument("--kdf", metavar="FC",
+                   help="5G KDF (TS 33.220 B.2): octet FC in hex, with --key and "
+                        "--p0/--p1/--p2")
+    p.add_argument("--key", help="KDF key, hex (K for 0x6A/0x6B, KAUSF for 0x6C)")
+    p.add_argument("--p0", help="KDF parameter P0, hex (SN name for every FC here)")
+    p.add_argument("--p1", help="KDF parameter P1, hex (SQN xor AK, or RAND)")
+    p.add_argument("--p2", help="KDF parameter P2, hex (RES, for RES*)")
     p.add_argument("--keccak", metavar="HEX",
                    help="raw Keccak-f[1600] on exactly 200 bytes of hex")
     p.add_argument("--a51", action="store_true",
@@ -1610,6 +1731,8 @@ def main(argv=None) -> int:
 
     if a.selftest:
         return selftest()
+    if a.kdf is not None:
+        return _cli_kdf(a)
     if a.keccak:
         try:
             inb = parse_hex(a.keccak, 200, "KECCAK input")

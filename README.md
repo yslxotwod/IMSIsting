@@ -125,7 +125,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 | Module | Description |
 |---|---|
 | `14_suci` | SUCI concealment and de-concealment, X25519 and P-256 profiles |
-| `16_sim` | SIM AKA (COMP128 1/2/3, Milenage, TUAK), USIM files, EF_AD, OTA parsing, eSIM profiles, ES9+ |
+| `16_sim` | SIM AKA (COMP128 1/2/3, Milenage, TUAK), USIM files, EF_AD, OTA parsing, eSIM profiles, ES9+, plus a subscriber key store and an AKA responder (`--key-add`, `--aka-responder`, `--aka-serve`) that holds K/OPC, SQN and state across calls and derives KAUSF/RES* for 5G |
 | `18_imsi_exposure` | IMSI harvest and TMSI/IMSI correlation over a capture |
 | `31_sim_defense` | SIM swap: risk scoring, the six detection signals, plus APDU and port-out artefacts |
 | `41_ota_sms` | OTA binary SMS: TPDU packing, S@T push with its CONCATENATE / variable-reference / substitution byte code, SMPP 3.4 built/parsed and carried to an SMSC over TCP, an HTTP gateway send that needs a SIM on the far phone rather than in this machine, WIB refused by name |
@@ -331,6 +331,9 @@ A **PC/SC reader** (any CCID reader, ~$15) for `16_sim`'s USIM file work. For
 writing profiles you need a programmable card such as a **sysmoUSIM-SJS1** or a
 **5G test USIM**; `16_sim`'s four offensive paths currently stop at a plan file
 naming one, because there is no APDU exchange loop in the module to drive it.
+The key store and the AKA responder need none of that: they compute the network
+side of the AKA from a subscriber's K and OPC/TOP, walk SQN on disk, and answer
+on a line protocol.
 
 ### GPS
 
@@ -620,7 +623,7 @@ the location and state halves are unverified by this tree.
 | module | refused, and why |
 |---|---|
 | `50_gprs` | GEA1/GEA2: recovered only in the cryptanalysis literature, taps not in this tree. GEA5: algorithm body and test data licence-gated. GEA0/GEA3/GEA4 are computed and vector-tested. |
-| `16_sim` | the profile-element chain carried inside the `86` segments (SCP03t protects the block, it does not parse it), `HandleNotification` (the standard defines no response body), AUTS resynchronisation, and a live session — `--es8-scp03t` builds the 84/85/86 TLVs from a supplied key set and both challenges, but a card cryptogram can only be confirmed by an eUICC |
+| `16_sim` | the profile-element chain carried inside the `86` segments (SCP03t protects the block, it does not parse it), `HandleNotification` (the standard defines no response body), AUTS resynchronisation (`--aka-responder` emits the quintet and walks SQN but has no resync path), and a live session — `--es8-scp03t` builds the 84/85/86 TLVs from a supplied key set and both challenges, but a card cryptogram can only be confirmed by an eUICC |
 | `41_ota_sms` | SMPP optional TLVs, submit_multi, data_sm and SMPP-over-TLS (the session is plaintext TCP 2775 by design, so the transport is named in the output); WIB push (the leaf command bytes have no citable public encoding) and a deck that binds a terminal response into a variable: S@T's CONCATENATE, variable-reference and substitution encodings are built, but PROVIDE LOCAL INFORMATION returns its datum in the terminal response rather than into a variable, so `--sat-push` emits the fixed-body form and the variable-bound body is assembled from `--sat-concat` / `--sat-varref` / `--sat-subst` by hand |
 | `49_ntn` | feeder link — SIB19 carries no gateway geometry, so the gateway-satellite distance is not derivable from anything the cell broadcasts |
 | `46_lpp` | UTDOA is LPPa, not LPP, so it is stated as a handoff instead of encoded as the wrong protocol |

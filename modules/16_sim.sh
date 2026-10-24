@@ -4716,6 +4716,135 @@ sim_selftest() {
     chk usage-es9-plus    "$(printf '%s\n' "$out" | grep -c '^  --es9-plus <op> --smds')" "1"
     chk es9-plus-hnotif   "$(sim_cmd_es9_plus handleNotification --smds h >/dev/null 2>&1; echo $?)" "2"
 
+    # ── 13. subscriber key store + AKA responder ───────────────────────
+    # The store is the only place this tree holds a card secret, so the
+    # assertions are about the file (mode, masking, atomic replace) and about
+    # the arithmetic coming out where TS 35.208 says it should.
+    local st="$STATE_DIR/sim_aka/subscribers.tsv" want got
+    out=$(sim_cmd_key_add --imsi 001010123456789 \
+            --ki 465B5CE8B199B49FAA5F0A2EE238A6BC \
+            --op CDC202D5123E20F62B6D676AC72CB318 --sqn FF9BB4D0B607 2>&1)
+    chk aka-add-stored     "$(fld "$out" stored)"      "yes"
+    chk aka-add-opc        "$(fld "$out" secret2_masked)" "CD63********2BAF"
+    chk aka-add-mask-ki    "$(fld "$out" ki_masked)"   "465B********A6BC"
+    chk aka-add-hides-ki   "$(printf '%s\n' "$out" | grep -c '^ki	')" "0"
+    chk aka-store-mode     "$(stat -c %a "$st" 2>/dev/null)" "600"
+    chk aka-store-dir-mode "$(stat -c %a "$(dirname "$st")" 2>/dev/null)" "700"
+    chk aka-store-opc-row  "$(awk -F'\t' '$1=="001010123456789"{print $4}' "$st")" \
+                           "CD63CB71954A9F4E48A5994E37A02BAF"
+    # Same IMSI again must replace the row, not append a second one.
+    sim_cmd_key_add --imsi 001010123456789 --ki 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        --opc CD63CB71954A9F4E48A5994E37A02BAF --sqn FF9BB4D0B607 >/dev/null 2>&1
+    chk aka-add-replaces    "$(sim_aka_live "$st")" "1"
+
+    # TS 35.208 test set 1 through the responder: RAND and SQN from the
+    # standard, so RES/CK/IK/AUTN are fixed values and not this tree's opinion.
+    out=$(sim_cmd_aka_responder --imsi 001010123456789 \
+            --rand 23553CBE9637A89D218AE64DAE47BF35 2>&1)
+    chk aka-xres  "$(fld "$out" xres)" "A54211D5E3BA50BF"
+    chk aka-ck    "$(fld "$out" ck)"   "B40BA9A3C58B2A05BBF0D987B21BF8CB"
+    chk aka-ik    "$(fld "$out" ik)"   "F769BCD751044604127672711C6D3441"
+    chk aka-autn  "$(fld "$out" autn)" "55F328B43577B9B94A9FFAC354DFAFB3"
+    chk aka-mode  "$(fld "$out" mode)" "eps-aka"
+    chk aka-sqn-next     "$(fld "$out" sqn_next)" "FF9BB4D0B608"
+    chk aka-sqn-persist  "$(awk -F'\t' '$1=="001010123456789"{print $5}' "$st")" "FF9BB4D0B608"
+    chk aka-vectors      "$(awk -F'\t' '$1=="001010123456789"{print $7}' "$st")" "1"
+    # The next vector starts where the last one left off, which is the whole
+    # point of keeping SQN on disk.
+    out=$(sim_cmd_aka_responder --imsi 001010123456789 \
+            --rand 00000000000000000000000000000000 2>&1)
+    chk aka-sqn-walks-1  "$(fld "$out" sqn)"      "FF9BB4D0B608"
+    chk aka-sqn-walks-2  "$(fld "$out" sqn_next)" "FF9BB4D0B609"
+    chk aka-vector-2-count "$(fld "$out" vector_count)" "2"
+
+    # The KDF is checked against OpenSSL's own HMAC rather than against a
+    # second copy of this code: same S, two independent implementations.
+    if command -v xxd >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
+        want=$(printf '%s' '6a355c3230388d0030' | xxd -r -p |
+               openssl dgst -sha256 -mac HMAC \
+                   -macopt hexkey:465B5CE8B199B49FAA5F0A2EE238A6BC 2>/dev/null |
+               sed 's/^.*= //')
+        got=$(sim_aka_kdf 6A 465B5CE8B199B49FAA5F0A2EE238A6BC 355C3230388D)
+        chk kdf-openssl-referee "$got" "${want^^}"
+        chk kdf-absent-param   "$(sim_aka_kdf 6A 465B5CE8B199B49FAA5F0A2EE238A6BC '' 2>/dev/null)" ""
+    else
+        printf '%s\tSKIP no xxd/openssl for the KDF referee\n' "kdf-openssl-referee"
+        printf '%s\tSKIP no xxd/openssl for the KDF referee\n' "kdf-absent-param"
+    fi
+
+    # 5G HE AV: with SQN pinned, KAUSF and RES* are fixed too, so the same
+    # openssl referee applies to the derived keys and not just to the KDF.
+    out=$(sim_cmd_aka_responder --imsi 001010123456789 \
+            --rand 23553CBE9637A89D218AE64DAE47BF35 --sqn FF9BB4D0B607 \
+            --5g --sn-name 5G:mnc001.mcc001.3gppnetwork.org 2>&1)
+    chk fiveg-sn        "$(fld "$out" sn)"      "35473A6D6E633030312E6D63633030312E336770706E6574776F726B2E6F7267"
+    chk fiveg-sn-text   "$(fld "$out" sn_text)" "5G:mnc001.mcc001.3gppnetwork.org"
+    chk fiveg-kausf-len "$(printf '%s' "$(fld "$out" kausf)" | wc -c)" "64"
+    chk fiveg-resstar-len "$(printf '%s' "$(fld "$out" res_star)" | wc -c)" "64"
+    chk fiveg-mode      "$(fld "$out" mode)"    "5g"
+    if command -v xxd >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
+        # AK for that RAND/SQN, then KAUSF = HMAC(K, 6A || SN || 0100 || SQN^AK || 0030)
+        local ak_raw ak v kausf_ref
+        ak_raw=$(sim_cmd_sim_auth milenage 465B5CE8B199B49FAA5F0A2EE238A6BC \
+                   23553CBE9637A89D218AE64DAE47BF35 \
+                   --opc CD63CB71954A9F4E48A5994E37A02BAF \
+                   --sqn FF9BB4D0B607 --amf B9B9 2>/dev/null)
+        ak=$(sim_kv f5 "$ak_raw")
+        v=$(sim_auth_xor FF9BB4D0B607 "$ak")
+        kausf_ref=$(printf '%s' "6a35473A6D6E633030312E6D63633030312E336770706E6574776F726B2E6F72670100${v}0030" |
+                    xxd -r -p | openssl dgst -sha256 -mac HMAC \
+                        -macopt hexkey:465B5CE8B199B49FAA5F0A2EE238A6BC 2>/dev/null |
+                    sed 's/^.*= //')
+        chk fiveg-kausf-referee "$(fld "$out" kausf)" "${kausf_ref^^}"
+    else
+        printf '%s\tSKIP no xxd/openssl for the KAUSF referee\n' "fiveg-kausf-referee"
+    fi
+
+    # ── refusals, by name ─────────────────────────────────────────────
+    chk aka-no-imsi      "$(sim_cmd_key_add --ki 465B5CE8B199B49FAA5F0A2EE238A6BC >/dev/null 2>&1; echo $?)" "2"
+    chk aka-short-ki     "$(sim_cmd_key_add --imsi 001010123456789 --ki 465B >/dev/null 2>&1; echo $?)" "2"
+    chk aka-both-op      "$(sim_cmd_key_add --imsi 001010123456789 --ki 465B5CE8B199B49FAA5F0A2EE238A6BC --op CDC202D5123E20F62B6D676AC72CB318 --opc CD63CB71954A9F4E48A5994E37A02BAF >/dev/null 2>&1; echo $?)" "2"
+    chk aka-top-milenage "$(sim_cmd_key_add --imsi 001010123456789 --ki 465B5CE8B199B49FAA5F0A2EE238A6BC --opc CD63CB71954A9F4E48A5994E37A02BAF --top 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF >/dev/null 2>&1; echo $?)" "2"
+    chk aka-bad-sqn      "$(sim_cmd_key_add --imsi 001010123456789 --ki 465B5CE8B199B49FAA5F0A2EE238A6BC --opc CD63CB71954A9F4E48A5994E37A02BAF --sqn 1234 >/dev/null 2>&1; echo $?)" "2"
+    chk aka-unknown-imsi "$(sim_cmd_aka_responder --imsi 999999999999999 >/dev/null 2>&1; echo $?)" "1"
+    chk aka-bad-rand     "$(sim_cmd_aka_responder --imsi 001010123456789 --rand 00 >/dev/null 2>&1; echo $?)" "2"
+    chk aka-5g-no-sn     "$(sim_cmd_aka_responder --imsi 001010123456789 --5g >/dev/null 2>&1; echo $?)" "2"
+    chk aka-sn-without-5g "$(sim_cmd_aka_responder --imsi 001010123456789 --sn 355C >/dev/null 2>&1; echo $?)" "2"
+    chk aka-both-sn      "$(sim_cmd_aka_responder --imsi 001010123456789 --5g --sn 355C --sn-name x >/dev/null 2>&1; echo $?)" "2"
+    chk aka-sn-odd       "$(sim_cmd_aka_responder --imsi 001010123456789 --5g --sn 355 >/dev/null 2>&1; echo $?)" "2"
+    chk aka-key-show-missing "$(sim_cmd_key_show --imsi 000000000000001 >/dev/null 2>&1; echo $?)" "1"
+
+    # ── masking and reveal ────────────────────────────────────────────
+    chk aka-list-no-secret "$(sim_cmd_key_list | grep -c '465B5CE8B199B49FAA5F0A2EE238A6BC')" "0"
+    chk aka-list-masked    "$(sim_cmd_key_list | grep -c '465B\*\*\*\*\*\*\*\*A6BC')" "1"
+    chk aka-show-reveal    "$(sim_cmd_key_show --imsi 001010123456789 --reveal |
+                               grep -c '465B5CE8B199B49FAA5F0A2EE238A6BC')" "1"
+
+    # ── resident responder ────────────────────────────────────────────
+    out=$(printf 'VECTOR 001010123456789 00112233445566778899AABBCCDDEEFF\nVECTOR 999999999999999\nBOGUS\nQUIT\n' |
+          sim_cmd_aka_serve 2>&1)
+    chk serve-ready    "$(printf '%s\n' "$out" | grep -c '^serve	ready')" "1"
+    chk serve-served   "$(fld "$out" served)"   "1"
+    chk serve-rejected "$(fld "$out" rejected)" "2"
+    chk serve-requests "$(fld "$out" requests)" "4"
+    chk serve-vector   "$(printf '%s\n' "$out" | grep -c '^result	ok')" "1"
+    # Served vectors keep walking SQN across requests, on disk.
+    chk serve-sqn-store "$(awk -F'\t' '$1=="001010123456789"{print $5}' "$st")" "FF9BB4D0B609"
+    chk serve-vector-count "$(awk -F'\t' '$1=="001010123456789"{print $7}' "$st")" "4"
+
+    # ── removal ──────────────────────────────────────────────────────
+    chk aka-remove-rc   "$(sim_cmd_key_remove --imsi 001010123456789 >/dev/null 2>&1; echo $?)" "0"
+    chk aka-remove-gone "$(sim_aka_live "$st")" "0"
+    chk aka-remove-again "$(sim_cmd_key_remove --imsi 001010123456789 >/dev/null 2>&1; echo $?)" "1"
+
+    # The verbs have to be in the usage text, because that is where the index
+    # and the GUI drawer read them from.
+    out=$(sim_cli_main --__no_such_verb__ 2>&1) || true
+    chk usage-key-add    "$(printf '%s\n' "$out" | grep -c '^  --key-add ')" "1"
+    chk usage-key-list   "$(printf '%s\n' "$out" | grep -c '^  --key-list ')" "1"
+    chk usage-aka-resp   "$(printf '%s\n' "$out" | grep -c '^  --aka-responder ')" "1"
+    chk usage-aka-serve  "$(printf '%s\n' "$out" | grep -c '^  --aka-serve ')" "1"
+
     printf 'ASSERTIONS\t%d\n' "$n_checks"
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -4854,6 +4983,582 @@ M
     done
 }
 
+# ── subscriber key store + AKA responder ────────────────────────────────
+# The 3GPP secret K (and OPC/TOP) has to live somewhere between runs. This is
+# that somewhere: one TSV row per subscriber under STATE_DIR, mode 0600, and a
+# responder that walks SQN the way a USIM does — one increment per vector,
+# persisted, so a replay of the previous vector is refused by the network's own
+# freshness check rather than by a flag in this tree.
+#
+# Columns (tab separated, one header line beginning with #):
+#   imsi  ki  algo  secret2  sqn  amf  vectors  updated
+# algo is milenage or tuak; secret2 is OPC for milenage and TOP for tuak, so
+# every vector is one call to tools/gsm_crypto.py with no second lookup.
+#
+# WHAT IS REAL: the quintet (or the 5G HE AV inputs), the KDF calls, the SQN
+# counter, and the file. WHAT IS NOT: no card is touched, no USIM is emulated,
+# and the AUTS/resynchronisation path is not built here (it needs SQN_MS, which
+# only the peer in a resync message can supply).
+
+SIM_AKA_HEADER='# imsi	ki	algo	secret2	sqn	amf	vectors	updated'
+SIM_AKA_COLS=8
+
+sim_aka_dir()   { printf '%s/sim_aka' "${STATE_DIR:-$IMSISTING_ROOT/state}"; }
+sim_aka_store() { printf '%s/subscribers.tsv' "$(sim_aka_dir)"; }
+
+sim_aka_usage() {
+    printf 'ERROR\tusage: --key-add --imsi <digits> --ki <32hex> (--opc <32hex>|--op <32hex>|--top <64hex>) [--algo milenage|tuak] [--sqn <12hex>] [--amf <4hex>]\n' >&2
+    printf 'ERROR\t       --key-list [--reveal] | --key-show --imsi <digits> [--reveal] | --key-remove --imsi <digits>\n' >&2
+    printf 'ERROR\t       --aka-responder --imsi <digits> [--rand <32hex>] [--sqn <12hex>] [--5g --sn <hex>|--sn-name <text>]\n' >&2
+    printf 'ERROR\t       --aka-serve [--5g --sn <hex>|--sn-name <text>]\n' >&2
+}
+
+# Create the directory and the file if they are missing; print the path.
+sim_aka_ensure() {
+    local d f
+    d=$(sim_aka_dir)
+    f=$(sim_aka_store)
+    if [[ ! -d "$d" ]]; then
+        mkdir -p "$d" 2>/dev/null || {
+            printf 'ERROR\tcannot create %s\n' "$(sim_sanitize "$d")" >&2; return 1; }
+        chmod 700 "$d" 2>/dev/null
+    fi
+    if [[ ! -f "$f" ]]; then
+        # umask, not a later chmod, so the secrets are never briefly world-readable.
+        ( umask 077; printf '%s\n' "$SIM_AKA_HEADER" > "$f" ) || {
+            printf 'ERROR\tcannot write %s\n' "$(sim_sanitize "$f")" >&2; return 1; }
+    fi
+    chmod 600 "$f" 2>/dev/null
+    printf '%s' "$f"
+}
+
+sim_aka_mask() { # <hex> -> first 4 and last 4, middle starred
+    local h="${1:-}"
+    if (( ${#h} <= 8 )); then printf '********'; return 0; fi
+    printf '%s********%s' "${h:0:4}" "${h: -4}"
+}
+
+sim_aka_live() { # <store> -> number of subscriber rows
+    [[ -f "${1:-}" ]] || { printf 0; return 0; }
+    awk -F'\t' '!/^#/ && $1 != "" { n++ } END { printf "%d", n + 0 }' "$1"
+}
+
+sim_aka_row() { # <imsi> -> that subscriber's row, or empty
+    local f
+    f=$(sim_aka_store)
+    [[ -f "$f" ]] || return 0
+    awk -F'\t' -v i="$1" '!/^#/ && $1 == i { print; exit }' "$f"
+}
+
+# Replace or append one row. Atomic: awk writes a sibling temp file, then mv.
+sim_aka_put() { # <imsi> <ki> <algo> <secret2> <sqn> <amf> <vectors>
+    local d f tmp row
+    d=$(sim_aka_dir)
+    f=$(sim_aka_store)
+    tmp="$f.tmp.$$"
+    mkdir -p "$d" 2>/dev/null || return 1
+    [[ -f "$f" ]] || printf '%s\n' "$SIM_AKA_HEADER" > "$f" || return 1
+    row=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+            "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+    if awk -F'\t' -v OFS='\t' -v i="$1" -v r="$row" '
+            /^#/ { print; next }
+            $1 == i { print r; seen = 1; next }
+            { print }
+            END { if (!seen) print r }' "$f" > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$f" 2>/dev/null && chmod 600 "$f" 2>/dev/null && return 0
+    fi
+    rm -f "$tmp" 2>/dev/null
+    return 1
+}
+
+sim_aka_del() { # <imsi> -> 0 removed, 1 absent
+    local f tmp hit
+    f=$(sim_aka_store)
+    tmp="$f.tmp.$$"
+    [[ -f "$f" ]] || return 1
+    hit=$(awk -F'\t' -v i="$1" '!/^#/ && $1 == i { n++ } END { printf "%d", n + 0 }' "$f")
+    (( hit )) || return 1
+    if awk -F'\t' -v i="$1" '/^#/ || $1 != i { print }' "$f" > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$f" 2>/dev/null && chmod 600 "$f" 2>/dev/null && return 0
+    fi
+    rm -f "$tmp" 2>/dev/null
+    return 1
+}
+
+# Run a command under an exclusive lock on the store. Without flock the work
+# still happens: the store is small, and a lost update is visible as a stuck
+# SQN rather than as a silently wrong vector.
+sim_aka_locked() {
+    local d l
+    d=$(sim_aka_dir)
+    if ! mkdir -p "$d" 2>/dev/null; then "$@"; return $?; fi
+    l="$d/.lock"
+    if command -v flock >/dev/null 2>&1; then
+        ( flock -x 9 2>/dev/null; "$@" ) 9>>"$l"
+        return $?
+    fi
+    "$@"
+}
+
+sim_aka_sqn_inc() { # <12 hex> -> next SQN, modulo 2^48
+    local v
+    v=$(( ( 16#${1:-0} + 1 ) & 0xFFFFFFFFFFFF ))
+    printf '%012X' "$v"
+}
+
+sim_aka_rand() { # 16 random bytes, uppercase hex
+    local r=''
+    if [[ -r /dev/urandom ]]; then
+        r=$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n')
+    fi
+    if (( ${#r} != 32 )); then
+        printf 'ERROR\tno /dev/urandom on this host; pass --rand\n' >&2
+        return 1
+    fi
+    printf '%s' "${r^^}"
+}
+
+sim_aka_text_hex() { # <text> -> its UTF-8 bytes as hex (the SN name is text on the wire)
+    printf '%s' "$1" | od -An -tx1 -v 2>/dev/null | tr -d ' \n' | tr 'a-f' 'A-F'
+}
+
+sim_aka_kdf() { # <fc> <key-hex> <p0-hex> [p1] [p2] -> the KDF output hex
+    local fc="$1" key="$2" p0="$3" p1="${4:-}" p2="${5:-}" tool out
+    tool="$IMSISTING_ROOT/tools/gsm_crypto.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\tno %s\n' "$tool" >&2; return 1; }
+    local -a args=(--kdf "$fc" --key "$key" --p0 "$p0")
+    [[ -n "$p1" ]] && args+=(--p1 "$p1")
+    [[ -n "$p2" ]] && args+=(--p2 "$p2")
+    out=$(python3 "$tool" "${args[@]}" 2>/dev/null) || return 1
+    printf '%s' "$(sim_kv out "$out")"
+}
+
+# Resolve --sn / --sn-name into UTF-8 bytes as hex. Both spell the same thing;
+# the standard writes the SN name as text ('5G:mnc001.mcc001.3gppnetwork.org'),
+# and the KDF takes its bytes, so the text is hex-encoded here once.
+sim_aka_sn_hex() { # <sn-hex> <sn-name> -> hex, or empty
+    local sn="${1:-}" name="${2:-}"
+    if [[ -n "$sn" && -n "$name" ]]; then
+        printf 'ERROR\tgive --sn or --sn-name, not both\n' >&2
+        return 2
+    fi
+    if [[ -n "$sn" ]]; then
+        sn="${sn^^}"
+        [[ "$sn" =~ ^[0-9A-F]+$ && $(( ${#sn} % 2 )) -eq 0 ]] || {
+            printf 'ERROR\t--sn must be an even number of hex digits\n' >&2; return 2; }
+        printf '%s' "$sn"
+        return 0
+    fi
+    if [[ -n "$name" ]]; then
+        local h
+        h=$(sim_aka_text_hex "$name")
+        [[ -n "$h" ]] || { printf 'ERROR\t--sn-name produced no bytes\n' >&2; return 2; }
+        printf '%s' "$h"
+        return 0
+    fi
+    return 1
+}
+
+# ── --key-add ────────────────────────────────────────────────────────────
+sim_cmd_key_add() {
+    local imsi='' ki='' opc='' op='' top='' algo='milenage' sqn='' amf='B9B9' reveal=0
+    while (( $# )); do
+        case "$1" in
+            --imsi)   imsi="${2:-}";   shift 2 2>/dev/null || shift ;;
+            --ki)     ki="${2:-}";     shift 2 2>/dev/null || shift ;;
+            --opc)    opc="${2:-}";    shift 2 2>/dev/null || shift ;;
+            --op)     op="${2:-}";     shift 2 2>/dev/null || shift ;;
+            --top)    top="${2:-}";    shift 2 2>/dev/null || shift ;;
+            --algo)   algo="${2:-}";   shift 2 2>/dev/null || shift ;;
+            --sqn)    sqn="${2:-}";    shift 2 2>/dev/null || shift ;;
+            --amf)    amf="${2:-}";    shift 2 2>/dev/null || shift ;;
+            --reveal) reveal=1;        shift ;;
+            -h|--help) sim_aka_usage; return 0 ;;
+            *) sim_aka_usage; return 2 ;;
+        esac
+    done
+    [[ -n "$imsi" ]] || { sim_aka_usage; return 2; }
+    [[ "$imsi" =~ ^[0-9]{5,15}$ ]] || {
+        printf 'ERROR\t--imsi must be 5..15 decimal digits, got %d chars\n' "${#imsi}" >&2; return 2; }
+    ki="${ki^^}"
+    [[ "$ki" =~ ^[0-9A-F]{32}$ ]] || {
+        printf 'ERROR\t--ki must be 32 hex digits (128-bit K), got %d\n' "${#ki}" >&2; return 2; }
+    case "$algo" in
+        milenage)
+            (( ${#opc} )) && opc="${opc^^}"
+            (( ${#op} ))  && op="${op^^}"
+            if [[ -n "$top" ]]; then
+                printf 'ERROR\t--top is a TUAK parameter; for milenage give --op or --opc\n' >&2
+                return 2
+            fi
+            if [[ -n "$op" && -n "$opc" ]]; then
+                printf 'ERROR\tgive --op or --opc, not both\n' >&2; return 2
+            fi
+            if [[ -n "$op" ]]; then
+                [[ "$op" =~ ^[0-9A-F]{32}$ ]] || {
+                    printf 'ERROR\t--op must be 32 hex digits, got %d\n' "${#op}" >&2; return 2; }
+                opc=$(sim_kv opc "$(sim_cmd_sim_auth milenage "$ki" \
+                        00000000000000000000000000000000 --op "$op" 2>/dev/null)")
+                [[ "$opc" =~ ^[0-9A-F]{32}$ ]] || {
+                    printf 'ERROR\tcould not derive OPC from that OP\n' >&2; return 1; }
+            fi
+            [[ "$opc" =~ ^[0-9A-F]{32}$ ]] || {
+                printf 'ERROR\t--opc must be 32 hex digits (16 bytes), got %d\n' "${#opc}" >&2; return 2; }
+            ;;
+        tuak)
+            [[ -n "$op" || -n "$opc" ]] && {
+                printf 'ERROR\tOP/OPC belong to milenage; TUAK takes --top\n' >&2; return 2; }
+            top="${top^^}"
+            [[ "$top" =~ ^[0-9A-F]{64}$ ]] || {
+                printf 'ERROR\t--top must be 64 hex digits (the TUAK TOP), got %d\n' "${#top}" >&2; return 2; }
+            opc="$top"
+            ;;
+        *) printf 'ERROR\t--algo must be milenage or tuak\n' >&2; return 2 ;;
+    esac
+    sqn="${sqn^^}"
+    [[ -z "$sqn" || "$sqn" =~ ^[0-9A-F]{12}$ ]] || {
+        printf 'ERROR\t--sqn must be 12 hex digits (6 bytes), got %d\n' "${#sqn}" >&2; return 2; }
+    amf="${amf^^}"
+    [[ "$amf" =~ ^[0-9A-F]{4}$ ]] || {
+        printf 'ERROR\t--amf must be 4 hex digits (2 bytes), got %d\n' "${#amf}" >&2; return 2; }
+    : "${sqn:=000000000000}"
+
+    local store prev
+    store=$(sim_aka_ensure) || return 1
+    prev=$(sim_aka_row "$imsi")
+    # Adding over an existing IMSI keeps its vector count and only resets what
+    # was given: re-keying a subscriber must not silently rewind SQN to zero,
+    # because the network would then see a stale SQN as a replay.
+    local vectors=0 keep_sqn=''
+    if [[ -n "$prev" ]]; then
+        IFS=$'\t' read -r _ _ _ _ keep_sqn _ vectors _ <<<"$prev"
+        [[ "$sqn" == 000000000000 && -n "$keep_sqn" ]] && sqn="$keep_sqn"
+    fi
+
+    sim_aka_locked sim_aka_put "$imsi" "$ki" "$algo" "$opc" "$sqn" "$amf" "${vectors:-0}" || {
+        printf 'ERROR\tcould not write the store\n' >&2; return 1; }
+
+    printf 'stored\tyes\n'
+    printf 'imsi\t%s\n' "$imsi"
+    printf 'algo\t%s\n' "$algo"
+    if (( reveal )); then
+        printf 'ki\t%s\n' "$ki"
+        printf 'secret2\t%s\n' "$opc"
+    else
+        printf 'ki_masked\t%s\n' "$(sim_aka_mask "$ki")"
+        printf 'secret2_masked\t%s\n' "$(sim_aka_mask "$opc")"
+        printf 'reveal\tno (--reveal prints K and OPC/TOP)\n'
+    fi
+    printf 'sqn\t%s\n' "$sqn"
+    printf 'amf\t%s\n' "$amf"
+    printf 'store\t%s\n' "${store#"$IMSISTING_ROOT"/}"
+    printf 'store_mode\t%s\n' "$(stat -c %a "$store" 2>/dev/null || printf '?')"
+    printf 'note\tK and OPC/TOP are the card secrets: the file is 0600 and in STATE_DIR, which is never committed\n'
+    return 0
+}
+
+# ── --key-list / --key-show / --key-remove ──────────────────────────────
+sim_cmd_key_list() {
+    local reveal=0 store n
+    while (( $# )); do
+        case "$1" in
+            --reveal) reveal=1; shift ;;
+            -h|--help) sim_aka_usage; return 0 ;;
+            *) sim_aka_usage; return 2 ;;
+        esac
+    done
+    store=$(sim_aka_ensure) || return 1
+    n=$(sim_aka_live "$store")
+    printf 'store\t%s\n' "${store#"$IMSISTING_ROOT"/}"
+    printf 'store_mode\t%s\n' "$(stat -c %a "$store" 2>/dev/null || printf '?')"
+    printf 'subscribers\t%s\n' "$n"
+    (( n )) || printf 'note\tempty store: --key-add --imsi <digits> --ki <32hex> --opc <32hex> writes the first row\n'
+    awk -F'\t' '!/^#/ && $1 != "" { print }' "$store" |
+    while IFS=$'\t' read -r imsi ki algo secret2 sqn amf vectors updated; do
+        printf 'imsi\t%s\n' "$imsi"
+        printf 'algo\t%s\n' "$algo"
+        if (( reveal )); then
+            printf 'ki\t%s\n' "$ki"
+            printf 'secret2\t%s\n' "$secret2"
+        else
+            printf 'ki_masked\t%s\n' "$(sim_aka_mask "$ki")"
+            printf 'secret2_masked\t%s\n' "$(sim_aka_mask "$secret2")"
+        fi
+        printf 'sqn\t%s\n' "$sqn"
+        printf 'vectors\t%s\n' "$vectors"
+        printf 'updated\t%s\n' "$updated"
+        printf 'row_end\t-\n'
+    done
+    return 0
+}
+
+sim_cmd_key_show() {
+    local imsi='' reveal=0 row
+    while (( $# )); do
+        case "$1" in
+            --imsi)   imsi="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --reveal) reveal=1; shift ;;
+            -h|--help) sim_aka_usage; return 0 ;;
+            *) sim_aka_usage; return 2 ;;
+        esac
+    done
+    [[ -n "$imsi" ]] || { sim_aka_usage; return 2; }
+    row=$(sim_aka_row "$imsi")
+    if [[ -z "$row" ]]; then
+        printf 'ERROR\tno subscriber %s in the store; --key-list shows what is there\n' \
+            "$(sim_sanitize "$imsi")" >&2
+        return 1
+    fi
+    local ki algo secret2 sqn amf vectors updated
+    IFS=$'\t' read -r _ ki algo secret2 sqn amf vectors updated <<<"$row"
+    printf 'imsi\t%s\n' "$imsi"
+    printf 'algo\t%s\n' "$algo"
+    if (( reveal )); then
+        printf 'ki\t%s\n' "$ki"
+        printf 'secret2\t%s\n' "$secret2"
+    else
+        printf 'ki_masked\t%s\n' "$(sim_aka_mask "$ki")"
+        printf 'secret2_masked\t%s\n' "$(sim_aka_mask "$secret2")"
+        printf 'reveal\tno (--reveal prints K and OPC/TOP)\n'
+    fi
+    printf 'sqn\t%s\n' "$sqn"
+    printf 'amf\t%s\n' "$amf"
+    printf 'vectors\t%s\n' "$vectors"
+    printf 'updated\t%s\n' "$updated"
+    return 0
+}
+
+sim_cmd_key_remove() {
+    local imsi=''
+    while (( $# )); do
+        case "$1" in
+            --imsi) imsi="${2:-}"; shift 2 2>/dev/null || shift ;;
+            -h|--help) sim_aka_usage; return 0 ;;
+            *) sim_aka_usage; return 2 ;;
+        esac
+    done
+    [[ -n "$imsi" ]] || { sim_aka_usage; return 2; }
+    local store
+    store=$(sim_aka_ensure) || return 1
+    if ! sim_aka_locked sim_aka_del "$imsi"; then
+        printf 'ERROR\tno subscriber %s in the store\n' "$(sim_sanitize "$imsi")" >&2
+        return 1
+    fi
+    printf 'removed\t%s\n' "$imsi"
+    printf 'subscribers\t%s\n' "$(sim_aka_live "$store")"
+    return 0
+}
+
+# ── --aka-responder ─────────────────────────────────────────────────────
+# One AKA authentication event for one stored subscriber:
+#   * RAND is supplied or drawn from /dev/urandom
+#   * SQN comes from the store and is incremented afterwards (a USIM's job)
+#   * the quintet comes from the same --sim-auth path everything else uses
+#   * with --5g, the two KDF outputs the AUSF would need are derived too
+sim_cmd_aka_responder() {
+    local imsi='' rand='' sqn='' sn='' sn_name='' fiveg=0 persist=1
+    while (( $# )); do
+        case "$1" in
+            --imsi)    imsi="${2:-}";    shift 2 2>/dev/null || shift ;;
+            --rand)    rand="${2:-}";    shift 2 2>/dev/null || shift ;;
+            --sqn)     sqn="${2:-}";     shift 2 2>/dev/null || shift ;;
+            --sn)      sn="${2:-}";      shift 2 2>/dev/null || shift ;;
+            --sn-name) sn_name="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --5g)      fiveg=1;          shift ;;
+            --no-persist) persist=0;     shift ;;
+            -h|--help) sim_aka_usage; return 0 ;;
+            *) sim_aka_usage; return 2 ;;
+        esac
+    done
+    [[ -n "$imsi" ]] || { sim_aka_usage; return 2; }
+    local row
+    row=$(sim_aka_row "$imsi")
+    if [[ -z "$row" ]]; then
+        printf 'ERROR\tno subscriber %s in the store; --key-add writes one\n' \
+            "$(sim_sanitize "$imsi")" >&2
+        return 1
+    fi
+    local ki algo secret2 st_sqn amf vectors updated
+    IFS=$'\t' read -r _ ki algo secret2 st_sqn amf vectors updated <<<"$row"
+    st_sqn="${st_sqn^^}"; amf="${amf^^}"
+    : "${st_sqn:=000000000000}"
+    : "${amf:=B9B9}"
+
+    rand="${rand^^}"
+    if [[ -z "$rand" ]]; then
+        rand=$(sim_aka_rand) || return 1
+    fi
+    [[ "$rand" =~ ^[0-9A-F]{32}$ ]] || {
+        printf 'ERROR\tRAND must be 32 hex digits (16 bytes), got %d\n' "${#rand}" >&2; return 2; }
+    if [[ -n "$sqn" ]]; then
+        sqn="${sqn^^}"
+        [[ "$sqn" =~ ^[0-9A-F]{12}$ ]] || {
+            printf 'ERROR\t--sqn must be 12 hex digits (6 bytes), got %d\n' "${#sqn}" >&2; return 2; }
+    else
+        sqn="$st_sqn"
+    fi
+
+    local sn_hex='' sn_rc=0
+    if (( fiveg )); then
+        sn_hex=$(sim_aka_sn_hex "$sn" "$sn_name") || sn_rc=$?
+        (( sn_rc == 2 )) && return 2
+        if [[ -z "$sn_hex" ]]; then
+            printf 'ERROR\t--5g needs the serving network name: --sn <hex> or --sn-name <text>\n' >&2
+            printf 'ERROR\tthe KDF input is the SN name verbatim (TS 33.501 A.4.1, e.g. 5G:mnc001.mcc001.3gppnetwork.org)\n' >&2
+            return 2
+        fi
+    elif [[ -n "$sn" || -n "$sn_name" ]]; then
+        printf 'ERROR\t--sn/--sn-name only mean something with --5g\n' >&2
+        return 2
+    fi
+
+    local raw res ck ik ak maca autn
+    if [[ "$algo" == tuak ]]; then
+        raw=$(sim_cmd_sim_auth tuak "$ki" "$rand" --top "$secret2" --sqn "$sqn" --amf "$amf" 2>/dev/null) || {
+            printf 'ERROR\tTUAK run failed for %s\n' "$(sim_sanitize "$imsi")" >&2; return 1; }
+    else
+        raw=$(sim_cmd_sim_auth milenage "$ki" "$rand" --opc "$secret2" --sqn "$sqn" --amf "$amf" 2>/dev/null) || {
+            printf 'ERROR\tMilenage run failed for %s\n' "$(sim_sanitize "$imsi")" >&2; return 1; }
+    fi
+    res=$(sim_kv res "$raw"); ck=$(sim_kv ck "$raw"); ik=$(sim_kv ik "$raw")
+    ak=$(sim_kv f5 "$raw");   maca=$(sim_kv f1 "$raw"); autn=$(sim_kv autn "$raw")
+    [[ -n "$res" && -n "$ck" && -n "$ik" && -n "$autn" ]] || {
+        printf 'ERROR\tthe auth run produced no complete vector\n' >&2; return 1; }
+
+    local kausf_hex='' res_star_hex='' sqn_ak
+    if (( fiveg )); then
+        sqn_ak=$(sim_auth_xor "$sqn" "$ak")
+        kausf_hex=$(sim_aka_kdf 6A "$ki" "$sn_hex" "$sqn_ak") || {
+            printf 'ERROR\tKAUSF derivation failed\n' >&2; return 1; }
+        res_star_hex=$(sim_aka_kdf 6B "$ki" "$sn_hex" "$rand" "$res") || {
+            printf 'ERROR\tRES* derivation failed\n' >&2; return 1; }
+        [[ -n "$kausf_hex" && -n "$res_star_hex" ]] || {
+            printf 'ERROR\tthe KDF returned nothing\n' >&2; return 1; }
+    fi
+
+    if (( persist )); then
+        vectors=$(( ${vectors:-0} + 1 ))
+        sim_aka_locked sim_aka_put "$imsi" "$ki" "$algo" "$secret2" \
+            "$(sim_aka_sqn_inc "$sqn")" "$amf" "$vectors" || {
+            printf 'ERROR\tvector computed but the SQN counter could not be persisted\n' >&2
+            return 1; }
+    fi
+
+    printf 'imsi\t%s\n' "$imsi"
+    printf 'algo\t%s\n' "$algo"
+    local mode='eps-aka'
+    (( fiveg )) && mode='5g'
+    printf 'mode\t%s\n' "$mode"
+    printf 'rand\t%s\n' "$rand"
+    printf 'xres\t%s\n' "$res"
+    printf 'ck\t%s\n' "$ck"
+    printf 'ik\t%s\n' "$ik"
+    printf 'autn\t%s\n' "$autn"
+    printf 'sqn\t%s\n' "$sqn"
+    printf 'amf\t%s\n' "$amf"
+    printf 'sqn_next\t%s\n' "$(sim_aka_sqn_inc "$sqn")"
+    printf 'vector_count\t%s\n' "${vectors:-0}"
+    if (( fiveg )); then
+        printf 'sn\t%s\n' "$sn_hex"
+        printf 'sn_text\t%s\n' "$(sim_aka_sn_text "$sn_hex")"
+        printf 'kausf\t%s\n' "$kausf_hex"
+        printf 'res_star\t%s\n' "$res_star_hex"
+        printf 'kdf_source\tTS 33.220 Annex B.2 KDF: FC=6A over (SN, SQN xor AK), FC=6B over (SN, RAND, RES)\n'
+    fi
+    printf 'note\tXRES is the network side of RES: the card computes RES on the same input; this is the AuC half\n'
+    printf 'note\tAUTS/resynchronisation is not built: it needs SQN_MS from the peer, not from this store\n'
+    return 0
+}
+
+sim_aka_sn_text() { # <hex> -> the text form, if every byte is printable
+    local h="${1:-}" out='' i c
+    (( ${#h} % 2 == 0 )) || return 1
+    for (( i = 0; i < ${#h}; i += 2 )); do
+        c=$(( 16#${h:i:2} ))
+        if (( c < 32 || c > 126 )); then return 1; fi
+        out+=$(printf '%b' "$(printf '\\%03o' "$c")")
+    done
+    printf '%s' "$out"
+}
+
+# ── --aka-serve ─────────────────────────────────────────────────────────
+# The resident responder: one long-lived process, a request per line, SQN
+# walked on disk between requests. Requests:
+#   VECTOR <imsi> [<rand-hex>]     one authentication event
+#   LIST                           what the store holds
+#   QUIT                           leave
+# Every request prints its rows, then `result ok|error`.
+sim_cmd_aka_serve() {
+    local fiveg=0 sn='' sn_name=''
+    while (( $# )); do
+        case "$1" in
+            --5g)      fiveg=1;          shift ;;
+            --sn)      sn="${2:-}";      shift 2 2>/dev/null || shift ;;
+            --sn-name) sn_name="${2:-}"; shift 2 2>/dev/null || shift ;;
+            -h|--help) sim_aka_usage; return 0 ;;
+            *) sim_aka_usage; return 2 ;;
+        esac
+    done
+    local store served=0 rejected=0 line verb a1 a2 out rc n=0
+    store=$(sim_aka_ensure) || return 1
+    printf 'serve\tready\n'
+    printf 'store\t%s\n' "${store#"$IMSISTING_ROOT"/}"
+    printf 'protocol\tVECTOR <imsi> [<rand>] | LIST | QUIT\n'
+    while IFS= read -r line; do
+        # Trim, then split into at most three words: the line protocol has no
+        # quoting, so a tab or a space inside an argument is a rejection, not
+        # a parse decision made here.
+        line="${line%%[[:cntrl:]]*}"
+        read -r verb a1 a2 <<<"$line" || true
+        verb="${verb:-}"
+        [[ -z "$verb" ]] && continue
+        n=$(( n + 1 ))
+        printf 'request\t%s\n' "$verb"
+        case "${verb^^}" in
+            VECTOR)
+                local -a args=(--imsi "${a1:-}")
+                [[ -n "${a2:-}" ]] && args+=(--rand "$a2")
+                (( fiveg )) && args+=(--5g)
+                [[ -n "$sn" ]] && args+=(--sn "$sn")
+                [[ -n "$sn_name" ]] && args+=(--sn-name "$sn_name")
+                if out=$(sim_cmd_aka_responder "${args[@]}" 2>&1); then
+                    printf '%s\n' "$out"
+                    printf 'result\tok\n'
+                    served=$(( served + 1 ))
+                else
+                    printf '%s\n' "$out"
+                    printf 'result\terror\n'
+                    rejected=$(( rejected + 1 ))
+                fi
+                ;;
+            LIST)
+                out=$(sim_cmd_key_list)
+                rc=$?
+                printf '%s\n' "$out"
+                if (( rc == 0 )); then printf 'result\tok\n'; else printf 'result\terror\n'; fi
+                served=$(( served + 1 ))
+                ;;
+            QUIT|EXIT)
+                printf 'result\tbye\n'
+                break
+                ;;
+            *)
+                printf 'ERROR\tunknown request %s; VECTOR <imsi> [<rand>], LIST, QUIT\n' \
+                    "$(sim_sanitize "$verb")"
+                printf 'result\terror\n'
+                rejected=$(( rejected + 1 ))
+                ;;
+        esac
+    done
+    printf 'served\t%s\n' "$served"
+    printf 'rejected\t%s\n' "$rejected"
+    printf 'requests\t%s\n' "$n"
+    # A rejection here is the protocol working: an unknown IMSI or an unparsable
+    # line is answered with ERROR and the loop keeps the SQN walk intact. There
+    # is therefore no PASS/FAIL row — the counters are the report.
+    return 0
+}
+
 # ── CLI dispatch ────────────────────────────────────────────────────────
 sim_cli_main() {
     local cmd="${1:-}"
@@ -4880,6 +5585,12 @@ sim_cli_main() {
         --rsp)            sim_rsp_roles ;;
         --sim-auth)       sim_cmd_sim_auth "$@" ;;
         --sim-auth-check) sim_cmd_sim_auth_check ;;
+        --key-add)        sim_cmd_key_add "$@" ;;
+        --key-list)       sim_cmd_key_list "$@" ;;
+        --key-show)       sim_cmd_key_show "$@" ;;
+        --key-remove)     sim_cmd_key_remove "$@" ;;
+        --aka-responder)  sim_cmd_aka_responder "$@" ;;
+        --aka-serve)      sim_cmd_aka_serve "$@" ;;
         --es9-plus)       sim_cmd_es9_plus "$@" ;;
         --es8-scp03t)     sim_cmd_es8_scp03t "$@" ;;
         --es8-build)      sim_cmd_es8_build "$@" ;;
@@ -4914,6 +5625,15 @@ Usage: $0 COMMAND
   --sim-auth <algo> <ki> <rand> [--op|--opc <hex>] [--sqn <hex>] [--amf <hex>] [--top <hex>] [--klength 128|256] [--iterations 1|2]
                                     COMP128-1/2/3, Milenage or TUAK vector: SRES/Kc or RES/CK/IK/AUTN
   --sim-auth-check                  published known-answer vectors through --sim-auth
+  --key-add --imsi <digits> --ki <32hex> (--opc <hex>|--op <hex>|--top <64hex>) [--algo milenage|tuak] [--sqn <hex>] [--amf <hex>]
+                                    store a subscriber's K and OPC/TOP in STATE_DIR (mode 0600)
+  --key-list [--reveal]             stored subscribers, secrets masked unless --reveal
+  --key-show --imsi <digits> [--reveal]   one stored subscriber
+  --key-remove --imsi <digits>      drop a subscriber
+  --aka-responder --imsi <digits> [--rand <hex>] [--sqn <hex>] [--5g --sn <hex>|--sn-name <text>]
+                                    one AKA event: quintet from the store, SQN incremented and saved; --5g adds KAUSF and RES*
+  --aka-serve [--5g --sn <hex>|--sn-name <text>]
+                                    resident responder: VECTOR <imsi> [<rand>] / LIST / QUIT on stdin
   --es9-plus <op> --smds <host[:port]> [flags]
                                     SGP.22 ES9+ HTTP/JSON request builder; nothing is sent
   --es8-build <segment> [flags]     SGP.22 ES8+ TLV builder (5.5.1..5.5.5): bpp-header,
