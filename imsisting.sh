@@ -410,7 +410,7 @@ IMSISTING_MODULE_TABLE=(
 
     # RADIO
     "RADIO|08|GSM Air Interface|gair_menu|06_gsm_air"
-    "RADIO|09|GSM Attack|gatk_menu|07_gsm_attack"
+    "RADIO|09|GSM Catcher|gatk_menu|07_gsm_attack"
     "RADIO|10|UMTS Air Interface|uair_menu|08_umts_air"
     "RADIO|11|LTE Air Interface|lair_menu|10_lte_air"
     "RADIO|12|5G NR Air Interface|nair_menu|12_nr_air"

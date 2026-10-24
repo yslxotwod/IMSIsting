@@ -86,6 +86,7 @@ vims_py() {
         printf 'ERROR\tpython3 missing — cannot run the crypto or SIP engine\n' >&2; return 1; }
     python3 - "$@" <<'PY'
 import sys, os, re, struct, hashlib, socket, base64
+import shutil, subprocess, threading, time, wave
 
 try:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -889,15 +890,24 @@ def render_sip(kind, d):
         lines.append('Content-Type: application/sdp')
         rtp = d.get('rtp_port', '49152')
         ip = d.get('media_ip', d['host'])
+        # PCMU and PCMA first because this leg can speak them; AMR last because
+        # an IMS core expects to see it offered. If the answer picks AMR the
+        # call still connects and the media is reported unsupported rather
+        # than silently mute.
         body = ('v=0\r\n'
                 'o=imsisting 1 1 IN IP4 %s\r\n'
                 's=IMSIsting\r\n'
                 'c=IN IP4 %s\r\n'
                 't=0 0\r\n'
-                'm=audio %s RTP/AVP 96\r\n'
+                'm=audio %s RTP/AVP 0 8 96\r\n'
+                'a=rtpmap:0 PCMU/8000\r\n'
+                'a=rtpmap:8 PCMA/8000\r\n'
                 'a=rtpmap:96 AMR/8000\r\n'
                 'a=fmtp:96 mode-set=0,1,2,3,4,5,6,7\r\n'
-                % (_bad_field('host', ip), _bad_field('host', ip), _bad_field('rtp_port', rtp)))
+                'a=ptime:%d\r\n'
+                'a=sendrecv\r\n'
+                % (_bad_field('host', ip), _bad_field('host', ip),
+                   _bad_field('rtp_port', rtp), RTP_PTIME_MS))
     elif kind == 'ack':
         # A 2xx ACK: its own transaction, the CSeq number of the INVITE it
         # acknowledges, no Contact and no response.
@@ -1048,6 +1058,549 @@ def digest_response(user, realm, password, method, uri, nonce, nc, cnonce, qop):
     return hashlib.md5(('%s:%s:%s' % (ha1, nonce, ha2)).encode()).hexdigest()
 
 
+# ══════════════════════════════════════════════════════════════════════
+# The media leg: G.711, RTP, and the two directions of a call's audio.
+#
+# Signalling alone rings a phone and then says nothing. This block carries the
+# audio: PCMU/PCMA (G.711) both ways at 8 kHz, 20 ms frames, one UDP socket on
+# the port the SDP advertised. It is deliberately not a jitter buffer or an
+# echo canceller — it is the smallest thing that makes a call audible.
+#
+# G.711 is the Sun reference implementation of g711.c (linear2ulaw and friends),
+# which is the table pair every other implementation is checked against. AMR is
+# offered in the SDP because an IMS core expects it, and refused by name when
+# the answer picks it: this leg cannot decode AMR, and pretending otherwise
+# would be silence with a success row on top.
+# ══════════════════════════════════════════════════════════════════════
+A_ENDS = (0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF)
+U_ENDS = (0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x1FFF)
+G711_BIAS = 0x84
+G711_CLIP_U = 8159
+
+
+def _g711_seg(v, ends):
+    for i, e in enumerate(ends):
+        if v <= e:
+            return i
+    return 8
+
+
+def ulaw_encode(s):
+    s = int(s) >> 2
+    if s < 0:
+        s = -s
+        mask = 0x7F
+    else:
+        mask = 0xFF
+    if s > G711_CLIP_U:
+        s = G711_CLIP_U
+    s += G711_BIAS >> 2
+    seg = _g711_seg(s, U_ENDS)
+    if seg >= 8:
+        return 0x7F ^ mask
+    return ((seg << 4) | ((s >> (seg + 1)) & 0xF)) ^ mask
+
+
+def ulaw_decode(u):
+    u = (~u) & 0xFF
+    t = ((u & 0xF) << 3) + G711_BIAS
+    t <<= (u & 0x70) >> 4
+    return (G711_BIAS - t) if (u & 0x80) else (t - G711_BIAS)
+
+
+def alaw_encode(s):
+    s = int(s) >> 3
+    if s >= 0:
+        mask = 0xD5
+    else:
+        mask = 0x55
+        s = -s - 1
+    seg = _g711_seg(s, A_ENDS)
+    if seg >= 8:
+        return 0x7F ^ mask
+    a = seg << 4
+    a |= ((s >> 1) & 0xF) if seg < 2 else ((s >> seg) & 0xF)
+    return a ^ mask
+
+
+def alaw_decode(a):
+    a ^= 0x55
+    t = (a & 0xF) << 4
+    seg = (a & 0x70) >> 4
+    if seg == 0:
+        t += 8
+    elif seg == 1:
+        t += 0x108
+    else:
+        t = (t + 0x108) << (seg - 1)
+    return t if (a & 0x80) else -t
+
+
+# payload type, name, encoder, decoder. The two static types are the ones a
+# plain SIP endpoint answers with (RFC 3551 4.5.14): 0 is PCMU, 8 is PCMA.
+G711 = {
+    'PCMU': (0, 'PCMU/8000', ulaw_encode, ulaw_decode),
+    'PCMA': (8, 'PCMA/8000', alaw_encode, alaw_decode),
+}
+
+RTP_PTIME_MS = 20
+RTP_SAMPLES = 8 * RTP_PTIME_MS          # 160 samples per frame
+RTP_FRAME_BYTES = 2 * RTP_SAMPLES       # 320 bytes of s16le
+
+
+def rtp_packet(pt, seq, ts, ssrc, payload):
+    return struct.pack('>BBHII', 0x80, pt & 0x7F, seq & 0xFFFF,
+                       ts & 0xFFFFFFFF, ssrc & 0xFFFFFFFF) + payload
+
+
+def rtp_parse(buf):
+    """(header, payload) or None. Header extensions and padding are honoured."""
+    if len(buf) < 12:
+        return None
+    b0, b1, seq, ts, ssrc = struct.unpack('>BBHII', buf[:12])
+    if (b0 >> 6) != 2:
+        return None
+    off = 12 + 4 * (b0 & 0x0F)
+    if b0 & 0x10:
+        if len(buf) < off + 4:
+            return None
+        off += 4 + 4 * struct.unpack('>H', buf[off + 2:off + 4])[0]
+    if off > len(buf):
+        return None
+    body = buf[off:]
+    if b0 & 0x20 and body:
+        body = body[:-body[-1]] if body[-1] else b''
+    return ({'pt': b1 & 0x7F, 'marker': bool(b1 & 0x80), 'seq': seq,
+             'ts': ts, 'ssrc': ssrc}, body)
+
+
+def sdp_parse(body):
+    """What an ANSWER tells us about where to send audio and in what shape."""
+    out = {'port': 0, 'conn': '', 'pts': [], 'rtpmap': {}, 'ptime': ''}
+    for line in body.replace('\r\n', '\n').split('\n'):
+        if line.startswith('c=IN IP'):
+            out['conn'] = line.split()[-1]
+        elif line.startswith('m=audio'):
+            f = line.split()
+            if len(f) > 1:
+                out['port'] = int(f[1].split('/')[0] or 0)
+            out['pts'] = f[3:]
+        elif line.startswith('a=rtpmap:'):
+            pt, _, rest = line[len('a=rtpmap:'):].partition(' ')
+            out['rtpmap'][pt.strip()] = rest.strip()
+        elif line.startswith('a=ptime:'):
+            out['ptime'] = line[len('a=ptime:'):].strip()
+    return out
+
+
+def sdp_choose_codec(sdp, want):
+    """-> (pt, codec-name) for a codec this leg can actually speak."""
+    for name, (static_pt, rtpmap_name, _e, _d) in G711.items():
+        if want and name != want:
+            continue
+        if str(static_pt) in sdp['pts']:
+            return static_pt, name
+        for pt, rm in sdp['rtpmap'].items():
+            if rm.lower().startswith(rtpmap_name.lower().split('/')[0]):
+                return int(pt), name
+    return None, (sdp['rtpmap'].get(sdp['pts'][0], '?') if sdp['pts'] else '?')
+
+
+class AudioSource:
+    """320 bytes of 8 kHz s16le per frame, or None at the end of a file."""
+
+    def __init__(self, spec):
+        self.spec = spec
+        self.kind, _, self.arg = spec.partition(':')
+        self.proc = None
+        self.wav = None
+        if self.kind == 'mic':
+            exe = shutil.which('arecord')
+            if not exe:
+                raise MediaError('--media mic needs arecord (alsa-utils); '
+                                 'pass media=wav:<file> or media=none')
+            self.proc = subprocess.Popen(
+                [exe, '-q', '-f', 'S16_LE', '-r', '8000', '-c', '1', '-t', 'raw'],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        elif self.kind == 'wav':
+            if not self.arg:
+                raise MediaError('media=wav: needs a file path')
+            try:
+                self.wav = wave.open(self.arg, 'rb')
+            except (OSError, wave.Error) as exc:
+                raise MediaError('cannot open %s: %s' % (self.arg, exc))
+            if (self.wav.getframerate() != 8000 or self.wav.getnchannels() != 1
+                    or self.wav.getsampwidth() != 2):
+                raise MediaError(
+                    '%s is %d Hz, %d channel(s), %d byte samples; this leg sends '
+                    '8000 Hz mono 16-bit only'
+                    % (self.arg, self.wav.getframerate(),
+                       self.wav.getnchannels(), self.wav.getsampwidth()))
+        elif self.kind not in ('silence', 'none'):
+            raise MediaError('media source %r is not mic, wav:<file>, silence '
+                             'or none' % spec)
+
+    def read(self, nbytes):
+        if self.kind == 'mic':
+            return self.proc.stdout.read(nbytes)
+        if self.kind == 'wav':
+            data = self.wav.readframes(RTP_SAMPLES)
+            if not data:                      # loop the clip: a test tone should
+                self.wav.rewind()             # not stop mid-call
+                data = self.wav.readframes(RTP_SAMPLES)
+            return data
+        return b'\x00' * nbytes
+
+    def close(self):
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=2)
+            except Exception:
+                pass
+        if self.wav is not None:
+            self.wav.close()
+
+
+class AudioSink:
+    """Plays the far end, or records it, or counts it and drops it."""
+
+    def __init__(self, play, record):
+        self.proc = None
+        self.wav = None
+        self.dropped = 0
+        if play:
+            exe = shutil.which('aplay')
+            if not exe:
+                raise MediaError('--play needs aplay (alsa-utils)')
+            self.proc = subprocess.Popen(
+                [exe, '-q', '-f', 'S16_LE', '-r', '8000', '-c', '1', '-t', 'raw'],
+                stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        if record:
+            self.wav = wave.open(record, 'wb')
+            self.wav.setnchannels(1)
+            self.wav.setsampwidth(2)
+            self.wav.setframerate(8000)
+
+    def write(self, pcm):
+        if self.proc is not None:
+            try:
+                self.proc.stdin.write(pcm)
+                self.proc.stdin.flush()
+            except (BrokenPipeError, ValueError):
+                self.dropped += len(pcm)
+        if self.wav is not None:
+            self.wav.writeframes(pcm)
+
+    def close(self):
+        if self.proc is not None:
+            try:
+                self.proc.stdin.close()
+                self.proc.wait(timeout=2)
+            except Exception:
+                pass
+        if self.wav is not None:
+            self.wav.close()
+
+
+class MediaLeg:
+    """One RTP socket, one sender thread, one receiver thread, and counters.
+
+    The socket is bound BEFORE the INVITE so the port in the SDP is a port that
+    is actually listening. Advertising a port nobody holds is how a call
+    connects and stays silent.
+    """
+
+    def __init__(self, codec, source, play, record, port):
+        if codec not in G711:
+            raise MediaError('codec %r is not PCMU or PCMA' % codec)
+        self.codec = codec
+        self.pt, self.rtpmap_name, self.encode, self.decode = G711[codec]
+        self.source_spec = source
+        self.play = play
+        self.record = record
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self.sock.bind(('', int(port)))
+        except OSError as exc:
+            raise MediaError('cannot bind RTP port %s: %s' % (port, exc))
+        self.port = self.sock.getsockname()[1]
+        self.sock.settimeout(0.2)
+        self.ssrc = struct.unpack('>I', os.urandom(4))[0]
+        self.seq = int(self.ssrc & 0xFFFF)
+        self.ts = int(self.ssrc >> 7) & 0xFFFFFFFF
+        self.remote = None
+        self.stop = threading.Event()
+        self.src = None
+        self.sink = None
+        self.threads = []
+        self.closed = False
+        self.st = {'sent': 0, 'recv': 0, 'bytes_out': 0, 'bytes_in': 0,
+                   'bad': 0, 'other_pt': 0, 'first_seq': None,
+                   'last_seq': None, 'highest_seq': None, 'jitter': 0.0,
+                   'last_transit': None}
+
+    def attach(self, ip, port, pt=None):
+        if pt is not None:
+            self.pt = pt
+        self.remote = (ip, int(port))
+
+    def start(self):
+        if self.remote is None:
+            raise MediaError('the media leg has no remote address yet')
+        self.src = AudioSource(self.source_spec)
+        self.sink = AudioSink(self.play, self.record)
+        self.threads = [threading.Thread(target=self._send, daemon=True),
+                        threading.Thread(target=self._recv, daemon=True)]
+        for t in self.threads:
+            t.start()
+
+    def _send(self):
+        deadline = time.monotonic()
+        paced = self.src.kind != 'mic'      # arecord paces itself
+        first = True
+        while not self.stop.is_set():
+            try:
+                raw = self.src.read(RTP_FRAME_BYTES)
+            except (OSError, ValueError):
+                break
+            if not raw:
+                if first and self.src.kind == 'mic':
+                    # arecord dies when there is no capture device, and a
+                    # silent call with a success row on top is the exact lie
+                    # this module refuses to tell.
+                    print('ERROR\tarecord produced no audio: is there a capture '
+                          'device? (arecord -l)', file=sys.stderr)
+                break
+            first = False
+            if len(raw) < RTP_FRAME_BYTES:
+                raw = raw + b'\x00' * (RTP_FRAME_BYTES - len(raw))
+            pcm = struct.unpack('<%dh' % RTP_SAMPLES, raw)
+            pkt = rtp_packet(self.pt, self.seq, self.ts, self.ssrc,
+                             bytes(self.encode(s) for s in pcm))
+            try:
+                self.sock.sendto(pkt, self.remote)
+            except OSError:
+                break
+            self.st['sent'] += 1
+            self.st['bytes_out'] += len(pkt)
+            self.seq = (self.seq + 1) & 0xFFFF
+            self.ts = (self.ts + RTP_SAMPLES) & 0xFFFFFFFF
+            if paced:
+                deadline += RTP_PTIME_MS / 1000.0
+                wait = deadline - time.monotonic()
+                if wait > 0:
+                    self.stop.wait(wait)
+
+    def _recv(self):
+        while not self.stop.is_set():
+            try:
+                buf, _peer = self.sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            now = time.monotonic()
+            parsed = rtp_parse(buf)
+            if parsed is None:
+                self.st['bad'] += 1
+                continue
+            hdr, payload = parsed
+            self.st['recv'] += 1
+            self.st['bytes_in'] += len(buf)
+            if self.st['first_seq'] is None:
+                self.st['first_seq'] = hdr['seq']
+            if (self.st['highest_seq'] is None
+                    or (hdr['seq'] - self.st['highest_seq']) & 0xFFFF < 0x8000):
+                self.st['highest_seq'] = hdr['seq']
+            self.st['last_seq'] = hdr['seq']
+            # RFC 3550 A.8: interarrival jitter from transit times.
+            transit = now * 1000.0 - hdr['ts'] * 1000.0 / 8000.0
+            if self.st['last_transit'] is not None:
+                d = abs(transit - self.st['last_transit'])
+                self.st['jitter'] += (d - self.st['jitter']) / 16.0
+            self.st['last_transit'] = transit
+            if hdr['pt'] != self.pt:
+                self.st['other_pt'] += 1
+                continue
+            if self.sink is not None and payload:
+                pcm = struct.pack('<%dh' % len(payload),
+                                  *[self.decode(b) for b in payload])
+                self.sink.write(pcm)
+
+    def run(self, duration):
+        """Talk for `duration` seconds; 0 means until interrupted."""
+        deadline = time.monotonic() + duration if duration else None
+        try:
+            while not self.stop.is_set():
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                self.stop.wait(0.1)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.shutdown()
+
+    def shutdown(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.stop.set()
+        for t in self.threads:
+            t.join(timeout=2)
+        if self.src is not None:
+            self.src.close()
+        if self.sink is not None:
+            self.sink.close()
+        self.sock.close()
+
+    def stats(self):
+        st = self.st
+        expected = 0
+        lost = 0
+        if st['first_seq'] is not None:
+            expected = ((st['highest_seq'] - st['first_seq']) & 0xFFFF) + 1
+            lost = max(0, expected - st['recv'])
+        return [
+            ('rtp_codec', self.rtpmap_name),
+            ('rtp_local_port', self.port),
+            ('rtp_remote', '%s:%s' % (self.remote if self.remote else ('-', '-'))),
+            ('rtp_sent', st['sent']),
+            ('rtp_recv', st['recv']),
+            ('rtp_lost', lost),
+            ('rtp_loss_percent', '%.2f' % (100.0 * lost / expected) if expected else '0.00'),
+            ('rtp_jitter_ms', '%.2f' % st['jitter']),
+            ('rtp_bad_packets', st['bad']),
+            ('rtp_other_payload', st['other_pt']),
+            ('rtp_bytes_out', st['bytes_out']),
+            ('rtp_bytes_in', st['bytes_in']),
+        ]
+
+
+class MediaError(Exception):
+    pass
+
+
+def cmd_g711(argv):
+    """Encode or decode a hex sample stream, so the tables can be checked."""
+    if len(argv) < 3:
+        raise SystemExit('ERROR\tusage: g711 <PCMU|PCMA> encode|decode <hex>')
+    codec, direction, hexin = argv[0].upper(), argv[1], argv[2]
+    if codec not in G711:
+        print('ERROR\tcodec must be PCMU or PCMA, not %r' % codec, file=sys.stderr)
+        return 2
+    _pt, name, enc, dec = G711[codec]
+    try:
+        raw = bytes.fromhex(hexin)
+    except ValueError:
+        print('ERROR\tnot hex: %r' % hexin, file=sys.stderr)
+        return 2
+    print('codec\t%s' % name)
+    print('direction\t%s' % direction)
+    if direction == 'encode':
+        if len(raw) % 2:
+            print('ERROR\tencode takes 16-bit samples, so an even octet count',
+                  file=sys.stderr)
+            return 2
+        pcm = struct.unpack('<%dh' % (len(raw) // 2), raw)
+        print('out\t%s' % bytes(enc(s) for s in pcm).hex())
+        return 0
+    if direction == 'decode':
+        print('out\t%s' % struct.pack('<%dh' % len(raw),
+                                      *[dec(b) for b in raw]).hex())
+        return 0
+    print('ERROR\tdirection must be encode or decode', file=sys.stderr)
+    return 2
+
+
+def cmd_sipprobe(argv):
+    """Ask a SIP endpoint whether it is there, before blaming the call.
+
+    OPTIONS is the method RFC 3261 11.1 defines for exactly this: it changes
+    nothing and any live UA answers it. A phone that rings nothing is usually
+    a phone with no client listening on that port, and saying which it is
+    saves an afternoon of suspecting the wrong end.
+    """
+    if not argv:
+        raise SystemExit('ERROR\tusage: sipprobe <host> <port> [to=...]')
+    host, port = argv[0], argv[1]
+    opt = {}
+    for a in argv[2:]:
+        if '=' in a:
+            k, v = a.split('=', 1)
+            opt[k] = v
+    try:
+        portn = int(port)
+    except ValueError:
+        print('ERROR\tport must be a number', file=sys.stderr)
+        return 2
+    timeout = float(os.environ.get('VIMS_SIP_TIMEOUT', '2') or '2')
+    try:
+        fam, typ, proto, _, addr = socket.getaddrinfo(host, portn, 0,
+                                                      socket.SOCK_DGRAM)[0]
+    except socket.gaierror as exc:
+        print('ERROR\tcannot resolve %s: %s' % (host, exc), file=sys.stderr)
+        return 1
+    s = socket.socket(fam, typ, proto)
+    try:
+        s.bind(('', 0))
+    except OSError as exc:
+        print('ERROR\tcannot bind a local port: %s' % exc, file=sys.stderr)
+        return 1
+    s.settimeout(timeout)
+    user = opt.get('user') or 'imsisting'
+    target = opt.get('to') or ('sip:%s@%s' % (user, host))
+    branch = 'z9hG4bK' + _rand(6)
+    callid = _rand(8) + '@' + host
+    contact = 'sip:%s@%s:%d' % (user, host, s.getsockname()[1])
+    msg = ('OPTIONS %s SIP/2.0\r\n'
+           'Via: SIP/2.0/UDP %s:%d;branch=%s;rport\r\n'
+           'Max-Forwards: 70\r\n'
+           'From: <sip:%s@%s>;tag=%s\r\n'
+           'To: <%s>\r\n'
+           'Call-ID: %s\r\n'
+           'CSeq: 1 OPTIONS\r\n'
+           'Contact: <%s>\r\n'
+           'User-Agent: IMSIsting\r\n'
+           'Content-Length: 0\r\n\r\n'
+           % (target, host, s.getsockname()[1], branch, user, host, _rand(4),
+              target, callid, contact)).encode()
+    print('probe\toptions\t%s' % target)
+    try:
+        s.sendto(msg, addr)
+        print('sent_bytes\t%d' % len(msg))
+    except OSError as exc:
+        print('reachable\tno')
+        print('ERROR\tsend to %s:%d failed: %s' % (host, portn, exc),
+              file=sys.stderr)
+        return 1
+    try:
+        data, peer = s.recvfrom(65535)
+    except socket.timeout:
+        print('reachable\tno')
+        print('answered\tnothing in %.1fs' % timeout)
+        print('WHY\tno SIP UA replied on that port: check the client is running,\n'
+              'WHY\tdirect-IP calls are allowed, and the firewall on the phone\n'
+              'WHY\tpermits UDP to it' , file=sys.stderr)
+        print('limitation\ta silent UDP endpoint and a closed one look the same '
+              'from here; only an ICMP port-unreachable tells them apart')
+        s.close()
+        return 3
+    except OSError as exc:
+        print('reachable\tno')
+        print('ERROR\treceive failed: %s' % exc, file=sys.stderr)
+        s.close()
+        return 1
+    s.close()
+    line = data.decode('utf-8', 'replace').split('\r\n', 1)[0]
+    print('reachable\tyes')
+    print('answered\t%s' % line)
+    print('from\t%s:%d' % (peer[0], peer[1]))
+    parts = line.split(' ')
+    print('sip_status\t%s' % (parts[1] if len(parts) > 1 else '?'))
+    return 0
+
+
 def cmd_callflow(argv):
     """Place a call, and keep the dialog consistent while doing it.
 
@@ -1075,6 +1628,18 @@ def cmd_callflow(argv):
     if not 0 < portn < 65536:
         print('ERROR\tport %d is outside 1..65535' % portn, file=sys.stderr)
         return 2
+    # Media options. media=none is the old behaviour: ring, then say nothing.
+    media_spec = opt.get('media', 'none')
+    media_codec = (opt.get('codec') or 'PCMU').upper()
+    media_play = opt.get('play', '0') not in ('0', '', 'no', 'off')
+    media_record = opt.get('record', '')
+    talk_seconds = float(opt.get('duration', '0') or '0')
+    media = None
+    if media_spec not in ('none', ''):
+        if media_codec not in G711:
+            print('ERROR\tcodec %r is not PCMU or PCMA — this leg has no AMR'
+                  % media_codec, file=sys.stderr)
+            return 2
     timeout = float(os.environ.get('VIMS_SIP_TIMEOUT', opt.get('timeout', '2')) or '2')
     try:
         fam, typ, proto, _, addr = socket.getaddrinfo(
@@ -1083,7 +1648,47 @@ def cmd_callflow(argv):
         print('ERROR\tcannot resolve %s: %s' % (host, exc), file=sys.stderr)
         return 1
     sock = socket.socket(fam, typ, proto)
+    # Bind before sending: the Contact header has to name a port that answers,
+    # and an unbound socket's port is only known after the first send. A phone
+    # that hangs up sends its BYE to that Contact, so a wrong one strands the
+    # call until a timeout tears it down.
+    try:
+        sock.bind(('', 0))
+    except OSError as exc:
+        print('ERROR\tcannot bind a local SIP port: %s' % exc, file=sys.stderr)
+        return 1
     sock.settimeout(timeout)
+    sip_port = sock.getsockname()[1]
+    # The address the far end can reach us on: ask the routing table, which is
+    # the interface that actually reaches them.
+    local_ip = None
+    _probe = socket.socket(fam, typ, proto)
+    try:
+        _probe.connect(addr)
+        local_ip = _probe.getsockname()[0]
+    except OSError:
+        pass
+    finally:
+        _probe.close()
+
+    if media_spec not in ('none', ''):
+        try:
+            # Bind before the INVITE: the port in the SDP has to be a port that
+            # is listening, or the call connects into silence.
+            media = MediaLeg(media_codec, media_spec, media_play, media_record,
+                             opt.get('rtp_port', '0'))
+            opt['rtp_port'] = str(media.port)
+        except MediaError as exc:
+            print('ERROR\t%s' % exc, file=sys.stderr)
+            return 2
+        # The SDP has to name an address the far end can reach US on. Defaulting
+        # it to the far end's own address (which is what the signalling builder
+        # does) makes the phone send audio to itself.
+        if 'media_ip' not in opt and local_ip:
+            opt['media_ip'] = local_ip
+        print('media\t%s\tport=%d\tcodec=%s\tip=%s'
+              % (media_spec, media.port, media.rtpmap_name,
+                 opt.get('media_ip', opt.get('host'))))
 
     impi = opt.get('impi') or '310150123456789@ims.mnc001.mcc310.3gppnetwork.org'
     domain = opt.get('domain') or 'ims.mnc001.mcc310.3gppnetwork.org'
@@ -1098,8 +1703,12 @@ def cmd_callflow(argv):
             'domain': domain, 'realm': opt.get('realm') or domain,
             'callid': opt.get('callid') or (_rand(8) + '@' + _rand(2)),
             'from_tag': opt.get('from_tag') or _rand(4),
+            # Contact names US, so it carries our address and our SIP port,
+            # not the far end's: a default built from `host` tells the phone to
+            # send its in-dialog requests to itself.
             'contact': opt.get('contact') or ('%s@%s:%d'
-                                              % (impi.split('@')[0], host, portn)),
+                                              % (impi.split('@')[0],
+                                                 local_ip or host, sip_port)),
             'to_tag': ''}
     state = {'cseq': int(opt.get('cseq', '1'))}
 
@@ -1140,7 +1749,7 @@ def cmd_callflow(argv):
             if code >= 200:
                 return line, code, hdrs, body
 
-    def authenticate(line, code, hdrs, method, ruri):
+    def authenticate(line, code, hdrs, method, ruri, **extra):
         """Answer a 401/407 and return the request that carries the answer."""
         if auth_mode == 'none':
             print('challenged\t%s' % line)
@@ -1174,18 +1783,23 @@ def cmd_callflow(argv):
                     realm=realm, nonce=nonce, uri=uri, response=response,
                     qop=qop, nc=nc, cnonce=cnonce, user=base['user'],
                     algorithm=params.get('algorithm', 'AKAv1-MD5'))
+        over.update(extra)
         return build(method.lower() + '-auth', **over)
 
     try:
+        invite_extra = {}
+        if media is not None:
+            invite_extra['rtp_port'] = str(media.port)
         wire(build('invite', cseq=str(state['cseq']),
-                   branch='z9hG4bK' + _rand(6)), 'INVITE')
+                   branch='z9hG4bK' + _rand(6), **invite_extra), 'INVITE')
         resp = await_final()
         if resp is None:
             print('status\tno-answer')
             return 3
         line, code, hdrs, body = resp
         if code in (401, 407):
-            msg = authenticate(line, code, hdrs, 'INVITE', base['ruri'])
+            msg = authenticate(line, code, hdrs, 'INVITE', base['ruri'],
+                               **invite_extra)
             if msg is None:
                 print('status\tchallenged-no-credentials')
                 return 3
@@ -1199,6 +1813,31 @@ def cmd_callflow(argv):
             # ACK for a non-2xx is the same transaction and a different form;
             # this verb does not send it and says so rather than faking it.
             print('status\tfailed-%d' % code)
+            # A status code from a handset is an answer about the handset. Say
+            # what each one means for this leg, so nobody spends an evening on
+            # the wrong end of the problem.
+            hints = {
+                403: 'the endpoint answered and refused this caller: a client '
+                     'that only accepts calls from its registered server, or a '
+                     'phone that blocked the identity',
+                404: 'the endpoint answered and does not know that address: the '
+                     'user part of the INVITE does not match a configured account',
+                405: 'the endpoint answered and does not accept INVITE there '
+                     '(OPTIONS is answered, calls are not)',
+                406: 'the endpoint answered and no offered codec was acceptable',
+                408: 'the endpoint answered and timed out its own side',
+                480: 'the callee is registered but currently unreachable',
+                486: 'the callee is busy',
+                488: 'the endpoint answered and rejected the SDP: codec or media '
+                     'address it will not accept',
+                491: 'the endpoint already has a call with this Call-ID in '
+                     'progress',
+                503: 'the endpoint answered and is out of service or refusing '
+                     'this request class',
+                603: 'the callee declined the call',
+            }
+            if code in hints:
+                print('why\t%s' % hints[code])
             print('note\tno ACK was sent: a non-2xx ACK belongs to the failed '
                   'transaction and is a different message')
             return 4
@@ -1215,6 +1854,36 @@ def cmd_callflow(argv):
               % (base['callid'], base['from_tag'], to_tag or '(none)', ruri))
         wire(build('ack', ruri=ruri, to_tag=to_tag, cseq=str(state['cseq']),
                    branch='z9hG4bK' + _rand(6)), 'ACK')
+
+        # ── the media leg, now that the answer named where audio goes ────
+        if media is not None:
+            answer = sdp_parse(body)
+            pt, picked = sdp_choose_codec(answer, media_codec)
+            print('sdp_answer\tport=%d\tconn=%s\tpt=%s'
+                  % (answer['port'], answer['conn'] or '-',
+                     ' '.join(answer['pts']) or '-'))
+            if not answer['port']:
+                print('media\tno-media-in-answer\tstatus=signalling-only')
+            elif pt is None:
+                print('media\tcodec-unsupported\t%s\tstatus=signalling-only\t'
+                      'why=the answer picked a payload type this leg cannot '
+                      'decode' % picked)
+            else:
+                remote_ip = answer['conn'] or host
+                # The answer's connection address is what the far end wants to
+                # receive on; 0.0.0.0 means "use the address the INVITE came
+                # from", which for us is the SIP peer.
+                if remote_ip in ('0.0.0.0', ''):
+                    remote_ip = host
+                media.attach(remote_ip, answer['port'], pt)
+                print('media\tstart\tremote=%s:%d\tpt=%d\tcodec=%s'
+                      % (remote_ip, answer['port'], pt, media.rtpmap_name))
+                media.start()
+                media.run(talk_seconds)
+                for k, v in media.stats():
+                    print('%s\t%s' % (k, v))
+                print('media\tstop')
+
         if opt.get('bye', '1') == '0':
             print('status\tcall-up')
             return 0
@@ -1232,6 +1901,8 @@ def cmd_callflow(argv):
         return 4
     finally:
         sock.close()
+        if media is not None:
+            media.shutdown()
 
 
 def cmd_akadigest(argv):
@@ -1323,6 +1994,10 @@ def main():
         return cmd_akadigest(rest)
     if mode == 'callflow':
         return cmd_callflow(rest)
+    if mode == 'g711':
+        return cmd_g711(rest)
+    if mode == 'sipprobe':
+        return cmd_sipprobe(rest)
     raise SystemExit('unknown mode ' + mode)
 
 
@@ -1559,8 +2234,25 @@ vims_call_flow() {
     fi
     local k="" op="" opc="" rand="" had_res=""
     local -a args=()
-    local a
-    for a in "$@"; do
+    local a media="none" codec="PCMU" play="0" record="" duration="0" rtpport="0"
+    # The media leg is spelled as flags here and as key=value in the engine, so
+    # both `--media mic --play --duration 30` and `media=mic play=1 duration=30`
+    # reach the same code. Flags are read off and never forwarded verbatim.
+    while (( $# )); do
+        case "$1" in
+            --media)     media="${2:-none}"; shift 2; continue ;;
+            --media=*)   media="${1#--media=}"; shift; continue ;;
+            --codec)     codec="${2:-PCMU}"; shift 2; continue ;;
+            --codec=*)   codec="${1#--codec=}"; shift; continue ;;
+            --play)      play="1"; shift; continue ;;
+            --record-wav)   record="${2:-}"; shift 2; continue ;;
+            --record-wav=*) record="${1#--record-wav=}"; shift; continue ;;
+            --duration)  duration="${2:-0}"; shift 2; continue ;;
+            --duration=*) duration="${1#--duration=}"; shift; continue ;;
+            --rtp-port)  rtpport="${2:-0}"; shift 2; continue ;;
+            --rtp-port=*) rtpport="${1#--rtp-port=}"; shift; continue ;;
+        esac
+        a="$1"; shift
         case "$a" in
             k=*)    k="${a#k=}" ;;
             opc=*)  opc="${a#opc=}" ;;
@@ -1570,6 +2262,13 @@ vims_call_flow() {
             *)      args+=("$a") ;;
         esac
     done
+    # Defaults go FIRST so an explicit key=value on the command line wins: the
+    # engine reads the last value for a key, and a flag the operator wrote must
+    # not be overridden by a default this wrapper supplied.
+    local -a mdefaults=("media=$media" "codec=$codec" "play=$play"
+                        "rtp_port=$rtpport" "duration=$duration")
+    [[ -n "$record" ]] && mdefaults+=("record=$record")
+    args=("${mdefaults[@]}" "${args[@]}")
     if [[ -n "$k" && -n "$rand" && -n "${op}${opc}" && -z "$had_res" ]]; then
         local gsm="$IMSISTING_ROOT/tools/gsm_crypto.py" gout res
         if [[ ! -f "$gsm" ]]; then
@@ -1588,7 +2287,63 @@ vims_call_flow() {
         printf 'res\t%s\n' "$res" >&2
         args+=("res=$res")
     fi
-    vims_py callflow "$host" "$port" "${args[@]}"
+    local out rc
+    out=$(vims_py callflow "$host" "$port" "${args[@]}"); rc=$?
+    printf '%s\n' "$out"
+    # A call's media numbers are evidence: keep the last set so --rtp-stats can
+    # report what this call measured rather than what we hoped it would.
+    if printf '%s\n' "$out" | grep -q '^rtp_'; then
+        mkdir -p "$STATE_DIR/volte" 2>/dev/null
+        # Only the measurements: one key per row, and `status` belongs to the
+        # verb that reports them, not to the file it reads.
+        printf '%s\n' "$out" | grep -E '^rtp_' >| "$STATE_DIR/volte/rtp_last.tsv"
+    fi
+    return "$rc"
+}
+
+# ── the media numbers of the last call ──────────────────────────────────
+vims_cmd_rtp_stats() {
+    local f="$STATE_DIR/volte/rtp_last.tsv"
+    if [[ ! -s "$f" ]]; then
+        printf 'status\tnone\n'
+        printf 'ERROR\tno media has been measured yet\n' >&2
+        printf 'WHY\trun --call <host> --media mic --play --duration 20 first; this\n' >&2
+        printf 'WHY\tverb reports the last call, it does not probe anything\n' >&2
+        return 1
+    fi
+    printf 'status\treported\n'
+    printf 'file\t%s\n' "$f"
+    cat "$f"
+}
+
+# ── is the far end even there? ──────────────────────────────────────────
+# A phone that rings nothing is usually a phone with no SIP client listening.
+# OPTIONS is the method RFC 3261 11.1 defines for asking, and it changes
+# nothing, so it is the right first question to ask of a handset.
+vims_cmd_sip_probe() {
+    local dst="${1:-}"
+    if [[ -z "$dst" ]]; then
+        printf 'ERROR\tusage: --sip-probe <host>[:port] [user=...] [to=...]\n' >&2
+        return 2
+    fi
+    local host port
+    if [[ "$dst" == *:* ]]; then host="${dst%:*}"; port="${dst##*:}"
+    else host="$dst"; port="${VIMS_SIP_PORT:-5060}"; fi
+    [[ "$host" =~ ^[A-Za-z0-9_.:-]+$ ]] || {
+        printf 'ERROR\thost %q is not a hostname or address\n' "$host" >&2; return 2; }
+    [[ "$port" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tport %q is not a number\n' "$port" >&2; return 2; }
+    shift
+    vims_py sipprobe "$host" "$port" "$@"
+}
+
+# ── G.711 in and out, so the tables can be checked without a call ───────
+vims_cmd_g711() {
+    local codec="${1:-}" direction="${2:-}" hex="${3:-}"
+    [[ -n "$codec" && -n "$direction" ]] || {
+        printf 'ERROR\tusage: --g711 <PCMU|PCMA> encode|decode <hex>\n' >&2
+        return 2; }
+    vims_py g711 "$codec" "$direction" "$hex"
 }
 
 # ── IMP4GT model ────────────────────────────────────────────────────────
@@ -2019,6 +2774,44 @@ vims_selftest() {
     tabhex=$(printf '%s' "$tabmsg" | vims_hex_of)
     chk sip-tab-sanitised "$(vims_cmd_sip_parse "$tabhex" | awk -F'\t' 'NF!=2{n++} END{print n+0}')" "0"
 
+    # ── the media leg ───────────────────────────────────────────────────
+    # The offer first: a call that cannot say what audio it speaks is a call
+    # that connects and stays silent. PCMU and PCMA are listed before AMR
+    # because those are the two this leg can encode and decode.
+    hex=$(vims_py sipbuild invite rtp_port=40000 media_ip=127.0.0.1 | vims_hex_of)
+    out=$(vims_cmd_sip_parse "$hex")
+    chk offer-media   "$(fld "$out" sdp_media)"  "audio 40000 RTP/AVP 0 8 96"
+    chk offer-rtpmap  "$(fld "$out" sdp_rtpmap)" "0 PCMU/8000,8 PCMA/8000,96 AMR/8000"
+
+    # G.711 known answers: the reference codes every implementation agrees on
+    # (full scale is 32767 and -32768, written here little-endian).
+    chk g711-ulaw-zero "$(vims_py g711 PCMU encode 0000 | awk -F'\t' '$1=="out"{print $2}')" "ff"
+    chk g711-ulaw-max  "$(vims_py g711 PCMU encode ff7f | awk -F'\t' '$1=="out"{print $2}')" "80"
+    chk g711-ulaw-min  "$(vims_py g711 PCMU encode 0080 | awk -F'\t' '$1=="out"{print $2}')" "00"
+    chk g711-alaw-zero "$(vims_py g711 PCMA encode 0000 | awk -F'\t' '$1=="out"{print $2}')" "d5"
+    chk g711-alaw-max  "$(vims_py g711 PCMA encode ff7f | awk -F'\t' '$1=="out"{print $2}')" "aa"
+    chk g711-ulaw-dec  "$(vims_py g711 PCMU decode ff | awk -F'\t' '$1=="out"{print $2}')" "0000"
+
+    # The same thing against an implementation that is not this one: audioop
+    # was the reference codec in the Python standard library for years. When it
+    # is gone (3.13) this reports SKIP — a skip is never a pass.
+    local ramp ulaw_ref alaw_ref n
+    ramp=$(python3 -c 'import struct,sys; sys.stdout.write(struct.pack("<8h",0,1,-1,100,-100,1000,-1000,32767).hex())')
+    ulaw_ref=$(python3 -c 'import audioop,struct,sys; sys.stdout.write(audioop.lin2ulaw(bytes.fromhex(sys.argv[1]),2).hex())' "$ramp" 2>/dev/null)
+    alaw_ref=$(python3 -c 'import audioop,struct,sys; sys.stdout.write(audioop.lin2alaw(bytes.fromhex(sys.argv[1]),2).hex())' "$ramp" 2>/dev/null)
+    if [[ -n "$ulaw_ref" ]]; then
+        chk g711-ulaw-audioop "$(vims_py g711 PCMU encode "$ramp" | awk -F'\t' '$1=="out"{print $2}')" "$ulaw_ref"
+        chk g711-alaw-audioop "$(vims_py g711 PCMA encode "$ramp" | awk -F'\t' '$1=="out"{print $2}')" "$alaw_ref"
+        chk g711-ulaw-decode-audioop \
+            "$(vims_py g711 PCMU decode "$ulaw_ref" | awk -F'\t' '$1=="out"{print $2}')" \
+            "$(python3 -c 'import audioop,sys; sys.stdout.write(audioop.ulaw2lin(bytes.fromhex(sys.argv[1]),2).hex())' "$ulaw_ref" 2>/dev/null)"
+    else
+        printf 'SKIP\tg711-referee\taudioop is not in this python (removed in 3.13)\n'
+    fi
+    chk g711-bad-codec "$(vims_cmd_g711 AMR encode 0000 >/dev/null 2>&1; echo $?)" "2"
+    chk g711-bad-dir   "$(vims_cmd_g711 PCMU sideways 0000 >/dev/null 2>&1; echo $?)" "2"
+    chk g711-odd-hex   "$(vims_cmd_g711 PCMU encode 000 >/dev/null 2>&1; echo $?)" "2"
+
     # 6. IMS registration flow: REGISTER -> 401 challenge -> authenticated
     #    REGISTER -> 200 OK, plus the RFC 2617 3.5 digest known answer.
     out=$(vims_cmd_ims_registration "$(vims_py msgs register)")
@@ -2371,6 +3164,9 @@ vims_cli_main() {
         --register-spoof)         vims_register_spoof "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --register-aka)           vims_register_aka "$@" ;;
         --call)                   vims_call_flow "$@" ;;
+        --rtp-stats)              vims_cmd_rtp_stats ;;
+        --sip-probe)              vims_cmd_sip_probe "$@" ;;
+        --g711)                   vims_cmd_g711 "${1:-}" "${2:-}" "${3:-}" ;;
         --plan)                   vims_plan "${1:-}" ;;
         --selftest)               vims_selftest ;;
         --menu)                   vims_menu ;;
@@ -2397,10 +3193,25 @@ Usage: $0 COMMAND
                                             hashed into the RFC 2617 digest
                                             (encoding=hex|raw chooses how RES is
                                             hashed, since RFC 3310 does not say)
-  --call <host>[:port] [key=value ...]      place a call: INVITE, answer the
-                                            challenge, ACK, BYE (no flag needed)
+  --call <host>[:port] [flags] [key=value]  place a call: INVITE, answer the
+                                            challenge, ACK, media, BYE
                                             auth=none|digest|aka, password=,
                                             res=, to=, domain=, bye=0
+      --media none|mic|wav:<file>|silence   carry audio instead of ringing and
+                                            hanging up: G.711, 8 kHz, 20 ms
+      --codec PCMU|PCMA                     the codec this leg speaks (AMR is
+                                            offered in the SDP, refused if the
+                                            answer picks it)
+      --play                                play the far end through aplay
+      --record-wav <file.wav>               or write its audio to a wav
+      --duration <seconds>                  talk for that long, then BYE
+                                            (0 = until interrupted)
+      --rtp-port <n>                        the RTP port to offer (0 = pick one)
+  --sip-probe <host>[:port] [user=...]       ask the far end whether a UA is
+                                            listening (OPTIONS), before a call
+  --rtp-stats                               the media numbers of the last call
+  --g711 <PCMU|PCMA> encode|decode <hex>    the codec alone, no call, so the
+                                            tables can be checked by hand
   --ims-registration <hex> [aka-res-hex]    IMS REGISTER/401/AKA flow
   --detect-keystream-reuse <pcap> [port] [--calls <tsv>]
                                             reuse detector, two calls at a time

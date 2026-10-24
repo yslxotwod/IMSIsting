@@ -3736,6 +3736,203 @@ ERROR	usage: --es9-notification <json>   (@file reads the body from a file)
 EOF
 }
 
+# ── RSP binding audit: would a replay or a redirect be noticed? (R10) ───
+#
+# SGP.22's remote SIM provisioning moves a profile over the internet. The
+# protocol's protection is not secrecy of the conversation -- TLS carries it --
+# but BINDING: the transactionId ties a response to its request, the SM-DP+
+# signatures tie the command to the key it was issued under, and the EID ties
+# the profile to one eUICC. An exchange that has all three is hard to move; one
+# missing any of them is a profile that can be installed somewhere else.
+#
+# This audits a captured exchange against those three ties and says which one
+# is missing, citing the clause that requires it. It never says "safe": it says
+# what would have to be true for a replay to work.
+sim_rsp_audit() {
+    local json="" req="" eid="" op=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --request)     req="${2:-}";  shift 2 ;;
+            --eid)         eid="${2:-}";  shift 2 ;;
+            --op)          op="${2:-}";   shift 2 ;;
+            --help|-h)
+                printf 'ERROR\tusage: --rsp-audit <response-json> [--request <request-json>] [--eid <32 hex>] [--op <operation>]\n' >&2
+                printf 'NOTE\t  the response is an ES9+ response body; --request is the matching request body (or @file)\n' >&2
+                return 2 ;;
+            --*) printf 'ERROR\tunsupported flag %s for --rsp-audit\n' "$(sim_sanitize "$1")" >&2; return 2 ;;
+            *)
+                [[ -z "$json" ]] || {
+                    printf 'ERROR\t--rsp-audit takes one response body\n' >&2; return 2; }
+                json="$1"; shift ;;
+        esac
+    done
+    [[ -n "$json" ]] || {
+        printf 'ERROR\tusage: --rsp-audit <response-json> [--request <request-json>] [--eid <32 hex>] [--op <operation>]\n' >&2
+        return 2; }
+    sim_rsp_audit_py "$json" "$req" "$eid" "$op"
+}
+
+sim_rsp_audit_py() {  # <response> <request> <eid> <op>
+    python3 - "${1:-}" "${2:-}" "${3:-}" "${4:-}" <<'PY'
+import json, re, sys
+
+def load(s):
+    if s.startswith("@"):
+        with open(s[1:], encoding="utf-8") as f:
+            return json.load(f)
+    return json.loads(s)
+
+def s(v):
+    t = str(v).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    return t if len(t) <= 120 else t[:120] + "..."
+
+resp_raw, req_raw, eid, op = sys.argv[1], sys.argv[2], sys.argv[3].strip().upper(), sys.argv[4]
+try:
+    resp = load(resp_raw)
+except Exception as e:
+    sys.stderr.write("ERROR\tthe response is not JSON: %s\n" % e)
+    sys.exit(1)
+if not isinstance(resp, dict):
+    sys.stderr.write("ERROR\tthe response body is a JSON object\n")
+    sys.exit(1)
+
+print("audit\tRSP exchange binding")
+print("spec\tSGP.22 v2.2.2 6.5.1.4 (header), 6.5.2.6-6.5.2.8 (ES9+ bodies)")
+
+# Which operation this is: --op wins, else the fields present decide.
+if not op:
+    if "serverSigned1" in resp:
+        op = "initiateAuthentication"
+    elif "smdpSigned2" in resp:
+        op = "authenticateClient"
+    elif "boundProfilePackage" in resp:
+        op = "getBoundProfilePackage"
+    else:
+        op = "unknown"
+print("operation\t%s" % (op if op != "unknown" else "undetermined"))
+
+findings = []
+def finding(sev, text):
+    findings.append((sev, text))
+
+# 1. The transaction tie: a response belongs to the request that asked for it.
+tid = resp.get("transactionId")
+if not isinstance(tid, str) or not re.fullmatch(r"[0-9A-F]{2,32}", tid):
+    finding("HIGH", "the response carries no usable transactionId (6.5.2.6-6.5.2.8 require TransactionID)")
+    print("binding.transaction\tabsent")
+else:
+    print("binding.transaction\t%s" % tid)
+    if req_raw:
+        try:
+            rq = load(req_raw)
+        except Exception as e:
+            sys.stderr.write("ERROR\tthe request is not JSON: %s\n" % e)
+            sys.exit(1)
+        rtid = rq.get("transactionId") if isinstance(rq, dict) else None
+        print("binding.request_transaction\t%s" % (rtid or "absent"))
+        if rtid is None:
+            finding("HIGH", "the request has no transactionId to bind to, so any response matches it")
+        elif str(rtid).upper() != tid.upper():
+            finding("HIGH", "the response answers transaction %s, not the request's %s: this is the shape a redirected or replayed response takes" % (tid, rtid))
+
+# 2. The signature tie: the command has to come from the SM-DP+ key.
+if op == "initiateAuthentication":
+    for field, clause in (("serverSigned1", "6.5.2.6"), ("serverSignature1", "6.5.2.6"),
+                          ("euiccCiPKIdToBeUsed", "6.5.2.6"), ("serverCertificate", "6.5.2.6")):
+        if field not in resp:
+            finding("HIGH", "initiateAuthentication without %s (%s): nothing ties the command to the SM-DP+ key" % (field, clause))
+    if "serverSigned1" in resp and "serverSignature1" in resp:
+        print("binding.signature\tserverSigned1 + serverSignature1 present")
+elif op == "authenticateClient":
+    for field, clause in (("smdpSigned2", "6.5.2.8"), ("smdpSignature2", "6.5.2.8"),
+                          ("smdpCertificate", "6.5.2.8")):
+        if field not in resp:
+            finding("MEDIUM", "authenticateClient without %s (%s): the profile metadata is unsigned" % (field, clause))
+    if "smdpSigned2" in resp:
+        print("binding.signature\tsmdpSigned2 + smdpSignature2 present")
+elif op == "unknown":
+    finding("MEDIUM", "the body carries none of the ES9+ operation field sets (serverSigned1, smdpSigned2, boundProfilePackage), so the signature tie cannot be checked at all: an unsigned body and a body whose operation is not recognized look the same here")
+elif op == "getBoundProfilePackage":
+    if "boundProfilePackage" not in resp:
+        finding("HIGH", "getBoundProfilePackage without boundProfilePackage (6.5.2.7)")
+    else:
+        bpp = resp["boundProfilePackage"]
+        if isinstance(bpp, str) and len(bpp) < 32:
+            finding("MEDIUM", "boundProfilePackage is %d base64 characters, too short to carry a profile" % len(bpp))
+        print("binding.profile\tboundProfilePackage present (%s characters)" % (len(bpp) if isinstance(bpp, str) else "?"))
+
+# 3. The device tie: a profile is for one EID.
+if eid:
+    named = []
+    meta = resp.get("profileMetadata")
+    if isinstance(meta, dict):
+        for k in ("eidValue", "eid", "associationToken"):
+            if k in meta:
+                named.append("%s=%s" % (k, s(meta[k])))
+    for k in ("eidValue", "eid"):
+        if k in resp:
+            named.append("%s=%s" % (k, s(resp[k])))
+    print("binding.device\t%s" % (", ".join(named) or "no EID named in the response"))
+    if named and not any(eid in n.upper() for n in named):
+        finding("HIGH", "the response names an EID that is not the one supplied: the profile is bound to another device")
+
+# 4. Notifications ride the same channel and are not signed by the SM-DP+.
+if "pendingNotification" in resp or "notification" in resp:
+    print("binding.notification\ta notification is being carried: its authenticity rests on the card's own signature, not on ES9")
+
+print("findings\t%d" % len(findings))
+for i, (sev, text) in enumerate(findings, 1):
+    print("finding.%d\t%s\t%s" % (i, sev, text))
+if findings:
+    high = sum(1 for sev, _ in findings if sev == "HIGH")
+    if high:
+        print("verdict\ta replay or a redirected response would not be detected")
+        sys.exit(1)
+    if op == "unknown":
+        print("verdict\tundetermined: the transaction tie is all this body can be checked for, and it is not enough to move a profile")
+        sys.exit(1)
+    print("verdict\tthe transaction tie is present, with warnings above")
+    sys.exit(0)
+print("verdict\tthe transaction and signature ties are present: a response cannot be moved to another request by this audit")
+print("sent\t0")
+sys.exit(0)
+PY
+}
+
+# The attacks B1 names, as handoff plans: what each needs and what it proves.
+sim_rsp_plan() {
+    local kind="${1:-}"
+    case "$kind" in
+        profile-move)
+            printf 'status\thandoff\n'
+            printf 'what\tinstall a profile on another eUICC by replaying an ES9+ conversation\n'
+            printf 'why\tthe transactionId and the SM-DP+ signature are what stop it; --rsp-audit says whether a captured exchange has both\n'
+            printf 'hardware\ta test eUICC and an LPA (or an eUICC simulator) on a device you control\n'
+            printf 'software\tthe ES9+ client from --es9-plus, the BPP parser from --es8-parse, and a proxy that can edit the JSON body\n'
+            printf 'flow\t1. capture an initiateAuthentication exchange  2. --rsp-audit it  3. replay the response against a second request and see whether the LPA accepts it\n'
+            printf 'refuses\tnothing here signs or forges an SM-DP+ signature: the audit names what is missing, it does not supply it\n' ;;
+        notification-spoof)
+            printf 'status\thandoff\n'
+            printf 'what\tsend a HandleNotification that makes the SM-DP+ record an install that never happened\n'
+            printf 'why\tthe notification is authenticated by the card, not by the LPA, so a spoofed one is a delivery question rather than a crypto one\n'
+            printf 'hardware\ta test eUICC; a real SM-DP+ must be avoided\n'
+            printf 'software\tthe notification builder and --es9-notification to read it back\n'
+            printf 'flow\t1. build a PendingNotification with --es9-notification  2. note which fields the SM-DP+ would trust  3. send it on a test SM-DP+ and read the record\n'
+            printf 'refuses\tthe card-side signature is not forged here\n' ;;
+        smdp-redirect)
+            printf 'status\thandoff\n'
+            printf 'what\tpoint an LPA at another SM-DP+ during activation\n'
+            printf 'why\tthe activation code names the SM-DP+; TLS and the SM-DP+ certificate are what stop a redirect, and --rsp-audit flags a response with no serverCertificate\n'
+            printf 'hardware\ta device with a test eUICC and a proxy between LPA and SM-DP+\n'
+            printf 'software\t--es9-plus to build the requests, --es9-response to parse what comes back\n'
+            printf 'flow\t1. capture the activation code  2. rewrite the SM-DP+ host in the proxied request  3. --rsp-audit the response: a redirectable exchange is one with no signature tie\n'
+            printf 'refuses\tno certificate is forged and no TLS is broken here\n' ;;
+        *)
+            printf 'ERROR\tusage: --rsp-plan <profile-move|notification-spoof|smdp-redirect>\n' >&2
+            return 2 ;;
+    esac
+}
+
 sim_cmd_es9_notification() {
     local json="${1:-}"
     shift 2>/dev/null || true
@@ -4899,6 +5096,30 @@ sim_selftest() {
     chk usage-key-list   "$(printf '%s\n' "$out" | grep -c '^  --key-list ')" "1"
     chk usage-aka-resp   "$(printf '%s\n' "$out" | grep -c '^  --aka-responder ')" "1"
     chk usage-aka-serve  "$(printf '%s\n' "$out" | grep -c '^  --aka-serve ')" "1"
+
+    # ── RSP binding audit (R10) ────────────────────────────────────────
+    # SGP.22's protection is binding, not secrecy: the transactionId ties a
+    # response to its request, the SM-DP+ signature ties the command to its
+    # key, and the EID ties the profile to one device. The audit says which
+    # tie is missing, so a replay is a finding rather than a hope.
+    local rsp_ok rsp_replay rsp_unsigned
+    rsp_ok='{"header":{"functionExecutionStatus":{"status":"Executed-Success"}},"transactionId":"AB12","serverSigned1":"MAA=","serverSignature1":"MAA=","euiccCiPKIdToBeUsed":"MAA=","serverCertificate":"MAA="}'
+    chk rsp-bound "$(sim_cli_main --rsp-audit "$rsp_ok" --request '{"transactionId":"AB12"}' 2>/dev/null | awk -F'\t' '$1=="findings"{print $2}')" "0"
+    chk rsp-bound-rc "$(sim_cli_main --rsp-audit "$rsp_ok" --request '{"transactionId":"AB12"}' >/dev/null 2>&1; echo $?)" "0"
+    rsp_replay=$(sim_cli_main --rsp-audit "$rsp_ok" --request '{"transactionId":"CD34"}' 2>&1)
+    chk rsp-replay-sev "$(printf '%s\n' "$rsp_replay" | awk -F'\t' '$1=="finding.1"{print $2; exit}')" "HIGH"
+    chk rsp-replay-rc  "$(sim_cli_main --rsp-audit "$rsp_ok" --request '{"transactionId":"CD34"}' >/dev/null 2>&1; echo $?)" "1"
+    rsp_unsigned=$(sim_cli_main --rsp-audit '{"transactionId":"AB12"}' 2>&1)
+    chk rsp-unsigned-sev "$(printf '%s\n' "$rsp_unsigned" | awk -F'\t' '$1=="finding.1"{print $2; exit}')" "MEDIUM"
+    chk rsp-unsigned-op  "$(printf '%s\n' "$rsp_unsigned" | awk -F'\t' '$1=="operation"{print $2; exit}')" "undetermined"
+    # A named EID that is not the supplied one is the moved-profile case.
+    chk rsp-eid-mismatch "$(sim_cli_main --rsp-audit '{"transactionId":"AB12","eidValue":"AABB"}' --eid CCDD 2>/dev/null | grep -c '^finding\.[0-9]*	HIGH	.*EID')" "1"
+    chk rsp-bad-json "$(sim_cli_main --rsp-audit 'nope' >/dev/null 2>&1; echo $?)" "1"
+    chk rsp-no-args  "$(sim_cli_main --rsp-audit >/dev/null 2>&1; echo $?)" "2"
+    # The plans name what each attack needs, and refuse an unknown one.
+    chk rsp-plan-profile "$(sim_cli_main --rsp-plan profile-move 2>/dev/null | awk -F'\t' '$1=="status"{print $2; exit}')" "handoff"
+    chk rsp-plan-notify  "$(sim_cli_main --rsp-plan notification-spoof 2>/dev/null | grep -c '^what	')" "1"
+    chk rsp-plan-refused "$(sim_cli_main --rsp-plan nope >/dev/null 2>&1; echo $?)" "2"
 
     # ── SCP03t: the derivation, and a card's cryptogram (R11) ──────────
     # The keys SGP.02 2.6.4 rides on: S-ENC/S-MAC/S-RMAC from the Annex D
@@ -6181,6 +6402,8 @@ sim_cli_main() {
         --aka-responder)  sim_cmd_aka_responder "$@" ;;
         --aka-serve)      sim_cmd_aka_serve "$@" ;;
         --auts-build)     sim_cmd_auts_build "$@" ;;
+        --rsp-audit)      sim_rsp_audit "$@" ;;
+        --rsp-plan)       sim_rsp_plan "${1:-}" ;;
         --auts-verify)    sim_cmd_auts_verify "$@" ;;
         --usim-serve)     sim_usim_serve "$@" ;;
         --usim-tcp)       sim_cmd_usim_tcp "$@" ;;
@@ -6227,6 +6450,12 @@ Usage: $0 COMMAND
                                     one AKA event: quintet from the store, SQN incremented and saved; --5g adds KAUSF and RES*
   --aka-serve [--5g --sn <hex>|--sn-name <text>]
                                     resident responder: VECTOR <imsi> [<rand>] / LIST / QUIT on stdin
+  --rsp-audit <response-json> [--request <json>] [--eid <hex>]
+                                    audit an ES9+ exchange for the three ties
+                                    that stop a profile being moved: transaction,
+                                    SM-DP+ signature, EID
+  --rsp-plan <profile-move|notification-spoof|smdp-redirect>
+                                    what each RSP attack needs, as a handoff
   --auts-build <ki> <opc> <rand> <sqn_ms> [<amf>]
                                     the AUTS a card sends when the network's SQN
                                     is behind: (SQN_MS xor AK) || MAC-S

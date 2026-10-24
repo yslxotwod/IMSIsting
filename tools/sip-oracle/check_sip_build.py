@@ -241,10 +241,18 @@ def main():
             if got["sip.msg_body"].lower() != body.hex():
                 failures.append("invite: tshark's body does not match the "
                                 "bytes after the separator")
-            if b"m=audio 49152 RTP/AVP 96" not in body:
-                failures.append("invite: no AMR audio line in the SDP")
-            if b"a=rtpmap:96 AMR/8000" not in body:
-                failures.append("invite: no rtpmap for the AMR payload")
+            # The offer lists PCMU and PCMA first because the media leg can
+            # actually encode and decode those two, and AMR last because an
+            # IMS core expects to see it. All three must be in the same audio
+            # line: a second m= line would be a second stream nobody answers.
+            if b"m=audio 49152 RTP/AVP 0 8 96" not in body:
+                failures.append("invite: the audio line does not offer "
+                                "PCMU, PCMA and AMR")
+            for line in (b"a=rtpmap:0 PCMU/8000", b"a=rtpmap:8 PCMA/8000",
+                         b"a=rtpmap:96 AMR/8000", b"a=ptime:20"):
+                if line not in body:
+                    failures.append("invite: the SDP lacks %r"
+                                    % line.decode())
         if kind == "register-auth":
             auth = got["sip.Authorization"]
             for piece in ('username="310150123456789"', 'realm="%s"' % DOMAIN,

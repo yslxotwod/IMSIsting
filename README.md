@@ -106,7 +106,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 |---|---|
 | `26_ss7_map` | MAP/TCAP decode and forge, SIGTRAN both ways, GRX/roaming interconnect |
 | `27_cellular_dns` | DNS over the bearer, the aLTEr sequence, spoof detection |
-| `30_volte_ims` | ReVoLTE keystream reuse, IMP4GT model, SIP REGISTER spoofing, IMS registration hijack |
+| `30_volte_ims` | ReVoLTE keystream reuse, IMP4GT model, SIP REGISTER spoofing, IMS registration hijack, and a call leg that carries G.711 audio (`--call --media mic --play`) |
 | `32_nas_signaling` | NAS rate and procedure mix, storm detection, and seventeen pre-authentication message builders |
 | `48_oran` | O-RAN interfaces, E2SM, xApp authority, A1 policy poisoning, QoS policy |
 
@@ -209,6 +209,7 @@ computes rather than describes.
 |---|---|---|
 | MAP operations | `26_ss7_map` | ATI, SRI, SRI-SM, SAI, PSI, ULR, ISD, RegisterSS and ActivateSS built byte-exact, with M3UA encapsulation both ways. |
 | SIP and IMS registration hijack | `30_volte_ims` | A forged REGISTER and the spoofed re-registration sequence; `--sip-flood` is a rate calculation, not a sender. |
+| A call that carries audio | `30_volte_ims` | `--call` drives INVITE → 401 answer → ACK → BYE over UDP with SDP, and the media leg behind it binds a real RTP socket, offers PCMU/PCMA, sends 20 ms frames from the microphone or a wav and plays or records the far end. Verified against a loopback SIP UAS (`tools/check-media-leg.sh`); a handset or an IMS core accepting the offer has not been tested here. |
 | 5G SBA and NGAP | `13_nr_core`, `40_sba_pivot` | NRF discovery, NGAP procedures, PFCP rules, and the reachability map across the service-based architecture. |
 | 5G SUCI capture | `58_suci_catcher` | The pre-authentication identity exchange: cell and AMF slice build, catcher plan, and the SUCI a UE hands over before any key exists. |
 | O-RAN and slicing | `48_oran`, `34_slicing` | A1 policy poisoning, E2 control shapes, the over-broad xApp model, slice isolation testing, 5QI and TSN assistance. |

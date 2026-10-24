@@ -912,6 +912,26 @@ gair_store_si_row() {
     gair_init_store
     printf '%s\n' "$1" >> "$GAIR_SI_STORE"
 }
+# Persist what a decode actually learned. Only SI3/SI4 carry a LAI and a cell
+# identity, so only those produce a row; every other type returns 1 and the
+# store stays untouched. 07_gsm_attack --vector-imsi-catcher reads this file as
+# its default cell, which is why the columns are the ones it needs.
+gair_store_decoded_si() {   # <decode output: TSV rows on stdout>
+    local rows="${1:-}" name mcc mnc lac ci t3212
+    name=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="message"{print $2; exit}')
+    case "$name" in SI3|SI4) ;; *) return 1 ;; esac
+    mcc=$(printf '%s\n' "$rows"   | awk -F'\t' '$1=="mcc"{print $2; exit}')
+    mnc=$(printf '%s\n' "$rows"   | awk -F'\t' '$1=="mnc"{print $2; exit}')
+    lac=$(printf '%s\n' "$rows"   | awk -F'\t' '$1=="lac"{print $2; exit}')
+    ci=$(printf '%s\n' "$rows"    | awk -F'\t' '$1=="cell_id"{print $2; exit}')
+    t3212=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="t3212"{print $2; exit}')
+    [[ -n "$mcc" && -n "$lac" && -n "$ci" ]] || return 1
+    gair_init_store
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$name" "$mcc" "$mnc" "$lac" "$ci" "${t3212:--}" "-" \
+        "decode-si" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GAIR_SI_STORE"
+    return 0
+}
 gair_si_count() {
     [[ -f "$GAIR_SI_STORE" ]] || { echo 0; return; }
     local n; n=$(tail -n +2 "$GAIR_SI_STORE" 2>/dev/null | grep -c . || true)
@@ -939,7 +959,15 @@ gair_cmd_decode_si() {
     local hex="${1:-}"
     [[ -n "$hex" ]] || {
         printf 'ERROR\tusage: --decode-si <hex>\n' >&2; return 2; }
-    gair_decode_si "$hex"
+    local out rc
+    out=$(gair_decode_si "$hex"); rc=$?
+    (( rc == 0 )) || return "$rc"
+    printf '%s\n' "$out"
+    # A decode is also a sighting: SI3/SI4 get stored so the cell can be
+    # cloned without retyping it. A type with no LAI stores nothing, and that
+    # is not an error in the decode that just succeeded.
+    gair_store_decoded_si "$out" || true
+    return 0
 }
 
 gair_cmd_paging_group() {
@@ -1032,6 +1060,16 @@ gair_selftest() {
     local si3d="15061b000102f81030390000000000000000"
     chk si3-mcc-fr "$(fld "$(gair_decode_lai "$si3d")" mcc)" "208"
     chk si3-mnc-fr "$(fld "$(gair_decode_lai "$si3d")" mnc)" "01"
+
+    # 3b. A decode is also a sighting: --decode-si must persist the cell onto
+    #     one row of the store (07_gsm_attack reads that file for its defaults),
+    #     and a type with no LAI must add nothing.
+    gair_cmd_decode_si "$si3b" >/dev/null 2>&1
+    chk si-store-rows "$(gair_si_count)" "1"
+    chk si-store-cell "$(awk -F'\t' 'NR==2{printf "%s/%s/%s/%s", $2, $3, $4, $5}' "$GAIR_SI_STORE")" "262/01/12345/1"
+    chk si-store-type "$(awk -F'\t' 'NR==2{print $1}' "$GAIR_SI_STORE")" "SI3"
+    chk si-store-none "$(gair_store_decoded_si "$(printf 'message\tSI1\nmcc\t262\nlac\t1\n')"; echo $?)" "1"
+    chk si-store-none-count "$(gair_si_count)" "1"
 
     # 4. Unknown message type must fail, not guess.
     chk si-unknown-type "$(gair_decode_si '1506ff00000000' >/dev/null 2>&1; echo $?)" "1"
@@ -1183,7 +1221,10 @@ gair_selftest() {
     chk sanitize-nl   "$(printf '%s' "$evil" | tr -cd '\n' | wc -c | tr -d ' ')" "0"
 
     # 14. Status TSV contract. SDR presence is environment-dependent, so only
-    #     the invariant fields are asserted.
+    #     the invariant fields are asserted. The store is emptied first: the
+    #     decode in 3b wrote a real row, and this block asserts the empty-count
+    #     path rather than a count that depends on test order.
+    rm -f "$GAIR_SI_STORE"
     out=$(gair_cli_status_tsv)
     chk status-dir          "$(fld "$out" dir)"   "$GAIR_DIR"
     chk status-store        "$(fld "$out" store)" "$GAIR_SI_STORE"

