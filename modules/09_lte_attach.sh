@@ -175,7 +175,12 @@ latt_bcd_decode_num() {
 #   type = 0b001 (1)  IMSI       value = 3..8 BCD octets (see above)
 #   type = 0b010 (2)  IMEI       as IMSI, 15 digits
 #   type = 0b011 (3)  IMEISV     as IMSI
-#   type = 0b110 (6)  GUTI       value = PLMN(3) | M-TMSI(4) | MMEI(3 )
+#   type = 0b110 (6)  GUTI       value = PLMN(3) | MME group id(2) |
+#                                MME code(1) | M-TMSI(4)   -- the order
+#                                tshark reads: 00 F1 10 12 34 56 DE AD BE EF
+#                                is 001/01, group 4660, code 86, M-TMSI
+#                                0xDEADBEEF. The type octet is 0xF6: bits 3-1
+#                                hold 110 and bit 4 is the odd/even indicator.
 #
 # So an IMSI identity IE is always type_octet + value = 1 + 8 = 9 octets
 # for a 15-digit IMSI, i.e. length field 9.
@@ -1069,18 +1074,53 @@ latt_cmd_nas_responder() {
                     latt_state_set state "$state" imsi "$imsi" \
                         exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
                 else
-                    # A GUTI attach names no subscriber: ask for the IMSI.
+                    # A GUTI attach names no subscriber on its own. If the
+                    # binding is already known the attach resolves without
+                    # asking again -- that is what having harvested the parse
+                    # half buys. If it is not, remember which GUTI was
+                    # presented and ask for the IMSI behind it.
+                    local ghex gdec gstr bound_imsi
+                    ghex="${pdu:6}"; gdec=$(latt_guti_decode "$ghex" 2>/dev/null || true)
+                    gstr=$(printf '%s\n' "$gdec" | awk -F'\t' '$1=="guti"{print $2; exit}')
+                    bound_imsi=""
+                    if [[ -n "$gstr" ]]; then
+                        bound_imsi=$(awk -F'\t' -v g="$gstr" '$1==g{print $7; exit}' \
+                            "$LATT_GUTI_MAP" 2>/dev/null)
+                    fi
+                    if [[ -n "$bound_imsi" ]]; then
+                        imsi="$bound_imsi"
+                        state="attach-requested"
+                        local acc2; acc2=$(latt_answer_build attach-accept)
+                        printf 'step\t%s\n' "$step"
+                        printf 'uplink\t%s\n' "$mname"
+                        printf 'guti\t%s\n' "$gstr"
+                        printf 'identity\t%s\n' "$imsi"
+                        printf 'resolved_by\tguti binding\n'
+                        printf 'state\t%s\n' "$state"
+                        printf 'downlink\tAttach accept\n'
+                        printf 'downlink_hex\t%s\n' "$acc2"
+                        [[ -n "$acc2" ]] && printf 'downlink_octets\t%d\n' "$(( ${#acc2} / 2 ))"
+                        printf 'next\tAttach complete from the UE\n'
+                        latt_state_set state "$state" imsi "$imsi" pending_guti "$gstr" \
+                            exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
+                        continue
+                    fi
+                    # Ask for the IMSI, and keep the GUTI so the answer can be
+                    # bound to it.
                     state="identity-requested"
                     local req; req=$(latt_answer_build identity-request --identity imsi)
                     printf 'step\t%s\n' "$step"
                     printf 'uplink\t%s\n' "$mname"
+                    printf 'guti\t%s\n' "$gstr"
                     printf 'identity\tnone -- the UE gave a temporary identity\n'
+                    printf 'resolved_by\tnone: no binding for this GUTI yet\n'
                     printf 'state\t%s\n' "$state"
                     printf 'downlink\tIdentity request\n'
                     printf 'downlink_hex\t%s\n' "$req"
                     printf 'next\tIdentity response carrying the IMSI, in the clear\n'
                     printf 'limit\tthis is the exposure: the IMSI is asked for before any security context exists\n'
-                    latt_state_set state "$state" \
+                    latt_state_set state "$state" pending_guti "$gstr" \
+                        pending_guti_hex "$ghex" \
                         exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
                 fi ;;
             ul:56)
@@ -1089,6 +1129,17 @@ latt_cmd_nas_responder() {
                     imsi=$(printf '%s' "$id" | cut -f2)
                     latt_store_identity "$(printf '%s' "$id" | cut -f1)" "$imsi" \
                         "latt:--nas-responder"
+                    # The GUTI the UE presented a moment ago now has a name:
+                    # this is the harvest's parse half, done without a radio.
+                    local pending_hex pending_name prow
+                    pending_hex=$(latt_state_get pending_guti_hex)
+                    pending_name=$(latt_state_get pending_guti)
+                    if [[ -n "$pending_hex" ]] && prow=$(latt_guti_decode "$pending_hex" 2>/dev/null); then
+                        latt_guti_store_put "$prow" "$imsi" "latt:--nas-responder" >/dev/null 2>&1 || true
+                        printf 'guti_bound\t%s\n' "$pending_name"
+                        printf 'guti_bound_imsi\t%s\n' "$imsi"
+                    fi
+                    latt_state_set pending_guti "" pending_guti_hex ""
                     state="attach-requested"
                     local acc; acc=$(latt_answer_build attach-accept)
                     printf 'step\t%s\n' "$step"
@@ -1134,6 +1185,204 @@ latt_cmd_nas_responder() {
     printf 'final_state\t%s\n' "$(latt_state_get state)"
     [[ -n "$(latt_state_get imsi)" ]] && printf 'final_imsi\t%s\n' "$(latt_state_get imsi)"
     return 0
+}
+
+# ── GUTI: the identity a network issues, and what it maps back to ───────
+#
+# A GUTI is the network's own temporary name for a subscriber: PLMN, MME group,
+# MME code, M-TMSI (TS 24.301 §9.9.3.12). It names nobody on its own, which is
+# exactly why it is useful: a subscriber who re-attaches with it is asking the
+# network to recognise the context behind it. Harvesting the parse half means
+# reading the GUTI out of an attach request and holding the binding the moment
+# an identity response supplies the IMSI behind it.
+LATT_GUTI_MAP="$LATT_DIR/guti_map.tsv"
+# The header is written with %b so the tabs are real tabs: a header carrying
+# literal backslash-t is invisible to every reader that splits on tab.
+latt_guti_header() { printf 'guti\tmcc\tmnc\tmme_group\tmme_code\tm_tmsi\timsi\tsource\tfirst_seen\tlast_seen\tattaches'; }
+
+latt_guti_store_init() {
+    mkdir -p "$LATT_DIR" 2>/dev/null
+    [[ -f "$LATT_GUTI_MAP" ]] || { latt_guti_header; printf '\n'; } > "$LATT_GUTI_MAP"
+}
+
+# The value part of an EPS mobile identity carrying a GUTI, from any of the
+# shapes it arrives in: bare value (type first), length + value, or an IE with
+# the 0x08 identifier in front.
+latt_guti_value() {  # <hex> -> the 11-octet value part, or empty
+    local h; h=$(latt_nfc "${1:-}")
+    latt_is_hex "$h" || return 1
+    local first=$(( 16#${h:0:2} ))
+    # 08 <len> <type> ...   (IEI + length form)
+    if (( first == 8 )) && (( ${#h} >= 8 )); then
+        h="${h:4}"
+    fi
+    # <len> <type> ...  (length-first form; only when the next octet is a type)
+    if (( ${#h} >= 6 )); then
+        local second=$(( 16#${h:2:2} ))
+        if (( first >= 0x0A && first <= 0x0C )) && (( (second & 0x07) == 6 )); then
+            h="${h:2}"
+        fi
+    fi
+    [[ ${#h} -ge 22 ]] || return 1
+    printf '%s' "${h:0:22}"
+}
+
+latt_guti_decode() {  # <hex> -> rows
+    local v; v=$(latt_guti_value "${1:-}") || {
+        printf 'ERROR\tnot an EPS mobile identity carrying a GUTI: %s\n' "$(latt_sanitize "${1:-<none>}")" >&2
+        return 1; }
+    local type=$(( 16#${v:0:2} ))
+    (( (type & 0x07) == 6 )) || {
+        printf 'ERROR\tthe identity type is %d, not 6 (GUTI)\n' "$(( type & 0x07 ))" >&2; return 1; }
+    local plmn="${v:2:6}" grp="${v:8:4}" code="${v:12:2}" tmsi="${v:14:8}"
+    local mcc mnc
+    mcc=$(latt_plmn_decode "$plmn") || return 1
+    mnc=$(printf '%s' "$mcc" | cut -f2); mcc=$(printf '%s' "$mcc" | cut -f1)
+    printf 'identity_type\tGUTI\n'
+    printf 'plmn\t%s-%s\n' "$mcc" "$mnc"
+    printf 'mcc\t%s\n' "$mcc"
+    printf 'mnc\t%s\n' "$mnc"
+    printf 'mme_group\t%s\n' "$(( 16#$grp ))"
+    printf 'mme_code\t%s\n' "$(( 16#$code ))"
+    printf 'm_tmsi\t%s\n' "$(( 16#$tmsi ))"
+    printf 'm_tmsi_hex\t%s\n' "${tmsi^^}"
+    printf 'guti\t%s-%s-%s-%s-%s\n' "$mcc" "$mnc" "$(( 16#$grp ))" "$(( 16#$code ))" "$(( 16#$tmsi ))"
+    printf 'value_hex\t%s\n' "${v^^}"
+    printf 'ref\t3GPP TS 24.301 9.9.3.12 (EPS mobile identity, GUTI)\n'
+}
+
+# PLMN from three BCD octets, the layout 43_ran_share owns: MCC in octet 1 and
+# the low nibble of octet 2, MNC split across octets 2 and 3, a two-digit MNC
+# marked by an F filler.
+latt_plmn_decode() {  # <6 hex> -> "mcc<TAB>mnc"
+    local h; h=$(latt_nfc "${1:-}")
+    [[ "$h" =~ ^[0-9A-Fa-f]{6}$ ]] || return 1
+    local o1=$(( 16#${h:0:2} )) o2=$(( 16#${h:2:2} )) o3=$(( 16#${h:4:2} ))
+    local d1=$(( o1 & 0xF )) d2=$(( (o1 >> 4) & 0xF )) d3=$(( o2 & 0xF ))
+    local d4=$(( o3 & 0xF )) d5=$(( (o3 >> 4) & 0xF )) d6=$(( (o2 >> 4) & 0xF ))
+    local mcc="${d1}${d2}${d3}" mnc
+    if (( d6 == 0xF )); then mnc="${d4}${d5}"; else mnc="${d4}${d5}${d6}"; fi
+    printf '%s\t%s' "$mcc" "$mnc"
+}
+
+latt_guti_encode() {  # <plmn> <mme_group> <mme_code> <m_tmsi> -> hex
+    local plmn="${1:-}" grp="${2:-}" code="${3:-}" tmsi="${4:-}"
+    [[ "$grp" =~ ^[0-9]+$ ]] && (( grp >= 0 && grp <= 65535 )) || {
+        printf 'ERROR\tMME group id is 0..65535\n' >&2; return 2; }
+    [[ "$code" =~ ^[0-9]+$ ]] && (( code >= 0 && code <= 255 )) || {
+        printf 'ERROR\tMME code is 0..255\n' >&2; return 2; }
+    [[ "$tmsi" =~ ^[0-9]+$ ]] && (( tmsi >= 0 && tmsi <= 4294967295 )) || {
+        printf 'ERROR\tM-TMSI is 0..4294967295\n' >&2; return 2; }
+    local bcd; bcd=$(latt_plmn_encode "$plmn") || return 2
+    printf 'F6%s%04X%02X%08X' "$bcd" "$grp" "$code" "$tmsi"
+}
+
+latt_plmn_encode() {  # <mcc> [mnc] or "00101" -> 3 BCD octets
+    local plmn="${1:-}" mcc mnc
+    if [[ "$plmn" =~ ^[0-9]{5,6}$ ]]; then
+        mcc="${plmn:0:3}"; mnc="${plmn:3}"
+    elif [[ "$plmn" == *-* ]]; then
+        mcc="${plmn%%-*}"; mnc="${plmn#*-}"
+    else
+        printf 'ERROR\ta PLMN is MCC and MNC: 00101, 001-01 or 310260\n' >&2; return 1
+    fi
+    [[ "$mcc" =~ ^[0-9]{3}$ && "$mnc" =~ ^[0-9]{2,3}$ ]] || {
+        printf 'ERROR\tMCC is 3 digits and MNC 2 or 3: %s\n' "$(latt_sanitize "$plmn")" >&2; return 1; }
+    local o1 o2 o3
+    o1=$(( (10#${mcc:1:1} << 4) | 10#${mcc:0:1} ))
+    if (( ${#mnc} == 3 )); then
+        o2=$(( (10#${mnc:2:1} << 4) | 10#${mcc:2:1} ))
+    else
+        o2=$(( (0xF << 4) | 10#${mcc:2:1} ))
+    fi
+    o3=$(( (10#${mnc:1:1} << 4) | 10#${mnc:0:1} ))
+    printf '%02X%02X%02X' "$o1" "$o2" "$o3"
+}
+
+# The binding store: one row per GUTI, rewritten in place. A GUTI is reused
+# across attaches, so an append would grow a second row per attach and the
+# lookup would have to guess which one is current; upserting keeps one truth
+# per name and counts the attaches on it.
+latt_guti_store_put() {  # <decode rows> <imsi> <source>
+    local rows="$1" imsi="$2" src="$3"
+    local guti mcc mnc grp code tmsi
+    guti=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="guti"{print $2; exit}')
+    mcc=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="mcc"{print $2; exit}')
+    mnc=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="mnc"{print $2; exit}')
+    grp=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="mme_group"{print $2; exit}')
+    code=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="mme_code"{print $2; exit}')
+    tmsi=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="m_tmsi"{print $2; exit}')
+    [[ -n "$guti" ]] || { printf 'ERROR\tno GUTI to store\n' >&2; return 1; }
+    [[ "$imsi" =~ ^[0-9]{14,15}$ ]] || {
+        printf 'ERROR\tan IMSI is 14 or 15 digits: %s\n' "$(latt_sanitize "${imsi:-<none>}")" >&2; return 2; }
+    latt_guti_store_init
+    local now prev_first attaches
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    prev_first=$(awk -F'\t' -v g="$guti" '$1==g{print $9; exit}' "$LATT_GUTI_MAP" 2>/dev/null)
+    attaches=$(awk -F'\t' -v g="$guti" '$1==g{print $11; exit}' "$LATT_GUTI_MAP" 2>/dev/null)
+    [[ -n "$prev_first" ]] || prev_first="$now"
+    attaches=$(( ${attaches:-0} + 1 ))
+    local tmp; tmp=$(mktemp "$LATT_DIR/guti.XXXXXX") || return 1
+    { latt_guti_header; printf '\n'; } > "$tmp"
+    awk -F'\t' -v OFS='\t' -v g="$guti" '$1!=g && NR>1{print}' "$LATT_GUTI_MAP" >> "$tmp" 2>/dev/null
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$guti" "$mcc" "$mnc" "$grp" "$code" "$tmsi" "$imsi" \
+        "$(latt_sanitize "$src")" "$prev_first" "$now" "$attaches" >> "$tmp"
+    mv "$tmp" "$LATT_GUTI_MAP" || { rm -f "$tmp"; return 1; }
+    printf 'stored\t%s\n' "$guti"
+    printf 'imsi\t%s\n' "$imsi"
+    printf 'attaches\t%s\n' "$attaches"
+}
+
+latt_guti_lookup() {  # <guti | guti_hex> -> rows
+    local guti="${1:-}" decoded
+    if [[ "$guti" =~ ^[0-9A-Fa-f]{8,}$ ]]; then
+        decoded=$(latt_guti_decode "$guti" 2>/dev/null | awk -F'\t' '$1=="guti"{print $2; exit}')
+        [[ -n "$decoded" ]] && guti="$decoded"
+    fi
+    latt_guti_store_init
+    local row; row=$(awk -F'\t' -v g="$guti" '$1==g{print; exit}' "$LATT_GUTI_MAP" 2>/dev/null)
+    if [[ -z "$row" ]]; then
+        printf 'guti\t%s\n' "$guti"
+        printf 'bound\tno\n'
+        printf 'note\tno IMSI has been bound to this GUTI yet: it names no subscriber until an identity response supplies one\n'
+        return 1
+    fi
+    printf 'guti\t%s\n'          "$(printf '%s' "$row" | cut -f1)"
+    printf 'bound\tyes\n'
+    printf 'imsi\t%s\n'           "$(printf '%s' "$row" | cut -f7)"
+    printf 'plmn\t%s-%s\n'        "$(printf '%s' "$row" | cut -f2)" "$(printf '%s' "$row" | cut -f3)"
+    printf 'mme_group\t%s\n'      "$(printf '%s' "$row" | cut -f4)"
+    printf 'mme_code\t%s\n'       "$(printf '%s' "$row" | cut -f5)"
+    printf 'm_tmsi\t%s\n'         "$(printf '%s' "$row" | cut -f6)"
+    printf 'source\t%s\n'         "$(printf '%s' "$row" | cut -f8)"
+    printf 'first_seen\t%s\n'     "$(printf '%s' "$row" | cut -f9)"
+    printf 'last_seen\t%s\n'      "$(printf '%s' "$row" | cut -f10)"
+    printf 'attaches\t%s\n'       "$(printf '%s' "$row" | cut -f11)"
+}
+
+latt_cmd_guti_decode() {
+    local hex="${1:-}"
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --guti-decode <hex>\n' >&2; return 2; }
+    latt_guti_decode "$hex"
+}
+
+latt_cmd_guti_map() {
+    local hex="${1:-}" imsi="${2:-}" rows
+    [[ -n "$hex" && -n "$imsi" ]] || {
+        printf 'ERROR\tusage: --guti-map <guti_hex> <imsi>\n' >&2; return 2; }
+    rows=$(latt_guti_decode "$hex") || return 1
+    latt_guti_store_put "$rows" "$imsi" "latt:--guti-map"
+}
+
+latt_cmd_guti_tsv() {
+    local which="${1:-}"
+    if [[ -n "$which" ]]; then latt_guti_lookup "$which"; return $?; fi
+    latt_guti_store_init
+    cat "$LATT_GUTI_MAP"
+    local n; n=$(($(grep -c . "$LATT_GUTI_MAP" 2>/dev/null || echo 1) - 1))
+    printf 'BOUND_GUTI_COUNT\t%s\n' "$n"
+    [[ "$n" -gt 0 ]]
 }
 
 latt_identity_count() {
@@ -1633,6 +1882,61 @@ latt_selftest() {
     chk resp-guti-state "$(fld "$guti_session" final_state)" "identity-requested"
     chk resp-guti-noimsi "$(fld "$guti_session" final_imsi)" ""
 
+    # ── GUTI: the identity a network issued (R5, parse half) ───────────
+    # The octet order is the one tshark reads: PLMN(3) | MME group(2) |
+    # MME code(1) | M-TMSI(4). 00 F1 10 12 34 56 DE AD BE EF is therefore
+    # 001/01, group 4660, code 86, M-TMSI 0xDEADBEEF -- the same numbers
+    # tshark printed for that frame, pinned here so the layout cannot drift.
+    export LATT_GUTI_MAP="$d/loot/lte_attach/guti_map.tsv"
+    local gut; gut=$(latt_guti_encode 00101 4660 86 3735928559)
+    chk guti-encode "$gut" "F600F110123456DEADBEEF"
+    local gdec; gdec=$(latt_guti_decode "$gut")
+    chk guti-mcc   "$(fld "$gdec" mcc)" "001"
+    chk guti-mnc   "$(fld "$gdec" mnc)" "01"
+    chk guti-group "$(fld "$gdec" mme_group)" "4660"
+    chk guti-code  "$(fld "$gdec" mme_code)" "86"
+    chk guti-tmsi  "$(fld "$gdec" m_tmsi)" "3735928559"
+    chk guti-name  "$(fld "$gdec" guti)" "001-01-4660-86-3735928559"
+    # The same identity arrives in three shapes: bare value, LV and an IE.
+    chk guti-decode-ie "$(latt_guti_decode 080BF600F110123456DEADBEEF | awk -F'\t' '$1=="m_tmsi"{print $2; exit}')" "3735928559"
+    chk guti-decode-lv "$(latt_guti_decode 0BF600F110123456DEADBEEF | awk -F'\t' '$1=="m_tmsi"{print $2; exit}')" "3735928559"
+    chk guti-bad-type "$(latt_guti_decode 080B0100F110123456DEADBEEF >/dev/null 2>&1; echo $?)" "1"
+    chk guti-bad-hex  "$(latt_guti_decode ZZ >/dev/null 2>&1; echo $?)" "1"
+    # A three-digit MNC round-trips too.
+    local gut3; gut3=$(latt_guti_encode 310260 1 2 3)
+    chk guti-encode-3mnc "$(latt_guti_decode "$gut3" | awk -F'\t' '$1=="plmn"{print $2; exit}')" "310-260"
+
+    # The binding store: one row per GUTI, attaches counted, upsert not append.
+    local out1; out1=$(latt_cmd_guti_map "$gut" 001010000000001)
+    chk guti-map-stored "$(fld "$out1" stored)" "001-01-4660-86-3735928559"
+    chk guti-map-attaches "$(fld "$out1" attaches)" "1"
+    out1=$(latt_cmd_guti_map "$gut" 001010000000001)
+    chk guti-map-attaches2 "$(fld "$out1" attaches)" "2"
+    chk guti-map-rows "$(( $(grep -c . "$LATT_GUTI_MAP") - 1 ))" "1"
+    chk guti-lookup-bound "$(latt_cmd_guti_tsv "$gut" | awk -F'\t' '$1=="imsi"{print $2; exit}')" "001010000000001"
+    chk guti-lookup-rc "$(latt_cmd_guti_tsv "$gut" >/dev/null 2>&1; echo $?)" "0"
+    chk guti-lookup-miss "$(latt_cmd_guti_tsv F600F110999999DEADBEEF | awk -F'\t' '$1=="bound"{print $2; exit}')" "no"
+    chk guti-lookup-miss-rc "$(latt_cmd_guti_tsv F600F110999999DEADBEEF >/dev/null 2>&1; echo $?)" "1"
+
+    # The responder: a GUTI attach asks for the IMSI, the identity response
+    # binds the GUTI, and the same GUTI then resolves without asking.
+    # A GUTI distinct from the one bound above, so the responder has to ask.
+    local guti_hex="080BF600F110270F3737359255"
+    local session2; session2=$(printf 'reset\nul 0741E2%s\nul 075608090100010100000000F1\n' \
+        "$guti_hex" | latt_cmd_nas_responder - 2>&1)
+    chk guti-resp-asks "$(printf '%s\n' "$session2" | awk -F'\t' '$1=="downlink"{print $2; exit}')" \
+        "Identity request"
+    chk guti-resp-binds "$(printf '%s\n' "$session2" | awk -F'\t' '$1=="guti_bound"{print $2; exit}')" \
+        "001-01-9999-55-926257749"
+    chk guti-resp-bound-imsi "$(printf '%s\n' "$session2" | awk -F'\t' '$1=="guti_bound_imsi"{print $2; exit}')" \
+        "001010000000001"
+    local session3; session3=$(printf 'reset\nul 0741E2%s\n' "$guti_hex" | \
+        latt_cmd_nas_responder - 2>&1)
+    chk guti-resp-resolves "$(printf '%s\n' "$session3" | awk -F'\t' '$1=="resolved_by"{print $2; exit}')" \
+        "guti binding"
+    chk guti-resp-accept "$(printf '%s\n' "$session3" | awk -F'\t' '$1=="downlink"{print $2; exit}')" \
+        "Attach accept"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1727,6 +2031,9 @@ latt_cli_main() {
         --setup-complete)   latt_cmd_setup_complete "$@" ;;
         --parse-setup-complete) latt_cmd_parse_setup_complete "${1:-}" ;;
         --nas-responder)    latt_cmd_nas_responder "${1:--}" ;;
+        --guti-decode)      latt_cmd_guti_decode "${1:-}" ;;
+        --guti-map)         latt_cmd_guti_map "${1:-}" "${2:-}" ;;
+        --guti-tsv)         latt_cmd_guti_tsv "${1:-}" ;;
         --ue-stack)         latt_require_ue_stack ;;
         --selftest)         latt_selftest ;;
         --menu)             latt_menu ;;
@@ -1747,6 +2054,9 @@ Usage: $0 COMMAND
                              UE NAS PDU, and the answering lines carry the
                              network's next message. State persists in
                              $STATE_DIR/lte_attach/ue.tsv
+  --guti-decode <hex>        read a GUTI: PLMN, MME group, MME code, M-TMSI
+  --guti-map <hex> <imsi>    bind a GUTI to the IMSI behind it
+  --guti-tsv [<hex>]         the bindings, or one looked up by GUTI
   --encode-attach <IMSI> [CAPS_HEX] [ESM_HEX]
                                build a byte-exact Attach Request
   --imsi-encode <IMSI>         IMSI -> EPS mobile identity (BCD, TS 23.003)

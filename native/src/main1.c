@@ -654,12 +654,12 @@ static const ModuleDefinition modules[] = {
       "GPS-tagged cell survey with CSV, KML and GeoJSON export." },
 
     /* RADIO — the air interface per RAT, plus radio-layer attacks and RF effects */
-    { "06_gsm_air",          "GSM Air / Catcher", "RADIO",
+    { "06_gsm_air",          "GSM Air / Receiver", "RADIO",
       "imsisting-06_gsm_air-symbolic",
-      "GSM system information, paging, cipher audit and A5/1 keystream, proved against the BGW vector. The catcher chain is not built here yet; 07_gsm_attack holds the transmit path it would stand on." },
-    { "07_gsm_attack",       "GSM Attack",           "RADIO",
+      "GSM system information, paging, cipher audit and A5/1 keystream, proved against the BGW vector. Receive side only: the catcher chain is not built here; 07_gsm_attack is the catcher and holds the transmit path." },
+    { "07_gsm_attack",       "GSM Catcher",          "RADIO",
       "imsisting-07_gsm_attack-symbolic",
-      "IMSI-catcher sequence, A5/1 downgrade, TMSI de-anonymisation and Kc recovery." },
+      "The GSM catcher itself: IMSI-catcher sequence, A5/1 downgrade, TMSI de-anonymisation and Kc recovery." },
     { "08_umts_air",         "UMTS Air / Catcher", "RADIO",
       "imsisting-08_umts_air-symbolic",
       "UMTS UARFCN, SIB decode, RRC integrity (UIA1/UIA2), the AKA relay flow, and the whole catcher chain: carrier, BCH, system information on FACH, the uplink request and preamble, identity, authentication and release." },
@@ -2447,6 +2447,18 @@ module_id_words(const char *tok)
  * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
  */
 static const char *const plain_keys[] = {
+    "attaches\tattaches",
+    "bound\tbound",
+    "cell_source\tcell source",
+    "ci_hex\tci hex",
+    "guti_bound\tguti bound",
+    "guti_bound_imsi\tguti bound imsi",
+    "lac_hex\tlac hex",
+    "m_tmsi_hex\tm tmsi hex",
+    "mme_code\tmme code",
+    "mme_group\tmme group",
+    "resolved_by\tresolved by",
+    "value_hex\tvalue hex",
     "dedicated_info_nas\tdedicated info nas",
     "downlink\tdownlink",
     "downlink_hex\tdownlink hex",
@@ -5917,6 +5929,14 @@ static const ChipRow chip_rows[] = {
     { "09_lte_attach",       "--encode-attach",       NEED_NO, DOES_BUILDS },
     { "09_lte_attach",       "--help",                NEED_NO, DOES_READS },
     { "09_lte_attach",       "--identity-exposure",   NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--guti-decode",         NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--guti-map",            NEED_NO, DOES_MODIFIES },
+    { "09_lte_attach",       "--guti-tsv",            NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--nas-responder",       NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--parse-setup-complete", NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--plmn",                NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--setup-complete",      NEED_NO, DOES_BUILDS },
+    { "09_lte_attach",       "--tx",                  NEED_NO, DOES_READS },
     { "09_lte_attach",       "--imsi-decode",         NEED_NO, DOES_READS },
     { "09_lte_attach",       "--imsi-encode",         NEED_NO, DOES_BUILDS },
     { "09_lte_attach",       "--info",                NEED_NO, DOES_READS },
@@ -22466,6 +22486,30 @@ latt_build_identity(AppState *state, const char *module_id,
         "request carries the same message type and means something different, "
         "which is why the security context is printed beside the finding."));
     gtk_box_append(GTK_BOX(body), exp);
+
+    /* The temporary identity the network issued, and the moment it gets a
+       name. A GUTI attach names nobody until the network asks; the binding is
+       what turns the second attach into a resolved subscriber. */
+    {
+        GtkWidget *guti_body;
+        GtkWidget *guti = verb_card("THE TEMPORARY IDENTITY", &guti_body);
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(guti_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read a GUTI",
+                "--guti-decode", "080BF600F110270F3735928559",
+                "The identity as hex. The answer is the PLMN, the MME group "
+                "and code, and the M-TMSI that names the context."));
+        gtk_box_append(GTK_BOX(guti_body),
+            mod_arg_row_prefilled(state, module_id, status, "Bind it to a Subscriber",
+                "--guti-map", "080BF600F110270F3735928559 001010000000001",
+                "The GUTI and the IMSI behind it, as the identity response "
+                "supplied them. The binding is kept, one row per GUTI, and the "
+                "attach count grows each time that context re-attaches."));
+        gtk_box_append(GTK_BOX(guti_body), res);
+        gtk_box_append(GTK_BOX(body), guti);
+    }
     /* One answer surface for the whole page: every card's answer lands here,
        replaced on each run, so nothing grows a well under its own button. */
     gtk_box_append(GTK_BOX(body), av_col);
@@ -22546,6 +22590,8 @@ static ModuleSubmenuEntry latt_entries[] = {
     { "Attach flow", "dialog-information-symbolic", NULL, latt_build_attach },
     { "Identity", "auth-smartcard-symbolic", NULL, latt_build_identity },
     { "Attach middle", "network-transmit-receive-symbolic", NULL, latt_build_middle },
+    { "GUTI harvest", "contact-new-symbolic",
+      "--guti-tsv:Read the bindings", NULL },
 };
 /* 10_lte_air — the LTE air interface and the eNB a lab runs against it.
  *
