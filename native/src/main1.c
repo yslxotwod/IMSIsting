@@ -2447,6 +2447,16 @@ module_id_words(const char *tok)
  * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
  */
 static const char *const plain_keys[] = {
+    "card\tcard",
+    "deck\tdeck",
+    "macro\tmacro",
+    "refused\trefused",
+    "reported\treported",
+    "substitution\tsubstitution",
+    "card_id\tcard id",
+    "deck_id\tdeck id",
+    "push\tpush",
+    "push_octets\tpush octets",
     "autn_case_amf\tautn case amf",
     "mac_s\tmac s",
     "mac_s_computed\tmac s computed",
@@ -5971,7 +5981,13 @@ static const ChipRow chip_rows[] = {
     { "10_lte_air",          "--build-meas-report",   NEED_NO, DOES_BUILDS },
     { "10_lte_air",          "--build-reest-reject",  NEED_NO, DOES_BUILDS },
     { "10_lte_air",          "--build-rrc-release",   NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--band",                NEED_NO, DOES_READS },
+    { "10_lte_air",          "--barred",              NEED_NO, DOES_READS },
     { "10_lte_air",          "--build-sib1",          NEED_NO, DOES_BUILDS },
+    { "10_lte_air",          "--cellid",              NEED_NO, DOES_READS },
+    { "10_lte_air",          "--plmn",                NEED_NO, DOES_READS },
+    { "10_lte_air",          "--qrxlevmin",           NEED_NO, DOES_READS },
+    { "10_lte_air",          "--tac",                 NEED_NO, DOES_READS },
     { "10_lte_air",          "--build-sib10",         NEED_NO, DOES_BUILDS },
     { "10_lte_air",          "--build-sib11",         NEED_NO, DOES_BUILDS },
     { "10_lte_air",          "--build-sib12",         NEED_NO, DOES_BUILDS },
@@ -6191,6 +6207,7 @@ static const ChipRow chip_rows[] = {
     { "16_sim",              "--__index_probe__",     NEED_NO, DOES_READS },
     { "16_sim",              "--aka-responder",       NEED_NO, DOES_MODIFIES },
     { "16_sim",              "--auts-build",          NEED_NO, DOES_BUILDS },
+    { "16_sim",              "--reslen",              NEED_NO, DOES_READS },
     { "16_sim",              "--auts-verify",         NEED_NO, DOES_READS },
     { "16_sim",              "--usim-serve",          NEED_NO, DOES_READS },
     { "16_sim",              "--usim-tcp",            NEED_NO, DOES_SENDS },
@@ -6531,6 +6548,7 @@ static const ChipRow chip_rows[] = {
     { "30_volte_ims",        "--sip-build",           NEED_CAP, DOES_READS },
     { "30_volte_ims",        "--sip-flood",           NEED_CAP, DOES_READS },
     { "30_volte_ims",        "--sip-parse",           NEED_CAP, DOES_READS },
+    { "30_volte_ims",        "--sip-probe",           NEED_CAP, DOES_SENDS },
     { "30_volte_ims",        "--sip-send",            NEED_CAP, DOES_SENDS },
     { "30_volte_ims",        "--status-tsv",          NEED_NO, DOES_READS },
     { "30_volte_ims",        "--version",             NEED_NO, DOES_READS },
@@ -6820,6 +6838,8 @@ static const ChipRow chip_rows[] = {
     { "41_ota_sms",          "--plan-tp",             NEED_NO, DOES_READS },
     { "41_ota_sms",          "--quiet",               NEED_NO, DOES_READS },
     { "41_ota_sms",          "--rd",                  NEED_SIM, DOES_READS },
+    { "41_ota_sms",          "--sat-audit",           NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--sat-commands",        NEED_NO,  DOES_READS },
     { "41_ota_sms",          "--sat-push",            NEED_SIM, DOES_MODIFIES },
     { "41_ota_sms",          "--sat-concat",          NEED_NO,  DOES_BUILDS },
     { "41_ota_sms",          "--sat-varref",          NEED_NO,  DOES_BUILDS },
@@ -28096,6 +28116,12 @@ vims_build_media(AppState *state, const char *module_id,
                 "Packets sent and received, loss, jitter and the negotiated "
                 "codec, as measured by the last call this module placed."));
         gtk_box_append(GTK_BOX(stats_body), res);
+        gtk_box_append(GTK_BOX(stats_body),
+            mod_arg_row(state, module_id, status, "Ask the Far End",
+                "--sip-probe", "192.168.1.37:5060",
+                "An OPTIONS to the endpoint before a call: whether a SIP user "
+                "agent answers there at all. A phone that rings nothing is "
+                "usually a phone with no client listening."));
     }
     gtk_box_append(GTK_BOX(body), stats);
 

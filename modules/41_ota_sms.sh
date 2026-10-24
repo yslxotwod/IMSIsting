@@ -1884,6 +1884,210 @@ otasm_sat_cc52() {
     otasm_sat_cmp52 "$d0" "$ref"
 }
 
+# ── auditing an S@T push: what the deck tells a card to do (R9) ────────
+#
+# A push is opaque on the wire: a TS 31.115 envelope, a UDH carrier, then S@T
+# TLVs. Building one is half the job; the other half is reading one back and
+# saying what it does, because "a binary SMS arrived" and "a binary SMS told the
+# card to read the terminal's location and send it to a number" are different
+# facts and only the second one is actionable.
+#
+# The walk is tag-by-tag with the BER length, and an unknown tag stops it with a
+# refusal rather than a guess: a tag this tree does not know is not a tag it can
+# explain.
+otasm_sat_find_push() {  # <hex> -> the S@T push TLV, or empty
+    local h; h=$(otasm_norm_hex "${1:-}")
+    (( ${#h} >= 4 )) || return 0
+    local i byte len total
+    for (( i = 0; i + 3 < ${#h}; i += 2 )); do
+        byte="${h:i:2}"
+        [[ "${byte,,}" == "42" ]] || continue
+        # The length octet follows the tag, so read it one octet further on.
+        local info; info=$(otasm_berlen_read "$h" $(( i / 2 + 1 )) 2>/dev/null) || continue
+        len=$(printf '%s' "$info" | cut -f1)
+        local lhdr; lhdr=$(printf '%s' "$info" | cut -f2)
+        [[ -n "$len" && -n "$lhdr" ]] || continue
+        total=$(( 1 + lhdr + len ))
+        if (( i / 2 + total <= ${#h} / 2 )); then
+            printf '%s' "${h:i:$(( total * 2 ))}"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# Walk TLVs in a body: prints "<tag>	<value>" per element, or a refusal.
+otasm_sat_walk() {  # <body-hex>
+    local h; h=$(otasm_norm_hex "${1:-}")
+    local off=0 n=$(( ${#h} / 2 ))
+    while (( off < n )); do
+        local tag="${h:$(( off * 2 )):2}"
+        local info len
+        info=$(otasm_berlen_read "$h" $(( off + 1 )) 2>/dev/null) || {
+            printf 'ERROR\tS@T TLV at octet %d has no readable BER length\n' "$off" >&2
+            return 1; }
+        len=$(printf '%s' "$info" | cut -f1)
+        local lhdr; lhdr=$(printf '%s' "$info" | cut -f2)
+        [[ -n "$len" && -n "$lhdr" ]] || return 1
+        local value="${h:$(( (off + 1 + lhdr) * 2 )):$(( len * 2 ))}"
+        (( ${#value} == len * 2 )) || {
+            printf 'ERROR\tS@T TLV %s at octet %d claims %d octets and the body has fewer\n' \
+                "$tag" "$off" "$len" >&2
+            return 1; }
+        printf '%s\t%s\n' "${tag^^}" "$value"
+        off=$(( off + 1 + lhdr + len ))
+    done
+    return 0
+}
+
+# TS 102 223 command type -> what it is (the ones a deck in this tree uses, and
+# the ones worth naming in a finding).
+otasm_sat_command_name() {
+    case "${1^^}" in
+        13) printf 'SEND SHORT MESSAGE (TS 102 223 6.6.9)' ;;
+        26) printf 'PROVIDE LOCAL INFORMATION (TS 102 223 6.6.15)' ;;
+        16) printf 'SET UP CALL (TS 102 223 6.6.20)' ;;
+        17) printf 'SEND SS (TS 102 223 6.6.11)' ;;
+        18) printf 'SEND USSD (TS 102 223 6.6.12)' ;;
+        25) printf 'SET UP MENU (TS 102 223 6.6.8)' ;;
+        27) printf 'TIMER MANAGEMENT (TS 102 223 6.6.21)' ;;
+        28) printf 'PROVIDE LOCAL INFORMATION / LANGUAGE (TS 102 223 6.6.15)' ;;
+        29) printf 'PLAY TONE (TS 102 223 6.6.16)' ;;
+        32) printf 'DISPLAY TEXT (TS 102 223 6.6.1)' ;;
+        33) printf 'GET INKEY (TS 102 223 6.6.2)' ;;
+        34) printf 'GET INPUT (TS 102 223 6.6.3)' ;;
+        35) printf 'SELECT ITEM (TS 102 223 6.6.4)' ;;
+        36) printf 'SET UP MENU (TS 102 223 6.6.8)' ;;
+        37) printf 'PROVIDE LOCAL INFORMATION (TS 102 223 6.6.15)' ;;
+        64) printf 'REFRESH (TS 102 223 6.4.7)' ;;
+        *)  printf 'unnamed command type 0x%s' "${1^^}" ;;
+    esac
+}
+
+otasm_sat_pli_meaning() {
+    case "${1^^}" in
+        00) printf 'location information (MCC/MNC, LAC/TAC, cell id)' ;;
+        01) printf 'IMEI of the terminal' ;;
+        02) printf 'network measurement results' ;;
+        03) printf 'date, time and time zone' ;;
+        04) printf 'language setting' ;;
+        05) printf 'access technology' ;;
+        *)  printf 'qualifier 0x%s (TS 102 223 8.6)' "${1^^}" ;;
+    esac
+}
+
+# --sat-audit <push_hex | ts31.115 packet | TPDU>
+otasm_sat_audit() {
+    local raw; raw=$(otasm_norm_hex "${1:-}")
+    [[ -n "$raw" ]] || { printf 'ERROR\tusage: --sat-audit <push_hex>\n' >&2; return 2; }
+    otasm_is_hex "$raw" || { printf 'ERROR\tnot hex\n' >&2; return 2; }
+
+    local push; push=$(otasm_sat_find_push "$raw")
+    [[ -n "$push" ]] || {
+        printf 'ERROR\tno S@T push (tag 0x42) in %d octets of input\n' "$(( ${#raw} / 2 ))" >&2
+        printf 'WHY\ta push starts with the S@T push tag 0x42 and a BER length; without that tag this is not one\n' >&2
+        return 1; }
+
+    printf 'push\t%s\n' "$push"
+    printf 'push_octets\t%d\n' "$(( ${#push} / 2 ))"
+    if [[ "$push" != "$raw" ]]; then
+        printf 'transport\twrapped: %d octets of envelope around the push\n' \
+            "$(( (${#raw} - ${#push}) / 2 ))"
+    else
+        printf 'transport\tbare push (no TS 31.115 envelope)\n'
+    fi
+
+    local lhdr; lhdr=$(otasm_berlen_read "$push" 1 | cut -f2)
+    local body="${push:$(( (1 + lhdr) * 2 ))}"   # skip the 42 tag and its length
+    local decktag deckid cardtag cardid rest deck_walk card_walk
+    deck_walk=$(otasm_sat_walk "$body") || return 1
+    decktag=$(printf '%s\n' "$deck_walk" | awk -F'\t' '$1=="01"{print $1; exit}')
+    [[ "$decktag" == "01" ]] || {
+        printf 'ERROR\tthe push has no deck (tag 0x01)\n' >&2; return 1; }
+    local deckbody; deckbody=$(printf '%s\n' "$deck_walk" | awk -F'\t' '$1=="01"{print $2; exit}')
+    local deck_inner; deck_inner=$(otasm_sat_walk "$deckbody") || return 1
+    deckid=$(printf '%s\n' "$deck_inner" | awk -F'\t' '$1=="02"{print $2; exit}')
+    cardbody=$(printf '%s\n' "$deck_inner" | awk -F'\t' '$1=="05"{print $2; exit}')
+    printf 'deck_id\t%s\n' "${deckid:-none}"
+    [[ -n "$cardbody" ]] || {
+        printf 'ERROR\tthe deck carries no card (tag 0x05)\n' >&2; return 1; }
+
+    local card_inner; card_inner=$(otasm_sat_walk "$cardbody") || return 1
+    cardid=$(printf '%s\n' "$card_inner" | awk -F'\t' '$1=="06"{print $2; exit}')
+    printf 'card_id\t%s\n' "${cardid:-none}"
+
+    local n=0 t v ctype cqual cdest meaning
+    local -a findings=()
+    while IFS=$'\t' read -r t v; do
+        [[ "$t" == "2D" ]] || continue
+        n=$(( n + 1 ))
+        ctype="${v:0:2}"; cqual="${v:2:2}"; cdest="${v:4:2}"
+        printf 'command.%d.type\t0x%s\n' "$n" "$ctype"
+        printf 'command.%d.name\t%s\n' "$n" "$(otasm_sat_command_name "$ctype")"
+        printf 'command.%d.qualifier\t0x%s\n' "$n" "$cqual"
+        printf 'command.%d.destination\t0x%s\n' "$n" "$cdest"
+        case "${ctype^^}" in
+            26|37)
+                meaning=$(otasm_sat_pli_meaning "$cqual")
+                printf 'command.%d.meaning\t%s\n' "$n" "$meaning"
+                case "${cqual^^}" in
+                    00) findings+=("the card is told to read the terminal's location") ;;
+                    01) findings+=("the card is told to read the terminal's IMEI") ;;
+                esac ;;
+            13)
+                # The 3GPP-SMS TPDU rides in data object 0x0B (TS 131 111 8.13).
+                local tpdus; tpdus=$(otasm_sat_walk "${v:6}")
+                local tpdu; tpdu=$(printf '%s\n' "$tpdus" | awk -F'\t' '$1=="0B"{print $2; exit}')
+                if [[ -n "$tpdu" ]]; then
+                    printf 'command.%d.tpdu\t%s\n' "$n" "$tpdu"
+                    local da da_digits
+                    da=$(otasm_tpdu_parse "$tpdu" 2>/dev/null | awk -F'\t' '$1=="da"{print $2; exit}')
+                    da_digits=$(otasm_tpdu_parse "$tpdu" 2>/dev/null | awk -F'\t' '$1=="da_value"{print $2; exit}')
+                    if [[ -n "$da_digits" ]]; then
+                        printf 'command.%d.sms_destination\t%s\n' "$n" "$da_digits"
+                        printf 'command.%d.sms_destination_octets\t%s\n' "$n" "$da"
+                    elif [[ -n "$da" ]]; then
+                        printf 'command.%d.sms_destination\t%s\n' "$n" "$da"
+                    fi
+                    findings+=("the card is told to send an SMS by itself")
+                    [[ -n "$da_digits" ]] && findings+=("the SMS destination is $da_digits, named in the message rather than chosen by the operator")
+                else
+                    printf 'command.%d.meaning\tno 3GPP-SMS TPDU data object found\n' "$n"
+                fi ;;
+            *)
+                printf 'command.%d.meaning\t%s\n' "$n" "$(otasm_sat_command_name "$ctype")" ;;
+        esac
+    done <<< "$card_inner"
+    printf 'commands\t%d\n' "$n"
+    local i=0
+    for f in "${findings[@]}"; do i=$(( i + 1 )); printf 'finding.%d\t%s\n' "$i" "$f"; done
+    if (( ${#findings[@]} > 0 )); then
+        printf 'verdict\texecutes on the card: it reads terminal data and/or sends a message the operator did not compose\n'
+    else
+        printf 'verdict\tno command this audit recognises as terminal-data or message-exfiltration\n'
+    fi
+    printf 'ref\tS@T 01.00 5.3/6.2.9, TS 102 223 6.6/8.6, TS 31.115 4.2\n'
+    printf 'limit\tthis reads the deck; whether the SIM browser supports the command is a property of that card, not of the message\n'
+    printf 'sent\t0\n'
+}
+
+# The S@T commands this tree builds, with the clause each rests on.
+otasm_sat_catalogue() {
+    printf 'tag\tcommand\tclause\tdirection\n'
+    printf '42\tpush (generic deck)\tS@T 01.23 6.1\tOTA to card\n'
+    printf '01\tdeck\tS@T 01.00 5.3.2\tin push\n'
+    printf '05\tcard\tS@T 01.00 5.3.6\tin deck\n'
+    printf '2D\tSTK generic macro\tS@T 01.00 6.2.9\tin card\n'
+    printf '26\tPROVIDE LOCAL INFORMATION (location, IMEI)\tTS 102 223 6.6.15\tmacro\n'
+    printf '13\tSEND SHORT MESSAGE\tTS 102 223 6.6.9\tmacro\n'
+    printf '0B\t3GPP-SMS TPDU data object\tTS 131 111 8.13\tin macro\n'
+    printf '08\tvariable reference\tS@T 01.00 5.5.1\tin macro value\n'
+    printf '24\tCONCATENATE\tS@T 01.00 6.2.4\tmacro\n'
+    printf 'FF\tsubstitution\tS@T 01.00 5.4.8\tin macro value\n'
+    printf 'WIB\tWIB push\tno citable clause\trefused\n'
+    printf 'note\tthe WIB row is a refusal, not a plan: no WIB command encoding is citable from this tree, so none is invented\n'
+}
+
 # --sat-push [<victim-msisdn>] [<exfil-msisdn>] [<spi>]
 # The SPI defaults to 0000, the no-security value the public SIMjacker samples
 # carry. S@T 01.23 §7 recommends a non-zero SPI and names 12 (CC, counter mode
@@ -3558,6 +3762,31 @@ otasm_selftest() {
     chk sat-card-head "$(printf '%s' "$(fld "$sp" card_hex)" | cut -c1-10)" "0528060101"
     chk sat-deck-head "$(printf '%s' "$(fld "$sp" deck_hex)" | cut -c1-10)" "012d020101"
     chk sat-push-head "$(printf '%s' "$(fld "$sp" push_hex)" | cut -c1-4)" "422f"
+
+    # ── auditing a push (R9) ───────────────────────────────────────────
+    # A built deck read back by the audit: three commands, the two PLI
+    # qualifiers named, and the SMS destination recovered from the TPDU.
+    local au; au=$(otasm_sat_audit "$(fld "$sp" push_hex)")
+    chk sat-audit-deck  "$(fld "$au" deck_id)" "01"
+    chk sat-audit-card  "$(fld "$au" card_id)" "01"
+    chk sat-audit-count "$(fld "$au" commands)" "3"
+    chk sat-audit-c1    "$(fld "$au" command.1.meaning)" "location information (MCC/MNC, LAC/TAC, cell id)"
+    chk sat-audit-c2    "$(fld "$au" command.2.meaning)" "IMEI of the terminal"
+    chk sat-audit-c3    "$(fld "$au" command.3.name)" "SEND SHORT MESSAGE (TS 102 223 6.6.9)"
+    chk sat-audit-dest  "$(fld "$au" command.3.sms_destination)" "15559876543"
+    chk sat-audit-find  "$(printf '%s\n' "$au" | grep -c '^finding\.')" "4"
+    chk sat-audit-verdict "$(fld "$au" verdict | cut -c1-9)" "executes "
+    chk sat-audit-sent  "$(fld "$au" sent)" "0"
+    # A push wrapped in an envelope is found by tag, and the envelope is named.
+    local wrapped='002d0a8100000000'$(fld "$sp" push_hex)
+    chk sat-audit-wrapped "$(otasm_sat_audit "$wrapped" | awk -F'\t' '$1=="transport"{print ($2 ~ /^wrapped/ ? "yes" : "no"); exit}')" "yes"
+    # Not a push: a refusal, not an empty audit.
+    chk sat-audit-notpush "$(otasm_sat_audit 01020304 >/dev/null 2>&1; echo $?)" "1"
+    chk sat-audit-noargs "$(otasm_sat_audit >/dev/null 2>&1; echo $?)" "2"
+    chk sat-audit-badhex "$(otasm_sat_audit ZZ >/dev/null 2>&1; echo $?)" "2"
+    # The catalogue names the WIB row as a refusal rather than a plan.
+    chk sat-commands-wib "$(otasm_sat_catalogue | awk -F'\t' '$2 ~ /^WIB/{print $4; exit}')" "refused"
+    chk sat-commands-rows "$(otasm_sat_catalogue | awk -F'\t' '$1 ~ /^[0-9A-F][0-9A-F]$/' | grep -c .)" "10"
     # S@T 01.00 §5.5.1: the encapsulated variable reference is 08, length 01, id.
     chk sat-varref        "$(otasm_cli_main --sat-varref 01 2>/dev/null)" 080101
     # §6.2.4: 24, length, destination variable, then the values as references.
@@ -4074,6 +4303,8 @@ otasm_cli_main() {
         --sat-concat)     otasm_sat_concat "${1:-}" "${@:2}" ;;
         --sat-subst)      otasm_sat_substitution "${1:-}" "${2:-}" ;;
         --sat-varref)     otasm_sat_varref "${1:-}" ;;
+        --sat-audit)      otasm_sat_audit "${1:-}" ;;
+        --sat-commands)   otasm_sat_catalogue ;;
         --wib-push)       otasm_wib_push ;;
         --plan)           otasm_plan ;;
         --plan-tp)        otasm_plan_tp ;;
@@ -4121,6 +4352,11 @@ Usage: $0 COMMAND
   --smsc-wrap <sca-hex> <tpdu-hex>   prepend an SMSC address field
   --type0-build [oa] [scts] [dcs]    build a Type 0 silent SMS-DELIVER
   --type0 <hex>                      audit a TPDU for the Type 0 properties
+  --sat-audit <push_hex>             read an S@T push back: the deck, the card,
+                                     every macro, and what each command makes
+                                     the card do
+  --sat-commands                     the S@T commands this tree builds, with
+                                     the clause each rests on
   --sat-push [<victim>] [<exfil>] [<spi>]
   --sat-concat <dest-var> <var>...   S@T CONCATENATE byte code (01.00 6.2.4)
   --sat-varref <var>                 S@T variable reference TLV (01.00 5.5.1)
