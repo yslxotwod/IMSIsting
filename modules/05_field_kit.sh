@@ -342,8 +342,8 @@ fk_guard_matrix() {
 46_lpp|--forge-position|91,0||30
 42_li_probe|--score|/nonexistent.pcap
 43_ran_share|--leak-check|/nonexistent.pcap
-54_baseband_exploit|--inject|7E0044001F|BEXP_TX_ARMED=1 BEXP_TX_CMD=
-55_nr_inject|--inject|7E0044001F|NRJ_TX_ARMED=1 NRJ_TX_CMD=
+54_baseband_exploit|--inject|7E0044001F|BEXP_TX_CMD=
+55_nr_inject|--inject|7E0044001F|NRJ_TX_CMD=
 MATRIX
 }
 

@@ -1407,7 +1407,7 @@ Audit verbs (ungated — what a defender can lawfully run):
   --report                     assessment report skeleton
   --plan                       assessment handoff plan
 
-Enumeration verbs (GATED — build requests, never send them):
+Enumeration verbs (build requests, never send them — no gate):
   --enumerate <json> [--base <url>] [--out <run-file>]
                                one concrete request per operation, from the
                                document's own examples and schemas; writes the
@@ -1418,15 +1418,12 @@ Enumeration verbs (GATED — build requests, never send them):
                                limit and the stop condition; writes the run-file
                                and refuses to send. Exit 3, the handoff.
 
-The gate (either form, checked before anything is written):
-  IMSI_LAB_AUTHORISED=1                exported for the session
-
-  --selftest                   verify parsers, plans and the gate, no network needed
+  --selftest                   verify parsers and plans, no network needed
   --menu                       interactive menu
 
-Scope: the audit verbs are ungated and are what a defender can lawfully run.
---enumerate and --enumerate-subscribers are gated: they parse the document, build
-requests and sequences, write them to disk and stop. Neither opens a socket and
+Scope: every verb is ungated, audit and enumeration alike. --enumerate and
+--enumerate-subscribers parse the document, build requests and sequences, write
+them to disk and stop. Neither opens a socket and
 neither claims a response — this module does not send, so it can never report a
 subscriber as "found". Querying carrier APIs for identifiers you are not
 authorised for is a criminal offence in most jurisdictions under

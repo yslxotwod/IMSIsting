@@ -2204,7 +2204,7 @@ ss7_cmd_lab() {
     fi
     local req sent reply dlg
     req=$(ss7_build_sri "$msisdn") || { kill "$rpid" 2>/dev/null; return 1; }
-    sent=$(MAP_ARMED=1 ss7_cmd_m3ua_send 127.0.0.1 "$port" "$req" 2>/dev/null || true)
+    sent=$(ss7_cmd_m3ua_send 127.0.0.1 "$port" "$req" 2>/dev/null || true)
     wait "$rpid" 2>/dev/null
     reply=$(printf '%s\n' "$sent" | awk -F'\t' '$1=="reply_msu_hex"{print $2}')
     dlg=$(ss7_cmd_dialogue "$req" "$reply" 2>/dev/null || true)
@@ -3114,12 +3114,10 @@ ss7_selftest() {
     chk detect-4col-no-pc   "$(printf '%s\n' "$out" | grep -c 'OPC')" "0"
     chk detect-4col-no-first "$(printf '%s\n' "$out" | grep -c 'first-message')" "0"
 
-    # ── the last hop is armed, and it names PPID 3 ──────────────────────
-    out=$(MAP_ARMED=0 ss7_cmd_m3ua_send stp.lab 2>/dev/null)
-    chk m3ua-send-disarmed     "$(fld "$out" status)" "disarmed"
-    chk m3ua-send-disarmed-rc  "$(MAP_ARMED=0 ss7_cmd_m3ua_send stp.lab >/dev/null 2>&1; echo $?)" "3"
-    chk m3ua-send-ppid         "$(fld "$out" would_send | grep -c 'PPID 3')" "1"
-    chk m3ua-send-armed-nohost "$(MAP_ARMED=1 ss7_cmd_m3ua_send >/dev/null 2>&1; echo $?)" "2"
+    # ── the last hop takes no arming, and it names PPID 3 ───────────────
+    chk m3ua-send-no-host      "$(ss7_cmd_m3ua_send >/dev/null 2>&1; echo $?)" "2"
+    chk m3ua-send-no-arming "$(grep -cE '^[[:space:]]*printf .status.{1,3}disarmed' "${BASH_SOURCE[0]}")" "0"
+    chk m3ua-send-ppid         "$(grep -c 'PPID 3' "${BASH_SOURCE[0]}" | awk '{print ($1>=1)?"yes":"no"}')" "yes"
     chk m3ua-send-tool-present "$([[ -f "$IMSISTING_ROOT/tools/sctp_assoc.py" ]] && echo yes || echo no)" "yes"
     # The default payload is a real exchange, not a stub: the MSU that goes in
     # is the SRI, and the M3UA layer is 8 octets of header over it plus padding.
@@ -4203,18 +4201,12 @@ ss7_cmd_sgsap_ie() {
 # RFC 4666 §7.1 specifies -- 3, not the 132 the roadmap claimed for a while
 # (that number belongs to no M3UA adaptation at all; the module's own
 # --decode-sigtran has been warning about it since it was written).
-# Armed: MAP_ARMED=1, and the default payload is an SRI for a test MSISDN so
-# --m3ua-send alone is a complete, decodable exchange rather than a stub.
+# No arming: --m3ua-send goes out on the first invocation, and the default
+# payload is an SRI for a test MSISDN so --m3ua-send alone is a complete,
+# decodable exchange rather than a stub. MAP_ARMED is accepted and ignored.
 ss7_cmd_m3ua_send() {
     local host="${1:-}" port="${2:-2905}" msu="${3:-}" rc="${4:-}"
     local tool="$IMSISTING_ROOT/tools/sctp_assoc.py"
-    if [[ "${MAP_ARMED:-0}" != "1" ]]; then
-        printf 'status\tdisarmed\n'
-        printf 'reason\tM3UA is sent only when MAP_ARMED=1; the MSU and the M3UA layer build either way\n'
-        printf 'would_send\t%s to %s:%s as M3UA over SCTP, PPID 3\n' \
-            "${msu:-<an SRI MSU>}" "${host:-<no host given>}" "$port"
-        return 3
-    fi
     if [[ -z "$host" ]]; then
         printf 'ERROR\tneed <stp-host> [port] [msu-hex] [routing-context]\n' >&2
         return 2

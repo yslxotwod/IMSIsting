@@ -1211,6 +1211,19 @@ deps_selftest() {
     chk menu-helper          "$(declare -F deps_menu >/dev/null && echo yes || echo no)" yes
     chk cli-menu-rc          "$(deps_cli_main --menu < /dev/null >/dev/null 2>&1; echo $?)" 0
 
+    # 19. preflight: the page nobody has to grep for. The gate rows are read
+    # back from the table, so a gate added here and not asserted fails loudly.
+    local pf
+    pf=$(deps_preflight 2>/dev/null)
+    chk preflight-rc       "$(deps_cli_main --preflight >/dev/null 2>&1; echo $?)" 0
+    chk preflight-stamp    "$(printf '%s\n' "$pf" | head -1 | cut -f1)" PREFLIGHT
+    chk preflight-version  "$(fld "$pf" version)" "$(cat "$IMSISTING_ROOT/VERSION")"
+    chk preflight-gates    "$(printf '%s\n' "$pf" | awk -F'\t' '$1=="gates"{print $2}')" none
+    chk preflight-legend   "$(printf '%s\n' "$pf" | grep -c '^legend')" 5
+    chk preflight-notes    "$(printf '%s\n' "$pf" | grep -c '^note')" 2
+    chk preflight-captures "$(printf '%s\n' "$pf" | awk -F'\t' '$1=="captures"{print ($2 ~ /^[0-9]+$/)?"num":"bad"}')" num
+    chk preflight-lock     "$(printf '%s\n' "$pf" | grep -c '^radio_lock')" 1
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1261,6 +1274,67 @@ M
     done
 }
 
+# ── preflight ───────────────────────────────────────────────────────────
+# One page that answers "why is this card refusing" without reading the
+# module's source. Three kinds of answer and nothing else: what the radio
+# reports, which gates are closed and the exact thing that opens each, and
+# what the capability chips on the cards mean. It never installs, opens a
+# socket or transmits, so it is safe to run first and safe to paste into a
+# bug report.
+deps_preflight() {
+    local v root="$IMSISTING_ROOT" cap lock dev
+    v=$(cat "$root/VERSION" 2>/dev/null || echo unknown)
+    printf 'PREFLIGHT\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'version\t%s\n' "$(deps_sanitize "$v")"
+    printf 'root\t%s\n' "$(deps_sanitize "$root")"
+
+    # What the SDR says about itself, taken from the module that owns the
+    # question rather than re-probed here, so the two can never disagree.
+    if [[ -x "$root/modules/01_radio.sh" ]]; then
+        local caps
+        caps=$(IMSISTING_ROOT="$root" timeout 90 bash "$root/modules/01_radio.sh" \
+                   --caps-tsv 2>/dev/null) || caps=""
+        if [[ -n "$caps" ]]; then
+            printf '%s\n' "$caps" \
+                | awk -F'\t' '$1=="driver"||$1=="serial"||$1=="direction"||$1=="can_tx"||$1=="tx_note"||$1=="freq_min_mhz"||$1=="freq_max_mhz"||$1=="bands"{print "sdr_" $1 "\t" $2}'
+        else
+            printf 'sdr\tnone attached, or 01_radio could not read one\n'
+        fi
+    else
+        printf 'sdr\tmodules/01_radio.sh missing\n'
+    fi
+
+    # A second process holding the radio is the commonest "it worked on the
+    # first card" refusal, so its state is part of the answer.
+    lock="${TMP_DIR:-/tmp/imsisting}/radio.lock/owner.tsv"
+    if [[ -f "$lock" ]]; then
+        printf 'radio_lock\t%s\n' "$(deps_sanitize "$(tr '\t' ' ' < "$lock" | head -1)")"
+    else
+        printf 'radio_lock\tnone\n'
+    fi
+
+    # Gates. There are none: this row is here so the answer to "what do I
+    # have to unlock" is on the page instead of in a README that might drift.
+    printf 'gates\tnone\tno verb refuses on a missing approval flag; the retired --i-have-a-lab-and-authorisation is accepted and ignored\n'
+
+    # The capture chips are the ones most often read as a permission. They are
+    # not: they mean a .pcap has to exist before the verb has anything to read.
+    cap=$( { find "$CAPTURES_DIR" -maxdepth 2 -type f \( -name '*.pcap' -o -name '*.pcapng' \) 2>/dev/null
+             find "$LOOT_DIR" -maxdepth 3 -type f \( -name '*.pcap' -o -name '*.pcapng' \) 2>/dev/null; } | wc -l)
+    printf 'captures\t%s\tpcap files under captures/ and loot/\n' "$cap"
+
+    # Legend. The words are the chip captions the GUI draws, so this page and
+    # the cards cannot drift apart.
+    printf 'legend\tNO RADIO NEEDED\tparses, builds or reads a file; nothing attached\n'
+    printf 'legend\tNEEDS A RADIO\tan SDR must answer 01_radio before the card means anything\n'
+    printf 'legend\tNEEDS A CAPTURE\ta .pcap must exist first; make one with 03_gsmtap --listen, then --read it\n'
+    printf 'legend\tNEEDS A SIM\ta card in a reader, at the path pcscd reports\n'
+    printf 'legend\tTRANSMITS\tkeys a transmitter; the only class that puts RF on the air\n'
+    printf 'note\tno global switch exists: nothing here is disabled by a setting to flip\n'
+    printf 'note\ta module that still strips --i-have-a-lab-and-authorisation accepts it and does nothing with it\n'
+    return 0
+}
+
 # ═══════════════════════════════════════════════════════════════════
 #  CLI dispatch
 # ═══════════════════════════════════════════════════════════════════
@@ -1276,6 +1350,7 @@ deps_cli_main() {
         --install-all)      deps_install_all_cmd "${1:-}" ;;
         --install-pip)      deps_install_pip "$@" ;;
         --distro-info)      deps_distro_info ;;
+        --preflight)        deps_preflight ;;
         --report)           deps_write_report ;;
         --privileged-install) deps_privileged_install "$@" ;;
         --selftest)         deps_selftest ;;
@@ -1293,6 +1368,7 @@ Usage: $0 COMMAND
   --install-all [--yes]        install every registered package
   --install-pip DIST...        pip-install protocol libraries
   --distro-info                distro, package manager, counts
+  --preflight                  radio, gates and capture state in one page
   --report                     write loot/deps/deps_report.tsv
   --selftest                   verify the registry and parsers, no radio
   --menu                       interactive menu
@@ -1305,6 +1381,7 @@ EOF
 Usage: $0 --status-tsv | --check-versions | --missing-only
        $0 --install-missing [--yes] | --install-package PKG... | --install-all [--yes]
        $0 --install-pip DIST... | --distro-info | --report
+       $0 --preflight
        $0 --selftest | --menu
 EOF
            return 2 ;;

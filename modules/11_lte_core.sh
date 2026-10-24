@@ -3388,19 +3388,11 @@ lcore_selftest() {
     chk forge-len "$(lcore_gtpc_parse_header "$forged" | awk -F'\t' '$1=="length_agrees"{print $2}')" "yes"
     chk cli-unknown "$(lcore_cli_main --nope >/dev/null 2>&1; echo $?)" "2"
 
-    # The last hop is armed, and the refusal comes before any socket: the tool
-    # has no business running in a selftest, so what is asserted here is the
-    # guard and the shape of what it would have sent.
-    out=$(LTE_ARMED=0 lcore_cmd_gtpc_send 203.0.113.9 2>/dev/null)
-    chk gtpc-send-disarmed     "$(fld "$out" status)" "disarmed"
-    chk gtpc-send-disarmed-rc  "$(LTE_ARMED=0 lcore_cmd_gtpc_send 203.0.113.9 >/dev/null 2>&1; echo $?)" "3"
-    chk gtpc-send-would-send   "$(fld "$out" would_send | grep -c 'GTPv2-C, UDP')" "1"
-    out=$(LTE_ARMED=0 lcore_cmd_diameter_send hss.example 2>/dev/null)
-    chk diam-send-disarmed     "$(fld "$out" status)" "disarmed"
-    chk diam-send-disarmed-rc  "$(LTE_ARMED=0 lcore_cmd_diameter_send hss.example >/dev/null 2>&1; echo $?)" "3"
-    chk diam-send-would-send   "$(fld "$out" would_send | grep -c 'hss.example:3868')" "1"
-    chk diam-send-armed-nohost "$(LTE_ARMED=1 lcore_cmd_diameter_send >/dev/null 2>&1; echo $?)" "2"
-    chk gtpc-send-armed-nohost "$(LTE_ARMED=1 lcore_cmd_gtpc_send >/dev/null 2>&1; echo $?)" "2"
+    # The last hop takes no arming. What is asserted here is the argument check
+    # and the transport each verb names -- no socket is opened by a selftest.
+    chk gtpc-send-no-host      "$(lcore_cmd_gtpc_send >/dev/null 2>&1; echo $?)" "2"
+    chk diam-send-no-host      "$(lcore_cmd_diameter_send >/dev/null 2>&1; echo $?)" "2"
+    chk send-no-arming "$(grep -cE '^[[:space:]]*printf .status.{1,3}disarmed' "${BASH_SOURCE[0]}")" "0"
     chk gtpc-send-tool-present "$([[ -f "$IMSISTING_ROOT/tools/udp_assoc.py" ]] && echo yes || echo no)" "yes"
 
     out=$(lcore_cli_status_tsv)
@@ -3753,13 +3745,6 @@ M
 lcore_cmd_gtpc_send() {
     local host="${1:-}" port="${2:-2123}" hex="${3:-}"
     local tool="$IMSISTING_ROOT/tools/udp_assoc.py"
-    if [[ "${LTE_ARMED:-0}" != "1" ]]; then
-        printf 'status\tdisarmed\n'
-        printf 'reason\ta datagram is sent only when LTE_ARMED=1; the octets build either way\n'
-        printf 'would_send\t%s to %s:%s as GTPv2-C, UDP\n' \
-            "${hex:-<a forged Create Session Request>}" "${host:-<no host given>}" "$port"
-        return 3
-    fi
     if [[ -z "$host" ]]; then
         printf 'ERROR\tneed <sgw-or-pgw-host> [port] [hex]\n' >&2
         return 2
@@ -3786,13 +3771,6 @@ lcore_cmd_gtpc_send() {
 lcore_cmd_diameter_send() {
     local host="${1:-}" port="${2:-3868}" hex="${3:-}"
     local tool="$IMSISTING_ROOT/tools/stream_assoc.py"
-    if [[ "${LTE_ARMED:-0}" != "1" ]]; then
-        printf 'status\tdisarmed\n'
-        printf 'reason\ta Diameter message is sent only when LTE_ARMED=1; the octets build either way\n'
-        printf 'would_send\t%s to %s:%s\n' \
-            "${hex:-<an S6a Update-Location-Request>}" "${host:-<no host given>}" "$port"
-        return 3
-    fi
     if [[ -z "$host" ]]; then
         printf 'ERROR\tneed <hss-or-dra-host> [port] [hex]\n' >&2
         return 2
@@ -3872,10 +3850,10 @@ Usage: $0 COMMAND
                               MBMS-over-Demand (unicast-originated) variant
   --gtpc-send <host> [port] [hex]
                               send the Create Session Request over UDP 2123
-                              (needs LTE_ARMED=1; reports disarmed otherwise)
+                              (no arming needed)
   --diameter-send <host> [port] [hex]
                               send a Diameter message over TCP 3868, or TLS
-                              with LTE_DIAMETER_TLS=1 (needs LTE_ARMED=1)
+                              with LTE_DIAMETER_TLS=1
   --gtpdoor-detect <hex>      GTPdoor-class Echo abuse detection
   --cdr-fraud-check <tsv>     CDR overbilling/bypass anomaly
   --fs20-audit <config>       GSMA FS.20 GTP interconnect controls

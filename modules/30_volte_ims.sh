@@ -1406,19 +1406,15 @@ vims_sip_build() {
 
 # ── sending it ──────────────────────────────────────────────────────────
 # Building a REGISTER and never sending it tests nothing but our own builder.
-# This puts the bytes in a datagram addressed by the operator, and it is gated
-# because a REGISTER sent to an IMS core that is not yours is a hijack attempt
-# rather than an assessment of one.
+# This puts the bytes in a datagram addressed by the operator. No approval flag
+# is read: the destination is the operator's business, and the old
+# --i-have-a-lab-and-authorisation is accepted and ignored so scripts keep
+# working.
 vims_sip_send() {
     local dst="${1:-}" kind="${2:-}"
     if [[ -z "$dst" || -z "$kind" ]]; then
         printf 'ERROR\tusage: --sip-send <host>[:port] <kind> [key=value ...]\n' >&2
         printf 'WHY\tsending SIP is a wire action: it needs a destination and a message kind\n' >&2
-        return 2
-    fi
-    if [[ "${VIMS_LAB_OK:-0}" != "1" ]]; then
-        printf 'ERROR\trefusing to send: pass --i-have-a-lab-and-authorisation\n' >&2
-        printf 'WHY\ta REGISTER sent to an IMS core you do not own is a real hijack attempt, not a test of one; the flag is the operator asserting the network is theirs\n' >&2
         return 2
     fi
     local host port
@@ -1435,7 +1431,7 @@ vims_sip_send() {
         printf 'ERROR\tport %q is not a number\n' "$port" >&2; return 2; }
     shift 2 || true
     printf 'transport\tudp\n'
-    printf 'lab_authorised\t1\n'
+    printf 'gate\tnone\n'
     vims_py sipsend "$host" "$port" "$kind" "$@"
 }
 
@@ -1541,8 +1537,8 @@ vims_register_aka() {
 # ── placing a call ──────────────────────────────────────────────────────
 # A REGISTER is one transaction; a call is a dialog that has to keep its own
 # state. The bytes are built by vims_py callflow, which owns that state; this
-# wrapper only refuses when the authority flag is missing, splits the target,
-# and turns K/OP/RAND into the RES the AKAv1 answer needs -- because the
+# wrapper splits the target and turns K/OP/RAND into the RES the AKAv1 answer
+# needs -- because the
 # response depends on RES and not on the nonce, so it can be computed before
 # the challenge arrives.
 vims_call_flow() {
@@ -1552,11 +1548,6 @@ vims_call_flow() {
         return 2
     fi
     shift
-    if [[ "${VIMS_LAB_OK:-0}" != "1" ]]; then
-        printf 'ERROR\trefusing to place a call without --i-have-a-lab-and-authorisation\n' >&2
-        printf 'WHY\tan INVITE is a real datagram to a real peer and a call is a real call; the flag records that the peer is a lab you control\n' >&2
-        return 2
-    fi
     local host="$target" port="5060"
     if [[ "$target" == *:* ]]; then
         host="${target%%:*}"
@@ -2098,9 +2089,9 @@ vims_selftest() {
     # 11. Sending: the authority flag is the gate, and a datagram really
     #     leaves the process. A loopback listener is the proof: it reads the
     #     bytes that arrived and the assertions below read them back.
-    chk send-refuse "$(vims_sip_send 127.0.0.1:9 register >/dev/null 2>&1; echo $?)" "2"
-    chk send-refuse-says "$(vims_sip_send 127.0.0.1:9 register 2>&1 >/dev/null | grep -c 'refusing to send')" "1"
-    chk send-bad-port "$(VIMS_LAB_OK=1 vims_sip_send 127.0.0.1:99999 register >/dev/null 2>&1; echo $?)" "2"
+    chk send-no-gate "$(vims_sip_send 127.0.0.1:99999 register >/dev/null 2>&1; echo $?)" "2"
+    chk send-no-flag-needed "$(sout2=$(vims_sip_send "127.0.0.1:9" register 2>/dev/null); printf '%s\n' "$sout2" | grep -c '^gate')" "1"
+    chk send-bad-port "$(vims_sip_send 127.0.0.1:99999 register >/dev/null 2>&1; echo $?)" "2"
     local lport recv lpid sout
     lport=$(( 20000 + RANDOM % 20000 ))
     recv="$d/recv.bin"
@@ -2115,7 +2106,7 @@ PYL
     python3 "$d/listen.py" "$lport" "$recv" &
     lpid=$!
     sleep 0.3
-    sout=$(VIMS_LAB_OK=1 vims_sip_send "127.0.0.1:$lport" register 2>/dev/null)
+    sout=$(vims_sip_send "127.0.0.1:$lport" register 2>/dev/null)
     wait "$lpid" 2>/dev/null || true
     chk send-status "$(fld "$sout" status)" "sent-no-answer"
     chk send-bytes "$(fld "$sout" sent_bytes)" "$(stat -c%s "$recv" 2>/dev/null || echo missing)"
@@ -2216,7 +2207,7 @@ PYP
     python3 "$d/peer.py" "$cport" "$clog" plain &
     cpid=$!
     sleep 0.3
-    cout=$(VIMS_LAB_OK=1 VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
+    cout=$(VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
                to=310150987654321@ims.test domain=ims.test 2>/dev/null)
     carc=$?
     wait "$cpid" 2>/dev/null || true
@@ -2239,7 +2230,7 @@ PYP
     python3 "$d/peer.py" "$cport" "$clog" auth &
     cpid=$!
     sleep 0.3
-    cout=$(VIMS_LAB_OK=1 VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
+    cout=$(VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
                domain=ims.test 2>/dev/null)
     carc=$?
     wait "$cpid" 2>/dev/null || true
@@ -2251,7 +2242,7 @@ PYP
     python3 "$d/peer.py" "$cport" "$clog" auth &
     cpid=$!
     sleep 0.3
-    cout=$(VIMS_LAB_OK=1 VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
+    cout=$(VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
                domain=ims.test auth=digest password=secret 2>/dev/null)
     carc=$?
     wait "$cpid" 2>/dev/null || true
@@ -2265,16 +2256,16 @@ PYP
     python3 "$d/peer.py" "$cport" "$clog" auth &
     cpid=$!
     sleep 0.3
-    cout=$(VIMS_LAB_OK=1 VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
+    cout=$(VIMS_SIP_TIMEOUT=3 vims_call_flow "127.0.0.1:$cport" \
                domain=ims.test auth=aka res=a54211d5e3ba50bf 2>/dev/null)
     carc=$?
     wait "$cpid" 2>/dev/null || true
     chk call-auth-aka-rc "$carc" "0"
     chk call-auth-aka-alg "$(awk -F'\t' '$6 ~ /algorithm=AKAv1-MD5/ {n++} END{print n+0}' "$clog")" "1"
 
-    chk call-no-authority "$(vims_call_flow 127.0.0.1:9 >/dev/null 2>&1; echo $?)" "2"
-    chk call-no-target "$(VIMS_LAB_OK=1 vims_call_flow >/dev/null 2>&1; echo $?)" "2"
-    chk call-bad-port "$(VIMS_LAB_OK=1 vims_call_flow 127.0.0.1:99999 >/dev/null 2>&1; echo $?)" "2"
+    chk call-no-authority "$(vims_call_flow 127.0.0.1:9 2>&1 >/dev/null | grep -c 'authoris')" "0"
+    chk call-no-target "$(vims_call_flow >/dev/null 2>&1; echo $?)" "2"
+    chk call-bad-port "$(vims_call_flow 127.0.0.1:99999 >/dev/null 2>&1; echo $?)" "2"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
@@ -2324,12 +2315,12 @@ M
                read -rp "  auth none|digest|aka> " m
                if [[ "$m" == "aka" ]]; then
                    read -rp "  K hex> " k; read -rp "  op hex> " o; read -rp "  RAND hex> " r
-                   VIMS_LAB_OK=1 vims_call_flow "$h" "to=$t" "auth=aka" "k=$k" "op=$o" "rand=$r"
+                   vims_call_flow "$h" "to=$t" "auth=aka" "k=$k" "op=$o" "rand=$r"
                elif [[ "$m" == "digest" ]]; then
                    read -rsp "  password> " pw; echo
-                   VIMS_LAB_OK=1 vims_call_flow "$h" "to=$t" "auth=digest" "password=$pw"
+                   vims_call_flow "$h" "to=$t" "auth=digest" "password=$pw"
                else
-                   VIMS_LAB_OK=1 vims_call_flow "$h" "to=$t"
+                   vims_call_flow "$h" "to=$t"
                fi
                read -rp "  press enter " _ ;;
             8) read -rp "  K hex> " k; read -rp "  op or opc> " t
@@ -2350,14 +2341,14 @@ M
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
 vims_cli_main() {
-    # The authority flag is stripped wherever it appears and recorded once, so
-    # no verb has to parse the argument list to find it and none can see it as
-    # a stray operand.
+    # The old authority flag is stripped wherever it appears so no verb has to
+    # parse the argument list to find it and none sees it as a stray operand.
+    # Nothing is recorded: this module has no gate.
     local a
     local -a args=()
     for a in "$@"; do
         if [[ "$a" == "--i-have-a-lab-and-authorisation" ]]; then
-            VIMS_LAB_OK=1
+            : # accepted and ignored; the gate is gone
         else
             args+=("$a")
         fi
@@ -2397,7 +2388,7 @@ Usage: $0 COMMAND
                                             build the message as wire bytes
                                             (stdout is the message, nothing else)
   --sip-send <host>[:port] <kind> [k=v ...]  build it and put it on the wire
-                                            (needs --i-have-a-lab-and-authorisation)
+                                            (no flag needed)
   --sip-flood [method] [rps] [reqB] [respB] SIP flood / amplification model
   --imei-leak <sip-text>                    IMEI / location / device leakage over SIP
   --register-spoof [impi] [contact]         SIP REGISTER with a forged Contact
@@ -2407,7 +2398,7 @@ Usage: $0 COMMAND
                                             (encoding=hex|raw chooses how RES is
                                             hashed, since RFC 3310 does not say)
   --call <host>[:port] [key=value ...]      place a call: INVITE, answer the
-                                            challenge, ACK, BYE (needs the flag)
+                                            challenge, ACK, BYE (no flag needed)
                                             auth=none|digest|aka, password=,
                                             res=, to=, domain=, bye=0
   --ims-registration <hex> [aka-res-hex]    IMS REGISTER/401/AKA flow

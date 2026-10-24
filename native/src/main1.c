@@ -697,7 +697,7 @@ static const ModuleDefinition modules[] = {
        other half, and the gate is described in the page, not in the title. */
     { "33_jamming_detect",   "Jamming",              "RADIO",
       "imsisting-33_jamming_detect-symbolic",
-      "Detection and measurement are the authority: jamming told apart from congestion and a coverage hole. Behind an explicit lab gate it also constructs the waveform." },
+      "Detection and measurement are the authority: jamming told apart from congestion and a coverage hole, and the waveform constructor that keys a radio when you tell it to." },
 
     /* ACCESS — attach, registration and the access-network edge */
     { "09_lte_attach",       "LTE Attach Forge",     "ACCESS",
@@ -3117,7 +3117,6 @@ static const char *const plain_keys[] = {
     "direction\tdirection",
     "direction_name\tdirection name",
     "directions\tdirections",
-    "disarmed\tdisarmed",
     "disclosed\tdisclosed",
     "discovered\tdiscovered",
     "discovery_requests\tdiscovery requests",
@@ -3403,9 +3402,9 @@ static const char *const plain_keys[] = {
     "gamma\tkeystream block XORed onto the packet",
     "gap_ts\tgap timestamp",
     "gate\tgate",
-    "gate_flag\tgate flag",
     "gate_status\tgate status",
     "gated\tgated",
+	"gates\twhether any approval flag is still required (none is)",
     "gbr\tguaranteed bit rate",
     "gbr_info_required\tguaranteed bit rate information required",
     "gen\tgeneration",
@@ -3716,7 +3715,6 @@ static const char *const plain_keys[] = {
     "l3\tl3",
     "l3_octets\tl3 octets",
     "l_ra\tl ra",
-    "lab_authorised\tlab authorised",
     "lab_peer\tlab peer",
     "lab_plmn\tlab network ID",
     "lab_reaches\tlab reaches",
@@ -3769,6 +3767,7 @@ static const char *const plain_keys[] = {
     "leg\tleg",
     "legacy_pairing_markers\tlegacy pairing markers",
     "legacy_stack\tlegacy stack",
+	"legend\twhat a capability chip on a card means",
     "len\tlength",
     "length\tlength",
     "length_agrees\tlength agrees",
@@ -4463,6 +4462,7 @@ static const char *const plain_keys[] = {
     "radial_velocity_mps\tradial velocity mps",
     "radio\tradio",
     "radio_io\tradio input output",
+	"radio_lock\twhich process owns the SDR, or none",
     "radio_required\tradio required",
     "radio_state\tradio state",
     "radius_m\tradius m",
@@ -5316,7 +5316,6 @@ static const char *const plain_keys[] = {
     "tx_gate\ttx gate",
     "tx_iq\ttx iq",
     "tx_iq_format\ttx iq format",
-    "tx_keyed_by\ttx keyed by",
     "tx_mode\ttx mode",
     "tx_note\ttx note",
     "tx_rate_hz\ttx rate (Hz)",
@@ -5504,7 +5503,6 @@ static const char *const plain_keys[] = {
     "wire_octets\twire octets",
     "with_fix\twith fix",
     "without_fix\twithout fix",
-    "would_send\twould send",
     "wrap_seconds\twrap seconds",
     "write\twrite",
     "written\twritten",
@@ -5611,6 +5609,7 @@ static const ChipRow chip_rows[] = {
     { "00_deps",             "--missing-only",        NEED_NO, DOES_READS },
     { "00_deps",             "--quiet",               NEED_NO, DOES_READS },
     { "00_deps",             "--report",              NEED_NO, DOES_READS },
+    { "00_deps",             "--preflight",           NEED_NO, DOES_READS },
     { "00_deps",             "--selftest",            NEED_NO, DOES_READS },
     { "00_deps",             "--status-tsv",          NEED_NO, DOES_READS },
     { "00_deps",             "--version",             NEED_NO, DOES_READS },
@@ -6376,7 +6375,6 @@ static const ChipRow chip_rows[] = {
     { "30_volte_ims",        "--calls",               NEED_CAP, DOES_READS },
     { "30_volte_ims",        "--detect-keystream-reuse", NEED_CAP, DOES_READS },
     { "30_volte_ims",        "--help",                NEED_NO, DOES_READS },
-    { "30_volte_ims",        "--i-have-a-lab-and-authorisation", NEED_CAP, DOES_READS },
     { "30_volte_ims",        "--imei-leak",           NEED_CAP, DOES_READS },
     { "30_volte_ims",        "--imp4gt-model",        NEED_CAP, DOES_READS },
     { "30_volte_ims",        "--ims-registration",    NEED_CAP, DOES_READS },
@@ -6454,7 +6452,6 @@ static const ChipRow chip_rows[] = {
     { "33_jamming_detect",   "--fixture",             NEED_NO, DOES_BUILDS },
     { "33_jamming_detect",   "--format",              NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--help",                NEED_NO, DOES_READS },
-    { "33_jamming_detect",   "--i-have-a-lab-and-authorisation", NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--i-ssb",               NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--info",                NEED_NO, DOES_READS },
     { "33_jamming_detect",   "--menu",                NEED_NO, DOES_READS },
@@ -6486,6 +6483,7 @@ static const ChipRow chip_rows[] = {
     { "33_jamming_detect",   "--ssb-waveform",        NEED_RADIO, DOES_TRANSMITS },
     { "33_jamming_detect",   "--status-tsv",          NEED_NO, DOES_READS },
     { "33_jamming_detect",   "--tx-build",            NEED_RADIO, DOES_READS },
+    { "33_jamming_detect",   "--tx-key",              NEED_RADIO, DOES_TRANSMITS },
     { "33_jamming_detect",   "--tx-status",           NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--v",                   NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--version",             NEED_NO, DOES_READS },
@@ -6700,6 +6698,12 @@ static const ChipRow chip_rows[] = {
     { "41_ota_sms",          "--http-devices",        NEED_NO,  DOES_READS },
     { "41_ota_sms",          "--host",                NEED_NO,  DOES_READS },
     { "41_ota_sms",          "--port",                NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--api",                 NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--api-key",             NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--base",                NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--device-id",           NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--raw",                 NEED_NO,  DOES_READS },
+    { "41_ota_sms",          "--serve",               NEED_NO,  DOES_READS },
     { "41_ota_sms",          "--timeout",             NEED_NO,  DOES_READS },
     { "41_ota_sms",          "--text",                NEED_NO,  DOES_READS },
     { "41_ota_sms",          "--no-bind",             NEED_NO,  DOES_READS },
@@ -28740,19 +28744,21 @@ jamd_build_shapes(AppState *state, const char *module_id,
     return outer;
 }
 
-/* 7. The gate: what the module will and will not do, and what it needs before
-      it does the second thing. The warning is the module's, not this page's. */
+/* 7. Keying: what the module says about itself, and the one step that puts RF
+      on the air. There is no approval flag in front of it; the warning is the
+      module's, and it is printed here before the button. */
 static GtkWidget *
 jamd_build_gate(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
     GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("GATE",
-        "What this module refuses, what it accepts, and what has to be true "
-        "about the room before the radio is opened.", &body);
+    GtkWidget *outer = radio_view_shell("KEY IT",
+        "What the module says about itself, and the step that opens the radio. "
+        "No flag stands in front of it: the module asks the driver whether a "
+        "radio is there, and refuses to claim a transmission it cannot see.", &body);
     GtkWidget *state_body, *call_body;
     GtkWidget *state_card = verb_card("WHAT THE MODULE SAYS ABOUT ITSELF", &state_body);
-    GtkWidget *call = verb_card("WHAT HAPPENS WHEN THE GATE IS ARMED", &call_body);
+    GtkWidget *call = verb_card("KEY THE TRANSMITTER", &call_body);
     GtkWidget *flow = fkit_flow();
     GtkWidget *status_btn = gtk_button_new_with_label("Read the gate state");
     g_autofree char *script = module_script_path(module_id);
@@ -28784,21 +28790,20 @@ jamd_build_gate(AppState *state, const char *module_id,
     gtk_box_append(GTK_BOX(state_body), flow);
     gtk_box_append(GTK_BOX(body), state_card);
 
+    jamd_append_disclaimer(call_body, module_id);
+    gtk_box_append(GTK_BOX(call_body),
+        mod_arg_row(state, module_id, status, "Key the Transmitter",
+            "--tx-key",
+            "--mode barrage --shape awgn --centre 2650MHz --secs 1",
+            "Constructs the pulse train first, then opens the radio. There is "
+            "no approval flag: the module asks the driver what it can see, and "
+            "a box with no radio fails with a non-zero exit instead of "
+            "reporting a transmission it did not make."));
     gtk_box_append(GTK_BOX(call_body), fkit_note(
-        "Keying is not on this page. The constructor above builds a file and "
-        "stops; the step that opens a radio is reachable from the module's own "
-        "command line, where an operator who has read the warning already is, "
-        "and it is the only step that needs the authorisation flag. A button "
-        "here would put that step one click from someone who arrived at this "
-        "page by accident, and the flag would then have to be typed by someone "
-        "who was not told what it means."));
-    gtk_box_append(GTK_BOX(call_body), fkit_note(
-        "With the flag set, the module still refuses to report success without "
-        "a radio: it asks the driver, not the PATH, and a driver package "
-        "installed is not a radio. Each driver is probed by its own tool, and a "
-        "box with none of them fails with a non-zero exit and says which four "
-        "were asked. Nothing is transmitted by a module that cannot see the "
-        "device it claims to be transmitting with."));
+        "A driver package installed is not a radio. Each driver is probed by "
+        "its own tool -- hackrf_info, bladeRF-cli -p, LimeUtil --find, "
+        "uhd_find_devices -- and a box with none of them says which four were "
+        "asked rather than improvising a command line from a name."));
     gtk_box_append(GTK_BOX(call_body), fkit_note(
         "There is one further refusal worth knowing: only one driver has a "
         "built-in transmit call. The others report what they would need rather "
@@ -28817,7 +28822,7 @@ static ModuleSubmenuEntry jamd_entries[] = {
     { "Report", "document-save-symbolic", NULL, jamd_build_report },
     { "Build waveform", "document-new-symbolic", NULL, jamd_build_waveform },
     { "Signal shapes", "network-wireless-symbolic", NULL, jamd_build_shapes },
-    { "Gate", "security-high-symbolic", NULL, jamd_build_gate },
+    { "Key it", "security-high-symbolic", NULL, jamd_build_gate },
 };
 
 /* 34_slicing — network slicing.

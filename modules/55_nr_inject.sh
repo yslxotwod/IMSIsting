@@ -748,8 +748,9 @@ nrj_auth_replay() {
         "$hex" "$rbhex" "$([[ "$rbhex" == "$hex" ]] && echo yes || echo no)"
 }
 
-# tx-guard is on by default: transmitting requires --yes or NRJ_TX_ARMED=1.
-# The TX path is NRJ_TX_CMD — a command that reads the frame hex on stdin and
+# There is no tx-guard: --inject transmits on the first invocation, and --yes /
+# NRJ_TX_ARMED are accepted and ignored so old command lines keep working.
+# The TX path is NRJ_TX_CMD -- a command that reads the frame hex on stdin and
 # exits 0 on a completed send (wrap your srsRAN/OAI injection patch in it).
 # No NRJ_TX_CMD, no send: frank failure, no success line.
 nrj_inject() {
@@ -765,10 +766,6 @@ nrj_inject() {
     done
     frame=$(nrj_norm_hex "$frame"); frame="${frame^^}"
     nrj_is_hex "$frame" || { printf 'ERROR\tframe must be hex\n' >&2; return 2; }
-    if (( yes == 0 && ${NRJ_TX_ARMED:-0} != 1 )); then
-        printf 'ERROR\ttx-guard: refusing to transmit; pass --yes or set NRJ_TX_ARMED=1\n' >&2
-        return 4
-    fi
     local cmd="${NRJ_TX_CMD:-}"
     if [[ -z "$cmd" ]]; then
         printf 'ERROR\tno TX path: set NRJ_TX_CMD to a command that reads the frame hex on stdin\n' >&2
@@ -873,7 +870,7 @@ hardware	two SDRs (USRP B210/X310) or one SDR plus an amplifier; a lab UE/modem 
 software	OpenAirInterface or srsRAN for the gNB side, plus a Sni5Gect/5Ghoul-style injection patch
 flow	1. compute the RNTIs here  2. sync and track the UE to the target state  3. frame the payload with --frame  4. inject it with --inject
 tx_path	NRJ_TX_CMD — a command that reads the frame hex on stdin and exits 0 on a completed send; wrap your srsRAN/OAI injection patch in it
-tx_guard	--inject refuses to transmit without --yes or NRJ_TX_ARMED=1
+tx_guard	none --inject transmits on the first invocation
 note	nothing here is transmitted by this module; the over-the-air step is this handoff, against equipment you own
 EOF
 }
@@ -1157,8 +1154,8 @@ nrj_selftest() {
     chk bi-idx-10 "$(fld "$(nrj_rar_backoff_idx 10)" backoff_ms)" "320 ms"
     chk bi-idx-octet-10 "$(fld "$(nrj_rar_backoff_idx 10)" subheader)" "0A"
     chk bi-idx-bad "$(nrj_rar_backoff_idx 16 >/dev/null 2>&1; echo $?)" "2"
-    chk inject-guard "$(NRJ_TX_ARMED=0 nrj_cli_main --inject 7E0044001F >/dev/null 2>&1; echo $?)" "4"
-    chk inject-no-tx "$(NRJ_TX_ARMED=1 nrj_cli_main --inject 7E0044001F >/dev/null 2>&1; echo $?)" "3"
+    chk inject-no-gate "$(NRJ_TX_ARMED=0 nodef=1 nrj_cli_main --inject 7E0044001F >/dev/null 2>&1; echo $?)" "3"
+    chk inject-no-tx "$(nrj_cli_main --inject 7E0044001F >/dev/null 2>&1; echo $?)" "3"
     chk inject-ok "$(NRJ_TX_ARMED=1 NRJ_TX_CMD='cat >/dev/null' nrj_cli_main --inject 7E0044001F 2>/dev/null | awk -F'\t' '$1=="injected"{print $2}')" "7E0044001F"
     chk inject-yes-flag "$(NRJ_TX_ARMED=0 NRJ_TX_CMD='cat >/dev/null' nrj_cli_main --inject --yes 7E0044001F 2>/dev/null | awk -F'\t' '$1=="injected"{print $2}')" "7E0044001F"
     chk inject-bad-hex "$(NRJ_TX_ARMED=1 nrj_cli_main --inject zz >/dev/null 2>&1; echo $?)" "2"
@@ -1271,7 +1268,7 @@ Usage: $0 COMMAND
                                auth-request, reg-accept-aka, nas-unknown
   --auth-capture <hex>         store an observed Authentication Request
   --auth-replay                rebuild the stored frame; compare octet-exact
-  --inject <hex> [--yes]       send a frame via NRJ_TX_CMD (tx-guard armed)
+  --inject <hex>               send a frame via NRJ_TX_CMD (no gate)
   --exploits | --exploit <n>   the injection exploit set
   --plan                       dual-radio handoff
   --selftest                   verify the arithmetic and framing

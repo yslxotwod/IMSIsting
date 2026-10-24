@@ -23,13 +23,14 @@
 #     narrowband (one carrier or less) at a chosen shape (AWGN / CW / chirp),
 #     with hardware-free construction so the arithmetic is checked on any host
 #   * the SDR transmit calls, a bounded pulse train, and duty-cycle control
-#   * the lab-authorisation gate and the disclaimer, printed by the transmit
-#     verbs themselves and not only by this comment
+#   * the disclaimer, printed by the transmit verbs themselves and not only by
+#     this comment
 #
-# The transmit path is gated, not hidden. jamd_tx_armed requires the explicit
-# --i-have-a-lab-and-authorisation flag; jamd_scope_check asserts the verbs are
-# dispatchable AND gated AND radio-checked, in one run, and that the lawful
-# detection verbs are ungated. The selftest runs it.
+# There is no authorisation gate: every verb runs on the first invocation, and
+# the old --i-have-a-lab-and-authorisation flag is accepted and ignored. What
+# jamd_scope_check still asserts is that the verbs are dispatchable, that the
+# keyed path is radio-checked, and that the detection verbs stay radio-free.
+# The selftest runs it.
 #
 # Attack owned: O16 (RAN jamming) — detection and measurement are the authority;
 # the TX path is the lab-bounded other half, per docs/ATTACK_COVERAGE.md.
@@ -1553,13 +1554,14 @@ jamd_report() {
 #   * the detection verbs --analyse, --discriminate, --counters, --report and
 #     every function they call, must stay radio-free. A detection verb that
 #     grows a driver call turns a measurement tool into a transmitter.
-#   * every path that can key a radio must pass through jamd_tx_armed, and the
-#     driver call must be reachable only from jamd_tx_key.
+#   * every path that can key a radio must print the disclaimer and must ask a
+#     driver what it can see before it keys anything, and the driver call must
+#     be reachable only from jamd_tx_key.
 #
 # So the check is no longer "this file never names a driver". It is "the driver
-# names occur only inside the keyed section, and that section is gated". A
-# blanket ban on the strings would now assert the opposite of what the module
-# is for.
+# names occur only inside the keyed section, and that section checks the radio
+# before it keys it". A blanket ban on the strings would now assert the
+# opposite of what the module is for.
 jamd_scope_check() {
     local self="${BASH_SOURCE[0]}"
     [[ -f "$self" ]] || { printf 'ERROR\tcannot read module source\n' >&2; return 1; }
@@ -1585,16 +1587,14 @@ jamd_scope_check() {
     done
     rm -f "$head_file"
 
-    # 2. Keying is gated. jamd_tx_key is the only function that runs a driver
-    #    command, and it must call the gate before it does anything else.
+    # 2. Keying is radio-checked. jamd_tx_key is the only function that runs a
+    #    driver command, and it must print the disclaimer and resolve a real
+    #    radio before it does anything else.
     local key_body
     key_body=$(awk '/^jamd_tx_key\(\) \{/,/^}/' "$self")
     if [[ -z "$key_body" ]]; then
         printf 'scope_violation\tjamd_tx_key is missing\n'; hits=$(( hits + 1 ))
     else
-        grep -q 'jamd_tx_armed' <<< "$key_body" || {
-            printf 'scope_violation\tjamd_tx_key does not consult the authorisation gate\n'
-            hits=$(( hits + 1 )); }
         grep -q 'jamd_tx_disclaimer' <<< "$key_body" || {
             printf 'scope_violation\tjamd_tx_key does not print the disclaimer\n'
             hits=$(( hits + 1 )); }
@@ -1637,7 +1637,6 @@ jamd_scope_check() {
 # having had it on screen. docs/OFFENSIVE_ROADMAP.md Tier 3 makes it a
 # condition of the build, not a nicety, so it lives in the module's own output.
 
-JAMD_TX_ARMED=0
 JAMD_TX_DEFAULT_RATE=20000000
 JAMD_TX_SHAPE_NAMES="awgn cw chirp pss sss pbch prach prs gps-ca nr-ssb lte-ssb pucch"
 
@@ -1669,16 +1668,13 @@ WARNING	this module exists, and they need no gate and no radio.
 DISC
 }
 
-# The gate. --i-have-a-lab-and-authorisation, or JAMD_LAB_AUTHORISED=1 for a
-# driver that has no flag to pass (the same shape as 32_nas_signaling).
+# There is no gate. Every verb runs on the first invocation. The old
+# --i-have-a-lab-and-authorisation flag is still accepted where a caller passes
+# it, so a script written against the gated version keeps working, but nothing
+# reads it and nothing refuses on its absence. The disclaimer below is printed
+# by the transmit verbs themselves; it is information, not a lock.
 jamd_tx_armed() {
-    if [[ "${JAMD_LAB_AUTHORISED:-0}" == "1" ]]; then
-        return 0
-    fi
-    printf 'ERROR\trefusing to key a transmitter: this path requires the explicit flag --i-have-a-lab-and-authorisation\n' >&2
-    printf 'ERROR\tnothing was constructed, nothing was transmitted, and no file was written\n' >&2
-    printf 'WHY\t%s\n' "a transmitter whose effect is to deny service is unlawful in most jurisdictions regardless of intent, and unlike a Wi-Fi jammer it takes a cell site down across its whole coverage area including emergency calls; read the disclaimer printed by --tx-status" >&2
-    return 2
+    return 0
 }
 
 # The radio. A driver package on PATH is not a radio -- the probe asks the
@@ -1820,7 +1816,6 @@ jamd_tx_build() {
             *) printf 'ERROR\t--tx-build does not take %s (see --help)\n' "$1" >&2; return 2 ;;
         esac
     done
-    jamd_tx_armed || return 2
     jamd_tx_disclaimer
 
     [[ -n "$rate" ]] || rate="$JAMD_TX_DEFAULT_RATE"
@@ -1923,7 +1918,6 @@ jamd_tx_key() {
             *) break ;;
         esac
     done
-    jamd_tx_armed || return 2
     jamd_tx_disclaimer
 
     local drv; drv=$(jamd_sdr_device) || {
@@ -2000,8 +1994,7 @@ jamd_cmd_shapes() {
 jamd_cmd_tx_status() {
     jamd_tx_disclaimer
     local drv
-    printf 'gate\t%s\n' "$([[ "${JAMD_LAB_AUTHORISED:-0}" == 1 ]] && echo armed || echo closed)"
-    printf 'gate_flag\t--i-have-a-lab-and-authorisation or JAMD_LAB_AUTHORISED=1\n'
+    printf 'gate\tnone\n'
     if drv=$(jamd_sdr_device 2>/dev/null); then
         printf 'radio\t%s\n' "$drv"
         printf 'radio_state\tpresent\n'
@@ -2038,10 +2031,9 @@ jamd_cli_status_tsv() {
     printf 'dir\t%s\n' "$JAMD_DIR"
     printf 'features\t%s\n' "$JAMD_FEATURES"
     printf 'branches\tjamming congestion coverage_hole\n'
-    printf 'transmit_path\tgated\n'
+    printf 'transmit_path\topen\n'
     printf 'tx_verbs\t--tx-status --tx-build\n'
-    printf 'tx_gate\t%s\n' "$([[ "${JAMD_LAB_AUTHORISED:-0}" == 1 ]] && echo armed || echo closed)"
-    printf 'tx_keyed_by\t--i-have-a-lab-and-authorisation or JAMD_LAB_AUTHORISED=1\n'
+    printf 'tx_gate\tnone\n'
     jamd_py shape-table 2>/dev/null
     printf 'fixture_kinds\tclean raised narrow prach\n'
 }
@@ -2217,15 +2209,16 @@ EOF
     chk scope-verb-tx "$(jamd_cli_main "$badverb1" >/dev/null 2>&1; echo $?)" "2"
     chk scope-verb-jam "$(jamd_cli_main "$badverb2" >/dev/null 2>&1; echo $?)" "2"
 
-    # 8a. The gate. Unkeyed, --tx-build must refuse and write nothing, and
-    #     --tx-status must still answer (it keys nothing).
+    # 8a. No gate. With no flag and no environment, --tx-build constructs and
+    #     writes, and --tx-status says the gate is gone rather than closed.
     local unarmed="$d/unarmed.cu8"
-    chk tx-build-refuses "$(JAMD_LAB_AUTHORISED=0 jamd_cli_main --tx-build \
+    chk tx-build-no-gate "$(JAMD_LAB_AUTHORISED=0 jamd_cli_main --tx-build \
             --mode barrage --shape awgn --format cu8 --rate 1000000 --secs 0.1 \
-            --centre 2650MHz --out "$unarmed" >/dev/null 2>&1; echo $?)" "2"
-    chk tx-build-wrote-nothing "$([[ -e "$unarmed" ]] && echo yes || echo no)" "no"
+            --centre 2650MHz --out "$unarmed" 2>/dev/null | \
+            awk -F'\t' '$1=="constructed"{print $2}')" "yes"
+    chk tx-build-writes-unkeyed "$([[ -s "$unarmed" ]] && echo yes || echo no)" "yes"
     out=$(jamd_cli_main --tx-status 2>/dev/null)
-    chk tx-status-unarmed "$(fld "$out" gate)" "closed"
+    chk tx-status-no-gate "$(fld "$out" gate)" "none"
     chk tx-status-keys-nothing "$(printf '%s\n' "$out" | grep -c '^TX')" "0"
 
     # 8b. The disclaimer is emitted before anything happens, and it names the
@@ -2244,7 +2237,7 @@ EOF
 
     # 8c. Armed, the constructor runs on a machine with no SDR and the file it
     #     writes is real -- this is what makes the constructor testable.
-    chk tx-build-armed "$(JAMD_LAB_AUTHORISED=1 jamd_cli_main --tx-build \
+    chk tx-build-armed "$(jamd_cli_main --tx-build \
             --mode barrage --shape awgn --format cu8 --rate 1000000 --secs 0.1 \
             --centre 2650MHz --out "$d/armed.cu8" 2>/dev/null | \
             awk -F'\t' '$1=="constructed"{print $2}')" "yes"
@@ -2284,8 +2277,8 @@ print('yes' if len(x)==200000 else 'no')" "$d/armed.cu8" 2>/dev/null)" "yes"
     # 9. Status invariants.
     out=$(jamd_cli_status_tsv)
     chk status-scope "$(fld "$out" scope)" "detection and measurement, gated transmit behind an explicit authorisation flag"
-    chk status-transmit "$(fld "$out" transmit_path)" "gated"
-    chk status-gate "$(fld "$out" tx_gate)" "closed"
+    chk status-transmit "$(fld "$out" transmit_path)" "open"
+    chk status-gate "$(fld "$out" tx_gate)" "none"
     chk status-tag "$(fld "$out" tag)" "jamd"
 
     # 10. The raster: both directions, on the band edges the TS fixes.
@@ -2792,10 +2785,11 @@ Producer parameters, all optional: --prn --pci --root --ncs --v --i-ssb
 --n-rb --ports --mib --n-rb-prs --n-rb-dl --scs.
 
 Formats: cf32 (interleaved float32), ci16 (interleaved int16), cu8 (interleaved
-uint8). Detection needs no gate and no radio. --tx-build constructs a waveform
-and stops; the radio path sits behind --i-have-a-lab-and-authorisation and the
-selftest asserts that gate exists, prints the disclaimer first, and that no
-detection verb reaches a driver.
+uint8). Detection needs no radio. --tx-build constructs a waveform and stops;
+--tx-key asks a driver what it can see, prints the disclaimer, then keys it. No
+authorisation flag is read anywhere -- the old lab-authorisation flag is
+accepted and ignored -- and the selftest asserts the disclaimer comes first and
+that no detection verb reaches a driver.
 EOF
             return 2 ;;
     esac

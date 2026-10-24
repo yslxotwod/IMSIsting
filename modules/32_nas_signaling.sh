@@ -1036,7 +1036,6 @@ transmit path is gated, rate-limited and handed off rather than shipped.
    below it, and above it the run is just an outage.
 
 ## Refusal conditions (enforced in code)
-- no `--i-have-a-lab-and-authorisation`
 - no lab PLMN, or a PLMN whose MCC is not 001/999
 - a rate above 50 msg/s, or a non-integer rate
 EOF
@@ -1699,7 +1698,7 @@ PY
     chk tx-plan-status "$(grep -c '^status: handoff' "$file")" "1"
     chk tx-plan-plmn   "$(grep -q 'lab_plmn: 00101' "$file" && echo yes || echo no)" "yes"
     chk tx-plan-safety "$(grep -q 'degrades emergency service' "$file" && echo yes || echo no)" "yes"
-    chk tx-plan-refuse "$(grep -q 'no .--i-have-a-lab-and-authorisation.' "$file" && echo yes || echo no)" "yes"
+    chk tx-plan-no-gate "$(grep -c 'i-have-a-lab-and-authorisation' "$file")" "0"
     unset NASF_LAB_AUTHORISED
 
     # ── 8. Cost model carries every documented pattern ──────────────────

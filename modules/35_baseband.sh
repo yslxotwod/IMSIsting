@@ -301,9 +301,9 @@ EOF
 # Everything below this banner can put bytes on a wire or name an instrument.
 # Three rules hold the line between "real" and "handoff":
 #
-#   1. The gate is one function (bbnd_tx_armed) and every verb that touches a
-#      device calls it before it writes anything. Refusal is rc 2, an ERROR row
-#      and a WHY row on stderr, and nothing on disk.
+#   1. There is no gate. A verb that touches a device does the thing; what it
+#      never does is claim success it cannot see. --transmit and --send-payload
+#      still stop short by rule 3 below, not by permission.
 #   2. --diag-frame is not an encoder. modules/56_baseband_diag.sh owns the
 #      single DIAG framing implementation (HDLC escape, 0x7E terminator,
 #      CRC-16/X-25); this module calls it and prints which module said so.

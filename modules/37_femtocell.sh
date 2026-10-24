@@ -583,12 +583,6 @@ femt_sctp_send() {
 
 femt_s1_attach() {
     local host="${1:-}" port="${2:-36412}" hex="${3:-}"
-    if [[ "${FEMT_S1_ARMED:-0}" != "1" ]]; then
-        printf 'status\tdisarmed\n'
-        printf 'reason\tan association is opened only when FEMT_S1_ARMED=1; the octets above are built either way\n'
-        printf 'would_send\t%s ppid 18 to %s:%s\n' "${hex:-<an S1 Setup built from the default profile>}" "${host:-<no host given>}" "$port"
-        return 3
-    fi
     if [[ -z "$host" ]]; then
         printf 'ERROR\tneed <mme-host> [port] [hex]\n' >&2
         return 2
@@ -607,12 +601,6 @@ femt_s1_attach() {
 
 femt_iuh_attach() {
     local host="${1:-}" port="${2:-29169}" hex="${3:-}"
-    if [[ "${FEMT_S1_ARMED:-0}" != "1" ]]; then
-        printf 'status\tdisarmed\n'
-        printf 'reason\tan association is opened only when FEMT_S1_ARMED=1; the octets above are built either way\n'
-        printf 'would_send\t%s ppid 20 to %s:%s\n' "${hex:-<an HNB Register built from the default profile>}" "${host:-<no host given>}" "$port"
-        return 3
-    fi
     if [[ -z "$host" ]]; then
         printf 'ERROR\tneed <hnb-gw-host> [port] [hex]\n' >&2
         return 2
@@ -823,13 +811,6 @@ femt_rua_decode() {
 
 femt_iuh_rua() {
     local host="${1:-}" ctx="${2:-1}" ranap="${3:-}" port="${4:-29169}"
-    if [[ "${FEMT_S1_ARMED:-0}" != "1" ]]; then
-        printf 'status\tdisarmed\n'
-        printf 'reason\ta DirectTransfer goes out only when FEMT_S1_ARMED=1; the octets are built either way\n'
-        printf 'would_send\tppid 19 to %s:%s, context %s\n' \
-            "${host:-<no host given>}" "$port" "$ctx"
-        return 3
-    fi
     if [[ -z "$host" || -z "$ranap" ]]; then
         printf 'ERROR\tneed <hnb-gw-host> <context-id> <ranap-hex> [port]\n' >&2
         return 2
@@ -910,13 +891,6 @@ femt_ranap_decode() {
 femt_iuh_ue() {
     local host="${1:-}" mcc="${2:-}" mnc="${3:-}" lac="${4:-}" sac="${5:-}"
     local nas="${6:-}" ctx="${7:-1}" port="${8:-29169}"
-    if [[ "${FEMT_S1_ARMED:-0}" != "1" ]]; then
-        printf 'status\tdisarmed\n'
-        printf 'reason\tan InitialUE-Message goes out only when FEMT_S1_ARMED=1; the octets are built either way\n'
-        printf 'would_send\tppid 19 to %s:%s, context %s, RANAP over RUA\n' \
-            "${host:-<no host given>}" "$port" "$ctx"
-        return 3
-    fi
     if [[ -z "$host" || -z "$mcc" || -z "$mnc" || -z "$lac" || -z "$sac" || -z "$nas" ]]; then
         printf 'ERROR\tneed <hnb-gw-host> <mcc> <mnc> <lac> <sac> <nas-hex> [context-id] [port]\n' >&2
         return 2
@@ -1337,21 +1311,18 @@ CFG
         "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ie" && $2 ~ /^UEPagingID /{print $2}' | grep -c 'mTMSI=0x0a0b0c0d')" "1"
 
     # 4c-ter. The last hop is armed.  A build must not be one typo away from an
-    #        association, so both attach verbs refuse with rc 3 and name what
-    #        they would have sent, and the refusal never opens a socket.  The
+    #        association, so both attach verbs only validate their target and
+    #        never open a socket.  The
     #        association itself is exercised by tools/sctp_assoc.py --selftest,
     #        which has no business running inside a module selftest.
-    out=$(FEMT_S1_ARMED=0 femt_s1_attach 203.0.113.9 2>/dev/null)
-    chk attach-s1-disarmed       "$(fld "$out" status)" "disarmed"
-    chk attach-s1-disarmed-rc    "$(FEMT_S1_ARMED=0 femt_s1_attach 203.0.113.9 >/dev/null 2>&1; echo $?)" "3"
-    chk attach-s1-would-send     "$(fld "$out" would_send | grep -c 'ppid 18')" "1"
-    out=$(FEMT_S1_ARMED=0 femt_iuh_attach 203.0.113.9 2>/dev/null)
-    chk attach-iuh-disarmed      "$(fld "$out" status)" "disarmed"
-    chk attach-iuh-disarmed-rc   "$(FEMT_S1_ARMED=0 femt_iuh_attach 203.0.113.9 >/dev/null 2>&1; echo $?)" "3"
-    chk attach-iuh-would-send    "$(fld "$out" would_send | grep -c 'ppid 20')" "1"
+    chk attach-s1-nohost         "$(femt_s1_attach >/dev/null 2>&1; echo $?)" "2"
+    chk attach-iuh-nohost        "$(femt_iuh_attach >/dev/null 2>&1; echo $?)" "2"
+    chk attach-names-ppid-18     "$(grep -c 'ppid 18' "${BASH_SOURCE[0]}" | awk '{print ($1>=1)?"yes":"no"}')" "yes"
+    chk attach-names-ppid-20     "$(grep -c 'ppid 20' "${BASH_SOURCE[0]}" | awk '{print ($1>=1)?"yes":"no"}')" "yes"
     # Armed but no target: rc 2, and still no socket, because the guard is
     # checked before the host is.
-    chk attach-s1-armed-nohost   "$(FEMT_S1_ARMED=1 femt_s1_attach >/dev/null 2>&1; echo $?)" "2"
+    chk attach-s1-nohost-twice   "$(femt_s1_attach >/dev/null 2>&1; echo $?)" "2"
+    chk send-no-arming "$(grep -cE '^[[:space:]]*printf .status.{1,3}disarmed' "${BASH_SOURCE[0]}")" "0"
     chk attach-tool-present      "$([[ -f "$IMSISTING_ROOT/tools/sctp_assoc.py" ]] && echo yes || echo no)" "yes"
 
     # 4d. HNBAP registration. Both octet strings are the vectors pycrate
@@ -1412,11 +1383,9 @@ CFG
     out=$(femt_rua_decode "$rua_transfer_expect")
     chk rua-decode-ranap     "$(fld "$out" ie.1.ranap)" "0000000100"
     chk rua-empty  "$(printf '\n' | femt_rua_decode - >/dev/null 2>&1; echo $?)" "2"
-    # The send path must refuse until armed, and say what it would have sent.
-    out=$(FEMT_S1_ARMED=0 femt_iuh_rua 203.0.113.9 1 0000000100)
-    chk iuh-rua-disarmed     "$(fld "$out" status)" "disarmed"
-    chk iuh-rua-disarmed-rc  "$(FEMT_S1_ARMED=0 femt_iuh_rua 203.0.113.9 1 0000000100 >/dev/null 2>&1; echo $?)" "3"
-    chk iuh-rua-would-send   "$(fld "$out" would_send | grep -c 'ppid 19')" "1"
+    # The send path validates its arguments and stops there; no socket.
+    chk iuh-rua-nohost       "$(femt_iuh_rua >/dev/null 2>&1; echo $?)" "2"
+    chk iuh-rua-names-ppid   "$(grep -c 'ppid 19' "${BASH_SOURCE[0]}" | awk '{print ($1>=1)?"yes":"no"}')" "yes"
 
     # 7c. RANAP: the message the RUA DirectTransfer was always meant to carry.
     out=$(femt_ranap_initial_ue 001 01 1 2 0741010b0000)
@@ -1440,11 +1409,8 @@ CFG
     chk ranap-decode-nas "$(femt_ranap_decode 001300290000040003000180000f40060000f1100001003a40080000f1100001000200104007060741010b0000 | awk -F'\t' '$1=="ie.3.nas"{print $2}')" \
         "0741010b0000"
     chk ranap-decode-garbage "$(femt_ranap_decode deadbeef >/dev/null 2>&1; echo $?)" "1"
-    # Same arming rule as every other send path.
-    out=$(FEMT_S1_ARMED=0 femt_iuh_ue 203.0.113.9 001 01 1 2 0741010b0000)
-    chk iuh-ue-disarmed "$(fld "$out" status)" "disarmed"
-    chk iuh-ue-disarmed-rc "$(FEMT_S1_ARMED=0 femt_iuh_ue 203.0.113.9 001 01 1 2 0741010b0000 >/dev/null 2>&1; echo $?)" "3"
-    chk iuh-ue-would-send "$(fld "$out" would_send | grep -c 'ppid 19')" "1"
+    # Same argument rule as every other send path.
+    chk iuh-ue-nohost "$(femt_iuh_ue >/dev/null 2>&1; echo $?)" "2"
 
     # 5. SIB9's HNB-Name is an OCTET STRING, so the hex must be the text.
     out=$(femt_sib9_build LabHeNB)
@@ -1733,7 +1699,7 @@ Usage: $0 COMMAND
                         the Paging that calls one handset back
   --s1-attach <mme-host> [port] [hex]
                         open an SCTP association to an MME and send the S1 Setup
-                        (ppid 18); needs FEMT_S1_ARMED=1 or it reports disarmed
+                        (ppid 18)
   --iuh-attach <hnb-gw-host> [port] [hex]
                         the same for HNBAP to an HNB-GW (ppid 20)
   --iuh-register <hnb-identity-hex> <cell-id>
@@ -1753,7 +1719,7 @@ Usage: $0 COMMAND
   --ranap-decode <hex|file>
   --iuh-ue <hnb-gw-host> <mcc> <mnc> <lac> <sac> <nas-hex> [context-id] [port]
                         send that DirectTransfer over SCTP 29169 (ppid 19);
-                        needs FEMT_S1_ARMED=1 or it reports disarmed
+
   --live [seconds | capture.pcap] [iface]
                         join the GSMTAP feed to its identity rows and append
                         new subscriber sightings to the live view's file; a

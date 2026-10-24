@@ -884,13 +884,6 @@ ncore_cmd_pfcp_build() {  # [teid] [ue-ip] [seq] [seid] [upf-ip]
 ncore_cmd_pfcp_send() {  # <upf-host> [port] [hex]
     local host="${1:-}" port="${2:-8805}" hex="${3:-}"
     local tool="$IMSISTING_ROOT/tools/udp_assoc.py"
-    if [[ "${NR_ARMED:-0}" != "1" ]]; then
-        printf 'status\tdisarmed\n'
-        printf 'reason\ta PFCP datagram is sent only when NR_ARMED=1; the octets build either way\n'
-        printf 'would_send\t%s to %s:%s as PFCP, UDP\n' \
-            "${hex:-<a forged Session Establishment Request>}" "${host:-<no host given>}" "$port"
-        return 3
-    fi
     if [[ -z "$host" ]]; then
         printf 'ERROR\tneed <upf-host> [port] [hex]\n' >&2
         return 2
@@ -1077,13 +1070,6 @@ ncore_cmd_ngap_ngsetup() {  # [plmn] [gnb-id] [node-name] [tac]
 ncore_cmd_ngap_send() {  # <amf-host> [port] [hex]
     local host="${1:-}" port="${2:-38412}" hex="${3:-}"
     local tool="$IMSISTING_ROOT/tools/sctp_assoc.py"
-    if [[ "${NR_ARMED:-0}" != "1" ]]; then
-        printf 'status\tdisarmed\n'
-        printf 'reason\tan NGAP message is sent only when NR_ARMED=1; the octets build either way\n'
-        printf 'would_send\t%s to %s:%s as NGAP over SCTP, PPID 60\n' \
-            "${hex:-<a forged InitialUEMessage>}" "${host:-<no host given>}" "$port"
-        return 3
-    fi
     if [[ -z "$host" ]]; then
         printf 'ERROR\tneed <amf-host> [port] [hex]\n' >&2
         return 2
@@ -1760,13 +1746,10 @@ ncore_selftest() {
     chk xnap-setup-tac    "$(fld "$out" hex | grep -c '00beef01')" "1"
     chk xnap-setup-55     "$(fld "$out" hex | grep -c '00000aa0$')" "1"
 
-    # 1c. The sender is armed on its own.
-    chk ngap-send-disarmed \
-        "$(ncore_cmd_ngap_send 127.0.0.1 38412 >/dev/null 2>&1; echo $?)" "3"
-    chk ngap-send-would-send \
-        "$(ncore_cmd_ngap_send 127.0.0.1 38412 2>/dev/null | awk -F'\t' '$1=="would_send"{print $2; exit}' | grep -c 'PPID 60')" "1"
-    chk ngap-send-armed-nohost \
-        "$(NR_ARMED=1 ncore_cmd_ngap_send '' 38412 >/dev/null 2>&1; echo $?)" "2"
+    # 1c. No arming: the sender builds and validates on the first invocation,
+    #    and only the missing target stops it -- no socket is opened here.
+    chk ngap-send-nohost \
+        "$(ncore_cmd_ngap_send '' 38412 >/dev/null 2>&1; echo $?)" "2"
     chk ngap-send-tool-present \
         "$([[ -f "$IMSISTING_ROOT/tools/sctp_assoc.py" ]] && echo yes || echo no)" "yes"
 
@@ -1923,8 +1906,8 @@ ncore_selftest() {
     out=$(ncore_decode_pfcp "$(ncore_pfcp_msg 1 9 '' )")
     chk pfcp-node-noseid  "$(fld "$out" seid_present)"    "no"
     chk pfcp-node-len     "$(fld "$out" length)"          "4"
-    chk pfcp-build-rc-disarmed "$(NR_ARMED=0 ncore_cmd_pfcp_send 198.51.100.7 >/dev/null 2>&1; echo $?)" "3"
-    chk pfcp-build-rc-nohost   "$(NR_ARMED=1 ncore_cmd_pfcp_send >/dev/null 2>&1; echo $?)" "2"
+    chk pfcp-send-no-host      "$(ncore_cmd_pfcp_send >/dev/null 2>&1; echo $?)" "2"
+    chk send-no-arming "$(grep -cE '^[[:space:]]*printf .status.{1,3}disarmed' "${BASH_SOURCE[0]}")" "0"
 
     # 8. PFCP IE table: the real IE type numbers.
     chk ie-1   "$(ncore_pfcp_ie_name 1)"   "Create PDR"
@@ -2219,7 +2202,7 @@ Usage: $0 COMMAND
   --pfcp-build [teid] [ue-ip] [seq] [seid] [upf-ip]
                                 build a Session Establishment Request (type 50)
   --pfcp-send <upf-host> [port] [hex]
-                                send it on UDP 8805, needs NR_ARMED=1
+                                send it on UDP 8805
   --ngap-initial-ue [ran-ue-id] [nas-hex] [nci-hex] [cause]
                                 build an InitialUEMessage with its NAS-PDU
   --ngap-downlink-nas [amf-ue-id] [ran-ue-id] [nas-hex]
@@ -2231,7 +2214,7 @@ Usage: $0 COMMAND
                                 build an XnSetupRequest (SCTP 38422, PPID 61)
   --xnap-decode <hex>           read one back: node id, TAC, slice
   --ngap-send <amf-host> [port] [hex]
-                                send one on SCTP 38412, PPID 60, needs NR_ARMED=1
+                                send one on SCTP 38412, PPID 60
   --gtpu-header [teid] [qfi]    build an N3 GTP-U header with the QFI
   --plan <name>                 write a handoff plan
                                 (n2-expose|nrf-discovery|sepp-bypass|ipx-attack)

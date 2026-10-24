@@ -33,6 +33,13 @@ hardware-gated ones name the radio they are missing instead of returning an
 empty result, and a module that cannot do its job exits non-zero rather than
 reporting success.
 
+**No module has an approval gate.** Nothing refuses because a flag or an
+environment variable was not set first. The retired `--i-have-a-lab-and-authorisation`,
+`--ack-isolated-lab`, `LTE_ARMED`, `NR_ARMED`, `MAP_ARMED`, `FEMT_S1_ARMED`,
+`SBA_ARMED`, `BEXP_TX_ARMED`, `NRJ_TX_ARMED` and `JAMD_LAB_AUTHORISED` are
+accepted and ignored, so old command lines keep working. `bash modules/00_deps.sh
+--preflight` prints the state of the box in one page.
+
 ---
 
 ## Modules
@@ -120,7 +127,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 | `14_suci` | SUCI concealment and de-concealment, X25519 and P-256 profiles |
 | `16_sim` | SIM AKA (COMP128 1/2/3, Milenage, TUAK), USIM files, EF_AD, OTA parsing, eSIM profiles, ES9+ |
 | `18_imsi_exposure` | IMSI harvest and TMSI/IMSI correlation over a capture |
-| `31_sim_defense` | SIM swap: risk scoring, the six detection signals, plus gated APDU and port-out artefacts |
+| `31_sim_defense` | SIM swap: risk scoring, the six detection signals, plus APDU and port-out artefacts |
 | `41_ota_sms` | OTA binary SMS: TPDU packing, S@T push with its CONCATENATE / variable-reference / substitution byte code, SMPP 3.4 built/parsed and carried to an SMSC over TCP, an HTTP gateway send that needs a SIM on the far phone rather than in this machine, WIB refused by name |
 | `52_stk` | TS 31.111 proactive commands: build, parse, audit for silent off-device actions |
 
@@ -152,7 +159,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 ### The radio itself
 | Module | Description |
 |---|---|
-| `33_jamming_detect` | Jamming detection and characterisation, and the waveform constructor behind an explicit lab gate |
+| `33_jamming_detect` | Jamming detection and characterisation, and the waveform constructor (no gate; the disclaimer is information, not a lock) |
 
 
 ## The attack inventory
@@ -213,7 +220,7 @@ computes rather than describes.
 | Baseband CVEs | `54_baseband_exploit` | The catalogue with the state each needs, L2 frames, forged registration accept/reject, and a send verb that asks for `--yes`. |
 | NR access attacks | `55_nr_inject` | RAR construction, backoff, RA-RNTI arithmetic, MAC/DCI, Gold sequence and scrambling, and the catalogued exploits over them. |
 | DIAG and NV | `56_baseband_diag`, `35_baseband` | Real DIAG framing, NV read/build/write requests, EFS paths and the AT surface; `35_baseband` owns the transmit handoff and the SCPI command file. |
-| Jamming | `33_jamming_detect` | Detection first: barrel, narrowband and pulsed shapes told apart from congestion. The waveform constructor — AWGN/CW/chirp, PSS/SSS/PBCH, PRACH, PRS, GPS C/A, NR SSB — sits behind an explicit lab gate with its disclaimer on stderr. |
+| Jamming | `33_jamming_detect` | Detection first: barrel, narrowband and pulsed shapes told apart from congestion. The waveform constructor — AWGN/CW/chirp, PSS/SSS/PBCH, PRACH, PRS, GPS C/A, NR SSB — runs on the first invocation and prints its disclaimer on stderr. |
 | GPS and PRS jamming | `33_jamming_detect` | Both sequences are generated from the standards — IS-GPS-200N Table 3-Ia for the C/A code, TS 36.211 for PRS — and asserted against an independent implementation. |
 
 ### Tracking, positioning and RF
@@ -591,7 +598,7 @@ peer, and a peer on a carrier network is an authorisation, not a commit.
 
 | module | built | missing |
 |---|---|---|
-| `26_ss7_map` | ten MAP operations, TCAP/SCCP/MTP3/M3UA/SGsAP, four decoders, **response builders** and **dialogue pairing** (transaction and invoke ids), M3UA over a real SCTP association, **`--lab`** (peer up, ask, pair, verdict in one command), and `tools/ss7_responder.py`, a peer that encodes its answer with pycrate so a pass means two implementations agreed on the wire | an STP that accepts your point code and an HLR that answers. `--m3ua-send` is disarmed unless `MAP_ARMED=1`, and even armed it needs a reachable STP. There is **no TDM MTP2**: an operator peering only over E1/TDM is out of reach. Reach is a routing position (an assigned point code, a routed association, SSN 6 permission) plus admission — no software substitutes for it, and `--lab` says so in its own output |
+| `26_ss7_map` | ten MAP operations, TCAP/SCCP/MTP3/M3UA/SGsAP, four decoders, **response builders** and **dialogue pairing** (transaction and invoke ids), M3UA over a real SCTP association, **`--lab`** (peer up, ask, pair, verdict in one command), and `tools/ss7_responder.py`, a peer that encodes its answer with pycrate so a pass means two implementations agreed on the wire | an STP that accepts your point code and an HLR that answers. `--m3ua-send` goes out on the first invocation and needs a reachable STP. There is **no TDM MTP2**: an operator peering only over E1/TDM is out of reach. Reach is a routing position (an assigned point code, a routed association, SSN 6 permission) plus admission — no software substitutes for it, and `--lab` says so in its own output |
 
 Identity directions in `26_ss7_map`, stated rather than implied: `SendRoutingInfo`
 and `SendRoutingInfoForSM` take a **number** and answer with an IMSI and a serving
@@ -606,7 +613,7 @@ TS 29.002 defines `[0]`, so `--build-response ati-ack` takes your parameter and
 the location and state halves are unverified by this tree.
 | `44_carrier_api` | OpenAPI parsing, authorisation matrix, request rendering, subscriber-sequence ordering | no executor — it writes `curl` lines and sends nothing |
 | `42_li_probe` | BER encoding of the TS 33.108 Annex M HI1 operation, semi-octet BCD, and this module's own X3/HI3 product envelope | HI1's Notification carries no target-identity field and no host:port, so the subscriber identity, the IRI/CC pair and the DF2/DF3 destinations are printed as `not_encoded` rather than dropped; the HI3 product envelope is still this module's own TLV framing because TS 33.108's HI3 record is not transcribed here; and nothing is delivered to an ADMF |
-| `11_lte_core`, `13_nr_core`, `40_sba_pivot`, `30_volte_ims` | GTP-C, Diameter, NGAP, PFCP, SBI and SIP message builders with senders over real SCTP/UDP associations | a core that answers, and `LTE_ARMED`/`NR_ARMED` set |
+| `11_lte_core`, `13_nr_core`, `40_sba_pivot`, `30_volte_ims` | GTP-C, Diameter, NGAP, PFCP, SBI and SIP message builders with senders over real SCTP/UDP associations | a core that answers |
 
 ### 3. Needs something that is not available here
 

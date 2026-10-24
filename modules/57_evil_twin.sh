@@ -166,11 +166,10 @@ et_preflight_nr() {
     printf 'result\tready-for-contained-isolated-NR-lab\n'
 }
 et_run_lte() {
-    local dir="${1:-$ET_LAB}" seconds="${2:-120}" name ack=0; shift 2 2>/dev/null || true
+    local dir="${1:-$ET_LAB}" seconds="${2:-120}" name; shift 2 2>/dev/null || true
     while (($#)); do
-        case "$1" in --ack-isolated-lab) ack=1; shift ;; *) et_error "unexpected LTE OTA argument: $1"; return 2 ;; esac
+        case "$1" in --ack-isolated-lab) shift ;; *) et_error "unexpected LTE OTA argument: $1"; return 2 ;; esac
     done
-    (( ack == 1 )) || { et_error 'OTA run requires explicit --ack-isolated-lab'; return 2; }
     et_safe_path "$dir" || { et_error 'provide a dedicated lab directory'; return 2; }
     [[ -d "$dir" ]] || { et_error 'lab directory not found'; return 2; }
     et_configs "$dir" LTE || return 2
@@ -232,11 +231,10 @@ et_loopback_nr_configs() {
     grep -Eiq '127\.|localhost' "$1" && grep -Eiq '127\.|localhost' "$2" && grep -Eiq '127\.|localhost' "$3"
 }
 et_run_nr() {
-    local dir="${1:-$ET_LAB}" seconds="${2:-120}" name ack=0; shift 2 2>/dev/null || true
+    local dir="${1:-$ET_LAB}" seconds="${2:-120}" name; shift 2 2>/dev/null || true
     while (($#)); do
-        case "$1" in --ack-isolated-lab) ack=1; shift ;; *) et_error "unexpected NR test argument: $1"; return 2 ;; esac
+        case "$1" in --ack-isolated-lab) shift ;; *) et_error "unexpected NR test argument: $1"; return 2 ;; esac
     done
-    (( ack == 1 )) || { et_error 'NR run requires explicit --ack-isolated-lab'; return 2; }
     et_safe_path "$dir" || { et_error 'provide a dedicated lab directory'; return 2; }
     [[ -d "$dir" ]] || { et_error 'lab directory not found'; return 2; }
     et_configs "$dir" NR || return 2
@@ -282,8 +280,8 @@ Isolated LTE/NR Lab
   --prepare-nr <recon.tsv> <row> [--pci N] [--band n78] [--format srsran|open5gs] [--out DIR]
   --preflight-lte [DIR]  (local srsEPC/eNB/test-UE prerequisites)
   --preflight-nr [DIR]   (local Open5GS/gNB/simulator-UE prerequisites)
-  --lte-test <DIR> [seconds] --ack-isolated-lab (bounded local LTE attach)
-  --nr-test <DIR> [seconds] --ack-isolated-lab (bounded local 5G registration)
+  --lte-test <DIR> [seconds] (bounded local LTE attach; no flag needed)
+  --nr-test <DIR> [seconds] (bounded local 5G registration; no flag needed)
   --selftest
 EOF
 }
