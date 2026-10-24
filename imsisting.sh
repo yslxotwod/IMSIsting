@@ -313,7 +313,8 @@ imsisting — cellular security research toolkit
             2G/GSM · 3G/UMTS · 4G/LTE · 5G/NR
 
 Usage:
-  sudo bash imsisting.sh           Interactive module menu (requires root)
+  sudo bash imsisting.sh           Interactive module browser (requires root)
+  sudo bash imsisting.sh --tui     Full-screen module browser (explicit selection)
   bash imsisting.sh --list         List all modules and availability
   bash imsisting.sh --index        Print the module index (TSV)
   bash imsisting.sh --gui          Launch the GTK GUI
@@ -346,6 +347,9 @@ USAGE
             exit $? ;;
         --list)
             IMSISTING_LIST=1 ;;
+        --tui)
+            IMSISTING_TUI=1
+            IMSISTING_LIST=0 ;;
         --gui)
             IMSISTING_GUI=1
             IMSISTING_LIST=0 ;;
@@ -630,8 +634,12 @@ fn_for_key() {
 }
 
 # ── root + module dir checks ────────────────────────────────
-if [[ $EUID -ne 0 && "${IMSISTING_LIST:-0}" != "1" && "${IMSISTING_GUI:-0}" != "1" ]]; then
-    err "must run as root — try: sudo bash $0"
+if [[ $EUID -ne 0 && "${IMSISTING_LIST:-0}" != "1" && "${IMSISTING_GUI:-0}" != "1" && "${IMSISTING_TUI:-0}" != "1" ]]; then
+    if [[ ! -t 0 || ! -t 1 || "${TERM:-dumb}" == "dumb" ]]; then
+        printf 'IMSIsting: interactive mode needs a terminal; try --list, --help, or --gui.\n' >&2
+    else
+        err "must run as root — try: sudo bash $0"
+    fi
     exit 1
 fi
 if [[ $EUID -ne 0 && "${IMSISTING_GUI:-0}" == "1" ]]; then
@@ -679,7 +687,7 @@ for mod in "${MODULE_FILES[@]}"; do
 done
 
 # ── --list ──────────────────────────────────────────────────
-if (( IMSISTING_LIST )) && (( ! IMSISTING_SOURCED )); then
+if (( IMSISTING_LIST )) && (( ! IMSISTING_SOURCED )) && [[ "${IMSISTING_TUI:-0}" != "1" ]]; then
     printf '\nimsisting — installed modules\n\n'
     local_cat=""
     for row in "${IMSISTING_MODULE_TABLE[@]}"; do
@@ -843,11 +851,14 @@ HELP
 # Don't leave a false conditional as the final sourced command — the
 # GUI sources this file then invokes a module function; a status of 1
 # here would prevent the caller's `&&` from firing.
-if (( ! IMSISTING_SOURCED )) && [[ "${IMSISTING_GUI:-0}" != "1" ]]; then
+if (( ! IMSISTING_SOURCED )) && [[ "${IMSISTING_GUI:-0}" != "1" && "${IMSISTING_TUI:-0}" != "1" ]]; then
     main_menu
 fi
 if (( ! IMSISTING_SOURCED )) && [[ "${IMSISTING_GUI:-0}" == "1" ]]; then
     launch_gui
+fi
+if (( ! IMSISTING_SOURCED )) && [[ "${IMSISTING_TUI:-0}" == "1" ]]; then
+    exec python3 "$SCRIPT_DIR/tools/imsisting_tui.py" --root "$SCRIPT_DIR"
 fi
 
 true
