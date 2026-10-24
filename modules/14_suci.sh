@@ -981,6 +981,22 @@ suci_status() {
     printf 'dir\t%s\n'          "$SUCI_DIR"
     printf 'keydir\t%s\n'       "$SUCI_KEYDIR"
 
+    # The home network this host holds, if any: the SIDF key and the PLMN the
+    # AUSF answers for. Reported here so a fake cell can ask before it calls.
+    if suci_hn_have; then
+        printf 'home_network\tconfigured\n'
+        printf 'hn_plmn\t%s\n'     "$(suci_hn_plmn)"
+        printf 'hn_scheme\t%s\n'   "$(suci_hn_pget scheme)"
+        printf 'hn_sn_name\t%s\n'  "$(suci_hn_sn_name)"
+        if [[ -f "$(suci_hn_pget keyfile)" ]]; then
+            printf 'hn_key_present\tyes\n'
+        else
+            printf 'hn_key_present\tno\n'
+        fi
+    else
+        printf 'home_network\tnot configured\n'
+    fi
+
     # ── the key interface, as labelled fields ───────────────────────────
     # key_absent is the accurate state when no source defines a key — it is
     # not an error here, because most of this module runs without one.
@@ -1184,6 +1200,401 @@ suci_cmd_genkey() {
         chmod 600 "$out" 2>/dev/null
         printf 'keyfile\t%s\n' "$out"
     fi
+}
+
+# ── the home network: SIDF and AUSF ─────────────────────────────────────
+# R2 of the queue. The two functions that make a SUCI mean something again
+# live together here because they are one deployment: the SIDF holds the
+# concealment private key and turns an arriving SUCI back into a SUPI, and the
+# AUSF holds (or reaches) the subscriber's K and answers the serving network's
+# authentication request. On real network functions these are two hosts; here
+# they are two verbs and one profile.
+#
+# Profile on disk: $STATE_DIR/suci_hn/profile.tsv (0600), directory 0700. The
+# private key is its own file (0600) and no verb here ever prints it.
+#
+# What is NOT done here, by name: no Nudm/Nausf HTTP, no SBI, no AUSF service
+# operation. This is the cryptography and the state those services carry, so a
+# test UE or a fake cell (R4) can be authenticated locally.
+
+suci_hn_dir()     { printf '%s/suci_hn' "${STATE_DIR:-$IMSISTING_ROOT/state}"; }
+suci_hn_profile() { printf '%s/profile.tsv' "$(suci_hn_dir)"; }
+suci_hn_keyfile() { printf '%s/hn_priv.key' "$(suci_hn_dir)"; }
+
+# One row from the profile. Reads, never writes.
+suci_hn_pget() { # <key>
+    local f
+    f=$(suci_hn_profile)
+    [[ -f "$f" ]] || return 0
+    awk -F'\t' -v k="$1" '!/^#/ && $1 == k { print $2; exit }' "$f"
+}
+
+suci_hn_have() { [[ -f "$(suci_hn_profile)" ]]; }
+
+suci_hn_ensure_dir() {
+    local d
+    d=$(suci_hn_dir)
+    if [[ ! -d "$d" ]]; then
+        mkdir -p "$d" 2>/dev/null || {
+            printf 'ERROR\tcannot create %s\n' "$(suci_sanitize "$d")" >&2; return 1; }
+        chmod 700 "$d" 2>/dev/null
+    fi
+    return 0
+}
+
+suci_hn_plmn() { printf '%s%s' "$(suci_hn_pget mcc)" "$(suci_hn_pget mnc)"; }
+
+# The serving network name, TS 24.501 §4.4.1: the MNC is always three digits
+# here, so a two-digit MNC is zero-padded. This string is a KDF input, not a
+# label: a wrong form produces keys no core accepts.
+suci_hn_sn_name() {
+    local mcc mnc
+    mcc=$(suci_hn_pget mcc)
+    mnc=$(suci_hn_pget mnc)
+    [[ -n "$mcc" && -n "$mnc" ]] || return 0
+    printf '5G:mnc%03d.mcc%s.3gppnetwork.org' "$((10#$mnc))" "$mcc"
+}
+
+# A hex string's UTF-8 bytes, which is what the KDF wants.
+suci_hn_sn_hex() {
+    local name
+    name=$(suci_hn_sn_name)
+    [[ -n "$name" ]] || return 0
+    printf '%s' "$name" | od -An -tx1 | tr -d ' \n'
+}
+
+# Is this IMSI known to the key store? Answers by asking 16_sim, so the store
+# format stays that module's business.
+suci_hn_store_row() { # <imsi> -> "ki_masked=<v>" or empty
+    local mod out
+    mod="$IMSISTING_ROOT/modules/16_sim.sh"
+    [[ -f "$mod" ]] || return 0
+    out=$( bash "$mod" --key-show --imsi "$1" 2>/dev/null ) || return 0
+    awk -F'\t' '$1 == "ki_masked" { print $2; exit }' <<< "$out"
+}
+
+# One named 5G derivation through the crypto tool. The truncation and the
+# CK||IK key live there; this function only carries arguments.
+suci_hn_derive() { # <res-star|hxres|kseaf> [k=v ...]
+    local kind="$1"; shift
+    local tool out rc=0
+    tool="$IMSISTING_ROOT/tools/gsm_crypto.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\tno %s\n' "$tool" >&2; return 1; }
+    out=$(python3 "$tool" --derive "$kind" "$@" 2>/dev/null) || rc=$?
+    (( rc == 0 )) || { printf 'ERROR\t%s derivation refused its inputs\n' "$kind" >&2; return 1; }
+    case "$kind" in
+        res-star) awk -F'\t' '$1 == "res_star"  { print $2; exit }' <<< "$out" ;;
+        hxres)    awk -F'\t' '$1 == "hxres_star"{ print $2; exit }' <<< "$out" ;;
+        kseaf)    awk -F'\t' '$1 == "kseaf"     { print $2; exit }' <<< "$out" ;;
+        *) return 1 ;;
+    esac
+}
+
+# ── the profile ─────────────────────────────────────────────────────────
+suci_hn_create() {
+    local mcc=001 mnc=01 mnc_digits=2 scheme=1 ri=0000 keyfile='' force=0
+    while (( $# )); do
+        case "$1" in
+            --mcc)        mcc="${2:-}";        shift 2 2>/dev/null || shift ;;
+            --mnc)        mnc="${2:-}";        shift 2 2>/dev/null || shift ;;
+            --mnc-digits) mnc_digits="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --scheme)     scheme="${2:-}";     shift 2 2>/dev/null || shift ;;
+            --ri)         ri="${2:-}";         shift 2 2>/dev/null || shift ;;
+            --keyfile)    keyfile="${2:-}";    shift 2 2>/dev/null || shift ;;
+            --force)      force=1;             shift ;;
+            *)            shift ;;
+        esac
+    done
+
+    [[ "$mcc" =~ ^[0-9]{3}$ ]] || {
+        printf 'ERROR\t--mcc must be exactly three digits\n' >&2; return 2; }
+    [[ "$mnc" =~ ^[0-9]{1,3}$ ]] || {
+        printf 'ERROR\t--mnc must be one to three digits\n' >&2; return 2; }
+    (( mnc_digits == 2 || mnc_digits == 3 )) || {
+        printf 'ERROR\t--mnc-digits must be 2 or 3 (it decides where the MSIN starts)\n' >&2; return 2; }
+    (( ${#mnc} == mnc_digits )) || {
+        printf 'ERROR\t--mnc %s is %d digit(s) but --mnc-digits says %d\n' \
+               "$mnc" "${#mnc}" "$mnc_digits" >&2; return 2; }
+    [[ "$scheme" =~ ^[12]$ ]] || {
+        printf 'ERROR\t--scheme must be 1 (profile A, X25519) or 2 (profile B, secp256r1)\n' >&2; return 2; }
+    [[ "$ri" =~ ^[0-9]{1,4}$ ]] || {
+        printf 'ERROR\t--ri must be one to four decimal digits\n' >&2; return 2; }
+
+    local f
+    f=$(suci_hn_profile)
+    if [[ -f "$f" ]] && (( force == 0 )); then
+        printf 'ERROR\ta home network profile already exists: %s (--force replaces it)\n' \
+               "$(suci_sanitize "$f")" >&2
+        return 1
+    fi
+
+    local dep
+    dep=$(suci_missing_dep)
+    local kf
+    kf=$(suci_hn_keyfile)
+    if [[ -n "$keyfile" ]]; then
+        [[ -f "$keyfile" ]] || {
+            printf 'ERROR\tno such key file: %s\n' "$(suci_sanitize "$keyfile")" >&2; return 1; }
+        kf="$keyfile"
+    else
+        if [[ -n "$dep" ]]; then
+            printf 'ERROR\t%s is required to generate the concealment key pair\n' "$dep" >&2
+            return 1
+        fi
+        local kout
+        kout=$(suci_gen_keypair "$scheme") || return 1
+        suci_hn_ensure_dir || return 1
+        # umask, not a later chmod: the scalar is never briefly readable.
+        ( umask 077; printf '%s\n' "$kout" > "$(suci_hn_keyfile)" ) || {
+            printf 'ERROR\tcannot write %s\n' "$(suci_sanitize "$(suci_hn_keyfile)")" >&2
+            return 1; }
+        chmod 600 "$(suci_hn_keyfile)" 2>/dev/null
+    fi
+
+    # Validate the key against the profile's curve before the profile is
+    # written: a profile pointing at a key that cannot deconceal anything is
+    # worse than no profile.
+    local kres pub
+    kres=$(suci_key_resolve "$kf" "$scheme") || return 1
+    pub=$(awk -F'\t' '$1 == "public_key" { print $2; exit }' <<< "$kres")
+    [[ -n "$pub" ]] || {
+        printf 'ERROR\tthe key resolved to no public key\n' >&2; return 1; }
+
+    local sn_name
+    sn_name=$(printf '5G:mnc%03d.mcc%s.3gppnetwork.org' "$((10#$mnc))" "$mcc")
+    local tmp
+    tmp="$f.tmp.$$"
+    suci_hn_ensure_dir || return 1
+    ( umask 077; {
+        printf '# SUCI home network profile (SIDF + AUSF)\n'
+        printf 'mcc\t%s\n' "$mcc"
+        printf 'mnc\t%s\n' "$mnc"
+        printf 'mnc_digits\t%s\n' "$mnc_digits"
+        printf 'plmn\t%s%s\n' "$mcc" "$mnc"
+        printf 'ri\t%s\n' "$ri"
+        printf 'scheme\t%s\n' "$scheme"
+        printf 'hn_public_key\t%s\n' "$pub"
+        printf 'keyfile\t%s\n' "$(suci_sanitize "$kf")"
+        printf 'sn_name\t%s\n' "$sn_name"
+        printf 'created\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      } > "$tmp" ) || {
+        printf 'ERROR\tcannot write %s\n' "$(suci_sanitize "$f")" >&2; return 1; }
+    mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+    chmod 600 "$f" 2>/dev/null
+
+    printf 'profile\t%s\n' "$(suci_sanitize "$f")"
+    printf 'mcc\t%s\n' "$mcc"
+    printf 'mnc\t%s\n' "$mnc"
+    printf 'mnc_digits\t%s\n' "$mnc_digits"
+    printf 'plmn\t%s%s\n' "$mcc" "$mnc"
+    printf 'ri\t%s\n' "$ri"
+    printf 'scheme\t%s\n' "$scheme"
+    printf 'curve\t%s\n' "$([[ "$scheme" == 1 ]] && echo X25519 || echo secp256r1)"
+    printf 'hn_public_key\t%s\n' "$pub"
+    printf 'keyfile\t%s\n' "$(suci_sanitize "$kf")"
+    printf 'sn_name\t%s\n' "$sn_name"
+    printf 'mode\t600\n'
+    printf 'role\t%s\n' "SIDF holds the private key; AUSF reaches the K store for the vector"
+    return 0
+}
+
+suci_hn_show() {
+    suci_hn_have || {
+        printf 'ERROR\tno home network profile: run --hn-create first\n' >&2; return 1; }
+    local k kf
+    kf=$(suci_hn_pget keyfile)
+    printf 'profile\t%s\n' "$(suci_sanitize "$(suci_hn_profile)")"
+    for k in mcc mnc mnc_digits plmn ri scheme hn_public_key sn_name created; do
+        printf '%s\t%s\n' "$k" "$(suci_hn_pget "$k")"
+    done
+    printf 'keyfile\t%s\n' "$(suci_sanitize "$kf")"
+    if [[ -f "$kf" ]]; then
+        printf 'key_present\tyes\n'
+    else
+        printf 'key_present\tno\n'
+        printf 'note\tthe profile points at a key file that is not there: deconcealment will refuse\n'
+    fi
+}
+
+# ── SIDF: a SUCI in, a SUPI out ─────────────────────────────────────────
+suci_hn_deconceal() { # <suci-hex>
+    local suci="${1:-}"
+    [[ -n "$suci" ]] || {
+        printf 'ERROR\tusage: --hn-deconceal <suci-hex>\n' >&2; return 2; }
+    suci_hn_have || {
+        printf 'ERROR\tno home network profile: run --hn-create first\n' >&2; return 1; }
+    local kf
+    kf=$(suci_hn_pget keyfile)
+    [[ -f "$kf" ]] || {
+        printf 'ERROR\tthe profile key file is missing: %s\n' "$(suci_sanitize "$kf")" >&2
+        return 1; }
+
+    local out
+    out=$(suci_deconceal "$suci" "$kf") || return 1
+    local msin
+    msin=$(awk -F'\t' '$1 == "msin" { print $2; exit }' <<< "$out")
+    [[ -n "$msin" ]] || {
+        printf 'ERROR\tdeconcealment returned no MSIN\n' >&2; return 1; }
+
+    local mcc mnc mnc_digits imsi
+    mcc=$(suci_hn_pget mcc); mnc=$(suci_hn_pget mnc); mnc_digits=$(suci_hn_pget mnc_digits)
+    imsi="$mcc$mnc$msin"
+    local want=$(( 15 - 3 - mnc_digits ))
+    if (( ${#msin} != want )); then
+        printf 'note\tMSIN is %d digits; this PLMN with a %d-digit MNC expects %d, so the IMSI is %d digits\n' \
+               "${#msin}" "$mnc_digits" "$want" "$(( 3 + mnc_digits + ${#msin} ))"
+    fi
+    local known
+    known=$(suci_hn_store_row "$imsi")
+
+    printf 'role\tSIDF\n'
+    printf 'scheme\t%s\n' "$(awk -F'\t' '$1 == "scheme" { print $2; exit }' <<< "$out")"
+    printf 'hn_public_key\t%s\n' "$(awk -F'\t' '$1 == "hn_public_key" { print $2; exit }' <<< "$out")"
+    printf 'msin\t%s\n' "$msin"
+    printf 'imsi\t%s\n' "$imsi"
+    printf 'supi\timsi-%s\n' "$imsi"
+    if [[ -n "$known" ]]; then
+        printf 'store\thit\n'
+        printf 'store_ki\t%s\n' "$known"
+    else
+        printf 'store\tmiss\n'
+        printf 'note\tthe de-concealed IMSI has no row in the key store, so no AUSF vector can be made for it\n'
+    fi
+    return 0
+}
+
+# ── AUSF: the vector the serving network asked for ──────────────────────
+# Resolve the SUCI, take the subscriber's K from the store, run one 5G-AKA
+# event and hand back exactly the values the SEAF and the UE need:
+# RAND || AUTN towards the UE, XRES* and HXRES* towards the SEAF, KSEAF up.
+suci_hn_auth() { # <suci-hex> [rand-hex]
+    local suci="${1:-}" rand="${2:-}"
+    [[ -n "$suci" ]] || {
+        printf 'ERROR\tusage: --hn-auth <suci-hex> [rand-hex]\n' >&2; return 2; }
+    suci_hn_have || {
+        printf 'ERROR\tno home network profile: run --hn-create first\n' >&2; return 1; }
+
+    local sid
+    sid=$(suci_hn_deconceal "$suci") || return 1
+    local imsi store
+    imsi=$(awk -F'\t' '$1 == "imsi" { print $2; exit }' <<< "$sid")
+    store=$(awk -F'\t' '$1 == "store" { print $2; exit }' <<< "$sid")
+    [[ -n "$imsi" ]] || { printf 'ERROR\tno IMSI came out of the SIDF step\n' >&2; return 1; }
+    [[ "$store" == hit ]] || {
+        printf 'ERROR\t%s de-concealed to an IMSI the key store does not hold\n' "$imsi" >&2
+        printf 'ERROR\tstore a subscriber for it with: modules/16_sim.sh --key-add --imsi %s ...\n' "$imsi" >&2
+        return 1; }
+
+    local sn sn_hex
+    sn=$(suci_hn_sn_name)
+    sn_hex=$(suci_hn_sn_hex)
+    [[ -n "$sn" && -n "$sn_hex" ]] || {
+        printf 'ERROR\tthe profile carries no SN name\n' >&2; return 1; }
+
+    if [[ -z "$rand" ]]; then
+        rand=$(openssl rand -hex 16 2>/dev/null) || {
+            printf 'ERROR\tcould not draw a RAND (openssl rand)\n' >&2; return 1; }
+        rand=${rand^^}
+    fi
+    [[ "$rand" =~ ^[0-9a-fA-F]{32}$ ]] || {
+        printf 'ERROR\tRAND must be 32 hex digits\n' >&2; return 2; }
+
+    local mod out
+    mod="$IMSISTING_ROOT/modules/16_sim.sh"
+    [[ -f "$mod" ]] || { printf 'ERROR\tno %s\n' "$mod" >&2; return 1; }
+    out=$( bash "$mod" --aka-responder --imsi "$imsi" --rand "$rand" \
+                  --5g --sn-name "$sn" 2>&1 ) || {
+        printf 'ERROR\tthe AKA responder refused the request\n' >&2
+        [[ -n "$out" ]] && sed -n '1,4p' <<< "$out" >&2
+        return 1; }
+
+    local xres autn ck ik sqn kausf res_star
+    xres=$(awk -F'\t' '$1 == "xres" { print $2; exit }' <<< "$out")
+    autn=$(awk -F'\t' '$1 == "autn" { print $2; exit }' <<< "$out")
+    ck=$(awk -F'\t' '$1 == "ck" { print $2; exit }' <<< "$out")
+    ik=$(awk -F'\t' '$1 == "ik" { print $2; exit }' <<< "$out")
+    sqn=$(awk -F'\t' '$1 == "sqn" { print $2; exit }' <<< "$out")
+    kausf=$(awk -F'\t' '$1 == "kausf" { print $2; exit }' <<< "$out")
+    res_star=$(awk -F'\t' '$1 == "res_star" { print $2; exit }' <<< "$out")
+    [[ -n "$xres" && -n "$autn" && -n "$ck" && -n "$ik" && -n "$kausf" && -n "$res_star" ]] || {
+        printf 'ERROR\tthe responder made an incomplete vector\n' >&2; return 1; }
+
+    # The AUSF's own two values, derived here from XRES and never copied from
+    # the responder's RES* row: XRES* is XRES through the same clause, and the
+    # equality is the check that the two halves agree.
+    local xres_star hxres_star kseaf matches=no
+    xres_star=$(suci_hn_derive res-star --ck "$ck" --ik "$ik" --sn "$sn_hex" \
+                    --rand "$rand" --res "$xres") || return 1
+    [[ "$xres_star" == "$res_star" ]] && matches=yes
+    hxres_star=$(suci_hn_derive hxres --rand "$rand" --xres-star "$xres_star") || return 1
+    kseaf=$(suci_hn_derive kseaf --key "$kausf" --sn "$sn_hex") || return 1
+
+    printf 'role\tAUSF\n'
+    printf 'auth_type\t5G-AKA\n'
+    printf 'supi\timsi-%s\n' "$imsi"
+    printf 'serving_network\t%s\n' "$sn"
+    printf 'rand\t%s\n' "$rand"
+    printf 'autn\t%s\n' "$autn"
+    printf 'sqn\t%s\n' "$sqn"
+    printf 'xres_star\t%s\n' "$xres_star"
+    printf 'hxres_star\t%s\n' "$hxres_star"
+    printf 'kausf\t%s\n' "$kausf"
+    printf 'kseaf\t%s\n' "$kseaf"
+    printf 'xres_star_matches\t%s\n' "$matches"
+    printf 'source\tTS 33.501 A.4 / A.5 / A.6; the KDF key is CK||IK and XRES* is the rightmost 128 of 256 bits\n'
+    printf 'note\tthe card side of the proof needs the physical USIM: RES* comes from the same clause on RES\n'
+    printf 'note\tnot built here: KAMF (the SEAF/AMF derivation with ABBA) and the Nausf service itself\n'
+    return 0
+}
+
+# ── the resident home network ───────────────────────────────────────────
+# A line protocol on stdin so a fake cell or a test UE can drive one process
+# instead of a shell call per message. AUTH on the same SUCI returns a fresh
+# vector: the SQN counter lives in the key store, so two requests never share
+# one sequence number.
+suci_hn_serve() {
+    suci_hn_have || {
+        printf 'ERROR\tno home network profile: run --hn-create first\n' >&2; return 1; }
+    local line verb arg rc
+    printf 'served\tready\n'
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        verb="${line%%[[:space:]]*}"
+        arg="${line#"$verb"}"
+        arg="${arg#"${arg%%[![:space:]]*}"}"
+        case "${verb^^}" in
+            SUCI)
+                if [[ -z "$arg" ]]; then
+                    printf 'served\tsuci\tneed\tone SUCI in hex\n'; continue
+                fi
+                rc=0
+                suci_hn_deconceal "$arg" || rc=$?
+                printf 'served\tsuci\trc\t%d\n' "$rc"
+                ;;
+            AUTH)
+                if [[ -z "$arg" ]]; then
+                    printf 'served\tauth\tneed\tone SUCI in hex\n'; continue
+                fi
+                rc=0
+                suci_hn_auth $arg || rc=$?
+                printf 'served\tauth\trc\t%d\n' "$rc"
+                ;;
+            SHOW)
+                suci_hn_show
+                printf 'served\tshow\tok\n'
+                ;;
+            QUIT|EXIT)
+                printf 'served\tbye\n'
+                return 0
+                ;;
+            *)
+                printf 'served\tunknown\t%s\n' "$verb"
+                ;;
+        esac
+        printf 'served\tawaiting\n'
+    done
+    return 0
 }
 
 # ── selftest — no radio, no root, no network ────────────────────────────
@@ -1576,6 +1987,111 @@ EOF
     chk status-keydir "$(fld "$out" keydir)"    "$SUCI_KEYDIR"
     chk status-keys   "$(printf '%s\n' "$out" | grep -c . | awk '{print ($1>=8)?"ok":"short"}')" "ok"
 
+    # 10. The home network: SIDF + AUSF. One profile, one key store, one
+    #     vector, and OpenSSL refereeing the two values the AUSF owns.
+    chk hn-no-profile "$(suci_hn_deconceal 0801 >/dev/null 2>&1; echo $?)" "1"
+    chk hn-show-no-profile "$(suci_hn_show >/dev/null 2>&1; echo $?)" "1"
+    chk hn-create-bad-mcc "$(suci_hn_create --mcc 12 >/dev/null 2>&1; echo $?)" "2"
+    chk hn-create-bad-scheme "$(suci_hn_create --scheme 7 >/dev/null 2>&1; echo $?)" "2"
+    chk hn-create-bad-mnc "$(suci_hn_create --mnc 1 --mnc-digits 2 >/dev/null 2>&1; echo $?)" "2"
+    chk hn-create-bad-ri "$(suci_hn_create --ri 12345 >/dev/null 2>&1; echo $?)" "2"
+    if suci_have_cryptography; then
+        out=$(suci_hn_create --mcc 001 --mnc 01 --mnc-digits 2 --scheme 1 --ri 0000)
+        chk hn-create-rc    "$?" "0"
+        chk hn-create-plmn  "$(fld "$out" plmn)" "00101"
+        chk hn-create-sn    "$(fld "$out" sn_name)" "5G:mnc001.mcc001.3gppnetwork.org"
+        chk hn-create-mode  "$(fld "$out" mode)" "600"
+        chk hn-profile-mode "$(stat -c '%a' "$(suci_hn_profile)")" "600"
+        chk hn-keyfile-mode "$(stat -c '%a' "$(suci_hn_keyfile)")" "600"
+        chk hn-dir-mode     "$(stat -c '%a' "$(suci_hn_dir)")" "700"
+        chk hn-create-twice "$(suci_hn_create --mcc 001 --mnc 01 >/dev/null 2>&1; echo $?)" "1"
+        out=$(suci_hn_show)
+        chk hn-show-key     "$(fld "$out" key_present)" "yes"
+        chk hn-show-pub     "$(printf '%s' "$(fld "$out" hn_public_key)" | wc -c)" "64"
+
+        # SIDF round trip through the profile, not through a key argument.
+        local hnpub hnsuci hnout
+        hnpub=$(suci_hn_pget hn_public_key)
+        hnsuci=$(fld "$(suci_build 1 0123456789 "$hnpub" 001 01)" suci)
+        hnout=$(suci_hn_deconceal "$hnsuci")
+        chk hn-sidf-msin "$(fld "$hnout" msin)" "0123456789"
+        chk hn-sidf-imsi "$(fld "$hnout" imsi)" "001010123456789"
+        chk hn-sidf-supi "$(fld "$hnout" supi)" "imsi-001010123456789"
+        chk hn-sidf-store-miss "$(fld "$hnout" store)" "miss"
+
+        # AUSF: the IMSI exists in the store, so a vector can be made. The
+        # RAND and SQN are TS 35.208 set 1, so AUTN and RES are published.
+        local simmod="$IMSISTING_ROOT/modules/16_sim.sh"
+        bash "$simmod" --key-add --imsi 001010123456789 \
+            --ki 465B5CE8B199B49FAA5F0A2EE238A6BC \
+            --op CDC202D5123E20F62B6D676AC72CB318 --sqn FF9BB4D0B607 >/dev/null 2>&1
+        hnout=$(suci_hn_deconceal "$hnsuci")
+        chk hn-sidf-store-hit "$(fld "$hnout" store)" "hit"
+        out=$(suci_hn_auth "$hnsuci" 23553CBE9637A89D218AE64DAE47BF35)
+        chk hn-ausf-rc       "$?" "0"
+        chk hn-ausf-type     "$(fld "$out" auth_type)" "5G-AKA"
+        chk hn-ausf-supi     "$(fld "$out" supi)" "imsi-001010123456789"
+        chk hn-ausf-autn     "$(fld "$out" autn)" "55F328B43577B9B94A9FFAC354DFAFB3"
+        chk hn-ausf-xres-len "$(printf '%s' "$(fld "$out" xres_star)" | wc -c)" "32"
+        chk hn-ausf-hxres-len "$(printf '%s' "$(fld "$out" hxres_star)" | wc -c)" "32"
+        chk hn-ausf-kausf-len "$(printf '%s' "$(fld "$out" kausf)" | wc -c)" "64"
+        chk hn-ausf-kseaf-len "$(printf '%s' "$(fld "$out" kseaf)" | wc -c)" "64"
+        chk hn-ausf-agrees   "$(fld "$out" xres_star_matches)" "yes"
+
+        # Referee 1: XRES* through OpenSSL, keyed with CK||IK, message
+        # 6B || SN || L0 || RAND || L1 || RES || L2, rightmost 128 bits.
+        if command -v openssl >/dev/null 2>&1 && command -v xxd >/dev/null 2>&1; then
+            local ck ik snh xres_ref xstar_ref hx_ref
+            ck=$(fld "$(suci_hn_auth "$hnsuci" 23553CBE9637A89D218AE64DAE47BF35)" kausf)
+            # Reuse the responder directly for CK and IK: the auth verb does
+            # not print them, and a referee must not need them printed.
+            local resp
+            resp=$(bash "$simmod" --aka-responder --imsi 001010123456789 \
+                        --rand 23553CBE9637A89D218AE64DAE47BF35 \
+                        --5g --sn-name '5G:mnc001.mcc001.3gppnetwork.org' 2>/dev/null)
+            local ckv ikv resv
+            ckv=$(awk -F'\t' '$1=="ck"{print $2}' <<< "$resp")
+            ikv=$(awk -F'\t' '$1=="ik"{print $2}' <<< "$resp")
+            resv=$(awk -F'\t' '$1=="xres"{print $2}' <<< "$resp")
+            snh=$(printf '%s' '5G:mnc001.mcc001.3gppnetwork.org' | od -An -tx1 | tr -d ' \n')
+            xstar_ref=$(printf '%s' "6b${snh}010023553CBE9637A89D218AE64DAE47BF35 0080${resv}0040" | tr -d ' ' |
+                        xxd -r -p | openssl dgst -sha256 -mac HMAC \
+                            -macopt hexkey:"${ckv}${ikv}" 2>/dev/null | sed 's/^.*= //')
+            xstar_ref=${xstar_ref^^}
+            xstar_ref="${xstar_ref:32}"
+            chk hn-xres-openssl "$(fld "$out" xres_star)" "$xstar_ref"
+            # Referee 2: HXRES* = rightmost 128 of SHA-256(RAND || XRES*).
+            hx_ref=$(printf '%s' "23553CBE9637A89D218AE64DAE47BF35${xstar_ref}" |
+                     xxd -r -p | openssl dgst -sha256 2>/dev/null | sed 's/^.*= //')
+            hx_ref=${hx_ref^^}
+            hx_ref="${hx_ref:32}"
+            chk hn-hxres-openssl "$(fld "$out" hxres_star)" "$hx_ref"
+        else
+            printf 'hn-xres-openssl\tSKIP no openssl/xxd\n'
+            printf 'hn-hxres-openssl\tSKIP no openssl/xxd\n'
+        fi
+
+        # A SUCI for an IMSI the store does not hold must refuse, by name.
+        local stray
+        stray=$(fld "$(suci_build 1 999999999 "$hnpub" 001 01)" suci)
+        chk hn-ausf-no-store "$(suci_hn_auth "$stray" >/dev/null 2>&1; echo $?)" "1"
+        chk hn-auth-bad-rand "$(suci_hn_auth "$hnsuci" zz >/dev/null 2>&1; echo $?)" "2"
+        chk hn-auth-noargs   "$(suci_hn_auth >/dev/null 2>&1; echo $?)" "2"
+
+        # The resident home network: one SUCI asked twice, so the SQN moves.
+        local sr1 sr2
+        sr1=$(printf 'SUCI %s\nQUIT\n' "$hnsuci" | suci_hn_serve 2>/dev/null)
+        chk hn-serve-ready "$(fld "$sr1" served)" "ready"
+        chk hn-serve-sidf  "$(printf '%s\n' "$sr1" | grep -c '^role	SIDF')" "1"
+        chk hn-serve-bye   "$(printf '%s\n' "$sr1" | grep -c '^served	bye')" "1"
+        sr2=$(printf 'AUTH %s\nAUTH %s\nQUIT\n' "$hnsuci" "$hnsuci" | suci_hn_serve 2>/dev/null)
+        chk hn-serve-auths "$(printf '%s\n' "$sr2" | grep -c '^role	AUSF')" "2"
+    else
+        local dep; dep=$(suci_missing_dep)
+        printf 'hn-profile\tSKIP %s not installed\n' "${dep:-python3}"
+        printf 'hn-ausf\tSKIP %s not installed\n' "${dep:-python3}"
+    fi
+
     # 9. TSV injection: a tab in an untrusted string must not forge a row.
     local evil
     evil=$(suci_sanitize $'001\tfake\trow\nmore')
@@ -1606,6 +2122,11 @@ suci_menu() {
   [8]  audit a file of SUCIs (exposure / linkability)
   [9]  status
   [10] verify a home-network private key (the last hop)
+  [11] become a home network (profile: PLMN, RI, concealment key)
+  [12] show the home network profile
+  [13] SIDF: deconceal a SUCI with the profile
+  [14] AUSF: one 5G-AKA event for a SUCI
+  [15] serve a home network on stdin
   [0]  back
 
 M
@@ -1653,6 +2174,25 @@ M
                 read -rp "  profile (1|X25519, 2|secp256r1)> " p
                 suci_cmd_verify_hnkey "$k" "${p:-1}" | column -t -s$'\t' 2>/dev/null
                 read -rp "  press enter " _ ;;
+            11) read -rp "  MCC (001)> " mcc
+                read -rp "  MNC (01)> " mnc
+                read -rp "  MNC digits (2)> " md
+                read -rp "  scheme (1|profile A, 2|profile B)> " sc
+                read -rp "  routing indicator (0000)> " ri
+                suci_hn_create --mcc "${mcc:-001}" --mnc "${mnc:-01}" \
+                    --mnc-digits "${md:-2}" --scheme "${sc:-1}" --ri "${ri:-0000}" \
+                    | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            12) suci_hn_show | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            13) read -rp "  SUCI hex> " h
+                suci_hn_deconceal "$h" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            14) read -rp "  SUCI hex> " h
+                read -rp "  RAND hex (blank to draw one)> " r
+                suci_hn_auth "$h" "$r" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            15) suci_hn_serve ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1674,6 +2214,11 @@ suci_cli_main() {
         --msin-decode)   suci_cmd_msin_decode "${1:-}" ;;
         --audit)         suci_cmd_audit "${1:-}" ;;
         --genkey)        suci_cmd_genkey "${1:-1}" "${2:-}" ;;
+        --hn-create)     suci_hn_create "$@" ;;
+        --hn-show)       suci_hn_show ;;
+        --hn-deconceal)  suci_hn_deconceal "${1:-}" ;;
+        --hn-auth)       suci_hn_auth "${1:-}" "${2:-}" ;;
+        --hn-serve)      suci_hn_serve ;;
         --conceal)       suci_conceal "${1:-1}" "${2:-}" "${3:-}" ;;
         --selftest)      suci_selftest ;;
         --menu)          suci_menu ;;
@@ -1699,6 +2244,18 @@ Usage: $0 COMMAND
   --msin-decode <hex>                BCD back to the MSIN, dropping the 0xF filler
   --audit <sucis-file>               find null-scheme exposure and reused ephemeral keys
   --genkey <1|2> [outfile]           generate a home network key pair
+  --hn-create [--mcc 001] [--mnc 01] [--mnc-digits 2|3] [--scheme 1|2]
+              [--ri 0000] [--keyfile <file>] [--force]
+                                     make this host a home network: PLMN, routing
+                                     indicator, concealment key. Already there
+                                     is refused unless --force
+  --hn-show                          the profile, with the key's presence
+  --hn-deconceal <suci-hex>          SIDF: the profile's key turns the SUCI back
+                                     into a SUPI and looks the IMSI up in the store
+  --hn-auth <suci-hex> [rand-hex]    AUSF: one 5G-AKA event end to end -- SIDF, the
+                                     K store, RAND||AUTN, XRES*, HXRES*, KAUSF, KSEAF
+  --hn-serve                         resident home network on stdin: SUCI, AUTH,
+                                     SHOW, QUIT (one line each)
   --conceal <1|2> <msin> <hn-pubkey-hex>
                                      the raw ECIES concealment
   --selftest                         RFC 5869 vectors, BCD round trips, profile A/B

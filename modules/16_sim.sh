@@ -4780,20 +4780,22 @@ sim_selftest() {
     chk fiveg-sn        "$(fld "$out" sn)"      "35473A6D6E633030312E6D63633030312E336770706E6574776F726B2E6F7267"
     chk fiveg-sn-text   "$(fld "$out" sn_text)" "5G:mnc001.mcc001.3gppnetwork.org"
     chk fiveg-kausf-len "$(printf '%s' "$(fld "$out" kausf)" | wc -c)" "64"
-    chk fiveg-resstar-len "$(printf '%s' "$(fld "$out" res_star)" | wc -c)" "64"
+    chk fiveg-resstar-len "$(printf '%s' "$(fld "$out" res_star)" | wc -c)" "32"
     chk fiveg-mode      "$(fld "$out" mode)"    "5g"
     if command -v xxd >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
         # AK for that RAND/SQN, then KAUSF = HMAC(K, 6A || SN || 0100 || SQN^AK || 0030)
-        local ak_raw ak v kausf_ref
+        local ak_raw ak v ck ik kausf_ref akey_ref
         ak_raw=$(sim_cmd_sim_auth milenage 465B5CE8B199B49FAA5F0A2EE238A6BC \
                    23553CBE9637A89D218AE64DAE47BF35 \
                    --opc CD63CB71954A9F4E48A5994E37A02BAF \
                    --sqn FF9BB4D0B607 --amf B9B9 2>/dev/null)
-        ak=$(sim_kv f5 "$ak_raw")
+        ak=$(sim_kv f5 "$ak_raw"); ck=$(sim_kv ck "$ak_raw"); ik=$(sim_kv ik "$ak_raw")
+        akey_ref="${ck}${ik}"
         v=$(sim_auth_xor FF9BB4D0B607 "$ak")
+        # Referee: the same KDF message, keyed with CK||IK, through OpenSSL.
         kausf_ref=$(printf '%s' "6a35473A6D6E633030312E6D63633030312E336770706E6574776F726B2E6F72670100${v}0030" |
                     xxd -r -p | openssl dgst -sha256 -mac HMAC \
-                        -macopt hexkey:465B5CE8B199B49FAA5F0A2EE238A6BC 2>/dev/null |
+                        -macopt hexkey:"$akey_ref" 2>/dev/null |
                     sed 's/^.*= //')
         chk fiveg-kausf-referee "$(fld "$out" kausf)" "${kausf_ref^^}"
     else
@@ -5133,6 +5135,30 @@ sim_aka_kdf() { # <fc> <key-hex> <p0-hex> [p1] [p2] -> the KDF output hex
     printf '%s' "$(sim_kv out "$out")"
 }
 
+# A named 5G derivation. The truncation (RES* is the rightmost 128 of 256
+# bits) and the key (CK||IK) live in the tool, not here, so the shell never
+# re-derives a clause from memory.
+sim_aka_derive() { # <res-star|kausf|hxres> [k=v ...] -> one value
+    local kind="$1"; shift
+    local tool out err rc=0
+    tool="$IMSISTING_ROOT/tools/gsm_crypto.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\tno %s\n' "$tool" >&2; return 1; }
+    err=$(mktemp "${MOD_TMP:-/tmp}/derive.XXXXXX" 2>/dev/null) || err=/tmp/derive.$$
+    out=$(python3 "$tool" --derive "$kind" "$@" 2>"$err") || rc=$?
+    if (( rc != 0 )); then
+        [[ -s "$err" ]] && sed -n '1p' "$err" >&2
+        rm -f "$err"
+        return 1
+    fi
+    rm -f "$err"
+    case "$kind" in
+        res-star) awk -F'\t' '$1=="res_star"{print $2; exit}' <<< "$out" ;;
+        kausf)    awk -F'\t' '$1=="kausf"{print $2; exit}' <<< "$out" ;;
+        hxres)    awk -F'\t' '$1=="hxres_star"{print $2; exit}' <<< "$out" ;;
+        *)        return 1 ;;
+    esac
+}
+
 # Resolve --sn / --sn-name into UTF-8 bytes as hex. Both spell the same thing;
 # the standard writes the SN name as text ('5G:mnc001.mcc001.3gppnetwork.org'),
 # and the KDF takes its bytes, so the text is hex-encoded here once.
@@ -5425,12 +5451,17 @@ sim_cmd_aka_responder() {
     [[ -n "$res" && -n "$ck" && -n "$ik" && -n "$autn" ]] || {
         printf 'ERROR\tthe auth run produced no complete vector\n' >&2; return 1; }
 
-    local kausf_hex='' res_star_hex='' sqn_ak
+    local kausf_hex='' res_star_hex='' sqn_ak akey
     if (( fiveg )); then
+        # The KDF key is CK||IK, not K (TS 33.501 A.4.1). Every 5G derivation
+        # below uses that concatenation; with K a core would reject the vector.
+        akey="${ck}${ik}"
         sqn_ak=$(sim_auth_xor "$sqn" "$ak")
-        kausf_hex=$(sim_aka_kdf 6A "$ki" "$sn_hex" "$sqn_ak") || {
+        kausf_hex=$(sim_aka_derive kausf --ck "${akey:0:32}" --ik "${akey:32:32}" \
+                        --sn "$sn_hex" --sqn-ak "$sqn_ak") || {
             printf 'ERROR\tKAUSF derivation failed\n' >&2; return 1; }
-        res_star_hex=$(sim_aka_kdf 6B "$ki" "$sn_hex" "$rand" "$res") || {
+        res_star_hex=$(sim_aka_derive res-star --ck "${akey:0:32}" --ik "${akey:32:32}" \
+                        --sn "$sn_hex" --rand "$rand" --res "$res") || {
             printf 'ERROR\tRES* derivation failed\n' >&2; return 1; }
         [[ -n "$kausf_hex" && -n "$res_star_hex" ]] || {
             printf 'ERROR\tthe KDF returned nothing\n' >&2; return 1; }

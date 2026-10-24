@@ -792,19 +792,42 @@ def kdf(key: bytes, fc: int, params) -> bytes:
     return hmac.new(key, msg, hashlib.sha256).digest()[:nbytes]
 
 
-def kausf(k: bytes, sn_name: bytes, sqn_ak: bytes) -> bytes:
-    """AUSF key: KDF(K, FC=0x6A, SN name, SQN xor AK)."""
-    return kdf(k, 0x6A, (sn_name, sqn_ak))
+def kausf(key: bytes, sn_name: bytes, sqn_ak: bytes) -> bytes:
+    """AUSF key: KDF(KEY, FC=0x6A, SN name, SQN xor AK), 256 bits.
+
+    KEY is CK||IK, not K (TS 33.501 A.4.1): the 256-bit concatenation of the
+    two 128-bit keys the authentication produced. Using K here is the mistake
+    that produces a KAUSF no core will agree with.
+    """
+    return kdf(key, 0x6A, (sn_name, sqn_ak))
 
 
-def res_star(k: bytes, sn_name: bytes, rand: bytes, res: bytes) -> bytes:
-    """5G RES*: KDF(K, FC=0x6B, SN name, RAND, RES)."""
-    return kdf(k, 0x6B, (sn_name, rand, res))
+def res_star(key: bytes, sn_name: bytes, rand: bytes, res: bytes) -> bytes:
+    """5G RES*/XRES*: the RIGHTMOST 128 bits of the 256-bit KDF output.
+
+    TS 33.501 Annex A.4 derives a 256-bit block and takes its second half,
+    which is why the output here is 16 bytes and not 32.
+    """
+    return kdf(key, 0x6B, (sn_name, rand, res))[16:32]
 
 
 def kseaf(kausf_key: bytes, sn_name: bytes) -> bytes:
     """SEAF key: KDF(KAUSF, FC=0x6C, SN name)."""
     return kdf(kausf_key, 0x6C, (sn_name,))
+
+
+def hxres_star(rand: bytes, res_star_bytes: bytes) -> bytes:
+    """HXRES*: the rightmost 128 bits of SHA-256(RAND || RES*) (TS 33.501 A.5).
+
+    RAND comes first and the second half of the digest is taken. This is the
+    value the serving network sees: it compares it against the HRES* the UE
+    derives, so it can conclude the UE holds the card without learning RES*.
+    """
+    if len(rand) != 16:
+        raise ValueError("RAND must be 16 bytes, got %d" % len(rand))
+    if len(res_star_bytes) != 16:
+        raise ValueError("RES* must be 16 bytes, got %d" % len(res_star_bytes))
+    return hashlib.sha256(rand + res_star_bytes).digest()[16:32]
 
 
 def _cli_kdf(a) -> int:
@@ -854,6 +877,96 @@ def _cli_kdf(a) -> int:
     print("out\t%s" % out.hex().upper())
     print("source\tTS 33.220 Annex B.2: HMAC-SHA-256(key, FC || P0 || L0 || ...), Li = bit length")
     print("clause\t%s" % why)
+    return 0
+
+
+def _cli_derive(a) -> int:
+    """--derive <res-star|hxres|kausf|kseaf> with the inputs that derivation needs.
+
+    Named derivations, because the truncation and the parameter order are part
+    of each clause and are exactly what a raw --kdf call gets wrong.
+    """
+    kind = (a.derive or "").lower()
+
+    def hx(v, name, nbytes=None):
+        if v is None:
+            raise ValueError("%s is required" % name)
+        try:
+            b = bytes.fromhex(v)
+        except ValueError:
+            raise ValueError("%s must be hex" % name)
+        if nbytes is not None and len(b) != nbytes:
+            raise ValueError("%s must be %d bytes, got %d" % (name, nbytes, len(b)))
+        return b
+
+    try:
+        if kind in ("res-star", "xres-star"):
+            ck, ik = hx(a.ck, "--ck", 16), hx(a.ik, "--ik", 16)
+            sn, rand, res = hx(a.sn, "--sn"), hx(a.rand, "--rand", 16), hx(a.res, "--res")
+            out = res_star(ck + ik, sn, rand, res)
+            rows = [("res_star", out.hex().upper()),
+                    ("key", "CK||IK, %d bytes" % (len(ck) + len(ik))),
+                    ("rand", rand.hex().upper()),
+                    ("res", res.hex().upper()),
+                    ("source", "TS 33.501 Annex A.4: rightmost 128 bits of "
+                               "KDF(CK||IK, FC=0x6B, SN || RAND || RES)")]
+        elif kind == "hxres":
+            rand = hx(a.rand, "--rand", 16)
+            rs = hx(a.xres_star or a.res_star, "--xres-star", 16)
+            out = hxres_star(rand, rs)
+            rows = [("hxres_star", out.hex().upper()),
+                    ("rand", rand.hex().upper()),
+                    ("res_star", rs.hex().upper()),
+                    ("source", "TS 33.501 Annex A.5: rightmost 128 bits of "
+                               "SHA-256(RAND || RES*)")]
+        elif kind == "kausf":
+            ck, ik = hx(a.ck, "--ck", 16), hx(a.ik, "--ik", 16)
+            sn, sqn_ak = hx(a.sn, "--sn"), hx(a.sqn_ak, "--sqn-ak", 6)
+            out = kausf(ck + ik, sn, sqn_ak)
+            rows = [("kausf", out.hex().upper()),
+                    ("key", "CK||IK, %d bytes" % (len(ck) + len(ik))),
+                    ("sqn_ak", sqn_ak.hex().upper()),
+                    ("source", "TS 33.501 Annex A.4.1: KDF(CK||IK, FC=0x6A, "
+                               "SN || SQN xor AK), 256 bits")]
+        elif kind == "kseaf":
+            sn = hx(a.sn, "--sn")
+            k = hx(a.key, "--key", 32)
+            out = kseaf(k, sn)
+            rows = [("kseaf", out.hex().upper()),
+                    ("source", "TS 33.501 Annex A.6: KDF(KAUSF, FC=0x6C, SN), 256 bits")]
+        else:
+            print("ERROR\t--derive wants res-star, hxres, kausf or kseaf",
+                  file=sys.stderr)
+            return 2
+    except ValueError as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+    print("derived\t%s" % kind)
+    for k, v in rows:
+        print("%s\t%s" % (k, v))
+    return 0
+
+
+def _cli_hxres(a) -> int:
+    """--hxres --res-star <hex> --rand <hex>."""
+    if not a.res_star or not a.rand:
+        print("ERROR\t--hxres needs --res-star and --rand", file=sys.stderr)
+        return 2
+    try:
+        res_star_b = bytes.fromhex(a.res_star)
+        rand_b = bytes.fromhex(a.rand)
+    except ValueError:
+        print("ERROR\t--res-star and --rand must be hex", file=sys.stderr)
+        return 1
+    try:
+        out = hxres_star(rand_b, res_star_b)
+    except ValueError as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+    print("res_star\t%s" % res_star_b.hex().upper())
+    print("rand\t%s" % rand_b.hex().upper())
+    print("hxres_star\t%s" % out.hex().upper())
+    print("source\tTS 33.501 Annex A.5: HXRES* = rightmost 128 bits of SHA-256(RAND || RES*)")
     return 0
 
 
@@ -1699,6 +1812,17 @@ def main(argv=None) -> int:
     p.add_argument("--p0", help="KDF parameter P0, hex (SN name for every FC here)")
     p.add_argument("--p1", help="KDF parameter P1, hex (SQN xor AK, or RAND)")
     p.add_argument("--p2", help="KDF parameter P2, hex (RES, for RES*)")
+    p.add_argument("--derive", metavar="WHAT",
+                   help="named 5G derivation: res-star, hxres, kausf or kseaf")
+    p.add_argument("--ck", help="CK, hex, 16 bytes (KDF key is CK||IK)")
+    p.add_argument("--ik", help="IK, hex, 16 bytes")
+    p.add_argument("--sn", help="serving network name, hex (UTF-8 bytes)")
+    p.add_argument("--sqn-ak", help="SQN xor AK, hex, 6 bytes")
+    p.add_argument("--res", help="RES, hex, 8 or 16 bytes")
+    p.add_argument("--xres-star", help="XRES*, hex, 16 bytes")
+    p.add_argument("--hxres", action="store_true",
+                   help="HXRES* from --res-star and --rand (TS 33.501 A.9)")
+    p.add_argument("--res-star", help="RES* (or XRES*), hex, 16 bytes")
     p.add_argument("--keccak", metavar="HEX",
                    help="raw Keccak-f[1600] on exactly 200 bytes of hex")
     p.add_argument("--a51", action="store_true",
@@ -1731,6 +1855,10 @@ def main(argv=None) -> int:
 
     if a.selftest:
         return selftest()
+    if a.derive:
+        return _cli_derive(a)
+    if a.hxres:
+        return _cli_hxres(a)
     if a.kdf is not None:
         return _cli_kdf(a)
     if a.keccak:

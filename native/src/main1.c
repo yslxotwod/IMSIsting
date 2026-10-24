@@ -2584,6 +2584,7 @@ static const char *const plain_keys[] = {
     "auth_response\tauth response",
     "auth_stage\tauth stage",
     "auth_storm\tauth storm",
+    "auth_type\tthe authentication method this vector is for: 5G-AKA or EAP-AKA'",
     "auth_uri\tauth uri",
     "auth_username\tauth username",
     "autn\tauthentication token",
@@ -2593,6 +2594,7 @@ static const char *const plain_keys[] = {
     "averaging_window_ms\taveraging window (ms)",
     "avg_bytes\taverage bytes",
     "avp_count\tavp count",
+    "awaiting\tthe home network is listening and has not yet answered a line",
     "b3_bit1_field\tb3 bit1 field",
     "b3_bit1_field_source\tb3 bit1 field source",
     "b3_bit1_value\tb3 bit1 value",
@@ -3502,13 +3504,18 @@ static const char *const plain_keys[] = {
     "hits\thits",
     "hkdf\thkdf",
     "hl_flag_bn60\thl flag bn60",
+    "hn_key_present\twhether the profile's private key file is still where the profile says it is",
+    "hn_plmn\tthe mobile country and network code this home network answers for",
     "hn_public_key\thome network public key",
     "hn_public_key_id\thome network public key id",
+    "hn_scheme\tthe SUCI concealment scheme this home network holds a key for",
+    "hn_sn_name\tthe serving network name the AUSF tells the serving network (TS 24.501)",
     "hnb_identity\thnb identity",
     "hnb_markers\thnb markers",
     "hnb_name\thnb name",
     "hnbap_hex\thnbap bytes",
     "hnbap_octets\thnbap octets",
+    "home_network\twhether a home-network profile exists on this host at all",
     "honest_baseline\thonest baseline",
     "hop_by_hop_id\thop by hop id",
     "hop_span\thop span",
@@ -3529,6 +3536,7 @@ static const char *const plain_keys[] = {
 	"http_status\tthe HTTP status the gateway returned",
 	"http_url\tthe endpoint the request went to",
     "hu_flag_bn87\thu flag bn87",
+    "hxres_star\tthe hash of the expected response that the serving network compares (rightmost 128 bits of SHA-256 over RAND and XRES*)",
     "hyperframe_frames\thyperframe frames",
     "hyperframe_h\thyperframe h",
     "i_s\ti s",
@@ -3681,6 +3689,7 @@ static const char *const plain_keys[] = {
     "key_malformed\tkey malformed",
     "key_missing\tkey missing",
     "key_note\tkey note",
+    "key_present\twhether the stored subscriber still has a K or TOP on file",
     "key_ref\tkey ref",
     "key_source\tkey source",
     "key_state\tkey state",
@@ -4023,6 +4032,7 @@ static const char *const plain_keys[] = {
     "nc\tnc",
     "ncc\tncc",
     "ndi\tndi",
+    "need\twhat a row is waiting for before it can run",
     "needed\tneeded",
     "needs\tneeds",
     "needs_calibration_for\tneeds calibration for",
@@ -4510,6 +4520,7 @@ static const char *const plain_keys[] = {
     "rats_seen\trats seen",
     "raw\traw",
     "raw_payload\traw payload",
+    "rc\tthe process exit status of the command this row came from",
     "rccds\trccds",
     "rccds_len\trccds length",
     "rccds_meaning\trccds meaning",
@@ -4625,6 +4636,7 @@ static const char *const plain_keys[] = {
     "rfn\trfn",
     "rfu_bytes\trfu bytes",
     "rhl\trhl",
+    "ri\tthe routing indicator that tells the serving network which home subscription server to query",
     "ric_action_id\tric action id",
     "ric_ingress_open\tric ingress open",
     "risk\trisk",
@@ -4889,6 +4901,7 @@ static const char *const plain_keys[] = {
     "short\tshort",
     "short_message\tshort message",
     "short_message_octets\tshort message octets",
+    "show\tprint the stored profile back without changing anything",
     "si\tsi",
     "si1\tsi1",
     "si1_rule\tsi1 rule",
@@ -4983,6 +4996,7 @@ static const char *const plain_keys[] = {
     "smc_octet\tsmc octet",
     "smf\tsession manager",
     "sn\tserving network name, hex",
+    "sn_name\tthe serving network name (the KDF's serving-network component, \"5G:mncNNN.mccNNN.3gppnetwork.org\")",
     "sn_text\tserving network name, text",
     "snn\tserving network name",
     "snn_hex\tserving network name hex",
@@ -5097,6 +5111,7 @@ static const char *const plain_keys[] = {
     "stk_command_keyword\tstk command keyword",
     "stopped\tstopped",
     "store\tstore",
+    "store_ki\tthe stored subscriber key, masked to its first and last four hex digits",
     "store_mode\tstore mode",
     "stored\tstored",
     "story\tstory",
@@ -5531,6 +5546,8 @@ static const char *const plain_keys[] = {
     "xapp\txapp",
     "xapp_unsigned\txapp unsigned",
     "xres\texpected response (network side of RES)",
+    "xres_star\tthe expected response the home network holds, derived from RES with the CK||IK key",
+    "xres_star_matches\twhether the responder's RES* equals the XRES* the home network derived on its own",
     "yes\tyes",
     "zero_teids\tzero teids",
     "zp_csi_rs\tzp CSI rs",
@@ -6053,15 +6070,27 @@ static const ChipRow chip_rows[] = {
     { "14_suci",             "--build-suci",          NEED_NO, DOES_BUILDS },
     { "14_suci",             "--conceal",             NEED_NO, DOES_BUILDS },
     { "14_suci",             "--deconceal",           NEED_NO, DOES_READS },
+    { "14_suci",             "--force",                NEED_NO, DOES_MODIFIES },
     { "14_suci",             "--genkey",              NEED_NO, DOES_BUILDS },
     { "14_suci",             "--help",                NEED_NO, DOES_READS },
     { "14_suci",             "--hkdf",                NEED_NO, DOES_BUILDS },
+    { "14_suci",             "--hn-auth",             NEED_NO, DOES_BUILDS },
+    { "14_suci",             "--hn-create",           NEED_NO, DOES_MODIFIES },
+    { "14_suci",             "--hn-deconceal",        NEED_NO, DOES_READS },
+    { "14_suci",             "--hn-serve",            NEED_NO, DOES_MODIFIES },
+    { "14_suci",             "--hn-show",             NEED_NO, DOES_READS },
     { "14_suci",             "--info",                NEED_NO, DOES_READS },
+    { "14_suci",             "--keyfile",              NEED_NO, DOES_READS },
+    { "14_suci",             "--mcc",                  NEED_NO, DOES_READS },
     { "14_suci",             "--menu",                NEED_NO, DOES_READS },
+    { "14_suci",             "--mnc",                  NEED_NO, DOES_READS },
+    { "14_suci",             "--mnc-digits",           NEED_NO, DOES_READS },
     { "14_suci",             "--msin-decode",         NEED_NO, DOES_READS },
     { "14_suci",             "--msin-encode",         NEED_NO, DOES_BUILDS },
     { "14_suci",             "--parse-suci",          NEED_NO, DOES_READS },
     { "14_suci",             "--quiet",               NEED_NO, DOES_READS },
+    { "14_suci",             "--ri",                   NEED_NO, DOES_READS },
+    { "14_suci",             "--scheme",               NEED_NO, DOES_READS },
     { "14_suci",             "--selftest",            NEED_NO, DOES_READS },
     { "14_suci",             "--status-tsv",          NEED_NO, DOES_READS },
     { "14_suci",             "--verify-hnkey",        NEED_NO, DOES_READS },
@@ -23320,10 +23349,95 @@ suci_build_audit(AppState *state, const char *module_id,
     return outer;
 }
 
+static GtkWidget *
+suci_build_home(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("HOME NETWORK",
+        "The two functions that make a concealed subscriber usable again: the SIDF "
+        "that opens the arriving SUCI, and the AUSF that answers the serving "
+        "network with a vector.", &body);
+    GtkWidget *create_body, *show_body, *open_body, *auth_body, *serve_body;
+    GtkWidget *create = verb_card("BECOME ONE", &create_body);
+    GtkWidget *show = verb_card("WHAT THIS HOST IS", &show_body);
+    GtkWidget *open = verb_card("OPEN AN ARRIVING SUCI", &open_body);
+    GtkWidget *auth = verb_card("ANSWER AN AUTHENTICATION", &auth_body);
+    GtkWidget *serve = verb_card("SERVE IT", &serve_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(create_body),
+            mod_arg_row_prefilled(state, module_id, status, "Make a Profile",
+                "--hn-create", "--mcc 001 --mnc 01 --mnc-digits 2 --ri 0000 --scheme 1",
+                "A PLMN, a routing indicator and a concealment key pair: the "
+                "identity a home network would carry. The private key is written "
+                "owner-only and no verb prints it. --keyfile imports a key pair "
+                "you already hold; --force overwrites the profile in place."));
+        gtk_box_append(GTK_BOX(create_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), create);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(show_body),
+            mod_arg_row(state, module_id, status, "Show the Profile",
+                "--hn-show", "",
+                "The PLMN, the scheme and whether the key file is actually there."));
+        gtk_box_append(GTK_BOX(show_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), show);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(open_body),
+            mod_arg_row(state, module_id, status, "Deconceal It",
+                "--hn-deconceal", "",
+                "A SUCI from the air. The answer is the SUPI and whether the key "
+                "store holds that subscriber, which decides if an AUSF answer is "
+                "even possible."));
+        gtk_box_append(GTK_BOX(open_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), open);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(auth_body),
+            mod_arg_row(state, module_id, status, "Run One 5G-AKA",
+                "--hn-auth", "",
+                "One authentication event end to end: SUCI to SUPI, the K store, "
+                "RAND and AUTN out, XRES* and HXRES* back, KAUSF and KSEAF up."));
+        gtk_box_append(GTK_BOX(auth_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), auth);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(serve_body),
+            mod_arg_row(state, module_id, status, "Stay Resident",
+                "--hn-serve", "",
+                "A line protocol on stdin (SUCI, AUTH, SHOW, QUIT) so a fake cell "
+                "or a test UE drives one process instead of one shell call per "
+                "message."));
+        gtk_box_append(GTK_BOX(serve_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), serve);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry suci_entries[] = {
     { "Identity", "dialog-information-symbolic", NULL, suci_build_identity },
     { "Keys", "channel-secure-symbolic", NULL, suci_build_keys },
     { "Audit checks", "system-search-symbolic", NULL, suci_build_audit },
+    { "Home network", "network-wireless-symbolic", NULL, suci_build_home },
 };
 /* 15_downgrade — pushing a handset down a generation.
  *

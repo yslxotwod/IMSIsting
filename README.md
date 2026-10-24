@@ -124,7 +124,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 ### SIM and identity
 | Module | Description |
 |---|---|
-| `14_suci` | SUCI concealment and de-concealment, X25519 and P-256 profiles |
+| `14_suci` | SUCI concealment and de-concealment, X25519 and P-256 profiles, plus a home network (`--hn-create`, `--hn-deconceal`, `--hn-auth`, `--hn-serve`) that is both the SIDF and the AUSF: it de-conceals an arriving SUCI with its own private key, finds the subscriber in the `16_sim` key store, runs 5G-AKA and returns the authentication vector |
 | `16_sim` | SIM AKA (COMP128 1/2/3, Milenage, TUAK), USIM files, EF_AD, OTA parsing, eSIM profiles, ES9+, plus a subscriber key store and an AKA responder (`--key-add`, `--aka-responder`, `--aka-serve`) that holds K/OPC, SQN and state across calls and derives KAUSF/RES* for 5G |
 | `18_imsi_exposure` | IMSI harvest and TMSI/IMSI correlation over a capture |
 | `31_sim_defense` | SIM swap: risk scoring, the six detection signals, plus APDU and port-out artefacts |
@@ -176,6 +176,7 @@ computes rather than describes.
 | IMSI catcher — LTE | `09_lte_attach`, `10_lte_air` | NAS EMM attach forging, BCD IMSI/IMEI, the identity-request sequence, and srsRAN eNB orchestration. |
 | IMSI catcher — NR | `12_nr_air` | SSB/MIB/SIB1 construction, RACH handling, gNB orchestration, and the SSB written as samples. |
 | SUCI de-concealment | `14_suci` | X25519 and P-256 profile A/B conceal and de-conceal, HKDF, MSIN BCD, all computed. |
+| Be your own home network | `14_suci`, `16_sim` | `--hn-create` mints a home-network profile (PLMN, routing indicator, concealment scheme and the private key), `--hn-deconceal` resolves an arriving SUCI to an IMSI with it, and `--hn-auth` looks the subscriber up in the `16_sim` store, runs 5G-AKA and prints the vector the serving network expects — XRES*, HXRES*, KAUSF and KSEAF per TS 33.501 A.4–A.6, with the KDF key CK‖IK and XRES* as the rightmost 128 bits. `--hn-serve` answers `SUCI`/`AUTH`/`SHOW` lines on stdin so a fake cell can talk to it over a pipe. |
 | TMSI → IMSI deanonymisation | `07_gsm_attack`, `18_imsi_exposure` | Correlation across a capture via forced-identity and location-update bindings, with a confirm step that needs a second observation. |
 | Piercer (IMSI by paging correlation) | `28_paging_track` | The paging-occasion maths and the published model, with the correlation step kept separate from the claim. |
 
@@ -625,6 +626,7 @@ the location and state halves are unverified by this tree.
 | `50_gprs` | GEA1/GEA2: recovered only in the cryptanalysis literature, taps not in this tree. GEA5: algorithm body and test data licence-gated. GEA0/GEA3/GEA4 are computed and vector-tested. |
 | `16_sim` | the profile-element chain carried inside the `86` segments (SCP03t protects the block, it does not parse it), `HandleNotification` (the standard defines no response body), AUTS resynchronisation (`--aka-responder` emits the quintet and walks SQN but has no resync path), and a live session — `--es8-scp03t` builds the 84/85/86 TLVs from a supplied key set and both challenges, but a card cryptogram can only be confirmed by an eUICC |
 | `41_ota_sms` | SMPP optional TLVs, submit_multi, data_sm and SMPP-over-TLS (the session is plaintext TCP 2775 by design, so the transport is named in the output); WIB push (the leaf command bytes have no citable public encoding) and a deck that binds a terminal response into a variable: S@T's CONCATENATE, variable-reference and substitution encodings are built, but PROVIDE LOCAL INFORMATION returns its datum in the terminal response rather than into a variable, so `--sat-push` emits the fixed-body form and the variable-bound body is assembled from `--sat-concat` / `--sat-varref` / `--sat-subst` by hand |
+| `14_suci` | the card side of the 5G-AKA proof: `--hn-auth` produces the network half (XRES*, HXRES*, KAUSF, KSEAF) and the HRES* a handset would return is the same clause on RES*, but the RES the proof needs comes off a physical USIM — a virtual one is not built here. Also not built: KAMF (the SEAF/AMF derivation over ABBA) and the Nausf service itself, which is HTTP/2 JSON on this tree's own key material |
 | `49_ntn` | feeder link — SIB19 carries no gateway geometry, so the gateway-satellite distance is not derivable from anything the cell broadcasts |
 | `46_lpp` | UTDOA is LPPa, not LPP, so it is stated as a handoff instead of encoded as the wrong protocol |
 | `26_ss7_map` | the ATI answer body: below it, `SubscriberState` is not encodable by any referee available here, so the location and state fields are named as unverified rather than shipped on a guess |
