@@ -5240,6 +5240,41 @@ sim_selftest() {
     chk usage-aka-resp   "$(printf '%s\n' "$out" | grep -c '^  --aka-responder ')" "1"
     chk usage-aka-serve  "$(printf '%s\n' "$out" | grep -c '^  --aka-serve ')" "1"
 
+    # ── eUICC fuzz corpus and classifier (R13) ─────────────────────────
+    # The corpus runs against the card this module serves, so the Tier 0 half
+    # is testable with no hardware: every malformed command must come back
+    # refused, and a target that answers 9000 to one must be caught.
+    # The removal test above emptied the store; the fuzz target needs a card.
+    sim_cmd_key_add --imsi 001010123456789 \
+        --ki 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        --opc CD63CB71954A9F4E48A5994E37A02BAF --sqn FF9BB4D0B607 >/dev/null 2>&1
+    local fz
+    fz=$(sim_euicc_fuzz --imsi 001010123456789 2>&1)
+    chk fuzz-cases  "$(printf '%s\n' "$fz" | awk -F'\t' '$1=="cases"{print $2; exit}')" "20"
+    chk fuzz-refused "$(printf '%s\n' "$fz" | awk -F'\t' '$1=="refused"{print $2; exit}')" "20"
+    chk fuzz-misbehaved "$(printf '%s\n' "$fz" | awk -F'\t' '$1=="misbehaved"{print $2; exit}')" "0"
+    chk fuzz-rc     "$(sim_euicc_fuzz --imsi 001010123456789 >/dev/null 2>&1; echo $?)" "0"
+    # A target that accepts everything is a defect the classifier must call.
+    # The target is a script file, because a target is a command line and the
+    # classifier splits it on spaces -- quoting a whole -c script into it would
+    # be a test of the shell, not of the corpus.
+    local accept_all="$d/accept-all.sh"
+    printf '#!/bin/sh\nwhile read -r line; do printf "sw\\t9000\\n"; done\n' > "$accept_all"
+    chmod +x "$accept_all"
+    chk fuzz-accepts "$(python3 "$IMSISTING_ROOT/tools/euicc_fuzz.py" \
+        --target "$accept_all" --limit 3 2>/dev/null \
+        | awk -F'\t' '$1=="accepted"{print $2; exit}')" "3"
+    chk fuzz-accepts-rc "$(python3 "$IMSISTING_ROOT/tools/euicc_fuzz.py" \
+        --target "$accept_all" --limit 3 >/dev/null 2>&1; echo $?)" "1"
+    chk fuzz-silent "$(python3 "$IMSISTING_ROOT/tools/euicc_fuzz.py" --target true --limit 2 2>/dev/null \
+        | awk -F'\t' '$1=="silent"{print $2; exit}')" "2"
+    chk fuzz-crash  "$(python3 "$IMSISTING_ROOT/tools/euicc_fuzz.py" --target false --limit 2 2>/dev/null \
+        | awk -F'\t' '$1=="crash"{print $2; exit}')" "2"
+    # The hardware half is a handoff that says what it needs.
+    chk fuzz-reader "$(sim_euicc_fuzz --target reader >/dev/null 2>&1; echo $?)" "3"
+    chk fuzz-bad-target "$(sim_euicc_fuzz --target nope >/dev/null 2>&1; echo $?)" "2"
+    chk fuzz-no-store "$(sim_euicc_fuzz --imsi 999999999999999 >/dev/null 2>&1; echo $?)" "1"
+
     # ── profile state machine (R12) ────────────────────────────────────
     # Four sequences: the legal one, a delete while enabled, the one-slot
     # rule when a second profile is enabled, and an enable after a delete.
@@ -6309,6 +6344,66 @@ sim_usim_serve() {
 # The same responder over a TCP socket, for a UE emulator that expects a card
 # on a port rather than on stdin. socat forks one responder per connection and
 # the state (SQN) lives in the store, so two connections share one card.
+# ── eUICC APDU fuzz corpus and runner (R13) ────────────────────────────
+#
+# The hardware half of B2 is a €10 reader and a sacrificial eUICC. The half that
+# needs neither is the corpus and the judgement: a malformed command is only
+# interesting if you can say what a card did with it. So this generates the
+# classes of malformed APDU that matter -- length confusion, bad instructions,
+# oversized data, truncated bodies -- drives them at a target, and classifies
+# each answer:
+#
+#   refused    the card said no, with a status word (6700/6A86/6D00/6E00/...)
+#   accepted   the card said 9000 to a malformed command (a finding: it took
+#              garbage as valid)
+#   silent     no status word at all
+#   hang       the target did not answer in time
+#   crash      the target exited non-zero
+#
+# A target of `usim` is the card this module already serves (--usim-serve), so
+# the corpus is meaningful with no card in the room; `reader` is the handoff and
+# says what it needs.
+sim_euicc_fuzz() {
+    local target="usim" imsi="" cases="" timeout_s="5"
+    while (( $# > 0 )); do
+        case "$1" in
+            --target)  target="${2:-usim}"; shift 2 ;;
+            --imsi)    imsi="${2:-}"; shift 2 ;;
+            --cases)   cases="${2:-}"; shift 2 ;;
+            --timeout) timeout_s="${2:-5}"; shift 2 ;;
+            --help|-h)
+                printf 'usage: --euicc-fuzz [--target usim|reader] [--imsi <imsi>] [--cases all|N] [--timeout s]\n' >&2
+                return 0 ;;
+            *) printf 'ERROR\t--euicc-fuzz does not take %s\n' "$(sim_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ "$timeout_s" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--timeout is seconds\n' >&2; return 2; }
+    case "$target" in
+        usim) ;;
+        reader)
+            printf 'status\thandoff\n'
+            printf 'what\tdrive the corpus at a real eUICC through a reader\n'
+            printf 'needs\tTier 1: a PC/SC reader (about EUR 10) and a sacrificial eUICC; pcscd plus pcsc-tools\n'
+            printf 'refuses\tno reader is present, so no card is driven\n'
+            printf 'note\tthe corpus and the classifier run with no card: --target usim\n'
+            return 3 ;;
+        *) printf 'ERROR\t--target is usim or reader\n' >&2; return 2 ;;
+    esac
+    [[ -n "$imsi" ]] || imsi=$(sim_aka_rows 2>/dev/null | head -n1 | cut -f1)
+    if [[ -z "$imsi" || -z "$(sim_aka_row "$imsi")" ]]; then
+        printf 'ERROR\tno subscriber in the key store; --key-add writes one and --imsi names it\n' >&2
+        return 1
+    fi
+    local tool="$IMSISTING_ROOT/tools/euicc_fuzz.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing\n' "$tool" >&2; return 1; }
+    printf 'target\tusim (%s)\n' "$imsi"
+    printf 'corpus\tmalformed C-APDUs: length confusion, bad instruction, bad P1/P2, oversized data, truncation\n'
+    local -a args=(--target "bash $BASH_SOURCE --usim-serve --imsi $imsi" --timeout "$timeout_s")
+    [[ -n "$cases" && "$cases" != "all" ]] && args+=(--limit "$cases")
+    python3 "$tool" "${args[@]}"
+}
+
+
 sim_cmd_usim_tcp() {
     local port="${1:-}" imsi=""
     shift 2>/dev/null || true
@@ -6575,6 +6670,7 @@ sim_cli_main() {
         --auts-build)     sim_cmd_auts_build "$@" ;;
         --rsp-audit)      sim_rsp_audit "$@" ;;
         --profile-model)  sim_profile_model "${1:--}" ;;
+        --euicc-fuzz)     sim_euicc_fuzz "$@" ;;
         --rsp-plan)       sim_rsp_plan "${1:-}" ;;
         --auts-verify)    sim_cmd_auts_verify "$@" ;;
         --usim-serve)     sim_usim_serve "$@" ;;
@@ -6622,6 +6718,10 @@ Usage: $0 COMMAND
                                     one AKA event: quintet from the store, SQN incremented and saved; --5g adds KAUSF and RES*
   --aka-serve [--5g --sn <hex>|--sn-name <text>]
                                     resident responder: VECTOR <imsi> [<rand>] / LIST / QUIT on stdin
+  --euicc-fuzz [--target usim|reader] [--imsi <imsi>]
+                                    drive a corpus of malformed C-APDUs at the
+                                    card and classify each answer: refused,
+                                    accepted, silent, hang or crash
   --profile-model <events-file>     run a sequence of profile operations
                                     (install|enable|disable|delete <iccid>, list)
                                     through the SGP.22 2.6.1 state machine and

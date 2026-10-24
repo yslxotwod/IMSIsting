@@ -2447,6 +2447,7 @@ module_id_words(const char *tok)
  * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
  */
 static const char *const plain_keys[] = {
+    "misbehaved\tmisbehaved",
     "disabled\tdisabled",
     "events\tevents",
     "list\tlist",
@@ -6218,6 +6219,8 @@ static const ChipRow chip_rows[] = {
     { "16_sim",              "--aka-responder",       NEED_NO, DOES_MODIFIES },
     { "16_sim",              "--auts-build",          NEED_NO, DOES_BUILDS },
     { "16_sim",              "--eid",                 NEED_NO, DOES_READS },
+    { "16_sim",              "--euicc-fuzz",          NEED_NO, DOES_READS },
+    { "16_sim",              "--target",              NEED_NO, DOES_READS },
     { "16_sim",              "--profile-model",       NEED_NO, DOES_READS },
     { "16_sim",              "--request",             NEED_NO, DOES_READS },
     { "16_sim",              "--rsp-audit",           NEED_NO, DOES_READS },
