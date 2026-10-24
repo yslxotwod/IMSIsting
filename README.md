@@ -121,7 +121,7 @@ asked: a value list for one record, a list of records with per-row Copy for many
 | `16_sim` | SIM AKA (COMP128 1/2/3, Milenage, TUAK), USIM files, EF_AD, OTA parsing, eSIM profiles, ES9+ |
 | `18_imsi_exposure` | IMSI harvest and TMSI/IMSI correlation over a capture |
 | `31_sim_defense` | SIM swap: risk scoring, the six detection signals, plus gated APDU and port-out artefacts |
-| `41_ota_sms` | OTA binary SMS: TPDU packing, S@T push with its CONCATENATE / variable-reference / substitution byte code, SMPP 3.4 built/parsed and carried to an SMSC over TCP, WIB refused by name |
+| `41_ota_sms` | OTA binary SMS: TPDU packing, S@T push with its CONCATENATE / variable-reference / substitution byte code, SMPP 3.4 built/parsed and carried to an SMSC over TCP, an HTTP gateway send that needs a SIM on the far phone rather than in this machine, WIB refused by name |
 | `52_stk` | TS 31.111 proactive commands: build, parse, audit for silent off-device actions |
 
 ### Baseband and device

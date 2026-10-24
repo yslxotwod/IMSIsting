@@ -2901,17 +2901,15 @@ static const char *const plain_keys[] = {
     "ciphering_meaning\tcipher meaning",
     "ciphering_mode_command_l3\tcipher mode command l3",
     "ciphertext\tciphertext",
-    "dry_run\tbuild-only; no socket was opened",
-    "gamma\tkeystream block XORed onto the packet",
     "ciphertext_seconds\tciphertext seconds",
     "ck\tcipher key",
     "cla\tcla",
     "claimed\tclaimed",
     "class\tclass",
+    "classified\tclassified",
     "classmark\tclassmark",
     "classmark_after\tclassmark after",
     "classmark_before\tclassmark before",
-    "classified\tclassified",
     "clause\tclause",
     "clean\tclean",
     "cleared_field\tcleared field",
@@ -2989,12 +2987,12 @@ static const char *const plain_keys[] = {
     "controls_missing\tcontrols missing",
     "controls_present\tcontrols present",
     "core\tcore",
+    "corpus\tcorpus",
     "corpus_lines\tcorpus lines",
     "count\tcount",
     "count_hex\tcount bytes",
     "count_i\tcount i",
     "count_i_bits\tcount i bits",
-    "corpus\tcorpus",
     "counter\tcounter",
     "counter_dec\tcounter dec",
     "counter_meaning\tcounter meaning",
@@ -3110,6 +3108,7 @@ static const char *const plain_keys[] = {
     "device_fingerprint\tdevice fingerprint",
     "devices\tdevices",
     "devices_covering\tdevices covering",
+	"devices_parsed\twhether the device list was read as JSON",
     "dialect\tdialect",
     "dialog_portion_len\tdialog portion length",
     "digest_check\tdigest check",
@@ -3153,6 +3152,7 @@ static const char *const plain_keys[] = {
     "dropped\tdropped",
     "drx\tsleep cycle",
     "drx_t\tdrx t",
+    "dry_run\tbuild-only; no socket was opened",
     "dst\tdestination",
     "dt\tdt",
     "dtid\tdtid",
@@ -3400,6 +3400,7 @@ static const char *const plain_keys[] = {
     "gain_db\tgain (dB)",
     "gain_max_db\tgain maximum (dB)",
     "gain_min_db\tgain minimum (dB)",
+    "gamma\tkeystream block XORed onto the packet",
     "gap_ts\tgap timestamp",
     "gate\tgate",
     "gate_flag\tgate flag",
@@ -3515,6 +3516,17 @@ static const char *const plain_keys[] = {
     "host_pkt_window\thost pkt window",
     "hplmn_2digit\thplmn 2digit",
     "hplmn_3digit\thplmn 3digit",
+	"http_api\twhich gateway's request shape is used",
+	"http_api_key\tpresent or absent, never the key itself",
+	"http_body\tthe exact JSON body sent",
+	"http_body_octets\tsize of that body in octets",
+	"http_body_parsed\twhether the response was read as JSON",
+	"http_body_raw\tthe response exactly as it arrived",
+	"http_device_id\twhich phone sends it, or the account default",
+	"http_method\tthe HTTP verb used",
+	"http_recipient\tthe number the gateway routes to, in E.164",
+	"http_status\tthe HTTP status the gateway returned",
+	"http_url\tthe endpoint the request went to",
     "hu_flag_bn87\thu flag bn87",
     "hyperframe_frames\thyperframe frames",
     "hyperframe_h\thyperframe h",
@@ -3822,9 +3834,9 @@ static const char *const plain_keys[] = {
     "mac_octets\tmac octets",
     "magic\tmagic",
     "magic_class\tmagic class",
+    "malformed\tmalformed",
     "map\tMAP",
     "map_peer\tMAP peer",
-    "malformed\tmalformed",
     "mapped_identity\tmapped identity",
     "mappings\tmappings",
     "margin_db\tmargin (dB)",
@@ -4510,6 +4522,7 @@ static const char *const plain_keys[] = {
     "reason\treason",
     "reasoning\treasoning",
     "rebuilt\trebuilt",
+	"recipient_rule\thow the destination is written: E.164, up to 15 digits",
     "record\trecord",
     "recorded\trecorded",
     "records\trecords",
@@ -4795,10 +4808,10 @@ static const char *const plain_keys[] = {
     "sec_header\tsec header",
     "sec_meaning\tsec meaning",
     "seconds\tseconds",
+    "secp256r1\tsecp256r1 curve",
     "secured\tsecured",
     "secured_data\tsecured data",
     "secured_data_len\tsecured data length",
-    "secp256r1\tsecp256r1 curve",
     "secured_note\tsecured note",
     "security_context\tsecurity context",
     "security_header\tsecurity header",
@@ -5207,6 +5220,7 @@ static const char *const plain_keys[] = {
     "testbed\ttestbed",
     "text\tthe message text before 7-bit packing",
     "text7bit\ttext7bit",
+	"text_octets\tsize of the message text in octets",
     "text_septets\tGSM 7-bit septets the text occupies",
     "text_short_message\tpacked TP-UD octets carried in short_message",
     "thresh_serving_low\tthresh serving low",
@@ -6682,6 +6696,8 @@ static const ChipRow chip_rows[] = {
      * an SMSC authenticates the ESME by system_id/password (SMPP 3.4 5.2.1), which
      * is the one SMS path that has no subscriber on this side of the wire. */
     { "41_ota_sms",          "--smpp-send",           NEED_NO,  DOES_TRANSMITS },
+    { "41_ota_sms",          "--http-send",           NEED_NO,  DOES_TRANSMITS },
+    { "41_ota_sms",          "--http-devices",        NEED_NO,  DOES_READS },
     { "41_ota_sms",          "--host",                NEED_NO,  DOES_READS },
     { "41_ota_sms",          "--port",                NEED_NO,  DOES_READS },
     { "41_ota_sms",          "--timeout",             NEED_NO,  DOES_READS },
@@ -30951,7 +30967,62 @@ otasm_build_send(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(live_body), res);
     }
     gtk_box_append(GTK_BOX(body), live);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(live_body),
+            mod_arg_row_prefilled(state, module_id, status, "Local stand-in",
+                "--smpp-send", "--host 127.0.0.1 --port 2775 --src 15551234567 --dst 15559876543 --text hello",
+                "no SMSC on the box? python3 tools/smpp_client.py --serve "
+                "--port 2775 answers the bind and the submit and routes nothing, "
+                "so the session can be read end to end offline."));
+        gtk_box_append(GTK_BOX(live_body), res);
+    }
     mod_card_end();
+
+    /* The other transport: an HTTP gateway, where the SIM sits in a phone on
+     * the account rather than in this machine. Same two-step shape -- build and
+     * read, then send -- because the body is the thing worth inspecting. */
+    {
+        GtkWidget *http_body, *http_dev_body;
+        GtkWidget *http = verb_card("SEND OVER A GATEWAY", &http_body);
+        GtkWidget *http_dev = verb_card("WHICH PHONE SENDS", &http_dev_body);
+        GtkWidget *res;
+
+        res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(http_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the request",
+                "--http-send", "--dst 15559876543 --text hello --dry-run",
+                "prints the URL, the header name and the exact JSON body the "
+                "gateway expects, and sends nothing. The shape is textbee's "
+                "SendSMSRequestDTO from its own openapi document."));
+        gtk_box_append(GTK_BOX(http_body), res);
+
+        res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(http_body),
+            mod_arg_row_prefilled(state, module_id, status, "Send it",
+                "--http-send", "--dst 15559876543 --text hello --device-id 64b7f0000000000000000002 --raw",
+                "POSTs to the gateway. The key comes from OTASM_HTTP_KEY, not "
+                "from a flag, because a flag is visible in the process list; "
+                "--raw also echoes the body the gateway answered."));
+        gtk_box_append(GTK_BOX(http_body), res);
+        mod_card_end();
+        gtk_box_append(GTK_BOX(body), http);
+
+        res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(http_dev_body),
+            mod_arg_row_prefilled(state, module_id, status, "List devices",
+                "--http-devices", "--raw",
+                "the phones this key can send from, with their SIM count and "
+                "send tally, so --device-id is read rather than guessed."));
+        gtk_box_append(GTK_BOX(http_dev_body), res);
+        mod_card_end();
+        gtk_box_append(GTK_BOX(body), http_dev);
+    }
 
     (void) out;
     return outer;

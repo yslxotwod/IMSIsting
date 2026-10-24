@@ -2818,6 +2818,330 @@ otasm_smpp_parse() {
     printf 'parsed\tyes\n'
 }
 
+# --http-send — hand a message to an HTTP SMS gateway; an Android phone with a
+# SIM does the transmitting at the far end. One provider's request shape is
+# quoted here instead of guessed: textbee POST /api/v1/gateway/send-sms with an
+# x-api-key header and a body of {"message","recipients","deviceId"?}, read
+# from that project's own openapi.json (SendSMSRequestDTO). This path needs a
+# SIM somewhere -- on the phone, not in this machine.
+otasm_json_escape() {  # <text> -> JSON string body, quotes included by caller
+    local s="${1:-}" out='' c i
+    for ((i = 0; i < ${#s}; i++)); do
+        c="${s:i:1}"
+        case "$c" in
+            '"')   out+='\"' ;;
+            '\')   out+='\\' ;;
+            $'\n') out+='\n' ;;
+            $'\r') out+='\r' ;;
+            $'\t') out+='\t' ;;
+            $'\b') out+='\b' ;;
+            $'\f') out+='\f' ;;
+            *)     out+="$c" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+# Read one gateway response and name the fields it carries. Without python3 the
+# octets are printed and nothing is claimed about their meaning.
+otasm_http_report() {  # <json-file>
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], 'rb') as handle:
+        doc = json.load(handle)
+except Exception as exc:                                    # noqa: BLE001
+    print("http_body_parsed\tno\t%s" % exc)
+    raise SystemExit(3)
+
+data = doc.get("data", doc) if isinstance(doc, dict) else doc
+names = (
+    ("success", "http_success"),
+    ("message", "http_message"),
+    ("smsBatchId", "http_sms_batch_id"),
+    ("recipientCount", "http_recipient_count"),
+    ("successCount", "http_success_count"),
+    ("failureCount", "http_failure_count"),
+    ("estimatedCompletionAt", "http_eta"),
+    ("warning", "http_warning"),
+)
+if isinstance(data, dict):
+    for key, name in names:
+        value = data.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        print("%s\t%s" % (name, value))
+print("http_body_parsed\tyes")
+PY
+        return $?
+    fi
+    printf 'http_body_parsed\tno\tno python3 to read the JSON\n'
+    return 0
+}
+
+otasm_http_send() {
+    local api='textbee' base='' key='' device_id='' dst='' text='' timeout='20'
+    local dry=0 raw=0
+    while (($#)); do
+        case "$1" in
+            --api|--base|--api-key|--device-id|--dst|--text|--timeout)
+                if (($# < 2)); then
+                    printf 'ERROR\t%s needs a value\n' "$1" >&2
+                    printf 'WHY\t--http-send takes "--flag value" pairs; a flag with no value has no request field\n' >&2
+                    return 2
+                fi
+                case "$1" in
+                    --api)       api="$2" ;;
+                    --base)      base="$2" ;;
+                    --api-key)   key="$2" ;;
+                    --device-id) device_id="$2" ;;
+                    --dst)       dst="$2" ;;
+                    --text)      text="$2" ;;
+                    --timeout)   timeout="$2" ;;
+                esac
+                shift 2
+                ;;
+            --dry-run) dry=1; shift ;;
+            --raw)     raw=1; shift ;;
+            *)
+                printf 'ERROR\tunknown option: %s\n' "$1" >&2
+                printf 'WHY\t--http-send accepts --api --base --api-key --device-id --dst --text --timeout --dry-run --raw\n' >&2
+                return 2
+                ;;
+        esac
+    done
+
+    local path=''
+    case "$api" in
+        textbee)
+            : "${base:=https://api.textbee.dev}"
+            path='/api/v1/gateway/send-sms'
+            ;;
+        *)
+            printf 'ERROR\t--api %s has no request shape in this module\n' "$api" >&2
+            printf 'WHY\tonly textbee'"'"'s POST /api/v1/gateway/send-sms is quoted here (its openapi.json, SendSMSRequestDTO); another gateway needs its own endpoint, auth header and body field names from its own API document, and inventing them would be a guess -- use --base with --api textbee only if that host speaks the same shape\n' >&2
+            return 2
+            ;;
+    esac
+
+    if [[ ! "$base" =~ ^https?://[A-Za-z0-9._:/-]+$ ]]; then
+        printf 'ERROR\t--base is not an http(s) URL: %s\n' "$base" >&2
+        printf 'WHY\tthe value is handed to curl as a URL; anything outside letters, digits, dot, colon, slash and hyphen is not part of one\n' >&2
+        return 2
+    fi
+    base="${base%/}"
+    if [[ ! "$timeout" =~ ^[0-9]+$ ]] || (( timeout < 1 || timeout > 600 )); then
+        printf 'ERROR\t--timeout is not in 1..600 seconds: %s\n' "$timeout" >&2
+        printf 'WHY\tthe deadline bounds the request; zero would fail before the gateway answers and above 600 the harness timeout fires first\n' >&2
+        return 2
+    fi
+    : "${key:=${OTASM_HTTP_KEY:-}}"
+    if [[ -z "$key" ]]; then
+        if (( dry == 0 )); then
+            printf 'ERROR\tthe gateway needs an API key and none was given\n' >&2
+            printf 'WHY\tevery request carries it in the x-api-key header (textbee openapi security scheme); set OTASM_HTTP_KEY or pass --api-key, and the environment is the safer of the two because --api-key is visible in the process list\n' >&2
+            return 2
+        fi
+    fi
+
+    if [[ -z "$dst" ]]; then
+        printf 'ERROR\t--http-send needs --dst\n' >&2
+        printf 'WHY\tannotated in recipients; a message without a destination has nowhere to land and is not sent in place of what was asked for\n' >&2
+        return 2
+    fi
+    if [[ ! "$dst" =~ ^\+?[0-9]{6,15}$ ]]; then
+        printf 'ERROR\t--dst is not an international number: %s\n' "$dst" >&2
+        printf 'WHY\tE.164 allows up to 15 digits with an optional leading +; the gateway routes by this number and a short code here addresses no subscriber\n' >&2
+        return 2
+    fi
+    local recipient="+${dst#+}"
+    if [[ -z "$text" ]]; then
+        printf 'ERROR\t--http-send needs --text\n' >&2
+        printf 'WHY\tmessage is the body of the request; an empty one would be sent in place of what was asked for\n' >&2
+        return 2
+    fi
+    if [[ -n "$device_id" && ! "$device_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        printf 'ERROR\t--device-id is not a device id: %s\n' "$device_id" >&2
+        printf 'WHY\tthe id is a 24-hex ObjectId from GET /api/v1/gateway/devices; anything else resolves to the default device or nothing\n' >&2
+        return 2
+    fi
+
+    local esc body url octets
+    esc=$(otasm_json_escape "$text")
+    body="{\"message\":\"$esc\",\"recipients\":[\"$recipient\"]"
+    [[ -n "$device_id" ]] && body+=",\"deviceId\":\"$device_id\""
+    body+='}'
+    url="$base$path"
+    octets=$(printf '%s' "$text" | wc -c | tr -d ' ')
+
+    printf 'http_api\t%s\n'      "$api"
+    printf 'http_method\tPOST\n'
+    printf 'http_url\t%s\n'      "$url"
+    printf 'http_recipient\t%s\n' "$recipient"
+    printf 'recipient_rule\tE.164, up to 15 digits\n'
+    printf 'http_device_id\t%s\n' "${device_id:-default-device}"
+    printf 'http_api_key\t%s\n'  "$([[ -n "$key" ]] && echo present || echo absent)"
+    printf 'text\t%s\n'          "$text"
+    printf 'text_octets\t%s\n'   "$octets"
+    printf 'http_body\t%s\n'     "$body"
+    printf 'http_body_octets\t%s\n' "$(printf '%s' "$body" | wc -c | tr -d ' ')"
+
+    if (( dry )); then
+        printf 'dry_run\tno request sent\n'
+        printf 'sent\tno\n'
+        return 0
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        printf 'ERROR\tcurl is not installed\n' >&2
+        printf 'WHY\tthe request is carried by curl, which is the only HTTP client this module shells out to; --dry-run prints the exact URL, header and body it would send\n' >&2
+        return 3
+    fi
+    local tmp code rc
+    tmp=$(mktemp "${TMPDIR:-/tmp}/otasm-http.XXXXXX") || return 3
+    code=$(curl -sS -o "$tmp" -w '%{http_code}' --max-time "$timeout" \
+                -H "x-api-key: $key" -H 'content-type: application/json' \
+                --data-binary "$body" "$url" 2>"$tmp.err")
+    rc=$?
+    if (( rc != 0 )); then
+        printf 'ERROR\tthe request did not complete\n' >&2
+        printf 'WHY\tcurl exit %d: %s\n' "$rc" "$(tr '\n' ' ' < "$tmp.err")" >&2
+        rm -f "$tmp" "$tmp.err"
+        return 3
+    fi
+    printf 'http_status\t%s\n' "$code"
+    if (( raw )); then
+        printf 'http_body_raw\t%s\n' "$(tr -d '\n' < "$tmp")"
+    fi
+    otasm_http_report "$tmp"
+    case "$code" in
+        200) : ;;
+        400) printf 'ERROR\tthe gateway refused the send\n' >&2
+             printf 'WHY\t400: no enabled device to send from, the device is disabled, the account email is not verified, or the message could not be pushed to the phone -- GET /api/v1/gateway/devices names the devices this key can reach (openapi 400)\n' >&2
+             rm -f "$tmp" "$tmp.err"; return 1 ;;
+        401) printf 'ERROR\tthe API key was not accepted\n' >&2
+             printf 'WHY\t401: the key is missing, invalid or revoked; it is per account and rotates from the textbee dashboard (openapi 401)\n' >&2
+             rm -f "$tmp" "$tmp.err"; return 1 ;;
+        429) printf 'ERROR\tthe plan limit is used up\n' >&2
+             printf 'WHY\t429: a daily, monthly or per-batch limit was hit; the response body says which one (openapi 429)\n' >&2
+             rm -f "$tmp" "$tmp.err"; return 1 ;;
+        *)   printf 'ERROR\tthe gateway answered %s, which this verb does not interpret\n' "$code" >&2
+             printf 'WHY\tonly 200/400/401/429 are documented for this endpoint; --raw prints the body it returned\n' >&2
+             rm -f "$tmp" "$tmp.err"; return 1 ;;
+    esac
+    printf 'sent\tyes\n'
+    rm -f "$tmp" "$tmp.err"
+    return 0
+}
+
+# --http-devices — the devices this API key can send from, so --device-id can be
+# read rather than guessed. Same host, same header, a GET instead of a POST.
+otasm_http_devices() {
+    local api='textbee' base='' key='' timeout='20' raw=0
+    while (($#)); do
+        case "$1" in
+            --api|--base|--api-key|--timeout)
+                if (($# < 2)); then
+                    printf 'ERROR\t%s needs a value\n' "$1" >&2
+                    printf 'WHY\t--http-devices takes "--flag value" pairs\n' >&2
+                    return 2
+                fi
+                case "$1" in
+                    --api)     api="$2" ;;
+                    --base)    base="$2" ;;
+                    --api-key) key="$2" ;;
+                    --timeout) timeout="$2" ;;
+                esac
+                shift 2
+                ;;
+            --raw) raw=1; shift ;;
+            *)
+                printf 'ERROR\tunknown option: %s\n' "$1" >&2
+                printf 'WHY\t--http-devices accepts --api --base --api-key --timeout --raw\n' >&2
+                return 2
+                ;;
+        esac
+    done
+    case "$api" in
+        textbee) : "${base:=https://api.textbee.dev}"; base="${base%/}" ;;
+        *)
+            printf 'ERROR\t--api %s has no device-list shape in this module\n' "$api" >&2
+            printf 'WHY\tGET /api/v1/gateway/devices returns DeviceListResponseDTO (openapi, textbee); another gateway lists its own way and guessing the path would report a lie\n' >&2
+            return 2
+            ;;
+    esac
+    : "${key:=${OTASM_HTTP_KEY:-}}"
+    if [[ -z "$key" ]]; then
+        printf 'ERROR\tthe device list needs an API key and none was given\n' >&2
+        printf 'WHY\tevery request carries it in the x-api-key header; set OTASM_HTTP_KEY\n' >&2
+        return 2
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        printf 'ERROR\tcurl is not installed\n' >&2
+        printf 'WHY\tthe request is carried by curl\n' >&2
+        return 3
+    fi
+    local tmp code rc url="$base/api/v1/gateway/devices"
+    printf 'http_api\t%s\n' "$api"
+    printf 'http_method\tGET\n'
+    printf 'http_url\t%s\n' "$url"
+    tmp=$(mktemp "${TMPDIR:-/tmp}/otasm-dev.XXXXXX") || return 3
+    code=$(curl -sS -o "$tmp" -w '%{http_code}' --max-time "$timeout" \
+                -H "x-api-key: $key" "$url" 2>"$tmp.err")
+    rc=$?
+    if (( rc != 0 )); then
+        printf 'ERROR\tthe request did not complete\n' >&2
+        printf 'WHY\tcurl exit %d: %s\n' "$rc" "$(tr '\n' ' ' < "$tmp.err")" >&2
+        rm -f "$tmp" "$tmp.err"
+        return 3
+    fi
+    printf 'http_status\t%s\n' "$code"
+    (( raw )) && printf 'http_body_raw\t%s\n' "$(tr -d '\n' < "$tmp")"
+    if (( code != 200 )); then
+        printf 'ERROR\tthe gateway answered %s\n' "$code" >&2
+        printf 'WHY\t401 means the key is missing, invalid or revoked; the device list is scoped to the key'"'"'s account (openapi 401)\n' >&2
+        rm -f "$tmp" "$tmp.err"
+        return 1
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$tmp" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], 'rb') as handle:
+        doc = json.load(handle)
+except Exception as exc:                                    # noqa: BLE001
+    print("devices_parsed\tno\t%s" % exc)
+    raise SystemExit(3)
+
+devices = doc.get("data", []) if isinstance(doc, dict) else doc
+print("devices\t%d" % len(devices))
+for device in devices:
+    if not isinstance(device, dict):
+        continue
+    model = " ".join(part for part in (device.get("brand"), device.get("model")) if part)
+    print("device\t%s\t%s\tenabled=%s\tdefault=%s\tsim=%d\tsent=%s\treceived=%s"
+          % (device.get("_id", "?"), model or "?",
+             "true" if device.get("enabled") else "false",
+             "true" if device.get("isDefault") else "false",
+             len(device.get("simInfo") or []),
+             device.get("sentSMSCount", 0), device.get("receivedSMSCount", 0)))
+print("devices_parsed\tyes")
+PY
+        rc=$?
+    else
+        printf 'devices_parsed\tno\tno python3 to read the JSON\n'
+        rc=0
+    fi
+    rm -f "$tmp" "$tmp.err"
+    return $rc
+}
+
 # --smpp-response <request-hex> [--status n] — the matching *_resp PDU.
 otasm_smpp_response() {
     local raw="${1:-}" status_arg='00' mid='' sysid=''
@@ -3422,6 +3746,125 @@ PY
     else
         chk smpp-send-client-self "skipped-no-python3" "skipped-no-python3"
     fi
+    # ── HTTP send: the request shape is quoted from the gateway's own document,
+    # so these assertions pin the body, the escaping, every refusal by name, and
+    # then one live run against a loopback gateway that answers the documented
+    # DTO. No real gateway is contacted.
+    http_dry=$(otasm_http_send --dst 15551234567 --text 'first breath' --dry-run 2>/dev/null)
+    chk http-send-dry-rc   "$(otasm_http_send --dst 15551234567 --text 'first breath' --dry-run >/dev/null 2>&1; echo $?)" "0"
+    chk http-send-url      "$(fld "$http_dry" http_url)" "https://api.textbee.dev/api/v1/gateway/send-sms"
+    chk http-send-body     "$(fld "$http_dry" http_body)" '{"message":"first breath","recipients":["+15551234567"]}'
+    chk http-send-rcpt     "$(fld "$http_dry" http_recipient)" "+15551234567"
+    chk http-send-sent     "$(fld "$http_dry" sent)" "no"
+    chk http-send-key-ab   "$(fld "$http_dry" http_api_key)" "absent"
+    chk http-send-device-opt "$(fld "$http_dry" http_device_id)" "default-device"
+    chk http-send-escape   "$(otasm_http_send --dst 15551234567 --text 'say "hi" \o/' --dry-run 2>/dev/null | awk -F'\t' '$1=="http_body"{print $2}')" \
+                           '{"message":"say \"hi\" \\o/","recipients":["+15551234567"]}'
+    chk http-send-device-id "$(otasm_http_send --dst 15551234567 --text hi --device-id 64b7f0000000000000000002 --dry-run 2>/dev/null | awk -F'\t' '$1=="http_body"{print $2}')" \
+                           '{"message":"hi","recipients":["+15551234567"],"deviceId":"64b7f0000000000000000002"}'
+    chk http-send-selfbase "$(fld "$(otasm_http_send --dst 15551234567 --text hi --base http://127.0.0.1:1 --dry-run 2>/dev/null)" http_url)" \
+                           "http://127.0.0.1:1/api/v1/gateway/send-sms"
+    chk http-send-no-key   "$(otasm_http_send --dst 15551234567 --text hi >/dev/null 2>&1; echo $?)" "2"
+    chk http-send-no-dst   "$(otasm_http_send --text hi --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk http-send-bad-dst  "$(otasm_http_send --dst 12ab --text hi --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk http-send-no-text  "$(otasm_http_send --dst 15551234567 --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk http-send-bad-api  "$(otasm_http_send --api twilio --dst 15551234567 --text hi --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk http-send-bad-api-why "$(otasm_http_send --api twilio --dst 15551234567 --text hi --dry-run 2>&1 >/dev/null | awk -F'\t' '$1=="WHY"{print $1; exit}')" "WHY"
+    chk http-send-bad-base "$(otasm_http_send --base 'ftp://x y' --dst 15551234567 --text hi --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk http-send-bad-tmo  "$(otasm_http_send --dst 15551234567 --text hi --timeout 0 --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk http-send-bad-id   "$(otasm_http_send --dst 15551234567 --text hi --device-id 'a b' --dry-run >/dev/null 2>&1; echo $?)" "2"
+    chk http-send-flag-val "$(otasm_http_send --dst --text hi 2>/dev/null | awk -F'\t' '$1=="http_recipient"{print $2}')" ""
+
+    # One loopback gateway in two modes: a document-shaped 200 for the good key,
+    # the documented 401 for the bad one. The daemon is killed below whatever the
+    # assertions do.
+    if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+        hgw="$d/gateway.py"
+        cat > "$hgw" <<'PYGW'
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+DEVICES = {"data": [{"_id": "64b7f0000000000000000002", "brand": "Samsung",
+                     "model": "SM-A125F", "enabled": True, "isDefault": True,
+                     "simInfo": [{"subscriptionId": 1}],
+                     "sentSMSCount": 7, "receivedSMSCount": 3}]}
+
+
+class Gateway(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def _json(self, code, doc):
+        body = json.dumps(doc).encode()
+        self.send_response(code)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.headers.get("x-api-key") != "good":
+            return self._json(401, {"message": "invalid key"})
+        if self.path.endswith("/gateway/devices"):
+            return self._json(200, DEVICES)
+        return self._json(404, {"message": "no such path"})
+
+    def do_POST(self):
+        if self.headers.get("x-api-key") != "good":
+            return self._json(401, {"message": "invalid key"})
+        length = int(self.headers.get("content-length") or 0)
+        doc = json.loads(self.rfile.read(length) or b"{}")
+        if not doc.get("recipients"):
+            return self._json(400, {"message": "no recipients"})
+        return self._json(200, {"data": {
+            "success": True,
+            "message": "SMS added to queue for processing",
+            "smsBatchId": "batch0001",
+            "recipientCount": len(doc["recipients"])}})
+
+
+HTTPServer(("127.0.0.1", int(sys.argv[1])), Gateway).serve_forever()
+PYGW
+        hport=$(( 20000 + (RANDOM % 20000) ))
+        python3 "$hgw" "$hport" >/dev/null 2>&1 &
+        hpid=$!
+        hup=0
+        for _ in $(seq 1 100); do
+            if (exec 3<>"/dev/tcp/127.0.0.1/$hport") 2>/dev/null; then hup=1; break; fi
+            sleep 0.05
+        done
+        if (( hup )); then
+            hbase="http://127.0.0.1:$hport"
+            hout=$(OTASM_HTTP_KEY=good otasm_http_send --base "$hbase" \
+                       --dst 15551234567 --text 'first breath' 2>/dev/null)
+            chk http-send-live-rc  "$(OTASM_HTTP_KEY=good otasm_http_send --base "$hbase" \
+                       --dst 15551234567 --text hi >/dev/null 2>&1; echo $?)" "0"
+            chk http-send-status   "$(fld "$hout" http_status)" "200"
+            chk http-send-success  "$(fld "$hout" http_success)" "true"
+            chk http-send-batch    "$(fld "$hout" http_sms_batch_id)" "batch0001"
+            chk http-send-count    "$(fld "$hout" http_recipient_count)" "1"
+            chk http-send-live-sent "$(fld "$hout" sent)" "yes"
+            hbad=$(OTASM_HTTP_KEY=nokey otasm_http_send --base "$hbase" \
+                       --dst 15551234567 --text hi 2>&1 >/dev/null)
+            chk http-send-401-rc   "$(OTASM_HTTP_KEY=nokey otasm_http_send --base "$hbase" \
+                       --dst 15551234567 --text hi >/dev/null 2>&1; echo $?)" "1"
+            chk http-send-401-why  "$(printf '%s\n' "$hbad" | awk -F'\t' '$1=="WHY"{print $1; exit}')" "WHY"
+            chk http-send-401-text "$(printf '%s\n' "$hbad" | awk -F'\t' '$1=="ERROR"{print $2}')" "the API key was not accepted"
+            hdev=$(OTASM_HTTP_KEY=good otasm_http_devices --base "$hbase" 2>/dev/null)
+            chk http-devices-rc    "$(OTASM_HTTP_KEY=good otasm_http_devices --base "$hbase" >/dev/null 2>&1; echo $?)" "0"
+            chk http-devices-count "$(fld "$hdev" devices)" "1"
+            chk http-devices-id    "$(printf '%s\n' "$hdev" | awk -F'\t' '$1=="device"{print $2}')" "64b7f0000000000000000002"
+            chk http-devices-sim   "$(printf '%s\n' "$hdev" | grep -c 'sim=1')" "1"
+        else
+            chk http-send-live-rc "skipped-no-loopback" "skipped-no-loopback"
+        fi
+        kill "$hpid" 2>/dev/null
+        wait "$hpid" 2>/dev/null
+    else
+        chk http-send-live-rc "skipped-no-python3-or-curl" "skipped-no-python3-or-curl"
+    fi
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -3639,6 +4082,8 @@ otasm_cli_main() {
         --smpp-response)  otasm_smpp_response "${1:-}" "${@:2}" ;;
         --smpp-pdu)       otasm_smpp_pdu "${1:-}" ;;
         --smpp-send)      otasm_smpp_send "$@" ;;
+        --http-send)      otasm_http_send "$@" ;;
+        --http-devices)   otasm_http_devices "$@" ;;
         --selftest)       otasm_selftest ;;
         --menu)           otasm_menu ;;
         *)
@@ -3714,6 +4159,20 @@ Usage: $0 COMMAND
                                      A stand-in SMSC for a run on this box:
                                        python3 tools/smpp_client.py --serve --port 2775
                                      it answers bind and submit and routes nothing.
+  --http-send --api textbee --dst D --text T [--api-key K]
+              [--device-id ID] [--base URL] [--timeout s] [--dry-run] [--raw]
+                                     POST the message to an HTTP SMS gateway. An
+                                     Android phone with a SIM on the account does
+                                     the transmitting, so this path does need a
+                                     SIM -- just not one plugged in here (textbee
+                                     openapi, SendSMSRequestDTO: message,
+                                     recipients, optional deviceId, header
+                                     x-api-key). OTASM_HTTP_KEY keeps the key off
+                                     the command line; --dry-run prints the URL,
+                                     the body and no request.
+  --http-devices --api textbee [--api-key K] [--base URL]
+                                     list the devices this key can send from, so
+                                     --device-id is read rather than guessed
   --selftest                         verify SPI, packet and replay logic
   --menu                             interactive menu
 
