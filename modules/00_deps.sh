@@ -71,9 +71,13 @@ deps_sanitize() {
 # ═══════════════════════════════════════════════════════════════════
 
 deps_detect_distro() {
-    if [[ -r /etc/os-release ]]; then
-        # shellcheck disable=SC1091
-        ( . /etc/os-release 2>/dev/null; printf '%s' "${ID:-unknown}" )
+    # DEPS_OS_RELEASE lets --selftest exercise every family on one host: the
+    # mapping is asserted against a fixture rather than against the machine the
+    # test happens to run on.
+    local f="${DEPS_OS_RELEASE:-/etc/os-release}"
+    if [[ -r "$f" ]]; then
+        # shellcheck disable=SC1090
+        ( . "$f" 2>/dev/null; printf '%s' "${ID:-unknown}" )
     else
         printf 'unknown'
     fi
@@ -84,6 +88,8 @@ deps_pkg_manager() {
         debian|ubuntu|kali|parrot|raspbian|linuxmint|pop) echo "apt" ;;
         fedora|rhel|centos|rocky|alma|ol)                echo "dnf" ;;
         arch|manjaro|endeavouros|garuda|artix)           echo "pacman" ;;
+        opensuse*|suse|sles|sled|tumbleweed)             echo "zypper" ;;
+        alpine)                                          echo "apk" ;;
         *)                                               echo "unknown" ;;
     esac
 }
@@ -100,79 +106,73 @@ deps_pkg_manager() {
 
 DEPS_TOOLS=(
     # ── core shell tooling ──────────────────────────────────────────
-    "bash|core|yes|bash|bash|bash"
-    "python3|core|yes|python3|python3|python"
-    "awk|core|yes|gawk|gawk|gawk"
-    "sed|core|yes|sed|sed|sed"
-    "grep|core|yes|grep|grep|grep"
-    "sort|core|yes|coreutils|coreutils|coreutils"
-    "mktemp|core|yes|coreutils|coreutils|coreutils"
-    "timeout|core|yes|coreutils|coreutils|coreutils"
-    "tr|core|yes|coreutils|coreutils|coreutils"
-    "find|core|yes|findutils|findutils|findutils"
-    "column|core|no|util-linux|util-linux|util-linux"
-    "pv|core|no|pv|pv|pv"
-
     # ── SDR hardware support ────────────────────────────────────────
-    "hackrf_info|sdr|no|hackrf|hackrf|hackrf"
-    "hackrf_transfer|sdr|no|hackrf|hackrf|hackrf"
-    "hackrf_sweep|sdr|no|hackrf|hackrf|hackrf"
-    "bladeRF-cli|sdr|no|bladerf|bladerf|bladerf"
-    "LimeUtil|sdr|no|limesuite|limesuite|limesuite"
-    "LimeSuiteGUI|sdr|no|limesuite|limesuite|limesuite"
-    "uhd_find_devices|sdr|no|uhd-host|uhd|uhd"
-    "uhd_usrp_probe|sdr|no|uhd-host|uhd|uhd"
-    "rtl_test|sdr|no|rtl-sdr|rtl-sdr|rtl-sdr"
-    "rtl_sdr|sdr|no|rtl-sdr|rtl-sdr|rtl-sdr"
-    "rtl_fm|sdr|no|rtl-sdr|rtl-sdr|rtl-sdr"
-    "SoapySDRUtil|sdr|no|soapysdr-tools|SoapySDR|soapysdr"
-    "gnuradio-config-info|sdr|no|gnuradio|gnuradio|gnuradio"
-    "gnuradio-companion|sdr|no|gnuradio|gnuradio|gnuradio"
-    "gqrx|sdr|no|gqrx-sdr|gqrx|gqrx"
-
     # ── GSM / 2G stack ──────────────────────────────────────────────
-    "grgsm_livemon|gsm|no|gr-gsm|gr-gsm|gr-gsm"
-    "grgsm_scanner|gsm|no|gr-gsm|gr-gsm|gr-gsm"
-    "grgsm_decode|gsm|no|gr-gsm|gr-gsm|gr-gsm"
-    "kal|gsm|no|kalibrate-rtl|kalibrate-rtl|kalibrate-rtl"
-    "osmocon|gsm|no|osmocom-bb|osmocom-bb|osmocom-bb"
-    "mobile|gsm|no|osmocom-bb|osmocom-bb|osmocom-bb"
-
     # ── LTE / 5G RAN ────────────────────────────────────────────────
-    "srsenb|lte|no|srsran|srsran|srsran"
-    "srsepc|lte|no|srsran|srsran|srsran"
-    "srsue|lte|no|srsran|srsran|srsran"
-    "gnb|nr|no|srsran|srsran|srsran"
-    "nr-uesoftmodem|nr|no|srsran|srsran|srsran"
-    "open5gs-mmed|core|no|open5gs|open5gs|open5gs"
-    "open5gs-amfd|core|no|open5gs|open5gs|open5gs"
-    "open5gs-smfd|core|no|open5gs|open5gs|open5gs"
-    "open5gs-upfd|core|no|open5gs|open5gs|open5gs"
-    "free5gc|core|no|free5gc|free5gc|free5gc"
-
     # ── core network / protocol analysis ────────────────────────────
-    "tshark|proto|yes|tshark|wireshark-cli|wireshark-cli"
-    "dumpcap|proto|no|wireshark-common|wireshark-cli|wireshark-cli"
-    "tcpdump|proto|no|tcpdump|tcpdump|tcpdump"
-    "socat|proto|no|socat|socat|socat"
-    "nc|proto|no|netcat-openbsd|nmap-ncat|gnu-netcat"
-    "openssl|proto|no|openssl|openssl|openssl"
-    "text2pcap|proto|no|wireshark-common|wireshark-cli|wireshark-cli"
-
     # ── SIM / smart card ────────────────────────────────────────────
-    "pcscd|sim|no|pcscd|pcsc-tools|pcsclite"
-    "pcsc_scan|sim|no|pcsc-tools|pcsc-tools|pcsc-tools"
-    "opensc-tool|sim|no|opensc|opensc|opensc"
-    "pySim-shell.py|sim|no|pysim|pysim|pysim"
-
     # ── offline cracking / analysis ─────────────────────────────────
-    "hashcat|crack|no|hashcat|hashcat|hashcat"
-    "john|crack|no|john|john|john"
-    "sqlite3|analysis|no|sqlite3|sqlite|sqlite"
-    "jq|analysis|no|jq|jq|jq"
-    "gpsd|analysis|no|gpsd|gpsd|gpsd"
-    "gpspipe|analysis|no|gpsd|gpsd|gpsd"
-    "gpsbabel|analysis|no|gpsbabel|gpsbabel|gpsbabel"
+    "bash|core|yes|bash|bash|bash|bash|bash"
+    "python3|core|yes|python3|python3|python|python3|python3"
+    "awk|core|yes|gawk|gawk|gawk|gawk|gawk"
+    "sed|core|yes|sed|sed|sed|sed|sed"
+    "grep|core|yes|grep|grep|grep|grep|grep"
+    "sort|core|yes|coreutils|coreutils|coreutils|coreutils|coreutils"
+    "mktemp|core|yes|coreutils|coreutils|coreutils|coreutils|coreutils"
+    "timeout|core|yes|coreutils|coreutils|coreutils|coreutils|coreutils"
+    "tr|core|yes|coreutils|coreutils|coreutils|coreutils|coreutils"
+    "find|core|yes|findutils|findutils|findutils|findutils|findutils"
+    "column|core|no|util-linux|util-linux|util-linux|util-linux|util-linux"
+    "pv|core|no|pv|pv|pv|pv|pv"
+    "hackrf_info|sdr|no|hackrf|hackrf|hackrf|?|hackrf"
+    "hackrf_transfer|sdr|no|hackrf|hackrf|hackrf|?|hackrf"
+    "hackrf_sweep|sdr|no|hackrf|hackrf|hackrf|?|hackrf"
+    "bladeRF-cli|sdr|no|bladerf|bladerf|bladerf|?|?"
+    "LimeUtil|sdr|no|limesuite|limesuite|limesuite|?|?"
+    "LimeSuiteGUI|sdr|no|limesuite|limesuite|limesuite|?|?"
+    "uhd_find_devices|sdr|no|uhd-host|uhd|uhd|uhd|?"
+    "uhd_usrp_probe|sdr|no|uhd-host|uhd|uhd|uhd|?"
+    "rtl_test|sdr|no|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr"
+    "rtl_sdr|sdr|no|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr"
+    "rtl_fm|sdr|no|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr"
+    "SoapySDRUtil|sdr|no|soapysdr-tools|SoapySDR|soapysdr|SoapySDR|?"
+    "gnuradio-config-info|sdr|no|gnuradio|gnuradio|gnuradio|gnuradio|gnuradio"
+    "gnuradio-companion|sdr|no|gnuradio|gnuradio|gnuradio|gnuradio|gnuradio"
+    "gqrx|sdr|no|gqrx-sdr|gqrx|gqrx|gqrx|gqrx"
+    "grgsm_livemon|gsm|no|-|gr-gsm|-|-|-"
+    "grgsm_scanner|gsm|no|-|gr-gsm|-|-|-"
+    "grgsm_decode|gsm|no|-|gr-gsm|-|-|-"
+    "kal|gsm|no|kalibrate-rtl|?|-|?|-"
+    "osmocon|gsm|no|-|-|-|-|-"
+    "mobile|gsm|no|-|-|-|-|-"
+    "srsenb|lte|no|-|-|-|-|-"
+    "srsepc|lte|no|-|-|-|-|-"
+    "srsue|lte|no|-|-|-|-|-"
+    "gnb|nr|no|-|-|-|-|-"
+    "nr-uesoftmodem|nr|no|-|-|-|-|-"
+    "open5gs-mmed|core|no|-|-|-|-|-"
+    "open5gs-amfd|core|no|-|-|-|-|-"
+    "open5gs-smfd|core|no|-|-|-|-|-"
+    "open5gs-upfd|core|no|-|-|-|-|-"
+    "free5gc|core|no|-|-|-|-|-"
+    "tshark|proto|yes|tshark|wireshark-cli|wireshark-cli|wireshark-cli|wireshark-cli"
+    "dumpcap|proto|no|wireshark-common|wireshark-cli|wireshark-cli|wireshark-cli|wireshark-cli"
+    "tcpdump|proto|no|tcpdump|tcpdump|tcpdump|tcpdump|tcpdump"
+    "socat|proto|no|socat|socat|socat|socat|socat"
+    "nc|proto|no|netcat-openbsd|nmap-ncat|gnu-netcat|netcat-openbsd|netcat-openbsd"
+    "openssl|proto|no|openssl|openssl|openssl|openssl|openssl"
+    "text2pcap|proto|no|wireshark-common|wireshark-cli|wireshark-cli|wireshark-cli|wireshark-cli"
+    "pcscd|sim|no|pcscd|?|pcsclite|?|pcsc-lite"
+    "pcsc_scan|sim|no|pcsc-tools|pcsc-tools|pcsc-tools|pcsc-tools|pcsc-tools"
+    "opensc-tool|sim|no|opensc|opensc|opensc|opensc|opensc"
+    "pySim-shell.py|sim|no|pysim|?|-|?|-"
+    "hashcat|crack|no|hashcat|hashcat|hashcat|hashcat|hashcat"
+    "john|crack|no|john|john|john|john|john"
+    "sqlite3|analysis|no|sqlite3|sqlite|sqlite|sqlite3|sqlite"
+    "jq|analysis|no|jq|jq|jq|jq|jq"
+    "gpsd|analysis|no|gpsd|gpsd|gpsd|gpsd|gpsd"
+    "gpspipe|analysis|no|gpsd|gpsd|gpsd|gpsd|gpsd"
+    "gpsbabel|analysis|no|gpsbabel|gpsbabel|gpsbabel|gpsbabel|gpsbabel"
 )
 
 # Extra clues used by the honesty probe. A tool can be present on PATH and
@@ -215,6 +215,13 @@ declare -A DEPS_MIN_VERSION=(
 
 # ── registry accessors ──────────────────────────────────────────────────
 
+# DEPS_TOOLS rows are "tool|group|required|pkg_apt|pkg_dnf|pkg_pacman|pkg_zypper|pkg_apk".
+# A package cell is one of:
+#   <name>  the package that provides this tool in that family's official repos
+#   -       not packaged by that family: the tool is a handoff (pip/git/source)
+#   ?       not verified for that family. It is neither claimed nor denied, and
+#           the plan and the report print it as unverified rather than guessing.
+
 # Print the raw registry row for a tool, or nothing.
 deps_row_for() {
     local want="$1" row
@@ -230,30 +237,54 @@ deps_field() {
     printf '%s\n' "$row" | cut -d'|' -f"$2"
 }
 
-deps_pkg_for() {
-    # deps_pkg_for TOOL -> package name for this distro family, or "".
-    local tool="$1" row f
+deps_pkg_field() {  # -> the package column of this family, 0 when unknown
+    case "$(deps_pkg_manager)" in
+        apt)    printf '4' ;;
+        dnf)    printf '5' ;;
+        pacman) printf '6' ;;
+        zypper) printf '7' ;;
+        apk)    printf '8' ;;
+        *)      printf '0' ;;
+    esac
+}
+
+# deps_pkg_kind TOOL -> "name|<pkg>" | "pip|<dist>" | "source|" | "unverified|" | "unknown|"
+# The cell says which of those it is; nothing here guesses. "source" means the
+# family has no package for this tool, "unverified" means nobody has confirmed
+# one yet -- a claim to make, not a fact to assume.
+deps_pkg_kind() {
+    local tool="$1" row f cell m
+    f=$(deps_pkg_field)
+    [[ "$f" == "0" ]] && { printf 'unknown|'; return 0; }
     if row=$(deps_row_for "$tool"); then
-        case "$(deps_pkg_manager)" in
-            apt)    f=4 ;;
-            dnf)    f=5 ;;
-            pacman) f=6 ;;
-            *)      printf ''; return 0 ;;
+        cell=$(printf '%s\n' "$row" | cut -d'|' -f"$f")
+        case "$cell" in
+            ""|"-") printf 'source|' ;;
+            "?")    printf 'unverified|' ;;
+            *)      printf 'name|%s' "$cell" ;;
         esac
-        local pkg; pkg=$(printf '%s\n' "$row" | cut -d'|' -f"$f")
-        [[ "$pkg" == "-" ]] && pkg=""
-        printf '%s' "$pkg"
         return 0
     fi
-    # Not a binary row: maybe a python module with a pip distribution.
-    local m
+    # Not a binary row: a python module whose pip distribution is a handoff
+    # that works on every family.
     for m in "${DEPS_PY_MODULES[@]}"; do
         if [[ "${m%%|*}" == "$tool" ]]; then
-            printf '%s' "${DEPS_PIP_DIST[$tool]:-}"
+            printf 'pip|%s' "${DEPS_PIP_DIST[$tool]:-$tool}"
             return 0
         fi
     done
-    printf ''
+    printf 'unknown|'
+}
+
+deps_pkg_for() {
+    # deps_pkg_for TOOL -> package name for this distro family, or "".
+    # Kept for the callers that only want a name: a source or unverified cell
+    # answers "", and deps_pkg_kind is the accessor that says which one it was.
+    local kind; kind=$(deps_pkg_kind "$1")
+    case "${kind%%|*}" in
+        name|pip) printf '%s' "${kind#*|}" ;;
+        *)        printf '' ;;
+    esac
 }
 
 deps_required_for() {
@@ -556,19 +587,23 @@ deps_check_versions_tsv() {
 
 deps_missing_packages() {
     # Actionable lines: "pkg|family|tool" so a caller can tell a distro
-    # package from a pip distribution from something that needs source.
-    local tool state pkg
+    # package from a pip distribution from a source build from a cell nobody
+    # has verified for this family yet. Unverified is its own answer: calling
+    # it "source" would claim the family has no package, and calling it a
+    # package name would be a guess.
+    local tool state kind pkg
     for tool in $(deps_all_tools_sorted); do
         state=$(deps_state_of "$tool")
         [[ "$state" == "installed" ]] && continue
-        pkg=$(deps_pkg_for "$tool")
-        if [[ -n "$pkg" ]]; then
-            printf '%s|%s|%s\n' "$pkg" "$(deps_pkg_manager)" "$tool"
-        elif deps_is_py_module "$tool"; then
-            printf '%s|pip|%s\n' "${DEPS_PIP_DIST[$tool]:-$tool}" "$tool"
-        else
-            printf '-|source|%s\n' "$tool"
-        fi
+        kind=$(deps_pkg_kind "$tool")
+        pkg="${kind#*|}"
+        case "${kind%%|*}" in
+            name)       printf '%s|%s|%s\n' "$pkg" "$(deps_pkg_manager)" "$tool" ;;
+            pip)        printf '%s|pip|%s\n' "$pkg" "$tool" ;;
+            source)     printf '-|source|%s\n' "$tool" ;;
+            unverified) printf '-|unverified|%s\n' "$tool" ;;
+            *)          printf '-|source|%s\n' "$tool" ;;
+        esac
     done
 }
 
@@ -577,9 +612,10 @@ deps_cmd_missing_only() {
     for tool in $(deps_all_tools_sorted); do
         state=$(deps_state_of "$tool")
         [[ "$state" == "installed" ]] && continue
-        printf '%s\t%s\t%s\t%s\n' "$(deps_sanitize "$tool")" "$state" \
+        local kind; kind=$(deps_pkg_kind "$tool")
+        printf '%s\t%s\t%s\t%s\t%s\n' "$(deps_sanitize "$tool")" "$state" \
             "$(deps_sanitize "$(deps_group_for "$tool")")" \
-            "$(deps_sanitize "$(deps_pkg_for "$tool")")"
+            "$(deps_sanitize "${kind#*|}")" "${kind%%|*}"
         n=$((n + 1))
     done
     printf 'MISSING_COUNT\t%s\n' "$n"
@@ -636,14 +672,15 @@ deps_install_plan() {
     for tool in $(deps_all_tools_sorted); do
         state=$(deps_state_of "$tool")
         [[ "$state" == "installed" ]] && continue
-        pkg=$(deps_pkg_for "$tool")
-        if [[ -n "$pkg" ]]; then
-            printf 'install\t%s\t%s\t%s\n' "$tool" "$(deps_sanitize "$pkg")" "$mgr"
-        elif deps_is_py_module "$tool"; then
-            printf 'install\t%s\t%s\tpip\n' "$tool" "$(deps_sanitize "${DEPS_PIP_DIST[$tool]:-$tool}")"
-        else
-            printf 'PLAN\t%s\t%s\n' "$tool" "no package in $mgr; build from source (see docs)"
-        fi
+        local kind; kind=$(deps_pkg_kind "$tool")
+        pkg="${kind#*|}"
+        case "${kind%%|*}" in
+            name)  printf 'install\t%s\t%s\t%s\n' "$tool" "$(deps_sanitize "$pkg")" "$mgr" ;;
+            pip)   printf 'install\t%s\t%s\tpip\n' "$tool" "$(deps_sanitize "$pkg")" ;;
+            source) printf 'PLAN\t%s\t%s\n' "$tool" "no package in $mgr; build from source" ;;
+            unverified) printf 'PLAN\t%s\t%s\n' "$tool" "no package confirmed for $mgr yet" ;;
+            *)     printf 'PLAN\t%s\t%s\n' "$tool" "no package manager for this distribution" ;;
+        esac
     done
 }
 
@@ -719,10 +756,24 @@ deps_privileged_install() {
                 dnf install -y "$pkg" || failed+=("$pkg")
             done ;;
         pacman)
-            pacman -Sy --noconfirm || true
+            # No -Sy here on purpose: refreshing the index without upgrading
+            # is the documented way to break a rolling system, and a partial
+            # upgrade is the operator's call, not this installer's. -S --needed
+            # installs from whatever index the system already has.
             for pkg in "${packages[@]}"; do
                 printf 'INSTALLING\t%s\n' "$(deps_sanitize "$pkg")"
                 pacman -S --noconfirm --needed "$pkg" || failed+=("$pkg")
+            done
+            printf 'NOTE\tif a package is not found, run \`pacman -Syu\` yourself first: this installer never syncs a rolling index\n' ;;
+        zypper)
+            for pkg in "${packages[@]}"; do
+                printf 'INSTALLING\t%s\n' "$(deps_sanitize "$pkg")"
+                zypper --non-interactive install --no-recommends "$pkg" || failed+=("$pkg")
+            done ;;
+        apk)
+            for pkg in "${packages[@]}"; do
+                printf 'INSTALLING\t%s\n' "$(deps_sanitize "$pkg")"
+                apk add --no-cache "$pkg" || failed+=("$pkg")
             done ;;
         *) printf 'ERROR\tunsupported package manager\n' >&2; return 1 ;;
     esac
@@ -737,6 +788,20 @@ deps_privileged_install() {
 
 # pip path for the python protocol libraries. Runs unprivileged on purpose:
 # these belong in the invoking user's environment, not the system one.
+# The package that carries pip, per family. Named rather than assumed: an
+# operator on Arch reading "apt: python3-pip" learns nothing but that this
+# module was written on Debian.
+deps_pip_hint() {
+    case "$(deps_pkg_manager)" in
+        apt)    echo 'install it with: apt-get install python3-pip' ;;
+        dnf)    echo 'install it with: dnf install python3-pip' ;;
+        pacman) echo 'install it with: pacman -S python-pip' ;;
+        zypper) echo 'install it with: zypper install python3-pip' ;;
+        apk)    echo 'install it with: apk add py3-pip' ;;
+        *)      echo 'install python3-pip with this distribution'"'"'s package manager' ;;
+    esac
+}
+
 deps_install_pip() {
     local -a dists=("$@")
     local -a failed=()
@@ -745,7 +810,8 @@ deps_install_pip() {
     for py in python3 python; do command -v "$py" >/dev/null 2>&1 && break; py=""; done
     [[ -z "$py" ]] && { printf 'ERROR\tpython3 not found\n' >&2; return 1; }
     if ! "$py" -m pip --version >/dev/null 2>&1; then
-        printf 'ERROR\tpython3-pip is not installed — install it first (apt: python3-pip)\n' >&2
+        printf 'ERROR\tpython3-pip is not installed — install it first\n' >&2
+        printf 'WHY\t%s\n' "$(deps_pip_hint)" >&2
         return 1
     fi
     for d in "${dists[@]}"; do
@@ -774,14 +840,15 @@ deps_dedupe() {
 # silently dropped: a plan that omits them lies about coverage).
 deps_install_missing_cmd() {
     local yes="${1:-}"
-    local -a pkgs=() pips=() srcs=()
+    local -a pkgs=() pips=() srcs=() unverified=()
     local line family pkg
     while IFS='|' read -r pkg family _tool; do
         case "$family" in
-            pip)    pips+=("$pkg") ;;
-            source) srcs+=("$pkg") ;;
+            pip)        pips+=("$pkg") ;;
+            source)     srcs+=("$pkg") ;;
+            unverified) unverified+=("$pkg") ;;
             unknown) ;;
-            *)      pkgs+=("$pkg") ;;
+            *)          pkgs+=("$pkg") ;;
         esac
     done < <(deps_missing_packages)
     local -a upkgs=()
@@ -796,8 +863,13 @@ deps_install_missing_cmd() {
     if (( ${#srcs[@]} > 0 )); then
         printf 'PLAN\tsource builds\t%s\t%s\n' "${#srcs[@]}" "$(deps_sanitize "${srcs[*]}")"
     fi
+    if (( ${#unverified[@]} > 0 )); then
+        printf 'PLAN\tunverified for %s\t%s\t%s\n' "$(deps_pkg_manager)" \
+            "${#unverified[@]}" "$(deps_sanitize "${unverified[*]}")"
+    fi
 
-    (( ${#upkgs[@]} + ${#pips[@]} + ${#srcs[@]} > 0 )) || { printf 'OK\tnothing missing\n'; return 0; }
+    (( ${#upkgs[@]} + ${#pips[@]} + ${#srcs[@]} + ${#unverified[@]} > 0 )) || \
+        { printf 'OK\tnothing missing\n'; return 0; }
 
     if [[ "$yes" != "--yes" ]]; then
         deps_confirm "install the packages listed above?" || return 1
@@ -812,6 +884,11 @@ deps_install_missing_cmd() {
     if (( ${#srcs[@]} > 0 )); then
         printf 'HANDOFF\tsource|%s\n' "$(deps_sanitize "${srcs[*]}")"
         printf 'status: handoff — these have no package in %s; build them from source\n' "$(deps_pkg_manager)" >&2
+    fi
+    if (( ${#unverified[@]} > 0 )); then
+        printf 'HANDOFF\tunverified|%s\n' "$(deps_sanitize "${unverified[*]}")"
+        printf 'status: unverified — no package has been confirmed for %s; name one in the registry or build from source\n' \
+            "$(deps_pkg_manager)" >&2
     fi
     return $rc
 }
@@ -953,9 +1030,15 @@ deps_selftest() {
     chk table-nonempty "$(( ${#DEPS_TOOLS[@]} > 0 ? 1 : 0 ))" 1
     local nrows=${#DEPS_TOOLS[@]}
     chk table-count "$nrows" "$nrows"
-    chk table-field-count "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' 'NF!=6{c++} END{print c+0}')" 0
-    # name, group, required are never empty; family cells are never empty
-    chk table-no-empty "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$1==""||$2==""||$3==""||$4==""||$5==""||$6==""{c++} END{print c+0}')" 0
+    chk table-field-count "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' 'NF!=8{c++} END{print c+0}')" 0
+    # name, group, required are never empty; a family cell is a package name,
+    # "-" (not packaged) or "?" (not verified) -- never blank, never invented.
+    chk table-no-empty "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$1==""||$2==""||$3==""{c++} END{print c+0}')" 0
+    chk table-no-blank-cell "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$4==""||$5==""||$6==""||$7==""||$8==""{c++} END{print c+0}')" 0
+    chk table-cell-domain "$(printf '%s\n' "${DEPS_TOOLS[@]}" | \
+        awk -F'|' '{for(i=4;i<=8;i++) if($i!="-" && $i!="?" && $i!~/^[A-Za-z0-9][A-Za-z0-9._+:@-]*$/) c++} END{print c+0}')" 0
+    chk table-apt-named "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$4!="-"{c++} END{print c+0}')" 46
+    chk table-pacman-named "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$6!="-"{c++} END{print c+0}')" 44
     chk table-required-domain "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$3!="yes"&&$3!="no"{c++} END{print c+0}')" 0
     chk table-unique "$(printf '%s\n' "${DEPS_TOOLS[@]}" | cut -d'|' -f1 | sort -u | grep -c .)" "$nrows"
     chk table-py-count "$(printf '%s\n' "${DEPS_PY_MODULES[@]}" | awk -F'|' 'NF!=3{c++} END{print c+0}')" 0
@@ -1041,9 +1124,18 @@ deps_selftest() {
     chk pkg-apt-uhd         "$(deps_row_for uhd_find_devices | cut -d'|' -f4)" uhd-host
     chk pkg-apt-rtlsdr      "$(deps_row_for rtl_test | cut -d'|' -f4)" rtl-sdr
     chk pkg-apt-soapy       "$(deps_row_for SoapySDRUtil | cut -d'|' -f4)" soapysdr-tools
-    chk pkg-apt-grgsm       "$(deps_row_for grgsm_livemon | cut -d'|' -f4)" gr-gsm
-    chk pkg-apt-srsran-apps "$(deps_row_for srsenb | cut -d'|' -f4)" srsran
-    chk pkg-apt-open5gs     "$(deps_row_for open5gs-mmed | cut -d'|' -f4)" open5gs
+    # The radio stack is a source build on the families that do not package
+    # it, and the table now says so instead of naming a package nobody can
+    # install: srsRAN and Open5GS are not in Debian/Ubuntu repos, and gr-gsm
+    # left Ubuntu's set when GNU Radio moved to 3.10.
+    chk pkg-apt-grgsm-absent "$(deps_row_for grgsm_livemon | cut -d'|' -f4)" -
+    chk pkg-dnf-grgsm      "$(deps_row_for grgsm_livemon | cut -d'|' -f5)" gr-gsm
+    chk pkg-apt-srsran-absent "$(deps_row_for srsenb | cut -d'|' -f4)" -
+    chk pkg-apt-open5gs-absent "$(deps_row_for open5gs-mmed | cut -d'|' -f4)" -
+    chk pkg-pacman-srsran-absent "$(deps_row_for srsenb | cut -d'|' -f6)" -
+    chk pkg-zypper-uhd     "$(deps_row_for uhd_find_devices | cut -d'|' -f7)" uhd
+    chk pkg-apk-tshark     "$(deps_row_for tshark | cut -d'|' -f8)" wireshark-cli
+    chk pkg-zypper-unverified "$(deps_row_for pcscd | cut -d'|' -f7)" ?
     chk pkg-dnf-tshark      "$(deps_row_for tshark | cut -d'|' -f5)" wireshark-cli
     chk pkg-pacman-tshark   "$(deps_row_for tshark | cut -d'|' -f6)" wireshark-cli
     chk pkg-apt-column      "$(deps_row_for column | cut -d'|' -f4)" util-linux
@@ -1056,16 +1148,69 @@ deps_selftest() {
     chk group-grgsm         "$(deps_group_for grgsm_livemon)" gsm
     chk group-unknown       "$(deps_group_for definitely_not_a_tool_xyz)" unknown
 
-    # 9. Every required tool must be installable, or --install-missing lies.
+    # 9. Every required tool must be installable in every family, or
+    #    --install-missing lies on that family. A required tool whose cell is
+    #    "-" or "?" is a hole in the promise, not a fact about the distro.
     local no_pkg=""
-    local row
+    local row f
     for row in "${DEPS_TOOLS[@]}"; do
         [[ "$(printf '%s\n' "$row" | cut -d'|' -f3)" == "yes" ]] || continue
-        for f in 4 5 6; do
-            [[ "$(printf '%s\n' "$row" | cut -d'|' -f$f)" == "-" ]] && no_pkg="$no_pkg $(printf '%s\n' "$row" | cut -d'|' -f1)"
+        for f in 4 5 6 7 8; do
+            case "$(printf '%s\n' "$row" | cut -d'|' -f$f)" in
+                "-"|"?") no_pkg="$no_pkg $(printf '%s\n' "$row" | cut -d'|' -f1)" ;;
+            esac
         done
     done
     chk pkg-required-mapped "$(printf '%s' "$no_pkg" | tr -s ' ' '\n' | grep -c .)" 0
+
+    # 9b. The family mapping itself, exercised through a fixture rather than
+    #     through whichever machine happens to run the test.
+    local fix="$d/os-release"
+    local family id
+    for family in apt dnf pacman zypper apk unknown; do
+        case "$family" in
+            apt)     id=debian ;;
+            dnf)     id=fedora ;;
+            pacman)  id=arch ;;
+            zypper)  id=opensuse-tumbleweed ;;
+            apk)     id=alpine ;;
+            *)       id=martian ;;
+        esac
+        printf 'ID=%s\n' "$id" > "$fix"
+        chk "family-$family" "$(DEPS_OS_RELEASE="$fix" deps_pkg_manager)" "$family"
+    done
+    printf 'ID=ubuntu\n' > "$fix"
+    chk family-ubuntu-apt "$(DEPS_OS_RELEASE="$fix" deps_pkg_manager)" apt
+    printf 'ID=rocky\n' > "$fix"
+    chk family-rocky-dnf "$(DEPS_OS_RELEASE="$fix" deps_pkg_manager)" dnf
+
+    # 9c. The three-state lookup: a name, a source handoff, or unverified.
+    printf 'ID=arch\n' > "$fix"
+    chk kind-name "$(DEPS_OS_RELEASE="$fix" deps_pkg_kind tshark)" "name|wireshark-cli"
+    chk kind-source "$(DEPS_OS_RELEASE="$fix" deps_pkg_kind srsenb)" "source|"
+    chk kind-zypper-tshark "$(DEPS_OS_RELEASE="$fix" deps_pkg_kind tshark)" "name|wireshark-cli"
+    printf 'ID=debian\n' > "$fix"
+    chk kind-apt-name "$(DEPS_OS_RELEASE="$fix" deps_pkg_kind hackrf_info)" "name|hackrf"
+    printf 'ID=opensuse-tumbleweed\n' > "$fix"
+    chk kind-zypper-unverified "$(DEPS_OS_RELEASE="$fix" deps_pkg_kind pcscd)" "unverified|"
+    chk kind-zypper-name "$(DEPS_OS_RELEASE="$fix" deps_pkg_kind uhd_find_devices)" "name|uhd"
+    printf 'ID=alpine\n' > "$fix"
+    chk kind-apk-pip "$(DEPS_OS_RELEASE="$fix" deps_pkg_kind scapy)" "pip|scapy"
+    printf 'ID=martian\n' > "$fix"
+    chk kind-unknown "$(DEPS_OS_RELEASE="$fix" deps_pkg_kind bash)" "unknown|"
+
+    # 9d. The pip advice names the family's own package, not Debian's.
+    for family in apt dnf pacman zypper apk; do
+        case "$family" in
+            apt)     id=debian;        want='apt-get install python3-pip' ;;
+            dnf)     id=fedora;        want='dnf install python3-pip' ;;
+            pacman)  id=arch;          want='pacman -S python-pip' ;;
+            zypper)  id=opensuse-leap; want='zypper install python3-pip' ;;
+            apk)     id=alpine;        want='apk add py3-pip' ;;
+        esac
+        printf 'ID=%s\n' "$id" > "$fix"
+        chk "pip-hint-$family" "$(DEPS_OS_RELEASE="$fix" deps_pip_hint)" "install it with: $want"
+    done
 
     # 10. Honesty: a present-with-broken-stack tool is not "installed".
     #     Simulated with a stub so the result does not depend on this box.
@@ -1113,7 +1258,10 @@ deps_selftest() {
     done | grep -c .)" 0
     chk missing-only-nonempty "$(printf '%s\n' "$out" | awk -F'\t' '$1!="MISSING_COUNT"' | grep -c .)" \
                               "$(fld "$out" MISSING_COUNT)"
-    chk missing-only-fields  "$(printf '%s\n' "$out" | awk -F'\t' '$1!="MISSING_COUNT" && NF!=4{c++} END{print c+0}')" 0
+    # tool, state, group, package, kind -- the fifth column says whether the
+    # package cell is a name, a source handoff or an unverified one.
+    chk missing-only-fields  "$(printf '%s\n' "$out" | awk -F'\t' '$1!="MISSING_COUNT" && NF!=5{c++} END{print c+0}')" 0
+    chk missing-only-kind    "$(printf '%s\n' "$out" | awk -F'\t' '$1!="MISSING_COUNT" && $5!~/^(name|pip|source|unverified)$/{c++} END{print c+0}')" 0
     chk missing-only-count   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="MISSING_COUNT"' | grep -c .)" 1
     # MISSING_COUNT counts everything not installed — missing AND broken. The
     # literal-state-word sum that used to be asserted here only agreed on a
@@ -1361,8 +1509,11 @@ Dependency Manager — the cellular toolchain
 
 Usage: $0 COMMAND
   --status-tsv                 one row per registered tool, 6 TSV fields
+                               (package column is empty when this family has
+                               no package, or none verified yet)
   --check-versions             present/absent/broken with version strings
-  --missing-only               only the tools that are not usable
+  --missing-only               only the tools that are not usable; the last
+                               column says name, pip, source or unverified
   --install-missing [--yes]    install what is missing (asks first)
   --install-package PKG...     install named packages or tool names
   --install-all [--yes]        install every registered package
@@ -1372,6 +1523,11 @@ Usage: $0 COMMAND
   --report                     write loot/deps/deps_report.tsv
   --selftest                   verify the registry and parsers, no radio
   --menu                       interactive menu
+
+Package families: apt (Debian/Ubuntu/Kali), dnf (Fedora/RHEL/EL),
+pacman (Arch), zypper (openSUSE/SLES) and apk (Alpine). A family that has no
+package for a tool is a source build, and a cell nobody has verified is
+reported as unverified rather than guessed.
 
 Installs never run without consent: in CLI mode a bare --install-all or
 --install-missing prints the plan and refuses unless --yes is given.
