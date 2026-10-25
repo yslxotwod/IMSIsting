@@ -906,6 +906,117 @@ otasm_tp_text() {
     printf '%s' "$out"
 }
 
+# ── TS 23.041 CELL BROADCAST ───────────────────────────────────────────
+# A CB message is not sent like an SMS. It is assembled once, split into
+# blocks, and those blocks are carried four at a time on the CBCH in a
+# 51-multiframe (TS 44.012 §6.1). The CBC-facing half is the command that
+# carries the same message to the BSC; its field layout is the 48.049
+# WRITE-REPLACE reading, and what is not citable is said so.
+#
+# Serial Number (TS 23.041 §9.3.2): 2 bits geographic scope, 10 bits message
+# code, 4 bits update number.
+otasm_cb_serial() {   # <geo-scope 0..3> <message-code 0..1023> <update 0..15>
+    local gs="${1:-0}" code="${2:-0}" up="${3:-0}"
+    [[ "$gs" =~ ^[0-3]$ ]] || { printf 'ERROR\tgeographic scope must be 0..3\n' >&2; return 2; }
+    [[ "$code" =~ ^[0-9]+$ ]] && (( code <= 1023 )) || { printf 'ERROR\tmessage code must be 0..1023\n' >&2; return 2; }
+    [[ "$up" =~ ^[0-9]+$ ]] && (( up <= 15 )) || { printf 'ERROR\tupdate number must be 0..15\n' >&2; return 2; }
+    printf '%04x\n' "$(( (gs << 14) | (code << 4) | up ))"
+}
+
+# CB message (TS 23.041 §9.4.1): Message Identifier (2), Serial Number (2),
+# DCS (1), then the CB data. A 7-bit message is capped at 82 octets of data.
+otasm_cb_build() {   # <text> [--message-id HEX4] [--serial HEX4] [--dcs HEX2] [--gs N] [--code N] [--update N]
+    local text="${1:-}" mid="1234" serial="" dcs="00" gs=0 code=0 up=0
+    shift 1 || true
+    while (( $# )); do
+        case "$1" in
+            --message-id) mid=$(otasm_norm_hex "${2:-}"); shift 2 ;;
+            --serial)     serial=$(otasm_norm_hex "${2:-}"); shift 2 ;;
+            --dcs)        dcs=$(otasm_norm_hex "${2:-}"); shift 2 ;;
+            --gs)         gs="${2:-0}"; shift 2 ;;
+            --code)       code="${2:-0}"; shift 2 ;;
+            --update)     up="${2:-0}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(otasm_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ "$mid" =~ ^[0-9a-f]{4}$ ]] || { printf 'ERROR\t--message-id must be 4 hex digits\n' >&2; return 2; }
+    [[ "$dcs" =~ ^[0-9a-f]{2}$ ]] || { printf 'ERROR\t--dcs must be 2 hex digits\n' >&2; return 2; }
+    if [[ -z "$serial" ]]; then
+        serial=$(otasm_cb_serial "$gs" "$code" "$up") || return 1
+    fi
+    [[ "$serial" =~ ^[0-9a-f]{4}$ ]] || { printf 'ERROR\t--serial must be 4 hex digits\n' >&2; return 2; }
+    [[ -n "$text" ]] || { printf 'ERROR\tusage: --cb-build <text> [--message-id HEX4]\n' >&2; return 2; }
+    local data
+    if [[ "$dcs" == "00" ]]; then
+        data=$(otasm_tp_pack_text "$text") || return 1
+        local octets=$(( ${#data} / 2 ))
+        (( octets <= 82 )) || { printf 'ERROR\t7-bit CB data is %s octets, above the 82-octet limit\n' "$octets" >&2; return 2; }
+        printf 'dsc\t7-bit default alphabet\n'
+    else
+        data=$(otasm_norm_hex "$text")
+        otasm_is_hex "$data" || { printf 'ERROR\twith DCS %s the data must be hex (8-bit)\n' "$dcs" >&2; return 2; }
+        (( ${#data} / 2 <= 82 )) || { printf 'ERROR\tCB data above 82 octets\n' >&2; return 2; }
+        printf 'dsc\t8-bit data\n'
+    fi
+    local msg="${mid}${serial}${dcs}${data}"
+    printf 'message_id\t%s\n' "$mid"
+    printf 'serial\t%s\n' "$serial"
+    printf 'dcs\t%s\n' "$dcs"
+    printf 'data_octets\t%d\n' "$(( ${#data} / 2 ))"
+    printf 'cb_message\t%s\n' "$msg"
+    printf 'note\tfield order (message id, serial, dcs) follows the TS 23.041 9.4.1 CB message heading\n'
+}
+
+# The CB message split over CBCH blocks (TS 44.012 §6.1): each block is a
+# length octet then at most 22 data octets, and the tail pads with 0x2b.
+# Four blocks ride the four CBCH positions of one 51-multiframe.
+otasm_cb_blocks() {   # <cb-message-hex>
+    local msg; msg=$(otasm_norm_hex "${1:-}")
+    otasm_is_hex "$msg" || { printf 'ERROR\tCB message must be hex\n' >&2; return 2; }
+    local total=$(( ${#msg} / 2 )) n=0 blk off=0 part len i=0
+    local oc=()
+    while (( off < total )); do
+        n=$(( total - off )); (( n > 22 )) && n=22
+        part="${msg:$(( off * 2 )):$(( n * 2 ))}"
+        blk=$(printf '02%02x%s' "$(( n + 1 ))" "$part")
+        oc+=( "$blk" )
+        off=$(( off + n ))
+    done
+    local count padded j
+    count=${#oc[@]}
+    padded=$(( (count + 3) / 4 * 4 ))
+    for (( j = count; j < padded; j++ )); do oc+=( "012b" ); done
+    for (( j = 0; j < padded; j++ )); do
+        printf 'block\t%d\t%s\n' "$j" "$(printf '%s' "${oc[j]}" | awk '{s=""; for(k=1;k<=length($0);k+=2) s=s substr($0,k,2) " "; print s}')"
+    done
+    printf 'blocks\t%d\n' "$padded"
+    printf 'multiframes\t%d\n' "$(( padded / 4 ))"
+    printf 'note\tfill octet is 0x2b; four blocks per CBCH multiframe (TS 44.012 6.1)\n'
+}
+
+# CBC-facing command: the WRITE-REPLACE shape that carries the same message
+# from the CBC to the BSC (TS 48.049). The fields below follow the §6.2
+# message contents; where the octet coding is a reading rather than quoted
+# text the row says reading.
+otasm_cb_command() {   # <cb-message-hex> <message-id-hex4>
+    local msg; msg=$(otasm_norm_hex "${1:-}"); local mid=$(otasm_norm_hex "${2:-}")
+    otasm_is_hex "$msg" || { printf 'ERROR\tCB message must be hex\n' >&2; return 2; }
+    [[ "$mid" =~ ^[0-9a-f]{4}$ ]] || { printf 'ERROR\tmessage id must be 4 hex digits\n' >&2; return 2; }
+    [[ "$msg" =~ ^$mid ]] || { printf 'ERROR\tthe CB message does not start with message id %s\n' "$mid" >&2; return 2; }
+    local serial="${msg:4:4}" dcs="${msg:8:2}" data="${msg:10}"
+    # Message type 0x01 WRITE-REPLACE, then the information elements.
+    local cmd
+    cmd="01"
+    cmd+="01$(printf '%02x' "$(( (${#serial} / 2) + (${#dcs} / 2) + (${#data} / 2) ))" )"   # CB data IE
+    cmd+="$serial$dcs$data"
+    printf 'message_type\t01\twrite-replace (TS 48.049 6.2)\n'
+    printf 'serial\t%s\n' "$serial"
+    printf 'dcs\t%s\n' "$dcs"
+    printf 'data_octets\t%d\n' "$(( ${#data} / 2 ))"
+    printf 'cb_command\t%s\n' "$cmd"
+    printf 'note\tWRITE-REPLACE carries the whole CB message in one CB data IE; the octet coding is a reading of TS 48.049 6.2, not quoted text\n'
+}
+
 # ── TS 23.038 §6.1.2.1.1 seven-bit packing ──────────────────────────────
 # "The bit number zero is always transmitted first."  Codes are packed
 # low-bit-first, so septet i starts at bit 7*i of the octet string.
@@ -3481,6 +3592,19 @@ otasm_selftest() {
     #    counter=3, cipher=1, CC=2 packs as 0x1E -- not 0xB8, which is what
     #    reading the clause's fields in the order they are printed produces.
     chk spi-build "$(fld "$(otasm_spi_build 2 1 3 0 0 0 0)" spi)" "1E00"
+    # ── TS 23.041 cell broadcast ───────────────────────────────────────
+    chk cb-serial     "$(otasm_cb_serial 1 7 3)" "4073"
+    chk cb-serial-gs  "$(otasm_cb_serial 3 0 0)" "c000"
+    local cb; cb=$(otasm_cb_build "ALERT" --message-id 1112 --serial 4003)
+    chk cb-mid     "$(fld "$cb" message_id)" "1112"
+    chk cb-serial  "$(fld "$cb" serial)" "4003"
+    chk cb-octets  "$(fld "$cb" data_octets)" "5"
+    local cbmsg; cbmsg=$(fld "$cb" cb_message)
+    chk cb-msg-len "$(( ${#cbmsg} / 2 ))" "10"
+    chk cb-blocks  "$(otasm_cb_blocks "$(fld "$cb" cb_message)" | awk -F'\t' '$1=="blocks"{print $2}')" "4"
+    chk cb-frames  "$(otasm_cb_blocks "$(fld "$cb" cb_message)" | awk -F'\t' '$1=="multiframes"{print $2}')" "1"
+    chk cb-refuses "$(otasm_cb_build '' >/dev/null 2>&1; echo $?)" "2"
+    chk cb-8bit    "$(otasm_cb_build 0102F3 --dcs 04 | awk -F'\t' '$1=="cb_message"{print length($2); exit}')" "16"
     chk spi-build2 "$(fld "$(otasm_spi_build 1 0 0 0 0 0 0)" spi)" "0100"
     local out; out=$(otasm_spi_parse 1E00)
     chk spi-rccds   "$(fld "$out" rccds)" "2"
@@ -4299,6 +4423,10 @@ otasm_cli_main() {
         --tpdu-deliver)   otasm_tpdu_build_deliver "${1:-}" "${2:-00}" "${3:-00}" "${4:-}" "${5:-}" "${6:-0}" "${7:-0}" ;;
         --tpdu-submit)    otasm_tpdu_build_submit "${1:-}" "${2:-00}" "${3:-00}" "${4:-}" "${5:-0}" "${6:-0}" "${7:-0}" "${8:-}" "${9:-0}" ;;
         --smsc-wrap)      otasm_smsc_wrap "${1:-}" "${2:-}" ;;
+        --cb-build)       otasm_cb_build "${1:-}" "${@:2}" ;;
+        --cb-blocks)      otasm_cb_blocks "${1:-}" ;;
+        --cb-command)     otasm_cb_command "${1:-}" "${2:-}" ;;
+        --cb-serial)      otasm_cb_serial "${1:-0}" "${2:-0}" "${3:-0}" ;;
         --type0-build)    otasm_type0_build "${1:-}" "${2:-}" "${3:-00}" ;;
         --type0)          otasm_type0_audit "${1:-}" ;;
         --sat-push)       otasm_sat_push_build "${1:-}" "${2:-}" "${3:-}" ;;
@@ -4352,6 +4480,12 @@ Usage: $0 COMMAND
   --tpdu-deliver <oa> <pid> <dcs> <scts> <ud> <udl> [flagbits]
   --tpdu-submit <da> <pid> <dcs> <ud> <udl> [mr] [vpf] [vp] [flagbits]
   --smsc-wrap <sca-hex> <tpdu-hex>   prepend an SMSC address field
+  --cb-build <text> [--message-id HEX4] [--serial HEX4] [--dcs HEX2]
+                                  build a TS 23.041 CB message (7-bit or 8-bit)
+  --cb-blocks <cb-message-hex>     split it into CBCH blocks (TS 44.012 6.1)
+  --cb-command <cb-message-hex> <message-id-hex4>
+                                  the CBC WRITE-REPLACE that carries it (48.049)
+  --cb-serial <gs> <code> <update> build a CB serial number
   --type0-build [oa] [scts] [dcs]    build a Type 0 silent SMS-DELIVER
   --type0 <hex>                      audit a TPDU for the Type 0 properties
   --sat-audit <push_hex>             read an S@T push back: the deck, the card,
