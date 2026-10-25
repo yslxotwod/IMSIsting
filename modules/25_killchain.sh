@@ -194,6 +194,63 @@ kchn_builtin_chain() {
             printf '5\t48_oran\t--e2sm\t-\tno\tthe E2 service models an xApp can drive\n'
             printf '6\t48_oran\t--xapp-attack\t-\tno\tthe over-broad xApp model\n'
             ;;
+        nr-core-exposure)
+            # The 5G core's own protocols, from the messages that make the
+            # exposure concrete: a PFCP session-modification that re-points a
+            # user plane N3 endpoint, a NGAP setup that answers, a NAS COUNT
+            # that goes backwards, and two procedures whose interleaving breaks
+            # the state machine. No core required: every step builds octets or
+            # compares numbers.
+            kchn_chain_header
+            printf '1\t13_nr_core\t--pfcp-hijack\t123456789 4242 203.0.113.9\tno\tbuild a Session Modification that re-points the N3 FAR\n'
+            printf '2\t13_nr_core\t--ngap-probe\t10.0.0.1\tno\twhat a NGSetup and an InitialUEMessage ask an AMF\n'
+            printf '3\t13_nr_core\t--nas-count-check\t500 500\tno\ta NAS COUNT that repeats is a keystream that repeats\n'
+            printf '4\t13_nr_core\t--rekey-walk\t-\tno\tthe re-key and NCC checks a walk would make\n'
+            printf '5\t13_nr_core\t--kairos\tpdu-release pdu-establish\tno\ttwo procedures, one state machine, and a schedule that breaks it\n'
+            ;;
+        sba-exposure)
+            # The 5G service-based boundary: a roaming N32 hop, the NRF
+            # inventory answered to any requester, and the metadata endpoint a
+            # callback URI can be pointed at.
+            kchn_chain_header
+            printf '1\t40_sba_pivot\t--n32-bridge\thttp://10.0.0.1 AMF 001-01\tno\twhat crosses the home/visiting boundary, and what only appears to\n'
+            printf '2\t40_sba_pivot\t--nrf-walk\tnrf.5gc.mnc001.mcc001.3gppnetwork.org AMF\tno\tthirteen target types asked of one discovery service\n'
+            printf '3\t40_sba_pivot\t--imds-pivot\tAMF\tno\tan NFRegister whose notification URI points at the metadata service\n'
+            ;;
+        ntn-timing)
+            # A satellite cell is arithmetic before it is radio: Doppler at the
+            # carrier, range at the elevation, the K_offset that converts one to
+            # the other, and the SIB19 that tells a UE to believe all three.
+            kchn_chain_header
+            printf '1\t49_ntn\t--doppler\t2100 7.5 30\tno\tDoppler on a 2100 MHz carrier at 7.5 km/s\n'
+            printf '2\t49_ntn\t--range\t600 45\tno\tslant range from a 600 km altitude at 45 degrees\n'
+            printf '3\t49_ntn\t--ta\t12000\tno\tthe timing advance that range implies\n'
+            printf '4\t49_ntn\t--sib19-build\t--koffset 20 --epoch-sfn 3 --epoch-sub 5 --validity s30 --ref-hex AABBCC\tno\tthe element a satellite cell broadcasts\n'
+            printf '5\t49_ntn\t--sib19-carrier\t--ref-hex AABBCC\tno\tthe same block inside the BCCH-DL-SCH envelope it travels in\n'
+            printf '6\t49_ntn\t--ephemeris-hijack\t--true-range 1200 --forged-range 600 --koffset 20\tno\tthe timing a UE derives from an ephemeris nobody binds\n'
+            printf '7\t49_ntn\t--timing-geoloc\t--ta 12000 --sat-lat 0 --sat-lon 0 --sat-alt 600\tno\tone range is a circle, and the circle is where the UE is not\n'
+            ;;
+        sim-resync)
+            # The counter exchange behind a synchronisation failure, from both
+            # ends: the token the card would send, then the network deciding
+            # whether the counter it carries is ahead of its own.
+            kchn_chain_header
+            printf '1\t16_sim\t--auts-build\t465B5CE8B199B49FAA5F0A2EE238A6BC CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 FF9BB4D0B607\tno\tthe AUTS a stale card sends (TS 35.208 set 1)\n'
+            printf '2\t16_sim\t--auts-verify\t465B5CE8B199B49FAA5F0A2EE238A6BC CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 55F328B43577CF44E93596E355C6\tno\tcheck one token in isolation\n'
+            printf '3\t16_sim\t--auts-responder\t465B5CE8B199B49FAA5F0A2EE238A6BC CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 55F328B43577CF44E93596E355C6 --sqn-he FF9BB4D0B600\tno\tthe network accepts, moves its counter and issues a new AUTN\n'
+            printf '4\t16_sim\t--auts-responder\t465B5CE8B199B49FAA5F0A2EE238A6BC CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 55F328B43577CF44E93596E355C6 --sqn-he FF9BB4D0B607\tno\tthe same token again, against the counter the first answer set\n'
+            ;;
+        gea-posture)
+            # GEA is where 2G ciphering is decided: which algorithms exist, which
+            # this tree can compute against published vectors, and what the two
+            # that were never published cost to break.
+            kchn_chain_header
+            printf '1\t50_gprs\t--gea-table\t-\tno\tevery GEA with its clause, key size and whether it is implemented here\n'
+            printf '2\t50_gprs\t--gea\t1\tno\tthe standing of GEA1, by name\n'
+            printf '3\t50_gprs\t--gea-crypt\t3 2BD6459F82C5BC00 8E9421A3 0001020304\tno\tGEA3 keystream against the published vector\n'
+            printf '4\t50_gprs\t--gea-kat\t-\tno\tthe nine published GEA3/GEA4 vectors\n'
+            printf '5\t50_gprs\t--gea-recovery\t--algo 1\tno\twhat recovering GEA1 costs, in octets, guesses and hours\n'
+            ;;
         *)
             return 1 ;;
     esac
@@ -203,7 +260,8 @@ kchn_builtin_chain() {
 # the menu agree, so a new chain cannot ship unlisted.
 kchn_builtin_names() {
     printf '%s\n' survey passive-audit gsm-assessment lte-core-audit 5g-privacy \
-        rf-effect nbiot-audit lmr-survey slice-oran-assess
+        rf-effect nbiot-audit lmr-survey slice-oran-assess \
+        nr-core-exposure sba-exposure ntn-timing sim-resync gea-posture
 }
 
 kchn_builtin_count() {
@@ -692,11 +750,11 @@ STUB
     for n in $(kchn_builtin_names); do
         kchn_chain_exists "$n" && chk_names=$((chk_names + 1))
     done
-    chk builtin-count        "$(kchn_builtin_count)" "9"
-    chk builtin-all-exist    "$chk_names" "9"
-    chk builtin-names        "$(kchn_builtin_names | sort | tr '\n' ' ')" "5g-privacy gsm-assessment lmr-survey lte-core-audit nbiot-audit passive-audit rf-effect slice-oran-assess survey "
-    chk builtin-listed       "$(kchn_list_chains | tail -n +2 | grep -c .)" "9"
-    chk builtin-listed-src   "$(kchn_list_chains | awk -F'\t' '$4=="builtin"' | grep -c .)" "9"
+    chk builtin-count        "$(kchn_builtin_count)" "14"
+    chk builtin-all-exist    "$chk_names" "14"
+    chk builtin-names        "$(kchn_builtin_names | sort | tr '\n' ' ')" "5g-privacy gea-posture gsm-assessment lmr-survey lte-core-audit nbiot-audit nr-core-exposure ntn-timing passive-audit rf-effect sba-exposure sim-resync slice-oran-assess survey "
+    chk builtin-listed       "$(kchn_list_chains | tail -n +2 | grep -c .)" "14"
+    chk builtin-listed-src   "$(kchn_list_chains | awk -F'\t' '$4=="builtin"' | grep -c .)" "14"
 
     # Every chain's steps parse into the six documented fields, with a
     # positive step number and a hardware flag of yes or no.
@@ -906,7 +964,7 @@ CHAIN
 
     out=$(kchn_cli_status_tsv)
     chk status-module  "$(fld "$out" module)"           "killchain"
-    chk status-builtin "$(fld "$out" builtin_chains)"   "9"
+    chk status-builtin "$(fld "$out" builtin_chains)"   "14"
     chk status-dir     "$(fld "$out" dir)"              "$KCHN_DIR"
     chk status-runsdir "$(fld "$out" runs_dir)"         "$KCHN_RUNS_DIR"
     chk status-fields  "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"
