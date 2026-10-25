@@ -175,6 +175,81 @@ ntn_koffset() {
 # tools/lte-per-oracle/verify_per.py). Nothing here slices hex: every field the
 # decoder prints is a field the schema names, and a bit string that is not a
 # SIB19 is refused rather than read until something plausible comes out.
+# ── SIB19: build ────────────────────────────────────────────────────────
+# The other half of the decode above. A satellite cell broadcasts SIB19 so a
+# UE can schedule around a moving sky; building one is how you test what a UE
+# does with a cell that claims a pass it is not on. The value is composed here
+# and encoded through the same generated table the decoder reads, and the
+# encoding is accepted only when its own decoder gives the value back.
+ntn_sib19_build() {
+    local koffset=15 epoch_sfn=0 epoch_sub=0 validity=s20 kmac=1 ref_hex="" dist=""
+    while (( $# )); do
+        case "$1" in
+            --koffset)   koffset="${2:-}";  shift 2 || { ntn_sib19_build_usage; return 2; } ;;
+            --epoch-sfn) epoch_sfn="${2:-}"; shift 2 || { ntn_sib19_build_usage; return 2; } ;;
+            --epoch-sub) epoch_sub="${2:-}"; shift 2 || { ntn_sib19_build_usage; return 2; } ;;
+            --validity)  validity="${2:-}";  shift 2 || { ntn_sib19_build_usage; return 2; } ;;
+            --kmac)      kmac="${2:-}";      shift 2 || { ntn_sib19_build_usage; return 2; } ;;
+            --ref-hex)   ref_hex="${2:-}";   shift 2 || { ntn_sib19_build_usage; return 2; } ;;
+            --dist)      dist="${2:-}";      shift 2 || { ntn_sib19_build_usage; return 2; } ;;
+            *)           ntn_sib19_build_usage; return 2 ;;
+        esac
+    done
+    [[ "$koffset" =~ ^[0-9]+$ && "$koffset" -ge 1 && "$koffset" -le 1023 ]] || {
+        printf 'ERROR\t--koffset wants 1..1023 (TS 38.331 NTN-Config)\n' >&2; return 2; }
+    [[ "$epoch_sfn" =~ ^[0-9]+$ && "$epoch_sfn" -le 1023 ]] || {
+        printf 'ERROR\t--epoch-sfn wants 0..1023\n' >&2; return 2; }
+    [[ "$epoch_sub" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--epoch-sub wants whole slots\n' >&2; return 2; }
+    [[ "$kmac" =~ ^[0-9]+$ && "$kmac" -ge 1 && "$kmac" -le 512 ]] || {
+        printf 'ERROR\t--kmac wants 1..512\n' >&2; return 2; }
+    if [[ -n "$ref_hex" && ! "$ref_hex" =~ ^[0-9A-Fa-f]+$ ]]; then
+        printf 'ERROR\t--ref-hex wants hex digits\n' >&2; return 2
+    fi
+    if [[ -n "$dist" && ! "$dist" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\t--dist wants whole metres\n' >&2; return 2
+    fi
+    local root="${IMSISTING_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+    if [[ ! -r "$root/tools/nr_rrc.py" || ! -r "$root/tools/nr_rrc_layout.py" ]]; then
+        printf 'ERROR\tSIB19 cannot be built: tools/nr_rrc_layout.py is missing\n' >&2
+        printf 'WHY\tThe encoder is tools/nr_rrc.py over the generated table; regenerate and re-certify it as the decode path says\n' >&2
+        return 2
+    fi
+    local work; work=$(mktemp -d)
+    local json="$work/sib19.json"
+    {
+        printf '{"ntn-Config-r17":{"epochTime-r17":{"sfn-r17":%s,"subFrameNR-r17":%s},' "$epoch_sfn" "$epoch_sub"
+        printf '"ntn-UlSyncValidityDuration-r17":"%s","cellSpecificKoffset-r17":%s,"kmac-r17":%s}' "$validity" "$koffset" "$kmac"
+        if [[ -n "$ref_hex" ]]; then printf ',"referenceLocation-r17":{"$hex":"%s"}' "$ref_hex"; fi
+        if [[ -n "$dist" ]]; then printf ',"distanceThresh-r17":%s' "$dist"; fi
+        printf '}'
+    } > "$json"
+    local out rc=0
+    out=$(python3 "$root/tools/nr_rrc.py" encode SIB19_r17 "$json" 2>&1) || rc=$?
+    rm -rf "$work"
+    if (( rc != 0 )); then
+        printf '%s\n' "$out" >&2
+        return "$rc"
+    fi
+    printf 'role\tSIB19_r17\n'
+    printf '%s\n' "$out" | grep -v '^family'
+    printf 'koffset\t%s\n' "$koffset"
+    printf 'epoch_sfn\t%s\n' "$epoch_sfn"
+    printf 'epoch_subframe\t%s\n' "$epoch_sub"
+    printf 'validity\t%s\n' "$validity"
+    [[ -n "$ref_hex" ]] && printf 'reference_location\t0x%s\n' "$(printf '%s' "$ref_hex" | tr 'a-f' 'A-F')"
+    [[ -n "$dist" ]] && printf 'distance_thresh_m\t%s\n' "$dist"
+    printf 'note\tthis is the information element a cell broadcasts; nothing here transmits it, and a receiver only acts on it if the cell it came from passed the checks it cannot forge\n'
+    printf 'ref\t3GPP TS 38.331 SIB19-r17 / NTN-Config-r17\n'
+    return 0
+}
+
+ntn_sib19_build_usage() {
+    cat >&2 <<'EOF'
+USAGE	--sib19-build [--koffset N] [--epoch-sfn N] [--epoch-sub N] [--validity sN] [--kmac N] [--ref-hex HEX] [--dist M]
+WHY	builds the SIB19-r17 information element and encodes it through the same unaligned-PER table the --sib19 decoder reads
+EOF
+}
+
 ntn_sib19() {
     local hex="${1:-}"
     local root="${IMSISTING_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -207,8 +282,8 @@ ntn_plan() {
 status	handoff
 what	operating or observing an NTN cell
 hardware	an NTN-capable UE, or an SDR with a satellite pass to receive (a LEO beacon on the feeder/service downlink)
-software	computed here: --doppler, --range, --ta and --koffset (the SIB19 K_offset unit); refused here: --sib19 (no NR RRC table) and --feeder (no gateway geometry)
-flow	1. --doppler and --range for the pass geometry  2. --ta and --koffset for the timing budget  3. SIB19 decode needs a generated NR ASN.1 table first
+software	computed here: --doppler, --range, --ta and --koffset; SIB19 is decoded and built through the generated NR table (--sib19, --sib19-build); refused here: --feeder (no gateway geometry)
+flow	1. --doppler and --range for the pass geometry  2. --ta and --koffset for the timing budget  3. --sib19-build to forge what a satellite cell would broadcast, --sib19 to read one back
 note	transmitting into a satellite link needs that operator's authorisation; this module computes on geometry you supply
 EOF
 }
@@ -289,6 +364,19 @@ ntn_selftest() {
     chk sib19-badhex  "$(ntn_sib19 zz >/dev/null 2>&1; echo $?)"           "1"
     chk feeder-refuse "$(ntn_feeder_link >/dev/null 2>&1; echo $?)"        "2"
 
+    # 9. SIB19 build: the element encodes, and its own decoder reads it back.
+    local b19; b19=$(ntn_sib19_build --koffset 20 --epoch-sfn 3 --epoch-sub 5 --validity s30 --kmac 2 --ref-hex AABBCC --dist 1000)
+    chk sib19-build-rc "$?" "0"
+    chk sib19-build-bits "$(printf '%s\n' "$b19" | awk -F'\t' '$1=="bits"{print $2}')" "102"
+    chk sib19-build-readback "$(printf '%s\n' "$b19" | awk -F'\t' '$1=="read_back"{print $2}')" "yes"
+    chk sib19-build-koffset "$(printf '%s\n' "$b19" | awk -F'\t' '$1=="koffset"{print $2}')" "20"
+    chk sib19-build-ref "$(printf '%s\n' "$b19" | awk -F'\t' '$1=="reference_location"{print $2}')" "0xAABBCC"
+    local hx; hx=$(printf '%s\n' "$b19" | awk -F'\t' '$1=="hex"{print $2}')
+    chk sib19-decode-koffset "$(ntn_sib19 "$hx" | awk -F'\t' '$1=="ntn-Config-r17.cellSpecificKoffset-r17"{print $2}')" "20"
+    chk sib19-decode-validity "$(ntn_sib19 "$hx" | awk -F'\t' '$1 ~ /ntn-UlSyncValidityDuration/{print $2}')" "s30"
+    chk sib19-bad-koffset "$(ntn_sib19_build --koffset 5000 >/dev/null 2>&1; echo $?)" "2"
+    chk sib19-bad-kmac "$(ntn_sib19_build --kmac 0 >/dev/null 2>&1; echo $?)" "2"
+    chk sib19-bad-flag "$(ntn_sib19_build --nonsense >/dev/null 2>&1; echo $?)" "2"
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -336,6 +424,7 @@ ntn_cli_main() {
         --ta)          ntn_ta_units "${1:-}" ;;
         --koffset)     ntn_koffset "${1:-}" "${2:-}" "${3:-}" ;;
         --sib19)       ntn_sib19 "${1:-}" ;;
+        --sib19-build) ntn_sib19_build "$@" ;;
         --feeder)      ntn_feeder_link ;;
         --plan)        ntn_plan ;;
         --selftest)    ntn_selftest ;;
@@ -350,6 +439,8 @@ Usage: $0 COMMAND
   --range <one_way_km>      one-way and round-trip delay
   --ta <one_way_km>         TA units needed vs the LTE TA range
   --koffset <slots> [scs_khz] [sample_rate_hz]   K_offset (TS 38.331, 15 kHz reference slots) -> ms and samples
+  --sib19-build [--koffset N] [--epoch-sfn N] [--epoch-sub N] [--validity sN]
+                            build the SIB19-r17 element and encode it
   --sib19 <hex>             decode a SIB19 (TS 38.331) from its bits
   --feeder                  refused: SIB19 carries no gateway geometry
   --plan                    NTN handoff plan

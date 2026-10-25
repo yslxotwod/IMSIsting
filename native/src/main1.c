@@ -46,6 +46,10 @@
    this process gets to see them without installing anything system-wide. */
 #include <fontconfig/fontconfig.h>
 
+/* The Map page. Its own translation unit: one canvas, one projection, and
+   nothing from AppState but the root it reads loot/map/layers under. */
+#include "map_page.h"
+
 /* The generated module index. tools/gen-module-index.sh rewrites this file;
    it is included rather than linked so the GUI always agrees with the tree. */
 #include "module_index.c"
@@ -342,7 +346,7 @@ struct _AppState {
     /* The six permanent pages as a list at the top of the drawer. Held so
        the highlight can follow the notebook instead of being rebuilt. */
     GtkWidget *drawer_nav;
-    GtkWidget *drawer_nav_rows[8];
+    GtkWidget *drawer_nav_rows[9];
     gboolean   drawer_nav_syncing;
     /* Beginner mode, on until the operator turns it off. It changes what a
        card puts in front of a reader - one worked example per action, the rest
@@ -3234,6 +3238,12 @@ static const char *const plain_keys[] = {
     "linkable_successors\thow many certificate changes continue a trajectory within the gap and radius",
     "no_kinematic_linkage\tno certificate change in this capture continues a trajectory inside the limits",
     "rotation_insufficient\tthe pseudonyms change but the trajectory does not, so a passive observer joins them",
+    "distance_thresh_m\thow far from the reference location the cell says it serves, in metres",
+    "epoch_sfn\tthe system frame number the SIB19 epoch time starts at",
+    "epoch_subframe\tthe slot inside that frame the SIB19 epoch time starts at",
+    "koffset\tthe cell-specific K_offset the K_offset unit is counted in",
+    "reference_location\tthe cell reference location the SIB19 carries, which is the point its timing is stated for",
+    "validity\thow long the SIB19 uplink synchronisation stays valid",
     "checked_on\tthe date the rows in this table were last read, so a reader knows how old the photograph is",
     "claim\twhat the table does and does not claim, stated in one word",
     "corpus_horizon\tthe last day the corpus covers; anything disclosed after it is unassessed rather than absent",
@@ -7454,6 +7464,7 @@ static const ChipRow chip_rows[] = {
     { "49_ntn",              "--range",               NEED_RADIO, DOES_READS },
     { "49_ntn",              "--selftest",            NEED_NO, DOES_READS },
     { "49_ntn",              "--sib19",               NEED_RADIO, DOES_READS },
+    { "49_ntn",              "--sib19-build",         NEED_NO, DOES_BUILDS },
     { "49_ntn",              "--status-tsv",          NEED_NO, DOES_READS },
     { "49_ntn",              "--ta",                  NEED_RADIO, DOES_READS },
     { "49_ntn",              "--version",             NEED_NO, DOES_READS },
@@ -10196,29 +10207,35 @@ drawer_nav_row_selected(GtkListBox *list, GtkListBoxRow *row, gpointer user_data
     drawer_set_open(state, FALSE);
 }
 
-/* The drawer's own navigation: the six permanent pages in tab order, which
-   is the order they are appended in. Above the catalogue, because the
-   drawer is read top to bottom -- where you can go, then everything that
-   can be opened once you are there. */
+/* The drawer's own navigation: the permanent pages, above the catalogue,
+   because the drawer is read top to bottom -- where you can go, then
+   everything that can be opened once you are there.
+ *
+ * Display order and notebook order are not the same list. Map sits under
+ * Casebook, where an operator looks for a place after reading a brief, but its
+ * notebook page is appended last so that every page index in this file still
+ * means what it meant before Map existed. `page_of_row` is the only place the
+ * two orders are reconciled. */
 static GtkWidget *
 build_drawer_nav(AppState *state)
 {
-    static const char *names[8] = {
-        "Dashboard", "Live Traffic", "Casebook", "Stats", "Notifications",
-        "Help", "Settings", "Workflows"
+    static const char *names[9] = {
+        "Dashboard", "Live Traffic", "Casebook", "Map", "Stats",
+        "Notifications", "Help", "Settings", "Workflows"
     };
-    static const char *icons[8] = {
+    static const char *icons[9] = {
         "view-grid-symbolic", "network-wireless-symbolic", "folder-symbolic",
-        "office-chart-bar-symbolic", "notification-symbolic",
-        "help-browser-symbolic", "emblem-system-symbolic",
-        "view-list-symbolic"
+        "mark-location-symbolic", "office-chart-bar-symbolic",
+        "notification-symbolic", "help-browser-symbolic",
+        "emblem-system-symbolic", "view-list-symbolic"
     };
+    static const int page_of_row[9] = { 0, 1, 2, 8, 3, 4, 5, 6, 7 };
 
     GtkWidget *nav = gtk_list_box_new();
     gtk_widget_add_css_class(nav, "drawer-nav");
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(nav), GTK_SELECTION_SINGLE);
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 9; i++) {
         GtkWidget *rowbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 9);
         GtkWidget *icon = imsisting_icon_image(icons[i]);
         GtkWidget *label = gtk_label_new(names[i]);
@@ -10233,9 +10250,10 @@ build_drawer_nav(AppState *state)
         GtkWidget *row = gtk_list_box_row_new();
         gtk_widget_add_css_class(row, "drawer-nav-row");
         gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), rowbox);
-        g_object_set_data(G_OBJECT(row), "page-index", GINT_TO_POINTER(i));
+        g_object_set_data(G_OBJECT(row), "page-index",
+                          GINT_TO_POINTER(page_of_row[i]));
         gtk_list_box_append(GTK_LIST_BOX(nav), row);
-        state->drawer_nav_rows[i] = row;
+        state->drawer_nav_rows[page_of_row[i]] = row;
     }
 
     g_signal_connect(nav, "row-selected",
@@ -10283,6 +10301,7 @@ static const struct {
     { "help",          "Help",          "help-browser-symbolic" },
     { "settings",      "Settings",      "emblem-system-symbolic" },
     { "goals",         "Workflows",   "view-list-symbolic" },
+    { "map",           "Map",         "mark-location-symbolic" },
 };
 
 
@@ -15405,7 +15424,7 @@ notebook_page_switched(GtkNotebook *nb, GtkWidget *child, guint page,
        page, which is on no list entry and so clears the highlight. */
     if (state->drawer_nav != NULL) {
         state->drawer_nav_syncing = TRUE;
-        if (page < 8 && state->drawer_nav_rows[page] != NULL)
+        if (page < 9 && state->drawer_nav_rows[page] != NULL)
             gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
                 GTK_LIST_BOX_ROW(state->drawer_nav_rows[page]));
         else
@@ -17188,7 +17207,7 @@ drawer_set_open(AppState *state, gboolean open)
     if (open && state->drawer_nav != NULL) {
         int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(state->notebook));
         state->drawer_nav_syncing = TRUE;
-        if (cur >= 0 && cur < 8 && state->drawer_nav_rows[cur] != NULL)
+        if (cur >= 0 && cur < 9 && state->drawer_nav_rows[cur] != NULL)
             gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
                 GTK_LIST_BOX_ROW(state->drawer_nav_rows[cur]));
         else
@@ -18798,6 +18817,13 @@ boot_build_ui(AppState *state, GtkApplication *app)
        question rather than a page of the tool. */
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
         goals_build_page(state), gtk_label_new("Workflows"));
+    /* Page 8 is the Map. Appended last for the same reason Workflows was: the
+       drawer lists it under Casebook, but a page index is a position, and
+       moving eight of them to slot a ninth in the middle is how every
+       `--tab N` and every saved place in state/ui.tsv would start opening the
+       wrong page. */
+    gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
+        map_page_new(IMSISTING_ROOT), gtk_label_new("Map"));
 
     g_signal_connect(state->notebook, "switch-page",
                      G_CALLBACK(notebook_page_switched), state);

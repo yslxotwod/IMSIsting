@@ -156,6 +156,48 @@ def cmd_decode(args):
     return 0
 
 
+def cmd_encode(args):
+    import json as _json
+    try:
+        text = sys.stdin.read() if args.json == "-" else open(args.json).read()
+        value = _json.loads(text)
+    except (OSError, ValueError) as exc:
+        raise Refused("the value is not JSON: %s" % exc)
+    def _dehex(v):
+        # JSON cannot spell a byte string, so {"$hex": "AABB"} is the spelling
+        # this tree uses, and anything else is left as it came in
+        if isinstance(v, dict):
+            if set(v) == {"$hex"}:
+                try:
+                    return bytes.fromhex(v["$hex"])
+                except ValueError:
+                    raise Refused("$hex wants an even number of hex digits")
+            return {k: _dehex(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [_dehex(x) for x in v]
+        return v
+
+    value = _dehex(value)
+    try:
+        bits = CODEC.encode_bits(args.type, value)
+    except lte_per.PerError as exc:
+        raise Refused("the value is not a %s: %s" % (args.type, exc))
+    back = CODEC.decode_bits(args.type, bits, exact=False)
+    if back != value:
+        raise Refused("the encoding does not decode back to the value it was "
+                      "built from (a field name the table does not have is "
+                      "dropped rather than guessed, so the value must name only "
+                      "fields this %s has)" % args.type)
+    nib = (len(bits) + 3) // 4
+    hexs = "%0*x" % (nib, int(bits.ljust(nib * 4, "0"), 2))
+    print("type\t%s" % args.type)
+    print("family\t%s" % FAMILY)
+    print("bits\t%d" % len(bits))
+    print("hex\t%s" % hexs.upper())
+    print("read_back\tyes")
+    return 0
+
+
 def cmd_types(args):
     print("family\t%s" % FAMILY)
     for r in ROOTS:
@@ -172,9 +214,9 @@ def cmd_types(args):
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="nr_rrc.py",
-        description="Decode NR RRC (TS 38.331) messages over the generated "
-                    "unaligned-PER table. The read half only: this tree has no "
-                    "NR message builder.")
+        description="Decode and encode NR RRC (TS 38.331) messages over the "
+                    "generated unaligned-PER table. An encoding is accepted only "
+                    "when it decodes back to the value it was built from.")
     sub = p.add_subparsers(dest="cmd")
 
     d = sub.add_parser("decode", help="decode one message from hex")
@@ -184,6 +226,11 @@ def main(argv=None):
                    help="decode only this many leading bits (a capture knows "
                         "the transport block size; hex alone does not)")
     d.set_defaults(func=cmd_decode)
+
+    e = sub.add_parser("encode", help="encode one value (JSON) into a message")
+    e.add_argument("type", help="a type name from this table, e.g. SIB19_r17")
+    e.add_argument("json", help="the value as a JSON file, or - for stdin")
+    e.set_defaults(func=cmd_encode)
 
     t = sub.add_parser("types", help="list the roots, and any type matching a word")
     t.add_argument("--match", default=None)
