@@ -346,7 +346,7 @@ Copy for many.
 | Module | Description |
 |---|---|
 | `42_li_probe` | Lawful-interception interfaces and posture signals, the TS 33.108 HI1 PDUs an interception is built from (BER, semi-octet BCD), and this module's own X3/HI3 envelope. HI1's Notification carries no target identity and no host:port, so those are printed as `not_encoded` rather than dropped, and nothing is delivered to an ADMF |
-| `44_carrier_api` | Carrier API surface, authorisation matrix, token and rate-limit audit, request rendering and subscriber-sequence ordering, plus a lab executor that runs a plan only under a spoken confirmation word and reports a 2xx answer to a deny row as a finding. It writes `curl` lines by default and sends nothing |
+| `44_carrier_api` | Carrier API surface from the OpenAPI 3 document (servers, paths, schemes), a four-case authorisation matrix per operation, JWT audit (`alg=none`, expiry, audience), token-bucket rate arithmetic, a differential between two response captures (new/changed/removed), credential-stuffing resistance controls scored by severity, a report and plan skeleton, and request rendering that writes one concrete request per operation plus an ordered subscriber sequence to a run file — it builds and stops, opening no socket. The one gated verb, `--execute`, runs that run file against an API you own and reports a 2xx answer to a deny row as `unauthorised_success` |
 
 ## The attack inventory
 
@@ -427,7 +427,7 @@ the attack runs end to end.
 | Shared RAN leakage | `43_ran_share` | EPLMN and MOCN review: which PLMN list a shared cell may broadcast, `--leak-check` over what a neighbour list gives away about the host network, and PLMN decoding of what the cell actually said. |
 | 5G SUCI capture | `58_suci_catcher` | The pre-authentication identity exchange: cell and AMF slice build, catcher plan, and the SUCI a UE hands over before any key exists. |
 | O-RAN and slicing | `48_oran`, `34_slicing` | A1 policy poisoning, E2 control shapes, the over-broad xApp model, slice isolation testing, 5QI and TSN assistance. |
-| Carrier API enumeration | `44_carrier_api` | A concrete request per operation rendered from the document's own examples, and the ordered subscriber sequence. Both stop at the file; an execution plan runs only with a lab confirmation word. |
+| Carrier API enumeration and boundary | `44_carrier_api` | A concrete request per operation rendered from the document's own examples, an ordered one-identifier-per-request subscriber sequence with its declared rate limit and stop condition, the four-case authorisation matrix that says which of those requests a correct API must refuse, and the JWT audit (`alg=none`, no expiry, audience) that decides whether the refusal can be bypassed at all. Enumeration stops at the run file; `--execute` runs it only under a lab confirmation word, and a 2xx to a deny row is reported as a finding. |
 | Lawful interception artefacts | `42_li_probe` | The provisioning and activation records as real TS 33.108 HI1 PDUs (liActivated / liDeactivated, BER), and the X3/HI3 product envelope as this module's own framing. Encoded, never delivered. |
 
 ### Baseband, device and radio
@@ -498,6 +498,28 @@ Everything that is pure protocol work runs today: `--selftest` on all 60 modules
 all encode/decode, all key derivation, pcap dissection, CVE dispatch, corpus
 generation and the killchain runner. This is most of the tree and it costs
 nothing.
+
+### PlutoSDR / Pluto+ (AD936x over libiio)
+
+A **PlutoSDR** (or a Pluto+/LibreSDR board running the same ADI firmware) is
+enumerated as `pluto:<context>` and captured with `iio_readdev`:
+
+```
+modules/01_radio.sh --list-tsv      # pluto:usb:1.9.5 and pluto:ip:192.168.2.1 are one board, two doors
+modules/01_radio.sh --select 'pluto:ip:192.168.2.1'
+modules/01_radio.sh --record 5      # iio_attr tunes, iio_readdev streams ci16
+```
+
+- Two contexts, two rows: USB and Ethernet reach the same board differently, and
+  the Ethernet door survives a cable pull without re-enumerating.
+- The capture is `ci16` (the AD9361 is a 12-bit converter, samples are shifted
+  left by four); `01_radio --record` reports `format ci16` with the file so a
+  reader never guesses.
+- Gain writes set `gain_control_mode manual` first, because a `hardwaregain`
+  write in automatic mode is silently ignored.
+- Known limit: this tree has no Pluto **transmit** call. The TX verbs name the
+  driver they were proved against (`hackrf_transfer`) and refuse for anything
+  else rather than shipping an untested `iio_writedev` line.
 
 ### Tier 1 — receive only (~$30)
 

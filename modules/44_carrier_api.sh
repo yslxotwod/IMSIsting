@@ -1543,16 +1543,25 @@ Enumeration verbs (build requests, never send them — no gate):
                                limit and the stop condition; writes the run-file
                                and refuses to send. Exit 3, the handoff.
 
+Executor (gated — the only verb that opens a socket):
+  --execute <plan.tsv> --base <url> --i-have-a-lab-and-authorisation
+                               run an enumeration run-file against an API you
+                               own, one request at a time, and report a 2xx
+                               answer to a deny row as unauthorised_success.
+                               Without the word it prints the handoff and
+                               exits 3. [--rate N/sec] [--max N] [--dry-run]
+
   --selftest                   verify parsers and plans, no network needed
   --menu                       interactive menu
 
-Scope: every verb is ungated, audit and enumeration alike. --enumerate and
+Scope: audit and enumeration verbs are ungated. --enumerate and
 --enumerate-subscribers parse the document, build requests and sequences, write
-them to disk and stop. Neither opens a socket and
-neither claims a response — this module does not send, so it can never report a
-subscriber as "found". Querying carrier APIs for identifiers you are not
-authorised for is a criminal offence in most jurisdictions under
-computer-misuse and privacy law, whatever the intent.
+them to disk and stop: neither opens a socket and neither claims a response.
+The one verb that sends is --execute, it runs only under the confirmation word,
+and it is the only place in this module that can report a subscriber as
+"found" — from an answer the target actually gave. Querying carrier APIs for
+identifiers you are not authorised for is a criminal offence in most
+jurisdictions under computer-misuse and privacy law, whatever the intent.
 EOF
             return 2 ;;
     esac
