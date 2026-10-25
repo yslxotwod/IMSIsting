@@ -3839,7 +3839,9 @@ otasm_selftest() {
     # WIB is refused with the reason on stderr, never invented.
     chk sat-wib-rc  "$(otasm_cli_main --wib-push >/dev/null 2>&1; echo $?)" "2"
     chk sat-wib-why "$(otasm_cli_main --wib-push 2>&1 >/dev/null | awk -F'\t' '$1=="WHY"' | wc -l | tr -d ' ')" "3"
-    chk sat-wib-stdout-empty "$(otasm_cli_main --wib-push 2>/dev/null | wc -c | tr -d ' ')" "0"
+    # A refusal is a handoff, not a shrug: it must name the document that
+    # unblocks it, or an operator is left with "no" and no next step.
+    chk sat-wib-unblock "$(otasm_cli_main --wib-push 2>&1 >/dev/null | grep -c 'SIMalliance WIB specification')" "1"
     # The TP layer is also decoded by a third-party TS 23.040 implementation
     # when one is importable. pycrate is not vendored here, so its absence is a
     # SKIP row and never a PASS.
