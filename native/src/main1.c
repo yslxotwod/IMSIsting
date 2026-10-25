@@ -23413,6 +23413,589 @@ gatk_build_attacks(AppState *state, const char *module_id,
     return outer;
 }
 
+/* ── the live feed ────────────────────────────────────────────────────
+ *
+ * Four pages watch a store that another process is still writing: the GSM
+ * catcher, the UMTS catcher, the 5G SUCI catcher and the evil twin. They show
+ * the same shape -- a summary strip over a list of what crossed the air -- so
+ * it is one widget with three loaders, not four windows that drift apart.
+ *
+ * The page owns no cursor and no cache. A catcher store is small (hundreds of
+ * rows, one per message that answered a plan step) and it is rewritten from the
+ * top on every reload, which is the only way a window cannot show a message
+ * that was removed and cannot miss one appended while it was drawing.
+ *
+ * The loaders read what the modules write, in the column order they write it:
+ *   07/08 catcher.tsv  ts ts_epoch run step channel direction protocol
+ *                      message_type message [integrity] source
+ *   57     evidence.tsv ts run kind value source confidence
+ *   58     captures/suci_catcher/<capture>.tsv   record/frame/identity blocks
+ * A column that is not there is drawn as a dash, never as an empty string that
+ * reads like a value somebody measured.
+ */
+
+typedef enum {
+    LIVE_FEED_STEPS,      /* one row per message that answered a plan step */
+    LIVE_FEED_EVIDENCE,   /* what the twin saw, and how it learned it */
+    LIVE_FEED_SUCI,       /* identity responses read out of captures */
+} LiveFeedKind;
+
+typedef struct {
+    GtkWidget   *summary;
+    GtkWidget   *list;
+    char        *root;
+    LiveFeedKind kind;
+    const char  *store;     /* path relative to root, or a directory */
+    guint        timer;
+    char        *stamp;     /* newest mtime+size seen, so a reload is honest */
+} LiveFeed;
+
+typedef struct {
+    char    *value;
+    char    *badge;
+    char    *meta;
+    char    *icon;
+    char    *copy;
+    gboolean worn;          /* drawn with the closed/second-class badge */
+} LiveRow;
+
+static void
+live_row_free(gpointer data)
+{
+    LiveRow *row = data;
+
+    if (row == NULL)
+        return;
+    g_free(row->value);
+    g_free(row->badge);
+    g_free(row->meta);
+    g_free(row->icon);
+    g_free(row->copy);
+    g_free(row);
+}
+
+static LiveRow *
+live_row_new(const char *value, const char *badge, const char *meta,
+             const char *icon, gboolean worn, const char *copy)
+{
+    LiveRow *row = g_new0(LiveRow, 1);
+
+    row->value = g_strdup(value != NULL && *value != '\0' ? value : "-");
+    row->badge = g_strdup(badge != NULL ? badge : "");
+    row->meta = g_strdup(meta != NULL ? meta : "");
+    row->icon = g_strdup(icon != NULL ? icon : "network-cellular-symbolic");
+    row->worn = worn;
+    row->copy = g_strdup(copy != NULL ? copy : value);
+    return row;
+}
+
+static void
+live_feed_copy_clicked(GtkButton *button, gpointer user_data)
+{
+    const char *text = g_object_get_data(G_OBJECT(button), "live-line");
+    GdkClipboard *cb;
+
+    (void) user_data;
+    if (text == NULL || *text == '\0')
+        return;
+    cb = gdk_display_get_clipboard(gtk_widget_get_display(GTK_WIDGET(button)));
+    if (cb != NULL)
+        gdk_clipboard_set_text(cb, text);
+}
+
+static void
+live_feed_draw_row(GtkWidget *list, const LiveRow *row)
+{
+    GtkWidget *box;
+    GtkWidget *grip;
+    GtkWidget *left;
+    GtkWidget *head;
+    GtkWidget *id;
+    GtkWidget *meta;
+    GtkWidget *copy;
+
+    box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_add_css_class(box, "live-feed-row");
+
+    grip = gtk_image_new_from_icon_name(row->icon);
+    gtk_image_set_pixel_size(GTK_IMAGE(grip), 20);
+    gtk_widget_set_valign(grip, GTK_ALIGN_START);
+    gtk_widget_add_css_class(grip, "live-feed-glyph");
+
+    left = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+
+    id = gtk_label_new(row->value);
+    gtk_label_set_xalign(GTK_LABEL(id), 0.0f);
+    gtk_label_set_selectable(GTK_LABEL(id), TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(id), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(id, "live-feed-id");
+    gtk_box_append(GTK_BOX(head), id);
+
+    if (row->badge != NULL && *row->badge != '\0') {
+        GtkWidget *badge = gtk_label_new(row->badge);
+
+        gtk_label_set_xalign(GTK_LABEL(badge), 0.5f);
+        gtk_widget_add_css_class(badge, "live-feed-badge");
+        if (row->worn)
+            gtk_widget_add_css_class(badge, "closed");
+        gtk_widget_set_valign(badge, GTK_ALIGN_CENTER);
+        gtk_box_append(GTK_BOX(head), badge);
+    }
+    gtk_box_append(GTK_BOX(left), head);
+
+    if (row->meta != NULL && *row->meta != '\0') {
+        meta = gtk_label_new(row->meta);
+        gtk_label_set_xalign(GTK_LABEL(meta), 0.0f);
+        gtk_label_set_wrap(GTK_LABEL(meta), TRUE);
+        gtk_widget_add_css_class(meta, "live-feed-meta");
+        gtk_box_append(GTK_BOX(left), meta);
+    }
+    gtk_widget_set_hexpand(left, TRUE);
+    gtk_box_append(GTK_BOX(box), grip);
+    gtk_box_append(GTK_BOX(box), left);
+
+    copy = gtk_button_new_with_label("Copy");
+    gtk_widget_set_valign(copy, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(copy, "live-feed-copy");
+    gtk_widget_add_css_class(copy, "flat");
+    g_object_set_data_full(G_OBJECT(copy), "live-line",
+                           g_strdup(row->copy), g_free);
+    g_signal_connect(copy, "clicked",
+                     G_CALLBACK(live_feed_copy_clicked), NULL);
+    gtk_box_append(GTK_BOX(box), copy);
+
+    gtk_list_box_append(GTK_LIST_BOX(list), box);
+}
+
+/* "2026-10-17T10:42:03Z" -> "10:42:03", left alone when it is not a timestamp */
+static const char *
+live_clock(const char *ts)
+{
+    const char *t = strchr(ts != NULL ? ts : "", 'T');
+
+    return (t != NULL && strlen(t + 1) >= 8) ? t + 1 : (ts != NULL ? ts : "-");
+}
+
+static void
+live_rows_steps(GPtrArray *rows, const char *path, gboolean with_integrity)
+{
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    guint total = 0;
+
+    if (!g_file_get_contents(path, &text, NULL, NULL) || text == NULL)
+        return;
+    lines = g_strsplit(text, "\n", -1);
+    for (guint i = 1; lines[i] != NULL; i++)
+        if (*lines[i] != '\0')
+            total++;
+
+    for (guint i = 0; total > 0 && i < total && rows->len < 500; i++) {
+        g_auto(GStrv) f = g_strsplit(lines[total - i], "\t", 12);
+        const char *step = f[3] != NULL && *f[3] != '\0' ? f[3] : "";
+        const char *message = f[8] != NULL && *f[8] != '\0' ? f[8] : "";
+        g_autofree char *badge = NULL;
+        g_autofree char *meta = NULL;
+        g_autofree char *integrity = NULL;
+
+        if (g_strv_length(f) < 9)
+            continue;
+        badge = g_strdup_printf("step %s", *step != '\0' ? step : "?");
+        if (with_integrity && f[9] != NULL && *f[9] != '\0')
+            integrity = g_strdup_printf("  \u2022  integrity %s", f[9]);
+        meta = g_strdup_printf("%s  \u2022  %s  \u2022  %s  \u2022  %s%s  \u2022  %s",
+            live_clock(f[0]),
+            f[4] != NULL && *f[4] != '\0' ? f[4] : "channel -",
+            f[5] != NULL && *f[5] != '\0' ? f[5] : "direction -",
+            f[2] != NULL && *f[2] != '\0' ? f[2] : "-",
+            integrity != NULL ? integrity : "",
+            f[with_integrity ? 10 : 9] != NULL &&
+                *f[with_integrity ? 10 : 9] != '\0'
+                ? f[with_integrity ? 10 : 9] : "-");
+        g_ptr_array_add(rows, live_row_new(
+            *message != '\0' ? message : "-",
+            badge, meta,
+            f[5] != NULL && g_strcmp0(f[5], "uplink") == 0
+                ? "go-up-symbolic" : "go-down-symbolic",
+            FALSE, lines[total - i]));
+    }
+}
+
+static void
+live_rows_evidence(GPtrArray *rows, const char *path)
+{
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    guint total = 0;
+
+    if (!g_file_get_contents(path, &text, NULL, NULL) || text == NULL)
+        return;
+    lines = g_strsplit(text, "\n", -1);
+    for (guint i = 1; lines[i] != NULL; i++)
+        if (*lines[i] != '\0')
+            total++;
+
+    for (guint i = 0; total > 0 && i < total && rows->len < 500; i++) {
+        g_auto(GStrv) f = g_strsplit(lines[total - i], "\t", 7);
+        const char *kind = f[2] != NULL ? f[2] : "";
+        const char *confidence = f[5] != NULL ? f[5] : "";
+        g_autofree char *meta = NULL;
+        const char *icon;
+
+        if (g_strv_length(f) < 6)
+            continue;
+        icon = g_strcmp0(kind, "imsi") == 0 ? "system-users-symbolic"
+             : g_strcmp0(kind, "imei") == 0 ? "phone-symbolic"
+             : g_strcmp0(kind, "tmsi") == 0 ? "dialog-password-symbolic"
+             : "network-cellular-symbolic";
+        /* advertised means the twin sent it and nobody confirmed a phone read
+           it, which is a weaker claim than a capture and is drawn as one */
+        meta = g_strdup_printf("%s  \u2022  %s  \u2022  %s  \u2022  %s",
+            live_clock(f[0]),
+            f[1] != NULL && *f[1] != '\0' ? f[1] : "run -",
+            f[4] != NULL && *f[4] != '\0' ? f[4] : "source -",
+            *confidence != '\0' ? confidence : "confidence -");
+        g_ptr_array_add(rows, live_row_new(f[3], kind, meta, icon,
+            g_strcmp0(confidence, "advertised") == 0, lines[total - i]));
+    }
+}
+
+/* The 5G records are block files, not a table: one block per identity
+   response, keyed by name, which is what a reader of one capture wants. The
+   blocks are read with owned copies of every value, because the split that
+   produced them is released as soon as its line is done and a pointer into it
+   would be a row drawn from freed memory. */
+typedef struct {
+    char *frame;
+    char *kind;
+    char *guti;
+    char *imsi;
+    char *record;
+} SuciBlock;
+
+static void
+suci_block_clear(SuciBlock *block)
+{
+    g_free(block->frame);
+    g_free(block->kind);
+    g_free(block->guti);
+    g_free(block->imsi);
+    g_free(block->record);
+    memset(block, 0, sizeof(*block));
+}
+
+/* "none" is what --capture writes when a field was absent, and drawing it as a
+   value would claim tshark read something it did not. */
+static gboolean
+suci_present(const char *value)
+{
+    return value != NULL && *value != '\0' && g_strcmp0(value, "none") != 0
+        && g_strcmp0(value, "-") != 0;
+}
+
+static void
+suci_block_emit(GPtrArray *rows, const SuciBlock *block, const char *base)
+{
+    g_autofree char *meta = NULL;
+
+    if (!suci_present(block->imsi) && !suci_present(block->guti))
+        return;
+    meta = g_strdup_printf("%s  \u2022  frame %s  \u2022  record %s  \u2022  %s",
+        base,
+        suci_present(block->frame) ? block->frame : "-",
+        suci_present(block->record) ? block->record : "-",
+        suci_present(block->kind) ? block->kind : "identity");
+    g_ptr_array_add(rows, live_row_new(
+        suci_present(block->imsi) ? block->imsi : block->guti,
+        suci_present(block->kind) ? block->kind : "identity",
+        meta,
+        suci_present(block->imsi) ? "system-users-symbolic"
+                                  : "dialog-password-symbolic",
+        !suci_present(block->imsi), meta));
+}
+
+static void
+live_rows_suci(GPtrArray *rows, const char *dir)
+{
+    g_autoptr(GDir) dh = NULL;
+    GPtrArray *files = g_ptr_array_new_with_free_func(g_free);
+    const char *name;
+
+    dh = g_dir_open(dir, 0, NULL);
+    if (dh != NULL) {
+        while ((name = g_dir_read_name(dh)) != NULL) {
+            g_autofree char *full = g_build_filename(dir, name, NULL);
+            GStatBuf st;
+
+            if (!g_str_has_suffix(name, ".tsv"))
+                continue;
+            if (g_stat(full, &st) != 0 || !S_ISREG(st.st_mode))
+                continue;
+            /* newest first: the capture that just finished is the one the
+               question is about */
+            g_ptr_array_add(files, g_strdup_printf("%020" G_GINT64_FORMAT "\t%s",
+                                                   (gint64) st.st_mtime, full));
+        }
+    }
+    g_ptr_array_sort(files, (GCompareFunc) strcmp);
+
+    for (guint i = files->len; i > 0 && rows->len < 500; i--) {
+        const char *entry = g_ptr_array_index(files, i - 1);
+        const char *full = strchr(entry, '\t');
+        g_autofree char *text = NULL;
+        g_auto(GStrv) lines = NULL;
+        g_autofree char *base = NULL;
+        SuciBlock block = { 0 };
+
+        if (full == NULL)
+            continue;
+        full++;
+        if (!g_file_get_contents(full, &text, NULL, NULL) || text == NULL)
+            continue;
+        base = g_path_get_basename(full);
+        lines = g_strsplit(text, "\n", -1);
+        for (guint j = 0; lines[j] != NULL; j++) {
+            g_auto(GStrv) kv = g_strsplit(lines[j], "\t", 2);
+
+            if (kv[1] == NULL)
+                continue;
+            if (g_strcmp0(kv[0], "record") == 0) {
+                suci_block_emit(rows, &block, base);
+                suci_block_clear(&block);
+                block.record = g_strdup(kv[1]);
+            } else if (g_strcmp0(kv[0], "frame") == 0) {
+                g_free(block.frame);
+                block.frame = g_strdup(kv[1]);
+            } else if (g_strcmp0(kv[0], "identity_type") == 0) {
+                g_free(block.kind);
+                block.kind = g_strdup(kv[1]);
+            } else if (g_strcmp0(kv[0], "guti") == 0) {
+                g_free(block.guti);
+                block.guti = g_strdup(kv[1]);
+            } else if (g_strcmp0(kv[0], "imsi") == 0) {
+                g_free(block.imsi);
+                block.imsi = g_strdup(kv[1]);
+            }
+        }
+        suci_block_emit(rows, &block, base);
+        suci_block_clear(&block);
+    }
+    g_ptr_array_unref(files);
+}
+
+/* Newest mtime and total size of whatever this feed reads, so a reload happens
+   when something changed and not on a timer alone. */
+static char *
+live_feed_source_stamp(const LiveFeed *feed)
+{
+    g_autofree char *path = g_build_filename(feed->root, feed->store, NULL);
+    GStatBuf st;
+
+    if (feed->kind != LIVE_FEED_SUCI) {
+        if (g_stat(path, &st) != 0)
+            return g_strdup("absent");
+        return g_strdup_printf("%" G_GINT64_FORMAT "/%" G_GINT64_FORMAT,
+                               (gint64) st.st_mtime, (gint64) st.st_size);
+    } else {
+        g_autoptr(GDir) dh = g_dir_open(path, 0, NULL);
+        const char *name;
+        gint64 newest = 0;
+        guint64 total = 0;
+
+        if (dh == NULL)
+            return g_strdup("absent");
+        while ((name = g_dir_read_name(dh)) != NULL) {
+            g_autofree char *full = g_build_filename(path, name, NULL);
+
+            if (!g_str_has_suffix(name, ".tsv"))
+                continue;
+            if (g_stat(full, &st) != 0)
+                continue;
+            if ((gint64) st.st_mtime > newest)
+                newest = (gint64) st.st_mtime;
+            total += (guint64) st.st_size;
+        }
+        return g_strdup_printf("%" G_GINT64_FORMAT "/%" G_GUINT64_FORMAT,
+                               newest, total);
+    }
+}
+
+static guint
+live_feed_reload(LiveFeed *feed)
+{
+    g_autoptr(GPtrArray) rows = g_ptr_array_new_with_free_func(live_row_free);
+    g_autofree char *path = g_build_filename(feed->root, feed->store, NULL);
+    g_autofree char *summary = NULL;
+    guint imsi = 0, other = 0;
+
+    for (GtkWidget *child = gtk_widget_get_first_child(feed->list);
+         child != NULL; child = gtk_widget_get_first_child(feed->list))
+        gtk_list_box_remove(GTK_LIST_BOX(feed->list), child);
+
+    switch (feed->kind) {
+    case LIVE_FEED_STEPS:
+        /* 08 keeps one more column than 07 does, and the store says which by
+           the header: reading the header is cheaper than a second enum. */
+        live_rows_steps(rows, path, strstr(feed->store, "umts") != NULL);
+        break;
+    case LIVE_FEED_EVIDENCE:
+        live_rows_evidence(rows, path);
+        break;
+    case LIVE_FEED_SUCI:
+        live_rows_suci(rows, path);
+        break;
+    }
+
+    for (guint i = 0; i < rows->len; i++) {
+        LiveRow *row = g_ptr_array_index(rows, i);
+
+        live_feed_draw_row(feed->list, row);
+        /* a suci carries an IMSI inside it: mcc+mmsin+msin concatenate to one,
+           so counting it as "other" would understate what the catcher caught */
+        if (g_strcmp0(row->badge, "imsi") == 0 ||
+            g_strcmp0(row->badge, "suci") == 0)
+            imsi++;
+        else
+            other++;
+    }
+
+    if (rows->len == 0) {
+        gtk_label_set_text(GTK_LABEL(feed->summary),
+            "nothing observed yet. The store is empty, which is not the same "
+            "as the catcher having failed");
+        return 0;
+    }
+    summary = g_strdup_printf(
+        "%u row%s  \u2022  %u IMSI  \u2022  %u other  \u2022  newest first",
+        rows->len, rows->len == 1 ? "" : "s", imsi, other);
+    gtk_label_set_text(GTK_LABEL(feed->summary), summary);
+    return rows->len;
+}
+
+static gboolean
+live_feed_tick(gpointer user_data)
+{
+    LiveFeed *feed = user_data;
+    g_autofree char *now = live_feed_source_stamp(feed);
+
+    if (g_strcmp0(now, feed->stamp) != 0) {
+        g_free(feed->stamp);
+        feed->stamp = g_strdup(now);
+        live_feed_reload(feed);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void
+live_feed_free(gpointer user_data)
+{
+    LiveFeed *feed = user_data;
+
+    if (feed == NULL)
+        return;
+    if (feed->timer != 0) {
+        g_source_remove(feed->timer);
+        feed->timer = 0;
+    }
+    g_free(feed->root);
+    g_free(feed->stamp);
+    g_free(feed);
+}
+
+static void
+live_feed_refresh_clicked(GtkButton *button, gpointer user_data)
+{
+    LiveFeed *feed = user_data;
+
+    (void) button;
+    g_free(feed->stamp);
+    feed->stamp = live_feed_source_stamp(feed);
+    live_feed_reload(feed);
+}
+
+/* The whole window: a strip that says what is in the store, a list that shows
+   it, and the path underneath so the file can be read with the tools that
+   wrote it. */
+static GtkWidget *
+live_feed_window(AppState *state, const char *module_id, GtkWidget *status,
+                 LiveFeedKind kind, const char *store, GtkWidget *extra_controls)
+{
+    g_autofree char *root = imsisting_root();
+    GtkWidget *window;
+    GtkWidget *head;
+    GtkWidget *scroll;
+    GtkWidget *list;
+    GtkWidget *refresh;
+    GtkWidget *note;
+    LiveFeed *feed = g_new0(LiveFeed, 1);
+
+    feed->root = g_strdup(root);
+    feed->store = store;
+    feed->kind = kind;
+    feed->stamp = live_feed_source_stamp(feed);
+
+    (void) state;
+    (void) module_id;
+    (void) status;
+
+    window = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_add_css_class(window, "live-feed-window");
+    if (extra_controls != NULL)
+        gtk_box_append(GTK_BOX(window), extra_controls);
+
+    head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    feed->summary = gtk_label_new("reading the store");
+    gtk_label_set_xalign(GTK_LABEL(feed->summary), 0.0f);
+    gtk_widget_set_hexpand(feed->summary, TRUE);
+    gtk_widget_set_valign(feed->summary, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(feed->summary, "live-feed-summary");
+    refresh = gtk_button_new_with_label("Refresh");
+    gtk_widget_set_valign(refresh, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(refresh, "flat");
+    gtk_box_append(GTK_BOX(head), feed->summary);
+    gtk_box_append(GTK_BOX(head), refresh);
+    gtk_box_append(GTK_BOX(window), head);
+
+    list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
+    gtk_widget_set_vexpand(list, TRUE);
+    gtk_widget_add_css_class(list, "live-feed-list");
+    scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+        GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), list);
+    /* Long on purpose: this is a window to watch, not a preview. Six hundred
+       pixels holds a dozen rows, which is a minute of a catcher's traffic, and
+       the list grows with the page when the page is taller than that. */
+    gtk_widget_set_size_request(scroll, -1, 620);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_widget_add_css_class(scroll, "live-feed-scroll");
+    gtk_box_append(GTK_BOX(window), scroll);
+
+    feed->list = list;
+    g_signal_connect(refresh, "clicked",
+                     G_CALLBACK(live_feed_refresh_clicked), feed);
+    g_signal_connect_swapped(scroll, "destroy",
+                             G_CALLBACK(live_feed_free), feed);
+    feed->timer = g_timeout_add_seconds(2, live_feed_tick, feed);
+
+    {
+        g_autofree char *full = g_build_filename(feed->root, store, NULL);
+
+        note = fkit_note(full);
+        gtk_box_append(GTK_BOX(window), note);
+    }
+    gtk_box_append(GTK_BOX(window), fkit_note(
+        "Reread every two seconds while this view is open, and redrawn only "
+        "when the store underneath actually changed. A row is written when "
+        "something crossed the air, so an empty list means nothing was "
+        "observed, not that the capture failed."));
+
+    live_feed_reload(feed);
+    return window;
+}
+
 /* 07_gsm_attack — the air side of the catcher sequence.
  *
  * The sequence says fourteen messages must cross the air. This view is where
@@ -23486,6 +24069,40 @@ gatk_build_catcher(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), join);
     mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+/* The live window: the same store the Catcher view reads, drawn as a feed that
+ * redraws itself while a capture is being classified, so a run can be watched
+ * rather than polled. It shows only what was observed -- an unseen step is
+ * absent from the feed, which is why the plan sits beside it on the Catcher
+ * view rather than in here.
+ */
+static GtkWidget *
+gatk_build_live(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CATCHER FEED, LIVE",
+        "What the sequence asked about and the air carried, newest first. The "
+        "store is reread every two seconds while this view is open; a run is "
+        "started on the Catcher view.", &body);
+    GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget *entry = NULL;
+    GtkWidget *res = result_rect_new(state, NULL);
+
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(controls), fkit_composer_verb(state, module_id,
+        status, &entry, "--catcher-watch", "Capture",
+        "capture.pcap, or empty to reread the store 03 filled",
+        "Classify a capture"));
+    gtk_box_append(GTK_BOX(controls), res);
+    mod_card_end();
+
+    gtk_box_append(GTK_BOX(body), live_feed_window(state, module_id, status,
+        LIVE_FEED_STEPS, "loot/gsm_attack/catcher.tsv", controls));
 
     (void) out;
     return outer;
@@ -23567,12 +24184,45 @@ uair_build_catcher(AppState *state, const char *module_id,
     return outer;
 }
 
+/* The UMTS side of the same window: one store, one more column (the integrity
+ * state of each message), so the feed says whether an RRC message was
+ * integrity protected when it crossed instead of only naming it.
+ */
+static GtkWidget *
+uair_build_live(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CATCHER FEED, LIVE",
+        "The eight steps as they are observed, newest first, with the integrity "
+        "state of every message that carried one. A run is started on the "
+        "Catcher view.", &body);
+    GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget *entry = NULL;
+    GtkWidget *res = result_rect_new(state, NULL);
+
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(controls), fkit_composer_verb(state, module_id,
+        status, &entry, "--observe", "Capture",
+        "capture.pcap with gsmtap type 12 frames",
+        "Classify a capture"));
+    gtk_box_append(GTK_BOX(controls), res);
+    mod_card_end();
+
+    gtk_box_append(GTK_BOX(body), live_feed_window(state, module_id, status,
+        LIVE_FEED_STEPS, "loot/umts_air/catcher.tsv", controls));
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry gatk_entries[] = {
     { "Message", "dialog-information-symbolic", NULL, gatk_build_decode },
     { "Build message", "document-send-symbolic", NULL, gatk_build_messages },
     { "Ciphers", "channel-secure-symbolic", NULL, gatk_build_ciphers },
     { "Attack steps", "security-high-symbolic", NULL, gatk_build_attacks },
     { "Catcher", "view-list-ordered-symbolic", NULL, gatk_build_catcher },
+    { "Catch feed", "media-record-symbolic", NULL, gatk_build_live },
 };
 /* 08_umts_air — 3G, where the cipher was broken properly and the identity was not.
  *
@@ -23962,6 +24612,7 @@ static ModuleSubmenuEntry uair_entries[] = {
     { "Build message", "document-send-symbolic", NULL, uair_build_messages },
     { "Cell impersonation", "network-transmit-receive-symbolic", NULL, uair_build_downlink },
     { "Catcher", "view-list-ordered-symbolic", NULL, uair_build_catcher },
+    { "Catch feed", "media-record-symbolic", NULL, uair_build_live },
 };
 /* 09_lte_attach — LTE Attach Forge.
  *
@@ -35344,11 +35995,45 @@ et_build_evidence(AppState *state, const char *module_id,
     return outer;
 }
 
+/* The twin's live window. Everything the twin learned lands in one store, and
+ * the store says how it was learned: a value read out of a capture is a
+ * stronger claim than a value the twin sent and nobody confirmed, so the
+ * second kind is drawn as a worn badge and never counted as a catch.
+ */
+static GtkWidget *
+et_build_live(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("TWIN FEED, LIVE",
+        "What crossed the air around the twin, newest first, with the source "
+        "and the confidence of every row. A row the twin sent and nobody "
+        "confirmed reads as advertised, not as a catch.", &body);
+    GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget *entry = NULL;
+    GtkWidget *res = result_rect_new(state, NULL);
+
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(controls), fkit_composer_verb(state, module_id,
+        status, &entry, "--evidence-collect", "Twin directory",
+        "loot/evil-twin/<name>, or empty to reread the newest twin",
+        "Collect the evidence again"));
+    gtk_box_append(GTK_BOX(controls), res);
+    mod_card_end();
+
+    gtk_box_append(GTK_BOX(body), live_feed_window(state, module_id, status,
+        LIVE_FEED_EVIDENCE, "loot/evil-twin/evidence.tsv", controls));
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry et_entries[] = {
     { "Overview", "dialog-information-symbolic", NULL, et_build_overview },
     { "Prepare", "document-new-symbolic", NULL, et_build_prepare },
     { "Run", "media-playback-start-symbolic", NULL, et_build_run },
     { "Evidence", "document-save-symbolic", NULL, et_build_evidence },
+    { "Twin feed", "media-record-symbolic", NULL, et_build_live },
 };
 
 /* 59_remote_node — the fleet.
@@ -38012,6 +38697,39 @@ suci_catcher_build_trace(AppState *state, const char *module_id,
     return outer;
 }
 
+/* The 5G live window. The catcher runs as a daemon and lands a block file per
+ * capture in captures/suci_catcher, so the feed reads those blocks newest file
+ * first and never reads the capture twice: --capture already classified it.
+ * The state of the daemon itself is the first thing to look at, because a
+ * catcher that is not running explains an empty feed better than any note.
+ */
+static GtkWidget *
+suci_catcher_build_live(AppState *state, const char *module_id,
+                        GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CATCHER FEED, LIVE",
+        "Identity responses read out of every capture the catcher has landed, "
+        "newest capture first, reread every two seconds.", &body);
+    GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget *entry = NULL;
+    GtkWidget *res = result_rect_new(state, NULL);
+
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(controls), fkit_composer_verb(state, module_id,
+        status, &entry, "--capture", "Capture",
+        "capture.pcap, NGAP carrying NAS-5GS",
+        "Classify a capture"));
+    gtk_box_append(GTK_BOX(controls), res);
+    mod_card_end();
+
+    gtk_box_append(GTK_BOX(body), live_feed_window(state, module_id, status,
+        LIVE_FEED_SUCI, "captures/suci_catcher", controls));
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry suci_catcher_entries[] = {
     { "Cell", "network-wireless-symbolic", NULL, suci_catcher_build_cell },
     { "Identity", "avatar-default-symbolic", NULL,
@@ -38019,6 +38737,7 @@ static ModuleSubmenuEntry suci_catcher_entries[] = {
     { "Codecs", "utilities-terminal-symbolic", NULL,
       suci_catcher_build_codecs },
     { "Trace", "document-open-symbolic", NULL, suci_catcher_build_trace },
+    { "Catch feed", "media-record-symbolic", NULL, suci_catcher_build_live },
 };
 
 
