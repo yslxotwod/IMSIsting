@@ -260,6 +260,79 @@ slnk_cmd_pseudonym_audit() {
         }' "$f"
 }
 
+# ── the rogue UE-to-network relay (TS 23.303 / 33.303) ───────────────────
+# A UE-to-network relay is a phone that forwards a remote UE's traffic. Any
+# relay that carries the traffic can read what is not encrypted above it and can
+# rewrite what is not integrity-protected above it; the interesting question is
+# therefore not whether the relay can see something but which layer a defence
+# would have to protect to stop it. The interposition is a model: the config
+# names the relay's layer and the trace layer names the protocols.
+slnk_relay_usage() {
+    cat >&2 <<'EOF'
+ERROR	usage: --relay-interpose <config>
+	config keys: relay_layer=layer2|layer3, traffic=http|dns|https|quic|all
+EOF
+}
+slnk_cmd_relay_interpose() {
+    local file="${1:-}"
+    if [[ -z "$file" ]]; then slnk_relay_usage; return 2; fi
+    [[ -f "$file" ]] || {
+        printf 'WHY\ta relay interposition is a claim about traffic, so an absent config names no traffic\n' >&2
+        printf 'ERROR\tno such config: %s\n' "$(slnk_sanitize "$file")" >&2
+        return 1
+    }
+    local layer="" traffic="all" line k v
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" == *=* ]] || continue
+        k=$(printf '%s' "${line%%=*}" | tr -d ' ' | tr 'A-Z' 'a-z'); v="${line#*=}"
+        case "$k" in
+            relay_layer|layer) layer="$v" ;;
+            traffic|traffic_kind) traffic="$v" ;;
+        esac
+    done < "$file"
+    case "$layer" in
+        layer2|l2|'' ) layer="layer2" ;;
+        layer3|l3 )    layer="layer3" ;;
+        * ) printf 'ERROR\trelay_layer must be layer2 or layer3\n' >&2; return 2 ;;
+    esac
+    case "$traffic" in
+        http|dns|https|quic|all) ;;
+        * ) printf 'ERROR\ttraffic must be http, dns, https, quic or all\n' >&2; return 2 ;;
+    esac
+    local n=0
+    printf 'relay_layer\t%s\n' "$layer"
+    printf 'traffic\t%s\n' "$traffic"
+    if [[ "$layer" == "layer2" ]]; then
+        printf 'sees\tLayer-2 frames of the remote UE: every IP packet, because the relay carries them\n'
+        printf 'sees\tDNS queries in the clear unless the remote UE uses a resolver the relay cannot see (DoH/DoT)\n'
+        printf 'sees\tTLS and QUIC handshakes: server names, certificate chains and packet timing\n'
+        printf 'sees\tIP addresses and ports, which is the remote UE traffic pattern even with no plaintext\n'
+        printf 'can_do\tdrop, delay, reorder or duplicate any packet, and the remote UE has no way to tell a relay loss from a radio loss\n'
+        printf 'can_do\trewrite plaintext DNS answers when the query is not protected\n'
+        printf 'can_do\treset a TCP association or redirect a plaintext HTTP request\n'
+        printf 'cannot\bread or forge an end-to-end TLS or QUIC payload, which is what a VPN or DoH would give the remote UE\n'
+    else
+        printf 'sees\tthe remote UE traffic only as far as the relay terminates the tunnel, which is the Layer-3 design\n'
+        printf 'can_do\tsubstitute its own endpoint and terminate TLS, if the remote UE does not pin the server certificate\n'
+        printf 'cannot\tskip a certificate the remote UE validates, which is the reason to pin at the application layer\n'
+    fi
+    printf 'finding\trelay_position\tHIGH\tthe relay is on the path for every packet the remote UE sends, before any protection the remote UE applies above it\n'; n=$((n+1))
+    if [[ "$traffic" == "http" || "$traffic" == "dns" || "$traffic" == "all" ]]; then
+        printf 'finding\tplaintext_visible\tHIGH\t%s traffic crosses the relay in clear text, so the relay reads it and can change it\n' "$traffic"; n=$((n+1))
+    else
+        printf 'finding\tmetadata_only\tMEDIUM\t%s traffic keeps its payload, but the relay still learns destinations and timing\n' "$traffic"; n=$((n+1))
+    fi
+    printf 'finding\tdetection_hard\tHIGH\tnothing in the remote UE protocol stack names the relay, so a defence has to come from the above layers (VPN, DoH, pinned certificates) or from a network-side relay audit\n'; n=$((n+1))
+    printf 'detect\tlatency\tone extra PC5 hop inflates round-trip time by the relay processing time, which a consistent baseline can show\n'
+    printf 'detect\tl2id\tthe relay Layer-2 ID is visible in the PC5 scheduling the remote UE sees\n'
+    printf 'detect\tpath\tthe remote UE network path ends where the relay is, so a traceroute stops at the relay subnet\n'
+    printf 'verdict\trelay_sees_traffic\n'
+    printf 'findings\t%d\n' "$n"
+    printf 'ref\t3GPP TS 23.303 (proximity services), TS 33.303 (security for proximity services)\n'
+    printf 'note\tthe relay is not a break of the radio; it is a break of the trust chain the remote UE walked into when it picked the relay\n'
+}
+
 slnk_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -339,6 +412,18 @@ slnk_selftest() {
     chk pau-missing "$(slnk_cmd_pseudonym_audit "$d/nope.tsv" 300 >/dev/null 2>&1; echo $?)" "1"
     chk pau-noargs "$(slnk_cmd_pseudonym_audit >/dev/null 2>&1; echo $?)" "2"
     chk pau-bad-bucket "$(slnk_cmd_pseudonym_audit "$d/trace.tsv" zero >/dev/null 2>&1; echo $?)" "2"
+    # 10. The rogue relay: position, plaintext, and the refusal paths.
+    printf 'relay_layer=layer2\ntraffic=dns\n' > "$d/rel.conf"
+    local ro; ro=$(slnk_cmd_relay_interpose "$d/rel.conf")
+    chk ri-layer      "$(awk -F'\t' '$1=="relay_layer"{print $2}' <<<"$ro")" "layer2"
+    chk ri-position   "$(awk -F'\t' '$1=="finding" && $2=="relay_position"{print $3}' <<<"$ro")" "HIGH"
+    chk ri-plaintext  "$(awk -F'\t' '$1=="finding" && $2=="plaintext_visible"{print $3}' <<<"$ro")" "HIGH"
+    chk ri-verdict    "$(awk -F'\t' '$1=="verdict"{print $2}' <<<"$ro")" "relay_sees_traffic"
+    printf 'relay_layer=layer3\ntraffic=https\n' > "$d/rel3.conf"
+    chk ri-meta       "$(slnk_cmd_relay_interpose "$d/rel3.conf" | awk -F'\t' '$1=="finding" && $2=="metadata_only"{print $3}')" "MEDIUM"
+    chk ri-bad-layer  "$(printf 'relay_layer=layer9\n' > "$d/bad.conf"; slnk_cmd_relay_interpose "$d/bad.conf" >/dev/null 2>&1; echo $?)" "2"
+    chk ri-missing    "$(slnk_cmd_relay_interpose "$d/none.conf" >/dev/null 2>&1; echo $?)" "1"
+    chk ri-noargs     "$(slnk_cmd_relay_interpose >/dev/null 2>&1; echo $?)" "2"
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -464,6 +549,7 @@ slnk_cli_main() {
         --bsm-plan)    slnk_bsm_plan ;;
         --bsm-audit)   slnk_bsm_audit "${1:-}" ;;
         --pseudonym-audit) slnk_cmd_pseudonym_audit "${1:-}" "${2:-}" ;;
+        --relay-interpose) slnk_cmd_relay_interpose "${1:-}" ;;
         --plan)        slnk_plan ;;
         --selftest)    slnk_selftest ;;
         --menu)        slnk_menu ;;
@@ -485,6 +571,7 @@ Usage: $0 COMMAND
   --bsm-audit <log.tsv>      kinematics over a BSM log (id, t_s, lat, lon,
                              speed_mps): teleports, impossible acceleration and
                              speed/position disagreements
+  --relay-interpose <config>  what a UE-to-network relay sees and can change
   --pseudonym-audit <trace.tsv> [bucket-s]
                             pseudonym rotation audit: reuse and co-temporal linkage
   --plan                     V2X handoff plan
