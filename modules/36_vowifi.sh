@@ -693,6 +693,102 @@ vowi_epdg_fqdn() {
     printf 'epdg.epc.mnc%03d.mcc%s.pub.3gppnetwork.org\n' "$mnc" "$mcc"
 }
 
+# ── I2 -- past the parser: ePDG selection, NAI privacy, fragmentation ───
+# Three things the parsing verbs could not answer: how the ePDG is chosen and
+# what that reveals before any tunnel exists, what the identity in the IKE
+# exchange gives away on the Wi-Fi link, and what an ePDG does with an IKE
+# SA_INIT that arrives in fragments.
+vowi_epdg_select() {
+    local mcc="${1:-001}" mnc="${2:-01}" imsi="${3:-001010123456789}"
+    local fqdn nai realm home
+    fqdn=$(vowi_epdg_fqdn "$mcc" "$mnc") || return $?
+    printf 'fqdn\t%s\n' "$fqdn"
+    printf 'dns_query\tNAPTR/SRV _epdg._udp.%s and _epdg._tcp.%s\n' "$fqdn" "$fqdn"
+    printf 'dns_leak\tthe queried name is the home PLMN, so the Wi-Fi network learns the subscriber home network from a plain UDP 53 lookup before any IKE exchange\n'
+    nai=$(vowi_nai "$imsi" "$mcc" "$mnc") || return $?
+    printf 'nai\t%s\n' "$nai"
+    printf 'nai_visibility\tNAI is in the IKEv2 IDi payload (RFC 7296 3.1: the identity is sent before any encryption exists) and in the EAP-AKA Response Identity\n'
+    printf 'imsi_in_nai\t%s\t0<IMSI>@nai.epc.mnc%s.mcc%s.3gppnetwork.org is the permanent form: the IMSI is on the air in the clear\n' \
+        "$imsi" "$(printf '%03d' "$mnc")" "$mcc"
+    printf 'privacy_form\tpseudonym@nai.epc.mnc%s.mcc%s.3gppnetwork.org -- the temporary identity is all the Wi-Fi side and an observer should see (TS 33.402 identity privacy)\n' \
+        "$(printf '%03d' "$mnc")" "$mcc"
+    printf 'realm_routing\tthe realm in the NAI decides which ePDG and which AAA proxy chain answers; the home PLMN is derivable from it by design\n'
+    printf 'epdg_selection\tTS 23.402 4.5.4: the UE builds the FQDN from its own PLMN, DNS-resolves it, and connects to the ePDG; the visited network is not consulted except when the home PLMN provides no ePDG\n'
+    printf 'finding\tcleartext_imsi\tHIGH\ta UE that uses the permanent NAI puts its IMSI on the WLAN: the decorated form 0<IMSI>@nai... is identity disclosure before the tunnel exists\n'
+    printf 'finding\thome_plmn_leak\tMEDIUM\teven with a pseudonym, the realm names the home PLMN: a Wi-Fi hot spot learns which operator the handset belongs to before the first IPsec packet\n'
+    printf 'finding\tprivate_dns\tINFO\tthe FQDN query is a plain query to the local resolver unless DoH/DoT is in use; every ePDG discovery is a record of the handset in the visited network\n'
+    printf 'detect\tin the ePDG AAA logs, alert on NAI values that start with a digit followed by a 15-digit IMSI (permanent form), and on a single pseudonym realm reused across many sessions\n'
+    printf 'verdict\tthe selection half of VoWiFi is a DNS lookup and an identity in a cleartext payload: the tunnel protects what follows, not what selects it\n'
+    return 0
+}
+
+vowi_eap_privacy() {
+    local imsi="${1:-001010123456789}" mcc="${2:-001}" mnc="${3:-01}" pseudo="${4:-psn12345}"
+    [[ "$imsi" =~ ^[0-9]{6,15}$ ]] || { printf 'ERROR\tIMSI must be 6..15 digits\n' >&2; return 2; }
+    local realm="nai.epc.mnc$(printf '%03d' "$mnc").mcc$mcc.3gppnetwork.org"
+    printf 'realm\t%s\n' "$realm"
+    printf 'permanent\t0%s@%s\n' "$imsi" "$realm"
+    printf 'pseudonym\t%s@%s\n' "$pseudo" "$realm"
+    printf 'nai_hex\t%s\n' "$(printf '%s' "0${imsi}@${realm}" | od -An -tx1 | tr -d ' \n')"
+    printf 'observer_sees\tthe IDi payload of the first IKE_SA_INIT, in the clear, before any key exists (RFC 7296 3.1)\n'
+    printf 'eap_identity\tEAP-AKA Identity Request comes later and goes through the ePDG to the AAA: the ePDG and the local network see both forms\n'
+    printf 'linkability\ta stable pseudonym links every session from one handset; freshness is the only defence offered by the pseudonym scheme\n'
+    printf 'finding\tpermanent_nai\tHIGH\tthe 0<IMSI> form is a permanent identity on the WLAN; a UE configured with it leaks the subscriber identifier to any observe of the association\n'
+    printf 'finding\tpseudonym_reuse\tMEDIUM\tone pseudonym across sessions re-creates the linkability the design removed; rotate per session and never fall back to permanent silently\n'
+    printf 'finding\tfallback_silent\tMEDIUM\twhen the pseudonym is unknown the AAA asks for the permanent identity via EAP-AKA Identity Request: the fallback is visible to the visited side, and it is where IMSI appears\n'
+    printf 'detect\tcount Identity Request/Response exchanges per association, and alert on any permanent-form NAI from a handset that previously used a pseudonym\n'
+    printf 'verdict\tEAP-AKA privacy is a property of the UE configuration and the AAA behaviour, not of IKEv2: the protocol carries whatever the UE puts in IDi\n'
+    return 0
+}
+
+vowi_ike_frag() {
+    local mtu="${1:-1280}"
+    [[ "$mtu" =~ ^[0-9]+$ ]] && (( mtu >= 500 && mtu <= 9000 )) || {
+        printf 'ERROR\t--ike-frag takes an MTU between 500 and 9000\n' >&2; return 2; }
+    local payload=$(( mtu - 28 - 60 ))          # IPv4+UDP headers, IKE header
+    printf 'mtu\t%s\n' "$mtu"
+    printf 'payload_per_fragment\t%s\n' "$payload"
+    printf 'fragment_header\tnext payload (1 octet), critical bit and length (2 octets), fragment number (1), total fragments (1), total length (2 if the encoder sets it), then the wrapped payload\n'
+    printf 'wrapped\tRFC 7383 2: for IKE_SA_INIT the fragments carry the unencrypted payloads; the Initiator SPI in each fragment is the same, the Responder SPI is zero\n'
+    printf 'reassembly\tRFC 7383 5: the receiver reassembles before processing; total fragments is a promise, and the promise is what a hostile sender breaks\n'
+    printf 'finding\tfragment_flood\tHIGH\tan ePDG that holds a reassembly buffer per association and never limits the count of a fragment sets is a memory exhaustion target one SA_INIT away\n'
+    printf 'finding\toverlap_ambiguity\tMEDIUM\ttwo fragments claiming the same byte range are resolved differently by different implementations; the second copy should be discarded, and which one is not stated\n'
+    printf 'finding\tmissing_total\tMEDIUM\ta fragment set that never reaches its total fragments pins the buffer until a timer expires; the timer is the only bound\n'
+    printf 'finding\tdesync\tHIGH\tRFC 7383 2.1 permits a responder that does not support fragmentation to treat the SKF payload as an unknown payload: a refusal or an error indication separates the two, and the answer is a state probe\n'
+    printf 'detect\tcap the fragment sets per association and per source, log the total-fragment value against bytes received, and alert on any fragment with a total greater than 16\n'
+    printf 'verdict\tfragmentation is where a parser meets a resource: the fields are trivial and the accounting is the attack\n'
+    return 0
+}
+
+vowi_ike_frag_parse() {
+    local hex; hex=$(vowi_norm_hex "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --ike-frag-parse <hex>\n' >&2; return 2; }
+    (( ${#hex} % 2 == 0 )) && (( ${#hex} >= 28 )) || {
+        printf 'ERROR\tan IKE message is at least 28 octets of hex\n' >&2; return 2; }
+    local off=0
+    printf 'initiator_spi\t%s\n' "${hex:0:16}"
+    printf 'responder_spi\t%s\n' "${hex:16:16}"
+    local np=$(( 16#${hex:32:2} ))
+    printf 'next_payload\t%s\t%s\n' "$(printf '%02X' "$np")" "$(vowi_payload_name "$np")"
+    printf 'version\t%s\n' "${hex:34:2}"
+    printf 'exchange\t%s\t%s\n' "${hex:36:2}" "$(vowi_ike_name "$(( 16#${hex:36:2} ))")"
+    printf 'flags\t%s\n' "${hex:38:2}"
+    printf 'message_id\t%s\n' "${hex:40:8}"
+    printf 'length\t%s\n' "$(( 16#${hex:44:8} ))"
+    if (( np != 53 )); then
+        printf 'fragment_payload\tnone\tnext payload is %s, so this message is not a fragment (RFC 7383 uses payload type 53)\n' "$np"
+        return 0
+    fi
+    off=56                      # 28-octet IKE header, in hex digits
+    local pnp=$(( 16#${hex:$off:2} ))
+    printf 'fragment_next_payload\t%s\t%s\n' "$(printf '%02X' "$pnp")" "$(vowi_payload_name "$pnp")"
+    printf 'fragment_length\t%s\n' "$(( 16#${hex:$((off+2)):4} ))"
+    printf 'fragment_number\t%s\n' "$(( 16#${hex:$((off+6)):2} ))"
+    printf 'total_fragments\t%s\n' "$(( 16#${hex:$((off+8)):2} ))"
+    printf 'note\tfragment number and total are one octet each; a total of zero or a number above the total is malformed by construction\n'
+    return 0
+}
+
 vowi_plan() {
     cat <<'EOF'
 status	handoff
@@ -831,6 +927,28 @@ vowi_selftest() {
     chk nai-badimsi "$(vowi_nai 12 310 260 >/dev/null 2>&1; echo $?)" "2"
     chk epdg-badmcc "$(vowi_epdg_fqdn 31 260 >/dev/null 2>&1; echo $?)" "2"
 
+    # 4b. I2 -- selection, NAI privacy, fragmentation.
+    local sel; sel=$(vowi_epdg_select 310 260 310150123456789)
+    chk sel-fqdn     "$(printf '%s\n' "$sel" | awk -F'\t' '$1=="fqdn"{print $2}')" "epdg.epc.mnc260.mcc310.pub.3gppnetwork.org"
+    chk sel-nai      "$(printf '%s\n' "$sel" | awk -F'\t' '$1=="nai"{print $2}')" "0310150123456789@nai.epc.mnc260.mcc310.3gppnetwork.org"
+    chk sel-leak     "$(printf '%s\n' "$sel" | awk -F'\t' '$1=="finding" && $2=="cleartext_imsi"{print $3}')" "HIGH"
+    local pv; pv=$(vowi_eap_privacy 310150123456789 310 260 tmpP)
+    chk pv-perm      "$(printf '%s\n' "$pv" | awk -F'\t' '$1=="permanent"{print $2}')" "0310150123456789@nai.epc.mnc260.mcc310.3gppnetwork.org"
+    chk pv-pseudo    "$(printf '%s\n' "$pv" | awk -F'\t' '$1=="pseudonym"{print $2}')" "tmpP@nai.epc.mnc260.mcc310.3gppnetwork.org"
+    chk pv-fallback  "$(printf '%s\n' "$pv" | awk -F'\t' '$1=="finding" && $2=="fallback_silent"{print $3}')" "MEDIUM"
+    chk pv-badimsi   "$(vowi_eap_privacy 12 >/dev/null 2>&1; echo $?)" "2"
+    local fr; fr=$(vowi_ike_frag 1280)
+    chk frag-mtu     "$(printf '%s\n' "$fr" | awk -F'\t' '$1=="mtu"{print $2}')" "1280"
+    chk frag-per     "$(printf '%s\n' "$fr" | awk -F'\t' '$1=="payload_per_fragment"{print $2}')" "1192"
+    chk frag-flood   "$(printf '%s\n' "$fr" | awk -F'\t' '$1=="finding" && $2=="fragment_flood"{print $3}')" "HIGH"
+    chk frag-mtubad  "$(vowi_ike_frag 100 >/dev/null 2>&1; echo $?)" "2"
+    local ih; ih=$(vowi_ike_build 1122334455667788 0000000000000000 53 34 8 00000000)
+    local fp; fp=$(vowi_ike_frag_parse "${ih}0000040001")
+    chk fragparse-np "$(printf '%s\n' "$fp" | awk -F'\t' '$1=="fragment_next_payload"{print $2}')" "00"
+    chk fragparse-n  "$(printf '%s\n' "$fp" | awk -F'\t' '$1=="fragment_number"{print $2}')" "0"
+    chk fragparse-t  "$(printf '%s\n' "$fp" | awk -F'\t' '$1=="total_fragments"{print $2}')" "1"
+    chk fragparse-no "$(vowi_ike_frag_parse "" >/dev/null 2>&1; echo $?)" "2"
+
     # 5. Transform classifiers. Unknown is never 'ok' (MODULE_CONVENTIONS 16).
     chk encr-null "$(fld "$(vowi_encr_classify 11)" verdict)" "weak — no confidentiality"
     chk encr-null-gmac "$(fld "$(vowi_encr_classify 21)" name)" "ENCR_NULL_AUTH_AES_GMAC"
@@ -949,6 +1067,10 @@ vowi_cli_main() {
         --eap-parse)    vowi_eap_parse "${1:-}" ;;
         --nai)          vowi_nai "${1:-}" "${2:-}" "${3:-}" ;;
         --epdg)         vowi_epdg_fqdn "${1:-}" "${2:-}" ;;
+        --epdg-select)  vowi_epdg_select "${1:-001}" "${2:-01}" "${3:-001010123456789}" ;;
+        --eap-privacy)  vowi_eap_privacy "${1:-001010123456789}" "${2:-001}" "${3:-01}" "${4:-psn12345}" ;;
+        --ike-frag)     vowi_ike_frag "${1:-1280}" ;;
+        --ike-frag-parse) vowi_ike_frag_parse "${1:-}" ;;
         --encr)         vowi_encr_classify "${1:-}" ;;
         --integrity)    vowi_integrity_classify "${1:-}" ;;
         --walk)         vowi_payload_walk "${1:-}" "${2:-33}" ;;
@@ -979,6 +1101,15 @@ Usage: $0 COMMAND
   --eap-parse <hex>    decode an EAP-AKA packet
   --nai <imsi> <mcc> <mnc>   SWu NAI (TS 23.003)
   --epdg <mcc> <mnc>         ePDG discovery FQDN
+  --epdg-select <mcc> <mnc> [imsi]
+                             I2: selection FQDN, the DNS query that leaks
+                             the home PLMN, and the NAI the IKE carrys
+  --eap-privacy <imsi> [mcc] [mnc] [pseudonym]
+                             I2: permanent vs pseudonym NAI, what an
+                             observer of the Wi-Fi link sees, and fallback
+  --ike-frag [mtu]           I2: fragment header, reassembly and the
+                             four ways a fragment set becomes the attack
+  --ike-frag-parse <hex>     I2: read a message as an RFC 7383 fragment
   --encr <id>          encryption transform verdict
   --integrity <id>     integrity transform verdict
   --walk <hex> [type]  walk an IKEv2 payload chain
