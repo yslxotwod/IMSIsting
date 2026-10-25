@@ -344,15 +344,6 @@ Any **gpsd**-supported receiver (~$15–40) for `04_tower_map` and the survey
 paths. Without one those modules still run; they just have no coordinates to
 attach.
 
-### Regulated-spectrum note, stated once
-
-Transmitting on licensed cellular spectrum is regulated in every jurisdiction,
-and several of the modules above do exactly that. The tree is built for a lab,
-a faraday enclosure, or a network you control — which is why the transmit verbs
-are guarded, why they name the hardware they need, and why they exit non-zero
-rather than pretending. That guard is engineering, not a legal opinion, and it
-does not make an unlicensed transmission legal.
-
 ---
 
 ## How to run it
