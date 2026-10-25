@@ -1068,6 +1068,60 @@ lcve_cmd_coverage() {
     printf 'note\t%s\n' "an absent CVE is not a safe one: the corpus records what this tree can reproduce, and a newer advisory is unassessed until a row here reproduces it"
 }
 
+# ── reachability, without a claim ──────────────────────────────────────
+# R72. A catalogue entry names a bug in somebody else's product. The question a
+# report has to answer is not "which CVEs do you know" but "from where, and with
+# what". This verb answers it per entry and refuses the third question: this tree
+# carries no memory-corruption payload, no TrustZone exploit, so the claim for
+# every entry is that there is no exploit primitive here. A probe exercises a
+# neighbouring function (a parse, a fingerprint, a config read); a handoff names
+# a plan file and stops.
+lcve_reachability() {
+    local want="${1:-}"
+    local entries=0 mine=0 ota=0 lab=0 stp=0 card=0 nos=0 other=0
+    local id kind cls needs desc position capability
+    while IFS=$'\t' read -r id kind cls needs desc; do
+        [[ -n "$id" ]] || continue
+        [[ "$id" == \#* ]] && continue
+        if [[ -n "$want" && "$id" != "$want" ]]; then continue; fi
+        entries=$(( entries + 1 ))
+        mine=$(( mine + 1 ))
+        case "$needs" in
+            ota-testbed)             position="over-the-air: needs a transmitter inside a cell, so a testbed or a licence"; ota=$(( ota + 1 )) ;;
+            lab-network|lab-core)    position="lab network: a host beside the core, not a radio"; lab=$(( lab + 1 )) ;;
+            lab-stp)                 position="SS7 interconnect: a signalling point beside an STP"; stp=$(( stp + 1 )) ;;
+            sim-toolkit-harness|programmable-sim) position="card side: a programmable USIM or an OTA harness"; card=$(( card + 1 )) ;;
+            none|-)                  position="no special position: a capture of the interface is enough"; nos=$(( nos + 1 )) ;;
+            *)                       position="unclassified: the entry names $needs"; other=$(( other + 1 )) ;;
+        esac
+        if [[ "$kind" == probe ]]; then
+            capability="a probe exists here: it checks a version, a config or a decode of this implementation, not the bug"
+        else
+            capability="a plan file names the hardware or testbed; nothing in this tree emits a payload"
+        fi
+        printf 'entry\t%s\t%s\t%s\t%s\t%s\n' "$id" "$kind" "$cls" "$position" "$capability"
+        printf 'claim\t%s\t%s\n' "$id" "no_exploit_primitive"
+    done < <(lcve_cve_table)
+    if [[ -n "$want" && "$mine" -eq 0 ]]; then
+        printf 'ERROR\t%s is not in the LTE catalogue of this tree\n' "$(lcve_sanitize "$want")" >&2
+        printf 'WHY\tan unknown id has no reachability to report, and printing a row for it would invent an entry\n' >&2
+        return 1
+    fi
+    printf 'entries\t%d\n' "$mine"
+    printf 'positioned_over_the_air\t%d\n' "$ota"
+    printf 'positioned_lab_network\t%d\n' "$lab"
+    printf 'positioned_ss7_interconnect\t%d\n' "$stp"
+    printf 'positioned_card_side\t%d\n' "$card"
+    printf 'positioned_nowhere_special\t%d\n' "$nos"
+    printf 'positioned_unclassified\t%d\n' "$other"
+    printf 'primitive_available\t0\n'
+    printf 'claim\tno_exploit_primitive\tthis catalogue records what is known about other implementations; no entry is a payload, and the probe half only checks an implementation answers\n'
+    printf 'ref\tCVSS v3.1 attack vector is the vocabulary a report needs here; the product and version are the entry own\n'
+    printf 'verdict\tcatalogue_without_a_primitive\n'
+    return 0
+}
+
+
 lcve_selftest() {
     local bad=0
     chk() {
@@ -1435,6 +1489,21 @@ SIP
     chk coverage-horizon  "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="corpus_horizon"{print ($2~/^[0-9]{4}-12-31$/)?"yes":"no"}')" "yes"
     chk coverage-claim    "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="claim"{print $2}')" "coverage_is_a_snapshot"
     chk coverage-update   "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="update"{print (length($2)>40)?"yes":"no"}')" "yes"
+    # R72: reachability says where each entry has to stand and refuses to claim
+    # a primitive. The counters partition the catalogue: every entry lands in
+    # exactly one position bucket.
+    local reach first_id
+    reach=$(lcve_reachability)
+    chk reach-entries      "$(printf '%s\n' "$reach" | awk -F'\t' '$1=="entries"{print $2}')" "$(lcve_id_count)"
+    chk reach-primitive    "$(printf '%s\n' "$reach" | awk -F'\t' '$1=="primitive_available"{print $2}')" "0"
+    chk reach-verdict      "$(printf '%s\n' "$reach" | awk -F'\t' '$1=="verdict"{print $2}')" "catalogue_without_a_primitive"
+    chk reach-partition    "$(printf '%s\n' "$reach" | awk -F'\t' 'BEGIN{s=0} $1 ~ /^positioned_/{s+=$2} $1=="entries"{e=$2} END{print (s==e)?"yes":"no"}')" "yes"
+    chk reach-claims       "$(printf '%s\n' "$reach" | awk -F'\t' '$1=="claim" && NF==3 && $3!="no_exploit_primitive" && $2!="no_exploit_primitive"' | grep -c .)" "0"
+    chk reach-claim-rows   "$(printf '%s\n' "$reach" | awk -F'\t' '$1=="claim" && NF==3' | grep -c .)" "$(( $(lcve_id_count) + 1 ))"
+    first_id=$(lcve_cve_table | awk -F'\t' '$1 !~ /^#/ && NF>1 {print $1; exit}')
+    chk reach-one          "$(lcve_reachability "$first_id" | awk -F'\t' '$1=="entries"{print $2}')" "1"
+    chk reach-unknown      "$(lcve_reachability NOPE-0000 >/dev/null 2>&1; echo $?)" "1"
+
 
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1509,6 +1578,7 @@ lcve_cli_main() {
         --teid)        lcve_teid_hex "${1:-}" ;;
         --runs-tsv)    lcve_cmd_runs_tsv ;;
         --coverage)    lcve_cmd_coverage ;;
+        --reachability) lcve_reachability "${1:-}" ;;
         --selftest)    lcve_selftest ;;
         --menu)        lcve_menu ;;
         *)
