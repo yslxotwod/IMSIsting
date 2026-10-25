@@ -2261,10 +2261,114 @@ ss7_map_sai_res() {  # <vectors> <seed-string>
     ss7_tlv 30 "$list"
 }
 
+# The ATI answer body, written here rather than by an external encoder, so the
+# two readings of LocationInformation can both be produced on purpose:
+# TS 29.002 17.7.6 has ageOfLocationInformation untagged (INTEGER 02), while a
+# peer that encodes it as [0] produces 80. SubscriberInfo wraps both fields as
+# [0] locationInformation and [1] subscriberState.
+ss7_map_ati_res() {  # <untagged|tagged> [assumedIdle|camelBusy|notReachable|notProvided]
+    local age_form="${1:-untagged}" sstate="${2:-assumedIdle}"
+    case "$age_form" in untagged|tagged) ;; *) return 2 ;; esac
+    local age="0A" sst
+    case "$sstate" in
+        assumedIdle)   sst="8000" ;;
+        camelBusy)     sst="8100" ;;
+        notReachable)  sst="8200" ;;
+        notProvided)   sst="8300" ;;
+        *) return 2 ;;
+    esac
+    local age_tlv
+    if [[ "$age_form" == "tagged" ]]; then age_tlv=$(ss7_tlv 80 "$age"); else age_tlv=$(ss7_tlv 02 "$age"); fi
+    local loc=$(ss7_tlv a0 "$age_tlv$(ss7_tlv 81 "$(ss7_map_address 310150987654321)")")
+    local sub=$(ss7_tlv a1 "$sst")
+    ss7_tlv 30 "$loc$sub"
+}
+
+# Referee for that body. It does not decide which reading is right; it says
+# which reading the body uses, because the two encoders disagree and only the
+# parser on the far side settles it in practice.
+ss7_cmd_ati_answer() {  # <hex>
+    local hex="${1:-}"
+    [[ -n "$hex" ]] || { printf 'ERROR\t--ati-answer needs the answer hex\n' >&2; return 2; }
+    hex=$(ss7_nfc "$hex")
+    ss7_is_hex "$hex" || { printf 'ERROR\tthe answer is not hex: %s\n' "$(ss7_sanitize "$hex")" >&2; return 2; }
+    local dec param
+    dec=$(ss7_cmd_decode_map "$hex") || { printf 'ERROR\tthe envelope does not decode\n' >&2; return 1; }
+    param=$(printf '%s\n' "$dec" | awk -F'\t' '$1=="component"{print $7}')
+    [[ -n "$param" ]] || { printf 'ERROR\tno result body in this answer\n' >&2; return 1; }
+    printf 'message\tanyTimeInterrogation answer\n'
+    printf 'body_octets\t%s\n' "$(( ${#param} / 2 ))"
+    local off=0 t l h v
+    ss7_ber_at "$param" 0 || { printf 'ERROR\tthe body is not one TLV\n' >&2; return 1; }
+    printf 'body_tag\t%s\n' "$SS7_BTAG"
+    # The body arrives inside one or more ANY containers, so descend while the
+    # next level is still a bare SEQUENCE holding a SEQUENCE.
+    local guard=0
+    while [[ "$SS7_BTAG" == "30" ]] && (( guard < 4 )); do
+        local inner; inner=$(ss7_nfc "$SS7_BVAL")
+        ss7_ber_at "$inner" 0 || break
+        [[ "$SS7_BTAG" == "30" ]] || break
+        param="$inner"; guard=$(( guard + 1 ))
+    done
+    ss7_ber_at "$param" 0 || { printf 'ERROR\tthe body is not one TLV\n' >&2; return 1; }
+    printf 'body_tag\t%s\n' "$SS7_BTAG"
+    [[ "$SS7_BTAG" == "30" ]] || { printf 'finding\tnot_subscriber_info\tHIGH\tthe result must be a SubscriberInfo SEQUENCE (30)\n'; return 1; }
+    off=$SS7_BHL
+    local age_tag="" age_val="" has_loc=no has_sst=no sst_tag=""
+    printf 'element\ttag\tlength\tname\n'
+    while (( off < ${#param} )); do
+        ss7_ber_at "$param" "$off" || break
+        t=$SS7_BTAG; l=$SS7_BLEN; h=$SS7_BHL; v=$(ss7_nfc "${SS7_BVAL}")
+        case "$t" in
+            A0) has_loc=yes
+                printf 'element\t%s\t%s\tlocationInformation\n' "$t" "$l"
+                local i=0
+                while (( i < ${#v} )); do
+                    ss7_ber_at "$v" "$i" || break
+                    local it=$SS7_BTAG il=$SS7_BLEN ih=$SS7_BHL iv; iv=${SS7_BVAL}
+                    case "$it" in
+                        02) age_tag=untagged; age_val=$(ss7_nfc "$iv"); printf 'element.%s\ttag\t%s\tageOfLocationInformation (untagged INTEGER)\n' "$i" "$it" ;;
+                        80) age_tag=tagged;   age_val=$(ss7_nfc "$iv"); printf 'element.%s\ttag\t%s\tageOfLocationInformation as [0]\n' "$i" "$it" ;;
+                        81) printf 'element.%s\ttag\t%s\tvlr-number\n' "$i" "$it" ;;
+                        *)  printf 'element.%s\ttag\t%s\tcontext tag %s\n' "$i" "$it" "$it" ;;
+                    esac
+                    i=$(( i + ih + il ))
+                done ;;
+            A1) has_sst=yes
+                printf 'element\t%s\t%s\tsubscriberState\n' "$t" "$l"
+                sst_tag=${v:0:2}
+                case "$sst_tag" in
+                    80) printf 'subscriber_state\tassumedIdle\n' ;;
+                    81) printf 'subscriber_state\tcamelBusy\n' ;;
+                    82) printf 'subscriber_state\tnetworkDeterminedNotReachable\n' ;;
+                    83) printf 'subscriber_state\tnotProvidedFromVLR\n' ;;
+                    *)  printf 'subscriber_state\tunrecognised tag %s\n' "$sst_tag" ;;
+                esac ;;
+            A2) printf 'element\t%s\t%s\textensionContainer\n' "$t" "$l" ;;
+            *)  printf 'element\t%s\t%s\tcontext tag %s\n' "$t" "$l" "$t" ;;
+        esac
+        off=$(( off + h + l ))
+    done
+    printf 'has_location\t%s\nhas_subscriber_state\t%s\n' "$has_loc" "$has_sst"
+    case "$age_tag" in
+        untagged) printf 'age_form\tuntagged (02 %s)\n' "$age_val"
+                  printf 'finding\tpycrate_shape\tINFO\tageOfLocationInformation arrives untagged, which is what TS 29.002 17.7.6 defines and what pycrate writes here\n' ;;
+        tagged)   printf 'age_form\ttagged as [0] (80 %s)\n' "$age_val"
+                  printf 'finding\treferee_divergence\tMEDIUM\tthe body tags ageOfLocationInformation, so a peer built to the untagged definition will read a context tag it did not expect and may drop the field or the element\n' ;;
+        *)        printf 'age_form\tmissing\n'
+                  printf 'finding\tno_age\tMEDIUM\tthe location came back without an age, so the answer cannot be dated\n' ;;
+    esac
+    if [[ "$has_sst" == "no" ]]; then
+        printf 'finding\tno_subscriber_state\tINFO\tsubscriberState is OPTIONAL; an answer without it still dates and locates the subscriber\n'
+    fi
+    printf 'ref\t3GPP TS 29.002 17.7.5 (SubscriberInfo) and 17.7.6 (LocationInformation)\n'
+    printf 'verdict\tread: the body is a SubscriberInfo with %s location and %s subscriber state\n' "$has_loc" "$has_sst"
+}
+
 ss7_cmd_build_response() {
     local kind="${1:-}"; shift || true
     local inv=1 otid="" imsi="" msc="" wrap="" dpc=1 opc=2 cssn=6 ossn=8 rawparam=""
-    local vectors=1 seed="00112233" errcode=1
+    local vectors=1 seed="00112233" errcode=1 ageform=untagged sstate=assumedIdle
     while (( $# )); do
         case "$1" in
             --invoke)   inv="${2:-1}"; shift 2 ;;
@@ -2284,7 +2388,9 @@ ss7_cmd_build_response() {
             --vectors)  vectors="${2:-1}"; shift 2 ;;
             --seed)     seed="${2:-00112233}"; shift 2 ;;
             --code)     errcode="${2:-1}"; shift 2 ;;
-            --help|-h)  printf 'usage: --build-response <sri-ack|sri-sm-ack|ulr-ack|ati-ack> [--invoke N] [--otid hex] [--imsi <digits>] [--msc <digits>]\n'; return 0 ;;
+            --age-form) ageform="${2:-untagged}"; shift 2 ;;
+            --subscriber-state) sstate="${2:-assumedIdle}"; shift 2 ;;
+            --help|-h)  printf 'usage: --build-response <sri-ack|sri-sm-ack|ulr-ack|ati-ack|sai-ack|error> [--invoke N] [--otid hex] [--imsi <digits>] [--msc <digits>] [--vectors N] [--code N] [--age-form untagged|tagged] [--subscriber-state <chosen>]\n'; return 0 ;;
             *)          printf 'ERROR\t--build-response does not take %s\n' "$(ss7_sanitize "$1")" >&2; return 2 ;;
         esac
     done
@@ -2309,6 +2415,9 @@ ss7_cmd_build_response() {
         [[ "$vectors" =~ ^[1-9]$ ]] || {
             printf 'ERROR\t--vectors is 1 to 9: %s\n' "$(ss7_sanitize "$vectors")" >&2; return 2; }
         param=$(ss7_map_sai_res "$vectors" "$seed")
+    elif [[ "$kind" == "ati-ack" ]]; then
+        param=$(ss7_map_ati_res "$ageform" "$sstate") || {
+            printf 'ERROR\t--age-form is untagged|tagged and --subscriber-state is assumedIdle|camelBusy|notReachable|notProvided\n' >&2; return 2; }
     elif [[ "$kind" == "error" ]]; then
         [[ "$errcode" =~ ^[0-9]+$ ]] && (( errcode > 0 && errcode < 256 )) || {
             printf 'ERROR\t--code is 1..255: %s\n' "$(ss7_sanitize "$errcode")" >&2; return 2; }
@@ -2950,6 +3059,24 @@ ss7_selftest() {
     chk err-code       "$(printf '%s\n' "$srerr" | awk -F'\t' '$1=="error_code"{print $2}')" "2"
     chk err-tag        "$(printf '%s\n' "$srerr" | awk -F'\t' '$1=="hex"{print substr($2,1,2)}')" "64"
     chk err-badcode    "$(ss7_cmd_build_response error --code 300 >/dev/null 2>&1; echo $?)" "2"
+    # The ATI referee: one body, two readings of the age field, and the
+    # referee is expected to name which one it saw.
+    local aiu ait au at
+    aiu=$(ss7_cmd_build_response ati-ack --age-form untagged --otid 0000000C)
+    ait=$(ss7_cmd_build_response ati-ack --age-form tagged --otid 0000000C)
+    au=$(ss7_cmd_ati_answer "$(printf '%s\n' "$aiu" | awk -F'\t' '$1=="hex"{print $2}')")
+    at=$(ss7_cmd_ati_answer "$(printf '%s\n' "$ait" | awk -F'\t' '$1=="hex"{print $2}')")
+    chk ati-age-untagged "$(printf '%s\n' "$au" | awk -F'\t' '$1=="age_form"{print $2}')" "untagged (02 0A)"
+    chk ati-age-tagged   "$(printf '%s\n' "$at" | awk -F'\t' '$1=="age_form"{print $2}')" "tagged as [0] (80 0A)"
+    chk ati-shape-info   "$(printf '%s\n' "$au" | awk -F'\t' '$1=="finding" && $2=="pycrate_shape"{print $3}')" "INFO"
+    chk ati-diverge      "$(printf '%s\n' "$at" | awk -F'\t' '$1=="finding" && $2=="referee_divergence"{print $3}')" "MEDIUM"
+    chk ati-sstate       "$(printf '%s\n' "$au" | awk -F'\t' '$1=="subscriber_state"{print $2}')" "assumedIdle"
+    chk ati-busy         "$(ss7_cmd_ati_answer "$(ss7_cmd_build_response ati-ack --subscriber-state camelBusy --otid 0000000C | awk -F'\t' '$1=="hex"{print $2}')" | awk -F'\t' '$1=="subscriber_state"{print $2}')" "camelBusy"
+    chk ati-short        "$(ss7_cmd_ati_answer 30 >/dev/null 2>&1; echo $?)" "1"
+    chk ati-nothex       "$(ss7_cmd_ati_answer zz >/dev/null 2>&1; echo $?)" "2"
+    chk ati-noarg        "$(ss7_cmd_ati_answer >/dev/null 2>&1; echo $?)" "2"
+    chk ati-badge        "$(ss7_cmd_build_response ati-ack --age-form odd >/dev/null 2>&1; echo $?)" "2"
+    chk ati-badge2       "$(ss7_cmd_build_response ati-ack --subscriber-state odd >/dev/null 2>&1; echo $?)" "2"
     # A response wrapped in END carries the peer's destination transaction id.
     rout=$(ss7_cmd_build_response sri-ack --imsi 310150123456789 --otid 00000001)
     local rend; rend=$(ss7_cmd_decode_tcap "$(printf '%s' "$rout" | awk -F'\t' '$1=="hex"{print $2}')")
@@ -4398,6 +4525,7 @@ ss7_cli_main() {
         --sgsap-ie)      ss7_cmd_sgsap_ie "${1:-}" ;;
         --decode-map)    ss7_cmd_decode_map "${1:-}" ;;
         --parse-sai)     ss7_cmd_parse_sai "${1:-}" ;;
+        --ati-answer)    ss7_cmd_ati_answer "${1:-}" ;;
         --build-sri)     ss7_cmd_build_sri "${1:-}" "${2:-}" ;;
         --build-response) ss7_cmd_build_response "$@" ;;
         --dialogue)      ss7_cmd_dialogue "${1:-}" "${2:-}" ;;
@@ -4448,6 +4576,10 @@ Usage: $0 COMMAND
   --lab [msisdn]             start the peer, ask, pair, and report the verdict
   --build-sai <imsi> [n]     build a SendAuthenticationInfo MSU (n vectors, default 5)
   --parse-sai <answer-hex>   read the vectors back out of a SendAuthenticationInfo answer
+  --ati-answer <answer-hex>  referee an AnyTimeInterrogation answer body: names
+                             each element, and says whether
+                             ageOfLocationInformation is untagged (TS 29.002
+                             17.7.6) or wrongly tagged as [0]
   --build-psi <imsi>         build a ProvideSubscriberInfo MSU
   --build-ulr <imsi> [msc] [vlr]
                              build an UpdateLocation MSU

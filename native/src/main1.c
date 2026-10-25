@@ -5886,6 +5886,19 @@ static const char *const plain_keys[] = {
     "epdg_selection\tchoosing which gateway to talk to",
     "realm\tthe realm part of a NAI",
     "eap_identity\tthe identity offered in EAP",
+    "age_form\thow the age of the location is tagged",
+    "body_tag\tthe tag the answer body starts with",
+    "body_octets\thow many octets the answer body has",
+    "element\tone element of the answer body",
+    "has_location\twhether a location came back",
+    "no_age\tthe answer came back with no age of location",
+    "no_subscriber_state\tthe answer came back with no subscriber state",
+    "not_subscriber_info\tthe body is not the shape the operation returns",
+    "has_subscriber_state\twhether a subscriber state came back",
+    "referee\tthe reading a body is checked against",
+    "subscriber_state\tthe state the network reports for the subscriber",
+    "pycrate_shape\tthe encoder shape a tool produced",
+    "referee_divergence\ttwo encoders disagreeing about the same field",
 };
 
 /* Compare a bare key against one "key<TAB>words" row. */
@@ -6745,6 +6758,7 @@ static const ChipRow chip_rows[] = {
     { "26_ss7_map",          "--menu",                NEED_NO, DOES_READS },
     { "26_ss7_map",          "--opcode",              NEED_NO, DOES_READS },
     { "26_ss7_map",          "--parse-sai",           NEED_NO, DOES_READS },
+    { "26_ss7_map",        "--ati-answer",          NEED_NO, DOES_READS },
     { "26_ss7_map",          "--pc-format",           NEED_NO, DOES_READS },
     { "26_ss7_map",          "--plan",                NEED_NO, DOES_READS },
     { "26_ss7_map",          "--quiet",               NEED_NO, DOES_READS },
