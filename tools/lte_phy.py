@@ -559,7 +559,7 @@ def pucch_base_sequence(u):
     """r_u,0(n) for one RB (N = 12), TS 36.211 5.5.1.2.
 
     The standard tabulates N = 12..24; the N = 12 rows are the Zadoff-Chu
-    root sequence over 12 elements with the table's phase convention, which
+    root sequence over 12 elements with the phase convention that table defines, which
     is the closed form below (q = 1, and the constant phase per group is
     carried by the table, not by this tree). Written out rather than copied
     so a receiver can cross-correlate for one root and get an answer.
