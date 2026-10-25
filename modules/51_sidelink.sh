@@ -333,6 +333,95 @@ slnk_cmd_relay_interpose() {
     printf 'note\tthe relay is not a break of the radio; it is a break of the trust chain the remote UE walked into when it picked the relay\n'
 }
 
+# ── kinematic linkage across pseudonyms (H2) ─────────────────────────────
+# Pseudonym rotation is supposed to break the link between a vehicle and its
+# history. It does not break physics: when one certificate stops transmitting
+# and another starts, at the same place, at the same speed, in the same
+# direction, a few seconds later, the two are one vehicle. The analysis reads a
+# trace where each message carries a certificate id, a time and a position, and
+# links certificates whose trajectories continue each other.
+slnk_link_usage() {
+    cat >&2 <<'EOF'
+ERROR	usage: --linkage <trace.tsv> [--gap seconds] [--radius metres]
+	trace.tsv rows: <certificate-id> <t_seconds> <latitude> <longitude> <speed_mps> <heading_deg>
+EOF
+}
+slnk_cmd_linkage() {
+    local f="" gap=10 radius=100
+    while (( $# )); do
+        case "$1" in
+            --gap)    gap="${2:-}"; shift 2 || { slnk_link_usage; return 2; } ;;
+            --radius) radius="${2:-}"; shift 2 || { slnk_link_usage; return 2; } ;;
+            -*)       slnk_link_usage; return 2 ;;
+            *)        f="$1"; shift ;;
+        esac
+    done
+    if [[ -z "$f" ]]; then slnk_link_usage; return 2; fi
+    [[ -r "$f" ]] || {
+        printf 'WHY\tthe linkage is a claim about a capture, so an absent capture supports no claim\n' >&2
+        printf 'ERROR\tcannot read %s\n' "$(slnk_sanitize "$f")" >&2
+        return 1
+    }
+    [[ "$gap" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--gap wants whole seconds\n' >&2; return 2; }
+    [[ "$radius" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--radius wants whole metres\n' >&2; return 2; }
+    awk -F'\t' -v gap="$gap" -v radius="$radius" '
+        function dist(la1, lo1, la2, lo2) {
+            # equirectangular on a sphere of radius 6371000 m: good to a few
+            # metres at the scales a vehicle trace spans
+            return 6371000 * 3.14159265358979 / 180 \
+                 * sqrt((la2 - la1)^2 + (cos((la1 + la2) / 2 * 3.14159265358979 / 180) * (lo2 - lo1))^2)
+        }
+        function adiff(a, b) { d = (a - b) % 360; if (d < 0) d += 360; return d > 180 ? 360 - d : d }
+        NF < 4 { next }
+        $2 !~ /^-?[0-9.]+$/ || $3 !~ /^-?[0-9.]+$/ || $4 !~ /^-?[0-9.]+$/ { next }
+        {
+            id = $1; t = $2 + 0; la = $3 + 0; lo = $4 + 0
+            sp = (NF >= 5 && $5 ~ /^-?[0-9.]+$/) ? $5 + 0 : -1
+            hd = (NF >= 6 && $6 ~ /^-?[0-9.]+$/) ? $6 + 0 : -1
+            n++
+            if (!(id in cnt)) { order[++nc] = id }
+            cnt[id]++
+            if (!(id in first_t) || t < first_t[id]) { first_t[id] = t; first_la[id] = la; first_lo[id] = lo; first_sp[id] = sp; first_hd[id] = hd }
+            if (!(id in last_t) || t > last_t[id]) { last_t[id] = t; last_la[id] = la; last_lo[id] = lo; last_sp[id] = sp; last_hd[id] = hd }
+        }
+        END {
+            if (n == 0) { print "ERROR\tno usable rows (want id, t, lat, lon)"; exit 2 }
+            links = 0; chains = 0
+            for (i = 1; i <= nc; i++) {
+                best = ""; bestscore = 999
+                for (j = 1; j <= nc; j++) {
+                    if (i == j) continue
+                    g = first_t[order[j]] - last_t[order[i]]
+                    if (g < 0 || g > gap) continue
+                    d = dist(last_la[order[i]], last_lo[order[i]], first_la[order[j]], first_lo[order[j]])
+                    # how far the vehicle could have travelled in the gap, with
+                    # a third again on top for acceleration and position noise
+                    reach = (last_sp[order[i]] >= 0 ? last_sp[order[i]] : 15) * g * 1.34 + radius
+                    if (d > reach) continue
+                    score = d + g
+                    if (score < bestscore) { bestscore = score; best = order[j]; best_g = g; best_d = d }
+                }
+                if (best != "") {
+                    links++
+                    printf "link\t%s\t%s\tgap_s=%d\tstep_m=%d\tconsistent=yes\n", order[i], best, best_g, best_d
+                }
+            }
+            printf "messages\t%d\n", n
+            printf "pseudonyms\t%d\n", nc
+            printf "linkable_successors\t%d\n", links
+            if (links > 0) {
+                printf "finding\tkinematic_linkage\tHIGH\t%d certificate change(s) are continuous in place, time and speed, so the rotation did not break the vehicle\n", links
+                printf "finding\trotation_insufficient\tHIGH\tthe pseudonyms change but the trajectory does not, so a passive observer joins them\n"
+            } else {
+                printf "finding\tno_kinematic_linkage\tINFO\tno certificate change in this capture continues a trajectory within %d s and %d m\n", gap, radius
+            }
+            verdict = links > 0 ? "pseudonyms_linkable" : "pseudonyms_unlinked_in_this_capture"
+            printf "verdict\t%s\n", verdict
+            printf "note\tthe linkage uses only what a receiver sees: where and when each certificate transmitted\n"
+            printf "ref\tETSI TS 102 941 (pseudonym rotation), TS 103 097\n"
+        }' "$f"
+}
+
 slnk_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -424,6 +513,18 @@ slnk_selftest() {
     chk ri-bad-layer  "$(printf 'relay_layer=layer9\n' > "$d/bad.conf"; slnk_cmd_relay_interpose "$d/bad.conf" >/dev/null 2>&1; echo $?)" "2"
     chk ri-missing    "$(slnk_cmd_relay_interpose "$d/none.conf" >/dev/null 2>&1; echo $?)" "1"
     chk ri-noargs     "$(slnk_cmd_relay_interpose >/dev/null 2>&1; echo $?)" "2"
+    # 11. Kinematic linkage across a rotated certificate.
+    printf 'aa\t0\t52.52000\t13.40500\t15\t90\naa\t5\t52.52000\t13.40550\t15\t90\nbb\t9\t52.52000\t13.40620\t15\t90\nbb\t14\t52.52000\t13.40670\t15\t90\n' > "$d/link.tsv"
+    local lo; lo=$(slnk_cmd_linkage "$d/link.tsv")
+    chk link-successors "$(awk -F'\t' '$1=="linkable_successors"{print $2}' <<<"$lo")" "1"
+    chk link-gap       "$(awk -F'\t' '$2=="aa" && $3=="bb"{print $4}' <<<"$lo")" "gap_s=4"
+    chk link-verdict   "$(awk -F'\t' '$1=="verdict"{print $2}' <<<"$lo")" "pseudonyms_linkable"
+    chk link-finding   "$(awk -F'\t' '$1=="finding" && $2=="kinematic_linkage"{print $3}' <<<"$lo")" "HIGH"
+    printf 'aa\t0\t0.00000\t0.00000\t10\t0\naa\t5\t0.00000\t0.00000\t10\t0\nbb\t9\t0.50000\t0.50000\t10\t0\n' > "$d/far.tsv"
+    chk link-far       "$(slnk_cmd_linkage "$d/far.tsv" --gap 10 --radius 50 | awk -F'\t' '$1=="verdict"{print $2}')" "pseudonyms_unlinked_in_this_capture"
+    chk link-bad-gap   "$(slnk_cmd_linkage "$d/link.tsv" --gap abc >/dev/null 2>&1; echo $?)" "2"
+    chk link-missing   "$(slnk_cmd_linkage "$d/none.tsv" >/dev/null 2>&1; echo $?)" "1"
+    chk link-noargs    "$(slnk_cmd_linkage >/dev/null 2>&1; echo $?)" "2"
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -550,6 +651,7 @@ slnk_cli_main() {
         --bsm-audit)   slnk_bsm_audit "${1:-}" ;;
         --pseudonym-audit) slnk_cmd_pseudonym_audit "${1:-}" "${2:-}" ;;
         --relay-interpose) slnk_cmd_relay_interpose "${1:-}" ;;
+        --linkage)       slnk_cmd_linkage "$@" ;;
         --plan)        slnk_plan ;;
         --selftest)    slnk_selftest ;;
         --menu)        slnk_menu ;;
@@ -571,6 +673,8 @@ Usage: $0 COMMAND
   --bsm-audit <log.tsv>      kinematics over a BSM log (id, t_s, lat, lon,
                              speed_mps): teleports, impossible acceleration and
                              speed/position disagreements
+  --linkage <trace.tsv> [--gap S] [--radius M]
+                            kinematic linkage: certificates whose trajectories continue each other
   --relay-interpose <config>  what a UE-to-network relay sees and can change
   --pseudonym-audit <trace.tsv> [bucket-s]
                             pseudonym rotation audit: reuse and co-temporal linkage
