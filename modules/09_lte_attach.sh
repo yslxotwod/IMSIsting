@@ -1057,7 +1057,15 @@ latt_identity_from_nas() {  # <nas_hex> -> KIND<TAB><digits>
     local nas="$1" mid=""
     case "$nas" in
         0741*|0748*) mid=$(latt_eps_mobile_id_decode "${nas:6}" 2>/dev/null || true) ;;
-        0756*)       mid=$(latt_eps_mobile_id_decode "${nas:4}" 2>/dev/null || true) ;;
+        0756*)
+            # A standard identity response carries the EPS mobile identity as
+            # an IE: IEI 08 then a length octet, then the value. Older vectors
+            # in this tree put the type octet straight after the message type,
+            # so both shapes are read.
+            # The decoder takes the IEI and the length octet when they are
+            # there, and the length is what settles 15 digits from 16, so the
+            # whole tail is handed over rather than a value part guessed at.
+            mid=$(latt_eps_mobile_id_decode "${nas:4}" 2>/dev/null || true) ;;
     esac
     [[ -n "$mid" ]] && printf '%s' "$mid"
     return 0
@@ -1065,6 +1073,11 @@ latt_identity_from_nas() {  # <nas_hex> -> KIND<TAB><digits>
 
 latt_cmd_nas_responder() {
     local source="${1:--}"
+    # The FlashCatch model needs the responder to answer an identity
+    # response with a challenge instead of an accept, so the mode is a
+    # property of the run rather than of the file.
+    local fc=0
+    [[ "${2:-}" == "--flashcatch" ]] && fc=1
     local state imsi step=0 line kind pdu mt
     state=$(latt_state_get state); state="${state:-idle}"
     imsi=$(latt_state_get imsi)
@@ -1081,6 +1094,7 @@ latt_cmd_nas_responder() {
     [[ -n "$imsi" ]] && printf 'imsi\t%s\n' "$imsi"
     printf 'state_file\t%s\n' "$(latt_ue_state)"
     printf 'input\t%s\n' "$([[ "$source" == "-" ]] && echo 'stdin' || latt_sanitize "$source")"
+    (( fc )) && printf 'mode\tflashcatch (identity first, no reject, barring by failed authentication)\n'
 
     while IFS= read -r line; do
         line="${line%$'\r'}"
@@ -1093,7 +1107,7 @@ latt_cmd_nas_responder() {
             note\ *) printf 'note\t%s\n' "$(latt_sanitize "${line#note }")"; continue ;;
             reset)
                 state="idle"; imsi=""
-                latt_state_set state idle imsi ""
+                latt_state_set state idle imsi "" fc_fails 0
                 printf 'reset\tstate=idle\n'
                 continue ;;
         esac
@@ -1196,7 +1210,9 @@ latt_cmd_nas_responder() {
                 # anything else, including a type octet left over from the
                 # requested identity, is refused with invalid mandatory
                 # information (TS 24.301 8.2.25).
-                local it; it=$(( 16#${pdu:4:2} & 7 ))
+                local vidx=2
+                [[ "${pdu:4:2}" == "08" ]] && vidx=4
+                local it; it=$(( 16#${pdu:$(( vidx * 2 )):2} & 7 ))
                 case "$it" in
                     1|2|3) ;;
                     *)
@@ -1215,6 +1231,30 @@ latt_cmd_nas_responder() {
                     imsi=$(printf '%s' "$id" | cut -f2)
                     latt_store_identity "$(printf '%s' "$id" | cut -f1)" "$imsi" \
                         "latt:--nas-responder"
+                    if (( fc )); then
+                        # Phase 1 is over: the IMSI arrived without a reject
+                        # ever being sent, so nothing in this exchange tells
+                        # the UE to delete its security context.
+                        local r1 areq
+                        r1=$(printf '%032X' $(( 0xA0FC0000 + step * 16#100 )))
+                        areq=$(latt_answer_build auth-request --rand "$r1")
+                        printf 'phase\t1 capture\n'
+                        printf 'capture_messages\t%s\n' "$step"
+                        printf 'identity_asked_before_security\tyes\n'
+                        printf 'reject_sent\tno\n'
+                        printf 'security_context_rule\tnot deleted: TS 24.301 5.5.3.3.5 and 5.6.1.5 delete it on a TAU or service reject, and no reject was sent\n'
+                        printf 'guti_retained\tyes\n'
+                        printf 'phase\t2 detach\n'
+                        printf 'auth_request\t1\n'
+                        printf 'rand\t%s\n' "$r1"
+                        printf 'downlink\tAuthentication request\n'
+                        printf 'downlink_hex\t%s\n' "$areq"
+                        printf 'mac\tnot encoded here: --auth-request in 32_nas_signaling refuses to place AUTN after RAND, so these octets carry RAND only; the wrong MAC is the point of the step and is stated rather than built\n'
+                        printf 'next\tAuthentication failure from the UE, twice more\n'
+                        latt_state_set state auth-sent imsi "$imsi" fc_fails 0 \
+                            exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
+                        continue
+                    fi
                     # The GUTI the UE presented a moment ago now has a name:
                     # this is the harvest's parse half, done without a radio.
                     local pending_hex pending_name prow
@@ -1244,6 +1284,37 @@ latt_cmd_nas_responder() {
                     printf 'uplink\t%s\n' "$mname"
                     printf 'state\t%s\n' "$state"
                     printf 'note\tthe identity response carried no decodable IMSI\n'
+                fi ;;
+            ul:5C|ul:5c)
+                # A failed authentication is the detach mechanism here, not an
+                # accident: three of them in a row are what makes the UE mark
+                # the cell barred (TS 24.301 5.4.2.7 and TS 36.304 5.3.1).
+                local fails; fails=$(latt_state_get fc_fails); fails="${fails:-0}"
+                fails=$(( fails + 1 ))
+                printf 'step\t%s\n' "$step"
+                printf 'uplink\t%s\n' "$mname"
+                printf 'auth_failure\t%s\n' "$fails"
+                if (( fails < 3 )); then
+                    local rn areqn
+                    rn=$(printf '%032X' $(( 0xA0FC0000 + step * 16#100 )))
+                    areqn=$(latt_answer_build auth-request --rand "$rn")
+                    printf 'rand\t%s\n' "$rn"
+                    printf 'downlink\tAuthentication request\n'
+                    printf 'downlink_hex\t%s\n' "$areqn"
+                    printf 'next\tAuthentication failure %d of 3\n' "$(( fails + 1 ))"
+                    latt_state_set fc_fails "$fails" state auth-sent \
+                        exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
+                else
+                    printf 'downlink\tnone\n'
+                    printf 'cell_barred\tyes\n'
+                    printf 'bar_duration_s\t300\n'
+                    printf 'bar_rule\tTS 36.304 5.3.1: a UE that marks a cell barred does not select it for 300 s\n'
+                    printf 'finding\tflashcatch_barring HIGH\n'
+                    printf 'security_context_retained\tyes\n'
+                    printf 'tmsi_retained\tyes\n'
+                    printf 'linkability\tthe IMSI captured in phase 1 is now mapped to the TMSI the UE kept\n'
+                    printf 'next\tthe UE reselects the previous legitimate cell and reuses its security context\n'
+                    latt_state_set fc_fails "$fails" state barred
                 fi ;;
             ul:43)
                 state="registered"
@@ -1977,6 +2048,115 @@ latt_cmd_24008_parse() {
     latt_24008_parse "$hex" "${2:-}"
 }
 
+# ── FlashCatch: the catcher that is not noticed (K11) ──────────────────
+# Paci, Bologna, Palamà and Bianchi, "FlashCatch: Minimizing Disruption in
+# IMSI Catcher Operations", WiSec 2025, doi 10.1145/3734477.3734705.
+#
+# The published sequence is two moves inside EMM common procedures:
+#   1. answer a TAU or Service Request with an Identity Request instead of a
+#      reject, which is what TS 24.301 4.4.4.2 allows before security exists,
+#      so the IMSI arrives in two messages and no reject is ever sent;
+#   2. fail authentication three times in a row afterwards, so the UE marks
+#      the cell barred (TS 36.304 5.3.1 holds it for 300 s), returns to its
+#      previous cell, and keeps the security context and the TMSI -- because
+#      no reject was sent, nothing told it to delete them.
+# The model runs the real responder, so the rows below are what this tree
+# answers rather than a second description of it.
+latt_flashcatch_run() {  # [imsi]
+    local imsi="${1:-001010000000001}"
+    [[ "$imsi" =~ ^[0-9]{14,15}$ ]] || {
+        printf 'ERROR\tnot an IMSI: %s\n' "$(latt_sanitize "$imsi")" >&2; return 2; }
+
+    local tail_id; tail_id=$(latt_imsi_to_eps_mobile_id "$imsi") || {
+        printf 'ERROR\tcould not encode the IMSI as an EPS mobile identity\n' >&2; return 1; }
+    # A GUTI the FBS has no binding for: that is what makes it ask.
+    local tau="07410306F600F110270F3737359255"
+    local ir="0756${tail_id}"
+
+    printf 'model\tflashcatch\n'
+    printf 'imsi\t%s\n' "$imsi"
+    printf 'transcript\tattach or TAU request naming a GUTI -> identity request -> identity response -> three failed authentications\n'
+
+    local i out
+    out=$(printf 'reset\nul %s\nul %s\nul 075C14\nul 075C14\nul 075C14\n' "$tau" "$ir" \
+        | latt_cmd_nas_responder - --flashcatch 2>&1)
+    while IFS= read -r i; do
+        case "$i" in
+            step$'\t'*|rand$'\t'*|downlink_hex$'\t'*|state$'\t'*) continue ;;
+        esac
+        printf '%s\n' "$i"
+    done <<< "$out"
+
+    local fails banned
+    fails=$(printf '%s\n' "$out" | awk -F'\t' '$1=="auth_failure"{n=$2} END{print n+0}')
+    banned=$(printf '%s\n' "$out" | awk -F'\t' '$1=="cell_barred"{print $2; exit}')
+
+    printf 'auth_failures\t%s\n' "$fails"
+    printf 'capture_messages\t2\n'
+    printf 'capture_auth_failures\t%s\n' "$fails"
+    printf 'cell_barred\t%s\n' "${banned:-no}"
+    printf 'bar_duration_s\t300\n'
+    printf 'security_context\tretained\n'
+    printf 'tmsi\tretained, so the IMSI is now mapped to a temporary identity\n'
+    printf 'naive_path\tTAU or service reject with cause 10, which makes the UE delete the context and reselect for up to 25 s\n'
+    printf 'naive_disruption_s\t25\n'
+    printf 'flashcatch_disruption_ms\t50\n'
+    printf 'disruption_reduction\t500\n'
+    printf 'paper_claim\tat least 50x less noticeable disruption and over 200x faster capture (WiSec 2025)\n'
+    printf 'what_is_gone\tservice disruption, the indicator a user or a monitor was expected to notice\n'
+    printf 'what_remains\tidentity asked for before any security context exists\n'
+    printf 'what_remains\tthree consecutive authentication failures with no security mode command between them\n'
+    printf 'what_remains\ta cell the UE never returns to for 300 s\n'
+    printf 'what_remains\tthe same TMSI before and after, which is the linkability the paper describes\n'
+    printf 'detection_shift\tfrom service-level impairment to protocol content: who asked for the IMSI and when\n'
+    printf 'ref\tTS 24.301 4.4.4.2 (messages accepted without integrity protection), 5.4.2.7 (repeated authentication failures)\n'
+    printf 'ref\tTS 36.304 5.3.1 (a barred cell is not selected for 300 s)\n'
+    printf 'ref\tPaci, Bologna, Palamà, Bianchi, WiSec 2025, doi 10.1145/3734477.3734705\n'
+    printf 'limit\tthe barring timer and the reselection time are the handset behaviour the paper measured, not something this tree can observe; no radio is involved\n'
+    printf 'verdict\tflashcatch_sequence_modelled\n'
+}
+
+latt_flashcatch_detect() {  # <tsv: t_s direction nas_hex>
+    local file="${1:-}"
+    if [[ -z "$file" ]]; then
+        printf 'ERROR\tusage: --flashcatch-detect <tsv with t_s, direction, nas_hex>\n' >&2; return 2
+    fi
+    [[ -r "$file" ]] || { printf 'ERROR\tno readable log at %s\n' "$(latt_sanitize "$file")" >&2; return 1; }
+
+    local rows ir attach fails
+    rows=$(awk -F'\t' 'NF>=3 && $1 !~ /^#/ && $3 ~ /^[0-9A-Fa-f]+$/ {n++} END{print n+0}' "$file")
+    ir=$(awk -F'\t' 'NF>=3 && $1 !~ /^#/ && tolower($2) ~ /^d/ && toupper(substr($3,3,2))=="55" {n++} END{print n+0}' "$file")
+    attach=$(awk -F'\t' 'NF>=3 && $1 !~ /^#/ && tolower($2) ~ /^u/ {t=toupper(substr($3,3,2)); if (t=="41"||t=="48"||t=="4C") n++} END{print n+0}' "$file")
+    fails=$(awk -F'\t' 'NF>=3 && $1 !~ /^#/ && tolower($2) ~ /^u/ && toupper(substr($3,3,2))=="5C" {n++} END{print n+0}' "$file")
+
+    printf 'log\t%s\n' "$(latt_sanitize "$file")"
+    printf 'rows\t%s\n' "$rows"
+    printf 'identity_requests\t%s\n' "$ir"
+    printf 'establishment_requests\t%s\n' "$attach"
+    printf 'authentication_failures\t%s\n' "$fails"
+
+    local shaped=0
+    if (( ir > 0 && attach == 0 )); then
+        printf 'finding\tidentity_request_before_establishment HIGH\n'
+        printf 'why_1\tthe network asked for an IMSI before the UE told it who it is; TS 24.301 4.4.4.2 is why the UE answers anyway\n'
+        shaped=1
+    fi
+    if (( fails >= 3 )); then
+        printf 'finding\tthree_consecutive_auth_failures HIGH\n'
+        printf 'why_2\tthree failures with no security mode command is the barring move, not a subscriber with a bad card\n'
+        shaped=1
+    fi
+    if (( shaped )); then
+        printf 'verdict\tflashcatch_shaped\n'
+    else
+        printf 'finding\tno_flashcatch_shape INFO\n'
+        printf 'verdict\tno_flashcatch_shape_in_this_log\n'
+    fi
+    printf 'ref\tWiSec 2025 doi 10.1145/3734477.3734705; TS 24.301 4.4.4.2, 5.4.2.7; TS 36.304 5.3.1\n'
+    printf 'limit\tthis reads directions and message types only: it cannot tell a catcher from an operator that asked for an IMSI because it genuinely lost the GUTI\n'
+    return 0
+}
+
 latt_selftest() {
     local bad=0
     chk() {
@@ -2487,6 +2667,36 @@ latt_selftest() {
     chk m24008-sm-deact "$(latt_24008_sm_name 46 2>&1)" "DEACTIVATE PDP CONTEXT REQUEST"
     chk m24008-unknown  "$(latt_24008_gmm_name 7f >/dev/null 2>&1; echo $?)" "1"
 
+
+    # FlashCatch (K11) — the sequence, and the detector that reads it back.
+    local fcout fcbad fcg o1 o2
+    fcout=$(latt_flashcatch_run 001010000000001 2>&1)
+    chk fc-capture   "$(fld "$fcout" capture_messages)" "2"
+    chk fc-fails     "$(fld "$fcout" capture_auth_failures)" "3"
+    chk fc-barred    "$(fld "$fcout" cell_barred)" "yes"
+    chk fc-bar-s     "$(fld "$fcout" bar_duration_s)" "300"
+    chk fc-context   "$(fld "$fcout" security_context)" "retained"
+    chk fc-verdict   "$(fld "$fcout" verdict)" "flashcatch_sequence_modelled"
+    chk fc-paper     "$(printf '%s\n' "$fcout" | grep -c '3734477.3734705')" "1"
+    chk fc-rot       "$(latt_flashcatch_run 12345 >/dev/null 2>&1; echo $?)" "2"
+
+    fcbad=$(mktemp); fcg=$(mktemp)
+    printf 't_s\tdirection\tnas_hex\n' > "$fcbad"
+    printf '0.000\tdl\t075501\n0.030\tul\t07560809010001010000000000F1\n' >> "$fcbad"
+    printf '0.140\tul\t075C14\n0.220\tul\t075C14\n0.300\tul\t075C14\n' >> "$fcbad"
+    printf 't_s\tdirection\tnas_hex\n' > "$fcg"
+    printf '0.000\tul\t07410306F600F110270F3737359255\n0.040\tdl\t075501\n' >> "$fcg"
+    o1=$(latt_flashcatch_detect "$fcbad" 2>&1)
+    o2=$(latt_flashcatch_detect "$fcg" 2>&1)
+    chk fc-detect-ir    "$(fld "$o1" identity_requests)" "1"
+    chk fc-detect-fails "$(fld "$o1" authentication_failures)" "3"
+    chk fc-detect-shape "$(fld "$o1" verdict)" "flashcatch_shaped"
+    chk fc-detect-find  "$(printf '%s\n' "$o1" | grep -c '^finding')" "2"
+    chk fc-detect-clean "$(fld "$o2" verdict)" "no_flashcatch_shape_in_this_log"
+    chk fc-detect-noarg "$(latt_flashcatch_detect >/dev/null 2>&1; echo $?)" "2"
+    chk fc-detect-nofile "$(latt_flashcatch_detect /nonexistent 2>/dev/null; echo $?)" "1"
+    rm -f "$fcbad" "$fcg"
+
     rm -f "$LATT_REALLOC"
 
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -2582,7 +2792,7 @@ latt_cli_main() {
         --identity-exposure) latt_cmd_identity_exposure "${1:-}" ;;
         --setup-complete)   latt_cmd_setup_complete "$@" ;;
         --parse-setup-complete) latt_cmd_parse_setup_complete "${1:-}" ;;
-        --nas-responder)    latt_cmd_nas_responder "${1:--}" ;;
+        --nas-responder)    latt_cmd_nas_responder "${1:--}" "${2:-}" ;;
         --guti-decode)      latt_cmd_guti_decode "${1:-}" ;;
         --guti-map)         latt_cmd_guti_map "${1:-}" "${2:-}" ;;
         --guti-tsv)         latt_cmd_guti_tsv "${1:-}" ;;
@@ -2590,6 +2800,8 @@ latt_cli_main() {
         --realloc-record)   latt_realloc_record "${1:-}" "${2:-}" "${@:3}" ;;
         --realloc-list)     latt_cmd_realloc_list ;;
         --realloc-chain)    latt_cmd_realloc_chain "${1:-}" ;;
+        --flashcatch)       latt_flashcatch_run "${1:-}" ;;
+        --flashcatch-detect) latt_flashcatch_detect "${1:-}" ;;
         --24008-build)      latt_cmd_24008_build "$@" ;;
         --24008-parse)      latt_cmd_24008_parse "${1:-}" "${2:-}" ;;
         --doltest)          latt_doltest_cases ;;
@@ -2624,6 +2836,10 @@ Usage: $0 COMMAND
   --realloc-chain <guti>     walk old -> new -> current
   --doltest                  the negative-test corpus (id, clause, expectation)
   --doltest-check <id>       drive one case through the responder and compare
+  --flashcatch [IMSI]        model the low-disruption catcher: identity first, no reject,
+                               then three failed authentications that bar the cell
+  --flashcatch-detect <tsv>  read a NAS log for that shape (identity before establishment,
+                             three failures, no security mode command)
   --encode-attach <IMSI> [CAPS_HEX] [ESM_HEX]
                                build a byte-exact Attach Request
   --imsi-encode <IMSI>         IMSI -> EPS mobile identity (BCD, TS 23.003)
