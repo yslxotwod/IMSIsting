@@ -1592,6 +1592,13 @@ Usage: $0 COMMAND
                        system puts in front of a record: version, LIID,
                        sequence, time, payload (ETSI TS 102 232-1 5.2)
   --li-pdu-parse <hex> read that header back
+  --hi2-build          encode the TS 33.108 HI2 payload itself as a record
+                       (an iRI-Report-record in APER): the LIID, the
+                       communication identifier and the timestamp are settable
+                       as modifiers, and the encoding is decoded back
+  --hi3-build          the same for HI3 content (Content_Report)
+  --hi2-parse <hex>    read an HI2 payload back, element by element
+  --hi3-parse <hex>    read an HI3 payload back
   --plan               network-side confirmation handoff
   --provision-target <conf> [--out <path>]
                        encode the provisioning request as a TS 33.108 HI1
