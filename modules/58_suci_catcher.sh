@@ -766,6 +766,64 @@ EOF
 # A capture is where the SUCI actually arrives. tshark is the dissector; this
 # reads its output rather than a private parse of the same frames, and refuses
 # honestly when the dissector is not installed instead of guessing at octets.
+# ── Devilray: would the phone notice ───────────────────────────────────
+# The catcher's own artifacts are what a modem sees first: the cell's
+# announcement and the NAS answer. This walks the built cell and the AMF
+# slice and reports, per signal, whether a modem that looks for catchers
+# has something to see. It is an audit of what this build does, not a
+# promise about any one handset's detector.
+sc_devilray() {   # [<plmn>]
+    local conf="$SC_ST/gnb.conf" amf="$SC_ST/amf.yaml"
+    local plmn="${1:-}"
+    [[ -r "$conf" && -r "$amf" ]] || {
+        printf 'ERROR\tno built cell — run --build-cell <plmn> first\n' >&2
+        printf 'WHY\tbeing detected is a question about the cell this build announces; without the config there is nothing to audit\n' >&2
+        return 2
+    }
+    local mcc mnc tac nssai
+    mcc=$(awk -F': *' '/^ *mcc:/{print $2; exit}' "$amf" 2>/dev/null)
+    mnc=$(awk -F': *' '/^ *mnc:/{print $2; exit}' "$amf" 2>/dev/null)
+    tac=$(awk -F': *' '/^ *tac:/{print $2; exit}' "$amf" 2>/dev/null)
+    nssai=$(awk -F': *' '/sst:/{print $2; exit}' "$amf" 2>/dev/null)
+    local flagged=0 total=6
+    local sig sum idreq
+    idreq=$(sc_identity_request_suci)
+
+    # 1. an identity request in plain NAS. A modem sees a network that skips
+    #    security mode and asks who it is; that ordering is the exposure.
+    printf 'signal\tplain_nas_identity\twould_notice\tyes\tevidence\t%s\tnote\tthe Identity Request goes out before any security mode, so the asking happens in the clear\n' "$idreq"
+    flagged=$(( flagged + 1 ))
+
+    # 2. ciphering: read what the slice offers.
+    local cipher
+    cipher=$(grep -i 'nea0\|nea1\|nea2\|null' "$amf" 2>/dev/null | head -1 || true)
+    if [[ -n "$cipher" ]]; then
+        printf 'signal\tciphering\twould_notice\tmaybe\tevidence\t%s\tnote\ta slice that offers a null or weak cipher is a known catcher tell; a phone that audits NEA0 flags it\n' "$(sc_sanitize "$cipher")"
+        flagged=$(( flagged + 1 ))
+    else
+        printf 'signal\tciphering\twould_notice\tunclear\tevidence\tno cipher line in the slice\tnote\topen5gs defaults decide this; the audit cannot claim what the run negotiated\n'
+    fi
+
+    # 3. PLMN: is this a network that should be here?
+    printf 'signal\tplmn_announced\twould_notice\tmaybe\tevidence\tmcc=%s mnc=%s\tnote\ta PLMN that differs from the live macro network is the classic detector trigger; whether a handset notices depends on its policy and the background cells it remembers\n' "$(sc_sanitize "${mcc:-<none>}")" "$(sc_sanitize "${mnc:-<none>}")"
+
+    # 4. TAC: a lone small TAC with no neighbours.
+    printf 'signal\ttac_announced\twould_notice\tmaybe\tevidence\ttac=%s\tnote\ta TAC is only suspicious next to what the phone already knew; alone it is just a number\n' "$(sc_sanitize "${tac:-<none>}")"
+
+    # 5. S-NSSAI: a slice nobody else in the area offers.
+    printf 'signal\ts_nssai\twould_notice\tmaybe\tevidence\tsst=%s\tnote\ta slice list that no neighbour cell advertises is a second-order tell; not every modem looks\n' "$(sc_sanitize "${nssai:-<none>}")"
+
+    # 6. no paging: this build never pages a camped UE, and a phone that
+    #    answers paging from elsewhere will show the gap on its own logs.
+    printf 'signal\tpaging\twould_notice\ttelemetry_only\tevidence\tthis catcher pages no UE\tnote\tthe gap shows in a handset tx/rx trace, not in a passive detector\n'
+
+    printf 'signals_flagged\t%d\n' "$flagged"
+    printf 'signals_total\t%s\n' "$total"
+    printf 'verdict\tthe plain identity request is the loud one; the rest is policy — %d of %s signals are visible without the phone cooperating\n' "$flagged" "$total"
+    printf 'limit\tthe answer depends on the handset: this audits the artifacts, it does not run a detector model\n'
+    return 0
+}
+
 sc_capture() {  # <pcap>
     local pcap="${1:-}"
     [[ -n "$pcap" ]] || { printf 'ERROR\tusage: --capture <pcap>\n' >&2; return 2; }
@@ -1345,6 +1403,11 @@ EOF
     chk mark-invalid "$(sc_mark_to_open5gs ZZ >/dev/null 2>&1; echo $?)" "2"
 
     # ── the transmit half, against stubs ────────────────────────────────
+    # --devilray reads the built cell and slices; without one it refuses
+    local dv; dv=$(sc_devilray 2>&1); local dv_rc=$?
+    chk "devilray-refuses-rc" "$dv_rc" "2"
+    chk "devilray-refuses-why" "$(printf '%s\n' "$dv" | awk -F'\t' '$1=="WHY"{print "yes"; exit}')" "yes"
+
     # --start used to record the wrapping subshell's pid, so --stop killed the
     # wrapper and the gNB kept radiating; and the AMF slice was written but
     # never launched, so a UE camped and was never asked for its SUCI. Both are
@@ -1445,6 +1508,7 @@ sc_cli_main() {
     case "$cmd" in
         --build-cell)   sc_build_cell "${1:-}" "${2:-n78}" "${3:-640000}" "${4:-1}" ;;
         --catch)        sc_catch_plan "${1:-}" ;;
+        --devilray)     sc_devilray "${1:-}" ;;
         --start)        sc_start ;;
         --stop)         sc_stop ;;
         --parse)        sc_parse "${1:-}" "${2:-}" ;;
