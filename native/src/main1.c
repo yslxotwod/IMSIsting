@@ -6759,6 +6759,11 @@ static const ChipRow chip_rows[] = {
     { "07_gsm_attack",       "--build-lu-accept",     NEED_NO, DOES_BUILDS },
     { "07_gsm_attack",       "--build-paging-request", NEED_NO, DOES_BUILDS },
     { "07_gsm_attack",       "--build-tmsi-realloc",  NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--catcher-observations-tsv", NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--catcher-progress-tsv", NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--catcher-run-start",  NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--catcher-run-stop",   NEED_NO, DOES_READS },
+    { "07_gsm_attack",       "--catcher-watch",      NEED_CAP, DOES_READS },
     { "07_gsm_attack",       "--burst-layout",        NEED_NO, DOES_BUILDS },
     { "07_gsm_attack",       "--c1",                  NEED_NO, DOES_READS },
     { "07_gsm_attack",       "--ccch-blocks",         NEED_NO, DOES_READS },
@@ -6833,6 +6838,11 @@ static const ChipRow chip_rows[] = {
     { "08_umts_air",         "--catcher-auth",        NEED_CAP, DOES_READS },
     { "08_umts_air",         "--catcher-identity",    NEED_CAP, DOES_READS },
     { "08_umts_air",         "--catcher-model",       NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--catcher-observations-tsv", NEED_NO, DOES_READS },
+    { "08_umts_air",         "--catcher-progress-tsv", NEED_NO, DOES_READS },
+    { "08_umts_air",         "--catcher-run-start",  NEED_NO, DOES_READS },
+    { "08_umts_air",         "--catcher-run-stop",   NEED_NO, DOES_READS },
+    { "08_umts_air",         "--observe",            NEED_CAP, DOES_READS },
     { "08_umts_air",         "--count-i",             NEED_CAP, DOES_READS },
     { "08_umts_air",         "--decode-pcap",         NEED_CAP, DOES_READS },
     { "08_umts_air",         "--decode-sib",          NEED_CAP, DOES_READS },
@@ -23403,11 +23413,166 @@ gatk_build_attacks(AppState *state, const char *module_id,
     return outer;
 }
 
+/* 07_gsm_attack — the air side of the catcher sequence.
+ *
+ * The sequence says fourteen messages must cross the air. This view is where
+ * the ones that did cross are recorded: a capture is classified frame by
+ * frame, every message that answers a step is stored with its timestamp, and
+ * the table joins the plan to what was seen. A step nobody observed is shown
+ * unseen -- the plan never fills the table in.
+ */
+static GtkWidget *
+gatk_build_catcher(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CATCHER OBSERVATIONS",
+        "What the air carried, step by step. A capture is read once and the "
+        "messages that answer a plan step are stored; a step nobody observed stays "
+        "unseen.", &body);
+    GtkWidget *run_body, *air_body, *join_body;
+    GtkWidget *run = verb_card("NAME THE RUN", &run_body);
+    GtkWidget *air = verb_card("READ THE AIR", &air_body);
+    GtkWidget *join = verb_card("PLAN AGAINST THE AIR", &join_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_row(state, module_id, status, "Start a run",
+                "--catcher-run-start", "run name, optional",
+                "Every observation from now on joins this run until another start. "
+                "Leave the name empty and one is made from the clock."));
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_choices(state, module_id, status, "Close it", "",
+                "A run is closed by naming another; this reports what it holds and "
+                "leaves the rows in place.",
+                (const char *[]) { "--catcher-run-stop" },
+                (const char *[]) { "Stop" }, 1));
+        gtk_box_append(GTK_BOX(run_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), run);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(air_body),
+            mod_arg_row(state, module_id, status, "Classify a capture",
+                "--catcher-watch", "capture.pcap, optional",
+                "Decoded by 03_gsmtap.sh, which owns GSMTAP parsing. Leave the "
+                "capture empty to read the store that module already filled. Only "
+                "frames that answer a plan step are stored, and each row keeps the "
+                "timestamp of the frame it came from."));
+        gtk_box_append(GTK_BOX(air_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), air);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(join_body),
+            mod_arg_choices(state, module_id, status, "Read it", "",
+                "The fourteen steps with seen or unseen against the air, then the "
+                "observed frames themselves in recorded order.",
+                (const char *[]) { "--catcher-progress-tsv",
+                                   "--catcher-observations-tsv" },
+                (const char *[]) { "Progress", "Observations" }, 2));
+        gtk_box_append(GTK_BOX(join_body),
+            mod_arg_row(state, module_id, status, "One run only",
+                "--catcher-observations-tsv --run", "run name",
+                "An observation store outlives the run that wrote it; name the run "
+                "to read one."));
+        gtk_box_append(GTK_BOX(join_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), join);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+/* 08_umts_air — the air side of the eight-step model.
+ *
+ * The model lists eight steps; this view records which of them a capture
+ * actually shows. Steps that a capture cannot show (the handset's own sync and
+ * broadcast reading, and authentication, which rides inside the same DL DIRECT
+ * TRANSFER as the identity request) are named unobservable with the reason
+ * instead of being quietly counted as done.
+ */
+static GtkWidget *
+uair_build_catcher(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CATCHER OBSERVATIONS",
+        "The eight steps against what a capture shows. Each RRC message is "
+        "classified with the channel it arrived on, because DL-CCCH and UL-CCCH are "
+        "different envelopes.", &body);
+    GtkWidget *run_body, *air_body, *join_body;
+    GtkWidget *run = verb_card("NAME THE RUN", &run_body);
+    GtkWidget *air = verb_card("READ THE AIR", &air_body);
+    GtkWidget *join = verb_card("MODEL AGAINST THE AIR", &join_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_row(state, module_id, status, "Start a run",
+                "--catcher-run-start", "run name, optional",
+                "Every observation from now on joins this run until another start."));
+        gtk_box_append(GTK_BOX(run_body),
+            mod_arg_choices(state, module_id, status, "Close it", "",
+                "Reports what the run holds and leaves the rows in place.",
+                (const char *[]) { "--catcher-run-stop" },
+                (const char *[]) { "Stop" }, 1));
+        gtk_box_append(GTK_BOX(run_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), run);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(air_body),
+            mod_arg_row(state, module_id, status, "Classify a capture",
+                "--observe", "capture.pcap",
+                "Reads the UMTS RRC frames (gsmtap type 12) and classifies each one "
+                "with the channel its sub-type names. A frame whose direction "
+                "contradicts its channel is skipped rather than guessed at."));
+        gtk_box_append(GTK_BOX(air_body),
+            mod_arg_choices(state, module_id, status, "One frame", "",
+                "Classify a single message when the channel is already known: the "
+                "example is an UPLINK DIRECT TRANSFER.",
+                (const char *[]) { "--observe --frame ul-dcch:6c00" },
+                (const char *[]) { "Classify one" }, 1));
+        gtk_box_append(GTK_BOX(air_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), air);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(join_body),
+            mod_arg_choices(state, module_id, status, "Read it", "",
+                "The eight steps and the handset's answer with seen, unseen or "
+                "unobservable against the air, then the observed messages.",
+                (const char *[]) { "--catcher-progress-tsv",
+                                   "--catcher-observations-tsv" },
+                (const char *[]) { "Progress", "Observations" }, 2));
+        gtk_box_append(GTK_BOX(join_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), join);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry gatk_entries[] = {
     { "Message", "dialog-information-symbolic", NULL, gatk_build_decode },
     { "Build message", "document-send-symbolic", NULL, gatk_build_messages },
     { "Ciphers", "channel-secure-symbolic", NULL, gatk_build_ciphers },
     { "Attack steps", "security-high-symbolic", NULL, gatk_build_attacks },
+    { "Catcher", "view-list-ordered-symbolic", NULL, gatk_build_catcher },
 };
 /* 08_umts_air — 3G, where the cipher was broken properly and the identity was not.
  *
@@ -23796,6 +23961,7 @@ static ModuleSubmenuEntry uair_entries[] = {
     { "Checksum", "channel-secure-symbolic", NULL, uair_build_integrity },
     { "Build message", "document-send-symbolic", NULL, uair_build_messages },
     { "Cell impersonation", "network-transmit-receive-symbolic", NULL, uair_build_downlink },
+    { "Catcher", "view-list-ordered-symbolic", NULL, uair_build_catcher },
 };
 /* 09_lte_attach — LTE Attach Forge.
  *
