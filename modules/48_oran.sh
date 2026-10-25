@@ -291,6 +291,19 @@ oran_selftest() {
     chk a1-poison-find  "$(printf '%s\n' "$pz" | awk -F'\t' '$1=="finding" && $2=="no_cross_policy_accounting"{print $3}')" "HIGH"
     chk a1-poison-same  "$(oran_a1_poison 1 1 >/dev/null 2>&1; echo $?)" "2"
     chk a1-poison-range "$(oran_a1_poison 1 2 200 >/dev/null 2>&1; echo $?)" "2"
+
+    # D2 -- the KPM subscription: per-UE measurements, empty scope, a join key.
+    local ks; ks=$(oran_e2_subscribe 500)
+    chk kpm-code      "$(fld "$ks" e2ap_procedure_code)" "8"
+    chk kpm-period    "$(fld "$ks" event_trigger)"       "format 1: periodic report every 500 ms"
+    chk kpm-meas      "$(printf '%s\n' "$ks" | awk -F'\t' '$1=="measurement"{n++} END{print n+0}')" "8"
+    chk kpm-ue        "$(printf '%s\n' "$ks" | awk -F'\t' '$1=="measurement" && $2=="DRB.UEThpDl"{print $3}')" "per DRB / UE"
+    chk kpm-nodes     "$(fld "$ks" scope_node_list | grep -c 'every E2 node')" "1"
+    chk kpm-uempty    "$(fld "$ks" scope_ue_list | grep -c 'no UE filter')" "1"
+    chk kpm-gran      "$(printf '%s\n' "$ks" | awk -F'\t' '$1=="finding" && $2=="ue_granularity"{print $3}')" "HIGH"
+    chk kpm-join      "$(printf '%s\n' "$ks" | awk -F'\t' '$1=="finding" && $2=="join_key"{print $3}')" "MEDIUM"
+    chk kpm-period-bad "$(oran_e2_subscribe 50 >/dev/null 2>&1; echo $?)" "2"
+    chk kpm-style-bad "$(oran_e2_subscribe 1000 0 >/dev/null 2>&1; echo $?)" "2"
     else
         printf 'qos-suite\tSKIP python3 not present\n'
     fi
@@ -573,6 +586,46 @@ PY
 
 # RIC Control is E2AP procedure 6; the RAN function and action are looked up
 # from the E2 service model. This builds the control shape an xApp sends.
+# ── D2 -- the KPM subscription: per-UE telemetry by design ──────────────
+# E2SM-KPM style 1 reports measurements on a period. Most of what it can
+# report is per-DRB or per-slice, and DRBs belong to UEs: a subscriber that is
+# accepted once can pull a live, labelled stream of what every handset in the
+# cell is doing. Nothing about the subscription is per-target: the xApp asks
+# for all nodes, all UEs, and gets them.
+oran_e2_subscribe() {
+    local period="${1:-1000}" style="${2:-1}"
+    [[ "$period" =~ ^[0-9]+$ ]] && (( period >= 100 && period <= 600000 )) || {
+        printf 'ERROR\tthe report period is milliseconds, 100..600000\n' >&2; return 2; }
+    [[ "$style" =~ ^[1-9]$ ]] || { printf 'ERROR\tE2SM-KPM has styles 1..2 in this build\n' >&2; return 2; }
+    printf 'e2ap_procedure\tRIC Subscription Request\n'
+    printf 'e2ap_procedure_code\t8\n'
+    printf 'ran_function\tORAN-E2SM-KPM\n'
+    printf 'ran_function_id\t3\n'
+    printf 'event_trigger\tformat 1: periodic report every %s ms\n' "$period"
+    printf 'action\tstyle %s, action 1, no filter\n' "$style"
+    printf 'scope_node_list\tempty -- an empty list is every E2 node the RIC holds\n'
+    printf 'scope_ue_list\tempty -- no UE filter, so every UE the node reports on is included\n'
+    printf 'header\tmeasurement\tgranularity\treveals\n'
+    printf 'measurement\tDRB.UEThpDl\tper DRB / UE\tthe downlink throughput each handset actually got, sample by sample\n'
+    printf 'measurement\tDRB.UEThpUl\tper DRB / UE\tthe uplink each handset got, which distinguishes streaming, bulk upload and idle\n'
+    printf 'measurement\tDRB.RlcSduDelayDl\tper DRB / UE\tqueue delay: what the scheduler is doing to this subscriber relative to the others\n'
+    printf 'measurement\tDRB.PdcpSduVolumeDl_Filter\tper DRB / UE\tvolumes per bearer, which map onto the QoS class the UE asked for\n'
+    printf 'measurement\tRRU.PrbUsedDl\tper cell / slice\tthe cell share in use, the denominator behind the per-UE numbers\n'
+    printf 'measurement\tDRB.UEBufferedTrafficDl\tper DRB / UE\tbuffer occupancy: whether the UE is saturated, stalling, or thin\n'
+    printf 'measurement\tCQI.Report\tper UE\tthe channel the handset reports -- a cheap radio-fingerprint of one device\n'
+    printf 'measurement\tDRB.MeanActiveUeDl\tper slice\tactive UE count, so a per-UE stream can be placed in the cell load\n'
+    printf 'identity\tthe indication carries the RAN UE NGAP ID and, in E2SM format 3, the UE ID: correlating that with the NGAP id on N2 names the subscriber\n'
+    printf 'correlate\tone RAN UE NGAP ID from the E2 indication plus one NGAP message from the capture is a join key that survives encryption of the user plane\n'
+    printf 'finding\tue_granularity\tHIGH\tthe measurements are per DRB and DRBs belong to UEs: this is not aggregate KPI, it is per-subscriber behaviour, labelled, every %s ms\n' "$period"
+    printf 'finding\tall_nodes\tHIGH\tan empty node list subscribes to every E2 node; no scope is needed to start, and none is required afterwards\n'
+    printf 'finding\tno_consumer_auth\tMEDIUM\tE2 setup establishes an xApp identity, and the near-RT RIC then treats subscriptions as that identity: the granularity of the authorisation is the RIC ACL, not the KPM action\n'
+    printf 'finding\tjoin_key\tMEDIUM\tthe RAN UE NGAP ID in the indication joins to N2 signalling; a KPM stream plus an NGAP capture identifies which handset is doing what, without decrypting anything\n'
+    printf 'finding\tpersistence\tMEDIUM\tthe subscription keeps reporting until it is deleted or the node deregisters; an expired xApp leaves an orphan that keeps collecting\n'
+    printf 'detect\tinventory RIC subscriptions against approved xApp ids, alert on any subscription with an empty node or UE list, and on a KPM subscription whose event trigger period changed\n'
+    printf 'verdict\tKPM is the quietest interface in this module: it needs no control, produces no packets to the UE, and returns a per-UE profile of the cell\n'
+    return 0
+}
+
 oran_e2_control() {
     local ranfunc="${1:-2}" action="${2:-1}" ue="${3:-0}"
     [[ "$ranfunc" =~ ^[0-9]+$ && "$action" =~ ^[0-9]+$ ]] || { printf 'ERROR\tRAN function id and RIC action id are numeric\n' >&2; return 2; }
@@ -667,6 +720,7 @@ oran_cli_main() {
         --qos-policy)      oran_qos_policy "${1:-20000}" "${2:-1}" "${3:-global}" ;;
         --qos-policy-check) oran_qos_policy_check "${1:-}" ;;
         --e2-control)      oran_e2_control "${1:-2}" "${2:-1}" "${3:-0}" ;;
+        --e2-subscribe)    oran_e2_subscribe "${1:-1000}" "${2:-1}" ;;
         --xapp-attack)     oran_xapp_attack "${1:-rogue-xapp}" ;;
         --a1-poison)       oran_a1_poison "${1:-1}" "${2:-2}" "${3:-2}" ;;
         --plan)            oran_plan ;;
@@ -689,6 +743,8 @@ Usage: $0 COMMAND
   --qos-policy-check <json>               validate that body; unknown keys are
                                           refused, not ignored
   --e2-control [ranfunc] [action] [ue]    RIC Control (E2AP procedure 6) shape
+  --e2-subscribe [period_ms] [style]   D2: the KPM subscription that returns
+                          per-UE telemetry to any accepted xApp
   --xapp-attack [name]      the over-broad xApp model
   --a1-poison [victim] [attacker] [pct]
                             D1: a policy PUT that moves PRB from one
