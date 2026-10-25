@@ -149,6 +149,81 @@ note	network-side TA is only available to the operator; this module computes on 
 EOF
 }
 
+# ── UTRAN ranging: RTT in chips and the Rx-Tx time difference ───────────
+# UTRAN has no timing advance. What a Node B can measure is RTT (the round
+# trip between the downlink DPCH frame boundary and the uplink DPCCH that
+# answers it) and what a UE reports is the Rx-Tx time difference (TS 25.215
+# §5.1 and §5.2, in chips). One chip is 1/3.84e6 s, which is 78.05 m of round
+# trip and therefore about 39.02 m of one-way range — the same order as the
+# LTE TA unit, which is why the two generations can be put in one calculation.
+#
+# The Rx-Tx difference is not a range on its own: it is a hyperbola, because
+# what it compares is the arrival time of two Node Bs' signals at one UE.
+# Ranging needs a Node B that also measures RTT, which is why U-TDOA at the
+# network side exists; this module does the arithmetic for both and does not
+# pretend one measurement is a position.
+tgeo_umts_rtt() {   # <rtt-chips> [--ue-rx-tx TYPE1|TYPE2 <chips>] [--ref-time ...]
+    local chips="${1:-}"
+    [[ "$chips" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tRTT must be a non-negative whole number of chips\n' >&2; return 2; }
+    shift
+    local ue_chips="" ue_type=""
+    while (($#)); do
+        case "$1" in
+            --ue-rx-tx) ue_type="${2:-TYPE1}"; ue_chips="${3:-}"; shift 3 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(tgeo_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    awk -v n="$chips" -v ue="$ue_chips" -v ut="$ue_type" -v chipm="78.0504" 'BEGIN{
+        rtt_m = n * chipm
+        printf "rat\tumts\n"
+        printf "chip_hz\t3840000\n"
+        printf "chip_m_round_trip\t78.0504\n"
+        printf "rtt_chips\t%d\n", n
+        printf "rtt_m\t%.2f\n", rtt_m
+        printf "range_m\t%.2f\n", rtt_m/2
+        printf "error_bound_m\t%.2f\n", chipm/2
+        if (ue != "") {
+            printf "ue_rx_tx_type\t%s\n", ut
+            printf "ue_rx_tx_chips\t%s\n", ue
+            # The Rx-Tx difference is a time difference of arrival between two
+            # cells: a hyperbola, not a radius. Converting it to metres is
+            # legitimate; calling the result a range is not.
+            printf "ue_rx_tx_m\t%.2f\n", ue * chipm / 2
+            printf "ue_rx_tx_geometry\thyperbola (one branch), needs a second cell and the two Node B positions\n"
+        }
+    }'
+    printf 'ref\tTS 25.215 5.1 (RTT), 5.2 (UE Rx-Tx time difference), TS 25.133 9.1 (measurement report mapping)\n'
+    printf 'limit\tRTT gives a radius around one Node B; the Rx-Tx difference gives a hyperbola; U-TDOA needs several Node Bs that measure the same uplink\n'
+    printf 'verdict\t%s\n' "$([[ -n "$ue_chips" ]] && echo umts_rtt_and_rx_tx_computed || echo umts_rtt_computed)"
+}
+
+# A measurement report is the container: RRC MEASUREMENT REPORT carries one or
+# more measured results, each with a cell identity and a value. The reader
+# takes the TSV a caller builds from a capture (`cell_id<TAB>rtt_chips<TAB>
+# rx_tx_type<TAB>rx_tx_chips`) and produces anchor rows for tgeo_trilaterate,
+# which is the whole point: the geometry code already exists, it just had no
+# UTRAN input.
+tgeo_umts_anchors() {   # <tsv>
+    local file="${1:-}"
+    [[ -n "$file" ]] || {
+        printf 'ERROR\tusage: --umts-anchors <tsv>\n' >&2
+        printf 'WHY\tthe TSV carries cell_id, rtt_chips, rx_tx_type, rx_tx_chips; the node positions are the ones the plan needs and this module will not invent\n' >&2
+        return 2; }
+    [[ -r "$file" ]] || { printf 'ERROR\tcannot read %s\n' "$(tgeo_sanitize "$file")" >&2; return 1; }
+    awk -F'\t' -v chipm="78.0504" '
+        NR==1 && $1 !~ /^[0-9]/ { next }
+        NF>=2 && $1 != "" && $2 ~ /^[0-9]+$/ {
+            n++
+            printf "anchor\t%s\t%s\t%.2f\n", $1, "rtt", $2 * chipm / 2
+            if ($4 ~ /^[0-9]+$/) printf "hyperbola\t%s\t%s\t%.2f\n", $1, $3, $4 * chipm / 2
+        }
+        END { printf "anchors\t%d\n", n; if (n < 3) printf "note\t%d radius measurement(s): a fix needs three\n", n }
+    ' "$file"
+    printf 'ref\tTS 25.215 5.1, TS 25.133 9.1; the least-squares fix itself is --trilaterate\n'
+    printf 'verdict\tumts_anchors_extracted\n'
+}
+
 tgeo_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -214,6 +289,41 @@ A
     chk cells-missing "$(tgeo_parse_cells "$d/none.tsv" >/dev/null 2>&1; echo $?)" "1"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
+    # ── UTRAN: RTT in chips, and the Rx-Tx hyperbola ───────────────────
+    local u u2 ua d
+    u=$(tgeo_umts_rtt 1000 2>/dev/null)
+    chk umts-rat        "$(printf '%s\n' "$u" | awk -F'\t' '$1=="rat"{print $2}')" "umts"
+    chk umts-chips      "$(printf '%s\n' "$u" | awk -F'\t' '$1=="rtt_chips"{print $2}')" "1000"
+    chk umts-rtt-m      "$(printf '%s\n' "$u" | awk -F'\t' '$1=="rtt_m"{print $2}')" "78050.40"
+    chk umts-range      "$(printf '%s\n' "$u" | awk -F'\t' '$1=="range_m"{print $2}')" "39025.20"
+    chk umts-error      "$(printf '%s\n' "$u" | awk -F'\t' '$1=="error_bound_m"{print $2}')" "39.03"
+    chk umts-verdict    "$(printf '%s\n' "$u" | awk -F'\t' '$1=="verdict"{print $2}')" "umts_rtt_computed"
+    # one chip is 78.05 m of round trip, so the range halves it
+    chk umts-chip1      "$(tgeo_umts_rtt 1 2>/dev/null | awk -F'\t' '$1=="range_m"{print $2}')" "39.03"
+    u2=$(tgeo_umts_rtt 1000 --ue-rx-tx TYPE1 40 2>/dev/null)
+    chk umts-rxtx-ty    "$(printf '%s\n' "$u2" | awk -F'\t' '$1=="ue_rx_tx_type"{print $2}')" "TYPE1"
+    chk umts-rxtx-m     "$(printf '%s\n' "$u2" | awk -F'\t' '$1=="ue_rx_tx_m"{print $2}')" "1561.01"
+    chk umts-rxtx-geo   "$(printf '%s\n' "$u2" | awk -F'\t' '$1=="ue_rx_tx_geometry"{print ($2 ~ /hyperbola/) ? "y" : "n"}')" "y"
+    chk umts-rxtx-verd  "$(printf '%s\n' "$u2" | awk -F'\t' '$1=="verdict"{print $2}')" "umts_rtt_and_rx_tx_computed"
+    chk umts-bad        "$(tgeo_umts_rtt abc >/dev/null 2>&1; echo $?)" "2"
+    chk umts-noargs     "$(tgeo_umts_rtt >/dev/null 2>&1; echo $?)" "2"
+    d=$(mktemp -d)
+    printf 'cell_id\trtt_chips\trx_tx_type\trx_tx_chips\n1\t1000\tTYPE1\t40\n2\t2000\tTYPE1\t80\n3\t1500\tTYPE2\t60\n' > "$d/a.tsv"
+    ua=$(tgeo_umts_anchors "$d/a.tsv" 2>/dev/null)
+    chk umts-anchors    "$(printf '%s\n' "$ua" | awk -F'\t' '$1=="anchors"{print $2}')" "3"
+    chk umts-anchor-1   "$(printf '%s\n' "$ua" | awk -F'\t' '$1=="anchor" && $2==1{print $4}')" "39025.20"
+    chk umts-hyper-1    "$(printf '%s\n' "$ua" | awk -F'\t' '$1=="hyperbola" && $2==1{print $4}')" "1561.01"
+    chk umts-anchor-missing "$(tgeo_umts_anchors >/dev/null 2>&1; echo $?)" "2"
+    chk umts-anchor-nofile  "$(tgeo_umts_anchors "$d/none.tsv" >/dev/null 2>&1; echo $?)" "1"
+    # the radii feed the existing least-squares fix, which is the point
+    printf '%s\n' "$ua" | awk -F'\t' '$1=="anchor"{print $2"\t0\t"$4}' > "$d/an.tsv"
+    # a consistent geometry: the fix at (20000,15000) has these exact ranges
+    printf '0\t0\t25000.00\n30000\t0\t18027.76\n15000\t25000\t11180.34\n' > "$d/an.tsv"
+    local fix; fix=$(tgeo_trilaterate "$d/an.tsv" 2>/dev/null)
+    chk umts-fix-anchors "$(printf '%s\n' "$fix" | awk -F'\t' '$1=="anchors"{print $2}')" "3"
+    chk umts-fix-rmse    "$(printf '%s\n' "$fix" | awk -F'\t' '$1=="residual_rmse"{print ($2 < 1) ? "small" : "large"}')" "small"
+    rm -rf "$d"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -249,6 +359,8 @@ tgeo_cli_main() {
     case "$cmd" in
         --status-tsv)  tgeo_status_tsv ;;
         --ta)          tgeo_ta_distance "${1:-}" "${2:-lte}" "${3:-0}" ;;
+        --umts-rtt)    tgeo_umts_rtt "$@" ;;
+        --umts-anchors) tgeo_umts_anchors "$@" ;;
         --trilaterate) tgeo_trilaterate "${1:-}" ;;
         --cells)       tgeo_parse_cells "${1:-}" ;;
         --plan)        tgeo_plan ;;
