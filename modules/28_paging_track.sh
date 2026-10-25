@@ -1846,6 +1846,122 @@ pgt_keepawake_stats() {  # <events-tsv>
 # with the cell's own PCI scrambling, a CRC the UE will accept, and a UE
 # already camped on that cell. That is 10_lte_air_pws and 57_evil_twin, and
 # this function says so rather than pretending the schedule is a waveform.
+# ── UTRAN paging: occasions, the indicator, and URA_PCH ─────────────────
+# A UMTS handset does not listen on a paging frame and a subframe; it listens
+# on a frame (the paging occasion) and inside it on one of Np paging
+# indicators carried by the PICH, which tells it whether to read the PCCH in
+# the associated S-CCPCH frame. The two numbers are separate, which is why a
+# catcher that only models the frame loses the indicator.
+#
+# TS 25.304 §8.3 defines the paging occasion from the identity and the DRX
+# cycle length; TS 25.211 §5.3.3 carries Np = 18, 36, 72 or 144 paging
+# indicators per frame on the PICH. What this module computes is: which frame
+# in the cycle, and which indicator inside it. The frame arithmetic is the
+# modulo; the indicator placement inside the frame is this module's model,
+# and it says so in its own output rather than implying a clause it has not
+# transcribed.
+pgt_umts_params() {   # <id-decimal> <cycle-frames> [np]
+    local id="${1:-}" cyc="${2:-64}" np="${3:-72}"
+    [[ "$id" =~ ^[0-9]+$ ]] || return 1
+    (( id >= 0 )) || return 1
+    [[ "$cyc" =~ ^[0-9]+$ ]] || return 1
+    case "$cyc" in 8|16|32|64|128|256|512) ;; *) return 1 ;; esac
+    [[ "$np" =~ ^[0-9]+$ ]] || return 1
+    case "$np" in 18|36|72|144) ;; *) return 1 ;; esac
+    local off=$(( id % cyc ))
+    local pi=$(( (id / cyc) % np ))
+    printf 'generation\tumts\nidentity_value\t%d\ndrx_cycle_frames\t%d\nnp\t%d\noffset_in_cycle\t%d\npi_index\t%d\n' \
+        "$id" "$cyc" "$np" "$off" "$pi"
+}
+
+pgt_cmd_umts_plan() {   # <identity-decimal> [--cycle N] [--np N] [--frames N] [--domain cs|ps] [--state idle|ura-pch]
+    local id="${1:-}" cyc=64 np=72 frames=4 domain=ps state=idle
+    [[ -n "$id" ]] || {
+        printf 'ERROR\tusage: --umts-plan <identity-decimal> [--cycle N] [--np N] [--frames N] [--domain cs|ps] [--state idle|ura-pch]\n' >&2
+        return 2; }
+    [[ "$id" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tthe identity must be a decimal value: an IMSI or a P-TMSI read as an integer\n' >&2; return 2; }
+    shift
+    while (($#)); do
+        case "$1" in
+            --cycle)  cyc="${2:-}"; shift 2 ;;
+            --np)     np="${2:-}"; shift 2 ;;
+            --frames) frames="${2:-4}"; shift 2 ;;
+            --domain) domain="${2:-ps}"; shift 2 ;;
+            --state)  state="${2:-idle}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(pgt_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    local p; p=$(pgt_umts_params "$id" "$cyc" "$np") || {
+        printf 'ERROR\tthe DRX cycle is 8, 16, 32, 64, 128, 256 or 512 frames and Np is 18, 36, 72 or 144 (TS 25.304 8.3, TS 25.211 5.3.3)\n' >&2
+        return 2; }
+    local off pi
+    off=$(printf '%s\n' "$p" | awk -F'\t' '$1=="offset_in_cycle"{print $2}')
+    pi=$(printf '%s\n' "$p" | awk -F'\t' '$1=="pi_index"{print $2}')
+    printf '%s\n' "$p"
+    printf 'frame_ms\t10\ncycle_ms\t%s\n' "$(( cyc * 10 ))"
+    printf 'domain\t%s\n' "$domain"
+    printf 'paging_carrier\tPICH indicator -> S-CCPCH (PCCH)\n'
+    local i=0 sfn=$off
+    while (( i < frames )); do
+        printf 'occasion\t%s\t%s\t%s\n' "$i" "$sfn" "$pi"
+        sfn=$(( sfn + cyc ))
+        i=$(( i + 1 ))
+    done
+    printf 'occasions\t%s\n' "$frames"
+    printf 'state\t%s\n' "$state"
+    if [[ "$state" == "ura-pch" ]]; then
+        printf 'answer\tCELL UPDATE on CCCH, not an RRC CONNECTION REQUEST\n'
+        printf 'note\ta UE in URA_PCH is paged on the same occasions; the difference is what it sends back, and that is what a correlator keys on\n'
+    else
+        printf 'answer\tRRC CONNECTION REQUEST on CCCH\n'
+    fi
+    printf 'harvest\tPAGING TYPE 1 carries the paged identity (P-TMSI or IMSI) in the paging record; the answer that follows carries the same identity in an IDENTITY RESPONSE or in the initial direct transfer, so the two halves are correlatable without breaking anything\n'
+    printf 'ref\tTS 25.304 8.3 (paging occasion), TS 25.211 5.3.3 (Np indicators per frame), TS 25.331 8.1.2 (PAGING TYPE 1)\n'
+    printf 'model\tthe frame arithmetic is the modulo; the indicator index inside the frame is this module model, not a transcribed clause\n'
+    printf 'verdict\tumts_paging_occasion_computed\n'
+}
+
+pgt_cmd_umts_correlate() {   # <tsv> [--window FRAMES]
+    local file="${1:-}" window=2
+    [[ -n "$file" ]] || {
+        printf 'ERROR\tusage: --umts-correlate <tsv> [--window FRAMES]\n' >&2
+        printf 'WHY\tthe file needs kind, identity and sfn columns; kind is paged, conn_req, cell_update or identity_resp\n' >&2
+        return 2; }
+    shift || true
+    [[ "${1:-}" == "--window" ]] && { window="${2:-2}"; }
+    [[ -r "$file" ]] || { printf 'ERROR\tcannot read %s\n' "$(pgt_sanitize "$file")" >&2; return 1; }
+    awk -F'\t' -v w="$window" '
+        # A paging record and the answer that follows it: the identity has to
+        # match, and the answer has to arrive within the window, in frames.
+        /^kind/ { next }
+        NF < 3 { next }
+        {
+            k[$1]++; if ($1 == "paged") { n++; pid[n] = $2; psfn[n] = $3 + 0 }
+            else if ($2 != "") { ans[$2] = ans[$2] " " $1 "@" $3 }
+        }
+        END {
+            printf "rows\t%d\npaged_records\t%d\n", NR - 1, n
+            hit = 0
+            for (i = 1; i <= n; i++) {
+                m = split(ans[pid[i]], seen, " ")
+                best = ""; bestd = 0
+                for (j = 1; j <= m; j++) {
+                    split(seen[j], s, "@")
+                    d = s[2] - psfn[i]
+                    if (d >= 0 && d <= w && (best == "" || d < bestd)) { best = s[1]; bestd = d }
+                }
+                if (best != "") { hit++; printf "correlated\t%s\t%s\t%s\t%s\n", pid[i], psfn[i], best, bestd }
+                else printf "unanswered\t%s\t%s\n", pid[i], psfn[i]
+            }
+            printf "correlated\t%d\nunanswered\t%d\n", hit, n - hit
+            printf "window_frames\t%d\n", w
+            if (hit > 0) printf "finding\tpaged_identity_answered\t%d paging record(s) are followed by an answer carrying the same identity\n", hit
+            printf "verdict\t%s\n", (hit > 0) ? "paging_correlated_with_identity" : "no_correlation_in_this_file"
+        }
+    ' "$file"
+}
+
 pgt_cmd_adaptover_plan() {
     local rate="15360000" t="64" nb="" ue="0" duplex="fdd" dur="60" out=""
     while (($#)); do
@@ -2607,6 +2723,44 @@ EOS
     chk storm-hackrf-argv "$(tr '\n' ' ' < "$d/srec" | sed 's/ $//')" \
         "-t $PGT_DIR/tx_storm.cs8 -f 935200000 -s 2166667 -a 1 -x 0"
 
+    # ── UTRAN paging: occasion arithmetic, the indicator, and URA_PCH ──
+    local up up2 upc
+    up=$(pgt_cmd_umts_plan 123456789012345 --cycle 64 --np 72 --frames 3 2>/dev/null)
+    chk up-gen        "$(fld "$up" generation)" "umts"
+    chk up-cycle      "$(fld "$up" drx_cycle_frames)" "64"
+    chk up-np         "$(fld "$up" np)" "72"
+    chk up-offset     "$(fld "$up" offset_in_cycle)" "57"
+    chk up-pi         "$(fld "$up" pi_index)" "21"
+    chk up-cycle-ms   "$(fld "$up" cycle_ms)" "640"
+    chk up-occ        "$(fld "$up" occasions)" "3"
+    # 57 + 64 + 64: the occasion walks the cycle, it does not repeat in it
+    chk up-occ-frames "$(printf '%s\n' "$up" | awk -F'\t' '$1=="occasion"{printf "%s ", $3}')" "57 121 185 "
+    chk up-carrier    "$(fld "$up" paging_carrier)" "PICH indicator -> S-CCPCH (PCCH)"
+    chk up-answer     "$(fld "$up" answer)" "RRC CONNECTION REQUEST on CCCH"
+    # identity decimal 8 / cycle 8: offset 0 and indicator 1, the first frame
+    up2=$(pgt_cmd_umts_plan 8 --cycle 8 --np 18 --frames 1 2>/dev/null)
+    chk up2-offset    "$(fld "$up2" offset_in_cycle)" "0"
+    chk up2-pi        "$(fld "$up2" pi_index)" "1"
+    chk up2-np        "$(fld "$up2" np)" "18"
+    # URA_PCH answers with a cell update, which is the correlator's key
+    local upu; upu=$(pgt_cmd_umts_plan 8 --cycle 8 --state ura-pch 2>/dev/null)
+    chk up-ura-state  "$(fld "$upu" state)" "ura-pch"
+    chk up-ura-answer "$(printf '%s' "$(fld "$upu" answer)" | grep -c 'CELL UPDATE')" "1"
+    chk up-bad-cycle  "$(pgt_cmd_umts_plan 8 --cycle 33 >/dev/null 2>&1; echo $?)" "2"
+    chk up-bad-np     "$(pgt_cmd_umts_plan 8 --np 19 >/dev/null 2>&1; echo $?)" "2"
+    chk up-noargs     "$(pgt_cmd_umts_plan >/dev/null 2>&1; echo $?)" "2"
+    chk up-nonnum     "$(pgt_cmd_umts_plan 4150abcd >/dev/null 2>&1; echo $?)" "2"
+    printf 'kind\tidentity\tsfn\npaged\t4150\t57\ncell_update\t4150\t58\npaged\t9999\t121\n' > "$d/uc.tsv"
+    upc=$(pgt_cmd_umts_correlate "$d/uc.tsv" --window 2 2>/dev/null)
+    chk upc-records   "$(fld "$upc" paged_records)" "2"
+    chk upc-correlated "$(printf '%s\n' "$upc" | awk -F'\t' '$1=="correlated"{c=$2} END{print c}')" "1"
+    chk upc-unanswered "$(printf '%s\n' "$upc" | awk -F'\t' '$1=="unanswered"{c=$2} END{print c}')" "1"
+    chk upc-row       "$(printf '%s\n' "$upc" | awk -F'\t' '$1=="correlated" && $2=="4150"{print $4}')" "cell_update"
+    chk upc-verdict   "$(fld "$upc" verdict)" "paging_correlated_with_identity"
+    chk upc-window    "$(pgt_cmd_umts_correlate "$d/uc.tsv" --window 0 2>/dev/null | awk -F'\t' '$1=="correlated"{c=$2} END{print c}')" "0"
+    chk upc-missing   "$(pgt_cmd_umts_correlate "$d/nope.tsv" >/dev/null 2>&1; echo $?)" "1"
+    chk upc-noargs    "$(pgt_cmd_umts_correlate >/dev/null 2>&1; echo $?)" "2"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
     trap - EXIT
@@ -3099,6 +3253,8 @@ pgt_cli_main() {
         --detect)           pgt_cmd_detect "${1:-}" ;;
         --adaptover-detect) pgt_cmd_adaptover_detect "${1:-}" ;;
         --adaptover-plan)   pgt_cmd_adaptover_plan "$@" ;;
+        --umts-plan)        pgt_cmd_umts_plan "$@" ;;
+        --umts-correlate)   pgt_cmd_umts_correlate "$@" ;;
         --plan)             pgt_plan "${1:-}" ;;
         --edrx-occ)         pgt_cli_edrx_occ "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
         --pei-occ)          pgt_cli_pei_occ "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
