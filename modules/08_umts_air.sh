@@ -732,6 +732,10 @@ UAIR_PAGECAUSE=(terminatingConversationalCall terminatingStreamingCall
     terminatingCauseUnknown spare)
 UAIR_REJCAUSE=(congestion unspecified)
 UAIR_STATEIND=(cell-DCH cell-FACH cell-PCH ura-PCH)
+# Capability string bit order, as the dissector reads it: uea0/uia1 in the
+# lowest used bit and each algorithm one bit above the previous one.
+UAIR_UEA=(uea0 uea1 uea2)
+UAIR_UIA=('' uia1 uia2)
 uair_enum_index() {  # value, then the alternatives; prints the index or -1
     # Compared case-insensitively so that cell-dch and cell-DCH both name the
     # same alternative: the ASN.1 spelling is hyphenated and mixed case, which
@@ -853,6 +857,127 @@ uair_rrc_emit() {  # message, message-type, channel, gsmtap sub-type, bits, [lim
     printf 'sent\t0\n'
     [[ -n "$extra" ]] && printf 'limit\t%s\n' "$extra"
     printf 'limit\tRRC octets only: no MAC-I, because an unprotected message carries none; no ciphering, because these messages precede security activation; and nothing is transmitted, because no radio is keyed here.\n'
+}
+
+# ── RRC SECURITY MODE COMMAND (DL-DCCH) ─────────────────────────────────
+# TS 25.331 clause 8.1.12: the message that tells a UE which ciphering and
+# integrity algorithms to start, and the moment they start. On a forged cell it
+# is the whole attack: a SECURITY MODE COMMAND that offers only uea0 and uia1
+# turns the cipher off on an unmodified handset, and the UE has no way to know
+# who asked.
+#
+# The placement was verified the same way the other RRC messages here were:
+# the octets were wrapped in GSMTAP and dissected by Wireshark's RRC dissector,
+# which names the message (DL-DCCH-MessageType alternative 16 of 32), the
+# transaction identifier, and both 16-bit capability bit strings with the
+# per-algorithm bits it sets. See tools/check-umts-rrc.sh.
+#
+# The four bits between the message index and the transaction identifier are
+# the presence bits of the OPTIONAL components the r3 structure declares; this
+# builder places them all zero (every optional IE absent), which is what a
+# minimal SECURITY MODE COMMAND carries.
+uair_build_security_mode() {
+    uair_cfg_check "--build-security-mode" "${1:-}" txid ciphering integrity || return 2
+    local conf="${1:-}" txid ciph integ cap_h ciph_cap integ_cap idx limit
+    txid=$(uair_cfg_uint "$conf" txid 0 0 3 "rrc-TransactionIdentifier") || return 2
+    ciph=$(uair_cfg_get "$conf" ciphering uea0)
+    integ=$(uair_cfg_get "$conf" integrity uia1)
+    # The capability fields are BIT STRINGs whose last bits are the algorithms:
+    # uea0/uia1 sit in the lowest bit, uea1/uia2 one above, uea2 one above that.
+    case "${ciph,,}" in
+        uea0) ciph_cap=0001 ;;
+        uea1) ciph_cap=0002 ;;
+        uea2) ciph_cap=0004 ;;
+        off|none)
+              ciph_cap=0000 ;;
+        *) printf 'ERROR\tciphering "%s" is not uea0, uea1, uea2 or off\n' "$(uair_sanitize "$ciph")" >&2
+           printf 'WHY\tCipheringAlgorithmCap is a 16-bit string whose set bits name the algorithms the network will accept (TS 25.331 clause 10); an unknown name has no bit\n' >&2
+           return 2 ;;
+    esac
+    # The integrity string starts one bit higher than the ciphering one: the
+    # referee (Wireshark's RRC dissector) reads uia1 from bit 1 and uia2 from
+    # bit 2, with bit 0 unused. Verified octet for octet, see the note above.
+    case "${integ,,}" in
+        uia1) integ_cap=0002 ;;
+        uia2) integ_cap=0004 ;;
+        off|none)
+              integ_cap=0000 ;;
+        *) printf 'ERROR\tintegrity "%s" is not uia1, uia2 or off\n' "$(uair_sanitize "$integ")" >&2
+           printf 'WHY\tIntegrityProtectionAlgorithmCap is the matching 16-bit string in TS 25.331 clause 10\n' >&2
+           return 2 ;;
+    esac
+
+    uair_bw_reset
+    uair_bwu 1 0        # DL-DCCH-Message integrityCheckInfo absent: nothing protects this message
+    uair_bwu 5 16       # DL-DCCH-MessageType: securityModeCommand is alternative 16 of 32
+    uair_bwu 1 0        # SecurityModeCommand: r3
+    uair_bwu 4 0        # r3-IEs optional components, all absent
+    uair_bwu 2 "$txid"  # rrc-TransactionIdentifier INTEGER(0..3)
+    uair_bwu 16 $(( 16#$ciph_cap ))   # cipheringAlgorithmCap
+    uair_bwu 16 $(( 16#$integ_cap ))  # integrityProtectionAlgorithmCap
+    local bits="$UAIR_BW"
+
+    uair_rrc_emit "RRC SECURITY MODE COMMAND" securityModeCommand dl-dcch 2 "$bits"
+    printf 'procedure\t%s\n'        "SecurityModeCommand (TS 25.331 clause 8.1.12)"
+    printf 'transaction_id\t%s\n'   "$txid"
+    printf 'ciphering_algorithm\t%s\n' "$ciph"
+    printf 'integrity_algorithm\t%s\n' "$integ"
+    printf 'ciphering_cap\t%s\n'    "$ciph_cap"
+    printf 'integrity_cap\t%s\n'    "$integ_cap"
+    printf 'activation_time\t%s\n'  "start of the next message: this command carries no activation-time IE, so both algorithms are active as soon as the UE reads it"
+    printf 'what_it_selects\t%s\n'  "the UE starts the named ciphering and integrity algorithms and stops accepting unprotected or differently protected traffic"
+    if [[ "$ciph_cap" == "0000" ]]; then
+        printf 'finding\t%s\n' "no ciphering algorithm offered at all: a UE that accepts this command has no confidentiality"
+    fi
+    printf 'ref\t%s\n'              "TS 25.331 clause 8.1.12 (message), clause 10 (SecurityModeCommand and SecurityCapability)"
+    printf 'detect\t%s\n'           "a UE logging the SECURITY MODE COMMAND it received shows uea0/uia1 beside a cell it has never seen; the network side shows no such command"
+    printf 'verdict\tsecurity_mode_command_built\n'
+}
+
+# Reader for the message above. It exists so that the builder can be checked
+# against something other than itself: the fields are read back from the
+# octets by position, and the algorithm names are recovered from the two
+# capability strings.
+uair_parse_security_mode() {
+    local hex="${1:-}" bits b0 idx txid ccap icap ciph integ i
+    hex=$(uair_norm_hex "$hex") || {
+        printf 'ERROR\tSECURITY MODE COMMAND octets must be hex\n' >&2; return 2; }
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --parse-security-mode <hex>\n' >&2; return 2; }
+    bits=$(uair_hex_to_bits "$hex") || {
+        printf 'ERROR\tcannot expand %s to bits\n' "$(uair_sanitize "$hex")" >&2; return 1; }
+    (( ${#bits} >= 45 )) || {
+        printf 'ERROR\t%d bits is too short for a SECURITY MODE COMMAND (needs 45)\n' "${#bits}" >&2
+        printf 'WHY\tTS 25.331 clause 8.1.12 places two 16-bit capability strings behind a transaction identifier; anything shorter is not this message\n' >&2
+        return 1; }
+    b0=${bits:0:1}
+    idx=$(( 2#${bits:1:5} ))
+    # 1 integrity bit + 5 index bits + 1 choice bit + 4 optional-presence
+    # bits puts the transaction identifier at bit 11.
+    txid=$(( 2#${bits:11:2} ))
+    ccap=${bits:13:16}
+    icap=${bits:29:16}
+    printf 'message\tRRC SECURITY MODE COMMAND\n'
+    printf 'message_type\tsecurityModeCommand\n'
+    printf 'integrity_check_info\t%s\n' "$([[ "$b0" == "1" ]] && echo present || echo absent)"
+    printf 'message_index\t%s\n'      "$idx"
+    printf 'transaction_id\t%s\n'     "$txid"
+    printf 'ciphering_cap\t%s\n'      "$(printf '%04x' "$(( 2#$ccap ))")"
+    printf 'integrity_cap\t%s\n'      "$(printf '%04x' "$(( 2#$icap ))")"
+    ciph=""
+    for i in 0 1 2; do
+        [[ "${ccap:$(( 15 - i )):1}" == "1" ]] && ciph+="${UAIR_UEA[i]} "
+    done
+    integ=""
+    for i in 1 2; do
+        [[ "${icap:$(( 15 - i )):1}" == "1" ]] && integ+="${UAIR_UIA[i]} "
+    done
+    ciph="${ciph% }"; integ="${integ% }"
+    printf 'ciphering_offered\t%s\n'  "${ciph:-none}"
+    printf 'integrity_offered\t%s\n'  "${integ:-none}"
+    if [[ -z "$ciph" ]]; then
+        printf 'finding\t%s\n' "the ciphering capability string is empty: a UE that accepts this command has no confidentiality"
+    fi
+    printf 'verdict\t%s\n' "security_mode_command_parsed"
 }
 
 # ── RRC CONNECTION SETUP (DL-CCCH) ──────────────────────────────────────
@@ -1642,6 +1767,31 @@ uair_selftest() {
     chk integ-null  "$(printf '%s\n' "$ia" | awk -F'\t' '$1=="SECURITY MODE COMMAND"{print ($3 ~ /UIA0/) ? "y":"n"}')" "y"
     chk integ-req-no "$(printf '%s\n' "$ia" | awk -F'\t' '$1=="RRC CONNECTION REQUEST"{print $2}')" "no"
 
+    # 4b. RRC SECURITY MODE COMMAND: the message that picks the algorithms.
+    chk smc-bits   "$(uair_cli_main --build-security-mode | awk -F'\t' '$1=="bits"{print $2}')" "45"
+    chk smc-hex    "$(uair_cli_main --build-security-mode | awk -F'\t' '$1=="hex"{print $2}')" "400000080010"
+    chk smc-type   "$(uair_cli_main --build-security-mode | awk -F'\t' '$1=="message_type"{print $2}')" "securityModeCommand"
+    chk smc-chan   "$(uair_cli_main --build-security-mode | awk -F'\t' '$1=="channel"{print $2}')" "dl-dcch"
+    chk smc-ciph   "$(uair_cli_main --build-security-mode | awk -F'\t' '$1=="ciphering_cap"{print $2}')" "0001"
+    chk smc-integ  "$(uair_cli_main --build-security-mode | awk -F'\t' '$1=="integrity_cap"{print $2}')" "0002"
+    chk smc-uea1   "$(uair_cli_main --build-security-mode 'txid=2,ciphering=uea1,integrity=uia2' | awk -F'\t' '$1=="hex"{print $2}')" "401000100020"
+    chk smc-off    "$(uair_cli_main --build-security-mode 'ciphering=off,integrity=off' | awk -F'\t' '$1=="ciphering_cap"{print $2}')" "0000"
+    chk smc-off-finding "$(uair_cli_main --build-security-mode 'ciphering=off' | grep -c 'no ciphering algorithm offered')" "1"
+    chk smc-bad-alg "$(uair_cli_main --build-security-mode 'ciphering=uea9' >/dev/null 2>&1; echo $?)" "2"
+    chk smc-bad-int "$(uair_cli_main --build-security-mode 'integrity=uia9' >/dev/null 2>&1; echo $?)" "2"
+    chk smc-txid    "$(uair_cli_main --build-security-mode 'txid=7' >/dev/null 2>&1; echo $?)" "2"
+    # the reader must agree with the builder about every field it places
+    local smc smcp
+    smc=$(uair_cli_main --build-security-mode 'txid=3,ciphering=uea2,integrity=uia2')
+    smcp=$(uair_cli_main --parse-security-mode "$(printf '%s\n' "$smc" | awk -F'\t' '$1=="hex"{print $2}')")
+    chk smc-rt-index "$(printf '%s\n' "$smcp" | awk -F'\t' '$1=="message_index"{print $2}')" "16"
+    chk smc-rt-txid  "$(printf '%s\n' "$smcp" | awk -F'\t' '$1=="transaction_id"{print $2}')" "3"
+    chk smc-rt-ciph  "$(printf '%s\n' "$smcp" | awk -F'\t' '$1=="ciphering_offered"{print $2}')" "uea2"
+    chk smc-rt-integ "$(printf '%s\n' "$smcp" | awk -F'\t' '$1=="integrity_offered"{print $2}')" "uia2"
+    chk smc-rt-icial "$(printf '%s\n' "$smcp" | awk -F'\t' '$1=="integrity_check_info"{print $2}')" "absent"
+    chk smc-short   "$(uair_cli_main --parse-security-mode 4000 >/dev/null 2>&1; echo $?)" "1"
+    chk smc-noarg   "$(uair_cli_main --parse-security-mode >/dev/null 2>&1; echo $?)" "2"
+
     # 5. AKA flow: the real message sequence and the attacker positions.
     local ak; ak=$(uair_aka_flow_tsv)
     chk aka-header "$(printf '%s\n' "$ak" | head -1)" \
@@ -1960,6 +2110,8 @@ uair_cli_main() {
         --sib-vectors)      umtsa_cmd_sib_vectors ;;
         --uplink)           umtsa_cmd_uplink "$@" ;;
         --build-rrc-setup)  uair_build_rrc_setup  "${1:-}" ;;
+        --build-security-mode) uair_build_security_mode "${1:-}" ;;
+        --parse-security-mode) uair_parse_security_mode "${1:-}" ;;
         --build-rrc-reject) uair_build_rrc_reject "${1:-}" ;;
         --build-paging)     uair_build_paging     "${1:-}" ;;
         --parse-rrc)        uair_parse_rrc        "${1:-}" ;;
@@ -1997,6 +2149,11 @@ Usage: $0 COMMAND
   --integrity-tsv               what is integrity protected, and what is not
   --decode-pcap <pcap>          list RRC messages in a capture
   --build-rrc-setup [conf]      build RRC CONNECTION SETUP octets (DL-CCCH)
+  --build-security-mode [conf]  build RRC SECURITY MODE COMMAND octets (DL-DCCH);
+                                keys: txid, ciphering (uea0|uea1|uea2|off),
+                                integrity (uia1|uia2|off) -- the message that
+                                selects the algorithms on a forged cell
+  --parse-security-mode <hex>   read those octets back by field position
   --build-rrc-reject [conf]     build RRC CONNECTION REJECT octets (DL-CCCH)
   --build-paging [conf]         build PAGING TYPE 1 octets (PCCH)
   --parse-rrc <ch>:<hex>        classify and walk a received RRC message
