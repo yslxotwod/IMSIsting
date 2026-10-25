@@ -188,6 +188,108 @@ ntn_koffset() {
 # All three are numbers the cell asserts, and a UE that believes them schedules
 # its uplink into silence. This verb takes a true range and a forged one and
 # works out what the UE would get wrong, in the units the UE uses.
+# ── timing advance → a position on the ground (F3) ──────────────────────
+# The NTN round trip is a distance, and the distance from one satellite places
+# the UE on a circle: the ground where the slant range matches. Two circles,
+# from two satellites or the same one twice, meet at two points, and the answer
+# is the pair. This is the analysis an operator would need to turn a timing
+# measurement into a location, worked out from the TA or the range directly.
+ntn_timing_geoloc() {
+    local ta="" r1="" r2="" slat="" slon="" salt="" lat2="" lon2=""
+    while (( $# )); do
+        case "$1" in
+            --ta)      ta="${2:-}";    shift 2 || { ntn_geo_usage; return 2; } ;;
+            --range-km) r1="${2:-}";   shift 2 || { ntn_geo_usage; return 2; } ;;
+            --range2-km) r2="${2:-}";  shift 2 || { ntn_geo_usage; return 2; } ;;
+            --sat-lat) slat="${2:-}";  shift 2 || { ntn_geo_usage; return 2; } ;;
+            --sat-lon) slon="${2:-}";  shift 2 || { ntn_geo_usage; return 2; } ;;
+            --sat-alt) salt="${2:-}";  shift 2 || { ntn_geo_usage; return 2; } ;;
+            --sat2-lat) lat2="${2:-}"; shift 2 || { ntn_geo_usage; return 2; } ;;
+            --sat2-lon) lon2="${2:-}"; shift 2 || { ntn_geo_usage; return 2; } ;;
+            *)         ntn_geo_usage; return 2 ;;
+        esac
+    done
+    if [[ -z "$ta" && -z "$r1" ]]; then ntn_geo_usage; return 2; fi
+    [[ "$slat" =~ ^-?[0-9]+([.][0-9]+)?$ && "$slon" =~ ^-?[0-9]+([.][0-9]+)?$ && "$salt" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        printf 'ERROR\t--sat-lat, --sat-lon and --sat-alt are all needed to place the circle\n' >&2; return 2; }
+    if [[ -n "$ta" && ! "$ta" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\t--ta wants whole timing-advance units\n' >&2; return 2
+    fi
+    ntn_geo_math "$ta" "$r1" "$r2" "$slat" "$slon" "$salt" "$lat2" "$lon2"
+}
+
+ntn_geo_math() {
+    awk -v ta="$1" -v r1="$2" -v r2="$3" -v slat="$4" -v slon="$5" -v salt="$6" \
+        -v lat2="$7" -v lon2="$8" 'BEGIN{
+        c = 299792458; unit = 16.0/30720000.0
+        deg = 3.14159265358979/180; R = 6371.0
+        if (ta != "") {
+            rtt = ta * unit
+            dkm = c * rtt / 2000.0
+            printf "input\ttiming advance\n"
+            printf "ta_units\t%s\n", ta
+            printf "rtt_ms\t%.3f\n", rtt*1000
+        } else {
+            dkm = r1 + 0
+            printf "input\trange\n"
+        }
+        h = salt + 0
+        g2 = dkm*dkm - h*h
+        if (g2 <= 0) {
+            printf "ERROR\tthe slant range %.1f km is shorter than the satellite altitude %.1f km, so no ground point matches it\n", dkm, h
+            exit 2
+        }
+        gr = sqrt(g2)
+        # TA quantisation: one unit is 16/30720000 s of round trip, so half a
+        # unit is the worst rounding error, in metres of one-way range
+        quant_m = c * (unit/2) / 2 * 1
+        printf "slant_range_km\t%.1f\n", dkm
+        printf "sat_alt_km\t%.1f\n", h
+        printf "ground_radius_km\t%.1f\n", gr
+        printf "quantisation_m\t%.0f\n", quant_m
+        printf "circle\tlat=%s lon=%s radius_km=%.1f\n", slat, slon, gr
+        printf "finding\tsingle_measurement\tMEDIUM\tone range gives a circle of %.0f km radius, which is a region and not a position\n", gr
+        if (lat2 != "" && lon2 != "" && r2 != "") {
+            h2 = h
+            g2b = (r2+0)*(r2+0) - h2*h2
+            if (g2b <= 0) { printf "finding\tno_intersection\tINFO\tthe second range gives no ground circle either\n"; exit 0 }
+            gr2 = sqrt(g2b)
+            printf "circle2\tlat=%s lon=%s radius_km=%.1f\n", lat2, lon2, gr2
+            # planar intersection at the scale of the two subpoints, which is
+            # honest for a pair of circles a few hundred km across
+            dy = (lat2 - slat) * 111.32
+            dx = (lon2 - slon) * 111.32 * cos(slat * deg)
+            d = sqrt(dx*dx + dy*dy)
+            if (d == 0) { printf "finding\tno_intersection\tINFO\tthe two satellite subpoints coincide, so the circles are concentric\n"; exit 0 }
+            if (d > gr + gr2) { printf "finding\tno_intersection\tHIGH\tthe circles are %.0f km apart and their radii sum to %.0f km, so no point satisfies both\n", d, gr+gr2; exit 0 }
+            if (d < (gr > gr2 ? gr - gr2 : gr2 - gr)) { printf "finding\tno_intersection\tHIGH\tone circle sits inside the other, so no point satisfies both\n"; exit 0 }
+            a = (gr*gr - gr2*gr2 + d*d) / (2*d)
+            hh = sqrt(gr*gr - a*a)
+            px = a*dx/d; py = a*dy/d
+            ux = -dy/d; uy = dx/d
+            for (k = -1; k <= 1; k += 2) {
+                x = px + k*hh*ux; y = py + k*hh*uy
+                la = slat + y/111.32
+                lo = slon + x/(111.32*cos(slat*deg))
+                printf "candidate\tlat=%.4f lon=%.4f\n", la, lo
+            }
+            printf "finding\ttrilaterated\tINFO\ttwo circles leave two candidate points; a third measurement or a sector test picks between them\n"
+            printf "verdict\tposition_pinned_to_two_points\n"
+        } else {
+            printf "verdict\tposition_circle_only\n"
+        }
+        printf "ref\t3GPP TS 38.821 (NTN), TS 38.213 timing advance\n"
+        printf "note\tthe planar intersection is an approximation for circles a few hundred kilometers across; a production fix would intersect on the ellipsoid\n"
+    }'
+}
+
+ntn_geo_usage() {
+    cat >&2 <<'EOF'
+USAGE	--timing-geoloc (--ta N | --range-km KM) --sat-lat DEG --sat-lon DEG --sat-alt KM [--range2-km KM --sat2-lat DEG --sat2-lon DEG]
+WHY	turns a timing-advance measurement into the circle of ground positions that could have produced it, and two measurements into the pair of points they meet at
+EOF
+}
+
 ntn_ephemeris_hijack() {
     local true_km="" forged_km="" koffset="" kerr=0 scs=15 dur=60 cp=4.69
     while (( $# )); do
@@ -468,6 +570,17 @@ ntn_selftest() {
     chk eph-within-cp "$(ntn_ephemeris_hijack --true-range 1200 --forged-range 1199.9 --koffset 20 | awk -F'\t' '$1=="finding" && $2=="timing_within_cp"{print $3}')" "INFO"
     chk eph-noargs "$(ntn_ephemeris_hijack --true-range 1200 >/dev/null 2>&1; echo $?)" "2"
     chk eph-bad-scs "$(ntn_ephemeris_hijack --true-range 1 --forged-range 2 --koffset 20 --scs 45 >/dev/null 2>&1; echo $?)" "2"
+    # 11. Timing advance to a position: one circle, then two circles.
+    local gl; gl=$(ntn_timing_geoloc --ta 12000 --sat-lat 48 --sat-lon 11 --sat-alt 600)
+    chk geo-slant "$(printf '%s\n' "$gl" | awk -F'\t' '$1=="slant_range_km"{print $2}')" "936.9"
+    chk geo-radius "$(printf '%s\n' "$gl" | awk -F'\t' '$1=="ground_radius_km"{print $2}')" "719.5"
+    chk geo-verdict "$(printf '%s\n' "$gl" | awk -F'\t' '$1=="verdict"{print $2}')" "position_circle_only"
+    chk geo-single "$(printf '%s\n' "$gl" | awk -F'\t' '$1=="finding" && $2=="single_measurement"{print $3}')" "MEDIUM"
+    local g2; g2=$(ntn_timing_geoloc --range-km 620 --sat-lat 48 --sat-lon 11 --sat-alt 600 --range2-km 665 --sat2-lat 51 --sat2-lon 14)
+    chk geo-candidates "$(printf '%s\n' "$g2" | grep -c '^candidate')" "2"
+    chk geo-pinned "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="verdict"{print $2}')" "position_pinned_to_two_points"
+    chk geo-noargs "$(ntn_timing_geoloc --sat-lat 1 --sat-lon 1 --sat-alt 600 >/dev/null 2>&1; echo $?)" "2"
+    chk geo-noalt "$(ntn_timing_geoloc --ta 100 >/dev/null 2>&1; echo $?)" "2"
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -517,6 +630,7 @@ ntn_cli_main() {
         --sib19)       ntn_sib19 "${1:-}" ;;
         --sib19-build) ntn_sib19_build "$@" ;;
         --ephemeris-hijack) ntn_ephemeris_hijack "$@" ;;
+        --timing-geoloc)  ntn_timing_geoloc "$@" ;;
         --feeder)      ntn_feeder_link ;;
         --plan)        ntn_plan ;;
         --selftest)    ntn_selftest ;;
@@ -531,6 +645,8 @@ Usage: $0 COMMAND
   --range <one_way_km>      one-way and round-trip delay
   --ta <one_way_km>         TA units needed vs the LTE TA range
   --koffset <slots> [scs_khz] [sample_rate_hz]   K_offset (TS 38.331, 15 kHz reference slots) -> ms and samples
+  --timing-geoloc (--ta N | --range-km KM) --sat-lat DEG --sat-lon DEG --sat-alt KM
+                            one range gives a circle; two give the pair of ground points
   --ephemeris-hijack --true-range KM --forged-range KM --koffset N
                             a forged SIB19 ephemeris, and the timing the UE derives from it
   --sib19-build [--koffset N] [--epoch-sfn N] [--epoch-sub N] [--validity sN]
