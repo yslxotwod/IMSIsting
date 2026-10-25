@@ -338,6 +338,37 @@ gprs_gea_recovery() {
     return 0
 }
 
+# ── GEA5: an admission, not an implementation ─────────────────────────
+# TS 55.251 is the specification of the GEA5 algorithm and TS 55.252 holds its
+# test data, and both are published by 3GPP with their algorithmic clauses and
+# their vectors under the licence that covers 3GPP specifications. The table in
+# TS 43.020 names GEA5 for EC-GSM-IoT, which is why an operator with an EC-GSM
+# deployment meets it and why this tree has to say something about a cipher it
+# cannot compute: the honest answer is the name, the specs, what is public, and
+# that the body and the vectors are not. What a licence would and would not buy
+# is part of the answer, because "licence-gated" is not a synonym for "unknown".
+gprs_gea5_admission() {
+    printf 'algorithm\tGEA5\n'
+    printf 'family\tGPRS/EGPRS LLC ciphering, EC-GSM-IoT deployment (TS 43.020 Table D.1 names it; TS 55.251 specifies it)\n'
+    printf 'key_bits\t128\n'
+    printf 'input\t32-bit\n'
+    printf 'structure\tSNOW 3G based, with a CONSTANT-F initialisation constant that is what separates it from GEA4\n'
+    printf 'spec_algorithm\tTS 55.251 (GEA5 specification)\n'
+    printf 'spec_test_data\tTS 55.252 (GEA5 test data set)\n'
+    printf 'spec_status\tpublished by 3GPP, algorithmic clauses and the test vectors are licence-gated: a copy is available to members and licensees, not to a reader of the public catalogue\n'
+    printf 'public\tthat it exists, its key size, its 32-bit input, that it is SNOW 3G based with CONSTANT-F, and which specs define it\n'
+    printf 'not_public\tthe CONSTANT-F value, the exact SNOW 3G configuration (IV layout, preloading, the number of initialisation rounds), and the TS 55.252 vectors that would show whether an implementation is right\n'
+    printf 'implemented_here\tno\n'
+    printf 'why_not\tan implementation of a cipher whose body is not readable and whose vectors are not readable cannot be tested: it would be a guess dressed as GEA5, and a wrong guess that silently returns keystream is worse than a refusal\n'
+    printf 'what_a_licence_would_buy\tTS 55.251 and TS 55.252, so that tools/gsm_gea.py could gain a fifth algorithm with the same vector discipline GEA3 and GEA4 have here\n'
+    printf 'what_it_would_not_buy\tGEA1 and GEA2, which were never published by anyone and are known only through the recovery in the cryptanalysis literature (EUROCRYPT 2021, IACR ePrint 2022/424)\n'
+    printf 'attack_work\tnot stated: no published cryptanalysis of GEA5 exists to quote, and inventing a complexity would be the same fabrication as inventing the algorithm\n'
+    printf 'detection\ta network using GEA5 answers a ciphering-mode command with algorithm 5; --gea-crypt answers 3 here, so the refusal itself is visible in a run\n'
+    printf 'ref\tTS 43.020 (the GEA table), TS 55.251 V14.0.0, TS 55.252, 3GPP specification licence terms\n'
+    printf 'verdict\tgea5_admitted_not_implemented\n'
+}
+
+
 gprs_gea_recovery_usage() {
     cat >&2 <<'EOF'
 USAGE	--gea-recovery [--algo 1|2] [--cores N] [--speed GUESSES_PER_CORE]
@@ -505,6 +536,20 @@ gprs_selftest() {
     chk gea-notoffered "$(gprs_gea_downgrade 2,3 1 >/dev/null 2>&1; echo $?)" "1"
     chk gea-bad "$(gprs_gea_downgrade 9 1 >/dev/null 2>&1; echo $?)" "2"
 
+    # R73: GEA5 is admitted, not implemented. The rows that matter are the ones
+    # that say what is public and what a licence would buy, and the assertion
+    # that no keystream is ever printed.
+    local g5
+    g5=$(gprs_gea5_admission)
+    chk gea5-algo       "$(fld "$g5" algorithm)" "GEA5"
+    chk gea5-spec       "$(fld "$g5" spec_algorithm)" "TS 55.251 (GEA5 specification)"
+    chk gea5-vectors    "$(fld "$g5" spec_test_data | grep -c 'TS 55.252')" "1"
+    chk gea5-impl       "$(fld "$g5" implemented_here)" "no"
+    chk gea5-keybits    "$(fld "$g5" key_bits)" "128"
+    chk gea5-verdict    "$(fld "$g5" verdict)" "gea5_admitted_not_implemented"
+    chk gea5-no-gamma   "$(grep -c '^gamma' <<<"$g5")" "0"
+    chk gea5-crypt-refused "$(gprs_gea_crypt 5 00000000000000000000000000000000 00000000 ab >/dev/null 2>&1; echo $?)" "3"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -561,6 +606,7 @@ gprs_cli_main() {
         --gea-kat)      gprs_gea_kat ;;
         --gea-downgrade) gprs_gea_downgrade "${1:-}" "${2:-}" ;;
         --gea-recovery)  gprs_gea_recovery "$@" ;;
+        --gea5)          gprs_gea5_admission ;;
         --plan)         gprs_plan ;;
         --selftest)     gprs_selftest ;;
         --menu)         gprs_menu ;;
@@ -582,6 +628,9 @@ Usage: $0 COMMAND
   --gea-downgrade <csv> <n>    offered vs selected GEA (exit 1 if not offered)
   --gea-recovery [--algo 1|2] [--cores N] [--speed G/s]
                                the published cost of recovering GEA1/GEA2 (no keystream)
+  --gea5                       GEA5 admitted: what is public, what TS 55.251 /
+                               55.252 hold behind the licence, and why nothing here
+                               computes it
   --plan                       Gb/Gn lab handoff plan
   --selftest                   known-answer tests for every computation
   --menu                       interactive menu
