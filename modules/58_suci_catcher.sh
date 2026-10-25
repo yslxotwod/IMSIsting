@@ -62,6 +62,7 @@ else
 fi
 SC_LOG="$LOGS_DIR/suci_catcher.log"
 SC_PID="$SC_ST/catcher.pid"
+SC_CORE_PID="$SC_ST/core.pid"
 
 SC_REFS="TS 33.501 Annex C, TS 24.501 8.2.6, TS 38.331 6.2.2, TS 38.413 9.3.1.9, TS 35.208"
 
@@ -498,7 +499,7 @@ sc_probe_deps() {
     for cand in srsran_gnb gnb; do
         if command -v "$cand" >/dev/null 2>&1; then gnb="$cand"; break; fi
     done
-    for cand in open5gs-amfd nr-softmodem; do
+    for cand in open5gs-amfd open5gs-amf nr-softmodem; do
         if command -v "$cand" >/dev/null 2>&1; then core="$cand"; break; fi
     done
     for cand in hackrf_info "bladeRF-cli -p" "LimeUtil --find" uhd_find_devices; do
@@ -579,9 +580,13 @@ sc_build_cell() {  # <plmn> [band] [arfcn] [pci]
 }
 
 sc_start() {
-    local conf="$SC_ST/gnb.conf"
+    local conf="$SC_ST/gnb.conf" amf="$SC_ST/amf.yaml"
     [[ -f "$conf" ]] || {
         printf 'ERROR\tno cell config at %s — run --build-cell <plmn> first\n' "$conf" >&2
+        return 1
+    }
+    [[ -f "$amf" ]] || {
+        printf 'ERROR\tno AMF slice at %s — run --build-cell <plmn> first\n' "$amf" >&2
         return 1
     }
     local deps drc=0
@@ -598,34 +603,55 @@ sc_start() {
         printf 'WHY\tnothing was started; a process that radiates nothing is the fabricated-success shape this module avoids\n' >&2
         return 1
     fi
-    if [[ -f "$SC_PID" ]]; then
-        local old; old=$(cat "$SC_PID" 2>/dev/null)
+    local old
+    for old in "$SC_PID" "$SC_CORE_PID"; do
+        [[ -f "$old" ]] || continue
+        old=$(cat "$old" 2>/dev/null)
         if [[ -n "$old" ]] && kill -0 "$old" 2>/dev/null; then
-            printf 'ERROR\tcatcher cell already running (pid %s); --stop it first\n' "$old" >&2
+            printf 'ERROR\tcatcher already running (pid %s); --stop it first\n' "$old" >&2
             return 1
         fi
-        rm -f "$SC_PID"
-    fi
-    local gnb; gnb=$(printf '%s\n' "$deps" | awk -F'\t' '$1=="gnb"{print $2}')
+        rm -f "$old"
+    done
+    local gnb core
+    gnb=$(printf '%s\n' "$deps" | awk -F'\t' '$1=="gnb"{print $2}')
+    core=$(printf '%s\n' "$deps" | awk -F'\t' '$1=="core"{print $2}')
     sc_init_dirs
-    sc_log "start gnb=$gnb conf=$conf"
-    # The gNB writes its own log; the pid file is the catcher's so --stop has one
-    # owner and cannot signal an unrelated process.
-    ( "$gnb" -c "$conf" >>"$SC_LOG" 2>&1 & echo "${BASHPID:-$$}" > "$SC_PID"; wait ) &
+    sc_log "start core=$core gnb=$gnb conf=$conf amf=$amf"
+
+    # The AMF first: a cell that comes up before the core answers degrades
+    # registration, and a UE that gives up is a UE that sends no SUCI. Each
+    # process is started from this shell and its own pid is recorded, so --stop
+    # signals the process that radiates, not a wrapper around it.
+    "$core" -c "$amf" >>"$SC_LOG" 2>&1 &
+    local core_pid=$!
+    printf '%s\n' "$core_pid" > "$SC_CORE_PID"
+    "$gnb" -c "$conf" >>"$SC_LOG" 2>&1 &
+    local gnb_pid=$!
+    printf '%s\n' "$gnb_pid" > "$SC_PID"
+
     local i
     for i in 1 2 3 4 5; do
-        [[ -s "$SC_PID" ]] && break
+        kill -0 "$core_pid" 2>/dev/null && kill -0 "$gnb_pid" 2>/dev/null && break
         sleep 1
     done
-    local pid; pid=$(cat "$SC_PID" 2>/dev/null)
-    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
-        printf 'ERROR\t%s did not stay up; see %s\n' "$gnb" "$SC_LOG" >&2
-        rm -f "$SC_PID"
+    local down=0
+    if ! kill -0 "$gnb_pid" 2>/dev/null; then
+        printf 'ERROR\t%s did not stay up; see %s\n' "$gnb" "$SC_LOG" >&2; down=1
+    fi
+    if ! kill -0 "$core_pid" 2>/dev/null; then
+        printf 'ERROR\t%s did not stay up; see %s\n' "$core" "$SC_LOG" >&2; down=1
+    fi
+    if (( down )); then
+        sc_stop >/dev/null 2>&1
         return 1
     fi
-    printf 'pid\t%s\n' "$pid"
+    printf 'pid\t%s\n' "$gnb_pid"
+    printf 'core_pid\t%s\n' "$core_pid"
     printf 'gnb\t%s\n' "$gnb"
+    printf 'core\t%s\n' "$core"
     printf 'conf\t%s\n' "$conf"
+    printf 'amf_conf\t%s\n' "$amf"
     printf 'log\t%s\n' "$SC_LOG"
     printf 'amf\t127.0.0.5\n'
     printf 'sib1\tbroadcasting the configured PLMN\n'
@@ -633,18 +659,27 @@ sc_start() {
 }
 
 sc_stop() {
-    if [[ ! -f "$SC_PID" ]]; then printf 'status\tnot-running\n'; return 0; fi
-    local pid; pid=$(cat "$SC_PID" 2>/dev/null)
-    if [[ -z "$pid" ]]; then rm -f "$SC_PID"; printf 'status\tnot-running\n'; return 0; fi
-    if kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null || true
-        local i
-        for i in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
-    fi
-    rm -f "$SC_PID"
-    sc_log "stop pid=$pid"
-    printf 'status\tstopped\npid\t%s\n' "$pid"
+    local any=0 detail="" pid name
+    for name in "$SC_CORE_PID:core" "$SC_PID:gnb"; do
+        pid="${name%%:*}"; name="${name##*:}"
+        [[ -f "$pid" ]] || continue
+        any=1
+        local p; p=$(cat "$pid" 2>/dev/null)
+        if [[ -z "$p" ]]; then rm -f "$pid"; continue; fi
+        if kill -0 "$p" 2>/dev/null; then
+            kill "$p" 2>/dev/null || true
+            local i
+            for i in 1 2 3 4 5; do kill -0 "$p" 2>/dev/null || break; sleep 1; done
+            kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null || true
+        fi
+        rm -f "$pid"
+        sc_log "stop $name pid=$p"
+        detail+="$(printf '%s\t%s\n' "$name" "$p") "
+    done
+    if (( any == 0 )); then printf 'status\tnot-running\n'; return 0; fi
+    printf 'status\tstopped\n'
+    [[ -n "$detail" ]] && printf 'stopped\t%s\n' "${detail% }"
+    return 0
 }
 
 # ── the catcher sequence, as YAML the operator's cores consume -------------------
@@ -705,6 +740,7 @@ sequence:
       expect: suci
       note: 5GS mobile identity, identity type 1 (TS 24.501 9.11.3.4)
 steps:
+  - start_core     # Open5GS AMF with ${amf}; no core, no identity request
   - start_cell
   - wait_rrc_setup_complete
   - send_identity_request_suci
@@ -1044,10 +1080,14 @@ sc_status() {
     gnb=$(printf '%s\n' "$deps" | awk -F'\t' '$1=="gnb"{print $2}')
     core=$(printf '%s\n' "$deps" | awk -F'\t' '$1=="core"{print $2}')
     sdr=$(printf '%s\n' "$deps" | awk -F'\t' '$1=="sdr"{print $2}')
-    local running=no pid=none
+    local running=no pid=none core_running=no core_pid=none
     if [[ -f "$SC_PID" ]]; then
         pid=$(cat "$SC_PID" 2>/dev/null)
         [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && running=yes || pid=none
+    fi
+    if [[ -f "$SC_CORE_PID" ]]; then
+        core_pid=$(cat "$SC_CORE_PID" 2>/dev/null)
+        [[ -n "$core_pid" ]] && kill -0 "$core_pid" 2>/dev/null && core_running=yes || core_pid=none
     fi
     local conf_present=no
     [[ -f "$SC_ST/gnb.conf" ]] && conf_present=yes
@@ -1068,6 +1108,9 @@ sc_status() {
     printf 'tshark\t%s\n' "$ts"
     printf 'catcher_running\t%s\n' "$running"
     printf 'catcher_pid\t%s\n' "$pid"
+    printf 'core_running\t%s\n' "$core_running"
+    printf 'core_pid\t%s\n' "$core_pid"
+    printf 'amf_config\t%s\n' "$SC_ST/amf.yaml"
     printf 'cell_config\t%s\n' "$conf_present"
     printf 'cell_config_path\t%s\n' "$SC_ST/gnb.conf"
     printf 'records_dir\t%s\n' "$SC_DIR"
@@ -1301,6 +1344,49 @@ EOF
     chk mark-valid   "$(sc_mark_to_open5gs 0)" "0x0"
     chk mark-invalid "$(sc_mark_to_open5gs ZZ >/dev/null 2>&1; echo $?)" "2"
 
+    # ── the transmit half, against stubs ────────────────────────────────
+    # --start used to record the wrapping subshell's pid, so --stop killed the
+    # wrapper and the gNB kept radiating; and the AMF slice was written but
+    # never launched, so a UE camped and was never asked for its SUCI. Both are
+    # driven here with stub binaries that stay up until signalled: the pids
+    # recorded are the processes themselves, and a stop leaves neither alive.
+    mkdir -p "$d/bin"
+    printf '#!/bin/sh\ntrap "exit 0" TERM\nwhile :; do sleep 0.2; done\n' > "$d/bin/gnb"
+    printf '#!/bin/sh\ntrap "exit 0" TERM\nwhile :; do sleep 0.2; done\n' > "$d/bin/open5gs-amfd"
+    printf '#!/bin/sh\necho "model hackrf"\n' > "$d/bin/hackrf_info"
+    chmod +x "$d/bin/gnb" "$d/bin/open5gs-amfd" "$d/bin/hackrf_info"
+    printf 'cell_cfg:\n  pci: 1\n' > "$SC_ST/gnb.conf"
+    printf 'amf:\n  addr: 127.0.0.5\n' > "$SC_ST/amf.yaml"
+    local saved_path="$PATH"
+    export PATH="$d/bin:$PATH"
+    local sout spid cpid
+    sout=$(sc_start 2>&1); local src=$?
+    chk start-rc       "$src" "0"
+    chk start-status   "$(kv "$sout" status)" "started"
+    chk start-core-row "$(kv "$sout" core)" "open5gs-amfd"
+    spid=$(kv "$sout" pid); cpid=$(kv "$sout" core_pid)
+    chk start-gnb-alive  "$(kill -0 "$spid" 2>/dev/null && echo yes || echo no)" "yes"
+    chk start-core-alive "$(kill -0 "$cpid" 2>/dev/null && echo yes || echo no)" "yes"
+    # The recorded pid is the process that radiates, not a wrapper around it.
+    chk start-pid-is-gnb "$(cat /proc/"$spid"/comm 2>/dev/null)" "gnb"
+    chk start-core-pid-is-amf "$(cat /proc/"$cpid"/comm 2>/dev/null)" "open5gs-amfd"
+    local st; st=$(sc_status)
+    chk status-running      "$(kv "$st" catcher_running)" "yes"
+    chk status-core-running "$(kv "$st" core_running)" "yes"
+    chk start-twice "$(sc_start 2>/dev/null; echo $?)" "1"
+    local stopout; stopout=$(sc_stop 2>&1)
+    chk stop-status "$(kv "$stopout" status)" "stopped"
+    sleep 1
+    chk stop-gnb-dead  "$(kill -0 "$spid" 2>/dev/null && echo alive || echo dead)" "dead"
+    chk stop-core-dead "$(kill -0 "$cpid" 2>/dev/null && echo alive || echo dead)" "dead"
+    chk stop-idempotent "$(sc_stop 2>&1 | awk -F'\t' '$1=="status"{print $2; exit}')" "not-running"
+    # A core that is missing is a refusal that names the core, not a silent no.
+    local err; err=$(PATH="$saved_path" sc_start 2>&1 >/dev/null)
+    chk start-no-core-rc "$(PATH="$saved_path" sc_start >/dev/null 2>&1; echo $?)" "1"
+    chk start-no-core-says "$(printf '%s\n' "$err" | grep -c 'no 5G core')" "1"
+    export PATH="$saved_path"
+    rm -f "$d/bin/gnb" "$d/bin/open5gs-amfd" "$d/bin/hackrf_info"
+
     printf 'ASSERTIONS\t%d\nRESULT\t%s\n' "$n" "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     (( bad == 0 ))
 }
@@ -1397,7 +1483,8 @@ The pre-authentication identity exchange, built and driven:
                         the PLMN, and check that the two name the same network
   --catch [plmn]        write the catcher plan: the RRC SETUP COMPLETE, the NAS
                         IDENTITY REQUEST for SUCI, and the sequence between them
-  --start               start the cell (needs srsRAN, a 5G core and an SDR)
+  --start               start the AMF and then the cell (needs srsRAN, Open5GS
+                        and an SDR); --stop stops both
   --stop                stop it (idempotent)
   --parse <suci> [key]  parse a SUCI; deconceal the MSIN when a home network
                         private key is supplied (profile A or B, via 14_suci)
