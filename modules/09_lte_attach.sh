@@ -997,6 +997,59 @@ latt_answer_build() {  # <message> [extra args...] -> hex on stdout
     printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2; exit}'
 }
 
+# ── DoLTEst-style negative corpus (K6) ──────────────────────────────────
+# Cases a device must reject or ignore, per TS 24.301, handed to the responder
+# so its answer is a normative one rather than a guess. A "check" feeds the
+# case through the same responder path an operator would use and compares the
+# reaction with the expectation. Tier 4 to send (needs a radio); the corpus and
+# the expectations are Tier 0 and live here.
+latt_doltest_cases() {
+    printf 'id\tspec\tdirection\tmessage\thex\texpect\tnote\n'
+    printf 'd1\t24.301 8.2.4\tul\tAttach request truncated after the attach type\t074103\treject-96\tmissing the mandatory EPS mobile identity\n'
+    printf 'd2\t24.301 7.3\tul\tUnknown EMM message type\t0774\tignore\tan unknown message type is ignored, not answered\n'
+    printf 'd3\t24.301 8.2.25\tul\tIdentity response with an unacceptable identity type\t0756F4\treject-96\ttype octet is not IMSI/IMEI/IMEISV\n'
+    printf 'd4\t24.301 8.2.4\tul\tAttach request naming a GUTI\t07410306F600F110270F3737359255\taccept\ta GUTI attach is legal; with no binding the responder asks for the IMSI behind it\n'
+}
+
+latt_doltest_check() {   # <case-id>
+    local id="${1:-}" spec dir expect note hex n=0
+    [[ -n "$id" ]] || {
+        printf 'ERROR\tusage: --doltest-check <case-id>\n' >&2; return 2; }
+    local case_spec case_hex case_expect case_note
+    case "$id" in
+        d1) spec="24.301 8.2.4";  hex=074103;            expect=reject-96 ;;
+        d2) spec="24.301 7.3";    hex=0774;              expect=ignore ;;
+        d3) spec="24.301 8.2.25"; hex=0756F4;            expect=reject-96 ;;
+        d4) spec="24.301 8.2.4";  hex=07410306F600F110270F3737359255; expect=accept ;;
+        *) printf 'ERROR\tno such case: %s (d1..d4)\n' "$(latt_sanitize "$id")" >&2; return 2 ;;
+    esac
+    local out; out=$(printf 'reset\nul %s\n' "$hex" | latt_cmd_nas_responder -)
+    local rej none
+    rej=$(printf '%s\n' "$out" | awk -F'\t' '$1=="reject_cause"{print $2; exit}')
+    none=$(printf '%s\n' "$out" | awk -F'\t' '$1=="downlink" && $2=="none"{print 1; exit}')
+    local actual verdict
+    if [[ -n "$rej" ]]; then
+        actual="reject-$rej"
+    elif [[ -n "$none" ]]; then
+        actual="ignore"
+    else
+        actual="answered"
+    fi
+    case "$expect" in
+        ignore)   [[ "$actual" == ignore ]] && verdict=pass || verdict=fail ;;
+        reject-*) [[ "$actual" == "$expect" ]] && verdict=pass || verdict=fail ;;
+        accept)   [[ "$actual" == "answered" ]] && verdict=pass || verdict=fail ;;
+    esac
+    printf 'case\t%s\n' "$id"
+    printf 'spec\t%s\n' "$spec"
+    printf 'hex\t%s\n' "$hex"
+    printf 'expect\t%s\n' "$expect"
+    printf 'actual\t%s\n' "$actual"
+    printf 'verdict\t%s\n' "$verdict"
+    [[ "$verdict" == pass ]]
+}
+
+# The identity a UE states, in either place it can state one: the EPS mobile
 # The identity a UE states, in either place it can state one: the EPS mobile
 # identity IE of an attach/TAU request (first IE after octet 4), or the whole
 # body of an identity response.
@@ -1055,6 +1108,21 @@ latt_cmd_nas_responder() {
 
         case "$kind:$mt" in
             ul:41|ul:48)
+                # A truncated attach request (missing the EPS mobile identity,
+                # which is mandatory per TS 24.301 8.2.4) is rejected rather
+                # than guessed at: 96 = invalid mandatory information.
+                if (( ${#pdu} < 14 )); then
+                    local rej; rej=$(latt_answer_build attach-reject --cause 96)
+                    printf 'step\t%s\n' "$step"
+                    printf 'uplink\t%s\n' "$mname"
+                    printf 'reject\ttruncated attach request (missing mandatory IEs)\n'
+                    printf 'reject_cause\t%s\n' "96"
+                    printf 'downlink\tAttach reject\n'
+                    printf 'downlink_hex\t%s\n' "$rej"
+                    printf 'next\tinvalid mandatory information, TS 24.301 8.2.4\n'
+                    latt_state_set exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
+                    continue
+                fi
                 local id; id=$(latt_identity_from_nas "$pdu")
                 if [[ -n "$id" ]]; then
                     imsi=$(printf '%s' "$id" | cut -f2)
@@ -1124,6 +1192,24 @@ latt_cmd_nas_responder() {
                         exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
                 fi ;;
             ul:56)
+                # Types 1 (IMSI), 2 (IMEI), 3 (IMEISV) have a place here;
+                # anything else, including a type octet left over from the
+                # requested identity, is refused with invalid mandatory
+                # information (TS 24.301 8.2.25).
+                local it; it=$(( 16#${pdu:4:2} & 7 ))
+                case "$it" in
+                    1|2|3) ;;
+                    *)
+                        printf 'step\t%s\n' "$step"
+                        printf 'uplink\t%s\n' "$mname"
+                        printf 'reject\tidentity type %s is not acceptable here\n' "$it"
+                        printf 'reject_cause\t%s\n' "96"
+                        local rej; rej=$(latt_answer_build attach-reject --cause 96)
+                        printf 'downlink_hex\t%s\n' "$rej"
+                        printf 'next\tinvalid mandatory information, TS 24.301 8.2.25\n'
+                        latt_state_set exchanges "$(($(latt_state_get exchanges || echo 0) + 1))"
+                        continue ;;
+                esac
                 local id; id=$(latt_identity_from_nas "$pdu")
                 if [[ -n "$id" ]]; then
                     imsi=$(printf '%s' "$id" | cut -f2)
@@ -1176,7 +1262,7 @@ latt_cmd_nas_responder() {
                 printf 'uplink\t%s\n' "$mname"
                 printf 'state\t%s\n' "$state"
                 printf 'downlink\tnone\n'
-                printf 'next\tno transition for 0x%s in this responder\n' "$mt"
+                printf 'ignored\tunknown EMM message type 0x%s (TS 24.301 7.3)\n' "$mt"
                 printf 'limit\tthe responder answers the attach handshake only; every other procedure is decoded and left to the operator\n' ;;
         esac
     done < <([[ "$source" == "-" ]] && cat || cat -- "$source")
@@ -2181,6 +2267,8 @@ latt_cli_main() {
         --realloc-record)   latt_realloc_record "${1:-}" "${2:-}" "${@:3}" ;;
         --realloc-list)     latt_cmd_realloc_list ;;
         --realloc-chain)    latt_cmd_realloc_chain "${1:-}" ;;
+        --doltest)          latt_doltest_cases ;;
+        --doltest-check)    latt_doltest_check "${1:-}" ;;
         --ue-stack)         latt_require_ue_stack ;;
         --selftest)         latt_selftest ;;
         --menu)             latt_menu ;;
@@ -2209,6 +2297,8 @@ Usage: $0 COMMAND
                              record one old->new replacement
   --realloc-list             every recorded replacement
   --realloc-chain <guti>     walk old -> new -> current
+  --doltest                  the negative-test corpus (id, clause, expectation)
+  --doltest-check <id>       drive one case through the responder and compare
   --encode-attach <IMSI> [CAPS_HEX] [ESM_HEX]
                                build a byte-exact Attach Request
   --imsi-encode <IMSI>         IMSI -> EPS mobile identity (BCD, TS 23.003)
