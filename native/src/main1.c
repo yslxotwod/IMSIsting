@@ -2447,6 +2447,10 @@ module_id_words(const char *tok)
  * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
  */
 static const char *const plain_keys[] = {
+    "blunt\twhat the far side does not check",
+    "decode_ok\tdid this tree read the bytes it just built",
+    "new_endpoint\twhere a redirected session would now terminate",
+    "outer_header_creation_value\tthe tunnel header description, TEID and address",
     "pending_octets\tthe notification octets being carried",
     "pending_hex\tthe PendingNotification octets",
     "error_reason\tthe reason the profile installation failed",
@@ -2458,6 +2462,7 @@ static const char *const plain_keys[] = {
     "profiles\tprofiles",
     "refuses\trefuses",
     "software\tsoftware",
+    "update_far\tthe forwarding rule this message rewrites",
     "what\twhat",
     "card_cryptogram_expected\tcard cryptogram expected",
     "card_cryptogram_matches\tcard cryptogram matches",
@@ -6241,6 +6246,8 @@ static const ChipRow chip_rows[] = {
     { "13_nr_core",          "--pfcp-build",          NEED_NO, DOES_BUILDS },
     { "13_nr_core",          "--pfcp-rules",          NEED_NO, DOES_READS },
     { "13_nr_core",          "--pfcp-send",           NEED_NO, DOES_SENDS },
+    { "13_nr_core",          "--pfcp-hijack",         NEED_NO, DOES_BUILDS },
+    { "13_nr_core",          "--pfcp-delete",         NEED_NO, DOES_BUILDS },
     { "13_nr_core",          "--plan",                NEED_NO, DOES_READS },
     { "13_nr_core",          "--quiet",               NEED_NO, DOES_READS },
     { "13_nr_core",          "--selftest",            NEED_NO, DOES_READS },
