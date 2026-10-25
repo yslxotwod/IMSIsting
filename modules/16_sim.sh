@@ -5587,6 +5587,38 @@ sim_selftest() {
     chk auts-verify-verdict "$(fld "$ver" verdict)" "valid"
     chk auts-verify-sqn     "$(fld "$ver" sqn_ms)"  "FF9BB4D0B607"
     chk auts-verify-next    "$(fld "$ver" next_sqn_hex)" "FF9BB4D0B608"
+    # R68: the responder. Same token, but now against a network that has a
+    # counter of its own: ahead-and-inside-the-window accepts, equal refuses as
+    # a replay, and a jump beyond the configured window is refused too.
+    local resp1 resp2 resp3 resp4
+    resp1=$(sim_auts_responder 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 \
+        "$(fld "$auts_row" auts)" --sqn-he FF9BB4D0B600)
+    chk auts-resp-verdict "$(fld "$resp1" verdict)" "auts_accepted_and_sqn_updated"
+    chk auts-resp-delta   "$(fld "$resp1" delta)" "7"
+    chk auts-resp-next    "$(fld "$resp1" sqn_he_after)" "FF9BB4D0B608"
+    chk auts-resp-autn    "$(fld "$resp1" new_autn | wc -c)" "33"
+    chk auts-resp-autn-amf "$(fld "$resp1" new_autn | cut -c13-16)" "0000"
+    chk auts-resp-mac     "$(fld "$resp1" mac_chk)" "passed"
+    resp2=$(sim_auts_responder 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 \
+        "$(fld "$auts_row" auts)" --sqn-he FF9BB4D0B607)
+    chk auts-resp-replay  "$(fld "$resp2" verdict)" "auts_rejected_not_ahead"
+    chk auts-resp-replay-finding "$(fld "$resp2" finding | grep -c 'replay_or_stale_auts HIGH')" "1"
+    chk auts-resp-replay-nas "$(fld "$resp2" nas_downlink | cut -c1-10)" "075C21300E"
+    resp3=$(sim_auts_responder 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 \
+        "$(fld "$auts_row" auts)" --sqn-he FF9BB4D0B600 --window 3)
+    chk auts-resp-window  "$(fld "$resp3" verdict)" "auts_refused_outside_window"
+    resp4=$(sim_auts_responder 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 \
+        55F328B43577CF44E93596E355C7 --sqn-he FF9BB4D0B600)
+    chk auts-resp-badmac  "$(fld "$resp4" verdict)" "auts_rejected_bad_mac_s"
+    chk auts-resp-badmac-finding "$(fld "$resp4" finding | grep -c 'mac_s_rejected HIGH')" "1"
+    chk auts-resp-argc    "$(sim_auts_responder 00 >/dev/null 2>&1; echo $?)" "2"
+    chk auts-resp-badsqn  "$(sim_auts_responder 465B5CE8B199B49FAA5F0A2EE238A6BC \
+        CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 \
+        "$(fld "$auts_row" auts)" --sqn-he XYZ >/dev/null 2>&1; echo $?)" "2"
     # A one-nibble change in MAC-S must fail: that is what makes it a check.
     chk auts-verify-tamper "$(sim_auts_verify 465B5CE8B199B49FAA5F0A2EE238A6BC \
         CD63CB71954A9F4E48A5994E37A02BAF 23553CBE9637A89D218AE64DAE47BF35 \
@@ -6241,8 +6273,138 @@ sim_auts_verify() {  # <ki> <opc> <rand> <auts-28hex> -> rows
     return 1
 }
 
+# ── R68: the responder side of AUTS ─────────────────────────────────────
+# --auts-build is the card (it constructs a synchronisation failure token) and
+# --auts-verify checks one token in isolation. Neither is a network. A network
+# that receives "Authentication Failure / sync failure" holds a counter of its
+# own, SQN_HE, and it has to answer a question the single-token check never
+# asks: is the counter the card reports AHEAD of mine, by how much, and is that
+# jump one a real card could have made? TS 33.102 6.3.5 lets the network set
+# SQN_HE := SQN_MS and re-authenticate, and it leaves the window to the
+# operator -- which is the whole weakness: a token that is internally perfect
+# proves the key, not the card.
+#
+# The failure path is a real message too: Authentication Failure with cause 21
+# and the AUTS as its parameter (TS 24.008 8.2.9.1, TS 24.301 8.2.5), 075C21300E
+# followed by the 14 octets. Replaying the same token a second time lands in the
+# delta <= 0 branch and is refused, which is the point of modelling the counter.
+sim_auts_responder() {  # <ki> <opc> <rand> <auts> [--sqn-he HEX12] [--window N]
+    local ki="${1:-}" opc="${2:-}" rand="${3:-}" auts="${4:-}"
+    [[ -n "$ki" && -n "$opc" && -n "$rand" && -n "$auts" ]] || {
+        printf 'ERROR\tusage: --auts-responder <ki-32hex> <opc-32hex> <rand-32hex> <auts-28hex> [--sqn-he HEX12] [--window N]\n' >&2
+        return 2; }
+    [[ "${ki^^}" =~ ^[0-9A-F]{32}$ && "${opc^^}" =~ ^[0-9A-F]{32}$ && "${rand^^}" =~ ^[0-9A-F]{32}$ ]] || {
+        printf 'ERROR\tKi, OPc and RAND are 16 octets each (32 hex)\n' >&2; return 2; }
+    [[ "${auts^^}" =~ ^[0-9A-F]{28}$ ]] || {
+        printf 'ERROR\tAUTS is 14 octets (28 hex): %s\n' "$(sim_sanitize "$auts")" >&2; return 2; }
+    ki="${ki^^}"; opc="${opc^^}"; rand="${rand^^}"; auts="${auts^^}"
+    local sqn_he="000000000001" window=1000000
+    shift 4
+    while (( $# )); do
+        case "$1" in
+            --sqn-he) sqn_he="${2:-}"; shift 2 || { printf 'ERROR\t--sqn-he wants 12 hex\n' >&2; return 2; } ;;
+            --window) window="${2:-}"; shift 2 || { printf 'ERROR\t--window is a whole number of steps\n' >&2; return 2; } ;;
+            *) printf 'ERROR\tunknown option %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ "${sqn_he^^}" =~ ^[0-9A-Fa-f]{12}$ ]] || {
+        printf 'ERROR\t--sqn-he is 6 octets (12 hex): %s\n' "$(sim_sanitize "$sqn_he")" >&2; return 2; }
+    [[ "$window" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'ERROR\t--window is a positive whole number of SQN steps\n' >&2; return 2; }
+    sqn_he="${sqn_he^^}"
+
+    # f5 does not depend on SQN or AMF, so the AK that conceals SQN_MS can be
+    # derived with any SQN; the derived SQN_MS is then checked by f1*.
+    local raw ak sqn_ms sqn_ak mac_s
+    raw=$(sim_cmd_sim_auth milenage "$ki" "$rand" --opc "$opc" --sqn 000000000000 --amf 0000 2>/dev/null) || {
+        printf 'ERROR\tthe Milenage run failed\n' >&2; return 1; }
+    ak=$(sim_kv ak "$raw")
+    [[ -n "$ak" ]] || { printf 'ERROR\tno f5 in the run\n' >&2; return 1; }
+    sqn_ak="${auts:0:12}"
+    sqn_ms=$(sim_auth_xor "$sqn_ak" "$ak") || return 1
+    mac_s="${auts:12:16}"
+
+    local check want_mac
+    check=$(sim_cmd_sim_auth milenage "$ki" "$rand" --opc "$opc" --sqn "$sqn_ms" --amf 0000 2>/dev/null)
+    want_mac=$(sim_kv 'f1*' "$check")
+    [[ -n "$want_mac" ]] || { printf 'ERROR\tno f1* in the check run\n' >&2; return 1; }
+
+    local d_ms d_he delta
+    d_ms=$(( 16#$sqn_ms ))
+    d_he=$(( 16#$sqn_he ))
+    delta=$(( d_ms - d_he ))
+
+    printf 'role\tAuC/HSS answering Authentication Failure (sync failure)\n'
+    printf 'auts\t%s\n' "$auts"
+    printf 'sqn_ak\t%s\n' "$sqn_ak"
+    printf 'ak\t%s\n' "$ak"
+    printf 'sqn_ms\t%s\n' "$sqn_ms"
+    printf 'mac_s\t%s\n' "$mac_s"
+    printf 'mac_s_computed\t%s\n' "$want_mac"
+    printf 'sqn_he\t%s\n' "$sqn_he"
+    printf 'delta\t%d\n' "$delta"
+    printf 'window\t%s\n' "$window"
+
+    if [[ "$mac_s" != "$want_mac" ]]; then
+        printf 'mac_chk\tfailed\n'
+        printf 'decision\trefuse\n'
+        printf 'sqn_he_after\t%s\n' "$sqn_he"
+        printf 'nas_downlink\t075C21300E%s\n' "$auts"
+        printf 'nas_note\tAuthentication Failure, cause 21 (synch failure) with the AUTS echoed as the authentication failure parameter (TS 24.008 8.2.9.1); the counter is not touched\n'
+        printf 'finding\tmac_s_rejected HIGH\tMAC-S does not verify, so this is not a synchronisation failure: it is a token computed with another key or corrupted in transit, and a network that resyncs on it hands the attacker a counter it chose\n'
+        printf 'ref\tTS 33.102 6.3.5, TS 24.008 8.2.9.1 / 10.5.3.8 (cause 21), TS 33.105 f1*\n'
+        printf 'verdict\tauts_rejected_bad_mac_s\n'
+        return 0
+    fi
+    printf 'mac_chk\tpassed\n'
+    if (( delta <= 0 )); then
+        printf 'decision\trefuse\n'
+        printf 'sqn_he_after\t%s\n' "$sqn_he"
+        printf 'reason\tSQN_MS is %d against SQN_HE %s: the card claims a counter that is not ahead of the network, so this token is a replay or a forgery and honouring it would move the network backwards\n' "${delta#-}" "$sqn_he"
+        printf 'nas_downlink\t075C21300E%s\n' "$auts"
+        printf 'finding\treplay_or_stale_auts HIGH\tA valid MAC-S with SQN_MS <= SQN_HE is the same token being presented twice, or a card whose counter was rolled back; either way the network must not resync\n'
+        printf 'ref\tTS 33.102 6.3.5 (SQN_MS must exceed the network value), TS 24.008 8.2.9.1\n'
+        printf 'verdict\tauts_rejected_not_ahead\n'
+        return 0
+    fi
+    if (( delta > window )); then
+        printf 'decision\trefuse (outside the window this network configured)\n'
+        printf 'sqn_he_after\t%s\n' "$sqn_he"
+        printf 'reason\tSQN_MS is %d steps ahead of SQN_HE, and the window is %s: a card that has not been reachable that long is either a clone or a counter written by someone else\n' "$delta" "$window"
+        printf 'nas_downlink\t075C21300E%s\n' "$auts"
+        printf 'finding\tsqn_jump_beyond_window MEDIUM\tThe token is genuine for one key, but the jump is larger than this network accepts; the standard leaves the window to the operator, which is why two operators can disagree about the same card\n'
+        printf 'ref\tTS 33.102 6.3.5 (the resync leaves the window to the network), TS 33.105 f1*\n'
+        printf 'verdict\tauts_refused_outside_window\n'
+        return 0
+    fi
+
+    # Genuine resync: set SQN_HE := SQN_MS and issue a new AUTN for the next
+    # attempt. AUTN = (SQN xor AK) || AMF || MAC-A with a fresh SQN of SQN_MS+1.
+    local new_sqn new_sqn_dec auth f1 ak_new conceal autn
+    new_sqn_dec=$(( d_ms + 1 ))
+    new_sqn=$(printf '%012X' "$new_sqn_dec")
+    auth=$(sim_cmd_sim_auth milenage "$ki" "$rand" --opc "$opc" --sqn "$new_sqn" --amf 0000 2>/dev/null) || {
+        printf 'ERROR\tthe Milenage run for the new AUTN failed\n' >&2; return 1; }
+    f1=$(sim_kv f1 "$auth")
+    ak_new=$(sim_kv ak "$auth")
+    conceal=$(sim_auth_xor "$new_sqn" "$ak_new") || return 1
+    autn="${conceal}0000${f1}"
+    printf 'decision\taccept and re-authenticate\n'
+    printf 'sqn_he_after\t%s\n' "$new_sqn"
+    printf 'new_sqn\t%s\n' "$new_sqn"
+    printf 'new_autn\t%s\n' "$autn"
+    printf 'new_autn_layout\tSQN_if_needed(SQN xor AK) || AMF 0000 || MAC-A, SQN %s (TS 33.102 6.3.3, TS 33.105 f1/f5)\n' "$new_sqn"
+    printf 'nas_downlink\tAuthentication Request carrying RAND %s and AUTN %s (TS 24.008 8.2.7.2)\n' "$rand" "$autn"
+    printf 'finding\tresync_trusts_the_card MEDIUM\tDelta %d is inside the window, so the network believes the card; nothing in this exchange proves the card is the one the subscription belongs to, which is why a cloned USIM alternates with the real one instead of replacing it\n' "$delta"
+    printf 'ref\tTS 33.102 6.3.5 (resync sets SQN_HE := SQN_MS), TS 33.105 f1/f5\n'
+    printf 'verdict\tauts_accepted_and_sqn_updated\n'
+    return 0
+}
+
+
 sim_cmd_auts_build()  { sim_auts_build "$@"; }
 sim_cmd_auts_verify() { sim_auts_verify "$@"; }
+sim_cmd_auts_responder() { sim_auts_responder "$@"; }
 
 # ── USIM over a socket: the card side of an attach (R7) ─────────────────
 #
@@ -6824,6 +6986,7 @@ sim_cli_main() {
         --es9-notification-build) sim_es9_notification_build "$@" ;;
         --rsp-plan)       sim_rsp_plan "${1:-}" ;;
         --auts-verify)    sim_cmd_auts_verify "$@" ;;
+        --auts-responder) sim_cmd_auts_responder "$@" ;;
         --usim-serve)     sim_usim_serve "$@" ;;
         --usim-tcp)       sim_cmd_usim_tcp "$@" ;;
         --es9-plus)       sim_cmd_es9_plus "$@" ;;
@@ -6889,6 +7052,8 @@ Usage: $0 COMMAND
   --auts-build <ki> <opc> <rand> <sqn_ms> [<amf>]
                                     the AUTS a card sends when the network's SQN
                                     is behind: (SQN_MS xor AK) || MAC-S
+  --auts-responder <ki> <opc> <rand> <auts> [--sqn-he HEX12] [--window N]
+                               the network side: resync or refuse, with the NAS answer
   --auts-verify <ki> <opc> <rand> <auts>
                                     the network side: recover SQN_MS and check
                                     MAC-S, so a resync is diagnosed not guessed
