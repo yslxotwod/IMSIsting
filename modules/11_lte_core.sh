@@ -3390,6 +3390,19 @@ lcore_selftest() {
 
     # The last hop takes no arming. What is asserted here is the argument check
     # and the transport each verb names -- no socket is opened by a selftest.
+    # C6 -- the flooding depth: wire octets, saturation pps/Mbit/s, finite objects.
+    local fm
+    fm=$(lcore_flood_model 2000 500 100)
+    chk flood-air-wire  "$(printf '%s\n' "$fm" | awk -F'\t' '$1=="leg_wire_octets" && $2=="diameter-s6a"{print $3}')" "310"
+    chk flood-air-pps   "$(printf '%s\n' "$fm" | awk -F'\t' '$1=="leg_saturate" && $2=="diameter-s6a"{print $3}')" "2000 pps"
+    chk flood-air-mbps  "$(printf '%s\n' "$fm" | awk -F'\t' '$1=="leg_saturate" && $2=="diameter-s6a"{print $4}')" "4.960 Mbit/s"
+    chk flood-gtpc-wire "$(printf '%s\n' "$fm" | awk -F'\t' '$1=="leg_wire_octets" && $2=="gtpv2-c"{print $3}')" "176"
+    chk flood-gtpc-mbps "$(printf '%s\n' "$fm" | awk -F'\t' '$1=="leg_saturate" && $2=="gtpv2-c"{print $4}')" "0.704 Mbit/s"
+    chk flood-fit       "$(printf '%s\n' "$fm" | awk -F'\t' '$1=="leg_fit" && $2=="diameter-s6a"{print $3}')" "feasible"
+    chk flood-pool      "$(printf '%s\n' "$fm" | awk -F'\t' '$1=="state" && $2=="vector_pool"{print ($3=="5 vectors per subscriber: five re-authentications -- five Authentication Information Requests answered -- retire every vector for that IMSI, and the sixth attach cannot complete until the HSS refreshes")?"yes":"no"}')" "yes"
+    chk flood-finding   "$(printf '%s\n' "$fm" | awk -F'\t' '$1=="finding" && $2=="vector_pool_per_subscriber"{print $3}')" "HIGH"
+    chk flood-noargs    "$(lcore_flood_model a b c >/dev/null 2>&1; echo $?)" "2"
+    chk flood-small     "$(lcore_flood_model 10 10 1 | awk -F'\t' '$1=="leg_fit" && $2=="gtpv2-c"{print $3}')" "feasible"
     chk gtpc-send-no-host      "$(lcore_cmd_gtpc_send >/dev/null 2>&1; echo $?)" "2"
     chk diam-send-no-host      "$(lcore_cmd_diameter_send >/dev/null 2>&1; echo $?)" "2"
     chk send-no-arming "$(grep -cE '^[[:space:]]*printf .status.{1,3}disarmed' "${BASH_SOURCE[0]}")" "0"
@@ -3742,6 +3755,61 @@ M
 # datagram itself proves nothing beyond the kernel accepting it -- UDP has no
 # acknowledgement -- so the report carries the reply when one comes back and
 # says "unconfirmed" when none does.
+# ── C6 — the flooding depth, with the maths shown ──────────────────────
+# Two different limits get called "flooding": the bandwidth one (more packets
+# than the link or the NIC will take) and the state one (more objects than the
+# core has room for). The first is arithmetic anyone can do; the second is the
+# one that matters, because the numbers are small and the objects are finite.
+lcore_flood_model() {  # [hss-air-per-sec] [mme-sessions-per-sec] [attacker-mbps]
+    local hss="${1:-2000}" mme="${2:-500}" mbps="${3:-100}"
+    [[ "$hss" =~ ^[0-9]+$ && "$mme" =~ ^[0-9]+$ && "$mbps" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--flood-model takes three decimal numbers: HSS AIR/s, MME sessions/s, attacker Mbps\n' >&2; return 2; }
+    local cap_air="$hss" cap_sess="$mme" link="$mbps"
+    printf 'assumption\thss_air_per_sec\t%s\tone Authentication-Information-Request answered per second by the target HSS at saturation\n' "$cap_air"
+    printf 'assumption\tmme_sessions_per_sec\t%s\tone GTPv2 Create Session Request turned into a session per second at saturation\n' "$cap_sess"
+    printf 'assumption\tattacker_mbps\t%s\tthe sending capacity being reasoned about\n' "$link"
+    printf 'assumption\tvectors_per_subscriber\t5\tTS 33.102 authentication vectors per subscriber, refreshed on use\n'
+    printf 'formula\tpps\trequired_pps = saturation_capacity / work_per_message\n'
+    printf 'formula\tmbps\trequired_mbps = required_pps * wire_octets_per_message * 8 / 1000000\n'
+
+    # Diameter AIR: 20-octet header, Session-Id/Auth-Session-State/Origin-Host/
+    # Origin-Realm/Destination-Realm/User-Name/SIP-Auth-Data-Item(?); 4-octet
+    # AVP alignment per RFC 6733 4.1; TCP/IPv4 adds 40 octets.
+    local air_avps=250 air_wire=$(( 20 + 250 + 40 ))
+    # GTPv2-C CSReq: 8-octet header + IEs (IMSI, MSISDN, RAT, F-TEID, APN,
+    # PAA, AMBR, ...) about 140 octets; UDP/IPv4 adds 28.
+    local gtpc_wire=$(( 8 + 140 + 28 ))
+    local air_pps air_mbps sess_pps sess_mbps
+    air_pps=$cap_air
+    air_mbps=$(awk -v p="$air_pps" -v b="$air_wire" 'BEGIN{printf "%.3f", p*b*8/1000000}')
+    sess_pps=$cap_sess
+    sess_mbps=$(awk -v p="$sess_pps" -v b="$gtpc_wire" 'BEGIN{printf "%.3f", p*b*8/1000000}')
+
+    printf 'leg\tdiameter-s6a\tAuthentication-Information-Request\n'
+    printf 'leg_wire_octets\tdiameter-s6a\t%s\t20-octet header + ~250 octets of AVPs (4-octet aligned) + 40 octets TCP/IPv4\n' "$air_wire"
+    printf 'leg_saturate\tdiameter-s6a\t%s pps\t%s Mbit/s\tcapacity/1 per message\n' "$air_pps" "$air_mbps"
+    printf 'leg_fit\tdiameter-s6a\t%s\t%s Mbit/s of the attacker link is %s%% of what saturation needs\n' \
+        "$([[ "$(awk -v a="$air_mbps" -v b="$link" 'BEGIN{print (a<=b)?1:0}')" == 1 ]] && echo feasible || echo insufficient)" \
+        "$air_mbps" "$(awk -v a="$air_mbps" -v b="$link" 'BEGIN{printf "%.2f", (b>0)?100*a/b:0}')"
+    printf 'leg\tgtpv2-c\tCreate Session Request\n'
+    printf 'leg_wire_octets\tgtpv2-c\t%s\t8-octet header + ~140 octets of IEs + 28 octets UDP/IPv4\n' "$gtpc_wire"
+    printf 'leg_saturate\tgtpv2-c\t%s pps\t%s Mbit/s\tcapacity/1 per message\n' "$sess_pps" "$sess_mbps"
+    printf 'leg_fit\tgtpv2-c\t%s\t%s Mbit/s of the attacker link is %s%% of what saturation needs\n' \
+        "$([[ "$(awk -v a="$sess_mbps" -v b="$link" 'BEGIN{print (a<=b)?1:0}')" == 1 ]] && echo feasible || echo insufficient)" \
+        "$sess_mbps" "$(awk -v a="$sess_mbps" -v b="$link" 'BEGIN{printf "%.2f", (b>0)?100*a/b:0}')"
+
+    printf 'state\tvector_pool\t5 vectors per subscriber: five re-authentications -- five Authentication Information Requests answered -- retire every vector for that IMSI, and the sixth attach cannot complete until the HSS refreshes\n'
+    printf 'state\tthis_is_the_depth\t1\tat %s pps the six messages take microseconds, so the bandwidth question never arises for one subscriber; the cost is the state the HSS must recover\n' "$air_pps"
+    printf 'state\tsession_table\tone Create Session Request is a session, a TEID pair and a P-GW record: the MME session table (%s/s at saturation) and the P-GW tunnel table are the finite objects, not the link\n' "$cap_sess"
+    printf 'state\tteid_space\t2^32 TEIDs is not the limit; the per-APN address pool and the P-GW session store are\n'
+    printf 'finding\tbandwidth_is_a_red_herring\tINFO\tthe Mbit/s arithmetic says a 100 Mbit/s sender is not the interesting actor for these legs; state exhaustion needs far less\n'
+    printf 'finding\tvector_pool_per_subscriber\tHIGH\tthe HSS vector pool makes a targeted denial of service cost a handful of messages per IMSI and no bandwidth worth measuring\n'
+    printf 'finding\tsession_table_shared\tMEDIUM\tGTP session allocation is shared: the attacker does not need the victim IMSI, only the S11 address and a P-GW that allocates before checking\n'
+    printf 'detect\tcount AIRs per IMSI and per origin host, and CSR per APN and per source; alert on a per-IMSI rate above two per minute and on any AIR from a host that never attaches\n'
+    printf 'verdict\tthe depth of a Diameter or GTP flood is the number of finite objects behind the message, not the bit rate: five vectors per subscriber, one session per request, and the maths says a single laptop is enough\n'
+    return 0
+}
+
 lcore_cmd_gtpc_send() {
     local host="${1:-}" port="${2:-2123}" hex="${3:-}"
     local tool="$IMSISTING_ROOT/tools/udp_assoc.py"
@@ -3809,6 +3877,7 @@ lcore_cli_main() {
         --gtp-in-gtp)    lcore_cmd_gtp_in_gtp "$@" ;;
         --mbms-session)  lcore_cmd_mbms_session "$@" ;;
         --gtpc-send)     lcore_cmd_gtpc_send "${1:-}" "${2:-2123}" "${3:-}" ;;
+        --flood-model)   lcore_flood_model "${1:-2000}" "${2:-500}" "${3:-100}" ;;
         --diameter-send) lcore_cmd_diameter_send "${1:-}" "${2:-3868}" "${3:-}" ;;
         --gtpdoor-detect) lcore_cmd_gtpdoor "${1:-}" ;;
         --cdr-fraud-check) lcore_cmd_cdr_fraud "${1:-}" ;;
@@ -3851,6 +3920,9 @@ Usage: $0 COMMAND
   --gtpc-send <host> [port] [hex]
                               send the Create Session Request over UDP 2123
                               (no arming needed)
+  --flood-model [hss-air/s] [mme-sess/s] [mbps]
+                                C6: the flooding depth, with the
+                                octet counts and the finite objects
   --diameter-send <host> [port] [hex]
                               send a Diameter message over TCP 3868, or TLS
                               with LTE_DIAMETER_TLS=1
