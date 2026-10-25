@@ -277,6 +277,20 @@ oran_selftest() {
         chk qos-none          "$(oran_qos_policy_check >/dev/null 2>&1; echo $?)" "2"
         # The ERROR line names the offending key, so the author can find it.
         chk qos-unknown-named "$(oran_qos_policy_check "$d/top.json" 2>&1 >/dev/null | grep -c 'unknown key(s): bandwidth')" "1"
+
+    # D1 -- the redistribution the totals cannot see.
+    local pz
+    pz=$(oran_a1_poison 1 2 20)
+    chk a1-poison-vmin  "$(printf '%s\n' "$pz" | awk -F'\t' '$1=="slice" && $2=="SST 1"{print $5}')" "10"
+    chk a1-poison-amax  "$(printf '%s\n' "$pz" | awk -F'\t' '$1=="slice" && $2=="SST 2"{print $6}')" "40"
+    chk a1-poison-ssum  "$(printf '%s\n' "$pz" | awk -F'\t' '$1=="sum" && $2=="min"{print $4}')" "45"
+    chk a1-poison-body  "$(printf '%s\n' "$pz" | awk -F'\t' '$1=="body"{print $2}' | grep -c '"minPct":10,"maxPct":30')" "1"
+    chk a1-poison-json  "$(printf '%s\n' "$pz" | awk -F'\t' '$1=="body"{print $2}' | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["statement"]["slices"]))' 2>/dev/null)" "3"
+    chk a1-poison-blind "$(printf '%s\n' "$pz" | awk -F'\t' '$1=="audit_naive"{print ($2 ~ /a redistribution moves nothing/)?"yes":"no"}')" "yes"
+    chk a1-poison-diff  "$(printf '%s\n' "$pz" | awk -F'\t' '$1=="audit_honest"{print ($2 ~ /SST 1 fell 30 -> 10/)?"yes":"no"}')" "yes"
+    chk a1-poison-find  "$(printf '%s\n' "$pz" | awk -F'\t' '$1=="finding" && $2=="no_cross_policy_accounting"{print $3}')" "HIGH"
+    chk a1-poison-same  "$(oran_a1_poison 1 1 >/dev/null 2>&1; echo $?)" "2"
+    chk a1-poison-range "$(oran_a1_poison 1 2 200 >/dev/null 2>&1; echo $?)" "2"
     else
         printf 'qos-suite\tSKIP python3 not present\n'
     fi
@@ -568,6 +582,72 @@ oran_e2_control() {
     printf 'attack\tRIC Control — a compromised or unsigned xApp drives handover, slicing or beam decisions through this message\n'
 }
 # The over-broad xApp: subscribe to KPM everywhere and hold RC control.
+# ── D1 -- the policy that quietly moves the radio ───────────────────────
+# A1 policies are per-slice statements of PRB share and 5QI set. The near-RT
+# RIC applies each policy it holds; it does not add them up. So a policy that
+# looks reasonable slice by slice can over-commit the cell, and the slice that
+# loses is the one whose minimum was quietly lowered -- while the sum of the
+# minimums still reads under 100 and passes a naive audit.
+oran_a1_poison() {
+    local victim="${1:-1}" attacker="${2:-2}" shift_pct="${3:-2}"
+    [[ "$victim" =~ ^[1-3]$ && "$attacker" =~ ^[1-3]$ && "$victim" != "$attacker" ]] || {
+        printf 'ERROR\t--a1-poison takes two different slice numbers 1..3\n' >&2; return 2; }
+    [[ "$shift_pct" =~ ^[0-9]+$ ]] && (( shift_pct >= 1 && shift_pct <= 90 )) || {
+        printf 'ERROR\tthe shift is a percentage 1..90\n' >&2; return 2; }
+    # before: SST1 30-50, SST2 10-20, SST3 5-10 (oran_qos_policy_body defaults)
+    local -a bn=(30 10 5) bx=(50 20 10)
+    local -a an=("${bn[@]}") ax=("${bx[@]}")
+    local keep=$shift_pct
+    an[$((victim-1))]=$(( bn[$((victim-1))] - keep ))
+    ax[$((victim-1))]=$(( bx[$((victim-1))] - keep ))
+    (( an[$((victim-1))] < 1 )) && an[$((victim-1))]=1
+    an[$((attacker-1))]=$(( bn[$((attacker-1))] + keep ))
+    ax[$((attacker-1))]=$(( bx[$((attacker-1))] + keep ))
+    (( ax[$((attacker-1))] > 99 )) && ax[$((attacker-1))]=99
+    local i
+    local bmin=0 bmax=0 amin=0 amax=0
+    for i in 0 1 2; do
+        bmin=$(( bmin + bn[i] )); bmax=$(( bmax + bx[i] ))
+        amin=$(( amin + an[i] )); amax=$(( amax + ax[i] ))
+    done
+    printf 'policy_type_id\t20000\npolicy_instance_id\t1\nscope\tALL\n'
+    printf 'method\tPUT\npath\t/A1-P/v2/policytypes/20000/policies/1\n'
+    printf 'ledger\tslice\tprb_min_before\tprb_max_before\tprb_min_after\tprb_max_after\n'
+    local sst
+    for i in 0 1 2; do
+        sst="SST $(( i + 1 ))"
+        printf 'slice\t%s\t%s\t%s\t%s\t%s\n' "$sst" "${bn[i]}" "${bx[i]}" "${an[i]}" "${ax[i]}"
+    done
+    printf 'sum\tmin\t%s\t%s\n' "$bmin" "$amin"
+    printf 'sum\tmax\t%s\t%s\n' "$bmax" "$amax"
+    printf 'victim\t%s\tloses %s%% of its PRB floor\n' "SST $victim" "$keep"
+    printf 'attacker_gain\t%s\tgains %s%%\n' "SST $attacker" "$keep"
+    # the body, in the same shape the module already builds
+    printf 'body\t{"scope":{"ueId":"ALL"},"statement":{"action":"slice-qos","policyTypeId":20000,"policyInstanceId":1,"slices":['
+    for i in 0 1 2; do
+        (( i > 0 )) && printf ','
+        local q5; case "$i" in
+            0) q5="1,5,6,9"; local ug=20000 dg=40000 ;;
+            1) q5="82,85";   local ug=5000  dg=10000 ;;
+            *) q5="9";       local ug=1000  dg=1000 ;;
+        esac
+        printf '{"snssai":{"sst":%d,"sd":"00000%d"},"prb":{"minPct":%d,"maxPct":%d},"quota":{"ulGbrKbps":%d,"dlGbrKbps":%d},"allowed5qi":[%s]}' \
+            $(( i + 1 )) $(( i + 1 )) "${an[i]}" "${ax[i]}" "$ug" "$dg" "$q5"
+    done
+    printf ']}}\n'
+    printf 'audit_naive\tmin-sum %s -> %s, max-sum %s -> %s: a redistribution moves nothing in the totals, so a check that adds slices cannot see it\n' \
+        "$bmin" "$amin" "$bmax" "$amax"
+    printf 'audit_honest\tcompare each slice against its previous body: SST %s fell %s -> %s while SST %s rose %s -> %s in the same PUT\n' \
+        "$victim" "${bn[$((victim-1))]}" "${an[$((victim-1))]}" "$attacker" "${bn[$((attacker-1))]}" "${an[$((attacker-1))]}"
+    printf 'overcommit\tif a policy instead raised a slice above the cell headroom (max-sum over 100), the scheduler decides per TTI who actually gets PRB and the over-committed slice is not the one that loses\n'
+    printf 'finding\tquiet_shift\tHIGH\tthe change is %s percentage points on two slices and the totals do not move: small enough to read as retuning, large enough to move the victim below the level its 5QI set needs\n' "$keep"
+    printf 'finding\tno_cross_policy_accounting\tHIGH\tthe near-RT RIC enforces each policy as written; nothing sums the slices, so an over-commit is invisible at the point of enforcement\n'
+    printf 'finding\tfiveqi_carries_it\tMEDIUM\tthe 5QI set is what the scheduler weighs: leaving [1,5,6,9] on an under-fed slice does not restore the GFBR its bearers think they have\n'
+    printf 'detect\taudit the policy store by max-sum per cell rather than per policy, and diff policy_instance bodies against the previous revision on every PUT\n'
+    printf 'verdict\tA1 poisoning is arithmetic the RIC does not do: the poisoned policy is valid JSON, valid A1, and only the ledger for the whole cell shows it\n'
+    return 0
+}
+
 oran_xapp_attack() {
     local name="${1:-rogue-xapp}"
     printf 'xapp\t%s\nsubscription\tORAN-E2SM-KPM (all E2 nodes)\ncontrol\tORAN-E2SM-RC (all E2 nodes)\n' "$(oran_sanitize "$name")"
@@ -588,6 +668,7 @@ oran_cli_main() {
         --qos-policy-check) oran_qos_policy_check "${1:-}" ;;
         --e2-control)      oran_e2_control "${1:-2}" "${2:-1}" "${3:-0}" ;;
         --xapp-attack)     oran_xapp_attack "${1:-rogue-xapp}" ;;
+        --a1-poison)       oran_a1_poison "${1:-1}" "${2:-2}" "${3:-2}" ;;
         --plan)            oran_plan ;;
         --selftest)        oran_selftest ;;
         --menu)            oran_menu ;;
@@ -609,6 +690,9 @@ Usage: $0 COMMAND
                                           refused, not ignored
   --e2-control [ranfunc] [action] [ue]    RIC Control (E2AP procedure 6) shape
   --xapp-attack [name]      the over-broad xApp model
+  --a1-poison [victim] [attacker] [pct]
+                            D1: a policy PUT that moves PRB from one
+                            slice to another without changing the totals
   --plan                    O-RAN testbed handoff plan
   --selftest                verify the tables and the assessor
   --menu                    interactive menu
