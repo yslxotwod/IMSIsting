@@ -471,6 +471,100 @@ umtsa_cmd_transmit() {
 # the tree can and cannot do it. This is not a claim that the attack works from
 # this repository; it is the map of which step exists and which does not, so
 # nobody has to infer it from a missing verb.
+# ── the duplex loop: Test 3's question, asked of what can answer it ────
+# TS 34.108 Test 3 keeps the uplink and the downlink on one port and checks
+# that the handset's integrity still holds while the downlink is on. The
+# downlink half here is a built carrier; the uplink half is a built burst. What
+# this can assert without a radio is that both halves are the same cell, that
+# the carrier is reproducible sample for sample, and that the uplink piece
+# exists at the same chip rate. What it cannot assert is a receiver hearing the
+# handset while the transmitter is on -- that is the part a radio answers, so
+# the verb stops at the call and says so.
+umtsa_cmd_duplex_loop() {
+    local freq="" rate="7680000" secs="1.0" psc="0" gain="0"
+    while (( $# )); do
+        case "$1" in
+            --freq)    freq="${2:-}"; shift 2 ;;
+            --rate)    rate="${2:-}"; shift 2 ;;
+            --seconds) secs="${2:-}"; shift 2 ;;
+            --psc)     psc="${2:-}"; shift 2 ;;
+            --gain)    gain="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--duplex-loop does not take %s\n' "$(umtsa_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ "$freq" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--duplex-loop needs --freq <MHz> for the one carrier both halves share\n' >&2
+        printf 'WHY\tTest 3 puts the transmitter and the receiver on one port at one frequency; without the frequency there is no loop to name\n' >&2
+        return 2
+    }
+    (( rate % 3840000 == 0 )) || {
+        printf 'ERROR\t--rate %s is not a whole number of samples per UMTS chip\n' "$(umtsa_sanitize "$rate")" >&2
+        printf 'WHY\tthe uplink burst is built at the chip rate, so a carrier rate that is not 3840000 * n cannot be paired with it\n' >&2
+        return 2
+    }
+    command -v python3 >/dev/null 2>&1 || { printf 'ERROR\tpython3 is needed to build both halves\n' >&2; return 1; }
+
+    local tx1 tx2 gen
+    tx1=$(umtsa_iq_path loop_tx); tx2=$(umtsa_iq_path loop_tx_again)
+    if ! gen=$(timeout 300 python3 "$(umtsa_phy)" gen --carrier both --out "$tx1" \
+                 --format cf32 --rate "$rate" --seconds "$secs" --psc "$psc" 2>&1); then
+        printf 'ERROR\tthe downlink half could not be built\n' >&2
+        printf '%s\n' "$gen" | sed 's/^/  /' >&2
+        return 1
+    fi
+    timeout 300 python3 "$(umtsa_phy)" gen --carrier both --out "$tx2" \
+        --format cf32 --rate "$rate" --seconds "$secs" --psc "$psc" >/dev/null 2>&1 || true
+
+    local txb=0 sha1="" sha2="" det="no"
+    [[ -r "$tx1" ]] && txb=$(stat -c%s "$tx1" 2>/dev/null || echo 0)
+    if command -v sha256sum >/dev/null 2>&1; then
+        [[ -r "$tx1" ]] && sha1=$(sha256sum "$tx1" | awk '{print $1}')
+        [[ -r "$tx2" ]] && sha2=$(sha256sum "$tx2" | awk '{print $1}')
+    fi
+    [[ -n "$sha1" && "$sha1" == "$sha2" ]] && det="yes"
+
+    local ul="" ulrc=0
+    ul=$(timeout 120 python3 "$IMSISTING_ROOT/tools/umts_uplink.py" burst 2>&1) || ulrc=$?
+    local ulrows; ulrows=$(printf '%s\n' "$ul" | grep -c . || true)
+
+    printf 'loop_side\tdownlink\n'
+    printf 'loop_freq\t%s\n' "$freq"
+    printf 'loop_rate\t%s\n' "$rate"
+    printf 'loop_psc\t%s\n' "$psc"
+    printf 'loop_seconds\t%s\n' "$secs"
+    printf 'tx_bytes\t%s\n' "$txb"
+    printf 'tx_sha256\t%s\n' "${sha1:-<none>}"
+    printf 'deterministic\t%s\n' "$det"
+    printf 'loop_side\tuplink\n'
+    printf 'ul_rows\t%s\n' "$ulrows"
+    printf 'ul_source\ttools/umts_uplink.py burst\n'
+    printf 'ul_rate\t%s chips/s (the pair rate is a whole multiple of 3840000)\n' "3840000"
+    printf 'duplex\tsame_port: one frequency, one rate, one carrier for both directions\n'
+    printf 'duplex_assert\t%s\n' "$([[ "$det" == "yes" ]] && echo "the two halves address one cell and the downlink is reproducible sample for sample" || echo "the downlink is not reproducible; the loop cannot claim the halves agree")"
+    printf 'duplex_note\ta transmitter on the same port as the receiver desenses it; Test 3 measures the handset against the interference, not against silence\n'
+    printf 'ref\tTS 34.108 6.1 Test 3 (duplex loop); TS 25.214 4.3 (sync), TS 25.212 4.2 uplink (RACH)\n'
+
+    local dev
+    if dev=$(umtsa_tx_device 2>/dev/null); then
+        printf 'sdr\t%s\n' "$dev"
+        printf 'sdr_call\thackrf_transfer -t %s -f %s000000 -s %s -a 1 -x %s\n' "$tx1" "$freq" "$rate" "$gain"
+        printf 'rx_call\tuhd_rx_samples_to_file --file %s/rx_loop.cf32 --freq %s000000 --rate %s --gain %s --duration %s\n' \
+               "$(umtsa_dir)" "$freq" "$rate" "$gain" "$secs"
+        printf 'status\thandoff\n'
+        printf 'handoff\tthe downlink half is built and the radio answered; the simultaneous receive that Test 3 compares against still has to be run on the printed call\n'
+        return 3
+    fi
+    printf 'sdr\tnone\n'
+    printf 'sdr_probe\tno radio answered (hackrf_info, bladeRF-cli -p, LimeUtil --find)\n'
+    printf 'sdr_call\thackrf_transfer -t %s -f %s000000 -s %s -a 1 -x %s\n' "$tx1" "$freq" "$rate" "$gain"
+    printf 'rx_call\tuhd_rx_samples_to_file --file %s/rx_loop.cf32 --freq %s000000 --rate %s --gain %s --duration %s\n' \
+           "$(umtsa_dir)" "$freq" "$rate" "$gain" "$secs"
+    printf 'status\thandoff\n'
+    printf 'handoff\tboth halves are built; the loop needs one radio transmitting and one receiving at the same frequency, so the receive that would hear the uplink is left to the operator\n'
+    printf 'limit\tTest 3 is a radio test: without hardware this asserts the build, not the air\n'
+    return 3
+}
+
 umtsa_cmd_catcher_model() {
     printf 'step\twhat happens\tclause\tin_this_tree\n'
     printf '1\tthe handset searches the downlink rasters, finds a carrier and synchronises to it on the SCH\tTS 25.214 4.3\tbuilt: --transmit builds CPICH + SCH\n'

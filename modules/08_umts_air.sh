@@ -1823,6 +1823,15 @@ uair_selftest() {
     chk auth-replay     "$(uair_cli_main --catcher-auth --rand 00112233445566778899aabbccddeeff --autn ffeeddccbbaa99887766554433221100 | awk -F'\t' '$1=="mm_hex"{print $2}')" "050012211000112233445566778899aabbccddeeff2010ffeeddccbbaa99887766554433221100"
     chk auth-needs-both "$(uair_cli_main --catcher-auth --rand 0011 >/dev/null 2>&1; echo $?)" "2"
     chk auth-not-a-break "$(uair_cli_main --catcher-auth --rand 00112233445566778899aabbccddeeff --autn ffeeddccbbaa99887766554433221100 | grep -c 'not.*an AKA break')" "1"
+    #    The duplex loop builds both halves and stops at the radio: the downlink
+    #    has to be reproducible for the two halves to be comparable at all.
+    local dvl dvr
+    dvl=$(uair_cli_main --duplex-loop --freq 2140 2>/dev/null); dvr=$?
+    chk dup-loop-rc "$dvr" "3"
+    chk dup-loop-det "$(fld "$dvl" deterministic)" "yes"
+    chk dup-loop-ul  "$(fld "$dvl" ul_rows | awk '{print ($1>0)?"yes":"no"}')" "yes"
+    chk dup-loop-rx  "$(printf '%s\n' "$dvl" | awk -F'\t' '$1=="rx_call"{print ($2 ~ /uhd_rx_samples_to_file/) ? "yes":"no"}')" "yes"
+    chk dup-loop-freq-bad "$(uair_cli_main --duplex-loop >/dev/null 2>&1; echo $?)" "2"
 
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -1955,6 +1964,7 @@ uair_cli_main() {
         --build-paging)     uair_build_paging     "${1:-}" ;;
         --parse-rrc)        uair_parse_rrc        "${1:-}" ;;
         --transmit)         umtsa_cmd_transmit "$@" ;;
+        --duplex-loop)      umtsa_cmd_duplex_loop "$@" ;;
         --catcher-model)    umtsa_cmd_catcher_model ;;
         --catcher-identity) umtsa_cmd_identity_request "$@" ;;
         --catcher-auth)     umtsa_cmd_auth_replay "$@" ;;
