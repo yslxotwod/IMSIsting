@@ -950,12 +950,173 @@ step	module	verb	args	hardware	description
 CHAIN
     chk badflag-shape "$(kchn_chain_steps badflag | tail -n +2 | awk -F'\t' '$5 !~ /^(yes|no)$/' | grep -c .)" "1"
 
+    # R69: evidence. A manifest that verifies, and the same manifest after one
+    # byte moves -- because a hash check that cannot fail is not a check.
+    mkdir -p "$d/ev"
+    printf 'alpha\n' > "$d/ev/one.txt"
+    printf 'beta\n'  > "$d/ev/two.txt"
+    local evman="$d/ev/manifest.tsv" evout evver
+    evout=$(kchn_evidence_build --out "$evman" --note 'selftest' "$d/ev/one.txt" "$d/ev/two.txt")
+    chk ev-rc "$?" "0"
+    chk ev-artifacts "$(fld "$evout" artifacts)" "2"
+    chk ev-verdict "$(fld "$evout" verdict)" "evidence_manifest_written"
+    chk ev-version "$(fld "$evout" tool_version | grep -cE '^[0-9]+\.[0-9]+')" "1"
+    chk ev-header "$(grep -c '^# body_sha256' "$evman")" "1"
+    chk ev-utc "$(awk -F'\t' '$1=="# produced_at" && $2 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T.*Z$/{n++} END{print n+0}' "$evman")" "1"
+    chk ev-note "$(awk -F'\t' '$1=="# note" && $2=="selftest"{n++} END{print n+0}' "$evman")" "1"
+    evver=$(kchn_evidence_verify "$evman")
+    chk ev-verify-rc "$?" "0"
+    chk ev-verify-verdict "$(fld "$evver" verdict)" "evidence_intact"
+    chk ev-verify-body "$(fld "$evver" body_verdict)" "matches"
+    chk ev-verify-unchanged "$(fld "$evver" unchanged)" "2"
+    printf 'alphabet\n' > "$d/ev/one.txt"
+    evver=$(kchn_evidence_verify "$evman")
+    chk ev-tamper-rc "$?" "1"
+    chk ev-tamper-verdict "$(fld "$evver" verdict)" "evidence_broken"
+    chk ev-tamper-changed "$(fld "$evver" changed)" "1"
+    chk ev-tamper-finding "$(printf '%s\n' "$evver" | grep -c 'evidence_altered HIGH')" "1"
+    rm -f "$d/ev/two.txt"
+    chk ev-missing "$(kchn_evidence_verify "$evman" 2>/dev/null | awk -F'\t' '$1=="missing" && $2 ~ /^[0-9]+$/{print $2}')" "1"
+    chk ev-noargs "$(kchn_evidence_build >/dev/null 2>&1; echo $?)" "2"
+    chk ev-badfile "$(kchn_evidence_build "$d/ev/nope.txt" >/dev/null 2>&1; echo $?)" "2"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
 
 # ── menu ────────────────────────────────────────────────────────────────
+# ── R69 (I7): evidence, so a finding survives the report ────────────────
+# Every verb in this tree prints observations. An observation becomes evidence
+# when someone else can re-derive it: the bytes it came from are named by hash,
+# the moment is stamped in UTC, and the tool that produced it is identified by
+# version and commit. Three things die in a hand-written report and these verbs
+# are about those three: the file that was "the capture" is edited afterwards,
+# the timestamp is off by a timezone, and nobody knows which build printed the
+# verdict.
+#
+# The manifest is deliberately plain text with a '#' header, because the point
+# is that a reader can check it without this tool. The body hash covers the
+# artefact rows only, so the header can gain fields without invalidating it.
+kchn_evidence_build() {
+    local out="${KCHN_EVIDENCE_OUT:-}" note=""
+    local -a files=()
+    while (( $# )); do
+        case "$1" in
+            --out)  out="${2:-}";  shift 2 || { kchn_evidence_usage; return 2; } ;;
+            --note) note="${2:-}"; shift 2 || { kchn_evidence_usage; return 2; } ;;
+            --) shift; while (( $# )); do files+=("$1"); shift; done ;;
+            *) files+=("$1"); shift ;;
+        esac
+    done
+    (( ${#files[@]} )) || { printf 'ERROR\t--evidence-build wants at least one file\n' >&2; return 2; }
+    local f
+    for f in "${files[@]}"; do
+        [[ -r "$f" ]] || { printf 'ERROR\tnot readable: %s\n' "$f" >&2; return 2; }
+    done
+    local ver commit host now body_body
+    ver="$(cat "$IMSISTING_ROOT/VERSION" 2>/dev/null || echo unknown)"
+    commit="$(git -C "$IMSISTING_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    host="$(hostname 2>/dev/null || echo unknown)"
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    local tmp; tmp=$(mktemp)
+    for f in "${files[@]}"; do
+        local size sum mtime
+        size=$(stat -c '%s' -- "$f" 2>/dev/null || echo 0)
+        sum=$(sha256sum -- "$f" | awk '{print $1}')
+        mtime=$(date -u -r "$f" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
+        printf 'artifact\t%s\t%s\t%s\t%s\n' "$size" "$sum" "$mtime" "$f" >> "$tmp"
+    done
+    body_body=$(sha256sum -- "$tmp" | awk '{print $1}')
+
+    local path="${out:-"$IMSISTING_ROOT/evidence/evidence_$(date -u +%Y%m%dT%H%M%SZ).tsv"}"
+    mkdir -p -- "$(dirname -- "$path")" || { rm -f "$tmp"; return 1; }
+    {
+        printf '# evidence manifest, IMSIsting\n'
+        printf '# produced_at\t%s\n' "$now"
+        printf '# tool_version\t%s\n' "$ver"
+        printf '# tool_commit\t%s\n' "$commit"
+        printf '# host\t%s\n' "$host"
+        printf '# clock\tUTC, from this host clock: a report that needs a traceable clock says so, and this line is the claim\n'
+        printf '# body_sha256\t%s\n' "$body_body"
+        [[ -n "$note" ]] && printf '# note\t%s\n' "$(kchn_sanitize "$note")"
+        printf '# columns\tsize\tsha256\tmtime_utc\tpath\n'
+        cat "$tmp"
+    } > "$path" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+
+    printf 'manifest\t%s\n' "$path"
+    printf 'produced_at\t%s\n' "$now"
+    printf 'tool_version\t%s\n' "$ver"
+    printf 'tool_commit\t%s\n' "$commit"
+    printf 'host\t%s\n' "$host"
+    printf 'artifacts\t%d\n' "${#files[@]}"
+    printf 'body_sha256\t%s\n' "$body_body"
+    local row
+    while IFS=$'\t' read -r tag size sum mtime rel; do
+        printf 'artifact\t%s\t%s\t%s\t%s\n' "$rel" "$size" "$sum" "$mtime"
+    done < <(grep -v '^#' "$path")
+    printf 'limit\ta hash proves the bytes did not change after they were hashed; it says nothing about whether they were the bytes the radio produced\n'
+    printf 'ref\tNIST SP 800-86 (hashes and timestamps as part of the record), ISO 8601 UTC timestamps\n'
+    printf 'verdict\tevidence_manifest_written\n'
+    return 0
+}
+
+kchn_evidence_verify() {
+    local manifest="${1:-}"
+    [[ -n "$manifest" ]] || { kchn_evidence_usage; return 2; }
+    [[ -r "$manifest" ]] || { printf 'ERROR\tnot readable: %s\n' "$manifest" >&2; return 2; }
+    local claimed
+    claimed=$(awk -F'\t' '$1=="# body_sha256"{print $2}' "$manifest")
+    local body; body=$(mktemp)
+    grep -v '^#' "$manifest" > "$body"
+    local actual; actual=$(sha256sum -- "$body" | awk '{print $1}')
+    local rows=0 unchanged=0 changed=0 missing=0
+    local out_list=""
+    while IFS=$'\t' read -r tag size sum mtime rel; do
+        [[ "$tag" == artifact ]] || continue
+        rows=$(( rows + 1 ))
+        if [[ ! -r "$rel" ]]; then
+            missing=$(( missing + 1 )); out_list+="missing\t$rel\n"; continue
+        fi
+        local now_sum; now_sum=$(sha256sum -- "$rel" | awk '{print $1}')
+        if [[ "$now_sum" == "$sum" ]]; then
+            unchanged=$(( unchanged + 1 ))
+        else
+            changed=$(( changed + 1 )); out_list+="changed\t$rel\t$sum\t$now_sum\n"
+        fi
+    done < "$body"
+    rm -f "$body"
+    printf 'manifest\t%s\n' "$manifest"
+    printf 'body_claims\t%s\n' "${claimed:-absent}"
+    printf 'body_actual\t%s\n' "$actual"
+    printf 'body_verdict\t%s\n' "$( [[ -n "$claimed" && "$claimed" == "$actual" ]] && echo matches || echo differs )"
+    printf 'artifacts\t%d\n' "$rows"
+    printf 'unchanged\t%d\n' "$unchanged"
+    printf 'changed\t%d\n' "$changed"
+    printf 'missing\t%d\n' "$missing"
+    [[ -n "$out_list" ]] && printf "$out_list"
+    if (( changed > 0 || missing > 0 )); then
+        printf 'finding\tevidence_altered HIGH\tthe manifest no longer describes the tree it described when it was written, so any finding that cites these paths has to be re-derived before it is reported\n'
+        printf 'verdict\tevidence_broken\n'
+        return 1
+    fi
+    printf 'finding\tevidence_intact INFO\tevery hashed artifact still hashes to what the manifest recorded\n'
+    printf 'limit\tthis check cannot tell whether the file it hashes now is the file the radio produced, and an empty manifest verifies as intact\n'
+    printf 'verdict\tevidence_intact\n'
+    return 0
+}
+
+kchn_evidence_usage() {
+    cat >&2 <<'EOF'
+USAGE	--evidence-build [--out PATH] [--note TEXT] FILE...
+USAGE	--evidence-verify MANIFEST
+EOF
+    return 2
+}
+
+
 kchn_menu() {
     while true; do
         banner
@@ -1013,6 +1174,8 @@ kchn_cli_main() {
         --resume)      kchn_resume ;;
         --run-multi)   kchn_run_multi "${1:-}" "${2:-}" ;;
         --run-status-tsv) kchn_run_status_tsv ;;
+        --evidence-build)  kchn_evidence_build "$@" ;;
+        --evidence-verify) kchn_evidence_verify "${1:-}" ;;
         --selftest)    kchn_selftest ;;
         --menu)        kchn_menu ;;
         *)
