@@ -786,6 +786,29 @@ notebook > header > tabs > tab:checked label {
     letter-spacing: 1.2px;
 }
 
+.stat-tile:hover {
+    background-color: rgba(18, 28, 40, 0.78);
+    border-color: #2a3446;
+}
+
+/* Numbers here are read down a column, so they need tabular figures: with
+   proportional digits the count and the share jitter row to row and the eye
+   has to re-find the decimal that is not there. */
+.stat-value,
+.stat-row-count {
+    font-feature-settings: "tnum" 1;
+}
+
+.stat-value {
+    letter-spacing: -0.5px;
+}
+
+/* The ring and the bars are one figure, not two cards: the gap between them is
+   the only separator, because a border would split one reading in half. */
+.stat-figure {
+    padding: 4px 0 2px 0;
+}
+
 .stat-row-label {
     color: #b9c4d2;
     font-size: 14px;
@@ -795,6 +818,58 @@ notebook > header > tabs > tab:checked label {
     color: #4fb3d9;
     font-size: 14px;
     font-weight: 700;
+}
+
+/* A module's numbers used to be rows with the loot path printed on the right of
+   every line, which is a directory listing pretending to be a statistic. A cell
+   keeps one number on one card: the scope above it, the figure at reading size,
+   what it counts underneath, and the path tucked into the tooltip where it
+   belongs - provenance, not information. */
+.metric-grid {
+    padding: 2px 0 0 0;
+}
+
+.metric-cell {
+    background-color: rgba(12, 20, 30, 0.55);
+    border: 1px solid #1a2231;
+    border-radius: 8px;
+    padding: 9px 12px 10px 12px;
+}
+
+.metric-cell:hover {
+    background-color: rgba(18, 28, 40, 0.82);
+    border-color: #2a3446;
+}
+
+.metric-scope {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+}
+
+.metric-dot {
+    font-size: 8px;
+}
+
+.metric-value {
+    color: #eaf6ff;
+    font-size: 19px;
+    font-weight: 700;
+    letter-spacing: -0.4px;
+    font-feature-settings: "tnum" 1;
+}
+
+.metric-unit {
+    color: #6f7b8d;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    padding-bottom: 2px;
+}
+
+.metric-name {
+    color: #95a2b3;
+    font-size: 11px;
 }
 
 progressbar.stat-bar {
@@ -3076,6 +3151,60 @@ window.motion-reduced * {
 }
 /* An open cipher is the reading that matters, so it is the one that shouts. */
 .target-lock.target-open { color: #e8a06a; }
+
+/* ── target posture ──────────────────────────────────────────────────────
+   One chip per dimension, tinted by how bad the finding is. Three tones and
+   one grey: EXPOSED, WEAK, HARDENED, and UNOBSERVED for a dimension no
+   module has written a fact about. The grey is the important one — a
+   dimension nobody looked at must not wear a green border. */
+.posture-chips { margin-bottom: 2px; }
+.posture-chip {
+    border: 1px solid @line;
+    border-radius: 6px;
+    background-color: @bg_sunken;
+    padding: 4px 9px 5px 9px;
+    min-width: 86px;
+}
+.posture-chip-label {
+    color: @text_dim;
+    font-size: 8px;
+    letter-spacing: 0.10em;
+}
+.posture-chip-state {
+    color: @text;
+    font-family: monospace;
+    font-size: 12px;
+}
+.posture-chip.posture-bad {
+    border-color: alpha(#ef6b6b, 0.55);
+    background-color: alpha(#ef6b6b, 0.08);
+}
+.posture-chip.posture-bad .posture-chip-state { color: #ef8b8b; }
+.posture-chip.posture-warn {
+    border-color: alpha(#e0b357, 0.50);
+    background-color: alpha(#e0b357, 0.07);
+}
+.posture-chip.posture-warn .posture-chip-state { color: #e0b357; }
+.posture-chip.posture-ok {
+    border-color: alpha(#74d99f, 0.45);
+    background-color: alpha(#74d99f, 0.06);
+}
+.posture-chip.posture-ok .posture-chip-state { color: #74d99f; }
+.posture-chip.posture-unk { border-color: @line; }
+.posture-chip.posture-unk .posture-chip-state { color: @text_dim; }
+
+.posture-why {
+    color: @text_dim;
+    font-size: 11px;
+}
+.posture-why.posture-bad  { color: #ef8b8b; }
+.posture-why.posture-warn { color: #e0b357; }
+.posture-why.posture-ok   { color: #8fbf9f; }
+.posture-src {
+    color: @text_dim;
+    font-size: 10px;
+    font-family: monospace;
+}
 
 /* The spark and the bars that go with it. */
 .target-spark {

@@ -32,6 +32,7 @@ conf.set('IMSISTING_VERSION', meson.project_version())
 
 
 gnome = import('gnome')
+cc = meson.get_compiler('c')
 
 gtk_dep = dependency('gtk4', version: '>=4.10')
 
@@ -77,12 +78,24 @@ executable(
     # interface, and because it needs nothing from it: no AppState, no
     # module registry, no output console.
     'src/help_page.c',
+    # The Map page. Its own translation unit for the same reason: a canvas, a
+    # projection and a layer inbox, and nothing from AppState but the root.
+    'src/map_page.c',
+    'src/stats_chart.c',
+    # The target panel's posture chips. Its own translation unit because the
+    # rules it applies — which cipher is weak, which store beats which — are
+    # testable without a display, and a panel this dense changes for reasons
+    # that have nothing to do with main1.c.
+    'src/target_posture.c',
     imsisting_resources,
   ],
   dependencies: [
     gtk_dep,
     vte_dep,
     fontconfig_dep,
+    # The Map page's projection: cos/floor/pow for the scale bar and the
+    # graticule step. GTK does not pull the maths library in on its own.
+    cc.find_library('m', required: false),
   ],
   install: true,
 )

@@ -41,6 +41,18 @@ done
     printf '    <file>imsisting_splash4.mp4</file>\n'
     printf '    <file>imsisting_splash5.mp4</file>\n'
     printf '    <file>imsisting_splash6.mp4</file>\n'
+    # The map basemap: Natural Earth 1:110m, already flattened by
+    # tools/gen-basemap.py. Compiled in for the same reason the splash is --
+    # the map page paints on the first switch, before any path is trusted.
+    # The GeoJSON sources stay on disk; the renderer never sees them.
+    for base in land coastline countries places; do
+        if [ -f "$ROOT/native/resources/basemap/$base.bin" ]; then
+            printf '    <file>basemap/%s.bin</file>\n' "$base"
+        fi
+    done
+    if [ -f "$ROOT/native/resources/basemap/places.tsv" ]; then
+        printf '    <file>basemap/places.tsv</file>\n'
+    fi
     ( cd "$ROOT/native/resources" && find icons/symbolic -name '*.svg' | LC_ALL=C sort ) \
         | while read -r icon; do
               printf '    <file alias="icons/scalable/actions/%s">%s</file>\n' \

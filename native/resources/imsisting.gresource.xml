@@ -13,6 +13,11 @@
     <file>imsisting_splash4.mp4</file>
     <file>imsisting_splash5.mp4</file>
     <file>imsisting_splash6.mp4</file>
+    <file>basemap/land.bin</file>
+    <file>basemap/coastline.bin</file>
+    <file>basemap/countries.bin</file>
+    <file>basemap/places.bin</file>
+    <file>basemap/places.tsv</file>
     <file alias="icons/scalable/actions/imsisting-00_deps-symbolic.svg">icons/symbolic/imsisting-00_deps-symbolic.svg</file>
     <file alias="icons/scalable/actions/imsisting-01_radio-symbolic.svg">icons/symbolic/imsisting-01_radio-symbolic.svg</file>
     <file alias="icons/scalable/actions/imsisting-02_cell_recon-symbolic.svg">icons/symbolic/imsisting-02_cell_recon-symbolic.svg</file>
