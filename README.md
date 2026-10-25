@@ -59,7 +59,7 @@ sudo ./imsisting.sh          # CLI menu
 ./imsisting.sh --list        # module list
 ./imsisting.sh --index       # the module index as TSV
 ./imsisting.sh --gui         # launch the GUI
-./imsisting.sh --tui         # launch the TUI
+./imsisting.sh --tui         # launch the TUI (modules listed by their menu keys)
 ```
 
 <img width="1366" height="708" alt="image" src="https://github.com/user-attachments/assets/597fcd5c-9694-4c74-95d7-211a0a5c8e3b" />

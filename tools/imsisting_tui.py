@@ -87,6 +87,16 @@ _DESCRIBED = re.compile(r'\{\s*"(\w+)"\s*,\s*"[^"]*"\s*,\s*"[^"]*"\s*,\s*"[^"]*"
                         r'((?:"(?:[^"\\]|\\.)*"\s*)+)\}')
 _VERB = re.compile(r"--[a-z][a-z0-9-]*")
 
+# Verbs that take an argument, shared with tools/check-verbs.sh so the action
+# list cannot offer `--transport ssh` as something to press. A verb in that file
+# is never dispatched on its own anywhere in the tree, which is exactly what
+# makes it safe to keep out of a list of things to run.
+MODIFIERS = frozenset(
+    line.strip() for line in
+    (Path(__file__).resolve().parent / "verb-modifiers.txt").read_text(
+        encoding="utf-8").splitlines()
+    if line.strip() and not line.startswith("#"))
+
 
 def c_sanitize(source: str, blank_literals: bool) -> str:
     """Blank comments (and optionally string bodies) while keeping offsets.
@@ -191,8 +201,10 @@ def parse_gui(root: Path) -> tuple[dict[str, str], dict[str, tuple[tuple[str, tu
             if spec.strip() == "NULL":
                 start, end = spans.get(builder or "", (0, 0))
                 verbs = tuple(dict.fromkeys(_VERB.findall(prose[start:end])))
-                if verbs:
-                    groups.append((name, verbs))
+                # An empty group is kept on purpose: the view exists, it is drawn
+                # by the GUI, and the terminal says so rather than pretending the
+                # module has fewer views than it does.
+                groups.append((name, verbs))
                 continue
             sections = spec_groups(literal_text(spec))
             for section, verbs in sections:
@@ -308,7 +320,9 @@ def module_title(module: Module) -> str:
 
 def grouped_actions(module: Module) -> tuple[tuple[str, tuple[str, ...]], ...]:
     """Place CLI actions beneath the same named views used by the GUI."""
-    actions = tuple(v for v in module.verbs if v not in ("--menu", "--help")) or ("--status-tsv",)
+    actions = tuple(v for v in module.verbs
+                    if v not in ("--menu", "--help")
+                    and v[2:] not in MODIFIERS) or ("--status-tsv",)
     pending = set(actions)
     groups: list[tuple[str, tuple[str, ...]]] = []
     for title, gui_verbs in module.groups:
@@ -383,12 +397,16 @@ def detail_rows(module: Module | None, root: Path, width: int) -> list[tuple[str
     if module.description:
         rows.append(("gap", ""))
         rows.extend(("text", line) for line in textwrap.wrap(module.description, max(12, width)))
-    if groups:
+    gui_only = [name for name, verbs in module.groups if not verbs]
+    if groups or gui_only:
         rows.append(("gap", ""))
         rows.append(("sub", "VIEWS"))
         for title, verbs in groups:
             rows.extend(("text", line) for line in
                         textwrap.wrap(f"{title}  ({len(verbs)})", max(12, width)))
+        for name in gui_only:
+            rows.extend(("text", line) for line in
+                        textwrap.wrap(f"{name}  (in the GUI)", max(12, width)))
     return rows
 
 

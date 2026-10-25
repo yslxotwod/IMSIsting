@@ -34446,6 +34446,45 @@ rnode_stream_stop_clicked(GtkButton *button, gpointer user_data)
                        "Collection stopped. Node spool continues recording.");
 }
 
+/* The stream picker is the fleet read the same way the Nodes view reads it, so
+   a node that appears there appears here without a second list to keep. It is
+   its own function for one reason beyond reuse: the list is built from the
+   casebook's node table, and a reader of this file should not have to hunt a
+   shell verb inside a page builder to find that out. */
+static GtkStringList *
+rnode_node_names(const char *module_id)
+{
+    GtkStringList *names = gtk_string_list_new(NULL);
+    g_autofree char *script = module_script_path(module_id);
+    const char *argv[3] = { script, "--list-tsv", NULL };
+    g_autofree char *listing = run_capture(argv);
+    g_auto(GStrv) lines = NULL;
+    int name_col;
+
+    if (listing == NULL || *listing == '\0')
+        return names;
+
+    lines = g_strsplit(listing, "\n", -1);
+    if (lines[0] != NULL) {
+        g_auto(GStrv) header = g_strsplit(lines[0], "\t", -1);
+
+        name_col = rnode_col(header, "name");
+    } else {
+        name_col = -1;
+    }
+
+    for (guint i = 1; lines[i] != NULL; i++) {
+        g_auto(GStrv) f = NULL;
+
+        if (*lines[i] == '\0') continue;
+        f = g_strsplit(lines[i], "\t", -1);
+        if (name_col < 0 || (int) g_strv_length(f) <= name_col) continue;
+        if (f[name_col] != NULL && *f[name_col] != '\0')
+            gtk_string_list_append(names, f[name_col]);
+    }
+    return names;
+}
+
 static GtkWidget *
 rnode_build_stream(AppState *state, const char *module_id,
                    GtkWidget *status, GtkTextBuffer *out)
@@ -34466,11 +34505,8 @@ rnode_build_stream(AppState *state, const char *module_id,
     GtkWidget *stop = gtk_button_new_with_label("Stop");
     GtkWidget *clear = gtk_button_new_with_label("Clear");
     GtkWidget *line = gtk_label_new("idle");
-    GtkStringList *names = gtk_string_list_new(NULL);
+    GtkStringList *names = rnode_node_names(module_id);
     RnodeStream *s = g_new0(RnodeStream, 1);
-    g_autofree char *script = module_script_path(module_id);
-    const char *argv[3] = { script, "--list-tsv", NULL };
-    g_autofree char *listing = run_capture(argv);
 
     gtk_widget_add_css_class(page, "dependency-page");
     gtk_widget_add_css_class(title, "page-title");
@@ -34480,25 +34516,6 @@ rnode_build_stream(AppState *state, const char *module_id,
     gtk_label_set_wrap(GTK_LABEL(sub), TRUE);
     gtk_box_append(GTK_BOX(page), title);
     gtk_box_append(GTK_BOX(page), sub);
-
-    /* The picker is the fleet read the same way the Nodes view reads it, so a
-       node that appears there appears here without a second list to keep. */
-    if (listing != NULL && *listing != '\0') {
-        g_auto(GStrv) lines = g_strsplit(listing, "\n", -1);
-        g_auto(GStrv) header =
-            lines[0] != NULL ? g_strsplit(lines[0], "\t", -1) : NULL;
-        int name_col = rnode_col(header, "name");
-
-        for (guint i = 1; lines[i] != NULL; i++) {
-            g_auto(GStrv) f = NULL;
-
-            if (*lines[i] == '\0') continue;
-            f = g_strsplit(lines[i], "\t", -1);
-            if (name_col < 0 || (int) g_strv_length(f) <= name_col) continue;
-            if (f[name_col] != NULL && *f[name_col] != '\0')
-                gtk_string_list_append(names, f[name_col]);
-        }
-    }
 
     s->state = state;
     s->module_id = module_id;
@@ -34546,7 +34563,7 @@ rnode_build_stream(AppState *state, const char *module_id,
     g_signal_connect(clear, "clicked",
                      G_CALLBACK(rnode_stream_clear_clicked), s);
 
-    if (listing == NULL || *listing == '\0') {
+    if (g_list_model_get_n_items(G_LIST_MODEL(names)) == 0) {
         gtk_label_set_text(GTK_LABEL(line),
                            "Registry empty. Register a node first.");
         rnode_stream_append(s,
