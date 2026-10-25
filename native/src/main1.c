@@ -2537,6 +2537,7 @@ static const char *const plain_keys[] = {
     "cleartext_imsi\tan identifier sent without protection",
     "client_auth\twhat SMPP over TLS changes, or does not",
     "codec\tthe vocoder a system uses",
+    "compact\tthe SUCI field layout this module shipped first: no home network identifier anywhere in the octets",
     "complexity\tthe search space of a published attack, as the paper states it, in powers of two",
     "contract\twhat the roaming agreement permits across the boundary",
     "cores\thow many cores the wall-time arithmetic assumes",
@@ -2597,6 +2598,10 @@ static const char *const plain_keys[] = {
     "grid_definition\twhat one guess in the search is, written out so a cost is comparable to another attack's",
     "guesses\tthe size of the search space as a plain number of candidates",
     "high_mhz\ttop of the band in MHz",
+    "hnid\tthe SUCI field layout a network sends, with the home network identifier in front of the routing indicator",
+    "home_mcc\tthe MCC read out of a SUCI home network identifier",
+    "home_mnc\tthe MNC read out of a SUCI home network identifier",
+    "home_network_identifier\tthe MCC and MNC a real SUCI carries ahead of the routing indicator, packed in PLMN BCD",
     "home_plmn_leak\tthe home network named in the clear",
     "home_sepp\tthe home network security edge",
     "hop\tone step of the trust chain across the boundary",
@@ -14183,42 +14188,162 @@ stats_value(GPtrArray *rows, const char *key, const char *fallback)
     return fallback;
 }
 
-/* label — value — source. The source is dim monospace because it answers
-   "where did that come from", which is a question to be settled once, not read
-   every visit. */
-static GtkWidget *
-stat_metric_row(const char *label, const char *value, const char *unit,
-                const char *source)
+/* A count arrives as raw digits -- "229785600" -- and no one reads that. Group
+   the thousands so the magnitude is visible, and scale a byte count to the unit
+   that fits in a cell: the flat row said "3060000 bytes", the cell says
+   "2.92 MB". */
+static char *
+stat_value_human(const char *value, const char **unit)
 {
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    GtkWidget *l = gtk_label_new(label);
-    GtkWidget *v = gtk_label_new(NULL);
-    GtkWidget *s = gtk_label_new(source);
-    g_autofree char *joined = (unit != NULL && *unit != '\0')
-                              ? g_strdup_printf("%s %s", value, unit)
-                              : g_strdup(value);
+    gboolean all_digits = value != NULL && *value != '\0';
+    GString *out;
+    gsize n;
 
-    gtk_widget_add_css_class(l, "stat-row-label");
-    gtk_label_set_xalign(GTK_LABEL(l), 0.0f);
-    gtk_label_set_ellipsize(GTK_LABEL(l), PANGO_ELLIPSIZE_END);
-    gtk_widget_set_size_request(l, 268, -1);
+    if (value == NULL) return g_strdup("");
+    for (const char *p = value; *p != '\0'; p++)
+        if (!g_ascii_isdigit(*p)) { all_digits = FALSE; break; }
 
-    gtk_widget_add_css_class(v, "mono");
-    gtk_label_set_text(GTK_LABEL(v), joined);
-    gtk_label_set_xalign(GTK_LABEL(v), 1.0f);
-    gtk_widget_set_size_request(v, 120, -1);
+    if (!all_digits) return g_strdup(value);
 
-    gtk_widget_add_css_class(s, "mono");
-    gtk_widget_add_css_class(s, "dim");
-    gtk_label_set_xalign(GTK_LABEL(s), 0.0f);
-    gtk_label_set_ellipsize(GTK_LABEL(s), PANGO_ELLIPSIZE_MIDDLE);
-    gtk_widget_set_hexpand(s, TRUE);
-    gtk_widget_set_tooltip_text(s, source);
+    if (unit != NULL && g_strcmp0(*unit, "bytes") == 0) {
+        static const char *scales[] = { "B", "KB", "MB", "GB", "TB" };
+        double v = (double) g_ascii_strtoull(value, NULL, 10);
+        guint s = 0;
 
-    gtk_box_append(GTK_BOX(row), l);
-    gtk_box_append(GTK_BOX(row), v);
-    gtk_box_append(GTK_BOX(row), s);
-    return row;
+        while (v >= 1024.0 && s + 1 < G_N_ELEMENTS(scales)) { v /= 1024.0; s++; }
+        if (s == 0) return g_strdup(value);
+        *unit = scales[s];
+        return g_strdup_printf(v >= 100.0 ? "%.0f" : v >= 10.0 ? "%.1f" : "%.2f", v);
+    }
+
+    n = strlen(value);
+    out = g_string_sized_new(n + n / 3 + 1);
+    for (gsize i = 0; i < n; i++) {
+        if (i > 0 && (n - i) % 3 == 0) g_string_append_c(out, ',');
+        g_string_append_c(out, value[i]);
+    }
+    return g_string_free(out, FALSE);
+}
+
+/* A count of one takes a singular unit: "1 runs" is a typo, not a statistic.
+   Returns NULL when the unit is already right, so the caller keeps its
+   pointer. */
+static char *
+stat_unit_singular(const char *unit, const char *value)
+{
+    gsize len;
+
+    if (unit == NULL || *unit == '\0' || value == NULL) return NULL;
+    if (g_strcmp0(value, "1") != 0) return NULL;
+    len = strlen(unit);
+    if (len > 3 && g_str_has_suffix(unit, "ies"))
+        return g_strdup_printf("%.*sy", (int) (len - 3), unit);
+    if (len < 2 || g_str_has_suffix(unit, "ss") || !g_str_has_suffix(unit, "s"))
+        return NULL;
+    return g_strndup(unit, len - 1);
+}
+
+/* One number on its own tile: where it comes from above, the number big, what
+   it counts underneath, and the path it was read from in the tooltip.
+
+   This used to be a row of plain text with the source path printed on every
+   line, which is how a hundred numbers turn into a wall of directories. The
+   path is provenance -- a thing you check once -- so it lives in the tooltip,
+   and the value gets the space a value deserves. */
+static GtkWidget *
+stat_metric_cell(const char *scope, const char *category, const char *name,
+                 const char *value, const char *unit, const char *source)
+{
+    GtkWidget *cell = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *dot = gtk_label_new("\u25cf");
+    GtkWidget *scope_l;
+    GtkWidget *vrow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    const char *unit_text = unit;
+    g_autofree char *shown = stat_value_human(value, &unit_text);
+    g_autofree char *singular = stat_unit_singular(unit_text, shown);
+    GtkWidget *v;
+    GtkWidget *name_l = gtk_label_new(name);
+    const char *hue = category_class(category);
+    g_autofree char *scope_up = scope != NULL ? g_utf8_strup(scope, -1) : NULL;
+
+    /* "1 runs" is a typo, not a statistic. */
+    if (singular != NULL) unit_text = singular;
+    v = gtk_label_new(shown);
+
+    scope_l = gtk_label_new(scope_up);
+
+    gtk_widget_add_css_class(cell, "metric-cell");
+    gtk_widget_add_css_class(dot, "metric-dot");
+    gtk_widget_add_css_class(dot, hue);
+    gtk_widget_add_css_class(scope_l, "metric-scope");
+    gtk_widget_add_css_class(scope_l, hue);
+    gtk_widget_add_css_class(v, "metric-value");
+    gtk_widget_add_css_class(name_l, "metric-name");
+
+    gtk_widget_set_valign(head, GTK_ALIGN_CENTER);
+    gtk_label_set_xalign(GTK_LABEL(scope_l), 0.0f);
+    gtk_widget_set_hexpand(scope_l, TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(scope_l), PANGO_ELLIPSIZE_END);
+    gtk_box_append(GTK_BOX(head), dot);
+    gtk_box_append(GTK_BOX(head), scope_l);
+
+    gtk_label_set_xalign(GTK_LABEL(v), 0.0f);
+    gtk_widget_set_valign(v, GTK_ALIGN_END);
+    gtk_box_append(GTK_BOX(vrow), v);
+    if (unit_text != NULL && *unit_text != '\0') {
+        GtkWidget *u = gtk_label_new(unit_text);
+
+        gtk_widget_add_css_class(u, "metric-unit");
+        gtk_widget_set_valign(u, GTK_ALIGN_END);
+        gtk_widget_set_margin_bottom(u, 3);
+        gtk_box_append(GTK_BOX(vrow), u);
+    }
+
+    gtk_label_set_xalign(GTK_LABEL(name_l), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(name_l), PANGO_ELLIPSIZE_END);
+
+    gtk_box_append(GTK_BOX(cell), head);
+    gtk_box_append(GTK_BOX(cell), vrow);
+    gtk_box_append(GTK_BOX(cell), name_l);
+
+    if (source != NULL && *source != '\0')
+        gtk_widget_set_tooltip_text(cell, source);
+    return cell;
+}
+
+/* The grid the cells flow into: three across when the window is wide, never
+   narrower than two, because a single column of these reads as the old list
+   again with more padding. */
+static GtkWidget *
+stat_metric_grid(void)
+{
+    GtkWidget *grid = gtk_flow_box_new();
+
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(grid), GTK_SELECTION_NONE);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(grid), 10);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(grid), 10);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(grid), 3);
+    gtk_flow_box_set_min_children_per_line(GTK_FLOW_BOX(grid), 2);
+    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(grid), TRUE);
+    gtk_widget_add_css_class(grid, "metric-grid");
+    return grid;
+}
+
+/* Where a number came from, as a word: the first segment of its source path.
+   The full path is one hover away. */
+static const char *
+stat_scope_from_source(const char *source)
+{
+    if (source == NULL || *source == '\0') return "toolkit";
+    if (g_str_has_prefix(source, "loot/"))      return "loot";
+    if (g_str_has_prefix(source, "state/"))     return "state";
+    if (g_str_has_prefix(source, "cases/"))     return "cases";
+    if (g_str_has_prefix(source, "captures/"))  return "captures";
+    if (g_str_has_prefix(source, "modules/"))   return "modules";
+    if (g_str_has_prefix(source, "tools/"))     return "tools";
+    if (g_str_has_prefix(source, "tmp/"))       return "scratch";
+    return "toolkit";
 }
 
 /* Empty a card body so a refresh redraws it instead of stacking a second copy
@@ -14246,36 +14371,48 @@ stat_card_fill_fleet(GtkWidget *body, GPtrArray *rows)
         "cases", "timeline", "captures",
     };
 
+    GtkWidget *grid;
+
     if (body == NULL) return;
     stat_card_clear(body);
+    grid = stat_metric_grid();
     for (guint k = 0; k < G_N_ELEMENTS(shown); k++) {
         for (guint i = 0; i < rows->len; i++) {
             StatRow *row = g_ptr_array_index(rows, i);
 
             if (!row->fleet || g_strcmp0(row->key, shown[k]) != 0) continue;
-            gtk_box_append(GTK_BOX(body),
-                           stat_metric_row(row->label, row->value, row->unit, row->source));
+            gtk_flow_box_append(GTK_FLOW_BOX(grid),
+                stat_metric_cell(stat_scope_from_source(row->source), NULL,
+                                 row->label, row->value, row->unit, row->source));
             break;
         }
     }
+    gtk_box_append(GTK_BOX(body), grid);
 }
 
 static void
 stat_card_fill_modules(GtkWidget *body, GPtrArray *rows)
 {
+    GtkWidget *grid;
+
     if (body == NULL) return;
     stat_card_clear(body);
+    grid = stat_metric_grid();
     for (guint i = 0; i < rows->len; i++) {
         StatRow *row = g_ptr_array_index(rows, i);
         const ModuleDefinition *def;
-        g_autofree char *label = NULL;
 
         if (row->fleet) continue;
         def = dashboard_module(row->module);
-        label = g_strdup_printf("%s · %s", def != NULL ? def->name : row->module, row->label);
-        gtk_box_append(GTK_BOX(body),
-                       stat_metric_row(label, row->value, row->unit, row->source));
+        /* The module is the scope and the metric is the name: one cell says
+           both, and the cell already carries the module's category hue, so the
+           grid is grouped by colour without a group header. */
+        gtk_flow_box_append(GTK_FLOW_BOX(grid),
+            stat_metric_cell(def != NULL ? def->name : row->module,
+                             def != NULL ? def->category : NULL,
+                             row->label, row->value, row->unit, row->source));
     }
+    gtk_box_append(GTK_BOX(body), grid);
 }
 
 /* The counts behind the Stats tiles. Recomputed on every visit, because loot
@@ -14389,24 +14526,6 @@ create_stats_page(AppState *state)
     }
     gtk_box_append(GTK_BOX(inner), tiles);
 
-    /* ---- the fleet, then every module's own number ---- */
-    {
-        GtkWidget *body;
-        GtkWidget *card = verb_card("THE FLEET", &body);
-
-        state->stat_fleet_body = body;
-        stat_card_fill_fleet(body, index);
-        gtk_box_append(GTK_BOX(inner), card);
-    }
-    {
-        GtkWidget *body;
-        GtkWidget *card = verb_card("BY MODULE", &body);
-
-        state->stat_module_body = body;
-        stat_card_fill_modules(body, index);
-        gtk_box_append(GTK_BOX(inner), card);
-    }
-
     /* ---- by category, as a picture ----
        One array, two readings: the ring is each category's share of the
        toolkit, the bars are its count against the fullest one. Eleven rows of
@@ -14445,6 +14564,24 @@ create_stats_page(AppState *state)
         gtk_box_append(GTK_BOX(body), figure);
         gtk_box_append(GTK_BOX(inner), card);
         g_free(items);
+    }
+
+    /* ---- the fleet, then every module's own number ---- */
+    {
+        GtkWidget *body;
+        GtkWidget *card = verb_card("THE FLEET", &body);
+
+        state->stat_fleet_body = body;
+        stat_card_fill_fleet(body, index);
+        gtk_box_append(GTK_BOX(inner), card);
+    }
+    {
+        GtkWidget *body;
+        GtkWidget *card = verb_card("BY MODULE", &body);
+
+        state->stat_module_body = body;
+        stat_card_fill_modules(body, index);
+        gtk_box_append(GTK_BOX(inner), card);
     }
 
     /* ---- where things live ---- */

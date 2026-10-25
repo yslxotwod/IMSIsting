@@ -230,8 +230,59 @@ suci_supi_type_name() {
 
 # Parse a SUCI from its hex encoding. Returns the structured fields and, for
 # scheme 0, the recovered MSIN — which is the whole point of the audit.
-suci_parse() {
+
+# The home-network identifier is the PLMN a real SUCI carries ahead of the
+# routing indicator: MCC and MNC in the same BCD packing the IMSI uses
+# (TS 23.003 2.2, the PLMN is three octets: MCC2|MCC1, MNC3|MCC3, MNC2|MNC1,
+# with 0xF standing in for the third MNC digit when the MNC has two).
+suci_plmn_encode() {
+    local mcc="${1:-}" mnc="${2:-}"
+    [[ "$mcc" =~ ^[0-9]{3}$ ]] || {
+        printf 'ERROR\tMCC must be exactly 3 digits: %s\n' "$(suci_sanitize "$mcc")" >&2; return 2; }
+    [[ "$mnc" =~ ^[0-9]{2,3}$ ]] || {
+        printf 'ERROR\tMNC must be 2 or 3 digits: %s\n' "$(suci_sanitize "$mnc")" >&2; return 2; }
+    local d1="${mcc:0:1}" d2="${mcc:1:1}" d3="${mcc:2:1}"
+    local m1="${mnc:0:1}" m2="${mnc:1:1}" m3=f
+    (( ${#mnc} == 3 )) && m3="${mnc:2:1}"
+    printf '%s%s%s%s%s%s' "$d2" "$d1" "$m3" "$d3" "$m2" "$m1"
+}
+
+suci_plmn_decode() {
     local hex="${1:-}"
+    [[ "$hex" =~ ^[0-9A-Fa-f]{6}$ ]] || return 1
+    hex="${hex^^}"
+    local mcc mnc m3
+    mcc="${hex:1:1}${hex:0:1}${hex:3:1}"
+    m3="${hex:2:1}"
+    mnc="${hex:5:1}${hex:4:1}"
+    [[ "$m3" != "F" ]] && mnc+="$m3"
+    printf '%s\t%s' "$mcc" "$mnc"
+}
+
+# Which field layout a SUCI is in. "hnid" is what a network sends (home network
+# identifier, routing indicator, scheme, key id, output); "compact" is the
+# layout this module shipped first, which carries no home network identifier at
+# all and so cannot say which network the subscriber belongs to.
+suci_layout_of() {
+    local hex="${1:-}" layout="${2:-auto}"
+    hex="${hex//[[:space:]]/}"; hex="${hex//0x/}"; hex="${hex,,}"
+    case "$layout" in
+        compact|hnid) printf '%s' "$layout"; return 0 ;;
+        auto) ;;
+        *) printf 'ERROR\tlayout must be auto, hnid or compact: %s\n' "$(suci_sanitize "$layout")" >&2
+           return 2 ;;
+    esac
+    # A home network identifier plus a scheme octet needs 8 header octets, so
+    # anything shorter than 9 octets cannot be the hnid layout.
+    if (( ${#hex} < 18 )); then printf 'compact'; return 0; fi
+    # In the hnid layout the scheme sits in the low nibble of octet 7 and the
+    # key identifier in octet 8; a null/profile A/profile B scheme is 0..2.
+    local sch=$(( 16#${hex:12:2} ))
+    if (( (sch & 0x0F) <= 2 )); then printf 'hnid'; else printf 'compact'; fi
+}
+
+suci_parse() {
+    local hex="${1:-}" lay="${2:-auto}"
     hex="${hex//[[:space:]]/}"
     hex="${hex//0x/}"
     hex="${hex,,}"
@@ -240,27 +291,58 @@ suci_parse() {
     (( ${#hex} % 2 == 0 )) || {
         printf 'ERROR\tSUCI must be a whole number of octets\n' >&2; return 1; }
     # Minimum is the 5-octet protection header plus at least one octet of
-    # scheme output (a 1-digit MSIN under the null scheme).
+    # scheme output (a 1-digit MSIN under the null scheme). The hnid layout
+    # carries three more octets in front of the routing indicator.
     (( ${#hex} >= 12 )) || {
         printf 'ERROR\tSUCI too short to be well formed (%d octets, need >= 6)\n' "$(( ${#hex} / 2 ))" >&2
         return 1; }
 
-    # TS 23.003 §2.2 / TS 24.501 §9.11.3.4 field layout:
+    # Two layouts, and they are not interchangeable:
+    #
+    # hnid (what a network actually sends, TS 23.003 §2.2 with TS 24.501
+    # §9.11.3.4 for the identity octet):
     #   octet 1 : SUPI format (bits 1-3) | type of identity (bits 4-6)
-    #   octet 2 : home network public key identifier
-    #   octet 3 : routing indicator part 1 (high nibble first)
-    #   octet 4 : routing indicator part 2
-    #   octet 5 : protection scheme identifier (low nibble)
-    #   octet 6+: scheme output
+    #   octets 2-4: home network identifier, MCC/MNC in PLMN BCD
+    #   octets 5-6: routing indicator
+    #   octet 7 : protection scheme identifier (low nibble)
+    #   octet 8 : home network public key identifier
+    #   octet 9+: scheme output
+    #
+    # compact (the layout this module shipped first, and the only one it could
+    # build): the same fields with the home network identifier missing, so
+    # there is nothing in the octets that says which network the subscriber
+    # belongs to and every field sits three octets early.
+    local layout; layout=$(suci_layout_of "$hex" "$lay") || return 2
     local b0=$(( 16#${hex:0:2} ))
     local supi_type=$(( b0 & 0x07 ))
     local id_type=$(( (b0 >> 3) & 0x07 ))
-    local hnkey=$(( 16#${hex:2:2} ))
-    local ri1=$(( (16#${hex:4:2} >> 4) & 0xF ))
-    local ri2=$(( 16#${hex:4:2} & 0xF ))
-    local ri3=$(( (16#${hex:6:2} >> 4) & 0xF ))
-    local ri4=$(( 16#${hex:6:2} & 0xF ))
-    local scheme=$(( 16#${hex:8:2} & 0x0F ))
+    local hnkey ri1 ri2 ri3 ri4 scheme scheme_out
+    local plmn_hex="" hn_mcc="" hn_mnc=""
+    if [[ "$layout" == "hnid" ]]; then
+        plmn_hex="${hex:2:6}"
+        local pl; pl=$(suci_plmn_decode "$plmn_hex") || {
+            printf 'ERROR\thome network identifier %s is not a PLMN in BCD\n' "$(suci_sanitize "$plmn_hex")" >&2
+            return 1; }
+        hn_mcc="${pl%%$'\t'*}"; hn_mnc="${pl#*$'\t'}"
+        ri1=$(( (16#${hex:8:2} >> 4) & 0xF ))
+        ri2=$(( 16#${hex:8:2} & 0xF ))
+        ri3=$(( (16#${hex:10:2} >> 4) & 0xF ))
+        ri4=$(( 16#${hex:10:2} & 0xF ))
+        scheme=$(( 16#${hex:12:2} & 0x0F ))
+        hnkey=$(( 16#${hex:14:2} ))
+        scheme_out="${hex:16}"
+    else
+        hnkey=$(( 16#${hex:2:2} ))
+        ri1=$(( (16#${hex:4:2} >> 4) & 0xF ))
+        ri2=$(( 16#${hex:4:2} & 0xF ))
+        ri3=$(( (16#${hex:6:2} >> 4) & 0xF ))
+        ri4=$(( 16#${hex:6:2} & 0xF ))
+        scheme=$(( 16#${hex:8:2} & 0x0F ))
+        scheme_out="${hex:10}"
+    fi
+    (( ${#scheme_out} >= 2 )) || {
+        printf 'ERROR\tSUCI too short for the %s layout (%d octets)\n' "$layout" "$(( ${#hex} / 2 ))" >&2
+        return 1; }
     local ri=""
     local d
     for d in "$ri1" "$ri2" "$ri3" "$ri4"; do
@@ -269,7 +351,15 @@ suci_parse() {
     done
     [[ -n "$ri" ]] || ri="0000"
 
-    local scheme_out="${hex:10}"
+    printf 'layout\t%s\n'             "$layout"
+    if [[ -n "$plmn_hex" ]]; then
+        printf 'home_network_identifier\t%s\n' "$plmn_hex"
+        printf 'home_mcc\t%s\n'         "$hn_mcc"
+        printf 'home_mnc\t%s\n'         "$hn_mnc"
+    else
+        printf 'home_network_identifier\tabsent\n'
+        printf 'finding\tno home network identifier in the octets: this is the compact layout, which cannot say which network the subscriber belongs to\n'
+    fi
     printf 'supi_type\t%s\n'          "$supi_type"
     printf 'supi_type_name\t%s\n'     "$(suci_supi_type_name "$supi_type")"
     printf 'identity_type\t%s\n'      "$id_type"
@@ -894,7 +984,11 @@ suci_audit() {
 
 suci_build() {
     local scheme="${1:-1}" msin="${2:-}" hn_pub="${3:-}" mcc="${4:-001}" mnc="${5:-01}"
-    local hnkey="${6:-1}" ri="${7:-0000}"
+    local hnkey="${6:-1}" ri="${7:-0000}" layout="${8:-hnid}"
+    case "$layout" in
+        hnid|compact) ;;
+        *) printf 'ERROR\tlayout must be hnid or compact: %s\n' "$(suci_sanitize "$layout")" >&2; return 2 ;;
+    esac
     [[ "$scheme" =~ ^[012]$ ]] || {
         printf 'ERROR\tscheme must be 0 (null), 1 (profile A) or 2 (profile B)\n' >&2; return 2; }
     [[ -n "$msin" ]] || { printf 'ERROR\tMSIN required\n' >&2; return 2; }
@@ -925,15 +1019,30 @@ suci_build() {
         printf 'ERROR\trouting indicator encoding failed: %s\n' "$(suci_sanitize "$ri_bcd")" >&2; return 1; }
     [[ -n "$scheme_out" ]] || {
         printf 'ERROR\tscheme output is empty\n' >&2; return 1; }
+    local plmn_hex=""
+    if [[ "$layout" == "hnid" ]]; then
+        plmn_hex=$(suci_plmn_encode "$mcc" "$mnc") || return 2
+    fi
     local hex
-    hex=$(printf '%02X%02X%s%02X%s' "$b0" "$hnkey" "$ri_bcd" "$scheme" "$scheme_out")
+    if [[ "$layout" == "hnid" ]]; then
+        hex=$(printf '%02X%s%s%02X%02X%s' "$b0" "$plmn_hex" "$ri_bcd" "$scheme" "$hnkey" "$scheme_out")
+    else
+        hex=$(printf '%02X%02X%s%02X%s' "$b0" "$hnkey" "$ri_bcd" "$scheme" "$scheme_out")
+    fi
     printf 'suci\t%s\n' "$hex"
+    printf 'layout\t%s\n' "$layout"
     printf 'scheme\t%s\n' "$scheme"
     printf 'scheme_name\t%s\n' "$(suci_scheme_name "$scheme")"
     printf 'hn_public_key_id\t%s\n' "$hnkey"
     printf 'routing_indicator\t%s\n' "$(suci_sanitize "$ri")"
     printf 'mcc\t%s\n' "$(suci_sanitize "$mcc")"
     printf 'mnc\t%s\n' "$(suci_sanitize "$mnc")"
+    if [[ "$layout" == "hnid" ]]; then
+        printf 'home_network_identifier\t%s\n' "$plmn_hex"
+    else
+        printf 'home_network_identifier\tabsent\n'
+        printf 'finding\tcompact layout: the SUCI carries no MCC/MNC, so it does not say which network the subscriber belongs to\n'
+    fi
     printf 'bcd_msin\t%s\n' "$bcd"
     printf 'scheme_output_octets\t%s\n' "$(( ${#scheme_out} / 2 ))"
     printf 'suci_octets\t%s\n' "$(( ${#hex} / 2 ))"
@@ -1167,8 +1276,14 @@ suci_link_demo() {
         printf 'ERROR\tthe profile key file is gone: %s\n' \
             "$(suci_sanitize "$(suci_hn_pget keyfile)")" >&2; return 1; }
 
-    local a1 a2 a3 b1 f1
+    local a1 a2 a3 b1 f1 lay hdr
     a1=$(suci_build "$scheme" 0123456789 "$pub" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
+    lay=$(suci_build "$scheme" 0123456789 "$pub" 001 01 1 0000 | awk -F'\t' '$1=="layout"{print $2}')
+    # The reuse case below rebuilds a SUCI with its ephemeral key kept and its
+    # ciphertext reversed, so it has to know where the header ends. The header
+    # is 5 octets in the compact layout and 8 in the hnid one.
+    hdr=10
+    [[ "$lay" == "hnid" ]] && hdr=16
     a2=$(suci_build "$scheme" 0123456789 "$pub" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
     a3=$(suci_build "$scheme" 0123456789 "$pub" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
     b1=$(suci_build "$scheme" 0987654321 "$pub" 001 01 1 0000 | awk -F'\t' '$1=="suci"{print $2}')
@@ -1184,8 +1299,8 @@ suci_link_demo() {
     # key and the scheme output's length survive as shared fields.
     local split=64 head tail reused
     (( scheme == 2 )) && split=66
-    head="${a1:0:$(( 10 + split ))}"
-    tail="${a1:$(( 10 + split ))}"
+    head="${a1:0:$(( hdr + split ))}"
+    tail="${a1:$(( hdr + split ))}"
     reused="$head$(printf '%s' "$tail" | rev)"
     printf 'sub-A-round-1\t%s\nsub-A-round-2-reused-eph\t%s\n' "$a1" "$reused" > "$dir/reuse.tsv"
 
@@ -1407,17 +1522,18 @@ suci_cmd_verify_hnkey() {
 
 suci_cmd_build() {
     local scheme="${1:-1}" msin="${2:-}" hn_pub="${3:-}" mcc="${4:-001}" mnc="${5:-01}"
+    local hnkey="${6:-1}" ri="${7:-0000}" layout="${8:-hnid}"
     if [[ -z "$msin" ]]; then
-        [[ -n "${IMSISTING_CLI:-}" ]] && { printf 'ERROR\tusage: --build-suci <0|1|2> <msin> [hn-pubkey-hex] [mcc] [mnc]\n' >&2; return 2; }
-        printf 'ERROR\tusage: --build-suci <0|1|2> <msin> [hn-pubkey-hex] [mcc] [mnc]\n' >&2; return 2
+        [[ -n "${IMSISTING_CLI:-}" ]] && { printf 'ERROR\tusage: --build-suci <0|1|2> <msin> [hn-pubkey-hex] [mcc] [mnc] [hn-key-id] [routing-ind] [hnid|compact]\n' >&2; return 2; }
+        printf 'ERROR\tusage: --build-suci <0|1|2> <msin> [hn-pubkey-hex] [mcc] [mnc] [hn-key-id] [routing-ind] [hnid|compact]\n' >&2; return 2
     fi
-    suci_build "$scheme" "$msin" "$hn_pub" "$mcc" "$mnc"
+    suci_build "$scheme" "$msin" "$hn_pub" "$mcc" "$mnc" "$hnkey" "$ri" "$layout"
 }
 
 suci_cmd_parse() {
-    local hex="${1:-}"
-    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --parse-suci <hex>\n' >&2; return 2; }
-    suci_parse "$hex"
+    local hex="${1:-}" layout="${2:-auto}"
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --parse-suci <hex> [hnid|compact|auto]\n' >&2; return 2; }
+    suci_parse "$hex" "$layout"
 }
 
 suci_cmd_deconceal() {
@@ -1980,6 +2096,39 @@ suci_selftest() {
     chk suci-null-exposed "$(fld "$out" msin_exposed)" "yes"
     chk suci-null-finding "$(printf '%s\n' "$out" | grep -c '^finding	MSIN transmitted in the clear')" "1"
     chk suci-null-imsi   "$(fld "$out" imsi)" "1234567890"
+    # R74: the home network identifier. A real SUCI carries MCC/MNC ahead of
+    # the routing indicator, and the build side used to drop them on the floor.
+    local hl
+    hl=$(suci_build 0 1234567890 "" 208 01 1 0000)
+    chk suci-hnid-layout "$(fld "$hl" layout)" "hnid"
+    chk suci-hnid-octets "$(fld "$hl" suci_octets)" "13"
+    chk suci-hnid-hex "$(fld "$hl" suci)" "0802f810000000012143658709"
+    chk suci-hnid-plmn "$(fld "$hl" home_network_identifier)" "02f810"
+    local hp
+    hp=$(suci_parse "0802f810000000012143658709")
+    chk suci-hnid-back-layout "$(fld "$hp" layout)" "hnid"
+    chk suci-hnid-back-mcc "$(fld "$hp" home_mcc)" "208"
+    chk suci-hnid-back-mnc "$(fld "$hp" home_mnc)" "01"
+    chk suci-hnid-back-msin "$(fld "$hp" msin)" "1234567890"
+    chk suci-hnid-back-ri "$(fld "$hp" routing_indicator)" "0000"
+    chk suci-hnid-back-keyid "$(fld "$hp" hn_public_key_id)" "1"
+    # A three-digit MNC keeps its third digit, a two-digit one uses the F pad.
+    chk suci-hnid-plmn3 "$(suci_plmn_encode 310 260)" "130062"
+    chk suci-hnid-plmn2 "$(suci_plmn_encode 001 01)"  "00f110"
+    chk suci-plmn-bad "$(suci_plmn_encode 31 260 >/dev/null 2>&1; echo $?)" "2"
+    chk suci-plmn-bad2 "$(suci_plmn_encode 310 2 >/dev/null 2>&1; echo $?)" "2"
+    # The old layout is still readable, but only when asked for, and it says
+    # out loud that the octets carry no home network identifier.
+    hl=$(suci_build 0 1234567890 "" 208 01 1 0000 compact)
+    chk suci-compact-layout "$(fld "$hl" layout)" "compact"
+    chk suci-compact-hex "$(fld "$hl" suci)" "08010000002143658709"
+    chk suci-compact-hnid "$(fld "$hl" home_network_identifier)" "absent"
+    chk suci-compact-finding "$(printf '%s\n' "$hl" | grep -c 'carries no MCC/MNC')" "1"
+    chk suci-compact-parse "$(suci_parse "08010000002143658709" compact | awk -F'\t' '$1=="layout"{print $2}')" "compact"
+    chk suci-compact-msin "$(suci_parse "08010000002143658709" compact | awk -F'\t' '$1=="msin"{print $2}')" "1234567890"
+    chk suci-layout-bad "$(suci_parse "08010000002143658709" sideways >/dev/null 2>&1; echo $?)" "2"
+    chk suci-build-layout-bad "$(suci_build 0 1234567890 "" 208 01 1 0000 wide >/dev/null 2>&1; echo $?)" "2"
+
     # Profile B: 33-byte compressed ephemeral key.
     # A 33-octet compressed P-256 point: the 0x02 prefix plus 32 octets of X.
     local epk33="02${epk}"
@@ -2415,7 +2564,10 @@ EOF
         chk link-repeat-count "$(suci_link_oracle "$obsf/repeat.tsv" | awk -F'\t' '$1=="repeated_sucis"{v=$2} END{print v}')" "1"
         chk link-repeat-finding "$(suci_link_oracle "$obsf/repeat.tsv" | grep -c '^finding	repeated-suci')" "1"
         # the reused ephemeral key: same scheme output, re-randomised ciphertext
-        head2="${sa:0:74}"; tail2="${sa:74}"
+        # header 5 octets (compact) or 8 (hnid) then a 32-octet X25519 key
+        local hdr2=74
+        [[ "$(suci_parse "$sa" | awk -F'\t' '$1=="layout"{print $2}')" == "hnid" ]] && hdr2=80
+        head2="${sa:0:$hdr2}"; tail2="${sa:$hdr2}"
         sreuse="$head2$(printf '%s' "$tail2" | rev)"
         printf 'a\t%s\nb\t%s\n' "$sa" "$sreuse" > "$obsf/reuse.tsv"
         chk link-reuse-verdict "$(suci_link_oracle "$obsf/reuse.tsv" | awk -F'\t' '$1=="verdict"{v=$2} END{print v}')" "LINKABLE"
@@ -2599,7 +2751,11 @@ Usage: $0 COMMAND
                                      as TSV; with an argument, validates that key source
   --build-suci <0|1|2> <msin> [hn-pubkey-hex] [mcc] [mnc]
                                      build a SUCI (0 null, 1 profile A, 2 profile B)
-  --parse-suci <hex>                 parse the SUCI fields; flags a null scheme
+  --parse-suci <hex> [layout]        parse the SUCI fields (layout: hnid, compact
+                                     or auto -- real SUCI carries MCC/MNC ahead of
+                                     the routing indicator; the compact layout this
+                                     module first shipped carries none); flags a
+                                     null scheme
   --deconceal <hex> <key-hex|keyfile>
                                      recover the MSIN with the home network private
                                      key; env IMSISTING_SUCI_HN_KEY=<keyfile> also works
