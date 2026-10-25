@@ -2611,6 +2611,153 @@ vims_register_spoof() {
     printf 'attack\tSIP REGISTER with a forged Contact — binds the subscriber identity to an attacker endpoint, hijacking inbound calls and messages\n' >&2
 }
 
+# ── UMTS circuit-switched keystream: COUNT-C and the reset ───────────────
+# A UMTS voice call is not ciphered per packet. The RNC runs f8 (TS 35.201)
+# under a CK that the core hands it, and the counter it feeds f8 is COUNT-C:
+# a 32-bit value whose top 24 bits are the hyper frame number and whose low
+# 8 bits are the connection frame number (TS 33.102 §6.4.1). The HFN exists
+# precisely because the CFN is 8 bits and would wrap; the RNC increments the
+# HFN on wrap, and starts both at a value that is not sent over the air.
+#
+# The reuse this verb models is the one a reset creates: an RNC that restarts
+# with the same CK and an HFN back at its start, on a call whose CFN has come
+# round again, gives the second call the first call's keystream. Two AMR
+# streams under one keystream XOR to the XOR of their payloads, and one of the
+# two is usually silence — which is the ReVoLTE result, one generation up from
+# the GSM version this tree already carries.
+vims_umts_count_c() {   # <hfn> <cfn>
+    local hfn="${1:-0}" cfn="${2:-0}"
+    [[ "$hfn" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tthe hyper frame number is a decimal integer\n' >&2; return 2; }
+    [[ "$cfn" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tthe connection frame number is a decimal integer\n' >&2; return 2; }
+    (( hfn >= 0 && hfn <= 16777215 )) || {
+        printf 'ERROR\tthe hyper frame number is 24 bits (0..16777215)\n' >&2; return 2; }
+    (( cfn >= 0 && cfn <= 255 )) || {
+        printf 'ERROR\tthe connection frame number is 8 bits (0..255)\n' >&2; return 2; }
+    printf 'hfn\t%s\n' "$hfn"
+    printf 'cfn\t%s\n' "$cfn"
+    printf 'count_c\t%s\n' "$(( (hfn << 8) | cfn ))"
+    printf 'count_c_hex\t%08X\n' "$(( (hfn << 8) | cfn ))"
+    printf 'width_bits\t32\n'
+    printf 'ref\tTS 33.102 6.4.1 (COUNT-C: HFN then CFN), TS 35.201 3 (f8 takes COUNT as a 32-bit value)\n'
+}
+
+vims_cmd_umts_keystream() {   # <ck-a> <ck-b> <hfn-a> <cfn-a> <hfn-b> <cfn-b> [--frames N]
+    local cka="${1:-}" ckb="${2:-}" hfna="${3:-}" cfna="${4:-}" hfnb="${5:-}" cfnb="${6:-}" frames=8
+    [[ -n "$cfnb" ]] || {
+        printf 'ERROR\tusage: --umts-keystream <ck-a> <ck-b> <hfn-a> <cfn-a> <hfn-b> <cfn-b> [--frames N]\n' >&2
+        printf 'WHY\ttwo calls, each with the CK the core handed the RNC and the HFN/CFN it started its cipher at\n' >&2
+        return 2; }
+    shift 6
+    while (($#)); do
+        case "$1" in
+            --frames) frames="${2:-8}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(vims_san "$1" 2>/dev/null || printf '%s' "$1")" >&2; return 2 ;;
+        esac
+    done
+    cka=$(printf '%s' "$cka" | tr -d ' \t:-' | tr 'A-F' 'a-f')
+    ckb=$(printf '%s' "$ckb" | tr -d ' \t:-' | tr 'A-F' 'a-f')
+    [[ "$cka" =~ ^[0-9a-f]{32}$ ]] || { printf 'ERROR\tCK A must be 16 octets of hex\n' >&2; return 2; }
+    [[ "$ckb" =~ ^[0-9a-f]{32}$ ]] || { printf 'ERROR\tCK B must be 16 octets of hex\n' >&2; return 2; }
+    vims_umts_count_c "$hfna" "$cfna" >/dev/null || return 2
+    vims_umts_count_c "$hfnb" "$cfnb" >/dev/null || return 2
+    local ca=$(( (hfna << 8) | cfna )) cb=$(( (hfnb << 8) | cfnb ))
+    local same=no
+    [[ "$cka" == "$ckb" ]] && same=yes
+    printf 'call_a\tck\t%s\n' "$cka"
+    printf 'call_a\tcount_c_start\t%s\n' "$ca"
+    printf 'call_b\tck\t%s\n' "$ckb"
+    printf 'call_b\tcount_c_start\t%s\n' "$cb"
+    printf 'same_ck\t%s\n' "$same"
+    printf 'count_c_delta\t%s\n' "$(( cb - ca ))"
+    printf 'frames_compared\t%s\n' "$frames"
+    # Overlap: the two keystreams coincide when the CK is the same and the
+    # COUNT-C windows intersect. A COUNT-C window is frames long.
+    # Two COUNT-C windows of `frames` frames overlap when each starts before
+    # the other ends. Only a shared CK makes that overlap a shared keystream.
+    local overlap=0
+    if [[ "$same" == "yes" ]] && (( ca < cb + frames && cb < ca + frames )); then
+        overlap=1
+    fi
+    printf 'keystream_overlap\t%s\n' "$([[ $overlap -eq 1 ]] && echo yes || echo no)"
+    if [[ "$overlap" == "1" ]]; then
+        printf 'finding\tck_reused_same_count_c\tthe same CK is driven from the same COUNT-C in two calls: f8 produces the same keystream for both, and XOR of the two ciphertext streams is XOR of their payloads\n'
+    elif [[ "$same" == "yes" ]]; then
+        printf 'finding\tck_reused_but_counter_offsets\t%s\n' "the CK repeats but the counters do not coincide inside the window compared"
+    else
+        printf 'finding\tno_reuse_in_this_pair\tthe CKs differ, so no keystream is shared however the counters align\n'
+    fi
+    printf 'reset_model\tan RNC restart puts HFN back at its start value while the CN keeps the CK for the call; when the CFN has wrapped into the same frame, the counter coincides\n'
+    printf 'ref\tTS 33.102 6.4.1, TS 35.201 3, TS 26.090 (AMR payload framing)\n'
+    printf 'verdict\t%s\n' "$([[ $overlap -eq 1 ]] && echo keystream_reused || echo keystream_distinct)"
+}
+
+# The primitive itself, on octets: two ciphered streams under one keystream
+# XOR to the XOR of the plaintexts, and knowing one of them recovers the
+# other. That does not depend on the cipher, the generation or the key.
+vims_cmd_umts_two_stream() {   # <ct-a-hex> <ct-b-hex> [--known-a hex | --known-b hex]
+    local a="${1:-}" b="${2:-}" known_a="" known_b=""
+    [[ -n "$b" ]] || {
+        printf 'ERROR\tusage: --umts-two-stream <ct-a-hex> <ct-b-hex> [--known-a hex | --known-b hex]\n' >&2
+        printf 'WHY\ttwo ciphertext streams produced under the same keystream; if you have one plaintext, the other follows\n' >&2
+        return 2; }
+    shift 2
+    while (($#)); do
+        case "$1" in
+            --known-a) known_a="${2:-}"; shift 2 ;;
+            --known-b) known_b="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    a=$(printf '%s' "$a" | tr -d ' \t:-' | tr 'A-F' 'a-f')
+    b=$(printf '%s' "$b" | tr -d ' \t:-' | tr 'A-F' 'a-f')
+    [[ "$a" =~ ^[0-9a-f]+$ && ${#a} -eq 0 || ${#a} -ge 2 ]] || { printf 'ERROR\tthe first stream is not hex\n' >&2; return 2; }
+    [[ "$b" =~ ^[0-9a-f]*$ ]] || { printf 'ERROR\tthe second stream is not hex\n' >&2; return 2; }
+    local n=${#a}
+    (( ${#b} < n )) && n=${#b}
+    n=$(( n / 2 * 2 ))
+    a="${a:0:n}"; b="${b:0:n}"
+    local x
+    x=$(python3 - "$a" "$b" <<'PY'
+import sys
+a = bytes.fromhex(sys.argv[1]); b = bytes.fromhex(sys.argv[2])
+sys.stdout.write(bytes(x ^ y for x, y in zip(a, b)).hex())
+PY
+)
+    printf 'bytes_compared\t%s\n' "$(( n / 2 ))"
+    printf 'xor_hex\t%s\n' "$x"
+    if [[ -n "$known_a" ]]; then
+        known_a=$(printf '%s' "$known_a" | tr -d ' \t:-' | tr 'A-F' 'a-f')
+        local rec
+        rec=$(python3 - "$x" "$known_a" <<'PY'
+import sys
+x = bytes.fromhex(sys.argv[1]); k = bytes.fromhex(sys.argv[2])
+sys.stdout.write(bytes(a ^ b for a, b in zip(x, k[:len(x)])).hex())
+PY
+)
+        printf 'known_a_hex\t%s\n' "$known_a"
+        printf 'recovered_b_hex\t%s\n' "$rec"
+        printf 'recovered\tb\n'
+    elif [[ -n "$known_b" ]]; then
+        known_b=$(printf '%s' "$known_b" | tr -d ' \t:-' | tr 'A-F' 'a-f')
+        local rec
+        rec=$(python3 - "$x" "$known_b" <<'PY'
+import sys
+x = bytes.fromhex(sys.argv[1]); k = bytes.fromhex(sys.argv[2])
+sys.stdout.write(bytes(a ^ b for a, b in zip(x, k[:len(x)])).hex())
+PY
+)
+        printf 'known_b_hex\t%s\n' "$known_b"
+        printf 'recovered_a_hex\t%s\n' "$rec"
+        printf 'recovered\ta\n'
+    fi
+    printf 'what_this_is\tXOR of two streams produced under one keystream cancels the keystream, leaving the XOR of the two payloads\n'
+    printf 'what_it_is_not\ta recovery of either payload on its own: without a guess at one side this is one equation in two unknowns, which is why the attack keys on silence\n'
+    printf 'ref\tReVoLTE (EUROCRYPT 2020 posters / NDSS 2020), TS 26.090 for the AMR payload layout\n'
+    printf 'verdict\ttwo_streams_xored\n'
+}
+
 vims_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -3060,6 +3207,48 @@ PYP
     chk call-no-target "$(vims_call_flow >/dev/null 2>&1; echo $?)" "2"
     chk call-bad-port "$(vims_call_flow 127.0.0.1:99999 >/dev/null 2>&1; echo $?)" "2"
 
+    # 13. UMTS CS keystream: COUNT-C, the reset that reuses it, the XOR
+    local cc; cc=$(vims_umts_count_c 1 5 2>/dev/null)
+    chk cc-hfn      "$(vims_fld "$cc" hfn)" "1"
+    chk cc-cfn      "$(vims_fld "$cc" cfn)" "5"
+    chk cc-val      "$(vims_fld "$cc" count_c)" "261"
+    chk cc-hex      "$(vims_fld "$cc" count_c_hex)" "00000105"
+    chk cc-hfn-max  "$(vims_umts_count_c 16777215 255 2>/dev/null | vims_fld "$(cat)" count_c_hex 2>/dev/null || vims_umts_count_c 16777215 255 | awk -F'\t' '$1=="count_c_hex"{print $2}')" "FFFFFFFF"
+    chk cc-hfn-bad  "$(vims_umts_count_c 16777216 0 >/dev/null 2>&1; echo $?)" "2"
+    chk cc-cfn-bad  "$(vims_umts_count_c 0 256 >/dev/null 2>&1; echo $?)" "2"
+    local ks1 ks2 ks3 ks4
+    ks1=$(vims_cmd_umts_keystream 000102030405060708090a0b0c0d0e0f 000102030405060708090a0b0c0d0e0f 0 250 0 250 2>/dev/null)
+    chk ks-same     "$(vims_fld "$ks1" same_ck)" "yes"
+    chk ks-overlap  "$(vims_fld "$ks1" keystream_overlap)" "yes"
+    chk ks-verdict  "$(vims_fld "$ks1" verdict)" "keystream_reused"
+    chk ks-finding  "$(printf '%s\n' "$ks1" | grep -c 'ck_reused_same_count_c')" "1"
+    chk ks-delta    "$(vims_fld "$ks1" count_c_delta)" "0"
+    # different CK, same counter: no shared keystream
+    ks2=$(vims_cmd_umts_keystream 000102030405060708090a0b0c0d0e0f 1112131415161718191a1b1c1d1e1f20 0 250 0 250 2>/dev/null)
+    chk ks-diff-ck  "$(vims_fld "$ks2" same_ck)" "no"
+    chk ks-diff-verdict "$(vims_fld "$ks2" verdict)" "keystream_distinct"
+    # same CK, counters 8 frames apart with an 8-frame window: no overlap;
+    # with a 9-frame window they touch, which is the boundary the test pins
+    ks3=$(vims_cmd_umts_keystream 000102030405060708090a0b0c0d0e0f 000102030405060708090a0b0c0d0e0f 0 240 0 248 2>/dev/null)
+    chk ks-gap8     "$(vims_fld "$ks3" keystream_overlap)" "no"
+    ks4=$(vims_cmd_umts_keystream 000102030405060708090a0b0c0d0e0f 000102030405060708090a0b0c0d0e0f 0 240 0 248 --frames 9 2>/dev/null)
+    chk ks-gap8-9   "$(vims_fld "$ks4" keystream_overlap)" "yes"
+    # the HFN wrap: HFN 1 CFN 0 follows HFN 0 CFN 255, one frame later
+    chk ks-wrap     "$(( $(vims_umts_count_c 1 0 | awk -F'\t' '$1=="count_c"{print $2}') - $(vims_umts_count_c 0 255 | awk -F'\t' '$1=="count_c"{print $2}') ))" "1"
+    chk ks-bad-ck   "$(vims_cmd_umts_keystream 00 00 0 0 0 0 >/dev/null 2>&1; echo $?)" "2"
+    chk ks-noargs   "$(vims_cmd_umts_keystream >/dev/null 2>&1; echo $?)" "2"
+    # the primitive: XOR of two streams under one keystream, and recovery
+    local ts1 ts2
+    ts1=$(vims_cmd_umts_two_stream 00112233 44556677 2>/dev/null)
+    chk ts-xor      "$(vims_fld "$ts1" xor_hex)" "44444444"
+    chk ts-bytes    "$(vims_fld "$ts1" bytes_compared)" "4"
+    ts2=$(vims_cmd_umts_two_stream 00112233 44556677 --known-a 00000000 2>/dev/null)
+    chk ts-recover  "$(vims_fld "$ts2" recovered_b_hex)" "44444444"
+    chk ts-which    "$(vims_fld "$ts2" recovered)" "b"
+    # uneven lengths compare the common prefix only
+    chk ts-prefix   "$(vims_cmd_umts_two_stream 0011 44556677 2>/dev/null | vims_fld "$(cat)" xor_hex 2>/dev/null || vims_cmd_umts_two_stream 0011 44556677 | awk -F'\t' '$1=="xor_hex"{print $2}')" "4444"
+    chk ts-noargs   "$(vims_cmd_umts_two_stream >/dev/null 2>&1; echo $?)" "2"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
     trap - EXIT
@@ -3156,6 +3345,9 @@ vims_cli_main() {
         --imp4gt-model)           vims_imp4gt_model ;;
         --sip-parse)              vims_cmd_sip_parse "${1:-}" ;;
         --sip-build)              vims_sip_build "$@" ;;
+        --umts-count-c)     vims_umts_count_c "${1:-0}" "${2:-0}" ;;
+        --umts-keystream)   vims_cmd_umts_keystream "$@" ;;
+        --umts-two-stream)  vims_cmd_umts_two_stream "$@" ;;
         --sip-send)               vims_sip_send "$@" ;;
         --ims-registration)       vims_cmd_ims_registration "${1:-}" "${2:-}" ;;
         --detect-keystream-reuse) vims_cmd_detect_reuse "$@" ;;
