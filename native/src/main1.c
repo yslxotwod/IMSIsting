@@ -7587,6 +7587,7 @@ static const ChipRow chip_rows[] = {
     { "46_lpp",              "--supl-pos",            NEED_CAP, DOES_READS },
     { "46_lpp",              "--supl-session",        NEED_CAP, DOES_READS },
     { "46_lpp",              "--utdoa-config",        NEED_CAP, DOES_READS },
+    { "46_lpp",            "--utdoa-build",         NEED_NO, DOES_BUILDS },
     { "46_lpp",              "--version",             NEED_NO, DOES_READS },
     { "46_lpp",              "--yes",                 NEED_NO, DOES_READS },
     { "47_wifioff",          "--__index_probe__",     NEED_NO, DOES_READS },

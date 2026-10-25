@@ -58,6 +58,10 @@
 #   --otdoa-request [--form measure|capabilities] [--sfn N] [--pci N]
 #                   [--earfcn N] [--ref-res N] [--ref-val N] [--ref-samples N]
 #                   [--nbr PCI:RSTD:RES:VAL[:SAMPLES],...] [--initiator ...]
+#   --utdoa-build   [--pci N] [--ul-earfcn N] [--num-transmissions N]
+#                   [--ul-bw n6|..|n100] [--srs-index N] [--srs-cs CS] [--srs-antenna an1|an2|an4]
+#                   encodes the UTDOA IE contents as LPPa (TS 36.455) in APER
+#                   and decodes them back; needs the pycrate oracle
 #   --utdoa-config  [--pci N] [--ul-earfcn N] [--num-transmissions N]
 #                   [--ul-bw n6|..|n100] [--srs-index N] [--srs-cs N]
 #                   [--srs-antenna an1|an2|an4] [--cells N]
@@ -1021,6 +1025,100 @@ lpp_proc_run() {
     }
     python3 "$py" "$verb" "$@"
 }
+
+# ── R65: UTDOA octets, in the protocol that actually carries them ───────
+# LPP (TS 37.355) has no UTDOA IEs. Uplink UTDOA is an LPPa procedure
+# (TS 36.455): the E-SMLC sends utdoaInformationRequest, the eNB answers, and
+# the contents are RequestedSRSTransmissionCharacteristics plus one
+# SRSConfigurationForOneCell per cell that should listen. Naming those types was
+# the earlier position; this verb encodes them. The octets come from pycrate
+# (pycrate_asn1dir.LPPa) in APER, and every one is decoded back and compared, so
+# the hex is a message that round-trips rather than a transcription.
+#
+# What is deliberately NOT emitted: the LPPa pdu layer itself. UTDOAInformation-
+# Request in pycrate is a protocolIEs SEQUENCE OF with an OPEN_TYPE value field,
+# and building that layer means choosing the id constant and criticality of a
+# protocol this module does not own. The IE contents below are the part that
+# carries the request, and the row says so rather than presenting a whole PDU.
+lpp_utdoa_build() {
+    local pci=1 earfcn=18300 ntx=500 bw=n50 idx=7 cs=cs0 ant=an1 maxupts=true
+    while (($#)); do
+        case "$1" in
+            --pci)              pci="${2:-1}";      shift 2 ;;
+            --ul-earfcn)        earfcn="${2:-18300}"; shift 2 ;;
+            --num-transmissions) ntx="${2:-500}";   shift 2 ;;
+            --ul-bw)            bw="${2:-n50}";     shift 2 ;;
+            --srs-index)        idx="${2:-7}";      shift 2 ;;
+            --srs-cs)           cs="${2:-cs0}";     shift 2 ;;
+            --srs-antenna)      ant="${2:-an1}";    shift 2 ;;
+            *) err "unknown option $1"; return 2 ;;
+        esac
+    done
+    local py="${IMSI_LPP_ORACLE_PY:-/home/ysl/.lte-oracles/venv/bin/python}"
+    if [[ ! -x "$py" ]]; then
+        printf 'ERROR\tLPPa encoder unavailable: %s is not an executable interpreter\n' "$py" >&2
+        printf 'WHY\tUTDOA contents are LPPa (TS 36.455) and the encoder is pycrate_asn1dir.LPPa; without it this verb has no octets to print\n' >&2
+        printf 'FIX\tinstall pycrate in /home/ysl/.lte-oracles/venv or set IMSI_LPP_ORACLE_PY\n' >&2
+        return 2
+    fi
+    local script="$MOD_TMP/lpp_utdoa_build.py"
+    cat > "$script" <<'PYEOF'
+import sys
+try:
+    from pycrate_asn1dir import LPPa
+except ImportError as exc:
+    sys.stderr.write('ERROR\tcannot import pycrate_asn1dir.LPPa: %s\n' % exc)
+    raise SystemExit(2)
+I = LPPa.LPPA_IEs
+REF = ('TS 36.455 (LPPa) utdoaInformationRequest: RequestedSRSTransmissionCharacteristics, '
+       'SRSConfigurationForOneCell; TS 36.331 6.3.2 SRS configuration')
+REF_REQ = ('TS 36.455 UTDOAInformationRequest-IEs/RequestedSRSTransmissionCharacteristics '
+           '(numberOfTransmissions, bandwidth)')
+LIMIT = ('IE contents only: the LPPa pdu layer (protocolIEs with an OPEN_TYPE value) is a '
+         'protocol this module does not own, so no S1AP-carried LPPa PDU is claimed here')
+print('ie\ttype\toctets\thex\tdecoded_back\tref\tlimit')
+a = dict(x.split('=', 1) for x in sys.argv[1:])
+req = I.RequestedSRSTransmissionCharacteristics
+req.set_val({'numberOfTransmissions': int(a['ntx']), 'bandwidth': int(a['bw_rb'])})
+h = req.to_aper().hex()
+back = I.RequestedSRSTransmissionCharacteristics
+back.from_aper(bytes.fromhex(h))
+ok = 'yes' if back.get_val() == req.get_val() else 'NO'
+print('requested-srs\tRequestedSRSTransmissionCharacteristics\t%d\t%s\t%s\t%s\t%s'
+      % (len(h) // 2, h, ok, REF_REQ, LIMIT))
+cell = I.SRSConfigurationForOneCell
+cell.set_val({'pci': int(a['pci']), 'ul-earfcn': int(a['earfcn']),
+              'ul-bandwidth': a['bw'], 'ul-cyclicPrefixLength': 'normal',
+              'srs-BandwidthConfig': 'bw0', 'srs-Bandwidth': 'bw0',
+              'srs-AntennaPort': a['ant'], 'srs-HoppingBandwidth': 'hbw0',
+              'srs-cyclicShift': a['cs'], 'srs-ConfigIndex': int(a['idx']),
+              'maxUpPts': a['maxupts'], 'transmissionComb': 0,
+              'freqDomainPosition': 0, 'groupHoppingEnabled': False,
+              'deltaSS': 0, 'sfnInitialisationTime': (0, 64)})
+h2 = cell.to_aper().hex()
+back2 = I.SRSConfigurationForOneCell
+back2.from_aper(bytes.fromhex(h2))
+v2 = back2.get_val()
+ok2 = 'yes' if v2['pci'] == int(a['pci']) and v2['srs-ConfigIndex'] == int(a['idx']) else 'NO'
+print('srs-cell\tSRSConfigurationForOneCell\t%d\t%s\t%s\t%s\t%s'
+      % (len(h2) // 2, h2, ok2, REF, LIMIT))
+print('protocol\tLPPa (TS 36.455), not LPP (TS 37.355): LPP has no UTDOA IEs at all\t-\t-\t-\t%s\t%s'
+      % (REF, LIMIT))
+print('carrier\tLPPa over S1AP: DownlinkUEAssociatedLPPaTransport, then utdoaInformationResponse from the eNB\t-\t-\t-\t%s\t%s'
+      % (REF, LIMIT))
+print('encoding\tpycrate_asn1dir.LPPa, APER\t-\t-\t-\t%s\t%s' % (REF, LIMIT))
+print('verdict\tutdoa_encoded_as_lppa')
+PYEOF
+    local bwrb
+    case "$bw" in
+        n6)   bwrb=6 ;;   n15)  bwrb=15 ;;  n25) bwrb=25 ;;
+        n50)  bwrb=50 ;;  n75)  bwrb=75 ;;  n100) bwrb=100 ;;
+        *) err "ul bandwidth is n6, n15, n25, n50, n75 or n100"; return 2 ;;
+    esac
+    "$py" "$script" "pci=$pci" "earfcn=$earfcn" "ntx=$ntx" "bw=$bw" \
+        "bw_rb=$bwrb" "idx=$idx" "cs=$cs" "ant=$ant" "maxupts=$maxupts"
+}
+
 
 lpp_otdoa_assist()  { lpp_proc_run otdoa-assist  "$@"; }
 lpp_otdoa_request() { lpp_proc_run otdoa-request "$@"; }
@@ -2471,6 +2569,19 @@ lpp_selftest() {
     chk supl-parse-other-why \
         "$(lpp_supl_parse 0018020000448D159E10EE31D41ABD9B2D71A81A34C94030 2>&1 >/dev/null | grep -c '^WHY.*msSUPLEND')" 1
 
+    # R65: UTDOA is LPPa, and the contents now encode as octets that round-trip.
+    local ub
+    ub=$(lpp_utdoa_build 2>/dev/null)
+    chk utdoa-build-verdict "$(printf '%s\n' "$ub" | awk -F'\t' '$1=="verdict"{print $2}')" utdoa_encoded_as_lppa
+    chk utdoa-build-protocol "$(printf '%s\n' "$ub" | awk -F'\t' '$1=="protocol"{print $2}' | grep -c 'TS 36.455')" 1
+    chk utdoa-build-req-hex "$(printf '%s\n' "$ub" | awk -F'\t' '$1=="requested-srs"{print $4}')" 0001f431
+    chk utdoa-build-req-octets "$(printf '%s\n' "$ub" | awk -F'\t' '$1=="requested-srs"{print $3}')" 4
+    chk utdoa-build-srs-octets "$(printf '%s\n' "$ub" | awk -F'\t' '$1=="srs-cell"{print $3}')" 21
+    chk utdoa-build-srs-roundtrip "$(printf '%s\n' "$ub" | awk -F'\t' '$1=="srs-cell"{print $5}')" yes
+    chk utdoa-build-req-roundtrip "$(printf '%s\n' "$ub" | awk -F'\t' '$1=="requested-srs"{print $5}')" yes
+    chk utdoa-build-bad-bw "$(lpp_utdoa_build --ul-bw n7 >/dev/null 2>&1; echo $?)" 2
+    chk utdoa-build-not-lpp "$(printf '%s\n' "$ub" | awk -F'\t' '$1=="protocol" && $2 ~ /not LPP/{print "stated"}')" stated
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -2581,6 +2692,7 @@ lpp_cli_main() {
         --otdoa-assist)  lpp_otdoa_assist "$@" ;;
         --otdoa-request) lpp_otdoa_request "$@" ;;
         --utdoa-config)  lpp_utdoa_config "$@" ;;
+        --utdoa-build)   lpp_utdoa_build "$@" ;;
         --prs-plan)      lpp_prs_plan "$@" ;;
         --supl-build)    lpp_supl_build    "$@" ;;
         --supl-parse)    lpp_supl_parse    "$@" ;;
