@@ -1329,6 +1329,315 @@ gatk_lapdm_burst_plan() {   # <frame-hex> <fn0> <fn1> <fn2> <fn3>
     printf 'note\tbits are the 456-bit output of the TS 45.003 FIRE + convolutional block\n'
 }
 
+# ── an SMS-DELIVER over LAPDm, the whole exchange in frames ────────────
+# This is the half the fake cell never had: an SMS is not one message but a
+# sequence -- page, answer the page, open a SAPI 3 link, carry CP-DATA around
+# RP-DATA around the TS 23.040 TPDU, acknowledge at CP, release the RR link.
+# The builders below emit each frame; the sequence at the end prints the
+# order with the channel and direction every frame rides.
+#
+# TS 23.038 6.2.1: a septet whose GSM code differs from its ASCII code
+# (the currency, the accented letters, the brackets) has no honest basic-table
+# encoding here, so it is refused rather than escaped silently.
+gatk_gsm7_code() {   # <one character> -> septet 0..127
+    local c="$1"
+    case "$c" in
+        "@") printf '0\n'; return 0 ;;
+    esac
+    case "$c" in
+        [A-Za-z0-9]|' '|'.'|','|'?'|'!'|'('|')'|'+'|'-'|'/'|':'|';'|'='|'<'|'>'|'%'|'&'|'*'|'#')
+            printf '%d\n' "'$c"
+            return 0 ;;
+    esac
+    return 1
+}
+
+gatk_gsm7_pack() {   # <text>
+    local text="${1:-}" out="" acc=0 nbits=0 ch code i
+    GATK_SEPTETS=0
+    for (( i = 0; i < ${#text}; i++ )); do
+        ch="${text:i:1}"
+        code=$(gatk_gsm7_code "$ch") || {
+            printf 'ERROR\tcharacter "%s" has no septet in the GSM 03.38 basic table; use --ud-hex for 8-bit data\n' "$ch" >&2
+            return 2; }
+        acc=$(( acc | (code << nbits) ))
+        nbits=$(( nbits + 7 ))
+        while (( nbits >= 8 )); do
+            out+=$(printf '%02x' $(( acc & 0xFF )))
+            acc=$(( acc >> 8 )); nbits=$(( nbits - 8 ))
+        done
+        GATK_SEPTETS=$(( GATK_SEPTETS + 1 ))
+    done
+    if (( nbits > 0 )); then
+        out+=$(printf '%02x' $(( acc & 0xFF )))
+    fi
+    GATK_GSM7_HEX="$out"
+    printf '%s\n' "$out"
+}
+
+# An Address Field (TS 23.040 9.1.2.5): semi-octet digit count, type of
+# address, TBCD digits. International ISDN is 0x91.
+gatk_tp_address() {   # <digits> [type-of-address]
+    local digits="${1:-}" toa="${2:-91}"
+    [[ "$digits" =~ ^[0-9]{1,20}$ ]] || {
+        printf 'ERROR\taddress must be 1 to 20 digits (got %s)\n' "$digits" >&2; return 2; }
+    [[ "$toa" =~ ^[0-9a-f]{2}$ ]] || { printf 'ERROR\ttype-of-address must be 2 hex digits\n' >&2; return 2; }
+    local n=${#digits} pad="" 
+    (( n % 2 )) && pad=f
+    local tbcd=""
+    local i
+    for (( i = 0; i < n; i += 2 )); do
+        local hi="${digits:i:1}" lo="${digits:i+1:1}"
+        [[ -z "$lo" ]] && lo="$pad"
+        tbcd+="${lo}${hi}"
+    done
+    printf '%02x%s%s\n' "$n" "$toa" "$tbcd"
+}
+
+# SCTS, 7 octets YY MM DD hh mm ss tz, every field digit-swapped
+# (TS 23.040 9.2.3.11). Default is the wall clock with zone 00.
+gatk_scts() {   # [yyyymmddhhmmss] [tz-hours]
+    local ts="${1:-}" tz="${2:-00}"
+    if [[ -z "$ts" ]]; then
+        ts=$(date '+%y%m%d%H%M%S')
+    fi
+    [[ "$ts" =~ ^[0-9]{12}$ ]] || { printf 'ERROR\tSCTS time must be 12 digits YYMMDDhhmmss\n' >&2; return 2; }
+    local out="" i sw
+    for (( i = 0; i < 12; i += 2 )); do
+        sw="${ts:i+1:1}${ts:i:1}"
+        out+="$sw"
+    done
+    out+="${tz:1:1}${tz:0:1}"
+    printf '%s\n' "$out"
+}
+
+# SMS-DELIVER TPDU (TS 23.040 9.2.2.2). The first octet is 0x04: TP-MMS set,
+# every other bit 0. TP-UDHI is bit 7, so it clears the bit mask to 0x44.
+gatk_tpdu_deliver() {   # <oa-digits> <text> [--ud-hex HEX] [--udhi] [--scts HEX14]
+    local oa="${1:-}" text="${2:-}" ud_hex="" udhi=0 scts_hex=""
+    shift 2 || true
+    while (( $# )); do
+        case "$1" in
+            --ud-hex) ud_hex=$(gatk_norm_hex "${2:-}"); shift 2 ;;
+            --udhi)   udhi=1; shift ;;
+            --scts)   scts_hex="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(gatk_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    local oa_hex; oa_hex=$(gatk_tp_address "$oa") || return 1
+    local scts
+    if [[ -n "$scts_hex" ]]; then
+        [[ "$scts_hex" =~ ^[0-9a-f]{14}$ ]] || { printf 'ERROR\t--scts must be 14 hex digits\n' >&2; return 2; }
+        scts="$scts_hex"
+    else
+        scts=$(gatk_scts "" "00")
+    fi
+    local udl ud dcs
+    if [[ -n "$ud_hex" ]]; then
+        gatk_is_hex "$ud_hex" || { printf 'ERROR\t--ud-hex must be hex\n' >&2; return 2; }
+        dcs=04; udl=$(( ${#ud_hex} / 2 )); ud="$ud_hex"
+    else
+        [[ -n "$text" ]] || { printf 'ERROR\tusage: --tpdu-deliver <oa-digits> <text> [--ud-hex HEX]\n' >&2; return 2; }
+        gatk_gsm7_pack "$text" >/dev/null || return 1
+        dcs=00; udl=$GATK_SEPTETS; ud="$GATK_GSM7_HEX"
+    fi
+    local fo="04"
+    (( udhi )) && fo="44"
+    printf 'first_octet\t%s\n' "$fo"
+    printf 'tp_mti\tSMS-DELIVER\n'
+    printf 'tp_udhi\t%d\n' "$udhi"
+    printf 'oa\t%s\n' "$oa_hex"
+    printf 'dcs\t%02x\n' "$dcs"
+    printf 'scts\t%s\n' "$scts"
+    printf 'udl\t%d\n' "$udl"
+    printf 'ud\t%s\n' "$ud"
+    # TP-PID 0x00 sits between the address block and the DCS octet.
+    local t
+    t=$(printf '%02x' "$fo")${oa_hex}"00$(printf '%02x' "$dcs")${scts}$(printf '%02x' "$udl")${ud}"
+    printf 'tpdu\t%s\n' "$t"
+}
+
+# ── SMS-CP / SMS-RP wrappers (TS 24.011) ──────────────────────────────
+# RP-DATA (network to MS: RP-MTI 001, so 0x01) = RP-MR, then the two
+# addresses (IEI 0x41 originator, 0x42 destination) and the user
+# information (IEI 0x43) that carries the TPDU.
+gatk_rp_data() {   # <tpdu-hex> <oa-digits> <da-digits>
+    local tpdu; tpdu=$(gatk_norm_hex "${1:-}"); local oa="${2:-}" da="${3:-}"
+    gatk_is_hex "$tpdu" || { printf 'ERROR\tTPDU must be hex\n' >&2; return 2; }
+    local oa_hex da_hex
+    oa_hex=$(gatk_tp_address "$oa") || return 1
+    case "$da" in
+        tmsi:*)
+            local th; th=$(gatk_norm_hex "${da#tmsi:}")
+            [[ "$th" =~ ^[0-9a-f]{8}$ ]] || { printf 'ERROR\tTMSI must be 8 hex digits\n' >&2; return 2; }
+            # A TMSI address (TS 24.008 10.5.1.4): 8 semi-octets, type 0xf4.
+            da_hex="08f4$th" ;;
+        *) da_hex=$(gatk_tp_address "$da") || return 1 ;;
+    esac
+    local rp
+    rp="0100"
+    rp+="41$(printf '%02x' "$(( ${#oa_hex} / 2 ))")${oa_hex}"
+    rp+="42$(printf '%02x' "$(( ${#da_hex} / 2 ))")${da_hex}"
+    rp+="43$(printf '%02x' "$(( ${#tpdu} / 2 ))")${tpdu}"
+    printf 'rp_mti\tRP-DATA (network to MS)\n'
+    printf 'rp_address_originator\t%s\n' "$oa_hex"
+    printf 'rp_address_destination\t%s\n' "$da_hex"
+    printf 'rp_ui_bytes\t%d\n' "$(( ${#tpdu} / 2 ))"
+    printf 'rp_data\t%s\n' "$rp"
+}
+
+# CP-DATA (TS 24.011 7.2.2): one octet, message type 0x01.
+gatk_cp_data() {   # <rp-hex>
+    local rp; rp=$(gatk_norm_hex "${1:-}")
+    gatk_is_hex "$rp" || { printf 'ERROR\tRP-DATA must be hex\n' >&2; return 2; }
+    printf 'cp_mti\tCP-DATA\n'
+    printf 'cp_data\t01%s\n' "$rp"
+}
+
+gatk_cp_ack() {   # CP-ACK, message type 0x04 -- no body, the TI is in bit 4
+    printf 'cp_mti\tCP-ACK\n'
+    printf 'cp_ack\t04\n'
+}
+
+# ── LAPDm frames other than UI ────────────────────────────────────────
+# Address octet and length octet keep the convention the module's UI builder
+# prints (address = SAPI<<3 | C/R<<1 | 1, length = octet count<<3 | 1), so a
+# frame from here lines up with the ones the rest of the cell emits.
+gatk_lapdm_frame() {   # <kind> <sapi> <cr> [l3-hex] [ns] [nr]
+    local kind="${1:-sabm}" sapi="${2:-3}" cr="${3:-0}" l3="${4:-}" ns="${5:-0}" nr="${6:-0}"
+    [[ "$sapi" =~ ^[0-9]+$ ]] && (( sapi <= 7 )) || { printf 'ERROR\tSAPI must be 0..7\n' >&2; return 2; }
+    [[ "$cr" =~ ^[01]$ ]] || { printf 'ERROR\tC/R must be 0 or 1\n' >&2; return 2; }
+    local addr ctrl
+    addr=$(( (0 << 6) | (sapi << 3) | (cr << 1) | 1 ))
+    case "$kind" in
+        sabm) ctrl=$(( 0x3F )) ;;
+        ua)   ctrl=$(( 0x63 )) ;;
+        disc) ctrl=$(( 0x43 )) ;;
+        dm)   ctrl=$(( 0x0F )) ;;
+        rr)   ctrl=$(( 0x01 | (nr << 5) )) ;;
+        ui)   ctrl=$(( 0x03 )) ;;
+        i)    ctrl=$(( (ns << 1) | (nr << 5) )) ;;
+        *) printf 'ERROR\tunknown frame kind %s (sabm ua disc dm rr ui i)\n' "$(gatk_sanitize "$kind")" >&2; return 2 ;;
+    esac
+    printf 'frame_kind\t%s\n' "$kind"
+    printf 'address\t%02x\n' "$addr"
+    printf 'control\t%02x\n' "$ctrl"
+    if [[ -n "$l3" ]]; then
+        l3=$(gatk_norm_hex "$l3")
+        gatk_is_hex "$l3" || { printf 'ERROR\tlayer 3 payload must be hex\n' >&2; return 2; }
+        local n=$(( ${#l3} / 2 ))
+        (( n <= 23 )) || { printf 'ERROR\tpayload is %s octets, above N201 23 on SDCCH; segment it with --lapdm-i-segments\n' "$n" >&2; return 2; }
+        printf 'length\t%02x\n' "$(( (n << 3) | 1 ))"
+        printf 'payload_octets\t%d\n' "$n"
+        printf 'frame\t%02x%02x%02x%s\n' "$addr" "$ctrl" "$(( (n << 3) | 1 ))" "$l3"
+    else
+        printf 'frame\t%02x%02x\n' "$addr" "$ctrl"
+    fi
+}
+
+# A layer 3 message longer than N201 is segmented across I-frames and the M
+# bit says "more follows" (TS 44.006 5.4.2). The M bit is carried at bit 1 of
+# this module's length octet; the exact placement inside LAPDm's one- or
+# two-octet length indicator is an unverified reading, printed in the note.
+gatk_lapdm_i_segments() {   # <sapi> <cr> <l3-hex> [ns0] [nr]
+    local sapi="${1:-3}" cr="${2:-1}" l3="${3:-}" ns0="${4:-0}" nr="${5:-0}"
+    l3=$(gatk_norm_hex "$l3")
+    gatk_is_hex "$l3" || { printf 'ERROR\tlayer 3 payload must be hex\n' >&2; return 2; }
+    local total=$(( ${#l3} / 2 )) chunk=20 off=0 m len part n ns idx=0
+    [[ "$total" -gt 0 ]] || { printf 'ERROR\tempty layer 3 message\n' >&2; return 2; }
+    local addr ctrl
+    addr=$(( (0 << 6) | (sapi << 3) | (cr << 1) | 1 ))
+    while (( off < total )); do
+        n=$chunk
+        (( off + n > total )) && n=$(( total - off ))
+        part="${l3:$(( off * 2 )):$(( n * 2 ))}"
+        m=0
+        (( off + n < total )) && m=1
+        ns=$(( (ns0 + idx) & 7 ))
+        ctrl=$(( (ns << 1) | (nr << 5) ))
+        len=$(( (n << 3) | (m << 1) | 1 ))
+        printf 'segment\t%d\n' "$idx"
+        printf 'ns\t%d\n' "$ns"
+        printf 'more\t%d\n' "$m"
+        printf 'octets\t%d\n' "$n"
+        printf 'frame\t%02x%02x%02x%s\n' "$addr" "$ctrl" "$len" "$part"
+        off=$(( off + n )); idx=$(( idx + 1 ))
+    done
+    printf 'segments\t%d\n' "$idx"
+    printf 'note\tthe M bit sits at bit 1 of this module length octet; LAPDm length-indicator placement is an unverified reading of TS 44.006 5.4.2\n'
+}
+
+# RR Paging Response (TS 24.008 9.1.8): PD 0x06, MT 0x27, mobile identity.
+gatk_rr_paging_response() {   # <tmsi-hex8>
+    local t; t=$(gatk_norm_hex "${1:-}")
+    [[ "$t" =~ ^[0-9a-f]{8}$ ]] || { printf 'ERROR\tpaging response needs an 8-hex-digit TMSI\n' >&2; return 2; }
+    printf '0627' ; gatk_mobile_identity_tmsi "$t" ; printf '\n'
+}
+
+# RR Channel Release (TS 24.008 9.1.7): PD 0x06, MT 0x0d.
+gatk_rr_channel_release() { printf '060d\n'; }
+
+# The exchange, in order: paging request on PCH, paging response and the
+# SAPI 3 link on SDCCH, CP-DATA around RP-DATA around the TPDU, CP-ACK back,
+# then RR channel release.
+gatk_sms_deliver_seq() {   # <tmsi-hex8> <smsc-digits> <text> [--udhi]
+    local tmsi="${1:-}" smsc="${2:-}" text="${3:-}"; shift 3 || true
+    local udhi=0
+    while (( $# )); do
+        case "$1" in
+            --udhi) udhi=1; shift ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(gatk_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$tmsi" && -n "$smsc" && -n "$text" ]] || {
+        printf 'ERROR\tusage: --sms-deliver-seq <tmsi-hex8> <smsc-digits> <text> [--udhi]\n' >&2; return 2; }
+    tmsi=$(gatk_norm_hex "$tmsi")
+    [[ "$tmsi" =~ ^[0-9a-f]{8}$ ]] || {
+        printf 'ERROR\tTMSI must be 8 hex digits (got %s)\n' "$(gatk_sanitize "${tmsi:-}")" >&2; return 2; }
+    local tpdu rp cp ua_page resp sabm cp_i ack rel
+    local tp_out
+    tp_out=$(gatk_tpdu_deliver "$smsc" "$text" $([[ $udhi -eq 1 ]] && echo --udhi)) || return 1
+    tpdu=$(printf '%s\n' "$tp_out" | awk -F'\t' '$1=="tpdu"{print $2; exit}')
+    [[ -n "$tpdu" ]] || { printf 'ERROR\tthe TPDU builder returned no TPDU\n' >&2; return 1; }
+    local rp_out; rp_out=$(gatk_rp_data "$tpdu" "$smsc" "tmsi:$tmsi") || return 1
+    cp=$(printf '%s\n' "$rp_out" | awk -F'\t' '$1=="rp_data"{print $2; exit}')
+    cp=$(gatk_cp_data "$cp" | awk -F'\t' '$1=="cp_data"{print $2; exit}')
+    ua_page=$(gatk_rr_paging_response "$tmsi")
+    sabm=$(gatk_lapdm_frame sabm 3 0 | awk -F'\t' '$1=="frame"{print $2; exit}')
+    local ua; ua=$(gatk_lapdm_frame ua 3 1 | awk -F'\t' '$1=="frame"{print $2; exit}')
+    local i1 cp_frames cp_count
+    cp_frames=$(gatk_lapdm_i_segments 3 1 "$cp" 0 0)
+    cp_count=$(printf '%s\n' "$cp_frames" | awk -F'\t' '$1=="segments"{print $2; exit}')
+    i1=$(gatk_lapdm_frame i 3 0 "04" "$cp_count" 0 | awk -F'\t' '$1=="frame"{print $2; exit}')
+    rel=$(gatk_lapdm_frame ui 0 1 "060d" | awk -F'\t' '$1=="frame"{print $2; exit}')
+    printf 'step\t1\n channel\tpch\n direction\tdownlink\n frame_kind\trr-paging-request\n frame\t%s\n note\tpage the TMSI on its paging group\n' \
+        "$(gatk_build_paging_request "$tmsi" | tr -d '\n')"
+    printf 'step\t2\n channel\tsdcch\n direction\tuplink\n frame_kind\trr-paging-response\n frame\t%s\n note\tMS answers on the assigned channel\n' "$ua_page"
+    printf 'step\t3\n channel\tsdcch\n direction\tuplink\n frame_kind\tlapdm-sabm\n frame\t%s\n note\topen SAPI 3 for SMS\n' "$sabm"
+    printf 'step\t4\n channel\tsdcch\n direction\tdownlink\n frame_kind\tlapdm-ua\n frame\t%s\n note\tSAPI 3 link is up\n' "$ua"
+    local seg_i=0 seg_num seg_m seg_frame
+    local seg_rows
+    seg_rows=$(printf '%s\n' "$cp_frames" | awk -F'\t' '
+        $1=="segment" { s=$2; f="" }
+        $1=="more"    { m=$2 }
+        $1=="frame"   { if (s != "") print s "\t" m "\t" $2 }')
+    while IFS=$'\t' read -r seg_num seg_m seg_frame; do
+        [[ -n "$seg_frame" ]] || continue
+        seg_i=$(( seg_i + 1 ))
+        if [[ "$seg_m" == "1" ]]; then
+            printf 'step\t%d\n channel\tsdcch\n direction\tdownlink\n frame_kind\tlapdm-i-ns%s\n frame\t%s\n note\tCP-DATA segment %s, M=1 (RP-DATA around the SMS-DELIVER TPDU)\n' "$((4 + seg_i))" "$seg_num" "$seg_frame" "$seg_num"
+        else
+            printf 'step\t%d\n channel\tsdcch\n direction\tdownlink\n frame_kind\tlapdm-i-ns%s\n frame\t%s\n note\tCP-DATA final segment, M=0 (RP-DATA around the SMS-DELIVER TPDU)\n' "$((4 + seg_i))" "$seg_num" "$seg_frame"
+        fi
+    done <<< "$seg_rows"
+    printf 'step\t%d\n channel\tsdcch\n direction\tuplink\n frame_kind\tlapdm-i-ns%s\n frame\t%s\n note\tCP-ACK in an I-frame, N(S)=%s\n' "$((5 + seg_i))" "$cp_count" "$i1" "$cp_count"
+    printf 'step\t%d\n channel\tsdcch\n direction\tdownlink\n frame_kind\trr-channel-release\n frame\t%s\n note\trelease the link\n' "$((6 + seg_i))" "$rel"
+    printf 'steps\t%d\n' "$(( 6 + seg_i ))"
+    printf 'tpdu\t%s\n' "$tpdu"
+    printf 'rp_data\t%s\n' "$(printf '%s\n' "$rp_out" | awk -F'\t' '$1=="rp_data"{print $2; exit}')"
+    printf 'cp_data\t%s\n' "$cp"
+}
+
 # ══════════════════════════════════════════════════════════════════════
 # TMSI <-> IMSI correlation store
 #
@@ -2911,6 +3220,41 @@ gatk_selftest() {
     chk lapdm-overlong-rc \
         "$(gatk_lapdm_ui 0 1 "$(printf '06%.0s' $(seq 25))" >/dev/null 2>&1; echo $?)" "2"
     chk lapdm-at-n201 "$(gatk_lapdm_ui 0 1 "$(printf '06%.0s' $(seq 20))" 0 20 >/dev/null 2>&1; echo $?)" "0"
+    # ── the SMS-DELIVER exchange ───────────────────────────────────────
+    # 7-bit packing of "HELLO" is checked against the bit-by-bit definition
+    # (septets concatenated LSB-first), and the TPDU fields against 23.040.
+    gatk_gsm7_pack HELLO >/dev/null
+    chk gsm7-septets "$GATK_SEPTETS" "5"
+    chk gsm7-refuses "$(gatk_gsm7_pack 'a€b' >/dev/null 2>&1; echo $?)" "2"
+    local tp tpv
+    tp=$(gatk_tpdu_deliver 33612345678 "HELLO" --scts 26012211223301)
+    tpv=$(fld "$tp" tpdu)
+    chk tpdu-first   "$(fld "$tp" first_octet)" "04"
+    chk tpdu-udl     "$(fld "$tp" udl)" "5"
+    chk tpdu-oa      "$(fld "$tp" oa)" "0b913316325476f8"
+    chk tpdu-len     "$(( ${#tpv} / 2 ))" "$(( 1 + 8 + 1 + 1 + 7 + 1 + 5 ))"
+    chk tpdu-udhi    "$(fld "$(gatk_tpdu_deliver 33612345678 HI --udhi)" first_octet)" "44"
+    local rp; rp=$(gatk_rp_data "$tpv" 33612345678 tmsi:0a1b2c3d)
+    chk rp-mti   "$(printf '%s\n' "$rp" | awk -F'\t' '$1=="rp_data"{print substr($2,1,4); exit}')" "0100"
+    chk rp-oa    "$(fld "$rp" rp_address_originator)" "0b913316325476f8"
+    chk rp-da    "$(fld "$rp" rp_address_destination)" "08f40a1b2c3d"
+    chk rp-ui    "$(fld "$rp" rp_ui_bytes)" "$(( ${#tpv} / 2 ))"
+    local rpdata_bytes; rpdata_bytes=$(fld "$rp" rp_data)
+    local cp; cp=$(gatk_cp_data "$rpdata_bytes" | awk -F'\t' '$1=="cp_data"{print $2; exit}')
+    chk cp-type  "$(printf '%s' "$cp" | cut -c1-2)" "01"
+    chk cp-len   "$(( ${#cp} / 2 ))" "$(( (${#rpdata_bytes} + 2) / 2 ))"
+    chk lapdm-sabm-hex "$(gatk_lapdm_frame sabm 3 0 | awk -F'\t' '$1=="frame"{print $2}')" "193f"
+    chk lapdm-i-ns2   "$(gatk_lapdm_frame i 3 1 0303 2 0 | awk -F'\t' '$1=="frame"{print $2}')" "1b04110303"
+    local segs; segs=$(gatk_lapdm_i_segments 3 1 "$(printf 'AA%.0s' $(seq 45))" 0 0)
+    chk segments-count "$(fld "$segs" segments)" "3"
+    chk segments-m-bit "$(printf '%s\n' "$segs" | awk -F'\t' '$1=="more"{printf "%s", $2}')" "110"
+    local seq; seq=$(gatk_sms_deliver_seq 0a1b2c3d 33612345678 HELLO)
+    chk seq-steps   "$(fld "$seq" steps)" "9"
+    chk seq-paging  "$(printf '%s\n' "$seq" | awk -F'\t' '$1=="step"{n++} END{print n}')" "9"
+    local seqtpv; seqtpv=$(fld "$seq" tpdu)
+    chk seq-tpdu-fo "$(printf '%s' "$seqtpv" | cut -c1-2)" "04"
+    chk seq-tpdu-len "$(( ${#seqtpv} / 2 ))" "24"
+    chk seq-refuses "$(gatk_sms_deliver_seq zz 33612345678 HI >/dev/null 2>&1; echo $?)" "2"
     out=$(gatk_lapdm_burst_plan 030301 0 1 2 3)
     chk lapdm-bursts   "$(fld "$out" bursts)" "4"
     chk lapdm-coded    "$(fld "$out" coded_bits)" "456"
@@ -4340,6 +4684,12 @@ gatk_cli_main() {
         --ccch-conf)           gatk_ccch_conf "${1:-001}" ;;
         --sch-payload)         gatk_sch_payload "${1:-7}" "${2:-1}" "${3:-0}" ;;
         --lapdm-ui)            gatk_lapdm_ui "${1:-0}" "${2:-1}" "${3:-030301}" ;;
+        --tpdu-deliver)        gatk_tpdu_deliver "${1:-}" "${2:-}" "${@:3}" ;;
+        --rp-data)             gatk_rp_data "${1:-}" "${2:-}" "${3:-}" ;;
+        --cp-data)             gatk_cp_data "${1:-}" ;;
+        --lapdm-frame)         gatk_lapdm_frame "${1:-sabm}" "${2:-3}" "${3:-0}" "${4:-}" "${5:-0}" "${6:-0}" ;;
+        --lapdm-i-segments)    gatk_lapdm_i_segments "${1:-3}" "${2:-1}" "${3:-}" "${4:-0}" "${5:-0}" ;;
+        --sms-deliver-seq)     gatk_sms_deliver_seq "${1:-}" "${2:-}" "${3:-}" "${@:4}" ;;
         --burst-layout)        gatk_burst_layout "${1:-normal}" ;;
         --frame-facts)         gatk_frame_facts ;;
         --dummy-burst)         gatk_dummy_burst ;;
@@ -4447,6 +4797,17 @@ Usage: $0 COMMAND
 
   LAPDm (TS 44.006):
   --lapdm-ui [sapi] [cr] [l3-hex] [p] [n201]
+  --tpdu-deliver <oa-digits> <text> [--ud-hex HEX] [--udhi] [--scts HEX14]
+                             build an SMS-DELIVER TPDU (23.040)
+  --rp-data <tpdu-hex> <oa-digits> <da-digits>
+                             wrap a TPDU in RP-DATA (24.011)
+  --cp-data <rp-hex>         wrap RP-DATA in CP-DATA (24.011)
+  --lapdm-frame <kind> <sapi> <cr> [l3-hex] [ns] [nr]
+                             build a SABM/UA/DISC/DM/I/RR/UI frame
+  --sms-deliver-seq <tmsi-hex8> <smsc-digits> <text> [--udhi]
+  --lapdm-i-segments <sapi> <cr> <l3-hex> [ns0] [nr]
+                             split an over-long L3 message across I-frames with M
+                             the whole SMS-DELIVER exchange in frames
                                wrap an L3 message in a LAPDm UI frame
 
   A5/1 and Kc recovery (Briceno/Goldberg/Wagner vector, TS 55.226):
