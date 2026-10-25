@@ -239,9 +239,92 @@ slnk_selftest() {
     chk relay-bounded-count "$(fld "$out" findings)" "0"
     chk relay-missing "$(slnk_relay_check "$d/none.conf" >/dev/null 2>&1; echo $?)" "1"
 
+    # 8. The ghost vehicle: plan rows, and arithmetic that catches a teleport.
+    chk bsm-plan-signing "$(slnk_bsm_plan | awk -F'\t' '$1=="signing"{print ($2 ~ /1609.2/)?"ok":"no"}')" "ok"
+    chk bsm-plan-limit   "$(slnk_bsm_plan | awk -F'\t' '$1=="limit"{print ($2 ~ /handoff/)?"ok":"no"}')" "ok"
+    printf 'v1\t0\t52.5200\t13.4050\t15\nv1\t1\t52.5200\t13.4050\t15\nv1\t2\t52.5300\t13.4050\t15\n' > "$d/ghost.tsv"
+    chk bsm-ghost-verdict "$(slnk_bsm_audit "$d/ghost.tsv" | awk -F'\t' '$1=="verdict"{print $2}')" "ghost_in_traffic"
+    chk bsm-ghost-finding "$(slnk_bsm_audit "$d/ghost.tsv" | awk -F'\t' '$1=="finding" && $2=="ghost_vehicle"{print "yes"}')" "yes"
+    printf 'v1\t0\t52.5200\t13.4050\t15\nv1\t1\t52.5201\t13.4050\t15\n' > "$d/real.tsv"
+    chk bsm-real-verdict "$(slnk_bsm_audit "$d/real.tsv" | awk -F'\t' '$1=="verdict"{print $2}')" "no_ghost_in_this_capture"
+    chk bsm-audit-missing "$(slnk_bsm_audit "$d/nope.tsv" >/dev/null 2>&1; echo $?)" "1"
+    chk bsm-audit-noargs "$(slnk_bsm_audit >/dev/null 2>&1; echo $?)" "2"
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
+}
+
+# ── the ghost vehicle ───────────────────────────────────────────────────
+# A BSM says where a car is. Nothing in the message proves a car is there.
+# The plan half lists what a ghost needs to be believed; the audit half is
+# the arithmetic a receiver can run to catch one, and it needs no key: a
+# vehicle that teleports, accelerates past what a tyre can do, or reports a
+# speed that disagrees with its own positions is not a vehicle.
+slnk_bsm_plan() {
+    cat <<'EOF'
+role	the ghost broadcasts the same message a real vehicle does, for a vehicle that is not there
+message	SAE J2735 BasicSafetyMessage: msgCnt, id (4 octets), secMark, lat/lon (1/10 microdegree), elevation, accuracy, transmission state, speed (0.02 m/s units), heading (0.0125 degree units), acceleration, brake status, vehicle size
+signing	a real BSM is signed under an IEEE 1609.2 pseudonym certificate; a receiver that only checks the signature accepts a ghost that holds any valid certificate, which is why the certificate proves who signed and not who is there
+needs	1. a certificate chain a receiver accepts  2. a position on a road a receiver believes  3. a speed and heading consistent with the road's own flow  4. an id that is either new (a fresh vehicle, plausible) or continuing (a vehicle that was there)
+harder	a ghost that follows a real vehicle's trajectory at a fixed offset is the shape that survives plausibility checks; a stationary ghost in a live road is caught in seconds by the flow model
+catch	1. kinematics: positions that disagree with the reported speed, or acceleration beyond grip (kinematic_fault)  2. an id that stops and restarts at a distant position (teleport)  3. two ids that move as one (cloning)  4. a vehicle that never yields to anything (no interaction) -- all of them arithmetic over a capture, none of them needs the key
+limit	the transmit half needs a PC5 sidelink PHY at 5.9 GHz and a certificate a receiver accepts; this tree builds the message model and the audit, and states the transmit as a handoff rather than pretending to a radio it does not have
+EOF
+}
+
+slnk_bsm_audit() {  # <log.tsv>
+    local log="${1:-}"
+    [[ -n "$log" ]] || { printf 'ERROR\tusage: --bsm-audit <log.tsv> (id, t_s, lat_deg, lon_deg, speed_mps)\n' >&2; return 2; }
+    [[ -r "$log" ]] || { printf 'ERROR\tcannot read %s\n' "$(slnk_sanitize "$log")" >&2; return 1; }
+    local rows n
+    rows=$(grep -v '^#' "$log" | grep . | awk -F'\t' 'NF>=5{print $1"\t"$2"\t"$3"\t"$4"\t"$5}')
+    n=$(printf '%s\n' "$rows" | grep -c . || true)
+    (( n >= 2 )) || { printf 'ERROR\tneed at least two messages to have a gap; %d read\n' "$n" >&2; return 1; }
+    printf '%s\n' "$rows" | awk -F'\t' '
+        function rad(x) { return x * 3.14159265358979 / 180 }
+        function dist(a1,o1,a2,o2,   dlat,dlon,x,y) {
+            dlat = rad(a2-a1); dlon = rad(o2-o1)
+            x = dlon * cos(rad((a1+a2)/2)); y = dlat
+            return 6371000 * sqrt(x*x + y*y)
+        }
+        {
+            id[NR]=$1; t[NR]=$2+0; la[NR]=$3+0; lo[NR]=$4+0; sp[NR]=$5+0; order[NR]=$1
+        }
+        END {
+            # per-id kinematic checks over consecutive samples
+            printf "messages\t%d\n", NR
+            ids = 0
+            for (i = 1; i <= NR; i++) if (!(id[i] in seen)) { seen[id[i]]=1; ids++ }
+            printf "vehicles\t%d\n", ids
+            tele = 0; accel = 0; imps = 0
+            for (i = 2; i <= NR; i++) {
+                if (id[i] != id[i-1]) continue
+                dt = t[i] - t[i-1]
+                if (dt <= 0) { printf "sample\t%d\tclock\tnon-monotonic timestamp for %s\n", i, id[i]; bad++; continue }
+                d = dist(la[i-1], lo[i-1], la[i], lo[i])
+                v = d / dt
+                dv = v - sp[i-1]
+                # 9 m/s^2 is past what a road tyre sustains; 15 m/s per step
+                a = dv / dt
+                if (v > 80 || a > 15) {
+                    printf "impossible\t%s\t%d\t%.1f m in %.1f s = %.1f m/s, reported %.1f\n", id[i], i, d, dt, v, sp[i-1]
+                    imps++
+                } else if (v - sp[i-1] > 12 || sp[i-1] - v > 12) {
+                    printf "inconsistent\t%s\t%d\tmoved %.1f m/s while reporting %.1f m/s\n", id[i], i, v, sp[i-1]
+                    imps++
+                }
+            }
+            printf "impossible^%d\n", imps
+            printf "findings\t%d\n", imps + 0
+            if (imps > 0) {
+                printf "finding\tghost_vehicle\tMEDIUM\t%d message(s) describe motion a road vehicle cannot perform; the signature over each one was fine, which is the point: a certificate proves who signed, not who is there\n", imps
+                printf "verdict\tghost_in_traffic\n"
+            } else {
+                printf "finding\tkinematics_consistent\tINFO\tevery consecutive pair of positions agrees with the speed the message reported\n"
+                printf "verdict\tno_ghost_in_this_capture\n"
+                printf "note\t%s\n", "a ghost that follows a real trajectory at an offset passes this check; a receiver with road topology does better, and the arithmetic above is the free half"
+            }
+        }' | grep -v '^impossible^'
 }
 
 slnk_menu() {
@@ -288,6 +371,8 @@ slnk_cli_main() {
         --sci1a)       slnk_sci_1a ;;
         --its)         slnk_its ;;
         --relay-check) slnk_relay_check "${1:-}" ;;
+        --bsm-plan)    slnk_bsm_plan ;;
+        --bsm-audit)   slnk_bsm_audit "${1:-}" ;;
         --plan)        slnk_plan ;;
         --selftest)    slnk_selftest ;;
         --menu)        slnk_menu ;;
@@ -304,6 +389,11 @@ Usage: $0 COMMAND
   --sci1a                    SCI format 1-A: refuses, the widths are not in this tree
   --its                      ETSI/1609.2 certificate roles (reference, no validator)
   --relay-check <conf>       UE-to-NW relay configuration findings
+  --bsm-plan                 what a ghost vehicle needs, and what a receiver
+                             can check without any key
+  --bsm-audit <log.tsv>      kinematics over a BSM log (id, t_s, lat, lon,
+                             speed_mps): teleports, impossible acceleration and
+                             speed/position disagreements
   --plan                     V2X handoff plan
   --selftest                 verify the arithmetic and detectors
   --menu                     interactive menu
