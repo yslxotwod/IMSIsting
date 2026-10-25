@@ -277,6 +277,75 @@ gprs_pdp_type_ie() {
 # the offered set: a network that picks an un-offered GEA is either breaking
 # TS 43.020 §D.4.8 or forcing a downgrade. Exit 1 when the selection is
 # inconsistent; the caller decides what to do with the finding.
+# ── R67: what GEA1/GEA2 recovery costs, since the taps are not here ─────
+# The queue row asked for the GEA1 and GEA2 tap sets. They are not on this host
+# and 3GPP never published them: they were recovered from the standard by
+# Beierle et al. (EUROCRYPT 2021) and the attack was refined by Amzaleg and Dinur
+# (IACR ePrint 2022/424). Transcribing taps from memory would be an unproven
+# guess dressed as an implementation, which is exactly what MODULE_CONVENTIONS
+# refuses. What can be computed honestly is the cost the literature states, in
+# the units an operator cares about: how many ciphertext octets are needed, how
+# many guesses, and how long a laptop or a room of cores takes. Every number is
+# labelled as published or as this module's arithmetic, and none of it is a
+# keystream.
+gprs_gea_recovery() {
+    local algo=1 cores="${GPRS_CORES:-8}" speed="${GPRS_GUESSES_PER_CORE:-1000000}"
+    while (( $# )); do
+        case "$1" in
+            --algo)  algo="${2:-1}";  shift 2 || { gprs_gea_recovery_usage; return 2; } ;;
+            --cores) cores="${2:-8}"; shift 2 || { gprs_gea_recovery_usage; return 2; } ;;
+            --speed) speed="${2:-1000000}"; shift 2 || { gprs_gea_recovery_usage; return 2; } ;;
+            *) gprs_gea_recovery_usage; return 2 ;;
+        esac
+    done
+    [[ "$algo" == 1 || "$algo" == 2 ]] || {
+        printf 'ERROR\t--algo is 1 or 2: those are the two GEAs with a published recovery\n' >&2
+        printf 'WHY\tGEA3 and GEA4 are computed here (tools/gsm_gea.py, published vectors); GEA5 is licence-gated; GEA0 is the identity\n' >&2
+        return 2; }
+    [[ "$cores" =~ ^[1-9][0-9]*$ ]] || { printf 'ERROR\t--cores is a positive count\n' >&2; return 2; }
+    [[ "$speed" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'ERROR\t--speed is guesses per second per core, a positive whole number\n' >&2; return 2; }
+
+    local bits=40 attack="2^40 (Beierle et al., EUROCRYPT 2021)" status
+    if [[ "$algo" == 2 ]]; then
+        bits=45; attack="2^45 (same paper)"
+    fi
+    status='prohibited in mobile stations (TS 43.020 §D.4.9)'
+    [[ "$algo" == 2 ]] && status='removed 2021-06 "due to security" and prohibited in mobile stations (TS 43.020 §D.4.9)'
+    printf 'algo\tGEA%s\n' "$algo"
+    printf 'spec_status\t%s\n' "$status"
+    printf 'algorithm_published_by_3gpp\tno — never; recovered from the standard in the cryptanalysis literature\n'
+    printf 'keystream_bits_needed\t65\n'
+    printf 'ciphertext_octets_needed\t9\n'
+    printf 'why_65\tone 32-bit LLC input plus the 33 keystream bits around it is the published distinguisher; nine octets of one LLC frame carry it\n'
+    printf 'complexity\t%s\n' "$attack"
+    printf 'grid_definition\tone LLC frame ciphertext of 9+ octets under one Kc, in either direction; output is the Kc\n'
+    printf 'cores\t%s\n' "$cores"
+    printf 'speed_per_core\t%s guesses/s (an assumption of this module, not a measurement)\n' "$speed"
+    printf 'guesses\t%s\n' "$(awk -v b="$bits" 'BEGIN{printf "%.6g", 2^b}')"
+    printf 'wall_seconds\t%s\n' "$(awk -v b="$bits" -v c="$cores" -v s="$speed" 'BEGIN{printf "%.0f", (2^b)/(c*s)}')"
+    printf 'wall_hours\t%s\n' "$(awk -v b="$bits" -v c="$cores" -v s="$speed" 'BEGIN{printf "%.2f", (2^b)/(c*s)/3600}')"
+    printf 'wall_days\t%s\n' "$(awk -v b="$bits" -v c="$cores" -v s="$speed" 'BEGIN{printf "%.2f", (2^b)/(c*s)/86400}')"
+    printf 'memory_gib_before\t44\n'
+    printf 'memory_gib_after\t4\n'
+    printf 'memory_note\tePrint 2022/424 cut the published memory from 44 GiB to about 4 MiB with a different tradeoff; the second refinement is why "hours on a laptop" is in the paper\n'
+    printf 'direction\tonline capture, offline computation: nothing is transmitted to recover the key\n'
+    printf 'feed_signal\tan LLC frame that is ciphered under the Kc of interest, and either the plaintext structure or enough frames to test candidates\n'
+    printf 'detect\tthere is no on-air signature: the frames are legal, the ciphertext is what an ordinary subscriber produces\n'
+    printf 'verdict\tgea'"$algo"'_recovery_cost_computed\n'
+    printf 'ref\tBeierle, Derbez, Leander, Neumann, Rasool, GEA-1 and GEA-2: an analysis (EUROCRYPT 2021); Amzaleg and Dinur, IACR ePrint 2022/424; TS 43.020 §D.4.9\n'
+    printf 'limit\tthis is the published cost model, not an implementation: the recovered tap sets are not in this tree, so no keystream is computed and no Kc is claimed; --gea-crypt still answers 3 for GEA1/GEA2\n'
+    return 0
+}
+
+gprs_gea_recovery_usage() {
+    cat >&2 <<'EOF'
+USAGE	--gea-recovery [--algo 1|2] [--cores N] [--speed GUESSES_PER_CORE]
+EOF
+    return 2
+}
+
+
 gprs_gea_downgrade() {
     local offered="${1:-}" selected="${2:-}"
     [[ -n "$offered" && "$selected" =~ ^[0-5]$ ]] || { printf 'ERROR\tusage: --gea-downgrade <offered,csv> <selected 0-5>\n' >&2; return 2; }
@@ -410,6 +479,25 @@ gprs_selftest() {
     chk gea1-refused "$(gprs_gea_crypt 1 0000000000000000 00000000 ab >/dev/null 2>&1; echo $?)" "3"
     chk gea4-key-length "$(gprs_gea_crypt 4 0000000000000000 00000000 ab >/dev/null 2>&1; echo $?)" "2"
 
+    # 5c. GEA1/GEA2 cost model: the published numbers, and the refusal to invent
+    #     a keystream from taps this tree does not have.
+    local rec1 rec2
+    rec1=$(gprs_gea_recovery --algo 1 --cores 1 --speed 1000000)
+    chk rec1-complexity "$(fld "$rec1" complexity | grep -c '2\^40')" "1"
+    chk rec1-bits "$(fld "$rec1" keystream_bits_needed)" "65"
+    chk rec1-octets "$(fld "$rec1" ciphertext_octets_needed)" "9"
+    chk rec1-verdict "$(fld "$rec1" verdict)" "gea1_recovery_cost_computed"
+    chk rec1-memory "$(fld "$rec1" memory_gib_before)" "44"
+    chk rec1-hours "$(awk -F'\t' '$1=="wall_hours"{print ($2>1)?"plausible":"no"}' <<<"$rec1")" "plausible"
+    rec2=$(gprs_gea_recovery --algo 2)
+    chk rec2-complexity "$(fld "$rec2" complexity | grep -c '2\^45')" "1"
+    chk rec2-verdict "$(fld "$rec2" verdict)" "gea2_recovery_cost_computed"
+    chk rec1-no-keystream "$(grep -c '^gamma' <<<"$rec1")" "0"
+    chk rec-not-published "$(fld "$rec1" algorithm_published_by_3gpp | grep -c '^no')" "1"
+    chk rec-algo3 "$(gprs_gea_recovery --algo 3 >/dev/null 2>&1; echo $?)" "2"
+    chk rec-cores0 "$(gprs_gea_recovery --cores 0 >/dev/null 2>&1; echo $?)" "2"
+    chk rec-ref "$(fld "$rec1" ref | grep -c '2022/424')" "1"
+
     # 6. Downgrade detector — the selection must be one the MS offered.
     chk gea-downgrade0 "$(fld "$(gprs_gea_downgrade 1,2,3 0)" verdict)" "DOWNGRADE — the network selected GEA0; user data is unprotected"
     chk gea-weaker "$(gprs_gea_downgrade 1,2,3 2 | awk -F'\t' '$1=="verdict"{print ($2 ~ /WEAKER/)?"weaker":"ok"}')" "weaker"
@@ -472,6 +560,7 @@ gprs_cli_main() {
         --gea-crypt)    gprs_gea_crypt "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-0}" ;;
         --gea-kat)      gprs_gea_kat ;;
         --gea-downgrade) gprs_gea_downgrade "${1:-}" "${2:-}" ;;
+        --gea-recovery)  gprs_gea_recovery "$@" ;;
         --plan)         gprs_plan ;;
         --selftest)     gprs_selftest ;;
         --menu)         gprs_menu ;;
@@ -491,6 +580,8 @@ Usage: $0 COMMAND
   --apn-ie <apn>               APN IE (TS 24.008 §10.5.6.1, IEI 28)
   --pdp-ie <type_hex> [<addr_hex>]  requested PDP address IE (TS 24.008 §10.5.6.4)
   --gea-downgrade <csv> <n>    offered vs selected GEA (exit 1 if not offered)
+  --gea-recovery [--algo 1|2] [--cores N] [--speed G/s]
+                               the published cost of recovering GEA1/GEA2 (no keystream)
   --plan                       Gb/Gn lab handoff plan
   --selftest                   known-answer tests for every computation
   --menu                       interactive menu
