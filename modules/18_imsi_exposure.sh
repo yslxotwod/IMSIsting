@@ -748,6 +748,98 @@ imsi_marlin() {
         }' "$file" | sort
 }
 
+# ── eSIM device-profile linkability (Di5Guise) ──────────────────────────
+# Rotating the MNO profile is the privacy advice for an eSIM: a new IMSI, a
+# new ICCID, a new subscription. What rotation does not replace is the eUICC
+# itself. Every eUICC carries a Device Profile provisioned at manufacture --
+# a secret key, a certificate and the unique EID -- and that profile
+# authenticates the hardware to the SM-DP+/SM-DS on ES9+ and to the eIM on
+# ES2+ whatever MNO profile happens to be enabled at the time. An operator,
+# or anyone who sits where the provisioning traffic and the RAN both reach,
+# therefore has one key that folds every rotated identity back onto one
+# handset.
+#
+# This verb is the correlation oracle the tree was missing: it reads records
+# from a provisioning sequence (whatever a caller extracted from ES9+/ES2+/
+# ES10c logs, and the identity store this module already keeps) and scores how
+# much of a rotation survives the correlation. The decoupled variant is scored
+# separately, because that is the only published measurement of whether the
+# advice works (re-identification 93% -> 49% with a decoupled device profile
+# and traffic obfuscation; the number is cited, not measured here).
+imsi_device_link() {   # <records.tsv> [--eid-col N] [--imsi-col N]
+    local file="${1:-}"
+    [[ -n "$file" ]] || {
+        printf 'ERROR\tusage: --device-link <records.tsv> [--eid-col N] [--imsi-col N]\n' >&2
+        printf 'WHY\tcolumns: event_type, eid, iccid, imsi, t (seconds); the EID is the device anchor and the IMSI is the identity that rotates\n' >&2
+        return 2; }
+    [[ -r "$file" ]] || { printf 'ERROR\tcannot read %s\n' "$(imsi_sanitize "$file")" >&2; return 1; }
+    shift
+    local eid_col=2 imsi_col=4
+    while (($#)); do
+        case "$1" in
+            --eid-col)  eid_col="${2:-2}"; shift 2 ;;
+            --imsi-col) imsi_col="${2:-4}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(imsi_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    awk -F'\t' -v ec="$eid_col" -v ic="$imsi_col" '
+        NR==1 && $1 ~ /^[A-Za-z_]/ { next }
+        NF < 4 { next }
+        {
+            e = $(ec); i = $(ic)
+            if (e == "" || i == "") next
+            if (!((i SUBSEP e) in seen)) { seen[i SUBSEP e] = 1; ecount[i]++ }
+            eids[e] = 1
+            ids[i] = 1
+            if (!(i in first_eid)) { first_eid[i] = e; order[++n] = i }
+            else if (first_eid[i] != e) { multi[i] = 1 }
+            pairs++
+            # a rotation is the same EID carrying a second identity
+            if (!(e in count)) { count[e] = 0 }
+        }
+        END {
+            ne = 0; for (x in eids) ne++
+            ni = 0; for (x in ids) ni++
+            multi_n = 0
+            for (x in multi) multi_n++
+            # identities that land on an EID that already carried another
+            # identity: that is re-identification through the device profile
+            linked = 0
+            for (x in ids) if (multi_n > 0 && (x in multi)) linked++
+            # per-EID identity counts: max is the rotation depth observed
+            delete cnt
+            for (k in seen) { split(k, parts, SUBSEP); cnt[parts[2]]++ }
+            maxrot = 0; rot_eids = 0
+            for (e in cnt) { if (cnt[e] > 1) rot_eids++; if (cnt[e] > maxrot) maxrot = cnt[e] }
+            printf "records\t%d\n", pairs
+            printf "devices\t%d\n", ne
+            printf "identities\t%d\n", ni
+            printf "identities_per_device\t%.2f\n", (ne ? ni / ne : 0)
+            printf "devices_with_more_than_one_identity\t%d\n", rot_eids
+            printf "rotation_depth_max\t%d\n", maxrot
+            # an identity is re-identified when the device it landed on already
+            # carried a different identity: the EID is what joined them
+            relinked = 0; shared = 0
+            for (x in ids) if (ecount[x] > 1) shared++
+            for (k in seen) {
+                split(k, parts, SUBSEP)
+                if (cnt[parts[2]] > 1) relinked++
+            }
+            printf "identities_on_a_device_with_another_identity\t%d\n", relinked
+            printf "identities_seen_on_more_than_one_device\t%d\n", shared
+            printf "reidentification_rate\t%.4f\n", (ni ? relinked / ni : 0)
+            if (rot_eids > 0)
+                printf "finding\tdevice_profile_is_an_anchor\tHIGH\tthe EID survives the profile rotation: %d of %d device(s) carried more than one identity, and every identity lands on a device that is already known\n", rot_eids, ne
+            else
+                printf "finding\tno_rotation_in_this_file\tINFO\tevery device carried one identity, so this file cannot show whether rotation unlinks\n"
+            printf "decoupled_baseline\tpublished\tre-identification 93%% falls to 49%% when the device profile is decoupled from the MNO profile and the provisioning traffic is obfuscated (the number is cited from the published evaluation; nothing here measured it)\n"
+            printf "verdict\t%s\n", (rot_eids > 0 ? "identities_relink_to_one_device" : "no_relink_evidence")
+        }' "$file"
+    printf 'ref\tGSMA SGP.22 (ES9+/ES2+/ES10c), the EID as the eUICC identifier; Di5Guise published evaluation for the decoupled variant\n'
+    printf 'limit\tthe EID anchor is only as good as the records: a file without EIDs scores nothing, and a file with one identity per device cannot show rotation\n'
+    printf 'advice\trotating the MNO profile changes the identity, not the device: unlinkability needs the device profile decoupled, which is a different provisioning decision\n'
+}
+
 imsi_selftest() {
     local bad=0
     chk() {
@@ -1059,6 +1151,35 @@ imsi_selftest() {
     chk marlin-missing "$(imsi_marlin "$d/none.tsv" >/dev/null 2>&1; echo $?)" "1"
 
     rm -rf "$d"
+    # ── device-profile linkability: rotation does not replace the eUICC ──
+    local dl dld
+    dl=$(mktemp -d)
+    printf 'event\teid\ticcid\timsi\tt\nes9+\tAAAA\t8901\t310150000000001\t100\nactivation\tAAAA\t8901\t310150000000001\t200\nes9+\tAAAA\t8902\t310150000000002\t900\nactivation\tAAAA\t8902\t310150000000002\t1000\nes9+\tBBBB\t8903\t310150000000003\t300\n' > "$dl/rot.tsv"
+    dld=$(imsi_device_link "$dl/rot.tsv" 2>/dev/null)
+    chk dlink-devices   "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="devices"{print $2}')" "2"
+    chk dlink-ids       "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="identities"{print $2}')" "3"
+    chk dlink-rot       "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="devices_with_more_than_one_identity"{print $2}')" "1"
+    chk dlink-depth     "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="rotation_depth_max"{print $2}')" "2"
+    chk dlink-relinked  "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="identities_on_a_device_with_another_identity"{print $2}')" "2"
+    chk dlink-rate      "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="reidentification_rate"{print $2}')" "0.6667"
+    chk dlink-perdev    "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="identities_per_device"{print $2}')" "1.50"
+    chk dlink-finding   "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="finding"{print $2}')" "device_profile_is_an_anchor"
+    chk dlink-sev       "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="finding"{print $3}')" "HIGH"
+    chk dlink-verdict   "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="verdict"{print $2}')" "identities_relink_to_one_device"
+    chk dlink-baseline  "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="decoupled_baseline" && $3 ~ /93%/ && $3 ~ /49%/{print "cited"}')" "cited"
+    chk dlink-advice    "$(printf '%s\n' "$dld" | awk -F'\t' '$1=="advice" && $2 ~ /decoupled/{print "stated"}')" "stated"
+    # one identity per device: the file cannot show rotation, and says so
+    printf 'event\teid\ticcid\timsi\nes9+\tAAAA\t8901\t310150000000001\nes9+\tBBBB\t8902\t310150000000002\n' > "$dl/flat.tsv"
+    chk dlink-flat      "$(imsi_device_link "$dl/flat.tsv" | awk -F'\t' '$1=="verdict"{print $2}')" "no_relink_evidence"
+    chk dlink-flat-note "$(imsi_device_link "$dl/flat.tsv" | awk -F'\t' '$1=="finding" && $2 ~ /no_rotation/{print "noted"}')" "noted"
+    # a shared identity across two EIDs is the opposite failure: one SIM cloned
+    # across devices, which the same rows have to be able to report
+    printf 'event\teid\ticcid\timsi\nes9+\tAAAA\t8901\t310150000000001\nes9+\tBBBB\t8902\t310150000000001\n' > "$dl/shared.tsv"
+    chk dlink-shared    "$(imsi_device_link "$dl/shared.tsv" | awk -F'\t' '$1=="identities_seen_on_more_than_one_device"{print $2}')" "1"
+    chk dlink-noargs    "$(imsi_device_link >/dev/null 2>&1; echo $?)" "2"
+    chk dlink-nofile    "$(imsi_device_link "$dl/none.tsv" >/dev/null 2>&1; echo $?)" "1"
+    rm -rf "$dl"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1124,6 +1245,7 @@ imsi_cli_main() {
         --map)             imsi_cmd_map "${1:-}" ;;
         --subscribers-tsv) imsi_cmd_subscribers_tsv ;;
         --exposure-tsv)    imsi_cmd_exposure_tsv ;;
+        --device-link) imsi_device_link "$@" ;;
         --cross)           imsi_cmd_cross ;;
         --marlin)          imsi_marlin "${1:-}" ;;
         --marlin-msgs)     imsi_exposing_msgs ;;

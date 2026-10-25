@@ -50,6 +50,10 @@
    nothing from AppState but the root it reads loot/map/layers under. */
 #include "map_page.h"
 #include "stats_chart.h"
+/* The target panel's posture chips. Its own translation unit: it reads the
+   stores a handful of modules write and knows nothing about the rest of the
+   interface, which is what lets its rules be tested without a display. */
+#include "target_posture.h"
 
 /* The generated module index. tools/gen-module-index.sh rewrites this file;
    it is included rather than linked so the GUI always agrees with the tree. */
@@ -555,7 +559,13 @@ struct _AppState {
        panel means. */
     GtkWidget *rtarget_mark, *rtarget_mark_rat, *rtarget_mark_gen;
     GtkWidget *rtarget_mark_rat_owner;
+    /* The padlock beside the mark: the cipher that protects the cell, as a
+       glyph and as the word the cell survey wrote down. */
     GtkWidget *rtarget_mark_lock, *rtarget_mark_lock_lbl;
+    /* The posture chips: one row per dimension, each a fact some module wrote
+       down about this cell. The widget owns its own data and its own rules
+       (see native/src/target_posture.c); the panel only tells it what to read. */
+    GtkWidget *rtarget_posture;
     GtkWidget *rtarget_id_plmn, *rtarget_id_cell, *rtarget_id_chan, *rtarget_id_band;
     GtkWidget *rtarget_sig_now, *rtarget_sig_range, *rtarget_sig_state;
     GtkWidget *rtarget_spark_area;
@@ -2491,6 +2501,7 @@ static const char *const plain_keys[] = {
     "activation_time\twhen the algorithms this message names actually take effect",
     "additional_status_info_text\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "advance\tthe counter moved forward",
+    "advice\twhat the scoring says a rotation does and does not achieve",
     "alert_on_message_delivery\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "algorithm_published_by_3gpp\twhether 3GPP ever published an algorithm, answered separately from whether this tree implements it",
     "all_nodes\tevery radio node at once",
@@ -2583,6 +2594,7 @@ static const char *const plain_keys[] = {
     "days_left\tdays until the certificate expires",
     "decision\twhat the network does with the token: accept and re-authenticate, or refuse",
     "decode_ok\tdid this tree read the bytes it just built",
+    "decoupled_baseline\tthe published measurement for the variant where the device profile is decoupled, cited rather than measured here",
     "default_port\twhat SMPP over TLS changes, or does not",
     "delivery_failure_reason\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "delta\thow far the counter moved",
@@ -2596,6 +2608,8 @@ static const char *const plain_keys[] = {
     "detect\thow the far side would notice",
     "detect_at_nrf\twhat the directory can refuse up front",
     "device_effect\twhat the modem does with the class of AT command the card asked for",
+    "device_profile_is_an_anchor\tthe eUICC identifier survived the profile rotation and joins the identities back together",
+    "devices_with_more_than_one_identity\thow many eUICCs carried more than one subscription identity in the records read",
     "display_time\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "dns\tname resolution reaches this network",
     "dns_leak\twhat the lookup itself gives away",
@@ -2647,6 +2661,9 @@ static const char *const plain_keys[] = {
     "host\tthe name or address being talked to",
     "hss_air_per_sec\thow many lookups the home subscriber server answers",
     "hyperbola\ta time difference of arrival between two cells, which is a curve and not a radius",
+    "identities_on_a_device_with_another_identity\thow many identities landed on a device that already carried a different one",
+    "identities_per_device\taverage number of identities per eUICC",
+    "identities_seen_on_more_than_one_device\thow many identities were seen on more than one eUICC, which is a shared profile rather than a rotation",
     "identity_value\tthe identity a paging occasion was computed from, read as an integer",
     "ie_bodies\twhere the RANAP information element bodies come from",
     "ies\thow many information elements were placed or walked",
@@ -2720,6 +2737,7 @@ static const char *const plain_keys[] = {
     "no_rate_limit\tnothing counts the requests",
     "no_recheck\ta grant that is never asked again",
     "no_reuse_in_this_pair\tthe two calls were given different keys",
+    "no_rotation_in_this_file\tevery device in the records carried one identity, so rotation cannot be scored from it",
     "not_after\texpiry date of the certificate",
     "not_before\tissue date of the certificate",
     "not_public\tthe parts of the algorithm and the vectors that the 3GPP licence keeps out of the public catalogue",
@@ -2789,14 +2807,15 @@ static const char *const plain_keys[] = {
     "provenance\twhere the anchor frequency came from",
     "pseudonym_reuse\tone temporary name used like a permanent one",
     "public\tthe parts of GEA5 anybody can read: that it exists, its key size, its input width and its family",
+    "published\tthe number came from a published evaluation rather than from anything measured here",
     "push_inventory\ta map that keeps itself current",
     "qos_time_to_live\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "quiet_shift\ta small move with a large effect",
-    "ranap_pdu_built\ta RANAP PDU was composed and it reads back",
-    "ranap_pdu_parsed\ta RANAP PDU was decoded from octets",
     "realm\tthe domain suffix that routes the identity",
     "realm_routing\twhere the suffix sends the request",
     "reassembly\tputting the pieces back together",
+    "ranap_pdu_built\ta RANAP PDU was composed and it reads back",
+    "ranap_pdu_parsed\ta RANAP PDU was decoded from octets",
     "raster_position_computed\tthe 100 kHz raster position was computed from a supplied anchor",
     "reachability\twhen a device on this level can be reached",
     "receipted_message_id\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
@@ -2808,11 +2827,13 @@ static const char *const plain_keys[] = {
     "refuses\trefuses",
     "region\tregulator whose rules a band falls under",
     "registration\tthe profile an NF puts into the directory",
+    "reidentification_rate\tshare of identities that the device anchor folds back onto a device already known",
     "repetitions\trepetitions per message at this level",
     "requester\twho is asking",
     "reset_model\twhat an RNC restart does to the counters and therefore to the keystream",
     "reuse\tthe same counter value twice",
     "reveals\twhat a number gives away",
+    "rotation_depth_max\tthe largest number of identities one eUICC carried",
     "rrc_type\twhich RRC message the bits are, when the verb builds a message and not a bare IE",
     "rtt_chips\tthe round trip time a Node B measured, in chips",
     "rtt_m\tthat round trip converted to metres",
@@ -7081,6 +7102,7 @@ static const ChipRow chip_rows[] = {
     { "18_imsi_exposure",    "--audit",               NEED_CAP, DOES_READS },
     { "18_imsi_exposure",    "--clear",               NEED_CAP, DOES_READS },
     { "18_imsi_exposure",    "--cross",               NEED_CAP, DOES_BUILDS },
+    { "18_imsi_exposure",    "--device-link",        NEED_NO, DOES_READS },
     { "18_imsi_exposure",    "--exposure-tsv",        NEED_CAP, DOES_READS },
     { "18_imsi_exposure",    "--harvest",             NEED_CAP, DOES_BUILDS },
     { "18_imsi_exposure",    "--help",                NEED_NO, DOES_READS },
@@ -7549,9 +7571,9 @@ static const ChipRow chip_rows[] = {
     { "37_femtocell",        "--__index_probe__",     NEED_NO, DOES_READS },
     { "37_femtocell",        "--apply",               NEED_NO, DOES_READS },
     { "37_femtocell",        "--attack-surface",      NEED_NO, DOES_READS },
-    { "37_femtocell",    "--ranap-ie",            NEED_NO, DOES_READS },
-    { "37_femtocell",    "--ranap-parse",         NEED_NO, DOES_READS },
-    { "37_femtocell",    "--ranap-build",         NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--ranap-ie",           NEED_NO, DOES_READS },
+    { "37_femtocell",        "--ranap-parse",        NEED_NO, DOES_READS },
+    { "37_femtocell",        "--ranap-build",        NEED_NO, DOES_BUILDS },
     { "37_femtocell",        "--cert-audit",          NEED_NO, DOES_READS },
     { "37_femtocell",        "--cell-profile",        NEED_NO, DOES_BUILDS },
     { "37_femtocell",        "--csg-decode",          NEED_NO, DOES_READS },
@@ -7941,8 +7963,8 @@ static const ChipRow chip_rows[] = {
     { "51_sidelink",        "--bsm-audit",           NEED_NO, DOES_READS },
     { "52_stk",              "--__index_probe__",     NEED_NO, DOES_READS },
     { "52_stk",              "--audit",               NEED_SIM, DOES_READS },
-    { "52_stk",          "--run-at-audit",        NEED_NO, DOES_READS },
-    { "52_stk",          "--run-at-build",        NEED_NO, DOES_BUILDS },
+    { "52_stk",              "--run-at-audit",       NEED_NO, DOES_READS },
+    { "52_stk",              "--run-at-build",       NEED_NO, DOES_BUILDS },
     { "52_stk",              "--build",               NEED_NO, DOES_READS },
     { "52_stk",              "--cmd",                 NEED_SIM, DOES_READS },
     { "52_stk",              "--device",              NEED_SIM, DOES_READS },
@@ -18583,6 +18605,12 @@ rtarget_panel_refresh(AppState *state)
     /* ---- Context ---- */
     rtarget_put(state->rtarget_held, first);
     rtarget_put(state->rtarget_seen, last);
+
+    /* ---- Posture ----
+       Last, because it reads what the stores say about the cell the rows above
+       just described. It is handed the identity, not the widgets: the question
+       is "what is wrong here", and the answer comes from disk. */
+    target_posture_refresh(state->rtarget_posture, plmn, cell, chan);
 }
 
 static GtkWidget *
@@ -18592,6 +18620,7 @@ build_target_panel(AppState *state)
     GtkWidget *panel    = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
     GtkWidget *title    = gtk_label_new("TARGET");
     GtkWidget *id_body  = NULL, *live_body = NULL, *ctx_body = NULL;
+    GtkWidget *post_body = NULL;
     GtkWidget *mark_row, *mark_text, *mark_icon;
     GtkWidget *apply    = gtk_button_new_with_label("Apply the profile");
     GtkWidget *clear    = gtk_button_new_with_label("Clear what is stored");
@@ -18656,6 +18685,20 @@ build_target_panel(AppState *state)
         state->rtarget_id_cell = rtarget_kv(id_body, "Cell");
         state->rtarget_id_chan = rtarget_kv(id_body, "Channel");
         state->rtarget_id_band = rtarget_kv(id_body, "Band");
+        gtk_box_append(GTK_BOX(panel), zone);
+    }
+
+    /* ---- Posture ----
+       What is wrong with the cell, in the shortest form that is still true:
+       one chip per dimension, tinted by how bad the finding is, over the one
+       sentence that names the worst of them. Every chip comes from a store a
+       module already wrote; nothing here probes, and a dimension nobody has
+       observed stays grey rather than turning green. */
+    {
+        GtkWidget *zone = rtarget_zone("POSTURE", &post_body);
+
+        state->rtarget_posture = target_posture_new(IMSISTING_ROOT);
+        gtk_box_append(GTK_BOX(post_body), state->rtarget_posture);
         gtk_box_append(GTK_BOX(panel), zone);
     }
 
@@ -20469,6 +20512,11 @@ main(int argc, char **argv)
                clamps, and the zoom floor. None of that needs a display, and a
                direction bug is the one a screenshot cannot show. */
             bad += map_page_selftest ();
+
+            /* The posture chips check their own reading rules here: the cipher
+               vocabulary, the newest-row-wins grouping, and that an algorithm
+               the toolkit cannot place never comes out strong. */
+            bad += target_posture_selftest ();
 
             printf("RESULT\t%s\n", bad == 0 ? "PASS" : "FAIL");
             return bad == 0 ? 0 : 1;
