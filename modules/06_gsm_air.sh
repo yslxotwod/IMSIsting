@@ -263,12 +263,12 @@ gair_bcd_digits() {
 #   octet3 (bits 56..63) = MNC digit2 | MNC digit1
 # A 2-digit MNC sets MNC digit3 = 1111 (filler).
 gair_decode_lai() {
-    local hex="$1"
+    local hex="$1" off="${2:-40}"
     local mcc mnc
     local o1 o2 o3
-    o1=$(( 2#$(gair_bits "$hex" 40 8) )) || return 1
-    o2=$(( 2#$(gair_bits "$hex" 48 8) )) || return 1
-    o3=$(( 2#$(gair_bits "$hex" 56 8) )) || return 1
+    o1=$(( 2#$(gair_bits "$hex" "$off" 8) )) || return 1
+    o2=$(( 2#$(gair_bits "$hex" $(( off + 8 )) 8) )) || return 1
+    o3=$(( 2#$(gair_bits "$hex" $(( off + 16 )) 8) )) || return 1
 
     # TS 23.003 2.2 / TS 24.008 10.5.1.3: the digits are packed two per octet
     # with the earlier digit in the LOW nibble:
@@ -285,7 +285,7 @@ gair_decode_lai() {
     if (( mnc3 == 15 )); then mnc="${mnc1}${mnc2}"; else mnc="${mnc1}${mnc2}${mnc3}"; fi
 
     local lac
-    lac=$(gair_field "$hex" 64 16) || return 1
+    lac=$(gair_field "$hex" $(( off + 24 )) 16) || return 1
     printf 'mcc\t%s\nmnc\t%s\nlac\t%s\n' "$mcc" "$mnc" "$lac"
     (( mcc_fill == 1 )) && printf 'mcc_malformed\t1\n'
     return 0
@@ -341,11 +341,14 @@ gair_si1_neighbor_arfcns() {
     # "bit map 0" format (bits 0..1 of the IE = 00) the 124 bits that follow
     # are one bit per ARFCN 1..124.
     local fmt; fmt=$(gair_bits "$hex" 24 2) || return 1
-    local i b out=""
+    local a b out=""
     if [[ "$fmt" == "00" ]]; then
-        for (( i = 0; i < 124; i++ )); do
-            b=$(gair_bits "$hex" $(( 26 + i )) 1) || continue
-            [[ "$b" == "1" ]] && out+="$(( i + 1 )) "
+        # The 124 bits run from ARFCN 124 down to ARFCN 1, so ARFCN a is the bit
+        # at offset 24 + 128 - a. Reading them the other way round turned every
+        # neighbour into a different channel.
+        for (( a = 1; a <= 124; a++ )); do
+            b=$(gair_bits "$hex" $(( 152 - a )) 1) || continue
+            [[ "$b" == "1" ]] && out+="$a "
         done
     fi
     printf '%s' "${out% }"
@@ -358,14 +361,46 @@ gair_si1_neighbor_arfcns() {
 gair_decode_ba_list() {
     local hex="$1" label="${2:-neighbors}" off="${3:-24}"
     local fmt; fmt=$(gair_bits "$hex" "$off" 2) || return 1
-    local i b out=""
+    local a b out=""
     if [[ "$fmt" == "00" ]]; then
-        for (( i = 0; i < 124; i++ )); do
-            b=$(gair_bits "$hex" $(( off + 2 + i )) 1) || continue
-            [[ "$b" == "1" ]] && out+="$(( i + 1 )) "
+        # Same mapping as SI1's cell allocation: ARFCN a is the bit at offset
+        # off + 128 - a, because the list counts down from 124.
+        for (( a = 1; a <= 124; a++ )); do
+            b=$(gair_bits "$hex" $(( off + 128 - a )) 1) || continue
+            [[ "$b" == "1" ]] && out+="$a "
         done
     fi
     printf '%s\t%s\n' "$label" "${out% }"
+}
+
+# SI4 (TS 44.018 9.1.36): the location area, the cell selection parameters and
+# the RACH control parameters, and no cell identity at all. Decoding it with the
+# SI3 map read the top of the LAI as a cell identity and reported a network that
+# does not exist, which is worse than refusing the message.
+gair_decode_si4() {
+    local hex="$1"
+    local t
+    t=$(gair_si_type_of "$hex") || return 1
+    printf 'type\t%s\n' "$(gair_si_name "$(printf '%02x' "$t")")"
+    gair_decode_lai "$hex" 24 || return 1
+
+    # Cell selection parameters (TS 44.018 10.5.2.4): six bits of
+    # RXLEV_ACCESS_MIN, mapped to dBm by -110 + value, then MS_TXPWR_MAX_CCH.
+    local rxlev
+    rxlev=$(gair_field "$hex" 64 6) || rxlev=""
+    if [[ -n "$rxlev" ]]; then
+        printf 'rxlev_access_min\t%s\n' "$rxlev"
+        printf 'rxlev_access_min_dbm\t%s\n' "$(( rxlev - 110 ))"
+    fi
+
+    # RACH control parameters (TS 44.018 10.5.2.29): the CELL_BARR_ACCESS bit
+    # and the call re-establishment bit sit in the octet after the tx-integer.
+    local barred re
+    barred=$(gair_bits "$hex" 86 1) || barred=""
+    re=$(gair_bits "$hex" 87 1) || re=""
+    [[ -n "$barred" ]] && printf 'cell_barred\t%s\n' "$barred"
+    [[ -n "$re" ]] && printf 're_establishment_allowed\t%s\n' "$re"
+    return 0
 }
 
 # SI13 (GPRS) carries the GPRS cell options, including the GPRS cipher mode
@@ -398,8 +433,7 @@ gair_decode_si() {
         SI2)  gair_decode_ba_list "$hex" ba_list 24 ;;
         SI2bis|SI2ter) gair_decode_ba_list "$hex" ba_list 24 ;;
         SI3)  gair_decode_si3 "$hex" ;;
-        SI4)  gair_decode_si3 "$hex"
-              gair_decode_ba_list "$hex" ba_list 24 ;;
+        SI4)  gair_decode_si4 "$hex" ;;
         SI13) gair_decode_si13 "$hex" ;;
         *)
             printf 'ERROR\tno field map for message type 0x%02x (%s)\n' "$t" "$name" >&2
@@ -1073,6 +1107,35 @@ gair_selftest() {
 
     # 4. Unknown message type must fail, not guess.
     chk si-unknown-type "$(gair_decode_si '1506ff00000000' >/dev/null 2>&1; echo $?)" "1"
+
+    # 4b. The cell allocation bitmap counts from ARFCN 124 down to ARFCN 1, so
+    #     ARFCN 62 is one bit and it is not the 62nd. tshark and pycrate both
+    #     read this payload as ARFCN 62, and both disagreed with the module
+    #     before this row existed.
+    local si1_62 si1_1 si1_124
+    si1_62='55061900000000000000002000000000000000000000'
+    si1_1="550619$(printf '00%.0s' $(seq 1 15))01000000"
+    si1_124='55061908000000000000000000000000000000000000'
+    chk si1-arfcn-62  "$(fld "$(gair_decode_si "$si1_62")" cell_allocation_arfcns)" "62"
+    chk si1-arfcn-1   "$(fld "$(gair_decode_si "$si1_1")" cell_allocation_arfcns)" "1"
+    chk si1-arfcn-124 "$(fld "$(gair_decode_si "$si1_124")" cell_allocation_arfcns)" "124"
+    chk si1-arfcn-none "$(fld "$(gair_decode_si '55061900000000000000000000000000000000000000')" cell_allocation_arfcns)" ""
+    local si2_62
+    si2_62='59061a00000000000000002000000000000000ff000000'
+    chk si2-ba-arfcn   "$(fld "$(gair_decode_si "$si2_62")" ba_list)" "62"
+    chk si2-ncc-honest "$(fld "$(gair_decode_si "$si2_62")" ba_list | grep -c ff)" "0"
+
+    # 4c. SI4 has no cell identity. Reading it with the SI3 map invented one out
+    #     of the top of the location area and reported a network that is not on
+    #     the air, so the row asserts the fields it does carry and that no cell
+    #     identity is claimed for it.
+    local si4x
+    si4x='31061c62f21000f10000000000'
+    chk si4-mcc    "$(fld "$(gair_decode_si "$si4x")" mcc)" "262"
+    chk si4-mnc    "$(fld "$(gair_decode_si "$si4x")" mnc)" "01"
+    chk si4-lac    "$(fld "$(gair_decode_si "$si4x")" lac)" "241"
+    chk si4-no-ci  "$(gair_decode_si "$si4x" 2>/dev/null | grep -c '^cell_id')" "0"
+    chk si4-rxlev  "$(fld "$(gair_decode_si "$si4x")" rxlev_access_min_dbm)" "-110"
     chk si-nonhex       "$(gair_decode_si 'zzzz' >/dev/null 2>&1; echo $?)" "2"
     chk si-nonhex-empty "$(gair_cmd_decode_si >/dev/null 2>&1; echo $?)" "2"
 

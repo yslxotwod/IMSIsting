@@ -1975,52 +1975,92 @@ gatk_tx_device() {
 
 gatk_iq_path() { printf '%s/tx_%s.cs8' "$GATK_DIR" "${1:-carrier}"; }
 
+# TS 44.018 10.5.1.1: six bits of length, then two low bits that mark the last
+# octet of the element. The length counts the octets that follow it, which is
+# why it is computed from the body rather than written down as a constant --
+# a message that grows an information element and keeps a stale length is a
+# message a receiver splits in the wrong place.
+gatk_l2pl() {   # <octets after this one> -> the L2 pseudo length octet
+    local n="${1:-0}"
+    [[ "$n" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tL2 pseudo length must be a number: %s\n' "$n" >&2; return 2; }
+    (( n <= 63 )) || {
+        printf 'ERROR\tL2 pseudo length is six bits; %s octets does not fit\n' "$n" >&2; return 2; }
+    printf '%02x\n' $(( (n << 2) | 1 ))
+}
+
+# A BCCH block is 23 octets -- four bursts of 114 coded bits (TS 45.003). The
+# message already begins with its own L2 pseudo length and RR header, so this
+# pads and does nothing else: there is no LAPDm header in front of a system
+# information message, and prepending one moved every field three octets left
+# of where a receiver reads it. 2b is the fill octet.
 gatk_bcch_frame() {
     local l3; l3=$(gatk_norm_hex "${1:-}")
     gatk_is_hex "$l3" || { printf 'ERROR\tBCCH L3 must be hex\n' >&2; return 2; }
     local n=$(( ${#l3} / 2 ))
-    (( n <= 21 )) || {
-        printf 'ERROR\tBCCH L3 is %d octets; a 23-octet block holds 21 after the 2-octet LAPDm header\n' "$n" >&2
+    (( n >= 1 && n <= 23 )) || {
+        printf 'ERROR\tBCCH L3 is %d octets; a block is 23 and this one does not fit\n' "$n" >&2
         return 2; }
-    local pad=$(( 23 - 2 - n ))
-    printf '0303%s' "$l3"
-    (( pad > 0 )) && printf '%0*d' $(( pad * 2 )) 0
+    local pad=$(( 23 - n ))
+    printf '%s' "$l3"
+    (( pad > 0 )) && printf '2b%.0s' $(seq 1 "$pad")
     printf '\n'
 }
 
+# Cell channel description, bit map 0 (TS 44.018 10.5.2.1b): two bits of format
+# identifier, two spare bits, then 124 bits carrying ARFCN 124 down to ARFCN 1,
+# most significant first -- so ARFCN a sits at bit 128-a of the 128-bit element.
+# Putting a whole octet aside for the format identifier, and counting the list
+# upwards, both moved every neighbour to a channel it is not on.
 gatk_chan_desc_bitmap0() {
-    local bits; bits=$(printf '0%.0s' $(seq 1 120))
-    local a
+    local bits; bits=$(printf '0%.0s' $(seq 1 128))
+    local a pos
     for a in "$@"; do
         [[ "$a" =~ ^[0-9]+$ ]] || { printf 'ERROR\tARFCN must be a number: %s\n' "$a" >&2; return 2; }
-        (( a <= 123 )) || { printf 'ERROR\tbit map 0 covers ARFCN 0..123, got %s\n' "$a" >&2; return 2; }
-        bits="${bits:0:$a}1${bits:$(( a + 1 ))}"
+        (( a >= 1 && a <= 124 )) || {
+            printf 'ERROR\tbit map 0 covers ARFCN 1..124, got %s\n' "$a" >&2; return 2; }
+        pos=$(( 128 - a ))
+        bits="${bits:0:$pos}1${bits:$(( pos + 1 ))}"
     done
     local out="" i byte
-    for (( i = 0; i < 120; i += 8 )); do
+    for (( i = 0; i < 128; i += 8 )); do
         byte=0
         for (( j = 0; j < 8; j++ )); do
             [[ "${bits:$(( i + j )):1}" == 1 ]] && byte=$(( byte | (1 << (7 - j)) ))
         done
         out+=$(printf '%02x' "$byte")
     done
-    printf '00%s\n' "$out"
+    printf '%s\n' "$out"
 }
 
 gatk_rach_control() { printf '000000\n'; }
 
+# What a receiver sees on BCCH, in the order TS 44.018 9.1.3 lays it out: the
+# L2 pseudo length, the RR header (skip indicator and protocol discriminator in
+# one octet, 0x06 for RR), the message type, then the information elements in
+# the order the clause lists them. The order below is the clause's, not a
+# convenient one: an earlier version put the location area where the cell
+# identity belongs, which decoded into a different network rather than failing.
 gatk_build_si1() {
-    local arfcns=() a; for a in "$@"; do arfcns+=("$a"); done
-    printf '60'
-    printf '19'
-    gatk_chan_desc_bitmap0 "${arfcns[@]}"
-    gatk_rach_control
+    local cdb rach body
+    cdb=$(gatk_chan_desc_bitmap0 "$@") || return $?
+    rach=$(gatk_rach_control) || return $?
+    body="0619${cdb}${rach}"
+    printf '%s%s\n' "$(gatk_l2pl $(( ${#body} / 2 )))" "$body"
 }
 
 gatk_build_si2() {
-    printf '60'; printf '1a'
-    gatk_chan_desc_bitmap0 "$@"
-    gatk_rach_control
+    local cdb rach body
+    cdb=$(gatk_chan_desc_bitmap0 "$@") || return $?
+    rach=$(gatk_rach_control) || return $?
+    # NCC permitted (TS 44.018 10.5.2.21) sits between the BCCH frequency list
+    # and the RACH control parameters and is mandatory. 0xff admits every
+    # network colour code, which is what a twin that has not heard its
+    # neighbours should say; leaving the element out shifted RACH control two
+    # octets to the left and left SI2 one octet short, and putting it in front
+    # of the frequency list turned the list itself into a network colour mask.
+    body="061a${cdb}ff${rach}"
+    printf '%s%s\n' "$(gatk_l2pl $(( ${#body} / 2 )))" "$body"
 }
 
 gatk_ctrl_chan_desc() {
@@ -2040,21 +2080,36 @@ gatk_lai_field() {
 
 gatk_build_si3() {
     local mcc="${1:-262}" mnc="${2:-01}" lac="${3:-00f1}" ci="${4:-00a1}"
-    printf '60'; printf '1b'
-    gatk_lai_field "$mcc" "$mnc" "$lac"
-    printf '%s\n' "$(gatk_norm_hex "$ci")"
-    gatk_ctrl_chan_desc "${5:-1}" "${6:-2}" "${7:-2}" "${8:-10}" "${9:-1}"
-    gatk_cell_selection
-    gatk_rach_control
+    local ci_hex lai ccd cellopt cellsel rach body
+    ci_hex=$(gatk_norm_hex "$ci")
+    (( ${#ci_hex} == 4 )) || {
+        printf 'ERROR\tcell identity must be two octets of hex, got %s\n' "${ci:-}" >&2; return 2; }
+    lai=$(gatk_lai_field "$mcc" "$mnc" "$lac") || return $?
+    ccd=$(gatk_ctrl_chan_desc "${5:-1}" "${6:-2}" "${7:-2}" "${8:-10}" "${9:-1}") || return $?
+    # Cell options (TS 44.018 10.5.2.3): the octet a handset reads to learn the
+    # radio link timeout and whether the cell applies a cell reselect offset.
+    # Without it the cell selection parameters sat one octet early.
+    cellopt="00"
+    cellsel=$(gatk_cell_selection) || return $?
+    rach=$(gatk_rach_control) || return $?
+    body="061b${ci_hex}${lai}${ccd}${cellopt}${cellsel}${rach}"
+    printf '%s%s\n' "$(gatk_l2pl $(( ${#body} / 2 )))" "$body"
 }
 
 gatk_build_si4() {
-    local mcc="${1:-262}" mnc="${2:-01}" lac="${3:-00f1}" ci="${4:-00a1}"
-    printf '60'; printf '1c'
-    gatk_lai_field "$mcc" "$mnc" "$lac"
-    printf '%s\n' "$(gatk_norm_hex "$ci")"
-    gatk_cell_selection
-    gatk_rach_control
+    local mcc="${1:-262}" mnc="${2:-01}" lac="${3:-00f1}"
+    # The fourth argument is the cell identity, which SI4 does not carry: the
+    # clause lists the location area, the cell selection parameters and the
+    # RACH control parameters and no cell identity at all, because a handset
+    # already knows which cell it is on when it reads SI4. It is accepted and
+    # ignored rather than emitted, which would insert two octets that shifted
+    # the cell selection parameters.
+    local lai cellsel rach body
+    lai=$(gatk_lai_field "$mcc" "$mnc" "$lac") || return $?
+    cellsel=$(gatk_cell_selection) || return $?
+    rach=$(gatk_rach_control) || return $?
+    body="061c${lai}${cellsel}${rach}"
+    printf '%s%s\n' "$(gatk_l2pl $(( ${#body} / 2 )))" "$body"
 }
 
 gatk_cmd_transmit() {
@@ -2127,7 +2182,7 @@ gatk_cmd_transmit() {
     printf 'si2\t%s\n' "$(printf '%s' "$si2" | tr -d '\n')"
     printf 'si3\t%s\n' "$(printf '%s' "$si3" | tr -d '\n')"
     printf 'si4\t%s\n' "$(printf '%s' "$si4" | tr -d '\n')"
-    printf 'si_len\tSI1=21 SI2=21 SI3=17 SI4=14 octets of L3 (TS 44.018 9.1.3)\n'
+    printf 'si_len\tSI1=22 SI2=23 SI3=19 SI4=13 octets, L2 pseudo length included (TS 44.018 9.1.3)\n'
     printf 'si1_rule\tTS 44.018 9.1.3.1: Cell Channel Description (16 octets) + RACH Control (3)\n'
     printf 'si3_rule\tTS 44.018 9.1.35: LAI (5) + CI (2) + Control Channel Desc (3) + Cell Selection (2) + RACH Control (3)\n' 
     printf '\n'
@@ -2676,24 +2731,47 @@ gatk_selftest() {
     si2=$(gatk_build_si2 62 | tr -d '\n')
     si3=$(gatk_build_si3 262 01 00f1 00a1 | tr -d '\n')
     si4=$(gatk_build_si4 262 01 00f1 00a1 | tr -d '\n')
-    chk si1-len  "$(( ${#si1} / 2 ))" "21"
-    chk si2-len  "$(( ${#si2} / 2 ))" "21"
-    chk si3-len  "$(( ${#si3} / 2 ))" "17"
-    chk si4-len  "$(( ${#si4} / 2 ))" "14"
-    chk si1-mt "${si1:0:4}" "6019"
-    chk si2-mt "${si2:0:4}" "601a"
-    chk si3-mt "${si3:0:4}" "601b"
-    chk si4-mt "${si4:0:4}" "601c"
-    chk si3-lai "${si3:4:10}" "62f21000f1"
-    chk si4-lai "${si4:4:10}" "62f21000f1"
+    # A system information message is a whole L3 message: L2 pseudo length,
+    # RR header (0x06), message type, then the information elements in the
+    # clause's order. The lengths are the pseudo length plus its own octet, so
+    # a body that grows an element fails here before it misleads a receiver.
+    chk si1-len  "$(( ${#si1} / 2 ))" "22"
+    chk si2-len  "$(( ${#si2} / 2 ))" "23"
+    chk si3-len  "$(( ${#si3} / 2 ))" "19"
+    chk si4-len  "$(( ${#si4} / 2 ))" "13"
+    chk si1-head "${si1:0:6}" "550619"
+    chk si2-head "${si2:0:6}" "59061a"
+    chk si3-head "${si3:0:6}" "49061b"
+    chk si4-head "${si4:0:6}" "31061c"
+    chk si1-plen "$(gatk_l2pl 21)" "55"
+    chk si2-plen "$(gatk_l2pl 22)" "59"
+    chk si3-plen "$(gatk_l2pl 18)" "49"
+    chk si4-plen "$(gatk_l2pl 12)" "31"
+    chk si-plen-max "$(gatk_l2pl 64 >/dev/null 2>&1; echo $?)" "2"
+    chk si3-ci   "${si3:6:4}" "00a1"
+    chk si3-lai  "${si3:10:10}" "62f21000f1"
+    chk si4-lai  "${si4:6:10}" "62f21000f1"
+    chk si4-no-ci "$(printf '%s' "$si4" | grep -c 00a1)" "0"
+    chk si2-ncc  "${si2:38:2}" "ff"
+    chk si3-cellopt "${si3:26:2}" "00"
     chk lai-iei "$(gatk_lai_encode 262 01 00f1)" "0562f21000f1"
     chk lai-fld "$(gatk_lai_field 262 01 00f1)" "62f21000f1"
-    chk cdb62 "${si1:6:2}" "00"
-    chk cdb62-hit "$(gatk_chan_desc_bitmap0 62 | cut -c17-18)" "02"
+    # ARFCN a sits at bit 128-a of the 128-bit cell channel description, which
+    # both tshark and pycrate read back as that ARFCN; the format identifier is
+    # two bits, not an octet.
+    chk cdb62-fmt "$(gatk_chan_desc_bitmap0 62 | cut -c1-2)" "00"
+    chk cdb62-bit "$(gatk_chan_desc_bitmap0 62 | cut -c17-18)" "20"
+    chk cdb62-len "$(( $(gatk_chan_desc_bitmap0 62 | tr -d '\n' | wc -c) / 2 ))" "16"
+    chk cdb124 "$(gatk_chan_desc_bitmap0 124 | cut -c1-2)" "08"
+    chk cdb1 "$(gatk_chan_desc_bitmap0 1 | cut -c31-32)" "01"
+    chk cdb0-refused "$(gatk_chan_desc_bitmap0 0 >/dev/null 2>&1; echo $?)" "2"
+    chk cdb125-refused "$(gatk_chan_desc_bitmap0 125 >/dev/null 2>&1; echo $?)" "2"
     chk ccd "$(gatk_ctrl_chan_desc 1 2 2 10 1)" "085228"
     local blk rc
     blk=$(gatk_bcch_frame "$si3"); chk bcch-block-len "$(( ${#blk} / 2 ))" "23"
-    ( gatk_bcch_frame "60$(printf '00%.0s' $(seq 1 22))" ) >/dev/null 2>&1
+    chk bcch-fill "${blk:38}" "2b2b2b2b"
+    chk bcch-no-lapdm "${blk:0:4}" "4906"
+    ( gatk_bcch_frame "$(printf '00%.0s' $(seq 1 24))" ) >/dev/null 2>&1
     rc=$?; chk bcch-toobig-rc "$rc" "2"
 
     local sib="$IMSISTING_ROOT/modules/06_gsm_air.sh"
@@ -2717,6 +2795,19 @@ gatk_selftest() {
                           "$(printf '%s\n' "$sibpg" | awk -F'\t' '$1=="ccch_slot"{print $2}')"
         chk x-ident-imsi  "$(bash "$sib" --identity-exposure "$(printf '0609%s' "$(gatk_mobile_identity_imsi 310150123456789 | cut -c5-)")" 2>/dev/null |
                              awk -F'\t' '$1=="imsi"{print $2}')" "310150123456789"
+        # 06_gsm_air carries the BCCH field map, so it is the other reader of
+        # what this module puts on the air. If the two disagree about the order
+        # of the information elements, one of them is wrong and neither is
+        # evidence -- so the agreement is asserted rather than assumed.
+        local sibsi3
+        sibsi3=$(bash "$sib" --decode-si "$si3" 2>/dev/null)
+        chk x-si3-cell   "$(printf '%s\n' "$sibsi3" | awk -F'\t' '$1=="cell_id"{print $2}')" "161"
+        chk x-si3-mcc    "$(printf '%s\n' "$sibsi3" | awk -F'\t' '$1=="mcc"{print $2}')" "262"
+        chk x-si3-mnc    "$(printf '%s\n' "$sibsi3" | awk -F'\t' '$1=="mnc"{print $2}')" "01"
+        chk x-si3-lac    "$(printf '%s\n' "$sibsi3" | awk -F'\t' '$1=="lac"{print $2}')" "241"
+        local sibsi4
+        sibsi4=$(bash "$sib" --decode-si "$si4" 2>/dev/null)
+        chk x-si4-mcc    "$(printf '%s\n' "$sibsi4" | awk -F'\t' '$1=="mcc"{print $2}')" "262"
     else
         printf 'SKIP\tx-a51-agree-%s\t06_gsm_air.sh not found under %s\n' "-" "$IMSISTING_ROOT/modules"
     fi
