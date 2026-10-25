@@ -971,6 +971,36 @@ sbap_rapid_reset() {
         "$n" "$(( 2 * n ))"
 }
 
+# ── C3 — the directory maps the core ────────────────────────────────────
+# nnrf-disc is the SBI's index: ask it for a type and it hands back instance
+# ids, FQDNs, addresses and service versions for whatever it holds. The walk
+# below is the whole catalogue, one request per type, and the subscription is
+# the same map kept current by the NRF itself.
+sbap_nrf_walk() {
+    local host="${1:-nrf.5gc.mnc001.mcc001.3gppnetwork.org}" requester="${2:-AMF}"
+    printf 'host\t%s\nrequester\t%s\n' "$(sbap_sanitize "$host")" "$(sbap_sanitize "$requester")"
+    printf 'method\tGET\npath\t/nnrf-disc/v1/nf-instances\n'
+    local t
+    for t in AMF SMF UDM AUSF NRF PCF NSSF UDSF BSF NEF UPF CHF NWDAF; do
+        printf 'walk\t%s\t%s?target-nf-type=%s&requester-nf-type=%s\n' \
+            "$t" "/nnrf-disc/v1/nf-instances" "$t" "$requester"
+    done
+    printf 'walk_count\t13\n'
+    printf 'answering\t{"nfInstances":[{"nfInstanceId":"...","nfType":"UDM","nfStatus":"REGISTERED","fqdn":"udm.5gc.mnc001.mcc001.3gppnetwork.org","ipv4Addresses":["10.60.0.12"],"nfServices":[{"serviceName":"nudm-ueau","versions":[{"apiVersionInUri":"v1","apiVersion":"1.0.0"}],"scheme":"https","nfServiceStatus":"REGISTERED","ipEndPoints":[{"ipv4Address":"10.60.0.12","port":7777,"transport":"TCP"}]}]}]}\n'
+    printf 'subscription\t{"nfStatusNotificationUri":"https://%s/nnrf-nfm/v1/notifications","subscrCond":{"nfType":"UDM"},"reqNfInstanceId":"5e2b1c00-9f0a-4d33-8a77-1b9f0e6a4c11"}\n' \
+        "$(sbap_sanitize "$host")"
+    printf 'subscription_note\tthe subscription condition is one NF type, but nothing stops a client from subscribing thirteen times; each registration, deregistration and profile change then arrives as a push\n'
+    printf 'finding\tfull_inventory\tHIGH\tone request per NF type returns instance ids, FQDNs, addresses, ports, service versions and status -- the core can be mapped without a single packet to any NF\n'
+    printf 'finding\ttype_enumeration\tINFO\tthe type space is fixed and public (TS 23.501 6.2 / TS 29.510 6.1.6.3.2), so there is no guessing: thirteen requests cover it\n'
+    printf 'finding\tscope_gap\tMEDIUM\tdiscovery is authorised by the SBI client identity, and a token minted for one NF type is scoped to nnrf-disc, not to one target: the widest scope in the core is the one that reads the directory\n'
+    printf 'finding\tpush_inventory\tHIGH\tthe status subscription turns the map into a live feed with no further queries; deregistrations alone reveal restarts and deployments\n'
+    printf 'finding\tno_rate_limit\tMEDIUM\tNRF discovery is an internal API assumed to be used by NFs; per-requester volume and the type mix are what make enumeration visible\n'
+    printf 'artefact\tcurl -sS -H "Authorization: Bearer $TOKEN" https://%s/nnrf-disc/v1/nf-instances?target-nf-type=UDM&requester-nf-type=AMF\n' "$(sbap_sanitize "$host")"
+    printf 'detect\talert on one requester disc by more than two NF types within a minute, on any discovery from an NF that then sends no service request, and on a requester whose token audience is NRF\n'
+    printf 'verdict\tthe NRF is a read-only map of the core and the SBI gives it away at the price of one token: the control is authorisation granularity, not the API\n'
+    return 0
+}
+
 # ── C8 — cloud metadata through the SBI ────────────────────────────────
 # The SBI is an HTTP mesh where NFs fetch URIs that other NFs assert in their
 # profiles. Nothing in the protocol says those URIs have to be in the SBI
@@ -1171,6 +1201,18 @@ sbap_selftest() {
     chk imds-badnf   "$(sbap_imds_pivot UPX >/dev/null 2>&1; echo $?)" "2"
     chk imds-json-ok "$(sbap_imds_pivot AMF | awk -F'\t' '$1=="registration"{print $2}' | python3 -c 'import json,sys; json.load(sys.stdin); print("ok")' 2>/dev/null)" "ok"
 
+    # 7d. C3 -- the directory as a map of the core.
+    out=$(sbap_nrf_walk nrf.5gc.mnc001.mcc001.3gppnetwork.org AMF)
+    chk walk-host    "$(fld "$out" host)"  "nrf.5gc.mnc001.mcc001.3gppnetwork.org"
+    chk walk-count   "$(fld "$out" walk_count)" "13"
+    chk walk-types   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="walk"{print $2}' | sort -u | wc -l | tr -d ' ')" "13"
+    chk walk-udm     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="walk" && $2=="UDM"{print ($3 ~ /target-nf-type=UDM/)?"yes":"no"}')" "yes"
+    chk walk-inv     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="full_inventory"{print $3}')" "HIGH"
+    chk walk-push    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="push_inventory"{print $3}')" "HIGH"
+    chk walk-sub     "$(fld "$out" subscription | grep -c 'nfStatusNotificationUri')" "1"
+    chk walk-json    "$(fld "$out" answering | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["nfInstances"]))' 2>/dev/null)" "1"
+    chk walk-curl    "$(fld "$out" artefact | grep -c 'target-nf-type=UDM')" "1"
+
     # 8. HPACK (RFC 7541): the static table, the indexed and literal forms,
     # the Huffman code and the dynamic table the appendix examples exercise.
     local hp
@@ -1316,6 +1358,7 @@ sbap_cli_main() {
         --rapid-reset) sbap_rapid_reset "${1:-5}" ;;
         --n32-bridge)  sbap_n32_bridge "${1:-}" "${2:-AMF}" "${3:-001-01}" ;;
         --imds-pivot)  sbap_imds_pivot "${1:-SMF}" "${2:-}" ;;
+        --nrf-walk)    sbap_nrf_walk "${1:-}" "${2:-AMF}" ;;
         --plan)        sbap_plan ;;
         --selftest)    sbap_selftest ;;
         --menu)        sbap_menu ;;
@@ -1339,6 +1382,9 @@ Usage: $0 COMMAND
   --rapid-reset <n>          HTTP/2 Rapid Reset frame sequence (CVE-2023-44487)
   --n32-bridge <home-api-root> [visiting-NF] [plmn]
   --imds-pivot [NF] [url]  C8: a registered callback that points the
+  --nrf-walk [nrf-host] [requester]
+                        C3: the thirteen discovery requests that
+                        return the whole core as JSON
                         SBI client at the cloud metadata service
                         C2: what a visited network reaches over N32-f,
                         hop by hop, and which check would stop it
