@@ -1147,6 +1147,42 @@ ncore_cmd_ngap_ngsetup() {  # [plmn] [gnb-id] [node-name] [tac]
 # --ngap-send puts one of those messages on SCTP port 38412 with PPID 60.
 # Armed separately from the builders, for the same reason every other sender
 # in this tree is: a builder is not a target.
+ncore_cmd_ngap_probe() {  # [amf-host] [port]
+    local host="${1:-127.0.0.1}" port="${2:-38412}"
+    local setup; setup=$(ncore_ngap_build ng-setup --plmn 001/01 --gnb-id 0xA1C01 \
+        --node-name ProbeGNb --tac 000001) || { printf 'ERROR\tthe NGAP encoder failed\n' >&2; return 1; }
+    local iue; iue=$(ncore_ngap_build initial-ue --ran-ue-id 1 --nas 7e0041012e0100) \
+        || { printf 'ERROR\tthe NGAP encoder failed\n' >&2; return 1; }
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'transport\tSCTP PPID 60 (NGAP), one association, no key and no prior trust\n'
+    printf 'exposure\tan unauthenticated peer that can reach the SCTP port gets every probe below answered or refused with a cause, and the refusal is information too\n'
+    printf 'probe\t1\tNGSetupRequest\t%s\n' "$setup"
+    printf 'probe_ask\t1\twhich PLMNs and TACs does this AMF serve, what is it called, which S-NSSAIs does it accept\n'
+    printf 'probe_answer\t1\tNGSetupResponse carries the PLMN list, the TAC(s), the AMF name, the S-NSSAI list and capacity hints; NGSetupFailure carries a Cause that separates unknown PLMN from no resources\n'
+    printf 'probe_leaks\t1\toperator identity, network slice catalogue, and whether the AMF is already associated with that gNB-ID\n'
+    printf 'probe\t2\tInitialUEMessage (NAS Registration Request, no security)\t%s\n' "$iue"
+    printf 'probe_ask\t2\twill this AMF build a UE context for a NAS message from a peer it has never seen\n'
+    printf 'probe_answer\t2\tDownlinkNASTransport with an Identity Request, or a 5GMM reject with a cause; either way the answer names the AMF UE NGAP ID it allocated\n'
+    printf 'probe_leaks\t2\tthat a subscriber context is free of charge, and the AMF UE NGAP ID the next probes must quote\n'
+    printf 'probe\t3\tUplinkNASTransport on a guessed AMF UE NGAP ID\tbuilt from the id probe 2 returned\n'
+    printf 'probe_ask\t3\tdoes the AMF bind the AMF UE NGAP ID to the association that created it\n'
+    printf 'probe_answer\t3\tan AMF that binds answers with an Error Indication or nothing; one that does not binds the message to the wrong UE or services it\n'
+    printf 'probe_leaks\t3\tthe difference between the two behaviours is the whole finding\n'
+    printf 'probe\t4\tPaging for a guessed 5G-S-TMSI\t--ngap-paging 1 0 0A0B0C0D\n'
+    printf 'probe_ask\t4\tdoes paging disclose whether an identity exists\n'
+    printf 'probe_answer\t4\tan unknown identity produces no uplink answer, but the timing of the repeated page separates known from unknown\n'
+    printf 'probe_leaks\t4\twhich 5G-S-TMSIs are live, one page at a time\n'
+    printf 'finding\tngsetup_disclosure\tHIGH\tNG Setup is an unauthenticated handshake by design; the answer is an inventory of the operator, and nothing in NGAP asks the gNB to prove who it is\n'
+    printf 'finding\tue_context_free\tHIGH\tInitial UE Message creates state before any authentication; the state machine is reachable by whoever holds the SCTP association\n'
+    printf 'finding\tno_binding\tMEDIUM\twhether the AMF UE NGAP ID is bound to the association decides if a second peer can steer an existing UE -- the protocol does not say, the implementation does\n'
+    printf 'finding\trefusal_oracle\tMEDIUM\tNGSetupFailure causes and 5GMM reject causes turn a closed port into a map\n'
+    printf 'mitigation\tTS 33.501 9.1: N2 runs inside IPsec or TLS with mutual certificates; without it, an SCTP peer filter is the whole defence\n'
+    printf 'artefact\tsend probe 1 as is: --ngap-send %s %s %s\n' "$host" "$port" "$setup"
+    printf 'detect\tcount NG Setup Requests per source address against the gNB inventory, and alert on any Initial UE Message from an association that did not complete NG Setup\n'
+    printf 'verdict\tthe N2 boundary assumes a trusted gNB network; expose 38412 to anything else and the AMF becomes a directory with a state machine\n'
+    return 0
+}
+
 ncore_cmd_ngap_send() {  # <amf-host> [port] [hex]
     local host="${1:-}" port="${2:-38412}" hex="${3:-}"
     local tool="$IMSISTING_ROOT/tools/sctp_assoc.py"
@@ -2147,6 +2183,20 @@ ncore_selftest() {
     chk cli-nas-noargs    "$(ncore_cmd_decode_nas >/dev/null 2>&1; echo $?)"    "2"
     chk cli-nas-badhex    "$(ncore_cmd_decode_nas QQ >/dev/null 2>&1; echo $?)" "1"
     chk cli-pfcp-noargs   "$(ncore_cmd_decode_pfcp >/dev/null 2>&1; echo $?)"   "2"
+    # C5 -- the N2 walk: what an unauthenticated SCTP peer learns per probe.
+    out=$(ncore_cmd_ngap_probe 10.0.0.9)
+    chk probe-target  "$(fld "$out" target)"       "10.0.0.9:38412"
+    chk probe-probes  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="probe"{n++} END{print n+0}')" "4"
+    local p1 p2
+    p1=$(printf '%s\n' "$out" | awk -F'\t' '$1=="probe" && $2==1{print $4}')
+    p2=$(printf '%s\n' "$out" | awk -F'\t' '$1=="probe" && $2==2{print $4}')
+    chk probe-setup   "${p1:0:4}"                                     "0015"
+    chk probe-setup-d "$(fld "$(ncore_decode_ngap "$p1")" procedure_name)" "NGSetup"
+    chk probe-iue     "${p2:0:4}"                                     "000f"
+    chk probe-ngsetup "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="ngsetup_disclosure"{print $3}')" "HIGH"
+    chk probe-context "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="ue_context_free"{print $3}')" "HIGH"
+    chk probe-artefact "$(printf '%s\n' "$out" | awk -F'\t' '$1=="artefact"{print ($2 ~ /--ngap-send 10.0.0.9 38412/)?"yes":"no"}')" "yes"
+    chk probe-cli     "$(ncore_cmd_ngap_probe >/dev/null 2>&1; echo $?)" "0"
     chk cli-pfcp-short    "$(ncore_cmd_decode_pfcp 20 >/dev/null 2>&1; echo $?)" "1"
     chk cli-gtpu-noargs   "$(ncore_cmd_decode_gtpu >/dev/null 2>&1; echo $?)"   "2"
     chk cli-guti-noargs   "$(ncore_cmd_decode_guti >/dev/null 2>&1; echo $?)"   "2"
@@ -2280,6 +2330,7 @@ ncore_cli_main() {
         --xnap-setup)       ncore_cmd_xnap_setup "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
         --xnap-decode)      ncore_cmd_xnap_decode "${1:-}" ;;
         --ngap-send)        ncore_cmd_ngap_send "${1:-}" "${2:-}" "${3:-}" ;;
+        --ngap-probe)       ncore_cmd_ngap_probe "${1:-127.0.0.1}" "${2:-38412}" ;;
         --gtpu-header)     ncore_gtpu_header "${1:-1}" "${2:-1}" ;;
         --plan)            ncore_cmd_plan "${1:-}" ;;
         --selftest)        ncore_selftest ;;
@@ -2322,6 +2373,9 @@ Usage: $0 COMMAND
                                 build an XnSetupRequest (SCTP 38422, PPID 61)
   --xnap-decode <hex>           read one back: node id, TAC, slice
   --ngap-send <amf-host> [port] [hex]
+  --ngap-probe <amf-host> [port]
+                                C5: what an unauthenticated SCTP peer
+                                learns from the AMF, probe by probe
                                 send one on SCTP 38412, PPID 60
   --gtpu-header [teid] [qfi]    build an N3 GTP-U header with the QFI
   --plan <name>                 write a handoff plan
