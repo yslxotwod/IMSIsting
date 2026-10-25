@@ -363,6 +363,109 @@ WHY	takes the range the satellite really is at and the range a forged SIB19 clai
 EOF
 }
 
+# ── R66: SIB19 as it is actually carried, not as a standalone box ────────
+# The layout row said there was no NR RRC table in the tree; there is one now
+# (tools/nr_rrc_layout.py, generated from pycrate and grown with the codec), and
+# --sib19-build uses it. What that verb builds is the information element on its
+# own, which is the wrong shape for the air: SIB19-r17 never arrives by itself.
+# It arrives inside SystemInformation on BCCH-DL-SCH, as one alternative of
+# sib-TypeAndInfo, and the SIB1 of the cell says which si-Message carries it.
+# This verb builds the whole envelope, encodes it, and decodes it back, so the
+# extra layer is exercised rather than described.
+#
+# The alternative is named sib19-v1700 in the CHOICE, not sib19: the plain
+# sib19 name is not in the table's sib-TypeAndInfo, and a name the table does
+# not have is refused by name instead of being guessed at.
+ntn_sib19_carrier() {
+    local koffset=20 epoch_sfn=3 epoch_sub=5 validity=s30 ref_hex="" dist=""
+    local period=rf64 window=5 maptype="sibType19"
+    while (( $# )); do
+        case "$1" in
+            --koffset)   koffset="${2:-}";   shift 2 || { ntn_sib19_carrier_usage; return 2; } ;;
+            --epoch-sfn) epoch_sfn="${2:-}";  shift 2 || { ntn_sib19_carrier_usage; return 2; } ;;
+            --epoch-sub) epoch_sub="${2:-}";  shift 2 || { ntn_sib19_carrier_usage; return 2; } ;;
+            --validity)  validity="${2:-}";   shift 2 || { ntn_sib19_carrier_usage; return 2; } ;;
+            --ref-hex)   ref_hex="${2:-}";    shift 2 || { ntn_sib19_carrier_usage; return 2; } ;;
+            --dist)      dist="${2:-}";       shift 2 || { ntn_sib19_carrier_usage; return 2; } ;;
+            --period)    period="${2:-}";     shift 2 || { ntn_sib19_carrier_usage; return 2; } ;;
+            --window)    window="${2:-}";     shift 2 || { ntn_sib19_carrier_usage; return 2; } ;;
+            *)           ntn_sib19_carrier_usage; return 2 ;;
+        esac
+    done
+    [[ "$koffset" =~ ^[0-9]+$ && "$koffset" -ge 1 && "$koffset" -le 1023 ]] || {
+        printf 'ERROR\t--koffset wants 1..1023 (TS 38.331 NTN-Config)\n' >&2; return 2; }
+    [[ "$epoch_sfn" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--epoch-sfn wants whole SFNs\n' >&2; return 2; }
+    [[ "$epoch_sub" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--epoch-sub wants whole slots\n' >&2; return 2; }
+    case "$period" in rf8|rf16|rf32|rf64|rf128|rf256|rf512) ;; *)
+        printf 'ERROR\t--period is one of rf8 rf16 rf32 rf64 rf128 rf256 rf512\n' >&2; return 2 ;; esac
+    [[ "$window" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--window is a slot count\n' >&2; return 2; }
+    [[ -z "$ref_hex" || "$ref_hex" =~ ^[0-9A-Fa-f]+$ ]] || {
+        printf 'ERROR\t--ref-hex wants hex digits\n' >&2; return 2; }
+    [[ -z "$dist" || "$dist" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--dist wants whole metres\n' >&2; return 2; }
+
+    local root="${IMSISTING_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+    if [[ ! -r "$root/tools/nr_rrc.py" || ! -r "$root/tools/nr_rrc_layout.py" ]]; then
+        printf 'ERROR\tthe carrier cannot be built: tools/nr_rrc_layout.py is missing\n' >&2
+        printf 'WHY\tSystemInformation is a generated table type; without the table there is nothing to encode against\n' >&2
+        return 2
+    fi
+    local work json out rc=0
+    work=$(mktemp -d)
+    json="$work/si.json"
+    {
+        printf '{"criticalExtensions":{"$choice":["systemInformation",{"sib-TypeAndInfo":[{'
+        printf '"$choice":["sib19-v1700",{"ntn-Config-r17":{'
+        printf '"cellSpecificKoffset-r17":%s,' "$koffset"
+        printf '"epochTime-r17":{"sfn-r17":%s,"subFrameNR-r17":%s},' "$epoch_sfn" "$epoch_sub"
+        printf '"ntn-UlSyncValidityDuration-r17":"%s"' "$validity"
+        printf '}'
+        if [[ -n "$ref_hex" ]]; then printf ',"referenceLocation-r17":{"$hex":"%s"}' "$ref_hex"; fi
+        if [[ -n "$dist" ]]; then printf ',"distanceThresh-r17":%s' "$dist"; fi
+        printf '}]}]}]}}'
+    } > "$json"
+    out=$(python3 "$root/tools/nr_rrc.py" encode SystemInformation "$json" 2>&1) || rc=$?
+    if (( rc != 0 )); then
+        rm -rf "$work"
+        printf '%s\n' "$out" >&2
+        printf 'WHY\tthe envelope is only accepted when its own decoder gives the value back; a field name the table does not have is dropped rather than guessed\n' >&2
+        return "$rc"
+    fi
+    local bits hex got
+    bits=$(printf '%s\n' "$out" | awk -F'\t' '$1=="bits"{print $2}')
+    hex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="hex"{print $2}')
+    got=$(printf '%s\n' "$out" | awk -F'\t' '$1=="read_back"{print $2}')
+    printf 'role\tSystemInformation (BCCH-DL-SCH) carrying SIB19\n'
+    printf 'rrc_type\tSystemInformation\n'
+    printf 'sib_alternative\tsib19-v1700\n'
+    printf 'sib_wrapper\tcriticalExtensions > systemInformation > sib-TypeAndInfo[0]\n'
+    printf 'bits\t%s\n' "$bits"
+    printf 'hex\t%s\n' "$hex"
+    printf 'read_back\t%s\n' "${got:-no}"
+    printf 'koffset\t%s\n' "$koffset"
+    printf 'epoch_sfn\t%s\n' "$epoch_sfn"
+    printf 'epoch_subframe\t%s\n' "$epoch_sub"
+    printf 'validity\t%s\n' "$validity"
+    [[ -n "$ref_hex" ]] && printf 'reference_location\t0x%s\n' "$(printf '%s' "$ref_hex" | tr 'a-f' 'A-F')"
+    [[ -n "$dist" ]] && printf 'distance_thresh_m\t%s\n' "$dist"
+    printf 'scheduled_as\tsi-Message carrying %s\n' "$maptype"
+    printf 'si_periodicity\t%s\n' "$period"
+    printf 'si_window_slots\t%s\n' "$window"
+    printf 'sib1_points_here\tSIB1 si-SchedulingInfo lists %s in sib-MappingInfo, with the si-Periodicity %s and si-WindowLength above; the SI window is where the UE reads this block\n' "$maptype" "$period"
+    printf 'ref\tTS 38.331 5.2.2.1 (SI acquisition, BCCH-DL-SCH), 6.2.1 SystemInformation / SystemInformation-IEs / sib-TypeAndInfo, 6.3.1 SIB19-r17\n'
+    printf 'limit\tthis is the ASN.1 envelope, not a transport block: SIB19 rides in an DL-SCH TB scheduled by a DCI inside a SI window, and the DCI, the window timing and the cell SIB1 are outside what this module builds\n'
+    rm -rf "$work"
+    return 0
+}
+
+ntn_sib19_carrier_usage() {
+    cat >&2 <<'EOF'
+USAGE	--sib19-carrier [--koffset N] [--epoch-sfn N] [--epoch-sub N] [--validity sN] [--ref-hex HEX] [--dist M] [--period rfN] [--window SLOTS]
+EOF
+    return 2
+}
+
+
 ntn_sib19_build() {
     local koffset=15 epoch_sfn=0 epoch_sub=0 validity=s20 kmac=1 ref_hex="" dist=""
     while (( $# )); do
@@ -682,6 +785,22 @@ ntn_selftest() {
     chk sib19-bad-koffset "$(ntn_sib19_build --koffset 5000 >/dev/null 2>&1; echo $?)" "2"
     chk sib19-bad-kmac "$(ntn_sib19_build --kmac 0 >/dev/null 2>&1; echo $?)" "2"
     chk sib19-bad-flag "$(ntn_sib19_build --nonsense >/dev/null 2>&1; echo $?)" "2"
+    # The carrier: SIB19 never arrives alone, so the envelope is built too and
+    # its own decoder has to give the value back.
+    local car; car=$(ntn_sib19_carrier --ref-hex AABBCC)
+    chk carrier-rc "$?" "0"
+    chk carrier-bits "$(printf '%s\n' "$car" | awk -F'\t' '$1=="bits"{print $2}')" "104"
+    chk carrier-readback "$(printf '%s\n' "$car" | awk -F'\t' '$1=="read_back"{print $2}')" "yes"
+    chk carrier-alt "$(printf '%s\n' "$car" | awk -F'\t' '$1=="sib_alternative"{print $2}')" "sib19-v1700"
+    chk carrier-wrapper "$(printf '%s\n' "$car" | awk -F'\t' '$1=="sib_wrapper" && $2 ~ /sib-TypeAndInfo/{print "nested"}')" "nested"
+    chk carrier-scheduled "$(printf '%s\n' "$car" | awk -F'\t' '$1=="scheduled_as" && $2 ~ /sibType19/{print "named"}')" "named"
+    chk carrier-period "$(printf '%s\n' "$car" | awk -F'\t' '$1=="si_periodicity"{print $2}')" "rf64"
+    chk carrier-bad-period "$(ntn_sib19_carrier --period rf7 >/dev/null 2>&1; echo $?)" "2"
+    chk carrier-bad-koffset "$(ntn_sib19_carrier --koffset 0 >/dev/null 2>&1; echo $?)" "2"
+    # and the envelope decodes back to the same SIB19 fields
+    local chx; chx=$(printf '%s\n' "$car" | awk -F'\t' '$1=="hex"{print $2}')
+    chk carrier-decode-koffset "$(python3 "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/tools/nr_rrc.py" decode SystemInformation "$chx" 2>/dev/null | awk -F'\t' '$1 ~ /cellSpecificKoffset/{print $2}')" "20"
+    chk carrier-decode-sib "$(python3 "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/tools/nr_rrc.py" decode SystemInformation "$chx" 2>/dev/null | awk -F'\t' '$1 ~ /^criticalExtensions[.]systemInformation[.]sib-TypeAndInfo\[0\][.]sib19-v1700/ {f=1} END{print f+0}')" "1"
     # 10. Hostile ephemeris: the timing a forged SIB19 leaves the UE with.
     local eh; eh=$(ntn_ephemeris_hijack --true-range 1200 --forged-range 600 --koffset 20 --koffset-error 3 --scs 30)
     chk eph-ta-err "$(printf '%s\n' "$eh" | awk -F'\t' '$1=="ta_error_us"{print $2}')" "-4002.8"
@@ -765,6 +884,7 @@ ntn_cli_main() {
         --ta)          ntn_ta_units "${1:-}" ;;
         --koffset)     ntn_koffset "${1:-}" "${2:-}" "${3:-}" ;;
         --sib19)       ntn_sib19 "${1:-}" ;;
+        --sib19-carrier) ntn_sib19_carrier "$@" ;;
         --sib19-build) ntn_sib19_build "$@" ;;
         --ephemeris-hijack) ntn_ephemeris_hijack "$@" ;;
         --timing-geoloc)  ntn_timing_geoloc "$@" ;;

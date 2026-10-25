@@ -172,6 +172,17 @@ def cmd_encode(args):
                     return bytes.fromhex(v["$hex"])
                 except ValueError:
                     raise Refused("$hex wants an even number of hex digits")
+            if set(v) == {"$choice"}:
+                # JSON has no tuple, and a CHOICE value is a (name, value)
+                # pair in this engine. {"$choice": [name, value]} says so
+                # without guessing whether a two-element list was a CHOICE or
+                # a two-element SEQUENCE OF -- which the encoder cannot tell
+                # apart either.
+                pair = v["$choice"]
+                if not (isinstance(pair, list) and len(pair) == 2
+                        and isinstance(pair[0], str)):
+                    raise Refused('$choice wants [alternative-name, value]')
+                return (pair[0], _dehex(pair[1]))
             return {k: _dehex(x) for k, x in v.items()}
         if isinstance(v, list):
             return [_dehex(x) for x in v]
