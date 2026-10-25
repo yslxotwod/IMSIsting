@@ -49,6 +49,7 @@
 /* The Map page. Its own translation unit: one canvas, one projection, and
    nothing from AppState but the root it reads loot/map/layers under. */
 #include "map_page.h"
+#include "stats_chart.h"
 
 /* The generated module index. tools/gen-module-index.sh rewrites this file;
    it is included rather than linked so the GUI always agrees with the tree. */
@@ -239,6 +240,40 @@ category_class(const char *cat)
     if (g_strcmp0(cat, "EXPLOIT KITS") == 0)        return "cat-kits";
     if (g_strcmp0(cat, "INTERCEPT / CARRIER") == 0) return "cat-intercept";
     return "cat-system";
+}
+
+/* The same eleven hues as the .cat-* rules in native/resources/style.css, as
+   numbers, because a cairo painter cannot read a stylesheet. Two sources for
+   one palette is one too many: change a hue here and change it there, and the
+   comment in that block names this function so the two stay in step. */
+static void
+cat_rgb(const char *cat, double *r, double *g, double *b)
+{
+    struct { const char *name; double r, g, b; } table[] = {
+        { "SYSTEM",           0.576, 0.635, 0.722 },
+        { "RECON",            0.310, 0.702, 0.851 },
+        { "RADIO",            0.416, 0.553, 1.000 },
+        { "ACCESS",           0.310, 0.816, 0.753 },
+        { "CORE NETWORK",     0.663, 0.545, 1.000 },
+        { "SIM / IDENTITY",   0.310, 0.816, 0.541 },
+        { "BASEBAND / DEVICE",0.941, 0.569, 0.247 },
+        { "TRACKING",         0.878, 0.482, 0.816 },
+        { "ANALYSIS",         0.878, 0.702, 0.341 },
+        { "EXPLOIT KITS",     0.937, 0.420, 0.420 },
+        { "INTERCEPT / CARRIER", 0.851, 0.541, 0.612 },
+    };
+
+    for (guint i = 0; i < G_N_ELEMENTS(table); i++) {
+        if (g_strcmp0(cat, table[i].name) == 0) {
+            *r = table[i].r;
+            *g = table[i].g;
+            *b = table[i].b;
+            return;
+        }
+    }
+    *r = 0.576;
+    *g = 0.635;
+    *b = 0.722;
 }
 
 /* Module icons resolve by name from the hicolor theme: the symbolic SVGs in
@@ -6042,6 +6077,20 @@ static const char *const plain_keys[] = {
     "gnb_conf\tthe keys an OpenAirInterface gnb.conf expects",
     "rfsim_needs_no_radio\ta simulated RF path runs the whole stack without hardware",
     "run_with_radio\tthe command line that drives the gNB through a real USRP",
+    "attest\tre-hash the unpacked tree before and after a boot so the emulated image is the studied image",
+    "boot\tthe step that starts the emulator",
+    "boot_note\twhat the image format implies about booting it",
+    "feed\treplay a corpus into the running firmware",
+    "harness\ta generated script that runs the emulator",
+    "image\tthe baseband image being examined",
+    "image_must_match_device\tone image per device and build, so a harness without a manifest does not generalise",
+    "image_octets\tthe size of the image on disk",
+    "machine\tthe emulator and machine that boots this image class",
+    "netdev\tthe network the emulator attaches, and where it forwards to",
+    "stub_service\tthe host listener a fake network points the firmware at",
+    "tap_needs_root\ta tap device needs privileges, the user-mode network does not",
+    "unpack\tthe step that makes a filesystem or boot image into something QEMU can boot",
+    "user_mode_leaks_the_host\tuser-mode emulation runs the firmware on the host network unless a netdev is given",
 };
 
 /* Compare a bare key against one "key<TAB>words" row. */
@@ -7606,7 +7655,8 @@ static const ChipRow chip_rows[] = {
     { "54_baseband_exploit", "--__index_probe__",     NEED_NO, DOES_READS },
     { "54_baseband_exploit", "--cp-check",            NEED_NO, DOES_READS },
     { "54_baseband_exploit", "--cve",                 NEED_NO, DOES_READS },
-    { "54_baseband_exploit", "--emulate",             NEED_NO, DOES_READS },
+    { "54_baseband_exploit", "--qemu-harness",       NEED_NO, DOES_READS },
+{ "54_baseband_exploit", "--emulate",             NEED_NO, DOES_READS },
     { "54_baseband_exploit", "--forge-identity",      NEED_NO, DOES_BUILDS },
     { "54_baseband_exploit", "--forge-reg-accept",    NEED_NO, DOES_BUILDS },
     { "54_baseband_exploit", "--forge-reg-reject",    NEED_NO, DOES_BUILDS },
@@ -13823,37 +13873,6 @@ stat_tile(const char *value, const char *label)
     return b;
 }
 
-/* label — bar — count, so the shape of the tree is visible at a glance. */
-static GtkWidget *
-stat_bar_row(const char *label, guint n, guint max)
-{
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    GtkWidget *l = gtk_label_new(label);
-    GtkWidget *bar = gtk_progress_bar_new();
-    GtkWidget *c = gtk_label_new(NULL);
-    g_autofree char *cs = g_strdup_printf("%u", n);
-
-    gtk_widget_add_css_class(l, "stat-row-label");
-    gtk_widget_add_css_class(bar, "stat-bar");
-    gtk_widget_add_css_class(c, "stat-row-count");
-
-    gtk_label_set_xalign(GTK_LABEL(l), 0.0f);
-    gtk_widget_set_size_request(l, 132, -1);
-    gtk_widget_set_hexpand(bar, TRUE);
-    gtk_widget_set_valign(bar, GTK_ALIGN_CENTER);
-    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(bar),
-        max > 0 ? (double) n / (double) max : 0.0);
-    gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(bar), FALSE);
-    gtk_label_set_text(GTK_LABEL(c), cs);
-    gtk_widget_set_size_request(c, 32, -1);
-    gtk_label_set_xalign(GTK_LABEL(c), 1.0f);
-
-    gtk_box_append(GTK_BOX(row), l);
-    gtk_box_append(GTK_BOX(row), bar);
-    gtk_box_append(GTK_BOX(row), c);
-    return row;
-}
-
 /* ── The stats index ──────────────────────────────────────────────────
    Every number on this page beyond the static table comes from one TSV that
    tools/stats_index.py writes: scope, module, key, label, value, unit, source.
@@ -14098,7 +14117,7 @@ create_stats_page(AppState *state)
     GtkWidget *sub    = gtk_label_new("Modules, collections and health");
     GtkWidget *tiles  = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     GHashTable *by_cat = g_hash_table_new(g_str_hash, g_str_equal);
-    guint selftests = 0, loot_files = 0, loot_dirs = 0, offline = 0, maxcat = 0;
+    guint selftests = 0, loot_files = 0, loot_dirs = 0, offline = 0;
 
     gtk_widget_add_css_class(title, "page-title");
     gtk_widget_add_css_class(sub,   "page-subtitle");
@@ -14175,24 +14194,44 @@ create_stats_page(AppState *state)
         gtk_box_append(GTK_BOX(inner), card);
     }
 
-    /* ---- by category ---- */
+    /* ---- by category, as a picture ----
+       One array, two readings: the ring is each category's share of the
+       toolkit, the bars are its count against the fullest one. Eleven rows of
+       GtkProgressBar could only ever be the bars. */
     {
         GtkWidget *body;
-        GtkWidget *card = verb_card("SORT BY CATEGORY", &body);
+        GtkWidget *card = verb_card("WHERE THE TOOLKIT IS THICK", &body);
+        GtkWidget *figure = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 24);
+        GtkWidget *bars;
+        GtkWidget *ring;
         g_autoptr(GPtrArray) cats = category_order();
-        GHashTableIter it;
-        gpointer k, v;
-
-        g_hash_table_iter_init(&it, by_cat);
-        while (g_hash_table_iter_next(&it, &k, &v))
-            if (GPOINTER_TO_UINT(v) > maxcat) maxcat = GPOINTER_TO_UINT(v);
+        StatsChartItem *items = g_new0(StatsChartItem, MAX(cats->len, 1u));
+        guint total = 0;
+        g_autofree char *total_s = NULL;
 
         for (guint c = 0; c < cats->len; c++) {
             const char *cat = g_ptr_array_index(cats, c);
             guint n = GPOINTER_TO_UINT(g_hash_table_lookup(by_cat, cat));
-            gtk_box_append(GTK_BOX(body), stat_bar_row(cat, n, maxcat));
+
+            items[c].label = cat;
+            items[c].value = (double) n;
+            cat_rgb(cat, &items[c].r, &items[c].g, &items[c].b);
+            total += n;
         }
+
+        total_s = g_strdup_printf("%u", total);
+        ring = stats_chart_donut_new(items, cats->len, total_s, "MODULES");
+        bars = stats_chart_bars_new(items, cats->len);
+
+        gtk_widget_add_css_class(figure, "stat-figure");
+        gtk_widget_set_valign(ring, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(bars, GTK_ALIGN_CENTER);
+        gtk_widget_set_hexpand(bars, TRUE);
+        gtk_box_append(GTK_BOX(figure), ring);
+        gtk_box_append(GTK_BOX(figure), bars);
+        gtk_box_append(GTK_BOX(body), figure);
         gtk_box_append(GTK_BOX(inner), card);
+        g_free(items);
     }
 
     /* ---- where things live ---- */
