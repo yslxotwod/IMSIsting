@@ -3812,6 +3812,64 @@ otasm_smpp_response() {
     printf 'built\tyes\n'
 }
 
+# ── 3GPP2 SMS: the originating address as an ASCII name ─────────────────
+# TS 23.040 is the 3GPP SMS format and its originating address is a number,
+# tagged with a type-of-address octet. The 3GPP2 family (C.S0015 / X.S0011,
+# the cdma2000 SMS format that also rides SMS over IMS) allows the originating
+# address to be an ASCII string of up to 128 characters -- a *name*, not a
+# number -- and a handset displaying it has nothing to compare it against.
+#
+# This is the field the tree could not build. It is the sender half of the
+# NameSpoofing chain; the injection path lives in 30_volte_ims --spoof-sms.
+OTASM_GPP2_MAX_OA=128
+
+otasm_gpp2_oa() {   # <name> -> length octet + ASCII
+    local name="$1"
+    local -i n=${#name}
+    if (( n < 1 )); then
+        printf 'ERROR\tthe originating address is empty\n' >&2
+        printf 'WHY\ta 3GPP2 originating address carries at least one character and at most %s\n' "$OTASM_GPP2_MAX_OA" >&2
+        return 2
+    fi
+    if (( n > OTASM_GPP2_MAX_OA )); then
+        printf 'ERROR\tthe originating address is %s characters and the field holds %s\n' "$n" "$OTASM_GPP2_MAX_OA" >&2
+        printf 'WHY\tC.S0015 fixes the field at %s characters; a longer name is not a 3GPP2 address, it is a truncated one\n' "$OTASM_GPP2_MAX_OA" >&2
+        return 2
+    fi
+    if [[ "$name" == *[![:print:]]* ]]; then
+        printf 'ERROR\tthe originating address is not printable ASCII\n' >&2
+        printf 'WHY\tthe field is ASCII; the display on the far side is whatever those octets render as, so a control character is a display bug, not a spoof\n' >&2
+        return 2
+    fi
+    printf '%02X%s' "$n" "$(printf '%s' "$name" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')"
+}
+
+otasm_cmd_gpp2_oa() {   # --gpp2-oa <name>
+    local name="${1:-}"
+    [[ -n "$name" ]] || {
+        printf 'ERROR\tusage: --gpp2-oa <name>\n' >&2
+        printf 'WHY\tthe name a 3GPP2 originating address can carry, up to %s characters\n' "$OTASM_GPP2_MAX_OA" >&2
+        return 2; }
+    local field; field=$(otasm_gpp2_oa "$name") || return 2
+    local -i n=${#name}
+    printf 'field\toriginating_address\n'
+    printf 'format\t3GPP2 SMS originator: one length octet then ASCII\n'
+    printf 'chars\t%s\n' "$n"
+    printf 'max_chars\t%s\n' "$OTASM_GPP2_MAX_OA"
+    printf 'ascii_hex\t%s\n' "${field:2}"
+    printf 'field_hex\t%s\n' "$field"
+    printf 'length_octet\t%s\n' "${field:0:2}"
+    printf 'renders_as\t%s\n' "$name"
+    printf 'number_or_name\tname\n'
+    printf 'what_the_receiver_can_compare\tnothing: the field is a string the sender chose, so there is no number to look up and no subscriber record to disagree with it\n'
+    printf 'spec\t3GPP2 C.S0015 (SMS), X.S0011 (SMS over IMS): the originating address may be up to 128 ASCII characters\n'
+    printf 'contrast\tTS 23.040 (3GPP) would carry a number here, which an operator can check against a subscriber record\n'
+    printf 'finding\toriginator_is_a_string\tHIGH\tthe originating address is a name the sender chooses; nothing in the message binds it to a subscriber\n'
+    printf 'ref\t3GPP2 C.S0015 / X.S0011\n'
+    printf 'limit\tonly the originating-address field is encoded: the rest of the 3GPP2 envelope is not built here\n'
+    printf 'verdict\tgpp2_name_address_built\n'
+}
+
 otasm_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -4513,6 +4571,25 @@ PYGW
     chk smpp-tls-verdict    "$(fld "$tlsout" verdict)" "smpp_tls_admitted_by_shape"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
+    # ── the 3GPP2 name address ───────────────────────────────────────────
+    local g2 g2long
+    g2=$(otasm_cmd_gpp2_oa "Verified by Bank" 2>/dev/null)
+    chk gpp2-chars     "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="chars"{print $2}')" "16"
+    chk gpp2-max       "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="max_chars"{print $2}')" "128"
+    chk gpp2-len       "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="length_octet"{print $2}')" "10"
+    chk gpp2-ascii     "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="ascii_hex"{print $2}')" "56657269666965642062792042616E6B"
+    chk gpp2-kind      "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="number_or_name"{print $2}')" "name"
+    chk gpp2-finding   "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="finding"{print $2}')" "originator_is_a_string"
+    chk gpp2-sev       "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="finding"{print $3}')" "HIGH"
+    chk gpp2-verdict   "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="verdict"{print $2}')" "gpp2_name_address_built"
+    chk gpp2-spec      "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="spec" && $2 ~ /C\.S0015/{print "cited"}')" "cited"
+    # 128 characters is the limit and 129 is refused by name
+    g2long=$(printf 'A%.0s' $(seq 1 128))
+    chk gpp2-128       "$(otasm_gpp2_oa "$g2long" | cut -c1-2)" "80"
+    chk gpp2-129       "$(otasm_gpp2_oa "${g2long}A" >/dev/null 2>&1; echo $?)" "2"
+    chk gpp2-empty     "$(otasm_gpp2_oa "" >/dev/null 2>&1; echo $?)" "2"
+    chk gpp2-noargs    "$(otasm_cmd_gpp2_oa >/dev/null 2>&1; echo $?)" "2"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -4739,6 +4816,7 @@ otasm_cli_main() {
         --smpp-send)      otasm_smpp_send "$@" ;;
         --http-send)      otasm_http_send "$@" ;;
         --http-devices)   otasm_http_devices "$@" ;;
+        --gpp2-oa)          otasm_cmd_gpp2_oa "${1:-}" ;;
         --selftest)       otasm_selftest ;;
         --menu)           otasm_menu ;;
         *)

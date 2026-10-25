@@ -2758,6 +2758,76 @@ PY
     printf 'verdict\ttwo_streams_xored\n'
 }
 
+# ── IMS SMS source spoofing: the access leg the core never sees ─────────
+# An SMS over IMS is a SIP MESSAGE whose body is a 3GPP2-format short message.
+# The receiving ME has an IMS client that accepts an incoming MESSAGE from the
+# access leg -- the same leg the handset itself authenticated on -- and hands
+# the body to the messaging application as if the core had delivered it. There
+# is no originating MSC, no SMSC, no interworking: the message is composed on
+# the device and delivered to the device, and the display shows whatever
+# originating address the body carries.
+#
+# That is the second half of NameSpoofing. 41_ota_sms builds the 3GPP2
+# originating address as an ASCII name of up to 128 characters; this verb puts
+# it in a SIP MESSAGE and shows what the far side is asked to believe.
+vims_gpp2_body() {   # <name> <text> -> 3GPP2-ish body hex (OA field + text)
+    local name="$1" text="$2"
+    local -i n=${#name}
+    printf '%02X%s%s' "$n" \
+        "$(printf '%s' "$name" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')" \
+        "$(printf '%s' "$text" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')"
+}
+
+vims_cmd_spoof_sms() {   # <from-name> <to-uri> [--text <text>]
+    local name="${1:-}" to="${2:-}" text="Your account is verified"
+    [[ -n "$name" && -n "$to" ]] || {
+        printf 'ERROR\tusage: --spoof-sms <from-name> <to-uri> [--text <text>]\n' >&2
+        printf 'WHY\tthe sender name and the destination URI are the two things the message needs\n' >&2
+        return 2; }
+    shift 2
+    while (($#)); do
+        case "$1" in
+            --text) text="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(vims_sanitize "$1" 2>/dev/null || printf '%s' "$1")" >&2; return 2 ;;
+        esac
+    done
+    local -i n=${#name}
+    if (( n < 1 || n > 128 )); then
+        printf 'ERROR\tthe sender name is %s characters and a 3GPP2 originating address holds 1 to 128\n' "$n" >&2
+        return 2
+    fi
+    local body from_uri req
+    body=$(vims_gpp2_body "$name" "$text")
+    from_uri="sip:310150000000001@ims.mnc001.mcc310.3gppnetwork.org"
+    req=$(printf 'MESSAGE %s SIP/2.0\r\nVia: SIP/2.0/UDP 10.45.0.2:5060;branch=z9hG4bKspoof\r\nMax-Forwards: 70\r\nFrom: "%s" <%s>;tag=9a1\r\nTo: <%s>\r\nCall-ID: spoof-sms@10.45.0.2\r\nCSeq: 1 MESSAGE\r\nP-Preferred-Identity: <%s>\r\nContent-Type: application/vnd.3gpp2.sms\r\nContent-Length: %s\r\n\r\n' \
+        "$to" "$name" "$from_uri" "$to" "$from_uri" "$(( ${#body} / 2 ))")
+    printf 'request\tMESSAGE\n'
+    printf 'from_display\t%s\n' "$name"
+    printf 'from_uri\t%s\n' "$from_uri"
+    printf 'to_uri\t%s\n' "$to"
+    printf 'content_type\tapplication/vnd.3gpp2.sms\n'
+    printf 'body_hex\t%s\n' "$body"
+    printf 'body_octets\t%s\n' "$(( ${#body} / 2 ))"
+    printf 'sender_name_chars\t%s\n' "$n"
+    printf 'sip_headers\t%s\n' "$(printf '%s' "$req" | grep -c ':')"
+    printf 'sip_length\t%s\n' "${#req}"
+    printf 'path\tME -> access leg -> ME: the core, the SMSC and the originating MSC are not on it\n'
+    printf 'what_the_display_shows\t%s\n' "$name"
+    printf 'what_the_core_authenticated\tthe subscription that sent the MESSAGE, which is not the name in the From header\n'
+    if [[ "$text" == *verif* ]]; then
+        printf 'trust_string\t%s\n' "$text"
+        printf 'trust_note\tthe message claims a verification the infrastructure never issued, and nothing downstream can contradict it\n'
+    fi
+    printf 'finding\tname_is_not_an_identity\tHIGH\tthe From display name and the 3GPP2 originating address are strings the sender chose, so nothing binds them to a subscriber\n'
+    printf 'finding\tinjected_over_access_leg\tHIGH\tthe message is composed and delivered on the same leg, so no core element ever sees it and no SMSC authorises it\n'
+    printf 'finding\tav_is_not_a_signal\tMEDIUM\tpublished stealth note: top-tier mobile antivirus did not flag messages of this shape, which is why the display is the only defence\n'
+    printf 'detect\tcompare the From URI against the subscription that authenticated the access leg, and treat an SMS whose originating address is not a number as untrusted\n'
+    printf 'spec\t3GPP2 C.S0015 / X.S0011 SMS over IMS; the IMS client weakness is catalogued as unrestricted IMS signalling sources (SI-2)\n'
+    printf 'ref\tNameSpoofing (IMS SMS source spoofing)\n'
+    printf 'limit\tno SIP message is sent here: the request is composed and its headers counted, which is what a built message needs before a lab send\n'
+    printf 'verdict\tsip_message_built_with_a_spoofed_origin\n'
+}
+
 vims_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -3252,6 +3322,26 @@ PYP
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
     trap - EXIT
+    # ── IMS SMS source spoofing: the name the far side displays ──────────
+    local sp
+    sp=$(vims_cmd_spoof_sms "Verified by Bank" "sip:310150000000002@ims.mnc001.mcc310.3gppnetwork.org" --text "Your account is verified" 2>/dev/null)
+    chk spoof-display   "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="from_display"{print $2}')" "Verified by Bank"
+    chk spoof-ctype     "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="content_type"{print $2}')" "application/vnd.3gpp2.sms"
+    chk spoof-body-len  "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="body_octets"{print $2}')" "41"
+    chk spoof-body-oa   "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="body_hex"{print substr($2,1,2)}')" "10"
+    chk spoof-chars     "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="sender_name_chars"{print $2}')" "16"
+    chk spoof-path      "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="path" && $2 ~ /SMSC/{print "no_core"}')" "no_core"
+    chk spoof-trust     "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="trust_string"{print "claimed"}')" "claimed"
+    chk spoof-find1     "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="finding" && $2=="name_is_not_an_identity"{print $3}')" "HIGH"
+    chk spoof-find2     "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="finding" && $2=="injected_over_access_leg"{print $3}')" "HIGH"
+    chk spoof-find3     "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="finding" && $2=="av_is_not_a_signal"{print $3}')" "MEDIUM"
+    chk spoof-verdict   "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="verdict"{print $2}')" "sip_message_built_with_a_spoofed_origin"
+    chk spoof-si2       "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="spec" && $2 ~ /SI-2/{print "cited"}')" "cited"
+    # a plain number-as-name still builds, but a 129-character name does not
+    chk spoof-long      "$(vims_cmd_spoof_sms "$(printf 'A%.0s' $(seq 1 129))" sip:x@y >/dev/null 2>&1; echo $?)" "2"
+    chk spoof-noargs    "$(vims_cmd_spoof_sms >/dev/null 2>&1; echo $?)" "2"
+    chk spoof-no-trust  "$(vims_cmd_spoof_sms Bank sip:x@y --text "hello" | awk -F'\t' '$1=="trust_string"{print "none"}' | head -1)" ""
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -3360,6 +3450,7 @@ vims_cli_main() {
         --sip-probe)              vims_cmd_sip_probe "$@" ;;
         --g711)                   vims_cmd_g711 "${1:-}" "${2:-}" "${3:-}" ;;
         --plan)                   vims_plan "${1:-}" ;;
+        --spoof-sms)          vims_cmd_spoof_sms "$@" ;;
         --selftest)               vims_selftest ;;
         --menu)                   vims_menu ;;
         *)
