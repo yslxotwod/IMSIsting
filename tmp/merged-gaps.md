@@ -5,7 +5,7 @@ not built**: things the tree already attempts and cannot finish on this machine.
 The right half is `tmp/future-exploits.md`: things the tree does not attempt yet.
 
 The order is by how much the entry hurts, not by module number and not by lane.
-Every entry is ranked R1..R80 in one continuous queue; the blocks are only there
+Every entry is ranked R1..R84 in one continuous queue; the blocks are only there
 so the page stays readable. When two entries share a rank, the cheaper one goes
 first. Ranks are appended, never renumbered: a block that arrives later takes the
 next numbers so that a rank already quoted in a plan or a commit still points at
@@ -109,9 +109,9 @@ Block 1 object before they can do more than clone a cell.
 | R16 | **A2 — `58_suci_catcher` transmit half** — done        | `--start` launches the Open5GS AMF from the generated `amf.yaml` and then the gNB, recording each process's own pid; `--stop` stops both; a stop that hits the running gNB cell is verified by the recorded pid going away | the gNB and the AMF have to be installed, and the SDR has to answer — the module refuses, naming which of the three is missing, instead of starting a process that radiates nothing |
 | R17 | **L1 — `57_evil_twin` transmit half** — done           | `--prepare-*` builds the lab configs, `--lte-test`/`--nr-test` start the local core, eNB/gNB and simulator UE, bounded by a timer and by the lab configs themselves: Open5GS and srsRAN Project take `-c <file>`, a positional path is ignored and the process would read the host's installed config. The result is read from the UE log marker, not assumed; a missing UPF slice is named and skipped; a service that dies on start names itself | a real UE in place of the simulator UE needs a radio (Tier 3); this accepts an attach from the owned simulator UE only |
 | R18 | **L1b — MAP SAI answer parser** — done                 | `--parse-sai` takes the answer (a full MSU, an SCCP/TCAP message or a bare component), unwraps the TCAP returnResultLast to the operation, refuses anything that is not sendAuthenticationInfo, and walks the AuthenticationSetList one vector at a time: tag 80/16 RAND, tag 81 SRES or XRES, tag 82 Kc or AUTN, tag 83/32 KASME, any other tag printed raw with its length. It names only the tag/length pairs that are unambiguous and says why in a `note` row | a live HLR to answer; the fixture in the selftest is built by this module's own TCAP and TLV primitives, so it proves the parser, not the network |
-| R19 | **`07_gsm_attack` — fake cell delivering SMS-DELIVER** | RACH → AGCH(IA) → paging response → UA → SABM(SAPI 3) → CP-DATA → CP-ACK → RR release. RR builders exist, TP layer exists, the LAPDm framing and the sequence between them do not | code + hardware; sequence is published in TS 44.006 / 44.018 / 24.011                                                   |
-| R20 | **`41_ota_sms` — `--cb-build`**                        | TS 23.041 in CBCH/SMSCB encoding: a CB message in 4 consecutive TDMA blocks plus the CBC's `SMS BROADCAST COMMAND`. LTE PWS already builds (`10_lte_air --build-sib10/11/12`) | code; 4-block TDMA packing is published (TS 44.012 / 23.041 §9), nothing here encodes LAPDm blocks                       |
-| R21 | **G3 — GUTI reallocation observation**                 | forces a new temporary identity, records when reallocation happens                                       | Tier 4                                                                                                                  |
+| R19 | **`07_gsm_attack` — fake cell delivering SMS-DELIVER** — done | `--sms-deliver-seq` prints the whole exchange: paging request on PCH, paging response, SABM/UA on SAPI 3, CP-DATA around RP-DATA around an SMS-DELIVER TPDU (7-bit GSM 03.38 packed or 8-bit), CP-ACK, RR channel release. `--tpdu-deliver`, `--rp-data`, `--cp-data` build each layer alone; `--lapdm-frame` emits SABM/UA/DISC/DM/RR/UI/I; an over-long L3 message is split across I-frames with the M bit by `--lapdm-i-segments`. The SAPI 3 address and length octets follow the module's existing UI convention; the M-bit placement is an unverified reading of TS 44.006 5.4.2 and the sequence says so | the frames are built and ordered, not yet transmitted; a real handset answering needs the radio half (Tier 3) |
+| R20 | **`41_ota_sms` — `--cb-build`** — done | `--cb-build` assembles a TS 23.041 CB message (message id, serial = geo scope + message code + update number, DCS, 82-octet cap for 7-bit / 82 for 8-bit), `--cb-blocks` splits it into CBCH blocks (length octet + 22 data octets, 0x2b fill, four blocks per 51-multiframe per TS 44.012 6.1), `--cb-command` builds the CBC WRITE-REPLACE (message type 0x01 with one CB data IE, TS 48.049 6.2 — the field order is a reading, not quoted text, and the row says so), `--cb-serial` alone | the blocks are built and ordered, not yet placed on a CBCH; the WRITE-REPLACE octet coding is unverified against a real CBC |
+| R21 | **G3 — GUTI reallocation observation** — observation half done | `09_lte_attach --realloc-command` decodes a GUTI REALLOCATION COMMAND (new GUTI, TAI, cause; a reallocation carrying an IMSI says so), `--realloc-record <old> <new> [--imsi] [--cause]` stamps the swap in `realloc.tsv` (observed_at/old_guti/new_guti/imsi/cause/source), `--realloc-chain <guti>` walks old->new->current up to 16 hops, `--realloc-list` prints the log; the swap timer is a timestamp, so a caller can tell 'reallocated within N seconds of attach' | forcing the reallocation needs the radio (Tier 4); this half only watches what the UE was told |
 | R22 | **G1 — 5G-S-TMSI paging narrowing**                    | narrows to a paging frame and occasion, watches which the phone answers                                  | Tier 2 receive-only for the observation                                                                                 |
 | R23 | **K6 — DoLTEst device negative-test corpus**           | normative-rejection cases driven through the existing responder                                          | Tier 4 to send, Tier 0 for the corpus                                                                                   |
 | R24 | **K4 — Devilray: being detected**                      | would the phone notice; answers a question the tree has never asked                                      | Tier 0→3                                                                                                                |
@@ -258,6 +258,40 @@ existing rank moves.
 
 ---
 
+# Block 9 — R81–R84 · The 2025–26 published attacks the tree cannot express
+
+Four attacks with papers, CVE numbers or a formal model behind them, each one
+checked against the tree the same way Block 8 was: the absence is named with the
+command that shows it. None of them is a missing message field — each is a whole
+**object** the tree does not have, which is why they rank where they do.
+
+Ranked here rather than higher because damage decides the order and none of the
+four puts a subscriber in software on this bench: R81 and R83 need a card, a
+handset or a modem in the loop, R82 is a correlation model over records an
+operator already holds, and R84 needs an IMS access leg. All four are Tier 0 to
+*build*, which is the point — the codec is what turns a published result into
+something this tree can run.
+
+| #   | entry                                          | does                                                                | needs     |
+| --- | ---------------------------------------------- | ------------------------------------------------------------------- | --------- |
+| R81 | **CATANA — SIM-originated AT commands** (`RUN AT`, TS 31.111) (`52_stk`, `56_baseband_diag`, `16_sim`) | the proactive command that hands an arbitrary **AT command** to the modem. The tree has both halves and joins neither: `52_stk` builds and parses TS 31.111 D0 envelopes against a 40-entry command table, and **`0x34` is not in it** — `stk_cmd_name 34` prints `unknown proactive command` — while `56_baseband_diag` is the AT side (`--at`, `--at-parse`, `--escape`, EFS/NV writes) and `16_sim` is the card side. Nothing models what the modem does with the command, nothing carries the AT payload, and `--audit`'s silent-off-device class lists 10 11 12 13 15 30 40 43 60 61 with no modem-execution row. Published impact on vulnerable Qualcomm/Quectel parts (`CVE-2025-48618`, `CVE-2026-57550`; 7 of 8 IoT modems and multiple handsets in the CATANA sample): an AT chain to code execution on the application processor, a **forced 5G→2G downgrade** by rewriting RAT preference, identifier and file readout from the AT surface, cellular kill / device shutdown, and on recent Android a **browser launch with no user interaction**. The root cause is spec-compliant delegation of trust, not a memory bug, which is exactly why the build is a codec plus an acceptance harness rather than an exploit | code for the envelope + AT payload (Tier 0); hardware for the card and the modem under test |
+| R82 | **Di5Guise — eSIM device-profile linkability** (`16_sim`, `31_sim_defense`, `18_imsi_exposure`, `14_suci`) | the binding that survives profile rotation: every eSIM carries a **Device Profile** — secret key, certificate, unique **EID** — provisioned at manufacture and used to authenticate the *hardware*, so rotating MNO profiles still authenticates the same device and an operator-vantage adversary can fold all those subscriber identities back into one handset and a pattern of life. The tree can read the pieces and cannot correlate them: `16_sim --eid` is **accepted and not emitted** ("the EID travels on ES2+ (6.5.2.1) and ES10c GetEID (5.7.20)", `modules/16_sim.sh:2712`), `--es8-*`/`--es9-*` codecs and `31 --esim-profile-parse` describe one profile at a time, `18 --cross`/`--map` correlate subscriber identities with no device anchor, and `14 --link-oracle` models **SUCI** linkability, not device-profile binding. Missing object: a correlation oracle over ES9+/ES2+/ES10c records across a profile-rotation sequence, scoring re-identification, plus the vSIM-style decoupled-device-profile variant to measure against it (published evaluation: re-identification accuracy 93% → 49% with traffic obfuscation) | code — Tier 0 model; records or a lab eUICC for a real sequence |
+| R83 | **GSMA SGP.32 eSIM provisioning — management-plane takeover** (`16_sim`, `31_sim_defense`) | the unattended IoT provisioning plane (eIM → IPA → eUICC) and the 10-step takeover that chains **two unauthenticated local operations** into full control of it: install, enable, disable or delete profiles on a device nobody is watching, with **no credentials** in the preconditions and a kit cost around €130. The tree is SGP.22-shaped end to end and has nothing of SGP.32: `grep -rn 'SGP\.32\|eIM\|IPA' modules/` returns one unrelated string (`11_lte_core.sh:622`, `VPLMN-LIPA-Allowed`). No IPA/eIM message set, no IPAd/IPAe transport, no ES10b local-interface codec, no expression of the local pair that the formal model (Tamarin and ProVerif, v1.3 management plane) found — six specification-level attacks, the takeover being the worst. Missing object: the IPA/eIM plane plus a chain harness that replays the two local operations in order and asserts the management-plane state change | code for the message set and the chain (Tier 0); a device with an IPA, or the published model, for the last step |
+| R84 | **IMS SMS source spoofing — NameSpoofing** (`41_ota_sms`, `30_volte_ims`) | a sender name instead of a sender number. The **3GPP2 SMS format** allows an originating address that is an **ASCII string up to 128 characters**, and the ME's IMS client — the **V2: unrestricted IMS signaling sources (SI-2)** weakness — accepts an SMS injected over the IMS access leg as if the core had delivered it, so the message **never traverses the network** and can carry trust strings ("verified by …") that the infrastructure would never authorise. The tree builds the wrong century: `41_ota_sms` is TS 23.040 TPDU + SMPP + Type-0 + SAT/WIB, `30_volte_ims` builds and sends SIP with a real media leg, and `grep -rln '3GPP2\|C\.S0015' modules/` finds only `11_lte_core` (a LIPA name) — there is no 3GPP2 SMS codec and no SIP-side injection path, so the attack cannot even be described in a built message. Published stealth note: top-tier mobile antivirus did not flag the spoofed messages | code for the 3GPP2 codec and the SIP injection path (Tier 0); an IMS access leg for delivery |
+
+> Two of the four already have a neighbour in the queue and are **not** merged
+> into it: the AT codec R81 needs sits beside `56_baseband_diag`'s own coverage
+> gap, and the eUICC device-profile work R82/R83 need is the same card the
+> shipped `16_sim` key store and `31 --esim-profile-parse` already open.
+
+> Deliberately **not** a queue entry: reproducing the CATANA AT chains per modem
+> model, or the SGP.32 takeover per IPA implementation. Both are firmware-specific
+> and belong in a corpus (the `54_baseband_exploit` / `21_lte_cve` shape), not in
+> the queue. What is queued is the message and the chain, which is the part this
+> tree can hold.
+
+---
+
 # Where the two lists meet
 
 These roadmap entries **close a README gap** rather than open a lane. The
@@ -333,6 +367,13 @@ They sit at R75/R76 because damage decides the order and neither changes what a
 catcher can do until R25 exists or a 3G capture is in hand — the build is cheap,
 the consequence is not reachable yet.
 
+Same price again, same reason: **R81** (the `RUN AT` envelope), **R82** (the eSIM
+device-profile correlation oracle), **R83** (the SGP.32 IPA/eIM plane and its
+two-step chain) and **R84** (the 3GPP2 SMS codec and the SIP injection path) are
+all Tier 0 builds — the codec is the cheap half. Each sits low because the
+consequence needs a card, a modem, an operator's records or an IMS access leg,
+and none of those is on this bench yet.
+
 Then the €10–30 layer: R13, R12, R9, R62, R55, R22.
 
 Then transmit, which is where the money is: R16/R17 (Tier 3–4), R19 (hardware),
@@ -354,6 +395,10 @@ R49/R50 (Tier 3), R60 (Tier 3).
   objects the tree does not have. They were found by working the 3G surface
   against the code rather than against a roadmap, and they take new numbers so
   the existing queue does not move.
+- **Appended after that**: Block 9 (R81–R84), four published attacks with papers,
+  CVE numbers or a formal model behind them — CATANA's `RUN AT`, the eSIM
+  device-profile linkability result, the SGP.32 management-plane takeover and
+  IMS NameSpoofing. Same rule: new numbers at the tail, nothing renumbered.
 
 ## Gating removed (0.86.0)
 

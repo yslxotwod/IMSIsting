@@ -1384,6 +1384,122 @@ latt_cmd_guti_tsv() {
     printf 'BOUND_GUTI_COUNT\t%s\n' "$n"
     [[ "$n" -gt 0 ]]
 }
+# ── GUTI reallocation observation ─────────────────────────────────────
+# A GUTI reallocation is a temporary identity replaced by another, and the
+# only place the replacement is visible without forcing it is the exchange
+# itself: the network sends GUTI REALLOCATION COMMAND (NAS type 0x50) with
+# the new identity, the UE answers COMPLETE (0x51). This half records the
+# replacement in the order it was seen and can walk the chain old -> new ->
+# newer. Forcing one (a Tier-4 transmit) is not done here.
+LATT_REALLOC="$LATT_DIR/realloc.tsv"
+latt_realloc_header() { printf 'observed_at\told_guti\tnew_guti\timsi\tcause\tsource'; }
+
+latt_realloc_init() {
+    mkdir -p "$LATT_DIR" 2>/dev/null
+    [[ -f "$LATT_REALLOC" ]] || { latt_realloc_header; printf '\n'; } > "$LATT_REALLOC"
+}
+
+# GUTI REALLOCATION COMMAND body (TS 24.301 8.2.18): EPS mobile identity
+# carrying the new GUTI, then an optional TAI (5 octets: PLMN + TAC) when the
+# spare bit says one follows, then an optional reallocation cause.
+latt_realloc_command() {   # <hex>
+    local h; h=$(latt_nfc "${1:-}")
+    latt_is_hex "$h" || { printf 'ERROR\treallocation command must be hex\n' >&2; return 2; }
+    local v; v=$(latt_guti_value "$h")
+    if [[ -z "$v" ]]; then
+        local t=$(( 16#${h:0:2} ))
+        if (( (t & 7) == 1 )); then
+            printf 'reallocated_identity\tIMSI\n'
+            printf 'note\tthis reallocation carries an IMSI, not a GUTI (type 1)\n'
+            return 1
+        fi
+        printf 'ERROR\tthe command does not carry an EPS mobile identity\n' >&2; return 2
+    fi
+    local type=$(( 16#${v:0:2} ))
+    if (( (type & 0x07) == 6 )); then
+        printf 'reallocated_identity\tGUTI\n'
+        printf '%s\n' "$(latt_guti_decode "$v")"
+    else
+        printf 'reallocated_identity\tIMSI\n'
+        printf 'note\tthis reallocation carries an IMSI, not a GUTI (type %d)\n' "$(( type & 0x07 ))"
+        return 1
+    fi
+    local rest="${h:${#v}}"
+    if (( ${#rest} >= 10 )); then
+        printf 'tai\t%s\n' "$(latt_nfc "${rest:0:10}")"
+        rest="${rest:10}"
+    fi
+    if (( ${#rest} >= 2 )); then
+        printf 'cause\t%s\n' "${rest:0:2}"
+    fi
+    printf 'ref\t3GPP TS 24.301 8.2.18 (GUTI reallocation command)\n'
+}
+
+latt_realloc_record() {   # <old-guti-hex> <new-guti-hex> [--imsi IMSI] [--cause HEX]
+    local old new imsi="" cause="-" h
+    old=$(latt_guti_value "${1:-}" 2>/dev/null); new=$(latt_guti_value "${2:-}" 2>/dev/null)
+    [[ -n "$old" && -n "$new" ]] || {
+        printf 'ERROR\tusage: --realloc-record <old-guti-hex> <new-guti-hex> [--imsi IMSI] [--cause HEX]\n' >&2
+        return 2; }
+    shift 2 || true
+    while (( $# )); do
+        case "$1" in
+            --imsi)  imsi="${2:-}"; shift 2 ;;
+            --cause) cause=$(latt_nfc "${2:-}"); shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(latt_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    if [[ -n "$imsi" ]]; then
+        [[ "$imsi" =~ ^[0-9]{14,15}$ ]] || { printf 'ERROR\tIMSI is 14 or 15 digits\n' >&2; return 2; }
+    fi
+    [[ "$cause" == "-" || "$cause" =~ ^[0-9A-Fa-f]{2}$ ]] || {
+        printf 'ERROR\t--cause must be 2 hex digits\n' >&2; return 2; }
+    local old_name new_name
+    old_name=$(latt_guti_decode "$old" 2>/dev/null | awk -F'\t' '$1=="guti"{print $2; exit}')
+    new_name=$(latt_guti_decode "$new" 2>/dev/null | awk -F'\t' '$1=="guti"{print $2; exit}')
+    [[ -n "$old_name" && -n "$new_name" ]] || { printf 'ERROR\tboth ends must decode as GUTIs\n' >&2; return 2; }
+    latt_realloc_init
+    local now; now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$old_name" "$new_name" \
+        "$(latt_sanitize "${imsi:-}")" "$(printf '%s' "${cause^^}")" "latt:--realloc-record" >> "$LATT_REALLOC"
+    printf 'recorded\tyes\n'
+    printf 'old_guti\t%s\n' "$old_name"
+    printf 'new_guti\t%s\n' "$new_name"
+    [[ -n "$imsi" ]] && printf 'imsi\t%s\n' "$imsi"
+    printf 'observed_at\t%s\n' "$now"
+}
+
+latt_cmd_realloc_list() {
+    latt_realloc_init
+    cat "$LATT_REALLOC"
+    local n; n=$(($(grep -c . "$LATT_REALLOC" 2>/dev/null || echo 1) - 1))
+    printf 'REALLOC_COUNT\t%s\n' "$n"
+    [[ "$n" -gt 0 ]]
+}
+
+latt_cmd_realloc_chain() {   # <guti | guti-hex>
+    local name="${1:-}" raw
+    raw=$(latt_guti_value "$name" 2>/dev/null) || {
+        printf 'ERROR\tnot a GUTI: %s\n' "$(latt_sanitize "${name:-<none>}")" >&2; return 2; }
+    name=$(latt_guti_decode "$raw" | awk -F'\t' '$1=="guti"{print $2; exit}')
+    latt_realloc_init
+    local cur="$name" hops=0
+    printf 'start\t%s\n' "$cur"
+    while (( hops < 16 )); do
+        local next
+        next=$(awk -F'\t' -v g="$cur" '$2==g{print $3; exit}' "$LATT_REALLOC" 2>/dev/null)
+        [[ -n "$next" ]] || break
+        printf 'next\t%s\n' "$next"
+        cur="$next"; hops=$(( hops + 1 ))
+    done
+    printf 'current\t%s\n' "$cur"
+    printf 'hops\t%d\n' "$hops"
+    if (( hops == 0 )); then
+        printf 'note\tno recorded reallocation starts at this GUTI\n'
+        return 1
+    fi
+}
+
 
 latt_identity_count() {
     [[ -f "$LATT_IDENT" ]] || { echo 0; return; }
@@ -1937,6 +2053,33 @@ latt_selftest() {
     chk guti-resp-accept "$(printf '%s\n' "$session3" | awk -F'\t' '$1=="downlink"{print $2; exit}')" \
         "Attach accept"
 
+    # ── GUTI reallocation observation ─────────────────────────────────
+    # One old GUTI and one new one, both valid to latt_guti_value: type 6
+    # (GUTI) then PLMN/MME group/MME code/M-TMSI.
+    local rg1="06f4701000010102030405" rg2="06f4701000020202030406"
+    local rec; rec=$(latt_realloc_record "$rg1" "$rg2" --imsi 204080000000001 2>&1)
+    chk realloc-recorded   "$(printf '%s\n' "$rec" | awk -F'\t' '$1=="recorded"{print $2; exit}')" "yes"
+    chk realloc-old-guti   "$(printf '%s\n' "$rec" | awk -F'\t' '$1=="old_guti"{print $2; exit}')" "4150-017-1-1-33752069"
+    chk realloc-new-guti   "$(printf '%s\n' "$rec" | awk -F'\t' '$1=="new_guti"{print $2; exit}')" "4150-017-2-2-33752070"
+    local rts; rts=$(printf '%s\n' "$rec" | awk -F'\t' '$1=="observed_at"{print $2; exit}')
+    [[ "$rts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+        bad=$((bad+1)); printf 'realloc-stamped\tFAIL format=%s\n' "$rts"; }
+    local chain; chain=$(latt_cmd_realloc_chain "$rg1" 2>&1)
+    chk realloc-chain-next "$(printf '%s\n' "$chain" | awk -F'\t' '$1=="next"{print $2; exit}')" "4150-017-2-2-33752070"
+    chk realloc-chain-hops "$(printf '%s\n' "$chain" | awk -F'\t' '$1=="hops"{print $2; exit}')" "1"
+    local list; list=$(latt_cmd_realloc_list 2>&1)
+    chk realloc-list-n     "$(printf '%s\n' "$list" | awk -F'\t' '$1=="REALLOC_COUNT"{print $2; exit}')" "1"
+    # a command that does not carry an identity refuses
+    local badcmd; badcmd=$(latt_realloc_command "00" 2>&1); local badcmd_rc=$?
+    chk realloc-cmd-refuses-rc "$badcmd_rc" "2"
+    chk realloc-cmd-refuses    "$(printf '%s\n' "$badcmd" | awk -F'\t' '$1=="ERROR"{print $2; exit}')" \
+        "the command does not carry an EPS mobile identity"
+    # a reallocation that carries an IMSI instead of a GUTI says so and returns 1
+    local imsicmd; imsicmd=$(latt_realloc_command "010f10f4700000000001" 2>&1); local imsicmd_rc=$?
+    chk realloc-cmd-imsi-rc    "$imsicmd_rc" "1"
+    chk realloc-cmd-imsi-note  "$(printf '%s\n' "$imsicmd" | awk -F'\t' '$1=="reallocated_identity"{print $2; exit}')" "IMSI"
+    rm -f "$LATT_REALLOC"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -2034,6 +2177,10 @@ latt_cli_main() {
         --guti-decode)      latt_cmd_guti_decode "${1:-}" ;;
         --guti-map)         latt_cmd_guti_map "${1:-}" "${2:-}" ;;
         --guti-tsv)         latt_cmd_guti_tsv "${1:-}" ;;
+        --realloc-command)  latt_realloc_command "${1:-}" ;;
+        --realloc-record)   latt_realloc_record "${1:-}" "${2:-}" "${@:3}" ;;
+        --realloc-list)     latt_cmd_realloc_list ;;
+        --realloc-chain)    latt_cmd_realloc_chain "${1:-}" ;;
         --ue-stack)         latt_require_ue_stack ;;
         --selftest)         latt_selftest ;;
         --menu)             latt_menu ;;
@@ -2057,6 +2204,11 @@ Usage: $0 COMMAND
   --guti-decode <hex>        read a GUTI: PLMN, MME group, MME code, M-TMSI
   --guti-map <hex> <imsi>    bind a GUTI to the IMSI behind it
   --guti-tsv [<hex>]         the bindings, or one looked up by GUTI
+  --realloc-command <hex>    decode a GUTI REALLOCATION COMMAND (new GUTI, TAI, cause)
+  --realloc-record <old> <new> [--imsi IMSI] [--cause HEX]
+                             record one old->new replacement
+  --realloc-list             every recorded replacement
+  --realloc-chain <guti>     walk old -> new -> current
   --encode-attach <IMSI> [CAPS_HEX] [ESM_HEX]
                                build a byte-exact Attach Request
   --imsi-encode <IMSI>         IMSI -> EPS mobile identity (BCD, TS 23.003)
