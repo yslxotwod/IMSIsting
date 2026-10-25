@@ -258,6 +258,74 @@ pgt_nr_params() {
     return 0
 }
 
+# ── narrowing: which of several 5G-S-TMSIs share a paging occasion ──────
+# 3GPP TS 38.304 §7.1 gives one UE its PF and PO. An operator with a list of
+# candidates (from a ToRPEDO scan, a subscriber list, a capture) has a second
+# question: which of them land on the same occasion, so one captured paging
+# moment can be attributed to one of them. This walks every candidate through
+# pgt_nr_params and groups the results by occasion.
+pgt_nr_narrow() {   # <T> <nB> <pf_offset> <s-tmsi,...> [--plan]
+    local t="${1:-}" nb="${2:-}" off="${3:-}" list="${4:-}" plan="${5:-}"
+    [[ -n "$list" ]] || {
+        printf 'ERROR\tusage: --nr-narrow <T> <nB> <pf_offset> <5g-s-tmsi,...> [--plan]\n' >&2
+        return 2
+    }
+    [[ "$t" =~ ^[0-9]+$ && "$nb" =~ ^[0-9]+$ && "$off" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tT, nB and pf_offset must be numeric\n' >&2; return 2; }
+    local s ue rows="" names="" shared="" n_ok=0
+    declare -A count=() members=() names_of=()
+    local IFS=,
+    for s in $list; do
+        [[ -n "$s" ]] || continue
+        local h; h=$(pgt_norm_hex "$s")
+        pgt_is_hex "$h" && [[ ${#h} -ge 8 ]] || {
+            printf 'note\tnot an S-TMSI: %s\n' "$(pgt_sanitize "$s")"; continue; }
+        h="${h:${#h}-8}"   # the low 32 bits are the 5G-S-TMSI
+        ue=$(( (16#$h) % 1024 ))
+        local r; r=$(pgt_nr_params "$ue" "$t" "$nb" "$off") || {
+            printf 'note\tT/nB/offset out of range for S-TMSI %s\n' "$(pgt_sanitize "$s")"; continue; }
+        local pf is po
+        pf=$(printf '%s\n' "$r" | awk -F'\t' '$1=="pf_sfn"{print $2}')
+        is=$(printf '%s\n' "$r" | awk -F'\t' '$1=="i_s"{print $2}')
+        po=$(printf '%s\n' "$r" | awk -F'\t' '$1=="po_index"{print $2}')
+        local key="sfn_${pf}_po_${po}"
+        count[$key]=$(( ${count[$key]:-0} + 1 ))
+        members[$key]="${members[$key]:-}${members[$key]:+,}$s"
+        local line
+        printf -v line 's_tmsi\t%s\tue_id\t%d\tpf_sfn\t%s\ti_s\t%s\tpo_index\t%s\toccasion\t%s/%s' \
+            "$s" "$ue" "$pf" "$is" "$po" "$pf" "$po"
+        rows+="$line"$'\n'""
+        n_ok=$(( n_ok + 1 ))
+    done
+    unset IFS
+    printf 'candidates\t%d\n' "$n_ok"
+    printf '%s' "$rows"
+    local k
+    for k in "${!count[@]}"; do
+        if (( ${count[$k]} > 1 )); then
+            printf 'shared_occasion\t%s\t%d\t%s\n' "$k" "${count[$k]}" "${members[$k]}"
+        fi
+    done
+    (( ${#count[@]} > 1 )) && printf 'distinct_occasions\t%d\n' "${#count[@]}"
+    if [[ "$plan" == "--plan" ]]; then
+        for k in "${!count[@]}"; do
+            printf 'watch\t%s\t%d candidate(s)\t%s\n' "$k" "${count[$k]}" "${members[$k]}"
+        done
+        printf 'note\tcapture NR RRC paging (gNB -> SIB1 paging config) at the occasions above; the answer is the RRC setup request that carries the same 5G-S-TMSI\n'
+        printf 'note\tthis module decodes GSM and LTE paging records (--paging-parse); there is no NR paging-message decoder in the tree yet, so attribution is by hand from the captured setup message\n'
+    fi
+    (( n_ok > 0 ))
+}
+
+# The watch plan on its own: what to capture and what to bring back.
+pgt_watch_plan() {   # <T> <nB> <pf_offset> <s-tmsi,...>
+    local t="${1:-}" nb="${2:-}" off="${3:-}" list="${4:-}"
+    [[ -n "$list" ]] || {
+        printf 'ERROR\tusage: --watch-plan <T> <nB> <pf_offset> <5g-s-tmsi,...>\n' >&2
+        return 2; }
+    pgt_nr_narrow "$t" "$nb" "$off" "$list" --plan
+}
+
 # ── extended DRX (eDRX) and the paging time window ──────────────────────
 # 3GPP TS 36.304 §7.4 (LTE / LTE-M / NB-IoT eDRX), TS 24.301 §9.9.3.34 (the
 # eDRX parameters IE), TS 36.331 §6.3.2 (SIB1's hyperSFN and eDRX-Allowed).
@@ -2015,6 +2083,20 @@ pgt_selftest() {
     # The PEI must always precede the PO, never coincide with it.
     out=$(pgt_pei_occ 33 64 64 0 2)
     chk pei-before-po "$(( $(fld "$out" pei_frame) < $(fld "$out" po_frame) ))" "1"
+    # ── NR narrowing: which candidates share a paging occasion ─────────
+    out=$(pgt_nr_narrow 32 32 0 0a000001,0a000401,11223344)
+    chk nn-candidates   "$(fld "$out" candidates)" "3"
+    chk nn-shared-key   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="shared_occasion"{print $2; exit}')" "sfn_1_po_1"
+    chk nn-shared-count "$(printf '%s\n' "$out" | awk -F'\t' '$1=="shared_occasion"{print $3; exit}')" "2"
+    chk nn-distinct     "$(fld "$out" distinct_occasions)" "2"
+    # S-TMSI 0x11223344 -> ue_id 836 -> PF 4, PO 1 under T=32/bB=32.
+    chk nn-occasion     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="s_tmsi" && $2=="11223344"{print $12; exit}')" "4/1"
+    pgt_nr_narrow 32 32 0 >/dev/null 2>&1; chk nn-refuses-rc "$?" "2"
+    # the plan names the shared occasion and says where the answer comes from
+    out=$(pgt_watch_plan 32 32 0 0a000001,0a000401)
+    chk wp-watch-key    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="watch"{print $2; exit}')" "sfn_1_po_1"
+    chk wp-watch-n      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="watch"{print $3; exit}')" "2 candidate(s)"
+    chk wp-notes        "$(printf '%s\n' "$out" | grep -c '^note')" "2"
 
     # 15. GSM Page Mode and Channel Needed packing (TS 44.018 10.5).
     # 0621 10 ... : one shared type-1 octet, Page Mode LOW nibble = 0
@@ -2800,6 +2882,8 @@ pgt_cli_main() {
         --plan)             pgt_plan "${1:-}" ;;
         --edrx-occ)         pgt_cli_edrx_occ "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
         --pei-occ)          pgt_cli_pei_occ "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+        --nr-narrow)        pgt_nr_narrow "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+        --watch-plan)       pgt_watch_plan "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --paging-history)   pgt_cli_paging_history "$@" ;;
         --paging-cause)     pgt_cli_paging_cause "${1:-}" "${2:-}" ;;
         --page-mode)        pgt_cli_page_mode "${1:-}" ;;
@@ -2824,6 +2908,10 @@ Usage: $0 COMMAND
   --edrx-occ <imsi|ue_id> <TeDRX> <PTW> [T] [nB]
                                         eDRX PTW start and the POs inside it
   --pei-occ <5g-s-tmsi|ue_id> [T] [nB] [pf_offset] [N_subgroup]
+  --nr-narrow <T> <nB> <pf_offset> <5g-s-tmsi,...> [--plan]
+                                        which candidates share a PF/PO
+  --watch-plan <T> <nB> <pf_offset> <5g-s-tmsi,...>
+                                        the capture plan for those occasions
                                         NR paging-early-indication occasion
   --paging-history [--flapping-tsv] <pcap>...
                                         per-UE page counts across captures
