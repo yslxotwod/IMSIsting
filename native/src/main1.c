@@ -2625,6 +2625,7 @@ static const char *const plain_keys[] = {
     "dns_leak\twhat the lookup itself gives away",
     "dns_query\tthe names asked of the resolver",
     "domain\tthe core network domain a paging record belongs to: circuit switched or packet switched",
+    "dongle\ta cellular dongle the target panel can describe, read from the stores a module wrote",
     "dpf_result\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "drx_cycle_frames\tthe paging cycle length in frames",
     "duty_cycle_pct\tshare of time the transmitter is on",
@@ -2808,6 +2809,7 @@ static const char *const plain_keys[] = {
     "permanent_nai\tthe identity that never changes, sent to a network you do not control",
     "persistence\thow long a subscription keeps reporting",
     "phase\twhich part of the takeover a step belongs to: recon, stage, local, takeover, persist, harvest or finish",
+    "phone\ta handset the target panel can describe",
     "pi_index\twhich paging indicator inside the frame the handset reads",
     "port_asked\twhat SMPP over TLS changes, or does not",
     "positioned_card_side\thow many entries need a programmable card or a card-side harness",
@@ -2855,6 +2857,7 @@ static const char *const plain_keys[] = {
     "region\tregulator whose rules a band falls under",
     "registration\tthe profile an NF puts into the directory",
     "reidentification_rate\tshare of identities that the device anchor folds back onto a device already known",
+    "relay\ta relay the target panel can describe",
     "renders_as\thow the encoded field renders on the far side",
     "repetitions\trepetitions per message at this level",
     "requester\twho is asking",
@@ -2863,6 +2866,7 @@ static const char *const plain_keys[] = {
     "reveals\twhat a number gives away",
     "root_cause\tthe design reason the chain works: the plane exists to run with nobody present",
     "rotation_depth_max\tthe largest number of identities one eUICC carried",
+    "router\ta router the target panel can describe",
     "rrc_type\twhich RRC message the bits are, when the verb builds a message and not a bare IE",
     "rtt_chips\tthe round trip time a Node B measured, in chips",
     "rtt_m\tthat round trip converted to metres",
@@ -2874,6 +2878,7 @@ static const char *const plain_keys[] = {
     "sar_msg_ref_num\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "sar_segment_seqnum\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "sar_total_segments\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
+    "sbc\ta session border controller the target panel can describe",
     "sc_interface_version\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "schedule_file\twhere the schedule was written",
     "scheduled_as\twhich SI message carries the block, as SIB1 si-SchedulingInfo names it",
@@ -3673,6 +3678,7 @@ static const char *const plain_keys[] = {
     "width_khz\twidth of the band in kHz",
     "window\thow many SQN steps ahead a resync may be before this network refuses it",
     "workaround\twhat to supply to get an answer instead",
+    "workstation\ta workstation the target panel can describe",
     "would_be\tthe formula that would apply if the table were present",
     "wrote\tthe file a payload or an artefact was written to, and how many bytes it holds",
     "xor_hex\tthe XOR of the two streams, which is the XOR of their payloads when the keystream cancels",
@@ -13400,20 +13406,31 @@ static void
 cb_row_node(GtkWidget *list, gchar **h, gchar **f)
 {
     const char *st = casebook_f(f, casebook_col(h, "status"));
-    g_autofree char *ident = g_strdup_printf("%s  ·  %s  ·  %s",
+    /* class and caps are what a probe measured about the box.  A row with
+       neither was never probed, and says "unprobed" rather than showing an
+       empty gap where a device class belongs. */
+    const char *kind = casebook_f(f, casebook_col(h, "class"));
+    const char *caps = casebook_f(f, casebook_col(h, "caps"));
+    const char *detail = casebook_f(f, casebook_col(h, "detail"));
+    g_autofree char *ident = g_strdup_printf("%s  ·  %s  ·  %s  ·  %s",
+        *kind != 0 ? kind : "unprobed",
         casebook_f(f, casebook_col(h, "host")),
         casebook_f(f, casebook_col(h, "transport")),
         casebook_f(f, casebook_col(h, "role")));
-    g_autofree char *meta = g_strdup_printf("%s  ·  %s",
+    g_autofree char *meta = g_strdup_printf("%s  ·  caps  %s",
         casebook_f(f, casebook_col(h, "last_seen")),
-        casebook_f(f, casebook_col(h, "detail")));
+        *caps != 0 ? caps : "none measured");
     const char *cls = (g_ascii_strcasecmp(st, "ONLINE") == 0)  ? "status-ok"
                     : (g_ascii_strcasecmp(st, "OFFLINE") == 0) ? "status-error"
                                                               : "status-dim";
-
-    gtk_list_box_append(GTK_LIST_BOX(list), casebook_row_new(
+    GtkWidget *row = casebook_row_new(
         "network-server-symbolic",
-        casebook_f(f, casebook_col(h, "name")), ident, meta, st, cls));
+        casebook_f(f, casebook_col(h, "name")), ident, meta, st, cls);
+
+    /* The probe's own words go in the tooltip: a hostname and an os are too
+       long for a list row and too useful to drop. */
+    gtk_widget_set_tooltip_text(row, *detail != 0 ? detail : "no probe has reported on this node");
+    gtk_list_box_append(GTK_LIST_BOX(list), row);
 }
 
 static void
