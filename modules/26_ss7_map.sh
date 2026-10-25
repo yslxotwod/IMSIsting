@@ -2245,9 +2245,26 @@ ss7_cmd_build_sri() {
 # ── responses: the other half of a dialogue ─────────────────────────────
 # A request builder proves the module can ask. These build what a peer sends
 # back, so a dialogue can be completed and read rather than only opened.
+# The answer to SendAuthenticationInfo: an AuthenticationSetList of GSM
+# triplets (TS 29.002 17.5.5 / 17.5.7), which is what --parse-sai reads back.
+# The bytes come from a seed, so a test names the vector it means without a
+# random source; a real HLR takes them from its AUC.
+ss7_map_sai_res() {  # <vectors> <seed-string>
+    local n="${1:-1}" seed="${2:-00112233}" i list="" h vec
+    for (( i = 0; i < n; i++ )); do
+        h=$(printf '%s-%d' "$seed" "$i" | sha256sum | cut -c1-56)
+        vec=$(ss7_tlv 80 "${h:0:32}")$(ss7_tlv 81 "${h:32:8}")$(ss7_tlv 82 "${h:40:16}")
+        list+=$(ss7_tlv 30 "$vec")
+    done
+    # The result body is SEQUENCE { AuthenticationSetList } (TS 29.002 17.5.5)
+    # and AuthenticationSetList is itself a SEQUENCE OF, so one wrapper each.
+    ss7_tlv 30 "$list"
+}
+
 ss7_cmd_build_response() {
     local kind="${1:-}"; shift || true
-    local inv=1 otid="" imsi="" msc="" wrap="" dpc=1 opc=2 cssn=6 ossn=8 rawparam="" 
+    local inv=1 otid="" imsi="" msc="" wrap="" dpc=1 opc=2 cssn=6 ossn=8 rawparam=""
+    local vectors=1 seed="00112233" errcode=1
     while (( $# )); do
         case "$1" in
             --invoke)   inv="${2:-1}"; shift 2 ;;
@@ -2264,6 +2281,9 @@ ss7_cmd_build_response() {
             --opc)      opc="${2:-2}"; shift 2 ;;
             --cssn)     cssn="${2:-6}"; shift 2 ;;
             --ossn)     ossn="${2:-8}"; shift 2 ;;
+            --vectors)  vectors="${2:-1}"; shift 2 ;;
+            --seed)     seed="${2:-00112233}"; shift 2 ;;
+            --code)     errcode="${2:-1}"; shift 2 ;;
             --help|-h)  printf 'usage: --build-response <sri-ack|sri-sm-ack|ulr-ack|ati-ack> [--invoke N] [--otid hex] [--imsi <digits>] [--msc <digits>]\n'; return 0 ;;
             *)          printf 'ERROR\t--build-response does not take %s\n' "$(ss7_sanitize "$1")" >&2; return 2 ;;
         esac
@@ -2275,7 +2295,9 @@ ss7_cmd_build_response() {
         sri-sm-ack)  op=45; name="SendRoutingInfoForSM-ack" ;;
         ulr-ack)     op=2;  name="UpdateLocation-ack" ;;
         ati-ack)     op=71; name="AnyTimeInterrogation-ack" ;;
-        *)  printf 'ERROR\t--build-response needs a kind: sri-ack, sri-sm-ack, ulr-ack, ati-ack\n' >&2; return 2 ;;
+        sai-ack)     op=56; name="SendAuthenticationInfo-ack" ;;
+        error)       op=0;  name="MAP error" ;;
+        *)  printf 'ERROR\t--build-response needs a kind: sri-ack, sri-sm-ack, ulr-ack, ati-ack, sai-ack, error\n' >&2; return 2 ;;
     esac
     [[ -n "$imsi" ]] && { ih=$(ss7_imsi_hex "$imsi") || { printf 'ERROR\tIMSI must be 5 to 15 digits: %s\n' "$(ss7_sanitize "$imsi")" >&2; return 2; }; }
     [[ -n "$msc"  ]] && { mh=$(ss7_map_address "$msc")  || { printf 'ERROR\t--msc must be digits: %s\n' "$(ss7_sanitize "$msc")" >&2; return 2; }; }
@@ -2283,10 +2305,23 @@ ss7_cmd_build_response() {
     if [[ -n "$rawparam" ]]; then
         param=$(ss7_nfc "$rawparam")
         ss7_is_hex "$param" || { printf 'ERROR\t--parameter must be hex: %s\n' "$(ss7_sanitize "$rawparam")" >&2; return 2; }
+    elif [[ "$kind" == "sai-ack" ]]; then
+        [[ "$vectors" =~ ^[1-9]$ ]] || {
+            printf 'ERROR\t--vectors is 1 to 9: %s\n' "$(ss7_sanitize "$vectors")" >&2; return 2; }
+        param=$(ss7_map_sai_res "$vectors" "$seed")
+    elif [[ "$kind" == "error" ]]; then
+        [[ "$errcode" =~ ^[0-9]+$ ]] && (( errcode > 0 && errcode < 256 )) || {
+            printf 'ERROR\t--code is 1..255: %s\n' "$(ss7_sanitize "$errcode")" >&2; return 2; }
+        param=$(ss7_tlv 03 "$(ss7_byte "$errcode")")
     else
         param=$(ss7_map_sri_res "$ih" "$mh")
     fi
-    comps=$(ss7_map_result "$inv" "$op" "$param")
+    if [[ "$kind" == "error" ]]; then
+        # returnError (Q.773 3.3): [7] SEQUENCE { invokeID, errorCode }.
+        comps=$(ss7_tlv 67 "$(ss7_tlv 02 "$(ss7_ber_int "$inv")")$param")
+    else
+        comps=$(ss7_map_result "$inv" "$op" "$param")
+    fi
     if [[ -n "$otid" ]]; then
         tcap=$(ss7_tcap_end "$otid" "$comps") || { printf 'ERROR\t--otid must be hex\n' >&2; return 2; }
     else
@@ -2295,7 +2330,9 @@ ss7_cmd_build_response() {
     printf 'message\t%s\n' "$name"
     printf 'opcode\t%s\n' "$op"
     printf 'opcode_name\t%s\n' "$(ss7_map_opcode_name "$op" 2>/dev/null)"
-    printf 'component\treturnResultLast\n'
+    if [[ "$kind" == "error" ]]; then printf 'component\treturnError\n'; else printf 'component\treturnResultLast\n'; fi
+    [[ "$kind" == "sai-ack" ]] && printf 'vectors\t%s\n' "$vectors"
+    [[ "$kind" == "error" ]] && printf 'error_code\t%s\n' "$errcode"
     printf 'invoke_id\t%s\n' "$inv"
     printf 'imsi_hex\t%s\n' "$ih"
     printf 'msc_hex\t%s\n' "$mh"
@@ -2895,6 +2932,24 @@ ss7_selftest() {
     chk resp-result  "$(printf '%s\n' "$rout" | awk -F'\t' '$1=="component"{print $2}')" "returnResultLast"
     chk resp-bad     "$(ss7_cmd_build_response nope >/dev/null 2>&1; echo $?)" "2"
     chk resp-badflag "$(ss7_cmd_build_response sri-ack --msc 12 --wat >/dev/null 2>&1; echo $?)" "2"
+    # The far side answers a vector request: the answer has to be readable by
+    # this module's own parser, or the pairing is theatre.
+    local sair saih
+    sair=$(ss7_cmd_build_response sai-ack --vectors 2 --invoke 7 --otid 0000000A)
+    saih=$(printf '%s\n' "$sair" | awk -F'\t' '$1=="hex"{print $2}')
+    chk sai-ack-name   "$(printf '%s\n' "$sair" | awk -F'\t' '$1=="message"{print $2}')" "SendAuthenticationInfo-ack"
+    chk sai-ack-vec    "$(printf '%s\n' "$sair" | awk -F'\t' '$1=="vectors"{print $2}')" "2"
+    chk sai-ack-round  "$(ss7_cmd_parse_sai "$saih" | awk -F'\t' '$1=="vectors"{print $2}')" "2"
+    chk sai-ack-rand   "$(ss7_cmd_parse_sai "$saih" | awk -F'\t' '$1=="rand"{print $2}' | head -1)" "F160E71D99AE5B612EA773ED1511DE63"
+    chk sai-ack-det    "$([[ "$(ss7_cmd_build_response sai-ack --vectors 2 --invoke 7 --otid 0000000A | awk -F'\t' '$1=="hex"{print $2}')" == "$saih" ]] && echo same || echo differ)" "same"
+    chk sai-ack-vec0   "$(ss7_cmd_build_response sai-ack --vectors 0 >/dev/null 2>&1; echo $?)" "2"
+    local srerr
+    srerr=$(ss7_cmd_build_response error --code 2 --invoke 9 --otid 0000000B)
+    chk err-name       "$(printf '%s\n' "$srerr" | awk -F'\t' '$1=="message"{print $2}')" "MAP error"
+    chk err-comp       "$(printf '%s\n' "$srerr" | awk -F'\t' '$1=="component"{print $2}')" "returnError"
+    chk err-code       "$(printf '%s\n' "$srerr" | awk -F'\t' '$1=="error_code"{print $2}')" "2"
+    chk err-tag        "$(printf '%s\n' "$srerr" | awk -F'\t' '$1=="hex"{print substr($2,1,2)}')" "64"
+    chk err-badcode    "$(ss7_cmd_build_response error --code 300 >/dev/null 2>&1; echo $?)" "2"
     # A response wrapped in END carries the peer's destination transaction id.
     rout=$(ss7_cmd_build_response sri-ack --imsi 310150123456789 --otid 00000001)
     local rend; rend=$(ss7_cmd_decode_tcap "$(printf '%s' "$rout" | awk -F'\t' '$1=="hex"{print $2}')")
@@ -4380,7 +4435,8 @@ Usage: $0 COMMAND
   --build-sri <msisdn>       build a wire-ready SRI MSU
   --build-response <kind>    build what a peer sends BACK, so a dialogue
                              can be completed: sri-ack, sri-sm-ack,
-                             ulr-ack, ati-ack; --imsi, --msc, --invoke,
+                             ulr-ack, ati-ack, sai-ack (--vectors N),
+                             error (--code N); --imsi, --msc, --invoke,
                              --otid (wraps the result in a TCAP END),
                              --wrap sccp|msu|m3ua adds the lower layers
   --dialogue <req> <ans>     pair a request with an answer: compares the
