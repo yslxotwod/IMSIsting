@@ -464,6 +464,76 @@ ntn_feeder_link() {
 # timing budget assumed, so the receiver half is a tuning problem plus a
 # signature: a cell that broadcasts SIB19, whose timing moves with the sky, and
 # whose round trip is milliseconds rather than microseconds.
+# ── F6: reselection between a terrestrial cell and a satellite one ──────
+# A UE picks between the two cells the same way it picks between any two:
+# the S criterion, the cell-ranking criterion and the reselection timers. NTN
+# adds a distance gate (the UE must be inside the cell's distanceThresh of its
+# reference location, TS 38.304 5.2.4.6) and a validity timer that expires the
+# SIB19 information. This works out which way the UE goes, and what has to move
+# to make it go the other way.
+ntn_reselect() {
+    local ter="" sat="" dist="" hyst="" validity="" barring="" t_resel="" qrxlevmin=""
+    while (( $# )); do
+        case "$1" in
+            --terrestrial-rsrp) ter="${2:-}";    shift 2 || { ntn_resel_usage; return 2; } ;;
+            --satellite-rsrp)   sat="${2:-}";    shift 2 || { ntn_resel_usage; return 2; } ;;
+            --distance-km)      dist="${2:-}";   shift 2 || { ntn_resel_usage; return 2; } ;;
+            --hysteresis-db)    hyst="${2:-}";   shift 2 || { ntn_resel_usage; return 2; } ;;
+            --validity-s)       validity="${2:-}"; shift 2 || { ntn_resel_usage; return 2; } ;;
+            --barred)           barring=1;        shift ;;
+            --q-rxlevmin)       qrxlevmin="${2:-}"; shift 2 || { ntn_resel_usage; return 2; } ;;
+            *)                  ntn_resel_usage; return 2 ;;
+        esac
+    done
+    if [[ -z "$ter" || -z "$sat" ]]; then ntn_resel_usage; return 2; fi
+    for v in "$ter" "$sat" "$dist" "$hyst" "$validity" "$qrxlevmin"; do
+        if [[ -n "$v" && ! "$v" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+            printf 'ERROR\t%s wants a number\n' "$v" >&2; return 2
+        fi
+    done
+    awk -v ter="$ter" -v sat="$sat" -v dist="$dist" -v hyst="${hyst:-2}" \
+        -v validity="$validity" -v barred="$barring" -v qmin="${qrxlevmin:--140}" 'BEGIN{
+        printf "input\tterrestrial_rsrp\t%s\n", ter
+        printf "input\tsatellite_rsrp\t%s\n", sat
+        if (dist != "") printf "input\tdistance_km\t%s\n", dist
+        # the S criterion in its simplest usable form: the measured RSRP has to
+        # clear Qrxlevmin by the power offsets, and the hysteresis keeps a cell
+        # that is only marginally better from being reselected onto
+        printf "criterion\tS_terrestrial\t%s\n", (ter + 0 >= qmin + 0) ? "pass" : "fail"
+        printf "criterion\tS_satellite\t%s\n", (sat + 0 >= qmin + 0) ? "pass" : "fail"
+        gap = (sat + 0) - (ter + 0)
+        printf "margin_db\t%.1f\n", gap
+        if (barred == 1) printf "criterion\tterrestrial_barred\tbarred\n"
+        if (dist != "" && dist + 0 > 0) {
+            printf "gate\tdistance_thresh\tnot supplied, so the distance gate is assumed to pass\n"
+        }
+        if (validity != "") {
+            printf "gate\tvalidity_s\t%s\n", validity
+            printf "gate\tvalidity_expiry\tno expiry while the SIB19 repeats inside the window\n"
+        }
+        verdict = "stays_terrestrial"
+        if (barred == 1) verdict = "reselection_to_satellite_when_S_passes"
+        else if (gap > hyst + 0) verdict = "reselection_to_satellite"
+        else if (gap < -1 * (hyst + 0)) verdict = "stays_terrestrial"
+        else verdict = "marginal_inside_hysteresis"
+        printf "verdict\t%s\n", verdict
+        if (verdict == "reselection_to_satellite") {
+            printf "finding\tranking_decides\tINFO\tthe satellite cell ranks above the terrestrial one by %.1f dB, more than the %.1f dB of hysteresis, so the reselection is the UE doing what it was told\n", gap, hyst
+        }
+        printf "finding\tthree_levers\tMEDIUM\twhat moves the UE toward satellite is the barring, the Qrxlevmin or the measured power of the terrestrial cell: a fake SIB1 that bars it, a lowered RSRP from its direction, or a policy that prefers NTN\n"
+        printf "finding\toperator_selectable\tINFO\tNTN preference is also a UE policy and a network decision, so a diversion can be requested rather than forced\n"
+        printf "ref\t3GPP TS 38.304 5.2.4 (cell selection and reselection), TS 38.331 SIB19 distanceThresh and t-Service\n"
+        printf "limit\tthis compares RSRP and the hysteresis; the real criteria also weigh Srxlev offsets, the NTN distance gate and the validity timer, which need fields this module is not given\n"
+    }'
+}
+
+ntn_resel_usage() {
+    cat >&2 <<'EOF'
+USAGE	--ntn-reselect --terrestrial-rsrp DBM --satellite-rsrp DBM [--distance-km KM] [--hysteresis-db DB] [--validity-s S] [--barred] [--q-rxlevmin DBM]
+WHY	works out which cell the UE reselects to, and which lever moves it the other way
+EOF
+}
+
 ntn_scan_plan() {
     cat <<'EOF'
 status	plan
@@ -632,6 +702,10 @@ ntn_selftest() {
     local sp fp
     sp=$(ntn_scan_plan)
     fp=$(ntn_fakecell_plan)
+    chk resel-verdict "$(ntn_reselect --terrestrial-rsrp -105 --satellite-rsrp -95 | awk -F'\t' '$1=="verdict"{print $2}')" "reselection_to_satellite"
+    chk resel-marginal "$(ntn_reselect --terrestrial-rsrp -95 --satellite-rsrp -94 | awk -F'\t' '$1=="verdict"{print $2}')" "marginal_inside_hysteresis"
+    chk resel-barred "$(ntn_reselect --terrestrial-rsrp -80 --satellite-rsrp -120 --barred | awk -F'\t' '$1=="verdict"{print $2}')" "reselection_to_satellite_when_S_passes"
+    chk resel-s-crit "$(ntn_reselect --terrestrial-rsrp -105 --satellite-rsrp -95 | awk -F'\t' '$1=="criterion" && $2=="S_satellite"{print $3}')" "pass"
     chk scan-plan-status "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="status"{print $2}')" "plan"
     chk scan-plan-sib19 "$(printf '%s\n' "$sp" | grep -c "SIB19")" "5"
     chk scan-plan-signals "$(printf '%s\n' "$sp" | grep -c '^signal')" "4"
@@ -695,6 +769,7 @@ ntn_cli_main() {
         --ephemeris-hijack) ntn_ephemeris_hijack "$@" ;;
         --timing-geoloc)  ntn_timing_geoloc "$@" ;;
         --scan-plan)      ntn_scan_plan ;;
+        --ntn-reselect)   ntn_reselect "$@" ;;
         --fakecell-plan)  ntn_fakecell_plan ;;
         --feeder)      ntn_feeder_link ;;
         --plan)        ntn_plan ;;
@@ -710,6 +785,7 @@ Usage: $0 COMMAND
   --range <one_way_km>      one-way and round-trip delay
   --ta <one_way_km>         TA units needed vs the LTE TA range
   --koffset <slots> [scs_khz] [sample_rate_hz]   K_offset (TS 38.331, 15 kHz reference slots) -> ms and samples
+  --ntn-reselect            which cell the UE reselects to, and the lever that moves it
   --scan-plan               what to listen for, and the three signals that say NTN
   --fakecell-plan           what broadcasting a satellite cell needs, and where it fails
   --timing-geoloc (--ta N | --range-km KM) --sat-lat DEG --sat-lon DEG --sat-alt KM

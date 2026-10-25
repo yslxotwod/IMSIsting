@@ -6024,6 +6024,18 @@ static const char *const plain_keys[] = {
     "cross_subscriber_events\tevents where the UE was not the context owner",
     "journal\tthe event log this verb read",
     "re_authenticated\tevents where authentication ran before the context was used",
+    "barred\tthe cell is barred in the SIB1 that was read",
+    "criterion\tone selection criterion and whether it passes",
+    "distance_km\thow far the UE is from the cell reference location",
+    "distance_thresh\tthe gate that only lets a UE inside a radius use the cell",
+    "operator_selectable\tNTN preference is a policy decision as well as a measurement",
+    "ranking_decides\tthe margin over hysteresis explains the reselection",
+    "satellite_rsrp\tthe measured level of the satellite cell",
+    "terrestrial_barred\tthe terrestrial cell is barred so the UE must look elsewhere",
+    "terrestrial_rsrp\tthe measured level of the terrestrial cell",
+    "three_levers\tthe three things that move the UE toward satellite",
+    "validity_expiry\twhen the SIB19 information stops being usable",
+    "validity_s\thow long the SIB19 information stays valid",
 };
 
 /* Compare a bare key against one "key<TAB>words" row. */
@@ -7497,7 +7509,8 @@ static const ChipRow chip_rows[] = {
     { "49_ntn",              "--selftest",            NEED_NO, DOES_READS },
     { "49_ntn",              "--sib19",               NEED_RADIO, DOES_READS },
     { "49_ntn",              "--sib19-build",         NEED_NO, DOES_BUILDS },
-    { "49_ntn",              "--fakecell-plan",       NEED_NO, DOES_READS },
+    { "49_ntn",              "--ntn-reselect",        NEED_NO, DOES_READS },
+{ "49_ntn",              "--fakecell-plan",       NEED_NO, DOES_READS },
 { "49_ntn",              "--scan-plan",           NEED_NO, DOES_READS },
 { "49_ntn",              "--ephemeris-hijack",   NEED_NO, DOES_BUILDS },
     { "49_ntn",              "--timing-geoloc",       NEED_NO, DOES_READS },
@@ -10479,11 +10492,18 @@ place_push_view(AppState *state, const char *owner, const char *view)
 static GtkWidget *
 build_sidebar(AppState *state)
 {
-    /* The drawer is one surface: the page list, a rule, then the catalogue.
-       The background lives on the outer box rather than on the list so the
-       two halves cannot drift apart. */
+    /* The drawer is one surface: the page list, a rule, then the recent
+       places. It outgrew the window when Map was added to the page list, and
+       the last rows of RECENT went off the bottom edge with no way to reach
+       them, so the surface scrolls now.
+
+       The scroll belongs to the drawer and not to its halves: one scrollbar
+       on the whole surface means the page list and the recents cannot scroll
+       against each other, and the theme's sidebar background has to be on the
+       widget that owns the viewport for the strip behind the scrollbar to be
+       the same colour as the drawer. */
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_add_css_class(outer, "sidebar");
+    gtk_widget_add_css_class(outer, "sidebar-body");
 
     gtk_box_append(GTK_BOX(outer), build_drawer_nav(state));
 
@@ -10532,7 +10552,20 @@ build_sidebar(AppState *state)
         drawer_recent_refresh(state);
     }
 
-    return outer;
+    {
+        GtkWidget *scroll = gtk_scrolled_window_new();
+
+        gtk_widget_add_css_class(scroll, "sidebar");
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+        /* The drawer keeps the height the window gives it; the content is
+           what scrolls, never the sidebar growing to fit a long RECENT list. */
+        gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(scroll),
+                                                         FALSE);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), outer);
+        gtk_widget_set_vexpand(scroll, TRUE);
+        return scroll;
+    }
 }
 
 /* Bring the active sidebar row into view, once there is a layout to measure.
