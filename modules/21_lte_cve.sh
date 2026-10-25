@@ -1035,6 +1035,39 @@ lcve_teid_hex() {
 }
 
 # ── selftest — no radio, no root, no network ────────────────────────────
+# ── the corpus horizon ──────────────────────────────────────────────────
+# A CVE table is a photograph, not a feed. Every entry here was read on the
+# date in the row below it, and anything disclosed after that date is not in
+# the corpus and is therefore NOT assessed -- the one thing a security tool
+# must never do is let a fixed snapshot read as current coverage.
+lcve_cmd_coverage() {
+    local rows newest entries years
+    rows=$(lcve_cve_table)
+    entries=$(printf '%s\n' "$rows" | grep -c . || true)
+    years=$(printf '%s\n' "$rows" \
+        | awk -F'\t' '{ if (match($1, /(19|20)[0-9][0-9]/)) print substr($1, RSTART, 4) }' \
+        | sort -n | uniq)
+    newest=$(printf '%s\n' "$years" | tail -1)
+    local horizon="${newest:-unknown}"
+    local stale
+    stale=$(date -u +%Y)
+    printf 'corpus\t%s\n' "LTE CVE corpus"
+    printf 'entries\t%s\n' "$entries"
+    printf 'years_covered\t%s\n' "$(printf '%s\n' "$years" | tr '\n' ' ' | sed 's/ $//')"
+    printf 'newest_entry_year\t%s\n' "$horizon"
+    printf 'corpus_horizon\t%s\n' "${horizon}-12-31"
+    printf 'checked_on\t2025-06-01\n'
+    if [[ "$stale" != "$horizon" ]]; then
+        printf 'finding\tcorpus_stale\tMEDIUM\tthe corpus stops at %s and the clock says %s: every CVE disclosed in between is unassessed, and this table must not be read as current\n' "$horizon" "$stale"
+    fi
+    printf 'claim\tcoverage_is_a_snapshot\n'
+    if [[ "$entries" -gt 0 ]]; then
+        printf 'newest_entry\t%s\n' "$(printf '%s\n' "$rows" | awk -F'\t' -v y="$newest" 'match($1, /(19|20)[0-9][0-9]/) && substr($1, RSTART, 4) == y { print $1; exit }')"
+    fi
+    printf 'update\t%s\n' "append a row to the table in this module, add its selftest case, and move checked_on: an entry that cannot be reproduced is a claim, not a check"
+    printf 'note\t%s\n' "an absent CVE is not a safe one: the corpus records what this tree can reproduce, and a newer advisory is unassessed until a row here reproduces it"
+}
+
 lcve_selftest() {
     local bad=0
     chk() {
@@ -1396,6 +1429,13 @@ SIP
     chk gen-out-files      "$(find "$d/gen" -name '*.hex' | wc -l | tr -d ' ')" "6"
 
     rm -rf "$d"
+    # ── the corpus horizon, R47 ───────────────────────────────────────
+    local cov; cov=$(lcve_cmd_coverage)
+    chk coverage-entries  "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="entries"{print ($2>0)?"yes":"no"}')" "yes"
+    chk coverage-horizon  "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="corpus_horizon"{print ($2~/^[0-9]{4}-12-31$/)?"yes":"no"}')" "yes"
+    chk coverage-claim    "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="claim"{print $2}')" "coverage_is_a_snapshot"
+    chk coverage-update   "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="update"{print (length($2)>40)?"yes":"no"}')" "yes"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1468,6 +1508,7 @@ lcve_cli_main() {
         --plmn)        lcve_plmn_from_hex "${1:-}" ;;
         --teid)        lcve_teid_hex "${1:-}" ;;
         --runs-tsv)    lcve_cmd_runs_tsv ;;
+        --coverage)    lcve_cmd_coverage ;;
         --selftest)    lcve_selftest ;;
         --menu)        lcve_menu ;;
         *)
@@ -1493,6 +1534,7 @@ Usage: $0 COMMAND
   --plmn <6 hex nibbles>    decode a PLMN from its NAS encoding
   --teid <decimal>          TEID to 0x hex
   --runs-tsv                recorded probe runs as TSV
+  --coverage                the corpus horizon: newest year it knows, and what that leaves unassessed
   --selftest                verify routing and probes without a radio
   --menu                    interactive menu
 EOF

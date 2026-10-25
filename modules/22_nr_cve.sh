@@ -737,6 +737,39 @@ ncve_snssai_decode() {
 }
 
 # ── selftest — no radio, no root, no network ────────────────────────────
+# ── the corpus horizon ──────────────────────────────────────────────────
+# A CVE table is a photograph, not a feed. Every entry here was read on the
+# date in the row below it, and anything disclosed after that date is not in
+# the corpus and is therefore NOT assessed -- the one thing a security tool
+# must never do is let a fixed snapshot read as current coverage.
+ncve_cmd_coverage() {
+    local rows newest entries years
+    rows=$(ncve_cve_table)
+    entries=$(printf '%s\n' "$rows" | grep -c . || true)
+    years=$(printf '%s\n' "$rows" \
+        | awk -F'\t' '{ if (match($1, /(19|20)[0-9][0-9]/)) print substr($1, RSTART, 4) }' \
+        | sort -n | uniq)
+    newest=$(printf '%s\n' "$years" | tail -1)
+    local horizon="${newest:-unknown}"
+    local stale
+    stale=$(date -u +%Y)
+    printf 'corpus\t%s\n' "NR CVE corpus"
+    printf 'entries\t%s\n' "$entries"
+    printf 'years_covered\t%s\n' "$(printf '%s\n' "$years" | tr '\n' ' ' | sed 's/ $//')"
+    printf 'newest_entry_year\t%s\n' "$horizon"
+    printf 'corpus_horizon\t%s\n' "${horizon}-12-31"
+    printf 'checked_on\t2025-06-01\n'
+    if [[ "$stale" != "$horizon" ]]; then
+        printf 'finding\tcorpus_stale\tMEDIUM\tthe corpus stops at %s and the clock says %s: every CVE disclosed in between is unassessed, and this table must not be read as current\n' "$horizon" "$stale"
+    fi
+    printf 'claim\tcoverage_is_a_snapshot\n'
+    if [[ "$entries" -gt 0 ]]; then
+        printf 'newest_entry\t%s\n' "$(printf '%s\n' "$rows" | awk -F'\t' -v y="$newest" 'match($1, /(19|20)[0-9][0-9]/) && substr($1, RSTART, 4) == y { print $1; exit }')"
+    fi
+    printf 'update\t%s\n' "append a row to the table in this module, add its selftest case, and move checked_on: an entry that cannot be reproduced is a claim, not a check"
+    printf 'note\t%s\n' "an absent CVE is not a safe one: the corpus records what this tree can reproduce, and a newer advisory is unassessed until a row here reproduces it"
+}
+
 ncve_selftest() {
     local bad=0
     chk() {
@@ -1025,6 +1058,13 @@ NRF
     chk status-fields-none "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"
 
     rm -rf "$d"
+    # ── the corpus horizon, R47 ───────────────────────────────────────
+    local cov; cov=$(ncve_cmd_coverage)
+    chk coverage-entries  "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="entries"{print ($2>0)?"yes":"no"}')" "yes"
+    chk coverage-horizon  "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="corpus_horizon"{print ($2~/^[0-9]{4}-12-31$/)?"yes":"no"}')" "yes"
+    chk coverage-claim    "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="claim"{print $2}')" "coverage_is_a_snapshot"
+    chk coverage-update   "$(printf '%s\n' "$cov" | awk -F'\t' '$1=="update"{print (length($2)>40)?"yes":"no"}')" "yes"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1091,6 +1131,7 @@ ncve_cli_main() {
         --plan)         ncve_cmd_plan "${1:-}" ;;
         --snssai)       ncve_snssai_decode "${1:-}" ;;
         --runs-tsv)     ncve_cmd_runs_tsv ;;
+        --coverage)     ncve_cmd_coverage ;;
         --selftest)     ncve_selftest ;;
         --menu)         ncve_menu ;;
         *)
@@ -1107,6 +1148,7 @@ Usage: $0 COMMAND
   --plan <ID>               write the handoff plan for a handoff id
   --snssai <hex>            decode an S-NSSAI
   --runs-tsv                recorded probe runs as TSV
+  --coverage                 the corpus horizon: newest year it knows, and what that leaves unassessed
   --selftest                verify routing and probes without a radio
   --menu                    interactive menu
 EOF
