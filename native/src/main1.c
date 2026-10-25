@@ -6036,6 +6036,12 @@ static const char *const plain_keys[] = {
     "three_levers\tthe three things that move the UE toward satellite",
     "validity_expiry\twhen the SIB19 information stops being usable",
     "validity_s\thow long the SIB19 information stays valid",
+    "absolute_freq_ssb\tthe ARFCN the SSB sits on in the OAI config",
+    "differences\twhat a config has to change when moving between the two gNB stacks",
+    "frequency_mhz\tthe band a frequency belongs to, in megahertz",
+    "gnb_conf\tthe keys an OpenAirInterface gnb.conf expects",
+    "rfsim_needs_no_radio\ta simulated RF path runs the whole stack without hardware",
+    "run_with_radio\tthe command line that drives the gNB through a real USRP",
 };
 
 /* Compare a bare key against one "key<TAB>words" row. */
@@ -6540,7 +6546,8 @@ static const ChipRow chip_rows[] = {
     { "12_nr_air",           "--selftest",            NEED_NO, DOES_READS },
     { "12_nr_air",           "--ssb",                 NEED_NO, DOES_READS },
     { "12_nr_air",           "--ssb-waveform",        NEED_NO, DOES_BUILDS },
-    { "12_nr_air",           "--start",               NEED_NO, DOES_READS },
+    { "12_nr_air",           "--oai-gnb",             NEED_RADIO, DOES_READS },
+{ "12_nr_air",           "--start",               NEED_NO, DOES_READS },
     { "12_nr_air",           "--status",              NEED_NO, DOES_READS },
     { "12_nr_air",           "--status-tsv",          NEED_NO, DOES_READS },
     { "12_nr_air",           "--stop",                NEED_NO, DOES_READS },
@@ -10566,6 +10573,56 @@ build_sidebar(AppState *state)
         gtk_widget_set_vexpand(scroll, TRUE);
         return scroll;
     }
+}
+
+/* Bring one drawer row into view.
+
+   GtkListBox has no scroll-to in this GTK, so this asks where the row sits
+   inside the drawer's content and moves the drawer's vertical adjustment by
+   exactly enough to show it -- no centring, no animation: if the row is
+   already visible nothing happens, which is what keeps the drawer from
+   twitching every time the notebook changes page. */
+static void
+drawer_nav_scroll_to(AppState *state, GtkWidget *row)
+{
+    GtkWidget *child;
+    GtkAdjustment *adj;
+    graphene_rect_t b;
+    double top, bottom, page, val, target;
+
+    if (row == NULL || state->sidebar == NULL ||
+        !GTK_IS_SCROLLED_WINDOW(state->sidebar))
+        return;
+
+    child = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(state->sidebar));
+    adj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(state->sidebar));
+    if (child == NULL || adj == NULL)
+        return;
+
+    /* Before the drawer has been allocated the row has no bounds; the drawer
+       re-selects when it opens, and that pass does the scrolling. */
+    if (!gtk_widget_compute_bounds(row, child, &b) || b.size.height <= 0)
+        return;
+
+    page = gtk_adjustment_get_page_size(adj);
+    if (page <= 0)
+        return;
+
+    top = b.origin.y;
+    bottom = top + b.size.height;
+    val = gtk_adjustment_get_value(adj);
+
+    if (top < val)
+        target = top;
+    else if (bottom > val + page)
+        target = bottom - page;
+    else
+        return;
+
+    gtk_adjustment_set_value(adj,
+        CLAMP(target, gtk_adjustment_get_lower(adj),
+              MAX(gtk_adjustment_get_lower(adj),
+                  gtk_adjustment_get_upper(adj) - page)));
 }
 
 /* Bring the active sidebar row into view, once there is a layout to measure.
@@ -15493,11 +15550,16 @@ notebook_page_switched(GtkNotebook *nb, GtkWidget *child, guint page,
        page, which is on no list entry and so clears the highlight. */
     if (state->drawer_nav != NULL) {
         state->drawer_nav_syncing = TRUE;
-        if (page < 9 && state->drawer_nav_rows[page] != NULL)
+        if (page < 9 && state->drawer_nav_rows[page] != NULL) {
             gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
                 GTK_LIST_BOX_ROW(state->drawer_nav_rows[page]));
-        else
+            /* The drawer scrolls and RECENT sits under the page list, so the
+               row that says where you are can be below the fold: bring it
+               back when the notebook moves, not when the operator hunts. */
+            drawer_nav_scroll_to(state, state->drawer_nav_rows[page]);
+        } else {
             gtk_list_box_unselect_all(GTK_LIST_BOX(state->drawer_nav));
+        }
         state->drawer_nav_syncing = FALSE;
     }
 
@@ -17276,11 +17338,14 @@ drawer_set_open(AppState *state, gboolean open)
     if (open && state->drawer_nav != NULL) {
         int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(state->notebook));
         state->drawer_nav_syncing = TRUE;
-        if (cur >= 0 && cur < 9 && state->drawer_nav_rows[cur] != NULL)
+        if (cur >= 0 && cur < 9 && state->drawer_nav_rows[cur] != NULL) {
             gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
                 GTK_LIST_BOX_ROW(state->drawer_nav_rows[cur]));
-        else
+            /* A drawer that scrolls must open showing the row it is on. */
+            drawer_nav_scroll_to(state, state->drawer_nav_rows[cur]);
+        } else {
             gtk_list_box_unselect_all(GTK_LIST_BOX(state->drawer_nav));
+        }
         state->drawer_nav_syncing = FALSE;
     }
 }

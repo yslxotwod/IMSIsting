@@ -3442,6 +3442,45 @@ nair_cmd_meas_report_tx() {
     return 0
 }
 
+# ── G5: the same gNB on OpenAirInterface ────────────────────────────────
+# srsRAN is not the only gNB this tree can drive: OpenAirInterface's
+# nr-softmodem runs the same 5G NR stack on general-purpose x86 with its own
+# configuration format, and with --rfsim it runs with no radio at all. What
+# differs is the file, the driver and the flags, so this emits the shape OAI
+# reads and the command line that goes with it.
+nair_oai_gnb() {
+    local band="${1:-78}" arfcn="${2:-}" pci="${3:-1}"
+    [[ "$band" =~ ^[0-9]+$ ]] || { printf 'ERROR\tband wants a number, e.g. 78\n' >&2; return 2; }
+    [[ -z "$arfcn" || "$arfcn" =~ ^[0-9]+$ ]] || { printf 'ERROR\tarfcn wants a number\n' >&2; return 2; }
+    [[ "$pci" =~ ^[0-9]+$ ]] || { printf 'ERROR\tpci wants a number\n' >&2; return 2; }
+    [[ -n "$arfcn" ]] || arfcn=$(awk -v b="$band" -v tbl="$(nair_band_table)" 'BEGIN{
+        cnt = split(tbl, rows, "\n")
+        for (i = 1; i <= cnt; i++) {
+            split(rows[i], f, "\t")
+            if (f[1] == "n" b && f[4] != "") { print f[4]; exit }
+        }
+    }')
+    [[ -n "$arfcn" ]] || { printf 'ERROR\tband %s is not in the band table, so give an --arfcn\n' "$band" >&2; return 2; }
+    local mhz; mhz=$(nair_arfcn_to_mhz "$arfcn" 2>/dev/null || printf '?')
+    local ssb="$arfcn"
+    printf 'driver\t%s\n' "rfsim (no radio) | uhd (USRP) | soapy (LimeSDR, BladeRF) | zmq (explicit loopback)"
+    printf 'band\t%s\n' "$band"
+    printf 'arfcn\t%s\n' "$arfcn"
+    printf 'frequency_mhz\t%s\n' "${mhz%%.*}"
+    printf 'pci\t%s\n' "$((pci % 1008))"
+    printf 'gnb_conf\t%s\n' "gNB_DU { gNB_ID; gNB_name; tracking_area_code; plmn_list; servingCellConfigCommon { absoluteFrequencySSB, dl_frequencyBand, dl_absoluteFrequencyPointA, ssbSubcarrierSpacing, dl_carrierBandwidth, dl_subcarrierSpacing, pdsch_AntennaPorts, pusch_AntennaPorts, initialCellConfig } }"
+    printf 'absolute_freq_ssb\t%s\n' "$ssb"
+    printf 'run\t%s\n' "nr-softmodem -O gnb.conf --sa --rfsim --log_config.global_log_options level,nocolour"
+    printf 'run_with_radio\t%s\n' "nr-softmodem -O gnb.conf --sa --usrp-args type=b200 --clock-source internal"
+    printf 'core\t%s\n' "the AMF the gNB dials is in gnb.conf under amf_ip_address and the PLMN under plmn_list, both read at startup"
+    printf 'differences\t%s\n' "srsRAN names its file gnb.conf with a different schema and takes -c; OAI takes -O and its own keys, so a config is not portable between the two"
+    printf 'finding\trfsim_needs_no_radio\tINFO\tOAI --rfsim runs the whole stack over a simulated RF path, so a gNB and a UE can be stood up on one laptop with no SDR at all
+    printf 'finding\tformat_is_the_portability_cost\tMEDIUM\tporting between srsRAN and OAI is a config rewrite, not a flag change, and the PHY parameters have different names in each\n
+    printf 'ref\t%s\n' "OpenAirInterface 5G documentation, gnb.conf reference; srsRAN Project gnb.conf documentation"
+    printf 'limit\t%s\n' "this emits the shape and the command line; it does not validate the file against OAI's schema, because OAI's parser is the only thing that does"
+    printf 'note\t%s\n' "the config written here is a skeleton to start from: OAI rejects an incomplete gnb.conf loudly, so run it once with --rfsim before pointing it at a radio"
+}
+
 nair_find_srsran_gnb() {
     local t
     for t in gnb srsran_gnb srsgnb; do
@@ -6025,6 +6064,15 @@ NAIR_WAVE_LIB
         --i-have-a-lab-and-authorisation >/dev/null 2>&1; echo $?)" "2"
 
     rm -rf "$d"
+    local oai oai2
+    oai=$(nair_oai_gnb 78)
+    oai2=$(nair_oai_gnb 78 620000 5)
+    chk oai-band "$(printf '%s\n' "$oai" | awk -F'\t' '$1=="band"{print $2}')" "78"
+    chk oai-arfcn "$(printf '%s\n' "$oai" | awk -F'\t' '$1=="arfcn"{print $2}')" "620000"
+    chk oai-driver "$(printf '%s\n' "$oai" | grep -c "rfsim")" "4"
+    chk oai-run "$(printf '%s\n' "$oai" | grep -c "nr-softmodem -O gnb.conf --sa --rfsim")" "1"
+    chk oai-pci "$(printf '%s\n' "$oai2" | awk -F'\t' '$1=="pci"{print $2}')" "5"
+    chk oai-noargs "$(nair_oai_gnb abc >/dev/null 2>&1; echo $?)" "2"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -6204,6 +6252,7 @@ nair_cli_main() {
             fi ;;
         --decode-rrc)         nair_cmd_decode_rrc "${1:-}" ;;
         --beam-sweep)         nair_cmd_beam_sweep "${1:-}" ;;
+        --oai-gnb)      nair_oai_gnb "${1:-78}" "${2:-}" "${3:-1}" ;;
         --start)        nair_start "${1:-$NAIR_CONF}" ;;
         --stop)         nair_stop ;;
         --status)       nair_status ;;
@@ -6253,6 +6302,8 @@ Usage: $0 COMMAND
                                 waveform but transmits nothing. Without a radio
                                 --tx fails and prints no success line.
   --gen-core-conf [plmn] [tac]  write a minimal Open5GS AMF slice
+  --oai-gnb [band] [arfcn] [pci]
+                            the same cell as an OpenAirInterface nr-softmodem: the gnb.conf shape, the driver and the command line
   --start [conf]                start the gNB (needs srsRAN)
   --stop                        stop the gNB (idempotent)
   --status                      same fields as --status-tsv, readable
