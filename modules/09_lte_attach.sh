@@ -1702,6 +1702,281 @@ latt_require_ue_stack() {
 }
 
 # ── selftest — no radio, no root, no network ────────────────────────────
+# ── TS 24.008 GPRS mobility and session management ──────────────────────
+# The LTE side of this module speaks TS 24.301 only. A 3G or 2G handset is
+# not that protocol: it attaches with GMM, opens its data bearer with SM, and
+# carries its identity in the same four-octet header the MM layer has used
+# since GSM. The octets below are composed from the caller's own IE list and
+# read back by position, because the field layouts of the individual IEs are
+# message-specific and this module will not guess one: what it does verify is
+# the layer-3 header (protocol discriminator, transaction identifier or skip
+# indicator, message type) and the three IE formats 24.008 actually defines.
+#
+#   type 1 (TV, half octet): IEI in the high nibble, value in the low nibble
+#   type 2 (TV):             IEI, then one octet of value
+#   type 3 (TLV):            IEI, one length octet, value
+#   type 4 (TLV-E):          IEI, two length octets, value
+#
+# (TS 24.008 clause 10.5, "coding of information elements".)
+
+latt_24008_gmm_name() {
+    case "${1^^}" in
+        41) echo "ATTACH REQUEST" ;;
+        42) echo "ATTACH ACCEPT" ;;
+        43) echo "ATTACH COMPLETE" ;;
+        44) echo "ATTACH REJECT" ;;
+        45) echo "DETACH REQUEST" ;;
+        46) echo "DETACH ACCEPT" ;;
+        48) echo "ROUTING AREA UPDATE REQUEST" ;;
+        49) echo "ROUTING AREA UPDATE ACCEPT" ;;
+        4A) echo "ROUTING AREA UPDATE COMPLETE" ;;
+        4B) echo "ROUTING AREA UPDATE REJECT" ;;
+        4C) echo "SERVICE REQUEST" ;;
+        4D) echo "SERVICE ACCEPT" ;;
+        4E) echo "SERVICE REJECT" ;;
+        4F) echo "AUTHENTICATION AND CIPHERING REQUEST" ;;
+        50) echo "AUTHENTICATION AND CIPHERING RESPONSE" ;;
+        51) echo "AUTHENTICATION AND CIPHERING FAILURE" ;;
+        52) echo "IDENTITY REQUEST" ;;
+        53) echo "IDENTITY RESPONSE" ;;
+        55) echo "GMM STATUS" ;;
+        56) echo "GMM INFORMATION" ;;
+        *)  return 1 ;;
+    esac
+}
+
+latt_24008_sm_name() {
+    case "${1^^}" in
+        41) echo "ACTIVATE PDP CONTEXT REQUEST" ;;
+        42) echo "ACTIVATE PDP CONTEXT ACCEPT" ;;
+        43) echo "ACTIVATE PDP CONTEXT REJECT" ;;
+        46) echo "DEACTIVATE PDP CONTEXT REQUEST" ;;
+        47) echo "DEACTIVATE PDP CONTEXT ACCEPT" ;;
+        48) echo "MODIFY PDP CONTEXT REQUEST" ;;
+        49) echo "MODIFY PDP CONTEXT ACCEPT" ;;
+        *)  return 1 ;;
+    esac
+}
+
+latt_24008_pd_name() {
+    case "${1^^}" in
+        02) echo "session management (SM)" ;;
+        03) echo "call control (CC)" ;;
+        05) echo "mobility management (MM)" ;;
+        06) echo "radio resources management (RR)" ;;
+        08) echo "GPRS mobility management (GMM)" ;;
+        0A) echo "GPRS session management (SM)" ;;
+        *)  return 1 ;;
+    esac
+}
+
+# One information element, in the format the caller names. The formats are the
+# part of 24.008 this module places on its own; the IEI and value are the
+# caller's, because an IEI is only meaningful inside one message.
+# Which message-type table applies, from the protocol discriminator. 0x41 is
+# ATTACH REQUEST in GMM and ACTIVATE PDP CONTEXT REQUEST in SM, so the table
+# cannot be chosen from the message type alone.
+latt_24008_domain() {
+    case "${1^^}" in
+        08|0a) echo "GMM" ;;
+        02)    echo "SM" ;;
+        *)     echo "none" ;;
+    esac
+}
+
+latt_24008_ie() {  # fmt iei value-hex
+    local fmt="${1:-}" iei="${2:-}" val="${3:-}" n
+    iei="${iei#0x}"; iei="${iei#0X}"
+    [[ "$iei" =~ ^[0-9A-Fa-f]{1,2}$ ]] || {
+        printf 'ERROR\tIEI "%s" is not one or two hex digits\n' "$(latt_sanitize "$iei")" >&2; return 2; }
+    val="${val//[[:space:]]/}"
+    [[ -z "$val" || "$val" =~ ^[0-9A-Fa-f]+$ ]] || {
+        printf 'ERROR\tvalue "%s" is not hex\n' "$(latt_sanitize "$val")" >&2; return 2; }
+    (( ${#val} % 2 == 0 )) || {
+        printf 'ERROR\tvalue "%s" is a whole number of octets\n' "$(latt_sanitize "$val")" >&2; return 2; }
+    n=$(( ${#val} / 2 ))
+    case "$fmt" in
+        t1) (( n == 0 )) || {
+                printf 'ERROR\ta type 1 IE carries no length: the value is the low nibble of the IEI octet\n' >&2
+                return 2; }
+            printf '%X' "$(( (16#$iei << 4) & 0xF0 ))" ;;
+        t2) printf '%s%s' "$iei" "$val" ;;
+        t3) (( n <= 255 )) || { printf 'ERROR\ta type 3 IE cannot be longer than 255 octets\n' >&2; return 2; }
+            printf '%s%02X%s' "$iei" "$n" "$val" ;;
+        t4) printf '%s%04X%s' "$iei" "$n" "$val" ;;
+        v)  printf '%s' "$val" ;;
+        *)  printf 'ERROR\tIE format "%s" is not t1, t2, t3, t4 or v\n' "$(latt_sanitize "$fmt")" >&2
+            printf 'WHY\tTS 24.008 clause 10.5 defines exactly those four TV/TLV layouts\n' >&2
+            return 2 ;;
+    esac
+}
+
+# Layer-3 message: protocol discriminator, transaction identifier / skip
+# indicator, message type, then whatever the caller listed.
+latt_24008_build() {  # pd-hex type-hex ti|skip [fmt:iei:value ...]
+    local pd="${1:-}" mt="${2:-}" ti="${3:-}" out rest
+    [[ "$pd" =~ ^[0-9A-Fa-f]{2}$ ]] || {
+        printf 'ERROR\tprotocol discriminator must be one octet of hex\n' >&2; return 2; }
+    [[ "$mt" =~ ^[0-9A-Fa-f]{2}$ ]] || {
+        printf 'ERROR\tmessage type must be one octet of hex\n' >&2; return 2; }
+    latt_24008_pd_name "$pd" >/dev/null 2>&1 || {
+        printf 'ERROR\t0x%s is not a protocol discriminator TS 24.008 defines\n' "$pd" >&2; return 2; }
+    out="${pd}${ti}${mt}"
+    shift 3 || true
+    for rest in "$@"; do
+        # One assignment per statement: in this bash a multi-assignment local
+        # that reads the previous name yields an empty value.
+        local fmt mid iei val
+        fmt="${rest%%:*}"
+        mid="${rest#*:}"
+        iei="${mid%%:*}"
+        val="${mid#*:}"
+        out+=$(latt_24008_ie "$fmt" "$iei" "$val") || return 2
+    done
+    printf '%s' "$out"
+}
+
+latt_24008_ti() {  # value 0..7 -> transaction identifier octet
+    local v="${1:-0}"
+    [[ "$v" =~ ^[0-7]$ ]] || {
+        printf 'ERROR\ttransaction identifier must be 0..7\n' >&2; return 2; }
+    printf '%02X' "$(( (v << 4) | 0x0 ))"
+}
+
+latt_cmd_24008_build() {
+    local pd="${1:-}" mt="${2:-}" ti="${3:-}"
+    [[ -n "$mt" ]] || {
+        printf 'ERROR\tusage: --24008-build <pd-hex> <type-hex> <ti|skip> [fmt:iei:value ...]\n' >&2
+        printf 'WHY\tTS 24.008 section 9.4 and 9.5 define the message identities; the IEs are the caller'"'"'s because an IEI is only meaningful inside one message\n' >&2
+        return 2; }
+    local out; out=$(latt_24008_build "$pd" "$mt" "$ti" "${@:4}") || return 2
+    printf 'protocol_discriminator\t%s\n' "$pd"
+    printf 'pd_name\t%s\n' "$(latt_24008_pd_name "$pd" 2>/dev/null || echo unknown)"
+    printf 'message_type\t%s\n' "$mt"
+    local dom
+    dom=$(latt_24008_domain "$pd")
+    if [[ "$dom" == "SM" ]] && latt_24008_sm_name "$mt" >/dev/null 2>&1; then
+        printf 'message_name\t%s\n' "$(latt_24008_sm_name "$mt")"
+        printf 'message_domain\tSM\n'
+    elif [[ "$dom" == "GMM" ]] && latt_24008_gmm_name "$mt" >/dev/null 2>&1; then
+        printf 'message_name\t%s\n' "$(latt_24008_gmm_name "$mt")"
+        printf 'message_domain\tGMM\n'
+    else
+        printf 'message_name\tunknown\n'
+        printf 'message_domain\tnone\n'
+    fi
+    printf 'ies\t%s\n' "$(( $# - 3 ))"
+    printf 'hex\t%s\n' "$out"
+    printf 'octets\t%s\n' "$(( ${#out} / 2 ))"
+    printf 'ref\tTS 24.008 clause 9.4 (GMM), 9.5 (SM), 10.5 (coding of information elements)\n'
+    printf 'limit\tthe layer-3 header and the IE formats are placed here; whether a given IEI belongs in a given message is not checked, because that table is per message and this module does not carry it\n'
+}
+
+# Reading a 24.008 PDU back. The header is unambiguous; the IE list is walked
+# only with a format map the caller supplies, because the same IEI number is a
+# different IE in a different message and the octets do not say which format
+# they are.
+latt_24008_parse() {  # hex [fmt:iei ...]
+    local hex="${1:-}" fmtmap="${2:-}" pd ti mt out name domain
+    hex="${hex//[[:space:]]/}"; hex="${hex//0x/}"; hex="${hex,,}"
+    [[ "$hex" =~ ^[0-9a-f]+$ ]] || { printf 'ERROR\tPDU must be hex\n' >&2; return 1; }
+    (( ${#hex} % 2 == 0 )) || { printf 'ERROR\tPDU must be whole octets\n' >&2; return 1; }
+    (( ${#hex} >= 6 )) || {
+        printf 'ERROR\tPDU is shorter than the one-octet header plus message type\n' >&2; return 1; }
+    pd="${hex:0:2}"; ti="${hex:2:2}"; mt="${hex:4:2}"
+    printf 'protocol_discriminator\t%s\n' "$pd"
+    printf 'pd_name\t%s\n' "$(latt_24008_pd_name "$pd" 2>/dev/null || echo unknown)"
+    printf 'header_octet\t%s\n' "$ti"
+    if [[ "$pd" == "08" || "$pd" == "0a" ]]; then
+        printf 'skip_indicator\t%s\n' "$ti"
+        printf 'ti_or_skip\tskip_indicator\n'
+    else
+        printf 'transaction_id\t%s\n' "$(( 16#$ti >> 4 ))"
+        printf 'ti_flag\t%s\n' "$(( 16#$ti & 0x08 ? 1 : 0 ))"
+        printf 'ti_or_skip\ttransaction_identifier\n'
+    fi
+    printf 'message_type\t%s\n' "$mt"
+    local pdom
+    pdom=$(latt_24008_domain "$pd")
+    if [[ "$pdom" == "SM" ]] && name=$(latt_24008_sm_name "$mt" 2>/dev/null); then domain=SM
+    elif [[ "$pdom" == "GMM" ]] && name=$(latt_24008_gmm_name "$mt" 2>/dev/null); then domain=GMM
+    else name=unknown; domain=none; fi
+    printf 'message_name\t%s\n' "$name"
+    printf 'message_domain\t%s\n' "$domain"
+    local rest="${hex:6}" n=$(( (${#hex} - 6) / 2 ))
+    printf 'body_octets\t%s\n' "$n"
+    if [[ -z "$fmtmap" ]]; then
+        if (( n > 0 )); then
+            printf 'note\tthe body is not walked: an IEI number means a different IE, and a different format, in every message, so the caller supplies the map\n'
+            printf 'body_hex\t%s\n' "$rest"
+        fi
+        return 0
+    fi
+    # walk with a caller-supplied map of iei:format
+    local i=0 pos=0 byte iei fmt len val
+    while (( pos < ${#rest} )); do
+        byte="${rest:pos:2}"
+        iei="${byte^^}"
+        fmt=""
+        local spec
+        for spec in $fmtmap; do
+            local want got
+            want="${spec%%:*}"
+            got="${spec#*:}"
+            want="${want#0x}"; want="${want#0X}"
+            want=$(printf '%02X' "$(( 16#$want ))") || continue
+            if [[ "$want" == "$iei" ]]; then fmt="$got"; fi
+        done
+        # A type 1 IEI lives in the high nibble of its own octet, so a map
+        # entry such as "1:t1" has to be matched against the nibble.
+        if [[ -z "$fmt" ]]; then
+            local hi
+            hi=$(printf '%02X' "$(( (16#$byte >> 4) & 0x0F ))")
+            for spec in $fmtmap; do
+                local want got
+                want="${spec%%:*}"
+                got="${spec#*:}"
+                want="${want#0x}"; want="${want#0X}"
+                want=$(printf '%02X' "$(( 16#$want ))") || continue
+                if [[ "$want" == "$hi" && "$got" == "t1" ]]; then fmt="t1"; fi
+            done
+        fi
+        if [[ -z "$fmt" ]]; then
+            printf 'ie\t%s\t%s\tunmapped\t%s\t\n' "$i" "$pos" "$byte"
+            printf 'note\tIEI 0x%s is not in the map the caller supplied, so its length is unknown and the walk stops here\n' "$byte"
+            return 0
+        fi
+        case "$fmt" in
+            t1) printf 'ie\t%s\t%s\t%s\t%s\t%s\n' "$i" "$pos" "type1" "$iei" "$(( 16#$byte & 0x0F ))"
+                pos=$(( pos + 2 )) ;;
+            t2) val="${rest:pos+2:2}"
+                printf 'ie\t%s\t%s\t%s\t%s\t%s\n' "$i" "$pos" "type2" "$iei" "$val"
+                pos=$(( pos + 4 )) ;;
+            t3) len=$(( 16#${rest:pos+2:2} ))
+                val="${rest:pos+4:len*2}"
+                (( ${#val} == len * 2 )) || {
+                    printf 'ERROR\tIE 0x%s declares %d octets but the PDU ends first\n' "$iei" "$len" >&2; return 1; }
+                printf 'ie\t%s\t%s\t%s\t%s\t%s\n' "$i" "$pos" "type3" "$iei" "$val"
+                pos=$(( pos + 4 + len * 2 )) ;;
+            t4) len=$(( 16#${rest:pos+2:4} ))
+                val="${rest:pos+6:len*2}"
+                (( ${#val} == len * 2 )) || {
+                    printf 'ERROR\tIE 0x%s declares %d octets but the PDU ends first\n' "$iei" "$len" >&2; return 1; }
+                printf 'ie\t%s\t%s\t%s\t%s\t%s\n' "$i" "$pos" "type4" "$iei" "$val"
+                pos=$(( pos + 6 + len * 2 )) ;;
+        esac
+        i=$(( i + 1 ))
+    done
+    printf 'ies\t%s\n' "$i"
+    return 0
+}
+
+latt_cmd_24008_parse() {
+    local hex="${1:-}"
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --24008-parse <hex> [iei:fmt ...]\n' >&2; return 2; }
+    latt_24008_parse "$hex" "${2:-}"
+}
+
 latt_selftest() {
     local bad=0
     chk() {
@@ -2166,6 +2441,54 @@ latt_selftest() {
     chk realloc-cmd-imsi-note  "$(printf '%s\n' "$imsicmd" | awk -F'\t' '$1=="reallocated_identity"{print $2; exit}')" "IMSI"
     rm -f "$LATT_REALLOC"
 
+    # ── TS 24.008 GMM/SM: header, IE formats, and the read-back ────────
+    local m41; m41=$(latt_cmd_24008_build 08 41 00 't1:1:' 't3:19:4121' 2>&1)
+    chk m24008-pd      "$(printf '%s\n' "$m41" | awk -F'\t' '$1=="pd_name"{print $2; exit}')" \
+        "GPRS mobility management (GMM)"
+    chk m24008-type    "$(printf '%s\n' "$m41" | awk -F'\t' '$1=="message_type"{print $2; exit}')" "41"
+    chk m24008-name    "$(printf '%s\n' "$m41" | awk -F'\t' '$1=="message_name"{print $2; exit}')" "ATTACH REQUEST"
+    chk m24008-domain  "$(printf '%s\n' "$m41" | awk -F'\t' '$1=="message_domain"{print $2; exit}')" "GMM"
+    chk m24008-ies     "$(printf '%s\n' "$m41" | awk -F'\t' '$1=="ies"{print $2; exit}')" "2"
+    chk m24008-hex     "$(printf '%s\n' "$m41" | awk -F'\t' '$1=="hex"{print $2; exit}')" "0800411019024121"
+    chk m24008-octets  "$(printf '%s\n' "$m41" | awk -F'\t' '$1=="octets"{print $2; exit}')" "8"
+    # formats: t1 is a nibble, t2 one octet, t3 one length octet, t4 two
+    chk m24008-t1      "$(latt_24008_ie t1 1 '' 2>&1)" "10"
+    chk m24008-t2      "$(latt_24008_ie t2 17 05 2>&1)" "1705"
+    chk m24008-t3      "$(latt_24008_ie t3 28 0102 2>&1)" "28020102"
+    chk m24008-t4      "$(latt_24008_ie t4 33 0102 2>&1)" "3300020102"
+    chk m24008-v       "$(latt_24008_ie v 00 dead 2>&1)" "dead"
+    chk m24008-badfmt  "$(latt_24008_ie t9 1 00 >/dev/null 2>&1; echo $?)" "2"
+    chk m24008-t1-len  "$(latt_24008_ie t1 1 00 >/dev/null 2>&1; echo $?)" "2"
+    chk m24008-t3-long "$(latt_24008_ie t3 1 "$(printf '00%.0s' {1..256})" >/dev/null 2>&1; echo $?)" "2"
+    chk m24008-ti      "$(latt_24008_ti 5 2>&1)" "50"
+    chk m24008-ti-bad  "$(latt_24008_ti 9 >/dev/null 2>&1; echo $?)" "2"
+    chk m24008-nopd    "$(latt_cmd_24008_build 09 41 00 >/dev/null 2>&1; echo $?)" "2"
+    chk m24008-noargs  "$(latt_cmd_24008_build >/dev/null 2>&1; echo $?)" "2"
+    # the SM family and the transaction identifier header
+    local m41s; m41s=$(latt_cmd_24008_build 02 41 "$(latt_24008_ti 3)" 't3:28:6d6e633030312e6d63633030312e67707273' 2>&1)
+    chk m24008-sm-name   "$(printf '%s\n' "$m41s" | awk -F'\t' '$1=="message_name"{print $2; exit}')" "ACTIVATE PDP CONTEXT REQUEST"
+    chk m24008-sm-domain "$(printf '%s\n' "$m41s" | awk -F'\t' '$1=="message_domain"{print $2; exit}')" "SM"
+    chk m24008-sm-ti     "$(latt_24008_parse "$(printf '%s\n' "$m41s" | awk -F'\t' '$1=="hex"{print $2; exit}')" 2>&1 | awk -F'\t' '$1=="transaction_id"{print $2; exit}')" "3"
+    # read back the GMM message: the walk needs the caller's format map
+    local p41; p41=$(latt_24008_parse 0800411019024121 '1:t1 19:t3' 2>&1)
+    chk m24008-parse-skip  "$(printf '%s\n' "$p41" | awk -F'\t' '$1=="ti_or_skip"{print $2; exit}')" "skip_indicator"
+    chk m24008-parse-ies   "$(printf '%s\n' "$p41" | awk -F'\t' '$1=="ies"{print $2; exit}')" "2"
+    chk m24008-parse-f1    "$(printf '%s\n' "$p41" | awk -F'\t' '$1=="ie" && $2==0{print $4; exit}')" "type1"
+    chk m24008-parse-v1    "$(printf '%s\n' "$p41" | awk -F'\t' '$1=="ie" && $2==0{print $6; exit}')" "0"
+    chk m24008-parse-f2    "$(printf '%s\n' "$p41" | awk -F'\t' '$1=="ie" && $2==1{print $4; exit}')" "type3"
+    chk m24008-parse-v2    "$(printf '%s\n' "$p41" | awk -F'\t' '$1=="ie" && $2==1{print $6; exit}')" "4121"
+    chk m24008-parse-nomap "$(latt_24008_parse 0800411019024121 2>&1 | grep -c 'an IEI number means a different IE')" "1"
+    chk m24008-parse-unmapped "$(latt_24008_parse 0800411019024121 '19:t3' 2>&1 | awk -F'\t' '$1=="ie"{print $4; exit}')" "unmapped"
+    chk m24008-parse-short "$(latt_24008_parse 0800 >/dev/null 2>&1; echo $?)" "1"
+    chk m24008-parse-noarg "$(latt_cmd_24008_parse >/dev/null 2>&1; echo $?)" "2"
+    # the message tables name the families the row asked about
+    chk m24008-gmm-rau  "$(latt_24008_gmm_name 48 2>&1)" "ROUTING AREA UPDATE REQUEST"
+    chk m24008-gmm-detach "$(latt_24008_gmm_name 46 2>&1)" "DETACH ACCEPT"
+    chk m24008-sm-deact "$(latt_24008_sm_name 46 2>&1)" "DEACTIVATE PDP CONTEXT REQUEST"
+    chk m24008-unknown  "$(latt_24008_gmm_name 7f >/dev/null 2>&1; echo $?)" "1"
+
+    rm -f "$LATT_REALLOC"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -2267,6 +2590,8 @@ latt_cli_main() {
         --realloc-record)   latt_realloc_record "${1:-}" "${2:-}" "${@:3}" ;;
         --realloc-list)     latt_cmd_realloc_list ;;
         --realloc-chain)    latt_cmd_realloc_chain "${1:-}" ;;
+        --24008-build)      latt_cmd_24008_build "$@" ;;
+        --24008-parse)      latt_cmd_24008_parse "${1:-}" "${2:-}" ;;
         --doltest)          latt_doltest_cases ;;
         --doltest-check)    latt_doltest_check "${1:-}" ;;
         --ue-stack)         latt_require_ue_stack ;;
