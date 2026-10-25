@@ -1150,6 +1150,153 @@ femt_s1_tap() {
     return 0
 }
 
+# ── I3: what a used femtocell with a valid certificate is worth ─────────
+# A second-hand HeNB is thirty to eighty currency units and it arrives with the
+# one thing an attacker cannot easily manufacture: an operator-issued device
+# certificate. That is the whole threat model of this surface, and it is worth
+# stating precisely, because the interesting attacks are not the ones about
+# breaking crypto. The carrier trusts an identity that the certificate asserts;
+# the certificate asserts an identity, not a piece of hardware, and it does not
+# say which physical box is holding it, where it is, or what it announces.
+#
+# The rows below are the attacks that follow from that, each with what it needs
+# and how a network would notice. Everything here is analysis of published
+# procedure: this module builds and decodes the bodies (--s1setup,
+# --iuh-register, --ranap-*), and the radio and the certificate are the part an
+# operator hands out.
+femt_attack_surface() {
+    local unit="used"
+    while (($#)); do
+        case "$1" in
+            --unit) unit="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(femt_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    case "$unit" in used|sdr) ;; *)
+        printf 'ERROR\t--unit is used or sdr\n' >&2; return 2 ;; esac
+
+    printf 'attack\tneeds\tyou_have\teffect\tdetection\tref\ttier\n'
+    cat <<'EOF'
+A1 enb_id_collision	a used HeNB and the certificate it carries	the MME trusts the identity the certificate asserts	the same eNB ID is announced twice and UE contexts land on whichever box answered last	forwarding two S1 Setup Requests with one eNB ID to one MME	TS 36.413 9.1.7 / 9.1.3	used unit
+A2 csg_member_lure	the CSG ID the target subscriber is a member of	a closed cell is closed by a list the UE holds, not by the radio	broadcast that CSG ID and the target reselects onto a cell it is entitled to join	a CSG ID served by an HeNB that is not the subscriber home cell	TS 36.331 6.2.2, TS 23.830	used unit
+A3 iuh_shadow_register	a valid Iuh certificate	the HNB-GW registers by HNB identity, and a second registration need not displace the first	paging and RUA for that HNB reach both boxes; the subscriber fingerprint is visible on yours	two registrations with one HNB identity in the HNB-GW	TS 25.467 / TS 25.469	used unit
+A4 acs_redirect	control of the backhaul DHCP or DNS	on many units the ACS URL arrives from the network rather than being pinned	configuration, firmware and management credentials go to an ACS that is yours	ACS URL outside the operator address space	TR-069 / TR-069 Annex F	used unit
+A5 segw_pin	control of the peer address the unit resolves	the backhaul IPsec peer arrives by DNS or DHCP	the Iuh tunnel terminates in your responder and the management plane is read	IKE peer is not the operator SeGW	TS 33.320 7	used unit
+A6 cert_extraction	physical access to the unit	on many models the device certificate and key sit in readable flash	a clone that any SeGW accepts, without an identity of your own	two devices presenting one certificate serial	TS 33.320 6, 54_baseband_exploit --fw-manifest	used unit + flash access
+A7 pci_confusion	choice of the PCI to announce	reselection measures a cell, it does not verify an identity	UEs camp on your cell while the neighbour relation still points at the real one	a PCI duplicated inside one neighbourhood	TS 36.300 22.3.2	used unit
+A8 qrxlevmin_lure	control of the SIB1 the cell broadcasts	reselection thresholds are broadcast and unauthenticated	lower q-RxLevMin and absorb UEs that would otherwise stay on the macro	SIB1 thresholds out of line with the operator plan	TS 36.304 5.2.4.6	used unit
+EOF
+    if [[ "$unit" == "sdr" ]]; then
+        cat <<'EOF'
+A9 fake_macro	an SDR and an amplifier, no certificate at all	a full cell is a broadcast, not a contract	UEs that never saw an operator cell attach to yours and hand over an IMSI	a cell whose PLMN and PCI are not in the operator plan	TS 36.331, 33.501	lab only
+A10 downgrade_lure	an SDR plus 2G capability	reselection prefers the older generation when it is the only one offering service	push a UE to GSM where the cipher is weaker	RAT order in a coverage overlap	TS 23.122	lab only
+EOF
+    fi
+    printf 'cannot\tdecrypt a ciphered NAS message without the keys; impersonate an MME without an MME certificate; read an IMSI from a ciphered attach. A used unit gives identity, not key material.\n'
+    printf 'read\t%s\n' "a certificate says which identity may register; it does not say the box is where it claims, that its radio settings match the plan, or that the operator still holds its keys"
+    printf 'next\t--cert-audit <pem|der-hex> answers what a certificate actually proves, which is the first question this surface asks\n'
+    printf 'ref\tTS 33.320 (HeNB security), TS 36.413 (S1AP), TS 25.467 (Iuh), TR-069\n'
+    printf 'verdict\tattack_surface_listed\n'
+    return 0
+}
+
+# ── the certificate, audited rather than assumed ────────────────────────
+# "A valid certificate" is four separate claims: it is unexpired, it was issued
+# by someone the SeGW trusts, its key is not from a decade that trusted 1024-bit
+# RSA, and its extended key usage actually permits client authentication. An
+# operator validates all four. A second-hand unit usually satisfies the first
+# two and nobody ever looks at the last two, so this verb prints all of them and
+# refuses to call the result valid on the strength of one.
+femt_cert_audit() {
+    local src="${1:-}"
+    [[ -n "$src" ]] || { printf 'ERROR\tusage: --cert-audit <pem-file|der-hex>\n' >&2; return 2; }
+    command -v openssl >/dev/null 2>&1 || {
+        printf 'ERROR\topenssl is required to read a certificate\n' >&2; return 1; }
+    local pem="$MOD_TMP/cert-audit.pem"
+    if [[ -f "$src" ]]; then
+        if grep -q 'BEGIN CERTIFICATE' "$src" 2>/dev/null; then
+            cp "$src" "$pem"
+        else
+            xxd -r -p < "$src" > "$pem" 2>/dev/null || {
+                printf 'ERROR\tcannot read %s as PEM or hex DER\n' "$(femt_sanitize "$src")" >&2; return 1; }
+        fi
+    elif [[ "$src" =~ ^[0-9a-fA-Fx[:space:]:.-]+$ ]]; then
+        printf '%s' "$(femt_norm_hex "$src")" | xxd -r -p > "$pem" 2>/dev/null
+    else
+        printf 'ERROR\tno such file: %s\n' "$(femt_sanitize "$src")" >&2; return 2
+    fi
+    openssl x509 -in "$pem" -noout >/dev/null 2>&1 || {
+        printf 'ERROR\t%s does not parse as an X.509 certificate\n' "$(femt_sanitize "$src")" >&2; return 1; }
+
+    local subject issuer serial nb na bits sig
+    subject=$(openssl x509 -in "$pem" -noout -subject 2>/dev/null | sed 's/^subject=//')
+    issuer=$(openssl x509 -in "$pem" -noout -issuer 2>/dev/null | sed 's/^issuer=//')
+    serial=$(openssl x509 -in "$pem" -noout -serial 2>/dev/null | sed 's/^serial=//')
+    nb=$(openssl x509 -in "$pem" -noout -startdate 2>/dev/null | sed 's/^notBefore=//')
+    na=$(openssl x509 -in "$pem" -noout -enddate 2>/dev/null | sed 's/^notAfter=//')
+    sig=$(openssl x509 -in "$pem" -noout -text 2>/dev/null | awk -F': *' '/Signature Algorithm/{print $2; exit}')
+
+    local end_epoch now days_left expired self=no
+    end_epoch=$(date -d "$na" +%s 2>/dev/null || echo 0)
+    now=$(date +%s)
+    if [[ "$end_epoch" =~ ^[0-9]+$ ]] && (( end_epoch > 0 )); then
+        days_left=$(( (end_epoch - now) / 86400 ))
+    else
+        days_left=-1
+    fi
+    (( days_left >= 0 )) || expired=yes
+    [[ -z "$expired" ]] && expired=no
+    [[ "$subject" == "$issuer" ]] && self=yes
+
+    local alg bits_val
+    alg=$(openssl x509 -in "$pem" -noout -text 2>/dev/null | awk -F': *' '/Public Key Algorithm/{print $2; exit}')
+    if [[ "$alg" == *rsa* || "$alg" == *RSA* ]]; then
+        bits_val=$(openssl x509 -in "$pem" -noout -text 2>/dev/null | awk '/Public-Key:/{print $2; exit}' | tr -cd '0-9')
+    else
+        bits_val="-"
+    fi
+    local eku
+    eku=$(openssl x509 -in "$pem" -noout -ext extendedKeyUsage 2>/dev/null | tail -n +2 | tr -d ' ' | tr '\n' ',')
+    eku="${eku%,}"
+
+    local findings="" n_hits=0
+    if [[ "$expired" == "yes" ]]; then
+        findings+="cert_expired=HIGH "; n_hits=$(( n_hits + 1 ))
+    fi
+    if [[ "$self" == "yes" ]]; then
+        findings+="self_signed=HIGH "; n_hits=$(( n_hits + 1 ))
+    fi
+    if [[ "$bits_val" =~ ^[0-9]+$ ]] && (( bits_val < 2048 )); then
+        findings+="weak_key=HIGH "; n_hits=$(( n_hits + 1 ))
+    fi
+    if [[ -z "$eku" || "${eku,,}" != *clientauth* ]]; then
+        findings+="no_client_auth=MEDIUM "; n_hits=$(( n_hits + 1 ))
+    fi
+
+    printf 'subject\t%s\n' "$(femt_sanitize "$subject")"
+    printf 'issuer\t%s\n' "$(femt_sanitize "$issuer")"
+    printf 'serial\t%s\n' "$(femt_sanitize "$serial")"
+    printf 'not_before\t%s\n' "$(femt_sanitize "$nb")"
+    printf 'not_after\t%s\n' "$(femt_sanitize "$na")"
+    printf 'days_left\t%d\n' "$days_left"
+    printf 'expired\t%s\n' "$expired"
+    printf 'self_signed\t%s\n' "$self"
+    printf 'key_algorithm\t%s\n' "$(femt_sanitize "$alg")"
+    printf 'key_bits\t%s\n' "$(femt_sanitize "$bits_val")"
+    printf 'signature_algorithm\t%s\n' "$(femt_sanitize "$sig")"
+    printf 'extended_key_usage\t%s\n' "${eku:-none}"
+    printf 'findings\t%d\n' "$n_hits"
+    printf 'finding_list\t%s\n' "$(printf '%s' "${findings:-none}" | sed 's/ *$//' | tr '\t\r\n' '   ')"
+    printf 'proves\t%s\n' "which identity may register with the SeGW; not that the hardware is where it claims, nor that the operator still holds the matching key"
+    if (( n_hits > 0 )); then
+        printf 'verdict\tcert_posture_rejected\n'
+    else
+        printf 'verdict\tcert_posture_clean\n'
+    fi
+    return 0
+}
+
+
 femt_plan() {
     cat <<'EOF'
 status	handoff
@@ -1562,6 +1709,35 @@ S1PCAP
     chk s1-tap-bad-port "$(femt_s1_tap 0 5 >/dev/null 2>&1; echo $?)" "2"
     chk s1-tap-bad-secs "$(femt_s1_tap 36412 0 >/dev/null 2>&1; echo $?)" "2"
 
+    # 19. I3: the attack catalogue is a catalogue, and every row names what it
+    # needs; the certificate verb separates the four claims "valid" stands for.
+    asout=$(femt_attack_surface)
+    chk attack-rows "$(printf '%s\n' "$asout" | awk -F'\t' '$1 ~ /^A[0-9]/' | wc -l)" "8"
+    chk attack-sdr-more "$(femt_attack_surface --unit sdr | awk -F'\t' '$1 ~ /^A[0-9]/' | wc -l)" "10"
+    chk attack-refs "$(printf '%s\n' "$asout" | awk -F'\t' '$1 ~ /^A[0-9]/ && $6 ~ /TS|TR/' | wc -l)" "8"
+    chk attack-cannot "$(printf '%s\n' "$asout" | awk -F'\t' '$1=="cannot" && $2 ~ /key material/{print "named"}')" "named"
+    chk attack-verdict "$(printf '%s\n' "$asout" | awk -F'\t' '$1=="verdict"{print $2}')" "attack_surface_listed"
+    chk attack-bad-unit "$(femt_attack_surface --unit toaster >/dev/null 2>&1; echo $?)" "2"
+    chk cert-noargs "$(femt_cert_audit >/dev/null 2>&1; echo $?)" "2"
+    chk cert-nofile "$(femt_cert_audit /nonexistent.pem >/dev/null 2>&1; echo $?)" "2"
+    if command -v openssl >/dev/null 2>&1; then
+        openssl req -x509 -newkey rsa:2048 -nodes -keyout "$d/k.pem" -out "$d/c.pem" \
+            -days 30 -subj "/CN=henb-01.example" >/dev/null 2>&1
+        openssl req -x509 -newkey rsa:1024 -nodes -keyout "$d/wk.pem" -out "$d/wc.pem" \
+            -days 30 -subj "/CN=weak.example" >/dev/null 2>&1
+        cout=$(femt_cert_audit "$d/c.pem")
+        cfld() { printf '%s\n' "$cout" | awk -F'\t' -v k="$1" '$1==k{print $2; exit}'; }
+        chk cert-subject "$(cfld subject)" "CN = henb-01.example"
+        chk cert-selfsigned "$(cfld self_signed)" "yes"
+        chk cert-bits "$(cfld key_bits)" "2048"
+        chk cert-days "$([[ "$(cfld days_left)" =~ ^[0-9]+$ ]] && echo numeric || echo no)" "numeric"
+        chk cert-expired "$(cfld expired)" "no"
+        chk cert-findings "$(cfld finding_list)" "self_signed=HIGH no_client_auth=MEDIUM"
+        chk cert-verdict "$(cfld verdict)" "cert_posture_rejected"
+        chk cert-weak-key "$(femt_cert_audit "$d/wc.pem" | awk -F'\t' '$1=="finding_list" && $2 ~ /weak_key=HIGH/{print "flagged"}')" "flagged"
+        chk cert-notcert "$(printf 'deadbeef' > "$d/n.pem"; femt_cert_audit "$d/n.pem" >/dev/null 2>&1; echo $?)" "1"
+    fi
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1668,6 +1844,8 @@ femt_cli_main() {
         --s1-tap)      femt_s1_tap "$@" ;;
         --iuh)         femt_iuh_stack ;;
         --tr069-audit) femt_tr069_audit "${1:-}" ;;
+        --attack-surface) femt_attack_surface "$@" ;;
+        --cert-audit)  femt_cert_audit "${1:-}" ;;
         --plan)        femt_plan ;;
         --selftest)    femt_selftest ;;
         --menu)        femt_menu ;;
@@ -1730,6 +1908,10 @@ Usage: $0 COMMAND
                         row for every identity that arrives; receives only
   --iuh                 Iuh (HNBAP/RUA/RANAP) reference
   --tr069-audit <conf>  TR-069/CWMP local management findings
+  --attack-surface [--unit used|sdr]
+                        what a used femtocell with a valid certificate is worth
+  --cert-audit <pem|der-hex>
+                        what the certificate actually proves, finding by finding
   --plan                lab HeNB handoff plan
   --selftest            verify the codec and detectors, no radio needed
   --menu                interactive menu
