@@ -1601,6 +1601,90 @@ ncore_decode_5g_guti() {
     printf 'fiveg_guti_octets\t10\n'
 }
 
+# ── K1 / CITesting: whose context did the core believe? ─────────────────
+# The attack needs no radio at all. A UE sends a registration request that
+# carries a 5G-GUTI, and the core resolves that GUTI to a context it already
+# holds. If the core binds on the GUTI alone, a UE that presents a GUTI issued
+# to somebody else is answered with that subscriber's context: the attacker
+# position is the UE's own report of who it is.
+#
+# What settles it is a journal of the lab's own events, because every field of
+# the answer is visible there: which UE registered, which identity it
+# presented, which context the AMF resolved it to, and whether authentication
+# ran before the context was used. The input is a TSV whose header names the
+# columns, so the reader can map its own log without guessing:
+#
+#   event  ue  presented  context_owner  authenticated
+#   registration  ue-b  5g-guti:0001020304...  ue-a  0
+#
+# The verdict is about binding: an event where a UE was resolved to a context
+# owned by a different subscriber and no authentication ran is a context
+# confusion. One where authentication ran first is a re-authentication, which
+# is what the standard requires (TS 24.501 §4.4.4: the network re-authenticates
+# when it cannot vouch for the context).
+ncore_cmd_ctx_bind() {  # <journal.tsv>
+    local f="${1:-}"
+    [[ -n "$f" ]] || { printf 'ERROR\tusage: --ctx-bind <journal.tsv>\n' >&2; return 2; }
+    [[ -r "$f" ]] || { printf 'ERROR\tno such journal: %s\n' "$(ncore_sanitize "$f")" >&2; return 1; }
+
+    local hdr; hdr=$(head -n1 "$f")
+    local cols
+    cols=$(printf '%s\n' "$hdr" | awk -F'\t' '{
+        for (i = 1; i <= NF; i++) { c[$i] = i }
+        need[1]="event"; need[2]="ue"; need[3]="presented"; need[4]="context_owner"; need[5]="authenticated"
+        for (j = 1; j <= 5; j++) if (!(need[j] in c)) { print "missing:" need[j]; exit }
+        printf "%d %d %d %d %d\n", c["event"], c["ue"], c["presented"], c["context_owner"], c["authenticated"]
+    }')
+    if [[ "$cols" == missing:* ]]; then
+        printf 'ERROR\tthe journal header has no %s column\n' "${cols#missing:}" >&2
+        return 2
+    fi
+    local ce cu cp co ca
+    read -r ce cu cp co ca <<<"$cols"
+
+    local rows
+    rows=$(awk -F'\t' -v ce="$ce" -v cu="$cu" -v cp="$cp" -v co="$co" -v ca="$ca" '
+        NR == 1 { next }
+        NF < 5 { next }
+        {
+            ev = $(ce); ue = $(cu); pres = $(cp); owner = $(co); auth = $(ca)
+            if (owner == "" || owner == "-") { printf "skip\t%s\t%s\tno context owner in the row\n", ue, ev; next }
+            same = (ue == owner) ? "yes" : "no"
+            verdict = (same == "yes") ? "own context" : ((auth == "1") ? "re-authenticated before use" : "context of another subscriber, taken on the UE word")
+            printf "event\t%s\t%s\t%s\t%s\t%s\t%s\n", ev, ue, pres, owner, auth, verdict
+        }' "$f")
+    local nconf nreauth nother
+    nconf=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="event" && $6=="0" && $3!=$5' | grep -c . || true)
+    nreauth=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="event" && $6=="1" && $3!=$5' | grep -c . || true)
+    nother=$(printf '%s\n' "$rows" | awk -F'\t' '$1=="event" && $3!=$5' | grep -c . || true)
+
+    printf 'journal\t%s\n' "$(ncore_sanitize "$f")"
+    printf 'columns\tevent ue presented context_owner authenticated\n'
+    printf 'events\t%s\n' "$(printf '%s\n' "$rows" | awk -F'\t' '$1=="event"' | grep -c . || true)"
+    printf 'cross_subscriber_events\t%s\n' "${nother:-0}"
+    printf 're_authenticated\t%s\n' "${nreauth:-0}"
+    printf 'context_confusions\t%s\n' "${nconf:-0}"
+    printf '%s\n' "$rows" | grep . || true
+    local hits=0 findings=""
+    if (( nconf > 0 )); then
+        hits=$(( hits + 1 ))
+        findings+="K1 context_confusion=$nconf event(s) resolved a UE into another subscriber's context with no authentication;"
+    fi
+    if (( nreauth > 0 )); then
+        findings+="K1-INFO re_authenticated=$nreauth cross-subscriber event(s) were re-authenticated first;"
+    fi
+    printf 'findings\t%s\n' "$(ncore_sanitize "${findings:-none}")"
+    printf 'signal_hits\t%d\n' "$hits"
+    printf 'ref\t%s\n' 'TS 24.501 4.4.4 (re-authentication when the network cannot vouch for the context); the journal shape is this verb own, not a 3GPP file format'
+    if (( hits > 0 )); then
+        printf 'verdict\tcontext_confusion\n'
+        printf 'note\t%s\n' 'the attacker position is a UE and its own registration request: no false base station and no radio are needed for this half'
+        return 0
+    fi
+    printf 'verdict\tconsistent\n'
+    return 0
+}
+
 # ── plan files — hardware the vector needs ──────────────────────────────
 # A plan is not an attack. It names the testbed, the steps and the expected
 # observable, and it carries `status: handoff` so nothing downstream mistakes
@@ -2304,6 +2388,22 @@ ncore_selftest() {
     chk cli-nas-noargs    "$(ncore_cmd_decode_nas >/dev/null 2>&1; echo $?)"    "2"
     chk cli-nas-badhex    "$(ncore_cmd_decode_nas QQ >/dev/null 2>&1; echo $?)" "1"
     chk cli-pfcp-noargs   "$(ncore_cmd_decode_pfcp >/dev/null 2>&1; echo $?)"   "2"
+
+    # K1: a journal row whose UE differs from the context owner and shows no
+    # authentication is a context confusion; re-authentication is not.
+    printf 'event\tue\tpresented\tcontext_owner\tauthenticated\n' > "$d/ctx.tsv"
+    printf 'registration\tue-b\t5g-guti:0001\tue-a\t0\n' >> "$d/ctx.tsv"
+    printf 'registration\tue-a\t5g-guti:0002\tue-a\t0\n' >> "$d/ctx.tsv"
+    printf 'registration\tue-c\t5g-guti:0002\tue-a\t1\n' >> "$d/ctx.tsv"
+    out=$(ncore_cmd_ctx_bind "$d/ctx.tsv")
+    chk ctx-bind-confusions "$(printf '%s\n' "$out" | awk -F'\t' '$1=="context_confusions"{print $2}')" "1"
+    chk ctx-bind-cross      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="cross_subscriber_events"{print $2}')" "2"
+    chk ctx-bind-reauth     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="re_authenticated"{print $2}')" "1"
+    chk ctx-bind-verdict    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="verdict"{print $2}')" "context_confusion"
+    chk ctx-bind-nofile     "$(ncore_cmd_ctx_bind /nonexistent.tsv >/dev/null 2>&1; echo $?)" "1"
+    chk ctx-bind-noargs     "$(ncore_cmd_ctx_bind >/dev/null 2>&1; echo $?)" "2"
+    printf 'ue\tpresented\tcontext_owner\tauthenticated\n' > "$d/bad.tsv"
+    chk ctx-bind-badheader  "$(ncore_cmd_ctx_bind "$d/bad.tsv" >/dev/null 2>&1; echo $?)" "2"
     # C5 -- the N2 walk: what an unauthenticated SCTP peer learns per probe.
     out=$(ncore_cmd_ngap_probe 10.0.0.9)
     chk probe-target  "$(fld "$out" target)"       "10.0.0.9:38412"
@@ -2461,6 +2561,7 @@ ncore_cli_main() {
         --pfcp-build)      ncore_cmd_pfcp_build "${1:-1}" "${2:-10.45.0.2}" "${3:-1}" \
                                                 "${4:-0}" "${5:-10.45.0.1}" ;;
         --pfcp-send)       ncore_cmd_pfcp_send "$@" ;;
+        --ctx-bind)        ncore_cmd_ctx_bind "${1:-}" ;;
         --pfcp-hijack)     ncore_cmd_pfcp_hijack "${1:-}" "${2:-4242}" "${3:-127.0.0.1}" "${4:-1}" ;;
         --pfcp-delete)     ncore_cmd_pfcp_delete "${1:-}" "${2:-1}" ;;
         --ngap-initial-ue)  ncore_cmd_ngap_initial_ue "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
@@ -2499,6 +2600,8 @@ Usage: $0 COMMAND
   --pfcp-build [teid] [ue-ip] [seq] [seid] [upf-ip]
                                 build a Session Establishment Request (type 50)
   --pfcp-send <upf-host> [port] [hex] [--wait N]   UDP 8805, then read the reply
+  --ctx-bind <journal.tsv>               K1: whose context the core believed
+                                        (columns: event ue presented context_owner authenticated)
   --pfcp-hijack <seid> [teid] [attacker-ip] [far-id]
                                 C4: the Session Modification Request that
                                 repoints a live session at your tunnel

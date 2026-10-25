@@ -5922,6 +5922,13 @@ static const char *const plain_keys[] = {
     "periodic_identities\tidentities paged on a near-fixed interval",
     "sd_gap_s\tthe standard deviation of those gaps, in seconds",
     "threshold\tthe number this verb calls the attack",
+    "columns\tthe journal column names this verb read",
+    "consistent\tevery event used the context of its own subscriber",
+    "context_confusion\ta UE was placed in another subscriber's context",
+    "context_confusions\thow many such events the journal holds",
+    "cross_subscriber_events\tevents where the UE was not the context owner",
+    "journal\tthe event log this verb read",
+    "re_authenticated\tevents where authentication ran before the context was used",
 };
 
 /* Compare a bare key against one "key<TAB>words" row. */
@@ -6469,6 +6476,7 @@ static const ChipRow chip_rows[] = {
     { "13_nr_core",          "--xnap-decode",         NEED_NO, DOES_READS },
     { "13_nr_core",          "--xnap-setup",          NEED_NO, DOES_SENDS },
     { "13_nr_core",          "--yes",                 NEED_NO, DOES_READS },
+    { "13_nr_core",          "--ctx-bind",            NEED_NO, DOES_READS },
     { "14_suci",             "--__index_probe__",     NEED_NO, DOES_READS },
     { "14_suci",             "--audit",               NEED_NO, DOES_READS },
     { "14_suci",             "--build-suci",          NEED_NO, DOES_BUILDS },
