@@ -2601,17 +2601,185 @@ _otasm_smpp_status() {
 
 # Body layout of the command ids this module decodes: one "kind<TAB>name" per
 # field, in wire order. Absent ids return 1 (the body is not walked here).
+# ── optional parameters (SMPP 3.4 §4.7.1, Table 4-12) ──────────────────
+# Every SMPP body ends with zero or more tag/length/value triplets: a two-octet
+# tag, a two-octet length that counts the VALUE only, then that many octets. The
+# trap is that the length excludes both tag and length, so a reader that adds two
+# or four lands mid-triplet and the next tag is noise. Another trap: the same tag
+# carries different types depending on the PDU, so this table names the tag and
+# this module prints the octets rather than claiming a value it would have to
+# guess at (message_payload is text only because the PDU it appears in says so).
+_otasm_smpp_tlv_name() {
+    case "${1:-}" in
+        0005) printf 'dest_addr_subunit' ;;
+        0006) printf 'dest_network_type' ;;
+        0007) printf 'dest_bearer_type' ;;
+        0008) printf 'dest_telematics_id' ;;
+        000d) printf 'source_addr_subunit' ;;
+        000e) printf 'source_addr_network_type' ;;
+        000f) printf 'source_addr_bearer_type' ;;
+        0010) printf 'source_addr_telematics_id' ;;
+        0017) printf 'qos_time_to_live' ;;
+        0019) printf 'payload_type' ;;
+        001d) printf 'additional_status_info_text' ;;
+        001e) printf 'receipted_message_id' ;;
+        0030) printf 'ms_msg_wait_facilities' ;;
+        0201) printf 'privacy_indicator' ;;
+        020c) printf 'sar_msg_ref_num' ;;
+        020e) printf 'sar_total_segments' ;;
+        020f) printf 'sar_segment_seqnum' ;;
+        0210) printf 'sc_interface_version' ;;
+        0302) printf 'callback_num_pres_ind' ;;
+        0303) printf 'callback_num_atag' ;;
+        0304) printf 'number_of_messages' ;;
+        0381) printf 'callback_num' ;;
+        0420) printf 'dpf_result' ;;
+        0421) printf 'set_dpf' ;;
+        0422) printf 'ms_availability_status' ;;
+        0423) printf 'network_error_code' ;;
+        0424) printf 'message_payload' ;;
+        0425) printf 'delivery_failure_reason' ;;
+        0426) printf 'more_messages_to_send' ;;
+        0427) printf 'message_state' ;;
+        0501) printf 'ussd_service_op' ;;
+        1201) printf 'display_time' ;;
+        1203) printf 'sms_signal' ;;
+        1204) printf 'ms_validity' ;;
+        130c) printf 'alert_on_message_delivery' ;;
+        1380) printf 'its_reply_type' ;;
+        1383) printf 'its_session_info' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Walk tag/length/value triplets from off to end. Leaves OTASM_SMPP_OFF past the
+# last one it could establish, and refuses rather than guessing when a length
+# runs past the end of the PDU.
+_otasm_smpp_walk_tlvs() {
+    local hex="$1" off="$2" end="$3" tag len val name n=0 text
+    local start=$off
+    while (( off < end )); do
+        if (( off + 4 > end )); then
+            printf 'ERROR\tan optional parameter starts at offset %d but only %d octet(s) are left; the tag and its length need four\n' \
+                "$off" "$(( end - off ))" >&2
+            printf 'WHY\ta TLV is tag(2) length(2) value(length); with fewer than four octets the triplet has no boundary and the remaining bytes are not a parameter\n' >&2
+            return 1
+        fi
+        tag="${hex:$(( off * 2 )):4}"
+        len=$(( 16#${hex:$(( off * 2 + 4 )):4} ))
+        if (( off + 4 + len > end )); then
+            printf 'ERROR\toptional parameter 0x%s at offset %d says its value is %d octets but only %d remain\n' \
+                "$tag" "$off" "$len" "$(( end - off - 4 ))" >&2
+            printf 'WHY\tthe length counts the value only, not the tag and length octets; a value that runs past the PDU means the triplet is truncated and the bytes after it are not another parameter\n' >&2
+            return 1
+        fi
+        val="${hex:$(( (off + 4) * 2 )):$(( len * 2 ))}"
+        if name=$(_otasm_smpp_tlv_name "$tag"); then
+            :
+        else
+            name="unknown_tag_0x$tag"
+        fi
+        if [[ "$name" == "message_payload" || "$name" == "receipted_message_id" || "$name" == "additional_status_info_text" ]]; then
+            text=$(_otasm_smpp_text "$val")
+        else
+            text=""
+        fi
+        printf 'tlv\t%d\t0x%s\t%s\t%d\t%s\t%s\n' "$off" "$tag" "$name" "$len" "$val" "$text"
+        n=$(( n + 1 ))
+        off=$(( off + 4 + len ))
+    done
+    OTASM_SMPP_OFF=$off
+    OTASM_SMPP_TLVS=$n
+    return 0
+}
+
+# Compose one optional parameter, so an operator can put TLVs on a body by hand:
+# --smpp-tlv message_payload 00410042 emits 0424 0004 00410042.
+otasm_smpp_tlv_build() {
+    local what="${1:-}" value="${2:-}" tag_hex len_hex
+    if [[ -z "$what" ]]; then
+        printf 'ERROR\tusage: --smpp-tlv <tag-name|0xNNNN> <hex-value>\n' >&2
+        printf 'WHY\tan optional parameter is named by its tag, and the name and the value are both needed to emit the triplet\n' >&2
+        return 2
+    fi
+    case "${what,,}" in
+        0x*) tag_hex="${what:2}" ;;
+        *)   tag_hex="" ;;
+    esac
+    if [[ -z "$tag_hex" ]]; then
+        local t
+        for t in 0005 0006 0007 0008 000d 000e 000f 0010 0017 0019 001d 001e 0030 \
+                 0201 020c 020e 020f 0210 0302 0303 0304 0381 0420 0421 0422 0423 \
+                 0424 0425 0426 0427 0501 1201 1203 1204 130c 1380 1383; do
+            if [[ "$(_otasm_smpp_tlv_name "$t")" == "${what,,}" ]]; then tag_hex="$t"; break; fi
+        done
+        if [[ -z "$tag_hex" ]]; then
+            printf 'ERROR\t%s is not an optional parameter this module can name\n' "$what" >&2
+            printf 'WHY\tthe tag table is SMPP 3.4 Table 4-12; a name outside it has no tag, and inventing one would produce a triplet no SMSC reads\n' >&2
+            return 2
+        fi
+    fi
+    [[ "$tag_hex" =~ ^[0-9a-f]{4}$ ]] || {
+        printf 'ERROR\tthe tag must be four hex digits: %s\n' "$what" >&2; return 2; }
+    value=$(otasm_norm_hex "$value")
+    [[ "$value" =~ ^[0-9a-f]*$ ]] || {
+        printf 'ERROR\tthe value must be hex octets\n' >&2
+        printf 'WHY\tan optional parameter value is octets; the type is in the PDU definition, so text is encoded by the caller\n' >&2
+        return 2; }
+    (( ${#value} % 2 == 0 )) || { printf 'ERROR\tthe value is an odd number of hex digits\n' >&2; return 2; }
+    len_hex=$(printf '%04x' "$(( ${#value} / 2 ))")
+    printf 'tag\t0x%s\n' "$tag_hex"
+    printf 'name\t%s\n' "$(_otasm_smpp_tlv_name "$tag_hex")"
+    printf 'value_octets\t%d\n' "$(( ${#value} / 2 ))"
+    printf 'length_hex\t%s\n' "$len_hex"
+    printf 'tlv_hex\t%s%s%s\n' "$tag_hex" "$len_hex" "$value"
+    printf 'length_note\tthe length counts the value only: tag and length are four octets that are not in it (§4.7.1)\n'
+    printf 'ref\tSMPP 3.4 §4.7.1, Table 4-12\n'
+}
+
+# What SMPP over TLS changes: nothing in the PDUs and everything around them.
+# Port 3550 is the long-standing dedicated port and 2775 the alternative; the
+# session layer is a TLS record stream, so a PDU can straddle records and the
+# 16-octet header is not a framing boundary on the wire any more. This module can
+# build PDUs and cannot terminate an SMPP session, so the honest output is the
+# shape of the stream and the refusal to pretend otherwise.
+otasm_smpp_tls() {
+    local port="${1:-3550}"
+    [[ "$port" =~ ^[0-9]{2,5}$ ]] || {
+        printf 'ERROR\t--smpp-tls takes a port number\n' >&2; return 2; }
+    printf 'transport\tTLS over TCP\n'
+    printf 'default_port\t3550\n'
+    printf 'alternative_port\t2775\n'
+    printf 'port_asked\t%s\n' "$port"
+    printf 'pdu_framing\tunchanged: command_length still counts the whole PDU (§4.1)\n'
+    printf 'record_framing\tadded: a TLS record is at most 16384 plaintext octets, so a large message_payload is split across records that do not align with PDUs\n'
+    printf 'straddle\tpossible: one PDU may span two records and one record may hold several PDUs, so a reader must buffer until command_length octets arrive\n'
+    printf 'visible_to_the_middle\tTLS record header (content type, version, length) and the handshake of the session; no command_id and no sequence_number\n'
+    printf 'client_auth\toptional in TLS, and an SMPP bind carries its own system_id/password inside the tunnel: one authenticates the transport, the other the account\n'
+    printf 'build\tyes, --smpp-build emits PDUs that are byte-identical with or without TLS\n'
+    printf 'terminate\tno: this tree builds PDUs and has no SMPP session layer, so it cannot accept a bind or answer an enquire_link\n'
+    printf 'what_that_costs\ta capture on 3550 yields records, not PDUs, unless the session key is available; the PDU decoders here apply after decryption\n'
+    printf 'ref\tSMPP 3.4 §4.1 (framing), SMPP over TLS is a deployment convention, not a clause in 3.4\n'
+    printf 'verdict\tsmpp_tls_admitted_by_shape\n'
+}
+
+
 _otasm_smpp_layout() {
     case "${1:-}" in
         00000001|00000002|00000009)
             printf 'cstr\tsystem_id\ncstr\tpassword\ncstr\tsystem_type\nu8\tinterface_version\nu8\taddr_ton\nu8\taddr_npi\ncstr\taddress_range\n' ;;
         00000004|00000005)
             printf 'cstr\tservice_type\nu8\tsource_addr_ton\nu8\tsource_addr_npi\ncstr\tsource_addr\nu8\tdest_addr_ton\nu8\tdest_addr_npi\ncstr\tdestination_addr\nu8\tesm_class\nu8\tprotocol_id\nu8\tpriority_flag\ncstr\tschedule_delivery_time\ncstr\tvalidity_period\nu8\tregistered_delivery\nu8\treplace_if_present_flag\nu8\tdata_coding\nu8\tsm_default_msg_id\nu8\tsm_length\noctets\tshort_message\n' ;;
+        00000021)
+            printf 'cstr\tservice_type\nu8\tsource_addr_ton\nu8\tsource_addr_npi\ncstr\tsource_addr\nu8\tnumber_of_dests\ndests\tdest_addresses\nu8\tesm_class\nu8\tprotocol_id\nu8\tpriority_flag\ncstr\tschedule_delivery_time\ncstr\tvalidity_period\nu8\tregistered_delivery\nu8\treplace_if_present_flag\nu8\tdata_coding\nu8\tsm_default_msg_id\nu8\tsm_length\noctets\tshort_message\n' ;;
+        00000103)
+            printf 'cstr\tservice_type\nu8\tsource_addr_ton\nu8\tsource_addr_npi\ncstr\tsource_addr\nu8\tdest_addr_ton\nu8\tdest_addr_npi\ncstr\tdestination_addr\nu8\tesm_class\nu8\tregistered_delivery\nu8\tdata_coding\n' ;;
         00000006|00000015) printf '' ;;
         80000000|80000006|80000007|80000008|80000015) printf '' ;;
         80000001|80000002|80000009) printf 'cstr\tsystem_id\n' ;;
         80000004|80000005|80000103) printf 'cstr\tmessage_id\n' ;;
         80000003) printf 'cstr\tmessage_id\ncstr\tfinal_date\nu8\tmessage_state\nu8\terror_code\n' ;;
+        80000021) printf '' ;;
         *) return 1 ;;
     esac
 }
@@ -2672,10 +2840,78 @@ _otasm_smpp_walk_body() {
                 fi
                 byte="${hex:$(( off * 2 )):2}"
                 printf 'field\t%d\t%s\tInteger\t%s\t%d\n' "$off" "$name" "$byte" "$(( 16#$byte ))"
-                if [[ "$name" == "sm_length" ]]; then
+                if [[ "$name" == "sm_length" || "$name" == "number_of_dests" ]]; then
                     n=$(( 16#$byte ))
                 fi
                 off=$(( off + 1 ))
+                ;;
+            dests)
+                # number_of_dests was the previous row; each entry is a
+                # dest_flag followed by one of two shapes (§5.2.2.2):
+                # dest_flag 1 = SME address (ton, npi, C-Octet String),
+                # dest_flag 2 = distribution list name (C-Octet String).
+                local k=0 flag dton dnpi dsz dgot dstr
+                while (( k < n )); do
+                    if (( off >= end )); then
+                        printf 'ERROR\tdestination %d of %d starts at offset %d but the PDU ends at %d\n' \
+                            "$(( k + 1 ))" "$n" "$off" "$end" >&2
+                        printf 'WHY\tnumber_of_dests says %d entries and only %d could be walked; the rest are not invented\n' "$n" "$k" >&2
+                        return 1
+                    fi
+                    flag=$(( 16#${hex:$(( off * 2 )):2} ))
+                    off=$(( off + 1 ))
+                    case "$flag" in
+                        1)
+                            if (( off + 2 > end )); then
+                                printf 'ERROR\tdestination %d has a dest_flag but no ton/npi\n' "$(( k + 1 ))" >&2
+                                return 1
+                            fi
+                            dton=$(( 16#${hex:$(( off * 2 )):2} ))
+                            dnpi=$(( 16#${hex:$(( (off + 1) * 2 )):2} ))
+                            off=$(( off + 2 ))
+                            dsz=0; dgot=0
+                            while (( off + dsz < end )); do
+                                if [[ "${hex:$(( (off + dsz) * 2 )):2}" == "00" ]]; then dgot=1; break; fi
+                                dsz=$(( dsz + 1 ))
+                            done
+                            (( dgot )) || {
+                                printf 'ERROR\tdestination %d has no NUL-terminated address\n' "$(( k + 1 ))" >&2
+                                return 1; }
+                            dstr=$(_otasm_smpp_text "${hex:$(( off * 2 )):$(( dsz * 2 ))}")
+                            printf 'field\t%d\tdestination[%d].dest_flag\tInteger\t%02x\t%d\n' \
+                                "$(( off - 3 ))" "$(( k + 1 ))" "$flag" "$flag"
+                            printf 'field\t%d\tdestination[%d].ton_npi\tOctets\t%02x%02x\t%d/%d\n' \
+                                "$(( off - 2 ))" "$(( k + 1 ))" "$dton" "$dnpi" "$dton" "$dnpi"
+                            printf 'field\t%d\tdestination[%d].sme_address\tC-Octet-String\t%s\t%s\n' \
+                                "$off" "$(( k + 1 ))" "${hex:$(( off * 2 )):$(( (dsz + 1) * 2 ))}" "$dstr"
+                            off=$(( off + dsz + 1 ))
+                            ;;
+                        2)
+                            dsz=0; dgot=0
+                            while (( off + dsz < end )); do
+                                if [[ "${hex:$(( (off + dsz) * 2 )):2}" == "00" ]]; then dgot=1; break; fi
+                                dsz=$(( dsz + 1 ))
+                            done
+                            (( dgot )) || {
+                                printf 'ERROR\tdestination %d distribution list has no NUL\n' "$(( k + 1 ))" >&2
+                                return 1; }
+                            dstr=$(_otasm_smpp_text "${hex:$(( off * 2 )):$(( dsz * 2 ))}")
+                            printf 'field\t%d\tdestination[%d].dest_flag\tInteger\t%02x\t%d\n' \
+                                "$(( off - 1 ))" "$(( k + 1 ))" "$flag" "$flag"
+                            printf 'field\t%d\tdestination[%d].dl_name\tC-Octet-String\t%s\t%s\n' \
+                                "$off" "$(( k + 1 ))" "${hex:$(( off * 2 )):$(( (dsz + 1) * 2 ))}" "$dstr"
+                            off=$(( off + dsz + 1 ))
+                            ;;
+                        *)
+                            printf 'ERROR\tdestination %d has dest_flag %d, and the only values are 1 (SME address) and 2 (distribution list)\n' \
+                                "$(( k + 1 ))" "$flag" >&2
+                            printf 'WHY\tthe flag selects which of the two shapes follows; any other value leaves the next octets untyped, so nothing after it is decoded\n' >&2
+                            return 1
+                            ;;
+                    esac
+                    k=$(( k + 1 ))
+                done
+                printf 'dests\t%d\n' "$n"
                 ;;
             octets)
                 if (( off + n > end )); then
@@ -2786,12 +3022,12 @@ otasm_smpp_build() {
             return 2 ;;
         *)
             printf 'ERROR\t--smpp-build does not build %s\n' "$pdu" >&2
-            printf 'WHY\tthis tree builds submit_sm, deliver_sm and bind_transceiver; submit_multi, data_sm and the broadcast PDUs carry fields (distribution lists, mandatory TLVs, broadcast areas) that are not encoded here, so no PDU is invented for them\n' >&2
+            printf 'WHY\tthis tree builds submit_sm, deliver_sm and bind_transceiver; submit_multi (destination lists), data_sm and the broadcast PDUs have bodies whose field order this builder does not encode, so no PDU is invented for them. --smpp-parse walks submit_multi and data_sm back, and --smpp-tlv composes one optional parameter at a time\n' >&2
             return 2 ;;
     esac
     if (( tlv )); then
-        printf 'ERROR\t--smpp-build does not encode optional parameters\n' >&2
-        printf 'WHY\toptional parameters are TLVs with their own tag, length and value layout; this builder emits the mandatory body fields only and will not invent a TLV\n' >&2
+        printf 'ERROR\t--smpp-build does not append optional parameters to a built PDU\n' >&2
+        printf 'WHY\tthe builder emits the mandatory body fields; a TLV is tag(2) length(2) value(length) and can be composed one at a time with --smpp-tlv, which prints the octets to append and the length that has to change with them\n' >&2
         return 2
     fi
     local v f
@@ -3128,7 +3364,14 @@ otasm_smpp_parse() {
     if (( OTASM_SMPP_OFF < total )); then
         printf 'optional_parameters\t%d\n' "$(( total - OTASM_SMPP_OFF ))"
         printf 'optional_parameters_hex\t%s\n' "${hex:$(( OTASM_SMPP_OFF * 2 ))}"
-        printf 'optional_parameters_decoded\tno\n'
+        OTASM_SMPP_TLVS=0
+        if ! _otasm_smpp_walk_tlvs "$hex" "$OTASM_SMPP_OFF" "$total"; then
+            printf 'optional_parameters_decoded\tno\n'
+            printf 'parsed\tno\n'
+            return 1
+        fi
+        printf 'optional_parameters_decoded\tyes\n'
+        printf 'optional_parameter_count\t%d\n' "$OTASM_SMPP_TLVS"
     fi
     printf 'parsed\tyes\n'
 }
@@ -4220,6 +4463,55 @@ PYGW
         chk http-send-live-rc "skipped-no-python3-or-curl" "skipped-no-python3-or-curl"
     fi
 
+    # ── R71: optional parameters, submit_multi, data_sm, SMPP over TLS ──
+    # A submit_multi with both destination shapes and one TLV: the point is that
+    # number_of_dests drives a list whose entries are not fixed-width, and that
+    # the TLV that follows the mandatory body is walked with the length counting
+    # the value only.
+    local sm_submulti="00000046000000210000000000000000000101393939393939393939000201010131313131313131313100024c49535431000000000000010000000568656c6c6f0201000101"
+    local submu
+    submu=$(otasm_smpp_parse "$sm_submulti")
+    chk smpp-multi-rc       "$?" "0"
+    chk smpp-multi-name     "$(fld "$submu" name)" "submit_multi"
+    chk smpp-multi-dests    "$(printf '%s\n' "$submu" | awk -F'\t' '$1=="field" && $3=="number_of_dests"{print $6}')" "2"
+    chk smpp-multi-row1     "$(printf '%s\n' "$submu" | grep -c 'destination\[1\].sme_address')" "1"
+    chk smpp-multi-row2     "$(printf '%s\n' "$submu" | grep -c 'destination\[2\].dl_name')" "1"
+    chk smpp-multi-destn    "$(printf '%s\n' "$submu" | awk -F'\t' '$1=="dests"{print $2}')" "2"
+    chk smpp-multi-sm       "$(printf '%s\n' "$submu" | awk -F'\t' '$1=="field" && $3=="short_message"{print $6}')" "5 octets"
+    chk smpp-multi-tlv      "$(printf '%s\n' "$submu" | awk -F'\t' '$1=="tlv"{print $4}')" "privacy_indicator"
+    chk smpp-multi-tlvs     "$(fld "$submu" optional_parameter_count)" "1"
+    chk smpp-multi-parsed   "$(fld "$submu" parsed)" "yes"
+
+    # data_sm carries its message in a TLV and has no short_message at all.
+    local sm_datasm="0000002f000001030000000000000000000101393939393939393939000101313131000001000424000568656c6c6f"
+    local dsm
+    dsm=$(otasm_smpp_parse "$sm_datasm")
+    chk smpp-datasm-rc      "$?" "0"
+    chk smpp-datasm-name    "$(fld "$dsm" name)" "data_sm"
+    chk smpp-datasm-payload "$(printf '%s\n' "$dsm" | awk -F'\t' '$1=="tlv" && $4=="message_payload"{print $7}')" "hello"
+    chk smpp-datasm-count   "$(fld "$dsm" optional_parameter_count)" "1"
+
+    # A truncated TLV is refused by name, not read as if the length were right.
+    chk smpp-tlv-truncated  "$(otasm_smpp_parse 0000002f000001030000000000000000000101393939393939393939000101313131000001000424000968656c6c6f >/dev/null 2>&1; echo $?)" "1"
+
+    # Composing one optional parameter, and the name gate.
+    local tlvout
+    tlvout=$(otasm_smpp_tlv_build message_payload 00410042)
+    chk smpp-tlv-build      "$(fld "$tlvout" tlv_hex)" "0424000400410042"
+    chk smpp-tlv-len        "$(fld "$tlvout" length_hex)" "0004"
+    chk smpp-tlv-name       "$(fld "$tlvout" name)" "message_payload"
+    chk smpp-tlv-byname     "$(otasm_smpp_tlv_build no_such_parameter 00 >/dev/null 2>&1; echo $?)" "2"
+    chk smpp-tlv-odd        "$(otasm_smpp_tlv_build message_payload 001 >/dev/null 2>&1; echo $?)" "2"
+
+    # SMPP over TLS changes the framing and not the PDU, and this tree has no
+    # session layer to terminate a bind -- both stated, neither claimed.
+    local tlsout
+    tlsout=$(otasm_smpp_tls 3550)
+    chk smpp-tls-port       "$(fld "$tlsout" port_asked)" "3550"
+    chk smpp-tls-framing    "$(printf '%s\n' "$tlsout" | grep -c 'command_length still counts')" "1"
+    chk smpp-tls-terminate  "$(fld "$tlsout" build)" "yes, --smpp-build emits PDUs that are byte-identical with or without TLS"
+    chk smpp-tls-verdict    "$(fld "$tlsout" verdict)" "smpp_tls_admitted_by_shape"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -4440,6 +4732,8 @@ otasm_cli_main() {
         --plan-tp)        otasm_plan_tp ;;
         --smpp-build)     otasm_smpp_build "${1:-}" "${@:2}" ;;
         --smpp-parse)     otasm_smpp_parse "${1:-}" ;;
+        --smpp-tlv)       otasm_smpp_tlv_build "${1:-}" "${2:-}" ;;
+        --smpp-tls)       otasm_smpp_tls "${1:-}" ;;
         --smpp-response)  otasm_smpp_response "${1:-}" "${@:2}" ;;
         --smpp-pdu)       otasm_smpp_pdu "${1:-}" ;;
         --smpp-send)      otasm_smpp_send "$@" ;;
@@ -4512,7 +4806,12 @@ Usage: $0 COMMAND
                                      --system-type --interface-version; an
                                      integer flag is decimal unless 0x-prefixed
   --smpp-parse <hex>                 decode the header, then one row per body
-                                     field with its octet offset
+                                     field with its octet offset, then any
+                                     optional parameters (TLVs)
+  --smpp-tlv <tag-name|0xNNNN> <hex> compose one optional parameter and print
+                                     the octets to append, length excluded
+  --smpp-tls [port]                  what TLS changes around an SMPP PDU, and
+                                     what this tree cannot do without a session
   --smpp-response <request> [--status n]
                                      build the matching *_resp PDU, same
                                      sequence number, response command id
