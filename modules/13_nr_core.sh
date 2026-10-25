@@ -1601,6 +1601,142 @@ ncore_decode_5g_guti() {
     printf 'fiveg_guti_octets\t10\n'
 }
 
+# ── K2 / Kairos: two procedures, one state machine ──────────────────────
+# A UE runs one procedure at a time unless it does not. Every 5GMM/5GSM
+# procedure is a sequence of messages with a state machine on both ends, and
+# the states are keyed on which request is outstanding -- so two procedures in
+# flight at once can each be individually legal and together leave the two
+# ends describing different states. Kairos (2024) showed the window is not
+# theoretical: a PDU session release that arrives while an establishment is
+# pending, or a deregistration accepted while a registration is halfway, needs
+# only the right millisecond offset.
+#
+# This verb does not race a core. It lays the two procedures on one timeline,
+# takes every pair of steps whose states cannot coexist, and prints the offset
+# window in which the second procedure's step lands inside the first's. The
+# windows are arithmetic over the step tables below -- start times and
+# durations are this module's model (a lab core answers in tens of
+# milliseconds), so the numbers bound the window; the core's real timing
+# decides where inside it you land.
+ncore_kairos_procs() {
+    cat <<'TABLE'
+register	registration-request	0	5
+register	authentication-request	5	15
+register	authentication-response	20	5
+register	security-mode-command	25	5
+register	security-mode-complete	30	5
+register	registration-accept	35	5
+register	registration-complete	40	3
+service	service-request	0	5
+service	service-accept	5	5
+pdu-establish	pdu-session-establishment-request	0	5
+pdu-establish	pdu-session-establishment-accept	5	10
+pdu-release	pdu-session-release-request	0	5
+pdu-release	pdu-session-release-command	5	5
+pdu-release	pdu-session-release-complete	10	3
+deregister	deregistration-request	0	5
+deregister	deregistration-accept	5	5
+handover	handover-required	0	5
+handover	handover-command	5	5
+handover	handover-complete	10	5
+TABLE
+}
+
+# Pairs of steps that may not coexist, with what breaks and where the standard
+# says so. Each line is: proc-a step-a proc-b step-b severity consequence ref
+ncore_kairos_conflicts() {
+    cat <<'TABLE'
+pdu-release	pdu-session-release-request	pdu-establish	pdu-session-establishment-accept	HIGH	a session release crosses an establishment accept, so one end holds a session the other has torn down	TS 24.501 6.3.2 (5GSM session state machine); a release during establishment leaves the UE in PROCEDURE-TRANSACTION-PENDING with no session
+deregister	deregistration-accept	register	registration-complete	HIGH	the UE is deregistered while its own registration completes, so the core keeps a context the UE has dropped	TS 24.501 5.3.1 / 5.5 (5GMM state machine)
+deregister	deregistration-accept	register	authentication-request	HIGH	authentication runs against a context the deregistration is deleting	TS 24.501 4.4.4 / 5.5
+service	service-accept	register	security-mode-command	MEDIUM	the service is accepted before the security mode procedure has completed, so the accepted context predates the keys	TS 24.501 4.4.2 (security mode control before any other procedure)
+service	service-accept	register	authentication-response	MEDIUM	the request is served on a context whose authentication has not finished	TS 24.501 4.4.1
+handover	handover-command	pdu-release	pdu-session-release-request	MEDIUM	the session is released while the handover command moves it, so the target receives a session the source has deleted	TS 23.502 4.9 (handover and session management interleaving)
+TABLE
+}
+
+ncore_cmd_kairos() {  # <proc-a> <proc-b> [--proc-a ...] [--proc-b ...]
+    local pa="" pb=""
+    while (( $# )); do
+        case "$1" in
+            --proc-a) pa="${2:-}"; shift 2 ;;
+            --proc-b) pb="${2:-}"; shift 2 ;;
+            -*) printf 'ERROR\t--kairos does not take %s\n' "$1" >&2; return 2 ;;
+            *)  if [[ -z "$pa" ]]; then pa="$1"; elif [[ -z "$pb" ]]; then pb="$1"
+                else printf 'ERROR\t--kairos takes two procedure names\n' >&2; return 2; fi
+                shift ;;
+        esac
+    done
+    [[ -n "$pa" && -n "$pb" ]] || {
+        printf 'ERROR\tusage: --kairos <proc-a> <proc-b>\n' >&2
+        printf 'WHY\tthis models one pair of procedures at a time: the state machine is two-party, and a third procedure changes which state matters\n' >&2
+        return 2; }
+    local procs; procs=$(ncore_kairos_procs)
+    local how_a how_b
+    how_a=$(printf '%s\n' "$procs" | awk -F'\t' -v p="$pa" '$1==p' | grep -c . || true)
+    how_b=$(printf '%s\n' "$procs" | awk -F'\t' -v p="$pb" '$1==p' | grep -c . || true)
+    if (( how_a == 0 )); then
+        printf 'ERROR\tunknown procedure %s; known: %s\n' "$(ncore_sanitize "$pa")" \
+            "$(printf '%s\n' "$procs" | cut -f1 | sort -u | paste -sd' ' -)" >&2
+        return 2
+    fi
+    if (( how_b == 0 )); then
+        printf 'ERROR\tunknown procedure %s; known: %s\n' "$(ncore_sanitize "$pb")" \
+            "$(printf '%s\n' "$procs" | cut -f1 | sort -u | paste -sd' ' -)" >&2
+        return 2
+    fi
+    [[ "$pa" != "$pb" ]] || { printf 'ERROR\ta procedure cannot race itself\n' >&2; return 2; }
+
+    printf 'proc_a\t%s\nproc_b\t%s\n' "$pa" "$pb"
+    printf 'model\t%s\n' 'step start times and durations are this module own millisecond model, not measurements; a lab core answers in tens of milliseconds'
+    local conflicts; conflicts=$(ncore_kairos_conflicts)
+    local hits=0 rows=""
+    while IFS=$'\t' read -r ca sa cb sb sev cons ref; do
+        [[ -z "$ca" ]] && continue
+        local a_ok b_ok r1 r2
+        if [[ "$ca" == "$pa" && "$cb" == "$pb" ]]; then
+            r1=$(printf '%s\n' "$procs" | awk -F'\t' -v p="$ca" -v s="$sa" '$1==p && $2==s{print $3"\t"$4}')
+            r2=$(printf '%s\n' "$procs" | awk -F'\t' -v p="$cb" -v s="$sb" '$1==p && $2==s{print $3"\t"$4}')
+        elif [[ "$ca" == "$pb" && "$cb" == "$pa" ]]; then
+            r1=$(printf '%s\n' "$procs" | awk -F'\t' -v p="$cb" -v s="$sb" '$1==p && $2==s{print $3"\t"$4}')
+            r2=$(printf '%s\n' "$procs" | awk -F'\t' -v p="$ca" -v s="$sa" '$1==p && $2==s{print $3"\t"$4}')
+        else
+            continue
+        fi
+        [[ -n "$r1" && -n "$r2" ]] || continue
+        local sa_start sa_dur sb_start sb_dur
+        sa_start="${r1%%$'\t'*}"; sa_dur="${r1#*$'\t'}"
+        sb_start="${r2%%$'\t'*}"; sb_dur="${r2#*$'\t'}"
+        # Offset of B's start relative to A's: B's conflicting step lands inside
+        # A's step when start_a <= offset + start_b < start_a + dur_a.
+        local lo hi
+        lo=$(( sa_start - sb_start ))
+        hi=$(( sa_start + sa_dur - sb_start ))
+        (( hi > lo )) || continue
+        hits=$(( hits + 1 ))
+        rows+="$(printf 'conflict\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s' \
+            "$sev" "$pa" "$sa" "$pb" "$sb" "$lo" "$hi" "$(ncore_sanitize "$cons")" "$ref")"$'\n'
+    done <<<"$conflicts"
+
+    if [[ -n "$rows" ]]; then
+        printf '%s' "$rows"
+    fi
+    printf 'conflicting_pairs\t%d\n' "$hits"
+    local worst="none" first=""
+    if (( hits > 0 )); then
+        first=$(printf '%s' "$rows" | head -n1)
+        worst="${first##*$'\t'}"
+    fi
+    printf 'severity\t%s\n' "$(printf '%s\n' "$rows" | awk -F'\t' '$1=="conflict"{print $2}' | sort -u | paste -sd, - | sed 's/^$//')"
+    if (( hits > 0 )); then
+        printf 'verdict\tinterleaving_breaks_state\n'
+        printf 'note\t%s\n' 'the window is the offset in which the second procedure step lands inside the first own; outside it the two procedures are serialised and the state machine holds'
+        return 0
+    fi
+    printf 'verdict\tno_conflict_modelled\n'
+    return 0
+}
+
 # ── K1 / CITesting: whose context did the core believe? ─────────────────
 # The attack needs no radio at all. A UE sends a registration request that
 # carries a 5G-GUTI, and the core resolves that GUTI to a context it already
@@ -2562,6 +2698,7 @@ ncore_cli_main() {
                                                 "${4:-0}" "${5:-10.45.0.1}" ;;
         --pfcp-send)       ncore_cmd_pfcp_send "$@" ;;
         --ctx-bind)        ncore_cmd_ctx_bind "${1:-}" ;;
+        --kairos)          ncore_cmd_kairos "$@" ;;
         --pfcp-hijack)     ncore_cmd_pfcp_hijack "${1:-}" "${2:-4242}" "${3:-127.0.0.1}" "${4:-1}" ;;
         --pfcp-delete)     ncore_cmd_pfcp_delete "${1:-}" "${2:-1}" ;;
         --ngap-initial-ue)  ncore_cmd_ngap_initial_ue "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
@@ -2600,6 +2737,8 @@ Usage: $0 COMMAND
   --pfcp-build [teid] [ue-ip] [seq] [seid] [upf-ip]
                                 build a Session Establishment Request (type 50)
   --pfcp-send <upf-host> [port] [hex] [--wait N]   UDP 8805, then read the reply
+  --kairos <proc-a> <proc-b>             K2: the offset window where two
+                                        procedures break the state machine
   --ctx-bind <journal.tsv>               K1: whose context the core believed
                                         (columns: event ue presented context_owner authenticated)
   --pfcp-hijack <seid> [teid] [attacker-ip] [far-id]
