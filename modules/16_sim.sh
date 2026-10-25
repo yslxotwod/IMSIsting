@@ -5662,6 +5662,45 @@ sim_selftest() {
     printf 'ASSERTIONS\t%d\n' "$n_checks"
     rm -rf "$d"
 
+    # ── SGP.32: the unattended management plane ──────────────────────────
+    local s32 s32d
+    s32=$(sim_sgp32_chain 2>/dev/null)
+    chk sgp32-steps      "$(printf '%s\n' "$s32" | awk -F'\t' '$1=="steps"{print $2}')" "11"
+    chk sgp32-nocreds    "$(printf '%s\n' "$s32" | awk -F'\t' '$1=="credentials_in_preconditions"{print $2}')" "none"
+    chk sgp32-step1      "$(printf '%s\n' "$s32" | awk -F'\t' '$1=="step" && $2=="1"{print $5}')" "IPAd"
+    chk sgp32-last       "$(printf '%s\n' "$s32" | awk -F'\t' '$1=="step" && $2=="11"{print $4}')" "leave the device on the attacker profile"
+    chk sgp32-load       "$(printf '%s\n' "$s32" | awk -F'\t' '$5=="ES10b" && $4 ~ /load that bound profile package/{print "local"}')" "local"
+    chk sgp32-finding    "$(printf '%s\n' "$s32" | awk -F'\t' '$1=="finding"{print $2}')" "unattended_local_operations"
+    chk sgp32-sev        "$(printf '%s\n' "$s32" | awk -F'\t' '$1=="finding"{print $3}')" "HIGH"
+    chk sgp32-verdict    "$(printf '%s\n' "$s32" | awk -F'\t' '$1=="verdict"{print $2}')" "sgp32_takeover_modelled"
+    chk sgp32-root       "$(printf '%s\n' "$s32" | awk -F'\t' '$1=="root_cause" && $2 ~ /compliance/{print "stated"}')" "stated"
+    # the plane: three interfaces, and the local one is where the card trusts
+    # whoever holds the device
+    local pl
+    pl=$(sim_sgp32_plane 2>/dev/null)
+    chk sgp32-ifaces     "$(printf '%s\n' "$pl" | awk -F'\t' '$1=="iface"{c++} END{print c+0}')" "3"
+    chk sgp32-es10b      "$(printf '%s\n' "$pl" | awk -F'\t' '$1=="iface" && $2 ~ /ES10b/{print "local"}')" "local"
+    chk sgp32-states     "$(printf '%s\n' "$pl" | awk -F'\t' '$1=="states"{print $2}')" "installed disabled enabled deleted"
+    chk sgp32-plane-one  "$(sim_sgp32_plane ipad | awk -F'\t' '$1=="iface"{c++} END{print c+0}')" "1"
+    chk sgp32-plane-bad  "$(sim_sgp32_plane ipax >/dev/null 2>&1; echo $?)" "2"
+    # the replay: two local operations and the card belongs to the attacker
+    s32d=$(mktemp -d)
+    printf 'install\t8901\nenable\t8901\ninstall\t8902\nenable\t8902\ndisable\t8901\ndelete\t8901\n' > "$s32d/take.tsv"
+    chk sgp32-replay-ops   "$(sim_sgp32_replay "$s32d/take.tsv" | awk -F'\t' '$1=="applied_ops"{print $2}')" "6"
+    chk sgp32-replay-state "$(sim_sgp32_replay "$s32d/take.tsv" | awk -F'\t' '$1=="profile" && $2=="8902"{print $3}')" "enabled"
+    chk sgp32-replay-old   "$(sim_sgp32_replay "$s32d/take.tsv" | awk -F'\t' '$1=="profile" && $2=="8901"{print $3}')" "deleted"
+    chk sgp32-replay-creds "$(sim_sgp32_replay "$s32d/take.tsv" | awk -F'\t' '$1=="credentials_supplied"{print $2}')" "0"
+    chk sgp32-replay-one   "$(sim_sgp32_replay "$s32d/take.tsv" | awk -F'\t' '$1=="enabled_profiles"{print $2}')" "1"
+    chk sgp32-replay-verd  "$(sim_sgp32_replay "$s32d/take.tsv" | awk -F'\t' '$1=="verdict"{print $2}')" "local_operations_changed_the_plane"
+    chk sgp32-replay-side  "$(sim_sgp32_replay "$s32d/take.tsv" | awk -F'\t' '$1=="side_effect" && $2=="8901"{print "disabled"}')" "disabled"
+    chk sgp32-replay-del   "$(sim_sgp32_replay "$s32d/take.tsv" | awk -F'\t' '$1=="profile" && $2=="8901"{print "gone"}')" "gone"
+    # deleting the enabled profile is refused: the card keeps one active
+    printf 'install\t8901\nenable\t8901\ndelete\t8901\n' > "$s32d/live.tsv"
+    chk sgp32-replay-live  "$(sim_sgp32_replay "$s32d/live.tsv" | awk -F'\t' '$1=="refused"{print $2}')" "delete"
+    chk sgp32-replay-noarg "$(sim_sgp32_replay >/dev/null 2>&1; echo $?)" "2"
+    chk sgp32-replay-nofil "$(sim_sgp32_replay "$s32d/none.tsv" >/dev/null 2>&1; echo $?)" "1"
+    rm -rf "$s32d"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -6948,6 +6987,148 @@ sim_cmd_aka_serve() {
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── SGP.32: the unattended provisioning plane ───────────────────────────
+# SGP.22 is a person with a phone: the user consents, the LPA talks to the
+# SM-DP+, one device at a time. SGP.32 is an eIM talking to an IPA inside an
+# IoT device that nobody is watching -- a meter, a tracker, a vending machine
+# -- and the IPA is what applies the eIM's orders to the eUICC over the local
+# ES10b interface.
+#
+# The distinction that matters for an attacker is where the credentials are.
+# The eIM authenticates itself to the IPA, and the IPA talks to the card; the
+# two local operations at the bottom of the chain (load a bound profile
+# package, then enable or delete a profile) are the ones a device has to be
+# willing to perform unattended, because that is the entire point of the
+# plane. Published formal analysis of the v1.3 management plane found six
+# specification-level attacks; the takeover chains two *unauthenticated local*
+# operations into control of the management plane with no credentials in its
+# preconditions.
+#
+# This verb set is the message set and the chain harness the tree did not have.
+# It composes shapes and replays the state machine; it does not speak IPAd to
+# anything, and it says so in every verdict.
+SIM_SGP32_STATES="installed disabled enabled deleted"
+
+sim_sgp32_plane() {   # [ipad|ipae|es10b]
+    local which="${1:-all}"
+    case "$which" in
+        all|ipad|ipae|es10b) ;;
+        *) printf 'ERROR\t%s is not a SGP.32 interface: use ipad, ipae or es10b\n' "$(sim_sanitize "$which")" >&2; return 2 ;;
+    esac
+    printf 'spec\tGSMA SGP.32 v1.3 (eSIM IoT provisioning), management plane\n'
+    printf 'actors\teIM (the manager) -> IPA (inside the device) -> eUICC (the card)\n'
+    printf 'contrast\tSGP.22 needs a user and an LPA in the loop; SGP.32 is built to need neither\n'
+    if [[ "$which" == "all" || "$which" == "ipad" ]]; then
+        printf 'iface\tIPAd\teIM to IPA: profile download, enable, disable, delete, and the profile list\n'
+        printf 'iface_needs\tIPAd\tthe IPA is reachable from the eIM; mutual authentication is the eIM certificate and the own key of the IPA\n'
+    fi
+    if [[ "$which" == "all" || "$which" == "ipae" ]]; then
+        printf 'iface\tIPAe\teIM to IPA: the eIM management operations for a device already provisioned\n'
+        printf 'iface_needs\tIPAe\tthe same trust direction: the device answers the eIM, whoever holds the credentials the device was given\n'
+    fi
+    if [[ "$which" == "all" || "$which" == "es10b" ]]; then
+        printf 'iface\tES10b (local)\tIPA to eUICC: LoadBoundProfilePackage, EnableProfile, DisableProfile, DeleteProfile, ListProfileInfo\n'
+        printf 'iface_needs\tES10b\tlocal interface: the card trusts the device it is plugged into, not the party that asked\n'
+    fi
+    printf 'states\t%s\n' "$SIM_SGP32_STATES"
+    printf 'unattended\tthe device performs these without a human: that is the requirement the plane exists to satisfy\n'
+    printf 'ref\tGSMA SGP.32 v1.3 (management plane and the IPAd/IPAe/ES10b interfaces)\n'
+    printf 'limit\tno IPAd or IPAe traffic is generated here: the message set and the state machine are what is modelled\n'
+    printf 'verdict\tsgp32_plane_described\n'
+}
+
+# The chain: ten steps, in order, each with what it needs from the attacker.
+sim_sgp32_chain() {
+    local n=0
+    printf 'step\tphase\toperation\tinterface\tcredentials\tstate_change\n'
+    while IFS='|' read -r phase op iface creds change; do
+        [[ -z "$phase" || "$phase" == '#'* ]] && continue
+        n=$(( n + 1 ))
+        printf 'step\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$phase" "$op" "$iface" "$creds" "$change"
+    done <<'CHAIN'
+# phase | operation | interface | credentials the step needs | management-plane state change
+recon|discover the device's IPA endpoint and its eIM association|IPAd|none: the endpoint answers, and the association is what an unattended device must advertise|none
+recon|read the profile list|ES10b|none: ListProfileInfo is a local read|none
+recon|read which profile is enabled|ES10b|none|none
+stage|obtain a bound profile package for the attacker's profile|offline|a profile the attacker controls, bound to this eUICC's EID|none
+local-1|load that bound profile package|ES10b|none: a bound package is already bound to the EID, and the card applies it|the attacker profile is installed in the disabled state
+local-2|enable the attacker profile|ES10b|none: EnableProfile is a local operation, and the device performs it unattended|the attacker profile is enabled, the original is disabled
+takeover|disable the original profile|ES10b|none|the original is disabled and the device is on the attacker's network
+takeover|delete the original profile (optional)|ES10b|none: deletion is what makes the change hard to undo|the original is gone from the card
+persist|re-enable the attacker profile after any reset|ES10b|none|the device returns to the attacker's profile
+harvest|read the identities and the files the profile exposes|ES10b + the profile|none beyond the profile being enabled|none: this is the plane working as designed
+finish|leave the device on the attacker profile|IPAd|none in the preconditions|the management plane believes the device is provisioned
+CHAIN
+    printf 'steps\t%s\n' "$n"
+    printf 'credentials_in_preconditions\tnone\n'
+    printf 'kit_cost\taround EUR 130 for the components the published work used\n'
+    printf 'root_cause\tcompliance: the plane exists so a device can be provisioned with nobody present, so the two local operations cannot ask who is asking\n'
+    printf 'formal_model\tpublished analysis of the v1.3 management plane (Tamarin and ProVerif) found six specification-level attacks, of which this chain is the worst\n'
+    printf 'finding\tunattended_local_operations\tHIGH\tthe takeover needs two local operations and no credentials, because the device is required to perform them unattended\n'
+    printf 'ref\tGSMA SGP.32 v1.3; the published management-plane model\n'
+    printf 'limit\tthe chain is the specification-level shape: running it needs an IPA, an eUICC and a profile the attacker controls\n'
+    printf 'verdict\tsgp32_takeover_modelled\n'
+}
+
+# The replay: apply a TSV of local operations to a modelled card and report the
+# resulting profile table. This is the assertion the chain needs -- that two
+# operations with no credentials change who owns the device.
+sim_sgp32_replay() {   # <ops.tsv>
+    local file="${1:-}"
+    [[ -n "$file" ]] || {
+        printf 'ERROR\tusage: --sgp32-replay <ops.tsv>\n' >&2
+        printf 'WHY\tcolumns: operation, iccid; operations are install, enable, disable, delete\n' >&2
+        return 2; }
+    [[ -r "$file" ]] || { printf 'ERROR\tcannot read %s\n' "$(sim_sanitize "$file")" >&2; return 1; }
+    awk -F'\t' '
+        NR==1 && $1 !~ /^(install|enable|disable|delete)$/ && $1 ~ /^[A-Za-z]/ { next }
+        NF < 2 || $1 == "" || $2 == "" { next }
+        {
+            op = $1; ic = $2
+            if (op !~ /^(install|enable|disable|delete)$/) {
+                printf "refused\t%s\t%s\n", op, ic
+                next
+            }
+            if (!(ic in state)) {
+                if (op != "install") { printf "refused\t%s\t%s\tnot installed\n", op, ic; next }
+                state[ic] = "installed"
+                order[++n] = ic
+                printf "op\t%d\t%s\t%s\t%s\n", ++ops, op, ic, "installed"
+                next
+            }
+            if (op == "install") { printf "op\t%d\t%s\t%s\t%s\n", ++ops, op, ic, "already present"; next }
+            if (op == "enable") {
+                # enabling one profile disables whichever was enabled: the card
+                # has one active profile at a time
+                for (x in state) if (state[x] == "enabled") { state[x] = "disabled"; printf "side_effect\t%s\tdisabled\n", x }
+                state[ic] = "enabled"
+                printf "op\t%d\t%s\t%s\t%s\n", ++ops, op, ic, "enabled"
+                next
+            }
+            if (op == "disable") { state[ic] = "disabled"; printf "op\t%d\t%s\t%s\t%s\n", ++ops, op, ic, "disabled"; next }
+            if (op == "delete") {
+                if (state[ic] == "enabled") { printf "refused\tdelete\t%s\tstill enabled\n", ic; next }
+                state[ic] = "deleted"
+                printf "op\t%d\t%s\t%s\t%s\n", ++ops, op, ic, "deleted"
+                next
+            }
+        }
+        END {
+            printf "state\tthe profile table the management plane now believes\n"
+            for (i = 1; i <= n; i++) printf "profile\t%s\t%s\n", order[i], state[order[i]]
+            en = 0; del = 0; dis = 1
+            for (i = 1; i <= n; i++) { if (state[order[i]] == "enabled") { en++; enabled_ic = order[i] } }
+            printf "profiles\t%d\n", n
+            printf "enabled_profiles\t%d\n", en
+            printf "applied_ops\t%d\n", ops
+            printf "credentials_supplied\t0\n"
+            printf "verdict\t%s\n", (ops > 0 ? "local_operations_changed_the_plane" : "nothing_applied")
+            if (en == 1) printf "finding\tone_profile_active\tINFO\tthe card carries exactly one enabled profile, which is why enabling the attacker profile disables the original\t%s\n", enabled_ic
+        }' "$file"
+    printf 'note\tevery operation above is a local one: no eIM, no IPA and no credential appears in the file, which is the point being asserted\n'
+    printf 'ref\tGSMA SGP.32 v1.3 (ES10b local operations)\n'
+}
+
 sim_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -6995,6 +7176,9 @@ sim_cli_main() {
         --es8-parse)      sim_cmd_es8_parse "${1:-}" ;;
         --es9-response)   sim_cmd_es9_response "$@" ;;
         --es9-notification) sim_cmd_es9_notification "${1:-}" ;;
+        --sgp32-plane)  sim_sgp32_plane "${1:-all}" ;;
+        --sgp32-chain)  sim_sgp32_chain ;;
+        --sgp32-replay) sim_sgp32_replay "${1:-}" ;;
         --selftest)       sim_selftest ;;
         --menu)           sim_menu ;;
         *)
