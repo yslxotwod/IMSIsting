@@ -182,6 +182,84 @@ note	transmitting PC5 into the V2X band needs a licence and an ITS credential; t
 EOF
 }
 
+# ── pseudonym rotation audit (TS 102 941) ────────────────────────────────
+# A pseudonym that rotates is only unlinkable if the rotation is actually
+# happening: one certificate signing everything for twenty minutes links the
+# whole journey, and two certificates that appear at the same place at the same
+# moment link to each other even though neither is reused. The audit reads a
+# trace (time, certificate id) and counts both.
+SLNK_BUCKET=${SLNK_BUCKET:-300}   # seconds per rotation bucket (5 min)
+slnk_pau_usage() {
+    cat >&2 <<'EOF'
+ERROR	usage: --pseudonym-audit <trace.tsv> [bucket-seconds]
+	trace.tsv has one row per signed message: <epoch-seconds> <certificate-id> [latitude] [longitude]
+EOF
+}
+slnk_cmd_pseudonym_audit() {
+    local f="${1:-}" bucket="${2:-$SLNK_BUCKET}"
+    if [[ -z "$f" ]]; then slnk_pau_usage; return 2; fi
+    if [[ ! -r "$f" ]]; then
+        printf 'WHY\tthe audit reads a trace of what was signed, so an absent trace is an absent capture\n' >&2
+        printf 'ERROR\tcannot read %s\n' "$(slnk_sanitize "$f")" >&2
+        return 1
+    fi
+    [[ "$bucket" =~ ^[0-9]+$ && "$bucket" -gt 0 ]] || {
+        printf 'ERROR\tbucket-seconds must be a positive whole number\n' >&2; return 2; }
+    awk -F'\t' -v bucket="$bucket" '
+        NF < 2 { next }
+        $1 !~ /^[0-9]+$/ { next }
+        {
+            t = $1 + 0; cert = $2
+            if (cert == "") next
+            n++
+            if (!(cert in first) || t < first[cert]) first[cert] = t
+            if (!(cert in last) || t > last[cert]) last[cert] = t
+            uses[cert]++
+            b = int(t / bucket)
+            buckets[cert] = buckets[cert] (cert in buckets && index(buckets[cert] " ", b " ") ? "" : (buckets[cert] == "" ? b : " " b))
+            seen[b] = seen[b] " " cert
+        }
+        END {
+            if (n == 0) { print "ERROR\tno usable rows (want epoch-seconds and a certificate id)"; exit 2 }
+            nc = 0; reuse = 0; span_max = 0
+            for (c in uses) {
+                nc++
+                span = last[c] - first[c]
+                if (span > span_max) span_max = span
+                k = split(buckets[c], arr, " ")
+                if (k > 1) reuse++
+                printf "pseudonym\t%s\tuses=%d\tbuckets=%d\tspan_s=%d\n", c, uses[c], k, span
+            }
+            linkable = 0
+            for (bx in seen) {
+                m = split(seen[bx], cs, " ")
+                delete u
+                uniq = 0
+                for (i = 1; i <= m; i++) { if (cs[i] != "" && !(cs[i] in u)) { u[cs[i]] = 1; uniq++ } }
+                if (uniq > 1) { linkable += uniq * (uniq - 1) / 2; pairs++ }
+            }
+            printf "messages\t%d\n", n
+            printf "pseudonyms\t%d\n", nc
+            printf "rotation_bucket_s\t%d\n", bucket
+            printf "longest_span_s\t%d\n", span_max
+            printf "reused_pseudonyms\t%d\n", reuse
+            printf "linkable_pairs\t%d\n", linkable
+            printf "clusters_with_two\t%d\n", pairs + 0
+            if (nc == 1 && n > 1)
+                print "finding\tno_rotation\tHIGH\tevery message was signed with one certificate, so the whole trace is one vehicle"
+            if (reuse > 0)
+                printf "finding\tpseudonym_reuse\tHIGH\t%d certificate(s) live across more than one %d-second bucket\n", reuse, bucket
+            if (linkable > 0)
+                printf "finding\tco_temporal_linkage\tMEDIUM\t%d pair(s) of certificates appear in the same bucket, which links them to each other\n", linkable
+            if (nc > 1 && reuse == 0 && linkable == 0)
+                print "finding\trotation_consistent\tINFO\tevery certificate stays inside its bucket and no two share one"
+            verdict = (nc == 1 && n > 1) || linkable > 0 || reuse > 0 ? "pseudonyms_linkable" : "pseudonyms_rotating"
+            printf "verdict\t%s\n", verdict
+            printf "note\tTS 102 941 rotates pseudonyms on a schedule; the bucket is the audit window and a shorter one that still shows reuse is the stronger finding\n"
+            printf "ref\tETSI TS 102 941 (pseudonym provisioning), TS 103 097 (signing)\n"
+        }' "$f"
+}
+
 slnk_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -249,6 +327,18 @@ slnk_selftest() {
     chk bsm-real-verdict "$(slnk_bsm_audit "$d/real.tsv" | awk -F'\t' '$1=="verdict"{print $2}')" "no_ghost_in_this_capture"
     chk bsm-audit-missing "$(slnk_bsm_audit "$d/nope.tsv" >/dev/null 2>&1; echo $?)" "1"
     chk bsm-audit-noargs "$(slnk_bsm_audit >/dev/null 2>&1; echo $?)" "2"
+    # 9. Pseudonym rotation audit: reuse, linkage, and a single certificate.
+    printf '1700000000\taa\n1700000010\taa\n1700000400\tbb\n1700000410\tbb\n1700000405\tcc\n' > "$d/trace.tsv"
+    chk pau-pseudonyms "$(slnk_cmd_pseudonym_audit "$d/trace.tsv" 300 | awk -F'\t' '$1=="pseudonyms"{print $2}')" "3"
+    chk pau-linkage "$(slnk_cmd_pseudonym_audit "$d/trace.tsv" 300 | awk -F'\t' '$1=="linkable_pairs"{print $2}')" "1"
+    chk pau-linkable-verdict "$(slnk_cmd_pseudonym_audit "$d/trace.tsv" 300 | awk -F'\t' '$1=="verdict"{print $2}')" "pseudonyms_linkable"
+    chk pau-reuse "$(slnk_cmd_pseudonym_audit "$d/trace.tsv" 10 | awk -F'\t' '$1=="reused_pseudonyms"{print $2}')" "2"
+    printf '1700000000\taa\n1700000010\taa\n' > "$d/one.tsv"
+    chk pau-single-verdict "$(slnk_cmd_pseudonym_audit "$d/one.tsv" 300 | awk -F'\t' '$1=="verdict"{print $2}')" "pseudonyms_linkable"
+    chk pau-no-rotation "$(slnk_cmd_pseudonym_audit "$d/one.tsv" 300 | awk -F'\t' '$1=="finding" && $2=="no_rotation"{print $3}')" "HIGH"
+    chk pau-missing "$(slnk_cmd_pseudonym_audit "$d/nope.tsv" 300 >/dev/null 2>&1; echo $?)" "1"
+    chk pau-noargs "$(slnk_cmd_pseudonym_audit >/dev/null 2>&1; echo $?)" "2"
+    chk pau-bad-bucket "$(slnk_cmd_pseudonym_audit "$d/trace.tsv" zero >/dev/null 2>&1; echo $?)" "2"
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -373,6 +463,7 @@ slnk_cli_main() {
         --relay-check) slnk_relay_check "${1:-}" ;;
         --bsm-plan)    slnk_bsm_plan ;;
         --bsm-audit)   slnk_bsm_audit "${1:-}" ;;
+        --pseudonym-audit) slnk_cmd_pseudonym_audit "${1:-}" "${2:-}" ;;
         --plan)        slnk_plan ;;
         --selftest)    slnk_selftest ;;
         --menu)        slnk_menu ;;
@@ -394,6 +485,8 @@ Usage: $0 COMMAND
   --bsm-audit <log.tsv>      kinematics over a BSM log (id, t_s, lat, lon,
                              speed_mps): teleports, impossible acceleration and
                              speed/position disagreements
+  --pseudonym-audit <trace.tsv> [bucket-s]
+                            pseudonym rotation audit: reuse and co-temporal linkage
   --plan                     V2X handoff plan
   --selftest                 verify the arithmetic and detectors
   --menu                     interactive menu
