@@ -1009,6 +1009,173 @@ lipr_cmd_li_pdu() {  # --li-pdu-build | --li-pdu-parse
     return 0
 }
 
+# ── HI2 / HI3: the payload the delivery header was carrying blind ───────
+# The envelope (--li-pdu-build) is ETSI TS 102 232-1: a version, a lawful
+# interception identifier, a sequence number, a time and a payload. The payload
+# itself is TS 33.108 ASN.1 -- HI2 for the intercept-related information (who
+# called whom, when, and from where) and HI3 for the content -- and until now
+# that half was an opaque blob here, so a delivery header reached an ADMF
+# carrying something it could not read as an event.
+#
+# These verbs close that: the pycrate ASN.1 oracle ships LIETSI.HI2Operations
+# and LIETSI.HI3CircuitDataOperations, so the records are APER-encoded from the
+# published module rather than typed from a reading of the clause. Every build
+# is decoded back and compared, and the rows say which elements were carried.
+lipr_hi_help() {
+    printf 'ERROR\tusage: --hi2-build | --hi3-build [--liid TEXT] [--comm-id HEX8] [--operator HEX4] [--time YYYYMMDDhhmmss] [--out PATH]\n' >&2
+    printf 'WHY\tHI2 carries an IRI report for one interception (LIID, communication identifier, timestamp); HI3 carries the same context around the content\n' >&2
+}
+
+lipr_hi_script() {   # <hi2|hi3> <liid> <comm> <oper> <time> <out>
+    local kind="$1" liid="$2" comm="$3" oper="$4" tm="$5" out="$6"
+    cat > "$out" <<'PYEOF'
+import sys, json
+from pycrate_asn1dir import LIETSI
+kind, liid, comm, oper, tm = sys.argv[1:6]
+commid = {'communication-Identity-Number': bytes.fromhex(comm),
+          'network-Identifier': {'operator-Identifier': bytes.fromhex(oper)}}
+ts = ('utcTime', (tm[2:4], tm[4:6], tm[6:8], tm[8:10], tm[10:12], tm[12:14], 'Z'))
+if kind == 'hi2':
+    obj = LIETSI.HI2Operations.IRIContent
+    obj.set_val(('iRI-Report-record',
+                 {'lawfulInterceptionIdentifier': liid.encode('ascii'),
+                  'communicationIdentifier': commid,
+                  'timeStamp': ts}))
+    name = 'iRI-Report-record'
+elif kind == 'hi3':
+    obj = LIETSI.HI3CircuitDataOperations.Content_Report
+    obj.set_val({'communicationIdentifier': commid, 'timeStamp': ts})
+    name = 'Content_Report'
+else:
+    sys.stderr.write('ERROR\t%s is not HI2 or HI3\n' % kind)
+    raise SystemExit(2)
+body = obj.to_aper()
+print('payload_type\t%s' % kind.upper())
+print('record\t%s' % name)
+print('aper_octets\t%d' % len(body))
+print('aper_hex\t%s' % body.hex().upper())
+print('liid\t%s' % liid)
+print('comm_id\t%s' % comm.upper())
+print('operator\t%s' % oper.upper())
+print('utc_time\t%s' % tm)
+print('elements\t%s' % ('lawfulInterceptionIdentifier, communicationIdentifier, timeStamp' if kind == 'hi2' else 'communicationIdentifier, timeStamp'))
+# decode it back and compare: an encoding nobody read is a guess
+obj.from_aper(body)
+back = obj
+same = back.to_aper() == body
+print('decoded_back\t%s' % ('yes' if same else 'no'))
+print('read_back\t%s' % json.dumps(back.get_val(), default=lambda b: b.hex(), sort_keys=True)[:400])
+print('ref\tETSI TS 33.108 (HI2/HI3 ASN.1), APER')
+print('limit\tone record per build: an IRI sequence (begin/continue/end) needs the fields of each record, which the caller supplies per call')
+PYEOF
+}
+
+lipr_cmd_hi_build() {   # --hi2-build | --hi3-build
+    local kind="${1:-hi2}"
+    shift || true
+    local liid="LIID0001" comm="01020304" oper="F110" tm out=""
+    tm=$(date -u +%Y%m%d%H%M%S)
+    while (($#)); do
+        case "$1" in
+            --liid)     liid="${2:-}"; shift 2 ;;
+            --comm-id)  comm="${2:-}"; shift 2 ;;
+            --operator) oper="${2:-}"; shift 2 ;;
+            --time)     tm="${2:-}"; shift 2 ;;
+            --out)      out="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(lipr_show "$1" 2>/dev/null || printf '%s' "$1")" >&2; return 2 ;;
+        esac
+    done
+    if [[ ! "$comm" =~ ^[0-9A-Fa-f]{8}$ ]]; then
+        printf 'ERROR\t--comm-id must be four octets of hex and it is %s\n' "${#comm} characters" >&2
+        printf 'WHY\tcommunication-Identity-Number is an octet string the interception uses to join HI2 to HI3\n' >&2
+        return 1
+    fi
+    if [[ ! "$oper" =~ ^[0-9A-Fa-f]{4}$ ]]; then
+        printf 'ERROR\t--operator must be two octets of hex (the MCC/MNC as the operator encodes it)\n' >&2
+        return 1
+    fi
+    if [[ ! "$tm" =~ ^[0-9]{14}$ ]]; then
+        printf 'ERROR\t--time must be YYYYMMDDhhmmss and it is %s\n' "$(lipr_show "$tm")" >&2
+        return 1
+    fi
+    local py="${IMSI_LI_ORACLE_PY:-/home/ysl/.lte-oracles/venv/bin/python}"
+    if [[ ! -x "$py" ]]; then
+        printf 'ERROR\tthe ASN.1 oracle is not at %s\n' "$py" >&2
+        printf 'WHY\tHI2 and HI3 are TS 33.108 ASN.1 modules; encoding them needs the module, not a reading of the clause\n' >&2
+        printf 'FIX\tinstall the oracle venv or point IMSI_LI_ORACLE_PY at a python that can import pycrate_asn1dir\n' >&2
+        return 2
+    fi
+    local script; script=$(mktemp)
+    lipr_hi_script "$kind" "$liid" "$comm" "$oper" "$tm" "$script"
+    local rc=0
+    "$py" "$script" "$kind" "$liid" "$comm" "$oper" "$tm" || rc=$?
+    if (( rc == 0 )) && [[ -n "$out" ]]; then
+        local hex; hex=$("$py" "$script" "$kind" "$liid" "$comm" "$oper" "$tm" | awk -F'\t' '$1=="aper_hex"{print $2}')
+        printf '%s' "$hex" | xxd -r -p > "$out"
+        printf 'wrote\t%s\t%d bytes\n' "$out" "$(stat -c %s "$out" 2>/dev/null || echo 0)"
+    fi
+    rm -f "$script"
+    if (( rc != 0 )); then
+        return "$rc"
+    fi
+    printf 'verdict\t%s_encoded_from_the_ts_33_108_module\n' "$(printf '%s' "$kind" | tr '[:lower:]' '[:upper:]')"
+}
+
+lipr_cmd_hi_parse() {   # --hi2-parse | --hi3-parse <hex>
+    local kind="${1:-hi2}" hex="${2:-}"
+    [[ -n "$hex" ]] || { lipr_hi_help; return 2; }
+    hex=$(printf '%s' "$hex" | tr -d ' \n' | tr '[:lower:]' '[:upper:]')
+    if [[ ! "$hex" =~ ^[0-9A-F]+$ || $(( ${#hex} % 2 )) -ne 0 ]]; then
+        printf 'ERROR\tthe payload is not an even number of hex octets\n' >&2
+        return 1
+    fi
+    local py="${IMSI_LI_ORACLE_PY:-/home/ysl/.lte-oracles/venv/bin/python}"
+    local script; script=$(mktemp)
+    cat > "$script" <<'PYEOF'
+import sys, json
+from pycrate_asn1dir import LIETSI
+kind, hexbody = sys.argv[1], sys.argv[2]
+body = bytes.fromhex(hexbody)
+if kind == 'hi2':
+    obj = LIETSI.HI2Operations.IRIContent; label = 'IRIContent'
+elif kind == 'hi3':
+    obj = LIETSI.HI3CircuitDataOperations.Content_Report; label = 'Content_Report'
+else:
+    sys.stderr.write('ERROR\t%s is not HI2 or HI3\n' % kind); raise SystemExit(2)
+try:
+    obj.from_aper(body)
+except Exception as exc:
+    print('ERROR\tthe payload did not decode as %s: %s' % (label, exc))
+    raise SystemExit(1)
+val = obj.get_val()
+print('payload_type\t%s' % kind.upper())
+print('asn1_type\t%s' % label)
+print('octets\t%d' % len(body))
+print('decoded\tyes')
+def walk(v, path=''):
+    if isinstance(v, dict):
+        for k in v:
+            walk(v[k], (path + '.' + str(k)) if path else str(k))
+    elif isinstance(v, (list, tuple)):
+        if v and all(isinstance(x, str) for x in v):
+            print('field\t%s\t%s' % (path, ''.join(v)))
+        else:
+            for i, x in enumerate(v):
+                walk(x, '%s[%d]' % (path, i))
+    elif isinstance(v, (bytes, bytearray)):
+        print('field\t%s\t%s (hex)' % (path, bytes(v).hex().upper()))
+    else:
+        print('field\t%s\t%s' % (path, v))
+walk(val)
+print('json\t%s' % json.dumps(val, default=lambda b: b.hex(), sort_keys=True)[:400])
+print('ref\tETSI TS 33.108 (HI2/HI3 ASN.1), APER')
+PYEOF
+    "$py" "$script" "$kind" "$hex"
+    local rc=$?
+    rm -f "$script"
+    return "$rc"
+}
+
 lipr_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -1304,6 +1471,40 @@ CONF
     chk lpdu-notseq    "$(lipr_cmd_li_pdu --li-pdu-parse 020101 >/dev/null 2>&1; echo $?)" "1"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
+    # ── HI2 / HI3: the TS 33.108 payload the envelope was carrying blind ──
+    local hi2 hi3 hi2hex sp
+    hi2=$(lipr_cmd_hi_build hi2 --liid LIID0001 --time 20260825081500 2>/dev/null)
+    if [[ -n "$hi2" ]]; then
+        chk hi2-type      "$(printf '%s\n' "$hi2" | awk -F'\t' '$1=="payload_type"{print $2}')" "HI2"
+        chk hi2-record    "$(printf '%s\n' "$hi2" | awk -F'\t' '$1=="record"{print $2}')" "iRI-Report-record"
+        chk hi2-octets    "$(printf '%s\n' "$hi2" | awk -F'\t' '$1=="aper_octets"{print $2}')" "35"
+        chk hi2-back      "$(printf '%s\n' "$hi2" | awk -F'\t' '$1=="decoded_back"{print $2}')" "yes"
+        chk hi2-liid      "$(printf '%s\n' "$hi2" | awk -F'\t' '$1=="read_back" && /LIID0001|4c49494430303031/{print "carried"}')" "carried"
+        chk hi2-verdict   "$(printf '%s\n' "$hi2" | awk -F'\t' '$1=="verdict"{print $2}')" "HI2_encoded_from_the_ts_33_108_module"
+        chk hi2-ref       "$(printf '%s\n' "$hi2" | awk -F'\t' '$1=="ref" && $2 ~ /33.108/{print "cited"}')" "cited"
+        hi2hex=$(printf '%s\n' "$hi2" | awk -F'\t' '$1=="aper_hex"{print $2}')
+        sp=$(lipr_cmd_hi_parse hi2 "$hi2hex" 2>/dev/null)
+        chk hi2-parse-ok  "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="decoded"{print $2}')" "yes"
+        chk hi2-parse-asn "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="asn1_type"{print $2}')" "IRIContent"
+        chk hi2-parse-oa  "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="field" && $2 ~ /operator-Identifier/{print $3}')" "F110 (hex)"
+        chk hi2-parse-ts  "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="field" && $3=="utcTime"{print "utc"}')" "utc"
+        chk hi2-parse-bad "$(lipr_cmd_hi_parse hi2 ZZZZ >/dev/null 2>&1; echo $?)" "1"
+        # the envelope now carries a body an ADMF can read
+        chk hi2-in-envelope "$(lipr_cmd_li_pdu li-pdu-build --liid LIID0001 --payload "$hi2hex" 2>/dev/null | awk -F'\t' '$1=="payload_octets"{print $2}')" "35"
+    else
+        printf 'hi2-build\tSKIP (no ASN.1 oracle at %s)\n' "${IMSI_LI_ORACLE_PY:-/home/ysl/.lte-oracles/venv/bin/python}"
+    fi
+    hi3=$(lipr_cmd_hi_build hi3 2>/dev/null)
+    if [[ -n "$hi3" ]]; then
+        chk hi3-type      "$(printf '%s\n' "$hi3" | awk -F'\t' '$1=="payload_type"{print $2}')" "HI3"
+        chk hi3-record    "$(printf '%s\n' "$hi3" | awk -F'\t' '$1=="record"{print $2}')" "Content_Report"
+        chk hi3-octets    "$(printf '%s\n' "$hi3" | awk -F'\t' '$1=="aper_octets"{print $2}')" "24"
+        chk hi3-back      "$(printf '%s\n' "$hi3" | awk -F'\t' '$1=="decoded_back"{print $2}')" "yes"
+    fi
+    chk hi-noargs     "$(lipr_cmd_hi_parse hi2 >/dev/null 2>&1; echo $?)" "2"
+    chk hi-badcomm    "$(lipr_cmd_hi_build hi2 --comm-id 0102 >/dev/null 2>&1; echo $?)" "1"
+    chk hi-badtime    "$(lipr_cmd_hi_build hi2 --time 2026 >/dev/null 2>&1; echo $?)" "1"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1371,6 +1572,7 @@ lipr_cli_main() {
         --activate)    lipr_cmd_activate "${rest[@]}" ;;
         --intercept)   lipr_cmd_intercept "${rest[@]}" ;;
         --li-pdu-build|--li-pdu-parse) lipr_cmd_li_pdu "$1" "${rest[@]}" ;;
+        --hi2-build)           lipr_cmd_hi_build hi2 "${@:2}" ;;        --hi3-build)           lipr_cmd_hi_build hi3 "${@:2}" ;;        --hi2-parse)           lipr_cmd_hi_parse hi2 "${2:-}" ;;        --hi3-parse)           lipr_cmd_hi_parse hi3 "${2:-}" ;;
         --selftest)    lipr_selftest ;;
         --menu)        lipr_menu ;;
         *)
