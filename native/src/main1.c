@@ -5905,6 +5905,12 @@ static const char *const plain_keys[] = {
     "liid_hex\tthe delivery identifier as octets",
     "sequence_octets\thow many octets the wrapped record holds",
     "pdu_hex\tthe assembled delivery record as hex",
+    "authorised\twhether the operator has said the target is theirs",
+    "base\tthe address every step in the plan is sent to",
+    "cut\twhere the plan stopped",
+    "sock_us\tthe gap between two requests",
+    "unauthorised_success\ta call that should have been refused but answered",
+    "why\twhy a verb handed off instead of acting",
 };
 
 /* Compare a bare key against one "key<TAB>words" row. */
@@ -29040,6 +29046,7 @@ static const GoalStep goal_steps_api[] = {
       "A section per check and a place for the finding, with no finding "
       "claimed." },
     { "44_carrier_api", "--token-bucket", "Test a rate limit",
+    { "44_carrier_api",      "--execute",             NEED_NO, DOES_SENDS },
       "10 20 100 60",
       "Ten requests a second, burst twenty, over one hundred requests in "
       "sixty seconds: the arithmetic of what a limit would allow." },

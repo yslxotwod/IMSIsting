@@ -1025,6 +1025,90 @@ capi_enumerate_subscribers() {
     ( export CAPI_SUBS_OUT="$out"; capi_py_enum subscribers "" "" "" "$conf" "$CAPI_DIR" )
 }
 
+# ── the executor ────────────────────────────────────────────────────────
+# The plan verbs above write requests down and send nothing; this one sends
+# them, and only when the operator has said in words that the target is theirs.
+# There is no default target: a base URL is always an argument.
+capi_cmd_execute() {
+    local plan="" base="" armed=0 rate=5 maxreq=50 dry=0
+    local -a hs=()
+    while (( $# )); do
+        case "$1" in
+            --plan)   plan="${2:-}"; shift 2 ;;
+            --base)   base="${2:-}"; shift 2 ;;
+            --rate)   rate="${2:-5}"; shift 2 ;;
+            --max)    maxreq="${2:-50}"; shift 2 ;;
+            --dry-run) dry=1; shift ;;
+            --i-have-a-lab-and-authorisation) armed=1; shift ;;
+            --help|-h)
+                printf 'usage: --execute <plan.tsv> --base URL --i-have-a-lab-and-authorisation [--rate N/sec] [--max N] [--dry-run]\n'; return 0 ;;
+            *)
+                if [[ -z "$plan" && -r "$1" ]]; then plan="$1"; shift; continue; fi
+                printf 'ERROR\t--execute does not take %s\n' "$(capi_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$plan" ]] || { printf 'ERROR\t--execute needs a plan file\n' >&2; return 2; }
+    [[ -r "$plan" ]] || { printf 'ERROR\tthe plan is not readable: %s\n' "$(capi_sanitize "$plan")" >&2; return 2; }
+    [[ "$rate" =~ ^[0-9]+$ ]] && (( rate >= 1 && rate <= 100 )) || {
+        printf 'ERROR\t--rate is 1..100 requests per second: %s\n' "$(capi_sanitize "$rate")" >&2; return 2; }
+    [[ "$maxreq" =~ ^[0-9]+$ ]] && (( maxreq >= 1 && maxreq <= 5000 )) || {
+        printf 'ERROR\t--max is 1..5000 requests: %s\n' "$(capi_sanitize "$maxreq")" >&2; return 2; }
+    printf 'note\t%s\n' "$CAPI_NOTE"
+    printf 'authorised\t%s\n' "$armed"
+    if (( ! armed )); then
+        printf 'status\thandoff\n'
+        printf 'why\tthe executor sends the plan at a live API; say --i-have-a-lab-and-authorisation to run it against one you own\n'
+        printf 'sent\t0\n'
+        return 3
+    fi
+    [[ -n "$base" ]] || { printf 'ERROR\t--execute needs --base even when armed\n' >&2; return 2; }
+    case "$base" in
+        http://*|https://*) ;;
+        *) printf 'ERROR\t--base must be an http(s) URL: %s\n' "$(capi_sanitize "$base")" >&2; return 2 ;;
+    esac
+    command -v curl >/dev/null 2>&1 || {
+        printf 'ERROR\tcurl is required to execute a plan\n' >&2; return 1; }
+    base="${base%/}"
+    local sock=$(( 1000000 / rate ))
+    printf 'base\t%s\nrate\t%s\nsock_us\t%s\nmax\t%s\n' "$(capi_sanitize "$base")" "$rate" "$sock" "$maxreq"
+    local n=0 sent=0 code tsec size verdict authsig findings=0
+    local method path expect hdrs body
+    while IFS=$'\t' read -r method path expect hdrs body; do
+        [[ -n "$method" ]] || continue
+        [[ "$method" == "METHOD" || "$method" == "#"* ]] && continue
+        (( n < maxreq )) || { printf 'cut\tthe plan has more than --max %s rows; the rest was not sent\n' "$maxreq"; break; }
+        n=$(( n + 1 ))
+        local url="${base}${path}"
+        local -a cargs=(-s -o /dev/null -w '%{http_code} %{time_total} %{size_download}' -X "$method")
+        if [[ -n "$hdrs" && "$hdrs" != "-" ]]; then
+            local h; IFS=';' read -r -a hs <<< "$hdrs"
+            for h in "${hs[@]}"; do [[ -n "$h" ]] && cargs+=(-H "$h"); done
+        fi
+        [[ -n "$body" && "$body" != "-" ]] && cargs+=(--data-binary "$body")
+        if (( dry )); then
+            printf 'dry_run\t%s\t%s\n' "$method" "$(capi_sanitize "$url")"
+            continue
+        fi
+        read -r code tsec size <<< "$(curl "${cargs[@]}" "$url" 2>/dev/null)"
+        [[ -n "$code" ]] || code="000"
+        sent=$(( sent + 1 ))
+        verdict=unexpected
+        case "$expect" in
+            deny)  case "$code" in 401|403) verdict="denied as expected" ;; 200|201|204) verdict="ALLOWED, expected deny"; findings=$(( findings + 1 )) ;; *) verdict="code $code" ;; esac ;;
+            allow) case "$code" in 2??) verdict="allowed as expected" ;; 401|403) verdict="DENIED, expected allow" ;; *) verdict="code $code" ;; esac ;;
+            *)     verdict="code $code" ;;
+        esac
+        printf 'step\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$method" "$(capi_sanitize "$path")" "$code" "$tsec" "$size" "$verdict"
+        if [[ "$verdict" == "ALLOWED, expected deny" ]]; then
+            printf 'finding\tunauthorised_success\tHIGH\t%s %s returned %s where the plan expected a refusal\n' "$method" "$(capi_sanitize "$path")" "$code"
+        fi
+        sleep "$(printf '0.%06d' "$sock")"
+    done < "$plan"
+    printf 'sent\t%d\nfindings\t%d\n' "$sent" "$findings"
+    printf 'limit\tan executor that reports codes is not an authorisation verdict: a 200 from a test account proves that account may call the endpoint, and that is all\n'
+    (( findings == 0 )) && return 0 || return 1
+}
+
 capi_selftest() {
     local bad=0 nchk=0
     # There is no gate, so no environment needs holding aside: the selftest is
@@ -1316,6 +1400,46 @@ PY
     chk status-sends-none "$(printf '%s\n' "$out" | awk -F'\t' '$1=="SENDS"{print ($2 ~ /nothing/)?"no":"yes"}')" "no"
     chk status-enum       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ENUMERATE"{print ($2 ~ /^--enumerate <spec.json>/)}')" "1"
     chk status-enumsubs   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="ENUMERATE_SUBSCRIBERS"{print ($2 ~ /^--enumerate-subscribers <conf>/)}')" "1"
+
+    # The executor: it refuses until it is told the target is the operator's,
+    # and when told, it reports the codes it saw instead of asserting a verdict.
+    printf 'METHOD\tPATH\tEXPECT\tHEADERS\tBODY\nGET\t/health\tallow\t-\t-\n' > "$d/plan.tsv"
+    local ex unarmed dry run
+    unarmed=$(capi_cmd_execute --plan "$d/plan.tsv" --base http://127.0.0.1:1 2>/dev/null)
+    chk exec-unarmed-status "$(printf '%s\n' "$unarmed" | awk -F'\t' '$1=="status"{print $2}')" "handoff"
+    chk exec-unarmed-sent   "$(printf '%s\n' "$unarmed" | awk -F'\t' '$1=="sent"{print $2}')" "0"
+    chk exec-unarmed-rc     "$(capi_cmd_execute --plan "$d/plan.tsv" --base http://127.0.0.1:1 >/dev/null 2>&1; echo $?)" "3"
+    dry=$(capi_cmd_execute --plan "$d/plan.tsv" --base http://127.0.0.1:1 --i-have-a-lab-and-authorisation --dry-run)
+    chk exec-dry           "$(printf '%s\n' "$dry" | awk -F'\t' '$1=="dry_run"{print $2}')" "GET"
+    chk exec-dry-sent      "$(printf '%s\n' "$dry" | awk -F'\t' '$1=="sent"{print $2}')" "0"
+    chk exec-noplan        "$(capi_cmd_execute --base http://127.0.0.1:1 >/dev/null 2>&1; echo $?)" "2"
+    chk exec-badbase       "$(capi_cmd_execute --plan "$d/plan.tsv" --base ftp://x --i-have-a-lab-and-authorisation >/dev/null 2>&1; echo $?)" "2"
+    chk exec-badrate       "$(capi_cmd_execute --plan "$d/plan.tsv" --base http://127.0.0.1:1 --rate 500 --i-have-a-lab-and-authorisation >/dev/null 2>&1; echo $?)" "2"
+    # A live round trip needs something to talk to, so the selftest starts a
+    # throwaway server that answers 200 to anything.
+    if command -v python3 >/dev/null 2>&1; then
+        local sport=18333
+        python3 -c 'import http.server,socketserver
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length","0"); self.end_headers()
+    def log_message(self,*a): pass
+socketserver.TCPServer.allow_reuse_address=True
+socketserver.TCPServer(("127.0.0.1",'"$sport"'),H).serve_forever()' >/dev/null 2>&1 &
+        local spid=$!
+        sleep 0.6
+        printf 'METHOD\tPATH\tEXPECT\tHEADERS\tBODY\nGET\t/anything\tdeny\t-\t-\n' > "$d/plan2.tsv"
+        run=$(capi_cmd_execute --plan "$d/plan2.tsv" --base "http://127.0.0.1:$sport" --i-have-a-lab-and-authorisation --rate 20)
+        local rc1
+        capi_cmd_execute --plan "$d/plan2.tsv" --base "http://127.0.0.1:$sport" --i-have-a-lab-and-authorisation >/dev/null 2>&1
+        rc1=$?
+        kill "$spid" 2>/dev/null
+        wait "$spid" 2>/dev/null
+        chk exec-live-code   "$(printf '%s\n' "$run" | awk -F'\t' '$1=="step"{print $5}')" "200"
+        chk exec-live-sent   "$(printf '%s\n' "$run" | awk -F'\t' '$1=="sent"{print $2}')" "1"
+        chk exec-live-find   "$(printf '%s\n' "$run" | awk -F'\t' '$1=="finding"{print $2}')" "unauthorised_success"
+        chk exec-live-rc1    "$rc1" "1"
+    fi
     out=$(IMSI_LAB_AUTHORISED=1 capi_cli_main --status-tsv)
 
 
@@ -1387,6 +1511,7 @@ capi_cli_main() {
         --plan)           capi_plan ;;
         --enumerate)      capi_enumerate "$@" ;;
         --enumerate-subscribers) capi_enumerate_subscribers "$@" ;;
+        --execute)        capi_cmd_execute "$@" ;;
         --selftest)       capi_selftest ;;
         --menu)           capi_menu ;;
         *)
