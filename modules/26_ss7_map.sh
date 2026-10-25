@@ -2467,6 +2467,75 @@ ss7_cmd_build_extra() {  # <verb> [args...]
     printf 'roundtrip_opcode\t%s\n' "$(ss7_cmd_decode_map "$msu" | awk -F'\t' '$1=="component"{print $5; exit}')"
 }
 
+# ── the answer half of SAI ──────────────────────────────────────────────
+# --build-sai puts the question on the wire; a real HLR answers it with
+# AuthenticationSetList: one SEQUENCE per vector, each vector a SEQUENCE of
+# context-tagged OCTET STRINGs (TS 29.002 17.4.x). The tag+length pair is
+# what names an element, and only the unambiguous pairs get named:
+#   80/16  RAND        81/4  SRES (2G) or a 4-octet UMTS XRES
+#   82/8   Kc          82/16 AUTN        83/32 KASME
+# Everything else is printed as a raw context TLV so an odd-length vector
+# is visible instead of being folded into the nearest neat name.
+ss7_cmd_parse_sai() {
+    local hex; hex=$(ss7_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --parse-sai <answer-hex>\n' >&2; return 2; }
+    ss7_is_hex "$hex" || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
+    local out comp opname param
+    out=$(ss7_cmd_decode_map "$hex") || { printf '%s\n' "$out" >&2; return 1; }
+    comp=$(printf '%s\n' "$out" | awk -F'\t' '$1 == "component" { print; exit }')
+    [[ -n "$comp" ]] || { printf 'ERROR\tno TCAP component in this answer\n' >&2; return 1; }
+    opname=$(printf '%s\n' "$comp" | cut -f6)
+    param=$(printf '%s\n' "$comp" | cut -f7)
+    if [[ "$opname" != "sendAuthenticationInfo" ]]; then
+        printf 'ERROR\tthat is a %s, not a sendAuthenticationInfo answer\n' "$(ss7_sanitize "$opname")" >&2
+        printf 'WHY\tthe vectors ride only in a sendAuthenticationInfo result; ask with --build-sai and decode the answer here\n' >&2
+        return 1
+    fi
+    [[ -n "$param" ]] || { printf 'ERROR\tthis answer carries no result parameter (error or reject)\n' >&2; return 1; }
+    printf 'message\tsendAuthenticationInfo answer\n'
+    printf 'opcode\t56\n'
+    printf 'parameter_bytes\t%s\n' "$(( ${#param} / 2 ))"
+
+    # Descend the result ANY container, then the list SEQUENCE, until the
+    # current level holds the per-vector SEQUENCEs.
+    local cur="$param"
+    if ss7_ber_at "$cur" 0 && [[ "$SS7_BTAG" == "30" ]]; then
+        cur="$SS7_BVAL"
+    fi
+    if ss7_ber_at "$cur" 0 && [[ "$SS7_BTAG" == "30" && "${SS7_BVAL:0:2}" == "30" ]]; then
+        cur="$SS7_BVAL"
+    fi
+
+    local off=0 tag vs vec=0 vtag vlen vv vo
+    while ss7_ber_at "$cur" "$off"; do
+        tag="$SS7_BTAG"; vs="$SS7_BVAL"; vlen="$SS7_BLEN"
+        off=$(( off + SS7_BHL + vlen ))
+        if [[ "$tag" != "30" ]]; then
+            printf 'skipped\t%s\t%s\n' "$tag" "$(( vlen ))"
+            continue
+        fi
+        printf 'vector\t%d\n' "$vec"
+        vo=0
+        while ss7_ber_at "$vs" "$vo"; do
+            vtag="$SS7_BTAG"; vv="$SS7_BVAL"; vlen="$SS7_BLEN"
+            vo=$(( vo + SS7_BHL + vlen ))
+            case "$vtag:$vlen" in
+                80:16) printf 'rand\t%s\n' "$vv" ;;
+                81:4)  printf 'sres_or_xres\t%s\n' "$vv" ;;
+                81:*)  printf 'xres\t%s\n' "$vv" ;;
+                82:8)  printf 'kc_or_autn\t%s\n' "$vv" ;;
+                82:16) printf 'autn\t%s\n' "$vv" ;;
+                83:32) printf 'kasme\t%s\n' "$vv" ;;
+                *)     printf 'raw\t%s\t%s\n' "$vtag" "$vv" ;;
+            esac
+        done
+        vec=$(( vec + 1 ))
+    done
+    printf 'vectors\t%d\n' "$vec"
+    printf 'note\ttag 81 at four octets is a 2G SRES or a short UMTS XRES, and tag 82 at eight octets is a 2G Kc or the head of an AUTN -- the length alone cannot separate them\n'
+}
+
+
 ss7_cmd_flow() {
     local flow="${1:-}"
     [[ -n "$flow" ]] || { printf 'ERROR\tusage: --flow <intercept|locate|sms-intercept|forward-hijack> [msisdn] [imsi] [opc] [dpc]\n' >&2; return 2; }
@@ -3019,6 +3088,27 @@ ss7_selftest() {
     sai5=$(ss7_cmd_build_extra sai 310150123456789 5)
     sai9=$(ss7_cmd_build_extra sai 310150123456789 9)
     chk extra-sai-vectors "$([[ "$(fld "$sai5" hex)" != "$(fld "$sai9" hex)" ]] && echo differ || echo same)" "differ"
+    # ── the answer half ────────────────────────────────────────────────
+    # An HLR-shaped AuthenticationSetList, assembled with this module's own
+    # TCAP and TLV primitives: two 2G triplets then one EPC vector. The
+    # parser must name only the unambiguous tag/length pairs and refuse a
+    # result for another operation.
+    local v1 v2 v3 ans e3
+    v1=$(ss7_tlv 30 "$(ss7_tlv 80 0102030405060708090A0B0C0D0E0F10)$(ss7_tlv 81 A1B2C3D4)$(ss7_tlv 82 1112131415161718)")
+    v2=$(ss7_tlv 30 "$(ss7_tlv 80 F1E2D3C4B5A697887766554433221100)$(ss7_tlv 81 0BADF00D)$(ss7_tlv 82 00FFEEDDCCBBAA99)")
+    ans=$(ss7_cmd_parse_sai "$(ss7_tcap_end 00000001 "$(ss7_map_result 1 56 "$(ss7_tlv 30 "$v1$v2")")")")
+    chk sai-answer-vectors "$(fld "$ans" vectors)" "2"
+    chk sai-answer-rands   "$(printf '%s\n' "$ans" | awk -F'\t' '$1=="rand"{print $2}' | tr '\n' ' ')" "0102030405060708090A0B0C0D0E0F10 F1E2D3C4B5A697887766554433221100 "
+    chk sai-answer-sres    "$(printf '%s\n' "$ans" | awk -F'\t' '$1=="sres_or_xres"{print $2}' | head -1)" "A1B2C3D4"
+    chk sai-answer-note    "$(printf '%s\n' "$ans" | grep -c '^note	')" "1"
+    v3=$(ss7_tlv 30 "$(ss7_tlv 80 202122232425262728292A2B2C2D2E2F)$(ss7_tlv 81 3132333435363738)$(ss7_tlv 82 404142434445464748494A4B4C4D4E4F)$(ss7_tlv 83 505152535455565758595A5B5C5D5E5F606162636465666768696A6B6C6D6E6F)")
+    e3=$(ss7_cmd_parse_sai "$(ss7_tcap_end 00000001 "$(ss7_map_result 1 56 "$(ss7_tlv 30 "$v3")")")")
+    chk sai-answer-xres  "$(fld "$e3" xres)" "3132333435363738"
+    chk sai-answer-autn  "$(fld "$e3" autn)" "404142434445464748494A4B4C4D4E4F"
+    chk sai-answer-kasme "$(fld "$e3" kasme)" "505152535455565758595A5B5C5D5E5F606162636465666768696A6B6C6D6E6F"
+    chk sai-answer-op70  "$(ss7_cmd_parse_sai "$(ss7_tcap_end 00000001 "$(ss7_map_result 1 70)")" >/dev/null 2>&1; echo $?)" "1"
+    chk sai-answer-none  "$(ss7_cmd_parse_sai >/dev/null 2>&1; echo $?)" "2"
+    chk sai-answer-bad   "$(ss7_cmd_parse_sai 99 >/dev/null 2>&1; echo $?)" "1"
     chk val-extra-sai-none  "$(ss7_cmd_build_extra sai >/dev/null 2>&1; echo $?)" "2"
     chk val-extra-sai-badn  "$(ss7_cmd_build_extra sai 310150123456789 x >/dev/null 2>&1; echo $?)" "2"
     chk val-extra-psi-none  "$(ss7_cmd_build_extra psi >/dev/null 2>&1; echo $?)" "2"
@@ -4252,6 +4342,7 @@ ss7_cli_main() {
         --sgsap-parse)   ss7_cmd_sgsap_parse "${1:-}" ;;
         --sgsap-ie)      ss7_cmd_sgsap_ie "${1:-}" ;;
         --decode-map)    ss7_cmd_decode_map "${1:-}" ;;
+        --parse-sai)     ss7_cmd_parse_sai "${1:-}" ;;
         --build-sri)     ss7_cmd_build_sri "${1:-}" "${2:-}" ;;
         --build-response) ss7_cmd_build_response "$@" ;;
         --dialogue)      ss7_cmd_dialogue "${1:-}" "${2:-}" ;;
@@ -4300,6 +4391,7 @@ Usage: $0 COMMAND
   --build-ati <id> [--msisdn]  build a wire-ready ATI MSU (identity is imsi by default)
   --lab [msisdn]             start the peer, ask, pair, and report the verdict
   --build-sai <imsi> [n]     build a SendAuthenticationInfo MSU (n vectors, default 5)
+  --parse-sai <answer-hex>   read the vectors back out of a SendAuthenticationInfo answer
   --build-psi <imsi>         build a ProvideSubscriberInfo MSU
   --build-ulr <imsi> [msc] [vlr]
                              build an UpdateLocation MSU

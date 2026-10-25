@@ -158,7 +158,7 @@ et_preflight_nr() {
     [[ -d "$dir" ]] || { et_error "lab directory not found: $dir"; return 2; }
     et_configs "$dir" NR || { printf 'WHY\tProvide locally administered Open5GS AMF plus gNB and UE configs\n' >&2; return 1; }
     et_loopback_nr_configs "$dir/amf.yaml" "$dir/gnb.conf" "$dir/ue.yaml" || { et_error 'NR configs must bind/connect only to loopback'; return 2; }
-    for t in open5gs-amfd open5gs-upfd gnb nr-ue srsran_5g; do
+    for t in open5gs-amfd open5gs-upfd gnb nr-ue; do
         if command -v "$t" >/dev/null 2>&1; then printf 'tool\t%s\t%s\n' "$t" "$(command -v "$t")"; else printf 'missing_tool\t%s\n' "$t"; miss=1; fi
     done
     printf 'boundary\tLocal 5GC/gNB and owned simulator UE only; preflight starts no services.\n'
@@ -176,7 +176,7 @@ et_run_lte() {
     [[ "$seconds" =~ ^[0-9]+$ ]] && (( seconds >= 5 && seconds <= 3600 )) || { et_error 'duration must be 5..3600 seconds'; return 2; }
     for name in srsepc srsenb srsue timeout; do command -v "$name" >/dev/null 2>&1 || { et_error "$name is required"; return 1; }; done
     et_loopback_configs "$dir/epc.conf" "$dir/enb.conf" "$dir/rr.conf" "$dir/srsue.conf" || { et_error 'LTE configs must bind/connect only to loopback'; return 2; }
-    local epc enb ue p rc=0
+    local epc enb ue p w st rc=0 bounded=0
     epc=$(command -v srsepc); enb=$(command -v srsenb); ue=$(command -v srsue)
     mkdir -p "$dir/logs" || return 1
     ET_PIDS=(); trap 'et_stop_all' INT TERM HUP
@@ -188,10 +188,19 @@ et_run_lte() {
     (cd "$dir" && timeout --signal=INT "$seconds" "$ue" "$dir/srsue.conf") >"$dir/logs/ue.log" 2>&1 & ET_PIDS+=("$!")
     sleep "$seconds"
     for p in "${ET_PIDS[@]}"; do kill -INT "$p" 2>/dev/null || :; done
-    for p in "${ET_PIDS[@]}"; do wait "$p" 2>/dev/null || rc=1; done
+    for p in "${ET_PIDS[@]}"; do
+        wait "$p" 2>/dev/null
+        st=$?
+        case "$st" in
+            0) ;;
+            124|130) bounded=$((bounded + 1)) ;;   # timeout's own INT, normal
+            *) rc=1 ;;
+        esac
+    done
     ET_PIDS=(); trap - INT TERM HUP
     printf 'log\tepc\t%s/logs/epc.log\nlog\tenb\t%s/logs/enb.log\nlog\tue\t%s/logs/ue.log\n' "$dir" "$dir" "$dir"
     if grep -Eiq 'attach accept|attached|pdn connectivity accept|RRC connected' "$dir/logs/ue.log"; then printf 'result\tLTE-attach-marker-found\n'; else printf 'result\tLTE-test-finished-no-attach-marker\nWHY\tInspect logs, matching test-SIM credentials, channel plan, and containment.\n'; return 1; fi
+    (( bounded == 0 )) || printf 'note\t%d service(s) stopped by the timer, not by a crash.\n' "$bounded"
     (( rc == 0 )) || printf 'note\tA service exited nonzero at bounded shutdown; inspect its log.\n'
 }
 et_stop_all() {
@@ -243,34 +252,124 @@ et_run_nr() {
     for name in open5gs-amfd open5gs-upfd gnb nr-ue timeout; do command -v "$name" >/dev/null 2>&1 || { et_error "$name is required"; return 1; }; done
     et_loopback_nr_configs "$dir/amf.yaml" "$dir/gnb.conf" "$dir/ue.yaml" || { et_error 'NR configs must bind/connect only to loopback'; return 2; }
     et_loopback_nr_configs "$dir/amf.yaml" "$dir/gnb.conf" "$dir/ue.yaml" || { et_error 'NR configs must bind/connect only to loopback'; return 2; }
-    local amf upf gnb ue p rc=0
+    local amf upf gnb ue p w st rc=0 bounded=0
     amf=$(command -v open5gs-amfd); upf=$(command -v open5gs-upfd); gnb=$(command -v gnb); ue=$(command -v nr-ue)
     mkdir -p "$dir/logs" || return 1
     ET_PIDS=(); trap 'et_stop_all' INT TERM HUP
-    printf 'boundary\tLocal Open5GS 5GC, simulator gNB, and owned simulator UE only; use ZMQ/channel emulation.\n'
-    (cd "$dir" && timeout --signal=INT "$seconds" "$amf" "$dir/amf.yaml") >"$dir/logs/amf.log" 2>&1 & ET_PIDS+=("$!")
-    sleep 2; kill -0 "${ET_PIDS[0]}" 2>/dev/null || { et_stop_all; et_error 'AMF exited early; see logs/amf.log'; return 1; }
-    (cd "$dir" && timeout --signal=INT "$seconds" "$upf") >"$dir/logs/upf.log" 2>&1 & ET_PIDS+=("$!")
-    sleep 2; kill -0 "${ET_PIDS[1]}" 2>/dev/null || { et_stop_all; et_error 'UPF exited early; see logs/upf.log'; return 1; }
-    (cd "$dir" && timeout --signal=INT "$seconds" "$gnb" "$dir/gnb.conf") >"$dir/logs/gnb.log" 2>&1 & ET_PIDS+=("$!")
-    sleep 3; kill -0 "${ET_PIDS[2]}" 2>/dev/null || { et_stop_all; et_error 'gNB exited early; see logs/gnb.log'; return 1; }
-    (cd "$dir" && timeout --signal=INT "$seconds" "$ue" "$dir/ue.yaml") >"$dir/logs/ue.log" 2>&1 & ET_PIDS+=("$!")
+    printf 'conf\tamf=%s gnb=%s ue=%s\n' "$dir/amf.yaml" "$dir/gnb.conf" "$dir/ue.yaml"
+    # Open5GS and srsRAN Project both take their file with -c; a positional
+    # path is ignored and the process falls back to its installed config,
+    # which is how a "lab" run reaches the host's real network. The switch
+    # moves to the system config: -c here, and the file is the lab's own.
+    local amf_pid upf_pid gnb_pid ue_pid
+    (cd "$dir" && timeout --signal=INT "$seconds" "$amf" -c "$dir/amf.yaml") >"$dir/logs/amf.log" 2>&1 & amf_pid=$!
+    ET_PIDS+=("$amf_pid")
+    sleep 2; kill -0 "$amf_pid" 2>/dev/null || { et_stop_all; et_error 'AMF exited early; see logs/amf.log'; return 1; }
+    if [[ -r "$dir/upf.yaml" ]]; then
+        (cd "$dir" && timeout --signal=INT "$seconds" "$upf" -c "$dir/upf.yaml") >"$dir/logs/upf.log" 2>&1 & upf_pid=$!
+        ET_PIDS+=("$upf_pid")
+        sleep 2; kill -0 "$upf_pid" 2>/dev/null || { et_stop_all; et_error 'UPF exited early; see logs/upf.log'; return 1; }
+    else
+        # A UPF with no lab config is not a UPF on the lab network: it would
+        # read the installed one. Refusing the start is better than a PDU
+        # session that routes wherever the host happens to point.
+        printf 'upf\tskipped (no upf.yaml in the lab; a PDU session needs a local UPF slice)\n'
+    fi
+    (cd "$dir" && timeout --signal=INT "$seconds" "$gnb" -c "$dir/gnb.conf") >"$dir/logs/gnb.log" 2>&1 & gnb_pid=$!
+    ET_PIDS+=("$gnb_pid")
+    sleep 3; kill -0 "$gnb_pid" 2>/dev/null || { et_stop_all; et_error 'gNB exited early; see logs/gnb.log'; return 1; }
+    (cd "$dir" && timeout --signal=INT "$seconds" "$ue" -c "$dir/ue.yaml") >"$dir/logs/ue.log" 2>&1 & ue_pid=$!
+    ET_PIDS+=("$ue_pid")
     sleep "$seconds"
     for p in "${ET_PIDS[@]}"; do kill -INT "$p" 2>/dev/null || :; done
-    for p in "${ET_PIDS[@]}"; do wait "$p" 2>/dev/null || rc=1; done
+    for p in "${ET_PIDS[@]}"; do
+        wait "$p" 2>/dev/null
+        st=$?
+        case "$st" in
+            0) ;;
+            124|130) bounded=$((bounded + 1)) ;;   # timeout's own INT, normal
+            *) rc=1 ;;
+        esac
+    done
     ET_PIDS=(); trap - INT TERM HUP
     printf 'log\tamf\t%s/logs/amf.log\nlog\tupf\t%s/logs/upf.log\nlog\tgnb\t%s/logs/gnb.log\nlog\tue\t%s/logs/ue.log\n' "$dir" "$dir" "$dir" "$dir"
     if grep -Eiq 'Registration accept|registration complete|PDU Session Establishment Accept|PDU session established' "$dir/logs/ue.log"; then printf 'result\tNR-registration-marker-found\n'; else printf 'result\tNR-test-finished-no-registration-marker\nWHY\tInspect configs, subscriber profile, PLMN/slice, and ZMQ channel setup.\n'; return 1; fi
+    (( bounded == 0 )) || printf 'note\t%d service(s) stopped by the timer, not by a crash.\n' "$bounded"
     (( rc == 0 )) || printf 'note\tA service exited nonzero at bounded shutdown; inspect its log.\n'
 }
+et_stub_bin() {  # <dir> <name> <marker>
+    mkdir -p "$1" || return 1
+    cat > "$1/$2" <<'STUB'
+#!/bin/sh
+printf '%s %s\n' "$0" "$*" >> "${ET_ARGV_LOG:-/dev/null}"
+printf 'MARKER_GOES_HERE\n'
+trap 'exit 0' INT TERM
+while :; do sleep 0.2; done
+STUB
+    sed -i "s|MARKER_GOES_HERE|$3|" "$1/$2"
+    chmod +x "$1/$2"
+}
+
 et_selftest() {
-    local d rc=0
+    local d rc=0 lab out
     d=$(mktemp -d) || return 1
+    lab="$d/lab"
+    mkdir -p "$lab/logs"
     et_safe_path "$d" || rc=1; et_safe_path / && rc=1
     et_prepare_lte '' 1 --out / >/dev/null 2>&1; [[ $? == 2 ]] || rc=1
     et_prepare_nr '' 1 --out / >/dev/null 2>&1; [[ $? == 2 ]] || rc=1
     [[ "$(et_preflight_lte "$d" >/dev/null 2>&1; echo $?)" == 1 ]] || rc=1
     [[ "$(et_preflight_nr "$d" >/dev/null 2>&1; echo $?)" == 1 ]] || rc=1
+
+    # ── the transmit half, against stubs ────────────────────────────────────
+    # srsRAN Project and Open5GS take their file with -c; a positional path is
+    # silently ignored and the process reads its installed config instead —
+    # which on this host is the outside network. The stubs record argv so a
+    # regression to positional makes the test fail instead of a lab that runs
+    # against someone else's core.
+    et_stub_bin "$d/bin" open5gs-amfd 'AMF started' || rc=1
+    et_stub_bin "$d/bin" open5gs-upfd 'UPF started' || rc=1
+    et_stub_bin "$d/bin" gnb 'gNB started' || rc=1
+    et_stub_bin "$d/bin" nr-ue 'Registration accept' || rc=1
+    et_stub_bin "$d/bin" srsepc 'EPC started' || rc=1
+    et_stub_bin "$d/bin" srsenb 'eNB started' || rc=1
+    et_stub_bin "$d/bin" srsue 'Attach accept' || rc=1
+    printf 'amf:\n  ngap:\n    server_addr: 127.0.0.5\n' > "$lab/amf.yaml"
+    printf 'upf:\n  gtpu_addr: 127.0.0.5\n' > "$lab/upf.yaml"
+    printf 'gnb:\n  amf:\n    addr: 127.0.0.5\n' > "$lab/gnb.conf"
+    printf 'ue:\n  gnb:\n    addr: 127.0.0.5\n' > "$lab/ue.yaml"
+    printf 'epc:\n  mme:\n    addr: 127.0.0.1\n' > "$lab/epc.conf"
+    printf 'enb:\n  mme_addr: 127.0.0.1\n' > "$lab/enb.conf"
+    printf 'ue:\n  epc:\n    addr: 127.0.0.1\n' > "$lab/srsue.conf"
+    printf 'cell_list:\n  - cell:\n      mme_addr: 127.0.0.1\n' > "$lab/rr.conf"
+
+    out=$(ET_ARGV_LOG="$d/argv.log" PATH="$d/bin:$PATH" et_run_nr "$lab" 5 2>&1)
+    [[ "$(printf '%s\n' "$out" | awk -F'\t' '$1=="result"{print $2; exit}')" == NR-registration-marker-found ]] || { printf 'selftest\tNR run did not report its marker\n' >&2; rc=1; }
+    for cfg in "$lab/amf.yaml" "$lab/upf.yaml" "$lab/gnb.conf" "$lab/ue.yaml"; do
+        grep -q " -c $cfg\b" "$d/argv.log" || { printf 'selftest\tNR process not launched with -c %s\n' "$cfg" >&2; rc=1; }
+    done
+
+    # No upf.yaml: the UPF is named as skipped, and nothing reads a config the
+    # lab does not own.
+    rm -f "$lab/upf.yaml" "$d/argv.log" "$lab"/logs/*.log
+    out=$(ET_ARGV_LOG="$d/argv.log" PATH="$d/bin:$PATH" et_run_nr "$lab" 5 2>&1)
+    printf '%s\n' "$out" | grep -q '^upf[[:space:]]*skipped' || { printf 'selftest\tmissing UPF not reported as skipped\n' >&2; rc=1; }
+    [[ "$(printf '%s\n' "$out" | awk -F'\t' '$1=="result"{print $2; exit}')" == NR-registration-marker-found ]] || rc=1
+    grep -q open5gs-upfd "$d/argv.log" && { printf 'selftest\tUPF started without a lab slice\n' >&2; rc=1; }
+
+    # The LTE lab passes its configs positionally, which is what srsRAN 4G
+    # reads, and still finds its own attach marker.
+    rm -f "$d/argv.log" "$lab"/logs/*.log
+    out=$(ET_ARGV_LOG="$d/argv.log" PATH="$d/bin:$PATH" et_run_lte "$lab" 5 2>&1)
+    [[ "$(printf '%s\n' "$out" | awk -F'\t' '$1=="result"{print $2; exit}')" == LTE-attach-marker-found ]] || { printf 'selftest\tLTE run did not report its marker\n' >&2; rc=1; }
+    grep -q "^$d/bin/srsepc $lab/epc.conf$" "$d/argv.log" || { printf 'selftest\tLTE EPC not given its lab config\n' >&2; rc=1; }
+
+    # A service that dies on start is an error that names it, not a run.
+    printf '#!/bin/sh\nexit 1\n' > "$d/bin/open5gs-amfd"
+    out=$(PATH="$d/bin:$PATH" et_run_nr "$lab" 5 2>&1); local amf_rc=$?
+    [[ "$amf_rc" == 1 ]] || { printf 'selftest\tdead AMF did not fail the run\n' >&2; rc=1; }
+    printf '%s\n' "$out" | grep -q 'AMF exited early' || { printf 'selftest\tdead AMF did not name itself\n' >&2; rc=1; }
+
     rm -rf -- "$d"
     if (( rc == 0 )); then builtin printf 'selftest\tPASS\nRESULT\tPASS\n'; else builtin printf 'selftest\tFAIL\nRESULT\tFAIL\n'; return 1; fi
 }
