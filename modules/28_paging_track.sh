@@ -1829,6 +1829,110 @@ pgt_keepawake_stats() {  # <events-tsv>
         }' | awk -F'[ ]' '{printf "%s\t%.6f\t%.6f\t%.6f\n", $1, $2, $3, $4}'
 }
 
+# ── K7b: the transmit half of the keep-awake attack ─────────────────────
+# --adaptover-detect reads a capture and asks whether some identity was woken
+# on a schedule. This is the same lever pointed the other way: a sample-indexed
+# list of when a transmitter would have to send a page.
+#
+# The schedule is derived, not typed. A UE in RRC_IDLE wakes at every paging
+# occasion whether or not anybody pages it, so "keep it awake" means "page it
+# at its own PO, every cycle". The frames come from the same TS 36.304 7.1
+# arithmetic the receiver half uses (pgt_lte_params), and a sample index is
+# that frame and subframe turned into a count of samples at a stated rate.
+#
+# What it keys: nothing. Paging is sent on PCCH with P-RNTI and the paging
+# record is not ciphered (TS 36.331 6.5), so no key material appears anywhere
+# in the schedule. What it does need is a real transmission: PDCCH and PDSCH
+# with the cell's own PCI scrambling, a CRC the UE will accept, and a UE
+# already camped on that cell. That is 10_lte_air_pws and 57_evil_twin, and
+# this function says so rather than pretending the schedule is a waveform.
+pgt_cmd_adaptover_plan() {
+    local rate="15360000" t="64" nb="" ue="0" duplex="fdd" dur="60" out=""
+    while (($#)); do
+        case "$1" in
+            --rate)       rate="${2:-}"; shift 2 ;;
+            --t|--cycle)  t="${2:-}"; shift 2 ;;
+            --nb)         nb="${2:-}"; shift 2 ;;
+            --ue-id|--ue) ue="${2:-}"; shift 2 ;;
+            --duplex)     duplex="${2:-}"; shift 2 ;;
+            --duration|--seconds) dur="${2:-}"; shift 2 ;;
+            --out)        out="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(pgt_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ "$rate" =~ ^[1-9][0-9]{2,9}$ ]] || {
+        printf 'ERROR\t--rate wants a positive sample rate in samples per second\n' >&2; return 2; }
+    [[ "$dur" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        printf 'ERROR\t--duration wants seconds as a number\n' >&2; return 2; }
+    awk -v d="$dur" 'BEGIN{ exit !(d > 0) }' || {
+        printf 'ERROR\t--duration must be greater than zero\n' >&2; return 2; }
+
+    local p pf sub
+    p=$(pgt_lte_params "$ue" "$t" "$nb" "$duplex") || {
+        printf 'ERROR\tUE_ID must be 0..1023 and T one of 32/64/128/256 with a legal nB and duplex\n' >&2
+        return 2; }
+    pf=$(printf '%s\n' "$p" | awk -F'\t' '$1=="pf_sfn"{print $2}')
+    sub=$(printf '%s\n' "$p" | awk -F'\t' '$1=="po_subframe"{print $2}')
+
+    local sched count
+    sched=$(awk -v rate="$rate" -v dur="$dur" -v pf="$pf" -v T="$t" -v sfr="$sub" 'BEGIN{
+        per_ms = rate / 1000.0
+        len = int(per_ms + 0.5)
+        lastf = int(dur * 100)
+        n = 0
+        f = pf
+        while (f <= lastf) {
+            ms = f * 10 + sfr
+            if (ms <= dur * 1000) {
+                printf "%d\t%.3f\t%d\t%d\t%.0f\t%d\n", n, ms / 1000.0, f % 1024, sfr, ms * per_ms, len
+                n++
+            }
+            f += T
+        }
+        printf "COUNT\t%d\t%d\n", n, len
+    }')
+    count=$(printf '%s\n' "$sched" | awk -F'\t' '$1=="COUNT"{print $2}')
+    local len; len=$(printf '%s\n' "$sched" | awk -F'\t' '$1=="COUNT"{print $3}')
+    [[ -n "$count" ]] || count=0
+    [[ -n "$len" ]] || len=0
+
+    local duty first
+    duty=$(awk -v n="$count" -v l="$len" -v r="$rate" -v d="$dur" 'BEGIN{
+        if (r * d > 0) printf "%.4f", (n * l) / (r * d) * 100; else printf "0.0000" }')
+    first=$(printf '%s\n' "$sched" | awk -F'\t' '$1=="0"{print $5}')
+
+    if [[ -z "$out" ]]; then
+        mkdir -p "$PGT_PLAN_DIR" 2>/dev/null
+        out="$PGT_PLAN_DIR/schedule_adaptover_$(date +%Y%m%d-%H%M%S).tsv"
+    fi
+    {
+        printf 'wake\ttime_s\tsfn\tsubframe\tsample_start\tsample_len\n'
+        printf '%s\n' "$sched" | awk -F'\t' '$1!="COUNT"'
+    } > "$out" 2>/dev/null || {
+        printf 'ERROR\tcannot write %s\n' "$(pgt_sanitize "$out")" >&2; return 1; }
+
+    printf 'rate\t%s\n' "$rate"
+    printf 'paging_cycle_ms\t%d\n' "$(( t * 10 ))"
+    printf 'duration_s\t%s\n' "$dur"
+    printf 'ue_id\t%s\n' "$ue"
+    printf 'pf_sfn\t%s\n' "$pf"
+    printf 'po_subframe\t%s\n' "$sub"
+    printf 'wakes\t%s\n' "$count"
+    printf 'samples_per_wake\t%s\n' "$len"
+    printf 'first_sample\t%s\n' "${first:-0}"
+    printf 'duty_cycle_pct\t%s\n' "$duty"
+    printf 'schedule_file\t%s\n' "$(pgt_sanitize "$out")"
+    printf 'keys\tnone -- a paging record on PCCH/P-RNTI is not ciphered, so the schedule needs no key material at all\n'
+    printf 'needs\ta transmitter with a PA, and a UE already camped on a cell whose PCI, MIB and SIB1 are yours\n'
+    printf 'waveform\t10_lte_air_pws builds the paging message and 57_evil_twin is the cell; this verb only says when to send it\n'
+    printf 'ref\tTS 36.304 7.1 (PF and PO), TS 36.331 6.5 (Paging), TS 36.211 6.11 (P-RNTI on PDCCH)\n'
+    printf 'limit\t%s\n' "a sample index is not a transmission: the radio, the amplifier and the licence are somebody else's problem"
+    printf 'wake\ttime_s\tsfn\tsubframe\tsample_start\tsample_len\n'
+    printf '%s\n' "$sched" | awk -F'\t' '$1!="COUNT"'
+    return 0
+}
+
+
 pgt_cmd_adaptover_detect() {  # <pcap>
     local pcap="${1:-}"
     [[ -n "$pcap" ]] || { printf 'ERROR\tusage: --adaptover-detect <pcap>\n' >&2; return 2; }
@@ -2066,6 +2170,23 @@ pgt_selftest() {
     chk ka-few-pages "$(printf 'request\t1.0\t1\timsi\t310150123456789\nrequest\t11.0\t2\timsi\t310150123456789\n' | pgt_keepawake_stats "$(cat)")" ""
     chk v-adaptover-missing "$(pgt_cmd_adaptover_detect >/dev/null 2>&1; echo $?)" "2"
     chk v-adaptover-nofile "$(pgt_cmd_adaptover_detect /nonexistent.pcap >/dev/null 2>&1; echo $?)" "1"
+    # K7b: the schedule is derived from the same PF/PO arithmetic, and a
+    # sample index is that frame at a stated rate. At 1.92 MS/s the PO of PF 0
+    # (subframe 9) starts at sample 17280 and the next one 320 ms later.
+    plan_out=$(pgt_cmd_adaptover_plan --rate 1920000 --t 32 --duration 1 --out "$d/plan_adaptover.tsv")
+    pdfld() { printf '%s\n' "$plan_out" | awk -F'\t' -v k="$1" '$1==k{print $2; exit}'; }
+    chk plan-wakes "$(pdfld wakes)" "4"
+    chk plan-samples "$(pdfld samples_per_wake)" "1920"
+    chk plan-first "$(pdfld first_sample)" "17280"
+    chk plan-second "$(printf '%s\n' "$plan_out" | awk -F'\t' '$1=="1"{print $5}')" "631680"
+    chk plan-cycle "$(pdfld paging_cycle_ms)" "320"
+    chk plan-duty "$(pdfld duty_cycle_pct)" "0.4000"
+    chk plan-keys "$(printf '%s\n' "$plan_out" | awk -F'\t' '$1=="keys" && $2 ~ /^none/{print "none"}')" "none"
+    chk plan-file "$(grep -c '^wake	time_s	sfn	subframe	sample_start	sample_len' "$d/plan_adaptover.tsv")" "1"
+    chk plan-rows "$(grep -c '^[0-9]' "$d/plan_adaptover.tsv")" "4"
+    chk v-plan-bad-rate "$(pgt_cmd_adaptover_plan --rate x >/dev/null 2>&1; echo $?)" "2"
+    chk v-plan-bad-dur "$(pgt_cmd_adaptover_plan --duration 0 >/dev/null 2>&1; echo $?)" "2"
+    chk v-plan-bad-ue "$(pgt_cmd_adaptover_plan --ue-id 5000 >/dev/null 2>&1; echo $?)" "2"
 
     # 10. Plans are handoff, name the radio and the layer-2 position.
     out=$(pgt_plan torpedo)
@@ -2977,6 +3098,7 @@ pgt_cli_main() {
         --piercer-correlate) pgt_cmd_piercer "${1:-}" "${2:-}" "${3:-6}" ;;
         --detect)           pgt_cmd_detect "${1:-}" ;;
         --adaptover-detect) pgt_cmd_adaptover_detect "${1:-}" ;;
+        --adaptover-plan)   pgt_cmd_adaptover_plan "$@" ;;
         --plan)             pgt_plan "${1:-}" ;;
         --edrx-occ)         pgt_cli_edrx_occ "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
         --pei-occ)          pgt_cli_pei_occ "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
@@ -3005,6 +3127,9 @@ Usage: $0 COMMAND
   --detect <pcap>                       paging-anomaly signals and verdict
   --adaptover-detect <pcap>             K7a: the keep-awake paging pattern
                                         (AdaptOver / 5Gone), from gap regularity
+  --adaptover-plan [--rate SPS] [--t FRAMES] [--ue-id N] [--duration S] [--out PATH]
+                                        K7b: the sample-indexed transmit schedule
+                                        for that pattern (keys nothing)
   --edrx-occ <imsi|ue_id> <TeDRX> <PTW> [T] [nB]
                                         eDRX PTW start and the POs inside it
   --pei-occ <5g-s-tmsi|ue_id> [T] [nB] [pf_offset] [N_subgroup]
