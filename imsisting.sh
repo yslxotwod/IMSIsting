@@ -402,6 +402,7 @@ IMSISTING_MODULE_TABLE=(
     "SYSTEM|02|SDR / Radio Manager|radio_menu|01_radio"
     "SYSTEM|03|Field Kit|fkit_menu|05_field_kit"
     "SYSTEM|04|Cellular Killchain|kchn_menu|25_killchain"
+    "SYSTEM|05|Remote Nodes|rn_menu|59_remote_node"
 
     # RECON
     "RECON|05|Cell Recon|crec_menu|02_cell_recon"
@@ -417,6 +418,7 @@ IMSISTING_MODULE_TABLE=(
     "RADIO|13|Downgrade Attacks|dwn_menu|15_downgrade"
     "RADIO|14|NB-IoT / Cat-M1|iot_menu|45_iot"
     "RADIO|15|GPRS / EDGE|gprs_menu|50_gprs"
+    "RADIO|16|Overshadowing / AdaptOver|osh_menu|60_overshadow"
     "RADIO|16|NR Sidelink / V2X|slnk_menu|51_sidelink"
     "RADIO|17|5G NTN / Satellite|ntn_menu|49_ntn"
     "RADIO|18|TETRA / DMR / GSM-R|n3g_menu|53_non3gpp"

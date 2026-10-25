@@ -266,7 +266,7 @@ Copy for many.
 | `50_gprs` | GPRS/EDGE: GEA0/GEA3/GEA4 against published vectors, GEA1/GEA2 recovery cost, GEA5 admitted by name, APN and PDP coding |
 | `51_sidelink` | NR sidelink on PC5: resource pools, SCI-1A, ITS certificates, relay checks, BSM kinematics, pseudonym lifecycle and kinematic linkage |
 | `53_non3gpp` | TETRA, DMR and GSM-R structure, ciphers, vocoder bit budgets, and the bands you can transmit on legally |
-| `57_evil_twin` | An LTE cell that only this lab hears: a survey row becomes an eNB config on a HackRF, the preflight names the binary each config needs, and the timer decides whether a service stopped or crashed |
+| `57_evil_twin` | An LTE or NR cell built from a survey row: it radiates through a TX-capable SDR under your licence or keeps every peer on loopback, and every run ends by collecting what the phone handed over — NAS identities out of the logs and the capture, each row marked observed or advertised |
 | `60_overshadow` | AdaptOver and overshadowing: the subframe map, the timing budget against the 2 ms queue window and the cyclic prefix, the uplink and downlink power budgets, four detectors, and a plan that never keys a radio |
 
 ### Access — the attach, the edge and the offload
@@ -440,7 +440,7 @@ the attack runs end to end.
 | Jamming | `33_jamming_detect` | Detection first: barrel, narrowband and pulsed shapes told apart from congestion. The waveform constructor — AWGN/CW/chirp, PSS/SSS/PBCH, PRACH, PRS, PUCCH, GPS C/A, NR SSB — runs on the first invocation and prints its disclaimer on stderr. |
 | GPS and PRS jamming | `33_jamming_detect` | Both sequences are generated from the standards — IS-GPS-200N Table 3-Ia for the C/A code, TS 36.211 for PRS — and asserted against an independent implementation. |
 | **Overshadowing (AdaptOver)** | `60_overshadow` | A transmitter that fills only an unscheduled grant, so the cell stays up and only one user is affected. The module computes the two budgets that decide whether it is possible — the 2 ms queue window against the cyclic prefix, and the uplink power differential that makes the attack surgical (29 dBm modelled against the paper's measured 28.5) — plus the downlink case that collapses with range, four detectors, and a plan that never keys a radio. |
-| Evil twin | `57_evil_twin` | A survey row becomes an eNB configuration a HackRF can transmit, with the preflight that names every binary the config needs and the timer that tells a stopped service from a crashed one. |
+| Evil twin | `57_evil_twin` | A survey row becomes a radiating eNB or gNB: `--prepare-lte … --radiate` writes the rf section for one named SDR, `--run-lte … --radiate` puts it in the air without a UE of yours, and the verdict is `twin-received-identity`, `twin-accepted-attach` or `twin-radiated-unanswered` rather than a marker that always appears. `--with-capture` records S1AP, NGAP, GTP-U and PFCP and stores every identity it decodes. |
 | NB-IoT coverage enhancement | `45_iot` | CE levels with their repetition budgets and what they cost a cell: NPDCCH subframe occupancy, NPRACH congestion, and the suspend/resume state that outlives the session. |
 | Sidelink presence attacks | `51_sidelink` | BSM field analysis, the ghost-vehicle detector (speed against position, impossible steps), pseudonym lifecycle auditing and the kinematic linkage that undoes a rotation. |
 | Sidelink relay | `51_sidelink` | What a UE-to-network relay sees at layer 2 and layer 3, which traffic it can read in each, and why its position on the path is the whole finding. |

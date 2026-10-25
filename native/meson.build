@@ -81,6 +81,7 @@ executable(
     # The Map page. Its own translation unit for the same reason: a canvas, a
     # projection and a layer inbox, and nothing from AppState but the root.
     'src/map_page.c',
+    'src/fleet_page.c',
     'src/stats_chart.c',
     # The target panel's posture chips. Its own translation unit because the
     # rules it applies — which cipher is weak, which store beats which — are

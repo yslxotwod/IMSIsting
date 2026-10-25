@@ -1432,6 +1432,12 @@ PYEOF
     chk status-python   "$(fld "$out" python3)"        "present"
     chk status-count    "$(fld "$out" identity_count)" "1"
 
+    # A node source: a name is required, an unregistered one is refused with
+    # the command that fixes it, and a fetch needs both name and path.
+    chk node-missing-arg "$(pcap_cmd_node "" >/dev/null 2>&1; echo $?)" "2"
+    chk node-unknown     "$(CASEBOOK_DIR="$d/nobook" pcap_cmd_node no-such >/dev/null 2>&1; echo $?)" "2"
+    chk node-fetch-args  "$(pcap_cmd_node_fetch onlyname >/dev/null 2>&1; echo $?)" "2"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1493,6 +1499,36 @@ M
     done
 }
 
+# ── a node as the capture source ────────────────────────────────────────
+# The interesting capture is often the one another machine made. Listing is a
+# read (`--node`), fetching writes into captures/nodes/<name>/ under this tree
+# so every verb below works on a local path afterwards.
+pcap_node_tool() {
+    local tool="$IMSISTING_ROOT/tools/node_source.py"
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\t%s is missing\nWHY\twithout it a node is a name with no way to ask it for a capture\n' "$tool" >&2
+        return 2; }
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is missing\nWHY\tthe node table is not a shell job\n' >&2; return 2; }
+    printf '%s' "$tool"
+}
+
+pcap_cmd_node() {  # <name>  — list what that node can hand over
+    local name="${1:-}" tool
+    [[ -n "$name" ]] || {
+        printf 'ERROR\tusage: --node <name>\n' >&2; return 2; }
+    tool=$(pcap_node_tool) || return $?
+    python3 "$tool" captures "$name"
+}
+
+pcap_cmd_node_fetch() {  # <name> <path>
+    local name="${1:-}" path="${2:-}" tool
+    [[ -n "$name" && -n "$path" ]] || {
+        printf 'ERROR\tusage: --node-fetch <name> <path>\n' >&2; return 2; }
+    tool=$(pcap_node_tool) || return $?
+    python3 "$tool" captures "$name" --fetch "$path"
+}
+
 # ── CLI dispatch ────────────────────────────────────────────────────────
 pcap_cli_main() {
     local cmd="${1:-}"
@@ -1507,6 +1543,8 @@ pcap_cli_main() {
         --identities)    pcap_cmd_identities "${1:-}" ;;
         --ident-list)    pcap_cmd_ident_list ;;
         --build-sample)  pcap_build_sample "${1:-}" ;;
+        --node)          pcap_cmd_node "${1:-}" ;;
+        --node-fetch)    pcap_cmd_node_fetch "${1:-}" "${2:-}" ;;
         --clear)         pcap_cmd_clear ;;
         --selftest)      pcap_selftest ;;
         --menu)          pcap_menu ;;
@@ -1529,6 +1567,8 @@ Usage: $0 COMMAND
   --identities <pcap>           harvest IMSI/IMEI/TMSI into loot and report
   --ident-list                  the harvested identity store, deduplicated
   --build-sample <out.pcap>     write a small synthetic capture
+  --node <name>                 list the captures that fleet node holds
+  --node-fetch <name> <path>    copy one into captures/nodes/<name> and print it
   --clear                       empty the identity store
   --selftest                    verify the fallback parser (no tshark needed)
   --menu                        interactive menu

@@ -135,6 +135,9 @@ DEPS_TOOLS=(
     "rtl_test|sdr|no|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr"
     "rtl_sdr|sdr|no|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr"
     "rtl_fm|sdr|no|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr|rtl-sdr"
+    "iio_info|sdr|no|libiio-utils|libiio|libiio|libiio-utils|libiio"
+    "iio_attr|sdr|no|libiio-utils|libiio|libiio|libiio-utils|libiio"
+    "iio_readdev|sdr|no|libiio-utils|libiio|libiio|libiio-utils|libiio"
     "SoapySDRUtil|sdr|no|soapysdr-tools|SoapySDR|soapysdr|SoapySDR|?"
     "gnuradio-config-info|sdr|no|gnuradio|gnuradio|gnuradio|gnuradio|gnuradio"
     "gnuradio-companion|sdr|no|gnuradio|gnuradio|gnuradio|gnuradio|gnuradio"
@@ -977,7 +980,7 @@ deps_install_package_cmd() {
 
 deps_sdr_tools_present() {
     local t
-    for t in hackrf_info bladeRF-cli LimeUtil uhd_find_devices rtl_test SoapySDRUtil; do
+    for t in hackrf_info bladeRF-cli LimeUtil uhd_find_devices rtl_test iio_info SoapySDRUtil; do
         deps_check_one "$t" && { printf '%s\n' "$t"; return 0; }
     done
     return 1
@@ -1037,8 +1040,8 @@ deps_selftest() {
     chk table-no-blank-cell "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$4==""||$5==""||$6==""||$7==""||$8==""{c++} END{print c+0}')" 0
     chk table-cell-domain "$(printf '%s\n' "${DEPS_TOOLS[@]}" | \
         awk -F'|' '{for(i=4;i<=8;i++) if($i!="-" && $i!="?" && $i!~/^[A-Za-z0-9][A-Za-z0-9._+:@-]*$/) c++} END{print c+0}')" 0
-    chk table-apt-named "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$4!="-"{c++} END{print c+0}')" 46
-    chk table-pacman-named "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$6!="-"{c++} END{print c+0}')" 44
+    chk table-apt-named "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$4!="-"{c++} END{print c+0}')" 49
+    chk table-pacman-named "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$6!="-"{c++} END{print c+0}')" 47
     chk table-required-domain "$(printf '%s\n' "${DEPS_TOOLS[@]}" | awk -F'|' '$3!="yes"&&$3!="no"{c++} END{print c+0}')" 0
     chk table-unique "$(printf '%s\n' "${DEPS_TOOLS[@]}" | cut -d'|' -f1 | sort -u | grep -c .)" "$nrows"
     chk table-py-count "$(printf '%s\n' "${DEPS_PY_MODULES[@]}" | awk -F'|' 'NF!=3{c++} END{print c+0}')" 0
@@ -1058,6 +1061,7 @@ deps_selftest() {
     # 3. Named tools the task requires are actually in the table.
     local t
     for t in hackrf_info hackrf_transfer bladeRF-cli LimeUtil uhd_find_devices rtl_test \
+             iio_info iio_attr iio_readdev \
              SoapySDRUtil gnuradio-companion gqrx grgsm_livemon grgsm_scanner kal \
              srsenb srsepc gnb nr-uesoftmodem open5gs-mmed free5gc tshark tcpdump \
              socat pcscd pcsc_scan opensc-tool hashcat john gpsd gpsbabel sqlite3 jq column pv; do

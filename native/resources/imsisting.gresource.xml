@@ -77,5 +77,7 @@
     <file alias="icons/scalable/actions/imsisting-56_baseband_diag-symbolic.svg">icons/symbolic/imsisting-56_baseband_diag-symbolic.svg</file>
     <file alias="icons/scalable/actions/imsisting-57_evil_twin-symbolic.svg">icons/symbolic/imsisting-57_evil_twin-symbolic.svg</file>
     <file alias="icons/scalable/actions/imsisting-58_suci_catcher-symbolic.svg">icons/symbolic/imsisting-58_suci_catcher-symbolic.svg</file>
+    <file alias="icons/scalable/actions/imsisting-59_remote_node-symbolic.svg">icons/symbolic/imsisting-59_remote_node-symbolic.svg</file>
+    <file alias="icons/scalable/actions/imsisting-60_overshadow-symbolic.svg">icons/symbolic/imsisting-60_overshadow-symbolic.svg</file>
   </gresource>
 </gresources>

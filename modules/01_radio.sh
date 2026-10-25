@@ -166,7 +166,9 @@ radio_sanitize() {
 #  because a wedged USB device otherwise hangs the whole module.
 # ═══════════════════════════════════════════════════════════════════
 
-RADIO_DRIVERS=(hackrf bladerf limesdr usrp rtlsdr soapy)
+# pluto is listed before soapy because it is a specific device with its own
+# control surface (iio over USB or Ethernet); soapy is the catch-all.
+RADIO_DRIVERS=(hackrf bladerf limesdr usrp rtlsdr pluto soapy)
 
 radio_probe_cmd() {
     case "$1" in
@@ -175,6 +177,7 @@ radio_probe_cmd() {
         limesdr) echo "LimeUtil" ;;
         usrp)    echo "uhd_find_devices" ;;
         rtlsdr)  echo "rtl_test" ;;
+        pluto*)  echo "iio_info" ;;
         soapy)   echo "SoapySDRUtil" ;;
         *)       echo "" ;;
     esac
@@ -183,6 +186,9 @@ radio_probe_cmd() {
 radio_direction() {
     case "$1" in
         rtlsdr) echo "RX" ;;
+        # AD9361/AD9363 boards transmit on the second chain: ADALM-PLUTO has
+        # one RX and one TX, the Pluto+/LibreSDR boards have two of each.
+        pluto*) echo "RX/TX" ;;
         *)      echo "RX/TX" ;;
     esac
 }
@@ -200,6 +206,7 @@ radio_probe_args() {
         limesdr) printf '%s\n' "--find" ;;
         usrp)    printf '%s\n' "" ;;
         rtlsdr)  printf '%s\n' "-t" ;;
+        pluto*)  printf '%s\n' "-s" ;;
         soapy)   printf '%s\n' "--find" ;;
         *)       printf '%s\n' "" ;;
     esac
@@ -313,6 +320,32 @@ radio_parse_soapy() {
     fi
 }
 
+# iio_info -s:        "  0: 0456:b673 (Analog Devices Inc. PlutoSDR ...), serial=..."
+#                     "  1: ip:192.168.2.1 (Analog Devices Inc. PlutoSDR ...)"
+#
+# The context URI IS the address, so it goes into the driver field the way
+# soapy puts its backend driver there: `pluto:ip:192.168.2.1` is reachable over
+# Ethernet, `pluto:usb:1.9.5` over USB, and the two are the same board with two
+# doors. A board that reports no serial is identified by its URI, which is
+# still unique per context.
+radio_parse_pluto() {
+    local txt="$1" line uri rest sn
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*[0-9]+:[[:space:]]+([^[:space:]]+)[[:space:]]+ ]] || continue
+        uri="${BASH_REMATCH[1]}"
+        rest="${line#*"$uri"}"
+        [[ -n "$uri" ]] || continue
+        # serial=<value> when the firmware reports one; a context with none is
+        # identified by its URI, which is unique per context on the bus.
+        sn=$(printf '%s' "$rest" | sed -n 's/.*serial=\([^][, ]*\).*/\1/p')
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "pluto:${uri}" \
+            "$(radio_sanitize "${sn:-$uri}")" \
+            "" "" "" "" "" "" \
+            "$(radio_direction pluto)"
+    done < <(printf '%s\n' "$txt")
+}
+
 radio_parse() {
     # radio_parse DRIVER "<probe output>" -> zero or more TSV rows
     case "$1" in
@@ -321,6 +354,7 @@ radio_parse() {
         limesdr) radio_parse_limesdr "$2" ;;
         usrp)    radio_parse_usrp    "$2" ;;
         rtlsdr)  radio_parse_rtlsdr  "$2" ;;
+        pluto)   radio_parse_pluto   "$2" ;;
         soapy)   radio_parse_soapy   "$2" ;;
         *)       return 1 ;;
     esac
@@ -524,6 +558,8 @@ radio_freq_cmd() {
         limesdr) printf 'LimeUtil --set-frequency=%s (or: SoapySDRUtil --args="driver=lime" --frequency=%s)' "$2" "$2" ;;
         usrp)    printf 'uhd_find_devices; set via uhd: rx_freq=%s (use tx_freq=%s to transmit)' "$2" "$2" ;;
         rtlsdr)  printf 'rtl_sdr -f %s -s 2048000 -g 40 capture.iq  # RX ONLY' "$2" ;;
+        pluto*)  printf 'iio_attr -u %s -c ad9361-phy altvoltage0 frequency %s   # RX LO; TX LO is altvoltage1' \
+                     "${1#pluto:}" "$2" ;;
         soapy*)  printf 'SoapySDRUtil --args="driver=%s" --frequency=%s' "${1#soapy:}" "$2" ;;
         *)       printf '' ;;
     esac
@@ -536,6 +572,8 @@ radio_rate_cmd() {
         limesdr) printf 'LimeUtil --set-sample-rate=%s' "$2" ;;
         usrp)    printf 'uhd: master_clock_rate=%s, samp_rate=%s' "$2" "$2" ;;
         rtlsdr)  printf 'rtl_sdr -s %s   # max 2.4 Msps, RX ONLY' "$2" ;;
+        pluto*)  printf 'iio_attr -u %s -c ad9361-phy -i voltage0 sampling_frequency %s   # 0.52..61.44 Msps' \
+                     "${1#pluto:}" "$2" ;;
         soapy*)  printf 'SoapySDRUtil --args="driver=%s" --rate=%s' "${1#soapy:}" "$2" ;;
         *)       printf '' ;;
     esac
@@ -548,6 +586,8 @@ radio_gain_cmd() {
         limesdr) printf 'LimeUtil --set-gain=%s   # -12..61 dB' "$2" ;;
         usrp)    printf 'uhd: gain=%s   # B200/B210: 0..76 dB' "$2" ;;
         rtlsdr)  printf 'rtl_sdr -g %s   # 0..49.6 dB, RX ONLY' "$2" ;;
+        pluto*)  printf 'iio_attr -u %s -c ad9361-phy -i voltage0 hardwaregain %s   # 0..76 dB, manual gain mode' \
+                     "${1#pluto:}" "$2" ;;
         soapy*)  printf 'SoapySDRUtil --args="driver=%s" --gain=%s' "${1#soapy:}" "$2" ;;
         *)       printf '' ;;
     esac
@@ -609,9 +649,46 @@ radio_read_state() {
 #  IQ capture
 # ═══════════════════════════════════════════════════════════════════
 
+# The sample format a driver's capture command actually writes. Every reader in
+# the tree takes this as an argument rather than guessing from a filename, and a
+# wrong guess silently halves or doubles the sample rate.
+radio_capture_format() {
+    case "$1" in
+        hackrf)  echo "cs8"  ;;
+        rtlsdr)  echo "cu8"  ;;
+        bladerf) echo "sc16" ;;
+        limesdr) echo "cs16" ;;
+        usrp)    echo "sc16" ;;
+        pluto*)  echo "ci16" ;;
+        soapy*)  echo "cf32" ;;
+        *)       echo "" ;;
+    esac
+}
+
+# A driver token that is safe in a filename. `pluto:ip:192.168.2.1` is a driver
+# and an address at once, and a colon in a path is not.
+radio_slug() {
+    printf '%s' "$1" | tr ':/ ' '___' | tr -cd 'A-Za-z0-9._-'
+}
+
 # Vendor capture command. Where the vendor CLI cannot capture raw IQ at all
 # the function returns non-zero, and the caller writes a plan instead of
 # pretending. GNU Radio is the universal fallback and is named in the plan.
+# The binaries a driver's capture command runs. A plan is only honest when the
+# tools it names are the tools that exist: Pluto needs three, not one.
+radio_capture_needs() {
+    case "$1" in
+        hackrf)  echo "hackrf_transfer" ;;
+        rtlsdr)  echo "rtl_sdr" ;;
+        bladerf) echo "bladeRF-cli" ;;
+        limesdr) echo "LimeUtil" ;;
+        usrp)    echo "uhd_find_devices" ;;
+        pluto*)  echo "iio_attr iio_readdev" ;;
+        soapy*)  echo "SoapySDRUtil" ;;
+        *)       echo "" ;;
+    esac
+}
+
 radio_capture_cmd() {
     local drv="$1" secs="$2" out="$3" hz="$4" rate="$5" gain="$6"
     case "$drv" in
@@ -630,6 +707,24 @@ radio_capture_cmd() {
         usrp)
             printf 'uhd: rx_samples_to_file --freq %s --rate %s --gain %s --duration %s --file %s' \
                 "$hz" "$rate" "$gain" "$secs" "$out" ;;
+        pluto*)
+            # iio_readdev streams the two IQ channels as signed 16-bit pairs:
+            # the AD9361 is a 12-bit converter, so samples arrive shifted left
+            # by four, not scaled to full range. -s is a sample count, -b the
+            # kernel buffer, -T a timeout so a dead link cannot hang the caller.
+            #
+            # The control writes come first and in the same command: iio_attr
+            # is libiio's only control surface, gain_control_mode must be
+            # manual before hardwaregain means anything, and a capture at the
+            # wrong local oscillator is worse than a failed one.
+            local uri="${drv#pluto:}"
+            printf 'iio_attr -u %s -c ad9361-phy altvoltage0 frequency %s && \
+iio_attr -u %s -c ad9361-phy -i voltage0 sampling_frequency %s && \
+iio_attr -u %s -c ad9361-phy -i voltage0 gain_control_mode manual && \
+iio_attr -u %s -c ad9361-phy -i voltage0 hardwaregain %s && \
+iio_readdev -u %s -b 262144 -s %s -T 30 cf-ad9361-lpc voltage0 voltage1 > %s' \
+                "$uri" "$hz" "$uri" "$rate" "$uri" "$uri" "$gain" \
+                "$uri" "$(( secs * rate ))" "$out" ;;
         soapy*)
             printf 'SoapySDRUtil --args="driver=%s" --rate=%s --frequency=%s --gain=%s --duration=%s --direction=RX --file=%s' \
                 "${drv#soapy:}" "$rate" "$hz" "$gain" "$secs" "$out" ;;
@@ -678,8 +773,10 @@ radio_record_unlocked() {
     ts=$(date +%Y%m%d_%H%M%S)
     mkdir -p "$CAPTURES_DIR" 2>/dev/null || {
         printf 'ERROR\tcannot create %s\n' "$CAPTURES_DIR" >&2; return 1; }
-    out="$CAPTURES_DIR/iq_${drv}_${ts}.iq"
-    plan="$CAPTURES_DIR/iq_${drv}_${ts}.plan.txt"
+    local slug
+    slug=$(radio_slug "$drv")
+    out="$CAPTURES_DIR/iq_${slug}_${ts}.iq"
+    plan="$CAPTURES_DIR/iq_${slug}_${ts}.plan.txt"
 
     local cmd
     if ! cmd=$(radio_capture_cmd "$drv" "$secs" "$out" "$hz" "$rate" "$gain"); then
@@ -694,12 +791,32 @@ radio_record_unlocked() {
         return 1
     fi
 
+    local need missing=""
+    for need in $(radio_capture_needs "$drv"); do
+        command -v "$need" >/dev/null 2>&1 || missing="$missing $need"
+    done
+    if [[ -n "$missing" ]]; then
+        printf 'HANDOFF\t%s\t%s not installed\n' \
+            "$(radio_sanitize "$drv")" "${missing# }"
+        {
+            printf '# IQ capture plan — driver %s\n' "$(radio_sanitize "$drv")"
+            printf '# status: handoff — missing: %s\n' "${missing# }"
+            printf '# install it with: 00_deps.sh --install-package %s\n' "${missing# }"
+            printf '# centre %s Hz, rate %s sps, gain %s dB, %s s -> %s\n' "$hz" "$rate" "$gain" "$secs" "$out"
+            printf '# vendor command: %s\n' "$(radio_sanitize "$cmd")"
+            radio_gnuradio_plan "$drv" "$hz" "$rate" "$gain" "$secs" "$out"
+        } > "$plan"
+        printf 'status: handoff\t%s\n' "$plan"
+        return 1
+    fi
+
     if command -v "$(radio_probe_cmd "$drv")" >/dev/null 2>&1; then
         info "recording ${secs}s of IQ from $drv to $out"
         # The vendor command is run through bash -c so quoted -e strings work.
         if bash -c "$cmd" >/dev/null 2>&1; then
             if [[ -s "$out" ]]; then
                 printf 'OK\t%s\t%s\n' "$out" "$(stat -c %s "$out" 2>/dev/null || echo 0)"
+                printf 'format\t%s\n' "$(radio_capture_format "$drv")"
                 return 0
             fi
             printf 'ERROR\t%s produced no data (radio busy or not streaming)\n' "$out" >&2
@@ -991,6 +1108,8 @@ radio_selftest() {
     chk probe-limesdr-tool  "$(radio_probe_cmd limesdr)" LimeUtil
     chk probe-usrp-tool     "$(radio_probe_cmd usrp)"    uhd_find_devices
     chk probe-rtlsdr-tool   "$(radio_probe_cmd rtlsdr)"  rtl_test
+    chk probe-pluto-tool    "$(radio_probe_cmd pluto)"   iio_info
+    chk probe-pluto-args    "$(radio_probe_args pluto)"  "-s"
     chk probe-soapy-tool    "$(radio_probe_cmd soapy)"   SoapySDRUtil
     chk probe-unknown-empty "$(radio_probe_cmd nonsense)" ""
     chk missing-tool-rc     "$(radio_probe definitely_not_a_driver >/dev/null 2>&1; echo $?)" 2
@@ -1006,6 +1125,9 @@ radio_selftest() {
     chk cantx-rtlsdr     "$(radio_can_tx rtlsdr && echo yes || echo no)"  no
     chk cantx-hackrf     "$(radio_can_tx hackrf && echo yes || echo no)"  yes
     chk cantx-bladerf    "$(radio_can_tx bladerf && echo yes || echo no)" yes
+    chk dir-pluto-tx     "$(radio_direction pluto)"            "RX/TX"
+    chk dir-pluto-uri-tx "$(radio_direction pluto:ip:10.0.0.2)" "RX/TX"
+    chk cantx-pluto      "$(radio_can_tx pluto && echo yes || echo no)" yes
 
     # 3. Parsers against the real output shape of each vendor tool.
     out=$(radio_parse hackrf 'Found HackRF
@@ -1029,6 +1151,28 @@ Found Rafael Micro R820T tuner')
     chk parse-rtlsdr-dir    "$(printf '%s\n' "$out" | cut -f9)" "RX"
     chk parse-rtlsdr-fmax   "$(printf '%s\n' "$out" | cut -f4)" 1766
     chk parse-rtlsdr-count  "$(printf '%s\n' "$out" | grep -c .)" 1
+
+    # iio_info -s: the context URI is the address, and a board reachable two
+    # ways is two rows because the two doors behave differently.
+    out=$(radio_parse pluto 'Library version: 0.24 (git tag: v0.24)
+Compiled with backends: local xml ip usb serial
+IIO context scan:
+	0: usb:1.9.5 (Analog Devices Inc. PlutoSDR (ADALM-PLUTO)), serial=0000000000000001 [usb]
+	1: ip:192.168.2.1 (Analog Devices Inc. PlutoSDR (ADALM-PLUTO)), serial=0000000000000001 [ip]')
+    chk parse-pluto-count   "$(printf '%s\n' "$out" | grep -c .)" 2
+    chk parse-pluto-fields  "$(printf '%s\n' "$out" | awk -F'\t' '{print NF}' | sort -u)" 9
+    chk parse-pluto-usb     "$(printf '%s\n' "$out" | cut -f1 | head -1)" "pluto:usb:1.9.5"
+    chk parse-pluto-ip      "$(printf '%s\n' "$out" | cut -f1 | tail -1)" "pluto:ip:192.168.2.1"
+    chk parse-pluto-serial  "$(printf '%s\n' "$out" | cut -f2 | head -1)" "0000000000000001"
+    chk parse-pluto-dir     "$(printf '%s\n' "$out" | cut -f9 | head -1)" "RX/TX"
+    # Nothing iio_info -s prints is a range, so the range cells stay empty
+    # rather than being filled with a datasheet number nobody measured.
+    chk parse-pluto-empty-ranges "$(printf '%s\n' "$out" | cut -f3,4,5,6,7,8 | head -1)" $'\t\t\t\t\t'
+    out=$(radio_parse pluto 'Library version: 0.24
+IIO context scan:
+	0: local: (Analog Devices Inc. PlutoSDR (ADALM-PLUTO))')
+    chk parse-pluto-noserial "$(printf '%s\n' "$out" | cut -f2)" "local:"
+    chk parse-pluto-emptytxt  "$(radio_parse pluto '' | grep -c .)" 0
 
     out=$(radio_parse bladerf 'bladeRF-cli version: 2023.02
   Backend:        libusb
@@ -1233,6 +1377,24 @@ Found device 1
     chk capture-cmd-hackrf  "$(radio_capture_cmd hackrf 2 /tmp/x.iq 942000000 20000000 40 | grep -c 'hackrf_transfer -r')" 1
     chk capture-cmd-rtlsdr  "$(radio_capture_cmd rtlsdr 2 /tmp/x.iq 942000000 2048000 40 | grep -c 'rtl_sdr')" 1
     chk capture-cmd-unknown "$(radio_capture_cmd nonsense 2 /tmp/x.iq 1 1 1 >/dev/null 2>&1; echo $?)" 1
+    # Pluto: the tune, the rate, the manual gain mode and the stream are one
+    # command, because iio_attr has no state of its own to set up first.
+    out=$(radio_capture_cmd pluto:ip:192.168.2.1 2 /tmp/x.iq 942000000 2083000 40)
+    chk capture-cmd-pluto-stream  "$(printf '%s\n' "$out" | grep -c 'iio_readdev -u ip:192.168.2.1')" 1
+    chk capture-cmd-pluto-tune    "$(printf '%s\n' "$out" | grep -c 'altvoltage0 frequency 942000000')" 1
+    chk capture-cmd-pluto-rate    "$(printf '%s\n' "$out" | grep -c 'sampling_frequency 2083000')" 1
+    chk capture-cmd-pluto-gain    "$(printf '%s\n' "$out" | grep -c 'gain_control_mode manual')" 1
+    chk capture-cmd-pluto-samples "$(printf '%s\n' "$out" | grep -c -- '-s 4166000')" 1
+    chk capture-cmd-pluto-chans   "$(printf '%s\n' "$out" | grep -c 'cf-ad9361-lpc voltage0 voltage1')" 1
+    chk capture-needs-pluto       "$(radio_capture_needs pluto:ip:192.168.2.1)" "iio_attr iio_readdev"
+    chk capture-needs-hackrf      "$(radio_capture_needs hackrf)" "hackrf_transfer"
+    chk capture-needs-unknown     "$(radio_capture_needs nonsense)" ""
+    chk capture-format-pluto      "$(radio_capture_format pluto:usb:1.9.5)" ci16
+    chk capture-format-hackrf     "$(radio_capture_format hackrf)" cs8
+    chk capture-format-rtlsdr     "$(radio_capture_format rtlsdr)" cu8
+    chk capture-format-unknown    "$(radio_capture_format nonsense)" ""
+    chk slug-pluto "$(radio_slug pluto:ip:192.168.2.1)" "pluto_ip_192.168.2.1"
+    chk slug-hackrf "$(radio_slug hackrf)" hackrf
     chk gnuradio-plan-names-driver "$(radio_gnuradio_plan rtlsdr 942000000 2048000 40 2 /tmp/x.iq | grep -c 'driver=rtlsdr')" 1
 
     # 10. Coverage arithmetic against the parser's own rows.
@@ -1283,7 +1445,7 @@ Found device 1
     chk status-keys      "$(printf '%s\n' "$out" | cut -f1 | tr '\n' ' ')" \
         "devices selected selected_driver can_tx freq_hz gain_db rate_sps probe_tools_missing state_file captures_dir lock_state lock_owner "
     chk status-probe-missing-names " $(printf '%s\n' "$out" | awk -F'\t' '$1=="probe_tools_missing"{print $2}') " \
-        "$( for t in hackrf_info bladeRF-cli LimeUtil uhd_find_devices rtl_test SoapySDRUtil; do
+        "$( for t in hackrf_info bladeRF-cli LimeUtil uhd_find_devices rtl_test iio_info SoapySDRUtil; do
                 command -v "$t" >/dev/null 2>&1 || printf '%s ' "$t"
             done | sed 's/^/ /' )"
 

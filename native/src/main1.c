@@ -49,6 +49,7 @@
 /* The Map page. Its own translation unit: one canvas, one projection, and
    nothing from AppState but the root it reads loot/map/layers under. */
 #include "map_page.h"
+#include "fleet_page.h"
 #include "stats_chart.h"
 /* The target panel's posture chips. Its own translation unit: it reads the
    stores a handful of modules write and knows nothing about the rest of the
@@ -385,7 +386,7 @@ struct _AppState {
     /* The six permanent pages as a list at the top of the drawer. Held so
        the highlight can follow the notebook instead of being rebuilt. */
     GtkWidget *drawer_nav;
-    GtkWidget *drawer_nav_rows[9];
+    GtkWidget *drawer_nav_rows[10];
     gboolean   drawer_nav_syncing;
     /* Beginner mode, on until the operator turns it off. It changes what a
        card puts in front of a reader - one worked example per action, the rest
@@ -690,6 +691,9 @@ static const ModuleDefinition modules[] = {
     { "25_killchain",        "Killchain",            "SYSTEM",
       "imsisting-25_killchain-symbolic",
       "Chains module verbs into repeatable runs from a TSV chain file, with a record of every run." },
+    { "59_remote_node",      "Remote Nodes",         "SYSTEM",
+      "imsisting-59_remote_node-symbolic",
+      "Remote cellular nodes: identity, measured capabilities, captured events, dispatch permissions. Interactive view on the Fleet page." },
 
     /* RECON — passive survey of the RF environment: no target, no identity */
     { "02_cell_recon",       "Cell Recon",           "RECON",
@@ -725,9 +729,9 @@ static const ModuleDefinition modules[] = {
       "imsisting-45_iot-symbolic",
       "NB-IoT and Cat-M1: NPRACH, NPSS/NSSS, SIB1-NB and NPRFCN." },
 
-    { "57_evil_twin",        "LTE Evil Twin",        "RADIO",
+    { "57_evil_twin",        "LTE / NR Evil Twin",   "RADIO",
       "imsisting-57_evil_twin-symbolic",
-      "A cell that only this lab hears: a reconnaissance row becomes an eNB or gNB, the host is checked for the core and the test UE, and the attach is bounded in seconds." },
+      "A cell built from a reconnaissance row: it radiates under your licence, takes the attach a phone offers it, and records what crossed the air. Contained runs keep every peer on loopback." },
     { "50_gprs",             "GPRS / EDGE",          "RADIO",
       "imsisting-50_gprs-symbolic",
       "GPRS/EDGE packet-switched: GEA ciphering, APN coding, PDP context and downgrade detection." },
@@ -2540,10 +2544,6 @@ static const char *const plain_keys[] = {
     "attacker_range_m\tthe same range in metres, because tens of metres is the downlink answer",
     "audit_honest\tthe comparison that does catch it",
     "audit_naive\tthe check that misses it",
-    "auth_failure\tone failed authentication, counted in the order it arrived",
-    "auth_failures\tfailures the network drove, which is the detach mechanism here",
-    "auth_request\twhich authentication request this is, one of the three",
-    "authentication_failures\thow many failed authentications the log carries",
     "authorisation\twhether the slice may be used at all",
     "auts_accepted_and_sqn_updated\tthe network believed the card: SQN_MS was ahead and inside the window, so its own counter moved and a new AUTN was issued",
     "auts_refused_outside_window\tthe token is genuine but the counter jumped further than this network accepts, so nothing is resynced",
@@ -2551,8 +2551,6 @@ static const char *const plain_keys[] = {
     "auts_rejected_not_ahead\tMAC-S verifies but the counter is not ahead of the network value, which is what a replayed token looks like",
     "av_is_not_a_signal\tpublished stealth note: mobile antivirus did not flag messages of this shape, so the display carries the defence",
     "bandwidth_is_a_red_herring\tthe bit rate is not the interesting limit",
-    "bar_duration_s\thow long a barred cell stays barred, 300 seconds",
-    "bar_rule\tthe clause that holds a UE off a barred cell for 300 s",
     "beat\twhat the attacker has to exceed at the receiver: the competitor signal plus the margin",
     "binding_constraint\twhich of the two budgets runs out first: the 2 ms queue window or the cyclic prefix",
     "bit_rate_bps\tbits per second the codec produces",
@@ -2571,8 +2569,6 @@ static const char *const plain_keys[] = {
     "callback_num_atag\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "callback_num_pres_ind\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "callback_uri\tthe address a notification is posted to",
-    "capture_auth_failures\tfailed authentications the model drove after the capture",
-    "capture_messages\tuplink and downlink messages needed before the IMSI arrives",
     "catalogue_without_a_primitive\tthe verdict when the catalogue names other implementations bugs and nothing in this tree emits a payload",
     "ce_inflation_is_unproved\tthe reported CE level is not proved on the air",
     "ce_level\tcoverage enhancement level the flow assumes",
@@ -2647,13 +2643,11 @@ static const char *const plain_keys[] = {
     "dests\twhat SMPP over TLS changes, or does not",
     "detect\thow the far side would notice",
     "detect_at_nrf\twhat the directory can refuse up front",
-    "detection_shift\twhere a defender has to look once disruption is gone",
     "detector\tone structural observation that does not fit the schedule the cell announced",
     "device_effect\twhat the modem does with the class of AT command the card asked for",
     "device_profile_is_an_anchor\tthe eUICC identifier survived the profile rotation and joins the identities back together",
     "devices_with_more_than_one_identity\thow many eUICCs carried more than one subscription identity in the records read",
     "display_time\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
-    "disruption_reduction\tnaive outage divided by this sequence's outage",
     "dns\tname resolution reaches this network",
     "dns_leak\twhat the lookup itself gives away",
     "dns_query\tthe names asked of the resolver",
@@ -2669,7 +2663,6 @@ static const char *const plain_keys[] = {
     "enabled_profiles\thow many profiles the modelled card has enabled, which is one at most",
     "encode_us\ttime spent turning the message into samples before it can be queued",
     "epdg_selection\thow the gateway is chosen",
-    "establishment_requests\tattach, TAU or service requests the log carries",
     "event_trigger\twhen reports are due",
     "exchange\twhich IKE exchange this is",
     "fallback_silent\tthe quiet return to a permanent identity",
@@ -2684,10 +2677,6 @@ static const char *const plain_keys[] = {
     "finding_list\twhich certificate findings fired",
     "first_sample\tsample index of the first page",
     "fiveqi_carries_it\tthe scheduler weight a starved slice keeps",
-    "flashcatch\tthe low-disruption catcher sequence this model runs",
-    "flashcatch_disruption_ms\toutage this sequence costs, from the paper's measurements",
-    "flashcatch_sequence_modelled\tverdict: the whole sequence ran through the responder",
-    "flashcatch_shaped\tverdict: the log carries the shape of that sequence",
     "formal_model\tthe published formal analysis of the v1.3 management plane that the chain follows",
     "fqdn\tthe full domain name",
     "fragment_flood\tmore pieces than the receiver can hold",
@@ -2708,7 +2697,6 @@ static const char *const plain_keys[] = {
     "granularity\thow finely a number is cut",
     "grid_definition\twhat one guess in the search is, written out so a cost is comparable to another attack's",
     "guesses\tthe size of the search space as a plain number of candidates",
-    "guti_retained\twhether the temporary identity survived the detach",
     "harvest\twhat a paging record and its answer let an observer read without breaking anything",
     "header_octet\tthe second octet of a TS 24.008 message, which is a transaction identifier in CC and SM and a skip indicator in MM and GMM",
     "hfn\tthe hyper frame number, the high twenty-four bits of the counter a UMTS cipher is driven with",
@@ -2728,8 +2716,6 @@ static const char *const plain_keys[] = {
     "identities_on_a_device_with_another_identity\thow many identities landed on a device that already carried a different one",
     "identities_per_device\taverage number of identities per eUICC",
     "identities_seen_on_more_than_one_device\thow many identities were seen on more than one eUICC, which is a shared profile rather than a rotation",
-    "identity_asked_before_security\tthe IMSI was requested before any security context existed",
-    "identity_requests\tidentity requests the log carries, by direction",
     "identity_value\tthe identity a paging occasion was computed from, read as an integer",
     "ie_bodies\twhere the RANAP information element bodies come from",
     "ies\thow many information elements were placed or walked",
@@ -2792,8 +2778,6 @@ static const char *const plain_keys[] = {
     "ms_msg_wait_facilities\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "ms_validity\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "mtime_utc\tthe artefact's modification time in UTC, as the manifest recorded it",
-    "naive_disruption_s\toutage the established catcher costs, up to 25 seconds",
-    "naive_path\twhat the ordinary catcher does instead, and what it costs",
     "name_is_not_an_identity\ta display name or a string originator is chosen by the sender and binds to no subscriber",
     "nas_downlink\tthe NAS message the network answers with, as octets: an Authentication Failure with cause 21, or an Authentication Request",
     "nas_note\twhat the downlink message says, and which cause value it carries",
@@ -2812,7 +2796,6 @@ static const char *const plain_keys[] = {
     "no_cross_policy_accounting\tnothing adds the slices together",
     "no_egress_policy\tnothing says where the fetcher may reach",
     "no_exploit_primitive\tthe claim every entry carries: this tree can describe the bug and check an implementation, not exploit it",
-    "no_flashcatch_shape_in_this_log\tverdict: the log does not carry that shape",
     "no_rate_limit\tnothing counts the requests",
     "no_recheck\ta grant that is never asked again",
     "no_reuse_in_this_pair\tthe two calls were given different keys",
@@ -2843,7 +2826,6 @@ static const char *const plain_keys[] = {
     "overcommit\tmore share promised than the cell has",
     "overlap_ambiguity\ttwo claims on the same bytes",
     "pa_rise_us\ttime for the amplifier to reach its output level",
-    "paper_claim\twhat the paper measured, kept apart from what this tree computes",
     "paper_delta_db\thow far the computed power sits from the power the paper measured",
     "paper_measured_dbm\tthe power the paper measured on the air, for comparison with the model",
     "paper_model_check_m\tthe range the model predicts at the power the paper measured: a check on the model, not on the paper",
@@ -2932,7 +2914,6 @@ static const char *const plain_keys[] = {
     "region\tregulator whose rules a band falls under",
     "registration\tthe profile an NF puts into the directory",
     "reidentification_rate\tshare of identities that the device anchor folds back onto a device already known",
-    "reject_sent\twhether a reject went out, which is what would delete the context",
     "relay\ta relay the target panel can describe",
     "renders_as\thow the encoded field renders on the far side",
     "repetitions\trepetitions per message at this level",
@@ -2941,7 +2922,6 @@ static const char *const plain_keys[] = {
     "required_attacker_tx_dbm\ttransmit power the attacker needs on the uplink, before antenna gain",
     "required_note\tthe reasoning that makes the uplink number small",
     "reset_model\twhat an RNC restart does to the counters and therefore to the keystream",
-    "retained\twhether the value outlived the step that was supposed to clear it",
     "reuse\tthe same counter value twice",
     "reveals\twhat a number gives away",
     "root_cause\tthe design reason the chain works: the plane exists to run with nobody present",
@@ -2969,8 +2949,6 @@ static const char *const plain_keys[] = {
     "scope_gap\tauthority wider than the question needs",
     "scope_node_list\twhich nodes are included",
     "scope_ue_list\twhich handsets are included",
-    "security_context_retained\tthe context outlived the detach because no reject was sent",
-    "security_context_rule\tthe clauses that delete a context only on a reject",
     "security_mode_command_built\tthe RRC SECURITY MODE COMMAND octets were placed and their fields read back",
     "self_signed\twhether the certificate names itself as issuer",
     "sender_name_chars\thow many characters the spoofed sender name carries",
@@ -3039,7 +3017,6 @@ static const char *const plain_keys[] = {
     "time_us\twhen a scheduled step happens, in microseconds from the start of the plan",
     "timing_drift\ta change in observed timing across subframes that no handover accounts for",
     "tlv_hex\ta row of the optional-parameter builder",
-    "tmsi_retained\tthe temporary identity outlived the detach and stays linkable",
     "to_uri\tthe destination URI the message is addressed to",
     "tool_checks_failed\tfailed checks inside the NPRACH tool selfcheck",
     "tool_checks_passed\tchecks the NPRACH tool ran successfully",
@@ -3049,7 +3026,6 @@ static const char *const plain_keys[] = {
     "total_fragments\thow many pieces the sender promised",
     "transaction_id\tthe RRC transaction identifier that ties a request to its response",
     "transaction_identifier\tthe four-bit identifier that ties a request to its response in CC and SM",
-    "transcript\tthe message order this model drives through the responder",
     "trust_note\twhat a message claiming a verification asserts, and why nothing downstream can contradict it",
     "trust_string\tthe text that claims a verification the infrastructure never issued",
     "two_streams_xored\tthe two streams were XORed and, where a plaintext was supplied, the other side recovered",
@@ -3761,19 +3737,15 @@ static const char *const plain_keys[] = {
     "newest_entry_year\tthe year of that id, which is where the horizon comes from",
     "update\twhat has to happen for a row to be added: reproduce it, test the reproduction, move the date",
     "what_a_licence_would_buy\twhat a licensed copy of TS 55.251 and TS 55.252 would let this tree implement",
-    "what_is_gone\tthe observable the attack removes",
     "what_it_is_not\twhat this arithmetic does not do",
     "what_it_selects\twhat the UE switches on when it reads this message",
     "what_it_would_not_buy\tthe algorithms no licence can supply because 3GPP never published them",
-    "what_remains\tthe observable it cannot remove",
     "what_that_costs\twhat SMPP over TLS changes, or does not",
     "what_the_core_authenticated\tthe subscription that actually sent the message, as opposed to the name in it",
     "what_the_display_shows\twhat the receiving handset puts on the screen",
     "what_the_receiver_can_compare\twhat a receiver can check the originating address against, which for a name is nothing",
     "what_this_is\twhat this arithmetic is",
     "where_it_was_run\tthe environment each mode was actually run in",
-    "why_1\twhy the first finding is raised",
-    "why_2\twhy the second finding is raised",
     "why_65\twhy the attack needs the number of keystream bits it needs, in the protocol's own framing",
     "why_compliant\twhy this behaviour is the specification working as written rather than a bug",
     "why_not\twhy a cipher whose body and vectors are unreadable is refused instead of approximated",
@@ -6928,8 +6900,6 @@ static const ChipRow chip_rows[] = {
     { "09_lte_attach",       "--status-tsv",          NEED_NO, DOES_READS },
     { "09_lte_attach",       "--ue-stack",            NEED_NO, DOES_READS },
     { "09_lte_attach",       "--version",             NEED_NO, DOES_READS },
-    { "09_lte_attach",       "--flashcatch",          NEED_NO, DOES_BUILDS },
-    { "09_lte_attach",       "--flashcatch-detect",   NEED_NO, DOES_READS },
     { "09_lte_attach",       "--yes",                 NEED_NO, DOES_READS },
     { "10_lte_air",          "--__index_probe__",     NEED_NO, DOES_READS },
     { "10_lte_air",          "--build-meas-report",   NEED_NO, DOES_BUILDS },
@@ -8310,16 +8280,17 @@ static const ChipRow chip_rows[] = {
     { "60_overshadow",       "--detect",               NEED_NO, DOES_READS },
     { "60_overshadow",       "--info",                 NEED_NO, DOES_READS },
     { "60_overshadow",       "--menu",                 NEED_NO, DOES_READS },
+    { "60_overshadow",       "--selftest",             NEED_NO, DOES_READS },
+    { "60_overshadow",       "--status-tsv",           NEED_NO, DOES_READS },
     { "60_overshadow",       "--needs",                NEED_NO, DOES_READS },
     { "60_overshadow",       "--plan",                 NEED_NO, DOES_BUILDS },
     { "60_overshadow",       "--power-budget",         NEED_NO, DOES_BUILDS },
-    { "60_overshadow",       "--selftest",             NEED_NO, DOES_READS },
-    { "60_overshadow",       "--status-tsv",           NEED_NO, DOES_READS },
     { "60_overshadow",       "--subframe-map",         NEED_NO, DOES_READS },
     { "60_overshadow",       "--timing-budget",        NEED_NO, DOES_BUILDS },
-    { "57_evil_twin",        "--lte-test",             NEED_RADIO, DOES_TRANSMITS },
-    { "57_evil_twin",        "--nr-test",              NEED_RADIO, DOES_TRANSMITS },
-    { "57_evil_twin",        "--ack-isolated-lab",     NEED_NO, DOES_READS },
+    { "57_evil_twin",        "--run-lte",              NEED_RADIO, DOES_TRANSMITS },
+    { "57_evil_twin",        "--run-nr",               NEED_RADIO, DOES_TRANSMITS },
+    { "57_evil_twin",        "--evidence-collect",     NEED_NO, DOES_READS },
+    { "57_evil_twin",        "--evidence-tsv",         NEED_NO, DOES_READS },
     { "57_evil_twin",        "--pci",                  NEED_NO, DOES_READS },
     { "57_evil_twin",        "--out",                  NEED_NO, DOES_MODIFIES },
     { "57_evil_twin",        "--band",                 NEED_NO, DOES_READS },
@@ -10853,23 +10824,23 @@ drawer_nav_row_selected(GtkListBox *list, GtkListBoxRow *row, gpointer user_data
 static GtkWidget *
 build_drawer_nav(AppState *state)
 {
-    static const char *names[9] = {
-        "Dashboard", "Live Traffic", "Casebook", "Map", "Stats",
+    static const char *names[10] = {
+        "Dashboard", "Live Traffic", "Casebook", "Map", "Fleet", "Stats",
         "Notifications", "Help", "Settings", "Workflows"
     };
-    static const char *icons[9] = {
+    static const char *icons[10] = {
         "view-grid-symbolic", "network-wireless-symbolic", "folder-symbolic",
-        "mark-location-symbolic", "office-chart-bar-symbolic",
+        "mark-location-symbolic", "network-server-symbolic", "office-chart-bar-symbolic",
         "notification-symbolic", "help-browser-symbolic",
         "emblem-system-symbolic", "view-list-symbolic"
     };
-    static const int page_of_row[9] = { 0, 1, 2, 8, 3, 4, 5, 6, 7 };
+    static const int page_of_row[10] = { 0, 1, 2, 8, 9, 3, 4, 5, 6, 7 };
 
     GtkWidget *nav = gtk_list_box_new();
     gtk_widget_add_css_class(nav, "drawer-nav");
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(nav), GTK_SELECTION_SINGLE);
 
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 10; i++) {
         GtkWidget *rowbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 9);
         GtkWidget *icon = imsisting_icon_image(icons[i]);
         GtkWidget *label = gtk_label_new(names[i]);
@@ -10936,6 +10907,7 @@ static const struct {
     { "settings",      "Settings",      "emblem-system-symbolic" },
     { "goals",         "Workflows",   "view-list-symbolic" },
     { "map",           "Map",         "mark-location-symbolic" },
+    { "fleet",         "Fleet",       "network-server-symbolic" },
 };
 
 
@@ -14005,6 +13977,22 @@ casebook_node_probe_clicked(GtkButton *button, gpointer user_data)
     (void) button;
 }
 
+static void
+casebook_node_stream_clicked(GtkButton *button, gpointer user_data)
+{
+    AppState *state = user_data;
+    const char *name = casebook_entry(state->node_name_entry);
+    if (*name == 0) {
+        show_toast_full(state, "Stream Node", "Enter the sensor name", "error");
+        return;
+    }
+    /* One drain, not a follow: a button that never returns would hold the
+       worker slot. Following belongs to a live view, not to this card. */
+    const char *args[] = { "--node-stream", name, NULL };
+    casebook_run(state, "Stream Sensor", args);
+    (void) button;
+}
+
 static GtkWidget *
 casebook_text_view(GtkTextBuffer **buffer_out, const char *placeholder)
 {
@@ -14273,6 +14261,7 @@ create_casebook_nodes(AppState *state)
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     GtkWidget *add = gtk_button_new_with_label("Add a receiver");
     GtkWidget *probe = gtk_button_new_with_label("Probe the device");
+    GtkWidget *stream = gtk_button_new_with_label("Stream its events");
     GtkWidget *refresh = gtk_button_new_with_label("Refresh the list it");
     state->node_name_entry = gtk_entry_new();
     state->node_host_entry = gtk_entry_new();
@@ -14283,12 +14272,14 @@ create_casebook_nodes(AppState *state)
     gtk_widget_add_css_class(add, "primary");
     g_signal_connect(add, "clicked", G_CALLBACK(casebook_node_add_clicked), state);
     g_signal_connect(probe, "clicked", G_CALLBACK(casebook_node_probe_clicked), state);
+    g_signal_connect(stream, "clicked", G_CALLBACK(casebook_node_stream_clicked), state);
     g_signal_connect(refresh, "clicked", G_CALLBACK(casebook_refresh_clicked), state);
     gtk_box_append(GTK_BOX(toolbar), state->node_name_entry);
     gtk_box_append(GTK_BOX(toolbar), state->node_host_entry);
     gtk_box_append(GTK_BOX(toolbar), state->node_transport_entry);
     gtk_box_append(GTK_BOX(toolbar), add);
     gtk_box_append(GTK_BOX(toolbar), probe);
+    gtk_box_append(GTK_BOX(toolbar), stream);
     gtk_box_append(GTK_BOX(toolbar), refresh);
     gtk_box_append(GTK_BOX(body), toolbar);
     {
@@ -16260,7 +16251,7 @@ notebook_page_switched(GtkNotebook *nb, GtkWidget *child, guint page,
        page, which is on no list entry and so clears the highlight. */
     if (state->drawer_nav != NULL) {
         state->drawer_nav_syncing = TRUE;
-        if (page < 9 && state->drawer_nav_rows[page] != NULL) {
+        if (page < 10 && state->drawer_nav_rows[page] != NULL) {
             gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
                 GTK_LIST_BOX_ROW(state->drawer_nav_rows[page]));
             /* The drawer scrolls and RECENT sits under the page list, so the
@@ -18048,7 +18039,7 @@ drawer_set_open(AppState *state, gboolean open)
     if (open && state->drawer_nav != NULL) {
         int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(state->notebook));
         state->drawer_nav_syncing = TRUE;
-        if (cur >= 0 && cur < 9 && state->drawer_nav_rows[cur] != NULL) {
+        if (cur >= 0 && cur < 10 && state->drawer_nav_rows[cur] != NULL) {
             gtk_list_box_select_row(GTK_LIST_BOX(state->drawer_nav),
                 GTK_LIST_BOX_ROW(state->drawer_nav_rows[cur]));
             /* A drawer that scrolls must open showing the row it is on. */
@@ -19689,6 +19680,11 @@ boot_build_ui(AppState *state, GtkApplication *app)
        wrong page. */
     gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
         map_page_new(IMSISTING_ROOT), gtk_label_new("Map"));
+    /* Page 9 is the Fleet: which remote nodes exist, what each one measured,
+       and what each has heard. Appended last for the same reason again -- the
+       drawer lists it under Map, but a page index is a position. */
+    gtk_notebook_append_page(GTK_NOTEBOOK(state->notebook),
+        fleet_page_new(IMSISTING_ROOT), gtk_label_new("Fleet"));
 
     g_signal_connect(state->notebook, "switch-page",
                      G_CALLBACK(notebook_page_switched), state);
@@ -20076,7 +20072,8 @@ static const SplashFact splash_kit_facts[] = {
       "pipeline, or in a container with no display at all." },
     { "hardware is stated, not assumed",
       "01_radio enumerates what is genuinely attached \u2014 HackRF, BladeRF, "
-      "LimeSDR, USRP, RTL-SDR, SoapySDR \u2014 and the status strip shows SDR, TX, "
+      "LimeSDR, USRP, RTL-SDR, PlutoSDR through libiio, SoapySDR \u2014 and the "
+      "status strip shows SDR, TX, "
       "FREQ, CELLS and GPS before any work starts. Modules that need a radio "
       "say so and stop; the ones that only read files run anywhere." },
     { "the casebook keeps the chain, not just the files",
@@ -20701,6 +20698,7 @@ main(int argc, char **argv)
                clamps, and the zoom floor. None of that needs a display, and a
                direction bug is the one a screenshot cannot show. */
             bad += map_page_selftest ();
+            bad += fleet_page_selftest ();
 
             /* The posture chips check their own reading rules here: the cipher
                vocabulary, the newest-row-wins grouping, and that an algorithm
@@ -21940,17 +21938,15 @@ crec_build_targets(AppState *state, const char *module_id,
     gtk_box_append(GTK_BOX(inner), bar);
 
     /* The survey does not have to happen here. A registered fleet node may be
-       the only thing that can hear the network — a handset already camped on
+       the only thing that can hear the network: a handset already camped on
        it, a dongle holding a serving cell, a box in another city with an SDR.
        The row names the node and the module asks it; what that node can
        honestly answer is its transport's business, not this page's. */
-    {
-        GtkWidget *node_row = radio_bench_arg_action(state, module_id, status,
-            "Survey through a node",
-            "fleet node name — see Remote Nodes", "--node",
-            "Survey there");
-        gtk_box_append(GTK_BOX(inner), node_row);
-    }
+    gtk_box_append(GTK_BOX(inner),
+                   radio_bench_arg_action(state, module_id, status,
+                                          "Survey through a node",
+                                          "fleet node name, see Remote Nodes",
+                                          "--node", "Survey there"));
 
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
     gtk_widget_add_css_class(list, "cell-list");
@@ -22170,6 +22166,22 @@ gtap_build_live(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), filter);
     mod_card_end();
+
+    {
+        GtkWidget *card_body;
+        GtkWidget *card = verb_card("TAKE A NODE'S CAPTURE", &card_body);
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row(state, module_id, status, "Fetch and decode",
+                "--node", "fleet node name, see Remote Nodes",
+                "A node with an SDR writes its own GSMTAP capture. This fetches "
+                "the newest one into captures/nodes/ and decodes it here, so the "
+                "store says which machine heard it."));
+        gtk_box_append(GTK_BOX(card_body), res);
+        gtk_box_append(GTK_BOX(body), card);
+        mod_card_end();
+    }
 
     (void) out;
     return outer;
@@ -24017,6 +24029,11 @@ static ModuleSubmenuEntry latt_entries[] = {
     { "Attach middle", "network-transmit-receive-symbolic", NULL, latt_build_middle },
     { "GUTI harvest", "contact-new-symbolic",
       "--guti-tsv:Read the bindings", NULL },
+    /* The low-disruption catcher and its detector. Both take an argument the
+       operator supplies -- an IMSI to model, or a NAS log to read -- so they
+       stay on the command line rather than being guessed at by a button. */
+    { "Catcher", "network-wireless-symbolic",
+      "#MODEL IT|~--flashcatch#READ A LOG|~--flashcatch-detect", NULL },
 };
 /* 10_lte_air — the LTE air interface and the eNB a lab runs against it.
  *
@@ -26164,6 +26181,12 @@ static ModuleSubmenuEntry pcap_entries[] = {
     { "Flows", "network-transmit-receive-symbolic", NULL, pcap_build_flows },
     { "Identities", "auth-smartcard-symbolic", NULL, pcap_build_identities },
     { "Build sample", "preferences-system-symbolic", NULL, pcap_build_sample },
+    /* A capture another machine made. Listing is a read; fetching lands the
+       file under captures/nodes/<name>/ so every other view works on a local
+       path. Both take an argument the operator supplies, so both stay on the
+       command line rather than being guessed at by a button. */
+    { "From a node", "network-server-symbolic",
+      "#LIST THEM|~--node#FETCH ONE|~--node-fetch", NULL },
 };
 /* 18_imsi_exposure — who has been asking.
  *
@@ -26192,6 +26215,13 @@ imsi_build_harvest(AppState *state, const char *module_id,
                 "--harvest", "capture.pcap",
                 "A capture or a log. Each identity found is recorded with the "
                 "place it appeared and what was asked of it."));
+        gtk_box_append(GTK_BOX(harvest_body),
+            mod_arg_row(state, module_id, status, "Read a Node's Capture",
+                "--node", "fleet node name, see Remote Nodes",
+                "Identities exposed on somebody else's air. The node's newest "
+                "capture is fetched into captures/nodes/ and audited here; the "
+                "store keeps the origin, because an identity with no origin "
+                "cannot be defended in a report."));
         gtk_box_append(GTK_BOX(harvest_body), res);
     }
     gtk_box_append(GTK_BOX(body), harvest);
@@ -33716,6 +33746,1449 @@ capi_build_enumeration(AppState *state, const char *module_id,
     return outer;
 }
 
+/* ── Remote Nodes · Nodes and Stream ────────────────────────────────────
+   Same windows as wifisting's Remote Node page, because the shape is right for
+   a fleet you cannot see: a name line that carries the status in colour, a mono
+   second line with the transport, the roles and the measured capabilities, and
+   the per-node actions flat on the right where the eye already is after reading
+   the row. The class names are wifisting's too (dependency-*), so the two trees
+   read the same and a future port moves whole blocks.
+
+   What is cellular about it is the content, not the layout: a dongle, a router,
+   a handset, a SIM kit and a small cell answer different questions over
+   different wires, so the second line always names the transport the answer
+   came over, and a node nobody probed prints UNKNOWN rather than a green word,
+   because "not asked" is not "fine".
+
+   Rows come from tools/casebook.py --list-tsv, and every action is the module's
+   own verb run through the ordinary action path, so its output lands in this
+   page's answer card like any other button's. */
+typedef struct {
+    AppState   *state;
+    const char *module_id;
+    GtkWidget  *list;     /* GtkListBox of nodes */
+    GtkWidget  *status;   /* the page's status label */
+    GtkWidget  *result;   /* this card's answer rect */
+} RnodeNodes;
+
+/* A button that runs one of the module's verbs with fixed arguments. It is
+   handed to mod_arg_clicked, so the answer path and the result card are the
+   ones every other control in the tree uses. */
+static GtkWidget *
+rnode_action(GtkWidget *result, AppState *state, const char *module_id,
+             GtkWidget *status, const char *label, const char *verb)
+{
+    GtkWidget *button = gtk_button_new_with_label(label);
+
+    gtk_widget_add_css_class(button, "dependency-install");
+    gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+    g_object_set_data(G_OBJECT(button), "state", state);
+    g_object_set_data_full(G_OBJECT(button), "module-id",
+                           g_strdup(module_id), g_free);
+    g_object_set_data(G_OBJECT(button), "status", status);
+    g_object_set_data_full(G_OBJECT(button), "verb", g_strdup(verb), g_free);
+    g_object_set_data_full(G_OBJECT(button), "action-label",
+                           g_strdup(verb), g_free);
+    g_object_set_data(G_OBJECT(button), "result", result);
+    g_signal_connect(button, "clicked", G_CALLBACK(mod_arg_clicked), NULL);
+    return button;
+}
+
+/* Columns are found by name: the node table grew a class, a capability list, a
+   port and an allow-list across releases, and an old book on disk must still
+   draw its rows instead of shifting every value one column to the left. */
+static int
+rnode_col(char **header, const char *name)
+{
+    for (int i = 0; header != NULL && header[i] != NULL; i++)
+        if (g_strcmp0(header[i], name) == 0) return i;
+    return -1;
+}
+
+static const char *
+rnode_cell(char **f, int n_fields, int col)
+{
+    if (col < 0 || col >= n_fields) return "";
+    return f[col] != NULL ? f[col] : "";
+}
+
+/* A status word, in the three words a person can act on. Everything the table
+   does not recognise is UNKNOWN: an unreadable status is a question, not a
+   success. */
+static const char *
+rnode_status_class(const char *state, const char *seen)
+{
+    if (g_ascii_strcasecmp(state, "ONLINE") == 0) return "node-online";
+    if (g_ascii_strcasecmp(state, "OFFLINE") == 0) return "node-offline";
+    if (g_ascii_strcasecmp(state, "UNREACHABLE") == 0) return "node-offline";
+    if (g_ascii_strcasecmp(state, "ERROR") == 0) return "node-offline";
+    (void) seen;
+    return "node-unknown";
+}
+
+/* One node. */
+static void
+rnode_nodes_add_row(RnodeNodes *n, char **f, int nf, char **header)
+{
+    const char *name      = rnode_cell(f, nf, rnode_col(header, "name"));
+    const char *host      = rnode_cell(f, nf, rnode_col(header, "host"));
+    const char *port      = rnode_cell(f, nf, rnode_col(header, "port"));
+    const char *transport = rnode_cell(f, nf, rnode_col(header, "transport"));
+    const char *klass     = rnode_cell(f, nf, rnode_col(header, "class"));
+    const char *role      = rnode_cell(f, nf, rnode_col(header, "role"));
+    const char *caps      = rnode_cell(f, nf, rnode_col(header, "caps"));
+    const char *seen      = rnode_cell(f, nf, rnode_col(header, "last_seen"));
+    const char *state     = rnode_cell(f, nf, rnode_col(header, "status"));
+    const char *detail    = rnode_cell(f, nf, rnode_col(header, "detail"));
+    g_autofree char *l1 = NULL;
+    g_autofree char *l2 = NULL;
+    g_autofree char *address = NULL;
+    g_autofree char *verb = NULL;
+
+    address = port[0] != '\0'
+        ? g_strdup_printf("%s:%s", host, port)
+        : g_strdup(host);
+    l1 = g_strdup_printf("%s  [%s]  —  %s",
+                         name,
+                         (klass[0] != '\0' && g_strcmp0(klass, "-") != 0)
+                             ? klass : "unprobed",
+                         state[0] != '\0' ? state : "UNKNOWN");
+    l2 = g_strdup_printf("%s  %s  ·  roles: %s  ·  caps: %s",
+                         transport[0] != '\0' ? transport : "no transport",
+                         address,
+                         (role[0] != '\0' && g_strcmp0(role, "-") != 0)
+                             ? role : "-",
+                         (caps[0] != '\0' && g_strcmp0(caps, "-") != 0)
+                             ? caps : "-");
+
+    GtkWidget *row = gtk_list_box_row_new();
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget *top = gtk_label_new(l1);
+    GtkWidget *bot = gtk_label_new(l2);
+
+    gtk_widget_add_css_class(row, "dependency-row");
+    gtk_widget_add_css_class(top, "dependency-name");
+    gtk_widget_add_css_class(bot, "dependency-package");
+    gtk_widget_add_css_class(top, rnode_status_class(state, seen));
+    gtk_label_set_xalign(GTK_LABEL(top), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(bot), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(top), PANGO_ELLIPSIZE_END);
+    gtk_label_set_ellipsize(GTK_LABEL(bot), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_hexpand(top, TRUE);
+    gtk_widget_set_hexpand(bot, TRUE);
+    gtk_widget_set_hexpand(col, TRUE);
+    if (detail[0] != '\0')
+        gtk_widget_set_tooltip_text(row, detail);
+
+    gtk_box_append(GTK_BOX(col), top);
+    gtk_box_append(GTK_BOX(col), bot);
+    gtk_box_append(GTK_BOX(box), col);
+
+    verb = g_strdup_printf("--probe %s", name);
+    gtk_box_append(GTK_BOX(box),
+        rnode_action(n->result, n->state, n->module_id, n->status,
+                     "Probe", verb));
+    g_free(verb);
+    verb = g_strdup_printf("--stream %s", name);
+    gtk_box_append(GTK_BOX(box),
+        rnode_action(n->result, n->state, n->module_id, n->status,
+                     "Stream", verb));
+    g_free(verb);
+    verb = g_strdup_printf("--health %s", name);
+    gtk_box_append(GTK_BOX(box),
+        rnode_action(n->result, n->state, n->module_id, n->status,
+                     "Health", verb));
+    g_free(verb);
+    verb = g_strdup_printf("--collect %s", name);
+    gtk_box_append(GTK_BOX(box),
+        rnode_action(n->result, n->state, n->module_id, n->status,
+                     "Collect", verb));
+    g_free(verb);
+    verb = g_strdup_printf("--remove %s", name);
+    gtk_box_append(GTK_BOX(box),
+        rnode_action(n->result, n->state, n->module_id, n->status,
+                     "Remove", verb));
+
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+    gtk_list_box_append(GTK_LIST_BOX(n->list), row);
+}
+
+/* An empty fleet is a fact about the fleet, so it is drawn in the list where
+   the rows would be, not as a red dump in the answer card. */
+static void
+rnode_nodes_empty(GtkWidget *list, const char *text)
+{
+    GtkWidget *row = gtk_list_box_row_new();
+    GtkWidget *lbl = gtk_label_new(text);
+
+    gtk_widget_add_css_class(lbl, "dependency-package");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+    gtk_widget_set_margin_start(lbl, 8);
+    gtk_widget_set_margin_end(lbl, 8);
+    gtk_widget_set_margin_top(lbl, 6);
+    gtk_widget_set_margin_bottom(lbl, 6);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), lbl);
+    gtk_list_box_append(GTK_LIST_BOX(list), row);
+}
+
+static void
+rnode_nodes_fill(RnodeNodes *n)
+{
+    g_autofree char *script = module_script_path(n->module_id);
+    const char *argv[3] = { script, "--list-tsv", NULL };
+    g_autofree char *out = run_capture(argv);
+    g_auto(GStrv) lines = NULL;
+    g_auto(GStrv) header = NULL;
+    int rows = 0;
+
+    /* crec_targets_clear is the generic "drop every row" this file already has;
+       it takes a GtkListBox and does not care what the rows said. */
+    crec_targets_clear(n->list);
+
+    if (out != NULL && *out != '\0') {
+        lines = g_strsplit(out, "\n", -1);
+        if (lines[0] != NULL) header = g_strsplit(lines[0], "\t", -1);
+        for (guint i = 1; lines[i] != NULL; i++) {
+            g_auto(GStrv) f = NULL;
+            int nf;
+
+            if (*lines[i] == '\0') continue;
+            f = g_strsplit(lines[i], "\t", -1);
+            nf = (int) g_strv_length(f);
+            if (nf < 2) continue;
+            rnode_nodes_add_row(n, f, nf, header);
+            rows++;
+        }
+    }
+    if (rows == 0)
+        rnode_nodes_empty(n->list, "(no nodes registered yet)");
+}
+
+static void
+rnode_nodes_refresh_clicked(GtkButton *button, gpointer user_data)
+{
+    (void) button;
+    rnode_nodes_fill((RnodeNodes *) user_data);
+}
+
+/* Register a node without leaving the page. Five fields, because those are the
+   five a person actually knows: what to call it, how to reach it, and what it
+   is for. The class and the capabilities are measured, never typed. */
+static void
+rnode_add_create_clicked(GtkButton *button, gpointer user_data)
+{
+    RnodeNodes *n = user_data;
+    GtkWidget *dialog = g_object_get_data(G_OBJECT(button), "dialog");
+    GtkWidget *name_entry = g_object_get_data(G_OBJECT(button), "name-entry");
+    GtkWidget *host_entry = g_object_get_data(G_OBJECT(button), "host-entry");
+    GtkWidget *role_entry = g_object_get_data(G_OBJECT(button), "role-entry");
+    GtkWidget *picker = g_object_get_data(G_OBJECT(button), "transport-picker");
+    const char *name = gtk_editable_get_text(GTK_EDITABLE(name_entry));
+    const char *host = gtk_editable_get_text(GTK_EDITABLE(host_entry));
+    const char *role = gtk_editable_get_text(GTK_EDITABLE(role_entry));
+    g_autofree char *script = module_script_path(n->module_id);
+    GtkStringObject *obj = GTK_STRING_OBJECT(
+        gtk_drop_down_get_selected_item(GTK_DROP_DOWN(picker)));
+    const char *transport = obj != NULL ? gtk_string_object_get_string(obj)
+                                        : "ssh";
+    const char *argv[10] = { script, "--add", NULL, NULL, NULL, NULL, NULL,
+                             NULL, NULL, NULL };
+    guint i = 2;
+
+    if (*name == '\0' || *host == '\0') {
+        gtk_widget_add_css_class(name_entry, "error");
+        return;
+    }
+    argv[i++] = name;
+    argv[i++] = host;
+    if (transport != NULL && *transport != '\0') {
+        argv[i++] = "--transport";
+        argv[i++] = transport;
+    }
+    if (*role != '\0') {
+        argv[i++] = "--role";
+        argv[i++] = role;
+    }
+    run_capture(argv);
+    if (dialog != NULL) gtk_window_destroy(GTK_WINDOW(dialog));
+    rnode_nodes_fill(n);
+}
+
+static void
+rnode_nodes_add_clicked(GtkButton *button, gpointer user_data)
+{
+    RnodeNodes *n = user_data;
+    GtkWidget *dialog = gtk_window_new();
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    GtkWidget *grid = gtk_grid_new();
+    GtkWidget *name_entry = gtk_entry_new();
+    GtkWidget *host_entry = gtk_entry_new();
+    GtkWidget *role_entry = gtk_entry_new();
+    GtkWidget *picker = gtk_drop_down_new_from_strings(
+        (const char *const *) (const char *[]) {
+            "ssh", "local", "adb", "serial", "qmi", "mbim", "diag", "sms",
+            NULL });
+    GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *cancel = gtk_button_new_with_label("Cancel");
+    GtkWidget *create = gtk_button_new_with_label("Register it");
+
+    gtk_window_set_title(GTK_WINDOW(dialog), "Register a node");
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    gtk_window_set_transient_for(GTK_WINDOW(dialog),
+        GTK_WINDOW(gtk_widget_get_root(GTK_WIDGET(button))));
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 460, -1);
+    gtk_widget_set_margin_top(box, 14);
+    gtk_widget_set_margin_bottom(box, 14);
+    gtk_widget_set_margin_start(box, 14);
+    gtk_widget_set_margin_end(box, 14);
+
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(name_entry), "basestation");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(host_entry),
+                                   "192.168.1.40 or /dev/ttyUSB2");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(role_entry),
+                                   "sensor, catcher, ue, sim, core, relay");
+    {
+        const char *labels[] = { "Name", "Host", "Transport", "Role" };
+        GtkWidget *widgets[] = { name_entry, host_entry, picker, role_entry };
+
+        for (int r = 0; r < 4; r++) {
+            GtkWidget *lbl = gtk_label_new(labels[r]);
+
+            gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+            gtk_widget_add_css_class(lbl, "dim");
+            gtk_grid_attach(GTK_GRID(grid), lbl, 0, r, 1, 1);
+            gtk_grid_attach(GTK_GRID(grid), widgets[r], 1, r, 1, 1);
+        }
+    }
+    gtk_widget_set_hexpand(name_entry, TRUE);
+    gtk_widget_set_hexpand(host_entry, TRUE);
+    gtk_widget_set_hexpand(role_entry, TRUE);
+
+    gtk_widget_add_css_class(create, "accent");
+    gtk_widget_set_halign(actions, GTK_ALIGN_END);
+    gtk_box_append(GTK_BOX(actions), cancel);
+    gtk_box_append(GTK_BOX(actions), create);
+    gtk_box_append(GTK_BOX(box), grid);
+    gtk_box_append(GTK_BOX(box), actions);
+    gtk_window_set_child(GTK_WINDOW(dialog), box);
+
+    g_object_set_data(G_OBJECT(create), "dialog", dialog);
+    g_object_set_data(G_OBJECT(create), "name-entry", name_entry);
+    g_object_set_data(G_OBJECT(create), "host-entry", host_entry);
+    g_object_set_data(G_OBJECT(create), "role-entry", role_entry);
+    g_object_set_data(G_OBJECT(create), "transport-picker", picker);
+    g_signal_connect(create, "clicked",
+                     G_CALLBACK(rnode_add_create_clicked), n);
+    g_signal_connect_swapped(cancel, "clicked",
+                             G_CALLBACK(gtk_window_destroy), dialog);
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
+static GtkWidget *
+rnode_build_nodes(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *title = gtk_label_new("Nodes");
+    GtkWidget *sub = gtk_label_new(
+        "Registered devices and measured capabilities. Unprobed nodes report "
+        "UNKNOWN. Class and capabilities are measured, never typed.");
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card("REGISTERED NODES", &card_body);
+    GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *add = gtk_button_new_with_label("Add node");
+    GtkWidget *refresh = gtk_button_new_with_label("Refresh");
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    GtkWidget *list = gtk_list_box_new();
+    GtkWidget *res = result_rect_new(state, NULL);
+    RnodeNodes *n = g_new0(RnodeNodes, 1);
+
+    n->state = state;
+    n->module_id = module_id;
+    n->status = status;
+    n->list = list;
+    n->result = res;
+
+    gtk_widget_add_css_class(page, "dependency-page");
+    gtk_widget_add_css_class(title, "page-title");
+    gtk_widget_add_css_class(sub, "page-subtitle");
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(sub), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(sub), TRUE);
+    gtk_box_append(GTK_BOX(page), title);
+    gtk_box_append(GTK_BOX(page), sub);
+
+    gtk_widget_add_css_class(add, "accent");
+    gtk_widget_set_halign(top, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(top), add);
+    gtk_box_append(GTK_BOX(top), refresh);
+    gtk_box_append(GTK_BOX(card_body), top);
+
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
+    gtk_list_box_set_show_separators(GTK_LIST_BOX(list), TRUE);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), list);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_widget_set_size_request(scroll, -1, 320);
+    gtk_box_append(GTK_BOX(card_body), scroll);
+    gtk_box_append(GTK_BOX(card_body), res);
+    gtk_box_append(GTK_BOX(page), card);
+
+    /* No page-level log well here: every row action answers inside this card,
+       which is where the operator is looking when they press it. */
+    (void) out;
+
+    g_signal_connect(add, "clicked",
+                     G_CALLBACK(rnode_nodes_add_clicked), n);
+    g_signal_connect(refresh, "clicked",
+                     G_CALLBACK(rnode_nodes_refresh_clicked), n);
+    g_object_set_data_full(G_OBJECT(page), "rnode-nodes", n, g_free);
+
+    rnode_nodes_fill(n);
+    return page;
+}
+
+/* ── Remote Nodes · Stream ──────────────────────────────────────────────
+   wifisting's Live Stream window: a control card that names the node being
+   listened to, then the event feed under it.
+
+   The feed is the node's own spool read through a byte cursor, so a drain that
+   arrives late still arrives in order and nothing is invented for the time the
+   link was down. Rows are appended and the list is trimmed at the far end; the
+   poll runs off the main loop, so a slow drain cannot freeze a page being
+   scrolled. */
+typedef struct {
+    AppState   *state;
+    const char *module_id;
+    GtkWidget  *status;
+    GtkWidget  *feed;      /* GtkListBox of events */
+    GtkWidget  *picker;    /* GtkDropDown of node names */
+    GtkWidget  *stop;      /* disabled until a stream is running */
+    char       *active;    /* node being listened to, NULL when stopped */
+    guint       timer;
+    gboolean    busy;
+    guint       shown;
+} RnodeStream;
+
+#define RNODE_FEED_MAX 500
+
+static void
+rnode_stream_append(RnodeStream *s, const char *line)
+{
+    GtkWidget *row;
+    GtkWidget *box;
+    GtkWidget *lbl;
+
+    if (s->feed == NULL || line == NULL || *line == '\0') return;
+    row = gtk_list_box_row_new();
+    box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    lbl = gtk_label_new(line);
+    gtk_widget_add_css_class(row, "dependency-row");
+    gtk_widget_add_css_class(lbl, "dependency-package");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+    gtk_label_set_selectable(GTK_LABEL(lbl), TRUE);
+    gtk_widget_set_hexpand(box, TRUE);
+    gtk_box_append(GTK_BOX(box), lbl);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+    gtk_list_box_append(GTK_LIST_BOX(s->feed), row);
+    s->shown++;
+    while (s->shown > RNODE_FEED_MAX) {
+        GtkWidget *first = gtk_widget_get_first_child(s->feed);
+
+        if (first == NULL) break;
+        gtk_list_box_remove(GTK_LIST_BOX(s->feed), first);
+        s->shown--;
+    }
+}
+
+/* One stream row, in the order a person reads it: when, what, how much, and the
+   bit that identifies it. The clock is the node's own epoch, not this box's. */
+static char *
+rnode_stream_word(char **f)
+{
+    guint nf = g_strv_length(f);
+    const char *kind = nf > 0 ? f[0] : "row";
+    const char *epoch = nf > 1 ? f[1] : "";
+    const char *src = nf > 2 ? f[2] : "";
+    const char *type = nf > 3 ? f[3] : "";
+    const char *len = nf > 4 ? f[4] : "";
+    const char *detail = nf > 5 ? f[5] : "";
+    g_autofree char *when = NULL;
+
+    if (*epoch != '\0') {
+        g_autoptr(GDateTime) dt =
+            g_date_time_new_from_unix_local(g_ascii_strtoll(epoch, NULL, 10));
+
+        if (dt != NULL) when = g_date_time_format(dt, "%H:%M:%S");
+    }
+    if (when == NULL) when = g_strdup("--:--:--");
+
+    if (g_strcmp0(kind, "gsmtap") == 0)
+        return g_strdup_printf("%s  gsmtap  type %s  %s bytes  %s",
+                               when, *type ? type : "?", *len ? len : "?",
+                               detail);
+    if (g_strcmp0(kind, "radio") == 0)
+        return g_strdup_printf("%s  radio   %s  %s", when,
+                               *src ? src : "handset", detail);
+    if (g_strcmp0(kind, "beat") == 0)
+        return g_strdup_printf("%s  beat    %s", when, detail);
+    if (g_strcmp0(kind, "capture") == 0)
+        return g_strdup_printf("%s  capture %s bytes  %s", when,
+                               *len ? len : "?", detail);
+    return g_strdup_printf("%s  %-8s %s  %s", when, kind, *len ? len : "",
+                           *detail ? detail : (*type ? type : src));
+}
+
+static void
+rnode_stream_clear_clicked(GtkButton *button, gpointer user_data)
+{
+    RnodeStream *s = user_data;
+
+    (void) button;
+    while (gtk_widget_get_first_child(s->feed) != NULL)
+        gtk_list_box_remove(GTK_LIST_BOX(s->feed),
+                            gtk_widget_get_first_child(s->feed));
+    s->shown = 0;
+    gtk_label_set_text(GTK_LABEL(s->status),
+                       "Feed cleared. Node spool unchanged.");
+}
+
+static char *
+rnode_stream_pick(RnodeStream *s)
+{
+    GtkStringObject *obj;
+
+    if (s->picker == NULL) return NULL;
+    obj = GTK_STRING_OBJECT(
+        gtk_drop_down_get_selected_item(GTK_DROP_DOWN(s->picker)));
+    if (obj == NULL) return NULL;
+    return g_strdup(gtk_string_object_get_string(obj));
+}
+
+static void
+rnode_stream_drained(GObject *src, GAsyncResult *res, gpointer user_data)
+{
+    RnodeStream *s = user_data;
+    g_autoptr(GError) error = NULL;
+    g_autofree char *out = NULL;
+    g_autofree char *errout = NULL;
+    gboolean ok;
+
+    ok = g_subprocess_communicate_utf8_finish(G_SUBPROCESS(src), res,
+                                              &out, &errout, &error);
+    g_object_unref(src);
+    s->busy = FALSE;
+
+    if (!ok) {
+        g_autofree char *msg = g_strdup_printf("Drain failed: %s",
+            error != NULL ? error->message : "no answer");
+
+        rnode_stream_append(s, msg);
+        gtk_label_set_text(GTK_LABEL(s->status), "Drain returned no answer.");
+        return;
+    }
+    {
+        g_auto(GStrv) lines = out != NULL ? g_strsplit(out, "\n", -1) : NULL;
+        int added = 0;
+
+        for (guint i = 0; lines != NULL && lines[i] != NULL; i++) {
+            g_auto(GStrv) f = NULL;
+
+            if (*lines[i] == '\0') continue;
+            f = g_strsplit(lines[i], "\t", -1);
+            if (g_strv_length(f) < 2) continue;
+            /* Meta rows are about the wire, not about the air: where the spool
+               is, what is filling it, how far the cursor has read. They set the
+               status line instead of pretending to be events. */
+            if (g_strcmp0(f[0], "source") == 0) {
+                g_autofree char *msg = g_strdup_printf(
+                    "Collection source: %s",
+                    f[1] != NULL && *f[1] != '\0' ? f[1] : "none installed");
+
+                gtk_label_set_text(GTK_LABEL(s->status), msg);
+                continue;
+            }
+            /* Only four kinds are events. Everything else in this stream is the
+               drain talking about itself — which node, which spool file, how
+               far the cursor moved — and printing those into the feed would
+               bury the air under bookkeeping. */
+            if (g_strcmp0(f[0], "gsmtap") != 0 && g_strcmp0(f[0], "radio") != 0
+                && g_strcmp0(f[0], "beat") != 0
+                && g_strcmp0(f[0], "capture") != 0)
+                continue;
+            rnode_stream_append(s, rnode_stream_word(f));
+            added++;
+        }
+        if (added > 0) {
+            g_autofree char *msg = g_strdup_printf("%u event%s in the feed",
+                s->shown, s->shown == 1 ? "" : "s");
+
+            gtk_label_set_text(GTK_LABEL(s->status), msg);
+        } else if (s->shown == 0) {
+            gtk_label_set_text(GTK_LABEL(s->status),
+                               "Collection active. No events recorded yet.");
+        }
+        if (errout != NULL && *errout != '\0') {
+            g_autofree char *msg = g_strdup_printf("note: %s", errout);
+
+            rnode_stream_append(s, msg);
+        }
+    }
+}
+
+static gboolean
+rnode_stream_tick(gpointer user_data)
+{
+    RnodeStream *s = user_data;
+    g_autofree char *script = NULL;
+    g_autoptr(GSubprocessLauncher) launcher = NULL;
+    g_autoptr(GError) error = NULL;
+    GSubprocess *proc;
+
+    if (s->active == NULL) {
+        s->timer = 0;
+        return G_SOURCE_REMOVE;
+    }
+    if (s->busy) return G_SOURCE_CONTINUE;
+
+    script = module_script_path(s->module_id);
+    launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE
+                                         | G_SUBPROCESS_FLAGS_STDERR_PIPE);
+    /* One second of listening per tick. The module's own default is two; the
+       poll already runs every two seconds, and matching it would leave the feed
+       stuttering whenever a tick ran long. */
+    g_subprocess_launcher_setenv(launcher, "NODE_STREAM_WINDOW", "1", TRUE);
+    proc = g_subprocess_launcher_spawn(launcher, &error,
+                                       script, "--stream", s->active, NULL);
+    if (proc == NULL) {
+        g_autofree char *msg = g_strdup_printf(
+            "Drain failed to start: %s",
+            error != NULL ? error->message : "unknown");
+
+        rnode_stream_append(s, msg);
+        return G_SOURCE_CONTINUE;
+    }
+    s->busy = TRUE;
+    g_subprocess_communicate_utf8_async(proc, NULL, NULL,
+                                        rnode_stream_drained, s);
+    return G_SOURCE_CONTINUE;
+}
+
+static void
+rnode_stream_free(gpointer data)
+{
+    RnodeStream *s = data;
+
+    if (s == NULL) return;
+    if (s->timer != 0) g_source_remove(s->timer);
+    g_free(s->active);
+    g_free(s);
+}
+
+static void
+rnode_stream_start_clicked(GtkButton *button, gpointer user_data)
+{
+    RnodeStream *s = user_data;
+    g_autofree char *node = rnode_stream_pick(s);
+
+    (void) button;
+    if (node == NULL || *node == '\0') {
+        gtk_label_set_text(GTK_LABEL(s->status),
+                           "Select a node first. Registry is empty.");
+        return;
+    }
+    g_free(s->active);
+    s->active = g_strdup(node);
+    if (s->timer == 0) s->timer = g_timeout_add(2000, rnode_stream_tick, s);
+    gtk_widget_set_sensitive(s->stop, TRUE);
+    {
+        g_autofree char *msg = g_strdup_printf(
+            "Collecting from %s. Spool drained every 2 seconds.", node);
+
+        gtk_label_set_text(GTK_LABEL(s->status), msg);
+    }
+    rnode_stream_tick(s);
+}
+
+static void
+rnode_stream_stop_clicked(GtkButton *button, gpointer user_data)
+{
+    RnodeStream *s = user_data;
+    g_autofree char *node = g_strdup(s->active);
+    g_autofree char *script = NULL;
+    g_autofree char *out = NULL;
+
+    (void) button;
+    if (s->timer != 0) {
+        g_source_remove(s->timer);
+        s->timer = 0;
+    }
+    g_free(s->active);
+    s->active = NULL;
+    gtk_widget_set_sensitive(s->stop, FALSE);
+
+    /* Stopping the poll does not stop the node: its spool keeps filling, which
+       is the point of a spool. Say which of the two things stopped. */
+    if (node != NULL && *node != '\0') {
+        const char *argv[4] = { NULL, "--stream-stop", node, NULL };
+
+        script = module_script_path(s->module_id);
+        argv[0] = script;
+        out = run_capture(argv);
+    }
+    (void) out;
+    gtk_label_set_text(GTK_LABEL(s->status),
+                       "Collection stopped. Node spool continues recording.");
+}
+
+static GtkWidget *
+rnode_build_stream(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *title = gtk_label_new("Live Stream");
+    GtkWidget *sub = gtk_label_new(
+        "Select a node and start collection. Events poll every 2 seconds from "
+        "the node spool file and append in recorded order.");
+    GtkWidget *control_body, *feed_body;
+    GtkWidget *control = verb_card("STREAM CONTROL", &control_body);
+    GtkWidget *feedcard = verb_card("EVENT FEED", &feed_body);
+    GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *label = gtk_label_new("Node:");
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    GtkWidget *feed = gtk_list_box_new();
+    GtkWidget *start = gtk_button_new_with_label("Start");
+    GtkWidget *stop = gtk_button_new_with_label("Stop");
+    GtkWidget *clear = gtk_button_new_with_label("Clear");
+    GtkWidget *line = gtk_label_new("idle");
+    GtkStringList *names = gtk_string_list_new(NULL);
+    RnodeStream *s = g_new0(RnodeStream, 1);
+    g_autofree char *script = module_script_path(module_id);
+    const char *argv[3] = { script, "--list-tsv", NULL };
+    g_autofree char *listing = run_capture(argv);
+
+    gtk_widget_add_css_class(page, "dependency-page");
+    gtk_widget_add_css_class(title, "page-title");
+    gtk_widget_add_css_class(sub, "page-subtitle");
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_label_set_xalign(GTK_LABEL(sub), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(sub), TRUE);
+    gtk_box_append(GTK_BOX(page), title);
+    gtk_box_append(GTK_BOX(page), sub);
+
+    /* The picker is the fleet read the same way the Nodes view reads it, so a
+       node that appears there appears here without a second list to keep. */
+    if (listing != NULL && *listing != '\0') {
+        g_auto(GStrv) lines = g_strsplit(listing, "\n", -1);
+        g_auto(GStrv) header =
+            lines[0] != NULL ? g_strsplit(lines[0], "\t", -1) : NULL;
+        int name_col = rnode_col(header, "name");
+
+        for (guint i = 1; lines[i] != NULL; i++) {
+            g_auto(GStrv) f = NULL;
+
+            if (*lines[i] == '\0') continue;
+            f = g_strsplit(lines[i], "\t", -1);
+            if (name_col < 0 || (int) g_strv_length(f) <= name_col) continue;
+            if (f[name_col] != NULL && *f[name_col] != '\0')
+                gtk_string_list_append(names, f[name_col]);
+        }
+    }
+
+    s->state = state;
+    s->module_id = module_id;
+    s->status = line;
+    s->feed = feed;
+    s->stop = stop;
+    s->picker = gtk_drop_down_new(G_LIST_MODEL(names), NULL);
+    gtk_widget_set_size_request(s->picker, 180, -1);
+    gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+
+    gtk_widget_add_css_class(start, "accent");
+    gtk_widget_add_css_class(line, "dependency-summary");
+    gtk_widget_set_sensitive(stop, FALSE);
+    gtk_widget_set_hexpand(line, TRUE);
+    gtk_label_set_xalign(GTK_LABEL(line), 0.0f);
+
+    gtk_box_append(GTK_BOX(bar), label);
+    gtk_box_append(GTK_BOX(bar), s->picker);
+    gtk_box_append(GTK_BOX(bar), start);
+    gtk_box_append(GTK_BOX(bar), stop);
+    gtk_box_append(GTK_BOX(bar), clear);
+    gtk_box_append(GTK_BOX(bar), line);
+    gtk_box_append(GTK_BOX(control_body), bar);
+    gtk_box_append(GTK_BOX(page), control);
+
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(feed), GTK_SELECTION_NONE);
+    gtk_list_box_set_show_separators(GTK_LIST_BOX(feed), FALSE);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), feed);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_widget_set_size_request(scroll, -1, 340);
+    gtk_box_append(GTK_BOX(feed_body), scroll);
+    gtk_box_append(GTK_BOX(page), feedcard);
+
+    /* The feed is the answer surface on this page. */
+    (void) out;
+
+    g_object_set_data_full(G_OBJECT(page), "rnode-stream", s,
+                           rnode_stream_free);
+    g_signal_connect(start, "clicked",
+                     G_CALLBACK(rnode_stream_start_clicked), s);
+    g_signal_connect(stop, "clicked",
+                     G_CALLBACK(rnode_stream_stop_clicked), s);
+    g_signal_connect(clear, "clicked",
+                     G_CALLBACK(rnode_stream_clear_clicked), s);
+
+    if (listing == NULL || *listing == '\0') {
+        gtk_label_set_text(GTK_LABEL(line),
+                           "Registry empty. Register a node first.");
+        rnode_stream_append(s,
+            "Registry empty. No node to collect from.");
+    }
+    return page;
+}
+
+/* 60_overshadow — overshadowing, read as arithmetic.
+ *
+ * AdaptOver does not stand up a fake cell: it receives the live downlink, finds
+ * the subframe that carries the message it wants to replace, and is louder than
+ * the real transmitter for exactly that subframe. Because nothing about the
+ * cell changes, a rogue-base-station detector has nothing to look at -- which is
+ * why the useful questions here are budgets rather than captures.
+ *
+ * The page is therefore split by question: what the attack is and where this
+ * tree stops, how much of the 2 ms subframe the timing chain eats, what power
+ * each direction needs, which subframe carries what, whether a set of
+ * observations shows the attack, and who else pays for it. Every answer is the
+ * module's own TSV, printed verbatim in its own card.
+ *
+ * The one verb that is not a measurement is the transmit attempt, and it is on
+ * the page deliberately: it refuses with the name of the missing real-time
+ * stack, and that refusal is the honest state of the work.
+ */
+
+/* A control that takes no argument is a button, not a button beside an empty
+   field: an entry nobody is meant to type in reads as a form that is missing
+   its value. mod_arg_clicked copes with a button that carries no entry -- it
+   appends nothing -- so the whole difference is ownership of the widgets. */
+static GtkWidget *
+module_action_button(AppState *state, const char *module_id, GtkWidget *status,
+           const char *label, const char *verb, const char *hint)
+{
+    GtkWidget *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget *btn = gtk_button_new_with_label(label);
+
+    gtk_widget_add_css_class(btn, "verb-button");
+    gtk_widget_add_css_class(btn, "primary");
+    gtk_widget_set_halign(btn, GTK_ALIGN_START);
+    g_object_set_data(G_OBJECT(btn), "state", state);
+    g_object_set_data(G_OBJECT(btn), "module-id", (gpointer) module_id);
+    g_object_set_data(G_OBJECT(btn), "status", status);
+    g_object_set_data_full(G_OBJECT(btn), "verb", g_strdup(verb), g_free);
+    g_object_set_data_full(G_OBJECT(btn), "action-label", g_strdup(label), g_free);
+    if (mod_card_result != NULL)
+        g_object_set_data(G_OBJECT(btn), "result", mod_card_result);
+    g_signal_connect(btn, "clicked", G_CALLBACK(mod_arg_clicked), NULL);
+    gtk_box_append(GTK_BOX(column), btn);
+    if (hint != NULL) gtk_box_append(GTK_BOX(column), fkit_note(hint));
+    return column;
+}
+
+static GtkWidget *
+osh_build_overview(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body, *model_body, *stop_body, *bom_body;
+    GtkWidget *outer = radio_view_shell("OVERSHADOWING",
+        "A short, loud burst on the cell the victim is already camped on, timed to "
+        "the subframe that carries the message it replaces. Read the model, then "
+        "read where this toolkit stops.", &body);
+    GtkWidget *model = verb_card("READ THE MODEL", &model_body);
+    GtkWidget *stop = verb_card("WHERE THIS STOPS", &stop_body);
+    GtkWidget *bom = verb_card("BILL OF MATERIALS", &bom_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(model_body),
+            module_action_button(state, module_id, status, "Read the Model", "--info",
+                "What the attack does, what each view computes, and the four verbs "
+                "that need no radio."));
+        gtk_box_append(GTK_BOX(model_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), model);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(stop_body),
+            module_action_button(state, module_id, status, "Try to Key a Radio", "--transmit",
+                "This refuses and names what is missing: a real-time downlink "
+                "decoder and a transmitter aligned to the subframe boundary. The "
+                "published proof of concept is srsUE with fourteen lines changed. A "
+                "refusal that says so is worth more than a button that pretends."));
+        gtk_box_append(GTK_BOX(stop_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), stop);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(bom_body),
+            module_action_button(state, module_id, status, "Read the Bill", "--needs",
+                "The radio, amplifier, duplexer and antenna the paper used, with the "
+                "power envelope every measurement was taken inside."));
+        gtk_box_append(GTK_BOX(bom_body),
+            mod_arg_row_prefilled(state, module_id, status, "Ask About a Radio",
+                "--needs", "pluto",
+                "One radio by name: b210, b205mini, x310 or pluto. The answer says "
+                "whether that board can carry the attack at all, which is the first "
+                "thing to know before buying anything."));
+        gtk_box_append(GTK_BOX(bom_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), bom);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+osh_build_timing(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body, *run_body, *move_body;
+    GtkWidget *outer = radio_view_shell("TIMING BUDGET",
+        "Receive instant to transmit instant, measured against the 2 ms subframe. "
+        "Whichever budget runs out first is the one that decides the attack.", &body);
+    GtkWidget *run = verb_card("RUN THE BUDGET", &run_body);
+    GtkWidget *move = verb_card("MOVE THE ASSUMPTIONS", &move_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(run_body),
+            module_action_button(state, module_id, status, "Run the Budget", "--timing-budget",
+                "Encode, host-to-SDR transfer, PA rise and scheduler jitter, summed "
+                "against the queue window, with the cyclic prefix printed beside the "
+                "margin so a plan that cannot land is visible before anything moves."));
+        gtk_box_append(GTK_BOX(run_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), run);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(move_body),
+            mod_arg_row_prefilled(state, module_id, status, "Change the Queue Window",
+                "--timing-budget --queue-us", "2000",
+                "How long the transmit path is allowed to sit on a finished burst. "
+                "This is the number the rest of the chain is subtracted from."));
+        gtk_box_append(GTK_BOX(move_body),
+            mod_arg_row_prefilled(state, module_id, status, "Change the Encode Cost",
+                "--timing-budget --encode-us", "200",
+                "Time to produce one burst. A slower encoder is the usual reason a "
+                "plan stops fitting."));
+        gtk_box_append(GTK_BOX(move_body),
+            mod_arg_row_prefilled(state, module_id, status, "Change the Cyclic Prefix",
+                "--timing-budget --cp-us", "4.69",
+                "The alignment tolerance the waveform itself allows. Small changes "
+                "here move the verdict faster than any other number on this view."));
+        gtk_box_append(GTK_BOX(move_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), move);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+osh_build_power(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body, *down_body, *up_body, *move_body;
+    GtkWidget *outer = radio_view_shell("POWER BUDGET",
+        "Log-distance path loss, then the power each direction needs to arrive "
+        "above the competitor. Downlink is loud in the clear; uplink is surgical "
+        "and needs a duplexer.", &body);
+    GtkWidget *down = verb_card("DOWNLINK: LOUD", &down_body);
+    GtkWidget *up = verb_card("UPLINK: SURGICAL", &up_body);
+    GtkWidget *move = verb_card("MOVE THE MODEL", &move_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(down_body),
+            module_action_button(state, module_id, status, "Budget the Downlink",
+                "--power-budget --mode dl",
+                "Transmit and receive share one frequency, so no filter separates the "
+                "attacker from the cell it is copying -- and every subscriber in the "
+                "cell degrades with the reference signals."));
+        gtk_box_append(GTK_BOX(down_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), down);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(up_body),
+            module_action_button(state, module_id, status, "Budget the Uplink",
+                "--power-budget --mode ul",
+                "One grant, one victim, and a duplexer between the two paths. Only "
+                "that subscriber degrades, which is why this is the case that was run "
+                "on a live network."));
+        gtk_box_append(GTK_BOX(up_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), up);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(move_body),
+            mod_arg_row_prefilled(state, module_id, status, "Change the Range",
+                "--power-budget --range-km", "0.5",
+                "Attacker to receiver. Every kilometre costs the exponent, so this "
+                "number is what turns a published range into this deployment's range."));
+        gtk_box_append(GTK_BOX(move_body),
+            mod_arg_row_prefilled(state, module_id, status, "Change the Band",
+                "--power-budget --freq-mhz", "2100",
+                "Frequency appears twice: once in free-space loss and once in the "
+                "antenna the operator actually has."));
+        gtk_box_append(GTK_BOX(move_body),
+            mod_arg_row_prefilled(state, module_id, status, "Change the Margin",
+                "--power-budget --margin-db", "6",
+                "How far above the competitor the attacker aims to arrive. Too small "
+                "and the shadow fades; too large and the burst stops being local."));
+        gtk_box_append(GTK_BOX(move_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), move);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+osh_build_scheduling(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body, *map_body, *plan_body, *write_body;
+    GtkWidget *outer = radio_view_shell("SUBFRAME MAP AND PLAN",
+        "Which subframe and resource blocks carry the message worth replacing, and "
+        "the sample-indexed schedule a transmitter would have to follow.", &body);
+    GtkWidget *map = verb_card("MAP THE ALLOCATIONS", &map_body);
+    GtkWidget *plan = verb_card("PLAN A SCHEDULE", &plan_body);
+    GtkWidget *write = verb_card("WRITE THE SCHEDULE", &write_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(map_body),
+            mod_arg_row(state, module_id, status, "Map the Allocations",
+                "--subframe-map", "state/lte_air/allocations.tsv",
+                "A map file with the columns sfn, sf, rnti, rb_start, rb_count, mcs, "
+                "tbs and channel. The answer marks every allocation that arrives "
+                "before AS security, because those are the ones that can be replaced."));
+        gtk_box_append(GTK_BOX(map_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), map);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row_prefilled(state, module_id, status, "Plan a Message",
+                "--plan", "msg4",
+                "A target: one message by name (msg3, msg4, rar, sib1, paging) or one "
+                "C-RNTI. The answer is a step table in sample indices -- receive "
+                "sync, decode control, queue the burst, transmit -- with the gain "
+                "envelope and a verdict that says plan only."));
+        gtk_box_append(GTK_BOX(plan_body),
+            mod_arg_row_prefilled(state, module_id, status, "Plan for Another Subframe",
+                "--plan", "msg4 --sfn 16 --sf 9",
+                "Target plus the frame and subframe to land in. The subframe choice is "
+                "the whole attack: the plan is only useful where the message sits."));
+        gtk_box_append(GTK_BOX(plan_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plan);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(write_body),
+            mod_arg_row_prefilled(state, module_id, status, "Write the Schedule",
+                "--plan", "msg4 --out loot/overshadow/schedule.tsv",
+                "The same plan, written as TSV so a real-time stack can consume it "
+                "instead of a person reading it in a window."));
+        gtk_box_append(GTK_BOX(write_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), write);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+osh_build_detect(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body, *read_body, *thresh_body;
+    GtkWidget *outer = radio_view_shell("DETECTION",
+        "Four detectors, none of which is a loud-signal detector: an unscheduled "
+        "transport block, a system-information change with no paging, a received "
+        "power that disagrees with its neighbours, and a timing drift.", &body);
+    GtkWidget *read = verb_card("READ THE OBSERVATIONS", &read_body);
+    GtkWidget *thresh = verb_card("SET THE THRESHOLDS", &thresh_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(read_body),
+            mod_arg_row(state, module_id, status, "Read the Observations",
+                "--detect", "state/lte_air/observations.tsv",
+                "A file with the columns t_s, kind, cell, rnti and value, where kind "
+                "is one of scheduled, received, sib, paging, rsrp, handover or sync. "
+                "The answer lists every detector that fired, with its severity."));
+        gtk_box_append(GTK_BOX(read_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), read);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(thresh_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read With Thresholds",
+                "--detect", "state/lte_air/observations.tsv --rsrp-db -85",
+                "The file plus the received power that counts as a neighbour "
+                "disagreement. A detector with no threshold is a detector that fires "
+                "on everything, so this is the number that makes the answer usable."));
+        gtk_box_append(GTK_BOX(thresh_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read With a Drift Limit",
+                "--detect", "state/lte_air/observations.tsv --drift-us 12",
+                "The same file, measuring timing drift in microseconds. A shadow that "
+                "arrives on time is invisible; one that arrives late is the only "
+                "mechanical trace the attack leaves."));
+        gtk_box_append(GTK_BOX(thresh_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), thresh);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+osh_build_collateral(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body, *who_body;
+    GtkWidget *outer = radio_view_shell("WHO PAYS",
+        "The two directions are not two settings of one attack. One degrades every "
+        "subscriber in the cell and needs a shielded enclosure; the other degrades "
+        "one grant and needs one person's consent.", &body);
+    GtkWidget *who = verb_card("COMPARE THE DIRECTIONS", &who_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(who_body),
+            module_action_button(state, module_id, status, "Compare the Directions",
+                "--collateral",
+                "Downlink against uplink: what is overshadowed, who degrades, why "
+                "filtering cannot separate them, the published ranges and where each "
+                "was actually run. This is the view to read before choosing which "
+                "case a deployment is even allowed to test."));
+        gtk_box_append(GTK_BOX(who_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), who);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
+static ModuleSubmenuEntry osh_entries[] = {
+    { "Overview", "dialog-information-symbolic", NULL, osh_build_overview },
+    { "Timing", "alarm-symbolic", NULL, osh_build_timing },
+    { "Power", "power-profile-performance-symbolic", NULL, osh_build_power },
+    { "Scheduling", "view-list-ordered-symbolic", NULL, osh_build_scheduling },
+    { "Detection", "system-search-symbolic", NULL, osh_build_detect },
+    { "Collateral", "dialog-warning-symbolic", NULL, osh_build_collateral },
+};
+
+/* 57_evil_twin — a cell built from a reconnaissance row.
+ *
+ * The module is a transmitter with a record attached: --prepare-* writes the
+ * radio side for one named SDR, --preflight-* says whether this host can run
+ * it, the --run-* verbs either keep every peer on loopback or put the cell in
+ * the air, and every run ends by collecting what a phone handed over into
+ * loot/evil-twin/evidence.tsv. The page asks the questions in the order the
+ * work happens, because a run that starts before the radio is named is a run
+ * nobody can read afterwards.
+ */
+static GtkWidget *
+et_build_overview(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body, *mode_body;
+    GtkWidget *outer = radio_view_shell("EVIL TWIN",
+        "A cell built from a reconnaissance row. Prepare the radio side, check what "
+        "this host has, run it, and read what the phone handed over.", &body);
+    GtkWidget *mode = verb_card("CONTAINED OR ON AIR", &mode_body);
+    GtkWidget *res = result_rect_new(state, NULL);
+
+    (void) out;
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(mode_body), fkit_note(
+        "Contained keeps every peer on loopback and starts a UE you own, so the "
+        "chain is proven and nothing is radiated. On air the cell transmits under "
+        "your licence and the UE is somebody else's phone: the attach is the "
+        "evidence, and a run that nobody answers fails on purpose instead of "
+        "claiming a success."));
+    gtk_box_append(GTK_BOX(mode_body),
+        mod_arg_row_prefilled(state, module_id, status, "Check an LTE Twin",
+            "--preflight-lte", "loot/evil-twin/twin",
+            "Read the directory a twin was prepared into. The answer names the "
+            "mode, the radio it was built for, whether the core and the eNB are "
+            "installed here, and whether the configs stay on loopback."));
+    gtk_box_append(GTK_BOX(mode_body),
+        mod_arg_row_prefilled(state, module_id, status, "Check an NR Twin",
+            "--preflight-nr", "loot/evil-twin/twin-nr",
+            "The same check for a gNB twin: Open5GS AMF and UPF, gnb, timeout, and "
+            "an rf block that names a real driver."));
+    gtk_box_append(GTK_BOX(mode_body), res);
+    gtk_box_append(GTK_BOX(body), mode);
+    mod_card_end();
+    return outer;
+}
+
+static GtkWidget *
+et_build_prepare(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body, *ran_body, *air_body;
+    GtkWidget *outer = radio_view_shell("PREPARE THE TWIN",
+        "A recon row becomes the cell: PLMN, TAC, cell identity and channel come "
+        "out of the survey, and the radio section is written for one SDR.", &body);
+    GtkWidget *ran = verb_card("BUILD THE RAN SIDE", &ran_body);
+    GtkWidget *air = verb_card("AIMED AT A RADIO", &air_body);
+
+    (void) out;
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ran_body),
+            mod_arg_row_prefilled(state, module_id, status, "Prepare LTE",
+                "--prepare-lte", "loot/cell_recon/cells.tsv 1 --out loot/evil-twin/twin",
+                "The store path and the row to clone, then where to write. The eNB "
+                "and cell configs come from that row; the EPC and UE configs are "
+                "yours, and a contained twin refuses to start without them."));
+        gtk_box_append(GTK_BOX(ran_body),
+            mod_arg_row_prefilled(state, module_id, status, "Prepare NR",
+                "--prepare-nr", "6300 1 --out loot/evil-twin/twin-nr",
+                "Channel and PCI for a gNB twin. The same store is read when a path "
+                "is given, so the PLMN still comes from a survey rather than a form."));
+        gtk_box_append(GTK_BOX(ran_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ran);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(air_body), fkit_note(
+            "A radiating twin records the SDR it was built for in radio.tsv, so a "
+            "later run cannot quietly transmit through a different one. Only a "
+            "radio whose direction includes TX can be chosen: a receive-only stick "
+            "cannot be an evil twin."));
+        gtk_box_append(GTK_BOX(air_body),
+            mod_arg_row_prefilled(state, module_id, status, "Prepare LTE to Radiate",
+                "--prepare-lte", "loot/cell_recon/cells.tsv 1 --out loot/evil-twin/air --radiate",
+                "Adds --radio DRIVER and --tx-gain dB when you want a specific stick "
+                "or a specific power. The generated rf section is rewritten in place, "
+                "because the vendor template says auto and auto is not a radio."));
+        gtk_box_append(GTK_BOX(air_body),
+            mod_arg_row_prefilled(state, module_id, status, "Prepare NR to Radiate",
+                "--prepare-nr", "6300 1 --out loot/evil-twin/air-nr --radiate",
+                "The gNB template carries no rf block at all, so one is inserted "
+                "before cell_cfg with the driver this host can actually open."));
+        gtk_box_append(GTK_BOX(air_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), air);
+    mod_card_end();
+    return outer;
+}
+
+static GtkWidget *
+et_build_run(AppState *state, const char *module_id,
+             GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body, *in_body, *air_body, *cap_body;
+    GtkWidget *outer = radio_view_shell("RUN THE TWIN",
+        "Start the core, the cell and the UE, bounded in seconds, and read the "
+        "verdict from what happened rather than from a marker that always appears.",
+        &body);
+    GtkWidget *inside = verb_card("CONTAINED", &in_body);
+    GtkWidget *air = verb_card("ON AIR", &air_body);
+    GtkWidget *capture = verb_card("RECORD THE AIR", &cap_body);
+
+    (void) out;
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(in_body),
+            mod_arg_row_prefilled(state, module_id, status, "Run Contained",
+                "--run-lte", "loot/evil-twin/twin 20",
+                "A directory and a duration in seconds. The EPC, the eNB and your "
+                "own UE start on loopback; the evidence is what the logs and the "
+                "capture show, never a row invented to fill a table."));
+        gtk_box_append(GTK_BOX(in_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), inside);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(air_body), fkit_note(
+            "On air the twin transmits and no UE of yours is started. The verdict "
+            "is twin-received-identity, twin-accepted-attach or "
+            "twin-radiated-unanswered; the last one exits 1 and says which of "
+            "channel, PLMN and antenna to check first."));
+        gtk_box_append(GTK_BOX(air_body),
+            mod_arg_row_prefilled(state, module_id, status, "Run LTE on Air",
+                "--run-lte", "loot/evil-twin/air 60 --radiate",
+                "Refuses unless the twin was prepared to radiate, so a loopback "
+                "config cannot be turned into a transmitter by a flag alone."));
+        gtk_box_append(GTK_BOX(air_body),
+            mod_arg_row_prefilled(state, module_id, status, "Run NR on Air",
+                "--run-nr", "loot/evil-twin/air-nr 60 --radiate",
+                "The same for a gNB twin, with the NAS arriving over NGAP."));
+        gtk_box_append(GTK_BOX(air_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), air);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cap_body),
+            mod_arg_row_prefilled(state, module_id, status, "Run and Capture",
+                "--run-lte", "loot/evil-twin/air 60 --radiate --with-capture",
+                "Captures S1AP, NGAP, GTP-U and PFCP while the run holds, then "
+                "decodes the capture with 17_pcap_analysis and stores every identity "
+                "it finds. Needs tcpdump and permission to sniff the interface."));
+        gtk_box_append(GTK_BOX(cap_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), capture);
+    mod_card_end();
+    return outer;
+}
+
+static GtkWidget *
+et_build_evidence(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body, *read_body, *collect_body;
+    GtkWidget *outer = radio_view_shell("EVIDENCE",
+        "What crossed the air, who it belonged to, and whether the toolkit saw it "
+        "or the twin only advertised it.", &body);
+    GtkWidget *read = verb_card("WHAT WAS RECORDED", &read_body);
+    GtkWidget *collect = verb_card("COLLECT FROM A TWIN", &collect_body);
+
+    (void) out;
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(read_body), fkit_note(
+            "Every row carries a source and a confidence. observed means the value "
+            "came out of a capture or a log line; advertised means the twin sent it "
+            "and nobody confirmed a phone read it. Those are different claims and "
+            "the table keeps them apart."));
+        gtk_box_append(GTK_BOX(read_body),
+            module_action_button(state, module_id, status, "Read the Evidence",
+                "--evidence-tsv",
+                "The whole store: timestamp, run, kind, value, source and how it was "
+                "learned. Filter with --run NAME when one run is what you are "
+                "reading."));
+        gtk_box_append(GTK_BOX(read_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), read);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(collect_body),
+            mod_arg_row_prefilled(state, module_id, status, "Collect Again",
+                "--evidence-collect", "loot/evil-twin/air",
+                "Re-reads a twin directory: the config it was built from, its logs, "
+                "and any capture dropped in beside them. Useful when the capture "
+                "arrives after the run that was too short."));
+        gtk_box_append(GTK_BOX(collect_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), collect);
+    mod_card_end();
+    return outer;
+}
+
+static ModuleSubmenuEntry et_entries[] = {
+    { "Overview", "dialog-information-symbolic", NULL, et_build_overview },
+    { "Prepare", "document-new-symbolic", NULL, et_build_prepare },
+    { "Run", "media-playback-start-symbolic", NULL, et_build_run },
+    { "Evidence", "document-save-symbolic", NULL, et_build_evidence },
+};
+
+/* 59_remote_node — the fleet.
+ *
+ * This page is the command surface for a module whose real work happens on
+ * machines this one cannot see, so the buttons are the verbs and nothing is
+ * summarised here: the Fleet page is where nodes are read at a glance, and this
+ * page is where one is asked a question and told the answer verbatim.
+ *
+ * The nodes, their transports and the stream cursor belong to tools/casebook.py
+ * and the far side belongs to tools/node_agent.sh. A second copy of "how do you
+ * ask a dongle for its model" in C is the duplication this tree already paid
+ * for once.
+ */
+static ModuleSubmenuEntry rnode_entries[] = {
+    { "Nodes", "network-server-symbolic", NULL, rnode_build_nodes },
+    { "Stream", "media-record-symbolic", NULL, rnode_build_stream },
+    { "Registry", "view-list-symbolic",
+      "#FLEET|--list-tsv|--status-tsv|--health|--stream-status-tsv"
+      "|#MEASURE IT|--bulk-probe|--presets|~--probe|~--roles|~--set-roles"
+      "|#A NODE|~--add|~--remove|~--allow|--remove-offline"
+      "|#MOVE DATA|~--stream|~--stream-stop|~--collect|~--dispatch|--caps", NULL },
+};
 static ModuleSubmenuEntry capi_entries[] = {
     { "Exposure", "document-open-symbolic", NULL, capi_build_surface },
     { "Controls", "security-high-symbolic", NULL, capi_build_attacks },
@@ -36366,79 +37839,6 @@ static ModuleSubmenuEntry suci_catcher_entries[] = {
 };
 
 
-static GtkWidget *
-et_lab_build_setup(AppState *state, const char *module_id,
-                   GtkWidget *status, GtkTextBuffer *out)
-{
-    GtkWidget *body;
-    GtkWidget *outer = radio_view_shell("LAB SETUP",
-        "Reconnaissance row to cell, host preflight, and a bounded local "
-        "attach on hardware you own.", &body);
-    GtkWidget *prep_body, *check_body, *run_body;
-    GtkWidget *prep = verb_card("BUILD CELL", &prep_body);
-    GtkWidget *check = verb_card("CHECK HOST", &check_body);
-    GtkWidget *run = verb_card("RUN ATTACH", &run_body);
-
-    {
-        GtkWidget *res = result_rect_new(state, NULL);
-        mod_card_begin(res);
-        gtk_box_append(GTK_BOX(prep_body),
-            mod_arg_row(state, module_id, status, "LTE cell",
-                "--prepare-lte", "loot/recon.tsv 1",
-                "One reconnaissance row, turned into an eNB configuration for a "
-                "network this lab owns. Optionally pin a PCI and choose the "
-                "output directory."));
-        gtk_box_append(GTK_BOX(prep_body),
-            mod_arg_row(state, module_id, status, "NR cell",
-                "--prepare-nr", "loot/recon.tsv 1",
-                "The same row as a gNB, for srsRAN or Open5GS. A band and a "
-                "format are optional; the PCI is the same knob as above."));
-        gtk_box_append(GTK_BOX(prep_body), res);
-    }
-    gtk_box_append(GTK_BOX(body), prep);
-
-    {
-        GtkWidget *res = result_rect_new(state, NULL);
-        mod_card_begin(res);
-        gtk_box_append(GTK_BOX(check_body),
-            mod_arg_choices(state, module_id, status, "What is installed", "",
-                "Before a test fails on the air, find out whether the core, the "
-                "eNB and the test UE are on this host at all.",
-                (const char *[]) { "--preflight-lte", "--preflight-nr" },
-                (const char *[]) { "LTE stack", "NR stack" }, 2));
-        gtk_box_append(GTK_BOX(check_body), res);
-    }
-    gtk_box_append(GTK_BOX(body), check);
-
-    {
-        GtkWidget *res = result_rect_new(state, NULL);
-        mod_card_begin(res);
-        gtk_box_append(GTK_BOX(run_body),
-            mod_arg_row(state, module_id, status, "LTE attach",
-                "--lte-test", "loot/lab 60",
-                "A bounded local attach. The seconds argument closes the test "
-                "rather than leaving a cell up."));
-        gtk_box_append(GTK_BOX(run_body),
-            mod_arg_row(state, module_id, status, "5G registration",
-                "--nr-test", "loot/lab 60",
-                "The same for a registration against the local core."));
-        gtk_box_append(GTK_BOX(run_body),
-            mod_arg_row(state, module_id, status, "Acknowledge",
-                "--ack-isolated-lab", "",
-                "The run refuses without this: it is the operator saying the "
-                "lab is theirs and nothing here leaves it."));
-        gtk_box_append(GTK_BOX(run_body), res);
-    }
-    gtk_box_append(GTK_BOX(body), run);
-    mod_card_end();
-
-    (void) out;
-    return outer;
-}
-
-static ModuleSubmenuEntry et_lab_entries[] = {
-    { "Lab", "network-wireless-symbolic", NULL, et_lab_build_setup },
-};
 
 static void
 register_all_modules(void)
@@ -36557,8 +37957,12 @@ register_all_modules(void)
                              G_N_ELEMENTS(nrj_entries), NULL);
     module_registry_register("56_baseband_diag", bbdg_entries,
                              G_N_ELEMENTS(bbdg_entries), NULL);
+    module_registry_register("59_remote_node", rnode_entries,
+                             G_N_ELEMENTS(rnode_entries), NULL);
+    module_registry_register("57_evil_twin", et_entries,
+                             G_N_ELEMENTS(et_entries), NULL);
+    module_registry_register("60_overshadow", osh_entries,
+                             G_N_ELEMENTS(osh_entries), NULL);
     module_registry_register("58_suci_catcher", suci_catcher_entries,
                              G_N_ELEMENTS(suci_catcher_entries), NULL);
-    module_registry_register("57_evil_twin", et_lab_entries,
-                             G_N_ELEMENTS(et_lab_entries), NULL);
 }

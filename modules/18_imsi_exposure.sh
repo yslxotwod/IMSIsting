@@ -1180,6 +1180,13 @@ imsi_selftest() {
     chk dlink-nofile    "$(imsi_device_link "$dl/none.tsv" >/dev/null 2>&1; echo $?)" "1"
     rm -rf "$dl"
 
+    # ---- node as the evidence source ------------------------------------
+    # A name is required and an unregistered one is refused with the command
+    # that fixes it, because "no such node" is actionable and "no identities"
+    # is not.
+    chk node-missing-arg "$(imsi_cmd_node "" >/dev/null 2>&1; echo $?)" "2"
+    chk node-unknown     "$(CASEBOOK_DIR="$d/nobook" imsi_cmd_node no-such >/dev/null 2>&1; echo $?)" "2"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1234,6 +1241,44 @@ M
     done
 }
 
+# ── a node as the evidence source ───────────────────────────────────────
+# Identities are exposed on somebody else's air, not necessarily on this one.
+# The node hands over its newest capture and audit reads it like any other; the
+# store records where it came from because an identity with no origin cannot be
+# defended in a report.
+imsi_node_capture() {  # <name> -> local path
+    local name="${1:-}"
+    [[ -n "$name" ]] || { printf 'ERROR\t--node needs a fleet node name\n' >&2; return 2; }
+    local tool="$IMSISTING_ROOT/tools/node_source.py"
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\t%s is missing\nWHY\twithout it a node is a name with no way to ask it for a capture\n' "$tool" >&2
+        return 2; }
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is missing\nWHY\tthe node table is not a shell job\n' >&2; return 2; }
+    local out rc path
+    out=$(python3 "$tool" captures "$name" --newest 2>"$MOD_TMP/node.err"); rc=$?
+    if (( rc != 0 )); then
+        cat "$MOD_TMP/node.err" >&2
+        return "$rc"
+    fi
+    path=$(printf '%s\n' "$out" | awk -F'\t' '$1=="fetched"{print $2; exit}')
+    [[ -n "$path" ]] || {
+        printf 'ERROR\t%s reported no capture to fetch\nWHY\tan empty answer is not an empty capture store\n' "$name" >&2
+        return 1; }
+    printf 'node\t%s\n' "$name" >&2
+    printf 'fetched\t%s\n' "$path" >&2
+    printf '%s' "$path"
+}
+
+imsi_cmd_node() {  # <name>
+    local name="${1:-}" path rc
+    [[ -n "$name" ]] || { printf 'ERROR\tusage: --node <name>\n' >&2; return 2; }
+    path=$(imsi_node_capture "$name" 2>"$MOD_TMP/node.meta"); rc=$?
+    cat "$MOD_TMP/node.meta" >&2
+    (( rc != 0 )) && return "$rc"
+    imsi_cmd_audit "$path"
+}
+
 # ── CLI dispatch ────────────────────────────────────────────────────────
 imsi_cli_main() {
     local cmd="${1:-}"
@@ -1241,6 +1286,7 @@ imsi_cli_main() {
     case "$cmd" in
         --status-tsv)      imsi_cli_status_tsv ;;
         --audit)           imsi_cmd_audit "$@" ;;
+        --node)            imsi_cmd_node "${1:-}" ;;
         --harvest)         imsi_cmd_harvest "$@" ;;
         --map)             imsi_cmd_map "${1:-}" ;;
         --subscribers-tsv) imsi_cmd_subscribers_tsv ;;
@@ -1280,6 +1326,7 @@ which is what to use when module 17 is unavailable.
 Usage: $0 COMMAND
   --status-tsv                    store and module state as TSV
   --audit <pcap...|tsv...>        harvest and correlate one or more inputs
+  --node <name>                   fetch that node's newest capture and audit it
   --harvest <pcap...>             alias for --audit with captures only
   --map                           TMSI/GUTI -> IMSI mapping with evidence
   --subscribers-tsv               one row per subscriber with the score

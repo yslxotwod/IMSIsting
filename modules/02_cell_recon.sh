@@ -514,6 +514,10 @@ crec_cli_status_tsv() {
     printf 'cells\t%s\n'        "$cells"
     printf 'dir\t%s\n'          "$CREC_DIR"
     printf 'store\t%s\n'        "$CREC_CELLS"
+    # A node is a survey source, so its availability belongs in the status the
+    # GUI reads: "no SDR here" is a different page when four nodes are online.
+    printf 'node_source\t%s\n' \
+        "$([[ -f "$IMSISTING_ROOT/tools/node_source.py" ]] && echo yes || echo no)"
 }
 
 crec_cmd_list_tsv() {
@@ -552,6 +556,45 @@ crec_cmd_scan() {
         printf 'ERROR\tscan failed (rc=%s)\n' "$rc" >&2
         return "$rc"
     fi
+    printf 'OK\t%s\n' "$n"
+}
+
+# ── survey through a fleet node ─────────────────────────────────────────
+# A node is a source like the SDR or the capture file, and which of the three a
+# survey came from is written into the row's source column rather than left for
+# the reader to remember. What a node can deliver depends on what it is: a box
+# with the toolkit runs the same survey there and its store is copied back, a
+# handset reports the cells it can see, and a dongle reports one serving cell.
+# tools/node_source.py owns that difference and refuses when a device cannot
+# answer in this module's shape.
+crec_cmd_node() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || { printf 'ERROR\tusage: --node <name>\n' >&2; return 2; }
+    local src="$IMSISTING_ROOT/tools/node_source.py"
+    [[ -f "$src" ]] || {
+        printf 'ERROR\tnode_source.py is missing\n'
+        printf 'WHY\twithout it a node is a name with no way to ask it for cells\n'
+        return 2
+    }
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tno python3\nWHY\tthe node readers are not shell work\n' >&2
+        return 2
+    }
+    local rows rc
+    rows=$(python3 "$src" cells "$name" 2>"$MOD_TMP/node_source.err")
+    rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        cat "$MOD_TMP/node_source.err" >&2
+        return "$rc"
+    fi
+    [[ -n "$rows" ]] || {
+        printf 'ERROR\t%s returned no cells\n' "$name" >&2
+        printf 'WHY\tan empty answer is not a survey; run one on the node first\n' >&2
+        return 1
+    }
+    crec_init_store
+    printf '%s\n' "$rows" | crec_store_rows
+    local n; n=$(crec_cell_count)
     printf 'OK\t%s\n' "$n"
 }
 
@@ -716,6 +759,16 @@ crec_selftest() {
     chk plmn-bad           "$(crec_cmd_plmn "nope" >/dev/null 2>&1; echo $?)" "2"
     chk scan-bad-rat       "$(crec_cmd_scan nope >/dev/null 2>&1; echo $?)" "2"
     chk scan-pcap-nofile   "$(crec_cmd_scan pcap /nonexistent.pcap >/dev/null 2>&1; echo $?)" "1"
+    chk node-missing-arg   "$(crec_cmd_node >/dev/null 2>&1; echo $?)" "2"
+    chk node-unknown       "$(crec_cmd_node no-such-node >/dev/null 2>&1; echo $?)" "2"
+    # A node that has surveyed nothing is a handoff, not an empty survey: the
+    # caller has to run a survey there before this verb means anything.
+    local _nodebook="$MOD_TMP/node-book"
+    mkdir -p "$_nodebook"
+    printf 'name\thost\tport\ttransport\tclass\trole\tcaps\tallow\tadded\tlast_seen\tstatus\tdetail\n' > "$_nodebook/nodes.tsv"
+    printf 'selfnode\tlocalhost\t\tlocal\tsdr\tsensor\t\t-\t%s\t%s\tONLINE\t\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$_nodebook/nodes.tsv"
+    chk node-empty-store   "$(CASEBOOK_DIR="$_nodebook" crec_cmd_node selfnode >/dev/null 2>&1; echo $?)" "3"
 
     out=$(crec_cmd_arfcn lte 6300); rc=$?
     chk arfcn-rc    "$rc" "0"
@@ -839,6 +892,7 @@ crec_cli_main() {
         --status-tsv)   crec_cli_status_tsv ;;
         --list-tsv)     crec_cmd_list_tsv ;;
         --scan)         crec_cmd_scan "${1:-gsm}" "${2:-}" ;;
+        --node)         crec_cmd_node "${1:-}" ;;
         --arfcn)        crec_cmd_arfcn "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --plmn)         crec_cmd_plmn "${1:-}" ;;
         --set-target)   crec_cmd_set_target "${1:-}" "${2:-}" "${3:-}" ;;
@@ -855,6 +909,7 @@ Cell Recon — survey GSM/UMTS/LTE/NR cells
 Usage: $0 COMMAND
   --status-tsv              tool and store state as TSV
   --scan <gsm|lte|pcap> [BAND|PCAP]   run a survey
+  --node <name>             survey through a fleet node instead of this radio
   --list-tsv                surveyed cells as TSV
   --list                    surveyed cells, sorted for reading
   --arfcn <gsm|lte|nr> <N>  ARFCN/EARFCN to downlink MHz

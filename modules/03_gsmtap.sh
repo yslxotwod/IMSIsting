@@ -1312,6 +1312,11 @@ print(n)" "$d/hex.pcap")" "2"
     chk status-sdr-nofile  "$(fld "$out" sdr)" "none"
     chk status-fields-none "$(printf '%s\n' "$out" | awk -F'\t' 'NF!=2' | grep -c . || true)" "0"
 
+    # A node source needs a name, and a name nobody registered is a refusal
+    # that names the fix rather than a fetch that quietly finds nothing.
+    chk node-missing-arg   "$(gtap_cmd_node "" >/dev/null 2>&1; echo $?)" "2"
+    chk node-unknown       "$(CASEBOOK_DIR="$d/nobook" gtap_cmd_node no-such-node >/dev/null 2>&1; echo $?)" "2"
+
     trap - EXIT
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -1372,6 +1377,44 @@ gtap_cli_status_tsv() {
     printf 'dir\t%s\n'       "$GTAP_DIR"
     printf 'store\t%s\n'     "$GTAP_TSV"
     printf 'socat\t%s\n'     "$(command -v socat >/dev/null 2>&1 && echo yes || echo no)"
+}
+
+# ── a node as the capture source ────────────────────────────────────────
+# A GSMTAP capture does not have to be made here: a node with an SDR writes its
+# own pcap, and this module reads it the same way it reads a local one. The
+# fetch is done by node_source.py, so the path a node keeps its captures in is
+# spelled in one place rather than in every module that wants one.
+gtap_node_capture() {  # <name> -> prints the local path
+    local name="${1:-}"
+    [[ -n "$name" ]] || { printf 'ERROR\t--node needs a fleet node name\n' >&2; return 2; }
+    local tool="$IMSISTING_ROOT/tools/node_source.py"
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\t%s is missing\nWHY\twithout it a node is a name with no way to ask it for a capture\n' "$tool" >&2
+        return 2; }
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is missing\nWHY\tthe node table is not a shell job\n' >&2; return 2; }
+    local out rc
+    out=$(python3 "$tool" captures "$name" --newest 2>"$MOD_TMP/node.err"); rc=$?
+    if (( rc != 0 )); then
+        cat "$MOD_TMP/node.err" >&2
+        return "$rc"
+    fi
+    local path
+    path=$(printf '%s\n' "$out" | awk -F'\t' '$1=="fetched"{print $2; exit}')
+    [[ -n "$path" ]] || {
+        printf 'ERROR\t%s reported no capture to fetch\nWHY\tan empty answer is not an empty capture store\n' "$name" >&2
+        return 1; }
+    printf 'node\t%s\n' "$name" >&2
+    printf 'fetched\t%s\n' "$path" >&2
+    printf '%s' "$path"
+}
+
+gtap_cmd_node() {  # <name>
+    local path rc
+    path=$(gtap_node_capture "${1:-}"); rc=$?
+    (( rc != 0 )) && return "$rc"
+    gtap_decode_pcap "$path" "${fport:-$GTAP_PORT}" \
+        "$fsince" "$funtil" "$farfcn" "$fchan" "$ful"
 }
 
 gtap_cli_main() {
@@ -1462,6 +1505,7 @@ gtap_cli_main() {
             if [[ -n "$fwl" ]]; then gtap_identities_watch "$fwl"
             else gtap_identities; fi ;;
         --export-pcap)     gtap_export ;;
+        --node)            gtap_cmd_node "$(gtap_p 1)" ;;
         --parse-header)    gtap_parse_header "$(gtap_p 1)" ;;
         --build-header)    gtap_build_header "${GTAP_POS[@]}" ;;
         --selftest)        gtap_selftest ;;
@@ -1475,6 +1519,7 @@ Usage: $0 COMMAND [FLAGS]
   --status-tsv            listener and store state as TSV
   --listen [SECS] [OUT]   capture UDP $GTAP_PORT to a pcap, default 30s
   --read <pcap>           decode a GSMTAP pcap into the TSV store
+  --node <name>           fetch that node's newest capture and decode it
   --decode-tsv            the decoded store as TSV
   --identities-tsv        identities seen in the clear in the store
   --export-pcap           copy the decoded store into loot/

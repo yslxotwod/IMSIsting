@@ -177,6 +177,76 @@ def cmd_scale(module, factor, fit):
     return 0
 
 
+def inline_css(body):
+    """Fold an SVG's own <style> rules into attributes on the elements.
+
+    Icon-pack files carry their stroke width, caps and dash patterns in a
+    stylesheet keyed by class. A wrapper <g fill=... stroke=...> cannot reach
+    inside those rules, so an icon adopted straight from one renders in whatever
+    colour its CSS asked for -- black, every time. Inlining first means the
+    recolour below sees real attributes and the dash pattern survives.
+    """
+    m = re.search(r"(?s)<style[^>]*>(.*?)</style>", body)
+    if m is None:
+        return body
+    rules = {}
+    for sel, decls in re.findall(r"\.([A-Za-z0-9_-]+)\s*(?:,[^{]*)?\{([^}]*)\}",
+                                 m.group(1)):
+        props = {}
+        for decl in decls.split(";"):
+            if ":" in decl:
+                key, value = decl.split(":", 1)
+                props[key.strip()] = value.strip()
+        if props:
+            rules[sel] = props
+    if not rules:
+        return re.sub(r"(?s)<style[^>]*>.*?</style>", "", body)
+
+    keep = ("fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
+            "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset",
+            "fill-rule", "clip-rule", "opacity")
+
+    def one_tag(tag):
+        mcls = re.search(r'\sclass="([^"]*)"', tag)
+        if mcls is None:
+            return tag
+        props = {}
+        for name in mcls.group(1).split():
+            props.update(rules.get(name, {}))
+        if not props:
+            return tag
+        out = re.sub(r'\sclass="[^"]*"', "", tag)
+        # A self-closing tag has to stay self-closing: SVG is XML, and a <line>
+        # left open is a parse error that draws nothing at all.
+        closing = "/>" if out.rstrip().endswith("/>") else ">"
+        for key, value in props.items():
+            if key not in keep:
+                continue
+            if re.search(r'\s%s\s*=' % re.escape(key), out):
+                continue
+            out = out.rstrip()[:-len(closing)].rstrip() + ' %s="%s"%s' % (
+                key, value, closing)
+        return out
+
+    body = re.sub(r"<[A-Za-z][^>]*>", lambda mm: one_tag(mm.group(0)), body)
+    return re.sub(r"(?s)<style[^>]*>.*?</style>", "", body)
+
+
+def recolour(body, colour):
+    """One colour for the set, painted rather than stripped.
+
+    Stripping fill and stroke and letting the wrapper inherit works for filled
+    art and ruins line art: every `fill="none"` shape becomes a solid blob. So
+    only the values that name a colour are replaced, and `none` is left alone.
+    """
+    def swap(mm):
+        return '%s="%s"' % (mm.group(1), colour)
+    body = re.sub(r'\b(fill|stroke)\s*=\s*"(?!\s*none\s*")[^"]*"', swap, body)
+    # `currentColor` is only right for a loader that recolours; ours draws the
+    # file as-is, so it is a colour name like any other here.
+    return body
+
+
 def cmd_adopt(src, module, colour):
     if not os.path.exists(src):
         die("no such file: %s" % src, 1)
@@ -186,10 +256,9 @@ def cmd_adopt(src, module, colour):
     body = re.sub(r"(?s)<metadata>.*?</metadata>", "", body)
     body = re.sub(r"(?s)<svg\b[^>]*>", "", body, count=1)
     body = body.rsplit("</svg>", 1)[0]
-    # Colour belongs to the set, not to the file that walked in. Dropping the
-    # attributes lets the wrapper's fill and stroke be inherited.
-    body = re.sub(r'\sfill="[^"]*"', "", body)
-    body = re.sub(r'\sstroke="[^"]*"', "", body)
+    # Colour belongs to the set, not to the file that walked in.
+    body = inline_css(body)
+    body = recolour(body, colour)
     body = body.strip()
 
     ink = ink_box(src)                      # rendered at 256: measures the

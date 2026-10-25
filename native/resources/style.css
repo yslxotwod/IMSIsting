@@ -3334,3 +3334,149 @@ popover.menu > contents {
     border-radius: 8px;
     padding: 2px;
 }
+
+/* ── fleet page ───────────────────────────────────────────────────────────
+   The table is a list of boxes, not a chart: every row is one node and the
+   columns are the four questions an operator asks of it (is it up, what is it,
+   where is it reached, what has it heard). Colours follow the same vocabulary
+   as the posture chips -- green means measured and good, red means measured and
+   bad, grey means nobody has asked yet. */
+.fleet-page { padding: 16px 18px 18px 18px; }
+
+.fleet-top { padding-bottom: 12px; }
+.fleet-title { font-size: 20px; font-weight: 700; letter-spacing: 0.2px; }
+.fleet-sub { color: @text_dim; font-size: 12px; }
+
+.fleet-chip {
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-radius: 8px;
+    padding: 5px 10px 6px 10px;
+    min-width: 48px;
+}
+.fleet-chip-value {
+    font-family: monospace;
+    font-size: 17px;
+    font-weight: 700;
+    color: @text;
+    font-feature-settings: "tnum" 1;
+}
+.fleet-chip-label {
+    font-size: 9px;
+    letter-spacing: 1.1px;
+    color: @text_dim;
+}
+
+.fleet-card {
+    background-color: @bg_panel2;
+    border: 1px solid @line;
+    border-radius: 10px;
+    padding: 4px 0 4px 0;
+}
+
+.fleet-head {
+    font-size: 9px;
+    letter-spacing: 1.1px;
+    color: @text_dim;
+    padding: 6px 0 2px 0;
+}
+
+.fleet-row { border-radius: 7px; margin: 1px 6px; }
+.fleet-row:hover { background-color: alpha(@card_hi, 0.55); }
+.fleet-row:selected { background-color: alpha(@accent, 0.16); }
+
+.fleet-name { font-weight: 600; color: @text; }
+.fleet-status { font-family: monospace; font-size: 11px; color: @text_dim; }
+.fleet-class { font-family: monospace; font-size: 11px; color: #9fb4cc; }
+.fleet-meta { font-family: monospace; font-size: 11px; color: @text_dim; }
+.fleet-dot { font-size: 10px; }
+.fleet-dot-ok { color: #74d99f; }
+.fleet-dot-warn { color: #e0b357; }
+.fleet-dot-bad { color: #ef6b6b; }
+.fleet-dot-unk { color: #6f7b8d; }
+
+.fleet-empty {
+    padding: 18px 14px;
+    color: @text_dim;
+    font-family: monospace;
+    font-size: 11px;
+}
+
+.fleet-detail {
+    margin-top: 12px;
+    background-color: @card_bg;
+    border: 1px solid @line;
+    border-radius: 10px;
+    padding: 12px 14px;
+}
+.fleet-detail-title { font-size: 16px; font-weight: 700; }
+.fleet-caps { font-family: monospace; font-size: 11px; color: #9fb4cc; }
+.fleet-busy { font-size: 11px; color: @accent; }
+.fleet-log {
+    font-family: monospace;
+    font-size: 11px;
+    background-color: @bg_sunken;
+    color: @text_dim;
+    padding: 8px;
+}
+
+/* ── Remote Nodes · Nodes and Live Stream ─────────────────────────────
+   The class names are wifisting's (dependency-*) because these are the same two
+   windows: a name line that carries the status, a mono second line with the
+   transport, the roles and the measured capabilities, and the per-node actions
+   flat on the right. The colours are this tree's, so the page sits in the
+   palette around it instead of importing a second one. */
+.dependency-page {
+    background: alpha(@bg_sunken, 0.55);
+    padding: 16px;
+}
+.dependency-summary {
+    color: @text_dim;
+    font-size: 10px;
+    padding: 2px 3px 6px;
+}
+.dependency-page list {
+    color: @text;
+    background: alpha(@bg_sunken, 0.85);
+    border: 1px solid @line;
+    border-radius: 6px;
+}
+.dependency-page list > row {
+    min-height: 47px;
+    padding: 7px 9px;
+    background: alpha(@bg_base, 0.78);
+    border-bottom: 1px solid @line;
+}
+.dependency-page list > row:hover {
+    background: alpha(@accent, 0.10);
+}
+.dependency-name {
+    color: @text;
+    font-size: 12px;
+    font-weight: bold;
+}
+.dependency-package {
+    color: @text_dim;
+    font-family: monospace;
+    font-size: 9px;
+}
+.dependency-install {
+    min-width: 66px;
+}
+.dependency-install:disabled {
+    color: #5f636c;
+    background: alpha(@bg_base, 0.65);
+    border-color: @line;
+}
+.node-online  { color: #62e690; font-weight: bold; }
+.node-unknown { color: #ffb020; font-weight: bold; }
+.node-offline { color: #ff526f; font-weight: bold; }
+button.accent {
+    background: @accent;
+    border-color: @accent;
+    color: #06121a;
+}
+button.accent:hover {
+    background: #6cc6e8;
+    border-color: #6cc6e8;
+}

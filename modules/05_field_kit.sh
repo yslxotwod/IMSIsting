@@ -83,7 +83,7 @@ fk_split() {
 # machine with a sound card. It stays in the tool inventory, where it is true.
 fk_probe_sdr_tools() {
     local d
-    for d in hackrf bladeRF LimeUtil uhd_find_devices rtl_test SoapySDRUtil; do
+    for d in hackrf bladeRF LimeUtil uhd_find_devices rtl_test iio_info SoapySDRUtil; do
         if command -v "$d" >/dev/null 2>&1; then
             printf '%s\n' "$d"
         fi
@@ -118,6 +118,13 @@ fk_radio_probe() {
             command -v rtl_test >/dev/null 2>&1 || return 1
             out=$(timeout 15 rtl_test 2>&1)
             grep -qiE 'found[[:space:]]+[0-9]+[[:space:]]+device' <<< "$out" ;;
+        pluto)
+            # iio_info -s prints one numbered line per context and "No IIO
+            # context found." when there is nothing on the bus, so the
+            # numbered line is the answer.
+            command -v iio_info >/dev/null 2>&1 || return 1
+            out=$(timeout 15 iio_info -s 2>&1)
+            grep -qE '^[[:space:]]*[0-9]+:' <<< "$out" ;;
         *) return 1 ;;
     esac
 }
@@ -131,7 +138,7 @@ fk_probe_radio() {
         [[ -n "$FK_SDR_DEVICE" ]] || return 1
         printf '%s\n' "$FK_SDR_DEVICE"; return 0
     fi
-    for drv in hackrf bladerf limesdr usrp rtl; do
+    for drv in hackrf bladerf limesdr usrp rtl pluto; do
         fk_radio_probe "$drv" && printf '%s\n' "$drv"
     done
 }

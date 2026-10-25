@@ -506,9 +506,13 @@ static const HelpSection CLI_SECTIONS[] = {
 
 static const HelpSection HW_SECTIONS[] = {
     { "SDRS",
-      "The tree drives whatever the installed stack can see: HackRF\n"
-      "through hackrf_transfer, SoapySDR for everything SoapySDR supports,\n"
-      "UHD for USRP, and gr-gsm's own transceiver for GSM.\n"
+      "The tree drives what the installed stack can see, and captures raw\n"
+      "IQ only where the vendor CLI can write it: hackrf_transfer for a\n"
+      "HackRF, rtl_sdr for an RTL-SDR, bladeRF-cli, LimeUtil, uhd for a\n"
+      "USRP, and iio_readdev for a PlutoSDR over USB or Ethernet. SoapySDR\n"
+      "is enumerated because a board that speaks it should be visible, but\n"
+      "SoapySDRUtil cannot capture to a file, so no capture runs through it.\n"
+      "gr-gsm's own transceiver is the GSM path.\n"
       "modules/00_deps.sh reports what is present on this machine, and\n"
       "Settings shows the same facts rather than a second opinion.\n"
       "\n"

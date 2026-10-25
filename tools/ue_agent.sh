@@ -134,6 +134,47 @@ ue_cmd_probe() {
     fi
 }
 
+# What this handset can do, in the same vocabulary `tools/node_agent.sh` uses.
+#
+# One vocabulary matters: a fleet table that spells a phone's abilities
+# differently from a router's cannot be sorted, and the reader ends up comparing
+# words instead of capabilities.  Everything named here is a read the handset
+# already allows over adb -- no root, no AT parser, no diag interface.  A phone
+# that claimed `at` or `diag` would sit in the fleet looking like a modem.
+ue_cmd_caps() {
+    ue_cmd_probe >/dev/null 2>&1
+    local rc=$?
+    (( rc == 3 )) && { ue_unavailable; return 3; }
+    ue_emit status online
+    ue_emit serial "$(ue_serial_line)"
+    ue_emit model "$(ue_prop ro.product.model)"
+    ue_emit android "$(ue_prop ro.build.version.release)"
+    ue_emit cap cells
+    ue_emit via-cells "dumpsys telephony.registry"
+    ue_emit cap radio-log
+    ue_emit via-radio-log "logcat -b radio"
+    ue_emit cap identity
+    ue_emit via-identity "getprop"
+    ue_emit cap network-ue
+    ue_emit via-network-ue "attached to the network as a subscriber"
+    ue_emit cap battery
+    ue_emit via-battery "sysfs"
+    if [[ "$(ue_prop gsm.sim.state)" == "READY" ]]; then
+        ue_emit cap sim
+        ue_emit via-sim "gsm.sim.state"
+    fi
+    # Root is the difference between reading what Android exposes and reading
+    # what the modem exposes; the presence of `su` is the only honest test
+    # available over adb, and it is a statement about the build, not the sandbox.
+    if [[ -n "$(ue_shell 'command -v su' 2>/dev/null | tr -d '\r')" ]]; then
+        ue_emit cap root
+        ue_emit via-root "su on PATH"
+        ue_emit class phone-rooted
+    else
+        ue_emit class phone
+    fi
+}
+
 # The one reason a verb cannot read anything, in the handset's own words.  Every
 # verb asks this rather than inventing its own shrug, so "unauthorized" is never
 # reported as "absent" — the two need different things from a human.
@@ -514,6 +555,22 @@ EOF
     ue_check probe-devices "$(printf '%s\n' "$out" | awk -F'\t' '$1=="devices"{print $2}')" "1"
     ue_check probe-online  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')" "online"
 
+    # 2b. The caps verb speaks the node_agent vocabulary, so a phone and a
+    #     router can sit in one fleet table.  A handset must never claim an AT
+    #     parser or a diag interface: it has neither without root.
+    out=$(bash "${BASH_SOURCE[0]}" --caps 2>/dev/null)
+    ue_check caps-status    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2}')" "online"
+    ue_check caps-class     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="class"{print $2}')"  "phone"
+    ue_check caps-cells     "$(printf '%s\n' "$out" | grep -c '^cap	cells$')"               "1"
+    ue_check caps-radio-log "$(printf '%s\n' "$out" | grep -c '^cap	radio-log$')"           "1"
+    ue_check caps-sim       "$(printf '%s\n' "$out" | grep -c '^cap	sim$')"                 "1"
+    ue_check caps-no-at     "$(printf '%s\n' "$out" | grep -c '^cap	at$')"                  "0"
+    ue_check caps-no-diag   "$(printf '%s\n' "$out" | grep -c '^cap	diag$')"                "0"
+    ue_check caps-no-root   "$(printf '%s\n' "$out" | grep -c '^cap	root$')"                "0"
+    out=$(UE_ADB=definitely-not-adb bash "${BASH_SOURCE[0]}" --caps 2>/dev/null); rc=$?
+    ue_check caps-absent-rc "$rc" "3"
+    ue_check caps-absent-class "$(printf '%s\n' "$out" | grep -c '^class')" "0"
+
     out=$(bash "${BASH_SOURCE[0]}" --identity 2>/dev/null)
     ue_check ident-model   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="model"{print $2}')"        "SM-G973F"
     ue_check ident-android "$(printf '%s\n' "$out" | awk -F'\t' '$1=="android"{print $2}')"      "13"
@@ -680,6 +737,7 @@ ue_main() {
     (($# > 0)) && shift
     case "$cmd" in
         --probe)     ue_cmd_probe ;;
+        --caps)      ue_cmd_caps ;;
         --identity)  ue_cmd_identity ;;
         --radio)     ue_cmd_radio ;;
         --cells)     ue_cmd_cells "$@" ;;
@@ -693,6 +751,7 @@ ue_agent — the handset as a node (Phase 13)
 
 Usage: $0 COMMAND
   --probe       adb present, device present, serial and state
+  --caps        what this handset can do, in the node_agent vocabulary
   --identity    model, build, IMEI, IMSI, SIM -- each with its source
   --radio       SIM state, operator, network type, signal
   --cells       the serving cell as the handset sees it [--file dump.txt]
