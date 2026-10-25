@@ -99,6 +99,7 @@ stk_cmd_name() {
         31) echo "POWER OFF CARD" ;;
         32) echo "POWER ON CARD" ;;
         33) echo "GET READER STATUS" ;;
+        34) echo "RUN AT" ;;
         40) echo "OPEN CHANNEL" ;;
         41) echo "CLOSE CHANNEL" ;;
         42) echo "RECEIVE DATA" ;;
@@ -322,6 +323,121 @@ stk_simjacker_detect() {
     return 0
 }
 
+# ── RUN AT: the proactive command that hands the modem a string ─────────
+# TS 31.111 6.4.12 defines a proactive command whose payload is not data the
+# card composes but a command the card asks the terminal to execute in its own
+# AT parser: RUN AT, type of command 0x34. The tree carried the whole SAT
+# envelope and forty command types and not this one, so `stk_cmd_name 34`
+# printed "unknown proactive command" and nothing could carry an AT string.
+#
+# What the terminal does with it is a property of the terminal. The published
+# CATANA work (CVE-2025-48618, CVE-2026-57550) found compliant implementations
+# that hand a modem a chain of AT commands, and the consequences are the ones
+# this verb classifies rather than performs: a radio-access-technology change
+# that drops a device to 2G, an identifier readout, a shutdown, and on recent
+# Android a browser launch with no user interaction. The root cause is
+# delegation of trust, which is why the useful artefact is the envelope plus
+# an acceptance harness, not an exploit.
+stk_run_at_build() {   # <at-command-string> | --raw-hex HEX
+    local value="${1:-}"
+    [[ -n "$value" ]] || {
+        printf 'ERROR\tusage: --run-at-build "<AT command>" | --run-at-build --raw-hex HEX\n' >&2
+        printf 'WHY\tthe AT command travels as an octet string in the command, and an empty one is a command with no payload\n' >&2
+        return 2; }
+    local arg_hex="" qualifier="00" number="${STK_AT_NUMBER:-01}" text=""
+    if [[ "$value" == "--raw-hex" ]]; then
+        arg_hex=$(stk_norm_hex "${2:-}")
+        [[ "$arg_hex" =~ ^[0-9a-f]+$ ]] && (( ${#arg_hex} % 2 == 0 )) && [[ -n "$arg_hex" ]] || {
+            printf 'ERROR\t--raw-hex wants an even, non-empty run of hex digits\n' >&2; return 2; }
+    else
+        text="$value"
+        arg_hex=$(printf '%s' "$value" | od -An -tx1 | tr -d ' \n')
+    fi
+    (( ${#arg_hex} / 2 <= 239 )) || {
+        printf 'ERROR\tthe AT command is %d octets; a short TLV carries at most 239\n' "$(( ${#arg_hex} / 2 ))" >&2; return 2; }
+    # Command Details: command number, type 0x34, qualifier (0 = the terminal
+    # decides how to run it, which is the whole complaint).
+    local cd di at body
+    cd=$(stk_tlv 01 "${number}34${qualifier}")
+    di=$(stk_tlv 02 "${STK_AT_SRC:-81}${STK_AT_DST:-82}")
+    # TS 31.111 8.7: the AT command is carried in a TLV whose tag is 0x30.
+    at=$(stk_tlv 30 "$arg_hex")
+    body="${cd}${di}${at}"
+    local cmd="D0$(stk_tlv_len "$(( ${#body}/2 ))")${body}"
+    printf 'command\t%s\n' "$cmd"
+    printf 'command_type\t34\n'
+    printf 'command_name\tRUN AT\n'
+    printf 'command_number\t%s\n' "$number"
+    printf 'qualifier\t%s\n' "$qualifier"
+    printf 'at_octets\t%d\n' "$(( ${#arg_hex} / 2 ))"
+    printf 'at_hex\t%s\n' "$(printf '%s' "$arg_hex" | tr 'a-f' 'A-F')"
+    printf 'at_text\t%s\n' "$(stk_sanitize "$text")"
+    printf 'envelope\tD0 (proactive command), terminal response is R9 (Terminal Response) after the modem acts\n'
+    printf 'ref\tTS 31.111 6.4.12 (RUN AT), 8.7 (AT command TLV 0x30), TS 102 223 8.6 (Command Details)\n'
+    printf 'limit\tthe command is a request: what the terminal does with the string is the terminal behaviour the audit below classifies, and no modem is driven here\n'
+    printf 'verdict\trun_at_built\n'
+}
+
+stk_run_at_audit() {   # <at-command-string> [--rat 5g|4g|3g|2g]
+    local cmdline="${1:-}" rat="5g"
+    [[ -n "$cmdline" ]] || {
+        printf 'ERROR\tusage: --run-at-audit "AT+..." [--rat 5g|4g|3g|2g]\n' >&2; return 2; }
+    shift
+    while (($#)); do
+        case "$1" in
+            --rat) rat="${2:-5g}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(stk_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    case "$rat" in 5g|4g|3g|2g) ;; *)
+        printf 'ERROR\t--rat is 5g, 4g, 3g or 2g\n' >&2; return 2 ;; esac
+    local lower; lower=$(printf '%s' "$cmdline" | tr 'A-Z' 'a-z')
+    local cls="none" effect="nothing this module models" severity="INFO" why=""
+    local chained="no"; case "$cmdline" in *";"*) chained="yes" ;; esac
+    case "$lower" in
+        *cops*|*creg*|*ctzu*|*cgdcont*|*cesq*|*ws46*)
+            cls="rat_or_service_change"; severity="HIGH"
+            effect="the modem is told which radio or which bearer to use: a 5G device can be walked down to 2G, which needs no memory bug to break confidentiality"
+            why="the AT surface exposes the same radio controls the card asks for, and a downgrade is a legitimate command" ;;
+        *cgsn*|*cimi*|*cgmi*|*cgmm*|*csim*|*crsm*|*iced*)
+            cls="identifier_or_file_readout"; severity="HIGH"
+            effect="serial, model, IMSI or the card's own files are read out through the modem, so the card can learn the handset it is in"
+            why="the card is allowed to ask for local information, and a modem answers the same identifiers the handset prints" ;;
+        *cfun*0*|*cfun=1,1*|*cpwroff*|*poweroff*)
+            cls="shutdown_or_reset"; severity="MEDIUM"
+            effect="the modem is switched off or reset: a cellular kill, and on a device it is reachable from, a reboot loop"
+            why="power control is a normal AT command and the card may not distinguish asking from acting" ;;
+        *action=android.intent.action.view*|*http*|*ucmd*)
+            cls="browser_launch_or_uri"; severity="HIGH"
+            effect="the terminal is asked to open a URI; published implementations have launched a browser with no user interaction"
+            why="the chain of commands that reaches the application processor is spec-compliant" ;;
+        *)
+            if [[ "$chained" == "yes" ]]; then
+                cls="at_chain"; severity="MEDIUM"
+                effect="a second AT command follows the first in the same string: a chain is the primitive every one of the above needs"
+                why="one proactive command carries one string, and the modem parser treats the separators as them"
+            fi ;;
+    esac
+    printf 'at_text\t%s\n' "$(stk_sanitize "$cmdline")"
+    printf 'at_class\t%s\n' "$cls"
+    printf 'rat\t%s\n' "$rat"
+    printf 'device_effect\t%s\n' "$effect"
+    printf 'why_compliant\t%s\n' "$why"
+    printf 'severity\t%s\n' "$severity"
+    # A chain carries the specific classes: it is reported as the shape that
+    # makes them composable, after the class the first command in it names.
+    if [[ "$chained" == "yes" && "$cls" != "at_chain" && "$cls" != "none" ]]; then
+        printf 'chained\t%s\toctets\t%s\n' "$cls" "$(( ${#cmdline} ))"
+    fi
+    if [[ "$cls" != "none" ]]; then
+        printf 'finding\t%s\t%s\t%s\n' "$cls" "$severity" "the modem executes what the card asks, which is what the specification requires"
+    fi
+    printf 'acceptance\ta harness: send the envelope, read the Terminal Response and the modem-side effect, and record both; without a device the class above is what can be stated\n'
+    printf 'detect\t%s\n' "eDRX/paging anomalies, an unexpected RAT change while the card session is active, an AT-initiated reboot in the modem log"
+    printf 'ref\tTS 31.111 6.4.12; published CATANA work (CVE-2025-48618, CVE-2026-57550)\n'
+    printf 'verdict\t%s\n' "$([[ "$cls" == "none" ]] && echo at_command_not_modelled || echo at_command_classified)"
+}
+
 stk_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -413,6 +529,32 @@ stk_selftest() {
     chk simj-bad "$(stk_simjacker_detect zz 00 >/dev/null 2>&1; echo $?)" "2"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
+    # ── RUN AT: the proactive command that was missing ─────────────────
+    local ra rab raa
+    chk runat-name        "$(stk_cmd_name 34)" "RUN AT"
+    rab=$(stk_run_at_build "AT+COPS=0" 2>/dev/null)
+    chk runat-hex         "$(printf '%s\n' "$rab" | awk -F'\t' '$1=="command"{print $2}')" "D014010301340002028182300941542b434f50533d30"
+    chk runat-type        "$(printf '%s\n' "$rab" | awk -F'\t' '$1=="command_type"{print $2}')" "34"
+    chk runat-name-row    "$(printf '%s\n' "$rab" | awk -F'\t' '$1=="command_name"{print $2}')" "RUN AT"
+    chk runat-octets      "$(printf '%s\n' "$rab" | awk -F'\t' '$1=="at_octets"{print $2}')" "9"
+    chk runat-text        "$(printf '%s\n' "$rab" | awk -F'\t' '$1=="at_text"{print $2}')" "AT+COPS=0"
+    chk runat-tlv30       "$(printf '%s\n' "$rab" | awk -F'\t' '$1=="command" && $2 ~ /^D0[0-9A-F]*300941542b434f50533d30$/{print "has"}')" "has"
+    chk runat-verdict     "$(printf '%s\n' "$rab" | awk -F'\t' '$1=="verdict"{print $2}')" "run_at_built"
+    chk runat-raw         "$(stk_run_at_build --raw-hex 0d0a | awk -F'\t' '$1=="at_hex"{print $2}')" "0D0A"
+    chk runat-raw-odd     "$(stk_run_at_build --raw-hex ABC >/dev/null 2>&1; echo $?)" "2"
+    chk runat-noargs      "$(stk_run_at_build >/dev/null 2>&1; echo $?)" "2"
+    raa=$(stk_run_at_audit "AT+COPS=1,2,26201" 2>/dev/null)
+    chk runat-class-rat   "$(printf '%s\n' "$raa" | awk -F'\t' '$1=="at_class"{print $2}')" "rat_or_service_change"
+    chk runat-sev         "$(printf '%s\n' "$raa" | awk -F'\t' '$1=="severity"{print $2}')" "HIGH"
+    chk runat-finding     "$(printf '%s\n' "$raa" | awk -F'\t' '$1=="finding"{print $2}')" "rat_or_service_change"
+    chk runat-class-id    "$(stk_run_at_audit "AT+CGSN" | awk -F'\t' '$1=="at_class"{print $2}')" "identifier_or_file_readout"
+    chk runat-class-off   "$(stk_run_at_audit "AT+CFUN=0" | awk -F'\t' '$1=="at_class"{print $2}')" "shutdown_or_reset"
+    chk runat-class-uri   "$(stk_run_at_audit "AT+UCMD=action=android.intent.action.VIEW" | awk -F'\t' '$1=="at_class"{print $2}')" "browser_launch_or_uri"
+    chk runat-class-chain "$(stk_run_at_audit "AT+CGSN;AT+COPS=0" | awk -F'\t' '$1=="chained"{print "chained"}')" "chained"
+    chk runat-none        "$(stk_run_at_audit "AT+IUNKNOWN" | awk -F'\t' '$1=="verdict"{print $2}')" "at_command_not_modelled"
+    chk runat-bad-rat     "$(stk_run_at_audit "AT+CGSN" --rat 6g >/dev/null 2>&1; echo $?)" "2"
+    chk runat-noargs-audit "$(stk_run_at_audit >/dev/null 2>&1; echo $?)" "2"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -459,6 +601,8 @@ stk_cli_main() {
         --build)       stk_proactive_build "${1:-21}" "${2:-00}" "${3:-81}" "${4:-82}" "${5:-01}" ;;
         --parse)       stk_proactive_parse "${1:-}" ;;
         --audit)       stk_audit "${1:-}" ;;
+        --run-at-build) stk_run_at_build "$@" ;;
+        --run-at-audit) stk_run_at_audit "$@" ;;
         --sat-cmds)    stk_sat_cmds ;;
         --sat-audit)   stk_sat_audit "${1:-}" ;;
         --simjacker-detect) stk_simjacker_detect "${1:-}" "${2:-}" "${3:-}" ;;

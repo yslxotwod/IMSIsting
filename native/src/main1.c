@@ -2487,6 +2487,7 @@ module_id_words(const char *tok)
  */
 static const char *const plain_keys[] = {
     "abuse_surface_listed\tthe abuse surface was listed, not measured",
+    "acceptance\twhat a real acceptance test would have to record, and what this module can state without one",
     "activation_time\twhen the algorithms this message names actually take effect",
     "additional_status_info_text\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "advance\tthe counter moved forward",
@@ -2503,6 +2504,10 @@ static const char *const plain_keys[] = {
     "artifact\tone hashed artefact: its size, its sha256, its UTC mtime and its path",
     "artifacts\thow many artefacts the manifest covers",
     "assumption\ta number the maths stands on",
+    "at_class\tthe class of effect an AT command from the card falls into",
+    "at_hex\tthe AT command as the octets that travel in the proactive command",
+    "at_octets\thow many octets the AT command came to",
+    "at_text\tthe AT command as text, sanitised for one output field",
     "attack_surface_listed\tthe catalogue of attacks a used unit enables",
     "attack_work\twhat is known about breaking the algorithm, stated as not stated when no published cryptanalysis exists to quote",
     "attacker_gain\twhat the other slice takes",
@@ -2539,6 +2544,7 @@ static const char *const plain_keys[] = {
     "cert_posture_clean\tno certificate finding was raised",
     "cert_posture_rejected\tat least one certificate finding was raised",
     "cfn\tthe connection frame number, the low eight bits of the counter a UMTS cipher is driven with",
+    "chained\tthe class of the first command in a string that carries more than one",
     "checkable\twhether the abuse shows up in counters",
     "chip_hz\tthe UTRAN chip rate",
     "chip_m_round_trip\thow far a signal travels in one UTRAN chip, counting the round trip",
@@ -2551,6 +2557,7 @@ static const char *const plain_keys[] = {
     "cleartext_imsi\tan identifier sent without protection",
     "client_auth\twhat SMPP over TLS changes, or does not",
     "codec\tthe vocoder a system uses",
+    "command_type\tthe proactive command type octet",
     "compact\tthe SUCI field layout this module shipped first: no home network identifier anywhere in the octets",
     "complexity\tthe search space of a published attack, as the paper states it, in powers of two",
     "content_decoded\twhether the open type was decoded as the content type the caller named",
@@ -2588,6 +2595,7 @@ static const char *const plain_keys[] = {
     "dests\twhat SMPP over TLS changes, or does not",
     "detect\thow the far side would notice",
     "detect_at_nrf\twhat the directory can refuse up front",
+    "device_effect\twhat the modem does with the class of AT command the card asked for",
     "display_time\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "dns\tname resolution reaches this network",
     "dns_leak\twhat the lookup itself gives away",
@@ -2784,11 +2792,11 @@ static const char *const plain_keys[] = {
     "push_inventory\ta map that keeps itself current",
     "qos_time_to_live\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "quiet_shift\ta small move with a large effect",
+    "ranap_pdu_built\ta RANAP PDU was composed and it reads back",
+    "ranap_pdu_parsed\ta RANAP PDU was decoded from octets",
     "realm\tthe domain suffix that routes the identity",
     "realm_routing\twhere the suffix sends the request",
     "reassembly\tputting the pieces back together",
-    "ranap_pdu_built\ta RANAP PDU was composed and it reads back",
-    "ranap_pdu_parsed\ta RANAP PDU was decoded from octets",
     "raster_position_computed\tthe 100 kHz raster position was computed from a supplied anchor",
     "reachability\twhen a device on this level can be reached",
     "receipted_message_id\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
@@ -2808,6 +2816,7 @@ static const char *const plain_keys[] = {
     "rrc_type\twhich RRC message the bits are, when the verb builds a message and not a bare IE",
     "rtt_chips\tthe round trip time a Node B measured, in chips",
     "rtt_m\tthat round trip converted to metres",
+    "run_at_built\ta RUN AT proactive command was composed and is ready to be handed over",
     "same_ck\twhether both calls were given the same cipher key",
     "sample_len\tsamples one page occupies",
     "sample_start\tsample index where a page begins",
@@ -3591,6 +3600,7 @@ static const char *const plain_keys[] = {
     "what_that_costs\twhat SMPP over TLS changes, or does not",
     "what_this_is\twhat this arithmetic is",
     "why_65\twhy the attack needs the number of keystream bits it needs, in the protocol's own framing",
+    "why_compliant\twhy this behaviour is the specification working as written rather than a bug",
     "why_not\twhy a cipher whose body and vectors are unreadable is refused instead of approximated",
     "why_refused\tthe reason the verb refuses rather than guesses",
     "width_bits\thow wide the counter is",
@@ -7539,9 +7549,9 @@ static const ChipRow chip_rows[] = {
     { "37_femtocell",        "--__index_probe__",     NEED_NO, DOES_READS },
     { "37_femtocell",        "--apply",               NEED_NO, DOES_READS },
     { "37_femtocell",        "--attack-surface",      NEED_NO, DOES_READS },
-    { "37_femtocell",        "--ranap-ie",           NEED_NO, DOES_READS },
-    { "37_femtocell",        "--ranap-parse",        NEED_NO, DOES_READS },
-    { "37_femtocell",        "--ranap-build",        NEED_NO, DOES_BUILDS },
+    { "37_femtocell",    "--ranap-ie",            NEED_NO, DOES_READS },
+    { "37_femtocell",    "--ranap-parse",         NEED_NO, DOES_READS },
+    { "37_femtocell",    "--ranap-build",         NEED_NO, DOES_BUILDS },
     { "37_femtocell",        "--cert-audit",          NEED_NO, DOES_READS },
     { "37_femtocell",        "--cell-profile",        NEED_NO, DOES_BUILDS },
     { "37_femtocell",        "--csg-decode",          NEED_NO, DOES_READS },
@@ -7931,6 +7941,8 @@ static const ChipRow chip_rows[] = {
     { "51_sidelink",        "--bsm-audit",           NEED_NO, DOES_READS },
     { "52_stk",              "--__index_probe__",     NEED_NO, DOES_READS },
     { "52_stk",              "--audit",               NEED_SIM, DOES_READS },
+    { "52_stk",          "--run-at-audit",        NEED_NO, DOES_READS },
+    { "52_stk",          "--run-at-build",        NEED_NO, DOES_BUILDS },
     { "52_stk",              "--build",               NEED_NO, DOES_READS },
     { "52_stk",              "--cmd",                 NEED_SIM, DOES_READS },
     { "52_stk",              "--device",              NEED_SIM, DOES_READS },
@@ -18571,289 +18583,6 @@ rtarget_panel_refresh(AppState *state)
     /* ---- Context ---- */
     rtarget_put(state->rtarget_held, first);
     rtarget_put(state->rtarget_seen, last);
-}
-
-/* The newest matching row by network: these stores are append-only, so the
-   last line that names the network is the freshest fact about it. Compared on
-   digits, because one store writes "262-01" and another "26201". */
-static char *
-posture_find_plmn(gchar **lines, const char *plmn_digits)
-{
-    gchar **hdr;
-    int idx;
-    char *hit = NULL;
-
-    if (lines == NULL || lines[0] == NULL || plmn_digits == NULL) return NULL;
-    hdr = g_strsplit(lines[0], "\t", -1);
-    idx = posture_col(hdr, "plmn");
-    if (idx < 0) { g_strfreev(hdr); return NULL; }
-
-    for (int r = 1; lines[r] != NULL; r++) {
-        gchar **c = g_strsplit(lines[r], "\t", -1);
-
-        if (c[idx] != NULL) {
-            g_autofree char *d = posture_digits(c[idx]);
-
-            if (d != NULL && g_strcmp0(d, plmn_digits) == 0) {
-                g_free(hit);
-                hit = g_strdup(lines[r]);
-            }
-        }
-        g_strfreev(c);
-    }
-    g_strfreev(hdr);
-    return hit;
-}
-
-static void
-posture_keep_worst(PostureTone *worst, const char **worst_why, PostureTone t,
-                   const char *why)
-{
-    if (t > *worst) {
-        *worst = t;
-        if (why != NULL && *why != '\0') *worst_why = why;
-    }
-}
-
-/* What this cell is exposed to, one chip per dimension, and the reason the
-   worst of them is the worst. Everything is read back from a module's own
-   store; when a store is absent the chip says so and the case is not called
-   hardened on the strength of a file that was never written. */
-static GPtrArray *
-posture_collect(const char *plmn, const char *cell, const char *chan,
-                PostureTone *verdict_out, char **why_out, char **src_out)
-{
-    g_autofree char *root = imsisting_root();
-    g_autofree char *plmn_d = posture_digits(plmn);
-    g_autofree char *f_audit = g_build_filename(root, "loot", "cipher_audit",
-                                                "sessions.tsv", NULL);
-    g_autofree char *f_cells = g_build_filename(root, "loot", "cell_recon",
-                                                "cells.tsv", NULL);
-    g_autofree char *f_ident = g_build_filename(root, "loot", "imsi_exposure",
-                                                "identities.tsv", NULL);
-    g_autofree char *f_si = g_build_filename(root, "loot", "gsm_air", "si.tsv", NULL);
-    GPtrArray *badges = g_ptr_array_new_with_free_func(posture_badge_free);
-    GPtrArray *srcs = g_ptr_array_new();
-    PostureTone worst = POSTURE_UNK;
-    const char *worst_why = NULL;
-    g_autofree char *src_join = NULL;
-
-    /* ---- CIPHER: what was negotiated, else what the cell advertises ---- */
-    {
-        g_autofree char *cipher = NULL;
-        g_autofree char *integ = NULL;
-        g_autofree char *src = NULL;
-        const char *cipher_why = NULL;
-        const char *int_why = NULL;
-        PostureTone ct = POSTURE_UNK;
-        PostureTone it = POSTURE_UNK;
-        gchar **audit = posture_read_lines(f_audit);
-        gchar **cells = posture_read_lines(f_cells);
-
-        if (audit != NULL && plmn_d != NULL) {
-            g_autofree char *row = posture_find_plmn(audit, plmn_d);
-
-            if (row != NULL) {
-                gchar **hdr = g_strsplit(audit[0], "\t", -1);
-
-                cipher = posture_field(hdr, row, "enc_alg");
-                integ  = posture_field(hdr, row, "int_alg");
-                g_strfreev(hdr);
-                if (cipher != NULL) {
-                    src = g_strdup("19 cipher audit");
-                }
-            }
-        }
-
-        /* The audit records a session, not a cell: with no session on this
-           network the advertisement is the only cipher anyone has written
-           down, and the chip names its source so the weaker claim shows. */
-        if (cipher == NULL && cells != NULL) {
-            g_autofree char *row = NULL;
-            gchar **hdr = g_strsplit(cells[0], "\t", -1);
-
-            if (cell != NULL && *cell != '\0')
-                row = posture_find(cells, "cell_id", cell, NULL, NULL, NULL, NULL);
-            if (row == NULL && chan != NULL && *chan != '\0')
-                row = posture_find(cells, "arfcn", chan, NULL, NULL, NULL, NULL);
-            if (row == NULL && plmn_d != NULL) {
-                g_autofree char *r2 = posture_find_plmn(cells, plmn_d);
-
-                row = g_steal_pointer(&r2);
-            }
-            if (row != NULL) {
-                g_autofree char *c = posture_field(hdr, row, "cipher");
-
-                if (c != NULL && g_ascii_strcasecmp(c, "none") != 0 &&
-                    g_ascii_strcasecmp(c, "null") != 0 && g_strcmp0(c, "-") != 0)
-                    cipher = g_steal_pointer(&c);
-                if (cipher != NULL) src = g_strdup("02 cell recon");
-            }
-            g_strfreev(hdr);
-        }
-
-        ct = posture_cipher_tone(cipher, &cipher_why);
-        posture_add(badges, "CIPHER", cipher != NULL ? cipher : "not observed",
-                    ct, cipher_why, src);
-        posture_keep_worst(&worst, &worst_why, ct, cipher_why);
-        if (src != NULL) g_ptr_array_add(srcs, g_steal_pointer(&src));
-
-        /* Integrity is a separate answer from cipher: a cell can cipher with
-           A5/1 and still have no protection against forged signalling. GSM
-           has no separate integrity layer, so no chip is claimed there. */
-        if (integ != NULL && g_ascii_strcasecmp(integ, "n/a") != 0) {
-            it = posture_integrity_tone(integ, &int_why);
-            posture_add(badges, "INTEGRITY", integ, it, int_why,
-                        "19 cipher audit");
-            posture_keep_worst(&worst, &worst_why, it, int_why);
-        }
-        g_strfreev(audit);
-        g_strfreev(cells);
-    }
-
-    /* ---- IMSI: has a subscriber identity crossed the air in the clear ---- */
-    {
-        gchar **ids = posture_read_lines(f_ident);
-        guint n = 0, imsi = 0;
-        PostureTone t;
-        const char *why;
-
-        if (ids != NULL) {
-            for (int r = 1; ids[r] != NULL; r++) {
-                gchar **c = g_strsplit(ids[r], "\t", -1);
-
-                n++;
-                if (c[2] != NULL && g_ascii_strcasecmp(c[2], "imsi") == 0) imsi++;
-                g_strfreev(c);
-            }
-            if (n > 0) {
-                g_autofree char *state = g_strdup_printf("%u in the clear", n);
-
-                t = POSTURE_BAD;
-                why = "an identity crossed the air unencrypted; the store holds it";
-                posture_add(badges, "IMSI", state, t, why, "18 imsi exposure");
-                posture_keep_worst(&worst, &worst_why, t, why);
-                g_ptr_array_add(srcs, g_strdup("18 imsi exposure"));
-            } else {
-                posture_add(badges, "IMSI", "none seen", POSTURE_OK,
-                            "no identity has been captured in the clear", NULL);
-            }
-        } else {
-            posture_add(badges, "IMSI", "not observed", POSTURE_UNK,
-                        "run 18 --audit on a capture to fill this", NULL);
-        }
-        g_strfreev(ids);
-        (void) imsi;
-    }
-
-    /* ---- SI: is this cell's own broadcast understood ---- */
-    {
-        gchar **si = posture_read_lines(f_si);
-        char *row = NULL;
-
-        if (si != NULL) {
-            if (cell != NULL && *cell != '\0')
-                row = posture_find(si, "cell_id", cell, NULL, NULL, NULL, NULL);
-            if (row == NULL && plmn_d != NULL) row = posture_find_plmn(si, plmn_d);
-        }
-        if (row != NULL) {
-            posture_add(badges, "SI", "decoded", POSTURE_OK,
-                        "the cell's system information was read, so its LAI and "
-                        "paging parameters are known", "06 gsm air");
-            g_ptr_array_add(srcs, g_strdup("06 gsm air"));
-        } else {
-            posture_add(badges, "SI", "not decoded", POSTURE_UNK,
-                        "run 06 --decode-si on this cell to read its broadcast",
-                        NULL);
-        }
-        g_free(row);
-        g_strfreev(si);
-    }
-
-    /* One source per chip, named once in the footer. */
-    if (srcs->len > 0) {
-        GString *j = g_string_new("observed by ");
-
-        for (guint i = 0; i < srcs->len; i++) {
-            const char *s = g_ptr_array_index(srcs, i);
-            gboolean dup = FALSE;
-
-            for (guint k = 0; k < i; k++)
-                if (g_strcmp0(g_ptr_array_index(srcs, k), s) == 0) dup = TRUE;
-            if (dup) continue;
-            if (j->len > strlen("observed by ")) g_string_append(j, " · ");
-            g_string_append(j, s);
-        }
-        src_join = g_string_free(j, FALSE);
-    }
-    g_ptr_array_set_free_func(srcs, g_free);
-    g_ptr_array_free(srcs, TRUE);
-
-    if (verdict_out != NULL) *verdict_out = worst;
-    if (why_out != NULL)     *why_out = g_strdup(worst_why != NULL ? worst_why
-                                     : "no module has looked at this cell yet");
-    if (src_out != NULL)     *src_out = g_steal_pointer(&src_join);
-    return badges;
-}
-
-static void
-rtarget_posture_refresh(AppState *state, const char *plmn, const char *cell,
-                        const char *chan)
-{
-    g_autofree char *why = NULL;
-    g_autofree char *src = NULL;
-    PostureTone verdict = POSTURE_UNK;
-    GPtrArray *badges;
-    GtkWidget *body;
-    GtkWidget *cursor;
-
-    if (state == NULL || state->rtarget_posture_body == NULL) return;
-    body = state->rtarget_posture_body;
-
-    while ((cursor = gtk_widget_get_first_child(body)) != NULL)
-        gtk_flow_box_remove(GTK_FLOW_BOX(body), cursor);
-
-    badges = posture_collect(plmn, cell, chan, &verdict, &why, &src);
-
-    for (guint i = 0; i < badges->len; i++) {
-        PostureBadge *b = g_ptr_array_index(badges, i);
-        GtkWidget *chip  = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
-        GtkWidget *label = gtk_label_new(b->label);
-        GtkWidget *value = gtk_label_new(b->state);
-        g_autofree char *tip = g_strdup_printf(
-            "%s — %s\n%s", b->label, b->why,
-            b->src != NULL ? b->src : "no module has recorded this");
-
-        gtk_widget_add_css_class(chip, "posture-chip");
-        gtk_widget_add_css_class(chip, posture_tone_class(b->tone));
-        gtk_widget_add_css_class(label, "posture-chip-label");
-        gtk_widget_add_css_class(value, "posture-chip-state");
-        gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
-        gtk_label_set_xalign(GTK_LABEL(value), 0.0f);
-        gtk_label_set_ellipsize(GTK_LABEL(value), PANGO_ELLIPSIZE_END);
-        gtk_widget_set_tooltip_text(chip, tip);
-        gtk_box_append(GTK_BOX(chip), label);
-        gtk_box_append(GTK_BOX(chip), value);
-        gtk_flow_box_append(GTK_FLOW_BOX(body), chip);
-    }
-    g_ptr_array_free(badges, TRUE);
-
-    if (state->rtarget_posture_why != NULL) {
-        g_autofree char *text = g_strdup_printf("%s — %s",
-                                                posture_verdict_word(verdict), why);
-
-        gtk_label_set_text(GTK_LABEL(state->rtarget_posture_why), text);
-        for (int t = 0; t <= POSTURE_BAD; t++)
-            gtk_widget_remove_css_class(state->rtarget_posture_why,
-                                        posture_tone_class((PostureTone) t));
-        gtk_widget_add_css_class(state->rtarget_posture_why,
-                                 posture_tone_class(verdict));
-    }
-    if (state->rtarget_posture_src != NULL) {
-        gtk_label_set_text(GTK_LABEL(state->rtarget_posture_src),
-                           src != NULL ? src : "no store has answered for this cell");
-        gtk_widget_set_visible(state->rtarget_posture_src, TRUE);
-    }
 }
 
 static GtkWidget *
