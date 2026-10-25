@@ -5911,6 +5911,8 @@ static const char *const plain_keys[] = {
     "sock_us\tthe gap between two requests",
     "unauthorised_success\ta call that should have been refused but answered",
     "why\twhy a verb handed off instead of acting",
+    "reply_decoded\tthe answer, read with this tree's own decoder",
+    "reply_type\tthe numeric message type of that answer",
 };
 
 /* Compare a bare key against one "key<TAB>words" row. */

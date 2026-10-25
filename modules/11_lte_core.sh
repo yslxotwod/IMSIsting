@@ -3811,10 +3811,25 @@ lcore_flood_model() {  # [hss-air-per-sec] [mme-sessions-per-sec] [attacker-mbps
 }
 
 lcore_cmd_gtpc_send() {
-    local host="${1:-}" port="${2:-2123}" hex="${3:-}"
+    local host="" port=2123 hex="" wait=0
+    while (( $# )); do
+        case "$1" in
+            --wait) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                        printf 'ERROR\t--wait takes seconds; for UDP a reply is the only proof the message arrived\n' >&2; return 2; }
+                    wait="$2"; shift 2 ;;
+            --help|-h) printf 'usage: --gtpc-send <host> [port] [hex] [--wait N]\n'; return 0 ;;
+            -*)     printf 'ERROR\t--gtpc-send does not take %s\n' "$1" >&2; return 2 ;;
+            *)      [[ -n "$1" ]] || { shift; continue; }
+                    if [[ -z "$host" ]]; then host="$1"
+                    elif [[ "$port" == "2123" && "$1" =~ ^[0-9]+$ ]]; then port="$1"
+                    elif [[ -z "$hex" ]]; then hex="$1"
+                    else printf 'ERROR\t--gtpc-send takes <host> [port] [hex] [--wait N]\n' >&2; return 2; fi
+                    shift ;;
+        esac
+    done
     local tool="$IMSISTING_ROOT/tools/udp_assoc.py"
-    if [[ -z "$host" ]]; then
-        printf 'ERROR\tneed <sgw-or-pgw-host> [port] [hex]\n' >&2
+    if [[ -z "$host" || "$host" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\tneed <sgw-or-pgw-host> [port] [hex]; a port on its own is not a host\n' >&2
         return 2
     fi
     if [[ ! -f "$tool" ]]; then
@@ -3829,7 +3844,25 @@ lcore_cmd_gtpc_send() {
     printf 'leg\tGTPv2-C\n'
     printf 'target\t%s:%s\n' "$host" "$port"
     printf 'encapsulation\tudp\n'
-    timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${LTE_WAIT:-0}"
+    local out rep rc=0
+    out=$(timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "$wait" 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    rep=$(printf '%s\n' "$out" | awk -F'\t' '$1=="reply_hex"{print $2}')
+    if [[ -n "$rep" ]]; then
+        local rm
+        rm=$(lcore_gtpc_parse_header "$rep" 2>/dev/null | awk -F'\t' '$1=="message_name"{print $2; exit}')
+        local rt
+        rt=$(lcore_gtpc_parse_header "$rep" 2>/dev/null | awk -F'\t' '$1=="message_type"{print $2; exit}')
+        if [[ -n "$rm" ]]; then
+            printf 'reply_decoded\t%s\n' "$rm"
+            printf 'reply_type\t%s\n' "$rt"
+        else
+            printf 'reply_decoded\t%s octets came back and they are not a GTP-C header this tree can read\n' "$(( ${#rep} / 2 ))"
+        fi
+    elif [[ "$wait" != "0" ]]; then
+        printf 'reply_decoded\tnone within %ss\n' "$wait"
+    fi
+    return "$rc"
 }
 
 # Diameter's other leg.  The SCTP path belongs to tools/sctp_assoc.py (it is
@@ -3837,10 +3870,25 @@ lcore_cmd_gtpc_send() {
 # TCP 3868 behind TLS, and that is this.  Armed for the same reason as the other
 # two: the octets build without a network, the socket is a separate decision.
 lcore_cmd_diameter_send() {
-    local host="${1:-}" port="${2:-3868}" hex="${3:-}"
+    local host="" port=3868 hex="" wait=0
+    while (( $# )); do
+        case "$1" in
+            --wait) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                        printf 'ERROR\t--wait takes seconds; an answer is what proves the peer read the request\n' >&2; return 2; }
+                    wait="$2"; shift 2 ;;
+            --help|-h) printf 'usage: --diameter-send <host> [port] [hex] [--wait N]\n'; return 0 ;;
+            -*)     printf 'ERROR\t--diameter-send does not take %s\n' "$1" >&2; return 2 ;;
+            *)      [[ -n "$1" ]] || { shift; continue; }
+                    if [[ -z "$host" ]]; then host="$1"
+                    elif [[ "$port" == "3868" && "$1" =~ ^[0-9]+$ ]]; then port="$1"
+                    elif [[ -z "$hex" ]]; then hex="$1"
+                    else printf 'ERROR\t--diameter-send takes <host> [port] [hex] [--wait N]\n' >&2; return 2; fi
+                    shift ;;
+        esac
+    done
     local tool="$IMSISTING_ROOT/tools/stream_assoc.py"
-    if [[ -z "$host" ]]; then
-        printf 'ERROR\tneed <hss-or-dra-host> [port] [hex]\n' >&2
+    if [[ -z "$host" || "$host" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\tneed <hss-or-dra-host> [port] [hex]; a port on its own is not a host\n' >&2
         return 2
     fi
     [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot send\n' "$tool" >&2; return 1; }
@@ -3853,11 +3901,11 @@ lcore_cmd_diameter_send() {
     if [[ "${LTE_DIAMETER_TLS:-0}" == "1" ]]; then
         printf 'encapsulation\ttls\n'
         timeout 30 python3 "$tool" send "$host" "$port" "$hex" --tls \
-            ${LTE_DIAMETER_INSECURE:+--insecure} --wait "${LTE_WAIT:-0}"
+            ${LTE_DIAMETER_INSECURE:+--insecure} --wait "$wait"
     else
         printf 'encapsulation\ttcp\n'
         printf 'note\tno CER/CEA handshake and no answer matching; this sends and reads\n'
-        timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${LTE_WAIT:-0}"
+        timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "$wait"
     fi
 }
 
@@ -3876,9 +3924,9 @@ lcore_cli_main() {
         --gtp-modify-bearer) lcore_cmd_gtp_modify_bearer "${1:-}" "${2:-5}" ;;
         --gtp-in-gtp)    lcore_cmd_gtp_in_gtp "$@" ;;
         --mbms-session)  lcore_cmd_mbms_session "$@" ;;
-        --gtpc-send)     lcore_cmd_gtpc_send "${1:-}" "${2:-2123}" "${3:-}" ;;
+        --gtpc-send)     lcore_cmd_gtpc_send "$@" ;;
         --flood-model)   lcore_flood_model "${1:-2000}" "${2:-500}" "${3:-100}" ;;
-        --diameter-send) lcore_cmd_diameter_send "${1:-}" "${2:-3868}" "${3:-}" ;;
+        --diameter-send) lcore_cmd_diameter_send "$@" ;;
         --gtpdoor-detect) lcore_cmd_gtpdoor "${1:-}" ;;
         --cdr-fraud-check) lcore_cmd_cdr_fraud "${1:-}" ;;
         --fs20-audit)    lcore_cmd_fs20 "${1:-}" ;;
@@ -3917,7 +3965,7 @@ Usage: $0 COMMAND
                               build a GTPv2-C MBMS Session Start Request
                               (TS 29.274 §7.13.1, type 231); --mood marks the
                               MBMS-over-Demand (unicast-originated) variant
-  --gtpc-send <host> [port] [hex]
+  --gtpc-send <host> [port] [hex] [--wait N]   send over UDP and read the answer when there is one
                               send the Create Session Request over UDP 2123
                               (no arming needed)
   --flood-model [hss-air/s] [mme-sess/s] [mbps]

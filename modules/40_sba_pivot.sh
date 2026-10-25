@@ -1318,9 +1318,23 @@ M
 # none" rather than pretending to be a client.  No arming: SBA_ARMED is
 # accepted and ignored and the request goes out on the first invocation.
 sbap_cmd_sbi_send() {
-    local host="${1:-}" port="${2:-443}" hex="${3:-}"
+    local host="" port=443 hex="" wait="${SBI_WAIT:-0}"
+    while (( $# )); do
+        case "$1" in
+            --wait) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                        printf 'ERROR\t--wait takes seconds\n' >&2; return 2; }
+                    wait="$2"; shift 2 ;;
+            -*)     printf 'ERROR\t--sbi-send does not take %s\n' "$1" >&2; return 2 ;;
+            *)      [[ -n "$1" ]] || { shift; continue; }
+                    if [[ -z "$host" ]]; then host="$1"
+                    elif [[ -z "$hex" && "$1" =~ ^[0-9]{2,5}$ ]]; then port="$1"
+                    elif [[ -z "$hex" ]]; then hex="$1"
+                    else printf 'ERROR\t--sbi-send takes <nf-host> [port] <framed-http2-hex> [--wait N]\n' >&2; return 2; fi
+                    shift ;;
+        esac
+    done
     local tool="$IMSISTING_ROOT/tools/stream_assoc.py"
-    if [[ -z "$host" || -z "$hex" ]]; then
+    if [[ -z "$host" || -z "$hex" || "$host" =~ ^[0-9]+$ ]]; then
         printf 'ERROR\tneed <nf-host> [port] <framed-http2-hex>: this sends frames, it does not make them\n' >&2
         return 2
     fi
@@ -1328,14 +1342,29 @@ sbap_cmd_sbi_send() {
     printf 'leg\tSBI, HTTP/2 over TLS\n'
     printf 'target\t%s:%s\n' "$host" "$port"
     printf 'framing\tnone: the octets are sent as given, so they must already be HTTP/2 frames\n'
+    local out rep rc=0
     if [[ "${SBI_PLAIN:-0}" == "1" ]]; then
         printf 'encapsulation\ttcp (SBI_PLAIN=1; never a real core)\n'
-        timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "${SBI_WAIT:-0}"
+        out=$(timeout 30 python3 "$tool" send "$host" "$port" "$hex" --wait "$wait" 2>&1) || rc=$?
     else
         printf 'encapsulation\ttls\n'
-        timeout 30 python3 "$tool" send "$host" "$port" "$hex" --tls \
-            ${SBI_INSECURE:+--insecure} --wait "${SBI_WAIT:-0}"
+        out=$(timeout 30 python3 "$tool" send "$host" "$port" "$hex" --tls \
+            ${SBI_INSECURE:+--insecure} --wait "$wait" 2>&1) || rc=$?
     fi
+    printf '%s\n' "$out"
+    rep=$(printf '%s\n' "$out" | awk -F'\t' '$1=="reply_hex"{print $2}')
+    if [[ -n "$rep" ]]; then
+        local frames
+        frames=$(sbap_h2_parse "$rep" 2>/dev/null | awk -F'\t' '$1=="type_name"{print $2}' | paste -sd, -)
+        if [[ -n "$frames" ]]; then
+            printf 'reply_decoded\t%s\n' "$frames"
+        else
+            printf 'reply_decoded\tnone: %s octets came back and they are not HTTP/2 frames this tree can read\n' "$(( ${#rep} / 2 ))"
+        fi
+    elif [[ "$wait" != "0" ]]; then
+        printf 'reply_decoded\tnone within %ss\n' "$wait"
+    fi
+    return "$rc"
 }
 
 sbap_cli_main() {
@@ -1346,7 +1375,7 @@ sbap_cli_main() {
         --h2-types)    sbap_h2_types ;;
         --h2-build)    sbap_h2_build "${1:-0}" "${2:-0}" "${3:-0}" "${4:-}" ;;
         --h2-parse)    sbap_h2_parse "${1:-}" ;;
-        --sbi-send)    sbap_cmd_sbi_send "${1:-}" "${2:-443}" "${3:-}" ;;
+        --sbi-send)    sbap_cmd_sbi_send "$@" ;;
         --settings)    sbap_settings_parse "${1:-}" ;;
         --hpack)       sbap_cmd_hpack "$@" ;;
         --nrf)         sbap_nrf_discovery "${1:-UDM}" "${2:-AMF}" ;;
