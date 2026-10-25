@@ -12,8 +12,8 @@
 # slots for a given subcarrier spacing of 15 kHz"), and TS 38.213 clause 9 adds
 # 2^(mu-mu_Koffset)*K_offset slots in the carrier's numerology with
 # mu_Koffset = 0 in FR1 and in FR2-NTN. So the carrier SCS changes the slot
-# count the UE schedules with, not the delay in milliseconds. SIB19 itself is
-# not decoded here: this tree has no NR RRC ASN.1 layout table.
+# count the UE schedules with, not the delay in milliseconds. SIB19 is
+# decoded and built through the generated NR table (--sib19, --sib19-build).
 #
 # Attack owned: none direct — cell reconnaissance and timing analysis for NTN
 # access (extends 02_cell_recon and 12_nr_air to a satellite cell).
@@ -459,6 +459,59 @@ ntn_feeder_link() {
     return 2
 }
 
+# ── F4: listening for a satellite cell ──────────────────────────────────
+# A satellite cell is an ordinary NR cell with a round trip that no terrestrial
+# timing budget assumed, so the receiver half is a tuning problem plus a
+# signature: a cell that broadcasts SIB19, whose timing moves with the sky, and
+# whose round trip is milliseconds rather than microseconds.
+ntn_scan_plan() {
+    cat <<'EOF'
+status	plan
+what	listen for an NTN cell's downlink and tell it apart from a terrestrial one
+hardware	an SDR that covers the band (n255 DL 1525-1559 MHz, n256 DL 2170-2200 MHz) with a pass to receive, or an NTN-capable UE with the satellite profile enabled
+software	a receiver that decodes NR downlink: srsRAN Project with an NR-NTN build, or a spectrum recorder plus an offline decoder; the SIB19 this module decodes (--sib19) is the payload to look for
+step	tune	the band in the table above; a satellite downlink is a normal NR carrier with a wide beam, so a 20 MHz capture at the right centre frequency is enough to find it
+step	find	the SSB and read the cell's MIB; a satellite cell's MIB is unremarkable, so the discriminator is what comes after it
+step	decode	read SIB1, then SIB19 if the cell broadcasts it; SIB19 is what makes the cell NTN and this module's --sib19 reads it once you have the bits
+step	measure	the round trip: a terrestrial cell is under about 0.15 ms, an NTN cell is 2-40 ms one way, so the timing advance the network commands is the first give-away
+step	watch	the timing advance and Doppler over a pass: a satellite's Doppler sweeps through zero as it passes overhead, which no terrestrial cell does
+step	confirm	the ephemeris in SIB19 against a published orbit: a cell claiming a satellite that is not overhead is a fake, and that is the F5 question
+signal	ta_extended	a timing advance beyond the LTE range (1282 units) or a K_offset above 1 ms is an NTN-sized delay
+signal	sib19	the cell broadcasts SIB19, which a terrestrial cell has no reason to send
+signal	doppler_sweep	a carrier frequency offset that changes sign over minutes, consistent with a pass
+signal	rtt_jitter	a round trip that drifts smoothly rather than sitting at a constant value
+finding	ntn_signals_are_three	INFO	no single field says NTN: the round trip, the SIB19 presence and the Doppler sweep together do, and a cell that fakes one usually misses the others
+verdict	receive_plan_only
+limit	the capture and the decode happen outside this module; it gives the tuning, the signature and the interpretation, not a receiver
+note	receiving a satellite downlink in a band you are authorised to receive is passive; decoding an operator's signalling beyond what a normal UE does is covered by the local rules on radio interception
+EOF
+}
+
+# ── F5: broadcasting a fake satellite cell ──────────────────────────────
+# The transmit half is harder than the terrestrial fake cell for three reasons:
+# the band, the delay, and the orbit the UE can check.
+ntn_fakecell_plan() {
+    cat <<'EOF'
+status	plan
+what	broadcast downlink that presents itself as an NTN cell
+hardware	an SDR with a PA on the NTN downlink band (n255 DL 1525-1559 MHz or n256 DL 2170-2200 MHz); transmitting there is licensed to the operator
+software	an NR gNB that can be told its own delay profile (srsRAN Project with NTN support), and this module's --sib19-build for the SIB19 the cell must broadcast
+need_band	a carrier in the NTN band: a UE only scans bands its profile lists, so the fake cell is invisible to a phone that is not NTN-enabled
+need_sib19	SIB19 with a plausible ephemeris, a K_offset sized for the delay, and a reference location; without SIB19 the cell is not NTN to the UE
+need_delay	the gNB must run with the propagation delay it claims: a fake NTN cell that answers at terrestrial speed is rejected by timing checks, and this module's --ephemeris-hijack works out how far a wrong number puts the UE
+need_uplink	if the session goes beyond broadcast and the UE tries to attach, the uplink has to be received and relayed, which is the duplex the terrestrial fake cell only needs once
+step	build	--sib19-build --koffset N --validity sN with a reference location and distance threshold that match the claimed orbit
+step	run	bring up the gNB with the delay profile, then let the UE find the cell; watch the timing advance the UE reports back, which should sit where the delay predicts
+step	observe	what a UE does with a fake NTN cell is the interesting part: it holds the timing for the validity window and then declares out of sync
+finding	three_locks	HIGH	band, SIB19 and delay are three independent locks and a real NTN pass opens all three at once
+finding	orbit_checkable	MEDIUM	the ephemeris is checkable against public orbit data and against GNSS, so the fake cell needs a satellite that is genuinely overhead or a UE that does not check
+finding	uplink_needed_late	INFO	broadcast needs only the downlink; anything past that needs the duplex the terrestrial fake cell also needs
+verdict	transmit_plan_only
+limit	the transmitter and the delay-capable gNB are outside this module; --sib19-build gives the payload and --ephemeris-hijack gives the consequence of the numbers
+note	transmitting on an NTN band is licensed to that operator; a fake cell on those frequencies is both a radio offence and an interference problem
+EOF
+}
+
 ntn_plan() {
     cat <<'EOF'
 status	handoff
@@ -575,6 +628,16 @@ ntn_selftest() {
     chk geo-slant "$(printf '%s\n' "$gl" | awk -F'\t' '$1=="slant_range_km"{print $2}')" "936.9"
     chk geo-radius "$(printf '%s\n' "$gl" | awk -F'\t' '$1=="ground_radius_km"{print $2}')" "719.5"
     chk geo-verdict "$(printf '%s\n' "$gl" | awk -F'\t' '$1=="verdict"{print $2}')" "position_circle_only"
+
+    local sp fp
+    sp=$(ntn_scan_plan)
+    fp=$(ntn_fakecell_plan)
+    chk scan-plan-status "$(printf '%s\n' "$sp" | awk -F'\t' '$1=="status"{print $2}')" "plan"
+    chk scan-plan-sib19 "$(printf '%s\n' "$sp" | grep -c "SIB19")" "5"
+    chk scan-plan-signals "$(printf '%s\n' "$sp" | grep -c '^signal')" "4"
+    chk fake-plan-locks "$(printf '%s\n' "$fp" | awk -F'\t' '$1=="finding" && $2=="three_locks"{print $3}')" "HIGH"
+    chk fake-plan-licensed "$(printf '%s\n' "$fp" | grep -c "licensed to that operator")" "1"
+    chk fake-plan-steps "$(printf '%s\n' "$fp" | grep -c '^step')" "3"
     chk geo-single "$(printf '%s\n' "$gl" | awk -F'\t' '$1=="finding" && $2=="single_measurement"{print $3}')" "MEDIUM"
     local g2; g2=$(ntn_timing_geoloc --range-km 620 --sat-lat 48 --sat-lon 11 --sat-alt 600 --range2-km 665 --sat2-lat 51 --sat2-lon 14)
     chk geo-candidates "$(printf '%s\n' "$g2" | grep -c '^candidate')" "2"
@@ -631,6 +694,8 @@ ntn_cli_main() {
         --sib19-build) ntn_sib19_build "$@" ;;
         --ephemeris-hijack) ntn_ephemeris_hijack "$@" ;;
         --timing-geoloc)  ntn_timing_geoloc "$@" ;;
+        --scan-plan)      ntn_scan_plan ;;
+        --fakecell-plan)  ntn_fakecell_plan ;;
         --feeder)      ntn_feeder_link ;;
         --plan)        ntn_plan ;;
         --selftest)    ntn_selftest ;;
@@ -645,6 +710,8 @@ Usage: $0 COMMAND
   --range <one_way_km>      one-way and round-trip delay
   --ta <one_way_km>         TA units needed vs the LTE TA range
   --koffset <slots> [scs_khz] [sample_rate_hz]   K_offset (TS 38.331, 15 kHz reference slots) -> ms and samples
+  --scan-plan               what to listen for, and the three signals that say NTN
+  --fakecell-plan           what broadcasting a satellite cell needs, and where it fails
   --timing-geoloc (--ta N | --range-km KM) --sat-lat DEG --sat-lon DEG --sat-alt KM
                             one range gives a circle; two give the pair of ground points
   --ephemeris-hijack --true-range KM --forged-range KM --koffset N
