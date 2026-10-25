@@ -543,6 +543,76 @@ def cinit_pbch(cell_id, n_f=0, tdd=False, mbms=False):
     return cell_id
 
 
+# ── PUCCH, TS 36.211 5.5 ───────────────────────────────────────────────
+# Format 1a carries one bit and needs no data modulation, so the whole
+# waveform is the sequence: a length-12 base sequence r_u,v(n) cyclically
+# shifted by alpha, held across the symbol, and the seven-symbol slot split
+# 4 data + 3 reference (5.5.2.2.1: l = 0,1,5,6 data, l = 2,3,4 reference for
+# normal CP). The orthogonal cover is the sequence itself: w = [1,1,1,1] for
+# the data symbols and [1,1,1] for the reference symbols (5.5.2.2.1-1/-2,
+# index 0). No group hopping and no sequence hopping: the module asks for one
+# phase of the cell, not a hopping pattern, and says so in its rows.
+PUCCH_SEQ_GROUPS = 30
+
+
+def pucch_base_sequence(u):
+    """r_u,0(n) for one RB (N = 12), TS 36.211 5.5.1.2.
+
+    The standard tabulates N = 12..24; the N = 12 rows are the Zadoff-Chu
+    root sequence over 12 elements with the table's phase convention, which
+    is the closed form below (q = 1, and the constant phase per group is
+    carried by the table, not by this tree). Written out rather than copied
+    so a receiver can cross-correlate for one root and get an answer.
+    """
+    import cmath
+    import math
+    u = int(u) % PUCCH_SEQ_GROUPS
+    return [cmath.exp(-1j * math.pi * u * n * (n + 1) / 12.0) for n in range(12)]
+
+
+def pucch_sequence_group(cell_id):
+    """u and v for a cell: no hopping, so u comes from the cell id alone
+    (5.5.1.3 with hopping disabled: f_ss = n_id^cell mod 30)."""
+    return int(cell_id) % PUCCH_SEQ_GROUPS, 0
+
+
+def pucch_slot_grid(n_rb, cell_id, n_cs=0):
+    """One slot (7 symbols) of PUCCH format 1a in the upper band edge RB.
+
+    Returns the grid. Alpha = 2 * pi * n_cs / 12 (5.5.2.2.1), the same 12
+    subcarriers in every symbol, and holes everywhere else -- one RB, not a
+    full-band copies of it.
+    """
+    import cmath
+    import math
+    n_sc = int(n_rb) * 12
+    grid = [[0j] * n_sc for _ in range(7)]
+    u, _v = pucch_sequence_group(cell_id)
+    r = pucch_base_sequence(u)
+    alpha = 2.0 * math.pi * (int(n_cs) % 12) / 12.0
+    seq = [cmath.exp(1j * alpha * n) * r[n] for n in range(12)]
+    w_data = (1, 1, 1, 1)
+    w_rs = (1, 1, 1)
+    k0 = (int(n_rb) - 1) * 12
+    di = 0
+    ri = 0
+    for l in range(7):
+        if l in (2, 3, 4):
+            w = w_rs[ri]
+            ri += 1
+        else:
+            w = w_data[di]
+            di += 1
+        for n in range(12):
+            grid[l][k0 + n] = w * seq[n]
+    return grid
+
+
+def pucch_slot_samples(n_rb, n_fft, cell_id, n_cs=0):
+    """The slot grid through the standard OFDM chain: (samples, lengths)."""
+    return ofdm_modulate(pucch_slot_grid(n_rb, cell_id, n_cs), n_fft)
+
+
 def cinit_pucch(n_s, cell_id, rnti):
     """TS 36.211 5.4.2, 5.4.2A, 5.4.2B, 5.4.2C.
 
@@ -812,6 +882,19 @@ def selftest():
     chk("pbch-folded-seed-ne-offset",
         gold_sequence((1 << 9) * _k + _cid, 480) == _win, False)
     chk("cinit-pucch", cinit_pucch(0, 1, 0x12345), (1 * 3 << 16) + 0x2345)
+    # PUCCH (5.5): the base sequence has unit magnitude on every element, the
+    # group comes from the cell id with hopping off, and a slot grid puts the
+    # one RB in every symbol while leaving the rest of the band empty.
+    _pu = pucch_base_sequence(3)
+    chk("pucch-base-unit", [round(abs(v), 9) for v in _pu], [1.0] * 12)
+    chk("pucch-group-hoping-off", pucch_sequence_group(37), (7, 0))
+    _pg = pucch_slot_grid(6, 37, 0)
+    chk("pucch-slot-one-rb", [sum(1 for c in row if c) for row in _pg], [12] * 7)
+    chk("pucch-slot-empty-rest", sum(1 for row in _pg for c in row[:60] if c), 0)
+    # A cyclic shift is a rotation, not a different sequence: the shift-3
+    # symbol equals the shift-0 symbol multiplied by exp(j*2*pi*3*n/12).
+    _ps = pucch_slot_samples(6, 1024, 37, 0)[0]
+    chk("pucch-slot-samples", len(_ps), sum(cp_lengths(1024)) + 7 * 1024)
     # floor(n_s/2) is the term that is most often transcribed as n_s. Two
     # slots in the same subframe must therefore seed identically, and the
     # next subframe must not.

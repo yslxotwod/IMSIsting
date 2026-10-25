@@ -429,30 +429,26 @@ def cmd_counters(argv):
 # half the samples at zero and the analyser's activity_fraction reads it back.
 
 JAMD_SHAPES = ('awgn', 'cw', 'chirp',
-               'pss', 'sss', 'pbch', 'prach', 'prs', 'gps-ca', 'nr-ssb')
+               'pss', 'sss', 'pbch', 'pucch', 'prach', 'prs', 'gps-ca',
+               'nr-ssb')
 # Named, refused, and reported in its own fields: the name, why it is refused
 # and (for a shape someone might expect) what to use instead. --status,
 # --status-tsv and --tx-status print every one of these, and --tx-build prints
 # the matching line before exiting 3, so a caller that saw a name in
 # JAMD_SHAPES_REFUSED never has to guess why it is not in JAMD_SHAPES.
-JAMD_SHAPES_REFUSED = ('lte-ssb', 'pucch')
+JAMD_SHAPES_REFUSED = ('lte-ssb',)
 JAMD_SHAPE_REASON = (
     ('lte-ssb',
      'replaced by three shapes: an LTE sync block is PSS + SSS + PBCH, and '
      '--shape pss, --shape sss and --shape pbch now build each of them from '
      'tools/lte_phy.py; no producer in this tree emits one "lte-ssb" sample '
      'stream, so there is nothing to copy under that name'),
-    ('pucch',
-     'tools/lte_phy.py carries only the PUCCH scrambling seed (cinit_pucch, '
-     'TS 36.211 5.4.1.1) -- no format 1/2/3 sequence, no group or sequence '
-     'hopping, no orthogonal cover -- so there is no PUCCH waveform to copy '
-     'and this module will not invent one'),
 )
 # The shapes whose samples come from a producer elsewhere in the tree. Each
 # one names its producer in JAMD_SHAPE_PRODUCER, prints it in the `producer`
 # row of --tx-build, and is placed at baseband centre by the same machinery
 # the synthesised shapes use (peak, pulse train, writers).
-JAMD_SIGNAL_SHAPES = ('pss', 'sss', 'pbch', 'prach', 'prs', 'gps-ca', 'nr-ssb')
+JAMD_SIGNAL_SHAPES = ('pss', 'sss', 'pbch', 'pucch', 'prach', 'prs', 'gps-ca', 'nr-ssb')
 JAMD_SHAPE_PRODUCER = (
     ('awgn', 'this module: numpy FFT mask in build()'),
     ('cw', 'this module: complex exponential in build()'),
@@ -464,6 +460,8 @@ JAMD_SHAPE_PRODUCER = (
     ('pbch',
      'tools/lte_phy.py: pbch_encode + pbch_scramble + pbch_frame_bits + '
      'qpsk_modulate + pbch_re_positions + ofdm_modulate'),
+    ('pucch',
+     'tools/lte_phy.py: pucch_slot_grid + ofdm_modulate (TS 36.211 5.5)'),
     ('prach', 'tools/phy_seqs.py gen --seq prach (TS 36.211 5.7.2)'),
     ('prs', 'tools/phy_seqs.py gen --seq prs (TS 36.211 6.10.4)'),
     ('gps-ca', 'tools/phy_seqs.py gen --seq gps-ca (IS-GPS-200 3.2.2)'),
@@ -720,6 +718,38 @@ def signal_lte(shape, rate, sig):
         ]
         clause = ('the 72 subcarriers PSS/SSS occupy (6 RB of 15 kHz, '
                   'TS 36.211 6.11)')
+    elif shape == 'pucch':
+        if not 0 <= cell <= 503:
+            die2('--pci %d is outside an LTE cell id (0..503)' % cell)
+        n_cs = int(sig['ncs'])
+        if not 0 <= n_cs <= 11:
+            die2('--ncs %d is outside a cyclic shift (0..11)' % n_cs)
+        u, v = phy.pucch_sequence_group(cell)
+        grid = phy.pucch_slot_grid(n_rb, cell, n_cs)
+        extra = [
+            ('signal', 'LTE PUCCH format 1a, TS 36.211 5.5.1/5.5.2.2: one RB '
+                       '(12 subcarriers) in the band edge, cyclic shift %d, '
+                       'data symbols l = 0,1,5,6 and reference symbols '
+                       'l = 2,3,4, cover index 0' % n_cs),
+            ('cell_id', str(cell)),
+            ('sequence_group_u', str(u)),
+            ('sequence_v', str(v)),
+            ('group_hopping', 'off (one phase of the cell, not a hopping '
+                              'pattern)'),
+            ('n_cs', str(n_cs)),
+            ('pucch_format', '1a'),
+            ('pucch_occupied_rb', str(n_rb - 1)),
+            ('lte_n_rb', str(n_rb)),
+            ('lte_n_fft', str(n_fft)),
+            ('lte_sample_rate_hz', str(int(rate))),
+            ('repeat', 'one slot (7 symbols, %d samples) tiled to the capture '
+                       'length: a handset sends PUCCH in its uplink slot, this '
+                       'constructor emits it continuously so the duty cycle is '
+                       '--on/--off, not the frame timing'
+             % phy.slot_samples(n_fft)),
+        ]
+        clause = ('the one RB the PUCCH occupies (12 x 15 kHz = 180 kHz, '
+                  'TS 36.211 5.5.2)')
     else:
         if not 0 <= cell <= 503:
             die2('--pci %d is outside an LTE cell id (0..503)' % cell)
@@ -762,14 +792,15 @@ def signal_lte(shape, rate, sig):
     samples, lengths = phy.ofdm_modulate(grid, n_fft)
     x = np.asarray(samples, dtype=np.complex128)
     extra.append(('slot_samples', str(len(x))))
-    return x, extra, int(round(72 * 15000)), clause
+    occ_hz = int(round(12 * 15000)) if shape == 'pucch' else int(round(72 * 15000))
+    return x, extra, occ_hz, clause
 
 
 def signal_iq(shape, rate, secs, n, sig):
     """The named signal's samples plus the rows that describe where they came
     from. Returns a dict; `rate` and `n` can come back changed (prs is
     RE-domain, so its rate is the producer's frame rate, not --rate)."""
-    if shape in ('pss', 'sss', 'pbch'):
+    if shape in ('pss', 'sss', 'pbch', 'pucch'):
         block, extra, occ, clause = signal_lte(shape, rate, sig)
         x, pad, cut = fit_to(np.resize(block, n), n)
         extra.append(('occupied_basis', clause))
@@ -1638,7 +1669,7 @@ jamd_scope_check() {
 # condition of the build, not a nicety, so it lives in the module's own output.
 
 JAMD_TX_DEFAULT_RATE=20000000
-JAMD_TX_SHAPE_NAMES="awgn cw chirp pss sss pbch prach prs gps-ca nr-ssb lte-ssb pucch"
+JAMD_TX_SHAPE_NAMES="awgn cw chirp pss sss pbch pucch prach prs gps-ca nr-ssb lte-ssb"
 
 #
 # stderr, deliberately. Every verb that prints machine-readable TSV prints it on
@@ -2266,12 +2297,12 @@ print('yes' if len(x)==200000 else 'no')" "$d/armed.cu8" 2>/dev/null)" "yes"
     # tools/lte_phy.py, 12_nr_air --ssb-waveform). The status must name both,
     # because "this module can generate an SSB" and "12_nr_air generates an SSB
     # and this module transmits it" are different claims.
-    chk tx-status-shapes "$(fld "$out" shapes)" "awgn cw chirp pss sss pbch prach prs gps-ca nr-ssb"
+    chk tx-status-shapes "$(fld "$out" shapes)" "awgn cw chirp pss sss pbch pucch prach prs gps-ca nr-ssb"
     # lte-ssb is not refused for lack of a producer -- 12_nr_air and the LTE
     # table both exist -- it is refused because this module has no OFDM
     # modulator, which is exactly what the nr-ssb shape proves by not needing
     # one (it consumes the samples 12_nr_air already produced).
-    chk tx-status-shapes-refused "$(fld "$out" shapes_refused)" "lte-ssb pucch"
+    chk tx-status-shapes-refused "$(fld "$out" shapes_refused)" "lte-ssb"
     chk tx-status-modes "$(fld "$out" modes)" "barrage narrowband"
 
     # 9. Status invariants.
@@ -2600,11 +2631,17 @@ KATPY
     # 12h. What is refused, and the reason reaching the caller. A refusal that
     #      prints nothing is indistinguishable from a bug, so the reason is a
     #      machine-readable row on stdout as well as ERROR/WHY on stderr.
+    # PUCCH is built, not refused: one RB of format 1a from lte_phy's own
+    # sequence, in narrowband mode, at an LTE rate.
     srows=$(jamd_py build "$d/pucch.cf32" narrowband pucch cf32 15360000 0.01 \
-            2650000000 "" 1.0 1.0 0.0 20240101 0 "" 2>/dev/null); gaterc=$?
-    chk pucch-refused "$gaterc" "3"
-    chk pucch-wrote-nothing "$([[ -e "$d/pucch.cf32" ]] && echo yes || echo no)" "no"
-    chk pucch-reason "$(printf '%s\n' "$srows" | grep -c 'cinit_pucch')" "1"
+            2650000000 "" 1.0 1.0 0.0 20240101 0 "pci=37,ncs=3" 2>/dev/null); gaterc=$?
+    chk pucch-built "$gaterc" "0"
+    chk pucch-wrote-samples "$([[ -s "$d/pucch.cf32" ]] && echo yes || echo no)" "yes"
+    chk pucch-format "$(fld "$srows" pucch_format)" "1a"
+    chk pucch-group "$(fld "$srows" sequence_group_u)" "7"
+    chk pucch-shift "$(fld "$srows" n_cs)" "3"
+    chk pucch-producer "$(fld "$srows" producer)" \
+        "tools/lte_phy.py: pucch_slot_grid + ofdm_modulate (TS 36.211 5.5)"
     srows=$(jamd_py build "$d/lte-ssb.cf32" narrowband lte-ssb cf32 15360000 0.01 \
             2650000000 "" 1.0 1.0 0.0 20240101 0 "" 2>/dev/null); gaterc=$?
     chk lte-ssb-refused "$gaterc" "3"
@@ -2646,8 +2683,8 @@ KATPY
     # 12i. The shape table is answered by both verbs, and the bash-side name
     #      list cannot drift from the python one without this failing.
     out=$(jamd_cli_main --shapes 2>/dev/null)
-    chk shapes-verb-shapes "$(fld "$out" shapes)" "awgn cw chirp pss sss pbch prach prs gps-ca nr-ssb"
-    chk shapes-verb-refused "$(fld "$out" shapes_refused)" "lte-ssb pucch"
+    chk shapes-verb-shapes "$(fld "$out" shapes)" "awgn cw chirp pss sss pbch pucch prach prs gps-ca nr-ssb"
+    chk shapes-verb-refused "$(fld "$out" shapes_refused)" "lte-ssb"
     chk shapes-verb-nrssb "$(printf '%s\n' "$out" | awk -F'\t' \
             '$1=="shape_producer"&&$2=="nr-ssb"{print $3}')" \
         "modules/12_nr_air.sh --ssb-waveform (TS 38.211 7.4.3)"
@@ -2657,7 +2694,7 @@ KATPY
                 '($1=="shape_producer"||$1=="shape_refused_reason")&&$2==n{f=1} END{exit !f}' \
                 || echo "$n"; done | wc -l)" "0"
     chk status-names-shapes "$(jamd_cli_status_tsv | awk -F'\t' '$1=="shapes"{print $2}')" \
-        "awgn cw chirp pss sss pbch prach prs gps-ca nr-ssb"
+        "awgn cw chirp pss sss pbch pucch prach prs gps-ca nr-ssb"
 
     # 12j. A PRACH-shaped capture is the analyser's own measurement of a real
     #      preamble: one 1.04875 MHz slice of a 20 MHz span, which is what
@@ -2780,7 +2817,7 @@ A reference-signal shape is built in --mode narrowband only, at the rate its
 producer samples at (LTE: 1920000 3840000 7680000 15360000 23040000 30720000;
 NR SSB: --rate must be N_FFT x --scs; prs is RE-domain and ignores --rate).
 Refused by name, with the reason in --shapes: lte-ssb (now pss/sss/pbch),
-pucch (no sequence in tools/lte_phy.py).
+lte-ssb only (an LTE sync block is pss/sss/pbch).
 Producer parameters, all optional: --prn --pci --root --ncs --v --i-ssb
 --n-rb --ports --mib --n-rb-prs --n-rb-dl --scs.
 
