@@ -328,6 +328,95 @@ iot_nprfcn_to_mhz() {
 # NB-IoT device will actually attach to, and flooding its NPRACH, both need
 # hardware this tree does not assume — so they ship as labelled plan files
 # whose first lines are `status: handoff` and the exact hardware.
+# ── I4: the narrowband attach, end to end ───────────────────────────────
+# NB-IoT is not a different NAS. The attach that a UE performs on a
+# narrowband carrier is the same Attach Request, the same identity response and
+# the same security mode command as on LTE; what changes is the transport, the
+# number of repetitions each message is given, and the fact that a device may
+# be reachable only inside a paging window that lasts seconds. This verb lists
+# the sequence so the difference is visible where it actually is, and states
+# the one thing the sequence does not change: an identity request on NB-IoT is
+# as loud as an identity request anywhere else.
+iot_nb_attach() {
+    local ce="${1:-0}"
+    [[ "$ce" =~ ^[0-2]$ ]] || { printf 'ERROR\tcoverage enhancement level is 0, 1 or 2\n' >&2; return 2; }
+    local mode="${2:-in-band}"
+    case "$mode" in in-band|guard-band|standalone) ;; *)
+        printf 'ERROR\tmode is in-band, guard-band or standalone\n' >&2; return 2 ;; esac
+
+    printf 'step\tprocedure\tmessage\tdirection\tfields\tref\n'
+    cat <<'EOF'
+1	rrc	RRCConnectionRequest-NB	ul	establishmentCause, ue-Identity (S-TMSI or a random value)	TS 36.331 5.3.3.3
+2	rrc	RRCConnectionSetup-NB	dl	radioResourceConfigDedicated-NB: SRB1, and SRB1bis when CP CIoT	TS 36.331 6.2.2
+3	rrc	RRCConnectionSetupComplete-NB	ul	selectedPLMN-Identity, dedicatedInfoNAS carrying the Attach Request	TS 36.331 5.3.3
+4	nas	Attach Request	ul	EPS attach type, EPS mobile identity, UE network capability (the CIoT bits live here), ESM container	TS 24.301 8.2.4
+5	nas	Identity Request / Response	dl then ul	IMSI, asked exactly when there is no usable GUTI: the same NAS message as on any other RAT	TS 24.301 8.2.25
+6	nas	Authentication Request, Security Mode Command	dl then ul	the vectors and KASME that the core derives; nothing narrowband-specific	TS 24.301 5.4.2
+7	rrc	RRCConnectionReconfiguration-NB	dl	SRB1bis, and a user plane only when UP CIoT was granted	TS 36.331 5.3.5
+8	nas	Attach Accept	dl	EPS bearer, APN, CIoT EPS optimisation IE (CP or UP), DRX and eDRX parameters	TS 24.301 8.2.1
+9	rrc	RRCConnectionRelease	dl	releaseCause, extendedWaitTime (a cell can hold a device off with it), resumeIdentity when the context is kept	TS 36.331 6.2.2
+10	rrc	RRCConnectionSuspend-NB	dl	suspendConfig, resumeIdentity: the radio goes away and the context stays in the core	TS 36.331 5.3.13
+11	rrc	Early Data Transmission	ul	CP-EDT puts the Attach Request inside msg3; UP-EDT sends data on the resume	TS 36.300 22.4, TS 36.331 5.3.3.1a
+12	ce	Coverage enhancement	both	the level multiplies repetitions of NPUSCH and NPDCCH by a count the cell configures, not by a constant	TS 36.321 5.1, TS 36.211 10.1.6
+EOF
+    printf 'ce_level\t%s\n' "$ce"
+    printf 'mode\t%s\n' "$mode"
+    case "$ce" in
+        0) printf 'ce_meaning\tno repetition budget beyond the cell baseline; the level a device uses when the measured RSRP is good\n' ;;
+        1) printf 'ce_meaning\tone step of repetition;\nthe count itself comes from nprach-ConfigSIB-NB and the pdsch/pusch config, so it is a cell decision\n' ;;
+        2) printf 'ce_meaning\tthe deepest budget the cell offers; every message is repeated and the paging window is long enough to be measured in seconds\n' ;;
+    esac
+    printf 'ce_repetitions_source\tthe broadcast configuration of the cell, read with --nprach-decode; the standard fixes the mechanism and leaves the count to the operator\n'
+    printf 'nas_unchanged\tyes: the narrowband flow is the same EMM attach on a different transport, so identity exposure is not reduced and not increased\n'
+    printf 'reachability\ta device on this level may listen only inside its paging window, which is why a page can take seconds to land\n'
+    printf 'ref\tTS 36.331 5.3.3, TS 24.301 8.2.4, TS 36.300 22.4, TS 36.304 7.1\n'
+    printf 'limit\tthis is the message sequence, not the bytes: the NB-IoT RRC codec here decodes SIB1-NB, SIB2-NB and MIB-NB, and the RRCConnection* messages are read as ASN.1 names only when a capture supplies them\n'
+    return 0
+}
+
+# ── I4: where coverage enhancement can be turned against the cell ───────
+# The coverage enhancement level is the one number in this flow that a device
+# reports and the cell obeys. Nothing in the air interface proves the report,
+# so the abuse surface is arithmetic rather than cryptanalysis: one level of
+# inflation multiplies the repetitions the cell schedules for that device, and
+# the repetition count is what the sector spends.
+iot_ce_abuse() {
+    local ce=2 ues=1000 rep=128
+    while (($#)); do
+        case "$1" in
+            --ce)  ce="${2:-}";  shift 2 ;;
+            --ues) ues="${2:-}"; shift 2 ;;
+            --rep) rep="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ "$ce" =~ ^[0-2]$ ]] || { printf 'ERROR\t--ce is 0, 1 or 2\n' >&2; return 2; }
+    [[ "$ues" =~ ^[0-9]+$ ]] && (( ues > 0 )) || { printf 'ERROR\t--ues must be a positive count\n' >&2; return 2; }
+    [[ "$rep" =~ ^[0-9]+$ ]] && (( rep > 0 )) || { printf 'ERROR\t--rep must be a positive repetition count\n' >&2; return 2; }
+
+    local occ=$(( ues * rep ))
+    printf 'ce_level\t%s\n' "$ce"
+    printf 'ues\t%s\n' "$ues"
+    printf 'repetitions\t%s\n' "$rep"
+    printf 'npdcch_subframes\t%s\n' "$occ"
+    printf 'occupancy_s\t%s\n' "$(awk -v o="$occ" 'BEGIN{printf "%.3f", o/1000}')"
+    printf 'attack\tneeds\teffect\tdetection\tref\n'
+    cat <<'EOF'
+E1 ce_level_inflation	only the report: the level a device asks for is not proved by anything on the air	a device that reports the deepest level while its measured RSRP is good makes the cell spend the deep-level repetition budget on it	per-device CE level compared against the RSRP in the same measurement report	TS 36.321 5.1, TS 36.331 nprach-ConfigSIB-NB
+E2 nprach_congestion	many devices at one level	NPRACH preambles collide, every collision retries with power ramping, and the retries are the load	PRACH/NPRACH collision and retry counters	TS 36.321 5.1.1
+E3 repetition_amplifier	the broadcast repetition count, which is a cell setting	the count is obeyed by every device in the sector, so one setting scales the whole cell's NPDCCH and NPUSCH occupancy	scheduled repetitions against the RSRP distribution of the served devices	TS 36.211 10.1.6, TS 36.300 22.4
+E4 paging_cost	devices inside a long paging window	each page holds NPDCCH for the repetition budget, so a paging test costs repetitions per device rather than one subframe	P-RNTI scheduling and paging load counters	TS 36.304 7.1
+E5 suspend_state	a suspended context in the core	the resume identity is what a device presents later, from wherever it is, and the context was created before it moved	resume failures, TAU after resume, resume identity reuse	TS 24.301 5.3.2A, TS 36.331 5.3.13
+EOF
+    printf 'finding\tce_inflation_is_unproved\tMEDIUM\tthe reported level is what the cell schedules against and nothing on the air proves it\n'
+    printf 'finding\tbroadcast_amplifier\tMEDIUM\tthe repetition count is one cell setting that scales every served device\n'
+    printf 'checkable\tyes: collision, retry and scheduling counters. The abuse is visible in load, not in a message\n'
+    printf 'ref\tTS 36.321 5.1, TS 36.304 7.1, TS 36.211 10.1.6\n'
+    printf 'verdict\tabuse_surface_listed\n'
+    return 0
+}
+
+
 iot_plan() {
     local kind="${1:-}"
     case "$kind" in
@@ -538,6 +627,27 @@ iot_selftest() {
     chk plan-file-names-hw "$(grep -c '^hardware: ' "$plan_file" 2>/dev/null)" "1"
     [[ -n "$plan_file" && -f "$plan_file" ]] && rm -f "$plan_file"
 
+    # I4: the narrowband attach is twelve steps and the same NAS; the abuse
+    # surface is arithmetic on the repetition budget.
+    local naout
+    naout=$(iot_nb_attach 2)
+    chk nb-attach-steps "$(printf '%s\n' "$naout" | awk -F'\t' '$1 ~ /^[0-9]+$/' | wc -l)" "12"
+    chk nb-attach-ce "$(printf '%s\n' "$naout" | awk -F'\t' '$1=="ce_level"{print $2}')" "2"
+    chk nb-attach-nas "$(printf '%s\n' "$naout" | awk -F'\t' '$1=="nas_unchanged" && $2 ~ /^yes/{print "same"}')" "same"
+    chk nb-attach-identity "$(printf '%s\n' "$naout" | awk -F'\t' '$3 ~ /Identity Request/{print "asked"}')" "asked"
+    chk nb-attach-edt "$(printf '%s\n' "$naout" | awk -F'\t' '$3 ~ /Early Data Transmission/{print "present"}')" "present"
+    chk nb-attach-bad-ce "$(iot_nb_attach 3 >/dev/null 2>&1; echo $?)" "2"
+    chk nb-attach-bad-mode "$(iot_nb_attach 0 underwater >/dev/null 2>&1; echo $?)" "2"
+    local ceout
+    ceout=$(iot_ce_abuse --ues 1000 --rep 128)
+    chk ce-subframes "$(printf '%s\n' "$ceout" | awk -F'\t' '$1=="npdcch_subframes"{print $2}')" "128000"
+    chk ce-occupancy "$(printf '%s\n' "$ceout" | awk -F'\t' '$1=="occupancy_s"{print $2}')" "128.000"
+    chk ce-rows "$(printf '%s\n' "$ceout" | awk -F'\t' '$1 ~ /^E[0-9]/' | wc -l)" "5"
+    chk ce-inflation-row "$(printf '%s\n' "$ceout" | awk -F'\t' '$1=="finding" && $2=="ce_inflation_is_unproved"{print $3}')" "MEDIUM"
+    chk ce-verdict "$(printf '%s\n' "$ceout" | awk -F'\t' '$1=="verdict"{print $2}')" "abuse_surface_listed"
+    chk ce-bad-ues "$(iot_ce_abuse --ues 0 >/dev/null 2>&1; echo $?)" "2"
+    chk ce-bad-rep "$(iot_ce_abuse --rep x >/dev/null 2>&1; echo $?)" "2"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -595,6 +705,8 @@ iot_cli_main() {
         --decode-sib1)  iot_decode_sib1_nb "${1:-}" ;;
         --decode-mib)   iot_decode_mib_nb "${1:-}" ;;
         --to-mhz)       iot_nprfcn_to_mhz "${1:-}" ;;
+        --nb-attach)    iot_nb_attach "${1:-0}" "${2:-in-band}" ;;
+        --ce-abuse)     iot_ce_abuse "$@" ;;
         --plan)         iot_plan "${1:-}" ;;
         --selftest)     iot_selftest ;;
         --menu)         iot_menu ;;
@@ -610,6 +722,10 @@ Usage: $0 COMMAND
   --decode-sib1 <hex>  decode a SystemInformationBlockType1-NB
   --decode-mib <hex>   decode a MasterInformationBlock-NB (5 octets, 34 bits)
   --to-mhz <nprfcn>  refuses: TS 36.104 Table 5.7.3-1 is per-band and absent here
+  --nb-attach [ce 0|1|2] [in-band|guard-band|standalone]
+                     the narrowband attach message by message
+  --ce-abuse [--ce N] [--ues N] [--rep N]
+                     where coverage enhancement can be turned against a cell
   --plan <fake-cell|nprach-flood>
                      write a handoff plan (status: handoff) for a vector that
                      needs transmit hardware; no transmission is performed
