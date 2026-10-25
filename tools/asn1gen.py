@@ -171,6 +171,43 @@ def _register_nr():
     }
 
 
+def _register_ranap():
+    """RANAP (TS 25.413), the Iu-CS signalling plane.
+
+    `37_femtocell` describes a macro Iu-CS surface and could build nothing on
+    it: HNBAP and RUA have their own shapes for the home-node path, and a
+    macro RNC speaks RANAP, which is ASN.1 over APER like the rest of the
+    signalling protocols here and therefore reachable with the same closure
+    walk.  The PDU module holds RANAP-PDU and the message wrappers; the
+    contents module holds the InitialUE-Message, Paging, Reset and Overload
+    bodies those wrappers carry.
+    """
+    from pycrate_asn1dir import RANAP
+
+    FAMILIES["ranap"] = {
+        "modules": [
+            ("RANAP-PDU-Descriptions", RANAP.RANAP_PDU_Descriptions),
+            ("RANAP-PDU-Contents", RANAP.RANAP_PDU_Contents),
+            ("RANAP-IEs", RANAP.RANAP_IEs),
+        ],
+        "aliases": {
+            "PDU": "RANAP-PDU-Descriptions",
+            "CONT": "RANAP-PDU-Contents",
+            "IE": "RANAP-IEs",
+        },
+        "default_module": "RANAP-PDU-Descriptions",
+        "default_types": [
+            "PDU.RANAP_PDU",
+            "CONT.InitialUE_Message",
+            "CONT.Paging",
+            "CONT.Reset",
+            "CONT.Overload",
+        ],
+        "out": "ranap_layout.py",
+        "description": "RANAP (TS 25.413)",
+    }
+
+
 def _register_nbiot():
     """NB-IoT RRC (TS 36.331 clause 6.3, the ``-NB`` message set).
 
@@ -262,6 +299,7 @@ KNOWN_TYPES = (
     "BOOLEAN",
     "BIT STRING",
     "OCTET STRING",
+    "OPEN_TYPE",
     "NULL",
 )
 
@@ -599,6 +637,18 @@ class Generator(object):
             "containing": containing,
         }
 
+    # OPEN_TYPE -----------------------------------------------------------
+    #
+    # An ASN.1 open type is carried as a length-prefixed octet string whose
+    # contents are the encoding of some type named elsewhere (in RANAP, by the
+    # IE id in the same SEQUENCE).  The generator cannot know that type, so the
+    # table says exactly what the wire says: an unconstrained OCTET STRING.
+    # The caller supplies the inner encoding as octets, and the engine writes
+    # the length determinant the receiver expects.  Nothing is invented and
+    # nothing is dropped; what the octets mean stays the caller's to state.
+    def _n_open_type(self, obj, path, owner):
+        return {"k": "octets", "size": None, "ext": False, "containing": None}
+
     # -- helpers ----------------------------------------------------------
 
     def _size(self, obj, path):
@@ -869,7 +919,7 @@ def main(argv=None):
     parser.add_argument(
         "--family",
         default="rrc",
-        choices=("rrc", "lpp", "nbiot", "nr"),
+        choices=("rrc", "lpp", "nbiot", "nr", "ranap"),
         help="which ASN.1 namespace to generate for (default: rrc)",
     )
     parser.add_argument(
@@ -880,7 +930,9 @@ def main(argv=None):
         "family's root set: SIB1..SIB8 + RRCConnectionReconfiguration + "
         "HandoverCommand for rrc, LPP_Message for lpp, and the ten NB-IoT "
         "broadcast messages (MIB-NB, SIB1-NB, SIB2..5-NB, SIB14-NB, the "
-        "SystemInformation container and the two BCCH wrappers) for nbiot.",
+        "SystemInformation container and the two BCCH wrappers) for nbiot, "
+        "and RANAP-PDU plus the InitialUE-Message, Paging, Reset and Overload "
+        "contents for ranap.",
     )
     parser.add_argument(
         "--out",
@@ -897,6 +949,8 @@ def main(argv=None):
         _register_nr()
     elif args.family == "lpp":
         _register_lpp()
+    elif args.family == "ranap":
+        _register_ranap()
     elif args.family == "nbiot":
         _register_nbiot()
     use_family(args.family)

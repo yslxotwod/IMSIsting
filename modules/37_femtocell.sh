@@ -1311,6 +1311,103 @@ hnbap	the HNBRegisterRequest and UERegisterRequest this box would present are by
 EOF
 }
 
+# ── RANAP: the macro Iu-CS signalling plane ─────────────────────────────
+# Everything else in this module speaks the home-node path: HNBAP and RUA on
+# Iuh, where a CSG identity makes a small cell plausible. A macro RNC speaks
+# RANAP to an MSC over Iu-CS, and this module had no way to put a byte of it
+# on a wire. tools/ranap_layout.py is the schema (generated from pycrate's
+# RANAP namespaces by tools/asn1gen.py --family ranap) and tools/ranap.py
+# builds and reads it.
+#
+# The one limit, stated in the output as well as here: every RANAP IE is an
+# ASN.1 OPEN TYPE, carried as a length-prefixed octet string whose contents
+# are the encoding of the type the IE id names. The table carries those as
+# octet strings and the caller supplies the contents, so this verb composes
+# the envelope and the IE frame around an IE body it does not invent.
+femt_ranap_build() {   # <procedure-code> <criticality> <content-type> <json>
+    local pc="${1:-}" crit="${2:-}" ctype="${3:-}" jsonf="${4:-}"
+    local root="${IMSISTING_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+    [[ -n "$jsonf" ]] || {
+        printf 'ERROR\tusage: --ranap-build <procedure-code> <reject|ignore|notify> <content-type> <json-file>\n' >&2
+        printf 'WHY\tthe content type (InitialUE_Message, Paging, Reset, Overload) is the message the procedure code names, and the JSON is its IEs\n' >&2
+        return 2; }
+    [[ "$pc" =~ ^[0-9]+$ ]] && (( pc >= 0 && pc <= 255 )) || {
+        printf 'ERROR\tthe procedure code is 0..255: ProcedureCode is an INTEGER(0..255) in TS 25.413\n' >&2; return 2; }
+    case "$crit" in reject|ignore|notify) ;; *)
+        printf 'ERROR\tcriticality is reject, ignore or notify (TS 25.413 Criticality)\n' >&2; return 2 ;; esac
+    [[ -r "$jsonf" ]] || { printf 'ERROR\tcannot read %s\n' "$(femt_sanitize "$jsonf")" >&2; return 1; }
+    [[ -r "$root/tools/ranap.py" ]] || {
+        printf 'ERROR\ttools/ranap.py is missing from %s\n' "$root" >&2
+        printf 'WHY\twithout it there is no APER encoder for the schema, and a hand-placed RANAP PDU would be a guess\n' >&2
+        return 2; }
+
+    local work; work=$(mktemp -d) || return 1
+    trap 'rm -rf "$work"' RETURN
+    local content_out content_hex pdu_json pdu_out pdu_hex
+    content_out=$(python3 "$root/tools/ranap.py" encode "$ctype" "$jsonf" 2>&1) || {
+        printf '%s\n' "$content_out" >&2; return 1; }
+    content_hex=$(printf '%s\n' "$content_out" | awk -F'\t' '$1=="hex"{print $2}')
+    [[ -n "$content_hex" ]] || { printf 'ERROR\tthe content message produced no octets\n' >&2; return 1; }
+    pdu_json="$work/pdu.json"
+    printf '{"$choice": ["initiatingMessage", {"procedureCode": %s, "criticality": "%s", "value": {"$hex": "%s"}}]}' \
+        "$pc" "$crit" "$content_hex" > "$pdu_json"
+    pdu_out=$(python3 "$root/tools/ranap.py" encode RANAP_PDU "$pdu_json" 2>&1) || {
+        printf '%s\n' "$pdu_out" >&2; return 1; }
+    pdu_hex=$(printf '%s\n' "$pdu_out" | awk -F'\t' '$1=="hex"{print $2}')
+    printf 'transport\tSCTP, PPID 0 (RANAP over M3UA) on Iu-CS; no association is opened here\n'
+    printf 'pdu_choice\tinitiatingMessage\n'
+    printf 'procedure_code\t%s\n' "$pc"
+    printf 'criticality\t%s\n' "$crit"
+    printf 'content_type\t%s\n' "$ctype"
+    printf 'content_octets\t%s\n' "$(( ${#content_hex} / 2 ))"
+    printf 'content_hex\t%s\n' "$content_hex"
+    printf 'content_read_back\t%s\n' "$(printf '%s\n' "$content_out" | awk -F'\t' '$1=="read_back"{print $2}')"
+    printf 'pdu_octets\t%s\n' "$(( ${#pdu_hex} / 2 ))"
+    printf 'pdu_hex\t%s\n' "$pdu_hex"
+    printf 'pdu_read_back\t%s\n' "$(printf '%s\n' "$pdu_out" | awk -F'\t' '$1=="read_back"{print $2}')"
+    printf 'ie_bodies\tcaller-supplied: every RANAP IE is an OPEN TYPE, and this schema carries those as octet strings rather than inventing a type per id\n'
+    printf 'ref\tTS 25.413 9.1 (InitialUE-Message), 9.2 (IE definitions), 9.3 (procedure codes); TS 25.412 (Iu signalling transport)\n'
+    printf 'limit\ta procedure code and an IE body are the caller numbers: 3GPP does not publish the procedure-code table as ASN.1 constants and pycrate carries IE ids but no procedure codes\n'
+    printf 'verdict\tranap_pdu_built\n'
+}
+
+femt_ranap_parse() {   # <hex> [content-type]
+    local hex="${1:-}" ctype="${2:-}"
+    local root="${IMSISTING_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+    [[ -n "$hex" ]] || {
+        printf 'ERROR\tusage: --ranap-parse <hex> [content-type]\n' >&2; return 2; }
+    local out
+    out=$(python3 "$root/tools/ranap.py" decode RANAP_PDU "$hex" 2>&1) || {
+        printf '%s\n' "$out" >&2; return 1; }
+    printf '%s\n' "$out" | grep -v '^family'
+    local val
+    val=$(printf '%s\n' "$out" | awk -F'\t' '$1=="field" && $2 ~ /value$/ && $3=="hex"{print $4}')
+    if [[ -n "$ctype" && -n "$val" ]]; then
+        printf 'content_type\t%s\n' "$ctype"
+        local cont
+        if cont=$(python3 "$root/tools/ranap.py" decode "$ctype" "$val" 2>&1); then
+            printf '%s\n' "$cont" | grep -v '^family'
+        else
+            printf '%s\n' "$cont" >&2
+            printf 'content_decoded\tno\n'
+            return 1
+        fi
+    elif [[ -n "$val" ]]; then
+        printf 'content_note\tthe open type is %d octet(s); name the content type to have it decoded\n' "$(( ${#val} / 2 ))"
+    fi
+    printf 'verdict\tranap_pdu_parsed\n'
+}
+
+femt_ranap_ie() {   # [name-fragment]
+    local root="${IMSISTING_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+    local py="${IMSI_RANAP_ORACLE_PY:-/home/ysl/.lte-oracles/venv/bin/python}"
+    [[ -x "$py" ]] || {
+        printf 'ERROR\tthe IE id table is pycrate RANAP_Constants and %s is not executable\n' "$py" >&2
+        printf 'WHY\tprinting IE ids from memory would be exactly the kind of guess this tree refuses; set IMSI_RANAP_ORACLE_PY to a python that can import pycrate_asn1dir.RANAP\n' >&2
+        return 2; }
+    "$py" "$root/tools/ranap.py" ie "${1:-}"
+}
+
 femt_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -1738,6 +1835,30 @@ S1PCAP
         chk cert-notcert "$(printf 'deadbeef' > "$d/n.pem"; femt_cert_audit "$d/n.pem" >/dev/null 2>&1; echo $?)" "1"
     fi
 
+    # ── RANAP: the envelope this module could not build ────────────────
+    local rd rj rb rp rpp
+    rd=$(mktemp -d)
+    printf '{"protocolIEs": [{"id": 19, "criticality": "reject", "value": {"$hex": "00010203"}}]}' > "$rd/iem.json"
+    rb=$(femt_ranap_build 19 reject InitialUE_Message "$rd/iem.json" 2>/dev/null)
+    chk ranap-proc     "$(printf '%s\n' "$rb" | awk -F'\t' '$1=="procedure_code"{print $2}')" "19"
+    chk ranap-ctype    "$(printf '%s\n' "$rb" | awk -F'\t' '$1=="content_type"{print $2}')" "InitialUE_Message"
+    chk ranap-chex     "$(printf '%s\n' "$rb" | awk -F'\t' '$1=="content_hex"{print $2}')" "000004004C0400010203"
+    chk ranap-pduhex   "$(printf '%s\n' "$rb" | awk -F'\t' '$1=="pdu_hex"{print $2}')" "02605000002002602000081018"
+    chk ranap-readback "$(printf '%s\n' "$rb" | awk -F'\t' '$1=="pdu_read_back"{print $2}')" "yes"
+    chk ranap-verdict  "$(printf '%s\n' "$rb" | awk -F'\t' '$1=="verdict"{print $2}')" "ranap_pdu_built"
+    chk ranap-ie-open  "$(printf '%s\n' "$rb" | awk -F'\t' '$1=="ie_bodies" && $2 ~ /OPEN TYPE/{print "stated"}')" "stated"
+    rp=$(femt_ranap_parse 02605000002002602000081018 InitialUE_Message 2>/dev/null)
+    chk ranap-parse-pc "$(printf '%s\n' "$rp" | awk -F'\t' '$2 ~ /procedureCode$/ && $3=="value"{print $4}')" "19"
+    chk ranap-parse-val "$(printf '%s\n' "$rp" | awk -F'\t' '$2 ~ /initiatingMessage.value$/ && $3=="hex"{print $4}')" "000004004C0400010203"
+    chk ranap-parse-ct "$(printf '%s\n' "$rp" | awk -F'\t' '$1=="content_type"{print $2}')" "InitialUE_Message"
+    chk ranap-bad-json "$(printf 'not json' > "$rd/bad.json"; femt_ranap_build 19 reject InitialUE_Message "$rd/bad.json" >/dev/null 2>&1; echo $?)" "1"
+    chk ranap-bad-crit "$(femt_ranap_build 19 maybe InitialUE_Message "$rd/iem.json" >/dev/null 2>&1; echo $?)" "2"
+    chk ranap-bad-pc   "$(femt_ranap_build 256 reject InitialUE_Message "$rd/iem.json" >/dev/null 2>&1; echo $?)" "2"
+    chk ranap-nojson   "$(femt_ranap_build 19 reject InitialUE_Message >/dev/null 2>&1; echo $?)" "2"
+    chk ranap-parse-noargs "$(femt_ranap_parse >/dev/null 2>&1; echo $?)" "2"
+    chk ranap-parse-garbage "$(femt_ranap_parse FFFFFFFFFFFF >/dev/null 2>&1; echo $?)" "1"
+    rm -rf "$rd"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1845,6 +1966,9 @@ femt_cli_main() {
         --iuh)         femt_iuh_stack ;;
         --tr069-audit) femt_tr069_audit "${1:-}" ;;
         --attack-surface) femt_attack_surface "$@" ;;
+        --ranap-build)  femt_ranap_build "$@" ;;
+        --ranap-parse)  femt_ranap_parse "${1:-}" "${2:-}" ;;
+        --ranap-ie)     femt_ranap_ie "${1:-}" ;;
         --cert-audit)  femt_cert_audit "${1:-}" ;;
         --plan)        femt_plan ;;
         --selftest)    femt_selftest ;;
