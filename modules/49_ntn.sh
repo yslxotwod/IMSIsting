@@ -181,6 +181,86 @@ ntn_koffset() {
 # does with a cell that claims a pass it is not on. The value is composed here
 # and encoded through the same generated table the decoder reads, and the
 # encoding is accepted only when its own decoder gives the value back.
+# ── hostile ephemeris and a wrong K_offset (F2) ─────────────────────────
+# A satellite cell tells the UE where the satellite is and how far it may
+# trust that: the SIB19 ephemeris (TS 38.331), the K_offset that says how many
+# ms of propagation the schedule must absorb, and the UL sync validity window.
+# All three are numbers the cell asserts, and a UE that believes them schedules
+# its uplink into silence. This verb takes a true range and a forged one and
+# works out what the UE would get wrong, in the units the UE uses.
+ntn_ephemeris_hijack() {
+    local true_km="" forged_km="" koffset="" kerr=0 scs=15 dur=60 cp=4.69
+    while (( $# )); do
+        case "$1" in
+            --true-range)   true_km="${2:-}";  shift 2 || { ntn_eph_usage; return 2; } ;;
+            --forged-range) forged_km="${2:-}"; shift 2 || { ntn_eph_usage; return 2; } ;;
+            --koffset)      koffset="${2:-}";  shift 2 || { ntn_eph_usage; return 2; } ;;
+            --koffset-error) kerr="${2:-}";    shift 2 || { ntn_eph_usage; return 2; } ;;
+            --scs)          scs="${2:-}";      shift 2 || { ntn_eph_usage; return 2; } ;;
+            --duration)     dur="${2:-}";      shift 2 || { ntn_eph_usage; return 2; } ;;
+            --cp)           cp="${2:-}";       shift 2 || { ntn_eph_usage; return 2; } ;;
+            *)              ntn_eph_usage; return 2 ;;
+        esac
+    done
+    if [[ -z "$true_km" || -z "$forged_km" || -z "$koffset" ]]; then
+        ntn_eph_usage; return 2
+    fi
+    local v
+    for v in "$true_km" "$forged_km"; do
+        [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] || { printf 'ERROR\tranges must be numbers of km\n' >&2; return 2; }
+    done
+    [[ "$koffset" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--koffset wants a whole number of slots\n' >&2; return 2; }
+    [[ "$kerr" =~ ^-?[0-9]+$ ]] || { printf 'ERROR\t--koffset-error wants whole slots\n' >&2; return 2; }
+    case "$scs" in 15|30|60|120) ;; *) printf 'ERROR\t--scs wants 15, 30, 60 or 120 kHz\n' >&2; return 2; esac
+    awk -v t="$true_km" -v f="$forged_km" -v k="$koffset" -v ke="$kerr" -v scs="$scs" \
+        -v dur="$dur" -v cp="$cp" 'BEGIN{
+        c = 299792458; unit = 16.0/30720000.0
+        switch (scs) { case 15: mu=0; break; case 30: mu=1; break; case 60: mu=2; break; default: mu=3 }
+        slot_ms = 1.0 / (2 ^ mu)          # TS 38.211: 1/(2^mu) ms per slot
+        rtt_t = 2*t*1000.0/c; rtt_f = 2*f*1000.0/c
+        ta_t = rtt_t/unit; ta_f = rtt_f/unit
+        ta_err_us = (rtt_f - rtt_t)*1e6
+        k_ms = k*slot_ms
+        k_err_ms = ke*slot_ms
+        printf "true_range_km\t%s\n", t
+        printf "forged_range_km\t%s\n", f
+        printf "true_rtt_ms\t%.3f\n", rtt_t*1000
+        printf "forged_rtt_ms\t%.3f\n", rtt_f*1000
+        printf "true_ta_units\t%.0f\n", ta_t
+        printf "forged_ta_units\t%.0f\n", ta_f
+        printf "ta_error_us\t%.1f\n", ta_err_us
+        printf "ta_error_half_us\t%.1f\n", ta_err_us/2
+        printf "cp_us\t%s\n", cp
+        printf "koffset_slots\t%s\n", k
+        printf "koffset_ms\t%.3f\n", k_ms
+        printf "koffset_error_slots\t%s\n", ke
+        printf "koffset_error_ms\t%.3f\n", k_err_ms
+        printf "scs_khz\t%s\n", scs
+        if ((ta_err_us < 0 ? -ta_err_us : ta_err_us) / 2 > cp)
+            printf "finding\ttiming_beyond_cp\tHIGH\tthe UE uplink arrives %.1f us from where the gNB expects it, past the %s us cyclic prefix: symbols overlap\n", ta_err_us/2, cp
+        else
+            printf "finding\ttiming_within_cp\tINFO\tone-way error %.1f us stays inside the %s us prefix, so the forgery costs capacity but not the link\n", ta_err_us/2, cp
+        if (ke != 0)
+            printf "finding\tkoffset_mismatch\tHIGH\tthe UE schedules %.3f ms away from the slot the network counts, so a grant lands in the wrong slot\n", k_err_ms
+        printf "finding\tephemeris_is_a_number\tMEDIUM\tnothing in the broadcast binds the ephemeris to the satellite: a forged position is only detectable against a second source (GNSS, another cell, an operator orbit table)\n"
+        # how long the forged ephemeris holds a plausible range while the sky
+        # moves: a geostationary pass is static, LEO moves ~7.5 km/s of range
+        drift_ms_per_s = 2*7500.0/c*1000.0
+        printf "range_drift_ms_per_s\t%.3f\n", drift_ms_per_s
+        printf "sync_window_s\t%s\n", dur
+        printf "verdict\tephemeris_hostile\n"
+        printf "ref\t3GPP TS 38.331 NTN-Config-r17 / SIB19, TS 38.213 K_offset, TS 38.211 slot timing\n"
+        printf "note\tthe UE can only check the numbers against what it measures: TA against its own timing, ephemeris against GNSS or an operator table, K_offset against the grants it actually receives\n"
+    }'
+}
+
+ntn_eph_usage() {
+    cat >&2 <<'EOF'
+USAGE	--ephemeris-hijack --true-range KM --forged-range KM --koffset N [--koffset-error N] [--scs kHz] [--duration s] [--cp us]
+WHY	takes the range the satellite really is at and the range a forged SIB19 claims, and works out the timing the UE would use
+EOF
+}
+
 ntn_sib19_build() {
     local koffset=15 epoch_sfn=0 epoch_sub=0 validity=s20 kmac=1 ref_hex="" dist=""
     while (( $# )); do
@@ -377,6 +457,17 @@ ntn_selftest() {
     chk sib19-bad-koffset "$(ntn_sib19_build --koffset 5000 >/dev/null 2>&1; echo $?)" "2"
     chk sib19-bad-kmac "$(ntn_sib19_build --kmac 0 >/dev/null 2>&1; echo $?)" "2"
     chk sib19-bad-flag "$(ntn_sib19_build --nonsense >/dev/null 2>&1; echo $?)" "2"
+    # 10. Hostile ephemeris: the timing a forged SIB19 leaves the UE with.
+    local eh; eh=$(ntn_ephemeris_hijack --true-range 1200 --forged-range 600 --koffset 20 --koffset-error 3 --scs 30)
+    chk eph-ta-err "$(printf '%s\n' "$eh" | awk -F'\t' '$1=="ta_error_us"{print $2}')" "-4002.8"
+    chk eph-half "$(printf '%s\n' "$eh" | awk -F'\t' '$1=="ta_error_half_us"{print $2}')" "-2001.4"
+    chk eph-cp-finding "$(printf '%s\n' "$eh" | awk -F'\t' '$1=="finding" && $2=="timing_beyond_cp"{print $3}')" "HIGH"
+    chk eph-koffset-ms "$(printf '%s\n' "$eh" | awk -F'\t' '$1=="koffset_error_ms"{print $2}')" "1.500"
+    chk eph-k-finding "$(printf '%s\n' "$eh" | awk -F'\t' '$1=="finding" && $2=="koffset_mismatch"{print $3}')" "HIGH"
+    chk eph-verdict "$(printf '%s\n' "$eh" | awk -F'\t' '$1=="verdict"{print $2}')" "ephemeris_hostile"
+    chk eph-within-cp "$(ntn_ephemeris_hijack --true-range 1200 --forged-range 1199.9 --koffset 20 | awk -F'\t' '$1=="finding" && $2=="timing_within_cp"{print $3}')" "INFO"
+    chk eph-noargs "$(ntn_ephemeris_hijack --true-range 1200 >/dev/null 2>&1; echo $?)" "2"
+    chk eph-bad-scs "$(ntn_ephemeris_hijack --true-range 1 --forged-range 2 --koffset 20 --scs 45 >/dev/null 2>&1; echo $?)" "2"
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -425,6 +516,7 @@ ntn_cli_main() {
         --koffset)     ntn_koffset "${1:-}" "${2:-}" "${3:-}" ;;
         --sib19)       ntn_sib19 "${1:-}" ;;
         --sib19-build) ntn_sib19_build "$@" ;;
+        --ephemeris-hijack) ntn_ephemeris_hijack "$@" ;;
         --feeder)      ntn_feeder_link ;;
         --plan)        ntn_plan ;;
         --selftest)    ntn_selftest ;;
@@ -439,6 +531,8 @@ Usage: $0 COMMAND
   --range <one_way_km>      one-way and round-trip delay
   --ta <one_way_km>         TA units needed vs the LTE TA range
   --koffset <slots> [scs_khz] [sample_rate_hz]   K_offset (TS 38.331, 15 kHz reference slots) -> ms and samples
+  --ephemeris-hijack --true-range KM --forged-range KM --koffset N
+                            a forged SIB19 ephemeris, and the timing the UE derives from it
   --sib19-build [--koffset N] [--epoch-sfn N] [--epoch-sub N] [--validity sN]
                             build the SIB19-r17 element and encode it
   --sib19 <hex>             decode a SIB19 (TS 38.331) from its bits

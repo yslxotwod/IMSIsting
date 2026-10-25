@@ -3244,6 +3244,26 @@ static const char *const plain_keys[] = {
     "koffset\tthe cell-specific K_offset the K_offset unit is counted in",
     "reference_location\tthe cell reference location the SIB19 carries, which is the point its timing is stated for",
     "validity\thow long the SIB19 uplink synchronisation stays valid",
+    "cp_us\tthe cyclic prefix in microseconds, which is the timing error a link tolerates",
+    "ephemeris_hostile\tthe verdict: the numbers the cell broadcasts would put the UE where the satellite is not",
+    "ephemeris_is_a_number\tnothing in the broadcast binds the ephemeris to the satellite, so a forged position needs a second source to catch",
+    "forged_range_km\tthe range the forged broadcast claims",
+    "forged_rtt_ms\tthe round trip the UE computes from the forged range",
+    "forged_ta_units\tthe timing advance the UE computes from the forged range",
+    "koffset_error_ms\thow far the wrong K_offset puts the UE schedule from the one the network counts",
+    "koffset_error_slots\tthe wrong K_offset in slots of the active numerology",
+    "koffset_mismatch\tthe UE schedules away from the slot the network counts, so a grant lands in the wrong slot",
+    "koffset_ms\tthe K_offset the broadcast names, in milliseconds",
+    "koffset_slots\tthe K_offset the broadcast names, in slots",
+    "range_drift_ms_per_s\thow fast the round trip changes as a LEO pass moves the range",
+    "ta_error_half_us\tthe one-way timing error the UE would have, which is half the round-trip error",
+    "ta_error_us\tthe round-trip timing error between the true and forged range",
+    "timing_beyond_cp\tthe forged timing lands outside the cyclic prefix, so symbols overlap",
+    "timing_within_cp\tthe forged timing stays inside the cyclic prefix, so the forgery costs capacity but not the link",
+    "true_range_km\tthe range the satellite really is at",
+    "true_rtt_ms\tthe round trip the true range gives",
+    "true_ta_units\tthe timing advance the true range gives",
+    "sync_window_s\thow long the SIB19 uplink synchronisation is claimed valid",
     "checked_on\tthe date the rows in this table were last read, so a reader knows how old the photograph is",
     "claim\twhat the table does and does not claim, stated in one word",
     "corpus_horizon\tthe last day the corpus covers; anything disclosed after it is unassessed rather than absent",
@@ -7465,6 +7485,7 @@ static const ChipRow chip_rows[] = {
     { "49_ntn",              "--selftest",            NEED_NO, DOES_READS },
     { "49_ntn",              "--sib19",               NEED_RADIO, DOES_READS },
     { "49_ntn",              "--sib19-build",         NEED_NO, DOES_BUILDS },
+    { "49_ntn",              "--ephemeris-hijack",   NEED_NO, DOES_BUILDS },
     { "49_ntn",              "--status-tsv",          NEED_NO, DOES_READS },
     { "49_ntn",              "--ta",                  NEED_RADIO, DOES_READS },
     { "49_ntn",              "--version",             NEED_NO, DOES_READS },
@@ -19831,6 +19852,11 @@ main(int argc, char **argv)
                     bad++;
                 }
             }
+
+            /* The map page checks its own arithmetic here: pan direction, the
+               clamps, and the zoom floor. None of that needs a display, and a
+               direction bug is the one a screenshot cannot show. */
+            bad += map_page_selftest ();
 
             printf("RESULT\t%s\n", bad == 0 ? "PASS" : "FAIL");
             return bad == 0 ? 0 : 1;
