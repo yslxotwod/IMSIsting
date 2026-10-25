@@ -2447,6 +2447,10 @@ module_id_words(const char *tok)
  * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
  */
 static const char *const plain_keys[] = {
+    "pending_octets\tthe notification octets being carried",
+    "pending_hex\tthe PendingNotification octets",
+    "error_reason\tthe reason the profile installation failed",
+    "aid\tthe AID that answered the notification",
     "misbehaved\tmisbehaved",
     "disabled\tdisabled",
     "events\tevents",
@@ -6221,6 +6225,7 @@ static const ChipRow chip_rows[] = {
     { "16_sim",              "--eid",                 NEED_NO, DOES_READS },
     { "16_sim",              "--euicc-fuzz",          NEED_NO, DOES_READS },
     { "16_sim",              "--target",              NEED_NO, DOES_READS },
+    { "16_sim",              "--es9-notification-build", NEED_NO, DOES_READS },
     { "16_sim",              "--profile-model",       NEED_NO, DOES_READS },
     { "16_sim",              "--request",             NEED_NO, DOES_READS },
     { "16_sim",              "--rsp-audit",           NEED_NO, DOES_READS },

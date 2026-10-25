@@ -2841,6 +2841,10 @@ sim_cmd_es8_scp03t() {
             --card-challenge) card="${2:-}";   shift 2 ;;
             --kvn)            kvn="${2:-}";    shift 2 ;;
             --payload)        payload="${2:-}"; shift 2 ;;
+            --k-enc)          scp_k_enc="${2:-}"; shift 2 ;;
+            --k-mac)          scp_k_mac="${2:-}"; shift 2 ;;
+            --host-challenge) scp_host="${2:-}";  shift 2 ;;
+            --card-challenge) scp_card="${2:-}";  shift 2 ;;
             --card-cryptogram) card_crypt="${2:-}"; shift 2 ;;
             *)  printf 'ERROR\tunsupported flag %s for --es8-scp03t\n' "$(sim_sanitize "$1")" >&2
                 return 2 ;;
@@ -3047,7 +3051,7 @@ sim_cmd_es8_build() {
     shift 2>/dev/null || true
     local txn='' host='' otpk='' sign='' oid='' iccid='' spn='' pname='' pclass=''
     local itype='' icon='' owner='' ppr='' notif='' payload='' p87='' p88='' p87b='' p86=''
-    local mac='' penc='' pcmac=''
+    local mac='' penc='' pcmac='' scp_k_enc='' scp_k_mac='' scp_host='' scp_card=''
     while (( $# )); do
         case "$1" in
             --transaction-id) txn="${2:-}";   shift 2 2>/dev/null || shift ;;
@@ -3067,7 +3071,11 @@ sim_cmd_es8_build() {
             --profile-owner)  owner="${2:-}"; shift 2 2>/dev/null || shift ;;
             --ppr)            ppr="${2:-}";   shift 2 2>/dev/null || shift ;;
             --notification)   notif="${2:-}"; shift 2 2>/dev/null || shift ;;
-            --payload)        payload="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --payload)        payload="${2:-}"; shift 2 ;;
+            --k-enc)          scp_k_enc="${2:-}"; shift 2 ;;
+            --k-mac)          scp_k_mac="${2:-}"; shift 2 ;;
+            --host-challenge) scp_host="${2:-}";  shift 2 ;;
+            --card-challenge) scp_card="${2:-}";  shift 2 ;;
             --first-87)       p87="${2:-}";   shift 2 2>/dev/null || shift ;;
             --88)             p88="${2:-}";   shift 2 2>/dev/null || shift ;;
             --second-87)      p87b="${2:-}";  shift 2 2>/dev/null || shift ;;
@@ -3317,7 +3325,7 @@ sim_cmd_es8_build() {
             sim_es8_ref "SCP03t payload" "$tag" \
                 "2.5.4: the SCP03t payload TLVs are tag '87' (ConfigureISDP), '88' (StoreMetadata), '86' (profile elements); their values are protected (§2.6.4 SGP.02) and are passed through"
             if [[ -z "$payload" ]]; then
-                sim_es8_limit "missing input: --payload; the '$tag' payload is the SCP03t-protected command block (2.5.4, §2.6.4 SGP.02) and this module does not implement the protection"
+                sim_es8_limit "missing input: --payload is the profile element the segment will carry; with --k-enc/--k-mac/--host-challenge/--card-challenge it is protected into '$tag' TLVs here"
                 sim_es8_handoff
                 return 3
             fi
@@ -3325,14 +3333,46 @@ sim_cmd_es8_build() {
                 printf 'ERROR\t--payload is not hex\n' >&2; return 1
             fi
             if [[ "${payload^^}" != "$tag"* ]]; then
-                # A segment of tag '87'/'88'/'86' may hold only TLVs of that tag
-                # (2.5.4). What the operator passed is a profile element that the
-                # SCP03t layer has not touched yet, and SGP.22 does not fix those
-                # octets (the protection is SGP.02, the element chain SIMalliance
-                # [5]). Print the structure, emit nothing, hand off.
+                # A segment of tag 87/88/86 may hold only TLVs of that tag
+                # (2.5.4), and the value of each is the SCP03t-protected command
+                # block. With the session material this module protects the
+                # element itself -- the PPP chain, one MAC chaining value across
+                # the segments -- instead of asking the operator to arrive with
+                # bytes already protected somewhere else.
+                if [[ -n "$scp_k_enc$scp_k_mac$scp_host$scp_card" ]]; then
+                    local scp_tool="$IMSISTING_ROOT/tools/scp03t.py" wrapped
+                    [[ -f "$scp_tool" ]] || {
+                        printf 'ERROR\t%s is missing\n' "$scp_tool" >&2; return 1; }
+                    local missk=''
+                    [[ -z "$scp_k_enc" ]] && missk+="--k-enc "
+                    [[ -z "$scp_k_mac" ]] && missk+="--k-mac "
+                    [[ -z "$scp_host"  ]] && missk+="--host-challenge "
+                    [[ -z "$scp_card"  ]] && missk+="--card-challenge "
+                    if [[ -n "$missk" ]]; then
+                        sim_es8_limit "missing input: ${missk% }; protecting a segment needs the whole SCP03t key set and both challenges (SGP.02 2.6.4)"
+                        sim_es8_handoff
+                        return 3
+                    fi
+                    wrapped=$(python3 "$scp_tool" --wrap "${payload^^}" --k-enc "${scp_k_enc^^}" \
+                        --k-mac "${scp_k_mac^^}" --host-challenge "${scp_host^^}" \
+                        --card-challenge "${scp_card^^}") || {
+                        printf 'ERROR\ttools/scp03t.py could not protect the segment\n' >&2; return 1; }
+                    local segs; segs=$(printf '%s\n' "$wrapped" | sed -n 's/^segments[[:space:]]*//p')
+                    local joined=""
+                    local row
+                    while IFS= read -r row; do
+                        joined+="${row#*$'\t'}"
+                    done < <(printf '%s\n' "$wrapped" | sed -n 's/^tlv_86_[0-9]*[[:space:]]*\(.*\)$/\1/p')
+                    [[ -n "$joined" ]] || {
+                        printf 'ERROR\tthe protection returned no %s TLV\n' "$tag" >&2; return 1; }
+                    sim_es8_field "segment.count" "$tag" "INTEGER" "$segs" \
+                        "2.5.4: each segment is one command TLV; the profile package is split at 1024 octets including tag and length"
+                    sim_es8_out "$(sim_es8_tlv "$outer" "$joined")"
+                    return 0
+                fi
                 sim_es8_field "segment.$tag" "$tag" "OCTET STRING" "<SCP03t-protected payload>" \
                     "2.5.4: the value of a '$tag' TLV is the SCP03t-protected command block"
-                sim_es8_limit "payload starts with ${payload:0:2}: a profile element (BF24, BF25, BF26, profile header) is not a segment: SCP03t protection runs over it first, and that protection (SGP.02 SCP03t) is not implemented here, so the octets are not emitted"
+                sim_es8_limit "payload starts with ${payload:0:2}: a profile element is not a segment. Pass the SCP03t material (--k-enc --k-mac --host-challenge --card-challenge) and this builder protects it, or pass a '$tag' TLV that was protected elsewhere"
                 sim_es8_handoff
                 return 3
             fi
@@ -4074,6 +4114,75 @@ sim_rsp_plan() {
             printf 'ERROR\tusage: --rsp-plan <profile-move|notification-spoof|smdp-redirect>\n' >&2
             return 2 ;;
     esac
+}
+
+# --es9-notification-build : the HandleNotification body a card/LPA sends.
+#
+# A notification reports what happened to a profile: a ProfileInstallationResult
+# (5.7.9) with the ICCID and either a success aid or an error reason. The parts
+# are built here, then walked back with the same parser --es9-notification uses,
+# so the builder cannot drift from the reader. What it does NOT do is sign: a
+# real PIR carries euiccSignPIR, an eUICC signature this tree does not mint.
+sim_es9_notification_build() {
+    local iccid="" result="success" reason="0" aid="" transaction=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --iccid)       iccid="${2:-}";    shift 2 ;;
+            --result)      result="${2:-}";   shift 2 ;;
+            --reason)      reason="${2:-}";   shift 2 ;;
+            --aid)         aid="${2:-}";      shift 2 ;;
+            --transaction) transaction="${2:-}"; shift 2 ;;
+            --help|-h)
+                printf 'ERROR\tusage: --es9-notification-build --iccid <hex> [--result success|failure] [--reason n] [--aid hex]\n' >&2
+                return 2 ;;
+            *) printf 'ERROR\t--es9-notification-build does not take %s\n' "$(sim_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$iccid" ]] || {
+        printf 'ERROR\tusage: --es9-notification-build --iccid <hex> [--result success|failure]\n' >&2
+        return 2; }
+    [[ "$iccid" =~ ^[0-9A-Fa-f]{16,20}$ ]] || {
+        printf 'ERROR\t--iccid is 8..10 octets of hex (the iccid field of EFiccid)\n' >&2; return 2; }
+    case "$result" in success|failure) ;; *)
+        printf 'ERROR\t--result is success or failure\n' >&2; return 2 ;; esac
+    [[ "$reason" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--reason is a decimal number\n' >&2; return 2; }
+    local final
+    if [[ "$result" == "success" ]]; then
+        # SuccessResult SEQUENCE { aid [APPLICATION 15] } -- 5.7.9.
+        [[ -n "$aid" ]] || aid="A0000005591010FFFFFFFF8900000100"
+        [[ "$aid" =~ ^([0-9A-Fa-f]{2})+$ ]] || { printf 'ERROR\t--aid is hex\n' >&2; return 2; }
+        final=$(sim_es8_tlv 30 "$(sim_es8_tlv 5F0F "${aid^^}")") || return 1
+    else
+        # ErrorResult SEQUENCE { errorReason INTEGER } -- 5.7.9.
+        final=$(sim_es8_tlv 30 "$(sim_es8_tlv 81 "$(sim_es8_byte "$reason")")") || return 1
+    fi
+    local body data pir json b64
+    data=$(sim_es8_tlv 5A "${iccid^^}$(sim_es8_tlv A2 "$final")") || return 1
+    pir=$(sim_es8_tlv BF37 "$(sim_es8_tlv BF27 "$data")") || return 1
+    b64=$(printf '%s' "$pir" | python3 -c 'import base64,sys; sys.stdout.write(base64.b64encode(bytes.fromhex(sys.stdin.read().strip())).decode())')
+    json=$(printf '{"pendingNotification":"%s"}' "$b64")
+    printf 'op\tES9+.HandleNotification (built)\n'
+    printf 'spec\tSGP.22 v2.2.2 6.5.2.9 (request), 5.7.9 (ProfileInstallationResult), 5.7.10 (PendingNotification)\n'
+    printf 'iccid\t%s\n' "${iccid^^}"
+    printf 'result\t%s\n' "$result"
+    [[ "$result" == "failure" ]] && printf 'error_reason\t%s\n' "$reason"
+    [[ "$result" == "success" ]] && printf 'aid\t%s\n' "${aid^^}"
+    printf 'pending_hex\t%s\n' "$pir"
+    printf 'pending_octets\t%d\n' "$(( ${#pir} / 2 ))"
+    printf 'json\t%s\n' "$json"
+    # The reader is the check: build, then walk it back with the parser the
+    # HandleNotification verb uses, so the builder cannot drift from the reader.
+    local tmpf walked="no"
+    tmpf=$(mktemp "$DEPS_TMP/notif.XXXXXX" 2>/dev/null || mktemp)
+    if [[ -n "$tmpf" ]]; then
+        printf '%s' "$json" > "$tmpf"
+        sim_cmd_es9_notification "@$tmpf" >/dev/null 2>&1 && walked="yes"
+        rm -f "$tmpf"
+    fi
+    printf 'verify\t%s\n' "$walked"
+    printf 'limit\tthe PIR is unsigned: a real one carries euiccSignPIR (an eUICC signature) and this builder does not mint one\n'
+    printf 'sent\t0\n'
+    return 0
 }
 
 sim_cmd_es9_notification() {
@@ -4994,7 +5103,7 @@ sim_selftest() {
     # A profile element is not a segment: SCP03t protects it first, and that
     # protection (SGP.02) is not built here, so the builder hands off.
     chk es8-seg-not-seg   "$(sim_cmd_es8_build sequence-87 --payload BF2400 >/dev/null 2>&1; echo $?)" "3"
-    chk es8-seg-lim       "$(sim_cmd_es8_build sequence-87 --payload BF2400 2>/dev/null | grep -c 'SCP03t protection runs over it first')" "1"
+    chk es8-seg-lim       "$(sim_cmd_es8_build sequence-87 --payload BF2400 2>/dev/null | grep -c 'Pass the SCP03t material')" "1"
     chk es8-seg-not-hex   "$(sim_cmd_es8_build sequence-87 --payload ZZ >/dev/null 2>&1; echo $?)" "1"
 
     # The whole BPP in the order 2.5.4 states:
@@ -5239,6 +5348,47 @@ sim_selftest() {
     chk usage-key-list   "$(printf '%s\n' "$out" | grep -c '^  --key-list ')" "1"
     chk usage-aka-resp   "$(printf '%s\n' "$out" | grep -c '^  --aka-responder ')" "1"
     chk usage-aka-serve  "$(printf '%s\n' "$out" | grep -c '^  --aka-serve ')" "1"
+
+    # ── protected segments and the notification body (R14) ─────────────
+    # A BPP segment is not an element: SCP03t runs over the element first, and
+    # this builder now does that itself instead of asking for pre-protected
+    # bytes. The wrapper, the tag and the length are asserted; the value is the
+    # protected block, so it is checked by length and by the tool that made it.
+    local scp_seg scp_again
+    scp_seg=$(sim_cmd_es8_build sequence-86 --payload BF2403AABBCC \
+        --k-enc 000102030405060708090A0B0C0D0E0F --k-mac 101112131415161718191A1B1C1D1E1F \
+        --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF 2>&1)
+    chk seg-86-wrap   "$(fld "$scp_seg" hex | cut -c1-4)" "A31A"
+    chk seg-86-tag    "$(fld "$scp_seg" hex | cut -c5-6)" "86"
+    chk seg-86-built  "$(fld "$scp_seg" status)" "built"
+    chk seg-87-wrap   "$(sim_cmd_es8_build sequence-87 --payload BF2403AABBCC \
+        --k-enc 000102030405060708090A0B0C0D0E0F --k-mac 101112131415161718191A1B1C1D1E1F \
+        --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF 2>&1 | awk -F'\t' '$1=="hex"{print substr($2,1,4); exit}')" "A01A"
+    # The same material twice is the same bytes: the derivation is deterministic.
+    scp_again=$(sim_cmd_es8_build sequence-86 --payload BF2403AABBCC \
+        --k-enc 000102030405060708090A0B0C0D0E0F --k-mac 101112131415161718191A1B1C1D1E1F \
+        --host-challenge 0011223344556677 --card-challenge 8899AABBCCDDEEFF 2>&1)
+    chk seg-86-deterministic "$(fld "$scp_again" hex)" "$(fld "$scp_seg" hex)"
+    # Half the material is a handoff, not a guess.
+    chk seg-86-partial "$(sim_cmd_es8_build sequence-86 --payload BF2403AABBCC \
+        --k-enc 000102030405060708090A0B0C0D0E0F >/dev/null 2>&1; echo $?)" "3"
+
+    # The notification body: built, then walked back by the reader.
+    local notif_ok notif_bad
+    notif_ok=$(sim_es9_notification_build --iccid 89440000000000000001 2>&1)
+    chk notif-iccid  "$(fld "$notif_ok" iccid)" "89440000000000000001"
+    chk notif-result "$(fld "$notif_ok" result)" "success"
+    chk notif-aid    "$(fld "$notif_ok" aid)" "A0000005591010FFFFFFFF8900000100"
+    chk notif-verify "$(fld "$notif_ok" verify)" "yes"
+    chk notif-root   "$(fld "$notif_ok" pending_hex | cut -c1-4)" "BF37"
+    chk notif-limit  "$(fld "$notif_ok" limit | grep -q 'euiccSignPIR' && echo yes || echo no)" "yes"
+    notif_bad=$(sim_es9_notification_build --iccid 89440000000000000001 --result failure --reason 8 2>&1)
+    chk notif-fail-result "$(fld "$notif_bad" result)" "failure"
+    chk notif-fail-reason "$(fld "$notif_bad" error_reason)" "8"
+    chk notif-fail-verify "$(fld "$notif_bad" verify)" "yes"
+    chk notif-no-iccid "$(sim_es9_notification_build >/dev/null 2>&1; echo $?)" "2"
+    chk notif-bad-iccid "$(sim_es9_notification_build --iccid 1234 >/dev/null 2>&1; echo $?)" "2"
+    chk notif-bad-result "$(sim_es9_notification_build --iccid 89440000000000000001 --result maybe >/dev/null 2>&1; echo $?)" "2"
 
     # ── eUICC fuzz corpus and classifier (R13) ─────────────────────────
     # The corpus runs against the card this module serves, so the Tier 0 half
@@ -6671,6 +6821,7 @@ sim_cli_main() {
         --rsp-audit)      sim_rsp_audit "$@" ;;
         --profile-model)  sim_profile_model "${1:--}" ;;
         --euicc-fuzz)     sim_euicc_fuzz "$@" ;;
+        --es9-notification-build) sim_es9_notification_build "$@" ;;
         --rsp-plan)       sim_rsp_plan "${1:-}" ;;
         --auts-verify)    sim_cmd_auts_verify "$@" ;;
         --usim-serve)     sim_usim_serve "$@" ;;
@@ -6718,6 +6869,9 @@ Usage: $0 COMMAND
                                     one AKA event: quintet from the store, SQN incremented and saved; --5g adds KAUSF and RES*
   --aka-serve [--5g --sn <hex>|--sn-name <text>]
                                     resident responder: VECTOR <imsi> [<rand>] / LIST / QUIT on stdin
+  --es9-notification-build --iccid <hex> [--result success|failure]
+                                    the HandleNotification body for a profile
+                                    install result, walked back before printing
   --euicc-fuzz [--target usim|reader] [--imsi <imsi>]
                                     drive a corpus of malformed C-APDUs at the
                                     card and classify each answer: refused,
