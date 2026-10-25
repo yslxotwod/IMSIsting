@@ -498,6 +498,127 @@ HANDOFF
     return 0
 }
 
+# ── the modulator ──────────────────────────────────────────────────────
+# `--transmit` writes bytes and stops. This verb goes one step further and
+# turns the same bytes into OFDM samples a sound-card- or SDR-side transmitter
+# will key: QPSK symbols from the payload bits, mapped onto the LTE cell's
+# resource grid (the grid, the IFFT and the cyclic prefixes are lte_phy's own,
+# so the waveform is the one tools/lte_phy.py self-checks), one slot tiled to
+# the capture length.
+#
+# What it is NOT: a PDSCH. There is no CRC, no Turbo coding, no rate matching,
+# no DCI and no MIB on the BCH -- a modem cannot demodulate these samples into
+# an RRC message without the rest of a real stack. The row `decodable_as` says
+# that in the output rather than leaving the file to imply more.
+bbnd_modulate() {
+    local hex="" framing="rrc" rate="" pci="1" out="" secs="0.01"
+    while (( $# )); do
+        case "$1" in
+            --framing) [[ -n "${2:-}" ]] || { printf 'ERROR\t--framing needs rrc or nas\n' >&2; return 2; }
+                       framing="$2"; shift 2 ;;
+            --rate)    rate="${2:-}"; shift 2 ;;
+            --pci)     pci="${2:-}"; shift 2 ;;
+            --out)     [[ -n "${2:-}" ]] || { printf 'ERROR\t--out needs a path\n' >&2; return 2; }
+                       out="$2"; shift 2 ;;
+            --secs)    secs="${2:-}"; shift 2 ;;
+            --*) printf 'ERROR\t--modulate does not take %s (see --help)\n' "$(bbnd_sanitize "$1")" >&2; return 2 ;;
+            *)
+                if [[ -z "$hex" ]]; then hex="$1"; shift
+                else printf 'ERROR\t--modulate takes one payload\n' >&2; return 2; fi ;;
+        esac
+    done
+    case "$framing" in rrc|nas) ;; *)
+        printf 'ERROR\t--framing must be rrc or nas: %s\n' "$(bbnd_sanitize "$framing")" >&2; return 2 ;; esac
+    hex=$(bbnd_norm_hex "$hex")
+    bbnd_is_hex "$hex" || { printf 'ERROR\t--modulate needs even-length hex, got "%s"\n' "$(bbnd_sanitize "$hex")" >&2; return 2; }
+    case "$rate" in
+        1920000|3840000|7680000|15360000|23040000|30720000) ;;
+        *)  printf 'ERROR\t--rate %s is not an LTE sample rate\n' "$(bbnd_sanitize "${rate:-<empty>}")" >&2
+            printf 'WHY\tthe grid and the IFFT in tools/lte_phy.py are indexed by N_RB and N_FFT; a rate that is not one of 1920000 3840000 7680000 15360000 23040000 30720000 has no grid to map onto\n' >&2
+            return 2 ;;
+    esac
+    command -v python3 >/dev/null 2>&1 || { printf 'ERROR\tpython3 is needed for the grid and the IFFT\n' >&2; return 1; }
+    local run
+    if [[ -z "$out" ]]; then
+        run=$(bbnd_run_dir modulate) || return 1
+        out="$run/payload.cf32"
+    fi
+    local py; py=$(mktemp "${TMP_DIR:-/tmp}/bbnd_mod.XXXXXX.py") || return 1
+    cat > "$py" <<'PY'
+import sys, os, hashlib
+sys.path.insert(0, os.environ["BBND_TOOLS"])
+import lte_phy
+
+hexs, rate, pci, out, secs = sys.argv[1:6]
+rate, pci, secs = int(rate), int(pci), float(secs)
+data = bytes.fromhex(hexs)
+
+# QPSK: two bits per symbol (TS 36.211 7.1.2's constellation, through
+# lte_phy's own modulator so there is one constellation in the tree).
+bits = []
+for b in data:
+    for i in range(7, -1, -1):
+        bits.append((b >> i) & 1)
+if len(bits) % 2:
+    bits.append(0)
+syms = lte_phy.qpsk_modulate(bits)
+
+n_rb, n_fft, _ = [(r, f, s) for bw, r, f, s in lte_phy.LTE_OFDM if s == rate][0]
+n_sc = n_rb * 12
+grid = [[0j] * n_sc for _ in range(7)]
+# Keep the sync symbols of the cell out of the payload: PSS/SSS would
+# overwrite symbols a receiver expects to find them in.
+l_sss, l_pss = lte_phy.sync_symbols(0)
+skip = {l_pss, l_sss}
+used = []
+k = 0
+for l in range(7):
+    if l in skip:
+        continue
+    for j in range(n_sc):
+        grid[l][j] = syms[k % len(syms)]
+        used.append((l, j))
+        k += 1
+one_slot = lte_phy.ofdm_modulate(grid, n_fft)[0]
+nsamp = int(rate * secs)
+x = (list(one_slot) * (nsamp // len(one_slot) + 1))[:nsamp]
+# One scalar normalisation so a transmitter sees a known peak.
+peak = max((abs(v) for v in x), default=0.0)
+if peak > 0:
+    x = [v * (0.999 / peak) for v in x]
+with open(out, "wb") as fh:
+    fh.write(b"".join(__import__("struct").pack("<ff", v.real, v.imag) for v in x))
+print("payload_bytes\t%d" % len(data))
+print("qpsk_symbols\t%d" % len(syms))
+print("re_used\t%d" % len(used))
+print("slot_samples\t%d" % len(one_slot))
+print("samples\t%d" % len(x))
+print("peak_full_scale\t1.0")
+print("sha256\t%s" % hashlib.sha256(open(out, "rb").read()).hexdigest())
+print("decodable_as\tno: QPSK symbols on the LTE grid with no CRC, Turbo coding, DCI or MIB; a modem needs the rest of a stack to invert this")
+PY
+    local rows; rows=$(BBND_TOOLS="$IMSISTING_ROOT/tools" timeout 300 python3 "$py" \
+        "$hex" "$rate" "$pci" "$out" "$secs" 2>&1); local rc=$?
+    rm -f "$py"
+    if (( rc != 0 )); then
+        printf 'ERROR\tthe modulator failed\n' >&2
+        printf '%s\n' "$rows" | sed 's/^/  /' >&2
+        return 1
+    fi
+    printf 'status\tmodulated\n'
+    printf 'framing\t%s\n' "$framing"
+    printf 'file\t%s\n' "$out"
+    printf 'format\tcf32\n'
+    printf 'rate\t%s\n' "$rate"
+    printf 'pci\t%s\n' "$pci"
+    printf 'seconds\t%s\n' "$secs"
+    printf '%s\n' "$rows"
+    printf 'grid\ttools/lte_phy.py ofdm_modulate (TS 36.211 6.12): %s\n' \
+        "resource elements, PSS/SSS symbols left empty, one slot tiled"
+    printf 'next\tkey the file with a transmitter, or read it back with --analyse-? on a receiver; the bytes are recoverable from the constellation, not from a modem log\n'
+    return 0
+}
+
 bbnd_transmit() {
     local hex="" framing="rrc" out="" run
     while (( $# )); do
@@ -855,6 +976,21 @@ bbnd_selftest() {
     chk tx-claims-none "$(printf '%s\n' "$rout" | grep -ci 'transmitted')" "0"
     chk tx-bad-framing "$(bbnd_cli_main --transmit 00 --framing lte >/dev/null 2>&1; echo $?)" "2"
 
+    # 6e2. The modulator writes samples, says what they are and are not, and
+    #      refuses a rate that has no LTE grid.
+    local mout mrc
+    mout=$(bbnd_cli_main --modulate 0b4101 --rate 15360000 --pci 37 --out "$d/mod.cf32" 2>/dev/null); mrc=$?
+    chk mod-rc        "$mrc" "0"
+    chk mod-status    "$(fld "$mout" status)" "modulated"
+    chk mod-bytes     "$(fld "$mout" payload_bytes)" "3"
+    chk mod-symbols   "$(fld "$mout" qpsk_symbols)" "12"
+    chk mod-slot      "$(fld "$mout" slot_samples)" "7680"
+    chk mod-samples   "$(fld "$mout" samples)" "153600"
+    chk mod-file      "$([[ -s "$d/mod.cf32" ]] && echo yes || echo no)" "yes"
+    chk mod-bad-rate  "$(bbnd_cli_main --modulate 00 --rate 1234 >/dev/null 2>&1; echo $?)" "2"
+    chk mod-bad-framing "$(bbnd_cli_main --modulate 00 --framing lte --rate 15360000 >/dev/null 2>&1; echo $?)" "2"
+    chk mod-decodes   "$(printf '%s\n' "$mout" | awk -F'\t' '$1=="decodable_as" && $2 ~ /^no/{print "yes"; exit}')" "yes"
+
     # 6f. --send-payload mutates through the existing engine, then hands off.
     local want
     want=$(bbnd_mutate deadbeef bitflip 42)
@@ -981,6 +1117,7 @@ bbnd_cli_main() {
         --diag-send)    bbnd_diag_send "${rest[@]}" ;;
         --transmit)     bbnd_transmit "${rest[@]}" ;;
         --send-payload) bbnd_send_payload "${rest[@]}" ;;
+        --modulate)     bbnd_modulate "${rest[@]}" ;;
         --rf-submit)    bbnd_rf_submit "${rest[@]}" ;;
         --selftest)     bbnd_selftest ;;
         --menu)         bbnd_menu ;;
