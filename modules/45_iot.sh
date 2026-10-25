@@ -417,6 +417,105 @@ EOF
 }
 
 
+# ── R64: the two numbers this tree can and cannot settle ────────────────
+# The NPRACH rule is a computation that can be checked against the clause, and
+# tools/nbiot_nprach.py does check it: the Gold generator is imported from
+# tools/lte_phy.py rather than rewritten, the format table is TS 36.211
+# Table 10.1.6.1-1, and the tool carries its own selfcheck. This verb makes the
+# checking visible instead of assumed, and it holds every group to the bounds
+# the clause sets: one subcarrier per group, inside [n_sc_offset,
+# n_sc_offset + n_sc_nprach), with the CP and sequence lengths the format says.
+iot_nprach_verify() {
+    local cell="${1:-0}" init="${2:-0}" groups="${3:-12}"
+    [[ "$cell" =~ ^[0-9]+$ ]]   || { printf 'ERROR\tcell id is a non-negative integer\n' >&2; return 2; }
+    [[ "$init" =~ ^[0-9]+$ ]]   || { printf 'ERROR\tn_init is a non-negative integer\n' >&2; return 2; }
+    [[ "$groups" =~ ^[0-9]+$ ]] && (( groups > 0 )) || { printf 'ERROR\tgroup count must be positive\n' >&2; return 2; }
+    [[ -f "$IOT_TOOL_NPRACH" ]] || {
+        printf 'ERROR\ttools/nbiot_nprach.py is missing\n' >&2; return 1; }
+
+    local out
+    out=$(python3 "$IOT_TOOL_NPRACH" pattern --cell "$cell" --init "$init" --groups "$groups" 2>&1) || {
+        printf '%s\n' "$out"; return 1; }
+    local lo hi nsc
+    lo=$(printf '%s\n' "$out"  | awk -F'\t' '$1=="n_sc_offset"{print $2; exit}')
+    nsc=$(printf '%s\n' "$out" | awk -F'\t' '$1=="n_sc_nprach"{print $2; exit}')
+    lo="${lo:-0}"; nsc="${nsc:-12}"
+    hi=$(( lo + nsc - 1 ))
+
+    local gs bad=0 total=0
+    gs=$(printf '%s\n' "$out" | awk -F'\t' '$1=="groups"{print $2; exit}')
+    printf 'cell\t%s\n' "$cell"
+    printf 'n_init\t%s\n' "$init"
+    printf 'n_sc_offset\t%s\n' "$lo"
+    printf 'n_sc_nprach\t%s\n' "$nsc"
+    printf 'groups\t%s\n' "${gs:-0}"
+    printf 'group\tsubcarrier\tcp_samples\tseq_samples\tinside_window\n'
+    printf '%s\n' "$out" | awk -F'\t' -v lo="$lo" -v hi="$hi" '
+        $1=="group" {
+            inside = ($4 >= lo && $4 <= hi) ? "yes" : "NO"
+            printf "g%s\t%s\t%s\t%s\t%s\n", $2, $4, $7, $9, inside
+        }' | while IFS=$'\t' read -r g sc cp sq ins; do
+            printf '%s\t%s\t%s\t%s\t%s\n' "$g" "$sc" "$cp" "$sq" "$ins"
+        done
+    bad=$(printf '%s\n' "$out" | awk -F'\t' -v lo="$lo" -v hi="$hi" \
+        '$1=="group" && ($4 < lo || $4 > hi)' | wc -l)
+    total=$(( ${gs:-0} ))
+    printf 'outside_window\t%s\n' "$bad"
+    local chkout chkpass chkfail
+    chkout=$(python3 "$IOT_TOOL_NPRACH" selfcheck 2>&1) || true
+    chkpass=$(printf '%s\n' "$chkout" | awk -F'\t' '$1=="CHECKS"{print $2; exit}')
+    chkfail=$(printf '%s\n' "$chkout" | awk -F'\t' '$1=="FAILED"{print $2; exit}')
+    printf 'tool_selfcheck\t%s\n' "$(printf '%s\n' "$chkout" | awk -F'\t' '$1=="RESULT"{print $2; exit}')"
+    printf 'tool_checks_passed\t%s\n' "${chkpass:-0}"
+    printf 'tool_checks_failed\t%s\n' "${chkfail:-0}"
+    printf 'ref\tTS 36.211 10.1.6.1 (one subcarrier per symbol group, N_sc^NPRACH window) and Table 10.1.6.1-1 (formats)\n'
+    if (( bad > 0 )) || [[ "${chkfail:-0}" != "0" ]]; then
+        printf 'verdict\tnprach_disagrees_with_the_clause\n'
+        return 1
+    fi
+    printf 'verdict\tnprach_verified\n'
+    return 0
+}
+
+# The other number cannot be settled here. NPRFcn to hertz is a per-band table
+# (TS 36.104 5.7.3-1) that this tree does not carry, and guessing a band edge
+# would produce a number that looks like an answer. What CAN be done without
+# that table is the raster arithmetic itself: the NB-IoT carrier raster is
+# 100 kHz, so given an anchor frequency that the operator supplies from their
+# own plan, the n-th raster position is the anchor plus n steps of 100 kHz.
+# The verb refuses until the anchor is given, and says whose number it is.
+iot_freq_plan() {
+    local nprfcn="${1:-}" flow="${2:-}"
+    [[ -n "$nprfcn" ]] || { printf 'ERROR\tusage: --freq-plan <nprfcn> [anchor-mhz]\n' >&2; return 2; }
+    [[ "$nprfcn" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tNPRFcn is a non-negative integer\n' >&2; return 2; }
+    printf 'nprfcn\t%s\n' "$nprfcn"
+    printf 'raster_khz\t100\n'
+    if [[ -z "$flow" ]]; then
+        printf 'needs\tTS 36.104 Table 5.7.3-1, the per-band NB-IoT carrier offset table, which this tree does not carry\n'
+        printf 'would_be\tf = anchor + nprfcn * 0.1 MHz, where anchor is the band entry point from that table\n'
+        printf 'why_refused\ta guessed band edge is a number that looks like an answer; supplying the anchor makes the arithmetic exact and the provenance explicit\n'
+        printf 'workaround\tgive the anchor as the second argument, or use --to-mhz for the same refusal in one row\n'
+        printf 'ref\tTS 36.104 5.7.3\n'
+        printf 'verdict\tanchor_not_in_this_tree\n'
+        return 1
+    fi
+    [[ "$flow" =~ ^[0-9]+(\.[0-9]+)?$ ]] || {
+        printf 'ERROR\tthe anchor is a frequency in MHz\n' >&2; return 2; }
+    local step freq
+    step=$(awk -v n="$nprfcn" 'BEGIN{printf "%.4f", n/10}')
+    freq=$(awk -v a="$flow" -v s="$step" 'BEGIN{printf "%.4f", a + s}')
+    printf 'anchor_mhz\t%s\n' "$flow"
+    printf 'step_mhz\t%s\n' "$step"
+    printf 'freq_mhz\t%s\n' "$freq"
+    printf 'provenance\tanchor supplied by the caller; the 100 kHz step and the direction are the raster definition, the band edge is not invented here\n'
+    printf 'limit\tthis is arithmetic on the anchor, not a substitute for the per-band table: it cannot tell whether the result is inside the band\n'
+    printf 'ref\tTS 36.104 5.7.3 (100 kHz NB-IoT carrier raster)\n'
+    printf 'verdict\traster_position_computed\n'
+    return 0
+}
+
+
 iot_plan() {
     local kind="${1:-}"
     case "$kind" in
@@ -647,6 +746,22 @@ iot_selftest() {
     chk ce-verdict "$(printf '%s\n' "$ceout" | awk -F'\t' '$1=="verdict"{print $2}')" "abuse_surface_listed"
     chk ce-bad-ues "$(iot_ce_abuse --ues 0 >/dev/null 2>&1; echo $?)" "2"
     chk ce-bad-rep "$(iot_ce_abuse --rep x >/dev/null 2>&1; echo $?)" "2"
+    # R64: the NPRACH rule is checkable, the NPRFcn anchor is not in the tree.
+    local nvout
+    nvout=$(iot_nprach_verify 0 0 6)
+    chk npr-verdict "$(printf '%s\n' "$nvout" | awk -F'\t' '$1=="verdict"{print $2}')" "nprach_verified"
+    chk npr-outside "$(printf '%s\n' "$nvout" | awk -F'\t' '$1=="outside_window"{print $2}')" "0"
+    chk npr-selfcheck "$(printf '%s\n' "$nvout" | awk -F'\t' '$1=="tool_selfcheck"{print $2}')" "PASS"
+    chk npr-checks "$(printf '%s\n' "$nvout" | awk -F'\t' '$1=="tool_checks_failed"{print $2}')" "0"
+    chk npr-group-rows "$(printf '%s\n' "$nvout" | awk -F'\t' '$1 ~ /^g[0-9]/' | wc -l)" "6"
+    chk npr-all-inside "$(printf '%s\n' "$nvout" | awk -F'\t' '$1 ~ /^g[0-9]/ && $5=="yes"' | wc -l)" "6"
+    chk npr-bad-groups "$(iot_nprach_verify 0 0 0 >/dev/null 2>&1; echo $?)" "2"
+    chk fp-refused "$(iot_freq_plan 42 >/dev/null 2>&1; echo $?)" "1"
+    chk fp-needs "$(iot_freq_plan 42 | awk -F'\t' '$1=="needs" && $2 ~ /5.7.3-1/{print "named"}')" "named"
+    chk fp-computed "$(iot_freq_plan 42 1805.0 | awk -F'\t' '$1=="freq_mhz"{print $2}')" "1809.2000"
+    chk fp-step "$(iot_freq_plan 42 1805.0 | awk -F'\t' '$1=="step_mhz"{print $2}')" "4.2000"
+    chk fp-bad-anchor "$(iot_freq_plan 42 abc >/dev/null 2>&1; echo $?)" "2"
+    chk fp-no-arg "$(iot_freq_plan >/dev/null 2>&1; echo $?)" "2"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -705,6 +820,8 @@ iot_cli_main() {
         --decode-sib1)  iot_decode_sib1_nb "${1:-}" ;;
         --decode-mib)   iot_decode_mib_nb "${1:-}" ;;
         --to-mhz)       iot_nprfcn_to_mhz "${1:-}" ;;
+        --nprach-verify) iot_nprach_verify "${1:-0}" "${2:-0}" "${3:-12}" ;;
+        --freq-plan)    iot_freq_plan "${1:-}" "${2:-}" ;;
         --nb-attach)    iot_nb_attach "${1:-0}" "${2:-in-band}" ;;
         --ce-abuse)     iot_ce_abuse "$@" ;;
         --plan)         iot_plan "${1:-}" ;;
@@ -722,6 +839,10 @@ Usage: $0 COMMAND
   --decode-sib1 <hex>  decode a SystemInformationBlockType1-NB
   --decode-mib <hex>   decode a MasterInformationBlock-NB (5 octets, 34 bits)
   --to-mhz <nprfcn>  refuses: TS 36.104 Table 5.7.3-1 is per-band and absent here
+  --nprach-verify [cell] [n_init] [groups]
+                     hold the NPRACH hopping to the clause bounds, with the tool selfcheck
+  --freq-plan <nprfcn> [anchor-mhz]
+                     the 100 kHz raster arithmetic, refused until an anchor is supplied
   --nb-attach [ce 0|1|2] [in-band|guard-band|standalone]
                      the narrowband attach message by message
   --ce-abuse [--ce N] [--ues N] [--rep N]
