@@ -169,6 +169,66 @@ n3g_classify() {
     }' | { read -r t; printf 'bandwidth_khz\t%s\nmodulation\t%s\ntechnology\t%s\n' "$bw" "$mod" "$t"; }
 }
 
+# ── codecs: the part that turns bits back into a voice ──────────────────
+# A demodulator produces bits. Turning those bits into speech is the vocoder,
+# and every system below uses one whose text is not in this tree and, for DMR,
+# whose implementation is licensed silicon. The bit budget is what a decoder
+# would have to consume, so the missing half is a number rather than an
+# omission: ACELP is 137 bits per 30 ms frame, AMBE+2 is 67 per 27.5 ms.
+# Nothing here decodes audio, and the last column says so on every row.
+n3g_codec_table() {
+    cat <<'EOF'
+system	codec	bit_rate_bps	frame_ms	speech_standard	licence	implemented_here
+TETRA	ACELP	4567	30	EN 300 395-2	public text	no
+DMR	AMBE+2	2450	27.5	TS 102 361-2	DVSI licensed	no
+DMR	AMBE+2 half rate	1225	27.5	TS 102 361-2	DVSI licensed	no
+GSM-R	EFR	12200	20	TS 46.060	public text	no
+GSM-R	AMR 4.75	4750	20	TS 26.090	public text	no
+GSM-R	AMR 12.2	12200	20	TS 26.090	public text	no
+EOF
+}
+
+n3g_codec_budget() {
+    printf 'system\tcodec\tbit_rate_bps\tframe_ms\tbits_per_frame\tspeech_standard\tlicence\timplemented_here\n'
+    n3g_codec_table | tail -n +2 | awk -F'\t' '{
+        printf "%s\t%s\t%s\t%s\t%.0f\t%s\t%s\t%s\n", $1, $2, $3, $4, $3 * $4 / 1000, $5, $6, $7
+    }'
+}
+
+# ── bands: what may be transmitted, and at what power ───────────────────
+# The receive half of this module needs no permission. The transmit half does.
+# The licensed bands are here for contrast, and to say plainly that 876-880 MHz
+# is never something a tool arranges. The interesting rows are the exempt ones:
+# 500 mW on PMR446 or 2 W on FRS is the cheapest legal transmitter anyone can
+# own, which makes those bands the honest place to learn a transmit path.
+n3g_band_table() {
+    cat <<'EOF'
+region	band	low_mhz	high_mhz	max_power	licence	note
+EU	pmr446	446.0	446.2	500 mW EIRP	exempt	ERC/REC 70-03 Annex 1; analogue and digital share the band
+UK	pmr446	446.0	446.2	500 mW EIRP	exempt	the same band at the same power, under Ofcom
+US	FRS	462.5625	462.7125	2 W ERP	exempt	channels 1-7; 467.5625-467.7125 are channels 8-14
+US	MURS	151.82	154.6	2 W ERP	exempt	five VHF channels, business use
+RAIL	GSM-R	876.0	880.0	network-licensed	licensed	the railway mobile network; never exempt anywhere
+PS	TETRA	380.0	400.0	network-licensed	licensed	public safety; a network licence, not a purchase
+EOF
+}
+
+n3g_bands() {
+    local region="${1:-all}"
+    [[ "$region" =~ ^[A-Za-z-]+$ ]] || {
+        printf 'ERROR\tregion must be a name like EU, UK, US, RAIL or PS\n' >&2; return 2; }
+    printf 'region\tband\tlow_mhz\thigh_mhz\twidth_khz\tmax_power\tlicence\tnote\n'
+    n3g_band_table | tail -n +2 | awk -F'\t' -v want="$region" '
+        BEGIN { upper = toupper(want); found = 0 }
+        upper == "ALL" || toupper($1) == upper {
+            found = 1
+            printf "%s\t%s\t%s\t%s\t%.1f\t%s\t%s\t%s\n", $1, $2, $3, $4, ($4 - $3) * 1000, $5, $6, $7
+        }
+        END {
+            if (!found) { printf "ERROR\tno band in region %s\n", want > "/dev/stderr"; exit 2 }
+        }'
+}
+
 n3g_detect_note() {
     cat <<'EOF'
 system	weakness	detection note
@@ -186,6 +246,7 @@ what	receiving TETRA/DMR/GSM-R
 hardware	an SDR covering the band: TETRA 380-400 MHz, DMR 400-470 MHz, GSM-R 876-925 MHz
 software	telive or a TETRA demodulator for TETRA, dmrdecode/DSD for DMR, gr-gsm for GSM-R
 flow	1. --classify the observed channel spacing  2. --tdma for the frame maths  3. --detect-note for the cipher posture
+transmit	the exempt rows of --bands are the only place a transmit path makes sense without a licence, and --codecs is what a receive chain still lacks to produce audio
 note	receiving public-safety traffic may be restricted where you are; decrypting it requires keys you are not entitled to
 EOF
 }
@@ -256,6 +317,27 @@ n3g_selftest() {
     chk detect-tea1 "$(n3g_detect_note | awk -F'\t' '$1=="TETRA TEA1"{print ($2 ~ /weakened/)?"yes":"no"}')" "yes"
     chk detect-gsmr "$(n3g_detect_note | awk -F'\t' '$1=="GSM-R"{print ($3 ~ /observe, do not interfere/)?"yes":"no"}')" "yes"
 
+    # 6. Codecs: the bit budget of the half this tree does not decode. The
+    # numbers are rate x frame, so they are arithmetic rather than a quoted
+    # constant, and the last column admits the absence on every row.
+    chk codec-acelp "$(n3g_codec_budget | awk -F'\t' '$1=="TETRA" && $2=="ACELP"{print $5}')" "137"
+    chk codec-ambe "$(n3g_codec_budget | awk -F'\t' '$1=="DMR" && $2=="AMBE+2"{print $5}')" "67"
+    chk codec-ambe-half "$(n3g_codec_budget | awk -F'\t' '$2=="AMBE+2 half rate"{print $5}')" "34"
+    chk codec-efr "$(n3g_codec_budget | awk -F'\t' '$1=="GSM-R" && $2=="EFR"{print $5}')" "244"
+    chk codec-amr "$(n3g_codec_budget | awk -F'\t' '$1=="GSM-R" && $2=="AMR 4.75"{print $5}')" "95"
+    chk codec-none-implemented "$(n3g_codec_budget | awk -F'\t' 'NR>1 && $8!="no"' | wc -l)" "0"
+    chk codec-licensed "$(n3g_codec_budget | awk -F'\t' '$2=="AMBE+2"{print ($7 ~ /licensed/)?"yes":"no"}')" "yes"
+
+    # 7. Bands: the exempt rows are the only legal transmitter anyone owns,
+    # and the licensed rows must never read as purchasable.
+    chk bands-pmr-width "$(n3g_bands EU | awk -F'\t' '$2=="pmr446"{print $5}')" "200.0"
+    chk bands-pmr-power "$(n3g_bands EU | awk -F'\t' '$2=="pmr446"{print $6}')" "500 mW EIRP"
+    chk bands-exempt "$(n3g_bands all | awk -F'\t' '$7=="exempt"' | wc -l)" "4"
+    chk bands-licensed "$(n3g_bands all | awk -F'\t' '$7=="licensed"' | wc -l)" "2"
+    chk bands-eu-rows "$(n3g_bands EU | wc -l)" "2"
+    chk bands-bad-region "$(n3g_bands 9 >/dev/null 2>&1; echo $?)" "2"
+    chk bands-no-such-region "$(n3g_bands ZZ >/dev/null 2>&1; echo $?)" "2"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -273,8 +355,10 @@ n3g_menu() {
   [4]  GSM-R reference
   [5]  TDMA slot maths
   [6]  Classify a channel spacing
-  [7]  Detection notes
-  [8]  Plan (handoff)
+  [7]  Codec bit budgets
+  [8]  Bands and licence class
+  [9]  Detection notes
+  [10] Plan (handoff)
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -285,8 +369,10 @@ M
             4) n3g_gsmr_table; read -rp "  enter " _ ;;
             5) read -rp "  frame ms> " f; read -rp "  slots> " s; n3g_tdma_slot "$f" "$s"; read -rp "  enter " _ ;;
             6) read -rp "  bandwidth kHz> " b; read -rp "  modulation> " m; n3g_classify "$b" "${m:-unknown}"; read -rp "  enter " _ ;;
-            7) n3g_detect_note; read -rp "  enter " _ ;;
-            8) n3g_plan; read -rp "  enter " _ ;;
+            7) n3g_codec_budget; read -rp "  enter " _ ;;
+            8) n3g_bands "all"; read -rp "  enter " _ ;;
+            9) n3g_detect_note; read -rp "  enter " _ ;;
+            10) n3g_plan; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -305,6 +391,8 @@ n3g_cli_main() {
         --tdma)         n3g_tdma_slot "${1:-}" "${2:-}" ;;
         --frame-math)   n3g_frame_math "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-0}" ;;
         --classify)     n3g_classify "${1:-}" "${2:-unknown}" ;;
+        --codecs)       n3g_codec_budget ;;
+        --bands)        n3g_bands "${1:-all}" ;;
         --detect-note)  n3g_detect_note ;;
         --plan)         n3g_plan ;;
         --selftest)     n3g_selftest ;;
@@ -322,6 +410,8 @@ Usage: $0 COMMAND
   --tdma <frame_ms> <slots> TDMA slot arithmetic (from a stated frame length)
   --frame-math <syms> <bits/sym> <slots> <bit/s>  derive the frame length from the air interface
   --classify <khz> [mod]    identify the technology from channel spacing
+  --codecs                  the vocoders and the bit budget a decoder must consume
+  --bands [REGION]          band edges, power and licence class; PMR446/FRS are the exempt ones
   --detect-note             cipher-weakness and detection notes
   --plan                    receive-only handoff plan
   --selftest                verify the references and the classifier
