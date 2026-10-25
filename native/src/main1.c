@@ -5899,6 +5899,12 @@ static const char *const plain_keys[] = {
     "subscriber_state\tthe state the network reports for the subscriber",
     "pycrate_shape\tthe encoder shape a tool produced",
     "referee_divergence\ttwo encoders disagreeing about the same field",
+    "confidence\thow much of a field is cited versus read",
+    "time\tthe moment a record was made",
+    "liid\tthe identifier a warrant is delivered under",
+    "liid_hex\tthe delivery identifier as octets",
+    "sequence_octets\thow many octets the wrapped record holds",
+    "pdu_hex\tthe assembled delivery record as hex",
 };
 
 /* Compare a bare key against one "key<TAB>words" row. */
@@ -7240,6 +7246,8 @@ static const ChipRow chip_rows[] = {
     { "42_li_probe",         "--status-tsv",          NEED_NO, DOES_READS },
     { "42_li_probe",         "--version",             NEED_NO, DOES_READS },
     { "42_li_probe",         "--yes",                 NEED_NO, DOES_READS },
+    { "42_li_probe",         "--li-pdu-build",        NEED_NO, DOES_BUILDS },
+    { "42_li_probe",         "--li-pdu-parse",        NEED_NO, DOES_READS },
     { "43_ran_share",        "--__index_probe__",     NEED_NO, DOES_READS },
     { "43_ran_share",        "--eplmn",               NEED_NO, DOES_READS },
     { "43_ran_share",        "--help",                NEED_NO, DOES_READS },

@@ -879,6 +879,136 @@ lipr_scope_check() {
     return 0
 }
 
+# ── the delivery envelope a product travels in ──────────────────────────
+# The artefacts above are this module's own framing (magic LIPR). A product
+# that has to reach an ADMF travels wrapped in the delivery header ETSI
+# TS 102 232-1 puts in front of each record: version, LIID, sequence number,
+# timestamp, then the payload octets. That header is BER (SEQUENCE of
+# INTEGER/OCTET STRING/GeneralizedTime), which is what this builds.
+#
+# What is cited and what is read: the four header fields and their order are
+# from TS 102 232-1 5.2; the exact tagging of the timestamp and whether the
+# payload is an OCTET STRING or an [n] constructed are this tree's reading of
+# the text, so the artefact says so rather than pretending to be exact.
+lipr_ber_len() {     # <octet-count> -> length octets
+    local n="${1:-0}"
+    if (( n < 0x80 )); then printf '%02X' "$n"
+    elif (( n < 0x100 )); then printf '81%02X' "$n"
+    elif (( n < 0x10000 )); then printf '82%04X' "$n"
+    else printf '83%06X' "$n"; fi
+}
+lipr_ber_tlv() {     # <tag-hex> <value-hex>
+    local tag="${1:-}" val="${2:-}"
+    printf '%s%s%s' "$tag" "$(lipr_ber_len $(( ${#val} / 2 )))" "$val"
+}
+lipr_ber_int() {     # <n> -> INTEGER value octets, minimal, sign-safe
+    local n="${1:-0}" out=""
+    (( n >= 0 )) || n=0
+    if (( n == 0 )); then out="00"; else
+        while (( n > 0 )); do out=$(printf '%02X' $(( n & 0xFF )))"$out"; n=$(( n >> 8 )); done
+        # a leading octet >= 0x80 would read as negative, so pad with 00
+        [[ "${out:0:2}" > "7F" ]] && out="00$out"
+    fi
+    printf '%s' "$out"
+}
+lipr_liid_hex() {    # <text> -> octets; a hex LIID is taken as bytes
+    local v="${1:-}"
+    if [[ "$v" =~ ^[0-9A-Fa-f]+$ ]] && (( ${#v} % 2 == 0 )) && (( ${#v} >= 2 )); then
+        printf '%s' "${v^^}"
+    else
+        printf '%s' "$v" | od -An -tx1 | tr -d ' \n' | tr '[:lower:]' '[:upper:]'
+    fi
+}
+lipr_cmd_li_pdu() {  # --li-pdu-build | --li-pdu-parse
+    local mode="${1:-}"; shift || true
+    local liid="" seq=0 tstamp="" payload="" hex="" out=""
+    while (( $# )); do
+        case "$1" in
+            --liid)    liid="${2:-}"; shift 2 ;;
+            --seq)     seq="${2:-0}"; shift 2 ;;
+            --time)    tstamp="${2:-}"; shift 2 ;;
+            --payload) payload="${2:-}"; shift 2 ;;
+            --out)     out="${2:-}"; shift 2 ;;
+            --help|-h) printf 'usage: --li-pdu-build --liid <id> [--seq N] [--time UTCtime] [--payload hex] [--out path]\n       --li-pdu-parse <hex>\n'; return 0 ;;
+            *) [[ "$mode" == "--li-pdu-parse" && -z "$hex" ]] && { hex="$1"; shift; continue; }
+               printf 'ERROR\t--li-pdu does not take %s\n' "$(lipr_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    if [[ "$mode" == "--li-pdu-parse" ]]; then
+        [[ -n "$hex" ]] || { printf 'ERROR\t--li-pdu-parse needs hex\n' >&2; return 2; }
+        hex=$(printf '%s' "$hex" | tr -d ' :' | tr '[:lower:]' '[:upper:]')
+        [[ "$hex" =~ ^[0-9A-F]+$ ]] && (( ${#hex} % 2 == 0 )) || {
+            printf 'ERROR\tthe PDU is not hex: %s\n' "$(lipr_sanitize "$hex")" >&2; return 2; }
+        local off=0 t l h v l1
+        printf 'artefact\tLI-PDU\n'
+        # Require and strip the outer SEQUENCE, then walk its children.
+        [[ "${hex:0:2}" == "30" ]] || {
+            printf 'ERROR\tthe PDU does not start with a SEQUENCE: %s\n' "${hex:0:2}" >&2; return 1; }
+        l1=$(( 16#${hex:2:2} ))
+        if (( l1 < 0x80 )); then h=2; l=$l1
+        elif (( l1 == 0x81 )); then h=3; l=$(( 16#${hex:4:2} ))
+        elif (( l1 == 0x82 )); then h=4; l=$(( 16#${hex:4:2} * 256 + 16#${hex:6:2} ))
+        else printf 'ERROR\tthe PDU length is not supported\n' >&2; return 1; fi
+        hex="${hex:$((h*2)):$((l*2))}"
+        local total=$(( ${#hex} / 2 ))
+        printf 'sequence_octets\t%d\n' "$total"
+        while (( off < total )); do
+            t="${hex:$((off*2)):2}"
+            l1=$(( 16#${hex:$((off*2+2)):2} ))
+            if (( l1 < 0x80 )); then l=l1; h=2
+            elif (( l1 == 0x81 )); then l=$(( 16#${hex:$((off*2+4)):2} )); h=3
+            elif (( l1 == 0x82 )); then l=$(( 16#${hex:$((off*2+4)):2} * 256 + 16#${hex:$((off*2+6)):2} )); h=4
+            else printf 'ERROR\tthe PDU does not parse at octet %d\n' "$off" >&2; return 1; fi
+            v="${hex:$(((off+h)*2)):$((l*2))}"
+            case "$t" in
+                30) printf 'element\tSEQUENCE\t%d\n' "$l" ;;
+                02) printf 'element\tINTEGER\t%s\n' "$v" ;;
+                18) printf 'element\tGeneralizedTime\t%s\n' "$(printf '%b' "$(printf '%s' "$v" | sed 's/../\\x&/g')")" ;;
+                04) printf 'element\tOCTET STRING\t%s\n' "$v" ;;
+                *)  printf 'element\ttag %s\t%d\n' "$t" "$l" ;;
+            esac
+            off=$(( off + h + l ))
+        done
+        printf 'octets\t%d\n' "$total"
+        printf 'ref\tETSI TS 102 232-1 5.2 (delivery header fields and order)\n'
+        printf 'confidence\tfield names and order are cited; the tag choice for the timestamp and the payload is the reading made here\n'
+        return 0
+    fi
+    [[ -n "$liid" ]] || { printf 'ERROR\t--li-pdu-build needs --liid\n' >&2; return 2; }
+    [[ "$seq" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--seq is a non-negative number: %s\n' "$(lipr_sanitize "$seq")" >&2; return 2; }
+    [[ -n "$payload" ]] || payload=""
+    payload=$(printf '%s' "$payload" | tr -d ' ' | tr '[:lower:]' '[:upper:]')
+    if [[ -n "$payload" ]]; then
+        [[ "$payload" =~ ^[0-9A-F]+$ ]] && (( ${#payload} % 2 == 0 )) || {
+            printf 'ERROR\t--payload is not hex: %s\n' "$(lipr_sanitize "$payload")" >&2; return 2; }
+    fi
+    [[ -n "$tstamp" ]] || tstamp=$(date -u +%Y%m%d%H%M%SZ)
+    [[ "$tstamp" =~ ^[0-9]{12}Z$ || "$tstamp" =~ ^[0-9]{14}Z$ ]] || {
+        printf 'ERROR\t--time is GeneralizedTime without punctuation: YYYYMMDDhhmm[ss]Z, got %s\n' "$(lipr_sanitize "$tstamp")" >&2; return 2; }
+    local lh th ph body
+    lh=$(lipr_liid_hex "$liid")
+    th=$(printf '%s' "$tstamp" | od -An -tx1 | tr -d ' \n' | tr '[:lower:]' '[:upper:]')
+    ph=${payload}
+    body=$(lipr_ber_tlv 02 "$(lipr_ber_int 1)")$(lipr_ber_tlv 04 "$lh")$(lipr_ber_tlv 02 "$(lipr_ber_int "$seq")")$(lipr_ber_tlv 18 "$th")$(lipr_ber_tlv 04 "$ph")
+    printf 'artefact\tLI-PDU\n'
+    printf 'version\t1\n'
+    printf 'liid\t%s\n' "$(lipr_sanitize "$liid")"
+    printf 'liid_hex\t%s\n' "$lh"
+    printf 'sequence\t%s\n' "$seq"
+    printf 'time\t%s\n' "$tstamp"
+    printf 'payload_octets\t%d\n' "$(( ${#ph} / 2 ))"
+    printf 'body_octets\t%d\n' "$(( ${#body} / 2 ))"
+    printf 'pdu_hex\t%s\n' "$(lipr_ber_tlv 30 "$body")"
+    printf 'out_file\t%s\n' "$(lipr_sanitize "${out:-}")"
+    if [[ -n "$out" ]]; then
+        lipr_write_bytes "$out" "$(lipr_ber_tlv 30 "$body")" || return 1
+    fi
+    printf 'ref\tETSI TS 102 232-1 5.2 (delivery header fields and order)\n'
+    printf 'confidence\tfield names and order are cited; the tag choice for the timestamp and the payload is the reading made here\n'
+    printf 'limit\tthis is the delivery envelope only: the HI2/HI3 payload inside it is still not transcribed, so no ADMF will treat the body as an event\n'
+    return 0
+}
+
 lipr_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -1153,6 +1283,26 @@ CONF
     chk status-limit-names-product "$(has "$(fld "$out" LIMIT)" 'X3/HI3')" "yes"
     chk status-limit-names-target "$(has "$(fld "$out" LIMIT)" 'target-identity')" "yes"
 
+    # The delivery envelope: the fields have to survive a round trip, and the
+    # header has to be BER that another parser can walk.
+    local lpd lpv lpp
+    lpd=$(lipr_cmd_li_pdu --li-pdu-build --liid 310150123456789 --seq 7 --time 20250101120000Z --payload 300401020304)
+    lpv=$(printf '%s\n' "$lpd" | awk -F'\t' '$1=="pdu_hex"{print $2}')
+    lpp=$(lipr_cmd_li_pdu --li-pdu-parse "$lpv")
+    chk lpdu-version   "$(printf '%s\n' "$lpd" | awk -F'\t' '$1=="version"{print $2}')" "1"
+    chk lpdu-seq       "$(printf '%s\n' "$lpd" | awk -F'\t' '$1=="sequence"{print $2}')" "7"
+    chk lpdu-tag       "$(printf '%s' "$lpv" | cut -c1-2)" "30"
+    chk lpdu-parse-int "$(printf '%s\n' "$lpp" | awk -F'\t' '$1=="element" && $2=="INTEGER"{print $3}' | head -1)" "01"
+    chk lpdu-parse-seq "$(printf '%s\n' "$lpp" | awk -F'\t' '$1=="element" && $2=="INTEGER"{print $3}' | tail -1)" "07"
+    chk lpdu-parse-liid "$(printf '%s\n' "$lpp" | awk -F'\t' '$1=="element" && $2=="OCTET STRING"{print $3}' | head -1)" "333130313530313233343536373839"
+    chk lpdu-parse-time "$(printf '%s\n' "$lpp" | awk -F'\t' '$1=="element" && $2=="GeneralizedTime"{print $3}')" "20250101120000Z"
+    chk lpdu-parse-pay "$(printf '%s\n' "$lpp" | awk -F'\t' '$1=="element" && $2=="OCTET STRING"{print $3}' | tail -1)" "300401020304"
+    chk lpdu-limit     "$(printf '%s\n' "$lpd" | awk -F'\t' '$1=="limit"{print ($2 ~ /HI2\/HI3 payload/)?"yes":"no"}')" "yes"
+    chk lpdu-noliid    "$(lipr_cmd_li_pdu --li-pdu-build --seq 1 >/dev/null 2>&1; echo $?)" "2"
+    chk lpdu-badtime   "$(lipr_cmd_li_pdu --li-pdu-build --liid AB --time 2025-01-01 >/dev/null 2>&1; echo $?)" "2"
+    chk lpdu-badhex    "$(lipr_cmd_li_pdu --li-pdu-build --liid AB --payload zz >/dev/null 2>&1; echo $?)" "2"
+    chk lpdu-notseq    "$(lipr_cmd_li_pdu --li-pdu-parse 020101 >/dev/null 2>&1; echo $?)" "1"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1220,6 +1370,7 @@ lipr_cli_main() {
         --provision-target) lipr_cmd_provision "${rest[@]}" ;;
         --activate)    lipr_cmd_activate "${rest[@]}" ;;
         --intercept)   lipr_cmd_intercept "${rest[@]}" ;;
+        --li-pdu-build|--li-pdu-parse) lipr_cmd_li_pdu "$1" "${rest[@]}" ;;
         --selftest)    lipr_selftest ;;
         --menu)        lipr_menu ;;
         *)
@@ -1235,6 +1386,10 @@ Usage: $0 COMMAND
   --architecture       ADMF/POI/DF2/DF3/LEMF roles
   --score <tsv>        interception-posture score over signalling events
   --report             what to record and where to escalate
+  --li-pdu-build       wrap a product in the delivery header a collection
+                       system puts in front of a record: version, LIID,
+                       sequence, time, payload (ETSI TS 102 232-1 5.2)
+  --li-pdu-parse <hex> read that header back
   --plan               network-side confirmation handoff
   --provision-target <conf> [--out <path>]
                        encode the provisioning request as a TS 33.108 HI1
