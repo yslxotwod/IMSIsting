@@ -971,6 +971,44 @@ sbap_rapid_reset() {
         "$n" "$(( 2 * n ))"
 }
 
+# ── C2 — SBA boundary bridging (N32-f) ─────────────────────────────────
+# N32-f is a roaming interface: two SEPPs talk TLS, and everything a home NF
+# can do for a visited NF crosses it. The question this answers is whether the
+# trust boundary is per-message (a policy check at the home SEPP) or only
+# per-peer (whatever makes it through the IPX).
+sbap_n32_bridge() {
+    local root="${1:-}" visiting="${2:-AMF}" plmn="${3:-001-01}"
+    [[ -n "$root" ]] || { printf 'ERROR\thome apiRoot required, e.g. nudm-ueau.5gc.mnc001.mcc001.3gppnetwork.org\n' >&2; return 2; }
+    case "$visiting" in AMF|amf|SMF|smf) ;; *) printf 'ERROR\tvisiting NF is AMF or SMF (the two the roaming contract names)\n' >&2; return 2 ;; esac
+    visiting=$(printf '%s' "$visiting" | tr 'a-z' 'A-Z')
+    local sepp="sepp.5gc.mnc${plmn#*-}.mcc${plmn%-*}.3gppnetwork.org"
+    printf 'root\t%s\nvisiting_nf\t%s\nvisiting_plmn\t%s\nhome_sepp\t%s\n' \
+        "$(sbap_sanitize "$root")" "$visiting" "$(sbap_sanitize "$plmn")" "$sepp"
+    case "$visiting" in
+        AMF) printf 'contract\tN8: visiting AMF reaches home UDM (nudm-ueau, nudm-uecm, nudm-sdm)\n' ;;
+        SMF) printf 'contract\tN16: visiting SMF reaches home SMF (nsmf-pdusession)\n' ;;
+    esac
+    printf 'hop\t1\tvNF -> hSEPP: the forwarding request is built over N32-c\n'
+    printf 'hop\t2\tvSEPP -> hSEPP: TLS with certificates, N32-c handshake (TS 33.501 13.1)\n'
+    printf 'hop\t3\thSEPP -> home NF: the payload is delivered as if it came from the home AMF\n'
+    printf 'header\t:method\tPOST\n'
+    printf 'header\t:path\t%s/nudm-ueau/v1/imsi-001010000000001/security-information/generate-auth-data\n' "$(sbap_sanitize "$root")"
+    printf 'header\t:authority\t%s\n' "$(sbap_sanitize "$root")"
+    printf 'header\tcontent-type\tapplication/json\n'
+    printf 'header\t3gpp-Sbi-Target-apiRoot\thttps://%s\n' "$(sbap_sanitize "$root")"
+    printf 'finding\tdns\tINFO\thome apiRoots are public names: resolvable from any network, so discovery is not the barrier\n'
+    printf 'finding\tnrf_scope\tINFO\tthe visited NRF only discovers its own PLMN — the home name has to be configured or guessed, not looked up\n'
+    printf 'finding\tsepp_gate\tHIGH\tthe only per-message check is the home SEPP policy: service name outside the contract (nudm-ueau/nudm-uecm/nsmf-pdusession) must be refused there, and that is a configuration item, not a protocol guarantee\n'
+    printf 'finding\tipx_trust\tMEDIUM\tthe IPX hops in the middle see the payload; unless NDS/IPX or a JOSE protection layer is deployed, the home side authenticates the vSEPP, not the visiting NF\n'
+    printf 'finding\ttype_spoof\tHIGH\tN32-c is per-SEPP, not per-NF: an NF inside the visited core that talks to its own SEPP can name any visiting NF type, and the hSEPP has no identity of the individual source NF to check\n'
+    printf 'artefact\tsend from the visited side:\n'
+    printf 'artefact_line\tcurl -sS --http2-prior-knowledge -H "3gpp-Sbi-Target-apiRoot: https://%s" -H "content-type: application/json" --data @challenge.json https://%s/nudm-ueau/v1/imsi-001010000000001/security-information/generate-auth-data\n' \
+        "$(sbap_sanitize "$root")" "$sepp"
+    printf 'detect\tat the home SEPP: count service names per peer SEPP, alert on the first nudm-uecm or nudm-sdm from a visited peer, and on any NF type other than AMF/SMF\n'
+    printf 'verdict\tthe boundary is administrative: what a visited network reaches is what the home SEPP policy allows, and the source NF is asserted, not proven\n'
+    return 0
+}
+
 sbap_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -1070,6 +1108,22 @@ sbap_selftest() {
     chk rapid-frames  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="frames"{print $2}')" "6"
     chk rapid-rst     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="reset"{n++} END{print n+0}')" "3"
     chk rapid-bad     "$(sbap_rapid_reset 0 >/dev/null 2>&1; echo $?)" "2"
+
+    # 7b. C2 -- N32-f boundary: the contract is per visiting NF type, the
+    # gate is one policy at the home SEPP, and the source NF is asserted.
+    out=$(sbap_n32_bridge nudm-ueau.5gc.mnc001.mcc001.3gppnetwork.org AMF 001-01)
+    chk n32-root     "$(fld "$out" root)"        "nudm-ueau.5gc.mnc001.mcc001.3gppnetwork.org"
+    chk n32-nf       "$(fld "$out" visiting_nf)" "AMF"
+    chk n32-sepp     "$(fld "$out" home_sepp)"   "sepp.5gc.mnc01.mcc001.3gppnetwork.org"
+    chk n32-contract "$(fld "$out" contract | cut -c1-2)" "N8"
+    chk n32-hops     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="hop"{n++} END{print n+0}')" "3"
+    chk n32-gate     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="sepp_gate"{print $3}')" "HIGH"
+    chk n32-spoof    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="type_spoof"{print $3}')" "HIGH"
+    chk n32-curl     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="artefact_line"{print ($2 ~ /http2-prior-knowledge/)?"yes":"no"}')" "yes"
+    out=$(sbap_n32_bridge nudm-uecm.5gc.mnc001.mcc001.3gppnetwork.org SMF 001-01)
+    chk n32-smf      "$(fld "$out" contract | cut -c1-3)" "N16"
+    chk n32-noarg    "$(sbap_n32_bridge >/dev/null 2>&1; echo $?)" "2"
+    chk n32-badnf    "$(sbap_n32_bridge x UPF >/dev/null 2>&1; echo $?)" "2"
 
     # 8. HPACK (RFC 7541): the static table, the indexed and literal forms,
     # the Huffman code and the dynamic table the appendix examples exercise.
@@ -1214,6 +1268,7 @@ sbap_cli_main() {
         --token-pivot) sbap_token_pivot "${1:-}" "${2:-}" ;;
         --scope)       sbap_scope_confusion "${1:-}" "${2:-}" ;;
         --rapid-reset) sbap_rapid_reset "${1:-5}" ;;
+        --n32-bridge)  sbap_n32_bridge "${1:-}" "${2:-AMF}" "${3:-001-01}" ;;
         --plan)        sbap_plan ;;
         --selftest)    sbap_selftest ;;
         --menu)        sbap_menu ;;
@@ -1235,6 +1290,9 @@ Usage: $0 COMMAND
   --token-pivot <token> <target_nf>   cross-service token replay check
   --scope <token> <expected_scope>    scope-confusion check
   --rapid-reset <n>          HTTP/2 Rapid Reset frame sequence (CVE-2023-44487)
+  --n32-bridge <home-api-root> [visiting-NF] [plmn]
+                        C2: what a visited network reaches over N32-f,
+                        hop by hop, and which check would stop it
   --plan                SBA lab handoff plan
   --selftest            verify framing and token audit, no core needed
   --menu                interactive menu
