@@ -1147,6 +1147,65 @@ ncore_cmd_ngap_ngsetup() {  # [plmn] [gnb-id] [node-name] [tac]
 # --ngap-send puts one of those messages on SCTP port 38412 with PPID 60.
 # Armed separately from the builders, for the same reason every other sender
 # in this tree is: a builder is not a target.
+ncore_cmd_nas_count() {  # <before> <after> [--cause <name>]
+    local a="${1:-}" b="${2:-}"; shift 2 2>/dev/null || true
+    local cause=""
+    while (( $# )); do
+        case "$1" in
+            --cause) cause="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown argument %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--nas-count-check takes two NAS COUNT values (0..16777215)\n' >&2; return 2; }
+    (( a < 16777216 && b < 16777216 )) || {
+        printf 'ERROR\ta NAS COUNT is 24 bits, so 0..16777215\n' >&2; return 2; }
+    printf 'count_before\t%s\ncount_after\t%s\n' "$a" "$b"
+    printf 'count_before_hex\t%06X\ncount_after_hex\t%06X\n' "$a" "$b"
+    printf 'delta\t%s\n' "$(( b - a ))"
+    if (( b > a )); then
+        printf 'direction\tadvance\n'
+        printf 'rule\tTS 24.501 4.4.3.1: a received NAS COUNT must be greater than any COUNT already accepted under the same key\n'
+        printf 'verdict\tnormal: the new message is fresh under this key\n'
+    elif (( b == a )); then
+        printf 'direction\treuse\n'
+        printf 'rule\tTS 24.501 4.4.3.1: equal COUNT means the message is a replay of one already accepted\n'
+        printf 'finding\tcount_reuse\tHIGH\tthe same NAS COUNT on a second message: if the receiver accepts it, the keystream is reused too, so it must be discarded and the event logged\n'
+        printf 'verdict\treplay -- a receiver that takes this is the vulnerability, not the re-key\n'
+    else
+        printf 'direction\treset\n'
+        printf 'rule\tTS 24.501 4.4.3.1: a lower COUNT is only legal after a new key (re-authentication, handover with a fresh KgNB, or a new security context)\n'
+        case "$cause" in
+            reauth|re-auth|authentication) printf 'cause\t%s (new KAMF from re-authentication)\n' "$cause" ;;
+            handover|ho) printf 'cause\t%s (fresh KgNB/NH or KAMF at handover)\n' "$cause" ;;
+            "") printf 'cause\tnone given -- without a stated new-key event this is a replay\n' ;;
+            *) printf 'cause\t%s\n' "$(printf '%s' "$cause" | tr '\t\r\n' '   ')" ;;
+        esac
+        printf 'verdict\teither a new key took effect or the counter was rolled back; the difference is whether the re-authentication that should precede it actually happened\n'
+    fi
+    printf 'nh_note\ton handover the NH chain has to advance with NCC: NCC unchanged across a handover means the same KgNB was reused, and then the COUNT cannot legally go backwards either\n'
+    printf 'mitigation\tthe receiver keeps the highest accepted COUNT per key, rejects lower, and logs the reset attempt; a UE and a core that both do this turn re-key replay into a detection\n'
+    return 0
+}
+
+ncore_cmd_rekey_walk() {  # [ue-id]
+    local ue="${1:-0}"
+    printf 'target\tue %s\n' "$ue"
+    printf 'step\t1\tUDM sends a new authentication vector (re-authentication subscription data or operator trigger)\n'
+    printf 'step\t2\tAMF sends Authentication Request (5GMM) and the UE answers Authentication Response: new KAUSF -> new KAMF -> new KgNB\n'
+    printf 'step\t3\tAMF sends Security Mode Command with the same NAS algorithms; the NAS COUNT continues from the last accepted value, it does not restart\n'
+    printf 'step\t4\tthe UE acknowledges Security Mode Complete, which is the first message under the new key and therefore COUNT 0 of it\n'
+    printf 'check\t1\tcompare the uplink COUNT before and after: --nas-count-check <old> <new> --cause reauth\n'
+    printf 'check\t2\treplay an old Security Mode Command and see whether the UE answers or discards by COUNT\n'
+    printf 'check\t3\tif a handover follows, NCC in the RRC Reconfiguration must have advanced; an unchanged NCC is key reuse\n'
+    printf 'tool\t--nas-count-check\t2\t3 --cause reauth\n'
+    printf 'tool\t--nas-count-check\t500\t500 --cause reauth\n'
+    printf 'finding\tcount_treated_as_session\tMEDIUM\tcounters that restart with a new session rather than continuing under the key are exactly the state a re-key attack needs\n'
+    printf 'finding\tncc_not_checked\tMEDIUM\tif the UE accepts the same NH for a handover, a replayed Handover Command produces the same KgNB and the same keystream\n'
+    printf 'verdict\tthe re-key is safe exactly as far as the receiver remembers its counts: the protocol defines it, the implementations decide whether to enforce it\n'
+    return 0
+}
+
 ncore_cmd_ngap_probe() {  # [amf-host] [port]
     local host="${1:-127.0.0.1}" port="${2:-38412}"
     local setup; setup=$(ncore_ngap_build ng-setup --plmn 001/01 --gnb-id 0xA1C01 \
@@ -2197,6 +2256,25 @@ ncore_selftest() {
     chk probe-context "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="ue_context_free"{print $3}')" "HIGH"
     chk probe-artefact "$(printf '%s\n' "$out" | awk -F'\t' '$1=="artefact"{print ($2 ~ /--ngap-send 10.0.0.9 38412/)?"yes":"no"}')" "yes"
     chk probe-cli     "$(ncore_cmd_ngap_probe >/dev/null 2>&1; echo $?)" "0"
+
+    # C1 -- the re-key counter: advance, reuse, reset, and the stated cause.
+    out=$(ncore_cmd_nas_count 2 3)
+    chk count-adv     "$(fld "$out" direction)"   "advance"
+    chk count-adv-h   "$(fld "$out" count_after_hex | tr 'a-f' 'A-F')" "000003"
+    out=$(ncore_cmd_nas_count 500 500)
+    chk count-reuse   "$(fld "$out" direction)"   "reuse"
+    chk count-reuse-f "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding"{print $2":"$3}')" "count_reuse:HIGH"
+    out=$(ncore_cmd_nas_count 500 2 --cause reauth)
+    chk count-reset   "$(fld "$out" direction)"   "reset"
+    chk count-reason  "$(fld "$out" cause)"       "reauth (new KAMF from re-authentication)"
+    out=$(ncore_cmd_nas_count 500 2)
+    chk count-nocause "$(fld "$out" cause | grep -c 'without a stated new-key event')" "1"
+    chk count-bad     "$(ncore_cmd_nas_count 0 16777216 >/dev/null 2>&1; echo $?)" "2"
+    chk count-noargs  "$(ncore_cmd_nas_count >/dev/null 2>&1; echo $?)" "2"
+    out=$(ncore_cmd_rekey_walk 7)
+    chk rekey-steps   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="step"{n++} END{print n+0}')" "4"
+    chk rekey-checks  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="check"{n++} END{print n+0}')" "3"
+    chk rekey-find    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding" && $2=="count_treated_as_session"{print $3}')" "MEDIUM"
     chk cli-pfcp-short    "$(ncore_cmd_decode_pfcp 20 >/dev/null 2>&1; echo $?)" "1"
     chk cli-gtpu-noargs   "$(ncore_cmd_decode_gtpu >/dev/null 2>&1; echo $?)"   "2"
     chk cli-guti-noargs   "$(ncore_cmd_decode_guti >/dev/null 2>&1; echo $?)"   "2"
@@ -2331,6 +2409,8 @@ ncore_cli_main() {
         --xnap-decode)      ncore_cmd_xnap_decode "${1:-}" ;;
         --ngap-send)        ncore_cmd_ngap_send "${1:-}" "${2:-}" "${3:-}" ;;
         --ngap-probe)       ncore_cmd_ngap_probe "${1:-127.0.0.1}" "${2:-38412}" ;;
+        --nas-count-check)  ncore_cmd_nas_count "${1:-}" "${2:-}" "${@:3}" ;;
+        --rekey-walk)       ncore_cmd_rekey_walk "${1:-0}" ;;
         --gtpu-header)     ncore_gtpu_header "${1:-1}" "${2:-1}" ;;
         --plan)            ncore_cmd_plan "${1:-}" ;;
         --selftest)        ncore_selftest ;;
@@ -2374,6 +2454,11 @@ Usage: $0 COMMAND
   --xnap-decode <hex>           read one back: node id, TAC, slice
   --ngap-send <amf-host> [port] [hex]
   --ngap-probe <amf-host> [port]
+  --nas-count-check <before> <after> [--cause reauth|handover]
+                                C1: did the NAS COUNT advance, repeat
+                                or roll back after a re-key
+  --rekey-walk [ue-id]          C1: the re-authentication path and
+                                the three checks that decide it
                                 C5: what an unauthenticated SCTP peer
                                 learns from the AMF, probe by probe
                                 send one on SCTP 38412, PPID 60
