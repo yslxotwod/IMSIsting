@@ -1281,6 +1281,54 @@ slic_cmd_detect() {
 }
 
 # ── attack surface and vulnerability classes ────────────────────────────
+# ── D3 -- the cross-slice reachability matrix ───────────────────────────
+# A slice is an S-NSSAI in the signalling plus a forwarding instance in the
+# UPF. The tests below are the ones that decide whether the second half
+# exists: addressing first (can the two slices even see each other), then
+# authorisation (is a session in one slice entitled to reach the other), then
+# the resource half (does the 5QI carry the PRB the slice was promised).
+slic_cmd_cross_slice() {
+    local a="${1:-1}" b="${2:-2}" sub_a="${3:-10.45.0.0/16}" sub_b="${4:-10.46.0.0/16}"
+    [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$a" != "$b" ]] || {
+        printf 'ERROR\t--cross-slice takes two different slice identifiers\n' >&2; return 2; }
+    printf 'slice_a\tSST %s\nslice_b\tSST %s\nsubnet_a\t%s\nsubnet_b\t%s\n' "$a" "$b" "$(slic_sanitize "$sub_a")" "$(slic_sanitize "$sub_b")"
+    printf 'test\tT1\tdirection\tA -> B\n'
+    printf 'test_artefact\tT1\tping -c3 -W2 <b-host-in-%s>\n' "$(slic_sanitize "$sub_b")"
+    printf 'test_expected\tT1\tunreachable\n'
+    printf 'test_why\tT1\tif each slice has its own UPF network instance, the PDU session in A has no route to a %s address; reachability means the two slices share a forwarding instance\n' "$(slic_sanitize "$sub_b")"
+    printf 'test\tT2\tdirection\tB -> A\n'
+    printf 'test_artefact\tT2\tping -c3 -W2 <a-host-in-%s>\n' "$(slic_sanitize "$sub_a")"
+    printf 'test_expected\tT2\tunreachable\n'
+    printf 'test_why\tT2\tasymmetric separation is a finding in itself: one direction open is a misconfigured ACL, not a policy\n'
+    printf 'test\tT3\tdirection\tA -> B service port\n'
+    printf 'test_artefact\tT3\tcurl -m3 http://<b-service-in-%s>/\n' "$(slic_sanitize "$sub_b")"
+    printf 'test_expected\tT3\tno route or connection refused\n'
+    printf 'test_why\tT3\tthe user plane has no slice field in the GTP-U header: what stops A reaching B is the UPF network instance plus an ACL, never the S-NSSAI in the NAS\n'
+    printf 'test\tT4\tdirection\tA -> B with a second session\n'
+    printf 'test_artefact\tT4\topen two PDU sessions from the same UE (S-NSSAIs %s and %s) and repeat T1\n' "$a" "$b"
+    printf 'test_expected\tT4\tunreachable\n'
+    printf 'test_why\tT4\ttwo sessions is the standard way a UE gets two addresses; a UE with both sees the crossing as a routing decision, so the UPF must not route between its own slices\n'
+    printf 'test\tT5\tdirection\tauthorisation\n'
+    printf 'test_artefact\tT5\tregister with an Allowed NSSAI of {%s} and request a PDU session for %s\n' "$a" "$b"
+    printf 'test_expected\tT5\treject (5GMM cause 62 or 69)\n'
+    printf 'test_why\tT5\tTS 23.501 5.15.5.2.1 puts the check at the AMF/NSSF: a session for a slice outside the subscription must never be established, however the NSSAI was requested\n'
+    printf 'test\tT6\tdirection\t5QI inside the slice\n'
+    printf 'test_artefact\tT6\trequest a QFI/5QI from slice B within a session in slice A (--slice-qos-check the body first)\n'
+    printf 'test_expected\tT6\t5QI outside the slice ARP/5QI set is rejected; unknown 5QI must not silently take the default\n'
+    printf 'test_why\tT6\tthe 5QI selects the scheduler weight, so a low-priority slice that can ask for 5QI 1 takes the PRB the other slice was promised\n'
+    printf 'test\tT7\tdirection\tresource half\n'
+    printf 'test_artefact\tT7\trun N parallel sessions in slice %s and measure slice %s PRB\n' "$a" "$b"
+    printf 'test_expected\tT7\tno change in slice %s once its guaranteed share is met\n' "$b"
+    printf 'test_why\tT7\tRAN slice share is per-slice RRM policy: if N sessions in A move the PRB that B sees, the share is enforced per UE or per bearer, not per slice\n'
+    printf 'finding\tshared_instance\t%s\tthe deciding fact is whether the two slices terminate on one UPF network instance; a shared one makes every test above a routing question\n' \
+        "$( [[ "$(printf '%s' "$sub_a" | cut -d. -f1-2)" == "$(printf '%s' "$sub_b" | cut -d. -f1-2)" ]] && echo HIGH || echo INFO )"
+    printf 'finding\tlabel_not_boundary\tHIGH\tthe S-NSSAI is carried in NAS/NGAP and never in GTP-U; a network that signals isolation and shares forwarding has only the label\n'
+    printf 'finding\tno_recheck\tMEDIUM\tslice selection at registration is not re-run for every session: T5 is the test that catches an AMF that only consults the NSSF once\n'
+    printf 'detect\tat the UPF record per-slice network instance on every GTP-U flow; at the AMF count PDU sessions whose S-NSSAI is outside the Allowed NSSAI; in the RAN alert when a slice share drifts while its own session count is flat\n'
+    printf 'verdict\tisolation is a forwarding fact and a share fact: the tests above are cheap, and a slice that passes T1-T4 but fails T6/T7 is isolated on paper only\n'
+    return 0
+}
+
 slic_surface_notes() {
     cat <<'EOF'
 class	mechanism	precondition	impact	note
@@ -1681,6 +1729,20 @@ PY
     chk surface-vrf    "$(printf '%s\n' "$out" | grep -c 'shared-upf-no-vrf')" "1"
     chk surface-roam   "$(printf '%s\n' "$out" | grep -c 'roaming-mapping-not-enforced')" "1"
     chk surface-enum   "$(printf '%s\n' "$out" | grep -c 'slice-id-enumeration')" "1"
+
+    # D3 -- the cross-slice matrix: seven tests, and what a different
+    # answer proves.
+    local cs; cs=$(slic_cmd_cross_slice 1 2)
+    chk cross-tests    "$(printf '%s\n' "$cs" | awk -F'\t' '$1=="test"{n++} END{print n+0}')" "7"
+    chk cross-a        "$(fld "$cs" slice_a)" "SST 1"
+    chk cross-b        "$(fld "$cs" slice_b)" "SST 2"
+    chk cross-sub-a    "$(fld "$cs" subnet_a)" "10.45.0.0/16"
+    chk cross-t5-cause "$(printf '%s\n' "$cs" | awk -F'\t' '$1=="test_expected" && $2=="T5"{print ($3 ~ /cause 62 or 69/)?"yes":"no"}')" "yes"
+    chk cross-art-t3   "$(printf '%s\n' "$cs" | awk -F'\t' '$1=="test_artefact" && $2=="T3"{print ($3 ~ /^curl -m3/)?"yes":"no"}')" "yes"
+    chk cross-finding  "$(printf '%s\n' "$cs" | awk -F'\t' '$1=="finding" && $2=="label_not_boundary"{print $3}')" "HIGH"
+    chk cross-shared   "$(printf '%s\n' "$cs" | awk -F'\t' '$1=="finding" && $2=="shared_instance"{print $3}')" "INFO"
+    chk cross-shared-h "$(slic_cmd_cross_slice 1 2 10.45.0.0/16 10.45.1.0/24 | awk -F'\t' '$1=="finding" && $2=="shared_instance"{print $3}')" "HIGH"
+    chk cross-same     "$(slic_cmd_cross_slice 2 2 >/dev/null 2>&1; echo $?)" "2"
     local evil
     evil=$(slic_sanitize $'a\tb\nc')
     chk sanitize-tabs "$(printf '%s' "$evil" | tr -cd '\t' | wc -c)" "0"
@@ -1980,6 +2042,7 @@ slic_cli_main() {
         --nssai-parse)       slic_cmd_nssai "${1:-}" ;;
         --selection)         slic_cmd_selection "${1:-}" "${2:-}" "${3:-}" ;;
         --isolation-check)   slic_cmd_isolation "${1:-}" "${2:-}" ;;
+        --cross-slice)       slic_cmd_cross_slice "${1:-1}" "${2:-2}" "${3:-}" "${4:-}" ;;
         --detect)            slic_cmd_detect "${1:-}" ;;
         --nas5gs)            {
                                  local h="${1:-}"
@@ -2014,6 +2077,10 @@ Usage: $0 COMMAND
   --isolation-check <pcap> [map]      isolation evidence; never claims
                                       isolation it cannot establish
   --detect <slice-events.tsv>         session-level slice anomaly rules
+  --cross-slice [a] [b] [subnet-a] [subnet-b]
+                                      D3: the reachability matrix between two
+                                      slices -- addressing, authorisation,
+                                      5QI and the resource half
   --nas5gs <hex>                      decode a 5GS plain NAS slice message
   --five-qi <5qi>                     decode one 5QI to its TS 23.501
                                       Table 5.7.4-1 characteristics
