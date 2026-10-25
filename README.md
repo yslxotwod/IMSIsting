@@ -42,131 +42,319 @@ accepted and ignored, so old command lines keep working. `bash modules/00_deps.s
 
 ---
 
+## How to run it
+
+Build the GUI:
+
+```bash
+cd native
+meson setup builddir
+meson compile -C builddir
+```
+
+Then, from the project root:
+
+```bash
+sudo ./imsisting.sh          # CLI menu
+./imsisting.sh --list        # module list
+./imsisting.sh --index       # the module index as TSV
+./imsisting.sh --gui         # launch the GUI
+./imsisting.sh --tui         # launch the TUI
+```
+
+<img width="1366" height="708" alt="image" src="https://github.com/user-attachments/assets/597fcd5c-9694-4c74-95d7-211a0a5c8e3b" />
+
+
+Or launch the built binary directly:
+
+```bash
+./native/builddir/imsisting-gui
+```
+
+<img width="964" height="523" alt="imsisting" src="https://github.com/user-attachments/assets/97afe07a-1b0e-43fe-a931-66cd5dc0fd37" />
+
+The GUI asks for your password per action via `pkexec`, not once at startup.
+
+### Dependencies
+
+**Required:** GTK4 (4.14+), meson, ninja, a C compiler, python3.
+
+```bash
+# Debian / Ubuntu
+sudo apt install build-essential meson ninja-build libgtk-4-dev \
+                 python3 python3-numpy python3-scipy
+
+# Arch
+sudo pacman -S base-devel meson ninja gtk4 python python-numpy python-scipy
+```
+
+**Optional but used by specific modules:** `gnuradio` + `gr-gsm`, `srsRAN`,
+`Open5GS`/`free5GC`, `tshark`, `pcsc-tools`, `gpsd`, `python3-cryptography`.
+`00_deps` reports what is present and what is missing, and distinguishes a tool
+that is installed from a stack that is actually complete.
+
+### The interface
+
+The GUI opens on a **Dashboard** — every module as a card, grouped by category.
+Click a card and the module opens as its own tab. Six tabs are permanent:
+
+<img width="335" height="634" alt="image" src="https://github.com/user-attachments/assets/41d9556a-d047-4e7f-aa41-a642c19e3d16" />
+
+
+| Tab | What it is |
+|---|---|
+| **Dashboard** | Every module as a card, grouped by category. The main menu. |
+| **Live Traffic** | A live GSMTAP view (below). Starts listening when you open it. |
+| **Casebook** | Cases, selected cells, evidence/captures, timeline, IDS alerts, passive sensor nodes and HTML/JSON/TSV reports. The Evidence page retains the per-module loot browser and preview. |
+| **Map** | One permanent map for everything the toolkit located: cells, TA rings, geolocated frames and areas from `loot/map/layers/*.tsv`, drawn over a bundled Natural Earth basemap. Pan, zoom, and toggle layers. |
+| **Fleet** | Remote nodes and what each one measured: class, transport, role, capabilities, last seen and how far behind its event stream is. Survey a node, collect a stream window, copy it into the case, or dispatch a module to run there. |
+| **Stats** | Module and collection counts, a health line, and where the toolkit is thick. |
+| **Notifications** | What the tree decided to tell you, oldest first. |
+| **Help** | How the tree fits together and how to drive it. |
+| **Settings** | Environment facts, plus dependency and SDR probe actions. |
+| **Workflows** | Saved chains, run from the panel. |
+
+Module tabs appear alongside these and can be closed; the permanent tabs
+cannot.
+
+### A node as a source
+
+A survey does not have to happen on the machine in front of you. Any module
+that reads the air can be pointed at a registered node, and the node answers
+with what it actually measured:
+
+```
+modules/02_cell_recon.sh --node desk      # survey through the node, store rows here
+modules/03_gsmtap.sh --node desk          # fetch its newest capture and decode it
+modules/17_pcap_analysis.sh --node desk   # list the captures that node holds
+modules/18_imsi_exposure.sh --node desk   # audit the node's newest capture
+tools/node_source.py support              # what each transport can answer
+tools/node_source.py cells desk           # the node's cells, in the store's table
+tools/node_source.py events desk          # the node's spool, as event rows
+tools/node_source.py captures desk        # the node's capture store
+```
+
+Fetched captures land in `captures/nodes/<name>/`, so every existing verb works
+on a local path afterwards and the store keeps both files.
+
+What a node can honestly deliver depends on its transport, and the toolkit says
+so rather than filling the gap: `local` and `ssh` nodes run a real survey,
+`adb` handsets report their own serving cell and neighbours with withheld
+fields marked, `serial`/`qmi`/`mbim` modems report one serving cell and are
+labelled that way, and `diag`/`sms` refuse with the missing clause named. Every
+row carries `source node:<name>:<transport>:<kind>`, so a table never loses
+where a cell was heard. A node with an empty store is a handoff (exit 3), not
+an empty survey.
+
+**A module page** is a left menu of views with the content beside it, grouped
+into cards — STATUS, ACTIONS and ALL MODULE VERBS. The action buttons cover
+the verbs you reach for most; the generated selector is built from the module
+index and exposes everything else, with a separate arguments field and command
+copy button, so nothing is unreachable.
+
+**Live Traffic** is a real table (sequence, time, type, channel, ARFCN,
+timeslot, signal, direction, length, payload) with a filter box above it that
+matches on type, channel or payload. Uplink rows are marked.
+
+**The dashboard is configurable, and it remembers.** Every card carries a star:
+pinned modules lead the grid whatever the sort is set to. `Sort`
+offers Workflow (category order), Most used (by run count), Name and Category,
+and `Density` switches Compact, Comfortable or Spacious card sizing. All of it
+survives a restart, because it lives in `state/` rather than in the binary —
+and both searches say *no match* instead of going quietly blank.
+
+**Stats** shows headline counts as tiles, a per-category breakdown as bars, and
+where everything lives on disk. It recounts when you open it, so a module that
+has just written loot is not still showing the numbers from launch.
+
+The **module list on the left collapses** — the *Modules* button in the header
+bar. Collapse it when a module page needs the full width.
+
+The **header strip** carries the live cellular state, read from the modules
+themselves so it cannot disagree with them:
+
+    SDR    the selected radio (01_radio --status-tsv)
+    TX     whether that radio can transmit — most attack verbs need this
+    FREQ   the tuned frequency
+    CELLS  cells in the survey store (02_cell_recon)
+    GPS    the survey position source (04_tower_map)
+
+`--tab N` opens straight to a tab (0 Dashboard, 1 Live Traffic, 2 Casebook,
+3 Stats, 4 Notifications, 5 Help, 6 Settings, 7 Workflows, 8 Map, 9 Fleet):
+
+```bash
+./native/builddir/imsisting-gui --tab 1
+```
+
+### Live Traffic — what it is, and what it is not
+
+There is no way to demodulate GSM or LTE inside a GUI process; that needs a
+full PHY. So this is not a raw-radio view and does not pretend to be one.
+
+What it is: a **GSMTAP** listener on UDP 4729. GSMTAP is the format gr-gsm,
+srsRAN and Open5GS all emit, and it is what Wireshark keys off. The tab binds
+the port, decodes each message's 16-byte header as it arrives, and shows the
+type, GSM channel, ARFCN, timeslot, signal, direction, length and payload.
+
+That makes it useful both ways — passively to watch paging, SI and identity
+exchanges happen, and offensively to confirm an emitter is actually
+transmitting and see what a UE answers with.
+
+It needs an upstream emitter. If nothing arrives within three seconds it says
+so and names what to start, rather than showing an empty pane:
+
+```bash
+grgsm_livemon            # GSM, via gr-gsm
+# or an eNB/gNB started with GSMTAP enabled
+```
+
+Two honest limits. The header's `arfcn` field is 16 bits, so an NR-ARFCN
+(which runs into the millions) cannot be represented in it — the field is not
+a general NR ARFCN carrier. And `sub_type` is a GSM channel type only under a
+GSM payload; under LTE/NR it is not a channel, so the column shows `—` rather
+than a plausible-looking wrong name.
+
+### First run
+
+1. **Dependencies** — run the check. Half of all confusing failures later are a
+   missing tool.
+2. **SDR / Radio Manager** — confirm a device is seen and which bands it covers.
+   A receive-only device is flagged, because most attack verbs need transmit.
+3. **Cell Recon** — try `--status-tsv` first. It works with no radio attached,
+   which makes it a good smoke test.
+
+---
+
 ## Modules
 
-Fifty-eight modules, grouped by the part of the network they work on. Every verb a
-module documents has a control on its page, and every page answers in the card that
-asked: a value list for one record, a list of records with per-row Copy for many.
+Sixty-one modules, grouped by the categories the application itself uses, so this list and the
+Dashboard cannot drift apart. Every verb a module documents has a control on its page, and every
+page answers in the card that asked: a value list for one record, a list of records with per-row
+Copy for many.
 
 ### System
+
 | Module | Description |
 |---|---|
 | `00_deps` | Inspect the cellular toolchain and install what is missing |
 | `01_radio` | Enumerate SDRs, report per-band capability, record IQ |
 | `05_field_kit` | RF pre-flight, honesty verification of every radio verb, synthetic GSMTAP source |
-| `25_killchain` | Chain module verbs into repeatable, recorded runs |
+| `25_killchain` | Chain module verbs into repeatable recorded runs: fourteen builtin chains, a status line per step, and an evidence manifest whose hashes a second party can re-derive |
+| `59_remote_node` | Remote cellular nodes: identity, measured capabilities, captured events and dispatch permissions, with eight transports (ssh/local/adb/serial/qmi/mbim/diag/sms) that each say what they can honestly deliver |
 
 ### Recon
+
 | Module | Description |
 |---|---|
 | `02_cell_recon` | GSM/LTE/NR cell survey and neighbour discovery |
 | `03_gsmtap` | Live GSMTAP feed, header codec, per-type demultiplex to the owning decoder |
 | `04_tower_map` | GPS-tagged cell survey with CSV, KML and GeoJSON export |
 
-### 2G / GSM
+### Radio — the air interface and the cells
+
 | Module | Description |
 |---|---|
 | `06_gsm_air` | BCCH/CCCH decode, paging groups, A5/1 keystream, identity exposure |
-| `07_gsm_attack` | The 2G attack surface: forged BCCH, IMSI catcher sequence, A5 downgrade, TMSI deanonymisation, Kc recovery |
-| `15_downgrade` | Cross-generation steering: forged reject causes, SIB1 forgery, null-cipher analysis |
-| `20_gsm_cve` | Catalogued GSM/UMTS CVEs with reachability checks |
-
-### 3G / UMTS
-| Module | Description |
-|---|---|
-| `08_umts_air` | UTRAN decode and SIB fields, forged RRC setup/reject/paging, the TS 25.212 BCH chain, a WCDMA downlink carrier, SIB1/SIB3/SIB5 packed onto the BCCH-FACH transport, scheduled on non-colliding frames and spread on an S-CCPCH, the MIB derived from that SIB set and split into BCH blocks, and the COUNT/MAC-I AKA walk |
-
-### 4G / LTE
-| Module | Description |
-|---|---|
-| `09_lte_attach` | NAS EMM/ESM encode-decode, BCD IMSI/IMEI, attach forging, identity-exposure detection |
+| `07_gsm_attack` | The 2G attack surface: forged BCCH, the IMSI catcher sequence with its LAPDm dialogue, A5/1 downgrade forcing, TMSI deanonymisation, Kc recovery. C1 must beat the real cell and the forged command must land in the right LAPDm window; whether a handset accepts a clone depends on the handset and the location area |
+| `08_umts_air` | UTRAN decode and SIB fields, forged RRC setup/reject/paging and a real SECURITY MODE COMMAND, the TS 25.212 BCH chain, a WCDMA downlink carrier with CPICH and both sync channels, SIB1/SIB3/SIB5 through the FACH chain onto an S-CCPCH in the frames the MIB schedules, MM identity request, the uplink RACH as chips, and the uplink transport chain with its TFCI encoder. `--duplex-loop` puts both halves on one port and measures the desense; nothing here receives UMTS uplink and answers it in one process |
 | `10_lte_air` | LTE air interface: MIB/SIB decode, DCCH builders, CMAS/ETWS warning messages (SIB10-12), srsRAN eNB orchestration |
-| `11_lte_core` | EPC: Diameter S6a/S6d, GTP-C, GTP-U, S1AP, GTP-in-GTP, MBMS session start |
-| `21_lte_cve` | 98 catalogued LTE/5G stack CVEs from the public corpus, filed into the same class views as this tree's own vectors and filterable by reach, plus four message families built from each code pattern |
-
-### 5G / NR
-| Module | Description |
-|---|---|
 | `12_nr_air` | SSB/MIB/SIB1, PRACH, beam sweep, SSB waveform, gNB orchestration |
-| `13_nr_core` | 5G SBA: NRF discovery, NGAP, PFCP, 5G-AKA, KSEAF, forgery |
-| `58_suci_catcher` | 5G pre-authentication identity capture: gNB and AMF slice build, catcher plan, live SUCI read, SUCI classifier and corpus, NAS and RRC codecs |
-| `22_nr_cve` | Catalogued 5G CVEs, with the published NGAP and NAS entries filed beside them |
-| `40_sba_pivot` | Pivot across the service-based architecture: NRF, AMF, SMF reachability |
-| `49_ntn` | Non-terrestrial access: Doppler, RTT, timing advance, k_offset |
-| `51_sidelink` | NR sidelink on PC5: resource pools, SCI-1A limits, ITS certificates, relay checks |
+| `15_downgrade` | Cross-generation steering: forged reject causes, SIB1 forgery, null-cipher analysis |
+| `33_jamming_detect` | Jamming detection and characterisation, and eleven waveform shapes including PSS/SSS/PBCH, PRACH, PRS, PUCCH and GPS C/A, built on the first invocation with the disclaimer as information rather than a lock. `lte-ssb` is refused by name: pss+sss+pbch already cover it |
+| `45_iot` | NB-IoT: MIB-NB, SIB1-NB and SIB2-NB through the generated PER codec, NPSS/NSSS, NPRACH symbol-group hopping checked against TS 36.211 10.1.6.1, the attach and CE-level walk, and `--freq-plan`, which computes the raster position from an anchor carrier and refuses without one because the NREF column is not in this tree |
+| `49_ntn` | Non-terrestrial access: Doppler, RTT, timing advance, k_offset, SIB19 both alone and inside its carrier, hostile ephemeris arithmetic, and TA-to-position |
+| `50_gprs` | GPRS/EDGE: GEA0/GEA3/GEA4 against published vectors, GEA1/GEA2 recovery cost, GEA5 admitted by name, APN and PDP coding |
+| `51_sidelink` | NR sidelink on PC5: resource pools, SCI-1A, ITS certificates, relay checks, BSM kinematics, pseudonym lifecycle and kinematic linkage |
+| `53_non3gpp` | TETRA, DMR and GSM-R structure, ciphers, vocoder bit budgets, and the bands you can transmit on legally |
+| `57_evil_twin` | An LTE cell that only this lab hears: a survey row becomes an eNB config on a HackRF, the preflight names the binary each config needs, and the timer decides whether a service stopped or crashed |
+| `60_overshadow` | AdaptOver and overshadowing: the subframe map, the timing budget against the 2 ms queue window and the cyclic prefix, the uplink and downlink power budgets, four detectors, and a plan that never keys a radio |
 
-### Land mobile radio
+### Access — the attach, the edge and the offload
+
 | Module | Description |
 |---|---|
-| `53_non3gpp` | TETRA, DMR and GSM-R structure, ciphers and band classification |
-| `50_gprs` | GPRS/EDGE: GEA0/GEA3/GEA4 ciphering with published vectors, GEA standing, APN and PDP coding |
-
-### The core and the interconnect
-| Module | Description |
-|---|---|
-| `26_ss7_map` | MAP/TCAP decode and forge, SIGTRAN both ways, GRX/roaming interconnect |
-| `27_cellular_dns` | DNS over the bearer, the aLTEr sequence, spoof detection |
-| `30_volte_ims` | ReVoLTE keystream reuse, IMP4GT model, SIP REGISTER spoofing, IMS registration hijack, and a call leg that carries G.711 audio (`--call --media mic --play`) |
-| `32_nas_signaling` | NAS rate and procedure mix, storm detection, and seventeen pre-authentication message builders |
-| `48_oran` | O-RAN interfaces, E2SM, xApp authority, A1 policy poisoning, QoS policy |
-
-### Access and the network edge
-| Module | Description |
-|---|---|
+| `09_lte_attach` | NAS EMM/ESM encode-decode, BCD IMSI/IMEI, attach forging, identity-exposure detection, TS 24.008 GMM/SM for the 3G side, and the FlashCatch sequence — a catcher that takes the IMSI without ever causing an outage |
 | `34_slicing` | S-NSSAI codec, slice selection, isolation testing, 5QI and TSN assistance |
 | `36_vowifi` | IKEv2/IPsec SWu, EAP-AKA', ePDG attach, certificate assertions |
-| `37_femtocell` | S1/Iuh attach, femtocell provisioning, GSMTAP and S1 tap |
+| `37_femtocell` | Small-cell and eNB assessment: CSG/PCI conflicts, the S1 backhaul, Iuh, the ten-item attack surface, certificate posture, and RANAP for the macro Iu-CS side |
 | `38_ussd` | USSD request forge, response decode, SS/MMI command surface |
 | `43_ran_share` | Network sharing: PLMN leaks and MOCN configuration review |
-| `45_iot` | NB-IoT: MIB-NB, SIB1-NB and SIB2-NB decoded through the generated PER codec, NPSS/NSSS, NPRACH symbol-group hopping (TS 36.211 10.1.6.1), NPRFCN stated as absent |
 | `47_wifioff` | Wi-Fi offload: ePDG FQDN, EAP exchange byte for byte, certificate assertions |
 
-### SIM and identity
+### Core network and interconnect
+
 | Module | Description |
 |---|---|
-| `14_suci` | SUCI concealment and de-concealment, X25519 and P-256 profiles, a home network (`--hn-create`, `--hn-deconceal`, `--hn-auth`, `--hn-serve`) and a linkability oracle over observed SUCIs (`--link-oracle`, `--link-demo`) that is both the SIDF and the AUSF: it de-conceals an arriving SUCI with its own private key, finds the subscriber in the `16_sim` key store, runs 5G-AKA and returns the authentication vector |
-| `16_sim` | SIM AKA (COMP128 1/2/3, Milenage, TUAK), USIM files, EF_AD, OTA parsing, eSIM profiles, ES9+, plus a subscriber key store and an AKA responder (`--key-add`, `--aka-responder`, `--aka-serve`) that holds K/OPC, SQN and state across calls and derives KAUSF/RES* for 5G |
+| `11_lte_core` | EPC: Diameter S6a/S6d, GTP-C, GTP-U, S1AP, GTP-in-GTP, MBMS session start |
+| `13_nr_core` | 5G SBA: NGAP (with a probe that asks an AMF four questions), PFCP session hijack, 5G-GUTI, NAS COUNT and re-key walks, Kairos interleaving and context binding |
+| `26_ss7_map` | Ten MAP operations, TCAP/SCCP/MTP3/M3UA/SGsAP, four decoders, response builders (`--build-response sai-ack` returns real triplets and an EPC quintet) and dialogue pairing, M3UA over a real SCTP association, `--lab`, and `tools/ss7_responder.py` as a referee. An ATI answer is refereed too, which is how the untagged `ageOfLocationInformation` TS 29.002 17.7.6 requires is told apart from a tagged one. No TDM MTP2, and reach still needs an assigned point code |
+| `27_cellular_dns` | DNS over the bearer, the aLTEr sequence, spoof detection |
+| `30_volte_ims` | ReVoLTE keystream reuse, IMP4GT, UMTS COUNT-C reuse and two-stream XOR, SIP REGISTER spoofing, IMS registration hijack, and a call leg that carries G.711 audio |
+| `32_nas_signaling` | NAS rate and procedure mix, storm detection, and seventeen pre-authentication message builders |
+| `40_sba_pivot` | Pivot across the service-based architecture: HTTP/2 SBI framing, NRF discovery and an inventory walk, OAuth2 token audit, the N32 roaming bridge, and a cloud-metadata callback |
+| `48_oran` | O-RAN interfaces, E2SM, xApp authority, A1 policy poisoning, QoS policy |
+
+### SIM and identity
+
+| Module | Description |
+|---|---|
+| `14_suci` | the oracle's signal set is structural, not cryptographic: it joins pairs on octets, the ephemeral key, a cleartext MSIN, the MSIN's length class or a repeated AUTN, so two rounds that differ in every one of those fields come back not-linked even when a cryptanalysis of the concealment would join them. The card side of the 5G-AKA proof: `--hn-auth` produces the network half (XRES*, HXRES*, KAUSF, KSEAF) and the HRES* a handset would return is the same clause on RES*, but the RES the proof needs comes off a physical USIM — a virtual one is not built here. Also not built: KAMF (the SEAF/AMF derivation over ABBA) and the Nausf service itself, which is HTTP/2 JSON on this tree's own key material |
+| `16_sim` | SIM AKA (COMP128 1/2/3, Milenage, TUAK), USIM files, EF_AD, OTA parsing, eSIM profiles, ES9+, SGP.32 eIM/packaging, a subscriber key store, an AKA responder and the AUTS resync responder |
 | `18_imsi_exposure` | IMSI harvest and TMSI/IMSI correlation over a capture |
 | `31_sim_defense` | SIM swap: risk scoring, the six detection signals, plus APDU and port-out artefacts |
-| `41_ota_sms` | OTA binary SMS: TPDU packing, S@T push with its CONCATENATE / variable-reference / substitution byte code, SMPP 3.4 built/parsed and carried to an SMSC over TCP, an HTTP gateway send that needs a SIM on the far phone rather than in this machine, WIB refused by name |
-| `52_stk` | TS 31.111 proactive commands: build, parse, audit for silent off-device actions |
+| `41_ota_sms` | OTA binary SMS: TPDU packing, S@T push with its byte code, SMPP 3.4 with optional TLVs, submit_multi, data_sm and the TLS port, an HTTP gateway send, and 3GPP2 originating-address spoofing |
+| `52_stk` | TS 31.111 proactive commands: build, parse, RUN AT, and an audit for the silent off-device actions a card can ask for |
+| `58_suci_catcher` | 5G pre-authentication identity capture: gNB and AMF slice build, catcher plan, live SUCI read, classifier and corpus, NAS and RRC codecs, and an audit of what a Devilray-style target would notice |
 
-### Baseband and device
-| Module | Description |
-|---|---|
-| `35_baseband` | RRC/NAS mutation, corpus generation, crash triage, DIAG framing, transmit handoff |
-| `54_baseband_exploit` | Catalogued baseband CVEs with reachability checks, L2 frame builders |
-| `55_nr_inject` | NR random access, MAC/DCI, link-layer sequences, catalogued exploits |
-| `56_baseband_diag` | Qualcomm DM/DIAG framing, NV items, EFS, identity and AT surface |
+### Analysis — captures, ciphers, traffic
 
-### Analysis and tracking
 | Module | Description |
 |---|---|
 | `17_pcap_analysis` | From-scratch pcap reader: GSMTAP, Diameter, NGAP, S1AP, GTP, PFCP, RTP |
 | `19_cipher_audit` | Negotiated cipher audit, downgrade detection, authentication oracle |
 | `23_traffic_analysis` | Flow features, application classification, reference store, call records |
-| `24_rf_fingerprint` | IQ fingerprinting, CFO/IQ imbalance, transients, CSI motion |
-| `28_paging_track` | Paging occasions, Torpedo and Piercer models, storm and flapping detection |
 | `29_mac_layer` | MAC/RLC/PDCP decode, RNTI tracking, grant cadence, the user-plane integrity gap |
-| `39_ta_geoloc` | Timing-advance geolocation and cell-range estimation |
+
+### Tracking, positioning and RF
+
+| Module | Description |
+|---|---|
+| `24_rf_fingerprint` | IQ fingerprinting, CFO/IQ imbalance, transients, CSI motion |
+| `28_paging_track` | Paging occasions for LTE and UTRAN, the Torpedo and Piercer models, storm and flapping detection, the AdaptOver keep-awake detector and its sample-exact wake schedule |
+| `39_ta_geoloc` | Timing-advance ranging, multi-cell trilateration, cell-range estimation, and the UTRAN side: RTT in chips, Rx-Tx, and the hyperbola each anchor contributes |
+| `46_lpp` | UTDOA is LPPa, not LPP, so it is stated as a handoff instead of encoded as the wrong protocol |
+
+### Baseband and device
+
+| Module | Description |
+|---|---|
+| `35_baseband` | RRC/NAS mutation, corpus generation, crash triage, DIAG framing, the transmit handoff, and `--modulate`, which maps a payload onto the LTE grid as cf32 samples — QPSK on the grid with no coding, CRC or DCI, so it is samples rather than a message a chipset decodes |
+| `54_baseband_exploit` | Catalogued baseband CVEs with reachability checks, L2 frame builders |
+| `55_nr_inject` | NR random access, MAC/DCI, link-layer sequences, catalogued exploits |
+| `56_baseband_diag` | Qualcomm DM/DIAG framing, NV items, EFS, identity and AT surface |
+
+### Exploit kits — catalogued CVEs
+
+| Module | Description |
+|---|---|
+| `20_gsm_cve` | Catalogued GSM/UMTS CVEs with reachability checks: where each one needs you to stand, and the standing claim that no exploit primitive is shipped for it |
+| `21_lte_cve` | 98 catalogued LTE/5G stack CVEs, filed into the same class views as this tree's own vectors, with reachability and message families built from each code pattern |
+| `22_nr_cve` | Catalogued 5G NR, SBA and SUCI CVEs, the published NGAP and NAS entries beside them, and the same reachability split between a probe and a handoff |
 
 ### Intercept and carrier
+
 | Module | Description |
 |---|---|
-| `42_li_probe` | Lawful-interception interfaces and posture signals, plus the TS 33.108 HI1 PDUs an interception is built from |
-| `44_carrier_api` | Carrier API surface, authorisation matrix, token and rate-limit audit, surface and subscriber enumeration |
-
-### The radio itself
-| Module | Description |
-|---|---|
-| `33_jamming_detect` | Jamming detection and characterisation, and the waveform constructor (no gate; the disclaimer is information, not a lock) |
-
+| `42_li_probe` | Lawful-interception interfaces and posture signals, the TS 33.108 HI1 PDUs an interception is built from (BER, semi-octet BCD), and this module's own X3/HI3 envelope. HI1's Notification carries no target identity and no host:port, so those are printed as `not_encoded` rather than dropped, and nothing is delivered to an ADMF |
+| `44_carrier_api` | Carrier API surface, authorisation matrix, token and rate-limit audit, request rendering and subscriber-sequence ordering, plus a lab executor that runs a plan only under a spoken confirmation word and reports a 2xx answer to a deny row as a finding. It writes `curl` lines by default and sends nothing |
 
 ## The attack inventory
 
 The [Modules](#modules) section answers *what each module is*. This section answers
 the other question directly: **what attacks this tree contains**, and what each one
-computes rather than describes.
+computes rather than describes. Where an attack needs a transmitter, the sentence
+says so; where a piece is missing, it names the missing piece instead of implying
+the attack runs end to end.
 
 ### Identity capture
 
@@ -174,12 +362,18 @@ computes rather than describes.
 |---|---|---|
 | IMSI catcher — GSM | `07_gsm_attack` | The full catcher sequence and a forged BCCH carrier a handset can camp on. The attack needs a receiver beside the transmitter and licensed spectrum; the transmit verb is there and the handoff is named. |
 | IMSI catcher — LTE | `09_lte_attach`, `10_lte_air` | NAS EMM attach forging, BCD IMSI/IMEI, the identity-request sequence, and srsRAN eNB orchestration. |
+| **IMSI catcher that causes no outage (FlashCatch)** | `09_lte_attach` | `--flashcatch` drives the published WiSec 2025 sequence through the real responder: an attach/TAU request naming an unresolvable GUTI is answered with an Identity Request *instead of a reject*, so the IMSI arrives in two messages and nothing tells the UE to delete its context (TS 24.301 4.4.4.2 is why it answers at all). Three consecutive failed authentications then bar the cell for 300 s (TS 36.304 5.3.1), and the UE walks back to the legitimate cell **keeping its keys and its TMSI** — the linkability the paper describes. The naive path (reject cause 10, up to 25 s reselect) is printed beside it, the paper's own measurements are kept in a separate row, and `--flashcatch-detect` reads a NAS log for the same shape: an IMSI asked for before any establishment request, and three failures with no security mode command between. |
 | IMSI catcher — NR | `12_nr_air` | SSB/MIB/SIB1 construction, RACH handling, gNB orchestration, and the SSB written as samples. |
 | SUCI de-concealment | `14_suci` | X25519 and P-256 profile A/B conceal and de-conceal, HKDF, MSIN BCD, all computed. |
 | Be your own home network | `14_suci`, `16_sim` | `--hn-create` mints a home-network profile (PLMN, routing indicator, concealment scheme and the private key), `--hn-deconceal` resolves an arriving SUCI to an IMSI with it, and `--hn-auth` looks the subscriber up in the `16_sim` store, runs 5G-AKA and prints the vector the serving network expects — XRES*, HXRES*, KAUSF and KSEAF per TS 33.501 A.4–A.6, with the KDF key CK‖IK and XRES* as the rightmost 128 bits. `--hn-serve` answers `SUCI`/`AUTH`/`SHOW` lines on stdin so a fake cell can talk to it over a pipe. |
 | 5G-AKA linkability oracle | `14_suci` | `--link-oracle` reads a file of observed SUCIs (optionally with the AUTN the network was handed) and judges every pair: linked or not, and which signal joined it — the SUCI octets, the ephemeral key, a cleartext MSIN, the MSIN's length class, or an AUTN given to two rounds. It separates the fields every subscriber of one network shares (scheme, key id, routing indicator) from the ones that identify a subscriber. `--link-demo` builds that fixture on the host's own home network and shows all five shapes. |
+| eSIM profile to device linkability | `16_sim`, `14_suci`, `18_imsi_exposure` | A profile can be moved between devices, so the question is not which IMSI a device holds but whether two sightings are the same handset. The linkability work is the oracle: it joins observations on the fields that survive a profile swap and refuses to join on the ones that do not. |
+| eIM / IPA management-plane takeover | `16_sim` | The SGP.32 management plane — eIM, IPA, the profile state machine and the ES10 commands a card accepts — with the boundary stated: what a captured management session can and cannot reach, and which parts are refused by name because the standard gates them (TS 55.251/55.252 licence-gated material stays named, not guessed). |
 | TMSI → IMSI deanonymisation | `07_gsm_attack`, `18_imsi_exposure` | Correlation across a capture via forced-identity and location-update bindings, with a confirm step that needs a second observation. |
 | Piercer (IMSI by paging correlation) | `28_paging_track` | The paging-occasion maths and the published model, with the correlation step kept separate from the claim. |
+| UTRAN paging harvest | `28_paging_track` | PICH/S-CCPCH occasion arithmetic per identity (cycle, NP, PI index), the RRC answer each state produces, and the correlation between a page and the identity the UE disclosed. |
+| ePDG / EAP-AKA' identity exposure | `36_vowifi`, `47_wifioff` | The Wi-Fi calling attach in IKEv2: the decorated NAI a handset sends (`0<IMSI>@nai.epc.mnc…`), what it discloses in the clear before any key exists, the pseudonym-versus-permanent-identity question, IKEv2 fragmentation and its reassembly ambiguity, and the ePDG discovery path (NAPTR/SRV, then the FQDN). The certificate assertions on both ends are checked; nothing here terminates a real ePDG. |
+| SIM swap and port-out | `31_sim_defense` | Risk scoring over the six detection signals the standards and operators use, plus the APDU and port-out artefacts the swap leaves behind — the defensive half of an attack that needs the operator, not the air. |
 
 ### Cipher and downgrade
 
@@ -188,8 +382,11 @@ computes rather than describes.
 | A5/1 keystream | `06_gsm_air`, `07_gsm_attack` | Asserted against the published Briceno/Goldberg/Wagner vector. A5/2 is present for testing and its brokenness is stated. |
 | A5/1 downgrade | `07_gsm_attack` | The forcing sequence is constructed; putting it on the air is the same licensed-spectrum handoff as the catcher. |
 | Cross-generation steering / null cipher | `15_downgrade` | Reject-cause construction, SIB1 forgery, and cipher-change analysis across all four generations. |
+| UTRAN ciphering and integrity selection | `08_umts_air` | A real RRC SECURITY MODE COMMAND on DL-DCCH: transaction id plus the ciphering and integrity capability bitmaps, verified against Wireshark's dissector both ways. It is the message that turns UEA0/UIA1 on a forged cell — and the one that shows what a downgraded cell offers. |
 | ReVoLTE keystream reuse | `30_volte_ims` | Key-reuse detection, recovery, and the model of what two ciphertexts under one keystream give. |
-| GEA downgrade and ciphering — GPRS/EDGE | `50_gprs` | GEA3 and GEA4 compute against nine published vectors (TS 55.217/55.218/55.226), GEA0 is the identity, GEA1/2 are named as broken in the literature and prohibited, GEA5 as licence-gated; APN and PDP IEs encode for real. |
+| UMTS keystream reuse | `30_volte_ims` | COUNT-C as HFN‖CFN, an overlap test on two calls under one CK, the two-stream XOR and the known-plaintext recovery behind it. |
+| GEA downgrade and ciphering — GPRS/EDGE | `50_gprs` | GEA3 and GEA4 compute against nine published vectors (TS 55.217/55.218/55.226), GEA0 is the identity, GEA1/GEA2 are named as broken in the literature and prohibited, GEA5 admitted by name as licence-gated; APN and PDP IEs encode for real. |
+| GEA1/GEA2 recovery cost | `50_gprs` | The published cryptanalysis turned into arithmetic: 65 keystream bits, 9 ciphertext octets, 2^40 and 2^45 guesses, and the memory figure that decides whether it is a laptop or a cluster. No gamma is ever printed. |
 | Cipher audit and authentication oracle | `19_cipher_audit` | Scores the negotiated cipher, detects a downgrade, reads the cause tables against what each proves, and recovers the SQN a UE conceals in AUTS. |
 
 ### Signalling forgery — NAS, RRC and SIB
@@ -197,41 +394,66 @@ computes rather than describes.
 | Attack | Module | What exists |
 |---|---|---|
 | NAS pre-authentication messages | `32_nas_signaling` | Seventeen messages built as octets — Attach/TAU/Service reject, Identity Request, Authentication Request/Reject/Failure, Security Mode Command/Reject in EPS and 5GS — each checked against tshark. The NAS-MAC and AUTN are refused rather than placed at an unconfirmed offset. |
+| TS 24.008 GPRS/GMM and session management | `09_lte_attach` | The 3G message set built and parsed from the octets: GMM and SM bodies, the four IE formats (type-1 through type-4) with their length rules, and the PD-discriminator table that makes `0x41` read as ATTACH REQUEST or ACTIVATE PDP CONTEXT REQUEST depending on the protocol it arrived under. |
 | RRC reconfiguration, release and reject | `10_lte_air`, `12_nr_air` | MeasurementReport, RRCConnectionRelease and RRCConnectionReestablishmentReject encoded through the generated PER layout; NR reconfiguration beside them. |
 | **CMAS / ETWS / PWS alert forgery** | `10_lte_air` | The full warning chain in RRC: SIB10 carries the primary notification (message identifier, serial, `warningType` split into class and category), SIB11 and SIB12 the segments that follow, and SIB12 the coordinate segment. Every builder is pinned to pycrate vectors — `04400000000040` (SIB10, 50 bits), `048D159E00026F56DF7780` (SIB11, 81 bits), `82468ACF0000FFC00040412040204000` (SIB12 with a warning-area segment, 122 bits). `--enb-sib-schedule` writes the `sib.conf` fragment that would announce one, and refuses on srsRAN release_23_11 by name because that release registers only sib1-sib7, sib9 and sib13 — a SIB10 entry fails in `sib_info_item_c::pack`. Master implements it. |
+| SIB19 and the satellite cell | `49_ntn` | SIB19 built on its own and inside the `SystemInformation` carrier that actually carries it (sib-TypeAndInfo, si-Periodicity, window), each read back through the generated codec. |
 | SIB1 decode and DCCH forgery | `10_lte_air`, `12_nr_air` | SIB1/SIB2 read; MeasurementReport, RRCConnectionRelease and ReestablishmentReject encoded through the generated PER layout. |
 | Forged reject cause | `15_downgrade` | Built, with the transmit verb last on its card. |
 | GTP-in-GTP and MBMS session start | `11_lte_core` | Both built and dissected by tshark; the outer layer treats the inner as uninterpreted payload, which is exactly the middlebox gap. |
+| Proactive SIM commands (RUN AT) | `52_stk` | A card-originated `RUN AT` command built as the TLV chain a handset receives, and an audit that classifies the string: radio or service change, file or identifier readout, shutdown, browser launch. The chained form for multi-command strings is flagged rather than flattened. |
+| SMPP 3.4 beyond bind and submit | `41_ota_sms` | `submit_multi` with its destination list of two shapes, `data_sm`, the optional TLV set walked tag-length-value with unknown tags kept as `unknown_tag_0xNNNN`, a TLV builder, and the TLS port (3550) admitted by shape. Truncated and malformed TLVs are refused rather than guessed. |
+| IMS and SMS source spoofing | `41_ota_sms`, `30_volte_ims` | The 3GPP2 originating address as a 128-character name where the standards allow it, and the SIP/IMS path that carries the text, so the claim being tested is what the receiving handset renders, not what the sender typed. |
+| USSD and supplementary-service forge | `38_ussd` | 7-bit packing that handles the extension characters, a USSD facility message built from a DCS and the packed text, MMI and SS string parsing per TS 22.030 (SC/SI/SIA), the supplementary-service code reference, and the injection findings a payload raises. Which strings move an account and which are answered before authentication is the point. |
 
 ### Core network and interconnect
 
 | Attack | Module | What exists |
 |---|---|---|
-| MAP operations | `26_ss7_map` | ATI, SRI, SRI-SM, SAI, PSI, ULR, ISD, RegisterSS and ActivateSS built byte-exact, with M3UA encapsulation both ways. |
+| MAP operations | `26_ss7_map` | ATI, SRI, SRI-SM, SAI, PSI, ULR, ISD, RegisterSS and ActivateSS built byte-exact, with M3UA encapsulation both ways. The answers exist too: `--build-response sai-ack` returns real GSM triplets and an EPC quintet, and `--ati-answer` referees what a returning ATI actually contains — including the untagged `ageOfLocationInformation` that TS 29.002 17.7.6 requires and a tagged one does not. |
 | SIP and IMS registration hijack | `30_volte_ims` | A forged REGISTER and the spoofed re-registration sequence; `--sip-flood` is a rate calculation, not a sender. |
 | A call that carries audio | `30_volte_ims` | `--call` drives INVITE → 401 answer → ACK → BYE over UDP with SDP, and the media leg behind it binds a real RTP socket, offers PCMU/PCMA, sends 20 ms frames from the microphone or a wav and plays or records the far end. Verified against a loopback SIP UAS (`tools/check-media-leg.sh`); a handset or an IMS core accepting the offer has not been tested here. |
 | 5G SBA and NGAP | `13_nr_core`, `40_sba_pivot` | NRF discovery, NGAP procedures, PFCP rules, and the reachability map across the service-based architecture. |
+| PFCP session hijack | `13_nr_core` | A Session Modification Request that rewrites one FAR's outer header towards an attacker endpoint, decoded back by this tree's own PFCP reader. The blunt version of the same move: one message and the downlink follows the attacker. |
+| NGAP exposure probe | `13_nr_core` | Four questions to an AMF — NGSetupRequest, InitialUEMessage, UplinkNASTransport, Paging — each with what the answer leaks: cell inventory, whether a UE context is created free of charge, and whether a refusal tells you which identifier was wrong. |
+| NAS COUNT and re-key | `13_nr_core` | The 24-bit NAS COUNT gap, the three ways it can move (advance, reuse, reset) and what each means for keystream reuse, plus the NH/NCC walk that decides whether a handover re-keys at all. |
+| Interleaving two procedures | `13_nr_core` | Kairos: a timing model for six procedures, the pairs whose steps may not overlap, the offset window that opens each violation, and the state each side believes it is in. |
+| Context integrity | `13_nr_core` | A journal of UE/context/owner/authenticated events, judged for the case a security architecture has to rule out: one subscriber landing in another subscriber's context. |
+| Flooding depth | `11_lte_core` | Diameter and GTP-C message sizes, the pps that saturates a link, and the conclusion the numbers support — that the capacity that runs out first is the per-subscriber authentication vector pool, not the bandwidth. |
+| N32 roaming bridge | `40_sba_pivot` | The inter-PLMN forwarding shape: the visiting NF, the SEPP hop, the N32-c handshake and the headers a home NF trusts, with the type-spoofing and IPX-trust findings named. |
+| NRF discovery abuse | `40_sba_pivot` | The thirteen `target-nf-type` queries that enumerate a core, the NF-status subscription that pushes the inventory afterwards, and the absence of consumer authorisation and rate limiting. |
+| Cloud metadata through the SBA | `40_sba_pivot` | An NF registration and a status-subscription callback pointed at the instance metadata address, with the three-step chain and what an egress policy would have to catch. |
+| RANAP / Iu-CS on the macro side | `37_femtocell` | InitialUE-Message with its NAS payload built through the generated RANAP codec, and the IE ids read from pycrate's own constant table rather than typed in. |
+| Shared RAN leakage | `43_ran_share` | EPLMN and MOCN review: which PLMN list a shared cell may broadcast, `--leak-check` over what a neighbour list gives away about the host network, and PLMN decoding of what the cell actually said. |
 | 5G SUCI capture | `58_suci_catcher` | The pre-authentication identity exchange: cell and AMF slice build, catcher plan, and the SUCI a UE hands over before any key exists. |
 | O-RAN and slicing | `48_oran`, `34_slicing` | A1 policy poisoning, E2 control shapes, the over-broad xApp model, slice isolation testing, 5QI and TSN assistance. |
-| Carrier API enumeration | `44_carrier_api` | A concrete request per operation rendered from the document's own examples, and the ordered subscriber sequence. Both stop at the file. |
+| Carrier API enumeration | `44_carrier_api` | A concrete request per operation rendered from the document's own examples, and the ordered subscriber sequence. Both stop at the file; an execution plan runs only with a lab confirmation word. |
 | Lawful interception artefacts | `42_li_probe` | The provisioning and activation records as real TS 33.108 HI1 PDUs (liActivated / liDeactivated, BER), and the X3/HI3 product envelope as this module's own framing. Encoded, never delivered. |
 
 ### Baseband, device and radio
 
 | Attack | Module | What exists |
 |---|---|---|
-| Baseband CVEs | `54_baseband_exploit` | The catalogue with the state each needs, L2 frames, forged registration accept/reject, and a send verb that asks for `--yes`. |
+| Baseband CVEs | `54_baseband_exploit` | The catalogue with the state each needs, L2 frames, forged registration accept/reject, and a send verb that asks for `--yes`. The firmware integrity half lives beside it: a manifest of the image and a verify pass that says whether the image you emulated is the image you studied. |
 | NR access attacks | `55_nr_inject` | RAR construction, backoff, RA-RNTI arithmetic, MAC/DCI, Gold sequence and scrambling, and the catalogued exploits over them. |
-| DIAG and NV | `56_baseband_diag`, `35_baseband` | Real DIAG framing, NV read/build/write requests, EFS paths and the AT surface; `35_baseband` owns the transmit handoff and the SCPI command file. |
-| Jamming | `33_jamming_detect` | Detection first: barrel, narrowband and pulsed shapes told apart from congestion. The waveform constructor — AWGN/CW/chirp, PSS/SSS/PBCH, PRACH, PRS, GPS C/A, NR SSB — runs on the first invocation and prints its disclaimer on stderr. |
+| DIAG and NV | `56_baseband_diag`, `35_baseband` | Real DIAG framing, NV read/build/write requests, EFS paths and the AT surface; `35_baseband` owns the transmit handoff and the SCPI command file, and can modulate a payload onto the LTE grid as samples. |
+| Jamming | `33_jamming_detect` | Detection first: barrel, narrowband and pulsed shapes told apart from congestion. The waveform constructor — AWGN/CW/chirp, PSS/SSS/PBCH, PRACH, PRS, PUCCH, GPS C/A, NR SSB — runs on the first invocation and prints its disclaimer on stderr. |
 | GPS and PRS jamming | `33_jamming_detect` | Both sequences are generated from the standards — IS-GPS-200N Table 3-Ia for the C/A code, TS 36.211 for PRS — and asserted against an independent implementation. |
+| **Overshadowing (AdaptOver)** | `60_overshadow` | A transmitter that fills only an unscheduled grant, so the cell stays up and only one user is affected. The module computes the two budgets that decide whether it is possible — the 2 ms queue window against the cyclic prefix, and the uplink power differential that makes the attack surgical (29 dBm modelled against the paper's measured 28.5) — plus the downlink case that collapses with range, four detectors, and a plan that never keys a radio. |
+| Evil twin | `57_evil_twin` | A survey row becomes an eNB configuration a HackRF can transmit, with the preflight that names every binary the config needs and the timer that tells a stopped service from a crashed one. |
+| NB-IoT coverage enhancement | `45_iot` | CE levels with their repetition budgets and what they cost a cell: NPDCCH subframe occupancy, NPRACH congestion, and the suspend/resume state that outlives the session. |
+| Sidelink presence attacks | `51_sidelink` | BSM field analysis, the ghost-vehicle detector (speed against position, impossible steps), pseudonym lifecycle auditing and the kinematic linkage that undoes a rotation. |
+| Sidelink relay | `51_sidelink` | What a UE-to-network relay sees at layer 2 and layer 3, which traffic it can read in each, and why its position on the path is the whole finding. |
+| MAC grants and the user-plane integrity gap | `29_mac_layer` | MAC/RLC/PDCP decoded from the capture: RNTI tracking, grant cadence per UE, and the scheduling view that overshadowing needs — plus where user-plane integrity stops being applied, which is the difference between reading a channel and reading a message. |
 
 ### Tracking, positioning and RF
 
 | Attack | Module | What exists |
 |---|---|---|
 | Timing-advance geolocation | `39_ta_geoloc` | Cell range from TA, with the accuracy limit stated rather than rounded away. |
-| OTDOA / UTDOA / PRS | `46_lpp`, `33_jamming_detect` | LPP assistance data and requests through the generated LPP codec, checked against pycrate; PRS generated from TS 36.211 with its RE map written beside it. UTDOA is LPPa, so it is stated as a handoff. |
+| UTRAN ranging | `39_ta_geoloc` | RTT in chips to metres (78.0504 m per chip round trip), the Rx-Tx difference that turns a circle into a hyperbola, and the same trilateration once three anchors exist. |
+| OTDOA / UTDOA / PRS | `46_lpp`, `33_jamming_detect` | LPP assistance data and requests through the generated LPP codec, checked against pycrate; PRS generated from TS 36.211 with its RE map written beside it. UTDOA has no home in LPP at all, so it is built where it lives — LPPa over S1AP, with the SRS request and the per-cell SRS configuration encoded and read back. |
+| Satellite timing | `49_ntn` | A forged ephemeris turned into the timing a phone derives from it, an attacker-chosen k_offset, and the circle two TA measurements narrow to two points. |
 | RF fingerprinting and CSI sensing | `24_rf_fingerprint` | CFO, IQ imbalance, transients, and a channel that moves without a transmitter moving. |
 | Traffic and application fingerprinting | `23_traffic_analysis` | Flow features and classification on behaviour rather than ports. |
 
@@ -239,8 +461,9 @@ computes rather than describes.
 
 | Attack | Module | What exists |
 |---|---|---|
-| Repeated runs | `25_killchain` | Nine builtin chains — survey, passive-audit, gsm-assessment, lte-core-audit, 5g-privacy, rf-effect, nbiot-audit, lmr-survey, slice-oran-assess — plus user chains, with pause, resume and a result report per run. |
-
+| Repeated runs | `25_killchain` | Fourteen builtin chains — survey, passive-audit, gsm-assessment, lte-core-audit, 5g-privacy, rf-effect, nbiot-audit, lmr-survey, slice-oran-assess, nr-core-exposure, sba-exposure, ntn-timing, sim-resync, gea-posture — plus user chains, with pause, resume and a result report per run. Five of them run end to end without a radio. |
+| Evidence you can hand over | `25_killchain` | A manifest of the artefacts a run produced, with the tool version, the commit, the clock and a body hash, and a verify pass that reports what changed, what vanished and what appeared. A report nobody can re-derive is an assertion, not evidence. |
+| Catalogue reachability | `20_gsm_cve`, `21_lte_cve`, `22_nr_cve` | Every catalogued CVE placed: over the air, beside the core, at an STP, on the card, or nowhere special — and the standing claim that no exploit primitive ships with the catalogue. |
 
 ## Hardware
 
@@ -343,156 +566,6 @@ on a line protocol.
 Any **gpsd**-supported receiver (~$15–40) for `04_tower_map` and the survey
 paths. Without one those modules still run; they just have no coordinates to
 attach.
-
----
-
-## How to run it
-
-Build the GUI:
-
-```bash
-cd native
-meson setup builddir
-meson compile -C builddir
-```
-
-Then, from the project root:
-
-```bash
-sudo ./imsisting.sh          # CLI menu
-./imsisting.sh --list        # module list
-./imsisting.sh --index       # the module index as TSV
-./imsisting.sh --gui         # launch the GUI
-./imsisting.sh --tui         # launch the TUI
-```
-
-<img width="1366" height="708" alt="image" src="https://github.com/user-attachments/assets/597fcd5c-9694-4c74-95d7-211a0a5c8e3b" />
-
-
-Or launch the built binary directly:
-
-```bash
-./native/builddir/imsisting-gui
-```
-
-<img width="964" height="523" alt="imsisting" src="https://github.com/user-attachments/assets/97afe07a-1b0e-43fe-a931-66cd5dc0fd37" />
-
-The GUI asks for your password per action via `pkexec`, not once at startup.
-
-### Dependencies
-
-**Required:** GTK4 (4.14+), meson, ninja, a C compiler, python3.
-
-```bash
-# Debian / Ubuntu
-sudo apt install build-essential meson ninja-build libgtk-4-dev \
-                 python3 python3-numpy python3-scipy
-
-# Arch
-sudo pacman -S base-devel meson ninja gtk4 python python-numpy python-scipy
-```
-
-**Optional but used by specific modules:** `gnuradio` + `gr-gsm`, `srsRAN`,
-`Open5GS`/`free5GC`, `tshark`, `pcsc-tools`, `gpsd`, `python3-cryptography`.
-`00_deps` reports what is present and what is missing, and distinguishes a tool
-that is installed from a stack that is actually complete.
-
-### The interface
-
-The GUI opens on a **Dashboard** — every module as a card, grouped by category.
-Click a card and the module opens as its own tab. Six tabs are permanent:
-
-<img width="335" height="634" alt="image" src="https://github.com/user-attachments/assets/41d9556a-d047-4e7f-aa41-a642c19e3d16" />
-
-
-| Tab | What it is |
-|---|---|
-| **Dashboard** | Every module as a card, grouped by category. The main menu. |
-| **Live Traffic** | A live GSMTAP view (below). Starts listening when you open it. |
-| **Casebook** | Cases, selected cells, evidence/captures, timeline, IDS alerts, passive sensor nodes and HTML/JSON/TSV reports. The Evidence page retains the per-module loot browser and preview. |
-| **Stats** | Module and collection counts, and a health line. |
-| **Help** | How the tree fits together and how to drive it. |
-| **Settings** | Environment facts, plus dependency and SDR probe actions. |
-
-Module tabs appear alongside these and can be closed; the six permanent tabs
-cannot.
-
-**A module page** is a left menu of views with the content beside it, grouped
-into cards — STATUS, ACTIONS and ALL MODULE VERBS. The action buttons cover
-the verbs you reach for most; the generated selector is built from the module
-index and exposes everything else, with a separate arguments field and command
-copy button, so nothing is unreachable.
-
-**Live Traffic** is a real table (sequence, time, type, channel, ARFCN,
-timeslot, signal, direction, length, payload) with a filter box above it that
-matches on type, channel or payload. Uplink rows are marked.
-
-**The dashboard is configurable, and it remembers.** Every card carries a star:
-pinned modules lead the grid whatever the sort is set to. `Sort`
-offers Workflow (category order), Most used (by run count), Name and Category,
-and `Density` switches Compact, Comfortable or Spacious card sizing. All of it
-survives a restart, because it lives in `state/` rather than in the binary —
-and both searches say *no match* instead of going quietly blank.
-
-**Stats** shows headline counts as tiles, a per-category breakdown as bars, and
-where everything lives on disk. It recounts when you open it, so a module that
-has just written loot is not still showing the numbers from launch.
-
-The **module list on the left collapses** — the *Modules* button in the header
-bar. Collapse it when a module page needs the full width.
-
-The **header strip** carries the live cellular state, read from the modules
-themselves so it cannot disagree with them:
-
-    SDR    the selected radio (01_radio --status-tsv)
-    TX     whether that radio can transmit — most attack verbs need this
-    FREQ   the tuned frequency
-    CELLS  cells in the survey store (02_cell_recon)
-    GPS    the survey position source (04_tower_map)
-
-`--tab N` opens straight to a tab (0 Dashboard, 1 Live Traffic, 2 Casebook,
-3 Stats, 4 Help, 5 Settings):
-
-```bash
-./native/builddir/imsisting-gui --tab 1
-```
-
-### Live Traffic — what it is, and what it is not
-
-There is no way to demodulate GSM or LTE inside a GUI process; that needs a
-full PHY. So this is not a raw-radio view and does not pretend to be one.
-
-What it is: a **GSMTAP** listener on UDP 4729. GSMTAP is the format gr-gsm,
-srsRAN and Open5GS all emit, and it is what Wireshark keys off. The tab binds
-the port, decodes each message's 16-byte header as it arrives, and shows the
-type, GSM channel, ARFCN, timeslot, signal, direction, length and payload.
-
-That makes it useful both ways — passively to watch paging, SI and identity
-exchanges happen, and offensively to confirm an emitter is actually
-transmitting and see what a UE answers with.
-
-It needs an upstream emitter. If nothing arrives within three seconds it says
-so and names what to start, rather than showing an empty pane:
-
-```bash
-grgsm_livemon            # GSM, via gr-gsm
-# or an eNB/gNB started with GSMTAP enabled
-```
-
-Two honest limits. The header's `arfcn` field is 16 bits, so an NR-ARFCN
-(which runs into the millions) cannot be represented in it — the field is not
-a general NR ARFCN carrier. And `sub_type` is a GSM channel type only under a
-GSM payload; under LTE/NR it is not a channel, so the column shows `—` rather
-than a plausible-looking wrong name.
-
-### First run
-
-1. **Dependencies** — run the check. Half of all confusing failures later are a
-   missing tool.
-2. **SDR / Radio Manager** — confirm a device is seen and which bands it covers.
-   A receive-only device is flagged, because most attack verbs need transmit.
-3. **Cell Recon** — try `--status-tsv` first. It works with no radio attached,
-   which makes it a good smoke test.
 
 ---
 
