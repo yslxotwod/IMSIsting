@@ -1782,6 +1782,92 @@ pgt_cmd_piercer() {
     pgt_piercer_correlate "$c" "$p" "$m"
 }
 
+# ── AdaptOver / 5Gone: the wake-awake detector ──────────────────────────
+# AdaptOver (SRLabs, 2022) does not need a cell of its own to be heard. It
+# radiates paging downlink only -- the UE answers a page, moves to connected,
+# and the attacker goes quiet, so the device burns battery and stays reachable
+# for whatever comes next. 5Gone rides the same paging lever and makes the UE
+# believe it is reachable on 5G when it is not.
+#
+# Neither attack needs a fake base station, so a detector that looks for one
+# sees nothing. What both leave behind is a paging pattern: the same identity
+# woken again and again on a schedule no real core would use, because the
+# attacker wakes the device it wants awake, not the device traffic is for.
+#
+# The statistic is the coefficient of variation of the gaps between pages
+# aimed at one identity. A real subscriber is paged when there is traffic, and
+# traffic is bursty; an attacker paging to keep a device awake pages on a fixed
+# interval, so the gaps are near-identical and rev/sd is small. The threshold
+# is stated, not hidden: rev/sd < 0.15 over five or more pages.
+
+# The statistics over events, separated from the capture so a test can hand it
+# rows instead of a file: kind, timestamp, frame, identity type, identity.
+pgt_keepawake_stats() {  # <events-tsv>
+    printf '%s\n' "${1:-}" | awk -F'\t' '
+        $1 != "request" { next }
+        {
+            id = $5
+            n[id]++
+            if (n[id] >= 2) {
+                gap = $2 - last[id]
+                sum[id] += gap
+                sumsq[id] += gap * gap
+                gaps[id]++
+            }
+            last[id] = $2
+        }
+        END {
+            for (id in n) {
+                if (n[id] < 5 || gaps[id] < 4) continue
+                mean = sum[id] / gaps[id]
+                var  = sumsq[id] / gaps[id] - mean * mean
+                if (var < 0) var = 0
+                sd = sqrt(var)
+                cv = (mean > 0) ? sd / mean : 0
+                print id, mean, sd, cv
+            }
+        }' | awk -F'[ ]' '{printf "%s\t%.6f\t%.6f\t%.6f\n", $1, $2, $3, $4}'
+}
+
+pgt_cmd_adaptover_detect() {  # <pcap>
+    local pcap="${1:-}"
+    [[ -n "$pcap" ]] || { printf 'ERROR\tusage: --adaptover-detect <pcap>\n' >&2; return 2; }
+    local ev; ev=$(pgt_events "$pcap") || return 1
+    [[ -n "$ev" ]] || { printf 'ERROR\tno paging messages in %s\n' "${pcap:-<none>}" >&2; return 1; }
+
+    local rows
+    rows=$(pgt_keepawake_stats "$ev")
+    local periodic=0 total=0
+    if [[ -n "$rows" ]]; then
+        total=$(printf '%s\n' "$rows" | grep -c . || true)
+        periodic=$(printf '%s\n' "$rows" | awk -F'\t' '$5 < 0.15' | grep -c . || true)
+    fi
+    printf 'capture\t%s\n' "$(pgt_sanitize "$pcap")"
+    printf 'identities_seen\t%d\n' "$(printf '%s\n' "$ev" | awk -F'\t' '$1=="request"{print $5}' | sort -u | grep -c . || true)"
+    printf 'identities_with_enough_pages\t%s\n' "${total:-0}"
+    printf 'periodic_identities\t%s\n' "${periodic:-0}"
+    if [[ -n "$rows" ]]; then
+        printf '%s\n' "$rows" | awk -F'\t' '
+            { printf "identity\t%s\tmean_gap_s\t%s\tsd_gap_s\t%s\tcv\t%s\n", $1,$2,$3,$4 }'
+    fi
+    local hits=0 findings=""
+    if (( periodic > 0 )); then
+        hits=$(( hits + 1 ))
+        findings+="A1 periodic_paging=$periodic identity(ies) paged five or more times with gaps whose sd/mean is below 0.15;"
+    fi
+    printf 'findings\t%s\n' "$(pgt_sanitize "${findings:-none}")"
+    printf 'signal_hits\t%d\n' "$hits"
+    printf 'threshold\t%s\n' 'five or more pages from one identity and a coefficient of variation of the gaps below 0.15'
+    if (( hits > 0 )); then
+        printf 'verdict\tkeep_awake_pattern\n'
+        printf 'note\t%s\n' 'periodic paging is the shape of an attack that wants the device awake; it is also the shape of a network retrying a page a device cannot answer, so one identity is a question and the normal paging distribution in the capture is the answer'
+        return 0
+    fi
+    printf 'verdict\tno_keep_awake_pattern\n'
+    printf 'note\t%s\n' 'the 5G half of this row (5Gone) is the same lever on a different RAT; this verb reads the GSM paging capture --adaptover-detect takes, and an NR capture with the same identity and timestamp columns would take the same arithmetic'
+    return 0
+}
+
 pgt_cmd_detect() {
     local p="${1:-}"
     [[ -n "$p" ]] || { printf 'ERROR\tusage: --detect <pcap>\n' >&2; return 2; }
@@ -1969,6 +2055,17 @@ pgt_selftest() {
     out=$(pgt_detect "$d/normal.pcap")
     chk detect-normal "$(fld "$out" verdict)" "normal"
     chk detect-bad "$(pgt_detect /nonexistent.pcap >/dev/null 2>&1; echo $?)" "1"
+
+    # 9b. K7a keep-awake: the statistic is the coefficient of variation of the
+    #     gaps between pages for one identity. Ten seconds apart is the attack
+    #     shape (cv 0); a burst with one long pause is ordinary traffic.
+    ev_periodic=$(for i in $(seq 1 6); do printf 'request\t%s.0\t%d\timsi\t310150123456789\n' "$((i*10))" "$i"; done)
+    chk ka-cv-zero "$(printf '%s\n' "$(pgt_keepawake_stats "$ev_periodic")" | awk -F'\t' '{print $4}')" "0.000000"
+    ev_bursty=$(printf 'request\t1.0\t1\timsi\t310150123456789\nrequest\t1.4\t2\timsi\t310150123456789\nrequest\t1.9\t3\timsi\t310150123456789\nrequest\t2.1\t4\timsi\t310150123456789\nrequest\t40.0\t5\timsi\t310150123456789\nrequest\t41.0\t6\timsi\t310150123456789\n')
+    chk ka-bursty-high "$(printf '%s\n' "$(pgt_keepawake_stats "$ev_bursty")" | awk -F'\t' '{print ($4 > 0.6) ? "yes" : "no"}')" "yes"
+    chk ka-few-pages "$(printf 'request\t1.0\t1\timsi\t310150123456789\nrequest\t11.0\t2\timsi\t310150123456789\n' | pgt_keepawake_stats "$(cat)")" ""
+    chk v-adaptover-missing "$(pgt_cmd_adaptover_detect >/dev/null 2>&1; echo $?)" "2"
+    chk v-adaptover-nofile "$(pgt_cmd_adaptover_detect /nonexistent.pcap >/dev/null 2>&1; echo $?)" "1"
 
     # 10. Plans are handoff, name the radio and the layer-2 position.
     out=$(pgt_plan torpedo)
@@ -2879,6 +2976,7 @@ pgt_cli_main() {
         --torpedo-model)    pgt_cmd_torpedo "${1:-}" ;;
         --piercer-correlate) pgt_cmd_piercer "${1:-}" "${2:-}" "${3:-6}" ;;
         --detect)           pgt_cmd_detect "${1:-}" ;;
+        --adaptover-detect) pgt_cmd_adaptover_detect "${1:-}" ;;
         --plan)             pgt_plan "${1:-}" ;;
         --edrx-occ)         pgt_cli_edrx_occ "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
         --pei-occ)          pgt_cli_pei_occ "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
@@ -2905,6 +3003,8 @@ Usage: $0 COMMAND
   --piercer-correlate <cands> <pcap> [mfrms]
                                         rank candidate IMSIs by occasion
   --detect <pcap>                       paging-anomaly signals and verdict
+  --adaptover-detect <pcap>             K7a: the keep-awake paging pattern
+                                        (AdaptOver / 5Gone), from gap regularity
   --edrx-occ <imsi|ue_id> <TeDRX> <PTW> [T] [nB]
                                         eDRX PTW start and the POs inside it
   --pei-occ <5g-s-tmsi|ue_id> [T] [nB] [pf_offset] [N_subgroup]

@@ -5913,6 +5913,15 @@ static const char *const plain_keys[] = {
     "why\twhy a verb handed off instead of acting",
     "reply_decoded\tthe answer, read with this tree's own decoder",
     "reply_type\tthe numeric message type of that answer",
+    "cv\tthe spread of the gaps divided by their mean",
+    "identities_seen\thow many identities the capture paged",
+    "identities_with_enough_pages\thow many were paged often enough to judge",
+    "keep_awake_pattern\tthe gaps are regular enough to be a schedule",
+    "mean_gap_s\tthe average gap between two pages, in seconds",
+    "no_keep_awake_pattern\tnothing in the capture looks like a schedule",
+    "periodic_identities\tidentities paged on a near-fixed interval",
+    "sd_gap_s\tthe standard deviation of those gaps, in seconds",
+    "threshold\tthe number this verb calls the attack",
 };
 
 /* Compare a bare key against one "key<TAB>words" row. */
@@ -6830,6 +6839,7 @@ static const ChipRow chip_rows[] = {
     { "28_paging_track",     "--torpedo-model",       NEED_NO, DOES_READS },
     { "28_paging_track",     "--version",             NEED_NO, DOES_READS },
     { "28_paging_track",     "--yes",                 NEED_NO, DOES_READS },
+    { "28_paging_track",     "--adaptover-detect",    NEED_CAP, DOES_READS },
     { "29_mac_layer",        "--__index_probe__",     NEED_NO, DOES_READS },
     { "29_mac_layer",        "--dci",                 NEED_CAP, DOES_READS },
     { "29_mac_layer",        "--decode-mac",          NEED_CAP, DOES_READS },
