@@ -117,6 +117,36 @@ Click a card and the module opens as its own tab. Six tabs are permanent:
 Module tabs appear alongside these and can be closed; the permanent tabs
 cannot.
 
+#### Themes
+
+**Settings → Interface → Theme** switches the whole desk between two palettes:
+**Night**, the blue-black palette the app was drawn in, and **Ember**, the same
+desk one temperature over — near-black surfaces with a warm bias and a single
+ember accent.
+
+A theme is one stylesheet and it restates colours, nothing else. It is not
+maintained by hand: `tools/gen-theme.py` derives it from `native/resources/style.css`
+(the base sheet), so a change there reaches both, and a theme that falls behind
+shows up as a diff instead of as one stale panel. The derivation warms the
+greys, turns the accent family ember, deepens the surfaces, and deliberately
+leaves every status hue alone — green still means ok and red still means danger,
+because a theme that recolours them makes the honest chips lie. GTK's own
+widgets (entries, popovers, tooltips, switches) are restated at the end of the
+generated file, since the base sheet never spoke for them and the system theme's
+version kept its navy field in a warm window.
+
+After changing the generator:
+
+```bash
+tools/gen-theme.py            # write native/resources/theme-ember.css
+tools/check-theme.sh          # packaged? generated? in step with the base sheet?
+cd native && ninja -C builddir
+```
+
+`tools/check-theme.sh` exists because a theme that is *not* packaged fails
+silently: GTK draws the base sheet and the dropdown still reads "Ember". The
+GUI's `--selftest` asserts the same thing (`gui-theme-ember PASS packaged`).
+
 ### A node as a source
 
 A survey does not have to happen on the machine in front of you. Any module

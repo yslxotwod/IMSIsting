@@ -225,6 +225,29 @@ button.destructive:hover {
     background-color: #3d1f22;
 }
 
+/* GtkDropDown draws its own button, and the `button` rule above does not reach
+   it: the system theme's version wins, so on this dark desk the sort, density
+   and theme pickers drew as light pills with dark text. Same colours as every
+   other button; the shape stays whatever the system theme gives it, because a
+   picker narrower than the buttons beside it is a layout decision nobody made. */
+dropdown > button {
+    background-color: #1a2130;
+    color: #cfd6e0;
+    border: 1px solid #26303f;
+    box-shadow: none;
+}
+
+dropdown > button:hover {
+    background-color: #212b3c;
+    border-color: #33415a;
+}
+
+dropdown > button:active,
+dropdown > button:checked {
+    background-color: #1d3a4d;
+    border-color: #2f6b8f;
+}
+
 /* ── terminal / output ──────────────────────────────────────────── */
 
 .terminal-pane {

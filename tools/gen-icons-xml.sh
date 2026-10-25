@@ -30,6 +30,13 @@ generate() {
     printf '<gresources>\n'
     printf '  <gresource prefix="/com/imsisting/native">\n'
     printf '    <file>style.css</file>\n'
+    # Every theme file beside it. A theme is a stylesheet the binary loads by
+    # name, so it has to be in the resource or choosing it at runtime finds
+    # nothing; globbing keeps a new one from needing a second edit here.
+    for theme in "$ROOT"/native/resources/theme-*.css; do
+        [ -f "$theme" ] || continue
+        printf '    <file>%s</file>\n' "$(basename "$theme")"
+    done
     printf '    <file>imsisting_splash.png</file>\n'
 for f in "${ROOT}/native/resources/fonts"/*.ttf "${ROOT}/native/resources/fonts"/*.otf; do
     [[ -e "$f" ]] || continue

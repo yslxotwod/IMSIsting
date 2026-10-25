@@ -421,6 +421,11 @@ struct _AppState {
     char      *pending_view;
     GtkWidget *drawer_recent_box;
     char       *density;
+    /* The palette in force. "night" is the base stylesheet and needs no second
+       provider; anything else is a theme file loaded above it. The provider is
+       held so a switch removes the old one instead of stacking sheets. */
+    char           *theme;
+    GtkCssProvider *theme_css;
     GtkWidget *loot_list;
     GtkWidget *loot_search;
     GtkWidget *loot_sort;
@@ -12348,6 +12353,8 @@ ui_state_save(AppState *state)
     g_string_append_printf(out, "sort\t%d\n", g_dash_sort);
     g_string_append_printf(out, "density\t%s\n",
                            state->density ? state->density : "density-comfortable");
+    g_string_append_printf(out, "theme\t%s\n",
+                           state->theme ? state->theme : "night");
     g_file_set_contents(path, out->str, -1, NULL);
     g_string_free(out, TRUE);
 }
@@ -12383,6 +12390,119 @@ recents_bump(AppState *state, const char *module_id)
     g_hash_table_insert(state->recent_counts, g_strdup(module_id),
                         GUINT_TO_POINTER(n));
     recents_save(state);
+}
+
+/* ── themes ───────────────────────────────────────────────────────────
+ *
+ * The design is one stylesheet, written around a palette. A theme is a second
+ * stylesheet loaded above it that restates that palette and nothing else, so a
+ * theme cannot become a second copy of the layout and cannot fall behind it:
+ * the day a panel changes shape, the theme still paints it, because it only
+ * ever said what colour things are.
+ *
+ * "Night" is the bench palette and is what an untouched install draws - it is
+ * the base sheet, with no second provider at all. "Ember" is the same desk in
+ * near-black with one warm accent, for a room where the blue reads cold. The
+ * file is not hand-written: tools/gen-theme.py derives it from style.css, so a
+ * palette that drifts shows up as a diff rather than as one stale panel.
+ *
+ * A third way to load one exists for working on a theme without rebuilding the
+ * binary: IMSISTING_THEME_FILE=<path> reads a stylesheet from disk.
+ */
+
+static const char *theme_ids[]   = { "night", "ember" };
+static const char *theme_names[] = { "Night", "Ember" };
+
+static gboolean
+theme_known(const char *id)
+{
+    for (guint i = 0; i < G_N_ELEMENTS(theme_ids); i++)
+        if (g_strcmp0(theme_ids[i], id) == 0)
+            return TRUE;
+    return FALSE;
+}
+
+static int
+theme_index(AppState *state)
+{
+    const char *id = state->theme != NULL ? state->theme : "night";
+
+    for (guint i = 0; i < G_N_ELEMENTS(theme_ids); i++)
+        if (g_strcmp0(theme_ids[i], id) == 0)
+            return (int) i;
+    return 0;
+}
+
+static void
+theme_apply(AppState *state)
+{
+    const char *id = state->theme != NULL ? state->theme : "night";
+    const char *file = g_getenv("IMSISTING_THEME_FILE");
+    g_autoptr(GtkCssProvider) css = gtk_css_provider_new();
+    g_autofree char *res = NULL;
+
+    if (state == NULL)
+        return;
+    if (!theme_known(id))
+        id = "night";
+
+    if (state->theme_css != NULL) {
+        gtk_style_context_remove_provider_for_display(
+            gdk_display_get_default(), GTK_STYLE_PROVIDER(state->theme_css));
+        g_clear_object(&state->theme_css);
+    }
+    /* The base sheet is the night theme: an install that never chose one has
+       one provider, one file, and nothing to keep in step. */
+    if (g_strcmp0(id, "night") == 0 && (file == NULL || *file == '\0'))
+        return;
+
+    if (file != NULL && *file != '\0') {
+        gtk_css_provider_load_from_path(css, file);
+    } else {
+        res = g_strdup_printf("/com/imsisting/native/theme-%s.css", id);
+        /* A theme the binary does not carry cannot be drawn, and it does not
+           say so: load_from_resource() on a missing path draws the base sheet
+           and leaves the dropdown reading "Ember", which is a lie about what
+           is on screen. That is exactly what shipping the generator without
+           re-running tools/gen-icons-xml.sh looks like, so it is checked. */
+        g_autoptr(GBytes) have = g_resources_lookup_data(
+            res, G_RESOURCE_LOOKUP_FLAGS_NONE, NULL);
+        if (have == NULL) {
+            g_autofree char *msg = g_strdup_printf(
+                "The '%s' theme is not in this build (%s): the base palette is "
+                "what is being drawn. Re-run tools/gen-icons-xml.sh and rebuild.",
+                id, res);
+            append_event(state, msg);
+            if (state->window != NULL)
+                show_toast_full(state, "Theme", "that theme is not in this build",
+                                "warn");
+            g_free(state->theme);
+            state->theme = g_strdup("night");
+            return;
+        }
+        gtk_css_provider_load_from_resource(css, res);
+    }
+    /* Above the base sheet, so a tie on specificity goes to the theme. */
+    gtk_style_context_add_provider_for_display(
+        gdk_display_get_default(), GTK_STYLE_PROVIDER(css),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+    state->theme_css = g_object_ref(css);
+}
+
+static void
+theme_changed(GObject *dd, GParamSpec *pspec, gpointer user_data)
+{
+    AppState *state = g_object_get_data(dd, "state");
+    guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+
+    if (state == NULL || sel >= G_N_ELEMENTS(theme_ids))
+        return;
+    g_free(state->theme);
+    state->theme = g_strdup(theme_ids[sel]);
+    theme_apply(state);
+    ui_state_save(state);
+    (void) pspec;
+    (void) user_data;
 }
 
 /* Density is one class on the window; the stylesheet carries the sizes, so
@@ -12452,6 +12572,10 @@ ui_state_load(AppState *state)
             else if (g_strcmp0(f[0], "density") == 0) {
                 g_free(state->density);
                 state->density = g_strdup(f[1]);
+            }
+            else if (g_strcmp0(f[0], "theme") == 0) {
+                g_free(state->theme);
+                state->theme = g_strdup(f[1]);
             }
         }
     }
@@ -12621,8 +12745,21 @@ create_dashboard_page(AppState *state)
     gtk_widget_set_hexpand(search, TRUE);
     gtk_box_append(GTK_BOX(bar), sortlab);
     gtk_box_append(GTK_BOX(bar), dd);
+    /* Theme sits with Density for the same reason: both are how the desk
+       looks, not what it is doing. */
+    GtkWidget *themelab = gtk_label_new("Theme");
+    GtkWidget *theme_dd = gtk_drop_down_new_from_strings(theme_names);
+
+    gtk_widget_add_css_class(themelab, "dim");
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(theme_dd), (guint) theme_index(state));
+    g_object_set_data(G_OBJECT(theme_dd), "state", state);
+    g_signal_connect(theme_dd, "notify::selected",
+                     G_CALLBACK(theme_changed), NULL);
+
     gtk_box_append(GTK_BOX(bar), denslab);
     gtk_box_append(GTK_BOX(bar), dens);
+    gtk_box_append(GTK_BOX(bar), themelab);
+    gtk_box_append(GTK_BOX(bar), theme_dd);
     gtk_box_append(GTK_BOX(bar), search);
     gtk_widget_set_margin_start(bar, 16);
     gtk_widget_set_margin_end(bar, 16);
@@ -15401,6 +15538,19 @@ settings_density_apply(AppState *state, guint index)
     ui_state_save(state);
 }
 
+/* The theme is a provider swap, so this is the whole of it: the id moves in
+   state, theme_apply() puts the right sheet above the base one, and the next
+   session reads it back from state/ui.tsv. */
+static void
+settings_theme_apply(AppState *state, guint index)
+{
+    if (state == NULL || index >= G_N_ELEMENTS(theme_ids)) return;
+    g_free(state->theme);
+    state->theme = g_strdup(theme_ids[index]);
+    theme_apply(state);
+    ui_state_save(state);
+}
+
 static void
 settings_sort_apply(AppState *state, guint index)
 {
@@ -15489,6 +15639,17 @@ settings_view_interface(AppState *state)
         NULL, sort_v, sort_l, 3, s,
         "The order the full catalogue is laid out in.",
         settings_sort_apply, state));
+    gtk_box_append(GTK_BOX(body), settings_choice("Theme",
+        NULL, theme_ids, theme_names, G_N_ELEMENTS(theme_ids),
+        (guint) theme_index(state),
+        "Night is the palette the desk was drawn in. Ember is the same desk one "
+        "temperature over: near-black surfaces with a warm bias and one ember "
+        "accent, for a room where the blue reads cold. A theme restates colours "
+        "and nothing else, so the layout cannot differ between them, and every "
+        "status hue is left alone — a warning still reads as a warning. Generated "
+        "from the base sheet by tools/gen-theme.py; the dashboard dropdown "
+        "changes the same value.",
+        settings_theme_apply, state));
     gtk_box_append(GTK_BOX(body), settings_choice("Reader",
         "ui.reader", reader_v, reader_l, 2,
         g_strcmp0(settings_get("ui.reader", "beginner"), "expert") == 0 ? 1 : 0,
@@ -19382,7 +19543,6 @@ boot_restore_session(AppState *state, GtkApplication *app)
 static void
 boot_load_css(AppState *state, GtkApplication *app)
 {
-    (void) state;
     (void) app;
 
     g_autoptr(GtkCssProvider) css = gtk_css_provider_new();
@@ -19390,6 +19550,7 @@ boot_load_css(AppState *state, GtkApplication *app)
     gtk_style_context_add_provider_for_display(
         gdk_display_get_default(), GTK_STYLE_PROVIDER(css),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    theme_apply(state);
 }
 
 /* ── The terminal ──────────────────────────────────────────────────────
@@ -20714,6 +20875,24 @@ main(int argc, char **argv)
                vocabulary, the newest-row-wins grouping, and that an algorithm
                the toolkit cannot place never comes out strong. */
             bad += target_posture_selftest ();
+
+            /* Every theme the Settings dropdown offers has to be inside the
+               binary. A theme that is not packaged draws the base palette while
+               the control says otherwise, and GTK does not complain: that is
+               how "Ember does nothing" happened once, so it is asserted. */
+            for (guint t = 0; t < G_N_ELEMENTS(theme_ids); t++) {
+                g_autofree char *res = g_strdup_printf(
+                    "/com/imsisting/native/theme-%s.css", theme_ids[t]);
+                g_autoptr(GBytes) bytes = g_resources_lookup_data(
+                    res, G_RESOURCE_LOOKUP_FLAGS_NONE, NULL);
+                gboolean base = g_strcmp0(theme_ids[t], "night") == 0;
+                printf("gui-theme-%s\t%s\n", theme_ids[t],
+                       bytes != NULL ? "PASS packaged"
+                       : (base ? "PASS none needed — it is the base sheet"
+                               : "FAIL not in the resource"));
+                if (bytes == NULL && !base)
+                    bad++;
+            }
 
             printf("RESULT\t%s\n", bad == 0 ? "PASS" : "FAIL");
             return bad == 0 ? 0 : 1;
