@@ -12512,13 +12512,17 @@ recents_bump(AppState *state, const char *module_id)
  * binary: IMSISTING_THEME_FILE=<path> reads a stylesheet from disk.
  */
 
-static const char *theme_ids[]   = { "night", "ember" };
-static const char *theme_names[] = { "Night", "Ember" };
+/* NULL-terminated because gtk_drop_down_new_from_strings() walks to NULL: an
+   array sized exactly makes a dropdown list whatever static strings happen to
+   follow it in .rodata. THEME_COUNT is the size a loop wants. */
+static const char *theme_ids[]   = { "night", "ember", NULL };
+static const char *theme_names[] = { "Night", "Ember", NULL };
+#define THEME_COUNT ((guint) G_N_ELEMENTS(theme_ids) - 1u)
 
 static gboolean
 theme_known(const char *id)
 {
-    for (guint i = 0; i < G_N_ELEMENTS(theme_ids); i++)
+    for (guint i = 0; i < THEME_COUNT; i++)
         if (g_strcmp0(theme_ids[i], id) == 0)
             return TRUE;
     return FALSE;
@@ -12529,7 +12533,7 @@ theme_index(AppState *state)
 {
     const char *id = state->theme != NULL ? state->theme : "night";
 
-    for (guint i = 0; i < G_N_ELEMENTS(theme_ids); i++)
+    for (guint i = 0; i < THEME_COUNT; i++)
         if (g_strcmp0(theme_ids[i], id) == 0)
             return (int) i;
     return 0;
@@ -12591,22 +12595,6 @@ theme_apply(AppState *state)
     state->theme_css = g_object_ref(css);
 }
 
-static void
-theme_changed(GObject *dd, GParamSpec *pspec, gpointer user_data)
-{
-    AppState *state = g_object_get_data(dd, "state");
-    guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
-
-    if (state == NULL || sel >= G_N_ELEMENTS(theme_ids))
-        return;
-    g_free(state->theme);
-    state->theme = g_strdup(theme_ids[sel]);
-    theme_apply(state);
-    ui_state_save(state);
-    (void) pspec;
-    (void) user_data;
-}
-
 /* ── corners ──────────────────────────────────────────────────────────
  *
  * Shape is not a palette, so it cannot be a theme: a theme is only allowed to
@@ -12631,8 +12619,9 @@ theme_changed(GObject *dd, GParamSpec *pspec, gpointer user_data)
  * drift from.
  */
 
-static const char *corner_ids[]   = { "round", "square" };
-static const char *corner_names[] = { "Round", "Square" };
+static const char *corner_ids[]   = { "round", "square", NULL };
+static const char *corner_names[] = { "Round", "Square", NULL };
+#define CORNER_COUNT ((guint) G_N_ELEMENTS(corner_ids) - 1u)
 
 static int
 corners_index(AppState *state)
@@ -12931,21 +12920,11 @@ create_dashboard_page(AppState *state)
     gtk_widget_set_hexpand(search, TRUE);
     gtk_box_append(GTK_BOX(bar), sortlab);
     gtk_box_append(GTK_BOX(bar), dd);
-    /* Theme sits with Density for the same reason: both are how the desk
-       looks, not what it is doing. */
-    GtkWidget *themelab = gtk_label_new("Theme");
-    GtkWidget *theme_dd = gtk_drop_down_new_from_strings(theme_names);
-
-    gtk_widget_add_css_class(themelab, "dim");
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(theme_dd), (guint) theme_index(state));
-    g_object_set_data(G_OBJECT(theme_dd), "state", state);
-    g_signal_connect(theme_dd, "notify::selected",
-                     G_CALLBACK(theme_changed), NULL);
-
+    /* Theme and Corners are appearance, and appearance lives in Settings ->
+       Interface. A second Theme control here duplicated the setting and read
+       as a different one. */
     gtk_box_append(GTK_BOX(bar), denslab);
     gtk_box_append(GTK_BOX(bar), dens);
-    gtk_box_append(GTK_BOX(bar), themelab);
-    gtk_box_append(GTK_BOX(bar), theme_dd);
     gtk_box_append(GTK_BOX(bar), search);
     gtk_widget_set_margin_start(bar, 16);
     gtk_widget_set_margin_end(bar, 16);
@@ -15730,7 +15709,7 @@ settings_density_apply(AppState *state, guint index)
 static void
 settings_theme_apply(AppState *state, guint index)
 {
-    if (state == NULL || index >= G_N_ELEMENTS(theme_ids)) return;
+    if (state == NULL || index >= THEME_COUNT) return;
     g_free(state->theme);
     state->theme = g_strdup(theme_ids[index]);
     theme_apply(state);
@@ -15743,7 +15722,7 @@ settings_theme_apply(AppState *state, guint index)
 static void
 settings_corners_apply(AppState *state, guint index)
 {
-    if (state == NULL || index >= G_N_ELEMENTS(corner_ids)) return;
+    if (state == NULL || index >= CORNER_COUNT) return;
     g_free(state->corners);
     state->corners = g_strdup(corner_ids[index]);
     corners_apply(state);
@@ -15839,27 +15818,28 @@ settings_view_interface(AppState *state)
         "The order the full catalogue is laid out in.",
         settings_sort_apply, state));
     gtk_box_append(GTK_BOX(body), settings_choice("Theme",
-        NULL, theme_ids, theme_names, G_N_ELEMENTS(theme_ids),
+        NULL, theme_ids, theme_names, THEME_COUNT,
         (guint) theme_index(state),
         "Night is the palette the desk was drawn in. Ember is the same desk one "
         "temperature over: near-black surfaces with a warm bias and one ember "
         "accent, for a room where the blue reads cold. A theme restates colours "
         "and nothing else, so the layout cannot differ between them, and every "
         "status hue is left alone — a warning still reads as a warning. Generated "
-        "from the base sheet by tools/gen-theme.py; the dashboard dropdown "
-        "changes the same value.",
+        "from the base sheet by tools/gen-theme.py. This is the only control for "
+        "it: the dashboard toolbar carries no theme picker, because one setting "
+        "in two places reads as two settings.",
         settings_theme_apply, state));
     gtk_box_append(GTK_BOX(body), settings_choice("Corners",
-        NULL, corner_ids, corner_names, G_N_ELEMENTS(corner_ids),
+        NULL, corner_ids, corner_names, CORNER_COUNT,
         (guint) corners_index(state),
         "Round is the shape the desk was drawn in. Square loads a second "
         "stylesheet that removes every radius — buttons, entries, cards, the "
         "window controls — so the interface reads as a panel rather than as a "
         "set of pills. It changes shape and nothing else: no colour, no "
         "spacing, no layout, and a switch keeps its round knob because a square "
-        "one reads as a checkbox. Works with either theme, and the dashboard "
-        "dropdown has no counterpart for it because shape is not a place to "
-        "work from — it is set here and kept in state/ui.tsv.",
+        "one reads as a checkbox. Works with either theme, independently of it, "
+        "and is set here only — kept in state/ui.tsv with the rest of what the "
+        "last session was using.",
         settings_corners_apply, state));
     gtk_box_append(GTK_BOX(body), settings_choice("Reader",
         "ui.reader", reader_v, reader_l, 2,
@@ -21095,7 +21075,7 @@ main(int argc, char **argv)
                binary. A theme that is not packaged draws the base palette while
                the control says otherwise, and GTK does not complain: that is
                how "Ember does nothing" happened once, so it is asserted. */
-            for (guint t = 0; t < G_N_ELEMENTS(theme_ids); t++) {
+            for (guint t = 0; t < THEME_COUNT; t++) {
                 g_autofree char *res = g_strdup_printf(
                     "/com/imsisting/native/theme-%s.css", theme_ids[t]);
                 g_autoptr(GBytes) bytes = g_resources_lookup_data(
@@ -21113,7 +21093,7 @@ main(int argc, char **argv)
                and "round" must not need one at all. The pair is asserted
                together so an install that offers Square and draws round is a
                failing row rather than a preference nobody tested. */
-            for (guint c = 0; c < G_N_ELEMENTS(corner_ids); c++) {
+            for (guint c = 0; c < CORNER_COUNT; c++) {
                 gboolean square = g_strcmp0(corner_ids[c], "square") == 0;
                 g_autoptr(GBytes) sheet = g_resources_lookup_data(
                     "/com/imsisting/native/corners.css",
