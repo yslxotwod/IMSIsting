@@ -238,6 +238,135 @@ def print_feats(path, fmt, rate, feat, extra=None):
             print('%s\t%s' % (k, v))
 
 
+def cmd_occupancy(argv):
+    """Occupancy over a spectrogram: which slices of the band are in use, how
+    much of the time, and where the edges are.
+
+    The floor is estimated once over the whole capture (the 20th percentile of
+    every cell) rather than per bin: a per-bin floor follows a carrier that is
+    always on and would report it as idle, which is the wrong answer for the
+    one signal an investigator cares about.
+    """
+    if len(argv) < 3:
+        sys.stderr.write('ERROR\tusage: occupancy <iq> <format> <rate> '
+                         '[--bins N] [--threshold-db T] [--edge-pct P]\n')
+        return 2
+    path, fmt, rate = argv[0], argv[1], int(argv[2])
+    bins, thr, edge = 1024, 6.0, 10.0
+    rest = argv[3:]
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a not in ('--bins', '--threshold-db', '--edge-pct'):
+            sys.stderr.write('ERROR\tunknown option %s (want --bins, '
+                             '--threshold-db, --edge-pct)\n' % a)
+            return 2
+        if i + 1 >= len(rest):
+            sys.stderr.write('ERROR\t%s needs a value\n' % a)
+            return 2
+        try:
+            if a == '--bins':
+                bins = int(rest[i + 1])
+            elif a == '--threshold-db':
+                thr = float(rest[i + 1])
+            else:
+                edge = float(rest[i + 1])
+        except ValueError:
+            sys.stderr.write('ERROR\t%s takes a number, not %s\n' % (a, rest[i + 1]))
+            return 2
+        i += 2
+    if bins < 64 or bins > 16384 or (bins & (bins - 1)) != 0:
+        sys.stderr.write('ERROR\t--bins must be a power of two from 64 to 16384, '
+                         'not %d\n' % bins)
+        return 2
+    if thr <= 0:
+        sys.stderr.write('ERROR\t--threshold-db must be positive\n')
+        return 2
+
+    x = load_iq(path, fmt)
+    n = len(x)
+    hop = max(1, bins // 2)
+    total = (n - bins) // hop + 1
+    if total < 8:
+        sys.stderr.write('ERROR\tcapture is shorter than eight %d-sample frames; '
+                         'pass fewer --bins or a longer capture\n' % bins)
+        return 2
+    # Two averages, and both are the measurement rather than a detail: the
+    # spectrogram is cut into time windows, and each window is the mean of
+    # several periodograms. One raw periodogram has a variance of about 5.5 dB
+    # per bin, which is the same size as the threshold, so it would report
+    # noise as occupancy. Averaging inside a window is what makes "in use"
+    # mean "in use for this long", and it is why `windows` is printed.
+    step = max(1, total // 4096)
+    w = np.hanning(bins)
+    frames = []
+    for o in range(0, total, step):
+        seg = x[o * hop:o * hop + bins]
+        if len(seg) < bins:
+            break
+        frames.append(np.abs(np.fft.fft(seg * w)) ** 2)
+    if len(frames) < 8:
+        sys.stderr.write('ERROR\ttoo few frames to average\n')
+        return 2
+    avg = max(1, len(frames) // 128)
+    m = (len(frames) // avg) * avg
+    S = np.array(frames[:m]).reshape(-1, avg, bins).mean(axis=1) / float(bins) ** 2
+    P = 10.0 * np.log10(S + 1e-30)
+    floor = float(np.percentile(P, 20))
+    occ = P > (floor + thr)
+    frac = occ.mean(axis=0)
+    band_occ = float(occ.mean())
+    occupied_bins = int((frac > 0.5).sum())
+    busiest = int(np.argmax(frac))
+    bin_hz = rate / float(bins)
+    offs = (np.arange(bins) - bins / 2.0 + 0.5) * bin_hz
+
+    segs = []
+    run = None
+    for b in range(bins):
+        hot = frac[b] * 100.0 >= edge
+        if hot and run is None:
+            run = b
+        elif not hot and run is not None:
+            segs.append((run, b - 1))
+            run = None
+    if run is not None:
+        segs.append((run, bins - 1))
+
+    print('file\t%s' % san(path))
+    print('format\t%s' % fmt)
+    print('rate_hz\t%d' % rate)
+    print('samples\t%d' % n)
+    print('duration_s\t%.6f' % (n / float(rate)))
+    print('fft_size\t%d' % bins)
+    print('bin_width_hz\t%.3f' % bin_hz)
+    print('windows\t%d' % S.shape[0])
+    print('periodograms_per_window\t%d' % avg)
+    print('frame_hop_samples\t%d' % (hop * step))
+    print('threshold_db\t%.1f' % thr)
+    print('edge_pct\t%.1f' % edge)
+    print('noise_floor_db\t%.2f' % floor)
+    print('occupancy_pct\t%.2f' % (band_occ * 100.0))
+    print('occupied_bins\t%d' % occupied_bins)
+    print('busiest_bin_offset_hz\t%.0f' % offs[busiest])
+    print('busiest_bin_occupancy_pct\t%.2f' % (frac[busiest] * 100.0))
+    print('channels\t%d' % len(segs))
+    for k, (lo, hi) in enumerate(segs, 1):
+        print('channel\t%d\t%.0f\t%.0f\t%.0f\t%.2f\t%.2f'
+              % (k, offs[lo] - bin_hz / 2.0, offs[hi] + bin_hz / 2.0,
+                 (hi - lo + 1) * bin_hz, float(frac[lo:hi + 1].mean()) * 100.0,
+                 float(P[:, lo:hi + 1].max() - floor)))
+    print('note\t%s' % 'an offset is measured against the receiver centre '
+                        'frequency; the centre is not in the file')
+    print('limit\t%s' % 'a level is relative to the sample power in the capture, '
+                        'not a level at the antenna: no calibration is applied and '
+                        'the window gain is not corrected')
+    print('limit\t%s' % 'occupancy is measured, not licensed: a busy bin is not '
+                        'necessarily unlawful and a quiet one is not free')
+    print('verdict\tspectrum_occupancy_measured')
+    return 0
+
+
 def cmd_analyse(argv):
     path, fmt, rate = argv[0], argv[1], int(argv[2])
     x = load_iq(path, fmt)
@@ -1232,7 +1361,7 @@ def gen(path, kind, fmt, rate, secs):
 def main():
     argv = sys.argv[1:]
     if not argv:
-        sys.stderr.write('usage: jamd_py <analyse|noisefloor|characterise|counters|gen|build|raster> ...\n')
+        sys.stderr.write('usage: jamd_py <analyse|noisefloor|characterise|occupancy|counters|gen|build|raster> ...\n')
         sys.exit(2)
     mode, rest = argv[0], argv[1:]
     try:
@@ -1242,6 +1371,8 @@ def main():
             return cmd_noisefloor(rest)
         if mode == 'characterise':
             return cmd_characterise(rest)
+        if mode == 'occupancy':
+            return cmd_occupancy(rest)
         if mode == 'counters':
             return cmd_counters(rest)
         if mode == 'raster':
@@ -1322,7 +1453,7 @@ def main():
         sys.exit(1)
 
 
-main()
+sys.exit(main() or 0)
 PY
 }
 
@@ -1387,6 +1518,47 @@ jamd_cmd_characterise() {
 # is a claim the analyser has to meet, not a description of the file: the
 # selftest runs all three through --characterise and fails if the generator and
 # the analyser ever disagree.
+# ── spectrum occupancy over a recording ─────────────────────────────────
+# A recording is a slice of band with a known width, so the slice can be cut
+# into frequency bins and each bin watched over time. This answers three
+# things a single noise-floor number cannot: which parts of the slice were in
+# use, for what fraction of the capture, and where the edges of each stretch
+# are. It does not decide whether the noise is jamming (that is
+# --discriminate) and it does not read the air (that is --analyse).
+jamd_cmd_occupancy() {
+    local f="" fmt="cf32" rate="" bins="" thr="" edge=""
+    while (($#)); do
+        case "$1" in
+            --format)       fmt="${2:-}";  shift 2 ;;
+            --rate)         rate="${2:-}"; shift 2 ;;
+            --bins)         bins="${2:-}"; shift 2 ;;
+            --threshold-db) thr="${2:-}";  shift 2 ;;
+            --edge-pct)     edge="${2:-}"; shift 2 ;;
+            -*) printf 'ERROR\t--occupancy does not take %s (see --help)\n' "$1" >&2; return 2 ;;
+            *)  if [[ -z "$f" ]]; then f="$1"; shift
+                else printf 'ERROR\t--occupancy takes one capture path\n' >&2; return 2; fi ;;
+        esac
+    done
+    [[ -n "$f" ]] || {
+        printf 'ERROR\tno capture given\n' >&2
+        printf 'WHY\toccupancy is measured from a recording; there is nothing to measure on a radio that is not recording\n' >&2
+        return 2; }
+    [[ -n "$rate" ]] || {
+        printf 'ERROR\t--rate is required\n' >&2
+        printf 'WHY\tthe same file is a different bandwidth at a different sample rate, so the width of every bin comes from the rate and not from the path\n' >&2
+        return 2; }
+    [[ "$rate" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'ERROR\t--rate must be a positive integer in Hz\n' >&2; return 2; }
+    case "$fmt" in cf32|ci16|cu8|cs8|c16|sc16|cs16) ;;
+        *) printf 'ERROR\tunknown format: %s (want cf32|ci16|cu8 or a driver alias)\n' "$fmt" >&2; return 2 ;; esac
+    case "$fmt" in cs8) fmt="cu8" ;; c16|sc16|cs16) fmt="ci16" ;; esac
+    local extra=()
+    [[ -n "$bins" ]] && extra+=(--bins "$bins")
+    [[ -n "$thr" ]]  && extra+=(--threshold-db "$thr")
+    [[ -n "$edge" ]] && extra+=(--edge-pct "$edge")
+    jamd_py occupancy "$f" "$fmt" "$rate" ${extra[@]+"${extra[@]}"}
+}
+
 jamd_cmd_fixture() {
     local kind="" out="" fmt="cf32" rate="$JAMD_TX_DEFAULT_RATE" secs="0.5"
     while (($#)); do
@@ -2708,6 +2880,28 @@ KATPY
     chk fixture-prach-occupies-slice "$(printf '%s\n' "$got" | \
             awk -F'\t' '$1=="occupied_fraction"{print ($2<0.25)?"yes":"no"}')" "yes"
 
+    # 12k. Occupancy: the same three fixtures, asked a different question. A
+    #      clean capture has no slice in use, a raised floor is in use all the
+    #      time across the whole span, and a narrowband carrier is in use for
+    #      part of the time in one slice.
+    local occ
+    occ=$(jamd_cmd_occupancy "$fclean" --rate "$rate")
+    chk occ-clean-channels "$(fld "$occ" channels)"                          "0"
+    chk occ-clean-occupancy "$(printf '%s\n' "$occ" | awk -F'\t' '$1=="occupancy_pct"{print ($2<5)?"yes":"no"}')" "yes"
+    occ=$(jamd_cmd_occupancy "$fraised" --rate "$rate")
+    chk occ-raise-occupancy "$(printf '%s\n' "$occ" | awk -F'\t' '$1=="occupancy_pct"{print ($2>40)?"yes":"no"}')" "yes"
+    chk occ-raise-channels "$(fld "$occ" channels)"                          "1"
+    chk occ-raise-width "$(printf '%s\n' "$occ" | awk -F'\t' '$1=="channel"{print $5}')" "$rate"
+    chk occ-raise-threshold "$(fld "$(jamd_cmd_occupancy "$fraised" --rate "$rate" --threshold-db 20)" occupancy_pct)" "0.00"
+    occ=$(jamd_cmd_occupancy "$fnarrow" --rate "$rate")
+    chk occ-narrow-channels "$(fld "$occ" channels)"                         "1"
+    chk occ-narrow-width "$(printf '%s\n' "$occ" | awk -F'\t' '$1=="channel"{print $5}')" "52734"
+    chk occ-narrow-verdict "$(fld "$occ" verdict)"                           "spectrum_occupancy_measured"
+    chk occ-binwidth "$(fld "$(jamd_cmd_occupancy "$fnarrow" --rate "$rate" --bins 4096)" bin_width_hz)" "244.141"
+    chk occ-no-rate "$(jamd_cmd_occupancy "$fnarrow" >/dev/null 2>&1; echo $?)"  "2"
+    chk occ-bad-bins "$(jamd_cmd_occupancy "$fnarrow" --rate "$rate" --bins 1000 >/dev/null 2>&1; echo $?)" "2"
+    chk occ-no-file "$(jamd_cmd_occupancy "$d/iq/nope.cf32" --rate "$rate" >/dev/null 2>&1; echo $?)" "1"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
     trap - EXIT
@@ -2770,6 +2964,7 @@ jamd_cli_main() {
         --analyse)                 jamd_cmd_analyse "${1:-}" "${2:-}" "${3:-}" ;;
         --noise-floor)             jamd_cmd_noise_floor "${1:-}" "${2:-}" "${3:-}" ;;
         --characterise)            jamd_cmd_characterise "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+        --occupancy)               jamd_cmd_occupancy "$@" ;;
         --counters)                jamd_cmd_counters "${1:-}" ;;
         --discriminate)            jamd_discriminate "${1:-}" ;;
         --report)                  jamd_report "${1:-}" ;;
@@ -2788,6 +2983,13 @@ Usage: $0 COMMAND
   --analyse <iq> <format> <rate>            features from IQ, saved as the record
   --noise-floor <iq> <format> <rate>        noise floor over time
   --characterise <iq> <format> <rate> [MHz] narrowband/barrage, bandwidth, duty
+  --occupancy <iq> [--format cf32|ci16|cu8] --rate <sps>
+                                            which slices of the band were in use,
+                                            for what fraction of the capture
+             [--bins <n>] [--threshold-db <db>] [--edge-pct <pct>]
+                                            fft size, what counts as occupied,
+                                            and the duty a stretch needs to be
+                                            called a channel
   --counters <file>                         merge receiver counters into the record
   --discriminate [record]                   jamming / congestion / coverage hole
   --report [record]                         regulatory report (jamming only)

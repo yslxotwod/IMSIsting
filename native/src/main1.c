@@ -2874,6 +2874,7 @@ static const char *const plain_keys[] = {
     "burst_structure\tburst structure",
     "bursts\tbursts",
     "bursts_per_block\tbursts per block",
+    "busiest_bin_offset_hz\twhere the most-used bin sits relative to the centre frequency",
     "bwp_indicator\tbwp indicator",
     "bwp_prb\tbwp prb",
     "bye\tbye",
@@ -3535,6 +3536,7 @@ static const char *const plain_keys[] = {
     "echo_anomaly\techo anomaly",
     "echo_request_bytes\techo request bytes",
     "echo_response_bytes\techo response bytes",
+    "edge_pct\tthe share of the capture a stretch must be in use before it counts as a channel",
     "edrx\tedrx",
     "edrx_cycle_hsfn\tedrx cycle hsfn",
     "edrx_cycle_ms\tedrx cycle (ms)",
@@ -3679,6 +3681,7 @@ static const char *const plain_keys[] = {
     "femtocell\tsmall cell",
     "fetcher\tthe party that performs the fetch",
     "ffffff\tffffff",
+    "fft_size\thow many samples one transform covers, and therefore how fine the frequency axis is",
     "field\tfield",
     "field_constructor\tfield constructor",
     "field_count\tfield count",
@@ -3770,6 +3773,7 @@ static const char *const plain_keys[] = {
     "frame_bits\tframe bits",
     "frame_count\tframe count",
     "frame_hex\tframe bytes",
+    "frame_hop_samples\tthe distance between the starts of two consecutive transforms",
     "frame_kind\tframe kind",
     "frame_ms\tframe length (ms)",
     "frame_number\tframe number",
@@ -4693,6 +4697,7 @@ static const char *const plain_keys[] = {
     "no_rotation_in_this_file\tevery device in the records carried one identity, so rotation cannot be scored from it",
     "no_subscriber_state\tthe answer came back with no subscriber state",
     "nof_ports\tnof ports",
+    "noise_floor_db\tthe level the occupied test is measured against",
     "non3gpp\tnon3gpp",
     "non_critical_extension\tnon critical extension",
     "non_critical_extensions\tnon critical extensions",
@@ -4768,7 +4773,9 @@ static const char *const plain_keys[] = {
     "occasion\tone paging frame in the cycle, with the indicator index to listen on",
     "occasions\thow many paging occasions were listed",
     "occasions_per_frame\toccasions per frame",
+    "occupancy_pct\tthe share of bins and time that were in use together",
     "occupancy_s\tthat occupancy in seconds",
+    "occupied_bins\thow many bins were in use for more than half the capture",
     "octet\toctet",
     "octet1\toctet1",
     "octet2\toctet2",
@@ -5005,6 +5012,7 @@ static const char *const plain_keys[] = {
     "period_frames\tperiod frames",
     "period_ms\tperiod (ms)",
     "periodic_identities\tidentities paged on a near-fixed interval",
+    "periodograms_per_window\thow many transforms were averaged into one window before the test",
     "permanent\tthe identity that does not change",
     "permanent\tthe identity that never changes",
     "permanent_nai\tthe identity that never changes, sent to a network you do not control",
@@ -6218,6 +6226,7 @@ static const char *const plain_keys[] = {
     "three_levers\tthe three things that move the UE toward satellite",
     "thresh_serving_low\tthresh serving low",
     "threshold\tthe number this verb calls the attack",
+    "threshold_db\thow far over the floor a cell must be to count as in use",
     "ti_flag\tthe bit in a transaction identifier octet that tells a request from a response",
     "ti_or_skip\twhether the header octet is read as a transaction identifier or a skip indicator",
     "tid\ttid",
@@ -6605,6 +6614,7 @@ static const char *const plain_keys[] = {
     "window\thow many SQN steps ahead a resync may be before this network refuses it",
     "window_frames\twindow frames",
     "window_seconds\twindow seconds",
+    "windows\thow many time windows the spectrogram was cut into",
     "wire_code\twire code",
     "wire_octets\twire octets",
     "with_fix\twith fix",
@@ -7712,6 +7722,7 @@ static const ChipRow chip_rows[] = {
     { "33_jamming_detect",   "--n-rb-prs",            NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--ncs",                 NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--noise-floor",         NEED_RADIO, DOES_BUILDS },
+    { "33_jamming_detect",   "--occupancy",           NEED_NO, DOES_READS },
     { "33_jamming_detect",   "--off",                 NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--on",                  NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--out",                 NEED_RADIO, DOES_READS },
@@ -21986,6 +21997,11 @@ radio_build_bench(AppState *state, const char *module_id,
 
     gtk_box_append(GTK_BOX(capture_body), radio_bench_arg_action(
         state, module_id, status, "IQ capture", "seconds", "--record", "Record"));
+    /* The recording is this module's; reading it is the analyser's. One IQ
+       reader in the tree, one place that knows what a format means. */
+    gtk_box_append(GTK_BOX(capture_body), radio_bench_arg_action(
+        state, "33_jamming_detect", status, "Band occupancy of a recording",
+        "capture.iq --rate <sps>", "--occupancy", "Measure"));
     gtk_box_append(GTK_BOX(inner), capture_card);
     if (out != NULL)
         gtk_box_append(GTK_BOX(inner), build_output_card(out));
@@ -32157,6 +32173,33 @@ jamd_build_capture(AppState *state, const char *module_id,
         "and the same antenna. Change either and the shift you are reading is "
         "your own change, not the air's."));
     gtk_box_append(GTK_BOX(body), floor_card);
+
+    { /* Occupancy: the same capture, asked which slices of it were in use.
+         A single floor number cannot say that -- a band can be quiet on
+         average and busy in one 200 kHz stretch the whole time. */
+      GtkWidget *occ_body;
+      GtkWidget *occ = verb_card("WHICH SLICES WERE IN USE", &occ_body);
+      GtkWidget *res = result_rect_new(state, NULL);
+
+      mod_card_begin(res);
+      gtk_box_append(GTK_BOX(occ_body),
+          mod_arg_row(state, module_id, status, "Read the Occupancy",
+              "--occupancy",
+              "capture.iq --rate 20000000",
+              "The capture and its sample rate. The file is cut into frequency "
+              "bins and each bin is watched over time, so the answer is which "
+              "stretches of the band were in use, for what fraction of the "
+              "capture, and where the edge of each stretch is."));
+      gtk_box_append(GTK_BOX(occ_body), fkit_note(
+          "The rate is required and is not guessed from the path: the same file "
+          "is a different bandwidth at a different rate. Optional modifiers: "
+          "--format, --bins (fft size, a power of two), --threshold-db (how far "
+          "over the floor counts as in use) and --edge-pct (the duty a stretch "
+          "needs before it is called a channel)."));
+      gtk_box_append(GTK_BOX(occ_body), res);
+      gtk_box_append(GTK_BOX(body), occ);
+      mod_card_end();
+    }
 
     /* No capture of your own yet? The module can write one whose verdict is
        fixed by construction -- a clean band, a floor that lifts halfway
