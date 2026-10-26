@@ -2711,6 +2711,7 @@ static const char *const plain_keys[] = {
     "audit_naive\tthe check that misses it",
     "auth\tauthentication",
     "auth_available\tauth available",
+    "auth_bits\thow much of the packet SRTP authenticates, which is the difference between an 80-bit and a 32-bit tag",
     "auth_failure_streak\tauth failure streak",
     "auth_nonce\tauth nonce",
     "auth_oracle\tauth oracle",
@@ -3156,6 +3157,7 @@ static const char *const plain_keys[] = {
     "cmd_dec\tcmd dec",
     "cmd_name\tcmd name",
     "cmd_type\tcmd type",
+    "cmr\tcodec mode request: the mode the sender asks the far end to use on its next frame",
     "cmsp\tcmsp",
     "cn_domain\tcn domain",
     "cn_domain_note\tcn domain note",
@@ -3219,6 +3221,7 @@ static const char *const plain_keys[] = {
     "constructor\tconstructor",
     "constructor_unresolved\tconstructor unresolved",
     "contact\tcontact",
+    "contact_param\tthe Contact header parameter that marks a registration as emergency",
     "container\tcontainer",
     "container_bits\tcontainer bits",
     "container_hex\tcontainer bytes",
@@ -3434,6 +3437,7 @@ static const char *const plain_keys[] = {
     "dialog_portion_len\tdialog portion length",
     "differences\twhat a config has to change when moving between the two gNB stacks",
     "digest_check\tdigest check",
+    "digest_sha256_of_signing_input\tthe hash over header and payload, which is what a signature would cover",
     "digits\tdigits",
     "dir\tdirectory",
     "direction\tdirection",
@@ -3474,6 +3478,7 @@ static const char *const plain_keys[] = {
     "dns_query\tthe names asked of the resolver",
     "dns_query\tthe name lookup made before the tunnel exists",
     "do\tdo",
+    "document\tone XCAP document under the operator root, named by its path in the store",
     "domain\tthe core network domain a paging record belongs to: circuit switched or packet switched",
     "dongle\ta cellular dongle the target panel can describe, read from the stores a module wrote",
     "doppler_hz\tdoppler (Hz)",
@@ -3906,6 +3911,7 @@ static const char *const plain_keys[] = {
     "header\theader",
     "header2\theader2",
     "header_admin_protocol\theader admin protocol",
+    "header_b64\tthe base64url JOSE header a verifier reads first",
     "header_bytes\theader bytes",
     "header_content_length\theader content length",
     "header_content_type\theader content type",
@@ -3996,6 +4002,7 @@ static const char *const plain_keys[] = {
     "identities_with_enough_pages\thow many were paged often enough to judge",
     "identity\tidentity",
     "identity_count\tidentity count",
+    "identity_header\tthe SIP Identity header as it would appear in a message, header and payload joined by a dot",
     "identity_kind\tidentity kind",
     "identity_length\tidentity length",
     "identity_name\tidentity name",
@@ -4073,6 +4080,8 @@ static const char *const plain_keys[] = {
     "ink\tink",
     "ink_after\tink after",
     "ink_before\tink before",
+    "inline_key_b64\tthe SRTP key in the SDP, base64 encoded, protected by nothing but the signalling",
+    "inline_key_octets\thow many octets the decoded inline key actually is, which is how a wrong suite is caught",
     "inner_ipv4\tinner ipv4",
     "inner_ipv4_bytes\tinner ipv4 bytes",
     "inner_ipv4_checksum\tinner ipv4 checksum",
@@ -4276,6 +4285,7 @@ static const char *const plain_keys[] = {
     "leaks\tleaks",
     "learned_from\tlearned from",
     "ledger\tthe per-slice account before and after",
+    "leftover_bits\tbits left in the payload after the frame list was walked, which is padding or a second encoding",
     "leg\tleg",
     "leg_fit\twhether the link can reach the number",
     "leg_saturate\tthe rate where the target stops keeping up",
@@ -4897,6 +4907,7 @@ static const char *const plain_keys[] = {
     "pattern\tpattern",
     "pause\tpause",
     "payload\tpayload",
+    "payload_b64\tthe base64url claim itself: who called, who was called, when, and the attestation level",
     "payload_bits\tpayload bits",
     "payload_bytes\tpayload bytes",
     "payload_file\tpayload file",
@@ -5375,6 +5386,7 @@ static const char *const plain_keys[] = {
     "request_reference\trequest reference",
     "request_reference_octets\trequest reference octets",
     "request_sequence_number\trequest sequence number",
+    "request_uri\tthe urn a SIP request is addressed to, which for an emergency call is the service and not a user",
     "requested\trequested",
     "requested_count\trequested count",
     "requested_octets\tthe volume the client asks the server to reserve before it is used",
@@ -5713,6 +5725,7 @@ static const char *const plain_keys[] = {
     "service\tservice",
     "service_context_id\tthe 3GPP service the charge belongs to, such as 32251 for packet-switched",
     "service_type\tservice type",
+    "service_urn\tthe urn:service name that identifies which emergency service was called",
     "serving_beam_index\tserving beam index",
     "serving_cell_config_common\tserving cell config common",
     "serving_cell_rsrp_dbm\tserving cell signal strength (dBm)",
@@ -5813,6 +5826,7 @@ static const char *const plain_keys[] = {
     "signals_named\tsignals named",
     "signals_total\tsignals total",
     "signature_algorithm\talgorithm that signed the certificate",
+    "signature_b64u\tthe base64url ECDSA signature over header and payload, or the statement that none was produced",
     "signature_count\tsignature count",
     "signature_len\tsignature length",
     "signatures\tsignatures",
@@ -6060,6 +6074,7 @@ static const char *const plain_keys[] = {
     "suci_octets\tsuci octets",
     "suci_parse\tsuci parse",
     "sucis\tsucis",
+    "suite\tthe SRTP protection suite, which fixes the key length, the cipher and the tag length",
     "sum\tthe totals across slices",
     "summary\tsummary",
     "superframe_frames\tsuperframe frames",
@@ -6541,6 +6556,7 @@ static const char *const plain_keys[] = {
     "what_discovery_returns\twhat a requesting function would receive, in the words of the discovery answer",
     "what_i_would_need\twhat i would need",
     "what_it_is_not\twhat this arithmetic does not do",
+    "what_it_proves\tthe sentence that separates identity from assertion: a signature names a key, never a person",
     "what_it_selects\twhat the UE switches on when it reads this message",
     "what_it_would_not_buy\tthe algorithms no licence can supply because 3GPP never published them",
     "what_that_costs\twhat SMPP over TLS changes, or does not",
@@ -6548,6 +6564,7 @@ static const char *const plain_keys[] = {
     "what_the_display_shows\twhat the receiving handset puts on the screen",
     "what_the_receiver_can_compare\twhat a receiver can check the originating address against, which for a name is nothing",
     "what_this_is\twhat this arithmetic is",
+    "what_this_is_not\tthe boundary of the tool, stated where a reader would otherwise assume more",
     "when\twhen",
     "where\twhere",
     "where_it_was_run\tthe environment each mode was actually run in",
@@ -7598,6 +7615,11 @@ static const ChipRow chip_rows[] = {
     { "30_volte_ims",        "--version",             NEED_NO, DOES_READS },
     { "30_volte_ims",        "--yes",                 NEED_NO, DOES_READS },
     { "30_volte_ims",        "--spoof-sms",        NEED_NO, DOES_BUILDS },
+    { "30_volte_ims",       "--amr-parse",           NEED_NO, DOES_READS },
+    { "30_volte_ims",       "--sdes-parse",          NEED_NO, DOES_READS },
+    { "30_volte_ims",       "--stir-shaken",         NEED_NO, DOES_BUILDS },
+    { "30_volte_ims",       "--xcap",                NEED_NO, DOES_READS },
+    { "30_volte_ims",       "--emergency",           NEED_NO, DOES_READS },
     { "31_sim_defense",      "--__index_probe__",     NEED_NO, DOES_READS },
     { "31_sim_defense",      "--adm-apdu",            NEED_SIM, DOES_MODIFIES },
     { "31_sim_defense",      "--defence-checklist",   NEED_SIM, DOES_READS },
@@ -30809,10 +30831,100 @@ vims_build_media(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(g711_body), res);
     }
     gtk_box_append(GTK_BOX(body), g711);
+
+    {
+        GtkWidget *amr_body, *sdes_body;
+        GtkWidget *amr = verb_card("READ AN AMR PAYLOAD", &amr_body);
+        GtkWidget *sdes = verb_card("READ THE SRTP KEY", &sdes_body);
+        GtkWidget *res;
+
+        res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(amr_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Frames",
+                "--amr-parse", "f04aaeabaaeabaaeabaaeabaaeabaaeabaaeabaaeabaaeabaaeabaaeab0",
+                "One RTP payload as hex. The answer is the frame list: mode, "
+                "quality bit, size, and whether the far end sent speech or "
+                "comfort noise."));
+        gtk_box_append(GTK_BOX(amr_body), res);
+
+        res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sdes_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the Crypto Line",
+                "--sdes-parse",
+                "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:PS1UjWkR0vJ0nBtL2WmZ0Fh6dXk=|2^31",
+                "The a=crypto attribute from an SDP body, and the key it carries "
+                "in the clear for anyone who read the signalling."));
+        gtk_box_append(GTK_BOX(sdes_body), res);
+
+        gtk_box_append(GTK_BOX(body), amr);
+        gtk_box_append(GTK_BOX(body), sdes);
+    }
     gtk_box_append(GTK_BOX(body), fkit_note(
         "Place a call from the command line: --call <host>[:port] with "
         "--media mic --play --duration 30. This card reports what that call "
         "measured; it does not dial."));
+    return outer;
+}
+
+/* 30_volte_ims — the services plane, and the token that claims who called.
+ *
+ * Media answers what a call carried. This view answers what the operator will
+ * do for a subscriber (supplementary services), what happens when the phone
+ * has no subscription at all (emergency), and what a signed claim in a SIP
+ * header actually proves (PASSporT).
+ */
+static GtkWidget *
+vims_build_services(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SERVICES",
+        "Configuration the operator holds instead of the handset, the one call "
+        "that needs no subscription, and the header that says who is calling.", &body);
+    GtkWidget *xcap_body, *stir_body, *sos_body;
+    GtkWidget *xcap = verb_card("READ THE CONFIGURATION STORE", &xcap_body);
+    GtkWidget *stir = verb_card("BUILD A CALLER CLAIM", &stir_body);
+    GtkWidget *sos = verb_card("DESCRIBE THE EMERGENCY PATH", &sos_body);
+    GtkWidget *res;
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(xcap_body),
+        mod_arg_row_prefilled(state, module_id, status, "Read the Documents",
+            "--xcap", "https://xcap.operator.example/ PUT",
+            "The XCAP root and the method a client would use. The answer lists "
+            "the supplementary-service documents a subscriber's own "
+            "configuration lives in, and what writing one changes."));
+    gtk_box_append(GTK_BOX(xcap_body), res);
+    gtk_box_append(GTK_BOX(body), xcap);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(stir_body),
+        mod_arg_row_prefilled(state, module_id, status, "Build the Header",
+            "--stir-shaken", "15550100 15550199 1735689600",
+            "Calling number, called number, and when the claim was made. The "
+            "answer is the base64url header and payload, the signing input, and "
+            "what the signature does and does not prove."));
+    gtk_box_append(GTK_BOX(stir_body), res);
+    gtk_box_append(GTK_BOX(body), stir);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(sos_body),
+        mod_arg_choices(state, module_id, status, "Pick a service urn", "",
+            "The emergency path needs no credentials, so the question is what "
+            "it gives away and who is allowed to ask for it.",
+            (const char *[]) { "--emergency --type sos",
+                               "--emergency --type sos.fire",
+                               "--emergency --type sos.ambulance" },
+            (const char *[]) { "Emergency", "Fire", "Ambulance" }, 3));
+    gtk_box_append(GTK_BOX(sos_body), res);
+    gtk_box_append(GTK_BOX(body), sos);
+
+    (void) out;
     return outer;
 }
 
@@ -30821,6 +30933,7 @@ static ModuleSubmenuEntry vims_entries[] = {
     { "Registration", "channel-secure-symbolic", NULL, vims_build_registration },
     { "Calls", "media-playback-start-symbolic", NULL, vims_build_calls },
     { "Media", "audio-headphones-symbolic", NULL, vims_build_media },
+    { "Services", "preferences-system-symbolic", NULL, vims_build_services },
 };
 /* 31_sim_defense — Port-out Risk.
  *

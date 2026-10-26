@@ -2828,8 +2828,280 @@ vims_cmd_spoof_sms() {   # <from-name> <to-uri> [--text <text>]
     printf 'verdict\tsip_message_built_with_a_spoofed_origin\n'
 }
 
+# Three small converters the media and token verbs need. python3 is already a
+# dependency of this module (vims_py), so they are spelled once here.
+vims_b64url_text() {
+    python3 -c "import base64,sys; sys.stdout.write(base64.urlsafe_b64encode(sys.argv[1].encode()).decode().rstrip('='))" "${1:-}"
+}
+vims_hex_bits() {
+    python3 -c "import sys; b=bytes.fromhex(sys.argv[1]); sys.stdout.write(''.join(format(x,'08b') for x in b))" "${1:-}"
+}
+vims_bits_hex() {
+    python3 -c "import sys; bits=sys.argv[1]; bits=bits.ljust(((len(bits)+7)//8)*8,'0'); sys.stdout.write(''.join('%02x' % int(bits[i:i+8],2) for i in range(0,len(bits),8)))" "${1:-}"
+}
+
+# ── the media plane, the services plane, and the token that claims who called ──
+# The page offers AMR and SRTP keys under Media and the three service verbs under
+# Services. Nothing here decodes speech: an AMR payload is a frame list, and the
+# frame list is what a call that was cut looks like when it is read back.
+
+# TS 26.101 Table 1a, the AMR-NB frame sizes in bits, indexed by frame type.
+vims_amr_frame_bits() {
+    case "${1:-}" in
+        0) echo 244 ;; 1) echo 204 ;; 2) echo 159 ;; 3) echo 148 ;;
+        4) echo 134 ;; 5) echo 118 ;; 6) echo 103 ;; 7) echo 95 ;;
+        8) echo 39 ;; 15) echo 0 ;; *) echo "" ;;
+    esac
+}
+
+vims_amr_mode_name() {
+    case "${1:-}" in
+        0) echo "12.20" ;; 1) echo "10.20" ;; 2) echo "7.95" ;; 3) echo "7.40" ;;
+        4) echo "6.70" ;; 5) echo "5.90" ;; 6) echo "5.15" ;; 7) echo "4.75" ;;
+        8) echo "SID" ;; 15) echo "no_data" ;; *) echo "reserved" ;;
+    esac
+}
+
+# An AMR RTP payload: a 4-bit CMR, then one ToC octet per frame (F, FT, Q, P),
+# then the frame bits concatenated in the order the ToC list declares.
+vims_cmd_amr_parse() {   # <payload-hex> [--octet-align]
+    local payload fmt=0
+    payload=$(vims_norm_hex "${1:-}")
+    shift || true
+    while (( $# )); do
+        case "$1" in
+            --octet-align) fmt=1; shift ;;
+            *) printf 'ERROR\tunexpected argument %s\n' "$(vims_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$payload" ]] || { printf 'ERROR\tan RTP payload in hex is required\n' >&2; return 2; }
+    [[ "$payload" =~ ^[0-9a-f]+$ ]] || { printf 'ERROR\tpayload is not hex\n' >&2; return 2; }
+    (( ${#payload} >= 2 )) || { printf 'ERROR\ta payload needs at least one octet\n' >&2; return 2; }
+    local bits cmr off=4 frames=0 idx=0 spoken=0 quiet=0 total_bits=4
+    bits=$(vims_hex_bits "$payload")
+    cmr=$(( 2#${bits:0:4} ))
+    printf 'cmr\t%d\t%s\n' "$cmr" "$(vims_amr_mode_name "$cmr")"
+    # ToC octets
+    local toc=() f ft q
+    while :; do
+        [[ $(( ${#bits} - off )) -ge 6 ]] || break
+        f=${bits:$off:1}; ft=$(( 2#${bits:$((off+1)):4} )); q=${bits:$((off+5)):1}
+        toc+=( "$f:$ft:$q" )
+        off=$(( off + 6 ))
+        frames=$(( frames + 1 ))
+        [[ "$f" == "1" ]] || break
+        (( frames < 16 )) || break
+    done
+    local entry
+    for entry in "${toc[@]}"; do
+        f=${entry%%:*}; ft=${entry#*:}; ft=${ft%%:*}; q=${entry##*:}
+        local fbits fbytes fhex name
+        fbits=$(vims_amr_frame_bits "$ft")
+        if [[ -z "$fbits" ]]; then
+            printf 'frame\t%d\t%d\treserved\t%s\t0\t0\t\treserved frame type: not a mode this table knows\n' \
+                "$idx" "$ft" "$( [[ "$q" == "1" ]] && echo good || echo bad )"
+            idx=$(( idx + 1 )); continue
+        fi
+        name=$(vims_amr_mode_name "$ft")
+        fbytes=$(( (fbits + 7) / 8 ))
+        if (( fbits == 0 )); then
+            fhex=""
+        else
+            fhex=${bits:$off:$fbits}
+            fhex=$(vims_bits_hex "$fhex")
+        fi
+        off=$(( off + fbits ))
+        total_bits=$(( total_bits + 6 + fbits ))
+        printf 'frame\t%d\t%s\t%s\t%s\t%d\t%d\t%s\n' \
+            "$idx" "$ft" "$name" "$( [[ "$q" == "1" ]] && echo good || echo bad )" \
+            "$fbits" "$fbytes" "$fhex"
+        case "$ft" in
+            8|15) quiet=$(( quiet + 1 )) ;;
+            *) spoken=$(( spoken + 1 )) ;;
+        esac
+        idx=$(( idx + 1 ))
+    done
+    printf 'frames\t%d\npayload_octets\t%d\nbits_consumed\t%d\nleftover_bits\t%d\n' \
+        "$frames" "$(( ${#payload} / 2 ))" "$total_bits" "$(( ${#bits} - total_bits ))"
+    if (( spoken == 0 && quiet > 0 && quiet == frames )); then
+        printf 'finding\tINFO\tevery frame is SID or no-data: this is comfort noise, so a payload that carries no speech\n'
+        printf 'says_nothing\t%s\n' "a call whose audio stopped and a call that was never carrying audio look the same in this direction"
+    fi
+    printf 'what_this_is\t%s\n' "a frame list with the quality bit and the mode each frame claims, which is what a decoded call is checked against"
+    printf 'what_this_is_not\t%s\n' "no speech is reconstructed: the AMR decoder is licensed and not in this tree, and the frame list is the evidence that survives without it"
+    printf 'ref\t%s\n' "TS 26.101 Table 1a (frame sizes), RFC 4867 4.3 (payload format)"
+    printf 'verdict\t%s\n' "amr_payload_read"
+}
+
+# SDES: the key travels in the SDP body, protected by nothing but the signalling.
+vims_cmd_sdes_parse() {   # <a=crypto... line or bare crypto params>
+    local line="${1:-}"
+    [[ -n "$line" ]] || { printf 'ERROR\tan a=crypto: attribute is required\n' >&2; return 2; }
+    line=${line#a=crypto:}
+    local tag suite rest key="" lifetime="" mki=""
+    tag=${line%% *}
+    rest=${line#* }
+    suite=${rest%% *}
+    rest=${rest#* }
+    local params=${rest#inline:}
+    params=${params%% *}
+    key=${params%%|*}
+    rest2=${params#*|}
+    if [[ "$rest2" != "$params" ]]; then
+        lifetime=${rest2%%|*}
+        if [[ "$rest2" == *"|"* ]]; then mki=${rest2#*|}; fi
+    fi
+    printf 'tag\t%s\nsuite\t%s\n' "$(vims_sanitize "$tag")" "$(vims_sanitize "$suite")"
+    case "$suite" in
+        AES_CM_128_HMAC_SHA1_80) printf 'key_bits\t128\nauth_bits\t80\n' ;;
+        AES_CM_128_HMAC_SHA1_32) printf 'key_bits\t128\nauth_bits\t32\n' ;;
+        *) printf 'key_bits\tnot stated by this table\n' ;;
+    esac
+    if [[ -n "$key" ]]; then
+        local koct
+        koct=$(python3 -c "import base64,sys; s=sys.argv[1]+'='*((4-len(sys.argv[1])%4)%4); print(len(base64.urlsafe_b64decode(s)))" "$key" 2>/dev/null)
+        printf 'inline_key_b64\t%s\ninline_key_octets\t%s\n' \
+            "$(vims_sanitize "$key")" "${koct:-unknown}"
+    fi
+    [[ -n "$lifetime" ]] && printf 'lifetime\t%s\n' "$(vims_sanitize "$lifetime")"
+    [[ -n "$mki" ]] && printf 'mki\t%s\n' "$(vims_sanitize "$mki")"
+    printf 'profile\t%s\n' "RTP/SAVP, which is the only thing that makes the m= line mean SRTP"
+    printf 'finding\tHIGH\tthe media key is in the signalling body, so whoever reads the SDP reads the call\n'
+    printf 'needs\t%s\n' "nothing beyond the SIP message: no key agreement protocol, no certificate, no shared state"
+    printf 'ref\t%s\n' "RFC 4568 (SDES), RFC 3711 (SRTP)"
+    printf 'verdict\t%s\n' "sdes_key_read"
+}
+
+# PASSporT: a signed claim about who originated a call. The signature is real;
+# what it proves depends on who you trust to have issued the certificate.
+vims_cmd_stir_shaken() {   # <from-tn> <dest-tn> <iat> [--key PEM] [--cert-url URL] [--attest A|B|C]
+    local from="${1:-}" dest="${2:-}" iat="${3:-}"
+    shift 3 2>/dev/null || true
+    local keyfile="" certurl="https://cert.example.net/cert.pem" attest="A"
+    while (( $# )); do
+        case "$1" in
+            --key) keyfile="${2:-}"; shift 2 || return 2 ;;
+            --cert-url) certurl="${2:-}"; shift 2 || return 2 ;;
+            --attest) attest="${2:-A}"; shift 2 || return 2 ;;
+            *) printf 'ERROR\tunexpected argument %s\n' "$(vims_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$from" && -n "$dest" && -n "$iat" ]] || {
+        printf 'ERROR\tusage: --stir-shaken <from> <dest> <iat>\n' >&2; return 2; }
+    [[ "$iat" =~ ^[0-9]+$ ]] || { printf 'ERROR\tiat is seconds since the epoch\n' >&2; return 2; }
+    case "$attest" in A|B|C) ;; *) printf 'ERROR\tattest is A, B or C\n' >&2; return 2 ;; esac
+    local header payload sig="" digest
+    header=$(vims_b64url_text "{\"typ\":\"passport\",\"alg\":\"ES256\",\"ppt\":\"shaken\",\"x5u\":\"$certurl\"}")
+    payload=$(vims_b64url_text "{\"dest\":{\"tn\":[\"$dest\"]},\"iat\":$iat,\"orig\":{\"tn\":\"$from\"},\"attest\":\"$attest\"}")
+    digest=$(printf '%s.%s' "$header" "$payload" | sha256sum | cut -d' ' -f1)
+    printf 'identity_header\t%s\n' "Identity: $header.$payload"$([[ -n "$keyfile" ]] && echo ".<signature>")
+    printf 'header_b64\t%s\npayload_b64\t%s\n' "$header" "$payload"
+    printf 'claim\t%s\n' "orig=$from dest=$dest attest=$attest iat=$iat"
+    printf 'digest_sha256_of_signing_input\t%s\n' "$digest"
+    if [[ -n "$keyfile" ]]; then
+        if [[ -r "$keyfile" ]] && command -v openssl >/dev/null 2>&1; then
+            sig=$(printf '%s.%s' "$header" "$payload" \
+                  | openssl dgst -sha256 -sign "$keyfile" 2>/dev/null \
+                  | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+        fi
+        if [[ -n "$sig" ]]; then
+            printf 'signature_b64u\t%s\nsignature_algorithm\tES256\n' "$sig"
+            printf 'identity_header_signed\t%s\n' "Identity: $header.$payload.$sig"
+            printf 'verdict\t%s\n' "stir_token_signed"
+        else
+            printf 'ERROR\tthe key could not sign (readable PEM and openssl are both required)\n' >&2
+            return 2
+        fi
+    else
+        printf 'signature_b64u\tnot produced — no key was given\n'
+        printf 'verdict\t%s\n' "stir_token_unsigned"
+    fi
+    printf 'what_it_proves\t%s\n' "that whoever holds the key made this claim, and nothing about whether the caller is who the key says"
+    printf 'finding\tMEDIUM\tthe x5u in the header is a URL the signer chooses, so verification depends on fetching a certificate from an address the attacker controls unless the verifier pins the authority'
+    printf 'finding\tMEDIUM\tattest A means full attestation and the code cannot tell A from C without the authority chain'
+    printf 'ref\t%s\n' "RFC 8224 (PASSporT), RFC 8225 (shaken), RFC 8226 (certificates), TS 24.229"
+}
+
+# XCAP/Ut: the operator configuration store for supplementary services.
+vims_cmd_xcap() {   # <xcap-root-uri> [method]
+    local root="${1:-https://xcap.operator.example/}" method="${2:-GET}"
+    [[ -n "$root" ]] || { printf 'ERROR\tan XCAP root URI is required\n' >&2; return 2; }
+    case "$method" in GET|PUT|DELETE) ;; *)
+        printf 'ERROR\tmethod is GET, PUT or DELETE\n' >&2; return 2 ;; esac
+    printf 'root\t%s\nmethod\t%s\n' "$(vims_sanitize "$root")" "$method"
+    printf 'document\t%s\n' "simservs/~~/communication-diversion"
+    printf 'path\t%s\n' "${root%/}/simservs/~~/communication-diversion"
+    printf 'reveals\t%s\n' "which numbers a subscriber forwards to, on what condition, and when it was last written"
+    printf 'document\t%s\n' "simservs/~~/incoming-communication-barring"
+    printf 'reveals\t%s\n' "which numbers the subscriber refuses to take calls from"
+    printf 'document\t%s\n' "simservs/~~/outgoing-communication-barring"
+    printf 'reveals\t%s\n' "which numbers the subscriber refuses to call, which is a list of who they avoid"
+    printf 'document\t%s\n' "simservs/~~/communication-waiting"
+    printf 'reveals\t%s\n' "whether call waiting is on, which tells a caller whether a second call will ring"
+    printf 'auth\t%s\n' "GAA/GBA or a TLS client certificate: plain bearer access to XCAP is a configuration compromise, not a leak"
+    printf 'finding\tHIGH\ta forwarding rule written through XCAP redirects every incoming call without touching the handset, and the subscriber is not told'
+    printf 'detect\t%s\n' "an XCAP PUT from a network address the subscriber never uses, followed by a forwarding rule that points outside the operator"
+    printf 'ref\t%s\n' "TS 24.623 (XCAP), TS 24.604 (communication diversion), TS 33.220 (GBA)"
+    printf 'verdict\t%s\n' "xcap_surface_listed"
+}
+
+# Emergency calls: the one attach that is supposed to work without a subscription.
+vims_cmd_emergency() {   # [--type sos|sos.fire]
+    local type="sos"
+    while (( $# )); do
+        case "$1" in
+            --type) type="${2:-sos}"; shift 2 || return 2 ;;
+            *) printf 'ERROR\tunexpected argument %s\n' "$(vims_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    case "$type" in sos|sos.fire|sos.police|sos.ambulance) ;; *)
+        printf 'ERROR\tservice urn is sos, sos.fire, sos.police or sos.ambulance\n' >&2; return 2 ;; esac
+    printf 'service_urn\turn:service:%s\n' "$type"
+    printf 'attach\t%s\n' "emergency attach: the UE asks with an IMSI it may not have credentials for, and the network decides from policy alone"
+    printf 'register\t%s\n' "REGISTER with the emergency contact parameter and no prior authentication of the subscriber"
+    printf 'contact_param\t%s\n' ";+g.3gpp.emergency"
+    printf 'request_uri\t%s\n' "urn:service:$type"
+    printf 'allowed\t%s\n' "a call with no SIM, a barred subscription, or a network the subscriber has no agreement with"
+    printf 'leaks\t%s\n' "the serving cell and whatever location the network attaches, so an emergency call locates a handset that had no other reason to be found"
+    printf 'finding\tINFO\tthe emergency path is the one identity path that does not need the subscriber to prove anything'
+    printf 'ref\t%s\n' "TS 23.167 (emergency), TS 24.229 5.1.6, TS 24.301 5.5.1.2.3"
+    printf 'verdict\t%s\n' "emergency_path_described"
+}
+
 vims_selftest() {
     local bad=0 nchk=0
+    # ── the media and services plane (fold of the module-idea pass) ──
+    local amrpay amrout t1 t2
+    amrpay=$(python3 -c "import sys; bits='1111'+'0'+'0000'+'1'+'00'+'1010101011'*24; bits=bits.ljust(((len(bits)+7)//8)*8,'0'); sys.stdout.write(''.join('%02x'%int(bits[i:i+8],2) for i in range(0,len(bits),8)))")
+    amrout=$(vims_cmd_amr_parse "$amrpay")
+    chk amr-frames  "$(fld "$amrout" frames)" "1"
+    chk amr-mode    "$(printf '%s\n' "$amrout" | awk -F'\t' '$1=="frame"{print $4}')" "12.20"
+    chk amr-bits    "$(printf '%s\n' "$amrout" | awk -F'\t' '$1=="frame"{print $6}')" "244"
+    chk amr-octets  "$(printf '%s\n' "$amrout" | awk -F'\t' '$1=="frame"{print $7}')" "31"
+    chk amr-noarg   "$(vims_cmd_amr_parse '' >/dev/null 2>&1; echo $?)" "2"
+    local sdesout
+    sdesout=$(vims_cmd_sdes_parse 'a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:PS1UjWkR0vJ0nBtL2WmZ0Fh6dXk=')
+    chk sdes-suite  "$(fld "$sdesout" suite)" "AES_CM_128_HMAC_SHA1_80"
+    chk sdes-bits   "$(fld "$sdesout" key_bits)" "128"
+    chk sdes-octets "$(fld "$sdesout" inline_key_octets)" "20"
+    chk sdes-finding "$(printf '%s\n' "$sdesout" | grep -c 'HIGH.*signalling')" "1"
+    local stirout
+    stirout=$(vims_cmd_stir_shaken 15550100 15550199 1735689600)
+    chk stir-verdict "$(fld "$stirout" verdict)" "stir_token_unsigned"
+    chk stir-digest  "$(fld "$stirout" digest_sha256_of_signing_input)" "0932c41eef7754e7bc996ba593bec9217f74f0de80172818952a1819b8187c9a"
+    chk stir-nokey-rc "$(vims_cmd_stir_shaken 1 2 3 --attest D >/dev/null 2>&1; echo $?)" "2"
+    chk stir-iat     "$(vims_cmd_stir_shaken 1 2 abc >/dev/null 2>&1; echo $?)" "2"
+    local xout
+    xout=$(vims_cmd_xcap https://xcap.example)
+    chk xcap-docs    "$(printf '%s\n' "$xout" | grep -c '^document')" "4"
+    chk xcap-path    "$(printf '%s\n' "$xout" | grep -c 'simservs/~~/communication-diversion')" "1"
+    chk xcap-method  "$(vims_cmd_xcap https://x/ PATCH >/dev/null 2>&1; echo $?)" "2"
+    local eout
+    eout=$(vims_cmd_emergency --type sos.fire)
+    chk sos-urn      "$(fld "$eout" service_urn)" "urn:service:sos.fire"
+    chk sos-uri      "$(fld "$eout" request_uri)" "urn:service:sos.fire"
+    chk sos-bad      "$(vims_cmd_emergency --type sos.everything >/dev/null 2>&1; echo $?)" "2"
+
     chk() {
         nchk=$(( nchk + 1 ))
         local n="$1" got="$2" want="$3"
@@ -3438,6 +3710,11 @@ vims_cli_main() {
         --umts-count-c)     vims_umts_count_c "${1:-0}" "${2:-0}" ;;
         --umts-keystream)   vims_cmd_umts_keystream "$@" ;;
         --umts-two-stream)  vims_cmd_umts_two_stream "$@" ;;
+        --amr-parse)        vims_cmd_amr_parse "$@" ;;
+        --sdes-parse)       vims_cmd_sdes_parse "${1:-}" ;;
+        --stir-shaken)      vims_cmd_stir_shaken "$@" ;;
+        --xcap)             vims_cmd_xcap "${1:-}" "${2:-GET}" ;;
+        --emergency)        vims_cmd_emergency "$@" ;;
         --sip-send)               vims_sip_send "$@" ;;
         --ims-registration)       vims_cmd_ims_registration "${1:-}" "${2:-}" ;;
         --detect-keystream-reuse) vims_cmd_detect_reuse "$@" ;;
