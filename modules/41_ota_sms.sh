@@ -215,32 +215,43 @@ otasm_key_meaning() {
     local family_t mode_t strength
     case "$family" in
         0) family_t="algorithm known implicitly by both entities" ;;
-        1) family_t="DES (ISO 8731-1 DEA)" ;;
-        2) family_t="reserved" ;;
+        1) family_t="DES (ISO 18033-3 DEA); single DES is deprecated" ;;
+        2) family_t="AES (FIPS-197); the key length is 128, 192 or 256 bits" ;;
         3) family_t="proprietary implementation" ;;
     esac
     local is_cipher=1
     [[ "$kind" == "kid" ]] && is_cipher=0
-    if [[ "$family" == "1" ]]; then
-        case "$mode" in
-            0) mode_t="$([[ $is_cipher == 1 ]] && echo "DES in CBC mode" || echo "DES in CBC mode over the CC") (56-bit key, zero IV)" ;;
-            1) mode_t="Triple DES outer-CBC with two keys (112-bit effective)" ;;
-            2) mode_t="Triple DES outer-CBC with three keys (168-bit)" ;;
-            3) mode_t="$([[ $is_cipher == 1 ]] && echo "DES in ECB mode (no chaining)" || echo "reserved for KID_RC")" ;;
-        esac
-    else
-        mode_t="b4b3 carries no meaning for family $family"
-    fi
-    case "$family" in
-        0) strength="weak — implicit algorithm, no negotiated strength" ;;
-        1) case "$mode" in
-               0) strength="weak — single DES, 56-bit key" ;;
-               1) strength="weak — 2-key 3DES, 112-bit effective" ;;
-               2) strength="acceptable — 3-key 3DES" ;;
-               3) strength="critical — DES-ECB, 56-bit key and no chaining" ;;
-           esac ;;
-        2) strength="unknown — reserved algorithm family" ;;
-        3) strength="unknown — proprietary, cannot be assessed" ;;
+    case "$family:$mode" in
+        0:*)
+            mode_t="b4b3 carries no meaning for an implicitly agreed algorithm"
+            strength="weak -- implicit algorithm, no negotiated strength" ;;
+        1:0)
+            mode_t="DES in CBC mode (56-bit key, zero IV)"
+            strength="weak -- single DES, 56-bit key" ;;
+        1:1)
+            mode_t="triple DES outer-CBC with two keys (112-bit effective)"
+            strength="weak -- 2-key 3DES, 112-bit effective" ;;
+        1:2)
+            mode_t="triple DES outer-CBC with three keys (168-bit)"
+            strength="acceptable -- 3-key 3DES" ;;
+        1:3)
+            mode_t="DES in ECB mode (no chaining)"
+            strength="critical -- DES-ECB, 56-bit key and no chaining" ;;
+        2:0)
+            # b4b3 = 00 is the only coding AES has: CBC for the command data,
+            # CMAC for the checksum.  Anything else is reserved by the clause.
+            if (( is_cipher == 1 )); then
+                mode_t="AES in CBC mode (zero IV, 128/192/256-bit key)"
+            else
+                mode_t="AES in CMAC mode (32 or 64-bit tag)"
+            fi
+            strength="strong -- AES" ;;
+        2:*)
+            mode_t="reserved coding: AES uses b4b3 = 00 only"
+            strength="unknown -- reserved AES coding, cannot be assessed" ;;
+        3:*)
+            mode_t="b4b3 carries no meaning for a proprietary algorithm"
+            strength="unknown -- proprietary, cannot be assessed" ;;
     esac
     printf '%s_hex\t0x%s\n%s_key_set\t%s\n%s_family\t%s\n%s_family_meaning\t%s\n' \
         "$kind" "$v" "$kind" "$key_set" "$kind" "$family" "$kind" "$family_t"
@@ -338,9 +349,17 @@ otasm_packet_parse() {
 # octets of it over the zero-padded message, and the counters and lengths the
 # two clauses ask for.
 #
-# openssl is the cipher because it is on every host this toolkit has run on and
-# is already how 13_nr_core.sh computes HMAC-SHA-256; 2-key 3DES is the one
-# thing openssl will not accept directly, so the key is expanded here.
+# The algorithm is not a choice made here: TS 102 225 5.1.2 puts it in the KIc
+# octet (b2b1 family, b4b3 mode) and 5.1.3.1 puts the checksum algorithm in the
+# KID.  Both families are implemented.  DES and 3DES go through openssl, which
+# is on every host this toolkit has run on and is already how 13_nr_core.sh
+# computes HMAC-SHA-256; 2-key 3DES is the one thing openssl will not accept
+# directly, so the key is expanded here.  AES goes through tools/gsm_crypto.py,
+# because the packet may name a 128, 192 or 256-bit key and AES-CMAC is not an
+# openssl one-liner at those lengths.  An implicitly agreed algorithm (family
+# 00) is run as 3DES, which is what this module has always built, and every
+# report still says "implicit" so the assumption is never mistaken for a
+# negotiated one.
 
 # K1||K2 (16 octets) means 3DES with two keys, which is K1||K2||K1 on the wire.
 otasm_key24() {
@@ -390,6 +409,124 @@ otasm_des3_cc() {
     printf '%s\n' "${ct: -16}"
 }
 
+# TS 102 225 5.1.2 names the algorithm and the mode in the KIc octet itself --
+# b2b1 is the family (00 implicit, 01 DES, 10 AES, 11 proprietary) and b4b3 the
+# mode -- so the key does not decide which cipher runs, the header does.  Until
+# this section existed the module could only build 3DES, which meant a current
+# command packet (AES-128-CBC with an AES-CMAC check) parsed as "family 2,
+# reserved" and could neither be built nor verified.
+otasm_family() {
+    local f=$(( 16#${1:-0} & 0x03 ))
+    case "$f" in
+        0) printf 'implicit\n' ;;
+        1) printf 'des\n' ;;
+        2) printf 'aes\n' ;;
+        *) printf 'proprietary\n' ;;
+    esac
+}
+
+# An implicit algorithm still has to be run as something.  TS 102 225 5.1.2
+# leaves b2b1 = 00 to an agreement outside the packet, and the agreement this
+# tool has always used for a default packet is 3DES outer-CBC -- so implicit
+# resolves to DES here rather than refusing, and every report still says
+# "implicit" so nobody mistakes it for a negotiated choice.  A proprietary
+# algorithm is different: nothing can be assumed about it, so it refuses.
+otasm_alg() {
+    case "${1:-implicit}" in
+        implicit) printf 'des\n' ;;
+        *)        printf '%s\n' "${1:-des}" ;;
+    esac
+}
+
+otasm_block_size() {
+    case "$(otasm_alg "${1:-des}")" in aes) printf '16\n' ;; *) printf '8\n' ;; esac
+}
+
+# The key an octet's family expects, or exit 2 with the reason.  3DES takes a
+# 16-octet key as K1||K2 and expands it; AES takes 16, 24 or 32 and expands
+# nothing, because the length IS the strength (FIPS-197).
+otasm_key_check() {
+    local fam="$1" k; k=$(otasm_norm_hex "${2:-}")
+    if ! otasm_is_hex "$k"; then
+        printf 'ERROR\tkey must be hex\n' >&2; return 2
+    fi
+    case "$(otasm_alg "$fam")" in
+        des)
+            case ${#k} in
+                32) printf '%s%s\n' "$k" "${k:0:16}" ;;
+                48) printf '%s\n' "$k" ;;
+                *)  printf 'ERROR\t3DES needs a 16-octet (2-key) or 24-octet (3-key) key, got %d\n' \
+                        "$(( ${#k} / 2 ))" >&2; return 2 ;;
+            esac ;;
+        aes)
+            case ${#k} in
+                32|48|64) printf '%s\n' "$k" ;;
+                *)  printf 'ERROR\tAES needs a 16, 24 or 32-octet key, got %d\n' \
+                        "$(( ${#k} / 2 ))" >&2; return 2 ;;
+            esac ;;
+        *)
+            printf 'ERROR\tfamily %s has no mandated cipher; the packet cannot be keyed here\n' \
+                "$fam" >&2; return 2 ;;
+    esac
+}
+
+otasm_crypto_tool() {
+    printf '%s/tools/gsm_crypto.py' "$IMSISTING_ROOT"
+}
+
+# AES-CBC over whole 16-octet blocks with a zero IV, which is what the clause
+# requires ("The initial chaining value for CBC modes shall be zero").
+otasm_aes_cbc() {
+    local key="${1^^}" data dir="${3:-enc}" tool want
+    data=$(otasm_norm_hex "${2:-}")
+    if (( ${#data} % 32 != 0 )); then
+        printf 'ERROR\tAES-CBC input must be whole 16-octet blocks, %d octets given\n' \
+            "$(( ${#data} / 2 ))" >&2
+        return 2
+    fi
+    tool=$(otasm_crypto_tool)
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; AES needs it\n' "$tool" >&2; return 1; }
+    [[ "$dir" == "dec" ]] && want="plaintext" || want="ciphertext"
+    python3 "$tool" "--cbc-${dir}rypt" "$key" --iv 00000000000000000000000000000000 --message "$data" \
+        | awk -F'\t' -v w="$want" '$1==w{print $2}'
+}
+
+# TS 102 225 5.1.3.1: the CC under AES is AES-CMAC, and its key is configured
+# for one tag length, 32 or 64 bits.  No zero padding is applied: CMAC is
+# defined over any length, and padding the input would change the tag.
+otasm_aes_cc() {
+    local key="${1^^}" data bits="${3:-64}" tool
+    data=$(otasm_norm_hex "${2:-}")
+    if ! otasm_is_hex "$data" || (( ${#data} % 2 != 0 )); then
+        printf 'ERROR\tCC input must be whole octets of hex\n' >&2; return 2
+    fi
+    case "$bits" in 32|64) ;; *) printf 'ERROR\tAES CMAC tag length is 32 or 64 bits\n' >&2; return 2 ;; esac
+    tool=$(otasm_crypto_tool)
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; AES needs it\n' "$tool" >&2; return 1; }
+    python3 "$tool" --cmac "$key" --message "$data" --tag-bits "$bits" \
+        | awk -F'\t' '$1=="tag"{print $2}'
+}
+
+# One entry point for "cipher these octets under this family", so the build and
+# the parse cannot drift into using different algorithms for the same packet.
+otasm_block_cipher() {
+    case "$(otasm_alg "${1:-des}")" in
+        des) otasm_des3_cbc "$2" "$3" "${4:-enc}" ;;
+        aes) otasm_aes_cbc "${2^^}" "$3" "${4:-enc}" ;;
+        *)   printf 'ERROR\tfamily %s has no cipher here\n' "${1:-?}" >&2; return 2 ;;
+    esac
+}
+
+# The CC for this family.  Under DES the eight octets are the tail of 3DES-CBC;
+# under AES they are a truncated CMAC.  Both take the same input string.
+otasm_checksum() {
+    case "$(otasm_alg "${1:-des}")" in
+        des) otasm_des3_cc "$2" "$3" ;;
+        aes) otasm_aes_cc "${2^^}" "$3" "${4:-64}" ;;
+        *)   printf 'ERROR\tfamily %s has no checksum here\n' "${1:-?}" >&2; return 2 ;;
+    esac
+}
+
 # One field out of otasm_spi_parse, so this module reads the SPI bits in exactly
 # one place -- the reason the old reading survived was that there were three.
 otasm_spi_field() {
@@ -431,18 +568,21 @@ otasm_packet_sms_build() {
         return 2
     fi
 
-    local kic_key24="" kid_key24=""
+    local kic_fam kid_fam kic_key="" kid_key="" block=8
+    kic_fam=$(otasm_family "$kic")
+    kid_fam=$(otasm_family "$kid")
     if (( cipher == 1 )); then
         [[ -n "${OTASM_KIC_KEY:-}" ]] || {
             printf 'ERROR\tSPI says the payload is ciphered, but OTASM_KIC_KEY is not set\n' >&2
             return 2; }
-        kic_key24=$(otasm_key24 "$OTASM_KIC_KEY") || return 2
+        kic_key=$(otasm_key_check "$kic_fam" "$OTASM_KIC_KEY") || return 2
+        block=$(otasm_block_size "$kic_fam")
     fi
     if (( rccds == 2 )); then
         [[ -n "${OTASM_KID_KEY:-}" ]] || {
             printf 'ERROR\tSPI asks for a CC, but OTASM_KID_KEY is not set\n' >&2
             return 2; }
-        kid_key24=$(otasm_key24 "$OTASM_KID_KEY") || return 2
+        kid_key=$(otasm_key_check "$kid_fam" "$OTASM_KID_KEY") || return 2
     fi
 
     local cntr; printf -v cntr '%010X' "$(( counter & 0xFFFFFFFFFF ))"
@@ -450,8 +590,9 @@ otasm_packet_sms_build() {
     if (( cipher == 1 )); then
         # TS 102 225 5.1.1: the ciphered region is CNTR(5)||PCNTR(1)||CC(8)||
         # Secured Data, so the Secured Data is padded until that is a block
-        # multiple. The padding count rides in PCNTR.
-        pad_octets=$(( (8 - (14 + ${#data} / 2) % 8) % 8 ))
+        # multiple. The block is 8 octets under DES and 16 under AES, and the
+        # padding count rides in PCNTR.
+        pad_octets=$(( (block - (14 + ${#data} / 2) % block) % block ))
         if (( pad_octets > 0 )); then
             data+=$(printf '%0*d' $(( pad_octets * 2 )) 0)
         fi
@@ -463,14 +604,15 @@ otasm_packet_sms_build() {
     local cc="" body
     if (( rccds == 2 )); then
         # The CPL and CHL fields are part of the CC input and are not ciphered.
-        cc=$(otasm_des3_cc "$kid_key24" "$(printf '%04X%s%s%s' "$cpl" "$head" "$cntr$pcntr" "$data")") || return 1
+        cc=$(otasm_checksum "$kid_fam" "$kid_key" \
+            "$(printf '%04X%s%s%s' "$cpl" "$head" "$cntr$pcntr" "$data")") || return 1
         body="${cntr}${pcntr}${cc}${data}"
     else
         body="${cntr}${pcntr}${data}"
     fi
     local packet
     if (( cipher == 1 )); then
-        local ciph; ciph=$(otasm_des3_cbc "$kic_key24" "$body") || return 1
+        local ciph; ciph=$(otasm_block_cipher "$kic_fam" "$kic_key" "$body") || return 1
         packet=$(printf '%04X%s%s' "$cpl" "$head" "$ciph")
     else
         packet=$(printf '%04X%s%s' "$cpl" "$head" "$body")
@@ -479,6 +621,7 @@ otasm_packet_sms_build() {
         "$cpl" "$chl" "${spi^^}" "$rccds" "$cipher"
     printf 'kic\t%s\nkid\t%s\ntar\t%s\ncounter\t%s\npcntr\t%s\n' \
         "${kic^^}" "${kid^^}" "${tar^^}" "$cntr" "$pcntr"
+    printf 'cipher_family\t%s\ncc_family\t%s\n' "$kic_fam" "$kid_fam"
     printf 'padding_octets\t%s\nsecured_data_len\t%s\n' "$pad_octets" "$(( ${#data} / 2 ))"
     if [[ -n "$cc" ]]; then printf 'cc\tsigner\t%s\n' "${cc^^}"; else printf 'cc\tnone\n'; fi
     # One case for every hex field: the keys and the header are upper case, so
@@ -513,15 +656,17 @@ otasm_packet_sms_parse() {
             "$cpl" "$after_cpl" >&2
         return 1
     fi
-    local rest body
+    local rest body kic_fam kid_fam
+    kic_fam=$(otasm_family "$kic")
+    kid_fam=$(otasm_family "$kid")
     rest="${h:8}"   # SPI || KIc || KID || TAR || [enciphered CNTR..data]
     body="${h:20}"  # everything after the 10-octet head
     if (( cipher == 1 )); then
         [[ -n "${OTASM_KIC_KEY:-}" ]] || {
             printf 'ERROR\tthe payload is ciphered and OTASM_KIC_KEY is not set\n' >&2
             return 2; }
-        local kic_key24; kic_key24=$(otasm_key24 "$OTASM_KIC_KEY") || return 2
-        body=$(otasm_des3_cbc "$kic_key24" "$body" dec) || return 1
+        local kic_key; kic_key=$(otasm_key_check "$kic_fam" "$OTASM_KIC_KEY") || return 2
+        body=$(otasm_block_cipher "$kic_fam" "$kic_key" "$body" dec) || return 1
     fi
     local cntr="${body:0:10}" pcntr="${body:10:2}"
     local cc="" data pad_octets
@@ -534,10 +679,10 @@ otasm_packet_sms_parse() {
     local cc_verdict="not-present"
     if (( rccds == 2 )); then
         if [[ -n "${OTASM_KID_KEY:-}" ]]; then
-            local kid_key24 head recomputed
-            kid_key24=$(otasm_key24 "$OTASM_KID_KEY") || return 2
+            local kid_key head recomputed
+            kid_key=$(otasm_key_check "$kid_fam" "$OTASM_KID_KEY") || return 2
             head="${h:4:16}"   # CHL || SPI || KIc || KID || TAR
-            recomputed=$(otasm_des3_cc "$kid_key24" \
+            recomputed=$(otasm_checksum "$kid_fam" "$kid_key" \
                 "$(printf '%04X%s%s%s' "$cpl" "$head" "$cntr$pcntr" "$data")") || return 1
             if [[ "${recomputed^^}" == "${cc^^}" ]]; then cc_verdict="verified"
             else cc_verdict="mismatch"; fi
@@ -560,6 +705,7 @@ otasm_packet_sms_parse() {
         "$cpl" "$chl" "${spi^^}" "$rccds" "$cipher"
     printf 'kic\t%s\nkid\t%s\ntar\t%s\ncounter\t%s\npcntr\t%s\n' \
         "${kic^^}" "${kid^^}" "${tar^^}" "$cntr" "$pcntr"
+    printf 'cipher_family\t%s\ncc_family\t%s\n' "$kic_fam" "$kid_fam"
     printf 'cc\t%s\ncc_verdict\t%s\npadding_octets\t%s\n' "${cc:-none}" "$cc_verdict" "$pad_octets"
     printf 'secured_data\t%s\napdu\t%s\npacket_bytes\t%s\n' "${data^^}" "${apdu^^}" "$(( ${#h} / 2 ))"
     if (( pad_ok == 0 )); then
@@ -4011,6 +4157,62 @@ otasm_selftest() {
     chk sms-nokey-rc "$(OTASM_KIC_KEY= OTASM_KID_KEY= otasm_packet_sms_build b00001 1 1600 15 15 8010 >/dev/null 2>&1; echo $?)" "2"
     chk sms-nokey-says "$(OTASM_KIC_KEY= OTASM_KID_KEY= otasm_packet_sms_build b00001 1 1600 15 15 8010 2>&1 >/dev/null | grep -c OTASM_KIC_KEY)" "1"
     chk sms-rc-only "$(OTASM_KIC_KEY=00 OTASM_KID_KEY=00 otasm_packet_sms_build b00001 1 1200 15 15 80 >/dev/null 2>&1; echo $?)" "2"
+    # ── the same packet under AES (TS 102 225 §5.1.2 and §5.1.3.1) ────────
+    # KIc 0x12 is key set 1, b4b3 = 00 (CBC), b2b1 = 10 (AES); KID 0x22 is key
+    # set 2 with the same AES family, so the CC is an AES-CMAC over the same
+    # octets. The block is 16 here, not 8, which moves the padding count and
+    # the packet length: a build that quietly kept the DES block would agree
+    # with itself and be wrong on the wire.
+    local sa ra
+    sa=$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
+         OTASM_KID_KEY=0f0e0d0c0b0a09080706050403020100 \
+         otasm_packet_sms_build b00001 1 1600 12 22 801000000c00000000)
+    chk aes-cipher-family "$(fld "$sa" cipher_family)" "aes"
+    chk aes-cc-family     "$(fld "$sa" cc_family)"     "aes"
+    chk aes-padding       "$(fld "$sa" pcntr)"         "09"
+    chk aes-packet-bytes  "$(fld "$sa" packet_bytes)"  "42"
+    chk aes-packet-kat "$(fld "$sa" packet | tr 'A-F' 'a-f')" \
+        "00281516001222b000017b8e1d117ea6f9d040ded4cb7999433dc56754132cfa43bef90ef7dbb109a85d"
+    ra=$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
+         OTASM_KID_KEY=0f0e0d0c0b0a09080706050403020100 \
+         otasm_packet_sms_parse "$(fld "$sa" packet)")
+    chk aes-roundtrip-apdu "$(fld "$ra" apdu)"       "801000000C00000000"
+    chk aes-roundtrip-cc   "$(fld "$ra" cc_verdict)" "verified"
+    chk aes-roundtrip-fam  "$(fld "$ra" cipher_family)" "aes"
+    # AES-192 and AES-256 must cipher differently from AES-128 and from each
+    # other -- a schedule that ignored the key length would return the same
+    # octets for all three.
+    local s192 s256
+    s192=$(OTASM_KIC_KEY=000102030405060708090a0b0c0d0e0f1011121314151617 \
+           OTASM_KID_KEY=0f0e0d0c0b0a09080706050403020100 \
+           otasm_packet_sms_build b00001 1 1600 12 22 8010)
+    s256=$(OTASM_KIC_KEY=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
+           OTASM_KID_KEY=0f0e0d0c0b0a09080706050403020100 \
+           otasm_packet_sms_build b00001 1 1600 12 22 8010)
+    chk aes-192-kat "$(fld "$s192" packet | cut -c21-40 | tr 'A-F' 'a-f')" "85fdc134c38484fea491"
+    chk aes-256-kat "$(fld "$s256" packet | cut -c21-40 | tr 'A-F' 'a-f')" "c3a3d37a7d9eb648e37d"
+    chk aes-key-lengths-differ "$([[ "$(fld "$s192" packet)" != "$(fld "$s256" packet)" ]] && echo differ || echo same)" "differ"
+    # A key the family cannot use is refused with the reason, not coerced.
+    chk aes-key-too-short "$(OTASM_KIC_KEY=0011 OTASM_KID_KEY=0f0e0d0c0b0a09080706050403020100 \
+         otasm_packet_sms_build b00001 1 1600 12 22 8010 >/dev/null 2>&1; echo $?)" "2"
+    chk aes-key-too-short-says "$(OTASM_KIC_KEY=0011 OTASM_KID_KEY=0f0e0d0c0b0a09080706050403020100 \
+         otasm_packet_sms_build b00001 1 1600 12 22 8010 2>&1 >/dev/null | grep -c '16, 24 or 32')" "1"
+    # A 3DES key against an AES KIc must also refuse: the header chose the
+    # algorithm, and 24 octets is legal for both, so this is the case where
+    # the family -- not the length -- has to decide.
+    chk aes-key-24-accepted "$(OTASM_KIC_KEY=000102030405060708090a0b0c0d0e0f1011121314151617 \
+         OTASM_KID_KEY=0f0e0d0c0b0a09080706050403020100 \
+         otasm_packet_sms_build b00001 1 1600 12 22 8010 >/dev/null 2>&1; echo $?)" "0"
+    # The proprietary family has no mandated cipher, so it refuses.
+    chk key-proprietary-refuses "$(OTASM_KIC_KEY=00112233445566778899aabbccddeeff \
+         otasm_packet_sms_build b00001 1 1600 13 22 8010 >/dev/null 2>&1; echo $?)" "2"
+    chk key-aes-family     "$(fld "$(otasm_cmd_key 12)" family)" "2"
+    chk key-aes-cipher-mode "$(fld "$(otasm_cmd_key 12)" mode_meaning)" \
+        "AES in CBC mode (zero IV, 128/192/256-bit key)"
+    chk key-aes-cc-mode    "$(fld "$(otasm_cmd_key 12 22)" kid_mode_meaning)" \
+        "AES in CMAC mode (32 or 64-bit tag)"
+    chk key-aes-reserved   "$(fld "$(otasm_cmd_key 16)" mode_meaning)" \
+        "reserved coding: AES uses b4b3 = 00 only"
     # ── the card's Response Packet (TS 102 225 §5.2, TS 31.115 SMS form) ──
     # These four packets are pySim's own 3DES test vectors, so the status
     # word, the CC and the CompactRemoteResp are read the same way by two

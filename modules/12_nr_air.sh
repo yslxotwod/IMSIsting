@@ -4243,6 +4243,311 @@ nair_bit_get() {
     echo "$(( 2#$seg ))"
 }
 
+# ── SDAP (TS 37.324) ────────────────────────────────────────────────────
+# The QoS-flow layer between the application and PDCP. It is one octet, and
+# that octet is NOT the same in both directions:
+#
+#   DL, header configured (Figure 6.2.2.2-1):  RDI(1) RQI(1) QFI(6)
+#   UL, header configured (Figure 6.2.2.3-1):  D/C(1) R  (1) QFI(6)
+#
+# The DL header carries no D/C bit at all, which is why a parser that reads
+# the first octet as "D/C then QFI" decodes every DL packet one bit wrong and
+# reports a QFI twice the real value. The bit layout above is TS 38.523-3
+# Annex D.7.2 (SDAP_DL_PduHeader_Type / SDAP_UL_PduHeader_Type), which is
+# itself written against Figure 6.2.2.2-1 and 6.2.2.3-1.
+#
+# Both directions are 8 bits. QFI is 6 bits (0..63) in every case.
+
+nair_sdap_hdr_hex() { printf '%s' "${1:-}" | tr -d ' \t'; }
+
+# --sdap-build <dl|ul> <qfi> <sdu-hex> [rdi] [rqi] [dc]
+#
+# Builds the one-octet header and prefixes it to the SDU. The SDAP PDU with no
+# header (Figure 6.2.2.1-1) is the SDU untouched, and that is what a
+# network calls "SDAP header not configured"; it is reported, not invented.
+nair_sdap_build() {
+    local dir="${1:-}" qfi="${2:-}" sdu="${3:-}"
+    local rdi="${4:-0}" rqi="${5:-0}" dc="${6:-1}"
+    case "$dir" in
+        dl|DL) dir=dl ;;
+        ul|UL) dir=ul ;;
+        *) printf 'ERROR\t--sdap-build: direction must be dl or ul\n' >&2; return 2 ;;
+    esac
+    [[ "$qfi" =~ ^[0-9]+$ ]] && (( qfi <= 63 )) ||
+        { printf 'ERROR\t--sdap-build: QFI is 6 bits, 0..63\n' >&2; return 2; }
+    [[ -z "$sdu" || "$sdu" =~ ^[0-9a-fA-F]+$ ]] ||
+        { printf 'ERROR\t--sdap-build: SDU must be hex\n' >&2; return 2; }
+    (( ${#sdu} % 2 == 0 )) ||
+        { printf 'ERROR\t--sdap-build: SDU must be whole bytes\n' >&2; return 2; }
+    local hdr
+    if [[ "$dir" == dl ]]; then
+        [[ "$rdi" =~ ^[01]$ && "$rqi" =~ ^[01]$ ]] ||
+            { printf 'ERROR\t--sdap-build: RDI and RQI are single bits\n' >&2; return 2; }
+        hdr=$(( (rdi << 7) | (rqi << 6) | qfi ))
+    else
+        [[ "$dc" =~ ^[01]$ ]] ||
+            { printf 'ERROR\t--sdap-build: D/C is a single bit\n' >&2; return 2; }
+        # bit 7 is R and is mandated to 0 in this version of the spec
+        hdr=$(( (dc << 7) | qfi ))
+    fi
+    printf 'direction\t%s\n' "$dir"
+    printf 'qfi\t%d\n' "$qfi"
+    [[ "$dir" == dl ]] && printf 'rdi\t%s\nrqi\t%s\n' "$rdi" "$rqi" ||
+                         printf 'dc\t%s\nreserved\t0\n' "$dc"
+    printf 'header\t%02X\n' "$hdr"
+    printf 'header_bits\t%s\n' "$(printf '%08d' "$(echo "obase=2;$hdr" | bc)")"
+    printf 'pdu\t%02X%s\n' "$hdr" "$(printf '%s' "$sdu" | tr 'a-f' 'A-F')"
+    printf 'pdu_octets\t%d\n' "$(( 1 + ${#sdu} / 2 ))"
+    return 0
+}
+
+# --sdap-parse <dl|ul> <hex>
+#
+# Direction has to be supplied: the two header formats overlap in bit 8, so a
+# decoder that guesses can only ever report a guess. Refusing to guess is the
+# point.
+nair_sdap_parse() {
+    local dir="${1:-}" raw
+    raw="$(nair_sdap_hdr_hex "${2:-}")"
+    case "$dir" in
+        dl|DL) dir=dl ;;
+        ul|UL) dir=ul ;;
+        *) printf 'ERROR\t--sdap-parse: direction must be dl or ul\n' >&2; return 2 ;;
+    esac
+    [[ -n "$raw" ]] || { printf 'ERROR\t--sdap-parse: no PDU given\n' >&2; return 2; }
+    [[ "$raw" =~ ^[0-9a-fA-F]+$ ]] ||
+        { printf 'ERROR\t--sdap-parse: PDU must be hex\n' >&2; return 2; }
+    (( ${#raw} % 2 == 0 )) ||
+        { printf 'ERROR\t--sdap-parse: PDU must be whole bytes\n' >&2; return 2; }
+    local h=$(( 16#${raw:0:2} ))
+    printf 'direction\t%s\n' "$dir"
+    if [[ "$dir" == dl ]]; then
+        printf 'rdi\t%d\n' "$(( (h >> 7) & 1 ))"
+        printf 'rqi\t%d\n' "$(( (h >> 6) & 1 ))"
+        printf 'qfi\t%d\n' "$(( h & 0x3F ))"
+    else
+        printf 'dc\t%d\n' "$(( (h >> 7) & 1 ))"
+        printf 'reserved\t%d\n' "$(( (h >> 6) & 1 ))"
+        printf 'qfi\t%d\n' "$(( h & 0x3F ))"
+        (( ((h >> 6) & 1) == 0 )) ||
+            printf 'warning\treserved bit set; TS 37.324 6.3.5 says a sender must clear it\n'
+    fi
+    local n=$(( ${#raw} / 2 ))
+    printf 'sdu_octets\t%d\n' "$(( n - 1 ))"
+    printf 'sdu\t%s\n' "$(printf '%s' "${raw:2}" | tr 'a-f' 'A-F')"
+    return 0
+}
+
+# ── PDCP data PDU (TS 38.323) ───────────────────────────────────────────
+# Format, from TS 38.323 6.2.2.2 and 6.2.2.3:
+#   12-bit SN:  D/C (1) | R (3) | SN (12)                        = 2 octets
+#   18-bit SN:  D/C (1) | R (5) | SN (18)                        = 3 octets
+# then the SDU, then MAC-I (4 octets) when the DRB has integrity protection.
+#
+# The bit assignment is quoted from TS 38.523-3 Annex D (NR_PDCP_DataPduSN12Bits_Type
+# and NR_PDCP_DataPduSN18Bits_Type), because the figures in TS 38.323 are images.
+#
+# The COUNT that NEA/NIA consume is HFN||SN, not the SN alone: at HFN 0 the two
+# coincide, and a builder that always passes the SN silently ciphers a replayed
+# sequence number under the wrong keystream. --count is therefore explicit;
+# omitted, it defaults to the SN and says so in the row output.
+#
+# BEARER is not defaulted. The 5-bit BEARER is a property of the stack under
+# test (TS 33.501 sets it to all ones for PDCP; a UE test loopback may not), and
+# guessing it would produce a MAC-I that verifies against nothing.
+nair_crypto_path() {
+    printf '%s' "${NAIR_CRYPTO:-$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/gsm_crypto.py}"
+}
+
+# XOR two equal-length hex strings.
+nair_xor_hex() {
+    local a="${1:-}" b="${2:-}" i out=""
+    (( ${#a} == ${#b} )) || return 1
+    for (( i = 0; i < ${#a}; i += 2 )); do
+        printf -v out '%s%02X' "$out" "$(( 16#${a:i:2} ^ 16#${b:i:2} ))"
+    done
+    printf '%s' "$out"
+}
+
+nair_pdcp_usage() {
+    cat <<'EOF'
+--pdcp-build sn12|sn18 --sn N --sdu HEX [--dc B] [--nea A --ck HEX --bearer B]
+             [--nia A --ik HEX] [--direction B] [--count N]
+    Build a PDCP data PDU, optionally ciphered (NEA) and integrity protected
+    (NIA). MAC-I is computed over the plaintext SDU and placed after the
+    ciphered SDU, which is what a receiver holding the keys expects.
+--pdcp-parse sn12|sn18 HEX [MACI_OCTETS]
+    Split a PDCP data PDU back into header fields, SDU and MAC-I. The third
+    argument is how many leading octets are MAC-I (0 or 4).
+    Integrity is not checked here: that needs CK/IK and the PDU is taken
+    as ciphertext on purpose.
+EOF
+}
+
+nair_pdcp_build() {
+    local snlen="" sn="" sdu="" dc=1 nea="" ck="" nia="" ik=""
+    local bearer="" direction=0 count=""
+    while (( $# )); do
+        case "$1" in
+            --sn12)      snlen=12; shift ;;
+            --sn18)      snlen=18; shift ;;
+            --sn)        sn="${2:-}"; shift 2 ;;
+            --sdu)       sdu="${2:-}"; shift 2 ;;
+            --dc)        dc="${2:-}"; shift 2 ;;
+            --nea)       nea="${2:-}"; shift 2 ;;
+            --ck)        ck="${2:-}"; shift 2 ;;
+            --nia)       nia="${2:-}"; shift 2 ;;
+            --ik)        ik="${2:-}"; shift 2 ;;
+            --bearer)    bearer="${2:-}"; shift 2 ;;
+            --direction) direction="${2:-}"; shift 2 ;;
+            --count)     count="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--pdcp-build: unexpected argument %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ "$snlen" == 12 || "$snlen" == 18 ]] ||
+        { printf 'ERROR\t--pdcp-build: say --sn12 or --sn18; the header is a different width either way\n' >&2; return 2; }
+    [[ "$sn" =~ ^[0-9]+$ ]] ||
+        { printf 'ERROR\t--pdcp-build: SN must be numeric\n' >&2; return 2; }
+    (( sn < (1 << snlen) )) ||
+        { printf 'ERROR\t--pdcp-build: SN %s does not fit %s bits\n' "$sn" "$snlen" >&2; return 2; }
+    [[ "$dc" =~ ^[01]$ ]] || { printf 'ERROR\t--pdcp-build: D/C is a single bit\n' >&2; return 2; }
+    [[ "$direction" =~ ^[01]$ ]] || { printf 'ERROR\t--pdcp-build: --direction is 0 or 1\n' >&2; return 2; }
+    [[ -z "$sdu" || "$sdu" =~ ^[0-9a-fA-F]+$ ]] ||
+        { printf 'ERROR\t--pdcp-build: SDU must be hex\n' >&2; return 2; }
+    (( ${#sdu} % 2 == 0 )) ||
+        { printf 'ERROR\t--pdcp-build: SDU must be whole bytes\n' >&2; return 2; }
+    if [[ -n "$nea" || -n "$nia" ]]; then
+        [[ "$bearer" =~ ^[0-9]+$ ]] && (( bearer <= 31 )) ||
+            { printf 'ERROR\t--pdcp-build: --bearer is the 5-bit BEARER the stack uses; it is never assumed\n' >&2; return 2; }
+    fi
+    [[ -z "$nea" || "$nea" =~ ^[0-3]$ ]] || { printf 'ERROR\t--pdcp-build: --nea is 0..3\n' >&2; return 2; }
+    [[ -z "$nia" || "$nia" =~ ^[0-3]$ ]] || { printf 'ERROR\t--pdcp-build: --nia is 0..3\n' >&2; return 2; }
+    [[ -z "$nea" || "$ck" =~ ^[0-9a-fA-F]{32}$ ]] ||
+        { printf 'ERROR\t--pdcp-build: --nea needs --ck, 32 hex digits\n' >&2; return 2; }
+    [[ -z "$nia" || "$ik" =~ ^[0-9a-fA-F]{32}$ ]] ||
+        { printf 'ERROR\t--pdcp-build: --nia needs --ik, 32 hex digits\n' >&2; return 2; }
+
+    local plain sdu_up hdr
+    sdu_up=$(printf '%s' "$sdu" | tr 'a-f' 'A-F')
+    plain="${sdu_up:-}"
+    if [[ "$snlen" == 12 ]]; then
+        printf -v hdr '%02X%02X' $(( (dc << 7) | ((sn >> 8) & 0x0F) )) $(( sn & 0xFF ))
+    else
+        printf -v hdr '%02X%02X%02X' $(( (dc << 7) | ((sn >> 16) & 0x03) )) \
+            $(( (sn >> 8) & 0xFF )) $(( sn & 0xFF ))
+    fi
+
+    printf 'sn_length\t%s\n' "$snlen"
+    printf 'dc\t%s\n' "$dc"
+    printf 'reserved\t%s\n' "$(( snlen == 12 ? 3 : 5 ))"
+    printf 'sn\t%s\n' "$sn"
+    printf 'header\t%s\n' "$hdr"
+
+    # The COUNT the cipher sees. HFN is not carried in the header, so the
+    # caller supplies the whole 32-bit value it believes the peer holds.
+    local cnt="${count:-$sn}"
+    local count_source="sn"
+    [[ -n "$count" ]] && count_source="--count"
+    printf 'count\t%s\n' "$cnt"
+    printf 'count_source\t%s\n' "$count_source"
+    [[ -z "$count" ]] && printf 'warning\tCOUNT defaults to the SN (HFN 0); pass --count when the peer is past HFN 0\n'
+
+    local body="$plain" ciphered=""
+    if [[ "$nea" == 0 ]]; then
+        # NEA0 has no keystream to fetch: the CLI reports the null algorithm by
+        # returning the input unchanged, so asking it for a keystream would
+        # leave ciphered_sdu empty and the PDU short the whole payload.
+        printf 'nea\t128-NEA0\n'
+        printf 'ciphered_sdu\t%s\n' "$plain"
+        printf 'note\t128-NEA0 is the null cipher; plaintext is unchanged\n'
+    elif [[ -n "$nea" ]]; then
+        local ks
+        ks=$(python3 "$(nair_crypto_path)" --eea "$nea" --ck "$ck" --count "$cnt" \
+                --bearer "$bearer" --direction "$direction" \
+                --message "${plain:-00}" --bit-length $(( ${#plain} / 2 * 8 )) 2>&1) ||
+            { printf 'ERROR\t--pdcp-build: %s\n' "$(printf '%s' "$ks" | head -1)" >&2; return 1; }
+        ks=$(printf '%s\n' "$ks" | awk -F'\t' '$1=="keystream_output"{print $2}')
+        ciphered=$(nair_xor_hex "${plain:-}" "$ks")
+        body="$ciphered"
+        printf 'nea\t128-NEA%s\n' "$nea"
+        printf 'ciphered_sdu\t%s\n' "${ciphered:-}"
+    else
+        printf 'nea\tnone\n'
+        printf 'ciphered_sdu\t%s\n' "$plain"
+    fi
+
+    local mac=""
+    if [[ "$nia" == 0 ]]; then
+        # NIA0 is the null integrity algorithm: the MAC-I is four zero octets,
+        # present in the PDU so the receiver's offset arithmetic still holds.
+        mac=$(printf '%08X' 0)
+        printf 'nia\t128-NIA0\n'
+        printf 'mac_i\t%s\n' "$mac"
+        printf 'note\t128-NIA0 is the null integrity algorithm; the MAC-I is all zeros\n'
+    elif [[ -n "$nia" ]]; then
+        local m
+        m=$(python3 "$(nair_crypto_path)" --eia "$nia" --ik "$ik" --count "$cnt" \
+              --bearer "$bearer" --direction "$direction" \
+              --message "${plain:-}" --bit-length $(( ${#plain} / 2 * 8 )) 2>&1) ||
+            { printf 'ERROR\t--pdcp-build: %s\n' "$(printf '%s' "$m" | head -1)" >&2; return 1; }
+        mac=$(printf '%s\n' "$m" | awk -F'\t' '$1=="mac"{print $2}')
+        printf 'nia\t128-NIA%s\n' "$nia"
+        printf 'mac_i\t%s\n' "$mac"
+    else
+        printf 'nia\tnone\n'
+        printf 'mac_i\t-\n'
+    fi
+
+    local pdu="${hdr}${body}${mac}"
+    printf 'pdu\t%s\n' "$pdu"
+    printf 'pdu_octets\t%d\n' "$(( ${#pdu} / 2 ))"
+    printf 'payload_octets\t%d\n' "$(( ${#plain} / 2 ))"
+    return 0
+}
+
+nair_pdcp_parse() {
+    local snlen="${1:-}" hex="${2:-}" maclen="${3:-0}"
+    [[ "$maclen" =~ ^[0-9]+$ ]] || maclen=0
+    [[ "$snlen" == 12 || "$snlen" == 18 ]] ||
+        { printf 'ERROR\t--pdcp-parse: say 12 or 18 for the SN width\n' >&2; return 2; }
+    [[ "$hex" =~ ^[0-9a-fA-F]+$ ]] ||
+        { printf 'ERROR\t--pdcp-parse: PDU must be hex\n' >&2; return 2; }
+    (( ${#hex} % 2 == 0 )) ||
+        { printf 'ERROR\t--pdcp-parse: PDU must be whole bytes\n' >&2; return 2; }
+    local hlen=$(( snlen == 12 ? 2 : 3 ))
+    (( ${#hex} / 2 >= hlen )) ||
+        { printf 'ERROR\t--pdcp-parse: %s octets is shorter than the %s-octet header\n' \
+            "$(( ${#hex} / 2 ))" "$hlen" >&2; return 2; }
+
+    local h="${hex:0:hlen*2}" up
+    up=$(printf '%s' "$hex" | tr 'a-f' 'A-F')
+    local b0=$(( 16#${h:0:2} ))
+    local dc=$(( (b0 >> 7) & 1 )) sn
+    if [[ "$snlen" == 12 ]]; then
+        sn=$(( ((b0 & 0x0F) << 8) | 16#${h:2:2} ))
+    else
+        sn=$(( ((b0 & 0x03) << 16) | (16#${h:2:2} << 8) | 16#${h:4:2} ))
+    fi
+    local rest="${up:hlen*2}"
+
+    printf 'sn_length\t%s\n' "$snlen"
+    printf 'dc\t%s\n' "$dc"
+    printf 'reserved\t%s\n' "$(( snlen == 12 ? (b0 >> 4) & 0x07 : (b0 >> 3) & 0x0F ))"
+    printf 'sn\t%s\n' "$sn"
+    printf 'header\t%s\n' "$h"
+    printf 'pdu_octets\t%d\n' "$(( ${#up} / 2 ))"
+
+    # MAC-I is optional and cannot be distinguished from SDU octets without
+    # the key, so the caller states how many trailing octets are MAC-I.
+    printf 'mac_i_length\t%s\n' "$maclen"
+    printf 'mac_i\t%s\n' "$([[ "$maclen" -gt 0 ]] && printf '%s' "${rest: -$(( maclen * 2 ))}" || printf '-')"
+    local body="$rest"
+    [[ "$maclen" -gt 0 ]] && body="${rest:0:${#rest}-$(( maclen * 2 ))}"
+    printf 'sdu\t%s\n' "$body"
+    printf 'sdu_octets\t%d\n' "$(( ${#body} / 2 ))"
+    return 0
+}
+
 # ── RRC builders ────────────────────────────────────────────────────────
 
 # RRCReconfiguration (DL-DCCH-Message), APER.
@@ -6073,6 +6378,60 @@ NAIR_WAVE_LIB
     chk oai-run "$(printf '%s\n' "$oai" | grep -c "nr-softmodem -O gnb.conf --sa --rfsim")" "1"
     chk oai-pci "$(printf '%s\n' "$oai2" | awk -F'\t' '$1=="pci"{print $2}')" "5"
     chk oai-noargs "$(nair_oai_gnb abc >/dev/null 2>&1; echo $?)" "2"
+    # SDAP: the DL and UL headers are different formats, so the vectors below
+    # are chosen to show that bit 8 means RDI in one direction and D/C in the
+    # other, and that QFI is the low 6 bits either way.
+    out=$(nair_sdap_build dl 9 aabbccdd 1 0)
+    chk sdap-dl-header     "$(fld "$out" header)" "89"
+    chk sdap-dl-pdu        "$(fld "$out" pdu)" "89AABBCCDD"
+    chk sdap-dl-octets     "$(fld "$out" pdu_octets)" "5"
+    out=$(nair_sdap_build dl 63 "" 0 1)
+    chk sdap-dl-max-qfi    "$(fld "$out" header)" "7F"
+    out=$(nair_sdap_build ul 63 ffff)
+    chk sdap-ul-header     "$(fld "$out" header)" "BF"
+    chk sdap-ul-pdu        "$(fld "$out" pdu)" "BFFFFF"
+    out=$(nair_sdap_parse dl 89aabbccdd)
+    chk sdap-parse-dl-qfi  "$(fld "$out" qfi)" "9"
+    chk sdap-parse-dl-rdi  "$(fld "$out" rdi)" "1"
+    chk sdap-parse-dl-rqi  "$(fld "$out" rqi)" "0"
+    chk sdap-parse-dl-sdu  "$(fld "$out" sdu)" "AABBCCDD"
+    out=$(nair_sdap_parse ul bfffff)
+    chk sdap-parse-ul-qfi  "$(fld "$out" qfi)" "63"
+    chk sdap-parse-ul-dc   "$(fld "$out" dc)" "1"
+    out=$(nair_sdap_parse ul ffff)
+    chk sdap-parse-ul-reserved-warns \
+        "$(printf '%s\n' "$out" | grep -c '^warning')" "1"
+    chk sdap-parse-same-octet-differs \
+        "$(nair_sdap_parse dl c0 | awk -F'\t' '$1=="qfi"{print $2}')/$(nair_sdap_parse ul c0 \
+            | awk -F'\t' '$1=="dc"{print $2}')" "0/1"
+    chk sdap-build-bad-qfi "$(nair_sdap_build dl 64 aa >/dev/null 2>&1; echo $?)" "2"
+    chk sdap-build-bad-dir "$(nair_sdap_build sideways 1 aa >/dev/null 2>&1; echo $?)" "2"
+    chk sdap-parse-bad-dir "$(nair_sdap_parse sideways aa >/dev/null 2>&1; echo $?)" "2"
+    chk sdap-parse-odd-hex  "$(nair_sdap_parse dl abc >/dev/null 2>&1; echo $?)" "2"
+    # PDCP: the two SN widths put the sequence number at different offsets, and
+    # the MAC-I is over the PLAINTEXT even when the SDU is ciphered.
+    CK=d3c5d592327fb11c4035c6680af8c6d1
+    out=$(nair_pdcp_build --sn12 --sn 9 --sdu aabbccdd)
+    chk pdcp-12-header    "$(fld "$out" header)" "8009"
+    chk pdcp-12-pdu       "$(fld "$out" pdu)" "8009AABBCCDD"
+    out=$(nair_pdcp_build --sn18 --sn 262143 --sdu ffff --nea 0 --ck "$CK" --bearer 31)
+    chk pdcp-18-header    "$(fld "$out" header)" "83FFFF"
+    chk pdcp-18-pdu       "$(fld "$out" pdu)" "83FFFFFFFF"
+    out=$(nair_pdcp_build --sn12 --sn 9 --sdu aabbccdd --nea 2 --ck "$CK" --nia 2 --ik "$CK" --bearer 31 --direction 1)
+    chk pdcp-nea2-sdu     "$(fld "$out" ciphered_sdu)" "36930B41"
+    chk pdcp-nia2-mac     "$(fld "$out" mac_i)" "37751E05"
+    chk pdcp-pdu-order    "$(fld "$out" pdu)" "800936930B4137751E05"
+    out=$(nair_pdcp_build --sn12 --sn 1 --sdu aa --nia 0 --ik "$CK" --bearer 31)
+    chk pdcp-nia0-mac     "$(fld "$out" mac_i)" "00000000"
+    out=$(nair_pdcp_parse 12 800936930B4137751E05 4)
+    chk pdcp-parse-sn     "$(fld "$out" sn)" "9"
+    chk pdcp-parse-sdu    "$(fld "$out" sdu)" "36930B41"
+    chk pdcp-parse-mac    "$(fld "$out" mac_i)" "37751E05"
+    chk pdcp-parse-rsv18  "$(nair_pdcp_parse 18 83FFFF | awk -F'\t' '$1=="reserved"{print $2}')" "0"
+    chk pdcp-bearer-required "$(nair_pdcp_build --sn12 --sn 1 --sdu aa --nea 2 --ck "$CK" >/dev/null 2>&1; echo $?)" "2"
+    chk pdcp-bad-sn       "$(nair_pdcp_build --sn12 --sn 4096 --sdu aa >/dev/null 2>&1; echo $?)" "2"
+    chk pdcp-bad-snlen    "$(nair_pdcp_build --sn16 --sn 1 --sdu aa >/dev/null 2>&1; echo $?)" "2"
+    chk pdcp-parse-short  "$(nair_pdcp_parse 18 8009 >/dev/null 2>&1; echo $?)" "2"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -6250,6 +6609,11 @@ nair_cli_main() {
             else
                 nair_cmd_build_meas_report "$mspec"
             fi ;;
+        --sdap-build)         nair_sdap_build "${1:-}" "${2:-}" "${3:-}" \
+                                                   "${4:-0}" "${5:-0}" "${6:-1}" ;;
+        --sdap-parse)         nair_sdap_parse "${1:-}" "${2:-}" ;;
+        --pdcp-build)         nair_pdcp_build "$@" ;;
+        --pdcp-parse)         nair_pdcp_parse "${1:-}" "${2:-}" "${3:-0}" ;;
         --decode-rrc)         nair_cmd_decode_rrc "${1:-}" ;;
         --beam-sweep)         nair_cmd_beam_sweep "${1:-}" ;;
         --oai-gnb)      nair_oai_gnb "${1:-78}" "${2:-}" "${3:-1}" ;;
@@ -6269,6 +6633,20 @@ Usage: $0 COMMAND
   --decode-mib <hex>            decode a 24-bit MIB payload
   --decode-sib1 <hex>           decode SIB1: PLMN list, TAC, cellIdentity
   --decode-rrc <hex>            decode an RRC PDU built by this module
+  --sdap-build <dl|ul> <qfi> <sdu-hex> [rdi] [rqi] [dc]
+                                build a TS 37.324 SDAP data PDU: RDI/RQI/QFI
+                                in the DL header, D/C/R/QFI in the UL header
+  --sdap-parse <dl|ul> <hex>    decode a SDAP PDU; the direction must be given
+                                because the two header formats share bit 8
+  --pdcp-build sn12|sn18 --sn N --sdu HEX [--dc B] [--nea A --ck KEY
+               --bearer B] [--nia A --ik KEY] [--direction B] [--count N]
+                                build a TS 38.323 PDCP data PDU. MAC-I is
+                                computed over the plaintext and placed after
+                                the ciphered SDU. --bearer is required with
+                                --nea/--nia: the 5-bit BEARER is a property of
+                                the stack, not something this tool may assume
+  --pdcp-parse sn12|sn18 <hex> [maci-octets]
+                                split a PDCP data PDU into header, SDU, MAC-I
   --ssb <band> [i_ssb]          SSB burst set pattern and half-frame timing
   --ssb-waveform <out> [--format cf32|ci16|cu8] [--rate <sps>] [--n-rb <n>]
                  [--pci <n>] [--i-ssb <n>] [--scs <khz>] [--reps <n>]

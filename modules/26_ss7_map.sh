@@ -3796,6 +3796,64 @@ ss7_selftest() {
     chk ispc-malformed      "$(ss7_cmd_ispc nope >/dev/null 2>&1; echo $?)" "2"
     chk ispc-oob-decimal    "$(ss7_cmd_ispc 99999 >/dev/null 2>&1; echo $?)" "2"
 
+    # ── GTT and SCCP screening (Q.704 §14 over Q.713 §3.4) ────────────────
+    # A translation is a row in a table on somebody's STP.  These assertions
+    # cover the table reader and the two decisions it can reach; they do not
+    # claim to know what any real STP is configured with.
+    local gttf="$d/gtt.tsv"
+    printf 'kind\tgt\tcalled_pc\tcalled_ssn\tcalling_pc\tcalling_ssn\taction\tout_pc\tout_ssn\tout_gt\tnote\n' > "$gttf"
+    printf 'gtt\t216*\t-\t-\t-\t-\troute\t2-038-7\t8\t-\tTunisie Telecom HLR\n' >> "$gttf"
+    printf 'gtt\t*\t-\t-\t-\t-\tdrop\t-\t-\t-\tdefault deny\n' >> "$gttf"
+    chk gtt-route-decides  "$(ss7_cmd_gtt_route 21612345678 --rules "$gttf" | awk -F'\t' '$1=="decision"{print $2}')" "route"
+    chk gtt-route-row      "$(ss7_cmd_gtt_route 21612345678 --rules "$gttf" | awk -F'\t' '$1=="rule_line"{print $2}')" "2"
+    chk gtt-route-out-pc   "$(ss7_cmd_gtt_route 21612345678 --rules "$gttf" | awk -F'\t' '$1=="out_point_code"{print $2}')" "2-038-7"
+    chk gtt-route-out-ssn  "$(ss7_cmd_gtt_route 21612345678 --rules "$gttf" | awk -F'\t' '$1=="out_ssn"{print $2}')" "8"
+    chk gtt-route-out-gt   "$(ss7_cmd_gtt_route 21612345678 --rules "$gttf" | awk -F'\t' '$1=="out_gt"{print $2}')" "21612345678"
+    chk gtt-route-keeps-gt "$(ss7_cmd_gtt_route 21612345678 --rules "$gttf" | awk -F'\t' '$1=="reason"{print $2}')" "Tunisie Telecom HLR"
+    chk gtt-route-rc0      "$(ss7_cmd_gtt_route 21612345678 --rules "$gttf" >/dev/null 2>&1; echo $?)" "0"
+    # The catch-all below it drops, and dropping is exit 1, not exit 0.
+    chk gtt-deny-decides   "$(ss7_cmd_gtt_route 441234567890 --rules "$gttf" | awk -F'\t' '$1=="decision"{print $2}')" "drop"
+    chk gtt-deny-row       "$(ss7_cmd_gtt_route 441234567890 --rules "$gttf" | awk -F'\t' '$1=="rule_line"{print $2}')" "3"
+    chk gtt-deny-rc1       "$(ss7_cmd_gtt_route 441234567890 --rules "$gttf" >/dev/null 2>&1; echo $?)" "1"
+    # File order decides: put the deny first and the same number is dropped.
+    local gttr="$d/gtt-rev.tsv"
+    printf 'kind\tgt\tcalled_pc\tcalled_ssn\tcalling_pc\tcalling_ssn\taction\tout_pc\tout_ssn\tout_gt\tnote\n' > "$gttr"
+    printf 'gtt\t216*\t-\t-\t-\t-\tdrop\t-\t-\t-\tdeny first\n' >> "$gttr"
+    printf 'gtt\t*\t-\t-\t-\t-\troute\t2-038-7\t8\t-\troute rest\n' >> "$gttr"
+    chk gtt-order-matters  "$(ss7_cmd_gtt_route 21612345678 --rules "$gttr" | awk -F'\t' '$1=="decision"{print $2}')" "drop"
+    chk gtt-order-not-resorted "$(ss7_cmd_gtt_route 21612345678 --rules "$gttr" | awk -F'\t' '$1=="rule_line"{print $2}')" "2"
+    # No table is a refusal naming what is missing, never a guessed answer.
+    chk gtt-no-rules-rc    "$(ss7_cmd_gtt_route 21612345678 >/dev/null 2>&1; echo $?)" "2"
+    chk gtt-no-rules-says  "$(ss7_cmd_gtt_route 21612345678 2>&1 >/dev/null | grep -c 'a row in a table')" "1"
+    chk gtt-missing-file   "$(ss7_cmd_gtt_route 21612345678 --rules "$d/nope.tsv" >/dev/null 2>&1; echo $?)" "2"
+    chk gtt-bad-gt         "$(ss7_cmd_gtt_route +216-12 --rules "$gttf" >/dev/null 2>&1; echo $?)" "2"
+    # A header that does not match the columns is a defect in the file, and a
+    # file read against the wrong header would answer from the wrong column.
+    local gttb="$d/gtt-bad.tsv"
+    printf 'kind\tgt\taction\n' > "$gttb"
+    printf 'gtt\t216*\troute\n' >> "$gttb"
+    chk gtt-bad-header     "$(ss7_cmd_gtt_route 21612345678 --rules "$gttb" >/dev/null 2>&1; echo $?)" "2"
+    chk gtt-bad-header-says "$(ss7_cmd_gtt_route 21612345678 --rules "$gttb" 2>&1 >/dev/null | grep -c 'rules header must be')" "1"
+    # The listing reports every row in file order, header skipped.
+    chk gtt-table-rows     "$(ss7_cmd_gtt_table --rules "$gttf" | awk -F'\t' '$1=="rule_rows"{print $2}')" "2"
+    chk gtt-table-lines    "$(ss7_cmd_gtt_table --rules "$gttf" | awk -F'\t' '$1=="line"{print $2}' | tr '\n' ',')" "2,3,"
+    # ── SCCP screening ───────────────────────────────────────────────────
+    local sccpf="$d/sccp.tsv"
+    printf 'kind\tgt\tcalled_pc\tcalled_ssn\tcalling_pc\tcalling_ssn\taction\tout_pc\tout_ssn\tout_gt\tnote\n' > "$sccpf"
+    printf 'sccp\tudt\t2-038-7\t8\t-\t-\tallow\t-\t-\t-\tHLR accepts unitdata\n' >> "$sccpf"
+    printf 'sccp\t*\t-\t-\t-\t-\tdrop\t-\t-\t-\tscreen everything else\n' >> "$sccpf"
+    chk sccp-allow       "$(ss7_cmd_sccp_screen --called-pc 2-38-7 --called-ssn 8 --type udt --rules "$sccpf" | awk -F'\t' '$1=="decision"{print $2}')" "allow"
+    chk sccp-allow-rc0   "$(ss7_cmd_sccp_screen --called-pc 2-38-7 --called-ssn 8 --type udt --rules "$sccpf" >/dev/null 2>&1; echo $?)" "0"
+    # Zero padding is not identity: 2-38-7 and 2-038-7 are the same 14 bits.
+    chk sccp-pc-padded   "$(ss7_cmd_sccp_screen --called-pc 2-038-7 --called-ssn 8 --type udt --rules "$sccpf" | awk -F'\t' '$1=="decision"{print $2}')" "allow"
+    chk sccp-pc-decimal  "$(ss7_cmd_sccp_screen --called-pc 4407 --called-ssn 8 --type udt --rules "$sccpf" | awk -F'\t' '$1=="called_pc"{print $2}')" "4407"
+    # A different subsystem is a different row.
+    chk sccp-ssn-differs "$(ss7_cmd_sccp_screen --called-pc 2-38-7 --called-ssn 6 --type udt --rules "$sccpf" | awk -F'\t' '$1=="decision"{print $2}')" "drop"
+    chk sccp-ssn-rc1     "$(ss7_cmd_sccp_screen --called-pc 2-38-7 --called-ssn 6 --type udt --rules "$sccpf" >/dev/null 2>&1; echo $?)" "1"
+    # A message type the first rule does not name falls to the catch-all.
+    chk sccp-type-differs "$(ss7_cmd_sccp_screen --called-pc 2-38-7 --called-ssn 8 --type ludt --rules "$sccpf" | awk -F'\t' '$1=="decision"{print $2}')" "drop"
+    chk sccp-no-rules-rc "$(ss7_cmd_sccp_screen --called-pc 2-38-7 >/dev/null 2>&1; echo $?)" "2"
+
         rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
@@ -4823,11 +4881,276 @@ ss7_cmd_m3ua_send() {
         --wait "${MAP_WAIT:-3}" "${hs[@]}"
 }
 
+
+# ── GTT and SCCP screening: what the STP does with the message ─────────
+# A MAP message is not addressed to a host, it is addressed to a global title,
+# and a global title is not an address until a signalling transfer point
+# translates it.  That translation -- the GTT function of ITU-T Q.704 §14 over
+# the SCCP address of Q.713 §3.4 -- and the screening that decides whether the
+# message is allowed through at all are the two places where reachability is
+# actually granted.  Neither is a property of the number: both are rows in a
+# table on somebody's STP.
+#
+# This section evaluates such a table.  It does not invent one.  A toolkit that
+# guessed a translation would be reporting an advertised answer as a measured
+# one, which is the failure mode this project exists to avoid -- so with no
+# rules file it refuses and says what is missing.
+#
+# Rules file: TSV, one header row, these columns in this order.
+#
+#   kind       gtt | sccp
+#   gt         global title digits for a gtt rule; '*' at the end is a prefix
+#              wildcard, so 216* matches every Tunisian MSISDN-shaped GT.
+#              '-' means any.
+#   called_pc  '-' for any; decimal point code, or 'a-b-c' in ITU form
+#   called_ssn '-' for any, else 0..255
+#   calling_pc '-' for any
+#   calling_ssn '-' for any
+#   action     route | drop | allow
+#   out_pc     translated point code (gtt rules); '-' for none
+#   out_ssn    translated subsystem (gtt rules)
+#   out_gt     replacement global title (gtt rules); '-' to keep the original
+#   note       free text, printed as the reason
+#
+# First matching row wins, in file order, because that is how a screening table
+# is built: the operator orders it.  A table sorted by nothing is a table that
+# answers differently than its author meant, so the order is never re-sorted
+# here.
+
+# A GT is a digit string: no separators, no leading '+'.  Refusing here is what
+# keeps a pasted '+216...' from silently matching nothing.
+ss7_gtt_digits() {
+    local g="${1//[[:space:]]/}"
+    g="${g#+}"
+    [[ "$g" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "$g"
+}
+
+# '-', '*' and empty all mean "this field does not constrain the match".
+# A bare '*' as a global title is the catch-all row every screening table ends
+# with, and refusing it would make a default deny impossible to write.
+ss7_gtt_wild() { [[ -z "${1:-}" || "${1:-}" == "-" || "${1:-}" == "*" ]]; }
+
+# A pattern matches when it is '-', an exact digit string, or a prefix with a
+# trailing '*'.  Anything else is a rules file defect, not a near miss.
+ss7_gtt_match() {
+    local pat="$1" gt="$2"
+    ss7_gtt_wild "$pat" && return 0
+    case "$pat" in
+        *'*')
+            local stem="${pat%\*}"
+            [[ -n "$stem" && "$stem" =~ ^[0-9]+$ ]] || return 2
+            [[ "$gt" == "$stem"* ]] ;;
+        *)
+            [[ "$pat" =~ ^[0-9]+$ ]] || return 2
+            [[ "$pat" == "$gt" ]] ;;
+    esac
+}
+
+# Point codes are compared as numbers, not as text: a table that writes 2-038-7
+# and a caller that writes 2-38-7 are the same code, and refusing one of them
+# because of zero padding would make the file useful only to its author.  A
+# dashed code is read in the 3-8-3 ITU form this module already parses, so it
+# and a bare decimal agree when they mean the same 14 bits.
+ss7_gtt_pc_norm() {
+    local p="${1:-}" num
+    ss7_gtt_wild "$p" && { printf '%s' '-'; return 0; }
+    if [[ "$p" == *-* ]]; then
+        num=$(ss7_pc_parse "$p" 3-8-3 2>/dev/null) || num=""
+        if [[ -z "$num" ]]; then
+            num=$(ss7_pc_parse "$p" 7-7 2>/dev/null) || num=""
+        fi
+        if [[ -n "$num" ]]; then printf '%s' "$num"; return 0; fi
+        printf '%s' "$p"; return 0
+    fi
+    if [[ "$p" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$(( 10#$p ))"
+        return 0
+    fi
+    printf '%s' "$p"
+}
+
+# Load the rules file, rejecting a table that cannot be read rather than
+# answering from an empty one.  Prints "line<TAB>col<TAB>col..." rows.
+ss7_gtt_load() {
+    local f="${1:-}"
+    [[ -n "$f" ]] || { printf 'ERROR\t--rules FILE is required: a translation is a row in a table, not a property of the number\n' >&2; return 2; }
+    [[ -r "$f" ]] || { printf 'ERROR\trules file %s is not readable\n' "$f" >&2; return 2; }
+    python3 - "$f" <<'PY'
+import sys
+path = sys.argv[1]
+want = ["kind","gt","called_pc","called_ssn","calling_pc","calling_ssn",
+        "action","out_pc","out_ssn","out_gt","note"]
+rows = []
+with open(path, encoding="utf-8", errors="replace") as fh:
+    for n, line in enumerate(fh, 1):
+        line = line.rstrip("\n")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        cols = line.split("\t")
+        if not rows:
+            got = [c.strip().lower() for c in cols]
+            if got != want:
+                print("ERROR\trules header must be: " + "\t".join(want), file=sys.stderr)
+                raise SystemExit(2)
+            rows.append("\t".join(got))
+            print("\t".join(got))
+            continue
+        if len(cols) < len(want):
+            print("ERROR\trules line %d has %d columns, the header has %d"
+                  % (n, len(cols), len(want)), file=sys.stderr)
+            raise SystemExit(2)
+        if cols[0].strip().lower() not in ("gtt", "sccp"):
+            print("ERROR\trules line %d: kind must be gtt or sccp, not %r"
+                  % (n, cols[0]), file=sys.stderr)
+            raise SystemExit(2)
+        act = cols[6].strip().lower()
+        if cols[0].strip().lower() == "gtt" and act not in ("route", "drop"):
+            print("ERROR\trules line %d: a gtt rule routes or drops, not %r" % (n, act), file=sys.stderr)
+            raise SystemExit(2)
+        if cols[0].strip().lower() == "sccp" and act not in ("allow", "drop"):
+            print("ERROR\trules line %d: a sccp rule allows or drops, not %r" % (n, act), file=sys.stderr)
+            raise SystemExit(2)
+        print("%d\t%s" % (n, "\t".join(c.strip() for c in cols[:len(want)])))
+PY
+}
+
+ss7_cmd_gtt_table() {
+    local f="" a
+    while (( $# )); do
+        case "$1" in
+            --rules) f="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--gtt-table: unknown argument %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    local loaded
+    loaded=$(ss7_gtt_load "$f") || return $?
+    printf '%s\n' "$loaded" \
+        | awk -F'\t' 'NR>1{printf "line\t%s\tkind\t%s\tgt\t%s\tcalled\t%s/%s\tcalling\t%s/%s\taction\t%s\tout\t%s/%s/%s\tnote\t%s\n",
+                       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12}'
+    printf 'rules_file\t%s\nrule_rows\t%s\n' "$f" "$(printf '%s\n' "$loaded" | awk 'NR>1' | wc -l | tr -d ' ')"
+    printf 'order\tfile order; the first matching row decides and nothing is re-sorted\n'
+    return 0
+}
+
+ss7_cmd_gtt_route() {
+    local gt="" ssn="" tt="" np="" nai="" f=""
+    while (( $# )); do
+        case "$1" in
+            --ssn) ssn="${2:-}"; shift 2 ;;
+            --tt)  tt="${2:-}";  shift 2 ;;
+            --np)  np="${2:-}";  shift 2 ;;
+            --nai) nai="${2:-}"; shift 2 ;;
+            --rules) f="${2:-}"; shift 2 ;;
+            -*) printf 'ERROR\t--gtt-route: unknown flag %s\n' "$1" >&2; return 2 ;;
+            *) if [[ -z "$gt" ]]; then gt="$1"; else printf 'ERROR\t--gtt-route takes one global title\n' >&2; return 2; fi; shift ;;
+        esac
+    done
+    local digits; digits=$(ss7_gtt_digits "$gt") || {
+        printf 'ERROR\t--gtt-route needs a global title of digits, got %s\n' "$gt" >&2; return 2; }
+    local loaded
+    loaded=$(ss7_gtt_load "$f") || return $?
+    local ssn_v="${ssn:--}" pc_v="-" 
+    local line kind rgt rpc rssn cpc cssn act opc ossn ogt note
+
+    while IFS=$'\t' read -r line kind rgt rpc rssn cpc cssn act opc ossn ogt note; do
+        [[ "$kind" == "kind" ]] && continue
+        [[ "$kind" == "gtt" ]] || continue
+        ss7_gtt_match "$rgt" "$digits" || {
+            local mrc=$?
+            (( mrc == 2 )) && { printf 'ERROR\trules line %s: global title pattern %s is neither digits, digits followed by *, nor -\n' "$line" "$rgt" >&2; return 2; }
+            continue; }
+        if ! ss7_gtt_wild "$rssn" && [[ "$ssn_v" != "$rssn" ]]; then continue; fi
+        # Called point code on a GTT rule constrains only when both are known:
+        # the input side of GTT is the global title, not a point code.
+        printf 'gt\t%s\nnature_of_address\t%s\nnumbering_plan\t%s\ntranslation_type\t%s\nssn\t%s\n' \
+            "$digits" "${nai:--}" "${np:--}" "${tt:--}" "$ssn_v"
+        printf 'rules_file\t%s\nrule_line\t%s\nrule_gt\t%s\n' "$f" "$line" "$rgt"
+        printf 'decision\t%s\n' "$act"
+        printf 'out_point_code\t%s\nout_ssn\t%s\nout_gt\t%s\n' \
+            "${opc:--}" "${ossn:--}" "$([[ "$ogt" == "-" ]] && printf '%s' "$digits" || printf '%s' "$ogt")"
+        printf 'reason\t%s\n' "${note:-the table says so}"
+        if [[ "$act" == "route" ]]; then
+            printf 'meaning\tthe message leaves this STP for %s; the translation is the whole of what the global title bought, and the destination is where the SCCP connection is actually terminated\n' "${opc:--}"
+            printf 'attack\tthe table is readable by anyone who can read the STP configuration and writable by anyone who can change it; a rule inserted above this one takes the traffic without touching the number that addresses it\n'
+            return 0
+        fi
+        printf 'meaning\tthe message is dropped at this STP; the sender sees a timeout or an UDTS, and a global title that routes from another STP will still arrive\n'
+        printf 'attack\tdropping is per-STP, so a screening rule here protects this entry point only -- the same GT through a peer STP is a different question\n'
+        return 1
+    done <<<"$loaded"
+    printf 'gt\t%s\nssn\t%s\n' "$digits" "$ssn_v"
+    printf 'rules_file\t%s\ndecision\tno-match\n' "$f"
+    printf 'reason\tno row matched: a real STP would apply its default route, which this table does not describe\n'
+    printf 'meaning\tthe table does not cover this global title, so the answer is unknown rather than unroutable\n'
+    return 1
+}
+
+ss7_cmd_sccp_screen() {
+    local f="" cpc="" cssn="" ocpc="" ocssn="" mtype=""
+    while (( $# )); do
+        case "$1" in
+            --rules) f="${2:-}"; shift 2 ;;
+            --called-pc) cpc="${2:-}"; shift 2 ;;
+            --called-ssn) cssn="${2:-}"; shift 2 ;;
+            --calling-pc) ocpc="${2:-}"; shift 2 ;;
+            --calling-ssn) ocssn="${2:-}"; shift 2 ;;
+            --type) mtype="${2:-}"; shift 2 ;;
+            -*) printf 'ERROR\t--sccp-screen: unknown flag %s\n' "$1" >&2; return 2 ;;
+            *) shift ;;
+        esac
+    done
+    local loaded
+    loaded=$(ss7_gtt_load "$f") || return $?
+    local line kind rgt rpc rssn rcpc rcssn act opc ossn ogt note
+    local cpc_n; cpc_n=$(ss7_gtt_pc_norm "$cpc")
+    local ocpc_n; ocpc_n=$(ss7_gtt_pc_norm "$ocpc")
+
+    printf 'called_pc\t%s\ncalled_ssn\t%s\ncalling_pc\t%s\ncalling_ssn\t%s\nmessage_type\t%s\n' \
+        "${cpc_n:--}" "${cssn:--}" "${ocpc_n:--}" "${ocssn:--}" "${mtype:--}"
+    printf 'rules_file\t%s\n' "$f"
+
+    while IFS=$'\t' read -r line kind rgt rpc rssn rcpc rcssn act opc ossn ogt note; do
+        [[ "$kind" == "kind" ]] && continue
+        [[ "$kind" == "sccp" ]] || continue
+        # The gt column of an sccp rule carries the message type when it is not
+        # '-': 'udt' allows unitdata, 'udts' its error, '*' the lot.
+        if ! ss7_gtt_wild "$rgt" && [[ "${mtype:--}" != "$rgt" ]]; then continue; fi
+        if ! ss7_gtt_wild "$rpc"; then
+            local rpc_n; rpc_n=$(ss7_gtt_pc_norm "$rpc")
+            [[ "$cpc_n" == "$rpc_n" ]] || continue
+        fi
+        if ! ss7_gtt_wild "$rssn" && [[ "${cssn:--}" != "$rssn" ]]; then continue; fi
+        if ! ss7_gtt_wild "$rcpc"; then
+            local rcpc_n; rcpc_n=$(ss7_gtt_pc_norm "$rcpc")
+            [[ "$ocpc_n" == "$rcpc_n" ]] || continue
+        fi
+        if ! ss7_gtt_wild "$rcssn" && [[ "${ocssn:--}" != "$rcssn" ]]; then continue; fi
+        printf 'rule_line\t%s\nrule_type\t%s\nrule_called\t%s/%s\nrule_calling\t%s/%s\n' \
+            "$line" "$rgt" "$rpc" "$rssn" "$rcpc" "$rcssn"
+        printf 'decision\t%s\nreason\t%s\n' "$act" "${note:-the table says so}"
+        if [[ "$act" == "allow" ]]; then
+            printf 'meaning\tthe message is carried; screening asked only about the addresses it named, so the payload is untouched\n'
+            printf 'attack\ta message that matches no row falls to the STP default, which is normally to carry: an allowlist that is not exhaustive screens nothing\n'
+            return 0
+        fi
+        printf 'meaning\tthe message is discarded at the STP before it reaches the destination SCCP entity\n'
+        printf 'attack\tscreening by called address only protects the destination; screening by calling address protects everyone downstream of it\n'
+        return 1
+    done <<<"$loaded"
+    printf 'decision\tno-match\nreason\tthe table does not cover these addresses\n'
+    printf 'meaning\tunknown, not allowed: a real STP applies its own default, and this table is not it\n'
+    return 1
+}
+
 ss7_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
     case "$cmd" in
         --status-tsv)    ss7_cli_status_tsv ;;
+        --gtt-route)     ss7_cmd_gtt_route "$@" ;;
+        --gtt-table)     ss7_cmd_gtt_table "$@" ;;
+        --sccp-screen)   ss7_cmd_sccp_screen "$@" ;;
         --decode-msu)    ss7_cmd_decode_msu "${1:-}" ;;
         --decode-tcap)   ss7_cmd_decode_tcap "${1:-}" ;;
         --decode-sigtran) ss7_cmd_decode_sigtran "${1:-}" ;;
@@ -4928,6 +5251,14 @@ Usage: $0 COMMAND
   --ispc <pc|4-024-0>        who owns the point code, per the ITU Operational
                              Bulletin's ISPC annex (requires
                              tools/fetch-reference-data.sh --only ispc)
+  --gtt-route <gt> [--ssn N] [--tt N] [--np N] [--nai N] --rules FILE
+                             translate a global title through a GTT table and
+                             name the row that decided it
+  --gtt-table --rules FILE   list the loaded GTT/SCCP table with line numbers
+  --sccp-screen --rules FILE [--called-pc PC] [--called-ssn N]
+                             [--calling-pc PC] [--calling-ssn N] [--type T]
+                             decide whether the STP carries the message, and
+                             name the row that decided
   --surface                  attack surface notes
   --require-stp              report the lab STP, by name if absent
   --plan <stp-lab|ipx-path>  write a handed-off plan naming the testbed

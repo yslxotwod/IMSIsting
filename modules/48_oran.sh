@@ -222,10 +222,30 @@ oran_selftest() {
     chk a1-attack "$([[ "$(fld "$out" attack)" == forged* ]] && echo yes || echo no)" "yes"
     chk a1-bad "$(oran_a1_put x 1 >/dev/null 2>&1; echo $?)" "2"
     out=$(oran_e2_control 2 1 0)
-    chk e2-proc "$(fld "$out" e2ap_procedure_code)" "6"
+    chk e2-proc "$(fld "$out" e2ap_procedure_code)" "4"
     chk e2-sm "$(fld "$out" ran_function)" "ORAN-E2SM-RC"
     chk e2-bad "$(oran_e2_control x 1 >/dev/null 2>&1; echo $?)" "2"
     chk xapp-sub "$(oran_xapp_attack rogue | awk -F'\t' '$1=="subscription" && $2 ~ /KPM/{print "yes"}')" "yes"
+
+    # 4b. The encoded RIC Control Request: real APER octets, and the encoder's
+    # own vectors come from pycrate, so these rows fail if the layout drifts.
+    out=$(oran_cmd_e2_build 2 1 0102 aabb)
+    chk e2build-pdu     "$(fld "$out" pdu)" "00040020000004001D00050000010001000500020002001600030201020017000302AABB"
+    chk e2build-octets  "$(fld "$out" pdu_octets)" "36"
+    chk e2build-ppid    "$(fld "$out" ppid)" "70"
+    chk e2build-proc    "$(fld "$out" procedure_code)" "4"
+    chk e2build-ranfunc "$(fld "$out" ran_function_id)" "2"
+    chk e2build-bad-ranfunc "$(oran_cmd_e2_build x 1 >/dev/null 2>&1; echo $?)" "2"
+    chk e2build-bad-hex "$(oran_cmd_e2_build 2 1 0zz2 aabb >/dev/null 2>&1; echo $?)" "2"
+    chk e2-send-usage   "$(oran_cmd_e2_send >/dev/null 2>&1; echo $?)" "2"
+    chk e2ap-encoder-selftest "$(python3 "$(oran_e2ap_tool)" --selftest \
+        | tail -1 | cut -f2)" "PASS"
+    chk e2ap-ppid-const "$(python3 - "$IMSISTING_ROOT/tools/sctp_assoc.py" <<'EOF'
+import sys
+src = open(sys.argv[1]).read()
+print("70" if "PPID_E2AP = 70" in src else "missing")
+EOF
+)" "70"
 
 
     # 5. A1 QoS policy body: consistent with --a1-put, and checked.
@@ -630,7 +650,7 @@ oran_e2_control() {
     local ranfunc="${1:-2}" action="${2:-1}" ue="${3:-0}"
     [[ "$ranfunc" =~ ^[0-9]+$ && "$action" =~ ^[0-9]+$ ]] || { printf 'ERROR\tRAN function id and RIC action id are numeric\n' >&2; return 2; }
     local rn; case "$ranfunc" in 2) rn="ORAN-E2SM-RC" ;; 3) rn="ORAN-E2SM-KPM" ;; *) rn="custom" ;; esac
-    printf 'procedure\tRIC Control Request\ne2ap_procedure_code\t6\nran_function_id\t%s\nran_function\t%s\nric_action_id\t%s\ntarget_ue\t%s\n' \
+    printf 'procedure\tRIC Control Request\ne2ap_procedure_code\t4\nran_function_id\t%s\nran_function\t%s\nric_action_id\t%s\ntarget_ue\t%s\n' \
         "$ranfunc" "$rn" "$action" "$ue"
     printf 'attack\tRIC Control — a compromised or unsigned xApp drives handover, slicing or beam decisions through this message\n'
 }
@@ -707,6 +727,92 @@ oran_xapp_attack() {
     printf 'attack\tan xApp that both reads the whole KPM surface and holds RAN Control can profile every UE and steer the network; if it is unsigned the RIC accepted it without proof of origin\n'
 }
 
+# ── E2AP octets, and the one interface in this tree that rides IP and can send
+# Every verb above stops at a description: --e2-control prints
+# "e2ap_procedure_code 4" and a human reads it.  E2 carries APER over SCTP,
+# exactly the shape S1AP and M3UA already take in this tree, so there was never
+# a reason for it to be the one module whose protocol rides a socket it does not
+# open.  tools/e2ap_asn1.py encodes the PDU and its octets are checked against
+# pycrate, byte for byte, in --selftest.
+#
+# Procedure codes, from E2AP-Constants: id-E2setup 1, id-ErrorIndication 2,
+# id-Reset 3, id-RICcontrol 4, id-RICindication 5, id-RICsubscription 8,
+# id-RICsubscriptionDelete 9.  The number this module used to print for RIC
+# Control was 6, which is not a procedure code in any release of E2AP; a tool
+# that names a wrong code sends a message the near-RT RIC answers with
+# abstract-syntax-error-reject.
+#
+# The PPID matters as much as the code: E2 rides PPID 70, not 18 (S1AP) and not
+# 132 (M3UA).  A receiver demultiplexes on it, so an E2AP PDU sent with the S1AP
+# PPID is handed to the S1AP decoder and dropped.
+oran_e2ap_tool() {
+    printf '%s/tools/e2ap_asn1.py' "$IMSISTING_ROOT"
+}
+
+# --e2-build: the octets of a RIC Control Request, no radio, no socket.
+# The RAN function id is the E2 node's advertised id, the RIC request id is the
+# xApp's own numbering, and the E2SM header and message are opaque to E2AP --
+# which is the point: authority over the RAN function is asserted by whichever
+# xApp the RIC accepted, and nothing in the message proves which xApp sent it.
+oran_cmd_e2_build() {
+    local ranfunc="${1:-2}" action="${2:-1}" header="${3:-0102}" message="${4:-aabb}"
+    local tool; tool=$(oran_e2ap_tool)
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; no encoder\n' "$tool" >&2; return 1; }
+    [[ "$ranfunc" =~ ^[0-9]+$ ]] || { printf 'ERROR\tran-function id is numeric\n' >&2; return 2; }
+    [[ "$action" =~ ^[0-9]+$ ]] || { printf 'ERROR\tRIC action id is numeric\n' >&2; return 2; }
+    [[ "${header}${message}" =~ ^([0-9a-fA-F]{2})*$ ]] || {
+        printf 'ERROR\theader and message are whole hex octets\n' >&2; return 2; }
+    local out pdu
+    out=$(python3 "$tool" --ric-control "$action" 1 "$ranfunc" "$header" "$message" 2>&1) || {
+        printf 'ERROR\t%s\n' "$(printf '%s' "$out" | head -1)" >&2; return 1; }
+    pdu=$(printf '%s\n' "$out" | awk -F'\t' '$1=="pdu"{print $2}')
+    [[ -n "$pdu" ]] || { printf 'ERROR\tthe encoder produced no PDU\n' >&2; return 1; }
+    printf 'message\tRIC Control Request\n'
+    printf 'transport\tE2AP over APER, SCTP\n'
+    printf 'ppid\t70\n'
+    printf 'procedure_code\t4\n'
+    printf 'ran_function_id\t%s\n' "$ranfunc"
+    printf 'ric_request_id\t%s/1\n' "$action"
+    printf 'ric_action_id\t%s\n' "$action"
+    printf 'control_header\t%s\n' "${header^^}"
+    printf 'control_message\t%s\n' "${message^^}"
+    printf 'pdu\t%s\n' "$pdu"
+    printf 'pdu_octets\t%s\n' "$(( ${#pdu} / 2 ))"
+    printf 'note\tRICrequestID carries only the xApp own numbering: the near-RT RIC attributes the message to the identity its E2 setup established, so a second xApp that knows the request id can address the same action\n'
+    printf 'attack\tRIC Control -- driving handover, slicing or beam decisions through a near-RT RIC\n'
+    return 0
+}
+
+# --e2-send: the same octets, over SCTP, with the PPID the E2 interface uses.
+# There is no arming here and none is accepted: the verb sends on the first
+# invocation, because an E2 interface that waits for a flag is the gap this
+# section exists to close.
+oran_cmd_e2_send() {
+    local host="${1:-}" port="${2:-36421}" ranfunc="${3:-2}" action="${4:-1}"
+    local tool; tool=$(oran_e2ap_tool)
+    local sctp="$IMSISTING_ROOT/tools/sctp_assoc.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\t%s is missing; no encoder\n' "$tool" >&2; return 1; }
+    [[ -f "$sctp" ]] || { printf 'ERROR\t%s is missing; cannot send\n' "$sctp" >&2; return 1; }
+    if [[ -z "$host" ]]; then
+        printf 'ERROR\tneed <ric-host> [port] [ranfunc] [action]\n' >&2
+        return 2
+    fi
+    [[ "$ranfunc" =~ ^[0-9]+$ && "$action" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\tran-function id and RIC action id are numeric\n' >&2; return 2; }
+    local out pdu
+    out=$(python3 "$tool" --ric-control "$action" 1 "$ranfunc" 0102 aabb 2>&1) || {
+        printf 'ERROR\tthe encoder failed: %s\n' "$(printf '%s' "$out" | head -1)" >&2; return 1; }
+    pdu=$(printf '%s\n' "$out" | awk -F'\t' '$1=="pdu"{print $2}')
+    [[ -n "$pdu" ]] || { printf 'ERROR\tthe encoder produced no PDU\n' >&2; return 1; }
+    printf 'leg\tE2AP over SCTP\n'
+    printf 'target\t%s:%s\n' "$host" "$port"
+    printf 'ppid\t70\n'
+    printf 'pdu_octets\t%s\n' "$(( ${#pdu} / 2 ))"
+    printf 'note\tno handshake is sent: the SCTP association must already be up, which is what an E2 setup establishes\n'
+    timeout 30 python3 "$sctp" send "$host" "$port" "$pdu" --ppid 70 \
+        --wait "${ORAN_WAIT:-3}"
+}
+
 oran_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -720,6 +826,8 @@ oran_cli_main() {
         --qos-policy)      oran_qos_policy "${1:-20000}" "${2:-1}" "${3:-global}" ;;
         --qos-policy-check) oran_qos_policy_check "${1:-}" ;;
         --e2-control)      oran_e2_control "${1:-2}" "${2:-1}" "${3:-0}" ;;
+        --e2-build)        oran_cmd_e2_build "${1:-2}" "${2:-1}" "${3:-0102}" "${4:-aabb}" ;;
+        --e2-send)         oran_cmd_e2_send "${1:-}" "${2:-36421}" "${3:-2}" "${4:-1}" ;;
         --e2-subscribe)    oran_e2_subscribe "${1:-1000}" "${2:-1}" ;;
         --xapp-attack)     oran_xapp_attack "${1:-rogue-xapp}" ;;
         --a1-poison)       oran_a1_poison "${1:-1}" "${2:-2}" "${3:-2}" ;;
@@ -742,7 +850,12 @@ Usage: $0 COMMAND
                                           locally for --a1-put (nothing is sent)
   --qos-policy-check <json>               validate that body; unknown keys are
                                           refused, not ignored
-  --e2-control [ranfunc] [action] [ue]    RIC Control (E2AP procedure 6) shape
+  --e2-control [ranfunc] [action] [ue]    RIC Control (E2AP procedure 4) shape
+  --e2-build [ranfunc] [action] [hdr-hex] [msg-hex]
+                            the encoded RIC Control Request: real E2AP APER
+                            octets, PPID 70, checked against pycrate
+  --e2-send <host> [port] [ranfunc] [action]
+                            encode and send it over SCTP to a near-RT RIC
   --e2-subscribe [period_ms] [style]   D2: the KPM subscription that returns
                           per-UE telemetry to any accepted xApp
   --xapp-attack [name]      the over-broad xApp model

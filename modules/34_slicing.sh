@@ -2603,6 +2603,39 @@ CONF
     chk ursp-audit-none    "$(slic_cmd_ursp_audit >/dev/null 2>&1; echo $?)" "2"
     chk ursp-apn-bad-rc    "$(slic_apn_encode 'a..b' >/dev/null 2>&1; echo $?)" "2"
 
+    # NSAC: a counter at its maximum refuses, and the refusal is a named value
+    # rather than a generic failure, so a harness can tell it from a transport
+    # error. Headroom is reported as a signed number on purpose: a limit that
+    # was lowered under live UEs goes negative and must not be read as "full".
+    out=$(slic_cmd_nsac_admit --sst 1 --sd 000001 --ues 10 --ue-max 10 2>/dev/null)
+    chk nsac-ue-at-max      "$(fld "$out" decision)" "deny"
+    chk nsac-ue-at-max-rc   "$(slic_cmd_nsac_admit --sst 1 --ues 10 --ue-max 10 >/dev/null 2>&1; echo $?)" "1"
+    out=$(slic_cmd_nsac_admit --sst 1 --ues 9 --ue-max 10 2>/dev/null)
+    chk nsac-ue-headroom    "$(fld "$out" headroom)" "1"
+    chk nsac-ue-allow       "$(fld "$out" decision)" "allow"
+    chk nsac-ue-allow-rc    "$(slic_cmd_nsac_admit --sst 1 --ues 9 --ue-max 10 >/dev/null 2>&1; echo $?)" "0"
+    out=$(slic_cmd_nsac_admit --sst 1 --ues 12 --ue-max 10 2>/dev/null)
+    chk nsac-over-negative  "$(fld "$out" headroom)" "-2"
+    chk nsac-over-deny      "$(fld "$out" decision)" "deny"
+    out=$(slic_cmd_nsac_admit --sst 1 --sd 000001 --pdu 0 --pdu-max 1 --kind pdu 2>/dev/null)
+    chk nsac-pdu-kind       "$(fld "$out" kind)" "pdu"
+    chk nsac-pdu-allow      "$(fld "$out" decision)" "allow"
+    chk nsac-key-sd         "$(fld "$(slic_cmd_nsac_admit --sst 1 --sd 000001 --ues 0 --ue-max 1 2>/dev/null)" snssai)" "SST=1 SD=000001"
+    chk nsac-key-no-sd      "$(fld "$(slic_cmd_nsac_admit --sst 1 --ues 0 --ue-max 1 2>/dev/null)" snssai)" "SST=1 SD=absent"
+    chk nsac-sst-range      "$(slic_cmd_nsac_admit --sst 256 --ues 0 --ue-max 1 >/dev/null 2>&1; echo $?)" "2"
+    chk nsac-sd-width       "$(slic_cmd_nsac_admit --sst 1 --sd 0001 --ues 0 --ue-max 1 >/dev/null 2>&1; echo $?)" "2"
+    chk nsac-kind-bad       "$(slic_cmd_nsac_admit --sst 1 --ues 0 --ue-max 1 --kind session >/dev/null 2>&1; echo $?)" "2"
+    chk nsac-missing-max    "$(slic_cmd_nsac_admit --sst 1 --ues 0 >/dev/null 2>&1; echo $?)" "2"
+    # NSSAA: six steps, and the row that keeps the two gates apart must be there.
+    out=$(slic_cmd_nssaa_flow --sst 1 2>/dev/null)
+    chk nssaa-steps         "$(printf '%s\n' "$out" | grep -c '^step')" "6"
+    chk nssaa-method        "$(fld "$out" method)" "EAP-AKA'"
+    chk nssaa-not-nsac      "$(fld "$out" not_nsac | grep -c 'separate')" "1"
+    out=$(slic_cmd_nssaa_flow --sst 1 --method none 2>/dev/null)
+    chk nssaa-none          "$(fld "$out" nssaa | grep -c 'not run')" "1"
+    chk nssaa-bad-method    "$(slic_cmd_nssaa_flow --sst 1 --method pap >/dev/null 2>&1; echo $?)" "2"
+    chk nssaa-bad-sst       "$(slic_cmd_nssaa_flow --sst 999 >/dev/null 2>&1; echo $?)" "2"
+
     rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
@@ -2688,6 +2721,152 @@ M
     done
 }
 
+# ── NSSAA and NSAC: the two things a slice can refuse ───────────────────
+#
+# A slice is not just an S-NSSAI in a list. Two independent gates can stop a UE
+# that already holds a valid S-NSSAI, and neither is modelled anywhere else in
+# this tree:
+#
+#   NSSAA  (TS 23.502 4.2.9)  Network Slice-Specific Authentication and
+#          Authorization. The AMF hands the UE to the (S)NSSAAF, which runs an
+#          EAP method. Until it succeeds the S-NSSAI is not in the Allowed
+#          NSSAI, and a UE that skips it is refused with
+#          #N1_MODE_NOT_ALLOWED / #73 or keeps retrying into a registration
+#          loop. This is why "the UE has the slice in its requested NSSAI"
+#          never proves the slice is usable.
+#
+#   NSAC   (TS 23.501 5.15.11, TS 23.502 4.15.6)  Network Slice Admission
+#          Control. The NSACF holds a per-S-NSSAI maximum for the number of
+#          registered UEs and for the number of PDU sessions. It is a counter,
+#          not a policy engine: when the counter is at the maximum the next
+#          registration or session is refused with #69 (no suitable cells in
+#          tracking area) at the RAN, or a PDU session establishment reject,
+#          even though everything else about the request is valid.
+#
+# A plan that names a S-NSSAI and stops there answers neither. These two verbs
+# answer them, and they answer with the counter arithmetic rather than with a
+# paragraph, so a test harness can assert on the decision.
+
+slic_nsac_usage() {
+    cat <<'EOF'
+--nsac-admit --sst <0..255> [--sd <6 hex>] --ues <n> --ue-max <n>
+             [--pdu <n> --pdu-max <n>] [--kind ue|pdu]
+    Run the NSACF admission decision for one S-NSSAI against the counters a UE
+    would meet. Exit 0 admits, 1 refuses with the reason. --kind ue checks the
+    registered-UE counter, --kind pdu the PDU session counter.
+--nssaa-flow --sst <0..255> [--sd <6 hex>] [--method aka-prime|tls|none]
+    Print the NSSAA exchange in message order with what each side must do, and
+    what a failure produces. Nothing is transmitted.
+EOF
+}
+
+# slic_snssai_key <sst> <sd> -> "SST=1 SD=000001" or "SST=1 SD=absent"
+slic_nsac_key() {
+    local sst="${1:-}" sd="${2:-}"
+    if [[ -z "$sd" ]]; then printf 'SST=%s SD=absent' "$sst"
+    else printf 'SST=%s SD=%s' "$sst" "${sd^^}"; fi
+}
+
+slic_cmd_nsac_admit() {
+    local sst="" sd="" ues="" uemax="" pdu="" pdumax="" kind=ue
+    while (( $# )); do
+        case "$1" in
+            --sst)    sst="${2:-}";   shift 2 ;;
+            --sd)     sd="${2:-}";    shift 2 ;;
+            --ues)    ues="${2:-}";   shift 2 ;;
+            --ue-max) uemax="${2:-}"; shift 2 ;;
+            --pdu)    pdu="${2:-}";   shift 2 ;;
+            --pdu-max) pdumax="${2:-}"; shift 2 ;;
+            --kind)   kind="${2:-}";  shift 2 ;;
+            *) printf 'ERROR\t--nsac-admit: unexpected argument %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ "$sst" =~ ^[0-9]+$ ]] && (( sst <= 255 )) ||
+        { printf 'ERROR\t--nsac-admit: --sst is one octet, 0..255\n' >&2; return 2; }
+    [[ -z "$sd" || "$sd" =~ ^[0-9a-fA-F]{6}$ ]] ||
+        { printf 'ERROR\t--nsac-admit: --sd is 6 hex digits (3 octets)\n' >&2; return 2; }
+    case "$kind" in ue|pdu) ;; *) printf 'ERROR\t--nsac-admit: --kind is ue or pdu\n' >&2; return 2 ;; esac
+
+    local cur max label
+    if [[ "$kind" == ue ]]; then
+        cur="$ues"; max="$uemax"; label="registered UEs"
+    else
+        cur="$pdu"; max="$pdumax"; label="PDU sessions"
+    fi
+    [[ "$cur" =~ ^[0-9]+$ && "$max" =~ ^[0-9]+$ ]] ||
+        { printf 'ERROR\t--nsac-admit: %s needs both a current count and a maximum\n' "$label" >&2; return 2; }
+
+    local headroom=$(( max - cur )) decision reason
+    if (( headroom > 0 )); then
+        decision=allow
+        reason="the ${label} counter is below the per-S-NSSAI maximum"
+    else
+        decision=deny
+        if (( headroom == 0 )); then
+            reason="the ${label} counter is AT the maximum: the next request is refused while the counter does not fall"
+        else
+            reason="the ${label} counter is OVER the maximum by $(( -headroom )): a limit lowered under live UEs refuses every attempt until enough leave"
+        fi
+    fi
+    printf 'snssai\t%s\n' "$(slic_nsac_key "$sst" "$sd")"
+    printf 'registering_function\tNSACF (TS 23.501 5.15.11)\n'
+    printf 'kind\t%s\n' "$kind"
+    printf 'counter\t%s\n' "$cur"
+    printf 'maximum\t%s\n' "$max"
+    printf 'headroom\t%d\n' "$headroom"
+    printf 'decision\t%s\n' "$decision"
+    printf 'reason\t%s\n' "$reason"
+    if [[ "$decision" == deny ]]; then
+        printf 'ue_experience\t%s\n' "$([[ "$kind" == ue ]] \
+            && echo 'registration rejected; the slice is not in the Allowed NSSAI and a retrying UE loops' \
+            || echo 'PDU session establishment reject for this S-NSSAI; other slices on the same UE keep working')"
+    else
+        printf 'ue_experience\taccepted, and the counter is incremented for as long as the UE or session exists\n'
+    fi
+    printf 'not_auth\tNSAC is a counter, not a policy: it says nothing about whether this UE is authorised for the slice, which is NSSAA\n'
+    printf 'spec\tTS 23.501 5.15.11, TS 23.502 4.15.6\n'
+    [[ "$decision" == allow ]]
+}
+
+slic_cmd_nssaa_flow() {
+    local sst="" sd="" method=aka-prime
+    while (( $# )); do
+        case "$1" in
+            --sst)    sst="${2:-}";    shift 2 ;;
+            --sd)     sd="${2:-}";     shift 2 ;;
+            --method) method="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--nssaa-flow: unexpected argument %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ "$sst" =~ ^[0-9]+$ ]] && (( sst <= 255 )) ||
+        { printf 'ERROR\t--nssaa-flow: --sst is one octet, 0..255\n' >&2; return 2; }
+    case "$method" in
+        aka-prime|tls) ;;
+        none) printf 'nssaa\tnot run: the S-NSSAI carries no NSSAA requirement, so the slice needs no EAP\n'
+              printf 'snssai\t%s\n' "$(slic_nsac_key "$sst" "$sd")"
+              printf 'effect\tthe S-NSSAI is usable as soon as registration accepts it; NSAC still applies\n'
+              return 0 ;;
+        *) printf 'ERROR\t--nssaa-flow: --method is aka-prime, tls or none\n' >&2; return 2 ;;
+    esac
+    printf 'snssai\t%s\n' "$(slic_nsac_key "$sst" "$sd")"
+    printf 'method\tEAP-%s\n' "$([[ "$method" == aka-prime ]] && echo "AKA'" || echo TLS)"
+    printf 'registering_function\t(S)NSSAAF, reached by the AMF (TS 23.502 4.2.9)\n'
+    cat <<EOF
+step	1	AMF sees the S-NSSAI requires NSSAA and does not put it in the Allowed NSSAI yet
+step	2	AMF sends the UE an EAP Request/Identity through NAS, and the UE answers with its identity
+step	3	AMF relays the EAP exchange to the NSSAAF; the NSSAAF runs the method against the AAA server
+step	4	UE and NSSAAF exchange $( [[ "$method" == aka-prime ]] && echo "EAP-AKA' challenges: the UE proves possession of the long-term key" || echo 'EAP-TLS records: both sides exchange and verify certificates' )
+step	5	on EAP-Success the AMF adds the S-NSSAI to the Allowed NSSAI and re-registers the UE
+step	6	on EAP-Failure the AMF keeps the S-NSSAI out of the Allowed NSSAI and the UE is told the slice was refused
+failure	an NSSAA failure is NOT a registration failure: the UE stays registered without that slice, which is why a UE can look healthy while the slice it wanted is absent
+retry	a UE that re-requests the same S-NSSAI repeats the whole EAP exchange; there is no cached authorisation across a deregistration
+proves	neither direction of a NAS capture proves the slice is authorised: a UE that never ran NSSAA and a UE that failed it look the same on the air
+EOF
+    printf 'not_nsac\tNSSAA authorises this UE for the slice; the NSACF counter that bounds how many UEs may use it is separate\n'
+    printf 'spec\tTS 23.502 4.2.9, TS 33.501 5.9.x (NSSAA and EAP)\n'
+    return 0
+}
+
 # ── CLI dispatch ────────────────────────────────────────────────────────
 slic_cli_main() {
     local cmd="${1:-}"
@@ -2701,6 +2880,8 @@ slic_cli_main() {
         --selection)         slic_cmd_selection "${1:-}" "${2:-}" "${3:-}" ;;
         --isolation-check)   slic_cmd_isolation "${1:-}" "${2:-}" ;;
         --cross-slice)       slic_cmd_cross_slice "${1:-1}" "${2:-2}" "${3:-}" "${4:-}" ;;
+        --nsac-admit)        slic_cmd_nsac_admit "$@" ;;
+        --nssaa-flow)        slic_cmd_nssaa_flow "$@" ;;
         --detect)            slic_cmd_detect "${1:-}" ;;
         --nas5gs)            {
                                  local h="${1:-}"
@@ -2739,6 +2920,16 @@ Usage: $0 COMMAND
   --isolation-check <pcap> [map]      isolation evidence; never claims
                                       isolation it cannot establish
   --detect <slice-events.tsv>         session-level slice anomaly rules
+  --nsac-admit --sst <n> [--sd <6 hex>] --ues <n> --ue-max <n>
+                 [--pdu <n> --pdu-max <n>] [--kind ue|pdu]
+                                      the NSACF counter decision for one
+                                      S-NSSAI. Exit 0 admits, 1 refuses, 2 is
+                                      usage. A counter at its maximum is a
+                                      refusal, not an error.
+  --nssaa-flow --sst <n> [--sd <6 hex>] [--method aka-prime|tls|none]
+                                      the NSSAA EAP exchange in order, and what
+                                      a failure leaves behind: a UE still
+                                      registered without that slice
   --cross-slice [a] [b] [subnet-a] [subnet-b]
                                       D3: the reachability matrix between two
                                       slices -- addressing, authorisation,

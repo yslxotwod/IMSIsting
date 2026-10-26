@@ -5045,6 +5045,8 @@ lair_cli_main() {
                         lair_cmd_build_sib${cmd#--build-sib} "$@" ;;
         --enb-sib-schedule) lair_cmd_enb_sib_schedule "$@" ;;
         --warning-area) lair_cmd_warning_area "${1:-}" ;;
+        --warning-cover) lair_cmd_warning_cover "${1:-}" "${2:-}" ;;
+        --warning-plan) lair_cmd_warning_plan "$@" ;;
         --rrc-tx)       lair_cmd_rrc_tx "${1:-reconfiguration}" "${2:-minimal}" ;;
         --build-meas-report)  lair_build_meas_report "$@" ;;
         --build-rrc-release)  lair_build_rrc_release "$@" ;;
@@ -5146,6 +5148,20 @@ Usage: $0 COMMAND
                                    sets warningAreaCoordinatesSegment-r15, the
                                    Rel-15 extension-group field; SIB11 has no
                                    such field, so the flag is refused there.
+  --warning-area <serial-hex>[,...]
+                                   decode the Geographical Scope the Serial
+                                   Numbers imply, and say whether that bounds
+                                   delivery (it does not: scope is identity)
+  --warning-cover <lat,lon;...> <cell-lat,cell-lon>
+                                   is a cell inside the warning area polygon?
+                                   planar ray casting on WGS-84 degrees, with
+                                   the polygon area in km^2
+  --warning-plan <polygon> [<cell-lat,cell-lon> ...]
+                 [--segment-payload <octets>] [--message-octets <n>]
+                                   which given cells the polygon covers, and
+                                   what the message costs: segments are
+                                   ceil(octets / payload), and every covered
+                                   cell repeats all of them
   --enb-sib-schedule --sib 10|11|12 --hex <body> [--warning-message <text>]
                  [--out <dir>] [--srsran-version master]
                                    write the srsRAN sib.conf fragment and the

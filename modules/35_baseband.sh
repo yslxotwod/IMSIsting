@@ -209,6 +209,171 @@ bbnd_corpus() {
     done
 }
 
+# ── corpus minimisation ─────────────────────────────────────────────────
+# --corpus generates mutations; nothing in the tree reduced them.  A fuzzing
+# corpus that a person has to read is a corpus that does not get read: five
+# hundred mutations of one message usually describe a handful of distinct
+# changes, and each of those is a two-to-five octet window once it is compared
+# against the message it was derived from.
+#
+# The criterion is stated rather than implied, because a minimiser without one
+# is a filter that hides cases:
+#
+#   * the reference is the input the cases are compared against -- the caller's
+#     --reference when given, otherwise the most frequent input in the file
+#     (the unmutated seed is normally the mode).  Which one was used is
+#     reported as reference_source, never guessed at silently.
+#   * a case's distinguishing octets are the offsets where it differs from the
+#     reference, plus any octets past the reference's end.
+#   * a case is kept when it distinguishes an offset no kept case already
+#     covers, most-covering first.  Ties go to the narrower window, so the same
+#     coverage is reported with the smaller reproducer.
+#   * the minimised case is the window from the first distinguishing octet to
+#     the last, inclusive.  To rebuild it: take reference[0..first-1], then the
+#     window, then reference[last+1..].
+#
+# Exit 1 means an offset was never distinguished by any case: that is a gap in
+# the corpus, not a failure of the minimiser, and it is reported with the
+# offsets rather than rounded away.
+bbnd_corpus_min() {
+    local file="${1:--}" ref="${2:-}" 
+    if [[ "$file" != "-" ]]; then
+        [[ -r "$file" ]] || { printf 'ERROR\tcorpus %s is not readable\n' "$file" >&2; return 2; }
+    fi
+    local tmp; tmp=$(mktemp "${TMPDIR:-/tmp}/bbnd-min.XXXXXX") || return 1
+    if [[ "$file" == "-" ]]; then
+        cat > "$tmp"
+    else
+        cat "$file" > "$tmp"
+    fi
+    if [[ -n "$ref" ]]; then
+        ref=$(bbnd_norm_hex "$ref") || true
+        if ! bbnd_is_hex "$ref"; then
+            rm -f "$tmp"; printf 'ERROR\t--reference must be even-length hex\n' >&2; return 2
+        fi
+    fi
+    local rc=0
+    awk -F'\t' -v REF="${ref^^}" -v SELF="$0" '
+        function byte(h, i) { return substr(h, 2*i+1, 2) }
+        function nbytes(h) { return length(h)/2 }
+        NR == 1 {
+            # Accept the --corpus header, or a bare hex-per-line list.
+            if (tolower($1) ~ /index/ || tolower($1) ~ /hex/) {
+                for (i = 1; i <= NF; i++) col[tolower($i)] = i
+                next
+            }
+        }
+        {
+            n++
+            if (ncol == 0) {
+                if (col["hex"])      { hx = $col["hex"];  st = $col["strategy"]; sd = $col["seed"]; ix = $col["index"] }
+                else if (NF == 1)    { hx = $1; st = "-"; sd = "-"; ix = n - 1 }
+                else                 { hx = $NF; st = "-"; sd = "-"; ix = n - 1 }
+            } else {
+                hx = $col["hex"]; st = $col["strategy"]; sd = $col["seed"]; ix = $col["index"]
+            }
+            gsub(/[^0-9A-Fa-f]/, "", hx)
+            hx = toupper(hx)
+            if (hx == "" || length(hx) % 2) { bad++; next }
+            idx[n] = ix; strat[n] = st; seed[n] = sd; hex[n] = hx
+            freq[hx]++
+            if (length(hx) > maxlen) maxlen = length(hx)
+        }
+        END {
+            if (n == 0) { print "ERROR\tno corpus rows to minimise"; exit 2 }
+            if (bad)    { printf "ERROR\t%d row(s) were not even-length hex and were skipped\n", bad > "/dev/stderr" }
+
+            # The reference: what the caller named, or the mode of the file.
+            if (REF != "") { ref = REF; rsrc = "argument" }
+            else {
+                best = 0
+                for (h in freq) if (freq[h] > best) { best = freq[h]; ref = h }
+                rsrc = (best > 1) ? "mode(" best " cases)" : "first row (no repeated input to use as a mode)"
+                if (best <= 1) ref = hex[1]
+            }
+
+            # Distinguishing offsets per case, and the window they span.
+            for (i = 1; i <= n; i++) {
+                h = hex[i]; nb = nbytes(h); rb = nbytes(ref); k = 0
+                first = -1; last = -1
+                lim = (nb > rb) ? nb : rb
+                for (o = 0; o < lim; o++) {
+                    a = (o < nb) ? byte(h, o) : "--"
+                    b = (o < rb) ? byte(ref, o) : "--"
+                    if (a != b) { diffs[i, ++k] = o; if (first < 0) first = o; last = o }
+                }
+                ndiff[i] = k; wfirst[i] = first; wlast[i] = last
+                if (k > 0) {
+                    win = substr(h, 2*first + 1, 2*(last - first + 1))
+                    if (!(i in seen_win_seen) ) { }
+                    winstr[i] = win
+                }
+            }
+
+            # Greedy cover, most-covering first, narrower window on a tie.
+            for (i = 1; i <= n; i++) order[i] = i
+            for (i = 1; i <= n; i++)
+                for (j = i + 1; j <= n; j++) {
+                    ni = ndiff[order[i]]; nj = ndiff[order[j]]
+                    wi = wfirst[order[i]]; wj = wfirst[order[j]]
+                    li = wlast[order[i]];  lj = wlast[order[j]]
+                    if (wj < 0) { t = order[i]; order[i] = order[j]; order[j] = t; continue }
+                    if (wi < 0) continue
+                    if (nj > ni || (nj == ni && (lj - wj) < (li - wi))) { t = order[i]; order[i] = order[j]; order[j] = t }
+                }
+
+            printf "input_cases\t%d\n", n
+            printf "reference\ts%s\n", ref
+            printf "reference_octets\t%d\n", nbytes(ref)
+            printf "reference_source\t%s\n", rsrc
+
+            kept = 0; covered = 0
+            for (rank = 1; rank <= n; rank++) {
+                i = order[rank]
+                if (ndiff[i] == 0) continue
+                newc = 0
+                for (k = 1; k <= ndiff[i]; k++) if (!(diffs[i, k] in cov)) newc++
+                if (newc == 0) continue
+                kept++
+                for (k = 1; k <= ndiff[i]; k++) { cov[diffs[i, k]] = 1; covered++ }
+                covlist = ""
+                for (k = 1; k <= ndiff[i]; k++) covlist = covlist (k > 1 ? "," : "") diffs[i, k]
+                printf "kept\t%d\n", kept
+                printf "kept_index\t%s\n", idx[i]
+                printf "kept_strategy\t%s\n", strat[i]
+                printf "kept_seed\t%s\n", seed[i]
+                printf "window_first\t%d\n", wfirst[i]
+                printf "window_last\t%d\n", wlast[i]
+                printf "window_octets\t%d\n", wlast[i] - wfirst[i] + 1
+                printf "distinguishes\t%s\n", covlist
+                printf "minimised_hex\t%s\n", winstr[i]
+                if (wfirst[i] == 0 && wlast[i] == nbytes(ref) - 1)
+                    printf "reconstruct\tthe window is the whole reference\n"
+                else if (wfirst[i] == 0)
+                    printf "reconstruct\tthe window is the first %d octet(s); append reference[%d..]\n", wlast[i] + 1, wlast[i] + 1
+                else if (wlast[i] == nbytes(ref) - 1)
+                    printf "reconstruct\tprepend reference[0..%d]; the window ends the input\n", wfirst[i] - 1
+                else
+                    printf "reconstruct\tprepend reference[0..%d] and append reference[%d..]\n", wfirst[i] - 1, wlast[i] + 1
+            }
+            printf "kept_cases\t%d\n", kept
+            printf "covered_offsets\t%d\n", covered
+            # Every octet of the reference is a place the corpus could have
+            # distinguished; the ones nobody touched are the honest gap.
+            gaps = ""
+            for (o = 0; o < nbytes(ref); o++) if (!(o in cov)) gaps = gaps (gaps == "" ? "" : ",") o
+            printf "uncovered_offsets\t%s\n", (gaps == "" ? "-" : gaps)
+            printf "uncovered_count\t%s\n", (gaps == "" ? 0 : split(gaps, gtmp, ","))
+            printf "method\tgreedy cover over offsets differing from the reference; ties go to the narrower window\n"
+            printf "caveat\ta minimised case is only meaningful against its reference -- it is a window, not a standalone message\n"
+            exit (gaps == "" ? 0 : 1)
+        }
+    ' "$tmp"
+    rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
 # ── NAS security-header decode (TS 24.301 §9.3.1) ───────────────────────
 # Octet 1: bits 8-5 security header type, bits 4-1 protocol discriminator.
 #   PD 0x7 = EPS mobility management; 0x2 = EPS session management.
@@ -901,6 +1066,40 @@ bbnd_selftest() {
     chk corpus-stable "$([[ "$c1" == "$c2" ]] && echo yes || echo no)" "yes"
     chk corpus-header "$(printf '%s\n' "$c1" | head -1)" "$(printf 'index\tstrategy\tseed\thex')"
     chk corpus-bad-count "$(bbnd_corpus 00 0 byteflip >/dev/null 2>&1; echo $?)" "2"
+    # ── corpus minimisation ─────────────────────────────────────────────
+    # The generated corpus is the fixture: five octets, six cases, three of
+    # which are the same mutation.  What the minimiser must prove is that it
+    # collapses those three, trims each survivor to its distinguishing window,
+    # and reports the offsets no case touched instead of pretending coverage.
+    local cf; cf=$(mktemp "${TMPDIR:-/tmp}/bbnd-corpus.XXXXXX")
+    bbnd_corpus 0011223344 6 byteflip > "$cf"
+    chk cmin-input-cases "$(bbnd_corpus_min "$cf" 0011223344 | awk -F'\t' '$1=="input_cases"{print $2}')" "6"
+    chk cmin-kept-cases  "$(bbnd_corpus_min "$cf" 0011223344 | awk -F'\t' '$1=="kept_cases"{print $2}')" "4"
+    # Three identical cases must contribute one survivor, not three.
+    chk cmin-collapses   "$(bbnd_corpus_min "$cf" 0011223344 | awk -F'\t' '$1=="kept_index"{print $2}' | sort -n | uniq | wc -l | tr -d ' ')" "4"
+    chk cmin-window-first "$(bbnd_corpus_min "$cf" 0011223344 | awk -F'\t' '$1=="window_first"' | head -1 | cut -f2)" "0"
+    chk cmin-window-hex  "$(bbnd_corpus_min "$cf" 0011223344 | awk -F'\t' '$1=="minimised_hex"' | head -1 | cut -f2)" "FF"
+    # Octet 3 is never mutated by this seed, and saying so is the point.
+    chk cmin-uncovered   "$(bbnd_corpus_min "$cf" 0011223344 | awk -F'\t' '$1=="uncovered_offsets"{print $2}')" "3"
+    chk cmin-uncovered-n "$(bbnd_corpus_min "$cf" 0011223344 | awk -F'\t' '$1=="uncovered_count"{print $2}')" "1"
+    chk cmin-rc1         "$(bbnd_corpus_min "$cf" 0011223344 >/dev/null 2>&1; echo $?)" "1"
+    chk cmin-ref-source  "$(bbnd_corpus_min "$cf" | awk -F'\t' '$1=="reference_source"{print $2}')" "mode(3 cases)"
+    # A corpus that touches every octet is complete, and exit 0 says so.
+    local cf2; cf2=$(mktemp "${TMPDIR:-/tmp}/bbnd-corpus.XXXXXX")
+    printf 'index\tstrategy\tseed\thex\n' > "$cf2"
+    printf '0\tx\t1\tAAAAAAAB\n1\tx\t2\tAAAAABAA\n2\tx\t3\tAAABAAAA\n3\tx\t4\tABAAAAAA\n' >> "$cf2"
+    chk cmin-full-cover  "$(bbnd_corpus_min "$cf2" AAAAAAAA | awk -F'\t' '$1=="uncovered_count"{print $2}')" "0"
+    chk cmin-full-rc0    "$(bbnd_corpus_min "$cf2" AAAAAAAA >/dev/null 2>&1; echo $?)" "0"
+    chk cmin-full-kept   "$(bbnd_corpus_min "$cf2" AAAAAAAA | awk -F'\t' '$1=="kept_cases"{print $2}')" "4"
+    # An empty corpus is a refusal with a reason, not an empty answer.
+    local cf3; cf3=$(mktemp "${TMPDIR:-/tmp}/bbnd-corpus.XXXXXX")
+    printf 'index\tstrategy\tseed\thex\n' > "$cf3"
+    chk cmin-empty-rc    "$(bbnd_corpus_min "$cf3" >/dev/null 2>&1; echo $?)" "2"
+    chk cmin-missing     "$(bbnd_corpus_min /nonexistent/corpus.tsv >/dev/null 2>&1; echo $?)" "2"
+    chk cmin-bad-ref     "$(bbnd_corpus_min "$cf" zz >/dev/null 2>&1; echo $?)" "2"
+    # A bare hex list is accepted as well as the --corpus header.
+    chk cmin-bare-list   "$(printf 'AABB\nAACB\n' | bbnd_corpus_min - AABB | awk -F'\t' '$1=="kept_cases"{print $2}')" "1"
+    rm -f "$cf" "$cf2" "$cf3"
 
     # 5. Crash triage: positive signatures classify, negatives abstain.
     printf '==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x0\n' > "$d/c.log"
@@ -1109,6 +1308,11 @@ bbnd_cli_main() {
         --asn1-dec)     bbnd_asn1_len_decode "${rest[0]:-}" ;;
         --mutate)       bbnd_mutate "${rest[0]:-}" "${rest[1]:-bitflip}" "${rest[2]:-1}" ;;
         --corpus)       bbnd_corpus "${rest[0]:-}" "${rest[1]:-16}" "${rest[2]:-bitflip}" ;;
+        --corpus-min)   { local _mref=""; local _i
+                          for (( _i = 1; _i < ${#rest[@]}; _i++ )); do
+                              [[ "${rest[_i]}" == "--reference" ]] && _mref="${rest[_i+1]:-}"
+                          done
+                          bbnd_corpus_min "${rest[0]:--}" "$_mref"; } ;;
         --nas-hdr)      bbnd_nas_hdr "${rest[0]:-}" ;;
         --triage)       bbnd_triage "${rest[0]:-}" ;;
         --layers)       bbnd_layers ;;
@@ -1133,6 +1337,9 @@ Research half (no radio, no gate):
   --asn1-dec <hex>        BER/DER definite length decode
   --mutate <hex> <strat> <seed>
   --corpus <hex> <count> <strat>
+  --corpus-min <file|-> [--reference <hex>]
+                          reduce a generated corpus to the cases that distinguish
+                          offsets nothing else covers, each trimmed to its window
   --nas-hdr <hex>         EPS NAS security header decode
   --triage <log|->        ASAN/UBSAN crash-log triage
   --layers                protocol-layer reference

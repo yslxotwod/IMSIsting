@@ -111,9 +111,13 @@ PPID_S1AP = 18
 PPID_HNBAP = 20
 PPID_RUA = 19
 PPID_M3UA = 132
+# E2AP rides its own PPID: 70 is the value O-RAN assigned to the E2 interface,
+# distinct from S1AP (18) and M3UA (132), so a capture splits the two cleanly.
+PPID_E2AP = 70
 
 PORT_S1AP = 36412
 PORT_HNBAP = 29169
+PORT_E2AP = 36421
 
 
 def norm_hex(text: str) -> str:

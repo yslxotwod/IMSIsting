@@ -1426,6 +1426,38 @@ sbap_selftest() {
     chk dir-nwdaf-bad  "$(sbap_nwdaf_sub ../etc >/dev/null 2>&1; echo $?)" "2"
 
     printf 'ASSERTIONS\t%d\n' "$nchk"
+    # N32-f: build a message, open it again, and prove that the key is what
+    # decides whether it opens.
+    local zkey ziv n32f zbad
+    zkey=$(printf '0%.0s' $(seq 1 64))
+    ziv=$(printf '0%.0s' $(seq 1 24))
+    zbad=$(printf 'a%.0s' $(seq 1 64))
+    n32f="$d/n32.json"
+    out=$(sbap_cmd_n32_build --method POST --path /nudm-ueau/v1/x \
+        --authority nudm-ueau.5gc.mnc001.mcc001.3gppnetwork.org \
+        --header "content-type=application/json" \
+        --encrypt-header "Authorization=Bearer abc" \
+        --encrypt-ie '/supi={"supi":"imsi-001010000000001"}' \
+        --key "$zkey" --iv "$ziv" --out "$n32f")
+    chk n32-enc-blocks    "$(fld "$out" enc_blocks)" "2"
+    chk n32-block0        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="enc_block"&&$2==0{print $3":"$4}')" "header:Authorization"
+    chk n32-block1        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="enc_block"&&$2==1{print $3":"$4}')" "ie:/supi"
+    chk n32-visible       "$(fld "$out" visible_headers)" "content-type "
+    out=$(sbap_cmd_n32_decode --key "$zkey" --in "$n32f")
+    chk n32-tag           "$(fld "$out" tag)" "OK"
+    chk n32-cipher-input  "$(fld "$out" cipher_input)" \
+        '{"dataToEncrypt":["Bearer abc",{"supi":"imsi-001010000000001"}]}'
+    sbap_cmd_n32_decode --key "$zbad" --in "$n32f" >/dev/null 2>&1
+    chk n32-wrong-key-rc  "$?" "1"
+    sbap_cmd_n32_build --method GET --path /x --authority h \
+        --encrypt-header 'a=b' --key 00 --iv "$ziv" >/dev/null 2>&1
+    chk n32-bad-key       "$?" "2"
+    sbap_cmd_n32_build --method GET --path /x --authority h \
+        --key "$zkey" --iv "$ziv" >/dev/null 2>&1
+    chk n32-nothing-protected "$?" "2"
+    sbap_cmd_n32_build --method GET --path /x --authority h \
+        --encrypt-header 'a=b' --key "$zkey" --iv "$ziv" --context zz >/dev/null 2>&1
+    chk n32-bad-context   "$?" "2"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1523,6 +1555,289 @@ sbap_cmd_sbi_send() {
     return "$rc"
 }
 
+# ── N32-f: the JOSE protected message between two SEPPs ─────────────────
+#
+# sbap_n32_bridge above explains what N32-f *is*. This section builds one, so
+# a message-level test (or a decoder that has to cope with a real one) has
+# something real to work on.
+#
+# The shape is fixed by TS 29.573:
+#
+#   N32fReformattedReqMsg
+#     metaData                      n32fContextId, messageId, authorizedIpxId
+#     reformattedData               FlatJweJson
+#     modificationsBlock            FlatJwsJson
+#
+#   reformattedData.aad      = BASE64URL( UTF8( DataToIntegrityProtectBlock ) )
+#   reformattedData.protected= BASE64URL( UTF8( JWE protected header ) )
+#   reformattedData.ciphertext = BASE64URL( JWE cipher of
+#                                  {"dataToEncrypt":[<encrypted values>]} )
+#
+# and the JWE additional authenticated data is
+#
+#   ASCII(protected) || '.' || ASCII(aad)
+#
+# which is RFC 7516 §5.1 step 14 for the flattened JSON serialization. The
+# cipher is AES-256-GCM (TS 33.501 mandates it for N32-f), and tools/gsm_crypto.py
+# carries the primitive.
+#
+# What the indices mean: a header or IE that the SEPPs agreed to protect is
+# replaced in DataToIntegrityProtectBlock by {"encBlockIndex":n}, and the n-th
+# entry of dataToEncrypt is its value. An IPX in the middle therefore sees the
+# message structure — paths, header names, the shape of the JSON — and not the
+# protected values. That is exactly the "the IPX hops in the middle see the
+# payload" finding above, restated as a thing that can now be built and tested.
+
+sbap_n32_usage() {
+    cat <<'EOF'
+--n32-build --method <GET|POST|PUT|PATCH|DELETE> --path <path>
+            --authority <host> [--scheme https] [--query <q>]
+            [--header <name>=<value> ...] [--encrypt-header <name>=<value> ...]
+            [--encrypt-ie <iePath>=<json> ...]
+            --key <64 hex> --iv <24 hex> [--context <16 hex>] [--message-id <hex>]
+            [--ipx <fqdn|NULL>] [--out <file>]
+    Build an N32fReformattedReqMsg. Protected headers and IEs are removed from
+    the visible message and carried only inside the JWE. --out writes the JSON.
+--n32-decode --key <64 hex> --iv <24 hex> [--context <16 hex>] --in <file>
+    Verify and open an N32fReformattedReqMsg, listing what was hidden from the
+    IPX. Exit 1 when the tag does not verify.
+EOF
+}
+
+sbap_b64url() {
+    # stdin is hex; stdout is base64url without padding
+    local h
+    h=$(cat)
+    [[ -n "$h" ]] || { printf ''; return 0; }
+    printf '%s' "$h" | xxd -r -p | base64 -w0 | tr '+/' '-_' | tr -d '='
+}
+
+sbap_json_str() {
+    # Minimal JSON string escaping: the values here are header values, IE
+    # values and paths, so backslash, quote and the control range are enough.
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    printf '"%s"' "$s"
+}
+
+sbap_utf8_hex() {
+    printf '%s' "$1" | od -An -tx1 -v | tr -d ' \n'
+}
+
+sbap_n32_cipher() {
+    # sbap_n32_cipher encrypt|decrypt <keyhex> <ivhex> <aad-hex> <msg-hex> [taghex]
+    local mode="$1" key="$2" iv="$3" aad="$4" msg="$5" tag="${6:-}"
+    local crypto
+    crypto="${SBAP_CRYPTO:-$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/gsm_crypto.py}"
+    [[ -r "$crypto" ]] || { printf 'ERROR\tno cipher helper at %s\n' "$crypto" >&2; return 1; }
+    if [[ "$mode" == encrypt ]]; then
+        python3 "$crypto" --gcm-encrypt "$key" --iv "$iv" --aad "$aad" --message "$msg"
+    else
+        python3 "$crypto" --gcm-decrypt "$key" --iv "$iv" --aad "$aad" --message "$msg" --tag "$tag"
+    fi
+}
+
+sbap_cmd_n32_build() {
+    local method="" path="" authority="" scheme=https query="" key="" iv=""
+    local context="0600AD1855BD6007" msgid="0000000000000001" ipx="NULL" out=""
+    local -a hdr_names=() hdr_vals=() enc_names=() enc_vals=() ie_paths=() ie_vals=()
+    while (( $# )); do
+        case "$1" in
+            --method)  method="${2:-}";  shift 2 ;;
+            --path)    path="${2:-}";    shift 2 ;;
+            --authority) authority="${2:-}"; shift 2 ;;
+            --scheme)  scheme="${2:-}";  shift 2 ;;
+            --query)   query="${2:-}";   shift 2 ;;
+            --key)     key="${2:-}";     shift 2 ;;
+            --iv)      iv="${2:-}";      shift 2 ;;
+            --context) context="${2:-}"; shift 2 ;;
+            --message-id) msgid="${2:-}"; shift 2 ;;
+            --ipx)     ipx="${2:-}";     shift 2 ;;
+            --out)     out="${2:-}";     shift 2 ;;
+            --header)
+                [[ "${2:-}" == *=* ]] || { printf 'ERROR\t--header wants name=value\n' >&2; return 2; }
+                hdr_names+=("${2%%=*}"); hdr_vals+=("${2#*=}"); shift 2 ;;
+            --encrypt-header)
+                [[ "${2:-}" == *=* ]] || { printf 'ERROR\t--encrypt-header wants name=value\n' >&2; return 2; }
+                enc_names+=("${2%%=*}"); enc_vals+=("${2#*=}"); shift 2 ;;
+            --encrypt-ie)
+                [[ "${2:-}" == *=* ]] || { printf 'ERROR\t--encrypt-ie wants iePath=json\n' >&2; return 2; }
+                ie_paths+=("${2%%=*}"); ie_vals+=("${2#*=}"); shift 2 ;;
+            *) printf 'ERROR\t--n32-build: unexpected argument %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$method" && -n "$path" && -n "$authority" ]] ||
+        { printf 'ERROR\t--n32-build needs --method, --path and --authority\n' >&2; return 2; }
+    [[ "$key" =~ ^[0-9a-fA-F]{64}$ ]] ||
+        { printf 'ERROR\t--n32-build: --key is 32 bytes (64 hex digits)\n' >&2; return 2; }
+    [[ "$iv" =~ ^[0-9a-fA-F]{24}$ ]] ||
+        { printf 'ERROR\t--n32-build: --iv is 12 bytes (24 hex digits)\n' >&2; return 2; }
+    [[ "$context" =~ ^[0-9a-fA-F]{16}$ ]] ||
+        { printf 'ERROR\t--n32-build: --context is 16 hex digits (n32fContextId)\n' >&2; return 2; }
+    [[ "$msgid" =~ ^[0-9a-fA-F]{1,16}$ ]] ||
+        { printf 'ERROR\t--n32-build: --message-id is 1..16 hex digits\n' >&2; return 2; }
+
+    local nenc=$(( ${#enc_names[@]} + ${#ie_paths[@]} ))
+    (( nenc > 0 )) || { printf 'ERROR\t--n32-build: nothing to protect; give --encrypt-header or --encrypt-ie\n' >&2; return 2; }
+
+    # 1. dataToEncrypt: values in index order, headers first.
+    local i data="" sep=""
+    for (( i = 0; i < ${#enc_names[@]}; i++ )); do
+        data+="${sep}$(sbap_json_str "${enc_vals[i]}")"; sep=,
+    done
+    for (( i = 0; i < ${#ie_paths[@]}; i++ )); do
+        data+="${sep}${ie_vals[i]}"; sep=,
+    done
+    local cipher_input="{\"dataToEncrypt\":[${data}]}"
+
+    # 2. DataToIntegrityProtectBlock, the AAD.
+    local rl="{\"method\":\"${method}\",\"scheme\":\"${scheme}\",\"authority\":\"${authority}\",\"path\":\"${path}\",\"protocolVersion\":\"2\""
+    [[ -n "$query" ]] && rl+=",\"queryFragment\":\"${query}\""
+    rl+="}"
+    local meta="{\"n32fContextId\":\"${context}\",\"messageId\":\"${msgid}\",\"authorizedIpxId\":\"${ipx}\"}"
+    local hdrs="" k=0
+    sep=""
+    for (( i = 0; i < ${#hdr_names[@]}; i++ )); do
+        hdrs+="${sep}{\"header\":\"${hdr_names[i]}\",\"value\":$(sbap_json_str "${hdr_vals[i]}")}"; sep=,
+    done
+    for (( i = 0; i < ${#enc_names[@]}; i++ )); do
+        hdrs+="${sep}{\"header\":\"${enc_names[i]}\",\"value\":{\"encBlockIndex\":${k}}}"; sep=,; k=$(( k + 1 ))
+    done
+    local payloads=""
+    sep=""
+    for (( i = 0; i < ${#ie_paths[@]}; i++ )); do
+        payloads+="${sep}{\"iePath\":\"${ie_paths[i]}\",\"ieValueLocation\":\"JSON_BODY\",\"value\":{\"encBlockIndex\":${k}}}"
+        sep=,; k=$(( k + 1 ))
+    done
+    local dtipb="{\"metaData\":${meta},\"requestLine\":${rl},\"headers\":[${hdrs}],\"payload\":[${payloads}]}"
+
+    # 3. JWE: protected header, AAD, ciphertext, tag.
+    local prot_json='{"alg":"A256GCM","enc":"A256GCM"}'
+    local prot_b64 aad_b64
+    prot_b64=$(sbap_utf8_hex "$prot_json" | sbap_b64url)
+    aad_b64=$(sbap_utf8_hex "$dtipb" | sbap_b64url)
+    [[ -n "$prot_b64" && -n "$aad_b64" ]] ||
+        { printf 'ERROR\t--n32-build: base64url encoding failed (need xxd and base64)\n' >&2; return 1; }
+
+    local jwe_aad_hex ct_hex tag_hex
+    jwe_aad_hex=$(sbap_utf8_hex "${prot_b64}.${aad_b64}")
+    local res
+    res=$(sbap_n32_cipher encrypt "$key" "$iv" "$jwe_aad_hex" "$(sbap_utf8_hex "$cipher_input")") ||
+        { printf 'ERROR\t--n32-build: cipher helper failed\n' >&2; return 1; }
+    ct_hex=$(printf '%s\n' "$res" | awk -F'\t' '$1=="ciphertext"{print tolower($2)}')
+    tag_hex=$(printf '%s\n' "$res" | awk -F'\t' '$1=="tag"{print tolower($2)}')
+    local ct_b64 tag_b64 iv_b64
+    ct_b64=$(printf '%s' "$ct_hex" | sbap_b64url)
+    tag_b64=$(printf '%s' "$tag_hex" | sbap_b64url)
+    iv_b64=$(printf '%s' "$iv" | sbap_b64url)
+
+    local msg
+    msg="{\"metaData\":${meta},\"reformattedData\":{\"protected\":\"${prot_b64}\",\"aad\":\"${aad_b64}\",\"iv\":\"${iv_b64}\",\"ciphertext\":\"${ct_b64}\",\"tag\":\"${tag_b64}\"}}"
+
+    printf 'snssai_not_applicable\tN32-f carries an SBI message, not a slice\n'
+    printf 'context\t%s\n' "$context"
+    printf 'message_id\t%s\n' "$msgid"
+    printf 'authorized_ipx\t%s\n' "$ipx"
+    printf 'request_line\t%s %s://%s%s\n' "$method" "$scheme" "$authority" "$path"
+    printf 'visible_headers\t%s\n' "$(printf '%s ' "${hdr_names[@]}")"
+    printf 'encrypted_headers\t%s\n' "$(printf '%s ' "${enc_names[@]}")"
+    printf 'encrypted_ies\t%s\n' "$(printf '%s ' "${ie_paths[@]}")"
+    printf 'enc_blocks\t%d\n' "$nenc"
+    for (( i = 0; i < ${#enc_names[@]}; i++ )); do
+        printf 'enc_block\t%d\theader\t%s\n' "$i" "${enc_names[i]}"
+    done
+    k=${#enc_names[@]}
+    for (( i = 0; i < ${#ie_paths[@]}; i++ )); do
+        printf 'enc_block\t%d\tie\t%s\n' "$(( k + i ))" "${ie_paths[i]}"
+    done
+    printf 'cipher\tAES-256-GCM, AAD = ASCII(protected) || "." || ASCII(aad)\n'
+    printf 'what_the_ipx_sees\tpaths, header names and JSON shape; not the protected values\n'
+    printf 'what_the_home_sepp_learns\twho forwarded it (authorizedIpxId) and the exact message identity (n32fContextId, messageId)\n'
+    printf 'replay\tmessageId exists only because a separate JWS over the modifications block carries it; without that block the same documented message can be replayed inside its context\n'
+    printf 'spec\tTS 29.573 5.3.2.3 (reformatting), 6.2.5.2.4/5/11 (blocks), TS 33.501 (AES-256-GCM)\n'
+    if [[ -n "$out" ]]; then
+        printf '%s\n' "$msg" > "$out"
+        printf 'written\t%s\n' "$out"
+    else
+        printf 'message_json\t%s\n' "$msg"
+    fi
+    return 0
+}
+
+sbap_cmd_n32_decode() {
+    local key="" iv="" context="" in=""
+    while (( $# )); do
+        case "$1" in
+            --key) key="${2:-}"; shift 2 ;;
+            --iv)  iv="${2:-}";  shift 2 ;;
+            --context) context="${2:-}"; shift 2 ;;
+            --in)  in="${2:-}";  shift 2 ;;
+            *) printf 'ERROR\t--n32-decode: unexpected argument %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ "$key" =~ ^[0-9a-fA-F]{64}$ ]] || { printf 'ERROR\t--n32-decode: --key is 64 hex digits\n' >&2; return 2; }
+    [[ -n "$in" && -r "$in" ]] || { printf 'ERROR\t--n32-decode: --in needs a readable file\n' >&2; return 2; }
+    local json
+    json=$(tr -d '\n' < "$in")
+
+    local jget
+    jget() {
+        python3 - "$1" "$2" <<'PY'
+import json,sys
+obj = json.loads(sys.argv[1])
+for part in sys.argv[2].split('.'):
+    if isinstance(obj, list):
+        obj = obj[int(part)]
+    else:
+        obj = obj[part]
+print(obj if not isinstance(obj,(dict,list)) else json.dumps(obj,separators=(',',':')))
+PY
+    }
+    local prot_b64 aad_b64 ct_b64 tag_b64 iv_b64
+    prot_b64=$(jget "$json" reformattedData.protected) || return 1
+    aad_b64=$(jget "$json" reformattedData.aad) || return 1
+    ct_b64=$(jget "$json" reformattedData.ciphertext) || return 1
+    tag_b64=$(jget "$json" reformattedData.tag) || return 1
+    iv_b64=$(jget "$json" reformattedData.iv) || return 1
+    [[ -n "$iv" ]] || iv=$(printf '%s' "$iv_b64" | tr '_-' '/+' | base64 -d 2>/dev/null | od -An -tx1 -v | tr -d ' \n')
+
+    local b64url2hex
+    b64url2hex() { printf '%s' "$1" | tr '_-' '/+' | awk '{ l=length($0)%4; if(l==2)$0=$0"=="; else if(l==3)$0=$0"=" }1' | base64 -d 2>/dev/null | od -An -tx1 -v | tr -d ' \n'; }
+    local ct_hex tag_hex
+    ct_hex=$(b64url2hex "$ct_b64")
+    tag_hex=$(b64url2hex "$tag_b64")
+    local jwe_aad_hex
+    jwe_aad_hex=$(sbap_utf8_hex "${prot_b64}.${aad_b64}")
+
+    local res rc
+    res=$(sbap_n32_cipher decrypt "$key" "$iv" "$jwe_aad_hex" "$ct_hex" "$tag_hex"); rc=$?
+    if (( rc != 0 )); then
+        printf 'tag\tFAIL\n'
+        printf 'verdict\tthe message does not open under this key: a replayed or altered N32-f message fails exactly here\n'
+        return 1
+    fi
+    local pt_hex pt
+    pt_hex=$(printf '%s\n' "$res" | awk -F'\t' '$1=="plaintext"{print $2}')
+    pt=$(printf '%s' "$pt_hex" | xxd -r -p)
+
+    local dtipb_json
+    dtipb_json=$(b64url2hex "$aad_b64" | xxd -r -p)
+
+    printf 'tag\tOK\n'
+    printf 'context\t%s\n' "$(jget "$json" metaData.n32fContextId 2>/dev/null || echo '-')"
+    printf 'message_id\t%s\n' "$(jget "$json" metaData.messageId 2>/dev/null || echo '-')"
+    printf 'authorized_ipx\t%s\n' "$(jget "$json" metaData.authorizedIpxId 2>/dev/null || echo '-')"
+    printf 'aad_json\t%s\n' "$dtipb_json"
+    printf 'cipher_input\t%s\n' "$pt"
+    printf 'decoder\twhoever holds the key can rebuild the original message; the IPX in the middle holds neither\n'
+    printf 'spec\tTS 29.573 5.3.2.3\n'
+    return 0
+}
+
 sbap_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -1543,6 +1858,8 @@ sbap_cli_main() {
         --scope)       sbap_scope_confusion "${1:-}" "${2:-}" ;;
         --rapid-reset) sbap_rapid_reset "${1:-5}" ;;
         --n32-bridge)  sbap_n32_bridge "${1:-}" "${2:-AMF}" "${3:-001-01}" ;;
+        --n32-build)   sbap_cmd_n32_build "$@" ;;
+        --n32-decode)  sbap_cmd_n32_decode "$@" ;;
         --imds-pivot)  sbap_imds_pivot "${1:-SMF}" "${2:-}" ;;
         --nrf-walk)    sbap_nrf_walk "${1:-}" "${2:-AMF}" ;;
         --nrf-poison)  sbap_nrf_poison "${1:-AMF}" "${2:-}" "${3:-}" ;;
@@ -1579,6 +1896,17 @@ Usage: $0 COMMAND
                         SBI client at the cloud metadata service
                         C2: what a visited network reaches over N32-f,
                         hop by hop, and which check would stop it
+  --n32-build --method <GET|POST|...> --path <path> --authority <host>
+             [--header <name>=<value> ...] [--encrypt-header <name>=<value> ...]
+             [--encrypt-ie <iePath>=<json> ...]
+             --key <64 hex> --iv <24 hex> [--context <16 hex>]
+             [--message-id <hex>] [--ipx <fqdn|NULL>] [--out <file>]
+                        build a JOSE protected N32fReformattedReqMsg: the
+                        protected headers and IEs leave the visible message
+                        and travel only inside the AES-256-GCM cipher
+  --n32-decode --key <64 hex> [--iv <24 hex>] --in <file>
+                        verify the tag and recover the block that was
+                        protected, or fail exactly where a replay fails
   --plan                SBA lab handoff plan
   --selftest            verify framing and token audit, no core needed
   --menu                interactive menu

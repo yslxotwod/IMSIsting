@@ -437,6 +437,206 @@ lair_cmd_warning_area() {
     return 0
 }
 
+# ── Public warning geometry: does the polygon cover the cell? ───────────
+#
+# TS 23.041 carries a warning over a *set of cells*, and the set is chosen by
+# the network from the warning area — not from the Serial Number's Geographical
+# Scope, which is an identity field (see lair_cmd_warning_area). Three things
+# decide whether a cell actually shows a warning:
+#
+#   1. geometry  — the cell's coverage intersects the warning area polygon
+#   2. content   — the message fits in ceil(octets / segment payload) segments
+#   3. repetition— a UE re-displays the message once per cell it enters that
+#                  carries it, so N covered cells is N opportunities
+#
+# Nothing in this tree modelled 1 or 2, so a plan could name a warning area and
+# never learn whether the cell under test is in it. These helpers answer 1 and
+# 2 on the plane, and say so: a polygon edge shorter than the Earth's curvature
+# error is exact enough here, and the caller is told the model is planar.
+#
+# The polygon is given as "lat,lon;lat,lon;..." in decimal degrees, WGS-84.
+# Latitude is y, longitude is x: swapping them is the classic way to place a
+# cell in exactly the wrong polygon, so --warning-cover reports the pair as it
+# parsed them.
+
+lair_poly_parse() {
+    # stdin: "lat,lon;lat,lon;..."  stdout: "lat lon" per line, or empty on error
+    local spec="${1:-}" pair out="" seen=0
+    [[ -n "$spec" ]] || return 1
+    local IFS=';'
+    for pair in $spec; do
+        [[ "$pair" =~ ^(-?[0-9]+(\.[0-9]+)?),(-?[0-9]+(\.[0-9]+)?)$ ]] || return 1
+        out+="${BASH_REMATCH[1]} ${BASH_REMATCH[3]}"$'\n'
+        seen=$(( seen + 1 ))
+    done
+    (( seen >= 3 )) || return 1
+    printf '%s' "$out"
+}
+
+# Ray casting on the plane, one awk invocation: a per-edge subshell would be
+# eight processes for a quadrilateral and a hundred for a real warning polygon.
+# Returns 0 when inside, 1 when outside.
+lair_point_in_poly() {
+    local plat="$1" plon="$2" poly="$3"
+    printf '%s\n' "$poly" | awk -v px="$plon" -v py="$plat" '
+        NF >= 2 {
+            n++;
+            ys[n] = $1 + 0;
+            xs[n] = $2 + 0;
+        }
+        END {
+            if (n < 3) exit 1;
+            inside = 0;
+            j = n;
+            for (i = 1; i <= n; i++) {
+                y1 = ys[j]; x1 = xs[j];
+                y2 = ys[i]; x2 = xs[i];
+                # half-open test: a vertex lying exactly on a horizontal edge is
+                # counted once, which is what the closed polygon needs
+                if ((y1 > py) != (y2 > py)) {
+                    xi = x1 + (py - y1) * (x2 - x1) / (y2 - y1);
+                    if (px < xi) inside = 1 - inside;
+                }
+                j = i;
+            }
+            exit (inside ? 0 : 1);
+        }'
+}
+
+# Spherical polygon area in km^2, from the line-integral form
+#   A = R^2/2 * |sum over edges of (lon2-lon1) * (2 + sin(lat1) + sin(lat2))|
+# Longitude differences are wrapped to (-180, 180] so a polygon that crosses the
+# antimeridian is not measured as the rest of the world.
+lair_poly_area_km2() {
+    local poly="$1"
+    printf '%s\n' "$poly" | awk '
+        NF >= 2 {
+            n++;
+            ys[n] = $1 + 0;
+            xs[n] = $2 + 0;
+        }
+        END {
+            if (n < 3) { printf "nan"; exit 1 }
+            pi = atan2(0, -1);
+            s = 0;
+            j = n;
+            for (i = 1; i <= n; i++) {
+                d = xs[i] - xs[j];
+                if (d >  180) d -= 360;
+                if (d < -180) d += 360;
+                if (d != 0)
+                    s += (d*pi/180) * (2 + sin(ys[j]*pi/180) + sin(ys[i]*pi/180));
+                j = i;
+            }
+            r = 6371.0088;
+            a = s*r*r/2;
+            if (a < 0) a = -a;
+            printf "%.3f", a;
+        }'
+}
+
+lair_hav_km() {
+    local lat1="$1" lon1="$2" lat2="$3" lon2="$4"
+    awk -v a="$lat1" -v b="$lon1" -v c="$lat2" -v d="$lon2" 'BEGIN{
+        pi = atan2(0, -1); R = 6371.0088;
+        p1 = a*pi/180; p2 = c*pi/180; dp = (c-a)*pi/180; dl = (d-b)*pi/180;
+        q = sin(dp/2)^2 + cos(p1)*cos(p2)*sin(dl/2)^2;
+        printf "%.3f", 2*R*atan2(sqrt(q), sqrt(1-q))
+    }'
+}
+
+lair_warning_cover_usage() {
+    printf 'usage: --warning-cover <lat,lon;lat,lon;...> <cell-lat,cell-lon>\n' >&2
+    printf '       --warning-plan <polygon> [<cell-lat,cell-lon> ...] [--segment-payload <octets>]\n' >&2
+}
+
+lair_cmd_warning_cover() {
+    local spec="${1:-}" pt="${2:-}"
+    [[ -n "$spec" && -n "$pt" ]] || { lair_warning_cover_usage; return 2; }
+    local poly
+    poly=$(lair_poly_parse "$spec") ||
+        { printf 'ERROR\t--warning-cover: polygon needs three or more "lat,lon" pairs separated by ";"\n' >&2; return 2; }
+    [[ "$pt" =~ ^(-?[0-9]+(\.[0-9]+)?),(-?[0-9]+(\.[0-9]+)?)$ ]] ||
+        { printf 'ERROR\t--warning-cover: cell position must be "lat,lon"\n' >&2; return 2; }
+    local clat="${BASH_REMATCH[1]}" clon="${BASH_REMATCH[3]}"
+    local inside=outside
+    lair_point_in_poly "$clat" "$clon" "$poly" && inside=inside
+    printf 'model\tplanar ray-casting on WGS-84 degrees; exact for areas small against the Earth curvature\n'
+    printf 'polygon_vertices\t%d\n' "$(printf '%s\n' "$poly" | grep -c .)"
+    printf 'polygon_area_km2\t%s\n' "$(lair_poly_area_km2 "$poly")"
+    printf 'cell_lat\t%s\n' "$clat"
+    printf 'cell_lon\t%s\n' "$clon"
+    printf 'inside\t%s\n' "$([[ "$inside" == inside ]] && echo yes || echo no)"
+    printf 'verdict\t%s\n' "$([[ "$inside" == inside ]] \
+        && echo 'the cell is in the warning area: its UEs receive the message' \
+        || echo 'the cell is outside the warning area: it is not a delivery target')"
+    return 0
+}
+
+lair_cmd_warning_plan() {
+    local spec="${1:-}"; (($# > 0)) && shift
+    local segpay=88 octets=""
+    local -a pts=()
+    while (( $# )); do
+        case "$1" in
+            --segment-payload) segpay="${2:-}"; shift 2 ;;
+            --message-octets)  octets="${2:-}"; shift 2 ;;
+            *) pts+=("$1"); shift ;;
+        esac
+    done
+    [[ -n "$spec" ]] || { lair_warning_cover_usage; return 2; }
+    [[ "$segpay" =~ ^[0-9]+$ ]] && (( segpay > 0 )) ||
+        { printf 'ERROR\t--warning-plan: --segment-payload must be a positive octet count\n' >&2; return 2; }
+    if [[ -n "$octets" ]]; then
+        [[ "$octets" =~ ^[0-9]+$ ]] ||
+            { printf 'ERROR\t--warning-plan: --message-octets must be numeric\n' >&2; return 2; }
+    fi
+    local poly
+    poly=$(lair_poly_parse "$spec") ||
+        { printf 'ERROR\t--warning-plan: polygon needs three or more "lat,lon" pairs separated by ";"\n' >&2; return 2; }
+
+    printf 'model\tplanar ray-casting on WGS-84 degrees; a cell counts once, wherever its coverage centre is\n'
+    printf 'polygon_vertices\t%d\n' "$(printf '%s\n' "$poly" | grep -c .)"
+    printf 'polygon_area_km2\t%s\n' "$(lair_poly_area_km2 "$poly")"
+
+    local total=0 inn=0 out=0 pt
+    local -a covered=() missed=()
+    for pt in "${pts[@]}"; do
+        [[ "$pt" =~ ^(-?[0-9]+(\.[0-9]+)?),(-?[0-9]+(\.[0-9]+)?)$ ]] || {
+            printf 'ERROR\t--warning-plan: %s is not "lat,lon"\n' "$pt" >&2; return 2; }
+        total=$(( total + 1 ))
+        if lair_point_in_poly "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}" "$poly"; then
+            inn=$(( inn + 1 )); covered+=("$pt")
+        else
+            out=$(( out + 1 )); missed+=("$pt")
+        fi
+    done
+    printf 'cells_given\t%d\n' "$total"
+    printf 'cells_covered\t%d\n' "$inn"
+    printf 'cells_outside\t%d\n' "$out"
+    (( total == 0 )) && printf 'note\tno cell positions given: the geometry below is the whole answer, coverage is unobserved\n'
+    if (( total > 0 )); then
+        (( inn > 0 )) && printf 'covered\t%s\n' "${covered[*]}"
+        (( out > 0 )) && printf 'outside\t%s\n' "${missed[*]}"
+    fi
+    printf 'segment_payload_octets\t%d\n' "$segpay"
+    local segs=1
+    if [[ -n "$octets" ]]; then
+        segs=$(( (octets + segpay - 1) / segpay ))
+        (( segs == 0 )) && segs=1
+        printf 'message_octets\t%s\n' "$octets"
+        printf 'segments\t%d\n' "$segs"
+        printf 'segment_numbers\t1..%d (SIB11/12 segmentNumber is 1-based and segmentCount carries the total)\n' "$segs"
+    else
+        printf 'segments\tunknown: pass --message-octets to get ceil(octets / %d)\n' "$segpay"
+    fi
+    (( inn > 0 )) && printf 'transmissions_per_message\t%d covered cell(s) x %d segment(s) = %d\n' \
+        "$inn" "$segs" "$(( inn * segs ))"
+    printf 'redisplay\tone per cell entry: %d covered cell(s) is %d display opportunity(s)\n' "$inn" "$inn"
+    printf 'spec\tTS 23.041 9.4.2.2 (warning area and cell list), TS 36.331 SIB11/12 segmentation\n'
+    return 0
+}
+
 lair_cmd_build_sib_segmented() {
     local sib="${1:-}"; (($# > 0)) && shift
     local stem sfx
@@ -965,6 +1165,34 @@ lair_pws_selftest() {
     chk warn-bad-hex "$(lair_cmd_warning_area "40" 2>&1 >/dev/null | grep -c 'not a 2-octet Serial Number')" "1"
     # The CBS ID set is a different field and the verb has to say so.
     chk warn-cbsid-separate "$(fld "$(lair_cmd_warning_area 4000 2>/dev/null)" cbsid_separate | grep -c 'different field from the scope')" "1"
+
+    # ── Warning geometry: planar containment, area, segment arithmetic ────
+    BOX="48.0,2.0;48.0,2.2;48.2,2.2;48.2,2.0"
+    out=$(lair_cmd_warning_cover "$BOX" "48.1,2.1" 2>/dev/null)
+    chk warn-cover-inside  "$(fld "$out" inside)" "yes"
+    chk warn-cover-vertices "$(fld "$out" polygon_vertices)" "4"
+    out=$(lair_cmd_warning_cover "$BOX" "48.3,2.1" 2>/dev/null)
+    chk warn-cover-outside "$(fld "$out" inside)" "no"
+    # A 0.2 x 0.2 degree box on the 48th parallel is 22.2 km by 22.2*cos(48)
+    # = 14.9 km, about 330 km^2. A formula that forgets the cos(lat) term
+    # reports the equatorial value, 494 km^2, and this catches that.
+    chk warn-area-km2 "$(fld "$(lair_cmd_warning_cover "$BOX" "48.1,2.1" 2>/dev/null)" polygon_area_km2)" "330.292"
+    # Antimeridian: a 0.2 degree box straddling 180 must stay small, not become
+    # the whole planet because the raw longitude difference is ~359.8 degrees.
+    chk warn-area-antimeridian \
+        "$(awk -v a="$(lair_poly_area_km2 "$(lair_poly_parse "-0.1,179.9;-0.1,-179.9;0.1,-179.9;0.1,179.9")" 2>/dev/null)" \
+              'BEGIN{ print (a < 2000) ? "small" : "wrapped-wrong" }')" "small"
+    chk warn-poly-too-few "$(lair_poly_parse "0,0;1,1" >/dev/null 2>&1; echo $?)" "1"
+    chk warn-cover-usage  "$(lair_cmd_warning_cover "$BOX" >/dev/null 2>&1; echo $?)" "2"
+    out=$(lair_cmd_warning_plan "$BOX" "48.1,2.1" "47.0,2.1" --segment-payload 88 --message-octets 200 2>/dev/null)
+    chk warn-plan-covered   "$(fld "$out" cells_covered)" "1"
+    chk warn-plan-outside   "$(fld "$out" cells_outside)" "1"
+    chk warn-plan-segments  "$(fld "$out" segments)" "3"
+    chk warn-plan-transmissions "$(fld "$out" transmissions_per_message)" "1 covered cell(s) x 3 segment(s) = 3"
+    # 200 octets at 88 per segment is 3 segments, and the count must round UP:
+    # two segments carry 176 and would truncate the tail of the message.
+    chk warn-plan-ceil      "$(lair_cmd_warning_plan "$BOX" --segment-payload 100 --message-octets 199 2>/dev/null | awk -F'\t' '$1=="segments"{print $2}')" "2"
+    chk warn-plan-bad-octets "$(lair_cmd_warning_plan "$BOX" --message-octets abc >/dev/null 2>&1; echo $?)" "2"
 
     # ── SIB10: exact octets, pinned from pycrate ──────────────────────
     out=$(lair_cmd_build_sib10 --message-id 4352 --serial 0 --warning-type 0001 2>/dev/null)

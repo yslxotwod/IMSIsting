@@ -408,6 +408,234 @@ def aes128_enc(key, block):
     return _aes_encrypt_block(_aes_expand(key), block)
 
 
+# --- generic AES: 128/192/256-bit keys, CBC and CMAC (FIPS-197) ---------
+# The 128-bit path above serves Milenage and EIA2, where the key length is
+# fixed by the algorithm.  OTA is not like that: TS 102 225 5.1.2 lets the
+# ciphering key be 128, 192 or 256 bits, names the mode in the KIc, and the
+# cryptographic checksum in the KID is AES-CMAC over the same three lengths.
+# A schedule that only knows ten rounds cannot read a current command packet.
+_AES_RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36]
+
+
+def _gmul(a, b):
+    """Multiply in GF(2^8) modulo the AES polynomial."""
+    p = 0
+    for _ in range(8):
+        if b & 1:
+            p ^= a
+        hi = a & 0x80
+        a = (a << 1) & 0xFF
+        if hi:
+            a ^= 0x1B
+        b >>= 1
+    return p
+
+
+def _inverse_sbox_value(n):
+    for i, v in enumerate(SBOX):
+        if v == n:
+            return i
+    raise AssertionError("SBOX is not a permutation")
+
+
+_AES_INV = bytes(_inverse_sbox_value(i) for i in range(256))
+
+
+def _aes_schedule(key):
+    """Key schedule for 16/24/32-octet keys -> (round keys, rounds)."""
+    nk = len(key) // 4
+    if len(key) % 4 or nk not in (4, 6, 8):
+        raise ValueError("AES needs a 16, 24 or 32 octet key, not %d" % len(key))
+    nr = nk + 6
+    w = [list(key[4 * i:4 * i + 4]) for i in range(nk)]
+    rc = 1
+    for i in range(nk, 4 * (nr + 1)):
+        t = list(w[i - 1])
+        if i % nk == 0:
+            t = t[1:] + t[:1]
+            t = [SBOX[b] for b in t]
+            t[0] ^= rc
+            rc = _xtime(rc)
+        elif nk > 6 and i % nk == 4:
+            t = [SBOX[b] for b in t]
+        w.append([w[i - nk][j] ^ t[j] for j in range(4)])
+    # One big-endian word per column, the shape _aes_encrypt_block already uses.
+    rk = [sum(w[4 * r + c][j] << (24 - 8 * j) for j in range(4))
+          for r in range(nr + 1) for c in range(4)]
+    return rk, nr
+
+
+def _aes_state_round_keys(rk, nr):
+    return [rk[i].to_bytes(4, 'big') for i in range(4 * (nr + 1))]
+
+
+def _aes_encrypt_with(rk, nr, block):
+    s = [list(block[i * 4:i * 4 + 4]) for i in range(4)]
+    st = [[s[c][r] for c in range(4)] for r in range(4)]
+    k = _aes_state_round_keys(rk, nr)
+
+    def arks(rnd):
+        for c in range(4):
+            kb = k[4 * rnd + c]
+            for r in range(4):
+                st[r][c] ^= kb[r]
+
+    arks(0)
+    for rnd in range(1, nr + 1):
+        for r in range(4):
+            for c in range(4):
+                st[r][c] = SBOX[st[r][c]]
+        for r in range(1, 4):
+            st[r] = st[r][r:] + st[r][:r]
+        if rnd != nr:
+            for c in range(4):
+                a = [st[r][c] for r in range(4)]
+                t = a[0] ^ a[1] ^ a[2] ^ a[3]
+                st[0][c] = a[0] ^ t ^ _xtime(a[0] ^ a[1])
+                st[1][c] = a[1] ^ t ^ _xtime(a[1] ^ a[2])
+                st[2][c] = a[2] ^ t ^ _xtime(a[2] ^ a[3])
+                st[3][c] = a[3] ^ t ^ _xtime(a[3] ^ a[0])
+        arks(rnd)
+    return bytes(st[r][c] for c in range(4) for r in range(4))
+
+
+def _aes_decrypt_with(rk, nr, block):
+    s = [list(block[i * 4:i * 4 + 4]) for i in range(4)]
+    st = [[s[c][r] for c in range(4)] for r in range(4)]
+    k = _aes_state_round_keys(rk, nr)
+
+    def arks(rnd):
+        for c in range(4):
+            kb = k[4 * rnd + c]
+            for r in range(4):
+                st[r][c] ^= kb[r]
+
+    arks(nr)
+    for rnd in range(nr - 1, -1, -1):
+        for r in range(1, 4):
+            st[r] = st[r][-r:] + st[r][:-r]
+        for r in range(4):
+            for c in range(4):
+                st[r][c] = _AES_INV[st[r][c]]
+        arks(rnd)
+        if rnd != 0:
+            for c in range(4):
+                a = [st[r][c] for r in range(4)]
+                st[0][c] = _gmul(a[0], 14) ^ _gmul(a[1], 11) ^ _gmul(a[2], 13) ^ _gmul(a[3], 9)
+                st[1][c] = _gmul(a[0], 9) ^ _gmul(a[1], 14) ^ _gmul(a[2], 11) ^ _gmul(a[3], 13)
+                st[2][c] = _gmul(a[0], 13) ^ _gmul(a[1], 9) ^ _gmul(a[2], 14) ^ _gmul(a[3], 11)
+                st[3][c] = _gmul(a[0], 11) ^ _gmul(a[1], 13) ^ _gmul(a[2], 9) ^ _gmul(a[3], 14)
+    return bytes(st[r][c] for c in range(4) for r in range(4))
+
+
+def aes_block_encrypt(key, block):
+    rk, nr = _aes_schedule(key)
+    return _aes_encrypt_with(rk, nr, block)
+
+
+def aes_block_decrypt(key, block):
+    rk, nr = _aes_schedule(key)
+    return _aes_decrypt_with(rk, nr, block)
+
+
+def aes_cbc_encrypt(key, iv, data):
+    """CBC with the caller's IV.  The data must already be whole blocks:
+    padding is a property of the packet format, not of the mode."""
+    if len(data) % 16:
+        raise ValueError("CBC input must be a multiple of 16 octets")
+    rk, nr = _aes_schedule(key)
+    out = bytearray()
+    prev = iv
+    for i in range(0, len(data), 16):
+        prev = _aes_encrypt_with(rk, nr, _xor(data[i:i + 16], prev))
+        out += prev
+    return bytes(out)
+
+
+def aes_cbc_decrypt(key, iv, data):
+    if len(data) % 16:
+        raise ValueError("CBC input must be a multiple of 16 octets")
+    rk, nr = _aes_schedule(key)
+    out = bytearray()
+    prev = iv
+    for i in range(0, len(data), 16):
+        blk = data[i:i + 16]
+        out += _xor(_aes_decrypt_with(rk, nr, blk), prev)
+        prev = blk
+    return bytes(out)
+
+
+def _cmac_keys_for(key):
+    """The two CMAC subkeys for any AES key length (NIST SP 800-38B)."""
+    rk, nr = _aes_schedule(key)
+    l = int.from_bytes(_aes_encrypt_with(rk, nr, bytes(16)), 'big')
+    k1 = ((l << 1) & ((1 << 128) - 1)) ^ (0x87 if (l >> 127) & 1 else 0)
+    k2 = ((k1 << 1) & ((1 << 128) - 1)) ^ (0x87 if (k1 >> 127) & 1 else 0)
+    return k1.to_bytes(16, 'big'), k2.to_bytes(16, 'big')
+
+
+def aes_cmac(key, data):
+    """CMAC over octets, the full 16-octet tag.  Truncation happens where the
+    protocol asks for it, not here."""
+    rk, nr = _aes_schedule(key)
+    k1, k2 = _cmac_keys_for(key)
+    n = (len(data) + 15) // 16
+    if n == 0:
+        n = 1
+        complete = False
+    else:
+        complete = len(data) % 16 == 0
+    if complete:
+        last = _xor(data[16 * (n - 1):16 * n], k1)
+    else:
+        tail = data[16 * (n - 1):]
+        last = _xor(tail + b'\x80' + bytes(15 - len(tail)), k2)
+    x = bytes(16)
+    for i in range(n - 1):
+        x = _aes_encrypt_with(rk, nr, _xor(x, data[16 * i:16 * i + 16]))
+    return _aes_encrypt_with(rk, nr, _xor(x, last))
+
+
+def _aes_modes_kat_checks():
+    """Published vectors, not self-generated ones."""
+    out = []
+    pt = bytes.fromhex("00112233445566778899aabbccddeeff")
+    # FIPS-197 appendix C.1, C.2, C.3.
+    out.append(("aes-128-block",
+                aes_block_encrypt(bytes.fromhex("000102030405060708090a0b0c0d0e0f"), pt).hex(),
+                "69c4e0d86a7b0430d8cdb78070b4c55a"))
+    out.append(("aes-192-block",
+                aes_block_encrypt(bytes(range(24)), pt).hex(),
+                "dda97ca4864cdfe06eaf70a0ec0d7191"))
+    out.append(("aes-256-block",
+                aes_block_encrypt(bytes(range(32)), pt).hex(),
+                "8ea2b7ca516745bfeafc49904b496089"))
+    # FIPS-197 C.1 read backwards: the inverse cipher must undo the forward one.
+    k128 = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
+    out.append(("aes-128-inverse",
+                aes_block_decrypt(k128, bytes.fromhex("69c4e0d86a7b0430d8cdb78070b4c55a")).hex(),
+                pt.hex()))
+    # NIST SP 800-38A F.2.1 / F.2.5: CBC-AES128.
+    kcbc = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
+    iv = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
+    plain = bytes.fromhex("6bc1bee22e409f96e93d7e117393172a"
+                          "ae2d8a571e03ac9c9eb76fac45af8e51")
+    want = ("7649abac8119b246cee98e9b12e9197d"
+            "5086cb9b507219ee95db113a917678b2")
+    out.append(("aes-128-cbc", aes_cbc_encrypt(kcbc, iv, plain).hex(), want))
+    out.append(("aes-128-cbc-inverse", aes_cbc_decrypt(kcbc, iv, bytes.fromhex(want)).hex(),
+                plain.hex()))
+    # NIST SP 800-38B D.3: CMAC-AES128 over 40 octets -> eed5d47e..., truncated.
+    out.append(("aes-128-cmac",
+                aes_cmac(bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c"),
+                         bytes.fromhex("6bc1bee22e409f96e93d7e117393172a"
+                                       "ae2d8a571e03ac9c9eb76fac45af8e5130c81c46"
+                                       "a35ce411e5fbc1191a0a52eff69f2445"
+                                       "df4f9b17ad2b417be66c3710"))[:16].hex(),
+                "51f0bebf7e3b9d92fc49741779363cfe"))
+    return out
+
+
 # --------------------------------------------------------------- Milenage
 def _xor(a, b):
     return bytes(x ^ y for x, y in zip(a, b))
@@ -1348,6 +1576,162 @@ EEA_NAMES = {0: "128-EEA0 null", 1: "128-EEA1 SNOW 3G", 2: "128-EEA2 AES-CTR", 3
 EIA_NAMES = {0: "128-EIA0 null", 1: "128-EIA1 SNOW 3G", 2: "128-EIA2 AES-CMAC", 3: "128-EIA3 ZUC"}
 
 
+# ------------------------------------------------------- AES-256-GCM (N32-f)
+# N32-f protects the parts of an inter-PLMN HTTP/2 message the SEPPs agreed to
+# protect with JWE, and 3GPP TS 33.501 mandates AES-256-GCM for it. The AES
+# above is the 128-bit key schedule with a fixed ten rounds; GCM needs the
+# 256-bit schedule with fourteen, so the schedule is generalised here rather
+# than bent into the existing one.
+
+def _aes_expand_256(key):
+    """AES-256 key schedule: Nk=8, Nr=14, 60 words -> 15 round keys."""
+    if len(key) != 32:
+        raise ValueError('AES-256 needs a 32-byte key')
+    nk = 8
+    w = [list(key[i * 4:i * 4 + 4]) for i in range(nk)]
+    for i in range(nk, 4 * (14 + 1)):
+        t = list(w[i - 1])
+        if i % nk == 0:
+            t = t[1:] + t[:1]
+            t = [SBOX[b] for b in t]
+            t[0] ^= RCON[i // nk - 1]
+        elif i % nk == 4:
+            t = [SBOX[b] for b in t]
+        w.append([w[i - nk][j] ^ t[j] for j in range(4)])
+    return [sum(w[4 * r + c][j] << (24 - 8 * j) for j in range(4))
+            for r in range(15) for c in range(4)]
+
+
+def _aes256_encrypt_block(rk, block):
+    s = [list(block[i * 4:i * 4 + 4]) for i in range(4)]
+    st = [[s[c][r] for c in range(4)] for r in range(4)]
+    k = [rk[i].to_bytes(4, 'big') for i in range(60)]
+
+    def arks(round_):
+        for c in range(4):
+            kb = k[4 * round_ + c]
+            for r in range(4):
+                st[r][c] ^= kb[r]
+
+    arks(0)
+    for rnd in range(1, 15):
+        for r in range(4):
+            for c in range(4):
+                st[r][c] = SBOX[st[r][c]]
+        for r in range(1, 4):
+            st[r] = st[r][r:] + st[r][:r]
+        if rnd != 14:
+            for c in range(4):
+                a = [st[r][c] for r in range(4)]
+                t = a[0] ^ a[1] ^ a[2] ^ a[3]
+                st[0][c] = a[0] ^ t ^ _xtime(a[0] ^ a[1])
+                st[1][c] = a[1] ^ t ^ _xtime(a[1] ^ a[2])
+                st[2][c] = a[2] ^ t ^ _xtime(a[2] ^ a[3])
+                st[3][c] = a[3] ^ t ^ _xtime(a[3] ^ a[0])
+        arks(rnd)
+    return bytes(st[r][c] for c in range(4) for r in range(4))
+
+
+def _gf128_mul(x, y):
+    """Multiplication in GF(2^128) with the GCM reduction polynomial."""
+    z = 0
+    v = y
+    for i in range(127, -1, -1):
+        if (x >> i) & 1:
+            z ^= v
+        if v & 1:
+            v = (v >> 1) ^ (0xE1 << 120)
+        else:
+            v >>= 1
+    return z
+
+
+def _ghash(h, data):
+    if isinstance(h, (bytes, bytearray)):
+        h = int.from_bytes(h, 'big')
+    y = 0
+    for i in range(0, len(data), 16):
+        blk = data[i:i + 16]
+        if len(blk) < 16:
+            blk = blk + b'\x00' * (16 - len(blk))
+        y = _gf128_mul(y ^ int.from_bytes(blk, 'big'), h)
+    return y.to_bytes(16, 'big')
+
+
+def _gcm_keystream(rk, j0, nbytes):
+    out = bytearray()
+    counter = int.from_bytes(j0, 'big')
+    for _ in range((nbytes + 15) // 16):
+        counter = (counter & ~0xFFFFFFFF) | ((counter + 1) & 0xFFFFFFFF)
+        out += _aes256_encrypt_block(rk, counter.to_bytes(16, 'big'))
+    return bytes(out[:nbytes])
+
+
+def _gcm_core(key, iv, aad, data, encrypt):
+    """AES-256-GCM. Returns (ciphertext_or_plaintext, tag)."""
+    if len(iv) == 12:
+        j0 = iv + b'\x00\x00\x00\x01'
+    else:
+        j0 = _ghash(_aes256_encrypt_block(_aes_expand_256(key), b'\x00' * 16),
+                    iv + b'\x00' * ((16 - len(iv) % 16) % 16) +
+                    b'\x00' * 8 + (len(iv) * 8).to_bytes(8, 'big'))
+    rk = _aes_expand_256(key)
+    if encrypt:
+        out = bytes(a ^ b for a, b in zip(data, _gcm_keystream(rk, j0, len(data))))
+    else:
+        out = bytes(a ^ b for a, b in zip(data, _gcm_keystream(rk, j0, len(data))))
+    h = _aes256_encrypt_block(rk, b'\x00' * 16)
+    # GHASH always runs over the CIPHERTEXT: on the decrypt path that is the
+    # input, not the plaintext just recovered.
+    ct = out if encrypt else data
+    pad_a = b'\x00' * ((16 - len(aad) % 16) % 16)
+    pad_c = b'\x00' * ((16 - len(ct) % 16) % 16)
+    s = _ghash(h,
+               aad + pad_a + ct + pad_c +
+               (len(aad) * 8).to_bytes(8, 'big') + (len(ct) * 8).to_bytes(8, 'big'))
+    tag = bytes(a ^ b for a, b in zip(s, _aes256_encrypt_block(rk, j0)))
+    return out, tag
+
+
+def aes256_gcm_encrypt(key, iv, plaintext, aad=b''):
+    return _gcm_core(key, iv, aad, plaintext, True)
+
+
+def aes256_gcm_decrypt(key, iv, ciphertext, tag, aad=b''):
+    pt, want = _gcm_core(key, iv, aad, ciphertext, False)
+    if want != tag:
+        raise ValueError('GCM tag mismatch')
+    return pt
+
+
+def _gcm_kat_checks():
+    """NIST GCM test cases 13/14/15 (AES-256, the specification's own vectors)."""
+    out = []
+    k = bytes(32)
+    c, t = aes256_gcm_encrypt(k, bytes(12), bytes(16))
+    out.append(('gcm-tc13', c.hex(), 'cea7403d4d606b6e074ec5d3baf39d18'))
+    out.append(('gcm-tc13-tag', t.hex(), 'd0d1c8a799996bf0265b98b5d48ab919'))
+    k14 = bytes.fromhex('feffe9928665731c6d6a8f9467308308'
+                        'feffe9928665731c6d6a8f9467308308')
+    iv14 = bytes.fromhex('cafebabefacedbaddecaf888')
+    p14 = bytes.fromhex('d9313225f88406e5a55909c5aff5269a'
+                        '86a7a9531534f7da2e4c303d8a318a72'
+                        '1c3c0c95956809532fcf0e2449a6b525'
+                        'b16aedf5aa0de657ba637b39')
+    c14, t14 = aes256_gcm_encrypt(k14, iv14, p14)
+    out.append(('gcm-tc14', c14.hex(),
+                '522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa'
+                '8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662'))
+    out.append(('gcm-tc14-c', c14.hex()[:32], '522dc1f099567d07f47f37a32a84427d'))
+    out.append(('gcm-tc14-tag', t14.hex(), 'eb9f796c8d356fc31a8433884b696f4f'))
+    aad15 = bytes.fromhex('feedfacedeadbeeffeedfacedeadbeefabaddad2')
+    c15, t15 = aes256_gcm_encrypt(k14, iv14, p14, aad15)
+    out.append(('gcm-tc15-tag', t15.hex(), '76fc6ece0f4e1768cddf8853bb2d551b'))
+    back = aes256_gcm_decrypt(k14, iv14, c15, t15, aad15)
+    out.append(('gcm-tc15-roundtrip', back.hex(), p14.hex()))
+    return out
+
+
 def _crypto_kat_checks():
     """Yield (name, ok, detail) for every Milenage/TUAK known-answer test."""
     for n, (key_h, pt_h, ct_h) in enumerate(AES128_VECTORS, 1):
@@ -2116,6 +2500,112 @@ def _eea_eia_kat_checks():
         yield ("eia3-set%d" % n, got.hex() == mac, "want=%s got=%s" % (mac, got.hex()))
 
 
+def _cli_gcm(a) -> int:
+    """AES-256-GCM on the command line, the primitive N32-f JWE is built from."""
+    def var_hex(value, what):
+        # parse_hex wants an exact length; GCM inputs are any length, so the
+        # hex check is done here and the length is whatever the caller gave.
+        v = (value or "").strip()
+        if len(v) % 2 or any(c not in "0123456789abcdefABCDEF" for c in v):
+            raise ValueError("%s must be an even number of hex digits, got %r" % (what, value))
+        return bytes.fromhex(v)
+
+    key_hex = a.gcm_encrypt or a.gcm_decrypt
+    try:
+        key = parse_hex(key_hex, 32, "AES-256 key")
+        iv = var_hex(a.iv, "IV")
+        aad = var_hex(a.aad, "AAD")
+        msg = var_hex(a.message, "message")
+    except ValueError as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 2
+    if not iv:
+        print("ERROR\t--iv is required and non-empty", file=sys.stderr)
+        return 2
+    mode = "encrypt" if a.gcm_encrypt else "decrypt"
+    print("mode\t%s" % mode)
+    print("key_octets\t%d" % len(key))
+    print("iv_octets\t%d" % len(iv))
+    print("aad_octets\t%d" % len(aad))
+    try:
+        if a.gcm_encrypt:
+            ct, tag = aes256_gcm_encrypt(key, iv, msg, aad)
+            print("ciphertext\t%s" % ct.hex().upper())
+            print("tag\t%s" % tag.hex().upper())
+        else:
+            if not a.tag:
+                print("ERROR\t--gcm-decrypt needs --tag", file=sys.stderr)
+                return 2
+            tag = var_hex(a.tag, "tag")
+            if len(tag) != 16:
+                raise ValueError("tag must be 16 bytes")
+            pt = aes256_gcm_decrypt(key, iv, msg, tag, aad)
+            print("plaintext\t%s" % pt.hex().upper())
+    except ValueError as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+    return 0
+
+
+
+def _cli_cbc_cmac(a) -> int:
+    """AES-CBC and AES-CMAC with any of the three key lengths: the two modes
+    an OTA command packet names in its KIc and KID (TS 102 225 5.1.2/5.1.3.1)."""
+    def var_hex(value, what):
+        v = (value or "").strip()
+        if len(v) % 2 or any(c not in "0123456789abcdefABCDEF" for c in v):
+            raise ValueError("%s must be an even number of hex digits, got %r" % (what, value))
+        return bytes.fromhex(v)
+
+    try:
+        key = var_hex(a.cbc_encrypt or a.cbc_decrypt or a.cmac, "key")
+        msg = var_hex(a.message, "message")
+    except ValueError as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 2
+    if len(key) not in (16, 24, 32):
+        print("ERROR\tAES key must be 16, 24 or 32 octets, got %d" % len(key), file=sys.stderr)
+        return 2
+    if a.cmac:
+        bits = 128 if a.tag_bits is None else a.tag_bits
+        if bits % 8 or not 32 <= bits <= 128:
+            print("ERROR\t--tag-bits is 32..128 in steps of 8", file=sys.stderr)
+            return 2
+        tag = aes_cmac(key, msg)
+        print("mode\tcmac")
+        print("key_octets\t%d" % len(key))
+        print("message_octets\t%d" % len(msg))
+        print("tag_bits\t%d" % bits)
+        print("tag\t%s" % tag[:(bits // 8)].hex().upper())
+        print("full_tag\t%s" % tag.hex().upper())
+        return 0
+    try:
+        iv = var_hex(a.iv, "IV") if a.iv else bytes(16)
+    except ValueError as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 2
+    if len(iv) != 16:
+        print("ERROR\t--iv must be 16 octets", file=sys.stderr)
+        return 2
+    if len(msg) % 16:
+        print("ERROR\tCBC input must be a whole number of 16-octet blocks, got %d"
+              % len(msg), file=sys.stderr)
+        return 2
+    print("mode\t%s" % ("cbc-encrypt" if a.cbc_encrypt else "cbc-decrypt"))
+    print("key_octets\t%d" % len(key))
+    print("iv\t%s" % iv.hex().upper())
+    print("message_octets\t%d" % len(msg))
+    try:
+        if a.cbc_encrypt:
+            print("ciphertext\t%s" % aes_cbc_encrypt(key, iv, msg).hex().upper())
+        else:
+            print("plaintext\t%s" % aes_cbc_decrypt(key, iv, msg).hex().upper())
+    except ValueError as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+    return 0
+
+
 def _cli_eea_eia(a) -> int:
     if a.message is None:
         print("ERROR\t--eea/--eia need --message", file=sys.stderr)
@@ -2207,9 +2697,23 @@ def selftest() -> int:
             bad += nfail
         else:
             print("%-40s PASS %d checks" % (key, npass))
+    # AES-256-GCM, for the N32-f JWE layer: published vectors, plus the
+    # round trip that proves decryption re-derives what encryption consumed.
+    for name, got, want in _gcm_kat_checks():
+        if got == want:
+            print("%-40s PASS" % name)
+        else:
+            print("%-40s FAIL want=%s got=%s" % (name, want, got))
+            bad += 1
     # EEA1/EEA2/EEA3 and EIA1/EIA2/EIA3, one summary line per published set.
     for name, ok, detail in _eea_eia_kat_checks():
         print("%-40s %s" % (name, "PASS" if ok else "FAIL " + detail))
+        bad += 0 if ok else 1
+    # Generic AES modes used by OTA: FIPS-197 appendix C, SP 800-38A F.2 and
+    # SP 800-38B D.3.  These are published vectors, not this file's own output.
+    for name, got, want in _aes_modes_kat_checks():
+        ok = got == want
+        print("%-40s %s" % (name, "PASS" if ok else "FAIL want=%s got=%s" % (want, got)))
         bad += 0 if ok else 1
     # A5/1 against its two independent published vectors, both rows of each.
     for n, (kc, count, down, up) in enumerate(A51_VECTORS, 1):
@@ -2332,6 +2836,22 @@ def main(argv=None) -> int:
     p.add_argument("--message", help="message to protect, hex")
     p.add_argument("--bit-length", type=int,
                    help="length of --message in bits (default: every bit given)")
+    p.add_argument("--cbc-encrypt", metavar="KEY",
+                   help="AES-CBC encrypt: 16/24/32-octet key, --iv, --message")
+    p.add_argument("--cbc-decrypt", metavar="KEY",
+                   help="AES-CBC decrypt: 16/24/32-octet key, --iv, --message")
+    p.add_argument("--cmac", metavar="KEY",
+                   help="AES-CMAC over --message; --tag-bits truncates, default 128")
+    p.add_argument("--tag-bits", type=int,
+                   help="CMAC tag length in bits (32..128, steps of 8)")
+    p.add_argument("--gcm-encrypt", metavar="KEY256",
+                   help="AES-256-GCM encrypt --message under a 32-byte key, "
+                        "with --iv and optional --aad; N32-f JWE protection")
+    p.add_argument("--gcm-decrypt", metavar="KEY256",
+                   help="AES-256-GCM decrypt --message under --iv, --aad and --tag")
+    p.add_argument("--iv", help="AES-GCM initialisation vector, hex (12 bytes for N32-f)")
+    p.add_argument("--aad", help="AES-GCM additional authenticated data, hex")
+    p.add_argument("--tag", help="AES-GCM authentication tag, hex (decrypt only)")
     p.add_argument("--a51", action="store_true",
                    help="A5/1 keystream from --kc and --count")
     p.add_argument("--kc", help="Kc, 16 hex digits in transmission order")
@@ -2362,6 +2882,10 @@ def main(argv=None) -> int:
 
     if a.selftest:
         return selftest()
+    if a.cbc_encrypt or a.cbc_decrypt or a.cmac:
+        return _cli_cbc_cmac(a)
+    if a.gcm_encrypt or a.gcm_decrypt:
+        return _cli_gcm(a)
     if a.eea is not None or a.eia is not None:
         return _cli_eea_eia(a)
     if a.derive:
