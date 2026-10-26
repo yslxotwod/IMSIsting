@@ -256,3 +256,7 @@ threshold-db
 edge-pct
 precedence
 multi-access
+direction
+external-id
+scs-as-id
+subscription

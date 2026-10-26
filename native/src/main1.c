@@ -2546,6 +2546,7 @@ static const char *const plain_keys[] = {
     "accac00000\taccac00000",
     "accept\taccept",
     "acceptance\twhat a real acceptance test would have to record, and what this module can state without one",
+    "access_control\tWhat stands in for authentication on a call that carries a payload",
     "accounting_record_number\tidentifies the record within a session, in order, so a gap is visible",
     "accounting_record_type\tEVENT, START, INTERIM or STOP; only STOP claims the session ended",
     "accuracy_m_mean\tThe mean of the accuracy figures in a log of location answers, in metres",
@@ -2655,6 +2656,7 @@ static const char *const plain_keys[] = {
     "application\tthe Diameter application the message belongs to, and what it is for",
     "application_id\tapplication id",
     "application_name\tapplication name",
+    "applications\tHow many application servers appear in a log of API calls",
     "applied\tapplied",
     "applied_ms\tapplied (ms)",
     "applied_ops\thow many local operations the replay applied to the modelled card",
@@ -2880,6 +2882,7 @@ static const char *const plain_keys[] = {
     "burst_structure\tburst structure",
     "bursts\tbursts",
     "bursts_per_block\tbursts per block",
+    "busiest_application\tThe application that addressed the most distinct devices",
     "busiest_bin_offset_hz\twhere the most-used bin sits relative to the centre frequency",
     "bwp_indicator\tbwp indicator",
     "bwp_prb\tbwp prb",
@@ -3449,6 +3452,9 @@ static const char *const plain_keys[] = {
     "devices\tdevices",
     "devices_covering\tdevices covering",
 	"devices_parsed\twhether the device list was read as JSON",
+    "devices_per_application_max\tThe largest number of distinct devices one application addressed",
+    "devices_with_both_directions\tDevices that carried traffic in both directions",
+    "devices_with_downlink_only\tDevices that only ever received, never sent",
     "devices_with_more_than_one_identity\thow many eUICCs carried more than one subscription identity in the records read",
     "dialect\tdialect",
     "dialog_portion_len\tdialog portion length",
@@ -3502,6 +3508,7 @@ static const char *const plain_keys[] = {
     "downgrade_effective\tdowngrade effective",
     "downgrade_signature\tdowngrade signature",
     "downlink\tdownlink",
+    "downlink_calls\tHow many API calls pushed a payload to a device",
     "downlink_hex\tdownlink hex",
     "downlink_mhz\tdownlink (MHz)",
     "downlink_octets\tdownlink octets",
@@ -3661,6 +3668,7 @@ static const char *const plain_keys[] = {
     "extended_protocol_discriminator\textended protocol discriminator",
     "extension_bit\textension bit",
     "extension_octets\textension octets",
+    "external_id\tThe identifier an application uses to name a device",
     "extra\textra",
     "f1\tmilenage f1 mac-a",
     "f2\tmilenage f2 res",
@@ -4323,6 +4331,7 @@ static const char *const plain_keys[] = {
     "legacy_stack\tlegacy stack",
     "legal\twhat this tree will not do with a carrier even when it could",
 	"legend\twhat a capability chip on a card means",
+    "legs\tHow many legs a payload travels over between the device and the application",
     "len\tlength",
     "length\tlength",
     "length_agrees\tlength agrees",
@@ -4952,6 +4961,7 @@ static const char *const plain_keys[] = {
     "pause\tpause",
     "payload\tpayload",
     "payload_b64\tthe base64url claim itself: who called, who was called, when, and the attestation level",
+    "payload_base64\tThe payload as base64, the form an API body carries it in",
     "payload_bits\tpayload bits",
     "payload_bytes\tpayload bytes",
     "payload_file\tpayload file",
@@ -5179,6 +5189,7 @@ static const char *const plain_keys[] = {
     "profile_type\tprofile type",
     "profile_version\tprofile version",
     "profiles\tprofiles",
+    "protected_by_the_air_interface\tHow many legs the air-interface cipher actually covers",
     "protection\tprotection",
     "protection_markers\tprotection markers",
     "protection_scheme\tprotection scheme",
@@ -5691,6 +5702,7 @@ static const char *const plain_keys[] = {
     "scpi_written\tscpi written",
     "scpi_written_handoff\tscpi written handoff",
     "scrambled\tscrambled",
+    "scs_as_id\tThe application server identity a service capability call presents",
     "scs_khz\tsubcarrier spacing (kHz)",
     "scs_ref_khz\tscs ref (kHz)",
     "sctp\tsctp",
@@ -6132,6 +6144,7 @@ static const char *const plain_keys[] = {
     "subscription_id\tthe subscriber the charge is for, as an IMSI",
     "subscription_id_msisdn\tthe same subscriber as an E.164 number, when the message carries one",
     "subscription_note\twhat the subscription quietly also asks for",
+    "subscriptions\tHow many subscriptions a log of API calls covers",
     "subset\tsubset",
     "substitution\tsubstitution",
     "subsys\tsubsys",
@@ -6525,6 +6538,8 @@ static const char *const plain_keys[] = {
     "upf\tpacket gateway",
     "upf_markers\tupf markers",
     "uplink\tuplink",
+    "uplink_calls\tHow many API calls delivered a payload from a device",
+    "uplink_octets\tTotal octets delivered from devices to applications",
     "uplink_overshadow_is_low_power\tthe verdict when the required power is handset class, because the competitor is one handset rather than the cell",
     "url\turl",
     "urr_id\turr id",
@@ -6640,14 +6655,17 @@ static const char *const plain_keys[] = {
     "what_it_would_not_buy\tthe algorithms no licence can supply because 3GPP never published them",
     "what_proves_the_client\tWhat establishes the identity of the client that asked",
     "what_that_costs\twhat SMPP over TLS changes, or does not",
+    "what_the_call_says\tWhat one API call asks the far end to do",
     "what_the_core_authenticated\tthe subscription that actually sent the message, as opposed to the name in it",
     "what_the_display_shows\twhat the receiving handset puts on the screen",
     "what_the_receiver_can_compare\twhat a receiver can check the originating address against, which for a name is nothing",
+    "what_the_receiver_must_decide\tThe judgement the receiving node has to make on its own",
     "what_the_target_is_told\tWhether the subscriber learns that a positioning session happened",
     "what_this_is\twhat this arithmetic is",
     "what_this_is_not\tthe boundary of the tool, stated where a reader would otherwise assume more",
     "when\twhen",
     "where\twhere",
+    "where_a_payload_can_be_read\tThe points along a path where a payload is in the clear",
     "where_it_draws\twhat the handset does with a network-side USSD notification, and what evidence it leaves",
     "where_it_was_run\tthe environment each mode was actually run in",
     "who_is_told\tWho is informed that a location request was made",
@@ -8152,6 +8170,9 @@ static const ChipRow chip_rows[] = {
     { "45_iot",              "--decode-sib1",         NEED_RADIO, DOES_READS },
     { "45_iot",              "--help",                NEED_NO, DOES_READS },
     { "45_iot",              "--info",                NEED_NO, DOES_READS },
+    { "45_iot",              "--nidd",                NEED_NO, DOES_READS },
+    { "45_iot",              "--nidd-audit",          NEED_NO, DOES_READS },
+    { "45_iot",              "--nidd-build",          NEED_NO, DOES_BUILDS },
     { "45_iot",              "--menu",                NEED_NO, DOES_READS },
     { "45_iot",            "--nprach-verify",       NEED_NO, DOES_READS },
     { "45_iot",            "--freq-plan",           NEED_NO, DOES_READS },
@@ -37132,10 +37153,78 @@ iot_build_limits(AppState *state, const char *module_id,
     return outer;
 }
 
+/* 45_iot, the data plane: a payload that is not IP.
+ *
+ * NB-IoT exists to carry a few hundred octets from a meter. When the payload is
+ * non-IP the operator's IP tools have nothing to look at, and the data reaches
+ * the application through an API instead of a bearer - so the API is the only
+ * place the payload is visible at all.
+ */
+static GtkWidget *
+iot_build_nidd(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("WHERE THE PAYLOAD GOES",
+        "The non-IP path: the handset to the MME under NAS security, the MME to "
+        "the SCEF over Diameter, and the SCEF to the application as an HTTP "
+        "body. Only the first leg is protected by the air interface.", &body);
+    GtkWidget *plane_body, *build_body, *audit_body;
+    GtkWidget *plane = verb_card("THE PATH", &plane_body);
+    GtkWidget *build = verb_card("SEND ONE PAYLOAD", &build_body);
+    GtkWidget *audit = verb_card("WHAT AN API LOG SHOWS", &audit_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(plane_body),
+            module_action_button(state, module_id, status,
+                "Read the four legs", "--nidd",
+                "Which reference point carries the octets, what protects it, and "
+                "the three findings that follow: the payload leaves the NAS "
+                "cipher, the API credentials are the access control, and the "
+                "external identifier is the join to an IMSI."));
+        gtk_box_append(GTK_BOX(plane_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), plane);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the call",
+                "--nidd-build", "0102030405",
+                "The octets the device sends or receives, as hex. The answer is "
+                "the T8 request: method, path, and the body with the payload "
+                "base64-encoded, because a non-IP payload leaves the core as "
+                "JSON."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(audit_body),
+            mod_arg_row(state, module_id, status, "Account for a log",
+                "--nidd-audit", "calls.tsv",
+                "scs_as_id, subscription, external_id, direction, bytes, t. One "
+                "application addressing many devices is one leaked credential "
+                "away from all of them."));
+        gtk_box_append(GTK_BOX(audit_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), audit);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry iot_entries[] = {
     { "Message", "dialog-information-symbolic", NULL, iot_build_decode },
     { "Sequences", "network-wireless-symbolic", NULL, iot_build_sequences },
     { "Limits", "security-low-symbolic", NULL, iot_build_limits },
+    { "Non-IP data", "network-transmit-symbolic", NULL, iot_build_nidd },
 };
 /* 46_lpp — the positioning protocol.
  *

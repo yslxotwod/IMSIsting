@@ -627,6 +627,162 @@ EOF
 }
 
 # ── Selftest ───────────────────────────────────────────────────────────
+# ── NIDD — the configuration where the payload is not IP ───────────────
+# NB-IoT and Cat-M1 exist to carry a few hundred octets from a meter. When the
+# payload is non-IP, there is no IP header anywhere on the path, so the
+# operator's IP-layer tools have nothing to look at and the data is delivered
+# to an application server through an API instead of a bearer. That API is
+# where the payload becomes visible, and it is where the access control lives.
+
+iot_nidd_plane() {
+    cat <<'PLANE'
+leg	1	ue	mme	NAS ESM	the payload inside NAS, with PDN type non-IP	the ue and the mme: leg 1 is the only leg the air interface protects
+leg	2	mme	scef	T6a, Diameter (TS 29.336)	the payload in a Diameter AVP	the core: in the clear between the two nodes unless the operator runs IPsec
+leg	3	scef	scs	as	T8, HTTP (TS 29.122)	the payload as an API body	TLS is a deployment choice here, not a requirement of the reference point
+leg	4	scs	as	application	whatever the application does with it	outside any 3GPP scope
+PLANE
+}
+
+iot_cmd_nidd_plane() {
+    printf 'spec\tTS 23.682 4.4.6\tNIDD: non-IP data delivered through the SCEF\n'
+    printf 'spec\tTS 29.122\tT8, the API between the SCEF and the SCS/AS\n'
+    printf 'spec\tTS 29.336\tS6t and T6a, the Diameter legs the MME and SCEF speak\n'
+    printf 'spec\tTS 24.301\tPDN type non-IP, which is what makes the bearer carry no IP\n'
+    printf 'spec\tTS 23.003\tthe external identifier, local-part and domain-part, which is how the API names a device\n'
+    iot_nidd_plane
+    printf 'legs\t4\n'
+    printf 'protected_by_the_air_interface\t1\n'
+    printf 'finding\tpayload_leaves_the_nas_encryption\tHIGH\tthe air-interface cipher covers leg 1 and stops at the MME; from the SCEF onward the payload is an API body\n'
+    printf 'finding\tt8_credentials_are_the_access_control\tHIGH\tevery device in a subscription group is reachable by whoever holds the SCS/AS credentials, and nothing ties a call to the application that made it\n'
+    printf 'finding\texternal_identifier_is_the_join\tHIGH\tthe API names devices by external identifier and the SCEF holds the mapping to the IMSI, so the identifier is the join between the application world and the subscriber\n'
+    printf 'finding\tnon_ip_data_is_invisible_to_ip_tools\tMEDIUM\tthere is no IP header on any leg, so an IP-layer monitor beside the core sees nothing and an API log is the only record\n'
+    printf 'where_a_payload_can_be_read\tT6a in the core, T8 at the SCEF, and the SCS itself\n'
+    printf 'ref\tTS 23.682 4.4.6 and 5.13, TS 29.122, TS 29.336, TS 24.301 6.5\n'
+    printf 'limit\tThis states the path the payload takes. Whether any leg is protected beyond what the reference point requires is an operator decision this module cannot observe.\n'
+    printf 'verdict\tnidd_plane_described\n'
+}
+
+iot_hex_to_base64() {
+    local hex="$1"
+    if command -v xxd >/dev/null 2>&1; then
+        printf '%s' "$hex" | xxd -r -p | base64 -w0
+    elif command -v base64 >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys,binascii,base64;sys.stdout.write(base64.b64encode(binascii.unhexlify(sys.argv[1])).decode())' "$hex"
+    else
+        return 1
+    fi
+}
+
+iot_cmd_nidd_build() {
+    local payload="" direction="mt" scs="scs-1" sub="sub-0001" ext="meter-0001@example.com"
+    while (($# > 0)); do
+        case "$1" in
+            --direction)     direction="${2:-}"; shift 2 ;;
+            --scs-as-id)     scs="${2:-}"; shift 2 ;;
+            --subscription)  sub="${2:-}"; shift 2 ;;
+            --external-id)   ext="${2:-}"; shift 2 ;;
+            --)              shift; payload="${1:-}"; shift ;;
+            *)               payload="$1"; shift ;;
+        esac
+    done
+    [[ -z "$payload" ]] && { printf 'ERROR\tno payload: give the octets as hex\n' >&2; printf 'WHY\tthe T8 body carries the payload, so there is nothing to send without one\n' >&2; return 2; }
+    [[ "$payload" =~ ^[0-9A-Fa-f]+$ ]] || { printf 'ERROR\tpayload is not hex\n' >&2; return 2; }
+    (( ${#payload} % 2 == 0 )) || { printf 'ERROR\tpayload has an odd number of nibbles\n' >&2; return 2; }
+    case "$direction" in
+        mt|mo) ;;
+        *) printf 'ERROR\t--direction is mt or mo\n' >&2; return 2 ;;
+    esac
+    local b64 octets path method
+    b64="$(iot_hex_to_base64 "$payload")" || { printf 'ERROR\tno way to encode base64 (xxd or python3)\n' >&2; return 1; }
+    octets=$(( ${#payload} / 2 ))
+    if [[ "$direction" == "mt" ]]; then
+        method="POST"
+        path="/nidd/v1/${scs}/subscriptions/${sub}/transactions"
+        method_note="the SCS asks the SCEF to deliver this payload to one device"
+    else
+        method="POST"
+        path="/nidd/v1/${scs}/subscriptions/${sub}/notification"
+        method_note="the SCEF pushes an uplink payload to the SCS; the roles are reversed and the resource is a notification"
+    fi
+    local body
+    body="$(printf '{"mtcProviderId":"%s","externalId":"%s","niddDownlinkData":"%s"}' "$scs" "$ext" "$b64")"
+    if [[ "$direction" == "mo" ]]; then
+        body="$(printf '{"mtcProviderId":"%s","externalId":"%s","niddUplinkData":"%s"}' "$scs" "$ext" "$b64")"
+    fi
+    printf 'api\tTS 29.122\tNIDD\n'
+    printf 'direction\t%s\n' "$direction"
+    printf 'method\t%s\n' "$method"
+    printf 'path\t%s\n' "$path"
+    printf 'content_type\tapplication/json\n'
+    printf 'body\t%s\n' "$body"
+    printf 'body_octets\t%s\n' "$(printf '%s' "$body" | wc -c | tr -d ' ')"
+    printf 'payload_octets\t%s\n' "$octets"
+    printf 'payload_hex\t%s\n' "$(printf '%s' "$payload" | tr 'a-f' 'A-F')"
+    printf 'payload_base64\t%s\n' "$b64"
+    printf 'external_id\t%s\n' "$ext"
+    printf 'subscription\t%s\n' "$sub"
+    printf 'scs_as_id\t%s\n' "$scs"
+    printf 'what_the_call_says\t%s\n' "$method_note"
+    printf 'what_the_receiver_must_decide\tthe external identifier resolves to an IMSI at the SCEF, so the SCEF is the only node that can say which subscriber this payload reached\n'
+    printf 'access_control\tthe credentials provisioned for this SCS/AS; the body carries no second factor\n'
+    printf 'ref\tTS 29.122 (NIDD API), TS 23.682 4.4.6\n'
+    printf 'limit\tThe resource names follow the NIDD API model; a deployment is authoritative through its own OpenAPI document, and the field set there is the one a real SCEF accepts.\n'
+    printf 'verdict\tnidd_transaction_built\n'
+}
+
+iot_cmd_nidd_audit() {
+    local file="$1"
+    [[ -z "$file" ]] && { printf 'ERROR\tusage: --nidd-audit <calls.tsv>\n' >&2; return 2; }
+    [[ -f "$file" ]] || { printf 'ERROR\tno such file: %s\n' "$file" >&2; return 1; }
+    awk -F'\t' '
+        NR == 1 { next }
+        NF < 4 { next }
+        {
+            app = $1; sbn = $2; ext = $3; dir = $4; bytes = $5 + 0
+            calls++
+            seen_app[app] = 1
+            seen_sub[sbn] = 1
+            seen_dev[ext] = 1
+            if (dir == "mo") { up += bytes; upc++ }
+            else if (dir == "mt") { down += bytes; downc++ }
+            perapp[app]++
+            appunits[app SUBSEP ext] = 1
+            if (dir == "mo") saw_mo[ext] = 1
+            if (dir == "mt") saw_mt[ext] = 1
+        }
+        END {
+            na = 0; for (a in seen_app) na++
+            ns = 0; for (s in seen_sub) ns++
+            nd = 0; for (d in seen_dev) nd++
+            for (k in appunits) { split(k, p, SUBSEP); appdev[p[1]]++ }
+            maxapp = ""; maxn = 0
+            for (a in appdev) if (appdev[a] > maxn) { maxn = appdev[a]; maxapp = a }
+            both = 0
+            for (d in seen_dev) if (saw_mo[d] && saw_mt[d]) both++
+            downonly = 0; downonlydev = ""
+            for (d in seen_dev) if (saw_mt[d] && !saw_mo[d]) { downonly++; if (downonlydev == "") downonlydev = d }
+            printf "calls\t%d\n", calls
+            printf "applications\t%d\n", na
+            printf "subscriptions\t%d\n", ns
+            printf "devices\t%d\n", nd
+            printf "uplink_calls\t%d\n", upc
+            printf "downlink_calls\t%d\n", downc
+            printf "uplink_octets\t%d\n", up
+            printf "downlink_octets\t%d\n", down
+            printf "devices_with_both_directions\t%d\n", both
+            printf "devices_with_downlink_only\t%d\n", downonly
+            printf "devices_per_application_max\t%d\n", maxn
+            if (maxn > 0) printf "busiest_application\t%s\n", maxapp
+            for (a in perapp) printf "application\t%s\t%d\n", a, perapp[a]
+            if (maxn >= 3) printf "finding\tone_application_reads_many_devices\tHIGH\t%s addressed %d devices through one credential set, so one leaked credential is that many meters\n", maxapp, maxn
+            if (downonly > 0) printf "finding\tdownlink_only_device\tMEDIUM\t%s never sent uplink data, so every call about it was somebody pushing to it\n", downonlydev
+            if (both > 0) printf "note\tbidirectional_devices\t%d devices saw traffic in both directions, which is what a working application looks like\n", both
+            printf "ref\tTS 29.122 (NIDD API), TS 23.682 4.4.6, TS 23.003 (external identifier)\n"
+            printf "limit\tThe log is what the SCEF API recorded. A payload read at T6a inside the core leaves no row here at all.\n"
+            printf "verdict\t%s\n", (calls > 0 ? "nidd_log_accounted" : "no_calls_in_this_file")
+        }' "$file"
+}
+
 iot_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -763,6 +919,53 @@ iot_selftest() {
     chk fp-bad-anchor "$(iot_freq_plan 42 abc >/dev/null 2>&1; echo $?)" "2"
     chk fp-no-arg "$(iot_freq_plan >/dev/null 2>&1; echo $?)" "2"
 
+    # NIDD: the non-IP path, the API call that carries the octets, and a log of
+    # API calls accounted for. The base64 is checked against a hand value
+    # because that is the one encoding in the path a reader can verify alone.
+    local pla plm plo plf
+    pla=$(iot_cmd_nidd_plane 2>/dev/null)
+    chk nidd-legs "$(printf '%s\n' "$pla" | awk -F'\t' '$1=="legs"{print $2}')" 4
+    chk nidd-protected "$(printf '%s\n' "$pla" | awk -F'\t' '$1=="protected_by_the_air_interface"{print $2}')" 1
+    chk nidd-leg3 "$(printf '%s\n' "$pla" | awk -F'\t' '$1=="leg" && $2=="3"{print $6}' | grep -c 'T8')" 1
+    chk nidd-encryption "$(printf '%s\n' "$pla" | awk -F'\t' '$1=="finding" && $2=="payload_leaves_the_nas_encryption"{print $3}')" HIGH
+    chk nidd-join "$(printf '%s\n' "$pla" | awk -F'\t' '$1=="finding" && $2=="external_identifier_is_the_join"{print $3}')" HIGH
+    chk nidd-verdict "$(printf '%s\n' "$pla" | awk -F'\t' '$1=="verdict"{print $2}')" nidd_plane_described
+    plm=$(iot_cmd_nidd_build 0102030405 2>/dev/null)
+    chk nidd-build-b64 "$(printf '%s\n' "$plm" | awk -F'\t' '$1=="payload_base64"{print $2}')" AQIDBAU=
+    chk nidd-build-octets "$(printf '%s\n' "$plm" | awk -F'\t' '$1=="payload_octets"{print $2}')" 5
+    chk nidd-build-mt-path "$(printf '%s\n' "$plm" | awk -F'\t' '$1=="path"{print $2}')" /nidd/v1/scs-1/subscriptions/sub-0001/transactions
+    chk nidd-build-mt-field "$(printf '%s\n' "$plm" | awk -F'\t' '$1=="body" && $2 ~ /niddDownlinkData/{print "downlink"}')" downlink
+    chk nidd-build-verdict "$(printf '%s\n' "$plm" | awk -F'\t' '$1=="verdict"{print $2}')" nidd_transaction_built
+    plo=$(iot_cmd_nidd_build 0a0b --direction mo 2>/dev/null)
+    chk nidd-build-mo-path "$(printf '%s\n' "$plo" | awk -F'\t' '$1=="path"{print $2}')" /nidd/v1/scs-1/subscriptions/sub-0001/notification
+    chk nidd-build-mo-field "$(printf '%s\n' "$plo" | awk -F'\t' '$1=="body" && $2 ~ /niddUplinkData/{print "uplink"}')" uplink
+    chk nidd-build-noarg "$(iot_cmd_nidd_build >/dev/null 2>&1; echo $?)" 2
+    chk nidd-build-badhex "$(iot_cmd_nidd_build zz >/dev/null 2>&1; echo $?)" 2
+    chk nidd-build-odd "$(iot_cmd_nidd_build abc >/dev/null 2>&1; echo $?)" 2
+    chk nidd-build-baddir "$(iot_cmd_nidd_build 0102 --direction sideways >/dev/null 2>&1; echo $?)" 2
+    local nf
+    nf="$(mktemp)"
+    printf 'scs_as_id\tsubscription\texternal_id\tdirection\tbytes\tt\n' > "$nf"
+    printf 'app-power\tsub-1\tmeter-1@example.com\tmo\t42\t2026-02-01T10:00:00Z\n' >> "$nf"
+    printf 'app-power\tsub-1\tmeter-2@example.com\tmo\t40\t2026-02-01T10:01:00Z\n' >> "$nf"
+    printf 'app-power\tsub-1\tmeter-3@example.com\tmt\t12\t2026-02-01T10:02:00Z\n' >> "$nf"
+    printf 'app-power\tsub-1\tmeter-3@example.com\tmo\t41\t2026-02-01T10:03:00Z\n' >> "$nf"
+    printf 'app-water\tsub-2\tvalve-9@example.com\tmt\t8\t2026-02-01T10:04:00Z\n' >> "$nf"
+    plf=$(iot_cmd_nidd_audit "$nf" 2>/dev/null)
+    chk nidd-audit-calls "$(printf '%s\n' "$plf" | awk -F'\t' '$1=="calls"{print $2}')" 5
+    chk nidd-audit-apps "$(printf '%s\n' "$plf" | awk -F'\t' '$1=="applications"{print $2}')" 2
+    chk nidd-audit-devices "$(printf '%s\n' "$plf" | awk -F'\t' '$1=="devices"{print $2}')" 4
+    chk nidd-audit-up "$(printf '%s\n' "$plf" | awk -F'\t' '$1=="uplink_octets"{print $2}')" 123
+    chk nidd-audit-down "$(printf '%s\n' "$plf" | awk -F'\t' '$1=="downlink_octets"{print $2}')" 20
+    chk nidd-audit-both "$(printf '%s\n' "$plf" | awk -F'\t' '$1=="devices_with_both_directions"{print $2}')" 1
+    chk nidd-audit-max "$(printf '%s\n' "$plf" | awk -F'\t' '$1=="devices_per_application_max"{print $2}')" 3
+    chk nidd-audit-harvest "$(printf '%s\n' "$plf" | awk -F'\t' '$1=="finding" && $2=="one_application_reads_many_devices"{print $3}')" HIGH
+    chk nidd-audit-downonly "$(printf '%s\n' "$plf" | awk -F'\t' '$1=="finding" && $2=="downlink_only_device"{print $3}')" MEDIUM
+    chk nidd-audit-verdict "$(printf '%s\n' "$plf" | awk -F'\t' '$1=="verdict"{print $2}')" nidd_log_accounted
+    chk nidd-audit-noarg "$(iot_cmd_nidd_audit >/dev/null 2>&1; echo $?)" 2
+    chk nidd-audit-nofile "$(iot_cmd_nidd_audit /tmp/definitely-not-here-nidd.tsv >/dev/null 2>&1; echo $?)" 1
+    rm -f "$nf"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -825,6 +1028,9 @@ iot_cli_main() {
         --nb-attach)    iot_nb_attach "${1:-0}" "${2:-in-band}" ;;
         --ce-abuse)     iot_ce_abuse "$@" ;;
         --plan)         iot_plan "${1:-}" ;;
+        --nidd)         iot_cmd_nidd_plane ;;
+        --nidd-build)   iot_cmd_nidd_build "$@" ;;
+        --nidd-audit)   iot_cmd_nidd_audit "${1:-}" ;;
         --selftest)     iot_selftest ;;
         --menu)         iot_menu ;;
         *) cat >&2 <<EOF
@@ -847,6 +1053,15 @@ Usage: $0 COMMAND
                      the narrowband attach message by message
   --ce-abuse [--ce N] [--ues N] [--rep N]
                      where coverage enhancement can be turned against a cell
+  --nidd             the non-IP data path: UE to MME, MME to SCEF over T6a,
+                     SCEF to application over the T8 API, and which leg the
+                     air interface actually protects
+  --nidd-build <hex> [--direction mt|mo] [--scs-as-id ID] [--subscription ID]
+                     [--external-id id]
+                     build the T8 API call that carries these octets, since a
+                     non-IP payload leaves the core as an HTTP body
+  --nidd-audit <tsv> account for a log of SCEF or NEF API calls: which
+                     application read which devices, in which direction
   --plan <fake-cell|nprach-flood>
                      write a handoff plan (status: handoff) for a vector that
                      needs transmit hardware; no transmission is performed
