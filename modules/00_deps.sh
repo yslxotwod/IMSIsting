@@ -1139,7 +1139,10 @@ deps_selftest() {
     chk pkg-pacman-srsran-absent "$(deps_row_for srsenb | cut -d'|' -f6)" -
     chk pkg-zypper-uhd     "$(deps_row_for uhd_find_devices | cut -d'|' -f7)" uhd
     chk pkg-apk-tshark     "$(deps_row_for tshark | cut -d'|' -f8)" wireshark-cli
-    chk pkg-zypper-unverified "$(deps_row_for pcscd | cut -d'|' -f7)" ?
+    # "?" must stay quoted: a bare ? is a glob, and one single-character file
+    # in the working directory turns this assertion into a comparison against
+    # that filename -- which is how it failed once against a stray file "0".
+    chk pkg-zypper-unverified "$(deps_row_for pcscd | cut -d'|' -f7)" "?"
     chk pkg-dnf-tshark      "$(deps_row_for tshark | cut -d'|' -f5)" wireshark-cli
     chk pkg-pacman-tshark   "$(deps_row_for tshark | cut -d'|' -f6)" wireshark-cli
     chk pkg-apt-column      "$(deps_row_for column | cut -d'|' -f4)" util-linux

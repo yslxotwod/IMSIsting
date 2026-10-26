@@ -292,3 +292,5 @@ segment-payload
 sst
 tt
 ue-max
+sn12
+sn18

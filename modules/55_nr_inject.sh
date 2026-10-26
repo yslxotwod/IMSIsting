@@ -131,6 +131,110 @@ nrj_mac_pdu() {
         "$lcid" "$(nrj_lcid_class "$lcid")" "$sub" "$body" "$sub" "$body" "$(( (${#sub}+${#body}) / 2 ))"
 }
 
+# ── DRB chain: a protected PDCP PDU on the air ──────────────────────────
+# TS 38.321 §6.1.2. A MAC subPDU carrying a DTCH SDU is [subheader][PDCP PDU],
+# and the grant fixes the total size. Whatever the PDU does not fill is a
+# padding subheader: one octet with F=0 and LCID 63, carrying no length field.
+# A padding subheader that *did* carry a length would transmit one octet more
+# than the grant holds, which is a malformed PDU, not a bigger one.
+nrj_mac_fill() {
+    local lcid="${1:-0}" body tbs="${2:-0}"
+    body=$(nrj_norm_hex "${3:-}")
+    [[ -z "$body" ]] && body="00"
+    nrj_is_hex "$body" || { printf 'ERROR\tbody must be hex\n' >&2; return 2; }
+    [[ "$tbs" =~ ^[0-9]+$ ]] || { printf 'ERROR\ttbs must be numeric\n' >&2; return 2; }
+    (( tbs <= 0 || tbs > 65535 )) && { printf 'ERROR\ttbs out of range 1..65535\n' >&2; return 2; }
+
+    local sub; sub=$(nrj_mac_sub "$lcid" "$(( ${#body} / 2 ))") || return 1
+    local sdu_bytes=$(( ${#sub} / 2 + ${#body} / 2 ))
+    local pad_head="" pad_bytes=0
+
+    if (( tbs > 0 )); then
+        (( sdu_bytes <= tbs )) || {
+            printf 'ERROR\tthe PDU needs %d octets but the grant holds %d\n' "$sdu_bytes" "$tbs" >&2
+            printf 'refused\tgrant too small for subheader %d + body %d\n' \
+                "$(( ${#sub} / 2 ))" "$(( ${#body} / 2 ))"
+            return 1
+        }
+        pad_bytes=$(( tbs - sdu_bytes ))
+        (( pad_bytes > 0 )) && pad_head="3F"
+    fi
+
+    printf 'lcid\t%s\nclass\t%s\nl_field\tshort\nsubheader\t%s\nbody\t%s\n' \
+        "$lcid" "$(nrj_lcid_class "$lcid")" "$sub" "$body"
+    printf 'grant_octets\t%d\nsdu_octets\t%d\npadding_subheader\t%s\npadding_octets\t%d\n' \
+        "$tbs" "$sdu_bytes" "$pad_head" "$pad_bytes"
+    local zeroes=""
+    (( pad_bytes > 1 )) && zeroes=$(nrj_zeros "$(( pad_bytes - 1 ))")
+    printf 'pdu\t%s%s%s%s\nbytes\t%d\n' \
+        "$sub" "$body" "$pad_head" "$zeroes" \
+        "$(( sdu_bytes + pad_bytes ))"
+    printf 'note\tthe padding subheader is one octet and carries no length: LCID 63, F = 0\n'
+}
+
+nrj_zeros() {
+    local n="${1:-0}" out=""
+    (( n > 0 )) && out=$(printf '%*s' "$n" '' | tr ' ' '0')
+    printf '%s' "$out"
+}
+
+nrj_drb_usage() {
+    printf 'nrj_drb_usage: --drb-chain <lcid> <sdu_hex> [tbs] --nea N --ck K --nia N --ik K [--sn N] [--bearer N] [--direction N] [--sn18]\n' >&2
+}
+
+# Delegated: 12_nr_air owns the PDCP header, the cipher and the MAC-I. This
+# module owns the subheader, the padding and the grant.
+nrj_drb_chain() {
+    local lcid="${1:-}" sdu nea="${NRJ_NEA:-0}" ck="${NRJ_CK:-}" nia="${NRJ_NIA:-0}" ik="${NRJ_IK:-}"
+    local sn="${NRJ_SN:-0}" bearer="${NRJ_BEARER:-}" dir="${NRJ_DIRECTION:-0}" snlen="${NRJ_SNLEN:-sn12}"
+    local tbs="${2:-0}"
+    sdu=$(nrj_norm_hex "${3:-}")
+    shift 3 2>/dev/null || true
+    while (( $# )); do
+        case "$1" in
+            --nea)       nea="${2:-0}"; shift 2 ;;
+            --ck)        ck="${2:-}"; shift 2 ;;
+            --nia)       nia="${2:-0}"; shift 2 ;;
+            --ik)        ik="${2:-}"; shift 2 ;;
+            --sn)        sn="${2:-0}"; shift 2 ;;
+            --bearer)    bearer="${2:-}"; shift 2 ;;
+            --direction) dir="${2:-0}"; shift 2 ;;
+            --sn18)      snlen="sn18"; shift ;;
+            --sn12)      snlen="sn12"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    [[ "$lcid" =~ ^[0-9]+$ ]] && (( lcid <= 63 )) || { printf 'ERROR\tLCID must be 0..63\n' >&2; return 2; }
+    nrj_is_hex "$sdu" || { printf 'ERROR\tSDU must be hex\n' >&2; return 2; }
+    [[ -n "$sdu" ]] || { printf 'ERROR\tSDU must not be empty\n' >&2; return 2; }
+
+    local nair="$IMSISTING_ROOT/modules/12_nr_air.sh"
+    [[ -f "$nair" ]] || { printf 'ERROR\tmissing %s\n' "$nair" >&2; return 1; }
+
+    local -a a=(--pdcp-build "--$snlen" --sn "$sn" --sdu "$sdu" --direction "$dir")
+    if [[ -n "$bearer" ]]; then a+=(--bearer "$bearer"); fi
+    if [[ "$nea" != "0" || "$nia" != "0" ]]; then
+        [[ -n "$bearer" ]] || {
+            printf 'ERROR\t--bearer is required when --nea or --nia is given: the 5-bit BEARER belongs to the stack under test\n' >&2
+            return 2
+        }
+    fi
+    (( nea > 0 )) && a+=(--nea "$nea" --ck "$ck")
+    (( nia > 0 )) && a+=(--nia "$nia" --ik "$ik")
+
+    local out; out=$(bash "$nair" "${a[@]}" 2>/dev/null) || {
+        printf 'ERROR\t12_nr_air refused the PDCP build\n' >&2
+        return 1
+    }
+    local pdcp; pdcp=$(printf '%s\n' "$out" | awk -F'\t' '$1=="pdu"{print $2; exit}')
+    [[ -n "$pdcp" ]] || { printf 'ERROR\t12_nr_air produced no PDU\n' >&2; return 1; }
+
+    printf 'protected_by\t12_nr_air --pdcp-build\n'
+    printf 'pdcp_pdu\t%s\npdcp_octets\t%d\n' "$pdcp" "$(( ${#pdcp} / 2 ))"
+    nrj_mac_fill "$lcid" "$tbs" "$pdcp"
+}
+
 # ── DCI formats (TS 38.212 §7.3) ────────────────────────────────────────
 nrj_dci_formats() {
     cat <<'EOF'
@@ -919,6 +1023,22 @@ nrj_selftest() {
     chk sub-f1-300 "$(nrj_mac_sub 5 300)" "45012C"
     chk mac-pdu "$(fld "$(nrj_mac_pdu 0 aabbcc)" pdu)" "0003aabbcc"
     chk mac-pdu-len "$(fld "$(nrj_mac_pdu 0 aabbcc)" bytes)" "5"
+    chk mac-fill-exact  "$(fld "$(nrj_mac_fill 4 6 aabbccdd)" pdu)" "0404aabbccdd"
+    chk mac-fill-bytes  "$(fld "$(nrj_mac_fill 4 6 aabbccdd)" bytes)" "6"
+    chk mac-fill-nopad  "$(fld "$(nrj_mac_fill 4 6 aabbccdd)" padding_octets)" "0"
+    chk mac-fill-pad    "$(fld "$(nrj_mac_fill 4 12 aabbccdd)" pdu)" "0404aabbccdd3F00000"
+    chk mac-fill-padn   "$(fld "$(nrj_mac_fill 4 12 aabbccdd)" padding_octets)" "6"
+    chk mac-fill-grant  "$(fld "$(nrj_mac_fill 4 12 aabbccdd)" bytes)" "12"
+    chk mac-fill-lcid63 "$(fld "$(nrj_mac_fill 4 12 aabbccdd)" padding_subheader)" "3F"
+    chk mac-fill-tight  "$(nrj_mac_fill 4 3 aabbccdd >/dev/null 2>&1; echo $?)" "1"
+    chk mac-fill-badtbs "$(nrj_mac_fill 4 x aabbccdd >/dev/null 2>&1; echo $?)" "2"
+    chk mac-fill-badbody "$(nrj_mac_fill 4 8 zz >/dev/null 2>&1; echo $?)" "2"
+    chk drb-chain-pdcp  "$(fld "$(nrj_drb_chain 4 16 aabbccdd --nea 2 --ck d3c5d592327fb11c4035c6680af8c6d1 --nia 2 --ik d3c5d592327fb11c4035c6680af8c6d1 --sn 9 --bearer 31 --direction 1)" pdcp_pdu)" "800936930B4137751E05"
+    chk drb-chain-pdu   "$(fld "$(nrj_drb_chain 4 16 aabbccdd --nea 2 --ck d3c5d592327fb11c4035c6680af8c6d1 --nia 2 --ik d3c5d592327fb11c4035c6680af8c6d1 --sn 9 --bearer 31 --direction 1)" pdu)" "040A800936930b4137751e053F000"
+    chk drb-chain-grant "$(fld "$(nrj_drb_chain 4 16 aabbccdd --nea 2 --ck d3c5d592327fb11c4035c6680af8c6d1 --nia 2 --ik d3c5d592327fb11c4035c6680af8c6d1 --sn 9 --bearer 31 --direction 1)" bytes)" "16"
+    chk drb-chain-bearer "$(nrj_drb_chain 4 16 aabbccdd --nea 2 --ck d3c5d592327fb11c4035c6680af8c6d1 >/dev/null 2>&1; echo $?)" "2"
+    chk drb-chain-badsdu "$(nrj_drb_chain 4 16 zz >/dev/null 2>&1; echo $?)" "2"
+    chk drb-chain-toight "$(nrj_drb_chain 4 4 aabbccdd --nea 0 >/dev/null 2>&1; echo $?)" "1"
 
     # 4. DCI formats.
     chk dci-1_1 "$(nrj_dci_formats | awk -F'\t' '$1=="1_1" && $2 ~ /DL assignment/{print "ok"}')" "ok"
@@ -1219,6 +1339,8 @@ nrj_cli_main() {
         --lcid)        nrj_lcid_class "${1:-}" ;;
         --lcid-table)  nrj_lcid_table ;;
         --mac-pdu)     nrj_mac_pdu "${1:-0}" "${2:-}" ;;
+        --mac-fill)    nrj_mac_fill "${1:-0}" "${2:-0}" "${3:-}" ;;
+        --drb-chain)   nrj_drb_chain "${1:-0}" "${2:-0}" "${3:-}" "${@:4}" ;;
         --mac-sub)     nrj_mac_sub "${1:-0}" "${2:-0}" ;;
         --dci)         nrj_dci_formats ;;
         --dci-parse)   nrj_dci_parse "${1:-}" "${2:-1_0}" "${3:-24}" ;;
@@ -1248,6 +1370,13 @@ Usage: $0 COMMAND
   --ra-rnti-nr <s_id> <t_id> <f_id> <ul_carrier>
   --lcid <n>                   LCID class; --lcid-table for the reference
   --mac-pdu <lcid> <body_hex>  build a MAC-NR PDU
+  --mac-fill <lcid> <tbs> <body_hex>
+                               MAC PDU padded to a grant: LCID 63 padding,
+                               one octet, no length field (TS 38.321 6.1.2)
+  --drb-chain <lcid> <tbs> <sdu_hex> [--nea N --ck K] [--nia N --ik K]
+                               [--sn N] [--bearer N] [--direction N] [--sn18]
+                               protect the SDU through 12_nr_air --pdcp-build,
+                               then wrap it in a DRB subPDU that fills the grant
   --mac-sub <lcid> <len>       build one MAC-NR subheader
   --dci                        NR DCI format reference
   --dci-parse <hex> <1_0|1_1> [N_RB]
