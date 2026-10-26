@@ -30187,9 +30187,10 @@ ss7_build_queries(AppState *state, const char *module_id,
     gtk_box_append(GTK_BOX(body), isd);
     mod_card_end();
 
+    GtkWidget *owner;
     {
         GtkWidget *owner_body;
-        GtkWidget *owner = verb_card("FIND THE OWNER", &owner_body);
+        owner = verb_card("FIND THE OWNER", &owner_body);
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
         gtk_box_append(GTK_BOX(owner_body),
