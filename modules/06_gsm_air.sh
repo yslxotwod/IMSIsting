@@ -358,6 +358,13 @@ gair_si1_neighbor_arfcns() {
 # SI2 and SI4 carry the BA (BCCH allocation) list of neighbour ARFCNs, in the
 # same bit-map format as SI1's CA list. SI4 additionally carries the CBCH
 # channel description and the LAC/CI when SI3 is not broadcast.
+#
+# The 2G warning path is the CBCH, and its geographical scope is the same
+# 2-bit field in the same Serial Number as LTE's SIB10/11/12 — TS 23.041 is
+# written once and both RATs read it. The targeting arithmetic (which scope a
+# message really covers, and that "cell wide" bounds identity rather than
+# delivery) lives in 10_lte_air --warning-area because the LTE SIB codec is
+# where the encoders sit; there is nothing 2G-specific to recompute.
 gair_decode_ba_list() {
     local hex="$1" label="${2:-neighbors}" off="${3:-24}"
     local fmt; fmt=$(gair_bits "$hex" "$off" 2) || return 1

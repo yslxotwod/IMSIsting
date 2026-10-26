@@ -759,6 +759,11 @@ KDF_FC = {
     0x6A: ("KAUSF", "AUSF key (TS 33.501 A.4.1): P0 = SN name, P1 = SQN xor AK"),
     0x6B: ("RES*", "5G RES star (TS 33.501 A.4.1): P0 = SN name, P1 = RAND, P2 = RES"),
     0x6C: ("KSEAF", "SEAF key (TS 33.501 A.5): P0 = SN name"),
+    # AKMA (TS 33.535). The FC space is allocated per document: 33.535 claims
+    # the range 0x80-0x82 (A.1.2), and each annex fixes the parameters.
+    0x80: ("KAKMA", "AKMA anchor key (TS 33.535 A.2): KEY = KAUSF, P0 = \"AKMA\", P1 = SUPI"),
+    0x81: ("A-TID", "AKMA temporary UE id (TS 33.535 A.3): KEY = KAUSF, P0 = \"A-TID\", P1 = SUPI"),
+    0x82: ("KAF", "AKMA application key (TS 33.535 A.4): KEY = KAKMA, P0 = AF_ID"),
 }
 
 

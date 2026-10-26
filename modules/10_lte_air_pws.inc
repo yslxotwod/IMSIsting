@@ -336,6 +336,107 @@ lair_cmd_build_sib10() {
 lair_cmd_build_sib11() { lair_cmd_build_sib_segmented SIB11 "$@"; }
 lair_cmd_build_sib12() { lair_cmd_build_sib_segmented SIB12 "$@"; }
 
+# ── Warning-area targeting (TS 23.041 §9.4.2.2.5, TS 36.331 SIB10/11/12) ─
+# The codec above builds the segments. This is the arithmetic nobody does
+# before pressing send, and it decides whether a warning reaches one cell or
+# a country.
+#
+# The scope is NOT in the Set-of CBS IDs as a wide field. Each warning message
+# carries a Serial Number whose top 2 bits are the Geographical Scope:
+#
+#   GS 00  immediate  cell wide          (operators use this for base station IDs)
+#   GS 01  normal     PLMN wide
+#   GS 10  normal     Location Area wide (GSM) / Service Area wide (UMTS)
+#   GS 11  normal     cell wide
+#
+# (TS 23.041 v8.11.0 §9.4.2.2.5, the coding table.) The rest of the Serial
+# Number is a 10-bit Message Code and a 4-bit Update Number.
+#
+# Two consequences that matter before a forged warning goes out:
+#   * "cell wide" is about identity, not delivery — the TS says outright that
+#     a message with GS=cell is treated as new in the next cell, so the same
+#     broadcast re-displays at every cell boundary it crosses.
+#   * PLMN wide means the UE treats identical Message Code + Update Number as
+#     the same message across the whole network, which is what makes one
+#     forged body survive a drive across cells instead of being re-shown.
+#
+# The Set-of CBS IDs in SIB11/12 is a *list of target cells/areas*, a separate
+# field from the scope. Reading one and claiming it answers the other is the
+# mistake this verb exists to avoid making.
+
+# lair_warning_scope <serial 4-hex>
+#   Serial Number is 2 octets: GS in octet 1 bits 7-6, Message Code spanning
+#   the remaining bits, Update Number in octet 2 bits 3-0.
+lair_warning_scope() {  # <serial 4-hex> -> scope|mode|message_code|update
+    local h="${1:-}"; h="${h^^}"
+    [[ "$h" =~ ^[0-9A-F]{4}$ ]] || { printf 'invalid'; return 1; }
+    local v=$(( 16#$h ))
+    local gs=$(( (v >> 14) & 0x3 ))
+    local up=$(( v & 0xF ))
+    local mc=$(( (v >> 4) & 0x3FF ))
+    local scope mode
+    case $gs in
+        0) scope=cell-wide;          mode=immediate ;;
+        1) scope=plmn-wide;          mode=normal ;;
+        2) scope=location-area-wide; mode=normal ;;
+        3) scope=cell-wide;          mode=normal ;;
+    esac
+    printf '%s|%s|%d|%d' "$scope" "$mode" "$mc" "$up"
+}
+
+lair_warning_area_usage() {
+    printf 'usage: --warning-area <serial-hex>[,<serial-hex>,...]\n' >&2
+    printf '       each argument is a 2-octet Serial Number (GS + Message Code + Update Number)\n' >&2
+}
+
+# lair_cmd_warning_area <serial hex list>
+#   Decode one or more Serial Numbers and report the reach the scope implies.
+lair_cmd_warning_area() {
+    local list="${1:-}"
+    [[ -n "$list" ]] || { lair_warning_area_usage; return 2; }
+    list="${list// /}"; list="${list//,/ }"
+    local -a ids; read -r -a ids <<< "$list"
+    printf 'field\tvalue\n'
+    printf 'serial_count\t%d\n' "${#ids[@]}"
+    local widest='' widest_rank=0 rank id dec scope mode mc up
+    for id in "${ids[@]}"; do
+        id="${id^^}"
+        [[ "$id" =~ ^[0-9A-F]{4}$ ]] || {
+            printf 'ERROR\t%s is not a 2-octet Serial Number (4 hex digits)\n' \
+                "$(printf '%s' "$id" | tr -cd '0-9A-Fa-f')" >&2; return 2; }
+        dec=$(lair_warning_scope "$id") || return 2
+        scope="${dec%%|*}"; local rest="${dec#*|}"
+        mode="${rest%%|*}"; rest="${rest#*|}"
+        mc="${rest%%|*}"; up="${rest##*|}"
+        case "$scope" in
+            plmn-wide)          rank=3 ;;
+            location-area-wide) rank=2 ;;
+            cell-wide)          rank=1 ;;
+            *)                  rank=0 ;;
+        esac
+        printf 'serial\t%s\tscope=%s\tmode=%s\tmessage_code=%s\tupdate=%s\n' \
+            "$id" "$scope" "$mode" "$mc" "$up"
+        if (( rank > widest_rank )); then widest_rank=$rank; widest="$id"; fi
+    done
+    printf 'widest_serial\t%s\n' "$widest"
+    case $widest_rank in
+        3) printf 'effective_reach\tevery cell in the PLMN treats identical Message Code + Update Number as one message\n'
+           printf 'targeting_verdict\tnetwork-wide identity: one forged body survives a drive across cells\n' ;;
+        2) printf 'effective_reach\tone Location Area (GSM) or Service Area (UMTS)\n'
+           printf 'targeting_verdict\tbounded by the area the UE is registered in\n' ;;
+        1) printf 'effective_reach\tone cell of identity, re-displayed at every cell boundary it crosses\n'
+           printf 'targeting_verdict\tnarrow by identity, NOT narrow by delivery: GS=cell is treated as new in the next cell\n' ;;
+        *) printf 'effective_reach\tunclassified\n'
+           printf 'targeting_verdict\tunknown, and unknown is not the same answer as narrow\n' ;;
+    esac
+    if (( ${#ids[@]} > 1 )) && (( widest_rank >= 2 )); then
+        printf 'set_note\tthe widest scope in the set decides; a cell-wide entry does not shrink a PLMN-wide one\n'
+    fi
+    printf 'cbsid_separate\tthe Set-of CBS IDs in SIB11/12 names target areas and is a different field from the scope; reading it does not answer this\n'
+    printf 'spec\tTS 23.041 9.4.2.2.5 (Geographical Scope coding), TS 36.331 SIB10/11/12\n'
+    return 0
+}
+
 lair_cmd_build_sib_segmented() {
     local sib="${1:-}"; (($# > 0)) && shift
     local stem sfx
@@ -840,6 +941,30 @@ lair_cmd_enb_sib_schedule() {
 # (pycrate_asn1dir.RRCLTE, to_uper()), not from running this builder twice.
 lair_pws_selftest() {
     local out rc d1 d2
+
+    # ── Warning-area scope (TS 23.041 9.4.2.2.5) ───────────────────────
+    # GS is octet 1 bits 7-6, NOT a low-12-bit field. These four values are the
+    # whole coding table, so they get pinned one at a time.
+    chk warn-scope-gs00 "$(lair_warning_scope 0000 | cut -d'|' -f1)" "cell-wide"
+    chk warn-scope-gs01 "$(lair_warning_scope 4000 | cut -d'|' -f1)" "plmn-wide"
+    chk warn-scope-gs10 "$(lair_warning_scope 8000 | cut -d'|' -f1)" "location-area-wide"
+    chk warn-scope-gs11 "$(lair_warning_scope C000 | cut -d'|' -f1)" "cell-wide"
+    chk warn-mode-gs00-immediate "$(lair_warning_scope 0000 | cut -d'|' -f2)" "immediate"
+    chk warn-mode-gs01-normal    "$(lair_warning_scope 4000 | cut -d'|' -f2)" "normal"
+    # GS=PLMN must NOT decode as cell-wide, or a wide forgery reads as narrow.
+    chk warn-gs-not-cell "$([ "$(lair_warning_scope 4000 | cut -d'|' -f1)" != "cell-wide" ] && echo yes)" "yes"
+
+    # The widest entry decides; a narrow entry must not shrink it.
+    out=$(lair_cmd_warning_area "C000,4000" 2>/dev/null)
+    chk warn-widest-plmn "$(fld "$out" widest_serial)" "4000"
+    chk warn-widest-is-plmn "$(fld "$out" targeting_verdict | grep -c 'network-wide')" "1"
+    out=$(lair_cmd_warning_area "C000,0000" 2>/dev/null)
+    chk warn-all-narrow "$(fld "$out" targeting_verdict | grep -c 'narrow by identity')" "1"
+    # GS=cell must be described as re-displayed, never as a delivery bound.
+    chk warn-cell-not-delivery-bound "$(fld "$(lair_cmd_warning_area 0000 2>/dev/null)" targeting_verdict | grep -c 'NOT narrow by delivery')" "1"
+    chk warn-bad-hex "$(lair_cmd_warning_area "40" 2>&1 >/dev/null | grep -c 'not a 2-octet Serial Number')" "1"
+    # The CBS ID set is a different field and the verb has to say so.
+    chk warn-cbsid-separate "$(fld "$(lair_cmd_warning_area 4000 2>/dev/null)" cbsid_separate | grep -c 'different field from the scope')" "1"
 
     # ── SIB10: exact octets, pinned from pycrate ──────────────────────
     out=$(lair_cmd_build_sib10 --message-id 4352 --serial 0 --warning-type 0001 2>/dev/null)

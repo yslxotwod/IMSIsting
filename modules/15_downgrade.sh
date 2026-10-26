@@ -1990,6 +1990,24 @@ dwn_selftest() {
     }
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
 
+    # Steering of Roaming, the network half. The encoder has to agree with the
+    # decoder in 16_sim, so the round-trip is asserted here rather than
+    # trusting either side alone.
+    chk steer-plmn-208-01  "$(dwn_plmn_bcd 208 01)" "0208F1"
+    chk steer-plmn-260-001 "$(dwn_plmn_bcd 260 001)" "620010"
+    chk steer-plmn-310-410 "$(dwn_plmn_bcd 310 410)" "134001"
+    # MCC 208 MNC 01 is 02 08 F1, NOT 20 80 10 — the low nibble goes first.
+    chk steer-plmn-not-swapped "$([ "$(dwn_plmn_bcd 208 01)" != "208001" ] && echo yes)" "yes"
+    chk steer-eplmn-ie "$(dwn_build_eplmn '208-01,208-02,310-410' 2>/dev/null)" "090208F10208F2134001"
+    chk steer-eplmn-len "$(dwn_build_eplmn '208-01' 2>/dev/null | cut -c1-2)" "03"
+    # An EPLMN IE holds 15 entries; the sixteenth is a second message, not a
+    # truncated first one.
+    local too_many many
+    many=$(python3 -c 'print(",".join("208-%02d" % i for i in range(1,17)))')
+    too_many=$(dwn_build_eplmn "$many" 2>&1 >/dev/null | grep -c 'at most 15')
+    chk steer-eplmn-limit "$too_many" "1"
+    chk steer-plmn-bad "$(dwn_plmn_bcd 208 1 2>&1 >/dev/null | grep -c 'two or three digits')" "1"
+
     local d out rc
     d=$(mktemp -d "$MOD_TMP/selftest.XXXXXX") || {
         printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
@@ -2705,6 +2723,106 @@ M
     done
 }
 
+# ── Steering of Roaming: the network half ───────────────────────────────
+# SoR has two halves and only one of them is hard.
+#
+# The card half is a secured packet: SoR-CMCI, MAC-protected, delivered in a
+# NAS container and verified by the UICC against a key the network does not
+# hand out. That half is not forgeable by anyone without the UICC's key, and
+# it lives in 16_sim (--sor-decode / --sor-build) where the EF and the
+# envelope already are.
+#
+# The network half is the cheap one: a reject that carries an Equivalent PLMN
+# list, or a re-registration procedure whose SOR-CMCI the UE has no reason to
+# distrust because it arrived over its own authenticated NAS connection. The
+# interesting part is not "send a packet" — it is what the UE is left able to
+# choose afterwards. That is the same territory as a RAT downgrade, which is
+# what this module already exists for, so the arithmetic lives here.
+#
+# TS 24.301 §9.9.3.9 / §9.9.3.2 — the reject carries a cause, and if the
+# network wants the UE to leave, the EPLMN IE (§9.9.3.12) rides along.
+
+# dwn_plmn_bcd <mcc> <mnc>  ->  3 octets of hex, TS 24.008 10.5.1.3.
+# Six digits, LOW nibble of each octet first, MCC then MNC, F filler for a
+# two-digit MNC. This is the inverse of what 16_sim --plmn-lists decodes, and
+# the selftest round-trips the two.
+dwn_plmn_bcd() {
+    local mcc="${1:-}" mnc="${2:-}"
+    [[ "$mcc" =~ ^[0-9]{3}$ ]] || { printf 'ERROR\tmcc is three digits, got %s\n' \
+        "$(printf '%s' "$mcc" | tr -cd '0-9A-Za-z-')" >&2; return 2; }
+    case ${#mnc} in
+        2) mnc="${mnc}F" ;;
+        3) : ;;
+        *) printf 'ERROR\tmnc is two or three digits, got %s\n' "$(( ${#mnc} ))" >&2; return 2 ;;
+    esac
+    [[ "$mnc" =~ ^[0-9]{2,3}F?$ || "$mnc" =~ ^[0-9]{3}$ ]] || {
+        printf 'ERROR\tmnc must be digits\n' >&2; return 2; }
+    local d="${mcc}${mnc}"
+    [[ "$d" =~ ^[0-9A-F]{6}$ ]] || { printf 'ERROR\tbad digits\n' >&2; return 2; }
+    printf '%s%s%s' \
+        "${d:1:1}${d:0:1}" "${d:3:1}${d:2:1}" "${d:5:1}${d:4:1}"
+}
+
+# dwn_build_eplmn <tab-separated mcc-mnc list>
+#   The EPLMN IE content: a length octet then one 3-octet PLMN per entry
+#   (TS 24.301 §9.9.3.12 / TS 24.008 §10.5.1.13). One IE per 15 entries is
+#   the limit; this refuses to emit an overlong IE rather than truncating.
+dwn_build_eplmn() {
+    local list="${1:-}" n=0 out='' plmn mcc mnc
+    local -a entries
+    IFS=$'\t,' read -r -a entries <<< "$list"
+    for plmn in "${entries[@]}"; do
+        plmn="${plmn// /}"
+        [[ -n "$plmn" ]] || continue
+        if [[ "$plmn" =~ ^([0-9]{3})-([0-9]{2,3})$ ]]; then
+            mcc="${BASH_REMATCH[1]}"; mnc="${BASH_REMATCH[2]}"
+            out+=$(dwn_plmn_bcd "$mcc" "$mnc") || return 2
+            n=$(( n + 1 ))
+        else
+            printf 'ERROR\tPLMN %s is not mcc-mnc\n' "$(printf '%s' "$plmn" | tr -cd '0-9A-Za-z-')" >&2
+            return 2
+        fi
+    done
+    (( n > 0 )) || { printf 'ERROR\tno PLMN in the list\n' >&2; return 2; }
+    (( n <= 15 )) || {
+        printf 'ERROR\t%d entries: an EPLMN IE holds at most 15, a second IE is a second message\n' "$n" >&2
+        return 2; }
+    printf '%02X%s' "$(( n * 3 ))" "$out"
+    printf '\tentries\t%d\n' "$n" >&2
+}
+
+# dwn_cmd_build_steer <mcc> <mnc> <eplmn list> [<cause>]
+#   A reject that removes the serving PLMN and offers a replacement set.
+dwn_cmd_build_steer() {
+    local mcc="${1:-001}" mnc="${2:-01}" list="${3:-}" cause="${4:-15}"
+    [[ -n "$list" ]] || {
+        printf 'ERROR\tusage: --build-steer <mcc> <mnc> <plmn,plmn,...> [cause]\n' >&2; return 2; }
+
+    local eplmn rows
+    eplmn=$(dwn_build_eplmn "$list" 2>/dev/null) || { dwn_build_eplmn "$list" >/dev/null; return 2; }
+    local served
+    served=$(dwn_plmn_bcd "$mcc" "$mnc") || return 2
+
+    printf 'field\tvalue\n'
+    printf 'serving_plmn\t%s-%s\t%s\n' "$mcc" "$mnc" "$served"
+    printf 'reject_cause\t%s\n' "$cause"
+
+    # Cause 15 (No suitable cells in tracking area) is the one that means
+    # "leave and try elsewhere"; a reject with another cause does not steer.
+    case "$cause" in
+        15) printf 'cause_effect\tthe UE must not choose this TA again and looks elsewhere\n' ;;
+        12) printf 'cause_effect\ttracking area not allowed — the UE leaves the TA\n' ;;
+        13) printf 'cause_effect\troaming not allowed in this TA\n' ;;
+        *)  printf 'cause_effect\tthis cause does not force a reselection; an EPLMN riding it is advisory\n' ;;
+    esac
+    printf 'eplmn_ie\t%s\n' "$eplmn"
+    printf 'eplmn_note\tthe list replaces nothing; it widens what the UE may pick, and the UE keeps its own PLMNwAcT\n'
+    printf 'sor_cmci\tnot sent: a forged SoR packet fails MAC verification at the UICC, so the steering has to come from the reject\n'
+    printf 'limit\tthe reject must arrive inside the authenticated NAS connection of the UE; without that it is discarded as unprotected\n'
+    printf 'cross_ref\t16_sim.sh --plmn-lists decodes the card half, --sor-decode the packet envelope\n'
+    return 0
+}
+
 # ── CLI dispatch ────────────────────────────────────────────────────────
 dwn_cli_main() {
     local cmd="${1:-}"
@@ -2717,6 +2835,7 @@ dwn_cli_main() {
         --build-reject)      dwn_cmd_build_reject "${1:-}" "${2:-}" "${3:-attach}" ;;
         --tx-reject)         dwn_cmd_tx_reject "${1:-}" "${2:-}" "${3:-attach}" ;;
         --build-sib1)        dwn_build_sib1 "${1:-001}" "${2:-01}" "${3:-1}" "${4:-0}" "${5:-barred}" "${6:-notAllowed}" ;;
+        --build-steer)       dwn_cmd_build_steer "${1:-001}" "${2:-01}" "${3:-}" "${4:-15}" ;;
         --detect)            dwn_cmd_detect "${1:-}" ;;
         --path)              dwn_cmd_path "${1:-}" ;;
         --plan)              dwn_cmd_plan "${1:-}" ;;
@@ -2745,6 +2864,9 @@ Usage: $0 COMMAND
                                   a SIB1 body with cellBarred and
                                   intraFreqReselection set — the forged-SIB
                                   suppress-a-RAT vector, encoding half
+  --build-steer <mcc> <mnc> <plmn,plmn,...> [cause]
+                                  a reject carrying an Equivalent PLMN list:
+                                  the network half of Steering of Roaming
   --detect <pcap|records.tsv>     find a downgrade: steering reject, RAT
                                   change, or a cipher change to null
   --path <name>                   describe a downgrade mechanism

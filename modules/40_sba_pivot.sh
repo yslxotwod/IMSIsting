@@ -824,6 +824,39 @@ nsmf-pdusession	/nsmf-pdusession/v1/sm-contexts
 nbsf-management	/nbsf-management/v1/pcfBindings
 EOF
 }
+# ── AKMA as an SBA surface (TS 33.535, TS 29.503) ──────────────────────
+# The key derivation is not here — it lives in 16_sim --akma-keys, next to
+# the MILENAGE code that produces KAKA. What belongs here is the service
+# side, which is short and is where the interesting failure lives:
+#
+#   AAnF (Authentication Anchor Function) is an SBA NF. It receives the
+#   AKMA indication from the AUSF during primary authentication, derives
+#   KAKMA and keeps it. An AF then asks for KAF by presenting the A-KID.
+#
+# The property worth naming: KAKMA has no timer of its own. It is replaced
+# when the UE re-authenticates and not before, so a context sitting in the
+# AAnF survives every TAU and every mobility registration in between. An A-KID
+# therefore keeps working long after the registration that created it, and the
+# only thing that ends it is a fresh primary authentication.
+sbap_cmd_aanf() {
+    local nf="${1:-AAnF}"
+    printf 'field\tvalue\n'
+    printf 'nf_type\tAAnF\n'
+    printf 'service\tnausf_anchor\n'
+    printf 'spec\tTS 33.535 (AKMA framework), TS 29.503 (Nudm UDM services)\n'
+    printf 'discovery\ttarget-nf-type=AAnF&requester-nf-type=AF\n'
+    printf 'discovery_url\t/nnrf-disc/v1/nf-instances?target-nf-type=AAnF&requester-nf-type=AF\n'
+    printf 'request_key\tKAF for a given A-KID (NAI: RID||A-TID @ Home Network Identifier)\n'
+    printf 'derivation\t16_sim.sh --akma-keys (KAKMA, A-TID), --akma-kaf (KAF per AF_ID)\n'
+    # The lifetime is the whole point, so it gets its own rows.
+    printf 'lifetime_trigger\tnext successful primary authentication\n'
+    printf 'lifetime_bound\tKAF is bound to KAKMA; neither is bound to the registration that produced it\n'
+    printf 'lifetime_note\tan A-KID survives every TAU and mobility registration between two primary authentications\n'
+    printf 'revoke\tremoving the AKMA context in the AAnF is the only immediate kill (TS 33.535 context removal)\n'
+    printf 'limit\tthis describes the surface. Nothing here proves an AAnF is reachable or that it holds a context\n'
+    return 0
+}
+
 sbap_nrf_discovery() {
     local target="${1:-UDM}" requester="${2:-AMF}"
     printf 'method\tGET\npath\t/nnrf-disc/v1/nf-instances\n'
@@ -1173,6 +1206,18 @@ sbap_selftest() {
     }
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
 
+    # AKMA: the surface is here, the derivation is in 16_sim. What this module
+    # owes the reader is the lifetime, so that is what gets asserted.
+    local aanf
+    aanf=$(sbap_cmd_aanf 2>/dev/null)
+    chk aanf-nf-type "$(fld "$aanf" nf_type)" "AAnF"
+    chk aanf-discovery "$(fld "$aanf" discovery)" "target-nf-type=AAnF&requester-nf-type=AF"
+    chk aanf-lifetime-trigger "$(fld "$aanf" lifetime_trigger)" "next successful primary authentication"
+    chk aanf-points-at-sim "$(fld "$aanf" derivation | grep -c '16_sim.sh --akma-keys')" "1"
+    # The lifetime claim has to survive: a surface page that quietly says
+    # "registration-bound" would be wrong.
+    chk aanf-not-registration-bound "$(fld "$aanf" lifetime_bound | grep -c 'neither is bound to the registration')" "1"
+
     local d
     d=$(mktemp -d "$MOD_TMP/selftest.XXXXXX") || {
         printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
@@ -1490,6 +1535,7 @@ sbap_cli_main() {
         --settings)    sbap_settings_parse "${1:-}" ;;
         --hpack)       sbap_cmd_hpack "$@" ;;
         --nrf)         sbap_nrf_discovery "${1:-UDM}" "${2:-AMF}" ;;
+        --aanf)        sbap_cmd_aanf "${1:-AAnF}" ;;
         --nf-paths)    sbap_nf_paths ;;
         --jwt)         sbap_jwt_decode "${1:-}" ;;
         --jwt-audit)   sbap_jwt_audit "${1:-}" "${2:-}" ;;
@@ -1517,6 +1563,8 @@ Usage: $0 COMMAND
   --settings <hex>      decode a SETTINGS payload
   --hpack <hex>...      decode HPACK header blocks (RFC 7541)
   --nrf <target> [requester]   NRF discovery request (TS 29.510)
+  --aanf                the AKMA anchor surface: AAnF discovery and the
+                        lifetime its keys actually have (TS 33.535)
   --nf-paths            SBI service path reference
   --jwt <token>         decode a JWT header and payload
   --jwt-audit <token> [expected_aud]

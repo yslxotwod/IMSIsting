@@ -479,6 +479,12 @@ IMSISTING_MODULE_TABLE=(
     # INTERCEPT / CARRIER
     "INTERCEPT / CARRIER|60|LI Interception|lipr_menu|42_li_probe"
     "INTERCEPT / CARRIER|61|Carrier API Abuse|capi_menu|44_carrier_api"
+
+    # POSITIONING
+    "POSITIONING|62|GNSS / GPS|gnss_menu|61_gnss"
+
+    # USER PLANE
+    "USER PLANE|63|GTP-U User Plane|gtpu_menu|62_gtpu"
 )
 
 # ── banner ──────────────────────────────────────────────────

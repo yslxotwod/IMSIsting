@@ -9,6 +9,7 @@
 # One verb per line, without the leading dashes. Adding a line here means the
 # verb takes an argument everywhere in the tree -- tools/check-verbs.sh fails
 # if a verb listed here is dispatched as a bare command with no argument.
+aanf
 action
 algo
 algorithms
@@ -25,6 +26,8 @@ bare
 barred
 base
 bch-hex
+bins
+build-steer
 calls
 card-challenge
 case
@@ -51,6 +54,7 @@ dcs
 dest-var
 device-id
 dir
+direction
 dist
 domain
 dpc
@@ -61,10 +65,13 @@ dst-ton
 dummy
 duration
 earfcn
+edge-pct
 emm-mode
 encode-us
 epoch-sfn
 epoch-sub
+ext
+external-id
 flow-id
 follow
 forged-range
@@ -98,8 +105,8 @@ ksi
 ksi-type
 lai
 late-non-critical
-linkage
 limit
+linkage
 lu-type
 margin-db
 max
@@ -118,6 +125,7 @@ mode
 mood
 msc
 msisdn
+multi-access
 n-rb
 n-rb-dl
 n-rb-prs
@@ -149,6 +157,7 @@ plmn
 port
 ports
 power
+precedence
 prio
 prn
 psc
@@ -184,6 +193,7 @@ sat-lon
 sat2-lat
 sat2-lon
 scs
+scs-as-id
 scts
 seconds
 secs
@@ -197,6 +207,7 @@ service-id
 service-indicator
 service-type
 session-id
+sf
 sfn
 shape
 sib-code
@@ -215,11 +226,13 @@ src
 src-npi
 src-ton
 srsran-version
+subscription
 system-type
 t
 t320
 tai
 target
+threshold-db
 tid
 timing-geoloc
 tmsi
@@ -248,15 +261,3 @@ warning-type
 window
 with-capture
 wrap
-sf
-sfn
-rb
-bins
-threshold-db
-edge-pct
-precedence
-multi-access
-direction
-external-id
-scs-as-id
-subscription

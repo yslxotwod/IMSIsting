@@ -5587,6 +5587,63 @@ sim_selftest() {
     chk auts-verify-verdict "$(fld "$ver" verdict)" "valid"
     chk auts-verify-sqn     "$(fld "$ver" sqn_ms)"  "FF9BB4D0B607"
     chk auts-verify-next    "$(fld "$ver" next_sqn_hex)" "FF9BB4D0B608"
+
+    # ── AKMA (TS 33.535) ────────────────────────────────────────────────
+    # KAKMA is KDF(KAUSF, FC=0x80, "AKMA", SUPI). Cross-checked against a
+    # plain HMAC-SHA-256 built here rather than against the tool's own output,
+    # so a wrong parameter order cannot agree with itself.
+    local akma_row
+    akma_row=$(sim_cmd_akma_keys --kausf "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB" \
+        --imsi 001010000000001 2>/dev/null)
+    chk akma-kakma "$(fld "$akma_row" kakma)" "846AE580BEC767A0A944FACA56DE27A8DCE10ED935B6D0263929C7D385D2ACCF"
+    chk akma-kakma-hmac-ok "$(python3 -c '
+import hmac, hashlib
+key = bytes.fromhex("ab" * 32)
+parts = [bytes([0x80])]
+for p in (b"AKMA", b"001010000000001"):
+    parts += [p, (len(p) * 8).to_bytes(2, "big")]
+print(hmac.new(key, b"".join(parts), hashlib.sha256).hexdigest().upper())' 2>/dev/null)" \
+        "$(fld "$akma_row" kakma)"
+    # The FC range is allocated per document: 0x80 with another key must not
+    # reproduce 0x6A, or the derivation is not using the FC at all.
+    chk akma-fc-distinct "$(sim_akma_kdf 6a "$(printf 'ab%.0s' {1..32})" 414B4D41)" \
+        "$(python3 -c '
+import hmac, hashlib
+key = bytes.fromhex("ab" * 32)
+p = b"AKMA"
+print(hmac.new(key, bytes([0x6a]) + p + (len(p) * 8).to_bytes(2, "big"), hashlib.sha256).hexdigest().upper())' 2>/dev/null)"
+    chk akma-kakma-ne-kausf "$(fld "$akma_row" kakma)" "846AE580BEC767A0A944FACA56DE27A8DCE10ED935B6D0263929C7D385D2ACCF"
+
+    local kaf_row
+    kaf_row=$(sim_cmd_akma_kaf --kakma "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB" \
+        --af-id af.example.com --proto 01 2>/dev/null)
+    chk akma-kaf "$(fld "$kaf_row" kaf)" "ABB3AF4CD77FAE7B7DE5D7219C05962C3F4A8A2DC64E50C3F1B6FA14B9D749D7"
+    chk akma-kaf-afid-len "$(fld "$kaf_row" af_id_length_bytes)" "15"
+
+    # ── PLMN lists (TS 24.008 10.5.1.3) ─────────────────────────────────
+    # MCC 208, MNC 01 is 02 08 F1; the ACT byte rides after it.
+    local plmn_row
+    plmn_row=$(sim_cmd_plmn_lists "0208F13F00" 2>/dev/null)
+    chk plmn-decode-208-01 "$(printf '%s\n' "$plmn_row" | awk -F'\t' '$1=="1"{print $2}')" "208-01"
+    chk plmn-act-nr-gsm "$(printf '%s\n' "$plmn_row" | awk -F'\t' '$1=="1"{print $4}')" "NR+GSM+spare-nibble-set"
+    chk plmn-decode-260-001 "$(sim_plmn_bcd_decode "620010")" "260-001"
+    # A two-digit MNC is filler-padded in the sixth digit and must not grow.
+    chk plmn-2digit-mnc "$(sim_plmn_bcd_decode "0208F1")" "208-01"
+    chk plmn-bad-length "$(sim_cmd_plmn_lists "0208F10" 2>&1 >/dev/null | grep -c 'record length')" "1"
+
+    # ── SoR-CMCI (TS 31.111 9.1) ────────────────────────────────────────
+    local sor_row
+    sor_row=$(sim_cmd_sor_build "A1B2C3D4E5F60708" "02030004" 2>/dev/null)
+    chk sor-build "$(fld "$sor_row" packet)" "01A1B2C3D4E5F6070802030004"
+    chk sor-build-octets "$(fld "$sor_row" octets)" "13"
+    local sor_dec
+    sor_dec=$(sim_cmd_sor_decode "01A1B2C3D4E5F6070802030004" 2>/dev/null)
+    chk sor-decode-mac "$(fld "$sor_dec" mac)" "A1B2C3D4E5F60708"
+    chk sor-decode-payload "$(fld "$sor_dec" payload)" "02030004"
+    chk sor-decode-mac-octets "$(fld "$sor_dec" mac_octets)" "8"
+    # Decoding must never claim to have verified what it cannot verify.
+    chk sor-decode-no-verify-claim "$(fld "$sor_dec" limit | grep -c 'does not verify the MAC')" "1"
+    chk sor-build-rejects-short-mac "$(sim_cmd_sor_build "A1B2" "0203" 2>&1 >/dev/null | grep -c '8 octets')" "1"
     # R68: the responder. Same token, but now against a network that has a
     # counter of its own: ahead-and-inside-the-window accepts, equal refuses as
     # a replay, and a jump beyond the configured window is refused too.
@@ -6908,6 +6965,283 @@ sim_aka_sn_text() { # <hex> -> the text form, if every byte is printable
     printf '%s' "$out"
 }
 
+# ── AKMA (TS 33.535) ────────────────────────────────────────────────────
+# AKMA is a key derivation before it is anything else. There is no separate
+# authentication: it rides the 5G primary authentication that already
+# happened, and everything below is KDF over material this module already
+# produces.
+#
+#   KAKMA = KDF(KAUSF, FC=0x80, "AKMA", SUPI)      TS 33.535 A.2
+#   A-TID = KDF(KAUSF, FC=0x81, "A-TID", SUPI)     TS 33.535 A.3
+#   KAF   = KDF(KAKMA, FC=0x82, AF_ID)             TS 33.535 A.4
+#
+# The FC range 0x80-0x82 is allocated to this document alone (A.1.2), so a
+# KAKMA derived with any other FC is a different key and no AAnF will agree.
+#
+# A-KID is NAI format (RFC 7542): username@realm, username = RID || A-TID,
+# realm = Home Network Identifier (TS 33.535 §6.1).
+sim_akma_kdf() {  # <fc-hex> <key-hex> <p0-hex> [p1-hex]
+    local fc="$1" key="$2" p0="$3" p1="${4:-}"
+    local tool="$IMSISTING_ROOT/tools/gsm_crypto.py" out
+    [[ -f "$tool" ]] || { printf 'ERROR\tno %s\n' "$tool" >&2; return 1; }
+    if [[ -n "$p1" ]]; then
+        out=$(python3 "$tool" --kdf "$fc" --key "$key" --p0 "$p0" --p1 "$p1" 2>/dev/null) || return 1
+    else
+        out=$(python3 "$tool" --kdf "$fc" --key "$key" --p0 "$p0" 2>/dev/null) || return 1
+    fi
+    awk -F'\t' '$1=="out"{print $2; exit}' <<< "$out"
+}
+
+# The SUPI goes into the KDF as bytes. TS 33.535 A.7.0 of TS 33.501 fixes it
+# to type-4 (IMSI) form: the digits as a UTF-8 string in a BCD-pair-free
+# spelling, which is what the UE and AUSF both use.
+sim_akma_supi_hex() {  # <imsi digits>
+    local d="${1:-}"
+    [[ "$d" =~ ^[0-9]{15}$ ]] || { printf 'ERROR\tAKMA SUPI takes a 15-digit IMSI, got %s\n' \
+        "$(sim_sanitize "$d")" >&2; return 2; }
+    printf '%s' "$(printf '%s' "$d" | od -An -tx1 | tr -d ' \n')"
+}
+
+# sim_cmd_akma_keys --kaosf <64hex> --imsi <digits> [--rid <hex>] [--hni <text>]
+#   -> KAKMA, A-TID, the A-KID, and the lifetime the standard actually gives it
+sim_cmd_akma_keys() {
+    local kausf='' imsi='' rid='' hni=''
+    while (( $# )); do
+        case "$1" in
+            --kausf|--kaosf) kausf="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --imsi)          imsi="${2:-}";  shift 2 2>/dev/null || shift ;;
+            --rid)           rid="${2:-}";   shift 2 2>/dev/null || shift ;;
+            --hni)           hni="${2:-}";   shift 2 2>/dev/null || shift ;;
+            -h|--help) sim_akma_usage; return 0 ;;
+            *) sim_akma_usage; return 2 ;;
+        esac
+    done
+    kausf="${kausf^^}"
+    [[ "$kausf" =~ ^[0-9A-F]{64}$ ]] || {
+        printf 'ERROR\t--kausf must be 64 hex digits (the 256-bit KAUSF)\n' >&2; return 2; }
+    local sup hex=''
+    sup=$(sim_akma_supi_hex "$imsi") || return 2
+    [[ -n "$sup" ]] || return 2
+
+    local kakma atid
+    kakma=$(sim_akma_kdf 80 "$kausf" \
+        "$(printf 'AKMA' | od -An -tx1 | tr -d ' \n')" "$sup") || {
+        printf 'ERROR\tKAKMA derivation failed\n' >&2; return 1; }
+    atid=$(sim_akma_kdf 81 "$kausf" \
+        "$(printf 'A-TID' | od -An -tx1 | tr -d ' \n')" "$sup") || {
+        printf 'ERROR\tA-TID derivation failed\n' >&2; return 1; }
+    [[ -n "$kakma" && -n "$atid" ]] || { printf 'ERROR\tKDF returned nothing\n' >&2; return 1; }
+
+    # A-TID is a 27-bit value in the standard's usage; the KDF output is
+    # 256 bits and the identifier uses the leading part of it, so it is
+    # truncated here and both forms are printed rather than one silently.
+    local atid_full="${atid}" atid_short
+    atid_short=$(printf '%s' "$atid" | cut -c1-7)
+
+    printf 'imsi\t%s\n' "$imsi"
+    printf 'supi_hex\t%s\n' "$sup"
+    printf 'kausf\t%s\n' "$kausf"
+    printf 'kakma\t%s\n' "$kakma"
+    printf 'a_tid_full\t%s\n' "$atid_full"
+    printf 'a_tid\t%s\n' "$atid_short"
+    if [[ -n "$rid" ]]; then
+        printf 'rid\t%s\n' "${rid^^}"
+        if [[ -n "$hni" ]]; then
+            printf 'a_kid\t%s%s@%s\n' "${rid^^}" "$atid_short" "$hni"
+            printf 'a_kid_format\tNAI (RFC 7542): RID||A-TID @ Home Network Identifier\n'
+        else
+            printf 'a_kid_username\t%s%s\n' "${rid^^}" "$atid_short"
+            printf 'note\tno --hni given: the realm half of the A-KID is the Home Network Identifier\n'
+        fi
+    else
+        printf 'note\tno --rid given: without the RID the A-KID cannot be formed, only the A-TID\n'
+    fi
+    printf 'kdf_source\tTS 33.535 A.2/A.3 over TS 33.220 Annex B.2 KDF: FC=0x80 KAKMA, FC=0x81 A-TID\n'
+    printf 'lifetime\timplicit: KAKMA and A-KID are valid until the next successful primary authentication\n'
+    printf 'limit\tthis is the AUSF/UE half. The AAnF stores what it is given; nothing here proves an AAnF accepted it\n'
+    return 0
+}
+
+sim_akma_usage() {
+    printf 'ERROR\tusage: --akma-keys --kausf <64hex> --imsi <15 digits> [--rid <hex>] [--hni <text>]\n' >&2
+    printf 'ERROR\t       --akma-kaf --kakma <64hex> --af-id <text-or-hex> [--proto <hex>]\n' >&2
+}
+
+# sim_cmd_akma_kaf --kakma <hex> --af-id <text-or-hex> [--proto <hex>]
+#   KAF = KDF(KAKMA, FC=0x82, AF_ID), where AF_ID is the AF's FQDN followed by
+#   the Ua* security protocol identifier (TS 33.535 A.4, the identifier itself
+#   defined in TS 33.220 Annex H).
+sim_cmd_akma_kaf() {
+    local kakma='' af_id='' proto=''
+    while (( $# )); do
+        case "$1" in
+            --kakma)  kakma="${2:-}";  shift 2 2>/dev/null || shift ;;
+            --af-id)  af_id="${2:-}";  shift 2 2>/dev/null || shift ;;
+            --proto)  proto="${2:-}";  shift 2 2>/dev/null || shift ;;
+            -h|--help) sim_akma_usage; return 0 ;;
+            *) sim_akma_usage; return 2 ;;
+        esac
+    done
+    kakma="${kakma^^}"
+    [[ "$kakma" =~ ^[0-9A-F]{64}$ ]] || {
+        printf 'ERROR\t--kakma must be 64 hex digits\n' >&2; return 2; }
+    [[ -n "$af_id" ]] || { printf 'ERROR\t--af-id is the AF FQDN, e.g. af.example.com\n' >&2; return 2; }
+
+    # AF_ID is the FQDN text bytes followed by the protocol identifier bytes.
+    local af_hex
+    if [[ "$af_id" =~ ^[0-9A-Fa-f]+$ && $(( ${#af_id} % 2 )) -eq 0 ]]; then
+        af_hex="${af_id^^}"
+        printf 'af_id_input\thex\n'
+    else
+        af_hex=$(printf '%s' "$af_id" | od -An -tx1 | tr -d ' \n')
+        printf 'af_id_input\ttext\n'
+    fi
+    [[ -n "$proto" ]] || proto="00"
+    proto="${proto^^}"
+
+    local kaf
+    kaf=$(sim_akma_kdf 82 "$kakma" "${af_hex}${proto}") || {
+        printf 'ERROR\tKAF derivation failed\n' >&2; return 1; }
+    printf 'kakma\t%s\n' "$kakma"
+    printf 'af_id_hex\t%s\n' "${af_hex}${proto}"
+    printf 'af_id_length_bytes\t%d\n' "$(( (${#af_hex} + ${#proto}) / 2 ))"
+    printf 'kaf\t%s\n' "$kaf"
+    printf 'kdf_source\tTS 33.535 A.4: FC=0x82 over (AF_ID), keyed with KAKMA\n'
+    # The lifetime is the interesting half and it is not a timer.
+    printf 'lifetime\tKAF is bound to KAKMA: a re-authentication replaces KAKMA and therefore KAF\n'
+    printf 'note\tan application key outlives the registration that justified it only until the next primary authentication\n'
+    return 0
+}
+
+# ── PLMN lists and SoR (TS 31.102, TS 31.111 / TS 23.122) ────────────────
+# Steering of Roaming is two things wearing one name:
+#
+#   * a USIM list — EF_PLMNwAcT (6F60), EF_OPLMNwAcT (6F61),
+#     EF_HPLMNwAcT (6F62). Each record is 5 bytes: MCC/MNC in the same
+#     swapped-BCD the EF_IMSI uses, then a one-octet Access Technology
+#     selector. Decoding it is arithmetic; reading a list as an attack is not.
+#
+#   * a secured packet — SoR-CMCI, carried in a NAS container and protected
+#     by a MAC the UICC can verify. That is the half a third party cannot
+#     forge, which is exactly why a reject with an EPLMN list is the cheaper
+#     route and lives in 15_downgrade.
+#
+# This verb decodes and builds both, and reports what each one is allowed to
+# do rather than what it would be nice if it did.
+
+# PLMN in 3-octet swapped BCD: MCC digits 1,2,3 then MNC digits 1,2,3, where
+# a two-digit MNC has F in the last nibble. Byte order after the first swap
+# is MNC digit 2, MCC digit 3, MCC digit 2, MCC digit 1.
+sim_plmn_bcd_decode() {  # <6 hex> -> mcc-mnc
+    local h="${1:-}"
+    [[ "$h" =~ ^[0-9A-Fa-f]{6}$ ]] || { echo "??"; return 1; }
+    h="${h^^}"
+    # TS 24.008 10.5.1.3: six digits, LOW nibble of each octet first, in
+    # stream order, MCC taking the first three and MNC the rest. MCC 208 with
+    # a two-digit MNC 01 is therefore 02 08 F1, not 20 80 10.
+    local b1="${h:0:2}" b2="${h:2:2}" b3="${h:4:2}"
+    local d1="${b1:1:1}" d2="${b1:0:1}" d3="${b2:1:1}" d4="${b2:0:1}" d5="${b3:1:1}" d6="${b3:0:1}"
+    local mcc="${d1}${d2}${d3}" mnc
+    # F is the filler, and it may only occupy the MNC's third digit.
+    if [[ "$d6" == "F" ]]; then mnc="${d4}${d5}"; else mnc="${d4}${d5}${d6}"; fi
+    printf '%s-%s' "$mcc" "$mnc"
+}
+
+# Access Technology selector, TS 31.102 §4.2.5. The byte is a bit field:
+# bit 1 (0x80) UTRAN, bit 2 (0x40) E-UTRAN, bit 3 (0x20) NR, bit 4 (0x10)
+# GSM, rest spare. Reporting the bits is more useful than a lookup that
+# silently drops a set one.
+sim_plmn_act_names() {  # <hex byte>
+    local h="${1:-0}" v
+    [[ "$h" =~ ^[0-9A-Fa-f]{2}$ ]] || { printf 'invalid'; return 1; }
+    v=$(( 16#$h ))
+    local -a n=()
+    (( v & 0x80 )) && n+=("UTRAN")
+    (( v & 0x40 )) && n+=("E-UTRAN")
+    (( v & 0x20 )) && n+=("NR")
+    (( v & 0x10 )) && n+=("GSM")
+    (( v & 0x0F )) && n+=("spare-nibble-set")
+    if (( ${#n[@]} == 0 )); then printf 'none'; else
+        local IFS='+'; printf '%s' "${n[*]}"; fi
+}
+
+# sim_cmd_plmn_lists <hex> — one row per 5-octet record.
+sim_cmd_plmn_lists() {
+    local hex="${1:-}"
+    hex="${hex// /}"; hex="${hex//$'\n'/}"; hex="${hex^^}"
+    [[ "$hex" =~ ^[0-9A-F]+$ ]] || {
+        printf 'ERROR\tEF contents as hex, 10 hex digits per record\n' >&2; return 2; }
+    (( ${#hex} % 10 == 0 )) || {
+        printf 'ERROR\trecord length is 5 octets (10 hex digits); %d does not divide\n' \
+            "$(( ${#hex} / 2 ))" >&2; return 2; }
+    printf 'record\tplmn\tact_byte\tact\tencoded\n'
+    local i=0 rec plmn act
+    while (( i < ${#hex} )); do
+        rec="${hex:i:10}"
+        plmn=$(sim_plmn_bcd_decode "${rec:0:6}")
+        act="${rec:6:2}"
+        # A record that is all FF is a free slot, not a PLMN.
+        if [[ "${rec:0:6}" == "FFFFFF" || "${rec:0:6}" == "FFFF00" ]]; then
+            printf '%d\tfree\t--\t--\t%s\n' "$(( i / 10 + 1 ))" "$rec"
+        else
+            printf '%d\t%s\t%s\t%s\t%s\n' "$(( i / 10 + 1 ))" "$plmn" "$act" \
+                "$(sim_plmn_act_names "$act")" "$rec"
+        fi
+        i=$(( i + 10 ))
+    done
+    printf 'note\tEF_PLMNwAcT/EF_OPLMNwAcT/EF_HPLMNwAcT records are 5 octets: PLMN in swapped BCD plus an access-technology byte (TS 31.102 4.2.5)\n'
+    printf 'note\tthe Access Technology byte is a bit field; a set bit this decoder does not name is reported, never dropped\n'
+    return 0
+}
+
+# SoR-CMCI, TS 31.111 §9.1: a UICC-verifiable secured packet.
+#   octet 1        packet type (SoR-CMCI)
+#   octets 2..2+L  MAC over the payload, length from the SPI
+#   payload        the steering information itself
+# The verb decodes the envelope and says which half is authenticated, because
+# the distinction is the whole security story of the message.
+sim_cmd_sor_decode() {
+    local hex="${1:-}"
+    hex="${hex// /}"; hex="${hex//$'\n'/}"; hex="${hex^^}"
+    [[ "$hex" =~ ^[0-9A-F]+$ ]] || {
+        printf 'ERROR\tSoR-CMCI packet as hex\n' >&2; return 2; }
+    (( ${#hex} >= 8 )) || { printf 'ERROR\tpacket is too short to hold a type and a MAC\n' >&2; return 2; }
+    local ptype="${hex:0:2}" mac="${hex:2:16}" payload="${hex:18}"  # 1 + 8 octets = 18 nibbles
+    printf 'packet_type\t%s\n' "$ptype"
+    case "$ptype" in
+        01) printf 'packet_name\tSoR-CMCI\n' ;;
+        *)  printf 'packet_name\tunlisted type\n' ;;
+    esac
+    printf 'mac\t%s\n' "$mac"
+    printf 'mac_octets\t8\n'
+    printf 'payload\t%s\n' "$payload"
+    printf 'payload_octets\t%d\n' "$(( ${#payload} / 2 ))"
+    printf 'authenticated\t%s\n' "mac (the UICC verifies it against a key it holds)"
+    printf 'unauthenticated\t%s\n' "none — a packet whose MAC does not verify is discarded by the card"
+    printf 'limit\tthis decodes the envelope. It does not verify the MAC: the key is on the UICC, not here\n'
+    printf 'note\tSoR is delivered in a NAS container and accepted only when the MAC verifies, which is why steering by reject+EPLMN is the cheaper route (see 15_downgrade)\n'
+    return 0
+}
+
+sim_cmd_sor_build() {
+    local mac="${1:-}" payload="${2:-}" ptype="${3:-01}"
+    mac="${mac^^}"; payload="${payload^^}"; ptype="${ptype^^}"
+    [[ "$mac" =~ ^[0-9A-F]{16}$ ]] || {
+        printf 'ERROR\tMAC must be 8 octets (16 hex digits)\n' >&2; return 2; }
+    [[ "$payload" =~ ^[0-9A-F]*$ && $(( ${#payload} % 2 )) -eq 0 ]] || {
+        printf 'ERROR\tpayload must be even-length hex\n' >&2; return 2; }
+    [[ "$ptype" =~ ^[0-9A-F]{2}$ ]] || {
+        printf 'ERROR\tpacket type must be one octet of hex\n' >&2; return 2; }
+    printf 'packet\t%s%s%s\n' "$ptype" "$mac" "$payload"
+    printf 'octets\t%d\n' "$(( (2 + 16 + ${#payload}) / 2 ))"
+    printf 'note\tthe MAC is supplied, not computed: only the UICC can produce one this build would accept\n'
+    return 0
+}
+
+sim_akma_usage2() {
+    printf 'ERROR\tusage: --plmn-lists <hex> | --sor-decode <hex> | --sor-build <mac hex> <payload hex> [type]\n' >&2
+}
+
 # ── --aka-serve ─────────────────────────────────────────────────────────
 # The resident responder: one long-lived process, a request per line, SQN
 # walked on disk between requests. Requests:
@@ -7160,6 +7494,11 @@ sim_cli_main() {
         --key-remove)     sim_cmd_key_remove "$@" ;;
         --aka-responder)  sim_cmd_aka_responder "$@" ;;
         --aka-serve)      sim_cmd_aka_serve "$@" ;;
+        --akma-keys)      sim_cmd_akma_keys "$@" ;;
+        --akma-kaf)       sim_cmd_akma_kaf "$@" ;;
+        --sor-decode)     sim_cmd_sor_decode "$@" ;;
+        --sor-build)      sim_cmd_sor_build "$@" ;;
+        --plmn-lists)     sim_cmd_plmn_lists "$@" ;;
         --auts-build)     sim_cmd_auts_build "$@" ;;
         --rsp-audit)      sim_rsp_audit "$@" ;;
         --profile-model)  sim_profile_model "${1:--}" ;;

@@ -903,7 +903,17 @@ static const ModuleDefinition modules[] = {
       "Lawful-interception interfaces and posture signals, plus the artefacts an interception is built from, encoded and never delivered." },
     { "44_carrier_api",      "Carrier API Abuse",    "INTERCEPT / CARRIER",
       "imsisting-44_carrier_api-symbolic",
-      "Carrier API surface, authorisation-boundary testing and token/rate-limit audit, plus the request plan an enumeration runs and never sends." }
+      "Carrier API surface, authorisation-boundary testing and token/rate-limit audit, plus the request plan an enumeration runs and never sends." },
+
+    /* POSITIONING — the receiver interface and what it will believe */
+    { "61_gnss",             "GNSS / GPS",           "POSITIONING",
+      "imsisting-04_tower_map-symbolic",
+      "NMEA and UBX parsed and forged, spoofing tells, and the gpsd socket that hands a position to anything able to open it." },
+
+    /* USER PLANE — the payload carrier between the core and the RAN */
+    { "62_gtpu",             "GTP-U User Plane",     "USER PLANE",
+      "imsisting-11_lte_core-symbolic",
+      "The GTP-U encapsulation itself: header decode and build, the TS 38.415 PDU Session Container, echo storms and TEID collision arithmetic." }
 
 };
 
@@ -8249,6 +8259,33 @@ static const ChipRow chip_rows[] = {
     { "44_carrier_api",      "--version",             NEED_NO, DOES_READS },
     { "44_carrier_api",      "--yes",                 NEED_NO, DOES_READS },
     { "44_carrier_api",      "--execute",             NEED_NO, DOES_SENDS },
+    { "61_gnss",             "--__index_probe__",     NEED_NO, DOES_READS },
+    { "61_gnss",             "--constellations",      NEED_NO, DOES_READS },
+    { "61_gnss",             "--gpsd-lie",            NEED_NO, DOES_SENDS },
+    { "61_gnss",             "--gpsd-trust",          NEED_NO, DOES_READS },
+    { "61_gnss",             "--help",                NEED_NO, DOES_READS },
+    { "61_gnss",             "--nmea",                NEED_NO, DOES_READS },
+    { "61_gnss",             "--nmea-file",           NEED_NO, DOES_READS },
+    { "61_gnss",             "--nmea-gga",            NEED_NO, DOES_BUILDS },
+    { "61_gnss",             "--nmea-rmc",            NEED_NO, DOES_BUILDS },
+    { "61_gnss",             "--selftest",            NEED_NO, DOES_READS },
+    { "61_gnss",             "--spoof-detect",        NEED_NO, DOES_READS },
+    { "61_gnss",             "--status-tsv",          NEED_NO, DOES_READS },
+    { "61_gnss",             "--ubx",                 NEED_NO, DOES_READS },
+    { "61_gnss",             "--ubx-pvt",             NEED_NO, DOES_BUILDS },
+    { "62_gtpu",             "--__index_probe__",     NEED_NO, DOES_READS },
+    { "62_gtpu",             "--build",               NEED_NO, DOES_BUILDS },
+    { "62_gtpu",             "--detect",              NEED_NO, DOES_READS },
+    { "62_gtpu",             "--echo",                NEED_NO, DOES_BUILDS },
+    { "62_gtpu",             "--help",                NEED_NO, DOES_READS },
+    { "62_gtpu",             "--inner-route",         NEED_NO, DOES_READS },
+    { "62_gtpu",             "--parse",               NEED_NO, DOES_READS },
+    { "62_gtpu",             "--paths",               NEED_NO, DOES_READS },
+    { "62_gtpu",             "--pdu-session",         NEED_NO, DOES_READS },
+    { "62_gtpu",             "--plan",                NEED_NO, DOES_BUILDS },
+    { "62_gtpu",             "--selftest",            NEED_NO, DOES_READS },
+    { "62_gtpu",             "--status-tsv",          NEED_NO, DOES_READS },
+    { "62_gtpu",             "--teid-scan",           NEED_NO, DOES_READS },
     { "45_iot",              "--__index_probe__",     NEED_NO, DOES_READS },
     { "45_iot",              "--decode-mib",          NEED_RADIO, DOES_READS },
     { "45_iot",              "--decode-sib1",         NEED_RADIO, DOES_READS },
@@ -37214,6 +37251,194 @@ static ModuleSubmenuEntry capi_entries[] = {
     { "Run comparison", "system-search-symbolic", NULL, capi_build_compare },
     { "Enumeration", "network-transmit-receive-symbolic", NULL, capi_build_enumeration },
 };
+/* 61_gnss — the receiver interface.
+ *
+ * The floor that was missing: every positioning verb in the tree shelled out
+ * to gpsd and none of them parsed what a receiver actually emits. The page is
+ * two cards because the two halves are different jobs — read what the receiver
+ * said, and read what the daemon will tell the next client.
+ */
+static GtkWidget *
+gnss_build_receiver(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("RECEIVER",
+        "NMEA sentences and UBX frames, decoded without a daemon.", &body);
+    GtkWidget *card_body;
+
+    GtkWidget *card = verb_card("NMEA", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Parse sentence", "--nmea", "a GGA, RMC, GSA or GSV sentence",
+        "The checksum is verified, not assumed: a sentence that fails it is "
+        "reported as failing rather than decoded anyway."));
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Read a file", "--nmea-file", "path to a log of sentences",
+        "Per-sentence PASS/FAIL with counts, so a log with three forged lines "
+        "in a thousand shows as three."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("UBX", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Parse frame", "--ubx", "a UBX frame as hex",
+        "Sync, class, id, length and the Fletcher checksum over the payload. "
+        "This is what a u-blox receiver speaks and what nothing in this tree "
+        "could read before."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("SURFACE", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_choices(state, module_id, status,
+        "Read the surface", "the constellations this build understands",
+        "GPS, GLONASS, Galileo and BeiDou sentence shapes, and which a receiver "
+        "reports a fix for versus merely tracks.",
+        (const char *const []) { "--constellations", NULL },
+        (const char *const []) { "Constellations", NULL }, 1));
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+gnss_build_trust(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("WHAT IT WILL BELIEVE",
+        "Spoofing tells, and the socket that has no writer check.", &body);
+    GtkWidget *card_body;
+
+    GtkWidget *card = verb_card("SPOOF DETECTION", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Read a track", "--spoof-detect", "a file of fixes",
+        "A spoofed track is smooth where the sky is not: the tells are jump "
+        "size, acceleration no vehicle survives, and a fix that never loses "
+        "satellites."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("GPSD", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_choices(state, module_id, status,
+        "Who may write", "the trust model of the daemon",
+        "gpsd hands TPV to anything that can open the socket. Nothing "
+        "authenticates the writer, which is the cheap real-world abuse.",
+        (const char *const []) { "--gpsd-trust", NULL },
+        (const char *const []) { "Trust model", NULL }, 1));
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Write a position", "--gpsd-lie", "the position to assert",
+        "Prints the gpsd JSON a client would emit. It does not send: the "
+        "socket is the operator's to open."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
+static ModuleSubmenuEntry gnss_entries[] = {
+    { "Receiver", "find-location-symbolic", NULL, gnss_build_receiver },
+    { "Trust", "security-high-symbolic", NULL, gnss_build_trust },
+};
+/* 62_gtpu — the GTP-U user plane.
+ *
+ * Two cards, because the user plane has exactly two questions: what does this
+ * packet mean, and what may it carry. The decoder answers the first; the
+ * builder and the inner-route reader answer the second. Anything about a
+ * tunnel's existence is on 11_lte_core's page, and the note here says so
+ * rather than leaving an operator to wonder.
+ */
+static GtkWidget *
+gtpu_build_decode(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DECODE",
+        "A GTP-U header, its extension chain and the packet inside it.", &body);
+    GtkWidget *card_body;
+
+    GtkWidget *card = verb_card("DECODE A PACKET", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Parse packet", "--parse", "header and body as hex",
+        "The first octet carries the version and the E/S/PN flags; the message "
+        "type is the second. A length field that disagrees with the packet is "
+        "reported, never trusted."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("PDU SESSION CONTAINER", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Decode container", "--pdu-session", "TS 38.415 container as hex",
+        "PDU type in the high nibble, QFI in the second octet, RQI and PPI in "
+        "the third on the downlink form."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("INNER ROUTE", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Read inner route", "--inner-route", "the encapsulated IPv4 packet as hex",
+        "The tunnel does not route. This says where the inner destination "
+        "actually lands once the peer decapsulates."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("DETECT", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Find anomalies", "--detect", "a pcap path or a packet as hex",
+        "A G-PDU with no TEID cannot be delivered by any receiver, so it is "
+        "forged or misbuilt. Needs tshark for a capture."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+gtpu_build_build(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("BUILD",
+        "A G-PDU, an echo burst, and what a TEID value actually means.", &body);
+    GtkWidget *card_body;
+
+    GtkWidget *card = verb_card("BUILD A G-PDU", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Build G-PDU", "--build", "TEID as hex",
+        "Add --qfi, --rqi 1, --ppi and --inner on the command line. RQI makes "
+        "the RAN mirror this flow's QoS on the subscriber's own uplink."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("ECHO BURST", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Send echo burst", "--echo", "how many echo-requests",
+        "An echo is the only GTP-U message a tunnel-less peer must answer, so "
+        "the cost is asymmetric by construction."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("TEID", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Describe a TEID", "--teid-scan", "a TEID as hex",
+        "All 32 bits are the receiver's own choice. Zero is the sentinel: a "
+        "peer that reads it as no-tunnel will reject the packet."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("REFERENCE POINTS", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_choices(state, module_id, status,
+        "Paths", "the reference points", "N6 carries no GTP at all: the inner packet is the traffic.",
+        (const char *const []) { "--paths", NULL },
+        (const char *const []) { "Reference points", NULL }, 1));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("HANDOFF PLAN", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Write plan", "--plan", "echo-storm, teid-collision or inject",
+        "Writes the plan naming what the module cannot do alone: create the "
+        "tunnel. That control lives on 11_lte_core."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
+static ModuleSubmenuEntry gtpu_entries[] = {
+    { "Decode", "document-open-symbolic", NULL, gtpu_build_decode },
+    { "Build", "network-transmit-receive-symbolic", NULL, gtpu_build_build },
+};
 /* 45_iot — NB-IoT / Cat-M1.
  *
  * Two decoders, one arithmetic split, and two refusals that are on the page on
@@ -40246,6 +40471,10 @@ register_all_modules(void)
                              G_N_ELEMENTS(rans_entries), NULL);
     module_registry_register("44_carrier_api", capi_entries,
                              G_N_ELEMENTS(capi_entries), NULL);
+    module_registry_register("61_gnss", gnss_entries,
+                             G_N_ELEMENTS(gnss_entries), NULL);
+    module_registry_register("62_gtpu", gtpu_entries,
+                             G_N_ELEMENTS(gtpu_entries), NULL);
     module_registry_register("48_oran", oran_entries,
                              G_N_ELEMENTS(oran_entries), NULL);
     module_registry_register("49_ntn", ntn_entries,

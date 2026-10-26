@@ -5044,6 +5044,7 @@ lair_cli_main() {
         --build-sib10|--build-sib11|--build-sib12)
                         lair_cmd_build_sib${cmd#--build-sib} "$@" ;;
         --enb-sib-schedule) lair_cmd_enb_sib_schedule "$@" ;;
+        --warning-area) lair_cmd_warning_area "${1:-}" ;;
         --rrc-tx)       lair_cmd_rrc_tx "${1:-reconfiguration}" "${2:-minimal}" ;;
         --build-meas-report)  lair_build_meas_report "$@" ;;
         --build-rrc-release)  lair_build_rrc_release "$@" ;;
