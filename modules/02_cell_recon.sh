@@ -202,64 +202,59 @@ crec_nr_band_of_arfcn() {
 }
 
 # ── PLMN decode ─────────────────────────────────────────────────────────
-# MCC/MNC -> operator. A representative table, not the full ITU list: enough
-# that a survey reads as names instead of digits. Unknown PLMNs are reported
-# as the raw MCC-MNC, which is the honest answer.
-crec_plmn_name() {
-    local plmn="$1"
-    case "$plmn" in
-        208-01) echo "Orange FR" ;;
-        208-10) echo "SFR FR" ;;
-        208-15) echo "Free Mobile FR" ;;
-        208-20) echo "Bouygues FR" ;;
-        262-01) echo "Telekom DE" ;;
-        262-02) echo "Vodafone DE" ;;
-        262-03) echo "O2 DE" ;;
-        234-10) echo "O2 UK" ;;
-        234-15) echo "Vodafone UK" ;;
-        234-30) echo "EE UK" ;;
-        234-33) echo "EE UK" ;;
-        310-260) echo "T-Mobile US" ;;
-        310-410) echo "AT&T US" ;;
-        311-480) echo "Verizon US" ;;
-        204-04) echo "Vodafone NL" ;;
-        204-08) echo "KPN NL" ;;
-        204-16) echo "T-Mobile NL" ;;
-        214-01) echo "Vodafone ES" ;;
-        214-03) echo "Movistar ES" ;;
-        214-07) echo "Orange ES" ;;
-        222-01) echo "TIM IT" ;;
-        222-10) echo "Vodafone IT" ;;
-        222-88) echo "WindTre IT" ;;
-        228-01) echo "Swisscom CH" ;;
-        228-02) echo "Sunrise CH" ;;
-        228-03) echo "Salt CH" ;;
-        505-01) echo "Telstra AU" ;;
-        505-02) echo "Optus AU" ;;
-        505-03) echo "Vodafone AU" ;;
-        440-10) echo "NTT docomo JP" ;;
-        440-20) echo "SoftBank JP" ;;
-        450-05) echo "SK Telecom KR" ;;
-        460-00) echo "China Mobile" ;;
-        460-01) echo "China Unicom" ;;
-        *)      echo "unknown" ;;
-    esac
+# The register-backed answer, with the three states the toolkit insists on:
+#   <name>            the MCC/MNC is in the downloaded register
+#   unknown           the register was read and has no such assignment
+#   unknown (silent)  nobody ran tools/fetch-reference-data.sh, so nothing
+#                     was read -- an unobserved answer, not a negative one
+#
+# A hardcoded table used to sit here: 31 PLMNs and 20 MCCs. Every survey
+# outside Western Europe read "unknown" and the field looked like it was
+# answering when it was only guessing. The table now lives in
+# data/public/plmn.tsv, rebuilt by tools/fetch-reference-data.sh.
+crec_refdata="${IMSISTING_ROOT:-$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/tools/lib/refdata.sh"
+if [[ -r "$crec_refdata" ]]; then
+    # shellcheck source=tools/lib/refdata.sh
+    source "$crec_refdata"
+fi
+
+crec_plmn_registry() {  # <mcc> <mnc> -> "operator<TAB>country"
+    declare -F refdata_plmn >/dev/null 2>&1 || return 1
+    local out; out=$(refdata_plmn "${1:-}" "${2:-}") || return 1
+    local state="${out%%$'\t'*}"
+    local rest="${out#*$'\t'}"
+    [[ "$state" == "ok" ]] || return 1
+    printf '%s' "$rest"
 }
 
-# MCC -> country. Representative set covering the operator table above plus
-# the common roaming cases.
+crec_plmn_name() {
+    local plmn="$1" mcc="" mnc="" got
+    [[ "$plmn" =~ ^([0-9]{3})-?([0-9]{2,3})$ ]] || { printf 'unknown'; return 0; }
+    mcc="${BASH_REMATCH[1]}"; mnc="${BASH_REMATCH[2]}"
+    if got=$(crec_plmn_registry "$mcc" "$mnc"); then
+        printf '%s' "${got%%$'\t'*}"
+        return 0
+    fi
+    if declare -F refdata_plmn >/dev/null 2>&1 && [[ -f "${REFDATA_PUBLIC:-}/plmn.tsv" ]]; then
+        printf 'unknown'
+    else
+        printf 'unknown (silent)'
+    fi
+}
+
+# MCC -> country, from the same register: the country of any of that MCC's
+# assignments. Still returns "unknown (silent)" when nothing was downloaded,
+# because "this MCC is unassigned" and "I have no register" are not the same.
 crec_mcc_country() {
-    case "${1:-}" in
-        208) echo "France" ;;        262) echo "Germany" ;;
-        234|235) echo "United Kingdom" ;; 310|311|312|313|314|315|316) echo "United States" ;;
-        204) echo "Netherlands" ;;   214) echo "Spain" ;;
-        222) echo "Italy" ;;         228) echo "Switzerland" ;;
-        505) echo "Australia" ;;     440|441) echo "Japan" ;;
-        450) echo "South Korea" ;;   460) echo "China" ;;
-        240|242|244|246|248) echo "Nordics" ;;
-        404|405|406) echo "India" ;; 724) echo "Brazil" ;;
-        *)   echo "unknown" ;;
-    esac
+    local mcc="${1:-}" file got
+    [[ "$mcc" =~ ^[0-9]{3}$ ]] || { printf 'unknown'; return 0; }
+    file="${REFDATA_PUBLIC:-}/plmn.tsv"
+    if [[ -f "$file" ]]; then
+        got=$(awk -F'\t' -v mcc="$mcc" 'NR > 1 && $1 == mcc { print $3; exit }' "$file" 2>/dev/null)
+        if [[ -n "$got" ]]; then printf '%s' "$got"; else printf 'unknown'; fi
+        return 0
+    fi
+    printf 'unknown (silent)'
 }
 
 # ── generation from RAT ─────────────────────────────────────────────────
@@ -518,6 +513,16 @@ crec_cli_status_tsv() {
     # GUI reads: "no SDR here" is a different page when four nodes are online.
     printf 'node_source\t%s\n' \
         "$([[ -f "$IMSISTING_ROOT/tools/node_source.py" ]] && echo yes || echo no)"
+    # The MCC/MNC register decides whether a decoded PLMN gets a name at all.
+    # Its absence is reported here rather than discovered row by row: a survey
+    # of unnamed operators and a survey with no register look identical in a
+    # store that only holds numbers.
+    if declare -F refdata_status_line >/dev/null 2>&1; then
+        refdata_status_line | awk -F'\t' \
+            '$1 == "public/plmn.tsv" { printf "plmn_register\t%s\n", $2 }'
+    else
+        printf 'plmn_register\tsilent\n'
+    fi
 }
 
 crec_cmd_list_tsv() {
@@ -689,7 +694,11 @@ crec_selftest() {
     chk lte-earfcn-range  "$(crec_lte_earfcn_to_mhz 99999 >/dev/null 2>&1; echo $?)" "1"
 
     # 3. PLMN lookup and the honest unknown.
-    chk plmn-known   "$(crec_plmn_name 208-01)"  "Orange FR"
+    chk plmn-known   "$(crec_plmn_name 208-01)"  "Orange"
+    # The register answers through the shared loader; a machine without the
+    # download must say so rather than claiming the PLMN is unassigned.
+    chk plmn-state   "$(refdata_plmn 208 01 | cut -f1)" "ok"
+    chk plmn-missing "$(REFDATA_PUBLIC=/nonexistent refdata_plmn 208 01 | cut -f1)" "silent"
     chk plmn-unknown "$(crec_plmn_name 999-99)"  "unknown"
     chk mcc-country  "$(crec_mcc_country 262)"   "Germany"
     chk mcc-unknown  "$(crec_mcc_country 999)"   "unknown"
@@ -722,7 +731,7 @@ crec_selftest() {
     chk parse-gsm-arfcn  "$(printf '%s' "$parsed" | cut -f3)" "42"
     chk parse-gsm-freq   "$(printf '%s' "$parsed" | cut -f4)" "931.4"
     chk parse-gsm-cid    "$(printf '%s' "$parsed" | cut -f10)" "1234"
-    chk parse-gsm-op     "$(printf '%s' "$parsed" | cut -f8)" "Orange FR"
+    chk parse-gsm-op     "$(printf '%s' "$parsed" | cut -f8)" "Orange"
     chk parse-gsm-bad    "$(crec_parse_gsm_line 'not a cell line' >/dev/null 2>&1; echo $?)" "1"
 
     # 7. Parse a cell_search-shaped line.
@@ -774,7 +783,7 @@ crec_selftest() {
     chk arfcn-rc    "$rc" "0"
     chk arfcn-freq  "$(fld "$out" freq_mhz)" "806.0"
     out=$(crec_cmd_plmn 208-01)
-    chk plmn-op     "$(fld "$out" operator)" "Orange FR"
+    chk plmn-op     "$(fld "$out" operator)" "Orange"
     chk plmn-country "$(fld "$out" country)" "France"
 
     # 11. Status TSV contract. SDR presence is environment-dependent, so

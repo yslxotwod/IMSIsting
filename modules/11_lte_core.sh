@@ -2090,7 +2090,7 @@ lcore_cli_status_tsv() {
     printf 'plans\t%s\n' "$plans"
     printf 's6a_app_id\t16777251\n'
     printf 'refs\tRFC 6733, TS 29.272, TS 29.274, TS 29.281, TS 36.413\n'
-    printf 'verbs\tdecode-diameter, decode-gtp-c, decode-gtp-u, build-air, build-ulr, build-clr, gtp-csr-forge, gtp-modify-bearer, gtp-in-gtp, mbms-session, gtpc-send, diameter-send, gtpdoor-detect, cdr-fraud-check, fs20-audit, plan, s1ap, surface, require-core\n'
+    printf 'verbs\tdecode-diameter, decode-gtp-c, decode-gtp-u, build-air, build-ulr, build-clr, gtp-csr-forge, gtp-modify-bearer, gtp-in-gtp, mbms-session, gtpc-send, diameter-send, gtpdoor-detect, cdr-fraud-check, fs20-audit, gtp-screen-peer, diameter-screen, plan, s1ap, surface, require-core\n'
     printf 'gtp_in_gtp\tyes\n'
     printf 'mbms_session\tyes\n'
     printf 'decode_only\t%s\n' "$(lcore_find_core_testbed >/dev/null 2>&1 && echo no || echo yes)"
@@ -2259,6 +2259,116 @@ lcore_apn_encode() {
         out+=$(printf '%02x%s' "${#label}" "$lhex")
     done
     printf '%s' "$out"
+}
+
+# ── interconnect peer screening ────────────────────────────────────────
+# The exposure a GRX/IPX port creates is not a defect in GTP-C; it is that the
+# border authorises a *peer* and then waves through every message that peer
+# sends. Two questions decide whether a message should have been accepted, and
+# the toolkit answered neither before this section:
+#
+#   1. which contracted peer owns this source address, if any; and
+#   2. is this message type one that peer is allowed to originate?
+#
+# The second half matters: a message can come from the right address and still
+# be wrong. TS 29.274 assigns every message type an originating side, so a peer
+# sending one reserved for the network is the signature of a spoofed or a
+# misbehaving peer, not of a routing mistake.
+lcore_ipv4_to_int() {
+    local ip="${1:-}" a b c e
+    [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    a=$(( 10#${BASH_REMATCH[1]} )); b=$(( 10#${BASH_REMATCH[2]} ))
+    c=$(( 10#${BASH_REMATCH[3]} )); e=$(( 10#${BASH_REMATCH[4]} ))
+    (( a <= 255 && b <= 255 && c <= 255 && e <= 255 )) || return 1
+    printf '%d' "$(( (a << 24) | (b << 16) | (c << 8) | e ))"
+}
+
+# lcore_cidr_contains <cidr> <ip> -> 0 when the address is inside the prefix.
+# Integer arithmetic only: a screening rule that needs python3 to evaluate is a
+# screening rule that is absent on the router it runs on.
+lcore_cidr_contains() {
+    local cidr="${1:-}" ip="${2:-}" base mask addr plen
+    [[ "$cidr" =~ ^([0-9.]+)/([0-9]{1,2})$ ]] || return 1
+    base="${BASH_REMATCH[1]}"; plen=$(( 10#${BASH_REMATCH[2]} ))
+    (( plen <= 32 )) || return 1
+    mask=$(( plen == 0 ? 0 : (0xFFFFFFFF << (32 - plen)) & 0xFFFFFFFF ))
+    base=$(lcore_ipv4_to_int "$base") || return 1
+    addr=$(lcore_ipv4_to_int "$ip")   || return 1
+    (( (base & mask) == (addr & mask) ))
+}
+
+# Message types a roaming peer may originate. Outside this set a message is
+# either a response only or a node-originated procedure. The list is short on
+# purpose: screening exists to allow what roaming needs, not what it might.
+lcore_gtpc_peer_may_originate() {
+    case "${1:-}" in
+        1|2|3)                                              return 0 ;;  # Echo
+        32|33|34|35|36|37)                                  return 0 ;;  # bearer session
+        25|26|27|28|29)                                     return 0 ;;  # SRVCC PS to CS (Sv)
+        64|65|66|67|68|69)                                  return 0 ;;  # Bearer Resource
+        95|96|97|98|99)                                     return 0 ;;  # Overload control
+        170|171|176|177|179|180)                            return 0 ;;  # release / DDN
+        162)                                                return 0 ;;  # Create Indirect Data Forwarding
+        *)                                                  return 1 ;;
+    esac
+}
+
+lcore_cmd_gtp_screen_peer() {  # <ip> [message-type]
+    local ip="${1:-}" mtype="${2:-}" table plmn cidr role note
+    [[ -n "$ip" ]] || { printf 'ERROR\tusage: --gtp-screen-peer <ip> [message-type]\n' >&2; return 2; }
+    lcore_ipv4_to_int "$ip" >/dev/null || {
+        printf 'ERROR\tnot an IPv4 address: %s\n' "$(lcore_sanitize "$ip")" >&2; return 2; }
+    if [[ -n "$mtype" && ! "$mtype" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\tmessage type is a decimal number: %s\n' "$(lcore_sanitize "$mtype")" >&2
+        return 2
+    fi
+
+    table="${REFDATA_OPOPS:-$IMSISTING_ROOT/data/opops}/iprange.tsv"
+    printf 'source\t%s\n' "$(lcore_sanitize "$ip")"
+    [[ -n "$mtype" ]] && printf 'message_type\t%s\n' "$mtype"
+
+    if [[ ! -f "$table" ]]; then
+        # No operator table means the peer is unobserved. Printing "deny" here
+        # would manufacture a blocked-peer finding out of a missing file.
+        printf 'verdict\tunknown\n'
+        printf 'note\tno operator address table (data/opops/iprange.tsv)\n'
+        return 0
+    fi
+
+    local match="" match_role=""
+    while IFS=$'\t' read -r plmn cidr role note; do
+        [[ "$plmn" == "plmn" ]] && continue   # header row
+        [[ -z "$cidr" ]] && continue
+        if lcore_cidr_contains "$cidr" "$ip"; then
+            match="$plmn"; match_role="$role"; break
+        fi
+    done < "$table"
+
+    if [[ -z "$match" ]]; then
+        printf 'verdict\tdeny\n'
+        printf 'note\taddress is not inside any contracted peer prefix\n'
+        return 0
+    fi
+
+    printf 'plmn\t%s\n' "$(lcore_sanitize "$match")"
+    printf 'role\t%s\n' "$(lcore_sanitize "$match_role")"
+
+    # The address is authorised. The message type is the second decision, and
+    # it is the one a peer-level allow rule never makes.
+    if [[ -n "$mtype" ]]; then
+        if (( mtype == 2 || mtype == 29 )); then
+            printf 'verdict\tallow\n'
+            printf 'note\techo reply to a request this node sent\n'
+            return 0
+        fi
+        if ! lcore_gtpc_peer_may_originate "$mtype"; then
+            printf 'verdict\tdeny\n'
+            printf 'note\tmessage may not be sent by a peer: it is a node-initiated procedure\n'
+            return 0
+        fi
+    fi
+    printf 'verdict\tallow\n'
+    return 0
 }
 
 # ── GTP-in-GTP and MBMS Session Start ──────────────────────────────────
@@ -3263,6 +3373,77 @@ lcore_cmd_cdr_fraud() {
                 printf "%s\t%d\t%d\t%.1f\t%s\n", imsi, b, a, f, v }' "$file"
 }
 # GSMA FS.20 — the GTP interconnect controls.
+# ── Diameter interconnect screening ────────────────────────────────────
+# A roaming interconnect is flat by construction: an HSS cannot tell a DRA from
+# an MME at the transport layer, and nothing in a ULR says which PLMN it came
+# from. The only thing that separates a legitimate attach from an
+# identity-theft attempt is a rule at the edge: which application, which
+# command, and which side of the interface is allowed to *originate* it.
+#
+# The classic abuse is a request to a PLMN-internal interface — S6a ULR for a
+# foreign subscriber, or S6a AIR to harvest authentication vectors — arriving
+# on an interconnect DEA that is supposed to carry only Cx. That is a screening
+# failure, not a protocol bug, which is why no parser catches it.
+lcore_diameter_app_is_intra_plmn() {
+    # Applications whose interfaces only ever traverse one operator's domain.
+    case "${1:-}" in
+        16777216) return 0 ;;  # Cx  — MME/SGSN <-> HSS/I-CSCF inside one PLMN
+        16777217) return 0 ;;  # Sh  — AS <-> HSS
+        16777251) return 0 ;;  # S6a/S6d — MME/SGSN <-> HSS
+        16777252) return 0 ;;  # S13/S13' — MME <-> EIR
+        16777291) return 0 ;;  # SLh — GMLC <-> HSS
+        *)        return 1 ;;
+    esac
+}
+
+# Commands an *interconnect* peer may originate, by application. A relay/DEA
+# carries a great deal; it does not carry a request that only the home network
+# is entitled to make, and those are exactly the ones listed here.
+lcore_diameter_peer_may_originate() {  # <app-id> <command-code>
+    local app="${1:-}" cmd="${2:-}"
+    case "$app" in
+        16777216)  # Cx: the I-CSCF asks the HSS; only UAR/LIR are legitimately
+                   # issued from outside the MME/HSS pair.
+            case "$cmd" in 300|302) return 0 ;; *) return 1 ;; esac ;;
+        16777217)  # Sh
+            case "$cmd" in 306|308) return 0 ;; *) return 1 ;; esac ;;
+        16777251)  # S6a: everything here runs MME -> HSS. A peer may not
+                   # originate any of it.
+            return 1 ;;
+        *)         return 1 ;;
+    esac
+}
+
+lcore_cmd_diameter_screen() {  # <app-id> <command-code>
+    local app="${1:-}" cmd="${2:-}" appn cmdname
+    [[ -n "$app" && -n "$cmd" ]] || {
+        printf 'ERROR\tusage: --diameter-screen <app-id> <command-code>\n' >&2; return 2; }
+    [[ "$app" =~ ^[0-9]+$ ]] || { printf 'ERROR\tapplication id must be decimal\n' >&2; return 2; }
+    [[ "$cmd" =~ ^[0-9]+$ ]] || { printf 'ERROR\tcommand code must be decimal\n' >&2; return 2; }
+
+    appn=$(lcore_diameter_app_name "$app")
+    cmdname=$(lcore_diameter_command_name "$cmd")
+    printf 'application\t%s\napplication_name\t%s\n' "$app" "$appn"
+    printf 'command\t%s\ncommand_name\t%s\n' "$cmd" "$cmdname"
+
+    if lcore_diameter_app_is_intra_plmn "$app"; then
+        printf 'scope\t%s\n' "plmn-internal"
+        if ! lcore_diameter_peer_may_originate "$app" "$cmd"; then
+            printf 'verdict\tdeny\n'
+            printf 'note\t%s\n' "interface is PLMN-internal: only the home network may originate it"
+            return 0
+        fi
+        printf 'verdict\tallow\n'
+        printf 'note\t%s\n' "command is issued across a PLMN boundary by design"
+        return 0
+    fi
+
+    printf 'scope\t%s\n' "interconnect"
+    printf 'verdict\tallow\n'
+    printf 'note\t%s\n' "application is carried on an interconnect interface"
+    return 0
+}
+
 lcore_cmd_fs20() {
     local file="${1:-}"
     [[ -f "$file" ]] || { printf 'ERROR\tno such config: %s\n' "$file" >&2; return 1; }
@@ -3945,6 +4126,46 @@ lcore_selftest() {
     chk fs20-missing "$(lcore_cmd_fs20 "$d/fs20.tsv" | awk -F'\t' '$1=="controls_missing"{print $2}')" "4"
     chk fs20-present "$(lcore_cmd_fs20 "$d/fs20.tsv" | awk -F'\t' '$1=="imsi_plmn_consistency"{print $2}')" "yes"
 
+    # Interconnect screening. The address table is an operator table, so the
+    # selftest builds one; the verdicts are then checked against the rule that
+    # produced them rather than against a hard-coded "allow".
+    mkdir -p "$d/opops"
+    printf 'plmn\tcidr\trole\tnote\n' > "$d/opops/iprange.tsv"
+    printf '310-260\t198.51.100.0/26\tgrx-peer\tcontracted roaming partner\n' >> "$d/opops/iprange.tsv"
+    local saved_opops="${REFDATA_OPOPS:-}"
+    export REFDATA_OPOPS="$d/opops"
+    chk gtp-screen-contracted "$(lcore_cmd_gtp_screen_peer 198.51.100.5 32 | awk -F'\t' '$1=="verdict"{print $2}')" "allow"
+    chk gtp-screen-role "$(lcore_cmd_gtp_screen_peer 198.51.100.5 32 | awk -F'\t' '$1=="role"{print $2}')" "grx-peer"
+    chk gtp-screen-plmn "$(lcore_cmd_gtp_screen_peer 198.51.100.5 32 | awk -F'\t' '$1=="plmn"{print $2}')" "310-260"
+    chk gtp-screen-stranger "$(lcore_cmd_gtp_screen_peer 8.8.8.8 32 | awk -F'\t' '$1=="verdict"{print $2}')" "deny"
+    # Right address, wrong message: MBMS Session Start (231) is prepared by the
+    # operator's own core, so an interconnect peer may not originate it.
+    chk gtp-screen-echo "$(lcore_cmd_gtp_screen_peer 198.51.100.5 2 | awk -F'\t' '$1=="verdict"{print $2}')" "allow"
+    chk gtp-screen-initiate "$(lcore_cmd_gtp_screen_peer 198.51.100.5 231 | awk -F'\t' '$1=="verdict"{print $2}')" "deny"
+    chk gtp-screen-init-note "$(lcore_cmd_gtp_screen_peer 198.51.100.5 231 | awk -F'\t' '$1=="note"{print $2}')" "message may not be sent by a peer: it is a node-initiated procedure"
+    chk gtp-screen-echo-note "$(lcore_cmd_gtp_screen_peer 198.51.100.5 2 | awk -F'\t' '$1=="note"{print $2}')" "echo reply to a request this node sent"
+    # A missing operator table is unobserved, never a blocked peer.
+    REFDATA_OPOPS="$d/absent" lcore_cmd_gtp_screen_peer 1.1.1.1 1 > "$d/silent.txt"
+    chk gtp-screen-silent "$(awk -F'\t' '$1=="verdict"{print $2}' "$d/silent.txt")" "unknown"
+    chk gtp-screen-silent-note "$(awk -F'\t' '$1=="note"{print $2}' "$d/silent.txt")" "no operator address table (data/opops/iprange.tsv)"
+    unset REFDATA_OPOPS
+    [[ -n "$saved_opops" ]] && export REFDATA_OPOPS="$saved_opops"
+    chk cidr-in  "$(lcore_cidr_contains 10.0.0.0/8 10.1.2.3 >/dev/null; echo $?)" "0"
+    chk cidr-out "$(lcore_cidr_contains 10.0.0.0/8 11.1.2.3 >/dev/null; echo $?)" "1"
+    chk cidr-host "$(lcore_cidr_contains 10.0.0.7/32 10.0.0.7 >/dev/null; echo $?)" "0"
+    chk gtp-screen-usage "$(lcore_cmd_gtp_screen_peer "" >/dev/null 2>&1; echo $?)" "2"
+
+    # Diameter screening: the same message on the wrong interface. ULR (316)
+    # on S6a from a peer is the identity-theft shape; a UAR (300) on Cx from an
+    # I-CSCF is normal.
+    chk dh-s6a-ulr   "$(lcore_cmd_diameter_screen 16777251 316 | awk -F'\t' '$1=="verdict"{print $2}')" "deny"
+    chk dh-s6a-scope "$(lcore_cmd_diameter_screen 16777251 316 | awk -F'\t' '$1=="scope"{print $2}')" "plmn-internal"
+    chk dh-s6a-note  "$(lcore_cmd_diameter_screen 16777251 316 | awk -F'\t' '$1=="note"{print $2}')" "interface is PLMN-internal: only the home network may originate it"
+    chk dh-cx-uar    "$(lcore_cmd_diameter_screen 16777216 300 | awk -F'\t' '$1=="verdict"{print $2}')" "allow"
+    chk dh-cx-sar    "$(lcore_cmd_diameter_screen 16777216 301 | awk -F'\t' '$1=="verdict"{print $2}')" "deny"
+    chk dh-s6a-name  "$(lcore_cmd_diameter_screen 16777251 316 | awk -F'\t' '$1=="application_name"{print $2}')" "3GPP S6a/S6d"
+    chk dh-screen-usage "$(lcore_cmd_diameter_screen 16777251 >/dev/null 2>&1; echo $?)" "2"
+
     # ── 14. GTP-in-GTP and MBMS Session Start ───────────────────────────
     # Known-answer vectors. A, B and C were read back by tshark 4.2.2 (the
     # field values quoted next to each one are what it printed) and by
@@ -4426,6 +4647,8 @@ lcore_cli_main() {
         --gtpdoor-detect) lcore_cmd_gtpdoor "${1:-}" ;;
         --cdr-fraud-check) lcore_cmd_cdr_fraud "${1:-}" ;;
         --fs20-audit)    lcore_cmd_fs20 "${1:-}" ;;
+        --gtp-screen-peer) lcore_cmd_gtp_screen_peer "${1:-}" "${2:-}" ;;
+        --diameter-screen) lcore_cmd_diameter_screen "${1:-}" "${2:-}" ;;
         --plan)          lcore_cmd_plan "${1:-}" ;;
         --s1ap)          lcore_s1ap_identity_procedures ;;
         --surface)       lcore_surface_notes ;;
@@ -4473,6 +4696,17 @@ Usage: $0 COMMAND
   --gtpdoor-detect <hex>      GTPdoor-class Echo abuse detection
   --cdr-fraud-check <tsv>     CDR overbilling/bypass anomaly
   --fs20-audit <config>       GSMA FS.20 GTP interconnect controls
+  --gtp-screen-peer <ip> [message-type]
+                              would this source address pass the interconnect
+                              peer rule, and may a peer originate this GTP-C
+                              message type; reads data/opops/iprange.tsv and
+                              answers allow/deny, or "unknown" when the
+                              operator table is not on this machine
+  --diameter-screen <app-id> <command-code>
+                              is this Diameter (application, command) one a
+                              roaming peer may originate, or is it a
+                              PLMN-internal request arriving on an
+                              interconnect
   --plan <ulr-hijack|gtp-inject|sctp-scan>
                               write a handed-off plan naming the testbed
   --s1ap                      S1AP identity-carrying procedures

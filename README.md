@@ -93,6 +93,28 @@ sudo pacman -S base-devel meson ninja gtk4 python python-numpy python-scipy
 `00_deps` reports what is present and what is missing, and distinguishes a tool
 that is installed from a stack that is actually complete.
 
+### Reference data
+
+A decode gives you an identity; the reference tables give you an owner. They are
+public but not shipped, because they are hundreds of thousands of rows and go
+stale — run the fetcher once per checkout:
+
+```bash
+tools/fetch-reference-data.sh            # ~2 500 PLMNs, ~6 300 ISPCs, ~67 000 PENs
+tools/fetch-reference-data.sh --check    # what is present, without downloading
+```
+
+Lookups distinguish three states and the toolkit never collapses them: `ok` (the
+operator), `absent` (the register was read and holds no such row — that *is* the
+finding), and `silent` (the table is not on this machine — the answer is
+**unobserved**, not negative). `02_cell_recon --status-tsv` reports the register
+under `plmn_register`; `26_ss7_map --ispc` prints `owner_state` on every lookup.
+
+`data/opops/` is the private half: operator-supplied tables for global-title
+prefixes, cell identity blocks, core address ranges and SMSC identities. The
+tree ships the loader and the schema, never the contents, and reports a missing
+file as `silent` rather than as an empty answer.
+
 ### The interface
 
 The GUI opens on a **Dashboard** — every module as a card, grouped by category.

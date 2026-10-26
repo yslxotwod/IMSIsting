@@ -1,0 +1,11 @@
+# data/opops/gt.tsv — which PLMN and which STP a global-title prefix belongs to.
+#
+# Copy to gt.tsv and replace the examples with your own prefixes.
+# Read by:  tools/lib/refdata.sh refdata_opops_gt <global-title digits>
+#
+# gt_prefix is matched as a leading prefix of the digit string, first row wins.
+#
+# stp_type: international | national | hlr | msc | lnp | other
+gt_prefix	plmn	stp_type	note
+4740001	310-260	international	example: international gateway
+47400011	310-260	hlr	example: home location register

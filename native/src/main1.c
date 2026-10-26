@@ -3480,6 +3480,7 @@ static const char *const plain_keys[] = {
     "direction\tdirection",
     "direction_name\tdirection name",
     "directions\tdirections",
+    "directory\tThe directory the rules or events were written into",
     "disabled\tdisabled",
     "disclosed\tdisclosed",
     "discovered\tdiscovered",
@@ -4603,6 +4604,7 @@ static const char *const plain_keys[] = {
     "modulation\tmodulation",
     "modulator\tmodulator",
     "module\tmodule",
+    "modules\tHow many modules produced findings in the store",
     "modules_dir\tmodules dir",
     "mood\tmood",
     "mood_marker\tmood marker",
@@ -7251,6 +7253,8 @@ static const ChipRow chip_rows[] = {
     { "11_lte_core",         "--gtp-csr-forge",       NEED_NO, DOES_READS },
     { "11_lte_core",         "--gtp-in-gtp",          NEED_NO, DOES_READS },
     { "11_lte_core",         "--gtp-modify-bearer",   NEED_NO, DOES_READS },
+    { "11_lte_core",         "--gtp-screen-peer",     NEED_NO, DOES_READS },
+    { "11_lte_core",         "--diameter-screen",     NEED_NO, DOES_READS },
     { "11_lte_core",         "--gtpc-send",           NEED_NO, DOES_SENDS },
     { "11_lte_core",         "--flood-model",         NEED_NO, DOES_READS },
     { "11_lte_core",         "--ro-ccr",              NEED_NO, DOES_BUILDS },
@@ -25957,9 +25961,12 @@ lcore_build_audit(AppState *state, const char *module_id,
         "What a core exposes at its interconnect, and what it does about it.",
         &body);
     GtkWidget *fs20_body, *cdr_body, *echo_body, *surface_body, *plan_body;
+    GtkWidget *peer_body, *dh_body;
     GtkWidget *fs20 = verb_card("READ THE FS.20 CONTROLS", &fs20_body);
     GtkWidget *cdr = verb_card("FIND AN ANOMALY", &cdr_body);
     GtkWidget *echo = verb_card("TEST FOR ECHO ABUSE", &echo_body);
+    GtkWidget *peer = verb_card("SCREEN A PEER", &peer_body);
+    GtkWidget *dh = verb_card("SCREEN A DIAMETER MESSAGE", &dh_body);
     GtkWidget *surface = verb_card("READ THE ATTACK SURFACE", &surface_body);
     GtkWidget *plan = verb_card("READ THE HANDOFF", &plan_body);
 
@@ -26002,6 +26009,36 @@ lcore_build_audit(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(echo_body), res);
     }
     gtk_box_append(GTK_BOX(body), echo);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(peer_body),
+            mod_arg_row_prefilled(state, module_id, status, "Screen an Address",
+                "--gtp-screen-peer", "198.51.100.5 32",
+                "An interconnect source address and, optionally, a GTP-C "
+                "message type. The answer is whether a contracted peer owns "
+                "that address and whether that message may be sent by a peer "
+                "at all — or that no operator table is installed, which is "
+                "unobserved rather than clean."));
+        gtk_box_append(GTK_BOX(peer_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), peer);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(dh_body),
+            mod_arg_row_prefilled(state, module_id, status, "Screen a Command",
+                "--diameter-screen", "16777251 316",
+                "An application id and a command code. A PLMN-internal request "
+                "arriving over an interconnect is the identity-theft shape, and "
+                "it is named as such rather than as a protocol error."));
+        gtk_box_append(GTK_BOX(dh_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), dh);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -30203,8 +30240,8 @@ ss7_build_queries(AppState *state, const char *module_id,
                 "international origin looks like. Needs "
                 "tools/fetch-reference-data.sh --only ispc on this machine."));
         gtk_box_append(GTK_BOX(owner_body), res);
+        gtk_box_append(GTK_BOX(body), owner);
     }
-    gtk_box_append(GTK_BOX(body), owner);
 
     (void) out;
     return outer;

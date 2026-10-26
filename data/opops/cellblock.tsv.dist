@@ -1,0 +1,12 @@
+# data/opops/cellblock.tsv — the cell identity blocks an operator was allocated.
+#
+# Copy to cellblock.tsv and replace the examples with your own blocks.
+# Read by:  tools/lib/refdata.sh refdata_opops_cellblock <mcc-mnc> <cell_id>
+#
+# An eNB/gNB id whose high bits fall outside its operator's block is a spoof
+# or a small cell announcing somebody else's identity.
+#
+# kind: macro | small | dedicated | test
+plmn	range_lo	range_hi	kind	note
+310-260	0	65535	macro	example: nationwide macro layer
+310-260	1048576	1179647	small	example: small cell block

@@ -383,6 +383,10 @@ ss7_pc_parse() {
     for w in $widths; do
         local v="${parts[$i]}"
         [[ "$v" =~ ^[0-9]+$ ]] || return 1
+        # Forced to base 10: the formatter zero-pads, so a field can arrive as
+        # 0008 and bash arithmetic reads a leading zero as octal and dies on
+        # the 8. The inverse of a formatter must accept its own output.
+        v=$(( 10#$v ))
         (( v < (1 << w) )) || return 1
         pc=$(( (pc << w) | v ))
         i=$(( i + 1 ))
@@ -2863,6 +2867,105 @@ ss7_cmd_pc() {
     printf 'roundtrip\t%s\n' "$back"
 }
 
+# ── ISPC ownership (ITU-T Q.708 register) ───────────────────────────────
+# A point code is two questions, and this module could only answer one.
+# ss7_pc_format proves it is syntactically a valid 14-bit international point
+# code; the ITU Operational Bulletin's ISPC annex proves whether anybody owns
+# it. A well-formed code with no ISPC assignment is what a spoofed
+# international origin looks like, so the second question is the useful one.
+#
+# The register is downloaded by tools/fetch-reference-data.sh and looked up
+# through tools/lib/refdata.sh, which reports ok / absent / silent. `silent`
+# means the table is not on this machine: the answer is unobserved, not
+# negative, and printing "absent" for it would turn a missing download into a
+# false finding.
+ss7_refdata="${IMSISTING_ROOT:-$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/tools/lib/refdata.sh"
+if [[ -r "$ss7_refdata" ]]; then
+    # shellcheck source=tools/lib/refdata.sh
+    source "$ss7_refdata"
+fi
+
+ss7_ispc_lookup() {  # <pc decimal | 4-024-0>
+    local q="${1:-}" out state
+    declare -F refdata_ispc >/dev/null 2>&1 || {
+        printf 'ERROR	%s
+' "reference loader unavailable: tools/lib/refdata.sh is missing" >&2
+        return 1
+    }
+    out=$(refdata_ispc "$q") || return 1
+    state="${out%%$'\t'*}"
+    printf 'ispc\t%s\n' "$(ss7_sanitize "$q")"
+    case "$state" in
+        ok)
+            local rest="${out#*$'\t'}"
+            local country="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+            local dec="${rest%%$'\t'*}";     rest="${rest#*$'\t'}"
+            local point="${rest%%$'\t'*}";   rest="${rest#*$'\t'}"
+            printf 'owner_state\tok\n'
+            printf 'point_code\t%s\n' "$(ss7_sanitize "$dec")"
+            printf 'country\t%s\n'    "$(ss7_sanitize "$country")"
+            printf 'point_name\t%s\n' "$(ss7_sanitize "$point")"
+            printf 'operator\t%s\n'   "$(ss7_sanitize "$rest")"
+            # The ITU prints an ellipsis where the point name is withheld.
+            if [[ "$point" == "…" ]]; then
+                printf 'point_name_state\twithheld-by-register\n'
+            fi
+            local sanc
+            if sanc=$(refdata_ispc_sanc "$q" 2>/dev/null); then
+                printf 'sanc\t%s\n' "$sanc"
+            fi
+            ;;
+        absent)
+            # The register parsed and does not list this code. That is a
+            # finding, not a formatting failure: a message arriving from an
+            # international point code nobody is assigned is either spoofed
+            # or a national code presented as international.
+            printf 'owner_state\tabsent\n'
+            printf 'operator\tnone\n'
+            printf 'finding\t%s\n' \
+                "no ISPC assignment: spoofed international origin, or a national point code"
+            ;;
+        *)
+            printf 'owner_state\tsilent\n'
+            printf 'operator\tunobserved\n'
+            printf 'hint\trun tools/fetch-reference-data.sh --only ispc\n'
+            ;;
+    esac
+}
+
+ss7_cmd_ispc() {  # <pc decimal | 4-024-0>
+    local q="${1:-}"
+    [[ -n "$q" ]] || { printf 'ERROR\tusage: --ispc <0-16383 | 4-024-0>\n' >&2; return 2; }
+    # A decimal point code is rendered in the ITU's own spelling before the
+    # lookup: the Q.708 annex writes ISPCs as <sanc>-<3-digit member>, so a
+    # 14-bit code decomposes into a 3-bit SANC area, an 8-bit area/network
+    # member and a 3-bit signalling point, and the middle field is padded to
+    # three digits (8384 = 4-024-0, not 4-24-0).
+    if [[ "$q" =~ ^[0-9]+$ ]]; then
+        (( q <= 16383 )) || { printf 'ERROR\tpoint code out of range: %s\n' "$q" >&2; return 2; }
+        local formatted
+        formatted=$(printf '%d-%03d-%d' "$(( (q >> 11) & 7 ))" "$(( (q >> 3) & 255 ))" "$(( q & 7 ))")
+        printf 'pc_decimal\t%s\n' "$q"
+        printf 'pc_itu\t%s\n' "$formatted"
+        ss7_ispc_lookup "$formatted"
+    else
+        # Operators, captures and people in a hurry write 6-8-4 for 6-008-4.
+        # Both name the same point code, so the zero-padded form is what gets
+        # validated and looked up, and the padded form is what is echoed back —
+        # echoing the caller's shorthand would print a key the register does
+        # not contain, which reads as a second, different answer.
+        local padded="$q"
+        if [[ "$q" =~ ^([0-9])-([0-9]{1,3})-([0-9])$ ]]; then
+            padded="${BASH_REMATCH[1]}-$(printf '%03d' "$((10#${BASH_REMATCH[2]}))")-${BASH_REMATCH[3]}"
+        fi
+        [[ "$padded" =~ ^[0-9]-[0-9]{3}-[0-9]$ ]] || {
+            printf 'ERROR\tnot an international point code: %s (expected 4-024-0)\n' "$(ss7_sanitize "$q")" >&2
+            return 2
+        }
+        ss7_ispc_lookup "$padded"
+    fi
+}
+
 ss7_cmd_opcode() {
     local n="${1:-}"
     [[ "$n" =~ ^[0-9]+$ ]] || { printf 'ERROR\tusage: --opcode <n>\n' >&2; return 2; }
@@ -3658,6 +3761,40 @@ ss7_selftest() {
     chk sgsap-mme-55          "$(ss7_cmd_sgsap_build location-update-request --imsi 310150123456789 --lai 310-150-1 --mme-name mme.epc.mnc150.mcc310.3gppnetwork.org >/dev/null 2>&1; echo $?)" "1"
     chk sgsap-nas-short       "$(ss7_cmd_sgsap_build downlink-unitdata --imsi 310150123456789 --nas 09 >/dev/null 2>&1; echo $?)" "1"
     chk sgsap-imsi-bad        "$(ss7_cmd_sgsap_build downlink-unitdata --imsi 31015 --nas 0901020200 >/dev/null 2>&1; echo $?)" "1"
+
+    # ── ISPC ownership (ITU-T Q.708 register) ──────────────────────────
+    # The reference register is optional, so the assertions run against a
+    # fixture this selftest writes itself. That proves the three-state
+    # contract on any machine: a found row, a parsed register with no such
+    # row (a finding), and no register at all (unobserved, never a finding).
+    local fx="$d/fixture-public"
+    mkdir -p "$fx"
+    printf 'country\tispc\tispc_dec\tpoint_name\toperator\n' > "$fx/ispc.tsv"
+    printf 'Testland\t4-024-0\t8384\tTEST-POINT\tFixture Operator Ltd\n' >> "$fx/ispc.tsv"
+    printf 'Testland\t4-024-1\t8385\t\tFixture Two\n' >> "$fx/ispc.tsv"
+
+    local _saved_public="${REFDATA_PUBLIC:-}"
+    REFDATA_PUBLIC="$fx"
+    chk ispc-known-state    "$(ss7_cmd_ispc 4-024-0 | awk -F'\t' '$1=="owner_state"{print $2}')" "ok"
+    chk ispc-known-operator "$(ss7_cmd_ispc 4-024-0 | awk -F'\t' '$1=="operator"{print $2}')" "Fixture Operator Ltd"
+    chk ispc-known-country  "$(ss7_cmd_ispc 4-024-0 | awk -F'\t' '$1=="country"{print $2}')" "Testland"
+    chk ispc-known-dec      "$(ss7_cmd_ispc 4-024-0 | awk -F'\t' '$1=="point_code"{print $2}')" "8384"
+    chk ispc-known-sanc     "$(ss7_cmd_ispc 4-024-0 | awk -F'\t' '$1=="sanc"{print $2}')" "4-024"
+    # Short and zero-padded spellings are the same point code.
+    chk ispc-short-form     "$(ss7_cmd_ispc 4-24-0 | awk -F'\t' '$1=="operator"{print $2}')" "Fixture Operator Ltd"
+    chk ispc-echo-padded    "$(ss7_cmd_ispc 4-24-0 | awk -F'\t' '$1=="ispc"{print $2}')" "4-024-0"
+    # Decimal input is rendered to the register's own spelling first.
+    chk ispc-from-decimal   "$(ss7_cmd_ispc 8384 | awk -F'\t' '$1=="operator"{print $2}')" "Fixture Operator Ltd"
+    # A parsed register with no such row is a finding, never a silence.
+    chk ispc-absent-state   "$(ss7_cmd_ispc 5-150-0 | awk -F'\t' '$1=="owner_state"{print $2}')" "absent"
+    chk ispc-absent-finding "$(ss7_cmd_ispc 5-150-0 | awk -F'\t' '$1=="finding"{print $2}' | grep -c 'no ISPC assignment')" "1"
+    # A missing register is unobserved, and says so rather than answering.
+    REFDATA_PUBLIC="$d/no-such-table"
+    chk ispc-silent-state   "$(ss7_cmd_ispc 4-024-0 | awk -F'\t' '$1=="owner_state"{print $2}')" "silent"
+    chk ispc-silent-hints   "$(ss7_cmd_ispc 4-024-0 | awk -F'\t' '$1=="hint"{print $2}' | grep -c 'fetch-reference-data')" "1"
+    REFDATA_PUBLIC="$_saved_public"
+    chk ispc-malformed      "$(ss7_cmd_ispc nope >/dev/null 2>&1; echo $?)" "2"
+    chk ispc-oob-decimal    "$(ss7_cmd_ispc 99999 >/dev/null 2>&1; echo $?)" "2"
 
         rm -rf "$d"
     trap - EXIT
@@ -4725,6 +4862,7 @@ ss7_cli_main() {
         --ssn)           ss7_cmd_ssn "${1:-}" ;;
         --opcode)        ss7_cmd_opcode "${1:-}" ;;
         --pc-format)     ss7_cmd_pc "${1:-}" "${2:-3-8-3}" ;;
+        --ispc)          ss7_cmd_ispc "${1:-}" ;;
         --surface)       ss7_surface_notes ;;
         --require-stp)   ss7_require_stp ;;
         --plan)          ss7_cmd_plan "${1:-}" ;;
@@ -4787,6 +4925,9 @@ Usage: $0 COMMAND
   --ssn <n>                  subsystem number -> name
   --opcode <n>               MAP operation code -> name
   --pc-format <pc> [struct]  14-bit point code in a structured form
+  --ispc <pc|4-024-0>        who owns the point code, per the ITU Operational
+                             Bulletin's ISPC annex (requires
+                             tools/fetch-reference-data.sh --only ispc)
   --surface                  attack surface notes
   --require-stp              report the lab STP, by name if absent
   --plan <stp-lab|ipx-path>  write a handed-off plan naming the testbed
