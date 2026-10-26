@@ -77,7 +77,7 @@ static const HelpSection OVERVIEW_SECTIONS[] = {
       "it." },
 
     { "WHERE THINGS LIVE",
-      "modules/          57 shell modules. Each is a complete CLI and runs\n"
+      "modules/          61 shell modules. Each is a complete CLI and runs\n"
       "                  on its own, with no GUI and no daemon.\n"
       "native/           this interface: main1.c, help_page.c, meson.build,\n"
       "                  and resources/ for the icons and the stylesheet\n"
@@ -119,19 +119,22 @@ static const HelpSection OVERVIEW_SECTIONS[] = {
 };
 
 static const HelpSection NAV_SECTIONS[] = {
-    { "THE SEVEN PAGES",
+    { "THE TEN PAGES",
       "Dashboard       every module as a card on one grid, by category\n"
       "Live Traffic    what the sensors are seeing right now\n"
       "Casebook        cases, targets, evidence, alerts, sensors, reports\n"
+      "Map             cells and observations on one plane\n"
+      "Fleet           the remote nodes, and what each one can do\n"
       "Stats           module and collection counts\n"
-      "Notifications   events raised by modules and by the casebook\n"
+      "Notifications   events raised by modules and by the Casebook\n"
       "Help            this page\n"
-      "Settings        environment facts, guard report, maintenance" },
+      "Settings        what the toolkit does by default, in six views\n"
+      "Workflows       twelve questions, each opened into the steps" },
 
     { "THE DRAWER",
       "Move the pointer to the left edge of the window and it slides out,\n"
       "over the page rather than beside it. The top of the drawer lists the\n"
-      "seven pages in the order above; below that, the module catalogue.\n"
+      "ten pages in the order above; below that, the module catalogue.\n"
       "Choosing a row switches page and closes the drawer. Moving the\n"
       "pointer away closes it too.\n"
       "\n"
@@ -661,16 +664,16 @@ static const HelpView HELP_VIEWS[] = {
     { "Overview", "dialog-information-symbolic",
       "A cellular security research toolkit: 2G/GSM, 3G/UMTS, 4G/LTE and\n"
       "5G/NR, plus the core network, the SIM, and the carrier-side\n"
-      "interfaces around them. 57 modules in 11 categories.",
+      "interfaces around them. 61 modules in 11 categories.",
       OVERVIEW_SECTIONS, N_SECTIONS(OVERVIEW_SECTIONS) },
 
     { "Getting around", "view-grid-symbolic",
-      "The window is a notebook of seven pages, a drawer that lists them\n"
+      "The window is a notebook of ten pages, a drawer that lists them\n"
       "plus every module, and two panels that float over the page.",
       NAV_SECTIONS, N_SECTIONS(NAV_SECTIONS) },
 
     { "Modules", "system-software-install-symbolic",
-      "57 modules, each a self-contained shell script with its own CLI, its\n"
+      "61 modules, each a self-contained shell script with its own CLI, its\n"
       "own --selftest and its own --status-tsv. This window is a view over\n"
       "them, never a wrapper that hides them.",
       MODULE_SECTIONS, N_SECTIONS(MODULE_SECTIONS) },

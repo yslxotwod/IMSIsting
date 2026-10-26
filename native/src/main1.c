@@ -21124,6 +21124,17 @@ main(int argc, char **argv)
             g_start_module = argv[i + 1];
             /* fall through to run the app */
         }
+        if (g_strcmp0(argv[i], "--version") == 0) {
+            /* The same string the CLI prints, from the same VERSION file, so a
+               bug report that quotes one is quoting the other. Exit here: an
+               unregistered option would otherwise reach GApplication and fail
+               silently, which is the opposite of what asking the version should
+               do. */
+            g_autofree char *label = imsisting_version_label ();
+            printf("imsisting %s — %d modules, 2G/3G/4G/5G\n",
+                   label != NULL ? label : "(no VERSION file)", N_MODULES);
+            return label != NULL ? 0 : 1;
+        }
         if (g_strcmp0(argv[i], "--list-modules") == 0) {
             for (int j = 0; j < N_MODULES; j++)
                 printf("%s\t%s\t%s\n", modules[j].id, modules[j].category,
