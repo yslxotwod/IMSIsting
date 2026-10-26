@@ -66,7 +66,7 @@ imsisting_resources = gnome.compile_resources(
   # The manifest names the files, so meson has no other way to learn that the
   # sheet changed: without this a CSS-only edit is silently not embedded, and
   # the running app keeps the old styles with nothing to say so.
-  dependencies: files('resources/style.css'),
+  dependencies: files('resources/style.css', 'resources/corners.css'),
 )
 
 executable(

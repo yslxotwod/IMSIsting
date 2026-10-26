@@ -426,6 +426,10 @@ struct _AppState {
        held so a switch removes the old one instead of stacking sheets. */
     char           *theme;
     GtkCssProvider *theme_css;
+    /* Shape, kept apart from colour: "round" is the base sheet and needs no
+       provider, "square" loads native/resources/corners.css above both. */
+    char           *corners;
+    GtkCssProvider *corners_css;
     GtkWidget *loot_list;
     GtkWidget *loot_search;
     GtkWidget *loot_sort;
@@ -12355,6 +12359,8 @@ ui_state_save(AppState *state)
                            state->density ? state->density : "density-comfortable");
     g_string_append_printf(out, "theme\t%s\n",
                            state->theme ? state->theme : "night");
+    g_string_append_printf(out, "corners\t%s\n",
+                           state->corners ? state->corners : "round");
     g_file_set_contents(path, out->str, -1, NULL);
     g_string_free(out, TRUE);
 }
@@ -12505,6 +12511,86 @@ theme_changed(GObject *dd, GParamSpec *pspec, gpointer user_data)
     (void) user_data;
 }
 
+/* ── corners ──────────────────────────────────────────────────────────
+ *
+ * Shape is not a palette, so it cannot be a theme: a theme is only allowed to
+ * restate colours, and that rule is what keeps a second sheet from becoming a
+ * second copy of the layout. It is not one class on the window either, because
+ * a modal is its own toplevel — the page behind it would go square while the
+ * dialog stayed a pill, which reads as a rendering fault rather than as a
+ * setting. So square corners are a second stylesheet, loaded above the base
+ * sheet and above the theme.
+ *
+ * That sheet is derived, not written: tools/gen-corners.py restates every
+ * radius-bearing selector in style.css with the radius taken out. The two
+ * obvious hand-written versions both fail, and both fail silently — a bare
+ * `* { border-radius: 0 }` loses to any more specific selector (a later sheet
+ * does not outrank `.sidebar row`), and `!important` is not GTK CSS at all: the
+ * parser drops the declaration as "Junk at end of value" and the sheet draws
+ * nothing. Same selector, same specificity, later provider: that wins.
+ *
+ * Round is nothing at all: the base sheet, one provider, nothing to keep in
+ * step. That is the same shape of decision the themes make, for the same
+ * reason — an install that never chose must not carry a second sheet it could
+ * drift from.
+ */
+
+static const char *corner_ids[]   = { "round", "square" };
+static const char *corner_names[] = { "Round", "Square" };
+
+static int
+corners_index(AppState *state)
+{
+    const char *id = state != NULL && state->corners != NULL
+                     ? state->corners : "round";
+
+    return g_strcmp0(id, "square") == 0 ? 1 : 0;
+}
+
+static void
+corners_apply(AppState *state)
+{
+    g_autoptr(GtkCssProvider) css = gtk_css_provider_new();
+
+    if (state == NULL)
+        return;
+
+    if (state->corners_css != NULL) {
+        gtk_style_context_remove_provider_for_display(
+            gdk_display_get_default(), GTK_STYLE_PROVIDER(state->corners_css));
+        g_clear_object(&state->corners_css);
+    }
+    if (g_strcmp0(state->corners, "square") != 0)
+        return;
+
+    /* Same honesty guard as a theme: a sheet the binary does not carry draws
+       nothing at all, so the dropdown would keep reading "Square" over a
+       rounded window. That is what shipping the file without re-running
+       tools/gen-icons-xml.sh looks like, so it is checked, named, and the
+       setting put back. */
+    if (g_resources_lookup_data("/com/imsisting/native/corners.css",
+                                G_RESOURCE_LOOKUP_FLAGS_NONE, NULL) == NULL) {
+        append_event(state,
+            "The square-corner sheet is not in this build (corners.css): the "
+            "rounded base sheet is what is being drawn. Re-run "
+            "tools/gen-icons-xml.sh and rebuild.");
+        if (state->window != NULL)
+            show_toast_full(state, "Corners",
+                            "the square sheet is not in this build", "warn");
+        g_free(state->corners);
+        state->corners = g_strdup("round");
+        return;
+    }
+
+    gtk_css_provider_load_from_resource(css, "/com/imsisting/native/corners.css");
+    /* Above the theme (APPLICATION + 1), because shape outranks palette: it is
+       the shelf the controls sit on, not a restatement of their colour. */
+    gtk_style_context_add_provider_for_display(
+        gdk_display_get_default(), GTK_STYLE_PROVIDER(css),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 2);
+    state->corners_css = g_object_ref(css);
+}
+
 /* Density is one class on the window; the stylesheet carries the sizes, so
    nothing has to be re-measured or re-requested when it changes. */
 static void
@@ -12576,6 +12662,10 @@ ui_state_load(AppState *state)
             else if (g_strcmp0(f[0], "theme") == 0) {
                 g_free(state->theme);
                 state->theme = g_strdup(f[1]);
+            }
+            else if (g_strcmp0(f[0], "corners") == 0) {
+                g_free(state->corners);
+                state->corners = g_strdup(f[1]);
             }
         }
     }
@@ -15551,6 +15641,19 @@ settings_theme_apply(AppState *state, guint index)
     ui_state_save(state);
 }
 
+/* Shape is a provider swap like the palette, and it persists the same way: the
+   id moves in state, corners_apply() puts the sheet above the others, and the
+   next session reads it back from state/ui.tsv. */
+static void
+settings_corners_apply(AppState *state, guint index)
+{
+    if (state == NULL || index >= G_N_ELEMENTS(corner_ids)) return;
+    g_free(state->corners);
+    state->corners = g_strdup(corner_ids[index]);
+    corners_apply(state);
+    ui_state_save(state);
+}
+
 static void
 settings_sort_apply(AppState *state, guint index)
 {
@@ -15650,6 +15753,18 @@ settings_view_interface(AppState *state)
         "from the base sheet by tools/gen-theme.py; the dashboard dropdown "
         "changes the same value.",
         settings_theme_apply, state));
+    gtk_box_append(GTK_BOX(body), settings_choice("Corners",
+        NULL, corner_ids, corner_names, G_N_ELEMENTS(corner_ids),
+        (guint) corners_index(state),
+        "Round is the shape the desk was drawn in. Square loads a second "
+        "stylesheet that removes every radius — buttons, entries, cards, the "
+        "window controls — so the interface reads as a panel rather than as a "
+        "set of pills. It changes shape and nothing else: no colour, no "
+        "spacing, no layout, and a switch keeps its round knob because a square "
+        "one reads as a checkbox. Works with either theme, and the dashboard "
+        "dropdown has no counterpart for it because shape is not a place to "
+        "work from — it is set here and kept in state/ui.tsv.",
+        settings_corners_apply, state));
     gtk_box_append(GTK_BOX(body), settings_choice("Reader",
         "ui.reader", reader_v, reader_l, 2,
         g_strcmp0(settings_get("ui.reader", "beginner"), "expert") == 0 ? 1 : 0,
@@ -19551,6 +19666,10 @@ boot_load_css(AppState *state, GtkApplication *app)
         gdk_display_get_default(), GTK_STYLE_PROVIDER(css),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     theme_apply(state);
+    /* ui_state_load() has already run (boot_restore_session comes before this
+       stage), so the window opens in the shape the last session left it in
+       rather than drawing round and re-shaping once the page is built. */
+    corners_apply(state);
 }
 
 /* ── The terminal ──────────────────────────────────────────────────────
@@ -20892,6 +21011,30 @@ main(int argc, char **argv)
                                : "FAIL not in the resource"));
                 if (bytes == NULL && !base)
                     bad++;
+            }
+
+            /* Same rule for shape: "square" is a sheet the binary must carry,
+               and "round" must not need one at all. The pair is asserted
+               together so an install that offers Square and draws round is a
+               failing row rather than a preference nobody tested. */
+            for (guint c = 0; c < G_N_ELEMENTS(corner_ids); c++) {
+                gboolean square = g_strcmp0(corner_ids[c], "square") == 0;
+                g_autoptr(GBytes) sheet = g_resources_lookup_data(
+                    "/com/imsisting/native/corners.css",
+                    G_RESOURCE_LOOKUP_FLAGS_NONE, NULL);
+
+                if (square) {
+                    printf("gui-corners-%s\t%s\n", corner_ids[c],
+                           sheet != NULL ? "PASS packaged"
+                                         : "FAIL not in the resource");
+                    if (sheet == NULL)
+                        bad++;
+                } else {
+                    /* "round" is the base sheet: it must not need this file,
+                       and a build that carries it anyway is not a fault. */
+                    printf("gui-corners-%s\tPASS none needed — it is the base sheet\n",
+                           corner_ids[c]);
+                }
             }
 
             printf("RESULT\t%s\n", bad == 0 ? "PASS" : "FAIL");

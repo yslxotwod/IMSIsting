@@ -30,6 +30,10 @@ generate() {
     printf '<gresources>\n'
     printf '  <gresource prefix="/com/imsisting/native">\n'
     printf '    <file>style.css</file>\n'
+    # The square-corner sheet. Not a theme -- a theme may only restate colours,
+    # and this restates shape -- so it is named here rather than globbed with
+    # the theme-*.css files below.
+    printf '    <file>corners.css</file>\n'
     # Every theme file beside it. A theme is a stylesheet the binary loads by
     # name, so it has to be in the resource or choosing it at runtime finds
     # nothing; globbing keeps a new one from needing a second edit here.

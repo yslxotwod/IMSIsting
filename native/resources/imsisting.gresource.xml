@@ -3,6 +3,7 @@
 <gresources>
   <gresource prefix="/com/imsisting/native">
     <file>style.css</file>
+    <file>corners.css</file>
     <file>theme-ember.css</file>
     <file>imsisting_splash.png</file>
     <file>fonts/Orbitron-Bold.ttf</file>
