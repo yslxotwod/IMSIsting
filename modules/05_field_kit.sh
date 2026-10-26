@@ -472,6 +472,42 @@ fk_capability() {
 }
 
 # ── selftest ────────────────────────────────────────────────────────────
+# ── the findings this tree prints, in a form another system can read ────
+# Every detector in the toolkit writes `finding <key> <SEVERITY> <text>` into a
+# loot TSV. That is readable by a person and useless to a SIEM. This verb is the
+# bridge: it hands the rows to tools/detect_export.py, which catalogues them and
+# writes Sigma rules, ECS JSON or CEF lines. The identifiers are stable, so a
+# re-export after a change updates a rule instead of duplicating it.
+fk_cmd_detect_export() {
+    local path="" format="catalogue" out="" py="${PYTHON_BIN:-python3}"
+    while (($# > 0)); do
+        case "$1" in
+            --format) format="${2:-}"; shift 2 ;;
+            --out)    out="${2:-}";    shift 2 ;;
+            --)       shift; path="${1:-}"; shift ;;
+            *)        path="$1"; shift ;;
+        esac
+    done
+    case "$format" in
+        catalogue|sigma|ecs|cef|json) ;;
+        *) printf 'ERROR\t--format is catalogue, sigma, ecs, cef or json\n' >&2; return 2 ;;
+    esac
+    [[ -n "$path" ]] || path="${LOOT_DIR:-}"
+    [[ -n "$path" ]] || { printf 'ERROR\tno input: give a loot directory or a TSV\n' >&2; return 2; }
+    [[ -e "$path" ]] || {
+        printf 'ERROR\tno such path: %s\n' "$(fk_sanitize "$path")" >&2
+        printf 'WHY\tthere is nothing to export until a module has written findings somewhere\n' >&2
+        printf 'FIX\trun a detector first, or point the verb at the store it wrote\n' >&2
+        return 1; }
+    command -v "$py" >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is not available (%s)\n' "$py" >&2; return 1; }
+    local tool="$IMSISTING_ROOT/tools/detect_export.py"
+    [[ -f "$tool" ]] || { printf 'ERROR\tmissing %s\n' "$tool" >&2; return 1; }
+    local -a args=(--format "$format")
+    [[ -n "$out" ]] && args+=(--out "$out")
+    "$py" "$tool" "${args[@]}" "$path"
+}
+
 fk_selftest() {
     local bad=0
     chk() {
@@ -486,6 +522,26 @@ fk_selftest() {
         printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
     trap 'rm -rf "$d"' EXIT
     export LOOT_DIR="$d/loot" FK_DIR="$d/loot/field_kit" FK_GUARDS="$d/loot/field_kit/guard-check.tsv"
+
+    # The export bridge: a catalogue of findings, one Sigma rule per finding with
+    # an id that is a UUIDv5 of the rule name (so re-exporting updates rather
+    # than duplicates), and the two refusals.
+    mkdir -p "$d/loot/09_lte_attach"
+    printf 'finding\tflashcatch_barring\tHIGH\tthe cell was barred\nnote\tx\ty\n' > "$d/loot/09_lte_attach/a.tsv"
+    local ex
+    ex=$(fk_cmd_detect_export "$d/loot" 2>/dev/null)
+    chk export-files   "$(printf '%s\n' "$ex" | awk -F'\t' '$1=="files"{print $2}')" "1"
+    chk export-findings "$(printf '%s\n' "$ex" | awk -F'\t' '$1=="findings"{print $2}')" "1"
+    chk export-name    "$(printf '%s\n' "$ex" | awk -F'\t' '$1=="finding"{print $2}')" "09_lte_attach.flashcatch_barring"
+    chk export-verdict "$(printf '%s\n' "$ex" | awk -F'\t' '$1=="verdict"{print $2}')" "detections_catalogued"
+    fk_cmd_detect_export "$d/loot" --format sigma --out "$d/rules" >/dev/null 2>&1
+    chk export-sigma-file "$(ls "$d/rules" 2>/dev/null | grep -c 'imsisting.09_lte_attach.flashcatch_barring.yml')" "1"
+    chk export-sigma-id   "$(grep -c '^id: ' "$d/rules/imsisting.09_lte_attach.flashcatch_barring.yml" 2>/dev/null)" "1"
+    chk export-sigma-level "$(awk -F': ' '$1=="level"{print $2}' "$d/rules/imsisting.09_lte_attach.flashcatch_barring.yml" 2>/dev/null)" "high"
+    chk export-ecs     "$(fk_cmd_detect_export "$d/loot" --format ecs 2>/dev/null | grep -c '"kind": "alert"')" "1"
+    chk export-cef     "$(fk_cmd_detect_export "$d/loot" --format cef 2>/dev/null | grep -c '^CEF:0|IMSIsting|09_lte_attach')" "1"
+    chk export-badformat "$(fk_cmd_detect_export "$d/loot" --format yaml >/dev/null 2>&1; echo $?)" "2"
+    chk export-nopath  "$(fk_cmd_detect_export /tmp/definitely-not-here-loot >/dev/null 2>&1; echo $?)" "1"
 
     # 1. The GSMTAP header is the one verified against Wireshark: 16 bytes,
     #    hdr_len 4, GSM channel in sub_type.
@@ -670,6 +726,7 @@ fk_cli_main() {
         --emit)          fk_emit "${1:-mixed}" "${2:-1}" "${3:-0.2}" "${4:-udp}" ;;
         --scenarios)     fk_scenario_frames gsm-idle >/dev/null && \
                          printf 'gsm-idle\ngsm-attach\nlte-attach\nimsi-catcher\nmixed\n' ;;
+        --detect-export) fk_cmd_detect_export "$@" ;;
         --selftest)      fk_selftest ;;
         --menu)          fk_menu ;;
         *)
@@ -684,6 +741,11 @@ Usage: $0 COMMAND
   --emit [SCENARIO] [N] [DELAY] [udp|FILE.pcap]
                           generate a deterministic GSMTAP stream
   --scenarios             list the built-in scenarios
+  --detect-export <loot-dir|file.tsv> [--format catalogue|sigma|ecs|cef|json]
+                          [--out DIR]
+                          the `finding` rows this tree writes, catalogued or
+                          carried out as Sigma rules (one file per finding, with
+                          a stable UUID), ECS events, or CEF lines
   --status-tsv            capability state as TSV
   --selftest              verify the codec, the scenarios and the classifier
   --menu                  interactive menu

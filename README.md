@@ -268,7 +268,7 @@ Copy for many.
 |---|---|
 | `00_deps` | Inspect the cellular toolchain and install what is missing |
 | `01_radio` | Enumerate SDRs, report per-band capability, record IQ |
-| `05_field_kit` | RF pre-flight, honesty verification of every radio verb, synthetic GSMTAP source |
+| `05_field_kit` | RF pre-flight, honesty verification of every radio verb, synthetic GSMTAP source, and the export bridge: every `finding` row this tree writes, catalogued or carried out as Sigma rules with stable UUIDs, ECS events or CEF lines |
 | `25_killchain` | Chain module verbs into repeatable recorded runs: fourteen builtin chains, a status line per step, and an evidence manifest whose hashes a second party can re-derive |
 | `59_remote_node` | Remote cellular nodes: identity, measured capabilities, captured events and dispatch permissions, with eight transports (ssh/local/adb/serial/qmi/mbim/diag/sms) that each say what they can honestly deliver |
 

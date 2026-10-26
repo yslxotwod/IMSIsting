@@ -2549,6 +2549,7 @@ static const char *const plain_keys[] = {
     "access_control\tWhat stands in for authentication on a call that carries a payload",
     "accounting_record_number\tidentifies the record within a session, in order, so a gap is visible",
     "accounting_record_type\tEVENT, START, INTERIM or STOP; only STOP claims the session ended",
+    "accuracy_m\tThe accuracy a location answer claims, in metres",
     "accuracy_m_mean\tThe mean of the accuracy figures in a log of location answers, in metres",
     "accuracy_m_min\tThe best accuracy any answer in the log carried",
     "ack\tack",
@@ -2625,6 +2626,8 @@ static const char *const plain_keys[] = {
     "amplification\tamplification",
     "amplification_factor\tamplification factor",
     "amplifier\tthe amplifier board the published setup used, with its part number",
+    "amr_parameters_stated\tThe media parameters were stated, not negotiated",
+    "amr_stream_accounted\tA recorded stream was accounted for frame by frame",
     "analytics\tone NWDAF analytics identity, what it returns, and at what granularity",
     "anchor\tone ranging measurement attributed to a cell, ready for the least-squares fix",
     "anchor_mhz\tfrequency the caller supplied as the band entry point",
@@ -2732,6 +2735,7 @@ static const char *const plain_keys[] = {
     "auth_username\tauth username",
     "authenticated_by\twhat actually proves a peer is who it says, which is never the Origin-Host",
     "authorisation\twhether the slice may be used at all",
+    "authorisation_is_an_unverified_field\tThe authorisation field is taken at face value",
     "authorised\twhether the operator has said the target is theirs",
     "autn\tauthentication token",
     "autn_basis\tauthentication token basis",
@@ -2761,6 +2765,7 @@ static const char *const plain_keys[] = {
     "band\tband",
     "band_name_mhz\tband name (MHz)",
     "bands\tbands",
+    "bandwidth_efficient_mode\tFrames packed bit to bit with no padding",
     "bandwidth_is_a_red_herring\tthe bit rate is not the interesting limit",
     "bandwidth_khz\tbandwidth in kHz",
     "barred\tthe cell is barred in the SIB1 that was read",
@@ -2786,6 +2791,7 @@ static const char *const plain_keys[] = {
     "before\tbefore",
     "best_offered\tbest offered",
     "bi_index\tbi index",
+    "bidirectional_devices\tDevices whose traffic went both ways",
     "binary\tbinary",
     "bind\twhether the session opened with bind_transceiver",
     "bind_octets\tbind PDU length in octets",
@@ -3164,6 +3170,7 @@ static const char *const plain_keys[] = {
     "client_name\tThe name a location client put in its own request",
     "client_subscriber_pairs\tHow many distinct client and subscriber pairs a log holds",
     "client_type\tThe declared category of a location client",
+    "client_type_is_a_declaration\tThe client type says what the caller claims to be",
     "client_types\tHow many client categories the specifications name",
     "clients\tHow many distinct location clients appear in a log",
     "clock\tthe timestamp of a message is not later than the one before it, so the log cannot be ordered",
@@ -3209,6 +3216,8 @@ static const char *const plain_keys[] = {
     "command_status_name\tcommand status name",
     "command_type\tthe proactive command type octet",
     "commands\tcommands",
+    "commercial_client_asks_for_geographic_precision\tA commercial client asked for a position",
+    "commercial_geographic_precision\tCommercial requests answered with coordinates",
     "commit\tcommit",
     "common_note\tthe sentence that applies to every row above it",
     "comp128_zero_bits\tcomp128 zero bits",
@@ -3421,6 +3430,7 @@ static const char *const plain_keys[] = {
     "dependency\tdependency",
     "derived\tderived",
     "description\tdescription",
+    "descriptor_without_snssai\tA route selection with no slice named",
     "dest_addr_npi\tdest address npi",
     "dest_addr_subunit\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "dest_addr_ton\tdest address ton",
@@ -3517,6 +3527,7 @@ static const char *const plain_keys[] = {
     "downlink_hex\tdownlink hex",
     "downlink_mhz\tdownlink (MHz)",
     "downlink_octets\tdownlink octets",
+    "downlink_only_device\tA device that only ever received",
     "downlink_overshadow_collapses_with_range\tthe verdict when the required power is set by the cell rather than the attacker, so the range collapses to tens of metres",
     "dpc\tdpc",
     "dpf_result\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
@@ -3539,6 +3550,7 @@ static const char *const plain_keys[] = {
     "duplex_note\tduplex note",
     "duplex_spacing_mhz\tduplex spacing (MHz)",
     "duplicate_counts\tduplicate counts",
+    "duplicate_precedence\tTwo rules share one precedence number",
     "duplicated_mandatory_headers\tduplicated mandatory headers",
     "dur\tdur",
     "duration_microseconds\tduration microseconds",
@@ -3581,7 +3593,9 @@ static const char *const plain_keys[] = {
     "element\tone element of the answer body",
     "embedded_mmi_trigger\tembedded mmi trigger",
     "embedded_url\tembedded url",
+    "emergency\tThe emergency client type",
     "emergency_answers\tAnswers given to a request labelled emergency",
+    "emergency_label_skips_the_privacy_check\tAn emergency label is the whole privacy control",
     "emm_cause\temm reason",
     "emm_cause_name\temm reason name",
     "enabled_profiles\thow many profiles the modelled card has enabled, which is one at most",
@@ -3674,6 +3688,7 @@ static const char *const plain_keys[] = {
     "extension_bit\textension bit",
     "extension_octets\textension octets",
     "external_id\tThe identifier an application uses to name a device",
+    "external_identifier_is_the_join\tThe external identifier links application and subscriber",
     "extra\textra",
     "f1\tmilenage f1 mac-a",
     "f2\tmilenage f2 res",
@@ -3768,6 +3783,7 @@ static const char *const plain_keys[] = {
     "flags_octet\tflags octet",
     "flapping\tflapping attachments",
     "flapping_identities\tflapping identities",
+    "fleet\tA group of devices managed together",
     "flow\tflow",
     "flow_step\tflow step",
     "flows\tflows",
@@ -3862,6 +3878,7 @@ static const char *const plain_keys[] = {
     "generation\tgeneration",
     "generator\tgenerator",
     "generic_nack\tgeneric nack",
+    "geo\tA geographic answer shape",
     "geographic_answers\tAnswers that carried a position rather than a cell",
     "geometry\tthe distance and delay figures for a link",
     "gfbr_dl_bps\tgfbr downlink (bit/s)",
@@ -4325,6 +4342,9 @@ static const char *const plain_keys[] = {
     "lcid_source\tlcid source",
     "lcore\tlcore",
     "lcs\tlcs",
+    "lcs_entitlement_stated\tWho may ask was stated for each client type",
+    "lcs_granularity_stated\tThe answer shapes of a location service were stated",
+    "lcs_request_shaped\tA location request was shaped and its fields shown",
     "le\tle",
     "leaks\tleaks",
     "learned_from\tlearned from",
@@ -4445,6 +4465,8 @@ static const char *const plain_keys[] = {
     "margin_db\tmargin (dB)",
     "margin_us\twhat is left of the queue window after the whole chain has spent its time",
     "match\tmatch",
+    "match_all_at_precedence\tA match-all rule sits at this precedence",
+    "match_all_shadows_targeted\tA match-all rule catches traffic the specific rules were for",
     "matched\thow many IE ids matched the fragment asked for",
     "max\tmaximum",
     "max_chars\tthe largest number of characters the field can hold",
@@ -4553,6 +4575,8 @@ static const char *const plain_keys[] = {
     "mnc_digits\tnetwork code digits",
     "mnc_length\tnetwork code length",
     "mnc_length_raw\tnetwork code length raw",
+    "mno\tThe mobile network operator as a client",
+    "mo\tMobile originated, device to network",
     "mob_cai_rev\tmob cai rev",
     "mob_firmware_rev\tmob firmware rev",
     "mob_model\tmob model",
@@ -4565,11 +4589,13 @@ static const char *const plain_keys[] = {
     "mode\tmode",
     "mode_bits_max\tThe largest frame size in a mode set, in bits",
     "mode_bits_min\tThe smallest frame size in a mode set, in bits",
+    "mode_changed_without_a_mode_request\tA speech mode changed with nothing asking for it",
     "mode_changes\tHow many times the mode changed in a recorded stream",
     "mode_changes_without_a_request\tMode changes the payload mode request did not ask for",
     "mode_code\tmode code",
     "mode_count\tHow many modes a mode set names",
     "mode_set\tThe set of codec modes a call may use",
+    "mode_set_pins_the_capacity\tOne mode leaves the call no room to adapt",
     "model\tmodel",
     "modes_requested\tWhich modes a mode set actually names",
     "modes_seen\tThe modes a recorded stream used, in order of first appearance",
@@ -4608,6 +4634,7 @@ static const char *const plain_keys[] = {
     "msu_hex\tmsu bytes",
     "msu_octets\tmsu octets",
     "msu_source\tmsu source",
+    "mt\tMobile terminated, network to device",
     "mt_lp\tmt lp",
     "mt_mms\tmt mms",
     "mt_rd\tmt rd",
@@ -4719,12 +4746,15 @@ static const char *const plain_keys[] = {
     "ni\tni",
     "ni_name\tni name",
     "nibbles\tnibbles",
+    "nidd_plane_described\tThe non-IP data path was described leg by leg",
+    "nidd_transaction_built\tThe API call that carries a non-IP payload was built",
     "nist_vector\tnist vector",
     "nlink\tnlink",
     "no\tno",
     "no_age\tthe answer came back with no age of location",
     "no_audience\tno audience",
     "no_binding\tstate that is not tied to the connection that made it",
+    "no_client_authentication_on_the_hop\tNothing on the hop authenticates the client",
     "no_conflict_modelled\tno rule in this tree pairs the two procedures, which is not the same as the core being safe",
     "no_consumer_auth\tthe reader is trusted by role, not by need",
     "no_cross_policy_accounting\tnothing adds the slices together",
@@ -4742,11 +4772,13 @@ static const char *const plain_keys[] = {
     "no_reuse_in_this_pair\tthe two calls were given different keys",
     "no_rotation_in_this_file\tevery device in the records carried one identity, so rotation cannot be scored from it",
     "no_subscriber_state\tthe answer came back with no subscriber state",
+    "nobody\tNo party at all",
     "nof_ports\tnof ports",
     "noise_floor_db\tthe level the occupied test is measured against",
     "non3gpp\tnon3gpp",
     "non_critical_extension\tnon critical extension",
     "non_critical_extensions\tnon critical extensions",
+    "non_ip_data_is_invisible_to_ip_tools\tA payload with no IP header leaves IP tools nothing",
     "nonce_carries_rand\tnonce carries rand",
     "none\tnone",
     "none_matched\tnone matched",
@@ -4768,6 +4800,7 @@ static const char *const plain_keys[] = {
     "not_subscriber_info\tthe body is not the shape the operation returns",
     "note\tnote",
     "note_pin_flags\tnote pin flags",
+    "nothing\tNothing at all",
     "notification\tnotification",
     "now\tnow",
     "np\thow many paging indicators the PICH carries in one frame",
@@ -4831,12 +4864,15 @@ static const char *const plain_keys[] = {
     "octets_file\toctets file",
     "odd_even\todd even",
     "offered\toffered",
+    "offload_bypasses_the_core\tTraffic is sent without passing the core",
     "offset\toffset",
     "offset_in_cycle\twhich frame of the paging cycle the occasion falls on",
     "ofm\tofm",
     "ok\tok",
     "ok_responses\tok responses",
     "old_guti\told guti",
+    "one_application_reads_many_devices\tOne application addressed many devices",
+    "one_mode_for_the_whole_stream\tThe stream never changed mode",
     "one_profile_active\tthe card carries one enabled profile at a time, which is why enabling one disables another",
     "one_way_km\tone way (km)",
     "one_way_m\tone way m",
@@ -4985,6 +5021,7 @@ static const char *const plain_keys[] = {
     "payload_file\tpayload file",
     "payload_hex\tpayload bytes",
     "payload_is_waveform\tpayload is waveform",
+    "payload_leaves_the_nas_encryption\tThe payload leaves the cipher at the MME",
     "payload_len\tpayload length",
     "payload_mode\tWhether a payload was read as narrowband or wideband",
     "payload_ms\tpayload (ms)",
@@ -5128,11 +5165,13 @@ static const char *const plain_keys[] = {
     "po_index\tpo index",
     "po_subframe\tpo subframe",
     "points\tpoints",
+    "policy_consistent_with_the_slice\tThe policy agrees with the slice",
     "policy_instance_id\tpolicy instance id",
     "policy_part_hex\tthe UE policy part, which is what the network actually sends",
     "policy_part_len\tthe length field of a UE policy part",
     "policy_part_octets\thow many octets the policy part is",
     "policy_part_type\tthe policy part type: 1 is URSP",
+    "policy_steers_traffic_outside_the_slice\tThe policy sends traffic outside the slice",
     "policy_type_id\tpolicy type id",
     "poly\tpoly",
     "por\tpor",
@@ -5228,6 +5267,7 @@ static const char *const plain_keys[] = {
     "provenance\twhere the anchor frequency came from",
     "proves\tproves",
     "ps\tps",
+    "psap\tThe public safety answering point as a client",
     "psc\tscrambling code",
     "pseudonym\ta temporary name for the same subscriber",
     "pseudonym\tthe identity handed out for the next connection",
@@ -5447,6 +5487,7 @@ static const char *const plain_keys[] = {
     "repeat_paging\trepeat paging",
 	"repeated_autn\tAUTN values that appeared more than once",
     "repeated_public_keys\trepeated public keys",
+    "repeated_requests_are_a_track\tRepeated location answers are a track",
 	"repeated_sucis\tidentical SUCI octets that appeared more than once",
     "repetitions\trepetitions per message at this level",
     "replace_if_present_flag\treplace if present flag",
@@ -5931,6 +5972,7 @@ static const char *const plain_keys[] = {
     "signatures\tsignatures",
     "signed\tsigned",
     "signer\tsigner",
+    "silence_is_activity_metadata\tEven silence carries when speech stopped",
     "silent\tsilent",
     "silent_offdevice\tsilent offdevice",
     "silent_sms\tsilent sms",
@@ -6104,6 +6146,7 @@ static const char *const plain_keys[] = {
     "stealing_flags_per_burst\tstealing flags per burst",
     "steer_meas_id\tsteer meas id",
     "steer_report\tsteer report",
+    "steered_off_3gpp\tTraffic steered onto non-3GPP access",
     "steering_headroom\tsteering headroom",
     "steering_reject\tsteering rejection",
     "steering_rejects\tsteering rejects",
@@ -6216,6 +6259,7 @@ static const char *const plain_keys[] = {
     "t3410\tattach timer",
     "t3412\tattach timer",
     "t3p\tt3p",
+    "t8_credentials_are_the_access_control\tThe API credentials are the entire access control",
     "t_div_n\tt div n",
     "t_id\tt id",
     "t_reselection_eutra\tt reselection eutra",
@@ -6485,6 +6529,7 @@ static const char *const plain_keys[] = {
     "ue_identity_choice\thandset identity choice",
     "ue_identity_hex\thandset identity bytes",
     "ue_int_caps\thandset int caps",
+    "ue_policy_part\tA UE policy part as it arrives in a management message",
     "ue_rx_tx_chips\tthe Rx-Tx time difference the handset reported, in chips",
     "ue_rx_tx_geometry\twhat shape the Rx-Tx difference describes",
     "ue_rx_tx_m\tthat time difference converted to metres, which is not a range",
@@ -6565,6 +6610,8 @@ static const char *const plain_keys[] = {
     "uplink_overshadow_is_low_power\tthe verdict when the required power is handset class, because the competitor is one handset rather than the cell",
     "url\turl",
     "urr_id\turr id",
+    "ursp_parsed\tA slice policy was walked octet by octet",
+    "ursp_rule_built\tA slice policy rule was built and read back",
     "useful_keystream_bits_per_frame\tuseful keystream bits per frame",
     "user_confirm\tuser confirm",
     "user_mode_leaks_the_host\tuser-mode emulation runs the firmware on the host network unless a netdev is given",
@@ -6592,8 +6639,11 @@ static const char *const plain_keys[] = {
     "vectors\tvectors",
     "vectors_per_subscriber\tauthentication proofs held per subscriber",
     "vehicles\thow many distinct ids the capture holds",
+    "velocity\tA velocity answer shape",
     "velocity_answers\tAnswers that carried a speed and a bearing",
+    "velocity_exists_to_be_sampled_again\tA velocity answer is a sample of a track",
     "velocity_mps\tvelocity mps",
+    "velocity_requests_are_a_track\tVelocity requests over time are a track",
     "vendor\tvendor",
     "verb\tcommand",
     "verbs\tcommands",
@@ -6925,6 +6975,7 @@ static const ChipRow chip_rows[] = {
     { "04_tower_map",        "--version",             NEED_NO, DOES_READS },
     { "04_tower_map",        "--yes",                 NEED_NO, DOES_READS },
     { "05_field_kit",        "--__index_probe__",     NEED_NO, DOES_READS },
+    { "05_field_kit",        "--detect-export",       NEED_NO, DOES_READS },
     { "05_field_kit",        "--capability",          NEED_NO, DOES_READS },
     { "05_field_kit",        "--emit",                NEED_NO, DOES_BUILDS },
     { "05_field_kit",        "--guard-check",         NEED_NO, DOES_READS },
@@ -23484,10 +23535,61 @@ fkit_build_guards(AppState *state, const char *module_id,
     return outer;
 }
 
+/* 05_field_kit, the export view: the findings this tree prints, addressed to
+ * another system. The rows are already written by every detector; what was
+ * missing is a form a SIEM can load, with identifiers stable enough that a
+ * re-export updates a rule instead of duplicating it.
+ */
+static GtkWidget *
+fkit_build_export(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("WHAT ANOTHER SYSTEM CAN READ",
+        "Every detector writes finding rows into the store. This turns them into "
+        "a catalogue, Sigma rules with stable ids, ECS events, or CEF lines.", &body);
+    GtkWidget *cat_body, *sig_body;
+    GtkWidget *cat = verb_card("CATALOGUE THE STORE", &cat_body);
+    GtkWidget *sig = verb_card("WRITE THE RULES", &sig_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(cat_body),
+            mod_arg_choices(state, module_id, status, "Read the findings", "",
+                "What is in the store right now: how many distinct findings, "
+                "which modules produced them, and at which severities. A module "
+                "that never printed a finding exports nothing, which is the "
+                "honest answer rather than an empty rule set.",
+                (const char *[]) { "--detect-export loot",
+                                   "--detect-export loot --format ecs",
+                                   "--detect-export loot --format cef" },
+                (const char *[]) { "Catalogue", "ECS events", "CEF lines" }, 3));
+        gtk_box_append(GTK_BOX(cat_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), cat);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(sig_body),
+            mod_arg_row_prefilled(state, module_id, status, "Write Sigma rules",
+                "--detect-export", "loot --format sigma --out rules",
+                "One rule per finding, named imsisting.<module>.<finding>, with "
+                "an id that is a UUIDv5 of that name so a second export updates "
+                "the rule rather than adding another."));
+        gtk_box_append(GTK_BOX(sig_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), sig);
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry fkit_entries[] = {
     { "Overview", "dialog-information-symbolic", NULL, fkit_build_overview },
     { "Emitter",  "media-record-symbolic",       NULL, fkit_build_emitter },
     { "Guards",   "security-high-symbolic",      NULL, fkit_build_guards },
+    { "Export",   "document-send-symbolic",      NULL, fkit_build_export },
 };
 /* 06_gsm_air — the 2G air interface, which is still in the clear.
  *
@@ -32925,6 +33027,7 @@ slic_build_boundary(AppState *state, const char *module_id,
     return outer;
 }
 
+static GtkWidget *
 slic_build_ursp(AppState *state, const char *module_id,
                 GtkWidget *status, GtkTextBuffer *out)
 {
@@ -37510,6 +37613,7 @@ lpp_build_supl(AppState *state, const char *module_id,
     return outer;
 }
 
+static GtkWidget *
 lpp_build_lcs(AppState *state, const char *module_id,
                GtkWidget *status, GtkTextBuffer *out)
 {
