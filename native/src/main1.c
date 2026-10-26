@@ -2969,6 +2969,7 @@ static const char *const plain_keys[] = {
     "card_cryptogram_supplied\tcard cryptogram supplied",
     "card_hex\tcard bytes",
     "card_id\tcard id",
+    "carried_in\tthe message that carries a policy part",
     "carrier\tcarrier",
     "carrier_api\tcarrier api",
     "carrier_components\tcarrier components",
@@ -3376,6 +3377,7 @@ static const char *const plain_keys[] = {
     "decode_only\tdecode only",
     "decode_with\tdecode with",
     "decoded\tdecoded",
+    "decoded_back\twhether the octets were read back to the values they were built from",
     "deconceal\tdeconcealment",
     "decoupled_baseline\tthe published measurement for the variant where the device profile is decoupled, cited rather than measured here",
     "dedicated_info_nas\tdedicated info nas",
@@ -4810,6 +4812,7 @@ static const char *const plain_keys[] = {
     "optional_parameters_decoded\toptional parameters decoded",
     "optional_parameters_hex\toptional parameters bytes",
     "optional_privacy_markers\toptional privacy markers",
+    "oracle\twhether an independent decoder checked the same bytes",
     "oran\tO-RAN",
     "order\torder",
     "ordering\tordering",
@@ -5078,6 +5081,10 @@ static const char *const plain_keys[] = {
     "po_subframe\tpo subframe",
     "points\tpoints",
     "policy_instance_id\tpolicy instance id",
+    "policy_part_hex\tthe UE policy part, which is what the network actually sends",
+    "policy_part_len\tthe length field of a UE policy part",
+    "policy_part_octets\thow many octets the policy part is",
+    "policy_part_type\tthe policy part type: 1 is URSP",
     "policy_type_id\tpolicy type id",
     "poly\tpoly",
     "por\tpor",
@@ -5492,6 +5499,7 @@ static const char *const plain_keys[] = {
     "roundtrip_sd\troundtrip slice detail",
     "roundtrip_sst\troundtrip slice type",
     "roundtrip_us\troundtrip (µs)",
+    "route_selection\tthe route selection components in the rule",
     "router\ta router the target panel can describe",
     "routing_indicator\trouting indicator",
     "routing_on\trouting on",
@@ -5523,6 +5531,10 @@ static const char *const plain_keys[] = {
     "rrc_transaction_identifier\tRRC transaction identifier",
     "rrc_tx_id\tRRC tx id",
     "rrc_type\twhich RRC message the bits are, when the verb builds a message and not a bare IE",
+    "rsd\tone route selection descriptor component",
+    "rsd_octets\thow long the route selection descriptor list is",
+    "rsd_precedence\tthe precedence inside the descriptor, which can differ from the rule's",
+    "rsd_rule\twhich rule and which descriptor a component belongs to",
     "rsrp\tsignal strength (RSRP)",
     "rsrp_dbm\tsignal strength (dBm)",
     "rsrp_discontinuity\ta received-level jump with no handover to explain it, which a physical-layer replacement would produce",
@@ -5540,6 +5552,10 @@ static const char *const plain_keys[] = {
     "rua_ranap\trua ranap",
     "rua_transport\trua transport",
     "rule\trule",
+    "rule_end\twhere the next rule starts",
+    "rule_len_field\tthe length the rule declares for itself",
+    "rule_precedence\tthe precedence value the UE applies a rule in",
+    "rules\thow many URSP rules were found",
     "run\trun",
     "run_at_built\ta RUN AT proactive command was composed and is ready to be handed over",
     "run_with_radio\tthe command line that drives the gNB through a real USRP",
@@ -5675,6 +5691,7 @@ static const char *const plain_keys[] = {
     "scts_year\tscts year",
     "sd\tslice detail",
     "sd_decimal\tslice detail decimal",
+    "sd_emitted\twhich slice differentiator was put on the wire and why",
     "sd_gap_s\tthe standard deviation of those gaps, in seconds",
     "sd_present\tslice detail present",
     "sdcch\tsdcch",
@@ -6191,6 +6208,8 @@ static const char *const plain_keys[] = {
     "tch_h_or_tch_f\ttch h or tch f",
     "tci\ttci",
     "tcp\ttcp",
+    "td\tone traffic descriptor component",
+    "td_octets\thow long the traffic descriptor is",
     "tdma_frame_ms\ttdma frame (ms)",
     "tdma_frames\ttdma frames",
     "tdra\ttdra",
@@ -6295,6 +6314,7 @@ static const char *const plain_keys[] = {
     "tracking_area_code\ttracking area code",
     "tracking_area_code_hex\ttracking area code bytes",
     "traffic\twhich protocol family the config names",
+    "traffic_descriptor\twhat traffic the rule matches",
     "trailing\ttrailing",
     "transaction_id\tthe RRC transaction identifier that ties a request to its response",
     "transaction_identifier\tthe four-bit identifier that ties a request to its response in CC and SM",
@@ -6547,6 +6567,7 @@ static const char *const plain_keys[] = {
     "wakes_for_incoming_call\twakes for incoming call",
     "walk\twalk",
     "walk_count\thow many requests the set holds",
+    "walked\thow much of the input the walker accounted for",
     "wall_days\twall time of a search at the assumed speed, in days",
     "wall_hours\twall time of a search at the assumed speed, in hours",
     "wall_seconds\twall time of a search at the assumed speed, in seconds",
@@ -7771,6 +7792,10 @@ static const ChipRow chip_rows[] = {
     { "34_slicing",          "--status-tsv",          NEED_NO, DOES_READS },
     { "34_slicing",          "--surface",             NEED_NO, DOES_READS },
     { "34_slicing",          "--tsn-config",          NEED_NO, DOES_READS },
+{ "34_slicing",          "--ursp-audit",          NEED_NO, DOES_READS },
+{ "34_slicing",          "--ursp-parse",          NEED_NO, DOES_READS },
+{ "34_slicing",          "--ursp-rule",           NEED_NO, DOES_BUILDS },
+{ "34_slicing",          "--ursp-types",          NEED_NO, DOES_READS },
     { "34_slicing",          "--version",             NEED_NO, DOES_READS },
     { "34_slicing",          "--yes",                 NEED_NO, DOES_READS },
     { "35_baseband",         "--__index_probe__",     NEED_NO, DOES_READS },
@@ -32770,10 +32795,83 @@ slic_build_boundary(AppState *state, const char *module_id,
     return outer;
 }
 
+slic_build_ursp(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("WHAT GETS ASSIGNED",
+        "A slice is only used by a UE that is told which traffic belongs to it. "
+        "That statement is a URSP rule, and its precedence decides what the "
+        "rules behind it ever see.", &body);
+    GtkWidget *build_body, *parse_body, *audit_body, *types_body;
+    GtkWidget *build = verb_card("WRITE A RULE", &build_body);
+    GtkWidget *parse = verb_card("READ A POLICY", &parse_body);
+    GtkWidget *audit = verb_card("AUDIT WHAT IT STEERS", &audit_body);
+    GtkWidget *types = verb_card("THE COMPONENT TYPES", &types_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(build_body),
+            mod_arg_row_prefilled(state, module_id, status, "Build the Rule",
+                "--ursp-rule",
+                "--ursp-rule --domain netflix.com --snssai 2:000002 --dnn internet",
+                "The traffic descriptor (--match-all, --domain, --app-id, "
+                "--dnn-match) and the route (--snssai SST:SD, --dnn, --ssc, --pdu, "
+                "--access, --offload), then --wrap for the UE policy part and "
+                "--oracle to have pycrate decode the same octets."));
+        gtk_box_append(GTK_BOX(build_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), build);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(parse_body),
+            mod_arg_row(state, module_id, status, "Read the Policy",
+                "--ursp-parse", "003C01003A05000D910B...",
+                "One rule, a rule list, or a whole UE policy part. The precedence "
+                "is the number in the rule; the order in the policy is not what "
+                "the UE applies."));
+        gtk_box_append(GTK_BOX(parse_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), parse);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(audit_body),
+            mod_arg_row(state, module_id, status, "Audit the Steering",
+                "--ursp-audit", "0029...",
+                "Which rule catches traffic before a more specific one, which "
+                "descriptor sends it off 3GPP, and which one keeps it out of the "
+                "core entirely."));
+        gtk_box_append(GTK_BOX(audit_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), audit);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(types_body),
+            module_action_button(state, module_id, status, "Read the Types",
+                "--ursp-types",
+                "The component types this module builds, and the ones it refuses "
+                "to walk rather than guess at."));
+        gtk_box_append(GTK_BOX(types_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), types);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry slic_entries[] = {
     { "Slice", "dialog-information-symbolic", NULL, slic_build_identity },
     { "QoS", "preferences-system-symbolic", NULL, slic_build_qos },
     { "Boundary", "network-transmit-receive-symbolic", NULL, slic_build_boundary },
+    { "Assignment", "preferences-other-symbolic", NULL, slic_build_ursp },
 };
 /* 35_baseband — Baseband Fuzzing.
  *

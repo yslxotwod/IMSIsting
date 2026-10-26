@@ -304,7 +304,7 @@ Copy for many.
 | Module | Description |
 |---|---|
 | `09_lte_attach` | NAS EMM/ESM encode-decode, BCD IMSI/IMEI, attach forging, identity-exposure detection, TS 24.008 GMM/SM for the 3G side, and the FlashCatch sequence — a catcher that takes the IMSI without ever causing an outage |
-| `34_slicing` | S-NSSAI codec, slice selection, isolation testing, 5QI and TSN assistance |
+| `34_slicing` | S-NSSAI codec, slice selection, isolation testing, 5QI and TSN assistance, and URSP (TS 24.526) — the policy that actually assigns traffic to a slice: rules built and walked octet by octet, and audited for the three ways a policy quietly undoes a slice (a match-all rule that outranks the specific one, a descriptor that steers traffic off 3GPP, an offload indication that keeps it out of the core) |
 | `36_vowifi` | IKEv2/IPsec SWu, EAP-AKA', ePDG attach, certificate assertions |
 | `37_femtocell` | Small-cell and eNB assessment: CSG/PCI conflicts, the S1 backhaul, Iuh, the ten-item attack surface, certificate posture, and RANAP for the macro Iu-CS side |
 | `38_ussd` | USSD request forge, response decode, SS/MMI command surface |
@@ -456,7 +456,7 @@ the attack runs end to end.
 | RANAP / Iu-CS on the macro side | `37_femtocell` | InitialUE-Message with its NAS payload built through the generated RANAP codec, and the IE ids read from pycrate's own constant table rather than typed in. |
 | Shared RAN leakage | `43_ran_share` | EPLMN and MOCN review: which PLMN list a shared cell may broadcast, `--leak-check` over what a neighbour list gives away about the host network, and PLMN decoding of what the cell actually said. |
 | 5G SUCI capture | `58_suci_catcher` | The pre-authentication identity exchange: cell and AMF slice build, catcher plan, and the SUCI a UE hands over before any key exists. |
-| O-RAN and slicing | `48_oran`, `34_slicing` | A1 policy poisoning, E2 control shapes, the over-broad xApp model, slice isolation testing, 5QI and TSN assistance. |
+| O-RAN and slicing | `48_oran`, `34_slicing` | A1 policy poisoning, E2 control shapes, the over-broad xApp model, slice isolation testing, 5QI and TSN assistance, and the URSP policy itself: a rule set can be self-defeating without anyone attacking it, because a match-all rule at a lower precedence number catches the traffic the specific rules were written for. |
 | Carrier API enumeration and boundary | `44_carrier_api` | A concrete request per operation rendered from the document's own examples, an ordered one-identifier-per-request subscriber sequence with its declared rate limit and stop condition, the four-case authorisation matrix that says which of those requests a correct API must refuse, and the JWT audit (`alg=none`, no expiry, audience) that decides whether the refusal can be bypassed at all. Enumeration stops at the run file; `--execute` runs it only under a lab confirmation word, and a 2xx to a deny row is reported as a finding. |
 | Lawful interception artefacts | `42_li_probe` | The provisioning and activation records as real TS 33.108 HI1 PDUs (liActivated / liDeactivated, BER), and the X3/HI3 product envelope as this module's own framing. Encoded, never delivered. |
 

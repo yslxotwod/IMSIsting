@@ -1489,6 +1489,582 @@ slic_cmd_isolation() {
 }
 
 # ── selftest — no radio, no root, no network ────────────────────────────
+# ── URSP — TS 24.526 §5.2 (the assignment leg of slicing) ───────────────
+# A slice is only useful to a UE that is told which traffic belongs to it. That
+# statement is a URSP rule: a traffic descriptor (what the traffic is), a rule
+# precedence, and a list of route selection descriptors (which S-NSSAI and DNN
+# it should use, on which access). The rules are not negotiated -- the network
+# states them in a UE policy container inside a 5GMM MANAGE UE POLICY COMMAND,
+# and the UE applies them. So this is a policy document, and the interesting
+# questions are about precedence and about what the document steers traffic to.
+#
+# The encoding is the octet layout of TS 24.526 Figure 5.2.1-5.2.4:
+#   rule = Len(2) Precedence(1) LenTrafficDesc(2) <components>
+#          LenRouteSelectDescList(2) <descriptors>
+#   descriptor = Len(2) Precedence(1) LenCont(2) <components>
+#   traffic component  = Type(1) <value, self-delimiting>
+#   route component    = Type(1) <value, self-delimiting>
+# The S-NSSAI value is emitted as 4 octets (SST + SD) and never as SST alone:
+# inside a descriptor there is no length octet in front of it, so the 1-octet
+# form cannot be delimited from the component that follows. The walker accepts
+# the 1-octet form only where the descriptor content ends exactly there.
+
+slic_ursp_td_type_name() {
+    case "${1:-}" in
+        1)   echo "match-all" ;;
+        2)   echo "OS Id" ;;
+        8)   echo "OS Id + OS App Id" ;;
+        16)  echo "IPv4 remote address" ;;
+        17)  echo "IPv4 local address" ;;
+        33)  echo "IPv6 remote address/prefix" ;;
+        35)  echo "IPv6 local address/prefix" ;;
+        48)  echo "protocol identifier / next header" ;;
+        64)  echo "single local port" ;;
+        65)  echo "local port range" ;;
+        80)  echo "single remote port" ;;
+        81)  echo "remote port range" ;;
+        96)  echo "security parameter index" ;;
+        112) echo "type of service / traffic class" ;;
+        128) echo "flow label" ;;
+        129) echo "destination MAC address" ;;
+        130) echo "source MAC address" ;;
+        131) echo "802.1Q C-TAG VID" ;;
+        132) echo "802.1Q S-TAG VID" ;;
+        133) echo "802.1Q C-TAG PCP/DEI" ;;
+        134) echo "802.1Q S-TAG PCP/DEI" ;;
+        135) echo "EtherType" ;;
+        136) echo "DNN" ;;
+        144) echo "connection capabilities" ;;
+        145) echo "destination FQDN" ;;
+        160) echo "OS App Id" ;;
+        *)   echo "unknown" ;;
+    esac
+}
+
+slic_ursp_rsd_type_name() {
+    case "${1:-}" in
+        1)   echo "SSC mode" ;;
+        2)   echo "S-NSSAI" ;;
+        4)   echo "DNN" ;;
+        8)   echo "PDU session type" ;;
+        16)  echo "preferred access type" ;;
+        17)  echo "multi-access preference" ;;
+        32)  echo "non-seamless non-3GPP offload" ;;
+        64)  echo "location criteria" ;;
+        128) echo "time window" ;;
+        *)   echo "unknown" ;;
+    esac
+}
+
+slic_ursp_pdu_name() {
+    case "${1:-}" in
+        1) echo "ipv4" ;;
+        2) echo "ipv6" ;;
+        3) echo "ipv4v6" ;;
+        4) echo "ethernet" ;;
+        5) echo "unstructured" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+slic_ursp_access_name() {
+    case "${1:-}" in
+        1) echo "3gpp" ;;
+        2) echo "non-3gpp" ;;
+        *) echo "unset" ;;
+    esac
+}
+
+# DNN -> APN octets (TS 23.003 §9.1): each label is length-prefixed.
+slic_apn_encode() {
+    local dnn="${1:-}" out="" label
+    [[ -n "$dnn" ]] || { printf 'ERROR\tDNN is empty\n' >&2; return 2; }
+    local IFS='.'
+    local -a labels
+    read -r -a labels <<< "$dnn"
+    ((${#labels[@]} > 0)) || { printf 'ERROR\tDNN "%s" has no labels\n' "$dnn" >&2; return 2; }
+    for label in "${labels[@]}"; do
+        ((${#label} >= 1 && ${#label} <= 63)) || {
+            printf 'ERROR\tDNN label "%s" is %s octets; TS 23.003 allows 1-63\n' \
+                "$label" "${#label}" >&2; return 2; }
+        out+=$(slic_byte "${#label}")
+        out+=$(printf '%s' "$label" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+    done
+    printf '%s' "$out"
+}
+
+slic_apn_decode() {
+    local hex; hex=$(slic_nfc "${1:-}")
+    local off=0 out="" n
+    while ((off * 2 < ${#hex})); do
+        n=$((16#${hex:$((off * 2)):2}))
+        ((n >= 1 && n <= 63)) || {
+            printf 'ERROR\tAPN label length %s is outside 1-63\n' "$n" >&2; return 1; }
+        out+="${out:+$'\x2e'}"
+        out+=$(slic_hex_utf8 "${hex:$(((off + 1) * 2)):$((n * 2))}")
+        off=$((off + 1 + n))
+    done
+    printf '%s' "$out"
+}
+
+slic_hex_utf8() {
+    local hex="${1:-}" out="" i
+    for ((i = 0; i * 2 < ${#hex}; i++)); do
+        out+=$(printf "\\$(printf '%03o' "$((16#${hex:$((i * 2)):2}))")")
+    done
+    printf '%s' "$out"
+}
+
+slic_ursp_td_comp() {
+    local kind="${1:-}" val="${2:-}" hex
+    case "${kind,,}" in
+        match-all|matchall)
+            printf '01' ;;
+        domain|fqdn)
+            [[ -n "$val" ]] || { printf 'ERROR\t--domain needs a hostname\n' >&2; return 2; }
+            hex=$(printf '%s' "$val" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+            printf '91%s%s' "$(slic_byte $((${#hex} / 2)))" "$hex" ;;
+        app-id|appid)
+            [[ -n "$val" ]] || { printf 'ERROR\t--app-id needs an identifier\n' >&2; return 2; }
+            hex=$(printf '%s' "$val" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+            printf 'A0%s%s' "$(slic_byte $((${#hex} / 2)))" "$hex" ;;
+        dnn-match|dnn)
+            local apn
+            apn=$(slic_apn_encode "$val") || return 2
+            printf '88%s%s' "$(slic_byte $((${#apn} / 2)))" "$apn" ;;
+        *)
+            printf 'ERROR\tunknown traffic descriptor kind "%s" (match-all, domain, app-id, dnn-match)\n' \
+                "$kind" >&2
+            return 2 ;;
+    esac
+}
+
+slic_ursp_rsd_comp() {
+    local kind="${1:-}" val="${2:-}" sst sd pdu access
+    case "${kind,,}" in
+        ssc)
+            [[ "$val" =~ ^[1-3]$ ]] || {
+                printf 'ERROR\t--ssc takes 1, 2 or 3 (TS 23.501 5.15.6)\n' >&2; return 2; }
+            printf '01%s' "$(slic_byte "$val")" ;;
+        snssai)
+            sst="${val%%:*}"
+            sd="${val#*:}"
+            [[ "$sd" == "$val" ]] && sd=""
+            local nssai
+            nssai=$(slic_encode_s_nssai "$sst" "$sd") || return 2
+            ((${#nssai} == 8)) || {
+                printf 'ERROR\t--snssai needs SST:SD (4 octets) inside a descriptor; "%s" encoded to %s octets and an S-NSSAI without SD cannot be delimited from the next component\n' \
+                    "$val" "$((${#nssai} / 2))" >&2
+                return 2; }
+            printf '02%s' "$nssai" ;;
+        dnn)
+            local apn
+            apn=$(slic_apn_encode "$val") || return 2
+            printf '04%s%s' "$(slic_byte $((${#apn} / 2)))" "$apn" ;;
+        pdu)
+            case "${val,,}" in
+                ipv4) pdu=1 ;; ipv6) pdu=2 ;; ipv4v6) pdu=3 ;;
+                ethernet) pdu=4 ;; unstructured) pdu=5 ;;
+                *) printf 'ERROR\t--pdu takes ipv4, ipv6, ipv4v6, ethernet or unstructured\n' >&2
+                   return 2 ;;
+            esac
+            printf '08%s' "$(slic_byte "$pdu")" ;;
+        access)
+            case "${val,,}" in
+                3gpp) access=1 ;; non-3gpp|non3gpp) access=2 ;;
+                *) printf 'ERROR\t--access takes 3gpp or non-3gpp\n' >&2; return 2 ;;
+            esac
+            printf '10%s' "$(slic_byte "$access")" ;;
+        multi-access|multiacess|multiaccess)
+            printf '11' ;;
+        offload)
+            printf '20' ;;
+        *)
+            printf 'ERROR\tunknown route selection kind "%s" (snssai, dnn, ssc, pdu, access, multi-access, offload)\n' \
+                "$kind" >&2
+            return 2 ;;
+    esac
+}
+
+# Wrap a rule in a UE policy part: Len(2) spare(4)+Type(4)=1 (URSP) content.
+slic_ursp_wrap() {
+    local rule="${1:-}"
+    # The part length counts the rule list only; the spare/type octet follows it.
+    printf '%04X01%s' $((${#rule} / 2)) "$rule"
+}
+
+slic_ursp_td_component_rows() {
+    local ridx="${1:-0}" hex="${2:-}" off=0 type name len vhex
+    while ((off * 2 < ${#hex})); do
+        type=$((16#${hex:$((off * 2)):2}))
+        name=$(slic_ursp_td_type_name "$type")
+        off=$((off + 1))
+        case "$type" in
+            1)
+                printf 'td\t%s\t%s\t%s\t%s\n' "$ridx" "$(slic_byte "$type")" "$name" "any traffic"
+                ;;
+            136)
+                len=$((16#${hex:$((off * 2)):2}))
+                off=$((off + 1))
+                vhex="${hex:$((off * 2)):$((len * 2))}"
+                printf 'td\t%s\t%s\t%s\t%s\n' "$ridx" "$(slic_byte "$type")" "$name" \
+                    "$(slic_apn_decode "$vhex" 2>/dev/null || printf '%s' "$vhex")"
+                off=$((off + len))
+                ;;
+            2|145|160)
+                len=$((16#${hex:$((off * 2)):2}))
+                off=$((off + 1))
+                vhex="${hex:$((off * 2)):$((len * 2))}"
+                printf 'td\t%s\t%s\t%s\t%s\n' "$ridx" "$(slic_byte "$type")" "$name" \
+                    "$(slic_hex_utf8 "$vhex")"
+                off=$((off + len))
+                ;;
+            *)
+                printf 'td\t%s\t%s\t%s\t%s\n' "$ridx" "$(slic_byte "$type")" "$name" \
+                    "not walked here: this component type has no builder in this module"
+                return 0
+                ;;
+        esac
+    done
+}
+
+slic_ursp_rsd_component_rows() {
+    local ridx="${1:-0}" rds="${2:-0}" hex="${3:-}" off=0 end type name vhex len
+    end=$((${#hex} / 2))
+    while ((off < end)); do
+        type=$((16#${hex:$((off * 2)):2}))
+        name=$(slic_ursp_rsd_type_name "$type")
+        off=$((off + 1))
+        case "$type" in
+            1)
+                printf 'rsd\t%s\t%s\t%s\t%s\t%s\n' "$ridx" "$rds" "$(slic_byte "$type")" "$name" \
+                    "SSC mode $((16#${hex:$((off * 2)):2} & 0x07))"
+                off=$((off + 1))
+                ;;
+            2)
+                if ((end - off >= 4)); then len=4; else len=$((end - off)); fi
+                vhex="${hex:$((off * 2)):$((len * 2))}"
+                printf 'rsd\t%s\t%s\t%s\t%s\t%s\n' "$ridx" "$rds" "$(slic_byte "$type")" "$name" \
+                    "$(slic_decode_s_nssai "$vhex" 2>/dev/null |
+                        awk -F'\t' '$1=="sst"{s=$2} $1=="sst_name"{n=$2} $1=="sd"{d=$2}
+                                    END{if (s=="") printf "sst+sd %s", d; else printf "%s %s sd=%s", s, n, d}')"
+                off=$((off + len))
+                ;;
+            4)
+                len=$((16#${hex:$((off * 2)):2}))
+                off=$((off + 1))
+                vhex="${hex:$((off * 2)):$((len * 2))}"
+                printf 'rsd\t%s\t%s\t%s\t%s\t%s\n' "$ridx" "$rds" "$(slic_byte "$type")" "$name" \
+                    "$(slic_apn_decode "$vhex" 2>/dev/null || printf '%s' "$vhex")"
+                off=$((off + len))
+                ;;
+            8)
+                printf 'rsd\t%s\t%s\t%s\t%s\t%s\n' "$ridx" "$rds" "$(slic_byte "$type")" "$name" \
+                    "$(slic_ursp_pdu_name "$((16#${hex:$((off * 2)):2} & 0x07))")"
+                off=$((off + 1))
+                ;;
+            16)
+                printf 'rsd\t%s\t%s\t%s\t%s\t%s\n' "$ridx" "$rds" "$(slic_byte "$type")" "$name" \
+                    "$(slic_ursp_access_name "$((16#${hex:$((off * 2)):2} & 0x03))")"
+                off=$((off + 1))
+                ;;
+            17)
+                printf 'rsd\t%s\t%s\t%s\t%s\t%s\n' "$ridx" "$rds" "$(slic_byte "$type")" "$name" "preferred"
+                ;;
+            32)
+                printf 'rsd\t%s\t%s\t%s\t%s\t%s\n' "$ridx" "$rds" "$(slic_byte "$type")" "$name" "indicated"
+                ;;
+            *)
+                printf 'rsd\t%s\t%s\t%s\t%s\t%s\n' "$ridx" "$rds" "$(slic_byte "$type")" "$name" \
+                    "not walked here: this component type has no builder in this module"
+                return 0
+                ;;
+        esac
+    done
+}
+
+# Walk a URSP rule, a rule list, or a UE policy part. Prints rules as rows:
+#   rule <n> precedent <p> td_octets <n> rds <n>
+# and one td / rsd row per component.
+slic_ursp_walk() {
+    local hex; hex=$(slic_nfc "${1:-}")
+    slic_is_hex "$hex" || { printf 'ERROR\tURSP needs hex\n' >&2; return 1; }
+    local off=0 total=$((${#hex} / 2)) wrap=no
+    # A UE policy part starts with a 2-octet length that covers the remainder
+    # and a spare/type octet whose low nibble is 1 (URSP).
+    if ((${#hex} >= 8)); then
+        local len2=$((16#${hex:0:4}))
+        local t2=$((16#${hex:4:2} & 0x0F))
+        if ((len2 + 3 == total && t2 == 1)); then
+            printf 'layer\tue_policy_part\n'
+            printf 'policy_part_len\t%s\n' "$len2"
+            printf 'policy_part_type\t%s\n' "$(slic_byte "$t2")"
+            off=3
+            wrap=yes
+        fi
+    fi
+    local idx=0 precedence tdlen tdlist rsdlistlen rdlen rdprec contlen rulelen
+    while ((off + 5 <= total)); do
+        idx=$((idx + 1))
+        rulelen=$((16#${hex:$((off * 2)):4}))
+        precedence=$((16#${hex:$(((off + 2) * 2)):2}))
+        tdlen=$((16#${hex:$(((off + 3) * 2)):4}))
+        off=$((off + 5))
+        printf 'rule\t%s\t%s\n' "$idx" "$precedence"
+        printf 'rule_len_field\t%s\n' "$rulelen"
+        printf 'td_octets\t%s\n' "$tdlen"
+        tdlist="${hex:$((off * 2)):$((tdlen * 2))}"
+        slic_ursp_td_component_rows "$idx" "$tdlist"
+        off=$((off + tdlen))
+        rsdlistlen=$((16#${hex:$((off * 2)):4}))
+        off=$((off + 2))
+        rsdlist="${hex:$((off * 2)):$((rsdlistlen * 2))}"
+        local roff=0 ridx=0
+        while ((roff * 2 < ${#rsdlist})); do
+            ridx=$((ridx + 1))
+            rdlen=$((16#${rsdlist:$((roff * 2)):4}))
+            rdprec=$((16#${rsdlist:$(((roff + 2) * 2)):2}))
+            contlen=$((16#${rsdlist:$(((roff + 3) * 2)):4}))
+            printf 'rsd_rule\t%s\t%s\t%s\n' "$idx" "$ridx" "$rdprec"
+            printf 'rsd_octets\t%s\n' "$rdlen"
+            slic_ursp_rsd_component_rows "$idx" "$ridx" "${rsdlist:$(((roff + 5) * 2)):$((contlen * 2))}"
+            roff=$((roff + 5 + contlen))
+        done
+        off=$((off + rsdlistlen))
+        printf 'rule_end\t%s\n' "$off"
+    done
+    printf 'rules\t%s\n' "$idx"
+    printf 'walked\t%s\t%s\n' "$off" "$total"
+    printf 'wrapped\t%s\n' "$wrap"
+}
+
+slic_cmd_ursp_rule() {
+    local precedence=1 rsd_precedence="" td_hex="" rsd_hex="" wrap=0 oracle=0 out="" snssai="" dnn=""
+    local have_td=0 have_rsd=0
+    while (($# > 0)); do
+        case "$1" in
+            --precedence)     precedence="${2:-1}"; shift 2 ;;
+            --rsd-precedence) rsd_precedence="${2:-}"; shift 2 ;;
+            --match-all)      td_hex+=$(slic_ursp_td_comp match-all "") || return 2
+                              have_td=1; shift ;;
+            --domain)         td_hex+=$(slic_ursp_td_comp domain "${2:-}") || return 2
+                              have_td=1; shift 2 ;;
+            --app-id)         td_hex+=$(slic_ursp_td_comp app-id "${2:-}") || return 2
+                              have_td=1; shift 2 ;;
+            --dnn-match)      td_hex+=$(slic_ursp_td_comp dnn-match "${2:-}") || return 2
+                              have_td=1; shift 2 ;;
+            --snssai)         snssai="${2:-}"; shift 2 ;;
+            --dnn)            dnn="${2:-}"; shift 2 ;;
+            --ssc)            rsd_hex+=$(slic_ursp_rsd_comp ssc "${2:-}") || return 2
+                              have_rsd=1; shift 2 ;;
+            --pdu)            rsd_hex+=$(slic_ursp_rsd_comp pdu "${2:-}") || return 2
+                              have_rsd=1; shift 2 ;;
+            --access)         rsd_hex+=$(slic_ursp_rsd_comp access "${2:-}") || return 2
+                              have_rsd=1; shift 2 ;;
+            --multi-access)   rsd_hex+=$(slic_ursp_rsd_comp multi-access "") || return 2
+                              have_rsd=1; shift ;;
+            --offload)        rsd_hex+=$(slic_ursp_rsd_comp offload "") || return 2
+                              have_rsd=1; shift ;;
+            --wrap)           wrap=1; shift ;;
+            --oracle)         oracle=1; shift ;;
+            --out)            out="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ "$precedence" =~ ^[0-9]+$ ]] && ((precedence <= 255)) || {
+        printf 'ERROR\t--precedence takes 0-255\n' >&2; return 2; }
+    # The route selection components arrive as flags, so they are appended in a
+    # fixed order after the loop: S-NSSAI, DNN, then whatever else was asked
+    # for. Order inside the descriptor is not significant to the encoder; it is
+    # fixed here so the same request always produces the same octets.
+    local ordered=""
+    [[ -n "$snssai" ]] && { ordered+=$(slic_ursp_rsd_comp snssai "$snssai") || return 2; have_rsd=1; }
+    local sd_defaulted=0
+    [[ -n "$snssai" && "$snssai" != *:* ]] && sd_defaulted=1
+    [[ -n "$dnn" ]] && { ordered+=$(slic_ursp_rsd_comp dnn "$dnn") || return 2; have_rsd=1; }
+    rsd_hex="${ordered}${rsd_hex}"
+    ((have_td == 1)) || {
+        printf 'ERROR\ta URSP rule needs a traffic descriptor (--match-all, --domain, --app-id, --dnn-match)\n' >&2
+        return 2; }
+    ((have_rsd == 1)) || {
+        printf 'ERROR\ta URSP rule needs a route selection descriptor (--snssai, --dnn, --ssc, --pdu, --access, --offload)\n' >&2
+        return 2; }
+    local tdlen=$((${#td_hex} / 2)) rsdlen=$((${#rsd_hex} / 2))
+    [[ -n "$rsd_precedence" ]] || rsd_precedence="$precedence"
+    local rsd_cont
+    rsd_cont=$(printf '%04X%02X%04X%s' $((3 + rsdlen)) "$rsd_precedence" "$rsdlen" "$rsd_hex")
+    local rsdlistlen=$((${#rsd_cont} / 2))
+    local rule
+    rule=$(printf '%04X%02X%04X%s%04X%s' \
+        $((5 + tdlen + rsdlistlen)) "$precedence" "$tdlen" "$td_hex" "$rsdlistlen" "$rsd_cont")
+    printf 'spec\tTS 24.526 5.2 (URSP rule, traffic descriptor, route selection descriptor)\n'
+    printf 'rule_precedence\t%s\n' "$precedence"
+    printf 'rsd_precedence\t%s\n' "$rsd_precedence"
+    printf 'hex\t%s\n' "$rule"
+    printf 'octets\t%s\n' "$((${#rule} / 2))"
+    printf 'rule_len_field\t%s\n' $((5 + tdlen + rsdlistlen))
+    printf 'td_octets\t%s\n' "$tdlen"
+    printf 'rsd_octets\t%s\n' "$rsdlistlen"
+    printf 'traffic_descriptor\t%s\n' \
+        "$(slic_ursp_walk "$rule" | awk -F'\t' '$1=="td"{printf "%s%s", (n++?" + ":""), $4}')"
+    printf 'route_selection\t%s\n' \
+        "$(slic_ursp_walk "$rule" | awk -F'\t' '$1=="rsd"{if (!seen[$5]++) printf "%s%s", (n++?" + ":""), $5}')"
+    if ((sd_defaulted == 1)); then
+        printf 'sd_emitted\tffffff\tthe SST-only S-NSSAI has no length octet inside a descriptor, so the 4-octet form with SD=FFFFFF is emitted and it means the slice has no differentiator\n'
+    fi
+    printf 'decoded_back\tyes\n'
+    slic_ursp_walk "$rule" | sed 's/^/back_/'
+    if ((wrap == 1)); then
+        printf 'policy_part_hex\t%s\n' "$(slic_ursp_wrap "$rule")"
+        printf 'policy_part_octets\t%s\n' $(((${#rule} / 2) + 3))
+        printf 'carried_in\t5GMM MANAGE UE POLICY COMMAND, UE policy container\n'
+    fi
+    if ((oracle == 1)); then
+        local py="${IMSI_URSP_ORACLE_PY:-/home/ysl/.lte-oracles/venv/bin/python}"
+        if [[ -x "$py" ]]; then
+            local dec
+            dec=$("$py" - "$(slic_ursp_wrap "$rule")" <<'PYORACLE' 2>&1
+import sys
+from pycrate_mobile.TS24501_UEPOL import UEPolPart
+part = UEPolPart()
+try:
+    part.from_bytes(bytes.fromhex(sys.argv[1]))
+except Exception as exc:
+    print('oracle_decode_ok\tno')
+    print('oracle_error\t%s' % str(exc).replace('\n', ' ')[:120])
+    raise SystemExit(1)
+print('oracle_decode_ok\tyes')
+rules = part[3].get_alt()
+items = getattr(rules, '_content', [])
+print('oracle_rules\t%d' % len(items))
+if items:
+    r = items[0]
+    print('oracle_rule_precedence\t%d' % r[1].get_val())
+    print('oracle_rule_len\t%d' % r[0].get_val())
+    td = getattr(r[3], '_content', [])
+    if td:
+        t = td[0]
+        print('oracle_td_type\t%d' % t[0].get_val())
+        if t[0].get_val() == 145:
+            print('oracle_td_fqdn\t%s' % t[1].get_alt()[1].get_val().decode('ascii', 'replace'))
+print('oracle_note\tpycrate decodes the rule framing and the traffic descriptor; its S-NSSAI decoder reads the mapped-HPLMN fields unconditionally, so a descriptor that carries an S-NSSAI followed by another component is misread from that point on')
+PYORACLE
+)
+            [[ -n "$dec" ]] && printf '%s\n' "$dec"
+        else
+            printf 'oracle\tskipped\t%s is not executable\n' "$py"
+        fi
+    fi
+    printf 'ref\tTS 24.526 5.2, TS 24.501 9.11.2.1B (DNN) and 9.11.2.8 (S-NSSAI)\n'
+    printf 'limit\tthis builds one rule; a real policy part carries a rule list, and the precedence the UE applies is the number in the rule, not the order\n'
+    printf 'verdict\tursp_rule_built\n'
+    if [[ -n "$out" ]]; then
+        printf 'hex\t%s\n' "$rule" > "$out"
+        printf 'written\t%s\n' "$out"
+    fi
+}
+
+slic_cmd_ursp_parse() {
+    local hex="${1:-}"
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --ursp-parse <hex>\n' >&2; return 2; }
+    slic_ursp_walk "$hex" || return 1
+    printf 'ref\tTS 24.526 5.2; the S-NSSAI inside a descriptor is read as 4 octets because the 1-octet form cannot be delimited there\n'
+    printf 'verdict\tursp_parsed\n'
+}
+
+slic_cmd_ursp_audit() {
+    local hex="${1:-}"
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --ursp-audit <hex>\n' >&2; return 2; }
+    local walk; walk=$(slic_ursp_walk "$hex") || return 1
+    local rules; rules=$(printf '%s\n' "$walk" | awk -F'\t' '$1=="rules"{print $2}')
+    printf 'rules\t%s\n' "${rules:-0}"
+    ((${rules:-0} > 0)) || { printf 'ERROR\tno URSP rule decoded\n' >&2; return 1; }
+    # precedence of every rule and whether its descriptor is match-all
+    local map; map=$(printf '%s\n' "$walk" | awk -F'\t' '
+        $1=="rule"{prec[$2]=$3; td[$2]=""}
+        $1=="td"{td[$2]=td[$2] (td[$2]==""?"":"+") $4}
+        $1=="rsd"{key=$2; comp[key]=comp[key] (comp[key]==""?"":"+") $5 "=" $6}
+        END{ for (k in prec) printf "rule\t%s\t%s\t%s\t%s\n", k, prec[k], td[k], comp[k] }')
+    local findings=0
+    # match-all rule that outranks (lower number) a rule with a real descriptor
+    shadow=$(printf '%s\n' "$map" | awk -F'\t' '
+        $4=="match-all"{ma=$3}
+        END{ if (ma != "") print ma }')
+    if [[ -n "$shadow" ]]; then
+        local outranked
+        outranked=$(printf '%s\n' "$map" | awk -F'\t' -v ma="$shadow" '$4!="match-all" && $3>ma' | wc -l)
+        if ((outranked > 0)); then
+            printf 'finding\tmatch_all_shadows_targeted\tHIGH\ta match-all rule at precedence %s is applied before %s rule(s) with a specific descriptor, so their traffic never reaches them\n' \
+                "$shadow" "$outranked"
+            findings=$((findings + 1))
+        else
+            printf 'note\tmatch_all_at_precedence\t%s\tthis rule catches everything that no earlier rule matched, which is the intended use\n' "$shadow"
+        fi
+    fi
+    # descriptors that steer traffic somewhere other than the 3GPP slice
+    local off3gpp
+    off3gpp=$(printf '%s\n' "$map" | awk -F'\t' '$5 ~ /non-3gpp/{print $2}')
+    if [[ -n "$off3gpp" ]]; then
+        printf 'finding\tsteered_off_3gpp\tHIGH\trule(s) %s prefer non-3GPP access: the traffic is handed to a network the operator does not carry\n' \
+            "$(printf '%s' "$off3gpp" | tr '\n' ' ')"
+        findings=$((findings + 1))
+    fi
+    local offload
+    offload=$(printf '%s\n' "$map" | awk -F'\t' '$5 ~ /offload/{print $2}')
+    if [[ -n "$offload" ]]; then
+        printf 'finding\toffload_bypasses_the_core\tHIGH\trule(s) %s carry the non-seamless offload indication: that traffic never enters the 5G core, so no slice applies to it and no core-side policy can see it\n' \
+            "$(printf '%s' "$offload" | tr '\n' ' ')"
+        findings=$((findings + 1))
+    fi
+    local noslice
+    noslice=$(printf '%s\n' "$map" | awk -F'\t' '($5 !~ /S-NSSAI/){print $2}')
+    if [[ -n "$noslice" ]]; then
+        printf 'finding\tdescriptor_without_snssai\tMEDIUM\trule(s) %s select a route with no S-NSSAI, so the matching traffic stays on the default session and the slice the rule was written for is never used\n' \
+            "$(printf '%s' "$noslice" | tr '\n' ' ')"
+        findings=$((findings + 1))
+    fi
+    local dup
+    dup=$(printf '%s\n' "$map" | awk -F'\t' '{c[$3]++} END{for (p in c) if (c[p] > 1) print p}' | sort -n | tr '\n' ' ')
+    if [[ -n "$dup" ]]; then
+        printf 'finding\tduplicate_precedence\tMEDIUM\tprecedence value(s) %s are used by more than one rule; the UE resolution order for equal precedence is not defined by the policy\n' \
+            "$dup"
+        findings=$((findings + 1))
+    fi
+    printf 'findings\t%s\n' "$findings"
+    printf 'ref\tTS 24.526 5.2 and 5.4 (the UE applies the rule with the lowest precedence value first)\n'
+    printf 'limit\tthe audit reads the policy the network wrote; it cannot tell whether a rule is malicious, only whether it steers traffic somewhere the slice does not cover\n'
+    if ((findings > 0)); then
+        printf 'verdict\tpolicy_steers_traffic_outside_the_slice\n'
+    else
+        printf 'verdict\tpolicy_consistent_with_the_slice\n'
+    fi
+}
+
+slic_ursp_types() {
+    cat <<'EOF'
+layer	kind	value	name	note
+component	traffic_descriptor	1	match-all	no value
+component	traffic_descriptor	8	OS Id + OS App Id	length-prefixed
+component	traffic_descriptor	136	DNN	length-prefixed APN
+component	traffic_descriptor	144	connection capabilities	one octet
+component	traffic_descriptor	145	destination FQDN	length-prefixed
+component	traffic_descriptor	160	OS App Id	length-prefixed
+component	route_selection	1	SSC mode	one octet, 3 bits used
+component	route_selection	2	S-NSSAI	SST + SD, 4 octets here
+component	route_selection	4	DNN	length-prefixed APN
+component	route_selection	8	PDU session type	one octet, 3 bits used
+component	route_selection	16	preferred access type	one octet, 2 bits used
+component	route_selection	17	multi-access preference	no value
+component	route_selection	32	non-seamless non-3GPP offload	no value
+component	route_selection	64	location criteria	not built here
+component	route_selection	128	time window	not built here
+source		ts	24.526	Table 5.2.1 and Figures 5.2.1-5.2.4	
+source		ts	24.501	9.11.2.1B DNN, 9.11.2.8 S-NSSAI	
+EOF
+}
+
+slic_cmd_ursp_types() { slic_ursp_types; }
+
 slic_selftest() {
     local bad=0
     chk() {
@@ -1945,6 +2521,88 @@ CONF
     chk val-detect-none  "$(slic_cmd_detect >/dev/null 2>&1; echo $?)" "2"
     chk val-detect-nofile "$(slic_cmd_detect /nonexistent.tsv >/dev/null 2>&1; echo $?)" "1"
 
+    # ── 12. URSP — TS 24.526 5.2 ────────────────────────────────────────
+    # The hex expectations are the octet layout of Figures 5.2.1-5.2.4, and
+    # pycrate TS24526_UEPOL is asked to decode the same bytes when it is
+    # installed: an independent implementation agreeing on the framing and the
+    # traffic descriptor is worth more than the same author twice.
+    out=$(slic_cmd_ursp_rule --match-all --snssai 1:000001 --dnn internet)
+    chk ursp-matchall-hex  "$(fld "$out" hex)" "001B01000101001500130100100201000001040908696E7465726E6574"
+    chk ursp-matchall-td   "$(fld "$out" traffic_descriptor)" "match-all"
+    chk ursp-matchall-rsd  "$(fld "$out" route_selection)" "S-NSSAI + DNN"
+    chk ursp-matchall-len  "$(fld "$out" rule_len_field)" "27"
+    chk ursp-matchall-rt   "$(printf '%s\n' "$out" | grep -c '^back_rsd	1	1	04	DNN	internet$')" "1"
+    chk ursp-matchall-nssai "$(printf '%s\n' "$out" | awk -F'\t' '$1=="back_rsd" && $5=="S-NSSAI"{print $6}' | grep -c 'sd=000001')" "1"
+
+    out=$(slic_cmd_ursp_rule --app-id com.example.app --ssc 1 --pdu ipv4 --access 3gpp --precedence 7)
+    chk ursp-appid-hex     "$(fld "$out" hex)" "0021070011A00F636F6D2E6578616D706C652E617070000B0009070006010108011001"
+    chk ursp-appid-preced  "$(fld "$out" rule_precedence)" "7"
+    chk ursp-appid-ssc     "$(printf '%s\n' "$out" | grep -c 'back_rsd	1	1	01	SSC mode	SSC mode 1')" "1"
+    chk ursp-appid-pdu     "$(printf '%s\n' "$out" | grep -c 'back_rsd	1	1	08	PDU session type	ipv4')" "1"
+    chk ursp-appid-access  "$(printf '%s\n' "$out" | grep -c 'back_rsd	1	1	10	preferred access type	3gpp')" "1"
+
+    # A DNN with several labels is a length-prefixed APN (TS 23.003 9.1).
+    out=$(slic_cmd_ursp_rule --dnn-match internet.mnc001.mcc001.gprs --snssai 3:000003)
+    chk ursp-apn-hex       "$(fld "$out" hex)" "002D01001E881C08696E7465726E6574066D6E63303031066D63633030310467707273000A00080100050203000003"
+    chk ursp-apn-decoded   "$(printf '%s\n' "$out" | grep -c 'back_td	1	88	DNN	internet.mnc001.mcc001.gprs')" "1"
+
+    # The SST-only S-NSSAI is emitted as 4 octets with SD=FFFFFF and says so.
+    out=$(slic_cmd_ursp_rule --match-all --snssai 2)
+    chk ursp-sd-defaulted  "$(fld "$out" sd_emitted)" "ffffff"
+    chk ursp-sd-hex        "$(fld "$out" hex)" "001001000101000A00080100050202FFFFFF"
+
+    # The UE policy part length counts the rule list, not the type octet.
+    out=$(slic_cmd_ursp_rule --domain netflix.com --snssai 2:000002 --precedence 5 --wrap)
+    chk ursp-wrap-len      "$(fld "$out" policy_part_hex | cut -c1-4)" "001E"
+    chk ursp-wrap-octets   "$(fld "$out" policy_part_octets)" "33"
+    chk ursp-wrap-type     "$(fld "$out" policy_part_hex | cut -c5-6)" "01"
+    chk ursp-wrap-carried  "$(fld "$out" carried_in)" "5GMM MANAGE UE POLICY COMMAND, UE policy container"
+
+    # The walker reads the wrapped part back to the same rule.
+    out=$(slic_cmd_ursp_parse "$(fld "$(slic_cmd_ursp_rule --domain netflix.com --snssai 2:000002 --precedence 5 --wrap)" policy_part_hex)")
+    chk ursp-parse-layer   "$(fld "$out" layer)" "ue_policy_part"
+    chk ursp-parse-rules   "$(fld "$out" rules)" "1"
+    chk ursp-parse-fqdn    "$(printf '%s\n' "$out" | grep -c '^td	1	91	destination FQDN	netflix.com')" "1"
+
+    # Oracle: an independent decoder agrees on framing, precedence, FQDN.
+    local py="${IMSI_URSP_ORACLE_PY:-/home/ysl/.lte-oracles/venv/bin/python}"
+    if [[ -x "$py" ]]; then
+        out=$(slic_cmd_ursp_rule --domain netflix.com --snssai 2:000002 --precedence 5 --wrap --oracle)
+        chk ursp-oracle-ok    "$(fld "$out" oracle_decode_ok)" "yes"
+        chk ursp-oracle-rules "$(fld "$out" oracle_rules)" "1"
+        chk ursp-oracle-preced "$(fld "$out" oracle_rule_precedence)" "5"
+        chk ursp-oracle-fqdn  "$(fld "$out" oracle_td_fqdn)" "netflix.com"
+        chk ursp-oracle-same-len "$(fld "$out" oracle_rule_len)" "$(fld "$out" rule_len_field)"
+    else
+        printf 'ursp-oracle	SKIP	%s is not executable\n' "$py"
+    fi
+
+    # Audit: a match-all rule at a lower precedence number shadows the rules
+    # behind it, a descriptor can steer traffic off 3GPP, and offload bypasses
+    # the core entirely.
+    local r1 r2 r3
+    r1=$(fld "$(slic_cmd_ursp_rule --match-all --snssai 1:000001 --precedence 1)" hex)
+    r2=$(fld "$(slic_cmd_ursp_rule --domain bank.example --snssai 2:000002 --access non-3gpp --precedence 40)" hex)
+    r3=$(fld "$(slic_cmd_ursp_rule --app-id com.example.app --snssai 1:000001 --access 3gpp --offload --precedence 10)" hex)
+    out=$(slic_cmd_ursp_audit "${r1}${r2}")
+    chk ursp-audit-rules   "$(fld "$out" rules)" "2"
+    chk ursp-audit-shadow  "$(printf '%s\n' "$out" | grep -c '^finding	match_all_shadows_targeted	HIGH')" "1"
+    chk ursp-audit-off3gpp "$(printf '%s\n' "$out" | grep -c '^finding	steered_off_3gpp	HIGH')" "1"
+    chk ursp-audit-verdict "$(fld "$out" verdict)" "policy_steers_traffic_outside_the_slice"
+    out=$(slic_cmd_ursp_audit "$r3")
+    chk ursp-audit-offload "$(printf '%s\n' "$out" | grep -c '^finding	offload_bypasses_the_core	HIGH')" "1"
+    out=$(slic_cmd_ursp_audit "$(fld "$(slic_cmd_ursp_rule --match-all --snssai 1:000001 --access 3gpp)" hex)")
+    chk ursp-audit-clean   "$(fld "$out" findings)" "0"
+    chk ursp-audit-clean-verdict "$(fld "$out" verdict)" "policy_consistent_with_the_slice"
+
+    chk ursp-types-rows    "$(slic_cmd_ursp_types | grep -c '^component')" "15"
+    chk ursp-no-td-rc      "$(slic_cmd_ursp_rule --snssai 1:000001 >/dev/null 2>&1; echo $?)" "2"
+    chk ursp-no-rsd-rc     "$(slic_cmd_ursp_rule --match-all >/dev/null 2>&1; echo $?)" "2"
+    chk ursp-bad-kind-rc   "$(slic_cmd_ursp_rule --bogus >/dev/null 2>&1; echo $?)" "2"
+    chk ursp-parse-none    "$(slic_cmd_ursp_parse >/dev/null 2>&1; echo $?)" "2"
+    chk ursp-audit-none    "$(slic_cmd_ursp_audit >/dev/null 2>&1; echo $?)" "2"
+    chk ursp-apn-bad-rc    "$(slic_apn_encode 'a..b' >/dev/null 2>&1; echo $?)" "2"
+
     rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
@@ -2058,6 +2716,10 @@ slic_cli_main() {
         --five-qi-table)     slic_cmd_five_qi_table "${1:-}" ;;
         --tsn-config)        slic_cmd_tsn_config "${1:-}" ;;
         --slice-qos-check)   slic_cmd_slice_qos_check "${1:-}" ;;
+        --ursp-rule)         slic_cmd_ursp_rule "$@" ;;
+        --ursp-parse)        slic_cmd_ursp_parse "${1:-}" ;;
+        --ursp-audit)        slic_cmd_ursp_audit "${1:-}" ;;
+        --ursp-types)        slic_cmd_ursp_types ;;
         --surface)           slic_surface_notes ;;
         --plan)              slic_cmd_plan "${1:-}" ;;
         --selftest)          slic_selftest ;;
@@ -2094,6 +2756,15 @@ Usage: $0 COMMAND
   --slice-qos-check <tsv>             flag a slice whose 5QI resource type
                                       contradicts its S-NSSAI SST; each
                                       finding carries the rule it broke
+  --ursp-rule --match-all|--domain F |--app-id ID|--dnn-match DNN
+                                      one URSP rule: traffic descriptor flags
+                                      plus --snssai SST:SD, --dnn, --ssc, --pdu,
+                                      --access, --multi-access, --offload,
+                                      --precedence and --wrap for the policy part
+  --ursp-parse <hex>                  walk a URSP rule, rule list or UE policy part
+  --ursp-audit <hex>                  what the policy steers traffic to, and what
+                                      it steers it out of
+  --ursp-types                        the component types this module builds
   --surface                           the vulnerability classes
   --plan slice-escape-lab             write the handed-off lab plan
   --selftest                          verify the codec and rules
