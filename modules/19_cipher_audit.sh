@@ -55,6 +55,13 @@ CAUD_PCAP_MOD="${CAUD_PCAP_MOD:-$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # The authentication half of this module is a calculator, not a table, and
 # it lives in tools/ so other modules can ask it the same questions.
 # Missing is a stated error, never a silently empty table.
+# The 128-EEA*/128-EIA* primitives are shared with other modules, so they live in
+# tools/gsm_crypto.py next to the Milenage ones rather than being reimplemented
+# here. Missing is a stated error, never a silently empty output.
+if [[ -z "${CAUD_CRYPTO:-}" ]]; then
+    CAUD_CRYPTO="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/gsm_crypto.py"
+fi
+
 if [[ -z "${CAUD_AUTH_ORACLE:-}" ]]; then
     CAUD_AUTH_ORACLE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/nas_auth_oracle.py"
 fi
@@ -880,6 +887,93 @@ caud_cli_status_tsv() {
     printf 'dir\t%s\n'         "$CAUD_DIR"
 }
 
+# ── message protection ──────────────────────────────────────────────────
+# The tables above say which algorithm a network negotiated; this verb is the
+# other half of the same question, applying an algorithm to a message so a
+# forged or replayed PDU can be built the way the spec defines it. The
+# primitives are TS 35.201/35.221/33.401, not an approximation of them.
+caud_protect_usage() {
+    cat >&2 <<'EOF'
+usage: --protect <eea0|eea1|eea2|eea3|eia1|eia2|eia3> <key-hex> <count>
+                 <bearer 0..31> <direction 0|1> <message-hex> [bit-length]
+  eea*  cipher the message, key is CK (32 hex digits)
+  eia*  compute the 32-bit MAC, key is IK (32 hex digits) and the result is MAC
+  count is 32 bits, decimal or 0x-prefixed hex
+  bit-length defaults to every bit of the message
+EOF
+}
+
+caud_cmd_protect() {
+    local algo="${1:-}" key="${2:-}" count="${3:-}" bearer="${4:-}"
+    local dir="${5:-}" msg="${6:-}" bits="${7:-}"
+    case "$algo" in
+        eea0|eea1|eea2|eea3|eia1|eia2|eia3) ;;
+        *) caud_protect_usage; return 2 ;;
+    esac
+    if [[ -z "$key" || -z "$count" || -z "$msg" || -z "$bearer" || -z "$dir" ]]; then
+        caud_protect_usage; return 2
+    fi
+    if ! [[ "$bearer" =~ ^[0-9]+$ ]] || ((bearer > 31)); then
+        printf 'ERROR\t--protect bearer is 5 bits, 0..31\n' >&2; return 2
+    fi
+    if [[ "$dir" != "0" && "$dir" != "1" ]]; then
+        printf 'ERROR\t--protect direction is 0 (uplink) or 1 (downlink)\n' >&2; return 2
+    fi
+    if ! [[ "$msg" =~ ^[0-9a-fA-F]+$ ]] || (( ${#msg} % 2 != 0 )); then
+        printf 'ERROR\t--protect message must be whole bytes of hex\n' >&2; return 2
+    fi
+    if [[ -n "$bits" ]] && { ! [[ "$bits" =~ ^[0-9]+$ ]] || (( bits > ${#msg} * 4 )); }; then
+        printf 'ERROR\t--protect bit length exceeds the %d bits given\n' \
+               "$(( ${#msg} * 4 ))" >&2; return 2
+    fi
+    if [[ ! -f "$CAUD_CRYPTO" ]]; then
+        printf 'ERROR\tcrypto helper missing: %s\n' "$CAUD_CRYPTO" >&2; return 1
+    fi
+
+    local -a args=(--bearer "$bearer" --direction "$dir"
+                   --count "$count" --message "$msg")
+    [[ -n "$bits" ]] && args+=(--bit-length "$bits")
+    if [[ "$algo" == eea* ]]; then
+        args+=(--eea "${algo#eea}" --ck "$key")
+    else
+        args+=(--eia "${algo#eia}" --ik "$key")
+    fi
+
+    local out rc=0
+    out="$(python3 "$CAUD_CRYPTO" "${args[@]}" 2>&1)" || rc=$?
+    if (( rc != 0 )); then
+        printf '%s\n' "$out" >&2
+        printf 'ERROR\t--protect refused: %s\n' "$algo" >&2
+        return 1
+    fi
+    printf '%s\n' "$out"
+    local result
+    result="$(printf '%s\n' "$out" | awk -F'\t' '
+        $1=="keystream_output" { print $2; exit }
+        $1=="mac"              { print $2; exit }')"
+    local blen
+    blen="$(printf '%s\n' "$out" | awk -F'\t' '$1=="bit_length" { print $2; exit }')"
+
+    local store="$CAUD_DIR/protected.tsv"
+    if [[ ! -f "$store" ]]; then
+        printf 'algo\tkey_present\tcount\tbearer\tdirection\tbit_length\tinput\tresult\tutc\n' \
+            > "$store" 2>/dev/null
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$algo" yes "$count" "$bearer" "$dir" "${blen:-}" "$msg" "${result:-}" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$store" 2>/dev/null
+    printf 'store\t%s\n' "$store"
+    if [[ "$algo" == eia* ]]; then
+        printf 'effect\t%s MAC over %s bits; a forged PDU carrying this MAC is\n' \
+               "$algo" "${blen:-?}"
+        printf 'verdict\tindistinguishable from one the network produced\n'
+    else
+        printf 'effect\t%s ciphering of %s bits\n' "$algo" "${blen:-?}"
+        printf 'verdict\tplaintext is recoverable by any receiver holding the same CK\n'
+    fi
+    return 0
+}
+
 # ── selftest — no capture, no radio, no root, no network ────────────────
 caud_selftest() {
     local bad=0
@@ -1387,6 +1481,28 @@ caud_selftest() {
         "$(caud_cmd_sqn_recover 465b5ce8b199b49faa5f0a2ee238a6bc op \
             cdc202d5123e20f62b6d676ac72cb318 \
             23553cbe9637a89d218ae64dae47bf35 aabb >/dev/null 2>&1; echo $?)" "1"
+    # 128-EIA3 and 128-EEA2 against their published test vectors, driven
+    # through the CLI verb rather than the helper directly.
+    out=$(caud_cmd_protect eia3 c9e6cec4607c72db000aefa88385ab0a 0xa94059da \
+          10 1 983b41d47d780c9e1ad11d7eb70391b1de0b35da2dc62f83e7b78d6306ca0ea0\
+7e941b7be91348f9fcb170e2217fecd97f9f68adb16e5d7d21e569d280ed775cebde3f4093\
+c5388100000000 577 2>/dev/null)
+    chk protect-eia3-set1 \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="mac"{print $2}')" "FAE8FF0B"
+    out=$(caud_cmd_protect eea2 d3c5d592327fb11c4035c6680af8c6d1 0x398a59b4 \
+          21 1 981ba6824c1bfb1ab485472029b71d808ce33e2cc3c0b5fc1f3de8a6dc66b1f0 \
+          253 2>/dev/null)
+    chk protect-eea2-set1 \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="keystream_output"{print $2}')" \
+        "E9FED8A63D155304D71DF20BF3E82214B20ED7DAD2F233DC3C22D7BDEEED8E78"
+    chk protect-null \
+        "$(caud_cmd_protect eea0 00000000000000000000000000000000 0 0 0 aabb \
+          2>/dev/null | awk -F'\t' '$1=="output"{print $2}')" "AABB"
+    chk protect-bad-algo \
+        "$(caud_cmd_protect eea9 00 0 0 0 aa >/dev/null 2>&1; echo $?)" "2"
+    chk protect-bad-bearer \
+        "$(caud_cmd_protect eia1 00 0 32 0 aa >/dev/null 2>&1; echo $?)" "2"
+    chk protect-usage "$(caud_cmd_protect >/dev/null 2>&1; echo $?)" "2"
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1461,6 +1577,8 @@ caud_cli_main() {
         --downgrade-check) caud_cmd_downgrade_check ;;
         --session)         caud_cmd_session "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
         --sessions-load)   caud_cmd_sessions_load "${1:-}" ;;
+        --protect)         caud_cmd_protect "${1:-}" "${2:-}" "${3:-}" "${4:-}" \
+                                              "${5:-}" "${6:-}" "${7:-}" ;;
         --from-pcap)       caud_cmd_from_pcap "${1:-}" "${2:-1}" ;;
         --clear)           caud_cmd_clear ;;
         --auth-causes)     caud_cmd_auth_causes "${1:-eps}" ;;
@@ -1484,6 +1602,9 @@ Usage: $0 COMMAND
                                    record a session, optionally with the
                                    UE's advertised capabilities
   --sessions-load <tsv>            load sessions from a TSV
+  --protect <algo> <key> <count> <bearer> <dir> <msg-hex> [bits]
+                                   apply 128-EEA*/128-EIA* to a message and
+                                   store the result
   --from-pcap <pcap> [frame]       pull an SMC out of a capture (module 17)
   --clear                          empty the session store
   --auth-causes [eps|5gs]          authentication causes, and what each one

@@ -7550,6 +7550,7 @@ static const ChipRow chip_rows[] = {
     { "19_cipher_audit",     "--info",                NEED_NO, DOES_READS },
     { "19_cipher_audit",     "--menu",                NEED_NO, DOES_READS },
     { "19_cipher_audit",     "--parse-smc",           NEED_CAP, DOES_READS },
+    { "19_cipher_audit",     "--protect",             NEED_CAP, DOES_BUILDS },
     { "19_cipher_audit",     "--quiet",               NEED_NO, DOES_READS },
     { "19_cipher_audit",     "--score",               NEED_CAP, DOES_READS },
     { "19_cipher_audit",     "--selftest",            NEED_NO, DOES_READS },

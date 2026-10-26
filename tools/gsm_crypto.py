@@ -975,6 +975,379 @@ def _cli_hxres(a) -> int:
     return 0
 
 
+# ============================================================ 128-EEA/EIA
+#
+# EEA0/EIA0 (null) need no code. EEA1/EIA1 are SNOW 3G (TS 35.201/35.202),
+# EEA2/EIA2 are AES (TS 33.401 annex B), EEA3/EIA3 are ZUC (TS 35.221).
+# Every suite below is checked by --selftest against its published vectors;
+# none of them is derived from another suite here.
+
+_ZUC_S0 = bytes.fromhex(
+    "3e725b47cae0003304d1549809b96dcb7b1bf932af9d6aa5b82dfc1d08530390"
+    "4d4e8499e4ced991ddb685488b296eaccdc1f81e734369c6b5bdfd396320d438"
+    "767db2a7cfed57c5f32cbb142106559be3ef5e314f7f5aa40d8251495fba581c"
+    "4a16d517a892241f8cffd8ae2e01d3ad3b4bda46ebc9de9a8f87d73a806f2fc8"
+    "b1b437f70a2213287ccc3c89c7c3965607bf7ef00b2b975235417961a64c10fe"
+    "bc2695888ab0a3fbc01894f2e1e5e95dd0dc1166645cec59427512f5749caa23"
+    "0e86abbe2a02e767e644a26cc2939ff1f6fa36d250689e6271153dd640c4e20f"
+    "8e83776b25053f0c30ea70b7a1e8a9658d271adb81b3a0f4457a19dfee783460")
+
+_ZUC_S1 = bytes.fromhex(
+    "55c263713bc847869f3cda5b29aafd778cc5940ca61a1300e3a8167240f9f842"
+    "4426689681d9453e1076c6a78b3943e13ab5562ac06db3052266bfdc0bfa6248"
+    "dd20110636c9c1cff62752bb69f5d4877f844cd29c57a4bc4f9adffed68d7aeb"
+    "2b53d85ca11417fb23d57d3067730809eeb7703f61b2198e4ee54b938f5ddba9"
+    "adf1ae2ecb0dfcf42d466e1d97e8d1e94d37a5755e839eab829db91ce0cd4989"
+    "01b6bd5824a25f387899159050b895e4d091c7ceed0fb46fa0ccf0024a79c3de"
+    "a3efea51e66b18ec1b2c80f774e7ff215a6a541e41319235c433070aba7e0e34"
+    "88b1987cf33d606c7bcad31f3265042864be859b2f598ad7b025acaf1203e2f2")
+
+_SNOW_SQ = bytes.fromhex(
+    "25247367d7ae5c30a4ee6ecb7db582dbe48e48494f5d6a787088e85f5e8465e2"
+    "d8e9cced402f112857d2ace34a151bb9b28085a62e024729074b0ec151aa89d4"
+    "ca0146b3efdd447bc27fbec39f204c6483a2684213b441cdbac6bb6d4d7121f4"
+    "8db0e593fe8fe6cf43453122373696fabc0f08521d551ac54e23697a92ff5b5a"
+    "eb9a1ca9d17e0dfc508ab662f50af8dc033c0c39f1b8f33df2d597668132a000"
+    "06cef6eab717f78c79d6a7bf8b3f1f536375352c60fd27d394a57ca105582dbd"
+    "d9c7af6b540be03804c89de714b1879cdf6ff9da2ac459167491ab266176342b"
+    "ad99fb72ec3312de983bc09b3e18103a56e177c91e9e95a39019a86c09d0f086")
+
+_M32 = 0xFFFFFFFF
+_ZUC_M31 = 0x7FFFFFFF
+_ZUC_KD = (0x44D7, 0x26BC, 0x626B, 0x135E, 0x5789, 0x35E2, 0x7135, 0x09AF,
+           0x4D78, 0x2F13, 0x6BC4, 0x1AF1, 0x5E26, 0x3C4D, 0x789A, 0x47AC)
+
+
+# ------------------------------------------------------------- SNOW 3G
+def _mulx(v, c):
+    return (((v << 1) & 0xFF) ^ c) if (v & 0x80) else ((v << 1) & 0xFF)
+
+
+def _mulxpow(v, i, c):
+    for _ in range(i):
+        v = _mulx(v, c)
+    return v
+
+
+_MULA = tuple((_mulxpow(c, 23, 0xA9) << 24) | (_mulxpow(c, 245, 0xA9) << 16)
+              | (_mulxpow(c, 48, 0xA9) << 8) | _mulxpow(c, 239, 0xA9) for c in range(256))
+_DIVA = tuple((_mulxpow(c, 16, 0xA9) << 24) | (_mulxpow(c, 39, 0xA9) << 16)
+              | (_mulxpow(c, 6, 0xA9) << 8) | _mulxpow(c, 64, 0xA9) for c in range(256))
+
+
+def _snow_sbox(w, box, cte):
+    """S1 (box = AES S-box, cte = 0x1B) and S2 (box = SQ, cte = 0x69)."""
+    s0 = box[(w >> 24) & 0xFF]
+    s1 = box[(w >> 16) & 0xFF]
+    s2 = box[(w >> 8) & 0xFF]
+    s3 = box[w & 0xFF]
+    return (((_mulx(s0, cte) ^ s1 ^ s2 ^ _mulx(s3, cte) ^ s3) & 0xFF) << 24
+            | ((_mulx(s0, cte) ^ s0 ^ _mulx(s1, cte) ^ s2 ^ s3) & 0xFF) << 16
+            | ((s0 ^ _mulx(s1, cte) ^ s1 ^ _mulx(s2, cte) ^ s3) & 0xFF) << 8
+            | ((s0 ^ s1 ^ _mulx(s2, cte) ^ s2 ^ _mulx(s3, cte)) & 0xFF))
+
+
+class Snow3G:
+    """SNOW 3G LFSR + FSM keystream generator (TS 35.201 section 4)."""
+
+    __slots__ = ("s", "r")
+
+    def __init__(self, key, iv):
+        k0, k1, k2, k3 = key
+        i0, i1, i2, i3 = iv
+        n0, n1, n2, n3 = (~k0) & _M32, (~k1) & _M32, (~k2) & _M32, (~k3) & _M32
+        self.s = [n0, n1, n2, n3, k0, k1, k2, k3,
+                  n0, n1 ^ i3, n2 ^ i2, n3, k0 ^ i1, k1, k2, k3 ^ i0]
+        self.r = [0, 0, 0]
+        for _ in range(32):
+            self._init_mode(self._fsm())
+
+    def _fsm(self):
+        s, r = self.s, self.r
+        f = ((s[15] + r[0]) & _M32) ^ r[1]
+        rr = (r[1] + (r[2] ^ s[5])) & _M32
+        r[2] = _snow_sbox(r[1], _SNOW_SQ, 0x69)
+        r[1] = _snow_sbox(r[0], SBOX, 0x1B)
+        r[0] = rr
+        return f
+
+    def _step(self, feed):
+        s = self.s
+        v = ((s[0] << 8) & _M32) ^ _MULA[(s[0] >> 24) & 0xFF] ^ s[2] ^ (s[11] >> 8) ^ _DIVA[s[11] & 0xFF]
+        if feed is not None:
+            v ^= feed
+        s.pop(0)
+        s.append(v & _M32)
+
+    def _init_mode(self, feed):
+        self._step(feed)
+
+    def words(self, n):
+        self._fsm()                         # the two warm-up clocks
+        self._step(None)
+        out = []
+        for _ in range(n):
+            out.append(self._fsm() ^ self.s[0])
+            self._step(None)
+        return out
+
+
+def _snow_iv(count, bearer, direction, integrity):
+    """TS 35.202 section 4.4; the f9 variant swaps FRESH for BEARER||0^27.
+
+    The integrity IV carries DIRECTION in the top bits of IV[8] and IV[14]
+    (TS 33.401 annex B.2.2), which is why the two halves differ.
+    """
+    fresh = (bearer << 27) & _M32
+    if integrity:
+        return [fresh ^ ((direction << 15) & _M32), (count ^ (direction << 31)) & _M32, fresh, count]
+    conf = fresh | ((direction << 26) & _M32)
+    return [conf, count, conf, count]
+
+
+def _snow_keys(key16):
+    return [int.from_bytes(key16[i * 4:i * 4 + 4], 'big') for i in (3, 2, 1, 0)]
+
+
+def _mask_tail(buf, length):
+    """Clear the bits past LENGTH in the final octet a caller gave us."""
+    n = length >> 3
+    rem = length & 7
+    if not rem:
+        return bytes(buf[:n])
+    tail = buf[n:n + 1] or b'\x00'
+    return bytes(buf[:n]) + bytes([tail[0] & ((0xFF << (8 - rem)) & 0xFF)])
+
+
+def _keystream_bytes(words, nbytes):
+    return b''.join(w.to_bytes(4, 'big') for w in words)[:nbytes]
+
+
+def eea1(ck, count, bearer, direction, data, length):
+    """128-EEA1 — SNOW 3G keystream XORed with the message."""
+    st = Snow3G(_snow_keys(ck), _snow_iv(count, bearer, direction, False))
+    nbytes = (length + 7) >> 3
+    ks = _keystream_bytes(st.words((nbytes + 3) // 4), nbytes)
+    return _mask_tail(bytes(a ^ b for a, b in zip(ks, data)), length)
+
+
+def _gf64(v, p, c):
+    r = 0
+    for i in range(64):
+        if (p >> i) & 1:
+            x = v
+            for _ in range(i):
+                x = (((x << 1) ^ c) & 0xFFFFFFFFFFFFFFFF) if (x >> 63) & 1 else ((x << 1) & 0xFFFFFFFFFFFFFFFF)
+            r ^= x
+    return r
+
+
+def eia1(ik, count, bearer, direction, data, length):
+    """128-EIA1 — SNOW 3G f9 over the message, 32-bit MAC."""
+    st = Snow3G(_snow_keys(ik), _snow_iv(count, bearer, direction, True))
+    z = _keystream_bytes(st.words(5), 20)
+    p = int.from_bytes(z[0:8], 'big')
+    q = int.from_bytes(z[8:16], 'big')
+    otp = int.from_bytes(z[16:20], 'big')
+    blocks = ((length + 0x3F) >> 6) + 1
+    ev = 0
+    for i in range(blocks - 2):
+        ev = _gf64(ev ^ int.from_bytes(data[i * 8:i * 8 + 8], 'big'), p, 0x1B)
+    rem = bytes(data[8 * (blocks - 2):8 * (blocks - 1)]).ljust(8, b'\x00')
+    ev = _gf64(ev ^ int.from_bytes(rem, 'big'), p, 0x1B)
+    ev = _gf64(ev ^ length, q, 0x1B)
+    return ((ev >> 32) ^ otp).to_bytes(4, 'big')
+
+
+# ----------------------------------------------------------------- ZUC
+def _rot32(a, k):
+    return ((a << k) | (a >> (32 - k))) & _M32
+
+
+def _add31(a, b):
+    s = a + b
+    return (s & _ZUC_M31) + (s >> 31)
+
+
+def _rot31(a, k):
+    a &= _ZUC_M31
+    return ((a << k) | (a >> (31 - k))) & _ZUC_M31
+
+
+def _zuc_l1(x):
+    return (x ^ _rot32(x, 2) ^ _rot32(x, 10) ^ _rot32(x, 18) ^ _rot32(x, 24)) & _M32
+
+
+def _zuc_l2(x):
+    return (x ^ _rot32(x, 8) ^ _rot32(x, 14) ^ _rot32(x, 22) ^ _rot32(x, 30)) & _M32
+
+
+def _zuc_s(x):
+    return ((_ZUC_S0[x >> 24] << 24) | (_ZUC_S1[(x >> 16) & 0xFF] << 16)
+            | (_ZUC_S0[(x >> 8) & 0xFF] << 8) | _ZUC_S1[x & 0xFF]) & _M32
+
+
+class Zuc:
+    """ZUC keystream generator (TS 35.221 sections 3.2-3.4)."""
+
+    __slots__ = ("s", "r1", "r2")
+
+    def __init__(self, key, iv):
+        self.s = [((key[i] << 23) | (_ZUC_KD[i] << 8) | iv[i]) & _M32 for i in range(16)]
+        self.r1 = self.r2 = 0
+        for _ in range(32):
+            x0, x1, x2 = self._br3()
+            f = ((x0 ^ self.r1) + self.r2) & _M32
+            self.r1, self.r2 = self._fsm(x1, x2)
+            self._lfsr(f >> 1)
+        x1, x2 = self._br2()
+        self.r1, self.r2 = self._fsm(x1, x2)
+        self._lfsr(None)
+
+    def _br3(self):
+        s = self.s
+        return ((((s[15] & 0x7FFF8000) << 1) | (s[14] & 0xFFFF)) & _M32,
+                (((s[11] & 0xFFFF) << 16) | (s[9] >> 15)) & _M32,
+                (((s[7] & 0xFFFF) << 16) | (s[5] >> 15)) & _M32)
+
+    def _br2(self):
+        s = self.s
+        return ((((s[11] & 0xFFFF) << 16) | (s[9] >> 15)) & _M32,
+                (((s[7] & 0xFFFF) << 16) | (s[5] >> 15)) & _M32)
+
+    def _fsm(self, x1, x2):
+        w1 = (self.r1 + x1) & _M32
+        w2 = (self.r2 ^ x2) & _M32
+        u = _zuc_l1(((w1 << 16) & _M32) | (w2 >> 16))
+        v = _zuc_l2(((w2 << 16) & _M32) | (w1 >> 16))
+        return _zuc_s(u), _zuc_s(v)
+
+    def _lfsr(self, u):
+        s = self.s
+        v = s[0]
+        v = _add31(v, _rot31(s[0], 8))
+        v = _add31(v, _rot31(s[4], 20))
+        v = _add31(v, _rot31(s[10], 21))
+        v = _add31(v, _rot31(s[13], 17))
+        v = _add31(v, _rot31(s[15], 15))
+        if u is not None:
+            v = _add31(v, u)
+        elif v == 0:
+            v = _ZUC_M31                  # the LFSR state may never be zero
+        s.pop(0)
+        s.append(v & _ZUC_M31)
+
+    def words(self, n):
+        out = []
+        for _ in range(n):
+            x0, x1, x2 = self._br3()
+            x3 = (((self.s[2] & 0xFFFF) << 16) | (self.s[0] >> 15)) & _M32
+            f = ((x0 ^ self.r1) + self.r2) & _M32
+            out.append((f ^ x3) & _M32)
+            self.r1, self.r2 = self._fsm(x1, x2)
+            self._lfsr(None)
+        return out
+
+
+def _zuc_iv(count, bearer, direction, integrity):
+    """TS 35.221 section 3.3; EIA3 also injects DIRECTION into IV[8] and IV[14]."""
+    iv = [(count >> 24) & 0xFF, (count >> 16) & 0xFF, (count >> 8) & 0xFF, count & 0xFF]
+    if integrity:
+        iv.append((bearer << 3) & 0xF8)
+        d = (direction << 7) & 0x80
+        iv += [0, 0, 0]
+        iv += [iv[0] ^ d, iv[1], iv[2], iv[3]]
+        iv += [iv[4], iv[5], iv[6] ^ d, iv[7]]
+    else:
+        iv.append(((bearer << 3) | (direction << 2)) & 0xFC)
+        iv += [0, 0, 0]
+        iv += [iv[0], iv[1], iv[2], iv[3], iv[4], iv[5], iv[6], iv[7]]
+    return iv
+
+
+def eea3(ck, count, bearer, direction, data, length):
+    """128-EEA3 — ZUC keystream XORed with the message."""
+    st = Zuc(ck, _zuc_iv(count, bearer, direction, False))
+    nbytes = (length + 7) >> 3
+    ks = _keystream_bytes(st.words((nbytes + 3) // 4), nbytes)
+    return _mask_tail(bytes(a ^ b for a, b in zip(ks, data)), length)
+
+
+def eia3(ik, count, bearer, direction, data, length):
+    """128-EIA3 — ZUC MAC over a bit stream, 32-bit output."""
+    st = Zuc(ik, _zuc_iv(count, bearer, direction, True))
+    bits = ''.join(format(b, '08b') for b in data)[:length]
+    nwords = ((length + 31) >> 5) + 2
+    words = st.words(nwords)
+    zbits = ''.join(format(w, '032b') for w in words)
+    t = 0
+    for i in range(length):
+        if bits[i] == '1':
+            t ^= int(zbits[i:i + 32], 2)
+    return ((t ^ int(zbits[length:length + 32], 2)) ^ words[nwords - 1]).to_bytes(4, 'big')
+
+
+# ------------------------------------------------------- AES: EEA2 / EIA2
+def _ctr_block(count, bearer, direction, index):
+    """TS 33.401 annex B.1.3: COUNT || BEARER || DIRECTION || 0^26 || index."""
+    return (count.to_bytes(4, 'big')
+            + bytes([((bearer << 3) | (direction << 2)) & 0xFC]) + b'\x00\x00\x00'
+            + index.to_bytes(8, 'big'))
+
+
+def eea2(ck, count, bearer, direction, data, length):
+    """128-EEA2 — AES-128 in counter mode."""
+    rk = _aes_expand(ck)
+    nbytes = (length + 7) >> 3
+    ks = b''.join(_aes_encrypt_block(rk, _ctr_block(count, bearer, direction, i))
+                  for i in range((nbytes + 15) >> 4))[:nbytes]
+    return _mask_tail(bytes(a ^ b for a, b in zip(ks, data)), length)
+
+
+def _cmac_subkeys(rk):
+    l = int.from_bytes(_aes_encrypt_block(rk, b'\x00' * 16), 'big')
+    k1 = ((l << 1) & ((1 << 128) - 1)) ^ (0x87 if (l >> 127) & 1 else 0)
+    k2 = ((k1 << 1) & ((1 << 128) - 1)) ^ (0x87 if (k1 >> 127) & 1 else 0)
+    return k1.to_bytes(16, 'big'), k2.to_bytes(16, 'big')
+
+
+def _bits_to_block(bits):
+    return bytes(int(bits[i:i + 8], 2) for i in range(0, 128, 8))
+
+
+def eia2(ik, count, bearer, direction, data, length):
+    """128-EIA2 — AES-128-CMAC over COUNT||BEARER||DIR||0^26||MESSAGE, 32-bit MAC.
+
+    CMAC is defined on bit strings (TS 33.401 annex B.2.3), so the digest is
+    assembled as bits and only converted back to octets per 128-bit block: a
+    3GPP message whose bit length is not a multiple of 8 leaves the low bits of
+    its final octet undefined and they must not be invented.
+    """
+    rk = _aes_expand(ik)
+    k1, k2 = _cmac_subkeys(rk)
+    head = (count.to_bytes(4, 'big')
+            + bytes([((bearer << 3) | (direction << 2)) & 0xFC]) + b'\x00\x00\x00')
+    bits = (''.join(format(b, '08b') for b in head)
+            + ''.join(format(b, '08b') for b in data)[:length])
+    nfull = (len(bits) + 127) // 128
+    body = bits[:128 * (nfull - 1)]
+    tail = bits[128 * (nfull - 1):]
+    if len(tail) == 128:
+        last = _xor(_bits_to_block(tail), k1)
+    else:
+        last = _xor(_bits_to_block(tail + '1' + '0' * (127 - len(tail))), k2)
+    x = bytes(16)
+    for i in range(0, len(body), 128):
+        x = _aes_encrypt_block(rk, _xor(x, _bits_to_block(body[i:i + 128])))
+    return _aes_encrypt_block(rk, _xor(x, last))[:4]
+
+
+EEA = {1: eea1, 2: eea2, 3: eea3}
+EIA = {1: eia1, 2: eia2, 3: eia3}
+EEA_NAMES = {0: "128-EEA0 null", 1: "128-EEA1 SNOW 3G", 2: "128-EEA2 AES-CTR", 3: "128-EEA3 ZUC"}
+EIA_NAMES = {0: "128-EIA0 null", 1: "128-EIA1 SNOW 3G", 2: "128-EIA2 AES-CMAC", 3: "128-EIA3 ZUC"}
+
+
 def _crypto_kat_checks():
     """Yield (name, ok, detail) for every Milenage/TUAK known-answer test."""
     for n, (key_h, pt_h, ct_h) in enumerate(AES128_VECTORS, 1):
@@ -1686,6 +2059,118 @@ def _dpa_checks():
     return results
 
 
+def _eea_eia_kat_checks():
+    """Yield (name, ok, detail) for every EEA/EIA published test vector."""
+    h = bytes.fromhex
+    f8 = (
+        (1, "2bd6459f82c5b300952c49104881ff48", 0x72a4f20f, 0x0c, 1, 798,
+         "7ec61272743bf1614726446a6c38ced166f6ca76eb5430044286346cef130f9292"
+         "2b03450d3a9975e5bd2ea0eb55ad8e1b199e3ec4316020e9a1b285e762795359b7"
+         "bdfd39bef4b2484583d5afe082aee638bf5fd5a606193901a08f4ab41aab9b134880",
+         "8ceba62943dced3a0990b06ea1b0a2c4fb3cedc71b369f42ba64c1eb6665e72a"
+         "a1c9bb0deaa20fe86058b8baee2c2e7f0becce48b52932a53c9d5f931a3a7c53"
+         "2259af4325e2a65e3084ad5f6a513b7bddc1b65f0aa0d97a053db55a88c4c4f9"
+         "605e4140"),
+        (3, "5acb1d644c0d51204ea5f1451010d852", 4199901990, 0x03, 1, 120,
+         "ad9c441f890b38c457a49d421407e8", "ba0f31300334c56b52a7497cbac046"),
+    )
+    for n, ck, count, bearer, direction, length, pt, ct in f8:
+        got = eea1(h(ck), count, bearer, direction, h(pt), length)
+        yield ("eea1-set%d" % n, got.hex() == ct, "want=%s got=%s" % (ct, got.hex()))
+    f9 = (
+        (1, "2bd6459f82c5b300952c49104881ff48", 0x38a6f056, 0x1f, 0, 88,
+         "3332346263393861373479", "731f1165"),
+        (3, "d3419be821087acd02123a9248033359", 0xc7590ea9, 0x17, 0, 511,
+         "bbb057038809496bcff86d6fbc8ce5b135a06b166054f2d565be8ace75dc851e0b"
+         "cdd8f07141c495872fb5d8c0c66a8b6da556663e4e461205d84580bee5bc7e",
+         "9a16c77d"),
+    )
+    for n, ik, count, bearer, direction, length, msg, mac in f9:
+        got = eia1(h(ik), count, bearer, direction, h(msg), length)
+        yield ("eia1-set%d" % n, got.hex() == mac, "want=%s got=%s" % (mac, got.hex()))
+    got = eea2(h("d3c5d592327fb11c4035c6680af8c6d1"), 0x398a59b4, 0x15, 1,
+               h("981ba6824c1bfb1ab485472029b71d808ce33e2cc3c0b5fc1f3de8a6dc66b1f0"), 253)
+    want = "e9fed8a63d155304d71df20bf3e82214b20ed7dad2f233dc3c22d7bdeeed8e78"
+    yield ("eea2-set1", got.hex() == want, "want=%s got=%s" % (want, got.hex()))
+    got = eia2(h("2bd6459f82c5b300952c49104881ff48"), 0x38a6f056, 0x18, 0,
+               h("3332346263393840"), 58)
+    yield ("eia2-set1", got.hex() == "118c6eb8", "want=118c6eb8 got=%s" % got.hex())
+    # TS 35.222 test vector 1 and 2 exercise ZUC with a zero key and IV, which
+    # is the only published keystream KAT for the generator itself.
+    w = Zuc(bytes(16), bytes(16)).words(2)
+    got = "%08X%08X" % (w[0], w[1])
+    yield ("zuc-tv1", got == "27BEDE74018082DA", "want=27BEDE74018082DA got=%s" % got)
+    w = Zuc(bytes([0xFF] * 16), bytes([0xFF] * 16)).words(2)
+    got = "%08X%08X" % (w[0], w[1])
+    yield ("zuc-tv2", got == "0657CFA07096398B", "want=0657CFA07096398B got=%s" % got)
+    eia3_sets = (
+        (1, "c9e6cec4607c72db000aefa88385ab0a", 0xa94059da, 0x0a, 1, 577,
+         "983b41d47d780c9e1ad11d7eb70391b1de0b35da2dc62f83e7b78d6306ca0ea0"
+         "7e941b7be91348f9fcb170e2217fecd97f9f68adb16e5d7d21e569d280ed775c"
+         "ebde3f4093c5388100000000", "fae8ff0b"),
+        (2, "47054125561eb2dda94059da05097850", 0x561eb2dd, 0x14, 0, 90,
+         "000000000000000000000000", "6719a088"),
+    )
+    for n, ik, count, bearer, direction, length, msg, mac in eia3_sets:
+        got = eia3(h(ik), count, bearer, direction, h(msg), length)
+        yield ("eia3-set%d" % n, got.hex() == mac, "want=%s got=%s" % (mac, got.hex()))
+
+
+def _cli_eea_eia(a) -> int:
+    if a.message is None:
+        print("ERROR\t--eea/--eia need --message", file=sys.stderr)
+        return 2
+    if a.count is None:
+        print("ERROR\t--eea/--eia need --count", file=sys.stderr)
+        return 2
+    key_hex = a.ck if a.eea is not None else a.ik
+    if not key_hex:
+        print("ERROR\t--eea needs --ck, --eia needs --ik", file=sys.stderr)
+        return 2
+    if not 0 <= a.bearer <= 31:
+        print("ERROR\t--bearer is 5 bits, 0..31", file=sys.stderr)
+        return 2
+    try:
+        key = parse_hex(key_hex, 16, "CK" if a.eea is not None else "IK")
+        msg = parse_hex(a.message, len(a.message) // 2, "MESSAGE")
+        count = int(a.count, 16) if a.count.lower().startswith("0x") else int(a.count)
+    except ValueError as exc:
+        print("ERROR\t%s" % exc, file=sys.stderr)
+        return 1
+    length = a.bit_length if a.bit_length is not None else len(msg) * 8
+    if length > len(msg) * 8:
+        print("ERROR\t--bit-length %d exceeds the %d bits of --message"
+              % (length, len(msg) * 8), file=sys.stderr)
+        return 2
+    if count >> 32:
+        print("ERROR\t--count is 32 bits", file=sys.stderr)
+        return 2
+    if a.eea is not None:
+        algo = a.eea
+        print("algorithm\t%s" % EEA_NAMES[algo])
+        fn = EEA.get(algo)
+    else:
+        algo = a.eia
+        print("algorithm\t%s" % EIA_NAMES[algo])
+        fn = EIA.get(algo)
+    print("count\t0x%08X" % count)
+    print("bearer\t%d" % a.bearer)
+    print("direction\t%d (%s)" % (a.direction,
+                                   "downlink" if a.direction else "uplink"))
+    print("bit_length\t%d" % length)
+    print("message\t%s" % msg[:length // 8 + (1 if length % 8 else 0)].hex().upper())
+    if fn is None:
+        # EEA0/EIA0 is the null algorithm: nothing is computed and nothing is
+        # claimed to have been computed.
+        print("output\t%s" % msg[:length // 8 + (1 if length % 8 else 0)].hex().upper())
+        print("note\tnull algorithm: no ciphering or integrity applied")
+        return 0
+    out = fn(key, count, a.bearer, a.direction, msg, length)
+    print("%s\t%s" % ("keystream_output" if a.eea is not None else "mac",
+                       out.hex().upper()))
+    return 0
+
+
 def selftest() -> int:
     bad = 0
     for algo, vectors in COMP128_KNOWN_ANSWERS.items():
@@ -1722,6 +2207,10 @@ def selftest() -> int:
             bad += nfail
         else:
             print("%-40s PASS %d checks" % (key, npass))
+    # EEA1/EEA2/EEA3 and EIA1/EIA2/EIA3, one summary line per published set.
+    for name, ok, detail in _eea_eia_kat_checks():
+        print("%-40s %s" % (name, "PASS" if ok else "FAIL " + detail))
+        bad += 0 if ok else 1
     # A5/1 against its two independent published vectors, both rows of each.
     for n, (kc, count, down, up) in enumerate(A51_VECTORS, 1):
         try:
@@ -1830,6 +2319,19 @@ def main(argv=None) -> int:
     p.add_argument("--res-star", help="RES* (or XRES*), hex, 16 bytes")
     p.add_argument("--keccak", metavar="HEX",
                    help="raw Keccak-f[1600] on exactly 200 bytes of hex")
+    p.add_argument("--eea", type=int, choices=(0, 1, 2, 3), metavar="ALGO",
+                   help="128-EEA ciphering of --message under --ck, --count, "
+                        "--bearer, --direction and --bit-length")
+    p.add_argument("--eia", type=int, choices=(0, 1, 2, 3), metavar="ALGO",
+                   help="128-EIA integrity MAC of --message under --ik, --count, "
+                        "--bearer, --direction and --bit-length")
+    p.add_argument("--bearer", type=int, default=0,
+                   help="5-bit radio bearer identity 0..31 (default 0)")
+    p.add_argument("--direction", type=int, default=0, choices=(0, 1),
+                   help="0 = uplink, 1 = downlink (default 0)")
+    p.add_argument("--message", help="message to protect, hex")
+    p.add_argument("--bit-length", type=int,
+                   help="length of --message in bits (default: every bit given)")
     p.add_argument("--a51", action="store_true",
                    help="A5/1 keystream from --kc and --count")
     p.add_argument("--kc", help="Kc, 16 hex digits in transmission order")
@@ -1860,6 +2362,8 @@ def main(argv=None) -> int:
 
     if a.selftest:
         return selftest()
+    if a.eea is not None or a.eia is not None:
+        return _cli_eea_eia(a)
     if a.derive:
         return _cli_derive(a)
     if a.hxres:
