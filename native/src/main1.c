@@ -2950,6 +2950,7 @@ static const char *const plain_keys[] = {
     "candidates_file\tcandidates file",
     "cannot\twhat the relay cannot do, which is where a defence lives",
     "cannot_without_key\tcannot without key",
+    "cap\tone CAP operation: its code, its name, which side sends it, and what it does to a call",
     "capability\tcapability",
     "capability_hex\tthe capability exchange this module would send, as hex",
     "capacity\tcapacity",
@@ -4786,6 +4787,7 @@ static const char *const plain_keys[] = {
     "operator\toperator",
     "operator_selectable\tNTN preference is a policy decision as well as a measurement",
     "operator_specific\toperator specific",
+    "ops\thow many operations the table holds",
     "optional_parameter_count\thow many tag/length/value triplets were walked after the mandatory body",
     "optional_parameters\toptional parameters",
     "optional_parameters_decoded\toptional parameters decoded",
@@ -4840,6 +4842,7 @@ static const char *const plain_keys[] = {
     "pa_rise_us\ttime for the amplifier to reach its output level",
     "package\tpackage",
     "packed\tpacked",
+    "packed_hex\tthe text as seven-bit septets packed the way an SMS body is packed",
     "packet\tpacket",
     "packet_bytes\tpacket bytes",
     "packing_rule\tpacking rule",
@@ -4893,6 +4896,8 @@ static const char *const plain_keys[] = {
     "param_value\tparam value",
     "parameter\tparameter",
     "parameter_bytes\tparameter bytes",
+    "parameter_hex\tthe USSD parameter as it would sit inside the MAP component",
+    "parameter_octets\thow many octets that parameter is",
     "params\tparams",
     "parity\tparity",
     "parity_agrees\tparity agrees",
@@ -5707,6 +5712,7 @@ static const char *const plain_keys[] = {
     "sent\tsent",
     "separator\tseparator",
     "sepp_gate\tthe per-message check at the security edge",
+    "septets\thow many seven-bit characters the string is, which is not its byte count",
     "seq\tsequence number",
     "seq_inner\tseq inner",
     "seq_len\tsequence length",
@@ -6026,6 +6032,7 @@ static const char *const plain_keys[] = {
     "stream\tstream",
     "stream_id\tstream id",
     "streams\tstreams",
+    "string\tthe text of the message as a reader typed it",
     "structure\tstructure",
     "stub_service\tthe host listener a fake network points the firmware at",
     "sub\tsub",
@@ -6553,6 +6560,7 @@ static const char *const plain_keys[] = {
     "weight\tweight",
     "what\twhat",
     "what_a_licence_would_buy\twhat a licensed copy of TS 55.251 and TS 55.252 would let this tree implement",
+    "what_a_rogue_scf_gets\twhat the operation is worth to a service function that answers where it should not",
     "what_discovery_returns\twhat a requesting function would receive, in the words of the discovery answer",
     "what_i_would_need\twhat i would need",
     "what_it_is_not\twhat this arithmetic does not do",
@@ -6567,6 +6575,7 @@ static const char *const plain_keys[] = {
     "what_this_is_not\tthe boundary of the tool, stated where a reader would otherwise assume more",
     "when\twhen",
     "where\twhere",
+    "where_it_draws\twhat the handset does with a network-side USSD notification, and what evidence it leaves",
     "where_it_was_run\tthe environment each mode was actually run in",
     "why\twhy",
     "why\twhy a verb handed off instead of acting",
@@ -8415,6 +8424,9 @@ static const ChipRow chip_rows[] = {
     { "26_ss7_map",        "--msisdn",               NEED_NO, DOES_READS },
     { "26_ss7_map",        "--otid",                 NEED_NO, DOES_READS },
     { "26_ss7_map",        "--wrap",                 NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--build-lcs",           NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--build-ussd",          NEED_NO, DOES_BUILDS },
+    { "26_ss7_map",          "--cap-surface",         NEED_NO, DOES_READS },
     { "45_iot",            "--nprach-decode",        NEED_NO, DOES_READS },
     { "57_evil_twin",      "--selftest",             NEED_NO, DOES_READS },
 };
@@ -30199,11 +30211,67 @@ ss7_build_sgsap(AppState *state, const char *module_id,
     return outer;
 }
 
+/* 26_ss7_map — the service plane, where a call can be redirected.
+ *
+ * Queries asks a register. This view is CAP, the dialogue that decides what
+ * happens to a call while it is being placed, plus the two message paths that
+ * leave no trace on the handset.
+ */
+static GtkWidget *
+ss7_build_service(AppState *state, const char *module_id,
+                  GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SERVICE PLANE",
+        "A service control function that answers on a point code it should not "
+        "own can move, hold, charge or record a call it never placed.", &body);
+    GtkWidget *cap_body, *ussd_body, *lcs_body;
+    GtkWidget *cap = verb_card("LIST THE CAP OPERATIONS", &cap_body);
+    GtkWidget *ussd = verb_card("BUILD A USSD MESSAGE", &ussd_body);
+    GtkWidget *lcs = verb_card("ASK WHERE A SUBSCRIBER IS", &lcs_body);
+    GtkWidget *res;
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(cap_body),
+        module_action_button(state, module_id, status,
+            "List the Operations", "--cap-surface",
+            "Every CAP operation that changes or records a call, with the "
+            "operation code an implementation sends."));
+    gtk_box_append(GTK_BOX(cap_body), res);
+    gtk_box_append(GTK_BOX(body), cap);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(ussd_body),
+        mod_arg_row_prefilled(state, module_id, status, "Build the Message",
+            "--build-ussd", "AT+COPS?",
+            "The text a network-side notification would draw on a handset. "
+            "Seven-bit packed, with the data coding scheme that says so."));
+    gtk_box_append(GTK_BOX(ussd_body), res);
+    gtk_box_append(GTK_BOX(body), ussd);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(lcs_body),
+        mod_arg_row_prefilled(state, module_id, status, "Build the Query",
+            "--build-lcs", "001010000000001",
+            "A ProvideSubscriberLocation for one IMSI: the query a GMLC sends "
+            "a visited MSC, and the one that needs an interconnect agreement "
+            "to belong there."));
+    gtk_box_append(GTK_BOX(lcs_body), res);
+    gtk_box_append(GTK_BOX(body), lcs);
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry ss7_entries[] = {
     { "Queries", "dialog-information-symbolic", NULL, ss7_build_queries },
     { "Message", "utilities-terminal-symbolic", NULL, ss7_build_decode },
     { "Data", "system-search-symbolic", NULL, ss7_build_analysis },
     { "SGsAP", "network-transmit-receive-symbolic", NULL, ss7_build_sgsap },
+    { "Service plane", "preferences-system-symbolic", NULL, ss7_build_service },
 };
 /* 27_cellular_dns — the DNS a cellular bearer carries.
  *

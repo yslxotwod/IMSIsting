@@ -1370,6 +1370,18 @@ ss7_build_sai()    { local a; a=$(ss7_arg_sai    "${1:-}" "${2:-5}")  || return 
                      ss7_build_msu 56 "$a" "${3:-1}" "${4:-00000001}" 6 7   "${5:-1}" "${6:-2}"; }
 ss7_build_isd()    { local a; a=$(ss7_arg_isd    "${1:-}")            || return 1
                      ss7_build_msu 7 "$a" "${2:-1}" "${3:-00000001}" 6 7   "${4:-1}" "${5:-2}"; }
+# LCS: the GMLC asks the VMSC where a subscriber is. The argument is the IMSI
+# plus the location type and the LCS client the request claims to come from.
+ss7_arg_lcs() {  # { subscriberIdentity, locationType, lcsClientType, gmlc-Number [4] }
+    local ih gh
+    ih=$(ss7_imsi_hex "${1:-}") || return 1
+    gh=$(ss7_msisdn_hex "${2:-33600000002}") || return 1
+    # locationType: currentLocation [0] (the VLR asks the radio for a fix)
+    ss7_tlv 30 "$(ss7_tlv 04 "$ih")$(ss7_tlv 80 "$(ss7_tlv 80 "")")$(ss7_tlv 81 "$(ss7_tlv 80 00)")$(ss7_tlv A4 "$gh")"
+}
+ss7_build_lcs() {  local a; a=$(ss7_arg_lcs "${1:-}" "${2:-}") || return 1
+                     ss7_build_msu 83 "$a" "${3:-1}" "${4:-00000001}" 7 6 "${5:-1}" "${6:-2}"; }
+
 # Supplementary-service management is VLR -> HLR.
 ss7_build_register_ss() { local a; a=$(ss7_arg_register_ss "${1:-33}" "${2:-}") || return 1
                      ss7_build_msu 10 "$a" "${3:-1}" "${4:-00000002}" 6 7  "${5:-1}" "${6:-2}"; }
@@ -2568,6 +2580,144 @@ ss7_cmd_build_ati() {
 # Ki-derived material -- could not be produced at all. One function carries
 # them so the six verbs cannot drift apart in output shape, and every branch
 # goes through the same round-trip decode as --build-sri.
+# ── CAP: the service layer that can redirect a call (TS 29.078) ─────────
+# The MAP operations above are questions to a register. CAP is the protocol
+# between a service switching function and the service that decides what
+# happens to the call — which is why an SCF reachable from the wrong point
+# code is worth more than an HLR that answers questions.
+#
+# The operation codes below are read out of the ASN.1 pycrate ships for CAP
+# (pycrate_asn1dir/CAP.py, opcode_<name> = ('local', N)), so they are the
+# numbers an implementation actually sends, not a transcription.
+ss7_cap_op_name() {
+    case "${1:-}" in
+        0)  echo initialDP ;;
+        16) echo assistRequestInstructions ;;
+        17) echo establishTemporaryConnection ;;
+        18) echo disconnectForwardConnection ;;
+        19) echo connectToResource ;;
+        20) echo connect ;;
+        22) echo releaseCall ;;
+        23) echo requestReportBCSMEvent ;;
+        24) echo eventReportBCSM ;;
+        27) echo collectInformation ;;
+        31) echo continue ;;
+        32) echo initiateCallAttempt ;;
+        33) echo resetTimer ;;
+        34) echo furnishChargingInformation ;;
+        35) echo applyCharging ;;
+        36) echo applyChargingReport ;;
+        41) echo callGap ;;
+        44) echo callInformationReport ;;
+        45) echo callInformationRequest ;;
+        46) echo sendChargingInformation ;;
+        47) echo playAnnouncement ;;
+        48) echo promptAndCollectUserInformation ;;
+        49) echo specializedResourceReport ;;
+        53) echo cancel ;;
+        55) echo activityTest ;;
+        60) echo initialDPSMS ;;
+        62) echo connectSMS ;;
+        65) echo continueSMS ;;
+        66) echo releaseSMS ;;
+        70) echo activityTestGPRS ;;
+        74) echo connectGPRS ;;
+        75) echo continueGPRS ;;
+        78) echo initialDPGPRS ;;
+        79) echo releaseGPRS ;;
+        *)   echo "unassigned/unknown" ;;
+    esac
+}
+
+# One row per operation that changes a call rather than reporting on it.
+ss7_cap_surface() {
+    printf 'cap\top\tname\tdirection\twhat_it_does\twhat_a_rogue_scf_gets\tref\n'
+    printf 'cap\t0\tinitialDP\tSSF to SCF\tthe trigger fires and the call is handed to the service with the calling and called numbers\tevery number the trigger covers, as they are dialled\tTS 29.078 3.1\n'
+    printf 'cap\t20\tconnect\tSCF to SSF\tthe call is routed to the destination the service names, not the one that was dialled\ta call that reaches a number its owner did not dial\tTS 29.078 3.1\n'
+    printf 'cap\t22\treleaseCall\tSCF to SSF\tthe call is torn down\ta subscriber who cannot complete a call in the covered area\tTS 29.078 3.1\n'
+    printf 'cap\t23\trequestReportBCSMEvent\tSCF to SSF\tthe service asks to be told about answer, busy, no-answer and disconnect\twhether a call was answered, and when, for every covered call\tTS 29.078 3.1\n'
+    printf 'cap\t24\teventReportBCSM\tSSF to SCF\tthe event the service asked for, with the cause\ta call-detail feed that no billing system is looking at\tTS 29.078 3.1\n'
+    printf 'cap\t31\tcontinue\tSCF to SSF\tthe call proceeds untouched\tnothing directly, which is what makes the rest quiet\tTS 29.078 3.1\n'
+    printf 'cap\t34\tfurnishChargingInformation\tSCF to SSF\ttext is attached to the call data record\ta record that says what the service wants it to say\tTS 29.078 3.1\n'
+    printf 'cap\t35\tapplyCharging\tSCF to SSF\tthe service sets the maximum call duration and the tariff switch\ta cap on call length that the subscriber did not choose\tTS 29.078 3.1\n'
+    printf 'cap\t36\tapplyChargingReport\tSSF to SCF\tthe elapsed time and the tariff actually reached\tthe shape of a subscriber calling pattern, per call\tTS 29.078 3.1\n'
+    printf 'cap\t41\tcallGap\tSCF to SSF\ta proportion of calls in a range are blocked at once\ta zone where calls fail, from one message\tTS 29.078 3.1\n'
+    printf 'cap\t44\tcallInformationReport\tSSF to SCF\tthe full call information, including the numbers\tcongruent with requestReportBCSMEvent\tTS 29.078 3.1\n'
+    printf 'cap\t45\tcallInformationRequest\tSCF to SSF\tthe service asks for full call information\tcall detail without a billing trail\tTS 29.078 3.1\n'
+    printf 'cap\t47\tplayAnnouncement\tSCF to SRF\tan announcement is played into the call\ta voice the subscriber did not expect on a call they placed\tTS 29.078 3.1\n'
+    printf 'cap\t48\tpromptAndCollectUserInformation\tSCF to SRF\tthe caller is prompted and the digits they type are collected\tdigits a subscriber believes are going to their bank\tTS 29.078 3.1\n'
+    printf 'cap\t53\tcancel\tSCF to SSF\tan earlier request is withdrawn\tquiet truncation of the reporting\tTS 29.078 3.1\n'
+    printf 'ops\t%s\n' "16"
+    printf 'finding\tHIGH\tan SCF reachable from a point code that is not the operator service is a call redirect, not an information leak\n'
+    printf 'precondition\t%s\n' "a TDM or SIGTRAN link into the operator service plane, and a gsmSCF address the SSF will accept"
+    printf 'detect\t%s\n' "TCAP dialogues from a point code the SSF has no service agreement with, and CAP connect or callGap operations that no provisioned service sends"
+    printf 'ref\t%s\n' "TS 29.078 (CAP), TS 23.078 (CAMEL phase 3/4), TS 29.002 17.1 (the dialogue this rides in)"
+    printf 'verdict\t%s\n' "cap_surface_listed"
+}
+
+# GSM 7-bit packing, because a USSD string travels the way an SMS body does.
+ss7_gsm7_pack() {  # <ascii> -> hex, septets LSB-first
+    python3 -c '
+import sys
+s = sys.argv[1]
+bits = 0
+n = 0
+out = []
+for ch in s:
+    v = ord(ch)
+    if v > 127 or ch in "@$[]{}":
+        sys.stderr.write("only printable ASCII is packed here\n"); sys.exit(2)
+    bits |= v << n
+    n += 7
+    while n >= 8:
+        out.append(bits & 0xFF)
+        bits >>= 8
+        n -= 8
+if n:
+    out.append(bits & 0xFF)
+sys.stdout.write("".join("%02X" % b for b in out))
+' "${1:-}"
+}
+
+# USSD is the third message path: not a call, not an SMS, and it draws text on
+# a handset while the phone has no data session and no message store entry.
+ss7_cmd_ussd() {  # <text> [--op request|notify] [--dcs HEX]
+    local text="${1:-}" op="request" dcs="0F"
+    shift 2>/dev/null || true
+    while (( $# )); do
+        case "$1" in
+            --op) op="${2:-request}"; shift 2 || return 2 ;;
+            --dcs) dcs="${2:-0F}"; shift 2 || return 2 ;;
+            *) printf 'ERROR\tunexpected argument %s\n' "$(ss7_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$text" ]] || { printf 'ERROR\tusage: --ussd <text> [--op request|notify]\n' >&2; return 2; }
+    [[ "$dcs" =~ ^[0-9A-Fa-f]{2}$ ]] || { printf 'ERROR\tdcs is one octet of hex\n' >&2; return 2; }
+    local packed
+    packed=$(ss7_gsm7_pack "$text") || { printf 'ERROR\tthe string is not packable as GSM 7-bit\n' >&2; return 1; }
+    local opcode opname
+    case "$op" in
+        request) opcode=59; opname=$(ss7_map_opcode_name 59) ;;
+        notify)  opcode=61; opname=$(ss7_map_opcode_name 61) ;;
+        *) printf 'ERROR\top is request or notify\n' >&2; return 2 ;;
+    esac
+    # ussd-DataCodingScheme then ussd-String, both as OCTET STRING components
+    local dcs_tlv str_tlv comp
+    dcs_tlv=$(ss7_tlv 04 "$dcs")
+    str_tlv=$(ss7_tlv 04 "$packed")
+    comp="30$(ss7_byte $(( (${#dcs_tlv} + ${#str_tlv}) / 2 )))${dcs_tlv}${str_tlv}"
+    printf 'operation\t%s\nopcode\t%s\nopcode_name\t%s\n' \
+        "$( [[ "$op" == request ]] && echo 'ProcessUnstructuredSS-Request' || echo 'UnstructuredSS-Notify' )" \
+        "$opcode" "$opname"
+    printf 'dcs\t%s\nstring\t%s\nseptets\t%d\npacked_hex\t%s\n' \
+        "$dcs" "$(ss7_sanitize "$text")" "${#text}" "$packed"
+    printf 'parameter_hex\t%s\nparameter_octets\t%d\n' "$comp" "$(( ${#comp} / 2 ))"
+    printf 'where_it_draws\t%s\n' "the handset screen, as a network notification: no message store entry, no delivery report, and nothing a user can forward to an auditor"
+    printf 'finding\tMEDIUM\ta network-side USSD notification is a text message whose only evidence is what the subscriber remembers reading'
+    printf 'ref\t%s\n' "TS 29.002 17.3 (processUnstructuredSS), TS 23.090 (USSD), TS 24.090 (the air-interface half)"
+    printf 'verdict\t%s\n' "ussd_message_built"
+}
+
 ss7_cmd_build_extra() {  # <verb> [args...]
     local verb="${1:-}"; shift || true
     local msg op label tgt="" msu
@@ -2599,6 +2749,10 @@ ss7_cmd_build_extra() {  # <verb> [args...]
             [[ "$code" =~ ^[0-9]+$ ]] && (( code <= 255 )) || { printf 'ERROR\tusage: --build-activate-ss [ss-code 0-255]\n' >&2; return 2; }
             msg='ActivateSS (supplementary service)'; op=12; label=ss_code; tgt="$code"
             msu=$(ss7_build_activate_ss "$code") || { printf 'ERROR\tcannot encode SS code\n' >&2; return 1; } ;;
+        lcs)
+            [[ -n "${1:-}" ]] || { printf 'ERROR\tusage: --build-lcs <imsi> [--gmlc <E164>]\n' >&2; return 2; }
+            msg='ProvideSubscriberLocation (LCS)'; op=83; label=imsi; tgt="$1"
+            msu=$(ss7_build_lcs "$1" "${2:-}") || { printf 'ERROR\tcannot encode IMSI: %s\n' "$(ss7_sanitize "$1")" >&2; return 1; } ;;
         *)  printf 'ERROR\tunknown build verb: %s\n' "$(ss7_sanitize "${verb:-<none>}")" >&2; return 2 ;;
     esac
     printf 'message\t%s\n'     "$msg"
@@ -3243,6 +3397,28 @@ ss7_selftest() {
     chk fb-detected "$(ss7_fallback_detect "$d/fb.tsv" | awk -F'\t' '$1=="310260000000001"{n++} END{print n+0}')" "1"
     chk fb-not-b "$(ss7_fallback_detect "$d/fb.tsv" | awk -F'\t' '$1=="310260000000002"{n++} END{print n+0}')" "0"
     chk fb-missing "$(ss7_fallback_detect "$d/none.tsv" >/dev/null 2>&1; echo $?)" "1"
+
+    # ── the service plane: CAP, USSD and LCS (module-idea fold) ─────────
+    local capout ussdout lcsout
+    capout=$(ss7_cap_surface)
+    chk cap-ops "$(printf '%s\n' "$capout" | awk -F'\t' '$1=="ops"{print $2}')" "16"
+    chk cap-rows "$(printf '%s\n' "$capout" | awk -F'\t' '$1=="cap"' | wc -l)" "16"
+    chk cap-connect "$(printf '%s\n' "$capout" | awk -F'\t' '$2=="20"{print $3}')" "connect"
+    chk cap-gap "$(printf '%s\n' "$capout" | awk -F'\t' '$2=="41"{print $3}')" "callGap"
+    chk cap-prompt "$(printf '%s\n' "$capout" | awk -F'\t' '$2=="48"{print $3}')" "promptAndCollectUserInformation"
+    chk cap-name "$(ss7_cap_op_name 0)" "initialDP"
+    chk cap-unknown "$(ss7_cap_op_name 199)" "unassigned/unknown"
+    ussdout=$(ss7_cmd_ussd 'AT+COPS?')
+    chk ussd-op "$(fld "$ussdout" opcode)" "59"
+    chk ussd-septets "$(fld "$ussdout" septets)" "8"
+    chk ussd-packed "$(fld "$ussdout" packed_hex)" "41EA6AF8844E7F"
+    chk ussd-notify "$(ss7_cmd_ussd 'hi' --op notify | awk -F'\t' '$1=="opcode"{print $2}')" "61"
+    chk ussd-bad-op "$(ss7_cmd_ussd hi --op shout >/dev/null 2>&1; echo $?)" "2"
+    chk ussd-noarg "$(ss7_cmd_ussd '' >/dev/null 2>&1; echo $?)" "2"
+    local lout
+    lout=$(ss7_cmd_build_extra lcs 310150123456789)
+    chk lcs-op "$(fld "$lout" opcode)" "83"
+    chk lcs-rt "$(fld "$lout" roundtrip_opcode)" "83"
 
     # ── 17. The MAP builders that had no CLI verb ───────────────────────
     # Each verb must name its operation AND round-trip through the decoder:
@@ -4528,6 +4704,8 @@ ss7_cli_main() {
         --ati-answer)    ss7_cmd_ati_answer "${1:-}" ;;
         --build-sri)     ss7_cmd_build_sri "${1:-}" "${2:-}" ;;
         --build-response) ss7_cmd_build_response "$@" ;;
+        --cap-surface)   ss7_cap_surface ;;
+        --build-ussd)    ss7_cmd_ussd "$@" ;;
         --dialogue)      ss7_cmd_dialogue "${1:-}" "${2:-}" ;;
         --build-sri-sm)  ss7_cmd_build_sri_sm "${1:-}" "${2:-}" ;;
         --build-ati)     ss7_cmd_build_ati "${1:-}" "${2:-}" ;;
@@ -4538,6 +4716,7 @@ ss7_cli_main() {
         --build-isd)         ss7_cmd_build_extra isd "${1:-}" ;;
         --build-register-ss) ss7_cmd_build_extra register-ss "${1:-}" "${2:-}" ;;
         --build-activate-ss) ss7_cmd_build_extra activate-ss "${1:-}" ;;
+        --build-lcs)         ss7_cmd_build_extra lcs "${1:-}" "${2:-}" ;;
         --flow)          ss7_cmd_flow "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
         --grx-recon)     ss7_grx_recon "${1:-}" ;;
         --detect)        ss7_cmd_detect "${1:-}" ;;
@@ -4587,6 +4766,11 @@ Usage: $0 COMMAND
   --build-register-ss [ss-code] [forwarded-number]
                              build a RegisterSS MSU (default cfu, code 33)
   --build-activate-ss [ss-code]
+  --build-lcs <imsi> [gmlc]  build a ProvideSubscriberLocation MSU (LCS, opcode 83)
+  --build-ussd <text> [--op request|notify] [--dcs HEX]
+                             build a USSD request or a network-side notification
+  --cap-surface              the CAP operations that change a call, with the
+                             codes pycrate ASN.1 ships (TS 29.078)
                              build an ActivateSS MSU (default cfu, code 33)
   --decode-sigtran <hex>     strip SCTP + M3UA and decode the carried MSU
   --build-m3ua <msu-hex> [routing-context] [network-appearance]
