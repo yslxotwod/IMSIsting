@@ -2512,6 +2512,14 @@ module_id_words(const char *tok)
  * unit is kept, because "signal strength" without "(dBm)" is not a measurement.
  */
 static const char *const plain_keys[] = {
+    "ABNORMAL_BEHAVIOUR\tthe analytics that flags a UE whose traffic stops matching its own history",
+    "EXPECTED_UE_BEHAVIOUR\tthe analytics that describes a UE's usual pattern so a deviation can be named",
+    "NETWORK_PERFORMANCE\tthe analytics that summarises per-slice or per-area performance rather than per UE",
+    "NF_LOAD\tthe analytics that reports how loaded one function is, and what it will hand out next",
+    "QOS_SUSTAINABILITY\tthe analytics that predicts whether a flow's QoS holds for the rest of its life",
+    "SM_CONGESTION\tthe analytics that reports session-management congestion and which slices it hits",
+    "UE_COMMUNICATION\tthe analytics that describes one UE's flows: volume, duration, and what it talked to",
+    "UE_MOBILITY\tthe analytics that predicts where a UE goes next, from where it has been",
     "a1_not_tls\ta1 not tls",
     "a5_1\ta5 1",
     "a5_1_after\ta5 1 after",
@@ -2614,6 +2622,7 @@ static const char *const plain_keys[] = {
     "amplification\tamplification",
     "amplification_factor\tamplification factor",
     "amplifier\tthe amplifier board the published setup used, with its part number",
+    "analytics\tone NWDAF analytics identity, what it returns, and at what granularity",
     "anchor\tone ranging measurement attributed to a cell, ready for the least-squares fix",
     "anchor_mhz\tfrequency the caller supplied as the band entry point",
     "anchor_not_in_this_tree\tthe per-band offset table is absent, so no frequency is claimed",
@@ -2635,6 +2644,7 @@ static const char *const plain_keys[] = {
     "apdu_log\tAPDU log",
     "api\tapi",
     "api_root\tapi root",
+    "apis\thow many northbound exposures this module can describe",
     "apn\tdata network name",
     "application\tthe Diameter application the message belongs to, and what it is for",
     "application_id\tapplication id",
@@ -2761,6 +2771,7 @@ static const char *const plain_keys[] = {
     "bcd_msin\tbcd msin",
     "bch_blocks\tbch blocks",
     "bch_period\tbch period",
+    "bdt\tbackground data transfer: the API that negotiates a transfer window and a price for it",
     "beam_gap_vs_serving_db\tbeam gap vs serving (dB)",
     "beat\twhat the attacker has to exceed at the receiver: the competitor signal plus the margin",
     "before\tbefore",
@@ -2915,6 +2926,7 @@ static const char *const plain_keys[] = {
     "call\tcall",
     "call_a\tthe first of the two calls being compared",
     "call_b\tthe second of the two calls being compared",
+    "callback\tthe URI the far side is told to deliver notifications to, which is where the data lands",
     "callback_num\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "callback_num_atag\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "callback_num_pres_ind\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
@@ -3118,6 +3130,9 @@ static const char *const plain_keys[] = {
     "cla\tcla",
     "claim\twhat the table does and does not claim, stated in one word",
     "claimed\tclaimed",
+    "claimed_address\tthe address you would answer on if discovery returned your entry",
+    "claimed_fqdn\tthe name discovery should return for that NF type once the registration is accepted",
+    "claimed_instance\tthe instance identity the registration claims, which is a UUID the NRF does not verify against anything",
     "class\tclass",
     "classified\tclassified",
     "classmark\tclassmark",
@@ -3171,6 +3186,7 @@ static const char *const plain_keys[] = {
     "command_type\tthe proactive command type octet",
     "commands\tcommands",
     "commit\tcommit",
+    "common_note\tthe sentence that applies to every row above it",
     "comp128_zero_bits\tcomp128 zero bits",
     "comp_date\tcomp date",
     "comp_time\tcomp time",
@@ -3409,6 +3425,7 @@ static const char *const plain_keys[] = {
     "device_effect\twhat the modem does with the class of AT command the card asked for",
     "device_fingerprint\tdevice fingerprint",
     "device_profile_is_an_anchor\tthe eUICC identifier survived the profile rotation and joins the identities back together",
+    "device_trigger\tthe API that makes the network send a binary SMS to wake a device, which is a payload it controls",
     "devices\tdevices",
     "devices_covering\tdevices covering",
 	"devices_parsed\twhether the device list was read as JSON",
@@ -5156,6 +5173,7 @@ static const char *const plain_keys[] = {
     "qer_id\tqer id",
     "qfi\tqfi",
     "qfi_hex\tqfi bytes",
+    "qos_on_demand\tthe API that asks for a QoS change for one flow and reports whether the policy allowed it",
     "qos_time_to_live\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "qos_verbs\tquality of service commands",
     "qpp_f1\tqpp f1",
@@ -5414,6 +5432,7 @@ static const char *const plain_keys[] = {
     "rnti\tradio network temporary ID",
     "rnti_source\trnti source",
     "rnti_store\trnti store",
+    "roaming\tthe exposure that says whether a subscriber is roaming and on which network",
     "role\trole",
     "root\troot",
     "root_cause\tthe design reason the chain works: the plane exists to run with nobody present",
@@ -6409,7 +6428,9 @@ static const char *const plain_keys[] = {
     "up_down_ratio_defined\tup down ratio defined",
     "update\twhat has to happen for a row to be added: reproduce it, test the reproduction, move the date",
     "update_access\tupdate access",
+    "update_body\tthe PATCH body that changes an existing entry instead of adding one",
     "update_far\tthe forwarding rule this message rewrites",
+    "update_path\tthe URL an update is sent to, which carries the instance identity being changed",
     "updated\tupdated",
     "upf\tpacket gateway",
     "upf_markers\tupf markers",
@@ -6517,6 +6538,7 @@ static const char *const plain_keys[] = {
     "weight\tweight",
     "what\twhat",
     "what_a_licence_would_buy\twhat a licensed copy of TS 55.251 and TS 55.252 would let this tree implement",
+    "what_discovery_returns\twhat a requesting function would receive, in the words of the discovery answer",
     "what_i_would_need\twhat i would need",
     "what_it_is_not\twhat this arithmetic does not do",
     "what_it_selects\twhat the UE switches on when it reads this message",
@@ -7848,6 +7870,9 @@ static const ChipRow chip_rows[] = {
     { "40_sba_pivot",        "--n32-bridge",          NEED_NO, DOES_READS },
     { "40_sba_pivot",        "--imds-pivot",          NEED_NO, DOES_BUILDS },
     { "40_sba_pivot",        "--nrf-walk",            NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--nrf-poison",          NEED_NO, DOES_BUILDS },
+    { "40_sba_pivot",        "--nef-apis",            NEED_NO, DOES_READS },
+    { "40_sba_pivot",        "--nwdaf",               NEED_NO, DOES_READS },
     { "40_sba_pivot",        "--rapid-reset",         NEED_NO, DOES_READS },
     { "40_sba_pivot",        "--scope",               NEED_NO, DOES_READS },
     { "40_sba_pivot",        "--selftest",            NEED_NO, DOES_READS },
@@ -34067,10 +34092,75 @@ sbap_build_core(AppState *state, const char *module_id,
     return outer;
 }
 
+/* 40_sba_pivot — the directory has a write side.
+ *
+ * Core network asks the NRF what it holds. This view is the other direction:
+ * a registration that makes the index point at a host you chose, the northbound
+ * that reports on one subscriber, and the analytics subscription that sums a
+ * population. All three are shapes, none of them is sent.
+ */
+static GtkWidget *
+sbap_build_directory(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("DIRECTORY",
+        "Discovery reads the index. A registration writes it, and everything that "
+        "trusts discovery afterwards believes the entry you put there.", &body);
+    GtkWidget *poison_body, *north_body, *analytics_body;
+    GtkWidget *poison = verb_card("POISON THE REGISTRY", &poison_body);
+    GtkWidget *north = verb_card("ASK THE NORTHBOUND", &north_body);
+    GtkWidget *analytics = verb_card("SUBSCRIBE TO THE ANALYTICS", &analytics_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(poison_body),
+            mod_arg_row_prefilled(state, module_id, status, "Register a Function",
+                "--nrf-poison",
+                "AMF amf.5gc.mnc001.mcc001.3gppnetwork.org 10.60.0.9:8080",
+                "An NF type, the FQDN discovery should return for it, and the "
+                "address you would answer on. Then the PATCH that suspends a real "
+                "instance instead."));
+        gtk_box_append(GTK_BOX(poison_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), poison);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(north_body),
+            mod_arg_choices(state, module_id, status, "Pick an exposure", "",
+                "What a northbound API reports about one subscriber: where they "
+                "are, whether they are attached, when they go quiet.",
+                (const char *[]) { "--nef-apis location", "--nef-apis reachability",
+                                   "--nef-apis device-trigger" },
+                (const char *[]) { "Location", "Reachability", "Device Trigger" }, 3));
+        gtk_box_append(GTK_BOX(north_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), north);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(analytics_body),
+            mod_arg_row_prefilled(state, module_id, status, "Subscribe",
+                "--nwdaf", "UE_MOBILITY",
+                "One analytics identity, what the subscription asks to be told, "
+                "and the granularity it comes back at."));
+        gtk_box_append(GTK_BOX(analytics_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), analytics);
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry sbap_entries[] = {
     { "Wire bytes", "dialog-information-symbolic", NULL, sbap_build_wire },
     { "Tokens", "channel-secure-symbolic", NULL, sbap_build_tokens },
     { "Core network", "network-wireless-symbolic", NULL, sbap_build_core },
+    { "Directory", "view-list-symbolic", NULL, sbap_build_directory },
 };
 /* 41_ota_sms — the binary SMS that reaches a card.
  *

