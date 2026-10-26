@@ -2794,6 +2794,463 @@ lcore_cmd_gtpdoor() {
     fi
     printf 'findings\t%s\n' "$n"
 }
+# ── Charging: Ro (Gy) and Rf, TS 32.299 ─────────────────────────────────
+#
+# Ro runs over the Diameter Credit-Control application (RFC 4006,
+# application-id 4) and Rf over the base Accounting application
+# (application-id 3, RFC 6733 §1.3). TS 32.299 §6.1 and §6.2 name both.
+# The tree spoke S6a/S6d and nothing else on the Diameter side, so a
+# deployment could rate-limit authentication while leaving the interface
+# that decides what a session costs entirely unaudited.
+
+LCORE_GY_APP=4
+LCORE_RF_APP=3
+
+# CC-Request-Type, RFC 4006 §8.3.
+lcore_cc_request_type_name() {
+    case "${1:-}" in
+        1) echo "INITIAL_REQUEST" ;;
+        2) echo "UPDATE_REQUEST" ;;
+        3) echo "TERMINATION_REQUEST" ;;
+        4) echo "EVENT_REQUEST" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# Accounting-Record-Type, RFC 6733 §8.19.
+lcore_acct_record_type_name() {
+    case "${1:-}" in
+        1) echo "EVENT_RECORD" ;;
+        2) echo "START_RECORD" ;;
+        3) echo "INTERIM_RECORD" ;;
+        4) echo "STOP_RECORD" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# Names for the charging AVPs the S6a table never had to name. Vendor
+# 10415 codes below 30 collide with base codes (1 is 3GPP-IMSI, not
+# User-Name), so the vendor id decides which table applies.
+lcore_charging_avp_name() {
+    local code="${1:-}" vid="${2:-}"
+    if [[ "$vid" == "10415" ]]; then
+        case "$code" in
+            1)  echo "3GPP-IMSI" ;;
+            2)  echo "3GPP-Charging-Id" ;;
+            3)  echo "3GPP-PDP-Type" ;;
+            4)  echo "3GPP-CG-Address" ;;
+            6)  echo "3GPP-SGSN-Address" ;;
+            7)  echo "3GPP-GGSN-Address" ;;
+            8)  echo "3GPP-IMSI-MCC-MNC" ;;
+            9)  echo "3GPP-GGSN-MCC-MNC" ;;
+            10) echo "3GPP-NSAPI" ;;
+            11) echo "3GPP-Session-Stop-Indicator" ;;
+            12) echo "3GPP-Selection-Mode" ;;
+            13) echo "3GPP-Charging-Characteristics" ;;
+            15) echo "3GPP-SGSN-IPv6-Address" ;;
+            16) echo "3GPP-GGSN-IPv6-Address" ;;
+            18) echo "3GPP-SGSN-MCC-MNC" ;;
+            21) echo "3GPP-RAT-Type" ;;
+            22) echo "3GPP-User-Location-Info" ;;
+            23) echo "3GPP-MS-TimeZone" ;;
+            *)  echo "vendor-avp-$code" ;;
+        esac
+        return 0
+    fi
+    case "$code" in
+        258) echo "Auth-Application-Id" ;;
+        259) echo "Acct-Application-Id" ;;
+        263) echo "Session-Id" ;;
+        264) echo "Origin-Host" ;;
+        268) echo "Result-Code" ;;
+        278) echo "Origin-State-Id" ;;
+        283) echo "Destination-Realm" ;;
+        293) echo "Destination-Host" ;;
+        296) echo "Origin-Realm" ;;
+        415) echo "CC-Request-Number" ;;
+        416) echo "CC-Request-Type" ;;
+        417) echo "CC-Session-Failover" ;;
+        418) echo "CC-Sub-Session-Id" ;;
+        419) echo "CC-Multi-Session-Id" ;;
+        420) echo "CC-Time" ;;
+        421) echo "CC-Total-Octets" ;;
+        422) echo "CC-Input-Octets" ;;
+        423) echo "CC-Output-Octets" ;;
+        424) echo "CC-Service-Specific-Units" ;;
+        431) echo "Granted-Service-Unit" ;;
+        432) echo "Rating-Group" ;;
+        437) echo "Requested-Service-Unit" ;;
+        438) echo "Used-Service-Unit" ;;
+        439) echo "Service-Identifier" ;;
+        440) echo "Service-Parameter-Info" ;;
+        443) echo "Subscription-Id" ;;
+        444) echo "Subscription-Id-Data" ;;
+        450) echo "Subscription-Id-Type" ;;
+        455) echo "Multiple-Services-Indicator" ;;
+        456) echo "Multiple-Services-Credit-Control" ;;
+        458) echo "G-S-U-Pool-Reference" ;;
+        461) echo "Service-Context-Id" ;;
+        480) echo "Accounting-Record-Type" ;;
+        485) echo "Accounting-Record-Number" ;;
+        487) echo "Accounting-Sub-Session-Id" ;;
+        8)   echo "Framed-IP-Address" ;;
+        30)  echo "Called-Station-Id" ;;
+        44)  echo "Acct-Session-Id" ;;
+        50)  echo "Acct-Multi-Session-Id" ;;
+        55)  echo "Event-Timestamp" ;;
+        85)  echo "Acct-Interim-Interval" ;;
+        *)   lcore_diameter_avp_name "$code" ;;
+    esac
+}
+
+# A grouped AVP is built by nesting already-built AVPs inside one header.
+# RFC 6733 §4.1: the payload is the concatenated child AVPs, padded to 4.
+lcore_diameter_build_grouped() {
+    local code="$1" children="$2" flagstr="${3:-M}"
+    lcore_diameter_build_avp "$code" "$children" "$flagstr"
+}
+
+# Subscription-Id is grouped: Subscription-Id-Type (0 E164, 1 IMSI per
+# RFC 4006 §8.3) plus Subscription-Id-Data.
+lcore_charging_subscription_id() {
+    local idtype="$1" value="$2"
+    local inner
+    inner=$(lcore_diameter_build_avp 450 "$(printf '%08X' "$idtype")" M)
+    inner+=$(lcore_diameter_build_utf8_avp 444 "$value" M)
+    lcore_diameter_build_grouped 443 "$inner" M
+}
+
+# Requested-Service-Unit, RFC 4006 §8.14.
+lcore_charging_requested_unit() {
+    local octets="${1:-0}" seconds="${2:-0}"
+    local inner=""
+    (( octets > 0 )) && inner+=$(lcore_diameter_build_avp 421 "$(printf '%016X' "$octets")" M)
+    (( seconds > 0 )) && inner+=$(lcore_diameter_build_avp 420 "$(printf '%08X' "$seconds")" M)
+    [[ -n "$inner" ]] || inner=$(lcore_diameter_build_avp 421 "$(printf '%016X' 0)" M)
+    lcore_diameter_build_grouped 437 "$inner" M
+}
+
+# A Credit-Control-Request. TR 32.299 §6.1.1: the Service-Context-Id for
+# packet-switched charging is 32251@3gpp.org.
+lcore_build_ccr() {
+    local imsi="$1" msisdn="${2:-}" ccrtype="${3:-1}" reqnum="${4:-0}" \
+          octets="${5:-1048576}" seconds="${6:-0}" rating="${7:-}" \
+          service="${8:-}" origin_host="${9:-ocs-client.localdomain}" \
+          origin_realm="${10:-localdomain}" dest_realm="${11:-localdomain}"
+    local sid="${origin_host};$(printf '%08X' $$);$(printf '%08X' "$reqnum")"
+    local avps=""
+    avps+=$(lcore_diameter_build_utf8_avp 263 "$sid" M)
+    avps+=$(lcore_diameter_build_utf8_avp 264 "$origin_host" M)
+    avps+=$(lcore_diameter_build_utf8_avp 296 "$origin_realm" M)
+    avps+=$(lcore_diameter_build_utf8_avp 283 "$dest_realm" M)
+    avps+=$(lcore_diameter_build_avp 258 "$(printf '%08X' "$LCORE_GY_APP")" M)
+    avps+=$(lcore_diameter_build_utf8_avp 461 "32251@3gpp.org" M)
+    avps+=$(lcore_diameter_build_avp 416 "$(printf '%08X' "$ccrtype")" M)
+    avps+=$(lcore_diameter_build_avp 415 "$(printf '%08X' "$reqnum")" M)
+    [[ -n "$imsi" ]] && avps+=$(lcore_charging_subscription_id 1 "$imsi")
+    [[ -n "$msisdn" ]] && avps+=$(lcore_charging_subscription_id 0 "$msisdn")
+    avps+=$(lcore_charging_requested_unit "$octets" "$seconds")
+    [[ -n "$rating" ]] && avps+=$(lcore_diameter_build_avp 432 "$(printf '%08X' "$rating")" M)
+    [[ -n "$service" ]] && avps+=$(lcore_diameter_build_avp 439 "$(printf '%08X' "$service")" M)
+    avps+=$(lcore_diameter_build_avp 455 "$(printf '%08X' 1)" M)
+    avps+=$(lcore_diameter_build_avp 1 "$(lcore_diameter_utf8_hex "$imsi")" MV 10415)
+    avps+=$(lcore_diameter_build_avp 2 "$(printf '%08X' $$)" MV 10415)
+    avps+=$(lcore_diameter_build_avp 3 "00000000" MV 10415)
+    avps+=$(lcore_diameter_build_avp 18 "$(lcore_diameter_utf8_hex 00101)" MV 10415)
+    avps+=$(lcore_diameter_build_avp 21 "06" MV 10415)
+    printf '%s' "$(lcore_diameter_build_msg 272 "$LCORE_GY_APP" 192 1 1 "$avps")"
+}
+
+lcore_diameter_utf8_hex() {
+    local text="$1" hex="" i
+    for (( i = 0; i < ${#text}; i++ )); do
+        hex+=$(printf '%02X' "'${text:$i:1}")
+    done
+    printf '%s' "$hex"
+}
+
+# Rf Accounting-Request, TR 32.299 §6.2.1: nothing is granted here, so
+# the record is the only evidence a session existed.
+lcore_build_acr() {
+    local imsi="$1" rectype="${2:-2}" recnum="${3:-0}" octets="${4:-0}" \
+          origin_host="${5:-ctf.localdomain}" origin_realm="${6:-localdomain}" \
+          dest_realm="${7:-localdomain}"
+    local sid="${origin_host};$(printf '%08X' $$);$(printf '%08X' "$recnum")"
+    local avps=""
+    avps+=$(lcore_diameter_build_utf8_avp 263 "$sid" M)
+    avps+=$(lcore_diameter_build_utf8_avp 264 "$origin_host" M)
+    avps+=$(lcore_diameter_build_utf8_avp 296 "$origin_realm" M)
+    avps+=$(lcore_diameter_build_utf8_avp 283 "$dest_realm" M)
+    avps+=$(lcore_diameter_build_avp 259 "$(printf '%08X' "$LCORE_RF_APP")" M)
+    avps+=$(lcore_diameter_build_avp 480 "$(printf '%08X' "$rectype")" M)
+    avps+=$(lcore_diameter_build_avp 485 "$(printf '%08X' "$recnum")" M)
+    [[ -n "$imsi" ]] && avps+=$(lcore_charging_subscription_id 1 "$imsi")
+    (( octets > 0 )) && avps+=$(lcore_diameter_build_avp 44 "$(lcore_diameter_utf8_hex "$sid")" M)
+    avps+=$(lcore_diameter_build_avp 1 "$(lcore_diameter_utf8_hex "$imsi")" MV 10415)
+    avps+=$(lcore_diameter_build_avp 13 "0800" MV 10415)
+    printf '%s' "$(lcore_diameter_build_msg 271 "$LCORE_RF_APP" 192 2 2 "$avps")"
+}
+
+# ── CLI: --ro-ccr ───────────────────────────────────────────────────────
+lcore_cmd_ro_ccr() {
+    local imsi="${1:-}" msisdn="${2:-}"
+    local ccrtype=1 reqnum=0 octets=1048576 seconds=0 rating="" service=""
+    local origin_host="ocs-client.localdomain"
+    shift 2 2>/dev/null || true
+    while (( $# )); do
+        case "$1" in
+            --type)          ccrtype="${2:-1}"; shift 2 || shift ;;
+            --request-number) reqnum="${2:-0}"; shift 2 || shift ;;
+            --octets)        octets="${2:-0}"; shift 2 || shift ;;
+            --seconds)       seconds="${2:-0}"; shift 2 || shift ;;
+            --rating-group)  rating="${2:-}"; shift 2 || shift ;;
+            --service-id)    service="${2:-}"; shift 2 || shift ;;
+            --origin-host)   origin_host="${2:-}"; shift 2 || shift ;;
+            *) shift ;;
+        esac
+    done
+    [[ "$imsi" =~ ^[0-9]{14,15}$ ]] || {
+        printf 'ERROR\tIMSI must be 14 or 15 digits: %s\n' "$(lcore_sanitize "${imsi:-<none>}")" >&2
+        return 2
+    }
+    [[ "$ccrtype" =~ ^[1-4]$ ]] || { printf 'ERROR\t--type is 1..4 (INITIAL, UPDATE, TERMINATION, EVENT)\n' >&2; return 2; }
+    [[ "$octets" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--octets must be a whole number\n' >&2; return 2; }
+    local hex; hex=$(lcore_build_ccr "$imsi" "$msisdn" "$ccrtype" "$reqnum" \
+                                     "$octets" "$seconds" "$rating" "$service" "$origin_host") || return 1
+    printf 'message\t%s\n' "Credit-Control-Request"
+    printf 'command_code\t272\n'
+    printf 'application_id\t%s\n' "$LCORE_GY_APP"
+    printf 'application\t%s\n' "Gy online charging (RFC 4006 credit-control, TS 32.299 6.1)"
+    printf 'cc_request_type\t%s\n' "$(lcore_cc_request_type_name "$ccrtype")"
+    printf 'cc_request_number\t%s\n' "$reqnum"
+    printf 'subscription_id\tsubscriber:%s\n' "$imsi"
+    printf 'requested_octets\t%s\n' "$octets"
+    printf 'requested_seconds\t%s\n' "$seconds"
+    [[ -n "$rating" ]] && printf 'rating_group\t%s\n' "$rating"
+    [[ -n "$service" ]] && printf 'service_identifier\t%s\n' "$service"
+    printf 'service_context_id\t%s\n' "32251@3gpp.org"
+    printf 'hex\t%s\n' "$hex"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'ref\t%s\n' "TS 32.299 6.1, RFC 4006"
+    if (( octets > 1073741824 )); then
+        printf 'finding\t%s\t%s\n' "quota_grant_request" "HIGH"
+        printf 'note\t%s\n' "a Requested-Service-Unit this size asks the OCS to reserve the balance, not the session: the answer is Grant-Service-Unit or a low Result-Code, so this measures the rating engine, not the subscriber"
+    fi
+    printf 'attack\t%s\n' "a forged CCR at a shared AVP code 443 points the charge at another subscriber; Rating-Group 432 decides which tariff bucket it lands in, and a mismatched group is how one session is billed to another service"
+    printf 'detect\t%s\n' "the OCS sees a CCR whose Session-Id prefix is not the CTF that owns it, and CC-Request-Number jumping without an INTERIM in between"
+    printf 'verdict\t%s\n' "ccr_built"
+}
+
+# ── CLI: --ro-parse ─────────────────────────────────────────────────────
+#
+# Walks the AVP list and names it with the charging table. Grouped AVPs
+# (Subscription-Id 443, Requested-Service-Unit 437, Granted-Service-Unit
+# 431, Multiple-Services-Credit-Control 456) are descended one level,
+# because the value that matters is inside them.
+lcore_charging_parse() {
+    local hex; hex=$(lcore_nfc "${1:-}")
+    lcore_is_hex "$hex" || { printf 'ERROR\tnot hex\n' >&2; return 2; }
+    LCORE_CH_HEX="$hex"
+    lcore_charging_reqtype=""; lcore_charging_reqnum=""; lcore_charging_result=""
+    lcore_charging_subid=""; lcore_charging_req_octets=""; lcore_charging_grant_octets=""
+    local n=0
+    lcore_charging_walk "$hex" 0
+}
+
+# A single walker that prints one row per AVP and descends the grouped
+# ones. Offsets are octets; the hex subscript multiplies by two.
+lcore_charging_walk() {
+    local hex="$1" off="${2:-0}" depth="${3:-0}"
+    local total=$(( ${#hex} / 2 ))
+    local n=0
+    while (( off + 8 <= total )); do
+        local base=$(( off * 2 ))
+        local code=$(( 16#${hex:$base:2} * 16777216 + 16#${hex:$((base+2)):2} * 65536 \
+                    + 16#${hex:$((base+4)):2} * 256 + 16#${hex:$((base+6)):2} ))
+        local fv=$(( 16#${hex:$((base+8)):2} ))
+        local alen=$(( 16#${hex:$((base+10)):2} * 65536 + 16#${hex:$((base+12)):2} * 256 \
+                    + 16#${hex:$((base+14)):2} ))
+        (( alen >= 8 && off + alen <= total )) || break
+        local vbit=$(( (fv >> 7) & 1 ))
+        local hdrlen=8 vid=""
+        if (( vbit == 1 )); then
+            hdrlen=12
+            vid=$(( 16#${hex:$((base+16)):2} * 16777216 + 16#${hex:$((base+18)):2} * 65536 \
+                  + 16#${hex:$((base+20)):2} * 256 + 16#${hex:$((base+22)):2} ))
+        fi
+        local dlen=$(( alen - hdrlen ))
+        local data="${hex:$(((off + hdrlen) * 2)):$((dlen * 2))}"
+        local name; name=$(lcore_charging_avp_name "$code" "$vid")
+        local pad=""
+        (( depth > 0 )) && pad=$(printf '%*s' $(( depth * 2 )) '')
+        printf 'avp\t%s%s\t%s\t%s\t%s\n' "$pad" "$code" "$name" "$dlen" "$data"
+        case "$code" in
+            416) lcore_charging_reqtype=$(( 16#${data:-0} )) ;;
+            415) lcore_charging_reqnum=$(( 16#${data:-0} )) ;;
+            268) lcore_charging_result=$(( 16#${data:-0} )) ;;
+            443|437|431|456)
+                local prev_group="${LCORE_CH_GROUP:-}"
+                LCORE_CH_GROUP="$code"
+                lcore_charging_walk "$data" 0 $(( depth + 1 ))
+                LCORE_CH_GROUP="$prev_group" ;;
+            444)
+                if [[ "${LCORE_CH_SUBTYPE:-1}" == "1" ]]; then
+                    lcore_charging_subid=$(lcore_diameter_hex_text "$data")
+                else
+                    lcore_charging_msisdn=$(lcore_diameter_hex_text "$data")
+                fi ;;
+            450) LCORE_CH_SUBTYPE=$(( 16#${data:-1} )) ;;
+            421)
+                # 437 asks for a unit and 431 grants one; the same child
+                # code 421 means different things inside each.
+                if [[ "${LCORE_CH_GROUP:-}" == "431" ]]; then
+                    lcore_charging_grant_octets=$(( 16#${data:-0} ))
+                else
+                    lcore_charging_req_octets=$(( 16#${data:-0} ))
+                fi ;;
+        esac
+        # AVP Length stops before the 4-octet padding, so the next AVP
+        # starts at the next 4-octet boundary (RFC 6733 4.1).
+        local step=$(( (alen + 3) / 4 * 4 ))
+        off=$(( off + step ))
+        n=$(( n + 1 ))
+        LCORE_CH_COUNT=$(( ${LCORE_CH_COUNT:-0} + 1 ))
+    done
+    return 0
+}
+
+lcore_diameter_hex_text() {
+    local hex="${1:-}" out="" i
+    for (( i = 0; i + 1 < ${#hex}; i += 2 )); do
+        local o=$(( 16#${hex:$i:2} ))
+        (( o == 0 )) && continue
+        out+=$(printf "\\$(printf '%03o' "$o")")
+    done
+    printf '%s' "$out"
+}
+
+lcore_cmd_ro_parse() {
+    local hex; hex=$(lcore_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --ro-parse <hex>\n' >&2; return 2; }
+    lcore_is_hex "$hex" || { printf 'ERROR\tnot hex\n' >&2; return 1; }
+    local hdr; hdr=$(lcore_diameter_parse_header "$hex") || return 1
+    printf '%s\n' "$hdr" | grep -v '^body' | sed 's/^/header./'
+    local body; body=$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="body"{print $2; exit}')
+    LCORE_CH_COUNT=0; LCORE_CH_FLAGS="$hdr"; LCORE_CH_GROUP=""; LCORE_CH_SUBTYPE=1
+    lcore_charging_msisdn=""; lcore_charging_subid=""
+    lcore_charging_parse "$body"
+    printf 'avps\t%s\n' "${LCORE_CH_COUNT:-0}"
+    printf 'cc_request_type\t%s\n' "$(lcore_cc_request_type_name "${lcore_charging_reqtype:-}")"
+    printf 'cc_request_number\t%s\n' "${lcore_charging_reqnum:-}"
+    [[ -n "${lcore_charging_subid:-}" ]] && printf 'subscription_id\t%s\n' "$lcore_charging_subid"
+    [[ -n "${lcore_charging_msisdn:-}" ]] && printf 'subscription_id_msisdn\t%s\n' "$lcore_charging_msisdn"
+    [[ -n "${lcore_charging_req_octets:-}" ]] && printf 'requested_octets\t%s\n' "$lcore_charging_req_octets"
+    [[ -n "${lcore_charging_grant_octets:-}" ]] && printf 'granted_octets\t%s\n' "$lcore_charging_grant_octets"
+    [[ -n "${lcore_charging_result:-}" ]] && printf 'result_code\t%s\n' "$lcore_charging_result"
+    local verdict="parsed"
+    (( ${lcore_charging_result:-0} >= 4010 && ${lcore_charging_result:-0} <= 4012 )) && verdict="parsed_insufficient_balance"
+    printf 'verdict\t%s\n' "$verdict"
+}
+
+# ── CLI: --rf-acr ───────────────────────────────────────────────────────
+#
+# Rf does not grant anything: the record is the evidence. A forged STOP
+# record with a small volume is how a session that happened disappears
+# from the bill.
+lcore_cmd_rf_acr() {
+    local imsi="" rectype=2 recnum=0 octets=0
+    if [[ "${1:-}" =~ ^[0-9]{14,15}$ ]]; then imsi="$1"; shift; fi
+    while (( $# )); do
+        case "$1" in
+            --type)    rectype="${2:-2}"; shift 2 || shift ;;
+            --number)  recnum="${2:-0}"; shift 2 || shift ;;
+            --octets)  octets="${2:-0}"; shift 2 || shift ;;
+            *) shift ;;
+        esac
+    done
+    [[ "$imsi" =~ ^[0-9]{14,15}$ ]] || {
+        printf 'ERROR\tIMSI must be 14 or 15 digits: %s\n' "$(lcore_sanitize "${imsi:-<none>}")" >&2
+        return 2
+    }
+    [[ "$rectype" =~ ^[1-4]$ ]] || { printf 'ERROR\t--type is 1..4 (EVENT, START, INTERIM, STOP)\n' >&2; return 2; }
+    local hex; hex=$(lcore_build_acr "$imsi" "$rectype" "$recnum" "$octets") || return 1
+    printf 'message\t%s\n' "Accounting-Request"
+    printf 'command_code\t271\n'
+    printf 'application_id\t%s\n' "$LCORE_RF_APP"
+    printf 'application\t%s\n' "Rf offline charging (RFC 6733 accounting, TS 32.299 6.2)"
+    printf 'accounting_record_type\t%s\n' "$(lcore_acct_record_type_name "$rectype")"
+    printf 'accounting_record_number\t%s\n' "$recnum"
+    printf 'subscription_id\tsubscriber:%s\n' "$imsi"
+    printf 'volume_octets\t%s\n' "$octets"
+    printf 'hex\t%s\n' "$hex"
+    printf 'octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'grants_anything\t%s\n' "no"
+    printf 'ref\t%s\n' "TS 32.299 6.2, RFC 6733 1.3"
+    printf 'attack\t%s\n' "a STOP record is the only claim that the session ended, so a forged one with a small volume closes a session that transferred terabytes; a duplicate record number reuses a correlation key the mediation system already saw"
+    printf 'detect\t%s\n' "SGSN and GGSN records for the same Charging-Id must agree on volume and duration; a STOP without a matching START, or a record number that repeats, is the tell"
+    printf 'verdict\t%s\n' "acr_built"
+}
+
+# ── CLI: --diameter-peer ────────────────────────────────────────────────
+#
+# The peer layer, RFC 6733 6.6: a Diameter peer is authenticated by IPsec
+# or TLS, and nothing else. Origin-Host is a string, and every capability
+# exchange below is decided on that string.
+lcore_cmd_diameter_peer() {
+    local kind="${1:-cer}"
+    local hdr_common
+    hdr_common=$(lcore_diameter_build_msg 257 0 192 0 0 "$(lcore_diameter_build_utf8_avp 264 "hss-clone.localdomain" M)$(lcore_diameter_build_utf8_avp 296 localdomain M)")
+    case "$kind" in
+        cer|cea|dpr|dpa|all) ;;
+        *) printf 'ERROR\tunknown peer message: %s\n' "$(lcore_sanitize "$kind")" >&2
+           printf 'WHY\tknown messages are cer, cea, dpr, dpa, all\n' >&2; return 2 ;;
+    esac
+    printf 'peer\tmessage\tcommand\tflags\tpurpose\n'
+    printf 'peer\tCapabilities-Exchange-Request\t257\t0x80\tannounces an Origin-Host and the applications it claims\n'
+    printf 'peer\tCapabilities-Exchange-Answer\t257\t0x00\taccepts or rejects that claim\n'
+    printf 'peer\tDisconnect-Peer-Request\t282\t0x80\tasks a peer to close the connection\n'
+    printf 'peer\tDisconnect-Peer-Answer\t282\t0x00\tconfirms it\n'
+    printf 'capability_hex\t%s\n' "$hdr_common"
+    printf 'peer_identity\t%s\n' "Origin-Host and Origin-Realm, both self-declared strings"
+    printf 'authenticated_by\t%s\n' "IPsec (RFC 6733 6.6.1) or TLS (6.6.2), never by the AVP"
+    printf 'finding\tpeer_identity_is_a_string\tHIGH\n'
+    printf 'note\t%s\n' "a peer that is trusted by address, or by a shared realm, will accept this CER: the tree can build the claim, and what decides whether it lands is the interconnect ACL, which is not in this module"
+    printf 'finding\tcer_storm\tMEDIUM\n'
+    printf 'note\t%s\n' "every CER that fails opens a reconnect timer, so a flood of them costs the far peer a table entry per second without a single subscriber"
+    printf 'finding\tsession_id_collision\tMEDIUM\n'
+    printf 'note\t%s\n' "Session-Id (RFC 6733 8.8) is the correlation key for charging; two CTFs that mint the same one make two sessions look like one, which is a way to hide the second"
+    printf 'detect\t%s\n' "an Origin-Host that resolves to an address outside the interconnect ACL, and a Session-Id prefix that no configured CTF owns"
+    printf 'verdict\t%s\n' "peer_layer_shaped"
+}
+
+# ── CLI: --cdr-model ────────────────────────────────────────────────────
+#
+# TS 32.298 lists the fields a PS CDR carries. The module already scores
+# a CDR file for anomalies (--cdr-fraud); this states which of its fields
+# a forger touches, because a volume number with no second record behind
+# it is an assertion, not a measurement.
+lcore_cmd_cdr_model() {
+    printf 'cdr\tfield\tasn1_type\tin_the_record\tattacker_touches\tcheck\n'
+    printf 'cdr\trecordType\tEnumerated (pDPRecord, sGWRecord)\twhich node wrote it\tno\tmust match the node that wrote the file\n'
+    printf 'cdr\tservedIMSI\tTBCDString\tthe subscriber\tno\tcompared against the SGSN record for the same Charging-Id\n'
+    printf 'cdr\tservedIMEISV\tTBCDString\tthe handset\tno\tnot available on every record\n'
+    printf 'cdr\tchargingID\tInteger32\tthe session key\tno\tchosen by the node, and the join key for both records\n'
+    printf 'cdr\tsgsnAddress\tIPAddress\tthe node\tno\tthe address must belong to the PLMN that claims it\n'
+    printf 'cdr\tggsnAddress\tIPAddress\tthe node\tno\tthe pair of addresses is what mediation expects\n'
+    printf 'cdr\tlistOfTrafficVolumes\tSEQUENCE OF ChangeOfCharCondition\tthe volume\tYES\tup, down and duration per interim interval\n'
+    printf 'cdr\tchangeCondition\tEnumerated\tthe cause of the record\tYES\tthe last one must be recordClosure or tariffTimeChange\n'
+    printf 'cdr\tchangeTime\tTimeStamp\tthe wall clock\tYES\tmonotonic against the node clock and the START record\n'
+    printf 'cdr\trATType\tEnumerated\tthe access\tYES\tmust agree with what the RAN reported on S1\n'
+    printf 'cdr\tsgsnPLMNIdentifier\tTBCDString\tthe serving PLMN\tYES\tchecked against the IMSI prefix at roaming settlement\n'
+    printf 'cdr\tcauseForRecClosing\tEnumerated\twhy it closed\tYES\tan abnormal cause explains a short record\n'
+    printf 'finding\tcdr_volume_is_an_assertion\tMEDIUM\n'
+    printf 'note\t%s\n' "a CDR states a volume; nothing in the record proves the octets moved, so the only check that costs an attacker work is a second, independently written record for the same Charging-Id"
+    printf 'finding\tmediation_trust\tMEDIUM\n'
+    printf 'note\t%s\n' "TAP files leave the operator as files: the integrity control is the file checksum, and it proves the file was not corrupted, not that its numbers were true"
+    printf 'ref\t%s\n' "TS 32.298, TS 32.299, GSMA TD.57 (TAP)"
+    printf 'verdict\t%s\n' "cdr_model_stated"
+}
+
 # CDR anomaly: a subscriber whose per-session volume is implausible against
 # their own baseline is the overbilling/bypass signature.
 lcore_cmd_cdr_fraud() {
@@ -3402,6 +3859,40 @@ lcore_selftest() {
     chk flood-pool      "$(printf '%s\n' "$fm" | awk -F'\t' '$1=="state" && $2=="vector_pool"{print ($3=="5 vectors per subscriber: five re-authentications -- five Authentication Information Requests answered -- retire every vector for that IMSI, and the sixth attach cannot complete until the HSS refreshes")?"yes":"no"}')" "yes"
     chk flood-finding   "$(printf '%s\n' "$fm" | awk -F'\t' '$1=="finding" && $2=="vector_pool_per_subscriber"{print $3}')" "HIGH"
     chk flood-noargs    "$(lcore_flood_model a b c >/dev/null 2>&1; echo $?)" "2"
+    # ── charging (Ro/Rf) and the peer layer (TS 32.299) ─────────────
+    local ccr ccrhex acr peer cdr
+    ccr=$(lcore_cmd_ro_ccr 310150123456789 +15550100 --octets 1048576 2>/dev/null)
+    chk chg-ccr-command "$(printf '%s\n' "$ccr" | awk -F'\t' '$1=="command_code"{print $2}')" "272"
+    chk chg-ccr-app     "$(printf '%s\n' "$ccr" | awk -F'\t' '$1=="application_id"{print $2}')" "4"
+    chk chg-ccr-type    "$(printf '%s\n' "$ccr" | awk -F'\t' '$1=="cc_request_type"{print $2}')" "INITIAL_REQUEST"
+    chk chg-ccr-ctx     "$(printf '%s\n' "$ccr" | awk -F'\t' '$1=="service_context_id"{print $2}')" "32251@3gpp.org"
+    ccrhex=$(printf '%s\n' "$ccr" | awk -F'\t' '$1=="hex"{print $2}')
+    chk chg-ccr-verdict "$(printf '%s\n' "$ccr" | awk -F'\t' '$1=="verdict"{print $2}')" "ccr_built"
+    chk chg-ccr-big     "$(lcore_cmd_ro_ccr 310150123456789 "" --octets 2147483648 2>/dev/null | awk -F'\t' '$1=="finding" && $2=="quota_grant_request"{print $3}')" "HIGH"
+    chk chg-ccr-badimsi "$(lcore_cmd_ro_ccr 12345 >/dev/null 2>&1; echo $?)" "2"
+    chk chg-ccr-badtype "$(lcore_cmd_ro_ccr 310150123456789 "" --type 9 >/dev/null 2>&1; echo $?)" "2"
+    local rt
+    rt=$(lcore_cmd_ro_parse "$ccrhex" 2>/dev/null)
+    chk chg-rt-type     "$(printf '%s\n' "$rt" | awk -F'\t' '$1=="cc_request_type"{print $2}')" "INITIAL_REQUEST"
+    chk chg-rt-imsi     "$(printf '%s\n' "$rt" | awk -F'\t' '$1=="subscription_id"{print $2}')" "310150123456789"
+    chk chg-rt-msisdn   "$(printf '%s\n' "$rt" | awk -F'\t' '$1=="subscription_id_msisdn"{print $2}')" "+15550100"
+    chk chg-rt-octets   "$(printf '%s\n' "$rt" | awk -F'\t' '$1=="requested_octets"{print $2}')" "1048576"
+    chk chg-rt-avps     "$(printf '%s\n' "$rt" | awk -F'\t' '$1=="avps"{print $2}')" "22"
+    chk chg-rt-grouped  "$(printf '%s\n' "$rt" | grep -c '^avp	[[:space:]]*450	Subscription-Id-Type')" "2"
+    acr=$(lcore_cmd_rf_acr 310150123456789 --type 4 --octets 1024 2>/dev/null)
+    chk chg-acr-command "$(printf '%s\n' "$acr" | awk -F'\t' '$1=="command_code"{print $2}')" "271"
+    chk chg-acr-app     "$(printf '%s\n' "$acr" | awk -F'\t' '$1=="application_id"{print $2}')" "3"
+    chk chg-acr-type    "$(printf '%s\n' "$acr" | awk -F'\t' '$1=="accounting_record_type"{print $2}')" "STOP_RECORD"
+    chk chg-acr-nogrant "$(printf '%s\n' "$acr" | awk -F'\t' '$1=="grants_anything"{print $2}')" "no"
+    chk chg-acr-badtype "$(lcore_cmd_rf_acr 310150123456789 --type 7 >/dev/null 2>&1; echo $?)" "2"
+    peer=$(lcore_cmd_diameter_peer cer 2>/dev/null)
+    chk chg-peer-rows   "$(printf '%s\n' "$peer" | grep -c '^peer	')" "5"
+    chk chg-peer-ident  "$(printf '%s\n' "$peer" | awk -F'\t' '$1=="finding" && $2=="peer_identity_is_a_string"{print $3}')" "HIGH"
+    chk chg-peer-bad    "$(lcore_cmd_diameter_peer bogus >/dev/null 2>&1; echo $?)" "2"
+    cdr=$(lcore_cmd_cdr_model 2>/dev/null)
+    chk chg-cdr-fields  "$(printf '%s\n' "$cdr" | awk -F'\t' '$1=="cdr" && $2!="field"' | wc -l)" "12"
+    chk chg-cdr-touch   "$(printf "%s\n" "$cdr" | awk -F"\t" '$1=="cdr" && $5=="YES"' | wc -l)" "6"
+    chk chg-cdr-finding "$(printf '%s\n' "$cdr" | awk -F'\t' '$1=="finding" && $2=="cdr_volume_is_an_assertion"{print $3}')" "MEDIUM"
     chk flood-small     "$(lcore_flood_model 10 10 1 | awk -F'\t' '$1=="leg_fit" && $2=="gtpv2-c"{print $3}')" "feasible"
     chk gtpc-send-no-host      "$(lcore_cmd_gtpc_send >/dev/null 2>&1; echo $?)" "2"
     chk diam-send-no-host      "$(lcore_cmd_diameter_send >/dev/null 2>&1; echo $?)" "2"
@@ -3924,6 +4415,11 @@ lcore_cli_main() {
         --gtp-modify-bearer) lcore_cmd_gtp_modify_bearer "${1:-}" "${2:-5}" ;;
         --gtp-in-gtp)    lcore_cmd_gtp_in_gtp "$@" ;;
         --mbms-session)  lcore_cmd_mbms_session "$@" ;;
+        --ro-ccr)        lcore_cmd_ro_ccr "$@" ;;
+        --ro-parse)      lcore_cmd_ro_parse "${1:-}" ;;
+        --rf-acr)        lcore_cmd_rf_acr "$@" ;;
+        --diameter-peer) lcore_cmd_diameter_peer "${1:-cer}" ;;
+        --cdr-model)     lcore_cmd_cdr_model ;;
         --gtpc-send)     lcore_cmd_gtpc_send "$@" ;;
         --flood-model)   lcore_flood_model "${1:-2000}" "${2:-500}" "${3:-100}" ;;
         --diameter-send) lcore_cmd_diameter_send "$@" ;;
