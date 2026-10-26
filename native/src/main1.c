@@ -2548,6 +2548,8 @@ static const char *const plain_keys[] = {
     "acceptance\twhat a real acceptance test would have to record, and what this module can state without one",
     "accounting_record_number\tidentifies the record within a session, in order, so a gap is visible",
     "accounting_record_type\tEVENT, START, INTERIM or STOP; only STOP claims the session ended",
+    "accuracy_m_mean\tThe mean of the accuracy figures in a log of location answers, in metres",
+    "accuracy_m_min\tThe best accuracy any answer in the log carried",
     "ack\tack",
     "acr_built\tthe Accounting request was built; on Rf nothing is granted, only claimed",
     "action\taction",
@@ -2630,11 +2632,15 @@ static const char *const plain_keys[] = {
     "ancount\tancount",
     "angle_deg\tangle (degrees)",
     "answer\twhat the paged handset is expected to send back",
+    "answer_carries\tWhat the answer to one location request actually contains",
     "answer_dtid\tanswer dialogue id",
     "answer_invoke\tanswer invoke id",
     "answer_ip\tanswer ip",
+    "answer_meaning\tWhat that answer shape is good for, stated plainly",
     "answer_otid\tanswer originating id",
+    "answer_scale\tThe scale a location answer resolves to",
     "answering\tthe shape of the answer that comes back",
+    "answers\tHow many location answers a log holds",
     "antenna\tthe antenna the published setup used, with its gain",
     "antenna_ports\tantenna ports",
     "any_channel\tany channel",
@@ -3147,7 +3153,13 @@ static const char *const plain_keys[] = {
     "cleared_field\tcleared field",
     "cleartext_imsi\tan identifier sent without protection",
 	"cleartext_msin\tnull-scheme observations whose MSIN travelled in the clear",
+    "client\tHow many answers one location client received",
     "client_auth\twhat SMPP over TLS changes, or does not",
+    "client_name\tThe name a location client put in its own request",
+    "client_subscriber_pairs\tHow many distinct client and subscriber pairs a log holds",
+    "client_type\tThe declared category of a location client",
+    "client_types\tHow many client categories the specifications name",
+    "clients\tHow many distinct location clients appear in a log",
     "clock\tthe timestamp of a message is not later than the one before it, so the log cannot be ordered",
     "close\tclose",
     "closed\tclosed",
@@ -3557,6 +3569,7 @@ static const char *const plain_keys[] = {
     "element\tone element of the answer body",
     "embedded_mmi_trigger\tembedded mmi trigger",
     "embedded_url\tembedded url",
+    "emergency_answers\tAnswers given to a request labelled emergency",
     "emm_cause\temm reason",
     "emm_cause_name\temm reason name",
     "enabled_profiles\thow many profiles the modelled card has enabled, which is one at most",
@@ -3716,6 +3729,7 @@ static const char *const plain_keys[] = {
     "first_mismatch_bit\tfirst mismatch bit",
     "first_occasion\tfirst occasion",
     "first_octet\tfirst octet",
+    "first_repeated_subscriber\tThe first subscriber in a log who was located more than once",
     "first_sample\tsample index of the first page",
     "first_seen\tfirst seen",
     "first_symbol\tfirst symbol",
@@ -3833,6 +3847,7 @@ static const char *const plain_keys[] = {
     "generation\tgeneration",
     "generator\tgenerator",
     "generic_nack\tgeneric nack",
+    "geographic_answers\tAnswers that carried a position rather than a cell",
     "geometry\tthe distance and delay figures for a link",
     "gfbr_dl_bps\tgfbr downlink (bit/s)",
     "gfbr_dl_display\tgfbr downlink display",
@@ -4285,6 +4300,7 @@ static const char *const plain_keys[] = {
     "latitude\tlatitude",
     "latitude_sign\tlatitude sign",
     "latt\tlatt",
+    "lawful_intercept_answers\tAnswers given under a lawful intercept label",
     "layer\tlayer",
     "layer2\tthe link layer a standard uses",
     "layers\tlayers",
@@ -4344,6 +4360,8 @@ static const char *const plain_keys[] = {
     "location_estimate\tlocation estimate",
     "location_exposed\tlocation exposed",
     "location_reason\tlocation reason",
+    "location_type\tThe shape of answer a location request asks for",
+    "location_types\tHow many answer shapes the service defines",
     "location_update\tlocation update",
     "location_update_burst\tlocation update burst",
     "lock\tlock",
@@ -4715,6 +4733,7 @@ static const char *const plain_keys[] = {
     "not_before\tissue date of the certificate",
     "not_determinable\tnot determinable",
     "not_encoded\tnot encoded",
+    "not_entitled\tA row naming who may not ask for a position",
     "not_needed\tequipment the surface does not require",
     "not_performed\tnot performed",
     "not_public\tthe parts of the algorithm and the vectors that the 3GPP licence keeps out of the public catalogue",
@@ -5134,6 +5153,7 @@ static const char *const plain_keys[] = {
     "priority_flag\tpriority flag",
     "priority_level\tpriority level",
     "priority_present\tpriority present",
+    "privacy_check\tWhat stands in for a consent check on a location request",
     "privacy_form\tthe identity meant to change",
     "privacy_form\tthe decorated NAI form that hides the subscriber",
     "privacy_indicator\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
@@ -5420,6 +5440,7 @@ static const char *const plain_keys[] = {
     "request_sequence_number\trequest sequence number",
     "request_uri\tthe urn a SIP request is addressed to, which for an emergency call is the service and not a user",
     "requested\trequested",
+    "requested_accuracy_m\tThe accuracy a location request asks for, in metres",
     "requested_count\trequested count",
     "requested_octets\tthe volume the client asks the server to reserve before it is used",
     "requested_seconds\tthe duration the client asks the server to reserve",
@@ -5452,6 +5473,7 @@ static const char *const plain_keys[] = {
     "response_delay_ms\tresponse delay (ms)",
     "response_hex\tresponse bytes",
     "response_raw\tresponse raw",
+    "response_time_s\tThe delay a location request allows, in seconds",
     "responses\tresponses",
     "result\tresult",
     "reuse\tthe same counter value twice",
@@ -6104,6 +6126,7 @@ static const char *const plain_keys[] = {
     "subscriber_state\tthe state the network reports for the subscriber",
     "subscribers\tsubscribers",
     "subscribers_file\tsubscribers file",
+    "subscribers_located_more_than_once\tHow many subscribers in a log were located more than once",
     "subscribes\tthe notification subscription being posted",
     "subscription\tsubscription",
     "subscription_id\tthe subscriber the charge is for, as an IMSI",
@@ -6188,6 +6211,7 @@ static const char *const plain_keys[] = {
     "target\ttarget",
     "target_imsi\ttarget subscriber ID",
     "target_nf\ttarget nf",
+    "target_subscriber\tThe subscriber a location request is about",
     "target_type\ttarget type",
     "target_ue\ttarget handset",
     "tau\ttau",
@@ -6519,6 +6543,7 @@ static const char *const plain_keys[] = {
     "validity_period\tvalidity period",
     "validity_s\thow long the SIB19 information stays valid",
     "value\tvalue",
+    "value_added_answers\tAnswers given to a commercial client",
     "value_hex\tvalue hex",
     "value_octets\ta row of the optional-parameter builder",
     "variant\tvariant",
@@ -6530,6 +6555,7 @@ static const char *const plain_keys[] = {
     "vectors\tvectors",
     "vectors_per_subscriber\tauthentication proofs held per subscriber",
     "vehicles\thow many distinct ids the capture holds",
+    "velocity_answers\tAnswers that carried a speed and a bearing",
     "velocity_mps\tvelocity mps",
     "vendor\tvendor",
     "verb\tcommand",
@@ -6612,16 +6638,19 @@ static const char *const plain_keys[] = {
     "what_it_proves\tthe sentence that separates identity from assertion: a signature names a key, never a person",
     "what_it_selects\twhat the UE switches on when it reads this message",
     "what_it_would_not_buy\tthe algorithms no licence can supply because 3GPP never published them",
+    "what_proves_the_client\tWhat establishes the identity of the client that asked",
     "what_that_costs\twhat SMPP over TLS changes, or does not",
     "what_the_core_authenticated\tthe subscription that actually sent the message, as opposed to the name in it",
     "what_the_display_shows\twhat the receiving handset puts on the screen",
     "what_the_receiver_can_compare\twhat a receiver can check the originating address against, which for a name is nothing",
+    "what_the_target_is_told\tWhether the subscriber learns that a positioning session happened",
     "what_this_is\twhat this arithmetic is",
     "what_this_is_not\tthe boundary of the tool, stated where a reader would otherwise assume more",
     "when\twhen",
     "where\twhere",
     "where_it_draws\twhat the handset does with a network-side USSD notification, and what evidence it leaves",
     "where_it_was_run\tthe environment each mode was actually run in",
+    "who_is_told\tWho is informed that a location request was made",
     "why\twhy",
     "why\twhy a verb handed off instead of acting",
     "why_65\twhy the attack needs the number of keystream bits it needs, in the protocol's own framing",
@@ -6636,6 +6665,7 @@ static const char *const plain_keys[] = {
     "window_frames\twindow frames",
     "window_seconds\twindow seconds",
     "windows\thow many time windows the spectrogram was cut into",
+    "wire\tThe protocol layer that carries a service, and who owns it",
     "wire_code\twire code",
     "wire_octets\twire octets",
     "with_fix\twith fix",
@@ -8144,6 +8174,10 @@ static const ChipRow chip_rows[] = {
     { "46_lpp",              "--help",                NEED_NO, DOES_READS },
     { "46_lpp",              "--info",                NEED_NO, DOES_READS },
     { "46_lpp",              "--list-pids",           NEED_CAP, DOES_READS },
+    { "46_lpp",              "--lcs-ask",             NEED_NO, DOES_BUILDS },
+    { "46_lpp",              "--lcs-audit",           NEED_NO, DOES_READS },
+    { "46_lpp",              "--lcs-entitlement",     NEED_NO, DOES_READS },
+    { "46_lpp",              "--lcs-ladder",          NEED_NO, DOES_READS },
     { "46_lpp",              "--menu",                NEED_NO, DOES_READS },
     { "46_lpp",              "--otdoa-assist",        NEED_CAP, DOES_READS },
     { "46_lpp",              "--otdoa-request",       NEED_CAP, DOES_READS },
@@ -37312,10 +37346,85 @@ lpp_build_supl(AppState *state, const char *module_id,
     return outer;
 }
 
+lpp_build_lcs(AppState *state, const char *module_id,
+               GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("WHO IS ASKING WHERE",
+        "The positioning protocols measure. This is the service wrapped around "
+        "them: one request, one answer, and the fact that every answer is a "
+        "question someone asked about a subscriber who is never told.", &body);
+    GtkWidget *ask_body, *ladder_body, *ent_body, *audit_body;
+    GtkWidget *ask = verb_card("ONE REQUEST", &ask_body);
+    GtkWidget *ladder = verb_card("WHAT AN ANSWER RESOLVES TO", &ladder_body);
+    GtkWidget *ent = verb_card("WHO MAY ASK", &ent_body);
+    GtkWidget *audit = verb_card("A LOG OF ANSWERS", &audit_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ask_body),
+            mod_arg_choices(state, module_id, status, "Ask as", "",
+                "The client type is a field in the request, not a credential - "
+                "an emergency label is the whole privacy control, and nothing "
+                "downstream can tell a real PSAP from a label.",
+                (const char *[]) { "--lcs-ask --client-type emergency",
+                                   "--lcs-ask --client-type value-added --client weather-app --accuracy 25",
+                                   "--lcs-ask --client-type lawful-intercept",
+                                   "--lcs-ask --location-type velocity" },
+                (const char *[]) { "Emergency", "Commercial", "Intercept",
+                                   "Velocity" }, 4));
+        gtk_box_append(GTK_BOX(ask_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ask);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ladder_body),
+            module_action_button(state, module_id, status,
+                "Read the shapes", "--lcs-ladder",
+                "Cell, tracking area, position, velocity, civic address: what "
+                "each answer carries and what scale it actually resolves."));
+        gtk_box_append(GTK_BOX(ladder_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ladder);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(ent_body),
+            module_action_button(state, module_id, status,
+                "Read the categories", "--lcs-entitlement",
+                "The four client types the specifications name, what each may "
+                "ask for, and what the target is told - which is nothing."));
+        gtk_box_append(GTK_BOX(ent_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), ent);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(audit_body),
+            mod_arg_row(state, module_id, status, "Account for a log",
+                "--lcs-audit", "answers.tsv",
+                "client, client_type, location_type, subscriber, accuracy_m, t. "
+                "It separates one question from a track: a subscriber located "
+                "four times looks like four harmless answers."));
+        gtk_box_append(GTK_BOX(audit_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), audit);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry lpp_entries[] = {
     { "Build message", "dialog-information-symbolic", NULL, lpp_build_messages },
     { "Procedures", "system-search-symbolic", NULL, lpp_build_procedures },
     { "Positioning", "network-transmit-receive-symbolic", NULL, lpp_build_supl },
+    { "Location service", "find-location-symbolic", NULL, lpp_build_lcs },
 };
 /* 47_wifioff — VoWiFi / ePDG Attacks.
  *

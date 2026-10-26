@@ -2242,6 +2242,217 @@ against the same serving cell.
 EOF
 }
 
+# ── LCS — who may ask where a subscriber is ────────────────────────────
+# The module owns the positioning protocols (LPP, LPPa, SUPL). This section
+# owns the service around them: the request that starts a positioning session,
+# what the answer is allowed to contain, and what a pile of answers adds up to.
+# The Diameter carriage (SLh, SLg) belongs to the wire layer of 11_lte_core; this
+# names the messages and refuses to print octets it cannot referee.
+
+LPP_LCS_CLIENT_TYPES="emergency value-added lawful-intercept plmn-operator"
+
+lpp_lcs_client_type_name() {
+    case "${1,,}" in
+        emergency)        echo "emergency" ;;
+        value-added|value-added-services|vas) echo "value-added" ;;
+        lawful-intercept|li) echo "lawful-intercept" ;;
+        plmn-operator|operator) echo "plmn-operator" ;;
+        *) return 1 ;;
+    esac
+}
+
+lpp_lcs_location_type_name() {
+    case "${1,,}" in
+        ecgi|cell)      echo "ecgi" ;;
+        tai|tracking-area) echo "tai" ;;
+        geo|geographic) echo "geo" ;;
+        velocity)       echo "velocity" ;;
+        civic)          echo "civic" ;;
+        *) return 1 ;;
+    esac
+}
+
+lpp_lcs_ladder() {
+    # location type, what the answer carries, the scale it resolves, and what
+    # that scale actually means for whoever asked.
+    cat <<'LADDER'
+location_type	ecgi	the E-UTRAN cell global identity of the serving cell	cell	six octets of cell id; resolves to a cell, and a cell is 100 m to 2 km in practice
+location_type	tai	the tracking area of the serving cell	area	the registration area the subscriber is registered in; km scale, and a rural TA can be tens of km
+location_type	geo	latitude and longitude with an accuracy figure	metres	the answer the requester actually wanted; the accuracy field is the network choosing what to admit
+location_type	velocity	speed and bearing for the moving subscriber	metres plus a direction	exists so that it can be sampled again: one velocity is a datapoint, two are a track
+location_type	civic	a civic address	street	a postal address, which resolves to a building rather than a point
+LADDER
+}
+
+lpp_cmd_lcs_ladder() {
+    local rows n
+    rows="$(lpp_lcs_ladder)"
+    printf 'spec\tTS 29.172\tSLh and SLg, the Diameter carriage of LCS\n'
+    printf 'spec\tTS 29.171\tLCS-AP, the same service over S1 between MME and E-SMLC\n'
+    printf 'spec\tTS 23.271\tLCS stage 2: the request, the answer, the privacy check\n'
+    printf 'wire\tDiameter\tnot encoded here: 11_lte_core owns the AVP layer (--diameter-peer)\n'
+    printf 'wire\tLPP\tpositioning messages are this module (--otdoa-assist, --parse-position)\n'
+    n="$(printf '%s\n' "$rows" | grep -c '^location_type')"
+    printf 'location_types\t%s\n' "$n"
+    printf '%s\n' "$rows"
+    printf 'limit\tThe scale column is deployment-dependent: a cell id is not a distance, and an accuracy field is what the network chose to admit.\n'
+    printf 'verdict\tlcs_granularity_stated\n'
+}
+
+lpp_lcs_entitlement() {
+    cat <<'ENT'
+client_type	emergency	may ask	yes	no consent, no subscription check, position goes to the PSAP	TS 23.271 9.1.1
+client_type	value-added	may ask	yes	commercial service; the client type says commercial and the privacy check is the operator's	TS 23.271 9.1.2
+client_type	lawful-intercept	may ask	yes	authorised intercept; the request carries the authorisation and the network does not verify it on the wire	TS 33.107
+client_type	plmn-operator	may ask	yes	the operator locating its own subscriber, which is what every handover already does	TS 23.271 9.1
+not_entitled	anyone else	may ask	no	there is no authentication of the client on the Diameter hop: a peer that can open a connection is a peer that can ask	TS 29.172 5
+ENT
+}
+
+lpp_cmd_lcs_entitlement() {
+    local rows
+    rows="$(lpp_lcs_entitlement)"
+    printf 'client_types\t4\n'
+    printf '%s\n' "$rows"
+    printf 'finding\tclient_type_is_a_declaration\tMEDIUM\tthe client type is a field in the request, not a credential: a peer that labels itself emergency is handled as an emergency\n'
+    printf 'finding\tno_client_authentication_on_the_hop\tHIGH\tnothing in a Provide-Location-Request proves the identity of the GMLC that sent it, beyond being able to reach the MME\n'
+    printf 'what_the_target_is_told\tnothing\tthe subscriber is not notified, and no message on the air says that a positioning session started\n'
+    printf 'ref\tTS 29.172 6.1.3, TS 23.271 9, TS 33.107\n'
+    printf 'limit\tEntitlement is a policy the operator configures; this table states the categories the specifications name, not the actual configuration of any operator.\n'
+    printf 'verdict\tlcs_entitlement_stated\n'
+}
+
+lpp_cmd_lcs_ask() {
+    local client="location-services" ctype="value-added" ltype="geo" target="" acc="50" rtime="10"
+    while (($# > 0)); do
+        case "$1" in
+            --client)        client="${2:-}"; shift 2 ;;
+            --client-type)   ctype="${2:-}"; shift 2 ;;
+            --location-type) ltype="${2:-}"; shift 2 ;;
+            --target)        target="${2:-}"; shift 2 ;;
+            --accuracy)      acc="${2:-}"; shift 2 ;;
+            --response-time) rtime="${2:-}"; shift 2 ;;
+            *) warn "unknown option: $1"; return 2 ;;
+        esac
+    done
+    local cn ln
+    cn="$(lpp_lcs_client_type_name "$ctype")" || {
+        err "unknown client type: $ctype"
+        err "WHY	the specifications name four: $LPP_LCS_CLIENT_TYPES"
+        return 2
+    }
+    ln="$(lpp_lcs_location_type_name "$ltype")" || {
+        err "unknown location type: $ltype"
+        err "WHY	the answer shapes are ecgi, tai, geo, velocity and civic"
+        return 2
+    }
+    [[ "$acc" =~ ^[0-9]+$ ]] || { err "accuracy must be metres, as a number"; return 2; }
+    [[ "$rtime" =~ ^[0-9]+$ ]] || { err "response time must be seconds, as a number"; return 2; }
+    [[ -z "$target" ]] && target="(not stated)"
+
+    printf 'request\tProvide-Location-Request\tSLg\tTS 29.172 7.3.1\n'
+    printf 'client_name\t%s\n' "$client"
+    printf 'client_type\t%s\n' "$cn"
+    printf 'target_subscriber\t%s\n' "$target"
+    printf 'location_type\t%s\n' "$ln"
+    printf 'requested_accuracy_m\t%s\n' "$acc"
+    printf 'response_time_s\t%s\n' "$rtime"
+    lpp_lcs_ladder | awk -F'\t' -v want="$ln" '
+        $1 == "location_type" && $2 == want {
+            printf "answer_carries\t%s\n", $3
+            printf "answer_scale\t%s\n", $4
+            printf "answer_meaning\t%s\n", $5
+        }'
+    printf 'who_is_told\tnobody\n'
+    printf 'what_proves_the_client\tnothing: the client name is a string the requester chose\n'
+    case "$cn" in
+        emergency)
+            printf 'privacy_check\tbypassed by the client type\n'
+            printf 'finding\temergency_label_skips_the_privacy_check\tHIGH\tthe same request with a different client type would be refused, so the label is the whole control\n' ;;
+        value-added)
+            printf 'privacy_check\tthe operator is expected to verify consent\n'
+            printf 'finding\tcommercial_client_asks_for_geographic_precision\tMEDIUM\tan accuracy of %s m is finer than any service that needs a cell\n' "$acc" ;;
+        lawful-intercept)
+            printf 'privacy_check\treplaced by an authorisation field\n'
+            printf 'finding\tauthorisation_is_an_unverified_field\tHIGH\tthe network checks that the field is present, not that the authorisation exists\n' ;;
+        *)
+            printf 'privacy_check\tthe operator locating its own subscriber\n' ;;
+    esac
+    if [[ "$ln" == "velocity" ]]; then
+        printf 'finding\tvelocity_exists_to_be_sampled_again\tHIGH\tone velocity is a datapoint and two are a track, and each request looks like a single question\n'
+    fi
+    printf 'ref\tTS 29.172 6.1.3 and 7.3, TS 23.271 9\n'
+    printf 'limit\tThis is what the request says. Whether any node checks it is a configuration question this module cannot observe.\n'
+    printf 'verdict\tlcs_request_shaped\n'
+}
+
+lpp_cmd_lcs_audit() {
+    local file="$1"
+    [[ -z "$file" ]] && { warn "usage: --lcs-audit <answers.tsv>"; return 2; }
+    [[ -f "$file" ]] || { err "no such file: $file"; return 1; }
+    if ! awk -F'\t' 'NF >= 3 { found = 1 } END { exit found ? 0 : 1 }' "$file"; then
+        err "no rows with at least three columns: expected client, client_type, location_type, subscriber, accuracy_m, t"
+        return 1
+    fi
+    awk -F'\t' '
+        NR == 1 && $1 !~ /^[A-Za-z_]+$/ { next }
+        NR == 1 { next }
+        NF < 3 { next }
+        {
+            client = $1; ctype = $2; ltype = $3; tgt = ($4 == "" ? "(unknown)" : $4)
+            acc = $5 + 0
+            requests++
+            seen_client[client] = 1
+            seen_sub[tgt] = 1
+            per_sub[tgt]++
+            if (ltype == "geo" || ltype == "civic") geo++
+            if (ltype == "velocity") vel++
+            if (ctype == "emergency") emerg++
+            if (ctype == "value-added") vas++
+            if (ctype == "lawful-intercept") li++
+            if (acc > 0) { accsum += acc; accn++; if (accmin == 0 || acc < accmin) accmin = acc }
+            pairs[client SUBSEP tgt] = 1
+            byclient[client]++
+            if (ltype == "geo" && ctype == "value-added") geoprecise[client]++
+            if (ltype == "velocity") trackers[client]++
+        }
+        END {
+            nc = 0; for (c in seen_client) nc++
+            ns = 0; for (s in seen_sub) ns++
+            np = 0; for (p in pairs) np++
+            multi = 0
+            for (s in per_sub) if (per_sub[s] > 1) { multi++; if (multisub == "") multisub = s }
+            printf "answers\t%d\n", requests
+            printf "clients\t%d\n", nc
+            printf "subscribers\t%d\n", ns
+            printf "client_subscriber_pairs\t%d\n", np
+            printf "subscribers_located_more_than_once\t%d\n", multi
+            if (multi > 0) printf "first_repeated_subscriber\t%s\n", multisub
+            printf "geographic_answers\t%d\n", geo
+            printf "velocity_answers\t%d\n", vel
+            printf "emergency_answers\t%d\n", emerg
+            printf "value_added_answers\t%d\n", vas
+            printf "lawful_intercept_answers\t%d\n", li
+            if (accn > 0) {
+                printf "accuracy_m_min\t%d\n", accmin
+                printf "accuracy_m_mean\t%.1f\n", accsum / accn
+            }
+            for (c in byclient) printf "client\t%s\t%d\n", c, byclient[c]
+            for (c in geoprecise) {
+                printf "finding\tcommercial_geographic_precision\tHIGH\tclient %s asked for a position, not a cell\n", c
+            }
+            for (c in trackers) {
+                printf "finding\tvelocity_requests_are_a_track\tHIGH\tclient %s asked for velocity, which only pays off when repeated\n", c
+            }
+            if (multi > 0) {
+                printf "finding\trepeated_requests_are_a_track\tHIGH\t%s was located %d times; every single answer looks like one question\n", multisub, per_sub[multisub]
+            }
+            printf "ref\tTS 29.172 7.3, TS 23.271 9\n"
+            printf "limit\tThe file is what was logged. A missing privacy check cannot be seen from the answers, only inferred from who asked and what came back.\n"
+            printf "verdict\t%s\n", (requests > 0 ? "location_answers_accounted" : "no_answers_in_this_file")
+        }' "$file"
+}
+
 # ── Selftest ───────────────────────────────────────────────────────────
 lpp_selftest() {
     local bad=0 nchk=0
@@ -2582,6 +2793,49 @@ lpp_selftest() {
     chk utdoa-build-bad-bw "$(lpp_utdoa_build --ul-bw n7 >/dev/null 2>&1; echo $?)" 2
     chk utdoa-build-not-lpp "$(printf '%s\n' "$ub" | awk -F'\t' '$1=="protocol" && $2 ~ /not LPP/{print "stated"}')" stated
 
+    # The LCS service around the positioning protocols: the request, what an
+    # answer resolves to, and what a log of answers adds up to.
+    local lad lea lak laf
+    lad=$(lpp_cmd_lcs_ladder 2>/dev/null)
+    lea=$(lpp_cmd_lcs_entitlement 2>/dev/null)
+    lak=$(lpp_cmd_lcs_ask --client-type emergency --location-type velocity 2>/dev/null)
+    chk lcs-ladder-types "$(printf '%s\n' "$lad" | awk -F'\t' '$1=="location_types"{print $2}')" 5
+    chk lcs-ladder-geo "$(printf '%s\n' "$lad" | awk -F'\t' '$1=="location_type" && $2=="geo"{print $3}' | grep -c 'latitude')" 1
+    chk lcs-ladder-velocity "$(printf '%s\n' "$lad" | awk -F'\t' '$1=="location_type" && $2=="velocity"{print $5}' | grep -c 'sampled again')" 1
+    chk lcs-ladder-verdict "$(printf '%s\n' "$lad" | awk -F'\t' '$1=="verdict"{print $2}')" lcs_granularity_stated
+    chk lcs-ladder-nooctets "$(printf '%s\n' "$lad" | awk -F'\t' '$1=="wire" && $2=="Diameter"{print $3}' | grep -c 'not encoded here')" 1
+    chk lcs-entitlement-rows "$(printf '%s\n' "$lea" | grep -c '^client_type	')" 4
+    chk lcs-entitlement-noauth "$(printf '%s\n' "$lea" | awk -F'\t' '$1=="finding" && $2=="no_client_authentication_on_the_hop"{print $3}')" HIGH
+    chk lcs-entitlement-told "$(printf '%s\n' "$lea" | awk -F'\t' '$1=="what_the_target_is_told"{print $2}')" nothing
+    chk lcs-ask-client "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="client_type"{print $2}')" emergency
+    chk lcs-ask-carries "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="answer_carries"{print $2}' | grep -c 'speed and bearing')" 1
+    chk lcs-ask-emergency-finding "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="finding" && $2=="emergency_label_skips_the_privacy_check"{print $3}')" HIGH
+    chk lcs-ask-velocity-finding "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="finding" && $2=="velocity_exists_to_be_sampled_again"{print $3}')" HIGH
+    chk lcs-ask-verdict "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="verdict"{print $2}')" lcs_request_shaped
+    chk lcs-ask-bad-client "$(lpp_cmd_lcs_ask --client-type wizard >/dev/null 2>&1; echo $?)" 2
+    chk lcs-ask-bad-type "$(lpp_cmd_lcs_ask --location-type streetview >/dev/null 2>&1; echo $?)" 2
+    chk lcs-ask-bad-acc "$(lpp_cmd_lcs_ask --accuracy fine >/dev/null 2>&1; echo $?)" 2
+    laf="$(mktemp)"
+    printf 'client\tclient_type\tlocation_type\tsubscriber\taccuracy_m\tt\n' > "$laf"
+    printf 'weather-app\tvalue-added\tgeo\t310150123456789\t25\t2026-02-01T10:00:00Z\n' >> "$laf"
+    printf 'psap\temergency\tgeo\t310150123456789\t50\t2026-02-01T10:04:00Z\n' >> "$laf"
+    printf 'fleet\tvalue-added\tvelocity\t310150123456789\t100\t2026-02-01T10:05:00Z\n' >> "$laf"
+    printf 'mno\tplmn-operator\tecgi\t310150987654321\t0\t2026-02-01T10:06:00Z\n' >> "$laf"
+    lak=$(lpp_cmd_lcs_audit "$laf" 2>/dev/null)
+    chk lcs-audit-answers "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="answers"{print $2}')" 4
+    chk lcs-audit-clients "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="clients"{print $2}')" 4
+    chk lcs-audit-subs "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="subscribers"{print $2}')" 2
+    chk lcs-audit-repeat "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="subscribers_located_more_than_once"{print $2}')" 1
+    chk lcs-audit-repeat-id "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="first_repeated_subscriber"{print $2}')" 310150123456789
+    chk lcs-audit-min "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="accuracy_m_min"{print $2}')" 25
+    chk lcs-audit-geo "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="geographic_answers"{print $2}')" 2
+    chk lcs-audit-vas "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="value_added_answers"{print $2}')" 2
+    chk lcs-audit-track "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="finding" && $2=="repeated_requests_are_a_track"{print $3}')" HIGH
+    chk lcs-audit-precision "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="finding" && $2=="commercial_geographic_precision"{print $3}')" HIGH
+    chk lcs-audit-verdict "$(printf '%s\n' "$lak" | awk -F'\t' '$1=="verdict"{print $2}')" location_answers_accounted
+    chk lcs-audit-noarg "$(lpp_cmd_lcs_audit >/dev/null 2>&1; echo $?)" 2
+    chk lcs-audit-nofile "$(lpp_cmd_lcs_audit /tmp/definitely-not-here-lcs.tsv >/dev/null 2>&1; echo $?)" 1
+    rm -f "$laf"
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -2698,6 +2952,10 @@ lpp_cli_main() {
         --supl-parse)    lpp_supl_parse    "$@" ;;
         --supl-session)  lpp_supl_session  "$@" ;;
         --supl-pos)      lpp_supl_pos      "$@" ;;
+        --lcs-ladder)    lpp_cmd_lcs_ladder ;;
+        --lcs-entitlement) lpp_cmd_lcs_entitlement ;;
+        --lcs-ask)       lpp_cmd_lcs_ask "$@" ;;
+        --lcs-audit)     lpp_cmd_lcs_audit "${1:-}" ;;
         --selftest)     lpp_selftest ;;
         --menu)         lpp_menu ;;
         *) cat >&2 <<EOF
@@ -2733,6 +2991,14 @@ Usage: $0 COMMAND
                        encode the SET session id and SET id on their own
   --supl-pos <lpp-hex> build the SUPL POS that carries this LPP payload
                        (the long form passes the payload as the lpp option)
+  --lcs-ladder         what each location answer shape resolves to, cell,
+                       tracking area, position, velocity, civic address
+  --lcs-entitlement    who may ask for a position and what the target is told
+  --lcs-ask            state one Provide-Location-Request: the client, its
+                       declared type, the target and the accuracy asked for,
+                       then what that answer would actually reveal
+  --lcs-audit <tsv>    account for a log of location answers: who asked, for
+                       whom, how precisely, and who has been located twice
   --selftest           verify tables and parsers
   --menu               interactive menu
 EOF
