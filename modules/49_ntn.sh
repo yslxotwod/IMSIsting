@@ -558,7 +558,7 @@ ntn_sib19() {
 # "exposure" was a topology sketch, not a measurement or a computed quantity.
 ntn_feeder_link() {
     printf 'ERROR\tfeeder link is not computed: SIB19 carries no gateway geometry\n' >&2
-    printf 'WHY\tSIB19 provides TA, K_offset, ephemeris and the cell reference location for the service link; the feeder (gateway-satellite) distance needs the gateway position, which is not signalled and not supplied here. A topology table is not an analysis, so this module prints none.\n' >&2
+    printf 'WHY\tSIB19 provides TA, K_offset, ephemeris and the cell reference location for the service link; the feeder (gateway-satellite) distance needs the gateway position, which is not signalled and not supplied here, so no geometry is invented. What a feeder carrier carries, and where an operator can encrypt it, is answered by --backhaul; the air interface of a legacy satellite network is answered by --gmr.\n' >&2
     return 2
 }
 
@@ -694,6 +694,153 @@ software	computed here: --doppler, --range, --ta and --koffset; SIB19 is decoded
 flow	1. --doppler and --range for the pass geometry  2. --ta and --koffset for the timing budget  3. --sib19-build to forge what a satellite cell would broadcast, --sib19 to read one back
 note	transmitting into a satellite link needs that operator's authorisation; this module computes on geometry you supply
 EOF
+}
+
+# ── behind the satellite: the feeder carrier ────────────────────────────
+# A bent-pipe satellite repeats whatever the gateway sends it, so everything
+# the operator puts between its own sites crosses the sky in one carrier and
+# comes down over a whole footprint. That is a receive-only surface: no radio
+# is keyed here, and no carrier is demodulated here either (there is no DVB-S2
+# demodulator or FEC decoder in this tree). What this verb answers is what sits
+# between the transponder and the traffic, and where an operator can put
+# encryption on the way.
+ntn_backhaul() {
+    case "${1:-chain}" in
+      all) ntn_backhaul chain; ntn_backhaul crypto; ntn_backhaul kit; return 0 ;;
+      chain)
+        printf 'question\twhat sits between the transponder and the operator traffic\n'
+        printf 'carrier\t%s\t%s\n' 'DVB-S2 / DVB-S2X' 'ETSI EN 302 307-1 and -2; also DVB-S on older links'
+        printf 'direction\t%s\t%s\n' 'downlink' 'the return path is a different carrier and is not on this one'
+        printf 'chain\t%s\t%s\t%s\t%s\n' 1 'dvb-s2' 'QPSK/8PSK/16APSK/32APSK and LDPC/BCH forward error correction' 'demodulated by the receiver, not here'
+        printf 'chain\t%s\t%s\t%s\t%s\n' 2 'bb-frame' 'baseband frame with stream adaptation and a CRC-8 header' 'the unit an FEC block carries'
+        printf 'chain\t%s\t%s\t%s\t%s\n' 3 'mpeg-ts' '188-octet transport stream, sync byte 0x47, demultiplexed by PID' 'one PID is one logical channel'
+        printf 'chain\t%s\t%s\t%s\t%s\n' 4 'gse-or-mpe' 'GSE (TS 102 606) or MPE/MPE2 wrap the IP packets' 'GSE header is 4 octets plus a length field'
+        printf 'chain\t%s\t%s\t%s\t%s\n' 5 'ip' 'IPv4 or IPv6 bearing TCP, UDP or ESP' 'the first layer whose content is checkable'
+        printf 'chain\t%s\t%s\t%s\t%s\n' 6 'application' 'SIP and RTP, DNP3, SNMP, XML, TLS' 'what a cleared carrier reads as'
+        printf 'demodulate\t%s\t%s\n' 'no' 'refused here: no DVB-S2 demodulator and no FEC decoder in this tree'
+        printf 'needs\t%s\t%s\n' 'a tuner and a demodulator' 'or the published parser (ucsdsysnet/dontlookup) before any byte below means anything'
+        printf 'ref\t%s\t%s\n' 'ETSI EN 302 307-1' 'DVB-S2 framing and FEC'
+        printf 'ref\t%s\t%s\n' 'TS 102 606' 'GSE encapsulation'
+        printf 'limit\t%s\t%s\n' 'standards only' 'no carrier is captured, tuned or demodulated by this verb'
+        printf 'verdict\t%s\n' 'feeder_chain_described'
+        return 0 ;;
+      crypto)
+        printf 'question\twhere encryption can sit between the transponder and the traffic\n'
+        printf 'layer\t%s\t%s\t%s\n' 'link' '10 percent of transponders scrambled' 'subscription television, almost all of it; the scrambling standard is published and the keys are not'
+        printf 'layer\t%s\t%s\t%s\n' 'network' '6 percent of transponders carrying IPsec' 'the operator own tunnel; whether it encrypts is a configuration choice, not a default'
+        printf 'layer\t%s\t%s\t%s\n' 'application' 'TLS on end-user traffic' 'the one layer that is usually right, because a browser or a phone insisted'
+        printf 'measured\t%s\t%s\n' '411 transponders across 39 satellites' 'one site, 2024-2025, Ku band, downlink only'
+        printf 'operator\t%s\t%s\t%s\t%s\n' 't-mobile' '4G backhaul' 'call audio and SMS contents, through an IPsec tunnel configured with a null cipher' 'encrypted after disclosure'
+        printf 'operator\t%s\t%s\t%s\t%s\n' 'at-t-mexico' '4G backhaul' 'security keys and subscriber identities, no audio and no text' 'transponders no longer active'
+        printf 'operator\t%s\t%s\t%s\t%s\n' 'telmex' 'voice' 'unencrypted SIP signalling and RTP media' 'still broadcasting at publication'
+        printf 'operator\t%s\t%s\t%s\t%s\n' 'mexican-navy' 'asset tracking' 'position updates from tracked units' 'described in the paper'
+        printf 'operator\t%s\t%s\t%s\t%s\n' 'inmarsat-government' 'government terminal backhaul' 'IPsec between defence addresses, voice in the clear, terminal configuration files' 'described in the paper'
+        printf 'operator\t%s\t%s\t%s\t%s\n' 'pge' 'utility SCADA' 'DNP3 setpoints and SNMPv1 community strings for 267 addresses' 'described in the paper'
+        printf 'operator\t%s\t%s\t%s\t%s\n' 'sagenet' 'payment terminals' 'card track data in XML and prepaid balances' 'described in the paper'
+        printf 'finding\t%s\t%s\t%s\n' 'tunnel_without_encryption' 'HIGH' 'an IPsec tunnel with a null cipher is a network layer that looks protected and is not'
+        printf 'finding\t%s\t%s\t%s\n' 'cleartext_critical_infrastructure' 'HIGH' 'SCADA, payment and voice traffic crossed a broadcast medium with no encryption at any layer'
+        printf 'ref\t%s\t%s\n' 'CCS 2025' 'Dai, Heninger, Zhang, Ryan, Levin, Schulman: Dont look up, sensitive internal links in the clear on GEO satellites'
+        printf 'limit\t%s\t%s\n' 'published and cited' 'nothing in this tree measured these numbers; they are the paper reported findings, downlink only'
+        printf 'verdict\t%s\n' 'encryption_layers_named'
+        return 0 ;;
+      kit)
+        printf 'question\twhat a passive receive station costs\n'
+        printf 'kit\t%s\t%s\t%s\n' 'dish' '1.1 m' '180'
+        printf 'kit\t%s\t%s\t%s\n' 'motor' '120 degree rotor' '195'
+        printf 'kit\t%s\t%s\t%s\n' 'tuner' 'DVB-S2 card' '230'
+        printf 'kit\t%s\t%s\t%s\n' 'lnb' 'Ku band' '15'
+        printf 'kit\t%s\t%s\t%s\n' 'total' 'under 700 US dollars' '620'
+        printf 'kit\t%s\t%s\t%s\n' 'software' 'transponder scanning' '0'
+        printf 'band\t%s\t%s\n' 'Ku' '12 to 18 GHz downlink; a television dish is the cheap way onto it'
+        printf 'not_needed\t%s\t%s\n' 'a transmitter' 'the surface is receive only'
+        printf 'legal\t%s\t%s\n' 'receive only' 'this tree does not descramble subscription television and holds no decoder for it'
+        printf 'limit\t%s\t%s\n' 'published figures' 'prices are the paper kit, not a quote'
+        printf 'verdict\t%s\n' 'passive_station_costed'
+        return 0 ;;
+      *)
+        printf 'ERROR\tunknown backhaul section: %s\n' "${1:-}" >&2
+        printf 'WHY\tthis verb answers chain, crypto or kit\n' >&2
+        return 2 ;;
+    esac
+}
+
+# ── triage: what a cleared carrier reads as ─────────────────────────────
+# The input is a text export of an already-parsed capture (tshark -V, strings,
+# or the published parser dump). This classifies tokens; it does not parse the
+# carrier and it does not claim a protocol from a byte count.
+ntn_backhaul_triage() {
+    local f="${1:-}"
+    [[ -n "$f" ]] || { printf 'ERROR\tno file given\n' >&2; printf 'WHY\tthis verb reads a text export of a parsed feeder capture\n' >&2; return 2; }
+    [[ -r "$f" ]] || { printf 'ERROR\tcannot read %s\n' "$f" >&2; printf 'WHY\tthe file must exist and be readable\n' >&2; return 1; }
+    local lines found=0
+    lines=$(wc -l < "$f" 2>/dev/null || echo 0)
+    printf 'input\t%s\n' "$f"
+    printf 'lines\t%s\n' "$lines"
+    local n t name what sev ref
+    while IFS='~' read -r t name what sev ref; do
+        [[ -n "$t" ]] || continue
+        n=$(grep -Eic -- "$t" "$f" 2>/dev/null || true)
+        n=${n:-0}
+        if (( n > 0 )); then
+            printf 'detection\t%s\t%s\t%s\t%s\t%s\n' "$name" "$n" "$what" "$sev" "$ref"
+            found=$(( found + 1 ))
+        fi
+    done <<'DET'
+SIP/2\.0~sip~call signalling, and the numbers in it~HIGH~RFC 3261
+INVITE sip~invite~the dialled party in a request line~HIGH~RFC 3261
+RTP/~rtp~the audio itself, once the codec is known~HIGH~RFC 3550
+DNP3~dnp3~SCADA function codes and setpoints~HIGH~IEEE 1815
+community=~snmpv1~an SNMPv1 community string and the device tree behind it~HIGH~RFC 1157
+<Track2~track2~payment card track data~HIGH~PCI DSS 4.1
+ESP~esp~an IPsec tunnel: present, and not readable~INFO~RFC 4303
+TLSv1~tls~a TLS session: present, and not readable~INFO~RFC 8446
+DET
+   printf 'found\t%s\n' "$found"
+    if (( found == 0 )); then
+        printf 'verdict\t%s\n' 'nothing_readable_in_this_file'
+    else
+        printf 'finding\t%s\t%s\t%s\n' 'cleartext_application_traffic' 'HIGH' 'a broadcast carrier carrying application traffic a third party can read'
+        printf 'verdict\t%s\n' 'feeder_capture_shows_cleartext'
+    fi
+    printf 'limit\t%s\t%s\n' 'token classification' 'a match is a token in a text export, not a decoded protocol message'
+    return 0
+}
+
+# ── legacy satellite cellular: GMR ──────────────────────────────────────
+# GMR is the air interface of the satellite phones, not the broadcast feed a
+# WAN link rides on. It is a GSM derivative with its own layer 2 and its own
+# authentication, so nothing in the NR SIB19 path above applies to it.
+ntn_gmr() {
+    case "${1:-all}" in
+      all|1|2) ;;
+      *) printf 'ERROR\tunknown generation: %s\n' "$1" >&2; printf 'WHY\tthis verb answers 1, 2 or all\n' >&2; return 2 ;;
+    esac
+    local want="${1:-all}"
+    printf 'question\twhat a satellite phone air interface is\n'
+    if [[ "$want" == "all" || "$want" == "1" ]]; then
+        printf 'spec\t%s\t%s\t%s\n' 'gmr-1' 'ETSI TS 101 376' 'GSM derived; variants GmPRS and GMR-1 3G; Thuraya, SkyTerra, TerreStar, ICO'
+        printf 'operator\t%s\t%s\n' 'thuraya' 'GMR-1; Thuraya 2 at 98.5 east, Thuraya 3 at 44 east'
+    fi
+    if [[ "$want" == "all" || "$want" == "2" ]]; then
+        printf 'spec\t%s\t%s\t%s\n' 'gmr-2' 'ETSI TS 101 377' 'Inmarsat IsatPhone, ACeS'
+    fi
+    printf 'band\t%s\t%s\n' 'service' '1525 to 1560 MHz downlink, 1626.5 to 1660.5 MHz uplink, left-hand circular spot beams'
+    printf 'channel\t%s\t%s\n' '1087 ARFCN pairs' '31.25 kHz raster'
+    printf 'symbol_rate\t%s\t%s\n' '23.4 kbaud base' 'the network is fully synchronous, so nothing here waits for a random access burst to align itself'
+    printf 'burst\t%s\t%s\n' '2, 3, 6 or 9 slots' 'one burst spans multiple slots, which is not the terrestrial GSM case'
+    printf 'modulation\t%s\t%s\n' 'pi/4-CQPSK and pi/4-CBPSK' '6-PSK carries the broadcast channel, pi/4-DBPSK the random access channel'
+    printf 'modulation\t%s\t%s\n' 'pi/2-CBPSK, 16-APSK, 32-APSK' 'GmPRS and GMR-1 3G, at 1x, 2x, 4x and 5x the base symbol rate'
+    printf 'sync\t%s\t%s\n' 'dual chirp over three slots' 'the frequency correction channel is a chirp, not a burst of a known pattern'
+    printf 'layer2\t%s\t%s\n' 'LAPSat' 'a link layer of its own, not LAPDm'
+    printf 'codec\t%s\t%s\n' 'AMBE derived' 'a compatible decoder family exists; the speech is not GSM full rate'
+    printf 'security\t%s\t%s\n' 'cipher optional at layer 1' 'supposedly derived from A5/2, but neither A5/1 nor A5/2 as published; a network may run without it'
+    printf 'rach\t%s\t%s\n' 'in the clear' 'the channel request carries the reason, the dialled number and the terminal position'
+    printf 'feeder\t%s\t%s\n' 'C band 3.4 to 4.2 GHz down and 5.85 to 6.725 GHz up, Ku 12 to 18 GHz' 'the standard does not specify the feeder modulation'
+    printf 'geometry\t%s\t%s\n' '35786 km, 119.3 ms one way' 'a bent-pipe round trip lands at roughly 239 to 280 ms'
+    printf 'ref\t%s\t%s\n' 'osmocom GMR introduction' 'the public reverse engineering summary this table follows'
+    printf 'limit\t%s\t%s\n' 'a description, not a decoder' 'nothing here demodulates a GMR burst, and no cipher is implemented'
+    printf 'verdict\t%s\n' 'gmr_air_interface_described'
+    return 0
 }
 
 ntn_selftest() {
@@ -837,6 +984,28 @@ ntn_selftest() {
     chk geo-pinned "$(printf '%s\n' "$g2" | awk -F'\t' '$1=="verdict"{print $2}')" "position_pinned_to_two_points"
     chk geo-noargs "$(ntn_timing_geoloc --sat-lat 1 --sat-lon 1 --sat-alt 600 >/dev/null 2>&1; echo $?)" "2"
     chk geo-noalt "$(ntn_timing_geoloc --ta 100 >/dev/null 2>&1; echo $?)" "2"
+    # 6. Behind the satellite: the carrier chain, the encryption layers, the kit.
+    chk bh-chain "$(ntn_backhaul chain | grep -c '^chain')"                 "6"
+    chk bh-demod "$(fld "$(ntn_backhaul chain)" demodulate)"                "no"
+    chk bh-chain-verdict "$(fld "$(ntn_backhaul chain)" verdict)"           "feeder_chain_described"
+    chk bh-crypto-link "$(ntn_backhaul crypto | awk -F'\t' '$1=="layer" && $2=="link"{print $3}')" "10 percent of transponders scrambled"
+    chk bh-crypto-ops "$(ntn_backhaul crypto | grep -c '^operator')"        "7"
+    chk bh-crypto-verdict "$(fld "$(ntn_backhaul crypto)" verdict)"         "encryption_layers_named"
+    chk bh-kit-total "$(ntn_backhaul kit | awk -F'\t' '$1=="kit" && $2=="total"{print $4}')" "620"
+    chk bh-kit-verdict "$(fld "$(ntn_backhaul kit)" verdict)"               "passive_station_costed"
+    chk bh-bad "$(ntn_backhaul radio >/dev/null 2>&1; echo $?)"             "2"
+    chk gmr-specs "$(ntn_gmr | grep -c '^spec')"                            "2"
+    chk gmr-one "$(ntn_gmr 1 | grep -c '^spec')"                            "1"
+    chk gmr-security "$(ntn_gmr | awk -F'\t' '$1=="security"{print $2}')"   "cipher optional at layer 1"
+    chk gmr-verdict "$(fld "$(ntn_gmr)" verdict)"                           "gmr_air_interface_described"
+    chk gmr-bad "$(ntn_gmr 4 >/dev/null 2>&1; echo $?)"                     "2"
+    printf 'SIP/2.0 200 OK\nINVITE sip:1234@10.0.0.1 SIP/2.0\nDNP3 function 5\ncommunity=public\nTLSv1.3 record\n' > "$d/fc.txt"
+    chk bh-triage-found "$(ntn_backhaul_triage "$d/fc.txt" | awk -F'\t' '$1=="found"{print $2}')" "5"
+    chk bh-triage-verdict "$(fld "$(ntn_backhaul_triage "$d/fc.txt")" verdict)" "feeder_capture_shows_cleartext"
+    printf 'nothing to see here\n' > "$d/fc-clean.txt"
+    chk bh-triage-clean "$(fld "$(ntn_backhaul_triage "$d/fc-clean.txt")" verdict)" "nothing_readable_in_this_file"
+    chk bh-triage-noarg "$(ntn_backhaul_triage >/dev/null 2>&1; echo $?)"   "2"
+    chk bh-triage-nofile "$(ntn_backhaul_triage "$d/nope.txt" >/dev/null 2>&1; echo $?)" "1"
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -855,6 +1024,8 @@ ntn_menu() {
   [5]  SIB19 decode (TS 38.331)
   [6]  Feeder link (refused: no geometry)
   [7]  Plan (handoff)
+  [8]  Behind the satellite (feeder carrier)
+  [9]  Legacy satellite cellular (GMR)
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -868,6 +1039,8 @@ M
             5) read -rp "  SIB19 as hex> " _s19; ntn_sib19 "$_s19"; read -rp "  enter " _ ;;
             6) ntn_feeder_link; read -rp "  enter " _ ;;
             7) ntn_plan; read -rp "  enter " _ ;;
+            8) read -rp "  chain, crypto or kit> " b; ntn_backhaul "${b:-chain}"; read -rp "  enter " _ ;;
+            9) read -rp "  GMR generation [1/2/all]> " g; ntn_gmr "${g:-all}"; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -892,6 +1065,9 @@ ntn_cli_main() {
         --ntn-reselect)   ntn_reselect "$@" ;;
         --fakecell-plan)  ntn_fakecell_plan ;;
         --feeder)      ntn_feeder_link ;;
+        --backhaul)    ntn_backhaul "${1:-chain}" ;;
+        --backhaul-triage) ntn_backhaul_triage "${1:-}" ;;
+        --gmr)         ntn_gmr "${1:-all}" ;;
         --plan)        ntn_plan ;;
         --selftest)    ntn_selftest ;;
         --menu)        ntn_menu ;;
@@ -916,6 +1092,11 @@ Usage: $0 COMMAND
                             build the SIB19-r17 element and encode it
   --sib19 <hex>             decode a SIB19 (TS 38.331) from its bits
   --feeder                  refused: SIB19 carries no gateway geometry
+  --backhaul <chain|crypto|kit>
+                            behind the satellite: the feeder carrier layers,
+                            the measured encryption layers, the receive-kit cost
+  --backhaul-triage <file>  classify a text export of a feeder capture
+  --gmr <1|2|all>           the legacy satellite air interface reference
   --plan                    NTN handoff plan
   --selftest                verify the timing geometry
   --menu                    interactive menu

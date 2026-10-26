@@ -3394,6 +3394,7 @@ static const char *const plain_keys[] = {
     "delivery_failure_reason\tan SMPP optional-parameter tag name (SMPP 3.4 Table 4-12)",
     "delta\thow far the counter moved",
 	"demo\tthe directory this run's fixture was written to",
+    "demodulate\twhether a carrier is demodulated here",
     "denied\tdenied",
     "dependency\tdependency",
     "derived\tderived",
@@ -3674,6 +3675,7 @@ static const char *const plain_keys[] = {
     "feed_signal\twhat has to be recorded before an offline attack can start: the ciphertext and one more property it needs",
     "feed_source\tfeed source",
     "feed_store\tfeed store",
+    "feeder\tthe gateway to satellite link that a bent-pipe repeater carries",
     "femtocell\tsmall cell",
     "fetcher\tthe party that performs the fetch",
     "ffffff\tffffff",
@@ -3751,6 +3753,7 @@ static const char *const plain_keys[] = {
     "formats\tformats",
     "formatted\tformatted",
     "formula\tformula",
+    "found\thow many detectors matched",
     "fqdn\tthe full domain name",
     "fqdn\tfully qualified domain name",
     "fr\tfr",
@@ -3824,6 +3827,7 @@ static const char *const plain_keys[] = {
     "generation\tgeneration",
     "generator\tgenerator",
     "generic_nack\tgeneric nack",
+    "geometry\tthe distance and delay figures for a link",
     "gfbr_dl_bps\tgfbr downlink (bit/s)",
     "gfbr_dl_display\tgfbr downlink display",
     "gfbr_ul_bps\tgfbr uplink (bit/s)",
@@ -4205,6 +4209,7 @@ static const char *const plain_keys[] = {
     "kind\tkind",
     "kinematic_linkage\ta certificate change that is continuous in place, time and speed, so the rotation did not break the vehicle",
     "kinematics_consistent\tevery pair of consecutive positions agrees with the speed the message reported",
+    "kit\tone line item of a receive station and what it costs",
     "kit_cost\twhat the published work spent on hardware for the takeover",
     "known\tknown",
     "known_a_hex\tthe plaintext of the first stream that the caller supplied",
@@ -4275,6 +4280,7 @@ static const char *const plain_keys[] = {
     "latitude_sign\tlatitude sign",
     "latt\tlatt",
     "layer\tlayer",
+    "layer2\tthe link layer a standard uses",
     "layers\tlayers",
     "layout\tlayout",
     "lc\tlc",
@@ -4293,6 +4299,7 @@ static const char *const plain_keys[] = {
     "leg_wire_octets\twhat one message costs on the wire",
     "legacy_pairing_markers\tlegacy pairing markers",
     "legacy_stack\tlegacy stack",
+    "legal\twhat this tree will not do with a carrier even when it could",
 	"legend\twhat a capability chip on a card means",
     "len\tlength",
     "length\tlength",
@@ -4313,6 +4320,7 @@ static const char *const plain_keys[] = {
     "limesdr\tlimesdr",
     "limit\tlimit",
     "line\tline",
+    "lines\thow many lines the input file holds",
     "link\tone certificate that continues another certificate trajectory",
     "linkability\twhether two sessions look like one person",
     "linkability\twhether two sessions can be tied to one subscriber",
@@ -4422,6 +4430,7 @@ static const char *const plain_keys[] = {
     "me_visible\tme visible",
     "mean_gap_s\tthe average gap between two pages, in seconds",
     "meaning\tmeaning",
+    "measured\twhat was measured, where, over what period",
     "measured_results_on_rach\tmeasured results on rach",
     "measurement\tone number the radio offers",
     "measurement_identity\tmeasurement identity",
@@ -4699,6 +4708,7 @@ static const char *const plain_keys[] = {
     "not_before\tissue date of the certificate",
     "not_determinable\tnot determinable",
     "not_encoded\tnot encoded",
+    "not_needed\tequipment the surface does not require",
     "not_performed\tnot performed",
     "not_public\tthe parts of the algorithm and the vectors that the 3GPP licence keeps out of the public catalogue",
     "not_served\tnot served",
@@ -5205,6 +5215,7 @@ static const char *const plain_keys[] = {
     "query_requester\tquery requester",
     "query_sm\tquery sm",
     "query_sm_resp\tquery sm resp",
+    "question\tthe question a verb answers",
     "queue_message\tthe step that puts a framed message in the send buffer ahead of the transmit instant",
     "queue_window_us\thow long before the transmit instant the message must already be ready",
     "quiet_shift\ta small move with a large effect",
@@ -5215,6 +5226,7 @@ static const char *const plain_keys[] = {
     "ra_rnti\trandom-access ID",
     "rac\trouting area",
     "race_window_frames\trace window frames",
+    "rach\twhat the random access channel carries in the clear",
     "radial_velocity_mps\tradial velocity mps",
     "radio\tradio",
     "radio_io\tradio input output",
@@ -5682,6 +5694,7 @@ static const char *const plain_keys[] = {
     "secured_data\tsecured data",
     "secured_data_len\tsecured data length",
     "secured_note\tsecured note",
+    "security\tthe cipher a standard defines and whether it is mandatory",
     "security_context\tsecurity context",
     "security_header\tsecurity header",
     "security_header_name\tsecurity header name",
@@ -6100,8 +6113,10 @@ static const char *const plain_keys[] = {
     "sym\tsym",
     "symbol\tsymbol",
     "symbol_in_half_frame\tsymbol in half frame",
+    "symbol_rate\tthe base symbol rate and whether the network is synchronous",
     "symbols\tsymbols",
     "symbols_per_slot\tsymbols per slot",
+    "sync\thow a receiver finds the frame boundary",
     "sync_window_s\thow long the SIB19 uplink synchronisation is claimed valid",
     "system\twhich radio system a row belongs to",
     "system_frame_number\tsystem frame number",
@@ -8145,8 +8160,11 @@ static const ChipRow chip_rows[] = {
     { "48_oran",             "--xapp-authority",      NEED_NO, DOES_READS },
     { "48_oran",             "--yes",                 NEED_NO, DOES_READS },
     { "49_ntn",              "--__index_probe__",     NEED_NO, DOES_READS },
+    { "49_ntn",              "--backhaul",            NEED_NO, DOES_READS },
+    { "49_ntn",              "--backhaul-triage",     NEED_NO, DOES_READS },
     { "49_ntn",              "--doppler",             NEED_RADIO, DOES_READS },
     { "49_ntn",              "--feeder",              NEED_RADIO, DOES_READS },
+    { "49_ntn",              "--gmr",                 NEED_NO, DOES_READS },
     { "49_ntn",              "--help",                NEED_NO, DOES_READS },
     { "49_ntn",              "--info",                NEED_NO, DOES_READS },
     { "49_ntn",              "--koffset",             NEED_RADIO, DOES_READS },
@@ -37619,10 +37637,120 @@ ntn_build_plan(AppState *state, const char *module_id,
     return outer;
 }
 
+/* Behind the satellite: the feeder carrier.
+ *
+ * A bent-pipe satellite repeats whatever the gateway sends, so an operator
+ * backhaul crosses the sky in one carrier and lands over a whole footprint.
+ * None of that is demodulated here; what these buttons answer is the layer
+ * structure, where encryption can sit in it, and what a receive station costs.
+ */
+static GtkWidget *
+ntn_build_feeder(AppState *state, const char *module_id,
+                 GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("BEHIND THE SATELLITE",
+        "What the feeder carrier carries and where encryption can sit in it. "
+        "No carrier is tuned or demodulated here.", &body);
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card("THE CARRIER", &card_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the chain",
+                "--backhaul", "chain",
+                "Six stages between the transponder and the traffic, from the "
+                "DVB-S2 frames down to what an application sees."));
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the layers",
+                "--backhaul", "crypto",
+                "Where scrambling, IPsec and TLS sit, what each one was measured "
+                "on, and the operator findings the measurement produced."));
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the kit",
+                "--backhaul", "kit",
+                "A receive-only station priced from the published work, and the "
+                "one thing it does not buy: a way past subscription scrambling."));
+        gtk_box_append(GTK_BOX(card_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), card);
+    mod_card_end();
+
+    {
+        GtkWidget *tb;
+        GtkWidget *triage = verb_card("A CLEARED CARRIER", &tb);
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(tb),
+            mod_arg_row(state, module_id, status, "Triage an export",
+                "--backhaul-triage", "/path/to/capture.txt",
+                "Classifies a text export of an already-parsed capture: clear "
+                "SIP and RTP, DNP3, SNMPv1 communities, card data, or an ESP and "
+                "TLS session that is present and unreadable."));
+        gtk_box_append(GTK_BOX(tb), res);
+        gtk_box_append(GTK_BOX(body), triage);
+        mod_card_end();
+    }
+
+    (void) out;
+    return outer;
+}
+
+/* Legacy satellite cellular: GMR.
+ *
+ * The satellite phone air interface is a GSM derivative with its own link
+ * layer, its own symbol rates and an optional layer-1 cipher. It is a
+ * different network from the broadcast carrier above, and it is described
+ * here rather than decoded: nothing in this tree demodulates a GMR burst.
+ */
+static GtkWidget *
+ntn_build_gmr(AppState *state, const char *module_id,
+              GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("LEGACY SATELLITE",
+        "GMR-1 and GMR-2: bands, bursts, the link layer, the cipher and what "
+        "the random access channel says in the clear.", &body);
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card("THE AIR INTERFACE", &card_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read both generations",
+                "--gmr", "all",
+                "The two standards, the operators behind them, the L-band plan, "
+                "the burst and modulation set, LAPSat and the AMBE codec."));
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read GMR-1",
+                "--gmr", "1",
+                "The GSM-derived generation, with GmPRS and GMR-1 3G on top."));
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read GMR-2",
+                "--gmr", "2",
+                "The Inmarsat and ACeS generation."));
+        gtk_box_append(GTK_BOX(card_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), card);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry ntn_entries[] = {
     { "Geometry", "dialog-information-symbolic", NULL, ntn_build_geometry },
     { "Timing control", "network-wireless-symbolic", NULL, ntn_build_link },
     { "Handoff", "preferences-system-symbolic", NULL, ntn_build_plan },
+    { "Behind the satellite", "network-transmit-receive-symbolic", NULL,
+      ntn_build_feeder },
+    { "Legacy satellite", "phone-symbolic", NULL, ntn_build_gmr },
 };
 /* 50_gprs — GPRS / EDGE.
  *
