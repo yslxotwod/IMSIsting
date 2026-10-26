@@ -2865,12 +2865,13 @@ vims_amr_mode_name() {
 # An AMR RTP payload: a 4-bit CMR, then one ToC octet per frame (F, FT, Q, P),
 # then the frame bits concatenated in the order the ToC list declares.
 vims_cmd_amr_parse() {   # <payload-hex> [--octet-align]
-    local payload fmt=0
+    local payload fmt=0 wb=0
     payload=$(vims_norm_hex "${1:-}")
     shift || true
     while (( $# )); do
         case "$1" in
             --octet-align) fmt=1; shift ;;
+            --wb)          wb=1; shift ;;
             *) printf 'ERROR\tunexpected argument %s\n' "$(vims_sanitize "$1")" >&2; return 2 ;;
         esac
     done
@@ -2896,13 +2897,13 @@ vims_cmd_amr_parse() {   # <payload-hex> [--octet-align]
     for entry in "${toc[@]}"; do
         f=${entry%%:*}; ft=${entry#*:}; ft=${ft%%:*}; q=${entry##*:}
         local fbits fbytes fhex name
-        fbits=$(vims_amr_frame_bits "$ft")
+        if (( wb )); then fbits=$(vims_amr_wb_frame_bits "$ft"); else fbits=$(vims_amr_frame_bits "$ft"); fi
         if [[ -z "$fbits" ]]; then
             printf 'frame\t%d\t%d\treserved\t%s\t0\t0\t\treserved frame type: not a mode this table knows\n' \
                 "$idx" "$ft" "$( [[ "$q" == "1" ]] && echo good || echo bad )"
             idx=$(( idx + 1 )); continue
         fi
-        name=$(vims_amr_mode_name "$ft")
+        if (( wb )); then name=$(vims_amr_wb_mode_name "$ft"); else name=$(vims_amr_mode_name "$ft"); fi
         fbytes=$(( (fbits + 7) / 8 ))
         if (( fbits == 0 )); then
             fhex=""
@@ -2921,6 +2922,7 @@ vims_cmd_amr_parse() {   # <payload-hex> [--octet-align]
         esac
         idx=$(( idx + 1 ))
     done
+    printf 'payload_mode\t%s\n' "$( (( wb )) && echo AMR-WB || echo AMR-NB )"
     printf 'frames\t%d\npayload_octets\t%d\nbits_consumed\t%d\nleftover_bits\t%d\n' \
         "$frames" "$(( ${#payload} / 2 ))" "$total_bits" "$(( ${#bits} - total_bits ))"
     if (( spoken == 0 && quiet > 0 && quiet == frames )); then
@@ -2931,6 +2933,180 @@ vims_cmd_amr_parse() {   # <payload-hex> [--octet-align]
     printf 'what_this_is_not\t%s\n' "no speech is reconstructed: the AMR decoder is licensed and not in this tree, and the frame list is the evidence that survives without it"
     printf 'ref\t%s\n' "TS 26.101 Table 1a (frame sizes), RFC 4867 4.3 (payload format)"
     printf 'verdict\t%s\n' "amr_payload_read"
+}
+
+# TS 26.201 Table 1a, the AMR-WB frame sizes in bits, indexed by frame type.
+# The wideband modes are a different table from the narrowband ones and the two
+# are never interchangeable: a payload read with the wrong table produces frame
+# boundaries that look plausible and are wrong from the second frame onward.
+vims_amr_wb_frame_bits() {
+    case "${1:-}" in
+        0) echo 132 ;; 1) echo 177 ;; 2) echo 253 ;; 3) echo 285 ;;
+        4) echo 317 ;; 5) echo 365 ;; 6) echo 397 ;; 7) echo 461 ;;
+        8) echo 477 ;; 9) echo 40 ;; 14) echo 40 ;; 15) echo 0 ;; *) echo "" ;;
+    esac
+}
+
+vims_amr_wb_mode_name() {
+    case "${1:-}" in
+        0) echo "6.60" ;; 1) echo "8.85" ;; 2) echo "12.65" ;; 3) echo "14.25" ;;
+        4) echo "15.85" ;; 5) echo "18.25" ;; 6) echo "19.85" ;; 7) echo "23.05" ;;
+        8) echo "23.85" ;; 9) echo "SID" ;; 14) echo "speech_lost" ;; 15) echo "no_data" ;;
+        *) echo "reserved" ;;
+    esac
+}
+
+# The SDP parameters that decide how a call sounds and how much it may cost.
+# A mode set is a capacity ceiling the far end is allowed to enforce, and the
+# payload format parameters are negotiation, not capability: an endpoint that
+# answers with the wrong octet-align produces frames nobody can reassemble.
+vims_cmd_amr_sdp() {   # [--wb] [--mode-set 0,7] [--octet-align 0|1] [--max-red N]
+    local wb=0 mode_set="" octet=0 red=""
+    while (($# > 0)); do
+        case "$1" in
+            --wb)          wb=1; shift ;;
+            --mode-set)    mode_set="${2:-}"; shift 2 ;;
+            --octet-align) octet="${2:-}"; shift 2 ;;
+            --max-red)     red="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunexpected argument %s\n' "$(vims_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ "$octet" =~ ^[01]$ ]] || { printf 'ERROR\t--octet-align is 0 or 1\n' >&2; return 2; }
+    local codec rate params="" modes_name="every speech mode" given_set=0 mode_bits_min=0 mode_bits_max=0 m bits
+    if (( wb )); then
+        codec="AMR-WB"; rate=16000
+        [[ -z "$mode_set" ]] || given_set=1
+        [[ -z "$mode_set" ]] && mode_set="0,1,2,3,4,5,6,7,8"
+    else
+        codec="AMR"; rate=8000
+        [[ -z "$mode_set" ]] || given_set=1
+        [[ -z "$mode_set" ]] && mode_set="0,1,2,3,4,5,6,7"
+    fi
+    local mode_count
+    mode_count=$(( $(printf '%s' "$mode_set" | tr -cd ',' | wc -c) + 1 ))
+    (( given_set )) && modes_name="$mode_set"
+    for m in ${mode_set//,/ }; do
+        if (( wb )); then bits=$(vims_amr_wb_frame_bits "$m"); else bits=$(vims_amr_frame_bits "$m"); fi
+        [[ -z "$bits" ]] && { printf 'ERROR\tmode %s is not a speech mode of %s\n' "$m" "$codec" >&2; return 2; }
+        (( bits == 0 )) && continue
+        (( mode_bits_min == 0 || bits < mode_bits_min )) && mode_bits_min=$bits
+        (( bits > mode_bits_max )) && mode_bits_max=$bits
+    done
+    params="mode-set=$mode_set;octet-align=$octet"
+    [[ -n "$red" ]] && params="$params;max-red=$red"
+    printf 'codec\t%s\n' "$codec"
+    printf 'clock_rate\t%s\n' "$rate"
+    printf 'rtpmap\ta=rtpmap:96 %s/%s\n' "$codec" "$rate"
+    printf 'fmtp\ta=fmtp:96 %s\n' "$params"
+    printf 'mode_set\t%s\n' "$mode_set"
+    printf 'mode_count\t%s\n' "$mode_count"
+    printf 'modes_requested\t%s\n' "$modes_name"
+    printf 'octet_align\t%s\n' "$octet"
+    printf 'max_red\t%s\n' "${red:--}"
+    printf 'frame_interval_ms\t20\n'
+    printf 'mode_bits_min\t%s\n' "$mode_bits_min"
+    printf 'mode_bits_max\t%s\n' "$mode_bits_max"
+    printf 'capacity_bps_min\t%s\n' "$(awk -v b="$mode_bits_min" 'BEGIN{printf "%.0f", b/0.02}')"
+    printf 'capacity_bps_max\t%s\n' "$(awk -v b="$mode_bits_max" 'BEGIN{printf "%.0f", b/0.02}')"
+    printf 'what_the_mode_set_decides\tthe ceiling the far end may enforce, so a narrow set is a quiet way to cap a call and a wide one is a way to spend a cell\n'
+    printf 'what_octet_align_decides\twhere the frame boundaries are: both ends must agree, and an endpoint that answers the other value produces a stream nobody can reassemble\n'
+    printf 'what_max_red_decides\thow many redundant frames may follow a lost one, which is robustness bought with bandwidth\n'
+    if (( mode_count == 1 )); then
+        printf 'finding\tmode_set_pins_the_capacity\tMEDIUM\ta single mode at %s leaves the call no room to adapt, so the negotiated ceiling is also the floor\n' "$mode_set"
+    fi
+    if (( octet == 0 )); then
+        printf 'note\tbandwidth_efficient_mode\tthe default: no padding, frames packed back to back, which saves tokens and is the format a decoder must agree on explicitly\n'
+    fi
+    printf 'ref\t%s\n' "$( (( wb )) && echo 'TS 26.201 Table 1a, RFC 4867 8.1 (media type parameters)' || echo 'TS 26.101 Table 1a, RFC 4867 8.1 (media type parameters)')"
+    printf 'limit\tThis states the parameters and what each decides. Whether the far end honours them is what its answer says, not this module.\n'
+    printf 'verdict\tamr_parameters_stated\n'
+}
+
+# A recorded media stream, one row per RTP payload: t, payload hex.
+# The frame list of one row is not the interesting part - the sequence is. A mode
+# that changes without a mode request, a call that is mostly silence, and a call
+# pinned to one mode are three different stories about the same audio.
+vims_cmd_amr_stream() {   # <tsv> [--wb]
+    local file="${1:-}" wb=0
+    shift || true
+    while (($# > 0)); do
+        case "$1" in
+            --wb) wb=1; shift ;;
+            *) printf 'ERROR\tunexpected argument %s\n' "$(vims_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$file" ]] || { printf 'ERROR\tusage: --amr-stream <stream.tsv> [--wb]\n' >&2; return 2; }
+    [[ -f "$file" ]] || { printf 'ERROR\tno such file: %s\n' "$(vims_sanitize "$file")" >&2; return 1; }
+    local t hex bits cmr ft fbits name
+    local frames=0 spoken=0 quiet=0 changes=0 unrequested=0 total_bits=0 distinct=0
+    local prev_ft="" t_first="" t_last="" modes_seen=" "
+    while IFS=$'\t' read -r t hex; do
+        [[ -z "$hex" ]] && continue
+        [[ "$hex" =~ ^[0-9a-fA-F]+$ ]] || continue
+        (( ${#hex} >= 2 )) || continue
+        bits=$(vims_hex_bits "${hex,,}")
+        (( ${#bits} >= 10 )) || continue
+        cmr=$(( 2#${bits:0:4} ))
+        ft=$(( 2#${bits:5:4} ))
+        if (( wb )); then fbits=$(vims_amr_wb_frame_bits "$ft"); name=$(vims_amr_wb_mode_name "$ft")
+        else fbits=$(vims_amr_frame_bits "$ft"); name=$(vims_amr_mode_name "$ft"); fi
+        [[ -z "$fbits" ]] && fbits=0
+        frames=$(( frames + 1 ))
+        total_bits=$(( total_bits + 6 + fbits ))
+        [[ -z "$t_first" ]] && t_first="$t"
+        t_last="$t"
+        case "$ft" in
+            8|9|14|15) quiet=$(( quiet + 1 )) ;;
+            *) spoken=$(( spoken + 1 )) ;;
+        esac
+        case "$modes_seen" in
+            *" $ft "*) ;;
+            *) modes_seen="$modes_seen$ft "; distinct=$(( distinct + 1 )) ;;
+        esac
+        if [[ -n "$prev_ft" && "$prev_ft" != "$ft" ]]; then
+            changes=$(( changes + 1 ))
+            # A transition into or out of silence needs no mode request: DTX is
+            # the sender saying it has nothing to encode, not a mode change.
+            local speech_now=1 speech_prev=1
+            case "$ft" in 8|9|14|15) speech_now=0 ;; esac
+            case "$prev_ft" in 8|9|14|15) speech_prev=0 ;; esac
+            if (( speech_now && speech_prev )) && [[ "$cmr" != "$ft" ]]; then
+                unrequested=$(( unrequested + 1 ))
+                printf 'change\t%s\t%s\t%s\t%s\t%s\n' "$t" "$prev_ft" "$ft" "$cmr" "$name"
+            fi
+        fi
+        prev_ft=$ft
+    done < "$file"
+    local span bps
+    if [[ -n "$t_first" && -n "$t_last" ]] && awk -v a="$t_first" -v b="$t_last" 'BEGIN{exit !(b>a)}'; then
+        span=$(awk -v a="$t_first" -v b="$t_last" 'BEGIN{printf "%.3f", b-a}')
+        bps=$(awk -v bits="$total_bits" -v span="$span" 'BEGIN{printf "%.0f", bits/span}')
+    else
+        span="0.000"
+        bps=$(awk -v bits="$total_bits" -v f="$frames" 'BEGIN{printf "%.0f", (f>0 ? bits/(0.02*f) : 0)}')
+    fi
+    printf 'frames\t%s\n' "$frames"
+    printf 'spoken_frames\t%s\n' "$spoken"
+    printf 'quiet_frames\t%s\n' "$quiet"
+    printf 'distinct_modes\t%s\n' "$distinct"
+    printf 'modes_seen\t%s\n' "$(printf '%s' "$modes_seen" | sed 's/^ *//;s/ *$//')"
+    printf 'mode_changes\t%s\n' "$changes"
+    printf 'mode_changes_without_a_request\t%s\n' "$unrequested"
+    printf 'window_s\t%s\n' "$span"
+    printf 'measured_bps\t%s\n' "$bps"
+    printf 'payload_mode\t%s\n' "$( (( wb )) && echo AMR-WB || echo AMR-NB )"
+    if (( unrequested > 0 )); then
+        printf 'finding\tmode_changed_without_a_mode_request\tHIGH\t%s of %s changes were not asked for by the mode request in the payload, so either the far end is steering the mode or the stream was spliced\n' "$unrequested" "$changes"
+    fi
+    if (( quiet > 0 && spoken > 0 )); then
+        printf 'finding\tsilence_is_activity_metadata\tMEDIUM\t%s of %s frames carry no speech, and their timing still says when the speaker stopped and started\n' "$quiet" "$frames"
+    fi
+    if (( distinct == 1 && frames > 4 )); then
+        printf 'finding\tone_mode_for_the_whole_stream\tLOW\ta call that never adapts is a call whose capacity was fixed, which is what a narrow mode set looks like from the wire\n'
+    fi
+    printf 'ref\tRFC 4867 4.3 and 8.1, TS 26.101 Table 1a, TS 26.201 Table 1a\n'
+    printf 'limit\tThe rows are timestamps and payloads. This does not attribute a stream to a subscriber, and the audio is never reconstructed.\n'
+    printf 'verdict\tamr_stream_accounted\n'
 }
 
 # SDES: the key travels in the SDP body, protected by nothing but the signalling.
@@ -3079,6 +3255,53 @@ vims_selftest() {
     chk amr-bits    "$(printf '%s\n' "$amrout" | awk -F'\t' '$1=="frame"{print $6}')" "244"
     chk amr-octets  "$(printf '%s\n' "$amrout" | awk -F'\t' '$1=="frame"{print $7}')" "31"
     chk amr-noarg   "$(vims_cmd_amr_parse '' >/dev/null 2>&1; echo $?)" "2"
+    # AMR-WB is a different frame size table, and the difference is visible in
+    # one payload: 12.65 kbit/s is 253 bits wideband and 148 bits narrowband, so
+    # a payload read with the wrong table lands on the wrong frame boundary.
+    local wbpay wbout sdpo stout stf
+    wbpay=$(python3 -c "bits='1111'+'0'+'0010'+'1'+'0'*253; bits=bits.ljust(((len(bits)+7)//8)*8,'0'); sys.stdout.write(''.join('%02x'%int(bits[i:i+8],2) for i in range(0,len(bits),8)))" 2>/dev/null)
+    wbout=$(vims_cmd_amr_parse "$wbpay" --wb 2>/dev/null)
+    chk amr-wb-mode "$(printf '%s\n' "$wbout" | awk -F'\t' '$1=="frame"{print $4}')" 12.65
+    chk amr-wb-bits "$(printf '%s\n' "$wbout" | awk -F'\t' '$1=="frame"{print $6}')" 253
+    chk amr-wb-tag "$(printf '%s\n' "$wbout" | awk -F'\t' '$1=="payload_mode"{print $2}')" AMR-WB
+    chk amr-nb-same-mode "$(vims_cmd_amr_parse "$wbpay" 2>/dev/null | awk -F'\t' '$1=="frame"{print $6}')" 148
+    sdpo=$(vims_cmd_amr_sdp --mode-set 7 --octet-align 1 2>/dev/null)
+    chk amr-sdp-fmtp "$(printf '%s\n' "$sdpo" | awk -F'\t' '$1=="fmtp"{print $2}')" "a=fmtp:96 mode-set=7;octet-align=1"
+    chk amr-sdp-pinned "$(printf '%s\n' "$sdpo" | awk -F'\t' '$1=="finding" && $2=="mode_set_pins_the_capacity"{print $3}')" MEDIUM
+    chk amr-sdp-cap "$(printf '%s\n' "$sdpo" | awk -F'\t' '$1=="capacity_bps_max"{print $2}')" 4750
+    sdpo=$(vims_cmd_amr_sdp --wb --mode-set 2,8 2>/dev/null)
+    chk amr-sdp-wb-max "$(printf '%s\n' "$sdpo" | awk -F'\t' '$1=="capacity_bps_max"{print $2}')" 23850
+    chk amr-sdp-wb-min "$(printf '%s\n' "$sdpo" | awk -F'\t' '$1=="capacity_bps_min"{print $2}')" 12650
+    chk amr-sdp-badmode "$(vims_cmd_amr_sdp --mode-set 12 >/dev/null 2>&1; echo $?)" 2
+    chk amr-sdp-badoctet "$(vims_cmd_amr_sdp --octet-align 7 >/dev/null 2>&1; echo $?)" 2
+    stf="$(mktemp)"
+    python3 - "$stf" <<'PYAMR'
+import sys
+p=sys.argv[1]
+nb={0:244,1:204,2:159,3:148,4:134,5:118,6:103,7:95,8:39,15:0}
+def pay(cmr, ft):
+    bits=format(cmr,'04b')+'0'+format(ft,'04b')+'1'+'0'*nb[ft]
+    bits=bits.ljust(((len(bits)+7)//8)*8,'0')
+    return ''.join('%02x'%int(bits[i:i+8],2) for i in range(0,len(bits),8))
+rows=[('0.00',pay(7,7)),('0.02',pay(7,7)),('0.04',pay(7,0)),('0.06',pay(0,0)),
+      ('0.08',pay(15,8)),('0.10',pay(15,8))]
+with open(p,'w') as f:
+    for t,h in rows: f.write('%s\t%s\n'%(t,h))
+PYAMR
+    stout=$(vims_cmd_amr_stream "$stf" 2>/dev/null)
+    chk amr-stream-frames "$(printf '%s\n' "$stout" | awk -F'\t' '$1=="frames"{print $2}')" 6
+    chk amr-stream-quiet "$(printf '%s\n' "$stout" | awk -F'\t' '$1=="quiet_frames"{print $2}')" 2
+    chk amr-stream-modes "$(printf '%s\n' "$stout" | awk -F'\t' '$1=="distinct_modes"{print $2}')" 3
+    chk amr-stream-changes "$(printf '%s\n' "$stout" | awk -F'\t' '$1=="mode_changes"{print $2}')" 2
+    # DTX is not a mode change: only the speech-to-speech transition counts.
+    chk amr-stream-unrequested "$(printf '%s\n' "$stout" | awk -F'\t' '$1=="mode_changes_without_a_request"{print $2}')" 1
+    chk amr-stream-finding "$(printf '%s\n' "$stout" | awk -F'\t' '$1=="finding" && $2=="mode_changed_without_a_mode_request"{print $3}')" HIGH
+    chk amr-stream-silence "$(printf '%s\n' "$stout" | awk -F'\t' '$1=="finding" && $2=="silence_is_activity_metadata"{print $3}')" MEDIUM
+    chk amr-stream-verdict "$(printf '%s\n' "$stout" | awk -F'\t' '$1=="verdict"{print $2}')" amr_stream_accounted
+    chk amr-stream-noarg "$(vims_cmd_amr_stream >/dev/null 2>&1; echo $?)" 2
+    chk amr-stream-nofile "$(vims_cmd_amr_stream /tmp/definitely-not-here-amr.tsv >/dev/null 2>&1; echo $?)" 1
+    rm -f "$stf"
+
     local sdesout
     sdesout=$(vims_cmd_sdes_parse 'a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:PS1UjWkR0vJ0nBtL2WmZ0Fh6dXk=')
     chk sdes-suite  "$(fld "$sdesout" suite)" "AES_CM_128_HMAC_SHA1_80"
@@ -3711,6 +3934,8 @@ vims_cli_main() {
         --umts-keystream)   vims_cmd_umts_keystream "$@" ;;
         --umts-two-stream)  vims_cmd_umts_two_stream "$@" ;;
         --amr-parse)        vims_cmd_amr_parse "$@" ;;
+        --amr-sdp)          vims_cmd_amr_sdp "$@" ;;
+        --amr-stream)       vims_cmd_amr_stream "$@" ;;
         --sdes-parse)       vims_cmd_sdes_parse "${1:-}" ;;
         --stir-shaken)      vims_cmd_stir_shaken "$@" ;;
         --xcap)             vims_cmd_xcap "${1:-}" "${2:-GET}" ;;

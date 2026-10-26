@@ -2964,6 +2964,8 @@ static const char *const plain_keys[] = {
     "capability\tcapability",
     "capability_hex\tthe capability exchange this module would send, as hex",
     "capacity\tcapacity",
+    "capacity_bps_max\tThe largest bit rate a negotiated mode set allows",
+    "capacity_bps_min\tThe smallest bit rate a negotiated mode set allows",
     "captcha\tcaptcha",
     "capture\tcapture",
     "capture_count\tcapture count",
@@ -3077,6 +3079,7 @@ static const char *const plain_keys[] = {
     "challenge_nonce\tchallenge nonce",
     "challenge_qop\tchallenge qop",
     "challenge_realm\tchallenge realm",
+    "change\tOne mode change in a recorded stream, with the mode request that did or did not ask for it",
     "changed\tchanged",
     "changed_note\tchanged note",
     "channel\tchannel",
@@ -3164,6 +3167,7 @@ static const char *const plain_keys[] = {
     "client_types\tHow many client categories the specifications name",
     "clients\tHow many distinct location clients appear in a log",
     "clock\tthe timestamp of a message is not later than the one before it, so the log cannot be ordered",
+    "clock_rate\tThe sample clock of a codec in an SDP rtpmap line",
     "close\tclose",
     "closed\tclosed",
     "clusters_with_two\trotation buckets holding two or more certificates, which links those certificates to each other",
@@ -3477,6 +3481,7 @@ static const char *const plain_keys[] = {
     "distance_thresh\tthe gate that only lets a UE inside a radius use the cell",
     "distance_thresh_m\thow far from the reference location the cell says it serves, in metres",
     "distinct_cells\tdistinct cells",
+    "distinct_modes\tHow many different modes a stream used",
     "distinct_occasions\tdistinct occasions",
     "distro\tdistro",
     "dl\tdownlink",
@@ -3766,6 +3771,7 @@ static const char *const plain_keys[] = {
     "flow\tflow",
     "flow_step\tflow step",
     "flows\tflows",
+    "fmtp\tThe format parameters line that decides how a payload is packed",
     "fn\tfn",
     "fn_check\tfn check",
     "fn_mod_42432\tfn mod 42432",
@@ -3798,6 +3804,7 @@ static const char *const plain_keys[] = {
     "frame_count\tframe count",
     "frame_hex\tframe bytes",
     "frame_hop_samples\tthe distance between the starts of two consecutive transforms",
+    "frame_interval_ms\tHow long one codec frame lasts",
     "frame_kind\tframe kind",
     "frame_ms\tframe length (ms)",
     "frame_number\tframe number",
@@ -4446,6 +4453,7 @@ static const char *const plain_keys[] = {
     "max_pages_per_subscriber\tmaximum pages per subscriber",
     "max_power\tlegal power limit for the band",
     "max_records_per_occasion\tmaximum records per occasion",
+    "max_red\tHow many redundant frames may follow a lost one",
     "max_ssb\tmaximum ssb",
     "max_ta\tmaximum timing advance",
     "max_version\tmaximum version",
@@ -4464,6 +4472,7 @@ static const char *const plain_keys[] = {
     "mean_gap_s\tthe average gap between two pages, in seconds",
     "meaning\tmeaning",
     "measured\twhat was measured, where, over what period",
+    "measured_bps\tThe bit rate a recorded stream actually carried",
     "measured_results_on_rach\tmeasured results on rach",
     "measurement\tone number the radio offers",
     "measurement_identity\tmeasurement identity",
@@ -4554,8 +4563,16 @@ static const char *const plain_keys[] = {
     "mobile_identity_raw\tmobile identity raw",
     "mobile_identity_type\tmobile identity type",
     "mode\tmode",
+    "mode_bits_max\tThe largest frame size in a mode set, in bits",
+    "mode_bits_min\tThe smallest frame size in a mode set, in bits",
+    "mode_changes\tHow many times the mode changed in a recorded stream",
+    "mode_changes_without_a_request\tMode changes the payload mode request did not ask for",
     "mode_code\tmode code",
+    "mode_count\tHow many modes a mode set names",
+    "mode_set\tThe set of codec modes a call may use",
     "model\tmodel",
+    "modes_requested\tWhich modes a mode set actually names",
+    "modes_seen\tThe modes a recorded stream used, in order of first appearance",
     "modulated\tmodulated",
     "modulation\tmodulation",
     "modulator\tmodulator",
@@ -4809,6 +4826,7 @@ static const char *const plain_keys[] = {
     "octet\toctet",
     "octet1\toctet1",
     "octet2\toctet2",
+    "octet_align\tWhether frames are octet aligned or packed bit to bit",
     "octets\toctets",
     "octets_file\toctets file",
     "odd_even\todd even",
@@ -4968,6 +4986,7 @@ static const char *const plain_keys[] = {
     "payload_hex\tpayload bytes",
     "payload_is_waveform\tpayload is waveform",
     "payload_len\tpayload length",
+    "payload_mode\tWhether a payload was read as narrowband or wideband",
     "payload_ms\tpayload (ms)",
     "payload_octets\tpayload octets",
     "payload_owner\tpayload owner",
@@ -5264,6 +5283,7 @@ static const char *const plain_keys[] = {
     "question\tthe question a verb answers",
     "queue_message\tthe step that puts a framed message in the send buffer ahead of the transmit instant",
     "queue_window_us\thow long before the transmit instant the message must already be ready",
+    "quiet_frames\tFrames that carry comfort noise or no data at all",
     "quiet_shift\ta small move with a large effect",
     "quota_grant_request\ta request this size asks the rating engine for a balance rather than a session",
     "r3_ies_optional_bitmap\tr3 ies optional bitmap",
@@ -5574,6 +5594,7 @@ static const char *const plain_keys[] = {
     "rsrp_mapping\tsignal strength mapping",
     "rsrq\tsignal quality (RSRQ)",
     "rssi\treceived level",
+    "rtpmap\tThe SDP line that names a codec and its clock rate",
     "rtt_chips\tthe round trip time a Node B measured, in chips",
     "rtt_m\tthat round trip converted to metres",
     "rtt_ms\trtt (ms)",
@@ -6014,6 +6035,7 @@ static const char *const plain_keys[] = {
     "spi_rccds\tspi rccds",
     "spi_source\tspi source",
     "spi_weakness\tspi weakness",
+    "spoken_frames\tFrames that carry encoded speech",
     "sqn\tsequence number",
     "sqn_ak\tsqn ak",
     "sqn_he\tthe network's own counter, before the token arrived",
@@ -6653,11 +6675,14 @@ static const char *const plain_keys[] = {
     "what_it_proves\tthe sentence that separates identity from assertion: a signature names a key, never a person",
     "what_it_selects\twhat the UE switches on when it reads this message",
     "what_it_would_not_buy\tthe algorithms no licence can supply because 3GPP never published them",
+    "what_max_red_decides\tWhat the redundancy allowance in a media line buys",
+    "what_octet_align_decides\tWhat the alignment parameter decides about frame boundaries",
     "what_proves_the_client\tWhat establishes the identity of the client that asked",
     "what_that_costs\twhat SMPP over TLS changes, or does not",
     "what_the_call_says\tWhat one API call asks the far end to do",
     "what_the_core_authenticated\tthe subscription that actually sent the message, as opposed to the name in it",
     "what_the_display_shows\twhat the receiving handset puts on the screen",
+    "what_the_mode_set_decides\tWhat a negotiated set of codec modes actually controls",
     "what_the_receiver_can_compare\twhat a receiver can check the originating address against, which for a name is nothing",
     "what_the_receiver_must_decide\tThe judgement the receiving node has to make on its own",
     "what_the_target_is_told\tWhether the subscriber learns that a positioning session happened",
@@ -6681,6 +6706,7 @@ static const char *const plain_keys[] = {
     "width_khz\twidth of the band in kHz",
     "window\thow many SQN steps ahead a resync may be before this network refuses it",
     "window_frames\twindow frames",
+    "window_s\tHow long the observed part of a stream lasted",
     "window_seconds\twindow seconds",
     "windows\thow many time windows the spectrogram was cut into",
     "wire\tThe protocol layer that carries a service, and who owns it",
@@ -7605,6 +7631,7 @@ static const ChipRow chip_rows[] = {
     { "26_ss7_map",          "--grx-recon",           NEED_NO, DOES_READS },
     { "26_ss7_map",          "--help",                NEED_NO, DOES_READS },
     { "26_ss7_map",          "--info",                NEED_NO, DOES_READS },
+    { "26_ss7_map",          "--ispc",                NEED_NO, DOES_READS },
     { "26_ss7_map",          "--menu",                NEED_NO, DOES_READS },
     { "26_ss7_map",          "--opcode",              NEED_NO, DOES_READS },
     { "26_ss7_map",          "--parse-sai",           NEED_NO, DOES_READS },
@@ -7719,6 +7746,8 @@ static const ChipRow chip_rows[] = {
     { "30_volte_ims",        "--yes",                 NEED_NO, DOES_READS },
     { "30_volte_ims",        "--spoof-sms",        NEED_NO, DOES_BUILDS },
     { "30_volte_ims",       "--amr-parse",           NEED_NO, DOES_READS },
+    { "30_volte_ims",       "--amr-sdp",             NEED_NO, DOES_READS },
+    { "30_volte_ims",       "--amr-stream",          NEED_NO, DOES_READS },
     { "30_volte_ims",       "--sdes-parse",          NEED_NO, DOES_READS },
     { "30_volte_ims",       "--stir-shaken",         NEED_NO, DOES_BUILDS },
     { "30_volte_ims",       "--xcap",                NEED_NO, DOES_READS },
@@ -30056,6 +30085,24 @@ ss7_build_queries(AppState *state, const char *module_id,
     gtk_box_append(GTK_BOX(body), isd);
     mod_card_end();
 
+    {
+        GtkWidget *owner_body;
+        GtkWidget *owner = verb_card("FIND THE OWNER", &owner_body);
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(owner_body),
+            mod_arg_row_prefilled(state, module_id, status, "Look Up the Point Code",
+                "--ispc", "4-024-0",
+                "An international signalling point code, from an MSU or from a "
+                "peer's routing configuration. The answer is the operator the "
+                "ITU register assigns it to, or a finding that nobody does — a "
+                "well-formed code with no assignment is what a spoofed "
+                "international origin looks like. Needs "
+                "tools/fetch-reference-data.sh --only ispc on this machine."));
+        gtk_box_append(GTK_BOX(owner_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), owner);
+
     (void) out;
     return outer;
 }
@@ -31019,6 +31066,34 @@ vims_build_media(AppState *state, const char *module_id,
                 "One RTP payload as hex. The answer is the frame list: mode, "
                 "quality bit, size, and whether the far end sent speech or "
                 "comfort noise."));
+        gtk_box_append(GTK_BOX(amr_body), res);
+
+        res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(amr_body),
+            mod_arg_choices(state, module_id, status, "Read the Parameters", "",
+                "What the SDP line decides before any audio moves: the mode set "
+                "is a capacity ceiling the far end may enforce, and octet-align "
+                "is the frame boundary both ends must agree on. A wideband "
+                "payload read with the narrowband table is wrong from the second "
+                "frame onward.",
+                (const char *[]) { "--amr-sdp --mode-set 7",
+                                   "--amr-sdp --mode-set 0,1,2,3,4,5,6,7",
+                                   "--amr-sdp --wb --mode-set 2,8",
+                                   "--amr-sdp --octet-align 1 --max-red 2" },
+                (const char *[]) { "One mode", "All narrowband", "Wideband",
+                                   "Redundancy" }, 4));
+        gtk_box_append(GTK_BOX(amr_body), res);
+
+        res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(amr_body),
+            mod_arg_row(state, module_id, status, "Account for a Stream",
+                "--amr-stream", "stream.tsv",
+                "t, payload hex, one row per packet. The sequence is the story: "
+                "a mode that changed without a mode request, a call that is "
+                "mostly silence, and a call pinned to one mode are three "
+                "different answers about the same audio."));
         gtk_box_append(GTK_BOX(amr_body), res);
 
         res = result_rect_new(state, NULL);
