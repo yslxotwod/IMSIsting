@@ -443,48 +443,45 @@ IMSISTING_MODULE_TABLE=(
     "CORE NETWORK|35|NAS Signalling|nasf_menu|32_nas_signaling"
     "CORE NETWORK|36|5G SBA Pivot|sbap_menu|40_sba_pivot"
     "CORE NETWORK|37|O-RAN / xApp Attacks|oran_menu|48_oran"
+    "CORE NETWORK|38|GTP-U User Plane|gtpu_menu|62_gtpu"
+    "CORE NETWORK|39|RAN / C-RAN Attacks|ran_menu|63_ran_attacks"
 
     # SIM / IDENTITY
-    "SIM / IDENTITY|38|SUCI Deconcealment|suci_menu|14_suci"
-    "SIM / IDENTITY|39|5G SUCI Catcher|suci_catcher_menu|58_suci_catcher"
-    "SIM / IDENTITY|40|SIM / eSIM / OTA Attacks|sim_menu|16_sim"
-    "SIM / IDENTITY|41|IMSI Harvest|imsi_menu|18_imsi_exposure"
-    "SIM / IDENTITY|42|SIM Swap Attack/Defence|simd_menu|31_sim_defense"
-    "SIM / IDENTITY|43|OTA Binary SMS Attacks|otasm_menu|41_ota_sms"
-    "SIM / IDENTITY|44|STK Attacks|stk_menu|52_stk"
+    "SIM / IDENTITY|40|SUCI Deconcealment|suci_menu|14_suci"
+    "SIM / IDENTITY|41|5G SUCI Catcher|suci_catcher_menu|58_suci_catcher"
+    "SIM / IDENTITY|42|SIM / eSIM / OTA Attacks|sim_menu|16_sim"
+    "SIM / IDENTITY|43|IMSI Harvest|imsi_menu|18_imsi_exposure"
+    "SIM / IDENTITY|44|SIM Swap Attack/Defence|simd_menu|31_sim_defense"
+    "SIM / IDENTITY|45|OTA Binary SMS Attacks|otasm_menu|41_ota_sms"
+    "SIM / IDENTITY|46|STK Attacks|stk_menu|52_stk"
 
     # BASEBAND / DEVICE
-    "BASEBAND / DEVICE|45|Baseband Fuzzing|bbnd_menu|35_baseband"
-    "BASEBAND / DEVICE|46|Baseband Exploits|bexp_menu|54_baseband_exploit"
-    "BASEBAND / DEVICE|47|5G NR Injection|nrj_menu|55_nr_inject"
-    "BASEBAND / DEVICE|48|Baseband NV/EFS|bbdg_menu|56_baseband_diag"
+    "BASEBAND / DEVICE|47|Baseband Fuzzing|bbnd_menu|35_baseband"
+    "BASEBAND / DEVICE|48|Baseband Exploits|bexp_menu|54_baseband_exploit"
+    "BASEBAND / DEVICE|49|5G NR Injection|nrj_menu|55_nr_inject"
+    "BASEBAND / DEVICE|50|Baseband NV/EFS|bbdg_menu|56_baseband_diag"
 
     # TRACKING
-    "TRACKING|49|RF Fingerprint / CSI|rff_menu|24_rf_fingerprint"
-    "TRACKING|50|Paging / Torpedo|pgt_menu|28_paging_track"
-    "TRACKING|51|TA Geolocation|tgeo_menu|39_ta_geoloc"
-    "TRACKING|52|LPP Position Forgery|lpp_menu|46_lpp"
+    "TRACKING|51|RF Fingerprint / CSI|rff_menu|24_rf_fingerprint"
+    "TRACKING|52|Paging / Torpedo|pgt_menu|28_paging_track"
+    "TRACKING|53|TA Geolocation|tgeo_menu|39_ta_geoloc"
+    "TRACKING|54|LPP Position Forgery|lpp_menu|46_lpp"
+    "TRACKING|55|GNSS / GPS|gnss_menu|61_gnss"
 
     # ANALYSIS
-    "ANALYSIS|53|Capture Analysis|pcap_menu|17_pcap_analysis"
-    "ANALYSIS|54|Cipher Audit|caud_menu|19_cipher_audit"
-    "ANALYSIS|55|Traffic Analysis|tana_menu|23_traffic_analysis"
-    "ANALYSIS|56|MAC / RLC Analysis|macl_menu|29_mac_layer"
+    "ANALYSIS|56|Capture Analysis|pcap_menu|17_pcap_analysis"
+    "ANALYSIS|57|Cipher Audit|caud_menu|19_cipher_audit"
+    "ANALYSIS|58|Traffic Analysis|tana_menu|23_traffic_analysis"
+    "ANALYSIS|59|MAC / RLC Analysis|macl_menu|29_mac_layer"
 
     # EXPLOIT KITS
-    "EXPLOIT KITS|57|GSM/UMTS CVE Kit|gcve_menu|20_gsm_cve"
-    "EXPLOIT KITS|58|LTE CVE Kit|lcve_menu|21_lte_cve"
-    "EXPLOIT KITS|59|5G CVE Kit|ncve_menu|22_nr_cve"
+    "EXPLOIT KITS|60|GSM/UMTS CVE Kit|gcve_menu|20_gsm_cve"
+    "EXPLOIT KITS|61|LTE CVE Kit|lcve_menu|21_lte_cve"
+    "EXPLOIT KITS|62|5G CVE Kit|ncve_menu|22_nr_cve"
 
     # INTERCEPT / CARRIER
-    "INTERCEPT / CARRIER|60|LI Interception|lipr_menu|42_li_probe"
-    "INTERCEPT / CARRIER|61|Carrier API Abuse|capi_menu|44_carrier_api"
-
-    # POSITIONING
-    "POSITIONING|62|GNSS / GPS|gnss_menu|61_gnss"
-
-    # USER PLANE
-    "USER PLANE|63|GTP-U User Plane|gtpu_menu|62_gtpu"
+    "INTERCEPT / CARRIER|63|LI Interception|lipr_menu|42_li_probe"
+    "INTERCEPT / CARRIER|64|Carrier API Abuse|capi_menu|44_carrier_api"
 )
 
 # ── banner ──────────────────────────────────────────────────

@@ -71,8 +71,6 @@ Or launch the built binary directly:
 ./native/builddir/imsisting-gui
 ```
 
-<img width="964" height="523" alt="imsisting" src="https://github.com/user-attachments/assets/97afe07a-1b0e-43fe-a931-66cd5dc0fd37" />
-
 The GUI asks for your password per action via `pkexec`, not once at startup.
 
 ### Dependencies
@@ -345,6 +343,7 @@ Copy for many.
 | `32_nas_signaling` | NAS rate and procedure mix, storm detection, and seventeen pre-authentication message builders |
 | `40_sba_pivot` | Pivot across the service-based architecture: HTTP/2 SBI framing, NRF discovery and an inventory walk, OAuth2 token audit, the N32 roaming bridge, and a cloud-metadata callback |
 | `48_oran` | O-RAN interfaces, E2SM, xApp authority, A1 policy poisoning, QoS policy |
+| `63_ran_attacks` | The tower from the transport side: an SNMP sweep of the management VLAN, a CWMP/TR-069 ACS, O1 NETCONF, malformed S1AP/NGAP/XnAP, the published RAN CVE inventory, and the CPRI/eCPRI fronthaul — which carries raw IQ, authenticates nothing, and is the one surface here that outranks an evil twin. Also the cheapest authenticity signal in the tree: the broadcast PLMN matched against the subscribers actually on the cell |
 
 ### SIM and identity
 

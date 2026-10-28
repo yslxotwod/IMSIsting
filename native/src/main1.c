@@ -905,15 +905,20 @@ static const ModuleDefinition modules[] = {
       "imsisting-44_carrier_api-symbolic",
       "Carrier API surface, authorisation-boundary testing and token/rate-limit audit, plus the request plan an enumeration runs and never sends." },
 
-    /* POSITIONING — the receiver interface and what it will believe */
-    { "61_gnss",             "GNSS / GPS",           "POSITIONING",
+    /* 61 — moved to TRACKING */
+    { "61_gnss",             "GNSS / GPS",           "TRACKING",
       "imsisting-04_tower_map-symbolic",
       "NMEA and UBX parsed and forged, spoofing tells, and the gpsd socket that hands a position to anything able to open it." },
 
-    /* USER PLANE — the payload carrier between the core and the RAN */
-    { "62_gtpu",             "GTP-U User Plane",     "USER PLANE",
+    /* 62 — moved to CORE NETWORK */
+    { "62_gtpu",             "GTP-U User Plane",     "CORE NETWORK",
       "imsisting-11_lte_core-symbolic",
-      "The GTP-U encapsulation itself: header decode and build, the TS 38.415 PDU Session Container, echo storms and TEID collision arithmetic." }
+      "The GTP-U encapsulation itself: header decode and build, the TS 38.415 PDU Session Container, echo storms and TEID collision arithmetic." },
+
+    /* 63 — the back door: management planes, fronthaul, and the tower's own software. */
+    { "63_ran_attacks",      "RAN / C-RAN Attacks",  "CORE NETWORK",
+      "imsisting-48_oran-symbolic",
+      "The tower approached as an operator would reach it: SNMP on the management VLAN, a CWMP ACS, O1 NETCONF, malformed N2, the published CVEs, and the CPRI/eCPRI fronthaul that carries raw IQ." }
 
 };
 
@@ -8303,6 +8308,21 @@ static const ChipRow chip_rows[] = {
     { "62_gtpu",             "--selftest",            NEED_NO, DOES_READS },
     { "62_gtpu",             "--status-tsv",          NEED_NO, DOES_READS },
     { "62_gtpu",             "--teid-scan",           NEED_NO, DOES_READS },
+    { "63_ran_attacks",      "--__index_probe__",     NEED_NO, DOES_READS },
+    { "63_ran_attacks",      "--acs",                 NEED_NO, DOES_BUILDS },
+    { "63_ran_attacks",      "--check-plmn",          NEED_NO, DOES_READS },
+    { "63_ran_attacks",      "--cpri-decode",         NEED_NO, DOES_READS },
+    { "63_ran_attacks",      "--cpri-options",        NEED_NO, DOES_READS },
+    { "63_ran_attacks",      "--cpri-sigmf",          NEED_NO, DOES_READS },
+    { "63_ran_attacks",      "--fronthaul",           NEED_CAP, DOES_READS },
+    { "63_ran_attacks",      "--fuzz",                NEED_CAP, DOES_SENDS },
+    { "63_ran_attacks",      "--help",                NEED_NO, DOES_READS },
+    { "63_ran_attacks",      "--inventory",           NEED_NO, DOES_READS },
+    { "63_ran_attacks",      "--o1",                  NEED_CAP, DOES_SENDS },
+    { "63_ran_attacks",      "--plan",                NEED_NO, DOES_READS },
+    { "63_ran_attacks",      "--scan-ems",            NEED_CAP, DOES_SENDS },
+    { "63_ran_attacks",      "--selftest",            NEED_NO, DOES_READS },
+    { "63_ran_attacks",      "--status-tsv",          NEED_NO, DOES_READS },
     { "45_iot",              "--__index_probe__",     NEED_NO, DOES_READS },
     { "45_iot",              "--decode-mib",          NEED_RADIO, DOES_READS },
     { "45_iot",              "--decode-sib1",         NEED_RADIO, DOES_READS },
@@ -37456,6 +37476,222 @@ gtpu_build_build(AppState *state, const char *module_id,
     return outer;
 }
 
+/* 63_ran_attacks — the tower approached from the transport side.
+ *
+ * Every other page in this catalogue is the air interface or the core. This one
+ * is the back door: the management VLAN, the provisioning server, the O1
+ * configuration tree, the SCTP peer, and the fibre between a baseband hotel and
+ * its radio heads. The page keeps the same promise as the module: a surface this
+ * bench cannot reach is named with what would unblock it, never drawn as an
+ * empty result.
+ */
+static GtkWidget *
+ran_build_overview(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("THE BACK DOOR",
+        "A base station is an authenticated peer of the core and an open door to "
+        "its own management plane. This page is the second door.", &body);
+    GtkWidget *card_body, *card;
+
+    card = verb_card("WHAT THIS APPROACH IS", &card_body);
+    gtk_box_append(GTK_BOX(card_body), fkit_note(
+        "The air interface is the door every other module uses. It is also the "
+        "best-defended one. This module uses the doors that assume nobody is "
+        "listening: SNMP on the management VLAN, the CWMP server the element "
+        "polls, the NETCONF tree it is configured through, the SCTP peer it "
+        "trusts, and the fronthaul fibre that carries raw IQ with no "
+        "authentication at all."));
+    gtk_box_append(GTK_BOX(card_body), mod_arg_choices(state, module_id, status,
+        "The plan", "", "",
+        (const char *const[]) {"--plan"}, (const char *const[]) {"What it needs"},
+        1));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("WHAT IS ON THE OTHER SIDE", &card_body);
+    gtk_box_append(GTK_BOX(card_body), fkit_note(
+        "An element announces itself in one string. SNMP sysDescr gives the "
+        "vendor, the model and the software version, and those three are what "
+        "the inventory matches against."));
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Sweep", "--scan-ems", "host or /24",
+        "One GET for sysDescr.0 per address. A VLAN of RAN elements answers in "
+        "a few seconds, and every element that answers has told you what it is."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("WHAT HAS BEEN COLLECTED", &card_body);
+    gtk_box_append(GTK_BOX(card_body), fkit_note(
+        "Three stores answer three different questions: which elements exist, "
+        "which published issues apply to them, and whether the fronthaul was "
+        "ever observed. An absent store reports none, which is not the same as "
+        "a scan that found nothing."));
+    gtk_box_append(GTK_BOX(card_body), mod_arg_choices(state, module_id, status,
+        "Read the stores", "", "",
+        (const char *const[]) {"--status-tsv"},
+        (const char *const[]) {"What has been collected"}, 1));
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ran_build_management(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("MANAGEMENT PLANE",
+        "The interfaces a RAN element is configured through, which are the ones "
+        "that assume they are only reachable from inside.", &body);
+    GtkWidget *card_body, *card;
+
+    card = verb_card("SNMP ON THE EMS VLAN", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Sweep", "--scan-ems", "host or /24",
+        "One GET for sysDescr.0 per host. A responder names its vendor, model and "
+        "software in that one string, which is what the inventory then matches. "
+        "Refuses a sweep wider than a /24: this is a management VLAN, not the "
+        "internet."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("CWMP / TR-069", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_choices(state, module_id, status,
+        "What a small cell will do for its ACS", "", "",
+        (const char *const[]) {"--acs"},
+        (const char *const[]) {"The parameters worth writing"}, 1));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("O1 / NETCONF", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_choices(state, module_id, status,
+        "The Open RAN configuration tree", "", "",
+        (const char *const[]) {"--o1"},
+        (const char *const[]) {"The YANG paths that matter"}, 1));
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
+/* The authenticity page: the cheapest decisive signal in the toolkit.
+ *
+ * A macro commissioned on a bench keeps the lab PLMN it was commissioned with,
+ * because re-running commissioning is a step somebody has to remember. One
+ * get-config answers it. The second half is the mismatch: a tower broadcasting
+ * 001-01 while every subscriber on it carries a 262-01 IMSI is not a test cell,
+ * it is a production cell nobody ever commissioned.
+ */
+static GtkWidget *
+ran_build_identity(AppState *state, const char *module_id,
+                   GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("AUTHENTICITY",
+        "Two facts decide it: the PLMN the tower broadcasts, and the PLMN its "
+        "subscribers are actually provisioned on.", &body);
+    GtkWidget *card_body, *card;
+
+    card = verb_card("THE BROADCAST PLMN", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Check", "--check-plmn", "262-01 or 26201",
+        "Test and internal-use MCCs (001, 002, 991, 999) and the PLMNs the "
+        "open-source cores ship as defaults are named for what they are. A "
+        "carrier macro on 001-01 was configured on a bench."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("AGAINST THE SUBSCRIBERS", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Compare", "--check-plmn", "a store or capture with IMSIs",
+        "The IMSI's own PLMN is the second fact. Give a file and every identity "
+        "in it is compared; a tower whose broadcast PLMN matches nobody is the "
+        "finding, and neither fact alone says it."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ran_build_signalling(AppState *state, const char *module_id,
+                     GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SIGNALLING AND SOFTWARE",
+        "What a base station must parse, and what its own software is known to "
+        "get wrong.", &body);
+    GtkWidget *card_body, *card;
+
+    card = verb_card("S1AP / NGAP / XnAP", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_choices(state, module_id, status,
+        "The mutation catalogue", "", "",
+        (const char *const[]) {"--fuzz"},
+        (const char *const[]) {"What each case breaks"}, 1));
+    gtk_box_append(GTK_BOX(card_body), fkit_note(
+        "The runner is on the page and does not run: a malformed NGAP at a live "
+        "gNB is a denial of service against a network that is not this bench. It "
+        "names the peer it would need and exits 3, which is a handoff."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("THE INVENTORY", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Match", "--inventory", "host vendor product software",
+        "The published issues for RAN element software, matched against what the "
+        "scan found. A host that matches nothing says so, which is a different "
+        "answer from a host nobody checked."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
+static GtkWidget *
+ran_build_fronthaul(AppState *state, const char *module_id,
+                    GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("FRONTHAUL",
+        "The fibre between a baseband hotel and its radio heads. It carries raw "
+        "IQ, and CPRI authenticates nothing.", &body);
+    GtkWidget *card_body, *card;
+
+    card = verb_card("THE LINK", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_choices(state, module_id, status,
+        "What the standard says", "", "",
+        (const char *const[]) {"--cpri-options", "--fronthaul"},
+        (const char *const[]) {"CPRI line rates", "eCPRI message types"}, 2));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("AUDIT A LINK", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Audit", "--fronthaul", "a capture path and a line rate",
+        "Every question answered in measured, advertised or unobservable, and "
+        "every unobservable one carries what would unblock it. A CPRI capture "
+        "that was never taken is a shopping list, not an empty result."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    card = verb_card("WITH A TAP", &card_body);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Decode", "--cpri-decode", "a raw 8b/10b bit file",
+        "8b/10b decode, hyperframe alignment on K28.5, and the AxC container "
+        "count. This is the half that works once the capture exists."));
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "To SigMF", "--cpri-sigmf", "raw file, output base, AxC index",
+        "Writes the sample stream the air-interface modules already read, so a "
+        "fronthaul capture closes the chain to the same decoders."));
+    gtk_box_append(GTK_BOX(body), card);
+
+    (void) out;
+    return outer;
+}
+
+static ModuleSubmenuEntry ran_entries[] = {
+    { "Overview", "view-grid-symbolic", NULL, ran_build_overview },
+    { "Management", "network-server-symbolic", NULL, ran_build_management },
+    { "Authenticity", "dialog-password-symbolic", NULL, ran_build_identity },
+    { "Signalling", "network-transmit-receive-symbolic", NULL, ran_build_signalling },
+    { "Fronthaul", "network-wired-symbolic", NULL, ran_build_fronthaul },
+};
+
 static ModuleSubmenuEntry gtpu_entries[] = {
     { "Decode", "document-open-symbolic", NULL, gtpu_build_decode },
     { "Build", "network-transmit-receive-symbolic", NULL, gtpu_build_build },
@@ -40496,6 +40732,8 @@ register_all_modules(void)
                              G_N_ELEMENTS(gnss_entries), NULL);
     module_registry_register("62_gtpu", gtpu_entries,
                              G_N_ELEMENTS(gtpu_entries), NULL);
+    module_registry_register("63_ran_attacks", ran_entries,
+                             G_N_ELEMENTS(ran_entries), NULL);
     module_registry_register("48_oran", oran_entries,
                              G_N_ELEMENTS(oran_entries), NULL);
     module_registry_register("49_ntn", ntn_entries,
