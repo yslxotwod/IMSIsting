@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Build and run the IMSIsting cellular security toolkit on Linux.">
+  <meta name="theme-color" content="#0b1017">
+  <link rel="icon" type="image/png" href="imsisting-icon.png">
+  <title>Installation — IMSIsting</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Orbitron:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="install.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner wrap">
+      <a class="brand" href="index.html" aria-label="IMSIsting home"><img class="brand-mark" src="imsisting-icon.png" alt="" width="40" height="40"><span>IMSI<span>sting</span><small>CELLULAR SECURITY TOOLKIT</small></span></a>
+      <nav aria-label="Main navigation">
+        <a href="index.html">Overview</a>
+        <a href="modules.html">Modules</a>
+        <a href="documentation.html">Documentation</a>
+        <a href="install.html" aria-current="page">Install</a>
+      </nav>
+      <a class="header-link" href="https://github.com/yslxotwod/IMSIsting"><svg class="icon icon-github" aria-hidden="true" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .9a11.1 11.1 0 0 0-3.51 21.63c.56.1.76-.24.76-.54v-2.1c-3.1.67-3.75-1.31-3.75-1.31-.51-1.29-1.24-1.63-1.24-1.63-1.02-.7.08-.68.08-.68 1.13.08 1.72 1.16 1.72 1.16 1 1.72 2.63 1.22 3.27.93.1-.72.39-1.22.7-1.5-2.48-.28-5.1-1.24-5.1-5.5 0-1.22.44-2.21 1.15-2.99-.12-.28-.5-1.42.1-2.96 0 0 .94-.3 3.05 1.14a10.63 10.63 0 0 1 5.56 0c2.11-1.44 3.04-1.14 3.04-1.14.61 1.54.23 2.68.11 2.96.72.78 1.14 1.77 1.14 2.99 0 4.27-2.62 5.21-5.11 5.49.4.35.75 1.03.75 2.08v3.06c0 .3.2.65.77.54A11.1 11.1 0 0 0 12 .9Z"/></svg> GitHub <span aria-hidden="true">↗</span></a>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="install-hero">
+      <div class="wrap install-hero-inner">
+        <div>
+          <p class="eyebrow"><span class="signal-dot"></span> DOCUMENTATION <span class="slash">/</span> GETTING STARTED</p>
+          <h1>Build the <em>toolkit.</em></h1>
+          <p class="install-lede">Set up IMSIsting on Linux, build the GTK4 desktop, and choose the interface that fits your work.</p>
+        </div>
+        <div class="install-meta" aria-label="Installation requirements">
+          <span>PLATFORM <strong>Linux</strong></span>
+          <span>DESKTOP <strong>GTK 4.14+</strong></span>
+          <span>BUILD <strong>Meson / Ninja</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="wrap install-layout">
+      <aside class="install-sidebar">
+        <p class="sidebar-label">ON THIS PAGE</p>
+        <nav aria-label="Installation sections">
+          <a href="#requirements"><span>01</span> Requirements</a>
+          <a href="#clone"><span>02</span> Clone</a>
+          <a href="#build"><span>03</span> Build</a>
+          <a href="#launch"><span>04</span> Launch</a>
+          <a href="#reference"><span>05</span> Reference data</a>
+          <a href="#limits"><span>06</span> Project limits</a>
+        </nav>
+      </aside>
+
+      <div class="install-content">
+        <section class="install-section" id="requirements">
+          <p class="eyebrow"><span class="section-number">01 /</span> PREPARE</p>
+          <h2>Requirements</h2>
+          <p>Use Linux with GTK4 4.14 or newer, Meson, Ninja, a C compiler, Python 3, and Fontconfig development files. Git is needed to clone the repository. NumPy and SciPy are included in the package examples below.</p>
+          <div class="command-block"><div class="command-label"><span>DEBIAN / UBUNTU</span><span>DEPENDENCIES</span></div><pre><code>sudo apt update
+sudo apt install git build-essential meson ninja-build pkg-config \
+  libgtk-4-dev libfontconfig1-dev python3 python3-numpy python3-scipy</code></pre></div>
+          <div class="command-block"><div class="command-label"><span>ARCH LINUX</span><span>DEPENDENCIES</span></div><pre><code>sudo pacman -S git base-devel meson ninja pkgconf gtk4 fontconfig \
+  python python-numpy python-scipy</code></pre></div>
+          <p class="detail-note">Package versions vary by distribution. Check <code>pkg-config --modversion gtk4</code>; if it reports less than 4.14, use a distribution or package source with a newer GTK4.</p>
+          <p>Specific modules may need additional tools such as GNU Radio and gr-gsm, srsRAN, Open5GS or free5GC, tshark, pcsc-tools, gpsd, or Python cryptography. Run <code>bash modules/00_deps.sh --preflight</code> from the project root to inspect the toolchain.</p>
+        </section>
+
+        <section class="install-section" id="clone">
+          <p class="eyebrow"><span class="section-number">02 /</span> SOURCE</p>
+          <h2>Clone the repository</h2>
+          <p>Get the source and enter the project directory. The commands that follow assume this checkout.</p>
+          <div class="command-block"><div class="command-label"><span>TERMINAL</span><span>PROJECT ROOT</span></div><pre><code>git clone https://github.com/yslxotwod/IMSIsting.git
+cd IMSIsting</code></pre></div>
+        </section>
+
+        <section class="install-section" id="build">
+          <p class="eyebrow"><span class="section-number">03 /</span> COMPILE</p>
+          <h2>Build the desktop</h2>
+          <p>Configure the native build once, then compile it. The executable is created inside <code>native/builddir</code>.</p>
+          <div class="command-block"><div class="command-label"><span>TERMINAL</span><span>GTK4 DESKTOP</span></div><pre><code>cd native
+meson setup builddir
+meson compile -C builddir
+cd ..</code></pre></div>
+          <p class="detail-note">For an existing build directory, use <code>meson setup --reconfigure builddir</code> from <code>native</code>, then compile again.</p>
+        </section>
+
+        <section class="install-section" id="launch">
+          <p class="eyebrow"><span class="section-number">04 /</span> RUN</p>
+          <h2>Choose an interface</h2>
+          <p>From the project root, launch the desktop or use the terminal interface. The modules also run as standalone scripts.</p>
+          <div class="command-block"><div class="command-label"><span>TERMINAL</span><span>PROJECT ROOT</span></div><pre><code>./imsisting.sh --gui     # GTK4 desktop
+./imsisting.sh --tui     # terminal interface
+./imsisting.sh --list    # list modules
+./imsisting.sh --index   # module index as TSV</code></pre></div>
+          <p>You can also run <code>./native/builddir/imsisting-gui</code> directly. The GUI requests privileges per action through <code>pkexec</code>, rather than at startup.</p>
+        </section>
+
+        <section class="install-section" id="reference">
+          <p class="eyebrow"><span class="section-number">05 /</span> OPTIONAL DATA</p>
+          <h2>Fetch reference tables</h2>
+          <p>Public PLMN, ISPC, and PEN tables help identify network and registry owners. They are not shipped with the repository; fetch them once per checkout or check what is already present.</p>
+          <div class="command-block"><div class="command-label"><span>TERMINAL</span><span>PROJECT ROOT</span></div><pre><code>tools/fetch-reference-data.sh
+# Check availability without downloading:
+tools/fetch-reference-data.sh --check</code></pre></div>
+          <p class="detail-note">A missing table means an answer is <strong>unobserved</strong>, not that the register has no matching entry. Operator-supplied private tables are not included.</p>
+        </section>
+
+        <section class="install-section" id="limits">
+          <p class="eyebrow"><span class="section-number">06 /</span> BEFORE YOU BEGIN</p>
+          <h2>Know the limits</h2>
+          <div class="limit-note"><span class="note-label">EARLY DEVELOPMENT</span><div><p>No module has been run against a real radio. Over-the-air paths are written and reviewed, but untested on hardware. Hardware, radios, and external stacks are not bundled; individual operations may require specific equipment or software.</p><p>Some protocol and capture analysis can run without a radio. A verb or a successful build is not proof that a live operation works. Consult the project’s <a href="https://github.com/yslxotwod/IMSIsting#what-actually-works">what actually works</a> and <a href="https://github.com/yslxotwod/IMSIsting#hardware">hardware</a> notes before relying on a path.</p></div></div>
+          <div class="next-links"><a class="text-link" href="modules.html">Explore modules <span aria-hidden="true">→</span></a><a class="text-link" href="index.html">Back to overview <span aria-hidden="true">→</span></a></div>
+        </section>
+      </div>
+    </div>
+  </main>
+  <footer><div class="wrap footer-inner"><div><a class="footer-brand" href="index.html">IMSI<span>sting</span></a><p>Cellular network and protocol security for Linux.</p></div><div class="footer-links"><a href="https://github.com/yslxotwod/IMSIsting">GitHub ↗</a><a href="https://github.com/yslxotwod/IMSIsting#what-actually-works">Project status ↗</a><a href="#main">Back to top ↑</a></div><div class="footer-meta">OPEN SOURCE <span>/</span> BUILT FOR LINUX</div></div></footer>
+<script src="glow-dust.js" defer></script>
+</body>
+</html>

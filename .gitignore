@@ -8,10 +8,29 @@
 /cases/
 /tmp/
 # /docs holds generated reference material; the hand-written manual under
-# docs/manual/ is source and is tracked, so the rule ignores the directory's
-# contents rather than the directory itself.
+# docs/manual/ and the GitHub Pages site are source and are tracked, so the
+# rule ignores the directory's contents rather than the directory itself.
 /docs/*
 !/docs/manual/
+!/docs/index.html
+!/docs/style.css
+!/docs/splash.js
+!/docs/imsisting-desktop.png
+!/docs/imsisting-icon.png
+!/docs/imsisting_screenshot.png
+!/docs/imsisting_screenshot2.png
+!/docs/imsisting_splash.png
+!/docs/imsisting_splash*.mp4
+!/docs/splash*-poster.jpg
+!/docs/modules.html
+!/docs/modules.css
+!/docs/module-icons/
+!/docs/install.html
+!/docs/install.css
+!/docs/glow-dust.js
+!/docs/documentation.html
+!/docs/documentation.css
+!/docs/documentation/
 
 # AGENTS.md is a briefing for whoever works in the tree, not part of the
 # project: it must never be committed or pushed (its own rule zero).

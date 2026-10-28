@@ -1,0 +1,37 @@
+/* Installation reference — shared colours and typography come from style.css. */
+.icon-github{width:13px;height:13px;vertical-align:middle;margin:0 6px 2px 0}
+.header-inner nav a[aria-current="page"]{color:#84d6ef}
+.install-hero{background:radial-gradient(ellipse at 80% 10%,#142c3d 0,transparent 48%),linear-gradient(180deg,#0c141f,#0b1017);border-bottom:1px solid var(--line)}
+.install-hero-inner{padding-block:82px 60px;display:grid;grid-template-columns:1fr 300px;align-items:end;gap:50px}
+.install-hero h1{margin-bottom:18px}
+.install-lede{max-width:620px;margin:0;color:#adbac9;font-size:19px}
+.install-meta{border-top:1px solid #34465b}
+.install-meta span{display:flex;justify-content:space-between;gap:15px;padding:12px 0;border-bottom:1px solid #293a50;color:#8295a7;font:500 10px var(--mono);letter-spacing:.08em}
+.install-meta strong{color:#d5e3ed;font-weight:500;letter-spacing:0}
+.install-layout{display:grid;grid-template-columns:215px minmax(0,760px);gap:80px;align-items:start;padding-block:70px 110px}
+.install-sidebar{position:sticky;top:28px;border-top:1px solid #32465a;padding-top:19px}
+.sidebar-label{font:600 10px var(--mono);letter-spacing:.13em;color:#8fa2b4;margin-bottom:14px}
+.install-sidebar nav{display:flex;flex-direction:column;gap:0;margin:0}
+.install-sidebar nav a{padding:8px 0;color:#a9b8c7;font-size:14px}
+.install-sidebar nav a:hover{color:#80d6f4}
+.install-sidebar nav span{font:500 10px var(--mono);color:#668b9f;margin-right:12px}
+.install-section{scroll-margin-top:24px;padding-bottom:60px;margin-bottom:60px;border-bottom:1px solid #26374a}
+.install-section:last-child{border:0;padding-bottom:0;margin-bottom:0}
+.install-section .eyebrow{margin-bottom:17px}
+.install-section h2{font-size:clamp(27px,3vw,36px);margin-bottom:20px}
+.install-section>p:not(.eyebrow){color:#adbac9;margin-bottom:20px}
+.install-section code{font-family:var(--mono);font-size:.88em;color:#b9dced;overflow-wrap:anywhere}
+.command-block{border:1px solid #3d6a80;background:#090f17;margin:23px 0;overflow:hidden;border-radius:4px}
+.command-label{display:flex;justify-content:space-between;gap:15px;padding:12px 18px;background:#152030;border-bottom:1px solid #293a50;font:500 10px var(--mono);letter-spacing:.09em;color:#a3b4c4}
+.command-label span:last-child{color:#86b5c9;text-align:right}
+.command-block pre{margin:0;padding:20px 22px;overflow-x:auto;line-height:1.8;tab-size:2}
+.command-block pre code{font-size:13px;color:#d5e5ee;overflow-wrap:normal}
+.install-section .detail-note{border-left:2px solid #477c92;padding:3px 0 3px 16px;color:#a8bbcb;font-size:15px}
+.detail-note strong{color:#e2edf3}
+.limit-note{border:1px solid #5a4b37;background:#1a1c20;padding:22px;display:flex;align-items:flex-start;gap:20px}
+.limit-note p{color:#c0c1bd;font-size:15px;margin:0 0 12px}
+.limit-note p:last-child{margin-bottom:0}
+.limit-note a{color:#91d4ed;text-decoration:underline;text-underline-offset:3px}
+.next-links{display:flex;flex-wrap:wrap;gap:28px;margin-top:30px}
+@media(max-width:900px){.install-layout{grid-template-columns:170px minmax(0,1fr);gap:35px}.install-hero-inner{grid-template-columns:1fr 230px;gap:30px}}
+@media(max-width:680px){.install-hero-inner{display:block;padding-block:58px 40px}.install-meta{margin-top:34px}.install-layout{display:block;padding-block:40px 70px}.install-sidebar{position:static;margin-bottom:50px}.install-sidebar nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 10px}.install-section{padding-bottom:44px;margin-bottom:44px}.limit-note{flex-direction:column;gap:14px}.command-block pre{padding:16px}.command-label{padding-inline:16px}}

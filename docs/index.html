@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="IMSIsting is a Linux cellular security toolkit for surveying, decoding, and investigating cellular networks across generations.">
+  <meta name="theme-color" content="#0b1017">
+  <link rel="icon" type="image/png" href="imsisting-icon.png">
+  <title>IMSIsting — Cellular security, in context</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Orbitron:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner wrap">
+      <a class="brand" href="#top" aria-label="IMSIsting home"><img class="brand-mark" src="imsisting-icon.png" alt="" width="40" height="40"><span>IMSI<span>sting</span><small>CELLULAR SECURITY TOOLKIT</small></span></a>
+      <nav aria-label="Main navigation">
+        <a href="#capabilities">Overview</a>
+        <a href="modules.html">Modules</a>
+        <a href="documentation.html">Documentation</a>
+        <a href="install.html">Install</a>
+      </nav>
+      <a class="header-link" href="https://github.com/yslxotwod/IMSIsting"><svg class="icon icon-github" aria-hidden="true" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .9a11.1 11.1 0 0 0-3.51 21.63c.56.1.76-.24.76-.54v-2.1c-3.1.67-3.75-1.31-3.75-1.31-.51-1.29-1.24-1.63-1.24-1.63-1.02-.7.08-.68.08-.68 1.13.08 1.72 1.16 1.72 1.16 1 1.72 2.63 1.22 3.27.93.1-.72.39-1.22.7-1.5-2.48-.28-5.1-1.24-5.1-5.5 0-1.22.44-2.21 1.15-2.99-.12-.28-.5-1.42.1-2.96 0 0 .94-.3 3.05 1.14a10.63 10.63 0 0 1 5.56 0c2.11-1.44 3.04-1.14 3.04-1.14.61 1.54.23 2.68.11 2.96.72.78 1.14 1.77 1.14 2.99 0 4.27-2.62 5.21-5.11 5.49.4.35.75 1.03.75 2.08v3.06c0 .3.2.65.77.54A11.1 11.1 0 0 0 12 .9Z"/></svg> GitHub <span aria-hidden="true">↗</span></a>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <video class="hero-video" src="imsisting_splash6.mp4" poster="splash6-poster.jpg" muted loop playsinline preload="metadata" aria-hidden="true"></video>
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="signal-dot"></span> OPEN SOURCE <span class="slash">/</span> LINUX TOOLKIT</p>
+          <h1>Cellular security,<br><em>from air to core.</em></h1>
+          <p class="hero-intro">IMSIsting brings cellular network assessment, protocol analysis, and evidence collection together in a single Linux toolkit.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="install.html">Installation guide <span aria-hidden="true">→</span></a>
+            <a class="button button-secondary" href="https://github.com/yslxotwod/IMSIsting"><svg class="icon icon-github" aria-hidden="true" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .9a11.1 11.1 0 0 0-3.51 21.63c.56.1.76-.24.76-.54v-2.1c-3.1.67-3.75-1.31-3.75-1.31-.51-1.29-1.24-1.63-1.24-1.63-1.02-.7.08-.68.08-.68 1.13.08 1.72 1.16 1.72 1.16 1 1.72 2.63 1.22 3.27.93.1-.72.39-1.22.7-1.5-2.48-.28-5.1-1.24-5.1-5.5 0-1.22.44-2.21 1.15-2.99-.12-.28-.5-1.42.1-2.96 0 0 .94-.3 3.05 1.14a10.63 10.63 0 0 1 5.56 0c2.11-1.44 3.04-1.14 3.04-1.14.61 1.54.23 2.68.11 2.96.72.78 1.14 1.77 1.14 2.99 0 4.27-2.62 5.21-5.11 5.49.4.35.75 1.03.75 2.08v3.06c0 .3.2.65.77.54A11.1 11.1 0 0 0 12 .9Z"/></svg> View on GitHub <span aria-hidden="true">↗</span></a>
+          </div>
+          <div class="hero-foot"><span class="tiny-cross">✳</span> BUILT FOR INVESTIGATION <span class="foot-divider"></span> 2G / 3G / 4G / 5G</div>
+        </div>
+        <aside class="spec-plate" aria-label="Toolkit overview">
+          <div class="spec-head"><span>PROJECT PROFILE</span><strong>IMSIsting / LINUX</strong></div>
+          <dl>
+            <div><dt>Scope</dt><dd>2G, 3G, 4G and 5G NR<span>Radio access and core networks</span></dd></div>
+            <div><dt>Interfaces</dt><dd>GUI · TUI · CLI<span>GTK4 desktop and standalone modules</span></dd></div>
+            <div><dt>Analysis</dt><dd>Protocols and captures<span>Offline and hardware-dependent paths</span></dd></div>
+            <div><dt>Evidence</dt><dd>Cases and TSV stores<span>Observations retain their context</span></dd></div>
+            <div><dt>Development</dt><dd>Early stage<span>Over-the-air paths not yet radio-tested</span></dd></div>
+          </dl>
+          <div class="spec-foot"><span>PROJECT REFERENCE</span><span>01 / 04</span></div>
+        </aside>
+      </div>
+      <div class="wrap hero-note"><span class="note-label">PROJECT STATUS</span><p><strong>Early development.</strong> No module has been tested against a real radio. Over-the-air paths are written and reviewed, but untested. <a href="https://github.com/yslxotwod/IMSIsting#what-actually-works">See what actually works <span aria-hidden="true">↗</span></a></p></div>
+    </section>
+
+    <section class="generations" aria-label="Cellular generations">
+      <div class="wrap generation-inner"><span class="generation-label">COVERAGE<br><b>ACROSS GENERATIONS</b></span><span>02 <b>GSM</b></span><span>03 <b>UMTS</b></span><span>04 <b>LTE</b></span><span>05 <b>NR</b></span><span class="generation-end">AIR → CORE</span></div>
+    </section>
+
+    <section class="section splash-section" id="capabilities">
+      <video class="section-splash" src="imsisting_splash2.mp4" poster="splash2-poster.jpg" muted loop playsinline preload="none" aria-hidden="true"></video>
+      <div class="wrap">
+      <div class="section-heading"><div><p class="eyebrow"><span class="section-number">01 /</span> SCOPE</p><h2>Assessment across<br><em>network layers.</em></h2></div><p>Modules cover multiple generations and network interfaces, with a common workspace for their commands and results.</p></div>
+      <div class="cap-grid">
+        <article class="cap-card"><div class="card-top"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 17v4M8 21h8M12 17a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM7.5 15a6 6 0 0 1 0-6M16.5 9a6 6 0 0 1 0 6M4.5 17.5a10 10 0 0 1 0-11M19.5 6.5a10 10 0 0 1 0 11"/></svg></span><span>01 / OBSERVE</span></div><h3>Radio and survey</h3><p>Work with cell surveys, radio tools, and passive capture analysis from a common interface.</p><span class="card-tag">2G — 5G</span></article>
+        <article class="cap-card"><div class="card-top"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16v12H4zM7 10h3M7 14h5M16 10h1M16 14h1"/></svg></span><span>02 / ANALYZE</span></div><h3>Protocol analysis</h3><p>Inspect signaling, subscriber identities, and security across radio access and core network protocols.</p><span class="card-tag">AIR → CORE</span></article>
+        <article class="cap-card"><div class="card-top"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h10l4 4v12H5zM15 4v4h4M8 12h8M8 15h8M8 18h5"/></svg></span><span>03 / COLLECT</span></div><h3>Evidence and records</h3><p>Organize observations, captures, and case evidence using shared append-only TSV stores.</p><span class="card-tag">EVIDENCE / TSV</span></article>
+      </div>
+      </div>
+    </section>
+
+    <section class="interface-section splash-section" id="interface">
+      <video class="section-splash" src="imsisting_splash3.mp4" poster="splash3-poster.jpg" muted loop playsinline preload="none" aria-hidden="true"></video>
+      <div class="wrap interface-grid">
+        <div class="interface-copy"><p class="eyebrow"><span class="section-number">02 /</span> THE INTERFACE</p><h2>Multiple interfaces.<br><em>One toolkit.</em></h2><p>The GTK4 desktop provides a dashboard and dedicated views for investigation. Each module also remains accessible from the command line, with a terminal interface available for remote sessions.</p><ul class="feature-list"><li><span>01</span> A dashboard of modules</li><li><span>02</span> Live traffic, cases, maps &amp; fleet</li><li><span>03</span> GUI, TUI, and standalone CLI</li></ul><a class="text-link" href="https://github.com/yslxotwod/IMSIsting#the-interface">Explore the interface <span aria-hidden="true">↗</span></a></div>
+        <figure class="screenshot"><div class="window-bar"><span class="window-dots"><i></i><i></i><i></i></span><span>IMSISTING / DESKTOP</span><span>GTK4</span></div><img src="imsisting_screenshot.png" alt="The IMSIsting GTK4 desktop interface" loading="lazy"><figcaption><span>THE TOOLKIT, AT A GLANCE</span><span>FIG. 01</span></figcaption></figure>
+      </div>
+    </section>
+
+    <section class="section approach splash-section" id="approach">
+      <video class="section-splash" src="imsisting_splash4.mp4" poster="splash4-poster.jpg" muted loop playsinline preload="none" aria-hidden="true"></video>
+      <div class="wrap approach-grid">
+        <figure class="screenshot approach-screenshot"><div class="window-bar"><span class="window-dots"><i></i><i></i><i></i></span><span>IMSISTING / DESKTOP</span><span>GTK4</span></div><img src="imsisting_screenshot2.png" alt="Another view of the IMSIsting desktop interface" loading="lazy"><figcaption><span>INVESTIGATION IN CONTEXT</span><span>FIG. 02</span></figcaption></figure>
+        <div class="approach-copy">
+          <p class="eyebrow"><span class="section-number">03 /</span> THE PRINCIPLE</p><h2>Evidence and<br><em>its limits.</em></h2><p class="approach-intro">Results distinguish measured evidence from network claims and missing observations. An unobserved condition is not equivalent to a clean result.</p>
+          <div class="state-grid"><article><span class="state-indicator measured"></span><span class="state-index">01</span><h3>Measured</h3><p>A fact came from a device or a capture.</p></article><article><span class="state-indicator advertised"></span><span class="state-index">02</span><h3>Advertised</h3><p>A fact is what a network claims about itself.</p></article><article><span class="state-indicator unobserved"></span><span class="state-index">03</span><h3>Unobserved</h3><p>The evidence is unavailable; no conclusion is implied.</p></article></div>
+          <div class="approach-bottom"><span>THE DISTINCTION MATTERS</span><span>NOT OBSERVED ≠ CLEAN</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="start-section splash-section" id="start"><video class="section-splash" src="imsisting_splash5.mp4" poster="splash5-poster.jpg" muted loop playsinline preload="none" aria-hidden="true"></video><div class="wrap start-grid"><div><p class="eyebrow"><span class="section-number">04 /</span> GET STARTED</p><h2>Build and run<br><em>IMSIsting.</em></h2><p>Build the GTK4 interface on Linux, or use the modules directly from the command line. Check the README for dependencies and the current state of the project.</p><a class="button button-primary" href="https://github.com/yslxotwod/IMSIsting#how-to-run-it">Read the setup guide <span aria-hidden="true">↗</span></a></div><div class="terminal"><div class="terminal-head"><span><i></i> TERMINAL</span><span>BUILD / LINUX</span></div><div class="terminal-body"><p><span># Clone the repository</span><br>git clone https://github.com/yslxotwod/IMSIsting.git<br>cd IMSIsting</p><p><span># Build the desktop interface</span><br>cd native<br>meson setup builddir<br>meson compile -C builddir</p><p><span># Launch the GUI</span><br>cd ..<br>./imsisting.sh --gui</p></div><div class="terminal-foot"><span>GTK4 · MESON · NINJA</span><span>_</span></div></div></div></section>
+  </main>
+
+  <footer><div class="wrap footer-inner"><div><a class="footer-brand" href="#top">IMSI<span>sting</span></a><p>Cellular network and protocol security for Linux.</p></div><div class="footer-links"><a href="https://github.com/yslxotwod/IMSIsting">GitHub ↗</a><a href="https://github.com/yslxotwod/IMSIsting#what-actually-works">Project status ↗</a><a href="#top">Back to top ↑</a></div><div class="footer-meta">OPEN SOURCE <span>/</span> BUILT FOR LINUX</div></div></footer>
+<script src="splash.js" defer></script>
+<script src="glow-dust.js" defer></script>
+</body>
+</html>
