@@ -31,6 +31,7 @@
 !/docs/documentation.html
 !/docs/documentation.css
 !/docs/documentation/
+!/docs/CNAME
 
 # AGENTS.md is a briefing for whoever works in the tree, not part of the
 # project: it must never be committed or pushed (its own rule zero).
