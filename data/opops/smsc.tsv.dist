@@ -1,9 +1,0 @@
-# data/opops/smsc.tsv — the SMSC a home network routes short messages through.
-#
-# Copy to smsc.tsv and replace the examples with your own identities.
-# Read by:  tools/lib/refdata.sh refdata_opops_smsc <mcc-mnc>
-#
-# An SMSC identity is core-internal: no public registry carries it, which is
-# why it is the only thing that validates an OTA command delivered to a SIM.
-plmn	smsc_gt	note
-310-260	13103150000	example: short code in E.164 digit form
