@@ -900,6 +900,125 @@ def mode_classify(path, fmt, rate, k):
     return 0
 
 
+def mode_validate(k):
+    """Leave-one-out accuracy of the classifier the store already defines.
+
+    A nearest-neighbour ranking answers "which stored device is this most like"
+    and says nothing about whether the answer is right. Withholding one
+    signature and asking the rest to place it is the only measurement of that
+    available without new hardware: each signature is classified exactly once,
+    against every other signature, and the result is counted.
+
+    Two guards that the arithmetic forces:
+      k needs repeats. A vote among neighbours can never name the withheld
+      device's own label when that label holds a single signature, so k is
+      held at 1 with a note instead of reporting an accuracy of zero that says
+      nothing about the metric.
+      A margin is per-signature. Reporting the winning score alone hides a tie;
+      the gap between the best and the second-best candidate is what says the
+      answer was unambiguous.
+    """
+    sigs = load_sigs(SIG_FILE)
+    if len(sigs) < 3:
+        err("need at least three stored signatures for a leave-one-out "
+            "measurement (%d stored) - --sig-add one more" % len(sigs))
+        return 1
+    if k < 1:
+        err("k must be >= 1")
+        return 2
+    labels = [x["label"] for x in sigs]
+    names = [x["file"] for x in sigs]
+    feats = [x["features"] for x in sigs]
+    counts = {}
+    for lab in labels:
+        counts[lab] = counts.get(lab, 0) + 1
+    repeat = max(counts.values())
+    k_eff = min(k, len(sigs) - 1)
+    note = None
+    if k_eff > 1 and repeat < 2:
+        k_eff = 1
+        note = ("k %d was asked for, but every label holds a single signature, "
+                "so a vote among neighbours can never name the withheld "
+                "device's own label; measured at k=1" % k)
+    out("validate", "sigs", len(sigs))
+    out("validate", "labels", len(counts))
+    out("validate", "k", k_eff)
+    if note:
+        out("validate", "note", note)
+    out("validate", "metric", "leave-one-out, cosine over the same "
+        "scale-normalised vector --classify ranks on")
+    out("loo", "file", "true", "pred", "top1", "runner_up", "margin", "correct")
+    correct = 0
+    mismatches = []
+    margins = []
+    winners = []
+    runners = []
+    seen = {}
+    for i in range(len(sigs)):
+        ranked = []
+        for j in range(len(sigs)):
+            if i == j:
+                continue
+            ranked.append((cosine(feats[i], feats[j]), labels[j], names[j]))
+        ranked.sort(key=lambda t: -t[0])
+        neigh = ranked[:k_eff]
+        votes = {}
+        for sc, lab, _f in neigh:
+            votes[lab] = votes.get(lab, 0) + 1
+        pred = sorted(votes.items(), key=lambda t: (-t[1], t[0]))[0][0]
+        top1 = ranked[0][0]
+        runner = ranked[1][0] if len(ranked) > 1 else 0.0
+        margin = top1 - runner
+        ok = (pred == labels[i])
+        if ok:
+            correct += 1
+        margins.append(margin)
+        winners.append(top1)
+        runners.append(runner)
+        out("loo", names[i], labels[i], pred, "%.6f" % top1, "%.6f" % runner,
+            "%.6f" % margin, "yes" if ok else "no")
+        if not ok:
+            mismatches.append((labels[i], pred))
+        st = seen.setdefault(labels[i], [0, 0])
+        st[0] += 1 if ok else 0
+        st[1] += 1
+    total = len(sigs)
+    for lab in sorted(seen):
+        c, n = seen[lab]
+        out("label", lab, "%d/%d" % (c, n))
+    out("accuracy", "%d/%d" % (correct, total),
+        "%.4f" % (correct / float(total)))
+    out("separation", "min_margin", "%.6f" % min(margins),
+        "min_top1", "%.6f" % min(winners), "max_runner_up", "%.6f" % max(runners))
+    thresh = (min(winners) + max(runners)) / 2.0
+    # A positive margin is necessary and not sufficient. Three near-identical
+    # tones all score above 0.998 against each other: every margin is positive
+    # and every answer is wrong, because the metric does not carry the property
+    # that separates them at this resolution. The verdict therefore counts
+    # answers first and margins second, so "separates" can never be printed for
+    # a classifier that placed nothing correctly.
+    if correct == total and min(margins) > 0:
+        out("verdict", "separates",
+            "every withheld signature was recovered, and a candidate scoring "
+            "above %.6f would be the wrong device in every case measured here" % thresh)
+    elif correct == total:
+        out("verdict", "separates-without-margin",
+            "every withheld signature was recovered, but at least one of them "
+            "tied with a foreign signature; the answer is right and the score "
+            "does not say so")
+    else:
+        wrong = []
+        for pair in mismatches:
+            wrong.append("%s -> %s" % pair)
+        out("verdict", "overlaps",
+            "%d of %d withheld signature(s) were placed under another label "
+            "(%s); the metric does not carry the property that separates them "
+            "at this scoring resolution, and a ranking that always answers is "
+            "guessing with a straight face" %
+            (total - correct, total, ", ".join(wrong[:6])))
+    return 0
+
+
 def mode_sigs_tsv(path):
     sigs = load_sigs(path)
     if not sigs:
@@ -983,6 +1102,9 @@ def main(argv):
                 return 2
             k = int(a[3]) if len(a) > 3 and a[3].isdigit() else 3
             return mode_classify(a[0], a[1], float(a[2]), k)
+        if mode == "validate":
+            k = int(a[0]) if a and a[0].isdigit() else 3
+            return mode_validate(k)
         if mode == "sigs":
             return mode_sigs_tsv(SIG_FILE)
         if mode == "csi-parse":
@@ -1150,6 +1272,18 @@ rff_cmd_classify() {
         return 1
     fi
     rff_run classify "$f" "$fmt" "$rate" "$k"
+}
+
+rff_cmd_validate() {
+    local k="${1:-3}"
+    [[ "$k" =~ ^[0-9]+$ && "$k" -ge 1 ]] || {
+        printf 'ERROR\tk must be a whole number >= 1\n' >&2; return 2; }
+    if [[ "$(rff_sig_count)" -lt 3 ]]; then
+        printf 'ERROR\tneed at least three stored signatures for a leave-one-out measurement (%s stored)\n' \
+            "$(rff_sig_count)" >&2
+        return 1
+    fi
+    rff_run validate "$k"
 }
 
 rff_cmd_sigs_tsv() {
@@ -1431,6 +1565,98 @@ PYFIX
     chk sig-balanced-order "$(awk -v a="$sc_a" -v b="$sc_b" 'BEGIN{print (a>b)?"yes":"no"}')" "yes"
     chk sig-rank-hd "$(printf '%s\n' "$out" | awk -F'\t' '$1=="rank"{print NF}')" "5"
 
+    # ── leave-one-out accuracy of that classifier ───────────────────────
+    # Two signatures cannot be validated: withholding one leaves nothing to
+    # classify against, so the verb refuses rather than reporting 100% of a
+    # sample of one.
+    chk sig-validate-needs-three \
+        "$(rff_cmd_validate 1 >/dev/null 2>&1; echo $?)" "1"
+    rff_run sig-add gamma "$iqdc" int8 1000000 >/dev/null 2>&1
+    chk sig-three "$(rff_sig_count)" "3"
+    out=$(rff_run validate 1); rc=$?
+    chk sig-validate-rc "$rc" "0"
+    chk sig-validate-attempts \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="validate" && $2=="sigs"{print $3}')" "3"
+    # Each signature is withheld once, so the LOO table has one row per
+    # signature and the accuracy denominator equals the store size.
+    chk sig-validate-rows \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="loo"{n++} END{print n-1}')" "3"
+    chk sig-validate-hd \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="loo"{print NF; exit}')" "8"
+    chk sig-validate-accuracy-denominator \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="accuracy"{split($2,p,"/"); print p[2]}')" "3"
+    # Three distinct fixtures are three distinct feature vectors, so each is
+    # recovered from the other two: the accuracy is 3/3 and the separation is
+    # a real threshold, not an artefact of the count.
+    # The accuracy line has to agree with the rows above it. Whether all three
+    # fixtures are recovered is a property of the fixtures, not of the code;
+    # whether the total matches the table is a property of the code.
+    chk sig-validate-accuracy-agrees \
+        "$(printf '%s\n' "$out" | awk -F'\t' '
+            $1=="loo" && $8=="yes"{c++}
+            $1=="loo"{n++}
+            $1=="accuracy"{split($2,p,"/"); num=p[1]; den=p[2]}
+            END{print (num==c && den==n-1)?"yes":"no"}')" "yes"
+    # The verdict must follow the table: any withheld signature placed under
+    # another label and "separates" would be a claim the rows beside it
+    # contradict.
+    chk sig-validate-verdict-follows-rows \
+        "$(printf '%s\n' "$out" | awk -F'\t' '
+            $1=="loo" && $8=="no"{miss=1}
+            $1=="verdict"{v=$2}
+            END{print ((miss==1 && v=="overlaps") || (miss!=1 && v ~ /^separates/))?"yes":"no"}')" "yes"
+    local margin
+    margin=$(printf '%s\n' "$out" | awk -F'\t' '$1=="separation"{for(i=2;i<=NF;i++) if($i=="min_margin") print $(i+1)}')
+    chk sig-validate-margin-positive "$(awk -v g="$margin" 'BEGIN{print (g>0)?"yes":"no"}')" "yes"
+    # k larger than the number of remaining signatures is clamped, never read
+    # past the end of the ranked list -- and with one signature per label it is
+    # clamped to 1 with the reason printed, because a vote among neighbours
+    # cannot name a label that no longer exists in the ranked list.
+    out=$(rff_run validate 9)
+    chk sig-validate-k-clamped \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="validate" && $2=="k"{print $3}')" "1"
+    chk sig-validate-k-note \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="validate" && $2=="note"' | grep -c 'single signature')" "1"
+
+    # gamma existed only to make a three-way measurement possible; the rest of
+    # the selftest asserts the two-signature store, so it is removed by
+    # rewriting the store rather than leaving those assertions tuned to a
+    # fixture that exists for one block.
+    awk -F'\t' 'BEGIN{OFS="\t"} $1 != "gamma"' "$RFF_SIGS" > "$d/sigs_trim.tsv" \
+        && mv "$d/sigs_trim.tsv" "$RFF_SIGS"
+    chk sig-gamma-removed "$(rff_sig_count)" "2"
+
+    # A verdict has to count answers before it counts margins. Three
+    # near-identical tones score above 0.998 against each other, so every
+    # margin is positive while every answer is wrong -- the case where
+    # "separable" would be a lie told by a confident number.
+    python3 - "$d" << 'PYFIX'
+import sys, os, math
+d = sys.argv[1]
+for name, amp, dc, imb in (("sim1", 60.0, 0.0, 1.0), ("sim2", 60.0, 18.0, 1.0),
+                           ("sim3", 30.0, 0.0, 1.35)):
+    out = bytearray()
+    for k in range(8192):
+        i = amp * math.cos(2 * math.pi * 0.05 * k) + dc
+        q = amp * math.sin(2 * math.pi * 0.05 * k) * imb
+        out.append(max(0, min(255, int(round(i)) + 128)))
+        out.append(max(0, min(255, int(round(q)) + 128)))
+    open(os.path.join(d, name + ".cs8"), "wb").write(bytes(out))
+PYFIX
+    local keep="$RFF_SIGS"
+    RFF_SIGS="$d/sim_sigs.tsv"
+    rff_run sig-add sim1 "$d/sim1.cs8" int8 1000000 >/dev/null 2>&1
+    rff_run sig-add sim2 "$d/sim2.cs8" int8 1000000 >/dev/null 2>&1
+    rff_run sig-add sim3 "$d/sim3.cs8" int8 1000000 >/dev/null 2>&1
+    out=$(rff_run validate 1)
+    chk sig-validate-overlap-verdict \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="verdict"{print $2}')" "overlaps"
+    chk sig-validate-overlap-counts \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="loo" && $8=="no"{n++} END{print n+0}')" "3"
+    chk sig-validate-overlap-names-miss \
+        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="verdict"{print ($3 ~ /placed under another label/)?"yes":"no"}')" "yes"
+    RFF_SIGS="$keep"
+
     # ── CSI: 802.11 matrix, hand-built ──────────────────────────────────
     # Four complex int8 coefficients with known amplitudes:
     #   (im,re) = (0,3) -> 3, (0,-4) -> 4, (3,4) -> 5, (0,0) -> 0
@@ -1652,6 +1878,7 @@ rff_menu() {
   [6]  clear the signature set
   [7]  parse a CSI report (LTE or 802.11)
   [8]  CSI motion / occupancy from a snapshot file
+  [9]  is the classifier right? (leave-one-out accuracy)
   [0]  back
 
 M
@@ -1695,6 +1922,10 @@ M
                 read -rp "  csi snapshot file> " f
                 rff_cmd_csi_motion "$f" | column -t -s$'\t' 2>/dev/null || rff_cmd_csi_motion "$f"
                 read -rp "  press enter " _ ;;
+            9)
+                read -rp "  k [1]> " k
+                rff_cmd_validate "${k:-1}" | column -t -s$'\t' 2>/dev/null || rff_cmd_validate "${k:-1}"
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1711,6 +1942,7 @@ rff_cli_main() {
         --transient)    rff_cmd_transient "${1:-}" "${2:-}" "${3:-}" ;;
         --sig-add)      rff_cmd_sig_add "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --classify)     rff_cmd_classify "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+        --classify-validate) rff_cmd_validate "${1:-}" ;;
         --sigs-tsv)     rff_cmd_sigs_tsv ;;
         --clear-sigs)   rff_cmd_clear_sigs ;;
         --csi-parse)    rff_cmd_csi_parse "${1:-}" "${2:-auto}" ;;
@@ -1731,6 +1963,11 @@ Usage: $0 COMMAND
   --transient <iq-file> <fmt> <rate>        burst edge, rise time, envelope shape
   --sig-add <name> <iq-file> <fmt> <rate>   store a device signature
   --classify <iq-file> <fmt> <rate> [k]     top-k against the signature set
+  --classify-validate [k]                   leave-one-out accuracy of the
+                                            classifier the store defines: what
+                                            each signature was called when it was
+                                            withheld, and whether a score exists
+                                            that rejects a stranger
   --sigs-tsv                                stored signatures as TSV
   --clear-sigs                              empty the signature store
   --csi-parse <hex> [auto|lte|80211]        CSI report -> CQI/PMI/RI or

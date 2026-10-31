@@ -7675,6 +7675,7 @@ static const ChipRow chip_rows[] = {
     { "23_traffic_analysis", "--yes",                 NEED_NO, DOES_READS },
     { "24_rf_fingerprint",   "--__index_probe__",     NEED_NO, DOES_READS },
     { "24_rf_fingerprint",   "--classify",            NEED_RADIO, DOES_READS },
+    { "24_rf_fingerprint",   "--classify-validate",   NEED_NO, DOES_READS },
     { "24_rf_fingerprint",   "--clear-sigs",          NEED_RADIO, DOES_READS },
     { "24_rf_fingerprint",   "--csi-motion",          NEED_RADIO, DOES_READS },
     { "24_rf_fingerprint",   "--csi-parse",           NEED_RADIO, DOES_READS },
@@ -30320,6 +30321,26 @@ rff_build_signatures(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(add_body), res);
     }
     gtk_box_append(GTK_BOX(body), add);
+
+    /* A ranking always produces an answer, so the question "is it right" needs
+       its own measurement: withhold one signature, ask the rest to place it.
+       The card says what the verdict words mean, because an accuracy of 0/3
+       with a confidence of 0.999 is exactly the trap a score invites. */
+    {
+        GtkWidget *val_body;
+        GtkWidget *val = verb_card("IS IT RIGHT?", &val_body);
+        GtkWidget *res = result_rect_new(state, NULL);
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(val_body),
+            mod_arg_row(state, module_id, status, "Measure the Classifier",
+                "--classify-validate", "",
+                "Leave-one-out over the store: each signature is withheld once "
+                "and named by the rest. Reports the accuracy, the margin that "
+                "made it, and whether a score exists that would reject a device "
+                "that is not in the store at all -- separates, or overlaps."));
+        gtk_box_append(GTK_BOX(val_body), res);
+        gtk_box_append(GTK_BOX(body), val);
+    }
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
