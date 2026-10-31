@@ -525,6 +525,56 @@ slnk_selftest() {
     chk link-bad-gap   "$(slnk_cmd_linkage "$d/link.tsv" --gap abc >/dev/null 2>&1; echo $?)" "2"
     chk link-missing   "$(slnk_cmd_linkage "$d/none.tsv" >/dev/null 2>&1; echo $?)" "1"
     chk link-noargs    "$(slnk_cmd_linkage >/dev/null 2>&1; echo $?)" "2"
+    # 12. The V2X service advertisement: a container this module defines, a
+    #     round trip through it, and a refusal for octets it does not own. The
+    #     gossip rows name the TS 24.587 header as unobserved on every run.
+    local adv advhex
+    adv=$(slnk_cmd_pc5_advert build 0x00008001 --l2id a1b2c3 --pqi 8 --pdb-ms 20 --gfbr-kbps 500 --repeat-ms 100)
+    advhex=$(fld "$adv" hex)
+    chk adv-psid      "$(fld "$adv" psid_dec)" "32769"
+    chk adv-l2id      "$(fld "$adv" l2_id)" "a1b2c3"
+    chk adv-octets    "$(fld "$adv" container_octets)" "19"
+    chk adv-hex-len   "${#advhex}" "38"
+    chk adv-repeats   "$(fld "$adv" repeats_per_min)" "600"
+    chk adv-beacons   "$(fld "$adv" beacons_per_hour)" "36000"
+    chk adv-fixed-id  "$(printf '%s\n' "$adv" | awk -F'\t' '$1=="finding" && $2=="fixed_l2id"{print $3}')" "MEDIUM"
+    chk adv-roundtrip-psid "$(fld "$(slnk_cmd_pc5_advert parse "$advhex")" psid_dec)" "32769"
+    chk adv-roundtrip-rep  "$(fld "$(slnk_cmd_pc5_advert parse "$advhex")" repeat_ms)" "100"
+    chk adv-roundtrip-pqi  "$(fld "$(slnk_cmd_pc5_advert parse "$advhex")" pqi)" "8"
+    chk adv-foreign-refused "$(slnk_cmd_pc5_advert parse deadbeef >/dev/null 2>&1; echo $?)" "1"
+    chk adv-short-refused   "$(slnk_cmd_pc5_advert parse 5632583100 >/dev/null 2>&1; echo $?)" "1"
+    chk adv-bad-psid  "$(slnk_cmd_pc5_advert build 4294967296 >/dev/null 2>&1; echo $?)" "2"
+    chk adv-bad-pqi   "$(slnk_cmd_pc5_advert build 1 --pqi 256 >/dev/null 2>&1; echo $?)" "2"
+    chk adv-no-psid   "$(slnk_cmd_pc5_advert build >/dev/null 2>&1; echo $?)" "2"
+    chk adv-no-sub    "$(slnk_cmd_pc5_advert >/dev/null 2>&1; echo $?)" "2"
+    chk adv-not-wire  "$(slnk_adv_doctrine | awk -F'\t' '$1=="format"{print ($2 ~ /NOT the TS 24.587/)?"yes":"no"}')" "yes"
+    chk adv-unobserved-v5 "$(slnk_adv_doctrine | awk -F'\t' '$1=="unobserved" && $2=="v5_message_header"' | wc -l)" "1"
+    chk adv-unobserved-pqi "$(slnk_adv_doctrine | awk -F'\t' '$1=="unobserved" && $2=="pqi_characteristics"' | wc -l)" "1"
+    # 13. PC5 QoS: the invariant, the slot arithmetic, and the honest blanks.
+    local q
+    chk qos-blank-pqi "$(fld "$(slnk_cmd_pc5_qos)" pqi)" "unobserved"
+    chk qos-blank-reason "$(slnk_cmd_pc5_qos | awk -F'\t' '$1=="note"{print ($2 ~ /unobserved/)?"yes":"no"}')" "yes"
+    q=$(slnk_cmd_pc5_qos --pqi 8 --resource-type gbr --gfbr-kbps 500 --mfbr-kbps 400 --pdb-ms 20 --scs-khz 30) && qrc=0 || qrc=$?
+    chk qos-inconsistent-rc "$qrc" "1"
+    chk qos-inconsistent "$(printf '%s\n' "$q" | awk -F'\t' '$1=="finding" && $2=="qos_inconsistent"{print $3}')" "HIGH"
+    q=$(slnk_cmd_pc5_qos --gfbr-kbps 500 --mfbr-kbps 1000 --pdb-ms 20 --scs-khz 30)
+    chk qos-consistent "$(fld "$q" verdict)" "qos_consistent"
+    chk qos-slot "$(fld "$q" slot_ms)" "0.5000"
+    chk qos-slots "$(fld "$q" pdb_slots)" "40.0000"
+    chk qos-inflight "$(fld "$q" in_flight_bits)" "10000"
+    chk qos-mu15 "$(fld "$(slnk_cmd_pc5_qos --scs-khz 15 --pdb-ms 10)" slot_ms)" "1.0000"
+    chk qos-bad-rtype "$(slnk_cmd_pc5_qos --resource-type maybe >/dev/null 2>&1; echo $?)" "2"
+    chk qos-bad-scs   "$(slnk_cmd_pc5_qos --scs-khz 7 >/dev/null 2>&1; echo $?)" "2"
+    chk qos-bad-per   "$(slnk_cmd_pc5_qos --per 2 >/dev/null 2>&1; echo $?)" "2"
+    chk qos-store-header "$(grep -c '^ts' "$SLNK_DIR/pc5-qos.tsv")" "1"
+    chk qos-store-row "$(awk -F'\t' '$10=="qos_inconsistent"' "$SLNK_DIR/pc5-qos.tsv" | wc -l)" "1"
+    chk advert-store-header "$(grep -c '^ts' "$SLNK_DIR/v2x_adverts.tsv")" "1"
+    chk advert-store-row "$(awk -F'\t' '$2=="pc5-advert" && $3=="32769" && $4=="a1b2c3"' "$SLNK_DIR/v2x_adverts.tsv" | wc -l)" "1"
+    # 14. The advertisement plan is a handoff, not a failure.
+    chk v2x-plan-status "$(slnk_v2x_plan | awk -F'\t' '$1=="status"{print $2}')" "handoff"
+    chk v2x-plan-exit   "$(slnk_v2x_plan >/dev/null 2>&1; echo $?)" "3"
+    chk v2x-plan-gap    "$(slnk_v2x_plan | awk -F'\t' '$1=="not_implemented"{print ($2 ~ /TS 24.587/)?"yes":"no"}')" "yes"
+    chk v2x-plan-needs  "$(slnk_v2x_plan | awk -F'\t' '$1=="needs_2"{print ($2 ~ /102 941/)?"yes":"no"}')" "yes"
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -603,6 +653,243 @@ slnk_bsm_audit() {  # <log.tsv>
         }' | grep -v '^impossible^'
 }
 
+# ── the V2X service advertisement on PC5 (TS 23.287 / TS 24.587) ─────────
+# Two different things get called "the advertisement": what a UE announces —
+# a V2X service identified by a PSID (an ITS-AID), with a PC5 QoS profile
+# attached to it — and the octets that carry it. The first is citable field by
+# field. The second is not: the TS 24.587 V5 message header layout is not in
+# this tree (the SCI-1A refusal above is the same gap, one layer down), so
+# this module builds its OWN container, says so on every row, and refuses
+# foreign octets by name instead of guessing an offset. A round trip through
+# that container is a property this module can prove; a claim to speak the
+# standard's wire format is not.
+SLNK_ADV_MAGIC="56325831"          # 'V2X1' — this module's container tag
+slnk_adv_usage() {
+    cat >&2 <<'EOF'
+ERROR	usage: --pc5-advert build <psid> [--l2id <hex>] [--pqi N] [--pdb-ms N] [--gfbr-kbps N] [--repeat-ms N]
+	       --pc5-advert parse <hex>
+EOF
+}
+slnk_adv_doctrine() {
+    printf 'format\t%s\n' "this module's own 19-octet container tagged V2X1; it is NOT the TS 24.587 V5 wire format and no row here claims to be"
+    printf 'container\tmagic 4 o (V2X1) | psid 4 o BE | l2_id 3 o | pqi 1 o | pdb_ms 2 o BE | gfbr_kbps 3 o BE | repeat_ms 2 o BE = 19 octets\n'
+    printf 'psid_width\t32 bits\tIEEE 1609.2 / SAE J2735: a PSID (ITS-AID) is a 32-bit identifier, and TS 23.287 identifies a V2X service by one\n'
+    printf 'l2id_width\t24 bits\tTS 23.287 5.6: PC5 addresses a station by a 24-bit Layer-2 ID, not by an IMSI or a phone number\n'
+    printf 'unobserved\tv5_message_header\tthe TS 24.587 V5 message header field order is not in this tree, so these octets are a container this module defines and not a message it can claim to send\n'
+    printf 'unobserved\tpqi_characteristics\tthe PQI to (resource type, priority, PDB, PER) binding lives in TS 23.287 Table 5.4.4-1, which is not in this tree: a PQI number alone yields no characteristics here\n'
+    printf 'ref\tTS 23.287 (V2X architecture and PC5 QoS), TS 24.587 (V5 protocol aspects), IEEE 1609.2 (PSID/ITS-AID)\n'
+}
+slnk_adv_hex() {  # build|parse helper: print the field rows for a container
+    local hex="$1"
+    local psid_hex="${hex:8:8}" l2_hex="${hex:16:6}" pqi_hex="${hex:22:2}"
+    local pdb_hex="${hex:24:4}" gfbr_hex="${hex:28:6}" rep_hex="${hex:34:4}"
+    printf 'container_octets\t%d\n' "$(( ${#hex} / 2 ))"
+    printf 'psid\t%s\n' "$psid_hex"
+    printf 'psid_dec\t%d\n' "$(( 16#$psid_hex ))"
+    printf 'l2_id\t%s\n' "$l2_hex"
+    printf 'pqi\t%d\n' "$(( 16#$pqi_hex ))"
+    printf 'pdb_ms\t%d\n' "$(( 16#$pdb_hex ))"
+    printf 'gfbr_kbps\t%d\n' "$(( 16#$gfbr_hex ))"
+    printf 'repeat_ms\t%d\n' "$(( 16#$rep_hex ))"
+}
+slnk_cmd_pc5_advert() {
+    local sub="${1:-}"
+    (($#)) && shift || true
+    case "$sub" in
+        build|parse) ;;
+        *) slnk_adv_usage; return 2 ;;
+    esac
+    if [[ "$sub" == "parse" ]]; then
+        local in="${1:-}"
+        [[ -n "$in" ]] || { slnk_adv_usage; return 2; }
+        local hex
+        hex=$(printf '%s' "$in" | tr -d ' \t\r\n:.-' | sed 's/^0x//I' | tr 'A-F' 'a-f')
+        [[ "$hex" =~ ^[0-9a-f]+$ ]] || { printf 'ERROR\toctets must be hex: %s\n' "$(slnk_sanitize "$in")" >&2; return 2; }
+        if [[ "${hex:0:8}" != "$SLNK_ADV_MAGIC" ]]; then
+            printf 'WHY\tthe first four octets are not V2X1, so this is not the container --pc5-advert build writes, and the TS 24.587 V5 header layout that would tell a parser where a PSID starts is not in this tree\n' >&2
+            printf 'ERROR\trefusing to guess a field offset for foreign octets\n' >&2
+            return 1
+        fi
+        (( ${#hex} == 38 )) || {
+            printf 'ERROR\tthe V2X1 container is 38 hex digits (19 octets); %d were given, so the tail is not attributable to a field\n' "${#hex}" >&2
+            return 1; }
+        slnk_adv_hex "$hex"
+        printf 'hex\t%s\n' "$hex"
+        local rep; rep=$(( 16#${hex:34:4} ))
+        if (( rep > 0 )); then
+            printf 'repeats_per_min\t%d\n' "$(( 60000 / rep ))"
+            printf 'beacons_per_hour\t%d\n' "$(( 3600000 / rep ))"
+        else
+            printf 'repeats_per_min\tunobserved\tthe repeat interval is zero, so no advertisement rate follows from it\n'
+        fi
+        printf 'verdict\tdecoded_from_this_module_container\n'
+        slnk_adv_doctrine
+        return 0
+    fi
+
+    local psid="${1:-}"
+    [[ -n "$psid" ]] || { slnk_adv_usage; return 2; }
+    shift || true
+    local l2id="000000" pqi=0 pdb=0 gfbr=0 repeat=100
+    while (($#)); do
+        case "${1:-}" in
+            --l2id)       l2id="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --pqi)        pqi="${2:-}";   shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --pdb-ms)     pdb="${2:-}";   shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --gfbr-kbps)  gfbr="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --repeat-ms)  repeat="${2:-}";shift $(( $# >= 2 ? 2 : 1 )) ;;
+            "")           shift ;;
+            *) printf 'ERROR\tunknown option for --pc5-advert: %s\n' "$(slnk_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    local psid_hex
+    if [[ "$psid" =~ ^[0-9]+$ ]]; then
+        (( psid <= 4294967295 )) || { printf 'ERROR\tpsid must fit 32 bits (0..4294967295), which is the width IEEE 1609.2 gives a PSID\n' >&2; return 2; }
+        psid_hex=$(printf '%08x' "$psid")
+    elif [[ "$psid" =~ ^(0[xX])?([0-9a-fA-F]{1,8})$ ]]; then
+        psid_hex=$(printf '%08x' "$(( 16#${BASH_REMATCH[2]} ))")
+    else
+        printf 'ERROR\tpsid must be decimal or 1..8 hex digits\n' >&2; return 2
+    fi
+    local l2_hex
+    l2_hex=$(printf '%s' "$l2id" | tr -d ' \t\r\n:.-' | sed 's/^0x//I' | tr 'A-F' 'a-f')
+    [[ "$l2_hex" =~ ^[0-9a-f]{1,6}$ ]] || { printf 'ERROR\t--l2id must be 1..6 hex digits (24 bits, TS 23.287 5.6)\n' >&2; return 2; }
+    l2_hex=$(printf '%06x' "$(( 16#$l2_hex ))")
+    local ok=1
+    [[ "$pqi"   =~ ^[0-9]+$ ]] && (( pqi <= 255 ))      || ok=0
+    [[ "$pdb"   =~ ^[0-9]+$ ]] && (( pdb <= 65535 ))    || ok=0
+    [[ "$gfbr"  =~ ^[0-9]+$ ]] && (( gfbr <= 16777215 ))|| ok=0
+    [[ "$repeat" =~ ^[0-9]+$ ]] && (( repeat >= 1 && repeat <= 65535 )) || ok=0
+    (( ok == 1 )) || {
+        printf 'ERROR\t--pqi 0..255, --pdb-ms 0..65535, --gfbr-kbps 0..16777215, --repeat-ms 1..65535 (the container widths)\n' >&2
+        return 2; }
+    local hex
+    hex="${SLNK_ADV_MAGIC}$(printf '%s%06x%02x%04x%06x%04x' "$psid_hex" "$(( 16#$l2_hex ))" "$pqi" "$pdb" "$gfbr" "$repeat")"
+    slnk_adv_hex "$hex"
+    printf 'hex\t%s\n' "$hex"
+    printf 'repeats_per_min\t%d\n' "$(( 60000 / repeat ))"
+    printf 'beacons_per_hour\t%d\n' "$(( 3600000 / repeat ))"
+    printf 'finding\tfixed_l2id\tMEDIUM\tthe advertisement carries one Layer-2 ID for the whole repetition period, so %d announcements an hour are joinable into one station without any key\n' "$(( 3600000 / repeat ))"
+    printf 'verdict\tcontainer_built\n'
+    local store="${SLNK_DIR:-$LOOT_DIR/sidelink}/v2x_adverts.tsv"
+    mkdir -p "${store%/*}"
+    [[ -s "$store" ]] || printf 'ts\tverb\tpsid\tl2_id\tpqi\thex\trepeats_per_min\n' > "$store"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        pc5-advert "$(( 16#$psid_hex ))" "$l2_hex" "$pqi" "$hex" "$(( 60000 / repeat ))" >> "$store"
+    slnk_adv_doctrine
+}
+
+# ── PC5 QoS parameters (TS 23.287 5.4.4) ─────────────────────────────────
+# A PC5 QoS profile is a PQI, a PFI per flow, and — for a GBR flow — a
+# guaranteed and a maximum bit rate. Three of the checks below are arithmetic
+# rather than quotation: MFBR must not sit below GFBR, a packet delay budget
+# converts to a slot count at a stated numerology, and PDB x rate is how many
+# bits the flow may have in flight. The PQI's own characteristics are a table
+# this tree does not hold, so a PQI number alone yields `unobserved`.
+slnk_qos_usage() {
+    cat >&2 <<'EOF'
+ERROR	usage: --pc5-qos [--pqi N] [--resource-type gbr|non-gbr] [--gfbr-kbps N]
+	      [--mfbr-kbps N] [--pdb-ms N] [--per P] [--priority N] [--scs-khz 15|30|60|120]
+EOF
+}
+slnk_cmd_pc5_qos() {
+    local pqi="" rtype="" gfbr="" mfbr="" pdb="" per="" prio="" scs=""
+    while (($#)); do
+        case "${1:-}" in
+            --pqi)           pqi="${2:-}";   shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --resource-type) rtype="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --gfbr-kbps)     gfbr="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --mfbr-kbps)     mfbr="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --pdb-ms)        pdb="${2:-}";   shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --per)           per="${2:-}";   shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --priority)      prio="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --scs-khz)       scs="${2:-}";   shift $(( $# >= 2 ? 2 : 1 )) ;;
+            "")              shift ;;
+            *) slnk_qos_usage; return 2 ;;
+        esac
+    done
+    [[ -z "$pqi" || "$pqi" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--pqi must be numeric\n' >&2; return 2; }
+    [[ -z "$rtype" || "$rtype" =~ ^(gbr|non-gbr)$ ]] || { printf 'ERROR\t--resource-type must be gbr or non-gbr\n' >&2; return 2; }
+    local v
+    for v in "$gfbr" "$mfbr"; do
+        [[ -z "$v" || "$v" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--gfbr-kbps and --mfbr-kbps want whole kbit/s\n' >&2; return 2; }
+    done
+    [[ -z "$pdb" || "$pdb" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--pdb-ms wants whole milliseconds\n' >&2; return 2; }
+    [[ -z "$per" || "$per" =~ ^(0([.][0-9]+)?|1([.]0+)?|[.][0-9]+)$ ]] || { printf 'ERROR\t--per wants a probability in (0,1]\n' >&2; return 2; }
+    [[ -z "$prio" || "$prio" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--priority must be numeric\n' >&2; return 2; }
+    [[ -z "$scs" || "$scs" =~ ^(15|30|60|120)$ ]] || { printf 'ERROR\t--scs-khz must be 15, 30, 60 or 120\n' >&2; return 2; }
+
+    local store="${SLNK_DIR:-$LOOT_DIR/sidelink}/pc5-qos.tsv"
+    mkdir -p "${store%/*}" 2>/dev/null
+    [[ -s "$store" ]] || printf 'ts\tpqi\tresource_type\tgfbr_kbps\tmfbr_kbps\tpdb_ms\tper\tpriority\tscs_khz\tverdict\n' >> "$store"
+
+    local u="unobserved"
+    printf 'pqi\t%s\n' "${pqi:-$u}"
+    printf 'resource_type\t%s\n' "${rtype:-$u}"
+    printf 'gfbr_kbps\t%s\n' "${gfbr:-$u}"
+    printf 'mfbr_kbps\t%s\n' "${mfbr:-$u}"
+    printf 'pdb_ms\t%s\n' "${pdb:-$u}"
+    printf 'per\t%s\n' "${per:-$u}"
+    printf 'priority\t%s\n' "${prio:-$u}"
+    printf 'scs_khz\t%s\n' "${scs:-$u}"
+    local verdict="parameters_incomplete" rc=0
+    if [[ -n "$scs" ]]; then
+        local mu=0 t="$scs" slot
+        while (( t > 15 )); do t=$(( t / 2 )); mu=$(( mu + 1 )); done
+        slot=$(awk -v m="$mu" 'BEGIN{ printf "%.4f", 1.0 / (2 ^ m) }')
+        printf 'numerology_mu\t%d\n' "$mu"
+        printf 'slot_ms\t%s\n' "$slot"
+        if [[ -n "$pdb" ]]; then
+            printf 'pdb_slots\t%s\n' "$(awk -v p="$pdb" -v s="$slot" 'BEGIN{ printf "%.4f", p / s }')"
+        else
+            printf 'pdb_slots\tunobserved\tthe packet delay budget was not supplied\n'
+        fi
+    fi
+    if [[ -n "$pdb" && -n "$gfbr" ]]; then
+        printf 'in_flight_bits\t%s\n' "$(awk -v p="$pdb" -v r="$gfbr" 'BEGIN{ printf "%.0f", r * 1000 * p / 1000 }')"
+    else
+        printf 'in_flight_bits\tunobserved\tPDB x GFBR needs both a delay budget and a rate\n'
+    fi
+    if [[ -n "$gfbr" && -n "$mfbr" ]]; then
+        if (( mfbr < gfbr )); then
+            printf 'finding\tqos_inconsistent\tHIGH\tMFBR %s kbit/s sits below GFBR %s kbit/s, which no flow can honour: the guaranteed rate would exceed the maximum the flow is allowed\n' "$mfbr" "$gfbr"
+            printf 'verdict\tqos_inconsistent\n'
+            printf 'ref\tTS 23.287 5.4.4 (PC5 QoS parameters), TS 24.587 (V5 signalling)\n'
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "${pqi:-}" "${rtype:-}" "$gfbr" "$mfbr" "${pdb:-}" "${per:-}" "${prio:-}" "${scs:-}" "qos_inconsistent" >> "$store"
+            return 1
+        fi
+        printf 'finding\tqos_consistent\tINFO\tMFBR %s kbit/s is at or above GFBR %s kbit/s, which is the invariant a GBR flow has to satisfy\n' "$mfbr" "$gfbr"
+        verdict="qos_consistent"
+    else
+        printf 'mfbr_gfbr_check\tunobserved\tboth --gfbr-kbps and --mfbr-kbps are needed to test the invariant\n'
+    fi
+    if [[ -z "$pqi" && -z "$rtype" && -z "$pdb" && -z "$per" && -z "$prio" ]]; then
+        printf 'note\tthis verb reports the parameter set: supply a value for any row you know and the rest stay unobserved rather than being filled in from the PQI table this tree does not hold\n'
+    fi
+    printf 'verdict\t%s\n' "$verdict"
+    printf 'ref\tTS 23.287 5.4.4 (PC5 QoS parameters), TS 24.587 (V5 signalling)\n'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "${pqi:-}" "${rtype:-}" "${gfbr:-}" "${mfbr:-}" "${pdb:-}" "${per:-}" "${prio:-}" "${scs:-}" "$verdict" >> "$store"
+    return $rc
+}
+
+# ── what forging that advertisement would still need ────────────────────
+slnk_v2x_plan() {
+    cat <<'EOF'
+status	handoff
+what	advertising a V2X service on PC5 that a receiver believes
+built_here	the advertisement model (--pc5-advert build/parse, its container and its round trip) and the PC5 QoS arithmetic (--pc5-qos: MFBR/GFBR invariant, PDB to slots, bits in flight)
+not_implemented	the TS 24.587 V5 message header and its field order, which are not in this tree, so no octet here is claimed to be a wire-format V5 message
+needs_1	a PC5 sidelink PHY at 5.9 GHz with transmit, which this module does not have and will not pretend to have
+needs_2	an ITS credential chain a receiver accepts (TS 102 941): the advertisement is signed, and a receiver that validates rejects an unsigned one
+needs_3	a PQI the receiver's own QoS mapping accepts, with GFBR/MFBR it believes — the numbers, not the octets, are what a receiver enforces
+detect_by	a PSID advertising a service no operator offers, one Layer-2 ID repeating far more often than road traffic requires, or GFBR/PDB values that no real flow of that service uses
+honest_verdict	the service advertisement is analysable here and the Qos arithmetic is exact; emitting one needs a radio, a credential and a header layout this tree does not hold
+ref	TS 23.287 (V2X architecture, PC5 QoS), TS 24.587 (V5 protocol aspects), ETSI TS 102 941 (ITS credential provisioning)
+EOF
+    return 3
+}
+
+
 slnk_menu() {
     while true; do
         banner
@@ -617,6 +904,10 @@ slnk_menu() {
   [6]  ITS certificate reference
   [7]  Relay configuration check
   [8]  Plan (handoff)
+  [9]  Build a V2X advertisement (V2X1 container)
+  [10] Parse an advertisement container
+  [11] PC5 QoS parameters
+  [12] V2X advertisement plan (handoff)
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -629,6 +920,21 @@ M
             6) slnk_its; read -rp "  enter " _ ;;
             7) read -rp "  relay config> " p; slnk_relay_check "$p"; read -rp "  enter " _ ;;
             8) slnk_plan; read -rp "  enter " _ ;;
+            9) read -rp "  psid (dec or hex)> " ps
+               read -rp "  l2 id (hex, blank=000000)> " l2
+               read -rp "  pqi (blank=0)> " pq
+               read -rp "  repeat ms (blank=100)> " rp
+               slnk_cmd_pc5_advert build "$ps" ${l2:+--l2id "$l2"} ${pq:+--pqi "$pq"} ${rp:+--repeat-ms "$rp"}
+               read -rp "  enter " _ ;;
+            10) read -rp "  container hex> " hx; slnk_cmd_pc5_advert parse "$hx"; read -rp "  enter " _ ;;
+            11) read -rp "  pqi (blank=unobserved)> " pq
+                read -rp "  gfbr kbit/s (blank=unobserved)> " gb
+                read -rp "  mfbr kbit/s (blank=unobserved)> " mb
+                read -rp "  pdb ms (blank=unobserved)> " pb
+                read -rp "  scs kHz [15|30|60|120] (blank=unobserved)> " sc
+                slnk_cmd_pc5_qos ${pq:+--pqi "$pq"} ${gb:+--gfbr-kbps "$gb"} ${mb:+--mfbr-kbps "$mb"} ${pb:+--pdb-ms "$pb"} ${sc:+--scs-khz "$sc"}
+                read -rp "  enter " _ ;;
+            12) slnk_v2x_plan; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -652,6 +958,9 @@ slnk_cli_main() {
         --pseudonym-audit) slnk_cmd_pseudonym_audit "${1:-}" "${2:-}" ;;
         --relay-interpose) slnk_cmd_relay_interpose "${1:-}" ;;
         --linkage)       slnk_cmd_linkage "$@" ;;
+        --pc5-advert)  slnk_cmd_pc5_advert "$@" ;;
+        --pc5-qos)     slnk_cmd_pc5_qos "$@" ;;
+        --v2x-plan)    slnk_v2x_plan ;;
         --plan)        slnk_plan ;;
         --selftest)    slnk_selftest ;;
         --menu)        slnk_menu ;;
@@ -678,6 +987,20 @@ Usage: $0 COMMAND
   --relay-interpose <config>  what a UE-to-network relay sees and can change
   --pseudonym-audit <trace.tsv> [bucket-s]
                             pseudonym rotation audit: reuse and co-temporal linkage
+  --pc5-advert build <psid> [--l2id <hex>] [--pqi N] [--pdb-ms N]
+                            [--gfbr-kbps N] [--repeat-ms N]
+                            a V2X service advertisement, built into this
+                            module's own V2X1 container (PSID 32 bits, L2 ID
+                            24 bits); says on every row that the TS 24.587
+                            header is not what these octets are
+  --pc5-advert parse <hex>  read that container back, field by field; refuses
+                            foreign octets by name rather than guessing offsets
+  --pc5-qos [--pqi N] [--resource-type gbr|non-gbr] [--gfbr-kbps N]
+            [--mfbr-kbps N] [--pdb-ms N] [--per P] [--priority N] [--scs-khz N]
+                            PC5 QoS parameters: the MFBR >= GFBR invariant, PDB
+                            in slots at a numerology, bits in flight; unsupplied
+                            rows read unobserved, not zero
+  --v2x-plan                 what forging an advertisement still needs (handoff)
   --plan                     V2X handoff plan
   --selftest                 verify the arithmetic and detectors
   --menu                     interactive menu

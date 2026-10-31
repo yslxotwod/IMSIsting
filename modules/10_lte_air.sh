@@ -3729,6 +3729,83 @@ PY
     # proves only that it is deterministic.
     lair_pws_selftest
 
+    # ── PRACH detection (TS 36.211 5.7.2) ───────────────────────────────
+    # The cyclic-shift table is the one SIB2 selects from, and it is asserted
+    # against the specification's own numbers rather than read back.
+    if lair_prach_available; then
+        local rp
+        rp="$(LAIR_PRACH_PY)"
+        chk rach-ncs-0  "$(python3 "$rp" ncs 0  | awk -F'\t' '$1=="n_cs"{print $2}')" "0"
+        chk rach-ncs-12 "$(python3 "$rp" ncs 12 | awk -F'\t' '$1=="n_cs"{print $2}')" "119"
+        chk rach-ncs-13 "$(python3 "$rp" ncs 13 | awk -F'\t' '$1=="n_cs"{print $2}')" "167"
+        chk rach-ncs-15 "$(python3 "$rp" ncs 15 | awk -F'\t' '$1=="n_cs"{print $2}')" "419"
+        # The whole point of N_CS: how many of the 64 preambles one root holds.
+        chk rach-per-root-13 "$(python3 "$rp" ncs 13 | awk -F'\t' '$1=="preambles_per_root"{print $2}')" "5"
+        chk rach-roots-13    "$(python3 "$rp" ncs 13 | awk -F'\t' '$1=="roots_for_64"{print $2}')" "13"
+        chk rach-per-root-0  "$(python3 "$rp" ncs 0  | awk -F'\t' '$1=="preambles_per_root"{print $2}')" "1"
+        chk rach-zc-length   "$(python3 "$rp" sequence 25 | awk -F'\t' '$1=="n_zc"{print $2}')" "839"
+        chk rach-zc-modulus  "$(python3 "$rp" sequence 25 | awk -F'\t' '$1=="unit_modulus"{print $2}')" "yes"
+        chk rach-zc-cyclic   "$(python3 "$rp" sequence 25 100 | awk -F'\t' '$1=="shift_is_cyclic"{print $2}')" "yes"
+
+        # A preamble planted at a known offset, with a known root and a known
+        # cyclic shift, must come back with those three facts or the correlator
+        # is finding something other than what was put there.
+        local rcap="$d/prach.cf32" syn rdet seq_at win cv shv
+        if python3 "$rp" synth "$rcap" --rate 1920000 --root 25 --zcc 12 \
+                --shift 2 --offset 12000 --snr-db 15 >/dev/null 2>&1; then
+            syn=$(python3 "$rp" synth "$d/synth2.cf32" --rate 1920000 --root 25 \
+                    --zcc 12 --shift 2 --offset 12000 --snr-db 15 2>/dev/null)
+            seq_at=$(printf '%s\n' "$syn" | awk -F'\t' '$1=="sequence_at"{print $2}')
+            rdet=$(lair_cmd_rach_detect "$rcap" --rate 1920000 --root-index 25 --zc-zone 12)
+            chk rach-detected   "$(fld "$rdet" verdict)"        "detected"
+            chk rach-root-u     "$(fld "$rdet" root_u)"         "25"
+            chk rach-nfft       "$(fld "$rdet" n_fft)"          "1536"
+            chk rach-tseq-us    "$(fld "$rdet" tseq_us)"        "800.000"
+            # The profile bin is u*C_v mod 839, so the cyclic shift is recovered
+            # by inverting the root -- 238 here, which is shift 2 at N_CS 119.
+            chk rach-cv         "$(fld "$rdet" peak0_cv)"       "238"
+            chk rach-shift-v    "$(fld "$rdet" peak0_shift_v)"  "2"
+            chk rach-on-grid    "$(fld "$rdet" peak0_on_shift_grid)" "yes"
+            win=$(fld "$rdet" peak0_window)
+            chk rach-window-near "$(awk -v a="$win" -v b="$seq_at" \
+                'BEGIN{d=a-b; if(d<0)d=-d; print (d<=8)?"yes":"no"}')" "yes"
+            # The store is append-only and holds the row that was just built.
+            chk rach-store-row "$(awk -F'\t' 'NR>1 && $4=="0"' \
+                "${LAIR_DIR:-$LOOT_DIR/lte_air}/rach_preambles.tsv" 2>/dev/null | wc -l | tr -d ' ')" "1"
+        else
+            chk rach-fixture "written" "failed"
+        fi
+
+        # Noise is not a preamble, and the refusal has to be the answer: a
+        # grey verdict with a reason, not a detection manufactured out of the
+        # strongest bin of the noise floor.
+        local ncap="$d/noise-prach.cf32"
+        if python3 "$rp" synth "$ncap" --rate 1920000 --root 25 --zcc 12 \
+                --offset 0 --snr-db -40 >/dev/null 2>&1; then
+            local nout nrc
+            nout=$(lair_cmd_rach_detect "$ncap" --rate 1920000 --root-index 25 --zc-zone 12); nrc=$?
+            chk rach-noise-refused "$nrc" "1"
+            chk rach-noise-verdict "$(fld "$nout" verdict)" "unobserved"
+            chk rach-noise-reason  "$(printf '%s\n' "$nout" | grep -c 'no-preamble-above-threshold')" "1"
+        else
+            chk rach-noise-fixture "written" "failed"
+        fi
+    else
+        printf 'rach-detected\tSKIP (no python3 with numpy)\n'
+    fi
+    # SIB2 supplies both facts, and neither is in the capture: the guards name
+    # them, and the layout table (5.7.2-4) stops being the identity above 455.
+    chk rach-need-rate  "$(lair_cmd_rach_detect /dev/null --root-index 25 --zc-zone 12 >/dev/null 2>&1; echo $?)" "2"
+    chk rach-need-root  "$(lair_cmd_rach_detect /dev/null --rate 1920000 --zc-zone 12 >/dev/null 2>&1; echo $?)" "2"
+    chk rach-need-zcc   "$(lair_cmd_rach_detect /dev/null --rate 1920000 --root-index 25 >/dev/null 2>&1; echo $?)" "2"
+    chk rach-need-file  "$(lair_cmd_rach_detect >/dev/null 2>&1; echo $?)" "2"
+    chk rach-no-file    "$(lair_cmd_rach_detect /nonexistent.cf32 --rate 1920000 --root-index 25 --zc-zone 12 >/dev/null 2>&1; echo $?)" "1"
+    chk rach-bad-format "$(lair_cmd_rach_detect /dev/null --rate 1920000 --root-index 25 --zc-zone 12 --format 9 >/dev/null 2>&1; echo $?)" "2"
+    chk rach-bad-zcc    "$(lair_cmd_rach_detect /dev/null --rate 1920000 --root-index 25 --zc-zone 99 >/dev/null 2>&1; echo $?)" "2"
+    chk rach-root-table "$(lair_cmd_rach_detect /dev/null --rate 1920000 --root-index 500 --zc-zone 12 2>&1 | grep -c 'Table 5.7.2-4')" "1"
+    # A rate that cannot hold 839 subcarriers at 1.25 kHz is refused, not
+    # silently rounded: 839 x 1.25 kHz = 1.04875 MHz.
+    chk rach-rate-too-low "$(lair_cmd_rach_detect /dev/null --rate 960000 --root-index 25 --zc-zone 12 >/dev/null 2>&1; echo $?)" "1"
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -4901,6 +4978,7 @@ lair_menu() {
   [12] build an RRC MeasurementReport (§6.2.2)
   [13] build an RRCConnectionRelease (§6.2.2)
   [14] build an RRCConnectionReestablishmentReject (§6.2.2)
+  [15] find PRACH preambles in an IQ capture
   [0]  back
 
 M
@@ -4994,6 +5072,23 @@ M
                     lair_build_meas_report "${margs[@]}" | column -t -s$'\t' 2>/dev/null || true
                     read -rp "  press enter " _
                 fi ;;
+            15)
+                if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                    echo "[-] need a capture, rate, root index and zc zone; cannot prompt in CLI mode" >&2
+                else
+                    read -rp "  capture (cf32/ci16/cu8)> " rf
+                    read -rp "  sample rate Hz> " rr
+                    read -rp "  rootSequenceIndex (or u for --physical-root)> " ri
+                    read -rp "  zeroCorrelationZoneConfig (0..15)> " rz
+                    local -a rargs=(--rate "$rr" --zc-zone "$rz")
+                    if [[ "$ri" =~ ^[0-9]+$ ]] && (( ri <= 455 )); then
+                        rargs+=(--root-index "$ri")
+                    else
+                        rargs+=(--physical-root "$ri")
+                    fi
+                    lair_cmd_rach_detect "$rf" "${rargs[@]}" | column -t -s$'\t' 2>/dev/null || true
+                    read -rp "  press enter " _
+                fi ;;
             13)
                 if [[ -n "${IMSISTING_CLI:-}" ]]; then
                     echo "[-] need --release-cause; cannot prompt in CLI mode" >&2
@@ -5027,6 +5122,112 @@ M
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── PRACH detection: find the preamble a UE actually sent ───────────────
+# Everything else in this module starts from a SIB2 the operator supplied. A
+# preamble is the one LTE message a UE sends without being told when, so a
+# capture is the only evidence it happened -- and the preamble is not in the
+# capture's metadata, it is in the waveform.
+#
+# The detector (tools/lte_prach.py) needs two facts that live in SIB2 and
+# nowhere in the capture:
+#   rootSequenceIndex        which of the 838 Zadoff-Chu roots the cell uses
+#                            (TS 36.331 prach-Config; TS 36.211 Table 5.7.2-4
+#                            maps the logical index to the physical root u)
+#   zeroCorrelationZoneConfig  N_CS, the cyclic-shift step that splits one root
+#                            into 64 preambles (TS 36.211 Table 5.7.2-2)
+# Without them the sequence on the air cannot be named, so both are required
+# arguments and the refusal says which one is missing.
+LAIR_PRACH_PY() { printf '%s' "${IMSISTING_ROOT}/tools/lte_prach.py"; }
+
+lair_prach_available() {
+    [[ -r "$(LAIR_PRACH_PY)" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 -c 'import numpy' 2>/dev/null || return 1
+    return 0
+}
+
+lair_prach_store() {
+    local d="${LAIR_DIR:-$LOOT_DIR/lte_air}"
+    mkdir -p "$d" 2>/dev/null || return 1
+    printf '%s/rach_preambles.tsv\n' "$d"
+}
+
+lair_cmd_rach_detect() {
+    local file="${1:-}"
+    (($#)) && shift
+    local rate="" fmt="cf32" format="0" root="" phy="" zcc="" k0="" scan=0
+    local threshold="20.0"
+    while (($#)); do
+        case "$1" in
+            --rate)          rate="${2:-}";      shift 2 ;;
+            --fmt)           fmt="${2:-}";       shift 2 ;;
+            --format)        format="${2:-}";    shift 2 ;;
+            --root-index)    root="${2:-}";      shift 2 ;;
+            --physical-root) phy="${2:-}";       shift 2 ;;
+            --zc-zone)       zcc="${2:-}";       shift 2 ;;
+            --k0)            k0="${2:-}";        shift 2 ;;
+            --threshold-db)  threshold="${2:-}"; shift 2 ;;
+            --scan)          scan=1;             shift ;;
+            *) printf 'ERROR\t--rach-detect does not take %s\n' "$(lair_sanitize "$1")" >&2
+               return 2 ;;
+        esac
+    done
+    [[ -n "$file" ]] || { printf 'ERROR\t--rach-detect needs a capture file\n' >&2; return 2; }
+    [[ -n "$rate" ]] || {
+        printf 'ERROR\t--rach-detect needs --rate in Hz\n' >&2
+        printf 'WHY\tTSEQ is a duration (TS 36.211 Table 5.7.1-1) and the window it implies is rate x TSEQ samples; without the rate there is no grid to place the sequence on\n' >&2
+        return 2; }
+    [[ "$rate" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--rate takes whole hertz\n' >&2; return 2; }
+    case "$format" in 0|1|2|3) ;; *) printf 'ERROR\t--format takes 0, 1, 2 or 3 (the long sequence, N_ZC=839)\n' >&2; return 2 ;; esac
+    if [[ -z "$root" && -z "$phy" ]]; then
+        printf 'ERROR\t--rach-detect needs --root-index <0..837> (SIB2 rootSequenceIndex)\n' >&2
+        printf 'WHY\tthe preamble is one Zadoff-Chu root and no capture carries which one: rootSequenceIndex is broadcast in SIB2 prach-Config and has to be supplied. Use --physical-root <u> when the index is above 455, where TS 36.211 Table 5.7.2-4 stops being the identity.\n' >&2
+        return 2
+    fi
+    if [[ -z "$zcc" ]]; then
+        printf 'ERROR\t--rach-detect needs --zc-zone <0..15> (SIB2 zeroCorrelationZoneConfig)\n' >&2
+        printf 'WHY\tN_CS decides the cyclic shift between the 64 preambles of one root (TS 36.211 Table 5.7.2-2). Without it a detected shift cannot be attributed to a preamble number, so the detection would name a root and nothing else.\n' >&2
+        return 2
+    fi
+    [[ "$zcc" =~ ^[0-9]+$ ]] && (( zcc <= 15 )) || {
+        printf 'ERROR\t--zc-zone is a zeroCorrelationZoneConfig 0..15: %s\n' "$(lair_sanitize "$zcc")" >&2; return 2; }
+    if ! lair_prach_available; then
+        printf 'MISSING\tpython3 with numpy, or %s\n' "$(LAIR_PRACH_PY)" >&2
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-correlator: the search needs numpy, and a fallback that guessed a preamble would be worse than no answer\n'
+        return 1
+    fi
+
+    local -a args=(detect "$file" --rate "$rate" --fmt "$fmt" --format "$format"
+                   --zcc "$zcc" --threshold-db "$threshold")
+    [[ -n "$root" ]] && args+=(--root "$root")
+    [[ -n "$phy"  ]] && args+=(--physical-root "$phy")
+    [[ -n "$k0"   ]] && args+=(--k0 "$k0")
+    (( scan ))     && args+=(--scan)
+
+    local out rc
+    out=$(python3 "$(LAIR_PRACH_PY)" "${args[@]}" 2>&1); rc=$?
+    printf '%s\n' "$out"
+    if (( rc == 0 )); then
+        local ts store v cv papr win
+        ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        v=$(printf '%s\n' "$out" | awk -F'\t' '$1=="peak0_shift_v"{print $2; exit}')
+        cv=$(printf '%s\n' "$out" | awk -F'\t' '$1=="peak0_cv"{print $2; exit}')
+        papr=$(printf '%s\n' "$out" | awk -F'\t' '$1=="peak0_papr_db"{print $2; exit}')
+        win=$(printf '%s\n' "$out" | awk -F'\t' '$1=="peak0_window"{print $2; exit}')
+        if store=$(lair_prach_store); then
+            [[ -s "$store" ]] || printf 'ts\tcapture\trate_hz\tformat\troot_logical\troot_u\tzcc\tn_cs\tshift_v\tcv\tpapr_db\twindow\tverdict\n' > "$store"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$ts" "$(lair_sanitize "$file")" "$rate" "$format" \
+                "$(printf '%s\n' "$out" | awk -F'\t' '$1=="root_logical"{print $2; exit}')" \
+                "$(printf '%s\n' "$out" | awk -F'\t' '$1=="root_u"{print $2; exit}')" \
+                "$zcc" "$(printf '%s\n' "$out" | awk -F'\t' '$1=="n_cs"{print $2; exit}')" \
+                "$v" "$cv" "$papr" "$win" "detected" >> "$store"
+        fi
+    fi
+    return $rc
+}
+
 lair_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -5054,6 +5255,7 @@ lair_cli_main() {
         --start)        lair_start "$LAIR_CONF" ;;
         --stop)         lair_stop ;;
         --status)       lair_cmd_status ;;
+        --rach-detect)  lair_cmd_rach_detect "$@" ;;
         --power-ref)    lair_lab_power_reference "${1:-6300}" "${2:-25}" ;;
         --selftest)     lair_selftest ;;
         --menu)         lair_menu ;;
@@ -5176,6 +5378,16 @@ Usage: $0 COMMAND
    --start                          start srsenb with the generated conf
   --stop                           stop it (idempotent)
   --status                         is the eNB running
+  --rach-detect <file> --rate N --root-index N|--physical-root N --zc-zone N
+                 [--format 0|1|2|3] [--fmt cf32|ci16|cu8] [--k0 N]
+                 [--scan] [--threshold-db N]
+                                  find PRACH preambles in an IQ capture and
+                                  name the cyclic shift (= the preamble). The
+                                  root and N_CS are SIB2 facts the waveform
+                                  does not carry, so both are required and the
+                                  refusal says which is missing. --scan tries
+                                  every resource-block-aligned position when the
+                                  capture is wider than the PRACH's six RBs.
   --power-ref [EARFCN] [N_PRB]     lab power and timing reference values
   --selftest                       verify the arithmetic without a radio
   --menu                           interactive menu

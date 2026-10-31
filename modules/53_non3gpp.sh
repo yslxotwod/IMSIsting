@@ -239,6 +239,125 @@ GSM-R	shares the GSM stack and its older ciphers	rail signalling availability is
 EOF
 }
 
+# ── TEA: what an analysis can honestly say about a TETRA cipher ─────────
+# EN 300 392-7 defines four cipher variants and this tree holds no copy of it.
+# Two figures are easy to confuse and easy to invent: the key LENGTH a
+# specification assigns, and the effective key SPACE an implementation keeps
+# after its design reductions. Neither is restated here. What is stated is the
+# design status (citable from the family itself: TEA1 was weakened on purpose,
+# TEA4 is the open variant), and every cost is computed from figures the
+# operator supplies or from the frame arithmetic this module already derives —
+# anything else is a cell that reads `unobserved` with its reason beside it.
+n3g_tea_posture() {
+    cat <<'EOF'
+cipher	spec	design_status	attack_status	verdict
+TEA1	EN 300 392-7	weakened by design; the effective key space is smaller than the nominal one	the published cryptanalysis targets that reduction, so no attack is reimplemented here	not confidential: TEA1 traffic is readable by whoever has a capture and the reduced search
+TEA2	EN 300 392-7	80-bit key, restricted distribution for public safety	no cryptanalysis of the key schedule is implemented in this tree	the cipher is not the weakest link; key distribution and the proprietary implementation are
+TEA3	EN 300 392-7	80-bit key, export variant	none implemented here	distribution and implementation again; the export restriction is the interesting part
+TEA4	EN 300 392-7	the open, weaker variant	none implemented here	an interoperability convenience; treat it as TEA1 in practice
+EOF
+}
+
+# The timeslot budget is derived, not typed: 255 symbols x 2 bits x 4 slots at
+# 36 kbit/s is 2040 bits per frame (EN 300 392-2 numbers, --frame-math above),
+# so one timeslot carries 510 modulated bits in 14.1667 ms.
+n3g_tea_slot_bits() {
+    n3g_frame_math 255 2 4 36000 | awk -F'\t' '$1=="bits_per_slot"{printf "%d", $2}'
+}
+n3g_tea_slot_ms() {
+    n3g_frame_math 255 2 4 36000 | awk -F'\t' '$1=="slot_ms"{printf "%s", $2}'
+}
+
+n3g_tea_analysis() {
+    local cipher="${1:-all}" effbits="" rate="" known=""
+    (($#)) && shift || true
+    while (($#)); do
+        case "${1:-}" in
+            --effective-bits) effbits="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --rate)           rate="${2:-}";    shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --known-bits)     known="${2:-}";   shift $(( $# >= 2 ? 2 : 1 )) ;;
+            "")               shift ;;
+            *) printf 'ERROR\tunknown option for --tea-analysis: %s\n' "$(n3g_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    case "$cipher" in
+        TEA1|TEA2|TEA3|TEA4|all) ;;
+        *) printf 'ERROR\tusage: --tea-analysis [TEA1|TEA2|TEA3|TEA4|all] [--effective-bits N] [--rate KEYS_PER_S] [--known-bits N]\n' >&2; return 2 ;;
+    esac
+    [[ -z "$effbits" || "$effbits" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'ERROR\t--effective-bits must be a positive integer (the key bits the reduced search actually walks)\n' >&2; return 2; }
+    [[ -z "$rate" || "$rate" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'ERROR\t--rate must be a positive integer (candidate keys tested per second)\n' >&2; return 2; }
+    local slotbits slotms
+    slotbits=$(n3g_tea_slot_bits); slotms=$(n3g_tea_slot_ms)
+    [[ -n "$known" ]] || known="$slotbits"
+    [[ "$known" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'ERROR\t--known-bits must be a positive integer (known keystream bits, one test vector per timeslot and up to %s bits per timeslot)\n' "$slotbits" >&2; return 2; }
+
+    local store="${N3G_DIR:-$LOOT_DIR/non3gpp}/tea-analysis.tsv"
+    mkdir -p "${store%/*}" 2>/dev/null
+    [[ -s "$store" ]] || printf 'ts\tcipher\teffective_key_bits\tkeyspace\texhaustive_seconds\tknown_bits\tcapture_slots\tcapture_ms\tattack_status\n' >> "$store"
+
+    printf 'cipher\tspec\tdesign_status\tattack_status\teffective_key_bits\tkeyspace\texhaustive_seconds\tknown_bits\tcapture_slots\tcapture_ms\tunobserved_reason\tverdict\n'
+    local c ekb ks secs slots cms why
+    while IFS=$'\t' read -r c _ ds as v; do
+        [[ "$cipher" == all || "$c" == "$cipher" ]] || continue
+        ekb="unobserved"; ks="unobserved"; secs="unobserved"
+        slots="unobserved"; cms="unobserved"; why=""
+        # Only the effective length matters to a search: a nominal length that
+        # the design reduces is exactly the figure TEA1 is criticised for.
+        if [[ -n "$effbits" ]]; then
+            ekb="$effbits"
+            if (( effbits <= 62 )); then ks=$(( 1 << effbits )); else ks="2^$effbits"; fi
+            if [[ -n "$rate" ]]; then
+                secs=$(awk -v k="$ks" -v r="$rate" 'BEGIN{ if (k ~ /^[0-9]+$/) printf "%.6f", k / r; else printf "unobserved" }')
+            else
+                why="the search rate was not supplied, so the exhaustion time is unobserved"
+            fi
+        else
+            why="the effective key length after the design reduction is not restated here (EN 300 392-7 is not in this tree) and no capture is supplied, so the key space and its cost read unobserved"
+        fi
+        slots=$(( (known + slotbits - 1) / slotbits ))
+        cms=$(awk -v n="$slots" -v s="$slotms" 'BEGIN{ printf "%.4f", n * s }')
+        local status="handoff"
+        [[ -n "$effbits" && -n "$rate" ]] || status="unobserved"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$c" "EN 300 392-7" "$ds" "$as" "$ekb" "$ks" "$secs" "$known" "$slots" "$cms" \
+            "${why:-—}" "$v"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$(date -u +%FT%TZ)" "$c" "$ekb" "$ks" "$secs" "$known" "$slots" "$cms" "$status" >> "$store"
+    done < <(n3g_tea_posture | tail -n +2)
+    return 0
+}
+
+# The crack itself. Naming what is absent is the whole point: a keystream
+# generator would have to come from EN 300 392-7, which is not here, and an
+# attack needs ciphered timeslots, which are not here either. So this exits 3.
+n3g_tea_plan() {
+    local cipher="${1:-TEA1}"
+    case "$cipher" in
+        TEA1|TEA2|TEA3|TEA4) ;;
+        *) printf 'ERROR\tusage: --tea-plan <TEA1|TEA2|TEA3|TEA4>\n' >&2; return 2 ;;
+    esac
+    local slotbits slotms
+    slotbits=$(n3g_tea_slot_bits); slotms=$(n3g_tea_slot_ms)
+    cat <<EOF
+status	handoff
+what	$cipher key recovery from ciphered TETRA traffic
+not_implemented_a	no $cipher keystream generator: EN 300 392-7 is not in this tree, and a guessed cipher is worse than an admitted gap
+not_implemented_b	no capture: no ciphered timeslots are in hand, so nothing here has been attacked and nothing here is claimed to have been
+mechanism	the cipher is additive — ciphertext = plaintext XOR keystream — so known plaintext yields keystream, and every candidate key is judged on those bits
+frame_fact	4 timeslots per 56.6667 ms frame; $slotbits modulated bits and $slotms ms per timeslot (derived from EN 300 392-2 symbols, bits/symbol, slots and 36 kbit/s by --frame-math 255 2 4 36000)
+capture_budget	ceil(K / $slotbits) timeslots of known keystream: --tea-analysis $cipher --effective-bits N prints that as capture_slots and capture_ms
+needs_1	the effective key length after the design reduction, as a number from a source this tree does not hold — pass it as --effective-bits
+needs_2	a known-plaintext or known-structure assumption per timeslot, so the XOR produces keystream rather than noise
+needs_3	a demodulator: telive or a TETRA receiver producing bits, which this module does not include
+honest_verdict	TEA1 is the variant a published break applies to, and its traffic is not confidential; TEA2/TEA3/TEA4 are not reimplemented here either, so this module reports posture and cost and stops
+cite	EN 300 392-7 (ciphers), EN 300 392-2 (frame and modulation)
+EOF
+    return 3
+}
+
 n3g_plan() {
     cat <<'EOF'
 status	handoff
@@ -338,6 +457,40 @@ n3g_selftest() {
     chk bands-bad-region "$(n3g_bands 9 >/dev/null 2>&1; echo $?)" "2"
     chk bands-no-such-region "$(n3g_bands ZZ >/dev/null 2>&1; echo $?)" "2"
 
+    # 8. TEA analysis: the posture is citable, the figures are not restated,
+    # and every cost is computed from a supplied number or from the frame
+    # arithmetic above. A cell that cannot be sourced reads `unobserved`, and
+    # the store that records it is append-only with one header.
+    chk tea-posture-rows "$(n3g_tea_posture | tail -n +2 | wc -l)" "4"
+    chk tea1-design "$(n3g_tea_posture | awk -F'\t' '$1=="TEA1"{print ($3 ~ /weakened by design/)?"yes":"no"}')" "yes"
+    chk tea2-restricted "$(n3g_tea_posture | awk -F'\t' '$1=="TEA2"{print ($3 ~ /restricted distribution/)?"yes":"no"}')" "yes"
+    chk tea-slot-bits "$(n3g_tea_slot_bits)" "510"
+    chk tea-slot-ms "$(n3g_tea_slot_ms)" "14.1667"
+    local ta
+    ta=$(n3g_tea_analysis TEA1)
+    chk tea-no-figure-is-unobserved "$(printf '%s\n' "$ta" | awk -F'\t' '$1=="TEA1"{print $5}')" "unobserved"
+    chk tea-no-figure-keyspace "$(printf '%s\n' "$ta" | awk -F'\t' '$1=="TEA1"{print $6}')" "unobserved"
+    chk tea-no-figure-reason "$(printf '%s\n' "$ta" | awk -F'\t' '$1=="TEA1"{print ($11 ~ /EN 300 392-7 is not in this tree/)?"yes":"no"}')" "yes"
+    chk tea-capture-default "$(printf '%s\n' "$ta" | awk -F'\t' '$1=="TEA1"{print $9}')" "1"
+    ta=$(n3g_tea_analysis TEA1 --effective-bits 32 --rate 1000000000 --known-bits 2040)
+    chk tea-keyspace "$(printf '%s\n' "$ta" | awk -F'\t' '$1=="TEA1"{print $6}')" "4294967296"
+    chk tea-seconds "$(printf '%s\n' "$ta" | awk -F'\t' '$1=="TEA1"{print $7}')" "4.294967"
+    chk tea-capture-slots "$(printf '%s\n' "$ta" | awk -F'\t' '$1=="TEA1"{print $9}')" "4"
+    chk tea-capture-ms "$(printf '%s\n' "$ta" | awk -F'\t' '$1=="TEA1"{print $10}')" "56.6668"
+    chk tea-bad-cipher "$(n3g_tea_analysis TEA9 >/dev/null 2>&1; echo $?)" "2"
+    chk tea-bad-bits "$(n3g_tea_analysis TEA1 --effective-bits 0 >/dev/null 2>&1; echo $?)" "2"
+    chk tea-bad-rate "$(n3g_tea_analysis TEA1 --rate x >/dev/null 2>&1; echo $?)" "2"
+    chk tea-bad-known "$(n3g_tea_analysis TEA1 --known-bits -1 >/dev/null 2>&1; echo $?)" "2"
+    chk tea-all-rows "$(n3g_tea_analysis all --effective-bits 20 | tail -n +2 | wc -l)" "4"
+    chk tea-plan-status "$(n3g_tea_plan TEA1 | awk -F'\t' '$1=="status"{print $2}')" "handoff"
+    chk tea-plan-exit "$(n3g_tea_plan TEA1 >/dev/null 2>&1; echo $?)" "3"
+    chk tea-plan-names-gap "$(n3g_tea_plan TEA1 | awk -F'\t' '$1=="not_implemented_a"{print ($2 ~ /EN 300 392-7 is not in this tree/)?"yes":"no"}')" "yes"
+    chk tea-plan-no-capture "$(n3g_tea_plan TEA4 | awk -F'\t' '$1=="not_implemented_b"{print ($2 ~ /no capture/)?"yes":"no"}')" "yes"
+    chk tea-plan-bad-cipher "$(n3g_tea_plan TEA9 >/dev/null 2>&1; echo $?)" "2"
+    chk tea-store-header-once "$(grep -c '^ts' "$N3G_DIR/tea-analysis.tsv")" "1"
+    chk tea-store-appended "$(awk -F'\t' '$2=="TEA1"' "$N3G_DIR/tea-analysis.tsv" | wc -l)" "3"
+    chk tea-store-status "$(awk -F'\t' '$2=="TEA1" && $5=="4.294967"{print $9}' "$N3G_DIR/tea-analysis.tsv")" "handoff"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -359,6 +512,8 @@ n3g_menu() {
   [8]  Bands and licence class
   [9]  Detection notes
   [10] Plan (handoff)
+  [11] TEA analysis (posture and cost)
+  [12] TEA plan (handoff)
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -373,6 +528,12 @@ M
             8) n3g_bands "all"; read -rp "  enter " _ ;;
             9) n3g_detect_note; read -rp "  enter " _ ;;
             10) n3g_plan; read -rp "  enter " _ ;;
+            11) read -rp "  cipher (TEA1..TEA4|all)> " tc
+                read -rp "  effective key bits (blank = unobserved)> " tb
+                read -rp "  keys/s (blank = unobserved)> " tr
+                n3g_tea_analysis "${tc:-all}" ${tb:+--effective-bits "$tb"} ${tr:+--rate "$tr"}
+                read -rp "  enter " _ ;;
+            12) read -rp "  cipher (TEA1..TEA4)> " tc; n3g_tea_plan "${tc:-TEA1}"; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -394,6 +555,8 @@ n3g_cli_main() {
         --codecs)       n3g_codec_budget ;;
         --bands)        n3g_bands "${1:-all}" ;;
         --detect-note)  n3g_detect_note ;;
+        --tea-analysis) n3g_tea_analysis "${1:-all}" "${@:2}" ;;
+        --tea-plan)     n3g_tea_plan "${1:-TEA1}" ;;
         --plan)         n3g_plan ;;
         --selftest)     n3g_selftest ;;
         --menu)         n3g_menu ;;
@@ -413,6 +576,12 @@ Usage: $0 COMMAND
   --codecs                  the vocoders and the bit budget a decoder must consume
   --bands [REGION]          band edges, power and licence class; PMR446/FRS are the exempt ones
   --detect-note             cipher-weakness and detection notes
+  --tea-analysis [CIPHER] [--effective-bits N] [--rate KEYS_PER_S] [--known-bits N]
+                            TEA1-TEA4 posture, plus key-space and capture cost
+                            from the figures you supply; absent figures read
+                            unobserved rather than zero
+  --tea-plan <CIPHER>       what a TEA key recovery needs and why none is
+                            claimed here (exit 3: handoff to a capture)
   --plan                    receive-only handoff plan
   --selftest                verify the references and the classifier
   --menu                    interactive menu

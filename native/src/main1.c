@@ -7224,12 +7224,10 @@ static const ChipRow chip_rows[] = {
     { "10_lte_air",          "--enb-sib-schedule",    NEED_NO, DOES_READS },
     { "10_lte_air",          "--gen-enb-conf",        NEED_NO, DOES_BUILDS },
     { "10_lte_air",          "--help",                NEED_NO, DOES_READS },
-    { "10_lte_air",          "--hex",                 NEED_NO, DOES_READS },
     { "10_lte_air",          "--info",                NEED_NO, DOES_READS },
     { "10_lte_air",          "--late-non-critical",   NEED_NO, DOES_READS },
     { "10_lte_air",          "--meas-id",             NEED_NO, DOES_READS },
     { "10_lte_air",          "--menu",                NEED_NO, DOES_READS },
-    { "10_lte_air",          "--message-id",          NEED_NO, DOES_READS },
     { "10_lte_air",          "--neigh",               NEED_NO, DOES_READS },
     { "10_lte_air",          "--non-critical-extension", NEED_NO, DOES_READS },
     { "10_lte_air",          "--out",                 NEED_NO, DOES_READS },
@@ -7247,8 +7245,6 @@ static const ChipRow chip_rows[] = {
     { "10_lte_air",          "--segment-number",      NEED_NO, DOES_READS },
     { "10_lte_air",          "--segment-type",        NEED_NO, DOES_READS },
     { "10_lte_air",          "--selftest",            NEED_NO, DOES_READS },
-    { "10_lte_air",          "--serial",              NEED_NO, DOES_READS },
-    { "10_lte_air",          "--sib",                 NEED_NO, DOES_READS },
     { "10_lte_air",          "--srsran-version",      NEED_NO, DOES_READS },
     { "10_lte_air",          "--start",               NEED_NO, DOES_READS },
     { "10_lte_air",          "--status",              NEED_NO, DOES_READS },
@@ -7287,6 +7283,7 @@ static const ChipRow chip_rows[] = {
     { "11_lte_core",         "--gtp-screen-peer",     NEED_NO, DOES_READS },
     { "11_lte_core",         "--diameter-screen",     NEED_NO, DOES_READS },
     { "11_lte_core",         "--gtpc-send",           NEED_NO, DOES_SENDS },
+    { "11_lte_core",         "--idr",                 NEED_NO, DOES_BUILDS },
     { "11_lte_core",         "--gtpdoor-build",       NEED_NO, DOES_BUILDS },
     { "11_lte_core",         "--gtpdoor-parse",       NEED_NO, DOES_READS },
     { "11_lte_core",         "--grx-scan",            NEED_NO, DOES_SENDS },
@@ -7938,10 +7935,8 @@ static const ChipRow chip_rows[] = {
     { "33_jamming_detect",   "--seq",                 NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--shape",               NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--shapes",              NEED_RADIO, DOES_READS },
-    { "33_jamming_detect",   "--ssb-waveform",        NEED_RADIO, DOES_TRANSMITS },
     { "33_jamming_detect",   "--status-tsv",          NEED_NO, DOES_READS },
     { "33_jamming_detect",   "--tx-build",            NEED_RADIO, DOES_READS },
-    { "33_jamming_detect",   "--tx-key",              NEED_RADIO, DOES_TRANSMITS },
     { "33_jamming_detect",   "--tx-status",           NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--v",                   NEED_RADIO, DOES_READS },
     { "33_jamming_detect",   "--version",             NEED_NO, DOES_READS },
@@ -25994,6 +25989,13 @@ static ModuleSubmenuEntry lair_entries[] = {
     { "State", "dialog-information-symbolic", NULL, lair_build_read },
     { "Build message", "document-send-symbolic", NULL, lair_build_messages },
     { "Cell", "imsisting-01_radio-symbolic", NULL, lair_build_cell },
+    /* Random access is heard, not assumed: the preambles in a capture say which
+       shift a handset picked, and the cyclic shift is the only field a receiver
+       can recover without knowing who sent it. */
+    { "Random access",
+      "system-search-symbolic",
+      "#FIND PREAMBLES|~--rach-detect",
+      NULL }
 };
 /* 11_lte_core — LTE EPC core.
  *
@@ -26133,6 +26135,34 @@ lcore_build_build(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(slg_body), res);
     }
     gtk_box_append(GTK_BOX(body), slg);
+
+    GtkWidget *idr_body;
+    GtkWidget *idr = verb_card("INSTALL A PROFILE", &idr_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(idr_body),
+            mod_arg_row_prefilled(state, module_id, status, "Install on the MME",
+                "--idr", "310150123456789 --dest-host mme.example --apn internet --qci 9",
+                "An Insert-Subscriber-Data-Request (319): the profile the HSS "
+                "installs on whichever node is serving the subscriber, and the "
+                "node it is aimed at."));
+        gtk_box_append(GTK_BOX(idr_body), res);
+    }
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(idr_body),
+            mod_arg_row_prefilled(state, module_id, status, "Install a barring",
+                "--idr", "310150123456789 --status barring --ambr-ul 0 --ambr-dl 0",
+                "The same install carrying operator-determined barring and a "
+                "zero bit rate, which is the profile a subscriber cannot use."));
+        gtk_box_append(GTK_BOX(idr_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), idr);
 
     {
         GtkWidget *res = result_rect_new(state, NULL);
@@ -27473,6 +27503,14 @@ dwn_build_path(AppState *state, const char *module_id,
 static ModuleSubmenuEntry dwn_entries[] = {
     { "Rejects", "dialog-information-symbolic", NULL, dwn_build_reject },
     { "Path detection", "system-search-symbolic", NULL, dwn_build_path },
+    /* Two ways down and one that is not: a 5G reject plus an LTE redirect is one
+       route, dropping to 3G needs a second message because NR's redirect choice
+       has no UTRAN branch. */
+    { "Fallback",
+      "network-wireless-symbolic",
+      "#PLAN IT|--plan eps-fallback|--plan nr-utran-redirect"
+      "|#BUILD THE 4G HALF|~--build-fallback",
+      NULL }
 };
 /* 16_sim — the card itself.
  *
@@ -38295,6 +38333,13 @@ static ModuleSubmenuEntry iot_entries[] = {
     { "Sequences", "network-wireless-symbolic", NULL, iot_build_sequences },
     { "Limits", "security-low-symbolic", NULL, iot_build_limits },
     { "Non-IP data", "network-transmit-symbolic", NULL, iot_build_nidd },
+    /* NB-IoT is one narrow carrier doing everything at once, so the downlink
+       control fields and the uplink airtime are the two numbers that decide
+       whether an occasion fits. */
+    { "Narrowband",
+      "network-cellular-symbolic",
+      "#DOWNLINK CONTROL|~--nb-dci|#UPLINK AIRTIME|~--npusch",
+      NULL }
 };
 /* 46_lpp — the positioning protocol.
  *
@@ -39660,6 +39705,13 @@ static ModuleSubmenuEntry slnk_entries[] = {
     { "Resource grid", "dialog-information-symbolic", NULL, slnk_build_grid },
     { "Identifiers", "network-wireless-symbolic", NULL, slnk_build_ids },
     { "Relay and handoff", "preferences-system-symbolic", NULL, slnk_build_relay },
+    /* A PC5 advertisement is a broadcast with no session: whoever hears it can
+       join, which is why the service identifier and the QoS profile are the two
+       facts worth forging. */
+    { "V2X / PC5",
+      "network-transmit-receive-symbolic",
+      "#ADVERTISEMENT|~--pc5-advert|#QOS FIGURES|~--pc5-qos|--v2x-plan",
+      NULL }
 };
 /* 52_stk — the SIM Application Toolkit.
  *
@@ -39994,6 +40046,13 @@ static ModuleSubmenuEntry n3g_entries[] = {
     { "Card identity", "dialog-information-symbolic", NULL, n3g_build_identify },
     { "Frames", "network-wireless-symbolic", NULL, n3g_build_frames },
     { "Reference values", "preferences-system-symbolic", NULL, n3g_build_reference },
+    /* TETRA's ciphers are named in a public standard and their weakness is a
+       key-space fact, not a bug this tree exploits: posture, then the handoff a
+       recovery would need. */
+    { "TETRA ciphers",
+      "network-wireless-symbolic",
+      "#CIPHER POSTURE|--tea-analysis|#RECOVERY HANDOFF|~--tea-plan",
+      NULL }
 };
 /* 54_baseband_exploit — the CVEs a baseband answers to.
  *

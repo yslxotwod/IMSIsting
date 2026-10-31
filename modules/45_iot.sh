@@ -516,6 +516,374 @@ iot_freq_plan() {
 }
 
 
+# ============================================================================
+# NB-IoT control: DCI formats N0/N1 and the NPUSCH resource assignment
+#
+# There is NO REFEREE for a DCI in this tree. A DCI is PHY, so it is not in
+# tools/lte_rrc_nb_layout.py (that file carries the rrc ASN.1 --
+# npdcch-NumRepetitions, npdcch-StartSF-USS and friends -- not field widths)
+# and tshark stops at the RRC/NAS boundary. The field LISTS below follow
+# TS 36.212 5.3.3.1.4 (format N0) and 5.3.3.1.5 (format N1); every WIDTH is
+# printed with certified=no and can be replaced field by field with --width,
+# because a real decoder's numbers win over this table.
+# ============================================================================
+iot_nb_dir() { printf '%s' "${IOT_DIR:-$LOOT_DIR/iot}"; }
+
+iot_nb_post() {   # <file> <header> <row>
+    local f hdr row d
+    f="$1"; hdr="$2"; row="$3"
+    d=$(iot_nb_dir); mkdir -p "$d" 2>/dev/null || return 0
+    [[ -s "$d/$f" ]] || printf '%s\n' "$hdr" >> "$d/$f"
+    printf '%s\n' "$row" >> "$d/$f"
+}
+
+iot_dci_model() {   # <n0|n1|n1order> -> field:width rows
+    case "${1:-n0}" in
+        n0) cat <<'F'
+flag_n0_n1:1
+subcarrier_ind:6
+ru_assign:3
+sched_delay:2
+mcs:4
+rv:1
+ndi:1
+rep_num:3
+harq_proc:1
+dci_subframe_rep:2
+F
+        ;;
+        n1) cat <<'F'
+flag_n0_n1:1
+npdcch_order:1
+sched_delay:3
+ru_assign:3
+mcs:4
+rep_num:4
+ndi:1
+harq_ack_res:4
+dci_subframe_rep:2
+F
+        ;;
+        n1order) cat <<'F'
+flag_n0_n1:1
+npdcch_order:1
+nprach_start_rep:2
+nprach_subcarrier_ind:6
+dci_subframe_rep:2
+F
+        ;;
+        *) return 1 ;;
+    esac
+}
+
+iot_bits_of() {   # <value> <width> -> exactly <width> bits, most significant first
+    local v w i out=""
+    v="$1"; w="$2"
+    for (( i = w - 1; i >= 0; i-- )); do out+=$(( (v >> i) & 1 )); done
+    printf '%s' "$out"
+}
+
+iot_bin_dec() {   # <binary string> -> decimal
+    local s i v=0
+    s="$1"
+    for (( i = 0; i < ${#s}; i++ )); do v=$(( v * 2 + ${s:i:1} )); done
+    printf '%s' "$v"
+}
+
+iot_hex_bits() {  # <hex> -> binary, four bits per character
+    local h i o=""
+    h="${1,,}"
+    for (( i = 0; i < ${#h}; i++ )); do
+        case "${h:i:1}" in
+            0) o+=0000 ;; 1) o+=0001 ;; 2) o+=0010 ;; 3) o+=0011 ;;
+            4) o+=0100 ;; 5) o+=0101 ;; 6) o+=0110 ;; 7) o+=0111 ;;
+            8) o+=1000 ;; 9) o+=1001 ;; a) o+=1010 ;; b) o+=1011 ;;
+            c) o+=1100 ;; d) o+=1101 ;; e) o+=1110 ;; f) o+=1111 ;;
+            *) return 1 ;;
+        esac
+    done
+    printf '%s' "$o"
+}
+
+iot_bits_hex() {  # <binary string, length a multiple of 4> -> hex
+    local b i o=""
+    b="$1"
+    for (( i = 0; i < ${#b}; i += 4 )); do
+        case "${b:i:4}" in
+            0000) o+=0 ;; 0001) o+=1 ;; 0010) o+=2 ;; 0011) o+=3 ;;
+            0100) o+=4 ;; 0101) o+=5 ;; 0110) o+=6 ;; 0111) o+=7 ;;
+            1000) o+=8 ;; 1001) o+=9 ;; 1010) o+=a ;; 1011) o+=b ;;
+            1100) o+=c ;; 1101) o+=d ;; 1110) o+=e ;; 1111) o+=f ;;
+        esac
+    done
+    printf '%s' "$o"
+}
+
+iot_nb_dci() {
+    local fmt="n0" action="" hx="" order_auto=0
+    local -a flds=() wov=()
+    while (( $# )); do
+        case "$1" in
+            n0|n1)              fmt="$1"; shift ;;
+            n[0-9]*)            printf 'ERROR\tunknown DCI format: %s (want n0 or n1)\n' "$1" >&2; return 2 ;;
+            widths|build|parse) action="$1"; shift ;;
+            --order)
+                [[ "$fmt" == "n1" ]] || { printf 'ERROR\t--order only applies to format n1\n' >&2; return 2; }
+                fmt="n1order"; shift ;;
+            --field)            flds+=("${2:-}"); shift 2 ;;
+            --width)            wov+=("${2:-}"); shift 2 ;;
+            -h|--help)
+                printf 'usage: --nb-dci [n0|n1] [widths|build|parse] [<hex>] [--field name=value] [--width name=bits] [--order]\n'
+                return 0 ;;
+            -*)                 printf 'ERROR\tunknown option: %s\n' "$1" >&2; return 2 ;;
+            *)                  hx="$1"; shift ;;
+        esac
+    done
+    [[ -n "$action" ]] || action="widths"
+
+    # The N1 order form is selected by the npdcch_order bit, which sits at bit
+    # offset 1 in both N1 layouts (TS 36.212 5.3.3.1.5), so the payload decides
+    # which field list applies when the caller did not say.
+    if [[ "$fmt" == "n1" && "$action" == "parse" && -n "$hx" ]]; then
+        local pk=""
+        pk=$(iot_hex_bits "$hx" 2>/dev/null) || pk=""
+        if (( ${#pk} >= 2 )) && (( $(iot_bin_dec "${pk:1:1}") == 1 )); then
+            fmt="n1order"; order_auto=1
+        fi
+    fi
+
+    local -a names=() widths=() wsrc=()
+    local n w ov val i total=0 hit=0
+    while IFS=: read -r n w; do
+        [[ -n "$n" ]] || continue
+        names+=("$n"); widths+=("$w"); wsrc+=("model")
+    done < <(iot_dci_model "$fmt")
+    (( ${#names[@]} )) || { printf 'ERROR\tunknown DCI format: %s (want n0 or n1)\n' "$fmt" >&2; return 2; }
+
+    for ov in ${wov[@]+"${wov[@]}"}; do
+        [[ "$ov" == *=* ]] || { printf 'ERROR\t--width wants name=bits, got: %s\n' "$ov" >&2; return 2; }
+        n="${ov%%=*}"; val="${ov##*=}"
+        [[ "$val" =~ ^[0-9]+$ ]] && (( val > 0 )) && (( val <= 32 )) || {
+            printf 'ERROR\t--width %s: bits must be 1..32, got: %s\n' "$n" "$val" >&2; return 2; }
+        hit=0
+        for i in "${!names[@]}"; do
+            if [[ "${names[$i]}" == "$n" ]]; then widths[$i]="$val"; wsrc[$i]="override"; hit=1; fi
+        done
+        (( hit )) || { printf 'ERROR\t--width names no field of %s: %s\n' "$fmt" "$n" >&2; return 2; }
+    done
+    for i in "${!widths[@]}"; do total=$(( total + ${widths[$i]} )); done
+    local octets=$(( (total + 7) / 8 ))
+
+    if [[ "$action" == "widths" ]]; then
+        printf 'field\twidth\twidth_source\n'
+        for i in "${!names[@]}"; do printf '%s\t%s\t%s\n' "${names[$i]}" "${widths[$i]}" "${wsrc[$i]}"; done
+        printf 'format\t%s\n' "$fmt"
+        printf 'field_count\t%s\n' "${#names[@]}"
+        printf 'bit_len\t%s\n' "$total"
+        printf 'octet_len\t%s\n' "$octets"
+        printf 'widths_certified\tno\n'
+        printf 'widths_source\tthis module'"'"'s model of TS 36.212 5.3.3.1.4 and 5.3.3.1.5: the field order is cited, the widths are not refereed, because nothing in this tree decodes an NPDCCH DCI\n'
+        printf 'override\tpass --width <field>=<bits> to replace any width with the numbers a real decoder reports\n'
+        if [[ "$fmt" == "n1" ]]; then
+            printf 'order_form\tformat N1 has a second layout when the npdcch_order bit is 1 (TS 36.212 5.3.3.1.5); pass --order to select it\n'
+        fi
+        if (( order_auto )); then
+            printf 'order_form_auto\tthe payload named the order layout by its npdcch_order bit\n'
+        fi
+        printf 'ref\tTS 36.212 5.3.3.1.4 (format N0), TS 36.212 5.3.3.1.5 (format N1)\n'
+        printf 'verdict\tfield_order_cited_widths_model\n'
+        return 0
+    fi
+
+    if [[ "$action" == "build" ]]; then
+        local -a vals=()
+        for i in "${!names[@]}"; do vals+=(0); done
+        local fv lim
+        for fv in ${flds[@]+"${flds[@]}"}; do
+            [[ "$fv" == *=* ]] || { printf 'ERROR\t--field wants name=value, got: %s\n' "$fv" >&2; return 2; }
+            n="${fv%%=*}"; val="${fv##*=}"
+            [[ "$val" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--field %s: value must be a decimal number\n' "$n" >&2; return 2; }
+            hit=0
+            for i in "${!names[@]}"; do
+                [[ "${names[$i]}" == "$n" ]] || continue
+                lim=$(( 1 << ${widths[$i]} ))
+                (( val < lim )) || { printf 'ERROR\t--field %s=%s does not fit %s bit(s) (max %s)\n' "$n" "$val" "${widths[$i]}" "$(( lim - 1 ))" >&2; return 2; }
+                vals[$i]="$val"; hit=1
+            done
+            (( hit )) || { printf 'ERROR\t--field names no field of %s: %s\n' "$fmt" "$n" >&2; return 2; }
+        done
+        local bits="" pad hex
+        for i in "${!names[@]}"; do bits+=$(iot_bits_of "${vals[$i]}" "${widths[$i]}"); done
+        pad=$(( (8 - total % 8) % 8 ))
+        hex=$(iot_bits_hex "$bits$(iot_bits_of 0 "$pad")")
+        printf 'format\t%s\n' "$fmt"
+        printf 'bit_len\t%s\n' "$total"
+        printf 'octet_len\t%s\n' "$octets"
+        printf 'field\tvalue\twidth\n'
+        for i in "${!names[@]}"; do printf '%s\t%s\t%s\n' "${names[$i]}" "${vals[$i]}" "${widths[$i]}"; done
+        printf 'bits\t%s\n' "$bits"
+        printf 'hex\t%s\n' "$hex"
+        printf 'padding_bits\t%s\n' "$pad"
+        printf 'bit_order\tfields in the listed order, first field in the most significant bits, zero padding to the octet at the least significant end\n'
+        printf 'widths_certified\tno\n'
+        if [[ "$fmt" == "n0" || "$fmt" == "n1" ]]; then
+            printf 'subcarrier_ind_map\tunobserved\tTS 36.213 Table 16.5.1.1-1 is not in this tree, so the 6-bit index is carried as a number and never turned into a subcarrier count\n'
+        fi
+        printf 'ref\tTS 36.212 5.3.3.1.4 (format N0), TS 36.212 5.3.3.1.5 (format N1)\n'
+        printf 'verdict\tbits_assembled_cited_field_order\n'
+        iot_nb_post nb_dci.tsv "$(printf 'ts\tverb\tformat\tbit_len\thex\tverdict')" \
+            "$(printf '%s\tbuild\t%s\t%s\t%s\tbits_assembled_cited_field_order' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$fmt" "$total" "$hex")"
+        return 0
+    fi
+
+    # parse
+    if [[ -z "$hx" ]]; then
+        printf 'ERROR\tparse needs the payload: --nb-dci %s parse <hex>\n' "$fmt" >&2
+        printf 'reason\tA DCI has no self-describing header: its field boundaries are the width table, so there is nothing to parse without one\n'
+        return 2
+    fi
+    local bits=""
+    bits=$(iot_hex_bits "$hx" 2>/dev/null) || {
+        printf 'ERROR\tnot hexadecimal: %s\n' "$hx" >&2
+        return 2; }
+    local padbits=$(( ${#bits} - total ))
+    if (( padbits < 0 || padbits > 7 )); then
+        printf 'ERROR\tpayload_bits=%s model_bits=%s\n' "${#bits}" "$total"
+        printf 'reason\tformat %s is %s bit(s) under this model and the payload carries %s: a payload that does not divide (to within the zero padding of the last octet) is refused, not parsed by guessing. Pass --width <field>=<bits> to correct the model, or --nb-dci %s widths to read it\n' \
+            "$fmt" "$total" "${#bits}" "$fmt"
+        return 1
+    fi
+    if [[ "${bits:total}" == *1* ]]; then
+        printf 'ERROR\tpayload_padding_bits=%s\n' "${bits:total}"
+        printf 'reason\tafter %s field bit(s) the payload still carries ones under this model: either the width model is wrong for this format or this is not a %s payload, and neither is guessed here\n' "$total" "$fmt"
+        return 1
+    fi
+    local off=0 v
+    printf 'format\t%s\n' "$fmt"
+    if (( order_auto )); then printf 'order_form_auto\tthe payload named the order layout by its npdcch_order bit\n'; fi
+    printf 'bit_len\t%s\n' "$total"
+    printf 'padding_bits\t%s\n' "$padbits"
+    printf 'field\tvalue\twidth\n'
+    for i in "${!names[@]}"; do
+        v=$(iot_bin_dec "${bits:off:${widths[$i]}}")
+        printf '%s\t%s\t%s\n' "${names[$i]}" "$v" "${widths[$i]}"
+        off=$(( off + ${widths[$i]} ))
+    done
+    # The two semantics that the standard states without a table.
+    printf 'flag_meaning\t%s\n' "$([[ "${names[0]}" == "flag_n0_n1" ]] && printf '0 keeps the N0/N1 split, 1 is the other format (TS 36.212 5.3.3.1.4)' || printf 'n/a')"
+    if [[ "$fmt" == "n1" || "$fmt" == "n1order" ]]; then
+        if (( $(iot_bin_dec "${bits:1:1}") == 1 )); then
+            printf 'npdcch_order_meaning\t%s\n' '1 asks the UE for a random-access order, not a data grant (TS 36.212 5.3.3.1.5)'
+        else
+            printf 'npdcch_order_meaning\t%s\n' '0 schedules NPDSCH (TS 36.212 5.3.3.1.5)'
+        fi
+    fi
+    printf 'subcarrier_ind_map\tunobserved\tTS 36.213 Table 16.5.1.1-1 is not in this tree, so the subcarrier count and the starting tone are not derived here\n'
+    printf 'tbs\tunobserved\tTS 36.213 Table 16.5.1.2-1 is not in this tree either, so the mcs field stays a number\n'
+    printf 'widths_certified\tno\n'
+    printf 'ref\tTS 36.212 5.3.3.1.4 (format N0), TS 36.212 5.3.3.1.5 (format N1)\n'
+    printf 'verdict\tfields_split_by_cited_order\n'
+    iot_nb_post nb_dci.tsv "$(printf 'ts\tverb\tformat\tbit_len\thex\tverdict')" \
+        "$(printf '%s\tparse\t%s\t%s\t%s\tfields_split_by_cited_order' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$fmt" "$total" "$hx")"
+    return 0
+}
+
+# TS 36.211 Table 10.1.2.2-1: resource-unit duration in slots. These counts are
+# this module's model too (no referee in this tree), so --slots-per-ru overrides
+# them and the output says which source was used.
+iot_npusch_ru_slots() {   # <subcarriers> <spacing kHz>
+    case "$1:$2" in
+        1:3.75) printf '16' ;;
+        1:15)   printf '16' ;;
+        3:15)   printf '8' ;;
+        6:15)   printf '4' ;;
+        12:15)  printf '2' ;;
+        *) return 1 ;;
+    esac
+}
+
+iot_npusch_plan() {
+    local sc=1 spacing=15 slots="" slots_src="model" slot_ms="" slot_src="model"
+    local rus=1 reps=1 mcs="" period=""
+    while (( $# )); do
+        case "$1" in
+            --subcarriers)  sc="${2:-}"; shift 2 ;;
+            --spacing-khz)  spacing="${2:-}"; shift 2 ;;
+            --slots-per-ru) slots="${2:-}"; slots_src="supplied"; shift 2 ;;
+            --slot-ms)      slot_ms="${2:-}"; slot_src="supplied"; shift 2 ;;
+            --rus)          rus="${2:-}"; shift 2 ;;
+            --repetitions)  reps="${2:-}"; shift 2 ;;
+            --mcs)          mcs="${2:-}"; shift 2 ;;
+            --period-ms)    period="${2:-}"; shift 2 ;;
+            -h|--help)
+                printf 'usage: --npusch [--subcarriers 1|3|6|12] [--spacing-khz 3.75|15] [--slots-per-ru N] [--slot-ms N] [--rus N] [--repetitions N] [--mcs N] [--period-ms N]\n'
+                return 0 ;;
+            -*)             printf 'ERROR\tunknown option: %s\n' "$1" >&2; return 2 ;;
+            *)              printf 'ERROR\tunexpected argument: %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    case "$sc" in 1|3|6|12) ;; *) printf 'ERROR\tunsupported subcarrier count: %s (NPUSCH carries 1, 3, 6 or 12 tones)\n' "$sc" >&2; return 2 ;; esac
+    case "$spacing" in 3.75|15) ;; *) printf 'ERROR\tunsupported subcarrier spacing: %s kHz (3.75 or 15)\n' "$spacing" >&2; return 2 ;; esac
+    [[ "$rus" =~ ^[0-9]+$ ]] && (( rus > 0 )) || { printf 'ERROR\t--rus must be a positive count, got: %s\n' "$rus" >&2; return 2; }
+    [[ "$reps" =~ ^[0-9]+$ ]] && (( reps > 0 )) || { printf 'ERROR\t--repetitions must be a positive count, got: %s\n' "$reps" >&2; return 2; }
+    [[ -z "$period" ]] || { [[ "$period" =~ ^[0-9]+$ ]] && (( period > 0 )) || { printf 'ERROR\t--period-ms must be a positive count, got: %s\n' "$period" >&2; return 2; }; }
+
+    if [[ -z "$slots" ]]; then
+        slots=$(iot_npusch_ru_slots "$sc" "$spacing") || {
+            printf 'ERROR\tno resource-unit model for %s tone(s) at %s kHz\n' "$sc" "$spacing" >&2
+            printf 'reason\tTS 36.211 Table 10.1.2.2-1 is not in this tree, so an unmodelled combination is named and not guessed; pass --slots-per-ru to supply it\n'
+            return 2; }
+    fi
+    if [[ -z "$slot_ms" ]]; then
+        if [[ "$spacing" == "15" ]]; then slot_ms="0.5"; slot_src="model"
+        else slot_ms=""; slot_src="unobserved"; fi
+    fi
+
+    local ru_ms="" total_ms="" duty="" share tone_bw
+    tone_bw=$(awk -v s="$sc" -v f="$spacing" 'BEGIN{printf "%.4f", s*f}')
+    share=$(awk -v s="$sc" 'BEGIN{printf "%.4f", 100*s/12}')
+    if [[ -n "$slot_ms" ]]; then
+        ru_ms=$(awk -v s="$slots" -v m="$slot_ms" 'BEGIN{printf "%.4f", s*m}')
+        total_ms=$(awk -v r="$ru_ms" -v n="$rus" -v p="$reps" 'BEGIN{printf "%.4f", r*n*p}')
+        if [[ -n "$period" ]]; then
+            duty=$(awk -v t="$total_ms" -v p="$period" 'BEGIN{printf "%.4f", 100*t/p}')
+        fi
+    fi
+
+    printf 'subcarriers\t%s\n' "$sc"
+    printf 'spacing_khz\t%s\n' "$spacing"
+    printf 'tone_bandwidth_khz\t%s\n' "$tone_bw"
+    printf 'channel_share_percent\t%s\n' "$share"
+    printf 'ru_slots\t%s\n' "$slots"
+    printf 'ru_slots_source\t%s\n' "$slots_src"
+    printf 'slot_ms\t%s\n' "${slot_ms:-unobserved}"
+    printf 'slot_ms_source\t%s\n' "$slot_src"
+    if [[ -n "$ru_ms" ]]; then
+        printf 'ru_ms\t%s\n' "$ru_ms"
+        printf 'total_slots\t%s\n' "$(( slots * rus * reps ))"
+        printf 'total_ms\t%s\n' "$total_ms"
+        printf 'rus\t%s\n' "$rus"
+        printf 'repetitions\t%s\n' "$reps"
+        printf 'duty_percent\t%s\n' "${duty:-unobserved}"
+        printf 'occupied_hz_ms\t%s\n' "$(awk -v b="$tone_bw" -v t="$total_ms" 'BEGIN{printf "%.4f", b*t}')"
+    else
+        printf 'ru_ms\tunobserved\n'
+        printf 'total_ms\tunobserved\n'
+        printf 'reason_duration\tthe 3.75 kHz slot structure is not in this tree, so a duration in milliseconds would be invented; pass --slot-ms to supply it\n'
+    fi
+    [[ -n "$mcs" ]] && printf 'mcs\t%s\n' "$mcs"
+    printf 'tbs\tunobserved\tTS 36.213 Table 16.5.1.2-1 (the MCS and RU count table) is not in this tree, so no transport block size is claimed\n'
+    printf 'modulation\tunobserved\tthe MCS-to-modulation map lives in the same absent table; n_sc and the RU count alone do not fix it\n'
+    printf 'ru_model_certified\tno\tTS 36.211 Table 10.1.2.2-1 is this module'"'"'s model; --slots-per-ru replaces it\n'
+    printf 'ref\tTS 36.211 10.1.2.2 (resource units), TS 36.213 16.5.1 (NPUSCH scheduling)\n'
+    printf 'verdict\tresource_assignment_described\n'
+    iot_nb_post nb_npusch.tsv "$(printf 'ts\tsubcarriers\tspacing_khz\tru_slots\trus\trepetitions\ttotal_ms\tchannel_share_percent\tverdict')" \
+        "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tresource_assignment_described' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$sc" "$spacing" "$slots" "$rus" "$reps" "${total_ms:-unobserved}" "$share")"
+    return 0
+}
+
+
 iot_plan() {
     local kind="${1:-}"
     case "$kind" in
@@ -966,6 +1334,75 @@ iot_selftest() {
     chk nidd-audit-nofile "$(iot_cmd_nidd_audit /tmp/definitely-not-here-nidd.tsv >/dev/null 2>&1; echo $?)" 1
     rm -f "$nf"
 
+    # NB-IoT control channel. The widths are a MODEL, so what is asserted here
+    # is the codec property -- round trip, refusals, labelling -- and never
+    # "the standard says 24 bits". Every store write lands in a temp tree.
+    local nbt saved_iot dci h0 b0 h1
+    nbt="$(mktemp -d)"
+    saved_iot="$IOT_DIR"; IOT_DIR="$nbt/loot/iot"; mkdir -p "$IOT_DIR"
+
+    chk nb-dci-field-count "$(iot_nb_dci n0 widths 2>/dev/null | awk -F'\t' '$1=="field_count"{print $2}')" 10
+    chk nb-dci-sum "$(iot_nb_dci n0 widths 2>/dev/null | awk -F'\t' 'NF==3&&$1!="field"{s+=$2} $1=="bit_len"{b=$2} END{print (s==b)?"agree":"disagree"}')" agree
+    chk nb-dci-certified "$(iot_nb_dci n0 widths 2>/dev/null | awk -F'\t' '$1=="widths_certified"{print $2}')" no
+    chk nb-dci-ref "$(iot_nb_dci n1 widths 2>/dev/null | awk -F'\t' '$1=="ref"{print $2}' | cut -d' ' -f1)" "TS"
+    chk nb-dci-order-form-differs "$(iot_nb_dci n1 widths --order 2>/dev/null | awk -F'\t' '$1=="field_count"{print $2}')" 5
+    chk nb-dci-override-width "$(iot_nb_dci n0 widths --width mcs=3 2>/dev/null | awk -F'\t' '$1=="mcs"{print $2"/"$3}')" "3/override"
+    chk nb-dci-override-sum "$(iot_nb_dci n0 widths --width mcs=3 2>/dev/null | awk -F'\t' 'NF==3&&$1!="field"{s+=$2} $1=="bit_len"{b=$2} END{print (s==b)?"agree":"disagree"}')" agree
+    chk nb-dci-override-noname "$(iot_nb_dci n0 widths --width nope=3 >/dev/null 2>&1; echo $?)" 2
+
+    dci=$(iot_nb_dci n0 build --field subcarrier_ind=12 --field ru_assign=5 --field mcs=4 --field rep_num=2 2>/dev/null)
+    h0=$(printf '%s\n' "$dci" | awk -F'\t' '$1=="hex"{print $2}')
+    b0=$(printf '%s\n' "$dci" | awk -F'\t' '$1=="bit_len"{print $2}')
+    chk nb-dci-build-hexlen "${#h0}" "$(( (b0 + 7) / 8 * 2 ))"
+    chk nb-dci-build-pad "$(printf '%s\n' "$dci" | awk -F'\t' '$1=="padding_bits"{print $2}')" 0
+    chk nb-dci-roundtrip-sub "$(iot_nb_dci n0 parse "$h0" 2>/dev/null | awk -F'\t' '$1=="subcarrier_ind"{print $2}')" 12
+    chk nb-dci-roundtrip-ru "$(iot_nb_dci n0 parse "$h0" 2>/dev/null | awk -F'\t' '$1=="ru_assign"{print $2}')" 5
+    chk nb-dci-roundtrip-mcs "$(iot_nb_dci n0 parse "$h0" 2>/dev/null | awk -F'\t' '$1=="mcs"{print $2}')" 4
+    chk nb-dci-roundtrip-rep "$(iot_nb_dci n0 parse "$h0" 2>/dev/null | awk -F'\t' '$1=="rep_num"{print $2}')" 2
+    chk nb-dci-parse-verdict "$(iot_nb_dci n0 parse "$h0" 2>/dev/null | awk -F'\t' '$1=="verdict"{print $2}')" fields_split_by_cited_order
+    chk nb-dci-map-unobserved "$(iot_nb_dci n0 parse "$h0" 2>/dev/null | awk -F'\t' '$1=="subcarrier_ind_map"{print $2}')" unobserved
+    chk nb-dci-tbs-unobserved "$(iot_nb_dci n0 parse "$h0" 2>/dev/null | awk -F'\t' '$1=="tbs"{print $2}')" unobserved
+    chk nb-dci-not-divide "$(iot_nb_dci n0 parse deadbeef >/dev/null 2>&1; echo $?)" 1
+    chk nb-dci-not-divide-reason "$(iot_nb_dci n0 parse deadbeef 2>/dev/null | awk -F'\t' '$1=="reason"{n++} END{print n+0}')" 1
+    chk nb-dci-trailing-ones "$(iot_nb_dci n1 parse ffff >/dev/null 2>&1; echo $?)" 1
+    chk nb-dci-parse-noarg "$(iot_nb_dci n0 parse >/dev/null 2>&1; echo $?)" 2
+    chk nb-dci-parse-noarg-reason "$(iot_nb_dci n0 parse 2>/dev/null | awk -F'\t' '$1=="reason"{n++} END{print n+0}')" 1
+    chk nb-dci-build-overflow "$(iot_nb_dci n0 build --field subcarrier_ind=64 >/dev/null 2>&1; echo $?)" 2
+    chk nb-dci-build-nofield "$(iot_nb_dci n0 build --field no_such_field=1 >/dev/null 2>&1; echo $?)" 2
+    chk nb-dci-bad-format "$(iot_nb_dci n9 widths >/dev/null 2>&1; echo $?)" 2
+
+    h1=$(iot_nb_dci n1 --order build --field npdcch_order=1 --field nprach_start_rep=2 --field nprach_subcarrier_ind=9 2>/dev/null | awk -F'\t' '$1=="hex"{print $2}')
+    chk nb-dci-order-autodetect "$(iot_nb_dci n1 parse "$h1" 2>/dev/null | awk -F'\t' '$1=="format"{print $2}')" n1order
+    chk nb-dci-order-value "$(iot_nb_dci n1 parse "$h1" 2>/dev/null | awk -F'\t' '$1=="nprach_subcarrier_ind"{print $2}')" 9
+    chk nb-dci-order-meaning "$(iot_nb_dci n1 parse "$h1" 2>/dev/null | awk -F'\t' '$1=="npdcch_order_meaning"{print (index($2,"random-access")>0 ? "names" : "silent")}')" names
+    chk nb-dci-store-header "$(awk 'NR==1&&/^ts\t/{n=1} END{print n+0}' "$IOT_DIR/nb_dci.tsv")" 1
+    chk nb-dci-store-rows "$(awk 'END{print (NR-1>=4)?"rows":"none"}' "$IOT_DIR/nb_dci.tsv")" rows
+
+    chk npusch-ru-slots "$(iot_npusch_plan --subcarriers 1 --spacing-khz 15 2>/dev/null | awk -F'\t' '$1=="ru_slots"{print $2}')" 16
+    chk npusch-ru-ms "$(iot_npusch_plan --subcarriers 1 --spacing-khz 15 2>/dev/null | awk -F'\t' '$1=="ru_ms"{print $2}')" 8.0000
+    chk npusch-3tone-slots "$(iot_npusch_plan --subcarriers 3 --spacing-khz 15 2>/dev/null | awk -F'\t' '$1=="ru_slots"{print $2}')" 8
+    chk npusch-6tone-slots "$(iot_npusch_plan --subcarriers 6 --spacing-khz 15 2>/dev/null | awk -F'\t' '$1=="ru_slots"{print $2}')" 4
+    chk npusch-12tone-slots "$(iot_npusch_plan --subcarriers 12 --spacing-khz 15 2>/dev/null | awk -F'\t' '$1=="ru_slots"{print $2}')" 2
+    chk npusch-total "$(iot_npusch_plan --subcarriers 1 --spacing-khz 15 --rus 2 --repetitions 3 2>/dev/null | awk -F'\t' '$1=="total_ms"{print $2}')" 48.0000
+    chk npusch-share "$(iot_npusch_plan --subcarriers 3 --spacing-khz 15 2>/dev/null | awk -F'\t' '$1=="channel_share_percent"{print $2}')" 25.0000
+    chk npusch-tone-bw "$(iot_npusch_plan --subcarriers 3 --spacing-khz 15 2>/dev/null | awk -F'\t' '$1=="tone_bandwidth_khz"{print $2}')" 45.0000
+    chk npusch-duty "$(iot_npusch_plan --rus 2 --period-ms 100 2>/dev/null | awk -F'\t' '$1=="duty_percent"{print $2}')" 16.0000
+    chk npusch-override "$(iot_npusch_plan --subcarriers 1 --spacing-khz 3.75 --slots-per-ru 20 --slot-ms 2 2>/dev/null | awk -F'\t' '$1=="total_ms"{print $2}')" 40.0000
+    chk npusch-override-source "$(iot_npusch_plan --slots-per-ru 20 2>/dev/null | awk -F'\t' '$1=="ru_slots_source"{print $2}')" supplied
+    chk npusch-375-unobserved "$(iot_npusch_plan --spacing-khz 3.75 2>/dev/null | awk -F'\t' '$1=="total_ms"{print $2}')" unobserved
+    chk npusch-375-names-reason "$(iot_npusch_plan --spacing-khz 3.75 2>/dev/null | awk -F'\t' '$1=="reason_duration"{print ($2 ~ /--slot-ms/)?"names":"silent"}')" names
+    chk npusch-tbs-unobserved "$(iot_npusch_plan 2>/dev/null | awk -F'\t' '$1=="tbs"{print $2}')" unobserved
+    chk npusch-bad-sc "$(iot_npusch_plan --subcarriers 2 >/dev/null 2>&1; echo $?)" 2
+    chk npusch-bad-spacing "$(iot_npusch_plan --spacing-khz 7.5 >/dev/null 2>&1; echo $?)" 2
+    chk npusch-bad-rus "$(iot_npusch_plan --rus 0 >/dev/null 2>&1; echo $?)" 2
+    chk npusch-bad-reps "$(iot_npusch_plan --repetitions x >/dev/null 2>&1; echo $?)" 2
+    chk npusch-bad-period "$(iot_npusch_plan --period-ms 0 >/dev/null 2>&1; echo $?)" 2
+    chk npusch-store-header "$(awk 'NR==1&&/^ts\t/{n=1} END{print n+0}' "$IOT_DIR/nb_npusch.tsv")" 1
+    chk npusch-store-rows "$(awk 'END{print (NR-1>=8)?"rows":"none"}' "$IOT_DIR/nb_npusch.tsv")" rows
+
+    IOT_DIR="$saved_iot"
+    rm -rf "$nbt"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -982,6 +1419,8 @@ iot_menu() {
   [3]  Decode SIB1-NB
   [4]  Decode MIB-NB
   [5]  NPRFCN to MHz (refused)
+  [6]  NB-IoT DCI N0/N1 (field order, model widths)
+  [7]  NPUSCH resource assignment
   [0]  back
 
 M
@@ -1005,6 +1444,10 @@ M
                 read -rp "  nprfcn> " n
                 echo "$(iot_nprfcn_to_mhz "$n") MHz"
                 read -rp "  press enter " _ ;;
+            6)
+                iot_nb_dci n0 widths; read -rp "  press enter " _ ;;
+            7)
+                iot_npusch_plan; read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1027,6 +1470,8 @@ iot_cli_main() {
         --freq-plan)    iot_freq_plan "${1:-}" "${2:-}" ;;
         --nb-attach)    iot_nb_attach "${1:-0}" "${2:-in-band}" ;;
         --ce-abuse)     iot_ce_abuse "$@" ;;
+        --nb-dci)       iot_nb_dci "$@" ;;
+        --npusch)       iot_npusch_plan "$@" ;;
         --plan)         iot_plan "${1:-}" ;;
         --nidd)         iot_cmd_nidd_plane ;;
         --nidd-build)   iot_cmd_nidd_build "$@" ;;
@@ -1062,6 +1507,15 @@ Usage: $0 COMMAND
                      non-IP payload leaves the core as an HTTP body
   --nidd-audit <tsv> account for a log of SCEF or NEF API calls: which
                      application read which devices, in which direction
+  --nb-dci [n0|n1] [widths|build|parse] [<hex>] [--field name=value]...
+           [--width name=bits] [--order]
+                     NB-IoT DCI formats N0/N1: the field order is cited to
+                     TS 36.212 5.3.3.1.4/5.3.3.1.5, every width prints
+                     certified=no until --width replaces it with a decoder's
+  --npusch [--subcarriers 1|3|6|12] [--spacing-khz 3.75|15] [--slots-per-ru N]
+           [--slot-ms N] [--rus N] [--repetitions N] [--mcs N] [--period-ms N]
+                     the NPUSCH resource assignment: RU composition, airtime,
+                     channel share; TBS and modulation stay unobserved
   --plan <fake-cell|nprach-flood>
                      write a handoff plan (status: handoff) for a vector that
                      needs transmit hardware; no transmission is performed
