@@ -1664,6 +1664,312 @@ latt_identity_count() {
     echo "${n:-0}"
 }
 
+
+# ── UE capability index — "which handset class is this?" ────────────────
+#
+# A subscriber dump (an Open5GS/MongoDB export, or a CSV) sometimes holds the
+# handset's capability octets next to the IMSI. When it does, an attach trace
+# stops being anonymous: the IMSI read out of the NAS message resolves to the
+# capability set the network already has for that handset, and a run of traces
+# groups by handset class instead of by subscriber.
+#
+# What it reads: the IMSI (a JSON document's "imsi", or a CSV column named
+# imsi), and capability octets from a small set of named fields. A dump that
+# carries no capability field is a normal outcome — subscriber provisioning
+# usually stores none — and it is reported as unobserved with the field names
+# that were looked for, never as a zero.
+#
+# The octets, when they are NAS capability: TS 24.301 §9.9.3.34 defines the UE
+# network capability, whose octet 1 carries EEA0..EEA7 and octet 2 carries
+# EIA0..EIA7:
+#   0x80 EEA0 | 0x40 128-EEA1 | 0x20 128-EEA2 | 0x10 128-EEA3
+#   0x08 EEA4 | 0x04 EEA5     | 0x02 EEA6      | 0x01 EEA7
+#   0x80 EIA0 | 0x40 128-EIA1 | 0x20 128-EIA2  | 0x10 128-EIA3
+#   0x08 EIA4 | 0x04 EIA5     | 0x02 EIA6      | 0x01 EIA7
+# Octets 3..15 are NOT decoded here: this tree carries no bit table for them,
+# and inventing one is what the doctrine forbids. An RRC
+# ueCapabilityRAT-ContainerList (the band/feature fingerprint) is a different
+# encoding again, so a value that is not a 1..15-octet NAS capability is
+# reported as unobserved rather than guessed at.
+latt_uecap_dir() { printf '%s' "${LATT_DIR:-${LOOT_DIR:-.}/lte_attach}"; }
+latt_uecap_store_path() { printf '%s/ue-cap-index.tsv' "$(latt_uecap_dir)"; }
+latt_uecap_store() {
+    # Append-only: one row per IMSI answer, never rewritten.
+    local file="$1" imsi="$2" source="$3" kind="$4" octets="$5" class="$6" verdict="$7" detail="$8"
+    local f; f=$(latt_uecap_store_path)
+    mkdir -p "$(dirname "$f")" 2>/dev/null
+    [[ -s "$f" ]] || printf 'ts\tfile\timsi\tsource\tkind\toctets\tclass\tverdict\tdetail\n' > "$f"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$(latt_sanitize "$file")" "$imsi" "$source" "$kind" "$octets" "$class" "$verdict" \
+        "$(latt_sanitize "$detail")" >> "$f"
+}
+
+latt_uecap_fields() {
+    # The field names this verb looks for, CSV column or JSON key, in the order
+    # it tries them — the four spellings of the NAS UE network capability first,
+    # because that is the only capability this tree decodes. A dump that carries
+    # the handset's capability under another name lands in the unobserved path
+    # with this list printed, so the gap is visible instead of silent: an RRC
+    # ueCapabilityRAT-ContainerList (TS 36.331 §6.2.2 / §6.3.1) is a different
+    # encoding, and reading it as NAS octets would be a guess.
+    printf '%s\n' ue_network_capability ueNetworkCapability ue_nw_capability \
+        network_capability ue_radio_capability radio_capability ue_capability \
+        ueCapability ue_caps caps capability
+}
+
+latt_uecap_class() {
+    # <hex octets> -> octets/eea/eia rows for TS 24.301 §9.9.3.34 octets 1,2.
+    local h; h=$(latt_nfc "${1:-}")
+    [[ "$h" =~ ^[0-9A-F]+$ ]] || { printf 'ERROR\tcapability value is not hex octets\n' >&2; return 1; }
+    (( ${#h} % 2 == 0 )) || { printf 'ERROR\tcapability value is not whole octets\n' >&2; return 1; }
+    local n=$(( ${#h} / 2 ))
+    if (( n < 1 || n > 15 )); then
+        printf 'ERROR\ta UE network capability is 1..15 octets (TS 24.301 §9.9.3.34); this value is %d octets, so it is either an RRC capability container or not a capability at all\n' "$n" >&2
+        return 1
+    fi
+    local o1=$(( 16#${h:0:2} )) o2=0
+    (( n >= 2 )) && o2=$(( 16#${h:2:2} ))
+    local eea="" eia="" item m
+    for item in 128:EEA0 64:128-EEA1 32:128-EEA2 16:128-EEA3 8:EEA4 4:EEA5 2:EEA6 1:EEA7; do
+        m=${item%%:*}
+        (( o1 & m )) && eea+="${eea:+,}${item#*:}"
+    done
+    for item in 128:EIA0 64:128-EIA1 32:128-EIA2 16:128-EIA3 8:EIA4 4:EIA5 2:EIA6 1:EIA7; do
+        m=${item%%:*}
+        (( o2 & m )) && eia+="${eia:+,}${item#*:}"
+    done
+    printf 'octets\t%d\n' "$n"
+    printf 'eea\t%s\n' "${eea:--}"
+    printf 'eia\t%s\n' "${eia:--}"
+    if (( n > 2 )); then
+        printf 'tail_octets\t%d\n' "$(( n - 2 ))"
+        printf 'tail_note\t%s\n' \
+            "octets 3.. carry bits this tree has no table for; they are counted and not named"
+    fi
+    return 0
+}
+
+latt_uecap_fp() {
+    # A stable short fingerprint of the capability octets, so two traces can be
+    # said to be the same handset class without carrying the octets around.
+    local h; h=$(latt_nfc "${1:-}")
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf 'fp-%s' "$(printf '%s' "$h" | sha256sum | cut -c1-8)"
+    elif command -v cksum >/dev/null 2>&1; then
+        printf 'fp-cksum-%s' "$(printf '%s' "$h" | cksum | awk '{print $1}')"
+    else
+        printf 'unobserved'
+        return 1
+    fi
+}
+
+latt_uecap_file_kind() {
+    # csv | json, decided by the first non-blank bytes, or refused with reason.
+    local file="$1" first
+    first=$(grep -m1 -v '^[[:space:]]*$' "$file" 2>/dev/null | cut -c1-1)
+    [[ -n "$first" ]] || { printf 'ERROR\tthe file is empty or holds only blank lines: %s\n' "$(latt_sanitize "$file")" >&2; return 1; }
+    case "$first" in
+        '{'|'[') printf 'json\n' ;;
+        *) printf 'csv\n' ;;
+    esac
+}
+
+latt_uecap_csv_header() {
+    # <file> -> "<imsi-column> <capability-column> <capability-column-name> <names>"
+    # 1-based column numbers, 0 when absent. A column that names the NAS
+    # capability wins over one that only says "capability", whichever order the
+    # header happens to put them in, because only the NAS one is decodable here.
+    awk -F',' '
+        NR==1 {
+            for (i=1; i<=NF; i++) {
+                h=$i; gsub(/^[ \t"]+/,"",h); gsub(/[ \t"]+$/,"",h); h=tolower(h)
+                names = names (names=="" ? "" : ",") h
+                if (h=="imsi" || h=="subscriber_imsi" || h=="supi") icol=i
+                nas = (h=="ue_network_capability" || h=="uenetworkcapability" || \
+                       h=="ue_nw_capability" || h=="network_capability")
+                other = (h ~ /capab/ || h == "caps" || h == "ue_caps")
+                if (nas)          { if (pri < 2) { cappick=i; capname=h; pri=2 } }
+                else if (other)   { if (pri < 1) { cappick=i; capname=h; pri=1 } }
+            }
+            printf "%d %d %s %s\n", icol+0, cappick+0, (capname=="" ? "-" : capname), names
+            exit
+        }' "$1"
+}
+
+latt_uecap_csv_rows() {
+    # <file> <imsi-column> <capability-column> <column-name>
+    #   -> imsi <TAB> capability <TAB> the column the value came out of
+    local file="$1" icol="$2" icap="$3" cname="${4:--}"
+    awk -F',' -v icol="$icol" -v icap="$icap" -v cname="$cname" '
+        NR==1 { next }
+        {
+            imsi=$icol; gsub(/^[ \t"]+/,"",imsi); gsub(/[ \t"]+$/,"",imsi)
+            cap=""
+            if (icap > 0) { cap=$icap; gsub(/^[ \t"]+/,"",cap); gsub(/[ \t"]+$/,"",cap) }
+            # An absent value is written as "-": read(1) collapses repeated
+            # tab separators, so an empty field would shift the columns.
+            if (cap == "") cap="-"
+            if (imsi != "") printf "%s\t%s\t%s\n", imsi, cap, cname
+        }' "$file"
+}
+
+latt_uecap_json_rows() {
+    # <file> -> imsi <TAB> capability <TAB> json, one line per document.
+    # Records are split on "{" because that is what both an Open5GS export and
+    # a mongoexport JSON-lines dump put between documents; a "{" inside a
+    # string value would split a document in two, which costs that document
+    # its IMSI and shows up as a record with no identity rather than a wrong one.
+    local file="$1" rec imsi cap key
+    while IFS= read -r rec; do
+        imsi=$(printf '%s' "$rec" | grep -oE '"imsi"[[:space:]]*:[[:space:]]*"?[0-9]{14,15}"?' | head -1 | grep -oE '[0-9]{14,15}' | head -1)
+        cap=""
+        for key in $(latt_uecap_fields); do
+            [[ -n "$cap" ]] && break
+            cap=$(printf '%s' "$rec" \
+                | grep -oE "\"$key\"[[:space:]]*:[[:space:]]*\"[0-9a-fA-F][0-9a-fA-F xX:-]*\"" \
+                | head -1 | sed 's/.*:[[:space:]]*"//; s/"$//')
+        done
+        if [[ -n "$imsi" ]]; then
+            # 0x and hex-digit separators are legal spellings in a dump; an
+            # absent value is "-" so the tab-separated read keeps its columns.
+            local v="${cap//[[:space:]]/}"
+            v="${v//[xX]/}"
+            v="${v#0}"
+            [[ -n "$v" ]] || v="-"
+            printf '%s\t%s\t%s\n' "$imsi" "$v" "$key"
+        fi
+    done < <(awk 'BEGIN{RS="{"} NR>1 { gsub(/\n/," "); print }' "$file")
+}
+
+latt_cmd_ue_cap_index() {
+    # --ue-cap-index <file> [imsi]
+    local file="${1:-}" want="${2:-}"
+    if [[ -z "$file" ]]; then
+        printf 'ERROR\tneed a subscriber dump: --ue-cap-index <file.json|file.csv> [imsi]\n' >&2
+        return 2
+    fi
+    [[ -f "$file" ]] || {
+        printf 'ERROR\tno such file: %s\n' "$(latt_sanitize "$file")" >&2; return 1; }
+    local kind
+    kind=$(latt_uecap_file_kind "$file") || return 1
+    [[ -n "$want" && ! "$want" =~ ^[0-9]{14,15}$ ]] && {
+        printf 'ERROR\tthe IMSI to look up must be 14 or 15 digits: %s\n' "$(latt_sanitize "$want")" >&2
+        return 2; }
+
+    local rows; rows=$(mktemp "$MOD_TMP/uecap.XXXXXX") || {
+        printf 'ERROR\tcannot write under %s\n' "$MOD_TMP" >&2; return 1; }
+    local note="" cname=""
+    if [[ "$kind" == "csv" ]]; then
+        local hdr icol icap names
+        hdr=$(latt_uecap_csv_header "$file")
+        icol=$(printf '%s' "$hdr" | awk '{print $1}')
+        icap=$(printf '%s' "$hdr" | awk '{print $2}')
+        cname=$(printf '%s' "$hdr" | awk '{print $3}')
+        names=$(printf '%s' "$hdr" | awk '{print $4}')
+        if [[ "${icol:-0}" -le 0 ]]; then
+            printf 'ERROR\tthe CSV header has no imsi column; its columns are: %s\n' \
+                "$(latt_sanitize "$names")" >&2
+            rm -f "$rows"; return 1
+        fi
+        (( icap == 0 )) && note="the CSV has no capability column; its columns are: $names"
+        latt_uecap_csv_rows "$file" "$icol" "$icap" "$cname" > "$rows"
+    else
+        latt_uecap_json_rows "$file" > "$rows"
+        [[ -s "$rows" ]] || note="no document in the dump carried an \"imsi\" field"
+    fi
+
+    local nrec ncap
+    nrec=$(awk 'END{print NR+0}' "$rows")
+    ncap=$(awk -F'\t' 'NF>=2 && $2!="" && $2!="-"{c++} END{print c+0}' "$rows")
+    if (( nrec == 0 )); then
+        printf 'status\tunobserved\n'
+        printf 'reason\t%s\n' "${note:-no IMSI records could be read out of the file}"
+        printf 'searched\t%s\n' "$(latt_uecap_fields | tr '\n' ',' | sed 's/,$//')"
+        printf 'spec\tTS 24.301 9.9.3.34 (UE network capability), TS 23.003 2.2 (IMSI)\n'
+        rm -f "$rows"; return 1
+    fi
+
+    printf 'file\t%s\n' "$(latt_sanitize "$file")"
+    printf 'kind\t%s\n' "$kind"
+    printf 'records\t%d\n' "$nrec"
+    printf 'with_capability\t%d\n' "$ncap"
+    printf 'without_capability\t%d\n' "$(( nrec - ncap ))"
+    local known; known=$(awk -F'\t' 'NF>=1 && $1!=""{print $1}' "$rows" | head -5 | paste -sd, -)
+    [[ -n "$note" ]] && printf 'note\t%s\n' "$(latt_sanitize "$note")"
+
+    # The index: one row per IMSI (one row only, when an IMSI is named). A
+    # capability that cannot be decoded keeps its octets and says why.
+    local imsi cap src chex crows fp cls measured=0 matched=0 why octets eea eia
+    while IFS=$'\t' read -r imsi cap src; do
+        [[ -n "$imsi" ]] || continue
+        if [[ -n "$want" && "$imsi" != "$want" ]]; then continue; fi
+        matched=$(( matched + 1 ))
+        if [[ ! "$imsi" =~ ^[0-9]{14,15}$ ]]; then
+            printf 'index\t%s\t-\t-\t-\t-\tunobserved\tthe identity field holds %s, which is not a 14-15 digit IMSI; a SUPI or SUCI in another form needs its own decoder\n' "$imsi" "$imsi"
+            latt_uecap_store "$file" "$imsi" "$src" none - - unobserved "the identity field does not hold an IMSI"
+            continue
+        fi
+        if [[ -z "$cap" || "$cap" == "-" ]]; then
+            printf 'index\t%s\t-\t-\t-\t-\tunobserved\tthe dump holds this IMSI but no capability field\n' "$imsi"
+            latt_uecap_store "$file" "$imsi" "$src" none - - unobserved "no capability field in the dump"
+            continue
+        fi
+        case "${src,,}" in
+            ue_network_capability|uenetworkcapability|ue_nw_capability|network_capability) ;;
+            *)
+                # A value under any other name is not this IE. Decoding it as
+                # one would be the guess the doctrine forbids.
+                printf 'index\t%s\t-\t-\t-\t-\tunobserved\tthe dump carries the value under the field "%s", which does not say it is the NAS UE network capability of TS 24.301 9.9.3.34; an RRC ueCapabilityRAT-ContainerList is a different encoding and is not decoded here\n' \
+                    "$imsi" "$(latt_sanitize "$src")"
+                latt_uecap_store "$file" "$imsi" "$src" other - - unobserved "the field name does not identify a NAS capability"
+                continue ;;
+        esac
+        chex=$(latt_nfc "$cap")
+        if ! crows=$(latt_uecap_class "$chex" 2>/dev/null); then
+            why=$(latt_uecap_class "$chex" 2>&1 >/dev/null | head -1 | sed 's/^ERROR[[:space:]]*//')
+            printf 'index\t%s\t-\t-\t-\t-\tunobserved\t%s\n' "$imsi" "$(latt_sanitize "$why")"
+            latt_uecap_store "$file" "$imsi" "$src" value - - unobserved "$why"
+            continue
+        fi
+        octets=$(printf '%s\n' "$crows" | awk -F'\t' '$1=="octets"{print $2}')
+        eea=$(printf '%s\n' "$crows" | awk -F'\t' '$1=="eea"{print $2}')
+        eia=$(printf '%s\n' "$crows" | awk -F'\t' '$1=="eia"{print $2}')
+        fp=$(latt_uecap_fp "$chex")
+        cls="nas-caps ${fp} eea=[${eea}] eia=[${eia}]"
+        printf 'index\t%s\t%s\t%s\t%s\t%s\tmeasured\t%s\n' "$imsi" "$octets" "$fp" "$eea" "$eia" \
+            "$(latt_sanitize "$cls")"
+        latt_uecap_store "$file" "$imsi" "$src" nas-ue-network-capability "$octets" "$fp" measured "$cls"
+        measured=$(( measured + 1 ))
+    done < "$rows"
+    rm -f "$rows"
+
+    if [[ -n "$want" ]] && (( matched == 0 )); then
+        printf 'status\tunobserved\n'
+        printf 'reason\tthe dump holds %d IMSI records and none of them is %s\n' "$nrec" "$want"
+        printf 'known_imsi\t%s\n' "${known:--}"
+        printf 'spec\tTS 24.301 9.9.3.34 (UE network capability), TS 23.003 2.2 (IMSI)\n'
+        return 1
+    fi
+    if (( measured == 0 && ncap > 0 )); then
+        printf 'verdict\tunobserved\n'
+        printf 'reason\t%s\n' \
+            "the $ncap capability value(s) in the dump do not decode as a TS 24.301 9.9.3.34 UE network capability; the per-IMSI rows carry the reason for each"
+        printf 'spec\t%s\n' "TS 24.301 9.9.3.34 (UE network capability), TS 23.003 2.2 (IMSI)"
+        return 1
+    fi
+    if (( measured > 0 )); then
+        printf 'verdict\tindexed\n'
+        printf 'spec\t%s\n' "TS 24.301 9.9.3.34 (UE network capability), TS 23.003 2.2 (IMSI)"
+        return 0
+    fi
+    printf 'verdict\tunobserved\n'
+    printf 'reason\t%s\n' \
+        "none of the $nrec IMSI records carries a capability this verb can decode; the field names it looked for are under searched"
+    printf 'searched\t%s\n' "$(latt_uecap_fields | tr '\n' ',' | sed 's/,$//')"
+    printf 'spec\t%s\n' "TS 24.301 9.9.3.34 (UE network capability), TS 23.003 2.2 (IMSI)"
+    return 1
+}
+
 # ── CLI verbs ───────────────────────────────────────────────────────────
 latt_cli_status_tsv() {
     local idc; idc=$(latt_identity_count)
@@ -2174,6 +2480,8 @@ latt_selftest() {
     export STATE_DIR="$d/state"
     export LATT_DIR="$d/loot/lte_attach"
     export LATT_IDENT="$LATT_DIR/identities.tsv"
+    export TMP_DIR="$d/tmp"
+    MOD_TMP="$TMP_DIR/lte_attach"; mkdir -p "$MOD_TMP"
 
     # ── 1. BCD primitives, byte-exact ───────────────────────────────────
     # 15-digit IMSI: 8 BCD octets, last high nibble is the 0xF filler.
@@ -2476,6 +2784,93 @@ latt_selftest() {
     chk san-nl  "$(latt_sanitize $'a\nb')" "a b"
     chk san-cr  "$(latt_sanitize $'a\rb')" "a b"
 
+    # ── 14. UE capability index — an IMSI resolves to a handset class ────
+    # The contract: every IMSI in the dump either gets a class read out of
+    # TS 24.301 §9.9.3.34 octets, or says unobserved and why. A dump that
+    # carries no capability field must never come back as a zero.
+    printf 'imsi,ue_network_capability,msisdn\n001010000000001,E0E0,491700000001\n001010000000002,,491700000002\n' > "$d/ue.csv"
+    out=$(latt_cmd_ue_cap_index "$d/ue.csv"); rc=$?
+    chk uecap-rc      "$rc" "0"
+    chk uecap-records "$(fld "$out" records)" "2"
+    chk uecap-with    "$(fld "$out" with_capability)" "1"
+    chk uecap-without "$(fld "$out" without_capability)" "1"
+    chk uecap-kind    "$(fld "$out" kind)" "csv"
+    chk uecap-verdict "$(fld "$out" verdict)" "indexed"
+    chk uecap-octets  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="index" && $2=="001010000000001"{print $3}')" "2"
+    chk uecap-eea     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="index" && $2=="001010000000001"{print $5}')" \
+        "EEA0,128-EEA1,128-EEA2"
+    chk uecap-eia     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="index" && $2=="001010000000001"{print $6}')" \
+        "EIA0,128-EIA1,128-EIA2"
+    chk uecap-fp      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="index" && $2=="001010000000001"{print substr($4,1,3)}')" "fp-"
+    chk uecap-nocap   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="index" && $2=="001010000000002"{print $7}')" "unobserved"
+
+    # the bit tables themselves, one octet at a time (TS 24.301 §9.9.3.34)
+    chk uecap-class-e0   "$(latt_uecap_class E0E0 | awk -F'\t' '$1=="eea"{print $2}')" "EEA0,128-EEA1,128-EEA2"
+    chk uecap-class-e7   "$(latt_uecap_class 0001  | awk -F'\t' '$1=="eia"{print $2}')" "EIA7"
+    chk uecap-class-oct  "$(latt_uecap_class FFFF | awk -F'\t' '$1=="octets"{print $2}')" "2"
+    chk uecap-class-tail "$(latt_uecap_class 000000 | awk -F'\t' '$1=="tail_octets"{print $2}')" "1"
+    latt_uecap_class zz    >/dev/null 2>&1; chk uecap-class-nonhex "$?" "1"
+    latt_uecap_class 00000000000000000000000000000000 >/dev/null 2>&1
+    chk uecap-class-long "$?" "1"
+    chk uecap-fp-stable "$(latt_uecap_fp e0e0)" "$(latt_uecap_fp E0E0)"
+
+    # a JSON dump: the same document shapes an Open5GS or mongoexport dump has
+    printf '{ "_id" : 1, "imsi" : "001010000000001", "ue_network_capability" : "e0 e0" }\n' > "$d/ue.json"
+    out=$(latt_cmd_ue_cap_index "$d/ue.json"); rc=$?
+    chk uecap-json-rc  "$rc" "0"
+    chk uecap-json-kind "$(fld "$out" kind)" "json"
+    chk uecap-json-eea "$(printf '%s\n' "$out" | awk -F'\t' '$1=="index"{print $5}')" "EEA0,128-EEA1,128-EEA2"
+
+    # a dump with no capability column: unobserved, with the columns it did see
+    printf 'imsi,msisdn\n001010000000001,491700000001\n' > "$d/ue-nocap.csv"
+    out=$(latt_cmd_ue_cap_index "$d/ue-nocap.csv"); rc=$?
+    chk uecap-nocap-rc      "$rc" "1"
+    chk uecap-nocap-verdict "$(fld "$out" verdict)" "unobserved"
+    chk uecap-nocap-note    "$(fld "$out" note)" "the CSV has no capability column; its columns are: imsi,msisdn"
+    chk uecap-nocap-search  "$(fld "$out" searched | cut -d, -f1)" "ue_network_capability"
+
+    # a look-up that misses names what the dump does hold
+    out=$(latt_cmd_ue_cap_index "$d/ue.csv" 001010000000099); rc=$?
+    chk uecap-miss-rc     "$rc" "1"
+    chk uecap-miss-status "$(fld "$out" status)" "unobserved"
+    chk uecap-miss-known  "$(fld "$out" known_imsi | cut -d, -f1)" "001010000000001"
+    out=$(latt_cmd_ue_cap_index "$d/ue.csv" 001010000000001); rc=$?
+    chk uecap-hit-rc    "$rc" "0"
+    chk uecap-hit-rows  "$(printf '%s\n' "$out" | grep -c '^index')" "1"
+
+    # refusals: an identity that is not an IMSI, a value too long for the IE
+    printf 'supi,capability\n001,E0E0\n' > "$d/ue-supi.csv"
+    out=$(latt_cmd_ue_cap_index "$d/ue-supi.csv"); rc=$?
+    chk uecap-supi-rc "$rc" "1"
+    chk uecap-supi    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="index"{print $8}' | grep -c 'not a 14-15 digit IMSI')" "1"
+    printf 'imsi,ue_network_capability\n001010000000001,000102030405060708090A0B0C0D0E0F10\n' > "$d/ue-big.csv"
+    out=$(latt_cmd_ue_cap_index "$d/ue-big.csv"); rc=$?
+    chk uecap-big-rc "$rc" "1"
+    chk uecap-big    "$(printf '%s\n' "$out" | grep -c '1..15 octets')" "1"
+    # a field named only "capability" does not say which capability it is:
+    # an RRC container is a different encoding, so the row must say unobserved
+    printf 'imsi,capability\n001010000000001,E0E0\n' > "$d/ue-vague.csv"
+    out=$(latt_cmd_ue_cap_index "$d/ue-vague.csv"); rc=$?
+    chk uecap-vague-rc  "$rc" "1"
+    chk uecap-vague     "$(printf '%s\n' "$out" | grep -c 'does not say it is the NAS UE network capability')" "1"
+    # and when both a NAS column and a radio-capability column exist, the NAS one wins
+    printf 'imsi,ue_radio_capability,ue_network_capability\n001010000000001,ABCD,E0E0\n' > "$d/ue-mix.csv"
+    out=$(latt_cmd_ue_cap_index "$d/ue-mix.csv"); rc=$?
+    chk uecap-mix-rc  "$rc" "0"
+    chk uecap-mix-eea "$(printf '%s\n' "$out" | awk -F'\t' '$1=="index"{print $5}')" "EEA0,128-EEA1,128-EEA2"
+    latt_cmd_ue_cap_index "$d/nope.csv" >/dev/null 2>&1; chk uecap-nofile "$?" "1"
+    latt_cmd_ue_cap_index            >/dev/null 2>&1; chk uecap-noarg  "$?" "2"
+    latt_cmd_ue_cap_index "$d/ue.csv" abc >/dev/null 2>&1; chk uecap-badimsi "$?" "2"
+
+    # the store: append-only, one row per answer, header written once
+    chk uecap-store-header "$(head -1 "$LATT_DIR/ue-cap-index.tsv")" \
+        "$(printf 'ts\tfile\timsi\tsource\tkind\toctets\tclass\tverdict\tdetail')"
+    before=$(grep -c . "$LATT_DIR/ue-cap-index.tsv")
+    latt_cmd_ue_cap_index "$d/ue.csv" 001010000000001 >/dev/null 2>&1
+    after=$(grep -c . "$LATT_DIR/ue-cap-index.tsv")
+    chk uecap-store-append "$(( after - before ))" "1"
+    chk uecap-store-noforge "$(awk -F'\t' 'NF!=9{c++} END{print c+0}' "$LATT_DIR/ue-cap-index.tsv")" "0"
+
     rm -rf "$d"
     # ── the middle of an attach (R4) ───────────────────────────────────
     # The message-type table is tshark's own ordering (TS 24.301 §9.8.1), and
@@ -2719,6 +3114,7 @@ latt_menu() {
   [5]  check a NAS message for identity exposure
   [6]  list recovered identities
   [7]  status
+  [8]  UE capability index (which handset class is this IMSI)
   [0]  back
 
 M
@@ -2773,6 +3169,16 @@ M
                 read -rp "  press enter " _ ;;
             7) latt_cli_status_tsv | column -t -s$'\t' 2>/dev/null || latt_cli_status_tsv
                read -rp "  press enter " _ ;;
+            8)
+                if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                    echo "[-] need a subscriber dump path; cannot prompt in CLI mode" >&2
+                else
+                    read -rp "  dump file (JSON or CSV)> " f
+                    read -rp "  IMSI (blank for all)> " w
+                    latt_cmd_ue_cap_index "$f" "$w" | column -t -s$'\t' 2>/dev/null \
+                        || latt_cmd_ue_cap_index "$f" "$w"
+                    read -rp "  press enter " _
+                fi ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -2789,6 +3195,7 @@ latt_cli_main() {
         --encode-attach)    latt_cmd_encode_attach "${1:-}" "${2:-}" "${3:-}" ;;
         --imsi-encode)      latt_cmd_imsi_encode "${1:-}" ;;
         --imsi-decode)      latt_cmd_imsi_decode "${1:-}" ;;
+        --ue-cap-index)     latt_cmd_ue_cap_index "${1:-}" "${2:-}" ;;
         --identity-exposure) latt_cmd_identity_exposure "${1:-}" ;;
         --setup-complete)   latt_cmd_setup_complete "$@" ;;
         --parse-setup-complete) latt_cmd_parse_setup_complete "${1:-}" ;;
@@ -2844,6 +3251,8 @@ Usage: $0 COMMAND
                                build a byte-exact Attach Request
   --imsi-encode <IMSI>         IMSI -> EPS mobile identity (BCD, TS 23.003)
   --imsi-decode <hex>          EPS mobile identity -> IMSI / IMEI / GUTI
+  --ue-cap-index <file> [IMSI] index UE capability by IMSI from a subscriber
+                               dump (Open5GS/MongoDB JSON, or CSV)
   --identity-exposure <hex>    flag a plain-NAS IDENTITY REQUEST for IMSI
   --ue-stack                   report the LTE UE stack, by name if absent
   --selftest                   verify the codecs without a radio

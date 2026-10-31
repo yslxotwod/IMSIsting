@@ -2826,6 +2826,33 @@ ncore_selftest() {
     chk sanitize-nl   "$(printf '%s' "$evil" | grep -c .)" "1"
 
     rm -rf "$d"
+    # ── --ngap-fuzz / --n2-handover: built, seeded, cited, inert ───────────
+    local fz fzhex fzhex2 ho
+    fz=$(ncore_cmd_ngap_fuzz --max 4 2>&1)
+    chk ngap-fuzz-cases   "$(fld "$fz" cases)" "4"
+    chk ngap-fuzz-mode    "$(fld "$fz" mode)" "planned"
+    chk ngap-fuzz-inert   "$(printf '%s' "$fz" | awk -F'\t' '$1=="sent" && $2 ~ /^nothing/ {print "yes"; exit}')" "yes"
+    chk ngap-fuzz-store   "$(fld "$fz" store)" "$NCORE_DIR/ngap_fuzz.tsv"
+    chk ngap-fuzz-clauses "$(awk -F'\t' 'NR>1 && $4 !~ /^TS 38\.413/' "$NCORE_DIR/ngap_fuzz.tsv" 2>/dev/null | wc -l | tr -d ' ')" "0"
+    chk ngap-fuzz-rows    "$(awk -F'\t' 'NR>1 && $NF=="planned"' "$NCORE_DIR/ngap_fuzz.tsv" 2>/dev/null | wc -l | tr -d ' ')" "4"
+    fzhex=$(printf '%s' "$fz" | awk -F'\t' 'NR>1 && $1!="case" {print $7; exit}')
+    fzhex2=$(ncore_cmd_ngap_fuzz --max 4 2>&1 | awk -F'\t' 'NR>1 && $1!="case" {print $7; exit}')
+    chk ngap-fuzz-seeded  "$fzhex2" "$fzhex"
+    ncore_cmd_ngap_fuzz_send >/dev/null 2>&1
+    chk ngap-fuzz-send-needs-peer "$?" "2"
+    ncore_cmd_ngap_fuzz --transmit >/dev/null 2>&1
+    chk ngap-fuzz-refuses-flag "$?" "2"
+
+    ho=$(ncore_cmd_n2_handover --sessions 1 2>&1)
+    chk n2-handover-required  "$(printf '%s' "$ho" | awk -F'\t' '$1=="message" && $2=="HandoverRequired"{print "yes"; exit}')" "yes"
+    chk n2-handover-command   "$(printf '%s' "$ho" | awk -F'\t' '$1=="message" && $2=="HandoverCommand"{print "yes"; exit}')" "yes"
+    chk n2-handover-notify    "$(printf '%s' "$ho" | awk -F'\t' '$1=="message" && $2=="HandoverNotify"{print "yes"; exit}')" "yes"
+    chk n2-handover-codes     "$(printf '%s' "$ho" | awk -F'\t' '$1=="procedure_code"{printf "%s,", $2}')" "12,12,11,"
+    chk n2-handover-inert     "$(printf '%s' "$ho" | awk -F'\t' '$1=="plan" && $2=="lab" {print "yes"; exit}')" "yes"
+    chk n2-handover-store     "$([[ -s "$NCORE_DIR/n2_handover.tsv" ]] && echo stored)" "stored"
+    ncore_cmd_n2_handover --transmit >/dev/null 2>&1
+    chk n2-handover-refuses-flag "$?" "2"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -2853,6 +2880,8 @@ ncore_menu() {
   [12] plan: NRF discovery
   [13] plan: SEPP bypass
   [14] plan: IPX attack
+  [16] NGAP fuzz corpus: one field per case, plan only
+  [17] N2 handover chain: Required/Command/Notify, plan only
   [15] status
   [0]  back
 
@@ -2901,6 +2930,10 @@ M
             12) ncore_cmd_plan nrf-discovery | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
             13) ncore_cmd_plan sepp-bypass  | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
             14) ncore_cmd_plan ipx-attack   | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
+            16) ncore_cmd_ngap_fuzz | column -t -s$'\t' 2>/dev/null || ncore_cmd_ngap_fuzz
+                read -rp "  press enter " _ ;;
+            17) ncore_cmd_n2_handover | column -t -s$'\t' 2>/dev/null || ncore_cmd_n2_handover
+                read -rp "  press enter " _ ;;
             15) ncore_status | column -t -s$'\t' 2>/dev/null; read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -2909,6 +2942,225 @@ M
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── --ngap-fuzz / --n2-handover : the corpus and the chain, built ─────────
+# A fuzzer that sends is a lab tool; a fuzzer that builds is a test plan. The
+# corpus comes from tools/ngap_fuzz.py at a seed, every case names the single
+# field it moves and the TS 38.413 clause that says what a correct NGAP
+# endpoint must do with it, and nothing leaves the machine. The transmit half
+# is --ngap-fuzz-send, a separate verb on purpose.
+#
+# The N2 handover chain is the same shape: HandoverRequired, HandoverCommand
+# and HandoverNotify are encoded by tools/ngap_handover.py, refereed against
+# pycrate and tshark by tools/check-ngap-handover.sh, and stored as a plan.
+# The wire verb for a built NGAP message is --ngap-send and nothing here
+# reaches it.
+ncore_ngap_fuzz_tool() { printf '%s/tools/ngap_fuzz.py' "$IMSISTING_ROOT"; }
+
+ncore_ngap_fuzz_store() { printf '%s/ngap_fuzz.tsv' "$NCORE_DIR"; }
+
+ncore_n2_handover_store() { printf '%s/n2_handover.tsv' "$NCORE_DIR"; }
+
+# A scratch path that exists: TMP_DIR is repointed by the selftest at a tree
+# it has just made, and mktemp fails silently if the directory is not there.
+ncore_scratch() {  # <stem>
+    local root="${TMP_DIR:-/tmp}"
+    [[ -d "$root" ]] || mkdir -p "$root" 2>/dev/null || root=/tmp
+    mktemp "$root/$1.XXXXXX"
+}
+
+# Append a generator's rows to a module store, header first, never truncating:
+# a run is evidence of what was planned or sent that day.
+ncore_append_tsv() {  # <plan-tsv> <store>
+    local plan="${1:-}" store="${2:-}"
+    [[ -s "$plan" ]] || return 1
+    mkdir -p "$(dirname -- "$store")" || return 1
+    [[ -s "$store" ]] || head -n 1 "$plan" > "$store" || return 1
+    tail -n +2 "$plan" >> "$store" || return 1
+    printf 'store\t%s\n' "$store"
+}
+
+ncore_cmd_ngap_fuzz() {  # [--seed N] [--family control|header|ies|downlink] [--max N]
+    local seed=0 family="" max=0
+    while (( $# )); do
+        case "$1" in
+            --seed)   (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                          printf 'ERROR\t--seed takes a number\n' >&2; return 2; }
+                      seed="$2"; shift 2 ;;
+            --family) (($# >= 2)) && [[ -n "${2:-}" ]] || {
+                          printf 'ERROR\t--family takes control, header, ies or downlink\n' >&2; return 2; }
+                      family="$2"; shift 2 ;;
+            --max)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                          printf 'ERROR\t--max takes a number\n' >&2; return 2; }
+                      max="$2"; shift 2 ;;
+            --help|-h) printf 'usage: --ngap-fuzz [--seed N] [--family control|header|ies|downlink] [--max N]\n'; return 0 ;;
+            *)        printf 'ERROR\t--ngap-fuzz does not take %s (the transmit verb is --ngap-fuzz-send)\n' \
+                          "$(ncore_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    local py; py=$(command -v python3 2>/dev/null || true)
+    [[ -n "$py" ]] || { printf 'ERROR\tpython3 is missing; the corpus generator is python3\n' >&2; return 1; }
+    local tool; tool=$(ncore_ngap_fuzz_tool)
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\t%s is missing: the generator that builds the corpus lives there\n' "$tool" >&2
+        return 1; }
+    local -a gargs=(--seed "$seed")
+    [[ -n "$family" ]] && gargs+=(--family "$family")
+    (( max > 0 )) && gargs+=(--max "$max")
+    local plan; plan=$(ncore_scratch ngap-fuzz-plan) || {
+        printf 'ERROR\tno scratch directory: cannot write the plan\n' >&2; return 1; }
+    local out rc=0
+    out=$("$py" "$tool" "${gargs[@]}" --plan-tsv "$plan" 2>&1) || rc=$?
+    if (( rc != 0 )); then
+        printf '%s\n' "$out" >&2
+        rm -f "$plan"
+        printf 'ERROR\tthe corpus generator refused or failed (exit %d)\n' "$rc" >&2
+        return 1
+    fi
+    printf '%s\n' "$out"
+    ncore_append_tsv "$plan" "$(ncore_ngap_fuzz_store)"
+    rm -f "$plan"
+    printf 'sent\tnothing: this verb builds the corpus, and --ngap-fuzz-send is the separate verb that puts it on SCTP\n'
+    printf 'referee\ttools/check-ngap-fuzz.sh dissects the same corpus with tshark and checks each case against its clause\n'
+    return 0
+}
+
+ncore_cmd_ngap_fuzz_send() {  # <amf-host> [--port N] [--seed N] [--family F] [--max N] [--rate R] [--timeout S]
+    local host="" port=38412 seed=0 family="" max=0 rate="5" tmo="1"
+    while (( $# )); do
+        case "$1" in
+            --port)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--port takes a number\n' >&2; return 2; }
+                       port="$2"; shift 2 ;;
+            --seed)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--seed takes a number\n' >&2; return 2; }
+                       seed="$2"; shift 2 ;;
+            --family)  (($# >= 2)) && [[ -n "${2:-}" ]] || {
+                           printf 'ERROR\t--family takes control, header, ies or downlink\n' >&2; return 2; }
+                       family="$2"; shift 2 ;;
+            --max)     (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--max takes a number\n' >&2; return 2; }
+                       max="$2"; shift 2 ;;
+            --rate)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--rate takes a number of cases per second\n' >&2; return 2; }
+                       rate="$2"; shift 2 ;;
+            --timeout) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--timeout takes a number of seconds\n' >&2; return 2; }
+                       tmo="$2"; shift 2 ;;
+            --help|-h) printf 'usage: --ngap-fuzz-send <amf-host> [--port N] [--seed N] [--family F] [--max N] [--rate R] [--timeout S]\n'; return 0 ;;
+            -*)        printf 'ERROR\t--ngap-fuzz-send does not take %s\n' "$(ncore_sanitize "$1")" >&2; return 2 ;;
+            *)         if [[ -z "$host" ]]; then host="$1"; shift; else
+                           printf 'ERROR\t--ngap-fuzz-send takes one peer address\n' >&2; return 2; fi ;;
+        esac
+    done
+    [[ -n "$host" ]] || {
+        printf 'ERROR\t--ngap-fuzz-send takes <amf-host>: this corpus goes nowhere without a peer you name\n' >&2
+        printf 'ERROR\tif you want the plan, --ngap-fuzz builds it and sends nothing\n' >&2
+        return 2; }
+    local py; py=$(command -v python3 2>/dev/null || true)
+    [[ -n "$py" ]] || { printf 'ERROR\tpython3 is missing; the corpus and its sender are python3\n' >&2; return 1; }
+    local tool; tool=$(ncore_ngap_fuzz_tool)
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\t%s is missing: the generator that builds the corpus lives there\n' "$tool" >&2
+        return 1; }
+    printf 'lab\tthis transmits NGAP at %s:%s -- a lab AMF you own, never a commercial network\n' \
+        "$host" "$port"
+    printf 'lab\ta 5G core will log and may react to a malformed N2 message; use a test core\n'
+    local plan; plan=$(ncore_scratch ngap-fuzz-sent) || {
+        printf 'ERROR\tno scratch directory: cannot write the plan\n' >&2; return 1; }
+    local -a gargs=(--seed "$seed" --transmit --host "$host" --port "$port"
+                    --rate "$rate" --timeout "$tmo")
+    [[ -n "$family" ]] && gargs+=(--family "$family")
+    (( max > 0 )) && gargs+=(--max "$max")
+    local out rc=0
+    out=$("$py" "$tool" "${gargs[@]}" --plan-tsv "$plan" 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    ncore_append_tsv "$plan" "$(ncore_ngap_fuzz_store)"
+    rm -f "$plan"
+    (( rc == 0 )) && return 0
+    printf 'ERROR\tsome cases got no answer (exit %d); unobserved is not absent -- the peer may be down, filtered or slow\n' \
+        "$rc" >&2
+    return 1
+}
+
+ncore_cmd_n2_handover() {  # [--type T] [--plmn MCC/MNC] [--gnb-id N] [--tac HEX] [--sessions N]
+                           # [--source-to-target HEX] [--amf-ue-id N] [--ran-ue-id N] [--cause NAME]
+    local ho_type="intra5gs" plmn="001/01" gnb_id="1" tac="000001" sessions="1"
+    local s2t="00" amf_ue="1" ran_ue="1" cause="handover-desirable-for-radio-reason"
+    while (( $# )); do
+        case "$1" in
+            --type)    (($# >= 2)) || { printf 'ERROR\t--type takes a HandoverType\n' >&2; return 2; }
+                       ho_type="$2"; shift 2 ;;
+            --plmn)    (($# >= 2)) || { printf 'ERROR\t--plmn takes MCC/MNC\n' >&2; return 2; }
+                       plmn="$2"; shift 2 ;;
+            --gnb-id)  (($# >= 2)) || { printf 'ERROR\t--gnb-id takes a number\n' >&2; return 2; }
+                       gnb_id="$2"; shift 2 ;;
+            --tac)     (($# >= 2)) || { printf 'ERROR\t--tac takes three octets of hex\n' >&2; return 2; }
+                       tac="$2"; shift 2 ;;
+            --sessions)(($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--sessions takes a number\n' >&2; return 2; }
+                       sessions="$2"; shift 2 ;;
+            --source-to-target) (($# >= 2)) || {
+                           printf 'ERROR\t--source-to-target takes hex\n' >&2; return 2; }
+                       s2t="$2"; shift 2 ;;
+            --amf-ue-id) (($# >= 2)) || { printf 'ERROR\t--amf-ue-id takes a number\n' >&2; return 2; }
+                       amf_ue="$2"; shift 2 ;;
+            --ran-ue-id) (($# >= 2)) || { printf 'ERROR\t--ran-ue-id takes a number\n' >&2; return 2; }
+                       ran_ue="$2"; shift 2 ;;
+            --cause)   (($# >= 2)) || { printf 'ERROR\t--cause takes a CauseRadioNetwork name\n' >&2; return 2; }
+                       cause="$2"; shift 2 ;;
+            --help|-h) printf 'usage: --n2-handover [--type T] [--plmn MCC/MNC] [--gnb-id N] [--tac HEX] [--sessions N] [--source-to-target HEX] [--amf-ue-id N] [--ran-ue-id N] [--cause NAME]\n'; return 0 ;;
+            *)         printf 'ERROR\t--n2-handover does not take %s (the wire verb is --ngap-send)\n' \
+                           "$(ncore_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    local py; py=$(command -v python3 2>/dev/null || true)
+    [[ -n "$py" ]] || { printf 'ERROR\tpython3 is missing; the chain encoder is python3\n' >&2; return 1; }
+    local tool="$IMSISTING_ROOT/tools/ngap_handover.py"
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\t%s is missing: the chain encoder lives there\n' "$tool" >&2; return 1; }
+    # Three encoders, three messages: the session list belongs to
+    # HandoverRequired alone (TS 38.413 9.2.3.2), and HandoverNotify carries
+    # none of it (9.2.3.5), so handing the list to all three is a defect the
+    # chain encoder refuses -- deliberately.
+    local common=(--handover-type "$ho_type" --plmn "$plmn" --gnb-id "$gnb_id"
+                  --tac "$tac" --amf-ue-id "$amf_ue" --ran-ue-id "$ran_ue"
+                  --cause "$cause" --source-to-target "$s2t")
+    local -a hreq=(required "${common[@]}")
+    local i
+    for (( i = 1; i <= sessions; i++ )); do
+        hreq+=(--pdu-session "$i:0102")
+    done
+    local out="" part rc=0
+    local -a emsg=(required command notify)
+    local -a eargs
+    for i in "${emsg[@]}"; do
+        case "$i" in
+            required) eargs=("${hreq[@]}") ;;
+            command)  eargs=(command "${common[@]}") ;;
+            notify)   eargs=(notify "${common[@]}" --nci 1) ;;
+        esac
+        part=$("$py" "$tool" "${eargs[@]}" 2>&1) || rc=$?
+        if (( rc != 0 )); then
+            printf '%s\n' "$part" >&2
+            printf 'ERROR\tthe %s encoder refused or failed (exit %d)\n' "$i" "$rc" >&2
+            return 1
+        fi
+        out+="$part"$'\n'
+    done
+    printf '%s\n' "$out"
+    printf 'plan\t1\tHandoverRequired\tTS 38.413 8.4.1 / 9.1.6.1\tthe target AMF allocates its own resources and answers HandoverCommand or HandoverPreparationFailure; a command with no preparation behind it means the source lost the answer path\n'
+    printf 'plan\t2\tHandoverCommand\tTS 38.413 8.4.1 / 9.3.1.9\tthe target-to-source container is opaque to the AMF and goes to the handset; an AMF that rewrites it corrupts the RRC reconfiguration without saying so\n'
+    printf 'plan\t3\tHandoverNotify\tTS 38.413 8.4.3\tthe target gNB says the handset arrived; an AMF that has released the UE context must answer with a named cause, not silence\n'
+    printf 'plan\tlab\tnothing is sent\tthe octets above are a plan; --ngap-send is the verb that puts one PDU on SCTP 38412 and it is armed on its own\n'
+    printf 'plan\treferee\ttools/check-ngap-handover.sh\tpycrate 0.8.1 and tshark 4.2.2 read the same octets and the two encoders must agree octet for octet\n'
+    local plan_tsv; plan_tsv=$(ncore_scratch n2-handover) || {
+        printf 'ERROR\tno scratch directory: cannot write the plan\n' >&2; return 1; }
+    printf '%s\n' "$out" > "$plan_tsv"
+    ncore_append_tsv "$plan_tsv" "$(ncore_n2_handover_store)"
+    rm -f "$plan_tsv"
+    return 0
+}
+
 ncore_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -2942,6 +3194,9 @@ ncore_cli_main() {
         --xnap-decode)      ncore_cmd_xnap_decode "${1:-}" ;;
         --ngap-send)        ncore_cmd_ngap_send "${1:-}" "${2:-}" "${3:-}" ;;
         --ngap-probe)       ncore_cmd_ngap_probe "${1:-127.0.0.1}" "${2:-38412}" ;;
+        --ngap-fuzz)        ncore_cmd_ngap_fuzz "$@" ;;
+        --ngap-fuzz-send)   ncore_cmd_ngap_fuzz_send "$@" ;;
+        --n2-handover)      ncore_cmd_n2_handover "$@" ;;
         --nas-count-check)  ncore_cmd_nas_count "${1:-}" "${2:-}" "${@:3}" ;;
         --rekey-walk)       ncore_cmd_rekey_walk "${1:-0}" ;;
         --gtpu-header)     ncore_gtpu_header "${1:-1}" "${2:-1}" ;;
@@ -3001,6 +3256,12 @@ Usage: $0 COMMAND
   --xnap-decode <hex>           read one back: node id, TAC, slice
   --ngap-send <amf-host> [port] [hex] [--wait N]   SCTP 38412, then read the reply
   --ngap-probe <amf-host> [port]
+  --ngap-fuzz [--seed N] [--family control|header|ies|downlink] [--max N]
+                          NGAP corpus: one field per case, with the TS 38.413 clause
+  --ngap-fuzz-send <amf-host> [--port N] [--rate R] [--timeout S]
+                          transmit that corpus at a lab AMF; builds nothing itself
+  --n2-handover [--type T] [--plmn MCC/MNC] [--gnb-id N] [--tac HEX] [--sessions N]
+                          HandoverRequired/Command/Notify chain as a plan (nothing sent)
   --nas-count-check <before> <after> [--cause reauth|handover]
                                 C1: did the NAS COUNT advance, repeat
                                 or roll back after a re-key

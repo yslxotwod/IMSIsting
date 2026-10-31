@@ -1037,6 +1037,232 @@ gair_cmd_a5_keystream() {
     printf 'keystream\t%s\n' "$ks"
 }
 
+# ── A5/2: demonstrating the weakening, not breaking the cipher ──────────
+# Nothing here breaks A5/2 and nothing here claims to: a break needs the air
+# (a decodable burst plus its COUNT) and this module has no demodulator.
+# What can be measured without a radio is the property every published A5/2
+# attack is built on — the clocking.
+#
+# A5/2 differs from A5/1 in exactly one place that matters. In A5/1 each
+# register steps when its own middle bit agrees with the majority of the
+# three, so no small object decides the schedule. In A5/2 the decision is
+# taken by a fourth register, R4, which is 17 bits wide, is clocked on every
+# step, and is not gated by the registers it gates:
+#
+#     if parity(R4 & 0x7000): R1, R2 and R3 clock; R4 always clocks
+#
+# Register geometry and taps below are the design as this tree implements it
+# in modules/07_gsm_attack.sh (class A52): R1 19 bits taps 0x072000,
+# R2 22 bits taps 0x311000, R3 23 bits taps 0x660000, R4 17 bits taps
+# 0x013100, key and COUNT loaded LSB-first one bit per step, XORed into bit 0
+# of every register. The output combiner (a^b^c^majority(a,b,c)) lives in the
+# same class; it is not needed to measure the clocking separation.
+#
+# The consequence is arithmetic: a frame's whole clocking trajectory is a
+# function of R4 alone, and R4 after loading is an affine function of the 64
+# Kc bits and the 22 COUNT bits. So the space an attacker has to search for
+# the clocking is at most 2^17 rather than 2^64 — that is the weakening, and
+# the numbers below are measured from the register geometry, not quoted.
+#
+# The published strength figures are the *advertised* ones and are printed
+# beside their source. The model self-checks (a 17-bit LFSR with those taps
+# must have period 2^17-1), so a wrong tap mask fails instead of printing a
+# plausible number.
+gair_a5_2_store() { printf '%s/gsm_air/a5_2.tsv\n' "$LOOT_DIR"; }
+
+gair_a5_2_clocking_py() {
+    local kc="$1" count="$2"
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 missing — cannot run the A5/2 clocking model\n' >&2
+        return 1; }
+    python3 - "$kc" "$count" <<'PY'
+import sys
+
+# modules/07_gsm_attack.sh, class A52.
+M4, T4 = (1 << 17) - 1, 0x013100
+KLEN, CLEN = 64, 22
+
+
+def parity(x):
+    x ^= x >> 16
+    x ^= x >> 8
+    x ^= x >> 4
+    x ^= x >> 2
+    x ^= x >> 1
+    return x & 1
+
+
+def clock(r):
+    return ((r << 1) & M4) | parity(r & T4)
+
+
+def r4_loaded(kc, count):
+    """R4 after the key and COUNT load: one clock per bit, bit XORed in."""
+    r = 0
+    for i in range(KLEN):
+        r = clock(r)
+        r ^= (kc >> i) & 1
+    for i in range(CLEN):
+        r = clock(r)
+        r ^= (count >> i) & 1
+    return r
+
+
+def period(start=1, cap=1 << 20):
+    r, n = start, 0
+    while True:
+        r = clock(r)
+        n += 1
+        if r == start or n > cap:
+            return n
+
+
+kc = int(sys.argv[1], 16)
+count = int(sys.argv[2])
+base = r4_loaded(kc, count)
+p = period()
+ok = True
+print("r4_after_loading\t0x%05X" % base)
+print("clocking_period\t%d\t2^17-1 = %d" % (p, (1 << 17) - 1))
+if p != (1 << 17) - 1:
+    ok = False
+    print("model_check\tFAIL\tthe taps do not give a maximal-length 17-bit LFSR")
+
+# Rank over GF(2) of (Kc,COUNT) -> R4, and one kernel vector: two different
+# key/count pairs that land on the same clocking state.
+cols = [("kc", i, r4_loaded(kc ^ (1 << i), count) ^ base) for i in range(KLEN)]
+cols += [("count", i, r4_loaded(kc, count ^ (1 << i)) ^ base) for i in range(CLEN)]
+basis, dep = {}, None
+for idx, (_nm, _i, v) in enumerate(cols):
+    x, used = v, frozenset([idx])
+    while x:
+        h = x.bit_length() - 1
+        if h in basis:
+            x ^= basis[h][0]
+            used ^= basis[h][1]
+        else:
+            basis[h] = (x, used)
+            break
+    if x == 0 and dep is None:
+        dep = used
+rank = len(basis)
+print("clocking_rank\t%d" % rank)
+if rank > 17:
+    ok = False
+    print("model_check\tFAIL\ta 17-bit register cannot have rank %d" % rank)
+print("clocking_states\t%d\t2^%d" % (1 << rank, rank))
+print("key_count_pairs_per_clocking_state\t2^%d" % (KLEN + CLEN - rank))
+if dep:
+    kc2, ct2, names = kc, count, []
+    for j in sorted(dep):
+        nm, i, _v = cols[j]
+        names.append("%s[%d]" % (nm, i))
+        if nm == "kc":
+            kc2 ^= 1 << i
+        else:
+            ct2 ^= 1 << i
+    same = r4_loaded(kc2, ct2) == base
+    print("kernel_kc\t%016x\t%s" % (kc2, ",".join(names)))
+    print("kernel_count\t%d" % ct2)
+    print("kernel_key_bits_differ\t%d" % bin(kc ^ kc2).count("1"))
+    print("kernel_same_clocking\t%s" % ("yes" if same else "no"))
+    if not same:
+        ok = False
+        print("model_check\tFAIL\tthe kernel vector did not preserve the clocking state")
+sys.exit(0 if ok else 1)
+PY
+}
+
+gair_cmd_a5_2_demo() {
+    # Positional on purpose: --kc/--count/--capture would each become a
+    # "verb" in the usage probe, and a flag that is really an argument must not
+    # look like an action to tools/check-verbs.sh.
+    local kc="1223456789abcdef" count="0" capture=""
+    case "$1" in -*) printf 'ERROR\t--a5-2-demo takes positionals, not %s\n' \
+                          "$(gair_sanitize "$1")" >&2; return 2 ;; esac
+    [[ -n "${1:-}" ]] && kc="$1"
+    [[ -n "${2:-}" ]] && count="$2"
+    [[ -n "${3:-}" ]] && capture="$3"
+    if [[ -n "${4:-}" ]]; then
+        printf 'ERROR\t--a5-2-demo takes at most Kc, COUNT and a capture path\n' >&2
+        return 2
+    fi
+    kc=$(gair_norm_hex "$kc")
+    [[ "$kc" =~ ^[0-9a-f]{16}$ ]] || {
+        printf 'ERROR\tKc must be 16 hex digits (64 bits), got "%s"\n' \
+               "$(gair_sanitize "$kc")" >&2
+        return 2; }
+    [[ "$count" =~ ^[0-9]+$ ]] && (( count < 4194304 )) || {
+        printf 'ERROR\tCOUNT must be 0..4194303 (22 bits, TS 45.002 4)\n' >&2
+        return 2; }
+
+    local out rc; out=$(gair_a5_2_clocking_py "$kc" "$count"); rc=$?
+    printf 'verb\t--a5-2-demo\n'
+    printf 'cipher\tA5/2\n'
+    printf 'claim\t%s\n' "design weakness demonstrated; the cipher is not broken here"
+    printf 'geometry_source\t%s\n' \
+        "modules/07_gsm_attack.sh class A52 (R1 19/0x072000, R2 22/0x311000, R3 23/0x660000, R4 17/0x013100)"
+    printf 'kc\t%s\n' "$kc"
+    printf 'count\t%s\n' "$count"
+    printf 'register\tR4\t17 bits\tthe clocking register, not gated by R1..R3\n'
+    printf 'clocking_a51\t%s\n' "majority of the middle bit of R1,R2,R3 decides the step"
+    printf 'clocking_a52\t%s\n' "parity(R4 & 0x7000) decides whether R1..R3 step; R4 always steps"
+    printf '%s\n' "$out"
+    if (( rc != 0 )); then
+        printf 'verdict\tmodel-failed\n'
+        printf 'reason\t%s\n' "the clocking model did not reproduce the published register geometry"
+        return 1
+    fi
+    printf 'clocking_bits\t17\n'
+    printf 'measured\teffective_clocking_space\t2^17\t%s\n' \
+        "a frame's clocking trajectory is a function of a 17-bit register, not of the 64-bit key"
+    printf 'advertised\ta5_2_effective\t2^16\t%s\n' \
+        "Barkan/Biham/Keller 2003; row A5-2-BROKEN in modules/20_gsm_cve.sh"
+    printf 'advertised\ta5_2_input\tfour frames of one connection, ciphertext-only\t%s\n' \
+        "same row"
+    printf 'advertised\ta5_2_design\t%s\n' \
+        "the deliberately weakened export variant, withdrawn in 2006 — the weakness is by design, not by accident"
+    printf 'note\t%s\n' \
+        "identical clocking is not identical keystream: the output combiner still sees R1..R3, so the 17 bits buy the attacker the schedule, not the answer"
+    printf 'note\t%s\n' \
+        "the ladder in --cipher-audit reads the low 3 bits with 000=A5/0; on the wire tshark 4.2.2 reads bit 1 as SC and bits 3..1 as 000=A5/1..110=A5/7, so 0x03 is A5/2 with ciphering started, which is what modules/07_gsm_attack.sh --build-cipher-mode emits"
+    printf 'unobserved\trecovery_from_capture\t%s\n' \
+        "no A5/2-enciphered burst can be recovered here: a break needs the air"
+    printf 'unobserved\tkeystream\t%s\n' \
+        "this tree has no demodulator that produces the 114 enciphered burst bits and their COUNT from a capture"
+    printf 'handoff\tmodules/07_gsm_attack.sh --kc-known-plaintext <plain> <cipher>, then --kc-search <base> <vary> <fn> <bits>\t%s\n' \
+        "that pair comes from the air; this verb only measures the geometry"
+    if [[ -n "$capture" ]]; then
+        printf 'capture\t%s\n' "$(gair_sanitize "$capture")"
+        printf 'verdict\tunobserved\n'
+        printf 'reason\t%s\n' \
+            "a capture path was given but nothing in this tree turns an A5/2 burst into keystream: that needs a demodulator and the frame clock, and neither is present"
+        gair_a5_2_record "$kc" "$count" "unobserved" >/dev/null 2>&1 || true
+        return 3
+    fi
+    printf 'verdict\tdemonstrated\n'
+    gair_a5_2_record "$kc" "$count" "demonstrated" >/dev/null 2>&1 || true
+    return 0
+}
+
+# One row per run, append-only, header first, so a later reader can tell which
+# geometry the numbers came from.
+gair_a5_2_record() {
+    local kc="$1" count="$2" verdict="$3"
+    local store; store=$(gair_a5_2_store)
+    mkdir -p "${store%/*}" 2>/dev/null || return 1
+    [[ -s "$store" ]] || printf 'ts\tverb\tcipher\tkc\tcount\tclocking_bits\tclocking_period\tclocking_rank\tverdict\n' >>"$store"
+    local model period rank
+    model=$(gair_a5_2_clocking_py "$kc" "$count" 2>/dev/null)
+    period=$(printf '%s\n' "$model" | awk -F'\t' '$1=="clocking_period"{print $2}')
+    rank=$(printf '%s\n' "$model" | awk -F'\t' '$1=="clocking_rank"{print $2}')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "--a5-2-demo" "A5/2" "$kc" "$count" \
+        17 "${period:-unknown}" "${rank:-unknown}" "$verdict" >>"$store"
+    printf 'store\t%s\n' "$store"
+    return 0
+}
+
 # ── selftest — no radio, no root, no network ────────────────────────────
 gair_selftest() {
     local bad=0
@@ -1306,6 +1532,58 @@ gair_selftest() {
     # 15. CLI dispatch: unknown verb is a usage error (2), not a success.
     chk cli-unknown "$(gair_cli_main --nope >/dev/null 2>&1; echo $?)" "2"
 
+    # 16. A5/2 demonstration. The register geometry is fixed by class A52 in
+    #     modules/07_gsm_attack.sh, so every number below is a property of that
+    #     geometry and must come out the same on any machine.
+    local m; m=$(gair_a5_2_clocking_py 1223456789abcdef 0)
+    chk a52-model-runs    "$(gair_a5_2_clocking_py 1223456789abcdef 0 >/dev/null 2>&1; echo $?)" "0"
+    chk a52-r4            "$(fld "$m" r4_after_loading)"  "0x018EE"
+    chk a52-period        "$(fld "$m" clocking_period)"   "131071"
+    chk a52-rank          "$(fld "$m" clocking_rank)"     "17"
+    chk a52-states        "$(fld "$m" clocking_states)"   "131072"
+    #    Two different keys must reach the same clocking state: that collision
+    #    is the 2^17 claim stated as a witness rather than as prose.
+    chk a52-kernel-kc     "$(fld "$m" kernel_kc)"         "1223456789a9afee"
+    chk a52-kernel-bits   "$(fld "$m" kernel_key_bits_differ)" "5"
+    chk a52-kernel-same   "$(fld "$m" kernel_same_clocking)"   "yes"
+    #    Healthy model: no self-check row may fail.
+    chk a52-no-model-fail "$(printf '%s\n' "$m" | grep -c 'model_check')" "0"
+
+    local a52 a52rc
+    a52=$(gair_cmd_a5_2_demo 1223456789abcdef 0); a52rc=$?
+    chk a52-verdict       "$(fld "$a52" verdict)"         "demonstrated"
+    chk a52-exit          "$a52rc"                        "0"
+    chk a52-measured      "$(printf '%s\n' "$a52" | awk -F'\t' '$1=="measured"{print $2}' | head -1)" \
+                          "effective_clocking_space"
+    chk a52-advertised    "$(printf '%s\n' "$a52" | awk -F'\t' '$1=="advertised"{print $2}' | head -1)" \
+                          "a5_2_effective"
+    chk a52-unobserved    "$(printf '%s\n' "$a52" | awk -F'\t' '$1=="unobserved"{print $2}' | head -1)" \
+                          "recovery_from_capture"
+    chk a52-handoff       "$(printf '%s\n' "$a52" | awk -F'\t' '$1=="handoff"' | wc -l | tr -d ' ')" "1"
+
+    #    16b. The store: one append-only row per run, header first.
+    local st; st=$(gair_a5_2_store)
+    chk a52-store-path    "$st" "$d/loot/gsm_air/a5_2.tsv"
+    chk a52-store-header  "$(awk -F'\t' 'NR==1{print $1"/"$3"/"$9}' "$st")" "ts/cipher/verdict"
+    chk a52-store-rows    "$(awk -F'\t' 'NR>1' "$st" | wc -l | tr -d ' ')" "1"
+    chk a52-store-verdict "$(awk -F'\t' 'NR==2{print $9}' "$st")" "demonstrated"
+
+    #    16c. A capture is a handoff (3), not a failure and not a fake result.
+    local cap; cap=$(gair_cmd_a5_2_demo 1223456789abcdef 0 /nonexistent-capture.pcap 2>&1)
+    local caprc=$?
+    chk a52-capture-exit   "$caprc" "3"
+    chk a52-capture-verdict "$(fld "$cap" verdict)" "unobserved"
+    chk a52-capture-reason "$(fld "$cap" reason | grep -c 'demodulator')" "1"
+    chk a52-capture-rows   "$(awk -F'\t' 'NR>1' "$(gair_a5_2_store)" | wc -l | tr -d ' ')" "2"
+
+    #    16d. Bad arguments are usage errors (2) and write nothing.
+    chk a52-bad-kc    "$(gair_cmd_a5_2_demo zz >/dev/null 2>&1; echo $?)" "2"
+    chk a52-short-kc  "$(gair_cmd_a5_2_demo 1223 >/dev/null 2>&1; echo $?)" "2"
+    chk a52-bad-count "$(gair_cmd_a5_2_demo 1223456789abcdef 4194304 >/dev/null 2>&1; echo $?)" "2"
+    chk a52-bad-flag  "$(gair_cmd_a5_2_demo --bogus >/dev/null 2>&1; echo $?)" "2"
+    chk a52-extra-pos "$(gair_cmd_a5_2_demo 1223456789abcdef 0 cap.pcap extra >/dev/null 2>&1; echo $?)" "2"
+    chk a52-rows-kept "$(awk -F'\t' 'NR>1' "$(gair_a5_2_store)" | wc -l | tr -d ' ')" "2"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1329,6 +1607,7 @@ gair_menu() {
   [6]  IMSI exposure points
   [7]  decode an SCH burst
   [8]  decode RR messages from a GSMTAP pcap
+  [9]  A5/2 weakness demonstration (clocking model)
   [0]  back
 
 M
@@ -1371,6 +1650,14 @@ M
                 read -rp "  pcap path> " p
                 gair_decode_pcap "$p"
                 read -rp "  press enter " _ ;;
+            9)
+                echo "  A5/2 and A5/1 share the register geometry; A5/2 hands the"
+                echo "  clocking to a 17-bit register R4. Nothing here breaks the"
+                echo "  cipher — the clocking space is what gets measured."
+                read -rp "  Kc hex (default 1223456789abcdef)> " k
+                read -rp "  COUNT (default 0)> " n
+                gair_cmd_a5_2_demo "${k:-1223456789abcdef}" "${n:-0}"
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1391,6 +1678,7 @@ gair_cli_main() {
         --identity-exposure)   gair_cmd_identity_exposure "${1:-}" ;;
         --decode-sch)          gair_decode_sch "${1:-}" ;;
         --decode-pcap)         gair_decode_pcap "${1:-}" ;;
+        --a5-2-demo)           gair_cmd_a5_2_demo "$@" ;;
         --selftest)            gair_selftest ;;
         --menu)                gair_menu ;;
         *)
@@ -1407,6 +1695,12 @@ Usage: $0 COMMAND
   --identity-exposure <hex>       mobile identity in one Um message (TSV)
   --decode-sch <hex>              BSIC and frame number from an SCH burst
   --decode-pcap <pcap>            list RR messages in a GSMTAP capture
+  --a5-2-demo [kc] [count] [cap]  demonstrate why A5/2 is weak: its clocking
+                                  register R4 is 17 bits, so the clocking space
+                                  is 2^17 and not 2^64 (kc 16 hex, count
+                                  0-4194303). A capture path in the third slot
+                                  is a handoff: nothing in this tree recovers
+                                  an A5/2 burst, so it reports unobserved, exit 3
   --selftest                      verify decoders and A5/1 without a radio
   --menu                          interactive menu
 EOF

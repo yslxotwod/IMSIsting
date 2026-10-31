@@ -7020,6 +7020,7 @@ static const ChipRow chip_rows[] = {
     { "05_field_kit",        "--yes",                 NEED_NO, DOES_READS },
     { "06_gsm_air",          "--__index_probe__",     NEED_NO, DOES_READS },
     { "06_gsm_air",          "--a5-1-keystream",      NEED_CAP, DOES_BUILDS },
+    { "06_gsm_air",          "--a5-2-demo",           NEED_NO,  DOES_READS },
     { "06_gsm_air",          "--cipher-audit",        NEED_CAP, DOES_READS },
     { "06_gsm_air",          "--decode-pcap",         NEED_CAP, DOES_READS },
     { "06_gsm_air",          "--decode-sch",          NEED_CAP, DOES_READS },
@@ -7043,6 +7044,7 @@ static const ChipRow chip_rows[] = {
     { "07_gsm_attack",       "--a5-count",            NEED_NO, DOES_READS },
     { "07_gsm_attack",       "--alg-name",            NEED_NO, DOES_READS },
     { "07_gsm_attack",       "--build-cipher-mode",   NEED_NO, DOES_BUILDS },
+    { "07_gsm_attack",       "--cipher-downgrade",    NEED_NO, DOES_BUILDS },
     { "07_gsm_attack",       "--build-identity-request", NEED_NO, DOES_BUILDS },
     { "07_gsm_attack",       "--build-immediate-assignment", NEED_NO, DOES_BUILDS },
     { "07_gsm_attack",       "--build-lu-accept",     NEED_NO, DOES_BUILDS },
@@ -7142,6 +7144,7 @@ static const ChipRow chip_rows[] = {
     { "08_umts_air",         "--identity",            NEED_CAP, DOES_READS },
     { "08_umts_air",         "--info",                NEED_NO, DOES_READS },
     { "08_umts_air",         "--integrity-tsv",       NEED_CAP, DOES_READS },
+    { "08_umts_air",         "--kasumi-audit",        NEED_NO,  DOES_READS },
     { "08_umts_air",         "--mac-input",           NEED_CAP, DOES_READS },
     { "08_umts_air",         "--menu",                NEED_NO, DOES_READS },
     { "08_umts_air",         "--mhz",                 NEED_CAP, DOES_READS },
@@ -7197,6 +7200,7 @@ static const ChipRow chip_rows[] = {
     { "09_lte_attach",       "--quiet",               NEED_NO, DOES_READS },
     { "09_lte_attach",       "--selftest",            NEED_NO, DOES_READS },
     { "09_lte_attach",       "--status-tsv",          NEED_NO, DOES_READS },
+    { "09_lte_attach",       "--ue-cap-index",        NEED_NO, DOES_READS },
     { "09_lte_attach",       "--ue-stack",            NEED_NO, DOES_READS },
     { "09_lte_attach",       "--version",             NEED_NO, DOES_READS },
     { "09_lte_attach",       "--yes",                 NEED_NO, DOES_READS },
@@ -7266,6 +7270,8 @@ static const ChipRow chip_rows[] = {
     { "11_lte_core",         "--build-air",           NEED_NO, DOES_BUILDS },
     { "11_lte_core",         "--build-clr",           NEED_NO, DOES_BUILDS },
     { "11_lte_core",         "--plr",                 NEED_NO, DOES_BUILDS },
+    { "11_lte_core",         "--gtp-fuzz",            NEED_NO, DOES_BUILDS },
+    { "11_lte_core",         "--gtp-fuzz-send",       NEED_NO, DOES_SENDS },
     { "11_lte_core",         "--build-ulr",           NEED_NO, DOES_BUILDS },
     { "11_lte_core",         "--cdr-fraud-check",     NEED_NO, DOES_READS },
     { "11_lte_core",         "--days",                NEED_NO, DOES_READS },
@@ -7334,6 +7340,7 @@ static const ChipRow chip_rows[] = {
     { "12_nr_air",           "--decode-rrc",          NEED_NO, DOES_READS },
     { "12_nr_air",           "--decode-sib1",         NEED_NO, DOES_READS },
     { "12_nr_air",           "--sdap-build",          NEED_NO, DOES_BUILDS },
+    { "12_nr_air",           "--spectrum",            NEED_CAP, DOES_READS },
     { "12_nr_air",           "--sdap-parse",          NEED_NO, DOES_READS },
     { "12_nr_air",           "--pdcp-build",          NEED_NO, DOES_BUILDS },
     { "12_nr_air",           "--pdcp-parse",          NEED_NO, DOES_READS },
@@ -7377,7 +7384,10 @@ static const ChipRow chip_rows[] = {
     { "13_nr_core",          "--menu",                NEED_NO, DOES_READS },
     { "13_nr_core",          "--nf-discovery",        NEED_NO, DOES_READS },
     { "13_nr_core",          "--nf-list",             NEED_NO, DOES_READS },
+    { "13_nr_core",          "--n2-handover",         NEED_NO, DOES_BUILDS },
     { "13_nr_core",          "--ngap-downlink-nas",   NEED_NO, DOES_SENDS },
+    { "13_nr_core",          "--ngap-fuzz",           NEED_NO, DOES_BUILDS },
+    { "13_nr_core",          "--ngap-fuzz-send",      NEED_NO, DOES_SENDS },
     { "13_nr_core",          "--ngap-initial-ue",     NEED_NO, DOES_SENDS },
     { "13_nr_core",          "--ngap-ngsetup",        NEED_NO, DOES_SENDS },
     { "13_nr_core",          "--ngap-paging",         NEED_NO, DOES_SENDS },
@@ -7955,7 +7965,10 @@ static const ChipRow chip_rows[] = {
     { "34_slicing",          "--cross-slice",         NEED_NO, DOES_READS },
     { "34_slicing",          "--menu",                NEED_NO, DOES_READS },
     { "34_slicing",          "--nas5gs",              NEED_NO, DOES_READS },
+    { "34_slicing",          "--nssai-ie",            NEED_NO, DOES_BUILDS },
+    { "34_slicing",          "--nssai-ie-parse",      NEED_NO, DOES_READS },
     { "34_slicing",          "--nssai-parse",         NEED_NO, DOES_READS },
+    { "34_slicing",          "--nssai-steer",         NEED_NO, DOES_READS },
     { "34_slicing",          "--plan",                NEED_NO, DOES_READS },
     { "34_slicing",          "--quiet",               NEED_NO, DOES_READS },
     { "34_slicing",          "--selection",           NEED_NO, DOES_READS },
@@ -8005,6 +8018,7 @@ static const ChipRow chip_rows[] = {
     { "36_vowifi",           "--__index_probe__",     NEED_NO, DOES_READS },
     { "36_vowifi",           "--dh",                  NEED_NO, DOES_READS },
     { "36_vowifi",           "--eap-attr",            NEED_NO, DOES_READS },
+    { "36_vowifi",           "--chain-parse",         NEED_NO, DOES_READS },
     { "36_vowifi",           "--eap-build",           NEED_NO, DOES_READS },
     { "36_vowifi",           "--eap-parse",           NEED_NO, DOES_READS },
     { "36_vowifi",           "--encr",                NEED_NO, DOES_READS },
@@ -8012,11 +8026,13 @@ static const ChipRow chip_rows[] = {
     { "36_vowifi",           "--esn",                 NEED_NO, DOES_READS },
     { "36_vowifi",           "--help",                NEED_NO, DOES_READS },
     { "36_vowifi",           "--id-type",             NEED_NO, DOES_READS },
+    { "36_vowifi",           "--ike-chain",           NEED_NO, DOES_BUILDS },
     { "36_vowifi",           "--ike-build",           NEED_NO, DOES_READS },
     { "36_vowifi",           "--ike-parse",           NEED_NO, DOES_READS },
     { "36_vowifi",           "--info",                NEED_NO, DOES_READS },
     { "36_vowifi",           "--integrity",           NEED_NO, DOES_READS },
     { "36_vowifi",           "--menu",                NEED_NO, DOES_READS },
+    { "36_vowifi",           "--n3iwf-plan",          NEED_NO, DOES_READS },
     { "36_vowifi",           "--nai",                 NEED_NO, DOES_READS },
     { "36_vowifi",           "--notify",              NEED_NO, DOES_READS },
     { "36_vowifi",           "--null-check",          NEED_NO, DOES_READS },
@@ -8042,8 +8058,10 @@ static const ChipRow chip_rows[] = {
     { "37_femtocell",        "--ranap-build",        NEED_NO, DOES_BUILDS },
     { "37_femtocell",        "--cert-audit",          NEED_NO, DOES_READS },
     { "37_femtocell",        "--cell-profile",        NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--csg-bypass-plan",     NEED_NO, DOES_READS },
     { "37_femtocell",        "--csg-decode",          NEED_NO, DOES_READS },
     { "37_femtocell",        "--csg-encode",          NEED_NO, DOES_BUILDS },
+    { "37_femtocell",        "--csg-ie",              NEED_NO, DOES_BUILDS },
     { "37_femtocell",        "--detect",              NEED_NO, DOES_READS },
     { "37_femtocell",        "--discover",            NEED_NO, DOES_READS },
     { "37_femtocell",        "--help",                NEED_NO, DOES_READS },
@@ -8323,6 +8341,7 @@ static const ChipRow chip_rows[] = {
     { "62_gtpu",             "--selftest",            NEED_NO, DOES_READS },
     { "62_gtpu",             "--status-tsv",          NEED_NO, DOES_READS },
     { "62_gtpu",             "--teid-scan",           NEED_NO, DOES_READS },
+    { "62_gtpu",             "--teid-sweep",          NEED_NO, DOES_SENDS },
     { "63_ran_attacks",      "--__index_probe__",     NEED_NO, DOES_READS },
     { "63_ran_attacks",      "--acs",                 NEED_NO, DOES_BUILDS },
     { "63_ran_attacks",      "--check-plmn",          NEED_NO, DOES_READS },
@@ -23959,6 +23978,24 @@ gair_build_exposure(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), audit);
 
+    /* A5/2 is not "a weaker cipher" in the abstract: its clocking register is
+       17 bits, so the clocking space is 2^17 rather than 2^64, and that is a
+       measurement this tree can make without a radio. */
+    {
+        GtkWidget *a52_body;
+        GtkWidget *a52 = verb_card("WHY A5/2 IS WEAK", &a52_body);
+        GtkWidget *ares = result_rect_new(state, NULL);
+        mod_card_begin(ares);
+        gtk_box_append(GTK_BOX(a52_body),
+            mod_arg_row_prefilled(state, module_id, status, "Show the Geometry",
+                "--a5-2-demo", "1223456789abcdef 0",
+                "A key and a frame number. The answer is the clocking register's "
+                "period and rank, which is where the weakness is, and a handoff to "
+                "the recovery step rather than a claim to have performed it."));
+        gtk_box_append(GTK_BOX(a52_body), ares);
+        gtk_box_append(GTK_BOX(body), a52);
+    }
+
     {
         GtkWidget *res = result_rect_new(state, NULL);
         mod_card_begin(res);
@@ -24194,6 +24231,16 @@ gatk_build_ciphers(AppState *state, const char *module_id,
                 (const char *[]) { "--build-cipher-mode 1 0 0",
                                    "--decrypt 00112233445566778899AABBCCDDEEFF 0 0102" },
                 (const char *[]) { "Cipher Mode", "Decrypt" }, 2));
+        /* The command above states a mode; this one states the mode that ends in
+           no ciphering at all, and lists the evidence that would prove the
+           handset obeyed. */
+        gtk_box_append(GTK_BOX(g_body),
+            mod_arg_row(state, module_id, status, "Force A5/0",
+                "--cipher-downgrade", "A5/1 0d",
+                "The cipher a cell starts from and the classmark the handset sent. "
+                "Prints the CIPHERING MODE COMMAND that ends in 'no ciphering', "
+                "what tshark decodes from it, and what would prove the handset "
+                "accepted. Add a capture as a third argument when you have one."));
         gtk_box_append(GTK_BOX(g_body), res);
     }
     gtk_box_append(GTK_BOX(body), g);
@@ -25257,6 +25304,25 @@ uair_build_integrity(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(tsv_body), res);
     }
     gtk_box_append(GTK_BOX(body), tsv);
+
+    /* 3G's cipher is the same core as GSM's A5/3 and the same one the published
+       attacks target, so the audit states which half is measured here and which
+       half is somebody else's published result. */
+    {
+        GtkWidget *kas_body;
+        GtkWidget *kas = verb_card("AUDIT THE CIPHER", &kas_body);
+        GtkWidget *kres = result_rect_new(state, NULL);
+        mod_card_begin(kres);
+        gtk_box_append(GTK_BOX(kas_body),
+            mod_arg_row_prefilled(state, module_id, status, "Audit KASUMI",
+                "--kasumi-audit", "uea1",
+                "uea1, uia1, uea2, uia2 or a SECURITY MODE COMMAND in hex. "
+                "Reproduces the TS 35.203 vector as measured, names the published "
+                "related-key and biclique results as advertised, and says which "
+                "keys a real test would need."));
+        gtk_box_append(GTK_BOX(kas_body), kres);
+        gtk_box_append(GTK_BOX(body), kas);
+    }
     mod_card_end();
 
     (void) out;
@@ -25746,6 +25812,12 @@ static ModuleSubmenuEntry latt_entries[] = {
        stay on the command line rather than being guessed at by a button. */
     { "Catcher", "network-wireless-symbolic",
       "#MODEL IT|~--flashcatch#READ A LOG|~--flashcatch-detect", NULL },
+    /* A subscriber dump is where a handset's capability octets are written
+       down, so indexing it by IMSI is what turns a dump into something an
+       attach trace can be read against. The file is the operator's, which is
+       why this is an argument row and not a button. */
+    { "Handset capability", "system-search-symbolic",
+      "#UE NETWORK CAPABILITY|~--ue-cap-index", NULL },
 };
 /* 10_lte_air — the LTE air interface and the eNB a lab runs against it.
  *
@@ -26245,6 +26317,31 @@ lcore_build_encapsulate(AppState *state, const char *module_id,
         gtk_box_append(GTK_BOX(mbms_body), res);
     }
     gtk_box_append(GTK_BOX(body), mbms);
+
+    /* Every case moves exactly one field away from a message the module already
+       builds, so whatever a stack answers is attributable to that field. The
+       corpus is inert until the second row names a peer. */
+    {
+        GtkWidget *fuzz_body;
+        GtkWidget *fuzz = verb_card("SEND IT A BROKEN DATAGRAM", &fuzz_body);
+        GtkWidget *fres = result_rect_new(state, NULL);
+        mod_card_begin(fres);
+        gtk_box_append(GTK_BOX(fuzz_body),
+            mod_arg_row(state, module_id, status, "Plan the corpus",
+                "--gtp-fuzz", "",
+                "One row per case: the field it moves, the clause that decides the "
+                "answer, and the octets that would go on the wire. The seed fixes "
+                "the corpus, so a case that found something replays by number. "
+                "Nothing is sent from here."));
+        gtk_box_append(GTK_BOX(fuzz_body),
+            mod_arg_row(state, module_id, status, "Then send it",
+                "--gtp-fuzz-send", "peer-address",
+                "An address and nothing else. This is the verb whose name says it "
+                "transmits; whether a stack answers, ignores or drops each case is "
+                "the result."));
+        gtk_box_append(GTK_BOX(fuzz_body), fres);
+        gtk_box_append(GTK_BOX(body), fuzz);
+    }
     mod_card_end();
 
     (void) out;
@@ -26779,6 +26876,23 @@ nair_build_sync(AppState *state, const char *module_id,
         "kHz and --fmt for cf32, ci16 or cu8."));
     gtk_box_append(GTK_BOX(card_body), res);
     gtk_box_append(GTK_BOX(body), card);
+
+    /* A capture that finds no PSS is the case this answers: the band is either
+       flat or busy somewhere the search did not look. Reporting a flat band as
+       "clean" would be a claim about a transmitter nobody sampled. */
+    {
+        GtkWidget *spec_body;
+        GtkWidget *spec = verb_card("SHOW THE SPECTRUM", &spec_body);
+        GtkWidget *sres = result_rect_new(state, NULL);
+        mod_card_begin(sres);
+        gtk_box_append(GTK_BOX(spec_body), mod_arg_row(state, module_id, status,
+            "Show the Spectrum", "--spectrum", "capture.cf32 --rate 1920000",
+            "The noise floor, the occupied bandwidth and the duty cycle of each "
+            "part of the band, in dBFS because no gain is known here. Flat is "
+            "reported as flat, not as clean."));
+        gtk_box_append(GTK_BOX(spec_body), sres);
+        gtk_box_append(GTK_BOX(body), spec);
+    }
     mod_card_end();
 
     (void) out;
@@ -27066,6 +27180,34 @@ ncore_build_forge(AppState *state, const char *module_id,
                                    "SEPP Bypass", "IPX Attack" }, 4));
     }
     gtk_box_append(GTK_BOX(body), send);
+
+    /* A core that parses a malformed NGAP message wrongly is a core an operator
+       finds out about from a stranger. Each case moves one field, so the answer
+       belongs to that field; nothing here transmits until the third row names a
+       test core. */
+    {
+        GtkWidget *n2_body;
+        GtkWidget *n2 = verb_card("BREAK THE N2 LINK", &n2_body);
+        GtkWidget *nres = result_rect_new(state, NULL);
+        mod_card_begin(nres);
+        gtk_box_append(GTK_BOX(n2_body),
+            mod_arg_choices(state, module_id, status, "Build the corpus", "",
+                "One field moved per case -- PDU choice, procedure code, an "
+                "unknown IE under reject and under ignore, a length overrun, a "
+                "mandatory IE left out -- each with the TS 38.413 clause and what "
+                "a correct receiver must do.",
+                (const char *[]) { "--ngap-fuzz", "--n2-handover" },
+                (const char *[]) { "NGAP Fuzz Corpus",
+                                   "N2 Handover Chain" }, 2));
+        gtk_box_append(GTK_BOX(n2_body),
+            mod_arg_row(state, module_id, status, "Then send it",
+                "--ngap-fuzz-send", "amf-address",
+                "An AMF host over SCTP 38412, PPID 60. The lab line prints first, "
+                "and a case that drew no answer is recorded as unobserved rather "
+                "than as a core that held."));
+        gtk_box_append(GTK_BOX(n2_body), nres);
+        gtk_box_append(GTK_BOX(body), n2);
+    }
     mod_card_end();
 
     (void) out;
@@ -34099,6 +34241,13 @@ static ModuleSubmenuEntry vowi_entries[] = {
     { "IKEv2", "dialog-information-symbolic", NULL, vowi_build_ike },
     { "EAP-AKA'", "channel-secure-symbolic", NULL, vowi_build_eap },
     { "Gateway", "network-wireless-symbolic", NULL, vowi_build_gateway },
+    /* The payload chain is the whole message: a correct payload in the wrong
+       order is a message no gateway answers. Each of the three takes an
+       argument -- an exchange and profile, a message in hex, a target -- so
+       they are rows rather than buttons. */
+    { "IKEv2 chains", "network-transmit-receive-symbolic",
+      "#ASSEMBLE A MESSAGE|~--ike-chain|#READ IT BACK|~--chain-parse"
+      "|#REACH THE GATEWAY|~--n3iwf-plan", NULL },
 };
 /* --------------------------------------------------------------------------
    The small-cell page, laid out the way the LTE CVE Kit page is: a named view
@@ -34763,6 +34912,11 @@ static ModuleSubmenuEntry femt_entries[] = {
     { "Closed cells", "network-server-symbolic", NULL, scell_build_identity },
     { "Backhaul", "network-wired-symbolic", NULL, scell_build_backhaul },
     { "Live subscribers", "view-list-symbolic", NULL, scell_build_live },
+    /* Closed-group handling in two steps: the fields SIB1 carries, and what a
+       handset does with them. The second is a plan because the membership check
+       happens inside the core, where this tree cannot see it. */
+    { "CSG control", "channel-secure-symbolic",
+      "#CSG FIELDS IN SIB1|~--csg-ie|#CSG HANDLING|~--csg-bypass-plan", NULL },
 };
 /* 38_ussd — the 90-character channel into the network.
  *
@@ -38157,6 +38311,12 @@ gtpu_build_probe(AppState *state, const char *module_id,
         "Ask without echo", "--teid-probe --no-echo", "upf.example.invalid",
         "The same query with the echo suppressed, for a peer that logs every "
         "datagram it receives."));
+    gtk_box_append(GTK_BOX(probe_body), mod_arg_row(state, module_id, status,
+        "Walk a range", "--teid-sweep", "upf.example.invalid",
+        "One address, then --start, --end, --step and --max. A dry run prints "
+        "each exact packet and its verdict; a range wider than --max is refused "
+        "rather than truncated, and nothing leaves the machine without "
+        "--transmit."));
     gtk_box_append(GTK_BOX(probe_body), res);
     gtk_box_append(GTK_BOX(body), probe);
 

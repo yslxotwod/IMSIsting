@@ -434,6 +434,177 @@ COUNTER CHECK	no	the MAC-I is what binds the message to COUNT-I; without it a re
 EOF
 }
 
+uair_kasumi_store() { printf '%s/kasumi.tsv\n' "$UAIR_DIR"; }
+
+# ── KASUMI: what is known about the cipher on this channel ──────────────
+# This verb audits, it does not attack. No break is performed and none is
+# claimed: the published results are named beside their source and marked
+# advertised, and the two things a real test would need are named as
+# unobserved.
+#
+# What can be measured here is the cipher itself, because 07_gsm_attack.sh
+# already implements KASUMI: the 64-bit block, the 128-bit key, and the fact
+# that the published TS 35.203 test set 1 reproduces octet for octet. Those
+# are printed as measured. Everything about the attacks is not.
+#
+# The algorithm the network selected decides whether any of this applies at
+# all: UEA1 and UIA1 are KASUMI (TS 35.201, f8 in TS 35.202, f9 in TS 35.203,
+# cited in this module's own header), while UEA2 and UIA2 are SNOW 3G
+# (TS 35.215). Selecting SNOW 3G is therefore a handoff, not a pass.
+uair_cmd_kasumi_audit() {
+    local arg="${1:-uea1}" arg2="${2:-}"
+    case "$arg" in -*) printf 'ERROR\t--kasumi-audit does not take %s\n' \
+                             "$(uair_sanitize "$arg")" >&2; return 2 ;; esac
+    if [[ -n "$arg2" ]]; then
+        printf 'ERROR\t--kasumi-audit takes one algorithm name or one SECURITY MODE COMMAND hex\n' >&2
+        return 2
+    fi
+
+    local alg="$arg" smc="" from_smc=no
+    if [[ "$arg" =~ ^[0-9a-fA-F]{6,}$ ]]; then
+        smc=$(uair_norm_hex "$arg")
+        local parsed; parsed=$(uair_parse_security_mode "$smc") || return $?
+        alg=$(printf '%s\n' "$parsed" | awk -F'\t' '$1=="ciphering_offered"{print $2; exit}')
+        from_smc=yes
+        [[ -n "$alg" ]] || {
+            printf 'ERROR\tthe SECURITY MODE COMMAND did not name a ciphering algorithm\n' >&2
+            return 1; }
+    fi
+    alg=$(printf '%s' "$alg" | tr 'A-Z' 'a-z')
+    case "$alg" in
+        uea1|uia1|uea2|uia2|snow3g) ;;
+        *) printf 'ERROR\talgorithm must be uea1, uia1, uea2 or uia2 (got %s)\n' \
+                  "$(uair_sanitize "$alg")" >&2
+           return 2 ;;
+    esac
+
+    printf 'verb\t--kasumi-audit\n'
+    printf 'algorithm\t%s\n' "$alg"
+    [[ "$from_smc" == yes ]] && printf 'security_mode_command\t%s\n' "$smc"
+
+    case "$alg" in
+        uea1|uia1)
+            printf 'core\tKASUMI\tTS 35.201 (cited in this module header, modules/08_umts_air.sh:6)\n'
+            ;;
+        uea2|uia2|snow3g)
+            printf 'core\tSNOW 3G\tTS 35.215\n'
+            printf 'claim\t%s\n' "this is not KASUMI: the KASUMI results below do not apply to the algorithm on the air"
+            printf 'verdict\thandoff\n'
+            printf 'reason\t%s\n' \
+                "the selected algorithm is SNOW 3G, so a KASUMI audit would answer a question nobody asked"
+            printf 'handoff\tmodules/19_cipher_audit.sh --audit\t%s\n' \
+                "the cipher-strength table there covers UEA0/1/2 and UIA1/2 in one place"
+            uair_kasumi_record "$alg" "handoff" || true
+            return 3
+            ;;
+        *)
+            printf 'ERROR\talgorithm must be uea1, uia1, uea2 or uia2 (got %s)\n' \
+                   "$(uair_sanitize "$alg")" >&2
+            return 2
+            ;;
+    esac
+
+    if [[ "$alg" == uea1 ]]; then
+        printf 'mode\tf8\tcounter mode keystream generator (TS 35.202)\n'
+        printf 'spec\t%s\n' "TS 33.102 6.6.1 names UEA1 as the f8-based ciphering algorithm"
+    else
+        printf 'mode\tf9\tsix-round MAC over the message (TS 35.203)\n'
+        printf 'spec\t%s\n' "TS 33.102 Annex B names UIA1 as the f9-based integrity algorithm"
+    fi
+
+    # The cipher itself, measured through 07_gsm_attack.sh --kasumi. TS 35.203
+    # test set 1: key 2BD6459F82C5B300952C49104881FF48, input EA024714AD5C4D84,
+    # output DF1F9B251C0BF45F. Those four constants are the published ones, and
+    # 07_gsm_attack.sh --selftest asserts the same vector as
+    # kasumi-ts35.203-set1, so a green selftest there and a green row here
+    # cannot disagree about the core.
+    local k7="${IMSISTING_ROOT}/modules/07_gsm_attack.sh"
+    local kat_key="2BD6459F82C5B300952C49104881FF48"
+    local kat_in="EA024714AD5C4D84" kat_want="DF1F9B251C0BF45F"
+    local measured=no
+    if [[ -r "$k7" ]] && command -v python3 >/dev/null 2>&1; then
+        local got; got=$(bash "$k7" --kasumi "$kat_key" "$kat_in" 2>/dev/null)
+        if [[ "${got^^}" == "$kat_want" ]]; then
+            measured=yes
+            printf 'measured\tkat\t%s\tTS 35.203 test set 1 reproduces through modules/07_gsm_attack.sh --kasumi\n' "$got"
+            printf 'measured\tblock_bits\t64\tone KASUMI call consumes a 64-bit block and returns 64 bits\n'
+            printf 'measured\tkey_bits\t128\tonly a 128-bit key is accepted; a shorter key is a usage error, not a shorter cipher\n'
+            # One key bit is enough to change every output block: that is what a
+            # good block cipher looks like, and it is the reason the published
+            # attacks are structural rather than a single-block distinguisher.
+            local key2="${kat_key%?}9"
+            local got2; got2=$(bash "$k7" --kasumi "$key2" "$kat_in" 2>/dev/null)
+            if [[ -n "$got2" ]]; then
+                local dist
+                dist=$(python3 - "$kat_want" "$got2" <<'PY'
+import sys
+a = bin(int(sys.argv[1], 16) ^ int(sys.argv[2], 16)).count('1')
+print(a)
+PY
+)
+                printf 'measured\tavalanche_bits\t%s/64\tflipping the last key bit changes %s output bits\n' "$dist" "$dist"
+                printf 'measured\tavalanche_note\t%s\n' \
+                    "a single-block avalanche is not a weakness: it is what the published attacks work around, not through"
+            fi
+        else
+            printf 'unobserved\tkat\t%s\n' \
+                "modules/07_gsm_attack.sh --kasumi did not return the TS 35.203 set-1 output, so the core is not confirmed here"
+        fi
+    else
+        printf 'unobserved\tkat\t%s\n' \
+            "modules/07_gsm_attack.sh or python3 is not available, so the cipher core could not be exercised"
+    fi
+
+    # The published results. Every row is advertised: this machine holds no
+    # copy of the papers, only the tree's own citations of them.
+    printf '\n# published results (advertised — cited from this tree, not reproduced here)\n'
+    printf 'advertised\trelated_key\t%s\n' \
+        "Biham-Dunkelman-Keller 2005 — in-tree at modules/19_cipher_audit.sh:104, which says such attacks give 'far less than the nominal 64-bit work factor'"
+    printf 'advertised\tbiclique\t%s\n' \
+        "Dunkelman-Keller-Shamir 2010 — in-tree at modules/20_gsm_cve.sh:664 and modules/19_cipher_audit.sh:105"
+    printf 'advertised\ta5_3_same_core\t%s\n' \
+        "the same core protects GSM's A5/3, so the structural results carry across (modules/19_cipher_audit.sh:114)"
+    printf 'advertised\ttree_verdict\t%s\n' \
+        "modules/15_downgrade.sh:1268 already calls KASUMI 'broken in practice'; this module now says what that rests on"
+    printf 'advertised\tnominal_key_bits\t128\t%s\n' \
+        "the strength that is claimed, against the reduced margins the published results report"
+    printf 'claim\t%s\n' \
+        "no break is performed here: a break needs chosen keys or the air, and this module has neither"
+
+    # What a real test needs. Named, not implied.
+    printf '\n# what a test would need\n'
+    printf 'unobserved\tkeys\t%s\n' \
+        "CK and IK for the subscriber: they live in the USIM and the AuC, so neither is available to a passive tool"
+    printf 'unobserved\trelated_keys\t%s\n' \
+        "the published attacks need keys of the attacker's choosing; that means an AuC or a test USIM, not a capture"
+    printf 'unobserved\tkeystream\t%s\n' \
+        "UEA1 keystream needs COUNT-C, bearer, direction and a known plaintext from an enciphered frame, plus a demodulator: this tree has no UMTS demodulator"
+    printf 'unobserved\tmac_window\t%s\n' \
+        "a UIA1 forgery test needs 2^32 MAC queries against a live network, which is a different exercise from reading a capture"
+    printf 'handoff\tmodules/07_gsm_attack.sh --f8-keystream <ck> [count] [bearer] [dir] [bits]\t%s\n' \
+        "the f8 generator is implemented there, so a keystream question belongs to that verb"
+    printf 'handoff\tmodules/07_gsm_attack.sh --f9-mac <ik> [count] [fresh] [dir] [msg]\t%s\n' \
+        "and the f9 MAC likewise; this module assembles the MAC-I input and hands the computation on"
+
+    printf '\nverdict\t%s\n' "$([[ "$measured" == yes ]] && echo "measured-core, advertised-attacks" || echo "advertised-only")"
+    uair_kasumi_record "$alg" "$([[ "$measured" == yes ]] && echo "measured-core" || echo "advertised-only")" || true
+    return 0
+}
+
+# Append-only: which algorithm was audited and how far the audit got.
+uair_kasumi_record() {
+    local alg="$1" verdict="$2"
+    local store; store=$(uair_kasumi_store)
+    mkdir -p "${store%/*}" 2>/dev/null || return 1
+    [[ -s "$store" ]] || printf 'ts\tverb\talgorithm\tcore\tverdict\n' >>"$store"
+    local core="KASUMI"
+    case "$alg" in uea2|uia2|snow3g) core="SNOW 3G" ;; esac
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "--kasumi-audit" "$alg" "$core" "$verdict" >>"$store"
+    printf 'store\t%s\n' "$store"
+    return 0
+}
+
 uair_integrity_analysis_tsv() {
     printf 'message\tintegrity_protected\tconsequence_if_not\n'
     uair_integrity_analysis | tail -n +2
@@ -2401,6 +2572,67 @@ with open(sys.argv[1], 'wb') as f:
 PYP
     chk obs-pcap-none    "$(uair_cli_main --observe "$d/none.pcap" >/dev/null 2>&1; echo $?)" "1"
 
+    # ── the cipher on this channel: KASUMI/UEA1 ─────────────────────────
+    # The verb must separate what it measured (the cipher core, through
+    # 07_gsm_attack.sh) from what it only names (the published attacks, and
+    # the two things a real break would need). A green row here means those
+    # three answers stayed apart.
+    local kout; kout=$(uair_cli_main --kasumi-audit 2>&1); local krc=$?
+    chk kasumi-rc        "$krc" "0"
+    chk kasumi-verb      "$(fld "$kout" verb)" "--kasumi-audit"
+    chk kasumi-alg       "$(fld "$kout" algorithm)" "uea1"
+    chk kasumi-core      "$(printf '%s\n' "$kout" | awk -F'\t' '$1=="core"{print $2}')" "KASUMI"
+    chk kasumi-mode      "$(fld "$kout" mode)" "f8"
+    chk kasumi-spec      "$(printf '%s\n' "$kout" | grep -c 'TS 33.102 6.6.1')" "1"
+    local kuia; kuia=$(uair_cli_main --kasumi-audit uia1 2>&1)
+    chk kasumi-uia-mode  "$(fld "$kuia" mode)" "f9"
+    # Measured: the published TS 35.203 set-1 vector, reproduced through 07.
+    if [[ -r "$IMSISTING_ROOT/modules/07_gsm_attack.sh" ]] && command -v python3 >/dev/null 2>&1; then
+        chk kasumi-kat    "$(printf '%s\n' "$kout" | awk -F'\t' '$1=="measured" && $2=="kat"{print $3}')" "DF1F9B251C0BF45F"
+        chk kasumi-block  "$(printf '%s\n' "$kout" | awk -F'\t' '$1=="measured" && $2=="block_bits"{print $3}')" "64"
+        chk kasumi-key    "$(printf '%s\n' "$kout" | awk -F'\t' '$1=="measured" && $2=="key_bits"{print $3}')" "128"
+        chk kasumi-aval   "$(printf '%s\n' "$kout" | awk -F'\t' '$1=="measured" && $2=="avalanche_bits"{split($3,a,"/"); print (a[1]>16 && a[1]<49) ? "half" : "odd"}')" "half"
+        chk kasumi-verdict "$(fld "$kout" verdict)" "measured-core, advertised-attacks"
+    else
+        chk kasumi-kat-skipped "$(printf '%s\n' "$kout" | awk -F'\t' '$1=="unobserved" && $2=="kat"{print $1}')" "unobserved"
+        chk kasumi-verdict "$(fld "$kout" verdict)" "advertised-only"
+    fi
+    # Advertised: named with the source beside it, and never as a measurement.
+    chk kasumi-adv-rel   "$(printf '%s\n' "$kout" | grep -c '^advertised.*Biham-Dunkelman-Keller 2005')" "1"
+    chk kasumi-adv-bic   "$(printf '%s\n' "$kout" | grep -c '^advertised.*Dunkelman-Keller-Shamir 2010')" "1"
+    chk kasumi-adv-src   "$(printf '%s\n' "$kout" | awk -F'\t' '$1=="advertised"' | grep -c 'modules/19_cipher_audit.sh')" "3"
+    chk kasumi-no-meas-attack "$(printf '%s\n' "$kout" | grep -c '^measured.*\(related\|biclique\)')" "0"
+    # Unobserved: the keys, the chosen keys, the keystream and a MAC window.
+    chk kasumi-unobs     "$(printf '%s\n' "$kout" | grep -c '^unobserved')" "4"
+    chk kasumi-unobs-key "$(printf '%s\n' "$kout" | awk -F'\t' '$1=="unobserved" && $2=="keys"{print $2}')" "keys"
+    chk kasumi-handoff   "$(printf '%s\n' "$kout" | grep -c '^handoff.*07_gsm_attack.sh --f8-keystream')" "1"
+    # SNOW 3G is a different cipher: the audit hands off instead of passing.
+    local k2; k2=$(uair_cli_main --kasumi-audit uea2 2>&1); local k2rc=$?
+    chk kasumi-snow-rc   "$k2rc" "3"
+    chk kasumi-snow-core "$(fld "$k2" core)" "SNOW 3G"
+    chk kasumi-snow-verdict "$(fld "$k2" verdict)" "handoff"
+    chk kasumi-snow-no-kat "$(printf '%s\n' "$k2" | grep -c '^measured.*kat')" "0"
+    # A SECURITY MODE COMMAND names the algorithm the audit then reads.
+    local ksmc; ksmc=$(uair_cli_main --kasumi-audit 400000100010 2>&1)
+    chk kasumi-smc       "$(fld "$ksmc" algorithm)" "uea1"
+    chk kasumi-smc-row   "$(fld "$ksmc" security_mode_command)" "400000100010"
+    chk kasumi-smc-core  "$(printf '%s\n' "$ksmc" | awk -F'\t' '$1=="core"{print $2}')" "KASUMI"
+    # Usage errors carry a reason and exit 2.
+    chk kasumi-bad-alg   "$(uair_cli_main --kasumi-audit banana >/dev/null 2>&1; echo $?)" "2"
+    chk kasumi-bad-flag  "$(uair_cli_main --kasumi-audit --foo >/dev/null 2>&1; echo $?)" "2"
+    chk kasumi-two-args  "$(uair_cli_main --kasumi-audit uea1 uia1 >/dev/null 2>&1; echo $?)" "2"
+    # The store: one append-only file, header first, one row per audit.
+    local kstore; kstore=$(uair_kasumi_store)
+    chk kasumi-store-path "$kstore" "$d/loot/umts_air/kasumi.tsv"
+    chk kasumi-store-head "$(head -1 "$kstore" | awk -F'\t' '{print $1"/"$3"/"$5}')" "ts/algorithm/verdict"
+    chk kasumi-store-alg  "$(awk -F'\t' 'NR>1{print $3; exit}' "$kstore")" "uea1"
+    # Every audit above appended exactly one row, and none rewrote the file.
+    chk kasumi-store-rows "$(awk -F'\t' 'NR>1 && $3=="uea2"' "$kstore" | wc -l | tr -d ' ')" "1"
+    chk kasumi-store-many "$(awk -F'\t' 'NR>1 && $3=="uea1"' "$kstore" | wc -l | tr -d ' ' | awk '{print ($1>=2)?"appended":"short"}')" "appended"
+    chk kasumi-store-cols "$(awk -F'\t' 'NR>1{print NF; exit}' "$kstore")" "5"
+    chk kasumi-store-snow "$(awk -F'\t' '$3=="uea2"{print $4"/"$5; exit}' "$kstore")" "SNOW 3G/handoff"
+    chk kasumi-help-line  "$(uair_usage | grep -c '^  --kasumi-audit')" "1"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -2433,6 +2665,7 @@ uair_menu() {
   [15] the IMSI-catcher chain: what is built, what is absent
   [16] build the MM identification request (the message that yields the IMSI)
   [17] build the authentication replay (a captured RAND and AUTN)
+  [18] what is known about the cipher (KASUMI/UEA1 audit)
   [0]  back
 
 M
@@ -2502,6 +2735,10 @@ M
                 read -rp "  AUTN (32 hex)> " a
                 umtsa_cmd_auth_replay --rand "$r" --autn "$a" | column -t -s$'\t' 2>/dev/null
                 read -rp "  press enter " _ ;;
+            18)
+                read -rp "  algorithm (uea1/uia1/uea2/uia2, or a SECURITY MODE COMMAND hex)> " ka
+                uair_cmd_kasumi_audit "${ka:-uea1}" | column -t -s$'\t' 2>/dev/null
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -2523,6 +2760,7 @@ uair_cli_main() {
         --mac-input)      uair_mac_input "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
         --count-i)        uair_count_i "${1:-}" "${2:-}" ;;
         --integrity-tsv)  uair_integrity_analysis_tsv ;;
+        --kasumi-audit)   uair_cmd_kasumi_audit "$@" ;;
         --decode-pcap)    uair_decode_pcap "${1:-}" ;;
         --observe)        uair_catcher_observe "$@" ;;
         --catcher-progress-tsv) uair_catcher_progress_tsv "$@" ;;
@@ -2570,6 +2808,14 @@ Usage: $0 COMMAND
                                 assemble the UIA1/UIA2 f9 input
   --count-i <hfn> <sn>          COUNT-I = (HFN << 8) | SN
   --integrity-tsv               what is integrity protected, and what is not
+  --kasumi-audit [alg|hex]      what is known about the cipher on this
+                                channel: KASUMI/UEA1 and UIA1 for a named
+                                algorithm, or for the one a SECURITY MODE
+                                COMMAND selected (pass its hex). The TS
+                                35.203 vector is reproduced as measured;
+                                the published attacks are advertised;
+                                keys and the air are unobserved. UEA2/UIA2
+                                are SNOW 3G and hand off, exit 3
   --decode-pcap <pcap>          list RRC messages in a capture
   --build-rrc-setup [conf]      build RRC CONNECTION SETUP octets (DL-CCCH)
   --build-security-mode [conf]  build RRC SECURITY MODE COMMAND octets (DL-DCCH);
@@ -2625,7 +2871,7 @@ Transmit half (a carrier, the BCH and the SIBs that make it a cell)
 
   --build-sib <sib3|sib5|sib1|mib|si|fach|pack> [args]
                                 encode a system-information block, the SYSTEM
-                                INFORMATION container over FACH, or `pack`:
+                                INFORMATION container over FACH, or 'pack':
                                 SIBs -> message -> FACH transport block ->
                                 channel-coded frame ready for the S-CCPCH
   --sib-vectors                 the pinned SIB vectors, bits and hex

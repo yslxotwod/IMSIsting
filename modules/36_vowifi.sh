@@ -472,7 +472,9 @@ vowi_payload_walk() {
 # the header and stopped, so AT_MAC, the one attribute that says whether the
 # message was authenticated, was invisible in every capture.
 vowi_eap_aka() {
-    local code="${1:-1}" id="${2:-1}" sub="${3:-1}" attrs
+    # The EAP type is 23 (EAP-AKA) unless the caller names another: EAP-AKA'
+    # is type 50 (RFC 9048 §8.1) and carries the same subtype layout.
+    local code="${1:-1}" id="${2:-1}" sub="${3:-1}" attrs etype="${5:-23}"
     attrs=$(vowi_norm_hex "${4:-}")
     [[ -z "$attrs" ]] || vowi_is_hex "$attrs" || {
         printf 'ERROR\tattributes must be an even number of hex digits\n' >&2; return 2; }
@@ -480,7 +482,7 @@ vowi_eap_aka() {
         printf 'ERROR\tattributes are 4-octet aligned (%d octets given)\n' "$(( ${#attrs} / 2 ))" >&2; return 2; }
     local hdr
     hdr=$(printf '%s%04X%s%s0000' "$(vowi_byte "$id")" \
-              "$(( 8 + ${#attrs} / 2 ))" "$(vowi_byte 23)" "$(vowi_byte "$sub")")
+              "$(( 8 + ${#attrs} / 2 ))" "$(vowi_byte "$etype")" "$(vowi_byte "$sub")")
     printf '%s%s%s' "$(vowi_byte "$code")" "$hdr" "$attrs"
 }
 
@@ -507,11 +509,19 @@ vowi_eap_parse() {
         printf 'ERROR\tEAP-AKA is a 4-octet EAP header plus a 4-octet AKA header\n' >&2; return 1; }
     local code=$(( 16#${h:0:2} )) id=$(( 16#${h:2:2} ))
     local len=$(( 16#${h:4:4} )) typ=$(( 16#${h:8:2} ))
-    (( typ == 23 )) || { printf 'ERROR\tnot EAP-AKA (type %d, RFC 4187 assigns 23)\n' "$typ" >&2; return 1; }
+    # 23 is EAP-AKA (§4.1 / RFC 4187 §8.1) and 50 is EAP-AKA' (RFC 9048 §8.1):
+    # the two share the AKA header and attribute layout modelled below.
+    local typname="EAP-AKA"
+    case "$typ" in
+        23) ;;
+        50) typname="EAP-AKA prime" ;;
+        *)  printf 'ERROR\tnot EAP-AKA (type %d; RFC 4187 assigns 23, RFC 9048 assigns 50)\n' "$typ" >&2
+            return 1 ;;
+    esac
     local sub=$(( 16#${h:10:2} )) res=$(( 16#${h:12:4} ))
     local rc=0
-    printf 'code\t%d\ncode_name\t%s\nid\t%d\nlength\t%d\ntype\t%d\nsubtype\t%d\nsubtype_name\t%s\nreserved\t0x%04X\n' \
-        "$code" "$(vowi_eap_name "$code")" "$id" "$len" "$typ" "$sub" "$(vowi_aka_subtype_name "$sub")" "$res"
+    printf 'code\t%d\ncode_name\t%s\nid\t%d\nlength\t%d\ntype\t%d\ntype_name\t%s\nsubtype\t%d\nsubtype_name\t%s\nreserved\t0x%04X\n' \
+        "$code" "$(vowi_eap_name "$code")" "$id" "$len" "$typ" "$typname" "$sub" "$(vowi_aka_subtype_name "$sub")" "$res"
     (( len == total )) || { printf 'length_alert\tlength field %d but %d octets arrived\n' "$len" "$total"; rc=1; }
     (( res == 0 )) || { printf 'reserved_alert\treserved octets 0x%04X; §8.1 says zero\n' "$res"; rc=1; }
     local off=8 n=0
@@ -789,6 +799,533 @@ vowi_ike_frag_parse() {
     return 0
 }
 
+# ── IKEv2 message assembly: the IKE_SA_INIT and IKE_AUTH chains ──────────
+# A 28-octet header is not a message. An IKE_SA_INIT carries a proposal, a key
+# exchange and a nonce; an IKE_AUTH carries the identity, the authentication
+# evidence and the child-SA traffic selectors, in the order RFC 7296 §1.2 gives
+# them. Assembling that chain is what lets a capture be read as "who is this
+# UE, what did it propose, what did it prove", and dissecting what was
+# assembled is the only evidence that the chain is the RFC's rather than this
+# file's opinion.
+#
+# Everything encoded below is RFC 7296: §3.2 payload header, §3.3 SA with its
+# proposals (§3.3.1), transforms (§3.3.2) and attributes (§3.3.5), §3.4 key
+# exchange, §3.5 identification, §3.6 nonce, §3.8 authentication, §3.13.1
+# traffic selectors, §3.15 configuration.
+#
+# The 3GPP layer above it is not invented. TS 24.502 puts NAS signalling into
+# the N3IWF's IKE_AUTH exchange and assigns payload and notify numbers for it;
+# those numbers are not carried in this tree, so --chain-parse reports such a
+# payload as unobserved with the reason, and --ike-chain refuses to build an
+# N3IWF IKE_AUTH whose identity form and NAS carriage it cannot cite. A guessed
+# number in a capture that is later used to blame a handset is worse than an
+# admitted gap.
+
+vowi_dir() { printf '%s' "${VOWI_DIR:-${LOOT_DIR:-.}/vowifi}"; }
+vowi_chains_path() { printf '%s/ike-chains.tsv' "$(vowi_dir)"; }
+vowi_hexify() { printf '%s' "${1:-}" | od -An -tx1 -v | tr -d ' \n' | tr 'a-f' 'A-F'; }
+# A payload value is shown as text when every octet is printable, and left as
+# hex when it is not: an NAI reads as an NAI, a key reads as key material.
+vowi_ascii() {
+    local h i c out=""
+    h=$(vowi_norm_hex "${1:-}")
+    for (( i = 0; i < ${#h}; i += 2 )); do
+        c=$(( 16#${h:i:2} ))
+        if (( c >= 32 && c < 127 )); then
+            out+=$(printf "\\$(printf '%03o' "$c")")
+        else
+            out+="."
+        fi
+    done
+    printf '%s' "$out"
+}
+
+# RFC 7296 §3.8 authentication methods, up to the ones the RFC names. A value
+# past them keeps its number: the registry has grown (RFC 7427 and 3GPP
+# additions) and a name this file cannot cite is not one it may invent.
+vowi_auth_method_name() {
+    case "${1:-0}" in
+        1) printf 'RSA Digital Signature\n' ;;
+        2) printf 'Shared Key Message Integrity Code\n' ;;
+        3) printf 'DSS Digital Signature\n' ;;
+        4) printf 'ECDSA with SHA-256\n' ;;
+        5) printf 'ECDSA with SHA-384\n' ;;
+        6) printf 'ECDSA with SHA-512\n' ;;
+        7) printf 'NULL Authentication\n' ;;
+        8) printf 'Digital Signature (RFC 7427)\n' ;;
+        *) printf 'unassigned\n' ;;
+    esac
+}
+# §3.15.1 configuration payload type.
+vowi_cfg_type_name() {
+    case "${1:-0}" in
+        1) printf 'CFG_REQUEST\n' ;; 2) printf 'CFG_REPLY\n' ;;
+        3) printf 'CFG_SET\n' ;;     4) printf 'CFG_ACK\n' ;;
+        *) printf 'unassigned\n' ;;
+    esac
+}
+# Only the four attributes RFC 7296 §3.15.1 names outright: the rest of that
+# registry is not in this tree, so an id past them keeps its number.
+vowi_cfg_attr_name() {
+    case "${1:-0}" in
+        1) printf 'INTERNAL_IP4_ADDRESS\n' ;; 2) printf 'INTERNAL_IP4_NETMASK\n' ;;
+        3) printf 'INTERNAL_IP4_DNS\n' ;;     4) printf 'INTERNAL_IP4_NBNS\n' ;;
+        *) printf 'unmodelled\n' ;;
+    esac
+}
+vowi_ts_type_name() {
+    case "${1:-0}" in
+        7) printf 'TS_IPV4_ADDR_RANGE\n' ;; 8) printf 'TS_IPV6_ADDR_RANGE\n' ;;
+        *) printf 'unassigned\n' ;;
+    esac
+}
+vowi_ip_proto_name() {
+    case "${1:-0}" in
+        0) printf 'any\n' ;; 6) printf 'tcp\n' ;; 17) printf 'udp\n' ;;
+        50) printf 'esp\n' ;; 51) printf 'ah\n' ;; *) printf 'unmodelled\n' ;;
+    esac
+}
+
+# §3.2: next(1) flags(1) length(2), the length counting this header too.
+vowi_pl() {
+    local next="${1:-0}" body="${2:-}"
+    printf '%s00%04X%s' "$(vowi_byte "$next")" "$(( 4 + ${#body} / 2 ))" "$body"
+}
+# §3.3.5: a transform attribute with the format bit set carries its value in
+# the same 4 octets as its type, so the Key Length of 128-bit AES is 800E 0080
+# — attribute 14, value 0x0080. That is the shape a dissector accepts: tshark
+# reads 800E 0080 as "Key Length: 128" and flags the 6-octet spelling
+# 800E 0002 0080 as a malformed packet, so the short form is the one built.
+vowi_attr_tv() { printf '%04X%04X' "$(( 0x8000 | ${1:-0} ))" "$(( ${2:-0} & 0xFFFF ))"; }
+# §3.3.2: Last(1) reserved(1) Length(2) Type(1) reserved(1) Transform ID(2).
+vowi_transform() {
+    local t="${1:-1}" id="${2:-0}" attr="${3:-}" last="${4:-0}"
+    printf '%s00%04X%s00%04X%s' "$(vowi_byte "$last")" "$(( 8 + ${#attr} / 2 ))" \
+        "$(vowi_byte "$t")" "$(( ${id:-0} & 0xFFFF ))" "$attr"
+}
+# §3.3.1: Last(1) reserved(1) Length(2) Num(1) Protocol ID(1) SPI Size(1)
+# Number of Transforms(1) SPI, then the transforms.
+vowi_proposal() {
+    local num="${1:-1}" proto="${2:-1}" ntr="${3:-0}" spi="${4:-}" trans="${5:-}" last="${6:-2}"
+    printf '%s00%04X%s%s%s%s%s' "$(vowi_byte "$last")" \
+        "$(( 8 + ${#spi} / 2 + ${#trans} / 2 ))" "$(vowi_byte "$num")" "$(vowi_byte "$proto")" \
+        "$(vowi_byte "$(( ${#spi} / 2 ))")" "$(vowi_byte "$ntr")" "$spi$trans"
+}
+
+# An SA payload body from a transform spec: <type>:<id>[:<keylen>], comma
+# separated. Every id is checked against the registry first: proposing a
+# transform whose number this file cannot name builds a message nobody can read.
+vowi_sa_body() {
+    local proto="${1:-1}" spec="${2:-}"
+    local -a toks=() okv=()
+    local IFS=','; toks=( $spec ); unset IFS
+    local tok t id keylen kname
+    for tok in "${toks[@]}"; do
+        [[ -n "$tok" ]] || continue
+        t="${tok%%:*}"; tok="${tok#*:}"
+        id="${tok%%:*}"; keylen=""
+        [[ "$tok" == *:* ]] && keylen="${tok#*:}"
+        [[ "$t" =~ ^[0-9]+$ && "$id" =~ ^[0-9]+$ ]] || {
+            printf 'ERROR\ttransform "%s" is not <type>:<id>[:keylen]\n' "$t:$id" >&2; return 1; }
+        case "$t" in
+            1) kname=encr ;; 2) kname=prf ;; 3) kname=integ ;; 4) kname=ke ;; 5) kname=esn ;;
+            *) kname="" ;;
+        esac
+        if [[ -n "$kname" && -z "$(vowi_reg_name "$kname" "$id")" ]]; then
+            printf 'ERROR\ttransform type %s id %s is not in the registry; an unnamed transform is not proposed\n' \
+                "$t" "$id" >&2
+            return 1
+        fi
+        okv+=( "$t:$id${keylen:+:$keylen}" )
+    done
+    (( ${#okv[@]} > 0 )) || { printf 'ERROR\tno transforms to propose\n' >&2; return 1; }
+    local trans="" attr n=0 total=${#okv[@]}
+    for tok in "${okv[@]}"; do
+        n=$(( n + 1 ))
+        t="${tok%%:*}"; tok="${tok#*:}"
+        id="${tok%%:*}"; keylen=""
+        [[ "$tok" == *:* ]] && keylen="${tok#*:}"
+        attr=""
+        [[ -n "$keylen" ]] && attr=$(vowi_attr_tv 14 "$keylen")
+        trans+=$(vowi_transform "$t" "$id" "$attr" "$(( n == total ? 3 : 0 ))")
+    done
+    vowi_proposal 1 "$proto" "$total" "" "$trans" 2
+}
+
+# §3.4: DH Group # (2) Reserved (2) Key Exchange Data.
+vowi_ke_body() { printf '%04X0000%s' "$(( ${1:-14} & 0xFFFF ))" "${2:-}"; }
+# §3.5: ID Type (1) Reserved (3) Identification Data.
+vowi_id_body() { printf '%s000000%s' "$(vowi_byte "${1:-2}")" "${2:-}"; }
+# §3.8: Authentication Method (1) Reserved (3) Authentication Data.
+vowi_auth_body() { printf '%s000000%s' "$(vowi_byte "${1:-2}")" "${2:-}"; }
+# §3.13.1: Number of TSs (1) Reserved (3), then per TS: TS Type (1), IP Protocol
+# ID (1), Selector Length (2, counting its own 8 octets), Start Port (2), End
+# Port (2), Starting Address, Ending Address.
+vowi_ts_body() {
+    local type="${1:-7}" proto="${2:-0}" sp="${3:-0}" ep="${4:-65535}"
+    local saddr="${5:-00000000}" eaddr="${6:-FFFFFFFF}"
+    printf '%s000000%s%s%04X%04X%04X%s%s' "$(vowi_byte 1)" "$(vowi_byte "$type")" \
+        "$(vowi_byte "$proto")" "$(( 8 + ${#saddr} / 2 + ${#eaddr} / 2 ))" \
+        "$(( sp & 0xFFFF ))" "$(( ep & 0xFFFF ))" "$saddr" "$eaddr"
+}
+# §3.15: CFG Type (1) Reserved (3), then configuration attributes, each a
+# type (2, AF bit set) length (2) value.
+vowi_cp_body() {
+    local cfgtype="${1:-1}" addr="${2:-}" attrs=""
+    [[ -n "$addr" ]] && attrs=$(printf '8001%04X%s' "$(( ${#addr} / 2 ))" "$addr")
+    printf '%s000000%s' "$(vowi_byte "$cfgtype")" "$attrs"
+}
+
+# The whole message: the header's length field counts header plus chain.
+vowi_ike_msg() {
+    local ispi rspi next exch flags mid chain
+    ispi=$(vowi_norm_hex "${1:-1122334455667788}")
+    rspi=$(vowi_norm_hex "${2:-0000000000000000}")
+    next="${3:-0}"; exch="${4:-34}"; flags="${5:-8}"
+    mid=$(vowi_norm_hex "${6:-00000000}"); chain="${7:-}"
+    printf '%s%s%s%s%s%s%s%08X%s' "$ispi" "$rspi" "$(vowi_byte "$next")" "20" \
+        "$(vowi_byte "$exch")" "$(vowi_byte "$flags")" "$mid" \
+        "$(( 28 + ${#chain} / 2 ))" "$chain"
+}
+
+vowi_chain_store() {  # <verb> <exchange> <profile> <payloads> <octets> <verdict> <detail>
+    local f; f=$(vowi_chains_path)
+    mkdir -p "$(vowi_dir)" 2>/dev/null
+    [[ -s "$f" ]] || printf 'ts\tverb\texchange\tprofile\tpayloads\toctets\tverdict\tdetail\n' > "$f"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$(vowi_sanitize "${1:-}")" "$(vowi_sanitize "${2:-}")" "$(vowi_sanitize "${3:-}")" \
+        "$(vowi_sanitize "${4:-}")" "$(vowi_sanitize "${5:-}")" "$(vowi_sanitize "${6:-}")" \
+        "$(vowi_sanitize "${7:-}")" >> "$f"
+}
+
+vowi_cmd_ike_chain() {
+    local exchange="${1:-ike-sa-init}" profile="${2:-plain}"
+    case "$exchange" in
+        ike-sa-init|ike_sa_init|sa-init|34) exchange="ike-sa-init" ;;
+        ike-auth|ike_auth|auth|35)          exchange="ike-auth" ;;
+        *)  printf 'ERROR\t--ike-chain builds ike-sa-init or ike-auth; "%s" is not modelled\n' "$exchange" >&2
+            return 2 ;;
+    esac
+    case "$profile" in
+        plain|epdg|n3iwf) ;;
+        *)  printf 'ERROR\tprofile is plain, epdg or n3iwf\n' >&2; return 2 ;;
+    esac
+
+    local ispi="1122334455667788" rspi="0000000000000000" mid="00000000" flags=8
+    local exch next payloads msg body body2 sa2 tsi tsr nai fqdn eap out rc
+
+    if [[ "$exchange" == "ike-sa-init" ]]; then
+        exch=34; next=33
+        body=$(vowi_sa_body 1 "1:12:128,2:5,3:12,4:14") || return $?
+        body2=$(vowi_ke_body 14 "$(printf 'a5%.0s' {1..64})")
+        # SAi → KEi → Ni, which is the order RFC 7296 §1.2 fixes for IKE_SA_INIT.
+        local ke nonce
+        ke=$(vowi_pl 40 "$body2")
+        nonce=$(vowi_pl 0 "$(printf '5a%.0s' {1..32})")
+        local sai; sai=$(vowi_pl 34 "$body")
+        msg=$(vowi_ike_msg "$ispi" "$rspi" 33 34 "$flags" "$mid" "$sai$ke$nonce")
+        payloads="SA,KEi,Ni"
+        printf 'kind\tsa-init\n'
+        printf 'exchange\tike-sa-init\n'
+        printf 'exchange_type\t34\t%s\n' "$(vowi_ike_name 34)"
+        printf 'profile\t%s\n' "$profile"
+        printf 'initiator_spi\t%s\nresponder_spi\t%s\n' "$ispi" "$rspi"
+        printf 'flags\t0x%02X\ninitiator\tyes\nmessage_id\t%s\n' "$flags" "$mid"
+        printf 'payloads\t%s\n' "$payloads"
+        printf 'sa_proposal\tencr 12 (AES-CBC, key length attribute 0x0080 = 128 bit), prf 5, integ 12, dh 14\n'
+        vowi_dh_classify 14 | sed 's/^/ke_/' 
+        printf 'nonce_octets\t32\n'
+        printf 'spec\tRFC 7296 3.1 (header), 3.2 (payload chain), 3.3 (SA), 3.4 (KE), 3.6 (nonce), 1.2 (IKE_SA_INIT is SAi, KEi, Ni)\n'
+        if [[ "$profile" != "plain" ]]; then
+            printf 'note\t%s\n' "IKE_SA_INIT is the same exchange for an ePDG and an N3IWF: RFC 7296 fixes it as SAi, KEi, Ni, and the 3GPP layer (identity form, authentication method, NAS carriage) appears only in IKE_AUTH"
+        fi
+    else
+        exch=35; flags=8
+        case "$profile" in
+            plain)
+                next=35
+                body=$(vowi_id_body 2 "$(vowi_hexify ue.example.org)")
+                body2=$(vowi_auth_body 2 "$(printf '3c%.0s' {1..32})")
+                sa2=$(vowi_sa_body 3 "1:12:128") || return $?
+                tsi=$(vowi_ts_body 7 0 0 65535 0A000001 0A000001)
+                tsr=$(vowi_ts_body 7 0 0 65535 00000000 FFFFFFFF)
+                # §1.2 order: IDi, AUTH, [CP], SA, TSi, TSr. A payload's own
+                # type is not in its header: it is the next-payload field of the
+                # payload before it (RFC 7296 3.2), so each call passes the type
+                # that FOLLOWS, never its own.
+                local p_tsr p_tsi p_sa p_auth p_idi
+                p_tsr=$(vowi_pl 0  "$tsr")      # TSr is last
+                p_tsi=$(vowi_pl 45 "$tsi")      # TSi -> TSr
+                p_sa=$(vowi_pl 44  "$sa2")      # SA  -> TSi
+                p_auth=$(vowi_pl 33 "$body2")   # AUTH -> SA
+                p_idi=$(vowi_pl 39 "$body")     # IDi -> AUTH
+                msg=$(vowi_ike_msg "$ispi" "$rspi" 35 35 "$flags" "$mid" "$p_idi$p_auth$p_sa$p_tsi$p_tsr")
+                payloads="IDi,AUTH,SAi2,TSi,TSr"
+                printf 'kind\tauth\n'
+                printf 'exchange\tike-auth\n'
+                printf 'exchange_type\t35\t%s\n' "$(vowi_ike_name 35)"
+                printf 'profile\tplain\n'
+                printf 'initiator_spi\t%s\nresponder_spi\t%s\n' "$ispi" "$rspi"
+                printf 'flags\t0x%02X\ninitiator\tyes\nmessage_id\t%s\n' "$flags" "$mid"
+                printf 'payloads\t%s\n' "$payloads"
+                printf 'idi_type\t2\t%s\tue.example.org\n' "$(vowi_id_type_name 2)"
+                printf 'auth_method\t2\t%s\n' "$(vowi_auth_method_name 2)"
+                printf 'child_sa\tesp, encr 12 (AES-CBC 128)\n'
+                printf 'tsi\t%s 10.0.0.1-10.0.0.1 ports 0-65535\n' "$(vowi_ts_type_name 7)"
+                printf 'tsr\t%s 0.0.0.0-255.255.255.255 ports 0-65535\n' "$(vowi_ts_type_name 7)"
+                printf 'spec\tRFC 7296 1.2 (IDi, [CERT], [IDr], AUTH, [CP], SA, TSi, TSr), 3.5 (ID), 3.8 (AUTH), 3.13.1 (TS)\n'
+                ;;
+            epdg)
+                next=35
+                nai=$(vowi_nai "001010123456789" "001" "01") || return $?
+                fqdn=$(vowi_epdg_fqdn "001" "01") || return $?
+                body=$(vowi_id_body 3 "$(vowi_hexify "$nai")")
+                # EAP-AKA' is EAP type 50 (RFC 9048 8.1); vowi_eap_aka defaults
+                # to 23, so the type is passed explicitly.
+                # The response carries one AT_RAND (attribute 1, RFC 4187 10.2);
+                # it is built by the module's own attribute encoder so its
+                # 4-octet alignment is the one already tested here.
+                eap=$(vowi_eap_aka 2 1 1 "$(vowi_eap_attr 1 "$(printf 'a1%.0s' {1..16})")" 50) || return $?
+                local p_eap p_idi2
+                p_eap=$(vowi_pl 0  "$eap")      # EAP is last
+                p_idi2=$(vowi_pl 48 "$body")    # IDi -> EAP
+                msg=$(vowi_ike_msg "$ispi" "$rspi" 35 35 "$flags" "$mid" "$p_idi2$p_eap")
+                payloads="IDi,EAP"
+                printf 'kind\tauth\n'
+                printf 'exchange\tike-auth\n'
+                printf 'exchange_type\t35\t%s\n' "$(vowi_ike_name 35)"
+                printf 'profile\tepdg\n'
+                printf 'initiator_spi\t%s\nresponder_spi\t%s\n' "$ispi" "$rspi"
+                printf 'flags\t0x%02X\ninitiator\tyes\nmessage_id\t%s\n' "$flags" "$mid"
+                printf 'payloads\t%s\n' "$payloads"
+                printf 'idi_type\t3\t%s\t%s\n' "$(vowi_id_type_name 3)" "$nai"
+                printf 'idr_expected\t2\t%s\t%s\n' "$(vowi_id_type_name 2)" "$fqdn"
+                printf 'eap_type\t50\t%s\n' "EAP-AKA' (RFC 9048 8.1); EAP-AKA alone would be type 23"
+                printf 'next_exchange\tthe ePDG answers with an EAP-Request/AKA-Challenge, and the child SA is negotiated in the second IKE_AUTH once EAP succeeds (RFC 7296 1.2)\n'
+                printf 'spec\tRFC 7296 1.2, 3.5 (IDi), 3.7 (EAP payload type 48), RFC 9048 8.1 (EAP-AKA type 50), RFC 4187 8.1 (EAP-AKA packet)\n'
+                printf 'note\t%s\n' "the identity travels in IDi, in the clear, before any key exists: the NAI and with it the home PLMN are visible to the Wi-Fi network (RFC 7296 3.1)"
+                ;;
+            n3iwf)
+                printf 'kind\tauth\n'
+                printf 'exchange\tike-auth\n'
+                printf 'exchange_type\t35\t%s\n' "$(vowi_ike_name 35)"
+                printf 'profile\tn3iwf\n'
+                printf 'status\tunobserved\n'
+                printf 'reason\t%s\n' "an N3IWF IKE_AUTH carries a 5G NAI in IDi and NAS signalling inside the EAP exchange (TS 24.502 8.2.1); neither the identity form nor the payload numbers that clause assigns are carried in this tree, so no message is built rather than a guessed one"
+                printf 'known\t%s\n' "the exchange is IKE_AUTH, the outer method is EAP, and the user-plane child SA is negotiated only after the EAP exchange succeeds (TS 24.502 8.2.1 / TS 23.501 4.3.2.2)"
+                printf 'measured\t%s\n' "nothing in this message: not one octet of an N3IWF IKE_AUTH is asserted here"
+                printf 'next\t%s\n' "--ike-chain ike-sa-init n3iwf builds the exchange the N3IWF shares with the ePDG; --n3iwf-plan n3iwf states what the rest of the path needs"
+                printf 'spec\tRFC 7296 1.2 / 3.5 (what IKE_AUTH is), TS 24.502 8.2.1 (what 3GPP adds, not carried here)\n'
+                vowi_chain_store ike-chain ike-auth n3iwf - 0 unobserved "TS 24.502 identity form and NAS carriage numbers not carried"
+                return 1
+                ;;
+        esac
+    fi
+
+    printf 'next_payload\t%s\t%s\n' "$next" "$(vowi_payload_name "$next")"
+    printf 'length_field\t%s\n' "$(( ${#msg} / 2 ))"
+    printf 'octets\t%s\n' "$(( ${#msg} / 2 ))"
+    printf 'hex\t%s\n' "$msg"
+    # The message is walked by this module's own parser before it is reported: a
+    # chain that cannot be walked is not a chain worth handing out.
+    out=$(vowi_payload_walk "$msg"); rc=$?
+    if (( rc != 0 )); then
+        printf 'ERROR\tthe assembled message does not walk: %s\n' \
+            "$(printf '%s' "$out" | grep -v '^order' | head -1)" >&2
+        return 1
+    fi
+    printf 'payload_order\t%s\n' "$(printf '%s\n' "$out" | awk -F'\t' 'NR>1{printf "%s%s", sep, $4; sep=","}')"
+    vowi_chain_store ike-chain "$exchange" "$profile" "$payloads" "$(( ${#msg} / 2 ))" built "assembled and walked"
+    return 0
+}
+
+# ── reading a chain back: what a capture of this exchange actually carries ──
+# The parser walks the chain the same way the builder walked it, and reports a
+# payload it cannot decode as unobserved rather than as an empty value. A
+# message with a SK payload has an encrypted tail: what is inside it is not
+# "nothing", it is unobserved.
+vowi_dotted() {
+    local h="${1:-00000000}"
+    printf '%d.%d.%d.%d' "$(( 16#${h:0:2} ))" "$(( 16#${h:2:2} ))" \
+        "$(( 16#${h:4:2} ))" "$(( 16#${h:6:2} ))"
+}
+
+vowi_cmd_chain_parse() {
+    local h; h=$(vowi_norm_hex "${1:-}")
+    vowi_is_hex "$h" || { printf 'ERROR\tsupply the IKEv2 message as hex\n' >&2; return 2; }
+    local octets=$(( ${#h} / 2 ))
+    (( octets >= 28 )) || {
+        printf 'ERROR\tan IKEv2 message begins with a 28-octet header; %d octets given\n' "$octets" >&2
+        return 2; }
+    local hdr hrc=0
+    hdr=$(vowi_ike_parse "$h") || hrc=$?
+    printf '%s\n' "$hdr"
+    local len; len=$(( 16#${h:48:8} ))
+    if (( len == octets )); then
+        printf 'length_mismatch\tno\n'
+    else
+        printf 'length_mismatch\tyes\tthe length field says %d octets and %d were given\n' "$len" "$octets"
+    fi
+    (( len >= 28 )) || { printf 'ERROR\tthe length field %d is shorter than the header\n' "$len" >&2; return 1; }
+    # A header that promises more octets than arrived describes a truncated
+    # message: walking it would read past the end and report fields that are
+    # not there, so the whole message stays unobserved instead.
+    if (( len > octets )); then
+        printf 'ERROR\tthe length field says %d octets and only %d arrived: the message is truncated\n' \
+            "$len" "$octets" >&2
+        printf 'verdict\tunobserved\t%s of %s octets arrived, so nothing past the truncation is read\n' \
+            "$octets" "$len"
+        return 1
+    fi
+    local nt=$(( 16#${h:32:2} )) off=28 n=0 seen=0 unobs=0
+    while (( nt != 0 )); do
+        if (( off + 4 > len )); then
+            printf 'ERROR\tpayload header at octet %d runs past the %d-octet message\n' "$off" "$len" >&2
+            return 1
+        fi
+        local pnext=$(( 16#${h:$(( off * 2 )):2} ))
+        local plen=$(( 16#${h:$(( off * 2 + 4 )):4} ))
+        if (( plen < 4 || off + plen > len )); then
+            printf 'ERROR\tpayload %d at octet %d claims %d octets into a %d-octet message\n' \
+                "$nt" "$off" "$plen" "$len" >&2
+            return 1
+        fi
+        local body="${h:$(( off * 2 + 8 )):$(( (plen - 4) * 2 ))}"
+        printf 'payload\t%s\t%s\t%s\t%s\t%s\n' "$n" "$plen" "$nt" "$(vowi_payload_name "$nt")" "$off"
+        case "$nt" in
+            33)  vowi_sa_parse "$body" | awk -F'\t' -v p="p$n." 'BEGIN{OFS="\t"}{$1=p $1; print}' ;;
+            34)  local dhv; dhv=$(vowi_dh_classify "$(( 16#${body:0:4} ))")
+                 printf '%s\n' "$dhv" | awk -F'\t' -v p="p$n.ke_" 'BEGIN{OFS="\t"}{$1=p $1; print}'
+                 printf 'p%s.ke_data_octets\t%s\n' "$n" "$(( plen - 8 ))" ;;
+            35|36)
+                 local idt=$(( 16#${body:0:2} ))
+                 printf 'p%s.id_type\t%s\t%s\n' "$n" "$idt" "$(vowi_id_type_name "$idt")"
+                 printf 'p%s.id_value\t%s\n' "$n" "$(vowi_ascii "${body:8}")" ;;
+            37|38)
+                 printf 'p%s.cert_payload\t%s\t%s\n' "$n" "$(( plen - 4 ))" \
+                     "carried as opaque octets: this module does not decode X.509 here" ;;
+            39)  local am=$(( 16#${body:0:2} ))
+                 printf 'p%s.auth_method\t%s\t%s\n' "$n" "$am" "$(vowi_auth_method_name "$am")"
+                 printf 'p%s.auth_data_octets\t%s\n' "$n" "$(( plen - 8 ))" ;;
+            40|41|42|43)
+                 printf 'p%s.nonce_octets\t%s\n' "$n" "$(( plen - 4 ))" ;;
+            44|45)
+                 local cnt=$(( 16#${body:0:2} )) i=0 boff=8
+                 printf 'p%s.ts_count\t%s\n' "$n" "$cnt"
+                 while (( i < cnt )); do
+                     local tst=$(( 16#${body:$boff:2} )) tproto=$(( 16#${body:$(( boff + 2 )):2} ))
+                     local slen=$(( 16#${body:$(( boff + 4 )):4} ))
+                     local sport=$(( 16#${body:$(( boff + 8 )):4} )) eport=$(( 16#${body:$(( boff + 12 )):4} ))
+                     if (( slen < 8 || (boff + slen * 2) > ${#body} )); then
+                         printf 'p%s.ts.%s\tunobserved\tthe selector length %s octets does not fit the payload\n' \
+                             "$n" "$i" "$slen"
+                         unobs=$(( unobs + 1 )); break
+                     fi
+                     printf 'p%s.ts.%s.type\t%s\t%s\n' "$n" "$i" "$tst" "$(vowi_ts_type_name "$tst")"
+                     printf 'p%s.ts.%s.proto\t%s\t%s\n' "$n" "$i" "$tproto" "$(vowi_ip_proto_name "$tproto")"
+                     printf 'p%s.ts.%s.ports\t%s-%s\n' "$n" "$i" "$sport" "$eport"
+                     if (( tst == 7 && slen >= 16 )); then
+                         printf 'p%s.ts.%s.addr\t%s-%s\n' "$n" "$i" \
+                             "$(vowi_dotted "${body:$(( boff + 16 )):8}")" \
+                             "$(vowi_dotted "${body:$(( boff + 24 )):8}")"
+                     else
+                         printf 'p%s.ts.%s.addr\tunobserved\tonly TS_IPV4_ADDR_RANGE is rendered here\n' "$n" "$i"
+                         unobs=$(( unobs + 1 ))
+                     fi
+                     boff=$(( boff + slen * 2 )); i=$(( i + 1 ))
+                 done ;;
+            46)  printf 'p%s.sk\tunobserved\tthe SK payload at octet %s encrypts the rest of the message: payload and notify numbers beyond it are not readable without the SA keys\n' \
+                     "$n" "$off"
+                 unobs=$(( unobs + 1 )) ;;
+            47)  local ct=$(( 16#${body:0:2} )) aoff=8
+                 printf 'p%s.cfg_type\t%s\t%s\n' "$n" "$ct" "$(vowi_cfg_type_name "$ct")"
+                 while (( aoff + 8 <= ${#body} )); do
+                     local at; at=$(( 16#${body:$aoff:4} & 0x7FFF ))
+                     local alen; alen=$(( 16#${body:$(( aoff + 4 )):4} ))
+                     printf 'p%s.cfg_attr.%s\t%s\t%s\t%s octets\n' "$n" "$at" \
+                         "$(vowi_cfg_attr_name "$at")" "$alen" "$alen"
+                     aoff=$(( aoff + 8 + alen * 2 ))
+                 done ;;
+            48)  local eapo eaprc=0
+                 eapo=$(vowi_eap_parse "$body") || eaprc=$?
+                 if (( eaprc == 0 )); then
+                     printf '%s\n' "$eapo" | awk -F'\t' -v p="p$n." 'BEGIN{OFS="\t"}{$1=p $1; print}'
+                 else
+                     printf 'p%s.unobserved\tthe EAP payload did not decode as EAP-AKA or EAP-AKA prime: %s\n' \
+                         "$n" "$(printf '%s' "$eapo" | head -1)"
+                     unobs=$(( unobs + 1 ))
+                 fi ;;
+            *)   printf 'p%s.unobserved\t%s\tpayload type %s (%s) is not decoded by this module: the RFC 7296 payloads are SA, KE, IDi/IDr, CERT, CERTREQ, AUTH, N, D, V, TSi/TSr, SK, CP and EAP, and a 3GPP payload number such as the N3IWF NAS carriage of TS 24.502 is not carried in this tree\n' \
+                     "$n" "$nt" "$nt" "$(vowi_payload_name "$nt")"
+                 unobs=$(( unobs + 1 )) ;;
+        esac
+        seen=$(( seen + 1 ))
+        n=$(( n + 1 ))
+        off=$(( off + plen ))
+        nt=$pnext
+    done
+    if (( off != len )); then
+        printf 'trailing\t%s\t%s octets after the last payload\n' "$(( len - off ))" "$(( len - off ))"
+    fi
+    if (( unobs > 0 )); then
+        printf 'verdict\tunobserved\t%s payloads decoded, %s left unobserved\n' "$seen" "$unobs"
+    else
+        printf 'verdict\tdecoded\tall %s payloads decoded\n' "$seen"
+    fi
+    printf 'spec\tRFC 7296 3.2 (payload chain), 3.3 (SA), 3.4 (KE), 3.5 (ID), 3.8 (AUTH), 3.13.1 (TS), 3.15 (CP)\n'
+    (( hrc == 0 )) || return 1
+    return 0
+}
+
+# ── how a UE reaches the ePDG or the N3IWF ────────────────────────────────
+# The tunnel is only the transport. What matters for a UE under test is which
+# of these steps leaves a trace an operator can be shown, and which of them
+# this tree cannot model honestly.
+vowi_cmd_n3iwf_plan() {
+    local mode="${1:-both}"
+    case "$mode" in
+        epdg|n3iwf|both) ;;
+        *)  printf 'ERROR\t--n3iwf-plan takes epdg, n3iwf or both, not "%s"\n' "$mode" >&2; return 2 ;;
+    esac
+    printf 'status\thandoff\n'
+    printf 'what\t%s\n' "how a UE reaches an untrusted non-3GPP gateway — the ePDG for EPC access over SWu, the N3IWF for 5GC access over NWu — and what each step leaves observable"
+    if [[ "$mode" != n3iwf ]]; then
+        printf 'step\t%s\tgateway-fqdn\tadvertised\t%s\n' 1 \
+            "the UE composes epdg.epc.mnc<MNC>.mcc<MCC>.pub.3gppnetwork.org from its home PLMN (TS 23.402 4.5.4); --epdg builds it for a given PLMN"
+        printf 'step\t%s\tdns\tunobserved\t%s\n' 2 \
+            "which address the UE actually gets is only measured by a capture of its own resolution: a specified name is not a resolved one"
+        printf 'step\t%s\tike-sa-init\tmeasured\t%s\n' 3 \
+            "SAi, KEi, Ni with a proposal of ENCR/PRF/INTEG/DH — built and dissected by --ike-chain ike-sa-init, with RFC 7296 as the only source"
+        printf 'step\t%s\tidentity-in-the-clear\tmeasured\t%s\n' 4 \
+            "IDi carries the NAI before any key exists, so the home PLMN and the IMSI-derived user part are visible to the access network (RFC 7296 3.5); --nai builds the form"
+        printf 'step\t%s\tauthentication\tmeasured\t%s\n' 5 \
+            "the ePDG authenticates the UE with EAP-AKA' (EAP type 50, RFC 9048 8.1) carried in the EAP payload (type 48); --ike-chain ike-auth epdg assembles that exchange"
+        printf 'step\t%s\tchild-sa\tmeasured\t%s\n' 6 \
+            "once EAP succeeds, IKE_AUTH negotiates an ESP child SA (proposal protocol 3) with traffic selectors; --chain-parse reads both out of a capture"
+        printf 'step\t%s\twhat-is-not-modelled\tunobserved\t%s\n' 7 \
+            "the cipher material and the inner IP are not derived here: no key agreement is performed and no tunnel is established"
+    fi
+    if [[ "$mode" != epdg ]]; then
+        printf 'step\t%s\tgateway-selection\tadvertised\t%s\n' 8 \
+            "the N3IWF is selected by the 5GC's own procedure (TS 23.501 6.3.6) from the same DNS model as the ePDG; the selection rules themselves are not carried in this tree"
+        printf 'step\t%s\tike-sa-init\tmeasured\t%s\n' 9 \
+            "the IKE_SA_INIT above is the same exchange on the N3IWF: RFC 7296 fixes SAi, KEi, Ni for both gateways, so --ike-chain ike-sa-init n3iwf builds it"
+        printf 'step\t%s\tnwu-identity\tunobserved\t%s\n' 10 \
+            "the 5G form of IDi is not carried in this tree, so --ike-chain ike-auth n3iwf refuses rather than guessing it"
+        printf 'step\t%s\tnas-over-eap-5g\tunobserved\t%s\n' 11 \
+            "TS 24.502 8.2.1 puts the 5G-NAS registration inside an EAP-5G exchange in IKE_AUTH; neither the method numbers nor the payload numbers that clause assigns are in this tree, so no message of that shape is built here"
+        printf 'step\t%s\tinner-registration\tunobserved\t%s\n' 12 \
+            "after the NWu child SA exists the UE registers over the inner IP; that NAS is NAS-5GS and would be decoded by modules/34_slicing.sh's NAS reader, not by this module"
+    fi
+    printf 'step\t%s\twhat-this-does-not-do\tmeasured\t%s\n' 13 \
+        "nothing is transmitted: every row above is a local reading of what the specifications fix, and a claim about a live gateway stays unobserved until a capture exists"
+    printf 'gate\t%s\n' "a live capture of the UE's own IKE exchange, or the gateway's logs — neither is produced by this verb"
+    printf 'note\t%s\n' "grey is not clean: a step marked unobserved is one this tree cannot answer, not one that passed"
+    printf 'spec\t%s\n' "RFC 7296 1.2 (exchanges), 3.5 (IDi), 3.7 (EAP), RFC 9048 8.1 (EAP-AKA prime), TS 23.402 4.5.4 (ePDG selection), TS 24.502 8.2.1 (N3IWF access, not modelled)"
+    vowi_chain_store n3iwf-plan "$mode" - - 0 handoff "steps stated; N3IWF NAS carriage unobserved"
+    return 0
+}
+
 vowi_plan() {
     cat <<'EOF'
 status	handoff
@@ -1000,6 +1537,106 @@ vowi_selftest() {
     # a proposal whose length runs past the payload is refused, not partially read
     chk sa-over "$(vowi_sa_parse 000000FF01010001030000080100000B >/dev/null 2>&1; echo $?)" "1"
 
+    # ── IKEv2 chain assembly and the reader that walks it back ─────────────
+    # RFC 7296 §1.2 fixes the order: IKE_SA_INIT is SAi, KEi, Ni and IKE_AUTH
+    # is IDi, AUTH, SA, TSi, TSr (or IDi then EAP). A payload's own type is not
+    # in its header — it is the next-payload octet of the one before it — so a
+    # assembled chain is the only way to show the order is right.
+    local out h rc2 n_before n_after
+    out=$(vowi_cmd_ike_chain ike-sa-init plain)
+    chk chain-sa-init-octets "$(fld "$out" octets)"                 "184"
+    chk chain-sa-init-order  "$(fld "$out" payload_order)"          "SA,KE,Ni"
+    chk chain-sa-init-next   "$(fld "$out" next_payload)"           "33"
+    chk chain-sa-init-exch   "$(fld "$out" exchange)"               "ike-sa-init"
+    h=$(fld "$out" hex)
+    chk chain-sa-init-sa     "$(printf '%s' "$h" | grep -c '220000300200002C01010004')" "1"
+    # the key length attribute is 4 octets with the format bit set: 800E 0080
+    chk chain-sa-init-keylen "$(printf '%s' "$h" | grep -c '800E0080')" "1"
+    chk chain-sa-init-dh     "$(printf '%s' "$h" | grep -c '030000080400000E')" "1"
+    out=$(vowi_cmd_chain_parse "$h")
+    chk chain-parse-exchange "$(fld "$out" exchange_name)"          "IKE_SA_INIT"
+    chk chain-parse-payloads "$(printf '%s\n' "$out" | awk -F'\t' '$1=="payload"{c++} END{print c+0}')" "3"
+    chk chain-parse-encr     "$(fld "$out" p0.proposal.0.transform.0.name)" "ENCR_AES_CBC"
+    chk chain-parse-transf   "$(fld "$out" p0.proposal.0.transforms)"       "4"
+    chk chain-parse-ke       "$(fld "$out" p1.ke_transform_id)"             "14"
+    chk chain-parse-nonce    "$(fld "$out" p2.nonce_octets)"                "32"
+    chk chain-parse-decoded  "$(fld "$out" verdict)"                        "decoded"
+
+    h=$(fld "$(vowi_cmd_ike_chain ike-auth plain)" hex)
+    out=$(vowi_cmd_chain_parse "$h")
+    chk chain-parse-idi      "$(fld "$out" p0.id_type)"             "2"
+    chk chain-parse-idval    "$(fld "$out" p0.id_value)"            "ue.example.org"
+    chk chain-parse-authm    "$(fld "$out" p1.auth_method)"         "2"
+    chk chain-parse-authlen  "$(fld "$out" p1.auth_data_octets)"    "32"
+    chk chain-parse-tsi      "$(fld "$out" p3.ts.0.addr)"           "10.0.0.1-10.0.0.1"
+    chk chain-parse-tsr      "$(fld "$out" p4.ts.0.addr)"           "0.0.0.0-255.255.255.255"
+    chk chain-parse-ports    "$(fld "$out" p4.ts.0.ports)"          "0-65535"
+    chk chain-parse-tsproto  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="p4.ts.0.proto"{print $3}')" "any"
+
+    out=$(vowi_cmd_chain_parse "$(fld "$(vowi_cmd_ike_chain ike-auth epdg)" hex)")
+    chk chain-parse-nai      "$(fld "$out" p0.id_value)" \
+                             "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org"
+    chk chain-parse-eaptype  "$(fld "$out" p1.type_name)"           "EAP-AKA prime"
+    chk chain-parse-eapsub   "$(fld "$out" p1.subtype_name)"        "AKA-Challenge"
+    chk chain-parse-rand     "$(fld "$out" p1.att.0.name)"          "AT_RAND"
+    chk chain-parse-randlen  "$(fld "$out" p1.att.0.length)"        "20"
+
+    # A message that cannot be read whole is refused with the reason, never
+    # read as far as the octets happen to go.
+    vowi_cmd_chain_parse 1122 >/dev/null 2>&1;                    chk chain-short   "$?" "2"
+    vowi_cmd_chain_parse 112233445566778800000000000000002120220800000000000000200000003C >/dev/null 2>&1
+    chk chain-overrun "$?" "1"
+    h=$(fld "$(vowi_cmd_ike_chain ike-sa-init plain)" hex)
+    out=$(vowi_cmd_chain_parse "${h:0:${#h}-16}" 2>&1); rc2=$?
+    chk chain-truncated      "$rc2"                                 "1"
+    chk chain-trunc-verdict  "$(fld "$out" verdict)"                "unobserved"
+    chk chain-trunc-reason   "$(printf '%s\n' "$out" | grep -c 'truncated')" "1"
+    # a payload whose length field claims more than the message holds
+    out=$(vowi_cmd_chain_parse 11223344556677880000000000000000212022080000000000000022000000100102 2>&1)
+    chk chain-overrun-reason "$(printf '%s\n' "$out" | awk '/claims 16 octets into a 34-octet message/{c++} END{print c+0}')" "1"
+
+    # The N3IWF IKE_AUTH is refused rather than guessed: TS 24.502 is not here.
+    out=$(vowi_cmd_ike_chain ike-auth n3iwf 2>/dev/null); rc2=$?
+    chk chain-n3iwf-rc       "$rc2"                                 "1"
+    out=$(vowi_cmd_ike_chain ike-auth n3iwf 2>/dev/null)
+    chk chain-n3iwf-status   "$(fld "$out" status)"                 "unobserved"
+    chk chain-n3iwf-reason   "$(printf '%s\n' "$out" | awk '/TS 24.502/{c++} END{print (c>0)?"yes":"no"}')" "yes"
+    vowi_cmd_ike_chain nope       >/dev/null 2>&1;                 chk chain-bad-exch  "$?" "2"
+    vowi_cmd_ike_chain ike-auth x >/dev/null 2>&1;                 chk chain-bad-prof  "$?" "2"
+
+    # EAP-AKA prime is type 50 (RFC 9048 §8.1) and shares the AKA layout.
+    out=$(vowi_eap_parse 0201001C320100000105A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A10000)
+    chk eap-prime-type       "$(fld "$out" type_name)"              "EAP-AKA prime"
+    chk eap-prime-att        "$(fld "$out" att.0.name)"             "AT_RAND"
+    vowi_eap_parse 0201001C07010000 >/dev/null 2>&1;               chk eap-bad-type "$?" "1"
+
+    # ── the reach plan: what each step of the path leaves observable ───────
+    out=$(vowi_cmd_n3iwf_plan both)
+    chk plan-status          "$(fld "$out" status)"                 "handoff"
+    chk plan-steps           "$(printf '%s\n' "$out" | awk -F'\t' '$1=="step"{c++} END{print c+0}')" "13"
+    chk plan-sa-init-measured "$(printf '%s\n' "$out" | awk -F'\t' '$1=="step" && $3=="ike-sa-init" && $4=="measured"{c++} END{print c+0}')" "2"
+    chk plan-n3iwf-nas       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="step" && $3=="nas-over-eap-5g"{print $4}')" "unobserved"
+    chk plan-n3iwf-identity  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="step" && $3=="nwu-identity"{print $4}')" "unobserved"
+    chk plan-epdg-only-has-7 "$(printf '%s\n' "$(vowi_cmd_n3iwf_plan epdg)" | awk -F'\t' '$1=="step"{c++} END{print c+0}')" "8"
+    chk plan-gate            "$(printf '%s\n' "$out" | awk -F'\t' '$1=="gate"{c++} END{print c+0}')" "1"
+    vowi_cmd_n3iwf_plan zz >/dev/null 2>&1;                        chk plan-bad-mode "$?" "2"
+
+    # ── the store: append-only, one row per build ─────────────────────────
+    local chain_tsv; chain_tsv=$(vowi_chains_path)
+    chk chain-store-header   "$(head -1 "$chain_tsv")" \
+        "$(printf 'ts\tverb\texchange\tprofile\tpayloads\toctets\tverdict\tdetail')"
+    n_before=$(awk 'END{print NR+0}' "$chain_tsv")
+    vowi_cmd_ike_chain ike-sa-init plain >/dev/null
+    n_after=$(awk 'END{print NR+0}' "$chain_tsv")
+    chk chain-store-appends  "$(( n_after - n_before ))"            "1"
+    n_before=$n_after
+    vowi_cmd_ike_chain ike-auth n3iwf >/dev/null 2>&1
+    n_after=$(awk 'END{print NR+0}' "$chain_tsv")
+    chk chain-store-n3iwf-row "$(( n_after - n_before ))"          "1"
+    chk chain-store-row      "$(awk -F'\t' '$2=="ike-chain" && $3=="ike-sa-init" && $7=="built"{c++} END{print c+0}' "$chain_tsv")" \
+        "$(awk -F'\t' '$2=="ike-chain" && $3=="ike-sa-init" && $7=="built"{c++} END{print c+0}' "$chain_tsv")"
+    chk chain-store-n3iwf    "$(awk -F'\t' '$2=="ike-chain" && $4=="n3iwf" && $7=="unobserved"{c++} END{print (c>0)?"yes":"no"}' "$chain_tsv")" "yes"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1022,6 +1659,9 @@ vowi_menu() {
   [9]  Classify an integrity transform
   [10] Walk a payload chain
   [11] Plan (handoff)
+  [12] Assemble an IKEv2 message (SA_INIT / AUTH chain)
+  [13] Parse a whole IKEv2 payload chain
+  [14] ePDG / N3IWF reach plan (handoff)
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -1042,6 +1682,28 @@ M
             10) read -rp "  chain hex> " h; read -rp "  first payload type> " f
                 vowi_payload_walk "$h" "$f"; read -rp "  enter " _ ;;
             11) vowi_plan; read -rp "  enter " _ ;;
+            12) if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                    echo "[-] need an exchange and a profile; cannot prompt in CLI mode" >&2
+                    sleep 1; continue
+                fi
+                read -rp "  exchange (ike-sa-init|ike-auth)> " x
+                read -rp "  profile (plain|epdg|n3iwf)> " pf
+                [[ -n "$x" ]] || { warn "need an exchange"; sleep 1; continue; }
+                vowi_cmd_ike_chain "$x" "${pf:-plain}"; read -rp "  enter " _ ;;
+            13) if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                    echo "[-] need a message in hex; cannot prompt in CLI mode" >&2
+                    sleep 1; continue
+                fi
+                read -rp "  message hex> " h
+                [[ -n "$h" ]] || { warn "need a message"; sleep 1; continue; }
+                vowi_cmd_chain_parse "$h"; read -rp "  enter " _ ;;
+            14) if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                    vowi_cmd_n3iwf_plan both
+                    read -rp "  enter " _
+                    continue
+                fi
+                read -rp "  mode (epdg|n3iwf|both)> " m
+                vowi_cmd_n3iwf_plan "${m:-both}"; read -rp "  enter " _ ;;
             0)  return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -1075,6 +1737,9 @@ vowi_cli_main() {
         --integrity)    vowi_integrity_classify "${1:-}" ;;
         --walk)         vowi_payload_walk "${1:-}" "${2:-33}" ;;
         --null-check)   vowi_sa_parse "${1:-}" ;;
+        --ike-chain)    vowi_cmd_ike_chain "${1:-}" "${2:-}" ;;
+        --chain-parse)  vowi_cmd_chain_parse "${1:-}" ;;
+        --n3iwf-plan)   vowi_cmd_n3iwf_plan "${1:-}" ;;
         --plan)         vowi_plan ;;
         --selftest)     vowi_selftest ;;
         --menu)         vowi_menu ;;
@@ -1115,6 +1780,15 @@ Usage: $0 COMMAND
   --walk <hex> [type]  walk an IKEv2 payload chain
   --null-check <hex>   read an SA payload and report NULL encryption or
                        INTEG NONE in the proposals (RFC 7296 3.3.1/3.3.2)
+  --ike-chain <ike-sa-init|ike-auth> [plain|epdg|n3iwf]
+                       assemble a whole IKEv2 message — SAi/KEi/Ni for
+                       IKE_SA_INIT, IDi/AUTH/SA/TSi/TSr or IDi/EAP for
+                       IKE_AUTH — as one payload chain (RFC 7296 1.2)
+  --chain-parse <hex>  read that chain back: every payload, its identity,
+                       its traffic selector, and what stays unobserved
+  --n3iwf-plan [epdg|n3iwf|both]
+                       how a UE reaches an ePDG or an N3IWF, and which
+                       steps leave a trace (handoff, nothing transmitted)
   --plan               lab ePDG handoff plan
   --selftest           verify codecs and tables, no radio needed
   --menu               interactive menu

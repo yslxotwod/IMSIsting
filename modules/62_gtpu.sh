@@ -125,6 +125,9 @@ Usage: gtpu COMMAND
   --pdu-session <hex>            decode just a PDU Session Container
   --echo <count> [--teid <hex>]  an echo-request burst, printed as packets
   --teid-scan <hex>              what a TEID value is and what it collides with
+  --teid-sweep <host> [--start HEX] [--end HEX] [--step N] [--max N] [--rate R]
+                                [--timeout S] [--transmit]
+                                many TEIDs at one peer; dry run unless --transmit
   --inner-route <hex>            decode the inner IPv4 header and report where
                                  the tunnel is actually allowed to deliver
   --detect <pcap|hex>            find GTP-U anomalies in traffic or a capture
@@ -1355,6 +1358,34 @@ gtpu_selftest() {
     # live TEID as free.
     chk teidprobe-oracle-name "$(gtpu_msg_name 1A)" "error-indication"
 
+    # ── teid-sweep: bounded, paced, and inert until asked ──────────────
+    # The store is repointed at a throwaway tree so a selftest run never adds
+    # a row to loot/: a sweep is evidence of what an operator did, not of what
+    # the test suite did.
+    local sweep_dir out_sweep
+    sweep_dir=$(mktemp -d "$TMP_DIR/teid-sweep.XXXXXX") || sweep_dir=""
+    if [[ -n "$sweep_dir" ]]; then
+        local saved_gtpu="$GTPU_DIR"
+        GTPU_DIR="$sweep_dir/gtpu"
+        out_sweep=$(gtpu_cmd_teid_sweep --max 3 2>&1)
+        chk sweep-cases      "$(printf '%s\n' "$out_sweep" | awk -F'\t' '$1=="cases"{print $2}')" "3"
+        chk sweep-mode       "$(printf '%s\n' "$out_sweep" | awk -F'\t' '$1=="mode"{print $2}')" "planned"
+        chk sweep-first-teid "$(printf '%s\n' "$out_sweep" | awk -F'\t' 'NR==2{print $1}')" "0x00000001"
+        chk sweep-packet     "$(printf '%s\n' "$out_sweep" | awk -F'\t' 'NR==2{print $3}')" "3201000000000001"
+        chk sweep-inert      "$(printf '%s\n' "$out_sweep" | awk -F'\t' '$1=="sent" && $2 ~ /^nothing/ {print "yes"; exit}')" "yes"
+        chk sweep-store      "$(awk -F'\t' 'NR>1 && $NF=="planned"' "$GTPU_DIR/teid_scan.tsv" 2>/dev/null | wc -l | tr -d ' ')" "3"
+        gtpu_cmd_teid_sweep --transmit >/dev/null 2>&1
+        chk sweep-transmit-needs-peer "$?" "2"
+        gtpu_cmd_teid_sweep 127.0.0.1 --start 0x1 --end 0x4000 --max 8 >/dev/null 2>&1
+        chk sweep-bound          "$?" "1"
+        gtpu_cmd_teid_sweep --wat >/dev/null 2>&1
+        chk sweep-refuses-flag   "$?" "2"
+        GTPU_DIR="$saved_gtpu"
+        rm -rf "$sweep_dir"
+    else
+        chk sweep-scratch "mktemp failed" "a scratch directory"
+    fi
+
     printf 'RESULT\t%s\n' "$([ "$bad" -eq 0 ] && echo PASS || echo "FAIL bad=$bad")"
     (( bad == 0 ))
 }
@@ -1369,6 +1400,7 @@ gtpu_menu() {
         printf '  3) PDU Session Container    7) inner route\n'
         printf '  4) detect                   8) reference points\n'
         printf '  9) boundary\n'
+        printf ' 10) sweep many TEIDs at one peer (dry run)\n'
         printf '  0) back\n'
         read -rp '  choice: ' c
         case "$c" in
@@ -1381,6 +1413,7 @@ gtpu_menu() {
             7) read -rp '  inner ipv4 hex: ' h; gtpu_cmd_inner_route "$h" ;;
             8) gtpu_cmd_paths ;;
             9) read -rp '  inner ipv4 hex (blank for the table): ' h; gtpu_cmd_boundary "$h" ;;
+            10) read -rp '  peer: ' h; gtpu_cmd_teid_sweep "${h:-127.0.0.1}" ;;
             0) return ;;
             *) printf '  invalid\n' ;;
         esac
@@ -1388,6 +1421,100 @@ gtpu_menu() {
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── --teid-scan : many TEIDs at one peer, and what came back ───────────────
+# A TEID is the only address a GTP-U packet carries (TS 29.281 5.1), so the
+# way to ask whether a peer holds a bearer is to send an Echo Request that
+# names it. Two limits keep that from becoming a flood: the range is bounded
+# by --max and refuses to truncate itself silently, and the pace is --rate.
+#
+# The default is a dry run. It builds every packet, prints the exact octets it
+# would send, and stores the plan; nothing goes on a wire unless --transmit is
+# given as well, and then the first rows say which lab this is meant for.
+# A missing answer is recorded as unobserved -- not as "the TEID is unused".
+# Silence has several causes (peer down, path filtered, no echo habit) and
+# only a returned Echo Response carrying the TEID settles the question.
+gtpu_teid_scan_tool() { printf '%s/tools/gtpu_teid_scan.py' "$IMSISTING_ROOT"; }
+
+gtpu_teid_scan_store() { printf '%s/teid_scan.tsv' "$GTPU_DIR"; }
+
+gtpu_cmd_teid_sweep() {  # <host> [--start HEX] [--end HEX] [--step N] [--max N]
+                        # [--rate R] [--timeout S] [--transmit]
+    local host="" start="0x00000001" end="" step="1" max="64" rate="10" tmo="1"
+    local transmit=0
+    while (( $# )); do
+        case "$1" in
+            --start)    (($# >= 2)) || { printf 'ERROR\t--start takes a TEID in hex\n' >&2; return 2; }
+                        start="$2"; shift 2 ;;
+            --end)      (($# >= 2)) || { printf 'ERROR\t--end takes a TEID in hex\n' >&2; return 2; }
+                        end="$2"; shift 2 ;;
+            --step)     (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                            printf 'ERROR\t--step takes a number\n' >&2; return 2; }
+                        step="$2"; shift 2 ;;
+            --max)      (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                            printf 'ERROR\t--max takes a number\n' >&2; return 2; }
+                        max="$2"; shift 2 ;;
+            --rate)     (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                            printf 'ERROR\t--rate takes packets per second\n' >&2; return 2; }
+                        rate="$2"; shift 2 ;;
+            --timeout)  (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                            printf 'ERROR\t--timeout takes seconds\n' >&2; return 2; }
+                        tmo="$2"; shift 2 ;;
+            --transmit) transmit=1; shift ;;
+            --help|-h)  printf 'usage: --teid-scan <host> [--start HEX] [--end HEX] [--step N] [--max N] [--rate R] [--timeout S] [--transmit]\n'; return 0 ;;
+            -*)         printf 'ERROR\t--teid-scan does not take %s\n' "$(gtpu_sanitize "$1")" >&2; return 2 ;;
+            *)          if [[ -z "$host" ]]; then host="$1"; shift; else
+                            printf 'ERROR\t--teid-scan takes one peer address\n' >&2; return 2; fi ;;
+        esac
+    done
+    local py; py=$(command -v python3 2>/dev/null || true)
+    [[ -n "$py" ]] || { printf 'ERROR\tpython3 is missing; the scan and its sender are python3\n' >&2; return 1; }
+    local tool; tool=$(gtpu_teid_scan_tool)
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\t%s is missing: the scan builder and sender live there\n' "$tool" >&2
+        return 1; }
+    if (( transmit )) && [[ -z "$host" ]]; then
+        printf 'ERROR\t--transmit needs a peer address: a scan goes nowhere without a host you name\n' >&2
+        printf 'ERROR\twithout --transmit this verb builds the packets and sends nothing\n' >&2
+        return 2
+    fi
+    local -a targs=(--start "$start" --step "$step" --max "$max" --rate "$rate"
+                    --timeout "$tmo")
+    [[ -n "$end" ]] && targs+=(--end "$end")
+    if (( transmit )); then
+        printf 'lab\tthis transmits GTP-U Echo Requests at %s:2152 -- a lab peer you own\n' "$host"
+        printf 'lab\tat --rate %s/s and --max %s packets; a production GGSN/PGW will log it\n' "$rate" "$max"
+        targs+=(--transmit)
+        targs=("$host" "${targs[@]}")
+    fi
+    local root="${TMP_DIR:-/tmp}" plan out rc=0
+    [[ -d "$root" ]] || mkdir -p "$root" 2>/dev/null || root=/tmp
+    plan=$(mktemp "$root/teid-scan.XXXXXX") || {
+        printf 'ERROR\tno scratch directory: cannot write the plan\n' >&2; return 1; }
+    out=$("$py" "$tool" "${targs[@]}" --plan-tsv "$plan" 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    if [[ -s "$plan" ]]; then
+        mkdir -p "$GTPU_DIR" || return 1
+        [[ -s "$(gtpu_teid_scan_store)" ]] || head -n 1 "$plan" > "$(gtpu_teid_scan_store)"
+        tail -n +2 "$plan" >> "$(gtpu_teid_scan_store)"
+        printf 'store\t%s\n' "$(gtpu_teid_scan_store)"
+    fi
+    rm -f "$plan"
+    if (( ! transmit )); then
+        if (( rc != 0 )); then
+            printf 'ERROR\tthe scan builder refused (exit %d); nothing was built and nothing was sent\n' "$rc" >&2
+            return 1
+        fi
+        printf 'sent\tnothing: this run built the packets and printed them, and --transmit is the separate flag that sends\n'
+        return 0
+    fi
+    if (( rc != 0 )); then
+        printf 'ERROR\tsome TEIDs got no answer (exit %d): unobserved is not absent -- the peer may be down, filtered, or slow to echo\n' \
+            "$rc" >&2
+        return 1
+    fi
+    return 0
+}
+
 gtpu_cli_main() {
     local cmd="${1:-}"
     (( $# > 0 )) && shift
@@ -1402,6 +1529,7 @@ gtpu_cli_main() {
         --detect)      gtpu_cmd_detect "${1:-}" ;;
         --boundary)    gtpu_cmd_boundary "${1:-}" ;;
         --teid-probe)  gtpu_cmd_teid_probe "$@" ;;
+        --teid-sweep)  gtpu_cmd_teid_sweep "$@" ;;
         --bridge)      gtpu_cmd_bridge "$@" ;;
         --paths)       gtpu_cmd_paths ;;
         --plan)        gtpu_cmd_plan "${1:-}" ;;

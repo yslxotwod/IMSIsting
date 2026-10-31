@@ -105,6 +105,176 @@ femt_csg_decode() {
     printf 'csg_id\t%d\nhex\t%08X\nbits\t27\n' "$v" "$v"
 }
 
+# ── CSG fields as SIB1 actually carries them — TS 36.331 §6.2.2, §6.3.1 ──
+#
+# cellAccessRelatedInfo carries exactly two closed-group fields:
+#   csg-Indication  BOOLEAN                 1 bit,  MANDATORY
+#   csg-Identity    BIT STRING (SIZE (27))  27 bits, OPTIONAL
+# Twenty-seven bits means 0..134217727 (0x07FFFFFF). The 4-octet form that
+# S1AP (TS 36.413) and --csg-encode print keeps the value in the low 27 bits;
+# the RRC field is a bit string and is never octet aligned, which is why both
+# fields here are built by tools/lte_asn1.py and read back by the same codec
+# instead of being laid out by hand.
+#
+# The pair is not symmetric: csg-Indication is what a handset reads first, and
+# csg-Identity is OPTIONAL, so "flag set, no identity" is a legal broadcast. A
+# flag that is *clear* next to an identity is ASN.1-legal too, and that
+# inconsistency is worth seeing once, which is why --csg-ie can build it.
+femt_csg_dir() { printf '%s' "${FEMT_DIR:-${LOOT_DIR:-.}/femtocell}"; }
+femt_csg_store_path() { printf '%s/csg-ies.tsv' "$(femt_csg_dir)"; }
+femt_csg_store() {
+    # Append-only: one row per verb run, never rewritten.
+    local verb="$1" id="$2" ind="$3" sib="$4" verdict="$5" detail="$6"
+    local f; f=$(femt_csg_store_path)
+    mkdir -p "$(dirname "$f")" 2>/dev/null
+    [[ -s "$f" ]] || printf 'ts\tverb\tcsg_id\tcsg_indication\tsib1_hex\tverdict\tdetail\n' > "$f"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$verb" "$id" "$ind" "$sib" "$verdict" "$(femt_sanitize "$detail")" >> "$f"
+}
+
+femt_csg_ie() {
+    # <csg-id>|none [csg-indication 0|1]
+    local idarg="${1:-}" ind="${2:-}" id="" hex=""
+    case "$idarg" in
+        ''|'-'|none|NONE|None) idarg="none" ;;
+    esac
+    if [[ "$idarg" != "none" ]]; then
+        [[ "$idarg" =~ ^[0-9]+$ ]] || {
+            printf 'ERROR\tCSG id must be numeric, or "none" for a cell that names no group: %s\n' \
+                "$(femt_sanitize "$idarg")" >&2; return 2; }
+        (( idarg >= 0 && idarg <= FEMT_CSG_MAX )) || {
+            printf 'ERROR\tCSG id %s does not fit csg-Identity: TS 36.331 declares it BIT STRING (SIZE (27)), so the space is 0..%d\n' \
+                "$idarg" "$FEMT_CSG_MAX" >&2; return 1; }
+        id="$idarg"; hex=$(printf '%08X' "$id")
+    fi
+    # A cell that names a group is a closed cell, so the flag follows the id
+    # unless the caller says otherwise; with no id the caller must say.
+    if [[ -z "$ind" ]]; then
+        [[ "$idarg" == "none" ]] && {
+            printf 'ERROR\tgive the CSG-Indication too (0 or 1) when the cell names no group\n' >&2
+            return 2; }
+        ind=1
+    fi
+    case "$ind" in
+        0|1) ;;
+        *) printf 'ERROR\tcsg-Indication is one bit: 0 or 1, got %s\n' "$(femt_sanitize "$ind")" >&2; return 2 ;;
+    esac
+
+    local args=(sib1 --mcc 001 --mnc 01 --tac 0001 --cellid 0000001)
+    (( ind == 1 )) && args+=(--csg-indication)
+    [[ -n "$hex" ]] && args+=(--csg-identity "$hex")
+
+    local out sibhex bits
+    if ! out=$(femt_lte_asn1 "${args[@]}" 2>&1); then
+        printf 'status\tunobserved\n'
+        printf 'reason\tthe SIB1 codec refused to build these fields: %s\n' \
+            "$(femt_sanitize "$(printf '%s\n' "$out" | tail -1)")"
+        printf 'spec\tTS 36.331 6.2.2 (cellAccessRelatedInfo), 6.3.1 (SIB1)\n'
+        femt_csg_store csg-ie "${id:-none}" "$ind" "-" unobserved "codec refused the fields"
+        return 1
+    fi
+    sibhex=$(printf '%s\n' "$out" | awk -F'\t' '$1=="per_hex"{print $2}')
+    bits=$(printf '%s\n' "$out" | awk -F'\t' '$1=="bits"{print $2}')
+
+    printf 'csg_id\t%s\n' "${id:-none}"
+    printf 'csg_hex\t%s\n' "${hex:--}"
+    printf 'csg_bits\t27\n'
+    printf 'csg_max\t%d\n' "$FEMT_CSG_MAX"
+    printf 'csg_indication\t%s\n' "$ind"
+    printf 'csg_identity_in_4_octets\t%s\n' "${hex:--}"
+    printf 'field_layout\t%s\n' \
+        "cellAccessRelatedInfo { csg-Indication BOOLEAN (1 bit, mandatory); csg-Identity BIT STRING (SIZE (27)) OPTIONAL }"
+    printf 'sib1_fixture\t%s\n' "mcc 001 mnc 01 tac 0001 cell 0000001"
+    printf 'sib1_hex\t%s\n' "$sibhex"
+    printf 'sib1_bits\t%s\n' "$bits"
+
+    # Read the fields back out of the octets just built: a construction this
+    # tree makes and this tree cannot re-read would be a claim, not a result.
+    local rt rtcsg rtverdict
+    rt=$(printf '%s\n' "$sibhex" | femt_detect - 2>/dev/null)
+    rtcsg=$(printf '%s\n' "$rt" | awk -F'\t' 'NR>1 && NF>=7 {print $6; exit}')
+    rtverdict=$(printf '%s\n' "$rt" | awk -F'\t' 'NR>1 && NF>=7 {print $7; exit}')
+    printf 'roundtrip_cell_verdict\t%s\n' "${rtverdict:--}"
+    printf 'roundtrip_csg_field\t%s\n' "${rtcsg:--}"
+    local rtv_ind="-" rtv_id="-" ok=0
+    case "$rtcsg" in
+        # csg-Indication set, identity absent: TS 36.331 makes it OPTIONAL.
+        set,identity-absent) rtv_ind=1; rtv_id=absent ;;
+        ''|-) # the codec reports no csg field at all: the flag is clear
+            rtv_ind=0; rtv_id=absent ;;
+        *)
+            if [[ "$rtcsg" =~ ^[0-9a-fA-F]{1,7}$ ]]; then
+                rtv_ind=1; rtv_id=$(( 16#$rtcsg ))
+            else
+                rtv_ind="-"; rtv_id=absent
+            fi ;;
+    esac
+    printf 'roundtrip_csg_indication\t%s\n' "$rtv_ind"
+    printf 'roundtrip_csg_identity\t%s\n' "$rtv_id"
+    if [[ "$rtv_ind" == "$ind" ]]; then
+        if [[ -n "$id" && "$rtv_id" == "$id" ]] ; then ok=1; fi
+        if [[ -z "$id" && "$rtv_id" == "absent" ]]; then ok=1; fi
+    fi
+    local means
+    if [[ -n "$id" && "$ind" == "1" ]]; then
+        means="a closed cell: this 27-bit identity is what a handset compares against its own allowed CSG list before it will camp"
+    elif [[ -z "$id" && "$ind" == "1" ]]; then
+        means="a closed cell that names no group: the flag is set and csg-Identity is absent, which TS 36.331 allows because the identity is OPTIONAL"
+    elif [[ -n "$id" && "$ind" == "0" ]]; then
+        means="an inconsistent broadcast: csg-Indication is clear while csg-Identity names a group, so a handset reads an open cell that still names one"
+    else
+        means="an open cell: neither closed-group field is present"
+    fi
+    printf 'means\t%s\n' "$means"
+    if (( ok == 1 )); then
+        printf 'verdict\tmeasured\n'
+        printf 'spec\tTS 36.331 6.2.2 (cellAccessRelatedInfo), 6.3.1 (SIB1), 6.3.4 (CSG-Identity is 27 bits)\n'
+        femt_csg_store csg-ie "${id:-none}" "$ind" "$sibhex" measured "$means"
+        return 0
+    fi
+    printf 'status\tunobserved\n'
+    if [[ -n "$id" && "$ind" == "0" ]]; then
+        printf 'reason\t%s\n' \
+            "csg-Indication is clear, and the codec reads csg-Identity only for a cell that declares itself closed, so the identity that went into the octets cannot be read back out: the build is reported unobserved rather than claimed"
+    else
+        printf 'reason\tthe fields were built but the codec read back indication=%s identity=%s: the round trip does not match what was asked for\n' \
+            "$rtv_ind" "$rtv_id"
+    fi
+    printf 'spec\tTS 36.331 6.2.2 (cellAccessRelatedInfo), 6.3.1 (SIB1)\n'
+    local why="round trip mismatch"
+    [[ -n "$id" && "$ind" == "0" ]] && why="the flag is clear, so the identity cannot be read back"
+    femt_csg_store csg-ie "${id:-none}" "$ind" "$sibhex" unobserved "$why"
+    return 1
+}
+
+femt_csg_bypass_plan() {
+    # What closed-subscriber-group handling actually is, step by step, and
+    # what this toolkit can and cannot answer about each step.
+    local id="${1:-}"
+    printf 'status\thandoff\n'
+    printf 'what\t%s\n' \
+        "closed subscriber group handling: what a cell declares, what a handset checks, and what this tree can prove"
+    printf 'step\t1\tadvertisement\tmeasured\t%s\n' \
+        "SIB1 cellAccessRelatedInfo carries csg-Indication (1 bit, mandatory) and csg-Identity (27 bits, optional); --csg-ie builds both and reads them back, --detect reads them out of a capture"
+    printf 'step\t2\thandset-selection\tadvertised\t%s\n' \
+        "the handset camps on a closed cell only if its identity is in the handset's own allowed CSG list; the rule is specified and the list itself is on the USIM, which this tree does not model"
+    printf 'step\t3\tmembership-check\tunobserved\t%s\n' \
+        "the network decides membership from CSG subscription data held for that subscriber; this tree carries no such data, so it cannot tell a member from a non-member"
+    printf 'step\t4\tcapture-consistency\tmeasured\t%s\n' \
+        "--detect reports declares-closed-cell or declares-open-cell for one captured SIB1; --csg-ie <id> 0 builds the inconsistent pair (identity named, flag clear) so a capture showing it can be recognised"
+    printf 'step\t5\tbypass\tunobserved\t%s\n' \
+        "a CSG is an access decision taken before any radio work matters, not an obstacle in the air: nothing in this tree bypasses it, and a non-member is refused by the network, visibly in NAS rather than here"
+    printf 'step\t6\twhat-would-move-this\tunobserved\t%s\n' \
+        "either the network's CSG subscription data for the subscriber, or a capture of a non-member attach showing the refusal cause; neither is on this machine"
+    [[ -n "$id" ]] && printf 'target\t%s\n' "$(femt_sanitize "$id")"
+    printf 'gate\t%s\n' \
+        "reading a real cell's declaration needs one captured SIB1; claiming anything about membership needs operator data this tree does not have"
+    printf 'note\t%s\n' "grey is not clean: a cell that broadcasts no CSG reads exactly like a macro here, so 'no closed cell found' is not 'open network'"
+    printf 'spec\t%s\n' "TS 36.331 6.2.2 (cellAccessRelatedInfo), 6.3.1 (SIB1), TS 36.413 (CSG-Id in S1AP)"
+    femt_csg_store csg-bypass-plan "${id:-none}" "-" "-" handoff "closed-subscriber-group handling plan"
+    return 0
+}
+
 # ── PCI conflict / confusion over a cell list ───────────────────────────
 # A PCI is only unique within one carrier. Two distinct cells advertising the
 # same PCI on the same EARFCN cause PCI confusion: the UE cannot tell them
@@ -1859,6 +2029,71 @@ S1PCAP
     chk ranap-parse-garbage "$(femt_ranap_parse FFFFFFFFFFFF >/dev/null 2>&1; echo $?)" "1"
     rm -rf "$rd"
 
+    # ── CSG fields as SIB1 carries them: build, read back, refuse ─────────
+    # TS 36.331 6.2.2: csg-Indication is 1 mandatory bit and csg-Identity is a
+    # 27-bit OPTIONAL bit string, so a cell that names a group is closed and a
+    # cell that declares itself closed may name none.
+    local co cfs
+    co=$(femt_csg_ie 12345)
+    chk csg-ie-verdict   "$(fld "$co" verdict)"                    "measured"
+    chk csg-ie-hex       "$(fld "$co" csg_hex)"                    "00003039"
+    chk csg-ie-bits      "$(fld "$co" csg_bits)"                   "27"
+    chk csg-ie-ind       "$(fld "$co" csg_indication)"             "1"
+    chk csg-ie-rt-id     "$(fld "$co" roundtrip_csg_identity)"     "12345"
+    chk csg-ie-rt-ind    "$(fld "$co" roundtrip_csg_indication)"   "1"
+    chk csg-ie-cell      "$(fld "$co" roundtrip_cell_verdict)"     "declares-closed-cell"
+    chk csg-ie-means     "$(printf '%s\n' "$co" | awk -F'\t' '$1=="means" && $2 ~ /closed cell/{print "closed"}')" "closed"
+    # a different identity must change the octets: the field is really carried
+    chk csg-ie-differs   "$([[ "$(fld "$co" sib1_hex)" != "$(fld "$(femt_csg_ie 12346)" sib1_hex)" ]] && echo differs)" "differs"
+
+    co=$(femt_csg_ie none 1)
+    chk csg-ie-noident   "$(fld "$co" verdict)"                    "measured"
+    chk csg-ie-noident-f "$(fld "$co" roundtrip_csg_field)"        "set,identity-absent"
+    chk csg-ie-noident-i "$(fld "$co" roundtrip_csg_identity)"     "absent"
+    chk csg-ie-noident-c "$(fld "$co" roundtrip_cell_verdict)"     "declares-closed-cell"
+
+    co=$(femt_csg_ie none 0)
+    chk csg-ie-open      "$(fld "$co" verdict)"                    "measured"
+    chk csg-ie-open-ind  "$(fld "$co" roundtrip_csg_indication)"   "0"
+    chk csg-ie-open-mean "$(printf '%s\n' "$co" | awk -F'\t' '$1=="means" && $2 ~ /an open cell/{print "open"}')" "open"
+
+    # The inconsistent pair: an identity with the flag clear. The octets build,
+    # but the codec surfaces CSG fields only for a cell that declares itself
+    # closed, so the identity cannot be read back -- unobserved, not claimed.
+    co=$(femt_csg_ie 12345 0 2>/dev/null); cfs=$?
+    chk csg-ie-inconsist-rc "$cfs"                                 "1"
+    chk csg-ie-inconsist    "$(fld "$co" status)"                  "unobserved"
+    chk csg-ie-inconsist-w  "$(printf '%s\n' "$co" | awk -F'\t' '$1=="reason" && $2 ~ /cannot be read back/{print "named"}')" "named"
+
+    # Refusals that name what is wrong, never a zero.
+    chk csg-ie-over      "$(femt_csg_ie 134217728 >/dev/null 2>&1; echo $?)" "1"
+    chk csg-ie-over-why  "$(femt_csg_ie 134217728 2>&1 >/dev/null | awk '/SIZE \(27\)/{print "named"}')" "named"
+    chk csg-ie-noargs    "$(femt_csg_ie >/dev/null 2>&1; echo $?)"  "2"
+    chk csg-ie-badind    "$(femt_csg_ie 12345 2 >/dev/null 2>&1; echo $?)" "2"
+    chk csg-ie-badid     "$(femt_csg_ie abc >/dev/null 2>&1; echo $?)" "2"
+
+    # ── the CSG handling plan: what each step leaves observable ───────────
+    local cplan
+    cplan=$(femt_csg_bypass_plan 12345)
+    chk csg-plan-status  "$(fld "$cplan" status)"                  "handoff"
+    chk csg-plan-steps   "$(printf '%s\n' "$cplan" | awk -F'\t' '$1=="step"{c++} END{print c+0}')" "6"
+    chk csg-plan-adv     "$(printf '%s\n' "$cplan" | awk -F'\t' '$1=="step" && $3=="advertisement"{print $4}')" "measured"
+    chk csg-plan-member  "$(printf '%s\n' "$cplan" | awk -F'\t' '$1=="step" && $3=="membership-check"{print $4}')" "unobserved"
+    chk csg-plan-bypass  "$(printf '%s\n' "$cplan" | awk -F'\t' '$1=="step" && $3=="bypass"{print $4}')" "unobserved"
+    chk csg-plan-gate    "$(printf '%s\n' "$cplan" | awk -F'\t' '$1=="gate"{c++} END{print c+0}')" "1"
+    chk csg-plan-target  "$(fld "$cplan" target)"                  "12345"
+
+    # ── the store: append-only, one row per run ──────────────────────────
+    local cstore; cstore=$(femt_csg_store_path)
+    chk csg-store-header "$(head -1 "$cstore")" \
+        "$(printf 'ts\tverb\tcsg_id\tcsg_indication\tsib1_hex\tverdict\tdetail')"
+    local cn1 cn2
+    cn1=$(awk 'END{print NR+0}' "$cstore")
+    femt_csg_ie 999 >/dev/null
+    cn2=$(awk 'END{print NR+0}' "$cstore")
+    chk csg-store-appends "$(( cn2 - cn1 ))"                       "1"
+    chk csg-store-measured "$(awk -F'\t' '$2=="csg-ie" && $3=="999" && $6=="measured"{c++} END{print (c>0)?"yes":"no"}' "$cstore")" "yes"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1872,6 +2107,8 @@ femt_menu() {
         cat <<'M'
   [1]  CSG id encode
   [2]  CSG id decode
+  [c]  CSG fields as SIB1 carries them (identity + indication, round trip)
+  [b]  CSG handling plan (handoff)
   [3]  PCI conflict check
   [4]  Iuh stack reference
   [5]  TR-069 config audit
@@ -1892,6 +2129,19 @@ M
         case "$c" in
             1) read -rp "  csg id> " i; femt_csg_encode "$i"; read -rp "  enter " _ ;;
             2) read -rp "  csg hex> " h; femt_csg_decode "$h"; read -rp "  enter " _ ;;
+            c|C) if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                   echo "[-] need a csg id (or 'none') and an indication; cannot prompt in CLI mode" >&2
+                   sleep 1; continue
+               fi
+               read -rp "  csg id (or 'none') [indication 0|1]> " p
+               local ca=(); read -ra ca <<< "$p"
+               femt_csg_ie "${ca[0]:-}" "${ca[1]:-}"; read -rp "  enter " _ ;;
+            b|B) if [[ -n "${IMSISTING_CLI:-}" ]]; then
+                   # the plan reads the same with no target, so run it as is
+                   femt_csg_bypass_plan ""; read -rp "  enter " _; continue
+               fi
+               read -rp "  csg id (optional)> " p
+               femt_csg_bypass_plan "$p"; read -rp "  enter " _ ;;
             3) read -rp "  cell-list tsv> " p; femt_pci_conflict "$p"; read -rp "  enter " _ ;;
             4) femt_iuh_stack; read -rp "  enter " _ ;;
             5) read -rp "  config path> " p; femt_tr069_audit "$p"; read -rp "  enter " _ ;;
@@ -1938,6 +2188,8 @@ femt_cli_main() {
         --status-tsv)  femt_status_tsv ;;
         --csg-encode)  femt_csg_encode "${1:-}" ;;
         --csg-decode)  femt_csg_decode "${1:-}" ;;
+        --csg-ie)      femt_csg_ie "${1:-}" "${2:-}" ;;
+        --csg-bypass-plan) femt_csg_bypass_plan "${1:-}" ;;
         --sib1)        femt_sib1_build "$@" ;;
         --sib9)        femt_sib9_build "$@" ;;
         --cell-profile) femt_cell_profile "$@" ;;
@@ -1981,6 +2233,11 @@ Usage: $0 COMMAND
   --status-tsv          module state as TSV
   --csg-encode <id>     27-bit CSG-Id to hex
   --csg-decode <hex>    hex to CSG-Id
+  --csg-ie <csg-id>|none [0|1]
+                        the csg-Indication and csg-Identity fields exactly as
+                        SIB1 carries them, read back by the same codec
+  --csg-bypass-plan [csg-id]
+                        closed subscriber group handling, step by step (handoff)
   --sib1 <mcc> <mnc> <tac> <cellid> [csg-id]
                         the SIB1 a small cell broadcasts, CSG fields included
   --sib9 <hnb-name>     the SIB9 carrying the home eNodeB name

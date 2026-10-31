@@ -6497,6 +6497,67 @@ PYNOISE
     else
         chk sync-skipped "$(nair_cmd_sync_detect /nonexistent --rate 1920000 2>/dev/null | grep -c no-correlator)" "1"
     fi
+    # ── the spectrum view ───────────────────────────────────────────────
+    # The same planted-tone discipline as the sync block above: a tone of known
+    # amplitude and frequency must come back as that amplitude and that
+    # frequency, and a noise-only capture must come back flat rather than quiet.
+    if nair_spectrum_available; then
+        local sdat="$sdir"
+        if python3 - "$sdat" <<'PYSPEC'
+import numpy as np, sys
+d = sys.argv[1]
+fs, n = 1.92e6, 20000
+rng = np.random.default_rng(7)
+z = (rng.normal(0, 0.01, n) + 1j * rng.normal(0, 0.01, n)).astype(np.complex64)
+z.tofile(d + "/noise.cf32")
+t = np.arange(n) / fs
+# A tone of amplitude 0.2 is 0.04 in power, which is -13.98 dBFS. The spectrum
+# must read it there: an incorrect FFT normalisation shows up as a level that
+# is off by tens of dB, not by a fraction.
+(z + 0.2 * np.exp(2j * np.pi * 200e3 * t)).astype(np.complex64).tofile(d + "/tone.cf32")
+PYSPEC
+        then
+            local spec
+            spec=$(nair_cmd_spectrum "$sdat/tone.cf32" --rate 1920000)
+            chk spec-verdict "$(printf '%s\n' "$spec" | awk -F'\t' '$1=="verdict"{print $2}')" "spectrum_measured"
+            chk spec-peak    "$(printf '%s\n' "$spec" | awk -F'\t' '$1=="peak_db"{printf "%.0f", $2}')" "-15"
+            chk spec-offset  "$(printf '%s\n' "$spec" | awk -F'\t' '$1=="peak_offset_hz"{v=$2; print (v>198000 && v<203000) ? "in-band" : v}')" "in-band"
+            chk spec-floor   "$(printf '%s\n' "$spec" | awk -F'\t' '$1=="noise_floor_db"{v=$2; print (v>-68 && v<-63) ? "nominal" : v}')" "nominal"
+            chk spec-bw      "$(printf '%s\n' "$spec" | awk -F'\t' '$1=="occupied_bw_hz"{v=$2; print (v>0 && v<200000) ? "narrow" : v}')" "narrow"
+            chk spec-bins    "$(printf '%s\n' "$spec" | awk -F'\t' '$1=="bins_above_threshold"{print ($2>0) ? "some" : "none"}')" "some"
+            chk spec-segs    "$(printf '%s\n' "$spec" | awk -F'\t' '$1=="segments"{print $2}')" "16"
+            chk spec-duty    "$(printf '%s\n' "$spec" | awk -F'\t' '$1=="busiest_seg_duty_pct"{print ($2>50) ? "continuous" : "gappy"}')" "continuous"
+            chk spec-units   "$(printf '%s\n' "$spec" | grep -c 'dBFS')" "1"
+            # A floor without a gain is a floor in the file's own full scale.
+            chk spec-no-dbm  "$(printf '%s\n' "$spec" | grep -c 'dBm')" "0"
+            # Nothing occupies the band in a noise-only capture: grey, not clean.
+            local nspec
+            nspec=$(nair_cmd_spectrum "$sdat/noise.cf32" --rate 1920000 --margin-db 10)
+            chk spec-flat       "$(printf '%s\n' "$nspec" | awk -F'\t' '$1=="verdict"{print $2}')" "spectrum_measured_flat"
+            chk spec-flat-em    "$(printf '%s\n' "$nspec" | awk -F'\t' '$1=="emission"{print $2}')" "none-above-threshold"
+            chk spec-flat-why   "$(printf '%s\n' "$nspec" | grep -c 'wrong band')" "1"
+            # An all-zero file is not a quiet band and must not be reported as one.
+            # 32 KiB of zeros is 4096 complex samples in cf32: long enough for
+            # several 1024-bin windows, so the answer cannot be "too short".
+            local zcap="$sdat/zero.cf32"
+            head -c 32768 /dev/zero >"$zcap"
+            local zout; zout=$(nair_cmd_spectrum "$zcap" --rate 1920000 2>&1); local zrc=$?
+            chk spec-zero-rc      "$zrc" "1"
+            chk spec-zero-verdict "$(printf '%s\n' "$zout" | awk -F'\t' '$1=="verdict"{print $2}')" "unobserved"
+            chk spec-zero-why     "$(printf '%s\n' "$zout" | grep -c 'no-signal-at-all')" "1"
+        else
+            chk spec-fixture-skipped "fixture" "fixture"
+        fi
+        chk spec-needs-rate "$(nair_cmd_spectrum "$sdir/noise.cf32" >/dev/null 2>&1; echo $?)" "2"
+        chk spec-why-rate   "$(nair_cmd_spectrum "$sdir/noise.cf32" 2>&1 | grep -c '^WHY')" "1"
+        chk spec-bad-fmt    "$(nair_cmd_spectrum "$sdir/noise.cf32" --rate 1920000 --fmt xyz >/dev/null 2>&1; echo $?)" "2"
+        chk spec-bad-flag   "$(nair_cmd_spectrum "$sdir/noise.cf32" --rate 1920000 --fft 64 >/dev/null 2>&1; echo $?)" "2"
+        chk spec-no-file    "$(nair_cmd_spectrum "$sdir/absent.cf32" --rate 1920000 >/dev/null 2>&1; echo $?)" "1"
+        chk spec-no-file-why "$(nair_cmd_spectrum "$sdir/absent.cf32" --rate 1920000 2>/dev/null | grep -c 'no-capture')" "1"
+    else
+        chk spec-skipped "$(nair_cmd_spectrum /nonexistent --rate 1920000 2>/dev/null | grep -c no-spectrum)" "1"
+    fi
+
     rm -rf "$sdir"
 
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -6529,6 +6590,7 @@ nair_menu() {
   [15] stop gNB
   [16] status
   [17] SSB waveform export (IQ for the jamming module)
+  [18] spectrum / occupancy of a capture (noise floor, occupied bandwidth)
   [0]  back
 
 M
@@ -6618,6 +6680,15 @@ M
                     --scs "${ws:-30}" --reps "${wrp:-1}" \
                     | column -t -s$'\t' 2>/dev/null
                 read -rp "  press enter " _ ;;
+            18)
+                read -rp "  capture file> " sf
+                read -rp "  sample rate (Hz)> " sr
+                read -rp "  format (cf32|ci16|cu8) [cf32]> " sfx
+                read -rp "  margin above the floor in dB [6]> " sm
+                nair_cmd_spectrum "${sf}" --rate "${sr:-0}" --fmt "${sfx:-cf32}" \
+                    --margin-db "${sm:-6}" | column -t -s$'\t' 2>/dev/null \
+                    || nair_cmd_spectrum "${sf}" --rate "${sr:-0}" --fmt "${sfx:-cf32}" --margin-db "${sm:-6}"
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -6637,11 +6708,67 @@ M
 # to nothing, and none of those is evidence that no cell is there.
 NAIR_SYNC_PY() { printf '%s' "${IMSISTING_ROOT}/tools/nr_sync.py"; }
 
+# The spectrum view lives beside the sync detector and shares its capture
+# formats: a file the detector reads must be readable by the spectrum verb too.
+NAIR_SPECTRUM_PY() { printf '%s' "${IMSISTING_ROOT}/tools/nr_spectrum.py"; }
+
 nair_sync_available() {
     [[ -r "$(NAIR_SYNC_PY)" ]] || return 1
     command -v python3 >/dev/null 2>&1 || return 1
     python3 -c 'import numpy' 2>/dev/null || return 1
     return 0
+}
+
+nair_spectrum_available() {
+    [[ -r "$(NAIR_SPECTRUM_PY)" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 -c 'import numpy' 2>/dev/null || return 1
+    return 0
+}
+
+# A plain look at the band: where the noise floor is, how wide the emission is,
+# and which parts of the band carry energy. No correlation and no cell identity,
+# so nothing here can be mistaken for a detection — that is --sync-detect.
+nair_cmd_spectrum() {
+    local file="${1:-}"
+    (($#)) && shift
+    local rate="" fmt="cf32" bins="1024" margin="6" edge="99"
+    while (($#)); do
+        case "$1" in
+            --rate)      rate="${2:-}"; shift 2 ;;
+            --fmt)       fmt="${2:-}"; shift 2 ;;
+            --bins)      bins="${2:-}"; shift 2 ;;
+            --margin-db) margin="${2:-}"; shift 2 ;;
+            --edge-pct)  edge="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--spectrum does not take %s\n' "$(nair_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$file" ]] || { printf 'ERROR\t--spectrum needs a capture file\n' >&2; return 2; }
+    [[ -n "$rate" ]] || {
+        printf 'ERROR\t--spectrum needs --rate in Hz\n' >&2
+        printf 'WHY\tevery number it prints is scaled by the sample rate: bin width, occupied bandwidth, and each segment edge in Hz\n' >&2
+        return 2; }
+    [[ "$rate" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--rate takes whole hertz\n' >&2; return 2; }
+    case "$fmt" in cf32|ci16|cu8) ;; *) printf 'ERROR\t--fmt takes cf32, ci16 or cu8\n' >&2; return 2 ;; esac
+    [[ "$bins" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--bins takes a whole number of FFT bins\n' >&2; return 2; }
+    [[ "$margin" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        printf 'ERROR\t--margin-db takes decibels above the noise floor\n' >&2; return 2; }
+    [[ "$edge" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        printf 'ERROR\t--edge-pct takes a percentage of total power\n' >&2; return 2; }
+    [[ -r "$file" ]] || {
+        printf 'ERROR\t--spectrum cannot read %s\n' "$(nair_sanitize "$file")" >&2
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-capture: nothing was measured, because the file is not there\n'
+        return 1; }
+    if ! nair_spectrum_available; then
+        printf 'MISSING\tpython3 with numpy, or %s\n' "$(NAIR_SPECTRUM_PY)" >&2
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-spectrum: an FFT needs numpy, and a floor invented without one would be a number nobody measured\n'
+        return 1
+    fi
+    printf 'capture\t%s\n' "$file"
+    python3 "$(NAIR_SPECTRUM_PY)" "$file" --rate "$rate" --fmt "$fmt" \
+        --bins "$bins" --margin-db "$margin" --edge-pct "$edge"
 }
 
 nair_cmd_sync_detect() {
@@ -6680,6 +6807,7 @@ nair_cli_main() {
     case "$cmd" in
         --status-tsv)   nair_cli_status_tsv ;;
         --sync-detect)  nair_cmd_sync_detect "$@" ;;
+        --spectrum)     nair_cmd_spectrum "$@" ;;
         --arfcn)        nair_cmd_arfcn "${1:-}" ;;
         --pci)          nair_cmd_pci "${1:-}" "${2:-}" ;;
         --decode-mib)   nair_cmd_decode_mib "${1:-}" ;;
@@ -6750,6 +6878,15 @@ Usage: $0 COMMAND
                                 N_ID(2) and how strongly it matched, so the
                                 cell identity comes from the waveform rather
                                 than from something typed in
+  --spectrum <file> --rate N [--fmt cf32|ci16|cu8] [--bins N]
+             [--margin-db N] [--edge-pct N]
+                                what the band looks like at all: the noise
+                                floor, the occupied bandwidth holding 99% of
+                                the power, and which segments carry energy and
+                                for what fraction of the time. No correlation
+                                and no cell identity, so nothing here is a
+                                detection; a flat band is reported as flat and
+                                an empty capture as unobserved
   --arfcn <N>                   NR-ARFCN -> frequency, band, FR, GSCN
   --pci <n_id_1> <n_id_2>       PCI derivation (n_id_1 0..335, n_id_2 0..2)
   --decode-mib <hex>            decode a 24-bit MIB payload

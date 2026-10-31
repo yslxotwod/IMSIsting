@@ -5570,6 +5570,31 @@ PYEOF
         printf 'tshark-mbms-*	SKIP	no tshark (or python3) on PATH; the artefact assertions above still ran\n'
     fi
 
+    # ── --gtp-fuzz: the corpus is deterministic, spec-cited and inert ──────
+    # Nothing here sends: the plan verb has no wire path at all, and the
+    # transmit verb is a different name that refuses without a peer.
+    local fz fz2 fz8 fzhex fzhex8
+    fz=$(lcore_cmd_gtp_fuzz --max 4 2>&1)
+    chk gtp-fuzz-cases      "$(fld "$fz" cases)" "4"
+    chk gtp-fuzz-mode       "$(fld "$fz" mode)" "planned"
+    chk gtp-fuzz-inert      "$(printf '%s' "$fz" | awk -F'\t' '$1=="sent" && $2 ~ /^nothing/ {print "yes"; exit}')" "yes"
+    chk gtp-fuzz-store      "$(fld "$fz" store)" "$LCORE_DIR/gtp_fuzz.tsv"
+    chk gtp-fuzz-store-rows "$(awk -F'\t' 'NR>1 && $NF=="planned"' "$LCORE_DIR/gtp_fuzz.tsv" 2>/dev/null | wc -l | tr -d ' ')" "4"
+    chk gtp-fuzz-clauses    "$(awk -F'\t' 'NR>1 && $6==""' "$LCORE_DIR/gtp_fuzz.tsv" 2>/dev/null | wc -l | tr -d ' ')" "0"
+    fzhex=$(printf '%s' "$fz" | awk -F'\t' 'NR>1 && $1!="case" {print $7; exit}')
+    fz2=$(lcore_cmd_gtp_fuzz --max 4 2>&1 | awk -F'\t' 'NR>1 && $1!="case" {print $7; exit}')
+    fzhex8=$(lcore_cmd_gtp_fuzz --max 4 --seed 8 2>&1 | awk -F'\t' 'NR>1 && $1!="case" {print $7; exit}')
+    chk gtp-fuzz-seeded     "$fz2" "$fzhex"
+    [[ -n "$fzhex" && "$fzhex" != "$fzhex8" ]] && chk gtp-fuzz-seed-moves "yes" "yes" \
+                                              || chk gtp-fuzz-seed-moves "same" "yes"
+    lcore_cmd_gtp_fuzz_send >/dev/null 2>&1
+    chk gtp-fuzz-send-needs-peer "$?" "2"
+    lcore_cmd_gtp_fuzz --transmit >/dev/null 2>&1
+    chk gtp-fuzz-refuses-transmit-flag "$?" "2"
+    chk gtp-fuzz-refusal-names-verb \
+        "$(lcore_cmd_gtp_fuzz --transmit 2>&1 | awk -F'\t' '$1=="ERROR"{print ($2 ~ /--gtp-fuzz-send/) ? "names-transmit" : "silent"}')" \
+        "names-transmit"
+
     rm -rf "$d"
     printf 'ASSERTIONS\t%s\n' "$(( ok + bad ))"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
@@ -5603,6 +5628,7 @@ lcore_menu() {
   [14] build / read a GTPdoor-class C2 envelope
   [15] scan a GRX/IPX prefix for answering GTP diameter or SCTP nodes
   [16] join a reachability file to the interconnect peer rule
+  [19] GTP fuzz corpus: one field moved per case, plan only
   [0]  back
 
 M
@@ -5673,6 +5699,8 @@ M
                          --status "${idrs:-granted}" \
                          | column -t -s$'\t' 2>/dev/null || lcore_cmd_idr "${idri:-310150123456789}"
                      read -rp "  press enter " _; fi ;;
+            19) lcore_cmd_gtp_fuzz | column -t -s$'\t' 2>/dev/null || lcore_cmd_gtp_fuzz
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -5841,6 +5869,138 @@ lcore_cmd_diameter_send() {
     fi
 }
 
+# ── --gtp-fuzz : one field moved per case, and what a reader must do ───────
+# A fuzzer that sends is a lab tool; a fuzzer that builds is a test plan. This
+# verb builds. The corpus comes from tools/gtp_fuzz.py at a seed, every case
+# names the single field it moves and the clause that says what a correct
+# implementation must do with it, and nothing leaves the machine. The transmit
+# half is --gtp-fuzz-send, a separate verb on purpose: an operator who wants
+# packets on a wire they own has to say so by name, and that verb prints the
+# lab it is meant for before it sends anything.
+#
+# The referee is not this module. tools/check-gtp-fuzz.sh generates the same
+# corpus, frames each case in IPv4/UDP by hand (text2pcap cannot frame a bare
+# PDU) and compares what tshark says against the spec-derived expectation for
+# that case name, so the corpus is checked by a dissector rather than by the
+# code that wrote it.
+lcore_gtp_fuzz_tool() { printf '%s/tools/gtp_fuzz.py' "$IMSISTING_ROOT"; }
+
+lcore_gtp_fuzz_store() { printf '%s/gtp_fuzz.tsv' "$LCORE_DIR"; }
+
+# Append the generator's rows to the module store, header first, never
+# truncating: a run is evidence of what was planned or sent that day.
+lcore_gtp_fuzz_append() {  # <plan-tsv>
+    local plan="${1:-}" store
+    store=$(lcore_gtp_fuzz_store)
+    [[ -s "$plan" ]] || return 1
+    mkdir -p "$LCORE_DIR" || return 1
+    if [[ ! -s "$store" ]]; then
+        head -n 1 "$plan" > "$store" || return 1
+    fi
+    tail -n +2 "$plan" >> "$store" || return 1
+    printf 'store\t%s\n' "$store"
+}
+
+lcore_cmd_gtp_fuzz() {  # [--seed N] [--family gtpu|gtpc2|gtpc1] [--max N]
+    local seed=0 family="" max=0
+    while (( $# )); do
+        case "$1" in
+            --seed)   (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                          printf 'ERROR\t--seed takes a number\n' >&2; return 2; }
+                      seed="$2"; shift 2 ;;
+            --family) (($# >= 2)) && [[ -n "${2:-}" ]] || {
+                          printf 'ERROR\t--family takes gtpu, gtpc2 or gtpc1\n' >&2; return 2; }
+                      family="$2"; shift 2 ;;
+            --max)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                          printf 'ERROR\t--max takes a number\n' >&2; return 2; }
+                      max="$2"; shift 2 ;;
+            --help|-h) printf 'usage: --gtp-fuzz [--seed N] [--family gtpu|gtpc2|gtpc1] [--max N]\n'; return 0 ;;
+            *)        printf 'ERROR\t--gtp-fuzz does not take %s (the transmit verb is --gtp-fuzz-send)\n' \
+                          "$(lcore_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    local py; py=$(command -v python3 2>/dev/null || true)
+    [[ -n "$py" ]] || { printf 'ERROR\tpython3 is missing; the corpus generator is python3\n' >&2; return 1; }
+    local tool; tool=$(lcore_gtp_fuzz_tool)
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\t%s is missing: the generator that builds the corpus lives there\n' "$tool" >&2
+        return 1; }
+    local -a gargs=(--seed "$seed")
+    [[ -n "$family" ]] && gargs+=(--family "$family")
+    (( max > 0 )) && gargs+=(--max "$max")
+    local plan; plan=$(mktemp "${TMP_DIR:-/tmp}/gtp-fuzz-plan.XXXXXX") || return 1
+    local out rc=0
+    out=$("$py" "$tool" "${gargs[@]}" --plan-tsv "$plan" 2>&1) || rc=$?
+    if (( rc != 0 )); then
+        printf '%s\n' "$out" >&2
+        rm -f "$plan"
+        printf 'ERROR\tthe corpus generator refused or failed (exit %d)\n' "$rc" >&2
+        return 1
+    fi
+    printf '%s\n' "$out"
+    lcore_gtp_fuzz_append "$plan"
+    rm -f "$plan"
+    printf 'sent\tnothing: this verb builds the corpus, and --gtp-fuzz-send is the separate verb that puts it on a wire\n'
+    printf 'referee\ttools/check-gtp-fuzz.sh dissects the same corpus with tshark and checks each case against its clause\n'
+    return 0
+}
+
+lcore_cmd_gtp_fuzz_send() {  # <host> [--port N] [--seed N] [--family F] [--max N] [--rate R] [--timeout S]
+    local host="" port=2123 seed=0 family="" max=0 rate="8" tmo="1"
+    while (( $# )); do
+        case "$1" in
+            --port)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--port takes a number\n' >&2; return 2; }
+                       port="$2"; shift 2 ;;
+            --seed)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--seed takes a number\n' >&2; return 2; }
+                       seed="$2"; shift 2 ;;
+            --family)  (($# >= 2)) && [[ -n "${2:-}" ]] || {
+                           printf 'ERROR\t--family takes gtpu, gtpc2 or gtpc1\n' >&2; return 2; }
+                       family="$2"; shift 2 ;;
+            --max)     (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                           printf 'ERROR\t--max takes a number\n' >&2; return 2; }
+                       max="$2"; shift 2 ;;
+            --rate)    (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                           printf 'ERROR\t--rate takes cases per second\n' >&2; return 2; }
+                       rate="$2"; shift 2 ;;
+            --timeout) (($# >= 2)) && [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+                           printf 'ERROR\t--timeout takes seconds\n' >&2; return 2; }
+                       tmo="$2"; shift 2 ;;
+            --help|-h) printf 'usage: --gtp-fuzz-send <host> [--port N] [--seed N] [--family F] [--max N] [--rate R] [--timeout S]\n'; return 0 ;;
+            -*)        printf 'ERROR\t--gtp-fuzz-send does not take %s\n' "$(lcore_sanitize "$1")" >&2; return 2 ;;
+            *)         [[ -z "$host" ]] || {
+                           printf 'ERROR\t--gtp-fuzz-send takes one address\n' >&2; return 2; }
+                       host="$1"; shift ;;
+        esac
+    done
+    [[ -n "$host" ]] || {
+        printf 'ERROR\t--gtp-fuzz-send needs a peer address; --gtp-fuzz builds the corpus without one\n' >&2
+        return 2; }
+    local py; py=$(command -v python3 2>/dev/null || true)
+    [[ -n "$py" ]] || { printf 'ERROR\tpython3 is missing; the wire half is python3\n' >&2; return 1; }
+    local tool; tool=$(lcore_gtp_fuzz_tool)
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\t%s is missing: the wire half lives there\n' "$tool" >&2; return 1; }
+    printf 'intent\ttransmit: this verb sends the corpus to %s:%s and is meant for a lab the operator owns\n' \
+        "$(lcore_sanitize "$host")" "$port"
+    printf 'bound\trate %s/s, timeout %ss, %s cases; every case that gets no answer is reported unobserved, never as a rejection\n' \
+        "$rate" "$tmo" "$([[ "$max" -gt 0 ]] && echo "$max" || echo all)"
+    local -a gargs=(--seed "$seed" --transmit --host "$host" --port "$port" \
+                    --rate "$rate" --timeout "$tmo")
+    [[ -n "$family" ]] && gargs+=(--family "$family")
+    (( max > 0 )) && gargs+=(--max "$max")
+    local plan; plan=$(mktemp "${TMP_DIR:-/tmp}/gtp-fuzz-sent.XXXXXX") || return 1
+    local out rc=0
+    out=$("$py" "$tool" "${gargs[@]}" --plan-tsv "$plan" 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    lcore_gtp_fuzz_append "$plan"
+    rm -f "$plan"
+    (( rc == 0 )) && return 0
+    printf 'ERROR\tthe run did not finish cleanly (exit %d); the rows it did write are the record of it\n' "$rc" >&2
+    return 1
+}
+
 lcore_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -5865,6 +6025,8 @@ lcore_cli_main() {
         --cdr-model)     lcore_cmd_cdr_model ;;
         --gtpc-send)     lcore_cmd_gtpc_send "$@" ;;
         --flood-model)   lcore_flood_model "${1:-2000}" "${2:-500}" "${3:-100}" ;;
+        --gtp-fuzz)      lcore_cmd_gtp_fuzz "$@" ;;
+        --gtp-fuzz-send) lcore_cmd_gtp_fuzz_send "$@" ;;
         --diameter-send) lcore_cmd_diameter_send "$@" ;;
         --gtpdoor-detect) lcore_cmd_gtpdoor "${1:-}" ;;
         --gtpdoor-build) lcore_cmd_gtpdoor_build "$@" ;;
@@ -5958,6 +6120,21 @@ Usage: $0 COMMAND
                               roaming peer may originate, or is it a
                               PLMN-internal request arriving on an
                               interconnect
+  --gtp-fuzz [--seed N] [--family gtpu|gtpc2|gtpc1] [--max N]
+                              build the malformed-message corpus for the
+                              GTP-C v2 and GTP-U headers the module already
+                              builds: one field moved per case (TEID,
+                              sequence, length, IMSI/EPS-bearer IEs,
+                              extension chain), each row naming the clause
+                              and what a correct reader must do with it
+                              (TS 29.281 §5.1/§5.2.1, TS 29.274 §5.1/§8.2,
+                              TS 29.060 §6.1). Deterministic from a seed and
+                              nothing is sent
+  --gtp-fuzz-send <host> [--port 2123] [--seed N] [--family F] [--max N]
+               [--rate R] [--timeout SEC]
+                              the transmit verb, separate on purpose: paced,
+                              bounded, meant for a lab the operator owns, and
+                              silence is reported as unobserved
   --plan <ulr-hijack|gtp-inject|sctp-scan>
                               write a handed-off plan naming the testbed
   --s1ap                      S1AP identity-carrying procedures

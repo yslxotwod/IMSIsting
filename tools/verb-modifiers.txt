@@ -428,3 +428,8 @@ tt
 ue-max
 sn12
 sn18
+family
+gnb-id
+sessions
+end
+step
