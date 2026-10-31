@@ -29,6 +29,13 @@ dest-host
 codeword
 client-name
 client-format
+eff
+dish-m
+gw-lon
+gw-lat
+window-min
+target-js-db
+gw-eirp-dbw
 aanf
 action
 algo
