@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # tower survey / war-drive — GPS-tagged cell survey with map export
 #
+# Two things this module can say that a survey alone cannot: where the towers
+# that were never heard are (imported from a published database), and how dense
+# they are without reading four hundred coordinates (a coarse grid).
+#
 # Resolve IMSISTING_ROOT from this script's own path so state and loot land in
 # the project tree even when launched standalone via pkexec.
 if [[ -z "${IMSISTING_ROOT:-}" ]]; then
@@ -33,6 +37,10 @@ mkdir -p "$TMP_DIR" "$LOOT_DIR" "$CAPTURES_DIR" "$LOGS_DIR" "$STATE_DIR" 2>/dev/
 MOD_TMP="$TMP_DIR/tower_map"
 TMAP_DIR="$LOOT_DIR/tower_map"
 TMAP_POINTS="$TMAP_DIR/points.tsv"
+# Imported towers live beside the survey points, not in them: a published
+# position was advertised by a third party and a survey point was measured
+# here, and the two stores are what keeps that difference visible.
+TMAP_TOWERS="$TMAP_DIR/towers.tsv"
 mkdir -p "$MOD_TMP" "$TMAP_DIR" 2>/dev/null
 
 # ── sanitisation ────────────────────────────────────────────────────────
@@ -332,6 +340,393 @@ tmap_json_escape() {
     printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+# ── imported tower database ─────────────────────────────────────────────
+#
+# A survey only knows what its own receiver heard. On the first drive through a
+# city that is a handful of cells and a blank map, and a blank map reads as
+# "there are no towers here" when the truth is "nobody has looked here yet".
+# OpenCellID and the Mozilla Location Service both publish cell positions, so
+# an operator's existing coverage can be seen before a single point is taken.
+#
+# Nothing is downloaded: these verbs read a CSV that is already on disk, so the
+# answer never depends on a network this module cannot see or check.
+#
+# The imports write to a tower store of their own rather than into points.tsv.
+# The survey store is measured, the imported store is advertised, and merging
+# them at rest would erase the one distinction the whole toolkit is built on.
+# --store-tsv is the single place where the two are joined, and every row that
+# comes out of it says which kind of fact it is.
+
+# The tower store's columns are the fields the importers can actually fill.
+# There is no operator name because neither format carries one (mcc/mnc is an
+# identity, not a brand) and no generation column because it is derivable from
+# the radio name -- a stored copy is a second answer that can disagree later.
+tmap_towers_header() {
+    printf 'source\trat\tmcc\tmnc\tlac\tcell_id\tlat\tlon\trange_m\tsamples\tavg_signal\timported_ts\n'
+}
+
+# An import that created its store only after a successful parse would leave a
+# real export merged into an unheaded file; creating the header first means the
+# store is readable by another verb even when every row of the file is rejected.
+tmap_towers_init() {
+    mkdir -p "$TMAP_DIR"
+    [[ -f "$TMAP_TOWERS" ]] || tmap_towers_header > "$TMAP_TOWERS"
+}
+
+# Counting the store is how every other verb decides whether it has anything to
+# work with, so it answers 0 for an absent file instead of failing: absence and
+# emptiness are the same refusal, one level up.
+tmap_tower_count() {
+    [[ -f "$TMAP_TOWERS" ]] || { echo 0; return; }
+    local n; n=$(tail -n +2 "$TMAP_TOWERS" 2>/dev/null | grep -c . || true)
+    echo "${n:-0}"
+}
+
+# Both stores, reduced to the only two columns a grid needs, with the numeric
+# test in place: a coordinate that is not a number would otherwise be read by
+# awk arithmetic as zero and land a tower in the Gulf of Guinea.
+tmap_positioned() {
+    local re='^[-+]?[0-9]+([.][0-9]+)?$'
+    if [[ -f "$TMAP_TOWERS" ]]; then
+        tail -n +2 "$TMAP_TOWERS" 2>/dev/null |
+            awk -F'\t' -v re="$re" '$7 ~ re && $8 ~ re { printf "%s\t%s\n", $7, $8 }'
+    fi
+    if [[ -f "$TMAP_POINTS" ]]; then
+        tail -n +2 "$TMAP_POINTS" 2>/dev/null |
+            awk -F'\t' -v re="$re" '$2 ~ re && $3 ~ re { printf "%s\t%s\n", $2, $3 }'
+    fi
+}
+
+# Import one published tower export and say exactly what happened to every row.
+#
+# The report exists because an import that silently drops half a file is worse
+# than no import: the map then shows the half that parsed and looks complete.
+# Rows are therefore counted into named reasons -- a row with no coordinates, a
+# latitude of 500, a non-numeric mcc and the rest -- and read == imported +
+# rejected is the property the selftest holds this to.
+#
+# Deduplication is per source. The same cell in OpenCellID and in MLS is two
+# independent claims about one tower, so both are kept; the same cell twice in
+# one file is one claim written twice, so the second copy is refused.
+tmap_import() {  # <opencellid|mls> <file.csv> [--help]
+    local fmt="${1:-}" file=""
+    case "$fmt" in
+        opencellid|mls) ;;
+        *)
+            printf 'ERROR\tthe importer reads opencellid and mls exports, not %s\n' \
+                "$(tmap_sanitize "$fmt")" >&2
+            printf 'WHY\teach format has its own column order, and guessing which one a file is would put a longitude in a latitude field\n' >&2
+            return 2 ;;
+    esac
+    (($# > 0)) && shift
+    while (($#)); do
+        case "$1" in
+            --help|-h) printf 'usage: --import-%s <file.csv>\n' "$fmt"; return 0 ;;
+            -*)
+                printf 'ERROR\t--import-%s does not take %s\n' "$fmt" "$(tmap_sanitize "$1")" >&2
+                return 2 ;;
+            *)
+                if [[ -n "$file" ]]; then
+                    printf 'ERROR\t--import-%s takes one file, not %s and %s\n' \
+                        "$fmt" "$(tmap_sanitize "$file")" "$(tmap_sanitize "$1")" >&2
+                    return 2
+                fi
+                file="$1"; shift ;;
+        esac
+    done
+    [[ -n "$file" ]] || {
+        printf 'ERROR\t--import-%s needs a CSV file\n' "$fmt" >&2
+        printf 'WHY\tthere is nothing to import without a file, and an empty tower list would look like a successful import of nothing\n' >&2
+        return 2; }
+    [[ -r "$file" ]] || {
+        printf 'MISSING\t%s\n' "$(tmap_sanitize "$file")" >&2
+        printf 'WHY\tthis verb reads an export that is already on disk; it never fetches one, so an absent file cannot be substituted for\n' >&2
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-file: no CSV at that path, so no row was read and no tower was placed\n'
+        return 1; }
+
+    tmap_towers_init
+    local rep
+    # The reasons are checked in a fixed order so a row with two problems lands
+    # in the same bucket on every run: a file counted twice must agree with
+    # itself, or the numbers are not a measurement.
+    rep=$(awk -v fmt="$fmt" -v existing="$TMAP_TOWERS" -v store="$TMAP_TOWERS" \
+              -v stage="$(date -Is)" -v bom="$(printf '\357\273\277')" '
+        function tf(s) { gsub(/^[ \t]+/, "", s); gsub(/[ \t]+$/, "", s); return s }
+        function saf(s) { gsub(/[\t\r\n]/, " ", s); return s }
+        function isnum(s) { return s ~ /^[-+]?[0-9]+([.][0-9]+)?$/ }
+        function isint(s) { return s ~ /^[0-9]+$/ }
+        function rej(r) { rejected++; hits[r] = hits[r] + 1 }
+        BEGIN {
+            FS = ","
+            need = (fmt == "opencellid") ? 13 : 11
+            nb = split("field-count no-coordinates lat-not-a-number lon-not-a-number lat-out-of-range lon-out-of-range plmn-not-numeric cell-id-not-numeric null-island duplicate", bucket, " ")
+            if (existing != "") {
+                keep = FS
+                FS = "\t"
+                while ((getline ln < existing) > 0) {
+                    n = split(ln, f, "\t")
+                    if (n >= 6) seen[f[1] SUBSEP f[2] SUBSEP f[3] "-" f[4] SUBSEP f[5] SUBSEP f[6]] = 1
+                }
+                close(existing)
+                FS = keep
+            }
+        }
+        {
+            gsub(/\r/, "")
+            # A byte-order mark in front of the first line would otherwise turn
+            # the header into a data row and be counted as a rejection.
+            if (!bomdone) { sub(bom, ""); bomdone = 1 }
+            if ($0 ~ /^[ \t]*$/) next
+            if ($0 ~ /^[ \t]*#/) next
+            if (!data_seen) {
+                data_seen = 1
+                h = tolower(tf($1))
+                if (h == "radio" || h == "mcc") { nheader = 1; next }
+            }
+            nread++
+            if (fmt == "opencellid") {
+                radio = $1; mcc = $2; mnc = $3; lac = $4; cid = $5
+                lon = $6; lat = $7; rng = $8; smp = $9; avg = $13
+            } else {
+                radio = ""; mcc = $1; mnc = $2; lac = $3; cid = $4
+                lon = $5; lat = $6; rng = $7; smp = $8; avg = ""
+            }
+            if (NF < need) { rej("field-count"); next }
+            radio = tf(radio); mcc = tf(mcc); mnc = tf(mnc); lac = tf(lac); cid = tf(cid)
+            lon = tf(lon); lat = tf(lat); rng = tf(rng); smp = tf(smp); avg = tf(avg)
+            if (lat == "" || lon == "") { rej("no-coordinates"); next }
+            if (!isnum(lat)) { rej("lat-not-a-number"); next }
+            if (!isnum(lon)) { rej("lon-not-a-number"); next }
+            if (lat + 0 > 90 || lat + 0 < -90) { rej("lat-out-of-range"); next }
+            if (lon + 0 > 180 || lon + 0 < -180) { rej("lon-out-of-range"); next }
+            if (!isint(mcc) || length(mcc) != 3) { rej("plmn-not-numeric"); next }
+            if (!isint(mnc) || length(mnc) > 3) { rej("plmn-not-numeric"); next }
+            if (!isint(lac) || !isint(cid)) { rej("cell-id-not-numeric"); next }
+            if (lat + 0 == 0 && lon + 0 == 0) { rej("null-island"); next }
+            key = fmt SUBSEP radio SUBSEP mcc "-" mnc SUBSEP lac SUBSEP cid
+            if (key in seen) { rej("duplicate"); next }
+            seen[key] = 1
+            print fmt "\t" saf(radio) "\t" mcc "\t" mnc "\t" lac "\t" cid "\t" lat "\t" lon \
+                  "\t" saf(rng) "\t" saf(smp) "\t" saf(avg) "\t" stage >> store
+            imported++
+        }
+        END {
+            printf "rows_read\t%d\n", nread
+            printf "header_skipped\t%d\n", nheader
+            printf "rows_imported\t%d\n", imported
+            printf "rows_rejected\t%d\n", rejected
+            for (i = 1; i <= nb; i++)
+                printf "reject_reason\t%s\t%d\n", bucket[i], (bucket[i] in hits) ? hits[bucket[i]] : 0
+        }' "$file") || {
+        printf 'ERROR\treading %s failed\n' "$(tmap_sanitize "$file")" >&2
+        return 1; }
+
+    local nimp nrej
+    nimp=$(fldk "$rep" rows_imported)
+    nrej=$(fldk "$rep" rows_rejected)
+    printf 'source\t%s\n' "$fmt"
+    printf 'file\t%s\n' "$(tmap_sanitize "$file")"
+    printf '%s\n' "$rep"
+    printf 'towers_total\t%s\n' "$(tmap_tower_count)"
+    printf 'store\t%s\n' "$TMAP_TOWERS"
+
+    (( ${nimp:-0} > 0 )) || {
+        printf 'MISSING\timportable-towers\n' >&2
+        printf 'WHY\t%s row(s) were read and %s could not be placed, so nothing was merged and an unchanged store must not be reported as a finished import\n' \
+            "$(fldk "$rep" rows_read)" "${nrej:-0}" >&2
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-importable-rows: every row failed one of the reasons counted above\n'
+        return 1; }
+    return 0
+}
+
+# One field out of a key/value report, with the empty field tolerated.
+# `read` would collapse a missing field; this is only ever used on two- and
+# three-column numeric reports, where an absent key means 0.
+fldk() {
+    printf '%s\n' "${1:-}" | awk -F'\t' -v k="$2" '$1 == k { print $2; exit }'
+}
+
+# A coarse density grid over everything that knows where it is.
+#
+# A list of coordinates answers "is this tower known" and says nothing about
+# shape: whether one drive crossed one cell or forty, whether the imported
+# database is dense where this receiver is thin. A terminal is not a map, so
+# this is deliberately coarse -- and every count is printed next to the cell
+# size and the approximate metres it covers, because a density without its
+# resolution is a picture of the font rather than of the towers.
+tmap_heatmap() {  # [--cell-deg N] [--help]
+    local cell_deg="0.05"
+    while (($#)); do
+        case "$1" in
+            --cell-deg)
+                cell_deg="${2:-}"
+                [[ -n "$cell_deg" ]] || {
+                    printf 'ERROR\t--cell-deg needs a number of degrees\n' >&2
+                    printf 'WHY\tthe cell size is the resolution of every count drawn below it; a blank one leaves the grid with no meaning to state\n' >&2
+                    return 2; }
+                shift 2 ;;
+            --help|-h) printf 'usage: --heatmap [--cell-deg 0.05]\n'; return 0 ;;
+            *)
+                printf 'ERROR\t--heatmap does not take %s\n' "$(tmap_sanitize "$1")" >&2
+                return 2 ;;
+        esac
+    done
+    awk -v d="$cell_deg" 'BEGIN { exit !(d ~ /^[0-9]+([.][0-9]+)?$/ && d + 0 > 0) }' || {
+        printf 'ERROR\t--cell-deg must be degrees as a positive number, not %s\n' \
+            "$(tmap_sanitize "$cell_deg")" >&2
+        printf 'WHY\ta zero cell would divide the grid by nothing\n' >&2
+        return 2; }
+
+    local pos="$MOD_TMP/heat.$$.tsv"
+    tmap_positioned > "$pos" 2>/dev/null
+    local npos nall nunpos
+    npos=$(grep -c . "$pos" 2>/dev/null || true); [[ -z "$npos" ]] && npos=0
+    nall=$(( $(tmap_point_count) + $(tmap_tower_count) ))
+    nunpos=$(( nall - npos )); (( nunpos < 0 )) && nunpos=0
+
+    (( npos > 0 )) || {
+        rm -f "$pos"
+        printf 'MISSING\tpositioned-towers\n'
+        printf 'WHY\ta grid of towers needs coordinates and %s known row(s) carry none, so an empty grid would claim this area has no towers when the truth is that nothing here has been placed\n' \
+            "$nall"
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-positioned-towers: an empty map is not an empty world\n'
+        return 1; }
+
+    local bb mnla mxla mnlo mxlo dims cols rows_
+    bb=$(awk -F'\t' 'NR == 1 { mnla = $1 + 0; mxla = $1 + 0; mnlo = $2 + 0; mxlo = $2 + 0 }
+                     { if ($1 + 0 < mnla) mnla = $1 + 0; if ($1 + 0 > mxla) mxla = $1 + 0
+                       if ($2 + 0 < mnlo) mnlo = $2 + 0; if ($2 + 0 > mxlo) mxlo = $2 + 0 }
+                     END { printf "%s\t%s\t%s\t%s\n", mnla, mxla, mnlo, mxlo }' "$pos")
+    mnla=$(cut -f1 <<< "$bb"); mxla=$(cut -f2 <<< "$bb")
+    mnlo=$(cut -f3 <<< "$bb"); mxlo=$(cut -f4 <<< "$bb")
+
+    # 1e-9 before the truncation: 2.35 - 2.30 is 0.04999999999999982 in binary
+    # floating point, and a tower exactly on a cell edge would otherwise be
+    # counted in the cell below it.
+    dims=$(awk -v mnla="$mnla" -v mxla="$mxla" -v mnlo="$mnlo" -v mxlo="$mxlo" -v d="$cell_deg" \
+        'BEGIN { c = int((mxlo - mnlo) / d + 1e-9) + 1; r = int((mxla - mnla) / d + 1e-9) + 1
+                 printf "%d\t%d\n", c, r }')
+    cols=$(cut -f1 <<< "$dims"); rows_=$(cut -f2 <<< "$dims")
+
+    if (( cols * rows_ > 4096 )); then
+        rm -f "$pos"
+        printf 'ERROR\t--cell-deg %s draws a %sx%s grid (over 4096 cells) over this bounding box\n' \
+            "$cell_deg" "$cols" "$rows_" >&2
+        printf 'WHY\tthis verb is a coarse look at density in a terminal; a finer cell needs a drawing tool, and %s already writes one for it\n' \
+            '--export-geojson' >&2
+        return 2
+    fi
+
+    local mns mew stats
+    mns=$(awk -v d="$cell_deg" 'BEGIN { printf "%d", 111320 * d + 0.5 }')
+    mew=$(awk -v mnla="$mnla" -v mxla="$mxla" -v d="$cell_deg" \
+        'BEGIN { c = (mnla + mxla) / 2; printf "%d", 111320 * d * cos(c * 3.14159265358979 / 180) + 0.5 }')
+    stats=$(awk -F'\t' -v mnla="$mnla" -v mnlo="$mnlo" -v d="$cell_deg" '
+        BEGIN { cols = 0 }
+        { r = int(($1 - mnla) / d + 1e-9); c = int(($2 - mnlo) / d + 1e-9)
+          if (!((r SUBSEP c) in g)) used++
+          g[r SUBSEP c]++ }
+        END { max = 0; for (k in g) if (g[k] > max) max = g[k]
+              printf "%d\t%d\n", used, max }' "$pos")
+
+    printf 'heatmap\n'
+    printf 'cell_deg\t%.6f\n' "$cell_deg"
+    printf 'grid_cols\t%s\n' "$cols"
+    printf 'grid_rows\t%s\n' "$rows_"
+    printf 'positioned\t%s\n' "$npos"
+    printf 'unpositioned\t%s\n' "$nunpos"
+    printf 'bbox_min_lat\t%s\n' "$mnla"
+    printf 'bbox_max_lat\t%s\n' "$mxla"
+    printf 'bbox_min_lon\t%s\n' "$mnlo"
+    printf 'bbox_max_lon\t%s\n' "$mxlo"
+    printf 'cell_m_north_south\t%s\n' "$mns"
+    printf 'cell_m_east_west\t%s\n' "$mew"
+    printf 'cells_used\t%s\n' "$(cut -f1 <<< "$stats")"
+    printf 'max_cell\t%s\n' "$(cut -f2 <<< "$stats")"
+    printf 'legend\t. = no tower | 1-9 = that many towers | # = 10 or more | first row is the north edge, first column the west edge\n'
+    printf 'grid\tbegin\n'
+    awk -F'\t' -v mnla="$mnla" -v mnlo="$mnlo" -v d="$cell_deg" -v cols="$cols" -v rows="$rows_" '
+        BEGIN { cols = cols + 0; rows = rows + 0 }
+        { r = int(($1 - mnla) / d + 1e-9); c = int(($2 - mnlo) / d + 1e-9)
+          if (c < 0) c = 0; if (c > cols - 1) c = cols - 1
+          if (r < 0) r = 0; if (r > rows - 1) r = rows - 1
+          g[r, c]++ }
+        END {
+            for (r = rows - 1; r >= 0; r--) {
+                line = ""
+                for (c = 0; c < cols; c++) {
+                    n = g[r, c] + 0
+                    if (n == 0) line = line "."
+                    else if (n < 10) line = line n
+                    else line = line "#"
+                }
+                print line
+            }
+        }' "$pos"
+    printf 'grid\tend\n'
+    rm -f "$pos"
+    return 0
+}
+
+# The merged store: survey points and imported towers, one header, one row per
+# tower, because every consumer -- this module's exporters, the GUI, another
+# module reading the loot directory -- would otherwise have to know which of
+# two files a tower came from and how that file orders its columns.
+#
+# The last column carries the difference instead of hiding it: `measured` is a
+# position this machine derived from a fix, `advertised` is a position a third
+# party published. They are not the same kind of fact and a consumer that
+# treats them as one will eventually report a database as a survey.
+#
+# plmn is mcc-mnc exactly as the source wrote it, unpadded: an MNC of "1" is
+# printed "1" and not "01", because padding it is a claim about how many digits
+# that network uses.
+tmap_store_tsv() {
+    # This verb has no modifiers, and silently ignoring one would let a caller
+    # believe it filtered the table when it did not.
+    while (($#)); do
+        case "$1" in
+            --help|-h) printf 'usage: --store-tsv\t(no arguments)\n'; return 0 ;;
+            *) printf 'ERROR\t--store-tsv does not take %s\n' "$1"; return 2 ;;
+        esac
+    done
+    printf 'origin\tlat\tlon\talt_m\tspeed_mps\trat\tgen\tarfcn\tplmn\tcell_id\trsrp_dbm\toperator\tevidence\n'
+    if [[ -f "$TMAP_POINTS" ]]; then
+        tail -n +2 "$TMAP_POINTS" 2>/dev/null |
+            awk -F'\t' 'NF >= 12 { printf "survey\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tmeasured\n", $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12 }'
+    fi
+    if [[ -f "$TMAP_TOWERS" ]]; then
+        # The generation is derived here rather than stored: CDMA and iDEN also
+        # appear in published exports and neither maps onto one generation, so
+        # an unknown radio leaves the column empty instead of guessing.
+        tail -n +2 "$TMAP_TOWERS" 2>/dev/null |
+            awk -F'\t' 'NF >= 12 {
+                r = toupper($2)
+                if (r == "GSM") g = "2G"
+                else if (r == "UMTS") g = "3G"
+                else if (r == "LTE") g = "4G"
+                else if (r == "NR") g = "5G"
+                else g = ""
+                printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tadvertised\n", $1, $7, $8, "", "", $2, g, "", $3 "-" $4, $6, $11, ""
+            }'
+    fi
+    local n
+    n=$(( $(tmap_point_count) + $(tmap_tower_count) ))
+    (( n > 0 )) || {
+        # Every word of the refusal goes to stderr: stdout is the table other
+        # verbs and the GUI parse, and a verdict line in the middle of it would
+        # be a row with two columns that no reader expects.
+        printf 'MISSING\ttowers\n' >&2
+        printf 'WHY\tneither a survey point nor an imported tower has been recorded, so the store holds a header and no rows, and a consumer must not read that as an area surveyed and found empty\n' >&2
+        printf 'verdict\tunobserved\n' >&2
+        printf 'reason\tempty-store: nothing has been measured and nothing has been imported\n' >&2
+        return 1; }
+    return 0
+}
+
 # ── selftest ────────────────────────────────────────────────────────────
 tmap_selftest() {
     local bad=0
@@ -341,11 +736,22 @@ tmap_selftest() {
         else printf '%s\tFAIL want=%s got=%s\n' "$n" "$want" "$got"; bad=$((bad + 1)); fi
     }
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
+    # The import report breaks rejections out as reject_reason<TAB>name<TAB>n.
+    rz()  { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1=="reject_reason" && $2==k {print $3; exit}'; }
+    # The grid is delimited by grid<TAB>begin / grid<TAB>end so its shape can
+    # be asserted as a shape rather than by eye.
+    grid() {
+        printf '%s\n' "$1" | awk -F'\t' '
+            $1 == "grid" && $2 == "begin" { on = 1; next }
+            $1 == "grid" && $2 == "end"   { on = 0; next }
+            on { printf "%s%s", (n++ ? "," : ""), $0 }'
+    }
 
     local d
     d=$(mktemp -d "$MOD_TMP/selftest.XXXXXX") || {
         printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
-    export LOOT_DIR="$d/loot" TMAP_DIR="$d/loot/tower_map" TMAP_POINTS="$d/loot/tower_map/points.tsv"
+    export LOOT_DIR="$d/loot" TMAP_DIR="$d/loot/tower_map" TMAP_POINTS="$d/loot/tower_map/points.tsv" \
+           TMAP_TOWERS="$d/loot/tower_map/towers.tsv"
 
     # 1. Empty store: every export must refuse rather than write an empty file.
     tmap_init_store
@@ -422,6 +828,153 @@ tmap_selftest() {
     # 11. GPS helpers must report absence rather than blocking.
     chk gps-avail-is-bool "$([[ "$(tmap_gps_available && echo 1 || echo 0)" =~ ^[01]$ ]] && echo yes || echo no)" "yes"
 
+    # 12. Import an OpenCellID export. The fixture writes one row for every way
+    #     a tower can fail to be placeable -- no coordinates, a latitude of
+    #     500, a non-numeric mcc, a longitude that is not a number, 0/0, a
+    #     truncated row, and the same cell twice -- so each bucket has to be
+    #     counted, not just the total.
+    local ocid="$d/opencellid.csv"
+    {
+        printf 'radio,mcc,mnc,lac,cid,lon,lat,range,samples,changeable,created,updated,averageSignal\n'
+        printf 'GSM,208,1,9001,11111,2.3500,48.8500,1000,7,1,1600000000,1600000100,-85\n'
+        printf 'LTE,208,1,9002,11112,2.4000,48.9000,500,3,1,1600000000,1600000100,-95\n'
+        printf 'UMTS,208,10,9003,11113,2.3000,48.8000,300,1,1,1600000000,1600000100,-101\n'
+        printf 'LTE,208,1,9004,11114,,48.9000,500,3,1,1600000000,1600000100,-95\n'
+        printf 'GSM,208,1,9005,11115,2.3000,500,500,3,1,1600000000,1600000100,-85\n'
+        printf 'GSM,20X,1,9006,11116,2.3000,48.8000,500,3,1,1600000000,1600000100,-85\n'
+        printf 'GSM,208,1,9007,11117,0,0,500,3,1,1600000000,1600000100,-85\n'
+        printf 'GSM,208,1,9001,11111,2.3500,48.8500,1000,7,1,1600000000,1600000100,-85\n'
+        printf 'LTE,208,1,9008,11118,2.5\n'
+        printf 'GSM,208,1,9009,11119,abc,48.8000,500,3,1,1600000000,1600000100,-85\n'
+    } > "$ocid"
+    local rep; rep=$(tmap_import opencellid "$ocid")
+    chk ocid-rc          "$?" "0"
+    chk ocid-header      "$(fld "$rep" header_skipped)" "1"
+    chk ocid-read        "$(fld "$rep" rows_read)" "10"
+    chk ocid-imported    "$(fld "$rep" rows_imported)" "3"
+    chk ocid-rejected    "$(fld "$rep" rows_rejected)" "7"
+    chk ocid-accounting  "$(( $(fld "$rep" rows_imported) + $(fld "$rep" rows_rejected) ))" "10"
+    chk ocid-rej-fields  "$(rz "$rep" field-count)" "1"
+    chk ocid-rej-coord   "$(rz "$rep" no-coordinates)" "1"
+    chk ocid-rej-latnum  "$(rz "$rep" lat-not-a-number)" "0"
+    chk ocid-rej-lonnum  "$(rz "$rep" lon-not-a-number)" "1"
+    chk ocid-rej-latrng  "$(rz "$rep" lat-out-of-range)" "1"
+    chk ocid-rej-lonrng  "$(rz "$rep" lon-out-of-range)" "0"
+    chk ocid-rej-plmn    "$(rz "$rep" plmn-not-numeric)" "1"
+    chk ocid-rej-cellid  "$(rz "$rep" cell-id-not-numeric)" "0"
+    chk ocid-rej-null    "$(rz "$rep" null-island)" "1"
+    chk ocid-rej-dup     "$(rz "$rep" duplicate)" "1"
+    chk ocid-store-rows  "$(tmap_tower_count)" "3"
+    chk ocid-store-cols  "$(head -1 "$TMAP_TOWERS" | awk -F'\t' '{print NF}')" "12"
+    chk ocid-source      "$(cut -f1 "$TMAP_TOWERS" | tail -n +2 | sort -u)" "opencellid"
+
+    # 13. The MLS export has its own column order, and the same cell as an
+    #     OpenCellID row is kept rather than de-duplicated: two sources that
+    #     agree are two claims about one tower, not one claim written twice.
+    local mls="$d/mls.csv"
+    {
+        printf 'mcc,mnc,lac,cellid,lon,lat,range,samples,changeable,created,updated\n'
+        printf '208,1,9101,22221,2.3600,48.8600,800,5,1,1600000000,1600000100\n'
+        printf '208,1,9102,22222,2.3700,48.8700,800,5,1,1600000000,1600000100\n'
+        printf '208,1,9101,22221,2.3600,48.8600,800,5,1,1600000000,1600000100\n'
+        printf '208,1,9103,22223,200.0000,48.0000,800,5,1,1600000000,1600000100\n'
+        printf '208,10,9003,11113,2.3000,48.8000,300,1,1,1600000000,1600000100\n'
+        printf '208,1,9106,22226,,48.8000,800,5,1,1600000000,1600000100\n'
+    } > "$mls"
+    local mrep; mrep=$(tmap_import mls "$mls")
+    chk mls-rc           "$?" "0"
+    chk mls-read         "$(fld "$mrep" rows_read)" "6"
+    chk mls-imported     "$(fld "$mrep" rows_imported)" "3"
+    chk mls-rejected     "$(fld "$mrep" rows_rejected)" "3"
+    chk mls-rej-dup      "$(rz "$mrep" duplicate)" "1"
+    chk mls-rej-lonrng   "$(rz "$mrep" lon-out-of-range)" "1"
+    chk mls-rej-coord    "$(rz "$mrep" no-coordinates)" "1"
+    chk mls-store-rows   "$(tmap_tower_count)" "6"
+    chk mls-store-rat    "$(awk -F'\t' '$1=="mls"{print $2}' "$TMAP_TOWERS" | sort -u)" ""
+
+    # 14. Re-importing the same file must import nothing: the store already
+    #     holds every placeable row, and a second copy would double the map.
+    local rep2; rep2=$(tmap_import opencellid "$ocid" 2>/dev/null)
+    chk reimport-rc       "$?" "1"
+    chk reimport-imported "$(fld "$rep2" rows_imported)" "0"
+    chk reimport-dup      "$(rz "$rep2" duplicate)" "4"
+    chk reimport-store    "$(tmap_tower_count)" "6"
+
+    # 15. An import of a file where nothing can be placed is a refusal with the
+    #     reasons attached, not a quiet success that changed nothing.
+    local badcsv="$d/bad.csv"
+    printf 'GSM,208,1,9001,11111,,48.85,1000,7,1,1,1,-85\n' > "$badcsv"
+    local brep brc
+    brep=$(tmap_import opencellid "$badcsv" 2>&1); brc=$?
+    chk badimport-rc     "$brc" "1"
+    chk badimport-read   "$(fld "$brep" rows_read)" "1"
+    chk badimport-msg    "$(printf '%s\n' "$brep" | grep -c '^MISSING')" "1"
+    chk badimport-why    "$(printf '%s\n' "$brep" | grep -c '^WHY')" "1"
+    chk badimport-store  "$(tmap_tower_count)" "6"
+
+    # 16. Import argument errors are usage errors, not refusals.
+    chk import-noarg-rc  "$(tmap_import opencellid >/dev/null 2>&1; echo $?)" "2"
+    chk import-nofile-rc "$(tmap_import opencellid "$d/absent.csv" >/dev/null 2>&1; echo $?)" "1"
+    chk import-nofile-msg "$(tmap_import opencellid "$d/absent.csv" 2>&1 | grep -c '^MISSING')" "1"
+    chk import-badfmt-rc "$(tmap_import csv "$badcsv" >/dev/null 2>&1; echo $?)" "2"
+    chk import-twofile-rc "$(tmap_import mls "$mls" "$ocid" >/dev/null 2>&1; echo $?)" "2"
+
+    # 17. The heatmap reads both stores: one measured point with a fix is added
+    #     next to the imported towers, and one without a fix must be counted as
+    #     unplaced rather than dropped in silence.
+    printf '%s\n' "$(tmap_header)" > "$TMAP_POINTS"
+    printf '2026-01-01T00:00:00Z\t48.85\t2.35\t35\t0\tLTE\t4G\t6300\t208-01\t11111\t-80\tOrange FR\n' >> "$TMAP_POINTS"
+    printf '2026-01-01T00:10:00Z\t\t\t\t\tGSM\t2G\t42\t208-01\t99\t-70\tOrange FR\n' >> "$TMAP_POINTS"
+    local hmap hrc
+    hmap=$(tmap_heatmap); hrc=$?
+    chk heat-rc        "$hrc" "0"
+    chk heat-deg       "$(fld "$hmap" cell_deg)" "0.050000"
+    chk heat-cols      "$(fld "$hmap" grid_cols)" "3"
+    chk heat-rows      "$(fld "$hmap" grid_rows)" "3"
+    chk heat-positioned "$(fld "$hmap" positioned)" "7"
+    chk heat-unpositioned "$(fld "$hmap" unpositioned)" "1"
+    chk heat-cells-used "$(fld "$hmap" cells_used)" "3"
+    chk heat-max-cell  "$(fld "$hmap" max_cell)" "4"
+    chk heat-legend    "$(printf '%s\n' "$hmap" | grep -c '^legend')" "1"
+    chk heat-res-ns    "$([[ "$(fld "$hmap" cell_m_north_south)" =~ ^[0-9]+$ ]] && echo yes || echo no)" "yes"
+    # Four towers around 48.85/2.35 (three imported, one measured), one in the
+    # north-east cell, two in the south-west cell.
+    chk heat-grid      "$(grid "$hmap")" "..1,.4.,2.."
+    chk heat-grid-shape "$(printf '%s\n' "$hmap" | awk -F'\t' '
+            $1=="grid"&&$2=="begin"{on=1;next} $1=="grid"&&$2=="end"{on=0} on{print length($0)}' |
+            sort -u | tr '\n' ',')" "3,"
+
+    # 18. With nothing positioned the heatmap refuses by name, and says why an
+    #     empty grid is not evidence about the world.
+    local sp="$TMAP_POINTS" st="$TMAP_TOWERS"
+    mkdir -p "$d/empty/loot/tower_map"
+    TMAP_POINTS="$d/empty/loot/tower_map/points.tsv"
+    TMAP_TOWERS="$d/empty/loot/tower_map/towers.tsv"
+    tmap_init_store
+    local href2 hrc2
+    href2=$(tmap_heatmap 2>&1); hrc2=$?
+    chk heat-none-rc   "$hrc2" "1"
+    chk heat-none-msg  "$(printf '%s\n' "$href2" | grep -c '^MISSING')" "1"
+    chk heat-none-name "$(printf '%s\n' "$href2" | awk -F'\t' '$1=="MISSING"{print $2}')" "positioned-towers"
+    chk heat-none-why  "$(printf '%s\n' "$href2" | grep -c '^WHY')" "1"
+    chk heat-none-verdict "$(printf '%s\n' "$href2" | awk -F'\t' '$1=="verdict"{print $2}')" "unobserved"
+    chk store-empty-rc "$(tmap_store_tsv >/dev/null 2>&1; echo $?)" "1"
+    chk store-empty-hdr "$(tmap_store_tsv 2>/dev/null | awk -F'\t' '{print NF}')" "13"
+    TMAP_POINTS="$sp"; TMAP_TOWERS="$st"
+
+    # 19. The merged store carries both kinds of fact and says which is which.
+    local stv
+    stv=$(tmap_store_tsv)
+    chk store-cols     "$(printf '%s\n' "$stv" | head -1 | awk -F'\t' '{print NF}')" "13"
+    chk store-rows     "$(printf '%s\n' "$stv" | tail -n +2 | grep -c .)" "8"
+    chk store-measured "$(printf '%s\n' "$stv" | awk -F'\t' '$13=="measured"' | grep -c .)" "2"
+    chk store-advertised "$(printf '%s\n' "$stv" | awk -F'\t' '$13=="advertised"' | grep -c .)" "6"
+    chk store-gen-2g   "$(printf '%s\n' "$stv" | awk -F'\t' '$2=="48.8500" && $7=="2G" && $13=="advertised"' | grep -c .)" "1"
+    chk store-gen-4g   "$(printf '%s\n' "$stv" | awk -F'\t' '$7=="4G" && $13=="advertised" && $11=="-95"' | grep -c .)" "1"
+    chk store-plmn     "$(printf '%s\n' "$stv" | awk -F'\t' '$13=="advertised" && $9=="208-10"' | grep -c .)" "2"
+    chk store-unplaced "$(printf '%s\n' "$stv" | awk -F'\t' '$13=="measured" && $2==""' | grep -c .)" "1"
+    chk store-arg-rc "$(tmap_store_tsv extra >/dev/null 2>&1; echo $?)" "2"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -436,6 +989,7 @@ tmap_menu() {
         echo -e "  ${C_MAG}=== tower survey ===${C_RESET}"
         echo -e "  gps:    ${C_GRN}$gps${C_RESET}"
         echo -e "  points: ${C_GRN}$(tmap_point_count)${C_RESET}"
+        echo -e "  towers: ${C_GRN}$(tmap_tower_count)${C_RESET}"
         echo -e "  store:  ${C_DIM}$TMAP_POINTS${C_RESET}\n"
         cat << 'M'
   [1]  GPS survey pass (GSM 900)
@@ -447,6 +1001,10 @@ tmap_menu() {
   [7]  export KML
   [8]  export GeoJSON
   [9]  clear survey
+  [10] import OpenCellID CSV
+  [11] import MLS CSV
+  [12] tower heatmap
+  [13] merged store (TSV)
   [0]  back
 
 M
@@ -465,6 +1023,17 @@ M
             7) tmap_export_kml; read -rp "  press enter " _ ;;
             8) tmap_export_geojson; read -rp "  press enter " _ ;;
             9) tmap_clear; sleep 1 ;;
+            10) read -rp "  OpenCellID CSV path> " f
+                [[ -n "$f" ]] && tmap_import opencellid "$f"
+                read -rp "  press enter " _ ;;
+            11) read -rp "  MLS CSV path> " f
+                [[ -n "$f" ]] && tmap_import mls "$f"
+                read -rp "  press enter " _ ;;
+            12) read -rp "  cell size in degrees [0.05]> " cdeg
+                if [[ -n "$cdeg" ]]; then tmap_heatmap --cell-deg "$cdeg"; else tmap_heatmap; fi
+                read -rp "  press enter " _ ;;
+            13) tmap_store_tsv | column -t -s$'\t' 2>/dev/null || tmap_store_tsv
+                read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -479,8 +1048,10 @@ tmap_cli_status_tsv() {
     fi
     printf 'gps\t%s\n'     "$gps"
     printf 'points\t%s\n'  "$(tmap_point_count)"
+    printf 'towers\t%s\n'  "$(tmap_tower_count)"
     printf 'dir\t%s\n'     "$TMAP_DIR"
     printf 'store\t%s\n'   "$TMAP_POINTS"
+    printf 'towers_store\t%s\n' "$TMAP_TOWERS"
 }
 
 tmap_cli_main() {
@@ -495,6 +1066,10 @@ tmap_cli_main() {
         --export-csv)   tmap_export_csv ;;
         --export-kml)   tmap_export_kml ;;
         --export-geojson) tmap_export_geojson ;;
+        --import-opencellid) tmap_import opencellid "$@" ;;
+        --import-mls)   tmap_import mls "$@" ;;
+        --heatmap)      tmap_heatmap "$@" ;;
+        --store-tsv)    tmap_store_tsv "$@" ;;
         --clear)        tmap_clear ;;
         --start-gpsd)   tmap_start_gpsd "${1:-/dev/ttyUSB0}" ;;
         --gps-quality-tsv)
@@ -522,8 +1097,12 @@ Usage: $0 COMMAND
   --export-csv              write the survey as CSV
   --export-kml              write the survey as KML (points with a fix only)
   --export-geojson          write the survey as GeoJSON
+  --import-opencellid <csv>  merge an OpenCellID export into the tower store
+  --import-mls <csv>        merge a Mozilla Location Service export
+  --heatmap [--cell-deg N]  tower density grid over the store bounding box
+  --store-tsv               survey points and imported towers as one TSV
   --clear                   empty the survey store
-  --selftest                verify the store and exporters without GPS
+  --selftest                verify the store, the importers, the heatmap and the exporters without GPS
   --menu                    interactive menu
 EOF
             return 2 ;;

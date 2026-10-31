@@ -22930,6 +22930,15 @@ static ModuleSubmenuEntry crec_entries[] = {
       "document-save-symbolic",
       NULL,
       crec_build_export },
+    /* What the store can answer, and the four shapes the survey leaves in. The
+       formats are one act with a choice, so each is a button carrying its own
+       argument rather than a form the operator has to fill twice. */
+    { "Inventory",
+      "view-list-symbolic",
+      "#WHAT THE STORE KNOWS|--inventory"
+      "|#WRITE THE SURVEY AS|--export=csv:CSV"
+      "|--export=kml:KML|--export=geojson:GeoJSON|--export=nmap:nmap XML",
+      NULL },
 };
 /* 03_gsmtap — the tap: everything a phone's stack hands to the host.
  *
@@ -23139,6 +23148,16 @@ gtap_build_header(AppState *state, const char *module_id,
 static ModuleSubmenuEntry gtap_entries[] = {
     { "Live tap", "dialog-information-symbolic", NULL, gtap_build_live },
     { "Header", "utilities-terminal-symbolic", NULL, gtap_build_header },
+    /* Forwarding a capture is one destination away, and the number that matters
+       afterwards is how many frames were dropped by the filter rather than how
+       many were sent: a relay that forwards nothing must not read as a relay
+       that received nothing. */
+    { "Relay",
+      "document-send-symbolic",
+      "#DESTINATION|~--relay"
+      "|#WHAT IT DID|--relay-status"
+      "|#ONLY THESE|~--watchlist",
+      NULL },
 };
 /* --------------------------------------------------------------------------
    04_tower_map — Tower Survey.
@@ -23306,6 +23325,11 @@ static ModuleSubmenuEntry tmap_entries[] = {
     { "Overview", "dialog-information-symbolic", NULL, tmap_build_overview },
     { "Position fix", "find-location-symbolic", NULL, tmap_build_gps },
     { "Export", "document-save-symbolic", NULL, tmap_build_export },
+    { "Tower database",
+      "network-workgroup-symbolic",
+      "#IMPORT A FILE|~--import-opencellid|~--import-mls"
+      "|#LOOK AT THE RESULT|--heatmap|--store-tsv",
+      NULL },
 };
 /* --------------------------------------------------------------------------
    The field kit is a pre-flight instrument and an honesty check, so the page
@@ -26531,6 +26555,11 @@ static ModuleSubmenuEntry lcore_entries[] = {
     { "Encapsulation", "network-transmit-receive-symbolic", NULL,
       lcore_build_encapsulate },
     { "Audit checks", "system-search-symbolic", NULL, lcore_build_audit },
+    /* One message, nine arguments: Insert-Subscriber-Data asks the HSS what a
+       subscriber is allowed, and the flags are the parts of the profile being
+       asked about. A form row, because a button cannot carry nine answers. */
+    { "Subscriber profile", "view-list-symbolic",
+      "#ASK THE HSS|~--idr", NULL },
     { "Charging", "document-send-symbolic", NULL, lcore_build_charging },
     { "Interconnect", "network-wired-symbolic", NULL, lcore_build_interconnect },
 };
@@ -26696,10 +26725,41 @@ nair_build_cell(AppState *state, const char *module_id,
     return outer;
 }
 
+/* A capture carries the timing and the cell identity in its first millisecond.
+ * This page is the one place in the tree where a PCI comes from the waveform
+ * instead of from something typed in. */
+static GtkWidget *
+nair_build_sync(AppState *state, const char *module_id,
+                GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("SYNCHRONISATION",
+        "Find the PSS in a capture: where a symbol starts, which of the three "
+        "roots it is, and how strongly it matched.", &body);
+    GtkWidget *card_body;
+    GtkWidget *card = verb_card("SEARCH A CAPTURE", &card_body);
+    GtkWidget *res = result_rect_new(state, NULL);
+
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(card_body), mod_arg_row(state, module_id, status,
+        "Find the PSS", "--sync-detect", "capture.cf32 --rate 1920000",
+        "A capture and its sample rate. The rate is not optional: the FFT size "
+        "is rate over subcarrier spacing, and without it there is no grid to "
+        "place a synchronisation sequence on. Add --scs for 15, 30, 60 or 120 "
+        "kHz and --fmt for cf32, ci16 or cu8."));
+    gtk_box_append(GTK_BOX(card_body), res);
+    gtk_box_append(GTK_BOX(body), card);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry nair_entries[] = {
     { "State", "dialog-information-symbolic", NULL, nair_build_read },
     { "Core messaging", "document-send-symbolic", NULL, nair_build_send },
     { "Cell", "imsisting-01_radio-symbolic", NULL, nair_build_cell },
+    { "Synchronisation", "system-search-symbolic", NULL, nair_build_sync },
 };
 /* 13_nr_core — 5G core.
  *

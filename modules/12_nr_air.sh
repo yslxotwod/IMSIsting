@@ -6432,6 +6432,73 @@ NAIR_WAVE_LIB
     chk pdcp-bad-sn       "$(nair_pdcp_build --sn12 --sn 4096 --sdu aa >/dev/null 2>&1; echo $?)" "2"
     chk pdcp-bad-snlen    "$(nair_pdcp_build --sn16 --sn 1 --sdu aa >/dev/null 2>&1; echo $?)" "2"
     chk pdcp-parse-short  "$(nair_pdcp_parse 18 8009 >/dev/null 2>&1; echo $?)" "2"
+    # ── the PSS the correlator looks for is the sequence the standard defines ──
+    # A fresh temp dir: the block below runs after the main selftest scratch tree
+    # has been removed, so it cannot borrow $d.
+    local sdir
+    sdir=$(mktemp -d) || return 1
+    if nair_sync_available; then
+        chk sync-pss-length "$(python3 "$(NAIR_SYNC_PY)" pss 0 | awk -F'\t' '$1=="length"{print $2}')" "127"
+        chk sync-pss-bipolar "$(python3 "$(NAIR_SYNC_PY)" pss 0 | awk -F'\t' '$1=="bipolar"{print $2}')" "yes"
+        chk sync-pss-distinct "$(python3 "$(NAIR_SYNC_PY)" pss 1 | awk -F'\t' '$1=="distinct"{print $2}')" "yes"
+
+        # A PSS planted at a known offset must come back at that offset and with
+        # that root. Anything else means the correlation is finding something
+        # other than the thing that was put there.
+        local cap="$sdir/sync.cf32"
+        if python3 - "$cap" "$(NAIR_SYNC_PY)" <<'PYSYNC'
+import importlib.util, numpy as np, sys
+cap, tool = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("nrs", tool)
+nrs = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(nrs)
+fs, scs, at = 1.92e6, 15.0, 4000
+n_fft = int(fs / (scs * 1000))
+tmpl = nrs.freq_to_time(nrs.pss_sequence(2), n_fft)
+rng = np.random.default_rng(5)
+z = (rng.standard_normal(20000) + 1j * rng.standard_normal(20000)) * 0.02
+z[at:at + n_fft] = tmpl * 8
+d = np.empty(2 * z.size, dtype="<f4")
+d[0::2] = z.real
+d[1::2] = z.imag
+open(cap, "wb").write(d.tobytes())
+PYSYNC
+        then
+            local sd
+            sd=$(nair_cmd_sync_detect "$cap" --rate 1920000 --scs 15)
+            chk sync-detected "$(printf '%s\n' "$sd" | awk -F'\t' '$1=="verdict"{print $2}')" "detected"
+            chk sync-offset "$(printf '%s\n' "$sd" | awk -F'\t' '$1=="peak0_offset"{print $2}')" "4000"
+            chk sync-nid2 "$(printf '%s\n' "$sd" | awk -F'\t' '$1=="peak0_nid2"{print $2}')" "2"
+            chk sync-fft "$(printf '%s\n' "$sd" | awk -F'\t' '$1=="fft_size"{print $2}')" "128"
+        else
+            chk sync-fixture "written" "failed"
+        fi
+
+        # Noise is not a cell, and the refusal has to be the answer.
+        python3 - "$sdir/noise.cf32" <<'PYNOISE' >/dev/null 2>&1
+import numpy as np, sys
+rng = np.random.default_rng(9)
+n = 20000
+z = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 0.02
+d = np.empty(2 * n, dtype="<f4")
+d[0::2] = z.real
+d[1::2] = z.imag
+open(sys.argv[1], "wb").write(d.tobytes())
+PYNOISE
+        chk sync-noise-refused "$(nair_cmd_sync_detect "$sdir/noise.cf32" --rate 1920000 >/dev/null 2>&1; echo $?)" "1"
+        chk sync-noise-detail "$(nair_cmd_sync_detect "$sdir/noise.cf32" --rate 1920000 2>/dev/null | grep -c 'no-pss-above-threshold')" "1"
+
+        # A capture shorter than four symbols cannot support a peak at all.
+        : > "$sdir/short.cf32"
+        head -c 2048 /dev/zero >> "$sdir/short.cf32"
+        chk sync-short-refused "$(nair_cmd_sync_detect "$sdir/short.cf32" --rate 1920000 >/dev/null 2>&1; echo $?)" "1"
+        chk sync-needs-rate "$(nair_cmd_sync_detect "$sdir/noise.cf32" >/dev/null 2>&1; echo $?)" "2"
+        chk sync-bad-scs "$(nair_cmd_sync_detect "$sdir/noise.cf32" --rate 1920000 --scs 7 >/dev/null 2>&1; echo $?)" "2"
+    else
+        chk sync-skipped "$(nair_cmd_sync_detect /nonexistent --rate 1920000 2>/dev/null | grep -c no-correlator)" "1"
+    fi
+    rm -rf "$sdir"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -6558,11 +6625,61 @@ M
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── find the synchronisation signal in a capture ──────────────────────
+#
+# Everything else in this module starts from an ARFCN and a PCI that the
+# operator supplied. A capture carries the same two facts in its first
+# millisecond, and until now nothing here could read them: the module could
+# describe a cell whose identity was typed in, not one that was received.
+#
+# The verdict is `detected` or `unobserved`, and unobserved is not zero: a slice
+# with no PSS in it may be the wrong band, the wrong rate, or a receiver tuned
+# to nothing, and none of those is evidence that no cell is there.
+NAIR_SYNC_PY() { printf '%s' "${IMSISTING_ROOT}/tools/nr_sync.py"; }
+
+nair_sync_available() {
+    [[ -r "$(NAIR_SYNC_PY)" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 -c 'import numpy' 2>/dev/null || return 1
+    return 0
+}
+
+nair_cmd_sync_detect() {
+    local file="${1:-}"
+    (($#)) && shift
+    local rate="" scs="15" fmt="cf32" threshold="0.25"
+    while (($#)); do
+        case "$1" in
+            --rate)      rate="${2:-}"; shift 2 ;;
+            --scs)       scs="${2:-}"; shift 2 ;;
+            --fmt)       fmt="${2:-}"; shift 2 ;;
+            --threshold) threshold="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--sync-detect does not take %s\n' "$(nair_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$file" ]] || { printf 'ERROR\t--sync-detect needs a capture file\n' >&2; return 2; }
+    [[ -n "$rate" ]] || {
+        printf 'ERROR\t--sync-detect needs --rate in Hz\n' >&2
+        printf 'WHY\tthe FFT size is the sample rate over the subcarrier spacing, and without it there is no grid to place a PSS on\n' >&2
+        return 2; }
+    case "$scs" in 15|30|60|120) ;; *) printf 'ERROR\t--scs takes 15, 30, 60 or 120 kHz\n' >&2; return 2 ;; esac
+    [[ "$rate" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--rate takes whole hertz\n' >&2; return 2; }
+    if ! nair_sync_available; then
+        printf 'MISSING\tpython3 with numpy, or %s\n' "$(NAIR_SYNC_PY)" >&2
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-correlator: the search needs numpy, and a fallback that guessed a PCI would be worse than no answer\n'
+        return 1
+    fi
+    printf 'capture\t%s\n' "$file"
+    python3 "$(NAIR_SYNC_PY)" detect "$file" "$scs" --rate "$rate" --fmt "$fmt" --threshold "$threshold"
+}
+
 nair_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
     case "$cmd" in
         --status-tsv)   nair_cli_status_tsv ;;
+        --sync-detect)  nair_cmd_sync_detect "$@" ;;
         --arfcn)        nair_cmd_arfcn "${1:-}" ;;
         --pci)          nair_cmd_pci "${1:-}" "${2:-}" ;;
         --decode-mib)   nair_cmd_decode_mib "${1:-}" ;;
@@ -6628,6 +6745,11 @@ nair_cli_main() {
 
 Usage: $0 COMMAND
   --status-tsv                  tool, config and process state as TSV
+  --sync-detect <file> --rate N [--scs 15|30|60|120] [--fmt cf32|ci16|cu8]
+                                find the PSS in a capture: timing offset,
+                                N_ID(2) and how strongly it matched, so the
+                                cell identity comes from the waveform rather
+                                than from something typed in
   --arfcn <N>                   NR-ARFCN -> frequency, band, FR, GSCN
   --pci <n_id_1> <n_id_2>       PCI derivation (n_id_1 0..335, n_id_2 0..2)
   --decode-mib <hex>            decode a 24-bit MIB payload

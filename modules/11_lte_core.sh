@@ -930,14 +930,14 @@ lcore_build_air() {
     local uname_avp; uname_avp=$(lcore_diameter_build_utf8_avp 1 "$imsi" M)
 
     # Visited-PLMN-Id is an OctetString of plain BCD digits (TS 29.272 §7.3.50).
-    local vplmn_avp; vplmn_avp=$(lcore_diameter_build_avp 1407 "$(lcore_nfc "$visited_plmn")" M)
+    local vplmn_avp; vplmn_avp=$(lcore_diameter_build_avp 1407 "$(lcore_nfc "$visited_plmn")" MV 10415)
 
     # Requested-EUTRAN-Authentication-Info is a GROUPED AVP (TS 29.272
     # §7.3.55) holding Number-Of-Requested-Vectors and
     # Immediate-Response-Preferred.
-    local nuri; nuri=$(lcore_diameter_build_u32_avp 1410 "$nvectors" M)
-    local irp;  irp=$(lcore_diameter_build_u32_avp 1412 0 M)
-    local reai; reai=$(lcore_diameter_build_avp 1408 "${nuri}${irp}" M)
+    local nuri; nuri=$(lcore_diameter_build_u32_avp 1410 "$nvectors" MV 10415)
+    local irp;  irp=$(lcore_diameter_build_u32_avp 1412 0 MV 10415)
+    local reai; reai=$(lcore_diameter_build_avp 1408 "${nuri}${irp}" MV 10415)
 
     local avps
     avps="$(lcore_diameter_origin_avps "$origin_host" "$origin_realm")${session_avp}${uname_avp}${vplmn_avp}${reai}"
@@ -957,11 +957,11 @@ lcore_build_ulr() {
     local sid="${origin_host};$(printf '%08X' $$);$(printf '%08X' 2)"
     local session_avp; session_avp=$(lcore_diameter_build_utf8_avp 263 "$sid" M)
     local uname_avp;   uname_avp=$(lcore_diameter_build_utf8_avp 1 "$imsi" M)
-    local vplmn_avp;   vplmn_avp=$(lcore_diameter_build_avp 1407 "$(lcore_nfc "$visited_plmn")" M)
+    local vplmn_avp;   vplmn_avp=$(lcore_diameter_build_avp 1407 "$(lcore_nfc "$visited_plmn")" MV 10415)
     # ULR-Flags is AVP 1405 (§7.3.7) and RAT-Type is AVP 1032, defined in
     # TS 29.212 and reused here (§7.3.13), which means a vendor-specific
     # AVP carrying Vendor-Id 10415 (3GPP).
-    local flags_avp;   flags_avp=$(lcore_diameter_build_u32_avp 1405 "$ulr_flags" M)
+    local flags_avp;   flags_avp=$(lcore_diameter_build_u32_avp 1405 "$ulr_flags" MV 10415)
     local rat_avp;     rat_avp=$(lcore_diameter_build_u32_avp 1032 "$rat_type" MV 10415)
 
     local avps
@@ -982,10 +982,227 @@ lcore_build_clr() {
     # 1 = INITIAL_ATTACH_PROCEDURE, 2 = SUBSCRIPTION_WITHDRAWAL,
     # 3 = UPDATE_PROCEDURE_IWF, 4 = INITIAL_ATTACH_PROCEDURE_IWF.
     local uname_avp; uname_avp=$(lcore_diameter_build_utf8_avp 1 "$imsi" M)
-    local ct_avp;    ct_avp=$(lcore_diameter_build_u32_avp 1420 "$canc_type" M)
+    local ct_avp;    ct_avp=$(lcore_diameter_build_u32_avp 1420 "$canc_type" MV 10415)
     local avps
     avps="$(lcore_diameter_origin_avps "$origin_host" "$origin_realm")${session_avp}${uname_avp}${ct_avp}"
     lcore_diameter_build_msg 317 16777251 192 3 3 "$avps"
+}
+
+# Reading a message back by AVP code. The encoders are proved against these
+# rather than against their own arguments. One reader takes a whole message
+# (the first 20 octets are the Diameter header); the other takes a bare run of
+# AVPs, which is what a grouped AVP's value is.
+lcore_avp_in() {  # <raw-avp-hex> <code> → the first matching top-level value hex
+    # Walk once, then read both the index and the value out of that walk: the
+    # walk exits non-zero when it reaches the end of a buffer it cannot pad,
+    # which under `pipefail` would otherwise turn a successful read into a
+    # failure and every downstream `|| echo unobserved` into a lie.
+    local raw idx out
+    raw=$(lcore_diameter_parse_avps "$1" 2>/dev/null) || raw=""
+    [[ -n "$raw" ]] || return 1
+    idx=$(printf '%s\n' "$raw" | awk -F'\t' -v c="$2" '$1 ~ /\.code$/ && $2==c { split($1,p,"."); print p[2]; exit }')
+    [[ -n "$idx" ]] || return 1
+    out=$(printf '%s\n' "$raw" | awk -F'\t' -v k="avp.$idx.data" '$1==k{print $2; exit}')
+    [[ -n "$out" ]] || return 1
+    printf '%s' "$out"
+    return 0
+}
+lcore_avp_data() {  # <msg-hex> <code> → the first matching top-level value hex
+    lcore_avp_in "${1:40}" "$2"
+}
+lcore_avp_utf8() {  # <msg-hex> <code> → the first matching AVP's text
+    local d; d=$(lcore_avp_data "$1" "$2") || return 1
+    lcore_diameter_utf8 "$d"
+}
+lcore_avp_children() {  # <msg-hex> <code> → child-code<TAB>child-value rows
+    local inner raw
+    inner=$(lcore_avp_data "$1" "$2") || return 1
+    raw=$(lcore_diameter_parse_avps "$inner" 2>/dev/null) || raw=""
+    [[ -n "$raw" ]] || return 1
+    printf '%s\n' "$raw" \
+        | awk -F'\t' '$1 ~ /\.code$/ { split($1,p,"."); c[p[2]]=$2; next }
+                       $1 ~ /\.data$/ { split($1,p,"."); if (p[2] in c) print c[p[2]] "\t" $2 }'
+    return 0
+}
+lcore_avp_path() {  # <msg-hex> <code> [<code>…] → the value at the end of the path
+    local cur="${1:40}"; shift
+    local c
+    for c in "$@"; do
+        cur=$(lcore_avp_in "$cur" "$c") || return 1
+    done
+    printf '%s' "$cur"
+    return 0
+}
+lcore_hex_u32() {  # <hex> → decimal, or fail
+    [[ "$1" =~ ^[0-9A-Fa-f]{8}$ ]] || return 1
+    printf '%d' "$(( 16#$1 ))"
+}
+lcore_hex_u8() {  # <hex> → decimal, or fail
+    [[ "$1" =~ ^[0-9A-Fa-f]{2}$ ]] || return 1
+    printf '%d' "$(( 16#$1 ))"
+}
+
+# Every 3GPP AVP in the S6a builders above and below carries the vendor bit
+# and Vendor-Id 10415. Written with M alone a receiver resolves the code
+# against no vendor: tshark names them Unknown(1407) and Unknown(1405),
+# which is what a real peer does too.
+lcore_idr_status_name() {
+    case "${1:-}" in
+        granted|service-granted|0) echo 0 ;;
+        barring|operator-determined-barring|1) echo 1 ;;
+        *) return 2 ;;
+    esac
+}
+lcore_idr_status_text() {
+    case "${1:-}" in
+        0) echo "SERVICE_GRANTED" ;;
+        1) echo "OPERATOR_DETERMINED_BARRING" ;;
+        *) echo "value $1" ;;
+    esac
+}
+lcore_idr_pdn_type() {
+    case "${1:-}" in
+        ipv4|0)          echo 0 ;;
+        ipv6|1)          echo 1 ;;
+        ipv4v6|2)        echo 2 ;;
+        ipv4-or-ipv6|3)  echo 3 ;;
+        *) return 2 ;;
+    esac
+}
+lcore_idr_pdn_text() {
+    case "${1:-}" in
+        0) echo IPV4 ;; 1) echo IPV6 ;; 2) echo IPV4V6 ;; 3) echo IPV4_OR_IPV6 ;;
+        *) echo "value $1" ;;
+    esac
+}
+
+# <imsi> [flags…] → the IDR as hex, or exit 2 with the reason on stderr.
+lcore_build_idr() {
+    local imsi="${1:-310150123456789}"; shift || true
+    local status=0 ambr_ul=100000 ambr_dl=100000 apn="internet" pdn=2 qci=9 arp=8
+    local rau_timer=0 idr_flags=0 dest_host="mme.localdomain"
+    local origin_host="hss.localdomain" origin_realm="localdomain"
+    local dest_realm="epc.mnc260.mcc310.3gppnetwork.org"
+    while (( $# > 0 )); do
+        case "$1" in
+            --status)      status=$(lcore_idr_status_name "${2:-}") || { printf 'ERROR\tunknown subscriber status %s\n' "$(lcore_sanitize "${2:-<none>}")" >&2; return 2; }; shift 2 ;;
+            --pdn)         pdn=$(lcore_idr_pdn_type "${2:-}") || { printf 'ERROR\tunknown PDN type %s\n' "$(lcore_sanitize "${2:-<none>}")" >&2; return 2; }; shift 2 ;;
+            --apn)         apn="${2:-}"; shift 2 ;;
+            --ambr-ul)     ambr_ul="${2:-}"; shift 2 ;;
+            --ambr-dl)     ambr_dl="${2:-}"; shift 2 ;;
+            --qci)         qci="${2:-}"; shift 2 ;;
+            --arp)         arp="${2:-}"; shift 2 ;;
+            --rau-timer)   rau_timer="${2:-}"; shift 2 ;;
+            --idr-flags)   idr_flags="${2:-}"; shift 2 ;;
+            --dest-host)   dest_host="${2:-}"; shift 2 ;;
+            --origin-host) origin_host="${2:-}"; shift 2 ;;
+            --origin-realm) origin_realm="${2:-}"; shift 2 ;;
+            --dest-realm)  dest_realm="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(lcore_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+
+    [[ "$imsi" =~ ^[0-9]{14,15}$ ]] || {
+        printf 'ERROR\tIMSI must be 14 or 15 digits: %s\n' "$(lcore_sanitize "${imsi:-<none>}")" >&2; return 2; }
+    [[ -n "$dest_host" ]] || { printf 'ERROR\t--dest-host must name the serving node\n' >&2; return 2; }
+    local v
+    for v in "$ambr_ul" "$ambr_dl" "$qci" "$arp" "$rau_timer" "$idr_flags"; do
+        [[ "$v" =~ ^[0-9]+$ ]] || { printf 'ERROR\tbit rates, QCI, ARP, timer and flags are numbers\n' >&2; return 2; }
+    done
+    (( qci >= 1 && qci <= 254 )) || { printf 'ERROR\t--qci is 1..254 (TS 23.203 §6.1.7)\n' >&2; return 2; }
+    (( arp >= 1 && arp <= 15 )) || { printf 'ERROR\t--arp is 1..15 (TS 23.401 §4.7.3)\n' >&2; return 2; }
+    [[ "$apn" =~ ^[A-Za-z0-9.\-]{1,100}$ ]] || {
+        printf 'ERROR\tAPN must be 1..100 characters of labels and dots\n' >&2; return 2; }
+
+    local sid="${origin_host};$(date +%s);$(printf '%08X' $$)"
+    local avps=""
+    avps+=$(lcore_diameter_build_utf8_avp 263 "$sid" M)
+    avps+=$(lcore_diameter_origin_avps "$origin_host" "$origin_realm" "$dest_realm")
+    avps+=$(lcore_diameter_build_utf8_avp 293 "$dest_host" M)
+    avps+=$(lcore_diameter_build_utf8_avp 1 "$imsi" M)
+
+    # APN-Configuration: one context, its PDN type, its service selection and
+    # the QoS the bearer will be requested with.
+    local qos_group arp_group apn_cfg apn_profile
+    arp_group=$(lcore_diameter_build_u32_avp 1046 "$arp" MV 10415)
+    arp_group=$(lcore_diameter_build_avp 1034 "$arp_group" MV 10415)
+    qos_group=$(lcore_diameter_build_u32_avp 1028 "$qci" MV 10415)
+    qos_group+="$arp_group"
+    qos_group=$(lcore_diameter_build_avp 1431 "$qos_group" MV 10415)
+
+    # APN-Configuration is ordered as TS 29.272 §7.3.35 lists it:
+    # Context-Identifier, PDN-Type, Service-Selection, EPS-Subscribed-QoS-Profile.
+    apn_cfg=$(lcore_diameter_build_u32_avp 1423 0 MV 10415)
+    apn_cfg+=$(lcore_diameter_build_u32_avp 1456 "$pdn" MV 10415)
+    apn_cfg+=$(lcore_diameter_build_utf8_avp 493 "$apn" MV 10415)
+    apn_cfg+="$qos_group"
+    apn_cfg=$(lcore_diameter_build_avp 1430 "$apn_cfg" MV 10415)
+
+    apn_profile=$(lcore_diameter_build_u32_avp 1428 0 MV 10415)
+    apn_profile+="$apn_cfg"
+    apn_profile=$(lcore_diameter_build_avp 1429 "$apn_profile" MV 10415)
+
+    # AMBR: the aggregate ceiling, uplink then downlink.
+    local ambr
+    ambr=$(lcore_diameter_build_u32_avp 516 "$ambr_ul" MV 10415)
+    ambr+=$(lcore_diameter_build_u32_avp 515 "$ambr_dl" MV 10415)
+    ambr=$(lcore_diameter_build_avp 1435 "$ambr" MV 10415)
+
+    # Subscription-Data: what the serving node is being told to enforce.
+    local subdata
+    subdata=$(lcore_diameter_build_u32_avp 1424 "$status" MV 10415)
+    subdata+="$ambr"
+    subdata+="$apn_profile"
+    subdata+=$(lcore_diameter_build_u32_avp 1619 "$rau_timer" MV 10415)
+    subdata=$(lcore_diameter_build_avp 1400 "$subdata" MV 10415)
+    avps+=$subdata
+    avps+=$(lcore_diameter_build_u32_avp 1490 "$idr_flags" MV 10415)
+
+    lcore_diameter_build_msg 319 16777251 192 1 1 "$avps"
+}
+
+_idr_enum_path() {  # <msg-hex> <leaf-code> <text-fn>
+    local h
+    h=$(lcore_avp_path "$1" 1400 1429 1430 "$2" 2>/dev/null) \
+      || h=$(lcore_avp_path "$1" 1400 "$2" 2>/dev/null) \
+      || { printf 'unobserved'; return 0; }
+    local n
+    n=$(lcore_hex_u32 "$h") || { printf 'unobserved'; return 0; }
+    "$3" "$n"
+}
+
+lcore_cmd_idr() {
+    local imsi="${1:-310150123456789}"; shift || true
+    local msg; msg=$(lcore_build_idr "$imsi" "$@") || return 2
+    local hdr walk
+    hdr=$(lcore_diameter_parse_header "$msg") || return 1
+    walk=$(lcore_diameter_parse_avps "${msg:40}")
+    printf 'message\tInsert-Subscriber-Data-Request (IDR)\n'
+    printf 'application_id\t16777251\n'
+    printf 'application\t3GPP S6a/S6d\n'
+    printf 'command_code\t319\n'
+    printf 'answer_code\t319\n'
+    printf 'answer_name\tInsert-Subscriber-Data-Answer (IDA)\n'
+    printf 'flags\tC0\n'
+    printf 'imsi\t%s\n' "$imsi"
+    printf 'destination_host\t%s\n' "$(lcore_avp_utf8 "$msg" 293 2>/dev/null || echo unobserved)"
+    printf 'octets\t%s\n' "$(( ${#msg} / 2 ))"
+    printf 'roundtrip_command\t%s\n' "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="command_code"{print $2}')"
+    printf 'roundtrip_app\t%s\n'     "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="application_id"{print $2}')"
+    printf 'roundtrip_length_ok\t%s\n' "$([[ "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="length_mismatch"{print $2}')" == "no" ]] && echo yes || echo no)"
+    printf 'avp_count\t%s\n' "$(printf '%s\n' "$walk" | awk -F'\t' '$1 ~ /\.code$/' | wc -l)"
+    printf 'avp_names\t%s\n' "$(printf '%s\n' "$walk" | awk -F'\t' '$1 ~ /\.name$/ {printf "%s ", $2}')"
+    # Read the profile back out of the octets, one level down at a time.
+    printf 'subscriber_status\t%s\n' "$(_idr_enum_path "$msg" 1424 lcore_idr_status_text)"
+    printf 'ambr_ul_kbps\t%s\n' "$(lcore_hex_u32 "$(lcore_avp_path "$msg" 1400 1435 516 2>/dev/null)" 2>/dev/null || echo unobserved)"
+    printf 'ambr_dl_kbps\t%s\n' "$(lcore_hex_u32 "$(lcore_avp_path "$msg" 1400 1435 515 2>/dev/null)" 2>/dev/null || echo unobserved)"
+    printf 'apn\t%s\n' "$(lcore_diameter_utf8 "$(lcore_avp_path "$msg" 1400 1429 1430 493 2>/dev/null)" 2>/dev/null || echo unobserved)"
+    printf 'pdn_type\t%s\n' "$(_idr_enum_path "$msg" 1456 lcore_idr_pdn_text)"
+    printf 'qci\t%s\n' "$(lcore_hex_u32 "$(lcore_avp_path "$msg" 1400 1429 1430 1431 1028 2>/dev/null)" 2>/dev/null || echo unobserved)"
+    printf 'arp_priority\t%s\n' "$(lcore_hex_u32 "$(lcore_avp_path "$msg" 1400 1429 1430 1431 1034 1046 2>/dev/null)" 2>/dev/null || echo unobserved)"
+    printf 'rau_timer_s\t%s\n' "$(lcore_hex_u32 "$(lcore_avp_path "$msg" 1400 1619 2>/dev/null)" 2>/dev/null || echo unobserved)"
+    printf 'idr_flags\t%s\n' "$(lcore_hex_u32 "$(lcore_avp_data "$msg" 1490 2>/dev/null)" 2>/dev/null || echo unobserved)"
+    printf 'hex\t%s\n' "$msg"
 }
 
 # ── GTP-C v2 — TS 29.274 §5.1 ───────────────────────────────────────────
@@ -2117,7 +2334,7 @@ lcore_cli_status_tsv() {
     printf 'plans\t%s\n' "$plans"
     printf 's6a_app_id\t16777251\n'
     printf 'refs\tRFC 6733, TS 29.272, TS 29.274, TS 29.281, TS 36.413\n'
-    printf 'verbs\tdecode-diameter, decode-gtp-c, decode-gtp-u, build-air, build-ulr, build-clr, plr, gtp-csr-forge, gtp-modify-bearer, gtp-in-gtp, mbms-session, gtpc-send, diameter-send, gtpdoor-detect, gtpdoor-build, gtpdoor-parse, grx-scan, ipx-map, cdr-fraud-check, fs20-audit, gtp-screen-peer, diameter-screen, plan, s1ap, surface, require-core\n'
+    printf 'verbs\tdecode-diameter, decode-gtp-c, decode-gtp-u, build-air, build-ulr, build-clr, plr, idr, gtp-csr-forge, gtp-modify-bearer, gtp-in-gtp, mbms-session, gtpc-send, diameter-send, gtpdoor-detect, gtpdoor-build, gtpdoor-parse, grx-scan, ipx-map, cdr-fraud-check, fs20-audit, gtp-screen-peer, diameter-screen, plan, s1ap, surface, require-core\n'
     printf 'gtp_in_gtp\tyes\n'
     printf 'mbms_session\tyes\n'
     printf 'decode_only\t%s\n' "$(lcore_find_core_testbed >/dev/null 2>&1 && echo no || echo yes)"
@@ -4981,6 +5198,62 @@ print('yes' if int.from_bytes(b[2:4],'big')==len(b)-4 else 'no')
     chk plr-bad-opt     "$(lcore_build_plr 310150123456789 --plr-flags x >/dev/null 2>&1; echo $?)" "2"
     chk plr-unknown-opt "$(lcore_build_plr 310150123456789 --gmlc 4917 >/dev/null 2>&1; echo $?)" "2"
 
+    # ── S6a Insert-Subscriber-Data (TS 29.272 §7.3.5) ───────────────────
+    idr=$(lcore_cmd_idr 310150123456789 --status barring --apn internet \
+            --pdn ipv4v6 --qci 9 --arp 8 --ambr-ul 100000 --ambr-dl 200000 \
+            --rau-timer 720 --dest-host mme.example)
+    idrh=$(fld "$idr" hex)
+    chk idr-message      "$(fld "$idr" message)" "Insert-Subscriber-Data-Request (IDR)"
+    chk idr-app          "$(fld "$idr" application_id)" "16777251"
+    chk idr-command      "$(fld "$idr" command_code)" "319"
+    chk idr-answer       "$(fld "$idr" answer_code)" "319"
+    chk idr-dest         "$(fld "$idr" destination_host)" "mme.example"
+    chk idr-imsi         "$(fld "$idr" imsi)" "310150123456789"
+    chk idr-rt-command   "$(fld "$idr" roundtrip_command)" "319"
+    chk idr-rt-app       "$(fld "$idr" roundtrip_app)" "16777251"
+    chk idr-rt-length    "$(fld "$idr" roundtrip_length_ok)" "yes"
+    chk idr-status       "$(fld "$idr" subscriber_status)" "OPERATOR_DETERMINED_BARRING"
+    chk idr-ambr-ul      "$(fld "$idr" ambr_ul_kbps)" "100000"
+    chk idr-ambr-dl      "$(fld "$idr" ambr_dl_kbps)" "200000"
+    chk idr-apn          "$(fld "$idr" apn)" "internet"
+    chk idr-pdn          "$(fld "$idr" pdn_type)" "IPV4V6"
+    chk idr-qci          "$(fld "$idr" qci)" "9"
+    chk idr-arp          "$(fld "$idr" arp_priority)" "8"
+    chk idr-rau          "$(fld "$idr" rau_timer_s)" "720"
+    chk idr-flags        "$(fld "$idr" idr_flags)" "0"
+    # Octets, not the summary line: Subscription-Data is a grouped AVP and the
+    # profile has to be inside it, not beside it.
+    chk idr-subdata-group "$(plr_field 1400 "$idrh" | cut -c1-4)" "0000"
+    chk idr-status-octets "$(lcore_hex_u32 "$(lcore_avp_path "$idrh" 1400 1424)")" "1"
+    chk idr-qci-octets   "$(lcore_hex_u32 "$(lcore_avp_path "$idrh" 1400 1429 1430 1431 1028)")" "9"
+    chk idr-arp-octets   "$(lcore_hex_u32 "$(lcore_avp_path "$idrh" 1400 1429 1430 1431 1034 1046)")" "8"
+    chk idr-user-octets  "$(plr_field 1 "$idrh")" "333130313530313233343536373839"
+    # Every 3GPP AVP must carry the vendor id, or a peer resolves the code
+    # against no vendor: 17 vendor AVPs in this message.
+    chk idr-vendor-bits  "$(printf '%s' "$idrh" | grep -o '0028AF' | wc -l)" "17"
+    # The same defect was live in AIR/ULR/CLR until this pass: 1407, 1410,
+    # 1412 and 1408 in the AIR; 1407, 1405 and 1032 in the ULR.
+    airh=$(fld "$(lcore_cmd_build_air 310150123456789)" hex)
+    chk air-vendor-bits  "$(printf '%s' "$airh" | grep -o '0028AF' | wc -l)" "4"
+    ulrh=$(fld "$(lcore_cmd_build_ulr 310150123456789)" hex)
+    chk ulr-vendor-bits  "$(printf '%s' "$ulrh" | grep -o '0028AF' | wc -l)" "3"
+    clrh=$(fld "$(lcore_cmd_build_clr 310150123456789)" hex)
+    chk clr-vendor-bits  "$(printf '%s' "$clrh" | grep -o '0028AF' | wc -l)" "1"
+    # Refusals name what is wrong rather than emitting a plausible message.
+    chk idr-bad-status   "$(lcore_build_idr 310150123456789 --status maybe >/dev/null 2>&1; echo $?)" "2"
+    chk idr-bad-pdn      "$(lcore_build_idr 310150123456789 --pdn gprs >/dev/null 2>&1; echo $?)" "2"
+    chk idr-bad-qci      "$(lcore_build_idr 310150123456789 --qci 0 >/dev/null 2>&1; echo $?)" "2"
+    chk idr-bad-arp      "$(lcore_build_idr 310150123456789 --arp 16 >/dev/null 2>&1; echo $?)" "2"
+    chk idr-bad-apn      "$(lcore_build_idr 310150123456789 --apn 'a b' >/dev/null 2>&1; echo $?)" "2"
+    chk idr-bad-imsi     "$(lcore_build_idr 3101501234 >/dev/null 2>&1; echo $?)" "2"
+    chk idr-bad-dest     "$(lcore_build_idr 310150123456789 --dest-host '' >/dev/null 2>&1; echo $?)" "2"
+    chk idr-bad-rate     "$(lcore_build_idr 310150123456789 --ambr-ul fast >/dev/null 2>&1; echo $?)" "2"
+    chk idr-bad-opt      "$(lcore_build_idr 310150123456789 --imei 1234 >/dev/null 2>&1; echo $?)" "2"
+    # The decoder names the command without the encoder being consulted.
+    chk idr-decode-command "$(lcore_cmd_decode_diameter "$idrh" | awk -F'\t' '$1=="command_code"{print $2}')" "319"
+    chk idr-decode-name    "$(lcore_cmd_decode_diameter "$idrh" | awk -F'\t' '$1=="command_name"{print $2}' | grep -c 'Insert-Subscriber-Data')" "1"
+    chk idr-decode-subdata "$(lcore_cmd_decode_diameter "$idrh" | awk -F'\t' '$1=="avp.7.name"{print $2}')" "Subscription-Data"
+
     chk gtpdoor-build-type  "$(fld "$bd" message_type)" "1"
     chk gtpdoor-build-name  "$(fld "$bd" message)" "Echo Request"
     chk gtpdoor-build-dir   "$(fld "$bd" direction)" "request"
@@ -5315,6 +5588,7 @@ lcore_menu() {
   [1]  decode a Diameter message (hex)
   [2]  decode a GTP-C v2 message (hex)
   [3]  decode a GTP-U packet (hex)
+  [18] build an S6a Insert-Subscriber-Data-Request (the installable profile)
   [17] build an SLg Provide-Location-Request (subscriber location ask)
   [4]  build an AIR (S6a Authentication-Information-Request)
   [5]  build a ULR (S6a Update-Location-Request)
@@ -5390,6 +5664,14 @@ M
                      read -rp "  client type [value-added/emergency/operator/law-enforcement]> " lcct
                      lcore_cmd_plr "${lcst:-310150123456789}" --client-type "${lcct:-value-added}" \
                          | column -t -s$'\t' 2>/dev/null || lcore_cmd_plr "${lcst:-310150123456789}"
+                     read -rp "  press enter " _; fi ;;
+            18) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need an IMSI; cannot prompt in CLI mode" >&2
+                else read -rp "  IMSI> " idri
+                     read -rp "  serving node host> " idrh
+                     read -rp "  subscriber status [granted/barring]> " idrs
+                     lcore_cmd_idr "${idri:-310150123456789}" --dest-host "${idrh:-mme.localdomain}" \
+                         --status "${idrs:-granted}" \
+                         | column -t -s$'\t' 2>/dev/null || lcore_cmd_idr "${idri:-310150123456789}"
                      read -rp "  press enter " _; fi ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -5571,6 +5853,7 @@ lcore_cli_main() {
         --build-ulr)     lcore_cmd_build_ulr "${1:-310150123456789}" ;;
         --build-clr)     lcore_cmd_build_clr "${1:-310150123456789}" ;;
         --plr)           lcore_cmd_plr "$@" ;;
+        --idr)           lcore_cmd_idr "$@" ;;
         --gtp-csr-forge) lcore_cmd_gtp_csr_forge "${1:-310150123456789}" "${2:-internet}" "${3:-310}" "${4:-260}" ;;
         --gtp-modify-bearer) lcore_cmd_gtp_modify_bearer "${1:-}" "${2:-5}" ;;
         --gtp-in-gtp)    lcore_cmd_gtp_in_gtp "$@" ;;
@@ -5615,6 +5898,11 @@ Usage: $0 COMMAND
                               --priority --service-type --codeword --plr-flags
                               --client-name --client-format --dest-host
                               --origin-host --origin-realm --dest-realm
+  --idr <imsi> [opts]         build an S6a Insert-Subscriber-Data-Request (319),
+                              the profile the HSS installs on the serving node:
+                              --dest-host --status granted|barring
+                              --ambr-ul --ambr-dl --apn --pdn
+                              --qci --arp --rau-timer --idr-flags
   --build-ulr [IMSI]          build an S6a Update-Location-Request
   --gtp-csr-forge [IMSI] [APN] [MCC] [MNC]
                               forge a GTP-C Create Session Request

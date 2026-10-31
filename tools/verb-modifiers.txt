@@ -38,6 +38,16 @@ target-js-db
 gw-eirp-dbw
 ref-db
 fmt
+threshold
+cell-deg
+rau-timer
+qci
+pdn
+idr-flags
+arp
+apn
+ambr-ul
+ambr-dl
 aanf
 action
 algo
