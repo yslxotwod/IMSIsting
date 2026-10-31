@@ -188,9 +188,9 @@ lcore_diameter_command_name() {
         322)       echo "Reset (RSR/RSA)  [S6a/S6d]" ;;
         323)       echo "Notify (NOR/NOA)  [S6a/S6d]" ;;
         324)       echo "ME-Identity-Check (ECR/ECA)  [S13/S13']" ;;
-        8388620)   echo "Provide-Location (PLR/PLA)  [SLh]" ;;
-        8388621)   echo "Location-Report (LRR/LRA)  [SLh]" ;;
-        8388622)   echo "LCS-Routing-Info (RIR/RIA)  [SLg]" ;;
+        8388620)   echo "Provide-Location (PLR/PLA)  [SLh/SLg]" ;;
+        8388621)   echo "Location-Report (LRR/LRA)  [SLg]" ;;
+        8388622)   echo "LCS-Routing-Info (RIR/RIA)  [SLh]" ;;
         8388635)   echo "Spending-Limit (SLR/SLA)  [Sy]" ;;
         8388636)   echo "Spending-Status-Notification (SNR/SNA)  [Sy]" ;;
         8388637)   echo "TDF-Session (TSR/TSA)  [Sd]" ;;
@@ -703,6 +703,33 @@ lcore_diameter_avp_name() {
         1705)    echo "eDRX-Related-RAT" ;;
         1706)    echo "Interworking-5GS-Indicator" ;;
         1032)    echo "RAT-Type" ;;
+        # TS 29.172 §7.4 (SLg/SLh) and TS 29.171. The 3GPP LCS block: these
+        # were absent, so a decoded PLR named nothing below User-Name.
+        701)     echo "MSISDN" ;;
+        1237)    echo "LCS-Format-Indicator" ;;
+        1238)    echo "LCS-Name-String" ;;
+        1241)    echo "LCS-Client-Type" ;;
+        1242)    echo "Location-Estimate" ;;
+        1402)    echo "IMEI" ;;
+        2401)    echo "Serving-Node" ;;
+        2405)    echo "GMLC-Address" ;;
+        2500)    echo "SLg-Location-Type" ;;
+        2501)    echo "LCS-EPS-Client-Name" ;;
+        2503)    echo "LCS-Priority" ;;
+        2504)    echo "LCS-QoS" ;;
+        2505)    echo "Horizontal-Accuracy" ;;
+        2506)    echo "Vertical-Accuracy" ;;
+        2509)    echo "Response-Time" ;;
+        2510)    echo "Supported-GAD-Shapes" ;;
+        2511)    echo "LCS-Codeword" ;;
+        2512)    echo "LCS-Privacy-Check" ;;
+        2513)    echo "Accuracy-Fulfilment-Indicator" ;;
+        2514)    echo "Age-Of-Location-Estimate" ;;
+        2520)    echo "LCS-Service-Type-ID" ;;
+        2523)    echo "LCS-QoS-Class" ;;
+        2531)    echo "LCS-Reference-Number" ;;
+        2532)    echo "Deferred-Location-Type" ;;
+        2545)    echo "PLR-Flags" ;;
         *)     echo "unknown AVP code $1" ;;
     esac
 }
@@ -2090,7 +2117,7 @@ lcore_cli_status_tsv() {
     printf 'plans\t%s\n' "$plans"
     printf 's6a_app_id\t16777251\n'
     printf 'refs\tRFC 6733, TS 29.272, TS 29.274, TS 29.281, TS 36.413\n'
-    printf 'verbs\tdecode-diameter, decode-gtp-c, decode-gtp-u, build-air, build-ulr, build-clr, gtp-csr-forge, gtp-modify-bearer, gtp-in-gtp, mbms-session, gtpc-send, diameter-send, gtpdoor-detect, gtpdoor-build, gtpdoor-parse, grx-scan, ipx-map, cdr-fraud-check, fs20-audit, gtp-screen-peer, diameter-screen, plan, s1ap, surface, require-core\n'
+    printf 'verbs\tdecode-diameter, decode-gtp-c, decode-gtp-u, build-air, build-ulr, build-clr, plr, gtp-csr-forge, gtp-modify-bearer, gtp-in-gtp, mbms-session, gtpc-send, diameter-send, gtpdoor-detect, gtpdoor-build, gtpdoor-parse, grx-scan, ipx-map, cdr-fraud-check, fs20-audit, gtp-screen-peer, diameter-screen, plan, s1ap, surface, require-core\n'
     printf 'gtp_in_gtp\tyes\n'
     printf 'mbms_session\tyes\n'
     printf 'decode_only\t%s\n' "$(lcore_find_core_testbed >/dev/null 2>&1 && echo no || echo yes)"
@@ -2894,6 +2921,200 @@ lcore_cmd_gtp_modify_bearer() {
 }
 # GTPdoor rides Echo Request/Response as a C2 channel. A clean Echo carries a
 # single Recovery IE; extra IEs or a payload without Recovery is the tell.
+# ── SLg Provide-Location (TS 29.172 §7.3.1) ────────────────────────────
+#
+# The LTE/5G subscriber location request. Application-Id 16777255, command
+# code 8388620, and the answer (PLA) carries the SAME code — direction is the
+# R bit (RFC 6733 §3). The request names a subscriber and a quality, not a
+# position; where that subscriber is comes back in Location-Estimate (1242)
+# as a GAD shape, and the accuracy field there is the network admitting what
+# its positioning method can actually deliver.
+#
+# Every AVP code below is the 3GPP LCS block of TS 29.172 §7.4. They were
+# checked against the Wireshark Diameter dictionary on this machine rather
+# than typed from memory, and tools/check-slg-plr.sh decodes the built
+# message with tshark so a wrong code shows up as an unnamed AVP.
+
+# <name|code> → <code> for the SLg enumerations. Refusing an unknown name is
+# the point: a location type silently defaulted to CURRENT_LOCATION would
+# make every request look the same on the wire.
+lcore_plr_loc_type() {
+    # Slg-Location-Type (2500), values straight from the 3GPP dictionary.
+    case "${1:-}" in
+        current|0)                     echo 0 ;;
+        last-known|current-or-last|1)  echo 1 ;;
+        initial|2)                     echo 2 ;;
+        deferred|3)                    echo 3 ;;
+        cancel-deferred|4)             echo 4 ;;
+        notification-only|5)           echo 5 ;;
+        *) return 2 ;;
+    esac
+}
+lcore_plr_client_type() {
+    case "${1:-}" in
+        emergency|0)        echo 0 ;;
+        value-added|1)      echo 1 ;;
+        operator|2)         echo 2 ;;
+        law-enforcement|3)  echo 3 ;;
+        *) return 2 ;;
+    esac
+}
+lcore_plr_qos_class() {
+    # LCS-QoS-Class (2523): ASSURED is 0, BEST EFFORT is 1.
+    case "${1:-}" in
+        assured|0)     echo 0 ;;
+        best-effort|1) echo 1 ;;
+        *) return 2 ;;
+    esac
+}
+lcore_plr_response_time() {
+    case "${1:-}" in
+        low-delay|0)       echo 0 ;;
+        delay-tolerant|1)  echo 1 ;;
+        *) return 2 ;;
+    esac
+}
+lcore_plr_privacy() {
+    case "${1:-}" in
+        allowed-without-notification|0) echo 0 ;;
+        allowed-with-notification|1)    echo 1 ;;
+        allowed-if-no-response|2)       echo 2 ;;
+        restricted-if-no-response|3)    echo 3 ;;
+        not-allowed|4)                  echo 4 ;;
+        *) return 2 ;;
+    esac
+}
+lcore_plr_name_format() {
+    # LCS-Format-Indicator (1237): the value names the TYPE of the string in
+    # LCS-Name-String, so it follows the string and not the subscriber.
+    case "${1:-}" in
+        logical-name|0) echo 0 ;;
+        email|1)        echo 1 ;;
+        msisdn|2)       echo 2 ;;
+        url|3)          echo 3 ;;
+        sip-url|4)      echo 4 ;;
+        *) return 2 ;;
+    esac
+}
+
+# <target> [flags…] → the PLR as hex, or exit 2 with the reason on stderr.
+lcore_build_plr() {
+    local target="${1:-310150123456789}"; shift || true
+    local as_imsi=0 loc_type=0 client_type=1 qos_class=0 accuracy=50 vertical=0
+    local response_time=0 privacy="" priority="" service_type="" codeword=""
+    local plr_flags="" dest_host="" origin_host="gmlc.localdomain"
+    local origin_realm="localdomain" dest_realm="epc.mnc260.mcc310.3gppnetwork.org"
+    local client_name="lcs-client" client_format=0
+    while (( $# > 0 )); do
+        case "$1" in
+            --imsi)          as_imsi=1; shift ;;
+            --location-type) loc_type=$(lcore_plr_loc_type "${2:-}") || { printf 'ERROR\tunknown location type %s\n' "$(lcore_sanitize "${2:-<none>}")" >&2; return 2; }; shift 2 ;;
+            --client-type)   client_type=$(lcore_plr_client_type "${2:-}") || { printf 'ERROR\tunknown client type %s\n' "$(lcore_sanitize "${2:-<none>}")" >&2; return 2; }; shift 2 ;;
+            --qos-class)     qos_class=$(lcore_plr_qos_class "${2:-}") || { printf 'ERROR\tunknown QoS class %s\n' "$(lcore_sanitize "${2:-<none>}")" >&2; return 2; }; shift 2 ;;
+            --response-time) response_time=$(lcore_plr_response_time "${2:-}") || { printf 'ERROR\tunknown response time %s\n' "$(lcore_sanitize "${2:-<none>}")" >&2; return 2; }; shift 2 ;;
+            --privacy)       privacy=$(lcore_plr_privacy "${2:-}") || { printf 'ERROR\tunknown privacy check %s\n' "$(lcore_sanitize "${2:-<none>}")" >&2; return 2; }; shift 2 ;;
+            --client-name)   client_name="${2:-}"; shift 2 ;;
+            --client-format) client_format=$(lcore_plr_name_format "${2:-}") || { printf 'ERROR\tunknown client name format %s\n' "$(lcore_sanitize "${2:-<none>}")" >&2; return 2; }; shift 2 ;;
+            --accuracy)      accuracy="${2:-}"; shift 2 ;;
+            --vertical)      vertical="${2:-}"; shift 2 ;;
+            --priority)      priority="${2:-}"; shift 2 ;;
+            --service-type)  service_type="${2:-}"; shift 2 ;;
+            --codeword)      codeword="${2:-}"; shift 2 ;;
+            --plr-flags)     plr_flags="${2:-}"; shift 2 ;;
+            --dest-host)     dest_host="${2:-}"; shift 2 ;;
+            --origin-host)   origin_host="${2:-}"; shift 2 ;;
+            --origin-realm)  origin_realm="${2:-}"; shift 2 ;;
+            --dest-realm)    dest_realm="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\tunknown option %s\n' "$(lcore_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+
+    [[ "$accuracy" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--accuracy takes metres as a number\n' >&2; return 2; }
+    [[ "$vertical" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--vertical takes metres as a number\n' >&2; return 2; }
+    if [[ "$as_imsi" == 1 ]]; then
+        [[ "$target" =~ ^[0-9]{14,15}$ ]] || {
+            printf 'ERROR\t--imsi needs 14 or 15 digits: %s\n' "$(lcore_sanitize "$target")" >&2; return 2; }
+    else
+        [[ "$target" =~ ^[0-9]{5,15}$ ]] || {
+            printf 'ERROR\tMSISDN must be 5 to 15 digits: %s\n' "$(lcore_sanitize "$target")" >&2; return 2; }
+    fi
+    [[ -n "$priority" ]] && { [[ "$priority" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--priority takes a number\n' >&2; return 2; }; }
+    [[ -n "$service_type" ]] && { [[ "$service_type" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--service-type takes a number\n' >&2; return 2; }; }
+    [[ -n "$plr_flags" ]] && { [[ "$plr_flags" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--plr-flags takes a number\n' >&2; return 2; }; }
+    [[ -z "$codeword" ]] || lcore_is_hex "$codeword" || { printf 'ERROR\t--codeword takes hex\n' >&2; return 2; }
+
+    # Every SLg/LCS AVP is a 3GPP vendor AVP: the host dictionaries declare
+    # vendor-bit="must" vendor-id TGPP (10415) for 1241, 1237, 1238, 2500-2545.
+    # Written without the V bit a receiver resolves the code against no vendor at
+    # all and reports the AVP as unknown, which is a message that decodes to
+    # nothing on the far side. Hence VM on every one of them.
+    local sid="${origin_host};$(date +%s);$(printf '%08X' $$)"
+    local avps=""
+    avps+=$(lcore_diameter_build_utf8_avp 263 "$sid" M)
+    avps+=$(lcore_diameter_origin_avps "$origin_host" "$origin_realm" "$dest_realm")
+    [[ -n "$dest_host" ]] && avps+=$(lcore_diameter_build_utf8_avp 293 "$dest_host" M)
+
+    # The subscriber. User-Name is AVP 1 without a vendor; IMSI is also AVP 1
+    # but vendor 10415 with the V bit, which is the only thing that tells the
+    # two apart on the wire.
+    if [[ "$as_imsi" == 1 ]]; then
+        avps+=$(lcore_diameter_build_utf8_avp 1 "$target" VM)
+    else
+        avps+=$(lcore_diameter_build_utf8_avp 1 "$target" M)
+    fi
+
+    avps+=$(lcore_diameter_build_u32_avp 2500 "$loc_type" VM)
+    local client_group
+    client_group=$(lcore_diameter_build_utf8_avp 1238 "$client_name" VM)
+    client_group+=$(lcore_diameter_build_u32_avp 1237 "$client_format" VM)
+    avps+=$(lcore_diameter_build_avp 2501 "$client_group" VM)
+    avps+=$(lcore_diameter_build_u32_avp 1241 "$client_type" VM)
+
+    local qos_group
+    qos_group=$(lcore_diameter_build_u32_avp 2523 "$qos_class" VM)
+    qos_group+=$(lcore_diameter_build_u32_avp 2505 "$accuracy" VM)
+    qos_group+=$(lcore_diameter_build_u32_avp 2506 "$vertical" VM)
+    qos_group+=$(lcore_diameter_build_u32_avp 2509 "$response_time" VM)
+    avps+=$(lcore_diameter_build_avp 2504 "$qos_group" VM)
+
+    [[ -n "$priority" ]]     && avps+=$(lcore_diameter_build_u32_avp 2503 "$priority" VM)
+    [[ -n "$privacy" ]]      && avps+=$(lcore_diameter_build_u32_avp 2512 "$privacy" VM)
+    [[ -n "$service_type" ]] && avps+=$(lcore_diameter_build_u32_avp 2520 "$service_type" VM)
+    [[ -n "$plr_flags" ]]    && avps+=$(lcore_diameter_build_u32_avp 2545 "$plr_flags" VM)
+    [[ -n "$codeword" ]]     && avps+=$(lcore_diameter_build_utf8_avp 2511 "$codeword" VM)
+
+    lcore_diameter_build_msg 8388620 16777255 192 1 1 "$avps"
+}
+
+lcore_cmd_plr() {
+    local target="${1:-310150123456789}"; shift || true
+    local msg; msg=$(lcore_build_plr "$target" "$@") || return 2
+    local as_imsi=0 a
+    for a in "$@"; do [[ "$a" == "--imsi" ]] && as_imsi=1; done
+    printf 'message\tProvide-Location-Request (PLR)\n'
+    printf 'application_id\t16777255\n'
+    printf 'application\t3GPP SLg\n'
+    printf 'command_code\t8388620\n'
+    printf 'answer_code\t8388620\n'
+    printf 'answer_name\tProvide-Location-Answer (PLA)\n'
+    printf 'flags\tC0\n'
+    printf 'octets\t%s\n' "$(( ${#msg} / 2 ))"
+    printf 'target\t%s\n' "$target"
+    if [[ "$as_imsi" == 1 ]]; then
+        printf 'target_avp\tIMSI (1, vendor 10415)\n'
+    else
+        printf 'target_avp\tUser-Name (1)\n'
+    fi
+    local hdr; hdr=$(lcore_diameter_parse_header "$msg") || return 1
+    printf 'roundtrip_command\t%s\n' "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="command_code"{print $2}')"
+    printf 'roundtrip_app\t%s\n'     "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="application_id"{print $2}')"
+    printf 'roundtrip_length_ok\t%s\n' "$([[ "$(printf '%s\n' "$hdr" | awk -F'\t' '$1=="length_mismatch"{print $2}')" == "no" ]] && echo yes || echo no)"
+    local walk; walk=$(lcore_diameter_parse_avps "${msg:40}")
+    printf 'avp_count\t%s\n' "$(printf '%s\n' "$walk" | grep -c '\.name	')"
+    printf 'avp_names\t%s\n' "$(printf '%s\n' "$walk" | awk -F'\t' '$1 ~ /\.name$/ {printf "%s ", $2}')"
+    printf 'hex\t%s\n' "$msg"
+}
+
 lcore_cmd_gtpdoor() {
     local hex; hex=$(lcore_nfc "${1:-}")
     lcore_is_hex "$hex" || { printf 'ERROR\tnot valid hex\n' >&2; return 2; }
@@ -3965,6 +4186,25 @@ lcore_selftest() {
     }
     fld() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
 
+    # One AVP's payload out of a message by its code, and a grouped AVP's
+    # children walked as AVPs of their own. Asserting on octets rather than on
+    # the summary line the command printed is what lets these rows fail.
+    plr_field() {  # <avp-code> <msg-hex>
+        local idx
+        idx=$(lcore_diameter_parse_avps "${2:40}" 2>/dev/null \
+              | awk -F'\t' -v c="$1" '$1 ~ /\.code$/ && $2==c { split($1,p,"."); print p[2]; exit }')
+        [[ -n "$idx" ]] || { echo missing; return 1; }
+        lcore_diameter_parse_avps "${2:40}" 2>/dev/null \
+            | awk -F'\t' -v k="avp.$idx.data" '$1==k{print $2; exit}'
+    }
+    plr_children() {  # <avp-code> <msg-hex> → child-code<TAB>child-data rows
+        local inner
+        inner=$(plr_field "$1" "$2")
+        lcore_diameter_parse_avps "$inner" 2>/dev/null \
+            | awk -F'\t' '$1 ~ /\.code$/ { split($1,p,"."); c[p[2]]=$2; next }
+                           $1 ~ /\.data$/ { split($1,p,"."); if (p[2] in c) print c[p[2]] "\t" $2 }'
+    }
+
     local d out rc
     d=$(mktemp -d "$MOD_TMP/selftest.XXXXXX") || {
         printf 'ERROR\tmktemp failed under %s\n' "$MOD_TMP" >&2; return 1; }
@@ -4673,6 +4913,74 @@ print('yes' if int.from_bytes(b[2:4],'big')==len(b)-4 else 'no')
     # --gtpdoor-detect as an octet string, not as a claim.
     local bd bdh prs
     bd=$(lcore_cmd_gtpdoor_build 310150123456789 identity)
+    # ── SLg Provide-Location-Request ───────────────────────────────────
+    # The default ask: a subscriber identified by MSISDN, the current
+    # location, the commercial client type, 50 m asked for.
+    local plr pm pe pid plrhex pdec
+    plr=$(lcore_cmd_plr 310150123456789 2>/dev/null)
+    plrhex=$(fld "$plr" hex)
+    chk plr-message     "$(fld "$plr" message)" "Provide-Location-Request (PLR)"
+    chk plr-app         "$(fld "$plr" application_id)" "16777255"
+    chk plr-app-name    "$(fld "$plr" application)" "3GPP SLg"
+    chk plr-code        "$(fld "$plr" command_code)" "8388620"
+    chk plr-answer-code "$(fld "$plr" answer_code)" "8388620"
+    chk plr-flags       "$(fld "$plr" flags)" "C0"
+    chk plr-version     "${plrhex:0:2}" "01"
+    chk plr-rt-code     "$(fld "$plr" roundtrip_command)" "8388620"
+    chk plr-rt-app      "$(fld "$plr" roundtrip_app)" "16777255"
+    chk plr-rt-length   "$(fld "$plr" roundtrip_length_ok)" "yes"
+    chk plr-target      "$(fld "$plr" target)" "310150123456789"
+    chk plr-target-avp  "$(fld "$plr" target_avp)" "User-Name (1)"
+    chk plr-avp-count   "$(fld "$plr" avp_count)" "10"
+    plr=$(lcore_cmd_plr 310150123456789 --imsi 2>/dev/null)
+    chk plr-imsi-avp    "$(fld "$plr" target_avp)" "IMSI (1, vendor 10415)"
+    # Every AVP the builder writes has to come back named by the decoder.
+    plr=$(lcore_cmd_plr 310150123456789 --client-type law-enforcement \
+            --location-type last-known --qos-class assured --accuracy 300 \
+            --vertical 20 --response-time delay-tolerant \
+            --privacy restricted-if-no-response --priority 2 \
+            --service-type 7 --plr-flags 1 --codeword 0A1B \
+            --dest-host mme.localdomain 2>/dev/null)
+    plrhex=$(fld "$plr" hex)
+    chk plr-full-count   "$(fld "$plr" avp_count)" "16"
+    for want in Session-Id Origin-Host Origin-Realm Destination-Realm \
+                Auth-Session-State Destination-Host User-Name SLg-Location-Type \
+                LCS-EPS-Client-Name LCS-Client-Type LCS-QoS LCS-Priority \
+                LCS-Privacy-Check LCS-Service-Type-ID PLR-Flags LCS-Codeword; do
+        case " $(fld "$plr" avp_names) " in
+            *" $want "*) chk "plr-names-$want" "present" "present" ;;
+            *)           chk "plr-names-$want" "absent" "present" ;;
+        esac
+    done
+    # The decoder names the command, which is the encoder refereed against itself.
+    pdec=$(lcore_cmd_decode_diameter "$plrhex" 2>/dev/null)
+    chk plr-decode-code  "$(fld "$pdec" command_code)" "8388620"
+    chk plr-decode-name  "$(fld "$pdec" command_name)" "Provide-Location (PLR/PLA)  [SLh/SLg]"
+    chk plr-decode-app   "$(fld "$pdec" application_name)" "3GPP SLg"
+    chk plr-decode-len   "$(fld "$pdec" length_mismatch)" "no"
+    # Field values survive the round trip as the enumerated numbers they are.
+    chk plr-client-num   "$(plr_field 1241 "$plrhex")" "00000003"
+    chk plr-loc-num      "$(plr_field 2500 "$plrhex")" "00000001"
+    chk plr-privacy-num  "$(plr_field 2512 "$plrhex")" "00000003"
+    # The QoS group carries all four of its children.
+    chk plr-qos-children "$(plr_children 2504 "$plrhex" | wc -l)" "4"
+    chk plr-qos-class    "$(plr_children 2504 "$plrhex" | awk -F'\t' '$1=="2523"{print $2}')" "00000000"
+    chk plr-qos-accuracy "$(plr_children 2504 "$plrhex" | awk -F'\t' '$1=="2505"{print $2}')" "0000012C"
+    chk plr-qos-vertical "$(plr_children 2504 "$plrhex" | awk -F'\t' '$1=="2506"{print $2}')" "00000014"
+    chk plr-qos-response "$(plr_children 2504 "$plrhex" | awk -F'\t' '$1=="2509"{print $2}')" "00000001"
+    # The client name group says who is asking, which is the whole point of it.
+    chk plr-client-group "$(plr_children 2501 "$plrhex" | awk -F'\t' '$1=="1238"{print $2}')" "6C63732D636C69656E74"
+    # Refusals.
+    chk plr-bad-client  "$(lcore_build_plr 310150123456789 --client-type wizard >/dev/null 2>&1; echo $?)" "2"
+    chk plr-bad-loc     "$(lcore_build_plr 310150123456789 --location-type moon >/dev/null 2>&1; echo $?)" "2"
+    chk plr-bad-privacy "$(lcore_build_plr 310150123456789 --privacy maybe >/dev/null 2>&1; echo $?)" "2"
+    chk plr-bad-acc     "$(lcore_build_plr 310150123456789 --accuracy near >/dev/null 2>&1; echo $?)" "2"
+    chk plr-bad-msisdn  "$(lcore_build_plr 1234 >/dev/null 2>&1; echo $?)" "2"
+    chk plr-bad-imsi    "$(lcore_build_plr 31015012345 --imsi >/dev/null 2>&1; echo $?)" "2"
+    chk plr-bad-codeword "$(lcore_build_plr 310150123456789 --codeword zz >/dev/null 2>&1; echo $?)" "2"
+    chk plr-bad-opt     "$(lcore_build_plr 310150123456789 --plr-flags x >/dev/null 2>&1; echo $?)" "2"
+    chk plr-unknown-opt "$(lcore_build_plr 310150123456789 --gmlc 4917 >/dev/null 2>&1; echo $?)" "2"
+
     chk gtpdoor-build-type  "$(fld "$bd" message_type)" "1"
     chk gtpdoor-build-name  "$(fld "$bd" message)" "Echo Request"
     chk gtpdoor-build-dir   "$(fld "$bd" direction)" "request"
@@ -5007,6 +5315,7 @@ lcore_menu() {
   [1]  decode a Diameter message (hex)
   [2]  decode a GTP-C v2 message (hex)
   [3]  decode a GTP-U packet (hex)
+  [17] build an SLg Provide-Location-Request (subscriber location ask)
   [4]  build an AIR (S6a Authentication-Information-Request)
   [5]  build a ULR (S6a Update-Location-Request)
   [6]  plan: spoofed ULR / location hijack
@@ -5075,6 +5384,12 @@ M
             16) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a file; cannot prompt in CLI mode" >&2
                 else read -rp "  reachability tsv> " rf
                      lcore_cmd_ipx_map "$rf" | column -t -s$'\t' 2>/dev/null || lcore_cmd_ipx_map "$rf"
+                     read -rp "  press enter " _; fi ;;
+            17) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need an MSISDN or IMSI; cannot prompt in CLI mode" >&2
+                else read -rp "  MSISDN or IMSI> " lcst
+                     read -rp "  client type [value-added/emergency/operator/law-enforcement]> " lcct
+                     lcore_cmd_plr "${lcst:-310150123456789}" --client-type "${lcct:-value-added}" \
+                         | column -t -s$'\t' 2>/dev/null || lcore_cmd_plr "${lcst:-310150123456789}"
                      read -rp "  press enter " _; fi ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -5255,6 +5570,7 @@ lcore_cli_main() {
         --build-air)     lcore_cmd_build_air "${1:-310150123456789}" ;;
         --build-ulr)     lcore_cmd_build_ulr "${1:-310150123456789}" ;;
         --build-clr)     lcore_cmd_build_clr "${1:-310150123456789}" ;;
+        --plr)           lcore_cmd_plr "$@" ;;
         --gtp-csr-forge) lcore_cmd_gtp_csr_forge "${1:-310150123456789}" "${2:-internet}" "${3:-310}" "${4:-260}" ;;
         --gtp-modify-bearer) lcore_cmd_gtp_modify_bearer "${1:-}" "${2:-5}" ;;
         --gtp-in-gtp)    lcore_cmd_gtp_in_gtp "$@" ;;
@@ -5293,6 +5609,12 @@ Usage: $0 COMMAND
   --decode-gtp-u <hex>        parse a GTP-U header and its extension chain
   --build-air [IMSI]          build an S6a Authentication-Information-Request
   --build-clr [IMSI]          build an S6a Cancel-Location-Request (317)
+  --plr <msisdn|imsi> [opts]  build an SLg Provide-Location-Request (8388620):
+                              --imsi --location-type --client-type --qos-class
+                              --accuracy --vertical --response-time --privacy
+                              --priority --service-type --codeword --plr-flags
+                              --client-name --client-format --dest-host
+                              --origin-host --origin-realm --dest-realm
   --build-ulr [IMSI]          build an S6a Update-Location-Request
   --gtp-csr-forge [IMSI] [APN] [MCC] [MNC]
                               forge a GTP-C Create Session Request

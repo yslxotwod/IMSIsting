@@ -7269,6 +7269,7 @@ static const ChipRow chip_rows[] = {
     { "11_lte_core",         "--area-ids",            NEED_NO, DOES_READS },
     { "11_lte_core",         "--build-air",           NEED_NO, DOES_BUILDS },
     { "11_lte_core",         "--build-clr",           NEED_NO, DOES_BUILDS },
+    { "11_lte_core",         "--plr",                 NEED_NO, DOES_BUILDS },
     { "11_lte_core",         "--build-ulr",           NEED_NO, DOES_BUILDS },
     { "11_lte_core",         "--cdr-fraud-check",     NEED_NO, DOES_READS },
     { "11_lte_core",         "--days",                NEED_NO, DOES_READS },
@@ -8434,6 +8435,9 @@ static const ChipRow chip_rows[] = {
     { "49_ntn",              "--backhaul-triage",     NEED_NO, DOES_READS },
     { "49_ntn",              "--doppler",             NEED_RADIO, DOES_READS },
     { "49_ntn",              "--feeder",              NEED_RADIO, DOES_READS },
+    { "49_ntn",              "--feeder-budget",       NEED_NO, DOES_READS },
+    { "49_ntn",              "--feeder-capture",      NEED_NO, DOES_READS },
+    { "49_ntn",              "--feeder-look",         NEED_NO, DOES_READS },
     { "49_ntn",              "--gmr",                 NEED_NO, DOES_READS },
     { "49_ntn",              "--help",                NEED_NO, DOES_READS },
     { "49_ntn",              "--info",                NEED_NO, DOES_READS },
@@ -26011,6 +26015,33 @@ lcore_build_build(AppState *state, const char *module_id,
     }
     gtk_box_append(GTK_BOX(body), s6a);
 
+    GtkWidget *slg_body;
+    GtkWidget *slg = verb_card("ASK WHERE A SUBSCRIBER IS", &slg_body);
+
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(slg_body),
+            mod_arg_row_prefilled(state, module_id, status, "Location ask",
+                "--plr", "310150123456789 --client-type value-added --accuracy 50",
+                "A Provide-Location-Request on SLg: the message a GMLC sends to "
+                "ask where a subscriber is, and the accuracy it asks for."));
+        gtk_box_append(GTK_BOX(slg_body), res);
+    }
+    {
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(slg_body),
+            mod_arg_row_prefilled(state, module_id, status, "As the emergency client",
+                "--plr", "310150123456789 --imsi --client-type emergency --accuracy 300",
+                "The same ask by IMSI, from the client type that carries the "
+                "strongest claim on the answer."));
+        gtk_box_append(GTK_BOX(slg_body), res);
+    }
+    gtk_box_append(GTK_BOX(body), slg);
+
     {
         GtkWidget *res = result_rect_new(state, NULL);
 
@@ -38900,8 +38931,9 @@ ntn_build_feeder(AppState *state, const char *module_id,
 {
     GtkWidget *body;
     GtkWidget *outer = radio_view_shell("BEHIND THE SATELLITE",
-        "What the feeder carrier carries and where encryption can sit in it. "
-        "No carrier is tuned or demodulated here.", &body);
+        "What the feeder carrier carries, where encryption can sit in it, and "
+        "the geometry and budget that decide whose carrier the transponder "
+        "relays. No carrier is tuned or demodulated here.", &body);
     GtkWidget *card_body;
     GtkWidget *card = verb_card("THE CARRIER", &card_body);
 
@@ -38924,10 +38956,52 @@ ntn_build_feeder(AppState *state, const char *module_id,
                 "--backhaul", "kit",
                 "A receive-only station priced from the published work, and the "
                 "one thing it does not buy: a way past subscription scrambling."));
+        gtk_box_append(GTK_BOX(card_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the feeder",
+                "--feeder", "",
+                "The feeder bands, the two payload kinds — a transparent one "
+                "relays without demodulating, a regenerative one carries "
+                "backhaul — and what the broadcast does and does not say about "
+                "the ground."));
         gtk_box_append(GTK_BOX(card_body), res);
     }
     gtk_box_append(GTK_BOX(body), card);
     mod_card_end();
+
+    {
+        GtkWidget *fb_body;
+        GtkWidget *fb = verb_card("THE FEEDER LINK", &fb_body);
+        GtkWidget *res = result_rect_new(state, NULL);
+
+        mod_card_begin(res);
+        gtk_box_append(GTK_BOX(fb_body),
+            mod_arg_row_prefilled(state, module_id, status, "Sweep a pass",
+                "--feeder-look", "0 105 /path/to/elements.tle 25 30",
+                "Gateway latitude, longitude, an element set, the minutes to "
+                "sweep and the feeder carrier. The gateway's own view of the "
+                "satellite: range, elevation, azimuth, range-rate, Doppler and "
+                "path loss, and the window it exists in."));
+        gtk_box_append(GTK_BOX(fb_body),
+            mod_arg_row_prefilled(state, module_id, status, "Read the budget",
+                "--feeder-budget", "30 35786 70",
+                "Carrier, slant range and earth-station EIRP, then bandwidth, "
+                "G/T and saturation flux density. The flux the carrier puts on "
+                "the satellite against the flux that saturates it, and the "
+                "carrier-to-noise it produces — the two numbers a bent-pipe "
+                "transponder answers to."));
+        gtk_box_append(GTK_BOX(fb_body),
+            mod_arg_row(state, module_id, status, "Measure the margin",
+                "--feeder-capture",
+                "elements.tle 0 0 105 --gw-lat 25 --gw-lon 95 --dish-m 3.7",
+                "Element set, minute, and the interferer's position, then the "
+                "gateway's position from a filing. Two slant ranges and two "
+                "EIRPs give the carrier ratio at the transponder: the EIRP a "
+                "chosen J/S needs, the geometry advantage against the gateway, "
+                "and the pass window that exists at all."));
+        gtk_box_append(GTK_BOX(fb_body), res);
+        gtk_box_append(GTK_BOX(body), fb);
+        mod_card_end();
+    }
 
     {
         GtkWidget *tb;

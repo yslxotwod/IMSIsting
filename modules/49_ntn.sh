@@ -23,8 +23,11 @@
 # geometry read the other way round, which is why it lives here rather than in a
 # module of its own: one implementation per number.
 #
-# Attack owned: none direct — cell reconnaissance and timing analysis for NTN
-# access (extends 02_cell_recon and 12_nr_air to a satellite cell).
+# Attack owned: the feeder link — the gateway's geometry, the uplink budget that
+# decides whether a bent-pipe transponder saturates, and the carrier ratio a
+# capture needs, all from an element set and a ground coordinate. The service
+# link stays analysis: cell reconnaissance and timing analysis for NTN access
+# (extends 02_cell_recon and 12_nr_air to a satellite cell).
 #
 # Resolve IMSISTING_ROOT from this script's own path (MODULE_CONVENTIONS §2).
 if [[ -z "${IMSISTING_ROOT:-}" ]]; then
@@ -1428,9 +1431,279 @@ ntn_sib19() {
 # is not derivable from anything this module reads. What the old table called
 # "exposure" was a topology sketch, not a measurement or a computed quantity.
 ntn_feeder_link() {
-    printf 'ERROR\tfeeder link is not computed: SIB19 carries no gateway geometry\n' >&2
-    printf 'WHY\tSIB19 provides TA, K_offset, ephemeris and the cell reference location for the service link; the feeder (gateway-satellite) distance needs the gateway position, which is not signalled and not supplied here, so no geometry is invented. What a feeder carrier carries, and where an operator can encrypt it, is answered by --backhaul; the air interface of a legacy satellite network is answered by --gmr.\n' >&2
-    return 2
+    printf 'band\tuplink_ghz\tdownlink_ghz\tallocation\n'
+    printf 'Ka\t27.5-31.0\t17.3-20.2\tFSS feeder\n'
+    printf 'Ku\t13.75-14.5\t10.7-12.75\tFSS feeder\n'
+    printf 'V\t47.2-50.2\t37.5-42.5\tFSS feeder\n'
+    printf 'Q\t47.2-48.2\t42.5-43.5\tFSS feeder\n'
+    printf 'payload\ttransparent\tthe payload translates the feeder carrier to the service band and back; it does not demodulate, so nothing in the relay checks what it carries\n'
+    printf 'payload\tregenerative\tthe gNB is on board; the feeder carries backhaul, IP or GTP-U, and is a network transport rather than a relay\n'
+    printf 'signalled\tSIB19\tservice link only: satellite state vector, TA, K_offset, reference location, distanceThresh\n'
+    printf 'not-signalled\tgateway\tthe earth-station position is in a filing, never in the broadcast\n'
+    printf 'gateway-source\tITU space network filing, earth-station licence, operator frequency plan\n'
+    printf 'geometry\t--feeder-look <gw-lat> <gw-lon> <tle> [minutes] [MHz]\n'
+    printf 'budget\t--feeder-budget <freq-mhz> <range-km> <eirp-dbw> [bw-khz] [g-over-t] [sfd-dbw-m2]\n'
+    printf 'capture\t--feeder-capture <tle> <tsince> <atk-lat> <atk-lon> [--gw-lat D --gw-lon D] [--gw-eirp-dbw D] [--target-js-db D] [--freq-mhz D] [--dish-m D]\n'
+    return 0
+}
+
+# ── feeder geometry from the gateway's side ─────────────────────────────
+# The gateway is the other end of the same satellite the service link sees, so
+# the geometry is ntn_look from a different ground point: range, elevation,
+# azimuth, range-rate, Doppler and free-space loss, sampled across the pass.
+# Everything else about a feeder is a link budget, which is the next verb.
+ntn_feeder_look() {
+    local lat="${1:-}" lon="${2:-}" file="${3:-}" minutes="${4:-15}" freq="${5:-30}"
+    [[ -n "$lat" && -n "$lon" && -r "$file" ]] || {
+        printf 'ERROR\t--feeder-look needs <gateway-lat> <gateway-lon> <tle-file> [minutes] [MHz]\n' >&2; return 2; }
+    local epoch_ts epoch_iso epoch_jd
+    epoch_ts=$(ntn_epoch_ts "$file") || {
+        printf 'GUARD\tepoch-unreadable\trefusing: the element set has no epoch, so samples cannot be placed on a clock\n'
+        return 1; }
+    epoch_iso=$(date -u -d "@$epoch_ts" +%Y-%m-%dT%H:%M:%SZ)
+    epoch_jd=$(ntn_jd "$epoch_iso")
+
+    printf 'field\tvalue\n'
+    printf 'gateway_lat\t%s\n' "$lat"
+    printf 'gateway_lon\t%s\n' "$lon"
+    printf 'feeder_mhz\t%s\n' "$freq"
+    printf 'epoch_utc\t%s\n' "$epoch_iso"
+    printf 'tsince_min\trange_km\telev_deg\taz_deg\trange_rate_kms\tdoppler_hz\tdelay_us\tfspl_db\n'
+
+    local i n step=0.5
+    n=$(awk -v m="$minutes" 'BEGIN{printf "%d", m*2}')
+    local first="" last="" maxel=-90 seen=0
+    for (( i = 0; i <= n; i++ )); do
+        local tsince rv
+        tsince=$(awk -v i="$i" -v s="$step" 'BEGIN{printf "%.2f", i*s}')
+        rv=$(ntn_state_at "$file" "$tsince") || break
+        [[ "$rv" == GUARD* ]] && { printf '%s\n' "$rv"; break; }
+        local rx ry rz vx vy vz
+        rx=$(printf '%s' "$rv" | sed -n 1p | cut -f1); ry=$(printf '%s' "$rv" | sed -n 1p | cut -f2); rz=$(printf '%s' "$rv" | sed -n 1p | cut -f3)
+        vx=$(printf '%s' "$rv" | sed -n 2p | cut -f1); vy=$(printf '%s' "$rv" | sed -n 2p | cut -f2); vz=$(printf '%s' "$rv" | sed -n 2p | cut -f3)
+        local gmst look
+        gmst=$(ntn_topocentric "$lat" "$lon" 0 "$tsince" "$epoch_jd")
+        look=$(ntn_look "$lat" "$lon" 0 "$rx" "$ry" "$rz" "$vx" "$vy" "$vz" "$gmst")
+        local rng el az rrate
+        rng=$(printf '%s' "$look" | cut -f1); el=$(printf '%s' "$look" | cut -f2)
+        az=$(printf '%s' "$look" | cut -f3); rrate=$(printf '%s' "$look" | cut -f4)
+        awk -v t="$tsince" -v r="$rng" -v el="$el" -v az="$az" -v rr="$rrate" \
+            -v f="$freq" -v c="$NTN_C_KM_S" 'BEGIN{
+            if (el < 0) exit 0
+            dop = -1 * (f*1e6) * rr / c
+            dly = r / c * 1e6
+            fspl = 92.45 + 20*log(r)/log(10) + 20*log(f)/log(10)
+            printf "%s\t%.3f\t%.3f\t%.1f\t%.4f\t%.1f\t%.1f\t%.2f\n", t, r, el, az, rr, dop, dly, fspl
+        }'
+        if awk -v e="$el" 'BEGIN{exit !(e >= 0)}'; then
+            seen=$(( seen + 1 ))
+            [[ -z "$first" ]] && first="$tsince"
+            last="$tsince"
+            maxel=$(awk -v a="$maxel" -v b="$el" 'BEGIN{print (b>a)?b:a}')
+        fi
+    done
+    printf 'visible_samples\t%d\n' "$seen"
+    printf 'aos_min\t%s\n' "${first:-unobserved}"
+    printf 'los_min\t%s\n' "${last:-unobserved}"
+    if (( seen == 0 )); then
+        printf 'max_elev_deg\tunobserved\n'
+    else
+        printf 'max_elev_deg\t%.3f\n' "$maxel"
+    fi
+    return 0
+}
+
+# A feeder link budget, in the two numbers that decide whether the transponder
+# is yours: how much flux density the carrier puts on the satellite compared
+# with the transponder's saturation flux density, and the carrier-to-noise the
+# same carrier produces. A bent-pipe transponder has one output and an AGC, so
+# a carrier strong enough to compress it takes the output regardless of who is
+# licensed to be there.
+ntn_feeder_budget() {
+    local freq="${1:-30}" rng="${2:-35786}" eirp="${3:-70}"
+    local bw="${4:-36}" gt="${5:-0}" sfd="${6:--90}"
+    local num='^[0-9]+([.][0-9]+)?$' neg='^-?[0-9]+([.][0-9]+)?$'
+    for v in "$freq" "$rng" "$bw"; do
+        [[ "$v" =~ $num ]] || { printf 'ERROR\tfrequency, range and bandwidth must be positive numbers\n' >&2; return 2; }
+    done
+    [[ "$eirp" =~ $neg && "$gt" =~ $neg && "$sfd" =~ $neg ]] || {
+        printf 'ERROR\teirp, G/T and SFD must be numbers\n' >&2; return 2; }
+
+    awk -v F="$freq" -v R="$rng" -v E="$eirp" -v B="$bw" -v GT="$gt" -v SFD="$sfd" 'BEGIN{
+        if (F <= 0 || R <= 0 || B <= 0) { print "ERROR\tfrequency, range and bandwidth must be positive"; exit 2 }
+        pi = atan2(0,-1)
+        fspl = 92.45 + 20*log(R)/log(10) + 20*log(F)/log(10)
+        dm = R*1000
+        spread = 10*log(4*pi*dm*dm)/log(10)
+        prx = E - fspl
+        flux = E - spread
+        sat = SFD - flux
+        cn0 = E - fspl + GT + 228.6
+        cn = cn0 - 10*log(B*1e6)/log(10)
+        printf "field\tvalue\n"
+        printf "feeder_mhz\t%.3f\n", F
+        printf "range_km\t%.3f\n", R
+        printf "eirp_dbw\t%.2f\n", E
+        printf "eirp_source\tsupplied\n"
+        printf "bandwidth_khz\t%.3f\n", B
+        printf "g_over_t_db_per_k\t%.2f\n", GT
+        printf "g_over_t_source\t%s\n", (GT == 0 ? "assumed: 0 dB/K" : "supplied")
+        printf "sfd_dbw_m2\t%.2f\n", SFD
+        printf "sfd_source\t%s\n", (SFD == -90 ? "assumed: -90 dBW/m2, a typical bent-pipe saturation flux" : "supplied")
+        printf "path_loss_db\t%.2f\n", fspl
+        printf "spreading_loss_db\t%.2f\n", spread
+        printf "received_dbw\t%.2f\n", prx
+        printf "flux_density_dbw_m2\t%.2f\n", flux
+        printf "saturation_margin_db\t%.2f\n", sat
+        printf "cn0_db_hz\t%.2f\n", cn0
+        printf "cn_db\t%.2f\n", cn
+        verdict = (sat < 0) ? "saturated" : (cn <= 0 ? "below-noise" : "nominal")
+        printf "verdict\t%s\n", verdict
+        printf "not_modelled\train fade, antenna sidelobes, uplink power control, transponder AGC time constant, polarization isolation\n"
+    }'
+}
+
+# Capture margin: the interferer's carrier arrives at the same transponder as
+# the gateway's, so the question is a ratio of two flux densities, i.e. of two
+# EIRPs and two slant ranges. Only the ranges are measurable from the element
+# set; the gateway's own EIRP is an operating parameter, so it is an argument
+# and is reported with its source. Everything the geometry cannot supply is
+# reported as not-supplied rather than filled in.
+ntn_feeder_capture() {
+    local file="${1:-}" tsince="${2:-0}" alat="${3:-}" alon="${4:-}"
+    local gwlat="" gwlon="" gweirp="70" js="0" freq="30" dish="" win="15" eff="0.65"
+    local gweirp_src="assumed" js_src="assumed"
+    shift 4 2>/dev/null || shift $#
+    while (( $# > 0 )); do
+        case "$1" in
+            --gw-lat)   gwlat="${2:-}"; shift 2 ;;
+            --gw-lon)   gwlon="${2:-}"; shift 2 ;;
+            --gw-eirp-dbw) gweirp="${2:-70}"; gweirp_src="supplied"; shift 2 ;;
+            --target-js-db) js="${2:-0}"; js_src="supplied"; shift 2 ;;
+            --freq-mhz) freq="${2:-30}"; shift 2 ;;
+            --dish-m)   dish="${2:-}"; shift 2 ;;
+            --eff)      eff="${2:-0.65}"; shift 2 ;;
+            --window-min) win="${2:-15}"; shift 2 ;;
+            *) printf 'ERROR\tunknown argument: %s\n' "$(ntn_sanitize "$1")" >&2
+               printf 'WHY\tusage: --feeder-capture <tle> <tsince> <atk-lat> <atk-lon> [--gw-lat D --gw-lon D] [--gw-eirp-dbw D] [--target-js-db D] [--freq-mhz D] [--dish-m D] [--eff D] [--window-min N]\n' >&2
+               return 2 ;;
+        esac
+    done
+    [[ -r "$file" ]] || { printf 'ERROR\t--feeder-capture needs a readable element set\n' >&2; return 2; }
+    local num='^-?[0-9]+([.][0-9]+)?$'
+    [[ "$alat" =~ $num && "$alon" =~ $num ]] || {
+        printf 'ERROR\tattacker latitude and longitude must be numbers\n' >&2; return 2; }
+    if [[ -n "$gwlat" || -n "$gwlon" ]]; then
+        [[ "$gwlat" =~ $num && "$gwlon" =~ $num ]] || {
+            printf 'ERROR\tgateway latitude and longitude must both be numbers\n' >&2; return 2; }
+    fi
+
+    local epoch_ts epoch_iso epoch_jd
+    epoch_ts=$(ntn_epoch_ts "$file") || {
+        printf 'GUARD\tepoch-unreadable\trefusing: no clock for the samples\n'; return 1; }
+    epoch_iso=$(date -u -d "@$epoch_ts" +%Y-%m-%dT%H:%M:%SZ)
+    epoch_jd=$(ntn_jd "$epoch_iso")
+
+    local rv; rv=$(ntn_state_at "$file" "$tsince") || {
+        printf 'GUARD\tstate-unavailable\trefusing: the element set would not propagate to %s min\n' "$tsince"; return 1; }
+    [[ "$rv" == GUARD* ]] && { printf '%s\n' "$rv"; return 1; }
+    local rx ry rz vx vy vz
+    rx=$(printf '%s' "$rv" | sed -n 1p | cut -f1); ry=$(printf '%s' "$rv" | sed -n 1p | cut -f2); rz=$(printf '%s' "$rv" | sed -n 1p | cut -f3)
+    vx=$(printf '%s' "$rv" | sed -n 2p | cut -f1); vy=$(printf '%s' "$rv" | sed -n 2p | cut -f2); vz=$(printf '%s' "$rv" | sed -n 2p | cut -f3)
+
+    local agmst alook arng ael arate
+    agmst=$(ntn_topocentric "$alat" "$alon" 0 "$tsince" "$epoch_jd")
+    alook=$(ntn_look "$alat" "$alon" 0 "$rx" "$ry" "$rz" "$vx" "$vy" "$vz" "$agmst")
+    arng=$(printf '%s' "$alook" | cut -f1); ael=$(printf '%s' "$alook" | cut -f2); arate=$(printf '%s' "$alook" | cut -f4)
+
+    local gwrng="" gwel=""
+    if [[ -n "$gwlat" ]]; then
+        local ggmst glook
+        ggmst=$(ntn_topocentric "$gwlat" "$gwlon" 0 "$tsince" "$epoch_jd")
+        glook=$(ntn_look "$gwlat" "$gwlon" 0 "$rx" "$ry" "$rz" "$vx" "$vy" "$vz" "$ggmst")
+        gwrng=$(printf '%s' "$glook" | cut -f1); gwel=$(printf '%s' "$glook" | cut -f2)
+    fi
+
+    # Window: a capture only exists while the interferer can see the satellite.
+    local i seen=0 maxel=-90 step=0.5
+    local n; n=$(awk -v m="$win" 'BEGIN{printf "%d", m*2}')
+    for (( i = 0; i <= n; i++ )); do
+        local ts rv2
+        ts=$(awk -v i="$i" -v s="$step" 'BEGIN{printf "%.2f", i*s}')
+        rv2=$(ntn_state_at "$file" "$ts") || break
+        [[ "$rv2" == GUARD* ]] && break
+        local wx wy wz wvx wvy wvz
+        wx=$(printf '%s' "$rv2" | sed -n 1p | cut -f1); wy=$(printf '%s' "$rv2" | sed -n 1p | cut -f2); wz=$(printf '%s' "$rv2" | sed -n 1p | cut -f3)
+        wvx=$(printf '%s' "$rv2" | sed -n 2p | cut -f1); wvy=$(printf '%s' "$rv2" | sed -n 2p | cut -f2); wvz=$(printf '%s' "$rv2" | sed -n 2p | cut -f3)
+        local wgmst wlook wel
+        wgmst=$(ntn_topocentric "$alat" "$alon" 0 "$ts" "$epoch_jd")
+        wlook=$(ntn_look "$alat" "$alon" 0 "$wx" "$wy" "$wz" "$wvx" "$wvy" "$wvz" "$wgmst")
+        wel=$(printf '%s' "$wlook" | cut -f2)
+        if awk -v e="$wel" 'BEGIN{exit !(e >= 5)}'; then
+            seen=$(( seen + 1 ))
+            maxel=$(awk -v a="$maxel" -v b="$wel" 'BEGIN{print (b>a)?b:a}')
+        fi
+        unset wx wy wz wvx wvy wvz wgmst wlook wel
+    done
+
+    awk -v T="$tsince" -v X="$rx" -v Y="$ry" -v Z="$rz" \
+        -v AL="$alat" -v AO="$alon" -v AR="$arng" -v AE="$ael" -v ARR="$arate" \
+        -v GR="$gwrng" -v GE="$gwel" -v GI="$gweirp" -v GIS="$gweirp_src" \
+        -v JS="$js" -v JSS="$js_src" -v F="$freq" -v D="$dish" -v EFF="$eff" \
+        -v VIS="$seen" -v MXE="$maxel" -v C="299792.458" -v WIN="$win" 'BEGIN{
+        pi = atan2(0,-1)
+        d2 = log(10)
+        printf "field\tvalue\n"
+        printf "tsince_min\t%s\n", T
+        printf "sat_x_km\t%.6f\n", X
+        printf "sat_y_km\t%.6f\n", Y
+        printf "sat_z_km\t%.6f\n", Z
+        printf "attacker_lat\t%s\n", AL
+        printf "attacker_lon\t%s\n", AO
+        printf "attacker_range_km\t%.3f\n", AR
+        printf "attacker_elev_deg\t%.3f\n", AE
+        printf "attacker_range_rate_kms\t%.4f\n", ARR
+        printf "attacker_spreading_db\t%.2f\n", 10*log(4*pi*(AR*1000)*(AR*1000))/d2
+        printf "attacker_fspl_db\t%.2f\n", 92.45 + 20*log(AR)/d2 + 20*log(F)/d2
+        printf "attacker_doppler_hz\t%.1f\n", -1*(F*1e6)*(ARR*1000)/(C*1000)
+        printf "gateway_source\t%s\n", (GR == "" ? "not-supplied" : "supplied")
+        printf "gateway_eirp_dbw\t%.2f\n", GI
+        printf "gateway_eirp_source\t%s\n", GIS
+        printf "target_js_db\t%.2f\n", JS
+        printf "target_js_source\t%s\n", JSS
+        if (GR != "") {
+            printf "gateway_range_km\t%.3f\n", GR
+            printf "gateway_elev_deg\t%.3f\n", GE
+            printf "gateway_spreading_db\t%.2f\n", 10*log(4*pi*(GR*1000)*(GR*1000))/d2
+            adv = 10*log(4*pi*(AR*1000)*(AR*1000))/d2 - 10*log(4*pi*(GR*1000)*(GR*1000))/d2
+            req = GI + adv + JS
+            printf "geometry_advantage_db\t%.2f\n", adv
+            printf "required_eirp_dbw\t%.2f\n", req
+            if (D != "") {
+                g = 10*log(EFF*(pi*D*(F*1e9)/299792458)*(pi*D*(F*1e9)/299792458))/d2
+                printf "dish_m\t%.3f\n", D
+                printf "dish_efficiency\t%.2f\n", EFF
+                printf "dish_gain_dbi\t%.2f\n", g
+                printf "required_tx_w\t%.3f\n", 10^((req-g)/10)
+            }
+        } else {
+            printf "geometry_advantage_db\tunobserved\n"
+            printf "required_eirp_dbw\tunobserved\n"
+            printf "gateway_missing\tthe interferer-to-gateway ratio needs the gateway position; supply --gw-lat and --gw-lon from a filing\n"
+        }
+        printf "window_minutes\t%s\n", WIN
+        printf "visible_minutes\t%.1f\n", VIS*0.5
+        if (VIS == 0) printf "max_elev_deg\tunobserved\n"
+        else printf "max_elev_deg\t%.3f\n", MXE
+        verdict = "favourable"
+        if (VIS == 0) verdict = "no-pass"
+        else if (AE < 5) verdict = "hostile-geometry"
+        else if (GR == "") verdict = "gateway-unknown"
+        else if (adv >= 0) verdict = "uphill"
+        else if (adv > -10) verdict = "marginal"
+        printf "verdict\t%s\n", verdict
+        printf "not_modelled\train fade, transmit sidelobes and adjacent-satellite isolation, uplink power control, transponder AGC time constant, polarization\n"
+    }'
 }
 
 # ── F4: listening for a satellite cell ──────────────────────────────────
@@ -1797,7 +2070,7 @@ ntn_selftest() {
     # An all-absent SIB19 is legal (every component is OPTIONAL, 7 bits), so
     # the refusal case has to be a bit string that is not hex at all.
     chk sib19-badhex  "$(ntn_sib19 zz >/dev/null 2>&1; echo $?)"           "1"
-    chk feeder-refuse "$(ntn_feeder_link >/dev/null 2>&1; echo $?)"        "2"
+    chk feeder-answers "$(ntn_feeder_link >/dev/null 2>&1; echo $?)"      "0"
 
     # 9. SIB19 build: the element encodes, and its own decoder reads it back.
     local b19; b19=$(ntn_sib19_build --koffset 20 --epoch-sfn 3 --epoch-sub 5 --validity s30 --kmac 2 --ref-hex AABBCC --dist 1000)
@@ -2001,6 +2274,67 @@ TLE
     chk sf-verdict-present "$(printf '%s\n' "$out" | grep -c '^verdict')" "1"
     chk sf-gap-numeric "$(printf '%s\n' "$out" | awk -F'\t' '$1=="worst-gap-s"{print ($2 ~ /^[0-9]+$/)?"numeric":"bad"}')" "numeric"
 
+    # 12b. The feeder link. The gateway sees the same satellite the service link
+    #      does, so the geometry is ntn_look from the other end; the budget is
+    #      the two numbers a bent-pipe transponder answers to; the capture margin
+    #      is a ratio of two flux densities, i.e. of two EIRPs and two ranges.
+    out=$(ntn_feeder_budget 30 35786 70)
+    near fb-fspl   "$(fld "$out" path_loss_db)"          213.07 0.02
+    near fb-spread "$(fld "$out" spreading_loss_db)"     162.07 0.02
+    near fb-flux   "$(fld "$out" flux_density_dbw_m2)"   -92.07 0.02
+    near fb-sat    "$(fld "$out" saturation_margin_db)"    2.07 0.02
+    near fb-cn0    "$(fld "$out" cn0_db_hz)"              85.53 0.02
+    chk  fb-verdict    "$(fld "$out" verdict)"            "nominal"
+    chk  fb-sfd-src    "$(fld "$out" sfd_source)"         "assumed: -90 dBW/m2, a typical bent-pipe saturation flux"
+    # the same carrier from a LEO slant range drives the transponder past
+    # saturation, because 800 km is nearer the satellite than the gateway is
+    out=$(ntn_feeder_budget 28 800 55)
+    chk  fb-leo-verdict "$(fld "$out" verdict)"           "saturated"
+    near fb-leo-sat     "$(fld "$out" saturation_margin_db)" -15.95 0.02
+    chk  fb-bad-range   "$(ntn_feeder_budget 30 zero 70 >/dev/null 2>&1; echo $?)" "2"
+    chk  fb-bad-eirp    "$(ntn_feeder_budget 30 35786 xx >/dev/null 2>&1; echo $?)" "2"
+
+    out=$(ntn_feeder_look 0 105 "$d/v2.tle" 25 30)
+    chk  fl-aos        "$(fld "$out" aos_min)"            "0.00"
+    chk  fl-los        "$(fld "$out" los_min)"            "9.00"
+    chk  fl-visible    "$(fld "$out" visible_samples)"    "19"
+    near fl-maxel      "$(fld "$out" max_elev_deg)"       86.516 0.01
+    near fl-first-rng  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="0.00"{print $2}')" 783.827 0.01
+    near fl-first-fspl "$(printf '%s\n' "$out" | awk -F'\t' '$1=="0.00"{print $8}')" 179.88 0.01
+    # a gateway on the wrong side of the planet sees nothing, and says so
+    out=$(ntn_feeder_look 0 -11 "$d/v2.tle" 25 30)
+    chk  fl-nopass     "$(fld "$out" visible_samples)"    "0"
+    chk  fl-nopass-el  "$(fld "$out" max_elev_deg)"       "unobserved"
+    chk  fl-noargs     "$(ntn_feeder_look '' '' '' >/dev/null 2>&1; echo $?)" "2"
+
+    out=$(ntn_feeder_capture "$d/v2.tle" 0 0 105 --gw-lat 25 --gw-lon 95 --dish-m 3.7 --freq-mhz 30)
+    chk  fc-gateway    "$(fld "$out" gateway_source)"     "supplied"
+    near fc-adv        "$(fld "$out" geometry_advantage_db)" -12.30 0.02
+    near fc-required   "$(fld "$out" required_eirp_dbw)"   57.70 0.02
+    near fc-dish-gain  "$(fld "$out" dish_gain_dbi)"       59.44 0.02
+    near fc-tx-w       "$(fld "$out" required_tx_w)"        0.670 0.01
+    chk  fc-verdict    "$(fld "$out" verdict)"            "favourable"
+    near fc-visible    "$(fld "$out" visible_minutes)"      7.5 0.01
+    near fc-maxel      "$(fld "$out" max_elev_deg)"        86.516 0.01
+    # with no gateway the ratio cannot be formed, and the row says so rather
+    # than assuming a site
+    out=$(ntn_feeder_capture "$d/v2.tle" 0 0 105)
+    chk  fc-nogw-src   "$(fld "$out" gateway_source)"     "not-supplied"
+    chk  fc-nogw-req   "$(fld "$out" required_eirp_dbw)"  "unobserved"
+    chk  fc-nogw-verdict "$(fld "$out" verdict)"          "gateway-unknown"
+    # an interferer under a satellite it cannot see has no window at all
+    out=$(ntn_feeder_capture "$d/v2.tle" 0 0 -20 --gw-lat 40 --gw-lon -75)
+    chk  fc-nopass     "$(fld "$out" verdict)"            "no-pass"
+    near fc-nopass-vis "$(fld "$out" visible_minutes)"      0.0 0.01
+    chk  fc-bad-lat    "$(ntn_feeder_capture "$d/v2.tle" 0 north 105 >/dev/null 2>&1; echo $?)" "2"
+    chk  fc-bad-gw     "$(ntn_feeder_capture "$d/v2.tle" 0 0 105 --gw-lat 25 >/dev/null 2>&1; echo $?)" "2"
+    chk  fc-unknown    "$(ntn_feeder_capture "$d/v2.tle" 0 0 105 --nope 1 >/dev/null 2>&1; echo $?)" "2"
+
+    out=$(ntn_feeder_link)
+    chk  feeder-bands     "$(printf '%s\n' "$out" | grep -c '^Ka	')" "1"
+    chk  feeder-payloads  "$(printf '%s\n' "$out" | grep -c '^payload	')" "2"
+    chk  feeder-unsignalled "$(printf '%s\n' "$out" | grep -c '^not-signalled	gateway')" "1"
+
     # 13. Guards name what is missing, and the plan is a handoff.
     chk guard-pass-noargs "$(ntn_pass_plan '' '' '' >/dev/null 2>&1; echo $?)" "2"
     chk guard-doppler-noargs "$(ntn_doppler_pass '' '' '' >/dev/null 2>&1; echo $?)" "2"
@@ -2046,7 +2380,26 @@ M
             4) read -rp "  k_offset slots> " k; read -rp "  scs kHz [15/30/60/120]> " s; read -rp "  sample rate Hz (blank skips)> " r
                ntn_koffset "$k" "$s" "$r"; read -rp "  enter " _ ;;
             5) read -rp "  SIB19 as hex> " _s19; ntn_sib19 "$_s19"; read -rp "  enter " _ ;;
-            6) ntn_feeder_link; read -rp "  enter " _ ;;
+            6) ntn_feeder_link
+               read -rp "  [l]ook angles, [b]udget, [c]apture, or enter for the inventory> " _f
+               case "$_f" in
+                 l) read -rp "  gateway lat> " la; read -rp "  gateway lon> " lo
+                    read -rp "  element set file> " f; read -rp "  carrier MHz [30]> " mh
+                    ntn_feeder_look "$la" "$lo" "$f" 15 "${mh:-30}" ;;
+                 b) read -rp "  feeder MHz [30]> " mh; read -rp "  range km [35786]> " rk
+                    read -rp "  EIRP dBW [70]> " ep; read -rp "  bandwidth kHz [36]> " bw
+                    ntn_feeder_budget "${mh:-30}" "${rk:-35786}" "${ep:-70}" "${bw:-36}" 0 -90 ;;
+                 c) read -rp "  element set file> " f; read -rp "  minutes past epoch> " t
+                    read -rp "  attacker lat> " la; read -rp "  attacker lon> " lo
+                    read -rp "  gateway lat (blank skips)> " gla; read -rp "  gateway lon> " glo
+                    if [[ -n "$gla" ]]; then
+                        ntn_feeder_capture "$f" "${t:-0}" "$la" "$lo" --gw-lat "$gla" --gw-lon "$glo"
+                    else
+                        ntn_feeder_capture "$f" "${t:-0}" "$la" "$lo"
+                    fi ;;
+                 *) ntn_feeder_link ;;
+               esac
+               read -rp "  enter " _ ;;
             7) ntn_plan; read -rp "  enter " _ ;;
             8) read -rp "  chain, crypto or kit> " b; ntn_backhaul "${b:-chain}"; read -rp "  enter " _ ;;
             9) read -rp "  GMR generation [1/2/all]> " g; ntn_gmr "${g:-all}"; read -rp "  enter " _ ;;
@@ -2090,6 +2443,9 @@ ntn_cli_main() {
         --ntn-reselect)   ntn_reselect "$@" ;;
         --fakecell-plan)  ntn_fakecell_plan ;;
         --feeder)      ntn_feeder_link ;;
+        --feeder-look) ntn_feeder_look "${1:-}" "${2:-}" "${3:-}" "${4:-15}" "${5:-30}" ;;
+        --feeder-budget) ntn_feeder_budget "${1:-30}" "${2:-35786}" "${3:-70}" "${4:-36}" "${5:-0}" "${6:--90}" ;;
+        --feeder-capture) ntn_feeder_capture "$@" ;;
         --backhaul)    ntn_backhaul "${1:-chain}" ;;
         --backhaul-triage) ntn_backhaul_triage "${1:-}" ;;
         --gmr)         ntn_gmr "${1:-all}" ;;
@@ -2125,7 +2481,23 @@ Usage: $0 COMMAND
   --sib19-build [--koffset N] [--epoch-sfn N] [--epoch-sub N] [--validity sN]
                             build the SIB19-r17 element and encode it
   --sib19 <hex>             decode a SIB19 (TS 38.331) from its bits
-  --feeder                  refused: SIB19 carries no gateway geometry
+  --feeder                  the feeder bands, the two payload kinds, and what
+                            the broadcast does and does not say about the ground
+  --feeder-look <gw-lat> <gw-lon> <tle> [minutes] [MHz]
+                            the gateway's own view of the satellite: range,
+                            elevation, azimuth, range-rate, Doppler, path loss
+                            across the pass
+  --feeder-budget <freq-mhz> <range-km> <eirp-dbw> [bw-khz] [g-over-t] [sfd]
+                            the uplink in the two numbers a bent-pipe transponder
+                            answers to: flux density against its saturation flux,
+                            and the carrier-to-noise the same carrier produces
+  --feeder-capture <tle> <tsince> <atk-lat> <atk-lon>
+      [--gw-lat D --gw-lon D] [--gw-eirp-dbw D] [--target-js-db D]
+      [--freq-mhz D] [--dish-m D] [--eff D] [--window-min N]
+                            two slant ranges and two EIRPs give the carrier
+                            ratio at the transponder; the EIRP a given J/S needs,
+                            the geometry advantage against the gateway, and the
+                            pass window the geometry allows at all
   --backhaul <chain|crypto|kit>
                             behind the satellite: the feeder carrier layers,
                             the measured encryption layers, the receive-kit cost
