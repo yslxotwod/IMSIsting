@@ -332,9 +332,129 @@ rn_selftest() {
     [[ "$rc_nopy" == 1 ]] || { printf 'selftest\tmissing python3 exited %s, not 1\n' "$rc_nopy" >&2; rc=1; }
     printf '%s\n' "$out" | grep -q 'python3 is not on PATH' || { printf 'selftest\tmissing python3 was not named\n' >&2; rc=1; }
 
+    # ── the three steps before a session: alive, key, deployed key ──
+    out=$(rn_cmd_ping 127.0.0.1 2>&1)
+    printf '%s\n' "$out" | grep -q '^verdict[[:space:]]*alive' \
+        || { printf 'selftest\t--ping did not report loopback alive\n' >&2; rc=1; }
+    rn_cmd_ping >/dev/null 2>&1; [[ $? == 2 ]] \
+        || { printf 'selftest\t--ping with no host did not exit 2\n' >&2; rc=1; }
+
+    out=$(rn_cmd_keygen "$d/keys" 2>&1)
+    printf '%s\n' "$out" | grep -q '^verdict[[:space:]]*created' \
+        || { printf 'selftest\t--ssh-keygen did not create a key\n' >&2; rc=1; }
+    [[ -f "$d/keys/imsisting_node_ed25519" ]] \
+        || { printf 'selftest\t--ssh-keygen reported a key it did not write\n' >&2; rc=1; }
+    out=$(rn_cmd_keygen "$d/keys" 2>&1)
+    printf '%s\n' "$out" | grep -q '^verdict[[:space:]]*already-present' \
+        || { printf 'selftest\ta second --ssh-keygen did not recognise the first\n' >&2; rc=1; }
+
+    # a push with no key to push is a named refusal, not a silent no-op
+    rn_cmd_keypush node.invalid --key "$d/keys/nothing.pub" >/dev/null 2>&1
+    [[ $? == 1 ]] || { printf 'selftest\t--key-push with a missing key did not exit 1\n' >&2; rc=1; }
+    rn_cmd_keypush >/dev/null 2>&1; [[ $? == 2 ]] \
+        || { printf 'selftest\t--key-push with no host did not exit 2\n' >&2; rc=1; }
+
     unset CASEBOOK_DIR STATE_DIR
     rm -rf -- "$d"
     if (( rc == 0 )); then builtin printf 'selftest\tPASS\nRESULT\tPASS\n'; else builtin printf 'selftest\tFAIL\nRESULT\tFAIL\n'; return 1; fi
+}
+
+# ── reaching a node without opening a session on it ────────────────────
+#
+# The fleet verbs all assume a node that already answers. These three are the
+# steps before that: is it alive, do I have a key, and does the node know the
+# key. Each refuses by name rather than half-doing the step, because a key that
+# was pushed to the wrong account is worse than no key at all.
+
+rn_cmd_ping() {
+    local host="${1:-}"
+    [[ -n "$host" ]] || { rn_error '--ping needs a host'; return 2; }
+    local out rc
+    if command -v ping >/dev/null 2>&1; then
+        out=$(ping -c 3 -W 2 "$host" 2>&1); rc=$?
+        printf 'method\ticmp\n'
+        printf 'host\t%s\n' "$host"
+        printf '%s\n' "$out" | awk -F', ' '/packets transmitted/{print "transmitted\t" $1; print "received\t" $2} /rtt|round-trip/{print "rtt\t" $0}'
+        if (( rc == 0 )); then printf 'verdict\talive\n'; return 0; fi
+        printf 'verdict\tno-icmp-answer\n'
+        printf 'reason\ticmp was refused or dropped; that says nothing about ssh, and a host that filters icmp is the normal case\n'
+        return 1
+    fi
+    # A tree without ping still has a TCP stack.
+    out=$(timeout 5 bash -c "exec 3<>/dev/tcp/${host}/22" 2>&1); rc=$?
+    printf 'method\ttcp-22\nhost\t%s\n' "$host"
+    if (( rc == 0 )); then printf 'verdict\talive\n'; return 0; fi
+    printf 'verdict\tno-answer\n'
+    printf 'reason\tneither ping nor a TCP connection to 22 answered within 5 s; %s\n' "$out"
+    return 1
+}
+
+rn_cmd_keygen() {
+    local dir="${1:-}"
+    [[ -n "$dir" ]] || dir="$HOME/.ssh"
+    mkdir -p "$dir" || { rn_error "cannot create $dir"; return 1; }
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        rn_error 'ssh-keygen is not on PATH'; return 1
+    fi
+    local key="$dir/imsisting_node_ed25519"
+    if [[ -f "$key" ]]; then
+        printf 'existing\t%s\n' "$key"
+        printf 'fingerprint\t%s\n' "$(ssh-keygen -lf "$key.pub" 2>/dev/null | awk '{print $2}')"
+        printf 'verdict\talready-present\n'
+        return 0
+    fi
+    # ed25519 because a node key has no legacy peer to satisfy; -N '' because a
+    # passphrase a fleet script cannot type is a key the fleet cannot use, and
+    # the file mode is what actually protects it.
+    ssh-keygen -t ed25519 -N '' -C "imsisting-node-$(date -u +%Y%m%d)" -f "$key" >/dev/null 2>&1 || {
+        rn_error 'ssh-keygen refused'; return 1; }
+    chmod 600 "$key"; chmod 644 "$key.pub"
+    printf 'created\t%s\n' "$key"
+    printf 'public\t%s\n' "$key.pub"
+    printf 'fingerprint\t%s\n' "$(ssh-keygen -lf "$key.pub" | awk '{print $2}')"
+    printf 'verdict\tcreated\n'
+    printf 'note\tthe private key is unencrypted so that an unattended dispatch can use it; treat the file as the credential it is\n'
+    return 0
+}
+
+rn_cmd_keypush() {
+    local host="${1:-}"
+    (($#)) && shift
+    local user="" key="" port="22"
+    while (($#)); do
+        case "$1" in
+            --user) user="${2:-}"; shift 2 ;;
+            --key)  key="${2:-}"; shift 2 ;;
+            --port) port="${2:-}"; shift 2 ;;
+            *) rn_error "--key-push does not take $1"; return 2 ;;
+        esac
+    done
+    [[ -n "$host" ]] || { rn_error '--key-push needs a host'; return 2; }
+    [[ -n "$key" ]] || key="$HOME/.ssh/imsisting_node_ed25519.pub"
+    if [[ ! -r "$key" ]]; then
+        rn_error "no public key at $key"
+        rn_why 'generate one with --ssh-keygen first: pushing a key that does not exist is not a step towards anything'
+        return 1
+    fi
+    if ! command -v ssh-copy-id >/dev/null 2>&1; then
+        rn_error 'ssh-copy-id is not on PATH'
+        rn_why 'the alternative is editing the remote authorized_keys by hand, which this verb will not do blind'
+        return 1
+    fi
+    local target="$host"
+    [[ -n "$user" ]] && target="$user@$host"
+    local out rc
+    out=$(ssh-copy-id -i "$key" -p "$port" -o BatchMode=no "$target" 2>&1); rc=$?
+    printf 'target\t%s\n' "$target"
+    printf 'key\t%s\n' "$key"
+    printf 'fingerprint\t%s\n' "$(ssh-keygen -lf "$key" 2>/dev/null | awk '{print $2}')"
+    if (( rc == 0 )); then
+        printf 'verdict\tinstalled\n'
+        return 0
+    fi
+    printf 'verdict\tnot-installed\n'
+    printf 'reason\tssh-copy-id exited %d: %s\n' "$rc" "$(printf '%s' "$out" | tail -1)"
+    return 1
 }
 
 rn_cli() {
@@ -358,6 +478,9 @@ rn_cli() {
         --health|--node-health-tsv) rn_cmd_health "$@" ;;
         --dispatch)           rn_cmd_dispatch "$@" ;;
         --status-tsv|--status) rn_cmd_status "$@" ;;
+        --ping)               rn_cmd_ping "$@" ;;
+        --ssh-keygen)         rn_cmd_keygen "$@" ;;
+        --key-push|--ssh-push) rn_cmd_keypush "$@" ;;
         --selftest)           rn_selftest ;;
         --help|-h|help|--menu|--__index_probe__|'') rn_menu ;;
         *) rn_error "unknown command: $cmd"; return 2 ;;

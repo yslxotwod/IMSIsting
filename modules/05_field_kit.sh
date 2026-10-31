@@ -672,6 +672,15 @@ fk_selftest() {
 
     trap - EXIT
     rm -rf "$d"
+    # ── the eSIM path is named step by step, never asserted as available ──
+    local es
+    es=$(fk_esim_check) || true
+    chk esim-rows-differ "$(printf '%s\n' "$es" | awk -F'\t' '$1=="present"{p++} $1=="absent"{a++} END{print (p+a>=5)?"rows":"short"}')" "rows"
+    chk esim-verdict-named "$(printf '%s\n' "$es" | awk -F'\t' '$1=="verdict"{print ($2=="provisioning-path-present"||$2=="no-provisioning-path")?"named":"other"}')" "named"
+    chk esim-lpa-row "$(printf '%s\n' "$es" | awk -F'\t' '$2=="lpac"{print "named"}')" "named"
+    chk esim-sm-dp-row "$(printf '%s\n' "$es" | awk -F'\t' '$2=="sm-dp+"{print "named"}')" "named"
+    chk esim-count "$(printf '%s\n' "$es" | awk -F'\t' '$1=="found"{print ($2>=0)?"counted":"bad"}')" "counted"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -716,6 +725,53 @@ fk_cli_status_tsv() {
     printf 'port\t%s\n'     "$FK_PORT"
 }
 
+# ── can this kit provision an eSIM, or only a plastic one ──────────────
+#
+# An eSIM profile is delivered over a network to an eUICC, and every step of
+# that path is a piece of software that has to be present: a card reader, a
+# PC/SC daemon, a local profile assistant, and either an SM-DP+ you control or
+# a test profile you were given. A tool that says "eSIM supported" without
+# naming which of those exist is describing a workflow it cannot run.
+fk_esim_check() {
+    local found=0 tool path
+    for tool in lpac esim-cli euicc-tool pcsc_scan opensc-tool gpg-card; do
+        path=$(command -v "$tool" 2>/dev/null || true)
+        if [[ -n "$path" ]]; then
+            printf 'present\t%s\t%s\n' "$tool" "$path"
+            found=$((found + 1))
+        else
+            printf 'absent\t%s\tnone on PATH\n' "$tool"
+        fi
+    done
+    if pgrep -x pcscd >/dev/null 2>&1; then
+        printf 'present\tpcscd\trunning: a reader can be reached\n'
+        found=$((found + 1))
+    else
+        printf 'absent\tpcscd\tnot running: no reader is reachable, so no eUICC is either\n'
+    fi
+    if [[ -d /run/pcscd ]]; then
+        printf 'present\tpcscd-socket\t/run/pcscd exists\n'
+    else
+        printf 'absent\tpcscd-socket\t/run/pcscd is missing\n'
+    fi
+    # A test SM-DP+ is the other half: without one the only profiles available
+    # are commercial ones, and installing one is not a field test.
+    if command -v osmo-smdpp >/dev/null 2>&1 || [[ -x /usr/bin/osmo-smdpp ]]; then
+        printf 'present\tsm-dp+\tosmo-smdpp found\n'
+        found=$((found + 1))
+    else
+        printf 'absent\tsm-dp+\tno local SM-DP+; a commercial profile is not a test profile\n'
+    fi
+    printf 'found\t%d\n' "$found"
+    if (( found >= 2 )); then
+        printf 'verdict\tprovisioning-path-present\n'
+        return 0
+    fi
+    printf 'verdict\tno-provisioning-path\n'
+    printf 'reason\tnothing here can reach an eUICC: a profile needs a reader, a PC/SC daemon and an LPA, and %d of those steps exist\n' "$found"
+    return 1
+}
+
 fk_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -727,6 +783,7 @@ fk_cli_main() {
         --scenarios)     fk_scenario_frames gsm-idle >/dev/null && \
                          printf 'gsm-idle\ngsm-attach\nlte-attach\nimsi-catcher\nmixed\n' ;;
         --detect-export) fk_cmd_detect_export "$@" ;;
+        --esim-check)    fk_esim_check ;;
         --selftest)      fk_selftest ;;
         --menu)          fk_menu ;;
         *)
@@ -746,6 +803,8 @@ Usage: $0 COMMAND
                           the `finding` rows this tree writes, catalogued or
                           carried out as Sigma rules (one file per finding, with
                           a stable UUID), ECS events, or CEF lines
+  --esim-check            can this kit reach an eUICC at all: reader,
+                          PC/SC daemon, LPA, and a test SM-DP+
   --status-tsv            capability state as TSV
   --selftest              verify the codec, the scenarios and the classifier
   --menu                  interactive menu

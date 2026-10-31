@@ -1380,6 +1380,24 @@ deps_selftest() {
     chk preflight-lock     "$(printf '%s\n' "$pf" | grep -c '^radio_lock')" 1
 
     rm -rf "$d"
+    # ── the container and pip checks answer about THIS process tree ──
+    local cc pc
+    cc=$(deps_container_check)
+    chk container-verdict "$(printf '%s\n' "$cc" | awk -F'\t' '$1=="verdict"{print $2}')" \
+        "$(printf '%s\n' "$cc" | awk -F'\t' '$1=="verdict"{print $2}')"
+    chk container-runtime-named "$(printf '%s\n' "$cc" | awk -F'\t' '$1=="runtime" && $2!=""{print "named"}')" "named"
+    chk container-counts-registry "$(printf '%s\n' "$cc" | awk -F'\t' '$1=="registry_packages" && $2>0{print "counted"}')" "counted"
+    chk container-detection-stated "$(printf '%s\n' "$cc" | awk -F'\t' '$1=="detected_by" && $2!=""{print "stated"}')" "stated"
+    chk container-host-or-container "$(printf '%s\n' "$cc" | awk -F'\t' '$1=="verdict"{print ($2=="host"||$2=="container")?"known":"other"}')" "known"
+
+    pc=$(deps_pip_check) || true
+    chk pip-verdict-named "$(printf '%s\n' "$pc" | awk -F'\t' '$1=="verdict"{print ($2=="pip-satisfied"||$2=="pip-missing")?"named":"other"}')" "named"
+    chk pip-checks-three "$(printf '%s\n' "$pc" | awk -F'\t' '$1=="checked"{print $2}')" "3"
+    chk pip-interpreter-row "$(printf '%s\n' "$pc" | awk -F'\t' '$1=="interpreter" && $2!=""{print "named"}')" "named"
+    chk pip-module-rows "$(printf '%s\n' "$pc" | grep -c '^module')" "3"
+    chk pip-missing-explains "$(printf '%s\n' "$pc" | awk -F'\t' '$1=="verdict" && $2=="pip-missing"{print "explained"}' | grep -c explained || true)" \
+        "$(printf '%s\n' "$pc" | grep -c '^reason')"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1493,6 +1511,88 @@ deps_preflight() {
 # ═══════════════════════════════════════════════════════════════════
 #  CLI dispatch
 # ═══════════════════════════════════════════════════════════════════
+# ── what a container hides, and what pip actually installed ────────────
+#
+# A dependency check that reads the distro's package database answers a
+# question about the host. Inside a container that answer is about the image,
+# and a tool the image does not carry is reported missing on a machine where it
+# is installed -- or worse, present because the host's /usr is mounted. The two
+# verbs below say which of those is happening before anything is installed.
+
+deps_container_check() {
+    local runtime="none" by="nothing in this process tree says container"
+    if [[ -f /.dockerenv ]]; then
+        runtime="docker"; by="/.dockerenv exists"
+    elif [[ -f /run/.containerenv ]]; then
+        runtime="podman"; by="/run/.containerenv exists"
+    elif [[ -r /proc/1/environ ]] && tr '\0' '\n' < /proc/1/environ 2>/dev/null | grep -q '^container='; then
+        runtime="$(tr '\0' '\n' < /proc/1/environ 2>/dev/null | awk -F= '$1=="container"{print $2; exit}')"
+        by="/proc/1/environ names container=$runtime"
+    elif command -v systemd-detect-virt >/dev/null 2>&1; then
+        local v
+        v=$(systemd-detect-virt --container 2>/dev/null || true)
+        if [[ -n "$v" && "$v" != "none" ]]; then runtime="$v"; by="systemd-detect-virt --container says $v"; fi
+    elif grep -qaE 'docker|lxc|kubepods|containerd' /proc/1/cgroup 2>/dev/null; then
+        runtime="cgroup"; by="/proc/1/cgroup names a container runtime"
+    fi
+    printf 'runtime\t%s\n' "$runtime"
+    printf 'detected_by\t%s\n' "$by"
+    printf 'pid1\t%s\n' "$(ps -p 1 -o comm= 2>/dev/null || echo unknown)"
+    printf 'distro\t%s\n' "$(. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-unknown}")"
+
+    # Only the packages in the registry can be asked about, and a package the
+    # image genuinely lacks is the answer for that package -- not a fact about
+    # the host it was built on.
+    local total=0 absent=0 row
+    while IFS=$'\t' read -r name pkg state _rest; do
+        [[ -z "${name:-}" || "$name" == "tool" ]] && continue
+        [[ -z "${pkg:-}" ]] && continue
+        total=$((total + 1))
+        if [[ "$state" == "absent" ]]; then absent=$((absent + 1)); fi
+    done < <(deps_check_versions_tsv 2>/dev/null)
+    printf 'registry_packages\t%d\n' "$total"
+    printf 'absent_here\t%d\n' "$absent"
+    if [[ "$runtime" == "none" ]]; then
+        printf 'verdict\thost\n'
+    else
+        printf 'verdict\tcontainer\n'
+        printf 'note\tthe package list describes this %s image; a tool it lacks is absent from the image, not from the machine the image was built on\n' "$runtime"
+    fi
+    return 0
+}
+
+# The python side of the tree has dependencies too, and they are not distro
+# packages: a venv that shadows the system python is invisible to apt.
+deps_pip_check() {
+    local mods="numpy" missing=0 n=0
+    local extra
+    for extra in pycrate sgp4; do mods="$mods $extra"; done
+    printf 'interpreter\t%s\n' "$(command -v python3 2>/dev/null || echo none)"
+    printf 'version\t%s\n' "$(python3 -c 'import platform; print(platform.python_version())' 2>/dev/null || echo none)"
+    local m
+    for m in $mods; do
+        n=$((n + 1))
+        local ver
+        ver=$(python3 -c "import $m, sys; print(getattr($m, '__version__', 'unknown'))" 2>/dev/null)
+        if [[ -n "$ver" ]]; then
+            printf 'module\t%s\tpresent\t%s\n' "$m" "$ver"
+        else
+            printf 'module\t%s\tabsent\t-\n' "$m"
+            missing=$((missing + 1))
+        fi
+    done
+    printf 'checked\t%d\n' "$n"
+    printf 'absent\t%d\n' "$missing"
+    if (( missing == 0 )); then
+        printf 'verdict\tpip-satisfied\n'
+        return 0
+    fi
+    printf 'verdict\tpip-missing\n'
+    printf 'reason\t%d of %d optional python module(s) are not importable by %s; the verbs that need them refuse by name rather than degrading quietly\n' \
+        "$missing" "$n" "$(command -v python3 2>/dev/null || echo python3)"
+    return 1
+}
+
 deps_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -1508,6 +1608,8 @@ deps_cli_main() {
         --preflight)        deps_preflight ;;
         --report)           deps_write_report ;;
         --privileged-install) deps_privileged_install "$@" ;;
+        --container-check)  deps_container_check ;;
+        --pip-check)        deps_pip_check ;;
         --selftest)         deps_selftest ;;
         --menu)             deps_menu ;;
         help|--help|-h)
@@ -1526,6 +1628,10 @@ Usage: $0 COMMAND
   --install-all [--yes]        install every registered package
   --install-pip DIST...        pip-install protocol libraries
   --distro-info                distro, package manager, counts
+  --container-check            which container this is, and what its
+                               package list actually describes
+  --pip-check                  are the python modules the tools import
+                               installable and importable, by name
   --preflight                  radio, gates and capture state in one page
   --report                     write loot/deps/deps_report.tsv
   --selftest                   verify the registry and parsers, no radio

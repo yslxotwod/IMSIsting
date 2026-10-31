@@ -22076,7 +22076,9 @@ static ModuleSubmenuEntry deps_entries[] = {
       deps_build_packages },
     { "System",
       "preferences-system-symbolic",
-      "--distro-info:Show the distribution" },
+      "--distro-info:Show the distribution"
+      "|--container-check:Is this a container"
+      "|--pip-check:Are the python modules importable" },
 };
 /* Radio Bench: an operational workspace for selecting, tuning and recording. */
 typedef struct {
@@ -22463,6 +22465,62 @@ radio_build_diagnostics(AppState *state, const char *module_id,
     return outer;
 }
 
+/* Calibration is the page that keeps every other page honest: a frequency
+ * read from a mis-clocked radio is wrong by more than the thing it measured,
+ * and past its compression point a receiver's power reading is its own
+ * distortion. Both verbs state the resolution they achieved. */
+static GtkWidget *
+radio_build_calibration(AppState *state, const char *module_id,
+                        GtkWidget *status, GtkTextBuffer *out)
+{
+    GtkWidget *body;
+    GtkWidget *outer = radio_view_shell("CALIBRATION",
+        "Two errors that hide inside every other measurement: the sample clock "
+        "and the amplifier.", &body);
+    GtkWidget *clk_body, *gain_body, *ref_body;
+    GtkWidget *clk = verb_card("THE CLOCK", &clk_body);
+    GtkWidget *gain = verb_card("THE AMPLIFIER", &gain_body);
+    GtkWidget *ref = verb_card("THE REFERENCE", &ref_body);
+    GtkWidget *res;
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(clk_body), mod_arg_row(state, module_id, status,
+        "Measure the error", "--calibrate", "1900 capture.cf32",
+        "The carrier's frequency in MHz, then a capture of it. Add --rate for "
+        "the sample rate, --window for the search width and --fmt for cf32, "
+        "ci16 or cu8. The answer is an offset in hertz, a figure in parts per "
+        "million, and the resolution it was measured to."));
+    gtk_box_append(GTK_BOX(clk_body), res);
+    gtk_box_append(GTK_BOX(body), clk);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(gain_body), mod_arg_row(state, module_id, status,
+        "Find the knee", "--gain-knee", "gain-sweep.csv",
+        "A CSV of gain_db,out_db from a sweep. The answer is the gain at which "
+        "the output falls more than a decibel below the straight line, because "
+        "past that point the reading is the amplifier and not the signal."));
+    gtk_box_append(GTK_BOX(gain_body), res);
+    gtk_box_append(GTK_BOX(body), gain);
+
+    res = result_rect_new(state, NULL);
+    mod_card_begin(res);
+    gtk_box_append(GTK_BOX(ref_body), mod_arg_choices(state, module_id, status,
+        "Look for a standard", "",
+        "A clock can only be calibrated against something more accurate than "
+        "itself. With no reference present the ppm figure is measured against "
+        "the network rather than traced to one, and the page says which.",
+        (const char *[]) { "--ref-check" },
+        (const char *[]) { "Check the machine" }, 1));
+    gtk_box_append(GTK_BOX(ref_body), res);
+    gtk_box_append(GTK_BOX(body), ref);
+    mod_card_end();
+
+    (void) out;
+    return outer;
+}
+
 static ModuleSubmenuEntry radio_entries[] = {
     { "Overview",
       "dialog-information-symbolic",
@@ -22476,6 +22534,10 @@ static ModuleSubmenuEntry radio_entries[] = {
       "channel-secure-symbolic",
       NULL,
       radio_build_ownership },
+    { "Calibration",
+      "system-run-symbolic",
+      NULL,
+      radio_build_calibration },
     { "Diagnostics",
       "utilities-terminal-symbolic",
       NULL,
@@ -23744,6 +23806,12 @@ static ModuleSubmenuEntry fkit_entries[] = {
     { "Emitter",  "media-record-symbolic",       NULL, fkit_build_emitter },
     { "Guards",   "security-high-symbolic",      NULL, fkit_build_guards },
     { "Export",   "document-send-symbolic",      NULL, fkit_build_export },
+    /* An eSIM profile is delivered over a network to an eUICC, and every step
+       of that path is software that has to exist: reader, PC/SC daemon, local
+       profile assistant, and either an SM-DP+ you control or a test profile you
+       were given. The card names which of those are present. */
+    { "eSIM path", "sim-card-symbolic",
+      "#THE CHAIN|--esim-check:Which steps exist here" },
 };
 /* 06_gsm_air — the 2G air interface, which is still in the clear.
  *
@@ -37472,7 +37540,8 @@ static ModuleSubmenuEntry rnode_entries[] = {
       "#FLEET|--list-tsv|--status-tsv|--health|--stream-status-tsv"
       "|#MEASURE IT|--bulk-probe|--presets|~--probe|~--roles|~--set-roles"
       "|#A NODE|~--add|~--remove|~--allow|--remove-offline"
-      "|#MOVE DATA|~--stream|~--stream-stop|~--collect|~--dispatch|--caps", NULL },
+      "|#MOVE DATA|~--stream|~--stream-stop|~--collect|~--dispatch|--caps"
+      "|#REACH IT|~--ping|~--ssh-keygen|~--key-push", NULL },
 };
 static ModuleSubmenuEntry capi_entries[] = {
     { "Exposure", "document-open-symbolic", NULL, capi_build_surface },

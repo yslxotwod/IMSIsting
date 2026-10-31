@@ -1481,6 +1481,70 @@ Found device 1
     chk sanitize-nl  "$(radio_sanitize $'a\nb')" "a b"
     chk sanitize-cr  "$(radio_sanitize $'a\rb')" "a b"
 
+    # ── the estimator: a known clock error, recovered from a synthesised tone ──
+    if radio_calib_available; then
+        local iq="$d/cal.cf32"
+        python3 "$(RADIO_CALIB_PY)" synth "$iq" cf32 2048000 1900000000 12.5 \
+            --samples 65536 --snr-db 30 >/dev/null 2>&1
+        local out
+        out=$(radio_calibrate 1900 "$iq")
+        chk calib-verdict "$(fld "$out" verdict)" "measured"
+        chk calib-ppm-near "$(awk -v p="$(fld "$out" ppm)" 'BEGIN{d=p-12.5; if(d<0)d=-d; print (d<0.1)?"yes":"no"}')" "yes"
+        chk calib-offset-hz "$(awk -v o="$(fld "$out" offset_hz)" 'BEGIN{d=o-23750; if(d<0)d=-d; print (d<200)?"yes":"no"}')" "yes"
+        chk calib-resolution-stated "$(fld "$out" resolution_hz)" "15.625000"
+
+        # A capture with no carrier in it: the refusal has to be named, because
+        # a peak found in noise is a number with nothing behind it.
+        python3 "$(RADIO_CALIB_PY)" synth "$d/noise.cf32" cf32 2048000 1900000000 0 \
+            --samples 65536 --noise-only --snr-db 0 >/dev/null 2>&1
+        chk calib-noise-refused "$(radio_calibrate 1900 "$d/noise.cf32" >/dev/null 2>&1; echo $?)" "1"
+        chk calib-noise-reason "$(radio_calibrate 1900 "$d/noise.cf32" 2>/dev/null | grep -c 'no-peak-above-noise')" "1"
+
+        # A capture too short to resolve anything.
+        : > "$d/tiny.ci16"
+        head -c 2048 /dev/zero >> "$d/tiny.ci16"
+        chk calib-short-refused "$(radio_calibrate 1900 "$d/tiny.ci16" --fmt ci16 >/dev/null 2>&1; echo $?)" "1"
+        chk calib-short-reason "$(radio_calibrate 1900 "$d/tiny.ci16" --fmt ci16 2>/dev/null | grep -c too-few-samples)" "1"
+
+        # A carrier 40 ppm out is outside a 20 kHz window: the answer is that
+        # the window could not hold it, never a number from the window edge.
+        python3 "$(RADIO_CALIB_PY)" synth "$d/far.cf32" cf32 2048000 1900000000 40 \
+            --samples 65536 --snr-db 40 >/dev/null 2>&1
+        chk calib-edge-refused "$(radio_calibrate 1900 "$d/far.cf32" --window 20000 >/dev/null 2>&1; echo $?)" "1"
+
+        chk calib-needs-carrier "$(radio_calibrate '' "$iq" >/dev/null 2>&1; echo $?)" "2"
+        chk calib-rejects-flag "$(radio_calibrate 1900 "$iq" --nonsense >/dev/null 2>&1; echo $?)" "2"
+    else
+        chk calib-skipped "$(radio_calibrate 1900 /nonexistent 2>/dev/null | grep -c no-estimator)" "1"
+    fi
+
+    # ── the compression point: the gain at which the output stops tracking ──
+    # 30 dB is 3 dB below the straight line, so the knee is unambiguous; a row
+    # exactly ON the threshold would test the comparison, not the instrument.
+    printf '# gain_db,out_db\n0,-60\n10,-50\n20,-40\n30,-33\n40,-42\n' > "$d/knee.csv"
+    local kn
+    kn=$(radio_gain_knee "$d/knee.csv")
+    chk knee-verdict "$(fld "$kn" verdict)" "measured"
+    chk knee-gain "$(fld "$kn" compression_gain_db)" "30.00"
+    chk knee-slope "$(fld "$kn" linear_slope)" "1.0000"
+    printf '# gain_db,out_db\n0,-60\n10,-50\n20,-40\n' > "$d/linear.csv"
+    chk knee-never "$(radio_gain_knee "$d/linear.csv" >/dev/null 2>&1; echo $?)" "1"
+    chk knee-never-why "$(radio_gain_knee "$d/linear.csv" 2>/dev/null | grep -c never-compresses)" "1"
+    chk knee-noargs "$(radio_gain_knee >/dev/null 2>&1; echo $?)" "2"
+
+    # ── the reference check names what is absent rather than failing ──
+    local rc
+    rc=$(radio_ref_check 2>/dev/null) || true
+    chk ref-verdict "$(printf '%s\n' "$rc" | awk -F'\t' '$1=="verdict"{print $2}')" \
+        "$(printf '%s\n' "$rc" | awk -F'\t' '$1=="verdict"{print $2}')"
+    # How many references exist is a fact about this machine (a VM has no PPS,
+    # a laptop with a u-blox may), so the assertion is about the shape of the
+    # answer: the GPSDO row is always absent, and every absent row says why.
+    chk ref-names-gap "$(printf '%s\n' "$rc" | awk -F'\t' '$1=="absent" && $2=="gpsdo-serial"{print "named"}')" "named"
+    chk ref-absent-have-detail "$(printf '%s\n' "$rc" | awk -F'\t' '$1=="absent" && $4!=""{n++} END{print n+0}')" \
+        "$(printf '%s\n' "$rc" | grep -c '^absent')"
+    chk ref-pps-row "$(printf '%s\n' "$rc" | awk -F'\t' '$1=="absent" && $2=="pps"{print "named"}')" "named"
+
     rm -rf "$d"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -1509,6 +1573,9 @@ radio_menu() {
   [7]  set sample rate
   [8]  show vendor control commands for selection
   [9]  record raw IQ
+  [10] calibrate the clock against a known carrier
+  [11] compression point from a gain sweep
+  [12] is there a frequency reference here?
   [0]  back
 
 M
@@ -1537,10 +1604,123 @@ M
                read -rp "  press enter " _ ;;
             9) read -rp "  seconds> " s
                radio_record "$s"; read -rp "  press enter " _ ;;
+            10) read -rp "  carrier MHz> " cf; read -rp "  capture file> " fp
+                radio_calibrate "$cf" "$fp"; read -rp "  press enter " _ ;;
+            11) read -rp "  gain/out CSV> " gp; radio_gain_knee "$gp"; read -rp "  enter " _ ;;
+            12) radio_ref_check; read -rp "  press enter " _ ;;
             0) return 0 ;;
             *) warn "invalid"; sleep 1 ;;
         esac
     done
+}
+
+# ── calibration: the error the radio adds to every number above ────────
+#
+# An SDR's sample clock is a crystal, and every frequency the radio is tuned to
+# inherits its error. One part per million on a 1.9 GHz carrier is 1.9 kHz --
+# wider than an LTE subcarrier -- so a capture that "looks wrong" is often
+# tuned wrong rather than decoded wrong. These verbs measure that error instead
+# of assuming it, and each one states the resolution it achieved, because a
+# number without its own error bar is a guess.
+
+RADIO_CALIB_PY() { printf '%s' "${IMSISTING_ROOT}/tools/sdr_calib.py"; }
+
+# The estimator needs numpy. Saying so by name is the difference between a
+# missing dependency and a broken measurement.
+radio_calib_available() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 -c 'import numpy' 2>/dev/null || return 1
+    [[ -r "$(RADIO_CALIB_PY)" ]] || return 1
+    return 0
+}
+
+radio_calibrate() {  # <carrier_mhz> <file> [--rate sps] [--window hz] [--fmt f]
+    local mhz="${1:-}" file="${2:-}"
+    (($# >= 2)) && shift 2
+    local rate="2048000" window="50000" fmt="cf32"
+    while (($#)); do
+        case "$1" in
+            --rate)   rate="${2:-}"; shift 2 ;;
+            --window) window="${2:-}"; shift 2 ;;
+            --fmt)    fmt="${2:-}"; shift 2 ;;
+            --help|-h) printf 'usage: --calibrate <carrier_mhz> <file> [--rate sps] [--window hz] [--fmt cf32|ci16|cu8]\n'; return 0 ;;
+            *) printf 'ERROR\t--calibrate does not take %s\n' "$(radio_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$mhz" && -n "$file" ]] || {
+        printf 'ERROR\t--calibrate needs a carrier in MHz and a capture file\n' >&2
+        printf 'WHY\tthe clock error is a ratio: without the carrier there is nothing to divide by, and without the capture there is nothing to measure\n' >&2
+        return 2; }
+    [[ "$mhz" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        printf 'ERROR\tcarrier must be MHz as a number, not %s\n' "$(radio_sanitize "$mhz")" >&2; return 2; }
+    if ! radio_calib_available; then
+        printf 'MISSING\tpython3 with numpy, or %s\n' "$(RADIO_CALIB_PY)" >&2
+        printf 'verdict\tunobserved\n'
+        printf 'reason\tno-estimator: the frequency estimate needs numpy, and a fallback that guesses would be worse than no answer\n'
+        return 1
+    fi
+    local hz
+    hz=$(awk -v m="$mhz" 'BEGIN{printf "%.6f", m*1000000}')
+    printf 'carrier_mhz\t%s\n' "$mhz"
+    python3 "$(RADIO_CALIB_PY)" tone "$file" "$fmt" "$rate" "$hz" --window-hz "$window"
+}
+
+radio_gain_knee() {  # <csv> [--ref-db db]
+    local csv="${1:-}"
+    (($# >= 1)) && shift
+    local ref="1.0"
+    while (($#)); do
+        case "$1" in
+            --ref-db) ref="${2:-}"; shift 2 ;;
+            --help|-h) printf 'usage: --gain-knee <gain_db,out_db csv> [--ref-db db]\n'; return 0 ;;
+            *) printf 'ERROR\t--gain-knee does not take %s\n' "$(radio_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$csv" ]] || { printf 'ERROR\t--gain-knee needs a CSV of gain_db,out_db\n' >&2; return 2; }
+    if ! radio_calib_available; then
+        printf 'verdict\tunobserved\nreason\tno-estimator: numpy or %s is missing\n' "$(RADIO_CALIB_PY)"
+        return 1
+    fi
+    python3 "$(RADIO_CALIB_PY)" gain "$csv" --ref-db "$ref"
+}
+
+# Is there anything in this machine that could serve as a frequency reference?
+# A clock can only be calibrated against something more accurate than itself,
+# so the honest answer is a list of what exists and, when nothing does, that
+# the ppm figure is a measurement against the network rather than a traceable
+# one.
+radio_ref_check() {
+    local found=0
+    if command -v gpspipe >/dev/null 2>&1 && pgrep -x gpsd >/dev/null 2>&1; then
+        printf 'reference\tgpsd\tdetail\t%s\n' \
+            "$(gpspipe -w -n 3 2>/dev/null | grep -c '"mode":[23]') fixes seen in 3 sentences"
+        found=1
+    else
+        printf 'absent\tgpsd\tdetail\tno gpsd speaking NMEA, so no GPS-disciplined clock to compare against\n'
+    fi
+    if [[ -e /dev/pps0 ]]; then
+        printf 'reference\tpps\tdetail\t/dev/pps0 exists: a pulse-per-second this radio can be steered by\n'
+        found=1
+    else
+        printf 'absent\tpps\tdetail\tno /dev/pps0: no 1PPS to measure the sample clock against\n'
+    fi
+    if [[ -d /sys/class/pps ]]; then
+        printf 'reference\tpps-sysfs\tdetail\t%s PPS device(s) in /sys/class/pps\n' "$(ls -1 /sys/class/pps 2>/dev/null | wc -l)"
+        found=1
+    else
+        printf 'absent\tpps-sysfs\tdetail\tno /sys/class/pps\n'
+    fi
+    # A GPSDO on a serial port is the other common arrangement, and there is no
+    # way to know which port without asking, so the check states the gap rather
+    # than scanning every device.
+    printf 'absent\tgpsdo-serial\tdetail\tnot probed: a GPSDO can sit on any serial port, and guessing one would be a fabricated answer\n'
+    if (( found )); then
+        printf 'verdict\treference-present\n'
+        return 0
+    fi
+    printf 'verdict\tno-reference\n'
+    printf 'reason\tnothing here is more accurate than the radio itself, so --calibrate measures against the network (a known carrier) rather than against a traceable standard\n'
+    return 1
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1565,6 +1745,9 @@ radio_cli_main() {
         --lock-status-tsv) radio_lock_status_tsv ;;
         --lock-recover) radio_lock_recover ;;
         --processes-tsv) radio_processes_tsv ;;
+        --calibrate)    radio_calibrate "$@" ;;
+        --gain-knee)    radio_gain_knee "$@" ;;
+        --ref-check)    radio_ref_check ;;
         --selftest)     radio_selftest ;;
         --menu)         radio_menu ;;
         *)
@@ -1587,7 +1770,14 @@ Usage: $0 COMMAND
   --lock-status-tsv          owner, PID, device and stale/live state
   --lock-recover             remove a stale claim; refuses a live owner
   --processes-tsv            vendor processes that may hold an SDR open
-  --selftest                 verify parsers and band tables, no radio needed
+  --calibrate <carrier_mhz> <file> [--rate sps] [--window hz] [--fmt fmt]
+                             the radio's clock error, recovered from a carrier
+                             of known frequency, with its own resolution stated
+  --gain-knee <gain_db,out_db csv> [--ref-db db]
+                             the 1 dB compression point: above it a power
+                             reading is the amplifier, not the signal
+  --ref-check                is anything here more accurate than the radio
+  --selftest                 verify parsers, band tables and the estimator, no radio needed
   --menu                     interactive menu
 
 A receive-only device (rtl-sdr) is flagged on every row. Verbs that need
