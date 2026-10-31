@@ -1,2 +1,0 @@
-#!/usr/bin/env bash
-exec "$(cd -P "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)/imsisting.sh" --gui "$@"
