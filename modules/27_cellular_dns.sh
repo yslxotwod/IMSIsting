@@ -1100,6 +1100,625 @@ cdns_cmd_build_response() {
 }
 
 cdns_cmd_resolver_discovery() { cdns_resolver_discovery "${1:-}"; }
+# ── DNSTap and DoH: the taps that see where a cellular query really goes ─
+#
+# Two paths a UE's DNS takes that a port-based reader cannot see:
+#
+#   * DNSTap: the resolver itself publishes every query and answer it handled,
+#     as a Frame Streams stream of protobuf messages (dnstap.proto).
+#   * DoH (RFC 8484): the DNS message is the body of an HTTPS POST with
+#     content-type application/dns-message, so nothing on the wire looks like
+#     DNS at all.
+#
+# What is claimed and what is not. The Frame Streams framing (a 4-octet
+# big-endian frame length, a zero length for end of stream, a control frame that
+# names the content type) and the protobuf wire format (tag = field << 3 |
+# wire type; 0 varint, 1 fixed64, 2 length-delimited, 5 fixed32) are decoded from
+# their published definitions. The dnstap.proto field NUMBERS are not: there is
+# no copy of the schema on this machine to cite and no fixture to check one
+# against, so no leaf is ever reported under a field name. A leaf is reported by
+# what it is: octets that parse as a DNS message are the DNS message, a 4- or
+# 16-octet leaf is an address, printable octets are text. Every row that rests on
+# that reading says "inferred", and the field-name mapping is printed as
+# unobserved with the reason. Grey is an answer here, not a clean bill.
+
+cdns_tap_tsv() { printf '%s/tap.tsv' "$CDNS_DIR"; }
+
+cdns_tap_store() {  # <action> <frame> <kind> <qname> <qtype> <qr> <rcode> <addr> <verdict> <note>
+    local f; f=$(cdns_tap_tsv)
+    mkdir -p "$(dirname "$f")" 2>/dev/null
+    [[ -s "$f" ]] || printf 'ts\taction\tframe\tkind\tqname\tqtype\tqr\trcode\taddr\tverdict\tnote\n' > "$f" 2>/dev/null
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" \
+        "$(cdns_sanitize "${1:-?}")" "$(cdns_sanitize "${2:-unobserved}")" \
+        "$(cdns_sanitize "${3:-unobserved}")" "$(cdns_sanitize "${4:-unobserved}")" \
+        "$(cdns_sanitize "${5:-unobserved}")" "$(cdns_sanitize "${6:-unobserved}")" \
+        "$(cdns_sanitize "${7:-unobserved}")" "$(cdns_sanitize "${8:-unobserved}")" \
+        "$(cdns_sanitize "${9:-unobserved}")" "$(cdns_sanitize "${10:-}")" >> "$f" 2>/dev/null
+}
+
+# Printable rendering of octets: anything outside 0x20-0x7E becomes a dot, so a
+# row always stays one line of ASCII (a tab or a newline out of a stream would
+# split the TSV).
+cdns_hex_text() {
+    local h; h=$(cdns_nfc "${1:-}")
+    local esc="" i b
+    for (( i = 0; i + 1 < ${#h}; i += 2 )); do
+        b=$(( 16#${h:$i:2} ))
+        if (( b >= 32 && b <= 126 && b != 92 && b != 37 )); then esc+=$(printf '\\x%02x' "$b")
+        else esc+='.'; fi
+    done
+    printf '%b' "$esc"
+}
+
+# An input argument is inline hex, or a path to a file of hex, or a path to the
+# raw stream itself (a resolver's tap file is binary). CDNS_INPUT_SRC names what
+# was read, so a store row can say where a row came from.
+CDNS_INPUT_SRC=""
+cdns_load_input() {  # <arg> -> hex on stdout
+    local a="${1:-}"
+    CDNS_INPUT_SRC=""
+    [[ -n "$a" ]] || { printf 'ERROR\tan input is required: hex octets, or a file holding hex or a raw stream\n' >&2; return 2; }
+    if [[ -r "$a" && ! -d "$a" ]]; then
+        CDNS_INPUT_SRC="$a"
+        local stray
+        stray=$(tr -d ' \t\r\n:' < "$a" 2>/dev/null | tr -d '0123456789abcdefABCDEF' | head -c 1)
+        if [[ -n "$stray" ]]; then
+            od -An -v -tx1 "$a" 2>/dev/null | tr -d ' \n' | tr 'a-f' 'A-F'
+        else
+            tr -d ' \t\r\n:' < "$a" 2>/dev/null | tr 'a-f' 'A-F'
+        fi
+    else
+        CDNS_INPUT_SRC="inline-hex"
+        [[ -e "$a" ]] && { printf 'ERROR\tcannot read %s\n' "$(cdns_sanitize "$a")" >&2; return 1; }
+        cdns_nfc "$a"
+    fi
+}
+
+# ── Frame Streams ───────────────────────────────────────────────────────
+# A stream is a 4-octet identifier followed by frames; each frame is a 4-octet
+# big-endian length and that many octets of payload, and a zero length means end
+# of stream. A payload that starts with the control field type 0x00000001 is a
+# control frame: the field type, a 4-octet length, then the content type as text
+# ("protobuf:dnstap.Dnstap"). Everything else is a data frame: one dnstap
+# protobuf message.
+#
+# The identifier is reported, never named: this build has no local copy of the
+# Frame Streams specification, so pinning a magic constant here would be a
+# constant with nothing behind it. --no-prologue reads a stream that starts at
+# its first frame length instead.
+cdns_fs_frames() {  # <hex> <first-frame-offset-octets> -> index<TAB>kind<TAB>octets<TAB>payload
+    local hex; hex=$(cdns_nfc "${1:-}")
+    local off="${2:-4}" idx=0 len payload kind
+    cdns_is_hex "$hex" || { printf 'ERROR\tthe stream is not hex octets\n' >&2; return 1; }
+    (( ${#hex} >= 8 )) || { printf 'ERROR\ta Frame Streams stream is at least 8 octets: a 4-octet identifier and a frame length\n' >&2; return 1; }
+    while (( (off + 4) * 2 <= ${#hex} )); do
+        len=$(( 16#${hex:$((off * 2)):8} ))
+        off=$(( off + 4 ))
+        if (( len == 0 )); then printf '%s\tfin\t0\t\n' "$idx"; return 0; fi
+        (( (off + len) * 2 <= ${#hex} )) || {
+            printf 'ERROR\tframe %s promises %s octets and the stream holds %s after its length\n' \
+                "$idx" "$len" "$(( ${#hex} / 2 - off ))" >&2; return 1; }
+        payload="${hex:$((off * 2)):$((len * 2))}"
+        kind=data
+        # A data frame whose protobuf happened to begin 00 00 00 01 would be read
+        # as a control frame; the caller checks that the control content type is
+        # printable text, which is what tells the two apart.
+        (( len >= 8 )) && [[ "${payload:0:8}" == "00000001" ]] && kind=control
+        printf '%s\t%s\t%s\t%s\n' "$idx" "$kind" "$len" "$payload"
+        off=$(( off + len )); idx=$(( idx + 1 ))
+    done
+    return 0
+}
+
+# ── protobuf wire format ────────────────────────────────────────────────
+# protobuf encoding: a message is a sequence of tag/value pairs, tag =
+# (field_number << 3) | wire_type. Varints are little-endian base-128 with the
+# continuation bit high. Wire types 3 and 4 (groups) are deprecated and refused
+# rather than guessed at, and a varint longer than 8 octets is refused rather
+# than overflowing a 64-bit shell integer.
+CDNS_PB_VAL=0
+CDNS_PB_NEXT=0
+cdns_pb_varint() {  # <hex> <start-octet> -> CDNS_PB_VAL, CDNS_PB_NEXT
+    local hex="$1" off="$2" val=0 shift=0 b i=0
+    CDNS_PB_VAL=0; CDNS_PB_NEXT=0
+    while :; do
+        (( (off + 1) * 2 <= ${#hex} )) || { printf 'ERROR\tprotobuf: varint runs past the end of the message\n' >&2; return 1; }
+        b=$(( 16#${hex:$((off * 2)):2} ))
+        (( shift <= 56 )) || { printf 'ERROR\tprotobuf: varint longer than 8 octets, which a shell integer cannot hold\n' >&2; return 1; }
+        val=$(( val | ((b & 0x7F) << shift) ))
+        off=$(( off + 1 )); i=$(( i + 1 ))
+        (( b & 0x80 )) || break
+        (( i < 9 )) || { printf 'ERROR\tprotobuf: varint longer than 9 octets\n' >&2; return 1; }
+        shift=$(( shift + 7 ))
+    done
+    CDNS_PB_VAL=$val; CDNS_PB_NEXT=$off
+    return 0
+}
+
+# Does this length-delimited payload walk cleanly as a protobuf message?
+cdns_pb_is_message() { cdns_pb_check "${1:-}" 0; }
+cdns_pb_check() {  # <hex> <depth>
+    local hex="${1:-}" depth="${2:-0}"
+    cdns_is_hex "$hex" && (( ${#hex} >= 2 )) || return 1
+    (( depth <= 4 )) || return 1
+    local off=0 key wt field len n=0
+    while (( off < ${#hex} / 2 )); do
+        cdns_pb_varint "$hex" "$off" 2>/dev/null || return 1
+        key=$CDNS_PB_VAL; off=$CDNS_PB_NEXT
+        wt=$(( key & 7 )); field=$(( key >> 3 ))
+        (( field >= 1 && field <= 536870911 )) || return 1
+        n=$(( n + 1 ))
+        case "$wt" in
+            0) cdns_pb_varint "$hex" "$off" 2>/dev/null || return 1; off=$CDNS_PB_NEXT ;;
+            2) cdns_pb_varint "$hex" "$off" 2>/dev/null || return 1
+               len=$CDNS_PB_VAL; off=$CDNS_PB_NEXT
+               (( len == 0 || (off + len) <= ${#hex} / 2 )) || return 1
+               off=$(( off + len )) ;;
+            1) (( (off + 8) <= ${#hex} / 2 )) || return 1; off=$(( off + 8 )) ;;
+            5) (( (off + 4) <= ${#hex} / 2 )) || return 1; off=$(( off + 4 )) ;;
+            *) return 1 ;;
+        esac
+    done
+    (( n >= 1 ))
+}
+
+# Emit one row per field: pb.<path><field><TAB><wire type> <value>. A
+# length-delimited field that itself walks as a message is descended into as
+# well, under a path of its own.
+cdns_pb_print() {  # <hex> <path> <depth>
+    local hex; hex=$(cdns_nfc "${1:-}")
+    local path="${2:-}" depth="${3:-0}"
+    cdns_is_hex "$hex" || { printf 'ERROR\tprotobuf: not hex octets\n' >&2; return 1; }
+    (( depth <= 4 )) || { printf 'pb.%s\tunobserved: nested deeper than 4 levels\n' "$path"; return 0; }
+    local off=0 key wt field len payload
+    while (( off < ${#hex} / 2 )); do
+        cdns_pb_varint "$hex" "$off" || return 1
+        key=$CDNS_PB_VAL; off=$CDNS_PB_NEXT
+        wt=$(( key & 7 )); field=$(( key >> 3 ))
+        (( field >= 1 )) || { printf 'ERROR\tprotobuf: field number 0 is not legal\n' >&2; return 1; }
+        case "$wt" in
+            0)
+                cdns_pb_varint "$hex" "$off" || return 1
+                printf 'pb.%s%s\tvarint %s\n' "$path" "$field" "$CDNS_PB_VAL"
+                off=$CDNS_PB_NEXT ;;
+            1)
+                (( (off + 8) <= ${#hex} / 2 )) || { printf 'ERROR\tprotobuf: fixed64 field %s is truncated\n' "$field" >&2; return 1; }
+                printf 'pb.%s%s\tfixed64 %s\n' "$path" "$field" "${hex:$((off * 2)):16}"
+                off=$(( off + 8 )) ;;
+            5)
+                (( (off + 4) <= ${#hex} / 2 )) || { printf 'ERROR\tprotobuf: fixed32 field %s is truncated\n' "$field" >&2; return 1; }
+                printf 'pb.%s%s\tfixed32 %s\n' "$path" "$field" "${hex:$((off * 2)):8}"
+                off=$(( off + 4 )) ;;
+            2)
+                cdns_pb_varint "$hex" "$off" || return 1
+                len=$CDNS_PB_VAL; off=$CDNS_PB_NEXT
+                (( len <= ${#hex} / 2 - off )) || {
+                    printf 'ERROR\tprotobuf: field %s promises %s octets and %s remain\n' \
+                        "$field" "$len" "$(( ${#hex} / 2 - off ))" >&2; return 1; }
+                payload="${hex:$((off * 2)):$((len * 2))}"
+                printf 'pb.%s%s\tbytes %s octets %s\n' "$path" "$field" "$len" "$payload"
+                if (( depth < 4 )) && (( len >= 2 )) && cdns_pb_is_message "$payload"; then
+                    cdns_pb_print "$payload" "$path$field." $(( depth + 1 )) || return 1
+                fi
+                off=$(( off + len )) ;;
+            *)
+                printf 'ERROR\tprotobuf: wire type %s is a deprecated group and is not decoded (field %s)\n' "$wt" "$field" >&2
+                return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# Octets that parse as a DNS message, as cdns_parse reads them. Used to find the
+# DNS message inside a protobuf without claiming which field number carries it.
+cdns_tap_dns() {  # <hex> -> cdns_parse rows, rc 1 when it is not a DNS message
+    local hex; hex=$(cdns_nfc "${1:-}")
+    cdns_is_hex "$hex" && (( ${#hex} >= 24 )) || return 1
+    local out; out=$(cdns_parse "$hex" 2>/dev/null) || return 1
+    local qd an
+    qd=$(cdns_fld "$out" qdcount); an=$(cdns_fld "$out" ancount)
+    [[ "$qd" =~ ^[0-9]+$ && "$an" =~ ^[0-9]+$ ]] || return 1
+    (( qd >= 1 && qd <= 4 )) || return 1
+    # A DNS question name has to decode, which is what separates a DNS message
+    # from arbitrary octets that happen to be long enough.
+    [[ -n "$(cdns_fld "$out" question.0.name)" ]] || return 1
+    printf '%s\n' "$out"
+}
+
+# ── the DNSTap verb ─────────────────────────────────────────────────────
+cdns_dnstap_report() {  # <hex> <source> <prologue octets>
+    local hex="$1" src="$2" pr="${3:-4}"
+    local octets=$(( ${#hex} / 2 ))
+    printf 'input\t%s\n' "$(cdns_sanitize "$src")"
+    printf 'octets\t%s\n' "$octets"
+    if (( pr > 0 )); then
+        printf 'stream_prefix\t%s\n' "${hex:0:$(( pr * 2 ))}"
+        printf 'stream_prefix_note\t%s\n' \
+            "the leading octets are reported as they are, not named: this build has no local copy of the Frame Streams specification to cite a magic constant from"
+    else
+        printf 'stream_prefix\t%s\n' "none (--no-prologue: the stream starts at its first frame length)"
+    fi
+    local frames; frames=$(cdns_fs_frames "$hex" "$pr") || return 1
+    local line idx kind len payload nframes=0 ndns=0
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        cdns_split "$line"
+        idx="${CDNS_F[0]:-0}"; kind="${CDNS_F[1]:-unknown}"; len="${CDNS_F[2]:-0}"; payload="${CDNS_F[3]:-}"
+        nframes=$(( nframes + 1 ))
+        printf 'frame.%s.kind\t%s\n' "$idx" "$kind"
+        case "$kind" in
+            fin)
+                printf 'frame.%s\tend of stream after %s frame(s)\n' "$idx" "$idx" ;;
+            control)
+                local ftype="${payload:0:8}" vlen=0 vtxt=""
+                [[ -n "$payload" ]] && vlen=$(( 16#${payload:8:8} ))
+                if [[ "$ftype" == "00000001" ]] && (( (8 + vlen) * 2 <= ${#payload} )); then
+                    vtxt=$(cdns_hex_text "${payload:16:$(( vlen * 2 ))}")
+                    printf 'frame.%s.control_field\tcontent-type\n' "$idx"
+                    printf 'frame.%s.content_type\t%s\n' "$idx" "$(cdns_sanitize "$vtxt")"
+                else
+                    printf 'frame.%s.unobserved\t%s\n' "$idx" \
+                        "a control frame whose first field is ${ftype:-none}, not the content-type field this build recognises"
+                fi ;;
+            data)
+                if ! cdns_pb_is_message "$payload"; then
+                    printf 'frame.%s.unobserved\t%s\n' "$idx" \
+                        "the data frame does not walk as a protobuf message, so nothing in it is claimed"
+                    continue
+                fi
+                local rows r key val fqr="" lhex
+                local -a addrs=()
+                rows=$(cdns_pb_print "$payload" "" 0) || {
+                    printf 'frame.%s.unobserved\t%s\n' "$idx" "the protobuf walk refused the frame; its error is above"
+                    continue; }
+                printf 'frame.%s.protobuf\t%s field row(s)\n' "$idx" "$(printf '%s\n' "$rows" | wc -l)"
+                printf '%s\n' "$rows" | sed 's/^/\t/'
+                while IFS= read -r r; do
+                    [[ -n "$r" ]] || continue
+                    key="${r%%$'\t'*}"; val="${r#*$'\t'}"
+                    case "$val" in
+                        bytes*)
+                            lhex="${val##* }"
+                            local dnsout
+                            if dnsout=$(cdns_tap_dns "$lhex"); then
+                                ndns=$(( ndns + 1 ))
+                                fqr=$(cdns_fld "$dnsout" qr)
+                                printf 'frame.%s.dns.name\t%s\n' "$idx" \
+                                    "$(cdns_sanitize "$(cdns_fld "$dnsout" question.0.name)")"
+                                printf 'frame.%s.dns.qtype\t%s\n' "$idx" "$(cdns_fld "$dnsout" question.0.type_name)"
+                                printf 'frame.%s.dns.qr\t%s\n' "$idx" "$fqr"
+                                printf 'frame.%s.dns.rcode\t%s\n' "$idx" "$(cdns_fld "$dnsout" rcode_name)"
+                                printf 'frame.%s.dns.field\t%s\n' "$idx" "$key"
+                                printf 'frame.%s.dns.verdict\tmeasured\n' "$idx"
+                            elif (( ${#lhex} == 8 )); then
+                                addrs+=("$(cdns_hex_ipv4 "$lhex")")
+                                printf 'frame.%s.addr.inferred_ipv4\t%s\n' "$idx" "$(cdns_hex_ipv4 "$lhex")"
+                            elif (( ${#lhex} == 32 )); then
+                                addrs+=("$lhex")
+                                printf 'frame.%s.addr.inferred_ipv6_octets\t%s\n' "$idx" "$lhex"
+                            elif (( ${#lhex} >= 6 )); then
+                                local txt; txt=$(cdns_hex_text "$lhex")
+                                [[ "$txt" =~ ^[[:print:]]+$ ]] && \
+                                    printf 'frame.%s.text.inferred\t%s\n' "$idx" "$(cdns_sanitize "$txt")"
+                            fi ;;
+                    esac
+                done <<< "$rows"
+                # The resolver that answered: the addresses in a frame that
+                # carries a response are the only candidates the stream holds,
+                # and which one is the answering side is not recoverable without
+                # the schema -- so it is named as an inference.
+                if [[ "$fqr" == "1" ]] && (( ${#addrs[@]} > 0 )); then
+                    printf 'frame.%s.resolver.inferred\t%s\n' "$idx" "${addrs[0]}"
+                    printf 'frame.%s.resolver.note\t%s\n' "$idx" \
+                        "inferred from the octets beside a response in the same frame; the dnstap field numbers are not readable here"
+                fi ;;
+            *)
+                printf 'frame.%s.unobserved\t%s\n' "$idx" "frame kind '$kind' is not one this build reads" ;;
+        esac
+    done <<< "$frames"
+    printf 'frames\t%s\n' "$nframes"
+    printf 'dns_messages\t%s\n' "$ndns"
+    if (( ndns > 0 )); then
+        printf 'verdict\tmeasured\n'
+        printf 'note\t%s\n' "the DNS messages were read out of the stream itself; nothing here was transmitted"
+    else
+        printf 'verdict\tunobserved\n'
+        printf 'unobserved\tdns_message\t%s\n' \
+            "no data frame held octets that parse as a DNS message, so this stream says nothing about which names were asked"
+    fi
+    printf 'unobserved\tdnstap_field_names\t%s\n' \
+        "the dnstap.proto field numbers are not on this machine and there is no fixture here to check one against, so a leaf is reported by its content (a DNS message, a 4- or 16-octet address, text) and never by a field name"
+    return 0
+}
+
+cdns_cmd_dnstap() {  # <hex|file> [--no-prologue]
+    local input="" pr=4
+    while (( $# > 0 )); do
+        case "$1" in
+            --no-prologue) pr=0; shift ;;
+            -*) printf 'ERROR\tunknown flag for --dnstap: %s (want --no-prologue)\n' "$(cdns_sanitize "$1")" >&2; return 2 ;;
+            *) input="$1"; shift ;;
+        esac
+    done
+    [[ -n "$input" ]] || { printf 'ERROR\tusage: --dnstap <hex|file> [--no-prologue]\n' >&2; return 2; }
+    local hex; hex=$(cdns_load_input "$input") || return $?
+    hex=$(cdns_nfc "$hex")
+    [[ -n "$hex" ]] || { printf 'ERROR\t%s holds no octets\n' "$(cdns_sanitize "$CDNS_INPUT_SRC")" >&2; return 1; }
+    local out; out=$(cdns_dnstap_report "$hex" "$CDNS_INPUT_SRC" "$pr") || return 1
+    printf '%s\n' "$out"
+    local n
+    n=$(printf '%s\n' "$out" | sed -n 's/^frame\.\([0-9]*\)\.dns\.name\t.*/\1/p' | head -1)
+    if [[ -n "$n" ]]; then
+        cdns_tap_store dnstap "$n" "$(cdns_fld "$out" "frame.$n.kind")" \
+            "$(cdns_fld "$out" "frame.$n.dns.name")" "$(cdns_fld "$out" "frame.$n.dns.qtype")" \
+            "$(cdns_fld "$out" "frame.$n.dns.qr")" "$(cdns_fld "$out" "frame.$n.dns.rcode")" \
+            "$(cdns_fld "$out" "frame.$n.resolver.inferred")" measured \
+            "read from $(cdns_sanitize "$CDNS_INPUT_SRC"); not transmitted"
+    else
+        cdns_tap_store dnstap unobserved unobserved unobserved unobserved unobserved unobserved \
+            unobserved unobserved "no DNS message in the stream, so no name is claimed"
+    fi
+    return 0
+}
+
+# The stream builder: a prologue, a control frame naming the dnstap protobuf, and
+# one data frame whose protobuf carries the DNS message and, optionally, a
+# 4-octet address. The field numbers 1 and 2 here are this builder's own choice,
+# not a claim about dnstap.proto: the reader reports whatever number it finds and
+# classifies the leaf by its content, so the builder and the reader are not
+# proving each other's schema.
+cdns_dnstap_build() {  # <dns-hex> [addr-hex-8]  -> stream hex
+    local dns; dns=$(cdns_nfc "${1:-}")
+    local addr; addr=$(cdns_nfc "${2:-}")
+    cdns_is_hex "$dns" && (( ${#dns} >= 24 )) || { printf 'ERROR\t--dnstap-build needs a DNS message in hex (at least 12 octets)\n' >&2; return 1; }
+    if [[ -n "$addr" ]]; then
+        cdns_is_hex "$addr" && (( ${#addr} == 8 )) || { printf 'ERROR\tan address is 4 octets, so 8 hex digits\n' >&2; return 1; }
+    fi
+    local dnslen=$(( ${#dns} / 2 ))
+    local pb=""
+    [[ -n "$addr" ]] && pb+="0A04$addr"
+    pb+="12$(cdns_hex_varint "$dnslen")$dns"
+    local ctype="protobuf:dnstap.Dnstap"
+    local clen=$(( ${#ctype} ))
+    local ch; ch=$(printf '%s' "$ctype" | od -An -v -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+    local control="00000001$(cdns_dword "$clen")$ch"
+    cdns_dword 0 >/dev/null
+    printf '00000000%s%s%s%s%s' \
+        "$(cdns_dword $(( ${#control} / 2 )))" "$control" \
+        "$(cdns_dword $(( ${#pb} / 2 )))" "$pb" "00000000"
+}
+
+# protobuf's own varint encoding, for a length prefix the builder has to write.
+cdns_hex_varint() {  # <non-negative integer> -> hex varint
+    local v=$(( ${1:-0} )) out="" b
+    (( v >= 0 )) || { printf 'ERROR\tvarint needs a non-negative value\n' >&2; return 1; }
+    while :; do
+        b=$(( v & 0x7F )); v=$(( v >> 7 ))
+        if (( v > 0 )); then out+=$(printf '%02X' $(( b | 0x80 )))
+        else out+=$(printf '%02X' "$b"); break; fi
+    done
+    printf '%s' "$out"
+}
+
+# ── DoH (RFC 8484) ──────────────────────────────────────────────────────
+# RFC 8484 §4.1: the DNS message is the body of an HTTP request, and the media
+# type registered in §6 is application/dns-message -- it is used for both the
+# content-type of the request body and the accept header of the response. A POST
+# carries the query in the body; the wire format is unchanged RFC 1035.
+cdns_doh_py() {
+    cat <<'PYEOF'
+import sys
+
+def split_http(blob):
+    """(start_line, headers, body) for one HTTP message. The body is the octets
+    after the empty line, cut to content-length when one is declared."""
+    if b"\r\n\r\n" in blob:
+        head, _, body = blob.partition(b"\r\n\r\n")
+    elif b"\n\n" in blob:
+        head, _, body = blob.partition(b"\n\n")
+    else:
+        head, body = blob, b""
+    lines = head.replace(b"\r\n", b"\n").split(b"\n")
+    start = lines[0].decode("latin-1", "replace") if lines else ""
+    hdrs = {}
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        k, _, v = line.partition(b":")
+        hdrs[k.strip().decode("latin-1", "replace").lower()] = v.strip().decode("latin-1", "replace")
+    declared = hdrs.get("content-length", "")
+    if declared.isdigit():
+        n = int(declared)
+        body = body[:n]
+    return start, hdrs, body
+
+def main():
+    req = bytes.fromhex(sys.argv[1]) if len(sys.argv) > 1 else b""
+    resp = bytes.fromhex(sys.argv[2]) if len(sys.argv) > 2 else b""
+    start, hdrs, body = split_http(req)
+    parts = start.split(" ")
+    print("start_line\t%s" % start)
+    print("method\t%s" % (parts[0] if parts else "unobserved"))
+    print("target\t%s" % (parts[1] if len(parts) > 1 else "unobserved"))
+    print("version\t%s" % (parts[2] if len(parts) > 2 else "unobserved"))
+    for key in ("host", "content-type", "accept", "content-length"):
+        if key in hdrs:
+            print("%s\t%s" % (key.replace("-", "_"), hdrs[key]))
+        else:
+            print("%s\tabsent" % key.replace("-", "_"))
+    print("body_octets\t%d" % len(body))
+    print("body_hex\t%s" % body.hex().upper())
+    if resp:
+        rstart, rhdrs, rbody = split_http(resp)
+        rparts = rstart.split(" ")
+        print("response_status\t%s" % (rparts[1] if len(rparts) > 1 else rstart))
+        print("response_content_type\t%s" % rhdrs.get("content-type", "absent"))
+        print("response_body_octets\t%d" % len(rbody))
+        print("response_body_hex\t%s" % rbody.hex().upper())
+    else:
+        print("response_status\tunobserved")
+        print("response_content_type\tunobserved")
+        print("response_body_hex\t")
+
+main()
+PYEOF
+}
+
+cdns_doh_build() {  # <dns-hex> <host> <path> -> request hex
+    local dns; dns=$(cdns_nfc "${1:-}")
+    local host="${2:-}" path="${3:-/dns-query}"
+    cdns_is_hex "$dns" && (( ${#dns} >= 24 )) || { printf 'ERROR\t--doh-build needs a DNS message in hex (at least 12 octets)\n' >&2; return 1; }
+    [[ -n "$host" ]] || { printf 'ERROR\t--doh-build needs --host: RFC 8484 §4.1 puts the resolver in an HTTP request whose Host header names it, and inventing one would be a message to nobody\n' >&2; return 1; }
+    [[ "$path" == /* ]] || { printf 'ERROR\t--doh-build needs --path to start with / (it is an HTTP request target)\n' >&2; return 1; }
+    # The header block is piped straight into od: a command substitution strips
+    # the last newline, which would leave the empty line that ends an HTTP header
+    # block as CR LF CR, and no reader would find the body behind it.
+    local hh
+    hh=$(printf 'POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/dns-message\r\nAccept: application/dns-message\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' \
+        "$path" "$host" "$(( ${#dns} / 2 ))" | od -An -v -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+    printf '%s%s' "$hh" "$dns"
+}
+
+cdns_cmd_doh() {  # <request-hex|file> [--response <hex|file>] [--peer <ip>]
+    local req="" resp="" peer=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --response) resp="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --peer)     peer="${2:-}"; shift 2 2>/dev/null || shift ;;
+            -*) printf 'ERROR\tunknown flag for --doh: %s (want --response, --peer)\n' "$(cdns_sanitize "$1")" >&2; return 2 ;;
+            *) req="$1"; shift ;;
+        esac
+    done
+    [[ -n "$req" ]] || { printf 'ERROR\tusage: --doh <request-hex|file> [--response <hex|file>] [--peer <ip>]\n' >&2; return 2; }
+    command -v python3 >/dev/null 2>&1 || { printf 'ERROR\t--doh needs python3 to split the HTTP message; it is not on PATH\n' >&2; return 1; }
+    local rh="" sh=""
+    rh=$(cdns_load_input "$req") || return $?
+    # cdns_load_input runs in a subshell here, so its CDNS_INPUT_SRC is lost;
+    # the source is the same question -- a readable path, or inline hex.
+    local rsrc=inline
+    [[ -r "$req" ]] && rsrc="$req"
+    if [[ -n "$resp" ]]; then
+        sh=$(cdns_load_input "$resp") || return $?
+    fi
+    local out; out=$(cdns_doh_py | python3 - "$(cdns_nfc "$rh")" "$(cdns_nfc "$sh")") || {
+        printf 'ERROR\tcould not split the HTTP message\n' >&2; return 1; }
+    printf 'request_source\t%s\n' "$(cdns_sanitize "$rsrc")"
+    printf '%s\n' "$out"
+    local ct body
+    ct=$(cdns_fld "$out" content_type)
+    body=$(cdns_fld "$out" body_hex)
+    local body_octets; body_octets=$(cdns_fld "$out" body_octets)
+    if [[ -z "$body" ]]; then
+        printf 'unobserved\tdns_body\t%s\n' "the request carried no body after its header block, so there is no DNS message to read"
+        cdns_tap_store doh unobserved request unobserved unobserved unobserved unobserved "${peer:-unobserved}" unobserved "no body in the request"
+        return 1
+    fi
+    local parsed; parsed=$(cdns_tap_dns "$body") || {
+        printf 'unobserved\tdns_body\t%s\n' "the body is not octets this module reads as a DNS message"
+        cdns_tap_store doh unobserved request unobserved unobserved unobserved unobserved "${peer:-unobserved}" unobserved "body is not a DNS message"
+        return 1; }
+    printf 'dns.name\t%s\n' "$(cdns_sanitize "$(cdns_fld "$parsed" question.0.name)")"
+    printf 'dns.qtype\t%s\n' "$(cdns_fld "$parsed" question.0.type_name)"
+    printf 'dns.qr\t%s\n' "$(cdns_fld "$parsed" qr)"
+    printf 'dns.rcode\t%s\n' "$(cdns_fld "$parsed" rcode_name)"
+    # The response, when the caller brought one, is the resolver's answer.
+    local rbody rct rstatus
+    rstatus=$(cdns_fld "$out" response_status)
+    rct=$(cdns_fld "$out" response_content_type)
+    rbody=$(cdns_fld "$out" response_body_hex)
+    if [[ -n "$rbody" ]]; then
+        local rparsed; rparsed=$(cdns_tap_dns "$rbody") && {
+            printf 'answer.rcode\t%s\n' "$(cdns_fld "$rparsed" rcode_name)"
+            printf 'answer.name\t%s\n' "$(cdns_sanitize "$(cdns_fld "$rparsed" question.0.name)")"
+            printf 'answer.verdict\tmeasured\n'
+        }
+        [[ "$rct" == "absent" ]] && printf 'advertised\tresponse_content_type\t%s\n' \
+            "the response declares no content-type, so it does not advertise itself as application/dns-message (RFC 8484 §4.1)"
+    fi
+    if [[ -n "$peer" ]]; then
+        printf 'resolver\t%s\n' "$(cdns_sanitize "$peer")"
+        printf 'resolver_source\t%s\n' "named by --peer on the command line"
+    else
+        printf 'resolver\tunobserved\n'
+        printf 'unobserved\tresolver\t%s\n' \
+            "the exchange carries no endpoint address; pass --peer <ip> with the address the request went to and the store can name it"
+    fi
+    # RFC 8484 §4.1 wants application/dns-message on a POST body. A request
+    # without it is still decodable, but it is not a DoH request as specified,
+    # and this module says so rather than reporting a body it happened to read.
+    if [[ "$ct" != "application/dns-message" ]]; then
+        printf 'advertised\tcontent_type\t%s\n' \
+            "the request declares '${ct}', not application/dns-message, so it is not a DoH exchange as RFC 8484 §4.1 defines one"
+        cdns_tap_store doh unobserved request "$(cdns_fld "$parsed" question.0.name)" \
+            "$(cdns_fld "$parsed" question.0.type_name)" "$(cdns_fld "$parsed" qr)" \
+            "$(cdns_fld "$parsed" rcode_name)" "${peer:-unobserved}" advertised \
+            "content-type is not application/dns-message"
+        return 1
+    fi
+    printf 'verdict\tmeasured\n'
+    cdns_tap_store doh unobserved request "$(cdns_fld "$parsed" question.0.name)" \
+        "$(cdns_fld "$parsed" question.0.type_name)" "$(cdns_fld "$parsed" qr)" \
+        "$(cdns_fld "$parsed" rcode_name)" "${peer:-unobserved}" measured \
+        "read from $(cdns_sanitize "$rsrc") with $body_octets octet(s) of body; not transmitted"
+    return 0
+}
+
+cdns_cmd_doh_build() {  # <dns-hex> [--host name] [--path target]
+    local dns="" host="" path="/dns-query"
+    while (( $# > 0 )); do
+        case "$1" in
+            --host) host="${2:-}"; shift 2 2>/dev/null || shift ;;
+            --path) path="${2:-}"; shift 2 2>/dev/null || shift ;;
+            -*) printf 'ERROR\tunknown flag for --doh-build: %s (want --host, --path)\n' "$(cdns_sanitize "$1")" >&2; return 2 ;;
+            *) dns="$1"; shift ;;
+        esac
+    done
+    dns=$(cdns_nfc "$dns")
+    local hex; hex=$(cdns_doh_build "$dns" "$host" "$path") || return $?
+    printf 'method\tPOST\n'
+    printf 'scheme\thttp (RFC 8484 also allows https; the port and the TLS are the transport'"'"'s business, not the message'"'"'s)\n'
+    printf 'host\t%s\n' "$(cdns_sanitize "$host")"
+    printf 'path\t%s\n' "$path"
+    printf 'content_type\tapplication/dns-message\n'
+    printf 'content_length\t%s\n' "$(( ${#dns} / 2 ))"
+    printf 'request_octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'request_hex\t%s\n' "$hex"
+    printf 'body_hex\t%s\n' "$dns"
+    printf 'verdict\tadvertised\n'
+    printf 'note\t%s\n' "built here and not sent: nothing on the wire was measured, and no resolver has acknowledged this request"
+    return 0
+}
+
+cdns_cmd_dnstap_build() {  # <dns-hex> [--addr a.b.c.d]
+    local dns="" addr=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --addr) addr="${2:-}"; shift 2 2>/dev/null || shift ;;
+            -*) printf 'ERROR\tunknown flag for --dnstap-build: %s (want --addr)\n' "$(cdns_sanitize "$1")" >&2; return 2 ;;
+            *) dns="$1"; shift ;;
+        esac
+    done
+    dns=$(cdns_nfc "$dns")
+    cdns_is_hex "$dns" && (( ${#dns} >= 24 )) || {
+        printf 'ERROR\t--dnstap-build needs a DNS message in hex (at least 12 octets)\n' >&2; return 1; }
+    local ahex=""
+    if [[ -n "$addr" ]]; then
+        ahex=$(cdns_ipv4_hex "$addr") || {
+            printf 'ERROR\t--addr wants an IPv4 address: %s\n' "$(cdns_sanitize "$addr")" >&2; return 2; }
+    fi
+    local st; st=$(cdns_dnstap_build "$dns" "$ahex") || return 1
+    printf 'dns_hex\t%s\n' "$dns"
+    printf 'addr_hex\t%s\n' "${ahex:-absent}"
+    printf 'stream_octets\t%s\n' "$(( ${#st} / 2 ))"
+    printf 'stream_hex\t%s\n' "$st"
+    printf 'prologue_octets\t4\n'
+    printf 'verdict\tadvertised\n'
+    printf 'note\t%s\n' "built here and not sent; the field numbers in the data frame are this builder's own choice, not a claim about dnstap.proto"
+    return 0
+}
+
+
 
 # ── selftest — no radio, no root, no network ────────────────────────────
 cdns_selftest() {
@@ -1360,6 +1979,120 @@ PY
     chk split-empty  "${CDNS_F[1]}" ""
     chk split-third  "${CDNS_F[2]}" "y"
 
+
+    # ── DNSTap and DoH ──────────────────────────────────────────────────
+    # Frame Streams framing (a 4-octet length before each frame, a zero length
+    # for end of stream) and the protobuf wire format are decoded from their
+    # published definitions. The dnstap.proto field numbers are not on this
+    # machine, so every leaf is classified by its content and every row that
+    # rests on that inference says "inferred" in its own name.
+    local mq st strows
+    # a query of this section's own: earlier sections reuse $q for other names
+    mq=$(cdns_build_query www.example.com A 0x1234)
+    st=$(cdns_dnstap_build "$mq" "$(cdns_ipv4_hex 192.0.2.1)"); rc=$?
+    chk dnstap-build-rc      "$rc" "0"
+    chk dnstap-stream-prefix "$(printf '%s' "$st" | cut -c1-8)" "00000000"
+    strows=$(cdns_fs_frames "$st" 4); rc=$?
+    chk dnstap-frames-rc     "$rc" "0"
+    chk dnstap-frame-count   "$(printf '%s\n' "$strows" | grep -c .)" "3"
+    chk dnstap-frame0-kind   "$(printf '%s\n' "$strows" | awk -F'\t' 'NR==1{print $2}')" "control"
+    chk dnstap-frame1-kind   "$(printf '%s\n' "$strows" | awk -F'\t' 'NR==2{print $2}')" "data"
+    chk dnstap-frame2-kind   "$(printf '%s\n' "$strows" | awk -F'\t' 'NR==3{print $2}')" "fin"
+    # the data frame holds 2 octets of field 1 tag + 4 of address + 2 of field 2
+    # tag + 1 length octet + the DNS message itself
+    chk dnstap-data-len      "$(printf '%s\n' "$strows" | awk -F'\t' 'NR==2{print $3}')" "$(( ${#mq} / 2 + 8 ))"
+    ( cdns_fs_frames "${st:0:24}" 4 >/dev/null 2>&1 ); rc=$?
+    chk dnstap-truncated-refused "$rc" "1"
+
+    out=$(cdns_dnstap_report "$st" selftest 4); rc=$?
+    chk dnstap-report-rc     "$rc" "0"
+    chk dnstap-content-type  "$(fld "$out" frame.0.content_type)" "protobuf:dnstap.Dnstap"
+    chk dnstap-dns-name      "$(fld "$out" frame.1.dns.name)" "www.example.com"
+    chk dnstap-dns-qtype     "$(fld "$out" frame.1.dns.qtype)" "A"
+    chk dnstap-dns-verdict   "$(fld "$out" frame.1.dns.verdict)" "measured"
+    chk dnstap-addr-inferred "$(fld "$out" frame.1.addr.inferred_ipv4)" "192.0.2.1"
+    chk dnstap-verdict       "$(fld "$out" verdict)" "measured"
+    chk dnstap-grey-schema   "$(printf '%s\n' "$out" | grep -c $'^unobserved\tdnstap_field_names')" "1"
+    chk dnstap-no-name-claim "$(printf '%s\n' "$out" | grep -c $'^frame\.1\.field_')" "0"
+
+    out=$(cdns_cmd_dnstap "$st" --no-prologue); rc=$?
+    chk dnstap-prologue-rc   "$rc" "0"
+    chk dnstap-prologue-grey "$(fld "$out" verdict)" "unobserved"
+    out=$(cdns_cmd_dnstap "$st"); rc=$?
+    chk dnstap-cmd-rc        "$rc" "0"
+    chk dnstap-cmd-name      "$(fld "$out" frame.1.dns.name)" "www.example.com"
+    ( cdns_cmd_dnstap --bogus "$st" >/dev/null 2>&1 ); rc=$?
+    chk dnstap-bad-flag      "$rc" "2"
+    ( cdns_cmd_dnstap >/dev/null 2>&1 ); rc=$?
+    chk dnstap-no-arg        "$rc" "2"
+
+    # protobuf wire format, at the level below the dnstap reader
+    chk pb-varint-300        "$(cdns_hex_varint 300)" "AC02"
+    chk pb-varint-31         "$(cdns_hex_varint 31)" "1F"
+    chk pb-refuses-field0    "$( (cdns_pb_print 0000 "" 0 >/dev/null 2>&1); echo $? )" "1"
+    chk pb-refuses-group     "$( (cdns_pb_print 0B00 "" 0 >/dev/null 2>&1); echo $? )" "1"
+    chk pb-refuses-overrun   "$( (cdns_pb_print 1204414243 "" 0 >/dev/null 2>&1); echo $? )" "1"
+    chk pb-dns-not-proto     "$( (cdns_pb_is_message "$mq" >/dev/null 2>&1); echo $? )" "1"
+    chk hex-text             "$(cdns_hex_text 414243)" "ABC"
+
+    # doh: a request is an HTTP POST whose body is the DNS message, and the
+    # media type is application/dns-message (RFC 8484 §4.1, media type in §6)
+    local req reqhex ans resp
+    req=$(cdns_cmd_doh_build "$mq" --host dns.example --path /dns-query); rc=$?
+    chk doh-build-rc         "$rc" "0"
+    chk doh-build-method     "$(fld "$req" method)" "POST"
+    chk doh-build-ct         "$(fld "$req" content_type)" "application/dns-message"
+    chk doh-build-clen       "$(fld "$req" content_length)" "$(( ${#mq} / 2 ))"
+    chk doh-build-verdict    "$(fld "$req" verdict)" "advertised"
+    reqhex=$(fld "$req" request_hex)
+    # 50 4F 53 54 = POST, 20, 2F 64 6E = "/dn"
+    chk doh-build-start      "$(printf '%s' "$reqhex" | cut -c1-16)" "504F5354202F646E"
+    chk doh-build-body       "$(fld "$req" body_hex)" "$mq"
+    ( cdns_cmd_doh_build "$mq" --host "" >/dev/null 2>&1 ); rc=$?
+    chk doh-build-needs-host "$rc" "1"
+
+    out=$(cdns_cmd_doh "$reqhex" --peer 192.0.2.53); rc=$?
+    chk doh-parse-rc         "$rc" "0"
+    chk doh-name             "$(fld "$out" dns.name)" "www.example.com"
+    chk doh-qtype            "$(fld "$out" dns.qtype)" "A"
+    chk doh-ct-row           "$(fld "$out" content_type)" "application/dns-message"
+    chk doh-resolver         "$(fld "$out" resolver)" "192.0.2.53"
+    chk doh-verdict          "$(fld "$out" verdict)" "measured"
+    out=$(cdns_cmd_doh "$reqhex"); rc=$?
+    chk doh-no-peer-grey     "$(fld "$out" resolver)" "unobserved"
+    chk doh-no-peer-reason   "$(printf '%s\n' "$out" | grep -c $'^unobserved\tresolver')" "1"
+
+    ans=$(cdns_build_response "$mq" 203.0.113.9)
+    resp=$(printf 'HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: %s\r\n\r\n' "$(( ${#ans} / 2 ))" \
+        | od -An -v -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+    out=$(cdns_cmd_doh "$reqhex" --response "${resp}${ans}" --peer 192.0.2.53); rc=$?
+    chk doh-answer-rc        "$rc" "0"
+    chk doh-answer-rcode     "$(fld "$out" answer.rcode)" "NOERROR"
+    chk doh-answer-verdict   "$(fld "$out" answer.verdict)" "measured"
+
+    # a request that is not a DoH request as RFC 8484 §4.1 defines one: the body
+    # still parses, and the module decodes it, then names the declared type
+    local evil
+    evil=$(printf 'POST /dns-query HTTP/1.1\r\nHost: dns.example\r\nContent-Type: text/plain\r\nContent-Length: %s\r\n\r\n' "$(( ${#mq} / 2 ))" \
+        | od -An -v -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+    out=$(cdns_cmd_doh "${evil}${mq}"); rc=$?
+    chk doh-wrong-ct-rc      "$rc" "1"
+    chk doh-wrong-ct-name    "$(fld "$out" dns.name)" "www.example.com"
+    chk doh-wrong-ct-grey    "$(printf '%s\n' "$out" | grep -c $'^advertised\tcontent_type')" "1"
+
+    local nobody
+    nobody=$(printf 'POST /dns-query HTTP/1.1\r\nHost: dns.example\r\nContent-Length: 0\r\n\r\n' \
+        | od -An -v -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+    out=$(cdns_cmd_doh "$nobody"); rc=$?
+    chk doh-no-body-rc       "$rc" "1"
+    chk doh-no-body-grey     "$(printf '%s\n' "$out" | grep -c $'^unobserved\tdns_body')" "1"
+
+    # the stores: append-only TSV under loot/cellular_dns/, one verdict column
+    chk tap-store-header     "$(head -1 "$(cdns_tap_tsv)" | cut -f2)" "action"
+    chk tap-store-verdicts   "$(awk -F'\t' 'NR>1 && ($10=="measured" || $10=="advertised" || $10=="unobserved")' "$(cdns_tap_tsv)" | wc -l > 0 && echo ok)" "ok"
+    chk tap-store-dnstap-row "$(awk -F'\t' 'NR>1 && $2=="dnstap" && $10=="measured"' "$(cdns_tap_tsv)" | wc -l > 0 && echo ok)" "ok"
+    chk tap-store-doh-row    "$(awk -F'\t' 'NR>1 && $2=="doh" && $10=="measured"' "$(cdns_tap_tsv)" | wc -l > 0 && echo ok)" "ok"
+
     rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
@@ -1385,6 +2118,10 @@ cdns_menu() {
   [7]  the aLTEr sequence, step by step
   [8]  plan: aLTEr lab
   [9]  status
+  [10] DNSTap: read a Frame Streams tap
+  [11] DNSTap: build a stream from a DNS message
+  [12] DoH: decode a request/response
+  [13] DoH: build an RFC 8484 request
   [0]  back
 
 M
@@ -1410,6 +2147,22 @@ M
             7) cdns_alter_notes | column -t -s$'\t' 2>/dev/null || cdns_alter_notes
                read -rp "  press enter " _ ;;
             8) cdns_cmd_plan alter-lab; read -rp "  press enter " _ ;;
+            10) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a tap stream; cannot prompt in CLI mode" >&2
+                else read -rp "  stream hex or file> " h
+                     cdns_cmd_dnstap "$h" | column -t -s$'\t' 2>/dev/null || cdns_cmd_dnstap "$h"
+                     read -rp "  press enter " _; fi ;;
+            11) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a DNS message; cannot prompt in CLI mode" >&2
+                else read -rp "  DNS hex> " h; read -rp "  resolver ip (blank for none)> " p
+                     cdns_cmd_dnstap_build "$h" ${p:+--addr "$p"} | column -t -s$'\t' 2>/dev/null
+                     read -rp "  press enter " _; fi ;;
+            12) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a request; cannot prompt in CLI mode" >&2
+                else read -rp "  request hex or file> " h; read -rp "  peer ip (blank for none)> " p
+                     cdns_cmd_doh "$h" ${p:+--peer "$p"} | column -t -s$'\t' 2>/dev/null
+                     read -rp "  press enter " _; fi ;;
+            13) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a DNS message; cannot prompt in CLI mode" >&2
+                else read -rp "  DNS hex> " h; read -rp "  Host> " p
+                     cdns_cmd_doh_build "$h" --host "$p" | column -t -s$'\t' 2>/dev/null
+                     read -rp "  press enter " _; fi ;;
             9) cdns_cli_status_tsv | column -t -s$'\t' 2>/dev/null || cdns_cli_status_tsv
                read -rp "  press enter " _ ;;
             0) return ;;
@@ -1428,6 +2181,10 @@ cdns_cli_main() {
         --build-query)         cdns_cmd_build_query "${1:-}" "${2:-A}" ;;
         --build-response)      cdns_cmd_build_response "${1:-}" "${2:-}" ;;
         --resolver-discovery)  cdns_cmd_resolver_discovery "${1:-}" ;;
+        --dnstap)              cdns_cmd_dnstap "$@" ;;
+        --dnstap-build)        cdns_cmd_dnstap_build "$@" ;;
+        --doh)                 cdns_cmd_doh "$@" ;;
+        --doh-build)           cdns_cmd_doh_build "$@" ;;
         --detect)              cdns_cmd_detect "${1:-}" ;;
         --pco)                 cdns_pco_parse "${1:-}" ;;
         --alter)               cdns_alter_notes ;;
@@ -1444,6 +2201,14 @@ Usage: $0 COMMAND
   --build-query <name> [type]     build a DNS query (default type A)
   --build-response <query> <ip>   build a response rewritten for <ip>
   --resolver-discovery <pcap>     which resolver the bearer used, and how
+  --dnstap <hex|file> [--no-prologue]
+                                  read a DNSTap Frame Streams tap, and the DNS in it
+  --dnstap-build <dns-hex> [--addr a.b.c.d]
+                                  build a tap stream from a DNS message
+  --doh <hex|file> [--response <hex|file>] [--peer ip]
+                                  read a DoH exchange (RFC 8484) and its resolver
+  --doh-build <dns-hex> --host <name> [--path target]
+                                  build an RFC 8484 POST for a DNS message
   --detect <pcap>                 report DNS rewrite and spoofing signals
   --pco <hex>                     walk protocol configuration options
   --alter                         the aLTEr sequence, step by step

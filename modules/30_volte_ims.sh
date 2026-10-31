@@ -2368,6 +2368,233 @@ EOF
     return 0
 }
 
+# ── IMP4GT detection: the reflection signature in a trace ───────────────
+#
+# IMP4GT's first half is a reflection: the attacker puts a packet in front of the
+# UE, the UE answers it, and the answer is a message the UE signed with its own
+# uplink keys. A UE that answers what it should have dropped hands the attacker a
+# valid uplink message, and a valid uplink message is the impersonation half
+# (Rupprecht, Kohls, Holz and Popper, "IMP4GT: IMPersonation Attacks in 4G
+# NeTworks", NDSS 2020, §III).
+#
+# Two things a trace can show with no radio and no keys:
+#   * an uplink payload byte-identical to a downlink payload from the same bearer
+#     moments earlier -- two independent senders do not emit the same octets, so an
+#     identical pair is a reflection unless the trace recorded one packet twice;
+#   * the ICMP pairing the reflection rides on: a downlink echo request and an
+#     uplink echo reply carrying the same identifier, sequence number and data
+#     (RFC 792, "Echo or Echo Reply Message"; ICMP is IP protocol 1, RFC 791 §3.1).
+#
+# What the trace cannot show is printed as unobserved with the reason: whether the
+# uplink was integrity protected at all (that needs the keys or the PDCP header),
+# and whether the downlink packet came from a source the UE should have trusted
+# (that needs the routing). A trace with no reflection pair is NOT reported as
+# clean -- a UE nobody asked is not a UE that refused.
+#
+# The trace is a tab-separated file with a header line naming the columns; ts,
+# direction (dl/ul) and payload_hex are required, integrity is optional.
+
+vims_imp4gt_awk() {
+    cat <<'AWK'
+BEGIN { FS = "\t" }
+# hex octet -> value, without strtonum: mawk has no strtonum and this module
+# should not need gawk to read a trace.
+function hxb(s,   i, c, v) {
+    v = 0
+    for (i = 1; i <= length(s); i++) {
+        c = tolower(substr(s, i, 1))
+        v = v * 16 + index("0123456789abcdef", c) - 1
+    }
+    return v
+}
+# IPv4 octet `k` (1-based) of a hex packet, as a number.
+function ipb(hex, k) { return hxb(substr(hex, (k - 1) * 2 + 1, 2)) }
+
+NR == 1 {
+    if ($1 != "ts") {
+        printf "ERROR\tthe trace needs a header line naming its columns; this one starts with '%s'\n", $1
+        exit 3
+    }
+    for (i = 1; i <= NF; i++) {
+        col = tolower($i)
+        if (col == "ts" || col == "time" || col == "timestamp") its = i
+        else if (col == "direction" || col == "dir") idir = i
+        else if (col == "payload_hex" || col == "payload" || col == "data") ipay = i
+        else if (col == "integrity") iint = i
+        else if (col == "bearer") ibear = i
+    }
+    if (!its)  { print "ERROR\tthe trace header has no ts column"; exit 3 }
+    if (!idir) { print "ERROR\tthe trace header has no direction column (dl/ul)"; exit 3 }
+    if (!ipay) { print "ERROR\tthe trace header has no payload_hex column"; exit 3 }
+    ncol = 3
+    next
+}
+{
+    ts = $its + 0
+    dir = tolower($idir)
+    pay = tolower($ipay)
+    if (dir != "dl" && dir != "ul") { skipped++; next }
+    n++
+    if (pay != "" && pay !~ /^[0-9a-f]+$/ && pay !~ /^[0-9A-F]+$/) { badpay++; next }
+    if (iint && $iint != "" && $iint != "-") integ[$iint] = 1
+
+    if (dir == "dl") {
+        di++
+        dlts[di] = ts; dlpay[di] = pay; dln[di] = NR - 1
+        if (length(pay) >= 40 && ipb(pay, 1) >= 0x40 && ipb(pay, 1) < 0x50 \
+            && ipb(pay, 10) == 1) {
+            ihl = (ipb(pay, 1) % 16) * 4
+            if (length(pay) >= (ihl + 8) * 2) {
+                itype = ipb(pay, ihl + 1)
+                if (itype == 8) {
+                    ei++
+                    eid[ei] = ipb(pay, ihl + 5) * 256 + ipb(pay, ihl + 6)
+                    eseq[ei] = ipb(pay, ihl + 7) * 256 + ipb(pay, ihl + 8)
+                    edata[ei] = substr(pay, (ihl + 9) * 2 + 1)
+                    ets[ei] = ts; en[ei] = NR - 1
+                }
+            }
+        }
+    } else {
+        # the same octets in both directions: a reflection, unless the trace
+        # recorded one packet twice
+        for (i = 1; i <= di; i++) {
+            if (dlts[i] < ts - win) continue
+            if (pay != "" && pay == dlpay[i]) {
+                ri++
+                rdl[ri] = dln[i]; rul[ri] = NR - 1; rdt[ri] = ts - dlts[i]
+            }
+        }
+        # the ICMP echo reply the reflection rides on (RFC 792)
+        if (length(pay) >= 40 && ipb(pay, 1) >= 0x40 && ipb(pay, 1) < 0x50 \
+            && ipb(pay, 10) == 1) {
+            ihl = (ipb(pay, 1) % 16) * 4
+            if (length(pay) >= (ihl + 8) * 2 && ipb(pay, ihl + 1) == 0) {
+                rid = ipb(pay, ihl + 5) * 256 + ipb(pay, ihl + 6)
+                rseq = ipb(pay, ihl + 7) * 256 + ipb(pay, ihl + 8)
+                rdata = substr(pay, (ihl + 9) * 2 + 1)
+                for (i = 1; i <= ei; i++) {
+                    if (ets[i] < ts - win) continue
+                    if (eid[i] == rid && eseq[i] == rseq && edata[i] == rdata) {
+                        ci++
+                        cdl[ci] = en[i]; cul[ci] = NR - 1; cdt[ci] = ts - ets[i]
+                        break
+                    }
+                }
+            }
+        }
+    }
+}
+END {
+    if (its == 0) {
+        print "ERROR\tthe trace is empty; it needs a header line naming ts, direction and payload_hex"
+        exit 3
+    }
+    printf "records\t%d\n", n
+    printf "records_skipped_direction\t%d\n", skipped
+    printf "records_bad_payload\t%d\n", badpay
+    printf "echo_requests\t%d\n", ei
+    printf "reflection_identical.count\t%d\n", ri
+    for (i = 1; i <= ri; i++) {
+        printf "reflection_identical.%d.dl_record\t%d\n", i - 1, rdl[i]
+        printf "reflection_identical.%d.ul_record\t%d\n", i - 1, rul[i]
+        printf "reflection_identical.%d.delta_s\t%.3f\n", i - 1, rdt[i]
+    }
+    printf "reflection_icmp.count\t%d\n", ci
+    for (i = 1; i <= ci; i++) {
+        printf "reflection_icmp.%d.dl_record\t%d\n", i - 1, cdl[i]
+        printf "reflection_icmp.%d.ul_record\t%d\n", i - 1, cul[i]
+        printf "reflection_icmp.%d.delta_s\t%.3f\n", i - 1, cdt[i]
+    }
+    ninteg = 0
+    for (k in integ) { ninteg++; printf "trace_integrity.%d\t%s\n", ninteg, k }
+    if (!ri && !ci && n > 0) printf "reflection\tunobserved\n"
+    else if (ri || ci) printf "reflection\tmeasured\n"
+}
+AWK
+}
+
+vims_imp4gt_tsv() { printf '%s/imp4gt.tsv' "$VIMS_DIR"; }
+
+vims_imp4gt_store() {  # <verdict> <dl_record> <ul_record> <delta> <note>
+    local f; f=$(vims_imp4gt_tsv)
+    mkdir -p "$(dirname "$f")" 2>/dev/null
+    [[ -s "$f" ]] || printf 'ts\tverdict\tdl_record\tul_record\tdelta_s\tnote\n' > "$f" 2>/dev/null
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" \
+        "$(vims_sanitize "${1:-unobserved}")" "$(vims_sanitize "${2:-unobserved}")" \
+        "$(vims_sanitize "${3:-unobserved}")" "$(vims_sanitize "${4:-unobserved}")" \
+        "$(vims_sanitize "${5:-}")" >> "$f" 2>/dev/null
+}
+
+vims_cmd_imp4gt() {  # <tsv> [--window seconds]
+    local tsv="" win=5
+    while (( $# > 0 )); do
+        case "$1" in
+            --window) win="${2:-}"; shift 2 2>/dev/null || shift ;;
+            -*) printf 'ERROR\tunknown flag for --imp4gt: %s (want --window)\n' "$(vims_sanitize "$1")" >&2; return 2 ;;
+            *) tsv="$1"; shift ;;
+        esac
+    done
+    [[ -n "$tsv" ]] || { printf 'ERROR\tusage: --imp4gt <tsv> [--window seconds]\n' >&2; return 2; }
+    [[ "$win" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        printf 'ERROR\t--window wants a number of seconds, got %s\n' "$(vims_sanitize "$win")" >&2; return 2; }
+    [[ -r "$tsv" ]] || {
+        printf 'ERROR\tthe trace %s is not readable; --imp4gt reads a tab-separated file with a header naming ts, direction and payload_hex (see the module help)\n' \
+            "$(vims_sanitize "$tsv")" >&2; return 2; }
+    command -v awk >/dev/null 2>&1 || {
+        printf 'ERROR\t--imp4gt needs awk to pair the records; it is not on PATH\n' >&2; return 1; }
+    local out rc
+    out=$(vims_imp4gt_awk | awk -v win="$win" -f - "$tsv")
+    rc=$?
+    if (( rc != 0 )); then
+        # the awk stops with 3 and an ERROR line when the trace is not the format
+        # the usage line describes; that is a usage answer, not a finding
+        [[ -n "$out" ]] && printf '%s\n' "$out" >&2
+        (( rc == 3 )) && return 2
+        printf 'ERROR\tthe trace %s could not be read\n' "$(vims_sanitize "$tsv")" >&2
+        return 1
+    fi
+    printf 'trace\t%s\n' "$(vims_sanitize "$tsv")"
+    printf 'window_seconds\t%s\n' "$win"
+    printf '%s\n' "$out"
+    local nri nci
+    nri=$(vims_fld "$out" reflection_identical.count)
+    nci=$(vims_fld "$out" reflection_icmp.count)
+    # whether the uplink was protected at all is not in a payload trace
+    if printf '%s\n' "$out" | grep -q '^trace_integrity\.'; then
+        printf 'uplink_integrity\tadvertised by the trace, not verified here\n'
+    else
+        printf 'unobserved\tuplink_integrity\t%s\n' \
+            "the trace records payload octets, not PDCP headers, so whether this uplink was integrity protected at all (NIA0 in some deployments) is not visible to this reader"
+    fi
+    printf 'unobserved\tdownlink_source\t%s\n' \
+        "whether the downlink packet came from an address the UE should have trusted needs the routing and the peer list, which a payload trace does not carry"
+    if (( ${nri:-0} > 0 || ${nci:-0} > 0 )); then
+        printf 'verdict\tmeasured\n'
+        printf 'signature\t%s\n' "reflection: the uplink carries octets the network sent down, or the UE answered an echo request with its own uplink message; that is the IMP4GT reflection half"
+        local dlr ulr dt
+        if (( ${nri:-0} > 0 )); then
+            dlr=$(vims_fld "$out" reflection_identical.0.dl_record)
+            ulr=$(vims_fld "$out" reflection_identical.0.ul_record)
+            dt=$(vims_fld "$out" reflection_identical.0.delta_s)
+        else
+            dlr=$(vims_fld "$out" reflection_icmp.0.dl_record)
+            ulr=$(vims_fld "$out" reflection_icmp.0.ul_record)
+            dt=$(vims_fld "$out" reflection_icmp.0.delta_s)
+        fi
+        vims_imp4gt_store measured "$dlr" "$ulr" "$dt" \
+            "reflection pair(s) in $(vims_sanitize "$tsv")"
+    else
+        printf 'verdict\tunobserved\n'
+        printf 'unobserved\treflection\t%s\n' \
+            "no uplink payload matched a downlink payload inside ${win}s, so this trace says nothing either way: the UE may never have been asked, and a trace of a UE nobody asked is not evidence that it refuses"
+        vims_imp4gt_store unobserved unobserved unobserved "$win" \
+            "no reflection pair in $(vims_sanitize "$tsv")"
+    fi
+    return 0
+}
+
 # ── SIP and IMS registration ────────────────────────────────────────────
 vims_cmd_sip_parse() {
     local h="${1:-}"
@@ -3814,6 +4041,85 @@ PYP
     chk ts-prefix   "$(vims_cmd_umts_two_stream 0011 44556677 2>/dev/null | vims_fld "$(cat)" xor_hex 2>/dev/null || vims_cmd_umts_two_stream 0011 44556677 | awk -F'\t' '$1=="xor_hex"{print $2}')" "4444"
     chk ts-noargs   "$(vims_cmd_umts_two_stream >/dev/null 2>&1; echo $?)" "2"
 
+    # ── IMP4GT detection: the reflection signature ──────────────────────
+    # RFC 792 echo request and reply, identifier 0x1234, sequence 7, data
+    # 0x10..0x27; the reply differs only in ICMP type and checksum. The second
+    # pair is the same request answered with different data, which is what a
+    # reply that was NOT reflected looks like.
+    local ICMPQ ICMPR ICMPQ2 ICMPR2 tr tr2 tr3
+    ICMPQ=450000340001000040010000C0000209C63364070800A07312340007101112131415161718191A1B1C1D1E1F2021222324252627
+    ICMPR=450000340001000040010000C6336407C00002090000A87312340007101112131415161718191A1B1C1D1E1F2021222324252627
+    ICMPQ2=4500001E0001000040010000C0000209C63364070800D4D2222200090102
+    ICMPR2=4500001E0001000040010000C0000209C63364070000DAD0222200090304
+
+    tr="$d/imp4gt-trace.tsv"
+    printf 'ts\tdirection\tpayload_hex\tintegrity\n' > "$tr"
+    printf '1000.000\tdl\t%s\tnia2\n' "$ICMPQ"  >> "$tr"
+    printf '1000.120\tul\t%s\tnia2\n' "$ICMPR"  >> "$tr"
+    printf '1001.000\tdl\tDEADBEEF0102030405\tnia2\n' >> "$tr"
+    printf '1001.050\tul\tDEADBEEF0102030405\tnia2\n' >> "$tr"
+    out=$(vims_cmd_imp4gt "$tr"); rc=$?
+    chk imp4gt-rc            "$rc" "0"
+    chk imp4gt-records       "$(fld "$out" records)" "4"
+    chk imp4gt-echo-requests "$(fld "$out" echo_requests)" "1"
+    chk imp4gt-identical     "$(fld "$out" reflection_identical.count)" "1"
+    chk imp4gt-identical-dl  "$(fld "$out" reflection_identical.0.dl_record)" "3"
+    chk imp4gt-identical-ul  "$(fld "$out" reflection_identical.0.ul_record)" "4"
+    chk imp4gt-icmp          "$(fld "$out" reflection_icmp.count)" "1"
+    chk imp4gt-icmp-dl       "$(fld "$out" reflection_icmp.0.dl_record)" "1"
+    chk imp4gt-icmp-ul       "$(fld "$out" reflection_icmp.0.ul_record)" "2"
+    chk imp4gt-verdict       "$(fld "$out" verdict)" "measured"
+    chk imp4gt-signature     "$(printf '%s\n' "$out" | grep -c $'^signature\t')" "1"
+    chk imp4gt-integrity-adv "$(printf '%s\n' "$out" | grep -c $'^uplink_integrity\t')" "1"
+
+    # a reply with different data is not a reflection, and a trace with no pair is
+    # unobserved -- never clean
+    tr2="$d/imp4gt-clean.tsv"
+    printf 'ts\tdirection\tpayload_hex\n1.0\tdl\t%s\n2.0\tul\t%s\n' "$ICMPQ2" "$ICMPR2" > "$tr2"
+    out=$(vims_cmd_imp4gt "$tr2"); rc=$?
+    chk imp4gt-clean-rc        "$rc" "0"
+    chk imp4gt-clean-identical "$(fld "$out" reflection_identical.count)" "0"
+    chk imp4gt-clean-icmp      "$(fld "$out" reflection_icmp.count)" "0"
+    chk imp4gt-clean-verdict   "$(fld "$out" verdict)" "unobserved"
+    chk imp4gt-clean-grey      "$(printf '%s\n' "$out" | grep -c $'^unobserved\treflection\t')" "1"
+    chk imp4gt-clean-notclean  "$(printf '%s\n' "$out" | grep -c '^verdict	clean')" "0"
+    chk imp4gt-no-integrity    "$(printf '%s\n' "$out" | grep -c $'^unobserved\tuplink_integrity\t')" "1"
+    chk imp4gt-source-grey     "$(printf '%s\n' "$out" | grep -c $'^unobserved\tdownlink_source\t')" "1"
+
+    # the window is the only threshold: 11 s apart with a 5 s window is no pair
+    tr3="$d/imp4gt-window.tsv"
+    printf 'ts\tdirection\tpayload_hex\n1.0\tdl\tAABBCC\n12.0\tul\tAABBCC\n' > "$tr3"
+    chk imp4gt-window-shut "$(vims_cmd_imp4gt "$tr3" --window 5 | awk -F'\t' '$1=="reflection_identical.count"{print $2}')" "0"
+    chk imp4gt-window-open "$(vims_cmd_imp4gt "$tr3" --window 20 | awk -F'\t' '$1=="reflection_identical.count"{print $2}')" "1"
+
+    # every refusal names what is missing and is a usage answer, not a finding
+    chk imp4gt-noargs     "$(vims_cmd_imp4gt >/dev/null 2>&1; echo $?)" "2"
+    chk imp4gt-missing    "$(vims_cmd_imp4gt "$d/nothere.tsv" >/dev/null 2>&1; echo $?)" "2"
+    chk imp4gt-badwin     "$(vims_cmd_imp4gt "$tr" --window later >/dev/null 2>&1; echo $?)" "2"
+    chk imp4gt-badflag    "$(vims_cmd_imp4gt "$tr" --nope >/dev/null 2>&1; echo $?)" "2"
+    : > "$d/imp4gt-empty.tsv"
+    chk imp4gt-empty      "$(vims_cmd_imp4gt "$d/imp4gt-empty.tsv" >/dev/null 2>&1; echo $?)" "2"
+    printf 'a\tb\tc\n' > "$d/imp4gt-badheader.tsv"
+    chk imp4gt-badheader  "$(vims_cmd_imp4gt "$d/imp4gt-badheader.tsv" >/dev/null 2>&1; echo $?)" "2"
+    printf 'ts\tdirection\n1\tdl\n' > "$d/imp4gt-nopayload.tsv"
+    chk imp4gt-nopayload  "$(vims_cmd_imp4gt "$d/imp4gt-nopayload.tsv" >/dev/null 2>&1; echo $?)" "2"
+    printf 'ts\tbearing\n1\tdl\n' > "$d/imp4gt-nodir.tsv"
+    chk imp4gt-nodir      "$(vims_cmd_imp4gt "$d/imp4gt-nodir.tsv" >/dev/null 2>&1; echo $?)" "2"
+
+    # the store is append-only and every row carries a verdict word
+    chk imp4gt-store-header   "$(head -1 "$(vims_imp4gt_tsv)" | cut -f2)" "verdict"
+    chk imp4gt-store-measured "$(awk -F'\t' 'NR>1 && $2=="measured"' "$(vims_imp4gt_tsv)" | wc -l > 0 && echo ok)" "ok"
+    chk imp4gt-store-grey     "$(awk -F'\t' 'NR>1 && $2=="unobserved"' "$(vims_imp4gt_tsv)" | wc -l > 0 && echo ok)" "ok"
+    chk imp4gt-store-cols     "$(awk -F'\t' 'NR==1{print NF}' "$(vims_imp4gt_tsv)")" "6"
+
+    # the plan verb that hands the transmit half off
+    local planf
+    planf=$(vims_plan imp4gt-lab 2>/dev/null | awk -F'\t' '$1=="plan_file"{print $2}')
+    chk imp4gt-plan-file   "$([[ -s "$planf" ]] && echo yes)" "yes"
+    chk imp4gt-plan-status "$(grep -c '^status: handoff' "$planf")" "1"
+    chk imp4gt-plan-model  "$(grep -c 'C-RNTI' "$planf" > /dev/null && echo cited)" "cited"
+    chk imp4gt-plan-bad    "$(vims_plan nope >/dev/null 2>&1; echo $?)" "2"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
     trap - EXIT
@@ -3854,6 +4160,7 @@ vims_menu() {
   [4]  parse a SIP message (hex)
   [5]  IMS registration flow (hex)
   [6]  IMP4GT model (sequence + preconditions)
+  [6b] IMP4GT detection: reflection signature in a trace
   [7]  write a handoff plan (revolte-capture / imp4gt-lab)
   [8]  register a UE with a real AKAv1-MD5 response
   [9]  place a call against a lab peer (INVITE, auth, ACK, BYE)
@@ -3877,6 +4184,9 @@ M
             5) read -rp "  hex> " h; vims_cmd_ims_registration "$h" | column -t -s$'\t' 2>/dev/null || true
                read -rp "  press enter " _ ;;
             6) vims_imp4gt_model | column -t -s$'\t' 2>/dev/null || vims_imp4gt_model
+               read -rp "  press enter " _ ;;
+            b|B) read -rp "  trace tsv> " p
+               vims_cmd_imp4gt "$p" | column -t -s$'\t' 2>/dev/null || vims_cmd_imp4gt "$p"
                read -rp "  press enter " _ ;;
             9) read -rp "  host[:port]> " h; read -rp "  callee> " t
                read -rp "  auth none|digest|aka> " m
@@ -3928,6 +4238,7 @@ vims_cli_main() {
         --revolte-demo)           vims_cmd_revolte_demo "${1:-}" "${2:-}" ;;
         --keystream-recover)      vims_cmd_keystream_recover "${1:-}" "${2:-}" "${3:-}" ;;
         --imp4gt-model)           vims_imp4gt_model ;;
+        --imp4gt)                 vims_cmd_imp4gt "$@" ;;
         --sip-parse)              vims_cmd_sip_parse "${1:-}" ;;
         --sip-build)              vims_sip_build "$@" ;;
         --umts-count-c)     vims_umts_count_c "${1:-0}" "${2:-0}" ;;
@@ -3964,6 +4275,8 @@ Usage: $0 COMMAND
   --revolte-demo <pt1-hex> <pt2-hex>        same-keystream XOR demonstration
   --keystream-recover <ct> <known-pt> [ct2] recover the keystream and decrypt
   --imp4gt-model                            IMP4GT sequence and preconditions
+  --imp4gt <tsv> [--window seconds]         detect the IMP4GT reflection in a
+                                            trace (ts, direction, payload_hex)
   --sip-parse <hex>                         SIP request/response, headers, SDP
   --sip-build <register|register-auth|challenge|invite> [key=value ...]
                                             build the message as wire bytes

@@ -1500,6 +1500,450 @@ nasf_cmd_plan() {
 }
 
 # ── selftest — no radio, no root, no network ────────────────────────────
+# ── Key derivation and NAS protection ───────────────────────────────────
+# TS 33.401 (EPS key hierarchy), TS 33.501 (5G key hierarchy), TS 35.206
+# (Milenage), TS 24.301 (NAS COUNT and MAC-I), TS 33.220 Annex B.2 (KDF).
+#
+# What this section does and does not claim.
+#
+# Everything except the Milenage run is arithmetic this build does itself: the
+# generic key derivation function is HMAC-SHA-256 over an input string built
+# octet by octet (S = FC || P0 || L0 [|| P1 || L1], TS 33.220 Annex B.2), so the
+# part that can be wrong is the *shape* of that string -- which octets, in which
+# order, with which length fields. That shape is asserted in the selftest
+# against fixed answers rather than assumed, and the HMAC is checked against a
+# published RFC 4231 test case. The Milenage run is delegated to
+# tools/gsm_crypto.py, the implementation the rest of this toolkit already uses.
+#
+# The FC octets are the part this build cannot re-read: there is no copy of
+# TS 33.220 Table B.1 or TS 33.401 Annex A on this machine to quote, so each FC
+# is reported as `advertised` beside the clause it is taken from and never as
+# measured. A derivation whose input shape is checked but whose FC constant is
+# only cited is exactly the grey this toolkit refuses to paint clean.
+NASF_KDF_FC_KASME=16     # 0x10  TS 33.401 Annex A: KASME from CK||IK and the SN identity
+NASF_KDF_FC_KAUSF=106    # 0x6A  TS 33.501 Annex A: KAUSF
+NASF_KDF_FC_KSEAF=108    # 0x6C  TS 33.501 Annex A (the same clause modules/13_nr_core.sh:1589 cites)
+NASF_KDF_FC_KAMF=109     # 0x6D  TS 33.501 Annex A: KAMF from KSEAF and the SUPI
+NASF_KDF_FC_KNASENC=3    # 0x03  TS 33.401 Annex A: KNASenc (algorithm type, then algorithm id)
+NASF_KDF_FC_KNASINT=4    # 0x04  TS 33.401 Annex A: KNASint
+NASF_NAS_ALG_TYPE=1      # 0x01  TS 33.401 Annex A: the NAS algorithm type distinguisher
+NASF_NAS_MAC_OCTETS=4    # TS 24.301: the NAS MAC-I carried by a protected message is four octets
+NASF_NAS_ALG_EEA2_ID=2   # 128-EEA2 is algorithm identity 2 (EEA0 null, EEA1 SNOW 3G, EEA2 AES-CTR)
+NASF_NAS_ALG_NIA2_ID=2   # 128-NIA2 is algorithm identity 2 (NIA0 null, NIA1 SNOW 3G, NIA2 AES-CMAC)
+
+nasf_keys_tsv() { printf '%s/keys.tsv' "$NASF_DIR"; }
+
+# Append-only, like every store in this toolkit: the header is written once and
+# no row is ever rewritten, so two runs that disagree both stay on the record.
+nasf_key_store_append() {  # <kind> <label> <value> <algo> <note>
+    local f; f=$(nasf_keys_tsv)
+    mkdir -p "$NASF_DIR" 2>/dev/null
+    if [[ ! -s "$f" ]]; then
+        printf 'ts\tkind\tlabel\tvalue\talgo\tnote\n' > "$f" 2>/dev/null || {
+            printf 'ERROR\tcannot write %s\n' "$f" >&2; return 1; }
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'unknown')" \
+        "$(nasf_sanitize "${1:-unobserved}")" \
+        "$(nasf_sanitize "${2:-unobserved}")" \
+        "$(nasf_sanitize "${3:-unobserved}")" \
+        "$(nasf_sanitize "${4:-unobserved}")" \
+        "$(nasf_sanitize "${5:-}")" >> "$f" 2>/dev/null
+}
+
+# ── primitives: raw bytes, HMAC-SHA-256, XOR, ASCII ─────────────────────
+# Bytes are written to stdout and never captured: a command substitution drops
+# NUL octets, and half of what this section handles is full of them.
+nasf_bytes() {  # <hex> -> raw octets on stdout
+    local h="${1:-}" esc="" i
+    for (( i = 0; i < ${#h}; i += 2 )); do esc+="\\x${h:$i:2}"; done
+    printf '%b' "$esc"
+}
+
+nasf_hmac_sha256() {  # <key-hex> <data-hex> -> 32 octets as hex
+    local key="${1:-}" data="${2:-}" out
+    command -v openssl >/dev/null 2>&1 || {
+        printf 'ERROR\topenssl is not on PATH: it is the HMAC-SHA-256 every derivation here rests on\n' >&2
+        return 1; }
+    nasf_is_hex "$key" && (( ${#key} > 0 )) || {
+        printf 'ERROR\tthe derivation key is not hex octets\n' >&2; return 1; }
+    nasf_is_hex "$data" || { printf 'ERROR\tthe derivation input is not hex octets\n' >&2; return 1; }
+    out=$(nasf_bytes "$data" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${key,,}" 2>/dev/null)
+    [[ -n "$out" ]] || {
+        printf 'ERROR\topenssl produced no HMAC: this build has openssl but its dgst -mac HMAC path failed\n' >&2
+        return 1; }
+    out="${out##* }"
+    printf '%s' "${out^^}"
+}
+
+nasf_xor_hex() {  # <a-hex> <b-hex> same length -> hex
+    local a="${1:-}" b="${2:-}" out="" i
+    nasf_is_hex "$a" && nasf_is_hex "$b" && (( ${#a} == ${#b} )) || return 1
+    for (( i = 0; i < ${#a}; i += 2 )); do
+        out+=$(printf '%02X' $(( 16#${a:$i:2} ^ 16#${b:$i:2} )))
+    done
+    printf '%s' "$out"
+}
+
+nasf_ascii_hex() {  # <ascii> -> hex
+    local s="${1:-}" out="" i
+    for (( i = 0; i < ${#s}; i++ )); do out+=$(printf '%02X' "'${s:$i:1}"); done
+    printf '%s' "$out"
+}
+
+# ── the generic KDF (TS 33.220 Annex B.2) ───────────────────────────────
+nasf_kdf_input() {  # <fc> <p0-hex> [<p1-hex>] -> S
+    local fc="${1:-}" p0="${2:-}" p1="${3:-}" s
+    s=$(printf '%02X' "$(( fc & 0xFF ))")
+    s+="${p0}$(printf '%04X' $(( ${#p0} / 2 )))"
+    if [[ -n "$p1" ]]; then s+="${p1}$(printf '%04X' $(( ${#p1} / 2 )))"; fi
+    printf '%s' "${s^^}"
+}
+
+nasf_kdf() {  # <key-hex> <fc> <p0-hex> [<p1-hex>]
+    local key="${1:-}" s
+    shift || true
+    s=$(nasf_kdf_input "$@") || return 1
+    nasf_hmac_sha256 "$key" "$s"
+}
+
+# ── Milenage (TS 35.206) through the tree's own implementation ──────────
+nasf_milenage_tool() { printf '%s/tools/gsm_crypto.py' "$IMSISTING_ROOT"; }
+
+nasf_milenage() {  # <k> <opc> <rand> [<sqn>] [<amf>] -> rows "fN<TAB>hex"
+    local tool; tool=$(nasf_milenage_tool)
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR\tpython3 is not on PATH: tools/gsm_crypto.py is the Milenage implementation this build reuses\n' >&2
+        return 1; }
+    [[ -f "$tool" ]] || {
+        printf 'ERROR\tmissing %s: it is the Milenage implementation this build reuses\n' "$tool" >&2
+        return 1; }
+    python3 - "$tool" "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" <<'PY'
+import importlib.util
+import sys
+
+tool, k, opc, rand, sqn, amf = sys.argv[1:7]
+for name, val in (("K", k), ("OPc", opc), ("RAND", rand)):
+    if len(val) != 32:
+        sys.stderr.write("ERROR\t%s must be 16 octets of hex, got %d characters\n" % (name, len(val)))
+        raise SystemExit(1)
+spec = importlib.util.spec_from_file_location("gsm_crypto_mod", tool)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+kw = {}
+if len(sqn) == 12 and len(amf) == 4:
+    kw["sqn"] = bytes.fromhex(sqn)
+    kw["amf"] = bytes.fromhex(amf)
+elif sqn or amf:
+    sys.stderr.write("ERROR\tSQN must be 6 octets and AMF 2 octets of hex\n")
+    raise SystemExit(1)
+out = mod.milenage(bytes.fromhex(k), bytes.fromhex(opc), bytes.fromhex(rand), **kw)
+for name in ("f1", "f1*", "f2", "f3", "f4", "f5", "f5*"):
+    if name in out:
+        print("%s\t%s" % (name, out[name].hex().upper()))
+PY
+}
+
+# ── NAS confidentiality and integrity (TS 33.401 Annex C, TS 33.501 Annex D) ──
+# The 128-bit initial counter block AES-CTR takes: COUNT (4 octets, big endian)
+# || BEARER (5 bits) and DIRECTION (1 bit) in the next octet || 26 zero bits,
+# the whole 64-bit value padded with 64 zero octets to the 128 bits the cipher
+# wants. The 26 zero bits are why the second octet is (bearer << 3) | (dir << 2).
+nasf_nas_iv() {  # <count> <bearer> <direction> -> 16 octets hex
+    local c="${1:-0}" b="${2:-0}" d="${3:-0}" s
+    s=$(printf '%08X%02X' "$(( c & 0xFFFFFFFF ))" "$(( (( b & 0x1F) << 3) | (( d & 1) << 2) ))")
+    s+="000000"              # the remaining 26 zero bits of the 64-bit prefix
+    s+="0000000000000000"    # the 64 zero bits that pad it to 128
+    printf '%s' "$s"
+}
+
+nasf_nea2_decrypt() {  # <key-hex> <count> <bearer> <direction> <ciphertext-hex>
+    local key="${1:-}" iv pt
+    command -v openssl >/dev/null 2>&1 || {
+        printf 'ERROR\topenssl is not on PATH: 128-EEA2 is AES-CTR and this build uses openssl for it\n' >&2
+        return 1; }
+    iv=$(nasf_nas_iv "${2:-0}" "${3:-0}" "${4:-0}")
+    pt=$(nasf_bytes "${5:-}" | openssl enc -d -aes-128-ctr -K "${key,,}" -iv "$iv" -nopad 2>/dev/null \
+         | od -An -v -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+    [[ -n "$pt" ]] || {
+        printf 'ERROR\topenssl could not run AES-128-CTR with the key given (16 octets of hex are required)\n' >&2
+        return 1; }
+    printf '%s' "$pt"
+}
+
+nasf_nia2_mac() {  # <key-hex> <count> <bearer> <direction> <message-hex> -> 4 octets
+    local key="${1:-}" pref mac
+    command -v openssl >/dev/null 2>&1 || {
+        printf 'ERROR\topenssl is not on PATH: 128-NIA2 is AES-CMAC and this build uses openssl for it\n' >&2
+        return 1; }
+    pref=$(printf '%08X%02X' "$(( ${2:-0} & 0xFFFFFFFF ))" "$(( (( ${3:-0} & 0x1F) << 3) | (( ${4:-0} & 1) << 2) ))")
+    mac=$(nasf_bytes "${pref}${5:-}" \
+          | openssl mac -macopt cipher:AES-128-CBC -macopt "hexkey:${key,,}" CMAC 2>/dev/null)
+    [[ -n "$mac" ]] || {
+        printf 'ERROR\tthis openssl has no working `mac -macopt cipher:AES-128-CBC CMAC` path: 128-NIA2 cannot be computed here\n' >&2
+        return 1; }
+    printf '%s' "${mac:0:$(( NASF_NAS_MAC_OCTETS * 2 ))}" | tr 'a-f' 'A-F'
+}
+
+# ── --key-derive ────────────────────────────────────────────────────────
+nasf_cmd_key_derive() {
+    local autn="" rnd="" opc="" k="" snid="" supi="" count="0" quiet=""
+    local -a pos=()
+    while (( $# > 0 )); do
+        case "$1" in
+            --k)        k="${2:-}";    shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --sn-id|--snid) snid="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --supi|--imsi)  supi="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --count)    count="${2:-0}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --no-store) quiet=1; shift ;;
+            -*) printf 'ERROR\t--key-derive does not take %s (see --help)\n' "$(nasf_sanitize "$1")" >&2; return 2 ;;
+            *)  pos+=( "$1" ); shift ;;
+        esac
+    done
+    autn="${pos[0]:-}"; rnd="${pos[1]:-}"; opc="${pos[2]:-}"
+    local i=0 name
+    for name in AUTN RAND OPc; do
+        i=$(( i + 1 ))
+        [[ -n "${pos[$((i-1))]:-}" ]] || {
+            printf 'ERROR\t--key-derive needs three positionals: <AUTN> <RAND> <OPc> (missing %s)\n' "$name" >&2
+            return 2; }
+    done
+    autn=$(nasf_nfc "$autn"); rnd=$(nasf_nfc "$rnd"); opc=$(nasf_nfc "$opc"); k=$(nasf_nfc "$k")
+    nasf_is_hex "$autn" && (( ${#autn} == 32 )) || {
+        printf 'ERROR\tAUTN must be 16 octets of hex (32 characters), got %s\n' "${#autn}" >&2; return 2; }
+    nasf_is_hex "$rnd" && (( ${#rnd} == 32 )) || {
+        printf 'ERROR\tRAND must be 16 octets of hex (32 characters), got %s\n' "${#rnd}" >&2; return 2; }
+    nasf_is_hex "$opc" && (( ${#opc} == 32 )) || {
+        printf 'ERROR\tOPc must be 16 octets of hex (32 characters), got %s\n' "${#opc}" >&2; return 2; }
+    [[ -n "$k" ]] || {
+        printf 'ERROR\t--key-derive needs --k <Ki>: Milenage f1..f5 are keyed by the subscriber key, and the AUTN alone does not hold it\n' >&2
+        return 1; }
+    nasf_is_hex "$k" && (( ${#k} == 32 )) || {
+        printf 'ERROR\t--k must be 16 octets of hex (32 characters), got %s\n' "${#k}" >&2; return 2; }
+
+    # AUTN = (SQN xor AK) || AMF || MAC-A, carried beside RAND in the
+    # Authentication Request (TS 33.401: RAND(16) || AUTN(16)).
+    local sqn_ak="${autn:0:12}" amf="${autn:12:4}" mac_a="${autn:16:16}"
+    printf 'autn\t%s\n' "$autn"
+    printf 'autn.sqn_xor_ak\t%s\n' "$sqn_ak"
+    printf 'autn.amf\t%s\n' "$amf"
+    printf 'autn.mac_a\t%s\n' "$mac_a"
+    printf 'rand\t%s\n' "$rnd"
+
+    local m ak res ck ik sqn
+    m=$(nasf_milenage "$k" "$opc" "$rnd" "") || return 1
+    ak=$(printf '%s\n' "$m" | awk -F'\t' '$1=="f5"{print $2; exit}')
+    res=$(printf '%s\n' "$m" | awk -F'\t' '$1=="f2"{print $2; exit}')
+    ck=$(printf '%s\n' "$m" | awk -F'\t' '$1=="f3"{print $2; exit}')
+    ik=$(printf '%s\n' "$m" | awk -F'\t' '$1=="f4"{print $2; exit}')
+    [[ -n "$ak" && -n "$res" && -n "$ck" && -n "$ik" ]] || {
+        printf 'ERROR\tthe Milenage run returned no f2/f3/f4/f5: nothing below can be derived\n' >&2; return 1; }
+    printf 'milenage.f5_ak\t%s\n' "$ak"
+    sqn=$(nasf_xor_hex "$sqn_ak" "$ak") || {
+        printf 'ERROR\tAK and the AUTN field could not be combined\n' >&2; return 1; }
+    printf 'sqn.recovered\t%s\n' "$sqn"
+
+    # f1 needs SQN, which is why the run above came first: AK protects it in the
+    # AUTN and is what recovers it.
+    local m1 mac_calc
+    m1=$(nasf_milenage "$k" "$opc" "$rnd" "$sqn" "$amf") || return 1
+    mac_calc=$(printf '%s\n' "$m1" | awk -F'\t' '$1=="f1"{print $2; exit}')
+    printf 'milenage.f1_mac_a\t%s\n' "$mac_calc"
+    if [[ "$mac_calc" == "$mac_a" ]]; then
+        printf 'autn.verdict\tmeasured verified\n'
+        printf 'autn.note\t%s\n' "the MAC-A carried in the AUTN is the one this Ki/OPc/RAND/SQN produce, so the vector is self-consistent and SQN above is the SQN the vector carries"
+    else
+        printf 'autn.verdict\tmeasured mismatch\n'
+        printf 'autn.note\t%s\n' "the recomputed MAC-A differs from the one in the AUTN: either the key, OPc or RAND is not the one the vector was built from, or the AUTN is not from this subscriber (this is the check that catches a spoofed or replayed vector)"
+    fi
+    printf 'milenage.f2_res\t%s\n' "$res"
+    printf 'milenage.f3_ck\t%s\n' "$ck"
+    printf 'milenage.f4_ik\t%s\n' "$ik"
+
+    # EPS: KASME = KDF(CK||IK), TS 33.401 Annex A.
+    local snid_hex="" kasme knasenc knasint
+    if [[ -n "$snid" ]]; then snid_hex=$(nasf_ascii_hex "$snid"); fi
+    kasme=$(nasf_kdf "${ck}${ik}" "$NASF_KDF_FC_KASME" "$snid_hex") || return 1
+    printf 'sn_id\t%s\n' "${snid:-unobserved}"
+    printf 'kdf.kasme\t%s\n' "$kasme"
+    printf 'kdf.kasme.fc\t%02X advertised\t%s\n' "$NASF_KDF_FC_KASME" "TS 33.401 Annex A: the FC is cited, not re-read (no copy of the clause is on this machine)"
+    if [[ -z "$snid" ]]; then
+        printf 'unobserved\tkdf.kasme.p0\tthe serving network identity was not given (--sn-id), so P0 is empty (L0 = 0000). Whether that is the form the network used cannot be told from here\n'
+    fi
+    # KNASenc / KNASint = KDF(KASME), TS 33.401 Annex A: the algorithm type
+    # distinguisher is 0x01 for NAS and the second parameter is the algorithm id.
+    knasenc=$(nasf_kdf "$kasme" "$NASF_KDF_FC_KNASENC" "$(printf '%02X' "$NASF_NAS_ALG_TYPE")" "$(printf '%02X' "$NASF_NAS_ALG_EEA2_ID")") || return 1
+    knasint=$(nasf_kdf "$kasme" "$NASF_KDF_FC_KNASINT" "$(printf '%02X' "$NASF_NAS_ALG_TYPE")" "$(printf '%02X' "$NASF_NAS_ALG_NIA2_ID")") || return 1
+    printf 'kdf.knasenc\t%s\n' "$knasenc"
+    printf 'kdf.knasint\t%s\n' "$knasint"
+    printf 'kdf.knas.fc\t%02X,%02X advertised\t%s\n' "$NASF_KDF_FC_KNASENC" "$NASF_KDF_FC_KNASINT" "TS 33.401 Annex A: FC and the 0x01 NAS algorithm type are cited, not re-read"
+
+    # 5G: KAUSF -> KSEAF -> KAMF, TS 33.501 Annex A.
+    if [[ -n "$supi" && -n "$snid" ]]; then
+        local kausf kseaf kamf
+        kausf=$(nasf_kdf "${ck}${ik}" "$NASF_KDF_FC_KAUSF" "$snid_hex") || return 1
+        kseaf=$(nasf_kdf "$kausf" "$NASF_KDF_FC_KSEAF" "$snid_hex") || return 1
+        kamf=$(nasf_kdf "$kseaf" "$NASF_KDF_FC_KAMF" "$(nasf_ascii_hex "$supi")") || return 1
+        printf 'kdf.kausf\t%s\n' "$kausf"
+        printf 'kdf.kseaf\t%s\n' "$kseaf"
+        printf 'kdf.kamf\t%s\n' "$kamf"
+        printf 'kdf.kamf.fc\t%02X,%02X,%02X advertised\t%s\n' "$NASF_KDF_FC_KAUSF" "$NASF_KDF_FC_KSEAF" "$NASF_KDF_FC_KAMF" \
+            "TS 33.501 Annex A: the FCs are cited, not re-read; KAMF takes the SUPI as its parameter and KSEAF the serving network name"
+    else
+        printf 'unobserved\tkdf.kamf\tthe 5G chain needs both --supi and --sn-id (TS 33.501 Annex A: KAMF is keyed with the SUPI, KSEAF with the serving network name), so KAUSF/KSEAF/KAMF were not derived\n'
+    fi
+    printf 'nas_count\t%s\n' "$count"
+
+    if [[ -z "$quiet" ]]; then
+        nasf_key_store_append derive kasme "$kasme" nea2 "ki-runs-with-opc; fc-cited" >/dev/null 2>&1
+        nasf_key_store_append derive knasenc "$knasenc" nea2 "algorithm id $(printf '%02X' "$NASF_NAS_ALG_EEA2_ID")" >/dev/null 2>&1
+        nasf_key_store_append derive knasint "$knasint" nia2 "algorithm id $(printf '%02X' "$NASF_NAS_ALG_NIA2_ID")" >/dev/null 2>&1
+        printf 'store\t%s\n' "$(nasf_keys_tsv)"
+    fi
+    return 0
+}
+
+# ── --key-store ─────────────────────────────────────────────────────────
+nasf_cmd_key_store() {
+    local add=0 label="" value=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --add) add=1; label="${2:-}"; value="${3:-}"
+                   shift $(( $# >= 3 ? 3 : $# )) ;;
+            -*) printf 'ERROR\t--key-store does not take %s (want --add <label> <hex>)\n' "$(nasf_sanitize "$1")" >&2; return 2 ;;
+            *)  printf 'ERROR\t--key-store takes no positional arguments (got %s)\n' "$(nasf_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    local f; f=$(nasf_keys_tsv)
+    if (( add == 1 )); then
+        [[ -n "$label" && -n "$value" ]] || {
+            printf 'ERROR\t--key-store --add needs <label> <hex>: neither is derivable from the other\n' >&2; return 2; }
+        nasf_is_hex "$value" || {
+            printf 'ERROR\t--key-store --add wants hex octets as its value, got %s\n' "$(nasf_sanitize "$value")" >&2; return 2; }
+        nasf_key_store_append manual "$label" "${value^^}" unstated "added by hand: the store does not claim this key was derived here" || return 1
+        printf 'added\t%s\n' "$(nasf_sanitize "$label")"
+        printf 'store\t%s\n' "$f"
+        return 0
+    fi
+    if [[ ! -s "$f" ]]; then
+        printf 'store\t%s\n' "$f"
+        printf 'unobserved\tkey_store\tthe store holds no rows yet: derive one key with --key-derive or append one with --key-store --add. An empty store is grey, not clean\n'
+        return 0
+    fi
+    printf 'store\t%s\n' "$f"
+    printf 'store_rows\t%s\n' "$(( $(wc -l < "$f") - 1 ))"
+    cat "$f"
+    return 0
+}
+
+# ── --decrypt ───────────────────────────────────────────────────────────
+nasf_cmd_decrypt() {
+    local hex="" key="" alg="nea2" ikey="" ialg="nia2" imac="" count="0" bearer="0" dir="0"
+    while (( $# > 0 )); do
+        case "$1" in
+            --key)       key="${2:-}";   shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --alg)       alg="${2:-nea2}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --int-key)   ikey="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --int-alg)   ialg="${2:-nia2}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --integrity) imac="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --count)     count="${2:-0}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --bearer)    bearer="${2:-0}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --direction) dir="${2:-0}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            -*) printf 'ERROR\t--decrypt does not take %s (see --help)\n' "$(nasf_sanitize "$1")" >&2; return 2 ;;
+            *)  hex="$1"; shift ;;
+        esac
+    done
+    [[ -n "$hex" ]] || {
+        printf 'ERROR\t--decrypt needs one positional: the NAS ciphertext in hex\n' >&2; return 2; }
+    hex=$(nasf_nfc "$hex")
+    nasf_is_hex "$hex" && (( ${#hex} >= 2 )) || {
+        printf 'ERROR\t--decrypt wants hex octets, got %s\n' "$(nasf_sanitize "$hex")" >&2; return 2; }
+    [[ -n "$key" ]] || {
+        printf 'ERROR\t--decrypt needs --key <KNASenc>: the ciphering key cannot be recovered from the ciphertext\n' >&2
+        return 1; }
+    key=$(nasf_nfc "$key")
+    nasf_is_hex "$key" && (( ${#key} == 32 )) || {
+        printf 'ERROR\t--key must be 16 octets of hex (32 characters), got %s\n' "${#key}" >&2; return 2; }
+    (( count >= 0 && count <= 4294967295 )) || {
+        printf 'ERROR\t--count must be a 32-bit NAS COUNT, got %s\n' "$(nasf_sanitize "$count")" >&2; return 2; }
+    (( bearer >= 0 && bearer <= 31 )) || {
+        printf 'ERROR\t--bearer (or the 5G bearer identity) is 5 bits, 0..31, got %s\n' "$(nasf_sanitize "$bearer")" >&2; return 2; }
+    (( dir == 0 || dir == 1 )) || {
+        printf 'ERROR\t--direction is one bit: 0 uplink, 1 downlink, got %s\n' "$(nasf_sanitize "$dir")" >&2; return 2; }
+
+    printf 'input_octets\t%s\n' "$(( ${#hex} / 2 ))"
+    printf 'count\t%s\n' "$count"
+    printf 'bearer\t%s\n' "$bearer"
+    printf 'direction\t%s\n' "$dir"
+    local pt=""
+    case "$alg" in
+        nea2|eea2|128-eea2)
+            pt=$(nasf_nea2_decrypt "$key" "$count" "$bearer" "$dir" "$hex") || return 1
+            printf 'alg\tnea2 (128-EEA2, AES-CTR)\n'
+            printf 'iv\t%s\n' "$(nasf_nas_iv "$count" "$bearer" "$dir")"
+            printf 'plaintext_hex\t%s\n' "$pt" ;;
+        nea1|eea1|128-eea1)
+            printf 'alg\tnea1 (128-EEA1, SNOW 3G)\n'
+            printf 'unobserved\tplaintext\tnothing was decrypted: 128-EEA1 is SNOW 3G (TS 35.201/35.202) and this build carries no SNOW 3G implementation, so no keystream block is claimed\n'
+            return 1 ;;
+        nea0|eea0)
+            printf 'alg\tnea0 (null ciphering)\n'
+            printf 'plaintext_hex\t%s\n' "$hex"
+            pt="$hex"
+            printf 'advertised\tplaintext\tNEA0 is no ciphering, so the input is the plaintext by definition; nothing here proves it came from a UE\n' ;;
+        *)  printf 'ERROR\tunknown --alg %s (want nea2, nea1 or nea0)\n' "$(nasf_sanitize "$alg")" >&2; return 2 ;;
+    esac
+
+    # What the plaintext is, if its first octet says so: the EPS and 5GS NAS
+    # protocol discriminators are 0x07 and 0x7E (TS 24.301, TS 24.501).
+    if [[ -n "$pt" ]]; then
+        local epd="${pt:0:2}" gen=""
+        case "$epd" in
+            07) gen=eps ;;
+            7E) gen=5gs ;;
+        esac
+        if [[ -n "$gen" ]]; then
+            local dec
+            dec=$(nasf_cmd_decode "$gen" "$pt" 2>/dev/null)
+            printf 'generation\t%s\n' "$gen"
+            printf 'message_name\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="message_name"{print $2; exit}')"
+            printf 'security_header_type\t%s\n' "$(printf '%s\n' "$dec" | awk -F'\t' '$1=="security_header_type"{print $2; exit}')"
+        else
+            printf 'unobserved\tmessage_name\tthe first octet %s is neither the EPS (07) nor the 5GS (7E) protocol discriminator, so this build does not claim the plaintext is a NAS message\n' "$epd"
+        fi
+    fi
+
+    # Integrity: the MAC-I is the last four octets of a protected message and the
+    # algorithm input is COUNT || BEARER || DIRECTION || the message without it.
+    if [[ -n "$imac" ]]; then
+        imac=$(nasf_nfc "$imac")
+        [[ -n "$ikey" ]] || {
+            printf 'ERROR\t--integrity needs --int-key <KNASint>: the integrity key is not in the message\n' >&2; return 1; }
+        ikey=$(nasf_nfc "$ikey")
+        case "$ialg" in
+            nia2|eia2|128-nia2) ;;
+            nia1|eia1|128-nia1)
+                printf 'unobserved\tintegrity\tnothing was checked: 128-NIA1 is SNOW 3G f9 (TS 35.201/35.202) and this build carries no SNOW 3G implementation\n'
+                return 1 ;;
+            *) printf 'ERROR\tunknown --int-alg %s (want nia2 or nia1)\n' "$(nasf_sanitize "$ialg")" >&2; return 2 ;;
+        esac
+        local body="${hex:0:$(( ${#hex} - NASF_NAS_MAC_OCTETS * 2 ))}" calc
+        calc=$(nasf_nia2_mac "$ikey" "$count" "$bearer" "$dir" "$body") || return 1
+        printf 'mac.input_octets\t%s\n' "$(( ${#body} / 2 ))"
+        printf 'mac.calculated\t%s\n' "$calc"
+        printf 'mac.carried\t%s\n' "${imac^^}"
+        if [[ "${calc^^}" == "${imac^^}" ]]; then
+            printf 'integrity\tmeasured verified\n'
+        else
+            printf 'integrity\tmeasured mismatch\n'
+        fi
+        printf 'advertised\tmac.input\tthe MAC input excludes the trailing %s octets (the MAC-I field itself), which is the convention this build reads out of TS 33.401 Annex C rather than verifies\n' "$NASF_NAS_MAC_OCTETS"
+    else
+        printf 'unobserved\tintegrity\tthe NIA2 MAC-I was not supplied (--integrity), so the plaintext is decrypted but not known to be authentic\n'
+    fi
+    return 0
+}
+
 nasf_selftest() {
     local bad=0
     chk() {
@@ -1923,6 +2367,96 @@ not decoded by an outside implementation\n'
     rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
+
+    # ── 12. Key derivation: the KDF shape, the HMAC, the AUTN check ──────
+    # RFC 4231 section 4.2 test case 1 (key = twenty 0x0b octets, data = "Hi
+    # There"). A published answer, so this checks the primitive itself and not
+    # openssl against openssl.
+    chk hmac-rfc4231 "$(nasf_hmac_sha256 "$(printf '0B%.0s' {1..20})" 4869205468657265)" \
+        "B0344C61D8DB38535CA8AFCEAF0BF12B881DC200C9833DA726E9376C2E32CFF7"
+    # TS 33.220 Annex B.2: S = FC || P0 || L0 [|| P1 || L1], lengths two octets.
+    chk kdf-shape-p0    "$(nasf_kdf_input 16 414243)" "104142430003"
+    chk kdf-shape-p1    "$(nasf_kdf_input 3 01 02)"   "03010001020001"
+    chk kdf-shape-empty "$(nasf_kdf_input 16 '')"     "100000"
+    chk nas-iv-layout   "$(nasf_nas_iv 43 7 1)"       "0000002B3C0000000000000000000000"
+    chk nas-iv-uplink   "$(nasf_nas_iv 1 0 0)"        "00000001000000000000000000000000"
+
+    local mk=465B5CE8B199B49FAA5F0A2EE238A6BC mopc=CD63CB71954A9F4E48A5994E37A02BAF
+    local mr=23553CBE9637A89D218AE64D30F4C8A9 msqn=FF9BB4D0B607 mamf=B9B9
+    local mo mrow makv akv autn2 out2
+    mo=$(nasf_milenage "$mk" "$mopc" "$mr" "$msqn" "$mamf")
+    chk milenage-f1 "$(printf '%s\n' "$mo" | awk -F'\t' '$1=="f1"{print length($2)}')" "16"
+    chk milenage-f2 "$(printf '%s\n' "$mo" | awk -F'\t' '$1=="f2"{print length($2)}')" "16"
+    chk milenage-ck "$(printf '%s\n' "$mo" | awk -F'\t' '$1=="f3"{print length($2)}')" "32"
+    chk milenage-ik "$(printf '%s\n' "$mo" | awk -F'\t' '$1=="f4"{print length($2)}')" "32"
+    chk milenage-ak "$(printf '%s\n' "$mo" | awk -F'\t' '$1=="f5"{print length($2)}')" "12"
+    mrow=$(printf '%s\n' "$mo" | awk -F'\t' '$1=="f1"{print $2}')
+    akv=$(printf '%s\n' "$mo" | awk -F'\t' '$1=="f5"{print $2}')
+    # AUTN = (SQN xor AK) || AMF || MAC-A, the field the Authentication Request
+    # carries beside RAND (TS 33.401).
+    autn2="$(nasf_xor_hex "$msqn" "$akv")${mamf}${mrow}"
+    chk autn-octets "$(printf '%s' "$autn2" | wc -c)" "32"
+    # A round trip through this module's own reader: the vector it just built
+    # must come back with SQN intact and the MAC accepted.
+    out2=$(nasf_cmd_key_derive "$autn2" "$mr" "$mopc" --k "$mk" --no-store)
+    chk derive-verdict    "$(fld "$out2" autn.verdict)" "measured verified"
+    chk derive-sqn        "$(fld "$out2" sqn.recovered)" "$msqn"
+    chk derive-res        "$(fld "$out2" milenage.f2_res)" "$(printf '%s\n' "$mo" | awk -F'\t' '$1=="f2"{print $2}')"
+    chk derive-kasme      "$(printf '%s' "$(fld "$out2" kdf.kasme)" | wc -c)" "64"
+    chk derive-knas-apart "$([[ -n "$(fld "$out2" kdf.knasenc)" && "$(fld "$out2" kdf.knasenc)" != "$(fld "$out2" kdf.knasint)" ]] && echo apart)" "apart"
+    chk derive-5g-grey    "$(printf '%s\n' "$out2" | grep -c $'^unobserved\tkdf.kamf\t')" "1"
+    chk derive-5g-chain   "$(nasf_cmd_key_derive "$autn2" "$mr" "$mopc" --k "$mk" --sn-id mnc001.mcc001.3gppnetwork.org --supi 001010000000001 --no-store | grep -c $'^kdf\.\(kausf\|kseaf\|kamf\)\t')" "3"
+    # One flipped MAC-A octet must be refused as a mismatch, not smoothed over.
+    chk derive-mismatch "$(nasf_cmd_key_derive "${autn2:0:16}0000000000000000" "$mr" "$mopc" --k "$mk" --no-store | awk -F'\t' '$1=="autn.verdict"{print $2}')" "measured mismatch"
+    chk derive-noargs   "$(nasf_cmd_key_derive >/dev/null 2>&1; echo $?)" "2"
+    chk derive-short-autn "$(nasf_cmd_key_derive 0011 "$mr" "$mopc" --k "$mk" >/dev/null 2>&1; echo $?)" "2"
+    chk derive-no-k     "$(nasf_cmd_key_derive "$autn2" "$mr" "$mopc" 2>&1 >/dev/null | grep -c 'needs --k')" "1"
+    chk derive-rc       "$(nasf_cmd_key_derive "$autn2" "$mr" "$mopc" --k "$mk" --no-store >/dev/null 2>&1; echo $?)" "0"
+
+    # ── 13. The append-only key store ───────────────────────────────────
+    rm -f "$(nasf_keys_tsv)"
+    chk store-empty-grey "$(nasf_cmd_key_store | grep -c $'^unobserved\tkey_store')" "1"
+    chk store-under-temp "$(case "$(nasf_keys_tsv)" in "$d"/*) echo under-temp ;; *) echo elsewhere ;; esac)" "under-temp"
+    nasf_cmd_key_derive "$autn2" "$mr" "$mopc" --k "$mk" >/dev/null 2>&1
+    nasf_cmd_key_derive "$autn2" "$mr" "$mopc" --k "$mk" >/dev/null 2>&1
+    chk store-one-header "$(grep -c '^ts	kind	label	value	algo	note$' "$(nasf_keys_tsv)")" "1"
+    chk store-append-only "$(awk 'NR>1' "$(nasf_keys_tsv)" | wc -l)" "6"
+    chk store-add-rc    "$(nasf_cmd_key_store --add manual 00112233445566778899AABBCCDDEEFF >/dev/null 2>&1; echo $?)" "0"
+    chk store-add-nonhex "$(nasf_cmd_key_store --add manual zz >/dev/null 2>&1; echo $?)" "2"
+    chk store-add-needs "$(nasf_cmd_key_store --add manual >/dev/null 2>&1; echo $?)" "2"
+    chk store-lists     "$(nasf_cmd_key_store | grep -c $'\tderive\t')" "6"
+
+    # ── 14. NAS confidentiality and integrity (128-EEA2 / 128-NIA2) ─────
+    local nk=000102030405060708090A0B0C0D0E0F npd=0741000BF11000000000000000000000
+    local nct nbody imac ref ik2=B04F46196E1E737CBDC16F81D1DBE955
+    nct=$(nasf_bytes "$npd" | openssl enc -aes-128-ctr -K "$nk" -iv "$(nasf_nas_iv 43 7 1)" -nopad 2>/dev/null \
+          | od -An -v -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+    chk nea2-ct-octets "$(printf '%s' "$nct" | wc -c)" "32"
+    chk nea2-roundtrip "$(nasf_nea2_decrypt "$nk" 43 7 1 "$nct")" "$npd"
+    chk nea2-differs   "$([[ "$nct" != "$npd" ]] && echo ciphertext)" "ciphertext"
+    chk decrypt-names  "$(nasf_cmd_decrypt "$nct" --key "$nk" --count 43 --bearer 7 --direction 1 | awk -F'\t' '$1=="message_name"{print $2}')" "Attach request"
+    chk decrypt-grey   "$(nasf_cmd_decrypt "$nct" --key "$nk" --count 43 --bearer 7 --direction 1 | grep -c $'^unobserved\tintegrity')" "1"
+    chk decrypt-no-key "$(nasf_cmd_decrypt "$nct" >/dev/null 2>&1; echo $?)" "1"
+    chk decrypt-nea1   "$(nasf_cmd_decrypt "$nct" --key "$nk" --alg nea1 >/dev/null 2>&1; echo $?)" "1"
+    chk decrypt-nea1-named "$(nasf_cmd_decrypt "$nct" --key "$nk" --alg nea1 2>/dev/null | grep -c 'no SNOW 3G implementation')" "1"
+    chk decrypt-bad-alg "$(nasf_cmd_decrypt "$nct" --key "$nk" --alg xxx >/dev/null 2>&1; echo $?)" "2"
+    nbody="${nct:0:$(( ${#nct} - 2 * NASF_NAS_MAC_OCTETS ))}"
+    imac=$(nasf_nia2_mac "$ik2" 43 7 1 "$nbody")
+    chk nia2-octets "$(printf '%s' "$imac" | wc -c)" "8"
+    if ref=$(nasf_bytes "$(printf '%08X%02X' 43 $(( (7 << 3) | (1 << 2) )))$nbody" \
+             | openssl mac -macopt cipher:AES-128-CBC -macopt "hexkey:${ik2,,}" CMAC 2>/dev/null) \
+       && [[ -n "$ref" ]]; then
+        chk nia2-truncation "${imac,,}" "$(printf '%s' "${ref:0:8}" | tr 'A-F' 'a-f')"
+    else
+        chk nia2-no-cmac "$(nasf_nia2_mac "$ik2" 43 7 1 "$nbody" 2>&1 >/dev/null | grep -c 'CMAC')" "1"
+    fi
+    chk integrity-verified "$(nasf_cmd_decrypt "$nct" --key "$nk" --count 43 --bearer 7 --direction 1 \
+        --integrity "$imac" --int-key "$ik2" | awk -F'\t' '$1=="integrity"{print $2}')" "measured verified"
+    chk integrity-mismatch "$(nasf_cmd_decrypt "$nct" --key "$nk" --count 43 --bearer 7 --direction 1 \
+        --integrity 00000000 --int-key "$ik2" | awk -F'\t' '$1=="integrity"{print $2}')" "measured mismatch"
+    chk integrity-nia1 "$(nasf_cmd_decrypt "$nct" --key "$nk" --alg nea0 --integrity 00000000 \
+        --int-key "$ik2" --int-alg nia1 >/dev/null 2>&1; echo $?)" "1"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1945,6 +2479,9 @@ nasf_menu() {
   [6]  the cost model
   [7]  plan: lab signalling characterisation
   [8]  build a pre-authentication message (reject / identity / auth)
+  [10] derive keys from an authentication vector (Milenage + KDF)
+  [11] the key store
+  [12] decrypt a NAS message and check its MAC
   [9]  status
   [0]  back
 
@@ -1976,6 +2513,21 @@ M
                     # shellcheck disable=SC2086
                     nasf_cmd_build "$g" "$p" $c
                     read -rp "  press enter " _; fi ;;
+            10) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] the derivation needs arguments; use --key-derive in CLI mode" >&2
+                else read -rp "  AUTN (32 hex)> " p; local au="$p"
+                     read -rp "  RAND (32 hex)> " p; local ra="$p"
+                     read -rp "  OPc (32 hex)> " p; local oc="$p"
+                     read -rp "  Ki (32 hex)> " p
+                     nasf_cmd_key_derive "$au" "$ra" "$oc" --k "$p"
+                     read -rp "  press enter " _; fi ;;
+            11) nasf_cmd_key_store | column -t -s$'\t' 2>/dev/null || nasf_cmd_key_store
+                read -rp "  press enter " _ ;;
+            12) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] decryption needs arguments; use --decrypt in CLI mode" >&2
+                else read -rp "  ciphertext hex> " p; local ct="$p"
+                     read -rp "  KNASenc (32 hex)> " p; local kk="$p"
+                     read -rp "  NAS COUNT (decimal)> " c
+                     nasf_cmd_decrypt "$ct" --key "$kk" --count "${c:-0}"
+                     read -rp "  press enter " _; fi ;;
             9) nasf_cli_status_tsv | column -t -s$'\t' 2>/dev/null || nasf_cli_status_tsv
                read -rp "  press enter " _ ;;
             0) return ;;
@@ -2013,6 +2565,9 @@ nasf_cli_main() {
         --build-nas)       nasf_cmd_build "${rest[0]:-eps}" "${rest[1]:-}" "${rest[@]:2}" ;;
         --cost-model)      nasf_cost_model ;;
         --plan)            nasf_cmd_plan "${rest[0]:-}" ;;
+        --key-derive)      nasf_cmd_key_derive "${rest[@]}" ;;
+        --key-store)       nasf_cmd_key_store "${rest[@]}" ;;
+        --decrypt)         nasf_cmd_decrypt "${rest[@]}" ;;
         --transmit)        nasf_cmd_transmit "${rest[0]:-}" "${rest[1]:-$NASF_RATE_DEFAULT}" ;;
         --selftest)        nasf_selftest ;;
         --menu)            nasf_menu ;;
@@ -2037,6 +2592,21 @@ Usage: $0 COMMAND
     flags: --cause <n>  --identity <type>  --rand <32 hex> --autn <32 hex>
            --auts <28 hex>  --algorithms <eea> <eia>  --ksi <0-7>
            --ksi-type <0|1>  --out <path>
+  --key-derive <AUTN> <RAND> <OPc> --k <Ki> [--sn-id <name>] [--supi <imsi>]
+                [--count <n>] [--no-store]
+                                  Milenage f1..f5 from the vector, the AUTN MAC
+                                  check, SQN recovery, then KASME/KNASenc/KNASint
+                                  (TS 33.401) and KAUSF/KSEAF/KAMF (TS 33.501).
+                                  Appends every key to the store. Sends nothing.
+  --key-store [--add <label> <hex>]
+                                  show the append-only key store, or append one
+                                  row to it
+  --decrypt <hex> [--key <KNASenc>] [--alg nea2|nea1|nea0]
+                [--count <n>] [--bearer <n>] [--direction <0|1>]
+                [--integrity <mac> --int-key <KNASint> [--int-alg nia2]]
+                                  NAS confidentiality (128-EEA2 = AES-CTR) and
+                                  the matching integrity check (128-NIA2 =
+                                  AES-CMAC), then name the message inside
   --cost-model                    the documented cost of each load pattern
   --plan lab-storm                write the handed-off characterisation plan
   --transmit <lab-plmn> [rate]    handoff: lab PLMN (MCC 001/999), rate <= $NASF_RATE_CEILING msg/s.

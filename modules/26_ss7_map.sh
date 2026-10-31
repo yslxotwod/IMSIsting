@@ -509,9 +509,14 @@ ss7_sccp_pc_hex() {  # 14-bit SCCP point code, two octets, low octet first
 }
 
 ss7_sccp_addr_encode() {  # <pc> <ssn>  -> AI|PC|SSN hex
-    local pc="${1:-}" ssn="${2:-}"
+    local pc="${1:-}" ssn="${2:-}" pchex
     [[ "$ssn" =~ ^[0-9]+$ ]] && (( ssn <= 255 )) || return 1
-    printf '03%s%s' "$(ss7_sccp_pc_hex "$pc")" "$(ss7_byte "$ssn")"
+    # The point code has to be checked here: ss7_sccp_pc_hex returns 1 for a
+    # value wider than 14 bits, and a command substitution that is only
+    # printf'd ignores that status, so 20000 used to come out as the
+    # plausible-looking 2-octet address for 19872.
+    pchex=$(ss7_sccp_pc_hex "$pc") || return 1
+    printf '03%s%s' "$pchex" "$(ss7_byte "$ssn")"
 }
 
 ss7_sccp_addr_decode() {  # <hex> -> TSV
@@ -566,87 +571,348 @@ ss7_sccp_addr_decode() {  # <hex> -> TSV
     return 0
 }
 
-# UDT/UDTS builder.
+# ── SCCP unitdata layer: builder and parser ──────────────────────────────
+# Q.713 §4.10 (UDT), §4.11 (UDTS), §4.12 (XUDT), §3.4 (pointers) and
+# TS 48.006 §8 for the same layer on the A interface.
 #
-# The three pointer octets are offsets relative to the octet that contains
-# the pointer (Q.713 §4.2, and exactly how Wireshark's VARIABLE_POINTER macro
-# resolves them: `var += offset`). The message is
-#   09|0A  class  p1 p2 p3  [len called][called] [len calling][calling] [len data][data]
-# where p1 is measured from the p1 octet, p2 from the p2 octet, p3 from the
-# p3 octet.
-# Q.713 4.10: a UDT is three pointers followed by the parameters of Table 11, and
-# 3.4.2.1 makes the point code two octets with bits 7 and 8 of the second octet
-# zero. This builder is a correct reading of both. Do not "simplify" it by
-# removing the pointer octets: an attempt at that produced a frame every layer
-# below tshark's SCCP parser rejected, and the spec text is what settled it.
-ss7_sccp_build_udt() {
-    local cpc="${1:-}" cssn="${2:-}" opc="${3:-}" ossn="${4:-}" data="${5:-}" mtype="${6:-09}"
-    local called calling dlen
-    called=$(ss7_sccp_addr_encode "$cpc" "$cssn") || return 1
-    calling=$(ss7_sccp_addr_encode "$opc" "$ossn") || return 1
-    data=$(ss7_nfc "$data"); ss7_is_hex "$data" || data=""
-    dlen=$(( ${#data} / 2 ))
-    (( dlen <= 254 )) || { printf 'ERROR\tSCCP data exceeds the unitdata length octet\n' >&2; return 1; }
-    local clen=$(( ${#called} / 2 )) olen=$(( ${#calling} / 2 ))
-    (( clen <= 255 && olen <= 255 )) || return 1
-    local p1_off=5
-    local p2_off=$(( p1_off + 1 + clen ))
-    local p3_off=$(( p2_off + 1 + olen ))
-    printf '%s%s%s%s%s%s%s%s%s' \
-        "$mtype" "00" \
-        "$(ss7_byte $(( p1_off - 2 )))" \
-        "$(ss7_byte $(( p2_off - 3 )))" \
-        "$(ss7_byte $(( p3_off - 4 )))" \
-        "$(ss7_byte "$clen")" "$called" \
-        "$(ss7_byte "$olen")" "$calling"
-    printf '%s%s' "$(ss7_byte "$dlen")" "$data"
+# The three message types do NOT share a header, and that is the whole reason
+# this section exists: TCAP-level builders below it stop at the SCCP user
+# data, so a malformed SCCP PDU could not be produced or read until now.
+#
+#   09 | protocol class | ptr called | ptr calling | ptr data | parameters
+#   0A | return cause   | ptr called | ptr calling | ptr data | parameters
+#   11 | protocol class | hop count  | ptr called | ptr calling | ptr data
+#      | ptr optional   | parameters
+#
+# A pointer's value is an offset measured from the octet that FOLLOWS the
+# pointer field (Q.713 §3.4, and exactly how Wireshark's VARIABLE_POINTER
+# macro resolves it: `var += offset` after the field is read), so a parameter
+# sits at ptr_index + value. Every octet above was checked by letting
+# tshark 4.2.2 dissect the built frame:
+#   UDT   090003070b0403010006040302000800 -> "Unitdata", pointers 3/7/11,
+#         called PC 1 SSN 6 (HLR), calling PC 2 SSN 8 (MSC)
+#   UDTS  0a0203070b0403010006040302000800 -> "Unitdata Service",
+#         "Return Cause: Subsystem congestion (0x02)", same two addresses
+#   XUDT  11000004080c000403010006040302000800 -> "Extended Unitdata",
+#         Hop Counter 0x00, pointers 4/8/12, optional pointer 0, addresses
+#         intact and the user data linked to TCAP
+# A UDTS carries NO protocol class octet: the octet in second position is the
+# return cause, which is why ss7_sccp_parse branches on the message type
+# instead of reading a fixed offset. tools/check-sccp-codec.sh re-runs the
+# tshark comparison so this claim stays checked rather than remembered.
+ss7_sccp_type_code() {  # <udt|udts|xudt|9|10|17> -> decimal message type
+    case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')" in
+        udt|unitdata|9)                  echo 9 ;;
+        udts|unitdata-service|10)        echo 10 ;;
+        xudt|extended|extended-unitdata|17) echo 17 ;;
+        *) return 1 ;;
+    esac
 }
 
+# UDTS return causes, Q.713 §4.13, names as Wireshark 4.2.2 prints them
+# (harvested from a frame per cause value rather than typed from memory).
+# Decimal argument: a case pattern is literal text, so `0x0a)` would never
+# match the decimal 10 (MODULE_CONVENTIONS §15).
+ss7_sccp_return_cause_name() {
+    case "${1:-}" in
+        0)  echo "No translation for an address of such nature" ;;
+        1)  echo "No translation for this specific address" ;;
+        2)  echo "Subsystem congestion" ;;
+        3)  echo "Subsystem failure" ;;
+        4)  echo "Unequipped failure" ;;
+        5)  echo "MTP failure" ;;
+        6)  echo "Network congestion" ;;
+        7)  echo "Unqualified" ;;
+        8)  echo "Error in message transport" ;;
+        9)  echo "Error in local processing" ;;
+        10) echo "Destination cannot perform reassembly" ;;
+        11) echo "SCCP failure" ;;
+        12) echo "Hop counter violation" ;;
+        13) echo "Segmentation not supported" ;;
+        14) echo "Segmentation failure" ;;
+        *)  echo "Unknown" ;;
+    esac
+}
+
+# Store path is a function, not a load-time global: a selftest repoints
+# $SS7_DIR (and $LOOT_DIR) at a temp tree, and a global captured at load time
+# once wrote fixtures into the real loot/ (AGENTS.md §3.5).
+ss7_sccp_tsv() { printf '%s/sccp.tsv' "${SS7_DIR:-${LOOT_DIR:-$IMSISTING_ROOT/loot}/ss7_map}"; }
+
+ss7_sccp_store() {  # <action> <message_type> <called_pc> <called_ssn> <calling_pc> <calling_ssn> <data_octets> <tcap> <verdict> <note>
+    local f; f=$(ss7_sccp_tsv)
+    mkdir -p "$(dirname "$f")" 2>/dev/null
+    [[ -s "$f" ]] || printf 'ts\taction\tmessage_type\tmessage_name\tcalled_pc\tcalled_ssn\tcalling_pc\tcalling_ssn\tdata_octets\ttcap\tverdict\tnote\n' > "$f" 2>/dev/null
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" \
+        "${1:-?}" "${2:-?}" "$(ss7_sccp_type_name "$(( 16#${2:-00} ))")" \
+        "${3:-unobserved}" "${4:-unobserved}" "${5:-unobserved}" "${6:-unobserved}" \
+        "${7:-unobserved}" "${8:-unobserved}" "${9:-unobserved}" "${10:-}" >> "$f" 2>/dev/null
+}
+
+# The unitdata builder. UDT/UDTS keep their three pointers at offsets 2-4;
+# XUDT pushes them to 3-5 with the hop counter in between, so the pointer
+# values are computed from where the parameter area actually starts instead
+# of from a hardcoded header length (that hardcoded 5 is what the old UDT-only
+# builder used, and it silently emitted UDTS frames with the cause octet
+# where the first pointer belonged).
+ss7_sccp_build_unitdata() {  # <type> <called-pc> <called-ssn> <calling-pc> <calling-ssn> [data-hex] [hop] [cause]
+    local type="${1:-}" cpc="${2:-}" cssn="${3:-}" opc="${4:-}" ossn="${5:-}"
+    local data="${6:-}" hop="${7:-0}" cause="${8:-0}"
+    local mt; mt=$(ss7_sccp_type_code "$type") || {
+        printf 'ERROR\tunknown SCCP message type %s: this builder emits udt, udts or xudt\n' "$type" >&2; return 1; }
+    [[ "$hop" =~ ^[0-9]+$ ]] && (( hop <= 255 )) || {
+        printf 'ERROR\thop count must be 0-255 (one octet, Q.713 §4.12)\n' >&2; return 1; }
+    [[ "$cause" =~ ^[0-9]+$ ]] && (( cause <= 255 )) || {
+        printf 'ERROR\treturn cause must be 0-255 (one octet, Q.713 §4.11)\n' >&2; return 1; }
+    local called calling a
+    for a in "$cpc" "$opc"; do
+        [[ "$a" =~ ^[0-9]+$ ]] && (( a <= 16383 )) || {
+            printf 'ERROR	a point code must be 0-16383 (14 bits, Q.713 §3.4.2.1): %s is not\n' "$a" >&2; return 1; }
+    done
+    for a in "$cssn" "$ossn"; do
+        [[ "$a" =~ ^[0-9]+$ ]] && (( a <= 255 )) || {
+            printf 'ERROR\ta subsystem number must be 0-255: %s is not\n' "$a" >&2; return 1; }
+    done
+    called=$(ss7_sccp_addr_encode "$cpc" "$cssn") || {
+        printf 'ERROR\tcalled party address needs a point code 0-16383 and an SSN 0-255 (got pc=%s ssn=%s)\n' "${cpc:-absent}" "${cssn:-absent}" >&2; return 1; }
+    calling=$(ss7_sccp_addr_encode "$opc" "$ossn") || {
+        printf 'ERROR\tcalling party address needs a point code 0-16383 and an SSN 0-255 (got pc=%s ssn=%s)\n' "${opc:-absent}" "${ossn:-absent}" >&2; return 1; }
+    data=$(ss7_nfc "$data"); ss7_is_hex "$data" || data=""
+    local dlen=$(( ${#data} / 2 )) clen=$(( ${#called} / 2 )) olen=$(( ${#calling} / 2 ))
+    (( dlen <= 254 )) || {
+        printf 'ERROR\tSCCP user data is %s octets: one length octet carries at most 254, and segmentation (Q.713 §4.12, §4.16) is not built here\n' "$dlen" >&2; return 1; }
+    local head ptr_base params p1 p2 p3
+    case "$mt" in
+        9)  head="0900";                     ptr_base=2; params=5 ;;
+        10) head="0A$(ss7_byte "$cause")";   ptr_base=2; params=5 ;;
+        17) head="1100$(ss7_byte "$hop")";   ptr_base=3; params=7 ;;
+    esac
+    p1=$(( params - ptr_base ))
+    p2=$(( params + 1 + clen - (ptr_base + 1) ))
+    p3=$(( params + 1 + clen + 1 + olen - (ptr_base + 2) ))
+    (( p1 <= 255 && p2 <= 255 && p3 <= 255 )) || {
+        printf 'ERROR\tan address is too long for the one-octet SCCP pointers\n' >&2; return 1; }
+    printf '%s' "$head"
+    printf '%s%s%s' "$(ss7_byte "$p1")" "$(ss7_byte "$p2")" "$(ss7_byte "$p3")"
+    # XUDT's fourth pointer addresses the optional parameters; 0 means there
+    # are none, which is how tshark 4.2.2 reads a frame with a 00 here.
+    (( mt == 17 )) && printf '00'
+    printf '%s%s%s%s%s%s' \
+        "$(ss7_byte "$clen")" "$called" \
+        "$(ss7_byte "$olen")" "$calling" \
+        "$(ss7_byte "$dlen")" "$data"
+}
+
+# Backwards-compatible wrapper: the MAP builders below still call this name.
+# It now refuses any type but UDT instead of emitting a UDT-shaped header
+# with a different message type in front of it.
+ss7_sccp_build_udt() {
+    local mtype="${6:-09}"
+    [[ "$mtype" == "09" || "$mtype" == "9" ]] || {
+        printf 'ERROR\tss7_sccp_build_udt only builds UDT: use ss7_sccp_build_unitdata for %s\n' "$mtype" >&2; return 1; }
+    ss7_sccp_build_unitdata udt "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}"
+}
+
+# Type-aware parser. The previous version read its three pointers at fixed
+# offsets 2-4 and a protocol class at 1, which is correct for UDT only: on a
+# UDTS that reads the return cause as the first pointer and on an XUDT the hop
+# counter, after which every address decodes a shifted octet. Anything that is
+# not a unitdata message is refused by name rather than decoded wrongly.
 ss7_sccp_parse() {
     local h; h=$(ss7_nfc "${1:-}")
     ss7_is_hex "$h" && (( ${#h} >= 6 )) || { printf 'ERROR\tSCCP message needs hex\n' >&2; return 1; }
     local mt=$(( 16#${h:0:2} ))
     printf 'sccp_message_type\t%s\n' "$(ss7_byte "$mt")"
     printf 'sccp_message_name\t%s\n' "$(ss7_sccp_type_name "$mt")"
-    local cls=$(( 16#${h:2:2} ))
-    printf 'sccp_class\t%s\n' "$(( (cls >> 4) & 0x0F ))"
-    local p1=$(( 16#${h:4:2} )) p2 p3
-    local doff coff xoff
-    doff=$(( p1 + 2 ))
-    (( ${#h} >= (doff + 1) * 2 )) || { printf 'ERROR\tSCCP pointer to the called party address is outside the message\n' >&2; return 1; }
-    if (( ${#h} >= 10 )); then
-        p2=$(( 16#${h:6:2} )); p3=$(( 16#${h:8:2} ))
-        coff=$(( p2 + 3 )); xoff=$(( p3 + 4 ))
-        # Q.713 §1.4: the parameters follow one another in the order the
-        # pointers name, so each pointer has to point past the previous one.
-        (( p2 > p1 )) || { printf 'ERROR\tSCCP pointers are out of order (called %s, calling %s)\n' "$p1" "$p2" >&2; return 1; }
-        (( p3 > p2 )) || { printf 'ERROR\tSCCP pointers are out of order (calling %s, data %s)\n' "$p2" "$p3" >&2; return 1; }
-    else
-        coff=0; xoff=0
+    local ptr_base have_class=0
+    case "$mt" in
+        9)  ptr_base=2; have_class=1 ;;
+        10) ptr_base=2
+            printf 'return_cause\t%s\n' "$(( 16#${h:2:2} ))"
+            printf 'return_cause_name\t%s\n' "$(ss7_sccp_return_cause_name "$(( 16#${h:2:2} ))")" ;;
+        17) ptr_base=3; have_class=1
+            (( ${#h} >= 16 )) || { printf 'ERROR\tXUDT needs at least 8 octets (type, class, hop counter, three pointers, optional pointer)\n' >&2; return 1; }
+            printf 'hop_counter\t%s\n' "$(( 16#${h:4:2} ))" ;;
+        *)  printf 'ERROR\tmessage type %s (%s) is not a unitdata message: this parser reads UDT 09, UDTS 0a and XUDT 11. Connection-oriented messages (CR 01, CC 02, DT1 06, ...) keep their parameters in a fixed mandatory part that is not decoded here, so nothing is guessed about them\n' \
+                "$(ss7_byte "$mt")" "$(ss7_sccp_type_name "$mt")" >&2
+            return 1 ;;
+    esac
+    if (( have_class )); then
+        local cls=$(( 16#${h:2:2} ))
+        printf 'sccp_class\t%s\n' "$(( (cls >> 4) & 0x0F ))"
+        printf 'sccp_message_handling\t%s\n' "$(( cls & 0x0F ))"
     fi
+    (( ${#h} >= 10 )) || {
+        printf 'ERROR\tSCCP message is %s octets: a message type, a class or cause octet and three pointers need five\n' "$(( ${#h} / 2 ))" >&2; return 1; }
+    local p1 p2 p3
+    p1=$(( 16#${h:$((ptr_base*2)):2} ))
+    p2=$(( 16#${h:$(((ptr_base+1)*2)):2} ))
+    p3=$(( 16#${h:$(((ptr_base+2)*2)):2} ))
+    printf 'pointer_called\t%s\npointer_calling\t%s\npointer_data\t%s\n' "$p1" "$p2" "$p3"
+    local doff=$(( ptr_base + p1 )) coff=$(( ptr_base + 1 + p2 )) xoff=$(( ptr_base + 2 + p3 ))
+    # Q.713 §1.4: the parameters follow one another in the order the pointers
+    # name them, so each target has to land past the previous parameter.
+    (( doff < coff )) || { printf 'ERROR\tSCCP pointers are out of order: the called party address target %s is not before the calling party target %s\n' "$doff" "$coff" >&2; return 1; }
+    (( coff < xoff )) || { printf 'ERROR\tSCCP pointers are out of order: the calling party address target %s is not before the user data target %s\n' "$coff" "$xoff" >&2; return 1; }
     # A length octet that promises more octets than the message carries is a
     # mangled frame, not a short parameter: refuse it rather than print the
     # part that happens to be there, which reads as a complete decode.
+    (( (doff + 1) * 2 <= ${#h} )) || { printf 'ERROR\tthe called party address pointer (%s) runs past the end of the message\n' "$doff" >&2; return 1; }
     local clen=$(( 16#${h:$((doff*2)):2} ))
     (( (doff + 1 + clen) * 2 <= ${#h} )) || { printf 'ERROR\tcalled party address length %s runs past the message\n' "$clen" >&2; return 1; }
     local called="${h:$(((doff+1)*2)):$((clen*2))}"
     printf 'called_party\t%s\n' "$called"
     ss7_sccp_addr_decode "$called" | sed 's/^/called_/'
-    if (( coff > 0 )); then
-        (( (coff + 1) * 2 <= ${#h} )) || { printf 'ERROR\tcalling party address pointer runs past the message\n' >&2; return 1; }
-        local olen=$(( 16#${h:$((coff*2)):2} ))
-        (( (coff + 1 + olen) * 2 <= ${#h} )) || { printf 'ERROR\tcalling party address length %s runs past the message\n' "$olen" >&2; return 1; }
-        local calling="${h:$(((coff+1)*2)):$((olen*2))}"
-        printf 'calling_party\t%s\n' "$calling"
-        ss7_sccp_addr_decode "$calling" | sed 's/^/calling_/'
+    (( (coff + 1) * 2 <= ${#h} )) || { printf 'ERROR\tthe calling party address pointer (%s) runs past the end of the message\n' "$coff" >&2; return 1; }
+    local olen=$(( 16#${h:$((coff*2)):2} ))
+    (( (coff + 1 + olen) * 2 <= ${#h} )) || { printf 'ERROR\tcalling party address length %s runs past the message\n' "$olen" >&2; return 1; }
+    local calling="${h:$(((coff+1)*2)):$((olen*2))}"
+    printf 'calling_party\t%s\n' "$calling"
+    ss7_sccp_addr_decode "$calling" | sed 's/^/calling_/'
+    (( (xoff + 1) * 2 <= ${#h} )) || { printf 'ERROR\tthe user data pointer (%s) runs past the end of the message\n' "$xoff" >&2; return 1; }
+    local dln=$(( 16#${h:$((xoff*2)):2} ))
+    (( (xoff + 1 + dln) * 2 <= ${#h} )) || { printf 'ERROR\tuser data length %s runs past the message\n' "$dln" >&2; return 1; }
+    local data="${h:$(((xoff+1)*2)):$((dln*2))}"
+    printf 'sccp_data\t%s\n' "$data"
+    printf 'sccp_data_octets\t%s\n' "$dln"
+    local end=$(( (xoff + 1 + dln) * 2 ))
+    if (( end < ${#h} )); then
+        # Optional parameters (XUDT/XUDTS) and any padding are NOT decoded:
+        # saying so is the honest answer, and it keeps a trailing octet from
+        # being silently dropped by a caller that only reads sccp_data.
+        printf 'sccp_trailing_octets\t%s\n' "$(( (${#h} - end) / 2 ))"
+        printf 'sccp_trailing_hex\t%s\n' "${h:$end}"
+        printf 'optional_parameters\tunobserved\n'
+        printf 'optional_parameters_note\t%s\n' "trailing octets are not decoded: Q.713 §4.13-§4.16 optional parameters would need their own length and alignment rules, so they are reported raw"
     fi
-    if (( xoff > 0 )); then
-        (( (xoff + 1) * 2 <= ${#h} )) || { printf 'ERROR\tuser data pointer runs past the message\n' >&2; return 1; }
-        local dln=$(( 16#${h:$((xoff*2)):2} ))
-        (( (xoff + 1 + dln) * 2 <= ${#h} )) || { printf 'ERROR\tuser data length %s runs past the message\n' "$dln" >&2; return 1; }
-        local data="${h:$(((xoff+1)*2)):$((dln*2))}"
-        printf 'sccp_data\t%s\n' "$data"
+    if (( mt == 17 )); then
+        local popt=$(( 16#${h:12:2} ))
+        printf 'optional_pointer\t%s\n' "$popt"
+        (( popt == 0 )) || printf 'optional_pointer_target\t%s\noptional_pointer_note\t%s\n' "$(( 6 + popt ))" \
+            "a non-zero pointer to optional parameters is reported but not walked (Q.713 §4.13)"
     fi
+    return 0
+}
+
+# --sccp-build <type> --called-pc N --called-ssn N --calling-pc N --calling-ssn N
+#               [--data HEX] [--hop N] [--cause N]
+#               [--msu-dpc N --msu-opc N [--msu-sls N]] [--out FILE] [--no-store]
+ss7_cmd_sccp_build() {
+    local type="" cpc="" cssn="" opc="" ossn="" data="" hop="0" cause="0"
+    local mdpc="" mopc="" msls="0" out="" store=1
+    if (($# == 0)); then
+        printf 'ERROR\tusage: --sccp-build <udt|udts|xudt> --called-pc N --called-ssn N --calling-pc N --calling-ssn N [--data HEX] [--hop N] [--cause N] [--msu-dpc N --msu-opc N [--msu-sls N]] [--out FILE] [--no-store]\n' >&2
+        return 2
+    fi
+    type="${1}"; shift
+    while (($#)); do
+        case "$1" in
+            --called-pc)    cpc="${2:-}";  shift 2 ;;
+            --called-ssn)   cssn="${2:-}"; shift 2 ;;
+            --calling-pc)   opc="${2:-}";  shift 2 ;;
+            --calling-ssn)  ossn="${2:-}"; shift 2 ;;
+            --data)         data="${2:-}"; shift 2 ;;
+            --hop)          hop="${2:-0}"; shift 2 ;;
+            --cause)        cause="${2:-0}"; shift 2 ;;
+            --msu-dpc)      mdpc="${2:-}"; shift 2 ;;
+            --msu-opc)      mopc="${2:-}"; shift 2 ;;
+            --msu-sls)      msls="${2:-0}"; shift 2 ;;
+            --out)          out="${2:-}";  shift 2 ;;
+            --no-store)     store=0; shift ;;
+            *) printf 'ERROR\tunknown flag %s for --sccp-build: the accepted flags are --called-pc, --called-ssn, --calling-pc, --calling-ssn, --data, --hop, --cause, --msu-dpc, --msu-opc, --msu-sls, --out, --no-store\n' "$1" >&2
+               return 2 ;;
+        esac
+    done
+    local mt; mt=$(ss7_sccp_type_code "$type") || {
+        printf 'ERROR\tunknown SCCP message type %s: the builder emits udt, udts or xudt\n' "$type" >&2; return 2; }
+    # Nothing is defaulted for the party addresses: a point code invented here
+    # would be an invented constant in a frame that goes on a link.
+    [[ -n "$cpc"  ]] || { printf 'ERROR\t--called-pc is missing: the called party address needs a point code (0-16383)\n'  >&2; return 2; }
+    [[ -n "$cssn" ]] || { printf 'ERROR\t--called-ssn is missing: the called party address needs a subsystem number (0-255)\n' >&2; return 2; }
+    [[ -n "$opc"  ]] || { printf 'ERROR\t--calling-pc is missing: the calling party address needs a point code (0-16383)\n' >&2; return 2; }
+    [[ -n "$ossn" ]] || { printf 'ERROR\t--calling-ssn is missing: the calling party address needs a subsystem number (0-255)\n' >&2; return 2; }
+    [[ -z "$mdpc" || -n "$mopc" ]] || { printf 'ERROR\t--msu-dpc was given without --msu-opc: an MTP3 routing label needs both point codes\n' >&2; return 2; }
+    local sccp; sccp=$(ss7_sccp_build_unitdata "$type" "$cpc" "$cssn" "$opc" "$ossn" "$data" "$hop" "$cause") || return 1
+    local dlen=$(( ${#data} / 2 ))
+    local hexname; hexname=$(ss7_sccp_type_name "$mt")
+    printf 'sccp_message_type\t%s\n' "$(ss7_byte "$mt")"
+    printf 'sccp_message_name\t%s\n' "$hexname"
+    printf 'called_pc\t%s\ncalled_ssn\t%s\ncalling_pc\t%s\ncalling_ssn\t%s\n' "$cpc" "$cssn" "$opc" "$ossn"
+    (( mt == 10 )) && { printf 'return_cause\t%s\n' "$cause"; printf 'return_cause_name\t%s\n' "$(ss7_sccp_return_cause_name "$cause")"; }
+    (( mt == 17 )) && printf 'hop_counter\t%s\n' "$hop"
+    printf 'data_octets\t%s\n' "$dlen"
+    printf 'sccp_hex\t%s\n' "$sccp"
+    local msu=""
+    if [[ -n "$mdpc" ]]; then
+        msu=$(ss7_msu_build "$mdpc" "$mopc" "$msls" "$sccp") || {
+            printf 'ERROR\tthe MTP3 routing label needs point codes 0-16383 and a link selector 0-15\n' >&2; return 1; }
+        printf 'msu_hex\t%s\n' "$msu"
+    fi
+    printf 'verdict\tadvertised\n'
+    printf 'note\t%s\n' "built here and not sent: nothing on a link was measured, and no far side has acknowledged this frame"
+    (( store )) && ss7_sccp_store build "$(ss7_byte "$mt")" "$cpc" "$cssn" "$opc" "$ossn" "$dlen" "none" "advertised" "built, not sent"
+    if [[ -n "$out" ]]; then
+        printf '%s\n' "${msu:-$sccp}" > "$out" || { printf 'ERROR\tcannot write %s\n' "$out" >&2; return 1; }
+        printf 'out\t%s\n' "$out"
+    fi
+    return 0
+}
+
+# --sccp-parse <hex> [--no-store]   bare SCCP, an MSU, or nothing
+ss7_cmd_sccp_parse() {
+    local hex="" store=1 a
+    for a in "$@"; do
+        case "$a" in
+            --no-store) store=0 ;;
+            -*) printf 'ERROR\tunknown flag %s for --sccp-parse: the only flag is --no-store\n' "$a" >&2; return 2 ;;
+            *)  if [[ -z "$hex" ]]; then hex="$a"; else
+                    printf 'ERROR\t--sccp-parse takes one hex string; a second was given (%s)\n' "$a" >&2; return 2; fi ;;
+        esac
+    done
+    [[ -n "$hex" ]] || {
+        printf 'ERROR\tusage: --sccp-parse <hex> [--no-store]; the hex may be a bare SCCP message (09/0a/11) or a full MSU (SIO 83/84/85)\n' >&2
+        return 2; }
+    hex=$(ss7_nfc "$hex")
+    ss7_is_hex "$hex" || { printf 'ERROR\tnot valid hex\n' >&2; return 1; }
+    local body="$hex"
+    case "${hex:0:2}" in
+        09|0A|11) : ;;
+        83|84|85) printf 'layer\tmtp3\n'
+                  ss7_sio_parse "${hex:0:2}"
+                  ss7_label_parse "${hex:2:8}"
+                  body="${hex:10}" ;;
+        01)       printf 'ERROR\tthis looks like an M3UA common header (class 1): strip it first with --decode-sigtran, which also checks the routing context this parser cannot see\n' >&2
+                  return 1 ;;
+        *)        printf 'ERROR\tunrecognised envelope %s: want an SCCP message type 09/0a/11 or an MSU service information octet 83/84/85\n' "${hex:0:2}" >&2
+                  return 1 ;;
+    esac
+    local out; out=$(ss7_sccp_parse "$body") || { printf '%s\n' "$out"; return 1; }
+    printf 'layer\tsccp\n%s\n' "$out"
+    local data tcap="none"
+    data=$(printf '%s\n' "$out" | awk -F'\t' '$1=="sccp_data"{print $2; exit}')
+    if [[ -n "$data" && "${data:0:2}" =~ ^6[1-7]$ ]]; then
+        printf 'layer\ttcap\n'
+        if ss7_tcap_parse "$data"; then tcap="decapsulated"; else tcap="tcap-parse-failed"; fi
+    elif [[ -n "$data" ]]; then
+        tcap="not-a-tcap-tag"
+        printf 'tcap\tunobserved\n'
+        printf 'tcap_note\t%s\n' "the SCCP user data starts with ${data:0:2}, which is not a TCAP tag 61-67; on these interfaces the other SCCP users are RANAP/S1AP or BSSAP, and this module does not decode those here"
+    else
+        tcap="no-user-data"
+    fi
+    printf 'tcap_decapsulation\t%s\n' "$tcap"
+    local cp="" cs="" op="" osn=""
+    cp=$(printf '%s\n' "$out" | awk -F'\t' '$1=="called_pc"{print $2; exit}')
+    cs=$(printf '%s\n' "$out" | awk -F'\t' '$1=="called_ssn"{print $2; exit}')
+    op=$(printf '%s\n' "$out" | awk -F'\t' '$1=="calling_pc"{print $2; exit}')
+    osn=$(printf '%s\n' "$out" | awk -F'\t' '$1=="calling_ssn"{print $2; exit}')
+    local mt dlen
+    mt=$(printf '%s\n' "$out" | awk -F'\t' '$1=="sccp_message_type"{print $2; exit}')
+    dlen=$(printf '%s\n' "$out" | awk -F'\t' '$1=="sccp_data_octets"{print $2; exit}')
+    printf 'verdict\tmeasured\n'
+    printf 'note\t%s\n' "these octets are the ones supplied on the command line; a decode is not a live observation"
+    (( store )) && ss7_sccp_store parse "$mt" "${cp:-unobserved}" "${cs:-unobserved}" "${op:-unobserved}" "${osn:-unobserved}" "${dlen:-0}" "$tcap" "measured" "decoded from supplied hex"
     return 0
 }
 
@@ -3854,6 +4120,97 @@ ss7_selftest() {
     chk sccp-type-differs "$(ss7_cmd_sccp_screen --called-pc 2-38-7 --called-ssn 8 --type ludt --rules "$sccpf" | awk -F'\t' '$1=="decision"{print $2}')" "drop"
     chk sccp-no-rules-rc "$(ss7_cmd_sccp_screen --called-pc 2-38-7 >/dev/null 2>&1; echo $?)" "2"
 
+    # ── SCCP unitdata builder and parser (Q.713 §4.10-§4.12) ─────────────
+    # Every expected hex below was dissected by tshark 4.2.2 before it was
+    # written down; tools/check-sccp-codec.sh re-runs that comparison.
+    out=$(ss7_sccp_build_unitdata udt 1 6 2 8 ""); rc=$?
+    chk sccp-build-udt-rc   "$rc"  "0"
+    chk sccp-build-udt-hex  "$out" "090003070B0403010006040302000800"
+    chk sccp-build-udts-hex "$(ss7_sccp_build_unitdata udts 1 6 2 8 "" 0 2)" "0A0203070B0403010006040302000800"
+    chk sccp-build-xudt-hex "$(ss7_sccp_build_unitdata xudt 1 6 2 8 "" 0)" "11000004080C000403010006040302000800"
+    # A payload moves the data length octet and nothing else: the pointers are
+    # computed from where the parameter area starts, not from its size.
+    chk sccp-build-data     "$(ss7_sccp_build_unitdata udt 1 6 2 8 41424344)" "090003070B040301000604030200080441424344"
+    out=$(ss7_sccp_build_unitdata udt 1 6 2 8 "$(ss7_tcap_begin 00000001 "$(ss7_map_invoke 1 45 "")")")
+    chk sccp-build-tcap-data "$out" "090003070B040301000604030200081262104804000000016C08A10602010102012D"
+    out=$(ss7_sccp_parse "$(ss7_sccp_build_unitdata udt 1 6 2 8 41424344)"); rc=$?
+    chk sccp-parse-rc        "$rc" "0"
+    chk sccp-parse-name      "$(fld "$out" sccp_message_name)" "UDT (Unitdata)"
+    chk sccp-parse-class     "$(fld "$out" sccp_class)" "0"
+    chk sccp-parse-called    "$(fld "$out" called_pc)" "1"
+    chk sccp-parse-called-ssn "$(fld "$out" called_ssn)" "6"
+    chk sccp-parse-called-name "$(fld "$out" called_ssn_name)" "HLR (Home Location Register)"
+    chk sccp-parse-calling   "$(fld "$out" calling_pc)" "2"
+    chk sccp-parse-calling-ssn "$(fld "$out" calling_ssn)" "8"
+    chk sccp-parse-data      "$(fld "$out" sccp_data)" "41424344"
+    chk sccp-parse-data-len  "$(fld "$out" sccp_data_octets)" "4"
+    # UDTS: the octet in second position is the return cause, not a class, so
+    # a parser with a fixed header length reads the cause as pointer one.
+    out=$(ss7_sccp_parse "$(ss7_sccp_build_unitdata udts 1 6 2 8 "" 0 3)")
+    chk sccp-parse-udts-cause "$(fld "$out" return_cause)" "3"
+    chk sccp-parse-udts-cause-name "$(fld "$out" return_cause_name)" "Subsystem failure"
+    chk sccp-parse-udts-no-class "$(printf '%s\n' "$out" | grep -c '^sccp_class')" "0"
+    chk sccp-parse-udts-called "$(fld "$out" called_pc)" "1"
+    # XUDT: hop counter and optional pointer, same rule.
+    out=$(ss7_sccp_parse "$(ss7_sccp_build_unitdata xudt 1 6 2 8 6200000500 7)")
+    chk sccp-parse-xudt-hop  "$(fld "$out" hop_counter)" "7"
+    chk sccp-parse-xudt-ptr  "$(fld "$out" pointer_called)" "4"
+    chk sccp-parse-xudt-class "$(fld "$out" sccp_class)" "0"
+    chk sccp-parse-xudt-opt  "$(fld "$out" optional_pointer)" "0"
+    chk sccp-parse-xudt-data "$(fld "$out" sccp_data)" "6200000500"
+    chk sccp-parse-xudt-called "$(fld "$out" called_pc)" "1"
+    # A length octet that promises more than the message carries is refused,
+    # and pointers have to run in the order the parameters sit in.
+    chk sccp-parse-truncated "$(ss7_sccp_parse 090003070b0403010006 >/dev/null 2>&1; echo $?)" "1"
+    chk sccp-parse-ptr-order "$(ss7_sccp_parse 09000b070b0403010006040302000800 >/dev/null 2>&1; echo $?)" "1"
+    # Connection-oriented messages are named as out of scope, not decoded.
+    chk sccp-parse-co-refused "$(ss7_sccp_parse 01030002 >/dev/null 2>&1; echo $?)" "1"
+    chk sccp-parse-co-says   "$(ss7_sccp_parse 01030002 2>&1 >/dev/null | grep -c 'not a unitdata message')" "1"
+    chk sccp-parse-nohex     "$(ss7_sccp_parse >/dev/null 2>&1; echo $?)" "1"
+    chk sccp-parse-nohex-names "$(ss7_sccp_parse 2>&1 >/dev/null | grep -c 'needs hex')" "1"
+    chk sccp-parse-verb-nohex "$(ss7_cmd_sccp_parse >/dev/null 2>&1; echo $?)" "2"
+    chk sccp-parse-badhex    "$(ss7_sccp_parse zzzz >/dev/null 2>&1; echo $?)" "1"
+    # The builder refuses rather than defaulting a point code it would have had
+    # to invent, and refuses data the one length octet cannot carry.
+    chk sccp-build-noargs    "$(ss7_cmd_sccp_build >/dev/null 2>&1; echo $?)" "2"
+    chk sccp-build-badtype   "$(ss7_cmd_sccp_build dl --called-pc 1 --called-ssn 6 --calling-pc 2 --calling-ssn 8 >/dev/null 2>&1; echo $?)" "2"
+    chk sccp-build-missing   "$(ss7_cmd_sccp_build udt --called-ssn 6 --calling-pc 2 --calling-ssn 8 2>&1 >/dev/null | grep -c 'called-pc is missing')" "1"
+    chk sccp-build-badflag   "$(ss7_cmd_sccp_build udt --called-pc 1 --called-ssn 6 --calling-pc 2 --calling-ssn 8 --nope 1 >/dev/null 2>&1; echo $?)" "2"
+    chk sccp-build-too-long  "$(ss7_cmd_sccp_build udt --called-pc 1 --called-ssn 6 --calling-pc 2 --calling-ssn 8 --data "$(printf '41%.0s' $(seq 512))" >/dev/null 2>&1; echo $?)" "1"
+    chk sccp-build-bad-pc    "$(ss7_cmd_sccp_build udt --called-pc 20000 --called-ssn 6 --calling-pc 2 --calling-ssn 8 >/dev/null 2>&1; echo $?)" "1"
+    # --sccp-build stores what it built; --sccp-parse stores what it read.
+    out=$(ss7_cmd_sccp_build udt --called-pc 1 --called-ssn 6 --calling-pc 2 --calling-ssn 8 --data 4142)
+    chk sccp-build-verb-hex  "$(fld "$out" sccp_hex)" "090003070B04030100060403020008024142"
+    chk sccp-build-verdict   "$(fld "$out" verdict)" "advertised"
+    local sccpstore; sccpstore=$(ss7_sccp_tsv)
+    chk sccp-store-header    "$(head -1 "$sccpstore" | cut -f1-3)" "ts	action	message_type"
+    chk sccp-store-rows      "$(($(wc -l < "$sccpstore") - 1))" "1"
+    chk sccp-store-action    "$(awk -F'\t' 'NR==2{print $2}' "$sccpstore")" "build"
+    chk sccp-store-type      "$(awk -F'\t' 'NR==2{print $3}' "$sccpstore")" "09"
+    # The MSU wrapper is the same octets with an MTP3 routing label in front.
+    out=$(ss7_cmd_sccp_build xudt --called-pc 1 --called-ssn 6 --calling-pc 2 --calling-ssn 8 --msu-dpc 1 --msu-opc 2 --no-store)
+    chk sccp-build-msu       "$(fld "$out" msu_hex)" "830180000011000004080C000403010006040302000800"
+    chk sccp-build-msu-rc    "$(ss7_cmd_sccp_build udt --called-pc 1 --called-ssn 6 --calling-pc 2 --calling-ssn 8 --msu-dpc 1 >/dev/null 2>&1; echo $?)" "2"
+    # --sccp-parse decapsulates a TCAP payload and says so; an MSU envelope is
+    # unwrapped first, and a non-TCAP payload is named as such rather than
+    # silently dropped.
+    out=$(ss7_cmd_sccp_parse "8301800000$(ss7_sccp_build_unitdata udt 1 6 2 8 "$(ss7_tcap_begin 00000001 "$(ss7_map_invoke 1 45 "")")")")
+    chk sccp-parse-msu-layer "$(printf '%s\n' "$out" | awk -F'\t' '$1=="layer"{print $2; exit}')" "mtp3"
+    chk sccp-parse-decap     "$(fld "$out" tcap_decapsulation)" "decapsulated"
+    chk sccp-parse-tcap-tag  "$(printf '%s\n' "$out" | awk -F'\t' '$1=="tcap_tag"{print $2; exit}')" "62"
+    chk sccp-parse-tcap-type "$(printf '%s\n' "$out" | awk -F'\t' '$1=="tcap_message_type"{print $2; exit}')" "begin"
+    chk sccp-store-rows2     "$(($(wc -l < "$sccpstore") - 1))" "2"
+    chk sccp-parse-nontcap   "$(ss7_cmd_sccp_parse "090003070b0403010006040302000802ffff" --no-store | awk -F'\t' '$1=="tcap_decapsulation"{print $2}')" "not-a-tcap-tag"
+    chk sccp-parse-empty-data "$(ss7_cmd_sccp_parse 090003070b0403010006040302000800 --no-store | awk -F'\t' '$1=="tcap_decapsulation"{print $2}')" "no-user-data"
+    chk sccp-parse-verb-verdict "$(ss7_cmd_sccp_parse 090003070b0403010006040302000800 --no-store | awk -F'\t' '$1=="verdict"{print $2}')" "measured"
+    # Return-cause names are the ones Wireshark 4.2.2 prints, harvested from a
+    # frame per value rather than typed from memory.
+    chk sccp-cause-0   "$(ss7_sccp_return_cause_name 0)"  "No translation for an address of such nature"
+    chk sccp-cause-2   "$(ss7_sccp_return_cause_name 2)"  "Subsystem congestion"
+    chk sccp-cause-14  "$(ss7_sccp_return_cause_name 14)" "Segmentation failure"
+    chk sccp-cause-unknown "$(ss7_sccp_return_cause_name 15)" "Unknown"
+    chk sccp-typecode  "$(ss7_sccp_type_code xudt)" "17"
+    chk sccp-typecode-bad "$(ss7_sccp_type_code dl >/dev/null 2>&1; echo $?)" "1"
         rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
@@ -3901,6 +4258,8 @@ ss7_menu() {
   [27] MAP opcode reference
   [28] status
   [29] build an SGsAP message (MME <-> MSC)
+  [30] build an SCCP unitdata message (UDT/UDTS/XUDT)
+  [31] parse an SCCP message and decapsulate its TCAP
   [0]  back
 
 M
@@ -3976,6 +4335,18 @@ M
             29) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need an IMSI; cannot prompt in CLI mode" >&2
                 else read -rp "  IMSI> " p; read -rp "  LAI (MCC-MNC-LAC) [310-150-1]> " s
                      ss7_cmd_sgsap_build location-update-request --imsi "$p" --lai "${s:-310-150-1}"
+                     read -rp "  press enter " _; fi ;;
+            30) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a message type; cannot prompt in CLI mode" >&2
+                else read -rp "  type (udt/udts/xudt)> " p; read -rp "  called pc> " s
+                     read -rp "  called ssn> " h; read -rp "  calling pc> " c2
+                     read -rp "  calling ssn> " c3; read -rp "  data hex (optional)> " c4
+                     ss7_cmd_sccp_build "${p:-udt}" --called-pc "$s" --called-ssn "$h" \
+                         --calling-pc "$c2" --calling-ssn "$c3" --data "$c4" | column -t -s$'\t' 2>/dev/null \
+                       || ss7_cmd_sccp_build "${p:-udt}" --called-pc "$s" --called-ssn "$h" \
+                              --calling-pc "$c2" --calling-ssn "$c3" --data "$c4"
+                     read -rp "  press enter " _; fi ;;
+            31) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need hex; cannot prompt in CLI mode" >&2
+                else read -rp "  SCCP hex> " h; ss7_cmd_sccp_parse "$h" | column -t -s$'\t' 2>/dev/null || ss7_cmd_sccp_parse "$h"
                      read -rp "  press enter " _; fi ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -5152,6 +5523,8 @@ ss7_cli_main() {
         --gtt-table)     ss7_cmd_gtt_table "$@" ;;
         --sccp-screen)   ss7_cmd_sccp_screen "$@" ;;
         --decode-msu)    ss7_cmd_decode_msu "${1:-}" ;;
+        --sccp-build)    ss7_cmd_sccp_build "$@" ;;
+        --sccp-parse)    ss7_cmd_sccp_parse "$@" ;;
         --decode-tcap)   ss7_cmd_decode_tcap "${1:-}" ;;
         --decode-sigtran) ss7_cmd_decode_sigtran "${1:-}" ;;
         --build-m3ua)    ss7_cmd_build_m3ua "${1:-}" "${2:-}" "${3:-}" ;;
@@ -5198,6 +5571,21 @@ SS7 / MAP — signalling interconnect, TCAP/MAP codec, GRX and IPX
 Usage: $0 COMMAND
   --status-tsv               module state as TSV
   --decode-msu <hex>         walk MTP3 and SCCP in a full MSU
+  --sccp-build <type>        build an SCCP unitdata message below TCAP:
+                             udt (09), udts (0a) or xudt (11), with both
+                             party addresses and the user data. Flags:
+                             --called-pc N --called-ssn N --calling-pc N
+                             --calling-ssn N (required, nothing is
+                             defaulted), --data HEX (the SCCP user data,
+                             a TCAP message if you have one), --hop N and
+                             --cause N (XUDT hop counter / UDTS return
+                             cause), --msu-dpc N --msu-opc N [--msu-sls N]
+                             to wrap it in an MTP3 routing label, --out
+                             FILE, --no-store
+  --sccp-parse <hex>         read an SCCP unitdata message back (UDT, UDTS
+                             or XUDT, bare or inside a full MSU) and
+                             decapsulate its user data as TCAP when the
+                             first tag is 61-67; --no-store
   --decode-tcap <hex>        parse TCAP transaction + component portions
   --decode-map <hex>         decode MAP, unwrapping MSU or SCCP if present
   --build-sri <msisdn>       build a wire-ready SRI MSU

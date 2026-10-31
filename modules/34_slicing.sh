@@ -843,6 +843,223 @@ slic_nssai_parse() {
     return 0
 }
 
+# ── NSSAI-family IEs — TS 24.501 §9.11.3.37, §9.11.3.46 ─────────────────
+# The container above is only half of what rides on the air. An NSSAI is always
+# carried inside an information element whose IEI depends on the message, so a
+# byte string cannot be named without knowing which message carried it. The IEIs
+# below were read back from Wireshark 4.2.2 one message at a time
+# (`text2pcap -l 252 -P nas-5gs`), because TS 24.501's tables are per message:
+#
+#   Registration request (0x41)     0x2F Requested NSSAI, 0x35 Mapped NSSAI
+#   Registration accept  (0x42)     0x11 Rejected NSSAI, 0x15 Allowed NSSAI,
+#                                   0x31 Configured NSSAI, 0x39 Pending NSSAI,
+#                                   0x68 Extended rejected NSSAI
+#   UE configuration update (0x54)  0x11, 0x15, 0x31, 0x68
+#
+# Every one of them is a type 4 IE (TS 24.007 §11.2.1): IEI + one-octet length +
+# value, so the length is the octet count of the value and can never exceed 255.
+#
+# Two value layouts, and they are not interchangeable:
+#   plain     <[len=1|4][SST][SD?]>...            requested / mapped / allowed /
+#                                                 configured / pending NSSAI
+#   rejected  <[len:4|cause:4][SST][SD?]>...      rejected NSSAI (§9.11.3.46)
+#
+# The rejected layout packs the S-NSSAI length and the reject cause into the two
+# nibbles of one octet. Verified against tshark 4.2.2 in both directions: the
+# nibble spelling 11 02 13 01 decodes as one rejected S-NSSAI of length 1 with
+# cause 3, while the byte-length spelling 11 03 01 01 03 makes tshark report
+# Malformed. Anything that has to be guessed is not built here: the extended
+# rejected NSSAI (0x68) carries a type-of-list, a back-off timer and a number of
+# elements, so this module reports it as `unobserved` with the reason.
+slic_nssai_reject_cause_name() {
+    # TS 24.501 §9.11.3.46 Table 9.11.3.46.1 gives the rejected S-NSSAI cause
+    # values. Only the rows this module can quote are named; the rest are
+    # `unknown`, never a plausible-looking name.
+    case "${1:-}" in
+        0) echo "S-NSSAI not available in the current PLMN or SNPN" ;;
+        1) echo "S-NSSAI not available in the current registration area" ;;
+        2) echo "S-NSSAI not available due to the failed or revoked NSSAA" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+slic_nssai_msg_types() { printf 'reg-request\nreg-accept\nue-config-update\n'; }
+
+# slic_nssai_iei_rows <message> -> "IEI<TAB>kind<TAB>layout" per IE of that message
+slic_nssai_iei_rows() {
+    case "${1:-}" in
+        reg-request)      printf '2F\trequested\tplain\n35\tmapped\tplain\n' ;;
+        reg-accept)       printf '11\trejected\trejected\n15\tallowed\tplain\n31\tconfigured\tplain\n39\tpending\tplain\n68\textended-rejected\tunsupported\n' ;;
+        ue-config-update) printf '11\trejected\trejected\n15\tallowed\tplain\n31\tconfigured\tplain\n68\textended-rejected\tunsupported\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# slic_nssai_iei_lookup <message> <iei-hex> -> "kind<TAB>layout"
+slic_nssai_iei_lookup() {
+    local iei="${2:-}"
+    iei="${iei^^}"
+    slic_nssai_iei_rows "${1:-}" | awk -F'\t' -v k="$iei" '$1==k{print $2"\t"$3; exit}'
+}
+
+# slic_nssai_iei_by_kind <message> <kind> -> "IEI<TAB>layout"
+slic_nssai_iei_by_kind() {
+    slic_nssai_iei_rows "${1:-}" | awk -F'\t' -v k="${2:-}" '$2==k{print $1"\t"$3; exit}'
+}
+
+# slic_nssai_ie_build <kind> <list> <message>
+#   list = "sst[:sd][,sst[:sd]]..."  and, for the rejected kind,
+#          "sst[:sd]=cause[,sst[:sd]=cause]..." (the cause is the reject cause).
+# Emits TSV rows: kind, message, iei, layout, length, count, container, ie.
+slic_nssai_ie_build() {
+    local kind="${1:-}" list="${2:-}" msg="${3:-}"
+    local hit; hit=$(slic_nssai_iei_by_kind "$msg" "$kind")
+    [[ -n "$hit" ]] || {
+        printf 'ERROR\t%s is not an NSSAI-family IE of the %s message; this module models %s\n' \
+            "${kind:-<none>}" "${msg:-<none>}" "$(slic_nssai_msg_types | paste -sd'|' -)" >&2
+        return 1; }
+    local iei="${hit%%$'\t'*}" layout="${hit##*$'\t'}"
+    if [[ "$layout" == "unsupported" ]]; then
+        printf 'status\tunobserved\n'
+        printf 'kind\t%s\n' "$kind"
+        printf 'message\t%s\n' "$msg"
+        printf 'iei\t%s\n' "$iei"
+        printf 'reason\t%s\n' "the extended rejected NSSAI carries a type-of-list, a back-off timer and a number of elements (TS 24.501 9.11.3.46); this module does not implement that layout, so nothing is built rather than a guessed one"
+        return 1
+    fi
+    local content="" e sn sst sd cause len n=0
+    local IFS=','
+    for e in $list; do
+        cause=""
+        if [[ "$layout" == "rejected" ]]; then
+            [[ "$e" == *=* ]] || {
+                printf 'ERROR\trejected entry "%s" has no =cause (e.g. 1=3 or 1:000001=2)\n' "$e" >&2; return 1; }
+            cause="${e#*=}"; e="${e%%=*}"
+            [[ "$cause" =~ ^[0-9]+$ ]] && (( cause <= 15 )) || {
+                printf 'ERROR\treject cause must be 0..15 (it is a 4-bit field), got %s\n' "$cause" >&2; return 1; }
+        fi
+        case "$e" in
+            *:*) sst="${e%%:*}"; sd="${e#*:}" ;;
+            *)   sst="$e"; sd="" ;;
+        esac
+        sn=$(slic_encode_s_nssai "$sst" "$sd") || return 1
+        # The 0xFFFFFF differentiator means "no SD"; the wire form is SST only.
+        [[ "${sn:2}" == "FFFFFF" ]] && sn="${sn:0:2}"
+        len=$(( ${#sn} / 2 ))
+        if [[ "$layout" == "rejected" ]]; then
+            content+=$(printf '%02X' "$(( (len << 4) | (cause & 0x0F) ))")"$sn"
+        else
+            content+=$(printf '%02X' "$len")"$sn"
+        fi
+        n=$(( n + 1 ))
+    done
+    unset IFS
+    (( n > 0 )) || { printf 'ERROR\tthe list is empty: nothing to encode\n' >&2; return 1; }
+    local bytes=$(( ${#content} / 2 ))
+    (( bytes <= 255 )) || {
+        printf 'ERROR\tNSSAI value is %s octets; the one-octet length field caps it at 255 (TS 24.007 11.2.1)\n' "$bytes" >&2
+        return 1; }
+    local ie; ie="$iei$(printf '%02X' "$bytes")$content"
+    printf 'kind\t%s\n' "$kind"
+    printf 'message\t%s\n' "$msg"
+    printf 'iei\t%s\n' "$iei"
+    printf 'layout\t%s\n' "$layout"
+    printf 'length\t%s\n' "$bytes"
+    printf 'count\t%s\n' "$n"
+    printf 'container\t%s\n' "$content"
+    printf 'ie\t%s\n' "$ie"
+    printf 'octets\t%s\n' "$(( ${#ie} / 2 ))"
+    printf 'spec\t%s\n' "TS 24.501 9.11.3.37 (NSSAI), 9.11.3.46 (rejected NSSAI), TS 24.007 11.2.1 (type 4 IE)"
+    return 0
+}
+
+# slic_nssai_ie_parse <ie-hex> [message]
+# Emits TSV rows: message, iei, name, layout, length, then one row per S-NSSAI.
+slic_nssai_ie_parse() {
+    local hex msg="${2:-}"
+    hex=$(slic_nfc "${1:-}")
+    [[ -n "$hex" ]] || { printf 'ERROR\tusage: --nssai-ie-parse <ie-hex> [message]\n' >&2; return 2; }
+    slic_is_hex "$hex" && (( ${#hex} >= 8 )) || {
+        printf 'ERROR\tan NSSAI IE needs hex: IEI + length + at least one S-NSSAI\n' >&2; return 2; }
+    local iei="${hex:0:2}" hit="" found_msg=""
+    if [[ -n "$msg" ]]; then
+        hit=$(slic_nssai_iei_lookup "$msg" "$iei")
+        [[ -n "$hit" ]] || {
+            printf 'ERROR\t0x%s is not an NSSAI-family IE of the %s message\n' "$iei" "$msg" >&2; return 1; }
+        found_msg="$msg"
+    else
+        local m h
+        for m in $(slic_nssai_msg_types); do
+            h=$(slic_nssai_iei_lookup "$m" "$iei")
+            [[ -z "$h" ]] && continue
+            hit="$h"; found_msg="$m"; break
+        done
+        [[ -n "$hit" ]] || {
+            printf 'ERROR\t0x%s is not an NSSAI-family IEI in any message this module models (%s)\n' \
+                "$iei" "$(slic_nssai_msg_types | paste -sd'|' -)" >&2
+            return 1; }
+    fi
+    local name="${hit%%$'\t'*}" layout="${hit##*$'\t'}"
+    local lenbyte=$(( 16#${hex:2:2} ))
+    local body="${hex:4}"
+    local bodyb=$(( ${#body} / 2 ))
+    (( lenbyte == bodyb )) || {
+        printf 'ERROR\tlength octet says %s octets but %s follow; the IE is truncated or the length is wrong\n' \
+            "$lenbyte" "$bodyb" >&2
+        return 1; }
+    printf 'message\t%s\n' "$found_msg"
+    printf 'iei\t%s\n' "$iei"
+    printf 'name\t%s\n' "$name"
+    printf 'layout\t%s\n' "$layout"
+    printf 'length\t%s\n' "$lenbyte"
+    if [[ "$layout" == "unsupported" ]]; then
+        printf 'status\tunobserved\n'
+        printf 'count\tunobserved\n'
+        printf 'reason\t%s\n' "the extended rejected NSSAI carries a type-of-list, a back-off timer and a number of elements (TS 24.501 9.11.3.46); this module does not implement that layout, so the slice list is unobserved rather than empty"
+        return 1
+    fi
+    local off=0 idx=0
+    printf 'header\tindex\ts_nssai\tsst\tsst_name\tsd\tsd_present\tcause\n'
+    while (( off * 2 < ${#body} )); do
+        local l=0 cause="" oct v sst sd present
+        if [[ "$layout" == "rejected" ]]; then
+            oct=$(( 16#${body:$((off * 2)):2} ))
+            l=$(( oct >> 4 )); cause=$(( oct & 0x0F ))
+            off=$(( off + 1 ))
+        else
+            l=$(( 16#${body:$((off * 2)):2} ))
+            off=$(( off + 1 ))
+        fi
+        (( l == 1 || l == 4 )) || {
+            printf 'ERROR\tS-NSSAI %s declares length %s; TS 24.501 allows 1 or 4\n' "$idx" "$l" >&2; return 1; }
+        (( ${#body} >= (off + l) * 2 )) || {
+            printf 'ERROR\tS-NSSAI %s runs past the end of the IE\n' "$idx" >&2; return 1; }
+        v="${body:$((off * 2)):$((l * 2))}"
+        sst=$(( 16#${v:0:2} )); sd="ffffff"; present=0
+        if (( l == 4 )); then sd="${v:2:6}"; [[ "${sd^^}" == "FFFFFF" ]] || present=1; fi
+        printf 'entry\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$v" "$sst" \
+            "$(slic_sanitize "$(slic_sst_name "$sst")")" "${sd,,}" "$present" "${cause:-}"
+        [[ -n "$cause" ]] && printf 'cause%s\t%s\n' "$idx" "$(slic_sanitize "$(slic_nssai_reject_cause_name "$cause")")"
+        idx=$(( idx + 1 ))
+        off=$(( off + l ))
+    done
+    printf 'count\t%s\n' "$idx"
+    return 0
+}
+
+# Append-only store for everything this block observes or builds. Paths are
+# functions so a selftest that repoints $SLIC_DIR writes into its own tree.
+slic_nssai_store_path() { printf '%s/nssai-ies.tsv' "$SLIC_DIR"; }
+
+slic_nssai_store() {  # <verb> <subject> <iei> <length> <count> <verdict> <detail>
+    local f; f=$(slic_nssai_store_path)
+    mkdir -p "$SLIC_DIR" 2>/dev/null
+    [[ -s "$f" ]] || printf 'ts\tverb\tsubject\tiei\tlength\tcount\tverdict\tdetail\n' >> "$f" 2>/dev/null
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1:--}" "${2:--}" "${3:--}" "${4:--}" "${5:--}" \
+        "$(slic_sanitize "${6:--}")" "$(slic_sanitize "${7:--}")" >> "$f" 2>/dev/null
+}
+
 # ── slice selection ─────────────────────────────────────────────────────
 # slic_selection <requested-nssai> [allowed-nssai] [rejected-nssai]
 #
@@ -1486,6 +1703,225 @@ slic_cmd_isolation() {
     local pcap="${1:-}" map="${2:-}"
     [[ -n "$pcap" ]] || { printf 'ERROR\tusage: --isolation-check <pcap> [slice=teid,...;...]\n' >&2; return 2; }
     slic_isolation_check "$pcap" "$map"
+}
+
+# ── slice steering — which slice a UE may be steered into ───────────────
+# The four NSSAI lists answer four different questions, and collapsing them is
+# how "the UE has the slice" gets mistaken for "the UE may use the slice":
+#
+#   requested  what the UE asked for, read off the Registration request. A
+#              request is the UE's claim, not a right.
+#   allowed    what the AMF granted in the Registration accept. This is the
+#              only list that says the UE holds the slice right now.
+#   configured what the network told the UE it is provisioned for (Registration
+#              accept or UE configuration update). It is ADVERTISED: the UE
+#              knows the slice exists, and no grant follows from it.
+#   rejected   what the network refused, with the 4-bit cause of §9.11.3.46.
+#
+# So "which slice may this UE be steered to" is answered from the allowed list
+# plus the configured list, and only the allowed list is a grant. A slice that
+# appears in the configured list but not in the allowed list is steerable in the
+# sense that the UE will accept a steering attempt toward it -- and refusable in
+# the sense that the network has not granted it. The verb keeps those apart and
+# says `unobserved` when the list that would settle the question was not given.
+slic_steer_usage() {
+    cat <<'EOF'
+  --nssai-steer <requested> <allowed> <configured> [rejected]
+                                      which slice a UE may be steered into.
+                                      Each argument is an NSSAI container or
+                                      a full NSSAI IE (hex); use "" for a list
+                                      the capture does not contain. A missing
+                                      allowed list makes the grant unobserved,
+                                      never zero.
+EOF
+}
+
+# slic_steer_rows <label> <hex>
+# Prints one row per S-NSSAI: key <TAB> cause <TAB> label. Accepts either a
+# bare NSSAI container or a full NSSAI-family IE (the IEI decides the layout,
+# so the rejected NSSAI's nibble-packed causes are read correctly).
+slic_steer_rows() {
+    local label="$1" hexn
+    hexn=$(slic_nfc "${2:-}")
+    [[ -n "$hexn" ]] || return 0
+    local first="${hexn:0:2}" second=0 restb=0
+    (( ${#hexn} >= 4 )) && second=$(( 16#${hexn:2:2} ))
+    restb=$(( (${#hexn} - 4) / 2 ))
+    local m h
+    local as_ie=0
+    if (( ${#hexn} >= 4 )); then
+        for m in $(slic_nssai_msg_types); do
+            h=$(slic_nssai_iei_lookup "$m" "$first")
+            [[ -z "$h" ]] && continue
+            [[ "${h##*$'\t'}" == "unsupported" ]] && continue
+            (( second == restb )) && as_ie=1
+            break
+        done
+    fi
+    if (( as_ie )); then
+        slic_nssai_ie_parse "$hexn" 2>/dev/null
+    else
+        slic_nssai_parse "$hexn" 2>/dev/null
+    fi | awk -F'\t' -v lbl="$label" '$1=="entry"{print $3"\t"($8==""?"-":$8)"\t"lbl}'
+}
+
+slic_cmd_nssai_steer() {
+    local req="${1:-}" allow="${2:-}" conf="${3:-}" rej="${4:-}"
+    if [[ -z "$req" && -z "$allow" && -z "$conf" ]]; then
+        slic_steer_usage >&2
+        printf 'ERROR\tat least one NSSAI list is required\n' >&2
+        return 2
+    fi
+    local -A in_req=() in_allow=() in_conf=() in_rej=() cause_of=()
+    local -a order=()
+    local key cause label
+    local rows
+    # How many S-NSSAIs each supplied argument actually yielded. A list that was
+    # handed in and read as nothing is not an empty list: it is an argument the
+    # module could not read, and the verdict below must say so instead of
+    # reporting a clean steering surface built from no input.
+    local n_in_req=0 n_in_allow=0 n_in_conf=0 n_in_rej=0
+    while IFS=$'\t' read -r key cause label; do
+        [[ -n "$key" ]] || continue
+        case "$label" in
+            requested)  in_req["$key"]=1;  n_in_req=$(( n_in_req + 1 )) ;;
+            allowed)    in_allow["$key"]=1; n_in_allow=$(( n_in_allow + 1 )) ;;
+            configured) in_conf["$key"]=1;  n_in_conf=$(( n_in_conf + 1 )) ;;
+            rejected)   in_rej["$key"]=1;   n_in_rej=$(( n_in_rej + 1 )); cause_of["$key"]="$cause" ;;
+        esac
+        [[ -n "${cause_of[$key]:-}" ]] || cause_of["$key"]="$cause"
+        [[ " ${order[*]} " == *" $key "* ]] || order+=( "$key" )
+    done < <(
+        slic_steer_rows requested  "$req"
+        slic_steer_rows allowed    "$allow"
+        slic_steer_rows configured "$conf"
+        slic_steer_rows rejected   "$rej"
+    )
+    printf 'input_requested\t%s\n' "$([[ -n "$req" ]] && echo supplied || echo unobserved)"
+    printf 'input_allowed\t%s\n' "$([[ -n "$allow" ]] && echo supplied || echo unobserved)"
+    printf 'input_configured\t%s\n' "$([[ -n "$conf" ]] && echo supplied || echo unobserved)"
+    printf 'header\ts_nssai\tsst\tsst_name\tsd\tsd_present\trequested\tallowed\tconfigured\treject_cause\tverdict\tdetail\n'
+    local k sst sd present verdict detail
+    local n_steer=0 n_adv=0 n_ref=0 n_obs=0 n_unreq=0
+    for k in "${order[@]}"; do
+        sst=$(( 16#${k:0:2} )); sd="ffffff"; present=0
+        (( ${#k} == 8 )) && { sd="${k:2:6}"; [[ "${sd^^}" == "FFFFFF" ]] || present=1; }
+        cause="${cause_of[$k]:--}"
+        if [[ -n "${in_rej[$k]:-}" ]]; then
+            verdict="refused"
+            detail="rejected NSSAI, cause ${cause} ($(slic_nssai_reject_cause_name "$cause")): the network answered and the answer was no"
+            n_ref=$(( n_ref + 1 ))
+        elif [[ -n "${in_allow[$k]:-}" ]]; then
+            n_steer=$(( n_steer + 1 ))
+            if [[ -z "${in_req[$k]:-}" ]]; then
+                verdict="steerable-unrequested"
+                detail="granted in the allowed NSSAI but never requested: measured grant out of the UE's asked-for set"
+                n_unreq=$(( n_unreq + 1 ))
+            else
+                verdict="steerable"
+                detail="granted in the allowed NSSAI: traffic may be steered into this slice now"
+            fi
+        elif [[ -n "${in_conf[$k]:-}" ]]; then
+            verdict="advertised-not-granted"
+            detail="in the configured NSSAI only: advertised to the UE, not granted -- a steering attempt needs a fresh registration or PDU session and may be refused"
+            n_adv=$(( n_adv + 1 ))
+        else
+            verdict="unobserved"
+            detail="requested but absent from the allowed, configured and rejected lists: the network answered nothing about it"
+            n_obs=$(( n_obs + 1 ))
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "slice" "$k" "$sst" "$(slic_sanitize "$(slic_sst_name "$sst")")" "${sd,,}" "$present" \
+            "$([[ -n "${in_req[$k]:-}" ]] && echo yes || echo no)" \
+            "$([[ -n "${in_allow[$k]:-}" ]] && echo yes || echo no)" \
+            "$([[ -n "${in_conf[$k]:-}" ]] && echo yes || echo no)" \
+            "$cause" "$verdict" "$detail"
+    done
+    printf 'steerable\t%s\n' "$n_steer"
+    printf 'advertised_not_granted\t%s\n' "$n_adv"
+    printf 'refused\t%s\n' "$n_ref"
+    printf 'unobserved\t%s\n' "$n_obs"
+    printf 'steerable_unrequested\t%s\n' "$n_unreq"
+    local overall bad_in="" why
+    [[ -n "$req"   && "$n_in_req"   -eq 0 ]] && bad_in+=" requested"
+    [[ -n "$allow" && "$n_in_allow" -eq 0 ]] && bad_in+=" allowed"
+    [[ -n "$conf"  && "$n_in_conf"  -eq 0 ]] && bad_in+=" configured"
+    [[ -n "$rej"   && "$n_in_rej"   -eq 0 ]] && bad_in+=" rejected"
+    if [[ -z "$allow" && -z "$conf" ]]; then
+        overall="unobserved"
+        printf 'missing\t%s\n' "the allowed NSSAI (Registration accept) and the configured NSSAI: without either, no steering surface is established"
+    elif [[ -n "$bad_in" ]]; then
+        overall="unobserved"
+        for why in $bad_in; do
+            printf 'unreadable\t%s\t%s\n' "$why" \
+                "supplied, but not one S-NSSAI could be read out of it: a hex NSSAI container, or a full NSSAI IE whose IEI belongs to this message, is required"
+        done
+    elif (( n_unreq > 0 )); then
+        overall="steers_to_unrequested_slice"
+        printf 'finding\tHIGH\tsteerable-unrequested-slice\tthe allowed NSSAI grants a slice the UE never requested, so the network can steer it somewhere it did not ask for\n'
+    elif (( n_adv > 0 )); then
+        overall="advertised_only"
+    elif (( n_steer > 0 )); then
+        overall="granted_within_request"
+    else
+        overall="nothing_granted"
+    fi
+    printf 'verdict\t%s\n' "$overall"
+    printf 'spec\t%s\n' "TS 24.501 9.11.3.37 / 9.11.3.46, TS 23.501 5.15.5.2.1 (NSSF steering), TS 23.502 4.2.3"
+    slic_nssai_store nssai-steer - - - "${#order[@]}" "$overall" \
+        "requested=$([[ -n "$req" ]] && echo yes || echo no) allowed=$([[ -n "$allow" ]] && echo yes || echo no) configured=$([[ -n "$conf" ]] && echo yes || echo no) rejected=$([[ -n "$rej" ]] && echo yes || echo no)"
+    [[ "$overall" == "unobserved" ]] && return 1
+    return 0
+}
+
+# slic_cmd_nssai_ie <kind> <list> [message]
+slic_cmd_nssai_ie() {
+    local kind="${1:-}" list="${2:-}" msg="${3:-}"
+    [[ -n "$kind" && -n "$list" ]] || {
+        printf 'ERROR\tusage: --nssai-ie <kind> <sst[:sd][=cause],...> [message]\n' >&2
+        printf 'ERROR\tkind is requested|mapped|allowed|configured|pending|rejected|extended-rejected; message is %s\n' \
+            "$(slic_nssai_msg_types | paste -sd'|' -)" >&2
+        return 2; }
+    if [[ -z "$msg" ]]; then
+        case "$kind" in
+            requested|mapped)                    msg="reg-request" ;;
+            allowed|configured|pending|rejected) msg="reg-accept" ;;
+            # The extended rejected NSSAI travels in the same messages, and it is
+            # named here so that its unsupported layout reaches the builder and
+            # comes back as unobserved-with-a-reason instead of as a usage error.
+            extended-rejected)                   msg="reg-accept" ;;
+            *)  printf 'ERROR\t%s is not an NSSAI-family IE; kind is requested|mapped|allowed|configured|pending|rejected\n' "$kind" >&2
+                return 2 ;;
+        esac
+    fi
+    local out rc
+    out=$(slic_nssai_ie_build "$kind" "$list" "$msg"); rc=$?
+    printf '%s\n' "$out"
+    (( rc == 0 )) || return "$rc"
+    local f_iei; f_iei=$(printf '%s\n' "$out" | awk -F'\t' '$1=="iei"{print $2; exit}')
+    local f_len; f_len=$(printf '%s\n' "$out" | awk -F'\t' '$1=="length"{print $2; exit}')
+    local f_cnt; f_cnt=$(printf '%s\n' "$out" | awk -F'\t' '$1=="count"{print $2; exit}')
+    slic_nssai_store nssai-ie "$kind" "$f_iei" "$f_len" "$f_cnt" "built" "$msg"
+    return 0
+}
+
+# slic_cmd_nssai_ie_parse <hex> [message]
+slic_cmd_nssai_ie_parse() {
+    local hex="${1:-}" msg="${2:-}"
+    [[ -n "$hex" ]] || {
+        printf 'ERROR\tusage: --nssai-ie-parse <ie-hex> [message]\n' >&2; return 2; }
+    local out rc
+    out=$(slic_nssai_ie_parse "$hex" "$msg"); rc=$?
+    printf '%s\n' "$out"
+    local f_name f_iei f_len f_cnt f_status
+    f_name=$(printf '%s\n' "$out" | awk -F'\t' '$1=="name"{print $2; exit}')
+    f_iei=$(printf '%s\n' "$out" | awk -F'\t' '$1=="iei"{print $2; exit}')
+    f_len=$(printf '%s\n' "$out" | awk -F'\t' '$1=="length"{print $2; exit}')
+    f_cnt=$(printf '%s\n' "$out" | awk -F'\t' '$1=="count"{print $2; exit}')
+    f_status=$(printf '%s\n' "$out" | awk -F'\t' '$1=="status"{print $2; exit}')
+    slic_nssai_store nssai-ie-parse "${f_name:-unknown}" "${f_iei:--}" "${f_len:--}" "${f_cnt:--}" \
+        "${f_status:-parsed}" "${msg:-auto}"
+    return "$rc"
 }
 
 # ── selftest — no radio, no root, no network ────────────────────────────
@@ -2636,6 +3072,134 @@ CONF
     chk nssaa-bad-method    "$(slic_cmd_nssaa_flow --sst 1 --method pap >/dev/null 2>&1; echo $?)" "2"
     chk nssaa-bad-sst       "$(slic_cmd_nssaa_flow --sst 999 >/dev/null 2>&1; echo $?)" "2"
 
+    # ── 11. NSSAI-family IEs — TS 24.501 §9.11.3.37, §9.11.3.46 ─────────
+    # The expected octets are the clause's, not this code's: an NSSAI is a type
+    # 4 IE (§9.11.3.37 with TS 24.007 §11.2.1), its length octet counts the
+    # octets that follow, and each S-NSSAI carries its own length of 1 (SST) or
+    # 4 (SST + SD). The rejected NSSAI (§9.11.3.46) is the one IE whose per-entry
+    # header packs two 4-bit fields into a single octet — the S-NSSAI length in
+    # the high nibble and the reject cause in the low nibble — and every AE here
+    # was read back with tshark 4.2.2 to confirm the layout, so a builder that
+    # drifts fails here instead of quietly agreeing with its own parser.
+    out=$(slic_cmd_nssai_ie requested "1"); rc=$?
+    chk nssaie-rc        "$rc" "0"
+    chk nssaie-req-ie    "$(fld "$out" ie)" "2F020101"
+    chk nssaie-req-iei   "$(fld "$out" iei)" "2F"
+    chk nssaie-req-len   "$(fld "$out" length)" "2"
+    chk nssaie-req-oct   "$(fld "$out" octets)" "4"
+    chk nssaie-req-lay   "$(fld "$out" layout)" "plain"
+    chk nssaie-spec      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="spec"{print ($2 ~ /9\.11\.3\.37/)?"yes":"no"}')" "yes"
+    # SST + SD: 4 octets of S-NSSAI, so the contents are 2 + 4 and the IE 7.
+    out=$(slic_cmd_nssai_ie requested "1,2:0000AB")
+    chk nssaie-2sd-ie    "$(fld "$out" ie)" "2F07010104020000AB"
+    chk nssaie-2sd-len   "$(fld "$out" length)" "7"
+    chk nssaie-2sd-cnt   "$(fld "$out" count)" "2"
+    chk nssaie-2sd-msg   "$(fld "$out" message)" "reg-request"
+    # The same container under the Registration-accept IEIs.
+    chk nssaie-allowed   "$(slic_cmd_nssai_ie allowed 1 | awk -F'\t' '$1=="ie"{print $2}')" "15020101"
+    chk nssaie-config    "$(slic_cmd_nssai_ie configured 3 | awk -F'\t' '$1=="ie"{print $2}')" "31020103"
+    chk nssaie-pending   "$(slic_cmd_nssai_ie pending 4 | awk -F'\t' '$1=="ie"{print $2}')" "39020104"
+    chk nssaie-mapped    "$(slic_cmd_nssai_ie mapped 1 | awk -F'\t' '$1=="ie"{print $2}')" "35020101"
+    # The rejected NSSAI: 0x41 = length 4, cause 1, then the four S-NSSAI octets.
+    out=$(slic_cmd_nssai_ie rejected "2:0000AB=1")
+    chk nssaie-rej-ie    "$(fld "$out" ie)" "110541020000AB"
+    chk nssaie-rej-lay   "$(fld "$out" layout)" "rejected"
+    chk nssaie-rej-msg   "$(fld "$out" message)" "reg-accept"
+    chk nssaie-rej-ie0   "$(slic_cmd_nssai_ie rejected "1=3" | awk -F'\t' '$1=="ie"{print $2}')" "11021301"
+    # SD FFFFFF is the reserved "no differentiator" value: it must collapse to
+    # the 1-octet S-NSSAI rather than travel as 4 octets of FFFFFF.
+    chk nssaie-sd-none   "$(slic_cmd_nssai_ie requested "1:FFFFFF" | awk -F'\t' '$1=="ie"{print $2}')" "2F020101"
+    # What it cannot encode it refuses, by name and with a reason.
+    chk nssaie-rc-kind    "$(slic_cmd_nssai_ie bogus 1 >/dev/null 2>&1; echo $?)" "2"
+    chk nssaie-rc-empty   "$(slic_cmd_nssai_ie requested "" >/dev/null 2>&1; echo $?)" "2"
+    chk nssaie-rc-sst     "$(slic_cmd_nssai_ie requested 256 >/dev/null 2>&1; echo $?)" "1"
+    chk nssaie-rc-sd      "$(slic_cmd_nssai_ie requested 1:0001 >/dev/null 2>&1; echo $?)" "1"
+    chk nssaie-rc-cause   "$(slic_cmd_nssai_ie rejected 1=16 >/dev/null 2>&1; echo $?)" "1"
+    # 0x2F is the Requested NSSAI of a Registration request and nothing in a
+    # Registration accept: the IEI table is per message, so this is refused.
+    chk nssaie-rc-msg     "$(slic_cmd_nssai_ie requested 1 reg-accept >/dev/null 2>&1; echo $?)" "1"
+    chk nssaie-rc-kindmsg "$(slic_cmd_nssai_ie allowed 1 reg-request >/dev/null 2>&1; echo $?)" "1"
+
+    # The parser reads both layouts back, causes included.
+    out=$(slic_cmd_nssai_ie_parse 110713014102000002); rc=$?
+    chk nssaiep-rc      "$rc" "0"
+    chk nssaiep-cnt     "$(fld "$out" count)" "2"
+    chk nssaiep-lay     "$(fld "$out" layout)" "rejected"
+    chk nssaiep-name    "$(fld "$out" name)" "rejected"
+    chk nssaiep-c0      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="entry" && $2==0{print $8}')" "3"
+    chk nssaiep-c1      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="entry" && $2==1{print $8}')" "1"
+    chk nssaiep-cause1  "$(fld "$out" cause1)" "S-NSSAI not available in the current registration area"
+    # Cause 3 is not named in the carried copy of the table: it stays unknown
+    # rather than borrowing a name from the 5GMM cause list.
+    chk nssaiep-cause0  "$(fld "$out" cause0)" "unknown"
+    chk nssaiep-sst     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="entry" && $2==1{print $4}')" "2"
+    out=$(slic_cmd_nssai_ie_parse 2F07010104020000AB)
+    chk nssaiep-plain-cnt "$(fld "$out" count)" "2"
+    chk nssaiep-sd        "$(printf '%s\n' "$out" | awk -F'\t' '$1=="entry" && $2==1{print $6}')" "0000ab"
+    chk nssaiep-sd-none   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="entry" && $2==0{print $7}')" "0"
+    chk nssaiep-automsg   "$(fld "$out" message)" "reg-request"
+    # The byte-length spelling of the same three S-NSSAI octets is refused: the
+    # nibble layout is what the clause gives, and a parser that accepts both
+    # would read a cause out of an S-NSSAI's length.
+    chk nssaiep-rc-bytelen "$(slic_cmd_nssai_ie_parse 1103010103 >/dev/null 2>&1; echo $?)" "1"
+    # A length octet that disagrees with the octets present is a refusal, not a
+    # best effort.
+    chk nssaiep-rc-short "$(slic_cmd_nssai_ie_parse 2F060101 >/dev/null 2>&1; echo $?)" "1"
+    chk nssaiep-msg-short "$(slic_cmd_nssai_ie_parse 2F060101 2>&1 | grep -c 'length octet says 6')" "1"
+    chk nssaiep-rc-empty "$(slic_cmd_nssai_ie_parse "" >/dev/null 2>&1; echo $?)" "2"
+    chk nssaiep-rc-msg   "$(slic_cmd_nssai_ie_parse 2F020101 reg-accept >/dev/null 2>&1; echo $?)" "1"
+    # The extended rejected NSSAI (0x68) has a type-of-list structure this code
+    # does not model. It says so and exits 1 — it does not report an empty list.
+    out=$(slic_cmd_nssai_ie_parse 68020101); rc=$?
+    chk nssaiep-er-rc    "$rc" "1"
+    chk nssaiep-er-stat  "$(fld "$out" status)" "unobserved"
+    chk nssaiep-er-why   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="reason"{print ($2 ~ /ER-NSSAI|type of list|9\.11\.3\.46/)?"yes":"no"}')" "yes"
+    chk nssaiep-er-build "$(slic_cmd_nssai_ie extended-rejected 1 >/dev/null 2>&1; echo $?)" "1"
+
+    # ── steering: which slice a UE may be steered into ──────────────────
+    out=$(slic_cmd_nssai_steer 2F0701010402000002 15020101 31020103 11054102000002); rc=$?
+    chk steer-rc        "$rc" "0"
+    chk steer-verdict   "$(fld "$out" verdict)" "advertised_only"
+    chk steer-steer     "$(fld "$out" steerable)" "1"
+    chk steer-refused   "$(fld "$out" refused)" "1"
+    chk steer-adv       "$(fld "$out" advertised_not_granted)" "1"
+    chk steer-unreq     "$(fld "$out" steerable_unrequested)" "0"
+    chk steer-row-1     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="slice" && $2=="01"{print $11}')" "steerable"
+    chk steer-row-2     "$(printf '%s\n' "$out" | awk -F'\t' '$1=="slice" && $2=="02000002"{print $11}')" "refused"
+    chk steer-row-3     "$(printf '%s\t%s\n' "" "$(printf '%s\n' "$out" | awk -F'\t' '$1=="slice" && $2=="03"{print $11}')" | awk -F'\t' '{print $2}')" "advertised-not-granted"
+    chk steer-ref-cause "$(printf '%s\n' "$out" | awk -F'\t' '$1=="slice" && $2=="02000002"{print ($12 ~ /cause 1/)?"yes":"no"}')" "yes"
+    chk steer-spec      "$(printf '%s\n' "$out" | awk -F'\t' '$1=="spec"{print ($2 ~ /24\.501/)?"yes":"no"}')" "yes"
+    # A grant the UE never asked for is the finding that matters: the network
+    # can steer the UE somewhere it did not request.
+    out=$(slic_cmd_nssai_steer 2F020101 150401010103 ""); rc=$?
+    chk steer-unreq-v   "$(fld "$out" verdict)" "steers_to_unrequested_slice"
+    chk steer-unreq-c   "$(fld "$out" steerable_unrequested)" "1"
+    chk steer-unreq-f   "$(printf '%s\n' "$out" | grep -c '^finding	HIGH	steerable-unrequested-slice')" "1"
+    out=$(slic_cmd_nssai_steer 2F020101 15020101 "")
+    chk steer-within    "$(fld "$out" verdict)" "granted_within_request"
+    out=$(slic_cmd_nssai_steer 2F020101 "" "")
+    chk steer-unknown   "$(fld "$out" verdict)" "unobserved"
+    chk steer-unknown-m "$(printf '%s\n' "$out" | awk -F'\t' '$1=="missing"{print ($2 ~ /allowed NSSAI/)?"yes":"no"}')" "yes"
+    chk steer-unknown-rc "$(slic_cmd_nssai_steer 2F020101 "" "" >/dev/null 2>&1; echo $?)" "1"
+    # An argument that was supplied but read as nothing is unobserved, not an
+    # empty list: otherwise unreadable input looks like a clean surface.
+    out=$(slic_cmd_nssai_steer zz 15020101 "")
+    chk steer-unread-v   "$(fld "$out" verdict)" "unobserved"
+    chk steer-unread-rc  "$(slic_cmd_nssai_steer zz 15020101 "" >/dev/null 2>&1; echo $?)" "1"
+    chk steer-unread-row "$(printf '%s\n' "$out" | grep -c '^unreadable	requested')" "1"
+    chk steer-rc-empty   "$(slic_cmd_nssai_steer >/dev/null 2>&1; echo $?)" "2"
+    chk steer-rc-badmsg  "$(slic_cmd_nssai_steer 2F020101 15020101 "" 11020101 >/dev/null 2>&1; echo $?)" "1"
+
+    # The store is append-only and names the layout it wrote.
+    local nf="$SLIC_DIR/nssai-ies.tsv"
+    chk nssai-store-hdr  "$(head -1 "$nf" 2>/dev/null)" "ts	verb	subject	iei	length	count	verdict	detail"
+    local before after
+    before=$(wc -l < "$nf" 2>/dev/null || echo 0)
+    slic_cmd_nssai_ie configured 4 >/dev/null 2>&1
+    after=$(wc -l < "$nf" 2>/dev/null || echo 0)
+    chk nssai-store-append "$(( after - before ))" "1"
+    chk nssai-store-verb "$(awk -F'\t' '$2=="nssai-ie"{n++} END{print n+0}' "$nf" 2>/dev/null | awk '{print ($1>0)?"yes":"no"}')" "yes"
+
     rm -rf "$d"
     trap - EXIT
     [[ -n "$_prev_trap" ]] && eval "$_prev_trap"
@@ -2665,7 +3229,10 @@ slic_menu() {
   [11] 5QI table (filter by resource type)
   [12] TSN/QoS configuration description
   [13] slice/QoS consistency check
-  [14] status
+  [14] build an NSSAI IE (requested/allowed/configured/pending/rejected)
+  [15] parse an NSSAI IE (with the rejected-NSSAI causes)
+  [16] slice steering: which slice a UE may be steered into
+  [17] status
   [0]  back
 
 M
@@ -2713,7 +3280,24 @@ M
                else read -rp "  slice/flow tsv path> " p
                     slic_cmd_slice_qos_check "$p" | column -t -s$'\t' 2>/dev/null || true
                     read -rp "  press enter " _; fi ;;
-            14) slic_cli_status_tsv | column -t -s$'\t' 2>/dev/null || slic_cli_status_tsv
+            14) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need a kind and a slice list; cannot prompt in CLI mode" >&2
+                else read -rp "  kind (requested|allowed|configured|pending|rejected|mapped)> " k
+                     read -rp "  slices (e.g. 1,2:000002; rejected: 1=3,2:000002=1)> " l
+                     read -rp "  message (blank = default)> " m
+                     slic_cmd_nssai_ie "$k" "$l" "$m" | column -t -s$'\t' 2>/dev/null || true
+                     read -rp "  press enter " _; fi ;;
+            15) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need hex; cannot prompt in CLI mode" >&2
+                else read -rp "  NSSAI IE hex> " h; read -rp "  message (blank = auto)> " m
+                     slic_cmd_nssai_ie_parse "$h" "$m" | column -t -s$'\t' 2>/dev/null || true
+                     read -rp "  press enter " _; fi ;;
+            16) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] need hex; cannot prompt in CLI mode" >&2
+                else read -rp "  requested NSSAI hex (blank if absent)> " r
+                     read -rp "  allowed NSSAI hex (blank if absent)> " a
+                     read -rp "  configured NSSAI hex (blank if absent)> " c
+                     read -rp "  rejected NSSAI hex (blank if absent)> " j
+                     slic_cmd_nssai_steer "$r" "$a" "$c" "$j" | column -t -s$'\t' 2>/dev/null || true
+                     read -rp "  press enter " _; fi ;;
+            17) slic_cli_status_tsv | column -t -s$'\t' 2>/dev/null || slic_cli_status_tsv
                 read -rp "  press enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -2877,6 +3461,9 @@ slic_cli_main() {
         --encode-s-nssai)    slic_cmd_encode "${1:-}" "${2:-}" ;;
         --decode-s-nssai)    slic_cmd_decode "${1:-}" ;;
         --nssai-parse)       slic_cmd_nssai "${1:-}" ;;
+        --nssai-ie)          slic_cmd_nssai_ie "${1:-}" "${2:-}" "${3:-}" ;;
+        --nssai-ie-parse)    slic_cmd_nssai_ie_parse "${1:-}" "${2:-}" ;;
+        --nssai-steer)       slic_cmd_nssai_steer "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         --selection)         slic_cmd_selection "${1:-}" "${2:-}" "${3:-}" ;;
         --isolation-check)   slic_cmd_isolation "${1:-}" "${2:-}" ;;
         --cross-slice)       slic_cmd_cross_slice "${1:-1}" "${2:-2}" "${3:-}" "${4:-}" ;;
@@ -2915,6 +3502,23 @@ Usage: $0 COMMAND
   --encode-s-nssai <sst> [sd]         S-NSSAI hex (SST + 3-octet SD)
   --decode-s-nssai <hex>              S-NSSAI hex -> SST/SD and the SST name
   --nssai-parse <hex>                 NSSAI container (or full IE) -> slices
+  --nssai-ie <kind> <list> [message]  build a full NSSAI-family IE:
+                                      requested|mapped|allowed|configured|
+                                      pending|rejected, list as sst[:sd] and,
+                                      for rejected, sst[:sd]=cause. message is
+                                      reg-request|reg-accept|ue-config-update
+                                      and defaults per kind (TS 24.501 9.11.3.37
+                                      / 9.11.3.46, TS 24.007 11.2.1)
+  --nssai-ie-parse <hex> [message]    parse one NSSAI-family IE; the rejected
+                                      NSSAI's nibble-packed causes come back,
+                                      and an IEI whose layout is not
+                                      implemented prints unobserved with why
+  --nssai-steer <requested> <allowed> <configured> [rejected]
+                                      which slice a UE may be steered into:
+                                      the grant (allowed) is kept apart from
+                                      what the network only advertised
+                                      (configured); a missing list is
+                                      unobserved, never zero
   --selection <req> [allow] [reject]  the selection outcome, including
                                       granted-but-unrequested and dropped
   --isolation-check <pcap> [map]      isolation evidence; never claims

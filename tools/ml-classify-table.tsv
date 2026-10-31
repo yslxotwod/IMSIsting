@@ -1,0 +1,122 @@
+# ml-classify-table.tsv — the weighted feature table behind --ml-classify.
+#
+# WHAT THIS IS: a small linear model over flow statistics. Each row says "when
+# feature F falls in bucket B, add W to the score of class C". Scoring a flow is
+# the sum of the weights of the buckets its observed features fall in; the class
+# with the highest sum wins and the runner-up is reported as the margin. A
+# negative weight is evidence *against* a class (a TCP flow is not GTP-U), which
+# is what keeps a sustained bulk transfer on port 80 from being called media.
+#
+# WHAT THIS IS NOT: a trained model. The weights are hand-set priors in the range
+# -4..+4, written from published traffic-shape knowledge and the port and MTU
+# anchors cited below, not fitted to a corpus and not validated against one. The
+# table is data on purpose so a measured table can replace it without touching a
+# module; a table fitted on labelled traffic is the honest upgrade, and until
+# then a verdict from this table is a suggestion with a stated margin, never a
+# measurement.
+#
+# DOCTRINE: a feature a flow does not carry is *unobserved*, not zero. The
+# scorer names the features it used and the ones it could not, and refuses a
+# verdict when fewer than MIN-OBSERVED are present.
+#
+# COLUMNS: class <TAB> feature <TAB> bucket <TAB> weight
+class	feature	bucket	weight
+# ── proto (IP protocol number, RFC 791 §3.1: 6=TCP, 17=UDP, 132=SCTP) ──
+sip	proto	tcp	1
+sip	proto	udp	1
+dns	proto	udp	2
+dns	proto	tcp	1
+http	proto	tcp	2
+http	proto	udp	-2
+tls	proto	tcp	2
+tls	proto	udp	-2
+gtp	proto	udp	2
+gtp	proto	tcp	-2
+streaming	proto	udp	2
+streaming	proto	tcp	-2
+interactive	proto	tcp	1
+tunnel	proto	tcp	1
+tunnel	proto	udp	1
+# ── port (transport port registry; the scorer takes the lower of the two ports,
+#    because an ephemeral client port is above 32768 — RFC 6335 §6 — so the
+#    lower number is the service side) ──
+sip	port	sip	4
+dns	port	dns	4
+http	port	http	4
+tls	port	tls	4
+gtp	port	gtp	4
+gtp	port	diameter	1
+streaming	port	rtp-range	2
+tunnel	port	high	1
+tunnel	port	other	1
+# ── size_mean (mean IP datagram size; anchors are the smallest useful segment
+#    128, a TLS record with its header 512, the 1024-octet small-buffer line and
+#    the 1400-octet payload of a 1500-octet Ethernet frame — RFC 894 MTU minus
+#    IPv4+TCP headers) ──
+sip	size_mean	tiny	2
+sip	size_mean	small	1
+dns	size_mean	tiny	3
+dns	size_mean	small	1
+http	size_mean	small	1
+http	size_mean	medium	1
+tls	size_mean	medium	1
+tls	size_mean	large	1
+gtp	size_mean	medium	1
+gtp	size_mean	mtu	1
+streaming	size_mean	mtu	2
+streaming	size_mean	large	1
+interactive	size_mean	tiny	2
+interactive	size_mean	small	1
+tunnel	size_mean	small	1
+tunnel	size_mean	medium	1
+# ── rate_pps (packets per second; 1500-octet frames cap a 10 Mbit/s bearer near
+#    812 pps, so >100 pps at MTU size is media or bulk and <0.5 pps is a
+#    keepalive) ──
+sip	rate_pps	low	1
+sip	rate_pps	sparse	1
+dns	rate_pps	sparse	1
+http	rate_pps	sparse	1
+gtp	rate_pps	medium	1
+streaming	rate_pps	medium	2
+streaming	rate_pps	high	1
+interactive	rate_pps	sparse	2
+interactive	rate_pps	low	1
+tunnel	rate_pps	low	1
+tunnel	rate_pps	medium	1
+# ── duration_s (flow lifetime) ──
+sip	duration_s	short	1
+dns	duration_s	very-short	3
+http	duration_s	very-short	1
+http	duration_s	short	1
+tls	duration_s	short	1
+gtp	duration_s	medium	1
+streaming	duration_s	medium	2
+streaming	duration_s	long	1
+interactive	duration_s	short	1
+interactive	duration_s	very-short	1
+tunnel	duration_s	medium	1
+tunnel	duration_s	long	1
+# ── size_cv (coefficient of variation of packet size, sigma/mu; a padded media
+#    or tunnelled flow is flat, cv < 0.10 — the padded-cell observation that
+#    makes page fingerprints weak on a mobile bearer) ──
+sip	size_cv	mixed	1
+dns	size_cv	low	1
+http	size_cv	mixed	1
+tls	size_cv	low	1
+tls	size_cv	mixed	1
+gtp	size_cv	mixed	1
+streaming	size_cv	flat	3
+interactive	size_cv	mixed	1
+tunnel	size_cv	flat	3
+tunnel	size_cv	low	1
+# ── the two thresholds, kept in the table so a measured model can move them ──
+# MIN-OBSERVED: a two-feature verdict on a six-feature model is a coin toss with
+# a table attached; three is the floor at which a margin still means something.
+mins	feature	MIN-OBSERVED	3
+# MIN-MARGIN: one weight step is noise, two is a preference; below it the
+# verdict is reported as `weak` rather than `classified`.
+mins	feature	MIN-MARGIN	2
+# MIN-CONF: confidence is the winning score over the largest score these buckets
+# could have produced, so a flow whose evidence is thin in absolute terms cannot
+# be called classified on a margin alone.
+mins	feature	MIN-CONF	0.30

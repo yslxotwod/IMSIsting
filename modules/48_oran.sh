@@ -170,6 +170,177 @@ note	loading an xApp into a carrier RIC needs that carrier's authorisation; this
 EOF
 }
 
+# ── O1: NETCONF and YANG ────────────────────────────────────────────────
+# O1 is the management interface between the SMO and the managed element (the
+# O-RAN architecture in O-RAN.WG10.ICON). It is NETCONF (RFC 6241): the
+# capability exchange is the hello of §8.1, the operations are the <rpc>
+# elements of §7, and the framing on the wire is the chunked framing of
+# RFC 6242 §4.1 -- an octet count between "\n#" and "\n" in front of every
+# chunk, and "\n##\n" at the end.
+#
+# Two things are claimed and nothing more. The NETCONF envelope is written from
+# RFC 6241, and the modelled payload uses the ietf-interfaces module of
+# RFC 8343, whose container, list and leaf names are fixed by that document. The
+# O-RAN modules themselves (o-ran-interfaces, o-ran-supervision,
+# o-ran-uplane-conf in O-RAN.WG4.MP) are NOT on this machine, so their node
+# names are not claimed anywhere below: --payload-ns will put the same shape in
+# an O-RAN namespace, and the row that does it says it is a namespace and not a
+# data model.
+oran_netconf_chunk() {  # <xml> -> hex of the chunked framing (RFC 6242 4.1)
+    local xml="${1:-}" len
+    [[ -n "$xml" ]] || { printf 'ERROR\ta NETCONF message is not empty\n' >&2; return 2; }
+    len=$(printf '%s' "$xml" | wc -c)
+    printf '%s' "$(printf '\n#%s\n%s\n##\n' "$len" "$xml" | od -An -v -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')"
+}
+
+# RFC 6241 §8.1: both peers open with <hello>. The server's hello carries the
+# session-id and the client's does not; both carry the capability URIs, and the
+# set below is the one a NETCONF 1.1 server advertises.
+oran_cmd_o1_hello() {
+    local role="client" sid="42" caps=() c
+    while (( $# > 0 )); do
+        case "$1" in
+            --session)    sid="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --capability) caps+=("${2:-}"); shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --server)     role="server"; shift ;;
+            --client)     role="client"; shift ;;
+            -*) printf 'ERROR\t--o1-hello does not take %s (want --server/--client/--session/--capability)\n' "$(oran_sanitize "$1")" >&2; return 2 ;;
+            *)  printf 'ERROR\t--o1-hello takes flags only (got %s)\n' "$(oran_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    [[ "$sid" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--session takes the server session-id, which RFC 6241 8.1 defines as a number\n' >&2; return 2; }
+    # RFC 6241 8.1 capability URIs, plus the YANG module capability form of
+    # RFC 6020 / RFC 7950 (module name and revision in the URI query).
+    (( ${#caps[@]} > 0 )) || caps=(
+        "urn:ietf:params:netconf:base:1.0"
+        "urn:ietf:params:netconf:base:1.1"
+        "urn:ietf:params:netconf:capability:writable-running:1.0"
+        "urn:ietf:params:netconf:capability:candidate:1.0"
+        "urn:ietf:params:netconf:capability:rollback-on-error:1.0"
+        "urn:ietf:params:netconf:capability:validate:1.1"
+        "urn:ietf:params:xml:ns:yang:ietf-interfaces?module=ietf-interfaces&revision=2018-02-20"
+    )
+    local xml='<?xml version="1.0" encoding="UTF-8"?>'
+    xml+='<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><capabilities>'
+    for c in "${caps[@]}"; do
+        [[ -n "$c" ]] || continue
+        # RFC 6241 8.1 puts URIs in <capability>, and a YANG module URI carries a
+        # query (RFC 7950 5.6.4): the ampersand in it is XML-escaped here, because
+        # an unescaped one makes the hello not well-formed XML.
+        xml+="<capability>${c//&/&amp;}</capability>"
+    done
+    xml+='</capabilities>'
+    # RFC 6241 8.1: <session-id> is in the server hello only.
+    [[ "$role" == "server" ]] && xml+="<session-id>$sid</session-id>"
+    xml+='</hello>'
+    printf 'role\t%s\n' "$role"
+    printf 'session_id\t%s\n' "$([[ "$role" == "server" ]] && printf '%s' "$sid" || printf 'unobserved')"
+    printf 'capability_count\t%s\n' "${#caps[@]}"
+    printf 'capabilities\t%s\n' "${caps[*]}"
+    printf 'xml\t%s\n' "$(oran_sanitize "$xml")"
+    printf 'framing\trfc6242-chunked\n'
+    printf 'framed_hex\t%s\n' "$(oran_netconf_chunk "$xml")"
+    if [[ "$role" == "client" ]]; then
+        printf 'note\t%s\n' "RFC 6241 8.1: a client hello carries no session-id; a server must not answer one that does"
+    fi
+    printf 'unobserved\ttransport\tsection 4.1 framing is built here with no SSH (RFC 6242 3) underneath it and nothing is sent\n'
+    printf 'verdict\tadvertised (built here, sent nowhere)\n'
+    return 0
+}
+
+# RFC 6241 §7: the operations a client can invoke. edit-config is the one that
+# changes the radio, so it is the default.
+oran_cmd_o1_rpc() {
+    local op="edit-config" target="running" dflt="merge" ifname="fronthaul0"
+    local enabled="true" mid="101" pns="urn:ietf:params:xml:ns:yang:ietf-interfaces"
+    while (( $# > 0 )); do
+        case "$1" in
+            --operation)         op="${2:-}";      shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --target)            target="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --default-operation) dflt="${2:-}";    shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --interface)         ifname="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --enabled)           enabled="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --message-id)        mid="${2:-}";     shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --payload-ns)        pns="${2:-}";     shift $(( $# >= 2 ? 2 : 1 )) ;;
+            -*) printf 'ERROR\t--o1-rpc does not take %s (see --help)\n' "$(oran_sanitize "$1")" >&2; return 2 ;;
+            *)  printf 'ERROR\t--o1-rpc takes flags only (got %s)\n' "$(oran_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    case "$op" in
+        edit-config|get|get-config|lock|unlock|validate|commit|discard-changes) ;;
+        *) printf 'ERROR\t--operation takes a NETCONF operation (edit-config, get, get-config, lock, unlock, validate, commit, discard-changes per RFC 6241 7), got %s\n' "$(oran_sanitize "$op")" >&2; return 2 ;;
+    esac
+    case "$target" in running|candidate|startup) ;; *) printf 'ERROR\t--target takes running, candidate or startup (RFC 6241 7.2 <target>), got %s\n' "$(oran_sanitize "$target")" >&2; return 2 ;; esac
+    case "$dflt" in merge|replace|none) ;; *) printf 'ERROR\t--default-operation takes merge, replace or none (RFC 6241 7.2), got %s\n' "$(oran_sanitize "$dflt")" >&2; return 2 ;; esac
+    case "$enabled" in true|false) ;; *) printf 'ERROR\t--enabled takes true or false (ietf-interfaces enabled is a boolean, RFC 8343), got %s\n' "$(oran_sanitize "$enabled")" >&2; return 2 ;; esac
+    [[ "$mid" =~ ^[0-9]+$ ]] || { printf 'ERROR\t--message-id takes a number: RFC 6241 4.1 pairs every <rpc> with its <rpc-reply> by it\n' >&2; return 2; }
+    [[ -n "$ifname" ]] || { printf 'ERROR\t--interface takes a name; ietf-interfaces names the list entry (RFC 8343)\n' >&2; return 2; }
+    local xml='<?xml version="1.0" encoding="UTF-8"?>'
+    xml+="<rpc message-id=\"$mid\" xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\">"
+    case "$op" in
+        edit-config)
+            xml+="<edit-config><target><$target/></target>"
+            xml+="<default-operation>$dflt</default-operation>"
+            xml+="<config><interfaces xmlns=\"$pns\">"
+            xml+="<interface><name>$ifname</name><enabled>$enabled</enabled></interface>"
+            xml+='</interfaces></config></edit-config>' ;;
+        get)    xml+='<get/>' ;;
+        get-config) xml+="<get-config><source><$target/></source></get-config>" ;;
+        lock)   xml+="<lock><target><$target/></target></lock>" ;;
+        unlock) xml+="<unlock><target><$target/></target></unlock>" ;;
+        validate) xml+="<validate><source><$target/></source></validate>" ;;
+        commit) xml+='<commit/>' ;;
+        discard-changes) xml+='<discard-changes/>' ;;
+    esac
+    xml+='</rpc>'
+    local framed; framed=$(oran_netconf_chunk "$xml")
+    printf 'operation\t%s\n' "$op"
+    printf 'message_id\t%s\n' "$mid"
+    printf 'target\t%s\n' "$target"
+    [[ "$op" == "edit-config" ]] && printf 'default_operation\t%s\n' "$dflt"
+    printf 'payload_namespace\t%s\n' "$pns"
+    printf 'xml\t%s\n' "$(oran_sanitize "$xml")"
+    printf 'framed_octets\t%s\n' "$(( ${#framed} / 2 ))"
+    printf 'framed_hex\t%s\n' "$framed"
+    case "$pns" in
+        urn:ietf:params:xml:ns:yang:ietf-interfaces)
+            printf 'payload_model\t%s\n' "ietf-interfaces (RFC 8343): interfaces/interface{name, enabled} -- names fixed by that document" ;;
+        *)
+            printf 'payload_model\t%s\n' "$(oran_sanitize "$pns")"
+            printf 'unobserved\tpayload_node_names\tthe namespace was changed by --payload-ns but the node names are still the RFC 8343 ones; the containers and leaves of the O-RAN modules themselves are not on this machine and are not claimed here\n' ;;
+    esac
+    printf 'what_it_changes\t%s\n' "an edit-config to <running/> is the configuration push that turns a fronthaul or cell off: the SMO is trusted, so nothing on the managed element asks again"
+    printf 'requires\t%s\n' "O1 write access from a client the managed element accepts: NETCONF over SSHv2 with the client key in the server authorized set (RFC 6242 3)"
+    printf 'unobserved\ttransport\tRFC 6242 4.1 chunked framing with no SSH beneath it, and no server; the octets below are built and never sent\n'
+    printf 'unobserved\tyang_validation\tRFC 6241 7.2 default-operation and the leaf types are checked here as strings; nothing validates the payload against the real schema of the module, because the schema is not on this machine\n'
+    printf 'finding\to1_write_reconfigures_ran\tHIGH\n'
+    printf 'verdict\tadvertised (built here, sent nowhere)\n'
+    printf 'ref\t%s\n' "RFC 6241 7, 8.1; RFC 6242 4.1; RFC 8343 (ietf-interfaces); O-RAN.WG10.ICON for the O1 role"
+    return 0
+}
+
+# The handoff: what an O1 write actually reaches, and which check would have to
+# fail first. This is a plan, not a run, so it returns 3.
+oran_o1_plan() {
+    cat <<'EOF'
+status	handoff
+what	an O1 NETCONF write from an SMO the managed element accepts, and what each write reaches
+build	modules/48_oran.sh --o1-hello --client
+build	modules/48_oran.sh --o1-rpc --operation edit-config --interface fronthaul0 --enabled false
+build	modules/48_oran.sh --o1-rpc --operation lock --target running
+hardware	a managed element that speaks O1: an O-RU or O-DU (or a virtual one) with NETCONF on 830 and YANG modules loaded
+software	netopeer2-server or an O-RAN image with the o-ran-* modules, sshd, and an operator account whose key is in the element's authorized set
+flow	1. build the hello and the rpc here  2. frame it and send it from a host the element accepts  3. read the <rpc-reply> for ok or for the error-tag  4. compare the running config of the element before and after
+reaches	edit-config to running changes the cell: an interface disabled is a fronthaul link down, a supervision watchdog disabled is a fault that stops being reported
+reaches	lock holds the running config against the SMO that owns it, so the legitimate operator's own writes are refused while the attacker holds the lock
+reaches	the whole element: O1 is not per-slice -- one write reaches every cell and every interface the account can name
+detect	a NETCONF session from an address outside the plan of the SMO; an edit-config not preceded by a lock from the same session; a running-config change with no matching SMO job
+mitigate	O1 over SSHv2 with host keys pinned, a per-element account, NACM (RFC 8341) limiting writes to the subtree of the SMO, and the running-versus-candidate split so a write lands somewhere it can be reviewed
+note	against a production element this needs that operator's authorisation; this module builds the octets and sends nothing
+EOF
+    return 3
+}
+
 oran_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -328,6 +499,63 @@ EOF
         printf 'qos-suite\tSKIP python3 not present\n'
     fi
 
+    # O1 / NETCONF: the chunked framing of RFC 6242 4.1, then the two messages
+    # a session is made of. The framed hex is asserted as octets because every
+    # later claim rides on the length prefix being right.
+    chk nc-chunk       "$(oran_netconf_chunk '<a/>')" "0A23340A3C612F3E0A23230A"
+    local hello_rpc out
+    out=$(oran_cmd_o1_hello --client)
+    chk nc-hello-role  "$(fld "$out" role)" "client"
+    chk nc-hello-sid   "$(fld "$out" session_id)" "unobserved"
+    chk nc-hello-caps  "$(fld "$out" capability_count)" "7"
+    chk nc-hello-base0 "$(fld "$out" xml | grep -c 'urn:ietf:params:netconf:base:1.0')" "1"
+    chk nc-hello-base1 "$(fld "$out" xml | grep -c 'urn:ietf:params:netconf:base:1.1')" "1"
+    chk nc-hello-yang  "$(fld "$out" xml | grep -c 'module=ietf-interfaces&amp;revision=2018-02-20')" "1"
+    chk nc-hello-nosid "$(fld "$out" xml | grep -c '<session-id>')" "0"
+    out=$(oran_cmd_o1_hello --server --session 7)
+    chk nc-server-sid  "$(fld "$out" session_id)" "7"
+    chk nc-server-xml  "$(fld "$out" xml | grep -c '<session-id>7</session-id>')" "1"
+    # edit-config: the operation that reaches the cell.
+    out=$(oran_cmd_o1_rpc --operation edit-config --interface fronthaul0 --enabled false)
+    chk nc-rpc-op      "$(fld "$out" operation)" "edit-config"
+    chk nc-rpc-mid     "$(fld "$out" message_id)" "101"
+    chk nc-rpc-target  "$(fld "$out" xml | grep -c '<target><running/></target>')" "1"
+    chk nc-rpc-dflt    "$(fld "$out" xml | grep -c '<default-operation>merge</default-operation>')" "1"
+    chk nc-rpc-ns      "$(fld "$out" xml | grep -c 'xmlns="urn:ietf:params:xml:ns:yang:ietf-interfaces"')" "1"
+    chk nc-rpc-iface   "$(fld "$out" xml | grep -c '<name>fronthaul0</name>')" "1"
+    chk nc-rpc-enabled "$(fld "$out" xml | grep -c '<enabled>false</enabled>')" "1"
+    chk nc-rpc-find    "$(printf '%s\n' "$out" | awk -F'\t' '$1=="finding"{print $3; exit}')" "HIGH"
+    # The framing is the message: reframe the xml row and compare the octets, and
+    # check the count in the framing against the octets of what it counts.
+    chk nc-rpc-roundtrip "$(fld "$out" framed_hex)" "$(oran_netconf_chunk "$(fld "$out" xml)")"
+    # framed octets = "\n#" + the decimal count + "\n" + the xml + "\n##\n", so
+    # the count itself occupies as many octets as the decimal has digits.
+    local xmlr nlen
+    xmlr=$(fld "$out" xml)
+    nlen=${#xmlr}
+    chk nc-rpc-count    "$(fld "$out" framed_octets)" "$(( nlen + ${#nlen} + 7 ))"
+    # other operations carry no configuration at all
+    out=$(oran_cmd_o1_rpc --operation get-config --target candidate)
+    chk nc-getcfg      "$(fld "$out" xml | grep -c '<get-config><source><candidate/></source></get-config>')" "1"
+    out=$(oran_cmd_o1_rpc --operation lock)
+    chk nc-lock        "$(fld "$out" xml | grep -c '<lock><target><running/></target></lock>')" "1"
+    # an O-RAN namespace is a namespace and nothing more, and the row says so
+    out=$(oran_cmd_o1_rpc --payload-ns "urn:o-ran:interfaces:1.0")
+    chk nc-oran-ns     "$(fld "$out" payload_namespace)" "urn:o-ran:interfaces:1.0"
+    chk nc-oran-grey   "$(printf '%s\n' "$out" | awk -F'\t' '$1=="unobserved"{print $2; exit}')" "payload_node_names"
+    # every refusal names what is missing
+    oran_cmd_o1_rpc --operation delete-everything >/dev/null 2>&1; chk nc-guard-op  "$?" "2"
+    oran_cmd_o1_rpc --target nowhere >/dev/null 2>&1; chk nc-guard-target "$?" "2"
+    oran_cmd_o1_rpc --default-operation maybe >/dev/null 2>&1; chk nc-guard-dflt "$?" "2"
+    oran_cmd_o1_rpc --enabled perhaps >/dev/null 2>&1; chk nc-guard-bool "$?" "2"
+    oran_cmd_o1_rpc --message-id x >/dev/null 2>&1; chk nc-guard-mid "$?" "2"
+    oran_cmd_o1_rpc edit-config >/dev/null 2>&1; chk nc-guard-pos "$?" "2"
+    oran_cmd_o1_hello --session x >/dev/null 2>&1; chk nc-guard-sid "$?" "2"
+    # the plan is a handoff
+    local pl; pl=$(oran_o1_plan); chk nc-plan-rc "$?" "3"
+    chk nc-plan-status  "$(printf '%s\n' "$pl" | awk -F'\t' '$1=="status"{print $2}')" "handoff"
+    chk nc-plan-reaches "$(printf '%s\n' "$pl" | grep -c '^reaches	')" "3"
+
     printf 'ASSERTIONS\t%d\n' "$nchk"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
@@ -346,6 +574,9 @@ oran_menu() {
   [5]  Plan (handoff)
   [6]  A1 QoS policy body (per-slice PRB/quota/5QI)
   [7]  Validate an A1 QoS policy body
+  [8]  O1 NETCONF hello (capabilities)
+  [9]  O1 NETCONF rpc (edit-config)
+  [10] Plan: what an O1 write reaches
   [0]  back
 M
         read -rp "  choice> " c || return 0
@@ -359,6 +590,14 @@ M
                read -rp "  enter " _ ;;
             7) read -rp "  json path> " p; oran_qos_policy_check "$p" | column -t -s$'\t' 2>/dev/null || oran_qos_policy_check "$p"
                read -rp "  enter " _ ;;
+            8) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] needs flags; use --o1-hello in CLI mode" >&2
+               else read -rp "  role (client/server)> " r
+                    oran_cmd_o1_hello "--${r:-client}"; read -rp "  enter " _; fi ;;
+            9) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] needs flags; use --o1-rpc in CLI mode" >&2
+               else read -rp "  interface> " i; read -rp "  enabled (true/false)> " e
+                    oran_cmd_o1_rpc --interface "${i:-fronthaul0}" --enabled "${e:-true}"
+                    read -rp "  enter " _; fi ;;
+            10) oran_o1_plan; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
         esac
@@ -831,6 +1070,9 @@ oran_cli_main() {
         --e2-subscribe)    oran_e2_subscribe "${1:-1000}" "${2:-1}" ;;
         --xapp-attack)     oran_xapp_attack "${1:-rogue-xapp}" ;;
         --a1-poison)       oran_a1_poison "${1:-1}" "${2:-2}" "${3:-2}" ;;
+        --o1-hello)        oran_cmd_o1_hello "$@" ;;
+        --o1-rpc)          oran_cmd_o1_rpc "$@" ;;
+        --o1-plan)         oran_o1_plan ;;
         --plan)            oran_plan ;;
         --selftest)        oran_selftest ;;
         --menu)            oran_menu ;;
@@ -862,6 +1104,18 @@ Usage: $0 COMMAND
   --a1-poison [victim] [attacker] [pct]
                             D1: a policy PUT that moves PRB from one
                             slice to another without changing the totals
+  --o1-hello [--client|--server] [--session <id>] [--capability <uri>]...
+                            the NETCONF hello of RFC 6241 8.1 with the capability
+                            set, framed as RFC 6242 4.1; the server hello carries
+                            the session-id and the client hello must not
+  --o1-rpc [--operation <op>] [--target <running|candidate|startup>]
+           [--default-operation <merge|replace|none>] [--interface <name>]
+           [--enabled <true|false>] [--message-id <n>] [--payload-ns <urn>]
+                            a NETCONF <rpc> (RFC 6241 7) with an ietf-interfaces
+                            payload (RFC 8343) in the RFC 6242 4.1 framing:
+                            edit-config is the operation that reaches the cell
+  --o1-plan                 handoff: what an O1 write reaches and which check
+                            would have to fail first (exit 3, a handoff)
   --plan                    O-RAN testbed handoff plan
   --selftest                verify the tables and the assessor
   --menu                    interactive menu

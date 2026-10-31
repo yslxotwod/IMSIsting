@@ -1315,6 +1315,7 @@ ncve_cli_main() {
         --snssai)       ncve_snssai_decode "${1:-}" ;;
         --runs-tsv)     ncve_cmd_runs_tsv ;;
         --coverage)     ncve_cmd_coverage ;;
+        --reachability) ncve_reachability "${1:-}" ;;
         --selftest)     ncve_selftest ;;
         --menu)         ncve_menu ;;
         *)

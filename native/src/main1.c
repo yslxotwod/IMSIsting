@@ -30617,6 +30617,10 @@ static ModuleSubmenuEntry nasf_entries[] = {
     { "Model", "system-search-symbolic", NULL, nasf_build_model },
     { "Build message", "document-send-symbolic", NULL, nasf_build_messages },
     { "Plan", "preferences-system-symbolic", NULL, nasf_build_plan },
+    { "Keys and protection",
+      "channel-secure-symbolic",
+      "#DERIVE|~--key-derive|#STORE|~--key-store|#DECRYPT|~--decrypt",
+      NULL }
 };
 /* 26_ss7_map — the signalling network a carrier's peers can query.
  *
@@ -31024,6 +31028,10 @@ static ModuleSubmenuEntry ss7_entries[] = {
     { "Data", "system-search-symbolic", NULL, ss7_build_analysis },
     { "SGsAP", "network-transmit-receive-symbolic", NULL, ss7_build_sgsap },
     { "Service plane", "preferences-system-symbolic", NULL, ss7_build_service },
+    { "SCCP",
+      "network-wired-symbolic",
+      "#BUILD IT|~--sccp-build|#READ IT BACK|~--sccp-parse",
+      NULL }
 };
 /* 27_cellular_dns — the DNS a cellular bearer carries.
  *
@@ -31191,6 +31199,10 @@ static ModuleSubmenuEntry cdns_entries[] = {
     { "Build message", "dialog-information-symbolic", NULL, cdns_build_messages },
     { "Detections", "system-search-symbolic", NULL, cdns_build_detect },
     { "Bearer capacity", "preferences-system-symbolic", NULL, cdns_build_options },
+    { "DNS tap",
+      "network-transmit-receive-symbolic",
+      "#DNSTAP|~--dnstap|~--dnstap-build|#DOH|~--doh|~--doh-build",
+      NULL }
 };
 /* 28_paging_track — paging is the one broadcast that says a subscriber is wanted.
  *
@@ -31782,6 +31794,10 @@ static ModuleSubmenuEntry vims_entries[] = {
     { "Calls", "media-playback-start-symbolic", NULL, vims_build_calls },
     { "Media", "audio-headphones-symbolic", NULL, vims_build_media },
     { "Services", "preferences-system-symbolic", NULL, vims_build_services },
+    { "IMP4GT",
+      "security-high-symbolic",
+      "#REFLECTION SIGNATURE|~--imp4gt",
+      NULL }
 };
 /* 31_sim_defense — Port-out Risk.
  *
@@ -33303,6 +33319,13 @@ static ModuleSubmenuEntry jamd_entries[] = {
     { "Build waveform", "document-new-symbolic", NULL, jamd_build_waveform },
     { "Signal shapes", "network-wireless-symbolic", NULL, jamd_build_shapes },
     { "Key it", "security-high-symbolic", NULL, jamd_build_gate },
+    /* A detection nobody acts on is a measurement, not a response. The list is
+       chosen by the SHAPE of the interference, and every row carries what it does
+       not fix. */
+    { "What to do about it",
+      "dialog-warning-symbolic",
+      "#RESPONSES|~--countermeasures",
+      NULL }
 };
 
 /* 34_slicing — network slicing.
@@ -33603,6 +33626,13 @@ static ModuleSubmenuEntry slic_entries[] = {
     { "QoS", "preferences-system-symbolic", NULL, slic_build_qos },
     { "Boundary", "network-transmit-receive-symbolic", NULL, slic_build_boundary },
     { "Assignment", "preferences-other-symbolic", NULL, slic_build_ursp },
+    /* A slice is selected by the NSSAI a UE sends, so the ask and the reply are
+       the two halves: what a handset requests, and which of them a network
+       answers with. */
+    { "Slicing",
+      "network-workgroup-symbolic",
+      "#THE NSSAI IE|~--nssai-ie|~--nssai-ie-parse|#THE STEER|~--nssai-steer",
+      NULL }
 };
 /* 35_baseband — Baseband Fuzzing.
  *
@@ -35231,6 +35261,10 @@ static ModuleSubmenuEntry sbap_entries[] = {
     { "Tokens", "channel-secure-symbolic", NULL, sbap_build_tokens },
     { "Core network", "network-wireless-symbolic", NULL, sbap_build_core },
     { "Directory", "view-list-symbolic", NULL, sbap_build_directory },
+    { "NRF registration",
+      "network-server-symbolic",
+      "#BUILD IT|~--nrf-register|#PLAN IT|--nrf-register-plan",
+      NULL }
 };
 /* 41_ota_sms — the binary SMS that reaches a card.
  *
@@ -38974,6 +39008,10 @@ static ModuleSubmenuEntry oran_entries[] = {
     { "Interfaces", "dialog-information-symbolic", NULL, oran_build_interfaces },
     { "Control plane", "security-high-symbolic", NULL, oran_build_control },
     { "Priorities", "preferences-system-symbolic", NULL, oran_build_assess },
+    { "O1 (NETCONF/YANG)",
+      "preferences-system-symbolic",
+      "#HELLO|~--o1-hello|#RPC|~--o1-rpc|#PLAN IT|--o1-plan",
+      NULL }
 };
 /* 49_ntn — 5G NTN / Satellite.
  *
