@@ -81,9 +81,6 @@ imsisting-gui                   # launch the GUI
 imsisting-tui                   # launch the TUI
 ```
 
-If you have stinglab installed as a sibling toolkit, the same
-`bin/` directory provides `stinglab` as well.
-
 The GUI asks for your password per action via `pkexec`, not once at startup.
 
 ### Dependencies

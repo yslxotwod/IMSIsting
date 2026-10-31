@@ -72,7 +72,6 @@ CONTRACT='
 bin/imsisting|imsisting.sh|
 bin/imsisting-gui|imsisting.sh|--gui
 bin/imsisting-tui|imsisting.sh|--tui
-bin/stinglab|stinglab.sh|
 '
 
 # ── 1 + 3: exercise each wrapper against a recording stub ───────────────────
@@ -195,7 +194,7 @@ done <<< "$CONTRACT"
 
 # ── 2b: the launchers the wrappers point at must themselves be executable ───
 
-for launcher in imsisting.sh stinglab.sh; do
+for launcher in imsisting.sh; do
     if [[ ! -x "$ROOT/$launcher" ]]; then
         problem "$launcher: not executable"
     fi
@@ -253,7 +252,7 @@ if [[ -r "$readme" ]]; then
     # legitimately carry one.
     promised="$(awk 'BEGIN { RS = "" }
                      /^\*\*Shortcuts\.\*\*/ { print; exit }' "$readme" |
-                grep -oE '`(imsisting|imsisting-gui|imsisting-tui|stinglab)( [^`]*)?`' |
+                grep -oE '`(imsisting|imsisting-gui|imsisting-tui)( [^`]*)?`' |
                 sed 's/`//g' | awk '{print $1}' | sort -u)"
     if [[ -z "$promised" ]]; then
         problem "README.md shortcut block names no wrapper (expected at least imsisting)"
